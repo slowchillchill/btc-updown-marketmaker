@@ -150,7 +150,6 @@ pub(super) enum StartupActivationOutcome {
 }
 
 pub(super) struct RawDayGate {
-    state_word: AtomicU64,
     next_close_id: AtomicU64,
     state: Mutex<RawDayGateState>,
     prepared_close: Mutex<Option<RawDayClose>>,
@@ -217,7 +216,6 @@ impl RawDayGate {
     pub(super) fn new() -> Self {
         let (state_changes, _) = watch::channel(0);
         Self {
-            state_word: AtomicU64::new(0),
             next_close_id: AtomicU64::new(1),
             state: Mutex::new(RawDayGateState::Inactive),
             prepared_close: Mutex::new(None),
@@ -233,19 +231,6 @@ impl RawDayGate {
             writer_rendezvous: Mutex::new(None),
             state_changes,
         }
-    }
-
-    fn encoded_open_generation(generation: u64) -> Result<u64> {
-        generation
-            .checked_mul(2)
-            .and_then(|value| value.checked_add(1))
-            .ok_or_else(|| invalid_data("raw-day generation encoding overflow").into())
-    }
-
-    fn encoded_closed_generation(generation: u64) -> Result<u64> {
-        generation
-            .checked_mul(2)
-            .ok_or_else(|| invalid_data("raw-day generation encoding overflow").into())
     }
 
     fn next_close_id(&self) -> Result<u64> {
@@ -456,10 +441,6 @@ impl RawDayGate {
                 invalid_data("raw-day startup activation requires an inactive gate").into(),
             );
         }
-        let encoded = Self::encoded_open_generation(generation)?;
-        self.state_word
-            .compare_exchange(0, encoded, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| invalid_data("raw-day startup activation CAS failed"))?;
         let permit = expected;
         *state = RawDayGateState::Active(permit.clone());
         *self
@@ -526,11 +507,6 @@ impl RawDayGate {
             unclean: false,
             unclean_cause: None,
         };
-        let open = Self::encoded_open_generation(active.generation)?;
-        let closed = Self::encoded_closed_generation(active.generation)?;
-        self.state_word
-            .compare_exchange(open, closed, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| invalid_data("same-day close preparation CAS failed"))?;
         *state = RawDayGateState::ClosingSameDay(close.clone());
         *prepared = Some(close.clone());
         drop(prepared);
@@ -1473,11 +1449,6 @@ impl RawDayGate {
             ))
             .into());
         }
-        let open = Self::encoded_open_generation(close.generation)?;
-        let closed = Self::encoded_closed_generation(close.generation)?;
-        self.state_word
-            .compare_exchange(open, closed, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| invalid_data("raw-day rollover close CAS failed"))?;
         *state = RawDayGateState::Closing(close.clone());
         *prepared = None;
         drop(prepared);
@@ -1562,11 +1533,6 @@ impl RawDayGate {
                 return Err(invalid_data("raw-day rollover activation found inactive gate").into());
             }
         }
-        let closed = Self::encoded_closed_generation(close.generation)?;
-        let open = Self::encoded_open_generation(close.next_generation)?;
-        self.state_word
-            .compare_exchange(closed, open, Ordering::AcqRel, Ordering::Acquire)
-            .map_err(|_| invalid_data("raw-day rollover activation CAS failed"))?;
         let permit = RawDayPermit {
             utc_day: close.next_utc_day.clone(),
             generation: close.next_generation,

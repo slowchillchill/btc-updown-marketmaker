@@ -310,7 +310,6 @@ async fn initial_discovery_and_day_fence_ready_together_processes_fence_first() 
     discovery.current.slug = format!("btc-updown-5m-{}", discovery.current.candidate_start_ts_s);
     refresh_test_discovery_evidence(&mut discovery.current, boundary_utc_ms.saturating_add(1));
     discovery.next = None;
-    discovery.relation = None;
     let expected_slug = discovery.current.slug.clone();
 
     let (control_tx, mut control_rx) = mpsc::channel(POLYMARKET_CONTROL_CHANNEL_CAPACITY);
@@ -1377,7 +1376,6 @@ fn polymarket_context_switch_preserves_pending_ownership() {
     let rollover = BtcUpdownDiscovery {
         current: next,
         next: None,
-        relation: None,
     };
     context.replace_discovery(rollover);
     assert!(context.pending.contains_key(&pending_slug));
@@ -1688,7 +1686,6 @@ fn polymarket_pending_union_and_terminal_claim_stay_within_frozen_bounds() {
     let mut context = PolymarketProcessingContext::new(BtcUpdownDiscovery {
         current: current.clone(),
         next: Some(next.clone()),
-        relation: None,
     });
     for market in [&pending_one, &pending_two] {
         let identity = PendingPolymarketIdentity::from_discovered(market).unwrap();
@@ -1748,7 +1745,6 @@ fn polymarket_pending_union_and_terminal_claim_stay_within_frozen_bounds() {
     let mut invalid_register_context = PolymarketProcessingContext::new(BtcUpdownDiscovery {
         current: current.clone(),
         next: None,
-        relation: None,
     });
     for market in [&pending_one, &pending_two] {
         let identity = PendingPolymarketIdentity::from_discovered(market).unwrap();
@@ -1916,7 +1912,6 @@ async fn polymarket_recovered_finalize_allows_fresh_v3_delivery_after_install() 
     let fresh_discovery = BtcUpdownDiscovery {
         current: fresh_market.clone(),
         next: None,
-        relation: None,
     };
     let identity = PendingPolymarketIdentity::from_discovered(&market).unwrap();
     let terminal_received_at_utc_ms = identity.market_end_utc_ms + 1;
@@ -2490,7 +2485,6 @@ fn polymarket_v3_resolved_target_admission_covers_current_next_and_recovery_pend
     let current_context = PolymarketProcessingContext::new(BtcUpdownDiscovery {
         current: current.clone(),
         next: Some(next.clone()),
-        relation: None,
     });
 
     for market in [&current, &next] {
@@ -6098,7 +6092,6 @@ async fn polymarket_day_fence_rejects_next_pre_e_claim_before_reply() {
     let discovery = BtcUpdownDiscovery {
         next: Some(next_market_for_test(&current)),
         current,
-        relation: None,
     };
     let next = discovery.next.clone().unwrap();
     let ws_received_at_utc_ms = boundary_utc_ms.saturating_sub(1);
@@ -6213,7 +6206,6 @@ async fn polymarket_2355_stop_defers_raw_e_transition_and_terminal_without_deadl
     let discovery = BtcUpdownDiscovery {
         current: market.clone(),
         next: None,
-        relation: None,
     };
     let ws_received_at_utc_ms = boundary_utc_ms.saturating_add(1);
     let actor_now_utc_ms = ws_received_at_utc_ms.saturating_add(1);
@@ -6366,7 +6358,6 @@ async fn polymarket_2355_day_fence_finalizes_e_minus_one_ws_before_reply() {
     let discovery = BtcUpdownDiscovery {
         current: current.clone(),
         next: Some(next.clone()),
-        relation: None,
     };
     let ws_received_at_utc_ms = boundary_utc_ms.saturating_sub(1);
     let actor_now_utc_ms = boundary_utc_ms.saturating_add(1);
@@ -6991,7 +6982,6 @@ async fn polymarket_outer_recovery_day_fence_admits_missing_snapshot_before_clos
     let mut context = PolymarketProcessingContext::new(BtcUpdownDiscovery {
         current,
         next: None,
-        relation: None,
     });
     assert!(!polymarket_context_discovery_authorities_complete(&context));
 
@@ -7104,7 +7094,6 @@ async fn polymarket_outer_recovery_day_fence_keeps_new_day_snapshot_for_resubscr
     let mut context = PolymarketProcessingContext::new(BtcUpdownDiscovery {
         current: current.clone(),
         next: None,
-        relation: None,
     });
     let mut recovered = RecoveredPolymarketFixedIdentities {
         current: Some(recovered_fixed_identity(
@@ -7267,7 +7256,6 @@ async fn polymarket_outer_recovery_day_fence_advances_after_pre_e_select_sample(
     let discovery = BtcUpdownDiscovery {
         current: current.clone(),
         next: Some(next.clone()),
-        relation: None,
     };
     let ws_received_at_utc_ms = boundary_utc_ms.saturating_sub(1);
     let actor_now_utc_ms = boundary_utc_ms.saturating_add(1);
@@ -7495,7 +7483,6 @@ async fn polymarket_outer_recovery_drives_due_slot_without_rebuilding_context() 
 async fn polymarket_outer_recovery_advances_current_across_e_before_retry() {
     let mut discovery = test_btc_discovery();
     discovery.next = None;
-    discovery.relation = None;
     let market = discovery.current.clone();
     let market_end_utc_ms = market.end_ts_s.saturating_mul(1_000);
     let slot_utc_ms = market_end_utc_ms.saturating_add(POLYMARKET_RESOLUTION_FIRST_SLOT_DELAY_MS);
@@ -7750,7 +7737,6 @@ async fn polymarket_terminal_fence_finalizes_three_reverse_races_once() {
         let discovery = BtcUpdownDiscovery {
             current,
             next: None,
-            relation: None,
         };
         let fixed = PendingPolymarketIdentity::from_discovered(&old).unwrap();
         let slug = fixed.slug.clone();
@@ -8159,7 +8145,6 @@ async fn polymarket_two_ready_pending_sample_applied_time_per_transition() {
     let discovery = BtcUpdownDiscovery {
         current,
         next: None,
-        relation: None,
     };
     let mut context = PolymarketProcessingContext::new(discovery.clone());
     for market in [&pending_one, &pending_two] {
@@ -8472,7 +8457,6 @@ async fn polymarket_rollover_rejects_prefetched_identity_mutation_before_fence_o
     let discovery = BtcUpdownDiscovery {
         current,
         next: Some(prefetched.clone()),
-        relation: None,
     };
     let mut mutated = prefetched;
     mutated.condition_id =
@@ -8480,7 +8464,6 @@ async fn polymarket_rollover_rejects_prefetched_identity_mutation_before_fence_o
     let replacement = BtcUpdownDiscovery {
         current: mutated,
         next: None,
-        relation: None,
     };
     let mut skipped_window = replacement.clone();
     skipped_window.current.slug = "btc-updown-5m-1783392900".to_owned();
@@ -8488,7 +8471,6 @@ async fn polymarket_rollover_rejects_prefetched_identity_mutation_before_fence_o
     let promoted_without_mutation = BtcUpdownDiscovery {
         current: discovery.next.clone().unwrap(),
         next: None,
-        relation: None,
     };
     assert!(
         validate_polymarket_discovery_identity_continuity(&discovery, &promoted_without_mutation,)
@@ -8540,7 +8522,6 @@ async fn polymarket_rollover_rejects_prefetched_identity_mutation_before_fence_o
     let skipped_transport_window = BtcUpdownDiscovery {
         current: skipped_window.current.clone(),
         next: None,
-        relation: None,
     };
     assert!(
         validate_polymarket_discovery_identity_continuity(&discovery, &skipped_transport_window,)
@@ -8612,7 +8593,6 @@ async fn polymarket_context_install_pre_subscription_failure_restores_pending_on
     let fresh_discovery = BtcUpdownDiscovery {
         current: fresh_market,
         next: None,
-        relation: None,
     };
     let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
         fixed_identities: RecoveredPolymarketFixedIdentities::default(),
@@ -8907,7 +8887,6 @@ async fn switch_subscription_error_commits_candidate_or_new_next_authority() {
     let mut candidate_discovery = BtcUpdownDiscovery {
         current: current.clone(),
         next: Some(next.clone()),
-        relation: None,
     };
     let candidate_match = preserve_recovered_polymarket_fixed_identity_authority(
         &recovered_next,
@@ -8962,13 +8941,11 @@ async fn switch_subscription_error_commits_candidate_or_new_next_authority() {
     let existing_context = PolymarketProcessingContext::new(BtcUpdownDiscovery {
         current: current.clone(),
         next: None,
-        relation: None,
     });
     let (_, mut next_context, next_rows) = context_install_with_terminal_before_ack(
         BtcUpdownDiscovery {
             current: current.clone(),
             next: Some(next.clone()),
-            relation: None,
         },
         existing_context,
         PolymarketCurrentMetadataRoute::ExistingCurrent,
@@ -9030,7 +9007,6 @@ async fn initial_subscription_error_retries_snapshot_without_early_consume() {
     let mut discovery = BtcUpdownDiscovery {
         current,
         next: None,
-        relation: None,
     };
     let matched =
         preserve_recovered_polymarket_fixed_identity_authority(&recovered, &mut discovery).unwrap();
@@ -9641,7 +9617,6 @@ async fn pending_only_expired_current_then_recovered_next_uses_monotonic_snapsho
     let mut preserved_a = BtcUpdownDiscovery {
         current: market_a.clone(),
         next: None,
-        relation: None,
     };
     let matched_a =
         preserve_recovered_polymarket_fixed_identity_authority(&recovered, &mut preserved_a)
@@ -9676,7 +9651,6 @@ async fn pending_only_expired_current_then_recovered_next_uses_monotonic_snapsho
     let mut preserved_b = BtcUpdownDiscovery {
         current: market_b.clone(),
         next: None,
-        relation: None,
     };
     let matched_b =
         preserve_recovered_polymarket_fixed_identity_authority(&recovered, &mut preserved_b)
@@ -9773,7 +9747,6 @@ async fn clob_current_and_prefetched_assets_survive_three_legacy_silence_cycles_
     let discovery = BtcUpdownDiscovery {
         current: current.clone(),
         next: Some(prefetched.clone()),
-        relation: None,
     };
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -10032,7 +10005,6 @@ async fn polymarket_resolution_timeline_is_absolute_green() {
     let initial = BtcUpdownDiscovery {
         current: market_a.clone(),
         next: Some(market_b.clone()),
-        relation: None,
     };
     let timeline_anchor = TokioInstant::now();
     let gamma_trace = Arc::new(Mutex::new(Vec::<(i64, String)>::new()));
@@ -10639,12 +10611,10 @@ async fn polymarket_rollover_loopback_keeps_retained_lifecycle_and_filters_retir
     let initial = BtcUpdownDiscovery {
         current: market_a.clone(),
         next: Some(market_b.clone()),
-        relation: None,
     };
     let rollover = BtcUpdownDiscovery {
         current: market_b.clone(),
         next: Some(market_c.clone()),
-        relation: None,
     };
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -11501,7 +11471,6 @@ async fn polymarket_day_stop_drains_paused_fifo_into_exact_source_termination() 
     let discovery = BtcUpdownDiscovery {
         current: current.clone(),
         next: None,
-        relation: None,
     };
     let collector_identity = CollectorIdentity {
         host_id: "collector-test".to_owned(),
@@ -12061,7 +12030,6 @@ async fn polymarket_five_thousand_message_burst_traverses_the_composed_ingress_p
     let discovery = BtcUpdownDiscovery {
         current,
         next: None,
-        relation: None,
     };
     let mut context = PolymarketProcessingContext::new(discovery.clone());
     let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);

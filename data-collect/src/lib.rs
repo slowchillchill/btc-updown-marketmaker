@@ -18,15 +18,11 @@ pub mod polymarket_orderbook_v3;
 pub mod polymarket_resolution_recovery;
 pub mod polymarket_sdk_runtime;
 pub mod publish;
-pub mod resource;
 pub mod runtime;
 pub mod source_format;
 pub mod source_hourly_layout;
 pub mod sources;
 pub mod writer;
 
-pub use manifest::{
-    ManifestDraft, QueueWatermark, RequiredFile, SourceCoverage, ValidationVerdict,
-};
-pub use resource::ResourceWatermark;
+pub use manifest::{SourceCoverage, ValidationVerdict};
 pub use writer::{ParquetSegmentWriter, PublishedSegment, RawEvent, sha256_file};

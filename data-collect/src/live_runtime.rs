@@ -4171,7 +4171,6 @@ mod tests {
             let discovery = BtcUpdownDiscovery {
                 current,
                 next: None,
-                relation: None,
             };
             let mut context = PolymarketProcessingContext::new(discovery);
             let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
@@ -4659,7 +4658,6 @@ mod tests {
         BtcUpdownDiscovery {
             current,
             next: None,
-            relation: None,
         }
     }
 

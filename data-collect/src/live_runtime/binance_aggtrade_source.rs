@@ -554,11 +554,10 @@ pub(super) fn binance_aggtrade_invalid_raw_event(
         crate::binance_aggtrade::BinanceAggTradeRawCaptureStatus::Complete => {
             let length = u64::try_from(invalid.raw_capture.bytes.len())
                 .map_err(|_| invalid_data("aggTrade invalid payload length overflow"))?;
-            let digest = format!("{:x}", Sha256::digest(&invalid.raw_capture.bytes));
             (
                 Some("base64"),
                 Some(length),
-                Some(digest),
+                invalid.raw_capture.payload_sha256.as_deref(),
                 Some(base64::engine::general_purpose::STANDARD.encode(&invalid.raw_capture.bytes)),
             )
         }
@@ -582,7 +581,7 @@ pub(super) fn binance_aggtrade_invalid_raw_event(
             payload_capture_status: capture_status,
             payload_encoding,
             payload_length_bytes,
-            payload_sha256: payload_sha256.as_deref(),
+            payload_sha256,
             receive_time_utc_ms: invalid.timestamp_received,
             transport: invalid.transport.as_str(),
         })
@@ -598,7 +597,7 @@ pub(super) fn binance_aggtrade_invalid_raw_event(
         payload_capture_status: capture_status,
         payload_encoding,
         payload_length_bytes,
-        payload_sha256: payload_sha256.as_deref(),
+        payload_sha256,
         record_kind: "invalid_input",
         rest_response_ingress_sequence: None,
         rest_response_item_index: None,

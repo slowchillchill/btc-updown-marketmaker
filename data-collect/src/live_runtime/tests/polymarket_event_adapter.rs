@@ -423,7 +423,6 @@ fn polymarket_business_assets_must_match_their_message_condition() {
     let discovery = BtcUpdownDiscovery {
         current: current.clone(),
         next: Some(next.clone()),
-        relation: None,
     };
     let asset_to_slug = discovery_asset_to_slug(&discovery);
     let assert_error = |message: WsMessage| {

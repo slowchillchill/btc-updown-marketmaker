@@ -13,10 +13,6 @@ name = "parquet_writer_probe"
 harness = false
 
 [[bench]]
-name = "throughput_probe"
-harness = false
-
-[[bench]]
 name = "source_hourly_layout_probe"
 harness = false
 

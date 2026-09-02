@@ -70,18 +70,19 @@ systemd 单元只在临时 `--root` 中配合同路径可执行占位执行 `sys
 ```bash
 cargo test -p data-collect --locked \
   --test deployment_binary_contract \
-  --test paper_live_boundary_contract \
   --test hot_path_handoff_contract \
   --test training_collector_runtime_contract \
   --test hourly_partition_contract \
   --test source_hourly_layout_contract \
+  --test market_discovery_probe_contract \
+  --test binance_aggtrade_continuity_contract \
+  --test writer_publish_contract \
   --test polymarket_orderbook_v3_contract \
   --test polymarket_metadata_layout_contract \
   --test parquet_writer_contract \
   --test polymarket_sdk_patch_contract \
   --test polymarket_sdk_runtime_contract \
   --test collector_identity_contract \
-  --test manifest_contract \
   -- --test-threads=1
 ```
 

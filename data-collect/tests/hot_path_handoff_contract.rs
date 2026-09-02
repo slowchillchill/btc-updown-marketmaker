@@ -160,6 +160,21 @@ fn paper_and_live_handoff_roots_are_distinct_but_schema_is_shared() {
     );
     assert_ne!(paper.socket_path, live.socket_path);
     assert_eq!(paper.frame_schema_version, live.frame_schema_version);
+
+    assert!(
+        HandoffRuntimeConfig::for_environment(
+            std::path::Path::new("relative-dataset-root"),
+            PaperLiveEnvironment::Paper,
+        )
+        .is_err()
+    );
+    assert!(
+        HandoffRuntimeConfig::for_environment(
+            &dataset_root.join("..").join("escape"),
+            PaperLiveEnvironment::Live,
+        )
+        .is_err()
+    );
 }
 
 #[test]

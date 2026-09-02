@@ -19,11 +19,9 @@
 缺口、恢复、存储和清单。它不负责标签、特征、训练切分、模型输入加工、订单、撤单、
 钱包、NOE、账本、PnL 或交易策略。
 
-消费者边界中的历史名称 `ConsumerKind::Training` 明确表示下游 `model-train`，不是
-`data-pipeline(training)` 或 `data-collect-training-collector`。它不得直接读取
-`typed_raw` Parquet，必须消费 `data-pipeline` 输出；`ConsumerKind::DataPipeline` 是离线
-训练路径中唯一直接读取最终化 `typed_raw` 的消费种类。本边界不改变采集器写入内容、
-Parquet schema 或每日清单 schema。
+离线训练链路中，只有 `data-pipeline(training)` 直接读取最终化 `typed_raw` Parquet；
+下游 `model-train` 不得直接读取该目录，必须消费 `data-pipeline` 输出。本边界不改变
+采集器写入内容、Parquet schema 或每日清单 schema。
 
 `model-train` 进程仍可直接读取 `manifest`、`source_coverage`、`source_health`、
 `source_gap`、`reconnect_trace`、`backpressure_state` 六类 `data-collect` 角色，但这些
