@@ -447,8 +447,7 @@ fn estimated_event_bytes(event: &SequencedRawEvent) -> u64 {
         + event.event.source_ts.as_ref().map_or(0, String::len)
         + event.event.raw_json.len()
         + event.event.collector_host_id.len()
-        + event.event.collector_region.len()
-        + event.event.parquet_raw_source_kind.len()) as u64
+        + event.event.collector_region.len()) as u64
 }
 
 fn elapsed_utc_ms(start_ms: i64, end_ms: i64) -> u64 {

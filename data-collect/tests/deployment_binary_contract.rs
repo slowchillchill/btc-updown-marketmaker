@@ -1,5 +1,5 @@
 use data_collect::deployment::{
-    CollectorBinaryRole, DeploymentRuntimeConfig, RuntimeReceipt, validate_runtime_config,
+    CollectorBinaryRole, CollectorStartupReceipt, DeploymentRuntimeConfig, validate_runtime_config,
 };
 use tempfile::tempdir;
 
@@ -57,7 +57,7 @@ fn runtime_receipt_records_binary_and_host_identity() {
         DeploymentRuntimeConfig::for_role(CollectorBinaryRole::TrainingCold, dataset_root, "run-1")
             .unwrap();
 
-    let receipt = RuntimeReceipt::new(
+    let receipt = CollectorStartupReceipt::new(
         &config,
         "git-commit",
         "binary-sha256",

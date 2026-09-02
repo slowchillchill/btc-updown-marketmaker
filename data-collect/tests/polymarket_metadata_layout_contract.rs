@@ -1,278 +1,32 @@
-use std::fs::File;
-use std::sync::Arc;
-
-use arrow_array::{
-    Array as _, ArrayRef, BooleanArray, RecordBatch, StringArray, TimestampMillisecondArray,
-    UInt64Array,
-};
+use arrow_array::{Array as _, RecordBatch, StringArray, UInt64Array};
 use arrow_schema::DataType;
 use data_collect::polymarket_market_metadata_layout::{
     ActiveUnavailableReason, ClosedTimeCheckFailureReason, MarketLifecycleState,
     MarketLifecycleTransition, MarketRuntimeRole, MarketRuntimeRoleTransition,
-    POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
-    POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION,
-    PolymarketMarketMetadataContext, PolymarketMarketMetadataRow, PolymarketMarketMetadataV3Row,
+    POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION,
+    POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION, PolymarketMarketMetadataV3Row,
     PolymarketMarketMetadataV4Row, PolymarketMarketMetadataV5Row, PolymarketMetadataOrigin,
-    PolymarketMetadataRowKind, PolymarketMetadataV3ReferenceIntegrityError,
-    PolymarketMetadataV3ReferenceRecord, ResolutionEvidenceSource, ResolutionFollowupStatus,
+    PolymarketMetadataReferenceIntegrityError, PolymarketMetadataReferenceRecord,
+    PolymarketMetadataRowKind, ResolutionEvidenceSource, ResolutionFollowupStatus,
     ResolutionIntegrityErrorClass, ResolutionPollResult, ResolutionTransportErrorClass,
     ResponseFieldsUnavailableReason, SourceEndpointUnavailableReason, SourceEvidenceChannel,
     SourceEvidenceEventType, SourceEvidenceOrigin, TerminalClaimOwner,
-    TerminalPredicateFailureReason, polymarket_market_metadata_schema,
-    polymarket_market_metadata_v3_schema, polymarket_market_metadata_v4_schema,
-    polymarket_market_metadata_v5_schema, validate_polymarket_metadata_v3_local_references,
+    TerminalPredicateFailureReason, polymarket_market_metadata_v3_schema,
+    polymarket_market_metadata_v4_schema, polymarket_market_metadata_v5_schema,
+    validate_polymarket_metadata_local_references,
 };
 use data_collect::sources::polymarket::{
     GammaTerminalAttemptContext, GammaTerminalFixedIdentity, GammaTerminalResponse,
     evaluate_gamma_terminal_response,
 };
 use data_collect::writer::TypedParquetSegmentWriter;
-use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
+use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use polymarket_client_sdk_v2::clob::ws::WsMessage;
 use polymarket_client_sdk_v2::gamma::types::response::Market as SdkGammaMarket;
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
+use std::fs::File;
 use tempfile::tempdir;
-
-fn context() -> PolymarketMarketMetadataContext {
-    PolymarketMarketMetadataContext {
-        timestamp_received_ms: 1_783_392_404_599,
-        metadata_fetch_start_utc_ms: Some(1_783_392_404_100),
-        collector_host_id: "collector-host".to_owned(),
-        collector_region: "eu-west-1".to_owned(),
-        source_endpoint: "https://gamma-api.polymarket.com/markets".to_owned(),
-        schema_version: POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION.to_owned(),
-    }
-}
-
-fn string_column<'a>(batch: &'a RecordBatch, name: &str) -> &'a StringArray {
-    batch
-        .column(batch.schema().index_of(name).unwrap())
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap()
-}
-
-#[test]
-fn new_market_metadata_row_keeps_condition_tokens_and_source() {
-    let row = PolymarketMarketMetadataRow::new_market(
-        "btc-updown-5m-1783392300",
-        "0x0000000000000000000000000000000000000000000000000000000000000001",
-        Some("clob-market-1"),
-        &[
-            "106585164761922456203746651621390029417453862034640469075081961934906147433548"
-                .to_owned(),
-            "206585164761922456203746651621390029417453862034640469075081961934906147433549"
-                .to_owned(),
-        ],
-        Some(1_783_392_300_000),
-        Some(1_783_392_600_000),
-        Some(true),
-        Some(true),
-        "prefetched",
-        Some("0.01"),
-        Some("1"),
-        Some(r#"{"maker":0}"#),
-        Some(r#"{"eligible":true}"#),
-        Some(true),
-        context(),
-    );
-
-    assert_eq!(row.metadata_source, "new_market");
-    assert_eq!(row.slug, "btc-updown-5m-1783392300");
-    assert_eq!(
-        row.asset_ids.as_deref(),
-        Some(
-            r#"["106585164761922456203746651621390029417453862034640469075081961934906147433548","206585164761922456203746651621390029417453862034640469075081961934906147433549"]"#
-        )
-    );
-    assert_eq!(row.same_condition_market_verified, Some(true));
-    assert!(row.validate().is_complete());
-}
-
-#[test]
-fn active_scan_and_fallback_close_metadata_rows_are_complete_with_evidence() {
-    let active_scan = PolymarketMarketMetadataRow::active_scan(
-        "btc-updown-5m-1783392300",
-        "condition-1",
-        Some("clob-market-1"),
-        &["asset-1".to_owned(), "asset-2".to_owned()],
-        Some(1_783_392_300_000),
-        Some(1_783_392_600_000),
-        Some(true),
-        Some(true),
-        "active",
-        Some("0.01"),
-        Some("1"),
-        Some(r#"{"maker":0}"#),
-        Some(r#"{"eligible":true}"#),
-        Some(true),
-        context(),
-    );
-    assert_eq!(active_scan.metadata_source, "active_scan");
-    assert!(active_scan.validate().is_complete());
-
-    let fallback = PolymarketMarketMetadataRow::fallback_close(
-        "btc-updown-5m-1783392300",
-        "condition-1",
-        Some("clob-market-1"),
-        &["asset-1".to_owned(), "asset-2".to_owned()],
-        Some(1_783_392_300_000),
-        Some(1_783_392_600_000),
-        Some(false),
-        Some(false),
-        "retired",
-        Some("0.01"),
-        Some("1"),
-        Some(r#"{"maker":0}"#),
-        Some(r#"{"eligible":true}"#),
-        Some(true),
-        context(),
-    );
-    assert_eq!(fallback.metadata_source, "fallback_close");
-    assert!(fallback.validate().is_complete());
-}
-
-#[test]
-fn slug_only_candidate_is_not_complete_discovery() {
-    let row = PolymarketMarketMetadataRow::candidate_slug_only(
-        "btc-updown-5m-1783392300",
-        Some(1_783_392_300_000),
-        Some(1_783_392_600_000),
-        context(),
-    );
-
-    let report = row.validate();
-    assert!(!report.is_complete());
-    assert!(
-        report
-            .source_gaps
-            .contains(&"slug_only_discovery".to_owned())
-    );
-    assert!(report.missing_fields.contains(&"condition_id".to_owned()));
-    assert!(report.missing_fields.contains(&"asset_ids".to_owned()));
-}
-
-#[test]
-fn schema_contains_metadata_columns() {
-    let schema = polymarket_market_metadata_schema();
-    for field in [
-        "timestamp_received",
-        "metadata_fetch_start_utc",
-        "slug",
-        "condition_id",
-        "clob_market_id",
-        "asset_ids",
-        "market_start_utc",
-        "market_end_utc",
-        "active",
-        "accepting_orders",
-        "market_lifecycle_state",
-        "tick_size",
-        "min_size",
-        "fee_schedule_raw",
-        "reward_eligibility_raw",
-        "metadata_unavailable_reason",
-        "metadata_source",
-        "same_condition_market_verified",
-    ] {
-        schema.field_with_name(field).expect(field);
-    }
-    assert!(schema.field_with_name("metadata_recv_time_utc").is_err());
-    assert!(schema.field_with_name("token_ids").is_err());
-    assert!(matches!(
-        schema
-            .field_with_name("timestamp_received")
-            .expect("timestamp_received")
-            .data_type(),
-        DataType::Timestamp(_, Some(timezone)) if timezone.as_ref() == "UTC"
-    ));
-}
-
-#[test]
-fn historical_v2_parquet_remains_readable_without_reopening_the_production_writer() {
-    let schema = polymarket_market_metadata_schema();
-    let columns: Vec<ArrayRef> = vec![
-        Arc::new(
-            TimestampMillisecondArray::from_iter_values([1_783_392_404_599]).with_timezone("UTC"),
-        ),
-        Arc::new(
-            TimestampMillisecondArray::from(vec![Some(1_783_392_404_100)]).with_timezone("UTC"),
-        ),
-        Arc::new(StringArray::from_iter_values(["btc-updown-5m-1783392300"])),
-        Arc::new(StringArray::from_iter_values(["condition-1"])),
-        Arc::new(StringArray::from(vec![Some("clob-market-1")])),
-        Arc::new(StringArray::from(vec![Some(r#"["asset-1","asset-2"]"#)])),
-        Arc::new(
-            TimestampMillisecondArray::from(vec![Some(1_783_392_300_000)]).with_timezone("UTC"),
-        ),
-        Arc::new(
-            TimestampMillisecondArray::from(vec![Some(1_783_392_600_000)]).with_timezone("UTC"),
-        ),
-        Arc::new(BooleanArray::from(vec![Some(true)])),
-        Arc::new(BooleanArray::from(vec![Some(true)])),
-        Arc::new(StringArray::from_iter_values(["active"])),
-        Arc::new(StringArray::from(vec![Some("0.01")])),
-        Arc::new(StringArray::from(vec![Some("1")])),
-        Arc::new(StringArray::from(vec![Some(r#"{"maker":0}"#)])),
-        Arc::new(StringArray::from(vec![Some(r#"{"eligible":true}"#)])),
-        Arc::new(StringArray::from(vec![None::<&str>])),
-        Arc::new(StringArray::from_iter_values(["active_scan"])),
-        Arc::new(BooleanArray::from(vec![Some(true)])),
-        Arc::new(StringArray::from_iter_values(["collector-host"])),
-        Arc::new(StringArray::from_iter_values(["eu-west-1"])),
-        Arc::new(StringArray::from_iter_values([
-            "https://gamma-api.polymarket.com/markets",
-        ])),
-        Arc::new(StringArray::from_iter_values([
-            POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION,
-        ])),
-    ];
-    let batch = RecordBatch::try_new(Arc::clone(&schema), columns).unwrap();
-    let tmp = tempdir().unwrap();
-    let path = tmp.path().join("historical-metadata-v2.parquet");
-    let mut historical_writer =
-        ArrowWriter::try_new(File::create(&path).unwrap(), schema, None).unwrap();
-    historical_writer.write(&batch).unwrap();
-    historical_writer.close().unwrap();
-
-    let mut reader = ParquetRecordBatchReaderBuilder::try_new(File::open(path).unwrap())
-        .unwrap()
-        .build()
-        .unwrap();
-    let historical = reader.next().unwrap().unwrap();
-    assert_eq!(historical.num_rows(), 1);
-    assert_eq!(
-        string_column(&historical, "schema_version").value(0),
-        POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION
-    );
-    assert_eq!(
-        string_column(&historical, "slug").value(0),
-        "btc-updown-5m-1783392300"
-    );
-    assert!(historical.schema().index_of("metadata_row_kind").is_err());
-    assert!(
-        historical
-            .schema()
-            .index_of("collector_admission_sequence")
-            .is_err()
-    );
-
-    let error = match TypedParquetSegmentWriter::create_for_typed_source(
-        tmp.path(),
-        "new-metadata-v2",
-        POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION,
-        "polymarket_market_metadata",
-    ) {
-        Ok(_) => panic!("historical metadata v2 must remain read-only"),
-        Err(error) => error,
-    };
-    assert!(
-        error
-            .to_string()
-            .contains("unsupported Polymarket metadata schema")
-    );
-}
 
 const T: i64 = 1_783_392_300_000;
 const E: i64 = T + 300_000;
@@ -283,6 +37,14 @@ const CONDITION_ID_2: &str = "0x000000000000000000000000000000000000000000000000
 const TERMINAL_CLOSED_TIME: &str = "2026-07-07T02:50:16Z";
 const TERMINAL_WS_TIMESTAMP_RAW: &str = "1783392839999";
 const TERMINAL_WS_PAYLOAD: &str = r#"{"event_type":"market_resolved","id":"clob-market-1","market":"0x0000000000000000000000000000000000000000000000000000000000000001","slug":"btc-updown-5m-1783392300","assets_ids":["101","102"],"outcomes":["Up","Down"],"winning_asset_id":"101","winning_outcome":"Up","timestamp":"1783392839999"}"#;
+
+fn string_column<'a>(batch: &'a RecordBatch, name: &str) -> &'a StringArray {
+    batch
+        .column(batch.schema().index_of(name).unwrap())
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap()
+}
 
 fn sdk_gamma_payload(
     closed: bool,
@@ -853,11 +615,6 @@ fn v3_schema_has_the_frozen_fields_types_and_utc_units() {
             .field_with_name("source_endpoint")
             .unwrap()
             .is_nullable()
-    );
-    assert!(
-        polymarket_market_metadata_schema()
-            .field_with_name("metadata_row_kind")
-            .is_err()
     );
 }
 
@@ -1487,36 +1244,36 @@ fn five_v3_row_kinds_and_local_reference_rules_remain_frozen() {
 
     let references = rows
         .iter()
-        .map(PolymarketMetadataV3ReferenceRecord::from)
+        .map(PolymarketMetadataReferenceRecord::from)
         .collect::<Vec<_>>();
-    validate_polymarket_metadata_v3_local_references(&references).unwrap();
+    validate_polymarket_metadata_local_references(&references).unwrap();
 
     let mut unique_digest_collision = references.clone();
     let mut different_payload = references[0].clone();
     different_payload.source_evidence_raw_sha256 = Some("f".repeat(64));
     unique_digest_collision.push(different_payload);
-    validate_polymarket_metadata_v3_local_references(&unique_digest_collision)
+    validate_polymarket_metadata_local_references(&unique_digest_collision)
         .expect("the full reference tuple must select the unique matching digest");
 
     let mut missing = references.clone();
     missing.remove(0);
     assert!(matches!(
-        validate_polymarket_metadata_v3_local_references(&missing),
-        Err(PolymarketMetadataV3ReferenceIntegrityError::Missing { .. })
+        validate_polymarket_metadata_local_references(&missing),
+        Err(PolymarketMetadataReferenceIntegrityError::Missing { .. })
     ));
 
     let mut duplicate = references.clone();
     duplicate.push(references[0].clone());
     assert!(matches!(
-        validate_polymarket_metadata_v3_local_references(&duplicate),
-        Err(PolymarketMetadataV3ReferenceIntegrityError::Multiple { matches: 2, .. })
+        validate_polymarket_metadata_local_references(&duplicate),
+        Err(PolymarketMetadataReferenceIntegrityError::Multiple { matches: 2, .. })
     ));
 
     let mut digest_mismatch = references;
     digest_mismatch[0].source_evidence_raw_sha256 = Some("0".repeat(64));
     assert!(matches!(
-        validate_polymarket_metadata_v3_local_references(&digest_mismatch),
-        Err(PolymarketMetadataV3ReferenceIntegrityError::DigestMismatch { .. })
+        validate_polymarket_metadata_local_references(&digest_mismatch),
+        Err(PolymarketMetadataReferenceIntegrityError::DigestMismatch { .. })
     ));
 }
 
@@ -1727,9 +1484,9 @@ fn v3_subtype_contracts_cover_transition_attempt_and_summary_variants() {
         late_transition.source_evidence_received_at_utc;
     late_end_transition.source_evidence_raw_sha256 =
         late_transition.source_evidence_raw_sha256.clone();
-    validate_polymarket_metadata_v3_local_references(&[
-        PolymarketMetadataV3ReferenceRecord::from(&late_transition),
-        PolymarketMetadataV3ReferenceRecord::from(&late_end_transition),
+    validate_polymarket_metadata_local_references(&[
+        PolymarketMetadataReferenceRecord::from(&late_transition),
+        PolymarketMetadataReferenceRecord::from(&late_end_transition),
     ])
     .expect("late candidate-to-active evidence must be the unique authority for its E transition");
 

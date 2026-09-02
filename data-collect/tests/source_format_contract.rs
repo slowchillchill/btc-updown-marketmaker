@@ -1,12 +1,9 @@
-use data_collect::ValidationVerdict;
 use data_collect::event::{
     EventEnvelope, HostClockSyncStatus, RawEvidence, SourceKind, SourceTimestamp,
 };
 use data_collect::source_format::{
     BinanceAggTradeRaw, BinanceDepthLevel, BinanceDepthSnapshotRaw, BinanceDepthUpdateRaw,
-    MarketLifecycleState, PolymarketMarketMetadataRaw, PolymarketMarketRaw,
-    PolymarketMarketResolutionRaw, PolymarketSubscriptionEvidence, RtdsChainlinkBtcUsdRaw,
-    SubscriptionConfirmation,
+    RtdsChainlinkBtcUsdRaw,
 };
 
 fn envelope(source_kind: SourceKind, event_type: &str, raw_json: &str) -> EventEnvelope {
@@ -25,158 +22,7 @@ fn envelope(source_kind: SourceKind, event_type: &str, raw_json: &str) -> EventE
             source: "chrony".to_owned(),
         },
         raw_evidence: RawEvidence::Json(raw_json.to_owned()),
-        parquet_raw_layout_version: 1,
-        parquet_raw_source_kind: source_kind,
     }
-}
-
-fn subscription() -> PolymarketSubscriptionEvidence {
-    PolymarketSubscriptionEvidence {
-        raw_json:
-            r#"{"type":"market","assets_ids":["asset-1","asset-2"],"custom_feature_enabled":true}"#
-                .to_owned(),
-        assets_ids: vec!["asset-1".to_owned(), "asset-2".to_owned()],
-        custom_feature_enabled: true,
-        confirmation: SubscriptionConfirmation::FirstBusinessEvent {
-            event_type: "book".to_owned(),
-        },
-        sdk_support_status: "supported".to_owned(),
-    }
-}
-
-#[test]
-fn polymarket_market_schema_requires_subscription_and_platform_timestamp() {
-    let market = PolymarketMarketRaw {
-        envelope: envelope(
-            SourceKind::PolymarketMarket,
-            "book",
-            r#"{"event_type":"book","timestamp":"1766789469958","asset_id":"asset-1"}"#,
-        ),
-        event_type: "book".to_owned(),
-        platform_timestamp: "1766789469958".to_owned(),
-        market_id: Some("market-1".to_owned()),
-        condition_id: Some("condition-1".to_owned()),
-        asset_ids: vec!["asset-1".to_owned(), "asset-2".to_owned()],
-        subscription: subscription(),
-    };
-
-    assert_eq!(
-        market.validate_contract().verdict,
-        ValidationVerdict::Complete
-    );
-
-    let mut missing_custom_feature = market;
-    missing_custom_feature.subscription.custom_feature_enabled = false;
-    let report = missing_custom_feature.validate_contract();
-    assert_eq!(report.verdict, ValidationVerdict::Incomplete);
-    assert!(
-        report
-            .source_gaps
-            .contains(&"custom_feature_enabled_missing".to_owned())
-    );
-}
-
-#[test]
-fn polymarket_market_resolved_schema_records_retired_event_predicate_fields() {
-    let resolved = PolymarketMarketResolutionRaw {
-        envelope: envelope(
-            SourceKind::PolymarketMarket,
-            "market_resolved",
-            r#"{"event_type":"market_resolved","market":"condition-1","asset_id":"asset-1"}"#,
-        ),
-        condition_id: "condition-1".to_owned(),
-        market_id: Some("market-1".to_owned()),
-        subscribed_asset_ids_for_market: vec!["asset-1".to_owned(), "asset-2".to_owned()],
-        resolved_event_asset_ids: vec!["asset-1".to_owned(), "asset-2".to_owned()],
-        winning_asset_id: "asset-1".to_owned(),
-        winning_outcome: "Up".to_owned(),
-        close_reason_if_present: None,
-    };
-
-    assert_eq!(
-        resolved.validate_contract().verdict,
-        ValidationVerdict::Complete
-    );
-
-    let mut incomplete = resolved;
-    incomplete.resolved_event_asset_ids = vec!["asset-1".to_owned()];
-    let report = incomplete.validate_contract();
-    assert_eq!(report.verdict, ValidationVerdict::Incomplete);
-    assert!(
-        report
-            .source_gaps
-            .contains(&"resolved_assets_do_not_cover_subscription".to_owned())
-    );
-
-    let extra_winner = PolymarketMarketResolutionRaw {
-        envelope: envelope(
-            SourceKind::PolymarketMarket,
-            "market_resolved",
-            r#"{"event_type":"market_resolved","market":"condition-1","asset_id":"asset-3"}"#,
-        ),
-        condition_id: "condition-1".to_owned(),
-        market_id: Some("market-1".to_owned()),
-        subscribed_asset_ids_for_market: vec!["asset-1".to_owned(), "asset-2".to_owned()],
-        resolved_event_asset_ids: vec![
-            "asset-1".to_owned(),
-            "asset-2".to_owned(),
-            "asset-3".to_owned(),
-        ],
-        winning_asset_id: "asset-3".to_owned(),
-        winning_outcome: "Other".to_owned(),
-        close_reason_if_present: None,
-    };
-    let report = extra_winner.validate_contract();
-    assert_eq!(report.verdict, ValidationVerdict::Incomplete);
-    assert!(
-        report
-            .source_gaps
-            .contains(&"winning_asset_not_in_subscribed_assets".to_owned())
-    );
-}
-
-#[test]
-fn polymarket_metadata_schema_rejects_slug_only_discovery() {
-    let metadata = PolymarketMarketMetadataRaw {
-        envelope: envelope(
-            SourceKind::PolymarketMarketMetadata,
-            "new_market",
-            r#"{"event_type":"new_market","condition_id":"condition-1"}"#,
-        ),
-        condition_id: "condition-1".to_owned(),
-        asset_ids: vec!["asset-1".to_owned(), "asset-2".to_owned()],
-        clob_market_id: "clob-1".to_owned(),
-        slug: "btc-updown-5m-1766789400".to_owned(),
-        start_time_utc_ms: 1_766_789_400_000,
-        end_time_utc_ms: 1_766_789_700_000,
-        active: true,
-        accepting_orders: true,
-        market_lifecycle_state: MarketLifecycleState::Active,
-        tick_size: "0.01".to_owned(),
-        min_size: "1".to_owned(),
-        fee_raw: Some(r#"{"maker":0}"#.to_owned()),
-        reward_raw: Some(r#"{"eligible":true}"#.to_owned()),
-        candidate_slug: "btc-updown-5m-1766789400".to_owned(),
-        active_scan_evidence: Some("gamma active scan row digest".to_owned()),
-        metadata_snapshot_evidence: Some("metadata snapshot digest".to_owned()),
-        clock_drift_evidence: Some("host clock drift 2ms".to_owned()),
-    };
-
-    assert_eq!(
-        metadata.validate_contract().verdict,
-        ValidationVerdict::Complete
-    );
-
-    let mut slug_only = metadata;
-    slug_only.active_scan_evidence = None;
-    slug_only.metadata_snapshot_evidence = None;
-    let report = slug_only.validate_contract();
-    assert_eq!(report.verdict, ValidationVerdict::Incomplete);
-    assert!(
-        report
-            .source_gaps
-            .contains(&"slug_only_discovery".to_owned())
-    );
 }
 
 #[test]
@@ -204,45 +50,30 @@ fn binance_depth_update_and_snapshot_schema_keep_official_fields() {
         combined_stream: None,
     };
 
-    assert_eq!(
-        update.validate_contract().verdict,
-        ValidationVerdict::Complete
-    );
+    assert!(update.validate_contract().is_complete());
 
     let mut one_sided_update = update.clone();
     one_sided_update.asks.clear();
-    assert_eq!(
-        one_sided_update.validate_contract().verdict,
-        ValidationVerdict::Complete
-    );
+    assert!(one_sided_update.validate_contract().is_complete());
 
     let mut empty_update = update.clone();
     empty_update.bids.clear();
     empty_update.asks.clear();
     let report = empty_update.validate_contract();
-    assert_eq!(report.verdict, ValidationVerdict::Incomplete);
+    assert!(!report.is_complete());
     assert!(report.missing_fields.contains(&"b_or_a".to_owned()));
 
     let mut missing_stream = update.clone();
     missing_stream.stream_name.clear();
-    assert_eq!(
-        missing_stream.validate_contract().verdict,
-        ValidationVerdict::Incomplete
-    );
+    assert!(!missing_stream.validate_contract().is_complete());
 
     let mut combined_wrapper = update;
     combined_wrapper.combined_stream = Some("btcusdt@depth".to_owned());
-    assert_eq!(
-        combined_wrapper.validate_contract().verdict,
-        ValidationVerdict::Complete
-    );
+    assert!(combined_wrapper.validate_contract().is_complete());
 
     let mut blank_combined_wrapper = combined_wrapper;
     blank_combined_wrapper.combined_stream = Some("  ".to_owned());
-    assert_eq!(
-        blank_combined_wrapper.validate_contract().verdict,
-        ValidationVerdict::Incomplete
-    );
+    assert!(!blank_combined_wrapper.validate_contract().is_complete());
 
     let snapshot = BinanceDepthSnapshotRaw {
         envelope: EventEnvelope {
@@ -272,10 +103,7 @@ fn binance_depth_update_and_snapshot_schema_keep_official_fields() {
         no_exchange_timestamp_evidence: "REST snapshot has no exchange timestamp".to_owned(),
     };
 
-    assert_eq!(
-        snapshot.validate_contract().verdict,
-        ValidationVerdict::Complete
-    );
+    assert!(snapshot.validate_contract().is_complete());
 }
 
 #[test]
@@ -300,10 +128,7 @@ fn binance_aggtrade_schema_keeps_full_trade_fields() {
         stream_name: "btcusdt@aggTrade".to_owned(),
     };
 
-    assert_eq!(
-        trade.validate_contract().verdict,
-        ValidationVerdict::Complete
-    );
+    assert!(trade.validate_contract().is_complete());
 }
 
 #[test]
@@ -329,17 +154,14 @@ fn rtds_chainlink_schema_keeps_subscription_and_timestamps() {
         close_or_error_evidence: None,
     };
 
-    assert_eq!(
-        rtds.validate_contract().verdict,
-        ValidationVerdict::Complete
-    );
+    assert!(rtds.validate_contract().is_complete());
 
     let mut wrong_filter = rtds;
     wrong_filter.subscription_raw_json =
         r#"{"action":"subscribe","topic":"crypto_prices_chainlink","type":"*","filters":"{\"symbol\":\"eth/usd\"}"}"#
             .to_owned();
     let report = wrong_filter.validate_contract();
-    assert_eq!(report.verdict, ValidationVerdict::Incomplete);
+    assert!(!report.is_complete());
     assert!(
         report
             .source_gaps

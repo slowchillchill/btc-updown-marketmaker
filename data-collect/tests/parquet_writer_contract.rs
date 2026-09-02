@@ -20,9 +20,6 @@ use data_collect::polymarket_market_metadata_layout::{
     POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
     POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION,
 };
-use data_collect::polymarket_orderbook_layout::{
-    PolymarketOrderbookContext, PolymarketOrderbookRow,
-};
 use data_collect::polymarket_orderbook_v3::{
     PolymarketOrderbookV3Admission, PolymarketOrderbookV3Message, PolymarketOrderbookV3Projection,
     polymarket_orderbook_v3_messages_from_batch, polymarket_orderbook_v3_messages_to_batch,
@@ -58,8 +55,6 @@ fn synthetic_event(seq: u64) -> RawEvent {
         collector_region: "local-dev".to_owned(),
         source_endpoint: "synthetic://polymarket-market".to_owned(),
         raw_json: format!(r#"{{"event_type":"book","asset_id":"asset-{seq}"}}"#),
-        parquet_raw_layout_version: 1,
-        parquet_raw_source_kind: "polymarket_market".to_owned(),
     }
 }
 
@@ -283,112 +278,18 @@ async fn blocking_work_is_isolated_from_main_runtime() {
 }
 
 #[test]
-fn parquet_writer_writes_pmxt_like_orderbook_schema() {
+fn polymarket_v2_writer_is_closed_while_legacy_recovery_remains_read_only() {
     let tmp = tempdir().unwrap();
-    let row = PolymarketOrderbookRow::book_from_raw_json(
-        r#"{
-            "event_type": "book",
-            "market": "0x0000000000000000000000000000000000000000000000000000000000000001",
-            "asset_id": "106585164761922456203746651621390029417453862034640469075081961934906147433548",
-            "timestamp": 1783392404599,
-            "bids": [["0.49","120.5"]],
-            "asks": [["0.51","88"]],
-            "hash": "book-hash"
-        }"#,
-        PolymarketOrderbookContext {
-            timestamp_received_ms: 1_783_392_404_599,
-            slug: Some("btc-updown-5m-1783392300".to_owned()),
-            source_native_payload_json:
-                r#"{"source":"polymarket_market","event_type":"book"}"#.to_owned(),
-            collector_host_id: "collector-host".to_owned(),
-            collector_region: "eu-west-1".to_owned(),
-            source_endpoint: "wss://ws-subscriptions-clob.polymarket.com/ws/market".to_owned(),
-            schema_version: "polymarket_orderbook_v2".to_owned(),
-        },
-    )
-    .expect("valid book row");
-
-    let mut writer = TypedParquetSegmentWriter::create_polymarket_orderbook(
+    let error = match TypedParquetSegmentWriter::create_for_typed_source(
         tmp.path(),
-        "polymarket-market-typed",
+        "polymarket-market-v2",
         "polymarket_orderbook_v2",
-    )
-    .unwrap();
-    writer.write_polymarket_orderbook_rows(&[row]).unwrap();
-    let published = writer.finalize().unwrap();
-
-    let reader = SerializedFileReader::new(File::open(&published.final_path).unwrap()).unwrap();
-    let fields = reader
-        .metadata()
-        .file_metadata()
-        .schema_descr()
-        .columns()
-        .iter()
-        .map(|column| column.name().to_owned())
-        .collect::<Vec<_>>();
-    for field in [
-        "timestamp_received",
-        "timestamp",
-        "market",
-        "event_type",
-        "asset_id",
-        "bids",
-        "asks",
-        "price",
-        "size",
-        "side",
-        "best_bid",
-        "best_ask",
-    ] {
-        assert!(fields.contains(&field.to_owned()), "missing field {field}");
-    }
-    assert!(!fields.contains(&"raw_json".to_owned()));
-
-    let metadata = reader
-        .metadata()
-        .file_metadata()
-        .key_value_metadata()
-        .expect("parquet key-value metadata")
-        .iter()
-        .map(|item| (item.key.clone(), item.value.clone()))
-        .collect::<BTreeMap<_, _>>();
-    assert_eq!(
-        metadata
-            .get("parquet_raw_layout_version")
-            .and_then(|value| value.as_deref()),
-        Some("polymarket_orderbook_v2")
-    );
-    assert_eq!(
-        metadata
-            .get("parquet_raw_source_kind")
-            .and_then(|value| value.as_deref()),
-        Some("polymarket_market")
-    );
-    assert_eq!(
-        metadata
-            .get("data_collect_artifact_kind")
-            .and_then(|value| value.as_deref()),
-        Some("typed_raw_parquet")
-    );
-
-    let file = File::open(&published.final_path).unwrap();
-    let mut batch_reader = ParquetRecordBatchReaderBuilder::try_new(file)
-        .unwrap()
-        .build()
-        .unwrap();
-    let batch = batch_reader.next().unwrap().unwrap();
-    let bids = batch
-        .column(batch.schema().index_of("bids").unwrap())
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap();
-    let asks = batch
-        .column(batch.schema().index_of("asks").unwrap())
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap();
-    assert_eq!(bids.value(0), r#"[["0.49","120.5"]]"#);
-    assert_eq!(asks.value(0), r#"[["0.51","88"]]"#);
+        "polymarket_market",
+    ) {
+        Ok(_) => panic!("legacy v2 writer must remain closed"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("read-only legacy"), "{error}");
 }
 
 #[test]

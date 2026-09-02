@@ -54,9 +54,14 @@ data-collect-training-collector
 cargo run --release --locked --offline -p data-collect --bin real_source_alignment_probe
 ```
 
-默认产物目录以同一次配置生成的唯一 `run_id` 隔离；显式产物目录必须为空，探针会在联网前
-使用 `create_new` 创建 `run_owner.json`，不会覆盖已有产物。普通 Cargo 回归只运行该目标的
-离线单元测试，不执行其真实网络业务入口。
+探针直接调用生产训练采集入口，并把生产输出放在本次独立产物目录内的 `production-data`；
+采集成功后，它只读取生产每日 `manifest.json` 中的最终文件、数据源计数、缺口和覆盖事实，
+形成 `probe_summary.json`。探针不再另行实现外部数据源循环、解析器、队列或通用原始
+Parquet 写入，也不把构造请求冒充真实出站帧证据。
+
+默认产物目录使用唯一 `run_id` 隔离；显式产物目录必须为空，探针会在连接外部数据源前使用
+`create_new` 创建 `run_owner.json`，不会覆盖已有产物。普通 Cargo 回归只运行该目标的离线
+单元测试，不执行其真实网络业务入口。
 
 在离线训练链路中，上述最终化 `typed_raw` 只允许由 `data-pipeline(training)` 直接读取。
 下游 `model-train` 不得直接读取该目录；它只能把经过唯一 `data-pipeline(training)`

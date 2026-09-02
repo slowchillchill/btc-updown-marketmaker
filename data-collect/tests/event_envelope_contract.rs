@@ -20,8 +20,6 @@ fn complete_envelope() -> EventEnvelope {
         raw_evidence: RawEvidence::Json(
             r#"{"event_type":"book","timestamp":"1766789469958"}"#.to_owned(),
         ),
-        parquet_raw_layout_version: 1,
-        parquet_raw_source_kind: SourceKind::PolymarketMarket,
     }
 }
 
@@ -48,24 +46,9 @@ fn event_envelope_requires_recv_time_and_source_timestamp_boundary() {
 }
 
 #[test]
-fn event_envelope_uses_numeric_layout_version_consistent_with_writer_schema() {
-    let mut envelope = complete_envelope();
-    assert_eq!(envelope.parquet_raw_layout_version, 1);
-    assert!(envelope.validate().is_ok());
-
-    envelope.parquet_raw_layout_version = 0;
-    let err = envelope.validate().unwrap_err();
-    assert!(
-        err.missing_fields
-            .contains(&"parquet_raw_layout_version".to_owned())
-    );
-}
-
-#[test]
 fn snapshot_without_exchange_timestamp_requires_explicit_evidence() {
     let mut snapshot = complete_envelope();
     snapshot.source_kind = SourceKind::BinanceDepthSnapshot;
-    snapshot.parquet_raw_source_kind = SourceKind::BinanceDepthSnapshot;
     snapshot.source_event_type = "depth_snapshot".to_owned();
     snapshot.source_timestamp = SourceTimestamp::NoSourceTimestamp {
         reason: "binance_rest_depth_snapshot_has_no_exchange_timestamp".to_owned(),

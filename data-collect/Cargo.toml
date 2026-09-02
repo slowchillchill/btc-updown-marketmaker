@@ -13,14 +13,6 @@ name = "parquet_writer_probe"
 harness = false
 
 [[bench]]
-name = "source_hourly_layout_probe"
-harness = false
-
-[[bench]]
-name = "polymarket_storage_ab_probe"
-harness = false
-
-[[bench]]
 name = "websocket_smoke_probe"
 harness = false
 

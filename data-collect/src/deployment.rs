@@ -75,7 +75,7 @@ impl DeploymentRuntimeConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuntimeReceipt {
+pub struct CollectorStartupReceipt {
     pub binary_role: String,
     pub binary_name: String,
     pub run_id: String,
@@ -89,7 +89,7 @@ pub struct RuntimeReceipt {
     pub host_clock_sync_status: String,
 }
 
-impl RuntimeReceipt {
+impl CollectorStartupReceipt {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: &DeploymentRuntimeConfig,

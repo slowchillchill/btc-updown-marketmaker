@@ -1,10 +1,9 @@
-use data_collect::ValidationVerdict;
 use data_collect::event::{
     EventEnvelope, HostClockSyncStatus, RawEvidence, SourceKind, SourceTimestamp,
 };
 use data_collect::sources::binance::{
-    BINANCE_DEPTH_SNAPSHOT_ENDPOINT, BinanceOfficialSourceConfig, DepthUpdateVerdict,
-    assess_depth_update, parse_aggtrade_raw, parse_depth_snapshot_raw, parse_depth_update_raw,
+    BINANCE_DEPTH_SNAPSHOT_ENDPOINT, DepthUpdateVerdict, assess_depth_update, parse_aggtrade_raw,
+    parse_depth_snapshot_raw, parse_depth_update_raw,
 };
 
 fn envelope(source_kind: SourceKind, event_type: &str, raw_json: &str) -> EventEnvelope {
@@ -32,9 +31,23 @@ fn envelope(source_kind: SourceKind, event_type: &str, raw_json: &str) -> EventE
             source: "chrony".to_owned(),
         },
         raw_evidence: RawEvidence::Json(raw_json.to_owned()),
-        parquet_raw_layout_version: 1,
-        parquet_raw_source_kind: source_kind,
     }
+}
+
+#[test]
+fn depth_update_verdict_uses_one_frozen_bidirectional_mapping() {
+    for verdict in [
+        DepthUpdateVerdict::Applied,
+        DepthUpdateVerdict::NotAppliedStaleDuplicate,
+        DepthUpdateVerdict::NotAppliedConfirmedHole,
+        DepthUpdateVerdict::NotAppliedSnapshotUnavailable,
+    ] {
+        assert_eq!(DepthUpdateVerdict::try_from(verdict.as_str()), Ok(verdict));
+    }
+    assert_eq!(
+        DepthUpdateVerdict::try_from("unknown").unwrap_err(),
+        "unsupported frozen Binance depth verdict: unknown"
+    );
 }
 
 #[test]
@@ -53,10 +66,7 @@ fn binance_depth_stitch_contract() {
         raw_update,
     )
     .expect("parse official depth update");
-    assert_eq!(
-        update.validate_contract().verdict,
-        ValidationVerdict::Complete
-    );
+    assert!(update.validate_contract().is_complete());
     assert_eq!(update.combined_stream.as_deref(), Some("btcusdt@depth"));
 
     let raw_snapshot = r#"{
@@ -76,10 +86,7 @@ fn binance_depth_stitch_contract() {
         BINANCE_DEPTH_SNAPSHOT_ENDPOINT,
     )
     .expect("parse official snapshot");
-    assert_eq!(
-        snapshot.validate_contract().verdict,
-        ValidationVerdict::Complete
-    );
+    assert!(snapshot.validate_contract().is_complete());
 
     let assessment = assess_depth_update(Some(snapshot.last_update_id), None, &update).unwrap();
     assert_eq!(assessment.verdict, DepthUpdateVerdict::Applied);
@@ -137,21 +144,6 @@ fn binance_depth_stitch_contract() {
         DepthUpdateVerdict::NotAppliedConfirmedHole
     );
 
-    let config = BinanceOfficialSourceConfig::default();
-    assert!(config.validate_official().is_ok());
-    let mut alternate_official_config = config.clone();
-    alternate_official_config.depth_ws_endpoint =
-        "wss://data-stream.binance.vision/ws/btcusdt@depth".to_owned();
-    alternate_official_config.aggtrade_ws_endpoint =
-        "wss://data-stream.binance.vision/ws/btcusdt@aggTrade".to_owned();
-    alternate_official_config.depth_snapshot_endpoint =
-        "https://api-gcp.binance.com/api/v3/depth?symbol=BTCUSDT&limit=1000".to_owned();
-    assert!(alternate_official_config.validate_official().is_ok());
-
-    let mut proxy_config = config;
-    proxy_config.depth_ws_endpoint = "wss://binance.com.evil.invalid/ws/btcusdt@depth".to_owned();
-    assert!(proxy_config.validate_official().is_err());
-
     let wrong_symbol = parse_depth_update_raw(
         envelope(
             SourceKind::BinanceDepthUpdate,
@@ -184,10 +176,7 @@ fn binance_depth_stitch_contract() {
         BINANCE_DEPTH_SNAPSHOT_ENDPOINT,
     )
     .expect("parse empty snapshot");
-    assert_eq!(
-        empty_snapshot.validate_contract().verdict,
-        ValidationVerdict::Incomplete
-    );
+    assert!(!empty_snapshot.validate_contract().is_complete());
 }
 
 #[test]
@@ -202,10 +191,7 @@ fn binance_aggtrade_raw_fields_contract() {
     )
     .expect("parse aggTrade");
 
-    assert_eq!(
-        trade.validate_contract().verdict,
-        ValidationVerdict::Complete
-    );
+    assert!(trade.validate_contract().is_complete());
     assert_eq!(trade.event_type, "aggTrade");
     assert_eq!(trade.aggregate_trade_id, 123);
     assert_eq!(trade.first_trade_id, 10);

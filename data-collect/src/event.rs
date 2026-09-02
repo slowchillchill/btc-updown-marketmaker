@@ -104,8 +104,6 @@ pub struct EventEnvelope {
     pub source_endpoint: String,
     pub host_clock_sync_status: HostClockSyncStatus,
     pub raw_evidence: RawEvidence,
-    pub parquet_raw_layout_version: u32,
-    pub parquet_raw_source_kind: SourceKind,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -149,13 +147,6 @@ impl EventEnvelope {
                 }
             }
         }
-        if self.parquet_raw_layout_version == 0 {
-            missing_fields.push("parquet_raw_layout_version".to_owned());
-        }
-        if self.parquet_raw_source_kind != self.source_kind {
-            missing_fields.push("parquet_raw_source_kind".to_owned());
-        }
-
         if missing_fields.is_empty() {
             Ok(())
         } else {

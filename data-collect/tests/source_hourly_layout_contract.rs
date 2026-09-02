@@ -52,8 +52,6 @@ fn envelope(source_kind: SourceKind, event_type: &str, raw_json: &str) -> EventE
             source: "chrony".to_owned(),
         },
         raw_evidence: RawEvidence::Json(raw_json.to_owned()),
-        parquet_raw_layout_version: 1,
-        parquet_raw_source_kind: source_kind,
     }
 }
 

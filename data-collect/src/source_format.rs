@@ -1,7 +1,5 @@
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::ValidationVerdict;
 use crate::event::{EventEnvelope, SourceKind};
 
 const MIN_PLAUSIBLE_UNIX_TIMESTAMP_MS: i64 = 1_000_000_000_000;
@@ -13,7 +11,6 @@ pub(crate) fn plausible_unix_timestamp_ms(timestamp: i64) -> bool {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FormatValidationReport {
-    pub verdict: ValidationVerdict,
     pub missing_fields: Vec<String>,
     pub source_gaps: Vec<String>,
 }
@@ -21,7 +18,6 @@ pub struct FormatValidationReport {
 impl FormatValidationReport {
     fn new() -> Self {
         Self {
-            verdict: ValidationVerdict::Complete,
             missing_fields: Vec::new(),
             source_gaps: Vec::new(),
         }
@@ -33,265 +29,23 @@ impl FormatValidationReport {
         }
     }
 
-    fn require_some<T>(&mut self, field: &str, value: &Option<T>) {
-        if value.is_none() {
-            self.missing_fields.push(field.to_owned());
-        }
-    }
-
-    fn require_non_empty_vec<T>(&mut self, field: &str, value: &[T]) {
-        if value.is_empty() {
-            self.missing_fields.push(field.to_owned());
-        }
-    }
-
     fn merge_envelope(&mut self, envelope: &EventEnvelope) {
         if let Err(error) = envelope.validate() {
             self.missing_fields.extend(error.missing_fields);
         }
     }
 
-    fn finish(mut self) -> Self {
-        if !self.missing_fields.is_empty() || !self.source_gaps.is_empty() {
-            self.verdict = ValidationVerdict::Incomplete;
-        }
+    pub fn is_complete(&self) -> bool {
+        self.missing_fields.is_empty() && self.source_gaps.is_empty()
+    }
+
+    fn finish(self) -> Self {
         self
     }
 }
 
 fn raw_json_is_parseable(raw_json: &str) -> bool {
     serde_json::from_str::<Value>(raw_json).is_ok()
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SubscriptionConfirmation {
-    Ack { message: String },
-    FirstBusinessEvent { event_type: String },
-    Unavailable { reason: String },
-}
-
-impl SubscriptionConfirmation {
-    fn has_evidence(&self) -> bool {
-        match self {
-            Self::Ack { message } => !message.trim().is_empty(),
-            Self::FirstBusinessEvent { event_type } => !event_type.trim().is_empty(),
-            Self::Unavailable { .. } => false,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PolymarketSubscriptionEvidence {
-    pub raw_json: String,
-    pub assets_ids: Vec<String>,
-    pub custom_feature_enabled: bool,
-    pub confirmation: SubscriptionConfirmation,
-    pub sdk_support_status: String,
-}
-
-impl PolymarketSubscriptionEvidence {
-    fn validate_into(&self, report: &mut FormatValidationReport) {
-        if !raw_json_is_parseable(&self.raw_json) {
-            report
-                .missing_fields
-                .push("subscription_raw_json".to_owned());
-        } else if !polymarket_market_subscription_matches(
-            &self.raw_json,
-            &self.assets_ids,
-            self.custom_feature_enabled,
-        ) {
-            report
-                .source_gaps
-                .push("subscription_payload_mismatch".to_owned());
-        }
-        report.require_non_empty_vec("subscription_assets_ids", &self.assets_ids);
-        if !self.custom_feature_enabled {
-            report
-                .source_gaps
-                .push("custom_feature_enabled_missing".to_owned());
-        }
-        if !self.confirmation.has_evidence() {
-            report.source_gaps.push("subscription_unproven".to_owned());
-        }
-        report.require_non_empty("sdk_support_status", &self.sdk_support_status);
-    }
-}
-
-fn polymarket_market_subscription_matches(
-    raw_json: &str,
-    assets_ids: &[String],
-    custom_feature_enabled: bool,
-) -> bool {
-    let Ok(value) = serde_json::from_str::<Value>(raw_json) else {
-        return false;
-    };
-    let has_market_type = value.get("type").and_then(Value::as_str) == Some("market");
-    let has_custom_feature = value.get("custom_feature_enabled").and_then(Value::as_bool)
-        == Some(true)
-        && custom_feature_enabled;
-    let Some(raw_assets) = value.get("assets_ids").and_then(Value::as_array) else {
-        return false;
-    };
-    let raw_asset_ids = raw_assets
-        .iter()
-        .filter_map(Value::as_str)
-        .collect::<Vec<_>>();
-    has_market_type
-        && has_custom_feature
-        && !assets_ids.is_empty()
-        && assets_ids
-            .iter()
-            .all(|asset_id| raw_asset_ids.contains(&asset_id.as_str()))
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PolymarketMarketRaw {
-    pub envelope: EventEnvelope,
-    pub event_type: String,
-    pub platform_timestamp: String,
-    pub market_id: Option<String>,
-    pub condition_id: Option<String>,
-    pub asset_ids: Vec<String>,
-    pub subscription: PolymarketSubscriptionEvidence,
-}
-
-impl PolymarketMarketRaw {
-    pub fn validate_contract(&self) -> FormatValidationReport {
-        let mut report = FormatValidationReport::new();
-        report.merge_envelope(&self.envelope);
-        if self.envelope.source_kind != SourceKind::PolymarketMarket {
-            report.missing_fields.push("source_kind".to_owned());
-        }
-        report.require_non_empty("event_type", &self.event_type);
-        report.require_non_empty("platform_timestamp", &self.platform_timestamp);
-        if self.market_id.is_none() && self.condition_id.is_none() {
-            report
-                .missing_fields
-                .push("market_or_condition_id".to_owned());
-        }
-        report.require_non_empty_vec("asset_ids", &self.asset_ids);
-        self.subscription.validate_into(&mut report);
-        report.finish()
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PolymarketMarketResolutionRaw {
-    pub envelope: EventEnvelope,
-    pub condition_id: String,
-    pub market_id: Option<String>,
-    pub subscribed_asset_ids_for_market: Vec<String>,
-    pub resolved_event_asset_ids: Vec<String>,
-    pub winning_asset_id: String,
-    pub winning_outcome: String,
-    pub close_reason_if_present: Option<String>,
-}
-
-impl PolymarketMarketResolutionRaw {
-    pub fn validate_contract(&self) -> FormatValidationReport {
-        let mut report = FormatValidationReport::new();
-        report.merge_envelope(&self.envelope);
-        if self.envelope.source_kind != SourceKind::PolymarketMarket {
-            report.missing_fields.push("source_kind".to_owned());
-        }
-        if self.envelope.source_event_type != "market_resolved" {
-            report
-                .missing_fields
-                .push("source_event_type=market_resolved".to_owned());
-        }
-        report.require_non_empty("condition_id", &self.condition_id);
-        report.require_non_empty_vec(
-            "subscribed_asset_ids_for_market",
-            &self.subscribed_asset_ids_for_market,
-        );
-        report.require_non_empty_vec("resolved_event_asset_ids", &self.resolved_event_asset_ids);
-        report.require_non_empty("winning_asset_id", &self.winning_asset_id);
-        report.require_non_empty("winning_outcome", &self.winning_outcome);
-        let resolved_covers_subscribed = self
-            .subscribed_asset_ids_for_market
-            .iter()
-            .all(|asset_id| self.resolved_event_asset_ids.contains(asset_id));
-        if !resolved_covers_subscribed {
-            report
-                .source_gaps
-                .push("resolved_assets_do_not_cover_subscription".to_owned());
-        }
-        if !self
-            .resolved_event_asset_ids
-            .contains(&self.winning_asset_id)
-        {
-            report
-                .source_gaps
-                .push("winning_asset_not_in_resolved_assets".to_owned());
-        }
-        if !self
-            .subscribed_asset_ids_for_market
-            .contains(&self.winning_asset_id)
-        {
-            report
-                .source_gaps
-                .push("winning_asset_not_in_subscribed_assets".to_owned());
-        }
-        report.finish()
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MarketLifecycleState {
-    Candidate,
-    Prefetched,
-    Active,
-    Retired,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PolymarketMarketMetadataRaw {
-    pub envelope: EventEnvelope,
-    pub condition_id: String,
-    pub asset_ids: Vec<String>,
-    pub clob_market_id: String,
-    pub slug: String,
-    pub start_time_utc_ms: i64,
-    pub end_time_utc_ms: i64,
-    pub active: bool,
-    pub accepting_orders: bool,
-    pub market_lifecycle_state: MarketLifecycleState,
-    pub tick_size: String,
-    pub min_size: String,
-    pub fee_raw: Option<String>,
-    pub reward_raw: Option<String>,
-    pub candidate_slug: String,
-    pub active_scan_evidence: Option<String>,
-    pub metadata_snapshot_evidence: Option<String>,
-    pub clock_drift_evidence: Option<String>,
-}
-
-impl PolymarketMarketMetadataRaw {
-    pub fn validate_contract(&self) -> FormatValidationReport {
-        let mut report = FormatValidationReport::new();
-        report.merge_envelope(&self.envelope);
-        if self.envelope.source_kind != SourceKind::PolymarketMarketMetadata {
-            report.missing_fields.push("source_kind".to_owned());
-        }
-        report.require_non_empty("condition_id", &self.condition_id);
-        report.require_non_empty_vec("asset_ids", &self.asset_ids);
-        report.require_non_empty("clob_market_id", &self.clob_market_id);
-        report.require_non_empty("slug", &self.slug);
-        report.require_non_empty("tick_size", &self.tick_size);
-        report.require_non_empty("min_size", &self.min_size);
-        report.require_some("fee_raw", &self.fee_raw);
-        report.require_some("reward_raw", &self.reward_raw);
-        report.require_non_empty("candidate_slug", &self.candidate_slug);
-        report.require_some("clock_drift_evidence", &self.clock_drift_evidence);
-        if self.active_scan_evidence.is_none() && self.metadata_snapshot_evidence.is_none() {
-            report.source_gaps.push("slug_only_discovery".to_owned());
-        }
-        if self.start_time_utc_ms >= self.end_time_utc_ms {
-            report.missing_fields.push("start_end_window".to_owned());
-        }
-        report.finish()
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
