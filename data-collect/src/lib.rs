@@ -11,6 +11,7 @@ mod inflight;
 pub mod latency;
 pub mod manifest;
 pub mod market_discovery;
+mod polymarket_identity;
 pub mod polymarket_market_metadata_layout;
 pub mod polymarket_orderbook_v3;
 pub mod polymarket_resolution_recovery;

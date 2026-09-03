@@ -1374,6 +1374,24 @@ impl PendingPolymarketIdentity {
             market_end_utc_ms: self.market_end_utc_ms,
         }
     }
+
+    fn identity_authority(&self) -> VerifiedPolymarketMarketIdentity {
+        VerifiedPolymarketMarketIdentity {
+            market: PolymarketMarketIdentity {
+                slug: self.slug.clone(),
+                condition_id: self.condition_id.clone(),
+                clob_market_id: self.clob_market_id.clone(),
+                ordered_up_down_asset_ids_json: serde_json::to_string(&[
+                    self.up_asset_id.as_str(),
+                    self.down_asset_id.as_str(),
+                ])
+                .unwrap_or_default(),
+                market_start_utc_ms: self.market_start_utc_ms,
+                market_end_utc_ms: self.market_end_utc_ms,
+            },
+            first_verified_at_utc_ms: self.fixed_identity_verified_at_utc_ms,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1529,7 +1547,7 @@ pub(super) struct PolymarketProcessingContext {
     pub(super) next: Option<DiscoveredBtcUpdownMarket>,
     pub(super) pending: BTreeMap<String, PendingPolymarketResolution>,
     pub(super) early_ws_claims: BTreeMap<String, PolymarketWsTerminalEvidence>,
-    pub(super) source_authorities: Vec<PolymarketMetadataReferenceRecord>,
+    pub(super) source_authorities: Vec<SourceAuthority>,
     pub(super) active_asset_to_slug: BTreeMap<String, String>,
     pub(super) asset_to_slug: BTreeMap<String, String>,
     pub(super) actor_now_utc_ms: i64,
@@ -1761,7 +1779,7 @@ impl PolymarketProcessingContext {
             early_claims.saturating_add(
                 self.source_authorities
                     .capacity()
-                    .saturating_mul(std::mem::size_of::<PolymarketMetadataReferenceRecord>()),
+                    .saturating_mul(std::mem::size_of::<SourceAuthority>()),
             ),
             |total, authority| {
                 total.saturating_add(polymarket_authority_dynamic_owned_bytes(authority))
@@ -1801,38 +1819,14 @@ impl PolymarketProcessingContext {
             .map_or(self.actor_now_utc_ms, |now| now())
     }
 
-    pub(super) fn register_source_authority(
-        &mut self,
-        authority: PolymarketMetadataReferenceRecord,
-    ) -> Result<()> {
-        if !authority.source_evidence_payload_present
-            || !matches!(
-                authority.metadata_row_kind.as_str(),
-                "metadata_snapshot" | "market_state_transition"
-            )
-            || authority.source_evidence_origin.as_deref()
-                != Some(SourceEvidenceOrigin::GammaMarketsDiscovery.as_str())
-            || authority.source_evidence_received_at_utc.is_none()
-            || authority
-                .source_evidence_raw_sha256
-                .as_deref()
-                .is_none_or(str::is_empty)
-        {
-            return Err(invalid_data(format!(
-                "Polymarket source authority is not a complete discovery evidence row:slug={}",
-                authority.slug
-            ))
-            .into());
-        }
-        let same_identity = |candidate: &PolymarketMetadataReferenceRecord| {
-            polymarket_authority_same_fixed_identity(candidate, &authority)
+    pub(super) fn register_source_authority(&mut self, authority: SourceAuthority) -> Result<()> {
+        let same_identity = |candidate: &SourceAuthority| {
+            same_identity_authority(&candidate.identity, &authority.identity)
         };
-        let same_complete_tuple = |candidate: &PolymarketMetadataReferenceRecord| {
+        let same_complete_tuple = |candidate: &SourceAuthority| {
             same_identity(candidate)
-                && candidate.source_evidence_origin == authority.source_evidence_origin
-                && candidate.source_evidence_received_at_utc
-                    == authority.source_evidence_received_at_utc
-                && candidate.source_evidence_raw_sha256 == authority.source_evidence_raw_sha256
+                && candidate.origin == authority.origin
+                && candidate.evidence == authority.evidence
         };
         let duplicate = self.source_authorities.iter().any(same_complete_tuple);
         let mut updated = self.source_authorities.clone();
@@ -1860,43 +1854,49 @@ impl PolymarketProcessingContext {
         &self,
         row: &PolymarketMarketMetadataRow,
     ) -> Result<()> {
-        let mut records = self.source_authorities.clone();
-        records.push(PolymarketMetadataReferenceRecord::from(row));
-        validate_polymarket_metadata_local_references(&records).map_err(|error| {
-            invalid_data(format!(
-                "polymarket_metadata_source_reference_integrity:{error}"
-            ))
-            .into()
-        })
+        let Some(reference) = source_reference_from_metadata_row(row)? else {
+            return Ok(());
+        };
+        validate_polymarket_source_references(&self.source_authorities, &[reference]).map_err(
+            |error| {
+                invalid_data(format!(
+                    "polymarket_metadata_source_reference_integrity:{error}"
+                ))
+                .into()
+            },
+        )
     }
 }
 
-fn polymarket_authority_same_fixed_identity(
-    left: &PolymarketMetadataReferenceRecord,
-    right: &PolymarketMetadataReferenceRecord,
-) -> bool {
-    left.slug == right.slug
-        && left.condition_id == right.condition_id
-        && left.clob_market_id == right.clob_market_id
-        && left.asset_ids == right.asset_ids
-        && left.market_start_utc == right.market_start_utc
-        && left.market_end_utc == right.market_end_utc
-        && left.fixed_identity_verified_at_utc == right.fixed_identity_verified_at_utc
+fn discovered_identity_authority(
+    market: &DiscoveredBtcUpdownMarket,
+) -> VerifiedPolymarketMarketIdentity {
+    VerifiedPolymarketMarketIdentity {
+        market: discovered_market_identity(market),
+        first_verified_at_utc_ms: market.fixed_identity_verified_at_utc_ms,
+    }
+}
+
+fn discovered_market_identity(market: &DiscoveredBtcUpdownMarket) -> PolymarketMarketIdentity {
+    PolymarketMarketIdentity {
+        slug: market.slug.clone(),
+        condition_id: market.condition_id.clone(),
+        clob_market_id: market.id.clone(),
+        ordered_up_down_asset_ids_json: serde_json::to_string(&[
+            market.up_asset_id.as_str(),
+            market.down_asset_id.as_str(),
+        ])
+        .unwrap_or_default(),
+        market_start_utc_ms: market.start_ts_s.saturating_mul(1_000),
+        market_end_utc_ms: market.end_ts_s.saturating_mul(1_000),
+    }
 }
 
 fn polymarket_authority_matches_discovered(
-    authority: &PolymarketMetadataReferenceRecord,
+    authority: &SourceAuthority,
     market: &DiscoveredBtcUpdownMarket,
 ) -> bool {
-    authority.slug == market.slug
-        && authority.condition_id == market.condition_id
-        && authority.clob_market_id == market.id
-        && authority.asset_ids
-            == serde_json::to_string(&[market.up_asset_id.as_str(), market.down_asset_id.as_str()])
-                .unwrap_or_default()
-        && authority.market_start_utc == market.start_ts_s.saturating_mul(1_000)
-        && authority.market_end_utc == market.end_ts_s.saturating_mul(1_000)
-        && authority.fixed_identity_verified_at_utc == market.fixed_identity_verified_at_utc_ms
+    same_identity_authority(&authority.identity, &discovered_identity_authority(market))
 }
 
 pub(super) fn polymarket_context_discovery_authorities_complete(
@@ -1915,45 +1915,29 @@ pub(super) fn polymarket_context_discovery_authorities_complete(
 }
 
 fn polymarket_authority_matches_identity(
-    authority: &PolymarketMetadataReferenceRecord,
+    authority: &SourceAuthority,
     identity: &PendingPolymarketIdentity,
 ) -> bool {
-    authority.slug == identity.slug
-        && authority.condition_id == identity.condition_id
-        && authority.clob_market_id == identity.clob_market_id
-        && authority.asset_ids
-            == serde_json::to_string(&[
-                identity.up_asset_id.as_str(),
-                identity.down_asset_id.as_str(),
-            ])
-            .unwrap_or_default()
-        && authority.market_start_utc == identity.market_start_utc_ms
-        && authority.market_end_utc == identity.market_end_utc_ms
-        && authority.fixed_identity_verified_at_utc == identity.fixed_identity_verified_at_utc_ms
+    same_identity_authority(&authority.identity, &identity.identity_authority())
 }
 
-fn polymarket_authority_dynamic_owned_bytes(
-    authority: &PolymarketMetadataReferenceRecord,
-) -> usize {
+fn polymarket_authority_dynamic_owned_bytes(authority: &SourceAuthority) -> usize {
     authority
-        .metadata_row_kind
+        .identity
+        .market
+        .slug
         .capacity()
-        .saturating_add(authority.slug.capacity())
-        .saturating_add(authority.condition_id.capacity())
-        .saturating_add(authority.clob_market_id.capacity())
-        .saturating_add(authority.asset_ids.capacity())
+        .saturating_add(authority.identity.market.condition_id.capacity())
+        .saturating_add(authority.identity.market.clob_market_id.capacity())
         .saturating_add(
             authority
-                .source_evidence_origin
-                .as_ref()
-                .map_or(0, String::capacity),
+                .identity
+                .market
+                .ordered_up_down_asset_ids_json
+                .capacity(),
         )
-        .saturating_add(
-            authority
-                .source_evidence_raw_sha256
-                .as_ref()
-                .map_or(0, String::capacity),
-        )
+        .saturating_add(authority.origin.capacity())
+        .saturating_add(authority.evidence.raw_sha256.capacity())
 }
 
 pub(super) fn polymarket_drain_terminal_error(
@@ -3769,11 +3753,10 @@ pub(super) fn validate_polymarket_context_switch(
     else {
         return Ok(());
     };
-    if prefetched.id != replacement.current.id
-        || prefetched.condition_id != replacement.current.condition_id
-        || prefetched.up_asset_id != replacement.current.up_asset_id
-        || prefetched.down_asset_id != replacement.current.down_asset_id
-    {
+    if !same_market_identity(
+        &discovered_market_identity(prefetched),
+        &discovered_market_identity(&replacement.current),
+    ) {
         return Err(invalid_data(format!(
             "Polymarket prefetched market identity changed before promotion:slug={}",
             prefetched.slug
@@ -3794,11 +3777,10 @@ pub(super) fn validate_polymarket_discovery_identity_continuity(
         else {
             continue;
         };
-        if previous_market.id != current_market.id
-            || previous_market.condition_id != current_market.condition_id
-            || previous_market.up_asset_id != current_market.up_asset_id
-            || previous_market.down_asset_id != current_market.down_asset_id
-        {
+        if !same_market_identity(
+            &discovered_market_identity(previous_market),
+            &discovered_market_identity(current_market),
+        ) {
             return Err(invalid_data(format!(
                 "Polymarket market identity changed across transport recovery:slug={}",
                 previous_market.slug
@@ -3914,13 +3896,21 @@ pub(super) fn recovered_polymarket_fixed_identity_matches(
     recovered: &RecoveredPolymarketFixedIdentity,
     fresh: &DiscoveredBtcUpdownMarket,
 ) -> bool {
-    recovered.slug == fresh.slug
-        && recovered.condition_id == fresh.condition_id
-        && recovered.clob_market_id == fresh.id
-        && recovered.up_asset_id == fresh.up_asset_id
-        && recovered.down_asset_id == fresh.down_asset_id
-        && recovered.market_start_utc_ms == fresh.start_ts_s.saturating_mul(1_000)
-        && recovered.market_end_utc_ms == fresh.end_ts_s.saturating_mul(1_000)
+    same_market_identity(
+        &PolymarketMarketIdentity {
+            slug: recovered.slug.clone(),
+            condition_id: recovered.condition_id.clone(),
+            clob_market_id: recovered.clob_market_id.clone(),
+            ordered_up_down_asset_ids_json: serde_json::to_string(&[
+                recovered.up_asset_id.as_str(),
+                recovered.down_asset_id.as_str(),
+            ])
+            .unwrap_or_default(),
+            market_start_utc_ms: recovered.market_start_utc_ms,
+            market_end_utc_ms: recovered.market_end_utc_ms,
+        },
+        &discovered_market_identity(fresh),
+    )
 }
 
 pub(super) fn polymarket_restart_discovery_integrity_error(
@@ -6131,7 +6121,7 @@ pub(super) async fn send_polymarket_metadata_event(
     market: &crate::market_discovery::DiscoveredBtcUpdownMarket,
     discovery_slot: &str,
     collector_identity: &CollectorIdentity,
-) -> Result<PolymarketMetadataReferenceRecord> {
+) -> Result<SourceAuthority> {
     let role = match discovery_slot {
         "current" => MarketRuntimeRole::Current,
         "next" => MarketRuntimeRole::Next,
@@ -6198,8 +6188,8 @@ pub(super) async fn send_polymarket_metadata_source_authority_row(
     sink: &SourceEventSink,
     run_started: Instant,
     row: PolymarketMarketMetadataRow,
-) -> Result<PolymarketMetadataReferenceRecord> {
-    let authority = PolymarketMetadataReferenceRecord::from(&row);
+) -> Result<SourceAuthority> {
+    let authority = discovery_source_authority_from_row(&row)?;
     let event = polymarket_metadata_event(row, None, None)?;
     match send_event_with_admission_outcome(sink, run_started, event).await? {
         EventAdmissionOutcome::Admitted => Ok(authority),
@@ -6212,6 +6202,30 @@ pub(super) async fn send_polymarket_metadata_source_authority_row(
         )
         .into()),
     }
+}
+
+pub(super) fn discovery_source_authority_from_row(
+    row: &PolymarketMarketMetadataRow,
+) -> Result<SourceAuthority> {
+    if !matches!(
+        row.metadata_row_kind,
+        PolymarketMetadataRowKind::MetadataSnapshot
+            | PolymarketMetadataRowKind::MarketStateTransition
+    ) || row.source_evidence_origin != Some(SourceEvidenceOrigin::GammaMarketsDiscovery)
+    {
+        return Err(invalid_data(format!(
+            "Polymarket source authority is not a complete discovery evidence row:slug={}",
+            row.slug
+        ))
+        .into());
+    }
+    source_authority_from_metadata_row(row).ok_or_else(|| {
+        invalid_data(format!(
+            "Polymarket source authority is not a complete discovery evidence row:slug={}",
+            row.slug
+        ))
+        .into()
+    })
 }
 
 async fn send_polymarket_metadata_rows_atomically(

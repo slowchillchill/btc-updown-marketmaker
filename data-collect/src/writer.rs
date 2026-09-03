@@ -15,6 +15,7 @@ use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
 use sha2::{Digest as _, Sha256};
 
+use crate::event::SourceKind;
 #[cfg(test)]
 use crate::polymarket_market_metadata_layout::PolymarketMarketMetadataV4Row;
 use crate::polymarket_market_metadata_layout::{
@@ -118,6 +119,25 @@ pub struct TypedParquetSegmentWriter {
 }
 
 impl TypedParquetSegmentWriter {
+    pub fn current_schema_version(source_kind: &str) -> Result<&'static str> {
+        let source_kind = source_kind
+            .parse::<SourceKind>()
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
+        Ok(match source_kind {
+            SourceKind::PolymarketMarket => POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,
+            SourceKind::PolymarketMarketMetadata => POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION,
+            SourceKind::BinanceDepthSnapshot => BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
+            SourceKind::BinanceDepthUpdate => BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,
+            SourceKind::BinanceAggTrade => BINANCE_AGGTRADE_SCHEMA_VERSION,
+            SourceKind::PolymarketRtdsChainlinkBtcUsd => "polymarket_rtds_chainlink_btc_usd_v4",
+        })
+    }
+
+    pub fn create_for_current_source(root: &Path, stem: &str, source_kind: &str) -> Result<Self> {
+        let schema_version = Self::current_schema_version(source_kind)?;
+        Self::create(root, stem, schema_version, source_kind, 3)
+    }
+
     pub fn create_for_typed_source(
         root: &Path,
         stem: &str,

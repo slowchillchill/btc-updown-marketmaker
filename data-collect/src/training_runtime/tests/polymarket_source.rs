@@ -1605,30 +1605,27 @@ fn polymarket_pending_owned_bytes_counts_each_allocation_once() {
         "the WS Box must include its pointee fixed size and dynamic allocations"
     );
 
-    let authority = PolymarketMetadataReferenceRecord::from(
-        &context.pending[&slug].buffered_attempt_rows[0].row,
-    );
+    let authority =
+        source_authority_from_metadata_row(&context.pending[&slug].buffered_attempt_rows[0].row)
+            .unwrap();
     let authority_dynamic = [
-        authority.metadata_row_kind.capacity(),
-        authority.slug.capacity(),
-        authority.condition_id.capacity(),
-        authority.clob_market_id.capacity(),
-        authority.asset_ids.capacity(),
+        authority.identity.market.slug.capacity(),
+        authority.identity.market.condition_id.capacity(),
+        authority.identity.market.clob_market_id.capacity(),
         authority
-            .source_evidence_origin
-            .as_ref()
-            .map_or(0, String::capacity),
-        authority
-            .source_evidence_raw_sha256
-            .as_ref()
-            .map_or(0, String::capacity),
+            .identity
+            .market
+            .ordered_up_down_asset_ids_json
+            .capacity(),
+        authority.origin.capacity(),
+        authority.evidence.raw_sha256.capacity(),
     ]
     .into_iter()
     .sum::<usize>();
     context.source_authorities = Vec::with_capacity(4);
     context.source_authorities.push(authority);
-    let authority_backing = context.source_authorities.capacity()
-        * std::mem::size_of::<PolymarketMetadataReferenceRecord>();
+    let authority_backing =
+        context.source_authorities.capacity() * std::mem::size_of::<SourceAuthority>();
     assert_eq!(
         context.pending_owned_bytes(),
         expected_without_claim
@@ -1708,7 +1705,7 @@ fn polymarket_pending_union_and_terminal_claim_stay_within_frozen_bounds() {
     .into_iter()
     .map(|(market, role)| {
         let row = polymarket_metadata_snapshot_row(market, role, &collector_identity).unwrap();
-        PolymarketMetadataReferenceRecord::from(&row)
+        discovery_source_authority_from_row(&row).unwrap()
     })
     .collect::<Vec<_>>();
     for authority in authorities.iter().cloned() {
@@ -3419,7 +3416,7 @@ async fn polymarket_v3_ingress_for_test(
 
 fn start_cold_polymarket_v3_writer_for_test(
     dataset_root: &Path,
-    provenance: &RuntimeProvenance,
+    provenance: &TrainingArtifactIdentity,
     manifest_tx: &mpsc::Sender<ManifestCommand>,
     runtime_stats: &Arc<SourceQueueBackpressureStats>,
     raw_day_gate: Option<Arc<RawDayGate>>,
@@ -3589,7 +3586,7 @@ async fn cold_v3_ingress_uses_one_writer_and_actual_manifest_schema() {
     )
     .await;
     let (manifest_tx, mut manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
-    let provenance = test_runtime_provenance("polymarket-v3-cold-writer");
+    let provenance = test_artifact_identity();
     let (mut writers, output_rx) = start_cold_polymarket_v3_writer_for_test(
         &dataset_root,
         &provenance,
@@ -3935,7 +3932,7 @@ async fn v3_sequence_state_survives_live_segment_rollover() {
         .collector_admission_sequence = 1;
 
     let (manifest_tx, mut manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
-    let provenance = test_runtime_provenance("polymarket-v3-live-segment-sequence");
+    let provenance = test_artifact_identity();
     let (mut writers, output_rx) = start_cold_polymarket_v3_writer_for_test(
         &dataset_root,
         &provenance,
@@ -4072,7 +4069,7 @@ async fn v3_sequence_state_survives_utc_day_rollover() {
     .await;
 
     let (manifest_tx, mut manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
-    let provenance = test_runtime_provenance("polymarket-v3-day-sequence");
+    let provenance = test_artifact_identity();
     let (mut writers, output_rx) = start_cold_polymarket_v3_writer_for_test(
         &dataset_root,
         &provenance,
@@ -5871,16 +5868,16 @@ async fn polymarket_stop_materializes_accepted_current_ws_after_e_before_reply()
             region: "local-test".to_owned(),
         };
         let mut context = PolymarketProcessingContext::new(discovery.clone());
-        context
-            .register_source_authority(PolymarketMetadataReferenceRecord::from(
-                &polymarket_metadata_snapshot_row(
-                    &market,
-                    MarketRuntimeRole::Current,
-                    &collector_identity,
-                )
-                .unwrap(),
-            ))
-            .unwrap();
+        let authority = discovery_source_authority_from_row(
+            &polymarket_metadata_snapshot_row(
+                &market,
+                MarketRuntimeRole::Current,
+                &collector_identity,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        context.register_source_authority(authority).unwrap();
         context.actor_now_utc_ms = actor_now_utc_ms;
         context.actor_utc_now = Some(Arc::new(move || actor_now_utc_ms));
 
@@ -6214,16 +6211,12 @@ async fn polymarket_2355_stop_defers_raw_e_transition_and_terminal_without_deadl
         region: "local-test".to_owned(),
     };
     let mut context = PolymarketProcessingContext::new(discovery.clone());
-    context
-        .register_source_authority(PolymarketMetadataReferenceRecord::from(
-            &polymarket_metadata_snapshot_row(
-                &market,
-                MarketRuntimeRole::Current,
-                &collector_identity,
-            )
+    let authority = discovery_source_authority_from_row(
+        &polymarket_metadata_snapshot_row(&market, MarketRuntimeRole::Current, &collector_identity)
             .unwrap(),
-        ))
-        .unwrap();
+    )
+    .unwrap();
+    context.register_source_authority(authority).unwrap();
     context.actor_now_utc_ms = actor_now_utc_ms;
     context.actor_utc_now = Some(Arc::new(move || actor_now_utc_ms));
 
@@ -6370,11 +6363,11 @@ async fn polymarket_2355_day_fence_finalizes_e_minus_one_ws_before_reply() {
         (&current, MarketRuntimeRole::Current),
         (&next, MarketRuntimeRole::Next),
     ] {
-        context
-            .register_source_authority(PolymarketMetadataReferenceRecord::from(
-                &polymarket_metadata_snapshot_row(market, role, &collector_identity).unwrap(),
-            ))
-            .unwrap();
+        let authority = discovery_source_authority_from_row(
+            &polymarket_metadata_snapshot_row(market, role, &collector_identity).unwrap(),
+        )
+        .unwrap();
+        context.register_source_authority(authority).unwrap();
     }
     context.actor_now_utc_ms = actor_now_utc_ms;
     context.actor_utc_now = Some(Arc::new(move || actor_now_utc_ms));
@@ -7054,7 +7047,7 @@ async fn polymarket_outer_recovery_day_fence_admits_missing_snapshot_before_clos
         context
             .source_authorities
             .iter()
-            .filter(|authority| authority.slug == current_slug)
+            .filter(|authority| authority.identity.market.slug == current_slug)
             .count(),
         1
     );
@@ -7266,11 +7259,11 @@ async fn polymarket_outer_recovery_day_fence_advances_after_pre_e_select_sample(
         (&current, MarketRuntimeRole::Current),
         (&next, MarketRuntimeRole::Next),
     ] {
-        context
-            .register_source_authority(PolymarketMetadataReferenceRecord::from(
-                &polymarket_metadata_snapshot_row(market, role, &collector_identity).unwrap(),
-            ))
-            .unwrap();
+        let authority = discovery_source_authority_from_row(
+            &polymarket_metadata_snapshot_row(market, role, &collector_identity).unwrap(),
+        )
+        .unwrap();
+        context.register_source_authority(authority).unwrap();
     }
     context.actor_now_utc_ms = actor_now_utc_ms;
     context.actor_utc_now = Some(Arc::new(move || actor_now_utc_ms));
@@ -7489,10 +7482,11 @@ async fn polymarket_outer_recovery_advances_current_across_e_before_retry() {
         region: "local-test".to_owned(),
     };
     let mut context = PolymarketProcessingContext::new(discovery.clone());
-    let authority = PolymarketMetadataReferenceRecord::from(
+    let authority = discovery_source_authority_from_row(
         &polymarket_metadata_snapshot_row(&market, MarketRuntimeRole::Current, &collector_identity)
             .unwrap(),
-    );
+    )
+    .unwrap();
     context.register_source_authority(authority).unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -8921,7 +8915,7 @@ async fn switch_subscription_error_commits_candidate_or_new_next_authority() {
         candidate_context
             .source_authorities
             .iter()
-            .filter(|authority| authority.slug == current.slug)
+            .filter(|authority| authority.identity.market.slug == current.slug)
             .count(),
         1
     );
@@ -8954,7 +8948,7 @@ async fn switch_subscription_error_commits_candidate_or_new_next_authority() {
         next_context
             .source_authorities
             .iter()
-            .filter(|authority| authority.slug == next.slug)
+            .filter(|authority| authority.identity.market.slug == next.slug)
             .count(),
         1
     );
@@ -9135,7 +9129,7 @@ async fn initial_subscription_error_retries_snapshot_without_early_consume() {
         context
             .source_authorities
             .iter()
-            .filter(|authority| authority.slug == current_slug)
+            .filter(|authority| authority.identity.market.slug == current_slug)
             .count(),
         1
     );
@@ -9388,8 +9382,8 @@ async fn pending_only_rollover_terminal_before_ack_commits_snapshot_and_retains_
             .source_authorities
             .iter()
             .filter(|authority| {
-                authority.slug == fresh_current.slug
-                    && authority.fixed_identity_verified_at_utc == old_fixed_at_utc_ms
+                authority.identity.market.slug == fresh_current.slug
+                    && authority.identity.first_verified_at_utc_ms == old_fixed_at_utc_ms
             })
             .count(),
         1
@@ -9945,7 +9939,7 @@ async fn clob_current_and_prefetched_assets_survive_three_legacy_silence_cycles_
 #[tokio::test(flavor = "current_thread", start_paused = true)]
 async fn polymarket_resolution_timeline_is_absolute_green() {
     assert_eq!(
-        typed_schema_version("polymarket_market_metadata"),
+        TypedParquetSegmentWriter::current_schema_version("polymarket_market_metadata").unwrap(),
         POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION
     );
     let real_windows = discovery_windows(1_783_392_404_599);
@@ -11466,16 +11460,16 @@ async fn polymarket_day_stop_drains_paused_fifo_into_exact_source_termination() 
         region: "local-test".to_owned(),
     };
     let mut context = PolymarketProcessingContext::new(discovery);
-    context
-        .register_source_authority(PolymarketMetadataReferenceRecord::from(
-            &polymarket_metadata_snapshot_row(
-                &current,
-                MarketRuntimeRole::Current,
-                &collector_identity,
-            )
-            .unwrap(),
-        ))
-        .unwrap();
+    let authority = discovery_source_authority_from_row(
+        &polymarket_metadata_snapshot_row(
+            &current,
+            MarketRuntimeRole::Current,
+            &collector_identity,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    context.register_source_authority(authority).unwrap();
     context.actor_now_utc_ms = post_fence_utc_ms;
     context.actor_utc_now = Some(Arc::new(move || post_fence_utc_ms));
 
@@ -11984,7 +11978,7 @@ async fn polymarket_five_thousand_message_burst_traverses_the_composed_ingress_p
     install_active_raw_day_gate(&runtime_stats, dispatch_started_utc_ms).await;
     let mut writers = start_writer_workers(
         &dataset_root,
-        &test_runtime_provenance("polymarket-composed"),
+        &test_artifact_identity(),
         &manifest_tx,
         &runtime_stats,
     )

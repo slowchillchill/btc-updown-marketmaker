@@ -56,7 +56,7 @@ async fn failed_manifest_shutdown_aborts_a_blocked_owner_before_a_late_mutation(
                 .is_none()
         );
     }
-    for source_kind in &TRAINING_SOURCE_KINDS[..TRAINING_SOURCE_KINDS.len() - 1] {
+    for source_kind in &training_source_kinds()[..training_source_kinds().len() - 1] {
         assert!(
             owner
                 .record_writer_ack(close.clone(), (*source_kind).to_owned())
@@ -76,7 +76,7 @@ async fn failed_manifest_shutdown_aborts_a_blocked_owner_before_a_late_mutation(
     manifest_tx
         .send(ManifestCommand::WriterDayFinalized {
             close: close.clone(),
-            source_kind: TRAINING_SOURCE_KINDS[TRAINING_SOURCE_KINDS.len() - 1].to_owned(),
+            source_kind: training_source_kinds()[training_source_kinds().len() - 1].to_owned(),
             raw_day_gate,
         })
         .await
@@ -171,7 +171,7 @@ async fn post_spawn_failure_converges_all_owned_runtime_resources() {
     let runtime_stats = Arc::new(SourceQueueBackpressureStats::default());
     let (mut writers, releases) = start_writer_workers_inner(
         &dataset_root,
-        &test_runtime_provenance("post-spawn-convergence"),
+        &test_artifact_identity(),
         &manifest_tx,
         &runtime_stats,
         None,

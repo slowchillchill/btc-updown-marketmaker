@@ -6,7 +6,7 @@ use data_collect::runtime::{
     RESOURCE_HARD_THRESHOLD_EXIT_CODE, collector_exit_code, parse_args,
 };
 use data_collect::training_runtime::{
-    TRAINING_SOURCE_KINDS, is_training_runtime_source_gap_reason,
+    is_training_runtime_source_gap_reason, training_source_kinds,
 };
 use tempfile::tempdir;
 
@@ -119,10 +119,10 @@ fn startup_capacity_gate_exits_75_without_manifest_or_network_startup() {
 
 #[test]
 fn training_runtime_sources_match_typed_raw_source_kind_contract() {
-    assert!(TRAINING_SOURCE_KINDS.contains(&"binance_depth_snapshot"));
-    assert!(TRAINING_SOURCE_KINDS.contains(&"binance_depth_update"));
-    assert!(TRAINING_SOURCE_KINDS.contains(&"polymarket_market_metadata"));
-    assert!(!TRAINING_SOURCE_KINDS.contains(&"binance_depth"));
+    assert!(training_source_kinds().contains(&"binance_depth_snapshot"));
+    assert!(training_source_kinds().contains(&"binance_depth_update"));
+    assert!(training_source_kinds().contains(&"polymarket_market_metadata"));
+    assert!(!training_source_kinds().contains(&"binance_depth"));
 }
 
 #[test]

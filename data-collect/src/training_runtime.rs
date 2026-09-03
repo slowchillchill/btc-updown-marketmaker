@@ -56,6 +56,7 @@ use runtime_time::*;
 use source_ingress_state::*;
 use source_recovery::*;
 use source_task_supervision::*;
+pub use source_topology::training_source_kinds;
 use source_topology::*;
 use startup_coordinator::*;
 use startup_recovery::*;
@@ -117,7 +118,7 @@ use crate::binance_aggtrade::{
 };
 use crate::daily_manifest::{
     CollectionDayCoverageState, DailyFileRecoveryMetadata, DailyFinalizedFileDelta,
-    DailyManifestIdentity, SourceOperationalCounterDelta, activate_collection_day_coverage,
+    SourceOperationalCounterDelta, TrainingArtifactIdentity, activate_collection_day_coverage,
     add_manifest_operational_counters, close_day_manifest_with_collection_end,
     close_day_manifest_with_unclean_end, close_reconciled_day_manifest, day_has_finalized_parquet,
     load_day_manifest, manifest_collection_day_coverage, manifest_state,
@@ -142,18 +143,23 @@ use crate::market_discovery::{
     BtcUpdownDiscovery, BtcUpdownMarketCandidate, CandidateRejectReason, DiscoveredBtcUpdownMarket,
     DiscoverySelectionError, discovery_windows, select_btc_updown_markets,
 };
+use crate::polymarket_identity::{
+    PolymarketMarketIdentity, SourceAuthority, VerifiedPolymarketMarketIdentity,
+    same_identity_authority, same_market_identity,
+};
 #[cfg(test)]
 use crate::polymarket_market_metadata_layout::POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION;
 use crate::polymarket_market_metadata_layout::{
     ActiveUnavailableReason, ClosedTimeCheckFailureReason, MarketLifecycleState,
     MarketLifecycleTransition, MarketRuntimeRole, MarketRuntimeRoleTransition,
     POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION, PolymarketMarketMetadataRow,
-    PolymarketMarketMetadataV5Row, PolymarketMetadataOrigin, PolymarketMetadataReferenceRecord,
-    PolymarketMetadataRowKind, ResolutionEvidenceSource, ResolutionFollowupStatus,
-    ResolutionIntegrityErrorClass, ResolutionPollResult, ResolutionTransportErrorClass,
-    ResponseFieldsUnavailableReason, SourceEndpointUnavailableReason, SourceEvidenceChannel,
-    SourceEvidenceEventType, SourceEvidenceOrigin, TerminalClaimOwner,
-    TerminalPredicateFailureReason, validate_polymarket_metadata_local_references,
+    PolymarketMarketMetadataV5Row, PolymarketMetadataOrigin, PolymarketMetadataRowKind,
+    ResolutionEvidenceSource, ResolutionFollowupStatus, ResolutionIntegrityErrorClass,
+    ResolutionPollResult, ResolutionTransportErrorClass, ResponseFieldsUnavailableReason,
+    SourceEndpointUnavailableReason, SourceEvidenceChannel, SourceEvidenceEventType,
+    SourceEvidenceOrigin, TerminalClaimOwner, TerminalPredicateFailureReason,
+    source_authority_from_metadata_row, source_reference_from_metadata_row,
+    validate_polymarket_source_references,
 };
 #[cfg(test)]
 use crate::polymarket_orderbook_v3::PolymarketOrderbookV3Admission;
@@ -176,8 +182,7 @@ use crate::source_format::{
 #[cfg(test)]
 use crate::source_hourly_layout::BinanceAggTradeOrdering;
 use crate::source_hourly_layout::{
-    BINANCE_AGGTRADE_SCHEMA_VERSION, BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
-    BINANCE_DEPTH_UPDATE_SCHEMA_VERSION, BINANCE_DEPTH_VERDICT_APPLIED,
+    BINANCE_AGGTRADE_SCHEMA_VERSION, BINANCE_DEPTH_VERDICT_APPLIED,
     BINANCE_DEPTH_VERDICT_NOT_APPLIED_CONFIRMED_HOLE, BinanceAggTradeHourlyRow,
     BinanceDepthSnapshotHourlyRow, BinanceDepthUpdateHourlyRow, RtdsChainlinkBtcUsdHourlyRow,
 };
@@ -263,15 +268,6 @@ fn runtime_error_with_secondary(
     .into()
 }
 
-pub const TRAINING_SOURCE_KINDS: &[&str] = &[
-    "polymarket_market",
-    "polymarket_market_metadata",
-    "binance_depth_snapshot",
-    "binance_depth_update",
-    "binance_aggtrade",
-    "polymarket_rtds_chainlink_btc_usd",
-];
-
 enum IngressControl {
     FinalizeSourceHour {
         source_kind: String,
@@ -282,15 +278,6 @@ enum IngressControl {
         close: RawDayClose,
         reply: oneshot::Sender<std::result::Result<DayBarrierRelease, String>>,
     },
-}
-
-#[derive(Clone)]
-struct RuntimeProvenance {
-    code_version: String,
-    collector_binary_sha256: String,
-    source_config_digest: String,
-    collector_host_id: String,
-    collector_region: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -338,7 +325,6 @@ async fn run_training_runtime_with_sources_and_stop<S>(
 where
     S: Future<Output = ()> + Send + 'static,
 {
-    validate_mandatory_producer_source_mapping()?;
     fs::create_dir_all(&config.dataset_root)?;
     let dataset_root = config.dataset_root.canonicalize()?;
     let dataset_root_lock = Arc::new(lock_training_dataset_root(&dataset_root)?);
@@ -453,22 +439,15 @@ where
             .prepare_runtime_exit_with_cause(request.observed_utc_ms, request.cause.clone());
         let _ = runtime_exit_tx.send(request).await;
     }));
-    let provenance = RuntimeProvenance {
-        code_version: config.code_version.clone(),
+    let artifact_identity = TrainingArtifactIdentity {
+        git_commit: config.code_version.clone(),
         collector_binary_sha256: config.collector_binary_sha256.clone(),
         source_config_digest: config.source_config_digest.clone(),
         collector_host_id: config.collector_host_id.clone(),
         collector_region: config.collector_region.clone(),
     };
-    let daily_manifest_identity = DailyManifestIdentity {
-        build_commit: config.code_version.clone(),
-        collector_binary_sha256: config.collector_binary_sha256.clone(),
-        config_digest: config.source_config_digest.clone(),
-        collector_host_id: config.collector_host_id.clone(),
-        collector_region: config.collector_region.clone(),
-    };
     let recovery_root = dataset_root.clone();
-    let recovery_identity = daily_manifest_identity.clone();
+    let recovery_identity = artifact_identity.clone();
     let startup_recovery = tokio::task::spawn_blocking(move || {
         reconcile_stable_startup_recovery(&recovery_root, &recovery_identity, now_ms)
     })
@@ -494,7 +473,8 @@ where
     let (rollover_ready_tx, mut rollover_ready_rx) = mpsc::channel(1);
     let mut rollover_coordinator = RolloverCoordinatorState::new(ManifestActivationAckMode::Send);
     let (startup_ready_tx, startup_ready_rx) = mpsc::channel(STARTUP_READY_CHANNEL_CAPACITY);
-    let mut manifest_owner = ManifestOwnerState::new(dataset_root.clone(), daily_manifest_identity);
+    let mut manifest_owner =
+        ManifestOwnerState::new(dataset_root.clone(), artifact_identity.clone());
     manifest_owner.insert_reconciled_manifest(recovery_day.clone(), current_manifest)?;
     let manifest_owner_dataset_lease = Arc::clone(&dataset_root_lock);
     let mut manifest_owner_handle = tokio::spawn(async move {
@@ -503,7 +483,7 @@ where
     });
     let (mut writer_handles, writer_startup_releases) = match start_writer_workers_gated(
         &dataset_root,
-        &provenance,
+        &artifact_identity,
         &manifest_tx,
         &source_queue_backpressure,
         &startup_ready_tx,
@@ -1936,7 +1916,7 @@ mod tests {
 
         let mut writer_releases = Vec::new();
         let mut writer_receivers = Vec::new();
-        for source_kind in TRAINING_SOURCE_KINDS {
+        for source_kind in training_source_kinds() {
             let participant = StartupParticipant::writer(source_kind);
             ready_tx
                 .try_send(participant)
@@ -2067,7 +2047,7 @@ mod tests {
         let (ready_tx, ready_rx) = mpsc::channel(STARTUP_READY_CHANNEL_CAPACITY);
         let (mut writer_handles, writer_releases) = start_writer_workers_gated(
             &dataset_root,
-            &test_runtime_provenance("startup-pre-rename-manifest-failure"),
+            &test_artifact_identity(),
             &manifest_tx,
             &runtime_stats,
             &ready_tx,
@@ -2175,7 +2155,7 @@ mod tests {
         .await;
         assert!(writer_outcome.all_terminal, "{:?}", writer_outcome.errors);
         assert!(writer_outcome.outputs.is_empty());
-        for source_kind in TRAINING_SOURCE_KINDS {
+        for source_kind in training_source_kinds() {
             assert!(writer_outcome.errors.iter().any(|error| {
                 error.contains(source_kind)
                     && error.contains("startup activation gate closed before writer release")
@@ -2376,7 +2356,7 @@ mod tests {
                 .unwrap();
         }
         raw_day_gate.seal_prepared_rollover(&close).await.unwrap();
-        for source in TRAINING_SOURCE_KINDS {
+        for source in training_source_kinds() {
             owner
                 .record_writer_ack(close.clone(), (*source).to_owned())
                 .unwrap();
@@ -3373,7 +3353,7 @@ mod tests {
         assert_eq!(manifest["collection_day_coverage"]["state"], "ended_known");
         let expected = composed_expected_minimum_rows(mode);
         let counters = manifest["source_counters"].as_object().unwrap();
-        assert_eq!(counters.len(), TRAINING_SOURCE_KINDS.len());
+        assert_eq!(counters.len(), training_source_kinds().len());
         for (source, minimum_rows) in expected {
             let counter = &counters[source];
             let rows = counter["rows"].as_u64().unwrap();
@@ -4105,7 +4085,7 @@ mod tests {
         let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
         let mut writers = start_writer_workers(
             &dataset_root,
-            &test_runtime_provenance("four-source-production-load"),
+            &test_artifact_identity(),
             &manifest_tx,
             &runtime_stats,
         )
@@ -4506,7 +4486,7 @@ mod tests {
             "{:?}",
             writer_outcome.errors
         );
-        assert_eq!(writer_outcome.outputs.len(), TRAINING_SOURCE_KINDS.len());
+        assert_eq!(writer_outcome.outputs.len(), training_source_kinds().len());
 
         let expected_rows = BTreeMap::from([
             ("polymarket_market", u64::try_from(polymarket_rows).unwrap()),
@@ -4661,8 +4641,6 @@ mod tests {
             end_ts_s: 1_783_392_600,
             candidate_start_ts_s: 1_783_392_300,
             candidate_end_ts_s: 1_783_392_600,
-            active: true,
-            accepting_orders: true,
             tick_size: Some("0.01".to_owned()),
             min_size: Some("1".to_owned()),
             fee_schedule_raw: Some(r#"{"fee":"0"}"#.to_owned()),
@@ -4955,21 +4933,11 @@ mod tests {
         }
     }
 
-    fn test_runtime_provenance(_run_id: &str) -> RuntimeProvenance {
-        RuntimeProvenance {
-            code_version: "test-code-version".to_owned(),
+    fn test_artifact_identity() -> TrainingArtifactIdentity {
+        TrainingArtifactIdentity {
+            git_commit: "test-code-version".to_owned(),
             collector_binary_sha256: "test-binary-sha256".to_owned(),
             source_config_digest: "test-source-config-digest".to_owned(),
-            collector_host_id: "collector-test".to_owned(),
-            collector_region: "local-test".to_owned(),
-        }
-    }
-
-    fn test_daily_manifest_identity() -> DailyManifestIdentity {
-        DailyManifestIdentity {
-            build_commit: "test-code-version".to_owned(),
-            collector_binary_sha256: "test-binary-sha256".to_owned(),
-            config_digest: "test-source-config-digest".to_owned(),
             collector_host_id: "collector-test".to_owned(),
             collector_region: "local-test".to_owned(),
         }

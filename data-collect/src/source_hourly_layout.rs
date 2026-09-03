@@ -8,13 +8,13 @@ use crate::binance_aggtrade::{
     AggTradeIngestSource, BINANCE_AGGTRADE_INVALID_INPUT_MAX_BYTES,
     BinanceAggTradeIngressCoordinate, BinanceAggTradeOutput,
 };
-use crate::event::{EventEnvelope, HostClockSyncStatus, RawEvidence, SourceKind, SourceTimestamp};
+use crate::event::EventEnvelope;
 use crate::source_format::{
     BinanceAggTradeRaw, BinanceDepthLevel, BinanceDepthOrdering, BinanceDepthSnapshotRaw,
     BinanceDepthUpdateRaw, RtdsChainlinkBtcUsdRaw, plausible_unix_timestamp_ms,
 };
 use crate::sources::binance::{
-    BINANCE_DEPTH_STREAM, DepthUpdateAssessment, DepthUpdateVerdict, assess_depth_update,
+    BINANCE_DEPTH_STREAM, DepthUpdateAssessment, DepthUpdateVerdict, assess_depth_sequence,
 };
 
 pub const BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION: &str = "binance_depth_snapshot_v3";
@@ -317,7 +317,7 @@ impl BinanceDepthUpdateHourlyRow {
         if !raw.validate_contract().is_complete() {
             return Err("invalid_binance_depth_update_contract".to_owned());
         }
-        validate_canonical_depth_assessment(raw, assessment)?;
+        validate_canonical_depth_assessment(raw.first_update_id, raw.final_update_id, assessment)?;
         ordering.validate_contract()?;
         let stitch_verdict = assessment.verdict.as_str();
         let row = Self {
@@ -506,9 +506,7 @@ impl BinanceDepthUpdateHourlyRow {
             stitch_evidence: self.stitch_evidence.clone(),
             gap_reason: self.stitch_gap_reason.clone(),
         };
-        if self
-            .as_depth_update_raw()
-            .and_then(|raw| validate_canonical_depth_assessment(&raw, &claimed))
+        if validate_canonical_depth_assessment(self.first_update_id, self.final_update_id, &claimed)
             .is_err()
         {
             report
@@ -516,57 +514,19 @@ impl BinanceDepthUpdateHourlyRow {
                 .push("stitch_assessment_canonical".to_owned());
         }
     }
-
-    fn as_depth_update_raw(&self) -> Result<BinanceDepthUpdateRaw, String> {
-        let parse_levels = |value: &str| {
-            serde_json::from_str::<Vec<[String; 2]>>(value)
-                .map(|levels| {
-                    levels
-                        .into_iter()
-                        .map(|[price, quantity]| BinanceDepthLevel { price, quantity })
-                        .collect::<Vec<_>>()
-                })
-                .map_err(|error| format!("invalid_depth_levels_json:{error}"))
-        };
-        Ok(BinanceDepthUpdateRaw {
-            envelope: EventEnvelope {
-                source_kind: SourceKind::BinanceDepthUpdate,
-                source_event_type: self.event_type.clone(),
-                source_identifier: self.symbol.clone(),
-                source_timestamp: SourceTimestamp::Timestamp {
-                    value: self.event_time.to_string(),
-                },
-                recv_time_utc_ms: Some(self.timestamp_received),
-                collector_host_id: self.collector_host_id.clone(),
-                collector_region: self.collector_region.clone(),
-                source_endpoint: self.source_endpoint.clone(),
-                host_clock_sync_status: HostClockSyncStatus::Unavailable {
-                    reason: "typed_hourly_row_validation".to_owned(),
-                },
-                raw_evidence: RawEvidence::Json("{}".to_owned()),
-            },
-            event_type: self.event_type.clone(),
-            event_time_ms: self.event_time,
-            symbol: self.symbol.clone(),
-            stream_name: self.stream.clone(),
-            first_update_id: self.first_update_id,
-            final_update_id: self.final_update_id,
-            bids: parse_levels(&self.bids)?,
-            asks: parse_levels(&self.asks)?,
-            combined_stream: None,
-        })
-    }
 }
 
 fn validate_canonical_depth_assessment(
-    raw: &BinanceDepthUpdateRaw,
+    first_update_id: u64,
+    final_update_id: u64,
     assessment: &DepthUpdateAssessment,
 ) -> Result<(), String> {
     assessment.validate_contract()?;
-    let canonical = assess_depth_update(
+    let canonical = assess_depth_sequence(
         assessment.snapshot_last_update_id,
         assessment.local_u_before,
-        raw,
+        first_update_id,
+        final_update_id,
     )?;
     if canonical != *assessment {
         return Err("depth_update_assessment_not_canonical".to_owned());

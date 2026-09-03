@@ -138,6 +138,20 @@ pub fn assess_depth_update(
     if !update.validate_contract().is_complete() {
         return Err("invalid_depth_update_contract".to_owned());
     }
+    assess_depth_sequence(
+        snapshot_last_update_id,
+        local_u,
+        update.first_update_id,
+        update.final_update_id,
+    )
+}
+
+pub fn assess_depth_sequence(
+    snapshot_last_update_id: Option<u64>,
+    local_u: Option<u64>,
+    first_update_id: u64,
+    final_update_id: u64,
+) -> Result<DepthUpdateAssessment, String> {
     if snapshot_last_update_id.is_none() {
         if local_u.is_some() {
             return Err("local_u_without_snapshot".to_owned());
@@ -165,7 +179,7 @@ pub fn assess_depth_update(
         .checked_add(1)
         .ok_or_else(|| "depth_update_sequence_overflow".to_owned())?;
 
-    if update.final_update_id <= previous_u {
+    if final_update_id <= previous_u {
         return Ok(DepthUpdateAssessment {
             snapshot_last_update_id: Some(snapshot_last_update_id),
             local_u_before: local_u,
@@ -181,12 +195,12 @@ pub fn assess_depth_update(
     }
 
     if local_u.is_none() {
-        if update.first_update_id <= required && required <= update.final_update_id {
+        if first_update_id <= required && required <= final_update_id {
             return Ok(DepthUpdateAssessment {
                 snapshot_last_update_id: Some(snapshot_last_update_id),
                 local_u_before: local_u,
                 verdict: DepthUpdateVerdict::Applied,
-                local_u_after: Some(update.final_update_id),
+                local_u_after: Some(final_update_id),
                 stitch_evidence: Some("U <= lastUpdateId + 1 <= u".to_owned()),
                 gap_reason: None,
             });
@@ -201,7 +215,7 @@ pub fn assess_depth_update(
         });
     }
 
-    if update.first_update_id > required {
+    if first_update_id > required {
         return Ok(DepthUpdateAssessment {
             snapshot_last_update_id: Some(snapshot_last_update_id),
             local_u_before: local_u,
@@ -215,7 +229,7 @@ pub fn assess_depth_update(
         snapshot_last_update_id: Some(snapshot_last_update_id),
         local_u_before: local_u,
         verdict: DepthUpdateVerdict::Applied,
-        local_u_after: Some(update.final_update_id),
+        local_u_after: Some(final_update_id),
         stitch_evidence: Some("continuous_depth_update".to_owned()),
         gap_reason: None,
     })

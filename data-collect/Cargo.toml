@@ -8,10 +8,6 @@ name = "data_collect"
 path = "src/lib.rs"
 bench = false
 
-[[bench]]
-name = "websocket_smoke_probe"
-harness = false
-
 [dependencies]
 arrow-array = "59.0.0"
 arrow-schema = "59.0.0"
@@ -39,10 +35,6 @@ path = "src/bin/data_collect_paper_hot.rs"
 [[bin]]
 name = "data-collect-live-hot"
 path = "src/bin/data_collect_live_hot.rs"
-
-[[bench]]
-name = "market_discovery_probe"
-harness = false
 
 [[bin]]
 name = "real_source_alignment_probe"

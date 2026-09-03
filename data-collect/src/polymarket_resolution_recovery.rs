@@ -20,13 +20,18 @@ use time::OffsetDateTime;
 use crate::market_discovery::{
     MarketWindow, discovery_windows, validate_recovered_btc_updown_market_from_sdk_payload,
 };
+use crate::polymarket_identity::{
+    PolymarketMarketIdentity, SourceAuthority, SourceEvidenceLocator, SourceReference,
+    VerifiedPolymarketMarketIdentity, same_identity_authority,
+    source_reference_candidate_matches_authority,
+};
 use crate::polymarket_market_metadata_layout::{
     POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
     POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION,
     PolymarketMarketMetadataRow, PolymarketMarketMetadataV4Row, PolymarketMarketMetadataV5Row,
-    PolymarketMetadataReferenceRecord, ResolutionPollResult, SourceEvidenceOrigin,
+    PolymarketMetadataReferenceIntegrityError, ResolutionPollResult, SourceEvidenceOrigin,
     polymarket_market_metadata_v3_schema, polymarket_market_metadata_v4_schema,
-    polymarket_market_metadata_v5_schema, validate_polymarket_metadata_local_references,
+    polymarket_market_metadata_v5_schema, validate_polymarket_source_references,
 };
 use crate::polymarket_orderbook_v3::{
     POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION, polymarket_orderbook_v3_schema, same_outcome_label,
@@ -148,15 +153,17 @@ pub struct RecoveredPolymarketPending {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FixedIdentity {
-    slug: String,
-    condition_id: String,
-    clob_market_id: String,
-    asset_ids_json: String,
+    authority: VerifiedPolymarketMarketIdentity,
     up_asset_id: String,
     down_asset_id: String,
-    market_start_utc_ms: i64,
-    market_end_utc_ms: i64,
-    fixed_identity_verified_at_utc_ms: i64,
+}
+
+impl std::ops::Deref for FixedIdentity {
+    type Target = PolymarketMarketIdentity;
+
+    fn deref(&self) -> &Self::Target {
+        &self.authority.market
+    }
 }
 
 impl FixedIdentity {
@@ -195,15 +202,9 @@ impl FixedIdentity {
             .into());
         }
         Ok(Self {
-            slug: record.slug.clone(),
-            condition_id: record.condition_id.clone(),
-            clob_market_id: record.clob_market_id.clone(),
-            asset_ids_json: record.asset_ids_json.clone(),
+            authority: record.identity_authority(),
             up_asset_id: asset_ids[0].clone(),
             down_asset_id: asset_ids[1].clone(),
-            market_start_utc_ms: record.market_start_utc_ms,
-            market_end_utc_ms: record.market_end_utc_ms,
-            fixed_identity_verified_at_utc_ms: record.fixed_identity_verified_at_utc_ms,
         })
     }
 
@@ -222,7 +223,7 @@ impl FixedIdentity {
             down_asset_id: self.down_asset_id.clone(),
             market_start_utc_ms: self.market_start_utc_ms,
             market_end_utc_ms: self.market_end_utc_ms,
-            fixed_identity_verified_at_utc_ms: self.fixed_identity_verified_at_utc_ms,
+            fixed_identity_verified_at_utc_ms: self.authority.first_verified_at_utc_ms,
         }
     }
 }
@@ -339,51 +340,6 @@ impl FinalizedArtifactPosition {
     fn precedes(&self, other: &Self) -> bool {
         self.file_order < other.file_order
             || (self.file_order == other.file_order && self.file_row < other.file_row)
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct MetadataReferenceLookup {
-    slug: String,
-    condition_id: String,
-    clob_market_id: String,
-    asset_ids_json: String,
-    market_start_utc_ms: i64,
-    market_end_utc_ms: i64,
-    fixed_identity_verified_at_utc_ms: i64,
-    source_origin: String,
-    source_received_at_utc_ms: i64,
-}
-
-impl MetadataReferenceLookup {
-    fn from_local_reference(record: &MetadataRecord) -> Option<Self> {
-        if record.kind != "market_state_transition" || record.source_payload_json.is_some() {
-            return None;
-        }
-        Some(Self {
-            slug: record.slug.clone(),
-            condition_id: record.condition_id.clone(),
-            clob_market_id: record.clob_market_id.clone(),
-            asset_ids_json: record.asset_ids_json.clone(),
-            market_start_utc_ms: record.market_start_utc_ms,
-            market_end_utc_ms: record.market_end_utc_ms,
-            fixed_identity_verified_at_utc_ms: record.fixed_identity_verified_at_utc_ms,
-            source_origin: record.source_origin.clone()?,
-            source_received_at_utc_ms: record.source_received_at_utc_ms?,
-        })
-    }
-
-    fn matches_source_authority(&self, record: &MetadataRecord) -> bool {
-        record.source_payload_json.is_some()
-            && record.slug == self.slug
-            && record.condition_id == self.condition_id
-            && record.clob_market_id == self.clob_market_id
-            && record.asset_ids_json == self.asset_ids_json
-            && record.market_start_utc_ms == self.market_start_utc_ms
-            && record.market_end_utc_ms == self.market_end_utc_ms
-            && record.fixed_identity_verified_at_utc_ms == self.fixed_identity_verified_at_utc_ms
-            && record.source_origin.as_deref() == Some(self.source_origin.as_str())
-            && record.source_received_at_utc_ms == Some(self.source_received_at_utc_ms)
     }
 }
 
@@ -946,21 +902,50 @@ impl MetadataRecord {
         Ok(())
     }
 
-    fn reference_record(&self) -> PolymarketMetadataReferenceRecord {
-        PolymarketMetadataReferenceRecord {
-            metadata_row_kind: self.kind.clone(),
-            slug: self.slug.clone(),
-            condition_id: self.condition_id.clone(),
-            clob_market_id: self.clob_market_id.clone(),
-            asset_ids: self.asset_ids_json.clone(),
-            market_start_utc: self.market_start_utc_ms,
-            market_end_utc: self.market_end_utc_ms,
-            fixed_identity_verified_at_utc: self.fixed_identity_verified_at_utc_ms,
-            source_evidence_origin: self.source_origin.clone(),
-            source_evidence_received_at_utc: self.source_received_at_utc_ms,
-            source_evidence_raw_sha256: self.source_raw_sha256.clone(),
-            source_evidence_payload_present: self.source_payload_json.is_some(),
+    fn identity_authority(&self) -> VerifiedPolymarketMarketIdentity {
+        VerifiedPolymarketMarketIdentity {
+            market: PolymarketMarketIdentity {
+                slug: self.slug.clone(),
+                condition_id: self.condition_id.clone(),
+                clob_market_id: self.clob_market_id.clone(),
+                ordered_up_down_asset_ids_json: self.asset_ids_json.clone(),
+                market_start_utc_ms: self.market_start_utc_ms,
+                market_end_utc_ms: self.market_end_utc_ms,
+            },
+            first_verified_at_utc_ms: self.fixed_identity_verified_at_utc_ms,
         }
+    }
+
+    fn source_authority(&self) -> Option<SourceAuthority> {
+        self.source_payload_json.as_ref()?;
+        Some(SourceAuthority {
+            identity: self.identity_authority(),
+            origin: self.source_origin.clone()?,
+            evidence: SourceEvidenceLocator {
+                received_at_utc_ms: self.source_received_at_utc_ms?,
+                raw_sha256: self.source_raw_sha256.clone()?,
+            },
+        })
+    }
+
+    fn source_reference(
+        &self,
+    ) -> std::result::Result<Option<SourceReference>, PolymarketMetadataReferenceIntegrityError>
+    {
+        if self.kind != "market_state_transition" || self.source_payload_json.is_some() {
+            return Ok(None);
+        }
+        let missing = || PolymarketMetadataReferenceIntegrityError::Missing {
+            slug: self.slug.clone(),
+        };
+        Ok(Some(SourceReference {
+            identity: self.identity_authority(),
+            origin: self.source_origin.clone().ok_or_else(missing)?,
+            evidence: SourceEvidenceLocator {
+                received_at_utc_ms: self.source_received_at_utc_ms.ok_or_else(missing)?,
+                raw_sha256: self.source_raw_sha256.clone().ok_or_else(missing)?,
+            },
+        }))
     }
 
     fn is_current_authority(&self) -> bool {
@@ -1057,9 +1042,9 @@ pub fn restore_polymarket_resolution_recovery(
         });
         let identity = records[0].fixed_identity()?;
         if records.iter().any(|record| {
-            !record
-                .fixed_identity()
-                .is_ok_and(|candidate| candidate == identity)
+            !record.fixed_identity().is_ok_and(|candidate| {
+                same_identity_authority(&candidate.authority, &identity.authority)
+            })
         }) {
             return Err(invalid_data(format!(
                 "Polymarket restart fixed identity conflict:slug={slug}"
@@ -1080,15 +1065,20 @@ pub fn restore_polymarket_resolution_recovery(
     for authority in &reference_authorities {
         authority.validate_recovery_eligibility()?;
     }
-    validate_polymarket_metadata_local_references(
-        &grouped
-            .values()
-            .flatten()
-            .chain(reference_authorities.iter())
-            .map(MetadataRecord::reference_record)
-            .collect::<Vec<_>>(),
-    )
-    .map_err(|error| {
+    let reference_records = grouped
+        .values()
+        .flatten()
+        .chain(reference_authorities.iter())
+        .collect::<Vec<_>>();
+    let authorities = reference_records
+        .iter()
+        .filter_map(|record| record.source_authority())
+        .collect::<Vec<_>>();
+    let references = reference_records
+        .iter()
+        .filter_map(|record| record.source_reference().transpose())
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    validate_polymarket_source_references(&authorities, &references).map_err(|error| {
         invalid_data(format!(
             "Polymarket restart source reference integrity:{error}"
         ))
@@ -1189,7 +1179,7 @@ pub fn restore_polymarket_resolution_recovery(
             down_asset_id: identity.down_asset_id.clone(),
             market_start_utc_ms: identity.market_start_utc_ms,
             market_end_utc_ms: identity.market_end_utc_ms,
-            fixed_identity_verified_at_utc_ms: identity.fixed_identity_verified_at_utc_ms,
+            fixed_identity_verified_at_utc_ms: identity.authority.first_verified_at_utc_ms,
             discovery_source_received_at_utc_ms: authority
                 .source_received_at_utc_ms
                 .expect("durable authority has source receive"),
@@ -1562,15 +1552,14 @@ fn read_precise_metadata_reference_authorities(
     default_days: &BTreeSet<String>,
     grouped: &BTreeMap<String, Vec<MetadataRecord>>,
 ) -> Result<Vec<MetadataRecord>> {
-    let mut lookups_by_day = BTreeMap::<String, BTreeSet<MetadataReferenceLookup>>::new();
-    for lookup in grouped
-        .values()
-        .flatten()
-        .filter_map(MetadataReferenceLookup::from_local_reference)
-    {
-        let day = utc_day(lookup.source_received_at_utc_ms)?;
+    let mut lookups_by_day = BTreeMap::<String, BTreeSet<SourceReference>>::new();
+    for record in grouped.values().flatten() {
+        let Some(reference) = record.source_reference()? else {
+            continue;
+        };
+        let day = utc_day(reference.evidence.received_at_utc_ms)?;
         if !default_days.contains(&day) {
-            lookups_by_day.entry(day).or_default().insert(lookup);
+            lookups_by_day.entry(day).or_default().insert(reference);
         }
     }
 
@@ -1600,8 +1589,8 @@ fn read_precise_metadata_reference_authorities(
                     let source_received_at_utc_ms =
                         optional_timestamp(&batch, row, "source_evidence_received_at_utc")?;
                     if !lookups.iter().any(|lookup| {
-                        lookup.slug == slug
-                            && source_received_at_utc_ms == Some(lookup.source_received_at_utc_ms)
+                        lookup.identity.market.slug == slug
+                            && source_received_at_utc_ms == Some(lookup.evidence.received_at_utc_ms)
                     }) {
                         file_row = file_row.saturating_add(1);
                         continue;
@@ -1616,9 +1605,10 @@ fn read_precise_metadata_reference_authorities(
                         },
                         layout,
                     )?;
-                    if lookups
-                        .iter()
-                        .any(|lookup| lookup.matches_source_authority(&record))
+                    if let Some(authority) = record.source_authority()
+                        && lookups.iter().any(|reference| {
+                            source_reference_candidate_matches_authority(reference, &authority)
+                        })
                     {
                         records.push(record);
                     }

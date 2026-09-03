@@ -43,7 +43,7 @@ pub(super) struct WriterStartupGate {
 #[cfg(test)]
 pub(super) fn start_writer_workers(
     dataset_root: &Path,
-    provenance: &RuntimeProvenance,
+    provenance: &TrainingArtifactIdentity,
     manifest_tx: &mpsc::Sender<ManifestCommand>,
     runtime_stats: &Arc<SourceQueueBackpressureStats>,
 ) -> Result<BTreeMap<String, SourceWriterHandle>> {
@@ -64,7 +64,7 @@ pub(super) fn start_writer_workers(
 
 pub(super) fn start_writer_workers_gated(
     dataset_root: &Path,
-    provenance: &RuntimeProvenance,
+    provenance: &TrainingArtifactIdentity,
     manifest_tx: &mpsc::Sender<ManifestCommand>,
     runtime_stats: &Arc<SourceQueueBackpressureStats>,
     ready_tx: &mpsc::Sender<StartupParticipant>,
@@ -89,7 +89,7 @@ pub(super) fn start_writer_workers_gated(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn start_writer_workers_inner<F>(
     dataset_root: &Path,
-    provenance: &RuntimeProvenance,
+    provenance: &TrainingArtifactIdentity,
     manifest_tx: &mpsc::Sender<ManifestCommand>,
     runtime_stats: &Arc<SourceQueueBackpressureStats>,
     ready_tx: Option<&mpsc::Sender<StartupParticipant>>,
@@ -105,7 +105,7 @@ where
 {
     let mut handles = BTreeMap::new();
     let mut releases = Vec::new();
-    for (index, source_kind) in TRAINING_SOURCE_KINDS.iter().enumerate() {
+    for (index, source_kind) in training_source_kinds().iter().enumerate() {
         if let Err(error) = before_spawn(index) {
             converge_partial_writer_spawn(handles, releases, STARTUP_GATE_TIMEOUT);
             return Err(error.into());
@@ -121,7 +121,8 @@ where
         let manifest_tx = manifest_tx.clone();
         let source_kind_owned = (*source_kind).to_owned();
         let report_source_kind = source_kind_owned.clone();
-        let writer_schema_version = typed_schema_version(source_kind).to_owned();
+        let writer_schema_version =
+            TypedParquetSegmentWriter::current_schema_version(source_kind)?.to_owned();
         let worker_schema_version = writer_schema_version.clone();
         let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
         let writer_epoch = WriterEpochCell::default();
@@ -381,7 +382,7 @@ pub(super) fn poll_writer_completion(
 #[cfg(test)]
 pub(super) fn start_writer_workers_with_hung_result(
     dataset_root: &Path,
-    provenance: &RuntimeProvenance,
+    provenance: &TrainingArtifactIdentity,
     dataset_lease: Option<Arc<File>>,
 ) -> Result<BTreeMap<String, SourceWriterHandle>> {
     let _ = (dataset_root, provenance);
@@ -597,7 +598,7 @@ pub(super) async fn send_writer_day_finalize(
     close: &RawDayClose,
 ) -> Result<()> {
     for source_kind in producer_writer_sources(producer)? {
-        let writer = writers.get(*source_kind).ok_or_else(|| {
+        let writer = writers.get(source_kind).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 format!("writer missing for day barrier: {source_kind}"),
@@ -844,7 +845,7 @@ async fn stop_writer_workers_with_optional_close(
 ) -> WriterStopOutcome {
     let deadline = Instant::now() + budget;
     let mut errors = Vec::new();
-    let required = TRAINING_SOURCE_KINDS
+    let required = training_source_kinds()
         .iter()
         .map(|source| (*source).to_owned())
         .collect::<BTreeSet<_>>();
@@ -972,7 +973,7 @@ async fn stop_writer_workers_with_optional_close(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn source_writer_worker(
     dataset_root: PathBuf,
-    provenance: RuntimeProvenance,
+    provenance: TrainingArtifactIdentity,
     source_kind: String,
     rx: std::sync::mpsc::Receiver<WriterCommand>,
     queue_rows: Arc<AtomicU64>,
@@ -980,7 +981,8 @@ pub(super) fn source_writer_worker(
     runtime_stats: Arc<SourceQueueBackpressureStats>,
     manifest_tx: mpsc::Sender<ManifestCommand>,
 ) -> Result<SourceWriterOutput> {
-    let writer_schema_version = typed_schema_version(&source_kind).to_owned();
+    let writer_schema_version =
+        TypedParquetSegmentWriter::current_schema_version(&source_kind)?.to_owned();
     source_writer_worker_with_startup(
         dataset_root,
         provenance,
@@ -1000,7 +1002,7 @@ pub(super) fn source_writer_worker(
 #[allow(clippy::too_many_arguments)]
 pub(super) fn source_writer_worker_with_startup(
     dataset_root: PathBuf,
-    provenance: RuntimeProvenance,
+    provenance: TrainingArtifactIdentity,
     source_kind: String,
     writer_schema_version: String,
     rx: std::sync::mpsc::Receiver<WriterCommand>,
@@ -1052,7 +1054,9 @@ pub(super) fn source_writer_worker_with_startup(
             match command {
                 WriterCommand::Events(events) => {
                     queue_rows.fetch_sub(events.len() as u64, Ordering::Relaxed);
-                    if writer_schema_version != typed_schema_version(&source_kind) {
+                    if writer_schema_version
+                        != TypedParquetSegmentWriter::current_schema_version(&source_kind)?
+                    {
                         let drop_facts = events
                             .iter()
                             .map(|event| {
@@ -1257,10 +1261,9 @@ pub(super) fn source_writer_worker_with_startup(
                                     recv_time_utc_ms,
                                     None,
                                 )?;
-                                active = Some(ActiveSegment::new_with_schema_version(
+                                active = Some(ActiveSegment::new(
                                     naming,
                                     &source_kind,
-                                    &writer_schema_version,
                                     selected_hour_part,
                                 )?);
                             }
@@ -1530,7 +1533,7 @@ pub(super) fn source_writer_worker_with_startup(
 fn finalize_segment_with_drop_accounting(
     segment: ActiveSegment,
     rollover_reason: &str,
-    provenance: &RuntimeProvenance,
+    provenance: &TrainingArtifactIdentity,
     manifest_tx: &mpsc::Sender<ManifestCommand>,
     runtime_stats: &SourceQueueBackpressureStats,
 ) -> Result<TrainingFinalizedSegment> {
@@ -1607,7 +1610,7 @@ fn stop_accepting_and_record_queued_drops(
 pub(super) fn finalize_segment(
     mut segment: ActiveSegment,
     rollover_reason: &str,
-    provenance: &RuntimeProvenance,
+    provenance: &TrainingArtifactIdentity,
     manifest_tx: &mpsc::Sender<ManifestCommand>,
 ) -> Result<TrainingFinalizedSegment> {
     let source_kind = segment.source_kind.clone();
@@ -1630,7 +1633,7 @@ pub(super) fn finalize_segment(
         source_timestamp_start: manifest_context.source_ts_start.clone(),
         source_timestamp_end: manifest_context.source_ts_end.clone(),
         event_type_counts: manifest_context.event_type_counts.clone(),
-        facts: facts.clone(),
+        facts,
     };
     segment.writer.append_key_value_metadata(
         DAILY_FILE_RECOVERY_METADATA_KEY,
@@ -1652,20 +1655,10 @@ pub(super) fn finalize_segment(
     let bytes = fs::metadata(&published.final_path)?.len();
     let delta = DailyFinalizedFileDelta {
         utc_day: manifest_context.utc_day.clone(),
-        source_kind: source_kind.clone(),
-        utc_hour: manifest_context.utc_hour.clone(),
-        part: manifest_context.hour_part,
         final_path: published.final_path.clone(),
-        rows: published.row_count,
         bytes,
         sha256: published.sha256.clone(),
-        schema_version: published.schema_version.clone(),
-        first_recv_time_utc_ms: manifest_context.segment_start_recv_time_utc_ms,
-        last_recv_time_utc_ms: manifest_context.last_recv_time_utc_ms,
-        source_timestamp_start: manifest_context.source_ts_start.clone(),
-        source_timestamp_end: manifest_context.source_ts_end.clone(),
-        event_type_counts: manifest_context.event_type_counts.clone(),
-        facts,
+        recovery_metadata,
     };
     manifest_tx
         .blocking_send(ManifestCommand::Finalized(delta))
@@ -1775,7 +1768,7 @@ pub(super) fn segment_daily_facts(
     segment: &SegmentManifestContext,
     schema_version: &str,
     rollover_reason: &str,
-    provenance: &RuntimeProvenance,
+    provenance: &TrainingArtifactIdentity,
 ) -> Value {
     let sort_order = typed_sort_order(schema_version, &segment.source_kind);
     json!({
@@ -1804,7 +1797,7 @@ pub(super) fn segment_daily_facts(
         "source_gaps": segment.depth_source_gaps,
         "metadata_complete_rows": segment.metadata_complete_rows,
         "metadata_unavailable_rows": segment.metadata_unavailable_rows,
-        "code_version": provenance.code_version,
+        "code_version": provenance.git_commit,
         "collector_binary_sha256": provenance.collector_binary_sha256,
         "source_config_digest": provenance.source_config_digest,
         "collector_host_id": provenance.collector_host_id,
@@ -2085,25 +2078,7 @@ pub(super) struct ActiveSegment {
 
 impl ActiveSegment {
     pub(super) fn new(naming: HourlyPartition, source_kind: &str, hour_part: u32) -> Result<Self> {
-        Self::new_with_schema_version(
-            naming,
-            source_kind,
-            typed_schema_version(source_kind),
-            hour_part,
-        )
-    }
-
-    fn new_with_schema_version(
-        naming: HourlyPartition,
-        source_kind: &str,
-        schema_version: &str,
-        hour_part: u32,
-    ) -> Result<Self> {
-        let writer = TrainingSegmentWriter::create_with_schema_version(
-            &naming,
-            source_kind,
-            schema_version,
-        )?;
+        let writer = TrainingSegmentWriter::create_for_current_source(&naming, source_kind)?;
         Ok(Self {
             source_kind: source_kind.to_owned(),
             utc_day: naming.utc_day.clone(),
@@ -2358,16 +2333,11 @@ pub(super) enum TrainingSegmentWriter {
 }
 
 impl TrainingSegmentWriter {
-    fn create_with_schema_version(
-        naming: &HourlyPartition,
-        source_kind: &str,
-        schema_version: &str,
-    ) -> Result<Self> {
+    fn create_for_current_source(naming: &HourlyPartition, source_kind: &str) -> Result<Self> {
         Ok(Self::Typed(
-            TypedParquetSegmentWriter::create_for_typed_source(
+            TypedParquetSegmentWriter::create_for_current_source(
                 &naming.partition_path,
                 &naming.stem,
-                schema_version,
                 source_kind,
             )?,
         ))
@@ -2417,18 +2387,6 @@ impl TrainingSegmentWriter {
         match self {
             Self::Typed(writer) => writer.finalize(),
         }
-    }
-}
-
-pub(super) fn typed_schema_version(source_kind: &str) -> &'static str {
-    match source_kind {
-        "polymarket_market" => POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,
-        "polymarket_market_metadata" => POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION,
-        "binance_depth_snapshot" => BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
-        "binance_depth_update" => BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,
-        "binance_aggtrade" => BINANCE_AGGTRADE_SCHEMA_VERSION,
-        "polymarket_rtds_chainlink_btc_usd" => "polymarket_rtds_chainlink_btc_usd_v4",
-        _ => "unknown_typed_layout",
     }
 }
 

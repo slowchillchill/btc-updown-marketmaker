@@ -30,15 +30,14 @@
 | 30GB 每日 UTC 12:00 外部清理每轮只删除最早一个合格日期 | `IMPLEMENTED_TESTED_DEPLOYED_AND_ENABLED_FIRST_TRIGGER_PENDING` |
 | RTDS 300/60 秒替换、×2/±20%/300 秒退避、无独立尝试耗尽门 | `IMPLEMENTED_AND_TESTED` |
 | 市场判定迟到事件忽略、矛盾时失败即关闭、固定身份信息、重启与 UTC 日切换 | `IMPLEMENTED_AND_TESTED` |
-| 模拟盘和实盘的帧、schema 与一次性 Unix 套接字辅助函数 | `IMPLEMENTED_AND_COMPONENT_TESTED` |
+| 模拟盘和实盘的 v1 `source_status` 心跳帧与 Unix 套接字服务端 | `IMPLEMENTED_AND_COMPONENT_TESTED` |
 | 模拟盘和实盘二进制程序 → 回执 → 长运行心跳循环 | `IMPLEMENTED_NOT_END_TO_END_TESTED` |
 | 真实 UTC 日切换和完整健康 UTC 日运行证据 | `NOT_CLAIMED_AND_NOT_A_COMPLETION_GATE` |
 | 模拟盘和实盘真实外部数据源适配器 | `DEFERRED_UNTIL_MODEL_TRAIN_COMPLETE_AND_USER_RETURN_DECISION` |
 
-`hot_path_handoff_contract` 覆盖帧、schema 和一次性辅助函数
-`run_single_frame_unix_server_handoff`；当前测试没有直接调用实际
-`run_hot_collector` 或长运行 `run_heartbeat_handoff_server`，因此不得把组件测试写成
-完整热路径二进制程序接线的端到端通过。
+`hot_path_handoff_contract` 直接调用短时运行的 `run_heartbeat_handoff_server`，覆盖
+v1 `source_status` 心跳线格式、角色目录隔离和套接字清理；当前测试没有直接调用
+`run_hot_collector`，因此不得把组件测试写成完整热路径二进制程序接线的端到端通过。
 
 模拟盘和实盘真实适配器不属于 `model-train`。必须先完成 `model-train`（模型训练
 模块，不是 `data-collect-training-collector`）；之后仍只有在用户决定返回
@@ -48,8 +47,8 @@
 
 ```bash
 cargo fmt --all -- --check
-cargo check -p data-collect --locked --all-targets
-cargo clippy -p data-collect --locked --all-targets -- -D warnings
+cargo check --workspace --all-targets --locked --offline
+cargo clippy -p data-collect --all-targets --locked --offline -- -D warnings
 git diff --check
 ```
 
@@ -74,7 +73,7 @@ cargo test -p data-collect --locked \
   --test training_collector_runtime_contract \
   --test hourly_partition_contract \
   --test source_hourly_layout_contract \
-  --test market_discovery_probe_contract \
+  --test market_discovery_contract \
   --test binance_aggtrade_continuity_contract \
   --test polymarket_orderbook_v3_contract \
   --test polymarket_metadata_layout_contract \

@@ -1022,15 +1022,17 @@ pub(super) async fn admit_depth_update(
         )],
         _ => Vec::new(),
     };
-    if !send_event_with_reservation_outcome(
-        &context.sink,
-        context.run_started,
-        event,
-        None,
-        admission_gaps,
-    )
-    .await?
-    {
+    if matches!(
+        send_event_with_reservation_outcome(
+            &context.sink,
+            context.run_started,
+            event,
+            None,
+            admission_gaps,
+        )
+        .await?,
+        EventAdmissionOutcome::Cutoff
+    ) {
         return Ok(None);
     }
     Ok(Some(assessment))
@@ -1152,10 +1154,15 @@ async fn admit_depth_snapshot_and_drain(
     continuity: &mut DepthContinuityState,
     saw_business: &mut bool,
 ) -> Result<Option<String>> {
-    if !send_event_with_outcome(&context.sink, context.run_started, record.event).await? {
-        pending.discard_all();
-        *continuity = DepthContinuityState::AwaitingSnapshot;
-        return Ok(None);
+    match send_event_with_admission_outcome(&context.sink, context.run_started, record.event)
+        .await?
+    {
+        EventAdmissionOutcome::Admitted | EventAdmissionOutcome::Deferred => {}
+        EventAdmissionOutcome::Cutoff => {
+            pending.discard_all();
+            *continuity = DepthContinuityState::AwaitingSnapshot;
+            return Ok(None);
+        }
     }
     *continuity = DepthContinuityState::Ready {
         snapshot_last_update_id: record.snapshot_last_update_id,

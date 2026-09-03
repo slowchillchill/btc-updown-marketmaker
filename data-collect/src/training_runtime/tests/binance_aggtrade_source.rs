@@ -234,7 +234,7 @@ async fn assert_binance_reconnects_after(first_message: Option<Message>) {
         restore_binance_aggtrade_recovery(
             &dataset_root_path,
             &utc_day_string_from_ms(now_ms()).unwrap(),
-            &test_daily_manifest_identity(),
+            &test_artifact_identity(),
         )
         .unwrap(),
         BinanceWsSpec {
@@ -303,7 +303,7 @@ async fn binance_handshake_failure_recovers_without_allocating_a_connection_gene
         restore_binance_aggtrade_recovery(
             &dataset_root_path,
             &utc_day_string_from_ms(now_ms()).unwrap(),
-            &test_daily_manifest_identity(),
+            &test_artifact_identity(),
         )
         .unwrap(),
         BinanceWsSpec {
@@ -373,7 +373,7 @@ async fn binance_frame_inactivity_reconnects_with_stable_epoch_and_no_gap() {
         restore_binance_aggtrade_recovery(
             &dataset_root_path,
             &utc_day_string_from_ms(now_ms()).unwrap(),
-            &test_daily_manifest_identity(),
+            &test_artifact_identity(),
         )
         .unwrap(),
         BinanceWsSpec {
@@ -452,7 +452,7 @@ async fn binance_protocol_error_reconnects_in_process_without_gap() {
         restore_binance_aggtrade_recovery(
             &dataset_root_path,
             &utc_day_string_from_ms(now_ms()).unwrap(),
-            &test_daily_manifest_identity(),
+            &test_artifact_identity(),
         )
         .unwrap(),
         BinanceWsSpec {
@@ -532,7 +532,7 @@ async fn binance_one_hundred_reconnects_keep_one_source_loop_and_reach_generatio
         restore_binance_aggtrade_recovery(
             &dataset_root_path,
             &utc_day_string_from_ms(now_ms()).unwrap(),
-            &test_daily_manifest_identity(),
+            &test_artifact_identity(),
         )
         .unwrap(),
         BinanceWsSpec {
@@ -625,7 +625,7 @@ async fn binance_ping_keeps_socket_alive_during_business_silence() {
         restore_binance_aggtrade_recovery(
             &dataset_root_path,
             &utc_day_string_from_ms(now_ms()).unwrap(),
-            &test_daily_manifest_identity(),
+            &test_artifact_identity(),
         )
         .unwrap(),
         BinanceWsSpec {
@@ -708,7 +708,7 @@ async fn binance_aggtrade_id_jump_is_forwarded_immediately_without_reconnect_or_
         restore_binance_aggtrade_recovery(
             &dataset_root_path,
             &utc_day_string_from_ms(now_ms()).unwrap(),
-            &test_daily_manifest_identity(),
+            &test_artifact_identity(),
         )
         .unwrap(),
         BinanceWsSpec {
@@ -823,7 +823,7 @@ async fn binance_aggtrade_payload_conflict_preserves_both_facts_and_records_conf
         restore_binance_aggtrade_recovery(
             &dataset_root_path,
             &utc_day_string_from_ms(now_ms()).unwrap(),
-            &test_daily_manifest_identity(),
+            &test_artifact_identity(),
         )
         .unwrap(),
         BinanceWsSpec {
@@ -943,7 +943,7 @@ async fn binance_aggtrade_invalid_text_frames_are_preserved_and_same_socket_cont
         restore_binance_aggtrade_recovery(
             &dataset_root_path,
             &utc_day_string_from_ms(now_ms()).unwrap(),
-            &test_daily_manifest_identity(),
+            &test_artifact_identity(),
         )
         .unwrap(),
         BinanceWsSpec {
@@ -1101,7 +1101,7 @@ async fn binance_aggtrade_binary_is_exact_and_oversize_is_bounded_before_reconne
         restore_binance_aggtrade_recovery(
             &dataset_root_path,
             &utc_day_string_from_ms(now_ms()).unwrap(),
-            &test_daily_manifest_identity(),
+            &test_artifact_identity(),
         )
         .unwrap(),
         BinanceWsSpec {

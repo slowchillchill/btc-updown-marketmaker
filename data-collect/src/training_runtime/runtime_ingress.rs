@@ -9,7 +9,7 @@ pub(super) struct PendingIngressBatches {
 impl PendingIngressBatches {
     pub(super) fn for_training_source_kinds() -> Self {
         Self {
-            raw_events: TRAINING_SOURCE_KINDS
+            raw_events: training_source_kinds()
                 .iter()
                 .map(|source| {
                     (
@@ -166,7 +166,7 @@ pub(super) async fn process_ingress_event(
     let mut inflight_event = match inflight {
         SourceIngressPayload::RawEvent(event) => {
             if event.event.source_kind == "polymarket_market"
-                && typed_schema_version("polymarket_market")
+                && TypedParquetSegmentWriter::current_schema_version("polymarket_market")?
                     == POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION
             {
                 return Err(invalid_data(format!(
