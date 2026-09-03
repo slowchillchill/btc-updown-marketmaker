@@ -5,7 +5,9 @@ use contracts::ModelIntentV1;
 mod live_adapter;
 mod sim_adapter;
 
-pub use live_adapter::{LiveIntentCallContextV1, LiveIntentErrorV1, LiveIntentImmediateSuccessV1};
+pub use live_adapter::{
+    LiveAdapterV1, LiveIntentCallContextV1, LiveIntentErrorV1, LiveIntentImmediateSuccessV1,
+};
 pub use sim_adapter::{
     SimAdapterV1, SimIntentCallContextV1, SimIntentErrorV1, SimIntentImmediateSuccessV1,
 };
@@ -87,6 +89,21 @@ impl<B> IntentBridge<B> {
 impl<'execution> IntentBridge<SimAdapterV1<'execution>> {
     pub fn bind_sim(execution: &'execution mut sim_system::execution::SimExecution) -> Self {
         Self::new(SimAdapterV1::bind(execution))
+    }
+}
+
+impl<'live, S, K> IntentBridge<LiveAdapterV1<'live, S, K>>
+where
+    S: polymarket_client_sdk_v2::auth::Signer,
+    K: polymarket_client_sdk_v2::auth::Kind,
+{
+    pub const fn bind_live(
+        client: &'live polymarket_client_sdk_v2::clob::Client<
+            polymarket_client_sdk_v2::auth::state::Authenticated<K>,
+        >,
+        signer: &'live S,
+    ) -> Self {
+        Self::new(LiveAdapterV1::bind(client, signer))
     }
 }
 
