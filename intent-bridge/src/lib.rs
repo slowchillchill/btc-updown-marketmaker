@@ -6,7 +6,9 @@ mod live_adapter;
 mod sim_adapter;
 
 pub use live_adapter::{LiveIntentCallContextV1, LiveIntentErrorV1, LiveIntentImmediateSuccessV1};
-pub use sim_adapter::{SimIntentCallContextV1, SimIntentErrorV1, SimIntentImmediateSuccessV1};
+pub use sim_adapter::{
+    SimAdapterV1, SimIntentCallContextV1, SimIntentErrorV1, SimIntentImmediateSuccessV1,
+};
 
 mod private {
     use super::{BridgeBackendV1, Future, ModelIntentV1};
@@ -18,18 +20,22 @@ mod private {
     impl DispatchKey for BridgeDispatchKey {}
 
     pub trait Sealed {
+        type DispatchFuture<'a>: Future<
+                Output = Result<
+                    <Self as BridgeBackendV1>::ImmediateSuccess,
+                    <Self as BridgeBackendV1>::Error,
+                >,
+            > + 'a
+        where
+            Self: BridgeBackendV1 + 'a;
+
         fn dispatch<'a, K>(
             &'a mut self,
             context: <Self as BridgeBackendV1>::CallContext,
             intent: &'a ModelIntentV1,
-        ) -> impl Future<
-            Output = Result<
-                <Self as BridgeBackendV1>::ImmediateSuccess,
-                <Self as BridgeBackendV1>::Error,
-            >,
-        > + 'a
+        ) -> Self::DispatchFuture<'a>
         where
-            Self: BridgeBackendV1,
+            Self: BridgeBackendV1 + 'a,
             K: DispatchKey;
     }
 }
@@ -78,6 +84,12 @@ impl<B> IntentBridge<B> {
     }
 }
 
+impl<'execution> IntentBridge<SimAdapterV1<'execution>> {
+    pub fn bind_sim(execution: &'execution mut sim_system::execution::SimExecution) -> Self {
+        Self::new(SimAdapterV1::bind(execution))
+    }
+}
+
 impl<B: BridgeBackendV1> IntentBridge<B> {
     pub async fn execute(
         &mut self,
@@ -95,7 +107,7 @@ impl<B: BridgeBackendV1> IntentBridge<B> {
 
 #[cfg(test)]
 mod tests {
-    use std::future::{Future, ready};
+    use std::future::{Future, Ready, ready};
     use std::task::{Context, Poll, Waker};
 
     use contracts::{ConditionId, ModelIntentV1};
@@ -141,17 +153,15 @@ mod tests {
     }
 
     impl private::Sealed for ProbeBackend {
+        type DispatchFuture<'a> = Ready<Result<ProbeSuccess, ProbeError>>;
+
         fn dispatch<'a, K>(
             &'a mut self,
             context: <Self as BridgeBackendV1>::CallContext,
             intent: &'a ModelIntentV1,
-        ) -> impl Future<
-            Output = Result<
-                <Self as BridgeBackendV1>::ImmediateSuccess,
-                <Self as BridgeBackendV1>::Error,
-            >,
-        > + 'a
+        ) -> Self::DispatchFuture<'a>
         where
+            Self: 'a,
             K: private::DispatchKey,
         {
             self.calls += 1;

@@ -2588,6 +2588,7 @@ dependencies = [
  "contracts",
  "polymarket_client_sdk_v2",
  "sim-system",
+ "tempfile",
 ]
 
 [[package]]
