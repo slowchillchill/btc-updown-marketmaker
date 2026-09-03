@@ -89,11 +89,7 @@ impl ProbeConfig {
             run_id,
             artifact_dir,
             dataset_root,
-            duration_secs: env_u64_alias(
-                "PHASE0_REAL_SOURCE_DURATION_SECS",
-                "REAL_SOURCE_RUN_SECS",
-                DEFAULT_DURATION_SECS,
-            ),
+            duration_secs: env_u64("REAL_SOURCE_RUN_SECS", DEFAULT_DURATION_SECS),
             collector_region: std::env::var("COLLECTOR_REGION")
                 .ok()
                 .filter(|region| !region.trim().is_empty()),
@@ -222,7 +218,7 @@ fn resolve_run_identity(
             run_id.to_owned()
         }
         None => format!(
-            "phase0-real-source-{}-{}-{}",
+            "real-source-alignment-{}-{}-{}",
             now_ms(),
             std::process::id(),
             RUN_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed)
@@ -231,7 +227,7 @@ fn resolve_run_identity(
     let artifact_dir = match explicit_artifact_dir {
         Some(path) => path,
         None => match dataset_root {
-            Some(root) => root.join("phase0-validation").join(&run_id),
+            Some(root) => root.join("real-source-alignment-artifacts").join(&run_id),
             None => current_dir
                 .join("real-source-alignment-artifacts")
                 .join(&run_id),
@@ -297,10 +293,9 @@ fn write_json_create_new(path: &Path, payload: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn env_u64_alias(primary: &str, secondary: &str, default: u64) -> u64 {
-    std::env::var(primary)
+fn env_u64(name: &str, default: u64) -> u64 {
+    std::env::var(name)
         .ok()
-        .or_else(|| std::env::var(secondary).ok())
         .and_then(|value| value.parse().ok())
         .unwrap_or(default)
 }
@@ -362,6 +357,14 @@ mod tests {
 
         assert_ne!(first_run_id, second_run_id);
         assert_ne!(first_dir, second_dir);
+        assert!(first_run_id.starts_with("real-source-alignment-"));
+        assert_eq!(
+            first_dir
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str()),
+            Some("real-source-alignment-artifacts")
+        );
         assert_eq!(
             first_dir.file_name().and_then(|name| name.to_str()),
             Some(first_run_id.as_str())

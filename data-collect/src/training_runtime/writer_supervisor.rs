@@ -1070,7 +1070,7 @@ pub(super) fn source_writer_worker_with_startup(
                             &runtime_stats,
                         );
                         return Err(invalid_data(format!(
-                            "legacy raw writer command does not match frozen writer schema:source={source_kind}:schema={writer_schema_version}"
+                            "raw event writer command does not match frozen writer schema:source={source_kind}:schema={writer_schema_version}"
                         ))
                         .into());
                     }
@@ -2375,7 +2375,7 @@ impl TrainingSegmentWriter {
 
     pub(super) fn write_event(&mut self, event: &RawEvent) -> Result<u64> {
         match self {
-            Self::Typed(writer) => write_typed_live_event(writer, event),
+            Self::Typed(writer) => write_typed_event(writer, event),
         }
     }
 
@@ -2432,15 +2432,15 @@ pub(super) fn typed_schema_version(source_kind: &str) -> &'static str {
     }
 }
 
-fn write_typed_live_event(writer: &mut TypedParquetSegmentWriter, event: &RawEvent) -> Result<u64> {
+fn write_typed_event(writer: &mut TypedParquetSegmentWriter, event: &RawEvent) -> Result<u64> {
     let logical_bytes = u64::try_from(owned_event_bytes(event))
         .map_err(|_| invalid_data("typed event logical size does not fit in u64"))?;
     match event.source_kind.as_str() {
         "polymarket_market" => {
-            Err(invalid_data("legacy raw Polymarket event reached the activated v3 writer").into())
+            Err(invalid_data("raw Polymarket event reached the activated v3 writer").into())
         }
         "polymarket_market_metadata" => {
-            write_polymarket_metadata_v5_live_event(writer, event, logical_bytes)
+            write_polymarket_metadata_event(writer, event, logical_bytes)
         }
         "binance_depth_snapshot" => {
             let row = binance_depth_snapshot_row_from_event(event)?;
@@ -2464,7 +2464,7 @@ fn write_typed_live_event(writer: &mut TypedParquetSegmentWriter, event: &RawEve
         }
         other => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!("unsupported live typed source kind: {other}"),
+            format!("unsupported training typed source kind: {other}"),
         )
         .into()),
     }

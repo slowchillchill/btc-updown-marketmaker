@@ -95,7 +95,7 @@ async fn raw_day_gate_fences_boundary_events_until_normal_rollover_ack() {
         deferred["binance_aggtrade"]
             .iter()
             .flat_map(|batch| match batch {
-                DeferredIngressBatch::LegacyRaw(batch) => batch.events.iter(),
+                DeferredIngressBatch::RawEvent(batch) => batch.events.iter(),
                 DeferredIngressBatch::PolymarketOrderbookV3(_) => {
                     panic!("Binance producer cannot own a deferred Polymarket v3 event")
                 }
@@ -219,7 +219,7 @@ async fn controlled_rollover_cutoff_discards_pre_admission_staging_without_drop_
             .deferred_ingress_batches
             .lock()
             .expect("deferred raw-event mutex poisoned");
-        let DeferredIngressBatch::LegacyRaw(staged) = &deferred["binance_aggtrade"][0] else {
+        let DeferredIngressBatch::RawEvent(staged) = &deferred["binance_aggtrade"][0] else {
             panic!("Binance producer cannot own a deferred Polymarket v3 event");
         };
         let staged = &staged.events[0];

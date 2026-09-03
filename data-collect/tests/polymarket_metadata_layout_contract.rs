@@ -4,7 +4,7 @@ use data_collect::polymarket_market_metadata_layout::{
     ActiveUnavailableReason, ClosedTimeCheckFailureReason, MarketLifecycleState,
     MarketLifecycleTransition, MarketRuntimeRole, MarketRuntimeRoleTransition,
     POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION,
-    POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION, PolymarketMarketMetadataV3Row,
+    POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION, PolymarketMarketMetadataRow,
     PolymarketMarketMetadataV4Row, PolymarketMarketMetadataV5Row, PolymarketMetadataOrigin,
     PolymarketMetadataReferenceIntegrityError, PolymarketMetadataReferenceRecord,
     PolymarketMetadataRowKind, ResolutionEvidenceSource, ResolutionFollowupStatus,
@@ -98,8 +98,8 @@ fn sha256_hex(payload: &str) -> String {
 fn v3_base(
     metadata_row_kind: PolymarketMetadataRowKind,
     metadata_origin: PolymarketMetadataOrigin,
-) -> PolymarketMarketMetadataV3Row {
-    PolymarketMarketMetadataV3Row {
+) -> PolymarketMarketMetadataRow {
+    PolymarketMarketMetadataRow {
         metadata_row_kind,
         timestamp_received: E + 500_000,
         collector_admission_sequence: 1,
@@ -175,17 +175,17 @@ fn v3_base(
     }
 }
 
-fn set_source_endpoint(row: &mut PolymarketMarketMetadataV3Row, endpoint: &str) {
+fn set_source_endpoint(row: &mut PolymarketMarketMetadataRow, endpoint: &str) {
     row.source_endpoint = Some(endpoint.to_owned());
     row.source_endpoint_unavailable_reason = None;
 }
 
-fn set_payload(row: &mut PolymarketMarketMetadataV3Row, payload: &str) {
+fn set_payload(row: &mut PolymarketMarketMetadataRow, payload: &str) {
     row.source_evidence_payload_json = Some(payload.to_owned());
     row.source_evidence_raw_sha256 = Some(sha256_hex(payload));
 }
 
-fn metadata_snapshot_v3() -> PolymarketMarketMetadataV3Row {
+fn metadata_snapshot_v3() -> PolymarketMarketMetadataRow {
     let mut row = v3_base(
         PolymarketMetadataRowKind::MetadataSnapshot,
         PolymarketMetadataOrigin::GammaMarketsDiscovery,
@@ -212,7 +212,7 @@ fn metadata_snapshot_v3() -> PolymarketMarketMetadataV3Row {
     row
 }
 
-fn market_state_transition_v3() -> PolymarketMarketMetadataV3Row {
+fn market_state_transition_v3() -> PolymarketMarketMetadataRow {
     let mut row = v3_base(
         PolymarketMetadataRowKind::MarketStateTransition,
         PolymarketMetadataOrigin::LocalMarketStateTimer,
@@ -234,7 +234,7 @@ fn market_state_transition_v3() -> PolymarketMarketMetadataV3Row {
     row
 }
 
-fn decoded_gamma_attempt_v3() -> PolymarketMarketMetadataV3Row {
+fn decoded_gamma_attempt_v3() -> PolymarketMarketMetadataRow {
     let mut row = v3_base(
         PolymarketMetadataRowKind::ResolutionPollAttempt,
         PolymarketMetadataOrigin::GammaBySlug,
@@ -266,7 +266,7 @@ fn decoded_gamma_attempt_v3() -> PolymarketMarketMetadataV3Row {
     row
 }
 
-fn terminal_gamma_attempt_v3() -> PolymarketMarketMetadataV3Row {
+fn terminal_gamma_attempt_v3() -> PolymarketMarketMetadataRow {
     let mut row = decoded_gamma_attempt_v3();
     let payload = terminal_gamma_payload();
     set_payload(&mut row, &payload);
@@ -295,7 +295,7 @@ fn terminal_gamma_attempt_v3() -> PolymarketMarketMetadataV3Row {
     row
 }
 
-fn resolution_terminal_ws_v3() -> PolymarketMarketMetadataV3Row {
+fn resolution_terminal_ws_v3() -> PolymarketMarketMetadataRow {
     let mut row = v3_base(
         PolymarketMetadataRowKind::ResolutionTerminalWs,
         PolymarketMetadataOrigin::MarketResolvedWs,
@@ -332,7 +332,7 @@ fn resolution_terminal_ws_v3() -> PolymarketMarketMetadataV3Row {
     row
 }
 
-fn resolution_followup_summary_v3() -> PolymarketMarketMetadataV3Row {
+fn resolution_followup_summary_v3() -> PolymarketMarketMetadataRow {
     let mut row = v3_base(
         PolymarketMetadataRowKind::ResolutionFollowupSummary,
         PolymarketMetadataOrigin::LocalFollowupScheduler,
@@ -470,7 +470,7 @@ fn v3_internal_json_draft_excludes_and_cannot_override_collector_admission() {
 
     let external_sequence = 41;
     let external_time = row.collector_admission_time_utc_ms;
-    let restored = PolymarketMarketMetadataV3Row::from_draft_json_with_admission(
+    let restored = PolymarketMarketMetadataRow::from_draft_json_with_admission(
         &serde_json::to_string(&draft_value).unwrap(),
         external_sequence,
         external_time,
@@ -479,7 +479,7 @@ fn v3_internal_json_draft_excludes_and_cannot_override_collector_admission() {
     let mut expected = row;
     expected.collector_admission_sequence = external_sequence;
     assert_eq!(restored, expected);
-    assert!(restored.validate().is_complete());
+    assert!(restored.validate_v3().is_complete());
 }
 
 #[test]
@@ -619,7 +619,7 @@ fn v3_schema_has_the_frozen_fields_types_and_utc_units() {
 }
 
 #[test]
-fn v4_schema_is_the_exact_v3_prefix_plus_the_nullable_claimant_pair() {
+fn v4_schema_is_the_exact_common_plus_the_nullable_claimant_pair() {
     let v3 = polymarket_market_metadata_v3_schema();
     let v4 = polymarket_market_metadata_v4_schema();
 
@@ -686,7 +686,7 @@ fn v5_schema_is_exactly_v4_without_the_resolution_digest_alias() {
 #[test]
 fn v5_terminal_validation_keeps_the_source_payload_digest_as_the_integrity_owner() {
     let terminal = terminal_gamma_attempt_v3();
-    let v5 = PolymarketMarketMetadataV5Row::from_v3_prefix(terminal.clone(), None, None);
+    let v5 = PolymarketMarketMetadataV5Row::from_common(terminal.clone(), None, None);
     assert!(
         v5.validate().is_complete(),
         "{:?}",
@@ -696,7 +696,7 @@ fn v5_terminal_validation_keeps_the_source_payload_digest_as_the_integrity_owner
     let mut missing = terminal.clone();
     missing.source_evidence_raw_sha256 = None;
     assert!(
-        PolymarketMarketMetadataV5Row::from_v3_prefix(missing, None, None)
+        PolymarketMarketMetadataV5Row::from_common(missing, None, None)
             .validate()
             .violations
             .contains(&"source_evidence_raw_sha256:required".to_owned())
@@ -705,7 +705,7 @@ fn v5_terminal_validation_keeps_the_source_payload_digest_as_the_integrity_owner
     let mut mismatched = terminal;
     mismatched.source_evidence_raw_sha256 = Some("f".repeat(64));
     assert!(
-        PolymarketMarketMetadataV5Row::from_v3_prefix(mismatched, None, None)
+        PolymarketMarketMetadataV5Row::from_common(mismatched, None, None)
             .validate()
             .violations
             .contains(&"source_evidence_raw_sha256:payload_mismatch".to_owned())
@@ -714,31 +714,31 @@ fn v5_terminal_validation_keeps_the_source_payload_digest_as_the_integrity_owner
 
 #[test]
 fn v4_claimant_pair_is_required_only_for_the_ws_terminal_owner() {
-    let qualified = PolymarketMarketMetadataV4Row::from_v3_prefix(
+    let qualified = PolymarketMarketMetadataV4Row::from_common(
         resolution_terminal_ws_v3(),
         Some("source-epoch-1".to_owned()),
         Some(7),
     );
     assert!(qualified.validate().is_complete());
     assert_eq!(
-        qualified.v3_prefix.schema_version,
+        qualified.common.schema_version,
         POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION
     );
 
     let invalid_ws_claimants = [
-        PolymarketMarketMetadataV4Row::from_v3_prefix(resolution_terminal_ws_v3(), None, None),
-        PolymarketMarketMetadataV4Row::from_v3_prefix(
+        PolymarketMarketMetadataV4Row::from_common(resolution_terminal_ws_v3(), None, None),
+        PolymarketMarketMetadataV4Row::from_common(
             resolution_terminal_ws_v3(),
             Some(" ".to_owned()),
             Some(7),
         ),
-        PolymarketMarketMetadataV4Row::from_v3_prefix(
+        PolymarketMarketMetadataV4Row::from_common(
             resolution_terminal_ws_v3(),
             Some("source-epoch-1".to_owned()),
             Some(0),
         ),
-        PolymarketMarketMetadataV4Row::from_v3_prefix(resolution_terminal_ws_v3(), None, Some(7)),
-        PolymarketMarketMetadataV4Row::from_v3_prefix(
+        PolymarketMarketMetadataV4Row::from_common(resolution_terminal_ws_v3(), None, Some(7)),
+        PolymarketMarketMetadataV4Row::from_common(
             resolution_terminal_ws_v3(),
             Some("source-epoch-1".to_owned()),
             None,
@@ -759,13 +759,13 @@ fn v4_claimant_pair_is_required_only_for_the_ws_terminal_owner() {
         resolution_followup_summary_v3(),
     ];
     for row in non_ws_owner_rows {
-        let accepted = PolymarketMarketMetadataV4Row::from_v3_prefix(row.clone(), None, None);
+        let accepted = PolymarketMarketMetadataV4Row::from_common(row.clone(), None, None);
         assert!(
             accepted.validate().is_complete(),
             "{:?}",
             accepted.validate().violations
         );
-        let rejected = PolymarketMarketMetadataV4Row::from_v3_prefix(
+        let rejected = PolymarketMarketMetadataV4Row::from_common(
             row,
             Some("source-epoch-1".to_owned()),
             Some(7),
@@ -1085,7 +1085,7 @@ fn five_v3_row_kinds_pass_the_direct_required_null_contract() {
         ),
     ];
     for (name, row) in rows {
-        let validation = row.validate();
+        let validation = row.validate_v3();
         assert!(
             validation.is_complete(),
             "{name}: {:?}",
@@ -1292,13 +1292,13 @@ fn five_v5_row_kinds_round_trip_without_the_resolution_digest_alias() {
         .map(|(index, mut row)| {
             row.collector_admission_sequence = index as u64 + 1;
             if row.metadata_row_kind == PolymarketMetadataRowKind::ResolutionTerminalWs {
-                PolymarketMarketMetadataV5Row::from_v3_prefix(
+                PolymarketMarketMetadataV5Row::from_common(
                     row,
                     Some("source-epoch-1".to_owned()),
                     Some(41),
                 )
             } else {
-                PolymarketMarketMetadataV5Row::from_v3_prefix(row, None, None)
+                PolymarketMarketMetadataV5Row::from_common(row, None, None)
             }
         })
         .collect::<Vec<_>>();
@@ -1501,7 +1501,7 @@ fn v3_subtype_contracts_cover_transition_attempt_and_summary_variants() {
         ("post_terminal", post),
         ("no_valid_summary", no_valid_summary),
     ] {
-        let validation = row.validate();
+        let validation = row.validate_v3();
         assert!(
             validation.is_complete(),
             "{name}: {:?}",
@@ -1696,7 +1696,7 @@ fn v3_validator_rejects_required_null_ownership_and_causal_time_violations() {
             "resolution_followup_summary:applied_after_timestamp_received",
         ),
     ] {
-        let validation = row.validate();
+        let validation = row.validate_v3();
         assert!(
             validation
                 .violations
@@ -1708,7 +1708,7 @@ fn v3_validator_rejects_required_null_ownership_and_causal_time_violations() {
     }
 
     assert!(
-        later_snapshot.validate().is_complete(),
+        later_snapshot.validate_v3().is_complete(),
         "later snapshots retain the first fixed-identity time"
     );
 }
@@ -1719,7 +1719,7 @@ fn terminal_gamma_status_is_trimmed_ascii_case_insensitive_and_has_no_future_ske
     far_future_closed_time.closed_time_raw = Some("2026-07-08T02:50:00Z".to_owned());
     far_future_closed_time.closed_time_utc = Some(E + 86_400_000);
     assert!(
-        far_future_closed_time.validate().is_complete(),
+        far_future_closed_time.validate_v3().is_complete(),
         "RF-09 deliberately has no closedTime-to-receive future-skew bound"
     );
 
@@ -1727,7 +1727,7 @@ fn terminal_gamma_status_is_trimmed_ascii_case_insensitive_and_has_no_future_ske
     invalid_status.uma_resolution_status = Some("proposed".to_owned());
     assert!(
         invalid_status
-            .validate()
+            .validate_v3()
             .violations
             .contains(&"uma_resolution_status:terminal_gamma_attempt".to_owned())
     );

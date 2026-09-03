@@ -316,7 +316,7 @@ fn verify_target_market_identity<'a>(
     Ok(Some((expected, expected_assets)))
 }
 
-fn polymarket_v3_base_row(
+fn polymarket_metadata_base_row(
     identity: &PendingPolymarketIdentity,
     row_kind: PolymarketMetadataRowKind,
     origin: PolymarketMetadataOrigin,
@@ -324,8 +324,8 @@ fn polymarket_v3_base_row(
     lifecycle: MarketLifecycleState,
     runtime_role: MarketRuntimeRole,
     collector_identity: &CollectorIdentity,
-) -> Result<PolymarketMarketMetadataV3Row> {
-    Ok(PolymarketMarketMetadataV3Row {
+) -> Result<PolymarketMarketMetadataRow> {
+    Ok(PolymarketMarketMetadataRow {
         metadata_row_kind: row_kind,
         timestamp_received,
         collector_admission_sequence: 0,
@@ -333,7 +333,7 @@ fn polymarket_v3_base_row(
         metadata_origin: origin,
         collector_host_id: collector_identity.host_id.clone(),
         collector_region: collector_identity.region.clone(),
-        schema_version: POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION.to_owned(),
+        schema_version: POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION.to_owned(),
         slug: identity.slug.clone(),
         condition_id: identity.condition_id.clone(),
         clob_market_id: identity.clob_market_id.clone(),
@@ -408,7 +408,7 @@ pub(super) fn polymarket_metadata_snapshot_row(
     market: &DiscoveredBtcUpdownMarket,
     role: MarketRuntimeRole,
     collector_identity: &CollectorIdentity,
-) -> Result<PolymarketMarketMetadataV3Row> {
+) -> Result<PolymarketMarketMetadataRow> {
     let identity = PendingPolymarketIdentity::from_discovered(market)?;
     let received = market
         .metadata_received_utc_ms
@@ -442,7 +442,7 @@ pub(super) fn polymarket_metadata_snapshot_row(
             return Err(invalid_data("metadata snapshot role must be current or next").into());
         }
     };
-    let mut row = polymarket_v3_base_row(
+    let mut row = polymarket_metadata_base_row(
         &identity,
         PolymarketMetadataRowKind::MetadataSnapshot,
         PolymarketMetadataOrigin::GammaMarketsDiscovery,
@@ -490,7 +490,7 @@ pub(super) fn polymarket_market_state_transition_row(
     transition: MarketRuntimeRoleTransition,
     applied_at_utc_ms: i64,
     collector_identity: &CollectorIdentity,
-) -> Result<PolymarketMarketMetadataV3Row> {
+) -> Result<PolymarketMarketMetadataRow> {
     let (lifecycle_transition, scheduled_at, lifecycle, role, horizon, status) = match transition {
         MarketRuntimeRoleTransition::NextToCurrent => (
             Some(MarketLifecycleTransition::PrefetchedToActive),
@@ -516,7 +516,7 @@ pub(super) fn polymarket_market_state_transition_row(
             .into());
         }
     };
-    let mut row = polymarket_v3_base_row(
+    let mut row = polymarket_metadata_base_row(
         identity,
         PolymarketMetadataRowKind::MarketStateTransition,
         PolymarketMetadataOrigin::LocalMarketStateTimer,
@@ -546,7 +546,7 @@ pub(super) fn polymarket_candidate_to_active_row(
     market: &DiscoveredBtcUpdownMarket,
     applied_at_utc_ms: i64,
     collector_identity: &CollectorIdentity,
-) -> Result<PolymarketMarketMetadataV3Row> {
+) -> Result<PolymarketMarketMetadataRow> {
     let mut row =
         polymarket_metadata_snapshot_row(market, MarketRuntimeRole::Current, collector_identity)?;
     if applied_at_utc_ms < row.market_start_utc || applied_at_utc_ms >= row.market_end_utc {
@@ -578,11 +578,11 @@ pub(super) fn polymarket_resolution_attempt_row<N>(
     validation_now_utc_ms: &N,
     ws_claimed: bool,
     collector_identity: &CollectorIdentity,
-) -> Result<PolymarketMarketMetadataV3Row>
+) -> Result<PolymarketMarketMetadataRow>
 where
     N: Fn() -> i64 + Send + Sync,
 {
-    let mut row = polymarket_v3_base_row(
+    let mut row = polymarket_metadata_base_row(
         &pending.identity,
         PolymarketMetadataRowKind::ResolutionPollAttempt,
         PolymarketMetadataOrigin::GammaBySlug,
@@ -731,7 +731,7 @@ pub(super) fn polymarket_resolution_missed_row(
     ordinal: u8,
     observed_at_utc_ms: i64,
     collector_identity: &CollectorIdentity,
-) -> Result<PolymarketMarketMetadataV3Row> {
+) -> Result<PolymarketMarketMetadataRow> {
     if !(1..=POLYMARKET_RESOLUTION_ATTEMPT_COUNT).contains(&ordinal) {
         return Err(invalid_data(format!(
             "recovered Polymarket missed ordinal is out of range:slug={}:ordinal={ordinal}",
@@ -747,7 +747,7 @@ pub(super) fn polymarket_resolution_missed_row(
         ))
         .into());
     }
-    let mut row = polymarket_v3_base_row(
+    let mut row = polymarket_metadata_base_row(
         &pending.identity,
         PolymarketMetadataRowKind::ResolutionPollAttempt,
         PolymarketMetadataOrigin::LocalFollowupScheduler,
@@ -767,7 +767,7 @@ pub(super) fn polymarket_resolution_missed_row(
 }
 
 pub(super) fn complete_polymarket_terminal_transition(
-    row: &mut PolymarketMarketMetadataV3Row,
+    row: &mut PolymarketMarketMetadataRow,
     applied_at_utc_ms: i64,
 ) {
     row.market_lifecycle_state = MarketLifecycleState::Retired;
@@ -783,8 +783,8 @@ pub(super) fn polymarket_resolution_terminal_ws_row(
     evidence: &PolymarketWsTerminalEvidence,
     applied_at_utc_ms: i64,
     collector_identity: &CollectorIdentity,
-) -> Result<PolymarketMarketMetadataV3Row> {
-    let mut row = polymarket_v3_base_row(
+) -> Result<PolymarketMarketMetadataRow> {
+    let mut row = polymarket_metadata_base_row(
         &pending.identity,
         PolymarketMetadataRowKind::ResolutionTerminalWs,
         PolymarketMetadataOrigin::MarketResolvedWs,
@@ -820,8 +820,8 @@ pub(super) fn polymarket_resolution_followup_summary_row(
     pending: &PendingPolymarketResolution,
     applied_at_utc_ms: i64,
     collector_identity: &CollectorIdentity,
-) -> Result<PolymarketMarketMetadataV3Row> {
-    let mut row = polymarket_v3_base_row(
+) -> Result<PolymarketMarketMetadataRow> {
+    let mut row = polymarket_metadata_base_row(
         &pending.identity,
         PolymarketMetadataRowKind::ResolutionFollowupSummary,
         PolymarketMetadataOrigin::LocalFollowupScheduler,
@@ -846,13 +846,13 @@ pub(super) fn polymarket_resolution_followup_summary_row(
     Ok(row)
 }
 
-pub(super) fn polymarket_metadata_v5_raw_event(
+pub(super) fn polymarket_metadata_raw_event(
     row: PolymarketMarketMetadataV5Row,
 ) -> Result<RawEvent> {
-    let prefix = row.compatibility_prefix();
-    let event_type = prefix.metadata_row_kind.as_str();
-    let endpoint = prefix.source_endpoint.as_deref().unwrap_or_default();
-    let Value::Object(mut raw) = serde_json::to_value(prefix)? else {
+    let common = row.common();
+    let event_type = common.metadata_row_kind.as_str();
+    let endpoint = common.source_endpoint.as_deref().unwrap_or_default();
+    let Value::Object(mut raw) = serde_json::to_value(common)? else {
         return Err(invalid_data("Polymarket metadata v5 draft is not a JSON object").into());
     };
     raw.remove("resolution_evidence_raw_sha256");
@@ -867,19 +867,19 @@ pub(super) fn polymarket_metadata_v5_raw_event(
     Ok(raw_event_with_recv_time(
         "polymarket_market_metadata",
         event_type,
-        &prefix.slug,
+        &common.slug,
         None,
-        prefix.timestamp_received,
+        common.timestamp_received,
         endpoint,
         &CollectorIdentity {
-            host_id: prefix.collector_host_id.clone(),
-            region: prefix.collector_region.clone(),
+            host_id: common.collector_host_id.clone(),
+            region: common.collector_region.clone(),
         },
         Value::Object(raw),
     ))
 }
 
-pub(super) fn polymarket_metadata_v5_rows_from_event(
+pub(super) fn polymarket_metadata_rows_from_event(
     event: &RawEvent,
 ) -> Result<Vec<PolymarketMarketMetadataV5Row>> {
     let admission = event.collector_admission.as_ref().ok_or_else(|| {
@@ -905,28 +905,27 @@ pub(super) fn polymarket_metadata_v5_rows_from_event(
             .remove("ws_claimant_collector_admission_sequence")
             .unwrap_or(Value::Null),
     )?;
-    let prefix = serde_json::from_value::<PolymarketMarketMetadataV3Row>(raw)?;
-    if prefix.schema_version != POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION {
+    let common = serde_json::from_value::<PolymarketMarketMetadataRow>(raw)?;
+    if common.schema_version != POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION {
         return Err(invalid_data(format!(
             "Polymarket metadata raw event has wrong schema version:actual={}:expected={POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION}",
-            prefix.schema_version
+            common.schema_version
         ))
         .into());
     }
     let mut row =
-        PolymarketMarketMetadataV5Row::from_v3_prefix(prefix, claimant_epoch, claimant_sequence);
-    row.compatibility_prefix_mut().collector_admission_sequence = admission.sequence;
-    row.compatibility_prefix_mut()
-        .collector_admission_time_utc_ms = admission.time_utc_ms;
+        PolymarketMarketMetadataV5Row::from_common(common, claimant_epoch, claimant_sequence);
+    row.common_mut().collector_admission_sequence = admission.sequence;
+    row.common_mut().collector_admission_time_utc_ms = admission.time_utc_ms;
     Ok(vec![row])
 }
 
-pub(super) fn write_polymarket_metadata_v5_live_event(
+pub(super) fn write_polymarket_metadata_event(
     writer: &mut TypedParquetSegmentWriter,
     event: &RawEvent,
     logical_bytes: u64,
 ) -> Result<u64> {
-    let rows = polymarket_metadata_v5_rows_from_event(event)?;
+    let rows = polymarket_metadata_rows_from_event(event)?;
     let written = rows.len() as u64;
     require_at_most_one_typed_row(event, written)?;
     writer.write_polymarket_market_metadata_v5_rows_with_logical_bytes(&rows, logical_bytes)?;

@@ -38,7 +38,7 @@
 只有训练二进制程序当前连接真实外部源。模拟盘和实盘的真实适配器不属于
 `model-train`，继续保持延期。必须先完成 `model-train`（模型训练模块，不是
 `data-collect-training-collector`）；之后仍只有在用户决定返回 `data-collect` 时，
-才另立三件套开发。
+才创建新的 GitHub Issue，并由用户明确批准后开发。
 
 ## 2. SDK 与 schema
 
@@ -214,4 +214,4 @@ RTDS 有效新鲜消息（`fresh`）只接受正确主题、类型、交易标�
 不作已取得声明，但不再是完成门。模拟盘和实盘的真实外部数据源适配器尚未实现、
 不属于 `model-train`，并继续保持延期。必须先完成 `model-train`（模型训练模块，不是
 `data-collect-training-collector`）；之后仍只有在用户决定返回 `data-collect` 时，
-才另立三件套开发。
+才创建新的 GitHub Issue，并由用户明确批准后开发。

@@ -42,7 +42,7 @@
 
 模拟盘和实盘真实适配器不属于 `model-train`。必须先完成 `model-train`（模型训练
 模块，不是 `data-collect-training-collector`）；之后仍只有在用户决定返回
-`data-collect` 时，才另立三件套开发。
+`data-collect` 时，才创建新的 GitHub Issue，并由用户明确批准后开发。
 
 ## 2. 格式与静态检查
 

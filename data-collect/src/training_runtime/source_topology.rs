@@ -88,7 +88,7 @@ pub(super) fn validate_mandatory_producer_source_mapping() -> Result<()> {
     }
     if forward_sources != training_source_kinds {
         return Err(invalid_data(format!(
-            "producer mapping does not cover the exact training source set: mapped={forward_sources:?} live={training_source_kinds:?}"
+            "producer mapping does not cover the exact training source set: mapped={forward_sources:?} training={training_source_kinds:?}"
         ))
         .into());
     }

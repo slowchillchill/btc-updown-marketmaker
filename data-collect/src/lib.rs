@@ -24,4 +24,4 @@ pub mod training_runtime;
 pub mod writer;
 
 pub use manifest::SourceCoverage;
-pub use writer::{ParquetSegmentWriter, PublishedSegment, RawEvent, sha256_file};
+pub use writer::{PublishedSegment, RawEvent, sha256_file};
