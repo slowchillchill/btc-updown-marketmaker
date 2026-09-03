@@ -56,6 +56,6 @@ async fn ingress_rejects_an_event_whose_real_enqueue_permit_was_removed() {
     );
     assert_eq!(received_rows, 0);
     assert!(coverage.is_empty());
-    assert!(batches.legacy.is_empty());
+    assert!(batches.raw_events.is_empty());
     assert!(batches.polymarket_orderbook_v3.is_empty());
 }

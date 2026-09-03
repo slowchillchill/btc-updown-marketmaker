@@ -26,7 +26,7 @@ pub(super) async fn send_ingress_control(
         _source_recv_monotonic_ms: monotonic_ms(run_started),
         _reservation: None,
     };
-    let message = SourceIngressPayload::LegacyRaw(message);
+    let message = SourceIngressPayload::RawEvent(message);
     match sink.tx.try_send(message) {
         Ok(()) => Ok(()),
         Err(mpsc::error::TrySendError::Full(message)) => {

@@ -35,7 +35,7 @@ async fn all_producers_enqueue_crossed_startup_barrier_before_first_source_event
         };
         let source = async move {
             marker_tx
-                .send(SourceIngressPayload::LegacyRaw(InflightRawEvent::for_test(
+                .send(SourceIngressPayload::RawEvent(InflightRawEvent::for_test(
                     test_raw_event("binance_aggtrade", now_ms()),
                 )))
                 .await
@@ -52,7 +52,7 @@ async fn all_producers_enqueue_crossed_startup_barrier_before_first_source_event
             source,
         ));
 
-        let barrier = rx.recv().await.unwrap().into_legacy_raw();
+        let barrier = rx.recv().await.unwrap().into_raw();
         let Some(IngressControl::DayBarrier {
             producer: actual,
             reply,
@@ -82,7 +82,7 @@ async fn all_producers_enqueue_crossed_startup_barrier_before_first_source_event
     let (control_tx, _control_rx) = mpsc::channel(1);
     let source = async move {
         marker_tx
-            .send(SourceIngressPayload::LegacyRaw(InflightRawEvent::for_test(
+            .send(SourceIngressPayload::RawEvent(InflightRawEvent::for_test(
                 test_raw_event("binance_aggtrade", now_ms()),
             )))
             .await
@@ -96,7 +96,7 @@ async fn all_producers_enqueue_crossed_startup_barrier_before_first_source_event
         initial_boundary,
         source,
     ));
-    let barrier = rx.recv().await.unwrap().into_legacy_raw();
+    let barrier = rx.recv().await.unwrap().into_raw();
     let Some(IngressControl::DayBarrier {
         producer, reply, ..
     }) = barrier.control
@@ -123,7 +123,7 @@ async fn all_producers_enqueue_crossed_startup_barrier_before_first_source_event
     let (control_tx, _control_rx) = mpsc::channel(1);
     let source = async move {
         marker_tx
-            .send(SourceIngressPayload::LegacyRaw(InflightRawEvent::for_test(
+            .send(SourceIngressPayload::RawEvent(InflightRawEvent::for_test(
                 test_raw_event("binance_aggtrade", now_ms()),
             )))
             .await
@@ -137,7 +137,7 @@ async fn all_producers_enqueue_crossed_startup_barrier_before_first_source_event
         initial_boundary,
         source,
     ));
-    let barrier = rx.recv().await.unwrap().into_legacy_raw();
+    let barrier = rx.recv().await.unwrap().into_raw();
     let Some(IngressControl::DayBarrier {
         producer, reply, ..
     }) = barrier.control
@@ -164,7 +164,7 @@ async fn all_producers_enqueue_crossed_startup_barrier_before_first_source_event
     let (control_tx, _control_rx) = mpsc::channel(1);
     let source = async move {
         marker_tx
-            .send(SourceIngressPayload::LegacyRaw(InflightRawEvent::for_test(
+            .send(SourceIngressPayload::RawEvent(InflightRawEvent::for_test(
                 test_raw_event("binance_aggtrade", now_ms()),
             )))
             .await
@@ -179,7 +179,7 @@ async fn all_producers_enqueue_crossed_startup_barrier_before_first_source_event
         next_utc_hour_boundary_ms(now_ms()),
         source,
     ));
-    let barrier = rx.recv().await.unwrap().into_legacy_raw();
+    let barrier = rx.recv().await.unwrap().into_raw();
     let Some(IngressControl::DayBarrier {
         producer, reply, ..
     }) = barrier.control
@@ -366,7 +366,7 @@ async fn transport_recovery_crossing_utc_boundary_is_gap_neutral() {
         async { Ok(()) },
     ));
 
-    let message = rx.recv().await.unwrap().into_legacy_raw();
+    let message = rx.recv().await.unwrap().into_raw();
     let Some(IngressControl::DayBarrier { reply, .. }) = message.control else {
         panic!("expected RTDS day barrier");
     };

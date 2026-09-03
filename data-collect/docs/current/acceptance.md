@@ -42,7 +42,7 @@
 
 模拟盘和实盘真实适配器不属于 `model-train`。必须先完成 `model-train`（模型训练
 模块，不是 `data-collect-training-collector`）；之后仍只有在用户决定返回
-`data-collect` 时，才另立三件套开发。
+`data-collect` 时，才创建新的 GitHub Issue，并由用户明确批准后开发。
 
 ## 2. 格式与静态检查
 
@@ -76,7 +76,6 @@ cargo test -p data-collect --locked \
   --test source_hourly_layout_contract \
   --test market_discovery_probe_contract \
   --test binance_aggtrade_continuity_contract \
-  --test writer_publish_contract \
   --test polymarket_orderbook_v3_contract \
   --test polymarket_metadata_layout_contract \
   --test parquet_writer_contract \

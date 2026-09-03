@@ -23,7 +23,7 @@ use crate::market_discovery::{
 use crate::polymarket_market_metadata_layout::{
     POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
     POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION,
-    PolymarketMarketMetadataV3Row, PolymarketMarketMetadataV4Row, PolymarketMarketMetadataV5Row,
+    PolymarketMarketMetadataRow, PolymarketMarketMetadataV4Row, PolymarketMarketMetadataV5Row,
     PolymarketMetadataReferenceRecord, ResolutionPollResult, SourceEvidenceOrigin,
     polymarket_market_metadata_v3_schema, polymarket_market_metadata_v4_schema,
     polymarket_market_metadata_v5_schema, validate_polymarket_metadata_local_references,
@@ -438,7 +438,7 @@ fn finalized_metadata_v3_row_from_batch(
     batch: &RecordBatch,
     row: usize,
     layout: MetadataLayout,
-) -> Result<PolymarketMarketMetadataV3Row> {
+) -> Result<PolymarketMarketMetadataRow> {
     let admission_sequence = required_u64(batch, row, "collector_admission_sequence")?;
     let admission_time_utc_ms = required_timestamp(batch, row, "collector_admission_time_utc_ms")?;
     let schema = layout
@@ -461,7 +461,7 @@ fn finalized_metadata_v3_row_from_batch(
         object.insert("resolution_evidence_raw_sha256".to_owned(), Value::Null);
     }
     let draft = serde_json::to_string(&Value::Object(object))?;
-    PolymarketMarketMetadataV3Row::from_draft_json_with_admission(
+    PolymarketMarketMetadataRow::from_draft_json_with_admission(
         &draft,
         admission_sequence,
         admission_time_utc_ms,
@@ -515,7 +515,7 @@ fn metadata_v3_json_value(batch: &RecordBatch, row: usize, field: &Field) -> Res
 }
 
 fn validate_finalized_metadata_v3_payload_semantics(
-    row: &PolymarketMarketMetadataV3Row,
+    row: &PolymarketMarketMetadataRow,
 ) -> Result<()> {
     match (
         row.source_evidence_origin,
@@ -535,7 +535,7 @@ fn validate_finalized_metadata_v3_payload_semantics(
 }
 
 fn validate_finalized_ws_payload_platform_timestamp(
-    row: &PolymarketMarketMetadataV3Row,
+    row: &PolymarketMarketMetadataRow,
     payload: &str,
 ) -> Result<()> {
     let payload = serde_json::from_str::<Value>(payload).map_err(|error| {
@@ -585,7 +585,7 @@ fn validate_finalized_ws_payload_platform_timestamp(
 }
 
 fn validate_finalized_discovery_payload(
-    row: &PolymarketMarketMetadataV3Row,
+    row: &PolymarketMarketMetadataRow,
     payload: &str,
 ) -> Result<()> {
     let market = serde_json::from_str::<SdkGammaMarket>(payload).map_err(|error| {
@@ -638,7 +638,7 @@ fn validate_finalized_discovery_payload(
 }
 
 fn validate_finalized_gamma_attempt_payload(
-    row: &PolymarketMarketMetadataV3Row,
+    row: &PolymarketMarketMetadataRow,
     payload: &str,
 ) -> Result<()> {
     let market = serde_json::from_str::<SdkGammaMarket>(payload).map_err(|error| {
@@ -733,7 +733,7 @@ fn validate_finalized_gamma_attempt_payload(
 }
 
 fn validate_persisted_gamma_response_fields(
-    row: &PolymarketMarketMetadataV3Row,
+    row: &PolymarketMarketMetadataRow,
     market: &SdkGammaMarket,
 ) -> Result<()> {
     let outcomes_raw = market
@@ -777,10 +777,10 @@ impl MetadataRecord {
             ws_claimant_source_sequence_epoch_id,
             ws_claimant_collector_admission_sequence,
         ) = match layout {
-            MetadataLayout::V3 => (full_row.validate(), None, None),
+            MetadataLayout::V3 => (full_row.validate_v3(), None, None),
             MetadataLayout::V4 => {
                 let v4 = PolymarketMarketMetadataV4Row {
-                    v3_prefix: full_row.clone(),
+                    common: full_row.clone(),
                     ws_claimant_source_sequence_epoch_id: optional_string(
                         batch,
                         row,
@@ -807,7 +807,7 @@ impl MetadataRecord {
                     ))
                     .into());
                 }
-                let v5 = PolymarketMarketMetadataV5Row::from_v3_prefix(
+                let v5 = PolymarketMarketMetadataV5Row::from_common(
                     full_row.clone(),
                     optional_string(batch, row, "ws_claimant_source_sequence_epoch_id")?,
                     optional_u64(batch, row, "ws_claimant_collector_admission_sequence")?,
@@ -2569,7 +2569,7 @@ mod tests {
         value.map(fixture_enum)
     }
 
-    fn metadata_fixture_row(record: &MetadataRecord) -> PolymarketMarketMetadataV3Row {
+    fn metadata_fixture_row(record: &MetadataRecord) -> PolymarketMarketMetadataRow {
         let metadata_row_kind = fixture_enum(&record.kind);
         let metadata_origin = fixture_enum(&record.metadata_origin);
         let source_evidence_origin = fixture_optional_enum(record.source_origin.as_deref());
@@ -2649,7 +2649,7 @@ mod tests {
         let source_endpoint_unavailable_reason = source_endpoint
             .is_none()
             .then_some(SourceEndpointUnavailableReason::NotApplicableNoSourceEvidence);
-        let mut row = PolymarketMarketMetadataV3Row {
+        let mut row = PolymarketMarketMetadataRow {
             metadata_row_kind,
             timestamp_received: record.timestamp_received,
             collector_admission_sequence: record.admission_sequence,
@@ -2853,7 +2853,7 @@ mod tests {
         row
     }
 
-    fn write_metadata_v3_rows(path: &Path, rows: &[PolymarketMarketMetadataV3Row]) {
+    fn write_metadata_v3_rows(path: &Path, rows: &[PolymarketMarketMetadataRow]) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         let schema = polymarket_market_metadata_v3_schema();
         let batch = polymarket_market_metadata_v3_rows_to_batch(Arc::clone(&schema), rows).unwrap();
@@ -2877,13 +2877,13 @@ mod tests {
     }
 
     fn metadata_v4_from_v3_fixture(
-        row: PolymarketMarketMetadataV3Row,
+        row: PolymarketMarketMetadataRow,
         claimant: Option<(&str, u64)>,
     ) -> PolymarketMarketMetadataV4Row {
         let (claimant_epoch, claimant_sequence) = claimant
             .map(|(epoch, sequence)| (Some(epoch.to_owned()), Some(sequence)))
             .unwrap_or((None, None));
-        PolymarketMarketMetadataV4Row::from_v3_prefix(row, claimant_epoch, claimant_sequence)
+        PolymarketMarketMetadataV4Row::from_common(row, claimant_epoch, claimant_sequence)
     }
 
     fn write_metadata_v4_rows(path: &Path, rows: &[PolymarketMarketMetadataV4Row]) {
@@ -2910,13 +2910,13 @@ mod tests {
     }
 
     fn metadata_v5_from_v3_fixture(
-        row: PolymarketMarketMetadataV3Row,
+        row: PolymarketMarketMetadataRow,
         claimant: Option<(&str, u64)>,
     ) -> PolymarketMarketMetadataV5Row {
         let (claimant_epoch, claimant_sequence) = claimant
             .map(|(epoch, sequence)| (Some(epoch.to_owned()), Some(sequence)))
             .unwrap_or((None, None));
-        PolymarketMarketMetadataV5Row::from_v3_prefix(row, claimant_epoch, claimant_sequence)
+        PolymarketMarketMetadataV5Row::from_common(row, claimant_epoch, claimant_sequence)
     }
 
     fn write_metadata_v5_rows(path: &Path, rows: &[PolymarketMarketMetadataV5Row]) {
@@ -3456,8 +3456,7 @@ mod tests {
         let tmp = tempdir().unwrap();
         let recovery_time = E + 4 * 60_000;
         let mut row = metadata_v5_fixture_row(&base_record(1), None);
-        row.compatibility_prefix_mut().schema_version =
-            POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION.to_owned();
+        row.common_mut().schema_version = POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION.to_owned();
         write_metadata_v5_rows(
             &day_dir(tmp.path(), recovery_time, "polymarket_market_metadata")
                 .join("polymarket_market_metadata_02.parquet"),
@@ -4120,7 +4119,7 @@ mod tests {
         let payload = payload.to_string();
         row.source_evidence_payload_json = Some(payload.clone());
         row.source_evidence_raw_sha256 = Some(sha256_hex(payload.as_bytes()));
-        assert!(row.validate().is_complete());
+        assert!(row.validate_v3().is_complete());
         write_metadata_v4_rows(
             &day_dir(tmp.path(), recovery_time, "polymarket_market_metadata")
                 .join("polymarket_market_metadata_02.parquet"),
@@ -4154,7 +4153,7 @@ mod tests {
         terminal_row.source_evidence_payload_json = Some(payload);
         terminal_row.source_evidence_raw_sha256 = Some(digest.clone());
         terminal_row.resolution_evidence_raw_sha256 = Some(digest);
-        assert!(terminal_row.validate().is_complete());
+        assert!(terminal_row.validate_v3().is_complete());
         write_metadata_v4_rows(
             &day_dir(tmp.path(), recovery_time, "polymarket_market_metadata")
                 .join("polymarket_market_metadata_02.parquet"),
@@ -4181,7 +4180,7 @@ mod tests {
         let mut terminal_row = metadata_fixture_row(&ws_terminal(2, receive));
         terminal_row.ws_platform_timestamp_raw = Some((receive + 1).to_string());
         terminal_row.ws_platform_timestamp_utc = Some(receive + 1);
-        assert!(terminal_row.validate().is_complete());
+        assert!(terminal_row.validate_v3().is_complete());
         write_metadata_v4_rows(
             &day_dir(tmp.path(), recovery_time, "polymarket_market_metadata")
                 .join("polymarket_market_metadata_02.parquet"),

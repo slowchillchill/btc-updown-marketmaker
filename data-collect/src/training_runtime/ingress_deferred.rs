@@ -14,7 +14,7 @@ fn record_deferred_raw_batch_drop(sink: &SourceEventSink, events: &[InflightRawE
 
 fn record_deferred_ingress_batch_drop(sink: &SourceEventSink, batch: &DeferredIngressBatch) {
     match batch {
-        DeferredIngressBatch::LegacyRaw(batch) => {
+        DeferredIngressBatch::RawEvent(batch) => {
             record_deferred_raw_batch_drop(sink, &batch.events);
         }
         DeferredIngressBatch::PolymarketOrderbookV3(event) => {
@@ -66,7 +66,7 @@ pub(super) async fn flush_accepted_deferred_raw_events_for_stop(
     let mut accepted = VecDeque::new();
     for batch in batches {
         let is_accepted = match &batch {
-            DeferredIngressBatch::LegacyRaw(batch) => batch.accepted_ticket.is_some(),
+            DeferredIngressBatch::RawEvent(batch) => batch.accepted_ticket.is_some(),
             DeferredIngressBatch::PolymarketOrderbookV3(_) => true,
         };
         if is_accepted {
@@ -97,7 +97,7 @@ async fn flush_deferred_ingress_batches(
 ) -> Result<()> {
     while let Some(batch) = batches.pop_front() {
         match batch {
-            DeferredIngressBatch::LegacyRaw(batch) => {
+            DeferredIngressBatch::RawEvent(batch) => {
                 flush_deferred_raw_batch(sink, producer, close, batch, &batches).await?;
             }
             DeferredIngressBatch::PolymarketOrderbookV3(event) => {
@@ -314,7 +314,7 @@ async fn flush_deferred_raw_batch(
     for (permit, mut event) in permits.zip(events) {
         let gap_time_utc_ms = event.event.recv_time_utc_ms;
         let admission_gaps = std::mem::take(&mut event.admission_gaps);
-        permit.send(SourceIngressPayload::LegacyRaw(event));
+        permit.send(SourceIngressPayload::RawEvent(event));
         for gap in admission_gaps {
             record_gap_at(&sink.gaps, gap_time_utc_ms, gap);
         }

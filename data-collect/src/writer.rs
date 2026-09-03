@@ -3,25 +3,23 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Instant;
 
 use arrow_array::{
     ArrayRef, BooleanArray, Int64Array, RecordBatch, StringArray, TimestampMillisecondArray,
     UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
-use arrow_schema::{DataType, Field, Schema, TimeUnit};
+use arrow_schema::Schema;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::metadata::KeyValue;
 use parquet::file::properties::WriterProperties;
-use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
 #[cfg(test)]
 use crate::polymarket_market_metadata_layout::PolymarketMarketMetadataV4Row;
 use crate::polymarket_market_metadata_layout::{
     POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION,
-    POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION, PolymarketMarketMetadataV3Row,
+    POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION, PolymarketMarketMetadataRow,
     PolymarketMarketMetadataV5Row, polymarket_market_metadata_v5_schema,
 };
 use crate::polymarket_orderbook_v3::{
@@ -71,30 +69,6 @@ pub struct PublishedSegment {
     pub schema_version: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct FinalizeTiming {
-    pub finalize_close_us: u64,
-    pub running_to_digesting_rename_us: u64,
-    pub sha256_us: u64,
-    pub digesting_to_final_rename_us: u64,
-    pub atomic_rename_us: u64,
-    pub finalize_total_us: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct WriterWriteStats {
-    pub rows: u64,
-    pub estimated_event_bytes: u64,
-    pub write_events_us: u64,
-    pub row_group_memory_estimate_bytes: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InstrumentedPublishedSegment {
-    pub segment: PublishedSegment,
-    pub timing: FinalizeTiming,
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PolymarketOrderbookV3WriteSequenceState {
     last_by_epoch: HashMap<String, u64>,
@@ -129,182 +103,6 @@ impl PolymarketOrderbookV3WriteSequenceState {
     }
 }
 
-pub struct ParquetSegmentWriter {
-    running_path: PathBuf,
-    digesting_path: PathBuf,
-    final_path: PathBuf,
-    schema_version: String,
-    parquet_raw_source_kind: String,
-    schema: Arc<Schema>,
-    writer: Option<ArrowWriter<File>>,
-    row_count: u64,
-}
-
-impl ParquetSegmentWriter {
-    pub fn create(root: &Path, stem: &str, schema_version: &str) -> Result<Self> {
-        Self::create_for_source(root, stem, schema_version, "mixed")
-    }
-
-    pub fn create_for_source(
-        root: &Path,
-        stem: &str,
-        schema_version: &str,
-        parquet_raw_source_kind: &str,
-    ) -> Result<Self> {
-        validate_segment_stem(stem)?;
-        fs::create_dir_all(root)?;
-
-        let running_path = root.join(format!("{stem}-running.parquet"));
-        let digesting_path = root.join(format!("{stem}-digesting.parquet"));
-        let final_path = root.join(format!("{stem}.parquet"));
-        if final_path.exists() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("final parquet already exists: {}", final_path.display()),
-            )
-            .into());
-        }
-        if running_path.exists() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!("running parquet already exists: {}", running_path.display()),
-            )
-            .into());
-        }
-        if digesting_path.exists() {
-            return Err(io::Error::new(
-                io::ErrorKind::AlreadyExists,
-                format!(
-                    "digesting parquet already exists: {}",
-                    digesting_path.display()
-                ),
-            )
-            .into());
-        }
-
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&running_path)?;
-        let schema = raw_event_schema();
-        let properties = WriterProperties::builder()
-            .set_key_value_metadata(Some(vec![
-                KeyValue::new(
-                    "parquet_raw_layout_version".to_owned(),
-                    schema_version.to_owned(),
-                ),
-                KeyValue::new(
-                    "parquet_raw_source_kind".to_owned(),
-                    parquet_raw_source_kind.to_owned(),
-                ),
-                KeyValue::new(
-                    "data_collect_artifact_kind".to_owned(),
-                    "typed_raw_parquet".to_owned(),
-                ),
-            ]))
-            .build();
-        let writer = ArrowWriter::try_new(file, Arc::clone(&schema), Some(properties))?;
-
-        Ok(Self {
-            running_path,
-            digesting_path,
-            final_path,
-            schema_version: schema_version.to_owned(),
-            parquet_raw_source_kind: parquet_raw_source_kind.to_owned(),
-            schema,
-            writer: Some(writer),
-            row_count: 0,
-        })
-    }
-
-    pub fn running_path(&self) -> &Path {
-        &self.running_path
-    }
-
-    pub fn write_events(&mut self, events: &[RawEvent]) -> Result<()> {
-        self.write_events_with_stats(events).map(|_| ())
-    }
-
-    pub fn write_events_with_stats(&mut self, events: &[RawEvent]) -> Result<WriterWriteStats> {
-        if events.is_empty() {
-            return Ok(WriterWriteStats {
-                rows: 0,
-                estimated_event_bytes: 0,
-                write_events_us: 0,
-                row_group_memory_estimate_bytes: 0,
-            });
-        }
-
-        let write_started = Instant::now();
-        let estimated_event_bytes = events
-            .iter()
-            .map(|event| estimated_event_bytes(event, &self.parquet_raw_source_kind))
-            .sum();
-        let batch = events_to_batch(
-            Arc::clone(&self.schema),
-            events,
-            &self.parquet_raw_source_kind,
-        )?;
-        let writer = self
-            .writer
-            .as_mut()
-            .ok_or_else(|| io::Error::other("parquet segment already finalized"))?;
-        writer.write(&batch)?;
-        self.row_count += events.len() as u64;
-        let write_events_us = elapsed_us(write_started);
-        Ok(WriterWriteStats {
-            rows: events.len() as u64,
-            estimated_event_bytes,
-            write_events_us,
-            row_group_memory_estimate_bytes: estimated_event_bytes,
-        })
-    }
-
-    pub fn finalize(self) -> Result<PublishedSegment> {
-        Ok(self.finalize_with_timing()?.segment)
-    }
-
-    pub fn finalize_with_timing(mut self) -> Result<InstrumentedPublishedSegment> {
-        let finalize_started = Instant::now();
-        let writer = self
-            .writer
-            .take()
-            .ok_or_else(|| io::Error::other("parquet segment already finalized"))?;
-        let close_started = Instant::now();
-        writer.close()?;
-        let finalize_close_us = elapsed_us(close_started);
-
-        let first_rename_started = Instant::now();
-        fs::rename(&self.running_path, &self.digesting_path)?;
-        let running_to_digesting_rename_us = elapsed_us(first_rename_started);
-        let sha256_started = Instant::now();
-        let sha256 = sha256_file(&self.digesting_path)?;
-        let sha256_us = elapsed_us(sha256_started);
-        let final_rename_started = Instant::now();
-        fs::rename(&self.digesting_path, &self.final_path)?;
-        let digesting_to_final_rename_us = elapsed_us(final_rename_started);
-
-        let timing = FinalizeTiming {
-            finalize_close_us,
-            running_to_digesting_rename_us,
-            sha256_us,
-            digesting_to_final_rename_us,
-            atomic_rename_us: running_to_digesting_rename_us + digesting_to_final_rename_us,
-            finalize_total_us: elapsed_us(finalize_started),
-        };
-
-        Ok(InstrumentedPublishedSegment {
-            segment: PublishedSegment {
-                final_path: self.final_path,
-                row_count: self.row_count,
-                sha256,
-                schema_version: self.schema_version,
-            },
-            timing,
-        })
-    }
-}
-
 pub struct TypedParquetSegmentWriter {
     running_path: PathBuf,
     final_path: PathBuf,
@@ -326,73 +124,17 @@ impl TypedParquetSegmentWriter {
         schema_version: &str,
         source_kind: &str,
     ) -> Result<Self> {
-        let schema = match source_kind {
-            "polymarket_market" => polymarket_orderbook_schema_for_version(schema_version)?,
-            "polymarket_market_metadata" => match schema_version {
-                POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION => {
-                    polymarket_market_metadata_v5_schema()
-                }
-                _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!(
-                            "unsupported Polymarket metadata schema version for writer:schema_version={schema_version}"
-                        ),
-                    )
-                    .into());
-                }
-            },
-            "binance_depth_snapshot" => {
-                validate_current_depth_schema_version(
-                    source_kind,
-                    schema_version,
-                    BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
-                    BINANCE_DEPTH_SNAPSHOT_LEGACY_SCHEMA_VERSION,
-                )?;
-                binance_depth_snapshot_schema()
-            }
-            "binance_depth_update" => {
-                validate_current_depth_schema_version(
-                    source_kind,
-                    schema_version,
-                    BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,
-                    BINANCE_DEPTH_UPDATE_LEGACY_SCHEMA_VERSION,
-                )?;
-                binance_depth_update_schema()
-            }
-            "binance_aggtrade" => {
-                if schema_version != BINANCE_AGGTRADE_SCHEMA_VERSION {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!(
-                            "unsupported Binance aggTrade schema version for writer:schema_version={schema_version}:expected={BINANCE_AGGTRADE_SCHEMA_VERSION}"
-                        ),
-                    )
-                    .into());
-                }
-                binance_aggtrade_schema()
-            }
-            "polymarket_rtds_chainlink_btc_usd" => rtds_chainlink_btc_usd_schema(),
-            other => {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("unsupported typed source kind: {other}"),
-                )
-                .into());
-            }
-        };
-        Self::create_with_schema(root, stem, schema_version, source_kind, schema, 3)
+        Self::create(root, stem, schema_version, source_kind, 3)
     }
 
-    fn create_with_schema(
+    fn create(
         root: &Path,
         stem: &str,
         schema_version: &str,
         source_kind: &str,
-        schema: Arc<Schema>,
         zstd_level: i32,
     ) -> Result<Self> {
-        validate_typed_writer_schema(source_kind, schema_version, schema.as_ref())?;
+        let schema = typed_writer_schema(source_kind, schema_version)?;
         validate_segment_stem(stem)?;
         fs::create_dir_all(root)?;
 
@@ -507,7 +249,7 @@ impl TypedParquetSegmentWriter {
                 )
                 .into());
             }
-            let sequence = row.compatibility_prefix().collector_admission_sequence;
+            let sequence = row.common().collector_admission_sequence;
             if previous.is_some_and(|previous| sequence <= previous) {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -983,26 +725,20 @@ fn polymarket_orderbook_schema_for_version(schema_version: &str) -> Result<Arc<S
     }
 }
 
-fn validate_typed_writer_schema(
-    source_kind: &str,
-    schema_version: &str,
-    schema: &Schema,
-) -> Result<()> {
-    let expected = match source_kind {
-        "polymarket_market" => Some(polymarket_orderbook_schema_for_version(schema_version)?),
+fn typed_writer_schema(source_kind: &str, schema_version: &str) -> Result<Arc<Schema>> {
+    match source_kind {
+        "polymarket_market" => polymarket_orderbook_schema_for_version(schema_version),
         "polymarket_market_metadata" => match schema_version {
             POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION => {
-                Some(polymarket_market_metadata_v5_schema())
+                Ok(polymarket_market_metadata_v5_schema())
             }
-            _ => {
-                return Err(io::Error::new(
+            _ => Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     format!(
                         "unsupported Polymarket metadata schema version for writer:schema_version={schema_version}"
                     ),
                 )
-                .into());
-            }
+                .into()),
         },
         "binance_depth_snapshot" => {
             validate_current_depth_schema_version(
@@ -1011,7 +747,7 @@ fn validate_typed_writer_schema(
                 BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
                 BINANCE_DEPTH_SNAPSHOT_LEGACY_SCHEMA_VERSION,
             )?;
-            Some(binance_depth_snapshot_schema())
+            Ok(binance_depth_snapshot_schema())
         }
         "binance_depth_update" => {
             validate_current_depth_schema_version(
@@ -1020,23 +756,27 @@ fn validate_typed_writer_schema(
                 BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,
                 BINANCE_DEPTH_UPDATE_LEGACY_SCHEMA_VERSION,
             )?;
-            Some(binance_depth_update_schema())
+            Ok(binance_depth_update_schema())
         }
-        _ => None,
-    };
-    if expected
-        .as_deref()
-        .is_some_and(|expected| expected != schema)
-    {
-        return Err(io::Error::new(
+        "binance_aggtrade" => {
+            if schema_version != BINANCE_AGGTRADE_SCHEMA_VERSION {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "unsupported Binance aggTrade schema version for writer:schema_version={schema_version}:expected={BINANCE_AGGTRADE_SCHEMA_VERSION}"
+                    ),
+                )
+                .into());
+            }
+            Ok(binance_aggtrade_schema())
+        }
+        "polymarket_rtds_chainlink_btc_usd" => Ok(rtds_chainlink_btc_usd_schema()),
+        other => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            format!(
-                "typed writer schema mismatch:source_kind={source_kind}:schema_version={schema_version}"
-            ),
+            format!("unsupported typed source kind: {other}"),
         )
-        .into());
+        .into()),
     }
-    Ok(())
 }
 
 fn validate_depth_admission_sequence(previous: Option<u64>, sequence: u64) -> Result<()> {
@@ -1060,8 +800,8 @@ fn validate_depth_admission_sequence(previous: Option<u64>, sequence: u64) -> Re
     Ok(())
 }
 
-fn polymarket_market_metadata_v3_prefix_columns(
-    rows: &[&PolymarketMarketMetadataV3Row],
+fn polymarket_market_metadata_common_columns(
+    rows: &[&PolymarketMarketMetadataRow],
     include_legacy_resolution_digest: bool,
 ) -> Vec<ArrayRef> {
     let mut columns = vec![
@@ -1210,10 +950,10 @@ fn polymarket_market_metadata_v3_prefix_columns(
 #[cfg(test)]
 pub(crate) fn polymarket_market_metadata_v3_rows_to_batch(
     schema: Arc<Schema>,
-    rows: &[PolymarketMarketMetadataV3Row],
+    rows: &[PolymarketMarketMetadataRow],
 ) -> Result<RecordBatch> {
-    let prefix_rows = rows.iter().collect::<Vec<_>>();
-    let columns = polymarket_market_metadata_v3_prefix_columns(&prefix_rows, true);
+    let common_rows = rows.iter().collect::<Vec<_>>();
+    let columns = polymarket_market_metadata_common_columns(&common_rows, true);
     Ok(RecordBatch::try_new(schema, columns)?)
 }
 
@@ -1222,8 +962,8 @@ pub(crate) fn polymarket_market_metadata_v4_rows_to_batch(
     schema: Arc<Schema>,
     rows: &[PolymarketMarketMetadataV4Row],
 ) -> Result<RecordBatch> {
-    let prefix_rows = rows.iter().map(|row| &row.v3_prefix).collect::<Vec<_>>();
-    let mut columns = polymarket_market_metadata_v3_prefix_columns(&prefix_rows, true);
+    let common_rows = rows.iter().map(|row| &row.common).collect::<Vec<_>>();
+    let mut columns = polymarket_market_metadata_common_columns(&common_rows, true);
     columns
         .push(optional_strings(rows.iter().map(|row| {
             row.ws_claimant_source_sequence_epoch_id.as_deref()
@@ -1239,11 +979,11 @@ pub(crate) fn polymarket_market_metadata_v5_rows_to_batch(
     schema: Arc<Schema>,
     rows: &[PolymarketMarketMetadataV5Row],
 ) -> Result<RecordBatch> {
-    let prefix_rows = rows
+    let common_rows = rows
         .iter()
-        .map(PolymarketMarketMetadataV5Row::compatibility_prefix)
+        .map(PolymarketMarketMetadataV5Row::common)
         .collect::<Vec<_>>();
-    let mut columns = polymarket_market_metadata_v3_prefix_columns(&prefix_rows, false);
+    let mut columns = polymarket_market_metadata_common_columns(&common_rows, false);
     columns
         .push(optional_strings(rows.iter().map(|row| {
             row.ws_claimant_source_sequence_epoch_id.as_deref()
@@ -1336,10 +1076,10 @@ fn binance_aggtrade_rows_to_batch(
         optional_strings(rows.iter().map(|row| row.quantity.as_deref())),
         optional_uint64_values(rows.iter().map(|row| row.first_trade_id)),
         optional_uint64_values(rows.iter().map(|row| row.last_trade_id)),
-        optional_boolean_values(rows.iter().map(|row| row.buyer_is_maker)),
+        optional_bool_values(rows.iter().map(|row| row.buyer_is_maker)),
         optional_strings(rows.iter().map(|row| row.stream.as_deref())),
-        optional_boolean_values(rows.iter().map(|row| row.ws_ignore)),
-        optional_boolean_values(rows.iter().map(|row| row.rest_was_best_price_match)),
+        optional_bool_values(rows.iter().map(|row| row.ws_ignore)),
+        optional_bool_values(rows.iter().map(|row| row.rest_was_best_price_match)),
         string_values(
             rows.iter()
                 .map(|row| row.source_native_payload_json.as_str()),
@@ -1424,10 +1164,6 @@ fn optional_int64_values(values: impl Iterator<Item = Option<i64>>) -> ArrayRef 
     Arc::new(Int64Array::from_iter(values))
 }
 
-fn optional_boolean_values(values: impl Iterator<Item = Option<bool>>) -> ArrayRef {
-    Arc::new(BooleanArray::from_iter(values))
-}
-
 fn string_values<'a>(values: impl Iterator<Item = &'a str>) -> ArrayRef {
     Arc::new(StringArray::from_iter_values(values))
 }
@@ -1438,50 +1174,6 @@ fn optional_strings<'a>(values: impl Iterator<Item = Option<&'a str>>) -> ArrayR
 
 fn optional_bool_values(values: impl Iterator<Item = Option<bool>>) -> ArrayRef {
     Arc::new(BooleanArray::from_iter(values))
-}
-
-fn elapsed_us(started: Instant) -> u64 {
-    started.elapsed().as_micros() as u64
-}
-
-pub async fn write_segment_on_blocking_pool(
-    root: PathBuf,
-    stem: String,
-    schema_version: String,
-    event_chunks: Vec<Vec<RawEvent>>,
-) -> Result<PublishedSegment> {
-    tokio::task::spawn_blocking(move || {
-        let mut writer = ParquetSegmentWriter::create(&root, &stem, &schema_version)?;
-        for events in event_chunks {
-            writer.write_events(&events)?;
-        }
-        writer.finalize()
-    })
-    .await
-    .map_err(|error| io::Error::other(format!("writer blocking task failed: {error}")))?
-}
-
-pub async fn write_segment_on_blocking_pool_for_source(
-    root: PathBuf,
-    stem: String,
-    schema_version: String,
-    parquet_raw_source_kind: String,
-    event_chunks: Vec<Vec<RawEvent>>,
-) -> Result<PublishedSegment> {
-    tokio::task::spawn_blocking(move || {
-        let mut writer = ParquetSegmentWriter::create_for_source(
-            &root,
-            &stem,
-            &schema_version,
-            &parquet_raw_source_kind,
-        )?;
-        for events in event_chunks {
-            writer.write_events(&events)?;
-        }
-        writer.finalize()
-    })
-    .await
-    .map_err(|error| io::Error::other(format!("writer blocking task failed: {error}")))?
 }
 
 pub fn sha256_file(path: &Path) -> Result<String> {
@@ -1500,75 +1192,6 @@ pub fn sha256_file(path: &Path) -> Result<String> {
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn raw_event_schema() -> Arc<Schema> {
-    Arc::new(Schema::new(vec![
-        Field::new("source_kind", DataType::Utf8, false),
-        Field::new("source_event_type", DataType::Utf8, false),
-        Field::new("source_identifier", DataType::Utf8, false),
-        Field::new("source_ts", DataType::Utf8, true),
-        Field::new(
-            "recv_time_utc",
-            DataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
-            false,
-        ),
-        Field::new("collector_host_id", DataType::Utf8, false),
-        Field::new("collector_region", DataType::Utf8, false),
-        Field::new("source_endpoint", DataType::Utf8, false),
-        Field::new("raw_json", DataType::Utf8, false),
-        Field::new("parquet_raw_layout_version", DataType::UInt32, false),
-        Field::new("parquet_raw_source_kind", DataType::Utf8, false),
-    ]))
-}
-
-fn events_to_batch(
-    schema: Arc<Schema>,
-    events: &[RawEvent],
-    parquet_raw_source_kind: &str,
-) -> Result<RecordBatch> {
-    let columns: Vec<ArrayRef> = vec![
-        Arc::new(StringArray::from_iter_values(
-            events.iter().map(|event| event.source_kind.as_str()),
-        )),
-        Arc::new(StringArray::from_iter_values(
-            events.iter().map(|event| event.source_event_type.as_str()),
-        )),
-        Arc::new(StringArray::from_iter_values(
-            events.iter().map(|event| event.source_identifier.as_str()),
-        )),
-        Arc::new(StringArray::from_iter(
-            events.iter().map(|event| event.source_ts.as_deref()),
-        )),
-        Arc::new(
-            TimestampMillisecondArray::from_iter_values(
-                events.iter().map(|event| event.recv_time_utc_ms),
-            )
-            .with_timezone("UTC"),
-        ),
-        Arc::new(StringArray::from_iter_values(
-            events.iter().map(|event| event.collector_host_id.as_str()),
-        )),
-        Arc::new(StringArray::from_iter_values(
-            events.iter().map(|event| event.collector_region.as_str()),
-        )),
-        Arc::new(StringArray::from_iter_values(
-            events.iter().map(|event| event.source_endpoint.as_str()),
-        )),
-        Arc::new(StringArray::from_iter_values(
-            events.iter().map(|event| event.raw_json.as_str()),
-        )),
-        Arc::new(UInt32Array::from_iter_values(events.iter().map(|_| 1))),
-        Arc::new(StringArray::from_iter_values(events.iter().map(|event| {
-            if parquet_raw_source_kind == "mixed" {
-                event.source_kind.as_str()
-            } else {
-                parquet_raw_source_kind
-            }
-        }))),
-    ];
-
-    Ok(RecordBatch::try_new(schema, columns)?)
-}
-
 fn validate_segment_stem(stem: &str) -> Result<()> {
     if stem.trim().is_empty()
         || stem == "."
@@ -1583,30 +1206,6 @@ fn validate_segment_stem(stem: &str) -> Result<()> {
         .into());
     }
     Ok(())
-}
-
-fn estimated_event_bytes(event: &RawEvent, parquet_raw_source_kind: &str) -> u64 {
-    let parquet_raw_source_kind = if parquet_raw_source_kind == "mixed" {
-        event.source_kind.as_str()
-    } else {
-        parquet_raw_source_kind
-    };
-    [
-        event.source_kind.as_str(),
-        event.source_event_type.as_str(),
-        event.source_identifier.as_str(),
-        event.source_ts.as_deref().unwrap_or_default(),
-        event.collector_host_id.as_str(),
-        event.collector_region.as_str(),
-        event.source_endpoint.as_str(),
-        event.raw_json.as_str(),
-        parquet_raw_source_kind,
-    ]
-    .iter()
-    .map(|value| value.len() as u64)
-    .sum::<u64>()
-        + std::mem::size_of::<i64>() as u64
-        + std::mem::size_of::<u32>() as u64
 }
 
 #[cfg(test)]
@@ -1682,31 +1281,5 @@ mod tests {
             .write_polymarket_orderbook_v3_messages(&[message], &mut sequence_state)
             .unwrap();
         assert_eq!(retry_writer.finalize().unwrap().row_count, 1);
-    }
-
-    #[test]
-    fn depth_writer_internal_factory_cannot_bypass_version_or_schema_guards() {
-        let legacy = validate_typed_writer_schema(
-            "binance_depth_update",
-            BINANCE_DEPTH_UPDATE_LEGACY_SCHEMA_VERSION,
-            binance_depth_update_schema().as_ref(),
-        )
-        .unwrap_err();
-        assert!(legacy.to_string().contains("read-only legacy depth schema"));
-
-        let mismatched = validate_typed_writer_schema(
-            "binance_depth_update",
-            BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,
-            binance_depth_snapshot_schema().as_ref(),
-        )
-        .unwrap_err();
-        assert!(mismatched.to_string().contains("writer schema mismatch"));
-
-        validate_typed_writer_schema(
-            "binance_depth_update",
-            BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,
-            binance_depth_update_schema().as_ref(),
-        )
-        .unwrap();
     }
 }

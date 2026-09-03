@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::fs::File;
+use std::fs::{self, File};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -8,7 +8,6 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use base64::Engine as _;
-use data_collect::RawEvent;
 use data_collect::binance_aggtrade::{
     BINANCE_AGGTRADE_INVALID_INPUT_MAX_BYTES, BinanceAggTradeIngressCoordinate,
     BinanceAggTradeOutput, BinanceWsAggTrade,
@@ -24,6 +23,7 @@ use data_collect::polymarket_orderbook_v3::{
     PolymarketOrderbookV3Admission, PolymarketOrderbookV3Message, PolymarketOrderbookV3Projection,
     polymarket_orderbook_v3_messages_from_batch, polymarket_orderbook_v3_messages_to_batch,
 };
+use data_collect::sha256_file;
 use data_collect::source_hourly_layout::{
     BINANCE_AGGTRADE_CAPTURE_COMPLETE, BINANCE_AGGTRADE_SCHEMA_VERSION,
     BINANCE_DEPTH_SNAPSHOT_LEGACY_SCHEMA_VERSION, BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
@@ -32,31 +32,13 @@ use data_collect::source_hourly_layout::{
     BinanceAggTradeHourlyRow, BinanceAggTradeInvalidEvidence, BinanceAggTradeOrdering,
     BinanceDepthSnapshotHourlyRow, BinanceDepthUpdateHourlyRow,
 };
-use data_collect::writer::{
-    ParquetSegmentWriter, PolymarketOrderbookV3WriteSequenceState, TypedParquetSegmentWriter,
-    write_segment_on_blocking_pool_for_source,
-};
+use data_collect::writer::{PolymarketOrderbookV3WriteSequenceState, TypedParquetSegmentWriter};
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 use parquet::file::reader::{FileReader, SerializedFileReader};
 use polymarket_client_sdk_v2::clob::ws::WsMessage;
 use sha2::{Digest as _, Sha256};
 use tempfile::tempdir;
-
-fn synthetic_event(seq: u64) -> RawEvent {
-    RawEvent {
-        source_kind: "polymarket_market".to_owned(),
-        source_event_type: "book".to_owned(),
-        source_identifier: format!("asset-{seq}"),
-        source_ts: Some("1766789469958".to_owned()),
-        recv_time_utc_ms: 1_766_789_469_999 + seq as i64,
-        collector_admission: None,
-        collector_host_id: "collector-local".to_owned(),
-        collector_region: "local-dev".to_owned(),
-        source_endpoint: "synthetic://polymarket-market".to_owned(),
-        raw_json: format!(r#"{{"event_type":"book","asset_id":"asset-{seq}"}}"#),
-    }
-}
 
 fn depth_snapshot_row(
     depth_ingress_sequence: u64,
@@ -181,27 +163,38 @@ fn parquet_projection(
 }
 
 #[test]
-fn parquet_writer_schema_metadata_contract() {
+fn typed_writer_publishes_only_finalized_content_with_digest_and_metadata() {
     let tmp = tempdir().unwrap();
-    let first_event = synthetic_event(1);
-    assert!(serde_json::from_str::<serde_json::Value>(&first_event.raw_json).is_ok());
-    let mut writer = ParquetSegmentWriter::create_for_source(
+    let stem = "polymarket-market";
+    let running_path = tmp.path().join(format!("{stem}.parquet.running"));
+    let final_path = tmp.path().join(format!("{stem}.parquet"));
+    let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
         tmp.path(),
-        "polymarket-market",
-        "parquet_raw_layout_v1",
+        stem,
+        "polymarket_orderbook_v3",
         "polymarket_market",
     )
     .unwrap();
+    assert!(running_path.exists());
+    assert!(!final_path.exists());
 
-    let stats = writer
-        .write_events_with_stats(&[first_event, synthetic_event(2)])
+    let mut sequence_state = PolymarketOrderbookV3WriteSequenceState::default();
+    writer
+        .write_polymarket_orderbook_v3_messages(
+            &[polymarket_v3_book_message("source-epoch-a", 1)],
+            &mut sequence_state,
+        )
         .unwrap();
     let published = writer.finalize().unwrap();
 
-    assert_eq!(stats.rows, 2);
-    assert!(stats.estimated_event_bytes > 0);
-    assert!(stats.row_group_memory_estimate_bytes >= stats.estimated_event_bytes);
-    assert_eq!(published.row_count, 2);
+    assert!(!running_path.exists());
+    assert_eq!(published.final_path, final_path);
+    assert!(published.final_path.exists());
+    assert_eq!(published.row_count, 1);
+    assert_eq!(
+        published.sha256,
+        sha256_file(&published.final_path).unwrap()
+    );
 
     let reader = SerializedFileReader::new(File::open(&published.final_path).unwrap()).unwrap();
     let metadata = reader
@@ -218,7 +211,7 @@ fn parquet_writer_schema_metadata_contract() {
         metadata
             .get("parquet_raw_layout_version")
             .and_then(|value| value.as_deref()),
-        Some("parquet_raw_layout_v1")
+        Some("polymarket_orderbook_v3")
     );
     assert_eq!(
         metadata
@@ -235,13 +228,13 @@ fn parquet_writer_schema_metadata_contract() {
 }
 
 #[test]
-fn parquet_writer_rejects_path_traversal_segment_stem() {
+fn typed_writer_rejects_path_traversal_segment_stem() {
     let tmp = tempdir().unwrap();
 
-    let result = ParquetSegmentWriter::create_for_source(
+    let result = TypedParquetSegmentWriter::create_for_typed_source(
         tmp.path(),
         "../escape",
-        "parquet_raw_layout_v1",
+        "polymarket_orderbook_v3",
         "polymarket_market",
     );
     assert!(result.is_err(), "unsafe stem must be rejected");
@@ -252,29 +245,38 @@ fn parquet_writer_rejects_path_traversal_segment_stem() {
             .to_string()
             .contains("parquet segment stem is not a safe path component")
     );
-    assert!(!tmp.path().join("../escape-running.parquet").exists());
+    assert!(!tmp.path().join("../escape.parquet.running").exists());
 }
 
-#[tokio::test]
-async fn blocking_work_is_isolated_from_main_runtime() {
+#[test]
+fn typed_writer_refuses_to_overwrite_running_or_finalized_segments() {
     let tmp = tempdir().unwrap();
+    let running_path = tmp.path().join("existing-running.parquet.running");
+    fs::write(&running_path, b"partial evidence").unwrap();
 
-    let published = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        write_segment_on_blocking_pool_for_source(
-            tmp.path().to_path_buf(),
-            "polymarket-market".to_owned(),
-            "parquet_raw_layout_v1".to_owned(),
-            "polymarket_market".to_owned(),
-            vec![vec![synthetic_event(1), synthetic_event(2)]],
-        ),
+    let running_error = TypedParquetSegmentWriter::create_for_typed_source(
+        tmp.path(),
+        "existing-running",
+        "polymarket_orderbook_v3",
+        "polymarket_market",
     )
-    .await
-    .expect("blocking writer task should not stall runtime")
-    .unwrap();
+    .err()
+    .expect("existing running segment must be rejected");
+    assert!(running_error.to_string().contains("already exists"));
+    assert_eq!(fs::read(&running_path).unwrap(), b"partial evidence");
 
-    assert_eq!(published.row_count, 2);
-    assert!(published.final_path.exists());
+    let final_path = tmp.path().join("existing-final.parquet");
+    fs::write(&final_path, b"final evidence").unwrap();
+    let final_error = TypedParquetSegmentWriter::create_for_typed_source(
+        tmp.path(),
+        "existing-final",
+        "polymarket_orderbook_v3",
+        "polymarket_market",
+    )
+    .err()
+    .expect("existing finalized segment must be rejected");
+    assert!(final_error.to_string().contains("already exists"));
+    assert_eq!(fs::read(&final_path).unwrap(), b"final evidence");
 }
 
 #[test]

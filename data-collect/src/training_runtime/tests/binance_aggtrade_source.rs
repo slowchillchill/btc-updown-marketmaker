@@ -258,7 +258,7 @@ async fn assert_binance_reconnects_after(first_message: Option<Message>) {
         .await
         .expect("aggTrade should arrive after reconnect")
         .expect("source queue should stay open")
-        .into_legacy_event();
+        .into_event();
 
     assert_eq!(event.source_event_type, "aggTrade");
     assert_eq!(event.source_ts.as_deref(), Some("1783392404599"));
@@ -333,7 +333,7 @@ async fn binance_handshake_failure_recovers_without_allocating_a_connection_gene
         .await
         .expect("the source must recover after the failed handshake")
         .expect("source queue must remain open")
-        .into_legacy_event();
+        .into_event();
     let envelope: Value = serde_json::from_str(&event.raw_json).unwrap();
     assert_eq!(envelope["connection_generation"], 1);
     assert!(gaps.lock().unwrap().all_reasons().is_empty());
@@ -405,7 +405,7 @@ async fn binance_frame_inactivity_reconnects_with_stable_epoch_and_no_gap() {
             .await
             .expect("both socket generations must deliver their trade")
             .expect("source queue must remain open")
-            .into_legacy_event();
+            .into_event();
         envelopes.push(serde_json::from_str::<Value>(&event.raw_json).unwrap());
     }
     assert_eq!(envelopes[0]["connection_generation"], 1);
@@ -482,7 +482,7 @@ async fn binance_protocol_error_reconnects_in_process_without_gap() {
         .await
         .expect("the source must recover after a WebSocket protocol error")
         .expect("source queue must remain open")
-        .into_legacy_event();
+        .into_event();
     let envelope: Value = serde_json::from_str(&event.raw_json).unwrap();
     assert_eq!(envelope["connection_generation"], 2);
     assert!(gaps.lock().unwrap().all_reasons().is_empty());
@@ -562,7 +562,7 @@ async fn binance_one_hundred_reconnects_keep_one_source_loop_and_reach_generatio
         .await
         .expect("the same source loop must survive one hundred reconnects")
         .expect("source queue must remain open")
-        .into_legacy_event();
+        .into_event();
     let envelope: Value = serde_json::from_str(&event.raw_json).unwrap();
     assert_eq!(envelope["connection_generation"], 101);
     assert_eq!(
@@ -655,7 +655,7 @@ async fn binance_ping_keeps_socket_alive_during_business_silence() {
         .await
         .expect("aggTrade should arrive on the original Ping-kept socket")
         .expect("source queue should stay open")
-        .into_legacy_event();
+        .into_event();
     assert_eq!(event.source_event_type, "aggTrade");
     assert_eq!(
         serde_json::from_str::<Value>(&event.raw_json).unwrap()["connection_generation"],
@@ -741,7 +741,7 @@ async fn binance_aggtrade_id_jump_is_forwarded_immediately_without_reconnect_or_
             .expect("all jumped-ID rows must be forwarded immediately")
             .expect("source queue must remain open");
         if inflight.control.is_none() {
-            events.push(inflight.into_legacy_event());
+            events.push(inflight.into_event());
         }
     }
     let envelopes = events
@@ -855,7 +855,7 @@ async fn binance_aggtrade_payload_conflict_preserves_both_facts_and_records_conf
             .await
             .expect("both conflicting payload facts must be forwarded")
             .expect("source queue must remain open")
-            .into_legacy_event();
+            .into_event();
         envelopes.push(serde_json::from_str::<Value>(&event.raw_json).unwrap());
     }
     assert!(envelopes.iter().all(|value| {
@@ -987,7 +987,7 @@ async fn binance_aggtrade_invalid_text_frames_are_preserved_and_same_socket_cont
             .expect("invalid and following valid frames must reach the source queue")
             .expect("source queue must remain open");
         if inflight.control.is_none() {
-            events.push(inflight.into_legacy_event());
+            events.push(inflight.into_event());
         }
     }
     assert_eq!(events[0].source_event_type, "aggTrade");
@@ -1134,7 +1134,7 @@ async fn binance_aggtrade_binary_is_exact_and_oversize_is_bounded_before_reconne
             .expect("binary, oversize and following trades must reach ingress")
             .expect("source queue must remain open");
         if inflight.control.is_none() {
-            events.push(inflight.into_legacy_event());
+            events.push(inflight.into_event());
         }
     }
     assert_eq!(
