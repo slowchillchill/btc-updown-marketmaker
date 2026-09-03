@@ -5,4 +5,5 @@ edition = "2024"
 publish = false
 
 [dependencies]
+rust_decimal = { version = "=1.42.1", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
