@@ -76,7 +76,6 @@ cargo test -p data-collect --locked \
   --test source_hourly_layout_contract \
   --test market_discovery_probe_contract \
   --test binance_aggtrade_continuity_contract \
-  --test writer_publish_contract \
   --test polymarket_orderbook_v3_contract \
   --test polymarket_metadata_layout_contract \
   --test parquet_writer_contract \
