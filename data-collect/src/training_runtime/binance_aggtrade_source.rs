@@ -148,7 +148,7 @@ pub(super) async fn run_binance_ws_source(
                         Ok(value) => value,
                         Err(error) => {
                             drop(text);
-                            emit_aggtrade_websocket_invalid(
+                            match emit_aggtrade_websocket_invalid(
                                 raw_bytes,
                                 recv_time_utc_ms,
                                 ingress_coordinate,
@@ -162,7 +162,12 @@ pub(super) async fn run_binance_ws_source(
                                 run_started,
                                 websocket_staging_reservation,
                             )
-                            .await?;
+                            .await?
+                            {
+                                EventAdmissionOutcome::Admitted
+                                | EventAdmissionOutcome::Deferred => {}
+                                EventAdmissionOutcome::Cutoff => continue,
+                            }
                             continue;
                         }
                     };
@@ -174,7 +179,7 @@ pub(super) async fn run_binance_ws_source(
                         }
                         _ => {
                             drop(value);
-                            emit_aggtrade_websocket_invalid(
+                            match emit_aggtrade_websocket_invalid(
                                 raw_bytes,
                                 recv_time_utc_ms,
                                 ingress_coordinate,
@@ -188,13 +193,18 @@ pub(super) async fn run_binance_ws_source(
                                 run_started,
                                 websocket_staging_reservation,
                             )
-                            .await?;
+                            .await?
+                            {
+                                EventAdmissionOutcome::Admitted
+                                | EventAdmissionOutcome::Deferred => {}
+                                EventAdmissionOutcome::Cutoff => continue,
+                            }
                             continue;
                         }
                     };
                     let Some(event_type) = payload.get("e").and_then(Value::as_str) else {
                         drop(value);
-                        emit_aggtrade_websocket_invalid(
+                        match emit_aggtrade_websocket_invalid(
                             raw_bytes,
                             recv_time_utc_ms,
                             ingress_coordinate,
@@ -208,7 +218,11 @@ pub(super) async fn run_binance_ws_source(
                             run_started,
                             websocket_staging_reservation,
                         )
-                        .await?;
+                        .await?
+                        {
+                            EventAdmissionOutcome::Admitted | EventAdmissionOutcome::Deferred => {}
+                            EventAdmissionOutcome::Cutoff => continue,
+                        }
                         continue;
                     };
                     let event_type = event_type.to_owned();
@@ -217,7 +231,7 @@ pub(super) async fn run_binance_ws_source(
                     }
                     if event_type != spec.default_event_type {
                         drop(value);
-                        emit_aggtrade_websocket_invalid(
+                        match emit_aggtrade_websocket_invalid(
                             raw_bytes,
                             recv_time_utc_ms,
                             ingress_coordinate,
@@ -231,7 +245,11 @@ pub(super) async fn run_binance_ws_source(
                             run_started,
                             websocket_staging_reservation,
                         )
-                        .await?;
+                        .await?
+                        {
+                            EventAdmissionOutcome::Admitted | EventAdmissionOutcome::Deferred => {}
+                            EventAdmissionOutcome::Cutoff => continue,
+                        }
                         continue;
                     }
                     let websocket = match BinanceWsAggTrade::from_wire(
@@ -243,7 +261,7 @@ pub(super) async fn run_binance_ws_source(
                         Ok(websocket) => websocket,
                         Err(error) => {
                             drop(value);
-                            emit_aggtrade_websocket_invalid(
+                            match emit_aggtrade_websocket_invalid(
                                 raw_bytes,
                                 recv_time_utc_ms,
                                 ingress_coordinate,
@@ -257,7 +275,12 @@ pub(super) async fn run_binance_ws_source(
                                 run_started,
                                 websocket_staging_reservation,
                             )
-                            .await?;
+                            .await?
+                            {
+                                EventAdmissionOutcome::Admitted
+                                | EventAdmissionOutcome::Deferred => {}
+                                EventAdmissionOutcome::Cutoff => continue,
+                            }
                             continue;
                         }
                     };
@@ -304,14 +327,18 @@ pub(super) async fn run_binance_ws_source(
                         .then(|| format!("binance_aggtrade_payload_conflict:id={native_id}"))
                         .into_iter()
                         .collect();
-                    send_event_with_reservation_outcome(
+                    match send_event_with_reservation_outcome(
                         &sink,
                         run_started,
                         event,
                         Some(reservation),
                         admission_gaps,
                     )
-                    .await?;
+                    .await?
+                    {
+                        EventAdmissionOutcome::Admitted | EventAdmissionOutcome::Deferred => {}
+                        EventAdmissionOutcome::Cutoff => continue,
+                    }
                 }
                 Ok(Some(Ok(Message::Binary(payload)))) => {
                     let recv_time_utc_ms = now_ms();
@@ -328,7 +355,7 @@ pub(super) async fn run_binance_ws_source(
                             BUFFER_ACQUIRE_TIMEOUT,
                         )
                         .await?;
-                    emit_aggtrade_websocket_invalid(
+                    match emit_aggtrade_websocket_invalid(
                         payload.to_vec(),
                         recv_time_utc_ms,
                         coordinate,
@@ -342,7 +369,11 @@ pub(super) async fn run_binance_ws_source(
                         run_started,
                         websocket_staging_reservation,
                     )
-                    .await?;
+                    .await?
+                    {
+                        EventAdmissionOutcome::Admitted | EventAdmissionOutcome::Deferred => {}
+                        EventAdmissionOutcome::Cutoff => continue,
+                    }
                 }
                 Ok(Some(Ok(Message::Ping(payload)))) => {
                     let write_timeout = deadline_remaining(deadline)
@@ -400,13 +431,20 @@ pub(super) async fn run_binance_ws_source(
                     drop(invalid);
                     let bytes = owned_event_bytes(&event);
                     oversize_reservation.shrink_to(1, bytes)?;
-                    send_event_with_reservation(
+                    match send_event_with_reservation_outcome(
                         &sink,
                         run_started,
                         event,
                         Some(oversize_reservation),
+                        Vec::new(),
                     )
-                    .await?;
+                    .await?
+                    {
+                        EventAdmissionOutcome::Admitted | EventAdmissionOutcome::Deferred => {}
+                        EventAdmissionOutcome::Cutoff => {
+                            break "oversize_application_message".to_owned();
+                        }
+                    }
                     break "oversize_application_message".to_owned();
                 }
                 Ok(Some(Err(error))) => break format!("error:{error}"),
@@ -696,7 +734,7 @@ pub(super) async fn emit_aggtrade_websocket_invalid(
     connection_generation: u64,
     run_started: Instant,
     mut staging_reservation: InflightReservation,
-) -> Result<()> {
+) -> Result<EventAdmissionOutcome> {
     let invalid = binance_aggtrade_websocket_invalid_input(
         raw_bytes,
         recv_time_utc_ms,
@@ -721,7 +759,14 @@ pub(super) async fn emit_aggtrade_websocket_invalid(
         .into());
     }
     staging_reservation.shrink_to(1, bytes)?;
-    send_event_with_reservation(sink, run_started, event, Some(staging_reservation)).await
+    send_event_with_reservation_outcome(
+        sink,
+        run_started,
+        event,
+        Some(staging_reservation),
+        Vec::new(),
+    )
+    .await
 }
 
 fn aggtrade_source_sequence_epoch_id(identity: &CollectorIdentity) -> Result<String> {

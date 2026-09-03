@@ -203,17 +203,6 @@ pub(super) async fn send_event_with_admission_outcome(
     enqueue_event_with_reservation_outcome(sink, run_started, event, None, Vec::new()).await
 }
 
-pub(super) async fn send_event_with_reservation(
-    sink: &SourceEventSink,
-    run_started: Instant,
-    event: RawEvent,
-    existing_reservation: Option<InflightReservation>,
-) -> Result<()> {
-    send_event_with_reservation_outcome(sink, run_started, event, existing_reservation, Vec::new())
-        .await
-        .map(|_| ())
-}
-
 pub(super) async fn send_event_with_reservation_outcome(
     sink: &SourceEventSink,
     run_started: Instant,

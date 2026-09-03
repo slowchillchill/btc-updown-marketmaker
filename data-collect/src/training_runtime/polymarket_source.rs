@@ -6387,7 +6387,11 @@ pub(super) async fn send_polymarket_terminal_prefix_ordered(
     rows: Vec<AcceptedPolymarketMetadataRow>,
 ) -> Result<()> {
     if rows.len() <= 1 {
-        send_polymarket_metadata_rows_atomically_with_tickets(sink, run_started, rows).await?;
+        match send_polymarket_metadata_rows_atomically_with_tickets(sink, run_started, rows).await?
+        {
+            EventAdmissionOutcome::Admitted | EventAdmissionOutcome::Deferred => {}
+            EventAdmissionOutcome::Cutoff => return Ok(()),
+        }
         return Ok(());
     }
     let first = rows
@@ -6444,8 +6448,12 @@ pub(super) async fn send_polymarket_terminal_prefix_ordered(
     }
 
     for group in groups {
-        let _ =
-            send_polymarket_metadata_rows_atomically_with_tickets(sink, run_started, group).await?;
+        match send_polymarket_metadata_rows_atomically_with_tickets(sink, run_started, group)
+            .await?
+        {
+            EventAdmissionOutcome::Admitted | EventAdmissionOutcome::Deferred => {}
+            EventAdmissionOutcome::Cutoff => continue,
+        }
     }
     Ok(())
 }
