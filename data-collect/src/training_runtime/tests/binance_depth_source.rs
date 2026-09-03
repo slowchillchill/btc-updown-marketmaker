@@ -203,7 +203,7 @@ async fn binance_depth_snapshot_keeps_real_fetch_start_and_full_response_time() 
     send_event(&sink, Instant::now(), record.event)
         .await
         .unwrap();
-    let event = rx.recv().await.unwrap().into_legacy_event();
+    let event = rx.recv().await.unwrap().into_event();
     let raw = serde_json::from_str::<Value>(&event.raw_json).unwrap();
     let fetch_start = raw["snapshot_fetch_start_utc"].as_i64().unwrap();
     assert!(fetch_start < event.recv_time_utc_ms);
@@ -322,7 +322,7 @@ async fn binance_depth_runtime_bootstraps_bridges_resnapshots_and_preserves_orde
 
     let mut events = Vec::new();
     while let Ok(timed) = rx.try_recv() {
-        events.push(timed.into_legacy_event());
+        events.push(timed.into_event());
     }
     assert_eq!(
         events
@@ -567,8 +567,8 @@ async fn binance_depth_utc_day_fence_cancels_snapshot_and_neutral_releases_buffe
             .into_iter()
             .all(|event| event.raw_day_permit.as_ref() == Some(&expected_permit))
     );
-    let first_update = first_update.into_legacy_event();
-    let second_update = second_update.into_legacy_event();
+    let first_update = first_update.into_event();
+    let second_update = second_update.into_event();
     assert_eq!(first_update.source_event_type, "depth_update");
     assert_eq!(second_update.source_event_type, "depth_update");
     let first_raw = serde_json::from_str::<Value>(&first_update.raw_json).unwrap();
@@ -671,7 +671,7 @@ async fn binance_depth_schema_error_is_process_fatal() {
         .await
         .expect_err("depth parser/schema errors must terminate the source");
         assert!(error.to_string().contains(expected_error), "{error}");
-        let released = rx.recv().await.unwrap().into_legacy_event();
+        let released = rx.recv().await.unwrap().into_event();
         let raw = serde_json::from_str::<Value>(&released.raw_json).unwrap();
         assert_eq!(raw["u"], 90);
         assert_eq!(
@@ -1131,7 +1131,7 @@ async fn binance_depth_invalid_snapshot_releases_valid_pending_update_before_ter
             .contains("binance_depth_snapshot_schema_fatal:schema:invalid_snapshot_contract"),
         "{error}"
     );
-    let released = rx.recv().await.unwrap().into_legacy_event();
+    let released = rx.recv().await.unwrap().into_event();
     let raw = serde_json::from_str::<Value>(&released.raw_json).unwrap();
     assert_eq!(raw["u"], 90);
     assert_eq!(
@@ -1294,7 +1294,7 @@ async fn binance_depth_snapshot_exhaustion_recovers_on_the_same_websocket_genera
 
     let mut events = Vec::new();
     while let Ok(event) = rx.try_recv() {
-        events.push(event.into_legacy_event());
+        events.push(event.into_event());
     }
     assert_eq!(
         events
@@ -1405,7 +1405,7 @@ async fn binance_depth_snapshot_admits_before_two_earlier_ingress_updates() {
 
     let mut events = Vec::new();
     while let Ok(event) = rx.try_recv() {
-        events.push(event.into_legacy_event());
+        events.push(event.into_event());
     }
     assert_eq!(
         events
@@ -1542,8 +1542,8 @@ async fn binance_depth_hour_fence_preserves_snapshot_and_ready_continuity() {
     resume_tx.send(()).unwrap();
     snapshot_release_tx.send(()).unwrap();
 
-    let snapshot = rx.recv().await.unwrap().into_legacy_event();
-    let first = rx.recv().await.unwrap().into_legacy_event();
+    let snapshot = rx.recv().await.unwrap().into_event();
+    let first = rx.recv().await.unwrap().into_event();
     assert_eq!(snapshot.source_event_type, "depth_snapshot");
     assert_eq!(first.source_event_type, "depth_update");
     let first_raw = serde_json::from_str::<Value>(&first.raw_json).unwrap();
@@ -1564,7 +1564,7 @@ async fn binance_depth_hour_fence_preserves_snapshot_and_ready_continuity() {
     resume_tx.send(()).unwrap();
     second_update_tx.send(()).unwrap();
 
-    let second = rx.recv().await.unwrap().into_legacy_event();
+    let second = rx.recv().await.unwrap().into_event();
     let second_raw = serde_json::from_str::<Value>(&second.raw_json).unwrap();
     assert_eq!(second_raw["stitch_verdict"], BINANCE_DEPTH_VERDICT_APPLIED);
     assert_eq!(second_raw["snapshot_last_update_id"], 100);
@@ -1647,7 +1647,7 @@ async fn binance_depth_dropped_hour_resume_releases_pending_before_terminal() {
             .contains("depth barrier owner dropped source resume signal"),
         "{error}"
     );
-    let released = rx.recv().await.unwrap().into_legacy_event();
+    let released = rx.recv().await.unwrap().into_event();
     let raw = serde_json::from_str::<Value>(&released.raw_json).unwrap();
     assert_eq!(raw["u"], 90);
     assert_eq!(
@@ -1929,7 +1929,7 @@ async fn binance_depth_eof_releases_pending_update_once() {
         outcome,
         BinanceDepthUpdateExit::StreamEnded { .. }
     ));
-    let released = rx.recv().await.unwrap().into_legacy_event();
+    let released = rx.recv().await.unwrap().into_event();
     let raw = serde_json::from_str::<Value>(&released.raw_json).unwrap();
     assert_eq!(raw["u"], 90);
     assert_eq!(
@@ -2021,7 +2021,7 @@ async fn binance_depth_pending_cap_neutral_releases_without_reconnecting_the_soc
 
     let mut events = Vec::new();
     while let Ok(event) = rx.try_recv() {
-        events.push(event.into_legacy_event());
+        events.push(event.into_event());
     }
     assert_eq!(
         events
@@ -2244,7 +2244,7 @@ async fn binance_depth_one_hundred_reconnects_reach_generation_101_with_bounded_
             .await
             .expect("the depth source must survive one hundred reconnects")
             .expect("source queue must remain open")
-            .into_legacy_event();
+            .into_event();
         let raw = serde_json::from_str::<Value>(&event.raw_json).unwrap();
         assert_eq!(raw["connection_generation"], expected_generation);
         assert_eq!(
@@ -2399,7 +2399,7 @@ async fn binance_depth_one_hundred_resnapshots_keep_one_owner_and_bounded_fds() 
             .await
             .expect("one hundred resnapshot cycles must make progress")
             .expect("source queue must remain open")
-            .into_legacy_event();
+            .into_event();
         let raw = serde_json::from_str::<Value>(&event.raw_json).unwrap();
         assert_eq!(raw["connection_generation"], 1);
         assert!(ingress.insert(raw["depth_ingress_sequence"].as_u64().unwrap()));

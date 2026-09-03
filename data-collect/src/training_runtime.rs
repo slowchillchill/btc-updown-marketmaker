@@ -142,17 +142,18 @@ use crate::market_discovery::{
     BtcUpdownDiscovery, BtcUpdownMarketCandidate, CandidateRejectReason, DiscoveredBtcUpdownMarket,
     DiscoverySelectionError, discovery_windows, select_btc_updown_markets,
 };
+#[cfg(test)]
+use crate::polymarket_market_metadata_layout::POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION;
 use crate::polymarket_market_metadata_layout::{
     ActiveUnavailableReason, ClosedTimeCheckFailureReason, MarketLifecycleState,
     MarketLifecycleTransition, MarketRuntimeRole, MarketRuntimeRoleTransition,
-    POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION,
-    PolymarketMarketMetadataV3Row, PolymarketMarketMetadataV5Row, PolymarketMetadataOrigin,
-    PolymarketMetadataReferenceRecord, PolymarketMetadataRowKind, ResolutionEvidenceSource,
-    ResolutionFollowupStatus, ResolutionIntegrityErrorClass, ResolutionPollResult,
-    ResolutionTransportErrorClass, ResponseFieldsUnavailableReason,
-    SourceEndpointUnavailableReason, SourceEvidenceChannel, SourceEvidenceEventType,
-    SourceEvidenceOrigin, TerminalClaimOwner, TerminalPredicateFailureReason,
-    validate_polymarket_metadata_local_references,
+    POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION, PolymarketMarketMetadataRow,
+    PolymarketMarketMetadataV5Row, PolymarketMetadataOrigin, PolymarketMetadataReferenceRecord,
+    PolymarketMetadataRowKind, ResolutionEvidenceSource, ResolutionFollowupStatus,
+    ResolutionIntegrityErrorClass, ResolutionPollResult, ResolutionTransportErrorClass,
+    ResponseFieldsUnavailableReason, SourceEndpointUnavailableReason, SourceEvidenceChannel,
+    SourceEvidenceEventType, SourceEvidenceOrigin, TerminalClaimOwner,
+    TerminalPredicateFailureReason, validate_polymarket_metadata_local_references,
 };
 #[cfg(test)]
 use crate::polymarket_orderbook_v3::PolymarketOrderbookV3Admission;
@@ -4495,7 +4496,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(batches.legacy.values().all(Vec::is_empty));
+        assert!(batches.raw_events.values().all(Vec::is_empty));
         assert!(batches.polymarket_orderbook_v3.is_empty());
         let writer_outcome =
             stop_writer_workers_with_budget(writers, Duration::from_secs(30)).await;

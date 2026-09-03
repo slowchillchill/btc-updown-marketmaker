@@ -9,10 +9,6 @@ path = "src/lib.rs"
 bench = false
 
 [[bench]]
-name = "parquet_writer_probe"
-harness = false
-
-[[bench]]
 name = "websocket_smoke_probe"
 harness = false
 

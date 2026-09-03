@@ -2,14 +2,14 @@ use super::*;
 
 #[derive(Default)]
 pub(super) struct PendingIngressBatches {
-    pub(super) legacy: BTreeMap<String, Vec<InflightRawEvent>>,
+    pub(super) raw_events: BTreeMap<String, Vec<InflightRawEvent>>,
     pub(super) polymarket_orderbook_v3: Vec<InflightPolymarketOrderbookV3>,
 }
 
 impl PendingIngressBatches {
     pub(super) fn for_training_source_kinds() -> Self {
         Self {
-            legacy: TRAINING_SOURCE_KINDS
+            raw_events: TRAINING_SOURCE_KINDS
                 .iter()
                 .map(|source| {
                     (
@@ -31,9 +31,9 @@ pub(super) async fn flush_all_batches(
     writer_queue_tracker: &mut QueueDurationTracker,
     run_started: Instant,
 ) -> Result<()> {
-    let sources = batches.legacy.keys().cloned().collect::<Vec<_>>();
+    let sources = batches.raw_events.keys().cloned().collect::<Vec<_>>();
     for source_kind in sources {
-        let Some(batch) = batches.legacy.get_mut(&source_kind) else {
+        let Some(batch) = batches.raw_events.get_mut(&source_kind) else {
             continue;
         };
         flush_source_batch(
@@ -76,7 +76,7 @@ pub(super) async fn handle_ingress_control(
             source_kind,
             utc_hour,
         } => {
-            let batch = batches.legacy.get_mut(&source_kind).ok_or_else(|| {
+            let batch = batches.raw_events.get_mut(&source_kind).ok_or_else(|| {
                 invalid_data(format!(
                     "missing source batch for hour finalize: {source_kind}"
                 ))
@@ -164,13 +164,13 @@ pub(super) async fn process_ingress_event(
     rollover_coordinator: &mut RolloverCoordinatorState,
 ) -> Result<()> {
     let mut inflight_event = match inflight {
-        SourceIngressPayload::LegacyRaw(event) => {
+        SourceIngressPayload::RawEvent(event) => {
             if event.event.source_kind == "polymarket_market"
                 && typed_schema_version("polymarket_market")
                     == POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION
             {
                 return Err(invalid_data(format!(
-                    "legacy raw Polymarket ingress is forbidden after v3 activation:event_type={}",
+                    "raw Polymarket ingress is forbidden after v3 activation:event_type={}",
                     event.event.source_event_type
                 ))
                 .into());
@@ -266,7 +266,7 @@ pub(super) async fn process_ingress_event(
         *received_rows,
     );
     let source_kind = event.source_kind.clone();
-    let batch = batches.legacy.entry(source_kind.clone()).or_default();
+    let batch = batches.raw_events.entry(source_kind.clone()).or_default();
     batch.push(inflight_event);
     if batch.len() >= DEFAULT_FLUSH_ROWS {
         flush_source_batch(

@@ -363,7 +363,7 @@ async fn enqueue_event_with_reservation_outcome(
     };
     stamp_source_admission(&mut inflight_event.event, sink)?;
     let admission_gaps = std::mem::take(&mut inflight_event.admission_gaps);
-    permit.send(SourceIngressPayload::LegacyRaw(inflight_event));
+    permit.send(SourceIngressPayload::RawEvent(inflight_event));
     for gap in admission_gaps {
         record_gap_at(&sink.gaps, recv_time_utc_ms, gap);
     }

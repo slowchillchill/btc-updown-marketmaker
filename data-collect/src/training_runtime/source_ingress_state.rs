@@ -75,7 +75,7 @@ pub(super) fn event_envelope(event: &RawEvent, source_kind: SourceKind) -> Event
         collector_region: event.collector_region.clone(),
         source_endpoint: event.source_endpoint.clone(),
         host_clock_sync_status: HostClockSyncStatus::Unavailable {
-            reason: "not_checked_in_live_runtime".to_owned(),
+            reason: "not_checked_in_training_runtime".to_owned(),
         },
         raw_evidence: RawEvidence::Json(event.raw_json.clone()),
     }
@@ -88,7 +88,7 @@ pub(super) struct DeferredRawBatch {
 }
 
 pub(super) enum DeferredIngressBatch {
-    LegacyRaw(DeferredRawBatch),
+    RawEvent(DeferredRawBatch),
     PolymarketOrderbookV3(Box<DeferredPolymarketOrderbookV3>),
 }
 
@@ -196,7 +196,7 @@ impl SourceQueueBackpressureStats {
             .expect("deferred raw-event mutex poisoned")
             .entry(producer.to_owned())
             .or_default()
-            .push_back(DeferredIngressBatch::LegacyRaw(DeferredRawBatch {
+            .push_back(DeferredIngressBatch::RawEvent(DeferredRawBatch {
                 epoch,
                 events,
                 accepted_ticket,
@@ -383,29 +383,29 @@ pub(super) struct DeferredPolymarketOrderbookV3 {
 
 #[allow(clippy::large_enum_variant)]
 pub(super) enum SourceIngressPayload {
-    LegacyRaw(InflightRawEvent),
+    RawEvent(InflightRawEvent),
     PolymarketOrderbookV3(InflightPolymarketOrderbookV3),
 }
 
 impl SourceIngressPayload {
     #[cfg(test)]
-    pub(super) fn into_legacy_raw(self) -> InflightRawEvent {
+    pub(super) fn into_raw(self) -> InflightRawEvent {
         match self {
-            Self::LegacyRaw(event) => event,
-            Self::PolymarketOrderbookV3(_) => panic!("expected a legacy raw ingress payload"),
+            Self::RawEvent(event) => event,
+            Self::PolymarketOrderbookV3(_) => panic!("expected a raw event ingress payload"),
         }
     }
 
     #[cfg(test)]
-    pub(super) fn into_legacy_event(self) -> RawEvent {
-        self.into_legacy_raw().event
+    pub(super) fn into_event(self) -> RawEvent {
+        self.into_raw().event
     }
 
     #[cfg(test)]
     pub(super) fn into_polymarket_orderbook_v3(self) -> InflightPolymarketOrderbookV3 {
         match self {
             Self::PolymarketOrderbookV3(event) => event,
-            Self::LegacyRaw(_) => panic!("expected a Polymarket v3 ingress payload"),
+            Self::RawEvent(_) => panic!("expected a Polymarket v3 ingress payload"),
         }
     }
 }
@@ -416,8 +416,8 @@ impl std::ops::Deref for SourceIngressPayload {
 
     fn deref(&self) -> &Self::Target {
         match self {
-            Self::LegacyRaw(event) => event,
-            Self::PolymarketOrderbookV3(_) => panic!("expected a legacy raw ingress payload"),
+            Self::RawEvent(event) => event,
+            Self::PolymarketOrderbookV3(_) => panic!("expected a raw event ingress payload"),
         }
     }
 }
@@ -426,8 +426,8 @@ impl std::ops::Deref for SourceIngressPayload {
 impl std::ops::DerefMut for SourceIngressPayload {
     fn deref_mut(&mut self) -> &mut Self::Target {
         match self {
-            Self::LegacyRaw(event) => event,
-            Self::PolymarketOrderbookV3(_) => panic!("expected a legacy raw ingress payload"),
+            Self::RawEvent(event) => event,
+            Self::PolymarketOrderbookV3(_) => panic!("expected a raw event ingress payload"),
         }
     }
 }

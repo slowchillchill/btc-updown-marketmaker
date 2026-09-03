@@ -46,7 +46,7 @@ async fn producer_barrier_cannot_overtake_an_old_day_event_waiting_for_queue_spa
     let second = rx.recv().await.unwrap();
     assert_eq!(second.event.recv_time_utc_ms, 1_783_468_799_999);
     assert!(second.control.is_none());
-    let third = rx.recv().await.unwrap().into_legacy_raw();
+    let third = rx.recv().await.unwrap().into_raw();
     let Some(IngressControl::DayBarrier {
         producer,
         close,

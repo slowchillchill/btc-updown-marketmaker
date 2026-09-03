@@ -316,9 +316,9 @@ fn polymarket_metadata_v5_version_propagates_through_finalize_and_manifest() {
     )
     .unwrap();
     let admission_time_utc_ms = prefix.fixed_identity_verified_at_utc + 1;
-    let mut event = polymarket_metadata_v5_raw_event(
-        PolymarketMarketMetadataV5Row::from_v3_prefix(prefix, None, None),
-    )
+    let mut event = polymarket_metadata_raw_event(PolymarketMarketMetadataV5Row::from_common(
+        prefix, None, None,
+    ))
     .unwrap();
     event.collector_admission = Some(RawEventAdmission {
         sequence: 1,
