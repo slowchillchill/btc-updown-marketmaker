@@ -1,0 +1,10 @@
+[package]
+name = "intent-bridge"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+contracts = { path = "../contracts" }
+polymarket_client_sdk_v2 = { version = "=0.7.0", default-features = false, features = ["clob"] }
+sim-system = { path = "../sim-system" }
