@@ -4,7 +4,7 @@ pub(super) fn test_manifest_owner(
     dataset_root: &Path,
     utc_day: &str,
 ) -> (ManifestOwnerState, PathBuf) {
-    let identity = test_daily_manifest_identity();
+    let identity = test_artifact_identity();
     let day_dir = typed_raw_root(dataset_root).join(format!("utc_day={utc_day}"));
     let manifest = reconcile_open_day_manifest(&day_dir, utc_day, &identity).unwrap();
     let mut owner = ManifestOwnerState::new(dataset_root.to_path_buf(), identity);
@@ -69,7 +69,7 @@ fn normal_rollover_waits_for_four_producers_and_six_writers() {
                 .is_none()
         );
     }
-    for source in &TRAINING_SOURCE_KINDS[..TRAINING_SOURCE_KINDS.len() - 1] {
+    for source in &training_source_kinds()[..training_source_kinds().len() - 1] {
         assert!(
             owner
                 .record_writer_ack(close.clone(), (*source).to_owned())
@@ -90,7 +90,7 @@ fn normal_rollover_waits_for_four_producers_and_six_writers() {
         owner
             .record_writer_ack(
                 close.clone(),
-                TRAINING_SOURCE_KINDS.last().unwrap().to_string(),
+                training_source_kinds().last().unwrap().to_string(),
             )
             .unwrap()
             .is_some()
@@ -120,7 +120,7 @@ fn pending_exit_rollover_closes_old_day_without_activating_new_day() {
             .record_producer_barrier(close.clone(), (*producer).to_owned(), &[], &BTreeMap::new())
             .unwrap();
     }
-    for source in TRAINING_SOURCE_KINDS {
+    for source in training_source_kinds() {
         owner
             .record_writer_ack(close.clone(), (*source).to_owned())
             .unwrap();
@@ -173,7 +173,7 @@ fn unclean_pending_exit_closes_old_day_without_creating_new_day() {
             .record_producer_barrier(close.clone(), (*producer).to_owned(), &[], &BTreeMap::new())
             .unwrap();
     }
-    for source in TRAINING_SOURCE_KINDS {
+    for source in training_source_kinds() {
         owner
             .record_writer_ack(close.clone(), (*source).to_owned())
             .unwrap();
@@ -239,7 +239,7 @@ fn rollover_rejects_wrong_generation_or_close_id() {
     wrong_close_id.close_id += 1;
     assert!(
         owner
-            .record_writer_ack(wrong_close_id, TRAINING_SOURCE_KINDS[0].to_owned())
+            .record_writer_ack(wrong_close_id, training_source_kinds()[0].to_owned())
             .unwrap_err()
             .to_string()
             .contains("tuple mismatch")
@@ -269,7 +269,7 @@ fn rejected_duplicate_or_late_producer_barrier_preserves_manifest_digest() {
         )
         .unwrap();
     let rejected_counters = BTreeMap::from([(
-        TRAINING_SOURCE_KINDS[0].to_owned(),
+        training_source_kinds()[0].to_owned(),
         SourceOperationalCounterDelta {
             dropped_rows: 1,
             ..SourceOperationalCounterDelta::default()
@@ -301,7 +301,7 @@ fn rejected_duplicate_or_late_producer_barrier_preserves_manifest_digest() {
             .unwrap();
     }
     let mut ready = None;
-    for source_kind in TRAINING_SOURCE_KINDS {
+    for source_kind in training_source_kinds() {
         ready = owner
             .record_writer_ack(close.clone(), (*source_kind).to_owned())
             .unwrap()
@@ -378,7 +378,7 @@ fn manifest_owner_requires_rendezvous_then_two_normal_rollover_cutpoints() {
         );
         assert_eq!(manifest_coverage_value(&day_dir), active_coverage);
     }
-    for source in &TRAINING_SOURCE_KINDS[..TRAINING_SOURCE_KINDS.len() - 1] {
+    for source in &training_source_kinds()[..training_source_kinds().len() - 1] {
         assert!(
             owner
                 .record_writer_ack(close.clone(), (*source).to_owned())
@@ -393,7 +393,7 @@ fn manifest_owner_requires_rendezvous_then_two_normal_rollover_cutpoints() {
     let ready = owner
         .record_writer_ack(
             close.clone(),
-            TRAINING_SOURCE_KINDS.last().unwrap().to_string(),
+            training_source_kinds().last().unwrap().to_string(),
         )
         .unwrap()
         .expect("ten-participant rendezvous must become ready exactly once");
@@ -492,11 +492,11 @@ fn manifest_owner_unclean_rollover_preserves_reactivation() {
                 .is_none()
         );
     }
-    for (index, source_kind) in TRAINING_SOURCE_KINDS.iter().enumerate() {
+    for (index, source_kind) in training_source_kinds().iter().enumerate() {
         let ready = owner
             .record_writer_ack(close.clone(), (*source_kind).to_owned())
             .unwrap();
-        assert_eq!(ready.is_some(), index + 1 == TRAINING_SOURCE_KINDS.len());
+        assert_eq!(ready.is_some(), index + 1 == training_source_kinds().len());
     }
     owner
         .commit_rollover_old_day(&close, ManifestRolloverCommitMode::UncleanOldDay)
@@ -603,7 +603,7 @@ fn rejected_shutdown_identity_preserves_manifest_digest() {
     let rejected_operational = BTreeMap::from([(
         day.to_owned(),
         BTreeMap::from([(
-            TRAINING_SOURCE_KINDS[0].to_owned(),
+            training_source_kinds()[0].to_owned(),
             SourceOperationalCounterDelta {
                 dropped_rows: 1,
                 ..SourceOperationalCounterDelta::default()

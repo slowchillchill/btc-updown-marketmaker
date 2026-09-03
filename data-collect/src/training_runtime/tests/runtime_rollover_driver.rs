@@ -61,7 +61,7 @@ async fn run_boundary_exit_poll_order(
     runtime_stats
         .install_raw_day_gate(Arc::clone(&raw_day_gate))
         .unwrap();
-    let provenance = test_runtime_provenance("boundary-exit-poll-order");
+    let provenance = test_artifact_identity();
     let mut writer_handles =
         start_writer_workers(&dataset_root, &provenance, &manifest_tx, &runtime_stats).unwrap();
     let mut batches = PendingIngressBatches::for_training_source_kinds();
@@ -293,7 +293,7 @@ async fn run_boundary_exit_poll_order(
             && termination.error.is_none()
     }));
     let writer_outcome = completed_writer_outcome.unwrap();
-    assert_eq!(writer_outcome.outputs.len(), TRAINING_SOURCE_KINDS.len());
+    assert_eq!(writer_outcome.outputs.len(), training_source_kinds().len());
     assert!(
         writer_outcome.errors.is_empty(),
         "{:?}",
@@ -421,7 +421,7 @@ async fn run_writer_rendezvous_poll_order(
             .await
             .unwrap();
     }
-    for source_kind in TRAINING_SOURCE_KINDS {
+    for source_kind in training_source_kinds() {
         manifest_tx
             .send(ManifestCommand::WriterDayFinalized {
                 close: close.clone(),
@@ -464,7 +464,9 @@ async fn run_writer_rendezvous_poll_order(
     let mut writer_handles = BTreeMap::from([(
         "binance_aggtrade".to_owned(),
         SourceWriterHandle {
-            schema_version: typed_schema_version("binance_aggtrade").to_owned(),
+            schema_version: TypedParquetSegmentWriter::current_schema_version("binance_aggtrade")
+                .unwrap()
+                .to_owned(),
             tx: writer_tx,
             queue_rows: Arc::new(AtomicU64::new(0)),
             accepting_commands: Arc::new(Mutex::new(true)),
@@ -674,7 +676,7 @@ async fn pending_exit_synthetic_barriers_receive_exact_stop_and_finalize_cleanly
         ));
     }
 
-    let provenance = test_runtime_provenance("pending-exit-synthetic-barrier");
+    let provenance = test_artifact_identity();
     let mut writer_handles =
         start_writer_workers(&dataset_root, &provenance, &manifest_tx, &runtime_stats).unwrap();
     let mut completed_terminations = Vec::new();
@@ -831,7 +833,7 @@ async fn post_activation_exit_waits_for_all_flushes_then_stops_exact_next_genera
     runtime_stats
         .install_raw_day_gate(Arc::clone(&raw_day_gate))
         .unwrap();
-    let provenance = test_runtime_provenance("post-activation-exit");
+    let provenance = test_artifact_identity();
     let mut writer_handles =
         start_writer_workers(&dataset_root, &provenance, &manifest_tx, &runtime_stats).unwrap();
     let mut batches = PendingIngressBatches::for_training_source_kinds();

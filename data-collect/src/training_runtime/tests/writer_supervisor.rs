@@ -4,7 +4,7 @@ use super::*;
 async fn writer_workers_report_ready_only_after_local_initialization() {
     let tmp = tempdir().unwrap();
     let dataset_root = tmp.path().canonicalize().unwrap();
-    let provenance = test_runtime_provenance("startup-ready-writers");
+    let provenance = test_artifact_identity();
     let runtime_stats = Arc::new(SourceQueueBackpressureStats::default());
     let (manifest_tx, _manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
     let (ready_tx, mut ready_rx) = mpsc::channel(STARTUP_READY_CHANNEL_CAPACITY);
@@ -21,7 +21,7 @@ async fn writer_workers_report_ready_only_after_local_initialization() {
     drop(ready_tx);
 
     let mut ready = BTreeSet::new();
-    for _ in 0..TRAINING_SOURCE_KINDS.len() {
+    for _ in 0..training_source_kinds().len() {
         ready.insert(
             timeout(Duration::from_secs(1), ready_rx.recv())
                 .await
@@ -31,7 +31,7 @@ async fn writer_workers_report_ready_only_after_local_initialization() {
     }
     assert_eq!(
         ready,
-        TRAINING_SOURCE_KINDS
+        training_source_kinds()
             .iter()
             .map(|source_kind| StartupParticipant::writer(source_kind))
             .collect()
@@ -56,7 +56,7 @@ async fn writer_workers_report_ready_only_after_local_initialization() {
 async fn committed_startup_stop_runs_writers_until_centralized_exact_shutdown() {
     let tmp = tempdir().unwrap();
     let dataset_root = tmp.path().canonicalize().unwrap();
-    let provenance = test_runtime_provenance("startup-stop-writers");
+    let provenance = test_artifact_identity();
     let runtime_stats = Arc::new(SourceQueueBackpressureStats::default());
     let (manifest_tx, _manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
     let (ready_tx, mut ready_rx) = mpsc::channel(STARTUP_READY_CHANNEL_CAPACITY);
@@ -71,7 +71,7 @@ async fn committed_startup_stop_runs_writers_until_centralized_exact_shutdown() 
     )
     .unwrap();
     drop(ready_tx);
-    for _ in 0..TRAINING_SOURCE_KINDS.len() {
+    for _ in 0..training_source_kinds().len() {
         timeout(Duration::from_secs(1), ready_rx.recv())
             .await
             .unwrap()
@@ -119,7 +119,7 @@ fn typed_writer_closes_row_groups_at_exact_row_and_logical_byte_limits() {
     let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
         tmp.path(),
         "binance_aggtrade_00",
-        typed_schema_version("binance_aggtrade"),
+        TypedParquetSegmentWriter::current_schema_version("binance_aggtrade").unwrap(),
         "binance_aggtrade",
     )
     .unwrap();
@@ -190,7 +190,7 @@ fn training_segment_finalize_emits_daily_delta_without_segment_manifest() {
     let finalized = finalize_segment(
         segment,
         "shutdown_finalize",
-        &test_runtime_provenance("run"),
+        &test_artifact_identity(),
         &manifest_tx,
     )
     .unwrap();
@@ -260,8 +260,7 @@ fn training_segment_finalize_emits_daily_delta_without_segment_manifest() {
         BINANCE_AGGTRADE_SCHEMA_VERSION
     );
     let reconciled =
-        reconcile_open_day_manifest(&day_dir, "2026-07-07", &test_daily_manifest_identity())
-            .unwrap();
+        reconcile_open_day_manifest(&day_dir, "2026-07-07", &test_artifact_identity()).unwrap();
     assert_eq!(reconciled["files"].as_array().unwrap().len(), 1);
     assert_eq!(reconciled["collection_day_coverage"], active_coverage);
 
@@ -343,7 +342,7 @@ fn polymarket_metadata_v5_version_propagates_through_finalize_and_manifest() {
     let finalized = finalize_segment(
         segment,
         "shutdown_finalize",
-        &test_runtime_provenance("metadata-v5"),
+        &test_artifact_identity(),
         &manifest_tx,
     )
     .unwrap();
@@ -412,7 +411,7 @@ fn polymarket_metadata_sort_order_matches_parquet_and_embedded_recovery_facts_by
         .unwrap();
     let segment = ActiveSegment::new(naming, "polymarket_market_metadata", 0).unwrap();
     let context = SegmentManifestContext::from_segment(&segment);
-    let provenance = test_runtime_provenance("sort-order");
+    let provenance = test_artifact_identity();
 
     for (index, (schema_version, expected_sort_order)) in [
         (
@@ -573,7 +572,7 @@ fn training_runtime_uses_next_part_when_same_hour_file_already_exists() {
 fn source_writer_output_uses_aggregated_stats_without_per_event_receipts() {
     let tmp = tempdir().unwrap();
     let dataset_root = tmp.path().canonicalize().unwrap();
-    let provenance = test_runtime_provenance("stats-run");
+    let provenance = test_artifact_identity();
     let (tx, rx) = std::sync::mpsc::sync_channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
     let queue_rows = Arc::new(AtomicU64::new(0));
     let queue_rows_for_worker = Arc::clone(&queue_rows);
@@ -642,7 +641,9 @@ fn completed_writer_with_close(
     let (tx, _rx) = std::sync::mpsc::sync_channel(1);
     let (_result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
     SourceWriterHandle {
-        schema_version: typed_schema_version(source_kind).to_owned(),
+        schema_version: TypedParquetSegmentWriter::current_schema_version(source_kind)
+            .unwrap_or("unknown_typed_layout")
+            .to_owned(),
         tx,
         queue_rows: Arc::new(AtomicU64::new(0)),
         accepting_commands: Arc::new(Mutex::new(true)),
@@ -676,7 +677,7 @@ fn completed_writer_with_close(
 fn completed_mandatory_writers(
     close: &RuntimeCloseIdentity,
 ) -> BTreeMap<String, SourceWriterHandle> {
-    TRAINING_SOURCE_KINDS
+    training_source_kinds()
         .iter()
         .map(|source_kind| {
             (
@@ -711,7 +712,7 @@ async fn writer_shutdown_requires_exact_mandatory_keys_and_report_proofs() {
     );
 
     let mut missing_writers = completed_mandatory_writers(&close);
-    let missing_source = TRAINING_SOURCE_KINDS[0];
+    let missing_source = training_source_kinds()[0];
     missing_writers.remove(missing_source);
     let missing = shutdown_writer_workers_with_budget(
         missing_writers,
@@ -762,7 +763,7 @@ async fn writer_shutdown_requires_exact_mandatory_keys_and_report_proofs() {
 
     let mut missing_report_writers = completed_mandatory_writers(&close);
     missing_report_writers
-        .get_mut(TRAINING_SOURCE_KINDS[0])
+        .get_mut(training_source_kinds()[0])
         .unwrap()
         .completed_result
         .as_mut()
@@ -882,7 +883,9 @@ async fn writer_report_is_not_terminal_until_the_os_thread_is_joined() {
     let writers = BTreeMap::from([(
         "binance_aggtrade".to_owned(),
         SourceWriterHandle {
-            schema_version: typed_schema_version("binance_aggtrade").to_owned(),
+            schema_version: TypedParquetSegmentWriter::current_schema_version("binance_aggtrade")
+                .unwrap()
+                .to_owned(),
             tx,
             queue_rows: Arc::new(AtomicU64::new(0)),
             accepting_commands: Arc::new(Mutex::new(true)),
@@ -914,7 +917,7 @@ fn partial_writer_spawn_failure_joins_started_workers_and_releases_the_lease() {
 
     let result = start_writer_workers_inner(
         &dataset_root,
-        &test_runtime_provenance("partial-writer-spawn"),
+        &test_artifact_identity(),
         &manifest_tx,
         &runtime_stats,
         Some(&ready_tx),
@@ -942,7 +945,7 @@ fn partial_writer_spawn_failure_joins_started_workers_and_releases_the_lease() {
 async fn writer_finalize_timeout_returns_error_without_waiting_for_worker() {
     let tmp = tempdir().unwrap();
     let dataset_root = tmp.path().canonicalize().unwrap();
-    let provenance = test_runtime_provenance("hung-writer-run");
+    let provenance = test_artifact_identity();
     let writers = start_writer_workers_with_hung_result(&dataset_root, &provenance, None).unwrap();
 
     let outcome = stop_writer_workers_with_budget(writers, Duration::from_millis(10)).await;
@@ -962,7 +965,7 @@ async fn writer_finalize_timeout_returns_error_without_waiting_for_worker() {
 async fn hung_writer_retains_dataset_lease_until_the_process_exits() {
     let tmp = tempdir().unwrap();
     let dataset_root = tmp.path().canonicalize().unwrap();
-    let provenance = test_runtime_provenance("hung-writer-lease");
+    let provenance = test_artifact_identity();
     let dataset_lease = Arc::new(lock_training_dataset_root(&dataset_root).unwrap());
     let writers = start_writer_workers_with_hung_result(
         &dataset_root,
@@ -983,7 +986,7 @@ async fn hung_writer_retains_dataset_lease_until_the_process_exits() {
 async fn six_writers_return_the_exact_coordinated_close_identity() {
     let tmp = tempdir().unwrap();
     let dataset_root = tmp.path().canonicalize().unwrap();
-    let provenance = test_runtime_provenance("writer-close-proof");
+    let provenance = test_artifact_identity();
     let (manifest_tx, _manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
     let runtime_stats = Arc::new(SourceQueueBackpressureStats::default());
     let writers =
@@ -999,7 +1002,7 @@ async fn six_writers_return_the_exact_coordinated_close_identity() {
 
     assert!(outcome.all_terminal, "{:?}", outcome.errors);
     assert!(outcome.all_close_proven, "{:?}", outcome.errors);
-    assert_eq!(outcome.outputs.len(), TRAINING_SOURCE_KINDS.len());
+    assert_eq!(outcome.outputs.len(), training_source_kinds().len());
     assert!(outcome.outputs.iter().all(|output| {
         output.coordinated_close.as_ref() == Some(&close) && output.observed_utc_ms > 0
     }));
@@ -1018,7 +1021,7 @@ async fn production_writer_report_preserves_reliable_terminal_lifecycle_epoch() 
         .unwrap();
     let (mut writers, releases) = start_writer_workers_inner(
         &dataset_root,
-        &test_runtime_provenance("writer-reliable-lifecycle"),
+        &test_artifact_identity(),
         &manifest_tx,
         &runtime_stats,
         None,
@@ -1082,7 +1085,9 @@ async fn writer_close_proof_rejects_a_precompleted_or_wrong_identity_result() {
     let writers = BTreeMap::from([(
         "binance_aggtrade".to_owned(),
         SourceWriterHandle {
-            schema_version: typed_schema_version("binance_aggtrade").to_owned(),
+            schema_version: TypedParquetSegmentWriter::current_schema_version("binance_aggtrade")
+                .unwrap()
+                .to_owned(),
             tx,
             queue_rows: Arc::new(AtomicU64::new(0)),
             accepting_commands: Arc::new(Mutex::new(true)),
@@ -1163,7 +1168,11 @@ async fn writer_stop_collects_late_terminal_state_after_another_writer_failed() 
         (
             "binance_aggtrade".to_owned(),
             SourceWriterHandle {
-                schema_version: typed_schema_version("binance_aggtrade").to_owned(),
+                schema_version: TypedParquetSegmentWriter::current_schema_version(
+                    "binance_aggtrade",
+                )
+                .unwrap()
+                .to_owned(),
                 tx: failed_tx,
                 queue_rows: Arc::new(AtomicU64::new(0)),
                 accepting_commands: Arc::new(Mutex::new(true)),
@@ -1187,7 +1196,11 @@ async fn writer_stop_collects_late_terminal_state_after_another_writer_failed() 
         (
             "binance_depth_update".to_owned(),
             SourceWriterHandle {
-                schema_version: typed_schema_version("binance_depth_update").to_owned(),
+                schema_version: TypedParquetSegmentWriter::current_schema_version(
+                    "binance_depth_update",
+                )
+                .unwrap()
+                .to_owned(),
                 tx: late_tx,
                 queue_rows: Arc::new(AtomicU64::new(0)),
                 accepting_commands: Arc::new(Mutex::new(true)),
@@ -1210,7 +1223,7 @@ async fn writer_stop_collects_late_terminal_state_after_another_writer_failed() 
         counters["2026-07-07"]["binance_depth_update"].dropped_rows,
         2
     );
-    let mut owner = ManifestOwnerState::new(dataset_root.clone(), test_daily_manifest_identity());
+    let mut owner = ManifestOwnerState::new(dataset_root.clone(), test_artifact_identity());
     owner.ensure_open("2026-07-07").unwrap();
     owner
         .record_operational_counters("2026-07-07", &counters["2026-07-07"])
@@ -1228,7 +1241,7 @@ async fn writer_stop_collects_late_terminal_state_after_another_writer_failed() 
 async fn polymarket_price_change_stats_count_one_canonical_v3_message_row() {
     let tmp = tempdir().unwrap();
     let dataset_root = tmp.path().canonicalize().unwrap();
-    let provenance = test_runtime_provenance("polymarket-stats-run");
+    let provenance = test_artifact_identity();
     let (tx, rx) = std::sync::mpsc::sync_channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
     let queue_rows = Arc::new(AtomicU64::new(0));
     let queue_rows_for_worker = Arc::clone(&queue_rows);
@@ -1303,7 +1316,7 @@ async fn polymarket_price_change_stats_count_one_canonical_v3_message_row() {
 fn binance_depth_manifest_carries_compact_stitch_evidence() {
     let tmp = tempdir().unwrap();
     let dataset_root = tmp.path().canonicalize().unwrap();
-    let provenance = test_runtime_provenance("depth-stitch-run");
+    let provenance = test_artifact_identity();
     let (tx, rx) = std::sync::mpsc::sync_channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
     let queue_rows = Arc::new(AtomicU64::new(0));
     let queue_rows_for_worker = Arc::clone(&queue_rows);
@@ -1375,7 +1388,7 @@ fn sparse_depth_snapshot_hour_finalize_closes_without_a_later_event() {
     let handle = std::thread::spawn(move || {
         source_writer_worker(
             dataset_root_for_worker,
-            test_runtime_provenance("sparse-snapshot-hour-finalize"),
+            test_artifact_identity(),
             "binance_depth_snapshot".to_owned(),
             rx,
             queue_rows_for_worker,
@@ -1430,7 +1443,7 @@ fn empty_depth_snapshot_hour_finalize_does_not_create_a_file() {
     let handle = std::thread::spawn(move || {
         source_writer_worker(
             dataset_root_for_worker,
-            test_runtime_provenance("empty-snapshot-hour-finalize"),
+            test_artifact_identity(),
             "binance_depth_snapshot".to_owned(),
             rx,
             Arc::new(AtomicU64::new(0)),
@@ -1470,7 +1483,7 @@ fn same_hour_depth_resnapshot_stays_in_the_primary_hour_file() {
     let handle = std::thread::spawn(move || {
         source_writer_worker(
             dataset_root_for_worker,
-            test_runtime_provenance("same-hour-snapshot"),
+            test_artifact_identity(),
             "binance_depth_snapshot".to_owned(),
             rx,
             queue_rows_for_worker,
@@ -1520,7 +1533,7 @@ fn same_hour_depth_resnapshot_stays_in_the_primary_hour_file() {
 fn binance_depth_manifest_counts_resnapshot_trigger_evidence() {
     let tmp = tempdir().unwrap();
     let dataset_root = tmp.path().canonicalize().unwrap();
-    let provenance = test_runtime_provenance("depth-resnapshot-run");
+    let provenance = test_artifact_identity();
     let (tx, rx) = std::sync::mpsc::sync_channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
     let queue_rows = Arc::new(AtomicU64::new(0));
     let queue_rows_for_worker = Arc::clone(&queue_rows);
@@ -1649,7 +1662,7 @@ async fn missing_writer_is_a_runtime_error() {
             .iter()
             .any(|gap| gap == "writer_missing_for_source:binance_aggtrade")
     );
-    let mut owner = ManifestOwnerState::new(dataset_root.clone(), test_daily_manifest_identity());
+    let mut owner = ManifestOwnerState::new(dataset_root.clone(), test_artifact_identity());
     owner.ensure_open("2026-07-07").unwrap();
     let counters = runtime_stats.drain_all_operational();
     owner
@@ -1672,7 +1685,9 @@ async fn disconnected_writer_channel_is_a_runtime_error() {
     let mut writers = BTreeMap::from([(
         "binance_aggtrade".to_owned(),
         SourceWriterHandle {
-            schema_version: typed_schema_version("binance_aggtrade").to_owned(),
+            schema_version: TypedParquetSegmentWriter::current_schema_version("binance_aggtrade")
+                .unwrap()
+                .to_owned(),
             tx,
             queue_rows: Arc::new(AtomicU64::new(0)),
             accepting_commands: Arc::new(Mutex::new(true)),
@@ -1712,7 +1727,7 @@ async fn disconnected_writer_channel_is_a_runtime_error() {
 #[tokio::test]
 async fn writer_parser_failure_is_reported_when_workers_stop() {
     let tmp = tempdir().unwrap();
-    let provenance = test_runtime_provenance("writer-parser-failure");
+    let provenance = test_artifact_identity();
     let (manifest_tx, _manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
     let runtime_stats = Arc::new(SourceQueueBackpressureStats::default());
     let mut writers =
@@ -1744,7 +1759,7 @@ async fn writer_parser_failure_is_reported_when_workers_stop() {
 
     assert!(all_terminal);
     assert!(all_close_proven);
-    assert_eq!(outputs.len(), TRAINING_SOURCE_KINDS.len() - 1);
+    assert_eq!(outputs.len(), training_source_kinds().len() - 1);
     assert!(
         outputs
             .iter()
@@ -1788,7 +1803,7 @@ fn writer_failure_counts_active_current_remaining_and_queued_rows_exactly() {
 
     let result = source_writer_worker(
         dataset_root,
-        test_runtime_provenance("writer-exact-drop"),
+        test_artifact_identity(),
         "binance_aggtrade".to_owned(),
         rx,
         Arc::clone(&queue_rows),

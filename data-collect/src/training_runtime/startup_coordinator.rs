@@ -137,7 +137,7 @@ pub(super) fn expected_startup_participants() -> BTreeSet<StartupParticipant> {
         .iter()
         .map(|producer| StartupParticipant::producer(producer))
         .chain(
-            TRAINING_SOURCE_KINDS
+            training_source_kinds()
                 .iter()
                 .map(|source_kind| StartupParticipant::writer(source_kind)),
         )

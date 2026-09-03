@@ -3,6 +3,12 @@ use std::sync::Arc;
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use polymarket_client_sdk_v2::types::DateTime;
 use serde::{Deserialize, Serialize};
+
+use crate::polymarket_identity::{
+    PolymarketMarketIdentity, SourceAuthority, SourceEvidenceLocator, SourceReference,
+    VerifiedPolymarketMarketIdentity, source_reference_candidate_matches_authority,
+    source_reference_matches_authority,
+};
 use sha2::{Digest as _, Sha256};
 
 pub const POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION: &str = "polymarket_market_metadata_v2";
@@ -614,43 +620,6 @@ pub struct PolymarketMarketMetadataV5Row {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PolymarketMetadataReferenceRecord {
-    pub metadata_row_kind: String,
-    pub slug: String,
-    pub condition_id: String,
-    pub clob_market_id: String,
-    pub asset_ids: String,
-    pub market_start_utc: i64,
-    pub market_end_utc: i64,
-    pub fixed_identity_verified_at_utc: i64,
-    pub source_evidence_origin: Option<String>,
-    pub source_evidence_received_at_utc: Option<i64>,
-    pub source_evidence_raw_sha256: Option<String>,
-    pub source_evidence_payload_present: bool,
-}
-
-impl From<&PolymarketMarketMetadataRow> for PolymarketMetadataReferenceRecord {
-    fn from(row: &PolymarketMarketMetadataRow) -> Self {
-        Self {
-            metadata_row_kind: row.metadata_row_kind.as_str().to_owned(),
-            slug: row.slug.clone(),
-            condition_id: row.condition_id.clone(),
-            clob_market_id: row.clob_market_id.clone(),
-            asset_ids: row.asset_ids.clone(),
-            market_start_utc: row.market_start_utc,
-            market_end_utc: row.market_end_utc,
-            fixed_identity_verified_at_utc: row.fixed_identity_verified_at_utc,
-            source_evidence_origin: row
-                .source_evidence_origin
-                .map(|origin| origin.as_str().to_owned()),
-            source_evidence_received_at_utc: row.source_evidence_received_at_utc,
-            source_evidence_raw_sha256: row.source_evidence_raw_sha256.clone(),
-            source_evidence_payload_present: row.source_evidence_payload_json.is_some(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PolymarketMetadataReferenceIntegrityError {
     Missing { slug: String },
     Multiple { slug: String, matches: usize },
@@ -682,54 +651,49 @@ impl std::fmt::Display for PolymarketMetadataReferenceIntegrityError {
 impl std::error::Error for PolymarketMetadataReferenceIntegrityError {}
 
 pub fn validate_polymarket_metadata_local_references(
-    records: &[PolymarketMetadataReferenceRecord],
+    rows: &[PolymarketMarketMetadataRow],
 ) -> Result<(), PolymarketMetadataReferenceIntegrityError> {
-    for reference in records.iter().filter(|record| {
-        record.metadata_row_kind == PolymarketMetadataRowKind::MarketStateTransition.as_str()
-            && !record.source_evidence_payload_present
-    }) {
-        let Some(source_received_at_utc) = reference.source_evidence_received_at_utc else {
-            return Err(PolymarketMetadataReferenceIntegrityError::Missing {
-                slug: reference.slug.clone(),
-            });
-        };
-        let Some(reference_digest) = reference.source_evidence_raw_sha256.as_deref() else {
-            return Err(PolymarketMetadataReferenceIntegrityError::Missing {
-                slug: reference.slug.clone(),
-            });
-        };
-        let candidates = records
+    let authorities = rows
+        .iter()
+        .filter_map(source_authority_from_metadata_row)
+        .collect::<Vec<_>>();
+    let references = rows
+        .iter()
+        .filter_map(|row| source_reference_from_metadata_row(row).transpose())
+        .collect::<Result<Vec<_>, _>>()?;
+    validate_polymarket_source_references(&authorities, &references)
+}
+
+pub(crate) fn validate_polymarket_source_references(
+    authorities: &[SourceAuthority],
+    references: &[SourceReference],
+) -> Result<(), PolymarketMetadataReferenceIntegrityError> {
+    for reference in references {
+        let candidates = authorities
             .iter()
-            .filter(|candidate| {
-                candidate.source_evidence_payload_present
-                    && same_polymarket_metadata_fixed_identity(reference, candidate)
-                    && candidate.source_evidence_origin == reference.source_evidence_origin
-                    && candidate.source_evidence_received_at_utc == Some(source_received_at_utc)
-            })
+            .filter(|authority| source_reference_candidate_matches_authority(reference, authority))
             .collect::<Vec<_>>();
-        let authorities = candidates
+        let matches = candidates
             .iter()
             .copied()
-            .filter(|candidate| {
-                candidate.source_evidence_raw_sha256.as_deref() == Some(reference_digest)
-            })
+            .filter(|authority| source_reference_matches_authority(reference, authority))
             .collect::<Vec<_>>();
-        match authorities.as_slice() {
+        match matches.as_slice() {
             [] => {
                 if candidates.is_empty() {
                     return Err(PolymarketMetadataReferenceIntegrityError::Missing {
-                        slug: reference.slug.clone(),
+                        slug: reference.identity.market.slug.clone(),
                     });
                 }
                 return Err(PolymarketMetadataReferenceIntegrityError::DigestMismatch {
-                    slug: reference.slug.clone(),
+                    slug: reference.identity.market.slug.clone(),
                 });
             }
             [_authority] => {}
             _ => {
                 return Err(PolymarketMetadataReferenceIntegrityError::Multiple {
-                    slug: reference.slug.clone(),
-                    matches: authorities.len(),
+                    slug: reference.identity.market.slug.clone(),
+                    matches: matches.len(),
                 });
             }
         }
@@ -737,17 +701,62 @@ pub fn validate_polymarket_metadata_local_references(
     Ok(())
 }
 
-fn same_polymarket_metadata_fixed_identity(
-    left: &PolymarketMetadataReferenceRecord,
-    right: &PolymarketMetadataReferenceRecord,
-) -> bool {
-    left.slug == right.slug
-        && left.condition_id == right.condition_id
-        && left.clob_market_id == right.clob_market_id
-        && left.asset_ids == right.asset_ids
-        && left.market_start_utc == right.market_start_utc
-        && left.market_end_utc == right.market_end_utc
-        && left.fixed_identity_verified_at_utc == right.fixed_identity_verified_at_utc
+pub(crate) fn verified_identity_from_metadata_row(
+    row: &PolymarketMarketMetadataRow,
+) -> VerifiedPolymarketMarketIdentity {
+    VerifiedPolymarketMarketIdentity {
+        market: PolymarketMarketIdentity {
+            slug: row.slug.clone(),
+            condition_id: row.condition_id.clone(),
+            clob_market_id: row.clob_market_id.clone(),
+            ordered_up_down_asset_ids_json: row.asset_ids.clone(),
+            market_start_utc_ms: row.market_start_utc,
+            market_end_utc_ms: row.market_end_utc,
+        },
+        first_verified_at_utc_ms: row.fixed_identity_verified_at_utc,
+    }
+}
+
+pub(crate) fn source_authority_from_metadata_row(
+    row: &PolymarketMarketMetadataRow,
+) -> Option<SourceAuthority> {
+    row.source_evidence_payload_json.as_ref()?;
+    let raw_sha256 = row
+        .source_evidence_raw_sha256
+        .clone()
+        .filter(|digest| !digest.is_empty())?;
+    Some(SourceAuthority {
+        identity: verified_identity_from_metadata_row(row),
+        origin: row.source_evidence_origin?.as_str().to_owned(),
+        evidence: SourceEvidenceLocator {
+            received_at_utc_ms: row.source_evidence_received_at_utc?,
+            raw_sha256,
+        },
+    })
+}
+
+pub(crate) fn source_reference_from_metadata_row(
+    row: &PolymarketMarketMetadataRow,
+) -> Result<Option<SourceReference>, PolymarketMetadataReferenceIntegrityError> {
+    if row.metadata_row_kind != PolymarketMetadataRowKind::MarketStateTransition
+        || row.source_evidence_payload_json.is_some()
+    {
+        return Ok(None);
+    }
+    let missing = || PolymarketMetadataReferenceIntegrityError::Missing {
+        slug: row.slug.clone(),
+    };
+    Ok(Some(SourceReference {
+        identity: verified_identity_from_metadata_row(row),
+        origin: row
+            .source_evidence_origin
+            .map(|origin| origin.as_str().to_owned())
+            .ok_or_else(missing)?,
+        evidence: SourceEvidenceLocator {
+            received_at_utc_ms: row.source_evidence_received_at_utc.ok_or_else(missing)?,
+            raw_sha256: row.source_evidence_raw_sha256.clone().ok_or_else(missing)?,
+        },
+    }))
 }
 
 impl PolymarketMarketMetadataRow {

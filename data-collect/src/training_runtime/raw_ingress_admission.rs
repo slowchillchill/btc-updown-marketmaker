@@ -203,34 +203,13 @@ pub(super) async fn send_event_with_admission_outcome(
     enqueue_event_with_reservation_outcome(sink, run_started, event, None, Vec::new()).await
 }
 
-pub(super) async fn send_event_with_outcome(
-    sink: &SourceEventSink,
-    run_started: Instant,
-    event: RawEvent,
-) -> Result<bool> {
-    send_event_with_admission_outcome(sink, run_started, event)
-        .await
-        .map(|outcome| outcome != EventAdmissionOutcome::Cutoff)
-}
-
-pub(super) async fn send_event_with_reservation(
-    sink: &SourceEventSink,
-    run_started: Instant,
-    event: RawEvent,
-    existing_reservation: Option<InflightReservation>,
-) -> Result<()> {
-    send_event_with_reservation_outcome(sink, run_started, event, existing_reservation, Vec::new())
-        .await
-        .map(|_| ())
-}
-
 pub(super) async fn send_event_with_reservation_outcome(
     sink: &SourceEventSink,
     run_started: Instant,
     event: RawEvent,
     existing_reservation: Option<InflightReservation>,
     admission_gaps: Vec<String>,
-) -> Result<bool> {
+) -> Result<EventAdmissionOutcome> {
     enqueue_event_with_reservation_outcome(
         sink,
         run_started,
@@ -239,7 +218,6 @@ pub(super) async fn send_event_with_reservation_outcome(
         admission_gaps,
     )
     .await
-    .map(|outcome| outcome != EventAdmissionOutcome::Cutoff)
 }
 
 async fn enqueue_event_with_reservation_outcome(

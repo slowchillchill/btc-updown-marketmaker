@@ -23,7 +23,7 @@ async fn raw_day_gate_fences_boundary_events_until_normal_rollover_ack() {
     };
     let run_started = Instant::now();
 
-    assert!(
+    assert_eq!(
         send_event_with_reservation_outcome(
             &sink,
             run_started,
@@ -32,7 +32,8 @@ async fn raw_day_gate_fences_boundary_events_until_normal_rollover_ack() {
             vec!["old_day_gap_follows_event_admission_day".to_owned()],
         )
         .await
-        .unwrap()
+        .unwrap(),
+        EventAdmissionOutcome::Admitted
     );
     let before = rx.recv().await.unwrap();
     assert_eq!(
@@ -70,7 +71,6 @@ async fn raw_day_gate_fences_boundary_events_until_normal_rollover_ack() {
             vec!["deferred_gap_published_only_after_admission".to_owned()],
         )
         .await
-        .map(|_| ())
     });
     let after_boundary_sink = sink.clone();
     let after_boundary = tokio::spawn(async move {
@@ -81,7 +81,10 @@ async fn raw_day_gate_fences_boundary_events_until_normal_rollover_ack() {
         )
         .await
     });
-    at_boundary.await.unwrap().unwrap();
+    assert_eq!(
+        at_boundary.await.unwrap().unwrap(),
+        EventAdmissionOutcome::Deferred
+    );
     after_boundary.await.unwrap().unwrap();
     assert!(matches!(
         rx.try_recv(),
@@ -203,7 +206,7 @@ async fn controlled_rollover_cutoff_discards_pre_admission_staging_without_drop_
         enqueue_lock: Arc::new(AsyncMutex::new(())),
     };
 
-    assert!(
+    assert_eq!(
         send_event_with_reservation_outcome(
             &sink,
             Instant::now(),
@@ -212,7 +215,8 @@ async fn controlled_rollover_cutoff_discards_pre_admission_staging_without_drop_
             vec!["staged_gap_must_not_publish".to_owned()],
         )
         .await
-        .unwrap()
+        .unwrap(),
+        EventAdmissionOutcome::Deferred
     );
     {
         let deferred = stats
@@ -258,6 +262,19 @@ async fn controlled_rollover_cutoff_discards_pre_admission_staging_without_drop_
     assert!(gaps.lock().unwrap().is_empty());
     assert!(rx.try_recv().is_err());
 
+    assert_eq!(
+        send_event_with_reservation_outcome(
+            &sink,
+            Instant::now(),
+            test_raw_event("binance_aggtrade", boundary_utc_ms + 1),
+            None,
+            Vec::new(),
+        )
+        .await
+        .unwrap(),
+        EventAdmissionOutcome::Cutoff
+    );
+
     let post_gate = Arc::new(RawDayGate::new());
     post_gate
         .activate_startup(
@@ -285,7 +302,7 @@ async fn controlled_rollover_cutoff_discards_pre_admission_staging_without_drop_
         inflight_budget: post_budget.clone(),
         enqueue_lock: Arc::new(AsyncMutex::new(())),
     };
-    assert!(
+    assert_eq!(
         send_event_with_reservation_outcome(
             &post_sink,
             Instant::now(),
@@ -294,7 +311,8 @@ async fn controlled_rollover_cutoff_discards_pre_admission_staging_without_drop_
             vec!["post_activation_staged_gap_must_not_publish".to_owned()],
         )
         .await
-        .unwrap()
+        .unwrap(),
+        EventAdmissionOutcome::Deferred
     );
     commit_test_manifest_activation(&post_gate, &post_close);
     let PreparedRuntimeExit::SameDay(post_exit) = post_gate

@@ -383,8 +383,7 @@ fn create_closed_test_aggtrade_day(dataset_root: &Path) -> (PathBuf, PathBuf) {
     let final_path =
         write_test_aggtrade_recovery_file(&day_dir, "2026-07-13T23", 0, 100, 1, 1_783_987_100_000);
     let mut manifest =
-        reconcile_open_day_manifest(&day_dir, "2026-07-13", &test_daily_manifest_identity())
-            .unwrap();
+        reconcile_open_day_manifest(&day_dir, "2026-07-13", &test_artifact_identity()).unwrap();
     close_day_manifest(&day_dir, &mut manifest, "test_closed_day").unwrap();
     (day_dir, final_path)
 }
@@ -480,7 +479,7 @@ fn binance_aggtrade_dedupe_restores_id_and_complete_payload() {
 
     let day = utc_day_string_from_ms(recv_time_utc_ms).unwrap();
     let mut process_b =
-        restore_binance_aggtrade_recovery(&dataset_root, &day, &test_daily_manifest_identity())
+        restore_binance_aggtrade_recovery(&dataset_root, &day, &test_artifact_identity())
             .unwrap()
             .websocket_dedupe;
     assert_eq!(
@@ -724,12 +723,9 @@ fn binance_recovery_closes_prior_open_day_and_overlays_current_finalized_tail() 
     )
     .unwrap();
 
-    let recovered = restore_binance_aggtrade_recovery(
-        &dataset_root,
-        "2026-07-14",
-        &test_daily_manifest_identity(),
-    )
-    .unwrap();
+    let recovered =
+        restore_binance_aggtrade_recovery(&dataset_root, "2026-07-14", &test_artifact_identity())
+            .unwrap();
     let prior_manifest = load_day_manifest(&prior_day_dir).unwrap().unwrap();
     assert_eq!(prior_manifest["state"], "closed");
     assert_eq!(
@@ -784,12 +780,9 @@ fn binance_recovery_closes_prior_open_day_and_overlays_current_finalized_tail() 
     );
     current_writer.finalize().unwrap();
 
-    let recovered = restore_binance_aggtrade_recovery(
-        &dataset_root,
-        "2026-07-14",
-        &test_daily_manifest_identity(),
-    )
-    .unwrap();
+    let recovered =
+        restore_binance_aggtrade_recovery(&dataset_root, "2026-07-14", &test_artifact_identity())
+            .unwrap();
     assert_eq!(recovered.websocket_dedupe.len(), 3);
     let canonical = BinanceWsAggTrade::from_wire(
         &test_ws_aggtrade_value_at(102, 1_783_987_200_000),
@@ -857,12 +850,9 @@ fn binance_recovery_uses_closed_day_when_current_manifest_has_no_parquet() {
     )
     .unwrap();
 
-    let recovered = restore_binance_aggtrade_recovery(
-        &dataset_root,
-        "2026-07-14",
-        &test_daily_manifest_identity(),
-    )
-    .unwrap();
+    let recovered =
+        restore_binance_aggtrade_recovery(&dataset_root, "2026-07-14", &test_artifact_identity())
+            .unwrap();
     assert!(recovered.websocket_dedupe.is_empty());
     assert_eq!(
         load_day_manifest(&current_day_dir).unwrap().unwrap()["binance_aggtrade_continuity"],
@@ -881,7 +871,7 @@ fn binance_recovery_rejects_closed_day_file_set_changes_before_source_start() {
         let error = restore_binance_aggtrade_recovery(
             &dataset_root,
             "2026-07-14",
-            &test_daily_manifest_identity(),
+            &test_artifact_identity(),
         )
         .err()
         .expect("a closed-day missing file must stop recovery before sources start");
@@ -897,7 +887,7 @@ fn binance_recovery_rejects_closed_day_file_set_changes_before_source_start() {
         let error = restore_binance_aggtrade_recovery(
             &dataset_root,
             "2026-07-14",
-            &test_daily_manifest_identity(),
+            &test_artifact_identity(),
         )
         .err()
         .expect("a closed-day mutated file must stop recovery before sources start");
@@ -912,7 +902,7 @@ fn binance_recovery_rejects_closed_day_file_set_changes_before_source_start() {
         let error = restore_binance_aggtrade_recovery(
             &dataset_root,
             "2026-07-14",
-            &test_daily_manifest_identity(),
+            &test_artifact_identity(),
         )
         .err()
         .expect("a closed-day extra file must stop recovery before sources start");
@@ -934,7 +924,7 @@ fn binance_recovery_rejects_manifest_schema_and_identity_corruption_before_sourc
         let error = restore_binance_aggtrade_recovery(
             &dataset_root,
             "2026-07-14",
-            &test_daily_manifest_identity(),
+            &test_artifact_identity(),
         )
         .err()
         .expect("a wrong manifest schema must stop recovery before sources start");
@@ -952,7 +942,7 @@ fn binance_recovery_rejects_manifest_schema_and_identity_corruption_before_sourc
         let error = restore_binance_aggtrade_recovery(
             &dataset_root,
             "2026-07-14",
-            &test_daily_manifest_identity(),
+            &test_artifact_identity(),
         )
         .err()
         .expect("a missing manifest identity must stop recovery before sources start");
@@ -967,8 +957,8 @@ fn binance_recovery_rejects_manifest_schema_and_identity_corruption_before_sourc
         let dataset_root = tmp.path().canonicalize().unwrap();
         let day_dir = dataset_root.join("training/typed_raw/utc_day=2026-07-14");
         write_test_aggtrade_recovery_file(&day_dir, "2026-07-14T00", 0, 100, 1, 1_783_987_200_000);
-        let mut wrong_identity = test_daily_manifest_identity();
-        wrong_identity.config_digest = "different-config".to_owned();
+        let mut wrong_identity = test_artifact_identity();
+        wrong_identity.source_config_digest = "different-config".to_owned();
 
         let error = restore_binance_aggtrade_recovery(&dataset_root, "2026-07-14", &wrong_identity)
             .err()
@@ -998,7 +988,7 @@ fn startup_recovery_crossing_midnight_closes_prior_day_before_source_constructio
     .into_iter();
 
     let startup =
-        reconcile_stable_startup_recovery(&dataset_root, &test_daily_manifest_identity(), || {
+        reconcile_stable_startup_recovery(&dataset_root, &test_artifact_identity(), || {
             clock.next().expect("startup recovery clock sample")
         })
         .unwrap();
@@ -1056,13 +1046,12 @@ fn startup_recovery_clock_regression_fails_closed_at_every_sample_boundary() {
         let dataset_root = tmp.path().canonicalize().unwrap();
         let mut clock = samples.iter().copied();
 
-        let error = reconcile_stable_startup_recovery(
-            &dataset_root,
-            &test_daily_manifest_identity(),
-            || clock.next().expect("startup recovery clock sample"),
-        )
-        .err()
-        .expect("a regressing startup clock must fail closed");
+        let error =
+            reconcile_stable_startup_recovery(&dataset_root, &test_artifact_identity(), || {
+                clock.next().expect("startup recovery clock sample")
+            })
+            .err()
+            .expect("a regressing startup clock must fail closed");
         let message = error.to_string();
         assert!(
             message.contains("UTC clock moved backward during startup recovery"),
@@ -1082,7 +1071,7 @@ fn startup_recovery_clock_regression_fails_closed_at_every_sample_boundary() {
     let tmp = tempdir().unwrap();
     let dataset_root = tmp.path().canonicalize().unwrap();
     let mut equal_clock = [1_783_987_100_000; 3].into_iter();
-    reconcile_stable_startup_recovery(&dataset_root, &test_daily_manifest_identity(), || {
+    reconcile_stable_startup_recovery(&dataset_root, &test_artifact_identity(), || {
         equal_clock.next().expect("startup recovery clock sample")
     })
     .expect("equal millisecond samples must remain valid");
@@ -1121,13 +1110,10 @@ fn binance_recovery_keeps_only_the_latest_fixed_id_window() {
     );
     writer.finalize().unwrap();
 
-    let mut recovered = restore_binance_aggtrade_recovery(
-        &dataset_root,
-        "2026-07-13",
-        &test_daily_manifest_identity(),
-    )
-    .unwrap()
-    .websocket_dedupe;
+    let mut recovered =
+        restore_binance_aggtrade_recovery(&dataset_root, "2026-07-13", &test_artifact_identity())
+            .unwrap()
+            .websocket_dedupe;
     assert_eq!(recovered.len(), BINANCE_AGGTRADE_RECOVERY_IDS);
     let canonical = |id| {
         let timestamp = 1_783_900_800_000 + i64::try_from(id).unwrap();

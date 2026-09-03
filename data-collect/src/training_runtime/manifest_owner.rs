@@ -123,7 +123,7 @@ pub(super) struct ManifestRolloverRendezvous {
 
 pub(super) struct ManifestOwnerState {
     dataset_root: PathBuf,
-    identity: DailyManifestIdentity,
+    identity: TrainingArtifactIdentity,
     manifests: BTreeMap<String, Value>,
     activation_attempts: BTreeSet<String>,
     pub(super) active_epoch: Option<ManifestActiveEpoch>,
@@ -131,7 +131,7 @@ pub(super) struct ManifestOwnerState {
 }
 
 impl ManifestOwnerState {
-    pub(super) fn new(dataset_root: PathBuf, identity: DailyManifestIdentity) -> Self {
+    pub(super) fn new(dataset_root: PathBuf, identity: TrainingArtifactIdentity) -> Self {
         Self {
             dataset_root,
             identity,
@@ -297,7 +297,7 @@ impl ManifestOwnerState {
         close: RawDayClose,
         source_kind: String,
     ) -> Result<Option<ManifestRolloverReady>> {
-        if !TRAINING_SOURCE_KINDS.contains(&source_kind.as_str()) {
+        if !training_source_kinds().contains(&source_kind.as_str()) {
             return Err(invalid_data(format!("unknown writer finalize ack: {source_kind}")).into());
         }
         self.ensure_rollover_identity(&close)?;
@@ -389,7 +389,7 @@ impl ManifestOwnerState {
     fn maybe_mark_rollover_ready(&mut self) -> Result<Option<ManifestRolloverReady>> {
         let rollover = self.rollover.as_mut().expect("rollover was ensured");
         if rollover.producer_barriers.len() != LOGICAL_PRODUCERS.len()
-            || rollover.writer_finalize_acks.len() != TRAINING_SOURCE_KINDS.len()
+            || rollover.writer_finalize_acks.len() != training_source_kinds().len()
         {
             return Ok(None);
         }
@@ -430,7 +430,7 @@ impl ManifestOwnerState {
         if rollover.close != ready.close
             || !rollover.ready_sent
             || rollover.producer_barriers.len() != LOGICAL_PRODUCERS.len()
-            || rollover.writer_finalize_acks.len() != TRAINING_SOURCE_KINDS.len()
+            || rollover.writer_finalize_acks.len() != training_source_kinds().len()
         {
             return Err(invalid_data(format!(
                 "rollover ready witness lacks the complete owner rendezvous: ready={ready:?}"
@@ -457,7 +457,7 @@ impl ManifestOwnerState {
             || !rollover.ready_sent
             || rollover.old_day_mode.is_some()
             || rollover.producer_barriers.len() != LOGICAL_PRODUCERS.len()
-            || rollover.writer_finalize_acks.len() != TRAINING_SOURCE_KINDS.len()
+            || rollover.writer_finalize_acks.len() != training_source_kinds().len()
         {
             return Err(invalid_data(format!(
                 "rollover commit identity/readiness mismatch: requested={close:?}"
@@ -661,7 +661,7 @@ impl ManifestOwnerState {
 
 pub(super) fn required_source_counter_defaults() -> BTreeMap<String, SourceOperationalCounterDelta>
 {
-    TRAINING_SOURCE_KINDS
+    training_source_kinds()
         .iter()
         .map(|source_kind| {
             (

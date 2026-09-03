@@ -81,7 +81,7 @@ pub(super) struct StableStartupRecovery {
 
 pub(super) fn reconcile_stable_startup_recovery<F>(
     dataset_root: &Path,
-    identity: &DailyManifestIdentity,
+    identity: &TrainingArtifactIdentity,
     mut clock_ms: F,
 ) -> Result<StableStartupRecovery>
 where
@@ -152,7 +152,7 @@ where
 pub(super) fn restore_binance_aggtrade_recovery(
     dataset_root: &Path,
     current_day: &str,
-    current_identity: &DailyManifestIdentity,
+    current_identity: &TrainingArtifactIdentity,
 ) -> Result<BinanceAggTradeRecovery> {
     let days = utc_day_directories(dataset_root)?;
     if let Some((future_day, _)) = days.iter().find(|(day, _)| day.as_str() > current_day) {

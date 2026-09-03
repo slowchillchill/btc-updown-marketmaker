@@ -132,31 +132,34 @@ async fn aggtrade_max_websocket_invalid_releases_constrained_budget_after_queue(
         inflight_budget: budget.clone(),
         enqueue_lock: Arc::new(AsyncMutex::new(())),
     };
-    emit_aggtrade_websocket_invalid(
-        vec![b'x'; BINANCE_AGGTRADE_INVALID_INPUT_MAX_BYTES],
-        recv_time_utc_ms,
-        BinanceAggTradeIngressCoordinate::Websocket { sequence: 1 },
-        BinanceAggTradeInvalidReason::InvalidJson,
-        "max_capture",
-        &sink,
-        &CollectorIdentity {
-            host_id: "collector-test".to_owned(),
-            region: "local-test".to_owned(),
-        },
-        &BinanceWsSpec {
-            source_kind: "binance_aggtrade".to_owned(),
-            default_event_type: "aggTrade".to_owned(),
-            url: BINANCE_AGGTRADE_WS_ENDPOINT.to_owned(),
-            frame_inactivity_timeout_secs: 30,
-            recovery_wait_override: None,
-        },
-        "test-source-epoch",
-        1,
-        Instant::now(),
-        staging_reservation,
-    )
-    .await
-    .unwrap();
+    assert_eq!(
+        emit_aggtrade_websocket_invalid(
+            vec![b'x'; BINANCE_AGGTRADE_INVALID_INPUT_MAX_BYTES],
+            recv_time_utc_ms,
+            BinanceAggTradeIngressCoordinate::Websocket { sequence: 1 },
+            BinanceAggTradeInvalidReason::InvalidJson,
+            "max_capture",
+            &sink,
+            &CollectorIdentity {
+                host_id: "collector-test".to_owned(),
+                region: "local-test".to_owned(),
+            },
+            &BinanceWsSpec {
+                source_kind: "binance_aggtrade".to_owned(),
+                default_event_type: "aggTrade".to_owned(),
+                url: BINANCE_AGGTRADE_WS_ENDPOINT.to_owned(),
+                frame_inactivity_timeout_secs: 30,
+                recovery_wait_override: None,
+            },
+            "test-source-epoch",
+            1,
+            Instant::now(),
+            staging_reservation,
+        )
+        .await
+        .unwrap(),
+        EventAdmissionOutcome::Admitted
+    );
 
     let queued = rx.recv().await.unwrap();
     assert_eq!(queued.event.source_event_type, "invalid_input");
@@ -166,6 +169,119 @@ async fn aggtrade_max_websocket_invalid_releases_constrained_budget_after_queue(
     assert_ne!(budget.available(), (max_rows, max_bytes));
     drop(queued);
     assert_eq!(budget.available(), (max_rows, max_bytes));
+}
+
+#[tokio::test]
+async fn aggtrade_invalid_admission_preserves_deferred_and_cutoff_outcomes() {
+    let boundary_utc_ms = 1_783_468_800_000;
+    let gate = Arc::new(RawDayGate::new());
+    gate.activate_startup(
+        utc_day_string_from_ms(boundary_utc_ms - 1).unwrap(),
+        INITIAL_RAW_DAY_GENERATION,
+    )
+    .await
+    .unwrap();
+    gate.close_for_rollover("2026-07-07", boundary_utc_ms)
+        .await
+        .unwrap();
+    let stats = Arc::new(SourceQueueBackpressureStats::default());
+    stats.install_raw_day_gate(Arc::clone(&gate)).unwrap();
+    let budget = InflightBudget::new();
+    let (tx, mut rx) = mpsc::channel(2);
+    let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+    let sink = SourceEventSink {
+        tx,
+        gaps: Arc::clone(&gaps),
+        source_queue_backpressure: Arc::clone(&stats),
+        inflight_budget: budget.clone(),
+        enqueue_lock: Arc::new(AsyncMutex::new(())),
+    };
+    let collector_identity = CollectorIdentity {
+        host_id: "collector-test".to_owned(),
+        region: "local-test".to_owned(),
+    };
+    let spec = BinanceWsSpec {
+        source_kind: "binance_aggtrade".to_owned(),
+        default_event_type: "aggTrade".to_owned(),
+        url: BINANCE_AGGTRADE_WS_ENDPOINT.to_owned(),
+        frame_inactivity_timeout_secs: 30,
+        recovery_wait_override: None,
+    };
+    let raw_bytes = b"{not-json".to_vec();
+    let staging_bytes = aggtrade_websocket_staging_bytes(raw_bytes.len(), true).unwrap();
+    let deferred_reservation = budget
+        .acquire(1, staging_bytes, BUFFER_ACQUIRE_TIMEOUT)
+        .await
+        .unwrap();
+    assert_eq!(
+        emit_aggtrade_websocket_invalid(
+            raw_bytes.clone(),
+            boundary_utc_ms,
+            BinanceAggTradeIngressCoordinate::Websocket { sequence: 1 },
+            BinanceAggTradeInvalidReason::InvalidJson,
+            "deferred_invalid",
+            &sink,
+            &collector_identity,
+            &spec,
+            "test-source-epoch",
+            1,
+            Instant::now(),
+            deferred_reservation,
+        )
+        .await
+        .unwrap(),
+        EventAdmissionOutcome::Deferred
+    );
+    assert!(matches!(
+        rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    assert_eq!(
+        stats
+            .deferred_ingress_batches
+            .lock()
+            .expect("deferred raw-event mutex poisoned")["binance_aggtrade"]
+            .len(),
+        1
+    );
+
+    let PreparedRuntimeExit::Rollover(_) = gate
+        .prepare_runtime_exit_with_cause(boundary_utc_ms + 1, RuntimeCloseCause::OperatorStop)
+        .unwrap()
+    else {
+        panic!("post-boundary operator stop must remain a pending exit");
+    };
+    let available_before_cutoff = budget.available();
+    let cutoff_reservation = budget
+        .acquire(1, staging_bytes, BUFFER_ACQUIRE_TIMEOUT)
+        .await
+        .unwrap();
+    assert_eq!(
+        emit_aggtrade_websocket_invalid(
+            raw_bytes,
+            boundary_utc_ms + 1,
+            BinanceAggTradeIngressCoordinate::Websocket { sequence: 2 },
+            BinanceAggTradeInvalidReason::InvalidJson,
+            "cutoff_invalid",
+            &sink,
+            &collector_identity,
+            &spec,
+            "test-source-epoch",
+            1,
+            Instant::now(),
+            cutoff_reservation,
+        )
+        .await
+        .unwrap(),
+        EventAdmissionOutcome::Cutoff
+    );
+    assert_eq!(budget.available(), available_before_cutoff);
+    assert!(matches!(
+        rx.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    assert!(gaps.lock().unwrap().is_empty());
+    assert_eq!(stats.dropped_rows.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]
@@ -234,7 +350,7 @@ async fn assert_binance_reconnects_after(first_message: Option<Message>) {
         restore_binance_aggtrade_recovery(
             &dataset_root_path,
             &utc_day_string_from_ms(now_ms()).unwrap(),
-            &test_daily_manifest_identity(),
+            &test_artifact_identity(),
         )
         .unwrap(),
         BinanceWsSpec {
@@ -303,7 +419,7 @@ async fn binance_handshake_failure_recovers_without_allocating_a_connection_gene
         restore_binance_aggtrade_recovery(
             &dataset_root_path,
             &utc_day_string_from_ms(now_ms()).unwrap(),
-            &test_daily_manifest_identity(),
+            &test_artifact_identity(),
         )
         .unwrap(),
         BinanceWsSpec {
@@ -373,7 +489,7 @@ async fn binance_frame_inactivity_reconnects_with_stable_epoch_and_no_gap() {
         restore_binance_aggtrade_recovery(
             &dataset_root_path,
             &utc_day_string_from_ms(now_ms()).unwrap(),
-            &test_daily_manifest_identity(),
+            &test_artifact_identity(),
         )
         .unwrap(),
         BinanceWsSpec {
@@ -452,7 +568,7 @@ async fn binance_protocol_error_reconnects_in_process_without_gap() {
         restore_binance_aggtrade_recovery(
             &dataset_root_path,
             &utc_day_string_from_ms(now_ms()).unwrap(),
-            &test_daily_manifest_identity(),
+            &test_artifact_identity(),
         )
         .unwrap(),
         BinanceWsSpec {
@@ -532,7 +648,7 @@ async fn binance_one_hundred_reconnects_keep_one_source_loop_and_reach_generatio
         restore_binance_aggtrade_recovery(
             &dataset_root_path,
             &utc_day_string_from_ms(now_ms()).unwrap(),
-            &test_daily_manifest_identity(),
+            &test_artifact_identity(),
         )
         .unwrap(),
         BinanceWsSpec {
@@ -625,7 +741,7 @@ async fn binance_ping_keeps_socket_alive_during_business_silence() {
         restore_binance_aggtrade_recovery(
             &dataset_root_path,
             &utc_day_string_from_ms(now_ms()).unwrap(),
-            &test_daily_manifest_identity(),
+            &test_artifact_identity(),
         )
         .unwrap(),
         BinanceWsSpec {
@@ -708,7 +824,7 @@ async fn binance_aggtrade_id_jump_is_forwarded_immediately_without_reconnect_or_
         restore_binance_aggtrade_recovery(
             &dataset_root_path,
             &utc_day_string_from_ms(now_ms()).unwrap(),
-            &test_daily_manifest_identity(),
+            &test_artifact_identity(),
         )
         .unwrap(),
         BinanceWsSpec {
@@ -823,7 +939,7 @@ async fn binance_aggtrade_payload_conflict_preserves_both_facts_and_records_conf
         restore_binance_aggtrade_recovery(
             &dataset_root_path,
             &utc_day_string_from_ms(now_ms()).unwrap(),
-            &test_daily_manifest_identity(),
+            &test_artifact_identity(),
         )
         .unwrap(),
         BinanceWsSpec {
@@ -943,7 +1059,7 @@ async fn binance_aggtrade_invalid_text_frames_are_preserved_and_same_socket_cont
         restore_binance_aggtrade_recovery(
             &dataset_root_path,
             &utc_day_string_from_ms(now_ms()).unwrap(),
-            &test_daily_manifest_identity(),
+            &test_artifact_identity(),
         )
         .unwrap(),
         BinanceWsSpec {
@@ -1101,7 +1217,7 @@ async fn binance_aggtrade_binary_is_exact_and_oversize_is_bounded_before_reconne
         restore_binance_aggtrade_recovery(
             &dataset_root_path,
             &utc_day_string_from_ms(now_ms()).unwrap(),
-            &test_daily_manifest_identity(),
+            &test_artifact_identity(),
         )
         .unwrap(),
         BinanceWsSpec {

@@ -6,14 +6,13 @@ use data_collect::polymarket_market_metadata_layout::{
     POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION,
     POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION, PolymarketMarketMetadataRow,
     PolymarketMarketMetadataV4Row, PolymarketMarketMetadataV5Row, PolymarketMetadataOrigin,
-    PolymarketMetadataReferenceIntegrityError, PolymarketMetadataReferenceRecord,
-    PolymarketMetadataRowKind, ResolutionEvidenceSource, ResolutionFollowupStatus,
-    ResolutionIntegrityErrorClass, ResolutionPollResult, ResolutionTransportErrorClass,
-    ResponseFieldsUnavailableReason, SourceEndpointUnavailableReason, SourceEvidenceChannel,
-    SourceEvidenceEventType, SourceEvidenceOrigin, TerminalClaimOwner,
-    TerminalPredicateFailureReason, polymarket_market_metadata_v3_schema,
-    polymarket_market_metadata_v4_schema, polymarket_market_metadata_v5_schema,
-    validate_polymarket_metadata_local_references,
+    PolymarketMetadataReferenceIntegrityError, PolymarketMetadataRowKind, ResolutionEvidenceSource,
+    ResolutionFollowupStatus, ResolutionIntegrityErrorClass, ResolutionPollResult,
+    ResolutionTransportErrorClass, ResponseFieldsUnavailableReason,
+    SourceEndpointUnavailableReason, SourceEvidenceChannel, SourceEvidenceEventType,
+    SourceEvidenceOrigin, TerminalClaimOwner, TerminalPredicateFailureReason,
+    polymarket_market_metadata_v3_schema, polymarket_market_metadata_v4_schema,
+    polymarket_market_metadata_v5_schema, validate_polymarket_metadata_local_references,
 };
 use data_collect::sources::polymarket::{
     GammaTerminalAttemptContext, GammaTerminalFixedIdentity, GammaTerminalResponse,
@@ -1242,34 +1241,30 @@ fn five_v3_row_kinds_and_local_reference_rules_remain_frozen() {
         row.collector_admission_sequence = index as u64 + 1;
     }
 
-    let references = rows
-        .iter()
-        .map(PolymarketMetadataReferenceRecord::from)
-        .collect::<Vec<_>>();
-    validate_polymarket_metadata_local_references(&references).unwrap();
+    validate_polymarket_metadata_local_references(&rows).unwrap();
 
-    let mut unique_digest_collision = references.clone();
-    let mut different_payload = references[0].clone();
+    let mut unique_digest_collision = rows.to_vec();
+    let mut different_payload = rows[0].clone();
     different_payload.source_evidence_raw_sha256 = Some("f".repeat(64));
     unique_digest_collision.push(different_payload);
     validate_polymarket_metadata_local_references(&unique_digest_collision)
         .expect("the full reference tuple must select the unique matching digest");
 
-    let mut missing = references.clone();
+    let mut missing = rows.to_vec();
     missing.remove(0);
     assert!(matches!(
         validate_polymarket_metadata_local_references(&missing),
         Err(PolymarketMetadataReferenceIntegrityError::Missing { .. })
     ));
 
-    let mut duplicate = references.clone();
-    duplicate.push(references[0].clone());
+    let mut duplicate = rows.to_vec();
+    duplicate.push(rows[0].clone());
     assert!(matches!(
         validate_polymarket_metadata_local_references(&duplicate),
         Err(PolymarketMetadataReferenceIntegrityError::Multiple { matches: 2, .. })
     ));
 
-    let mut digest_mismatch = references;
+    let mut digest_mismatch = rows.to_vec();
     digest_mismatch[0].source_evidence_raw_sha256 = Some("0".repeat(64));
     assert!(matches!(
         validate_polymarket_metadata_local_references(&digest_mismatch),
@@ -1484,11 +1479,10 @@ fn v3_subtype_contracts_cover_transition_attempt_and_summary_variants() {
         late_transition.source_evidence_received_at_utc;
     late_end_transition.source_evidence_raw_sha256 =
         late_transition.source_evidence_raw_sha256.clone();
-    validate_polymarket_metadata_local_references(&[
-        PolymarketMetadataReferenceRecord::from(&late_transition),
-        PolymarketMetadataReferenceRecord::from(&late_end_transition),
-    ])
-    .expect("late candidate-to-active evidence must be the unique authority for its E transition");
+    validate_polymarket_metadata_local_references(&[late_transition.clone(), late_end_transition])
+        .expect(
+            "late candidate-to-active evidence must be the unique authority for its E transition",
+        );
 
     for (name, row) in [
         ("late_transition", late_transition),

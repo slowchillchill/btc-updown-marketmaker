@@ -47,8 +47,8 @@ data-collect-training-collector
 文件。数据消费方只能读取最终化 Parquet 和满足自身准入合同的已关闭日期；不得读取
 `.running`。
 
-`real_source_alignment_probe` 是操作员显式运行的本地验证二进制程序，不是生产角色，也不
-部署到服务器：
+`real_source_alignment_probe` 是唯一显式真实源验证程序，由操作员在本地运行；它不是
+生产角色，也不部署到服务器：
 
 ```bash
 cargo run --release --locked --offline -p data-collect --bin real_source_alignment_probe
@@ -70,6 +70,8 @@ Parquet 写入，也不把构造请求冒充真实出站帧证据。
 `model-train` 读取，但只用于血缘、审计和质量诊断；这些事实不得参与训练准入或放行，
 也不得进入 Observation、特征、标签、训练样本、训练切分、样本选择、模型输入或任何决策
 触发。训练数据和模型输入只能来自版本化 `data-pipeline(training)`（DPT）输出。
+`source_counters[*].rows` 是规范行数；同值的 `written_rows` 仅为
+`data_collect_daily_manifest_v3` 兼容镜像，新消费者不得依赖它。
 
 ## 3. 模拟盘、实盘 CLI 与当前输出
 
@@ -105,9 +107,8 @@ data-collect-{paper|live}-hot
 `frame_type=source_status`、`status=heartbeat`，正常结束时删除套接字。当前代码
 没有对不可信运行标识提供回执路径失败即关闭保证。
 
-代码中已有 `external_market_event`、数据源证据和深度证据的版本化帧类型与校验器，
-但当前两个热路径二进制程序没有真实数据源生产者接线。这些类型是后续适配器的合同基础，
-不是“真实市场事件流已实现”的证据。
+当前交接合同仅包含上述 `source_status` 心跳，不包含市场事件、数据源证据或深度证据帧。
+未来外部事件适配器须在实际实施的新 Issue 中另行定义合同。
 
 ## 4. 时间戳与职责所有权
 

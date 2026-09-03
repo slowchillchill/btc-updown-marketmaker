@@ -181,7 +181,7 @@ async fn committed_rollover_with_dropped_ack_does_not_reopen_raw_gate() {
             .await
             .unwrap();
     }
-    for source_kind in TRAINING_SOURCE_KINDS {
+    for source_kind in training_source_kinds() {
         manifest_tx
             .send(ManifestCommand::WriterDayFinalized {
                 close: close.clone(),
@@ -312,7 +312,7 @@ async fn activation_prepared_exit_wins_without_new_day_activation_or_resume() {
             .await
             .unwrap();
     }
-    for source_kind in TRAINING_SOURCE_KINDS {
+    for source_kind in training_source_kinds() {
         manifest_tx
             .send(ManifestCommand::WriterDayFinalized {
                 close: close.clone(),

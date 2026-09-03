@@ -11,7 +11,16 @@ pub enum SourceKind {
 }
 
 impl SourceKind {
-    pub fn as_str(self) -> &'static str {
+    pub const ALL: [Self; 6] = [
+        Self::PolymarketMarket,
+        Self::PolymarketMarketMetadata,
+        Self::BinanceDepthSnapshot,
+        Self::BinanceDepthUpdate,
+        Self::BinanceAggTrade,
+        Self::PolymarketRtdsChainlinkBtcUsd,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::PolymarketMarket => "polymarket_market",
             Self::PolymarketMarketMetadata => "polymarket_market_metadata",
@@ -20,6 +29,17 @@ impl SourceKind {
             Self::BinanceAggTrade => "binance_aggtrade",
             Self::PolymarketRtdsChainlinkBtcUsd => "polymarket_rtds_chainlink_btc_usd",
         }
+    }
+}
+
+impl std::str::FromStr for SourceKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|source_kind| source_kind.as_str() == value)
+            .ok_or_else(|| format!("unknown source kind: {value}"))
     }
 }
 

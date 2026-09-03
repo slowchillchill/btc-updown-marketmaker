@@ -72,20 +72,10 @@ pub struct SourceOperationalCounterDelta {
 #[derive(Clone, Debug, PartialEq)]
 pub struct DailyFinalizedFileDelta {
     pub utc_day: String,
-    pub source_kind: String,
-    pub utc_hour: String,
-    pub part: u32,
     pub final_path: PathBuf,
-    pub rows: u64,
     pub bytes: u64,
     pub sha256: String,
-    pub schema_version: String,
-    pub first_recv_time_utc_ms: i64,
-    pub last_recv_time_utc_ms: i64,
-    pub source_timestamp_start: Option<String>,
-    pub source_timestamp_end: Option<String>,
-    pub event_type_counts: BTreeMap<String, u64>,
-    pub facts: Value,
+    pub recovery_metadata: DailyFileRecoveryMetadata,
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
@@ -104,11 +94,19 @@ pub struct DailyFileRecoveryMetadata {
     pub facts: Value,
 }
 
+impl std::ops::Deref for DailyFinalizedFileDelta {
+    type Target = DailyFileRecoveryMetadata;
+
+    fn deref(&self) -> &Self::Target {
+        &self.recovery_metadata
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DailyManifestIdentity {
-    pub build_commit: String,
+pub struct TrainingArtifactIdentity {
+    pub git_commit: String,
     pub collector_binary_sha256: String,
-    pub config_digest: String,
+    pub source_config_digest: String,
     pub collector_host_id: String,
     pub collector_region: String,
 }
@@ -1156,7 +1154,7 @@ pub fn close_reconciled_day_manifest(day_dir: &Path, manifest: &mut Value) -> io
 pub fn reconcile_open_day_manifest(
     day_dir: &Path,
     utc_day: &str,
-    identity: &DailyManifestIdentity,
+    identity: &TrainingArtifactIdentity,
 ) -> io::Result<Value> {
     fs::create_dir_all(day_dir)?;
     ensure_no_stale_temporary_files(day_dir)?;
@@ -1166,9 +1164,9 @@ pub fn reconcile_open_day_manifest(
             "schema_version": DAILY_MANIFEST_SCHEMA_VERSION,
             "utc_day": utc_day,
             "state": "open",
-            "build_commit": identity.build_commit,
+            "build_commit": identity.git_commit,
             "collector_binary_sha256": identity.collector_binary_sha256,
-            "config_digest": identity.config_digest,
+            "config_digest": identity.source_config_digest,
             "collector_host_id": identity.collector_host_id,
             "collector_region": identity.collector_region,
             "files": [],
@@ -1532,7 +1530,7 @@ pub fn validate_manifest_recovery_files(
 
 pub fn validate_unmanifested_recovery_files(
     day_dir: &Path,
-    identity: &DailyManifestIdentity,
+    identity: &TrainingArtifactIdentity,
 ) -> io::Result<()> {
     ensure_no_stale_temporary_files(day_dir)?;
     finalized_file_facts(day_dir, identity).map(|_| ())
@@ -1566,7 +1564,7 @@ fn reconciled_manifest_file_facts(
 
 fn finalized_file_facts(
     day_dir: &Path,
-    identity: &DailyManifestIdentity,
+    identity: &TrainingArtifactIdentity,
 ) -> io::Result<Vec<Value>> {
     let mut facts = Vec::new();
     for source_entry in fs::read_dir(day_dir)? {
@@ -1958,16 +1956,19 @@ fn validate_recovery_collection_facts(
 
 fn validate_recovery_collection_identity(
     facts: &Value,
-    identity: &DailyManifestIdentity,
+    identity: &TrainingArtifactIdentity,
     file_name: &str,
 ) -> io::Result<()> {
     for (field, expected) in [
-        ("code_version", identity.build_commit.as_str()),
+        ("code_version", identity.git_commit.as_str()),
         (
             "collector_binary_sha256",
             identity.collector_binary_sha256.as_str(),
         ),
-        ("source_config_digest", identity.config_digest.as_str()),
+        (
+            "source_config_digest",
+            identity.source_config_digest.as_str(),
+        ),
         ("collector_host_id", identity.collector_host_id.as_str()),
         ("collector_region", identity.collector_region.as_str()),
     ] {
@@ -2016,14 +2017,9 @@ fn source_counters_from_files(files: &[Value], existing: Option<&Value>) -> Valu
         let file_count = object.get("files").and_then(Value::as_u64).unwrap_or(0);
         object.insert("files".to_owned(), json!(file_count.saturating_add(1)));
         let rows = object.get("rows").and_then(Value::as_u64).unwrap_or(0);
-        object.insert(
-            "rows".to_owned(),
-            json!(rows.saturating_add(file["rows"].as_u64().unwrap_or(0))),
-        );
-        object.insert(
-            "written_rows".to_owned(),
-            json!(rows.saturating_add(file["rows"].as_u64().unwrap_or(0))),
-        );
+        let updated_rows = rows.saturating_add(file["rows"].as_u64().unwrap_or(0));
+        object.insert("rows".to_owned(), json!(updated_rows));
+        object.insert("written_rows".to_owned(), json!(updated_rows));
         let backfill_rows = object
             .get("backfill_rows")
             .and_then(Value::as_u64)
@@ -2178,22 +2174,22 @@ fn invalid_part(file_name: &str) -> io::Error {
     )
 }
 
-fn require_identity(manifest: &Value, identity: &DailyManifestIdentity) -> io::Result<()> {
+fn require_identity(manifest: &Value, identity: &TrainingArtifactIdentity) -> io::Result<()> {
     let actual_identity = manifest_identity(manifest)?;
     for (field, expected) in [
-        ("build_commit", identity.build_commit.as_str()),
+        ("build_commit", identity.git_commit.as_str()),
         (
             "collector_binary_sha256",
             identity.collector_binary_sha256.as_str(),
         ),
-        ("config_digest", identity.config_digest.as_str()),
+        ("config_digest", identity.source_config_digest.as_str()),
         ("collector_host_id", identity.collector_host_id.as_str()),
         ("collector_region", identity.collector_region.as_str()),
     ] {
         let actual = match field {
-            "build_commit" => actual_identity.build_commit.as_str(),
+            "build_commit" => actual_identity.git_commit.as_str(),
             "collector_binary_sha256" => actual_identity.collector_binary_sha256.as_str(),
-            "config_digest" => actual_identity.config_digest.as_str(),
+            "config_digest" => actual_identity.source_config_digest.as_str(),
             "collector_host_id" => actual_identity.collector_host_id.as_str(),
             "collector_region" => actual_identity.collector_region.as_str(),
             _ => unreachable!("identity field list is fixed"),
@@ -2210,7 +2206,7 @@ fn require_identity(manifest: &Value, identity: &DailyManifestIdentity) -> io::R
     Ok(())
 }
 
-fn manifest_identity(manifest: &Value) -> io::Result<DailyManifestIdentity> {
+fn manifest_identity(manifest: &Value) -> io::Result<TrainingArtifactIdentity> {
     let required = |field: &str| {
         manifest
             .get(field)
@@ -2224,10 +2220,10 @@ fn manifest_identity(manifest: &Value) -> io::Result<DailyManifestIdentity> {
                 )
             })
     };
-    Ok(DailyManifestIdentity {
-        build_commit: required("build_commit")?,
+    Ok(TrainingArtifactIdentity {
+        git_commit: required("build_commit")?,
         collector_binary_sha256: required("collector_binary_sha256")?,
-        config_digest: required("config_digest")?,
+        source_config_digest: required("config_digest")?,
         collector_host_id: required("collector_host_id")?,
         collector_region: required("collector_region")?,
     })
@@ -2253,11 +2249,11 @@ mod tests {
     const TEST_DAY_START_MS: i64 = 1_784_246_400_000;
     const TEST_DAY_END_MS: i64 = 1_784_332_800_000;
 
-    fn test_identity() -> DailyManifestIdentity {
-        DailyManifestIdentity {
-            build_commit: "test-build".to_owned(),
+    fn test_identity() -> TrainingArtifactIdentity {
+        TrainingArtifactIdentity {
+            git_commit: "test-build".to_owned(),
             collector_binary_sha256: "test-binary".to_owned(),
-            config_digest: "test-config".to_owned(),
+            source_config_digest: "test-config".to_owned(),
             collector_host_id: "test-host".to_owned(),
             collector_region: "test-region".to_owned(),
         }
@@ -2269,9 +2265,9 @@ mod tests {
             "schema_version": DAILY_MANIFEST_SCHEMA_VERSION,
             "utc_day": TEST_DAY,
             "state": "open",
-            "build_commit": identity.build_commit,
+            "build_commit": identity.git_commit,
             "collector_binary_sha256": identity.collector_binary_sha256,
-            "config_digest": identity.config_digest,
+            "config_digest": identity.source_config_digest,
             "collector_host_id": identity.collector_host_id,
             "collector_region": identity.collector_region,
             "files": [],
@@ -3052,7 +3048,7 @@ mod tests {
         )
         .unwrap();
         let mut mismatched_identity = identity.clone();
-        mismatched_identity.config_digest = "different-config".to_owned();
+        mismatched_identity.source_config_digest = "different-config".to_owned();
         let mismatch = reconcile_open_day_manifest(
             mismatched_legacy_dir.path(),
             TEST_DAY,
