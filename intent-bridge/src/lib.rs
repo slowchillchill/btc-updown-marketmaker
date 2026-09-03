@@ -11,8 +11,14 @@ pub use sim_adapter::{SimIntentCallContextV1, SimIntentErrorV1, SimIntentImmedia
 mod private {
     use super::{BridgeBackendV1, Future, ModelIntentV1};
 
+    pub trait DispatchKey {}
+
+    pub struct BridgeDispatchKey;
+
+    impl DispatchKey for BridgeDispatchKey {}
+
     pub trait Sealed {
-        fn dispatch<'a>(
+        fn dispatch<'a, K>(
             &'a mut self,
             context: <Self as BridgeBackendV1>::CallContext,
             intent: &'a ModelIntentV1,
@@ -23,7 +29,8 @@ mod private {
             >,
         > + 'a
         where
-            Self: BridgeBackendV1;
+            Self: BridgeBackendV1,
+            K: DispatchKey;
     }
 }
 
@@ -40,6 +47,19 @@ mod private {
 ///     type CallContext = ();
 ///     type ImmediateSuccess = ();
 ///     type Error = ();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use contracts::ModelIntentV1;
+/// use intent_bridge::BridgeBackendV1;
+///
+/// fn bypass_bridge<B: BridgeBackendV1>(
+///     backend: &mut B,
+///     context: B::CallContext,
+///     intent: &ModelIntentV1,
+/// ) {
+///     let _ = backend.dispatch(context, intent);
 /// }
 /// ```
 pub trait BridgeBackendV1: private::Sealed {
@@ -64,7 +84,12 @@ impl<B: BridgeBackendV1> IntentBridge<B> {
         context: B::CallContext,
         intent: &ModelIntentV1,
     ) -> Result<B::ImmediateSuccess, B::Error> {
-        <B as private::Sealed>::dispatch(&mut self.backend, context, intent).await
+        <B as private::Sealed>::dispatch::<private::BridgeDispatchKey>(
+            &mut self.backend,
+            context,
+            intent,
+        )
+        .await
     }
 }
 
@@ -116,7 +141,7 @@ mod tests {
     }
 
     impl private::Sealed for ProbeBackend {
-        fn dispatch<'a>(
+        fn dispatch<'a, K>(
             &'a mut self,
             context: <Self as BridgeBackendV1>::CallContext,
             intent: &'a ModelIntentV1,
@@ -125,7 +150,10 @@ mod tests {
                 <Self as BridgeBackendV1>::ImmediateSuccess,
                 <Self as BridgeBackendV1>::Error,
             >,
-        > + 'a {
+        > + 'a
+        where
+            K: private::DispatchKey,
+        {
             self.calls += 1;
             self.seen_context = Some(context);
             self.seen_intent = Some(std::ptr::from_ref(intent));
