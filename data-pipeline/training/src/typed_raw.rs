@@ -36,6 +36,10 @@ use sha2::{Digest, Sha256};
 
 use crate::ValidatedDirectSourceParquetFileV3;
 
+#[cfg(test)]
+#[path = "zero_source_tests.rs"]
+mod zero_source_tests;
+
 const POLYMARKET_ORDERBOOK_SOURCE: &str = "polymarket_market";
 const POLYMARKET_ORDERBOOK_SCHEMA: &str = "polymarket_orderbook_v3";
 const POLYMARKET_METADATA_SOURCE: &str = "polymarket_market_metadata";

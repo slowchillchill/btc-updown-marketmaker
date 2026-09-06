@@ -187,26 +187,6 @@ impl SourceRowCounts {
         };
         *counter = counter.saturating_add(1);
     }
-
-    fn missing_sources(&self) -> Vec<&'static str> {
-        [
-            ("polymarket_market", self.polymarket_orderbook),
-            (
-                "polymarket_market_metadata",
-                self.polymarket_market_metadata,
-            ),
-            (
-                "polymarket_rtds_chainlink_btc_usd",
-                self.polymarket_rtds_chainlink_btc_usd,
-            ),
-            ("binance_depth_snapshot", self.binance_depth_snapshot),
-            ("binance_depth_update", self.binance_depth_update),
-            ("binance_aggtrade", self.binance_aggtrade),
-        ]
-        .into_iter()
-        .filter_map(|(source, count)| (count == 0).then_some(source))
-        .collect()
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -307,7 +287,6 @@ pub enum CanonicalRunError {
         observed_at_least: usize,
         limit: usize,
     },
-    MissingRequiredSources(Vec<&'static str>),
     MissingIdentitySnapshot,
     MetadataBeforeIdentitySnapshot,
     DuplicateWsTerminalClaim {
@@ -371,9 +350,6 @@ impl fmt::Display for CanonicalRunError {
                 formatter,
                 "临时排序行至少需要 {observed_at_least} 字节，超过上限 {limit}"
             ),
-            Self::MissingRequiredSources(sources) => {
-                write!(formatter, "最小完整运行缺少真实来源：{}", sources.join(","))
-            }
             Self::MissingIdentitySnapshot => write!(formatter, "运行范围缺少完整身份快照"),
             Self::MetadataBeforeIdentitySnapshot => {
                 write!(formatter, "身份快照建立前出现同市场其他 metadata 行")
@@ -1047,10 +1023,6 @@ fn stage_sorted_input(
         }
     }
 
-    let missing = metrics.selected_rows.missing_sources();
-    if !missing.is_empty() {
-        return Err(CanonicalRunError::MissingRequiredSources(missing));
-    }
     sorter.finish().map_err(Into::into)
 }
 

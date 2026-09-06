@@ -350,6 +350,8 @@ pub struct FrozenDirectSourceInputSetV1 {
     admitted_daily_inputs: Vec<ValidatedDirectSourceDailyInputV3>,
     input_set_identity_sha256: String,
     input_manifest_set_sha256: String,
+    #[cfg(test)]
+    test_admission_root: Option<PathBuf>,
 }
 
 impl FrozenDirectSourceInputSetV1 {
@@ -367,6 +369,12 @@ impl FrozenDirectSourceInputSetV1 {
 
     /// 重新完整准入冻结路径，并拒绝任一摘要发生变化的输入集合。
     pub fn verify_unchanged(&self) -> Result<(), InputSetSnapshotError> {
+        #[cfg(test)]
+        if let Some(root) = &self.test_admission_root {
+            return self.verify_unchanged_with_admission(|path| {
+                validate_daily_manifest_admission_at_root(root, path)
+            });
+        }
         self.verify_unchanged_with_admission(validate_direct_source_daily_manifest_admission)
     }
 
@@ -1029,6 +1037,8 @@ where
         input_set_identity_sha256: input_set_identity_sha256(&admitted_daily_inputs),
         input_manifest_set_sha256: input_manifest_set_sha256(&admitted_daily_inputs),
         admitted_daily_inputs,
+        #[cfg(test)]
+        test_admission_root: None,
     })
 }
 
