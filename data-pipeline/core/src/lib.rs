@@ -2232,6 +2232,80 @@ pub fn derive_gate_a_receipt_v3_id(receipt: &GateAReceiptV3) -> Result<Sha256Hex
     ))
 }
 
+pub fn derive_dpt_observation_receipt_v1_id(
+    receipt: &DptObservationReceiptV1,
+) -> Result<Sha256Hex, ContractError> {
+    let mut material = receipt.clone();
+    material.receipt_id = Sha256Hex("0".repeat(64));
+    Ok(hash_domain_bytes(
+        b"dpt-observation-receipt-v1\0",
+        &stable_json(&material)?,
+    ))
+}
+
+pub fn validate_dpt_observation_receipt_v1(
+    receipt: &DptObservationReceiptV1,
+) -> Result<(), ContractError> {
+    if receipt.schema_version != DPT_OBSERVATION_RECEIPT_SCHEMA_V1 {
+        return Err(ContractError::UnsupportedSchema {
+            contract: "DPT observation receipt",
+            actual: receipt.schema_version.clone(),
+        });
+    }
+    for (field, digest) in [
+        ("receipt_id", &receipt.receipt_id),
+        (
+            "pipeline_core_identity_sha256",
+            &receipt.pipeline_core_identity_sha256,
+        ),
+        (
+            "input_set_identity_sha256",
+            &receipt.input_set_identity_sha256,
+        ),
+        (
+            "input_manifest_set_sha256",
+            &receipt.input_manifest_set_sha256,
+        ),
+        (
+            "observation_run_manifest_sha256",
+            &receipt.observation_run_manifest_sha256,
+        ),
+    ] {
+        validate_receipt_digest(digest, field)?;
+    }
+    if receipt.training_dataset_ready {
+        return Err(invalid(
+            "training_dataset_ready",
+            "观测凭据不能签发训练数据集就绪",
+        ));
+    }
+    if derive_dpt_observation_receipt_v1_id(receipt)? != receipt.receipt_id {
+        return Err(invalid("receipt_id", "与观测凭据的内容摘要不一致"));
+    }
+    Ok(())
+}
+
+pub fn encode_dpt_observation_receipt_v1(
+    receipt: &DptObservationReceiptV1,
+) -> Result<Vec<u8>, ContractError> {
+    validate_dpt_observation_receipt_v1(receipt)?;
+    stable_json(receipt)
+}
+
+pub fn decode_dpt_observation_receipt_v1(
+    bytes: &[u8],
+) -> Result<DptObservationReceiptV1, ContractError> {
+    require_schema_version(
+        bytes,
+        DPT_OBSERVATION_RECEIPT_SCHEMA_V1,
+        "DPT observation receipt",
+    )?;
+    let receipt =
+        serde_json::from_slice(bytes).map_err(|error| ContractError::Json(error.to_string()))?;
+    validate_dpt_observation_receipt_v1(&receipt)?;
+    Ok(receipt)
+}
+
 pub fn validate_gate_a_receipt_v3(
     receipt: &GateAReceiptV3,
     matrix: &GateACapabilityMatrixV2,

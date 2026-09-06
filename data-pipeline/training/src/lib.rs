@@ -11,9 +11,13 @@ mod gate_a_sim_adapter;
 pub mod observation;
 pub mod typed_raw;
 
+pub use gate_a_publication::observation_publication::*;
 pub use gate_a_publication::{
-    GateAPublicationError, GateARunManifestV2, ValidatedPublishedGateAFinal,
-    gate_a_formal_canonical_config, gate_a_formal_output_config, open_published_gate_a_final,
+    GateAArtifactManifestBindingsV1, GateACgroupMemoryEventsV1, GateAExternalResourceFactsV1,
+    GateAHostFactsV1, GateAPublicationError, GateAResourceHighWaterReportV1, GateARunManifestV2,
+    GateATestCommandEvidenceV1, ValidatedPublishedGateAFinal, decode_resource_high_water_report,
+    encode_resource_high_water_report, gate_a_formal_canonical_config, gate_a_formal_output_config,
+    open_published_gate_a_final, regular_directory_bytes,
 };
 pub use gate_a_sim_adapter::{
     ClosedExecutionMarketIndexBucketV1, GateASimulationReplayAdapter, ReplayIndexClosureV1,
@@ -1079,10 +1083,15 @@ fn input_set_identity_sha256(inputs: &[ValidatedDirectSourceDailyInputV3]) -> St
 }
 
 fn input_manifest_set_sha256(inputs: &[ValidatedDirectSourceDailyInputV3]) -> String {
-    let mut facts = inputs
-        .iter()
-        .map(|input| (input.utc_day(), input.manifest_sha256()))
-        .collect::<Vec<_>>();
+    input_manifest_bindings_sha256(
+        inputs
+            .iter()
+            .map(|input| (input.utc_day(), input.manifest_sha256()))
+            .collect(),
+    )
+}
+
+fn input_manifest_bindings_sha256(mut facts: Vec<(&str, &str)>) -> String {
     facts.sort_unstable();
 
     let mut hasher = Sha256::new();

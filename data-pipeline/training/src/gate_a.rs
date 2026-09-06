@@ -54,7 +54,7 @@ const CAPTURE_RECORD_DIRECTORY: &str = "capture-canonical-records";
 const CAPTURE_REPORT_DIRECTORY: &str = "capture-reduction-reports";
 const CAPTURE_FILE: &str = "captured.parquet";
 const WORK_DIRECTORY: &str = ".work";
-const PIPELINE_CORE_SOURCES: [(&str, &[u8]); 17] = [
+const PIPELINE_CORE_SOURCES: [(&str, &[u8]); 18] = [
     ("Cargo.lock", include_bytes!("../../../Cargo.lock")),
     ("Cargo.toml", include_bytes!("../../../Cargo.toml")),
     (
@@ -108,6 +108,10 @@ const PIPELINE_CORE_SOURCES: [(&str, &[u8]); 17] = [
     (
         "data-pipeline/training/src/gate_a_publication.rs",
         include_bytes!("gate_a_publication.rs"),
+    ),
+    (
+        "data-pipeline/training/src/dpt_observation_publication.rs",
+        include_bytes!("dpt_observation_publication.rs"),
     ),
     (
         "data-pipeline/training/src/dpt_gate_a_cli.rs",
