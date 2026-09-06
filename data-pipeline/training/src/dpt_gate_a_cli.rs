@@ -29,6 +29,10 @@ use contracts::{MarketObservationCausalShellV3, Sha256Hex};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
+#[cfg(test)]
+#[path = "dpt_observation_real_tests.rs"]
+mod dpt_observation_real_tests;
+
 const WORKSPACE: &str = "/home/chillchill/sim-system";
 const PUBLICATION_ROOT: &str =
     "/home/chillchill/sim-system/.local-artifacts/data-pipeline-training/gate-a";
@@ -229,25 +233,18 @@ fn run_measured_build(args: BuildArgs) -> AnyResult<()> {
     fs::create_dir(args.candidate_dir.join("reports"))?;
     let filesystem = publication_filesystem_facts(&args.candidate_dir)?;
 
-    let events_before = cgroup.memory_events()?;
-    let process_ids_before = cgroup.process_ids()?;
     let current_exe = env::current_exe()?;
     let time_path = args.candidate_dir.join(TIME_V_FILE);
     let child_arguments = child_arguments(&args);
-    let mut command = Command::new("/usr/bin/time");
-    command
-        .current_dir(WORKSPACE)
-        .env("LC_ALL", "C")
-        .env(EXPECTED_GIT_COMMIT_ENV, &git_commit)
-        .arg("-v")
-        .arg("-o")
-        .arg(&time_path)
-        .arg(&current_exe)
-        .args(&child_arguments);
-    let output = command.output()?;
-    let events_after = cgroup.memory_events()?;
-    let process_ids_after = cgroup.process_ids()?;
-    cgroup.require_formal_process_tree(&process_ids_after, network.supervisor_process_id)?;
+    let mut command = timed_child_command(
+        Path::new(WORKSPACE),
+        &current_exe,
+        &child_arguments,
+        &time_path,
+        &git_commit,
+    );
+    let measured = measure_child(&mut command, &cgroup, network.supervisor_process_id)?;
+    let output = &measured.output;
     require_unchanged_git_checkout(&git_commit)?;
     let filesystem_after = publication_filesystem_facts(&args.candidate_dir)?;
     if filesystem_after.filesystem_type != filesystem.filesystem_type
@@ -256,7 +253,7 @@ fn run_measured_build(args: BuildArgs) -> AnyResult<()> {
     {
         return Err("计时构建期间发布文件系统身份发生变化".into());
     }
-    let mut combined_output = combined_output(&output);
+    let mut combined_output = combined_output(output);
     if !output.status.success() {
         eprint!("{combined_output}");
         return Err("计时构建子进程失败".into());
@@ -274,32 +271,7 @@ fn run_measured_build(args: BuildArgs) -> AnyResult<()> {
     }
     let time_v_output = String::from_utf8(read_regular_bounded(&time_path, 1024 * 1024)?)?;
     let exit_code = output.status.code().ok_or("计时构建没有普通退出码")?;
-    let external = GateAExternalResourceFactsV1 {
-        build_exit_code: exit_code,
-        maximum_resident_set_size_kib: parse_time_value(
-            &time_v_output,
-            "Maximum resident set size (kbytes):",
-        )?,
-        publication_filesystem_type: filesystem.filesystem_type,
-        publication_root_device_id: filesystem.publication_root_device_id,
-        candidate_device_id: filesystem.candidate_device_id,
-        cgroup_v2_relative_path: cgroup.relative_path.clone(),
-        cgroup_process_ids_before: process_ids_before,
-        cgroup_process_ids_after: process_ids_after,
-        memory_peak_bytes: cgroup.read_number("memory.peak")?,
-        memory_max_bytes: cgroup.read_number("memory.max")?,
-        memory_swap_peak_bytes: cgroup.read_number("memory.swap.peak")?,
-        memory_swap_max_bytes: cgroup.read_number("memory.swap.max")?,
-        memory_events_before: events_before,
-        memory_events_after: events_after,
-        network_namespace: network.network_namespace,
-        network_interfaces: network.interfaces,
-        network_isolation_supervisor_pid: network.supervisor_process_id,
-        network_isolation_supervisor_name: network.supervisor_name,
-        network_isolation_supervisor_argv: network.supervisor_argv,
-        time_v_output_sha256: sha256_value(time_v_output.as_bytes()),
-        time_v_output,
-    };
+    let external = measured_resource_facts(&measured, &cgroup, filesystem, network, time_v_output)?;
     let resource =
         build_resource_high_water_report_from_state(&state, collect_host_facts()?, external)?;
     if !resource.evidence.passed {
@@ -351,6 +323,93 @@ fn run_measured_build(args: BuildArgs) -> AnyResult<()> {
         resource.external.memory_peak_bytes
     );
     Ok(())
+}
+
+struct MeasuredChild {
+    output: Output,
+    events_before: GateACgroupMemoryEventsV1,
+    events_after: GateACgroupMemoryEventsV1,
+    process_ids_before: Vec<u32>,
+    process_ids_after: Vec<u32>,
+}
+
+fn timed_child_command(
+    workspace: &Path,
+    executable: &Path,
+    arguments: &[OsString],
+    time_path: &Path,
+    git_commit: &str,
+) -> Command {
+    let mut command = Command::new("/usr/bin/time");
+    command
+        .current_dir(workspace)
+        .env("LC_ALL", "C")
+        .env(EXPECTED_GIT_COMMIT_ENV, git_commit)
+        .arg("-v")
+        .arg("-o")
+        .arg(time_path)
+        .arg(executable)
+        .args(arguments);
+    command
+}
+
+fn measure_child(
+    command: &mut Command,
+    cgroup: &CgroupFacts,
+    supervisor_pid: u32,
+) -> AnyResult<MeasuredChild> {
+    let events_before = cgroup.memory_events()?;
+    let process_ids_before = cgroup.process_ids()?;
+    let output = command.output()?;
+    let events_after = cgroup.memory_events()?;
+    let process_ids_after = cgroup.process_ids()?;
+    cgroup.require_formal_process_tree(&process_ids_after, supervisor_pid)?;
+    Ok(MeasuredChild {
+        output,
+        events_before,
+        events_after,
+        process_ids_before,
+        process_ids_after,
+    })
+}
+
+fn measured_resource_facts(
+    measured: &MeasuredChild,
+    cgroup: &CgroupFacts,
+    filesystem: PublicationFilesystemFacts,
+    network: NetworkIsolationFacts,
+    time_v_output: String,
+) -> AnyResult<GateAExternalResourceFactsV1> {
+    Ok(GateAExternalResourceFactsV1 {
+        build_exit_code: measured
+            .output
+            .status
+            .code()
+            .ok_or("计时构建没有普通退出码")?,
+        maximum_resident_set_size_kib: parse_time_value(
+            &time_v_output,
+            "Maximum resident set size (kbytes):",
+        )?,
+        publication_filesystem_type: filesystem.filesystem_type,
+        publication_root_device_id: filesystem.publication_root_device_id,
+        candidate_device_id: filesystem.candidate_device_id,
+        cgroup_v2_relative_path: cgroup.relative_path.clone(),
+        cgroup_process_ids_before: measured.process_ids_before.clone(),
+        cgroup_process_ids_after: measured.process_ids_after.clone(),
+        memory_peak_bytes: cgroup.read_number("memory.peak")?,
+        memory_max_bytes: cgroup.read_number("memory.max")?,
+        memory_swap_peak_bytes: cgroup.read_number("memory.swap.peak")?,
+        memory_swap_max_bytes: cgroup.read_number("memory.swap.max")?,
+        memory_events_before: measured.events_before.clone(),
+        memory_events_after: measured.events_after.clone(),
+        network_namespace: network.network_namespace,
+        network_interfaces: network.interfaces,
+        network_isolation_supervisor_pid: network.supervisor_process_id,
+        network_isolation_supervisor_name: network.supervisor_name,
+        network_isolation_supervisor_argv: network.supervisor_argv,
+        time_v_output_sha256: sha256_value(time_v_output.as_bytes()),
+        time_v_output,
+    })
 }
 
 fn run_build_child(args: BuildArgs) -> AnyResult<()> {
@@ -642,16 +701,21 @@ fn read_quality_artifact_bindings(
 }
 
 fn require_clean_git_checkout() -> AnyResult<String> {
-    let status = git_output(&["status", "--porcelain", "--untracked-files=all"])?;
+    require_clean_git_checkout_at(Path::new(WORKSPACE))
+}
+
+fn require_clean_git_checkout_at(workspace: &Path) -> AnyResult<String> {
+    let status = git_output_at(
+        workspace,
+        &["status", "--porcelain", "--untracked-files=all"],
+    )?;
     if !status.is_empty() {
         return Err("正式门 A 命令要求当前 Git 工作树干净".into());
     }
-    if workspace_pipeline_core_identity_sha256(Path::new(WORKSPACE))?
-        != pipeline_core_identity_sha256()
-    {
+    if workspace_pipeline_core_identity_sha256(workspace)? != pipeline_core_identity_sha256() {
         return Err("正式门 A 命令所用二进制不是由当前工作树的管道核心构建".into());
     }
-    let commit = git_output(&["rev-parse", "HEAD"])?;
+    let commit = git_output_at(workspace, &["rev-parse", "HEAD"])?;
     if commit.len() != 40
         || !commit
             .bytes()
@@ -663,16 +727,20 @@ fn require_clean_git_checkout() -> AnyResult<String> {
 }
 
 fn require_unchanged_git_checkout(expected_commit: &str) -> AnyResult<()> {
-    let current_commit = require_clean_git_checkout()?;
+    require_unchanged_git_checkout_at(Path::new(WORKSPACE), expected_commit)
+}
+
+fn require_unchanged_git_checkout_at(workspace: &Path, expected_commit: &str) -> AnyResult<()> {
+    let current_commit = require_clean_git_checkout_at(workspace)?;
     if current_commit != expected_commit {
         return Err("正式门 A 运行期间 Git 提交发生变化".into());
     }
     Ok(())
 }
 
-fn git_output(arguments: &[&str]) -> AnyResult<String> {
+fn git_output_at(workspace: &Path, arguments: &[&str]) -> AnyResult<String> {
     let output = Command::new("git")
-        .current_dir(WORKSPACE)
+        .current_dir(workspace)
         .args(arguments)
         .output()?;
     if !output.status.success() {
@@ -722,7 +790,13 @@ fn parse_time_value(output: &str, prefix: &str) -> AnyResult<u64> {
 }
 
 fn publication_filesystem_facts(candidate_dir: &Path) -> AnyResult<PublicationFilesystemFacts> {
-    let publication_root = Path::new(PUBLICATION_ROOT);
+    publication_filesystem_facts_at(Path::new(PUBLICATION_ROOT), candidate_dir)
+}
+
+fn publication_filesystem_facts_at(
+    publication_root: &Path,
+    candidate_dir: &Path,
+) -> AnyResult<PublicationFilesystemFacts> {
     let root_metadata = fs::symlink_metadata(publication_root)?;
     let candidate_metadata = fs::symlink_metadata(candidate_dir)?;
     if root_metadata.file_type().is_symlink()
