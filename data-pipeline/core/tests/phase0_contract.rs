@@ -6,6 +6,52 @@ fn sha(character: char) -> Sha256Hex {
     Sha256Hex(character.to_string().repeat(64))
 }
 
+#[test]
+fn observation_receipt_has_an_independent_domain_and_exact_seven_field_contract() {
+    let mut receipt = DptObservationReceiptV1 {
+        schema_version: DPT_OBSERVATION_RECEIPT_SCHEMA_V1.into(),
+        receipt_id: sha('0'),
+        pipeline_core_identity_sha256: sha('1'),
+        input_set_identity_sha256: sha('2'),
+        input_manifest_set_sha256: sha('3'),
+        observation_run_manifest_sha256: sha('4'),
+        training_dataset_ready: false,
+    };
+    // 独立 hashlib 对固定 548 字节 JSON、域和大端长度计算的固定预期。
+    receipt.receipt_id = derive_dpt_observation_receipt_v1_id(&receipt).unwrap();
+    assert_eq!(
+        receipt.receipt_id.0,
+        "a5c7ed8a0c8defd79da23a2d7e2acad4a8200cdea5c9591b571cfe349a7a9d42"
+    );
+    let encoded = encode_dpt_observation_receipt_v1(&receipt).unwrap();
+    assert_eq!(
+        decode_dpt_observation_receipt_v1(&encoded).unwrap(),
+        receipt
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&encoded)
+            .unwrap()
+            .as_object()
+            .unwrap()
+            .len(),
+        7
+    );
+    let matrix = matrix_with(|_| CapabilityStatus::Pass);
+    assert!(decode_gate_a_receipt_v3(&encoded, &matrix).is_err());
+    assert!(
+        decode_dpt_observation_receipt_v1(
+            &encode_gate_a_receipt_v3(&receipt_for(&matrix), &matrix).unwrap()
+        )
+        .is_err()
+    );
+    let mut changed = receipt;
+    changed.training_dataset_ready = true;
+    changed.receipt_id = derive_dpt_observation_receipt_v1_id(&changed).unwrap();
+    assert!(validate_dpt_observation_receipt_v1(&changed).is_err());
+    changed.training_dataset_ready = false;
+    assert!(validate_dpt_observation_receipt_v1(&changed).is_err());
+}
+
 fn event_id(character: char) -> CanonicalEventId {
     CanonicalEventId(character.to_string().repeat(64))
 }

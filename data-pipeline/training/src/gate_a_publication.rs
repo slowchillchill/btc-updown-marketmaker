@@ -1,5 +1,9 @@
 //! 门 A 质量证据、能力判定与原子发布控制面。
 
+#[path = "dpt_observation_publication.rs"]
+pub(crate) mod observation_publication;
+pub use observation_publication::*;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -51,6 +55,27 @@ pub const GATE_A_MEASURED_BUILD_STATE_SCHEMA_V1: &str = "gate_a_measured_build_s
 
 pub const GATE_A_MAX_RSS_KIB: u64 = 1024 * 1024;
 pub const GATE_A_CGROUP_MEMORY_MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum PublicationPurpose {
+    CompleteExecution,
+    Observation,
+}
+
+impl PublicationPurpose {
+    fn quality_schema(self) -> &'static str {
+        match self {
+            Self::CompleteExecution => GATE_A_QUALITY_ISOLATION_REPORT_SCHEMA_V1,
+            Self::Observation => DPT_OBSERVATION_QUALITY_REPORT_SCHEMA_V1,
+        }
+    }
+    fn measured_schema(self) -> &'static str {
+        match self {
+            Self::CompleteExecution => GATE_A_MEASURED_BUILD_STATE_SCHEMA_V1,
+            Self::Observation => DPT_OBSERVATION_MEASURED_BUILD_STATE_SCHEMA_V1,
+        }
+    }
+}
 pub(crate) const QUALITY_SCAN_CANONICAL_PAGE_ROWS: usize = 1;
 
 pub fn gate_a_formal_sort_config() -> SortConfig {
@@ -462,7 +487,7 @@ pub struct GateATypedRawScanPolicyV1 {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct GateARunManifestV2 {
+pub struct GateARunManifestV2<C = GateAControlBindingsV1> {
     pub schema_version: String,
     pub requirement_id: String,
     pub git_commit: String,
@@ -488,7 +513,7 @@ pub struct GateARunManifestV2 {
     pub output_config: GateAOutputConfig,
     pub host: GateAHostFactsV1,
     pub artifact_manifests: GateAArtifactManifestBindingsV1,
-    pub control_files: GateAControlBindingsV1,
+    pub control_files: C,
     pub artifact_rows: GateAArtifactRowCountsV1,
     pub canonical_digests: CanonicalRunDigests,
     pub rejected_reports: u64,
@@ -769,6 +794,21 @@ fn build_quality_isolation_report_with_identity(
     validated: &ValidatedGateACandidate,
     producer_pipeline_core_identity_sha256: &Sha256Hex,
 ) -> Result<GateAQualityIsolationReportV1, GateAPublicationError> {
+    build_quality_report_facts(
+        candidate,
+        validated,
+        producer_pipeline_core_identity_sha256,
+        PublicationPurpose::CompleteExecution,
+    )
+}
+
+// 返回共同事实载体；用途在统计和验证前显式选择，不生成旧凭据后转换用途。
+fn build_quality_report_facts(
+    candidate: &GateACandidate,
+    validated: &ValidatedGateACandidate,
+    producer_pipeline_core_identity_sha256: &Sha256Hex,
+    purpose: PublicationPurpose,
+) -> Result<GateAQualityIsolationReportV1, GateAPublicationError> {
     let artifact_manifests = GateAArtifactManifestBindingsV1::from_candidate(candidate);
     if artifact_manifests.canonical_event_store
         != *validated.canonical_event_store.manifest_sha256()
@@ -879,7 +919,7 @@ fn build_quality_isolation_report_with_identity(
 
     let observation_witnesses = std::mem::take(&mut scan.observation_witnesses);
     let mut report = GateAQualityIsolationReportV1 {
-        schema_version: GATE_A_QUALITY_ISOLATION_REPORT_SCHEMA_V1.to_owned(),
+        schema_version: purpose.quality_schema().to_owned(),
         pipeline_core_identity_sha256: producer_pipeline_core_identity_sha256.clone(),
         input_set_identity_sha256: candidate.input_set_identity_sha256.clone(),
         input_manifest_set_sha256: candidate.input_manifest_set_sha256.clone(),
@@ -926,7 +966,14 @@ fn build_quality_isolation_report_with_identity(
         &validated.projection_witnesses,
         &observation_witnesses,
     );
-    validate_quality_isolation_report(&report)?;
+    if purpose == PublicationPurpose::Observation {
+        for index in 0..report.evidence.len() {
+            let reason = observation_evidence_reason(&report, index);
+            report.evidence[index].passed = reason.is_none();
+            report.evidence[index].blocking_reason = reason;
+        }
+    }
+    validate_quality_report_facts(&report, purpose)?;
     Ok(report)
 }
 
@@ -1152,7 +1199,38 @@ const QUALITY_EVIDENCE_IDS: [&str; 14] = [
 pub fn validate_quality_isolation_report(
     report: &GateAQualityIsolationReportV1,
 ) -> Result<(), GateAPublicationError> {
-    if report.schema_version != GATE_A_QUALITY_ISOLATION_REPORT_SCHEMA_V1
+    validate_quality_report_facts(report, PublicationPurpose::CompleteExecution)
+}
+
+fn observation_evidence_reason(
+    report: &GateAQualityIsolationReportV1,
+    index: usize,
+) -> Option<String> {
+    let evidence = &report.evidence[index];
+    if !quality_predicates(report)[index] {
+        return Some(format!("{}/predicate_failed", evidence.evidence_id));
+    }
+    let gap = index == 9
+        && quality_gap_resync_is_complete(
+            &report.event_quality_counts,
+            &report.event_resync_counts,
+            report.fresh_resync_boundary,
+        );
+    let event_required = matches!(index, 2..=8 | 10) || gap;
+    let observation_required = matches!(index, 2..=8 | 10..=11) || gap;
+    if (event_required && (evidence.event_ids.len() != 1 || evidence.observation_ids.len() != 1))
+        || (observation_required && evidence.observation_ids.is_empty())
+    {
+        return Some(format!("{}/witness_not_observed", evidence.evidence_id));
+    }
+    None
+}
+
+fn validate_quality_report_facts(
+    report: &GateAQualityIsolationReportV1,
+    purpose: PublicationPurpose,
+) -> Result<(), GateAPublicationError> {
+    if report.schema_version != purpose.quality_schema()
         || CanonicalRunScope::new(
             report.scope.condition_id(),
             report.scope.received_start_utc_ms(),
@@ -1170,7 +1248,7 @@ pub fn validate_quality_isolation_report(
     {
         require_sha256(digest)?;
     }
-    validate_selected_files(&report.selected_files)?;
+    validate_selected_file_facts(&report.selected_files, purpose)?;
     let market_events = sum_u64([
         report.market_event_counts.market_lifecycle_transition,
         report.market_event_counts.market_trading_state,
@@ -1317,7 +1395,12 @@ pub fn validate_quality_isolation_report(
     let expected_manifests = report.artifact_manifests.all();
     let predicates = quality_predicates(report);
     for (index, evidence) in report.evidence.iter().enumerate() {
-        let expected_pass = predicates[index];
+        let expected_reason = if purpose == PublicationPurpose::Observation {
+            observation_evidence_reason(report, index)
+        } else {
+            (!predicates[index]).then(|| format!("{}/predicate_failed", evidence.evidence_id))
+        };
+        let expected_pass = expected_reason.is_none();
         let requires_gap_resync_witness = index == 9
             && quality_gap_resync_is_complete(
                 &report.event_quality_counts,
@@ -1334,8 +1417,7 @@ pub fn validate_quality_isolation_report(
         }
         if evidence.passed != expected_pass
             || evidence.passed != evidence.blocking_reason.is_none()
-            || evidence.blocking_reason
-                != (!expected_pass).then(|| format!("{}/predicate_failed", evidence.evidence_id))
+            || evidence.blocking_reason != expected_reason
             || (expected_pass && requires_event_witness && evidence.event_ids.is_empty())
             || (expected_pass
                 && requires_observation_witness
@@ -1377,7 +1459,10 @@ fn is_sorted_unique_strings(values: &[String]) -> bool {
         .all(|pair| pair[0].as_str() < pair[1].as_str())
 }
 
-fn validate_selected_files(files: &[CanonicalRunInputFile]) -> Result<(), GateAPublicationError> {
+fn validate_selected_file_facts(
+    files: &[CanonicalRunInputFile],
+    purpose: PublicationPurpose,
+) -> Result<(), GateAPublicationError> {
     let mut keys = BTreeSet::new();
     for file in files {
         let relative_path = Path::new(&file.manifest_relative_path);
@@ -1391,7 +1476,7 @@ fn validate_selected_files(files: &[CanonicalRunInputFile]) -> Result<(), GateAP
                 != Some(file.schema_version.as_str())
             || !is_valid_utc_hour(&file.utc_day, &file.utc_hour)
             || file.bytes == 0
-            || file.rows == 0
+            || (purpose == PublicationPurpose::CompleteExecution && file.rows == 0)
             || source_directory != Some(format!("source_kind={}", file.source_kind).as_str())
             || file_name.is_none_or(|name| name.is_empty())
             || path_parts.next().is_some()
@@ -1483,8 +1568,24 @@ pub fn build_measured_build_state(
     artifact_directory_bytes: u64,
     git_commit: String,
 ) -> Result<GateAMeasuredBuildStateV1, GateAPublicationError> {
+    build_measured_facts(
+        candidate,
+        quality_isolation_report_sha256,
+        artifact_directory_bytes,
+        git_commit,
+        PublicationPurpose::CompleteExecution,
+    )
+}
+
+fn build_measured_facts(
+    candidate: &GateACandidate,
+    quality_isolation_report_sha256: Sha256Hex,
+    artifact_directory_bytes: u64,
+    git_commit: String,
+    purpose: PublicationPurpose,
+) -> Result<GateAMeasuredBuildStateV1, GateAPublicationError> {
     let state = GateAMeasuredBuildStateV1 {
-        schema_version: GATE_A_MEASURED_BUILD_STATE_SCHEMA_V1.to_owned(),
+        schema_version: purpose.measured_schema().to_owned(),
         git_commit,
         candidate_path: candidate.candidate_path.to_string_lossy().into_owned(),
         pipeline_core_identity_sha256: pipeline_core_identity_sha256(),
@@ -1513,14 +1614,21 @@ pub fn build_measured_build_state(
         },
         artifact_directory_bytes,
     };
-    validate_measured_build_state(&state)?;
+    validate_measured_facts(&state, purpose)?;
     Ok(state)
 }
 
 pub fn validate_measured_build_state(
     state: &GateAMeasuredBuildStateV1,
 ) -> Result<(), GateAPublicationError> {
-    if state.schema_version != GATE_A_MEASURED_BUILD_STATE_SCHEMA_V1
+    validate_measured_facts(state, PublicationPurpose::CompleteExecution)
+}
+
+fn validate_measured_facts(
+    state: &GateAMeasuredBuildStateV1,
+    purpose: PublicationPurpose,
+) -> Result<(), GateAPublicationError> {
+    if state.schema_version != purpose.measured_schema()
         || state.pipeline_core_identity_sha256 != pipeline_core_identity_sha256()
         || state.git_commit.len() != 40
         || !state
@@ -1531,16 +1639,21 @@ pub fn validate_measured_build_state(
         || state.canonical_config != gate_a_formal_canonical_config()
         || state.output_config != gate_a_formal_output_config()
         || state.artifact_directory_bytes == 0
-        || state.artifact_rows.canonical_event_store == 0
-        || state.artifact_rows.event_time_index == 0
+        || (purpose == PublicationPurpose::CompleteExecution
+            && state.artifact_rows.canonical_event_store == 0)
+        || (purpose == PublicationPurpose::CompleteExecution
+            && state.artifact_rows.event_time_index == 0)
         || state.artifact_rows.visibility_index != state.artifact_rows.canonical_event_store
-        || state.artifact_rows.market_observations == 0
-        || state.artifact_rows.reduction_reports == 0
+        || (purpose == PublicationPurpose::CompleteExecution
+            && state.artifact_rows.market_observations == 0)
+        || (purpose == PublicationPurpose::CompleteExecution
+            && state.artifact_rows.reduction_reports == 0)
         || state.canonical_metrics.canonical_records != state.artifact_rows.canonical_event_store
         || state.canonical_metrics.event_time_projections != state.artifact_rows.event_time_index
         || state.canonical_metrics.visibility_projections != state.artifact_rows.visibility_index
         || state.canonical_metrics.reduction_reports != state.artifact_rows.reduction_reports
-        || state.build_metrics.peak_observation_l2_levels == 0
+        || (purpose == PublicationPurpose::CompleteExecution
+            && state.build_metrics.peak_observation_l2_levels == 0)
     {
         return Err(GateAPublicationError::Invalid(
             "计时构建状态的身份、配置、路径、行数或峰值无效",
@@ -1583,6 +1696,14 @@ pub fn build_resource_high_water_report_from_state(
     external: GateAExternalResourceFactsV1,
 ) -> Result<GateAResourceHighWaterReportV1, GateAPublicationError> {
     validate_measured_build_state(state)?;
+    build_resource_report_from_facts(state, host, external)
+}
+
+fn build_resource_report_from_facts(
+    state: &GateAMeasuredBuildStateV1,
+    host: GateAHostFactsV1,
+    external: GateAExternalResourceFactsV1,
+) -> Result<GateAResourceHighWaterReportV1, GateAPublicationError> {
     let passed = resource_facts_fit(
         &state.canonical_config,
         &state.output_config,
@@ -1952,9 +2073,38 @@ pub fn build_test_evidence_report(
     artifact_manifests: GateAArtifactManifestBindingsV1,
     commands: Vec<GateATestCommandEvidenceV1>,
 ) -> Result<GateATestEvidenceReportV1, GateAPublicationError> {
+    build_test_report_facts(
+        git_commit,
+        artifact_manifests,
+        commands,
+        PublicationPurpose::CompleteExecution,
+    )
+}
+
+fn test_evidence_ids(purpose: PublicationPurpose) -> &'static [&'static str] {
+    match purpose {
+        PublicationPurpose::CompleteExecution => &REQUIRED_GATE_A_TEST_EVIDENCE_IDS,
+        PublicationPurpose::Observation => &REQUIRED_DPT_OBSERVATION_TEST_EVIDENCE_IDS,
+    }
+}
+
+fn test_report_schema(purpose: PublicationPurpose) -> &'static str {
+    match purpose {
+        PublicationPurpose::CompleteExecution => GATE_A_TEST_EVIDENCE_REPORT_SCHEMA_V1,
+        PublicationPurpose::Observation => DPT_OBSERVATION_TEST_EVIDENCE_REPORT_SCHEMA_V1,
+    }
+}
+
+fn build_test_report_facts(
+    git_commit: String,
+    artifact_manifests: GateAArtifactManifestBindingsV1,
+    commands: Vec<GateATestCommandEvidenceV1>,
+    purpose: PublicationPurpose,
+) -> Result<GateATestEvidenceReportV1, GateAPublicationError> {
     let manifests = artifact_manifests.all();
-    let evidence = REQUIRED_GATE_A_TEST_EVIDENCE_IDS
-        .into_iter()
+    let evidence = test_evidence_ids(purpose)
+        .iter()
+        .copied()
         .map(|evidence_id| {
             let matching = commands
                 .iter()
@@ -1979,33 +2129,41 @@ pub fn build_test_evidence_report(
         })
         .collect();
     let report = GateATestEvidenceReportV1 {
-        schema_version: GATE_A_TEST_EVIDENCE_REPORT_SCHEMA_V1.to_owned(),
+        schema_version: test_report_schema(purpose).to_owned(),
         git_commit,
         pipeline_core_identity_sha256: pipeline_core_identity_sha256(),
         artifact_manifests,
         commands,
         evidence,
     };
-    validate_test_evidence_report(&report)?;
+    validate_test_report_facts(&report, purpose)?;
     Ok(report)
 }
 
 pub fn validate_test_evidence_report(
     report: &GateATestEvidenceReportV1,
 ) -> Result<(), GateAPublicationError> {
-    if report.schema_version != GATE_A_TEST_EVIDENCE_REPORT_SCHEMA_V1
+    validate_test_report_facts(report, PublicationPurpose::CompleteExecution)
+}
+
+fn validate_test_report_facts(
+    report: &GateATestEvidenceReportV1,
+    purpose: PublicationPurpose,
+) -> Result<(), GateAPublicationError> {
+    let ids = test_evidence_ids(purpose);
+    if report.schema_version != test_report_schema(purpose)
         || report.git_commit.len() != 40
         || !report
             .git_commit
             .bytes()
             .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        || report.commands.len() != 2
-        || report.evidence.len() != REQUIRED_GATE_A_TEST_EVIDENCE_IDS.len()
+        || (purpose == PublicationPurpose::CompleteExecution && report.commands.len() != 2)
+        || report.evidence.len() != ids.len()
         || report
             .evidence
             .iter()
-            .zip(REQUIRED_GATE_A_TEST_EVIDENCE_IDS)
-            .any(|(evidence, expected)| evidence.evidence_id != expected)
+            .zip(ids)
+            .any(|(evidence, expected)| evidence.evidence_id != *expected)
     {
         return Err(GateAPublicationError::Invalid(
             "测试证据的 schema、提交或固定证据集合无效",
@@ -2016,18 +2174,21 @@ pub fn validate_test_evidence_report(
     for command in &report.commands {
         if command.argv.is_empty()
             || command.argv.iter().any(|argument| argument.is_empty())
-            || command.working_directory != "/home/chillchill/sim-system"
+            || command.working_directory
+                != match purpose {
+                    PublicationPurpose::CompleteExecution => "/home/chillchill/sim-system",
+                    PublicationPurpose::Observation => "/home/chillchill/btc-updown-marketmaker",
+                }
             || command.combined_output.is_empty()
             || command.covered_evidence_ids.is_empty()
             || command
                 .covered_evidence_ids
                 .windows(2)
                 .any(|pair| pair[0] >= pair[1])
-            || command.covered_evidence_ids.iter().any(|evidence_id| {
-                REQUIRED_GATE_A_TEST_EVIDENCE_IDS
-                    .binary_search(&evidence_id.as_str())
-                    .is_err()
-            })
+            || command
+                .covered_evidence_ids
+                .iter()
+                .any(|evidence_id| ids.binary_search(&evidence_id.as_str()).is_err())
         {
             return Err(GateAPublicationError::Invalid(
                 "测试命令或其固定覆盖集合无效",
@@ -2043,35 +2204,37 @@ pub fn validate_test_evidence_report(
             return Err(GateAPublicationError::Invalid("测试命令输出摘要不匹配"));
         }
     }
-    let physical = &report.commands[0];
-    let workspace = &report.commands[1];
-    if physical.covered_evidence_ids != ["test/offline-boundary", "test/physical-perturbation"]
-        || physical.argv.first().map(String::as_str) != Some("/usr/bin/time")
-        || !physical.argv.iter().any(|argument| argument == "-v")
-        || !physical
-            .argv
-            .iter()
-            .any(|argument| argument == "__build-child")
-        || !physical
-            .combined_output
-            .contains("physical_perturbation=PASS")
-        || !physical
-            .combined_output
-            .contains("runtime_network_isolation=PASS")
-        || workspace.argv
-            != GATE_A_WORKSPACE_TEST_ARGV
-                .into_iter()
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-        || workspace.covered_evidence_ids
-            != GATE_A_WORKSPACE_TEST_EVIDENCE_IDS
-                .into_iter()
-                .map(str::to_owned)
-                .collect::<Vec<_>>()
-    {
-        return Err(GateAPublicationError::Invalid(
-            "测试报告必须精确绑定真实物理扰动与全工作区离线回归",
-        ));
+    if purpose == PublicationPurpose::CompleteExecution {
+        let physical = &report.commands[0];
+        let workspace = &report.commands[1];
+        if physical.covered_evidence_ids != ["test/offline-boundary", "test/physical-perturbation"]
+            || physical.argv.first().map(String::as_str) != Some("/usr/bin/time")
+            || !physical.argv.iter().any(|argument| argument == "-v")
+            || !physical
+                .argv
+                .iter()
+                .any(|argument| argument == "__build-child")
+            || !physical
+                .combined_output
+                .contains("physical_perturbation=PASS")
+            || !physical
+                .combined_output
+                .contains("runtime_network_isolation=PASS")
+            || workspace.argv
+                != GATE_A_WORKSPACE_TEST_ARGV
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+            || workspace.covered_evidence_ids
+                != GATE_A_WORKSPACE_TEST_EVIDENCE_IDS
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>()
+        {
+            return Err(GateAPublicationError::Invalid(
+                "测试报告必须精确绑定真实物理扰动与全工作区离线回归",
+            ));
+        }
     }
     for evidence in &report.evidence {
         let matching = report.commands.iter().filter(|command| {
@@ -2366,14 +2529,59 @@ pub fn build_gate_a_run_manifest(
         })
         .collect::<Vec<_>>();
 
+    let manifest = assemble_run_manifest(
+        (quality, resource, tests),
+        validated,
+        (covered_utc_dates, input_manifests),
+        GateAControlBindingsV1 {
+            quality_isolation_report: control_binding(
+                "reports/quality-isolation-report.json",
+                quality_sha256,
+            ),
+            resource_high_water_report: control_binding(
+                "reports/resource-evidence.json",
+                resource_sha256,
+            ),
+            test_evidence_report: control_binding("reports/test-evidence.json", tests_sha256),
+            capability_matrix: control_binding("gate-a-capability-matrix.json", matrix_file_sha256),
+        },
+        PublicationPurpose::CompleteExecution,
+    )?;
+    validate_gate_a_run_manifest(&manifest)?;
+    Ok(manifest)
+}
+
+fn assemble_run_manifest<C>(
+    reports: (
+        &GateAQualityIsolationReportV1,
+        &GateAResourceHighWaterReportV1,
+        &GateATestEvidenceReportV1,
+    ),
+    validated: &ValidatedGateACandidate,
+    inputs: (Vec<String>, Vec<GateAInputManifestBindingV1>),
+    control_files: C,
+    purpose: PublicationPurpose,
+) -> Result<GateARunManifestV2<C>, GateAPublicationError> {
+    let (quality, resource, tests) = reports;
+    let (covered_utc_dates, input_manifests) = inputs;
     let typed_raw_scan_policies = expected_typed_raw_scan_policies(
         quality.scope.condition_id(),
         quality.scope.received_start_utc_ms(),
         quality.scope.received_end_utc_ms(),
     )?;
     let manifest = GateARunManifestV2 {
-        schema_version: GATE_A_RUN_MANIFEST_SCHEMA_V2.to_owned(),
-        requirement_id: "DATA-PIPELINE-TRAINING-20260803".to_owned(),
+        schema_version: if purpose == PublicationPurpose::CompleteExecution {
+            GATE_A_RUN_MANIFEST_SCHEMA_V2
+        } else {
+            DPT_OBSERVATION_RUN_MANIFEST_SCHEMA_V1
+        }
+        .to_owned(),
+        requirement_id: if purpose == PublicationPurpose::CompleteExecution {
+            "DATA-PIPELINE-TRAINING-20260803"
+        } else {
+            "DPT-MISSING-SOURCE-SUPPORT-20260905"
+        }
+        .to_owned(),
         git_commit: tests.git_commit.clone(),
         pipeline_core_identity_sha256: quality.pipeline_core_identity_sha256.clone(),
         contract_versions: GateAContractVersionsV1 {
@@ -2410,18 +2618,7 @@ pub fn build_gate_a_run_manifest(
         output_config: resource.output_config.clone(),
         host: resource.host.clone(),
         artifact_manifests: quality.artifact_manifests.clone(),
-        control_files: GateAControlBindingsV1 {
-            quality_isolation_report: control_binding(
-                "reports/quality-isolation-report.json",
-                quality_sha256,
-            ),
-            resource_high_water_report: control_binding(
-                "reports/resource-evidence.json",
-                resource_sha256,
-            ),
-            test_evidence_report: control_binding("reports/test-evidence.json", tests_sha256),
-            capability_matrix: control_binding("gate-a-capability-matrix.json", matrix_file_sha256),
-        },
+        control_files,
         artifact_rows: GateAArtifactRowCountsV1 {
             canonical_event_store: validated.canonical_event_store.manifest().file.rows,
             event_time_index: validated.event_time_index.manifest().file.rows,
@@ -2432,9 +2629,13 @@ pub fn build_gate_a_run_manifest(
         canonical_digests: validated.recomputed_stream_digests.clone(),
         rejected_reports: quality.reduction_operation_counts.reject,
         suppressed_reports: quality.reduction_disposition_counts.suppressed,
-        validation_result: "PASS".to_owned(),
+        validation_result: if purpose == PublicationPurpose::CompleteExecution {
+            "PASS"
+        } else {
+            "OBSERVATION_ARTIFACTS_VALIDATED"
+        }
+        .to_owned(),
     };
-    validate_gate_a_run_manifest(&manifest)?;
     Ok(manifest)
 }
 
@@ -2581,105 +2782,25 @@ fn validate_typed_raw_scan_policies(
 pub fn validate_gate_a_run_manifest(
     manifest: &GateARunManifestV2,
 ) -> Result<(), GateAPublicationError> {
-    validate_typed_raw_scan_policies(
-        &manifest.typed_raw_scan_policies,
-        &manifest.condition_id,
-        manifest.received_start_utc_ms,
-        manifest.received_end_utc_ms,
-    )?;
-    let expected_contracts = GateAContractVersionsV1 {
-        canonical_event_record: CANONICAL_EVENT_RECORD_SCHEMA_V1.to_owned(),
-        execution_market_event: EXECUTION_MARKET_EVENT_SCHEMA_V3.to_owned(),
-        canonical_reference_event: CANONICAL_REFERENCE_EVENT_SCHEMA_V1.to_owned(),
-        market_observation: MARKET_OBSERVATION_CAUSAL_SHELL_SCHEMA_V3.to_owned(),
-        event_time_index: EVENT_TIME_INDEX_SCHEMA_V2.to_owned(),
-        visibility_index: VISIBILITY_INDEX_SCHEMA_V2.to_owned(),
-        artifact_manifest: GATE_A_ARTIFACT_MANIFEST_SCHEMA_V1.to_owned(),
-        reduction_report: REDUCTION_REPORT_SCHEMA_V1.to_owned(),
-    };
-    if manifest.schema_version != GATE_A_RUN_MANIFEST_SCHEMA_V2
-        || manifest.requirement_id != "DATA-PIPELINE-TRAINING-20260803"
-        || manifest.git_commit.len() != 40
-        || !manifest
-            .git_commit
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-        || manifest.contract_versions != expected_contracts
-        || manifest.canonical_rule_version.trim().is_empty()
-        || manifest.dataset_lineage_root != DATASET_LINEAGE_ROOT
-        || manifest.dataset_date_floor != DATASET_DATE_FLOOR
-        || manifest.covered_utc_dates.is_empty()
-        || manifest
-            .covered_utc_dates
-            .windows(2)
-            .any(|pair| pair[0] >= pair[1])
-        || manifest
-            .covered_utc_dates
-            .iter()
-            .any(|date| date.as_str() < DATASET_DATE_FLOOR)
-        || manifest.condition_id.trim().is_empty()
-        || manifest.received_start_utc_ms <= 0
-        || manifest.received_end_utc_ms <= manifest.received_start_utc_ms
-        || manifest.reference_received_start_utc_ms != manifest.received_start_utc_ms
-        || manifest.reference_received_end_utc_ms != manifest.received_end_utc_ms
-        || manifest.supported_schemas != supported_schema_bindings()
-        || manifest.canonical_config.canonical_rule_version != manifest.canonical_rule_version
-        || manifest.validation_result != "PASS"
-    {
-        return Err(GateAPublicationError::Invalid(
-            "运行清单固定身份、范围、合同或结论无效",
-        ));
-    }
-    for digest in [
-        &manifest.pipeline_core_identity_sha256,
-        &manifest.input_set_identity_sha256,
-        &manifest.input_manifest_set_sha256,
-        &manifest.supported_schema_set_identity_sha256,
-        &manifest.artifact_manifests.canonical_event_store,
-        &manifest.artifact_manifests.event_time_index,
-        &manifest.artifact_manifests.visibility_index,
-        &manifest.artifact_manifests.market_observations,
-        &manifest.artifact_manifests.reduction_reports,
-        &manifest.control_files.quality_isolation_report.sha256,
-        &manifest.control_files.resource_high_water_report.sha256,
-        &manifest.control_files.test_evidence_report.sha256,
-        &manifest.control_files.capability_matrix.sha256,
-    ] {
-        require_sha256(digest)?;
-    }
-    for digest in [
-        &manifest.canonical_digests.canonical_records_sha256,
-        &manifest.canonical_digests.event_time_projections_sha256,
-        &manifest.canonical_digests.visibility_projections_sha256,
-        &manifest.canonical_digests.reduction_reports_sha256,
-    ] {
-        require_sha256(&Sha256Hex(digest.clone()))?;
-    }
-    if manifest.supported_schema_set_identity_sha256 != supported_schema_set_identity_sha256()
-        || manifest
-            .control_files
-            .quality_isolation_report
-            .relative_path
-            != "reports/quality-isolation-report.json"
-        || manifest
-            .control_files
-            .resource_high_water_report
-            .relative_path
-            != "reports/resource-evidence.json"
-        || manifest.control_files.test_evidence_report.relative_path != "reports/test-evidence.json"
-        || manifest.control_files.capability_matrix.relative_path != "gate-a-capability-matrix.json"
-        || manifest.artifact_rows.canonical_event_store == 0
-        || manifest.artifact_rows.event_time_index == 0
-        || manifest.artifact_rows.visibility_index != manifest.artifact_rows.canonical_event_store
-        || manifest.artifact_rows.market_observations == 0
-        || manifest.artifact_rows.reduction_reports == 0
-        || manifest.selected_files.is_empty()
-    {
-        return Err(GateAPublicationError::Invalid(
-            "运行清单 schema 集合、控制文件或产物行数无效",
-        ));
-    }
-
+    validate_run_manifest_facts(manifest, PublicationPurpose::CompleteExecution)?;
+    validate_control_file_bindings(&[
+        (
+            &manifest.control_files.quality_isolation_report,
+            "reports/quality-isolation-report.json",
+        ),
+        (
+            &manifest.control_files.resource_high_water_report,
+            "reports/resource-evidence.json",
+        ),
+        (
+            &manifest.control_files.test_evidence_report,
+            "reports/test-evidence.json",
+        ),
+        (
+            &manifest.control_files.capability_matrix,
+            "gate-a-capability-matrix.json",
+        ),
+    ])?;
     let selected_dates = manifest
         .selected_files
         .iter()
@@ -2687,7 +2808,6 @@ pub fn validate_gate_a_run_manifest(
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    validate_selected_files(&manifest.selected_files)?;
     if selected_dates != manifest.covered_utc_dates
         || manifest.input_manifests.len() != manifest.covered_utc_dates.len()
     {
@@ -2720,6 +2840,128 @@ pub fn validate_gate_a_run_manifest(
         }
         require_sha256(&binding.sha256)?;
     }
+    Ok(())
+}
+
+fn validate_control_file_bindings(
+    bindings: &[(&GateAControlFileBindingV1, &str)],
+) -> Result<(), GateAPublicationError> {
+    for (binding, path) in bindings {
+        require_sha256(&binding.sha256)?;
+        if binding.relative_path != *path {
+            return Err(GateAPublicationError::Invalid("运行清单控制文件路径无效"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_run_manifest_facts<C>(
+    manifest: &GateARunManifestV2<C>,
+    purpose: PublicationPurpose,
+) -> Result<(), GateAPublicationError> {
+    validate_typed_raw_scan_policies(
+        &manifest.typed_raw_scan_policies,
+        &manifest.condition_id,
+        manifest.received_start_utc_ms,
+        manifest.received_end_utc_ms,
+    )?;
+    let expected_contracts = GateAContractVersionsV1 {
+        canonical_event_record: CANONICAL_EVENT_RECORD_SCHEMA_V1.to_owned(),
+        execution_market_event: EXECUTION_MARKET_EVENT_SCHEMA_V3.to_owned(),
+        canonical_reference_event: CANONICAL_REFERENCE_EVENT_SCHEMA_V1.to_owned(),
+        market_observation: MARKET_OBSERVATION_CAUSAL_SHELL_SCHEMA_V3.to_owned(),
+        event_time_index: EVENT_TIME_INDEX_SCHEMA_V2.to_owned(),
+        visibility_index: VISIBILITY_INDEX_SCHEMA_V2.to_owned(),
+        artifact_manifest: GATE_A_ARTIFACT_MANIFEST_SCHEMA_V1.to_owned(),
+        reduction_report: REDUCTION_REPORT_SCHEMA_V1.to_owned(),
+    };
+    if manifest.schema_version
+        != if purpose == PublicationPurpose::CompleteExecution {
+            GATE_A_RUN_MANIFEST_SCHEMA_V2
+        } else {
+            DPT_OBSERVATION_RUN_MANIFEST_SCHEMA_V1
+        }
+        || manifest.requirement_id
+            != if purpose == PublicationPurpose::CompleteExecution {
+                "DATA-PIPELINE-TRAINING-20260803"
+            } else {
+                "DPT-MISSING-SOURCE-SUPPORT-20260905"
+            }
+        || manifest.git_commit.len() != 40
+        || !manifest
+            .git_commit
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || manifest.contract_versions != expected_contracts
+        || manifest.canonical_rule_version.trim().is_empty()
+        || manifest.dataset_lineage_root != DATASET_LINEAGE_ROOT
+        || manifest.dataset_date_floor != DATASET_DATE_FLOOR
+        || manifest.covered_utc_dates.is_empty()
+        || manifest
+            .covered_utc_dates
+            .windows(2)
+            .any(|pair| pair[0] >= pair[1])
+        || manifest
+            .covered_utc_dates
+            .iter()
+            .any(|date| date.as_str() < DATASET_DATE_FLOOR)
+        || manifest.condition_id.trim().is_empty()
+        || manifest.received_start_utc_ms <= 0
+        || manifest.received_end_utc_ms <= manifest.received_start_utc_ms
+        || manifest.reference_received_start_utc_ms != manifest.received_start_utc_ms
+        || manifest.reference_received_end_utc_ms != manifest.received_end_utc_ms
+        || manifest.supported_schemas != supported_schema_bindings()
+        || manifest.canonical_config.canonical_rule_version != manifest.canonical_rule_version
+        || manifest.validation_result
+            != if purpose == PublicationPurpose::CompleteExecution {
+                "PASS"
+            } else {
+                "OBSERVATION_ARTIFACTS_VALIDATED"
+            }
+    {
+        return Err(GateAPublicationError::Invalid(
+            "运行清单固定身份、范围、合同或结论无效",
+        ));
+    }
+    for digest in [
+        &manifest.pipeline_core_identity_sha256,
+        &manifest.input_set_identity_sha256,
+        &manifest.input_manifest_set_sha256,
+        &manifest.supported_schema_set_identity_sha256,
+        &manifest.artifact_manifests.canonical_event_store,
+        &manifest.artifact_manifests.event_time_index,
+        &manifest.artifact_manifests.visibility_index,
+        &manifest.artifact_manifests.market_observations,
+        &manifest.artifact_manifests.reduction_reports,
+    ] {
+        require_sha256(digest)?;
+    }
+    for digest in [
+        &manifest.canonical_digests.canonical_records_sha256,
+        &manifest.canonical_digests.event_time_projections_sha256,
+        &manifest.canonical_digests.visibility_projections_sha256,
+        &manifest.canonical_digests.reduction_reports_sha256,
+    ] {
+        require_sha256(&Sha256Hex(digest.clone()))?;
+    }
+    if manifest.supported_schema_set_identity_sha256 != supported_schema_set_identity_sha256()
+        || (purpose == PublicationPurpose::CompleteExecution
+            && manifest.artifact_rows.canonical_event_store == 0)
+        || (purpose == PublicationPurpose::CompleteExecution
+            && manifest.artifact_rows.event_time_index == 0)
+        || manifest.artifact_rows.visibility_index != manifest.artifact_rows.canonical_event_store
+        || (purpose == PublicationPurpose::CompleteExecution
+            && manifest.artifact_rows.market_observations == 0)
+        || (purpose == PublicationPurpose::CompleteExecution
+            && manifest.artifact_rows.reduction_reports == 0)
+        || manifest.selected_files.is_empty()
+    {
+        return Err(GateAPublicationError::Invalid(
+            "运行清单 schema 集合、控制文件或产物行数无效",
+        ));
+    }
+
+    validate_selected_file_facts(&manifest.selected_files, purpose)?;
     Ok(())
 }
 
@@ -3128,16 +3370,27 @@ fn require_prepublication_layout(stage: &Path) -> Result<(), GateAPublicationErr
 }
 
 fn require_final_layout(stage: &Path) -> Result<(), GateAPublicationError> {
-    let expected_root = [
-        "artifacts",
-        "reports",
-        "gate-a-capability-matrix.json",
-        "run-manifest.json",
-        "gate-a-receipt.json",
-    ]
-    .into_iter()
-    .map(str::to_owned)
-    .collect::<BTreeSet<_>>();
+    require_publication_layout(
+        stage,
+        &[
+            "artifacts",
+            "reports",
+            "gate-a-capability-matrix.json",
+            "run-manifest.json",
+            "gate-a-receipt.json",
+        ],
+    )
+}
+
+fn require_publication_layout(
+    stage: &Path,
+    root_names: &[&str],
+) -> Result<(), GateAPublicationError> {
+    let expected_root = root_names
+        .iter()
+        .copied()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
     let expected_reports = [
         "quality-isolation-report.json",
         "resource-evidence.json",
@@ -3471,7 +3724,7 @@ fn verify_complete_publication(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::os::unix::fs::symlink;
     use tempfile::TempDir;
@@ -3482,7 +3735,7 @@ mod tests {
         producer_pipeline_core_identity_sha256: Sha256Hex,
     }
 
-    fn immutable_file_snapshot(root: &Path) -> BTreeMap<PathBuf, (u64, Sha256Hex)> {
+    pub(crate) fn immutable_file_snapshot(root: &Path) -> BTreeMap<PathBuf, (u64, Sha256Hex)> {
         fn visit(root: &Path, path: &Path, snapshot: &mut BTreeMap<PathBuf, (u64, Sha256Hex)>) {
             let mut entries = fs::read_dir(path)
                 .unwrap()
@@ -3517,7 +3770,7 @@ mod tests {
         Sha256Hex(String::from_utf8(identity).unwrap())
     }
 
-    fn passing_external_resource_facts() -> GateAExternalResourceFactsV1 {
+    pub(crate) fn passing_external_resource_facts() -> GateAExternalResourceFactsV1 {
         let time_v_output = "Maximum resident set size (kbytes): 1024\nExit status: 0\n".to_owned();
         let memory_events = GateACgroupMemoryEventsV1 {
             low: 0,
@@ -3879,6 +4132,17 @@ mod tests {
             .join("successful-open-validation");
 
         let opened = open_published_gate_a_final(&fixture.root, &validation_path).unwrap();
+        assert!(
+            open_published_dpt_observation(
+                &fixture.root,
+                &fixture
+                    ._candidate
+                    ._temporary
+                    .path()
+                    .join("wrong-purpose-validation")
+            )
+            .is_err()
+        );
 
         assert_eq!(opened.root(), fs::canonicalize(&fixture.root).unwrap());
         assert_eq!(

@@ -1,5 +1,8 @@
 //! 从真实物理格式和完整日清单进入唯一公开构建链的来源缺失回归。
 
+#[path = "zero_source_publication_tests.rs"]
+mod publication_tests;
+
 use super::*;
 use std::fs;
 use std::path::Path;
@@ -403,6 +406,7 @@ fn zero_source_three_physical_inputs_use_the_public_candidate_builder() {
         let output = TempDir::new().unwrap();
         let candidate = build(&input, &scope(), &output.path().join("candidate"), false)
             .expect("合法零参考来源应完成公开候选构建");
+        publication_tests::assert_publication(&input, &candidate);
         let reference_file = candidate
             .selected_files
             .iter()
@@ -504,6 +508,7 @@ fn complete_sources_preserve_fixed_business_values_and_times() {
     };
     assert_eq!(trade.price_usdt_per_btc.0, "64002");
     assert_eq!(trade.quantity_btc.0, "0.01");
+    publication_tests::assert_publication(&input, &candidate);
 }
 
 #[test]
@@ -566,6 +571,7 @@ fn silence_preserves_original_reference_anchor_until_real_recovery() {
     assert_eq!(recovery.received_at_utc_ms, Some(START + 80));
     assert_eq!(recovery.source_event_at_utc_ms, Some(START + 77));
     assert_ne!(recovery.last_visible_event_id, first.last_visible_event_id);
+    publication_tests::assert_publication(&fixture.freeze(), &candidate);
 }
 
 #[test]
@@ -613,6 +619,7 @@ fn snapshot_only_and_genuine_snapshot_unavailable_keep_distinct_facts() {
         let rows = observations(&candidate);
         let depth_events: Vec<_> = records(&candidate).into_iter().filter(|record| matches!(record,
             CanonicalEventRecordV1::ReferenceEvent(event) if matches!(event.payload, CanonicalReferenceEventPayloadV1::BinanceDepthState(_)))).collect();
+        publication_tests::assert_publication(&fixture.freeze(), &candidate);
         if snapshot_present {
             assert_eq!(
                 candidate
@@ -794,6 +801,7 @@ fn unrecovered_cross_day_gap_and_real_same_epoch_recovery_are_preserved() {
         )
         .unwrap();
         assert_eq!(candidate.scope, selected_scope);
+        publication_tests::assert_publication(&input, &candidate);
         assert_eq!(
             candidate.input_manifest_set_sha256.0,
             input.input_manifest_set_sha256()
@@ -875,6 +883,7 @@ fn complete_and_zero_source_inputs_are_invariant_to_physical_batching() {
         let output = TempDir::new().unwrap();
         let first = build(&input, &scope(), &output.path().join("first"), false).unwrap();
         let second = build(&input, &scope(), &output.path().join("second"), true).unwrap();
+        publication_tests::assert_publication(&input, &first);
         assert_ne!(
             first.canonical_metrics.sort.initial_runs,
             second.canonical_metrics.sort.initial_runs

@@ -11,6 +11,7 @@ pub const CANONICAL_EVENT_RECORD_SCHEMA_V1: &str = "canonical_event_record_v1";
 pub const MARKET_OBSERVATION_CAUSAL_SHELL_SCHEMA_V3: &str = "market_observation_causal_shell_v3";
 pub const GATE_A_CAPABILITY_MATRIX_SCHEMA_V2: &str = "gate_a_capability_matrix_v2";
 pub const GATE_A_RECEIPT_SCHEMA_V3: &str = "real_execution_tape_receipt_v3";
+pub const DPT_OBSERVATION_RECEIPT_SCHEMA_V1: &str = "dpt_observation_receipt_v1";
 pub const EVENT_TIME_INDEX_SCHEMA_V2: &str = "event_time_index_v2";
 pub const VISIBILITY_INDEX_SCHEMA_V2: &str = "visibility_index_v2";
 pub const ACCOUNT_INSTANCE_KEY_SCHEMA_V1: &str = "account_instance_key_v1";
@@ -1365,6 +1366,18 @@ pub struct GateACapabilityEntryV2 {
 pub struct GateACapabilityMatrixV2 {
     pub schema_version: String,
     pub entries: Vec<GateACapabilityEntryV2>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DptObservationReceiptV1 {
+    pub schema_version: String,
+    pub receipt_id: Sha256Hex,
+    pub pipeline_core_identity_sha256: Sha256Hex,
+    pub input_set_identity_sha256: Sha256Hex,
+    pub input_manifest_set_sha256: Sha256Hex,
+    pub observation_run_manifest_sha256: Sha256Hex,
+    pub training_dataset_ready: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
