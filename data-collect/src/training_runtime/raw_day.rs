@@ -187,6 +187,8 @@ pub(super) enum RawDayEnqueueDecision {
 pub(super) enum RawDayAcceptedTicket {
     Permit(RawDayPermit),
     Defer(RawDayDeferredEpoch),
+    /// 热会话内部已受理事实，不携带或伪造训练日凭据。
+    HotSession,
 }
 
 impl RawDayAcceptedTicket {
@@ -197,10 +199,11 @@ impl RawDayAcceptedTicket {
         }
     }
 
-    fn utc_day(&self) -> &str {
+    fn utc_day(&self) -> Option<&str> {
         match self {
-            Self::Permit(permit) => &permit.utc_day,
-            Self::Defer(epoch) => &epoch.utc_day,
+            Self::Permit(permit) => Some(&permit.utc_day),
+            Self::Defer(epoch) => Some(&epoch.utc_day),
+            Self::HotSession => None,
         }
     }
 
@@ -208,6 +211,7 @@ impl RawDayAcceptedTicket {
         match self {
             Self::Permit(permit) => permit.utc_day.capacity(),
             Self::Defer(epoch) => epoch.utc_day.capacity(),
+            Self::HotSession => 0,
         }
     }
 }
@@ -1988,6 +1992,7 @@ impl RawDayGate {
                                 && parent.old_generation == exit.close.generation
                                 && parent.expected_generation == exit.close.next_generation
                         }
+                        RawDayAcceptedTicket::HotSession => false,
                     } =>
             {
                 Ok(RawDayAcceptedTicket::Defer(RawDayDeferredEpoch {
@@ -2017,7 +2022,7 @@ impl RawDayGate {
         }
         let event_day = utc_day_string_from_ms(recv_time_utc_ms)
             .ok_or_else(|| invalid_data("UTC day unavailable for accepted raw-event ticket"))?;
-        if event_day != ticket.utc_day() {
+        if Some(event_day.as_str()) != ticket.utc_day() {
             return Err(invalid_data(format!(
                 "accepted raw-event ticket UTC day mismatch: producer={producer} event={event_day} ticket={ticket:?}"
             ))

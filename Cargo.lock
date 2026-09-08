@@ -1634,6 +1634,7 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "base64",
+ "data-pipeline-core",
  "futures",
  "libc",
  "parquet",

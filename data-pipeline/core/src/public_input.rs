@@ -15,6 +15,41 @@ pub const HISTORICAL_PRICE_ANCHOR_REPAIR_SCHEMA_V1: &str = "historical_price_anc
 pub const HISTORICAL_PRICE_ANCHOR_REPAIR_MANIFEST_SCHEMA_V1: &str =
     "historical_price_anchor_repair_manifest_v1";
 
+pub const DATA_COLLECT_HANDOFF_SCHEMA_V2: &str = "data_collect_handoff_v2";
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DataCollectHandoffSessionV2 {
+    pub frame_schema_version: String,
+    pub environment: String,
+    pub run_id: String,
+    pub git_commit: String,
+    pub binary_sha256: String,
+    pub config_digest: String,
+    pub collector_host_id: String,
+    pub collector_region: String,
+}
+
+/// 传输确认只表示当前对象消费并释放，不表示 DPT 应用或持久提交。
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DataCollectHandoffV2 {
+    Session(DataCollectHandoffSessionV2),
+    Message {
+        transport_sequence: u64,
+        row: TypedRawRowV2,
+    },
+    Received {
+        transport_sequence: u64,
+    },
+    End {
+        last_confirmed_sequence: u64,
+    },
+    Aborted {
+        last_confirmed_sequence: u64,
+        reason: String,
+    },
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TypedRawRowV2 {
     Existing(TypedRawRow),

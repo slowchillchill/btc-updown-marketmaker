@@ -757,13 +757,20 @@ fn empty_full_book_confirmation_follows_the_selected_absence_version() {
         let next = message(&context, &next_row);
         let result = state.run(&next);
         assert_eq!(result.reports.len(), 1);
-        assert_eq!(result.reports[0].operation, ReductionOperationKindV1::Confirm);
+        assert_eq!(
+            result.reports[0].operation,
+            ReductionOperationKindV1::Confirm
+        );
         assert_eq!(
             result.reports[0].reason_code,
             "POLYMARKET_IDENTICAL_BOOK_CONFIRMATION"
         );
         assert_eq!(
-            state.assets["123"].absence_baseline.as_ref().unwrap().direct,
+            state.assets["123"]
+                .absence_baseline
+                .as_ref()
+                .unwrap()
+                .direct,
             next.lineage.source_evidence[0]
         );
         assert_eq!(
@@ -798,7 +805,10 @@ fn legacy_empty_full_book_keeps_its_confirmation() {
         if sequence > 1 {
             assert!(result.events.is_empty());
             assert_eq!(result.reports.len(), 1);
-            assert_eq!(result.reports[0].operation, ReductionOperationKindV1::Confirm);
+            assert_eq!(
+                result.reports[0].operation,
+                ReductionOperationKindV1::Confirm
+            );
             assert_eq!(
                 result.reports[0].reason_code,
                 "POLYMARKET_IDENTICAL_BOOK_CONFIRMATION"

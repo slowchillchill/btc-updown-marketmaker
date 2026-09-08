@@ -1288,10 +1288,10 @@ async fn polymarket_price_change_stats_count_one_canonical_v3_message_row() {
     tx.send(WriterCommand::PolymarketOrderbookV3(vec![
         InflightPolymarketOrderbookV3 {
             message,
-            raw_day_permit: RawDayPermit {
+            raw_day_permit: Some(RawDayPermit {
                 utc_day: utc_day_string_from_ms(recv_time_utc_ms).unwrap(),
                 generation: INITIAL_RAW_DAY_GENERATION,
-            },
+            }),
             _source_recv_monotonic_ms: 0,
             _row_reservation: row_reservation,
             _byte_reservation: byte_reservation,

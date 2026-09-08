@@ -2432,7 +2432,6 @@ impl PolymarketMarketMetadataV5Row {
         &mut self.common
     }
 
-    #[cfg(test)]
     pub(crate) fn into_common(self) -> PolymarketMarketMetadataRow {
         self.common
     }

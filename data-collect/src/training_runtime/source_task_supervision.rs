@@ -308,7 +308,7 @@ impl SourceTaskHandle {
         let task_gate = Arc::clone(&gate);
         let join = tokio::spawn(async move {
             let _dataset_lease = dataset_lease;
-            match std::panic::AssertUnwindSafe(wrapper).catch_unwind().await {
+            match catch_source_return(wrapper).await {
                 Ok(result) => {
                     let existing = task_observation.snapshot();
                     let lifecycle =
@@ -567,4 +567,64 @@ pub(super) fn finished_source_task_index(handles: &[SourceTaskHandle]) -> Option
 
 pub(super) fn source_task_ended_unexpectedly(source_kind: &str) -> String {
     format!("source_task_ended_unexpectedly:{source_kind}")
+}
+
+fn catch_source_return<F>(source: F) -> impl Future<Output = std::thread::Result<Result<()>>>
+where
+    F: Future<Output = Result<()>>,
+{
+    // 组合来源 Future 放在堆上，避免新增监督层放大默认工作线程的 poll 栈帧。
+    std::panic::AssertUnwindSafe(Box::pin(source)).catch_unwind()
+}
+
+/// 共用来源监督的返回/异常边界；热会话不构造训练日 epoch 或关闭凭据。
+pub(super) async fn observe_hot_source_return<F>(
+    source_kind: &'static str,
+    source: F,
+    gate: Arc<HotSessionGate>,
+) -> SourceTaskTermination
+where
+    F: Future<Output = Result<()>>,
+{
+    let result = catch_source_return(source).await;
+    let observed_utc_ms = now_ms();
+    let (kind, error) = match result {
+        Ok(Ok(())) if gate.cutoff() => (SourceTaskTerminationKind::ReliableReturn, None),
+        Ok(Ok(())) => (
+            SourceTaskTerminationKind::Unclean,
+            Some(format!(
+                "source returned before hot session cutoff:{source_kind}"
+            )),
+        ),
+        Ok(Err(error)) => (
+            SourceTaskTerminationKind::ReliableReturn,
+            Some(error.to_string()),
+        ),
+        Err(payload) => {
+            let reason = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| {
+                    payload
+                        .downcast_ref::<&str>()
+                        .map(|value| (*value).to_owned())
+                })
+                .unwrap_or_else(|| "non-string panic".to_owned());
+            (
+                SourceTaskTerminationKind::Unclean,
+                Some(format!("source panic:{source_kind}:{reason}")),
+            )
+        }
+    };
+    if let Some(error) = &error {
+        gate.stop(RuntimeCloseCause::SourceInnerReturn { source_kind });
+        gate.fail(format!("{source_kind}:{error}"));
+    }
+    SourceTaskTermination {
+        source_kind,
+        observed_utc_ms: Some(observed_utc_ms),
+        epoch: None,
+        kind,
+        error,
+    }
 }

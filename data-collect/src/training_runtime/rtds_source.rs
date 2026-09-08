@@ -4,7 +4,7 @@ pub(super) const RTDS_WS_ENDPOINT: &str = "wss://ws-live-data.polymarket.com";
 const RTDS_FRESH_MIN_AGE_MS: i64 = -5_000;
 const RTDS_FRESH_MAX_AGE_MS: i64 = 30_000;
 pub(super) const RTDS_DEDUPE_WINDOW_MS: i64 = 60 * 60 * 1000;
-const RTDS_DEDUPE_MAX_KEYS: usize = 100_000;
+pub(super) const RTDS_DEDUPE_MAX_KEYS: usize = 100_000;
 const RTDS_STEADY_SILENCE_THRESHOLD: Duration = Duration::from_secs(300);
 const RTDS_FIRST_FRESH_OBSERVATION_WINDOW: Duration = Duration::from_secs(60);
 const RTDS_OUTER_BACKOFF_INITIAL_MS: u64 = 1_000;
@@ -464,7 +464,7 @@ pub(super) async fn run_rtds_source_with_spec(
     run_started: Instant,
 ) -> Result<()> {
     let restore_time_ms = now_ms();
-    let mut dedupe =
+    let dedupe =
         tokio::task::spawn_blocking(move || restore_rtds_dedupe(&dataset_root, restore_time_ms))
             .await
             .map_err(|error| {
@@ -477,6 +477,26 @@ pub(super) async fn run_rtds_source_with_spec(
                     "operator_intervention_required:RTDS dedupe restore failed:{error}"
                 ))
             })?;
+    run_rtds_source_with_dedupe(
+        spec,
+        dedupe,
+        sink,
+        collector_identity,
+        deadline,
+        run_started,
+    )
+    .await
+}
+
+pub(super) async fn run_rtds_source_with_dedupe(
+    spec: RtdsSourceSpec,
+    mut dedupe: TimedFingerprintWindow,
+    sink: SourceEventSink,
+    collector_identity: CollectorIdentity,
+    deadline: Option<Instant>,
+    run_started: Instant,
+) -> Result<()> {
+    let admission_gate = sink.source_queue_backpressure.admission_gate();
     let subscriptions = rtds_price_subscriptions();
     let source_sequence_epoch_id = rtds_source_sequence_epoch_id(&collector_identity)?;
     let mut rtds_runtime_epoch = 0_u64;
@@ -490,6 +510,10 @@ pub(super) async fn run_rtds_source_with_spec(
         let business_deadline = business_recovery.next_deadline();
         let runtime_result = tokio::select! {
             biased;
+            () = async {
+                if let Some(gate) = &admission_gate { gate.wait_for_hot_cutoff().await; }
+                else { std::future::pending::<()>().await; }
+            } => break,
             result = runtime.recv_event_until(deadline) => Some(result),
             () = async {
                 if let Some(deadline) = business_deadline {

@@ -13,10 +13,11 @@ use crate::deployment::{
     CollectorBinaryRole, CollectorStartupReceipt, DeploymentRuntimeConfig, Result,
     validate_runtime_config,
 };
-use crate::handoff::{HandoffRuntimeConfig, run_heartbeat_handoff_server};
+use crate::handoff::{HandoffRuntimeConfig, run_source_handoff_server};
 use crate::publish::PaperLiveEnvironment;
 use crate::training_runtime::{
-    TrainingRuntimeConfig, production_training_source_endpoints, run_training_runtime,
+    TrainingRuntimeConfig, production_training_source_endpoints, run_hot_sources,
+    run_training_runtime,
 };
 use crate::writer::sha256_file;
 
@@ -223,6 +224,24 @@ async fn run_hot_collector(
     role: CollectorBinaryRole,
     args: impl IntoIterator<Item = OsString>,
 ) -> Result<()> {
+    run_hot_collector_with_runner(role, args, run_hot_sources).await
+}
+
+pub(crate) async fn run_hot_collector_with_runner<F, Fut>(
+    role: CollectorBinaryRole,
+    args: impl IntoIterator<Item = OsString>,
+    run_sources: F,
+) -> Result<()>
+where
+    F: FnOnce(
+        tokio::net::UnixStream,
+        CollectorStartupReceipt,
+        std::time::Instant,
+        std::time::Instant,
+        i64,
+    ) -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
     let cli = parse_hot_args(args).map_err(operator_intervention_error)?;
     fs::create_dir_all(&cli.dataset_root).map_err(operator_intervention_error)?;
     let dataset_root = cli
@@ -246,11 +265,11 @@ async fn run_hot_collector(
         CollectorBinaryRole::TrainingCold => unreachable!("training uses its own entry point"),
     };
     let handoff_config = HandoffRuntimeConfig::for_environment(&config.dataset_root, environment)?;
-    run_heartbeat_handoff_server(
+    run_source_handoff_server(
         &handoff_config,
-        &receipt.collector_host_id,
-        &receipt.collector_region,
+        receipt,
         config.max_runtime_secs,
+        run_sources,
     )
     .await
 }
@@ -383,6 +402,86 @@ fn operator_intervention_error(error: impl std::fmt::Display) -> io::Error {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn hot_role_starts_with_a_length_framed_session_before_sources() {
+        use tokio::io::AsyncReadExt as _;
+        let root = tempfile::tempdir().unwrap();
+        let socket = root.path().join("paper/data_collect_handoff/hot.sock");
+        let args = vec![
+            OsString::from("--dataset-root"),
+            root.path().as_os_str().to_owned(),
+            OsString::from("--run-id"),
+            OsString::from("session-contract"),
+            OsString::from("--collector-region"),
+            OsString::from("fixture"),
+            OsString::from("--max-runtime-secs"),
+            OsString::from("1"),
+        ];
+        let server = tokio::spawn(run_hot_collector(CollectorBinaryRole::PaperHot, args));
+        let mut stream = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            loop {
+                if let Ok(stream) = tokio::net::UnixStream::connect(&socket).await {
+                    break stream;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let mut prefix = [0_u8; 8];
+        stream.read_exact(&mut prefix).await.unwrap();
+        assert_eq!(
+            &prefix[..4],
+            &[0; 4],
+            "the fixed Session must use the u64 frame header"
+        );
+        let mut body = vec![0; u64::from_be_bytes(prefix) as usize];
+        stream.read_exact(&mut body).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            value["Session"]["frame_schema_version"],
+            "data_collect_handoff_v2"
+        );
+        assert_eq!(value["Session"]["run_id"], "session-contract");
+        drop(stream);
+        assert!(
+            server.await.unwrap().is_err(),
+            "unconfirmed Session is incomplete"
+        );
+        assert!(!root.path().join("training").exists());
+    }
+
+    #[tokio::test]
+    async fn hot_deadline_without_consumer_never_starts_sources() {
+        let root = tempfile::tempdir().unwrap();
+        let started = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let observed = std::sync::Arc::clone(&started);
+        let args = vec![
+            OsString::from("--dataset-root"),
+            root.path().as_os_str().to_owned(),
+            OsString::from("--run-id"),
+            OsString::from("no-consumer"),
+            OsString::from("--collector-region"),
+            OsString::from("fixture"),
+            OsString::from("--max-runtime-secs"),
+            OsString::from("1"),
+        ];
+        run_hot_collector_with_runner(CollectorBinaryRole::PaperHot, args, move |_, _, _, _, _| {
+            observed.store(true, std::sync::atomic::Ordering::Relaxed);
+            async { Ok(()) }
+        })
+        .await
+        .unwrap();
+        assert!(!started.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(
+            !root
+                .path()
+                .join("paper/data_collect_handoff/hot.sock")
+                .exists()
+        );
+        assert!(!root.path().join("training").exists());
+    }
 
     #[test]
     fn production_source_spec_keeps_the_frozen_training_config_digest_bytes() {

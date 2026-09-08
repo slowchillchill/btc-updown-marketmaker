@@ -105,13 +105,13 @@ impl PolymarketDrainRuntime {
         endpoint: String,
         config: WsConfig,
         global_budget: InflightBudget,
-        raw_day_gate: Arc<RawDayGate>,
+        raw_day_gate: impl Into<SourceAdmissionGate>,
     ) -> Result<Self> {
         Self::new_with_recv_clock(
             endpoint,
             config,
             global_budget,
-            raw_day_gate,
+            raw_day_gate.into(),
             Arc::new(now_ms),
         )
     }
@@ -120,13 +120,13 @@ impl PolymarketDrainRuntime {
         endpoint: String,
         config: WsConfig,
         global_budget: InflightBudget,
-        raw_day_gate: Arc<RawDayGate>,
+        raw_day_gate: impl Into<SourceAdmissionGate>,
         recv_utc_now: Arc<dyn Fn() -> i64 + Send + Sync>,
     ) -> Result<Self> {
         Self::from_market_sdk(
             MarketSdkRuntime::new(endpoint, config)?,
             global_budget,
-            raw_day_gate,
+            raw_day_gate.into(),
             recv_utc_now,
         )
     }
@@ -137,7 +137,7 @@ impl PolymarketDrainRuntime {
         endpoint: String,
         config: WsConfig,
         global_budget: InflightBudget,
-        raw_day_gate: Arc<RawDayGate>,
+        raw_day_gate: impl Into<SourceAdmissionGate>,
         generation: u64,
         revision: u64,
         reached: oneshot::Sender<()>,
@@ -148,7 +148,7 @@ impl PolymarketDrainRuntime {
                 endpoint, config, generation, revision, reached, resume,
             )?,
             global_budget,
-            raw_day_gate,
+            raw_day_gate.into(),
             Arc::new(now_ms),
         )
     }
@@ -156,7 +156,7 @@ impl PolymarketDrainRuntime {
     fn from_market_sdk(
         mut sdk: MarketSdkRuntime,
         global_budget: InflightBudget,
-        raw_day_gate: Arc<RawDayGate>,
+        raw_day_gate: SourceAdmissionGate,
         recv_utc_now: Arc<dyn Fn() -> i64 + Send + Sync>,
     ) -> Result<Self> {
         let receiver = sdk.take_message_receiver()?;
@@ -299,7 +299,7 @@ pub(super) async fn run_polymarket_fast_drain(
     mut controls: mpsc::Receiver<PolymarketPumpControl>,
     global_budget: InflightBudget,
     decoded_budget: InflightBudget,
-    raw_day_gate: Arc<RawDayGate>,
+    raw_day_gate: SourceAdmissionGate,
     recv_utc_now: Arc<dyn Fn() -> i64 + Send + Sync>,
 ) {
     loop {
@@ -445,7 +445,7 @@ pub(super) async fn enqueue_polymarket_decoded_message(
     events: &mpsc::Sender<PolymarketPumpItem>,
     global_budget: &InflightBudget,
     decoded_budget: &InflightBudget,
-    raw_day_gate: &Arc<RawDayGate>,
+    raw_day_gate: &SourceAdmissionGate,
     recv_time_utc_ms: i64,
 ) -> bool {
     if !message.is_market() {
@@ -565,17 +565,13 @@ pub(super) async fn enqueue_polymarket_decoded_message(
 
 pub(super) async fn send_polymarket_terminal(
     events: &mpsc::Sender<PolymarketPumpItem>,
-    raw_day_gate: &RawDayGate,
+    raw_day_gate: &SourceAdmissionGate,
     terminal: PolymarketDrainTerminal,
 ) {
     if polymarket_drain_terminal_is_fatal(&terminal) {
-        let _ = raw_day_gate.observe_source_terminal_now(
-            RuntimeCloseCause::SourceInnerReturn {
-                source_kind: "polymarket_market",
-            },
-            None,
-            None,
-        );
+        raw_day_gate.observe_source_failure(RuntimeCloseCause::SourceInnerReturn {
+            source_kind: "polymarket_market",
+        });
     }
     let _ = events.send(PolymarketPumpItem::Terminal(terminal)).await;
 }
@@ -1055,7 +1051,7 @@ pub(super) async fn run_polymarket_source_with_spec(
             .ok_or_else(|| invalid_data("Polymarket processing context was not initialized"))?;
         let raw_day_gate = sink
             .source_queue_backpressure
-            .raw_day_gate()
+            .admission_gate()
             .ok_or_else(|| invalid_data("raw-day gate missing before Polymarket runtime start"))?;
         let mut market_runtime = PolymarketDrainRuntime::new(
             spec.market_ws_endpoint.clone(),
@@ -3051,7 +3047,7 @@ async fn materialize_polymarket_accepted_early_ws_at_quiesce(
     context.validate_local_transition_authority(&pending_row)?;
     let gate = sink
         .source_queue_backpressure
-        .raw_day_gate()
+        .admission_gate()
         .ok_or_else(|| {
             invalid_data("raw-day gate missing while accepted early WS is materialized at quiesce")
         })?;
@@ -4648,7 +4644,7 @@ where
 {
     let raw_day_gate = sink
         .source_queue_backpressure
-        .raw_day_gate()
+        .admission_gate()
         .ok_or_else(|| invalid_data("raw-day gate missing before Gamma resolution poll spawn"))?;
     let due_polls = context
         .pending
@@ -4667,9 +4663,13 @@ where
         })
         .collect::<Vec<_>>();
     for (slug, ordinal, scheduled_at_utc_ms) in due_polls {
+        let request_ticket = raw_day_gate.hot_request_ticket();
+        if matches!(raw_day_gate, SourceAdmissionGate::Hot(_)) && request_ticket.is_none() {
+            continue;
+        }
         let gamma = gamma.clone();
         let task_timeline = Arc::clone(timeline_now);
-        let task_raw_day_gate = Arc::clone(&raw_day_gate);
+        let task_raw_day_gate = raw_day_gate.clone();
         let task_slug = slug.clone();
         let handle = resolution_poll_tasks.spawn(async move {
             let fetch_start_utc_ms = task_timeline().utc_ms;
@@ -4697,7 +4697,7 @@ where
             };
             let completed_at_utc_ms = task_timeline().utc_ms;
             let raw_day_ticket = match task_raw_day_gate
-                .accept_unadmitted_event_ticket("polymarket", completed_at_utc_ms)
+                .accept_response_ticket(request_ticket.as_ref(), completed_at_utc_ms)
                 .await
             {
                 Ok(Some(ticket)) => RawDayTicketAcceptance::Accepted(ticket),
@@ -5007,7 +5007,7 @@ where
             )?;
             let gate = sink
                 .source_queue_backpressure
-                .raw_day_gate()
+                .admission_gate()
                 .ok_or_else(|| {
                     invalid_data(
                         "raw-day gate missing while exhausted Polymarket summary is finalized",
@@ -6189,7 +6189,7 @@ where
     }
     let gate = sink
         .source_queue_backpressure
-        .raw_day_gate()
+        .admission_gate()
         .ok_or_else(|| {
             invalid_data("raw-day gate missing from production Polymarket enqueue path")
         })?;
@@ -6210,8 +6210,8 @@ where
         ),
     };
     let raw_day_permit = match &raw_enqueue {
-        RawDayEnqueueDecision::Permit(enqueue) => Some(enqueue.permit.clone()),
-        RawDayEnqueueDecision::Defer(_) => None,
+        SourceEnqueueDecision::Permit(enqueue) => enqueue.raw_day_permit.clone(),
+        SourceEnqueueDecision::Defer(_) => None,
     };
     for event in &mut events {
         event.raw_day_permit = raw_day_permit.clone();
@@ -6226,7 +6226,7 @@ where
         record_gap_at(&sink.gaps, recv_time_utc_ms, reason.clone());
         return Err(invalid_data(reason).into());
     }
-    if let RawDayEnqueueDecision::Defer(epoch) = &raw_enqueue {
+    if let SourceEnqueueDecision::Defer(epoch) = &raw_enqueue {
         if let Err(error) = commit() {
             record_polymarket_fanout_drop(sink, recv_time_utc_ms, market_rows, metadata_rows);
             record_gap_at(
@@ -6684,7 +6684,7 @@ where
 {
     let gate = sink
         .source_queue_backpressure
-        .raw_day_gate()
+        .admission_gate()
         .ok_or_else(|| invalid_data("raw-day gate missing from Polymarket v3 admission path"))?;
     let raw_enqueue = gate
         .begin_accepted_ticket_enqueue("polymarket", recv_time_utc_ms, ticket)
@@ -6768,7 +6768,7 @@ where
     };
 
     match raw_enqueue {
-        RawDayEnqueueDecision::Permit(raw_enqueue) => {
+        SourceEnqueueDecision::Permit(raw_enqueue) => {
             let _enqueue_guard = sink.enqueue_lock.lock().await;
             let queue_permit = match sink.tx.try_reserve() {
                 Ok(permit) => permit,
@@ -6805,7 +6805,7 @@ where
             queue_permit.send(SourceIngressPayload::PolymarketOrderbookV3(
                 InflightPolymarketOrderbookV3 {
                     message,
-                    raw_day_permit: raw_enqueue.permit,
+                    raw_day_permit: raw_enqueue.raw_day_permit,
                     _source_recv_monotonic_ms: monotonic_ms(run_started),
                     _row_reservation: row_reservation,
                     _byte_reservation: byte_reservation,
@@ -6813,7 +6813,7 @@ where
             ));
             Ok(receipt)
         }
-        RawDayEnqueueDecision::Defer(epoch) => {
+        SourceEnqueueDecision::Defer(epoch) => {
             let mut deferred = sink
                 .source_queue_backpressure
                 .deferred_ingress_batches

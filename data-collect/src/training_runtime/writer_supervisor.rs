@@ -1215,25 +1215,30 @@ pub(super) fn source_writer_worker_with_startup(
                                         "UTC day unavailable in Polymarket v3 source writer",
                                     )
                                 })?;
-                            if event_day != inflight_event.raw_day_permit.utc_day {
+                            let raw_day_permit =
+                                inflight_event.raw_day_permit.as_ref().ok_or_else(|| {
+                                    invalid_data(
+                                        "production raw event missing day/generation permit",
+                                    )
+                                })?;
+                            if event_day != raw_day_permit.utc_day {
                                 return Err(invalid_data(format!(
                                     "writer Polymarket v3 raw-day permit mismatch:source={source_kind}:event_day={event_day}:permit={:?}",
-                                    inflight_event.raw_day_permit
+                                    raw_day_permit
                                 ))
                                 .into());
                             }
                             match expected_raw_epoch.as_ref() {
-                                Some(expected) if expected != &inflight_event.raw_day_permit => {
+                                Some(expected) if expected != raw_day_permit => {
                                     return Err(invalid_data(format!(
                                         "writer Polymarket v3 raw-day generation mismatch:source={source_kind}:expected={expected:?}:actual={:?}",
-                                        inflight_event.raw_day_permit
+                                        raw_day_permit
                                     ))
                                     .into());
                                 }
                                 None => {
-                                    expected_raw_epoch =
-                                        Some(inflight_event.raw_day_permit.clone());
-                                    writer_epoch.set(&inflight_event.raw_day_permit);
+                                    expected_raw_epoch = Some(raw_day_permit.clone());
+                                    writer_epoch.set(raw_day_permit);
                                 }
                                 Some(_) => {}
                             }
@@ -2430,279 +2435,6 @@ fn write_typed_event(writer: &mut TypedParquetSegmentWriter, event: &RawEvent) -
             format!("unsupported training typed source kind: {other}"),
         )
         .into()),
-    }
-}
-
-pub(super) fn binance_depth_snapshot_row_from_event(
-    event: &RawEvent,
-) -> Result<BinanceDepthSnapshotHourlyRow> {
-    let value = serde_json::from_str::<Value>(&event.raw_json)?;
-    let snapshot_fetch_start_utc = required_i64(&value, "snapshot_fetch_start_utc")?;
-    let raw = parse_depth_snapshot_raw(
-        event_envelope(event, SourceKind::BinanceDepthSnapshot),
-        &event.raw_json,
-        snapshot_fetch_start_utc,
-        event.recv_time_utc_ms,
-        event.source_endpoint.clone(),
-    )
-    .map_err(invalid_data)?;
-    BinanceDepthSnapshotHourlyRow::from_raw_with_ordering(
-        &raw,
-        binance_depth_ordering_from_event(event, &value)?,
-    )
-    .map_err(|error| invalid_data(error).into())
-}
-
-fn binance_depth_update_row_from_event(event: &RawEvent) -> Result<BinanceDepthUpdateHourlyRow> {
-    let value = serde_json::from_str::<Value>(&event.raw_json)?;
-    let raw = parse_depth_update_raw(
-        event_envelope(event, SourceKind::BinanceDepthUpdate),
-        &event.raw_json,
-    )
-    .map_err(invalid_data)?;
-    let stitch_verdict = required_value_string(&value, "stitch_verdict")?;
-    let verdict = DepthUpdateVerdict::try_from(stitch_verdict.as_str()).map_err(invalid_data)?;
-    let assessment = DepthUpdateAssessment {
-        snapshot_last_update_id: value.get("snapshot_last_update_id").and_then(Value::as_u64),
-        local_u_before: value.get("local_u_before").and_then(Value::as_u64),
-        verdict,
-        local_u_after: value.get("local_u_after").and_then(Value::as_u64),
-        stitch_evidence: optional_string(&value, "stitch_evidence"),
-        gap_reason: optional_string(&value, "stitch_gap_reason"),
-    };
-    assessment.validate_contract().map_err(invalid_data)?;
-    BinanceDepthUpdateHourlyRow::from_assessment(
-        &raw,
-        &assessment,
-        binance_depth_ordering_from_event(event, &value)?,
-    )
-    .map_err(|error| invalid_data(error).into())
-}
-
-fn binance_depth_ordering_from_event(
-    event: &RawEvent,
-    value: &Value,
-) -> Result<BinanceDepthOrdering> {
-    let admission = event.collector_admission.as_ref().ok_or_else(|| {
-        invalid_data("Binance depth event reached writer without collector admission")
-    })?;
-    let ordering = BinanceDepthOrdering {
-        source_sequence_epoch_id: required_value_string(value, "source_sequence_epoch_id")?,
-        connection_generation: value
-            .get("connection_generation")
-            .and_then(Value::as_u64)
-            .filter(|generation| *generation > 0)
-            .ok_or_else(|| invalid_data("Binance depth connection_generation missing or zero"))?,
-        depth_ingress_sequence: value
-            .get("depth_ingress_sequence")
-            .and_then(Value::as_u64)
-            .filter(|sequence| *sequence > 0)
-            .ok_or_else(|| invalid_data("Binance depth ingress sequence missing or zero"))?,
-        collector_admission_sequence: admission.sequence,
-        collector_admission_time_utc_ms: admission.time_utc_ms,
-    };
-    ordering.validate_contract().map_err(invalid_data)?;
-    Ok(ordering)
-}
-
-pub(super) fn binance_aggtrade_row_from_event(
-    event: &RawEvent,
-) -> Result<BinanceAggTradeHourlyRow> {
-    let value = serde_json::from_str::<Value>(&event.raw_json)?;
-    let record_kind = required_value_string(&value, "record_kind")?;
-    let timestamp_received = required_i64(&value, "timestamp_received")?;
-    if timestamp_received != event.recv_time_utc_ms {
-        return Err(invalid_data("aggTrade raw/event receive time mismatch").into());
-    }
-    let admission = event.collector_admission.as_ref().ok_or_else(|| {
-        invalid_data("binance aggTrade event reached writer without collector admission")
-    })?;
-    let ingest_source = required_value_string(&value, "ingest_source")?;
-    let rest_backfill_timestamp_received = optional_i64(&value, "rest_backfill_timestamp_received");
-    let row = BinanceAggTradeHourlyRow {
-        record_kind,
-        timestamp_received,
-        rest_backfill_timestamp_received,
-        ingest_source,
-        event_type: optional_string(&value, "event_type"),
-        event_time: optional_i64(&value, "event_time"),
-        trade_time: optional_i64(&value, "trade_time"),
-        symbol: optional_string(&value, "symbol"),
-        aggregate_trade_id: value.get("aggregate_trade_id").and_then(Value::as_u64),
-        price: optional_string(&value, "price"),
-        quantity: optional_string(&value, "quantity"),
-        first_trade_id: value.get("first_trade_id").and_then(Value::as_u64),
-        last_trade_id: value.get("last_trade_id").and_then(Value::as_u64),
-        buyer_is_maker: optional_bool(&value, "buyer_is_maker"),
-        stream: optional_string(&value, "stream"),
-        ws_ignore: optional_bool(&value, "ws_ignore"),
-        rest_was_best_price_match: optional_bool(&value, "rest_was_best_price_match"),
-        source_native_payload_json: required_value_string(&value, "source_native_payload_json")?,
-        source_sequence_epoch_id: required_value_string(&value, "source_sequence_epoch_id")?,
-        connection_generation: value
-            .get("connection_generation")
-            .and_then(Value::as_u64)
-            .filter(|generation| *generation != 0)
-            .ok_or_else(|| invalid_data("aggTrade connection_generation missing or zero"))?,
-        websocket_ingress_sequence: value
-            .get("websocket_ingress_sequence")
-            .and_then(Value::as_u64),
-        rest_response_ingress_sequence: value
-            .get("rest_response_ingress_sequence")
-            .and_then(Value::as_u64),
-        rest_response_item_index: value
-            .get("rest_response_item_index")
-            .and_then(Value::as_u64),
-        collector_admission_sequence: admission.sequence,
-        collector_admission_time_utc_ms: admission.time_utc_ms,
-        invalid_reason_code: optional_string(&value, "invalid_reason_code"),
-        invalid_reason_detail: optional_string(&value, "invalid_reason_detail"),
-        payload_encoding: optional_string(&value, "payload_encoding"),
-        payload_length_bytes: value.get("payload_length_bytes").and_then(Value::as_u64),
-        payload_sha256: optional_string(&value, "payload_sha256"),
-        payload_capture_status: optional_string(&value, "payload_capture_status"),
-        collector_host_id: event.collector_host_id.clone(),
-        collector_region: event.collector_region.clone(),
-        source_endpoint: event.source_endpoint.clone(),
-        schema_version: BINANCE_AGGTRADE_SCHEMA_VERSION.to_owned(),
-    };
-    let validation = row.validate();
-    if !validation.is_complete() {
-        return Err(invalid_data(format!(
-            "Binance aggTrade row missing fields: {:?}",
-            validation.missing_fields
-        ))
-        .into());
-    }
-    Ok(row)
-}
-
-pub(super) fn rtds_row_from_event(event: &RawEvent) -> Result<RtdsChainlinkBtcUsdHourlyRow> {
-    let row = rtds_common_row_from_event(event)?;
-    let validation = row.validate();
-    if !validation.is_complete() {
-        return Err(invalid_data(format!(
-            "RTDS row missing fields: {:?}",
-            validation.missing_fields
-        ))
-        .into());
-    }
-    Ok(row)
-}
-
-fn rtds_common_row_from_event(event: &RawEvent) -> Result<RtdsChainlinkBtcUsdHourlyRow> {
-    let value = serde_json::from_str::<Value>(&event.raw_json)?;
-    let raw = RtdsChainlinkBtcUsdRaw {
-        envelope: event_envelope(event, SourceKind::PolymarketRtdsChainlinkBtcUsd),
-        message_timestamp_ms: required_i64(&value, "message_timestamp")?,
-        payload_timestamp_ms: required_i64(&value, "payload_timestamp")?,
-        symbol: required_value_string(&value, "symbol")?,
-        value: required_value_string(&value, "value")?,
-        source_topic: required_value_string(&value, "topic")?,
-        message_type: required_value_string(&value, "type")?,
-        age_ms: optional_i64(&value, "age_ms"),
-        freshness_status: required_value_string(&value, "freshness_status")?,
-        subscription_raw_json: value
-            .get("subscription_raw_json")
-            .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(rtds_subscription_evidence_json),
-        ack_or_first_message_evidence: Some("first_chainlink_price_message".to_owned()),
-        close_or_error_evidence: None,
-    };
-    let mut row = RtdsChainlinkBtcUsdHourlyRow::from_raw(&raw);
-    row.source_native_payload_json = required_value_string(&value, "source_native_payload_json")?;
-    row.schema_version = "polymarket_rtds_chainlink_btc_usd_v4".to_owned();
-    Ok(row)
-}
-
-pub(super) fn rtds_twap_row_from_event(event: &RawEvent) -> Result<RtdsChainlinkTwapHourlyRow> {
-    let value: Value = serde_json::from_str(&event.raw_json)?;
-    let payload = value
-        .get("payload")
-        .ok_or_else(|| invalid_data("TWAP payload missing"))?;
-    let admission = event
-        .collector_admission
-        .as_ref()
-        .ok_or_else(|| invalid_data("TWAP collector admission missing"))?;
-    let mut common = rtds_common_row_from_event(event)?;
-    common.schema_version = RTDS_CHAINLINK_TWAP_SCHEMA_VERSION.to_owned();
-    let row = RtdsChainlinkTwapHourlyRow {
-        common,
-        full_accuracy_value: required_value_string(payload, "full_accuracy_value")?,
-        window_s: payload
-            .get("window_s")
-            .and_then(Value::as_u64)
-            .ok_or_else(|| invalid_data("TWAP window_s missing"))?,
-        source_sequence_epoch_id: required_value_string(&value, "source_sequence_epoch_id")?,
-        collector_admission_sequence: admission.sequence,
-        collector_admission_time_utc_ms: admission.time_utc_ms,
-    };
-    let validation = row.validate();
-    if !validation.is_complete() {
-        return Err(invalid_data(format!(
-            "RTDS TWAP row missing fields: {:?}",
-            validation.missing_fields
-        ))
-        .into());
-    }
-    Ok(row)
-}
-
-fn required_value_string(value: &Value, field: &str) -> Result<String> {
-    value
-        .get(field)
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .map(ToOwned::to_owned)
-        .ok_or_else(|| invalid_data(format!("{field} missing")).into())
-}
-
-fn optional_string(value: &Value, field: &str) -> Option<String> {
-    value
-        .get(field)
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn optional_bool(value: &Value, field: &str) -> Option<bool> {
-    value.get(field).and_then(Value::as_bool)
-}
-
-fn metadata_unavailable_reason(value: &Value) -> Option<String> {
-    match value.get("metadata_unavailable_reason") {
-        Some(Value::String(reason)) if !reason.trim().is_empty() => Some(reason.clone()),
-        Some(Value::Array(reasons)) if !reasons.is_empty() => {
-            let reasons = reasons
-                .iter()
-                .map(json_scalar_to_string)
-                .collect::<Result<Vec<_>>>()
-                .ok()?;
-            Some(reasons.join(";"))
-        }
-        Some(other) if !other.is_null() => Some(other.to_string()),
-        _ => None,
-    }
-}
-
-fn required_i64(value: &Value, field: &str) -> Result<i64> {
-    optional_i64(value, field).ok_or_else(|| invalid_data(format!("{field} missing")).into())
-}
-
-pub(super) fn optional_i64(value: &Value, field: &str) -> Option<i64> {
-    value.get(field).and_then(|value| {
-        value
-            .as_i64()
-            .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
-    })
-}
-
-fn json_scalar_to_string(value: &Value) -> Result<String> {
-    match value {
-        Value::String(value) if !value.trim().is_empty() => Ok(value.clone()),
-        Value::Number(value) => Ok(value.to_string()),
-        _ => Err(invalid_data("expected string or number JSON scalar").into()),
     }
 }
 
