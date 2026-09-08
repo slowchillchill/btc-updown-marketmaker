@@ -2420,6 +2420,11 @@ fn write_typed_event(writer: &mut TypedParquetSegmentWriter, event: &RawEvent) -
             writer.write_rtds_chainlink_btc_usd_rows_with_logical_bytes(&[row], logical_bytes)?;
             Ok(1)
         }
+        "polymarket_rtds_chainlink_twap" => {
+            let row = rtds_twap_row_from_event(event)?;
+            writer.write_rtds_chainlink_twap_rows_with_logical_bytes(&[row], logical_bytes)?;
+            Ok(1)
+        }
         other => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("unsupported training typed source kind: {other}"),
@@ -2573,6 +2578,19 @@ pub(super) fn binance_aggtrade_row_from_event(
 }
 
 pub(super) fn rtds_row_from_event(event: &RawEvent) -> Result<RtdsChainlinkBtcUsdHourlyRow> {
+    let row = rtds_common_row_from_event(event)?;
+    let validation = row.validate();
+    if !validation.is_complete() {
+        return Err(invalid_data(format!(
+            "RTDS row missing fields: {:?}",
+            validation.missing_fields
+        ))
+        .into());
+    }
+    Ok(row)
+}
+
+fn rtds_common_row_from_event(event: &RawEvent) -> Result<RtdsChainlinkBtcUsdHourlyRow> {
     let value = serde_json::from_str::<Value>(&event.raw_json)?;
     let raw = RtdsChainlinkBtcUsdRaw {
         envelope: event_envelope(event, SourceKind::PolymarketRtdsChainlinkBtcUsd),
@@ -2595,10 +2613,35 @@ pub(super) fn rtds_row_from_event(event: &RawEvent) -> Result<RtdsChainlinkBtcUs
     let mut row = RtdsChainlinkBtcUsdHourlyRow::from_raw(&raw);
     row.source_native_payload_json = required_value_string(&value, "source_native_payload_json")?;
     row.schema_version = "polymarket_rtds_chainlink_btc_usd_v4".to_owned();
+    Ok(row)
+}
+
+pub(super) fn rtds_twap_row_from_event(event: &RawEvent) -> Result<RtdsChainlinkTwapHourlyRow> {
+    let value: Value = serde_json::from_str(&event.raw_json)?;
+    let payload = value
+        .get("payload")
+        .ok_or_else(|| invalid_data("TWAP payload missing"))?;
+    let admission = event
+        .collector_admission
+        .as_ref()
+        .ok_or_else(|| invalid_data("TWAP collector admission missing"))?;
+    let mut common = rtds_common_row_from_event(event)?;
+    common.schema_version = RTDS_CHAINLINK_TWAP_SCHEMA_VERSION.to_owned();
+    let row = RtdsChainlinkTwapHourlyRow {
+        common,
+        full_accuracy_value: required_value_string(payload, "full_accuracy_value")?,
+        window_s: payload
+            .get("window_s")
+            .and_then(Value::as_u64)
+            .ok_or_else(|| invalid_data("TWAP window_s missing"))?,
+        source_sequence_epoch_id: required_value_string(&value, "source_sequence_epoch_id")?,
+        collector_admission_sequence: admission.sequence,
+        collector_admission_time_utc_ms: admission.time_utc_ms,
+    };
     let validation = row.validate();
     if !validation.is_complete() {
         return Err(invalid_data(format!(
-            "RTDS row missing fields: {:?}",
+            "RTDS TWAP row missing fields: {:?}",
             validation.missing_fields
         ))
         .into());

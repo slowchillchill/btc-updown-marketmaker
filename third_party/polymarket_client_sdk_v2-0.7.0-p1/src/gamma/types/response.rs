@@ -5,13 +5,93 @@
 
 use bon::Builder;
 use chrono::{DateTime, NaiveDate, Utc};
+use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 use serde_with::NoneAsEmptyString;
 use serde_with::json::JsonString;
 use serde_with::{DisplayFromStr, StringWithSeparator, formats::CommaSeparator, serde_as};
+use url::Url;
 
 use crate::serde_helpers::StringFromAny;
 use crate::types::{Address, B256, Decimal, U256};
+
+/// 完整 HTTP 响应及其解析结果；错误响应也保留原始实体字节。
+///
+/// `raw_body` 来自 HTTP 客户端读取的实体，不是 SDK 对象重序列化、压缩传输帧或 TLS 字节。
+/// `received_at_utc` 在完整实体收到后、解析前记录，不是上游计算或历史首次可见时间。
+/// 未收到完整实体的传输错误由调用方法的外层 `Result` 返回。
+#[derive(Debug, Builder)]
+#[non_exhaustive]
+pub struct ResponseCapture<T> {
+    pub result: crate::Result<T>,
+    pub raw_body: Vec<u8>,
+    pub request_url: Url,
+    pub response_url: Url,
+    pub received_at_utc: DateTime<Utc>,
+    pub status_code: StatusCode,
+}
+
+/// 来源价格的十进制词法，直接从 JSON 数字或字符串保留，不经过浮点数。
+///
+/// 此类型不承诺算术库的可表示范围；使用者在其数值边界处理。
+/// 重新序列化时写为字符串，原 HTTP 表达形式由 `ResponseCapture::raw_body` 留存。
+/// 词法保真要求直接从原 JSON 字节解析，不能先转换为 `serde_json::Value`。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct DecimalLexical(pub String);
+
+impl<'de> Deserialize<'de> for DecimalLexical {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+
+        let raw = Box::<RawValue>::deserialize(deserializer)?;
+        match raw.get().as_bytes().first() {
+            Some(b'"') => serde_json::from_str::<String>(raw.get())
+                .map(Self)
+                .map_err(D::Error::custom),
+            Some(b'-' | b'0'..=b'9') => Ok(Self(raw.get().to_owned())),
+            _ => Err(D::Error::custom("expected a JSON number or decimal string")),
+        }
+    }
+}
+
+/// 事件响应中明确提供的判定锚点和终价；不推断计算时间。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Builder)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct EventMetadata {
+    pub price_to_beat: Option<DecimalLexical>,
+    pub final_price: Option<DecimalLexical>,
+}
+
+/// 市场响应中的加密资产规则配置；缺项与明确关闭 TWAP 保持区别。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Builder)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct CryptoMarketConfig {
+    pub id: Option<String>,
+    pub asset: Option<String>,
+    pub duration: Option<String>,
+    pub twap_enabled: Option<bool>,
+    pub twap_lookback_seconds: Option<u32>,
+}
+
+/// 官网价格接口响应；时间和标志按上游原义留存，不表示历史可见性或交易准入。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Builder)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct WebsiteCryptoPriceResponse {
+    pub open_price: Option<DecimalLexical>,
+    pub close_price: Option<DecimalLexical>,
+    pub timestamp: Option<i64>,
+    pub completed: Option<bool>,
+    pub incomplete: Option<bool>,
+    pub cached: Option<bool>,
+}
 
 /// Image optimization metadata.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Builder)]
@@ -228,6 +308,7 @@ pub struct Collection {
 #[non_exhaustive]
 pub struct Event {
     pub id: String,
+    pub event_metadata: Option<EventMetadata>,
     pub ticker: Option<String>,
     pub slug: Option<String>,
     pub title: Option<String>,
@@ -343,6 +424,8 @@ pub struct Event {
 #[non_exhaustive]
 pub struct Market {
     pub id: String,
+    pub crypto_market_config_id: Option<String>,
+    pub crypto_market_config: Option<CryptoMarketConfig>,
     pub question: Option<String>,
     #[serde_as(as = "NoneAsEmptyString")]
     #[serde(default)]

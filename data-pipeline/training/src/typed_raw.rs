@@ -281,7 +281,7 @@ impl DecodeContext<'_> {
     }
 }
 
-fn expected_schema(
+pub(crate) fn expected_schema(
     source_kind: &str,
     schema_version: &str,
 ) -> Result<SchemaRef, TypedRawReadError> {
@@ -321,6 +321,15 @@ fn validate_physical_schema(
     actual: &Schema,
 ) -> Result<(), TypedRawReadError> {
     let expected = expected_schema(source_kind, schema_version)?;
+    validate_physical_schema_against(source_kind, schema_version, &expected, actual)
+}
+
+pub(crate) fn validate_physical_schema_against(
+    source_kind: &str,
+    schema_version: &str,
+    expected: &Schema,
+    actual: &Schema,
+) -> Result<(), TypedRawReadError> {
     if expected.fields().len() != actual.fields().len() {
         return Err(TypedRawReadError::PhysicalSchema {
             source_kind: source_kind.to_owned(),
@@ -776,7 +785,7 @@ fn validate_decoded_row(
     Ok(row)
 }
 
-fn decode_typed_raw_record_batch(
+pub(crate) fn decode_typed_raw_record_batch(
     source_kind: &str,
     schema_version: &str,
     batch: &RecordBatch,
@@ -2308,8 +2317,17 @@ fn decode_binance_aggtrade(
 }
 
 /// 已准入 Parquet 的有界批次解码流；每次迭代最多返回调用方指定的批次行数。
-pub struct TypedRawParquetStream {
+pub(crate) type DecodeBatch<Row> = fn(
+    &str,
+    &str,
+    &RecordBatch,
+    u64,
+    Option<&TypedRawReadScope>,
+) -> Result<Vec<Row>, TypedRawReadError>;
+
+pub struct TypedRawParquetStream<Row = TypedRawRow> {
     reader: ParquetRecordBatchReader,
+    decode: DecodeBatch<Row>,
     path: PathBuf,
     source_kind: String,
     schema_version: String,
@@ -2323,7 +2341,7 @@ pub struct TypedRawParquetStream {
     max_physical_batch_bytes: Option<usize>,
 }
 
-impl TypedRawParquetStream {
+impl<Row> TypedRawParquetStream<Row> {
     pub(crate) const fn last_physical_batch_rows(&self) -> usize {
         self.last_physical_batch_rows
     }
@@ -2333,8 +2351,8 @@ impl TypedRawParquetStream {
     }
 }
 
-impl Iterator for TypedRawParquetStream {
-    type Item = Result<Vec<TypedRawRow>, TypedRawReadError>;
+impl<Row> Iterator for TypedRawParquetStream<Row> {
+    type Item = Result<Vec<Row>, TypedRawReadError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.finished {
@@ -2369,7 +2387,7 @@ impl Iterator for TypedRawParquetStream {
                         }));
                     }
                 };
-                let decoded = decode_typed_raw_record_batch(
+                let decoded = (self.decode)(
                     &self.source_kind,
                     &self.schema_version,
                     &batch,
@@ -2421,7 +2439,7 @@ impl Iterator for TypedRawParquetStream {
     }
 }
 
-impl std::iter::FusedIterator for TypedRawParquetStream {}
+impl<Row> std::iter::FusedIterator for TypedRawParquetStream<Row> {}
 
 /// 打开已完成阶段 1 完整准入的直接源文件，并按显式正数批次上限流式解码。
 pub fn open_validated_typed_raw_parquet(
@@ -2451,10 +2469,63 @@ fn open_validated_typed_raw_parquet_inner(
     scope: Option<TypedRawReadScope>,
     max_physical_batch_bytes: Option<usize>,
 ) -> Result<TypedRawParquetStream, TypedRawReadError> {
+    open_validated_parquet_with_decoder(
+        file,
+        batch_size,
+        scope,
+        max_physical_batch_bytes,
+        expected_schema,
+        decode_typed_raw_record_batch,
+    )
+}
+
+pub(crate) fn open_validated_parquet_with_decoder<Row>(
+    file: &ValidatedDirectSourceParquetFileV3,
+    batch_size: usize,
+    scope: Option<TypedRawReadScope>,
+    max_physical_batch_bytes: Option<usize>,
+    schema: fn(&str, &str) -> Result<SchemaRef, TypedRawReadError>,
+    decode: DecodeBatch<Row>,
+) -> Result<TypedRawParquetStream<Row>, TypedRawReadError> {
+    open_parquet_with_decoder(
+        ParquetInputFacts {
+            path: file.canonical_path(),
+            source_kind: file.source_kind(),
+            schema_version: file.schema_version(),
+            bytes: file.bytes(),
+            rows: file.rows(),
+            sha256: file.sha256(),
+        },
+        batch_size,
+        scope,
+        max_physical_batch_bytes,
+        schema,
+        decode,
+    )
+}
+
+/// 直接源和独立历史补充各自的真实清单事实，共用同一只读 Parquet 边界。
+pub(crate) struct ParquetInputFacts<'a> {
+    pub path: &'a std::path::Path,
+    pub source_kind: &'a str,
+    pub schema_version: &'a str,
+    pub bytes: u64,
+    pub rows: u64,
+    pub sha256: &'a str,
+}
+
+pub(crate) fn open_parquet_with_decoder<Row>(
+    file: ParquetInputFacts<'_>,
+    batch_size: usize,
+    scope: Option<TypedRawReadScope>,
+    max_physical_batch_bytes: Option<usize>,
+    schema: fn(&str, &str) -> Result<SchemaRef, TypedRawReadError>,
+    decode: DecodeBatch<Row>,
+) -> Result<TypedRawParquetStream<Row>, TypedRawReadError> {
     if batch_size == 0 {
         return Err(TypedRawReadError::InvalidBatchSize);
     }
-    let path = file.canonical_path().to_path_buf();
+    let path = file.path.to_path_buf();
     let mut opened = File::open(&path).map_err(|source| TypedRawReadError::Io {
         path: path.clone(),
         source,
@@ -2466,10 +2537,10 @@ fn open_validated_typed_raw_parquet_inner(
             source,
         })?
         .len();
-    if actual_bytes != file.bytes() {
+    if actual_bytes != file.bytes {
         return Err(TypedRawReadError::AdmittedFileChanged {
             path,
-            expected_bytes: file.bytes(),
+            expected_bytes: file.bytes,
             actual_bytes,
         });
     }
@@ -2488,10 +2559,10 @@ fn open_validated_typed_raw_parquet_inner(
         hasher.update(&buffer[..read]);
     }
     let actual_sha256 = format!("{:x}", hasher.finalize());
-    if actual_sha256 != file.sha256() {
+    if actual_sha256 != file.sha256 {
         return Err(TypedRawReadError::AdmittedFileDigestMismatch {
             path,
-            expected_sha256: file.sha256().to_owned(),
+            expected_sha256: file.sha256.to_owned(),
             actual_sha256,
         });
     }
@@ -2509,15 +2580,21 @@ fn open_validated_typed_raw_parquet_inner(
             detail: error.to_string(),
         }
     })?;
-    validate_physical_schema(
-        file.source_kind(),
-        file.schema_version(),
+    let expected = schema(file.source_kind, file.schema_version)?;
+    validate_physical_schema_against(
+        file.source_kind,
+        file.schema_version,
+        &expected,
         builder.schema().as_ref(),
     )?;
-    let projected_columns = expected_projection_columns(file.source_kind(), file.schema_version())?;
+    let projected_columns = expected
+        .fields()
+        .iter()
+        .map(|field| field.name())
+        .collect::<Vec<_>>();
     let projection = ProjectionMask::columns(
         builder.parquet_schema(),
-        projected_columns.iter().map(String::as_str),
+        projected_columns.iter().map(|name| name.as_str()),
     );
     let actual_rows =
         u64::try_from(builder.metadata().file_metadata().num_rows()).map_err(|_| {
@@ -2527,10 +2604,10 @@ fn open_validated_typed_raw_parquet_inner(
                 detail: "Parquet footer 行数为负数".to_owned(),
             }
         })?;
-    if actual_rows != file.rows() {
+    if actual_rows != file.rows {
         return Err(TypedRawReadError::FooterRowCountMismatch {
             path,
-            expected_rows: file.rows(),
+            expected_rows: file.rows,
             actual_rows,
         });
     }
@@ -2545,10 +2622,11 @@ fn open_validated_typed_raw_parquet_inner(
         })?;
     Ok(TypedRawParquetStream {
         reader,
+        decode,
         path,
-        source_kind: file.source_kind().to_owned(),
-        schema_version: file.schema_version().to_owned(),
-        expected_rows: file.rows(),
+        source_kind: file.source_kind.to_owned(),
+        schema_version: file.schema_version.to_owned(),
+        expected_rows: file.rows,
         next_row_index: 0,
         next_batch_index: 0,
         finished: false,

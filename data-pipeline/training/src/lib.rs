@@ -9,6 +9,7 @@ pub mod gate_a;
 mod gate_a_publication;
 mod gate_a_sim_adapter;
 pub mod observation;
+pub mod public_input;
 pub mod typed_raw;
 
 pub use gate_a_publication::observation_publication::*;
@@ -81,6 +82,16 @@ const REQUIRED_WRITER_FINALIZE_ACKS: [&str; 6] = [
     "polymarket_market",
     "polymarket_market_metadata",
     "polymarket_rtds_chainlink_btc_usd",
+];
+
+const PUBLIC_WRITER_FINALIZE_ACKS: [&str; 7] = [
+    "binance_aggtrade",
+    "binance_depth_snapshot",
+    "binance_depth_update",
+    "polymarket_market",
+    "polymarket_market_metadata",
+    "polymarket_rtds_chainlink_btc_usd",
+    "polymarket_rtds_chainlink_twap",
 ];
 
 /// 仅有门 A 成功回执仍不构成训练数据集准入。
@@ -773,6 +784,12 @@ struct DailyManifestAdmissionDto {
 }
 
 #[derive(Deserialize)]
+struct PublicDailyManifestSourcesDto {
+    #[serde(default)]
+    source_counters: serde_json::Value,
+}
+
+#[derive(Deserialize)]
 struct DailyManifestAdmissionFileDto {
     source_kind: String,
     schema_version: String,
@@ -1004,6 +1021,17 @@ pub fn validate_direct_source_daily_manifest_admission(
     validate_daily_manifest_admission_at_root(Path::new(DATASET_LINEAGE_ROOT), manifest_path)
 }
 
+/// 新版公共输入显式接受原六来源材料及 V6/TWAP 材料，沿用每日清单 V3 的完整准入。
+pub fn validate_public_source_daily_manifest_admission_v1(
+    manifest_path: &Path,
+) -> Result<ValidatedDirectSourceDailyInputV3, ManifestAdmissionValidationError> {
+    validate_daily_manifest_admission_with_public_inputs(
+        Path::new(DATASET_LINEAGE_ROOT),
+        manifest_path,
+        true,
+    )
+}
+
 /// 完整准入显式选择的每日清单，并冻结 DPT 自有的不可变输入集合摘要。
 pub fn freeze_direct_source_input_set(
     manifest_paths: &[PathBuf],
@@ -1113,6 +1141,14 @@ fn validate_daily_manifest_admission_at_root(
     root: &Path,
     manifest_path: &Path,
 ) -> Result<ValidatedDirectSourceDailyInputV3, ManifestAdmissionValidationError> {
+    validate_daily_manifest_admission_with_public_inputs(root, manifest_path, false)
+}
+
+fn validate_daily_manifest_admission_with_public_inputs(
+    root: &Path,
+    manifest_path: &Path,
+    public_inputs: bool,
+) -> Result<ValidatedDirectSourceDailyInputV3, ManifestAdmissionValidationError> {
     let file_set = qualify_direct_source_daily_manifest_files_at_root(root, manifest_path)
         .map_err(ManifestAdmissionValidationError::FileSet)?;
     if file_set.header().closure_reason() != "utc_day_barrier"
@@ -1132,10 +1168,33 @@ fn validate_daily_manifest_admission_at_root(
             evidence_kind: "producer_barriers",
         });
     }
-    if !matches_exact_evidence_set(
-        &manifest.writer_finalize_acks,
-        &REQUIRED_WRITER_FINALIZE_ACKS,
-    ) {
+    let requires_twap_writer = if public_inputs {
+        let sources: PublicDailyManifestSourcesDto =
+            serde_json::from_slice(&file_set.manifest_bytes)
+                .map_err(ManifestAdmissionValidationError::Json)?;
+        // 新采集器在零行日期也为全部来源保存计数条目，不用行情是否到达推断屏障参与者。
+        sources
+            .source_counters
+            .get("polymarket_rtds_chainlink_twap")
+            .is_some()
+            || manifest.files.iter().any(|file| {
+                file.source_kind == "polymarket_rtds_chainlink_twap"
+                    || (file.source_kind == "polymarket_market_metadata"
+                        && file.schema_version == "polymarket_market_metadata_v6")
+            })
+            || manifest
+                .writer_finalize_acks
+                .iter()
+                .any(|source| source == "polymarket_rtds_chainlink_twap")
+    } else {
+        false
+    };
+    let required_writer_acks = if requires_twap_writer {
+        PUBLIC_WRITER_FINALIZE_ACKS.as_slice()
+    } else {
+        REQUIRED_WRITER_FINALIZE_ACKS.as_slice()
+    };
+    if !matches_exact_evidence_set(&manifest.writer_finalize_acks, required_writer_acks) {
         return Err(ManifestAdmissionValidationError::BarrierEvidenceMismatch {
             evidence_kind: "writer_finalize_acks",
         });
@@ -1143,10 +1202,18 @@ fn validate_daily_manifest_admission_at_root(
 
     let mut files = Vec::with_capacity(file_set.files().len());
     for (qualified_file, manifest_file) in file_set.files().iter().zip(&manifest.files) {
-        let expected = derived_manifest_file_identity(
-            qualified_file.manifest_relative_path(),
-            file_set.header().utc_day(),
-        )
+        let expected = if public_inputs {
+            derived_manifest_file_identity_with_schema(
+                qualified_file.manifest_relative_path(),
+                file_set.header().utc_day(),
+                Some(&manifest_file.schema_version),
+            )
+        } else {
+            derived_manifest_file_identity(
+                qualified_file.manifest_relative_path(),
+                file_set.header().utc_day(),
+            )
+        }
         .ok_or_else(|| ManifestAdmissionValidationError::InvalidFileLayout {
             path: qualified_file.manifest_relative_path().to_path_buf(),
         })?;
@@ -1365,13 +1432,30 @@ fn derived_manifest_file_identity(
     relative_path: &Path,
     utc_day: &str,
 ) -> Option<DerivedManifestFileIdentityV3> {
+    derived_manifest_file_identity_with_schema(relative_path, utc_day, None)
+}
+
+fn derived_manifest_file_identity_with_schema(
+    relative_path: &Path,
+    utc_day: &str,
+    public_schema: Option<&str>,
+) -> Option<DerivedManifestFileIdentityV3> {
     let source_kind = relative_path
         .parent()?
         .file_name()?
         .to_str()?
         .strip_prefix("source_kind=")?
         .to_owned();
-    let schema_version = supported_schema_for_source_kind(&source_kind)?.to_owned();
+    let schema_version = match public_schema {
+        Some(schema) => {
+            if !PUBLIC_WRITER_FINALIZE_ACKS.contains(&source_kind.as_str()) {
+                return None;
+            }
+            public_input::expected_public_schema(&source_kind, schema).ok()?;
+            schema.to_owned()
+        }
+        None => supported_schema_for_source_kind(&source_kind)?.to_owned(),
+    };
     let file_name = relative_path.file_name()?.to_str()?;
     let name_without_suffix = file_name.strip_suffix(".parquet")?;
     let hour_and_part = name_without_suffix.strip_prefix(&format!("{source_kind}_"))?;

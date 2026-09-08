@@ -11,6 +11,24 @@ use serde_with::{DisplayFromStr, serde_as, skip_serializing_none};
 use crate::gamma::types::{ParentEntityType, RelatedTagsStatus};
 use crate::types::{Address, B256, Decimal, U256};
 
+/// 官网价格查询参数；由调用方根据目标市场身份、起止时间及规则显式填写。
+///
+/// SDK 不猜测 TWAP 开关或窗口。官网前端的现货查询使用 `false` 与 `0`，
+/// TWAP 查询使用市场配置中的开关和窗口。
+#[derive(Debug, Clone, Builder, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[non_exhaustive]
+pub struct WebsiteCryptoPriceRequest {
+    #[builder(into)]
+    pub symbol: String,
+    pub event_start_time: DateTime<Utc>,
+    #[builder(into)]
+    pub variant: String,
+    pub end_date: DateTime<Utc>,
+    pub twap_enabled: bool,
+    pub twap_lookback_seconds: u32,
+}
+
 #[skip_serializing_none]
 #[derive(Debug, Clone, Builder, Default, Serialize)]
 #[non_exhaustive]

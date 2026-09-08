@@ -6,6 +6,7 @@ mod ingress_control_sender;
 mod ingress_deferred;
 mod ingress_owned_bytes;
 mod manifest_owner;
+mod market_anchor;
 mod polymarket_event_adapter;
 mod polymarket_source;
 mod producer_day_barrier;
@@ -35,6 +36,7 @@ use ingress_control_sender::*;
 use ingress_deferred::*;
 use ingress_owned_bytes::*;
 use manifest_owner::*;
+use market_anchor::*;
 use polymarket_event_adapter::*;
 use polymarket_source::*;
 use producer_day_barrier::*;
@@ -184,7 +186,8 @@ use crate::source_hourly_layout::BinanceAggTradeOrdering;
 use crate::source_hourly_layout::{
     BINANCE_AGGTRADE_SCHEMA_VERSION, BINANCE_DEPTH_VERDICT_APPLIED,
     BINANCE_DEPTH_VERDICT_NOT_APPLIED_CONFIRMED_HOLE, BinanceAggTradeHourlyRow,
-    BinanceDepthSnapshotHourlyRow, BinanceDepthUpdateHourlyRow, RtdsChainlinkBtcUsdHourlyRow,
+    BinanceDepthSnapshotHourlyRow, BinanceDepthUpdateHourlyRow, RTDS_CHAINLINK_TWAP_SCHEMA_VERSION,
+    RtdsChainlinkBtcUsdHourlyRow, RtdsChainlinkTwapHourlyRow,
 };
 #[cfg(test)]
 use crate::source_hourly_layout::{
@@ -502,7 +505,8 @@ where
     let polymarket_source_sink = polymarket_sink.clone();
     let (polymarket_control_tx, polymarket_control_rx) =
         mpsc::channel(POLYMARKET_CONTROL_CHANNEL_CAPACITY);
-    let polymarket_source = run_polymarket_source_with_spec(
+    // 大型来源状态放在堆上，避免监督包装器首次轮询时在 Tokio 默认工作线程栈中搬移。
+    let polymarket_source = Box::pin(run_polymarket_source_with_spec(
         source_specs.polymarket,
         dataset_root.clone(),
         polymarket_source_sink,
@@ -511,7 +515,7 @@ where
         run_started,
         polymarket_control_rx,
         polymarket_recovery,
-    );
+    ));
     let rtds_sink = event_sink.fork_logical_producer();
     let rtds_source = run_rtds_source_with_spec(
         source_specs.rtds,
@@ -1920,7 +1924,7 @@ mod tests {
             let participant = StartupParticipant::writer(source_kind);
             ready_tx
                 .try_send(participant)
-                .expect("ten-slot startup ready channel must hold all mandatory readiness");
+                .expect("启动就绪通道必须容纳四个生产者与七个写入器");
             let (release_tx, release_rx) = oneshot::channel();
             writer_releases.push(StartupReleaseSender {
                 participant,
@@ -2578,6 +2582,11 @@ mod tests {
                 if read == 0 {
                     continue;
                 }
+                if request[..read].starts_with(b"GET /events/slug/") {
+                    // 本夹具只提供发现响应；锚点请求不消耗原发现故障序列。
+                    let _ = socket.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await;
+                    continue;
+                }
                 let attempt = counters.gamma_attempts.fetch_add(1, Ordering::Relaxed) + 1;
                 counters
                     .gamma_fd_samples
@@ -2770,6 +2779,7 @@ mod tests {
     #[derive(Default)]
     struct ComposedLoopbackCounters {
         gamma_requests: AtomicU64,
+        gamma_anchor_responses: AtomicU64,
         clob_connections: AtomicU64,
         clob_subscriptions: AtomicU64,
         clob_business_sent: AtomicU64,
@@ -2857,6 +2867,15 @@ mod tests {
                     let Some(request) = read_loopback_http_request(&mut socket).await else {
                         continue;
                     };
+                    if request.starts_with("GET /events/slug/") {
+                        let windows = discovery_windows(now_ms());
+                        let mut markets: Value = serde_json::from_str(&gamma_market_response_for_window(&windows.current)).unwrap();
+                        markets[0]["cryptoMarketConfig"] = json!({"id":"btc-5m-twap-30","asset":"btc","duration":"5m","twapEnabled":true,"twapLookbackSeconds":30});
+                        let body = format!(r#"{{"id":"anchor-event","slug":{},"eventMetadata":{{"priceToBeat":64950.01421851144}},"markets":{}}}"#, serde_json::to_string(&windows.current.slug).unwrap(), markets);
+                        write_loopback_http_response(&mut socket, "200 OK", &body).await;
+                        gamma_counters.gamma_anchor_responses.fetch_add(1, Ordering::Relaxed);
+                        continue;
+                    }
                     gamma_counters
                         .gamma_requests
                         .fetch_add(1, Ordering::Relaxed);
@@ -2965,7 +2984,7 @@ mod tests {
                     let Ok(mut socket) = accept_async(stream).await else {
                         continue;
                     };
-                    let mut subscribed = false;
+                    let mut subscribed = 0;
                     while let Some(frame) = socket.next().await {
                         match frame {
                             Ok(Message::Text(text)) if text == "PING" => {
@@ -2980,14 +2999,16 @@ mod tests {
                                 rtds_counters
                                     .rtds_subscriptions
                                     .fetch_add(1, Ordering::Relaxed);
-                                subscribed = true;
-                                break;
+                                let request: Value = serde_json::from_str(&text).unwrap();
+                                assert_eq!(request["subscriptions"][0]["filters"], r#"{"symbol":"btc/usd"}"#);
+                                subscribed += 1;
+                                if subscribed == 3 { break; }
                             }
                             Ok(Message::Close(_)) | Err(_) => break,
                             _ => {}
                         }
                     }
-                    if !subscribed {
+                    if subscribed != 3 {
                         continue;
                     }
                     if mode.rtds == ComposedIoBehavior::Healthy {
@@ -3013,6 +3034,13 @@ mod tests {
                             rtds_counters
                                 .rtds_business_sent
                                 .fetch_add(1, Ordering::Relaxed);
+                        }
+                        for (topic, window_s) in [("crypto_prices_twap_thirty", 30), ("crypto_prices_twap_sixty", 60)] {
+                            socket.send(Message::Text(json!({
+                                "topic":topic,"type":"update","timestamp":timestamp,
+                                "payload":{"symbol":"btc/usd","timestamp":timestamp,"value":65000.1,
+                                    "full_accuracy_value":"65000100000000000000001","window_s":window_s}
+                            }).to_string().into())).await.unwrap();
                         }
                     }
                     keep_text_heartbeat_loopback_alive(&mut socket).await;
@@ -3172,7 +3200,7 @@ mod tests {
                     self.counters.rtds_connections.load(Ordering::Relaxed) >= unavailable_attempts
                 }
                 (ComposedIoPath::Rtds, _) => {
-                    self.counters.rtds_subscriptions.load(Ordering::Relaxed) >= 1
+                    self.counters.rtds_subscriptions.load(Ordering::Relaxed) >= 3
                         && (self.mode.rtds == ComposedIoBehavior::Silent
                             || self.counters.rtds_business_sent.load(Ordering::Relaxed) >= 1)
                 }
@@ -3270,7 +3298,8 @@ mod tests {
             .name("stage7-composed-runtime".to_owned())
             .stack_size(4 * 1024 * 1024)
             .spawn(move || {
-                tokio::runtime::Builder::new_current_thread()
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
                     .enable_all()
                     .build()
                     .unwrap()
@@ -3313,6 +3342,14 @@ mod tests {
             (
                 "polymarket_rtds_chainlink_btc_usd",
                 u64::from(mode.rtds == ComposedIoBehavior::Healthy),
+            ),
+            (
+                "polymarket_rtds_chainlink_twap",
+                if mode.rtds == ComposedIoBehavior::Healthy {
+                    2
+                } else {
+                    0
+                },
             ),
             (
                 "binance_depth_snapshot",
@@ -3392,6 +3429,111 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn full_runtime_persists_exact_anchor_rules_and_both_twap_windows() {
+        use crate::polymarket_market_metadata_v6_layout::{
+            PolymarketMarketMetadataV6Row, polymarket_market_metadata_v6_row_from_batch,
+        };
+        let tmp = tempdir().unwrap();
+        let dataset_root = tmp.path().canonicalize().unwrap();
+        let mode = ComposedLoopbackMode::healthy();
+        let fixture = ComposedLoopbackFixture::spawn(mode).await;
+        let (stop_tx, stop_rx) = oneshot::channel();
+        let runtime = spawn_composed_runtime_thread(
+            composed_runtime_config(dataset_root.clone(), "anchor-and-twap"),
+            fixture.specs.clone(),
+            stop_rx,
+        );
+        fixture.wait_ready(&runtime).await;
+        timeout(Duration::from_secs(2), async {
+            while fixture
+                .counters
+                .gamma_anchor_responses
+                .load(Ordering::Relaxed)
+                == 0
+            {
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("真实 SDK 请求必须到达锚点端点");
+        // 服务端完成发送与采集准入是不同进度；留出实际 TCP/SDK 队列的消费时间。
+        sleep(Duration::from_millis(250)).await;
+        stop_tx.send(()).unwrap();
+        let receipt = join_composed_runtime(runtime).await.unwrap();
+        let utc_day = utc_day_string_from_ms(now_ms()).unwrap();
+        let day_dir = typed_raw_root(&dataset_root).join(format!("utc_day={utc_day}"));
+        let manifest = load_day_manifest(&day_dir).unwrap().unwrap();
+        assert_composed_artifacts("anchor-and-twap", mode, &receipt, &manifest);
+
+        let mut anchors = Vec::new();
+        let mut twap_windows = BTreeSet::new();
+        for segment in &receipt.finalized_segments {
+            if !matches!(
+                segment.source_kind.as_str(),
+                "polymarket_market_metadata" | "polymarket_rtds_chainlink_twap"
+            ) {
+                continue;
+            }
+            let reader = ParquetRecordBatchReaderBuilder::try_new(
+                File::open(&segment.parquet_path).unwrap(),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+            for batch in reader {
+                let batch = batch.unwrap();
+                for row in 0..batch.num_rows() {
+                    if segment.source_kind == "polymarket_market_metadata" {
+                        if let PolymarketMarketMetadataV6Row::AnchorRule(anchor) =
+                            polymarket_market_metadata_v6_row_from_batch(&batch, row).unwrap()
+                        {
+                            anchors.push(anchor);
+                        }
+                    } else {
+                        let windows = batch
+                            .column_by_name("window_s")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<UInt64Array>()
+                            .unwrap();
+                        let values = batch
+                            .column_by_name("full_accuracy_value")
+                            .unwrap()
+                            .as_any()
+                            .downcast_ref::<StringArray>()
+                            .unwrap();
+                        twap_windows.insert(windows.value(row));
+                        assert_eq!(values.value(row), "65000100000000000000001");
+                    }
+                }
+            }
+        }
+        assert_eq!(anchors.len(), 1);
+        let anchor = &anchors[0];
+        assert_eq!(
+            anchor.observation.price_to_beat_decimal.as_deref(),
+            Some("64950.01421851144")
+        );
+        assert_eq!(anchor.observation.twap_enabled, Some(true));
+        assert_eq!(anchor.observation.twap_lookback_seconds, Some(30));
+        assert_eq!(
+            anchor.observation.http_received_at_utc,
+            Some(anchor.timestamp_received)
+        );
+        assert!(anchor.collector_admission_sequence > 1);
+        assert!(
+            anchor
+                .observation
+                .http_body
+                .as_deref()
+                .unwrap()
+                .contains(r#""priceToBeat":64950.01421851144"#)
+        );
+        assert_eq!(twap_windows, BTreeSet::from([30, 60]));
+        fixture.shutdown().await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -3535,7 +3677,7 @@ mod tests {
         assert_composed_artifacts("all-streams-silent", mode, &receipt, &manifest);
         assert_eq!(
             manifest["source_counters"]["polymarket_market_metadata"]["rows"],
-            1
+            2
         );
         assert_eq!(
             manifest["source_counters"]["binance_depth_snapshot"]["rows"],

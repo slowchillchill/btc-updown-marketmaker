@@ -33,6 +33,10 @@ use crate::polymarket_market_metadata_layout::{
     polymarket_market_metadata_v3_schema, polymarket_market_metadata_v4_schema,
     polymarket_market_metadata_v5_schema, validate_polymarket_source_references,
 };
+use crate::polymarket_market_metadata_v6_layout::{
+    POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION, PolymarketMarketMetadataV6Row,
+    polymarket_market_metadata_v6_row_from_batch, polymarket_market_metadata_v6_schema,
+};
 use crate::polymarket_orderbook_v3::{
     POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION, polymarket_orderbook_v3_schema, same_outcome_label,
 };
@@ -83,6 +87,7 @@ enum MetadataLayout {
     V3,
     V4,
     V5,
+    V6,
 }
 
 impl MetadataLayout {
@@ -92,6 +97,7 @@ impl MetadataLayout {
             Self::V3 => Some(polymarket_market_metadata_v3_schema()),
             Self::V4 => Some(polymarket_market_metadata_v4_schema()),
             Self::V5 => Some(polymarket_market_metadata_v5_schema()),
+            Self::V6 => Some(polymarket_market_metadata_v6_schema()),
         }
     }
 
@@ -101,6 +107,7 @@ impl MetadataLayout {
             Self::V3 => POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
             Self::V4 => POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION,
             Self::V5 => POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION,
+            Self::V6 => POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION,
         }
     }
 }
@@ -726,8 +733,16 @@ impl MetadataRecord {
         row: usize,
         artifact_position: FinalizedArtifactPosition,
         layout: MetadataLayout,
-    ) -> Result<Self> {
-        let full_row = finalized_metadata_v3_row_from_batch(batch, row, layout)?;
+    ) -> Result<Option<Self>> {
+        let full_row = if layout == MetadataLayout::V6 {
+            match polymarket_market_metadata_v6_row_from_batch(batch, row).map_err(invalid_data)? {
+                PolymarketMarketMetadataV6Row::Existing(existing) => existing.common().clone(),
+                // 锚点更新已经按 V6 验证；它不产生身份、终态或轮询次数。
+                PolymarketMarketMetadataV6Row::AnchorRule(_) => return Ok(None),
+            }
+        } else {
+            finalized_metadata_v3_row_from_batch(batch, row, layout)?
+        };
         let (
             validation,
             ws_claimant_source_sequence_epoch_id,
@@ -754,7 +769,7 @@ impl MetadataRecord {
                     v4.ws_claimant_collector_admission_sequence,
                 )
             }
-            MetadataLayout::V5 => {
+            MetadataLayout::V5 | MetadataLayout::V6 => {
                 if full_row.schema_version != POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION {
                     return Err(invalid_data(format!(
                         "Polymarket restart finalized metadata row schema version mismatch:file={}:row={row}:actual={}:expected={POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION}",
@@ -793,7 +808,7 @@ impl MetadataRecord {
                 artifact_position.path.display()
             ))
         })?;
-        Ok(Self {
+        Ok(Some(Self {
             artifact_position,
             kind: required_string(batch, row, "metadata_row_kind")?,
             timestamp_received: required_timestamp(batch, row, "timestamp_received")?,
@@ -844,7 +859,10 @@ impl MetadataRecord {
             #[cfg(test)]
             resolution_evidence_source: optional_string(batch, row, "resolution_evidence_source")?,
             #[cfg(test)]
-            resolution_evidence_raw_sha256: if layout == MetadataLayout::V5 {
+            resolution_evidence_raw_sha256: if matches!(
+                layout,
+                MetadataLayout::V5 | MetadataLayout::V6
+            ) {
                 None
             } else {
                 optional_string(batch, row, "resolution_evidence_raw_sha256")?
@@ -881,7 +899,7 @@ impl MetadataRecord {
             terminal_predicate_passed: optional_bool(batch, row, "terminal_predicate_passed")?,
             ws_claimant_source_sequence_epoch_id,
             ws_claimant_collector_admission_sequence,
-        })
+        }))
     }
 
     fn fixed_identity(&self) -> Result<FixedIdentity> {
@@ -1483,7 +1501,10 @@ fn read_finalized_metadata_for_validation(
             builder.metadata().file_metadata().key_value_metadata(),
             &path,
         )?;
-        if !matches!(layout, MetadataLayout::V4 | MetadataLayout::V5) {
+        if !matches!(
+            layout,
+            MetadataLayout::V4 | MetadataLayout::V5 | MetadataLayout::V6
+        ) {
             continue;
         }
         require_canonical_metadata_schema(builder.schema().as_ref(), &path, layout)?;
@@ -1502,7 +1523,7 @@ fn read_finalized_metadata_for_validation(
                     },
                     layout,
                 )?;
-                records.push(record);
+                records.extend(record);
                 file_row = file_row.saturating_add(1);
             }
         }
@@ -1576,7 +1597,10 @@ fn read_precise_metadata_reference_authorities(
                 builder.metadata().file_metadata().key_value_metadata(),
                 &path,
             )?;
-            if !matches!(layout, MetadataLayout::V4 | MetadataLayout::V5) {
+            if !matches!(
+                layout,
+                MetadataLayout::V4 | MetadataLayout::V5 | MetadataLayout::V6
+            ) {
                 continue;
             }
             require_canonical_metadata_schema(builder.schema().as_ref(), &path, layout)?;
@@ -1605,7 +1629,8 @@ fn read_precise_metadata_reference_authorities(
                         },
                         layout,
                     )?;
-                    if let Some(authority) = record.source_authority()
+                    if let Some(record) = record
+                        && let Some(authority) = record.source_authority()
                         && lookups.iter().any(|reference| {
                             source_reference_candidate_matches_authority(reference, &authority)
                         })
@@ -1659,6 +1684,7 @@ fn metadata_layout(metadata: Option<&Vec<KeyValue>>, path: &Path) -> Result<Meta
         POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION => Ok(MetadataLayout::V3),
         POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION => Ok(MetadataLayout::V4),
         POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION => Ok(MetadataLayout::V5),
+        POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION => Ok(MetadataLayout::V6),
         _ => Err(invalid_data(format!(
             "Polymarket restart metadata layout footer is unsupported:file={}:version={version}",
             path.display()
@@ -3371,6 +3397,7 @@ mod tests {
             },
             layout,
         )
+        .unwrap()
         .unwrap();
         assert_eq!(record.slug, SLUG);
         assert!(record.source_raw_sha256.is_some());
@@ -3386,6 +3413,70 @@ mod tests {
             &[base_record(1), attempt(2, 1, "valid_nonterminal")],
         );
 
+        let recovery = restore_polymarket_resolution_recovery(tmp.path(), recovery_time).unwrap();
+        assert_eq!(recovery.pending.len(), 1);
+        assert_eq!(recovery.pending[0].finalized_attempt_ordinals, [1]);
+    }
+
+    #[test]
+    fn v6_anchor_updates_preserve_v5_identity_and_resolution_recovery() {
+        use crate::market_anchor::{
+            MarketAnchorIdentity, MarketAnchorObservation, MarketAnchorOrigin,
+            MarketAnchorQueryResult,
+        };
+        use crate::polymarket_market_metadata_v6_layout::{
+            MarketAnchorRuleUpdateRow, PolymarketMarketMetadataV6Row,
+        };
+        use crate::writer::TypedParquetSegmentWriter;
+
+        let tmp = tempdir().unwrap();
+        let recovery_time = E + 4 * 60_000;
+        let metadata_dir = day_dir(tmp.path(), recovery_time, "polymarket_market_metadata");
+        let identity = metadata_v5_fixture_row(&base_record(1), None);
+        write_metadata_v5_rows(
+            &metadata_dir.join("polymarket_market_metadata_02.parquet"),
+            &[identity.clone()],
+        );
+        let common = identity.common();
+        let anchor = PolymarketMarketMetadataV6Row::AnchorRule(MarketAnchorRuleUpdateRow {
+            timestamp_received: T + 1_000,
+            collector_admission_sequence: 2,
+            collector_admission_time_utc_ms: T + 1_001,
+            metadata_origin: MarketAnchorOrigin::GammaEventBySlug,
+            collector_host_id: common.collector_host_id.clone(),
+            collector_region: common.collector_region.clone(),
+            identity: MarketAnchorIdentity {
+                slug: common.slug.clone(),
+                condition_id: common.condition_id.clone(),
+                clob_market_id: common.clob_market_id.clone(),
+                asset_ids: common.asset_ids.clone(),
+                market_start_utc: common.market_start_utc,
+                market_end_utc: common.market_end_utc,
+                fixed_identity_verified_at_utc: common.fixed_identity_verified_at_utc,
+            },
+            market_lifecycle_state: common.market_lifecycle_state,
+            market_runtime_role: common.market_runtime_role,
+            metadata_fetch_start_utc: T,
+            anchor_query_source_epoch_id: "anchor-test-epoch".to_owned(),
+            anchor_query_ordinal: 1,
+            observation: MarketAnchorObservation::unavailable(MarketAnchorQueryResult::Timeout),
+        });
+        let mut writer = TypedParquetSegmentWriter::create_for_current_source(
+            &metadata_dir,
+            "polymarket_market_metadata_03",
+            "polymarket_market_metadata",
+        )
+        .unwrap();
+        writer
+            .write_polymarket_market_metadata_v6_rows(&[
+                anchor,
+                PolymarketMarketMetadataV6Row::Existing(metadata_v5_fixture_row(
+                    &attempt(3, 1, "valid_nonterminal"),
+                    None,
+                )),
+            ])
+            .unwrap();
+        writer.finalize().unwrap();
         let recovery = restore_polymarket_resolution_recovery(tmp.path(), recovery_time).unwrap();
         assert_eq!(recovery.pending.len(), 1);
         assert_eq!(recovery.pending[0].finalized_attempt_ordinals, [1]);

@@ -1,5 +1,8 @@
 use super::*;
 use crate::polymarket_market_metadata_layout::PolymarketMarketMetadataV5Row;
+use crate::polymarket_market_metadata_v6_layout::{
+    POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION, PolymarketMarketMetadataV6Row,
+};
 
 #[derive(Clone, Debug)]
 pub(super) struct TargetAdmittedPolymarketMessage<'a> {
@@ -846,6 +849,7 @@ pub(super) fn polymarket_resolution_followup_summary_row(
     Ok(row)
 }
 
+#[cfg(test)]
 pub(super) fn polymarket_metadata_raw_event(
     row: PolymarketMarketMetadataV5Row,
 ) -> Result<RawEvent> {
@@ -925,11 +929,77 @@ pub(super) fn write_polymarket_metadata_event(
     event: &RawEvent,
     logical_bytes: u64,
 ) -> Result<u64> {
+    if writer.schema_version() == POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION {
+        let value: Value = serde_json::from_str(&event.raw_json)?;
+        let rows = if value["schema_version"] == POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION {
+            polymarket_metadata_v6_rows_from_event(event)?
+        } else {
+            polymarket_metadata_rows_from_event(event)?
+                .into_iter()
+                .map(PolymarketMarketMetadataV6Row::Existing)
+                .collect()
+        };
+        let written = rows.len() as u64;
+        require_at_most_one_typed_row(event, written)?;
+        writer.write_polymarket_market_metadata_v6_rows_with_logical_bytes(&rows, logical_bytes)?;
+        return Ok(written);
+    }
     let rows = polymarket_metadata_rows_from_event(event)?;
     let written = rows.len() as u64;
     require_at_most_one_typed_row(event, written)?;
     writer.write_polymarket_market_metadata_v5_rows_with_logical_bytes(&rows, logical_bytes)?;
     Ok(written)
+}
+
+pub(super) fn polymarket_metadata_v6_raw_event(
+    row: PolymarketMarketMetadataV6Row,
+) -> Result<RawEvent> {
+    row.validate_draft().map_err(invalid_data)?;
+    let value = row.to_raw_value()?;
+    let kind = value["metadata_row_kind"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let slug = value["slug"].as_str().unwrap_or_default().to_owned();
+    let endpoint = value["source_endpoint"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let collector = CollectorIdentity {
+        host_id: value["collector_host_id"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+        region: value["collector_region"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned(),
+    };
+    Ok(raw_event_with_recv_time(
+        "polymarket_market_metadata",
+        &kind,
+        &slug,
+        None,
+        row.timestamp_received(),
+        &endpoint,
+        &collector,
+        value,
+    ))
+}
+
+pub(super) fn polymarket_metadata_v6_rows_from_event(
+    event: &RawEvent,
+) -> Result<Vec<PolymarketMarketMetadataV6Row>> {
+    let admission = event.collector_admission.as_ref().ok_or_else(|| {
+        invalid_data("Polymarket metadata v6 event is missing collector admission")
+    })?;
+    let row = PolymarketMarketMetadataV6Row::from_raw_value(
+        serde_json::from_str(&event.raw_json)?,
+        admission.sequence,
+        admission.time_utc_ms,
+    )
+    .map_err(invalid_data)?;
+    Ok(vec![row])
 }
 
 fn require_at_most_one_typed_row(event: &RawEvent, rows: u64) -> Result<()> {

@@ -185,6 +185,30 @@ pub fn deserialize_with_warnings<T: DeserializeOwned>(value: Value) -> crate::Re
     Ok(serde_json::from_value(value)?)
 }
 
+/// Gamma 采集入口直接解析原字节，避免 `Value` 提前舍入新价格字段。
+#[cfg(feature = "gamma")]
+pub(crate) fn deserialize_slice_with_warnings<T: DeserializeOwned>(
+    bytes: &[u8],
+) -> crate::Result<T> {
+    #[cfg(feature = "tracing")]
+    {
+        let mut deserializer = serde_json::Deserializer::from_slice(bytes);
+        let result = serde_ignored::deserialize(&mut deserializer, |path| {
+            tracing::warn!(
+                type_name = %std::any::type_name::<T>(),
+                field = %path,
+                "unknown field in API response"
+            );
+        })?;
+        deserializer.end()?;
+        Ok(result)
+    }
+    #[cfg(not(feature = "tracing"))]
+    {
+        Ok(serde_json::from_slice(bytes)?)
+    }
+}
+
 /// Look up a value in a JSON structure by path.
 ///
 /// Handles paths from both `serde_ignored` and `serde_path_to_error`:

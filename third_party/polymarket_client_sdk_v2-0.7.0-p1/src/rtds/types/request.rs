@@ -143,7 +143,12 @@ impl Serialize for Subscription {
             // Chainlink endpoint expects filters as a JSON string (escaped),
             // while other endpoints (like Binance crypto_prices) expect raw JSON.
             // See: https://github.com/Polymarket/rs-clob-client/issues/136
-            if self.topic == "crypto_prices_chainlink" {
+            if matches!(
+                self.topic.as_str(),
+                "crypto_prices_chainlink"
+                    | "crypto_prices_twap_thirty"
+                    | "crypto_prices_twap_sixty"
+            ) {
                 // Chainlink: emit filters as string, e.g. "{\"symbol\":\"btc/usd\"}"
                 map.serialize_entry("filters", filters)?;
             } else if let Ok(json_value) = serde_json::from_str::<Value>(filters) {
@@ -201,6 +206,24 @@ mod tests {
             json.contains(r#""filters":"{\"symbol\":\"eth/usd\"}""#),
             "Chainlink filters should be serialized as escaped JSON string, got: {json}"
         );
+    }
+
+    #[test]
+    fn serialize_twap_filters_as_exact_json_strings() {
+        for topic in ["crypto_prices_twap_thirty", "crypto_prices_twap_sixty"] {
+            let subscription = Subscription {
+                topic: topic.to_owned(),
+                msg_type: "update".to_owned(),
+                filters: Some(r#"{"symbol":"btc/usd"}"#.to_owned()),
+                clob_auth: None,
+            };
+            let request = SubscriptionRequest::subscribe(vec![subscription]);
+            let json = serde_json::to_value(request).unwrap();
+            assert_eq!(
+                json["subscriptions"][0]["filters"], r#"{"symbol":"btc/usd"}"#,
+                "{topic} 必须使用只转义一次的 JSON 字符串"
+            );
+        }
     }
 
     #[test]

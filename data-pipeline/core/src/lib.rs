@@ -1,3 +1,5 @@
+pub mod public_input;
+pub mod public_reference;
 pub mod reduction;
 pub mod typed_raw;
 

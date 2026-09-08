@@ -3648,6 +3648,7 @@ dependencies = [
  "futures",
  "futures-util",
  "hmac",
+ "http 1.4.0",
  "httpmock",
  "phf",
  "rand 0.10.1",

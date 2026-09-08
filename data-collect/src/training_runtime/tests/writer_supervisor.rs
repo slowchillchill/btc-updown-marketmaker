@@ -301,7 +301,8 @@ fn training_segment_finalize_emits_daily_delta_without_segment_manifest() {
 }
 
 #[test]
-fn polymarket_metadata_v5_version_propagates_through_finalize_and_manifest() {
+fn polymarket_metadata_v6_version_propagates_through_finalize_and_manifest() {
+    use crate::polymarket_market_metadata_v6_layout::POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION;
     let tmp = tempdir().unwrap();
     let dataset_root = tmp.path().canonicalize().unwrap();
     let discovery = test_btc_discovery();
@@ -351,13 +352,13 @@ fn polymarket_metadata_v5_version_propagates_through_finalize_and_manifest() {
     };
     assert_eq!(
         delta.schema_version,
-        POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION
+        POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION
     );
     owner.apply_finalized(delta).unwrap();
     let manifest = load_day_manifest(&day_dir).unwrap().unwrap();
     assert_eq!(
         manifest["files"][0]["schema_version"],
-        POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION
+        POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION
     );
 
     let reader = SerializedFileReader::new(File::open(finalized.parquet_path).unwrap()).unwrap();
@@ -372,7 +373,7 @@ fn polymarket_metadata_v5_version_propagates_through_finalize_and_manifest() {
         .and_then(|entry| entry.value.as_deref());
     assert_eq!(
         footer_schema_version,
-        Some(POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION)
+        Some(POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION)
     );
     let embedded = metadata
         .iter()
@@ -382,7 +383,7 @@ fn polymarket_metadata_v5_version_propagates_through_finalize_and_manifest() {
         .expect("typed Parquet must carry embedded recovery metadata");
     assert_eq!(
         embedded.schema_version,
-        POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION
+        POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION
     );
     let fields = reader
         .metadata()
@@ -983,7 +984,7 @@ async fn hung_writer_retains_dataset_lease_until_the_process_exits() {
 }
 
 #[tokio::test]
-async fn six_writers_return_the_exact_coordinated_close_identity() {
+async fn seven_writers_return_the_exact_coordinated_close_identity() {
     let tmp = tempdir().unwrap();
     let dataset_root = tmp.path().canonicalize().unwrap();
     let provenance = test_artifact_identity();

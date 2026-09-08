@@ -30,6 +30,225 @@
 
 pub mod common;
 
+mod price_capture {
+    use chrono::Utc;
+    use httpmock::{Method::GET, MockServer};
+    use polymarket_client_sdk_v2::error::{Kind, Status};
+    use polymarket_client_sdk_v2::gamma::{
+        Client,
+        types::request::{
+            EventByIdRequest, EventBySlugRequest, EventsRequest, MarketBySlugRequest,
+            MarketsRequest,
+        },
+    };
+    use reqwest::StatusCode;
+
+    #[tokio::test]
+    async fn capture_retains_body_url_receive_time_and_price_lexical() -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let client = Client::new(&server.base_url())?;
+        let body = " {\n\"id\":\"1\",\"eventMetadata\":{\"priceToBeat\":6.495001421851144372681112345678901e4,\"finalPrice\":\"64943.19479955845\"},\"unknown\":\"retained only in raw body\"}\n";
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/events/slug/precise-event");
+            then.status(200).body(body);
+        });
+        let request = EventBySlugRequest::builder().slug("precise-event").build();
+
+        let before = Utc::now();
+        let capture = client.event_by_slug_capture(&request).await?;
+        let after = Utc::now();
+        assert_eq!(capture.raw_body, body.as_bytes());
+        assert_eq!(capture.status_code, StatusCode::OK);
+        assert_eq!(
+            capture.request_url.as_str(),
+            format!("{}/events/slug/precise-event", server.base_url())
+        );
+        assert_eq!(capture.response_url, capture.request_url);
+        assert!(before <= capture.received_at_utc && capture.received_at_utc <= after);
+        let event = capture.result?;
+        let metadata = event.event_metadata.as_ref().unwrap();
+        assert_eq!(
+            metadata.price_to_beat.as_ref().unwrap().0,
+            "6.495001421851144372681112345678901e4"
+        );
+        assert_eq!(
+            metadata.final_price.as_ref().unwrap().0,
+            "64943.19479955845"
+        );
+        assert_ne!(serde_json::to_vec(&event)?, capture.raw_body);
+        mock.assert();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn captures_keep_errors_and_legacy_error_classification() -> anyhow::Result<()> {
+        for (status, body, expected_status) in [
+            (200, "null", Some(404)),
+            (200, "", None),
+            (200, "{", None),
+            (200, r#"{"id":"1"} {}"#, None),
+            (
+                400,
+                "Timestamp too old for Chainlink API (max 30 days)",
+                Some(400),
+            ),
+            (429, "Too Many Requests", Some(429)),
+        ] {
+            let server = MockServer::start();
+            let client = Client::new(&server.base_url())?;
+            let mock = server.mock(|when, then| {
+                when.method(GET).path("/events/slug/unavailable");
+                then.status(status).body(body);
+            });
+            let request = EventBySlugRequest::builder().slug("unavailable").build();
+            let capture = client.event_by_slug_capture(&request).await?;
+            assert_eq!(capture.raw_body, body.as_bytes());
+            assert_eq!(capture.status_code.as_u16(), status);
+            let captured_error = capture.result.unwrap_err();
+            let legacy_error = client.event_by_slug(&request).await.unwrap_err();
+            for error in [captured_error, legacy_error] {
+                if let Some(expected_status) = expected_status {
+                    assert_eq!(error.kind(), Kind::Status);
+                    let source = error.downcast_ref::<Status>().unwrap();
+                    assert_eq!(source.status_code.as_u16(), expected_status);
+                    assert_eq!(source.method, reqwest::Method::GET);
+                    assert_eq!(source.path, "/events/slug/unavailable");
+                    assert_eq!(
+                        source.message,
+                        if status == 200 {
+                            "Unable to find requested resource"
+                        } else {
+                            body
+                        }
+                    );
+                } else {
+                    assert_eq!(error.kind(), Kind::Internal);
+                    assert!(error.downcast_ref::<serde_json::Error>().is_some());
+                }
+            }
+            mock.assert_calls(2);
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn market_capture_paths_preserve_nested_event_price() -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let client = Client::new(&server.base_url())?;
+        let body = r#"{"id":"7","events":[{"id":"8","eventMetadata":{"priceToBeat":64950.014218511443726811}}]}"#;
+        let list_body = format!("[{body}]");
+        let list_mock = server.mock(|when, then| {
+            when.method(GET).path("/markets");
+            then.status(200).body(&list_body);
+        });
+        let single_mock = server.mock(|when, then| {
+            when.method(GET).path("/markets/slug/exact-market");
+            then.status(200).body(body);
+        });
+        let list_capture = client.markets_capture(&MarketsRequest::default()).await?;
+        let single_capture = client
+            .market_by_slug_capture(&MarketBySlugRequest::builder().slug("exact-market").build())
+            .await?;
+        assert_eq!(list_capture.raw_body, list_body.as_bytes());
+        assert_eq!(single_capture.raw_body, body.as_bytes());
+        let list = list_capture.result?;
+        let single = single_capture.result?;
+        for market in [&list[0], &single] {
+            assert_eq!(
+                market.events.as_ref().unwrap()[0]
+                    .event_metadata
+                    .as_ref()
+                    .unwrap()
+                    .price_to_beat
+                    .as_ref()
+                    .unwrap()
+                    .0,
+                "64950.014218511443726811"
+            );
+        }
+        list_mock.assert();
+        single_mock.assert();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn missing_metadata_does_not_invent_price_or_twap_config() -> anyhow::Result<()> {
+        for body in [
+            r#"{"id":"1"}"#,
+            r#"{"id":"1","eventMetadata":null}"#,
+            r#"{"id":"1","eventMetadata":{"priceToBeat":null},"markets":[{"id":"2","cryptoMarketConfig":{"twapEnabled":false}}]}"#,
+        ] {
+            let server = MockServer::start();
+            let client = Client::new(&server.base_url())?;
+            let mock = server.mock(|when, then| {
+                when.method(GET).path("/events/slug/missing");
+                then.status(200).body(body);
+            });
+            let event = client
+                .event_by_slug_capture(&EventBySlugRequest::builder().slug("missing").build())
+                .await?
+                .result?;
+            assert!(
+                event
+                    .event_metadata
+                    .and_then(|value| value.price_to_beat)
+                    .is_none()
+            );
+            if let Some(markets) = event.markets {
+                let config = markets[0].crypto_market_config.as_ref().unwrap();
+                assert_eq!(config.twap_enabled, Some(false));
+                assert_eq!(config.twap_lookback_seconds, None);
+            }
+            mock.assert();
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn other_gamma_methods_still_accept_official_price_metadata() -> anyhow::Result<()> {
+        // 2026-09-08 官方 events 批响应中的原事件子串，没有经数值重序列化。
+        // 批响应 SHA-256: 2a6526f963e76b2556323324beb9e5c4b197b82595234855e17de81937ba423f。
+        let body = include_str!("fixtures/gamma-price-to-beat-event.json");
+        let source: serde_json::Value = serde_json::from_str(body)?;
+        let id = source["id"].as_str().unwrap();
+        let server = MockServer::start();
+        let client = Client::new(&server.base_url())?;
+        let list_mock = server.mock(|when, then| {
+            when.method(GET).path("/events");
+            then.status(200).body(format!("[{body}]"));
+        });
+        let event_mock = server.mock(|when, then| {
+            when.method(GET).path(format!("/events/{id}"));
+            then.status(200).body(body);
+        });
+        let list = client.events(&EventsRequest::default()).await?;
+        let event = client
+            .event_by_id(&EventByIdRequest::builder().id(id).build())
+            .await?;
+        for item in [&list[0], &event] {
+            assert_eq!(item.id, id);
+            assert!(
+                item.event_metadata
+                    .as_ref()
+                    .unwrap()
+                    .price_to_beat
+                    .is_some()
+            );
+            assert_eq!(
+                item.markets.as_ref().unwrap()[0]
+                    .crypto_market_config
+                    .as_ref()
+                    .unwrap()
+                    .twap_lookback_seconds,
+                Some(30)
+            );
+        }
+        list_mock.assert();
+        event_mock.assert();
+        Ok(())
+    }
+}
+
 mod sports {
     use httpmock::{Method::GET, MockServer};
     use polymarket_client_sdk_v2::gamma::{Client, types::request::TeamsRequest};
@@ -440,6 +659,37 @@ mod events {
         assert_eq!(response.slug, Some("my-event".to_owned()));
         mock.assert();
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn event_by_slug_preserves_precise_event_metadata() -> anyhow::Result<()> {
+        let server = MockServer::start();
+        let client = Client::new(&server.base_url())?;
+        let body = r#"{"id":"789","eventMetadata":{"priceToBeat":64950.014218511443726811,"finalPrice":"6.494319479955845123456e4"},"markets":[{"id":"123","cryptoMarketConfigId":"btc-5m-twap-30","cryptoMarketConfig":{"id":"btc-5m-twap-30","asset":"btc","duration":"5m","twapEnabled":true,"twapLookbackSeconds":30}}]}"#;
+        let mock = server.mock(|when, then| {
+            when.method(GET).path("/events/slug/precise-event");
+            then.status(StatusCode::OK)
+                .header("content-type", "application/json")
+                .body(body);
+        });
+
+        let request = EventBySlugRequest::builder().slug("precise-event").build();
+        let response = client.event_by_slug(&request).await?;
+        let retained = serde_json::to_value(response)?;
+        assert_eq!(
+            retained["eventMetadata"]["priceToBeat"],
+            "64950.014218511443726811"
+        );
+        assert_eq!(
+            retained["eventMetadata"]["finalPrice"],
+            "6.494319479955845123456e4"
+        );
+        assert_eq!(
+            retained["markets"][0]["cryptoMarketConfig"]["twapLookbackSeconds"],
+            30
+        );
+        mock.assert();
         Ok(())
     }
 }

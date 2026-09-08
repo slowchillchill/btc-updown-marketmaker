@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn startup_gate_collects_ten_ready_before_activation_and_first_source_poll() {
+async fn startup_gate_collects_eleven_ready_before_activation_and_first_source_poll() {
     let tmp = tempdir().unwrap();
     let dataset_root = tmp.path().canonicalize().unwrap();
     let started_utc_ms = 1_783_987_201_000;

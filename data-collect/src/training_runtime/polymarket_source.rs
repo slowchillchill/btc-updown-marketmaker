@@ -1,4 +1,5 @@
 use super::*;
+use crate::polymarket_market_metadata_v6_layout::PolymarketMarketMetadataV6Row;
 
 pub(super) const MARKET_WS_ENDPOINT: &str = "wss://ws-subscriptions-clob.polymarket.com/ws/market";
 pub(super) const DEFAULT_DISCOVERY_WAIT_SECS: u64 = 90;
@@ -653,6 +654,49 @@ pub(super) async fn wait_for_polymarket_outer_recovery<N>(
 where
     N: Fn() -> PolymarketTimelineNow + Send + Sync + 'static,
 {
+    match wait_for_polymarket_outer_recovery_inner(
+        recovery,
+        sink,
+        gamma,
+        deadline,
+        control_rx,
+        resolution_poll_tasks,
+        context,
+        collector_identity,
+        run_started,
+        timeline_now,
+    )
+    .await
+    {
+        Err(error) => Err(drain_polymarket_anchors_after_processing_error(
+            error,
+            context,
+            sink,
+            collector_identity,
+            run_started,
+            recovery,
+        )
+        .await),
+        result => result,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn wait_for_polymarket_outer_recovery_inner<N>(
+    recovery: &mut SourceRecoverySupervisor,
+    sink: &SourceEventSink,
+    gamma: &GammaClient,
+    deadline: Option<Instant>,
+    control_rx: &mut mpsc::Receiver<PolymarketSourceControl>,
+    resolution_poll_tasks: &mut JoinSet<GammaResolutionPollCompletion>,
+    context: &mut PolymarketProcessingContext,
+    collector_identity: &CollectorIdentity,
+    run_started: Instant,
+    timeline_now: Arc<N>,
+) -> Result<bool>
+where
+    N: Fn() -> PolymarketTimelineNow + Send + Sync + 'static,
+{
     let wait = recovery.next_wait();
     let delay = deadline_remaining(deadline)
         .map(|remaining| remaining.min(wait.delay))
@@ -707,8 +751,25 @@ where
             now,
             sink,
         )?;
+        drain_ready_market_anchor_requests(context, sink, run_started).await?;
+        if discovery_authorities_complete && control_rx.is_empty() {
+            spawn_due_market_anchor_requests(
+                gamma,
+                context,
+                sink,
+                collector_identity,
+                &timeline_now,
+            )?;
+        }
         let next_actor_at =
-            next_polymarket_outer_actor_at(&*timeline_now, context, discovery_authorities_complete);
+            next_polymarket_outer_actor_at(&*timeline_now, context, discovery_authorities_complete)
+                .into_iter()
+                .chain(
+                    discovery_authorities_complete
+                        .then(|| next_market_anchor_request_at(context, now))
+                        .flatten(),
+                )
+                .min();
         let has_next_actor_wake = next_actor_at.is_some();
         let next_actor_at = next_actor_at.unwrap_or(retry_at);
         tokio::select! {
@@ -771,6 +832,9 @@ where
                 }
                 abort_ws_claimed_gamma_resolution_polls(context);
                 let finalize_result: Result<()> = async {
+                    let mut anchors = Vec::new();
+                    collect_all_market_anchor_items(context, &mut anchors).await?;
+                    process_polymarket_boundary_drain_items(anchors, day_boundary_utc_ms, &*timeline_now, context, sink, collector_identity, run_started, recovery).await?;
                     drain_all_gamma_resolution_polls(
                         resolution_poll_tasks,
                         &*timeline_now,
@@ -848,6 +912,11 @@ where
                     .into());
                 }
                 return Ok(!deadline_reached(deadline));
+            }
+            result = context.market_anchor.tasks.join_next(), if !context.market_anchor.tasks.is_empty() => {
+                if let Some(result) = result {
+                    record_market_anchor_completion(result.map_err(|error| invalid_data(format!("market anchor request task failed:{error}")))?, context, sink, run_started).await?;
+                }
             }
             result = resolution_poll_tasks.join_next(), if !resolution_poll_tasks.is_empty() => {
                 let Some(result) = result else {
@@ -969,10 +1038,17 @@ pub(super) async fn run_polymarket_source_with_spec(
         };
         if let Some(recovered) = context.as_mut() {
             recovered.reclassify_recovered_pending(now_ms())?;
-            if recovered.current.is_none() && recovered.pending.is_empty() {
-                context = None;
-                continue;
-            }
+        }
+        if clear_empty_polymarket_context(
+            &mut context,
+            &sink,
+            &collector_identity,
+            run_started,
+            &mut recovery,
+        )
+        .await?
+        {
+            continue;
         }
         let context = context
             .as_mut()
@@ -1057,6 +1133,36 @@ pub(super) async fn run_polymarket_source_with_spec(
         }
     }
     Ok(())
+}
+
+pub(super) async fn clear_empty_polymarket_context(
+    context: &mut Option<PolymarketProcessingContext>,
+    sink: &SourceEventSink,
+    collector_identity: &CollectorIdentity,
+    run_started: Instant,
+    recovery: &mut SourceRecoverySupervisor,
+) -> Result<bool> {
+    let Some(retired) = context
+        .as_mut()
+        .filter(|context| context.current.is_none() && context.pending.is_empty())
+    else {
+        return Ok(false);
+    };
+    let mut anchors = Vec::new();
+    collect_all_market_anchor_items(retired, &mut anchors).await?;
+    process_polymarket_boundary_drain_items(
+        anchors,
+        None,
+        &production_polymarket_timeline_now,
+        retired,
+        sink,
+        collector_identity,
+        run_started,
+        recovery,
+    )
+    .await?;
+    *context = None;
+    Ok(true)
 }
 
 pub(super) fn market_source_error_is_retryable(error: &(dyn Error + 'static)) -> bool {
@@ -1542,6 +1648,7 @@ pub(super) struct GammaResolutionPollCompletion {
 }
 
 pub(super) struct PolymarketProcessingContext {
+    pub(super) market_anchor: MarketAnchorRuntime,
     pub(super) source_sequence_epoch_id: String,
     pub(super) current: Option<DiscoveredBtcUpdownMarket>,
     pub(super) next: Option<DiscoveredBtcUpdownMarket>,
@@ -1578,6 +1685,7 @@ impl PolymarketProcessingContext {
         source_sequence_epoch_id: String,
     ) -> Self {
         let mut context = Self {
+            market_anchor: MarketAnchorRuntime::default(),
             source_sequence_epoch_id,
             current: Some(discovery.current),
             next: discovery.next,
@@ -1606,6 +1714,7 @@ impl PolymarketProcessingContext {
             return Ok(None);
         }
         let mut context = Self {
+            market_anchor: MarketAnchorRuntime::default(),
             source_sequence_epoch_id,
             current: None,
             next: None,
@@ -2493,7 +2602,52 @@ pub(super) async fn stop_polymarket_after_processing_error(
         replace_retryable_polymarket_primary(&mut primary_error, error);
     }
     record_abandoned_polymarket_messages(&sink.gaps, abandoned_by_day);
+    if !market_source_error_is_retryable(primary_error.as_ref()) {
+        primary_error = drain_polymarket_anchors_after_processing_error(
+            primary_error,
+            context,
+            sink,
+            collector_identity,
+            run_started,
+            recovery,
+        )
+        .await;
+    }
     Err(primary_error)
+}
+
+async fn drain_polymarket_anchors_after_processing_error(
+    mut primary_error: Box<dyn Error + Send + Sync>,
+    context: &mut PolymarketProcessingContext,
+    sink: &SourceEventSink,
+    collector_identity: &CollectorIdentity,
+    run_started: Instant,
+    recovery: &mut SourceRecoverySupervisor,
+) -> Box<dyn Error + Send + Sync> {
+    let mut anchors = Vec::new();
+    if let Err(error) = collect_all_market_anchor_items(context, &mut anchors).await {
+        record_gap(
+            &sink.gaps,
+            format!("polymarket_anchor_error_drain_failed:{error}"),
+        );
+        replace_retryable_polymarket_primary(&mut primary_error, error);
+    }
+    let observed = context.validation_now_utc_ms();
+    process_polymarket_subscription_drain_items(
+        anchors,
+        Some(primary_error),
+        &|| PolymarketTimelineNow {
+            utc_ms: observed,
+            monotonic: TokioInstant::now(),
+        },
+        context,
+        sink,
+        collector_identity,
+        run_started,
+        recovery,
+    )
+    .await
+    .expect("primary processing error is retained")
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2617,6 +2771,23 @@ pub(super) async fn fence_polymarket_processor(
     }
     if stop_after_fence {
         market_runtime.wait_pump_stopped().await?;
+        let mut anchors = Vec::new();
+        collect_all_market_anchor_items(context, &mut anchors).await?;
+        let observed = context.validation_now_utc_ms();
+        process_polymarket_boundary_drain_items(
+            anchors,
+            None,
+            &|| PolymarketTimelineNow {
+                utc_ms: observed,
+                monotonic: TokioInstant::now(),
+            },
+            context,
+            sink,
+            collector_identity,
+            run_started,
+            recovery,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -2624,6 +2795,7 @@ pub(super) async fn fence_polymarket_processor(
 pub(super) enum PolymarketBoundaryDrainItem {
     Market(Box<BudgetedPolymarketMessage>),
     Gamma(Box<GammaResolutionPollCompletion>),
+    Anchor(Box<MarketAnchorCompletion>),
 }
 
 impl PolymarketBoundaryDrainItem {
@@ -2631,6 +2803,7 @@ impl PolymarketBoundaryDrainItem {
         match self {
             Self::Market(message) => message.recv_time_utc_ms,
             Self::Gamma(completion) => completion.completed_at_utc_ms,
+            Self::Anchor(completion) => completion.row.timestamp_received,
         }
     }
 
@@ -2638,6 +2811,7 @@ impl PolymarketBoundaryDrainItem {
         match self {
             Self::Gamma(_) => 0,
             Self::Market(_) => 1,
+            Self::Anchor(_) => 2,
         }
     }
 }
@@ -2671,6 +2845,9 @@ where
     N: Fn() -> PolymarketTimelineNow + Send + Sync,
 {
     match item {
+        PolymarketBoundaryDrainItem::Anchor(completion) => {
+            record_market_anchor_completion(*completion, context, sink, run_started).await
+        }
         PolymarketBoundaryDrainItem::Market(message) => {
             process_polymarket_budgeted_message(
                 *message,
@@ -2711,19 +2888,21 @@ where
     N: Fn() -> PolymarketTimelineNow + Send + Sync,
 {
     sort_polymarket_boundary_drain_items(&mut items, day_boundary_utc_ms);
-    for item in items {
-        process_polymarket_boundary_drain_item(
-            item,
-            timeline_now,
-            context,
-            sink,
-            collector_identity,
-            run_started,
-            recovery,
-        )
-        .await?;
+    match process_polymarket_subscription_drain_items(
+        items,
+        None,
+        timeline_now,
+        context,
+        sink,
+        collector_identity,
+        run_started,
+        recovery,
+    )
+    .await
+    {
+        Some(error) => Err(error),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2748,6 +2927,16 @@ where
         let received_at_utc_ms = item.received_at_utc_ms();
         if !can_process {
             match item {
+                PolymarketBoundaryDrainItem::Anchor(completion) => {
+                    record_gap_at(
+                        &sink.gaps,
+                        received_at_utc_ms,
+                        format!(
+                            "polymarket_anchor_completion_discarded_after_processing_error:slug={}:ordinal={}",
+                            completion.row.identity.slug, completion.row.anchor_query_ordinal,
+                        ),
+                    );
+                }
                 PolymarketBoundaryDrainItem::Market(_) => {
                     note_abandoned_polymarket_message(&mut abandoned_by_day, received_at_utc_ms);
                 }
@@ -2934,7 +3123,7 @@ fn collect_ready_gamma_resolution_items(
     while let Some(result) = resolution_poll_tasks.try_join_next() {
         collect_polymarket_gamma_join_item(result, context, items, clean_exit)?;
     }
-    Ok(())
+    collect_ready_market_anchor_items(context, items)
 }
 
 async fn abort_and_collect_gamma_resolution_items(
@@ -3041,6 +3230,7 @@ where
         .collect::<Vec<_>>();
     collect_ready_gamma_resolution_items(resolution_poll_tasks, context, &mut items, true)?;
     abort_and_collect_gamma_resolution_items(resolution_poll_tasks, context, &mut items).await?;
+    collect_all_market_anchor_items(context, &mut items).await?;
     process_polymarket_boundary_drain_items(
         items,
         None,
@@ -3234,6 +3424,7 @@ where
                     }
                 }
             }
+            collect_all_market_anchor_items(context, &mut drained).await?;
             process_polymarket_boundary_drain_items(
                 drained,
                 Some(day_boundary_utc_ms),
@@ -5158,6 +5349,7 @@ where
             run_started,
         )
         .await?;
+        drain_ready_market_anchor_requests(context, sink, run_started).await?;
         abort_ws_claimed_gamma_resolution_polls(context);
         if context.pending_requires_fence() {
             finalize_polymarket_pending_after_fence(
@@ -5226,6 +5418,7 @@ where
         }
 
         let now = timeline_now();
+        spawn_due_market_anchor_requests(gamma, context, sink, collector_identity, &timeline_now)?;
         admit_recovered_polymarket_missed_slots(
             now.utc_ms,
             context,
@@ -6156,7 +6349,7 @@ fn polymarket_metadata_event(
         ws_claimant_collector_admission_sequence,
     );
     validate_polymarket_metadata_draft(&row)?;
-    polymarket_metadata_raw_event(row)
+    polymarket_metadata_v6_raw_event(PolymarketMarketMetadataV6Row::Existing(row))
 }
 
 fn validate_polymarket_metadata_draft(row: &PolymarketMarketMetadataV5Row) -> Result<()> {
@@ -6290,7 +6483,8 @@ async fn send_polymarket_metadata_rows_atomically_with_authority(
     }
     if rows.len() <= 1 {
         if let Some(row) = rows.into_iter().next() {
-            let event = polymarket_metadata_raw_event(row)?;
+            let event =
+                polymarket_metadata_v6_raw_event(PolymarketMarketMetadataV6Row::Existing(row))?;
             return match raw_day_ticket {
                 Some(ticket) => {
                     send_event_with_ticket_outcome(sink, run_started, event, ticket).await
@@ -6303,7 +6497,7 @@ async fn send_polymarket_metadata_rows_atomically_with_authority(
 
     let events = rows
         .into_iter()
-        .map(polymarket_metadata_raw_event)
+        .map(|row| polymarket_metadata_v6_raw_event(PolymarketMarketMetadataV6Row::Existing(row)))
         .collect::<Result<Vec<_>>>()?;
     let recv_time_utc_ms = events[0].recv_time_utc_ms;
     let partition = utc_hour_string_from_ms(recv_time_utc_ms)
@@ -6701,7 +6895,7 @@ fn admit_polymarket_orderbook_v3_pending(
     Ok((message, receipt))
 }
 
-async fn send_event_with_ticket(
+pub(super) async fn send_event_with_ticket(
     sink: &SourceEventSink,
     run_started: Instant,
     event: RawEvent,
