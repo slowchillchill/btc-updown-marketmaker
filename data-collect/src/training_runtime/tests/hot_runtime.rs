@@ -268,7 +268,7 @@ async fn real_hot_roles_wait_for_session_then_deliver_all_seven_source_types() {
         .unwrap();
         runtime.await.unwrap().unwrap();
         assert_eq!(sources, training_source_kinds().iter().copied().collect());
-        assert_eq!(windows, BTreeSet::from([30, 60]));
+        assert_eq!(windows, BTreeSet::from([60]));
         assert!(anchor_seen);
         assert_eq!(
             fs::read(old_manifest).unwrap(),

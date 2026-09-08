@@ -321,17 +321,14 @@ pub(super) fn rtds_subscription_evidence_json() -> String {
 }
 
 fn rtds_price_subscriptions() -> Vec<Subscription> {
-    let mut subscriptions = vec![Subscription::chainlink_prices(Some("btc/usd".to_owned()))];
-    for topic in ["crypto_prices_twap_thirty", "crypto_prices_twap_sixty"] {
-        subscriptions.push(
-            Subscription::builder()
-                .topic(topic.to_owned())
-                .msg_type("update".to_owned())
-                .filters(r#"{"symbol":"btc/usd"}"#.to_owned())
-                .build(),
-        );
-    }
-    subscriptions
+    vec![
+        Subscription::chainlink_prices(Some("btc/usd".to_owned())),
+        Subscription::builder()
+            .topic("crypto_prices_twap_sixty".to_owned())
+            .msg_type("update".to_owned())
+            .filters(r#"{"symbol":"btc/usd"}"#.to_owned())
+            .build(),
+    ]
 }
 
 pub(super) fn rtds_source_native_payload_json(
