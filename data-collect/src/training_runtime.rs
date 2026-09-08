@@ -3007,15 +3007,18 @@ mod tests {
                                     .rtds_subscriptions
                                     .fetch_add(1, Ordering::Relaxed);
                                 let request: Value = serde_json::from_str(&text).unwrap();
+                                assert_eq!(request["action"], "subscribe");
+                                assert_eq!(request["subscriptions"].as_array().unwrap().len(), 1);
+                                assert_eq!(request["subscriptions"][0]["topic"], ["crypto_prices_chainlink", "crypto_prices_twap_sixty"][subscribed]);
                                 assert_eq!(request["subscriptions"][0]["filters"], r#"{"symbol":"btc/usd"}"#);
                                 subscribed += 1;
-                                if subscribed == 3 { break; }
+                                if subscribed == 2 { break; }
                             }
                             Ok(Message::Close(_)) | Err(_) => break,
                             _ => {}
                         }
                     }
-                    if subscribed != 3 {
+                    if subscribed != 2 {
                         continue;
                     }
                     if mode.rtds == ComposedIoBehavior::Healthy {
@@ -3042,12 +3045,12 @@ mod tests {
                                 .rtds_business_sent
                                 .fetch_add(1, Ordering::Relaxed);
                         }
-                        for (topic, window_s) in [("crypto_prices_twap_thirty", 30), ("crypto_prices_twap_sixty", 60)] {
-                            if socket.send(Message::Text(json!({
-                                "topic":topic,"type":"update","timestamp":timestamp,
-                                "payload":{"symbol":"btc/usd","timestamp":timestamp,"value":65000.1,
-                                    "full_accuracy_value":"65000100000000000000001","window_s":window_s}
-                            }).to_string().into())).await.is_err() { break; }
+                        if socket.send(Message::Text(json!({
+                            "topic":"crypto_prices_twap_sixty","type":"update","timestamp":timestamp,
+                            "payload":{"symbol":"btc/usd","timestamp":timestamp,"value":65000.1,
+                                "full_accuracy_value":"65000100000000000000001","window_s":60}
+                        }).to_string().into())).await.is_err() {
+                            continue;
                         }
                     }
                     keep_text_heartbeat_loopback_alive(&mut socket).await;
@@ -3207,7 +3210,7 @@ mod tests {
                     self.counters.rtds_connections.load(Ordering::Relaxed) >= unavailable_attempts
                 }
                 (ComposedIoPath::Rtds, _) => {
-                    self.counters.rtds_subscriptions.load(Ordering::Relaxed) >= 3
+                    self.counters.rtds_subscriptions.load(Ordering::Relaxed) >= 2
                         && (self.mode.rtds == ComposedIoBehavior::Silent
                             || self.counters.rtds_business_sent.load(Ordering::Relaxed) >= 1)
                 }
@@ -3353,7 +3356,7 @@ mod tests {
             (
                 "polymarket_rtds_chainlink_twap",
                 if mode.rtds == ComposedIoBehavior::Healthy {
-                    2
+                    1
                 } else {
                     0
                 },
@@ -3439,7 +3442,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn full_runtime_persists_exact_anchor_rules_and_both_twap_windows() {
+    async fn full_runtime_persists_exact_anchor_rules_and_sixty_second_twap() {
         use crate::polymarket_market_metadata_v6_layout::{
             PolymarketMarketMetadataV6Row, polymarket_market_metadata_v6_row_from_batch,
         };
@@ -3539,7 +3542,7 @@ mod tests {
                 .unwrap()
                 .contains(r#""priceToBeat":64950.01421851144"#)
         );
-        assert_eq!(twap_windows, BTreeSet::from([30, 60]));
+        assert_eq!(twap_windows, BTreeSet::from([60]));
         fixture.shutdown().await;
     }
 

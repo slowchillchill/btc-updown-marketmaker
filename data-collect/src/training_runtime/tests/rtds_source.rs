@@ -29,26 +29,27 @@ fn rtds_display_decimal_accepts_numeric_and_string_values_without_changing_evide
 
 async fn assert_remaining_twap_subscriptions(socket: &mut WebSocketStream<TcpStream>) -> u64 {
     let mut pings = 0;
-    for topic in ["crypto_prices_twap_thirty", "crypto_prices_twap_sixty"] {
-        let request = loop {
-            let message = socket.next().await.unwrap().unwrap();
-            if let Message::Text(text) = message {
-                if text == "PING" {
-                    pings += 1;
-                    continue;
-                }
-                break serde_json::from_str::<Value>(&text).unwrap();
+    let request = loop {
+        let message = socket.next().await.unwrap().unwrap();
+        if let Message::Text(text) = message {
+            if text == "PING" {
+                pings += 1;
+                continue;
             }
-        };
-        assert_eq!(request["action"], "subscribe");
-        assert_eq!(request["subscriptions"].as_array().unwrap().len(), 1);
-        assert_eq!(request["subscriptions"][0]["topic"], topic);
-        assert_eq!(request["subscriptions"][0]["type"], "update");
-        assert_eq!(
-            request["subscriptions"][0]["filters"],
-            r#"{"symbol":"btc/usd"}"#
-        );
-    }
+            break serde_json::from_str::<Value>(&text).unwrap();
+        }
+    };
+    assert_eq!(request["action"], "subscribe");
+    assert_eq!(request["subscriptions"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        request["subscriptions"][0]["topic"],
+        "crypto_prices_twap_sixty"
+    );
+    assert_eq!(request["subscriptions"][0]["type"], "update");
+    assert_eq!(
+        request["subscriptions"][0]["filters"],
+        r#"{"symbol":"btc/usd"}"#
+    );
     pings
 }
 
@@ -1023,7 +1024,7 @@ async fn rtds_business_silence_replaces_two_runtimes_then_fresh_resets_the_episo
     spec.ws_config.heartbeat_interval = Duration::from_millis(20);
     spec.ws_config.heartbeat_timeout = Duration::from_millis(60);
     spec.business_timing = RtdsBusinessTiming {
-        // 三份订阅实际经 TCP 传送，给本机确认/调度留下余量；精确时限由暂停时钟测试覆盖。
+        // 两份订阅实际经 TCP 传送，给本机确认/调度留下余量；精确时限由暂停时钟测试覆盖。
         steady_silence_threshold: Duration::from_millis(200),
         first_fresh_observation_window: Duration::from_millis(150),
         outer_backoff_initial_ms: 2,
