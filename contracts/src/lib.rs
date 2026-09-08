@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 pub mod execution_normalization;
 mod public_observation;
 pub use public_observation::*;
+mod public_book;
+pub use public_book::*;
 mod model_intent;
 
 pub use model_intent::{BuyLegIntentV1, BuyOrderIntentV1, ModelIntentV1};

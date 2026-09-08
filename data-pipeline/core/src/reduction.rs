@@ -8,8 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::typed_raw::{
     self, BinanceAggTradeRecord, BinanceAggTradeRow, BinanceDepthSnapshotRow,
     BinanceDepthStitchVerdict, BinanceDepthUpdateRow, DepthLevel, PolymarketMarketMetadataRow,
-    PolymarketOrderbookEvent, PolymarketOrderbookRow, PolymarketPriceChangeEntry,
-    PolymarketPriceLevel, PolymarketSide, TypedRawRow,
+    PolymarketOrderbookEvent, PolymarketOrderbookRow, TypedRawRow,
 };
 use crate::{
     ContractError, build_binance_aggregate_trade_reference_event_v1,
@@ -21,33 +20,7 @@ use crate::{
 
 pub const REDUCTION_REPORT_SCHEMA_V1: &str = "canonical_reduction_report_v1";
 
-const POLYMARKET_BOOK_DIGEST_DOMAIN_V1: &[u8] = b"data-pipeline/polymarket-book-digest/v1\0";
-const POLYMARKET_CAUSAL_GROUP_DOMAIN_V1: &[u8] = b"data-pipeline/polymarket-causal-group/v1\0";
-const POLYMARKET_PUBLIC_TRADE_ID_DOMAIN_V1: &[u8] =
-    b"data-pipeline/polymarket-public-trade-id/v1\0";
 const POLYMARKET_TERMINAL_MAPPING_RULE_V1: &str = "polymarket-binary-winning-asset-one-hot-v1";
-const POLYMARKET_L2_EPOCH_BASELINE_REQUIRED: &str = "POLYMARKET_L2_EPOCH_BASELINE_REQUIRED";
-const POLYMARKET_L2_EPOCH_BASELINE_RESTORED: &str = "POLYMARKET_L2_EPOCH_BASELINE_RESTORED";
-const POLYMARKET_PRICE_CHANGE_FULL_BOOK_REQUIRED: &str =
-    "POLYMARKET_PRICE_CHANGE_FULL_BOOK_REQUIRED";
-
-fn normalize_polymarket_boundary_quote(
-    value: Option<&str>,
-    field: &str,
-    empty_sentinel: Decimal,
-) -> Result<Option<ExactDecimal>, ContractError> {
-    let Some(value) = value else {
-        return Ok(None);
-    };
-    let normalized =
-        typed_raw::normalize_decimal_text(value, field).map_err(typed_raw_contract_error)?;
-    if parse_canonical_decimal(&normalized, field)? == empty_sentinel {
-        Ok(None)
-    } else {
-        Ok(Some(normalized))
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum ReductionOperationKindV1 {
@@ -156,7 +129,7 @@ fn exact_from_decimal(value: Decimal) -> ExactDecimal {
     ExactDecimal(value.normalize().to_string())
 }
 
-fn canonicalize_source_evidence(
+pub(crate) fn canonicalize_source_evidence(
     evidence: Vec<SourceEvidenceRefV2>,
 ) -> Result<Vec<SourceEvidenceRefV2>, ContractError> {
     let mut keyed = evidence
@@ -2188,88 +2161,36 @@ impl PolymarketReducer {
                     "a completed epoch cannot be resumed after another epoch began",
                 ));
             }
-            let switching_epoch = self.current_epoch.is_some();
+            // 代际排序/去重仍属旧外围；断开与恢复的证据计算复用共同组件。
+            let context = self.common_context();
+            let trigger = &inputs[0].evidence;
+            let reset = crate::pm_reduction::reduce_epoch(
+                &context,
+                self,
+                crate::pm_reduction::PmMessageInput {
+                    fact_id: CanonicalEventId(
+                        hash_domain_bytes(
+                            b"data-pipeline/canonical-pm-legacy-epoch/v1\0",
+                            &stable_json(&semantic_source_evidence(trigger))?,
+                        )
+                        .0,
+                    ),
+                    payload: None,
+                    source: trigger,
+                    source_at: inputs[0].row.timestamp.expect("validated source time"),
+                    admission: trigger
+                        .collector_admission
+                        .as_ref()
+                        .expect("validated admission"),
+                },
+            )?;
             self.current_epoch = Some(epoch.clone());
             self.seen_epochs.insert(epoch);
             self.last_sort_key = None;
             self.seen_admission_sequences.clear();
             self.last_row = None;
             self.last_evidence = None;
-            let epoch_trigger = inputs[0].evidence.clone();
-            let mut invalidated_assets = Vec::new();
-            for state in self.assets.values_mut() {
-                if switching_epoch && let Some(current) = &state.bba {
-                    state.bba_reanchor_frontier_evidence = Some(visibility_frontier_evidence(
-                        state
-                            .bba_reanchor_frontier_evidence
-                            .iter()
-                            .cloned()
-                            .chain([current.visibility_frontier_evidence.clone()])
-                            .collect(),
-                    )?);
-                }
-                if switching_epoch && state.book_ready {
-                    let reset_frontier = visibility_frontier_evidence(
-                        state
-                            .bids
-                            .values()
-                            .chain(state.asks.values())
-                            .map(|level| level.visibility_frontier_evidence.clone())
-                            .chain(
-                                state
-                                    .bid_absences
-                                    .values()
-                                    .chain(state.ask_absences.values())
-                                    .map(|absence| absence.visibility_frontier_evidence.clone()),
-                            )
-                            .chain(
-                                state
-                                    .l2_absence_baseline
-                                    .iter()
-                                    .map(|baseline| baseline.visibility_frontier_evidence.clone()),
-                            )
-                            .chain([epoch_trigger.clone()])
-                            .collect(),
-                    )?;
-                    let reset = PolymarketAbsenceState {
-                        direct_evidence: epoch_trigger.clone(),
-                        visibility_frontier_evidence: reset_frontier,
-                    };
-                    invalidated_assets.push((state.context.asset.clone(), reset.clone()));
-                    state.l2_absence_baseline = Some(reset);
-                } else if switching_epoch && let Some(previous) = state.l2_absence_baseline.clone()
-                {
-                    state.l2_absence_baseline = Some(PolymarketAbsenceState {
-                        direct_evidence: epoch_trigger.clone(),
-                        visibility_frontier_evidence: visibility_frontier_evidence(vec![
-                            previous.visibility_frontier_evidence,
-                            epoch_trigger.clone(),
-                        ])?,
-                    });
-                }
-                state.book_ready = false;
-                state.bids.clear();
-                state.asks.clear();
-                state.bid_absences.clear();
-                state.ask_absences.clear();
-                state.bba = None;
-            }
-            for (asset, reset) in invalidated_assets {
-                append_polymarket_quality_boundary(
-                    &self.market,
-                    &self.canonical_rule_version,
-                    &self.identity_source_evidence,
-                    &asset,
-                    MarketDataQuality::Fresh,
-                    MarketDataQuality::Missing,
-                    ResyncQuality::Required,
-                    POLYMARKET_L2_EPOCH_BASELINE_REQUIRED,
-                    ReductionOperationKindV1::Reject,
-                    &reset.direct_evidence,
-                    std::slice::from_ref(&reset.visibility_frontier_evidence),
-                    &mut batch,
-                )?;
-            }
+            self.apply_common_reduction(reset, &mut batch)?;
         }
 
         for input in inputs {
@@ -2321,714 +2242,404 @@ impl PolymarketReducer {
         Ok(batch)
     }
 
+    fn common_context(&self) -> crate::pm_reduction::PmMarketContextV1<SourceEvidenceRefV2> {
+        crate::pm_reduction::PmMarketContextV1 {
+            market: self.market.clone(),
+            assets: self
+                .assets
+                .values()
+                .map(|state| state.context.clone())
+                .collect(),
+            identity_source_evidence: self.identity_source_evidence.clone(),
+            canonical_rule_version: self.canonical_rule_version.clone(),
+        }
+    }
+
     fn apply_polymarket_input(
         &mut self,
         input: PolymarketOrderbookInputV1,
         batch: &mut PolymarketReductionBatch,
     ) -> Result<(), ContractError> {
-        match &input.row.event {
-            PolymarketOrderbookEvent::Book {
-                asset_id,
-                bids,
-                asks,
-                ..
-            } => self.apply_polymarket_book(asset_id, bids, asks, &input, batch),
-            PolymarketOrderbookEvent::PriceChange { price_changes } => {
-                for change in price_changes {
-                    self.apply_polymarket_price_change(change, &input, batch)?;
-                }
-                Ok(())
-            }
-            PolymarketOrderbookEvent::BestBidAsk {
-                asset_id,
-                best_bid,
-                best_ask,
-                spread,
-            } => self.apply_polymarket_bba(
-                asset_id,
-                best_bid.as_deref(),
-                best_ask.as_deref(),
-                spread.as_deref(),
-                &input,
-                batch,
-            ),
-            PolymarketOrderbookEvent::TickSizeChange {
-                asset_id,
-                old_tick_size,
-                new_tick_size,
-            } => self.apply_polymarket_tick(
-                asset_id,
-                old_tick_size.as_deref(),
-                new_tick_size,
-                &input,
-                batch,
-            ),
-            PolymarketOrderbookEvent::LastTradePrice {
-                asset_id,
-                price,
-                size,
-                side,
-                fee_rate_bps,
-            } => self.apply_polymarket_trade(
-                asset_id,
-                price,
-                size.as_deref(),
-                *side,
-                fee_rate_bps.as_deref(),
-                &input,
-                batch,
-            ),
-            PolymarketOrderbookEvent::NewMarket {
-                clob_market_id,
-                asset_ids,
-                outcomes,
-                ..
-            } => {
-                self.confirm_new_market_identity(clob_market_id, asset_ids, outcomes, &input, batch)
-            }
-            PolymarketOrderbookEvent::MarketResolved { .. } => Err(invalid(
-                "event",
-                "market_resolved WebSocket rows require the qualified terminal merger",
-            )),
-        }
-    }
-
-    fn confirm_new_market_identity(
-        &self,
-        clob_market_id: &str,
-        asset_ids: &[String],
-        outcomes: &[String],
-        input: &PolymarketOrderbookInputV1,
-        batch: &mut PolymarketReductionBatch,
-    ) -> Result<(), ContractError> {
-        if clob_market_id != self.market.clob_market_id.0
-            || asset_ids.len() != self.assets.len()
-            || !same_decimal_id_set(
-                asset_ids.iter().map(String::as_str),
-                self.assets.keys().map(String::as_str),
-            )
-            || asset_ids.iter().zip(outcomes).any(|(token_id, outcome)| {
-                self.assets.get(token_id).is_none_or(|state| {
-                    !state
-                        .context
-                        .asset
-                        .outcome
-                        .label
-                        .trim()
-                        .eq_ignore_ascii_case(outcome.trim())
-                })
-            })
-        {
-            return Err(invalid(
-                "event.new_market",
-                "does not match the registered fixed market identity",
-            ));
-        }
-        let mut evidence = self.identity_source_evidence.clone();
-        evidence.push(input.evidence.clone());
-        batch.reports.push(non_event_report(
-            &self.canonical_rule_version,
-            polymarket_message_scope(&input.row),
-            ReductionOperationKindV1::Confirm,
-            "POLYMARKET_NEW_MARKET_IDENTITY_CONFIRMED",
-            evidence,
-            true,
-        )?);
-        Ok(())
-    }
-
-    fn apply_polymarket_book(
-        &mut self,
-        asset_id: &str,
-        bids: &[PolymarketPriceLevel],
-        asks: &[PolymarketPriceLevel],
-        input: &PolymarketOrderbookInputV1,
-        batch: &mut PolymarketReductionBatch,
-    ) -> Result<(), ContractError> {
-        let mut incoming_bids = polymarket_level_map(bids, &input.evidence, "bids")?;
-        let mut incoming_asks = polymarket_level_map(asks, &input.evidence, "asks")?;
-        let state = self
-            .assets
-            .get_mut(asset_id)
-            .ok_or_else(|| invalid("asset_id", "is not part of the registered market"))?;
-        let scope = polymarket_asset_scope(&self.market, &state.context.asset);
-        if !state.book_ready && !state.has_initial_snapshot {
-            state.book_ready = true;
-            state.has_initial_snapshot = true;
-            state.bids = incoming_bids;
-            state.asks = incoming_asks;
-            let mut evidence = self.identity_source_evidence.clone();
-            evidence.extend(state.tick_direct_evidence.clone());
-            evidence.push(state.tick_visibility_frontier_evidence.clone());
-            evidence.push(input.evidence.clone());
-            let snapshot_frontier = visibility_frontier_evidence(evidence.clone())?;
-            for level in state.bids.values_mut().chain(state.asks.values_mut()) {
-                level.visibility_frontier_evidence = snapshot_frontier.clone();
-            }
-            state.l2_absence_baseline = Some(PolymarketAbsenceState {
-                direct_evidence: input.evidence.clone(),
-                visibility_frontier_evidence: snapshot_frontier,
-            });
-            let digest = polymarket_book_digest(&state.context.asset, &state.bids, &state.asks)?;
-            let event = finalize_execution_event(
-                self.market.clone(),
-                &self.canonical_rule_version,
-                evidence,
-                fresh_quality(ResyncQuality::NotRequired),
-                ExecutionMarketEventPayloadV3::InitialL2Snapshot(InitialL2SnapshotV2 {
-                    asset: state.context.asset.clone(),
-                    initial_tick_size_pusd_per_share: state.tick_size.clone(),
-                    source_sequence_epoch_id: input.row.source_sequence_epoch_id.clone(),
-                    source_cursor: input.row.collector_admission_sequence,
-                    book_digest_sha256: digest,
-                    bids: polymarket_levels(&state.bids, true),
-                    asks: polymarket_levels(&state.asks, false),
-                }),
-            )?;
-            batch.reports.push(produced_report(
-                &self.canonical_rule_version,
-                scope,
-                ReductionOperationKindV1::Merge,
-                "POLYMARKET_INITIAL_BOOK_BASELINE",
-                None,
-                event.event_id.clone(),
-            )?);
-            batch.events.push(event);
-            return Ok(());
-        }
-
-        let recovering_from_epoch_switch = !state.book_ready && state.has_initial_snapshot;
-        let previous_bids = std::mem::take(&mut state.bids);
-        let previous_asks = std::mem::take(&mut state.asks);
-        let previous_absence_baseline = state
-            .l2_absence_baseline
-            .clone()
-            .ok_or_else(|| invalid("book", "post-initial book requires an L2 absence baseline"))?;
-        incoming_bids = reconcile_polymarket_book_side(
-            &self.market,
-            &self.canonical_rule_version,
-            &self.identity_source_evidence,
-            &state.context.asset,
-            BookSide::Bid,
-            &previous_bids,
-            incoming_bids,
-            &mut state.bid_absences,
-            &previous_absence_baseline,
-            input,
-            batch,
-        )?;
-        incoming_asks = reconcile_polymarket_book_side(
-            &self.market,
-            &self.canonical_rule_version,
-            &self.identity_source_evidence,
-            &state.context.asset,
-            BookSide::Ask,
-            &previous_asks,
-            incoming_asks,
-            &mut state.ask_absences,
-            &previous_absence_baseline,
-            input,
-            batch,
-        )?;
-        let no_change = same_polymarket_levels(&previous_bids, &incoming_bids)
-            && same_polymarket_levels(&previous_asks, &incoming_asks);
-        state.bids = incoming_bids;
-        state.asks = incoming_asks;
-        state.l2_absence_baseline = Some(PolymarketAbsenceState {
-            direct_evidence: input.evidence.clone(),
-            visibility_frontier_evidence: visibility_frontier_evidence(vec![
-                previous_absence_baseline
-                    .visibility_frontier_evidence
-                    .clone(),
-                input.evidence.clone(),
-            ])?,
-        });
-        state.book_ready = true;
-        if recovering_from_epoch_switch {
-            append_polymarket_quality_boundary(
-                &self.market,
-                &self.canonical_rule_version,
-                &self.identity_source_evidence,
-                &state.context.asset,
-                MarketDataQuality::Missing,
-                MarketDataQuality::Fresh,
-                ResyncQuality::ResyncBoundary,
-                POLYMARKET_L2_EPOCH_BASELINE_RESTORED,
-                ReductionOperationKindV1::Overwrite,
-                &input.evidence,
-                &[
-                    previous_absence_baseline.direct_evidence,
-                    previous_absence_baseline.visibility_frontier_evidence,
-                ],
-                batch,
-            )?;
-        } else if no_change {
-            let mut evidence = self.identity_source_evidence.clone();
-            evidence.push(input.evidence.clone());
-            evidence.extend(
-                previous_bids
-                    .values()
-                    .chain(previous_asks.values())
-                    .flat_map(|level| {
-                        [
-                            level.direct_evidence.clone(),
-                            level.visibility_frontier_evidence.clone(),
-                        ]
-                    }),
-            );
-            batch.reports.push(non_event_report(
-                &self.canonical_rule_version,
-                scope,
-                ReductionOperationKindV1::Confirm,
-                "POLYMARKET_IDENTICAL_BOOK_CONFIRMATION",
-                evidence,
-                true,
-            )?);
-        }
-        Ok(())
-    }
-
-    fn apply_polymarket_price_change(
-        &mut self,
-        change: &PolymarketPriceChangeEntry,
-        input: &PolymarketOrderbookInputV1,
-        batch: &mut PolymarketReductionBatch,
-    ) -> Result<(), ContractError> {
-        let side = match change.side {
-            PolymarketSide::Buy => BookSide::Bid,
-            PolymarketSide::Sell => BookSide::Ask,
-            PolymarketSide::Unknown => {
-                return Err(invalid(
-                    "price_change.side",
-                    "unknown side cannot be mapped to a book side",
-                ));
-            }
-        };
-        if change.size.is_some() {
-            let state = self
-                .assets
-                .get(&change.asset_id)
-                .ok_or_else(|| invalid("asset_id", "is not part of the registered market"))?;
-            if !state.book_ready {
-                batch.reports.push(non_event_report(
-                    &self.canonical_rule_version,
-                    polymarket_asset_scope(&self.market, &state.context.asset),
-                    ReductionOperationKindV1::Reject,
-                    POLYMARKET_PRICE_CHANGE_FULL_BOOK_REQUIRED,
-                    vec![input.evidence.clone()],
-                    false,
-                )?);
-                if change.best_bid.is_some() || change.best_ask.is_some() {
-                    self.apply_polymarket_bba(
-                        &change.asset_id,
-                        change.best_bid.as_deref(),
-                        change.best_ask.as_deref(),
-                        None,
-                        input,
-                        batch,
-                    )?;
-                }
-                return Ok(());
-            }
-        }
-        if let Some(size) = &change.size {
-            let state = self
-                .assets
-                .get_mut(&change.asset_id)
-                .ok_or_else(|| invalid("asset_id", "is not part of the registered market"))?;
-            let price = typed_raw::normalize_decimal_text(&change.price, "price_change.price")
-                .map_err(typed_raw_contract_error)?;
-            let quantity = typed_raw::normalize_decimal_text(size, "price_change.size")
-                .map_err(typed_raw_contract_error)?;
-            let key = parse_canonical_decimal(&price, "price_change.price")?;
-            let absence_baseline = state.l2_absence_baseline.clone().ok_or_else(|| {
-                invalid(
-                    "price_change",
-                    "book-ready state requires an L2 absence baseline",
+        use crate::pm_reduction::*;
+        let context = self.common_context();
+        let payload = crate::pm_message::payload_from_typed_raw(&input.row, &context.assets)?;
+        let admission = input
+            .evidence
+            .collector_admission
+            .as_ref()
+            .expect("validated admission");
+        let message = PmMessageInput {
+            fact_id: CanonicalEventId(
+                hash_domain_bytes(
+                    b"data-pipeline/canonical-pm-legacy-message/v1\0",
+                    &stable_json(&(&semantic_source_evidence(&input.evidence), &payload))?,
                 )
-            })?;
-            let (levels, absences) = match side {
-                BookSide::Bid => (&mut state.bids, &mut state.bid_absences),
-                BookSide::Ask => (&mut state.asks, &mut state.ask_absences),
-            };
-            let previous = levels.get(&key).cloned();
-            let before = previous
-                .as_ref()
-                .map(|level| parse_canonical_decimal(&level.quantity, "quantity_before"))
-                .transpose()?
-                .unwrap_or(Decimal::ZERO);
-            let after = parse_canonical_decimal(&quantity, "quantity_after")?;
-            let scope = polymarket_level_scope(&self.market, &state.context.asset, side, &price);
-            let predecessor = previous
-                .as_ref()
-                .map(|level| PolymarketAbsenceState {
-                    direct_evidence: level.direct_evidence.clone(),
-                    visibility_frontier_evidence: level.visibility_frontier_evidence.clone(),
-                })
-                .or_else(|| absences.get(&key).cloned())
-                .unwrap_or(absence_baseline);
-            let mut evidence = self.identity_source_evidence.clone();
-            evidence.push(input.evidence.clone());
-            evidence.push(predecessor.direct_evidence);
-            evidence.push(predecessor.visibility_frontier_evidence);
-            if before == after {
-                batch.reports.push(non_event_report(
-                    &self.canonical_rule_version,
-                    scope,
-                    ReductionOperationKindV1::Confirm,
-                    "POLYMARKET_ABSOLUTE_LEVEL_CONFIRMATION",
+                .0,
+            ),
+            payload: Some(&payload),
+            source: &input.evidence,
+            source_at: input.row.timestamp.expect("validated source time"),
+            admission,
+        };
+        let reduction = reduce_message(&context, self, message, false)?;
+        self.apply_common_reduction(reduction, batch)
+    }
+
+    fn apply_common_reduction(
+        &mut self,
+        reduction: crate::pm_reduction::PmMessageReductionV1<'_, SourceEvidenceRefV2>,
+        batch: &mut PolymarketReductionBatch,
+    ) -> Result<(), ContractError> {
+        use crate::pm_reduction::{PmReductionDispositionV2, PmStepChangeV1};
+        let mut event_ids = BTreeMap::new();
+        for step in reduction.steps {
+            let payload = match step.change {
+                PmStepChangeV1::InitialSnapshot {
+                    asset,
+                    initial_tick_size_pusd_per_share,
+                    source_sequence_epoch_id,
+                    source_cursor,
+                    book_digest_sha256,
+                    bids,
+                    asks,
                     evidence,
-                    true,
-                )?);
-            } else {
-                let next_frontier = visibility_frontier_evidence(evidence.clone())?;
-                let event = polymarket_level_transition_event(
-                    &self.market,
-                    &self.canonical_rule_version,
-                    &state.context.asset,
-                    side,
-                    price.clone(),
-                    before,
-                    after,
-                    LevelExecutionBasis::LevelDeltaInference,
-                    ResyncQuality::NotRequired,
-                    &input.evidence,
-                    evidence,
-                )?;
-                let summary = level_quantity_summary(before, after);
-                let operation = if after.is_zero() {
-                    ReductionOperationKindV1::Delete
-                } else if before.is_zero() {
-                    ReductionOperationKindV1::Merge
-                } else {
-                    ReductionOperationKindV1::Overwrite
-                };
-                batch.reports.push(produced_report(
-                    &self.canonical_rule_version,
-                    scope,
-                    operation,
-                    "POLYMARKET_ABSOLUTE_LEVEL_UPDATE",
-                    Some(summary),
-                    event.event_id.clone(),
-                )?);
-                batch.events.push(event);
-                if after.is_zero() {
-                    levels.remove(&key);
-                    absences.insert(
-                        key,
-                        PolymarketAbsenceState {
-                            direct_evidence: input.evidence.clone(),
-                            visibility_frontier_evidence: next_frontier,
+                } => {
+                    let state = self
+                        .assets
+                        .get_mut(&asset.token_id.0)
+                        .expect("resolved asset");
+                    state.has_initial_snapshot = true;
+                    state.book_ready = true;
+                    for (target, levels) in [(&mut state.bids, bids), (&mut state.asks, asks)] {
+                        target.clear();
+                        for level in levels {
+                            target.insert(
+                                parse_canonical_decimal(&level.price_pusd_per_share, "price")?,
+                                PolymarketLevelState {
+                                    price: level.price_pusd_per_share.clone(),
+                                    quantity: level.quantity_shares.clone(),
+                                    direct_evidence: evidence.direct.clone(),
+                                    visibility_frontier_evidence: evidence.frontier.clone(),
+                                },
+                            );
+                        }
+                    }
+                    Some(ExecutionMarketEventPayloadV3::InitialL2Snapshot(
+                        InitialL2SnapshotV2 {
+                            asset,
+                            initial_tick_size_pusd_per_share,
+                            source_sequence_epoch_id,
+                            source_cursor,
+                            book_digest_sha256,
+                            bids: polymarket_levels(&state.bids, true),
+                            asks: polymarket_levels(&state.asks, false),
                         },
-                    );
-                } else {
-                    absences.remove(&key);
+                    ))
+                }
+                PmStepChangeV1::LevelChange {
+                    transition,
+                    evidence,
+                } => {
+                    let state = self
+                        .assets
+                        .get_mut(&transition.asset.token_id.0)
+                        .expect("resolved asset");
+                    let (levels, absences) = match transition.side {
+                        BookSide::Bid => (&mut state.bids, &mut state.bid_absences),
+                        BookSide::Ask => (&mut state.asks, &mut state.ask_absences),
+                    };
+                    let key = parse_canonical_decimal(&transition.price_pusd_per_share, "price")?;
+                    if parse_canonical_decimal(&transition.quantity_after_shares, "quantity_after")?
+                        .is_zero()
+                    {
+                        levels.remove(&key);
+                        absences.insert(
+                            key,
+                            PolymarketAbsenceState {
+                                direct_evidence: evidence.direct,
+                                visibility_frontier_evidence: evidence.frontier,
+                            },
+                        );
+                    } else {
+                        absences.remove(&key);
+                        levels.insert(
+                            key,
+                            PolymarketLevelState {
+                                price: transition.price_pusd_per_share.clone(),
+                                quantity: transition.quantity_after_shares.clone(),
+                                direct_evidence: evidence.direct,
+                                visibility_frontier_evidence: evidence.frontier,
+                            },
+                        );
+                    }
+                    Some(ExecutionMarketEventPayloadV3::LevelExecutionTransition(
+                        transition,
+                    ))
+                }
+                PmStepChangeV1::LevelEvidenceOnly {
+                    asset,
+                    side,
+                    price,
+                    evidence,
+                } => {
+                    let state = self
+                        .assets
+                        .get_mut(&asset.token_id.0)
+                        .expect("resolved asset");
+                    let levels = match side {
+                        BookSide::Bid => &mut state.bids,
+                        BookSide::Ask => &mut state.asks,
+                    };
                     levels.insert(
-                        key,
+                        parse_canonical_decimal(&price, "price")?,
                         PolymarketLevelState {
                             price,
-                            quantity,
-                            direct_evidence: input.evidence.clone(),
-                            visibility_frontier_evidence: next_frontier,
+                            quantity: ExactDecimal("0".to_owned()),
+                            direct_evidence: evidence.direct,
+                            visibility_frontier_evidence: evidence.frontier,
                         },
                     );
+                    None
                 }
-            }
-        }
-        if change.best_bid.is_some() || change.best_ask.is_some() {
-            self.apply_polymarket_bba(
-                &change.asset_id,
-                change.best_bid.as_deref(),
-                change.best_ask.as_deref(),
-                None,
-                input,
-                batch,
-            )?;
-        } else if change.size.is_none() {
-            let state = self
-                .assets
-                .get(&change.asset_id)
-                .ok_or_else(|| invalid("asset_id", "is not part of the registered market"))?;
-            batch.reports.push(non_event_report(
-                &self.canonical_rule_version,
-                polymarket_asset_scope(&self.market, &state.context.asset),
-                ReductionOperationKindV1::Reject,
-                "POLYMARKET_PRICE_CHANGE_WITHOUT_STATE",
-                vec![input.evidence.clone()],
-                false,
-            )?);
-        }
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn apply_polymarket_bba(
-        &mut self,
-        asset_id: &str,
-        best_bid: Option<&str>,
-        best_ask: Option<&str>,
-        spread: Option<&str>,
-        input: &PolymarketOrderbookInputV1,
-        batch: &mut PolymarketReductionBatch,
-    ) -> Result<(), ContractError> {
-        let best_bid = normalize_polymarket_boundary_quote(best_bid, "best_bid", Decimal::ZERO)?;
-        let best_ask = normalize_polymarket_boundary_quote(best_ask, "best_ask", Decimal::ONE)?;
-        if let (Some(bid), Some(ask)) = (&best_bid, &best_ask) {
-            let bid = parse_canonical_decimal(bid, "best_bid")?;
-            let ask = parse_canonical_decimal(ask, "best_ask")?;
-            if bid > ask {
-                return Err(invalid("best_bid_ask", "best bid must not exceed best ask"));
-            }
-            if let Some(spread) = spread {
-                let spread = typed_raw::normalize_decimal_text(spread, "spread")
-                    .map_err(typed_raw_contract_error)?;
-                if parse_canonical_decimal(&spread, "spread")? != ask - bid {
-                    return Err(invalid(
-                        "spread",
-                        "must equal best ask minus best bid when all values are present",
-                    ));
+                PmStepChangeV1::AbsenceBaseline {
+                    asset, evidence, ..
+                } => {
+                    self.assets
+                        .get_mut(&asset.token_id.0)
+                        .expect("resolved asset")
+                        .l2_absence_baseline = Some(PolymarketAbsenceState {
+                        direct_evidence: evidence.direct,
+                        visibility_frontier_evidence: evidence.frontier,
+                    });
+                    None
                 }
-            }
-        }
-        let state = self
-            .assets
-            .get_mut(asset_id)
-            .ok_or_else(|| invalid("asset_id", "is not part of the registered market"))?;
-        let scope = polymarket_asset_scope(&self.market, &state.context.asset);
-        if state
-            .bba
-            .as_ref()
-            .is_some_and(|current| current.best_bid == best_bid && current.best_ask == best_ask)
-        {
-            let mut evidence = self.identity_source_evidence.clone();
-            evidence.push(input.evidence.clone());
-            evidence.push(
-                state
-                    .bba
-                    .as_ref()
-                    .expect("matched BBA state")
-                    .direct_evidence
-                    .clone(),
-            );
-            evidence.push(
-                state
-                    .bba
-                    .as_ref()
-                    .expect("matched BBA state")
-                    .visibility_frontier_evidence
-                    .clone(),
-            );
-            batch.reports.push(non_event_report(
-                &self.canonical_rule_version,
-                scope,
-                ReductionOperationKindV1::Confirm,
-                "POLYMARKET_BBA_CONFIRMATION",
-                evidence,
-                true,
-            )?);
-            return Ok(());
-        }
-        let previous = state.bba.clone();
-        let mut evidence = self.identity_source_evidence.clone();
-        evidence.push(input.evidence.clone());
-        if let Some(previous) = &previous {
-            evidence.push(previous.direct_evidence.clone());
-            evidence.push(previous.visibility_frontier_evidence.clone());
-        } else if let Some(frontier) = &state.bba_reanchor_frontier_evidence {
-            evidence.push(frontier.clone());
-        }
-        let next_frontier = visibility_frontier_evidence(evidence.clone())?;
-        let event = finalize_execution_event(
-            self.market.clone(),
-            &self.canonical_rule_version,
-            evidence,
-            fresh_quality(ResyncQuality::NotRequired),
-            ExecutionMarketEventPayloadV3::BestBidAsk(BestBidAskV2 {
-                asset: state.context.asset.clone(),
-                best_bid_pusd_per_share: best_bid.clone(),
-                best_ask_pusd_per_share: best_ask.clone(),
-            }),
-        )?;
-        state.bba = Some(PolymarketBbaState {
-            best_bid: best_bid.clone(),
-            best_ask: best_ask.clone(),
-            direct_evidence: input.evidence.clone(),
-            visibility_frontier_evidence: next_frontier,
-        });
-        state.bba_reanchor_frontier_evidence = None;
-        batch.reports.push(produced_report(
-            &self.canonical_rule_version,
-            scope,
-            if previous.is_some() {
-                ReductionOperationKindV1::Overwrite
-            } else {
-                ReductionOperationKindV1::Merge
-            },
-            "POLYMARKET_BBA_UPDATE",
-            None,
-            event.event_id.clone(),
-        )?);
-        batch.events.push(event);
-        Ok(())
-    }
-
-    fn apply_polymarket_tick(
-        &mut self,
-        asset_id: &str,
-        old_tick_size: Option<&str>,
-        new_tick_size: &str,
-        input: &PolymarketOrderbookInputV1,
-        batch: &mut PolymarketReductionBatch,
-    ) -> Result<(), ContractError> {
-        let old_tick = old_tick_size
-            .map(|value| typed_raw::normalize_decimal_text(value, "old_tick_size"))
-            .transpose()
-            .map_err(typed_raw_contract_error)?;
-        let new_tick = typed_raw::normalize_decimal_text(new_tick_size, "new_tick_size")
-            .map_err(typed_raw_contract_error)?;
-        let state = self
-            .assets
-            .get_mut(asset_id)
-            .ok_or_else(|| invalid("asset_id", "is not part of the registered market"))?;
-        let scope = polymarket_asset_scope(&self.market, &state.context.asset);
-        if new_tick == state.tick_size {
-            let mut evidence = state.tick_direct_evidence.clone();
-            evidence.push(state.tick_visibility_frontier_evidence.clone());
-            evidence.push(input.evidence.clone());
-            batch.reports.push(non_event_report(
-                &self.canonical_rule_version,
-                scope,
-                ReductionOperationKindV1::Confirm,
-                "POLYMARKET_TICK_CONFIRMATION",
-                evidence,
-                true,
-            )?);
-            return Ok(());
-        }
-        if old_tick
-            .as_ref()
-            .is_some_and(|declared| declared != &state.tick_size)
-        {
-            return Err(invalid(
-                "old_tick_size",
-                "does not match the current asset tick",
-            ));
-        }
-        let mut evidence = self.identity_source_evidence.clone();
-        evidence.extend(state.tick_direct_evidence.clone());
-        evidence.push(state.tick_visibility_frontier_evidence.clone());
-        evidence.push(input.evidence.clone());
-        let next_frontier = visibility_frontier_evidence(evidence.clone())?;
-        let event = finalize_execution_event(
-            self.market.clone(),
-            &self.canonical_rule_version,
-            evidence,
-            fresh_quality(ResyncQuality::NotRequired),
-            ExecutionMarketEventPayloadV3::TickSizeChange(TickSizeChangeV2 {
-                asset: state.context.asset.clone(),
-                old_tick_size_pusd_per_share: old_tick,
-                new_tick_size_pusd_per_share: new_tick.clone(),
-            }),
-        )?;
-        state.tick_size = new_tick;
-        state.tick_direct_evidence = vec![input.evidence.clone()];
-        state.tick_visibility_frontier_evidence = next_frontier;
-        batch.reports.push(produced_report(
-            &self.canonical_rule_version,
-            scope,
-            ReductionOperationKindV1::Overwrite,
-            "POLYMARKET_TICK_UPDATE",
-            None,
-            event.event_id.clone(),
-        )?);
-        batch.events.push(event);
-        Ok(())
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn apply_polymarket_trade(
-        &mut self,
-        asset_id: &str,
-        price: &str,
-        size: Option<&str>,
-        side: Option<PolymarketSide>,
-        fee_rate_bps: Option<&str>,
-        input: &PolymarketOrderbookInputV1,
-        batch: &mut PolymarketReductionBatch,
-    ) -> Result<(), ContractError> {
-        let state = self
-            .assets
-            .get(asset_id)
-            .ok_or_else(|| invalid("asset_id", "is not part of the registered market"))?;
-        let (Some(size), Some(side)) = (size, side) else {
-            batch.reports.push(non_event_report(
-                &self.canonical_rule_version,
-                polymarket_asset_scope(&self.market, &state.context.asset),
-                ReductionOperationKindV1::Reject,
-                "POLYMARKET_PUBLIC_TRADE_INCOMPLETE",
-                vec![input.evidence.clone()],
-                false,
-            )?);
-            return Ok(());
-        };
-        let aggressor_side = match side {
-            PolymarketSide::Buy => TradeSide::Buy,
-            PolymarketSide::Sell => TradeSide::Sell,
-            PolymarketSide::Unknown => {
-                batch.reports.push(non_event_report(
+                PmStepChangeV1::BookReady { asset } => {
+                    self.assets
+                        .get_mut(&asset.token_id.0)
+                        .expect("resolved asset")
+                        .book_ready = true;
+                    None
+                }
+                PmStepChangeV1::BestBidAsk { quote, evidence } => {
+                    let state = self
+                        .assets
+                        .get_mut(&quote.asset.token_id.0)
+                        .expect("resolved asset");
+                    state.bba = Some(PolymarketBbaState {
+                        best_bid: quote.best_bid_pusd_per_share.clone(),
+                        best_ask: quote.best_ask_pusd_per_share.clone(),
+                        direct_evidence: evidence.direct,
+                        visibility_frontier_evidence: evidence.frontier,
+                    });
+                    state.bba_reanchor_frontier_evidence = None;
+                    Some(ExecutionMarketEventPayloadV3::BestBidAsk(quote))
+                }
+                PmStepChangeV1::Tick { tick, evidence } => {
+                    let state = self
+                        .assets
+                        .get_mut(&tick.asset.token_id.0)
+                        .expect("resolved asset");
+                    state.tick_size = tick.new_tick_size_pusd_per_share.clone();
+                    state.tick_direct_evidence = vec![evidence.direct];
+                    state.tick_visibility_frontier_evidence = evidence.frontier;
+                    Some(ExecutionMarketEventPayloadV3::TickSizeChange(tick))
+                }
+                PmStepChangeV1::PublicTrade { trade } => {
+                    Some(ExecutionMarketEventPayloadV3::PublicTrade(trade))
+                }
+                PmStepChangeV1::Quality { boundary } => {
+                    Some(ExecutionMarketEventPayloadV3::QualityBoundary(boundary))
+                }
+                PmStepChangeV1::ResetAsset {
+                    asset,
+                    absence_baseline,
+                    bba_reanchor_frontier,
+                } => {
+                    let state = self
+                        .assets
+                        .get_mut(&asset.token_id.0)
+                        .expect("resolved asset");
+                    state.book_ready = false;
+                    state.bids.clear();
+                    state.asks.clear();
+                    state.bid_absences.clear();
+                    state.ask_absences.clear();
+                    state.bba = None;
+                    state.l2_absence_baseline =
+                        absence_baseline.map(|value| PolymarketAbsenceState {
+                            direct_evidence: value.direct,
+                            visibility_frontier_evidence: value.frontier,
+                        });
+                    state.bba_reanchor_frontier_evidence = bba_reanchor_frontier;
+                    None
+                }
+                PmStepChangeV1::Epoch { .. }
+                | PmStepChangeV1::Selection { .. }
+                | PmStepChangeV1::PublicConfirmation { .. } => None,
+            };
+            if let Some(payload) = payload {
+                let event = finalize_execution_event(
+                    self.market.clone(),
                     &self.canonical_rule_version,
-                    polymarket_asset_scope(&self.market, &state.context.asset),
-                    ReductionOperationKindV1::Reject,
-                    "POLYMARKET_PUBLIC_TRADE_UNKNOWN_SIDE",
-                    vec![input.evidence.clone()],
-                    false,
-                )?);
-                return Ok(());
+                    step.dependencies,
+                    step.quality,
+                    payload,
+                )?;
+                event_ids.insert(step.derived_id.0, event.event_id.clone());
+                batch.events.push(event);
             }
-        };
-        let price = typed_raw::normalize_decimal_text(price, "last_trade_price.price")
-            .map_err(typed_raw_contract_error)?;
-        let quantity = typed_raw::normalize_decimal_text(size, "last_trade_price.size")
-            .map_err(typed_raw_contract_error)?;
-        if parse_canonical_decimal(&quantity, "last_trade_price.size")?.is_zero() {
-            return Err(invalid(
-                "last_trade_price.size",
-                "a public trade quantity must be positive",
-            ));
         }
-        let fee_rate_bps = fee_rate_bps
-            .map(|value| typed_raw::normalize_decimal_text(value, "fee_rate_bps"))
-            .transpose()
-            .map_err(typed_raw_contract_error)?;
-        let trade_id =
-            polymarket_source_derived_id(POLYMARKET_PUBLIC_TRADE_ID_DOMAIN_V1, &input.evidence)?;
-        let mut evidence = self.identity_source_evidence.clone();
-        evidence.push(input.evidence.clone());
-        let event = finalize_execution_event(
-            self.market.clone(),
-            &self.canonical_rule_version,
-            evidence,
-            fresh_quality(ResyncQuality::NotRequired),
-            ExecutionMarketEventPayloadV3::PublicTrade(PublicTradeV2 {
-                asset: state.context.asset.clone(),
-                trade_id: trade_id.0,
-                trade_id_source: PublicTradeIdSourceV1::DerivedSourceEvidence,
-                price_pusd_per_share: price,
-                quantity_shares: quantity,
-                aggressor_side,
-                fee_rate_bps,
-            }),
-        )?;
-        batch.reports.push(produced_report(
-            &self.canonical_rule_version,
-            polymarket_asset_scope(&self.market, &state.context.asset),
-            ReductionOperationKindV1::Merge,
-            "POLYMARKET_PUBLIC_TRADE_ACCEPTED",
-            None,
-            event.event_id.clone(),
-        )?);
-        batch.events.push(event);
+        for report in reduction.reports {
+            batch.reports.push(match report.disposition {
+                PmReductionDispositionV2::Produced { derived_id } => produced_report(
+                    &self.canonical_rule_version,
+                    report.scope,
+                    report.operation,
+                    &report.reason_code,
+                    report.quantity_conservation,
+                    event_ids
+                        .remove(&derived_id.0)
+                        .expect("produced report points to its execution step"),
+                )?,
+                PmReductionDispositionV2::NoOutput { operation_evidence } => non_event_report(
+                    &self.canonical_rule_version,
+                    report.scope,
+                    report.operation,
+                    &report.reason_code,
+                    operation_evidence
+                        .into_iter()
+                        .map(|value| value.source_evidence)
+                        .collect(),
+                    false,
+                )?,
+                PmReductionDispositionV2::Suppressed { operation_evidence } => non_event_report(
+                    &self.canonical_rule_version,
+                    report.scope,
+                    report.operation,
+                    &report.reason_code,
+                    operation_evidence
+                        .into_iter()
+                        .map(|value| value.source_evidence)
+                        .collect(),
+                    true,
+                )?,
+            });
+        }
         Ok(())
+    }
+}
+
+impl crate::pm_reduction::PmStateReadV1<SourceEvidenceRefV2> for PolymarketReducer {
+    fn market(&self) -> &MarketIdentityV2 {
+        &self.market
+    }
+    fn current_epoch(&self) -> Option<&str> {
+        self.current_epoch.as_deref()
+    }
+    fn asset_state(
+        &self,
+        token: &str,
+    ) -> Option<crate::pm_reduction::PmAssetReadV1<'_, SourceEvidenceRefV2>> {
+        use crate::pm_reduction::*;
+        let state = self.assets.get(token)?;
+        Some(PmAssetReadV1 {
+            has_initial_snapshot: state.has_initial_snapshot,
+            book_ready: state.book_ready,
+            tick_size: &state.tick_size,
+            tick_direct_evidence: &state.tick_direct_evidence,
+            tick_frontier: &state.tick_visibility_frontier_evidence,
+            absence_baseline: state
+                .l2_absence_baseline
+                .as_ref()
+                .map(|value| PmEvidenceReadV1 {
+                    direct: &value.direct_evidence,
+                    frontier: &value.visibility_frontier_evidence,
+                }),
+            selection_baseline: None,
+            bba: state.bba.as_ref().map(|value| PmBbaReadV1 {
+                best_bid: &value.best_bid,
+                best_ask: &value.best_ask,
+                evidence: PmEvidenceReadV1 {
+                    direct: &value.direct_evidence,
+                    frontier: &value.visibility_frontier_evidence,
+                },
+            }),
+            bba_reanchor_frontier: state.bba_reanchor_frontier_evidence.as_ref(),
+        })
+    }
+    fn quantity(&self, token: &str, side: BookSide, price: Decimal) -> Decimal {
+        self.assets
+            .get(token)
+            .and_then(|state| {
+                match side {
+                    BookSide::Bid => &state.bids,
+                    BookSide::Ask => &state.asks,
+                }
+                .get(&price)
+            })
+            .map(|value| {
+                parse_canonical_decimal(&value.quantity, "quantity")
+                    .expect("retained canonical quantity")
+            })
+            .unwrap_or(Decimal::ZERO)
+    }
+    fn level_evidence(
+        &self,
+        token: &str,
+        side: BookSide,
+        price: Decimal,
+    ) -> Option<crate::pm_reduction::PmEvidenceReadV1<'_, SourceEvidenceRefV2>> {
+        let state = self.assets.get(token)?;
+        let value = match side {
+            BookSide::Bid => &state.bids,
+            BookSide::Ask => &state.asks,
+        }
+        .get(&price)?;
+        Some(crate::pm_reduction::PmEvidenceReadV1 {
+            direct: &value.direct_evidence,
+            frontier: &value.visibility_frontier_evidence,
+        })
+    }
+    fn absence_evidence(
+        &self,
+        token: &str,
+        side: BookSide,
+        price: Decimal,
+    ) -> Option<crate::pm_reduction::PmEvidenceReadV1<'_, SourceEvidenceRefV2>> {
+        let state = self.assets.get(token)?;
+        let value = match side {
+            BookSide::Bid => &state.bid_absences,
+            BookSide::Ask => &state.ask_absences,
+        }
+        .get(&price)?;
+        Some(crate::pm_reduction::PmEvidenceReadV1 {
+            direct: &value.direct_evidence,
+            frontier: &value.visibility_frontier_evidence,
+        })
+    }
+    fn selected_level(
+        &self,
+        _: &str,
+        _: BookSide,
+        _: Decimal,
+    ) -> Option<&crate::pm_reduction::PmSelectedLevelV1<SourceEvidenceRefV2>> {
+        None
+    }
+    fn level_keys<'a>(
+        &'a self,
+        token: &'a str,
+        side: BookSide,
+    ) -> Box<dyn Iterator<Item = Decimal> + 'a> {
+        match self.assets.get(token) {
+            Some(state) => {
+                let (levels, absences) = match side {
+                    BookSide::Bid => (&state.bids, &state.bid_absences),
+                    BookSide::Ask => (&state.asks, &state.ask_absences),
+                };
+                Box::new(levels.keys().chain(absences.keys()).copied())
+            }
+            None => Box::new(std::iter::empty()),
+        }
     }
 }
 
@@ -3551,7 +3162,7 @@ fn gamma_terminal_conflict_reason(
     Ok(None)
 }
 
-fn same_decimal_id_set<'a>(
+pub(crate) fn same_decimal_id_set<'a>(
     left: impl Iterator<Item = &'a str>,
     right: impl Iterator<Item = &'a str>,
 ) -> bool {
@@ -3574,51 +3185,6 @@ fn polymarket_sort_key(row: &PolymarketOrderbookRow) -> (i64, u64) {
     )
 }
 
-fn polymarket_level_map(
-    levels: &[PolymarketPriceLevel],
-    evidence: &SourceEvidenceRefV2,
-    field: &str,
-) -> Result<BTreeMap<Decimal, PolymarketLevelState>, ContractError> {
-    let mut mapped = BTreeMap::new();
-    for (index, level) in levels.iter().enumerate() {
-        let price =
-            typed_raw::normalize_decimal_text(&level.price, &format!("{field}[{index}].price"))
-                .map_err(typed_raw_contract_error)?;
-        let quantity =
-            typed_raw::normalize_decimal_text(&level.size, &format!("{field}[{index}].size"))
-                .map_err(typed_raw_contract_error)?;
-        let key = parse_canonical_decimal(&price, &format!("{field}[{index}].price"))?;
-        if mapped
-            .insert(
-                key,
-                PolymarketLevelState {
-                    price,
-                    quantity,
-                    direct_evidence: evidence.clone(),
-                    visibility_frontier_evidence: evidence.clone(),
-                },
-            )
-            .is_some()
-        {
-            return Err(invalid(field, "contains a duplicate price level"));
-        }
-    }
-    Ok(mapped)
-}
-
-fn same_polymarket_levels(
-    left: &BTreeMap<Decimal, PolymarketLevelState>,
-    right: &BTreeMap<Decimal, PolymarketLevelState>,
-) -> bool {
-    left.len() == right.len()
-        && left
-            .iter()
-            .zip(right)
-            .all(|((left_price, left), (right_price, right))| {
-                left_price == right_price && left.quantity == right.quantity
-            })
-}
-
 fn polymarket_levels(
     levels: &BTreeMap<Decimal, PolymarketLevelState>,
     descending: bool,
@@ -3634,261 +3200,6 @@ fn polymarket_levels(
     }
 }
 
-#[derive(Serialize)]
-struct PolymarketBookDigestMaterialV1<'a> {
-    asset: &'a AssetIdentityV1,
-    bids: Vec<PriceLevelV1>,
-    asks: Vec<PriceLevelV1>,
-}
-
-fn polymarket_book_digest(
-    asset: &AssetIdentityV1,
-    bids: &BTreeMap<Decimal, PolymarketLevelState>,
-    asks: &BTreeMap<Decimal, PolymarketLevelState>,
-) -> Result<Sha256Hex, ContractError> {
-    let material = PolymarketBookDigestMaterialV1 {
-        asset,
-        bids: polymarket_levels(bids, true),
-        asks: polymarket_levels(asks, false),
-    };
-    Ok(hash_domain_bytes(
-        POLYMARKET_BOOK_DIGEST_DOMAIN_V1,
-        &stable_json(&material)?,
-    ))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn reconcile_polymarket_book_side(
-    market: &MarketIdentityV2,
-    canonical_rule_version: &str,
-    identity_source_evidence: &[SourceEvidenceRefV2],
-    asset: &AssetIdentityV1,
-    side: BookSide,
-    previous: &BTreeMap<Decimal, PolymarketLevelState>,
-    mut current: BTreeMap<Decimal, PolymarketLevelState>,
-    absences: &mut BTreeMap<Decimal, PolymarketAbsenceState>,
-    absence_baseline: &PolymarketAbsenceState,
-    input: &PolymarketOrderbookInputV1,
-    batch: &mut PolymarketReductionBatch,
-) -> Result<BTreeMap<Decimal, PolymarketLevelState>, ContractError> {
-    let mut keys = previous
-        .keys()
-        .chain(current.keys())
-        .copied()
-        .collect::<Vec<_>>();
-    keys.sort();
-    keys.dedup();
-    if side == BookSide::Bid {
-        keys.reverse();
-    }
-    for key in keys {
-        let before_state = previous.get(&key);
-        let after_state = current.get(&key);
-        let before = before_state
-            .map(|level| parse_canonical_decimal(&level.quantity, "quantity_before"))
-            .transpose()?
-            .unwrap_or(Decimal::ZERO);
-        let after = after_state
-            .map(|level| parse_canonical_decimal(&level.quantity, "quantity_after"))
-            .transpose()?
-            .unwrap_or(Decimal::ZERO);
-        let price = after_state
-            .or(before_state)
-            .expect("union key belongs to at least one book")
-            .price
-            .clone();
-        let predecessor = before_state
-            .map(|level| PolymarketAbsenceState {
-                direct_evidence: level.direct_evidence.clone(),
-                visibility_frontier_evidence: level.visibility_frontier_evidence.clone(),
-            })
-            .or_else(|| absences.get(&key).cloned())
-            .unwrap_or_else(|| absence_baseline.clone());
-        let mut evidence = identity_source_evidence.to_vec();
-        evidence.push(input.evidence.clone());
-        evidence.push(predecessor.direct_evidence);
-        evidence.push(predecessor.visibility_frontier_evidence);
-        let next_frontier = visibility_frontier_evidence(evidence.clone())?;
-        if before == after {
-            if let Some(previous) = before_state {
-                current.insert(key, previous.clone());
-            }
-            continue;
-        }
-        let event = polymarket_level_transition_event(
-            market,
-            canonical_rule_version,
-            asset,
-            side,
-            price.clone(),
-            before,
-            after,
-            LevelExecutionBasis::BookResyncDeltaInference,
-            ResyncQuality::ResyncBoundary,
-            &input.evidence,
-            evidence,
-        )?;
-        let operation = if after.is_zero() {
-            ReductionOperationKindV1::Delete
-        } else if before.is_zero() {
-            ReductionOperationKindV1::Merge
-        } else {
-            ReductionOperationKindV1::Overwrite
-        };
-        batch.reports.push(produced_report(
-            canonical_rule_version,
-            polymarket_level_scope(market, asset, side, &price),
-            operation,
-            "POLYMARKET_BOOK_RESYNC_DELTA",
-            Some(level_quantity_summary(before, after)),
-            event.event_id.clone(),
-        )?);
-        batch.events.push(event);
-        if after.is_zero() {
-            current.remove(&key);
-            absences.insert(
-                key,
-                PolymarketAbsenceState {
-                    direct_evidence: input.evidence.clone(),
-                    visibility_frontier_evidence: next_frontier,
-                },
-            );
-        } else {
-            absences.remove(&key);
-            let current_level = current
-                .get_mut(&key)
-                .expect("non-zero incoming book level must remain present");
-            current_level.visibility_frontier_evidence = next_frontier;
-        }
-    }
-    Ok(current)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn polymarket_level_transition_event(
-    market: &MarketIdentityV2,
-    canonical_rule_version: &str,
-    asset: &AssetIdentityV1,
-    side: BookSide,
-    price: ExactDecimal,
-    before: Decimal,
-    after: Decimal,
-    basis: LevelExecutionBasis,
-    resync: ResyncQuality,
-    trigger_evidence: &SourceEvidenceRefV2,
-    evidence: Vec<SourceEvidenceRefV2>,
-) -> Result<ExecutionMarketEventV3, ContractError> {
-    let evidence = canonicalize_source_evidence(evidence)?;
-    let time = event_time_from_evidence(&evidence);
-    let source_time = time.source_event_at_utc_ms.ok_or_else(|| {
-        invalid(
-            "source_event_at_utc_ms",
-            "Polymarket level transition requires platform source time",
-        )
-    })?;
-    let (added, reduced) = match after.cmp(&before) {
-        Ordering::Greater => (after - before, Decimal::ZERO),
-        Ordering::Less => (Decimal::ZERO, before - after),
-        Ordering::Equal => (Decimal::ZERO, Decimal::ZERO),
-    };
-    let causal_group_id =
-        polymarket_source_derived_id(POLYMARKET_CAUSAL_GROUP_DOMAIN_V1, trigger_evidence)?;
-    finalize_execution_event(
-        market.clone(),
-        canonical_rule_version,
-        evidence,
-        fresh_quality(resync),
-        ExecutionMarketEventPayloadV3::LevelExecutionTransition(LevelExecutionTransitionV3 {
-            causal_group_id,
-            market: market.clone(),
-            asset: asset.clone(),
-            side,
-            price_pusd_per_share: price,
-            quantity_before_shares: exact_from_decimal(before),
-            quantity_after_shares: exact_from_decimal(after),
-            attributed_trade_quantity_shares: ExactDecimal("0".to_owned()),
-            already_covered_quantity_shares: ExactDecimal("0".to_owned()),
-            net_added_quantity_shares: exact_from_decimal(added),
-            net_reduced_quantity_shares: exact_from_decimal(reduced),
-            queue_consumption_quantity_shares: exact_from_decimal(reduced),
-            basis,
-            platform_effective_at_utc_ms: source_time,
-            visible_at_utc_ms: time.received_at_utc_ms,
-            source_attribution_quality: SourceAttributionQuality::Unattributed,
-            queue_result_quality: QueueResultQuality::DeterministicInferred,
-        }),
-    )
-}
-
-fn level_quantity_summary(before: Decimal, after: Decimal) -> QuantityConservationV1 {
-    let (added, reduced) = match after.cmp(&before) {
-        Ordering::Greater => (after - before, Decimal::ZERO),
-        Ordering::Less => (Decimal::ZERO, before - after),
-        Ordering::Equal => (Decimal::ZERO, Decimal::ZERO),
-    };
-    QuantityConservationV1 {
-        quantity_before: exact_from_decimal(before),
-        quantity_after: exact_from_decimal(after),
-        quantity_added: exact_from_decimal(added),
-        quantity_reduced: exact_from_decimal(reduced),
-    }
-}
-
-fn polymarket_source_derived_id(
-    domain: &[u8],
-    evidence: &SourceEvidenceRefV2,
-) -> Result<Sha256Hex, ContractError> {
-    Ok(hash_domain_bytes(
-        domain,
-        &stable_json(&semantic_source_evidence(evidence))?,
-    ))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn append_polymarket_quality_boundary(
-    market: &MarketIdentityV2,
-    canonical_rule_version: &str,
-    identity_source_evidence: &[SourceEvidenceRefV2],
-    asset: &AssetIdentityV1,
-    previous_quality: MarketDataQuality,
-    current_quality: MarketDataQuality,
-    resync: ResyncQuality,
-    reason_code: &str,
-    operation: ReductionOperationKindV1,
-    trigger_evidence: &SourceEvidenceRefV2,
-    causal_frontier_evidence: &[SourceEvidenceRefV2],
-    batch: &mut PolymarketReductionBatch,
-) -> Result<(), ContractError> {
-    let mut evidence = identity_source_evidence.to_vec();
-    evidence.extend_from_slice(causal_frontier_evidence);
-    evidence.push(trigger_evidence.clone());
-    let event = finalize_execution_event(
-        market.clone(),
-        canonical_rule_version,
-        evidence,
-        EventQualityV2 {
-            availability: current_quality,
-            resync,
-        },
-        ExecutionMarketEventPayloadV3::QualityBoundary(QualityBoundaryV2 {
-            scope: QualityScopeV1::Asset(asset.clone()),
-            previous_quality,
-            current_quality,
-            reason_code: reason_code.to_owned(),
-        }),
-    )?;
-    batch.reports.push(produced_report(
-        canonical_rule_version,
-        polymarket_asset_scope(market, asset),
-        operation,
-        reason_code,
-        None,
-        event.event_id.clone(),
-    )?);
-    batch.events.push(event);
-    Ok(())
-}
-
 fn fresh_quality(resync: ResyncQuality) -> EventQualityV2 {
     EventQualityV2 {
         availability: MarketDataQuality::Fresh,
@@ -3900,28 +3211,5 @@ fn polymarket_message_scope(row: &PolymarketOrderbookRow) -> String {
     format!(
         "polymarket_message:{}:{}:{}",
         row.market, row.source_sequence_epoch_id, row.collector_admission_sequence
-    )
-}
-
-fn polymarket_asset_scope(market: &MarketIdentityV2, asset: &AssetIdentityV1) -> String {
-    format!(
-        "polymarket_asset:{}:{}",
-        market.condition_id.0, asset.token_id.0
-    )
-}
-
-fn polymarket_level_scope(
-    market: &MarketIdentityV2,
-    asset: &AssetIdentityV1,
-    side: BookSide,
-    price: &ExactDecimal,
-) -> String {
-    let side = match side {
-        BookSide::Bid => "BID",
-        BookSide::Ask => "ASK",
-    };
-    format!(
-        "polymarket_level:{}:{}:{side}:{}",
-        market.condition_id.0, asset.token_id.0, price.0
     )
 }
