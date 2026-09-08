@@ -1199,6 +1199,9 @@ impl<'a, 'm, E: PmEvidenceV1, S: PmStateReadV1<E>> Worker<'a, 'm, E, S> {
                 fresh(ResyncQuality::ResyncBoundary),
             )?;
             state.absence_baseline = Some(next);
+        } else {
+            // 空全簿没有逐价位比较，也须沿缺价版本取消较旧确认。
+            identical = false;
         }
         if recovering || !self.public_selection {
             self.step(

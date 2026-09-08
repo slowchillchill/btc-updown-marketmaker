@@ -4,7 +4,7 @@ use data_pipeline_core::pm_reduction::*;
 use data_pipeline_core::public_reference::source_evidence_v3_from_existing;
 use data_pipeline_core::reduction::{
     PolymarketAssetContextV1, PolymarketMarketContextV1, PolymarketOrderbookInputV1,
-    PolymarketReducer,
+    PolymarketReducer, ReductionOperationKindV1,
 };
 use data_pipeline_core::source_evidence_from_typed_raw;
 use data_pipeline_core::typed_raw::{
@@ -720,6 +720,91 @@ fn wholly_older_full_book_does_not_emit_a_current_confirmation() {
     );
     assert!(result.reports.is_empty());
     assert_eq!(state.quantity("123", BookSide::Bid, d("0.5")), d("100"));
+}
+
+#[test]
+fn empty_full_book_confirmation_follows_the_selected_absence_version() {
+    let context = public_context();
+    let mut state = ReadState::new(context.clone());
+    let empty = || PolymarketOrderbookEvent::Book {
+        asset_id: "123".to_owned(),
+        bids: vec![],
+        asks: vec![],
+        last_trade_price: None,
+    };
+    let first_row = row("epoch-a", 1, 1_500, 1_600, empty());
+    first_row.validate().unwrap();
+    let first = message(&context, &first_row);
+    state.run(&first);
+    let original_absence = state.assets["123"].absence_baseline.clone();
+    let original_selection = state.assets["123"].selection_baseline.clone();
+
+    let older_row = row("epoch-a", 2, 1_200, 1_700, empty());
+    older_row.validate().unwrap();
+    let older = message(&context, &older_row);
+    let result = state.run(&older);
+    assert!(result.steps.is_empty());
+    assert!(
+        result.reports.is_empty(),
+        "没有价位键的较旧全簿也不能确认较新的缺价基准"
+    );
+    assert_eq!(state.assets["123"].absence_baseline, original_absence);
+    assert_eq!(state.assets["123"].selection_baseline, original_selection);
+
+    for (sequence, source_time, received_time) in [(3, 1_600, 1_800), (4, 1_600, 1_900)] {
+        let next_row = row("epoch-a", sequence, source_time, received_time, empty());
+        next_row.validate().unwrap();
+        let next = message(&context, &next_row);
+        let result = state.run(&next);
+        assert_eq!(result.reports.len(), 1);
+        assert_eq!(result.reports[0].operation, ReductionOperationKindV1::Confirm);
+        assert_eq!(
+            result.reports[0].reason_code,
+            "POLYMARKET_IDENTICAL_BOOK_CONFIRMATION"
+        );
+        assert_eq!(
+            state.assets["123"].absence_baseline.as_ref().unwrap().direct,
+            next.lineage.source_evidence[0]
+        );
+        assert_eq!(
+            state.assets["123"]
+                .selection_baseline
+                .as_ref()
+                .unwrap()
+                .confirmation,
+            next.lineage.source_evidence[0]
+        );
+    }
+}
+
+#[test]
+fn legacy_empty_full_book_keeps_its_confirmation() {
+    let mut reducer = PolymarketReducer::new(context(), "pm-shared-baseline-v1").unwrap();
+    for (sequence, source_time) in [(1, 1_500), (2, 1_600), (3, 1_600)] {
+        let empty = row(
+            "epoch-a",
+            sequence,
+            source_time,
+            1_600 + sequence as i64,
+            PolymarketOrderbookEvent::Book {
+                asset_id: "123".to_owned(),
+                bids: vec![],
+                asks: vec![],
+                last_trade_price: None,
+            },
+        );
+        empty.validate().unwrap();
+        let result = reducer.reduce_orderbook_group(vec![input(empty)]).unwrap();
+        if sequence > 1 {
+            assert!(result.events.is_empty());
+            assert_eq!(result.reports.len(), 1);
+            assert_eq!(result.reports[0].operation, ReductionOperationKindV1::Confirm);
+            assert_eq!(
+                result.reports[0].reason_code,
+                "POLYMARKET_IDENTICAL_BOOK_CONFIRMATION"
+            );
+        }
+    }
 }
 
 #[test]
