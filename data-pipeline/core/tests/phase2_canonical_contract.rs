@@ -696,6 +696,14 @@ fn typed_raw_source_evidence_uses_the_frozen_time_mappings() {
     ];
     for (row, source_time, received_time) in expected {
         let evidence = source_evidence_from_typed_raw(row, &sha('c'), &sha('d')).unwrap();
+        assert_eq!(
+            data_pipeline_core::public_reference::source_evidence_v3_from_typed_raw_v2(
+                &data_pipeline_core::public_input::TypedRawRowV2::Existing(row.clone()),
+            )
+            .unwrap(),
+            data_pipeline_core::public_reference::source_evidence_v3_from_existing(&evidence)
+                .unwrap(),
+        );
         assert_eq!(evidence.source_event_at_utc_ms, source_time);
         assert_eq!(evidence.received_at_utc_ms, received_time);
         assert!(

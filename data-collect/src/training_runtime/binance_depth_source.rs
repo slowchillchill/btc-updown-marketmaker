@@ -1221,7 +1221,7 @@ fn depth_controlled_cutoff_is_active(context: &BinanceDepthUpdateContext) -> boo
     context
         .sink
         .source_queue_backpressure
-        .raw_day_gate()
+        .admission_gate()
         .is_some_and(|gate| gate.unadmitted_runtime_cutoff_is_active())
 }
 

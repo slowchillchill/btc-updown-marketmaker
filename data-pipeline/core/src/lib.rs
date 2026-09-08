@@ -259,7 +259,33 @@ pub fn source_evidence_from_typed_raw(
         source_event_at_utc_ms,
         received_at_utc_ms,
         admission,
-    ) = match row {
+    ) = source_evidence_parts_from_typed_raw(row)?;
+
+    let evidence = SourceEvidenceRefV2 {
+        source_kind,
+        source_native_identity,
+        source_event_at_utc_ms,
+        received_at_utc_ms,
+        collector_admission: admission,
+        input_manifest_sha256: input_manifest_sha256.clone(),
+        input_file_sha256: input_file_sha256.clone(),
+    };
+    validate_source_evidence(std::slice::from_ref(&evidence))?;
+    Ok(evidence)
+}
+
+type TypedSourceEvidenceParts = (
+    CanonicalSourceKind,
+    Option<SourceNativeIdentityV1>,
+    Option<i64>,
+    i64,
+    Option<CollectorAdmissionCoordinateV1>,
+);
+
+fn source_evidence_parts_from_typed_raw(
+    row: &typed_raw::TypedRawRow,
+) -> Result<TypedSourceEvidenceParts, ContractError> {
+    Ok(match row {
         typed_raw::TypedRawRow::PolymarketOrderbook(row) => (
             CanonicalSourceKind::PolymarketOrderbook,
             None,
@@ -271,18 +297,9 @@ pub fn source_evidence_from_typed_raw(
                 row.collector_admission_time_utc_ms,
             )),
         ),
-        typed_raw::TypedRawRow::PolymarketMarketMetadata(row) => (
-            CanonicalSourceKind::PolymarketMarketMetadata,
-            Some(metadata_semantic_identity(row)?),
-            match row.source_evidence_origin {
-                Some(typed_raw::MetadataSourceEvidenceOrigin::MarketResolvedWs) => {
-                    row.ws_platform_timestamp_utc
-                }
-                _ => None,
-            },
-            row.timestamp_received,
-            None,
-        ),
+        typed_raw::TypedRawRow::PolymarketMarketMetadata(row) => {
+            metadata_source_evidence_parts(row)?
+        }
         typed_raw::TypedRawRow::PolymarketRtdsChainlinkBtcUsd(row) => (
             CanonicalSourceKind::PolymarketRtdsChainlinkBtcUsd,
             Some(SourceNativeIdentityV1::SemanticEvidenceSha256 {
@@ -349,19 +366,24 @@ pub fn source_evidence_from_typed_raw(
                 )),
             )
         }
-    };
+    })
+}
 
-    let evidence = SourceEvidenceRefV2 {
-        source_kind,
-        source_native_identity,
-        source_event_at_utc_ms,
-        received_at_utc_ms,
-        collector_admission: admission,
-        input_manifest_sha256: input_manifest_sha256.clone(),
-        input_file_sha256: input_file_sha256.clone(),
-    };
-    validate_source_evidence(std::slice::from_ref(&evidence))?;
-    Ok(evidence)
+fn metadata_source_evidence_parts(
+    row: &typed_raw::PolymarketMarketMetadataRow,
+) -> Result<TypedSourceEvidenceParts, ContractError> {
+    Ok((
+        CanonicalSourceKind::PolymarketMarketMetadata,
+        Some(metadata_semantic_identity(row)?),
+        match row.source_evidence_origin {
+            Some(typed_raw::MetadataSourceEvidenceOrigin::MarketResolvedWs) => {
+                row.ws_platform_timestamp_utc
+            }
+            _ => None,
+        },
+        row.timestamp_received,
+        None,
+    ))
 }
 
 pub fn gate_a_capability_matrix_digest(
@@ -796,6 +818,54 @@ fn semantic_source_evidence(value: &SourceEvidenceRefV2) -> SemanticSourceEviden
     }
 }
 
+fn validate_semantic_source_evidence(
+    value: &SemanticSourceEvidence<'_>,
+    index: usize,
+) -> Result<(), ContractError> {
+    if value.source_event_at_utc_ms.is_some_and(|time| time <= 0) {
+        return Err(invalid(
+            format!("lineage.source_evidence[{index}].source_event_at_utc_ms"),
+            "must be positive when present",
+        ));
+    }
+    if value.source_kind == CanonicalSourceKind::PolymarketOrderbook
+        && value.source_event_at_utc_ms.is_none()
+    {
+        return Err(invalid(
+            format!("lineage.source_evidence[{index}].source_event_at_utc_ms"),
+            "Polymarket orderbook evidence requires source event time",
+        ));
+    }
+    if value.received_at_utc_ms <= 0 {
+        return Err(invalid(
+            format!("lineage.source_evidence[{index}].received_at_utc_ms"),
+            "must be positive",
+        ));
+    }
+    if let Some(admission) = &value.collector_admission {
+        let field = format!("lineage.source_evidence[{index}].collector_admission");
+        validate_collector_admission(admission, &field)?;
+        if value.received_at_utc_ms > admission.admitted_at_utc_ms {
+            return Err(invalid(
+                format!("lineage.source_evidence[{index}].received_at_utc_ms"),
+                "must not follow collector admission",
+            ));
+        }
+    }
+    if value.source_native_identity.is_none() && value.collector_admission.is_none() {
+        return Err(invalid(
+            format!("lineage.source_evidence[{index}]"),
+            "requires a source-native identity or complete collector admission coordinate",
+        ));
+    }
+    validate_source_native_identity(
+        value.source_kind,
+        &value.source_native_identity,
+        &format!("lineage.source_evidence[{index}].source_native_identity"),
+    )?;
+    Ok(())
+}
+
 fn validate_source_evidence(values: &[SourceEvidenceRefV2]) -> Result<(), ContractError> {
     if values.is_empty() {
         return Err(invalid(
@@ -805,47 +875,7 @@ fn validate_source_evidence(values: &[SourceEvidenceRefV2]) -> Result<(), Contra
     }
     let mut previous: Option<Vec<u8>> = None;
     for (index, value) in values.iter().enumerate() {
-        if value.source_event_at_utc_ms.is_some_and(|time| time <= 0) {
-            return Err(invalid(
-                format!("lineage.source_evidence[{index}].source_event_at_utc_ms"),
-                "must be positive when present",
-            ));
-        }
-        if value.source_kind == CanonicalSourceKind::PolymarketOrderbook
-            && value.source_event_at_utc_ms.is_none()
-        {
-            return Err(invalid(
-                format!("lineage.source_evidence[{index}].source_event_at_utc_ms"),
-                "Polymarket orderbook evidence requires source event time",
-            ));
-        }
-        if value.received_at_utc_ms <= 0 {
-            return Err(invalid(
-                format!("lineage.source_evidence[{index}].received_at_utc_ms"),
-                "must be positive",
-            ));
-        }
-        if let Some(admission) = &value.collector_admission {
-            let field = format!("lineage.source_evidence[{index}].collector_admission");
-            validate_collector_admission(admission, &field)?;
-            if value.received_at_utc_ms > admission.admitted_at_utc_ms {
-                return Err(invalid(
-                    format!("lineage.source_evidence[{index}].received_at_utc_ms"),
-                    "must not follow collector admission",
-                ));
-            }
-        }
-        if value.source_native_identity.is_none() && value.collector_admission.is_none() {
-            return Err(invalid(
-                format!("lineage.source_evidence[{index}]"),
-                "requires a source-native identity or complete collector admission coordinate",
-            ));
-        }
-        validate_source_native_identity(
-            value.source_kind,
-            &value.source_native_identity,
-            &format!("lineage.source_evidence[{index}].source_native_identity"),
-        )?;
+        validate_semantic_source_evidence(&semantic_source_evidence(value), index)?;
         decode_sha256(
             &value.input_manifest_sha256,
             &format!("lineage.source_evidence[{index}].input_manifest_sha256"),

@@ -15,7 +15,8 @@ use serde::Serialize;
 
 use crate::public_input::{
     HistoricalPriceAnchorRepairBatchInput, HttpResponseEvidenceV1, MarketAnchorOriginV1,
-    MarketAnchorQueryResultV1, MarketAnchorRuleUpdateInput, PolymarketRtdsChainlinkTwapInput,
+    MarketAnchorQueryResultV1, MarketAnchorRuleUpdateInput, PolymarketMarketMetadataV6Input,
+    PolymarketRtdsChainlinkTwapInput, TypedRawRowV2,
 };
 use crate::typed_raw::{RtdsFreshnessStatus, TypedRawError};
 use crate::{ContractError, hash_domain_bytes, stable_json};
@@ -300,6 +301,12 @@ pub fn canonicalize_chainlink_twap_v1(
 pub fn source_evidence_v3_from_existing(
     source: &SourceEvidenceRefV2,
 ) -> Result<SourceEvidenceRefV3, ContractError> {
+    source_evidence_v3_from_semantic(crate::semantic_source_evidence(source))
+}
+
+fn source_evidence_v3_from_semantic(
+    source: crate::SemanticSourceEvidence<'_>,
+) -> Result<SourceEvidenceRefV3, ContractError> {
     use contracts::CanonicalSourceKind as Old;
     let source_kind = match source.source_kind {
         Old::BinanceAggtrade => CanonicalSourceKindV2::BinanceAggtrade,
@@ -322,11 +329,54 @@ pub fn source_evidence_v3_from_existing(
             b"data-pipeline/source-message/v1\0",
             &stable_json(&identity)?,
         ),
-        source_native_identity: source.source_native_identity.clone(),
+        source_native_identity: (*source.source_native_identity).clone(),
         source_event_at_utc_ms: source.source_event_at_utc_ms,
         received_at_utc_ms: source.received_at_utc_ms,
-        collector_admission: source.collector_admission.clone(),
+        collector_admission: (*source.collector_admission).clone(),
     })
+}
+
+/// 只提取公共来源语义，不需要物理文件或清单，也不拥有 DPT 接纳位置。
+pub fn source_evidence_v3_from_typed_raw_v2(
+    row: &TypedRawRowV2,
+) -> Result<SourceEvidenceRefV3, ContractError> {
+    match row {
+        TypedRawRowV2::Existing(row) => existing_row_source_evidence_v3(row),
+        TypedRawRowV2::PolymarketMarketMetadataV6(row) => match row.as_ref() {
+            PolymarketMarketMetadataV6Input::Existing(row) => {
+                row.validate().map_err(crate::typed_raw_contract_error)?;
+                source_evidence_v3_from_parts(crate::metadata_source_evidence_parts(row)?)
+            }
+            PolymarketMarketMetadataV6Input::AnchorRule(row) => {
+                market_anchor_source_evidence_v3(row)
+            }
+        },
+        TypedRawRowV2::PolymarketRtdsChainlinkTwap(row) => twap_source_evidence_v3(row),
+        TypedRawRowV2::HistoricalPriceAnchorRepairBatch(batch) => {
+            historical_response_source_evidence_v3(&batch.response)
+        }
+    }
+}
+
+fn existing_row_source_evidence_v3(
+    row: &crate::typed_raw::TypedRawRow,
+) -> Result<SourceEvidenceRefV3, ContractError> {
+    row.validate().map_err(crate::typed_raw_contract_error)?;
+    source_evidence_v3_from_parts(crate::source_evidence_parts_from_typed_raw(row)?)
+}
+
+fn source_evidence_v3_from_parts(
+    (source_kind, native, source_time, received, admission): crate::TypedSourceEvidenceParts,
+) -> Result<SourceEvidenceRefV3, ContractError> {
+    let semantic = crate::SemanticSourceEvidence {
+        source_kind,
+        source_native_identity: &native,
+        source_event_at_utc_ms: source_time,
+        received_at_utc_ms: received,
+        collector_admission: &admission,
+    };
+    crate::validate_semantic_source_evidence(&semantic, 0)?;
+    source_evidence_v3_from_semantic(semantic)
 }
 
 pub fn historical_response_source_evidence_v3(

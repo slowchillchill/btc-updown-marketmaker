@@ -178,6 +178,9 @@ pub(super) async fn process_ingress_event(
             event
         }
         SourceIngressPayload::PolymarketOrderbookV3(event) => {
+            let raw_day_permit = event.raw_day_permit.as_ref().ok_or_else(|| {
+                invalid_data("production raw event missing day/generation permit")
+            })?;
             let Some(writer) = writers.get("polymarket_market") else {
                 return Err(invalid_data(
                     "Polymarket orderbook v3 ingress is missing the polymarket_market writer",
@@ -188,8 +191,8 @@ pub(super) async fn process_ingress_event(
                 return Err(invalid_data(format!(
                     "Polymarket orderbook v3 ingress reached a non-v3 writer:event_type={}:utc_day={}:generation={}",
                     event.message.event_type(),
-                    event.raw_day_permit.utc_day,
-                    event.raw_day_permit.generation,
+                    raw_day_permit.utc_day,
+                    raw_day_permit.generation,
                 ))
                 .into());
             }
@@ -197,7 +200,7 @@ pub(super) async fn process_ingress_event(
             let event_day = utc_day_string_from_ms(recv_time_utc_ms).ok_or_else(|| {
                 invalid_data("UTC day unavailable for inflight Polymarket v3 message")
             })?;
-            if event_day != event.raw_day_permit.utc_day || event.raw_day_permit.generation == 0 {
+            if event_day != raw_day_permit.utc_day || raw_day_permit.generation == 0 {
                 return Err(invalid_data(format!(
                     "inflight Polymarket v3 raw-day permit mismatch: event_day={event_day} permit={:?}",
                     event.raw_day_permit

@@ -428,7 +428,7 @@ async fn flush_deferred_polymarket_orderbook_v3(
     permit.send(SourceIngressPayload::PolymarketOrderbookV3(
         InflightPolymarketOrderbookV3 {
             message: event.message,
-            raw_day_permit,
+            raw_day_permit: Some(raw_day_permit),
             _source_recv_monotonic_ms: event._source_recv_monotonic_ms,
             _row_reservation: event._row_reservation,
             _byte_reservation: event._byte_reservation,

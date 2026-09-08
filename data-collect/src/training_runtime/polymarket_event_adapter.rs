@@ -930,17 +930,8 @@ pub(super) fn write_polymarket_metadata_event(
     logical_bytes: u64,
 ) -> Result<u64> {
     if writer.schema_version() == POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION {
-        let value: Value = serde_json::from_str(&event.raw_json)?;
-        let rows = if value["schema_version"] == POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION {
-            polymarket_metadata_v6_rows_from_event(event)?
-        } else {
-            polymarket_metadata_rows_from_event(event)?
-                .into_iter()
-                .map(PolymarketMarketMetadataV6Row::Existing)
-                .collect()
-        };
+        let rows = polymarket_metadata_v6_rows_for_event(event)?;
         let written = rows.len() as u64;
-        require_at_most_one_typed_row(event, written)?;
         writer.write_polymarket_market_metadata_v6_rows_with_logical_bytes(&rows, logical_bytes)?;
         return Ok(written);
     }
@@ -949,6 +940,22 @@ pub(super) fn write_polymarket_metadata_event(
     require_at_most_one_typed_row(event, written)?;
     writer.write_polymarket_market_metadata_v5_rows_with_logical_bytes(&rows, logical_bytes)?;
     Ok(written)
+}
+
+pub(super) fn polymarket_metadata_v6_rows_for_event(
+    event: &RawEvent,
+) -> Result<Vec<PolymarketMarketMetadataV6Row>> {
+    let value: Value = serde_json::from_str(&event.raw_json)?;
+    let rows = if value["schema_version"] == POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION {
+        polymarket_metadata_v6_rows_from_event(event)?
+    } else {
+        polymarket_metadata_rows_from_event(event)?
+            .into_iter()
+            .map(PolymarketMarketMetadataV6Row::Existing)
+            .collect()
+    };
+    require_at_most_one_typed_row(event, rows.len() as u64)?;
+    Ok(rows)
 }
 
 pub(super) fn polymarket_metadata_v6_raw_event(

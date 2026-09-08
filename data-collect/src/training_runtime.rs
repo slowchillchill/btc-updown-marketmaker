@@ -2,6 +2,8 @@ mod binance_aggtrade_source;
 mod binance_depth_source;
 mod dataset_capacity;
 mod dataset_root_lock;
+mod hot_input;
+mod hot_runtime;
 mod ingress_control_sender;
 mod ingress_deferred;
 mod ingress_owned_bytes;
@@ -20,6 +22,7 @@ mod runtime_ingress;
 mod runtime_rollover_driver;
 mod runtime_shutdown;
 mod runtime_time;
+mod source_admission;
 mod source_ingress_state;
 mod source_recovery;
 mod source_task_supervision;
@@ -32,6 +35,8 @@ use binance_aggtrade_source::*;
 use binance_depth_source::*;
 use dataset_capacity::*;
 use dataset_root_lock::*;
+use hot_input::*;
+pub(crate) use hot_runtime::run_hot_sources;
 use ingress_control_sender::*;
 use ingress_deferred::*;
 use ingress_owned_bytes::*;
@@ -55,6 +60,7 @@ use runtime_ingress::*;
 use runtime_rollover_driver::*;
 use runtime_shutdown::*;
 use runtime_time::*;
+use source_admission::*;
 use source_ingress_state::*;
 use source_recovery::*;
 use source_task_supervision::*;
@@ -1832,6 +1838,7 @@ mod tests {
     mod binance_depth_source;
     mod dataset_capacity;
     mod dataset_root_lock;
+    pub(super) mod hot_runtime;
     mod ingress_control_sender;
     mod ingress_deferred;
     mod manifest_owner;
@@ -3036,11 +3043,11 @@ mod tests {
                                 .fetch_add(1, Ordering::Relaxed);
                         }
                         for (topic, window_s) in [("crypto_prices_twap_thirty", 30), ("crypto_prices_twap_sixty", 60)] {
-                            socket.send(Message::Text(json!({
+                            if socket.send(Message::Text(json!({
                                 "topic":topic,"type":"update","timestamp":timestamp,
                                 "payload":{"symbol":"btc/usd","timestamp":timestamp,"value":65000.1,
                                     "full_accuracy_value":"65000100000000000000001","window_s":window_s}
-                            }).to_string().into())).await.unwrap();
+                            }).to_string().into())).await.is_err() { break; }
                         }
                     }
                     keep_text_heartbeat_loopback_alive(&mut socket).await;

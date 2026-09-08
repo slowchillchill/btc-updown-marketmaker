@@ -232,7 +232,7 @@ async fn enqueue_event_with_reservation_outcome(
     let recv_time_utc_ms = event.recv_time_utc_ms;
     let gate = sink
         .source_queue_backpressure
-        .raw_day_gate()
+        .admission_gate()
         .ok_or_else(|| {
             invalid_data(format!(
                 "raw-day gate missing from production enqueue path: source={source_kind}"
@@ -282,13 +282,13 @@ async fn enqueue_event_with_reservation_outcome(
         control: None,
         admission_gaps,
         raw_day_permit: match &raw_enqueue {
-            RawDayEnqueueDecision::Permit(enqueue) => Some(enqueue.permit.clone()),
-            RawDayEnqueueDecision::Defer(_) => None,
+            SourceEnqueueDecision::Permit(enqueue) => enqueue.raw_day_permit.clone(),
+            SourceEnqueueDecision::Defer(_) => None,
         },
         _source_recv_monotonic_ms: monotonic_ms(run_started),
         _reservation: Some(reservation),
     };
-    if let RawDayEnqueueDecision::Defer(epoch) = &raw_enqueue {
+    if let SourceEnqueueDecision::Defer(epoch) = &raw_enqueue {
         sink.source_queue_backpressure.defer_raw_batch(
             producer,
             epoch.clone(),

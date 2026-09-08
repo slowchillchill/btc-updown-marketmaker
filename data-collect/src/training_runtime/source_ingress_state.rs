@@ -105,7 +105,7 @@ pub(super) struct SourceQueueBackpressureStats {
     operational_counters: Mutex<BTreeMap<String, BTreeMap<String, SourceOperationalCounterDelta>>>,
     pub(super) active_recovery_sources: Mutex<BTreeSet<String>>,
     pub(super) deferred_ingress_batches: Mutex<BTreeMap<String, VecDeque<DeferredIngressBatch>>>,
-    raw_day_gate: OnceLock<Arc<RawDayGate>>,
+    admission_gate: OnceLock<SourceAdmissionGate>,
 }
 
 impl SourceQueueBackpressureStats {
@@ -152,13 +152,25 @@ impl SourceQueueBackpressureStats {
     }
 
     pub(super) fn install_raw_day_gate(&self, gate: Arc<RawDayGate>) -> Result<()> {
-        self.raw_day_gate
-            .set(gate)
+        self.admission_gate
+            .set(SourceAdmissionGate::Training(gate))
             .map_err(|_| invalid_data("raw-day gate already installed").into())
     }
 
     pub(super) fn raw_day_gate(&self) -> Option<Arc<RawDayGate>> {
-        self.raw_day_gate.get().cloned()
+        self.admission_gate
+            .get()
+            .and_then(SourceAdmissionGate::training)
+    }
+
+    pub(super) fn admission_gate(&self) -> Option<SourceAdmissionGate> {
+        self.admission_gate.get().cloned()
+    }
+
+    pub(super) fn install_hot_session(&self, gate: Arc<HotSessionGate>) -> Result<()> {
+        self.admission_gate
+            .set(SourceAdmissionGate::Hot(gate))
+            .map_err(|_| invalid_data("source admission gate already installed").into())
     }
 
     pub(super) fn defer_raw_batch(
@@ -371,7 +383,7 @@ pub(super) struct InflightRawEvent {
 
 pub(super) struct InflightPolymarketOrderbookV3 {
     pub(super) message: PolymarketOrderbookV3Message,
-    pub(super) raw_day_permit: RawDayPermit,
+    pub(super) raw_day_permit: Option<RawDayPermit>,
     pub(super) _source_recv_monotonic_ms: u64,
     pub(super) _row_reservation: InflightReservation,
     pub(super) _byte_reservation: InflightReservation,

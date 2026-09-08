@@ -123,6 +123,100 @@ async fn anchor_http_fixture(
 }
 
 #[tokio::test]
+async fn hot_anchor_started_before_cutoff_keeps_actual_response_after_cutoff() {
+    let discovery = anchor_discovery_now();
+    let market = discovery.current.clone();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let gamma = GammaClient::new(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+    let (requested_tx, requested_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let body = format!(
+        r#"{{"id":"event","slug":"{}","eventMetadata":{{"priceToBeat":6.49500142185114400000001e4}},"markets":[{}]}}"#,
+        market.slug,
+        market.raw_json.as_ref().unwrap()
+    );
+    let expected_body = body.clone();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let request = read_loopback_http_request(&mut stream).await.unwrap();
+        assert!(request.starts_with(&format!("GET /events/slug/{}", market.slug)));
+        requested_tx.send(()).unwrap();
+        release_rx.await.unwrap();
+        write_loopback_http_response(&mut stream, "200 OK", &body).await;
+    });
+    let gate = Arc::new(HotSessionGate::new(
+        Instant::now() + Duration::from_secs(60),
+    ));
+    let stats = Arc::new(SourceQueueBackpressureStats::default());
+    stats.install_hot_session(Arc::clone(&gate)).unwrap();
+    let (tx, mut rx) = mpsc::channel(8);
+    let sink = SourceEventSink {
+        tx,
+        gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+        source_queue_backpressure: stats,
+        inflight_budget: InflightBudget::new(),
+        enqueue_lock: Arc::new(AsyncMutex::new(())),
+    };
+    let collector = CollectorIdentity {
+        host_id: "hot-anchor-test".to_owned(),
+        region: "local-test".to_owned(),
+    };
+    let mut context = PolymarketProcessingContext::new(discovery);
+    spawn_due_market_anchor_requests(
+        &gamma,
+        &mut context,
+        &sink,
+        &collector,
+        &Arc::new(production_polymarket_timeline_now),
+    )
+    .unwrap();
+    requested_rx.await.unwrap();
+    gate.stop(RuntimeCloseCause::RunDeadline);
+    let cutoff_at = now_ms();
+    context.current.as_mut().unwrap().slug = "btc-updown-5m-later-context".to_owned();
+    release_tx.send(()).unwrap();
+    let completion = context
+        .market_anchor
+        .tasks
+        .join_next()
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        completion.raw_day_ticket,
+        RawDayTicketAcceptance::Accepted(RawDayAcceptedTicket::HotSession)
+    ));
+    let received = completion.row.timestamp_received;
+    assert!(received >= cutoff_at);
+    assert_eq!(
+        completion.row.observation.http_body.as_deref(),
+        Some(expected_body.as_str())
+    );
+    record_market_anchor_completion(completion, &mut context, &sink, Instant::now())
+        .await
+        .unwrap();
+    let payload = rx.recv().await.unwrap().into_raw();
+    assert!(payload.raw_day_permit.is_none());
+    let data_pipeline_core::public_input::TypedRawRowV2::PolymarketMarketMetadataV6(row) =
+        raw_event_to_public_input(&payload.event).unwrap().unwrap()
+    else {
+        panic!("metadata V6");
+    };
+    let data_pipeline_core::public_input::PolymarketMarketMetadataV6Input::AnchorRule(row) = *row
+    else {
+        panic!("anchor row");
+    };
+    assert_eq!(row.timestamp_received, received);
+    assert_eq!(
+        row.price_to_beat_decimal.as_deref(),
+        Some("6.49500142185114400000001e4")
+    );
+    assert!(row.collector_admission_sequence > 0);
+    assert!(!row.slug.contains("later-context"));
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn anchor_worker_has_single_request_and_keeps_late_response_identity() {
     let discovery = anchor_discovery_now();
     let original_slug = discovery.current.slug.clone();
@@ -3128,10 +3222,11 @@ async fn polymarket_v3_admission_receipt_matches_the_queued_canonical_message() 
     );
     assert_eq!(
         inflight.raw_day_permit,
-        match ticket {
+        Some(match ticket {
             RawDayAcceptedTicket::Permit(permit) => permit,
-            RawDayAcceptedTicket::Defer(_) => panic!("fixture must have an active permit"),
-        }
+            RawDayAcceptedTicket::Defer(_) | RawDayAcceptedTicket::HotSession =>
+                panic!("fixture must have an active permit"),
+        })
     );
     assert_eq!(
         budget.available(),
@@ -6347,7 +6442,14 @@ async fn polymarket_connected_stop_deadline_and_control_close_quiesce_ws_and_abo
 
 #[tokio::test]
 async fn polymarket_stop_materializes_accepted_current_ws_after_e_before_reply() {
-    for clean_exit in ["stop", "deadline", "control_close"] {
+    for clean_exit in [
+        "stop",
+        "deadline",
+        "control_close",
+        "hot_stop",
+        "hot_deadline",
+        "hot_source_failure",
+    ] {
         let discovery = test_btc_discovery();
         let market = discovery.current.clone();
         let market_end_utc_ms = market.end_ts_s.saturating_mul(1_000);
@@ -6372,7 +6474,17 @@ async fn polymarket_stop_materializes_accepted_current_ws_after_e_before_reply()
         context.actor_utc_now = Some(Arc::new(move || actor_now_utc_ms));
 
         let stats = Arc::new(SourceQueueBackpressureStats::default());
-        let raw_day_gate = install_active_raw_day_gate(&stats, ws_received_at_utc_ms).await;
+        let admission_gate = if clean_exit.starts_with("hot_") {
+            let gate = Arc::new(HotSessionGate::new(
+                Instant::now() + Duration::from_secs(60),
+            ));
+            stats.install_hot_session(Arc::clone(&gate)).unwrap();
+            SourceAdmissionGate::Hot(gate)
+        } else {
+            SourceAdmissionGate::Training(
+                install_active_raw_day_gate(&stats, ws_received_at_utc_ms).await,
+            )
+        };
         let (event_tx, mut event_rx) = mpsc::channel(4);
         let sink = SourceEventSink {
             tx: event_tx,
@@ -6390,21 +6502,27 @@ async fn polymarket_stop_materializes_accepted_current_ws_after_e_before_reply()
             &decoded_budget,
         )
         .await;
-        ws_message.raw_day_ticket =
-            accepted_raw_day_ticket_from_gate_for_test(&raw_day_gate, ws_received_at_utc_ms).await;
+        ws_message.raw_day_ticket = admission_gate
+            .accept_unadmitted_event_ticket("polymarket", ws_received_at_utc_ms)
+            .await
+            .unwrap()
+            .unwrap();
         let mut runtime = polymarket_runtime_with_fence_messages_for_test(vec![ws_message]).await;
         if clean_exit != "control_close" {
-            let cause = if clean_exit == "stop" {
+            let cause = if clean_exit.ends_with("stop") {
                 RuntimeCloseCause::OperatorStop
             } else {
                 RuntimeCloseCause::RunDeadline
             };
-            assert!(matches!(
-                raw_day_gate
-                    .prepare_runtime_exit_with_cause(actor_now_utc_ms, cause)
-                    .unwrap(),
-                PreparedRuntimeExit::SameDay(_)
-            ));
+            match &admission_gate {
+                SourceAdmissionGate::Training(raw_day_gate) => assert!(matches!(
+                    raw_day_gate
+                        .prepare_runtime_exit_with_cause(actor_now_utc_ms, cause)
+                        .unwrap(),
+                    PreparedRuntimeExit::SameDay(_)
+                )),
+                SourceAdmissionGate::Hot(gate) => gate.stop(cause),
+            }
         }
 
         let mut resolution_poll_tasks = JoinSet::new();
@@ -6459,6 +6577,83 @@ async fn polymarket_stop_materializes_accepted_current_ws_after_e_before_reply()
             PolymarketMetadataRowKind::ResolutionTerminalWs,
             "{clean_exit}"
         );
+        if clean_exit == "hot_source_failure" {
+            use crate::handoff::{read_handoff_v2, write_handoff_v2};
+            use data_pipeline_core::public_input::DataCollectHandoffV2;
+            let SourceAdmissionGate::Hot(gate) = admission_gate else {
+                unreachable!()
+            };
+            let (tx, rx) = mpsc::channel(4);
+            for event in events {
+                tx.send(event).await.unwrap();
+            }
+            drop(tx);
+            let report = observe_hot_source_return(
+                "binance_depth_update",
+                async { Err(invalid_data("controlled fatal before terminal delivery").into()) },
+                Arc::clone(&gate),
+            )
+            .await;
+            let mut sources = JoinSet::new();
+            sources.spawn(async move { report });
+            let (sender, mut reader) = tokio::net::UnixStream::pair().unwrap();
+            let runtime = tokio::spawn(crate::training_runtime::hot_runtime::drain_hot_sources(
+                sender,
+                rx,
+                sources,
+                tokio::spawn(async {}),
+                gate,
+            ));
+            for expected in 1..=3 {
+                let DataCollectHandoffV2::Message {
+                    transport_sequence,
+                    row,
+                } = read_handoff_v2(&mut reader).await.unwrap()
+                else {
+                    panic!("accepted websocket and both terminal sides must precede Aborted");
+                };
+                assert_eq!(transport_sequence, expected);
+                if expected == 3 {
+                    let data_pipeline_core::public_input::TypedRawRowV2::PolymarketMarketMetadataV6(
+                        metadata,
+                    ) = &row
+                    else {
+                        panic!("terminal metadata remains public");
+                    };
+                    let data_pipeline_core::public_input::PolymarketMarketMetadataV6Input::Existing(
+                        row,
+                    ) = metadata.as_ref()
+                    else {
+                        panic!("terminal row is not an anchor");
+                    };
+                    assert_eq!(row.metadata_row_kind, data_pipeline_core::typed_raw::PolymarketMetadataRowKind::ResolutionTerminalWs);
+                }
+                drop(row);
+                write_handoff_v2(
+                    &mut reader,
+                    &DataCollectHandoffV2::Received { transport_sequence },
+                )
+                .await
+                .unwrap();
+            }
+            let DataCollectHandoffV2::Aborted {
+                last_confirmed_sequence,
+                reason,
+            } = read_handoff_v2(&mut reader).await.unwrap()
+            else {
+                panic!("source failure must stay Aborted after complete healthy delivery");
+            };
+            assert_eq!(last_confirmed_sequence, 3);
+            assert!(reason.contains("controlled fatal before terminal delivery"));
+            assert!(
+                runtime
+                    .await
+                    .unwrap()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("last_confirmed_sequence=3")
+            );
+        }
     }
 }
 
@@ -11916,7 +12111,7 @@ async fn polymarket_retryable_sdk_terminals_do_not_prepare_raw_day_close() {
 
         send_polymarket_terminal(
             &event_tx,
-            &raw_day_gate,
+            &SourceAdmissionGate::Training(Arc::clone(&raw_day_gate)),
             PolymarketDrainTerminal::Sdk(error),
         )
         .await;
@@ -12047,7 +12242,7 @@ async fn polymarket_day_stop_drains_paused_fifo_into_exact_source_termination() 
             .unwrap();
         send_polymarket_terminal(
             &pump_event_tx,
-            &pump_gate,
+            &SourceAdmissionGate::Training(Arc::clone(&pump_gate)),
             PolymarketDrainTerminal::Sdk(SdkStreamError::Lagged(1_364)),
         )
         .await;
@@ -12402,7 +12597,7 @@ async fn polymarket_fence_cannot_hide_a_terminal_already_present_at_its_snapshot
         control_rx,
         global_budget.clone(),
         decoded_budget.clone(),
-        active_raw_day_gate_for_test(now_ms()).await,
+        active_raw_day_gate_for_test(now_ms()).await.into(),
         Arc::new(now_ms),
     ));
 
@@ -13280,7 +13475,7 @@ async fn polymarket_decoded_capacity_terminal_follows_already_accepted_messages(
             &tx,
             &global_budget,
             &decoded_budget,
-            &raw_day_gate,
+            &SourceAdmissionGate::Training(Arc::clone(&raw_day_gate)),
             now_ms(),
         )
         .await
@@ -13291,7 +13486,7 @@ async fn polymarket_decoded_capacity_terminal_follows_already_accepted_messages(
             &tx,
             &global_budget,
             &decoded_budget,
-            &raw_day_gate,
+            &SourceAdmissionGate::Training(Arc::clone(&raw_day_gate)),
             now_ms(),
         )
         .await
@@ -13347,7 +13542,7 @@ async fn polymarket_global_capacity_terminal_follows_already_accepted_messages()
             &tx,
             &global_budget,
             &decoded_budget,
-            &raw_day_gate,
+            &SourceAdmissionGate::Training(Arc::clone(&raw_day_gate)),
             now_ms(),
         )
         .await
@@ -13358,7 +13553,7 @@ async fn polymarket_global_capacity_terminal_follows_already_accepted_messages()
             &tx,
             &global_budget,
             &decoded_budget,
-            &raw_day_gate,
+            &SourceAdmissionGate::Training(Arc::clone(&raw_day_gate)),
             now_ms(),
         )
         .await
@@ -13414,7 +13609,7 @@ async fn polymarket_queue_full_terminal_does_not_block_after_consumer_resumes() 
             &tx,
             &global_budget,
             &decoded_budget,
-            &raw_day_gate,
+            &SourceAdmissionGate::Training(Arc::clone(&raw_day_gate)),
             now_ms(),
         )
         .await
@@ -13429,7 +13624,7 @@ async fn polymarket_queue_full_terminal_does_not_block_after_consumer_resumes() 
             &blocked_tx,
             &blocked_global,
             &blocked_decoded,
-            &blocked_raw_day_gate,
+            &SourceAdmissionGate::Training(Arc::clone(&blocked_raw_day_gate)),
             now_ms(),
         )
         .await

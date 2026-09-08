@@ -103,81 +103,91 @@ where
         let gamma = gamma.clone();
         let gate = sink
             .source_queue_backpressure
-            .raw_day_gate()
+            .admission_gate()
             .ok_or_else(|| invalid_data("raw-day gate missing before anchor request"))?;
+        let request_ticket = gate.hot_request_ticket();
+        if matches!(gate, SourceAdmissionGate::Hot(_)) && request_ticket.is_none() {
+            slot.in_flight = false;
+            continue;
+        }
         let collector = collector.clone();
         let epoch = context.source_sequence_epoch_id.clone();
         let timeline = Arc::clone(timeline);
         context.market_anchor.tasks.spawn(async move {
             let started = timeline().utc_ms;
-            let (received, raw_day_ticket, observation, next_fallback) =
-                if let Some(request) = fallback {
-                    match timeout(
-                        Duration::from_secs(GAMMA_REQUEST_TIMEOUT_SECS),
-                        gamma.website_crypto_price_capture(&request),
-                    )
-                    .await
-                    {
-                        Ok(Ok(capture)) => {
-                            let received = capture.received_at_utc.timestamp_millis();
-                            let ticket = anchor_response_ticket(&gate, received).await;
-                            (
-                                received,
-                                ticket,
-                                MarketAnchorObservation::from_website_capture(capture),
-                                None,
-                            )
-                        }
-                        result => {
-                            let received = timeline().utc_ms;
-                            let ticket = anchor_response_ticket(&gate, received).await;
-                            let result = if result.is_err() {
-                                MarketAnchorQueryResult::Timeout
-                            } else {
-                                MarketAnchorQueryResult::TransportError
-                            };
-                            (
-                                received,
-                                ticket,
-                                MarketAnchorObservation::unavailable(result),
-                                None,
-                            )
-                        }
+            let (received, raw_day_ticket, observation, next_fallback) = if let Some(request) =
+                fallback
+            {
+                match timeout(
+                    Duration::from_secs(GAMMA_REQUEST_TIMEOUT_SECS),
+                    gamma.website_crypto_price_capture(&request),
+                )
+                .await
+                {
+                    Ok(Ok(capture)) => {
+                        let received = capture.received_at_utc.timestamp_millis();
+                        let ticket =
+                            anchor_response_ticket(&gate, request_ticket.as_ref(), received).await;
+                        (
+                            received,
+                            ticket,
+                            MarketAnchorObservation::from_website_capture(capture),
+                            None,
+                        )
                     }
-                } else {
-                    let request = EventBySlugRequest::builder()
-                        .slug(identity.slug.clone())
-                        .build();
-                    match timeout(
-                        Duration::from_secs(GAMMA_REQUEST_TIMEOUT_SECS),
-                        gamma.event_by_slug_capture(&request),
-                    )
-                    .await
-                    {
-                        Ok(Ok(capture)) => {
-                            let received = capture.received_at_utc.timestamp_millis();
-                            let ticket = anchor_response_ticket(&gate, received).await;
-                            let (observation, fallback) =
-                                MarketAnchorObservation::from_gamma_capture(capture, &identity);
-                            (received, ticket, observation, fallback)
-                        }
-                        result => {
-                            let received = timeline().utc_ms;
-                            let ticket = anchor_response_ticket(&gate, received).await;
-                            let result = if result.is_err() {
-                                MarketAnchorQueryResult::Timeout
-                            } else {
-                                MarketAnchorQueryResult::TransportError
-                            };
-                            (
-                                received,
-                                ticket,
-                                MarketAnchorObservation::unavailable(result),
-                                None,
-                            )
-                        }
+                    result => {
+                        let received = timeline().utc_ms;
+                        let ticket =
+                            anchor_response_ticket(&gate, request_ticket.as_ref(), received).await;
+                        let result = if result.is_err() {
+                            MarketAnchorQueryResult::Timeout
+                        } else {
+                            MarketAnchorQueryResult::TransportError
+                        };
+                        (
+                            received,
+                            ticket,
+                            MarketAnchorObservation::unavailable(result),
+                            None,
+                        )
                     }
-                };
+                }
+            } else {
+                let request = EventBySlugRequest::builder()
+                    .slug(identity.slug.clone())
+                    .build();
+                match timeout(
+                    Duration::from_secs(GAMMA_REQUEST_TIMEOUT_SECS),
+                    gamma.event_by_slug_capture(&request),
+                )
+                .await
+                {
+                    Ok(Ok(capture)) => {
+                        let received = capture.received_at_utc.timestamp_millis();
+                        let ticket =
+                            anchor_response_ticket(&gate, request_ticket.as_ref(), received).await;
+                        let (observation, fallback) =
+                            MarketAnchorObservation::from_gamma_capture(capture, &identity);
+                        (received, ticket, observation, fallback)
+                    }
+                    result => {
+                        let received = timeline().utc_ms;
+                        let ticket =
+                            anchor_response_ticket(&gate, request_ticket.as_ref(), received).await;
+                        let result = if result.is_err() {
+                            MarketAnchorQueryResult::Timeout
+                        } else {
+                            MarketAnchorQueryResult::TransportError
+                        };
+                        (
+                            received,
+                            ticket,
+                            MarketAnchorObservation::unavailable(result),
+                            None,
+                        )
+                    }
+                }
+            };
             let (lifecycle, role) = if received < identity.market_start_utc {
                 (MarketLifecycleState::Prefetched, MarketRuntimeRole::Next)
             } else if received < identity.market_end_utc {
@@ -209,11 +219,12 @@ where
     Ok(())
 }
 
-async fn anchor_response_ticket(gate: &Arc<RawDayGate>, received: i64) -> RawDayTicketAcceptance {
-    match gate
-        .accept_unadmitted_event_ticket("polymarket", received)
-        .await
-    {
+async fn anchor_response_ticket(
+    gate: &SourceAdmissionGate,
+    parent: Option<&RawDayAcceptedTicket>,
+    received: i64,
+) -> RawDayTicketAcceptance {
+    match gate.accept_response_ticket(parent, received).await {
         Ok(Some(ticket)) => RawDayTicketAcceptance::Accepted(ticket),
         Ok(None) => RawDayTicketAcceptance::Cutoff,
         Err(error) => RawDayTicketAcceptance::Failed(error.to_string()),
