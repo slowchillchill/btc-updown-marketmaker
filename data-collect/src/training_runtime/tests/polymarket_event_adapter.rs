@@ -10,6 +10,159 @@ use polymarket_client_sdk_v2::clob::ws::interest::MessageInterest;
 use polymarket_client_sdk_v2::clob::ws::types::response::parse_if_interested;
 
 #[test]
+fn polymarket_metadata_v6_preserves_v5_identity_evidence_and_admission() {
+    use crate::polymarket_market_metadata_v6_layout::{
+        PolymarketMarketMetadataV6Row, polymarket_market_metadata_v6_row_from_batch,
+        polymarket_market_metadata_v6_rows_to_batch, polymarket_market_metadata_v6_schema,
+    };
+    let discovery = test_btc_discovery();
+    let prefix = polymarket_metadata_snapshot_row(
+        &discovery.current,
+        MarketRuntimeRole::Current,
+        &CollectorIdentity {
+            host_id: "collector-test".to_owned(),
+            region: "local-test".to_owned(),
+        },
+    )
+    .unwrap();
+    let original_payload = prefix.source_evidence_payload_json.clone();
+    let original_digest = prefix.source_evidence_raw_sha256.clone();
+    let row = PolymarketMarketMetadataV6Row::Existing(PolymarketMarketMetadataV5Row::from_common(
+        prefix, None, None,
+    ));
+    let mut event = polymarket_metadata_v6_raw_event(row).unwrap();
+    event.collector_admission = Some(RawEventAdmission {
+        sequence: 7,
+        time_utc_ms: discovery.current.fixed_identity_verified_at_utc_ms + 1,
+    });
+    let rows = polymarket_metadata_v6_rows_from_event(&event).unwrap();
+    let batch =
+        polymarket_market_metadata_v6_rows_to_batch(polymarket_market_metadata_v6_schema(), &rows)
+            .unwrap();
+    let decoded = polymarket_market_metadata_v6_row_from_batch(&batch, 0).unwrap();
+    let common = decoded.existing().unwrap().common();
+    assert_eq!(common.source_evidence_payload_json, original_payload);
+    assert_eq!(common.source_evidence_raw_sha256, original_digest);
+    assert_eq!(common.collector_admission_sequence, 7);
+    assert_eq!(
+        common.metadata_row_kind,
+        PolymarketMetadataRowKind::MetadataSnapshot
+    );
+    assert!(
+        batch
+            .column_by_name("price_to_beat_decimal")
+            .unwrap()
+            .is_null(0)
+    );
+    assert!(batch.column_by_name("http_body").unwrap().is_null(0));
+}
+
+#[test]
+fn polymarket_metadata_v6_anchor_is_independent_and_preserves_exact_http_evidence() {
+    use crate::market_anchor::{MarketAnchorIdentity, MarketAnchorObservation, MarketAnchorOrigin};
+    use crate::polymarket_market_metadata_v6_layout::{
+        MarketAnchorRuleUpdateRow, PolymarketMarketMetadataV6Row,
+        polymarket_market_metadata_v6_row_from_batch, polymarket_market_metadata_v6_rows_to_batch,
+        polymarket_market_metadata_v6_schema,
+    };
+    use polymarket_client_sdk_v2::gamma::types::response::{Event, ResponseCapture};
+    let market = test_btc_discovery().current;
+    let identity = MarketAnchorIdentity {
+        slug: market.slug.clone(),
+        condition_id: market.condition_id.clone(),
+        clob_market_id: market.id.clone(),
+        asset_ids: serde_json::to_string(&[&market.up_asset_id, &market.down_asset_id]).unwrap(),
+        market_start_utc: market.start_ts_s * 1_000,
+        market_end_utc: market.end_ts_s * 1_000,
+        fixed_identity_verified_at_utc: market.fixed_identity_verified_at_utc_ms,
+    };
+    let body = format!(
+        r#"{{"id":"event-1","slug":"{}","eventMetadata":{{"priceToBeat":64950.0142185114400000001}},"markets":[{}]}}"#,
+        market.slug,
+        market.raw_json.as_ref().unwrap()
+    );
+    let received = identity.market_start_utc + 1;
+    let capture = ResponseCapture::builder()
+        .result(Ok(serde_json::from_str::<Event>(&body).unwrap()))
+        .raw_body(body.as_bytes().to_vec())
+        .request_url(
+            format!(
+                "https://gamma-api.polymarket.com/events/slug/{}",
+                market.slug
+            )
+            .parse()
+            .unwrap(),
+        )
+        .response_url(
+            format!(
+                "https://gamma-api.polymarket.com/events/slug/{}",
+                market.slug
+            )
+            .parse()
+            .unwrap(),
+        )
+        .received_at_utc(
+            polymarket_client_sdk_v2::types::DateTime::from_timestamp_millis(received).unwrap(),
+        )
+        .status_code(reqwest::StatusCode::OK)
+        .build();
+    let (observation, _) = MarketAnchorObservation::from_gamma_capture(capture, &identity);
+    let row = PolymarketMarketMetadataV6Row::AnchorRule(MarketAnchorRuleUpdateRow {
+        timestamp_received: received,
+        collector_admission_sequence: 0,
+        collector_admission_time_utc_ms: 0,
+        metadata_origin: MarketAnchorOrigin::GammaEventBySlug,
+        collector_host_id: "collector-test".to_owned(),
+        collector_region: "local-test".to_owned(),
+        identity,
+        market_lifecycle_state: MarketLifecycleState::Active,
+        market_runtime_role: MarketRuntimeRole::Current,
+        metadata_fetch_start_utc: received - 1,
+        anchor_query_source_epoch_id: "epoch-1".to_owned(),
+        anchor_query_ordinal: 1,
+        observation,
+    });
+    let mut event = polymarket_metadata_v6_raw_event(row).unwrap();
+    event.collector_admission = Some(RawEventAdmission {
+        sequence: 8,
+        time_utc_ms: received + 10,
+    });
+    let rows = polymarket_metadata_v6_rows_from_event(&event).unwrap();
+    let batch =
+        polymarket_market_metadata_v6_rows_to_batch(polymarket_market_metadata_v6_schema(), &rows)
+            .unwrap();
+    let decoded = polymarket_market_metadata_v6_row_from_batch(&batch, 0).unwrap();
+    assert!(decoded.existing().is_none());
+    let PolymarketMarketMetadataV6Row::AnchorRule(decoded) = decoded else {
+        unreachable!()
+    };
+    assert_eq!(
+        decoded.observation.price_to_beat_decimal.as_deref(),
+        Some("64950.0142185114400000001")
+    );
+    assert_eq!(
+        decoded.observation.http_body.as_deref(),
+        Some(body.as_str())
+    );
+    assert_eq!(decoded.timestamp_received, received);
+    assert_eq!(decoded.collector_admission_time_utc_ms, received + 10);
+    assert!(
+        batch
+            .column_by_name("source_evidence_payload_json")
+            .unwrap()
+            .is_null(0)
+    );
+    assert!(batch.column_by_name("winning_asset_id").unwrap().is_null(0));
+    let mut corrupted: Value = serde_json::from_str(&event.raw_json).unwrap();
+    corrupted["winning_asset_id"] = "101".into();
+    assert!(
+        PolymarketMarketMetadataV6Row::from_raw_value(corrupted, 8, received + 10)
+            .unwrap_err()
+            .contains("winning_asset_id")
+    );
+}
+
+#[test]
 fn polymarket_late_activation_builder_rejects_applied_at_e() {
     let market = test_btc_discovery().current;
     let identity = CollectorIdentity {

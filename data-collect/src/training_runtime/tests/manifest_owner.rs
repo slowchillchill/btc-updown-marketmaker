@@ -43,7 +43,7 @@ pub(super) fn manifest_file_digest(day_dir: &Path) -> String {
 }
 
 #[test]
-fn normal_rollover_waits_for_four_producers_and_six_writers() {
+fn normal_rollover_waits_for_four_producers_and_seven_writers() {
     let tmp = tempdir().unwrap();
     let dataset_root = tmp.path().canonicalize().unwrap();
     let boundary_utc_ms = 1_783_468_800_000;
@@ -421,8 +421,8 @@ fn manifest_owner_requires_rendezvous_then_two_normal_rollover_cutpoints() {
         boundary_utc_ms
     );
     assert_eq!(closed["producer_barriers"].as_array().unwrap().len(), 4);
-    assert_eq!(closed["writer_finalize_acks"].as_array().unwrap().len(), 6);
-    assert_eq!(closed["source_counters"].as_object().unwrap().len(), 6);
+    assert_eq!(closed["writer_finalize_acks"].as_array().unwrap().len(), 7);
+    assert_eq!(closed["source_counters"].as_object().unwrap().len(), 7);
     assert_eq!(
         closed["source_counters"]["binance_aggtrade"]["structural_dedupe_dropped_events"],
         2

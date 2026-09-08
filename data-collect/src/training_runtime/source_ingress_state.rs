@@ -101,6 +101,7 @@ pub(super) struct SourceQueueBackpressureStats {
     pub(super) depth_admission_sequence: AtomicU64,
     pub(super) polymarket_market_admission_sequence: AtomicU64,
     pub(super) polymarket_metadata_admission_sequence: AtomicU64,
+    pub(super) rtds_twap_admission_sequence: AtomicU64,
     operational_counters: Mutex<BTreeMap<String, BTreeMap<String, SourceOperationalCounterDelta>>>,
     pub(super) active_recovery_sources: Mutex<BTreeSet<String>>,
     pub(super) deferred_ingress_batches: Mutex<BTreeMap<String, VecDeque<DeferredIngressBatch>>>,
@@ -130,6 +131,10 @@ impl SourceQueueBackpressureStats {
             "polymarket_market_metadata" => (
                 &self.polymarket_metadata_admission_sequence,
                 "Polymarket metadata admission sequence",
+            ),
+            "polymarket_rtds_chainlink_twap" => (
+                &self.rtds_twap_admission_sequence,
+                "RTDS TWAP admission sequence",
             ),
             _ => {
                 return Err(invalid_data(format!(

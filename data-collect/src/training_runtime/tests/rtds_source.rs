@@ -1,5 +1,168 @@
 use super::*;
 
+#[test]
+fn rtds_display_decimal_accepts_numeric_and_string_values_without_changing_evidence() {
+    let base = 1788848523000_i64;
+    for topic in ["crypto_prices_chainlink", "crypto_prices_twap_thirty"] {
+        for value in [json!(78437.3961692547), json!("78437.3961692547")] {
+            let message =
+                serde_json::from_value::<polymarket_client_sdk_v2::rtds::RtdsMessage>(json!({
+                    "topic": topic, "type": "update", "timestamp": base,
+                    "payload": {"symbol": "btc/usd", "timestamp": base, "value": value,
+                        "full_accuracy_value": "78437396169254703726592", "window_s": 30}
+                }))
+                .unwrap();
+            let original = rtds_source_native_payload_json(&message).unwrap();
+            let classified = classify_rtds_message(&message, base + 1000)
+                .unwrap()
+                .unwrap();
+            assert_eq!(classified.freshness_status, "fresh");
+            assert_eq!(rtds_source_native_payload_json(&message).unwrap(), original);
+            assert_eq!(message.payload["value"], value);
+            assert_eq!(
+                message.payload["full_accuracy_value"],
+                "78437396169254703726592"
+            );
+        }
+    }
+}
+
+async fn assert_remaining_twap_subscriptions(socket: &mut WebSocketStream<TcpStream>) -> u64 {
+    let mut pings = 0;
+    for topic in ["crypto_prices_twap_thirty", "crypto_prices_twap_sixty"] {
+        let request = loop {
+            let message = socket.next().await.unwrap().unwrap();
+            if let Message::Text(text) = message {
+                if text == "PING" {
+                    pings += 1;
+                    continue;
+                }
+                break serde_json::from_str::<Value>(&text).unwrap();
+            }
+        };
+        assert_eq!(request["action"], "subscribe");
+        assert_eq!(request["subscriptions"].as_array().unwrap().len(), 1);
+        assert_eq!(request["subscriptions"][0]["topic"], topic);
+        assert_eq!(request["subscriptions"][0]["type"], "update");
+        assert_eq!(
+            request["subscriptions"][0]["filters"],
+            r#"{"symbol":"btc/usd"}"#
+        );
+    }
+    pings
+}
+
+#[tokio::test]
+async fn twap_windows_and_same_value_updates_persist_exact_e18_without_refreshing_spot() {
+    let dataset = tempdir().unwrap();
+    let base = now_ms();
+    let (tx, mut rx) = mpsc::channel(8);
+    let stats = Arc::new(SourceQueueBackpressureStats::default());
+    install_active_raw_day_gate(&stats, base).await;
+    let sink = SourceEventSink {
+        tx,
+        gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+        source_queue_backpressure: stats,
+        inflight_budget: InflightBudget::new(),
+        enqueue_lock: Arc::new(AsyncMutex::new(())),
+    };
+    let identity = CollectorIdentity {
+        host_id: "test".to_owned(),
+        region: "test".to_owned(),
+    };
+    let mut dedupe = TimedFingerprintWindow::with_limits(RTDS_DEDUPE_WINDOW_MS, 16);
+    let mut messages = Vec::new();
+    for (topic, window_s, timestamp) in [
+        ("crypto_prices_twap_thirty", 30, base),
+        ("crypto_prices_twap_sixty", 60, base),
+        ("crypto_prices_twap_thirty", 30, base + 1),
+    ] {
+        let message =
+            serde_json::from_value::<polymarket_client_sdk_v2::rtds::RtdsMessage>(json!({
+                "topic": topic, "type": "update", "timestamp": timestamp,
+                "payload": {"symbol":"btc/usd", "timestamp":timestamp, "value":65000.5,
+                    "full_accuracy_value":"65000500000000000000001", "window_s":window_s}
+            }))
+            .unwrap();
+        messages.push(message.clone());
+        assert!(
+            !emit_rtds_message(&sink, &identity, Instant::now(), &mut dedupe, message)
+                .await
+                .unwrap(),
+            "TWAP 更新不能刷新现货恢复时钟"
+        );
+    }
+    assert!(
+        !emit_rtds_message(
+            &sink,
+            &identity,
+            Instant::now(),
+            &mut dedupe,
+            messages[0].clone()
+        )
+        .await
+        .unwrap()
+    );
+    let mut rows = Vec::new();
+    while let Ok(event) = rx.try_recv() {
+        assert_eq!(event.event.source_kind, "polymarket_rtds_chainlink_twap");
+        rows.push(rtds_twap_row_from_event(&event.event).unwrap());
+    }
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        rows.iter().map(|row| row.window_s).collect::<Vec<_>>(),
+        [30, 60, 30]
+    );
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.collector_admission_sequence)
+            .collect::<Vec<_>>(),
+        [1, 2, 3]
+    );
+    let day = utc_day_string_from_ms(base).unwrap();
+    let source_dir = dataset
+        .path()
+        .join("training/typed_raw")
+        .join(format!("utc_day={day}"))
+        .join("source_kind=polymarket_rtds_chainlink_twap");
+    let mut writer = TypedParquetSegmentWriter::create_for_current_source(
+        &source_dir,
+        "twap_00",
+        "polymarket_rtds_chainlink_twap",
+    )
+    .unwrap();
+    writer
+        .write_rtds_chainlink_twap_rows_with_logical_bytes(&rows, 4096)
+        .unwrap();
+    let published = writer.finalize().unwrap();
+    let reader =
+        ParquetRecordBatchReaderBuilder::try_new(File::open(&published.final_path).unwrap())
+            .unwrap()
+            .build()
+            .unwrap();
+    let batch = reader.into_iter().next().unwrap().unwrap();
+    let exact = batch
+        .column_by_name("full_accuracy_value")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(exact.value(0), "65000500000000000000001");
+    assert_eq!(exact.value(1), exact.value(0));
+    let mut restored = restore_rtds_dedupe(dataset.path(), now_ms() + 1).unwrap();
+    for message in &messages {
+        assert_eq!(
+            restored
+                .observe(
+                    rtds_source_native_payload_json(message).unwrap().as_bytes(),
+                    now_ms() + 2
+                )
+                .unwrap(),
+            FingerprintDecision::Duplicate
+        );
+    }
+}
+
 #[tokio::test]
 async fn rtds_source_survives_startup_unavailable_then_applies_one_complete_desired() {
     let dataset_root = tempdir().unwrap();
@@ -69,6 +232,7 @@ async fn rtds_source_survives_startup_unavailable_then_applies_one_complete_desi
             request["subscriptions"][0]["filters"],
             r#"{"symbol":"btc/usd"}"#
         );
+        assert_remaining_twap_subscriptions(&mut socket).await;
         assert!(
             timeout(Duration::from_millis(40), async {
                 loop {
@@ -186,6 +350,7 @@ async fn rtds_source_retries_after_a_stalled_websocket_handshake() {
             request["subscriptions"][0]["filters"],
             r#"{"symbol":"btc/usd"}"#
         );
+        assert_remaining_twap_subscriptions(&mut socket).await;
         assert!(
             timeout(Duration::from_millis(40), async {
                 loop {
@@ -310,6 +475,7 @@ async fn rtds_source_recovers_after_close_and_failures_without_gap_or_replay_dup
             }
             break serde_json::from_str::<Value>(&text).unwrap();
         };
+        assert_remaining_twap_subscriptions(&mut socket).await;
         socket.send(Message::Close(None)).await.unwrap();
         drop(socket);
 
@@ -344,6 +510,7 @@ async fn rtds_source_recovers_after_close_and_failures_without_gap_or_replay_dup
             replay["subscriptions"][0]["filters"],
             r#"{"symbol":"btc/usd"}"#
         );
+        assert_remaining_twap_subscriptions(&mut socket).await;
         assert!(
             timeout(Duration::from_millis(40), async {
                 loop {
@@ -440,6 +607,11 @@ async fn rtds_source_recovers_after_close_and_failures_without_gap_or_replay_dup
         .expect("natural RTDS generation advance counter");
     assert_eq!(counter.lag_events, 0);
     assert_eq!(counter.reconnect_events, 1);
+    let twap_counter = counters
+        .values()
+        .find_map(|by_source| by_source.get("polymarket_rtds_chainlink_twap"))
+        .expect("同一 RTDS 连接也承载 TWAP");
+    assert_eq!(twap_counter.reconnect_events, 1);
 }
 
 #[tokio::test]
@@ -473,6 +645,7 @@ async fn rtds_source_keeps_one_socket_without_required_text_pong_and_consumes_st
             request["subscriptions"][0]["filters"],
             r#"{"symbol":"btc/usd"}"#
         );
+        ping_count += assert_remaining_twap_subscriptions(&mut socket).await;
 
         let silence = sleep(Duration::from_millis(200));
         tokio::pin!(silence);
@@ -782,6 +955,7 @@ async fn rtds_business_silence_replaces_two_runtimes_then_fresh_resets_the_episo
                 request["subscriptions"][0]["filters"],
                 r#"{"symbol":"btc/usd"}"#
             );
+            assert_remaining_twap_subscriptions(&mut socket).await;
 
             if runtime_epoch != 1 {
                 let timestamp = now_ms();
@@ -849,8 +1023,9 @@ async fn rtds_business_silence_replaces_two_runtimes_then_fresh_resets_the_episo
     spec.ws_config.heartbeat_interval = Duration::from_millis(20);
     spec.ws_config.heartbeat_timeout = Duration::from_millis(60);
     spec.business_timing = RtdsBusinessTiming {
-        steady_silence_threshold: Duration::from_millis(80),
-        first_fresh_observation_window: Duration::from_millis(30),
+        // 三份订阅实际经 TCP 传送，给本机确认/调度留下余量；精确时限由暂停时钟测试覆盖。
+        steady_silence_threshold: Duration::from_millis(200),
+        first_fresh_observation_window: Duration::from_millis(150),
         outer_backoff_initial_ms: 2,
         outer_backoff_max_ms: 4,
     };
@@ -1359,6 +1534,12 @@ async fn rtds_hong_kong_vpn_eight_hour_probe() {
         let mut first_row_error = None;
 
         while let Some(event) = rx.recv().await {
+            if event.event.source_kind == "polymarket_rtds_chainlink_twap" {
+                if let Err(error) = rtds_twap_row_from_event(&event.event) {
+                    first_row_error.get_or_insert_with(|| error.to_string());
+                }
+                continue;
+            }
             let row = match rtds_row_from_event(&event.event) {
                 Ok(row) => row,
                 Err(error) => {

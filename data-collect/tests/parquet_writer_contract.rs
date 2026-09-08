@@ -16,6 +16,7 @@ use data_collect::polymarket_market_metadata_layout::{
     POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
     POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION,
 };
+use data_collect::polymarket_market_metadata_v6_layout::POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION;
 use data_collect::polymarket_orderbook_v3::{
     PolymarketOrderbookV3Admission, PolymarketOrderbookV3Message, PolymarketOrderbookV3Projection,
     polymarket_orderbook_v3_messages_from_batch, polymarket_orderbook_v3_messages_to_batch,
@@ -583,8 +584,18 @@ fn typed_writer_rejects_new_polymarket_market_metadata_v2_segments() {
 }
 
 #[test]
-fn polymarket_metadata_writer_only_opens_the_current_v5_layout() {
+fn polymarket_metadata_writer_opens_v6_and_preserves_explicit_v5_compatibility() {
     let tmp = tempdir().unwrap();
+    assert_eq!(
+        TypedParquetSegmentWriter::current_schema_version("polymarket_market_metadata").unwrap(),
+        POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION
+    );
+    TypedParquetSegmentWriter::create_for_current_source(
+        tmp.path(),
+        "metadata-v6",
+        "polymarket_market_metadata",
+    )
+    .unwrap();
     let _v5_writer = TypedParquetSegmentWriter::create_for_typed_source(
         tmp.path(),
         "metadata-v5",
@@ -623,6 +634,11 @@ fn typed_writer_constructors_publish_source_specific_schema_metadata() {
     let cases = [
         (
             "polymarket_market_metadata",
+            POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION,
+            "collector_admission_order",
+        ),
+        (
+            "polymarket_market_metadata",
             POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION,
             "collector_admission_order",
         ),
@@ -645,6 +661,11 @@ fn typed_writer_constructors_publish_source_specific_schema_metadata() {
             "polymarket_rtds_chainlink_btc_usd",
             "polymarket_rtds_chainlink_btc_usd_v4",
             "receive_order",
+        ),
+        (
+            "polymarket_rtds_chainlink_twap",
+            "polymarket_rtds_chainlink_twap_v1",
+            "collector_admission_order",
         ),
     ];
 

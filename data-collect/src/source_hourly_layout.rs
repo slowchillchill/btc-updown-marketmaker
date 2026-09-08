@@ -1051,6 +1051,10 @@ impl RtdsChainlinkBtcUsdHourlyRow {
     }
 
     pub fn validate(&self) -> SourceHourlyValidation {
+        self.validate_for_topics(&["crypto_prices_chainlink"])
+    }
+
+    fn validate_for_topics(&self, topics: &[&str]) -> SourceHourlyValidation {
         let mut report = SourceHourlyValidation {
             missing_fields: Vec::new(),
         };
@@ -1082,28 +1086,28 @@ impl RtdsChainlinkBtcUsdHourlyRow {
         let fresh_age = computed_age_ms.is_some_and(|age| (-5_000..=30_000).contains(&age));
         let status_consistent = match self.freshness_status.as_str() {
             "invalid_timestamp" => !timestamps_valid,
-            "invalid_topic" => timestamps_valid && self.topic != "crypto_prices_chainlink",
+            "invalid_topic" => timestamps_valid && !topics.contains(&self.topic.as_str()),
             "invalid_type" => {
                 timestamps_valid
-                    && self.topic == "crypto_prices_chainlink"
+                    && topics.contains(&self.topic.as_str())
                     && self.message_type != "update"
             }
             "invalid_symbol" => {
                 timestamps_valid
-                    && self.topic == "crypto_prices_chainlink"
+                    && topics.contains(&self.topic.as_str())
                     && self.message_type == "update"
                     && self.symbol != "btc/usd"
             }
             "fresh" => {
                 timestamps_valid
-                    && self.topic == "crypto_prices_chainlink"
+                    && topics.contains(&self.topic.as_str())
                     && self.message_type == "update"
                     && self.symbol == "btc/usd"
                     && fresh_age
             }
             "stale" => {
                 timestamps_valid
-                    && self.topic == "crypto_prices_chainlink"
+                    && topics.contains(&self.topic.as_str())
                     && self.message_type == "update"
                     && self.symbol == "btc/usd"
                     && !fresh_age
@@ -1132,6 +1136,29 @@ impl RtdsChainlinkBtcUsdHourlyRow {
         report.require_non_empty("collector_region", &self.collector_region);
         report.require_non_empty("source_endpoint", &self.source_endpoint);
         report.require_non_empty("schema_version", &self.schema_version);
+        report
+    }
+}
+
+pub const RTDS_CHAINLINK_TWAP_SCHEMA_VERSION: &str = "polymarket_rtds_chainlink_twap_v1";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RtdsChainlinkTwapHourlyRow {
+    pub common: RtdsChainlinkBtcUsdHourlyRow,
+    pub full_accuracy_value: String,
+    pub window_s: u64,
+    pub source_sequence_epoch_id: String,
+    pub collector_admission_sequence: u64,
+    pub collector_admission_time_utc_ms: i64,
+}
+
+impl RtdsChainlinkTwapHourlyRow {
+    pub fn validate(&self) -> SourceHourlyValidation {
+        let mut report = self
+            .common
+            .validate_for_topics(&["crypto_prices_twap_thirty", "crypto_prices_twap_sixty"]);
+        report.require_non_empty("full_accuracy_value", &self.full_accuracy_value);
+        report.require_non_empty("source_sequence_epoch_id", &self.source_sequence_epoch_id);
         report
     }
 }
@@ -1249,6 +1276,26 @@ pub fn rtds_chainlink_btc_usd_schema() -> Arc<Schema> {
         Field::new("source_endpoint", DataType::Utf8, false),
         Field::new("schema_version", DataType::Utf8, false),
     ]))
+}
+
+pub fn rtds_chainlink_twap_schema() -> Arc<Schema> {
+    let mut fields = rtds_chainlink_btc_usd_schema().fields().to_vec();
+    fields.extend([
+        Arc::new(Field::new("full_accuracy_value", DataType::Utf8, false)),
+        Arc::new(Field::new("window_s", DataType::UInt64, false)),
+        Arc::new(Field::new(
+            "source_sequence_epoch_id",
+            DataType::Utf8,
+            false,
+        )),
+        Arc::new(Field::new(
+            "collector_admission_sequence",
+            DataType::UInt64,
+            false,
+        )),
+        Arc::new(timestamp_field("collector_admission_time_utc_ms", false)),
+    ]);
+    Arc::new(Schema::new(fields))
 }
 
 fn timestamp_field(name: &str, nullable: bool) -> Field {

@@ -23,6 +23,10 @@ use crate::polymarket_market_metadata_layout::{
     POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION, PolymarketMarketMetadataRow,
     PolymarketMarketMetadataV5Row, polymarket_market_metadata_v5_schema,
 };
+use crate::polymarket_market_metadata_v6_layout::{
+    POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION, PolymarketMarketMetadataV6Row,
+    polymarket_market_metadata_v6_rows_to_batch, polymarket_market_metadata_v6_schema,
+};
 use crate::polymarket_orderbook_v3::{
     POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION, PolymarketOrderbookV3Message,
     polymarket_orderbook_v3_messages_to_batch, polymarket_orderbook_v3_schema,
@@ -32,8 +36,9 @@ use crate::source_hourly_layout::{
     BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION, BINANCE_DEPTH_UPDATE_LEGACY_SCHEMA_VERSION,
     BINANCE_DEPTH_UPDATE_SCHEMA_VERSION, BinanceAggTradeHourlyRow,
     BinanceDepthOrderingClassification, BinanceDepthSnapshotHourlyRow, BinanceDepthUpdateHourlyRow,
-    RtdsChainlinkBtcUsdHourlyRow, binance_aggtrade_schema, binance_depth_snapshot_schema,
-    binance_depth_update_schema, rtds_chainlink_btc_usd_schema,
+    RTDS_CHAINLINK_TWAP_SCHEMA_VERSION, RtdsChainlinkBtcUsdHourlyRow, RtdsChainlinkTwapHourlyRow,
+    binance_aggtrade_schema, binance_depth_snapshot_schema, binance_depth_update_schema,
+    rtds_chainlink_btc_usd_schema, rtds_chainlink_twap_schema,
 };
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -125,11 +130,12 @@ impl TypedParquetSegmentWriter {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidInput, error))?;
         Ok(match source_kind {
             SourceKind::PolymarketMarket => POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,
-            SourceKind::PolymarketMarketMetadata => POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION,
+            SourceKind::PolymarketMarketMetadata => POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION,
             SourceKind::BinanceDepthSnapshot => BINANCE_DEPTH_SNAPSHOT_SCHEMA_VERSION,
             SourceKind::BinanceDepthUpdate => BINANCE_DEPTH_UPDATE_SCHEMA_VERSION,
             SourceKind::BinanceAggTrade => BINANCE_AGGTRADE_SCHEMA_VERSION,
             SourceKind::PolymarketRtdsChainlinkBtcUsd => "polymarket_rtds_chainlink_btc_usd_v4",
+            SourceKind::PolymarketRtdsChainlinkTwap => RTDS_CHAINLINK_TWAP_SCHEMA_VERSION,
         })
     }
 
@@ -274,6 +280,65 @@ impl TypedParquetSegmentWriter {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "Polymarket metadata v5 admission sequence must be strictly increasing",
+                )
+                .into());
+            }
+            previous = Some(sequence);
+        }
+        Ok(previous.expect("non-empty rows have a last admission sequence"))
+    }
+
+    pub fn write_polymarket_market_metadata_v6_rows(
+        &mut self,
+        rows: &[PolymarketMarketMetadataV6Row],
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let last_sequence = self.validate_polymarket_metadata_v6_rows(rows)?;
+        let batch = polymarket_market_metadata_v6_rows_to_batch(Arc::clone(&self.schema), rows)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        self.write_batch(&batch)?;
+        self.last_polymarket_metadata_admission_sequence = Some(last_sequence);
+        Ok(())
+    }
+
+    pub(crate) fn write_polymarket_market_metadata_v6_rows_with_logical_bytes(
+        &mut self,
+        rows: &[PolymarketMarketMetadataV6Row],
+        logical_bytes: u64,
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let last_sequence = self.validate_polymarket_metadata_v6_rows(rows)?;
+        let batch = polymarket_market_metadata_v6_rows_to_batch(Arc::clone(&self.schema), rows)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        self.write_batch_with_logical_bytes(&batch, logical_bytes)?;
+        self.last_polymarket_metadata_admission_sequence = Some(last_sequence);
+        Ok(())
+    }
+
+    fn validate_polymarket_metadata_v6_rows(
+        &self,
+        rows: &[PolymarketMarketMetadataV6Row],
+    ) -> Result<u64> {
+        if self.schema_version != POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "v6 Polymarket metadata rows require a v6 writer",
+            )
+            .into());
+        }
+        let mut previous = self.last_polymarket_metadata_admission_sequence;
+        for row in rows {
+            row.validate()
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            let sequence = row.collector_admission_sequence();
+            if previous.is_some_and(|previous| sequence <= previous) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "Polymarket metadata v6 admission sequence must be strictly increasing",
                 )
                 .into());
             }
@@ -513,6 +578,18 @@ impl TypedParquetSegmentWriter {
         self.write_batch_with_logical_bytes(&batch, logical_bytes)
     }
 
+    pub fn write_rtds_chainlink_twap_rows_with_logical_bytes(
+        &mut self,
+        rows: &[RtdsChainlinkTwapHourlyRow],
+        logical_bytes: u64,
+    ) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let batch = rtds_chainlink_twap_rows_to_batch(Arc::clone(&self.schema), rows)?;
+        self.write_batch_with_logical_bytes(&batch, logical_bytes)
+    }
+
     pub fn write_batch(&mut self, batch: &RecordBatch) -> Result<()> {
         if self.schema_version == POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION {
             return Err(io::Error::new(
@@ -689,13 +766,17 @@ fn typed_writer_properties(
 pub(crate) fn typed_sort_order(schema_version: &str, source_kind: &str) -> &'static str {
     if matches!(
         source_kind,
-        "binance_aggtrade" | "binance_depth_snapshot" | "binance_depth_update"
+        "binance_aggtrade"
+            | "binance_depth_snapshot"
+            | "binance_depth_update"
+            | "polymarket_rtds_chainlink_twap"
     ) || (source_kind == "polymarket_market_metadata"
         && matches!(
             schema_version,
             POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION
                 | POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION
                 | POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION
+                | POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION
         ))
         || (source_kind == "polymarket_market"
             && schema_version == POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION)
@@ -749,6 +830,9 @@ fn typed_writer_schema(source_kind: &str, schema_version: &str) -> Result<Arc<Sc
     match source_kind {
         "polymarket_market" => polymarket_orderbook_schema_for_version(schema_version),
         "polymarket_market_metadata" => match schema_version {
+            POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION => {
+                Ok(polymarket_market_metadata_v6_schema())
+            }
             POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION => {
                 Ok(polymarket_market_metadata_v5_schema())
             }
@@ -791,6 +875,7 @@ fn typed_writer_schema(source_kind: &str, schema_version: &str) -> Result<Arc<Sc
             Ok(binance_aggtrade_schema())
         }
         "polymarket_rtds_chainlink_btc_usd" => Ok(rtds_chainlink_btc_usd_schema()),
+        "polymarket_rtds_chainlink_twap" => Ok(rtds_chainlink_twap_schema()),
         other => Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             format!("unsupported typed source kind: {other}"),
@@ -1129,26 +1214,49 @@ fn rtds_chainlink_btc_usd_rows_to_batch(
     schema: Arc<Schema>,
     rows: &[RtdsChainlinkBtcUsdHourlyRow],
 ) -> Result<RecordBatch> {
-    let columns: Vec<ArrayRef> = vec![
-        timestamp_values(rows.iter().map(|row| row.timestamp_received)),
-        timestamp_values(rows.iter().map(|row| row.message_timestamp)),
-        timestamp_values(rows.iter().map(|row| row.payload_timestamp)),
-        optional_int64_values(rows.iter().map(|row| row.age_ms)),
-        string_values(rows.iter().map(|row| row.symbol.as_str())),
-        string_values(rows.iter().map(|row| row.value.as_str())),
-        string_values(rows.iter().map(|row| row.topic.as_str())),
-        string_values(rows.iter().map(|row| row.message_type.as_str())),
-        string_values(rows.iter().map(|row| row.freshness_status.as_str())),
-        string_values(rows.iter().map(|row| row.subscription_filter.as_str())),
+    Ok(RecordBatch::try_new(
+        schema,
+        rtds_chainlink_columns(rows.iter()),
+    )?)
+}
+
+fn rtds_chainlink_columns<'a>(
+    rows: impl Iterator<Item = &'a RtdsChainlinkBtcUsdHourlyRow> + Clone,
+) -> Vec<ArrayRef> {
+    vec![
+        timestamp_values(rows.clone().map(|row| row.timestamp_received)),
+        timestamp_values(rows.clone().map(|row| row.message_timestamp)),
+        timestamp_values(rows.clone().map(|row| row.payload_timestamp)),
+        optional_int64_values(rows.clone().map(|row| row.age_ms)),
+        string_values(rows.clone().map(|row| row.symbol.as_str())),
+        string_values(rows.clone().map(|row| row.value.as_str())),
+        string_values(rows.clone().map(|row| row.topic.as_str())),
+        string_values(rows.clone().map(|row| row.message_type.as_str())),
+        string_values(rows.clone().map(|row| row.freshness_status.as_str())),
+        string_values(rows.clone().map(|row| row.subscription_filter.as_str())),
         string_values(
-            rows.iter()
+            rows.clone()
                 .map(|row| row.source_native_payload_json.as_str()),
         ),
-        string_values(rows.iter().map(|row| row.collector_host_id.as_str())),
-        string_values(rows.iter().map(|row| row.collector_region.as_str())),
-        string_values(rows.iter().map(|row| row.source_endpoint.as_str())),
-        string_values(rows.iter().map(|row| row.schema_version.as_str())),
-    ];
+        string_values(rows.clone().map(|row| row.collector_host_id.as_str())),
+        string_values(rows.clone().map(|row| row.collector_region.as_str())),
+        string_values(rows.clone().map(|row| row.source_endpoint.as_str())),
+        string_values(rows.map(|row| row.schema_version.as_str())),
+    ]
+}
+
+fn rtds_chainlink_twap_rows_to_batch(
+    schema: Arc<Schema>,
+    rows: &[RtdsChainlinkTwapHourlyRow],
+) -> Result<RecordBatch> {
+    let mut columns = rtds_chainlink_columns(rows.iter().map(|row| &row.common));
+    columns.extend([
+        string_values(rows.iter().map(|row| row.full_accuracy_value.as_str())),
+        uint64_values(rows.iter().map(|row| row.window_s)),
+        string_values(rows.iter().map(|row| row.source_sequence_epoch_id.as_str())),
+        uint64_values(rows.iter().map(|row| row.collector_admission_sequence)),
+        timestamp_values(rows.iter().map(|row| row.collector_admission_time_utc_ms)),
+    ]);
     Ok(RecordBatch::try_new(schema, columns)?)
 }
 

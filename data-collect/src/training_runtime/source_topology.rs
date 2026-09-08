@@ -11,12 +11,13 @@ const SOURCE_PRODUCER_OWNERSHIP: &[(SourceKind, &str)] = &[
     (SourceKind::PolymarketMarket, "polymarket"),
     (SourceKind::PolymarketMarketMetadata, "polymarket"),
     (SourceKind::PolymarketRtdsChainlinkBtcUsd, "polymarket_rtds"),
+    (SourceKind::PolymarketRtdsChainlinkTwap, "polymarket_rtds"),
     (SourceKind::BinanceDepthSnapshot, "binance_depth"),
     (SourceKind::BinanceDepthUpdate, "binance_depth"),
     (SourceKind::BinanceAggTrade, "binance_aggtrade"),
 ];
 
-pub fn training_source_kinds() -> [&'static str; 6] {
+pub fn training_source_kinds() -> [&'static str; 7] {
     SourceKind::ALL.map(SourceKind::as_str)
 }
 

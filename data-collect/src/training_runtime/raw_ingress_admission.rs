@@ -5,6 +5,7 @@ fn source_admission_authority(event: &RawEvent) -> Option<&'static str> {
         "binance_aggtrade" => "binance_aggtrade",
         "binance_depth_snapshot" | "binance_depth_update" => "binance_depth",
         "polymarket_market_metadata" => "polymarket_market_metadata",
+        "polymarket_rtds_chainlink_twap" => "polymarket_rtds_chainlink_twap",
         _ => return None,
     }
     .into()

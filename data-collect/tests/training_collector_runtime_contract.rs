@@ -122,6 +122,7 @@ fn training_runtime_sources_match_typed_raw_source_kind_contract() {
     assert!(training_source_kinds().contains(&"binance_depth_snapshot"));
     assert!(training_source_kinds().contains(&"binance_depth_update"));
     assert!(training_source_kinds().contains(&"polymarket_market_metadata"));
+    assert!(training_source_kinds().contains(&"polymarket_rtds_chainlink_twap"));
     assert!(!training_source_kinds().contains(&"binance_depth"));
 }
 

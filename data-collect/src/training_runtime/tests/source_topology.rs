@@ -1,13 +1,19 @@
 use super::*;
 
 #[test]
-fn typed_source_ownership_covers_the_six_sources_and_four_producers() {
+fn typed_source_ownership_covers_the_seven_sources_and_four_producers() {
     let approved = [
         (
             "polymarket",
             vec!["polymarket_market", "polymarket_market_metadata"],
         ),
-        ("polymarket_rtds", vec!["polymarket_rtds_chainlink_btc_usd"]),
+        (
+            "polymarket_rtds",
+            vec![
+                "polymarket_rtds_chainlink_btc_usd",
+                "polymarket_rtds_chainlink_twap",
+            ],
+        ),
         (
             "binance_depth",
             vec!["binance_depth_snapshot", "binance_depth_update"],
@@ -29,5 +35,5 @@ fn typed_source_ownership_covers_the_six_sources_and_four_producers() {
         }
     }
     assert_eq!(LOGICAL_PRODUCERS.len(), 4);
-    assert_eq!(expected_startup_participants().len(), 10);
+    assert_eq!(expected_startup_participants().len(), 11);
 }

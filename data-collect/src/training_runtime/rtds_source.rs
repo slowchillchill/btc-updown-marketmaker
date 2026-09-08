@@ -10,6 +10,21 @@ const RTDS_FIRST_FRESH_OBSERVATION_WINDOW: Duration = Duration::from_secs(60);
 const RTDS_OUTER_BACKOFF_INITIAL_MS: u64 = 1_000;
 const RTDS_OUTER_BACKOFF_MAX_MS: u64 = 300_000;
 
+fn is_rtds_twap_topic(topic: &str) -> bool {
+    matches!(
+        topic,
+        "crypto_prices_twap_thirty" | "crypto_prices_twap_sixty"
+    )
+}
+
+fn rtds_message_source_kind(topic: &str) -> &'static str {
+    if is_rtds_twap_topic(topic) {
+        "polymarket_rtds_chainlink_twap"
+    } else {
+        "polymarket_rtds_chainlink_btc_usd"
+    }
+}
+
 fn operator_dedupe_error(message: String) -> io::Error {
     invalid_data(format!(
         "operator_intervention_required:dedupe_invariant:{message}"
@@ -27,9 +42,23 @@ pub(super) fn classify_rtds_message(
     message: &polymarket_client_sdk_v2::rtds::RtdsMessage,
     recv_time_utc_ms: i64,
 ) -> Result<Option<ClassifiedRtdsMessage>> {
-    let payload = match serde_json::from_value::<ChainlinkPrice>(message.payload.clone()) {
+    let mut sdk_payload = message.payload.clone();
+    if let Some(Value::Number(number)) = sdk_payload.get("value") {
+        // 仅适配 SDK 显示值的解析副本，兼容工作区合并的 serde-str 特性。
+        // 数值文本沿用 Decimal 默认访问器的含义；原载荷和精确 E18 不变。
+        let display = number
+            .as_f64()
+            .filter(|_| number.is_f64())
+            .map_or_else(|| number.to_string(), |value| value.to_string());
+        sdk_payload["value"] = Value::String(display);
+    }
+    let payload = match serde_json::from_value::<ChainlinkPrice>(sdk_payload) {
         Ok(payload) => payload,
-        Err(_) if message.topic != "crypto_prices_chainlink" || message.msg_type != "update" => {
+        Err(_)
+            if (message.topic != "crypto_prices_chainlink"
+                && !is_rtds_twap_topic(&message.topic))
+                || message.msg_type != "update" =>
+        {
             return Ok(None);
         }
         Err(error) => {
@@ -42,7 +71,7 @@ pub(super) fn classify_rtds_message(
         || age_ms.is_none()
     {
         "invalid_timestamp"
-    } else if message.topic != "crypto_prices_chainlink" {
+    } else if message.topic != "crypto_prices_chainlink" && !is_rtds_twap_topic(&message.topic) {
         "invalid_topic"
     } else if message.msg_type != "update" {
         "invalid_type"
@@ -285,22 +314,31 @@ impl RtdsBusinessRecovery {
 }
 
 pub(super) fn rtds_subscription_evidence_json() -> String {
-    json!({
-        "action": "subscribe",
-        "subscriptions": [{
-            "topic": "crypto_prices_chainlink",
-            "type": "*",
-            "filters": "{\"symbol\":\"btc/usd\"}"
-        }]
-    })
-    .to_string()
+    serde_json::to_string(
+        &polymarket_client_sdk_v2::rtds::SubscriptionRequest::subscribe(rtds_price_subscriptions()),
+    )
+    .expect("固定公开 RTDS 订阅可序列化")
+}
+
+fn rtds_price_subscriptions() -> Vec<Subscription> {
+    let mut subscriptions = vec![Subscription::chainlink_prices(Some("btc/usd".to_owned()))];
+    for topic in ["crypto_prices_twap_thirty", "crypto_prices_twap_sixty"] {
+        subscriptions.push(
+            Subscription::builder()
+                .topic(topic.to_owned())
+                .msg_type("update".to_owned())
+                .filters(r#"{"symbol":"btc/usd"}"#.to_owned())
+                .build(),
+        );
+    }
+    subscriptions
 }
 
 pub(super) fn rtds_source_native_payload_json(
     message: &polymarket_client_sdk_v2::rtds::RtdsMessage,
 ) -> Result<String> {
     let canonical = serde_json::to_string(&json!({
-        "source": "polymarket_rtds_chainlink_btc_usd",
+        "source": rtds_message_source_kind(&message.topic),
         "topic": message.topic,
         "type": message.msg_type,
         "timestamp": message.timestamp,
@@ -329,13 +367,18 @@ pub(super) fn restore_rtds_dedupe(
             .ok_or_else(|| io::Error::other("RTDS current UTC day is out of range"))?,
     ]);
     for day in days {
-        paths.extend(finalized_parquet_files(
-            &dataset_root
-                .join("training")
-                .join("typed_raw")
-                .join(format!("utc_day={day}"))
-                .join("source_kind=polymarket_rtds_chainlink_btc_usd"),
-        )?);
+        for source in [
+            "polymarket_rtds_chainlink_btc_usd",
+            "polymarket_rtds_chainlink_twap",
+        ] {
+            paths.extend(finalized_parquet_files(
+                &dataset_root
+                    .join("training")
+                    .join("typed_raw")
+                    .join(format!("utc_day={day}"))
+                    .join(format!("source_kind={source}")),
+            )?);
+        }
     }
     paths.sort_by_key(|path| finalized_parquet_order_key(path));
     let window_start_ms = restore_time_ms.saturating_sub(RTDS_DEDUPE_WINDOW_MS);
@@ -405,10 +448,10 @@ pub(super) fn restore_rtds_dedupe(
 
 fn create_rtds_runtime(
     spec: &RtdsSourceSpec,
-    subscription: &Subscription,
+    subscriptions: &[Subscription],
 ) -> Result<RtdsSdkRuntime> {
     let mut runtime = RtdsSdkRuntime::new(spec.endpoint.clone(), spec.ws_config.clone())?;
-    runtime.replace_subscription(subscription.clone())?;
+    runtime.replace_subscriptions(subscriptions.to_vec())?;
     Ok(runtime)
 }
 
@@ -434,9 +477,10 @@ pub(super) async fn run_rtds_source_with_spec(
                     "operator_intervention_required:RTDS dedupe restore failed:{error}"
                 ))
             })?;
-    let subscription = Subscription::chainlink_prices(Some("btc/usd".to_owned()));
+    let subscriptions = rtds_price_subscriptions();
+    let source_sequence_epoch_id = rtds_source_sequence_epoch_id(&collector_identity)?;
     let mut rtds_runtime_epoch = 0_u64;
-    let mut runtime = create_rtds_runtime(&spec, &subscription)?;
+    let mut runtime = create_rtds_runtime(&spec, &subscriptions)?;
     let mut recorded_generation = runtime.connection_generation();
     let jitter_seed = u64::try_from(now_ms()).unwrap_or_default();
     let mut business_recovery =
@@ -479,12 +523,13 @@ pub(super) async fn run_rtds_source_with_spec(
                         observed_generation,
                         &sink,
                     )?;
-                    let is_fresh = emit_rtds_message(
+                    let is_fresh = emit_rtds_message_in_epoch(
                         &sink,
                         &collector_identity,
                         run_started,
                         &mut dedupe,
                         message.message,
+                        &source_sequence_epoch_id,
                     )
                     .await?;
                     if is_fresh && let Some(generation) = freshness_generation {
@@ -531,7 +576,7 @@ pub(super) async fn run_rtds_source_with_spec(
         runtime.shutdown_and_wait().await;
 
         rtds_runtime_epoch += 1;
-        runtime = create_rtds_runtime(&spec, &subscription)?;
+        runtime = create_rtds_runtime(&spec, &subscriptions)?;
         recorded_generation = runtime.connection_generation();
         business_recovery.start_runtime(recorded_generation);
         eprintln!(
@@ -553,19 +598,42 @@ fn record_rtds_generation_advance(
         return Ok(());
     }
     for _ in 0..newly_observed {
-        sink.source_queue_backpressure
-            .record_reconnect("polymarket_rtds_chainlink_btc_usd", now_ms());
+        let observed_at = now_ms();
+        for source in producer_writer_sources("polymarket_rtds")? {
+            sink.source_queue_backpressure
+                .record_reconnect(source, observed_at);
+        }
     }
     *recorded_generation = generation;
     Ok(())
 }
 
+#[cfg(test)]
 pub(super) async fn emit_rtds_message(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
     dedupe: &mut TimedFingerprintWindow,
     message: polymarket_client_sdk_v2::rtds::RtdsMessage,
+) -> Result<bool> {
+    emit_rtds_message_in_epoch(
+        sink,
+        collector_identity,
+        run_started,
+        dedupe,
+        message,
+        "rtds-test",
+    )
+    .await
+}
+
+async fn emit_rtds_message_in_epoch(
+    sink: &SourceEventSink,
+    collector_identity: &CollectorIdentity,
+    run_started: Instant,
+    dedupe: &mut TimedFingerprintWindow,
+    message: polymarket_client_sdk_v2::rtds::RtdsMessage,
+    source_sequence_epoch_id: &str,
 ) -> Result<bool> {
     let recv_time_utc_ms = now_ms();
     let classified = match classify_rtds_message(&message, recv_time_utc_ms) {
@@ -580,27 +648,25 @@ pub(super) async fn emit_rtds_message(
         }
     };
     let source_native_payload_json = rtds_source_native_payload_json(&message)?;
+    let source_kind = rtds_message_source_kind(&message.topic);
     if dedupe
         .observe(source_native_payload_json.as_bytes(), recv_time_utc_ms)
         .map_err(operator_dedupe_error)?
         == FingerprintDecision::Duplicate
     {
-        sink.source_queue_backpressure.record_structural_dedupe(
-            "polymarket_rtds_chainlink_btc_usd",
-            recv_time_utc_ms,
-            1,
-        );
+        sink.source_queue_backpressure
+            .record_structural_dedupe(source_kind, recv_time_utc_ms, 1);
         return Ok(false);
     }
     let source_ts = classified.payload.timestamp;
     let source_identifier = classified.payload.symbol.clone();
     let value = classified.payload.value.to_string();
-    let is_fresh = classified.freshness_status == "fresh";
+    let is_fresh = classified.freshness_status == "fresh" && !is_rtds_twap_topic(&message.topic);
     send_event(
         sink,
         run_started,
         RawEvent {
-            source_kind: "polymarket_rtds_chainlink_btc_usd".to_owned(),
+            source_kind: source_kind.to_owned(),
             source_event_type: message.msg_type.clone(),
             source_identifier,
             source_ts: Some(source_ts.to_string()),
@@ -620,6 +686,7 @@ pub(super) async fn emit_rtds_message(
                 "subscription_raw_json": rtds_subscription_evidence_json(),
                 "payload": message.payload,
                 "source_native_payload_json": source_native_payload_json,
+                "source_sequence_epoch_id": source_sequence_epoch_id,
             })
             .to_string(),
             collector_admission: None,
@@ -627,4 +694,14 @@ pub(super) async fn emit_rtds_message(
     )
     .await?;
     Ok(is_fresh)
+}
+
+fn rtds_source_sequence_epoch_id(identity: &CollectorIdentity) -> Result<String> {
+    let started_ns = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos();
+    let mut hash = Sha256::new();
+    hash.update(b"polymarket_rtds_source_sequence_epoch_v1\0");
+    hash.update(identity.host_id.as_bytes());
+    hash.update(std::process::id().to_le_bytes());
+    hash.update(started_ns.to_le_bytes());
+    Ok(format!("{:x}", hash.finalize()))
 }

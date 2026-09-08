@@ -1,6 +1,6 @@
 use super::*;
 
-pub(super) const STARTUP_READY_CHANNEL_CAPACITY: usize = 10;
+pub(super) const STARTUP_READY_CHANNEL_CAPACITY: usize = 11;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum StartupParticipantKind {

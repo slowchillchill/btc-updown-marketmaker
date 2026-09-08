@@ -102,7 +102,7 @@ struct MarketActorTestHooks {
 #[derive(Clone, Default)]
 struct DesiredRtdsSubscription {
     revision: u64,
-    subscription: Option<Subscription>,
+    subscriptions: Vec<Subscription>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -848,13 +848,20 @@ impl RtdsSdkRuntime {
         &mut self,
         subscription: Subscription,
     ) -> Result<u64, SdkStreamError> {
+        self.replace_subscriptions(vec![subscription])
+    }
+
+    pub fn replace_subscriptions(
+        &mut self,
+        subscriptions: Vec<Subscription>,
+    ) -> Result<u64, SdkStreamError> {
         self.next_revision = self
             .next_revision
             .checked_add(1)
             .ok_or_else(|| SdkStreamError::SubscriptionActor("revision overflow".to_owned()))?;
         self.desired_tx.send_replace(DesiredRtdsSubscription {
             revision: self.next_revision,
-            subscription: Some(subscription),
+            subscriptions,
         });
         Ok(self.next_revision)
     }
@@ -1125,7 +1132,7 @@ impl RtdsSdkRuntime {
 
     #[must_use]
     pub fn subscription_count(&self) -> usize {
-        usize::from(self.desired_tx.borrow().subscription.is_some())
+        self.desired_tx.borrow().subscriptions.len()
     }
 }
 
@@ -1148,7 +1155,7 @@ async fn run_rtds_subscription_actor(
         let mut generation_applied = false;
         let mut subscriptions = None::<RtdsSubscriptionManager>;
 
-        loop {
+        'generation_loop: loop {
             if let ConnectionState::Connected { .. } = *states.borrow() {
                 let generation = connection.connection_generation();
                 if connected_generation != Some(generation) {
@@ -1161,10 +1168,23 @@ async fn run_rtds_subscription_actor(
                 }
 
                 if !generation_applied
-                    && let Some(subscription) = desired.subscription.clone()
+                    && !desired.subscriptions.is_empty()
                     && let Some(generation_subscriptions) = subscriptions.as_ref()
                 {
-                    apply_rtds_subscription(generation_subscriptions, subscription)?;
+                    for subscription in &desired.subscriptions {
+                        if let Err(error) =
+                            apply_rtds_subscription(generation_subscriptions, subscription.clone())
+                        {
+                            if connection.connection_generation() != generation
+                                || !connection.state().is_connected()
+                            {
+                                subscriptions = None;
+                                connected_generation = None;
+                                continue 'generation_loop;
+                            }
+                            return Err(error);
+                        }
+                    }
                     if connection.connection_generation() != generation
                         || !connection.state().is_connected()
                     {
@@ -2105,7 +2125,7 @@ mod tests {
 
         let (desired_tx, desired_rx) = watch::channel(DesiredRtdsSubscription {
             revision: 1,
-            subscription: Some(Subscription::chainlink_prices(Some("btc/usd-1".to_owned()))),
+            subscriptions: vec![Subscription::chainlink_prices(Some("btc/usd-1".to_owned()))],
         });
         let (applied_tx, _applied_rx) = watch::channel(None);
         let (actor_error_tx, _actor_error_rx) = watch::channel(None);
@@ -2120,7 +2140,7 @@ mod tests {
 
         desired_tx.send_replace(DesiredRtdsSubscription {
             revision: 2,
-            subscription: Some(Subscription::chainlink_prices(Some("btc/usd-2".to_owned()))),
+            subscriptions: vec![Subscription::chainlink_prices(Some("btc/usd-2".to_owned()))],
         });
         close_tx.send(()).unwrap();
 
@@ -2136,5 +2156,73 @@ mod tests {
             r#"{"symbol":"btc/usd-2"}"#
         );
         actor.abort();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rtds_reconnect_applies_all_three_price_subscriptions() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (reconnected_tx, reconnected_rx) = tokio::sync::oneshot::channel();
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let mut generations = Vec::new();
+            for generation in 0..2 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = accept_async(stream).await.unwrap();
+                let mut topics = BTreeSet::new();
+                for _ in 0..3 {
+                    let frame = next_json_request(&mut socket).await;
+                    assert_eq!(frame["action"], "subscribe");
+                    let subscription = &frame["subscriptions"][0];
+                    assert_eq!(subscription["filters"], r#"{"symbol":"btc/usd"}"#);
+                    topics.insert(subscription["topic"].as_str().unwrap().to_owned());
+                }
+                generations.push(topics);
+                if generation == 0 {
+                    socket.send(Message::Close(None)).await.unwrap();
+                } else {
+                    reconnected_tx.send(()).unwrap();
+                    done_rx.await.unwrap();
+                    break;
+                }
+            }
+            generations
+        });
+        let mut config = Config::default();
+        config.reconnect.initial_backoff = Duration::from_millis(5);
+        config.reconnect.max_backoff = Duration::from_millis(10);
+        let mut runtime = RtdsSdkRuntime::new(format!("ws://{address}"), config).unwrap();
+        let mut subscriptions = vec![Subscription::chainlink_prices(Some("btc/usd".to_owned()))];
+        for topic in ["crypto_prices_twap_thirty", "crypto_prices_twap_sixty"] {
+            subscriptions.push(
+                Subscription::builder()
+                    .topic(topic.to_owned())
+                    .msg_type("update".to_owned())
+                    .filters(r#"{"symbol":"btc/usd"}"#.to_owned())
+                    .build(),
+            );
+        }
+        let revision = runtime.replace_subscriptions(subscriptions).unwrap();
+        timeout(Duration::from_secs(3), reconnected_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        runtime
+            .wait_subscription_applied(revision, Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert!(runtime.connection_generation() > 0);
+        assert_eq!(
+            runtime.applied_subscription().unwrap().generation,
+            runtime.connection_generation()
+        );
+        done_tx.send(()).unwrap();
+        let generations = server.await.unwrap();
+        let expected = BTreeSet::from([
+            "crypto_prices_chainlink".to_owned(),
+            "crypto_prices_twap_thirty".to_owned(),
+            "crypto_prices_twap_sixty".to_owned(),
+        ]);
+        assert_eq!(generations, vec![expected.clone(), expected]);
     }
 }

@@ -8,16 +8,18 @@ pub enum SourceKind {
     BinanceDepthSnapshot,
     BinanceAggTrade,
     PolymarketRtdsChainlinkBtcUsd,
+    PolymarketRtdsChainlinkTwap,
 }
 
 impl SourceKind {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::PolymarketMarket,
         Self::PolymarketMarketMetadata,
         Self::BinanceDepthSnapshot,
         Self::BinanceDepthUpdate,
         Self::BinanceAggTrade,
         Self::PolymarketRtdsChainlinkBtcUsd,
+        Self::PolymarketRtdsChainlinkTwap,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -28,6 +30,7 @@ impl SourceKind {
             Self::BinanceDepthSnapshot => "binance_depth_snapshot",
             Self::BinanceAggTrade => "binance_aggtrade",
             Self::PolymarketRtdsChainlinkBtcUsd => "polymarket_rtds_chainlink_btc_usd",
+            Self::PolymarketRtdsChainlinkTwap => "polymarket_rtds_chainlink_twap",
         }
     }
 }
