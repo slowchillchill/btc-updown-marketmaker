@@ -1,0 +1,477 @@
+{
+  "source_file_sha256": "7e544a8d2811ef0b597dbc1df73fad490a7e9b2ced76b52c8ed5340e6641f945",
+  "metadata_file_sha256": "b0e16c5ca84f1f144217ef7949958dbb49b39dc32878a9cf32f2dbab2973cd38",
+  "identity": {
+    "condition_id": "0xcd0ef6d000aea30396b0b6ff1cc6df17760237b4a578b3a8901e791758b27d1b",
+    "clob_market_id": "3394857",
+    "source_evidence_raw_sha256": "268228ba3cc293e2166c39ecdaad580fdbe389e80395aa5c7a8e05b18d9fd746",
+    "market_start_utc": 1786163100000,
+    "market_end_utc": 1786163400000,
+    "source_evidence_received_at_utc": 1786162857756,
+    "asset_ids": [
+      "77978710916918273184060752929022064680166483667192377174755549712387843872860",
+      "18192403301561870249186009700153456126945493127997947768525525738532957067885"
+    ],
+    "outcomes": [
+      "Up",
+      "Down"
+    ],
+    "initial_tick": "0.01"
+  },
+  "rows": [
+    {
+      "timestamp_received": 1786163145660,
+      "timestamp": 1786163145605,
+      "market": "0xcd0ef6d000aea30396b0b6ff1cc6df17760237b4a578b3a8901e791758b27d1b",
+      "slug": "btc-updown-5m-1786163100",
+      "collector_host_id": "ip-172-26-10-0",
+      "collector_region": "eu-west-1",
+      "source_endpoint": "wss://ws-subscriptions-clob.polymarket.com/ws/market",
+      "schema_version": "polymarket_orderbook_v3",
+      "source_sequence_epoch_id": "1db6e1d9dea04b498ccf8dea7e473c6b198869553c549383ce1679d28e3c25d9",
+      "collector_admission_sequence": 81856,
+      "collector_admission_time_utc_ms": 1786163145660,
+      "event": {
+        "Book": {
+          "asset_id": "77978710916918273184060752929022064680166483667192377174755549712387843872860",
+          "bids": [
+            {
+              "price": "0.01",
+              "size": "4557.61"
+            },
+            {
+              "price": "0.02",
+              "size": "3133.43"
+            },
+            {
+              "price": "0.03",
+              "size": "2193.49"
+            },
+            {
+              "price": "0.04",
+              "size": "879.9"
+            },
+            {
+              "price": "0.05",
+              "size": "1209.4"
+            },
+            {
+              "price": "0.06",
+              "size": "535"
+            },
+            {
+              "price": "0.07",
+              "size": "545"
+            },
+            {
+              "price": "0.08",
+              "size": "465.7"
+            },
+            {
+              "price": "0.09",
+              "size": "478.9"
+            },
+            {
+              "price": "0.1",
+              "size": "359.9"
+            },
+            {
+              "price": "0.11",
+              "size": "985.8"
+            },
+            {
+              "price": "0.12",
+              "size": "333.83"
+            },
+            {
+              "price": "0.13",
+              "size": "288.73"
+            },
+            {
+              "price": "0.14",
+              "size": "283.18"
+            },
+            {
+              "price": "0.15",
+              "size": "959.05"
+            },
+            {
+              "price": "0.16",
+              "size": "1684.53"
+            },
+            {
+              "price": "0.17",
+              "size": "265.99"
+            },
+            {
+              "price": "0.18",
+              "size": "138.8"
+            },
+            {
+              "price": "0.19",
+              "size": "197.3"
+            },
+            {
+              "price": "0.2",
+              "size": "284.8"
+            },
+            {
+              "price": "0.21",
+              "size": "314.1"
+            },
+            {
+              "price": "0.22",
+              "size": "124.6"
+            },
+            {
+              "price": "0.23",
+              "size": "177.3"
+            },
+            {
+              "price": "0.24",
+              "size": "119.1"
+            },
+            {
+              "price": "0.25",
+              "size": "182.9"
+            },
+            {
+              "price": "0.26",
+              "size": "122.55"
+            },
+            {
+              "price": "0.27",
+              "size": "224.13"
+            },
+            {
+              "price": "0.28",
+              "size": "81.4"
+            },
+            {
+              "price": "0.29",
+              "size": "125.3"
+            },
+            {
+              "price": "0.3",
+              "size": "50.2"
+            },
+            {
+              "price": "0.31",
+              "size": "118.1"
+            },
+            {
+              "price": "0.32",
+              "size": "39"
+            },
+            {
+              "price": "0.33",
+              "size": "116.9"
+            },
+            {
+              "price": "0.34",
+              "size": "37.8"
+            },
+            {
+              "price": "0.35",
+              "size": "113.7"
+            },
+            {
+              "price": "0.36",
+              "size": "63.6"
+            },
+            {
+              "price": "0.37",
+              "size": "411.6"
+            },
+            {
+              "price": "0.38",
+              "size": "36.5"
+            },
+            {
+              "price": "0.39",
+              "size": "86.5"
+            },
+            {
+              "price": "0.4",
+              "size": "55"
+            },
+            {
+              "price": "0.41",
+              "size": "256"
+            },
+            {
+              "price": "0.42",
+              "size": "191"
+            },
+            {
+              "price": "0.43",
+              "size": "266.62"
+            },
+            {
+              "price": "0.44",
+              "size": "57"
+            },
+            {
+              "price": "0.45",
+              "size": "90"
+            },
+            {
+              "price": "0.46",
+              "size": "102"
+            },
+            {
+              "price": "0.47",
+              "size": "85"
+            },
+            {
+              "price": "0.48",
+              "size": "40"
+            },
+            {
+              "price": "0.49",
+              "size": "107"
+            },
+            {
+              "price": "0.5",
+              "size": "196"
+            },
+            {
+              "price": "0.51",
+              "size": "141"
+            },
+            {
+              "price": "0.52",
+              "size": "369.13"
+            },
+            {
+              "price": "0.53",
+              "size": "233.87"
+            },
+            {
+              "price": "0.54",
+              "size": "193"
+            },
+            {
+              "price": "0.55",
+              "size": "228"
+            },
+            {
+              "price": "0.56",
+              "size": "41"
+            },
+            {
+              "price": "0.57",
+              "size": "165"
+            },
+            {
+              "price": "0.58",
+              "size": "22.06"
+            },
+            {
+              "price": "0.59",
+              "size": "60"
+            },
+            {
+              "price": "0.6",
+              "size": "10"
+            },
+            {
+              "price": "0.61",
+              "size": "190"
+            },
+            {
+              "price": "0.62",
+              "size": "10"
+            },
+            {
+              "price": "0.63",
+              "size": "100"
+            },
+            {
+              "price": "0.64",
+              "size": "30"
+            },
+            {
+              "price": "0.65",
+              "size": "172.07"
+            },
+            {
+              "price": "0.66",
+              "size": "267.53"
+            },
+            {
+              "price": "0.67",
+              "size": "168.02"
+            },
+            {
+              "price": "0.68",
+              "size": "234.7"
+            },
+            {
+              "price": "0.69",
+              "size": "268.04"
+            },
+            {
+              "price": "0.7",
+              "size": "459.6"
+            }
+          ],
+          "asks": [
+            {
+              "price": "0.99",
+              "size": "4088.86"
+            },
+            {
+              "price": "0.98",
+              "size": "3088.43"
+            },
+            {
+              "price": "0.97",
+              "size": "1750.16"
+            },
+            {
+              "price": "0.96",
+              "size": "669.9"
+            },
+            {
+              "price": "0.95",
+              "size": "1249.4"
+            },
+            {
+              "price": "0.94",
+              "size": "785"
+            },
+            {
+              "price": "0.93",
+              "size": "545"
+            },
+            {
+              "price": "0.92",
+              "size": "425.7"
+            },
+            {
+              "price": "0.91",
+              "size": "845.23"
+            },
+            {
+              "price": "0.9",
+              "size": "343.9"
+            },
+            {
+              "price": "0.89",
+              "size": "776.9"
+            },
+            {
+              "price": "0.88",
+              "size": "144.5"
+            },
+            {
+              "price": "0.87",
+              "size": "221.19"
+            },
+            {
+              "price": "0.86",
+              "size": "251.6"
+            },
+            {
+              "price": "0.85",
+              "size": "332.78"
+            },
+            {
+              "price": "0.84",
+              "size": "802.03"
+            },
+            {
+              "price": "0.83",
+              "size": "111.99"
+            },
+            {
+              "price": "0.82",
+              "size": "63.8"
+            },
+            {
+              "price": "0.81",
+              "size": "148.96"
+            },
+            {
+              "price": "0.8",
+              "size": "301.74"
+            },
+            {
+              "price": "0.79",
+              "size": "321.39"
+            },
+            {
+              "price": "0.78",
+              "size": "222.84"
+            },
+            {
+              "price": "0.77",
+              "size": "161.28"
+            },
+            {
+              "price": "0.76",
+              "size": "160.39"
+            },
+            {
+              "price": "0.75",
+              "size": "85"
+            },
+            {
+              "price": "0.74",
+              "size": "56.75"
+            },
+            {
+              "price": "0.73",
+              "size": "40"
+            },
+            {
+              "price": "0.72",
+              "size": "65"
+            },
+            {
+              "price": "0.71",
+              "size": "29.13"
+            }
+          ],
+          "last_trade_price": "0.290"
+        }
+      }
+    },
+    {
+      "timestamp_received": 1786163145660,
+      "timestamp": 1786163145433,
+      "market": "0xcd0ef6d000aea30396b0b6ff1cc6df17760237b4a578b3a8901e791758b27d1b",
+      "slug": "btc-updown-5m-1786163100",
+      "collector_host_id": "ip-172-26-10-0",
+      "collector_region": "eu-west-1",
+      "source_endpoint": "wss://ws-subscriptions-clob.polymarket.com/ws/market",
+      "schema_version": "polymarket_orderbook_v3",
+      "source_sequence_epoch_id": "1db6e1d9dea04b498ccf8dea7e473c6b198869553c549383ce1679d28e3c25d9",
+      "collector_admission_sequence": 81860,
+      "collector_admission_time_utc_ms": 1786163145661,
+      "event": {
+        "PriceChange": {
+          "price_changes": [
+            {
+              "asset_id": "77978710916918273184060752929022064680166483667192377174755549712387843872860",
+              "price": "0.01",
+              "size": "4362.61",
+              "side": "Buy",
+              "best_bid": "0.7",
+              "best_ask": "0.71"
+            },
+            {
+              "asset_id": "18192403301561870249186009700153456126945493127997947768525525738532957067885",
+              "price": "0.99",
+              "size": "4362.61",
+              "side": "Sell",
+              "best_bid": "0.29",
+              "best_ask": "0.3"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}
