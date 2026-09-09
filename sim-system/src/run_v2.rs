@@ -10137,15 +10137,7 @@ mod tests {
         );
         let delayed_at = receipt
             .platform_arrived_at_utc_ms
-            .checked_add(
-                actor
-                    ._rule_snapshot
-                    .snapshot()
-                    .documented_platform_rules
-                    .taker_delay
-                    .value
-                    .delay_ms as i64,
-            )
+            .checked_add(150)
             .expect("测试暂缓时点可表示");
         let keys = state
             .session

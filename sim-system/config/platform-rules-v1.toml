@@ -3,15 +3,15 @@ schema_version = "platform_rules_config_v1"
 [documented_platform_rules.taker_delay.value]
 enabled_only_when_itode = true
 applies_only_to_fok_fak_market_buy = true
-delay_ms = 250
+delay_ms = 150
 
 [documented_platform_rules.taker_delay.evidence]
 category = "OFFICIAL_PLATFORM_RULE"
-source = "https://docs.polymarket.com/api-reference/markets/get-clob-market-info"
-reviewed_on_utc_date = "2026-08-09"
+source = "https://x.com/PolymarketDevs/status/2095516409790910925"
+reviewed_on_utc_date = "2026-09-09"
 scope = "FOK/FAK market BUY when itode is enabled"
-limitation = "Does not represent geographic network latency"
-version = "CLOB_V2_2026-08-09"
+limitation = "用户依据公告批准固定为 150ms，不随平台后续变化自动更新；不代表地理网络时延"
+version = "CLOB_V2_2026-09-04"
 failure_semantics = "Missing itode means false; invalid wire values reject cold start"
 
 [documented_platform_rules.post_orders_batch.value]
