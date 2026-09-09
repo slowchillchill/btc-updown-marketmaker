@@ -1612,12 +1612,11 @@ fn validate_config(config: &PlatformRulesConfigV1) -> Result<(), RuleSnapshotErr
         &documented.resolved_order_status.evidence,
         RuleEvidenceCategory::OfficialSdkContract,
     )?;
-    if documented.taker_delay.value
-        != (TakerDelayRuleV1 {
-            enabled_only_when_itode: true,
-            applies_only_to_fok_fak_market_buy: true,
-            delay_ms: 250,
-        })
+    if !documented.taker_delay.value.enabled_only_when_itode
+        || !documented
+            .taker_delay
+            .value
+            .applies_only_to_fok_fak_market_buy
         || documented.post_orders_batch.value
             != (BatchRuleV1 {
                 max_items: 15,
@@ -3008,6 +3007,15 @@ pub(crate) mod tests {
         let target = directory.path().join("platform-rule-snapshot-v3.json");
         let sealed = create_successful_snapshot_v3(&server, target.clone()).await;
 
+        assert_eq!(
+            sealed
+                .snapshot()
+                .documented_platform_rules
+                .taker_delay
+                .value
+                .delay_ms,
+            150
+        );
         assert_eq!(server.request_count(), 3);
         assert_eq!(raw_response_digest_count(), 0);
         assert_eq!(sha256_hex_count(), 1);
@@ -3401,6 +3409,36 @@ pub(crate) mod tests {
         assert_eq!(recovered.access_mode(), SnapshotAccessMode::Recovery);
         assert_eq!(recovered.snapshot(), sealed.snapshot());
         assert_eq!(server.request_count(), request_count);
+    }
+
+    #[test]
+    fn v3_legacy_250_ms_snapshot_recovers_offline_without_replacing_its_delay() {
+        let bytes = include_bytes!("../tests/fixtures/platform-rule-snapshot-v3-gate-b.json");
+        let original: PlatformRuleSnapshotV3 =
+            serde_json::from_slice(bytes).expect("解析既有 250ms 快照夹具");
+        let directory = tempfile::tempdir().expect("创建旧快照恢复目录");
+        let target = directory.path().join("platform-rule-snapshot-v3.json");
+        std::fs::write(&target, bytes).expect("写入未经修改的旧快照");
+
+        let recovered = recover_process_snapshot_v3(RecoveryProcessSnapshotRequestV1 {
+            snapshot_path: target.clone(),
+            expected_file_sha256: sha256_hex(bytes),
+            expected_implementation_identity: original.provenance.implementation_identity.clone(),
+        })
+        .expect("旧 250ms 快照必须按原入口离线恢复");
+
+        assert_eq!(recovered.access_mode(), SnapshotAccessMode::Recovery);
+        assert_eq!(recovered.snapshot(), &original);
+        assert_eq!(
+            recovered
+                .snapshot()
+                .documented_platform_rules
+                .taker_delay
+                .value
+                .delay_ms,
+            250
+        );
+        assert_eq!(std::fs::read(target).expect("回读旧快照"), bytes);
     }
 
     #[tokio::test(flavor = "current_thread")]
