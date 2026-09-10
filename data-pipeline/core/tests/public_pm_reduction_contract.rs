@@ -102,7 +102,10 @@ impl<E: PmEvidenceV1> ReadState<E> {
                     let state = self.assets.get_mut(&asset.token_id.0).unwrap();
                     state.has_initial_snapshot = true;
                     state.book_ready = true;
-                    for (side, values) in [(BookSide::Bid, *bids), (BookSide::Ask, *asks)] {
+                    for (side, values) in [
+                        (BookSide::Bid, bids.as_ref()),
+                        (BookSide::Ask, asks.as_ref()),
+                    ] {
                         for value in values {
                             let key =
                                 key(&asset.token_id.0, side, d(&value.price_pusd_per_share.0));
@@ -1223,7 +1226,7 @@ fn retained_real_81856_then_81860_keeps_full_messages_and_has_no_195_reduction()
         .steps
         .iter()
         .find_map(|step| match &step.change {
-            PmStepChangeV1::InitialSnapshot { bids, .. } => Some(*bids),
+            PmStepChangeV1::InitialSnapshot { bids, .. } => Some(bids.as_ref()),
             _ => None,
         })
         .unwrap();

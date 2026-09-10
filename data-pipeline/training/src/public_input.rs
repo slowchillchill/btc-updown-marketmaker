@@ -305,6 +305,22 @@ pub fn open_validated_public_input_parquet_v1(
     )
 }
 
+/// 同一已验证解码入口，复用原批次字节限制。
+pub(crate) fn open_public_input_bounded_v1(
+    file: &ValidatedDirectSourceParquetFileV3,
+    batch_size: usize,
+    max_batch_bytes: usize,
+) -> Result<TypedRawParquetStream<TypedRawRowV2>, TypedRawReadError> {
+    open_validated_parquet_with_decoder(
+        file,
+        batch_size,
+        None,
+        Some(max_batch_bytes),
+        expected_public_schema,
+        decode_public_batch,
+    )
+}
+
 #[derive(Debug)]
 pub enum HistoricalAnchorReadError {
     Io(io::Error),

@@ -3440,7 +3440,7 @@ pub fn regular_directory_bytes(path: &Path) -> Result<u64, GateAPublicationError
     Ok(total)
 }
 
-fn sync_tree(path: &Path) -> Result<(), GateAPublicationError> {
+pub(crate) fn sync_tree(path: &Path) -> Result<(), GateAPublicationError> {
     for entry in fs::read_dir(path)? {
         let entry = entry?;
         let metadata = fs::symlink_metadata(entry.path())?;
@@ -3481,6 +3481,8 @@ fn commit_candidate_no_replace(
     )
     .map_err(|error| io::Error::from_raw_os_error(error.raw_os_error()))?;
     guard.path = target.clone();
+    #[cfg(test)]
+    crate::public_recording::faults::at("after_rename")?;
     parent_file.sync_all()?;
     guard.retain = true;
     Ok(target)
@@ -4278,4 +4280,17 @@ pub(crate) mod tests {
             [target_name].into()
         );
     }
+}
+
+pub(crate) fn commit_public_segment(
+    stage: PathBuf,
+    target_name: &str,
+) -> Result<PathBuf, GateAPublicationError> {
+    commit_candidate_no_replace(
+        PublicationCandidateGuard {
+            path: stage,
+            retain: false,
+        },
+        target_name,
+    )
 }
