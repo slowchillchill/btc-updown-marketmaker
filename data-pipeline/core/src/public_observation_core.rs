@@ -13,7 +13,7 @@ use std::str::FromStr;
 type LevelKey = (String, bool, Decimal);
 
 #[derive(Clone, Debug)]
-struct PublicPmState<E = SourceEvidenceRefV3> {
+pub struct PmOwnedStateV1<E = SourceEvidenceRefV3> {
     context: PmMarketContextV1<E>,
     epoch: Option<String>,
     assets: BTreeMap<String, PmAssetStateV1<E>>,
@@ -30,8 +30,11 @@ fn d(value: &str) -> Decimal {
     Decimal::from_str(value).unwrap()
 }
 
-impl<E: PmEvidenceV1> PublicPmState<E> {
-    fn new(context: PmMarketContextV1<E>) -> Self {
+impl<E: PmEvidenceV1> PmOwnedStateV1<E> {
+    pub fn context(&self) -> &PmMarketContextV1<E> {
+        &self.context
+    }
+    pub fn new(context: PmMarketContextV1<E>) -> Self {
         let evidence = context.identity_source_evidence[0].clone();
         let assets = context
             .assets
@@ -63,7 +66,7 @@ impl<E: PmEvidenceV1> PublicPmState<E> {
             selected: BTreeMap::new(),
         }
     }
-    fn apply<I>(&mut self, result: &PmMessageReductionV1<'_, E, I>) {
+    pub fn apply<I>(&mut self, result: &PmMessageReductionV1<'_, E, I>) {
         for step in &result.steps {
             match &step.change {
                 PmStepChangeV1::Epoch {
@@ -96,7 +99,10 @@ impl<E: PmEvidenceV1> PublicPmState<E> {
                     let state = self.assets.get_mut(&asset.token_id.0).unwrap();
                     state.has_initial_snapshot = true;
                     state.book_ready = true;
-                    for (side, values) in [(BookSide::Bid, *bids), (BookSide::Ask, *asks)] {
+                    for (side, values) in [
+                        (BookSide::Bid, bids.as_ref()),
+                        (BookSide::Ask, asks.as_ref()),
+                    ] {
                         for value in values {
                             let key =
                                 key(&asset.token_id.0, side, d(&value.price_pusd_per_share.0));
@@ -182,7 +188,7 @@ impl<E: PmEvidenceV1> PublicPmState<E> {
     }
 }
 
-impl<E: PmEvidenceV1> PmStateReadV1<E> for PublicPmState<E> {
+impl<E: PmEvidenceV1> PmStateReadV1<E> for PmOwnedStateV1<E> {
     fn market(&self) -> &MarketIdentityV2 {
         &self.context.market
     }
@@ -296,7 +302,7 @@ struct AssetProjection {
 struct MarketState {
     metadata: PolymarketMetadataReducer<E>,
     terminal: PolymarketTerminalMerger<E>,
-    pm: PublicPmState<E>,
+    pm: PmOwnedStateV1<E>,
     assets: BTreeMap<String, AssetProjection>,
     level_anchors: BTreeMap<LevelKey, ObservedFactV1<()>>,
     seen_epochs: BTreeSet<String>,
@@ -423,6 +429,9 @@ impl PublicObservationCoreV1 {
         self.references.get(condition)
     }
     /// 仅投影已知固定身份；来源准备可借此构造规范消息。
+    pub fn fixed_markets(&self) -> impl Iterator<Item = MarketIdentityV2> + '_ {
+        self.markets.values().map(|m| m.pm.context.market.clone())
+    }
     pub fn pm_context(&self, condition: &str) -> Option<PmMarketContextV1> {
         self.markets.get(condition).map(|m| PmMarketContextV1 {
             market: m.pm.context.market.clone(),
@@ -594,7 +603,7 @@ impl PublicObservationCoreV1 {
                         market_context.clone(),
                         &self.header.canonical_rule_version,
                     )?;
-                    let pm = PublicPmState::new(PmMarketContextV1 {
+                    let pm = PmOwnedStateV1::new(PmMarketContextV1 {
                         market: market_context.market.clone(),
                         assets: market_context.assets.clone(),
                         identity_source_evidence: market_context.identity_source_evidence.clone(),
@@ -1119,7 +1128,10 @@ impl MarketState {
                 } => {
                     self.assets.get_mut(&asset.token_id.0).unwrap().book =
                         observed_pm((), step, fact, group, "l2");
-                    for (side, levels) in [(BookSide::Bid, *bids), (BookSide::Ask, *asks)] {
+                    for (side, levels) in [
+                        (BookSide::Bid, bids.as_ref()),
+                        (BookSide::Ask, asks.as_ref()),
+                    ] {
                         for level in levels {
                             self.level_anchors.insert(
                                 key(&asset.token_id.0, side, d(&level.price_pusd_per_share.0)),
@@ -1376,4 +1388,18 @@ fn level_field_path(asset: &AssetIdentityV1, side: BookSide, price: &ExactDecima
         },
         price.0
     )
+}
+
+impl PublicAppliedIngressV1<'_> {
+    pub fn into_owned(self) -> PublicAppliedIngressV1<'static> {
+        PublicAppliedIngressV1 {
+            applied: self.applied,
+            reductions: self.reductions,
+            pm_reductions: self
+                .pm_reductions
+                .into_iter()
+                .map(|(p, r)| (p, r.into_owned()))
+                .collect(),
+        }
+    }
 }

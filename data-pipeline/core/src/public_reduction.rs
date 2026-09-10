@@ -1,6 +1,6 @@
 //! 将同次业务结果绑定公共逻辑位置；后台物化不读取任何可变归约状态。
 use contracts::*;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::pm_reduction::PreparedPmEvidenceV1;
 use crate::reduction::{
@@ -23,7 +23,7 @@ pub struct PublicReductionContextV1 {
     pub direct_sources: Vec<SourceEvidenceRefV3>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PublicReductionReportV1<I = PublicFactPositionV1> {
     pub position: PublicReportPositionV1,
     pub report: ReductionReportEntryV1<SourceEvidenceRefV3, I>,

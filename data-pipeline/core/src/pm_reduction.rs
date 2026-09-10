@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use contracts::*;
 use rust_decimal::Decimal;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::pm_message::ParsedCanonicalPmMessageV1;
 use crate::reduction::{
@@ -104,13 +104,13 @@ pub struct PmMarketContextV1<E = SourceEvidenceRefV3> {
     pub canonical_rule_version: String,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PmEvidencePairV1<E = SourceEvidenceRefV3> {
     pub direct: E,
     pub frontier: E,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PmL2SelectionVersionV1 {
     pub source_sequence_epoch_id: String,
     pub source_at_utc_ms: i64,
@@ -134,7 +134,7 @@ impl PmL2SelectionVersionV1 {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PmSelectedLevelV1<E = SourceEvidenceRefV3> {
     pub version: PmL2SelectionVersionV1,
     /// FullBook 的显式零量仍存在；删除或快照缺价为 false。
@@ -283,13 +283,13 @@ pub trait PmStateReadV1<E = SourceEvidenceRefV3> {
     ) -> Box<dyn Iterator<Item = Decimal> + 'a>;
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PmConfirmationComponentV1 {
     BestBidAsk,
     Tick,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PmStepChangeV1<'m, E = SourceEvidenceRefV3> {
     Epoch {
         source_sequence_epoch_id: String,
@@ -305,8 +305,8 @@ pub enum PmStepChangeV1<'m, E = SourceEvidenceRefV3> {
         source_sequence_epoch_id: String,
         source_cursor: u64,
         book_digest_sha256: Sha256Hex,
-        bids: &'m [PriceLevelV1],
-        asks: &'m [PriceLevelV1],
+        bids: std::borrow::Cow<'m, [PriceLevelV1]>,
+        asks: std::borrow::Cow<'m, [PriceLevelV1]>,
         evidence: PmEvidencePairV1<E>,
     },
     LevelChange {
@@ -355,7 +355,97 @@ pub enum PmStepChangeV1<'m, E = SourceEvidenceRefV3> {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+impl<E> PmStepChangeV1<'_, E> {
+    fn into_owned(self) -> PmStepChangeV1<'static, E> {
+        match self {
+            Self::Epoch {
+                source_sequence_epoch_id,
+            } => PmStepChangeV1::Epoch {
+                source_sequence_epoch_id,
+            },
+            Self::ResetAsset {
+                asset,
+                absence_baseline,
+                bba_reanchor_frontier,
+            } => PmStepChangeV1::ResetAsset {
+                asset,
+                absence_baseline,
+                bba_reanchor_frontier,
+            },
+            Self::InitialSnapshot {
+                asset,
+                initial_tick_size_pusd_per_share,
+                source_sequence_epoch_id,
+                source_cursor,
+                book_digest_sha256,
+                bids,
+                asks,
+                evidence,
+            } => PmStepChangeV1::InitialSnapshot {
+                asset,
+                initial_tick_size_pusd_per_share,
+                source_sequence_epoch_id,
+                source_cursor,
+                book_digest_sha256,
+                bids: std::borrow::Cow::Owned(bids.into_owned()),
+                asks: std::borrow::Cow::Owned(asks.into_owned()),
+                evidence,
+            },
+            Self::LevelChange {
+                transition,
+                evidence,
+            } => PmStepChangeV1::LevelChange {
+                transition,
+                evidence,
+            },
+            Self::LevelEvidenceOnly {
+                asset,
+                side,
+                price,
+                evidence,
+            } => PmStepChangeV1::LevelEvidenceOnly {
+                asset,
+                side,
+                price,
+                evidence,
+            },
+            Self::Selection {
+                asset,
+                side,
+                price,
+                selected,
+                previous,
+                absence_baseline,
+            } => PmStepChangeV1::Selection {
+                asset,
+                side,
+                price,
+                selected,
+                previous,
+                absence_baseline,
+            },
+            Self::AbsenceBaseline {
+                asset,
+                evidence,
+                selected,
+            } => PmStepChangeV1::AbsenceBaseline {
+                asset,
+                evidence,
+                selected,
+            },
+            Self::BookReady { asset } => PmStepChangeV1::BookReady { asset },
+            Self::BestBidAsk { quote, evidence } => PmStepChangeV1::BestBidAsk { quote, evidence },
+            Self::Tick { tick, evidence } => PmStepChangeV1::Tick { tick, evidence },
+            Self::PublicConfirmation { asset, kind } => {
+                PmStepChangeV1::PublicConfirmation { asset, kind }
+            }
+            Self::PublicTrade { trade } => PmStepChangeV1::PublicTrade { trade },
+            Self::Quality { boundary } => PmStepChangeV1::Quality { boundary },
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PmReductionStepV1<'m, E = SourceEvidenceRefV3, I = CanonicalEventId> {
     pub canonical_fact_id: CanonicalEventId,
     pub member_index: Option<u32>,
@@ -371,13 +461,13 @@ pub struct PmReductionStepV1<'m, E = SourceEvidenceRefV3, I = CanonicalEventId> 
     pub quality: EventQualityV2,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PmOperationEvidenceV2<E = SourceEvidenceRefV3> {
     pub role: ReductionEvidenceRoleV1,
     pub source_evidence: E,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PmReductionDispositionV2<E = SourceEvidenceRefV3, I = CanonicalEventId> {
     Produced {
         derived_id: I,
@@ -390,7 +480,7 @@ pub enum PmReductionDispositionV2<E = SourceEvidenceRefV3, I = CanonicalEventId>
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PmReductionReportV2<E = SourceEvidenceRefV3, I = CanonicalEventId> {
     pub canonical_fact_id: CanonicalEventId,
     pub member_index: Option<u32>,
@@ -534,7 +624,13 @@ pub(crate) fn reduce_message<'m, E: PmEvidenceV1, S: PmStateReadV1<E>>(
     input: PmMessageInput<'m, E>,
     public_selection: bool,
 ) -> Result<PmMessageReductionV1<'m, E>, ContractError> {
-    materialize_pm_reduction(compute_message(context, previous, input, public_selection)?)
+    materialize_pm_reduction(compute_message(
+        context,
+        previous,
+        input,
+        public_selection,
+        public_selection,
+    )?)
 }
 
 fn compute_message<'m, E: PmEvidenceV1, S: PmStateReadV1<E>>(
@@ -542,6 +638,7 @@ fn compute_message<'m, E: PmEvidenceV1, S: PmStateReadV1<E>>(
     previous: &S,
     input: PmMessageInput<'m, E>,
     public_selection: bool,
+    manage_epoch: bool,
 ) -> Result<PmMessageReductionV1<'m, E, u32>, ContractError> {
     let mut worker = Worker {
         context,
@@ -560,7 +657,7 @@ fn compute_message<'m, E: PmEvidenceV1, S: PmStateReadV1<E>>(
             materialization_rule_version: context.canonical_rule_version.clone(),
         },
     };
-    if public_selection
+    if manage_epoch
         && previous.current_epoch()
             != Some(worker.input.admission.source_sequence_epoch_id.as_str())
     {
@@ -1073,8 +1170,8 @@ impl<'a, 'm, E: PmEvidenceV1, S: PmStateReadV1<E>> Worker<'a, 'm, E, S> {
                         &incoming_bids,
                         &incoming_asks,
                     )?,
-                    bids,
-                    asks,
+                    bids: bids.into(),
+                    asks: asks.into(),
                     evidence: baseline.clone(),
                 },
                 None,
@@ -1946,6 +2043,7 @@ pub fn compute_pm_message_steps_v1<'m>(
                 .expect("准备已取得准入坐标"),
         },
         public_selection,
+        true,
     )?;
     let positions: Vec<_> = result
         .steps
@@ -2229,7 +2327,8 @@ mod no_encoding_tests {
                     0,
                     public_selection,
                 )
-                .unwrap();
+                .unwrap()
+                .into_owned();
                 assert!(result.steps.iter().any(|step| matches!(&step.change, PmStepChangeV1::InitialSnapshot { bids, asks, .. } if bids.len() == 1 && asks.len() == 1)));
                 assert!(
                     result
@@ -2246,6 +2345,36 @@ mod no_encoding_tests {
                             == -100)
                 );
             });
+        }
+    }
+}
+
+/// 交接当前不可变结果；只持有仍借用的当前快照成员，不编码或再归约。
+impl<E, I> PmMessageReductionV1<'_, E, I> {
+    pub fn into_owned(self) -> PmMessageReductionV1<'static, E, I> {
+        PmMessageReductionV1 {
+            steps: self
+                .steps
+                .into_iter()
+                .map(|s| PmReductionStepV1 {
+                    canonical_fact_id: s.canonical_fact_id,
+                    member_index: s.member_index,
+                    step_index: s.step_index,
+                    derived_id: s.derived_id,
+                    change: s.change.into_owned(),
+                    direct: s.direct,
+                    prestate: s.prestate,
+                    absence: s.absence,
+                    dependencies: s.dependencies,
+                    direct_time: s.direct_time,
+                    dependency_time: s.dependency_time,
+                    quality: s.quality,
+                })
+                .collect(),
+            reports: self.reports,
+            touched_level_entries: self.touched_level_entries,
+            materialization_market: self.materialization_market,
+            materialization_rule_version: self.materialization_rule_version,
         }
     }
 }

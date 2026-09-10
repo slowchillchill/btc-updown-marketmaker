@@ -465,10 +465,10 @@ impl Drop for WorkspaceGuard {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct CaptureCoordinate {
-    admitted_at_utc_ms: i64,
-    received_at_utc_ms: i64,
-    collector_admission_sequence: u64,
+pub(crate) struct CaptureCoordinate {
+    pub(crate) admitted_at_utc_ms: i64,
+    pub(crate) received_at_utc_ms: i64,
+    pub(crate) collector_admission_sequence: u64,
 }
 
 #[derive(Default)]
@@ -697,7 +697,7 @@ fn typed_raw_read_scope(scope: &CanonicalRunScope) -> TypedRawReadScope {
     )
 }
 
-fn update_epoch_start(
+pub(crate) fn update_epoch_start(
     starts: &mut BTreeMap<String, CaptureCoordinate>,
     epoch: &str,
     coordinate: CaptureCoordinate,
@@ -714,7 +714,7 @@ fn update_epoch_start(
     Ok(())
 }
 
-fn rank_epochs(
+pub(crate) fn rank_epochs(
     starts: BTreeMap<String, CaptureCoordinate>,
     source_kind: &'static str,
 ) -> Result<BTreeMap<String, u32>, CanonicalRunError> {

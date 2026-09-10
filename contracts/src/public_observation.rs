@@ -381,3 +381,68 @@ pub struct AppliedIngressV1 {
 pub enum PublicInitialStateV1 {
     Empty,
 }
+
+/// 同批记录及其引用都已稳定的前缀；与内存已应用凭据分开。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommittedIngressPrefixV1 {
+    pub input_stream_id: String,
+    pub next_input_position: u64,
+    pub next_canonical_position: u64,
+    pub next_group_position: u64,
+    pub next_observation_position: u64,
+    pub next_public_index_position: u64,
+    pub stable_storage_ref: String,
+    pub normal_end: bool,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceArtifactBindingV1 {
+    pub source_message_id: Sha256Hex,
+    pub manifest_sha256: Sha256Hex,
+    pub file_sha256: Sha256Hex,
+    pub relative_path: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicGroupIndexV1 {
+    pub group_id: Sha256Hex,
+    pub group_position: u64,
+    pub member_input_positions: Vec<u64>,
+    pub closed_at_input_position: u64,
+    pub records: Vec<PublicFactPositionV1>,
+    pub observation_positions: Vec<u64>,
+}
+/// 状态由唯一输入流重建；索引不复制整棵观测或其内嵌来源事实。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicObservationIndexV1 {
+    pub observation_position: u64,
+    pub market: MarketIdentityV2,
+    pub group_position: u64,
+    pub visible_prefix: AppliedIngressPrefixV1,
+    pub group_events: Vec<PublicFactPositionV1>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReplayIndexClosureV1 {
+    NextGlobalEventAt(i64),
+    EndOfInput,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HiddenDerivedStepRefV1 {
+    pub canonical_fact_id: crate::CanonicalEventId,
+    pub canonical_record_position: u64,
+    pub member_index: Option<u32>,
+    pub step_index: u32,
+    pub derivation_position: u64,
+    pub position: PmDerivedStepPositionV1,
+    pub derived_id: DerivedPmStepIdV1,
+    pub dependency_time: EventTimeV2,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClosedHiddenStepBucketV1 {
+    pub committed_prefix: CommittedIngressPrefixV1,
+    pub bucket_time_utc_ms: i64,
+    pub index_start: u64,
+    pub index_end: u64,
+    pub steps: Vec<HiddenDerivedStepRefV1>,
+    /// 完整隐藏外排索引中的全局位置；通过索引项再定位唯一规范记录。
+    pub reference_positions: Vec<u64>,
+    pub closure: ReplayIndexClosureV1,
+}

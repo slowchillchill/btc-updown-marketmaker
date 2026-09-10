@@ -431,8 +431,9 @@ impl Write for SharedQuotaWriter {
     }
 }
 
-struct SequentialCaptureWriter {
+pub(crate) struct SequentialCaptureWriter {
     stream_name: &'static str,
+    sync_batches: bool,
     path: PathBuf,
     writer: ArrowWriter<SharedQuotaWriter>,
     rows: Vec<SortRow>,
@@ -444,7 +445,7 @@ struct SequentialCaptureWriter {
 }
 
 impl SequentialCaptureWriter {
-    fn create(
+    pub(crate) fn create(
         stream_name: &'static str,
         directory: &Path,
         total_bytes: Arc<Mutex<u64>>,
@@ -473,6 +474,7 @@ impl SequentialCaptureWriter {
         .map_err(|error| GateAError::Io(io::Error::other(error)))?;
         Ok(Self {
             stream_name,
+            sync_batches: true,
             path,
             writer,
             rows: Vec::with_capacity(output_config.sort.batch_rows),
@@ -484,7 +486,7 @@ impl SequentialCaptureWriter {
         })
     }
 
-    fn push(&mut self, sequence: u64, key: Vec<u8>, payload: &[u8]) -> io::Result<()> {
+    pub(crate) fn push(&mut self, sequence: u64, key: Vec<u8>, payload: &[u8]) -> io::Result<()> {
         if sequence != self.expected_sequence {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -541,14 +543,20 @@ impl SequentialCaptureWriter {
     }
 
     fn flush_batch(&mut self) -> io::Result<()> {
+        self.write_batch(self.sync_batches)
+    }
+
+    fn write_batch(&mut self, sync: bool) -> io::Result<()> {
         if self.rows.is_empty() {
             return Ok(());
         }
         let batch = batch_from_rows(&self.rows).map_err(io::Error::other)?;
         self.writer.write(&batch).map_err(io::Error::other)?;
         self.writer.flush().map_err(io::Error::other)?;
-        self.writer.sync()?;
-        self.writer.inner_mut().sync_data_and_drop_cache()?;
+        if sync {
+            self.writer.sync()?;
+            self.writer.inner_mut().sync_data_and_drop_cache()?;
+        }
         self.metrics.initial_runs = self
             .metrics
             .initial_runs
@@ -556,6 +564,18 @@ impl SequentialCaptureWriter {
             .ok_or_else(|| io::Error::other("捕获产物行组计数溢出"))?;
         self.rows.clear();
         Ok(())
+    }
+
+    /// 新后台批次在显式稳定边界关闭；不执行旧离线逻辑摘要扫描。
+    pub(crate) fn defer_batch_sync(&mut self) {
+        self.sync_batches = false;
+    }
+    pub(crate) fn close_segment(mut self) -> Result<PathBuf, GateAError> {
+        self.write_batch(false)?;
+        self.writer
+            .close()
+            .map_err(|e| GateAError::Io(io::Error::other(e)))?;
+        Ok(self.path)
     }
 
     fn finish(mut self, output_config: &GateAOutputConfig) -> Result<SortOutcome, GateAError> {

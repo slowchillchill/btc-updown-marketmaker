@@ -8,8 +8,11 @@ mod dpt_gate_a_cli;
 pub mod gate_a;
 mod gate_a_publication;
 mod gate_a_sim_adapter;
+pub mod hidden_preparation;
 pub mod observation;
 pub mod public_input;
+pub mod public_recording;
+pub mod public_replay;
 pub mod typed_raw;
 
 pub use gate_a_publication::observation_publication::*;
@@ -2785,7 +2788,7 @@ impl<W: Write> Write for QuotaWriter<W> {
     }
 }
 
-struct RunCursor {
+pub(crate) struct RunCursor {
     path: PathBuf,
     metadata: ArrowReaderMetadata,
     next_row_group: usize,
@@ -2796,7 +2799,11 @@ struct RunCursor {
 }
 
 impl RunCursor {
-    fn open(path: &Path, batch_rows: usize, max_batch_bytes: usize) -> Result<Self, SortError> {
+    pub(crate) fn open(
+        path: &Path,
+        batch_rows: usize,
+        max_batch_bytes: usize,
+    ) -> Result<Self, SortError> {
         let file = File::open(path)?;
         let metadata = ArrowReaderMetadata::load(&file, Default::default())?;
         Ok(Self {
@@ -2829,7 +2836,7 @@ impl RunCursor {
         Ok(true)
     }
 
-    fn next_row(&mut self) -> Result<Option<SortRow>, SortError> {
+    pub(crate) fn next_row(&mut self) -> Result<Option<SortRow>, SortError> {
         loop {
             if let Some(row) = self.batch.next() {
                 return Ok(Some(row));

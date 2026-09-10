@@ -2281,7 +2281,10 @@ impl PolymarketReducer {
                         .expect("resolved asset");
                     state.has_initial_snapshot = true;
                     state.book_ready = true;
-                    for (target, levels) in [(&mut state.bids, bids), (&mut state.asks, asks)] {
+                    for (target, levels) in [
+                        (&mut state.bids, bids.as_ref()),
+                        (&mut state.asks, asks.as_ref()),
+                    ] {
                         target.clear();
                         for level in levels {
                             target.insert(

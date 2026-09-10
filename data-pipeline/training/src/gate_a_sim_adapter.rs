@@ -8,11 +8,7 @@ use crate::gate_a::{
     GateAError, PlatformReplayCursor, ValidatedGateACandidate, VisibilityReplayCursor,
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum ReplayIndexClosureV1 {
-    NextGlobalEventAt(i64),
-    EndOfInput,
-}
+pub use contracts::ReplayIndexClosureV1;
 
 struct PositionedCanonicalRecord {
     logical_position: u64,
