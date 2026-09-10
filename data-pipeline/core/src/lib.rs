@@ -1,6 +1,7 @@
 pub mod pm_message;
 pub mod pm_reduction;
 pub mod public_input;
+pub mod public_observation_core;
 pub mod public_reduction;
 pub mod public_reference;
 pub mod reduction;

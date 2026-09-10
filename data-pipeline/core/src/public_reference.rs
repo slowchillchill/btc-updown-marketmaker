@@ -1,4 +1,8 @@
 //! 对已采集参考事实做纯规范化；不维护市场状态或触发模型。
+use contracts::{
+    CanonicalInputRecordRefV1, DirectObservationAnchorV1, PreparedReferenceSelectionV1,
+    TemporaryTwapReferenceV1,
+};
 
 use contracts::{
     BtcSettlementReferenceV1, CANONICAL_REFERENCE_EVENT_SCHEMA_V2, CanonicalEventId,
@@ -570,4 +574,119 @@ pub fn twap_source_evidence_v3(
         received_at_utc_ms: common.timestamp_received,
         collector_admission: Some(admission),
     })
+}
+
+/// 页由来源所属方按唯一记录原序供给；不是另一个选择器或历史缓存。
+#[derive(Clone, Debug)]
+pub struct TemporaryReferenceCandidateV1 {
+    pub canonical_fact: CanonicalReferenceEventV2,
+    pub record_ref: CanonicalInputRecordRefV1,
+    pub anchor: DirectObservationAnchorV1,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TemporaryReferenceCursorV1 {
+    pub next_input_position: u64,
+}
+pub struct TemporaryReferencePageV1<'a> {
+    pub candidates: &'a [TemporaryReferenceCandidateV1],
+    pub next_cursor: TemporaryReferenceCursorV1,
+    pub exhausted: bool,
+}
+/// 由当前真实身份/规则证据确定的适用范围；查询完成时间不自动成为生效时间。
+#[derive(Clone, Debug)]
+pub enum TemporaryReferenceApplicabilityV1 {
+    OpeningWindow,
+    FromInput(CanonicalInputRecordRefV1),
+    Unproven,
+}
+pub struct TemporaryReferenceStateV1<'a> {
+    pub market: &'a MarketIdentityV2,
+    pub official: Option<&'a MarketPriceAnchorV1>,
+    pub temporary: Option<&'a TemporaryTwapReferenceV1>,
+    /// 实际身份/规则材料证明的适用类型，不由日期或市场名推断。
+    pub reference: Option<BtcSettlementReferenceV1>,
+    pub applicability: TemporaryReferenceApplicabilityV1,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TemporaryReferenceSelectionResultV1 {
+    NeedNextPage { cursor: TemporaryReferenceCursorV1 },
+    Prepared(PreparedReferenceSelectionV1),
+}
+
+/// 临时参考适用性和首条判断的唯一纯函数；准备阶段调用，热核心仅提交返回值。
+pub fn select_temporary_reference_v1(
+    state: TemporaryReferenceStateV1<'_>,
+    dependency_input_position: u64,
+    cursor: TemporaryReferenceCursorV1,
+    page: TemporaryReferencePageV1<'_>,
+) -> TemporaryReferenceSelectionResultV1 {
+    let empty = || {
+        TemporaryReferenceSelectionResultV1::Prepared(PreparedReferenceSelectionV1 {
+            selected_record_ref: None,
+            selected_value: None,
+            direct_anchor: None,
+            dependency_input_position,
+        })
+    };
+    if state.official.is_some() || state.temporary.is_some() {
+        return empty();
+    }
+    let window_s = match state.reference {
+        Some(BtcSettlementReferenceV1::ChainlinkTwapThirtySeconds) => 30,
+        Some(BtcSettlementReferenceV1::ChainlinkTwapSixtySeconds) => 60,
+        _ => return empty(),
+    };
+    if matches!(
+        state.applicability,
+        TemporaryReferenceApplicabilityV1::Unproven
+    ) {
+        return empty();
+    }
+    for candidate in page.candidates {
+        let CanonicalReferenceEventPayloadV2::ChainlinkBtcUsdTwap(value) =
+            &candidate.canonical_fact.payload
+        else {
+            continue;
+        };
+        if let TemporaryReferenceApplicabilityV1::FromInput(ref bound) = state.applicability {
+            if candidate.record_ref.input_stream_id != bound.input_stream_id
+                || candidate.record_ref.input_position < bound.input_position
+            {
+                continue;
+            }
+        }
+        if candidate.record_ref.input_position < cursor.next_input_position
+            || candidate.record_ref.input_position > dependency_input_position
+            || value.window_s != window_s
+            || !matches!(
+                candidate.canonical_fact.quality.availability,
+                MarketDataQuality::Fresh | MarketDataQuality::Stale
+            )
+        {
+            continue;
+        }
+        let start = state.market.window.start_at_utc_ms;
+        // 按实际观测时刻归属半开市场窗口，再沿原接收/记录顺序取首条。
+        if value.payload_timestamp_utc_ms < start
+            || value.payload_timestamp_utc_ms >= state.market.window.end_at_utc_ms
+        {
+            continue;
+        }
+        if candidate.anchor.received_at_utc_ms < start {
+            continue;
+        }
+        return TemporaryReferenceSelectionResultV1::Prepared(PreparedReferenceSelectionV1 {
+            selected_record_ref: Some(candidate.record_ref.clone()),
+            selected_value: Some(value.clone()),
+            direct_anchor: Some(candidate.anchor.clone()),
+            dependency_input_position,
+        });
+    }
+    if page.exhausted {
+        empty()
+    } else {
+        TemporaryReferenceSelectionResultV1::NeedNextPage {
+            cursor: page.next_cursor,
+        }
+    }
 }
