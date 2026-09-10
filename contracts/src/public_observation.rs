@@ -1,4 +1,4 @@
-//! #7 已签发的公共参考输入；完整观测与共享核心仍由其所属接口承接。
+//! 公共参考事实、逐事实业务观测与串行流引用。
 
 use serde::{Deserialize, Serialize};
 
@@ -221,6 +221,7 @@ pub struct PublicBusinessFactV1 {
     pub direct_time: EventTimeV2,
     pub dependency_time: EventTimeV2,
     pub quality: EventQualityV2,
+    pub direct_sources: Vec<SourceEvidenceRefV3>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,7 +268,7 @@ pub struct DirectObservationAnchorV1 {
     pub received_at_utc_ms: i64,
 }
 
-/// 来源准备交接的唯一选择结果；本阶段只定义供料，不实现选择状态机。
+/// 来源准备阶段由核心纯函数产生的唯一选择结果。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreparedReferenceSelectionV1 {
     pub selected_record_ref: Option<crate::CanonicalInputRecordRefV1>,
@@ -281,4 +282,102 @@ pub struct PublicReportPositionV1 {
     pub input_stream_id: String,
     pub closed_at_input_position: u64,
     pub report_ordinal: u32,
+}
+
+/// 一次分配并由相同原序重放复用的流头；初态始终为空。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicInputStreamHeaderV1 {
+    pub input_stream_id: String,
+    pub canonical_rule_version: String,
+    pub observation_version: String,
+    pub ordering_version: String,
+    pub input_scope: String,
+    pub max_pending_ws_terminals: usize,
+    pub max_retained_reducer_state_entries: usize,
+    pub initial_state: PublicInitialStateV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservedFactV1<T> {
+    pub value: Option<T>,
+    pub quality: crate::MarketDataQuality,
+    pub direct_anchors: Vec<DirectObservationAnchorV1>,
+    pub dependency_frontier: Option<AppliedIngressPrefixV1>,
+}
+impl<T> Default for ObservedFactV1<T> {
+    fn default() -> Self {
+        Self {
+            value: None,
+            quality: crate::MarketDataQuality::UnknownNotObserved,
+            direct_anchors: Vec::new(),
+            dependency_frontier: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TemporaryTwapReferenceV1 {
+    pub value: ChainlinkBtcUsdTwapReferenceV1,
+    pub selected_position: PublicFactPositionV1,
+    pub direct_anchor: DirectObservationAnchorV1,
+    pub dependency_frontier: AppliedIngressPrefixV1,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EffectiveMarketReferenceV1 {
+    Missing,
+    TemporaryTwap(TemporaryTwapReferenceV1),
+    OfficialAnchor(ObservedFactV1<MarketPriceAnchorV1>),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssetBusinessObservationV1 {
+    pub asset: crate::AssetIdentityV1,
+    pub bids: ObservedFactV1<Vec<crate::PriceLevelV1>>,
+    pub asks: ObservedFactV1<Vec<crate::PriceLevelV1>>,
+    pub best_bid_ask: ObservedFactV1<crate::CanonicalBbaFactV1>,
+    pub tick: ObservedFactV1<ExactDecimal>,
+    pub public_trade: ObservedFactV1<crate::PublicTradeV2>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarketBusinessObservationV1 {
+    pub schema_version: String,
+    pub market: MarketIdentityV2,
+    pub group_id: Sha256Hex,
+    pub group_position: u64,
+    pub visible_prefix: AppliedIngressPrefixV1,
+    pub assets: Vec<AssetBusinessObservationV1>,
+    pub lifecycle: ObservedFactV1<crate::MappedMarketLifecycleStateV1>,
+    pub active: ObservedFactV1<bool>,
+    pub closed: ObservedFactV1<bool>,
+    pub accepting_orders: ObservedFactV1<bool>,
+    pub terminal: ObservedFactV1<crate::MarketResolutionTerminalV3>,
+    pub official_anchor: ObservedFactV1<MarketPriceAnchorV1>,
+    pub settlement_reference: ObservedFactV1<BtcSettlementReferenceV1>,
+    pub temporary_reference: Option<TemporaryTwapReferenceV1>,
+    pub effective_reference: EffectiveMarketReferenceV1,
+    pub chainlink_spot: ObservedFactV1<ChainlinkBtcUsdReferenceV1>,
+    pub chainlink_twap_thirty: ObservedFactV1<ChainlinkBtcUsdTwapReferenceV1>,
+    pub chainlink_twap_sixty: ObservedFactV1<ChainlinkBtcUsdTwapReferenceV1>,
+    pub binance_depth: ObservedFactV1<BinanceDepthStateReferenceV1>,
+    pub binance_trade: ObservedFactV1<BinanceAggregateTradeReferenceV1>,
+    pub group_events: Vec<PublicBusinessFactV1>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClosedBusinessGroupV1 {
+    pub group_id: Sha256Hex,
+    pub group_position: u64,
+    pub member_input_positions: Vec<u64>,
+    pub closed_at_input_position: u64,
+    pub records: Vec<PublicBusinessFactV1>,
+    pub observations: Vec<MarketBusinessObservationV1>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppliedIngressV1 {
+    pub applied_prefix: AppliedIngressPrefixV1,
+    pub closed_groups: Vec<ClosedBusinessGroupV1>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PublicInitialStateV1 {
+    Empty,
 }

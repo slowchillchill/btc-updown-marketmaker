@@ -267,18 +267,46 @@ pub enum PreparedCanonicalInputV1<'a> {
     },
 }
 
+/// 借用唯一原输入；小量坐标/引用供本次调用使用，不复制原消息。
+pub struct RecordedIngressViewV1<'a> {
+    pub input_stream_id: String,
+    pub input_position: u64,
+    pub ingress: &'a DptIngressV1,
+    pub dependency_record_refs: Vec<contracts::CanonicalInputRecordRefV1>,
+}
 pub struct PreparedIngressV1<'a> {
-    pub recorded: &'a RecordedIngressV1,
+    pub recorded: RecordedIngressViewV1<'a>,
     pub current: PreparedCanonicalInputV1<'a>,
     pub prepared_group_id: Option<contracts::Sha256Hex>,
-    pub dependencies: &'a [contracts::CanonicalReferenceEventV2],
+    pub dependencies: std::borrow::Cow<'a, [contracts::CanonicalReferenceEventV2]>,
     pub reference_selection: Option<contracts::PreparedReferenceSelectionV1>,
+    pub reference_selection_market: Option<contracts::MarketIdentityV2>,
     pub pm_source_identity: Option<std::sync::Arc<crate::pm_reduction::PreparedPmSourceIdentityV1>>,
 }
 
 /// 来源所属方调用；此处可以编码，返回后业务入口只消费已有类型和规范键。
 pub fn prepare_ingress_v1<'a>(
     recorded: &'a RecordedIngressV1,
+    pm_context: Option<&crate::pm_reduction::PmMarketContextV1>,
+    identity_sources: &BTreeMap<String, contracts::SourceEvidenceRefV3>,
+    dependencies: &'a [contracts::CanonicalReferenceEventV2],
+    canonical_rule_version: &str,
+) -> Result<PreparedIngressV1<'a>, crate::ContractError> {
+    prepare_ingress_view_v1(
+        RecordedIngressViewV1 {
+            input_stream_id: recorded.input_stream_id.clone(),
+            input_position: recorded.input_position,
+            ingress: &recorded.ingress,
+            dependency_record_refs: recorded.dependency_record_refs.clone(),
+        },
+        pm_context,
+        identity_sources,
+        dependencies,
+        canonical_rule_version,
+    )
+}
+fn prepare_ingress_view_v1<'a>(
+    recorded: RecordedIngressViewV1<'a>,
     pm_context: Option<&crate::pm_reduction::PmMarketContextV1>,
     identity_sources: &BTreeMap<String, contracts::SourceEvidenceRefV3>,
     dependencies: &'a [contracts::CanonicalReferenceEventV2],
@@ -298,8 +326,9 @@ pub fn prepare_ingress_v1<'a>(
                 recorded,
                 current: PreparedCanonicalInputV1::EndOfInput,
                 prepared_group_id: None,
-                dependencies,
+                dependencies: std::borrow::Cow::Borrowed(dependencies),
                 reference_selection: None,
+                reference_selection_market: None,
                 pm_source_identity: None,
             });
         }
@@ -308,8 +337,9 @@ pub fn prepare_ingress_v1<'a>(
                 recorded,
                 current: PreparedCanonicalInputV1::Aborted { reason },
                 prepared_group_id: None,
-                dependencies,
+                dependencies: std::borrow::Cow::Borrowed(dependencies),
                 reference_selection: None,
+                reference_selection_market: None,
                 pm_source_identity: None,
             });
         }
@@ -438,8 +468,181 @@ pub fn prepare_ingress_v1<'a>(
         recorded,
         current,
         prepared_group_id,
-        dependencies,
+        dependencies: std::borrow::Cow::Borrowed(dependencies),
         reference_selection: None,
+        reference_selection_market: None,
         pm_source_identity,
     })
+}
+
+/// 来源准备借用唯一核心的当前身份，不构造第二份市场状态。
+pub fn prepare_public_ingress_v1<'a>(
+    core: &crate::public_observation_core::PublicObservationCoreV1,
+    recorded: &'a RecordedIngressV1,
+    identity_sources: &BTreeMap<String, contracts::SourceEvidenceRefV3>,
+    dependencies: &'a [contracts::CanonicalReferenceEventV2],
+) -> Result<PreparedIngressV1<'a>, crate::ContractError> {
+    let context = match &recorded.ingress {
+        DptIngressV1::Message {
+            row: TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row)),
+            ..
+        } => core.pm_context(&row.market),
+        _ => None,
+    };
+    prepare_ingress_v1(
+        recorded,
+        context.as_ref(),
+        identity_sources,
+        dependencies,
+        &core.header().canonical_rule_version,
+    )
+}
+
+/// 输入所属方只按纯函数游标供页；目标市场由真实调用上下文确定。
+/// 返回引用随当前 RecordedIngress 保存，重放仍从同一记录恢复，不保存页副本。
+pub fn prepare_temporary_reference_for_market_v1(
+    core: &crate::public_observation_core::PublicObservationCoreV1,
+    input: &mut PreparedIngressV1<'_>,
+    market: &contracts::MarketIdentityV2,
+    mut read_page: impl FnMut(
+        crate::public_reference::TemporaryReferenceCursorV1,
+    ) -> Result<
+        (
+            Vec<crate::public_reference::TemporaryReferenceCandidateV1>,
+            crate::public_reference::TemporaryReferenceCursorV1,
+            bool,
+        ),
+        crate::ContractError,
+    >,
+) -> Result<(), crate::ContractError> {
+    use crate::public_reference::*;
+    use contracts::*;
+    let prior = core.reference_state(&market.condition_id.0);
+    let mut reference = prior.and_then(|state| state.rule.value);
+    let mut official = prior.and_then(|state| state.official.value.as_ref());
+    let mut applicability = prior
+        .and_then(|state| state.changed_rule_record.clone())
+        .map_or(
+            TemporaryReferenceApplicabilityV1::OpeningWindow,
+            TemporaryReferenceApplicabilityV1::FromInput,
+        );
+    let facts: &[CanonicalReferenceEventV2] = match &input.current {
+        PreparedCanonicalInputV1::AnchorRule { facts, .. }
+        | PreparedCanonicalInputV1::HistoricalAnchorRepair { facts, .. } => facts,
+        _ => &[],
+    };
+    for fact in facts {
+        match &fact.payload {
+            CanonicalReferenceEventPayloadV2::MarketSettlementReferenceUpdate(update)
+                if &update.market == market =>
+            {
+                if reference.is_some_and(|old| old != update.reference) {
+                    // 这是真实配置记录的坐标，只证明从此观察到该配置，不声称平台生效时刻。
+                    applicability =
+                        TemporaryReferenceApplicabilityV1::FromInput(CanonicalInputRecordRefV1 {
+                            input_stream_id: input.recorded.input_stream_id.clone(),
+                            input_position: input.recorded.input_position,
+                        });
+                }
+                reference = Some(update.reference);
+            }
+            CanonicalReferenceEventPayloadV2::MarketPriceAnchorUpdate(update)
+                if &update.market == market =>
+            {
+                official = Some(&update.anchor)
+            }
+            _ => {}
+        }
+    }
+    let mut cursor = TemporaryReferenceCursorV1::default();
+    let mut page = Vec::new();
+    let mut next_cursor = cursor;
+    let mut exhausted = false;
+    loop {
+        match select_temporary_reference_v1(
+            TemporaryReferenceStateV1 {
+                market,
+                official,
+                temporary: prior.and_then(|state| state.temporary.as_ref()),
+                reference,
+                applicability: applicability.clone(),
+            },
+            input.recorded.input_position,
+            cursor,
+            TemporaryReferencePageV1 {
+                candidates: &page,
+                next_cursor,
+                exhausted,
+            },
+        ) {
+            TemporaryReferenceSelectionResultV1::NeedNextPage { cursor: next } => {
+                cursor = next;
+                (page, next_cursor, exhausted) = read_page(cursor)?;
+            }
+            TemporaryReferenceSelectionResultV1::Prepared(selection) => {
+                if let Some(selected) = &selection.selected_record_ref {
+                    if selected.input_position < input.recorded.input_position {
+                        if !input.recorded.dependency_record_refs.contains(selected) {
+                            input.recorded.dependency_record_refs.push(selected.clone());
+                        }
+                        if let Some(candidate) = page
+                            .iter()
+                            .find(|candidate| &candidate.record_ref == selected)
+                        {
+                            input
+                                .dependencies
+                                .to_mut()
+                                .push(candidate.canonical_fact.clone());
+                        }
+                    }
+                }
+                input.reference_selection_market = Some(market.clone());
+                input.reference_selection = Some(selection);
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// 配齐同一输入的原序引用及必要材料后才返回；调用者随后立即同步 push。
+pub fn prepare_public_ingress_with_reference_v1<'a>(
+    core: &crate::public_observation_core::PublicObservationCoreV1,
+    recorded: &'a mut RecordedIngressV1,
+    identity_sources: &BTreeMap<String, contracts::SourceEvidenceRefV3>,
+    dependencies: &'a [contracts::CanonicalReferenceEventV2],
+    market: &contracts::MarketIdentityV2,
+    read_page: impl FnMut(
+        crate::public_reference::TemporaryReferenceCursorV1,
+    ) -> Result<
+        (
+            Vec<crate::public_reference::TemporaryReferenceCandidateV1>,
+            crate::public_reference::TemporaryReferenceCursorV1,
+            bool,
+        ),
+        crate::ContractError,
+    >,
+) -> Result<PreparedIngressV1<'a>, crate::ContractError> {
+    let context = match &recorded.ingress {
+        DptIngressV1::Message {
+            row: TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row)),
+            ..
+        } => core.pm_context(&row.market),
+        _ => None,
+    };
+    let view = RecordedIngressViewV1 {
+        input_stream_id: recorded.input_stream_id.clone(),
+        input_position: recorded.input_position,
+        ingress: &recorded.ingress,
+        dependency_record_refs: recorded.dependency_record_refs.clone(),
+    };
+    let mut prepared = prepare_ingress_view_v1(
+        view,
+        context.as_ref(),
+        identity_sources,
+        dependencies,
+        &core.header().canonical_rule_version,
+    )?;
+    prepare_temporary_reference_for_market_v1(core, &mut prepared, market, read_page)?;
+    recorded.dependency_record_refs = prepared.recorded.dependency_record_refs.clone();
+    Ok(prepared)
 }

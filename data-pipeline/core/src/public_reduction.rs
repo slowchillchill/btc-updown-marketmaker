@@ -76,6 +76,7 @@ fn fact(
 ) -> PublicBusinessFactV1 {
     PublicBusinessFactV1 {
         position: position(context, ordinal),
+        direct_sources: context.direct_sources.clone(),
         payload,
         source_refs: context.source_refs.clone(),
         lineage: EventLineageV3 {
@@ -475,6 +476,7 @@ pub fn bind_prepared_reference_facts_v1(
             });
             PublicBusinessFactV1 {
                 position,
+                direct_sources: context.direct_sources.clone(),
                 payload: PublicBusinessPayloadV1::ReferenceFact(event.payload),
                 source_refs: context.source_refs.clone(),
                 lineage: event.lineage,

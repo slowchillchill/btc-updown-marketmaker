@@ -427,7 +427,7 @@ fn non_event_report<E: ReductionEvidenceV1>(
     Ok(report)
 }
 
-fn duplicate_suppressed_report<E: ReductionEvidenceV1>(
+pub(crate) fn duplicate_suppressed_report<E: ReductionEvidenceV1>(
     canonical_rule_version: &str,
     scope: String,
     reason_code: &str,
@@ -518,6 +518,15 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
             current_epoch: None,
             seen_epochs: BTreeSet::new(),
         })
+    }
+
+    /// 只投影唯一现有数量表；公共核心不常驻第二份完整深度值。
+    pub(crate) fn current_depth_value(&self) -> Option<BinanceDepthStateReferenceV1> {
+        self.current_epoch
+            .as_ref()
+            .and_then(|epoch| self.epochs.get(epoch))
+            .and_then(|state| state.book.as_ref())
+            .map(binance_depth_payload)
     }
 
     /// 返回会随输入增长、并由生产编排层实施硬上限的保留集合条目数。
@@ -1031,6 +1040,22 @@ fn finalize_binance_depth_event<E: ReductionEvidenceV1>(
     resync: ResyncQuality,
     additional_evidence: Vec<E>,
 ) -> Result<CanonicalReferenceEventV1<E::Identity, E>, ContractError> {
+    let mut evidence = binance_depth_evidence(book)?;
+    evidence.extend(additional_evidence);
+    finalize_reference_event(
+        canonical_rule_version,
+        evidence,
+        EventQualityV2 {
+            availability,
+            resync,
+        },
+        CanonicalReferenceEventPayloadV1::BinanceDepthState(binance_depth_payload(book)),
+    )
+}
+
+fn binance_depth_payload<E: ReductionEvidenceV1>(
+    book: &BinanceDepthBookState<E>,
+) -> BinanceDepthStateReferenceV1 {
     let last_update_id = book.local_u.unwrap_or(book.snapshot_last_update_id);
     let bids = book
         .bids
@@ -1049,22 +1074,12 @@ fn finalize_binance_depth_event<E: ReductionEvidenceV1>(
             quantity_btc: level.quantity.clone(),
         })
         .collect();
-    let mut evidence = binance_depth_evidence(book)?;
-    evidence.extend(additional_evidence);
-    finalize_reference_event(
-        canonical_rule_version,
-        evidence,
-        EventQualityV2 {
-            availability,
-            resync,
-        },
-        CanonicalReferenceEventPayloadV1::BinanceDepthState(BinanceDepthStateReferenceV1 {
-            symbol: "BTCUSDT".to_owned(),
-            last_update_id,
-            bids,
-            asks,
-        }),
-    )
+    BinanceDepthStateReferenceV1 {
+        symbol: "BTCUSDT".to_owned(),
+        last_update_id,
+        bids,
+        asks,
+    }
 }
 
 fn binance_depth_evidence<E: ReductionEvidenceV1>(
