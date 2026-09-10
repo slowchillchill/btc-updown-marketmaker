@@ -998,3 +998,161 @@ fn source_without_admission_uses_original_reception_not_payload_time_or_file_ord
     }
     assert_eq!(times, vec![(21000, 22100), (22000, 21900)]);
 }
+
+#[test]
+fn replay_historical_original_identity_keys_preserve_all_members() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("recording");
+    let mut core = core();
+    let mut writer = PublicRecordingWriterV1::create(&root, core.header(), config()).unwrap();
+    let mut expected = Vec::new();
+    let mut other = metadata_snapshot_row();
+    other.condition_id = format!("0x{}", "2".repeat(64));
+    other.clob_market_id = "3195577".into();
+    other.collector_admission_sequence = 2;
+    let other_id = other.condition_id.clone();
+    for input in [
+        meta(0),
+        record(
+            1,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(other))),
+        ),
+    ] {
+        let result = apply(&mut core, &input);
+        expected.push((input.clone(), fingerprint(&result)));
+        writer.record(input, result).unwrap();
+    }
+    let response = HttpResponseEvidenceV1 {
+        origin: "gamma_events".into(),
+        request_url: "https://gamma-api.polymarket.com/events".into(),
+        received_at_utc: "2026-09-08T04:00:00.123456Z".into(),
+        received_at_utc_ms: 1_788_840_000_123,
+        receipt_observation: "curl_completed".into(),
+        response_body_sha256: "a".repeat(64),
+        response_body_path: "response.json".into(),
+        original_response_file: "/original/response.json".into(),
+        http_status_code: None,
+        response_url: None,
+    };
+    let source = historical_response_source_evidence_v3(&response).unwrap();
+    let mut identities = BTreeMap::new();
+    let mut rows = vec![];
+    for (i, id) in [CONDITION_ID.to_owned(), other_id.clone()]
+        .into_iter()
+        .enumerate()
+    {
+        let context = core.pm_context(&id).unwrap();
+        let key = format!("identity-{i}");
+        identities.insert(key.clone(), context.identity_source_evidence[0].clone());
+        rows.push(HistoricalPriceAnchorRepairRowV1 {
+            schema_version: HISTORICAL_PRICE_ANCHOR_REPAIR_SCHEMA_V1.into(),
+            condition_id: id,
+            clob_market_id: context.market.clob_market_id.0,
+            slug: "btc-updown-5m".into(),
+            asset_ids_json: format!("[\"{UP_TOKEN_ID}\",\"{DOWN_TOKEN_ID}\"]"),
+            market_start_at_utc_ms: MARKET_START_AT,
+            market_end_at_utc_ms: MARKET_END_AT,
+            anchor_source: MarketAnchorSourceV1::GammaEventMetadataPriceToBeat,
+            price_to_beat_raw: "65000".into(),
+            response_group_id: source.source_message_id.0.clone(),
+            response_member_index: i as u32,
+            response_received_at_utc_ms: response.received_at_utc_ms,
+            response_sha256: response.response_body_sha256.clone(),
+            source_value_path: format!("/{i}/eventMetadata/priceToBeat"),
+            source_event_at_utc_ms: None,
+            historical_identity_ready_at_utc_ms: [10_000, 21_000][i],
+            historical_identity_evidence_ids_json: format!("[\"{key}\"]"),
+            repair_policy_version: "price_anchor_historical_repair_v1".into(),
+        });
+    }
+    let batch = HistoricalPriceAnchorRepairBatchInput {
+        response_group_id: source.source_message_id.0.clone(),
+        response: response.clone(),
+        rows,
+        identity_evidence: BTreeMap::new(),
+    };
+    let mut input = record(2, TypedRawRowV2::HistoricalPriceAnchorRepairBatch(batch));
+    input.dependency_record_refs = vec![
+        CanonicalInputRecordRefV1 {
+            input_stream_id: "core-test".into(),
+            input_position: 0,
+        },
+        CanonicalInputRecordRefV1 {
+            input_stream_id: "core-test".into(),
+            input_position: 1,
+        },
+    ];
+
+    let prepared = prepare_public_ingress_v1(&core, &input, &identities, &[]).unwrap();
+    let result = core.push(&prepared).unwrap().into_owned();
+    drop(prepared);
+    assert_eq!(result.applied.closed_groups.len(), 1);
+    assert_eq!(result.applied.closed_groups[0].records.len(), 2);
+    expected.push((input.clone(), fingerprint(&result)));
+    writer.record(input, result).unwrap();
+    writer.stabilize().unwrap();
+    for page in [1, 4] {
+        let mut replay = PublicReplayV1::open(&root, page, 1 << 20).unwrap();
+        let mut actual = Vec::new();
+        while let Some((input, result)) = replay.next_applied().unwrap() {
+            actual.push((input, fingerprint(&result)));
+        }
+        assert_eq!(actual, expected);
+    }
+}
+
+#[test]
+fn replay_first_identity_selects_prior_twap_at_its_original_position() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("recording");
+    let mut core = core();
+    let mut writer = PublicRecordingWriterV1::create(&root, core.header(), config()).unwrap();
+    let mut expected = Vec::new();
+    for input in [
+        twap_record(0, 60, 21_002, "65000000000000000000000"),
+        rule_record(1, 60, None),
+    ] {
+        let result = apply(&mut core, &input);
+        expected.push((input.clone(), fingerprint(&result)));
+        writer.record(input, result).unwrap();
+    }
+    writer.stabilize().unwrap();
+    let mut input = meta(2);
+    let ids = BTreeMap::new();
+    let mut page = ReferenceCandidateReaderV1::open(&root, 1, 1 << 20, 2).unwrap();
+    let prepared = prepare_public_ingress_with_reference_v1(
+        &core,
+        &mut input,
+        &ids,
+        &[],
+        &market(),
+        |cursor| Ok(page.page(cursor).unwrap()),
+    )
+    .unwrap();
+    let result = core.push(&prepared).unwrap().into_owned();
+    drop(prepared);
+    assert!(
+        core.reference_state(CONDITION_ID)
+            .unwrap()
+            .temporary
+            .is_some()
+    );
+    assert_eq!(
+        input.dependency_record_refs,
+        vec![CanonicalInputRecordRefV1 {
+            input_stream_id: "core-test".into(),
+            input_position: 0
+        }]
+    );
+    expected.push((input.clone(), fingerprint(&result)));
+    writer.record(input, result).unwrap();
+    writer.stabilize().unwrap();
+    for page in [1, 4] {
+        let mut replay = PublicReplayV1::open(&root, page, 1 << 20).unwrap();
+        let mut actual = Vec::new();
+        while let Some((input, result)) = replay.next_applied().unwrap() {
+            actual.push((input, fingerprint(&result)));
+        }
+        assert_eq!(actual, expected);
+    }
+}

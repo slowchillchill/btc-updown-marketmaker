@@ -115,7 +115,6 @@ impl HistoricalMergeV1 {
 pub struct PublicReplayV1 {
     reader: PublicRecordingReaderV1,
     pub core: PublicObservationCoreV1,
-    identity_sources: BTreeMap<String, SourceEvidenceRefV3>,
     page_rows: usize,
     page_bytes: usize,
 }
@@ -126,7 +125,6 @@ impl PublicReplayV1 {
         Ok(Self {
             reader,
             core,
-            identity_sources: BTreeMap::new(),
             page_rows,
             page_bytes,
         })
@@ -139,6 +137,12 @@ impl PublicReplayV1 {
                 let root = self.reader.root().to_path_buf();
                 let cutoff = input.input_position;
                 let target = reference_market_for_input(&self.core, &input);
+                let identity_sources = read_historical_identity_sources(
+                    &root,
+                    &input,
+                    self.page_rows,
+                    self.page_bytes,
+                )?;
                 let deps = read_dependencies(
                     &root,
                     &input.dependency_record_refs,
@@ -155,7 +159,7 @@ impl PublicReplayV1 {
                     let prepared = prepare_public_ingress_with_reference_v1(
                         &self.core,
                         &mut input,
-                        &self.identity_sources,
+                        &identity_sources,
                         &deps,
                         &market,
                         |cursor| {
@@ -169,27 +173,10 @@ impl PublicReplayV1 {
                     )?;
                     self.core.push(&prepared)?.into_owned()
                 } else {
-                    let prepared = prepare_public_ingress_v1(
-                        &self.core,
-                        &input,
-                        &self.identity_sources,
-                        &deps,
-                    )?;
+                    let prepared =
+                        prepare_public_ingress_v1(&self.core, &input, &identity_sources, &deps)?;
                     self.core.push(&prepared)?.into_owned()
                 };
-                if let DptIngressV1::Message {
-                    row,
-                    source_evidence,
-                } = &input.ingress
-                {
-                    if let Some(condition) = metadata_condition(row) {
-                        if self.core.pm_context(&condition).is_some() {
-                            self.identity_sources
-                                .entry(condition)
-                                .or_insert_with(|| source_evidence.clone());
-                        }
-                    }
-                }
                 return Ok(Some((input, result)));
             }
         }
@@ -199,17 +186,71 @@ impl PublicReplayV1 {
         self.core
     }
 }
-fn metadata_condition(row: &TypedRawRowV2) -> Option<String> {
-    match row {
-        TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(r)) => {
-            Some(r.condition_id.clone())
+/// 原修复成员与唯一规范事实同序；恢复原证据键，不以市场条件替代身份键域。
+fn read_historical_identity_sources(
+    root: &Path,
+    input: &RecordedIngressV1,
+    rows: usize,
+    bytes: usize,
+) -> RecordingResult<BTreeMap<String, SourceEvidenceRefV3>> {
+    let mut sources = BTreeMap::new();
+    let DptIngressV1::Message {
+        row: TypedRawRowV2::HistoricalPriceAnchorRepairBatch(batch),
+        ..
+    } = &input.ingress
+    else {
+        return Ok(sources);
+    };
+    let mut members = batch.rows.iter();
+    let mut reader = PublicRecordingReaderV1::recover(root, rows, bytes)?;
+    while let Some(row) = reader.next_row()? {
+        if let PublicStoredRowV1::Canonical {
+            binding,
+            record: CanonicalEventRecordV2::ReferenceEvent(event),
+            ..
+        } = row
+        {
+            if binding.position.input_stream_id != input.input_stream_id
+                || binding.position.closed_at_input_position != input.input_position
+            {
+                continue;
+            }
+            if let CanonicalReferenceEventPayloadV2::MarketPriceAnchorUpdate(value) = event.payload
+            {
+                if let PriceAnchorApplicationV1::HistoricalRepair {
+                    historical_identity_evidence,
+                    ..
+                } = value.anchor.application
+                {
+                    if let Some(member) = members.next() {
+                        let ids: Vec<String> =
+                            serde_json::from_str(&member.historical_identity_evidence_ids_json)?;
+                        sources.extend(ids.into_iter().zip(historical_identity_evidence));
+                    }
+                }
+            }
         }
-        TypedRawRowV2::PolymarketMarketMetadataV6(r) => match r.as_ref() {
-            PolymarketMarketMetadataV6Input::Existing(r) => Some(r.condition_id.clone()),
-            _ => None,
-        },
-        _ => None,
     }
+    Ok(sources)
+}
+fn metadata_reference_market(
+    core: &PublicObservationCoreV1,
+    row: &data_pipeline_core::typed_raw::PolymarketMarketMetadataRow,
+) -> Option<MarketIdentityV2> {
+    core.pm_context(&row.condition_id)
+        .map(|c| c.market)
+        .or_else(|| {
+            (row.metadata_row_kind
+                == data_pipeline_core::typed_raw::PolymarketMetadataRowKind::MetadataSnapshot)
+                .then(|| MarketIdentityV2 {
+                    condition_id: ConditionId(row.condition_id.clone()),
+                    clob_market_id: ClobMarketId(row.clob_market_id.clone()),
+                    window: MarketWindowV2 {
+                        start_at_utc_ms: row.market_start_utc,
+                        end_at_utc_ms: row.market_end_utc,
+                    },
+                })
+        })
 }
 /// 确定目标关联；候选适用性和首条判断仍仅归纯选择函数。
 pub fn reference_market_for_input(
@@ -224,12 +265,10 @@ pub fn reference_market_for_input(
             PolymarketMarketMetadataV6Input::AnchorRule(r) => {
                 core.pm_context(&r.condition_id).map(|c| c.market)
             }
-            PolymarketMarketMetadataV6Input::Existing(r) => {
-                core.pm_context(&r.condition_id).map(|c| c.market)
-            }
+            PolymarketMarketMetadataV6Input::Existing(r) => metadata_reference_market(core, r),
         },
         TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(r)) => {
-            core.pm_context(&r.condition_id).map(|c| c.market)
+            metadata_reference_market(core, r)
         }
         TypedRawRowV2::PolymarketRtdsChainlinkTwap(r) => core.fixed_markets().find(|m| {
             r.common.payload_timestamp >= m.window.start_at_utc_ms
