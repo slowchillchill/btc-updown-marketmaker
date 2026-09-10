@@ -1030,3 +1030,161 @@ fn reduction_report_rejects_an_impossible_operation_disposition_pair() {
 
     assert!(decode_reduction_report_entry_v1(&serde_json::to_vec(&value).unwrap()).is_err());
 }
+
+#[test]
+fn prepared_binance_inputs_keep_stateful_results_before_late_materialization() {
+    use contracts::*;
+    use data_pipeline_core::pm_reduction::PreparedPmEvidenceV1;
+    use data_pipeline_core::public_input::*;
+    use data_pipeline_core::public_reduction::*;
+    use data_pipeline_core::public_reference::source_evidence_v3_from_typed_raw_v2;
+    use data_pipeline_core::typed_raw::TypedRawRow;
+    let recorded = |row: TypedRawRow, position| {
+        let row = TypedRawRowV2::Existing(row);
+        let source_evidence = source_evidence_v3_from_typed_raw_v2(&row).unwrap();
+        RecordedIngressV1 {
+            input_stream_id: "binance".to_owned(),
+            input_position: position,
+            ingress: DptIngressV1::Message {
+                row,
+                source_evidence,
+            },
+            dependency_record_refs: vec![],
+        }
+    };
+    let context = |source: SourceEvidenceRefV3, position| PublicReductionContextV1 {
+        input_stream_id: "binance".to_owned(),
+        closed_at_input_position: position,
+        first_fact_ordinal: 0,
+        first_report_ordinal: 0,
+        group_id: source.source_message_id.clone(),
+        source_refs: vec![CanonicalInputRecordRefV1 {
+            input_stream_id: "binance".to_owned(),
+            input_position: position,
+        }],
+        direct_sources: vec![source],
+    };
+    let mut depth = BinanceDepthReducer::<PreparedPublicEvidenceV1>::new(RULE_VERSION).unwrap();
+    let first = recorded(
+        TypedRawRow::BinanceDepthSnapshot(snapshot("epoch", 10, 1)),
+        0,
+    );
+    let prepared =
+        prepare_ingress_v1(&first, None, &Default::default(), &[], RULE_VERSION).unwrap();
+    let PreparedCanonicalInputV1::BinanceDepthSnapshot { row, source } = prepared.current else {
+        panic!("snapshot")
+    };
+    let direct = source.source().clone();
+    let first_result = bind_reference_reduction_v1(
+        depth.compute_snapshot(row, source).unwrap(),
+        context(direct, 0),
+    );
+    let second = recorded(
+        TypedRawRow::BinanceDepthUpdate(update(
+            "epoch",
+            11,
+            11,
+            2,
+            Some(10),
+            None,
+            BinanceDepthStitchVerdict::Applied,
+            vec![level("64100", "0.2")],
+        )),
+        1,
+    );
+    let prepared =
+        prepare_ingress_v1(&second, None, &Default::default(), &[], RULE_VERSION).unwrap();
+    let PreparedCanonicalInputV1::BinanceDepthUpdate { row, source } = prepared.current else {
+        panic!("update")
+    };
+    let updated = depth.compute_update(row, source).unwrap();
+    assert!(
+        matches!(&updated.event.unwrap().payload, CanonicalReferenceEventPayloadV1::BinanceDepthState(value) if value.bids[0].quantity_btc.0 == "0.2")
+    );
+    let durable = materialize_public_reduction_v1(first_result).unwrap();
+    let CanonicalEventRecordV2::ReferenceEvent(event) = &durable.records[0] else {
+        panic!("reference")
+    };
+    assert_eq!(event.schema_version, CANONICAL_REFERENCE_EVENT_SCHEMA_V2);
+    assert!(
+        matches!(&event.payload, CanonicalReferenceEventPayloadV2::BinanceDepthState(value) if value.last_update_id == 10 && value.bids[0].quantity_btc.0 == "0.7")
+    );
+    assert!(
+        matches!(&durable.reports[0].report.disposition, ReductionDispositionV1::Produced { result_event_id } if *result_event_id == event.event_id)
+    );
+    let mut trades = BinanceAggTradeReducer::<PreparedPublicEvidenceV1>::new(RULE_VERSION).unwrap();
+    for (position, raw, expected) in [
+        (2, trade(100, 1, "64000"), "BINANCE_AGGTRADE_ACCEPTED"),
+        (
+            3,
+            trade(100, 2, "64000"),
+            "BINANCE_AGGTRADE_IDENTICAL_DUPLICATE",
+        ),
+        (4, invalid_trade(3), "BINANCE_AGGTRADE_INVALID_INPUT"),
+    ] {
+        let input = recorded(TypedRawRow::BinanceAggTrade(raw), position);
+        let prepared =
+            prepare_ingress_v1(&input, None, &Default::default(), &[], RULE_VERSION).unwrap();
+        let PreparedCanonicalInputV1::BinanceAggregateTrade {
+            row,
+            source,
+            payload,
+        } = prepared.current
+        else {
+            panic!("trade")
+        };
+        let outcome = trades.compute(row, source, payload.as_ref()).unwrap();
+        assert_eq!(outcome.report.reason_code, expected);
+        assert_eq!(outcome.event.is_some(), position == 2);
+    }
+    let conflict = recorded(TypedRawRow::BinanceAggTrade(trade(100, 4, "65000")), 5);
+    let prepared =
+        prepare_ingress_v1(&conflict, None, &Default::default(), &[], RULE_VERSION).unwrap();
+    let PreparedCanonicalInputV1::BinanceAggregateTrade {
+        row,
+        source,
+        payload,
+    } = prepared.current
+    else {
+        panic!("trade")
+    };
+    assert!(
+        trades
+            .compute(row, source, payload.as_ref())
+            .unwrap_err()
+            .to_string()
+            .contains("conflicting payloads")
+    );
+    // 真实 V2 来源保留物理绑定；延后物化仍取第一次真实状态。
+    let row = snapshot("legacy", 100, 1);
+    let source = data_pipeline_core::source_evidence_from_typed_raw(
+        &TypedRawRow::BinanceDepthSnapshot(row.clone()),
+        &sha('a'),
+        &sha('b'),
+    )
+    .unwrap();
+    let mut legacy =
+        BinanceDepthReducer::<PreparedPmEvidenceV1<SourceEvidenceRefV2>>::new(RULE_VERSION)
+            .unwrap();
+    let first = legacy
+        .compute_snapshot(&row, PreparedPmEvidenceV1::prepare(source, None).unwrap())
+        .unwrap();
+    let later = snapshot("legacy", 200, 2);
+    let source = data_pipeline_core::source_evidence_from_typed_raw(
+        &TypedRawRow::BinanceDepthSnapshot(later.clone()),
+        &sha('a'),
+        &sha('c'),
+    )
+    .unwrap();
+    legacy
+        .compute_snapshot(&later, PreparedPmEvidenceV1::prepare(source, None).unwrap())
+        .unwrap();
+    let first = data_pipeline_core::reduction::materialize_legacy_reference_reduction_v1(first)
+        .unwrap()
+        .event
+        .unwrap();
+    assert_eq!(first.lineage.source_evidence[0].input_file_sha256, sha('b'));
+    assert!(
+        matches!(first.payload, CanonicalReferenceEventPayloadV1::BinanceDepthState(value) if value.last_update_id == 100)
+    );
+}

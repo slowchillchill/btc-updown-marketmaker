@@ -137,14 +137,6 @@ fn finalize_reference(
     availability: MarketDataQuality,
     payload: CanonicalReferenceEventPayloadV2,
 ) -> Result<CanonicalReferenceEventV2, ContractError> {
-    #[derive(Serialize)]
-    struct Identity<'a> {
-        schema_version: &'a str,
-        time: &'a EventTimeV2,
-        lineage: &'a EventLineageV3,
-        quality: &'a EventQualityV2,
-        payload: &'a CanonicalReferenceEventPayloadV2,
-    }
     let time = EventTimeV2 {
         source_event_at_utc_ms: source.source_event_at_utc_ms,
         received_at_utc_ms: source.received_at_utc_ms,
@@ -157,6 +149,23 @@ fn finalize_reference(
         availability,
         resync: ResyncQuality::NotRequired,
     };
+    materialize_reference_v2(lineage, time, quality, payload)
+}
+
+pub(crate) fn materialize_reference_v2(
+    lineage: EventLineageV3,
+    time: EventTimeV2,
+    quality: EventQualityV2,
+    payload: CanonicalReferenceEventPayloadV2,
+) -> Result<CanonicalReferenceEventV2, ContractError> {
+    #[derive(Serialize)]
+    struct Identity<'a> {
+        schema_version: &'a str,
+        time: &'a EventTimeV2,
+        lineage: &'a EventLineageV3,
+        quality: &'a EventQualityV2,
+        payload: &'a CanonicalReferenceEventPayloadV2,
+    }
     let identity = Identity {
         schema_version: CANONICAL_REFERENCE_EVENT_SCHEMA_V2,
         time: &time,
@@ -243,37 +252,39 @@ pub fn canonicalize_market_reference_response_v1(
     Ok(events)
 }
 
+fn observed_rtds_anomaly(
+    row: &crate::typed_raw::PolymarketRtdsChainlinkBtcUsdRow,
+) -> Option<RtdsObservedAnomalyV1> {
+    let classification = match row.freshness_status {
+        RtdsFreshnessStatus::InvalidType => RtdsObservedAnomalyClassificationV1::InvalidType,
+        RtdsFreshnessStatus::InvalidTopic => RtdsObservedAnomalyClassificationV1::InvalidTopic,
+        RtdsFreshnessStatus::InvalidSymbol => RtdsObservedAnomalyClassificationV1::InvalidSymbol,
+        RtdsFreshnessStatus::InvalidTimestamp => {
+            RtdsObservedAnomalyClassificationV1::InvalidTimestamp
+        }
+        RtdsFreshnessStatus::Fresh | RtdsFreshnessStatus::Stale => return None,
+    };
+    Some(RtdsObservedAnomalyV1 {
+        classification,
+        observed_topic: row.topic.clone(),
+        observed_message_type: row.message_type.clone(),
+        observed_symbol: row.symbol.clone(),
+        observed_value_raw: row.value.clone(),
+        observed_message_timestamp_raw: row.message_timestamp,
+        observed_payload_timestamp_raw: row.payload_timestamp,
+    })
+}
+
 pub fn canonicalize_chainlink_twap_v1(
     row: &PolymarketRtdsChainlinkTwapInput,
     source: &SourceEvidenceRefV3,
     canonical_rule_version: &str,
 ) -> Result<CanonicalReferenceEventV2, ContractError> {
     let common = &row.common;
-    let anomaly = match common.freshness_status {
-        RtdsFreshnessStatus::InvalidType => Some(RtdsObservedAnomalyClassificationV1::InvalidType),
-        RtdsFreshnessStatus::InvalidTopic => {
-            Some(RtdsObservedAnomalyClassificationV1::InvalidTopic)
-        }
-        RtdsFreshnessStatus::InvalidSymbol => {
-            Some(RtdsObservedAnomalyClassificationV1::InvalidSymbol)
-        }
-        RtdsFreshnessStatus::InvalidTimestamp => {
-            Some(RtdsObservedAnomalyClassificationV1::InvalidTimestamp)
-        }
-        RtdsFreshnessStatus::Fresh | RtdsFreshnessStatus::Stale => None,
-    };
-    let (availability, payload) = if let Some(classification) = anomaly {
+    let (availability, payload) = if let Some(anomaly) = observed_rtds_anomaly(common) {
         (
             MarketDataQuality::Invalid,
-            CanonicalReferenceEventPayloadV2::RtdsObservedAnomaly(RtdsObservedAnomalyV1 {
-                classification,
-                observed_topic: common.topic.clone(),
-                observed_message_type: common.message_type.clone(),
-                observed_symbol: common.symbol.clone(),
-                observed_value_raw: common.value.clone(),
-                observed_message_timestamp_raw: common.message_timestamp,
-                observed_payload_timestamp_raw: common.payload_timestamp,
-            }),
+            CanonicalReferenceEventPayloadV2::RtdsObservedAnomaly(anomaly),
         )
     } else {
         let price_usd_per_btc =
@@ -292,6 +303,39 @@ pub fn canonicalize_chainlink_twap_v1(
                 payload_timestamp_utc_ms: common.payload_timestamp,
                 message_timestamp_utc_ms: common.message_timestamp,
             }),
+        )
+    };
+    finalize_reference(source, canonical_rule_version, availability, payload)
+}
+
+/// 新版现货沿已签发的四类异常事实；旧 V1 包装仍保留原拒绝行为。
+pub fn canonicalize_chainlink_spot_v1(
+    row: &crate::typed_raw::PolymarketRtdsChainlinkBtcUsdRow,
+    source: &SourceEvidenceRefV3,
+    canonical_rule_version: &str,
+) -> Result<CanonicalReferenceEventV2, ContractError> {
+    let (availability, payload) = if let Some(anomaly) = observed_rtds_anomaly(row) {
+        (
+            MarketDataQuality::Invalid,
+            CanonicalReferenceEventPayloadV2::RtdsObservedAnomaly(anomaly),
+        )
+    } else {
+        (
+            if row.freshness_status == RtdsFreshnessStatus::Fresh {
+                MarketDataQuality::Fresh
+            } else {
+                MarketDataQuality::Stale
+            },
+            CanonicalReferenceEventPayloadV2::ChainlinkBtcUsd(
+                contracts::ChainlinkBtcUsdReferenceV1 {
+                    symbol: row.symbol.clone(),
+                    price_usd_per_btc: crate::typed_raw::normalize_decimal_text(
+                        &row.value, "value",
+                    )
+                    .map_err(crate::typed_raw_contract_error)?,
+                    message_timestamp_utc_ms: row.message_timestamp,
+                },
+            ),
         )
     };
     finalize_reference(source, canonical_rule_version, availability, payload)

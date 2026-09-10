@@ -200,3 +200,246 @@ pub struct HistoricalPriceAnchorRepairBatchInput {
     pub rows: Vec<HistoricalPriceAnchorRepairRowV1>,
     pub identity_evidence: BTreeMap<String, HistoricalIdentityRowEvidenceV1>,
 }
+
+/// 唯一接纳序列的记录表达；准备材料不成为第二份耐久输入。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum DptIngressV1 {
+    Message {
+        row: TypedRawRowV2,
+        source_evidence: contracts::SourceEvidenceRefV3,
+    },
+    EndOfInput,
+    Aborted {
+        reason: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordedIngressV1 {
+    pub input_stream_id: String,
+    pub input_position: u64,
+    pub ingress: DptIngressV1,
+    pub dependency_record_refs: Vec<contracts::CanonicalInputRecordRefV1>,
+}
+
+/// 已完成原 JSON 映射的元数据；真实前序比较仍由原市场归约器完成。
+pub struct PreparedMetadataV1<'a> {
+    pub row: &'a PolymarketMarketMetadataRow,
+    pub source: crate::pm_reduction::PreparedPmEvidenceV1<contracts::SourceEvidenceRefV3>,
+    pub outcomes: Vec<crate::typed_raw::MetadataOutcomeEvidence>,
+    pub initial_tick: Option<crate::typed_raw::MetadataInitialTickEvidence>,
+}
+
+/// 有状态深度、成交和终态只准备输入，不能在此伪造已经归约的事件。
+pub enum PreparedCanonicalInputV1<'a> {
+    PolymarketMessage(crate::pm_reduction::PreparedPmMessageV1),
+    PolymarketWsTerminal {
+        row: &'a crate::typed_raw::PolymarketOrderbookRow,
+        source: crate::pm_reduction::PreparedPmEvidenceV1<contracts::SourceEvidenceRefV3>,
+    },
+    Metadata(PreparedMetadataV1<'a>),
+    AnchorRule {
+        input: &'a MarketAnchorRuleUpdateInput,
+        facts: Vec<contracts::CanonicalReferenceEventV2>,
+    },
+    BinanceDepthSnapshot {
+        row: &'a crate::typed_raw::BinanceDepthSnapshotRow,
+        source: crate::pm_reduction::PreparedPmEvidenceV1<contracts::SourceEvidenceRefV3>,
+    },
+    BinanceDepthUpdate {
+        row: &'a crate::typed_raw::BinanceDepthUpdateRow,
+        source: crate::pm_reduction::PreparedPmEvidenceV1<contracts::SourceEvidenceRefV3>,
+    },
+    BinanceAggregateTrade {
+        row: &'a crate::typed_raw::BinanceAggTradeRow,
+        source: crate::pm_reduction::PreparedPmEvidenceV1<contracts::SourceEvidenceRefV3>,
+        payload: Option<contracts::BinanceAggregateTradeReferenceV1>,
+    },
+    ChainlinkSpot(contracts::CanonicalReferenceEventV2),
+    ChainlinkTwap(contracts::CanonicalReferenceEventV2),
+    HistoricalAnchorRepair {
+        batch: &'a HistoricalPriceAnchorRepairBatchInput,
+        facts: Vec<contracts::CanonicalReferenceEventV2>,
+    },
+    EndOfInput,
+    Aborted {
+        reason: &'a str,
+    },
+}
+
+pub struct PreparedIngressV1<'a> {
+    pub recorded: &'a RecordedIngressV1,
+    pub current: PreparedCanonicalInputV1<'a>,
+    pub prepared_group_id: Option<contracts::Sha256Hex>,
+    pub dependencies: &'a [contracts::CanonicalReferenceEventV2],
+    pub reference_selection: Option<contracts::PreparedReferenceSelectionV1>,
+    pub pm_source_identity: Option<std::sync::Arc<crate::pm_reduction::PreparedPmSourceIdentityV1>>,
+}
+
+/// 来源所属方调用；此处可以编码，返回后业务入口只消费已有类型和规范键。
+pub fn prepare_ingress_v1<'a>(
+    recorded: &'a RecordedIngressV1,
+    pm_context: Option<&crate::pm_reduction::PmMarketContextV1>,
+    identity_sources: &BTreeMap<String, contracts::SourceEvidenceRefV3>,
+    dependencies: &'a [contracts::CanonicalReferenceEventV2],
+    canonical_rule_version: &str,
+) -> Result<PreparedIngressV1<'a>, crate::ContractError> {
+    use crate::pm_reduction::{PreparedPmEvidenceV1, PreparedPmMessageV1};
+    use crate::public_reference::*;
+    use crate::typed_raw::{BinanceAggTradeRecord, PolymarketOrderbookEvent};
+    use contracts::*;
+    let (row, source) = match &recorded.ingress {
+        DptIngressV1::Message {
+            row,
+            source_evidence,
+        } => (row, source_evidence),
+        DptIngressV1::EndOfInput => {
+            return Ok(PreparedIngressV1 {
+                recorded,
+                current: PreparedCanonicalInputV1::EndOfInput,
+                prepared_group_id: None,
+                dependencies,
+                reference_selection: None,
+                pm_source_identity: None,
+            });
+        }
+        DptIngressV1::Aborted { reason } => {
+            return Ok(PreparedIngressV1 {
+                recorded,
+                current: PreparedCanonicalInputV1::Aborted { reason },
+                prepared_group_id: None,
+                dependencies,
+                reference_selection: None,
+                pm_source_identity: None,
+            });
+        }
+    };
+    let prepared_source = || PreparedPmEvidenceV1::prepare(source.clone(), None);
+    let mut prepared_group_id = Some(source.source_message_id.clone());
+    let metadata = |row: &'a PolymarketMarketMetadataRow| -> Result<PreparedCanonicalInputV1<'a>, crate::ContractError> {
+        row.validate().map_err(crate::typed_raw_contract_error)?;
+        let outcomes = crate::typed_raw::map_metadata_outcomes(&row.asset_ids, row.outcomes_raw.as_deref(), row.outcome_prices_raw.as_deref()).map_err(crate::typed_raw_contract_error)?;
+        let initial_tick = if row.metadata_row_kind == crate::typed_raw::PolymarketMetadataRowKind::MetadataSnapshot {
+            row.source_evidence_payload_json.as_deref().map(crate::typed_raw::extract_metadata_initial_tick).transpose().map_err(crate::typed_raw_contract_error)?.flatten()
+        } else { None };
+        Ok(PreparedCanonicalInputV1::Metadata(PreparedMetadataV1 { row, source: prepared_source()?, outcomes, initial_tick }))
+    };
+    let current = match row {
+        TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row)) => {
+            row.validate().map_err(crate::typed_raw_contract_error)?;
+            if matches!(row.event, PolymarketOrderbookEvent::MarketResolved { .. }) {
+                prepared_group_id = Some(crate::hash_domain_bytes(
+                    b"data-pipeline/public-pm-message-group/v1\0",
+                    &crate::stable_json(&source.source_message_id)?,
+                ));
+                PreparedCanonicalInputV1::PolymarketWsTerminal {
+                    row,
+                    source: prepared_source()?,
+                }
+            } else {
+                let context = pm_context.ok_or_else(|| {
+                    crate::invalid("pm_context", "规范 PM 消息需要原固定身份上下文")
+                })?;
+                crate::pm_message::require_pm_market(context, row)?;
+                let payload = crate::pm_message::payload_from_typed_raw(row, &context.assets)?;
+                let message = crate::pm_message::build_canonical_pm_message(
+                    context,
+                    source.clone(),
+                    CanonicalInputRecordRefV1 {
+                        input_stream_id: recorded.input_stream_id.clone(),
+                        input_position: recorded.input_position,
+                    },
+                    payload,
+                )?;
+                prepared_group_id = Some(message.group_id.clone());
+                PreparedCanonicalInputV1::PolymarketMessage(PreparedPmMessageV1::prepare(message)?)
+            }
+        }
+        TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(row)) => metadata(row)?,
+        TypedRawRowV2::PolymarketMarketMetadataV6(row) => match row.as_ref() {
+            PolymarketMarketMetadataV6Input::Existing(row) => metadata(row)?,
+            PolymarketMarketMetadataV6Input::AnchorRule(input) => {
+                let market = MarketIdentityV2 {
+                    condition_id: ConditionId(input.condition_id.clone()),
+                    clob_market_id: ClobMarketId(input.clob_market_id.clone()),
+                    window: MarketWindowV2 {
+                        start_at_utc_ms: input.market_start_utc,
+                        end_at_utc_ms: input.market_end_utc,
+                    },
+                };
+                PreparedCanonicalInputV1::AnchorRule {
+                    input,
+                    facts: canonicalize_market_reference_response_v1(
+                        input,
+                        &market,
+                        source,
+                        canonical_rule_version,
+                    )?,
+                }
+            }
+        },
+        TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(row)) => {
+            row.validate().map_err(crate::typed_raw_contract_error)?;
+            PreparedCanonicalInputV1::BinanceDepthSnapshot {
+                row,
+                source: prepared_source()?,
+            }
+        }
+        TypedRawRowV2::Existing(TypedRawRow::BinanceDepthUpdate(row)) => {
+            row.validate().map_err(crate::typed_raw_contract_error)?;
+            PreparedCanonicalInputV1::BinanceDepthUpdate {
+                row,
+                source: prepared_source()?,
+            }
+        }
+        TypedRawRowV2::Existing(TypedRawRow::BinanceAggTrade(row)) => {
+            row.validate().map_err(crate::typed_raw_contract_error)?;
+            let payload = match &row.record {
+                BinanceAggTradeRecord::Trade { .. } => {
+                    Some(crate::prepare_binance_aggregate_trade_payload(row)?)
+                }
+                BinanceAggTradeRecord::InvalidInput { .. } => None,
+            };
+            PreparedCanonicalInputV1::BinanceAggregateTrade {
+                row,
+                source: prepared_source()?,
+                payload,
+            }
+        }
+        TypedRawRowV2::Existing(TypedRawRow::PolymarketRtdsChainlinkBtcUsd(row)) => {
+            row.validate().map_err(crate::typed_raw_contract_error)?;
+            PreparedCanonicalInputV1::ChainlinkSpot(canonicalize_chainlink_spot_v1(
+                row,
+                source,
+                canonical_rule_version,
+            )?)
+        }
+        TypedRawRowV2::PolymarketRtdsChainlinkTwap(row) => PreparedCanonicalInputV1::ChainlinkTwap(
+            canonicalize_chainlink_twap_v1(row, source, canonical_rule_version)?,
+        ),
+        TypedRawRowV2::HistoricalPriceAnchorRepairBatch(batch) => {
+            PreparedCanonicalInputV1::HistoricalAnchorRepair {
+                batch,
+                facts: canonicalize_historical_price_anchor_batch_v1(
+                    batch,
+                    identity_sources,
+                    canonical_rule_version,
+                )?,
+            }
+        }
+    };
+    let pm_source_identity = match &current {
+        PreparedCanonicalInputV1::PolymarketMessage(message) => {
+            Some(message.evidence().shared_source_identity())
+        }
+        _ => None,
+    };
+    Ok(PreparedIngressV1 {
+        recorded,
+        current,
+        prepared_group_id,
+        dependencies,
+        reference_selection: None,
+        pm_source_identity,
+    })
+}

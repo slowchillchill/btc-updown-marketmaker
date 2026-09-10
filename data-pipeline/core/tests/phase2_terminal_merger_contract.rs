@@ -847,3 +847,145 @@ fn winner_market_and_source_time_conflicts_quarantine_only_the_affected_market()
     assert_eq!(unaffected.events[0].market, unaffected_market);
     let _ = assert_resolved(&unaffected.events[0]);
 }
+
+#[test]
+fn prepared_ws_and_gamma_terminal_share_one_state_and_materialize_original_result() {
+    use data_pipeline_core::pm_reduction::PreparedPmEvidenceV1;
+    use data_pipeline_core::public_input::*;
+    use data_pipeline_core::public_reduction::*;
+    use data_pipeline_core::public_reference::{
+        source_evidence_v3_from_existing, source_evidence_v3_from_typed_raw_v2,
+    };
+    let market = market('1', "123");
+    let old_context = market_context(market.clone());
+    let context = PolymarketMarketContextV1 {
+        market: old_context.market,
+        assets: old_context.assets,
+        identity_source_evidence: old_context
+            .identity_source_evidence
+            .iter()
+            .map(|source| {
+                PreparedPmEvidenceV1::prepare(
+                    source_evidence_v3_from_existing(source).unwrap(),
+                    None,
+                )
+                .unwrap()
+            })
+            .collect(),
+    };
+    let mut merger = PolymarketTerminalMerger::new(context, "rule-v3").unwrap();
+    let record = |row: TypedRawRow, position| {
+        let row = TypedRawRowV2::Existing(row);
+        let source_evidence = source_evidence_v3_from_typed_raw_v2(&row).unwrap();
+        RecordedIngressV1 {
+            input_stream_id: "terminal".to_owned(),
+            input_position: position,
+            ingress: DptIngressV1::Message {
+                row,
+                source_evidence,
+            },
+            dependency_record_refs: vec![],
+        }
+    };
+    let ws = record(
+        TypedRawRow::PolymarketOrderbook(terminal_orderbook_row(&market)),
+        0,
+    );
+    let metadata = record(
+        TypedRawRow::PolymarketMarketMetadata(Box::new(terminal_metadata_row(&market))),
+        1,
+    );
+    let prepared_ws = prepare_ingress_v1(&ws, None, &Default::default(), &[], "rule-v3").unwrap();
+    let group_id = prepared_ws.prepared_group_id.unwrap();
+    let PreparedCanonicalInputV1::PolymarketWsTerminal { row, source } = prepared_ws.current else {
+        panic!("terminal")
+    };
+    assert_ne!(&group_id, &source.source_identity().causal_group_id);
+    let direct = source.source().clone();
+    let ws_input = PolymarketOrderbookInputV1 {
+        row: row.clone(),
+        evidence: source,
+    };
+    let prepared =
+        prepare_ingress_v1(&metadata, None, &Default::default(), &[], "rule-v3").unwrap();
+    let PreparedCanonicalInputV1::Metadata(value) = prepared.current else {
+        panic!("metadata")
+    };
+    let result = merger
+        .compute_ws_terminal(
+            PolymarketMetadataInputV1 {
+                row: value.row.clone(),
+                evidence: value.source.clone(),
+            },
+            &value.outcomes,
+            ws_input.clone(),
+        )
+        .unwrap();
+    assert_eq!(result.events.len(), 2);
+    let context = PublicReductionContextV1 {
+        input_stream_id: "terminal".to_owned(),
+        closed_at_input_position: 1,
+        first_fact_ordinal: 0,
+        first_report_ordinal: 0,
+        group_id: group_id.clone(),
+        source_refs: vec![
+            CanonicalInputRecordRefV1 {
+                input_stream_id: "terminal".to_owned(),
+                input_position: 0,
+            },
+            CanonicalInputRecordRefV1 {
+                input_stream_id: "terminal".to_owned(),
+                input_position: 1,
+            },
+        ],
+        direct_sources: vec![direct],
+    };
+    let hot = bind_market_reduction_v1(result, context);
+    let duplicate = merger
+        .compute_ws_terminal(
+            PolymarketMetadataInputV1 {
+                row: value.row.clone(),
+                evidence: value.source,
+            },
+            &value.outcomes,
+            ws_input,
+        )
+        .unwrap();
+    assert!(duplicate.events.is_empty());
+    assert!(matches!(
+        duplicate.reports[0].disposition,
+        ReductionDispositionV1::Suppressed { .. }
+    ));
+    let gamma = record(
+        TypedRawRow::PolymarketMarketMetadata(Box::new(gamma_terminal_metadata_row(&market))),
+        2,
+    );
+    let prepared = prepare_ingress_v1(&gamma, None, &Default::default(), &[], "rule-v3").unwrap();
+    let PreparedCanonicalInputV1::Metadata(value) = prepared.current else {
+        panic!("gamma")
+    };
+    let gamma = merger
+        .compute_gamma_terminal(
+            PolymarketMetadataInputV1 {
+                row: value.row.clone(),
+                evidence: value.source,
+            },
+            &value.outcomes,
+        )
+        .unwrap();
+    assert!(gamma.events.is_empty());
+    let durable = materialize_public_reduction_v1(hot).unwrap();
+    assert_eq!(durable.records.len(), 2);
+    let CanonicalEventRecordV2::MarketFact(terminal) = &durable.records[0] else {
+        panic!("market fact")
+    };
+    assert_eq!(terminal.schema_version, CANONICAL_MARKET_FACT_SCHEMA_V1);
+    assert_eq!(terminal.group_id, group_id);
+    assert!(
+        matches!(&terminal.payload, CanonicalMarketFactPayloadV1::Terminal(MarketResolutionTerminalV3::Resolved { winning_asset_id, .. }) if winning_asset_id == UP_TOKEN_ID)
+    );
+    assert!(terminal.lineage.source_evidence.len() >= 3);
+    assert!(
+        matches!(&durable.reports[0].report.disposition, ReductionDispositionV1::Produced { result_event_id } if *result_event_id == terminal.event_id)
+    );
+}

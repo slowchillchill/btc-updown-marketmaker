@@ -954,9 +954,9 @@ pub struct SourceEvidenceRefV2 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct EventLineageV2 {
+pub struct EventLineageV2<E = SourceEvidenceRefV2> {
     pub canonical_rule_version: String,
-    pub source_evidence: Vec<SourceEvidenceRefV2>,
+    pub source_evidence: Vec<E>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -1177,12 +1177,12 @@ pub enum ExecutionMarketEventPayloadV3 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ExecutionMarketEventV3 {
+pub struct ExecutionMarketEventV3<I = CanonicalEventId, E = SourceEvidenceRefV2> {
     pub schema_version: String,
-    pub event_id: CanonicalEventId,
+    pub event_id: I,
     pub market: MarketIdentityV2,
     pub time: EventTimeV2,
-    pub lineage: EventLineageV2,
+    pub lineage: EventLineageV2<E>,
     pub quality: EventQualityV2,
     pub payload: ExecutionMarketEventPayloadV3,
 }
@@ -1239,11 +1239,11 @@ pub enum CanonicalReferenceEventPayloadV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CanonicalReferenceEventV1 {
+pub struct CanonicalReferenceEventV1<I = CanonicalEventId, E = SourceEvidenceRefV2> {
     pub schema_version: String,
-    pub event_id: CanonicalEventId,
+    pub event_id: I,
     pub time: EventTimeV2,
-    pub lineage: EventLineageV2,
+    pub lineage: EventLineageV2<E>,
     pub quality: EventQualityV2,
     pub payload: CanonicalReferenceEventPayloadV1,
 }

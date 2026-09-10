@@ -309,6 +309,20 @@ fn historical_application_keeps_late_receipt_and_original_identity_without_fake_
     let events =
         canonicalize_historical_price_anchor_batch_v1(&batch, &identities, "rule-v1").unwrap();
     assert_eq!(events.len(), 2);
+    let recorded = RecordedIngressV1 {
+        input_stream_id: "repair".to_owned(),
+        input_position: 0,
+        ingress: DptIngressV1::Message {
+            row: TypedRawRowV2::HistoricalPriceAnchorRepairBatch(batch.clone()),
+            source_evidence: source.clone(),
+        },
+        dependency_record_refs: vec![],
+    };
+    let prepared = prepare_ingress_v1(&recorded, None, &identities, &[], "rule-v1").unwrap();
+    let PreparedCanonicalInputV1::HistoricalAnchorRepair { facts, .. } = prepared.current else {
+        panic!("repair")
+    };
+    assert_eq!(facts, events);
     for (i, event) in events.iter().enumerate() {
         assert_eq!(
             event.time.received_at_utc_ms,
@@ -333,5 +347,131 @@ fn historical_application_keeps_late_receipt_and_original_identity_without_fake_
                 .collector_admission
                 .is_none()
         );
+    }
+}
+
+#[test]
+fn prepared_reference_variants_keep_source_ids_anomalies_and_end_meanings() {
+    use contracts::*;
+    use data_pipeline_core::public_input::*;
+    use data_pipeline_core::public_reduction::*;
+    use data_pipeline_core::public_reference::*;
+    use data_pipeline_core::typed_raw::{
+        POLYMARKET_RTDS_CHAINLINK_BTC_USD_SCHEMA, RtdsFreshnessStatus, TypedRawRow,
+    };
+    let mut rows = vec![
+        TypedRawRowV2::PolymarketRtdsChainlinkTwap(twap_input(60)),
+        TypedRawRowV2::PolymarketMarketMetadataV6(Box::new(
+            PolymarketMarketMetadataV6Input::AnchorRule(anchor_input()),
+        )),
+    ];
+    for status in [
+        RtdsFreshnessStatus::Fresh,
+        RtdsFreshnessStatus::InvalidType,
+        RtdsFreshnessStatus::InvalidTopic,
+        RtdsFreshnessStatus::InvalidSymbol,
+        RtdsFreshnessStatus::InvalidTimestamp,
+    ] {
+        let mut row = twap_input(60).common;
+        row.schema_version = POLYMARKET_RTDS_CHAINLINK_BTC_USD_SCHEMA.to_owned();
+        row.topic = "crypto_prices_chainlink".to_owned();
+        row.freshness_status = status;
+        row.payload_timestamp = 2100;
+        row.age_ms = Some(-100);
+        rows.push(TypedRawRowV2::Existing(
+            TypedRawRow::PolymarketRtdsChainlinkBtcUsd(row),
+        ));
+    }
+    for (position, row) in rows.into_iter().enumerate() {
+        let source = source_evidence_v3_from_typed_raw_v2(&row).unwrap();
+        let recorded = RecordedIngressV1 {
+            input_stream_id: "references".to_owned(),
+            input_position: position as u64,
+            ingress: DptIngressV1::Message {
+                row,
+                source_evidence: source.clone(),
+            },
+            dependency_record_refs: vec![],
+        };
+        let prepared =
+            prepare_ingress_v1(&recorded, None, &Default::default(), &[], "rule-v1").unwrap();
+        assert_eq!(
+            prepared.prepared_group_id.as_ref(),
+            Some(&source.source_message_id)
+        );
+        let events = match prepared.current {
+            PreparedCanonicalInputV1::ChainlinkTwap(event)
+            | PreparedCanonicalInputV1::ChainlinkSpot(event) => vec![event],
+            PreparedCanonicalInputV1::AnchorRule { facts, .. } => facts,
+            _ => panic!("reference"),
+        };
+        if position >= 3 {
+            assert!(matches!(
+                events[0].payload,
+                CanonicalReferenceEventPayloadV2::RtdsObservedAnomaly(_)
+            ));
+            assert_eq!(events[0].quality.availability, MarketDataQuality::Invalid);
+            assert_eq!(
+                events[0].time.source_event_at_utc_ms.is_none(),
+                position == 6
+            );
+        }
+        if position == 2 {
+            assert_eq!(
+                events[0].time.received_at_utc_ms - events[0].time.source_event_at_utc_ms.unwrap(),
+                -100
+            );
+        }
+        let ids = events
+            .iter()
+            .map(|event| event.event_id.clone())
+            .collect::<Vec<_>>();
+        let context = PublicReductionContextV1 {
+            input_stream_id: "references".to_owned(),
+            closed_at_input_position: position as u64,
+            first_fact_ordinal: 0,
+            first_report_ordinal: 0,
+            group_id: source.source_message_id.clone(),
+            source_refs: vec![CanonicalInputRecordRefV1 {
+                input_stream_id: "references".to_owned(),
+                input_position: position as u64,
+            }],
+            direct_sources: vec![source],
+        };
+        let durable =
+            materialize_public_reduction_v1(bind_prepared_reference_facts_v1(events, context))
+                .unwrap();
+        assert_eq!(
+            durable
+                .bindings
+                .into_iter()
+                .map(|binding| binding.event_id)
+                .collect::<Vec<_>>(),
+            ids
+        );
+    }
+    for ingress in [
+        DptIngressV1::EndOfInput,
+        DptIngressV1::Aborted {
+            reason: "original-disconnect".to_owned(),
+        },
+    ] {
+        let input = RecordedIngressV1 {
+            input_stream_id: "end".to_owned(),
+            input_position: 7,
+            ingress,
+            dependency_record_refs: vec![],
+        };
+        let prepared =
+            prepare_ingress_v1(&input, None, &Default::default(), &[], "rule-v1").unwrap();
+        assert!(prepared.prepared_group_id.is_none());
+        match (&input.ingress, prepared.current) {
+            (DptIngressV1::EndOfInput, PreparedCanonicalInputV1::EndOfInput) => {}
+            (
+                DptIngressV1::Aborted { reason: original },
+                PreparedCanonicalInputV1::Aborted { reason },
+            ) => assert_eq!(reason, original),
+            _ => panic!("不能把异常结束变成正常结束"),
+        }
     }
 }

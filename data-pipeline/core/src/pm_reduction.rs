@@ -14,6 +14,7 @@ use crate::{ContractError, hash_domain_bytes, invalid, parse_canonical_decimal, 
 
 mod sealed {
     pub trait Evidence {}
+    pub trait StepIndex {}
 }
 
 /// 泛型只用于真实 V2 旧包装与 V3 公共入口，不制造物理来源标识。
@@ -21,13 +22,35 @@ pub trait PmEvidenceV1:
     sealed::Evidence + Clone + std::fmt::Debug + PartialEq + Eq + Serialize
 {
     fn source_time(&self) -> Option<i64>;
+    fn is_metadata_identity(&self) -> bool;
     fn received_time(&self) -> i64;
     fn semantic_bytes(&self) -> Result<Vec<u8>, ContractError>;
     fn canonicalize(values: Vec<Self>) -> Result<Vec<Self>, ContractError>;
+    fn source_digest(&self, domain: &[u8]) -> Result<Sha256Hex, ContractError> {
+        Ok(hash_domain_bytes(domain, &self.semantic_bytes()?))
+    }
+    fn prepared_book_digest(
+        &self,
+        asset: &AssetIdentityV1,
+        bids: &BTreeMap<Decimal, &PriceLevelV1>,
+        asks: &BTreeMap<Decimal, &PriceLevelV1>,
+    ) -> Result<Sha256Hex, ContractError> {
+        book_digest(asset, bids, asks)
+    }
 }
 
 impl sealed::Evidence for SourceEvidenceRefV2 {}
 impl PmEvidenceV1 for SourceEvidenceRefV2 {
+    fn is_metadata_identity(&self) -> bool {
+        self.source_kind == CanonicalSourceKind::PolymarketMarketMetadata
+            && self.source_event_at_utc_ms.is_none()
+            && matches!(
+                self.source_native_identity,
+                Some(SourceNativeIdentityV1::SemanticEvidenceSha256 { .. })
+            )
+            && self.collector_admission.is_none()
+    }
+
     fn source_time(&self) -> Option<i64> {
         self.source_event_at_utc_ms
     }
@@ -43,6 +66,16 @@ impl PmEvidenceV1 for SourceEvidenceRefV2 {
 }
 impl sealed::Evidence for SourceEvidenceRefV3 {}
 impl PmEvidenceV1 for SourceEvidenceRefV3 {
+    fn is_metadata_identity(&self) -> bool {
+        self.source_kind == CanonicalSourceKindV2::PolymarketMarketMetadata
+            && self.source_event_at_utc_ms.is_none()
+            && matches!(
+                self.source_native_identity,
+                Some(SourceNativeIdentityV1::SemanticEvidenceSha256 { .. })
+            )
+            && self.collector_admission.is_none()
+    }
+
     fn source_time(&self) -> Option<i64> {
         self.source_event_at_utc_ms
     }
@@ -323,11 +356,11 @@ pub enum PmStepChangeV1<'m, E = SourceEvidenceRefV3> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct PmReductionStepV1<'m, E = SourceEvidenceRefV3> {
+pub struct PmReductionStepV1<'m, E = SourceEvidenceRefV3, I = CanonicalEventId> {
     pub canonical_fact_id: CanonicalEventId,
     pub member_index: Option<u32>,
     pub step_index: u32,
-    pub derived_id: CanonicalEventId,
+    pub derived_id: I,
     pub change: PmStepChangeV1<'m, E>,
     pub direct: E,
     pub prestate: Option<PmEvidencePairV1<E>>,
@@ -345,9 +378,9 @@ pub struct PmOperationEvidenceV2<E = SourceEvidenceRefV3> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub enum PmReductionDispositionV2<E = SourceEvidenceRefV3> {
+pub enum PmReductionDispositionV2<E = SourceEvidenceRefV3, I = CanonicalEventId> {
     Produced {
-        derived_id: CanonicalEventId,
+        derived_id: I,
     },
     NoOutput {
         operation_evidence: Vec<PmOperationEvidenceV2<E>>,
@@ -358,7 +391,7 @@ pub enum PmReductionDispositionV2<E = SourceEvidenceRefV3> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub struct PmReductionReportV2<E = SourceEvidenceRefV3> {
+pub struct PmReductionReportV2<E = SourceEvidenceRefV3, I = CanonicalEventId> {
     pub canonical_fact_id: CanonicalEventId,
     pub member_index: Option<u32>,
     pub canonical_rule_version: String,
@@ -366,15 +399,19 @@ pub struct PmReductionReportV2<E = SourceEvidenceRefV3> {
     pub operation: ReductionOperationKindV1,
     pub reason_code: String,
     pub quantity_conservation: Option<QuantityConservationV1>,
-    pub disposition: PmReductionDispositionV2<E>,
+    pub disposition: PmReductionDispositionV2<E, I>,
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct PmMessageReductionV1<'m, E = SourceEvidenceRefV3> {
-    pub steps: Vec<PmReductionStepV1<'m, E>>,
-    pub reports: Vec<PmReductionReportV2<E>>,
+pub struct PmMessageReductionV1<'m, E = SourceEvidenceRefV3, I = CanonicalEventId> {
+    pub steps: Vec<PmReductionStepV1<'m, E, I>>,
+    pub reports: Vec<PmReductionReportV2<E, I>>,
     /// 实际消息内覆盖峰值；只计触及的价位，不施加新资源门槛。
     pub touched_level_entries: usize,
+    #[serde(skip)]
+    materialization_market: MarketIdentityV2,
+    #[serde(skip)]
+    materialization_rule_version: String,
 }
 
 pub(crate) struct PmMessageInput<'m, E> {
@@ -403,7 +440,7 @@ struct Worker<'a, 'm, E, S> {
     assets: BTreeMap<String, PmAssetStateV1<E>>,
     // bool 为 ask，避免引入 BookSide 全局排序语义。
     overlay: BTreeMap<(String, bool, Decimal), WorkingLevel<E>>,
-    result: PmMessageReductionV1<'m, E>,
+    result: PmMessageReductionV1<'m, E, u32>,
 }
 
 fn exact(value: Decimal) -> ExactDecimal {
@@ -483,10 +520,12 @@ pub(crate) fn reduce_epoch<'m, E: PmEvidenceV1, S: PmStateReadV1<E>>(
             steps: Vec::new(),
             reports: Vec::new(),
             touched_level_entries: 0,
+            materialization_market: context.market.clone(),
+            materialization_rule_version: context.canonical_rule_version.clone(),
         },
     };
     worker.epoch()?;
-    Ok(worker.result)
+    materialize_pm_reduction(worker.result)
 }
 
 pub(crate) fn reduce_message<'m, E: PmEvidenceV1, S: PmStateReadV1<E>>(
@@ -495,6 +534,15 @@ pub(crate) fn reduce_message<'m, E: PmEvidenceV1, S: PmStateReadV1<E>>(
     input: PmMessageInput<'m, E>,
     public_selection: bool,
 ) -> Result<PmMessageReductionV1<'m, E>, ContractError> {
+    materialize_pm_reduction(compute_message(context, previous, input, public_selection)?)
+}
+
+fn compute_message<'m, E: PmEvidenceV1, S: PmStateReadV1<E>>(
+    context: &PmMarketContextV1<E>,
+    previous: &S,
+    input: PmMessageInput<'m, E>,
+    public_selection: bool,
+) -> Result<PmMessageReductionV1<'m, E, u32>, ContractError> {
     let mut worker = Worker {
         context,
         previous,
@@ -508,6 +556,8 @@ pub(crate) fn reduce_message<'m, E: PmEvidenceV1, S: PmStateReadV1<E>>(
             steps: Vec::new(),
             reports: Vec::new(),
             touched_level_entries: 0,
+            materialization_market: context.market.clone(),
+            materialization_rule_version: context.canonical_rule_version.clone(),
         },
     };
     if public_selection
@@ -629,7 +679,7 @@ impl<'a, 'm, E: PmEvidenceV1, S: PmStateReadV1<E>> Worker<'a, 'm, E, S> {
         prestate: Option<PmEvidencePairV1<E>>,
         dependencies: Vec<E>,
         quality: EventQualityV2,
-    ) -> Result<CanonicalEventId, ContractError> {
+    ) -> Result<u32, ContractError> {
         self.step_with_absence(change, prestate, None, dependencies, quality)
     }
     fn step_with_absence(
@@ -639,28 +689,11 @@ impl<'a, 'm, E: PmEvidenceV1, S: PmStateReadV1<E>> Worker<'a, 'm, E, S> {
         absence: Option<PmEvidencePairV1<E>>,
         dependencies: Vec<E>,
         quality: EventQualityV2,
-    ) -> Result<CanonicalEventId, ContractError> {
+    ) -> Result<u32, ContractError> {
         let dependencies = E::canonicalize(dependencies)?;
         let dependency_time = time(&dependencies);
         let step_index = self.result.steps.len() as u32;
-        let derived_id = CanonicalEventId(
-            hash_domain_bytes(
-                b"data-pipeline/pm-derived-step/v1\0",
-                &stable_json(&(
-                    &self.context.canonical_rule_version,
-                    &self.context.market,
-                    &self.input.fact_id,
-                    self.member,
-                    step_index,
-                    &change,
-                    &prestate,
-                    &absence,
-                    &dependencies,
-                    &quality,
-                ))?,
-            )
-            .0,
-        );
+        let derived_id = step_index;
         self.result.steps.push(PmReductionStepV1 {
             canonical_fact_id: self.input.fact_id.clone(),
             member_index: self.member,
@@ -686,7 +719,7 @@ impl<'a, 'm, E: PmEvidenceV1, S: PmStateReadV1<E>> Worker<'a, 'm, E, S> {
         operation: ReductionOperationKindV1,
         reason: &str,
         quantity: Option<QuantityConservationV1>,
-        disposition: PmReductionDispositionV2<E>,
+        disposition: PmReductionDispositionV2<E, u32>,
     ) {
         self.result.reports.push(PmReductionReportV2 {
             canonical_fact_id: self.input.fact_id.clone(),
@@ -1035,7 +1068,11 @@ impl<'a, 'm, E: PmEvidenceV1, S: PmStateReadV1<E>> Worker<'a, 'm, E, S> {
                     initial_tick_size_pusd_per_share: state.tick_size.clone(),
                     source_sequence_epoch_id: self.input.admission.source_sequence_epoch_id.clone(),
                     source_cursor: self.input.admission.collector_admission_sequence,
-                    book_digest_sha256: book_digest(asset, &incoming_bids, &incoming_asks)?,
+                    book_digest_sha256: self.input.source.prepared_book_digest(
+                        asset,
+                        &incoming_bids,
+                        &incoming_asks,
+                    )?,
                     bids,
                     asks,
                     evidence: baseline.clone(),
@@ -1257,10 +1294,10 @@ impl<'a, 'm, E: PmEvidenceV1, S: PmStateReadV1<E>> Worker<'a, 'm, E, S> {
             )
         })?;
         let summary = quantity_summary(before, after);
-        let causal_group_id = hash_domain_bytes(
-            b"data-pipeline/polymarket-causal-group/v1\0",
-            &self.input.source.semantic_bytes()?,
-        );
+        let causal_group_id = self
+            .input
+            .source
+            .source_digest(b"data-pipeline/polymarket-causal-group/v1\0")?;
         let derived_id = self.step_with_absence(
             PmStepChangeV1::LevelChange {
                 transition: LevelExecutionTransitionV3 {
@@ -1571,10 +1608,10 @@ impl<'a, 'm, E: PmEvidenceV1, S: PmStateReadV1<E>> Worker<'a, 'm, E, S> {
                 "a public trade quantity must be positive",
             ));
         }
-        let trade_id = hash_domain_bytes(
-            b"data-pipeline/polymarket-public-trade-id/v1\0",
-            &self.input.source.semantic_bytes()?,
-        );
+        let trade_id = self
+            .input
+            .source
+            .source_digest(b"data-pipeline/polymarket-public-trade-id/v1\0")?;
         let derived_id = self.step(
             PmStepChangeV1::PublicTrade {
                 trade: PublicTradeV2 {
@@ -1636,4 +1673,579 @@ fn book_digest(
         b"data-pipeline/polymarket-book-digest/v1\0",
         &stable_json(&material)?,
     ))
+}
+
+/// 只编码已经计算完成的不可变步骤；不读取或推进调用方状态。
+pub fn materialize_pm_reduction<'m, E: PmEvidenceV1, I: PmStepIndexV1>(
+    reduction: PmMessageReductionV1<'m, E, I>,
+) -> Result<PmMessageReductionV1<'m, E>, ContractError> {
+    let mut ids = Vec::with_capacity(reduction.steps.len());
+    let mut steps = Vec::with_capacity(reduction.steps.len());
+    for step in reduction.steps {
+        let derived_id = CanonicalEventId(
+            hash_domain_bytes(
+                b"data-pipeline/pm-derived-step/v1\0",
+                &stable_json(&(
+                    &reduction.materialization_rule_version,
+                    &reduction.materialization_market,
+                    &step.canonical_fact_id,
+                    step.member_index,
+                    step.step_index,
+                    &step.change,
+                    &step.prestate,
+                    &step.absence,
+                    &step.dependencies,
+                    &step.quality,
+                ))?,
+            )
+            .0,
+        );
+        ids.push(derived_id.clone());
+        steps.push(PmReductionStepV1 {
+            canonical_fact_id: step.canonical_fact_id,
+            member_index: step.member_index,
+            step_index: step.step_index,
+            derived_id,
+            change: step.change,
+            direct: step.direct,
+            prestate: step.prestate,
+            absence: step.absence,
+            dependencies: step.dependencies,
+            direct_time: step.direct_time,
+            dependency_time: step.dependency_time,
+            quality: step.quality,
+        });
+    }
+    let reports = reduction
+        .reports
+        .into_iter()
+        .map(|report| PmReductionReportV2 {
+            canonical_fact_id: report.canonical_fact_id,
+            member_index: report.member_index,
+            canonical_rule_version: report.canonical_rule_version,
+            scope: report.scope,
+            operation: report.operation,
+            reason_code: report.reason_code,
+            quantity_conservation: report.quantity_conservation,
+            disposition: match report.disposition {
+                PmReductionDispositionV2::Produced { derived_id } => {
+                    PmReductionDispositionV2::Produced {
+                        derived_id: ids[derived_id.step_index() as usize].clone(),
+                    }
+                }
+                PmReductionDispositionV2::NoOutput { operation_evidence } => {
+                    PmReductionDispositionV2::NoOutput { operation_evidence }
+                }
+                PmReductionDispositionV2::Suppressed { operation_evidence } => {
+                    PmReductionDispositionV2::Suppressed { operation_evidence }
+                }
+            },
+        })
+        .collect();
+    Ok(PmMessageReductionV1 {
+        steps,
+        reports,
+        touched_level_entries: reduction.touched_level_entries,
+        materialization_market: reduction.materialization_market,
+        materialization_rule_version: reduction.materialization_rule_version,
+    })
+}
+
+/// 后台来源准备保存原规范字节，热计算只比较已有键。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct PreparedPmEvidenceV1<E> {
+    value: E,
+    #[serde(skip)]
+    physical_key: Vec<u8>,
+    #[serde(skip)]
+    operation_keys: Vec<Vec<u8>>,
+    #[serde(skip)]
+    source_identity: std::sync::Arc<PreparedPmSourceIdentityV1>,
+}
+impl<E: PmEvidenceV1> PreparedPmEvidenceV1<E> {
+    pub fn prepare(
+        value: E,
+        payload: Option<&CanonicalPmPayloadV1>,
+    ) -> Result<Self, ContractError> {
+        // 沿旧入口的单项证据检查；组合的规范化直接使用原键。
+        E::canonicalize(vec![value.clone()])?;
+        let semantic_key = value.semantic_bytes()?;
+        let physical_key = stable_json(&value)?;
+        let operation_keys = [
+            ReductionEvidenceRoleV1::Context,
+            ReductionEvidenceRoleV1::Input,
+            ReductionEvidenceRoleV1::MatchedExisting,
+            ReductionEvidenceRoleV1::IncomingDuplicate,
+        ]
+        .into_iter()
+        .map(|role| {
+            stable_json(&crate::reduction::ReductionOperationEvidenceV1 {
+                role,
+                source_evidence: value.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+        let mut book_digests = BTreeMap::new();
+        if let Some(CanonicalPmPayloadV1::Book {
+            fact:
+                CanonicalBookFactV1::FullBook {
+                    asset, bids, asks, ..
+                },
+        }) = payload
+        {
+            book_digests.insert(
+                asset.token_id.0.clone(),
+                book_digest(
+                    asset,
+                    &input_levels(bids, "bids")?,
+                    &input_levels(asks, "asks")?,
+                )?,
+            );
+        }
+        Ok(Self {
+            source_identity: std::sync::Arc::new(PreparedPmSourceIdentityV1 {
+                causal_group_id: hash_domain_bytes(
+                    b"data-pipeline/polymarket-causal-group/v1\0",
+                    &semantic_key,
+                ),
+                public_trade_id: hash_domain_bytes(
+                    b"data-pipeline/polymarket-public-trade-id/v1\0",
+                    &semantic_key,
+                ),
+                evidence_semantic_key: semantic_key,
+                book_digests_by_member: book_digests,
+            }),
+            value,
+            physical_key,
+            operation_keys,
+        })
+    }
+
+    pub fn source(&self) -> &E {
+        &self.value
+    }
+    pub fn source_identity(&self) -> &PreparedPmSourceIdentityV1 {
+        &self.source_identity
+    }
+    pub fn shared_source_identity(&self) -> std::sync::Arc<PreparedPmSourceIdentityV1> {
+        self.source_identity.clone()
+    }
+    pub(crate) fn operation_key(&self, role: ReductionEvidenceRoleV1) -> &[u8] {
+        &self.operation_keys[match role {
+            ReductionEvidenceRoleV1::Context => 0,
+            ReductionEvidenceRoleV1::Input => 1,
+            ReductionEvidenceRoleV1::MatchedExisting => 2,
+            ReductionEvidenceRoleV1::IncomingDuplicate => 3,
+        }]
+    }
+}
+impl<E: PmEvidenceV1> sealed::Evidence for PreparedPmEvidenceV1<E> {}
+impl<E: PmEvidenceV1> PmEvidenceV1 for PreparedPmEvidenceV1<E> {
+    fn is_metadata_identity(&self) -> bool {
+        self.value.is_metadata_identity()
+    }
+    fn source_time(&self) -> Option<i64> {
+        self.value.source_time()
+    }
+    fn received_time(&self) -> i64 {
+        self.value.received_time()
+    }
+    fn semantic_bytes(&self) -> Result<Vec<u8>, ContractError> {
+        Ok(self.source_identity.evidence_semantic_key.clone())
+    }
+    fn canonicalize(mut values: Vec<Self>) -> Result<Vec<Self>, ContractError> {
+        values.sort_by(|a, b| {
+            a.source_identity
+                .evidence_semantic_key
+                .cmp(&b.source_identity.evidence_semantic_key)
+                .then_with(|| a.physical_key.cmp(&b.physical_key))
+        });
+        values.dedup_by(|a, b| {
+            a.source_identity.evidence_semantic_key == b.source_identity.evidence_semantic_key
+        });
+        Ok(values)
+    }
+    fn source_digest(&self, domain: &[u8]) -> Result<Sha256Hex, ContractError> {
+        Ok(match domain {
+            b"data-pipeline/polymarket-causal-group/v1\0" => {
+                self.source_identity.causal_group_id.clone()
+            }
+            b"data-pipeline/polymarket-public-trade-id/v1\0" => {
+                self.source_identity.public_trade_id.clone()
+            }
+            _ => unreachable!("共同业务算法只有两类来源摘要"),
+        })
+    }
+    fn prepared_book_digest(
+        &self,
+        asset: &AssetIdentityV1,
+        _: &BTreeMap<Decimal, &PriceLevelV1>,
+        _: &BTreeMap<Decimal, &PriceLevelV1>,
+    ) -> Result<Sha256Hex, ContractError> {
+        Ok(self.source_identity.book_digests_by_member[&asset.token_id.0].clone())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedPmSourceIdentityV1 {
+    pub causal_group_id: Sha256Hex,
+    pub public_trade_id: Sha256Hex,
+    pub evidence_semantic_key: Vec<u8>,
+    pub book_digests_by_member: BTreeMap<String, Sha256Hex>,
+}
+
+pub struct PreparedPmMessageV1 {
+    message: CanonicalPmMessageV1,
+    evidence: PreparedPmEvidenceV1<SourceEvidenceRefV3>,
+}
+impl PreparedPmMessageV1 {
+    pub fn prepare(message: CanonicalPmMessageV1) -> Result<Self, ContractError> {
+        let parsed = crate::pm_message::parse_canonical_pm_message(&message)?;
+        let evidence =
+            PreparedPmEvidenceV1::prepare(parsed.source.clone(), Some(&message.payload))?;
+        Ok(Self { message, evidence })
+    }
+    pub fn message(&self) -> &CanonicalPmMessageV1 {
+        &self.message
+    }
+    pub fn evidence(&self) -> &PreparedPmEvidenceV1<SourceEvidenceRefV3> {
+        &self.evidence
+    }
+}
+
+/// 只消费已经准备的来源与调用方前序；报告和步骤引用同一完整逻辑位置。
+pub fn compute_pm_message_steps_v1<'m>(
+    context: &PmMarketContextV1<PreparedPmEvidenceV1<SourceEvidenceRefV3>>,
+    previous: &impl PmStateReadV1<PreparedPmEvidenceV1<SourceEvidenceRefV3>>,
+    message: &'m PreparedPmMessageV1,
+    consumer_stream_id: &str,
+    canonical_record_position: u64,
+    public_selection: bool,
+) -> Result<
+    PmMessageReductionV1<'m, PreparedPmEvidenceV1<SourceEvidenceRefV3>, PmDerivedStepPositionV1>,
+    ContractError,
+> {
+    let result = compute_message(
+        context,
+        previous,
+        PmMessageInput {
+            fact_id: message.message.event_id.clone(),
+            payload: Some(&message.message.payload),
+            source: &message.evidence,
+            source_at: message
+                .evidence
+                .value
+                .source_event_at_utc_ms
+                .expect("准备已取得来源时间"),
+            admission: message
+                .evidence
+                .value
+                .collector_admission
+                .as_ref()
+                .expect("准备已取得准入坐标"),
+        },
+        public_selection,
+    )?;
+    let positions: Vec<_> = result
+        .steps
+        .iter()
+        .map(|step| PmDerivedStepPositionV1 {
+            consumer_stream_id: consumer_stream_id.to_owned(),
+            canonical_record_position,
+            member_index: step.member_index,
+            step_index: step.step_index,
+        })
+        .collect();
+    let steps = result
+        .steps
+        .into_iter()
+        .map(|step| PmReductionStepV1 {
+            derived_id: positions[step.step_index as usize].clone(),
+            canonical_fact_id: step.canonical_fact_id,
+            member_index: step.member_index,
+            step_index: step.step_index,
+            change: step.change,
+            direct: step.direct,
+            prestate: step.prestate,
+            absence: step.absence,
+            dependencies: step.dependencies,
+            direct_time: step.direct_time,
+            dependency_time: step.dependency_time,
+            quality: step.quality,
+        })
+        .collect();
+    let reports = result
+        .reports
+        .into_iter()
+        .map(|report| PmReductionReportV2 {
+            canonical_fact_id: report.canonical_fact_id,
+            member_index: report.member_index,
+            canonical_rule_version: report.canonical_rule_version,
+            scope: report.scope,
+            operation: report.operation,
+            reason_code: report.reason_code,
+            quantity_conservation: report.quantity_conservation,
+            disposition: match report.disposition {
+                PmReductionDispositionV2::Produced { derived_id } => {
+                    PmReductionDispositionV2::Produced {
+                        derived_id: positions[derived_id as usize].clone(),
+                    }
+                }
+                PmReductionDispositionV2::NoOutput { operation_evidence } => {
+                    PmReductionDispositionV2::NoOutput { operation_evidence }
+                }
+                PmReductionDispositionV2::Suppressed { operation_evidence } => {
+                    PmReductionDispositionV2::Suppressed { operation_evidence }
+                }
+            },
+        })
+        .collect();
+    Ok(PmMessageReductionV1 {
+        steps,
+        reports,
+        touched_level_entries: result.touched_level_entries,
+        materialization_market: result.materialization_market,
+        materialization_rule_version: result.materialization_rule_version,
+    })
+}
+
+/// 仅支持内部消息序号与已签发的完整公共步骤位置。
+pub trait PmStepIndexV1: sealed::StepIndex {
+    fn step_index(&self) -> u32;
+}
+impl sealed::StepIndex for u32 {}
+impl PmStepIndexV1 for u32 {
+    fn step_index(&self) -> u32 {
+        *self
+    }
+}
+impl sealed::StepIndex for PmDerivedStepPositionV1 {}
+impl PmStepIndexV1 for PmDerivedStepPositionV1 {
+    fn step_index(&self) -> u32 {
+        self.step_index
+    }
+}
+
+pub type PmLogicalStepV1<'m> =
+    PmReductionStepV1<'m, PreparedPmEvidenceV1<SourceEvidenceRefV3>, PmDerivedStepPositionV1>;
+
+pub struct MaterializedPmReductionV1<'m> {
+    pub reduction: PmMessageReductionV1<'m, PreparedPmEvidenceV1<SourceEvidenceRefV3>>,
+    pub bindings: Vec<PmDerivedStepBindingV1>,
+}
+
+/// 后台物化已捕获的步骤材料，同时保存公共位置到独立派生身份的绑定。
+pub fn materialize_pm_step_identity_v1<'m>(
+    reduction: PmMessageReductionV1<
+        'm,
+        PreparedPmEvidenceV1<SourceEvidenceRefV3>,
+        PmDerivedStepPositionV1,
+    >,
+) -> Result<MaterializedPmReductionV1<'m>, ContractError> {
+    let positions = reduction
+        .steps
+        .iter()
+        .map(|step| step.derived_id.clone())
+        .collect::<Vec<_>>();
+    let reduction = materialize_pm_reduction(reduction)?;
+    let bindings = positions
+        .into_iter()
+        .zip(&reduction.steps)
+        .map(|(position, step)| PmDerivedStepBindingV1 {
+            position,
+            derived_id: DerivedPmStepIdV1(Sha256Hex(step.derived_id.0.clone())),
+        })
+        .collect();
+    Ok(MaterializedPmReductionV1 {
+        reduction,
+        bindings,
+    })
+}
+
+#[cfg(test)]
+mod no_encoding_tests {
+    use super::*;
+    type E = PreparedPmEvidenceV1<SourceEvidenceRefV3>;
+    struct InitialState {
+        market: MarketIdentityV2,
+        asset: PmAssetStateV1<E>,
+    }
+    impl PmStateReadV1<E> for InitialState {
+        fn market(&self) -> &MarketIdentityV2 {
+            &self.market
+        }
+        fn current_epoch(&self) -> Option<&str> {
+            None
+        }
+        fn asset_state(&self, _: &str) -> Option<PmAssetReadV1<'_, E>> {
+            Some(self.asset.as_read())
+        }
+        fn quantity(&self, _: &str, _: BookSide, _: Decimal) -> Decimal {
+            Decimal::ZERO
+        }
+        fn level_evidence(
+            &self,
+            _: &str,
+            _: BookSide,
+            _: Decimal,
+        ) -> Option<PmEvidenceReadV1<'_, E>> {
+            None
+        }
+        fn absence_evidence(
+            &self,
+            _: &str,
+            _: BookSide,
+            _: Decimal,
+        ) -> Option<PmEvidenceReadV1<'_, E>> {
+            None
+        }
+        fn selected_level(
+            &self,
+            _: &str,
+            _: BookSide,
+            _: Decimal,
+        ) -> Option<&PmSelectedLevelV1<E>> {
+            None
+        }
+        fn level_keys<'a>(
+            &'a self,
+            _: &'a str,
+            _: BookSide,
+        ) -> Box<dyn Iterator<Item = Decimal> + 'a> {
+            Box::new(std::iter::empty())
+        }
+    }
+    #[test]
+    fn prepared_full_book_steps_and_initial_digest_do_not_encode() {
+        let raw_identity = SourceEvidenceRefV2 {
+            source_kind: CanonicalSourceKind::PolymarketMarketMetadata,
+            source_native_identity: Some(SourceNativeIdentityV1::SemanticEvidenceSha256 {
+                sha256: Sha256Hex("a".repeat(64)),
+            }),
+            source_event_at_utc_ms: None,
+            received_at_utc_ms: 800,
+            collector_admission: None,
+            input_manifest_sha256: Sha256Hex("b".repeat(64)),
+            input_file_sha256: Sha256Hex("c".repeat(64)),
+        };
+        let identity =
+            crate::public_reference::source_evidence_v3_from_existing(&raw_identity).unwrap();
+        let market = MarketIdentityV2 {
+            condition_id: ConditionId(format!("0x{}", "1".repeat(64))),
+            clob_market_id: ClobMarketId("123".to_owned()),
+            window: MarketWindowV2 {
+                start_at_utc_ms: 1000,
+                end_at_utc_ms: 301000,
+            },
+        };
+        let assets = ["123", "456"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, token)| PolymarketAssetContextV1 {
+                asset: AssetIdentityV1 {
+                    token_id: TokenId(token.to_owned()),
+                    outcome: OutcomeIdentityV1 {
+                        index: index as u32,
+                        label: if index == 0 { "UP" } else { "DOWN" }.to_owned(),
+                    },
+                },
+                initial_tick_size_pusd_per_share: ExactDecimal("0.01".to_owned()),
+            })
+            .collect::<Vec<_>>();
+        let raw_context = PmMarketContextV1 {
+            market: market.clone(),
+            assets: assets.clone(),
+            identity_source_evidence: vec![identity.clone()],
+            canonical_rule_version: "rule".to_owned(),
+        };
+        let source =
+            crate::public_reference::source_evidence_v3_from_existing(&SourceEvidenceRefV2 {
+                source_kind: CanonicalSourceKind::PolymarketOrderbook,
+                source_native_identity: None,
+                source_event_at_utc_ms: Some(1100),
+                received_at_utc_ms: 1000,
+                collector_admission: Some(CollectorAdmissionCoordinateV1 {
+                    source_sequence_epoch_id: "epoch".to_owned(),
+                    collector_admission_sequence: 1,
+                    admitted_at_utc_ms: 1001,
+                }),
+                input_manifest_sha256: Sha256Hex("b".repeat(64)),
+                input_file_sha256: Sha256Hex("c".repeat(64)),
+            })
+            .unwrap();
+        let message = crate::pm_message::build_canonical_pm_message(
+            &raw_context,
+            source,
+            CanonicalInputRecordRefV1 {
+                input_stream_id: "input".to_owned(),
+                input_position: 0,
+            },
+            CanonicalPmPayloadV1::Book {
+                fact: CanonicalBookFactV1::FullBook {
+                    asset: assets[0].asset.clone(),
+                    bids: vec![PriceLevelV1 {
+                        price_pusd_per_share: ExactDecimal("0.5".to_owned()),
+                        quantity_shares: ExactDecimal("1".to_owned()),
+                    }],
+                    asks: vec![PriceLevelV1 {
+                        price_pusd_per_share: ExactDecimal("0.6".to_owned()),
+                        quantity_shares: ExactDecimal("2".to_owned()),
+                    }],
+                    last_trade_price_pusd_per_share: None,
+                },
+            },
+        )
+        .unwrap();
+        let message = PreparedPmMessageV1::prepare(message).unwrap();
+        let evidence = E::prepare(identity, None).unwrap();
+        let context = PmMarketContextV1 {
+            market: market.clone(),
+            assets,
+            identity_source_evidence: vec![evidence.clone()],
+            canonical_rule_version: "rule".to_owned(),
+        };
+        let state = InitialState {
+            market,
+            asset: PmAssetStateV1 {
+                has_initial_snapshot: false,
+                book_ready: false,
+                tick_size: ExactDecimal("0.01".to_owned()),
+                tick_direct_evidence: vec![evidence.clone()],
+                tick_frontier: evidence,
+                absence_baseline: None,
+                selection_baseline: None,
+                bba: None,
+                bba_reanchor_frontier: None,
+            },
+        };
+        for public_selection in [false, true] {
+            crate::without_identity_encoding(|| {
+                let result = compute_pm_message_steps_v1(
+                    &context,
+                    &state,
+                    &message,
+                    "consumer",
+                    0,
+                    public_selection,
+                )
+                .unwrap();
+                assert!(result.steps.iter().any(|step| matches!(&step.change, PmStepChangeV1::InitialSnapshot { bids, asks, .. } if bids.len() == 1 && asks.len() == 1)));
+                assert!(
+                    result
+                        .steps
+                        .iter()
+                        .all(|step| step.derived_id.consumer_stream_id == "consumer")
+                );
+                assert!(
+                    result
+                        .steps
+                        .iter()
+                        .any(|step| step.direct_time.received_at_utc_ms
+                            - step.direct_time.source_event_at_utc_ms.unwrap()
+                            == -100)
+                );
+            });
+        }
+    }
 }

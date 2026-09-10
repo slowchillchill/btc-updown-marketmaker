@@ -11,11 +11,11 @@ use crate::typed_raw::{
     PolymarketOrderbookEvent, PolymarketOrderbookRow, TypedRawRow,
 };
 use crate::{
-    ContractError, build_binance_aggregate_trade_reference_event_v1,
-    derive_execution_market_event_v3_id, derive_reference_event_v1_id, hash_domain_bytes, invalid,
-    parse_canonical_decimal, semantic_source_evidence, source_evidence_from_typed_raw, stable_json,
-    typed_raw_contract_error, validate_event_id, validate_execution_market_event_v3,
-    validate_market, validate_reference_event_v1, validate_source_evidence,
+    ContractError, derive_execution_market_event_v3_id, derive_reference_event_v1_id,
+    hash_domain_bytes, invalid, parse_canonical_decimal, semantic_source_evidence,
+    source_evidence_from_typed_raw, stable_json, typed_raw_contract_error, validate_event_id,
+    validate_execution_market_event_v3, validate_market, validate_reference_event_v1,
+    validate_source_evidence,
 };
 
 pub const REDUCTION_REPORT_SCHEMA_V1: &str = "canonical_reduction_report_v1";
@@ -52,9 +52,9 @@ pub enum ReductionEvidenceRoleV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ReductionOperationEvidenceV1 {
+pub struct ReductionOperationEvidenceV1<E = SourceEvidenceRefV2> {
     pub role: ReductionEvidenceRoleV1,
-    pub source_evidence: SourceEvidenceRefV2,
+    pub source_evidence: E,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -63,34 +63,34 @@ pub struct ReductionOperationEvidenceV1 {
     tag = "disposition",
     rename_all = "SCREAMING_SNAKE_CASE"
 )]
-pub enum ReductionDispositionV1 {
+pub enum ReductionDispositionV1<E = SourceEvidenceRefV2, I = CanonicalEventId> {
     Produced {
-        result_event_id: CanonicalEventId,
+        result_event_id: I,
     },
     NoOutput {
-        operation_evidence: Vec<ReductionOperationEvidenceV1>,
+        operation_evidence: Vec<ReductionOperationEvidenceV1<E>>,
     },
     Suppressed {
-        operation_evidence: Vec<ReductionOperationEvidenceV1>,
+        operation_evidence: Vec<ReductionOperationEvidenceV1<E>>,
     },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ReductionReportEntryV1 {
+pub struct ReductionReportEntryV1<E = SourceEvidenceRefV2, I = CanonicalEventId> {
     pub schema_version: String,
     pub canonical_rule_version: String,
     pub scope: String,
     pub operation: ReductionOperationKindV1,
     pub reason_code: String,
     pub quantity_conservation: Option<QuantityConservationV1>,
-    pub disposition: ReductionDispositionV1,
+    pub disposition: ReductionDispositionV1<E, I>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ReferenceReductionOutcomeV1 {
-    pub event: Option<CanonicalReferenceEventV1>,
-    pub report: ReductionReportEntryV1,
+pub struct ReferenceReductionOutcomeV1<E = SourceEvidenceRefV2, I = CanonicalEventId> {
+    pub event: Option<CanonicalReferenceEventV1<I, E>>,
+    pub report: ReductionReportEntryV1<E, I>,
 }
 
 pub fn build_chainlink_reference_outcome_v1(
@@ -105,7 +105,7 @@ pub fn build_chainlink_reference_outcome_v1(
         input_file_sha256,
         canonical_rule_version,
     )?;
-    let report = produced_report(
+    let report = produced_report::<SourceEvidenceRefV2>(
         canonical_rule_version,
         format!("chainlink_reference:{}", row.symbol),
         ReductionOperationKindV1::Merge,
@@ -120,9 +120,9 @@ pub fn build_chainlink_reference_outcome_v1(
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PolymarketReductionBatch {
-    pub events: Vec<ExecutionMarketEventV3>,
-    pub reports: Vec<ReductionReportEntryV1>,
+pub struct PolymarketReductionBatch<E = SourceEvidenceRefV2, I = CanonicalEventId> {
+    pub events: Vec<ExecutionMarketEventV3<I, E>>,
+    pub reports: Vec<ReductionReportEntryV1<E, I>>,
 }
 
 fn exact_from_decimal(value: Decimal) -> ExactDecimal {
@@ -152,12 +152,12 @@ pub(crate) fn canonicalize_source_evidence(
     Ok(canonical)
 }
 
-fn visibility_frontier_evidence(
-    evidence: Vec<SourceEvidenceRefV2>,
-) -> Result<SourceEvidenceRefV2, ContractError> {
-    canonicalize_source_evidence(evidence)?
+fn visibility_frontier_evidence<E: crate::pm_reduction::PmEvidenceV1>(
+    evidence: Vec<E>,
+) -> Result<E, ContractError> {
+    canonicalize_reduction_evidence::<E>(evidence)?
         .into_iter()
-        .max_by_key(|item| item.received_at_utc_ms)
+        .max_by_key(|item| item.received_time())
         .ok_or_else(|| invalid("source_evidence", "visibility frontier requires evidence"))
 }
 
@@ -209,7 +209,7 @@ fn event_time_from_evidence(evidence: &[SourceEvidenceRefV2]) -> EventTimeV2 {
     }
 }
 
-fn finalize_execution_event(
+fn finalize_execution_event_legacy(
     market: MarketIdentityV2,
     canonical_rule_version: &str,
     evidence: Vec<SourceEvidenceRefV2>,
@@ -237,7 +237,7 @@ fn finalize_execution_event(
     Ok(event)
 }
 
-fn finalize_reference_event(
+fn finalize_reference_event_legacy(
     canonical_rule_version: &str,
     evidence: Vec<SourceEvidenceRefV2>,
     quality: EventQualityV2,
@@ -295,6 +295,12 @@ fn validate_quantity_conservation(summary: &QuantityConservationV1) -> Result<()
 pub fn validate_reduction_report_entry_v1(
     report: &ReductionReportEntryV1,
 ) -> Result<(), ContractError> {
+    validate_reduction_report::<SourceEvidenceRefV2>(report)
+}
+
+fn validate_reduction_report<E: ReductionEvidenceV1>(
+    report: &ReductionReportEntryV1<E, E::Identity>,
+) -> Result<(), ContractError> {
     if report.schema_version != REDUCTION_REPORT_SCHEMA_V1 {
         return Err(crate::ContractError::UnsupportedSchema {
             contract: "canonical reduction report",
@@ -321,7 +327,7 @@ pub fn validate_reduction_report_entry_v1(
             | ReductionOperationKindV1::Reject,
             ReductionDispositionV1::Produced { result_event_id },
         ) => {
-            validate_event_id(result_event_id, "result_event_id")?;
+            E::validate_identity(result_event_id)?;
         }
         (
             ReductionOperationKindV1::Reject,
@@ -331,7 +337,7 @@ pub fn validate_reduction_report_entry_v1(
             ReductionOperationKindV1::Confirm | ReductionOperationKindV1::Suppress,
             ReductionDispositionV1::Suppressed { operation_evidence },
         ) => {
-            validate_operation_evidence(operation_evidence)?;
+            E::validate_operations(operation_evidence)?;
         }
         _ => {
             return Err(invalid(
@@ -359,14 +365,14 @@ pub fn decode_reduction_report_entry_v1(
     Ok(report)
 }
 
-fn produced_report(
+fn produced_report<E: ReductionEvidenceV1>(
     canonical_rule_version: &str,
     scope: String,
     operation: ReductionOperationKindV1,
     reason_code: &str,
     quantity_conservation: Option<QuantityConservationV1>,
-    event_id: CanonicalEventId,
-) -> Result<ReductionReportEntryV1, ContractError> {
+    event_id: E::Identity,
+) -> Result<ReductionReportEntryV1<E, E::Identity>, ContractError> {
     let report = ReductionReportEntryV1 {
         schema_version: REDUCTION_REPORT_SCHEMA_V1.to_owned(),
         canonical_rule_version: canonical_rule_version.to_owned(),
@@ -378,19 +384,19 @@ fn produced_report(
             result_event_id: event_id,
         },
     };
-    validate_reduction_report_entry_v1(&report)?;
+    validate_reduction_report::<E>(&report)?;
     Ok(report)
 }
 
-fn non_event_report(
+fn non_event_report<E: ReductionEvidenceV1>(
     canonical_rule_version: &str,
     scope: String,
     operation: ReductionOperationKindV1,
     reason_code: &str,
-    evidence: Vec<SourceEvidenceRefV2>,
+    evidence: Vec<E>,
     suppressed: bool,
-) -> Result<ReductionReportEntryV1, ContractError> {
-    let evidence = canonicalize_operation_evidence(
+) -> Result<ReductionReportEntryV1<E, E::Identity>, ContractError> {
+    let evidence = E::canonicalize_operations(
         evidence
             .into_iter()
             .map(|source_evidence| ReductionOperationEvidenceV1 {
@@ -417,18 +423,18 @@ fn non_event_report(
         quantity_conservation: None,
         disposition,
     };
-    validate_reduction_report_entry_v1(&report)?;
+    validate_reduction_report::<E>(&report)?;
     Ok(report)
 }
 
-fn duplicate_suppressed_report(
+fn duplicate_suppressed_report<E: ReductionEvidenceV1>(
     canonical_rule_version: &str,
     scope: String,
     reason_code: &str,
-    context: Vec<SourceEvidenceRefV2>,
-    matched_existing: Vec<SourceEvidenceRefV2>,
-    incoming_duplicate: Vec<SourceEvidenceRefV2>,
-) -> Result<ReductionReportEntryV1, ContractError> {
+    context: Vec<E>,
+    matched_existing: Vec<E>,
+    incoming_duplicate: Vec<E>,
+) -> Result<ReductionReportEntryV1<E, E::Identity>, ContractError> {
     let mut evidence = context
         .into_iter()
         .map(|source_evidence| ReductionOperationEvidenceV1 {
@@ -456,51 +462,51 @@ fn duplicate_suppressed_report(
         reason_code: reason_code.to_owned(),
         quantity_conservation: None,
         disposition: ReductionDispositionV1::Suppressed {
-            operation_evidence: canonicalize_operation_evidence(evidence)?,
+            operation_evidence: E::canonicalize_operations(evidence)?,
         },
     };
-    validate_reduction_report_entry_v1(&report)?;
+    validate_reduction_report::<E>(&report)?;
     Ok(report)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct ReferenceLevelState {
+struct ReferenceLevelState<E: ReductionEvidenceV1 = SourceEvidenceRefV2> {
     price: ExactDecimal,
     quantity: ExactDecimal,
-    direct_evidence: SourceEvidenceRefV2,
+    direct_evidence: E,
 }
 
 #[derive(Clone, Debug)]
-struct BinanceDepthBookState {
+struct BinanceDepthBookState<E: ReductionEvidenceV1 = SourceEvidenceRefV2> {
     snapshot_last_update_id: u64,
     local_u: Option<u64>,
-    bids: BTreeMap<Decimal, ReferenceLevelState>,
-    asks: BTreeMap<Decimal, ReferenceLevelState>,
-    deleted_bids: BTreeMap<Decimal, SourceEvidenceRefV2>,
-    deleted_asks: BTreeMap<Decimal, SourceEvidenceRefV2>,
-    snapshot_evidence: SourceEvidenceRefV2,
-    anchor_evidence: SourceEvidenceRefV2,
-    visibility_frontier_evidence: SourceEvidenceRefV2,
+    bids: BTreeMap<Decimal, ReferenceLevelState<E>>,
+    asks: BTreeMap<Decimal, ReferenceLevelState<E>>,
+    deleted_bids: BTreeMap<Decimal, E>,
+    deleted_asks: BTreeMap<Decimal, E>,
+    snapshot_evidence: E,
+    anchor_evidence: E,
+    visibility_frontier_evidence: E,
 }
 
-#[derive(Clone, Debug, Default)]
-struct BinanceDepthEpochState {
+#[derive(Clone, Debug)]
+struct BinanceDepthEpochState<E: ReductionEvidenceV1 = SourceEvidenceRefV2> {
     last_admission_sequence: Option<u64>,
-    book: Option<BinanceDepthBookState>,
+    book: Option<BinanceDepthBookState<E>>,
     awaiting_after_confirmed_gap: bool,
-    epoch_switch_prior_book: Option<BinanceDepthBookState>,
+    epoch_switch_prior_book: Option<BinanceDepthBookState<E>>,
     epoch_switch_missing_emitted: bool,
 }
 
 #[derive(Clone, Debug)]
-pub struct BinanceDepthReducer {
+pub struct BinanceDepthReducer<E: ReductionEvidenceV1 = SourceEvidenceRefV2> {
     canonical_rule_version: String,
-    epochs: BTreeMap<String, BinanceDepthEpochState>,
+    epochs: BTreeMap<String, BinanceDepthEpochState<E>>,
     current_epoch: Option<String>,
     seen_epochs: BTreeSet<String>,
 }
 
-impl BinanceDepthReducer {
+impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
     pub fn new(canonical_rule_version: impl Into<String>) -> Result<Self, ContractError> {
         let canonical_rule_version = canonical_rule_version.into();
         if canonical_rule_version.trim().is_empty() {
@@ -534,19 +540,12 @@ impl BinanceDepthReducer {
         )
     }
 
-    pub fn apply_snapshot(
+    pub fn compute_snapshot(
         &mut self,
         row: &BinanceDepthSnapshotRow,
-        input_manifest_sha256: &Sha256Hex,
-        input_file_sha256: &Sha256Hex,
-    ) -> Result<ReferenceReductionOutcomeV1, ContractError> {
-        row.validate().map_err(typed_raw_contract_error)?;
+        evidence: E,
+    ) -> Result<ReferenceReductionOutcomeV1<E, E::Identity>, ContractError> {
         self.begin_epoch(&row.source_sequence_epoch_id)?;
-        let evidence = source_evidence_from_typed_raw(
-            &TypedRawRow::BinanceDepthSnapshot(row.clone()),
-            input_manifest_sha256,
-            input_file_sha256,
-        )?;
         let state = self
             .epochs
             .entry(row.source_sequence_epoch_id.clone())
@@ -613,7 +612,7 @@ impl BinanceDepthReducer {
             resync,
             Vec::new(),
         )?;
-        let report = produced_report(
+        let report = produced_report::<E>(
             &self.canonical_rule_version,
             scope,
             ReductionOperationKindV1::Merge,
@@ -631,19 +630,12 @@ impl BinanceDepthReducer {
         })
     }
 
-    pub fn apply_update(
+    pub fn compute_update(
         &mut self,
         row: &BinanceDepthUpdateRow,
-        input_manifest_sha256: &Sha256Hex,
-        input_file_sha256: &Sha256Hex,
-    ) -> Result<ReferenceReductionOutcomeV1, ContractError> {
-        row.validate().map_err(typed_raw_contract_error)?;
+        evidence: E,
+    ) -> Result<ReferenceReductionOutcomeV1<E, E::Identity>, ContractError> {
         self.begin_epoch(&row.source_sequence_epoch_id)?;
-        let evidence = source_evidence_from_typed_raw(
-            &TypedRawRow::BinanceDepthUpdate(row.clone()),
-            input_manifest_sha256,
-            input_file_sha256,
-        )?;
         let state = self
             .epochs
             .entry(row.source_sequence_epoch_id.clone())
@@ -675,7 +667,7 @@ impl BinanceDepthReducer {
                         ResyncQuality::Required,
                         vec![evidence.clone()],
                     )?;
-                    let report = produced_report(
+                    let report = produced_report::<E>(
                         &self.canonical_rule_version,
                         scope,
                         ReductionOperationKindV1::Reject,
@@ -726,7 +718,7 @@ impl BinanceDepthReducer {
                     ResyncQuality::Required,
                     vec![evidence.clone()],
                 )?;
-                let report = produced_report(
+                let report = produced_report::<E>(
                     &self.canonical_rule_version,
                     scope,
                     ReductionOperationKindV1::Reject,
@@ -774,7 +766,7 @@ impl BinanceDepthReducer {
                     ResyncQuality::NotRequired,
                     prior_evidence,
                 )?;
-                let report = produced_report(
+                let report = produced_report::<E>(
                     &self.canonical_rule_version,
                     scope,
                     ReductionOperationKindV1::Overwrite,
@@ -839,8 +831,8 @@ fn require_next_admission(
     Ok(())
 }
 
-fn expected_depth_verdict(
-    book: Option<&BinanceDepthBookState>,
+fn expected_depth_verdict<E: ReductionEvidenceV1>(
+    book: Option<&BinanceDepthBookState<E>>,
     row: &BinanceDepthUpdateRow,
 ) -> Result<BinanceDepthStitchVerdict, ContractError> {
     let Some(book) = book else {
@@ -877,11 +869,11 @@ fn expected_depth_verdict(
     })
 }
 
-fn reference_level_map(
+fn reference_level_map<E: ReductionEvidenceV1>(
     levels: &[DepthLevel],
-    evidence: &SourceEvidenceRefV2,
+    evidence: &E,
     field: &str,
-) -> Result<BTreeMap<Decimal, ReferenceLevelState>, ContractError> {
+) -> Result<BTreeMap<Decimal, ReferenceLevelState<E>>, ContractError> {
     let mut mapped = BTreeMap::new();
     for (index, level) in levels.iter().enumerate() {
         let price =
@@ -910,9 +902,9 @@ fn reference_level_map(
     Ok(mapped)
 }
 
-fn same_reference_levels(
-    left: &BTreeMap<Decimal, ReferenceLevelState>,
-    right: &BTreeMap<Decimal, ReferenceLevelState>,
+fn same_reference_levels<E: ReductionEvidenceV1>(
+    left: &BTreeMap<Decimal, ReferenceLevelState<E>>,
+    right: &BTreeMap<Decimal, ReferenceLevelState<E>>,
 ) -> bool {
     left.len() == right.len()
         && left
@@ -967,13 +959,13 @@ impl QuantityConservationV1 {
     }
 }
 
-fn apply_reference_level_updates(
-    levels: &mut BTreeMap<Decimal, ReferenceLevelState>,
-    deleted_levels: &mut BTreeMap<Decimal, SourceEvidenceRefV2>,
+fn apply_reference_level_updates<E: ReductionEvidenceV1>(
+    levels: &mut BTreeMap<Decimal, ReferenceLevelState<E>>,
+    deleted_levels: &mut BTreeMap<Decimal, E>,
     updates: &[DepthLevel],
-    evidence: &SourceEvidenceRefV2,
+    evidence: &E,
     field: &str,
-) -> Result<(QuantityConservationV1, Vec<SourceEvidenceRefV2>), ContractError> {
+) -> Result<(QuantityConservationV1, Vec<E>), ContractError> {
     let mut seen = BTreeSet::new();
     let mut summary = QuantityConservationV1::zero();
     let mut prior_evidence = Vec::new();
@@ -1032,13 +1024,13 @@ fn apply_reference_level_updates(
     Ok((summary, prior_evidence))
 }
 
-fn finalize_binance_depth_event(
+fn finalize_binance_depth_event<E: ReductionEvidenceV1>(
     canonical_rule_version: &str,
-    book: &BinanceDepthBookState,
+    book: &BinanceDepthBookState<E>,
     availability: MarketDataQuality,
     resync: ResyncQuality,
-    additional_evidence: Vec<SourceEvidenceRefV2>,
-) -> Result<CanonicalReferenceEventV1, ContractError> {
+    additional_evidence: Vec<E>,
+) -> Result<CanonicalReferenceEventV1<E::Identity, E>, ContractError> {
     let last_update_id = book.local_u.unwrap_or(book.snapshot_last_update_id);
     let bids = book
         .bids
@@ -1075,10 +1067,10 @@ fn finalize_binance_depth_event(
     )
 }
 
-fn binance_depth_evidence(
-    book: &BinanceDepthBookState,
-) -> Result<Vec<SourceEvidenceRefV2>, ContractError> {
-    canonicalize_source_evidence(
+fn binance_depth_evidence<E: ReductionEvidenceV1>(
+    book: &BinanceDepthBookState<E>,
+) -> Result<Vec<E>, ContractError> {
+    canonicalize_reduction_evidence::<E>(
         book.bids
             .values()
             .chain(book.asks.values())
@@ -1095,17 +1087,12 @@ fn binance_depth_evidence(
 }
 
 #[derive(Clone, Debug)]
-pub struct BinanceAggTradeReducer {
+pub struct BinanceAggTradeReducer<E: ReductionEvidenceV1 = SourceEvidenceRefV2> {
     canonical_rule_version: String,
-    current_trade: Option<(
-        u64,
-        i64,
-        BinanceAggregateTradeReferenceV1,
-        SourceEvidenceRefV2,
-    )>,
+    current_trade: Option<(u64, i64, BinanceAggregateTradeReferenceV1, E)>,
 }
 
-impl BinanceAggTradeReducer {
+impl<E: ReductionEvidenceV1> BinanceAggTradeReducer<E> {
     pub fn new(canonical_rule_version: impl Into<String>) -> Result<Self, ContractError> {
         let canonical_rule_version = canonical_rule_version.into();
         if canonical_rule_version.trim().is_empty() {
@@ -1117,18 +1104,12 @@ impl BinanceAggTradeReducer {
         })
     }
 
-    pub fn apply(
+    pub fn compute(
         &mut self,
         row: &BinanceAggTradeRow,
-        input_manifest_sha256: &Sha256Hex,
-        input_file_sha256: &Sha256Hex,
-    ) -> Result<ReferenceReductionOutcomeV1, ContractError> {
-        row.validate().map_err(typed_raw_contract_error)?;
-        let evidence = source_evidence_from_typed_raw(
-            &TypedRawRow::BinanceAggTrade(row.clone()),
-            input_manifest_sha256,
-            input_file_sha256,
-        )?;
+        evidence: E,
+        prepared_payload: Option<&BinanceAggregateTradeReferenceV1>,
+    ) -> Result<ReferenceReductionOutcomeV1<E, E::Identity>, ContractError> {
         let BinanceAggTradeRecord::Trade {
             aggregate_trade_id, ..
         } = &row.record
@@ -1145,16 +1126,16 @@ impl BinanceAggTradeReducer {
                 )?,
             });
         };
-        let candidate = build_binance_aggregate_trade_reference_event_v1(
-            row,
-            input_manifest_sha256,
-            input_file_sha256,
+        let payload = prepared_payload.expect("已准备的 Trade 保留规范成交载荷");
+        let candidate = finalize_reference_event(
             &self.canonical_rule_version,
+            vec![evidence.clone()],
+            EventQualityV2 {
+                availability: MarketDataQuality::Fresh,
+                resync: ResyncQuality::NotRequired,
+            },
+            CanonicalReferenceEventPayloadV1::BinanceAggregateTrade(payload.clone()),
         )?;
-        let CanonicalReferenceEventPayloadV1::BinanceAggregateTrade(payload) = &candidate.payload
-        else {
-            unreachable!("aggregate-trade builder returned another payload")
-        };
         let trade_time = candidate
             .time
             .source_event_at_utc_ms
@@ -1194,7 +1175,7 @@ impl BinanceAggTradeReducer {
             }
         }
         self.current_trade = Some((*aggregate_trade_id, trade_time, payload.clone(), evidence));
-        let report = produced_report(
+        let report = produced_report::<E>(
             &self.canonical_rule_version,
             format!("binance_aggtrade:{aggregate_trade_id}"),
             ReductionOperationKindV1::Merge,
@@ -1216,66 +1197,61 @@ pub struct PolymarketAssetContextV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PolymarketMarketContextV1 {
+pub struct PolymarketMarketContextV1<E = SourceEvidenceRefV2> {
     pub market: MarketIdentityV2,
     pub assets: Vec<PolymarketAssetContextV1>,
-    pub identity_source_evidence: Vec<SourceEvidenceRefV2>,
+    pub identity_source_evidence: Vec<E>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PolymarketOrderbookInputV1 {
+pub struct PolymarketOrderbookInputV1<E = SourceEvidenceRefV2> {
     pub row: PolymarketOrderbookRow,
-    pub evidence: SourceEvidenceRefV2,
+    pub evidence: E,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PolymarketMetadataInputV1 {
+pub struct PolymarketMetadataInputV1<E = SourceEvidenceRefV2> {
     pub row: PolymarketMarketMetadataRow,
-    pub evidence: SourceEvidenceRefV2,
+    pub evidence: E,
 }
 
 #[derive(Clone, Debug)]
-pub struct PolymarketMetadataReducer {
+pub struct PolymarketMetadataReducer<E: ReductionEvidenceV1 = SourceEvidenceRefV2> {
     market: MarketIdentityV2,
     assets: Vec<AssetIdentityV1>,
-    identity_source_evidence: Vec<SourceEvidenceRefV2>,
+    identity_source_evidence: Vec<E>,
     canonical_rule_version: String,
     current_lifecycle: KnownMarketLifecycleState,
     last_lifecycle_transition: Option<(KnownMarketLifecycleState, KnownMarketLifecycleState)>,
     current_trading_state: Option<MarketTradingStateV2>,
 }
 
-impl PolymarketMetadataReducer {
-    pub fn from_identity_snapshot(
-        input: PolymarketMetadataInputV1,
+impl<E: ReductionEvidenceV1> PolymarketMetadataReducer<E> {
+    pub fn compute_identity_snapshot(
+        input: PolymarketMetadataInputV1<E>,
+        outcomes: Vec<typed_raw::MetadataOutcomeEvidence>,
+        initial_tick: Option<typed_raw::MetadataInitialTickEvidence>,
         canonical_rule_version: impl Into<String>,
-    ) -> Result<(Self, PolymarketMarketContextV1, PolymarketReductionBatch), ContractError> {
-        validate_polymarket_metadata_input(&input)?;
+    ) -> Result<
+        (
+            Self,
+            PolymarketMarketContextV1<E>,
+            PolymarketReductionBatch<E, E::Identity>,
+        ),
+        ContractError,
+    > {
         let canonical_rule_version = canonical_rule_version.into();
         if canonical_rule_version.trim().is_empty() {
             return Err(invalid("canonical_rule_version", "must not be empty"));
         }
         validate_identity_snapshot(&input)?;
 
-        let outcomes = typed_raw::map_metadata_outcomes(
-            &input.row.asset_ids,
-            input.row.outcomes_raw.as_deref(),
-            input.row.outcome_prices_raw.as_deref(),
-        )
-        .map_err(typed_raw_contract_error)?;
-        let payload = input
-            .row
-            .source_evidence_payload_json
-            .as_deref()
-            .expect("validated identity snapshot retains the Gamma payload");
-        let initial_tick = typed_raw::extract_metadata_initial_tick(payload)
-            .map_err(typed_raw_contract_error)?
-            .ok_or_else(|| {
-                invalid(
-                    "source_evidence_payload_json.orderPriceMinTickSize",
-                    "is required to build the market context",
-                )
-            })?;
+        let initial_tick = initial_tick.ok_or_else(|| {
+            invalid(
+                "source_evidence_payload_json.orderPriceMinTickSize",
+                "is required to build the market context",
+            )
+        })?;
         let market = MarketIdentityV2 {
             condition_id: ConditionId(input.row.condition_id.clone()),
             clob_market_id: ClobMarketId(input.row.clob_market_id.clone()),
@@ -1362,12 +1338,13 @@ impl PolymarketMetadataReducer {
         &self.market
     }
 
-    pub fn reduce_metadata(
+    pub fn compute_metadata(
         &mut self,
-        input: PolymarketMetadataInputV1,
-    ) -> Result<PolymarketReductionBatch, ContractError> {
-        validate_polymarket_metadata_input(&input)?;
-        validate_metadata_identity(&input.row, &self.market, &self.assets)?;
+        input: PolymarketMetadataInputV1<E>,
+        outcomes: &[typed_raw::MetadataOutcomeEvidence],
+        public_snapshot: bool,
+    ) -> Result<PolymarketReductionBatch<E, E::Identity>, ContractError> {
+        validate_prepared_metadata_identity(&input.row, &self.market, &self.assets, outcomes)?;
         if input.row.metadata_row_kind
             == typed_raw::PolymarketMetadataRowKind::ResolutionFollowupSummary
         {
@@ -1443,10 +1420,29 @@ impl PolymarketMetadataReducer {
             }
         } else if map_metadata_lifecycle(input.row.market_lifecycle_state) != self.current_lifecycle
         {
-            return Err(invalid(
-                "market_lifecycle_state",
-                "changed without an explicit lifecycle transition",
-            ));
+            if public_snapshot
+                && input.row.metadata_row_kind
+                    == typed_raw::PolymarketMetadataRowKind::MetadataSnapshot
+                && self.current_lifecycle == KnownMarketLifecycleState::Prefetched
+                && map_metadata_lifecycle(input.row.market_lifecycle_state)
+                    == KnownMarketLifecycleState::Active
+            {
+                self.append_lifecycle_event(
+                    None,
+                    KnownMarketLifecycleState::Active,
+                    &input.evidence,
+                    ReductionOperationKindV1::Overwrite,
+                    "POLYMARKET_METADATA_LIFECYCLE_SNAPSHOT",
+                    &mut batch,
+                )?;
+                self.current_lifecycle = KnownMarketLifecycleState::Active;
+                self.last_lifecycle_transition = None;
+            } else {
+                return Err(invalid(
+                    "market_lifecycle_state",
+                    "changed without an explicit lifecycle transition",
+                ));
+            }
         }
 
         if let Some(trading_state) = metadata_trading_state(&input.row)
@@ -1481,10 +1477,10 @@ impl PolymarketMetadataReducer {
         &mut self,
         previous_state: Option<KnownMarketLifecycleState>,
         current_state: KnownMarketLifecycleState,
-        input_evidence: &SourceEvidenceRefV2,
+        input_evidence: &E,
         operation: ReductionOperationKindV1,
         reason_code: &str,
-        batch: &mut PolymarketReductionBatch,
+        batch: &mut PolymarketReductionBatch<E, E::Identity>,
     ) -> Result<(), ContractError> {
         let mut evidence = self.identity_source_evidence.clone();
         evidence.push(input_evidence.clone());
@@ -1502,7 +1498,7 @@ impl PolymarketMetadataReducer {
                 assets: self.assets.clone(),
             }),
         )?;
-        batch.reports.push(produced_report(
+        batch.reports.push(produced_report::<E>(
             &self.canonical_rule_version,
             format!("polymarket_market:{}", self.market.condition_id.0),
             operation,
@@ -1517,10 +1513,10 @@ impl PolymarketMetadataReducer {
     fn append_trading_state_event(
         &mut self,
         trading_state: MarketTradingStateV2,
-        input_evidence: &SourceEvidenceRefV2,
+        input_evidence: &E,
         operation: ReductionOperationKindV1,
         reason_code: &str,
-        batch: &mut PolymarketReductionBatch,
+        batch: &mut PolymarketReductionBatch<E, E::Identity>,
     ) -> Result<(), ContractError> {
         let mut evidence = self.identity_source_evidence.clone();
         evidence.push(input_evidence.clone());
@@ -1531,7 +1527,7 @@ impl PolymarketMetadataReducer {
             fresh_quality(ResyncQuality::NotRequired),
             ExecutionMarketEventPayloadV3::MarketTradingState(trading_state),
         )?;
-        batch.reports.push(produced_report(
+        batch.reports.push(produced_report::<E>(
             &self.canonical_rule_version,
             format!("polymarket_market:{}", self.market.condition_id.0),
             operation,
@@ -1545,47 +1541,45 @@ impl PolymarketMetadataReducer {
 }
 
 #[derive(Clone, Debug)]
-pub struct PolymarketTerminalMerger {
+pub struct PolymarketTerminalMerger<E: ReductionEvidenceV1 = SourceEvidenceRefV2> {
     market: MarketIdentityV2,
     assets: Vec<AssetIdentityV1>,
-    identity_source_evidence: Vec<SourceEvidenceRefV2>,
+    identity_source_evidence: Vec<E>,
     canonical_rule_version: String,
     emitted_terminal: Option<MarketResolutionTerminalV3>,
-    emitted_terminal_evidence: Vec<SourceEvidenceRefV2>,
+    emitted_terminal_evidence: Vec<E>,
     quarantined: bool,
 }
 
-impl PolymarketTerminalMerger {
+impl<E: ReductionEvidenceV1> PolymarketTerminalMerger<E> {
     pub fn new(
-        context: PolymarketMarketContextV1,
+        context: PolymarketMarketContextV1<E>,
         canonical_rule_version: impl Into<String>,
     ) -> Result<Self, ContractError> {
-        let reducer = PolymarketReducer::new(context, canonical_rule_version)?;
-        let identity_source_evidence = reducer.identity_source_evidence.clone();
-        let mut assets = reducer
-            .assets
-            .into_values()
-            .map(|state| state.context.asset)
+        let (market, canonical_rule_version, contexts, identity_source_evidence) =
+            prepare_polymarket_context(context, canonical_rule_version.into())?;
+        let mut assets = contexts
+            .into_iter()
+            .map(|context| context.asset)
             .collect::<Vec<_>>();
         assets.sort_by(|left, right| compare_decimal_ids(&left.token_id.0, &right.token_id.0));
         Ok(Self {
-            market: reducer.market,
+            market,
             assets,
             identity_source_evidence,
-            canonical_rule_version: reducer.canonical_rule_version,
+            canonical_rule_version,
             emitted_terminal: None,
             emitted_terminal_evidence: Vec::new(),
             quarantined: false,
         })
     }
 
-    pub fn merge_ws_terminal(
+    pub fn compute_ws_terminal(
         &mut self,
-        metadata: PolymarketMetadataInputV1,
-        orderbook: PolymarketOrderbookInputV1,
-    ) -> Result<PolymarketReductionBatch, ContractError> {
-        validate_polymarket_metadata_input(&metadata)?;
-        validate_polymarket_orderbook_evidence(&orderbook)?;
+        metadata: PolymarketMetadataInputV1<E>,
+        metadata_outcomes: &[typed_raw::MetadataOutcomeEvidence],
+        orderbook: PolymarketOrderbookInputV1<E>,
+    ) -> Result<PolymarketReductionBatch<E, E::Identity>, ContractError> {
         let terminal_evidence = vec![metadata.evidence.clone(), orderbook.evidence.clone()];
         let mut evidence = self.identity_source_evidence.clone();
         evidence.extend(terminal_evidence.clone());
@@ -1605,9 +1599,13 @@ impl PolymarketTerminalMerger {
             });
         }
 
-        if let Some(reason_code) =
-            terminal_conflict_reason(&self.market, &self.assets, &metadata.row, &orderbook.row)?
-        {
+        if let Some(reason_code) = terminal_conflict_reason(
+            &self.market,
+            &self.assets,
+            &metadata.row,
+            &orderbook.row,
+            metadata_outcomes,
+        )? {
             let previous_quality = if self.emitted_terminal.is_some() {
                 MarketDataQuality::Fresh
             } else {
@@ -1632,7 +1630,7 @@ impl PolymarketTerminalMerger {
                     reason_code: reason_code.to_owned(),
                 }),
             )?;
-            let report = produced_report(
+            let report = produced_report::<E>(
                 &self.canonical_rule_version,
                 scope,
                 ReductionOperationKindV1::Reject,
@@ -1706,7 +1704,7 @@ impl PolymarketTerminalMerger {
                         reason_code: "POLYMARKET_TERMINAL_DUPLICATE_CONFLICT".to_owned(),
                     }),
                 )?;
-                let report = produced_report(
+                let report = produced_report::<E>(
                     &self.canonical_rule_version,
                     scope,
                     ReductionOperationKindV1::Reject,
@@ -1735,7 +1733,7 @@ impl PolymarketTerminalMerger {
 
         self.emitted_terminal = Some(terminal);
         self.emitted_terminal_evidence = terminal_evidence.clone();
-        let report = produced_report(
+        let report = produced_report::<E>(
             &self.canonical_rule_version,
             scope,
             ReductionOperationKindV1::Merge,
@@ -1749,7 +1747,7 @@ impl PolymarketTerminalMerger {
             &self.canonical_rule_version,
             evidence_for_terminal_state(&self.identity_source_evidence, &terminal_evidence),
         )?;
-        let lifecycle_report = produced_report(
+        let lifecycle_report = produced_report::<E>(
             &self.canonical_rule_version,
             format!("polymarket_market:{}", self.market.condition_id.0),
             ReductionOperationKindV1::Overwrite,
@@ -1763,11 +1761,11 @@ impl PolymarketTerminalMerger {
         })
     }
 
-    pub fn merge_gamma_terminal(
+    pub fn compute_gamma_terminal(
         &mut self,
-        metadata: PolymarketMetadataInputV1,
-    ) -> Result<PolymarketReductionBatch, ContractError> {
-        validate_polymarket_metadata_input(&metadata)?;
+        metadata: PolymarketMetadataInputV1<E>,
+        metadata_outcomes: &[typed_raw::MetadataOutcomeEvidence],
+    ) -> Result<PolymarketReductionBatch<E, E::Identity>, ContractError> {
         let terminal_evidence = vec![metadata.evidence.clone()];
         let mut evidence = self.identity_source_evidence.clone();
         evidence.extend(terminal_evidence.clone());
@@ -1787,9 +1785,12 @@ impl PolymarketTerminalMerger {
             });
         }
 
-        if let Some(reason_code) =
-            gamma_terminal_conflict_reason(&self.market, &self.assets, &metadata)?
-        {
+        if let Some(reason_code) = gamma_terminal_conflict_reason(
+            &self.market,
+            &self.assets,
+            &metadata,
+            metadata_outcomes,
+        )? {
             let previous_quality = if self.emitted_terminal.is_some() {
                 MarketDataQuality::Fresh
             } else {
@@ -1814,7 +1815,7 @@ impl PolymarketTerminalMerger {
                     reason_code: reason_code.to_owned(),
                 }),
             )?;
-            let report = produced_report(
+            let report = produced_report::<E>(
                 &self.canonical_rule_version,
                 scope,
                 ReductionOperationKindV1::Reject,
@@ -1887,7 +1888,7 @@ impl PolymarketTerminalMerger {
                         reason_code: "POLYMARKET_TERMINAL_DUPLICATE_CONFLICT".to_owned(),
                     }),
                 )?;
-                let report = produced_report(
+                let report = produced_report::<E>(
                     &self.canonical_rule_version,
                     scope,
                     ReductionOperationKindV1::Reject,
@@ -1916,7 +1917,7 @@ impl PolymarketTerminalMerger {
 
         self.emitted_terminal = Some(terminal);
         self.emitted_terminal_evidence = terminal_evidence.clone();
-        let report = produced_report(
+        let report = produced_report::<E>(
             &self.canonical_rule_version,
             scope,
             ReductionOperationKindV1::Merge,
@@ -1932,7 +1933,7 @@ impl PolymarketTerminalMerger {
             &self.canonical_rule_version,
             state_evidence.clone(),
         )?;
-        let lifecycle_report = produced_report(
+        let lifecycle_report = produced_report::<E>(
             &self.canonical_rule_version,
             format!("polymarket_market:{}", self.market.condition_id.0),
             ReductionOperationKindV1::Overwrite,
@@ -1949,7 +1950,7 @@ impl PolymarketTerminalMerger {
             fresh_quality(ResyncQuality::NotRequired),
             ExecutionMarketEventPayloadV3::MarketTradingState(trading_state),
         )?;
-        let trading_report = produced_report(
+        let trading_report = produced_report::<E>(
             &self.canonical_rule_version,
             format!("polymarket_market:{}", self.market.condition_id.0),
             ReductionOperationKindV1::Overwrite,
@@ -2022,57 +2023,15 @@ impl PolymarketReducer {
         context: PolymarketMarketContextV1,
         canonical_rule_version: impl Into<String>,
     ) -> Result<Self, ContractError> {
-        let canonical_rule_version = canonical_rule_version.into();
-        if canonical_rule_version.trim().is_empty() {
-            return Err(invalid("canonical_rule_version", "must not be empty"));
-        }
-        validate_market(&context.market, "market")?;
-        if context.assets.len() != 2 {
-            return Err(invalid(
-                "assets",
-                "btc-updown market context requires exactly two assets",
-            ));
-        }
-        let identity_source_evidence =
-            canonicalize_source_evidence(context.identity_source_evidence)?;
-        if identity_source_evidence.iter().any(|evidence| {
-            evidence.source_kind != CanonicalSourceKind::PolymarketMarketMetadata
-                || evidence.source_event_at_utc_ms.is_some()
-                || !matches!(
-                    evidence.source_native_identity,
-                    Some(SourceNativeIdentityV1::SemanticEvidenceSha256 { .. })
-                )
-                || evidence.collector_admission.is_some()
-        }) {
-            return Err(invalid(
-                "identity_source_evidence",
-                "market identity and initial tick context requires non-WS metadata evidence without a fabricated platform time or admission coordinate",
-            ));
-        }
-
-        let mut outcome_indices = BTreeSet::new();
-        let mut assets = BTreeMap::new();
+        let (market, canonical_rule_version, contexts, identity_source_evidence) =
+            prepare_polymarket_context(context, canonical_rule_version.into())?;
         let identity_visibility_frontier =
             visibility_frontier_evidence(identity_source_evidence.clone())?;
-        for asset_context in context.assets {
-            crate::validate_asset(&asset_context.asset, "assets.asset")?;
-            if !outcome_indices.insert(asset_context.asset.outcome.index) {
-                return Err(invalid("assets", "outcome indices must be unique"));
-            }
-            let tick = parse_canonical_decimal(
-                &asset_context.initial_tick_size_pusd_per_share,
-                "assets.initial_tick_size_pusd_per_share",
-            )?;
-            if tick <= Decimal::ZERO {
-                return Err(invalid(
-                    "assets.initial_tick_size_pusd_per_share",
-                    "must be positive",
-                ));
-            }
-            let token_id = asset_context.asset.token_id.0.clone();
-            if assets
-                .insert(
-                    token_id,
+        let assets = contexts
+            .into_iter()
+            .map(|asset_context| {
+                (
+                    asset_context.asset.token_id.0.clone(),
                     PolymarketAssetState {
                         tick_size: asset_context.initial_tick_size_pusd_per_share.clone(),
                         tick_direct_evidence: identity_source_evidence.clone(),
@@ -2089,13 +2048,10 @@ impl PolymarketReducer {
                         bba_reanchor_frontier_evidence: None,
                     },
                 )
-                .is_some()
-            {
-                return Err(invalid("assets", "token IDs must be unique"));
-            }
-        }
+            })
+            .collect();
         Ok(Self {
-            market: context.market,
+            market,
             canonical_rule_version,
             identity_source_evidence,
             assets,
@@ -2491,16 +2447,18 @@ impl PolymarketReducer {
         }
         for report in reduction.reports {
             batch.reports.push(match report.disposition {
-                PmReductionDispositionV2::Produced { derived_id } => produced_report(
-                    &self.canonical_rule_version,
-                    report.scope,
-                    report.operation,
-                    &report.reason_code,
-                    report.quantity_conservation,
-                    event_ids
-                        .remove(&derived_id.0)
-                        .expect("produced report points to its execution step"),
-                )?,
+                PmReductionDispositionV2::Produced { derived_id } => {
+                    produced_report::<SourceEvidenceRefV2>(
+                        &self.canonical_rule_version,
+                        report.scope,
+                        report.operation,
+                        &report.reason_code,
+                        report.quantity_conservation,
+                        event_ids
+                            .remove(&derived_id.0)
+                            .expect("produced report points to its execution step"),
+                    )?
+                }
                 PmReductionDispositionV2::NoOutput { operation_evidence } => non_event_report(
                     &self.canonical_rule_version,
                     report.scope,
@@ -2694,7 +2652,9 @@ fn validate_polymarket_metadata_input(
     Ok(())
 }
 
-fn validate_identity_snapshot(input: &PolymarketMetadataInputV1) -> Result<(), ContractError> {
+fn validate_identity_snapshot<E: crate::pm_reduction::PmEvidenceV1>(
+    input: &PolymarketMetadataInputV1<E>,
+) -> Result<(), ContractError> {
     use typed_raw::{
         MetadataSourceEvidenceEventType, MetadataSourceEvidenceOrigin, PolymarketMetadataOrigin,
         PolymarketMetadataRowKind,
@@ -2720,7 +2680,7 @@ fn validate_identity_snapshot(input: &PolymarketMetadataInputV1) -> Result<(), C
         || !source_pair_matches
         || input.row.source_evidence_payload_json.is_none()
         || input.row.outcomes_raw.is_none()
-        || input.evidence.source_event_at_utc_ms.is_some()
+        || input.evidence.source_time().is_some()
     {
         return Err(invalid(
             "metadata",
@@ -2730,10 +2690,11 @@ fn validate_identity_snapshot(input: &PolymarketMetadataInputV1) -> Result<(), C
     Ok(())
 }
 
-fn validate_metadata_identity(
+fn validate_prepared_metadata_identity(
     row: &PolymarketMarketMetadataRow,
     market: &MarketIdentityV2,
     assets: &[AssetIdentityV1],
+    outcomes: &[typed_raw::MetadataOutcomeEvidence],
 ) -> Result<(), ContractError> {
     if row.condition_id != market.condition_id.0
         || row.clob_market_id != market.clob_market_id.0
@@ -2745,12 +2706,6 @@ fn validate_metadata_identity(
             "fixed market identity changed within one reducer",
         ));
     }
-    let outcomes = typed_raw::map_metadata_outcomes(
-        &row.asset_ids,
-        row.outcomes_raw.as_deref(),
-        row.outcome_prices_raw.as_deref(),
-    )
-    .map_err(typed_raw_contract_error)?;
     if outcomes.len() != assets.len()
         || outcomes.iter().enumerate().any(|(index, outcome)| {
             assets.iter().all(|asset| {
@@ -2812,10 +2767,10 @@ fn metadata_trading_state(row: &PolymarketMarketMetadataRow) -> Option<MarketTra
     )
 }
 
-fn evidence_for_terminal_state(
-    identity_evidence: &[SourceEvidenceRefV2],
-    terminal_evidence: &[SourceEvidenceRefV2],
-) -> Vec<SourceEvidenceRefV2> {
+fn evidence_for_terminal_state<E: ReductionEvidenceV1>(
+    identity_evidence: &[E],
+    terminal_evidence: &[E],
+) -> Vec<E> {
     identity_evidence
         .iter()
         .chain(terminal_evidence)
@@ -2823,12 +2778,12 @@ fn evidence_for_terminal_state(
         .collect()
 }
 
-fn qualified_terminal_lifecycle_event(
+fn qualified_terminal_lifecycle_event<E: ReductionEvidenceV1>(
     market: &MarketIdentityV2,
     assets: &[AssetIdentityV1],
     canonical_rule_version: &str,
-    evidence: Vec<SourceEvidenceRefV2>,
-) -> Result<ExecutionMarketEventV3, ContractError> {
+    evidence: Vec<E>,
+) -> Result<ExecutionMarketEventV3<E::Identity, E>, ContractError> {
     finalize_execution_event(
         market.clone(),
         canonical_rule_version,
@@ -2869,6 +2824,7 @@ fn terminal_conflict_reason(
     assets: &[AssetIdentityV1],
     metadata: &PolymarketMarketMetadataRow,
     orderbook: &PolymarketOrderbookRow,
+    metadata_outcomes: &[typed_raw::MetadataOutcomeEvidence],
 ) -> Result<Option<&'static str>, ContractError> {
     use typed_raw::{
         MetadataMarketLifecycleState, MetadataMarketLifecycleTransition, MetadataMarketRuntimeRole,
@@ -2957,12 +2913,6 @@ fn terminal_conflict_reason(
         return Ok(Some("POLYMARKET_TERMINAL_MARKET_IDENTITY_CONFLICT"));
     }
 
-    let metadata_outcomes = typed_raw::map_metadata_outcomes(
-        &metadata.asset_ids,
-        metadata.outcomes_raw.as_deref(),
-        metadata.outcome_prices_raw.as_deref(),
-    )
-    .map_err(typed_raw_contract_error)?;
     if metadata_outcomes.len() != assets.len()
         || metadata_outcomes
             .iter()
@@ -3044,10 +2994,11 @@ fn terminal_conflict_reason(
     Ok(None)
 }
 
-fn gamma_terminal_conflict_reason(
+fn gamma_terminal_conflict_reason<E: ReductionEvidenceV1>(
     market: &MarketIdentityV2,
     assets: &[AssetIdentityV1],
-    metadata: &PolymarketMetadataInputV1,
+    metadata: &PolymarketMetadataInputV1<E>,
+    metadata_outcomes: &[typed_raw::MetadataOutcomeEvidence],
 ) -> Result<Option<&'static str>, ContractError> {
     use typed_raw::{
         MetadataMarketLifecycleState, MetadataMarketLifecycleTransition, MetadataMarketRuntimeRole,
@@ -3085,7 +3036,7 @@ fn gamma_terminal_conflict_reason(
         || row.market_runtime_role_transition
             != Some(MetadataMarketRuntimeRoleTransition::ResolutionPendingToNone)
         || row.source_evidence_received_at_utc != Some(row.timestamp_received)
-        || metadata.evidence.source_event_at_utc_ms.is_some()
+        || metadata.evidence.source_time().is_some()
     {
         return Err(invalid(
             "metadata",
@@ -3101,12 +3052,6 @@ fn gamma_terminal_conflict_reason(
         return Ok(Some("POLYMARKET_TERMINAL_MARKET_IDENTITY_CONFLICT"));
     }
 
-    let metadata_outcomes = typed_raw::map_metadata_outcomes(
-        &row.asset_ids,
-        row.outcomes_raw.as_deref(),
-        row.outcome_prices_raw.as_deref(),
-    )
-    .map_err(typed_raw_contract_error)?;
     if metadata_outcomes.len() != assets.len()
         || metadata_outcomes
             .iter()
@@ -3212,4 +3157,667 @@ fn polymarket_message_scope(row: &PolymarketOrderbookRow) -> String {
         "polymarket_message:{}:{}:{}",
         row.market, row.source_sequence_epoch_id, row.collector_admission_sequence
     )
+}
+
+/// 仅支持既有 V2 和已准备的 V2/V3 证据，不改变业务归约分支。
+pub trait ReductionEvidenceV1: crate::pm_reduction::PmEvidenceV1 {
+    type Identity: Clone + std::fmt::Debug + PartialEq + Eq;
+    fn execution_identity(
+        event: &ExecutionMarketEventV3<(), Self>,
+    ) -> Result<Self::Identity, ContractError>;
+    fn reference_identity(
+        event: &CanonicalReferenceEventV1<(), Self>,
+    ) -> Result<Self::Identity, ContractError>;
+    fn canonicalize_operations(
+        values: Vec<ReductionOperationEvidenceV1<Self>>,
+    ) -> Result<Vec<ReductionOperationEvidenceV1<Self>>, ContractError>;
+    fn validate_operations(
+        values: &[ReductionOperationEvidenceV1<Self>],
+    ) -> Result<(), ContractError>;
+    fn validate_identity(identity: &Self::Identity) -> Result<(), ContractError>;
+}
+
+impl ReductionEvidenceV1 for SourceEvidenceRefV2 {
+    type Identity = CanonicalEventId;
+    fn execution_identity(
+        event: &ExecutionMarketEventV3<(), Self>,
+    ) -> Result<Self::Identity, ContractError> {
+        Ok(finalize_execution_event_legacy(
+            event.market.clone(),
+            &event.lineage.canonical_rule_version,
+            event.lineage.source_evidence.clone(),
+            event.quality.clone(),
+            event.payload.clone(),
+        )?
+        .event_id)
+    }
+    fn reference_identity(
+        event: &CanonicalReferenceEventV1<(), Self>,
+    ) -> Result<Self::Identity, ContractError> {
+        Ok(finalize_reference_event_legacy(
+            &event.lineage.canonical_rule_version,
+            event.lineage.source_evidence.clone(),
+            event.quality.clone(),
+            event.payload.clone(),
+        )?
+        .event_id)
+    }
+    fn canonicalize_operations(
+        values: Vec<ReductionOperationEvidenceV1<Self>>,
+    ) -> Result<Vec<ReductionOperationEvidenceV1<Self>>, ContractError> {
+        canonicalize_operation_evidence(values)
+    }
+    fn validate_operations(
+        values: &[ReductionOperationEvidenceV1<Self>],
+    ) -> Result<(), ContractError> {
+        validate_operation_evidence(values)
+    }
+    fn validate_identity(identity: &Self::Identity) -> Result<(), ContractError> {
+        validate_event_id(identity, "result_event_id")
+    }
+}
+
+/// 只在同次结果内关联事实与报告。材料由事件本身唯一持有，不复制完整载荷。
+#[derive(Clone, Debug)]
+pub struct PendingBusinessIdentityV1(std::sync::Arc<()>);
+impl PartialEq for PendingBusinessIdentityV1 {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+    }
+}
+impl Eq for PendingBusinessIdentityV1 {}
+
+impl<E: crate::pm_reduction::PmEvidenceV1> ReductionEvidenceV1
+    for crate::pm_reduction::PreparedPmEvidenceV1<E>
+{
+    type Identity = PendingBusinessIdentityV1;
+    fn execution_identity(
+        _: &ExecutionMarketEventV3<(), Self>,
+    ) -> Result<Self::Identity, ContractError> {
+        Ok(PendingBusinessIdentityV1(std::sync::Arc::new(())))
+    }
+    fn reference_identity(
+        _: &CanonicalReferenceEventV1<(), Self>,
+    ) -> Result<Self::Identity, ContractError> {
+        Ok(PendingBusinessIdentityV1(std::sync::Arc::new(())))
+    }
+    fn canonicalize_operations(
+        mut values: Vec<ReductionOperationEvidenceV1<Self>>,
+    ) -> Result<Vec<ReductionOperationEvidenceV1<Self>>, ContractError> {
+        values.sort_by(|a, b| {
+            a.source_evidence
+                .operation_key(a.role)
+                .cmp(b.source_evidence.operation_key(b.role))
+        });
+        values.dedup_by(|a, b| {
+            a.source_evidence.operation_key(a.role) == b.source_evidence.operation_key(b.role)
+        });
+        Self::validate_operations(&values)?;
+        Ok(values)
+    }
+    fn validate_operations(
+        values: &[ReductionOperationEvidenceV1<Self>],
+    ) -> Result<(), ContractError> {
+        if values.is_empty() {
+            return Err(invalid("operation_evidence", "must not be empty"));
+        }
+        Ok(())
+    }
+    fn validate_identity(_: &Self::Identity) -> Result<(), ContractError> {
+        Ok(())
+    }
+}
+
+fn finalize_execution_event<E: ReductionEvidenceV1>(
+    market: MarketIdentityV2,
+    canonical_rule_version: &str,
+    evidence: Vec<E>,
+    quality: EventQualityV2,
+    payload: ExecutionMarketEventPayloadV3,
+) -> Result<ExecutionMarketEventV3<E::Identity, E>, ContractError> {
+    if canonical_rule_version.trim().is_empty() {
+        return Err(invalid("canonical_rule_version", "must not be empty"));
+    }
+    let evidence = canonicalize_reduction_evidence::<E>(evidence)?;
+    let time = event_time_from_prepared_evidence(&evidence);
+    let material = ExecutionMarketEventV3 {
+        schema_version: EXECUTION_MARKET_EVENT_SCHEMA_V3.to_owned(),
+        event_id: (),
+        market,
+        time,
+        lineage: EventLineageV2 {
+            canonical_rule_version: canonical_rule_version.to_owned(),
+            source_evidence: evidence,
+        },
+        quality,
+        payload,
+    };
+    Ok(ExecutionMarketEventV3 {
+        event_id: E::execution_identity(&material)?,
+        schema_version: material.schema_version,
+        market: material.market,
+        time: material.time,
+        lineage: material.lineage,
+        quality: material.quality,
+        payload: material.payload,
+    })
+}
+
+fn finalize_reference_event<E: ReductionEvidenceV1>(
+    canonical_rule_version: &str,
+    evidence: Vec<E>,
+    quality: EventQualityV2,
+    payload: CanonicalReferenceEventPayloadV1,
+) -> Result<CanonicalReferenceEventV1<E::Identity, E>, ContractError> {
+    if canonical_rule_version.trim().is_empty() {
+        return Err(invalid("canonical_rule_version", "must not be empty"));
+    }
+    let evidence = canonicalize_reduction_evidence::<E>(evidence)?;
+    let time = event_time_from_prepared_evidence(&evidence);
+    let material = CanonicalReferenceEventV1 {
+        schema_version: CANONICAL_REFERENCE_EVENT_SCHEMA_V1.to_owned(),
+        event_id: (),
+        time,
+        lineage: EventLineageV2 {
+            canonical_rule_version: canonical_rule_version.to_owned(),
+            source_evidence: evidence,
+        },
+        quality,
+        payload,
+    };
+    Ok(CanonicalReferenceEventV1 {
+        event_id: E::reference_identity(&material)?,
+        schema_version: material.schema_version,
+        time: material.time,
+        lineage: material.lineage,
+        quality: material.quality,
+        payload: material.payload,
+    })
+}
+
+fn event_time_from_prepared_evidence<E: crate::pm_reduction::PmEvidenceV1>(
+    evidence: &[E],
+) -> EventTimeV2 {
+    EventTimeV2 {
+        source_event_at_utc_ms: evidence.iter().filter_map(|e| e.source_time()).max(),
+        received_at_utc_ms: evidence
+            .iter()
+            .map(|e| e.received_time())
+            .max()
+            .expect("canonical evidence is non-empty"),
+    }
+}
+
+impl<E: ReductionEvidenceV1> Default for BinanceDepthEpochState<E> {
+    fn default() -> Self {
+        Self {
+            last_admission_sequence: None,
+            book: None,
+            awaiting_after_confirmed_gap: false,
+            epoch_switch_prior_book: None,
+            epoch_switch_missing_emitted: false,
+        }
+    }
+}
+
+impl BinanceDepthReducer<SourceEvidenceRefV2> {
+    pub fn apply_snapshot(
+        &mut self,
+        row: &BinanceDepthSnapshotRow,
+        input_manifest_sha256: &Sha256Hex,
+        input_file_sha256: &Sha256Hex,
+    ) -> Result<ReferenceReductionOutcomeV1, ContractError> {
+        row.validate().map_err(typed_raw_contract_error)?;
+        self.begin_epoch(&row.source_sequence_epoch_id)?;
+        let evidence = source_evidence_from_typed_raw(
+            &TypedRawRow::BinanceDepthSnapshot(row.clone()),
+            input_manifest_sha256,
+            input_file_sha256,
+        )?;
+        self.compute_snapshot(row, evidence)
+    }
+    pub fn apply_update(
+        &mut self,
+        row: &BinanceDepthUpdateRow,
+        input_manifest_sha256: &Sha256Hex,
+        input_file_sha256: &Sha256Hex,
+    ) -> Result<ReferenceReductionOutcomeV1, ContractError> {
+        row.validate().map_err(typed_raw_contract_error)?;
+        self.begin_epoch(&row.source_sequence_epoch_id)?;
+        let evidence = source_evidence_from_typed_raw(
+            &TypedRawRow::BinanceDepthUpdate(row.clone()),
+            input_manifest_sha256,
+            input_file_sha256,
+        )?;
+        self.compute_update(row, evidence)
+    }
+}
+
+impl BinanceAggTradeReducer<SourceEvidenceRefV2> {
+    pub fn apply(
+        &mut self,
+        row: &BinanceAggTradeRow,
+        input_manifest_sha256: &Sha256Hex,
+        input_file_sha256: &Sha256Hex,
+    ) -> Result<ReferenceReductionOutcomeV1, ContractError> {
+        row.validate().map_err(typed_raw_contract_error)?;
+        let evidence = source_evidence_from_typed_raw(
+            &TypedRawRow::BinanceAggTrade(row.clone()),
+            input_manifest_sha256,
+            input_file_sha256,
+        )?;
+        let payload = if matches!(row.record, BinanceAggTradeRecord::Trade { .. }) {
+            Some(crate::prepare_binance_aggregate_trade_payload(row)?)
+        } else {
+            None
+        };
+        self.compute(row, evidence, payload.as_ref())
+    }
+}
+
+impl PolymarketMetadataReducer<SourceEvidenceRefV2> {
+    pub fn from_identity_snapshot(
+        input: PolymarketMetadataInputV1,
+        canonical_rule_version: impl Into<String>,
+    ) -> Result<(Self, PolymarketMarketContextV1, PolymarketReductionBatch), ContractError> {
+        validate_polymarket_metadata_input(&input)?;
+        let canonical_rule_version = canonical_rule_version.into();
+        if canonical_rule_version.trim().is_empty() {
+            return Err(invalid("canonical_rule_version", "must not be empty"));
+        }
+        validate_identity_snapshot(&input)?;
+        let outcomes = typed_raw::map_metadata_outcomes(
+            &input.row.asset_ids,
+            input.row.outcomes_raw.as_deref(),
+            input.row.outcome_prices_raw.as_deref(),
+        )
+        .map_err(typed_raw_contract_error)?;
+        let initial_tick = typed_raw::extract_metadata_initial_tick(
+            input
+                .row
+                .source_evidence_payload_json
+                .as_deref()
+                .expect("validated identity snapshot retains the Gamma payload"),
+        )
+        .map_err(typed_raw_contract_error)?;
+        Self::compute_identity_snapshot(input, outcomes, initial_tick, canonical_rule_version)
+    }
+    pub fn reduce_metadata(
+        &mut self,
+        input: PolymarketMetadataInputV1,
+    ) -> Result<PolymarketReductionBatch, ContractError> {
+        validate_polymarket_metadata_input(&input)?;
+        let outcomes = typed_raw::map_metadata_outcomes(
+            &input.row.asset_ids,
+            input.row.outcomes_raw.as_deref(),
+            input.row.outcome_prices_raw.as_deref(),
+        )
+        .map_err(typed_raw_contract_error)?;
+        self.compute_metadata(input, &outcomes, false)
+    }
+}
+
+fn prepare_polymarket_context<E: ReductionEvidenceV1>(
+    context: PolymarketMarketContextV1<E>,
+    canonical_rule_version: String,
+) -> Result<
+    (
+        MarketIdentityV2,
+        String,
+        Vec<PolymarketAssetContextV1>,
+        Vec<E>,
+    ),
+    ContractError,
+> {
+    if canonical_rule_version.trim().is_empty() {
+        return Err(invalid("canonical_rule_version", "must not be empty"));
+    }
+    validate_market(&context.market, "market")?;
+    if context.assets.len() != 2 {
+        return Err(invalid(
+            "assets",
+            "btc-updown market context requires exactly two assets",
+        ));
+    }
+    let identity_source_evidence =
+        canonicalize_reduction_evidence::<E>(context.identity_source_evidence)?;
+    if identity_source_evidence
+        .iter()
+        .any(|evidence| !evidence.is_metadata_identity())
+    {
+        return Err(invalid(
+            "identity_source_evidence",
+            "market identity and initial tick context requires non-WS metadata evidence without a fabricated platform time or admission coordinate",
+        ));
+    }
+
+    let mut outcome_indices = BTreeSet::new();
+    let mut assets = BTreeMap::new();
+    for asset_context in context.assets {
+        crate::validate_asset(&asset_context.asset, "assets.asset")?;
+        if !outcome_indices.insert(asset_context.asset.outcome.index) {
+            return Err(invalid("assets", "outcome indices must be unique"));
+        }
+        let tick = parse_canonical_decimal(
+            &asset_context.initial_tick_size_pusd_per_share,
+            "assets.initial_tick_size_pusd_per_share",
+        )?;
+        if tick <= Decimal::ZERO {
+            return Err(invalid(
+                "assets.initial_tick_size_pusd_per_share",
+                "must be positive",
+            ));
+        }
+        let token_id = asset_context.asset.token_id.0.clone();
+        if assets.insert(token_id, asset_context).is_some() {
+            return Err(invalid("assets", "token IDs must be unique"));
+        }
+    }
+    Ok((
+        context.market,
+        canonical_rule_version,
+        assets.into_values().collect(),
+        identity_source_evidence,
+    ))
+}
+
+impl PolymarketTerminalMerger<SourceEvidenceRefV2> {
+    pub fn merge_ws_terminal(
+        &mut self,
+        metadata: PolymarketMetadataInputV1,
+        orderbook: PolymarketOrderbookInputV1,
+    ) -> Result<PolymarketReductionBatch, ContractError> {
+        validate_polymarket_metadata_input(&metadata)?;
+        validate_polymarket_orderbook_evidence(&orderbook)?;
+        let outcomes = typed_raw::map_metadata_outcomes(
+            &metadata.row.asset_ids,
+            metadata.row.outcomes_raw.as_deref(),
+            metadata.row.outcome_prices_raw.as_deref(),
+        )
+        .map_err(typed_raw_contract_error)?;
+        self.compute_ws_terminal(metadata, &outcomes, orderbook)
+    }
+    pub fn merge_gamma_terminal(
+        &mut self,
+        metadata: PolymarketMetadataInputV1,
+    ) -> Result<PolymarketReductionBatch, ContractError> {
+        validate_polymarket_metadata_input(&metadata)?;
+        let outcomes = typed_raw::map_metadata_outcomes(
+            &metadata.row.asset_ids,
+            metadata.row.outcomes_raw.as_deref(),
+            metadata.row.outcome_prices_raw.as_deref(),
+        )
+        .map_err(typed_raw_contract_error)?;
+        self.compute_gamma_terminal(metadata, &outcomes)
+    }
+}
+
+/// V2 有限隐藏准备也可以延后物化，保留原物理绑定和原身份域。
+pub fn materialize_legacy_reference_reduction_v1(
+    outcome: ReferenceReductionOutcomeV1<
+        crate::pm_reduction::PreparedPmEvidenceV1<SourceEvidenceRefV2>,
+        PendingBusinessIdentityV1,
+    >,
+) -> Result<ReferenceReductionOutcomeV1, ContractError> {
+    let event = outcome
+        .event
+        .map(|event| {
+            finalize_reference_event_legacy(
+                &event.lineage.canonical_rule_version,
+                event
+                    .lineage
+                    .source_evidence
+                    .into_iter()
+                    .map(|source| source.source().clone())
+                    .collect(),
+                event.quality,
+                event.payload,
+            )
+        })
+        .transpose()?;
+    let report = materialize_legacy_report(outcome.report, |_| {
+        event
+            .as_ref()
+            .expect("Produced 有同次事件")
+            .event_id
+            .clone()
+    })?;
+    Ok(ReferenceReductionOutcomeV1 { event, report })
+}
+
+pub fn materialize_legacy_market_reduction_v1(
+    batch: PolymarketReductionBatch<
+        crate::pm_reduction::PreparedPmEvidenceV1<SourceEvidenceRefV2>,
+        PendingBusinessIdentityV1,
+    >,
+) -> Result<PolymarketReductionBatch, ContractError> {
+    let mut identities = Vec::with_capacity(batch.events.len());
+    let events = batch
+        .events
+        .into_iter()
+        .map(|event| {
+            identities.push(event.event_id);
+            finalize_execution_event_legacy(
+                event.market,
+                &event.lineage.canonical_rule_version,
+                event
+                    .lineage
+                    .source_evidence
+                    .into_iter()
+                    .map(|source| source.source().clone())
+                    .collect(),
+                event.quality,
+                event.payload,
+            )
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let reports = batch
+        .reports
+        .into_iter()
+        .map(|report| {
+            materialize_legacy_report(report, |identity| {
+                events[identities
+                    .iter()
+                    .position(|candidate| candidate == &identity)
+                    .expect("Produced 引用同次事件")]
+                .event_id
+                .clone()
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(PolymarketReductionBatch { events, reports })
+}
+
+fn materialize_legacy_report(
+    report: ReductionReportEntryV1<
+        crate::pm_reduction::PreparedPmEvidenceV1<SourceEvidenceRefV2>,
+        PendingBusinessIdentityV1,
+    >,
+    identity: impl FnOnce(PendingBusinessIdentityV1) -> CanonicalEventId,
+) -> Result<ReductionReportEntryV1, ContractError> {
+    let operations = |items: Vec<
+        ReductionOperationEvidenceV1<
+            crate::pm_reduction::PreparedPmEvidenceV1<SourceEvidenceRefV2>,
+        >,
+    >| {
+        items
+            .into_iter()
+            .map(|item| ReductionOperationEvidenceV1 {
+                role: item.role,
+                source_evidence: item.source_evidence.source().clone(),
+            })
+            .collect()
+    };
+    let report = ReductionReportEntryV1 {
+        schema_version: report.schema_version,
+        canonical_rule_version: report.canonical_rule_version,
+        scope: report.scope,
+        operation: report.operation,
+        reason_code: report.reason_code,
+        quantity_conservation: report.quantity_conservation,
+        disposition: match report.disposition {
+            ReductionDispositionV1::Produced { result_event_id } => {
+                ReductionDispositionV1::Produced {
+                    result_event_id: identity(result_event_id),
+                }
+            }
+            ReductionDispositionV1::NoOutput { operation_evidence } => {
+                ReductionDispositionV1::NoOutput {
+                    operation_evidence: operations(operation_evidence),
+                }
+            }
+            ReductionDispositionV1::Suppressed { operation_evidence } => {
+                ReductionDispositionV1::Suppressed {
+                    operation_evidence: operations(operation_evidence),
+                }
+            }
+        },
+    };
+    validate_reduction_report_entry_v1(&report)?;
+    Ok(report)
+}
+
+#[cfg(test)]
+mod prepared_evidence_tests {
+    use super::*;
+    use crate::pm_reduction::{PmEvidenceV1, PreparedPmEvidenceV1};
+
+    #[test]
+    fn prepared_keys_keep_v2_physical_tie_and_independent_time_maxima_without_encoding() {
+        let mut first = SourceEvidenceRefV2 {
+            source_kind: CanonicalSourceKind::PolymarketOrderbook,
+            source_native_identity: None,
+            source_event_at_utc_ms: Some(300),
+            received_at_utc_ms: 200,
+            collector_admission: Some(CollectorAdmissionCoordinateV1 {
+                source_sequence_epoch_id: "epoch".to_owned(),
+                collector_admission_sequence: 1,
+                admitted_at_utc_ms: 201,
+            }),
+            input_manifest_sha256: Sha256Hex("a".repeat(64)),
+            input_file_sha256: Sha256Hex("a".repeat(64)),
+        };
+        let preferred = PreparedPmEvidenceV1::prepare(first.clone(), None).unwrap();
+        first.input_file_sha256 = Sha256Hex("b".repeat(64));
+        let duplicate = PreparedPmEvidenceV1::prepare(first.clone(), None).unwrap();
+        first.source_event_at_utc_ms = Some(100);
+        first
+            .collector_admission
+            .as_mut()
+            .unwrap()
+            .collector_admission_sequence = 2;
+        let other = PreparedPmEvidenceV1::prepare(first, None).unwrap();
+        let original = canonicalize_source_evidence(vec![
+            other.source().clone(),
+            duplicate.source().clone(),
+            preferred.source().clone(),
+        ])
+        .unwrap();
+        crate::without_identity_encoding(|| {
+            let actual =
+                PreparedPmEvidenceV1::canonicalize(vec![other, duplicate, preferred]).unwrap();
+            assert_eq!(
+                actual
+                    .iter()
+                    .map(|source| source.source().clone())
+                    .collect::<Vec<_>>(),
+                original
+            );
+            assert_eq!(
+                actual
+                    .iter()
+                    .find(|source| source.source_time() == Some(300))
+                    .unwrap()
+                    .source()
+                    .input_file_sha256
+                    .0,
+                "a".repeat(64)
+            );
+            let frontier = visibility_frontier_evidence(actual.clone()).unwrap();
+            assert_eq!(frontier.source(), original.last().unwrap());
+            let time = event_time_from_prepared_evidence(&actual);
+            assert_eq!(time.source_event_at_utc_ms, Some(300));
+            assert_eq!(time.received_at_utc_ms, 200);
+            assert_eq!(
+                time.received_at_utc_ms - time.source_event_at_utc_ms.unwrap(),
+                -100
+            );
+            let report = duplicate_suppressed_report(
+                "rule",
+                "scope".to_owned(),
+                "duplicate",
+                vec![],
+                vec![actual[0].clone()],
+                vec![actual[1].clone()],
+            )
+            .unwrap();
+            assert!(
+                matches!(report.disposition, ReductionDispositionV1::Suppressed { operation_evidence } if operation_evidence.len() == 2)
+            );
+        });
+    }
+
+    #[test]
+    fn prepared_depth_produced_and_confirmation_reports_do_not_encode() {
+        let row = BinanceDepthSnapshotRow {
+            timestamp_received: 2001,
+            snapshot_fetch_start_utc: 900,
+            last_update_id: 10,
+            bids: vec![DepthLevel {
+                price: "64000".to_owned(),
+                quantity: "0.5".to_owned(),
+            }],
+            asks: vec![DepthLevel {
+                price: "65000".to_owned(),
+                quantity: "0.2".to_owned(),
+            }],
+            symbol: "BTCUSDT".to_owned(),
+            source_endpoint: "https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=1000"
+                .to_owned(),
+            snapshot_status: "complete".to_owned(),
+            source_sequence_epoch_id: "epoch".to_owned(),
+            connection_generation: 1,
+            depth_ingress_sequence: 1,
+            collector_admission_sequence: 1,
+            collector_admission_time_utc_ms: 2101,
+            collector_host_id: "collector".to_owned(),
+            collector_region: "eu-west-1".to_owned(),
+            schema_version: "binance_depth_snapshot_v3".to_owned(),
+        };
+        let prepared = |row: &BinanceDepthSnapshotRow| {
+            let source = crate::public_reference::source_evidence_v3_from_typed_raw_v2(
+                &crate::public_input::TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(
+                    row.clone(),
+                )),
+            )
+            .unwrap();
+            PreparedPmEvidenceV1::prepare(source, None).unwrap()
+        };
+        let first = prepared(&row);
+        let mut next = row.clone();
+        next.collector_admission_sequence = 2;
+        next.depth_ingress_sequence = 2;
+        next.timestamp_received += 1;
+        next.collector_admission_time_utc_ms += 1;
+        let second = prepared(&next);
+        let mut reducer = BinanceDepthReducer::new("rule").unwrap();
+        crate::without_identity_encoding(|| {
+            let first = reducer.compute_snapshot(&row, first).unwrap();
+            assert!(first.event.is_some());
+            let second = reducer.compute_snapshot(&next, second).unwrap();
+            assert!(second.event.is_none());
+            assert_eq!(
+                second.report.reason_code,
+                "BINANCE_DEPTH_IDENTICAL_SNAPSHOT"
+            );
+        });
+    }
+}
+
+fn canonicalize_reduction_evidence<E: crate::pm_reduction::PmEvidenceV1>(
+    values: Vec<E>,
+) -> Result<Vec<E>, ContractError> {
+    let values = E::canonicalize(values)?;
+    crate::require_source_evidence(&values)?;
+    Ok(values)
 }

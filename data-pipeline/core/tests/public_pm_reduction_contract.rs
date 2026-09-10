@@ -19,14 +19,14 @@ use std::str::FromStr;
 type LevelKey = (String, bool, Decimal);
 
 #[derive(Clone, Debug)]
-struct ReadState {
-    context: PmMarketContextV1,
+struct ReadState<E = SourceEvidenceRefV3> {
+    context: PmMarketContextV1<E>,
     epoch: Option<String>,
-    assets: BTreeMap<String, PmAssetStateV1>,
+    assets: BTreeMap<String, PmAssetStateV1<E>>,
     quantities: BTreeMap<LevelKey, Decimal>,
-    levels: BTreeMap<LevelKey, PmEvidencePairV1>,
-    absences: BTreeMap<LevelKey, PmEvidencePairV1>,
-    selected: BTreeMap<LevelKey, PmSelectedLevelV1>,
+    levels: BTreeMap<LevelKey, PmEvidencePairV1<E>>,
+    absences: BTreeMap<LevelKey, PmEvidencePairV1<E>>,
+    selected: BTreeMap<LevelKey, PmSelectedLevelV1<E>>,
 }
 
 fn key(token: &str, side: BookSide, price: Decimal) -> LevelKey {
@@ -36,8 +36,8 @@ fn d(value: &str) -> Decimal {
     Decimal::from_str(value).unwrap()
 }
 
-impl ReadState {
-    fn new(context: PmMarketContextV1) -> Self {
+impl<E: PmEvidenceV1> ReadState<E> {
+    fn new(context: PmMarketContextV1<E>) -> Self {
         let evidence = context.identity_source_evidence[0].clone();
         let assets = context
             .assets
@@ -69,7 +69,7 @@ impl ReadState {
             selected: BTreeMap::new(),
         }
     }
-    fn apply(&mut self, result: &PmMessageReductionV1<'_>) {
+    fn apply<I>(&mut self, result: &PmMessageReductionV1<'_, E, I>) {
         for step in &result.steps {
             match &step.change {
                 PmStepChangeV1::Epoch {
@@ -190,22 +190,16 @@ impl ReadState {
             }
         }
     }
-    fn run<'m>(&mut self, message: &'m CanonicalPmMessageV1) -> PmMessageReductionV1<'m> {
-        let parsed = parse_canonical_pm_message(message).unwrap();
-        let result = reduce_pm_message(&self.context, self, &parsed).unwrap();
-        self.apply(&result);
-        result
-    }
 }
 
-impl PmStateReadV1 for ReadState {
+impl<E: PmEvidenceV1> PmStateReadV1<E> for ReadState<E> {
     fn market(&self) -> &MarketIdentityV2 {
         &self.context.market
     }
     fn current_epoch(&self) -> Option<&str> {
         self.epoch.as_deref()
     }
-    fn asset_state(&self, token: &str) -> Option<PmAssetReadV1<'_>> {
+    fn asset_state(&self, token: &str) -> Option<PmAssetReadV1<'_, E>> {
         self.assets.get(token).map(PmAssetStateV1::as_read)
     }
     fn quantity(&self, token: &str, side: BookSide, price: Decimal) -> Decimal {
@@ -219,7 +213,7 @@ impl PmStateReadV1 for ReadState {
         token: &str,
         side: BookSide,
         price: Decimal,
-    ) -> Option<PmEvidenceReadV1<'_>> {
+    ) -> Option<PmEvidenceReadV1<'_, E>> {
         self.levels
             .get(&key(token, side, price))
             .map(PmEvidencePairV1::as_read)
@@ -229,7 +223,7 @@ impl PmStateReadV1 for ReadState {
         token: &str,
         side: BookSide,
         price: Decimal,
-    ) -> Option<PmEvidenceReadV1<'_>> {
+    ) -> Option<PmEvidenceReadV1<'_, E>> {
         self.absences
             .get(&key(token, side, price))
             .map(PmEvidencePairV1::as_read)
@@ -239,7 +233,7 @@ impl PmStateReadV1 for ReadState {
         token: &str,
         side: BookSide,
         price: Decimal,
-    ) -> Option<&PmSelectedLevelV1> {
+    ) -> Option<&PmSelectedLevelV1<E>> {
         self.selected.get(&key(token, side, price))
     }
     fn level_keys<'a>(
@@ -255,6 +249,15 @@ impl PmStateReadV1 for ReadState {
                 .filter(move |(id, ask, _)| id == token && *ask == (side == BookSide::Ask))
                 .map(|(_, _, price)| *price),
         )
+    }
+}
+
+impl ReadState {
+    fn run<'m>(&mut self, message: &'m CanonicalPmMessageV1) -> PmMessageReductionV1<'m> {
+        let parsed = parse_canonical_pm_message(message).unwrap();
+        let result = reduce_pm_message(&self.context, self, &parsed).unwrap();
+        self.apply(&result);
+        result
     }
 }
 
@@ -1352,4 +1355,205 @@ fn absent_predecessor_role_trade_no_output_and_same_millisecond_messages_stay_di
     let result = state.run(&later);
     assert_eq!(transitions(&result)[0].quantity_before_shares.0, "90");
     assert_ne!(later.group_id, second.group_id);
+}
+
+#[test]
+fn prepared_steps_keep_complete_positions_and_original_prestate_after_later_application() {
+    let original_context = public_context();
+    let mut prepared_context = PmMarketContextV1 {
+        market: original_context.market.clone(),
+        assets: original_context.assets.clone(),
+        canonical_rule_version: original_context.canonical_rule_version.clone(),
+        identity_source_evidence: original_context
+            .identity_source_evidence
+            .iter()
+            .cloned()
+            .map(|source| PreparedPmEvidenceV1::prepare(source, None).unwrap())
+            .collect(),
+    };
+    let rows = [
+        row("epoch-a", 1, 1_000, 1_500, book("100")),
+        row(
+            "epoch-a",
+            2,
+            1_100,
+            1_400,
+            PolymarketOrderbookEvent::PriceChange {
+                price_changes: vec![change(Some("80")), change(Some("100"))],
+            },
+        ),
+        row("epoch-a", 3, 1_200, 1_300, book("150")),
+    ];
+    let messages = rows
+        .iter()
+        .map(|row| PreparedPmMessageV1::prepare(message(&original_context, row)).unwrap())
+        .collect::<Vec<_>>();
+    let mut state = ReadState::new(prepared_context.clone());
+    let initial = compute_pm_message_steps_v1(
+        &prepared_context,
+        &state,
+        &messages[0],
+        "public-consumer",
+        10,
+        true,
+    )
+    .unwrap();
+    assert!(initial.steps.iter().any(|step| matches!(&step.change, PmStepChangeV1::InitialSnapshot { book_digest_sha256, .. } if book_digest_sha256.0.len() == 64)));
+    state.apply(&initial);
+    let middle = compute_pm_message_steps_v1(
+        &prepared_context,
+        &state,
+        &messages[1],
+        "public-consumer",
+        11,
+        true,
+    )
+    .unwrap();
+    let changes = middle
+        .steps
+        .iter()
+        .filter_map(|step| match &step.change {
+            PmStepChangeV1::LevelChange { transition, .. } => Some((
+                transition.quantity_before_shares.0.as_str(),
+                transition.quantity_after_shares.0.as_str(),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(changes, vec![("100", "80"), ("80", "100")]);
+    assert!(
+        middle.steps.iter().all(
+            |step| step.derived_id.consumer_stream_id == "public-consumer"
+                && step.derived_id.canonical_record_position == 11
+                && step.derived_id.member_index == step.member_index
+                && step.derived_id.step_index == step.step_index
+        )
+    );
+    state.apply(&middle);
+    let later = compute_pm_message_steps_v1(
+        &prepared_context,
+        &state,
+        &messages[2],
+        "public-consumer",
+        12,
+        true,
+    )
+    .unwrap();
+    state.apply(&later);
+    assert_eq!(
+        state.quantities[&key("123", BookSide::Bid, d("0.5"))],
+        d("150")
+    );
+    prepared_context.canonical_rule_version = "later-rule-does-not-rewrite-old-result".to_owned();
+    let materialized = materialize_pm_step_identity_v1(middle).unwrap();
+    let mut old = ReadState::new(original_context.clone());
+    old.run(messages[0].message());
+    let expected = old.run(messages[1].message());
+    assert_eq!(
+        serde_json::to_value(&materialized.reduction).unwrap(),
+        serde_json::to_value(expected).unwrap()
+    );
+    for (binding, step) in materialized
+        .bindings
+        .iter()
+        .zip(&materialized.reduction.steps)
+    {
+        assert_eq!(binding.position.canonical_record_position, 11);
+        assert_eq!(binding.derived_id.0.0, step.derived_id.0);
+    }
+    assert!(
+        materialized
+            .reduction
+            .steps
+            .iter()
+            .any(|step| step.direct_time.received_at_utc_ms == 1400
+                && step.dependency_time.received_at_utc_ms == 1500)
+    );
+}
+
+#[test]
+fn prepared_ingress_supplies_all_nonterminal_pm_kinds_and_shared_source_identity() {
+    use data_pipeline_core::public_input::*;
+    use data_pipeline_core::public_reference::source_evidence_v3_from_typed_raw_v2;
+    let context = public_context();
+    let events = [
+        book("100"),
+        PolymarketOrderbookEvent::PriceChange {
+            price_changes: vec![change(Some("80"))],
+        },
+        PolymarketOrderbookEvent::BestBidAsk {
+            asset_id: "123".to_owned(),
+            best_bid: None,
+            best_ask: None,
+            spread: None,
+        },
+        PolymarketOrderbookEvent::TickSizeChange {
+            asset_id: "123".to_owned(),
+            old_tick_size: Some("0.01".to_owned()),
+            new_tick_size: "0.02".to_owned(),
+        },
+        PolymarketOrderbookEvent::LastTradePrice {
+            asset_id: "123".to_owned(),
+            price: "0.5".to_owned(),
+            size: Some("1".to_owned()),
+            side: Some(PolymarketSide::Buy),
+            fee_rate_bps: None,
+        },
+        PolymarketOrderbookEvent::NewMarket {
+            clob_market_id: context.market.clob_market_id.0.clone(),
+            question: None,
+            description: None,
+            asset_ids: vec!["123".to_owned(), "456".to_owned()],
+            outcomes: vec!["UP".to_owned(), "DOWN".to_owned()],
+            event_message: None,
+        },
+    ];
+    for (position, event) in events.into_iter().enumerate() {
+        let row = TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row(
+            "epoch",
+            position as u64 + 1,
+            1100,
+            1200,
+            event,
+        )));
+        let source_evidence = source_evidence_v3_from_typed_raw_v2(&row).unwrap();
+        let source = source_evidence.clone();
+        let input = RecordedIngressV1 {
+            input_stream_id: "pm-input".to_owned(),
+            input_position: position as u64,
+            ingress: DptIngressV1::Message {
+                row,
+                source_evidence,
+            },
+            dependency_record_refs: vec![],
+        };
+        let prepared = prepare_ingress_v1(
+            &input,
+            Some(&context),
+            &Default::default(),
+            &[],
+            "public-pm-v1",
+        )
+        .unwrap();
+        let PreparedCanonicalInputV1::PolymarketMessage(message) = &prepared.current else {
+            panic!("pm")
+        };
+        assert_eq!(message.message().lineage.source_evidence, vec![source]);
+        assert_eq!(
+            prepared.prepared_group_id.as_ref(),
+            Some(&message.message().group_id)
+        );
+        assert!(std::sync::Arc::ptr_eq(
+            prepared.pm_source_identity.as_ref().unwrap(),
+            &message.evidence().shared_source_identity()
+        ));
+        assert_ne!(
+            prepared.prepared_group_id.as_ref().unwrap(),
+            &prepared
+                .pm_source_identity
+                .as_ref()
+                .unwrap()
+                .causal_group_id
+        );
+    }
 }
