@@ -1,6 +1,7 @@
 pub mod pm_message;
 pub mod pm_reduction;
 pub mod public_input;
+pub mod public_reduction;
 pub mod public_reference;
 pub mod reduction;
 pub mod typed_raw;
@@ -125,6 +126,11 @@ pub fn classify_dataset_date(date: &str) -> Result<DatasetDateEligibility, Contr
 }
 
 fn stable_json<T: Serialize>(value: &T) -> Result<Vec<u8>, ContractError> {
+    #[cfg(test)]
+    assert!(
+        !FORBID_IDENTITY_ENCODING.get(),
+        "热业务调用了 JSON 身份编码"
+    );
     serde_json::to_vec(value).map_err(|error| ContractError::Json(error.to_string()))
 }
 
@@ -150,6 +156,8 @@ fn require_schema_version(
 }
 
 fn hash_domain_bytes(domain: &[u8], bytes: &[u8]) -> Sha256Hex {
+    #[cfg(test)]
+    assert!(!FORBID_IDENTITY_ENCODING.get(), "热业务调用了 SHA 身份编码");
     let mut hasher = Sha256::new();
     hasher.update(domain);
     hasher.update((bytes.len() as u64).to_be_bytes());
@@ -866,13 +874,18 @@ fn validate_semantic_source_evidence(
     Ok(())
 }
 
-fn validate_source_evidence(values: &[SourceEvidenceRefV2]) -> Result<(), ContractError> {
+fn require_source_evidence<T>(values: &[T]) -> Result<(), ContractError> {
     if values.is_empty() {
         return Err(invalid(
             "lineage.source_evidence",
             "must contain at least one source evidence reference",
         ));
     }
+    Ok(())
+}
+
+fn validate_source_evidence(values: &[SourceEvidenceRefV2]) -> Result<(), ContractError> {
+    require_source_evidence(values)?;
     let mut previous: Option<Vec<u8>> = None;
     for (index, value) in values.iter().enumerate() {
         validate_semantic_source_evidence(&semantic_source_evidence(value), index)?;
@@ -1459,6 +1472,33 @@ pub fn build_binance_aggregate_trade_reference_event_v1(
     input_file_sha256: &Sha256Hex,
     canonical_rule_version: &str,
 ) -> Result<CanonicalReferenceEventV1, ContractError> {
+    if !matches!(row.record, typed_raw::BinanceAggTradeRecord::Trade { .. }) {
+        return Err(invalid(
+            "typed_raw.record",
+            "invalid aggTrade rows cannot form aggregate-trade reference updates",
+        ));
+    }
+    let evidence = source_evidence_from_typed_raw(
+        &typed_raw::TypedRawRow::BinanceAggTrade(row.clone()),
+        input_manifest_sha256,
+        input_file_sha256,
+    )?;
+    finalize_reference_event_v1(
+        evidence,
+        canonical_rule_version,
+        EventQualityV2 {
+            availability: MarketDataQuality::Fresh,
+            resync: ResyncQuality::NotRequired,
+        },
+        CanonicalReferenceEventPayloadV1::BinanceAggregateTrade(
+            prepare_binance_aggregate_trade_payload(row)?,
+        ),
+    )
+}
+
+pub(crate) fn prepare_binance_aggregate_trade_payload(
+    row: &typed_raw::BinanceAggTradeRow,
+) -> Result<BinanceAggregateTradeReferenceV1, ContractError> {
     let typed_raw::BinanceAggTradeRecord::Trade {
         event_time,
         symbol,
@@ -1476,33 +1516,20 @@ pub fn build_binance_aggregate_trade_reference_event_v1(
             "invalid aggTrade rows cannot form aggregate-trade reference updates",
         ));
     };
-    let evidence = source_evidence_from_typed_raw(
-        &typed_raw::TypedRawRow::BinanceAggTrade(row.clone()),
-        input_manifest_sha256,
-        input_file_sha256,
-    )?;
     let price_usdt_per_btc =
         typed_raw::normalize_decimal_text(price, "price").map_err(typed_raw_contract_error)?;
     let quantity_btc = typed_raw::normalize_decimal_text(quantity, "quantity")
         .map_err(typed_raw_contract_error)?;
-    finalize_reference_event_v1(
-        evidence,
-        canonical_rule_version,
-        EventQualityV2 {
-            availability: MarketDataQuality::Fresh,
-            resync: ResyncQuality::NotRequired,
-        },
-        CanonicalReferenceEventPayloadV1::BinanceAggregateTrade(BinanceAggregateTradeReferenceV1 {
-            symbol: symbol.clone(),
-            aggregate_trade_id: *aggregate_trade_id,
-            first_trade_id: *first_trade_id,
-            last_trade_id: *last_trade_id,
-            price_usdt_per_btc,
-            quantity_btc,
-            buyer_is_maker: *buyer_is_maker,
-            event_time_utc_ms: *event_time,
-        }),
-    )
+    Ok(BinanceAggregateTradeReferenceV1 {
+        symbol: symbol.clone(),
+        aggregate_trade_id: *aggregate_trade_id,
+        first_trade_id: *first_trade_id,
+        last_trade_id: *last_trade_id,
+        price_usdt_per_btc,
+        quantity_btc,
+        buyer_is_maker: *buyer_is_maker,
+        event_time_utc_ms: *event_time,
+    })
 }
 
 fn validate_reference_levels(
@@ -2499,4 +2526,20 @@ pub fn decode_gate_a_receipt_v3(
         serde_json::from_slice(bytes).map_err(|error| ContractError::Json(error.to_string()))?;
     validate_gate_a_receipt_v3(&receipt, matrix)?;
     Ok(receipt)
+}
+
+#[cfg(test)]
+std::thread_local! { static FORBID_IDENTITY_ENCODING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
+#[cfg(test)]
+fn without_identity_encoding<T>(work: impl FnOnce() -> T) -> T {
+    struct Reset;
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            FORBID_IDENTITY_ENCODING.set(false);
+        }
+    }
+    FORBID_IDENTITY_ENCODING.set(true);
+    let _reset = Reset;
+    work()
 }

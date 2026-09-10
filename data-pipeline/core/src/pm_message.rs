@@ -89,12 +89,7 @@ pub fn canonical_pm_message_from_typed_raw(
     input_record: CanonicalInputRecordRefV1,
 ) -> Result<CanonicalPmMessageV1, ContractError> {
     row.validate().map_err(typed_raw_contract_error)?;
-    if row.market != context.market.condition_id.0 {
-        return Err(invalid(
-            "row.market",
-            "does not match the registered condition ID",
-        ));
-    }
+    require_pm_market(context, row)?;
     let admission = CollectorAdmissionCoordinateV1 {
         source_sequence_epoch_id: row.source_sequence_epoch_id.clone(),
         collector_admission_sequence: row.collector_admission_sequence,
@@ -276,4 +271,17 @@ pub(crate) fn payload_from_typed_raw(
             ));
         }
     })
+}
+
+pub(crate) fn require_pm_market(
+    context: &PmMarketContextV1,
+    row: &PolymarketOrderbookRow,
+) -> Result<(), ContractError> {
+    if row.market != context.market.condition_id.0 {
+        return Err(invalid(
+            "row.market",
+            "does not match the registered condition ID",
+        ));
+    }
+    Ok(())
 }

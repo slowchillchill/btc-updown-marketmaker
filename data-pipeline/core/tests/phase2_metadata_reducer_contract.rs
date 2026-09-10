@@ -501,3 +501,201 @@ fn resolution_followup_summary_rejects_a_non_exhaustion_status() {
         .is_err()
     );
 }
+
+#[test]
+fn prepared_metadata_keeps_initial_lifecycle_and_only_public_narrow_snapshot() {
+    use data_pipeline_core::pm_reduction::PreparedPmEvidenceV1;
+    use data_pipeline_core::public_input::*;
+    use data_pipeline_core::public_reduction::*;
+    use data_pipeline_core::public_reference::source_evidence_v3_from_typed_raw_v2;
+    let prepare = |row: PolymarketMarketMetadataRow, position| {
+        let row = TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(row)));
+        let source_evidence = source_evidence_v3_from_typed_raw_v2(&row).unwrap();
+        RecordedIngressV1 {
+            input_stream_id: "metadata-stream".to_owned(),
+            input_position: position,
+            ingress: DptIngressV1::Message {
+                row,
+                source_evidence,
+            },
+            dependency_record_refs: vec![],
+        }
+    };
+    let initial_row = metadata_snapshot_row();
+    let initial = prepare(initial_row.clone(), 0);
+    let prepared = prepare_ingress_v1(&initial, None, &Default::default(), &[], "rule-v3").unwrap();
+    let PreparedCanonicalInputV1::Metadata(value) = prepared.current else {
+        panic!("metadata")
+    };
+    let context_for = |source: SourceEvidenceRefV3, position| PublicReductionContextV1 {
+        input_stream_id: "metadata-stream".to_owned(),
+        closed_at_input_position: position,
+        first_fact_ordinal: 0,
+        first_report_ordinal: 0,
+        group_id: source.source_message_id.clone(),
+        source_refs: vec![CanonicalInputRecordRefV1 {
+            input_stream_id: "metadata-stream".to_owned(),
+            input_position: position,
+        }],
+        direct_sources: vec![source],
+    };
+    let direct = value.source.source().clone();
+    let (mut state, market_context, initial_result) = PolymarketMetadataReducer::<
+        PreparedPmEvidenceV1<SourceEvidenceRefV3>,
+    >::compute_identity_snapshot(
+        PolymarketMetadataInputV1 {
+            row: value.row.clone(),
+            evidence: value.source,
+        },
+        value.outcomes,
+        value.initial_tick,
+        "rule-v3",
+    )
+    .unwrap();
+    let initial_facts =
+        bind_initial_market_reduction_v1(&market_context, initial_result, context_for(direct, 0));
+    assert!(initial_facts.facts.iter().any(|fact| matches!(
+        &fact.payload,
+        PublicBusinessPayloadV1::MarketFact {
+            payload: CanonicalMarketFactPayloadV1::LifecycleTransition(_),
+            ..
+        }
+    )));
+    assert!(!initial_facts.facts.iter().any(|fact| matches!(
+        &fact.payload,
+        PublicBusinessPayloadV1::MarketFact {
+            payload: CanonicalMarketFactPayloadV1::MarketLifecycleSnapshot { .. },
+            ..
+        }
+    )));
+    let mut active = initial_row.clone();
+    active.market_lifecycle_state = MetadataMarketLifecycleState::Active;
+    active.market_runtime_role = MetadataMarketRuntimeRole::Current;
+    active.timestamp_received += 1;
+    active.source_evidence_received_at_utc = Some(active.timestamp_received);
+    active.collector_admission_sequence += 1;
+    active.collector_admission_time_utc_ms += 1;
+    let recorded = prepare(active.clone(), 1);
+    let prepared =
+        prepare_ingress_v1(&recorded, None, &Default::default(), &[], "rule-v3").unwrap();
+    let PreparedCanonicalInputV1::Metadata(value) = prepared.current else {
+        panic!("metadata")
+    };
+    let direct = value.source.source().clone();
+    let result = state
+        .compute_metadata(
+            PolymarketMetadataInputV1 {
+                row: value.row.clone(),
+                evidence: value.source.clone(),
+            },
+            &value.outcomes,
+            true,
+        )
+        .unwrap();
+    let hot = bind_market_reduction_v1(result, context_for(direct, 1));
+    assert_eq!(
+        hot.facts
+            .iter()
+            .filter(|fact| matches!(
+                &fact.payload,
+                PublicBusinessPayloadV1::MarketFact {
+                    payload: CanonicalMarketFactPayloadV1::MarketLifecycleSnapshot { .. },
+                    ..
+                }
+            ))
+            .count(),
+        1
+    );
+    // 推进当前状态后再物化此前初始结果，仍必须保留原 Prefetched。
+    let initial_durable = materialize_public_reduction_v1(initial_facts).unwrap();
+    assert!(initial_durable.records.iter().any(|record| matches!(
+        record,
+        CanonicalEventRecordV2::MarketFact(CanonicalMarketFactV1 {
+            payload: CanonicalMarketFactPayloadV1::LifecycleTransition(
+                MarketLifecycleTransitionV2 {
+                    current_state: MappedMarketLifecycleStateV1::Known {
+                        value: KnownMarketLifecycleState::Prefetched
+                    },
+                    ..
+                }
+            ),
+            ..
+        })
+    )));
+    let (mut old, _, _) =
+        PolymarketMetadataReducer::from_identity_snapshot(metadata_input(initial_row), "rule-v3")
+            .unwrap();
+    assert!(
+        old.reduce_metadata(metadata_input(active))
+            .unwrap_err()
+            .to_string()
+            .contains("changed without an explicit lifecycle transition")
+    );
+    let repeat = state
+        .compute_metadata(
+            PolymarketMetadataInputV1 {
+                row: value.row.clone(),
+                evidence: value.source,
+            },
+            &value.outcomes,
+            true,
+        )
+        .unwrap();
+    assert!(repeat.events.is_empty());
+}
+
+#[test]
+fn preparation_preserves_v6_existing_transition_and_followup_row_kinds() {
+    use data_pipeline_core::public_input::*;
+    use data_pipeline_core::public_reference::source_evidence_v3_from_typed_raw_v2;
+    let snapshot = metadata_snapshot_row();
+    let mut transition = local_transition_row(snapshot.clone(), MARKET_START_AT + 5);
+    transition.market_lifecycle_state = MetadataMarketLifecycleState::Active;
+    transition.market_lifecycle_transition =
+        Some(MetadataMarketLifecycleTransition::PrefetchedToActive);
+    transition.lifecycle_scheduled_at_utc = Some(MARKET_START_AT);
+    transition.lifecycle_applied_at_utc = Some(MARKET_START_AT + 5);
+    transition.market_runtime_role = MetadataMarketRuntimeRole::Current;
+    transition.market_runtime_role_transition =
+        Some(MetadataMarketRuntimeRoleTransition::NextToCurrent);
+    transition.runtime_role_scheduled_at_utc = Some(MARKET_START_AT);
+    transition.runtime_role_applied_at_utc = Some(MARKET_START_AT + 5);
+    let followup = resolution_followup_summary_row(
+        snapshot.clone(),
+        MetadataResolutionFollowupStatus::BudgetExhaustedWithoutValidResponse,
+        MARKET_END_AT + 5,
+    );
+    for (row, expected) in [
+        (
+            TypedRawRowV2::PolymarketMarketMetadataV6(Box::new(
+                PolymarketMarketMetadataV6Input::Existing(snapshot),
+            )),
+            PolymarketMetadataRowKind::MetadataSnapshot,
+        ),
+        (
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(transition))),
+            PolymarketMetadataRowKind::MarketStateTransition,
+        ),
+        (
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(followup))),
+            PolymarketMetadataRowKind::ResolutionFollowupSummary,
+        ),
+    ] {
+        let source_evidence = source_evidence_v3_from_typed_raw_v2(&row).unwrap();
+        let input = RecordedIngressV1 {
+            input_stream_id: "metadata-kinds".to_owned(),
+            input_position: 0,
+            ingress: DptIngressV1::Message {
+                row,
+                source_evidence,
+            },
+            dependency_record_refs: vec![],
+        };
+        let prepared = prepare_ingress_v1(&input, None, &Default::default(), &[], "rule").unwrap();
+        let PreparedCanonicalInputV1::Metadata(metadata) = prepared.current else {
+            panic!("metadata")
+        };
+        assert_eq!(metadata.row.metadata_row_kind, expected);
+        assert_eq!(metadata.outcomes.len(), 2);
+    }
+}
