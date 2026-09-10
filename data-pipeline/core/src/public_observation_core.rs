@@ -1108,7 +1108,8 @@ impl MarketState {
                     let state = self.assets.get_mut(&asset.token_id.0).unwrap();
                     state.book = ObservedFactV1 {
                         value: None,
-                        quality: MarketDataQuality::Missing,
+                        // 重置不新增质量事实；真实缺失沿共同算法的 Quality 步骤更新。
+                        quality: state.book.quality,
                         ..ObservedFactV1::default()
                     };
                     // BBA 模型值保留原最后事实；执行路径的重锚由所属执行器处理。

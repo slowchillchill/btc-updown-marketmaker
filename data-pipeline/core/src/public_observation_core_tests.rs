@@ -476,15 +476,16 @@ fn complete_groups_keep_independent_unknowns_confirmations_and_preimages() {
         up(obs).bids.value.as_ref().unwrap()[0].quantity_shares.0,
         "4557.61"
     );
-    assert!(
-        obs.assets
-            .iter()
-            .find(|a| a.asset.token_id.0 == DOWN_TOKEN_ID)
-            .unwrap()
-            .bids
-            .value
-            .is_none()
-    );
+    let down = obs
+        .assets
+        .iter()
+        .find(|a| a.asset.token_id.0 == DOWN_TOKEN_ID)
+        .unwrap();
+    for side in [&down.bids, &down.asks] {
+        assert!(side.value.is_none());
+        assert_eq!(side.quality, MarketDataQuality::UnknownNotObserved);
+        assert!(side.direct_anchors.is_empty());
+    }
     assert_eq!(up(obs).tick.direct_anchors, tick_anchor);
     let predecessor =
         core.markets[CONDITION_ID].pm.levels[&key(UP_TOKEN_ID, BookSide::Bid, d("0.5"))].clone();
@@ -1350,6 +1351,7 @@ fn fullbook_absence_version_and_epoch_recovery_do_not_create_false_quantity() {
     let reset = push(&mut core, &input);
     let obs = up(&reset.closed_groups[0].observations[0]);
     assert!(obs.bids.value.is_none());
+    assert_eq!(obs.bids.quality, MarketDataQuality::Missing);
     assert_eq!(
         obs.best_bid_ask
             .value
@@ -1361,10 +1363,30 @@ fn fullbook_absence_version_and_epoch_recovery_do_not_create_false_quantity() {
             .0,
         "0.2"
     );
+    // 尚未恢复就绪时再次换代，既有 Missing 不能被重置成未知。
     let input = record(
         7,
         TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row(
-            "epoch-b",
+            "epoch-c",
+            1,
+            20_001,
+            22_101,
+            PolymarketOrderbookEvent::BestBidAsk {
+                asset_id: UP_TOKEN_ID.into(),
+                best_bid: Some("0.4".into()),
+                best_ask: Some("0.6".into()),
+                spread: Some("0.2".into()),
+            },
+        ))),
+    );
+    let reset_again = push(&mut core, &input);
+    let obs = up(&reset_again.closed_groups[0].observations[0]);
+    assert!(obs.bids.value.is_none());
+    assert_eq!(obs.bids.quality, MarketDataQuality::Missing);
+    let input = record(
+        8,
+        TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row(
+            "epoch-c",
             2,
             20_001,
             22_101,
