@@ -61,6 +61,7 @@ impl std::fmt::Display for FinishGateBFlowError {
 fn prepare_gate_b_flow(input: GateBFlowPreparation<'_>) -> Result<PreparedGateBFlow, String> {
     let creation_request_id = format!("{}-create", input.gate.run_id);
     let opened = RunOpenedV2 {
+        projection_version: Default::default(),
         run_id: input.gate.run_id.clone(),
         durability_role: RunDurabilityRoleV2::CleanRun,
         platform_rule_snapshot_file_sha256: input.rule_snapshot.file_sha256().clone(),

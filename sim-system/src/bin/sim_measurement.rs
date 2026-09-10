@@ -1296,6 +1296,7 @@ mod enabled {
                 .map_err(|error| format!("加载 Gate A runner 时延档失败：{error}"))?;
             let log_path = candidate.join("sim-event-log-v2.working.jsonl");
             let opened = RunOpenedV2 {
+                projection_version: Default::default(),
                 run_id: GATE_A_RUNNER_IDENTITY.to_owned(),
                 durability_role: RunDurabilityRoleV2::CleanRun,
                 platform_rule_snapshot_file_sha256: rule_snapshot.file_sha256().clone(),
@@ -2033,6 +2034,7 @@ mod enabled {
         let mut execution = SimExecution::create_new(
             &log_path,
             RunOpenedV2 {
+                projection_version: Default::default(),
                 run_id: COMPONENT_RUNNER_IDENTITY.to_owned(),
                 durability_role: RunDurabilityRoleV2::CleanRun,
                 platform_rule_snapshot_file_sha256: snapshot.file_sha256().clone(),
@@ -2840,6 +2842,7 @@ mod enabled {
         let mut execution = SimExecution::create_new(
             &log_path,
             RunOpenedV2 {
+                projection_version: Default::default(),
                 run_id: run_id.clone(),
                 durability_role: RunDurabilityRoleV2::RecoverablePaper,
                 platform_rule_snapshot_file_sha256: snapshot.file_sha256().clone(),
@@ -3329,6 +3332,7 @@ mod enabled {
         };
         let caller_role = SimCallerRoleV1::Paper;
         let opened = RunOpenedV2 {
+            projection_version: Default::default(),
             run_id: run_id.clone(),
             durability_role: role,
             platform_rule_snapshot_file_sha256: snapshot.file_sha256().clone(),

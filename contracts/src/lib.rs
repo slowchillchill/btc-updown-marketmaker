@@ -721,6 +721,25 @@ pub struct TradeLifecycleFeedbackV2 {
     pub account_delta: Option<PlatformAccountDeltaV2>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TradeLifecycleFeedbackV3 {
+    #[serde(flatten)]
+    pub feedback: TradeLifecycleFeedbackV2,
+    pub fill_sequence: u64,
+    pub matched_at_utc_ms: i64,
+}
+impl std::ops::Deref for TradeLifecycleFeedbackV3 {
+    type Target = TradeLifecycleFeedbackV2;
+    fn deref(&self) -> &Self::Target {
+        &self.feedback
+    }
+}
+impl TradeLifecycleFeedbackV3 {
+    pub fn into_v2(self) -> TradeLifecycleFeedbackV2 {
+        self.feedback
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MakerRebateAccrualStatusV2 {
     Calculated,

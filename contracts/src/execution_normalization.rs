@@ -349,6 +349,24 @@ pub struct SourceNeutralTradeLifecycleResultV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceNeutralTradeLifecycleResultV2 {
+    pub trade_identity: StableLogicalIdentityV1,
+    pub order_identity: StableLogicalIdentityV1,
+    pub condition_id: ConditionId,
+    pub token_id: TokenId,
+    pub state: SourceNeutralTradeStateV1,
+    pub economic_disposition: SourceNeutralTradeEconomicDispositionV1,
+    pub fill_sequence: u64,
+    pub matched_at_utc_ms: i64,
+    pub liquidity_role: crate::TradeLiquidityRoleV2,
+    pub source_price_pusd_per_share: ExactDecimal,
+    pub base_quantity_shares: ExactDecimal,
+    pub quote_amount_pusd: ExactDecimal,
+    pub immediate_taker_fee_pusd: ExactDecimal,
+    pub economic_application_account_transition_seq: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceNeutralTradesPageV1 {
     pub root_sequence: u64,
     pub items: Vec<SourceNeutralTradeLifecycleResultV1>,

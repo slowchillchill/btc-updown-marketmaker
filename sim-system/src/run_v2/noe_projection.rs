@@ -27,15 +27,19 @@ use contracts::{
     TradeProjectionV2, TradesQueryResultV2,
 };
 use execution_normalization::{
-    DurableCommitOutcomeV1, DurableContextStoreV1, DurableErrorV1, NormalizationBatchInputV1,
-    SimV2ContextSeedV1, SourceNeutralEconomicEvidenceV1, SourceNeutralEntityKeyV1,
-    SourceNeutralEvidenceKindV1, SourceNeutralEvidenceV1, SourceNeutralLogicalKeyV1,
+    DurableCommitOutcomeV1, DurableContextStore, DurableErrorV1, NoeTradePayload,
+    NormalizationBatchInput, SimV2ContextSeedV1, SourceNeutralEconomicEvidenceV1,
+    SourceNeutralEntityKeyV1, SourceNeutralEvidence, SourceNeutralEvidenceKind,
+    SourceNeutralLogicalKeyV1,
 };
 
-use super::{BusinessDirectResponseV2, BusinessProjectionBatchV2, BusinessProjectionPortV2};
+use super::{
+    BusinessDirectResponseV2, BusinessProjectionBatch, BusinessProjectionBatchPayloadV1,
+    BusinessProjectionBatchV2, BusinessProjectionPortV2,
+};
 use crate::runtime_v2::RunOpenedV2;
 
-pub struct SimV2NoeProjectionPortV1 {
+pub struct SimNoeProjectionPort<T: NoeFeedbackPayload> {
     root: PathBuf,
     opened: RunOpenedV2,
     run_opened_reference: DurableSourceReferenceV1,
@@ -43,7 +47,7 @@ pub struct SimV2NoeProjectionPortV1 {
     account_opening_evidence_identity: String,
     implementation_identity: String,
     seed: Option<SimV2ContextSeedV1>,
-    store: Option<DurableContextStoreV1>,
+    store: Option<DurableContextStore<T::Result>>,
     observation: SimV2NoeObservationV1,
 }
 
@@ -61,7 +65,7 @@ impl SimV2NoeObservationV1 {
     }
 }
 
-impl SimV2NoeProjectionPortV1 {
+impl<T: NoeFeedbackPayload> SimNoeProjectionPort<T> {
     pub fn new(
         root: impl AsRef<Path>,
         opened: RunOpenedV2,
@@ -138,7 +142,7 @@ impl SimV2NoeProjectionPortV1 {
             .extend(commit.result_references());
     }
 
-    fn open_from_first_batch(&mut self, batch: &BusinessProjectionBatchV2) -> bool {
+    fn open_from_first_batch(&mut self, batch: &BusinessProjectionBatch<T>) -> bool {
         if self.store.is_some() {
             return true;
         }
@@ -156,7 +160,7 @@ impl SimV2NoeProjectionPortV1 {
             account_opening_evidence_identity: self.account_opening_evidence_identity.clone(),
             implementation_identity: self.implementation_identity.clone(),
         };
-        match DurableContextStoreV1::open_or_create_sim_v2(&self.root, seed.clone()) {
+        match DurableContextStore::<T::Result>::open_or_create_sim_v2(&self.root, seed.clone()) {
             Ok(store) => {
                 self.seed = Some(seed);
                 self.store = Some(store);
@@ -172,7 +176,8 @@ impl SimV2NoeProjectionPortV1 {
         let Some(seed) = self.seed.clone() else {
             return false;
         };
-        let Ok(store) = DurableContextStoreV1::open_or_create_sim_v2(&self.root, seed) else {
+        let Ok(store) = DurableContextStore::<T::Result>::open_or_create_sim_v2(&self.root, seed)
+        else {
             return false;
         };
         let durable = store.durable_through().is_some_and(|watermark| {
@@ -185,8 +190,14 @@ impl SimV2NoeProjectionPortV1 {
     }
 }
 
-impl BusinessProjectionPortV2 for SimV2NoeProjectionPortV1 {
+impl<T: NoeFeedbackPayload> BusinessProjectionPortV2 for SimNoeProjectionPort<T> {
     fn try_accept(&mut self, batch: Arc<BusinessProjectionBatchV2>) -> bool {
+        self.try_accept_payload(Arc::new(BusinessProjectionBatchPayloadV1::V2(batch)))
+    }
+    fn try_accept_payload(&mut self, payload: Arc<BusinessProjectionBatchPayloadV1>) -> bool {
+        let Some(batch) = T::batch(payload.as_ref()) else {
+            return false;
+        };
         if !self.open_from_first_batch(&batch) || batch.run_id != self.opened.run_id {
             return false;
         }
@@ -198,7 +209,7 @@ impl BusinessProjectionPortV2 for SimV2NoeProjectionPortV1 {
         }) {
             return false;
         }
-        let input = match BatchMapperV1::new(store, &batch).map() {
+        let input = match BatchMapper::new(store, &batch).map() {
             Ok(input) => input,
             Err(()) => return false,
         };
@@ -227,22 +238,25 @@ impl BusinessProjectionPortV2 for SimV2NoeProjectionPortV1 {
         }
         self.store
             .as_ref()
-            .and_then(DurableContextStoreV1::durable_through)
+            .and_then(DurableContextStore::<T::Result>::durable_through)
             .filter(|watermark| watermark.run_id == run_id)
             .map_or(0, |watermark| watermark.projection_batch_sequence)
     }
 }
 
-struct BatchMapperV1<'a> {
-    store: &'a DurableContextStoreV1,
-    batch: &'a BusinessProjectionBatchV2,
+struct BatchMapper<'a, T: NoeFeedbackPayload> {
+    store: &'a DurableContextStore<T::Result>,
+    batch: &'a BusinessProjectionBatch<T>,
     watermark: SimV2SourceWatermarkV1,
-    evidence: Vec<SourceNeutralEvidenceV1>,
+    evidence: Vec<SourceNeutralEvidence<T::Result>>,
     next_ordinal: u32,
 }
 
-impl<'a> BatchMapperV1<'a> {
-    fn new(store: &'a DurableContextStoreV1, batch: &'a BusinessProjectionBatchV2) -> Self {
+impl<'a, T: NoeFeedbackPayload> BatchMapper<'a, T> {
+    fn new(
+        store: &'a DurableContextStore<T::Result>,
+        batch: &'a BusinessProjectionBatch<T>,
+    ) -> Self {
         Self {
             store,
             batch,
@@ -255,7 +269,7 @@ impl<'a> BatchMapperV1<'a> {
         }
     }
 
-    fn map(mut self) -> Result<NormalizationBatchInputV1, ()> {
+    fn map(mut self) -> Result<NormalizationBatchInput<T::Result>, ()> {
         if self.batch.run_id != self.store.context().account_identity.run_scope {
             return Err(());
         }
@@ -273,7 +287,7 @@ impl<'a> BatchMapperV1<'a> {
                         .account_opening_evidence_identity
                         .clone(),
                 },
-                SourceNeutralEvidenceKindV1::Economic {
+                SourceNeutralEvidenceKind::Economic {
                     evidence: SourceNeutralEconomicEvidenceV1::AccountOpening {
                         opening_evidence_identity: self
                             .store
@@ -294,7 +308,7 @@ impl<'a> BatchMapperV1<'a> {
                 SourceNeutralLogicalKeyV1::MarketEnrollment {
                     enrollment_request_id: enrollment.enrollment_request_id.clone(),
                 },
-                SourceNeutralEvidenceKindV1::MarketEnrollment {
+                SourceNeutralEvidenceKind::MarketEnrollment {
                     result: SourceNeutralMarketEnrollmentResultV1 {
                         enrollment_request_id: enrollment.enrollment_request_id.clone(),
                         market: enrollment.market.clone(),
@@ -315,7 +329,7 @@ impl<'a> BatchMapperV1<'a> {
         for feedback in &self.batch.settlement_lifecycle {
             self.map_settlement_lifecycle(feedback)?;
         }
-        Ok(NormalizationBatchInputV1 {
+        Ok(NormalizationBatchInput {
             source_watermark: self.watermark,
             evidence: self.evidence,
         })
@@ -415,7 +429,7 @@ impl<'a> BatchMapperV1<'a> {
                 global_request_id: metadata.global_request_id.clone(),
                 batch_item_ordinal: item.batch_item_ordinal,
             },
-            SourceNeutralEvidenceKindV1::Control {
+            SourceNeutralEvidenceKind::Control {
                 result: SourceNeutralControlResultV1::Submission { outcome },
             },
         );
@@ -450,7 +464,7 @@ impl<'a> BatchMapperV1<'a> {
                 global_request_id: metadata.global_request_id.clone(),
                 target_ordinal: target.target_ordinal,
             },
-            SourceNeutralEvidenceKindV1::Control {
+            SourceNeutralEvidenceKind::Control {
                 result: SourceNeutralControlResultV1::Cancellation {
                     order_identity: self.entity_order(&target.platform_order_id)?,
                     outcome,
@@ -475,7 +489,7 @@ impl<'a> BatchMapperV1<'a> {
             SourceNeutralLogicalKeyV1::DirectResponseRequest {
                 global_request_id: metadata.global_request_id.clone(),
             },
-            SourceNeutralEvidenceKindV1::Control { result },
+            SourceNeutralEvidenceKind::Control { result },
         );
     }
 
@@ -627,7 +641,7 @@ impl<'a> BatchMapperV1<'a> {
                 order_identity: feedback.platform_order_id.clone(),
                 occurrence: feedback.metadata.private_feedback_sequence,
             },
-            SourceNeutralEvidenceKindV1::OrderLifecycle {
+            SourceNeutralEvidenceKind::OrderLifecycle {
                 result: SourceNeutralOrderLifecycleResultV1 {
                     order_identity,
                     condition_id: feedback.condition_id.clone(),
@@ -642,34 +656,32 @@ impl<'a> BatchMapperV1<'a> {
         Ok(())
     }
 
-    fn map_trade_lifecycle(
-        &mut self,
-        feedback: &contracts::TradeLifecycleFeedbackV2,
-    ) -> Result<(), ()> {
-        self.check_account(&feedback.metadata.account_instance_key)?;
+    fn map_trade_lifecycle(&mut self, feedback: &T) -> Result<(), ()> {
+        let legacy = feedback.legacy();
+        self.check_account(&legacy.metadata.account_instance_key)?;
         let record = SimV2SourceRecordReferenceV1::TradeLifecycle {
-            private_feedback_sequence: feedback.metadata.private_feedback_sequence,
-            platform_event_at_utc_ms: feedback.metadata.platform_event_at_utc_ms,
-            feedback_received_at_utc_ms: feedback.metadata.feedback_received_at_utc_ms,
+            private_feedback_sequence: legacy.metadata.private_feedback_sequence,
+            platform_event_at_utc_ms: legacy.metadata.platform_event_at_utc_ms,
+            feedback_received_at_utc_ms: legacy.metadata.feedback_received_at_utc_ms,
         };
         self.push(
             record.clone(),
             SourceNeutralLogicalKeyV1::TradeLifecycle {
-                trade_identity: feedback.trade_id.clone(),
-                occurrence: feedback.metadata.private_feedback_sequence,
+                trade_identity: legacy.trade_id.clone(),
+                occurrence: legacy.metadata.private_feedback_sequence,
             },
-            SourceNeutralEvidenceKindV1::TradeLifecycle {
-                result: SourceNeutralTradeLifecycleResultV1 {
-                    trade_identity: self.entity_trade(&feedback.trade_id)?,
-                    order_identity: self.entity_order(&feedback.platform_order_id)?,
-                    condition_id: feedback.condition_id.clone(),
-                    token_id: feedback.token_id.clone(),
-                    state: map_trade_state(&feedback.status),
-                    economic_disposition: map_trade_disposition(feedback.economic_disposition),
-                },
+            SourceNeutralEvidenceKind::TradeLifecycle {
+                result: feedback.normalized(SourceNeutralTradeLifecycleResultV1 {
+                    trade_identity: self.entity_trade(&legacy.trade_id)?,
+                    order_identity: self.entity_order(&legacy.platform_order_id)?,
+                    condition_id: legacy.condition_id.clone(),
+                    token_id: legacy.token_id.clone(),
+                    state: map_trade_state(&legacy.status),
+                    economic_disposition: map_trade_disposition(legacy.economic_disposition),
+                }),
             },
         );
-        if let Some(delta) = &feedback.account_delta {
+        if let Some(delta) = &legacy.account_delta {
             self.push_economic(record, delta)?;
         }
         Ok(())
@@ -782,7 +794,7 @@ impl<'a> BatchMapperV1<'a> {
             SourceNeutralLogicalKeyV1::SettlementLifecycle {
                 private_feedback_sequence: feedback.metadata.private_feedback_sequence,
             },
-            SourceNeutralEvidenceKindV1::SettlementLifecycle { result },
+            SourceNeutralEvidenceKind::SettlementLifecycle { result },
         );
         if let Some(delta) = account_delta {
             self.push_economic(record, delta)?;
@@ -891,7 +903,7 @@ impl<'a> BatchMapperV1<'a> {
             SourceNeutralLogicalKeyV1::AccountTransition {
                 account_transition_seq: delta.account_transition_seq,
             },
-            SourceNeutralEvidenceKindV1::Economic {
+            SourceNeutralEvidenceKind::Economic {
                 evidence: SourceNeutralEconomicEvidenceV1::AccountTransition {
                     account_transition_seq: delta.account_transition_seq,
                     economic_effective_at_utc_ms: delta.platform_effective_at_utc_ms,
@@ -983,11 +995,11 @@ impl<'a> BatchMapperV1<'a> {
         &mut self,
         record: SimV2SourceRecordReferenceV1,
         logical_key: SourceNeutralLogicalKeyV1,
-        kind: SourceNeutralEvidenceKindV1,
+        kind: SourceNeutralEvidenceKind<T::Result>,
     ) {
         let source_ordinal = self.next_ordinal;
         self.next_ordinal += 1;
-        self.evidence.push(SourceNeutralEvidenceV1 {
+        self.evidence.push(SourceNeutralEvidence {
             source_reference: SimV2SourceReferenceV1 {
                 context_reference: self.store.context().context_reference.clone(),
                 watermark: self.watermark.clone(),
@@ -1108,8 +1120,158 @@ fn durable_now_utc_ms() -> i64 {
         .unwrap_or(i64::MAX)
 }
 
+/// 只在公开反馈版本边界选型，核心处理前保留完整成交证据。
+pub trait NoeFeedbackPayload: Clone {
+    type Result: NoeTradePayload;
+    fn legacy(&self) -> &contracts::TradeLifecycleFeedbackV2;
+    fn normalized(&self, identity: SourceNeutralTradeLifecycleResultV1) -> Self::Result;
+    fn batch(
+        payload: &BusinessProjectionBatchPayloadV1,
+    ) -> Option<Arc<BusinessProjectionBatch<Self>>>;
+}
+impl NoeFeedbackPayload for contracts::TradeLifecycleFeedbackV2 {
+    type Result = SourceNeutralTradeLifecycleResultV1;
+    fn legacy(&self) -> &Self {
+        self
+    }
+    fn normalized(&self, identity: SourceNeutralTradeLifecycleResultV1) -> Self::Result {
+        identity
+    }
+    fn batch(
+        payload: &BusinessProjectionBatchPayloadV1,
+    ) -> Option<Arc<BusinessProjectionBatch<Self>>> {
+        match payload {
+            BusinessProjectionBatchPayloadV1::V2(b) => Some(Arc::clone(b)),
+            _ => None,
+        }
+    }
+}
+impl NoeFeedbackPayload for contracts::TradeLifecycleFeedbackV3 {
+    type Result = contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2;
+    fn legacy(&self) -> &contracts::TradeLifecycleFeedbackV2 {
+        &self.feedback
+    }
+    fn normalized(&self, identity: SourceNeutralTradeLifecycleResultV1) -> Self::Result {
+        Self::Result {
+            trade_identity: identity.trade_identity,
+            order_identity: identity.order_identity,
+            condition_id: identity.condition_id,
+            token_id: identity.token_id,
+            state: identity.state,
+            economic_disposition: identity.economic_disposition,
+            fill_sequence: self.fill_sequence,
+            matched_at_utc_ms: self.matched_at_utc_ms,
+            liquidity_role: self.liquidity_role,
+            source_price_pusd_per_share: self.source_price_pusd_per_share.clone(),
+            base_quantity_shares: self.base_quantity_shares.clone(),
+            quote_amount_pusd: self.quote_amount_pusd.clone(),
+            immediate_taker_fee_pusd: self.immediate_taker_fee_pusd.clone(),
+            economic_application_account_transition_seq: self
+                .economic_application_account_transition_seq,
+        }
+    }
+    fn batch(
+        payload: &BusinessProjectionBatchPayloadV1,
+    ) -> Option<Arc<BusinessProjectionBatch<Self>>> {
+        match payload {
+            BusinessProjectionBatchPayloadV1::V3(b) => Some(Arc::clone(b)),
+            _ => None,
+        }
+    }
+}
+pub type SimV2NoeProjectionPortV1 = SimNoeProjectionPort<contracts::TradeLifecycleFeedbackV2>;
+pub type SimV2NoeProjectionPortV2 = SimNoeProjectionPort<contracts::TradeLifecycleFeedbackV3>;
+#[cfg(test)]
+type BatchMapperV1<'a> = BatchMapper<'a, contracts::TradeLifecycleFeedbackV2>;
+
+#[cfg(test)]
+pub(super) fn assert_v3_rebuilt_evidence_semantics(
+    root: &std::path::Path,
+    context: &contracts::execution_normalization::ExecutionNormalizationContextReferenceV1,
+    batch: &super::BusinessProjectionBatchV3,
+) {
+    use execution_normalization::{
+        DurableContextStoreV2, NormalizationCoreV1, NormalizationRecordV2,
+    };
+    let mut store = DurableContextStoreV2::open(root, context).unwrap();
+    let original = BatchMapper::new(&store, batch).map().unwrap();
+    let next = store.durable_through().unwrap().projection_batch_sequence + 1;
+    let mut duplicate = original.clone();
+    duplicate.source_watermark.projection_batch_sequence = next;
+    for e in &mut duplicate.evidence {
+        e.source_reference.watermark = duplicate.source_watermark.clone();
+    }
+    // 已签发的核心入口仍可显式选择新载荷，且与耐久核心共用同一实现。
+    let core = NormalizationCoreV1::<
+        contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2,
+    >::new(store.context().clone());
+    core.prepare_batch_v2(duplicate.clone()).unwrap();
+    store
+        .commit_batch_v2(duplicate, durable_now_utc_ms())
+        .unwrap();
+    assert!(
+        store
+            .commits()
+            .last()
+            .unwrap()
+            .records
+            .iter()
+            .all(|r| matches!(r, NormalizationRecordV2::Duplicate { .. }))
+    );
+    // 同一真实经济事实以另一个证据身份再次提供，沿现有别名逻辑引用已恢复事实。
+    let mut economic = original
+        .evidence
+        .iter()
+        .find(|e| matches!(e.kind, SourceNeutralEvidenceKind::Economic { .. }))
+        .unwrap()
+        .clone();
+    economic.logical_key = SourceNeutralLogicalKeyV1::EconomicEvidence {
+        evidence_identity: format!(
+            "repeated-public-evidence:{:?}",
+            economic.source_reference.record
+        ),
+    };
+    let mut alias = original.clone();
+    alias.source_watermark.projection_batch_sequence = next + 1;
+    economic.source_reference.watermark = alias.source_watermark.clone();
+    alias.evidence = vec![economic];
+    store.commit_batch_v2(alias, durable_now_utc_ms()).unwrap();
+    assert!(matches!(
+        store.commits().last().unwrap().records.as_slice(),
+        [NormalizationRecordV2::EconomicAlias { .. }]
+    ));
+    // 仅新字段不同的反证不得被降为旧版后判作重复。
+    for (offset, change_sequence) in [(2, true), (3, false)] {
+        let mut changed = original
+            .evidence
+            .iter()
+            .find(|e| matches!(e.kind, SourceNeutralEvidenceKind::TradeLifecycle { .. }))
+            .unwrap()
+            .clone();
+        if let SourceNeutralEvidenceKind::TradeLifecycle { result } = &mut changed.kind {
+            if change_sequence {
+                result.fill_sequence += 1;
+            } else {
+                result.matched_at_utc_ms += 1;
+            }
+        }
+        let mut conflicting = original.clone();
+        conflicting.source_watermark.projection_batch_sequence = next + offset;
+        changed.source_reference.watermark = conflicting.source_watermark.clone();
+        conflicting.evidence = vec![changed];
+        store
+            .commit_batch_v2(conflicting, durable_now_utc_ms())
+            .unwrap();
+        assert!(matches!(
+            store.commits().last().unwrap().records.as_slice(),
+            [NormalizationRecordV2::Conflict { .. }]
+        ));
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use execution_normalization::SourceNeutralEvidenceKindV1;
     use std::fs;
     use std::time::Instant;
 
@@ -1154,6 +1316,7 @@ mod tests {
 
     fn opened() -> RunOpenedV2 {
         RunOpenedV2 {
+            projection_version: Default::default(),
             run_id: "run-noe-58".to_owned(),
             durability_role: RunDurabilityRoleV2::CleanRun,
             platform_rule_snapshot_file_sha256: sha('1'),
