@@ -56,7 +56,9 @@ use crate::scenario::{PlatformMarketV1, SealedPlatformScenarioV1};
 use crate::session::MarketEnrollmentRequestV1;
 
 mod noe_projection;
-pub use noe_projection::{SimV2NoeObservationV1, SimV2NoeProjectionPortV1};
+pub use noe_projection::{
+    SimV2NoeObservationV1, SimV2NoeProjectionPortV1, SimV2NoeProjectionPortV2,
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CreateSessionDispositionV2 {
@@ -252,18 +254,18 @@ pub enum BusinessDirectResponseV2 {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct BusinessProjectionBatchV2 {
+pub struct BusinessProjectionBatch<T> {
     pub run_id: String,
     pub projection_batch_sequence: u64,
     pub account_opening: Option<Arc<AccountOpeningFactV2>>,
     pub market_enrollment: Option<MarketEnrollmentV2>,
     direct_responses: Vec<Arc<StoredDirectResponseV2>>,
     pub order_lifecycle: Vec<OrderLifecycleFeedbackV2>,
-    pub trade_lifecycle: Vec<TradeLifecycleFeedbackV2>,
+    pub trade_lifecycle: Vec<T>,
     pub settlement_lifecycle: Vec<SettlementLifecycleFeedbackV2>,
 }
 
-impl BusinessProjectionBatchV2 {
+impl<T> BusinessProjectionBatch<T> {
     pub fn direct_responses(&self) -> impl Iterator<Item = &BusinessDirectResponseV2> {
         self.direct_responses
             .iter()
@@ -274,14 +276,63 @@ impl BusinessProjectionBatchV2 {
     }
 }
 
+pub type BusinessProjectionBatchV2 = BusinessProjectionBatch<TradeLifecycleFeedbackV2>;
+pub type BusinessProjectionBatchV3 = BusinessProjectionBatch<contracts::TradeLifecycleFeedbackV3>;
+#[derive(Clone)]
+pub enum BusinessProjectionBatchPayloadV1 {
+    V2(Arc<BusinessProjectionBatchV2>),
+    V3(Arc<BusinessProjectionBatchV3>),
+}
+impl BusinessProjectionBatchPayloadV1 {
+    fn sequence(&self) -> u64 {
+        match self {
+            Self::V2(b) => b.projection_batch_sequence,
+            Self::V3(b) => b.projection_batch_sequence,
+        }
+    }
+}
+impl BusinessProjectionBatchV3 {
+    fn into_payload(
+        self,
+        version: crate::runtime_v2::BusinessProjectionVersionV1,
+    ) -> BusinessProjectionBatchPayloadV1 {
+        match version {
+            crate::runtime_v2::BusinessProjectionVersionV1::V3 => {
+                BusinessProjectionBatchPayloadV1::V3(Arc::new(self))
+            }
+            crate::runtime_v2::BusinessProjectionVersionV1::V2 => {
+                BusinessProjectionBatchPayloadV1::V2(Arc::new(BusinessProjectionBatchV2 {
+                    run_id: self.run_id,
+                    projection_batch_sequence: self.projection_batch_sequence,
+                    account_opening: self.account_opening,
+                    market_enrollment: self.market_enrollment,
+                    direct_responses: self.direct_responses,
+                    order_lifecycle: self.order_lifecycle,
+                    trade_lifecycle: self
+                        .trade_lifecycle
+                        .into_iter()
+                        .map(contracts::TradeLifecycleFeedbackV3::into_v2)
+                        .collect(),
+                    settlement_lifecycle: self.settlement_lifecycle,
+                }))
+            }
+        }
+    }
+}
 pub trait BusinessProjectionPortV2 {
     fn try_accept(&mut self, batch: Arc<BusinessProjectionBatchV2>) -> bool;
 
+    fn try_accept_payload(&mut self, batch: Arc<BusinessProjectionBatchPayloadV1>) -> bool {
+        match batch.as_ref() {
+            BusinessProjectionBatchPayloadV1::V2(batch) => self.try_accept(Arc::clone(batch)),
+            BusinessProjectionBatchPayloadV1::V3(_) => false,
+        }
+    }
     fn durable_through(&self, run_id: &str) -> u64;
 }
 
 struct PendingProjectionBatchV2 {
-    batch: Arc<BusinessProjectionBatchV2>,
+    batch: Arc<BusinessProjectionBatchPayloadV1>,
     resources: ResourceQuantityV1,
     accepted: bool,
 }
@@ -930,22 +981,26 @@ fn finalize_lifecycle_feedback_v2(
             })
         }
         LifecycleFeedbackEffectV2::Trade(effect) => {
-            FinalizedLifecycleFeedbackV2::Trade(TradeLifecycleFeedbackV2 {
-                metadata,
-                trade_id: effect.trade_id,
-                platform_order_id: effect.platform_order_id,
-                condition_id: effect.condition_id,
-                token_id: effect.token_id,
-                status: effect.status,
-                economic_disposition: effect.economic_disposition,
-                liquidity_role: effect.liquidity_role,
-                source_price_pusd_per_share: effect.source_price_pusd_per_share,
-                base_quantity_shares: effect.base_quantity_shares,
-                quote_amount_pusd: effect.quote_amount_pusd,
-                immediate_taker_fee_pusd: effect.immediate_taker_fee_pusd,
-                economic_application_account_transition_seq: effect
-                    .economic_application_account_transition_seq,
-                account_delta: effect.account_delta,
+            FinalizedLifecycleFeedbackV2::Trade(contracts::TradeLifecycleFeedbackV3 {
+                fill_sequence: effect.fill_sequence,
+                matched_at_utc_ms: effect.matched_at_utc_ms,
+                feedback: TradeLifecycleFeedbackV2 {
+                    metadata,
+                    trade_id: effect.trade_id,
+                    platform_order_id: effect.platform_order_id,
+                    condition_id: effect.condition_id,
+                    token_id: effect.token_id,
+                    status: effect.status,
+                    economic_disposition: effect.economic_disposition,
+                    liquidity_role: effect.liquidity_role,
+                    source_price_pusd_per_share: effect.source_price_pusd_per_share,
+                    base_quantity_shares: effect.base_quantity_shares,
+                    quote_amount_pusd: effect.quote_amount_pusd,
+                    immediate_taker_fee_pusd: effect.immediate_taker_fee_pusd,
+                    economic_application_account_transition_seq: effect
+                        .economic_application_account_transition_seq,
+                    account_delta: effect.account_delta,
+                },
             })
         }
         LifecycleFeedbackEffectV2::Settlement(effect) => {
@@ -959,7 +1014,7 @@ fn finalize_lifecycle_feedback_v2(
 
 enum FinalizedLifecycleFeedbackV2 {
     Order(OrderLifecycleFeedbackV2),
-    Trade(TradeLifecycleFeedbackV2),
+    Trade(contracts::TradeLifecycleFeedbackV3),
     Settlement(SettlementLifecycleFeedbackV2),
 }
 
@@ -985,7 +1040,7 @@ fn finalize_projection_batch_v2(
     (
         BusinessReducerStateV2,
         CommittedBusinessOutputV2,
-        Option<BusinessProjectionBatchV2>,
+        Option<BusinessProjectionBatchV3>,
     ),
     SimRunActorErrorV2,
 > {
@@ -1107,7 +1162,7 @@ fn finalize_projection_batch_v2(
     Ok((
         state,
         committed,
-        Some(BusinessProjectionBatchV2 {
+        Some(BusinessProjectionBatchV3 {
             run_id: run_id.to_owned(),
             projection_batch_sequence,
             account_opening,
@@ -1209,7 +1264,22 @@ fn reduce_actor_input_v2(
     }
 }
 
-fn projection_resource_quantity_v2(batch: &BusinessProjectionBatchV2) -> ResourceQuantityV1 {
+fn projection_resource_quantity_v2(batch: &BusinessProjectionBatchPayloadV1) -> ResourceQuantityV1 {
+    match batch {
+        BusinessProjectionBatchPayloadV1::V2(batch) => {
+            projection_resource_quantity(batch, trade_lifecycle_owned_bytes_v2)
+        }
+        BusinessProjectionBatchPayloadV1::V3(batch) => {
+            projection_resource_quantity(batch, |trade| {
+                trade_lifecycle_owned_bytes_v2(&trade.feedback) + 16
+            })
+        }
+    }
+}
+fn projection_resource_quantity<T>(
+    batch: &BusinessProjectionBatch<T>,
+    trade_bytes: impl Fn(&T) -> u64,
+) -> ResourceQuantityV1 {
     let records = 1_u64
         + u64::from(batch.account_opening.is_some())
         + u64::from(batch.market_enrollment.is_some())
@@ -1243,11 +1313,7 @@ fn projection_resource_quantity_v2(batch: &BusinessProjectionBatchV2) -> Resourc
             .iter()
             .map(order_lifecycle_owned_bytes_v2)
             .sum::<u64>()
-        + batch
-            .trade_lifecycle
-            .iter()
-            .map(trade_lifecycle_owned_bytes_v2)
-            .sum::<u64>()
+        + batch.trade_lifecycle.iter().map(trade_bytes).sum::<u64>()
         + batch
             .settlement_lifecycle
             .iter()
@@ -2004,6 +2070,7 @@ where
                 && durable_through
                     .is_some_and(|watermark| projection.projection_batch_sequence > watermark)
             {
+                let projection = projection.into_payload(opened.projection_version);
                 let resources = projection_resource_quantity_v2(&projection);
                 pending_projection_resources =
                     add_resource_quantity_v2(pending_projection_resources, resources);
@@ -2826,6 +2893,7 @@ impl SimRunActorV2 {
         #[cfg(feature = "measurement")]
         let had_projections = !projections.is_empty();
         for projection in projections {
+            let projection = projection.into_payload(self.opened.projection_version);
             let resources = projection_resource_quantity_v2(&projection);
             self.pending_projection_resources =
                 add_resource_quantity_v2(self.pending_projection_resources, resources);
@@ -2855,9 +2923,11 @@ impl SimRunActorV2 {
 
     fn deliver_pending_projections(&mut self) {
         let durable_through = self.projection_port.durable_through(&self.opened.run_id);
-        while self.pending_projections.front().is_some_and(|pending| {
-            pending.accepted && pending.batch.projection_batch_sequence <= durable_through
-        }) {
+        while self
+            .pending_projections
+            .front()
+            .is_some_and(|pending| pending.accepted && pending.batch.sequence() <= durable_through)
+        {
             let pending = self
                 .pending_projections
                 .pop_front()
@@ -2869,15 +2939,20 @@ impl SimRunActorV2 {
             if pending.accepted {
                 continue;
             }
-            if !self.projection_port.try_accept(Arc::clone(&pending.batch)) {
+            if !self
+                .projection_port
+                .try_accept_payload(Arc::clone(&pending.batch))
+            {
                 break;
             }
             pending.accepted = true;
         }
         let durable_through = self.projection_port.durable_through(&self.opened.run_id);
-        while self.pending_projections.front().is_some_and(|pending| {
-            pending.accepted && pending.batch.projection_batch_sequence <= durable_through
-        }) {
+        while self
+            .pending_projections
+            .front()
+            .is_some_and(|pending| pending.accepted && pending.batch.sequence() <= durable_through)
+        {
             let pending = self
                 .pending_projections
                 .pop_front()
@@ -6106,6 +6181,7 @@ mod tests {
         latency_profile: &EmpiricalDelayProfile,
     ) -> RunOpenedV2 {
         RunOpenedV2 {
+            projection_version: Default::default(),
             run_id: run_id.to_owned(),
             durability_role: RunDurabilityRoleV2::CleanRun,
             platform_rule_snapshot_file_sha256: rule_snapshot.file_sha256().clone(),
@@ -8390,6 +8466,11 @@ mod tests {
         else {
             panic!("MNB FOK 必须形成接受和成交首态效果")
         };
+        assert_eq!(initial_trade.fill_sequence, 1);
+        assert_eq!(
+            initial_trade.matched_at_utc_ms,
+            initial_trade.platform_event_at_utc_ms
+        );
         assert_eq!(
             initial_trade.status.known,
             Some(contracts::SimulatedTradeKnownStatusV2::MatchedNotBroadcasted)
@@ -13102,6 +13183,8 @@ mod tests {
             panic!("首次正对价 maker 穿越只能形成一个成交首态效果")
         };
         assert_eq!(maker_trade.trade_id, "sim-2");
+        assert_eq!(maker_trade.fill_sequence, 2);
+        assert_eq!(maker_trade.matched_at_utc_ms, 1_300);
         assert_eq!(
             maker_trade.liquidity_role,
             contracts::TradeLiquidityRoleV2::MakerInferred
@@ -17315,5 +17398,435 @@ mod tests {
             coverage.book_resync_count[0],
             coverage.resync_boundary_count[0],
         );
+    }
+    struct TradeFactsCapturePort {
+        inner: Box<dyn BusinessProjectionPortV2>,
+        accepted: Rc<RefCell<Vec<Arc<BusinessProjectionBatchPayloadV1>>>>,
+        reject_once: bool,
+    }
+    impl BusinessProjectionPortV2 for TradeFactsCapturePort {
+        fn try_accept(&mut self, _: Arc<BusinessProjectionBatchV2>) -> bool {
+            panic!("实际待交付路径必须调用版本载荷入口")
+        }
+        fn try_accept_payload(&mut self, payload: Arc<BusinessProjectionBatchPayloadV1>) -> bool {
+            if self.reject_once {
+                self.reject_once = false;
+                return false;
+            }
+            if !self.inner.try_accept_payload(Arc::clone(&payload)) {
+                return false;
+            }
+            self.accepted.borrow_mut().push(payload);
+            true
+        }
+        fn durable_through(&self, run_id: &str) -> u64 {
+            self.inner.durable_through(run_id)
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn trade_facts_v3_public_delivery_durable_rebuild_and_legacy_equivalence() {
+        use crate::runtime_v2::BusinessProjectionVersionV1;
+        use contracts::execution_normalization::{
+            DurableSourceReferenceV1, ImmutableSourceReferenceV1,
+        };
+        use execution_normalization::{NormalizationRecordV2, SourceNeutralEvidenceKindV2};
+        let mut legacy_feedback = Vec::new();
+        let mut legacy_identities = Vec::new();
+        let mut legacy_economics = Vec::new();
+        for version in [
+            BusinessProjectionVersionV1::V2,
+            BusinessProjectionVersionV1::V3,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
+            let root = directory.path().join("noe");
+            let rules = successful_snapshot_v3_for_sim_tests().await;
+            let session_spec = {
+                let mut value = spec("trade-facts", "create-trade-facts");
+                value.caller_role = SimCallerRoleV1::Paper;
+                value
+            };
+            let account_key = contracts::AccountInstanceKeyV1 {
+                run_id: session_spec.run_id.clone(),
+                caller_role: session_spec.caller_role,
+                caller_instance_id: session_spec.caller_instance_id.clone(),
+                account_id: session_spec.account_id.clone(),
+                platform_source: contracts::PlatformSourceV1::Simulated,
+            };
+            let policy_bytes = serde_json::to_vec(&serde_json::json!({
+                "schema_version": "trade_finality_policy_v2",
+                "normal_path": {"steps": [
+                    {"state":"MATCHED_NOT_BROADCASTED","offset_ms":0},
+                    {"state":"MATCHED","offset_ms":10},
+                    {"state":"MINED","offset_ms":20},
+                    {"state":"CONFIRMED","offset_ms":30}], "economic_application_ordinal":2},
+                "failure_overrides":[{"selector":{"selector_domain":"FILL","account_instance_key":account_key,"fill_sequence":2},
+                    "path":{"steps":[{"state":"MATCHED_NOT_BROADCASTED","offset_ms":0},{"state":"MATCHED","offset_ms":10},{"state":"FAILED","offset_ms":20}],"economic_application_ordinal":null}}]
+            })).unwrap();
+            let policy = Arc::new(TradeFinalityPolicyV2::decode_and_seal(&policy_bytes).unwrap());
+            let market = market_with_window('1', "123", "1", "2", 1_000, 100_000);
+            let scenario = sealed_scenario_for_markets(vec![market.clone()]);
+            let latency = load_embedded_proxy_latency_profile().unwrap();
+            let mut run_opened = opened("trade-facts", &rules, &policy, &scenario, &latency);
+            run_opened.durability_role = RunDurabilityRoleV2::RecoverablePaper;
+            run_opened.projection_version = version;
+            let evidence = DurableSourceReferenceV1 {
+                source: ImmutableSourceReferenceV1::Location(path.to_string_lossy().into_owned()),
+            };
+            let (inner, observation): (Box<dyn BusinessProjectionPortV2>, _) = match version {
+                BusinessProjectionVersionV1::V2 => {
+                    let port = SimV2NoeProjectionPortV1::new(
+                        &root,
+                        run_opened.clone(),
+                        evidence.clone(),
+                        evidence.clone(),
+                        "opening".into(),
+                        "trade-facts-test".into(),
+                    );
+                    let observation = port.observation();
+                    (Box::new(port), observation)
+                }
+                BusinessProjectionVersionV1::V3 => {
+                    let port = SimV2NoeProjectionPortV2::new(
+                        &root,
+                        run_opened.clone(),
+                        evidence.clone(),
+                        evidence.clone(),
+                        "opening".into(),
+                        "trade-facts-test".into(),
+                    );
+                    let observation = port.observation();
+                    (Box::new(port), observation)
+                }
+            };
+            let accepted = Rc::new(RefCell::new(Vec::new()));
+            let mut execution = SimExecution::create_new(
+                &path,
+                run_opened.clone(),
+                Arc::clone(&rules),
+                Arc::clone(&policy),
+                Arc::clone(&scenario),
+                Arc::clone(&latency),
+                Box::new(TradeFactsCapturePort {
+                    inner,
+                    accepted: Rc::clone(&accepted),
+                    reject_once: true,
+                }),
+                MAX_GROUP_BYTES,
+            )
+            .unwrap();
+            execution.create_session(session_spec).unwrap();
+            assert!(
+                !execution.actor.pending_projections.is_empty(),
+                "端口拒收必须保留原待交付批次"
+            );
+            execution.activate_session("activate".into()).unwrap();
+            let mut events =
+                decoded_initial_events_for_market_with_quantity(&market, 1_100, 1_110, 1, "5");
+            if let ExecutionMarketEventPayloadV3::InitialL2Snapshot(snapshot) =
+                &mut events[0].payload
+            {
+                snapshot.asks[0].price_pusd_per_share = ExactDecimal("0.5".into());
+                let mut second = snapshot.asks[0].clone();
+                second.price_pusd_per_share = ExactDecimal("0.6".into());
+                snapshot.asks.push(second);
+            } else {
+                panic!("真实初始盘口");
+            }
+            events[0].event_id =
+                data_pipeline_core::derive_execution_market_event_v3_id(&events[0]).unwrap();
+            let events: Arc<[ExecutionMarketEventV3]> = Arc::from(
+                events
+                    .into_iter()
+                    .map(|event| {
+                        data_pipeline_core::decode_execution_market_event_v3(
+                            &data_pipeline_core::encode_execution_market_event_v3(&event).unwrap(),
+                        )
+                        .unwrap()
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            let reference = DurableMarketBucketReferenceV2 {
+                path: MarketEventPathV1::PublicVisibility,
+                bucket_at_utc_ms: 1_100,
+                start_index_position: 0,
+                next_index_position: 2,
+                closure: MillisecondBucketClosureV1::NextEventAt(200_000),
+            };
+            execution
+                .drive_closed_market_bucket(AcceptedClosedMarketBucketV2 {
+                    reference: reference.clone(),
+                    events: Arc::clone(&events),
+                })
+                .unwrap();
+            execution
+                .post_order(
+                    request_cutoff(10_000),
+                    PostOrderRequestV2 {
+                        context: RequestContextV2 {
+                            global_request_id: "two-fills".into(),
+                            caller_correlation_id: None,
+                        },
+                        item: post_item(
+                            "two-fills-item",
+                            &market.market().condition_id,
+                            &TokenId("1".into()),
+                            SimBuyOrderKindV1::GtcLimit {
+                                limit_price_pusd_per_share: "0.6".parse().unwrap(),
+                                size_shares: "10".parse().unwrap(),
+                                post_only: false,
+                            },
+                        ),
+                    },
+                )
+                .unwrap();
+            for _ in 0..32 {
+                let Some(required) = execution.next_required_logical_drive() else {
+                    break;
+                };
+                if required.required_at_utc_ms > 20_000 {
+                    break;
+                }
+                execution
+                    .drive_platform_prefix(PlatformPrefixAdvanceV2 {
+                        path: required.path,
+                        closed_through_utc_ms: required.required_at_utc_ms,
+                        next_index_position: 2,
+                    })
+                    .unwrap();
+            }
+            assert!(execution.actor.pending_projections.is_empty());
+            assert_eq!(
+                execution.actor.pending_projection_resources,
+                ResourceQuantityV1::default()
+            );
+            let mut feedback = Vec::new();
+            let mut new_feedback = Vec::new();
+            for (index, payload) in accepted.borrow().iter().enumerate() {
+                assert_eq!(payload.sequence(), index as u64 + 1);
+                match payload.as_ref() {
+                    BusinessProjectionBatchPayloadV1::V2(batch) => {
+                        feedback.extend(batch.trade_lifecycle.clone())
+                    }
+                    BusinessProjectionBatchPayloadV1::V3(batch) => {
+                        new_feedback.extend(batch.trade_lifecycle.clone());
+                        feedback.extend(
+                            batch
+                                .trade_lifecycle
+                                .iter()
+                                .cloned()
+                                .map(contracts::TradeLifecycleFeedbackV3::into_v2),
+                        );
+                    }
+                }
+            }
+            assert_eq!(
+                feedback.len(),
+                7,
+                "两笔同刻成交分别成功／失败的全部生命周期"
+            );
+            if version == BusinessProjectionVersionV1::V2 {
+                legacy_feedback = feedback;
+                for reference in observation.result_references() {
+                    let record = execution_normalization::read_noe_result_v1(&reference)
+                        .unwrap()
+                        .record;
+                    legacy_identities.push((
+                        record.logical_identity().clone(),
+                        record.source_order().clone(),
+                    ));
+                    if let Some(fact) = record.economic_fact() {
+                        legacy_economics.push((
+                            fact.fact_reference.clone(),
+                            fact.logical_identity.clone(),
+                            fact.economic_identity.clone(),
+                            fact.disposition.clone(),
+                            fact.source_reference.watermark.clone(),
+                            fact.source_reference.record.clone(),
+                        ));
+                    }
+                }
+                continue;
+            }
+            assert_eq!(
+                feedback, legacy_feedback,
+                "新载荷不能改变旧字段、序号、时间或经济事实"
+            );
+            let first: Vec<_> = new_feedback
+                .iter()
+                .filter(|f| {
+                    f.status.known
+                        == Some(contracts::SimulatedTradeKnownStatusV2::MatchedNotBroadcasted)
+                })
+                .collect();
+            assert_eq!(first.len(), 2);
+            assert_eq!(first[0].matched_at_utc_ms, first[1].matched_at_utc_ms);
+            assert_eq!((first[0].fill_sequence, first[1].fill_sequence), (1, 2));
+            assert!(
+                new_feedback
+                    .iter()
+                    .any(|f| f.economic_application_account_transition_seq.is_some())
+            );
+            assert!(
+                new_feedback
+                    .iter()
+                    .any(|f| f.economic_application_account_transition_seq.is_none())
+            );
+            for current in &new_feedback {
+                let initial = first
+                    .iter()
+                    .find(|f| f.trade_id == current.trade_id)
+                    .unwrap();
+                assert_eq!(current.fill_sequence, initial.fill_sequence);
+                assert_eq!(current.matched_at_utc_ms, initial.matched_at_utc_ms);
+            }
+            let mut identities = Vec::new();
+            let mut economics = Vec::new();
+            let mut matched_records = 0;
+            let mut first_resolved = None;
+            for result_ref in observation.result_references() {
+                let result = execution_normalization::read_noe_result_v2(&result_ref).unwrap();
+                first_resolved.get_or_insert_with(|| result.clone());
+                identities.push((
+                    result.record.logical_identity().clone(),
+                    result.record.source_order().clone(),
+                ));
+                if let Some(fact) = result.record.economic_fact() {
+                    economics.push((
+                        fact.fact_reference.clone(),
+                        fact.logical_identity.clone(),
+                        fact.economic_identity.clone(),
+                        fact.disposition.clone(),
+                        fact.source_reference.watermark.clone(),
+                        fact.source_reference.record.clone(),
+                    ));
+                }
+                if let NormalizationRecordV2::Evidence {
+                    source_reference,
+                    evidence: SourceNeutralEvidenceKindV2::TradeLifecycle { result },
+                    ..
+                } = result.record
+                {
+                    let contracts::execution_normalization::SimV2SourceRecordReferenceV1::TradeLifecycle { private_feedback_sequence, platform_event_at_utc_ms, feedback_received_at_utc_ms } = source_reference.record else { panic!("成交直接来源"); };
+                    let original = new_feedback
+                        .iter()
+                        .find(|f| f.metadata.private_feedback_sequence == private_feedback_sequence)
+                        .unwrap();
+                    assert_eq!(result.fill_sequence, original.fill_sequence);
+                    assert_eq!(result.matched_at_utc_ms, original.matched_at_utc_ms);
+                    assert_eq!(
+                        result.source_price_pusd_per_share,
+                        original.source_price_pusd_per_share
+                    );
+                    assert_eq!(result.base_quantity_shares, original.base_quantity_shares);
+                    assert_eq!(result.quote_amount_pusd, original.quote_amount_pusd);
+                    assert_eq!(
+                        result.immediate_taker_fee_pusd,
+                        original.immediate_taker_fee_pusd
+                    );
+                    assert_eq!(result.liquidity_role, original.liquidity_role);
+                    assert_eq!(
+                        result.economic_application_account_transition_seq,
+                        original.economic_application_account_transition_seq
+                    );
+                    assert_eq!(
+                        platform_event_at_utc_ms,
+                        original.metadata.platform_event_at_utc_ms
+                    );
+                    assert_eq!(
+                        feedback_received_at_utc_ms,
+                        original.metadata.feedback_received_at_utc_ms
+                    );
+                    matched_records += 1;
+                }
+            }
+            assert_eq!(matched_records, 7);
+            assert_eq!(identities, legacy_identities);
+            assert_eq!(economics, legacy_economics);
+            let resolved = first_resolved.unwrap();
+            let restored = execution_normalization::DurableContextStoreV2::open(
+                &root,
+                &resolved.context.context_reference,
+            )
+            .unwrap();
+            assert_eq!(
+                restored
+                    .commits()
+                    .iter()
+                    .map(|c| c.records.len())
+                    .sum::<usize>(),
+                observation.result_references().len()
+            );
+            // 从同一事件日志重建到一个空的正常NOE根，验证保存的运行版本和完整新字段。
+            drop(execution);
+            let rebuilt_root = directory.path().join("rebuilt-noe");
+            let port = SimV2NoeProjectionPortV2::new(
+                &rebuilt_root,
+                run_opened,
+                evidence.clone(),
+                evidence,
+                "opening".into(),
+                "trade-facts-test".into(),
+            );
+            let rebuilt_observation = port.observation();
+            let recovered = SimExecution::recover_paper(
+                &path,
+                rules,
+                policy,
+                scenario,
+                latency,
+                Box::new(port),
+                MAX_GROUP_BYTES,
+                |r| {
+                    assert_eq!(r, &reference);
+                    Ok(Arc::clone(&events))
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                recovered.actor.opened.projection_version,
+                BusinessProjectionVersionV1::V3
+            );
+            let rebuilt: Vec<_> = rebuilt_observation
+                .result_references()
+                .iter()
+                .map(|r| {
+                    execution_normalization::read_noe_result_v2(r)
+                        .unwrap()
+                        .record
+                })
+                .collect();
+            let original: Vec<_> = observation
+                .result_references()
+                .iter()
+                .map(|r| {
+                    execution_normalization::read_noe_result_v2(r)
+                        .unwrap()
+                        .record
+                })
+                .collect();
+            assert_eq!(rebuilt, original);
+            let batch = accepted
+                .borrow()
+                .iter()
+                .find_map(|payload| match payload.as_ref() {
+                    BusinessProjectionBatchPayloadV1::V3(batch)
+                        if batch
+                            .trade_lifecycle
+                            .iter()
+                            .any(|f| f.account_delta.is_some()) =>
+                    {
+                        Some(Arc::clone(batch))
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            noe_projection::assert_v3_rebuilt_evidence_semantics(
+                &rebuilt_root,
+                &resolved.context.context_reference,
+                &batch,
+            );
+        }
     }
 }

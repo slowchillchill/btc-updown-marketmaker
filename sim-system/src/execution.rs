@@ -14,19 +14,19 @@ pub use crate::measurement_probe::{
     MeasurementContext, MeasurementObservation, MeasurementPhase, MeasurementResourceSnapshot,
 };
 pub use crate::run_v2::{
-    BusinessDirectResponseV2, BusinessProjectionBatchV2, BusinessProjectionPortV2,
-    CreateSessionControlResultV2, CreateSessionDispositionV2, MutationRequestReceiptV2,
-    NextRequiredLogicalDriveV2, SessionInitializationControlResultV2, SimExecution,
-    SimRunActorErrorV2, SimV2NoeObservationV1, SimV2NoeProjectionPortV1,
-    UnpublishedRunArtifactCandidateV2,
+    BusinessDirectResponseV2, BusinessProjectionBatchPayloadV1, BusinessProjectionBatchV2,
+    BusinessProjectionBatchV3, BusinessProjectionPortV2, CreateSessionControlResultV2,
+    CreateSessionDispositionV2, MutationRequestReceiptV2, NextRequiredLogicalDriveV2,
+    SessionInitializationControlResultV2, SimExecution, SimRunActorErrorV2, SimV2NoeObservationV1,
+    SimV2NoeProjectionPortV1, SimV2NoeProjectionPortV2, UnpublishedRunArtifactCandidateV2,
 };
 pub use crate::runtime_v2::{
-    AcceptedClosedMarketBucketV2, BusinessRequestV2, CancelAllOrdersRequestV2,
-    CancelMarketOrdersRequestV2, CancelOrderBatchItemV2, CancelOrderRequestV2,
-    CancelOrdersRequestV2, DurableMarketBucketReferenceV2, OrderRequestV2, OrdersRequestV2,
-    PlatformPrefixAdvanceV2, PostOrderBatchItemV2, PostOrderRequestV2, PostOrdersRequestV2,
-    RequestContextV2, RetentionAdvanceV2, RunDurabilityRoleV2, RunOpenedV2, SessionSpecV3,
-    TradesRequestV2, TrustedDecisionCutoffV2,
+    AcceptedClosedMarketBucketV2, BusinessProjectionVersionV1, BusinessRequestV2,
+    CancelAllOrdersRequestV2, CancelMarketOrdersRequestV2, CancelOrderBatchItemV2,
+    CancelOrderRequestV2, CancelOrdersRequestV2, DurableMarketBucketReferenceV2, OrderRequestV2,
+    OrdersRequestV2, PlatformPrefixAdvanceV2, PostOrderBatchItemV2, PostOrderRequestV2,
+    PostOrdersRequestV2, RequestContextV2, RetentionAdvanceV2, RunDurabilityRoleV2, RunOpenedV2,
+    SessionSpecV3, TradesRequestV2, TrustedDecisionCutoffV2,
 };
 pub use crate::session::{MarketEnrollmentRequestV1, PublicVisibilityCursorV1};
 pub use contracts::{ConditionId, TokenId};

@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::core::{
-    CoreErrorV1, NormalizationBatchInputV1, NormalizationCoreV1, NormalizationRecordV1,
+    CoreErrorV1, NormalizationBatchInput, NormalizationCore, NormalizationRecord,
     SourceNeutralEntityKeyV1,
 };
 
@@ -42,29 +42,29 @@ struct ContextContainerV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct CommitPayloadV1 {
+struct CommitPayload<T> {
     container_version: String,
     encoding: String,
     commit_sequence: u64,
     boundary: NoeSourceCommitBoundaryV1,
-    records: Vec<NormalizationRecordV1>,
+    records: Vec<NormalizationRecord<T>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct CommitContainerV1 {
-    payload: CommitPayloadV1,
+struct CommitContainer<T> {
+    payload: CommitPayload<T>,
     boundary_sha256: Sha256Hex,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DurableCommitV1 {
+pub struct DurableCommit<T> {
     pub commit_sequence: u64,
     pub boundary: NoeSourceCommitBoundaryV1,
-    pub records: Vec<NormalizationRecordV1>,
+    pub records: Vec<NormalizationRecord<T>>,
     pub container_reference: NoePublishedContainerReferenceV1,
 }
 
-impl DurableCommitV1 {
+impl<T: NoeTradePayload> DurableCommit<T> {
     pub fn result_reference(&self, record_ordinal: u64) -> Option<NoeResultReferenceV1> {
         (record_ordinal < self.records.len() as u64).then(|| NoeResultReferenceV1 {
             commit_container: self.container_reference.clone(),
@@ -239,12 +239,12 @@ impl From<CoreErrorV1> for DurableErrorV1 {
 }
 
 #[derive(Debug)]
-pub struct DurableContextStoreV1 {
+pub struct DurableContextStore<T> {
     context_directory: PathBuf,
     context: ExecutionNormalizationContextV1,
     context_container_reference: NoePublishedContainerReferenceV1,
-    commits: Vec<DurableCommitV1>,
-    core: NormalizationCoreV1,
+    commits: Vec<DurableCommit<T>>,
+    core: NormalizationCore<T>,
     poison: Option<PoisonedStoreV1>,
     #[cfg(test)]
     publish_fault: PublishFaultV1,
@@ -261,10 +261,10 @@ pub struct SimV2ContextSeedV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ResolvedNoeResultV1 {
+pub struct ResolvedNoeResult<T> {
     pub context: ExecutionNormalizationContextV1,
     pub boundary: NoeSourceCommitBoundaryV1,
-    pub record: NormalizationRecordV1,
+    pub record: NormalizationRecord<T>,
 }
 
 #[derive(Clone, Debug)]
@@ -280,7 +280,7 @@ struct PublishFaultV1 {
     fail_rollback_directory_sync: bool,
 }
 
-impl DurableContextStoreV1 {
+impl<T: NoeTradePayload> DurableContextStore<T> {
     pub fn open_or_create_sim_v2(
         root: impl AsRef<Path>,
         seed: SimV2ContextSeedV1,
@@ -304,7 +304,7 @@ impl DurableContextStoreV1 {
             account_opening: seed.account_opening,
         };
         let context_reference = derive_sim_v2_context_reference(
-            EXECUTION_NORMALIZATION_CONTRACT_V1,
+            T::CONTRACT_VERSION,
             &account_identity,
             &source,
             &seed.implementation_identity,
@@ -313,7 +313,7 @@ impl DurableContextStoreV1 {
             context_reference: context_reference.clone(),
             account_identity,
             source,
-            contract_version: EXECUTION_NORMALIZATION_CONTRACT_V1.to_owned(),
+            contract_version: T::CONTRACT_VERSION.to_owned(),
             implementation_identity: seed.implementation_identity,
         };
 
@@ -348,7 +348,7 @@ impl DurableContextStoreV1 {
 
         let context_path = context_directory.join(CONTEXT_FILE_NAME);
         let payload = ContextPayloadV1 {
-            container_version: NOE_CONTEXT_CONTAINER_V1.to_owned(),
+            container_version: T::CONTEXT_VERSION.to_owned(),
             encoding: NOE_CONTAINER_ENCODING_V1.to_owned(),
             context: context.clone(),
         };
@@ -371,7 +371,7 @@ impl DurableContextStoreV1 {
         )?;
         sync_directory(root, "同步耐久根")?;
 
-        let core = NormalizationCoreV1::new(context.clone());
+        let core = NormalizationCore::new(context.clone());
         Ok(Self {
             context_directory,
             context,
@@ -397,7 +397,7 @@ impl DurableContextStoreV1 {
         check_container_header(
             &context_path,
             &context_container.payload.container_version,
-            NOE_CONTEXT_CONTAINER_V1,
+            T::CONTEXT_VERSION,
             &context_container.payload.encoding,
         )?;
         check_digest(
@@ -427,11 +427,11 @@ impl DurableContextStoreV1 {
                     found: file_sequence,
                 });
             }
-            let container: CommitContainerV1 = decode_container(&path)?;
+            let container: CommitContainer<T> = decode_container(&path)?;
             check_container_header(
                 &path,
                 &container.payload.container_version,
-                NOE_COMMIT_CONTAINER_V1,
+                T::COMMIT_VERSION,
                 &container.payload.encoding,
             )?;
             check_digest(&path, &container.payload, &container.boundary_sha256)?;
@@ -461,7 +461,7 @@ impl DurableContextStoreV1 {
                 });
             }
             expected_run_id.get_or_insert_with(|| watermark.run_id.clone());
-            commits.push(DurableCommitV1 {
+            commits.push(DurableCommit {
                 commit_sequence: container.payload.commit_sequence,
                 boundary: container.payload.boundary,
                 records: container.payload.records,
@@ -477,7 +477,7 @@ impl DurableContextStoreV1 {
             boundary_sha256: context_container.boundary_sha256,
         };
         let context = context_container.payload.context;
-        let core = NormalizationCoreV1::restore(
+        let core = NormalizationCore::restore(
             context.clone(),
             commits.iter().flat_map(|commit| commit.records.iter()),
         );
@@ -501,7 +501,7 @@ impl DurableContextStoreV1 {
         &self.context_container_reference
     }
 
-    pub fn commits(&self) -> &[DurableCommitV1] {
+    pub fn commits(&self) -> &[DurableCommit<T>] {
         &self.commits
     }
 
@@ -520,7 +520,7 @@ impl DurableContextStoreV1 {
 
     pub fn commit_batch(
         &mut self,
-        input: NormalizationBatchInputV1,
+        input: NormalizationBatchInput<T>,
         durable_available_at_utc_ms: i64,
     ) -> Result<DurableCommitOutcomeV1, DurableErrorV1> {
         if let Some(poison) = &self.poison {
@@ -563,8 +563,8 @@ impl DurableContextStoreV1 {
         let prepared = self.core.prepare_batch(input)?;
         let (batch, state_delta) = prepared.into_parts();
         let commit_sequence = self.commits.len() as u64;
-        let payload = CommitPayloadV1 {
-            container_version: NOE_COMMIT_CONTAINER_V1.to_owned(),
+        let payload = CommitPayload {
+            container_version: T::COMMIT_VERSION.to_owned(),
             encoding: NOE_CONTAINER_ENCODING_V1.to_owned(),
             commit_sequence,
             boundary: NoeSourceCommitBoundaryV1 {
@@ -580,7 +580,7 @@ impl DurableContextStoreV1 {
             .join(COMMITS_DIRECTORY_NAME)
             .join(&target_name);
         let boundary_sha256 = payload_digest(&payload, &target_path)?;
-        let container = CommitContainerV1 {
+        let container = CommitContainer {
             payload,
             boundary_sha256: boundary_sha256.clone(),
         };
@@ -611,7 +611,7 @@ impl DurableContextStoreV1 {
             location: target_path.to_string_lossy().into_owned(),
             boundary_sha256,
         };
-        let commit = DurableCommitV1 {
+        let commit = DurableCommit {
             commit_sequence,
             boundary: container.payload.boundary,
             records: container.payload.records,
@@ -626,9 +626,9 @@ impl DurableContextStoreV1 {
     }
 }
 
-pub fn read_noe_result_v1(
+fn read_noe_result<T: NoeTradePayload>(
     reference: &NoeResultReferenceV1,
-) -> Result<ResolvedNoeResultV1, DurableErrorV1> {
+) -> Result<ResolvedNoeResult<T>, DurableErrorV1> {
     let commit_path = PathBuf::from(&reference.commit_container.location);
     let commits_directory = commit_path.parent().filter(|path| {
         path.file_name()
@@ -644,11 +644,11 @@ pub fn read_noe_result_v1(
         .parent()
         .expect("固定 commits 目录必有上下文父目录");
     let file_sequence = commit_sequence_from_path(&commit_path)?;
-    let container: CommitContainerV1 = decode_container(&commit_path)?;
+    let container: CommitContainer<T> = decode_container(&commit_path)?;
     check_container_header(
         &commit_path,
         &container.payload.container_version,
-        NOE_COMMIT_CONTAINER_V1,
+        T::COMMIT_VERSION,
         &container.payload.encoding,
     )?;
     check_digest(&commit_path, &container.payload, &container.boundary_sha256)?;
@@ -683,7 +683,7 @@ pub fn read_noe_result_v1(
     check_container_header(
         &context_path,
         &context_container.payload.container_version,
-        NOE_CONTEXT_CONTAINER_V1,
+        T::CONTEXT_VERSION,
         &context_container.payload.encoding,
     )?;
     check_digest(
@@ -712,7 +712,7 @@ pub fn read_noe_result_v1(
         });
     }
 
-    Ok(ResolvedNoeResultV1 {
+    Ok(ResolvedNoeResult {
         context: context_container.payload.context,
         boundary: container.payload.boundary,
         record,
@@ -999,8 +999,60 @@ fn io_error(operation: &'static str, path: &Path, error: std::io::Error) -> Dura
     }
 }
 
+/// 载荷版本只选择正常记录编码；两个版本共用同一核心和耐久算法。
+pub trait NoeTradePayload:
+    Clone + std::fmt::Debug + Eq + Serialize + serde::de::DeserializeOwned
+{
+    const COMMIT_VERSION: &'static str;
+    const CONTEXT_VERSION: &'static str;
+    const CONTRACT_VERSION: &'static str;
+}
+impl NoeTradePayload for contracts::execution_normalization::SourceNeutralTradeLifecycleResultV1 {
+    const COMMIT_VERSION: &'static str = NOE_COMMIT_CONTAINER_V1;
+    const CONTEXT_VERSION: &'static str = NOE_CONTEXT_CONTAINER_V1;
+    const CONTRACT_VERSION: &'static str = EXECUTION_NORMALIZATION_CONTRACT_V1;
+}
+impl NoeTradePayload for contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2 {
+    const COMMIT_VERSION: &'static str = "noe_commit_container_v2";
+    const CONTEXT_VERSION: &'static str = "noe_context_container_v2";
+    const CONTRACT_VERSION: &'static str = "execution_normalization_v2";
+}
+pub type DurableCommitV1 =
+    DurableCommit<contracts::execution_normalization::SourceNeutralTradeLifecycleResultV1>;
+pub type DurableCommitV2 =
+    DurableCommit<contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2>;
+pub type DurableContextStoreV1 =
+    DurableContextStore<contracts::execution_normalization::SourceNeutralTradeLifecycleResultV1>;
+pub type DurableContextStoreV2 =
+    DurableContextStore<contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2>;
+pub type ResolvedNoeResultV1 =
+    ResolvedNoeResult<contracts::execution_normalization::SourceNeutralTradeLifecycleResultV1>;
+pub type ResolvedNoeResultV2 =
+    ResolvedNoeResult<contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2>;
+
+impl DurableContextStoreV2 {
+    pub fn commit_batch_v2(
+        &mut self,
+        input: crate::NormalizationBatchInputV2,
+        durable_available_at_utc_ms: i64,
+    ) -> Result<DurableCommitOutcomeV1, DurableErrorV1> {
+        self.commit_batch(input, durable_available_at_utc_ms)
+    }
+}
+pub fn read_noe_result_v1(
+    reference: &NoeResultReferenceV1,
+) -> Result<ResolvedNoeResultV1, DurableErrorV1> {
+    read_noe_result(reference)
+}
+pub fn read_noe_result_v2(
+    reference: &NoeResultReferenceV1,
+) -> Result<ResolvedNoeResultV2, DurableErrorV1> {
+    read_noe_result(reference)
+}
+
 #[cfg(test)]
 mod tests {
+    use crate::NormalizationBatchInputV1;
     use contracts::execution_normalization::{
         DurableSourceReferenceV1, ImmutableSourceReferenceV1, SimV2ContextSourceV1,
         SimV2DirectResponseAssociationV1, SimV2SourceRecordReferenceV1, SimV2SourceReferenceV1,

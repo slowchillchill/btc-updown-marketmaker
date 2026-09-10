@@ -1346,6 +1346,8 @@ pub(crate) struct OrderLifecycleEffectV2 {
 #[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct TradeLifecycleEffectV2 {
+    pub(crate) fill_sequence: u64,
+    pub(crate) matched_at_utc_ms: i64,
     pub(crate) platform_event_at_utc_ms: i64,
     pub(crate) path_ordinal: u32,
     pub(crate) trade_id: String,
@@ -1496,6 +1498,8 @@ impl TradeFinalityTransitionEffectV2 {
         account_delta: Option<PlatformAccountDeltaV2>,
     ) -> Result<LifecycleFeedbackEffectV2, MatchingStateErrorV1> {
         Ok(LifecycleFeedbackEffectV2::Trade(TradeLifecycleEffectV2 {
+            fill_sequence: self.fill_sequence,
+            matched_at_utc_ms: self.matched_at_utc_ms,
             platform_event_at_utc_ms: self.platform_event_at_utc_ms,
             path_ordinal: self.path_ordinal,
             trade_id: self.trade_id,

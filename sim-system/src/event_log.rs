@@ -619,6 +619,7 @@ mod tests {
 
     fn opened(role: RunDurabilityRoleV2) -> RunOpenedV2 {
         RunOpenedV2 {
+            projection_version: Default::default(),
             run_id: "run-event-log-v2".to_owned(),
             durability_role: role,
             platform_rule_snapshot_file_sha256: sha('1'),

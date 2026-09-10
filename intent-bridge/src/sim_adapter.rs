@@ -402,6 +402,7 @@ mod tests {
                 captured: Rc::clone(&captured),
             });
             let opened = RunOpenedV2 {
+                projection_version: Default::default(),
                 run_id: run_id.to_owned(),
                 durability_role: RunDurabilityRoleV2::CleanRun,
                 platform_rule_snapshot_file_sha256: rule_snapshot.file_sha256().clone(),

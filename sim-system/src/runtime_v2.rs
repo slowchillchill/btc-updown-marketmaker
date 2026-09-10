@@ -18,8 +18,22 @@ pub enum RunDurabilityRoleV2 {
     RecoverablePaper,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BusinessProjectionVersionV1 {
+    #[default]
+    V2,
+    V3,
+}
+impl BusinessProjectionVersionV1 {
+    pub fn is_v2(&self) -> bool {
+        *self == Self::V2
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunOpenedV2 {
+    #[serde(default, skip_serializing_if = "BusinessProjectionVersionV1::is_v2")]
+    pub projection_version: BusinessProjectionVersionV1,
     pub run_id: String,
     pub durability_role: RunDurabilityRoleV2,
     pub platform_rule_snapshot_file_sha256: Sha256Hex,
