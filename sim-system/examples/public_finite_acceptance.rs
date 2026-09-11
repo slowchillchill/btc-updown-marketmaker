@@ -3,6 +3,8 @@
 mod recorded_times;
 #[path = "public_finite_acceptance/simulation.rs"]
 mod simulation;
+#[path = "public_finite_acceptance/terminal_order.rs"]
+mod terminal_order;
 use contracts::*;
 use data_pipeline_core::{
     public_input::*, public_observation_core::*,
@@ -250,10 +252,39 @@ fn measure_pm_boundary(
     }
     Ok(())
 }
+// 快照和紧接快照编号的更新只作有限机制见证，全部输入仍完整归约。
+fn measure_binance_boundary(
+    input: &RecordedIngressV1,
+    result: &PublicAppliedIngressV1<'_>,
+    writer: &mut impl Write,
+) -> RecordingResult<()> {
+    let DptIngressV1::Message {
+        row: TypedRawRowV2::Existing(row),
+        ..
+    } = &input.ingress
+    else {
+        return Ok(());
+    };
+    let boundary = match row {
+        TypedRawRow::BinanceDepthSnapshot(_) => true,
+        TypedRawRow::BinanceDepthUpdate(row) => {
+            row.local_u_before.is_some() && row.local_u_before == row.snapshot_last_update_id
+        }
+        _ => false,
+    };
+    if boundary {
+        let reports: Vec<_> = result.reductions.iter().map(|r| &r.reports).collect();
+        write_line(
+            writer,
+            &serde_json::json!({"input": input, "applied": result.applied, "reports": reports}),
+        )?;
+    }
+    Ok(())
+}
 fn run() -> RecordingResult<()> {
     let args: Vec<_> = std::env::args().collect();
     if args.len() != 5 && !(args.len() == 4 && args[1] == "core") {
-        return Err("用法: public_finite_acceptance <core|record|replay|hidden|hidden-probe|simulate> <config.json> <output> [recording-root]（core无需记录目录）".into());
+        return Err("用法: public_finite_acceptance <core|record|replay|hidden|hidden-probe|simulate|terminal-order> <config.json> <output> [recording-root]（core无需记录目录）".into());
     }
     if args[1] == "simulate" {
         return simulation::run(
@@ -269,8 +300,11 @@ fn run() -> RecordingResult<()> {
     let mut results = BufWriter::new(File::create(out.join("results.jsonl"))?);
     let mut metrics = BufWriter::new(File::create(out.join("checkpoints.jsonl"))?);
     let mut boundary = BufWriter::new(File::create(out.join("pm-boundary.jsonl"))?);
+    let mut binance_boundary = BufWriter::new(File::create(out.join("binance-boundary.jsonl"))?);
     let recording = args.get(4).map(PathBuf::from).unwrap_or_default();
-    if args[1] == "record" || args[1] == "core" {
+    if args[1] == "terminal-order" {
+        terminal_order::run(&config, &out, &recording)?;
+    } else if args[1] == "record" || args[1] == "core" {
         let decode = std::rc::Rc::new(std::cell::RefCell::new(DecodeMetrics::default()));
         let writer = if args[1] == "record" {
             Some(std::cell::RefCell::new(PublicRecordingWriterV1::create(
@@ -312,6 +346,7 @@ fn run() -> RecordingResult<()> {
                 .map_err(|e| format!("input_position={}: {e}", input.input_position))?;
             measure_result(&result, &mut results)?;
             measure_pm_boundary(&input, &result, &mut boundary)?;
+            measure_binance_boundary(&input, &result, &mut binance_boundary)?;
             count += 1;
             observations += result
                 .applied
@@ -358,6 +393,7 @@ fn run() -> RecordingResult<()> {
         while let Some((input, result)) = replay.next_applied()? {
             measure_result(&result, &mut results)?;
             measure_pm_boundary(&input, &result, &mut boundary)?;
+            measure_binance_boundary(&input, &result, &mut binance_boundary)?;
             if matches!(input.ingress, DptIngressV1::Message { .. }) {
                 count += 1;
             }
@@ -440,10 +476,14 @@ fn run() -> RecordingResult<()> {
             &serde_json::json!({"complete_buckets": count, "peak_bucket_index_members": peak_members, "peak_bucket_encoded_bytes": peak_encoded_bytes, "read_metrics": buckets.read_metrics(), "unmeasured": ["file_open_count", "row_group_reads"]}),
         )?;
     } else {
-        return Err("入口只接受 core/record/replay/hidden/hidden-probe/simulate".into());
+        return Err(
+            "入口只接受 core/record/replay/hidden/hidden-probe/simulate/terminal-order".into(),
+        );
     }
     results.flush()?;
     metrics.flush()?;
+    boundary.flush()?;
+    binance_boundary.flush()?;
     Ok(())
 }
 fn main() {
