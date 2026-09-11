@@ -139,6 +139,102 @@ pub struct SealedProcessRuleSnapshotV3 {
 }
 
 impl SealedProcessRuleSnapshotV3 {
+    /// 冷快照的只读投影；逐腿 tick 与动态市场事实由同帧 DPT 观测提供。
+    pub fn public_rule_context(
+        &self,
+        market: contracts::MarketIdentityV2,
+    ) -> contracts::PublicTradingRuleContextV1 {
+        let snapshot = &self.snapshot;
+        let synchronized = &snapshot.synchronized_platform_rules;
+        let documented = &snapshot.documented_platform_rules;
+        let decimal =
+            |value: &RuleDecimal| contracts::ExactDecimal(value.value().normalize().to_string());
+        contracts::PublicTradingRuleContextV1 {
+            version: "public_trading_rule_context_v1".into(),
+            snapshot_file_sha256: self.file_sha256.clone(),
+            market,
+            query_started_at_utc_ms: snapshot.provenance.query_started_at_utc_ms,
+            query_completed_at_utc_ms: snapshot.provenance.query_completed_at_utc_ms,
+            frozen_at_utc_ms: snapshot.provenance.rules_observed_at_utc_ms,
+            queried_minimum_order_size_shares: decimal(&synchronized.minimum_order_size_shares),
+            limit_min_quantity_shares: contracts::ExactDecimal("5".into()),
+            market_buy_min_spend_pusd: contracts::ExactDecimal("1".into()),
+            taker_delay_enabled: synchronized.taker_order_delay_enabled,
+            taker_delay_ms: documented.taker_delay.value.delay_ms,
+            delay_requires_itode: documented.taker_delay.value.enabled_only_when_itode,
+            delay_only_fok_fak_market_buy: documented
+                .taker_delay
+                .value
+                .applies_only_to_fok_fak_market_buy,
+            fees_enabled: synchronized.fees_enabled,
+            fee_rate: decimal(&synchronized.fee_schedule.rate),
+            fee_exponent: synchronized.fee_schedule.exponent,
+            fee_taker_only: synchronized.fee_schedule.taker_only,
+            fee_formula_version: documented.fee_computation.value.formula_version.clone(),
+            fee_precision_decimal_places: documented.fee_computation.value.precision_decimal_places,
+            minimum_nonzero_fee_pusd: decimal(
+                &documented.fee_computation.value.minimum_nonzero_fee_pusd,
+            ),
+            gtd_lifetime_seconds: [180, 240, 300],
+            gtd_safety_offset_seconds: 60,
+            maker_rebate_rate: decimal(
+                &snapshot
+                    .project_account_rules
+                    .rebate_settlement
+                    .value
+                    .fixed_maker_rebate_rate,
+            ),
+            taker_rebate_rate: decimal(
+                &snapshot
+                    .project_account_rules
+                    .rebate_settlement
+                    .value
+                    .fixed_taker_rebate_rate,
+            ),
+            encoding_contract_reference: snapshot
+                .provenance
+                .dependencies
+                .iter()
+                .find(|dependency| dependency.name == "polymarket_client_sdk_v2")
+                .map(|dependency| {
+                    format!(
+                        "{}@{}:{}",
+                        dependency.name, dependency.version, dependency.source
+                    )
+                }),
+            queried_rules_source: contracts::PublicRuleSourceV1 {
+                category: contracts::PublicRuleSourceCategoryV1::QueriedPlatform,
+                reference: snapshot
+                    .provenance
+                    .reference_observation_evidence
+                    .source
+                    .clone(),
+            },
+            delay_rule_source: contracts::PublicRuleSourceV1 {
+                category: contracts::PublicRuleSourceCategoryV1::PublishedPlatformRule,
+                reference: documented.taker_delay.evidence.source.clone(),
+            },
+            fee_formula_source: contracts::PublicRuleSourceV1 {
+                category: contracts::PublicRuleSourceCategoryV1::PublishedPlatformRule,
+                reference: documented.fee_computation.evidence.source.clone(),
+            },
+            rebate_source: contracts::PublicRuleSourceV1 {
+                category: contracts::PublicRuleSourceCategoryV1::ApprovedProjectRule,
+                reference: snapshot
+                    .project_account_rules
+                    .rebate_settlement
+                    .evidence
+                    .source
+                    .clone(),
+            },
+            project_rules_source: contracts::PublicRuleSourceV1 {
+                category: contracts::PublicRuleSourceCategoryV1::ApprovedProjectRule,
+                reference: "https://github.com/slowchillchill/btc-updown-marketmaker/issues/5"
+                    .into(),
+            },
+        }
+    }
+
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
@@ -3437,6 +3533,27 @@ pub(crate) mod tests {
                 .value
                 .delay_ms,
             250
+        );
+        let view = recovered.public_rule_context(contracts::MarketIdentityV2 {
+            condition_id: contracts::ConditionId("legacy-context".into()),
+            clob_market_id: contracts::ClobMarketId("legacy-market".into()),
+            window: contracts::MarketWindowV2 {
+                start_at_utc_ms: 0,
+                end_at_utc_ms: 300_000,
+            },
+        });
+        assert_eq!(view.taker_delay_ms, 250);
+        assert_eq!(
+            view.query_started_at_utc_ms,
+            original.provenance.query_started_at_utc_ms
+        );
+        assert_eq!(
+            view.query_completed_at_utc_ms,
+            original.provenance.query_completed_at_utc_ms
+        );
+        assert_eq!(
+            view.frozen_at_utc_ms,
+            original.provenance.rules_observed_at_utc_ms
         );
         assert_eq!(std::fs::read(target).expect("回读旧快照"), bytes);
     }

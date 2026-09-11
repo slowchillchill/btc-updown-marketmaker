@@ -20,6 +20,7 @@ use std::{
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum HiddenIndexEntryV1 {
     Step(HiddenDerivedStepRefV1),
+    /// 原规范参考或市场事实；只保存原位置，缺真实来源时间的不进入此索引。
     Reference {
         canonical_position: u64,
         source_at_utc_ms: i64,
@@ -118,7 +119,17 @@ pub fn prepare_hidden_v1(
                         reference_order += 1;
                     }
                 }
-                _ => {}
+                CanonicalEventRecordV2::MarketFact(event) => {
+                    if let Some(at) = event.dependency_time.source_event_at_utc_ms {
+                        let value = HiddenIndexEntryV1::Reference {
+                            canonical_position,
+                            source_at_utc_ms: at,
+                            derivation_position: reference_order,
+                        };
+                        index.push(index_row(at, reference_order, &value)?)?;
+                        reference_order += 1;
+                    }
+                }
             }
         }
     }
@@ -348,5 +359,139 @@ impl HiddenIndexReaderV1 {
         let position = self.next_position;
         self.next_position += 1;
         Ok(Some((position, entry)))
+    }
+}
+
+/// 当前有界索引页的强类型材料，位置仍是唯一原索引位置。
+pub enum ResolvedHiddenRecordV1 {
+    Step {
+        stored: HiddenStoredStepV1,
+        market: MarketIdentityV2,
+    },
+    Reference {
+        canonical_position: u64,
+        record: CanonicalEventRecordV2,
+    },
+}
+/// 按索引页定位原文件；只持有当前页，派生文件物理顺序不参与消费排序。
+pub struct HiddenMaterialReaderV1 {
+    prepared: HiddenPreparationV1,
+    recording_root: PathBuf,
+    index: HiddenIndexReaderV1,
+    rows: usize,
+    bytes: usize,
+}
+impl HiddenMaterialReaderV1 {
+    pub fn open(
+        prepared: &HiddenPreparationV1,
+        recording_root: &Path,
+        rows: usize,
+        bytes: usize,
+    ) -> RecordingResult<Self> {
+        Ok(Self {
+            prepared: prepared.clone(),
+            recording_root: recording_root.to_owned(),
+            index: HiddenIndexReaderV1::open(prepared, rows, bytes)?,
+            rows,
+            bytes,
+        })
+    }
+    pub fn next_page(&mut self) -> RecordingResult<Vec<(u64, ResolvedHiddenRecordV1)>> {
+        let mut entries = Vec::new();
+        for _ in 0..self.rows {
+            let Some(entry) = self.index.next_entry()? else {
+                break;
+            };
+            entries.push(entry);
+        }
+        if entries.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut step_slots = BTreeMap::new();
+        let mut fact_slots = BTreeMap::new();
+        let mut step_market_slots: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
+        for (slot, (_, entry)) in entries.iter().enumerate() {
+            match entry {
+                HiddenIndexEntryV1::Step(reference) => {
+                    step_slots.insert(reference.derivation_position, slot);
+                    step_market_slots
+                        .entry(reference.canonical_record_position)
+                        .or_default()
+                        .push(slot);
+                }
+                HiddenIndexEntryV1::Reference {
+                    canonical_position, ..
+                } => {
+                    fact_slots.insert(*canonical_position, slot);
+                }
+            }
+        }
+        let mut stored_steps: Vec<Option<HiddenStoredStepV1>> =
+            (0..entries.len()).map(|_| None).collect();
+        let mut resolved: Vec<Option<ResolvedHiddenRecordV1>> =
+            (0..entries.len()).map(|_| None).collect();
+        if !step_slots.is_empty() {
+            let mut reader = HiddenStepReaderV1::open(&self.prepared, self.rows, self.bytes)?;
+            while let Some(row) = reader.next_row()? {
+                if let HiddenStoredRowV1::Step(step) = row {
+                    if let Some(slot) = step_slots.remove(&step.reference.derivation_position) {
+                        stored_steps[slot] = Some(step);
+                    }
+                    if step_slots.is_empty() {
+                        break;
+                    }
+                }
+            }
+        }
+        if !fact_slots.is_empty() || !step_market_slots.is_empty() {
+            let mut reader = PublicRecordingReaderV1::open_committed(
+                &self.recording_root,
+                Some(self.prepared.prefix.clone()),
+                self.rows,
+                self.bytes,
+            )?;
+            while let Some(row) = reader.next_row()? {
+                if let PublicStoredRowV1::Canonical {
+                    canonical_position,
+                    record,
+                    ..
+                } = row
+                {
+                    if let CanonicalEventRecordV2::PolymarketMessage(message) = &record {
+                        if let Some(slots) = step_market_slots.remove(&canonical_position) {
+                            for slot in slots {
+                                if let Some(stored) = stored_steps[slot].take() {
+                                    resolved[slot] = Some(ResolvedHiddenRecordV1::Step {
+                                        stored,
+                                        market: message.market.clone(),
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    if let Some(slot) = fact_slots.remove(&canonical_position) {
+                        resolved[slot] = Some(ResolvedHiddenRecordV1::Reference {
+                            canonical_position,
+                            record,
+                        });
+                    }
+                    if fact_slots.is_empty() && step_market_slots.is_empty() {
+                        break;
+                    }
+                }
+            }
+        }
+        entries
+            .into_iter()
+            .zip(resolved)
+            .map(|((position, _), record)| {
+                Ok((
+                    position,
+                    record.ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "隐藏索引引用的原记录缺失")
+                    })?,
+                ))
+            })
+            .collect()
     }
 }

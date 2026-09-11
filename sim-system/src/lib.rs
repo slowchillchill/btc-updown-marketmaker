@@ -17,6 +17,7 @@ pub(crate) mod matching;
 mod measurement_probe;
 
 pub mod platform_rules;
+pub mod public_consumption;
 pub(crate) mod rebate;
 pub mod resource;
 #[allow(dead_code)]

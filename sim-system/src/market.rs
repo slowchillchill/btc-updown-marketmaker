@@ -802,8 +802,13 @@ pub(crate) struct NormalizedPriceLevelV2 {
 pub(crate) enum NormalizedMarketEventV2<'a> {
     MarketLifecycleTransition(&'a contracts::MarketLifecycleTransitionV2),
     MarketTradingState(&'a MarketTradingStateV2),
+    MarketLifecycleSnapshot(&'a contracts::MappedMarketLifecycleStateV1),
+    InitialTick {
+        asset: &'a contracts::AssetIdentityV1,
+        tick: Decimal,
+    },
     InitialL2Snapshot {
-        snapshot: &'a contracts::InitialL2SnapshotV2,
+        asset: &'a contracts::AssetIdentityV1,
         initial_tick_size_pusd_per_share: Decimal,
         bids: Vec<NormalizedPriceLevelV2>,
         asks: Vec<NormalizedPriceLevelV2>,
@@ -850,8 +855,8 @@ pub(crate) struct MarketStateApplicationV2 {
     pub(crate) resolution_invalidation_reason: Option<String>,
 }
 
-pub(crate) fn normalize_market_event_v2(
-    event: &ExecutionMarketEventV3,
+pub(crate) fn normalize_market_event_v2<I, E>(
+    event: &ExecutionMarketEventV3<I, E>,
 ) -> Result<NormalizedMarketEventV2<'_>, MarketEventErrorV1> {
     Ok(match &event.payload {
         ExecutionMarketEventPayloadV3::MarketLifecycleTransition(transition) => {
@@ -862,7 +867,7 @@ pub(crate) fn normalize_market_event_v2(
         }
         ExecutionMarketEventPayloadV3::InitialL2Snapshot(snapshot) => {
             NormalizedMarketEventV2::InitialL2Snapshot {
-                snapshot,
+                asset: &snapshot.asset,
                 initial_tick_size_pusd_per_share: parse_decimal(
                     &snapshot.initial_tick_size_pusd_per_share,
                 )?,
@@ -912,17 +917,7 @@ pub(crate) fn normalize_market_event_v2(
             }
         }
         ExecutionMarketEventPayloadV3::MarketResolutionTerminal(terminal) => {
-            let MarketResolutionTerminalV3::Resolved { payout_vector, .. } = terminal;
-            let parsed_payouts = payout_vector
-                .iter()
-                .map(|entry| parse_decimal(&entry.payout_pusd_per_share))
-                .collect::<Result<Vec<_>, _>>()?
-                .try_into()
-                .map_err(|_| MarketEventErrorV1::ResolutionAssetConflict)?;
-            NormalizedMarketEventV2::MarketResolutionTerminal {
-                terminal,
-                parsed_payouts,
-            }
+            normalize_terminal_v2(terminal)?
         }
     })
 }
@@ -942,6 +937,31 @@ fn normalize_price_levels_v2(
 }
 
 impl MarketStateStoreV2 {
+    pub(crate) fn pm_quantity(
+        &self,
+        condition: &str,
+        token: &str,
+        side: contracts::BookSide,
+        price: Decimal,
+    ) -> Decimal {
+        self.markets
+            .get(condition)
+            .and_then(|market| market.assets.get(token))
+            .map_or(Decimal::ZERO, |asset| {
+                asset.external_book.quantity(side, price)
+            })
+    }
+    pub(crate) fn applies_pm_l2(&self, condition: &str, at: i64, end: i64) -> bool {
+        at < end
+            && self.markets.get(condition).is_some_and(|market| {
+                !matches!(
+                    market.lifecycle_phase,
+                    MarketLifecyclePhaseV1::PostEndPendingResolution
+                        | MarketLifecyclePhaseV1::ResolutionTerminal
+                )
+            })
+    }
+
     pub(crate) fn new(directory: &SessionMarketDirectoryV1) -> Self {
         let markets = directory
             .markets()
@@ -1020,9 +1040,26 @@ impl MarketStateStoreV2 {
         )
     }
 
-    pub(crate) fn apply_admitted_event(
+    #[cfg(test)]
+    fn apply_admitted_event(
         &mut self,
         event: &ExecutionMarketEventV3,
+        normalized: &NormalizedMarketEventV2<'_>,
+        at: i64,
+        end: i64,
+    ) -> Result<MarketStateApplicationV2, MarketEventErrorV1> {
+        let header = MarketEventHeaderV1 {
+            identity: &event.event_id.0,
+            market: &event.market,
+            time: &event.time,
+            quality: &event.quality,
+        };
+        self.apply_admitted_header(&header, normalized, at, end)
+    }
+
+    pub(crate) fn apply_admitted_header(
+        &mut self,
+        event: &MarketEventHeaderV1<'_>,
         normalized: &NormalizedMarketEventV2<'_>,
         platform_effective_at_utc_ms: i64,
         end_at_utc_ms: i64,
@@ -1177,7 +1214,7 @@ impl MarketStateV2 {
 
     fn apply_event(
         &mut self,
-        event: &ExecutionMarketEventV3,
+        event: &MarketEventHeaderV1<'_>,
         normalized: &NormalizedMarketEventV2<'_>,
         platform_effective_at_utc_ms: i64,
         end_at_utc_ms: i64,
@@ -1205,19 +1242,30 @@ impl MarketStateV2 {
                 );
                 self.mapped_lifecycle_state = Some(transition.current_state.clone());
             }
+            NormalizedMarketEventV2::MarketLifecycleSnapshot(current) => {
+                resources.replace_bytes(
+                    mapped_lifecycle_owned_bytes(self.mapped_lifecycle_state.as_ref()),
+                    mapped_lifecycle_owned_bytes(Some(current)),
+                );
+                self.mapped_lifecycle_state = Some((*current).clone());
+            }
+            NormalizedMarketEventV2::InitialTick { asset, tick } => {
+                self.admitted_asset_mut(asset)
+                    .current_tick_size_pusd_per_share = Some(*tick);
+            }
             NormalizedMarketEventV2::MarketTradingState(state) => {
                 self.trading_state = (*state).clone();
             }
             NormalizedMarketEventV2::InitialL2Snapshot {
-                snapshot,
+                asset: snapshot_asset,
                 initial_tick_size_pusd_per_share,
                 bids,
                 asks,
             } => {
-                let asset = self.admitted_asset_mut(&snapshot.asset);
+                let asset = self.admitted_asset_mut(snapshot_asset);
                 if asset.initialized {
                     return Err(MarketEventErrorV1::InitialSnapshotAlreadyLoaded(
-                        snapshot.asset.token_id.0.clone(),
+                        snapshot_asset.token_id.0.clone(),
                     ));
                 }
                 asset.initialized = true;
@@ -1359,7 +1407,7 @@ impl MarketStateV2 {
                     }
                     if self.source_qualified_resolution.is_none() {
                         let evidence = SourceQualifiedResolutionV2 {
-                            resolution_event_id: event.event_id.0.clone(),
+                            resolution_event_id: event.identity.to_owned(),
                             resolution_source_event_at_utc_ms: source_event_at_utc_ms,
                             terminal: (*terminal).clone(),
                             parsed_payouts: *parsed_payouts,
@@ -4150,4 +4198,122 @@ mod tests {
         ));
         assert!(store.market(&condition_id).is_none());
     }
+}
+
+/// 撮合只需原事件引用；新位置不伪装成尚未物化的摘要。
+pub(crate) trait MarketEventIdentityV1 {
+    fn identity_key(&self) -> String;
+}
+impl MarketEventIdentityV1 for contracts::CanonicalEventId {
+    fn identity_key(&self) -> String {
+        self.0.clone()
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct MarketEventHeaderV1<'a> {
+    pub identity: &'a str,
+    pub market: &'a contracts::MarketIdentityV2,
+    pub time: &'a contracts::EventTimeV2,
+    pub quality: &'a contracts::EventQualityV2,
+}
+
+/// 直接借用当次 PM 步骤；只做撮合已有的精确数值归一化，不复制原盘口数组。
+pub(crate) fn normalize_pm_step_v1<'a, E, I>(
+    step: &'a data_pipeline_core::pm_reduction::PmReductionStepV1<'_, E, I>,
+) -> Result<Option<NormalizedMarketEventV2<'a>>, MarketEventErrorV1> {
+    use data_pipeline_core::pm_reduction::PmStepChangeV1;
+    Ok(Some(match &step.change {
+        PmStepChangeV1::InitialSnapshot {
+            asset,
+            initial_tick_size_pusd_per_share,
+            bids,
+            asks,
+            ..
+        } => NormalizedMarketEventV2::InitialL2Snapshot {
+            asset,
+            initial_tick_size_pusd_per_share: parse_decimal(initial_tick_size_pusd_per_share)?,
+            bids: normalize_price_levels_v2(bids)?,
+            asks: normalize_price_levels_v2(asks)?,
+        },
+        PmStepChangeV1::LevelChange { transition, .. } => {
+            NormalizedMarketEventV2::LevelExecutionTransition {
+                transition,
+                price_pusd_per_share: parse_decimal(&transition.price_pusd_per_share)?,
+                quantity_before_shares: parse_decimal(&transition.quantity_before_shares)?,
+                quantity_after_shares: parse_decimal(&transition.quantity_after_shares)?,
+            }
+        }
+        PmStepChangeV1::BestBidAsk { quote, .. } => NormalizedMarketEventV2::BestBidAsk {
+            best: quote,
+            best_bid_pusd_per_share: quote
+                .best_bid_pusd_per_share
+                .as_ref()
+                .map(parse_decimal)
+                .transpose()?,
+            best_ask_pusd_per_share: quote
+                .best_ask_pusd_per_share
+                .as_ref()
+                .map(parse_decimal)
+                .transpose()?,
+        },
+        PmStepChangeV1::Tick { tick, .. } => NormalizedMarketEventV2::TickSizeChange {
+            change: tick,
+            old_tick_size_pusd_per_share: tick
+                .old_tick_size_pusd_per_share
+                .as_ref()
+                .map(parse_decimal)
+                .transpose()?,
+            new_tick_size_pusd_per_share: parse_decimal(&tick.new_tick_size_pusd_per_share)?,
+        },
+        PmStepChangeV1::PublicTrade { trade } => NormalizedMarketEventV2::PublicTrade(trade),
+        PmStepChangeV1::Quality { boundary } => NormalizedMarketEventV2::QualityBoundary {
+            boundary,
+            resync: step.quality.resync,
+        },
+        _ => return Ok(None),
+    }))
+}
+
+pub(crate) fn normalize_public_market_fact_v1<'a>(
+    fact: &'a contracts::CanonicalMarketFactPayloadV1,
+    quality: &contracts::EventQualityV2,
+) -> Result<Option<NormalizedMarketEventV2<'a>>, MarketEventErrorV1> {
+    use contracts::CanonicalMarketFactPayloadV1 as P;
+    Ok(Some(match fact {
+        P::FixedIdentity { .. } => return Ok(None),
+        P::InitialTick {
+            asset,
+            tick_size_pusd_per_share,
+        } => NormalizedMarketEventV2::InitialTick {
+            asset,
+            tick: parse_decimal(tick_size_pusd_per_share)?,
+        },
+        P::LifecycleTransition(v) => NormalizedMarketEventV2::MarketLifecycleTransition(v),
+        P::MarketLifecycleSnapshot { current_state, .. } => {
+            NormalizedMarketEventV2::MarketLifecycleSnapshot(current_state)
+        }
+        P::TradingState(v) => NormalizedMarketEventV2::MarketTradingState(v),
+        P::QualityBoundary(v) => NormalizedMarketEventV2::QualityBoundary {
+            boundary: v,
+            resync: quality.resync,
+        },
+        P::Terminal(terminal) => normalize_terminal_v2(terminal)?,
+    }))
+}
+
+fn normalize_terminal_v2(
+    terminal: &MarketResolutionTerminalV3,
+) -> Result<NormalizedMarketEventV2<'_>, MarketEventErrorV1> {
+    let MarketResolutionTerminalV3::Resolved { payout_vector, .. } = terminal;
+    let parsed_payouts = payout_vector
+        .iter()
+        .map(|entry| parse_decimal(&entry.payout_pusd_per_share))
+        .collect::<Result<Vec<_>, _>>()?
+        .try_into()
+        .map_err(|_| MarketEventErrorV1::ResolutionAssetConflict)?;
+    Ok(NormalizedMarketEventV2::MarketResolutionTerminal {
+        terminal,
+        parsed_payouts,
+    })
 }

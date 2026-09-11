@@ -17,7 +17,7 @@ pub struct PmOwnedStateV1<E = SourceEvidenceRefV3> {
     context: PmMarketContextV1<E>,
     epoch: Option<String>,
     assets: BTreeMap<String, PmAssetStateV1<E>>,
-    quantities: BTreeMap<LevelKey, Decimal>,
+    quantities: Option<BTreeMap<LevelKey, Decimal>>,
     levels: BTreeMap<LevelKey, PmEvidencePairV1<E>>,
     absences: BTreeMap<LevelKey, PmEvidencePairV1<E>>,
     selected: BTreeMap<LevelKey, PmSelectedLevelV1<E>>,
@@ -60,130 +60,146 @@ impl<E: PmEvidenceV1> PmOwnedStateV1<E> {
             context,
             epoch: None,
             assets,
-            quantities: BTreeMap::new(),
+            quantities: Some(BTreeMap::new()),
             levels: BTreeMap::new(),
             absences: BTreeMap::new(),
             selected: BTreeMap::new(),
         }
     }
+    /// 模拟器仅持有原归约证据，数量通过其已有数量簿借用。
+    pub fn new_evidence_only(context: PmMarketContextV1<E>) -> Self {
+        let mut state = Self::new(context);
+        state.quantities = None;
+        state
+    }
     pub fn apply<I>(&mut self, result: &PmMessageReductionV1<'_, E, I>) {
         for step in &result.steps {
-            match &step.change {
-                PmStepChangeV1::Epoch {
-                    source_sequence_epoch_id,
-                } => self.epoch = Some(source_sequence_epoch_id.clone()),
-                PmStepChangeV1::ResetAsset {
-                    asset,
-                    absence_baseline,
-                    bba_reanchor_frontier,
-                } => {
-                    let token = &asset.token_id.0;
-                    self.quantities.retain(|(id, ..), _| id != token);
-                    self.levels.retain(|(id, ..), _| id != token);
-                    self.absences.retain(|(id, ..), _| id != token);
-                    self.selected.retain(|(id, ..), _| id != token);
-                    let state = self.assets.get_mut(token).unwrap();
-                    state.book_ready = false;
-                    state.absence_baseline = absence_baseline.clone();
-                    state.selection_baseline = None;
-                    state.bba = None;
-                    state.bba_reanchor_frontier = bba_reanchor_frontier.clone();
+            self.apply_step(step);
+        }
+    }
+    pub fn apply_step<I>(&mut self, step: &PmReductionStepV1<'_, E, I>) {
+        match &step.change {
+            PmStepChangeV1::Epoch {
+                source_sequence_epoch_id,
+            } => self.epoch = Some(source_sequence_epoch_id.clone()),
+            PmStepChangeV1::ResetAsset {
+                asset,
+                absence_baseline,
+                bba_reanchor_frontier,
+            } => {
+                let token = &asset.token_id.0;
+                if let Some(quantities) = &mut self.quantities {
+                    quantities.retain(|(id, ..), _| id != token);
                 }
-                PmStepChangeV1::InitialSnapshot {
-                    asset,
-                    bids,
-                    asks,
-                    evidence,
-                    ..
-                } => {
-                    let state = self.assets.get_mut(&asset.token_id.0).unwrap();
-                    state.has_initial_snapshot = true;
-                    state.book_ready = true;
-                    for (side, values) in [
-                        (BookSide::Bid, bids.as_ref()),
-                        (BookSide::Ask, asks.as_ref()),
-                    ] {
-                        for value in values {
-                            let key =
-                                key(&asset.token_id.0, side, d(&value.price_pusd_per_share.0));
-                            let quantity = d(&value.quantity_shares.0);
-                            if !quantity.is_zero() {
-                                self.quantities.insert(key.clone(), quantity);
+                self.levels.retain(|(id, ..), _| id != token);
+                self.absences.retain(|(id, ..), _| id != token);
+                self.selected.retain(|(id, ..), _| id != token);
+                let state = self.assets.get_mut(token).unwrap();
+                state.book_ready = false;
+                state.absence_baseline = absence_baseline.clone();
+                state.selection_baseline = None;
+                state.bba = None;
+                state.bba_reanchor_frontier = bba_reanchor_frontier.clone();
+            }
+            PmStepChangeV1::InitialSnapshot {
+                asset,
+                bids,
+                asks,
+                evidence,
+                ..
+            } => {
+                let state = self.assets.get_mut(&asset.token_id.0).unwrap();
+                state.has_initial_snapshot = true;
+                state.book_ready = true;
+                for (side, values) in [
+                    (BookSide::Bid, bids.as_ref()),
+                    (BookSide::Ask, asks.as_ref()),
+                ] {
+                    for value in values {
+                        let key = key(&asset.token_id.0, side, d(&value.price_pusd_per_share.0));
+                        let quantity = d(&value.quantity_shares.0);
+                        if !quantity.is_zero() {
+                            if let Some(quantities) = &mut self.quantities {
+                                quantities.insert(key.clone(), quantity);
                             }
-                            self.levels.insert(key, evidence.clone());
                         }
-                    }
-                }
-                PmStepChangeV1::LevelChange {
-                    transition,
-                    evidence,
-                } => {
-                    let key = key(
-                        &transition.asset.token_id.0,
-                        transition.side,
-                        d(&transition.price_pusd_per_share.0),
-                    );
-                    let after = d(&transition.quantity_after_shares.0);
-                    if after.is_zero() {
-                        self.quantities.remove(&key);
-                        self.levels.remove(&key);
-                        self.absences.insert(key, evidence.clone());
-                    } else {
-                        self.quantities.insert(key.clone(), after);
-                        self.absences.remove(&key);
                         self.levels.insert(key, evidence.clone());
                     }
                 }
-                PmStepChangeV1::LevelEvidenceOnly {
-                    asset,
-                    side,
-                    price,
-                    evidence,
-                } => {
-                    self.levels
-                        .insert(key(&asset.token_id.0, *side, d(&price.0)), evidence.clone());
-                }
-                PmStepChangeV1::Selection {
-                    asset,
-                    side,
-                    price,
-                    selected,
-                    ..
-                } => {
-                    self.selected
-                        .insert(key(&asset.token_id.0, *side, d(&price.0)), selected.clone());
-                }
-                PmStepChangeV1::AbsenceBaseline {
-                    asset,
-                    evidence,
-                    selected,
-                } => {
-                    let state = self.assets.get_mut(&asset.token_id.0).unwrap();
-                    state.absence_baseline = Some(evidence.clone());
-                    state.selection_baseline = selected.clone();
-                }
-                PmStepChangeV1::BookReady { asset } => {
-                    self.assets.get_mut(&asset.token_id.0).unwrap().book_ready = true
-                }
-                PmStepChangeV1::BestBidAsk { quote, evidence } => {
-                    let state = self.assets.get_mut(&quote.asset.token_id.0).unwrap();
-                    state.bba = Some(PmBbaStateV1 {
-                        best_bid: quote.best_bid_pusd_per_share.clone(),
-                        best_ask: quote.best_ask_pusd_per_share.clone(),
-                        evidence: evidence.clone(),
-                    });
-                    state.bba_reanchor_frontier = None;
-                }
-                PmStepChangeV1::Tick { tick, evidence } => {
-                    let state = self.assets.get_mut(&tick.asset.token_id.0).unwrap();
-                    state.tick_size = tick.new_tick_size_pusd_per_share.clone();
-                    state.tick_direct_evidence = vec![evidence.direct.clone()];
-                    state.tick_frontier = evidence.frontier.clone();
-                }
-                PmStepChangeV1::PublicConfirmation { .. }
-                | PmStepChangeV1::PublicTrade { .. }
-                | PmStepChangeV1::Quality { .. } => {}
             }
+            PmStepChangeV1::LevelChange {
+                transition,
+                evidence,
+            } => {
+                let key = key(
+                    &transition.asset.token_id.0,
+                    transition.side,
+                    d(&transition.price_pusd_per_share.0),
+                );
+                let after = d(&transition.quantity_after_shares.0);
+                if after.is_zero() {
+                    if let Some(quantities) = &mut self.quantities {
+                        quantities.remove(&key);
+                    }
+                    self.levels.remove(&key);
+                    self.absences.insert(key, evidence.clone());
+                } else {
+                    if let Some(quantities) = &mut self.quantities {
+                        quantities.insert(key.clone(), after);
+                    }
+                    self.absences.remove(&key);
+                    self.levels.insert(key, evidence.clone());
+                }
+            }
+            PmStepChangeV1::LevelEvidenceOnly {
+                asset,
+                side,
+                price,
+                evidence,
+            } => {
+                self.levels
+                    .insert(key(&asset.token_id.0, *side, d(&price.0)), evidence.clone());
+            }
+            PmStepChangeV1::Selection {
+                asset,
+                side,
+                price,
+                selected,
+                ..
+            } => {
+                self.selected
+                    .insert(key(&asset.token_id.0, *side, d(&price.0)), selected.clone());
+            }
+            PmStepChangeV1::AbsenceBaseline {
+                asset,
+                evidence,
+                selected,
+            } => {
+                let state = self.assets.get_mut(&asset.token_id.0).unwrap();
+                state.absence_baseline = Some(evidence.clone());
+                state.selection_baseline = selected.clone();
+            }
+            PmStepChangeV1::BookReady { asset } => {
+                self.assets.get_mut(&asset.token_id.0).unwrap().book_ready = true
+            }
+            PmStepChangeV1::BestBidAsk { quote, evidence } => {
+                let state = self.assets.get_mut(&quote.asset.token_id.0).unwrap();
+                state.bba = Some(PmBbaStateV1 {
+                    best_bid: quote.best_bid_pusd_per_share.clone(),
+                    best_ask: quote.best_ask_pusd_per_share.clone(),
+                    evidence: evidence.clone(),
+                });
+                state.bba_reanchor_frontier = None;
+            }
+            PmStepChangeV1::Tick { tick, evidence } => {
+                let state = self.assets.get_mut(&tick.asset.token_id.0).unwrap();
+                state.tick_size = tick.new_tick_size_pusd_per_share.clone();
+                state.tick_direct_evidence = vec![evidence.direct.clone()];
+                state.tick_frontier = evidence.frontier.clone();
+            }
+            PmStepChangeV1::PublicConfirmation { .. }
+            | PmStepChangeV1::PublicTrade { .. }
+            | PmStepChangeV1::Quality { .. } => {}
         }
     }
 }
@@ -200,7 +216,8 @@ impl<E: PmEvidenceV1> PmStateReadV1<E> for PmOwnedStateV1<E> {
     }
     fn quantity(&self, token: &str, side: BookSide, price: Decimal) -> Decimal {
         self.quantities
-            .get(&key(token, side, price))
+            .as_ref()
+            .and_then(|quantities| quantities.get(&key(token, side, price)))
             .copied()
             .unwrap_or(Decimal::ZERO)
     }
@@ -431,6 +448,13 @@ impl PublicObservationCoreV1 {
     /// 仅投影已知固定身份；来源准备可借此构造规范消息。
     pub fn fixed_markets(&self) -> impl Iterator<Item = MarketIdentityV2> + '_ {
         self.markets.values().map(|m| m.pm.context.market.clone())
+    }
+    /// 来源准备的同一证据材料，只投影固定上下文，不复制数量状态。
+    pub fn prepared_pm_context(
+        &self,
+        condition: &str,
+    ) -> Option<PmMarketContextV1<PreparedPmEvidenceV1<SourceEvidenceRefV3>>> {
+        self.markets.get(condition).map(|m| m.pm.context.clone())
     }
     pub fn pm_context(&self, condition: &str) -> Option<PmMarketContextV1> {
         self.markets.get(condition).map(|m| PmMarketContextV1 {
@@ -1255,6 +1279,7 @@ impl MarketState {
                         .pm
                         .quantities
                         .iter()
+                        .flat_map(|quantities| quantities.iter())
                         .filter(|((id, ask, _), _)| id == token && *ask == (side == BookSide::Ask))
                         .map(|((_, _, price), quantity)| PriceLevelV1 {
                             price_pusd_per_share: ExactDecimal(price.normalize().to_string()),
