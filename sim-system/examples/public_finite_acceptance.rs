@@ -216,10 +216,44 @@ fn measure_result(
         &serde_json::json!({"complete_input_result_sha256": digest, "encoded_bytes": bytes, "ordered_groups": groups}),
     )
 }
+// 窄代际样本只保留本代最初14条的实际公开观测，供独立窗口断言。
+fn measure_pm_boundary(
+    input: &RecordedIngressV1,
+    result: &PublicAppliedIngressV1<'_>,
+    writer: &mut impl Write,
+) -> RecordingResult<()> {
+    let DptIngressV1::Message {
+        row: TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row)),
+        ..
+    } = &input.ingress
+    else {
+        return Ok(());
+    };
+    if row.collector_admission_sequence > 14 {
+        return Ok(());
+    }
+    for group in &result.applied.closed_groups {
+        for observed in &group.observations {
+            write_line(
+                writer,
+                &serde_json::json!({
+                    "input_position": input.input_position,
+                    "epoch": row.source_sequence_epoch_id,
+                    "source_sequence": row.collector_admission_sequence,
+                    "source_event": row.event,
+                    "visible_prefix": observed.visible_prefix,
+                    "assets": observed.assets,
+                    "lifecycle": observed.lifecycle,
+                }),
+            )?;
+        }
+    }
+    Ok(())
+}
 fn run() -> RecordingResult<()> {
     let args: Vec<_> = std::env::args().collect();
-    if args.len() != 5 {
-        return Err("用法: public_finite_acceptance <record|replay|hidden|hidden-probe|simulate> <config.json> <output> <recording-root>".into());
+    if args.len() != 5 && !(args.len() == 4 && args[1] == "core") {
+        return Err("用法: public_finite_acceptance <core|record|replay|hidden|hidden-probe|simulate> <config.json> <output> [recording-root]（core无需记录目录）".into());
     }
     if args[1] == "simulate" {
         return simulation::run(
@@ -234,22 +268,27 @@ fn run() -> RecordingResult<()> {
     serde_json::to_writer_pretty(File::create(out.join("configuration.json"))?, &config)?;
     let mut results = BufWriter::new(File::create(out.join("results.jsonl"))?);
     let mut metrics = BufWriter::new(File::create(out.join("checkpoints.jsonl"))?);
-    let recording = PathBuf::from(&args[4]);
-    if args[1] == "record" {
+    let mut boundary = BufWriter::new(File::create(out.join("pm-boundary.jsonl"))?);
+    let recording = args.get(4).map(PathBuf::from).unwrap_or_default();
+    if args[1] == "record" || args[1] == "core" {
         let decode = std::rc::Rc::new(std::cell::RefCell::new(DecodeMetrics::default()));
-        let writer = std::cell::RefCell::new(PublicRecordingWriterV1::create(
-            &recording,
-            &config.header,
-            config.output.clone(),
-        )?);
-        let writer_ref = &writer;
+        let writer = if args[1] == "record" {
+            Some(std::cell::RefCell::new(PublicRecordingWriterV1::create(
+                &recording,
+                &config.header,
+                config.output.clone(),
+            )?))
+        } else {
+            None
+        };
+        let writer_ref = writer.as_ref();
         let mut first_read = true;
         let mut merge = prepare_historical_rows_v1(
             &out.join("source-order"),
             &config.canonical,
             config.header.input_stream_id.clone(),
             || {
-                let bindings = if first_read { Some(writer_ref) } else { None };
+                let bindings = if first_read { writer_ref } else { None };
                 first_read = false;
                 Ok(Rows::new(&config, decode.clone(), bindings))
             },
@@ -263,23 +302,33 @@ fn run() -> RecordingResult<()> {
             &*decode.borrow(),
         )?;
         let mut core = PublicObservationCoreV1::new(config.header.clone())?;
-        let mut writer = writer.into_inner();
+        let mut writer = writer.map(std::cell::RefCell::into_inner);
         let mut count = 0;
+        let mut observations = 0_u64;
         while let Some(input) = merge.next_input()? {
             let prepared = prepare_public_ingress_v1(&core, &input, &BTreeMap::new(), &[])?;
             let result = core
                 .push(&prepared)
                 .map_err(|e| format!("input_position={}: {e}", input.input_position))?;
             measure_result(&result, &mut results)?;
+            measure_pm_boundary(&input, &result, &mut boundary)?;
             count += 1;
+            observations += result
+                .applied
+                .closed_groups
+                .iter()
+                .map(|g| g.observations.len() as u64)
+                .sum::<u64>();
             if config.checkpoints.contains(&count) {
                 write_line(
                     &mut metrics,
                     &serde_json::json!({"input_count": count, "core": core.object_counts(), "groups_this_input": result.applied.closed_groups.len(), "input_encoded_bytes": serde_json::to_vec(&input)?.len(), "applied_encoded_bytes": serde_json::to_vec(&result.applied)?.len(), "unmeasured": ["allocator_capacity", "heap_bytes", "cgroup_memory_peak"]}),
                 )?;
             }
-            let result = result.into_owned();
-            writer.record(input, result)?;
+            if let Some(writer) = &mut writer {
+                let result = result.into_owned();
+                writer.record(input, result)?;
+            }
         }
         let end = RecordedIngressV1 {
             input_stream_id: config.header.input_stream_id.clone(),
@@ -290,13 +339,15 @@ fn run() -> RecordingResult<()> {
         let prepared = prepare_public_ingress_v1(&core, &end, &BTreeMap::new(), &[])?;
         let result = core.push(&prepared)?;
         measure_result(&result, &mut results)?;
-        let result = result.into_owned();
-        writer.record(end, result)?;
-        let prefix = writer.stabilize()?;
-        serde_json::to_writer_pretty(
-            File::create(out.join("completion.json"))?,
-            &serde_json::json!({"messages": count, "committed": prefix}),
-        )?;
+        let completion = if let Some(writer) = &mut writer {
+            let result = result.into_owned();
+            writer.record(end, result)?;
+            serde_json::json!({"messages": count, "committed": writer.stabilize()?})
+        } else {
+            serde_json::json!({"messages": count, "applied": core.applied_prefix(), "observations": observations,
+                "unexercised": ["recording", "source_binding_persistence", "max_capture_output_bytes", "max_artifact_payload_bytes", "max_candidate_directory_bytes"]})
+        };
+        serde_json::to_writer_pretty(File::create(out.join("completion.json"))?, &completion)?;
     } else if args[1] == "replay" {
         let mut replay = PublicReplayV1::open(
             &recording,
@@ -306,6 +357,7 @@ fn run() -> RecordingResult<()> {
         let mut count = 0;
         while let Some((input, result)) = replay.next_applied()? {
             measure_result(&result, &mut results)?;
+            measure_pm_boundary(&input, &result, &mut boundary)?;
             if matches!(input.ingress, DptIngressV1::Message { .. }) {
                 count += 1;
             }
@@ -388,7 +440,7 @@ fn run() -> RecordingResult<()> {
             &serde_json::json!({"complete_buckets": count, "peak_bucket_index_members": peak_members, "peak_bucket_encoded_bytes": peak_encoded_bytes, "read_metrics": buckets.read_metrics(), "unmeasured": ["file_open_count", "row_group_reads"]}),
         )?;
     } else {
-        return Err("入口只接受 record/replay/hidden/hidden-probe/simulate".into());
+        return Err("入口只接受 core/record/replay/hidden/hidden-probe/simulate".into());
     }
     results.flush()?;
     metrics.flush()?;

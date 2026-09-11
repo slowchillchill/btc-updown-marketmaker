@@ -390,6 +390,11 @@ pub struct HiddenMaterialReaderV1 {
     rows: usize,
     bytes: usize,
     metrics: HiddenMaterialReadMetricsV1,
+    derived: Option<HiddenStepReaderV1>,
+    recording: Option<PublicRecordingReaderV1>,
+    last_derivation_position: Option<u64>,
+    last_canonical_position: Option<u64>,
+    last_market: Option<MarketIdentityV2>,
 }
 impl HiddenMaterialReaderV1 {
     pub fn open(
@@ -405,6 +410,11 @@ impl HiddenMaterialReaderV1 {
             rows,
             bytes,
             metrics: HiddenMaterialReadMetricsV1::default(),
+            derived: None,
+            recording: None,
+            last_derivation_position: None,
+            last_canonical_position: None,
+            last_market: None,
         })
     }
     pub fn metrics(&self) -> &HiddenMaterialReadMetricsV1 {
@@ -448,10 +458,25 @@ impl HiddenMaterialReaderV1 {
         let mut resolved: Vec<Option<ResolvedHiddenRecordV1>> =
             (0..entries.len()).map(|_| None).collect();
         if !step_slots.is_empty() {
-            let mut reader = HiddenStepReaderV1::open(&self.prepared, self.rows, self.bytes)?;
-            while let Some(row) = reader.next_row()? {
+            // 索引可真实倒退；只在所需步骤已经越过时重开，不能把索引序当文件序。
+            if self
+                .last_derivation_position
+                .is_some_and(|last| *step_slots.first_key_value().unwrap().0 <= last)
+            {
+                self.derived = None;
+                self.last_derivation_position = None;
+            }
+            if self.derived.is_none() {
+                self.derived = Some(HiddenStepReaderV1::open(
+                    &self.prepared,
+                    self.rows,
+                    self.bytes,
+                )?);
+            }
+            while let Some(row) = self.derived.as_mut().unwrap().next_row()? {
                 self.metrics.decoded_derived_rows += 1;
                 if let HiddenStoredRowV1::Step(step) = row {
+                    self.last_derivation_position = Some(step.reference.derivation_position);
                     if let Some(slot) = step_slots.remove(&step.reference.derivation_position) {
                         stored_steps[slot] = Some(step);
                     }
@@ -461,14 +486,44 @@ impl HiddenMaterialReaderV1 {
                 }
             }
         }
+        // 同一消息的步骤可能跨页；仅复用其市场身份，不缓存规范载荷。
+        if let (Some(position), Some(market)) = (self.last_canonical_position, &self.last_market) {
+            if let Some(slots) = step_market_slots.remove(&position) {
+                for slot in slots {
+                    if let Some(stored) = stored_steps[slot].take() {
+                        resolved[slot] = Some(ResolvedHiddenRecordV1::Step {
+                            stored,
+                            market: market.clone(),
+                        });
+                    }
+                }
+            }
+        }
         if !fact_slots.is_empty() || !step_market_slots.is_empty() {
-            let mut reader = PublicRecordingReaderV1::open_committed(
-                &self.recording_root,
-                Some(self.prepared.prefix.clone()),
-                self.rows,
-                self.bytes,
-            )?;
-            while let Some(row) = reader.next_row()? {
+            let first = fact_slots
+                .keys()
+                .chain(step_market_slots.keys())
+                .min()
+                .copied()
+                .unwrap();
+            // 相等的真正 Reference 仍需原载荷，不能用上一市场身份代替。
+            if self
+                .last_canonical_position
+                .is_some_and(|last| first <= last)
+            {
+                self.recording = None;
+                self.last_canonical_position = None;
+                self.last_market = None;
+            }
+            if self.recording.is_none() {
+                self.recording = Some(PublicRecordingReaderV1::open_committed(
+                    &self.recording_root,
+                    Some(self.prepared.prefix.clone()),
+                    self.rows,
+                    self.bytes,
+                )?);
+            }
+            while let Some(row) = self.recording.as_mut().unwrap().next_row()? {
                 self.metrics.decoded_recording_rows += 1;
                 if let PublicStoredRowV1::Canonical {
                     canonical_position,
@@ -476,13 +531,20 @@ impl HiddenMaterialReaderV1 {
                     ..
                 } = row
                 {
-                    if let CanonicalEventRecordV2::PolymarketMessage(message) = &record {
+                    self.last_canonical_position = Some(canonical_position);
+                    self.last_market = match &record {
+                        CanonicalEventRecordV2::PolymarketMessage(message) => {
+                            Some(message.market.clone())
+                        }
+                        _ => None,
+                    };
+                    if let Some(market) = &self.last_market {
                         if let Some(slots) = step_market_slots.remove(&canonical_position) {
                             for slot in slots {
                                 if let Some(stored) = stored_steps[slot].take() {
                                     resolved[slot] = Some(ResolvedHiddenRecordV1::Step {
                                         stored,
-                                        market: message.market.clone(),
+                                        market: market.clone(),
                                     });
                                 }
                             }

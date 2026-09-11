@@ -19,6 +19,8 @@ use std::{
     sync::Arc,
 };
 
+const PROJECTION_VERSION: BusinessProjectionVersionV1 = BusinessProjectionVersionV1::V3;
+
 #[derive(Deserialize)]
 struct SimulationConfig {
     data: Config,
@@ -136,7 +138,7 @@ pub fn run(config_path: &Path, out: &Path, recording: &Path) -> RecordingResult<
     let scenario = Arc::new(SealedPlatformScenarioV1::decode_and_seal(&bytes)?);
     let latency = load_embedded_proxy_latency_profile()?;
     let opened = RunOpenedV2 {
-        projection_version: Default::default(),
+        projection_version: PROJECTION_VERSION,
         run_id: config.session.run_id.clone(),
         durability_role: RunDurabilityRoleV2::CleanRun,
         platform_rule_snapshot_file_sha256: rules.file_sha256().clone(),
@@ -227,4 +229,135 @@ pub fn run(config_path: &Path, out: &Path, recording: &Path) -> RecordingResult<
         &serde_json::json!({"groups": groups, "clean_sealed_log": candidate.log_path()}),
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use contracts::*;
+
+    #[test]
+    fn finite_projection_accepts_real_account_opening_and_persists_it() {
+        let directory = tempfile::tempdir().unwrap();
+        // 只读复用已有合法规则夹具；正式入口仍在会话前真实查询当前规则。
+        let rules = load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
+            snapshot_path: Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("tests/fixtures/platform-rule-snapshot-v3-gate-b.json"),
+            expected_file_sha256: Sha256Hex(
+                "d63c0e7b09edc4b2c4c3f0295f806b25f6f5fd03663cdf60ff062117e53e4e54".into(),
+            ),
+            replay_causal_start_utc_ms: 1_787_400_000_000,
+        })
+        .unwrap();
+        let finality = Arc::new(TradeFinalityPolicyV2::decode_and_seal(br#"{"schema_version":"trade_finality_policy_v2","normal_path":{"steps":[{"state":"MATCHED","offset_ms":0},{"state":"MINED","offset_ms":10},{"state":"CONFIRMED","offset_ms":20}],"economic_application_ordinal":1},"failure_overrides":[]}"#).unwrap());
+        let market = PlatformMarketV1::try_new(
+            MarketIdentityV2 {
+                condition_id: ConditionId(format!("0x{}", "1".repeat(64))),
+                clob_market_id: ClobMarketId("3195576".into()),
+                window: MarketWindowV2 {
+                    start_at_utc_ms: 20_000,
+                    end_at_utc_ms: 30_000,
+                },
+            },
+            [
+                AssetIdentityV1 {
+                    token_id: TokenId("20".into()),
+                    outcome: OutcomeIdentityV1 {
+                        index: 0,
+                        label: "Up".into(),
+                    },
+                },
+                AssetIdentityV1 {
+                    token_id: TokenId("3".into()),
+                    outcome: OutcomeIdentityV1 {
+                        index: 1,
+                        label: "Down".into(),
+                    },
+                },
+            ],
+        )
+        .unwrap();
+        let scenario = PlatformScenarioV1::try_new(vec![market]).unwrap();
+        let scenario = Arc::new(
+            SealedPlatformScenarioV1::decode_and_seal(
+                &serde_json::to_vec(&SimulationScenarioArtifactV1 {
+                    schema_version: PLATFORM_SCENARIO_SCHEMA_V1.into(),
+                    scenario_sha256: scenario.scenario_sha256().clone(),
+                    market_set_sha256: scenario.market_set_sha256().clone(),
+                    markets: scenario.market_set().markets().to_vec(),
+                })
+                .unwrap(),
+            )
+            .unwrap(),
+        );
+        let latency = load_embedded_proxy_latency_profile().unwrap();
+        let opened = RunOpenedV2 {
+            projection_version: PROJECTION_VERSION,
+            run_id: "finite-projection-test".into(),
+            durability_role: RunDurabilityRoleV2::CleanRun,
+            platform_rule_snapshot_file_sha256: rules.file_sha256().clone(),
+            trade_finality_policy_file_sha256: finality.policy_id().clone(),
+            platform_scenario_file_sha256: scenario.file_sha256().clone(),
+            proxy_latency_profile_file_sha256: latency.file_sha256().clone(),
+            implementation_identity: ImplementationIdentityV1 {
+                git_commit: "a".repeat(40),
+                source_identity_sha256: Sha256Hex("b".repeat(64)),
+                cargo_lock_sha256: Sha256Hex("c".repeat(64)),
+            },
+            market_event_source_identity_sha256: Sha256Hex("d".repeat(64)),
+        };
+        let reference = DurableSourceReferenceV1 {
+            source: ImmutableSourceReferenceV1::Location(
+                directory.path().join("sim.jsonl").display().to_string(),
+            ),
+        };
+        let projection = SimV2NoeProjectionPortV2::new(
+            directory.path().join("noe"),
+            opened.clone(),
+            reference.clone(),
+            reference,
+            "opening".into(),
+            "finite-test".into(),
+        );
+        let observation = projection.observation();
+        let mut execution = PublicSimExecutionV1::create_new(
+            &directory.path().join("sim.jsonl"),
+            PublicRunOpenedV1 {
+                projection_version: opened.projection_version,
+                run_id: opened.run_id.clone(),
+                platform_rule_snapshot_file_sha256: opened.platform_rule_snapshot_file_sha256,
+                trade_finality_policy_file_sha256: opened.trade_finality_policy_file_sha256,
+                platform_scenario_file_sha256: opened.platform_scenario_file_sha256,
+                proxy_latency_profile_file_sha256: opened.proxy_latency_profile_file_sha256,
+                implementation_identity: opened.implementation_identity,
+                market_event_source_identity_sha256: opened.market_event_source_identity_sha256,
+            },
+            rules,
+            finality,
+            scenario,
+            latency,
+            Box::new(Projection(projection)),
+            262144,
+            4,
+        )
+        .unwrap();
+        execution
+            .create_session(SessionSpecV3 {
+                run_id: opened.run_id,
+                session_id: "session".into(),
+                account_id: "account".into(),
+                caller_role: SimCallerRoleV1::Paper,
+                caller_instance_id: "finite-test".into(),
+                creation_request_id: "opening".into(),
+                response_bridge_binding_id: "response".into(),
+                initial_account_state: InitialAccountStateV2 {
+                    available_pusd: ExactDecimal("10".into()),
+                },
+                session_seed: Sha256Hex("e".repeat(64)),
+            })
+            .unwrap();
+        execution.activate_session("activate".into()).unwrap();
+        assert_eq!(observation.result_references().len(), 1);
+        assert!(directory.path().join("noe").exists());
+    }
 }
