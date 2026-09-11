@@ -18676,9 +18676,11 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
     ) -> Self {
         let rules = execution
             .actor
-            .scenario
-            .initial_market_directory()
-            .markets()
+            .state
+            .as_ref()
+            .and_then(|state| state.session.as_ref())
+            .into_iter()
+            .flat_map(|session| session.market_directory.markets())
             .map(|market| {
                 (
                     market.market().condition_id.0.clone(),

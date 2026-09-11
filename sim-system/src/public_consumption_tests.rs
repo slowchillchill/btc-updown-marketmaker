@@ -317,6 +317,13 @@ async fn public_execution(
         )
         .unwrap(),
     ]);
+    public_execution_with_scenario(path, scenario, role).await
+}
+async fn public_execution_with_scenario(
+    path: &Path,
+    scenario: Arc<SealedPlatformScenarioV1>,
+    role: SimCallerRoleV1,
+) -> (PublicSimExecutionV1, Rc<DeliveredFeedbackState>) {
     let rules = successful_snapshot_v3_for_sim_tests().await;
     let finality = successful_policy_v2_for_tests();
     let latency = load_embedded_proxy_latency_profile().unwrap();
@@ -1393,4 +1400,48 @@ async fn pure_reference_bucket_closes_without_market_effect_and_missing_time_is_
             .pm_quantity(CONDITION_ID, UP_TOKEN_ID, BookSide::Bid, Decimal::new(5, 1)),
         Decimal::ZERO
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn enrolled_market_has_the_same_snapshot_rule_frame() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let core = recorded_books(&root);
+    let scenario = sealed_scenario_for_markets(vec![super::market('2', "456", "4", "5")]);
+    let (mut execution, _) = public_execution_with_scenario(
+        &temp.path().join("sim.jsonl"),
+        scenario,
+        SimCallerRoleV1::ModelTrain,
+    )
+    .await;
+    let context = core.pm_context(CONDITION_ID).unwrap();
+    let target = crate::scenario::PlatformMarketV1::try_new(
+        context.market,
+        context
+            .assets
+            .into_iter()
+            .map(|a| a.asset)
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap(),
+    )
+    .unwrap();
+    execution
+        .enroll_market(MarketEnrollmentRequestV1 {
+            enrollment_request_id: "enroll-before-public-groups".into(),
+            market: target,
+        })
+        .unwrap();
+    let expected = execution.actor._rule_snapshot.public_rule_context(market());
+    let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, RecordedTimes).unwrap();
+    let mut driver =
+        FinitePublicConsumptionV1::new(execution, source, "finite-enrolled-market".into());
+    let (receipt, cutoff) = driver.next_group().unwrap().unwrap();
+    assert_eq!(receipt.group.group_position, 0);
+    let frames = driver.frames();
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].observation.market, market());
+    assert_eq!(frames[0].rule_context.as_ref(), &expected);
+    assert_eq!(frames[0].receipt, receipt);
+    assert_eq!(frames[0].decision_cutoff, cutoff);
 }
