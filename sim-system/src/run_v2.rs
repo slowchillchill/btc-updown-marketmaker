@@ -58,6 +58,7 @@ use crate::session::MarketEnrollmentRequestV1;
 mod noe_projection;
 pub use noe_projection::{
     SimV2NoeObservationV1, SimV2NoeProjectionPortV1, SimV2NoeProjectionPortV2,
+    SimV2NoeProjectionPortV3,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -8985,6 +8986,16 @@ mod tests {
             Arc::clone(&finality_policy),
         )
         .await;
+        let quantity_opening = Arc::clone(
+            &actor
+                .state
+                .as_ref()
+                .unwrap()
+                .session
+                .as_ref()
+                .unwrap()
+                .opening_fact,
+        );
         let initial = decoded_initial_market_events("0");
         let condition_id = initial[0].market.condition_id.clone();
         let first_token_id = TokenId("1".to_owned());
@@ -9190,6 +9201,25 @@ mod tests {
         else {
             panic!("全量活动订单首页必须返回页面")
         };
+        let projected = noe_projection::project_real_query_for_tests(
+            &_directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2),
+            &actor.opened,
+            &quantity_opening,
+            &all_effect.result,
+        );
+        assert_eq!(projected["Page"]["root_sequence"], all_page.root_sequence);
+        assert_eq!(
+            projected["Page"]["next_cursor"],
+            serde_json::to_value(all_page.next_cursor).unwrap()
+        );
+        assert!(
+            projected["Page"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|o| o.get("quantities").is_some())
+        );
+
         let all_root_rows = &state
             .session
             .as_ref()
@@ -9443,6 +9473,28 @@ mod tests {
         else {
             panic!("同修订同过滤首页必须复用页面")
         };
+        let projected = noe_projection::project_real_query_for_tests(
+            &_directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2),
+            &actor.opened,
+            &quantity_opening,
+            &repeated_all_effect.result,
+        );
+        assert_eq!(
+            projected["Page"]["root_sequence"],
+            repeated_all_page.root_sequence
+        );
+        assert_eq!(
+            projected["Page"]["next_cursor"],
+            serde_json::to_value(repeated_all_page.next_cursor).unwrap()
+        );
+        assert!(
+            projected["Page"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|o| o.get("quantities").is_some())
+        );
+
         assert_eq!(
             state.business_resources.bytes,
             resources_before_repeated_all.bytes
@@ -9602,6 +9654,28 @@ mod tests {
         else {
             panic!("撤单后的新订单根必须成功")
         };
+        let projected = noe_projection::project_real_query_for_tests(
+            &_directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2),
+            &actor.opened,
+            &quantity_opening,
+            &current_all_effect.result,
+        );
+        assert_eq!(
+            projected["Page"]["root_sequence"],
+            current_all_page.root_sequence
+        );
+        assert_eq!(
+            projected["Page"]["next_cursor"],
+            serde_json::to_value(current_all_page.next_cursor).unwrap()
+        );
+        assert!(
+            projected["Page"]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|o| o.get("quantities").is_some())
+        );
+
         assert_eq!(current_all_page.root_sequence, 103);
         assert_eq!(current_all_page.items.len(), 100);
         assert_eq!(
@@ -9740,6 +9814,26 @@ mod tests {
             actor._rule_snapshot.snapshot(),
             actor._finality_policy.as_ref(),
         );
+        for effect in [
+            &expired_orders_effect,
+            &missing_orders_effect,
+            &beyond_orders_effect,
+        ] {
+            let projected = noe_projection::project_real_query_for_tests(
+                &_directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2),
+                &actor.opened,
+                &quantity_opening,
+                &effect.result,
+            );
+            let QueryActionResultV2::Orders(source) = &effect.result else {
+                unreachable!()
+            };
+            assert_eq!(
+                projected,
+                serde_json::to_value(source).unwrap(),
+                "无数量分支不能生成数量或改写保留范围"
+            );
+        }
         assert_eq!(
             beyond_orders_effect.result,
             QueryActionResultV2::Orders(OrdersQueryResultV2::InvalidCursor)
@@ -9750,6 +9844,16 @@ mod tests {
     async fn pending_maker_stays_private_until_first_positive_maker_fill_changes_query_root() {
         let (_directory, mut actor) =
             active_market_actor(SimCallerRoleV1::ModelTrain, "run-query-maker-v2").await;
+        let quantity_opening = Arc::clone(
+            &actor
+                .state
+                .as_ref()
+                .unwrap()
+                .session
+                .as_ref()
+                .unwrap()
+                .opening_fact,
+        );
         let initial = decoded_initial_market_events("0");
         let condition_id = initial[0].market.condition_id.clone();
         let token_id = TokenId("1".to_owned());
@@ -9912,6 +10016,18 @@ mod tests {
             panic!("零对价 maker 后活动订单查询必须成功")
         };
         assert_eq!(repeated_page, &frozen_before_page);
+        let projected = noe_projection::project_real_query_for_tests(
+            &_directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2),
+            &actor.opened,
+            &quantity_opening,
+            &repeated_effect.result,
+        );
+        assert_eq!(
+            projected["Page"]["items"][0]["quantities"]["Base"]["active_unfilled_base_quantity_shares"],
+            "5"
+        );
+        assert_eq!(projected["Page"]["root_sequence"], 1);
+
         let session = state.session.as_ref().expect("零对价 maker 查询后会话存在");
         assert_eq!(session.query_state.current_revision, 1);
         assert_eq!(session.query_state.order_roots.len(), 1);
@@ -17426,11 +17542,33 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn trade_facts_v3_public_delivery_durable_rebuild_and_legacy_equivalence() {
+        trade_facts_with_order_evidence(false).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn order_quantity_v3_public_delivery_durable_rebuild_and_legacy_equivalence() {
+        trade_facts_with_order_evidence(true).await;
+    }
+
+    async fn trade_facts_with_order_evidence(measured: bool) {
         use crate::runtime_v2::BusinessProjectionVersionV1;
         use contracts::execution_normalization::{
             DurableSourceReferenceV1, ImmutableSourceReferenceV1,
         };
         use execution_normalization::{NormalizationRecordV2, SourceNeutralEvidenceKindV2};
+        let read_result = |reference: &contracts::execution_normalization::NoeResultReferenceV1| {
+            if measured {
+                let new = execution_normalization::read_noe_result_v3(reference).unwrap();
+                execution_normalization::ResolvedNoeResultV2 {
+                    context: new.context,
+                    boundary: new.boundary,
+                    record: serde_json::from_value(serde_json::to_value(new.record).unwrap())
+                        .unwrap(),
+                }
+            } else {
+                execution_normalization::read_noe_result_v2(reference).unwrap()
+            }
+        };
         let mut legacy_feedback = Vec::new();
         let mut legacy_identities = Vec::new();
         let mut legacy_economics = Vec::new();
@@ -17445,6 +17583,9 @@ mod tests {
             let session_spec = {
                 let mut value = spec("trade-facts", "create-trade-facts");
                 value.caller_role = SimCallerRoleV1::Paper;
+                if measured {
+                    value.initial_account_state.available_pusd = ExactDecimal("2000".into());
+                }
                 value
             };
             let account_key = contracts::AccountInstanceKeyV1 {
@@ -17488,16 +17629,29 @@ mod tests {
                     (Box::new(port), observation)
                 }
                 BusinessProjectionVersionV1::V3 => {
-                    let port = SimV2NoeProjectionPortV2::new(
-                        &root,
-                        run_opened.clone(),
-                        evidence.clone(),
-                        evidence.clone(),
-                        "opening".into(),
-                        "trade-facts-test".into(),
-                    );
-                    let observation = port.observation();
-                    (Box::new(port), observation)
+                    if measured {
+                        let port = SimV2NoeProjectionPortV3::new(
+                            &root,
+                            run_opened.clone(),
+                            evidence.clone(),
+                            evidence.clone(),
+                            "opening".into(),
+                            "trade-facts-test".into(),
+                        );
+                        let observation = port.observation();
+                        (Box::new(port), observation)
+                    } else {
+                        let port = SimV2NoeProjectionPortV2::new(
+                            &root,
+                            run_opened.clone(),
+                            evidence.clone(),
+                            evidence.clone(),
+                            "opening".into(),
+                            "trade-facts-test".into(),
+                        );
+                        let observation = port.observation();
+                        (Box::new(port), observation)
+                    }
                 }
             };
             let accepted = Rc::new(RefCell::new(Vec::new()));
@@ -17530,9 +17684,22 @@ mod tests {
                 snapshot.asks[0].price_pusd_per_share = ExactDecimal("0.5".into());
                 let mut second = snapshot.asks[0].clone();
                 second.price_pusd_per_share = ExactDecimal("0.6".into());
+                if measured {
+                    second.quantity_shares = ExactDecimal("5.005".into());
+                }
                 snapshot.asks.push(second);
             } else {
                 panic!("真实初始盘口");
+            }
+            if measured {
+                if let ExecutionMarketEventPayloadV3::InitialL2Snapshot(snapshot) =
+                    &mut events[1].payload
+                {
+                    snapshot.asks[0].price_pusd_per_share = ExactDecimal("0.5".into());
+                    snapshot.asks[0].quantity_shares = ExactDecimal("10".into());
+                }
+                events[1].event_id =
+                    data_pipeline_core::derive_execution_market_event_v3_id(&events[1]).unwrap();
             }
             events[0].event_id =
                 data_pipeline_core::derive_execution_market_event_v3_id(&events[0]).unwrap();
@@ -17574,7 +17741,7 @@ mod tests {
                             &TokenId("1".into()),
                             SimBuyOrderKindV1::GtcLimit {
                                 limit_price_pusd_per_share: "0.6".parse().unwrap(),
-                                size_shares: "10".parse().unwrap(),
+                                size_shares: if measured { "10.01" } else { "10" }.parse().unwrap(),
                                 post_only: false,
                             },
                         ),
@@ -17595,6 +17762,149 @@ mod tests {
                         next_index_position: 2,
                     })
                     .unwrap();
+            }
+            if measured {
+                execution
+                    .post_order(
+                        request_cutoff(15_000),
+                        PostOrderRequestV2 {
+                            context: RequestContextV2 {
+                                global_request_id: "improved-budget".into(),
+                                caller_correlation_id: None,
+                            },
+                            item: post_item(
+                                "improved-fak",
+                                &market.market().condition_id,
+                                &TokenId("2".into()),
+                                SimBuyOrderKindV1::FakMarket {
+                                    spend_pusd: "3".parse().unwrap(),
+                                    worst_price_pusd_per_share: "0.6".parse().unwrap(),
+                                },
+                            ),
+                        },
+                    )
+                    .unwrap();
+                for _ in 0..32 {
+                    let Some(required) = execution.next_required_logical_drive() else {
+                        break;
+                    };
+                    if required.required_at_utc_ms > 20_000 {
+                        break;
+                    }
+                    execution
+                        .drive_platform_prefix(PlatformPrefixAdvanceV2 {
+                            path: required.path,
+                            closed_through_utc_ms: required.required_at_utc_ms,
+                            next_index_position: 2,
+                        })
+                        .unwrap();
+                }
+                execution
+                    .post_orders(
+                        request_cutoff(20_000),
+                        PostOrdersRequestV2 {
+                            context: RequestContextV2 {
+                                global_request_id: "quantity-batch".into(),
+                                caller_correlation_id: None,
+                            },
+                            items: vec![
+                                PostOrderBatchItemV2 {
+                                    batch_item_ordinal: 0,
+                                    item: post_item(
+                                        "rejected-fak",
+                                        &market.market().condition_id,
+                                        &TokenId("2".into()),
+                                        SimBuyOrderKindV1::FakMarket {
+                                            spend_pusd: "3".parse().unwrap(),
+                                            worst_price_pusd_per_share: "0.6".parse().unwrap(),
+                                        },
+                                    ),
+                                },
+                                PostOrderBatchItemV2 {
+                                    batch_item_ordinal: 1,
+                                    item: post_item(
+                                        "partial-base",
+                                        &market.market().condition_id,
+                                        &TokenId("2".into()),
+                                        SimBuyOrderKindV1::GtcLimit {
+                                            size_shares: "7".parse().unwrap(),
+                                            limit_price_pusd_per_share: "0.6".parse().unwrap(),
+                                            post_only: false,
+                                        },
+                                    ),
+                                },
+                                PostOrderBatchItemV2 {
+                                    batch_item_ordinal: 2,
+                                    item: post_item(
+                                        "zero-matched",
+                                        &market.market().condition_id,
+                                        &TokenId("2".into()),
+                                        SimBuyOrderKindV1::GtcLimit {
+                                            size_shares: "7".parse().unwrap(),
+                                            limit_price_pusd_per_share: "0.6".parse().unwrap(),
+                                            post_only: false,
+                                        },
+                                    ),
+                                },
+                            ],
+                        },
+                    )
+                    .unwrap();
+                for _ in 0..32 {
+                    let Some(required) = execution.next_required_logical_drive() else {
+                        break;
+                    };
+                    if required.required_at_utc_ms > 25_000 {
+                        break;
+                    }
+                    execution
+                        .drive_platform_prefix(PlatformPrefixAdvanceV2 {
+                            path: required.path,
+                            closed_through_utc_ms: required.required_at_utc_ms,
+                            next_index_position: 2,
+                        })
+                        .unwrap();
+                }
+                execution
+                    .order(
+                        request_cutoff(25_000),
+                        OrderRequestV2 {
+                            context: RequestContextV2 {
+                                global_request_id: "quantity-order".into(),
+                                caller_correlation_id: None,
+                            },
+                            platform_order_id: "sim-3".into(),
+                        },
+                    )
+                    .unwrap();
+                execution
+                    .orders(
+                        request_cutoff(25_000),
+                        OrdersRequestV2 {
+                            context: RequestContextV2 {
+                                global_request_id: "quantity-orders".into(),
+                                caller_correlation_id: None,
+                            },
+                            filter: OrdersFilterV1::default(),
+                            cursor: None,
+                        },
+                    )
+                    .unwrap();
+                for _ in 0..16 {
+                    let Some(required) = execution.next_required_logical_drive() else {
+                        break;
+                    };
+                    if required.required_at_utc_ms > 30_000 {
+                        break;
+                    }
+                    execution
+                        .drive_platform_prefix(PlatformPrefixAdvanceV2 {
+                            path: required.path,
+                            closed_through_utc_ms: required.required_at_utc_ms,
+                            next_index_position: 2,
+                        })
+                        .unwrap();
+                }
             }
             assert!(execution.actor.pending_projections.is_empty());
             assert_eq!(
@@ -17623,7 +17933,7 @@ mod tests {
             }
             assert_eq!(
                 feedback.len(),
-                7,
+                if measured { 15 } else { 7 },
                 "两笔同刻成交分别成功／失败的全部生命周期"
             );
             if version == BusinessProjectionVersionV1::V2 {
@@ -17660,7 +17970,7 @@ mod tests {
                         == Some(contracts::SimulatedTradeKnownStatusV2::MatchedNotBroadcasted)
                 })
                 .collect();
-            assert_eq!(first.len(), 2);
+            assert_eq!(first.len(), if measured { 4 } else { 2 });
             assert_eq!(first[0].matched_at_utc_ms, first[1].matched_at_utc_ms);
             assert_eq!((first[0].fill_sequence, first[1].fill_sequence), (1, 2));
             assert!(
@@ -17686,7 +17996,7 @@ mod tests {
             let mut matched_records = 0;
             let mut first_resolved = None;
             for result_ref in observation.result_references() {
-                let result = execution_normalization::read_noe_result_v2(&result_ref).unwrap();
+                let result = read_result(&result_ref);
                 first_resolved.get_or_insert_with(|| result.clone());
                 identities.push((
                     result.record.logical_identity().clone(),
@@ -17741,42 +18051,64 @@ mod tests {
                     matched_records += 1;
                 }
             }
-            assert_eq!(matched_records, 7);
+            assert_eq!(matched_records, if measured { 15 } else { 7 });
             assert_eq!(identities, legacy_identities);
             assert_eq!(economics, legacy_economics);
             let resolved = first_resolved.unwrap();
-            let restored = execution_normalization::DurableContextStoreV2::open(
-                &root,
-                &resolved.context.context_reference,
-            )
-            .unwrap();
-            assert_eq!(
-                restored
-                    .commits()
-                    .iter()
-                    .map(|c| c.records.len())
-                    .sum::<usize>(),
-                observation.result_references().len()
-            );
-            // 从同一事件日志重建到一个空的正常NOE根，验证保存的运行版本和完整新字段。
             drop(execution);
+            if measured {
+                noe_projection::assert_order_controls_v3(
+                    &root,
+                    &resolved.context.context_reference,
+                    &accepted.borrow(),
+                );
+            } else {
+                let restored = execution_normalization::DurableContextStoreV2::open(
+                    &root,
+                    &resolved.context.context_reference,
+                )
+                .unwrap();
+                assert_eq!(
+                    restored
+                        .commits()
+                        .iter()
+                        .map(|c| c.records.len())
+                        .sum::<usize>(),
+                    observation.result_references().len()
+                );
+            }
+            // 从同一事件日志重建到一个空的正常NOE根，验证保存的运行版本和完整新字段。
             let rebuilt_root = directory.path().join("rebuilt-noe");
-            let port = SimV2NoeProjectionPortV2::new(
-                &rebuilt_root,
-                run_opened,
-                evidence.clone(),
-                evidence,
-                "opening".into(),
-                "trade-facts-test".into(),
-            );
-            let rebuilt_observation = port.observation();
+            let (port, rebuilt_observation): (Box<dyn BusinessProjectionPortV2>, _) = if measured {
+                let port = SimV2NoeProjectionPortV3::new(
+                    &rebuilt_root,
+                    run_opened,
+                    evidence.clone(),
+                    evidence,
+                    "opening".into(),
+                    "trade-facts-test".into(),
+                );
+                let observation = port.observation();
+                (Box::new(port), observation)
+            } else {
+                let port = SimV2NoeProjectionPortV2::new(
+                    &rebuilt_root,
+                    run_opened,
+                    evidence.clone(),
+                    evidence,
+                    "opening".into(),
+                    "trade-facts-test".into(),
+                );
+                let rebuilt_observation = port.observation();
+                (Box::new(port), rebuilt_observation)
+            };
             let recovered = SimExecution::recover_paper(
                 &path,
                 rules,
                 policy,
                 scenario,
                 latency,
-                Box::new(port),
+                port,
                 MAX_GROUP_BYTES,
                 |r| {
                     assert_eq!(r, &reference);
@@ -17791,22 +18123,38 @@ mod tests {
             let rebuilt: Vec<_> = rebuilt_observation
                 .result_references()
                 .iter()
-                .map(|r| {
-                    execution_normalization::read_noe_result_v2(r)
-                        .unwrap()
-                        .record
-                })
+                .map(|r| read_result(r).record)
                 .collect();
             let original: Vec<_> = observation
                 .result_references()
                 .iter()
-                .map(|r| {
-                    execution_normalization::read_noe_result_v2(r)
-                        .unwrap()
-                        .record
-                })
+                .map(|r| read_result(r).record)
                 .collect();
             assert_eq!(rebuilt, original);
+            if measured {
+                let original_full: Vec<_> = observation
+                    .result_references()
+                    .iter()
+                    .map(|r| {
+                        execution_normalization::read_noe_result_v3(r)
+                            .unwrap()
+                            .record
+                    })
+                    .collect();
+                let rebuilt_full: Vec<_> = rebuilt_observation
+                    .result_references()
+                    .iter()
+                    .map(|r| {
+                        execution_normalization::read_noe_result_v3(r)
+                            .unwrap()
+                            .record
+                    })
+                    .collect();
+                assert_eq!(
+                    rebuilt_full, original_full,
+                    "新控制数量与批项时间必须逐字段原样重建"
+                );
+            }
             let batch = accepted
                 .borrow()
                 .iter()
@@ -17822,11 +18170,20 @@ mod tests {
                     _ => None,
                 })
                 .unwrap();
-            noe_projection::assert_v3_rebuilt_evidence_semantics(
-                &rebuilt_root,
-                &resolved.context.context_reference,
-                &batch,
-            );
+            drop(recovered);
+            if !measured {
+                noe_projection::assert_v3_rebuilt_evidence_semantics(
+                    &rebuilt_root,
+                    &resolved.context.context_reference,
+                    &batch,
+                );
+            } else {
+                noe_projection::assert_order_controls_v3(
+                    &rebuilt_root,
+                    &resolved.context.context_reference,
+                    &accepted.borrow(),
+                );
+            }
         }
     }
 }

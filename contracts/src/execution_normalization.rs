@@ -298,22 +298,22 @@ pub enum SourceNeutralQueryOutOfRetentionV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SourceNeutralOrderQueryResultV1 {
-    Found { order: SourceNeutralOrderSnapshotV1 },
+pub enum SourceNeutralOrderQueryResult<O> {
+    Found { order: O },
     NotFound,
     OutOfRetention(SourceNeutralQueryOutOfRetentionV1),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SourceNeutralOrdersPageV1 {
+pub struct SourceNeutralOrdersPage<O> {
     pub root_sequence: u64,
-    pub items: Vec<SourceNeutralOrderSnapshotV1>,
+    pub items: Vec<O>,
     pub next_cursor: Option<SourceNeutralQueryCursorV1>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SourceNeutralOrdersQueryResultV1 {
-    Page(SourceNeutralOrdersPageV1),
+pub enum SourceNeutralOrdersQueryResult<O> {
+    Page(SourceNeutralOrdersPage<O>),
     InvalidCursor,
     OutOfRetention(SourceNeutralQueryOutOfRetentionV1),
 }
@@ -381,19 +381,19 @@ pub enum SourceNeutralTradesQueryResultV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SourceNeutralControlResultV1 {
+pub enum SourceNeutralControlResult<S, O> {
     Submission {
-        outcome: SourceNeutralSubmissionOutcomeV1,
+        outcome: S,
     },
     Cancellation {
         order_identity: StableLogicalIdentityV1,
         outcome: SourceNeutralCancellationOutcomeV1,
     },
     OrderQuery {
-        result: SourceNeutralOrderQueryResultV1,
+        result: SourceNeutralOrderQueryResult<O>,
     },
     OrdersQuery {
-        result: SourceNeutralOrdersQueryResultV1,
+        result: SourceNeutralOrdersQueryResult<O>,
     },
     TradesQuery {
         result: SourceNeutralTradesQueryResultV1,
@@ -488,4 +488,59 @@ pub struct NoeRunConsumptionManifestV1 {
     pub source_watermark: SimV2SourceWatermarkV1,
     pub context_container: NoePublishedContainerReferenceV1,
     pub commit_containers: Vec<NoePublishedContainerReferenceV1>,
+}
+
+// 两代控制结果只改变所属测量成员，其他分支及编码保持一致。
+pub type SourceNeutralOrderQueryResultV1 =
+    SourceNeutralOrderQueryResult<SourceNeutralOrderSnapshotV1>;
+pub type SourceNeutralOrdersPageV1 = SourceNeutralOrdersPage<SourceNeutralOrderSnapshotV1>;
+pub type SourceNeutralOrdersQueryResultV1 =
+    SourceNeutralOrdersQueryResult<SourceNeutralOrderSnapshotV1>;
+pub type SourceNeutralControlResultV1 =
+    SourceNeutralControlResult<SourceNeutralSubmissionOutcomeV1, SourceNeutralOrderSnapshotV1>;
+pub type SourceNeutralOrderQueryResultV2 =
+    SourceNeutralOrderQueryResult<SourceNeutralOrderSnapshotV2>;
+pub type SourceNeutralOrdersPageV2 = SourceNeutralOrdersPage<SourceNeutralOrderSnapshotV2>;
+pub type SourceNeutralOrdersQueryResultV2 =
+    SourceNeutralOrdersQueryResult<SourceNeutralOrderSnapshotV2>;
+pub type SourceNeutralControlResultV2 =
+    SourceNeutralControlResult<SourceNeutralSubmissionOutcomeV2, SourceNeutralOrderSnapshotV2>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceNeutralSubmissionMeasurementV1 {
+    Base {
+        matched_base_quantity_shares: ExactDecimal,
+        open_base_quantity_shares: ExactDecimal,
+    },
+    QuoteBudget {
+        actual_matched_base_quantity_shares: ExactDecimal,
+    },
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceNeutralSubmissionOutcomeV2 {
+    Accepted {
+        order: SourceNeutralOrderSnapshotV1,
+        measurement: SourceNeutralSubmissionMeasurementV1,
+        effective_processing_at_utc_ms: i64,
+    },
+    RejectedNoEffect,
+    EvidenceUnknownNoEffect,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceNeutralOrderQuantityEvidenceV1 {
+    Base {
+        matched_base_quantity_shares: ExactDecimal,
+        active_unfilled_base_quantity_shares: ExactDecimal,
+    },
+    QuoteBudget {
+        actual_matched_base_quantity_shares: ExactDecimal,
+    },
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceNeutralOrderSnapshotV2 {
+    pub order_identity: StableLogicalIdentityV1,
+    pub condition_id: ConditionId,
+    pub token_id: TokenId,
+    pub state: SourceNeutralOrderStateV1,
+    pub quantities: SourceNeutralOrderQuantityEvidenceV1,
 }
