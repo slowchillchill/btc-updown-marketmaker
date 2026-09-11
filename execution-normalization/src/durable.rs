@@ -10,6 +10,7 @@ use contracts::execution_normalization::{
     ExecutionNormalizationContextReferenceV1, ExecutionNormalizationContextV1,
     NoePublishedContainerReferenceV1, NoeResultReferenceV1, NoeSourceCommitBoundaryV1,
     SimV2ContextSourceV1, SimV2SourceWatermarkV1, SourceNeutralAccountIdentityV1,
+    SourceNeutralControlResultV1, SourceNeutralControlResultV2,
 };
 use contracts::{AccountInstanceKeyV1, Sha256Hex};
 use rustix::fs::{RenameFlags, renameat_with};
@@ -42,29 +43,33 @@ struct ContextContainerV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct CommitPayload<T> {
+struct CommitPayload<T, C> {
     container_version: String,
     encoding: String,
     commit_sequence: u64,
     boundary: NoeSourceCommitBoundaryV1,
-    records: Vec<NormalizationRecord<T>>,
+    records: Vec<NormalizationRecord<T, C>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-struct CommitContainer<T> {
-    payload: CommitPayload<T>,
+struct CommitContainer<T, C> {
+    payload: CommitPayload<T, C>,
     boundary_sha256: Sha256Hex,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DurableCommit<T> {
+pub struct DurableCommit<T, C = SourceNeutralControlResultV1> {
     pub commit_sequence: u64,
     pub boundary: NoeSourceCommitBoundaryV1,
-    pub records: Vec<NormalizationRecord<T>>,
+    pub records: Vec<NormalizationRecord<T, C>>,
     pub container_reference: NoePublishedContainerReferenceV1,
 }
 
-impl<T: NoeTradePayload> DurableCommit<T> {
+impl<
+    T: NoeTradePayload<C>,
+    C: Clone + std::fmt::Debug + Eq + Serialize + serde::de::DeserializeOwned,
+> DurableCommit<T, C>
+{
     pub fn result_reference(&self, record_ordinal: u64) -> Option<NoeResultReferenceV1> {
         (record_ordinal < self.records.len() as u64).then(|| NoeResultReferenceV1 {
             commit_container: self.container_reference.clone(),
@@ -239,12 +244,12 @@ impl From<CoreErrorV1> for DurableErrorV1 {
 }
 
 #[derive(Debug)]
-pub struct DurableContextStore<T> {
+pub struct DurableContextStore<T, C = SourceNeutralControlResultV1> {
     context_directory: PathBuf,
     context: ExecutionNormalizationContextV1,
     context_container_reference: NoePublishedContainerReferenceV1,
-    commits: Vec<DurableCommit<T>>,
-    core: NormalizationCore<T>,
+    commits: Vec<DurableCommit<T, C>>,
+    core: NormalizationCore<T, C>,
     poison: Option<PoisonedStoreV1>,
     #[cfg(test)]
     publish_fault: PublishFaultV1,
@@ -261,10 +266,10 @@ pub struct SimV2ContextSeedV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ResolvedNoeResult<T> {
+pub struct ResolvedNoeResult<T, C = SourceNeutralControlResultV1> {
     pub context: ExecutionNormalizationContextV1,
     pub boundary: NoeSourceCommitBoundaryV1,
-    pub record: NormalizationRecord<T>,
+    pub record: NormalizationRecord<T, C>,
 }
 
 #[derive(Clone, Debug)]
@@ -280,7 +285,11 @@ struct PublishFaultV1 {
     fail_rollback_directory_sync: bool,
 }
 
-impl<T: NoeTradePayload> DurableContextStore<T> {
+impl<
+    T: NoeTradePayload<C>,
+    C: Clone + std::fmt::Debug + Eq + Serialize + serde::de::DeserializeOwned,
+> DurableContextStore<T, C>
+{
     pub fn open_or_create_sim_v2(
         root: impl AsRef<Path>,
         seed: SimV2ContextSeedV1,
@@ -427,7 +436,7 @@ impl<T: NoeTradePayload> DurableContextStore<T> {
                     found: file_sequence,
                 });
             }
-            let container: CommitContainer<T> = decode_container(&path)?;
+            let container: CommitContainer<T, C> = decode_container(&path)?;
             check_container_header(
                 &path,
                 &container.payload.container_version,
@@ -501,7 +510,7 @@ impl<T: NoeTradePayload> DurableContextStore<T> {
         &self.context_container_reference
     }
 
-    pub fn commits(&self) -> &[DurableCommit<T>] {
+    pub fn commits(&self) -> &[DurableCommit<T, C>] {
         &self.commits
     }
 
@@ -520,7 +529,7 @@ impl<T: NoeTradePayload> DurableContextStore<T> {
 
     pub fn commit_batch(
         &mut self,
-        input: NormalizationBatchInput<T>,
+        input: NormalizationBatchInput<T, C>,
         durable_available_at_utc_ms: i64,
     ) -> Result<DurableCommitOutcomeV1, DurableErrorV1> {
         if let Some(poison) = &self.poison {
@@ -626,9 +635,12 @@ impl<T: NoeTradePayload> DurableContextStore<T> {
     }
 }
 
-fn read_noe_result<T: NoeTradePayload>(
+fn read_noe_result<
+    T: NoeTradePayload<C>,
+    C: Clone + std::fmt::Debug + Eq + Serialize + serde::de::DeserializeOwned,
+>(
     reference: &NoeResultReferenceV1,
-) -> Result<ResolvedNoeResult<T>, DurableErrorV1> {
+) -> Result<ResolvedNoeResult<T, C>, DurableErrorV1> {
     let commit_path = PathBuf::from(&reference.commit_container.location);
     let commits_directory = commit_path.parent().filter(|path| {
         path.file_name()
@@ -644,7 +656,7 @@ fn read_noe_result<T: NoeTradePayload>(
         .parent()
         .expect("固定 commits 目录必有上下文父目录");
     let file_sequence = commit_sequence_from_path(&commit_path)?;
-    let container: CommitContainer<T> = decode_container(&commit_path)?;
+    let container: CommitContainer<T, C> = decode_container(&commit_path)?;
     check_container_header(
         &commit_path,
         &container.payload.container_version,
@@ -999,8 +1011,8 @@ fn io_error(operation: &'static str, path: &Path, error: std::io::Error) -> Dura
     }
 }
 
-/// 载荷版本只选择正常记录编码；两个版本共用同一核心和耐久算法。
-pub trait NoeTradePayload:
+/// 载荷版本只选择正常记录编码；各版本共用同一核心和耐久算法。
+pub trait NoeTradePayload<C = SourceNeutralControlResultV1>:
     Clone + std::fmt::Debug + Eq + Serialize + serde::de::DeserializeOwned
 {
     const COMMIT_VERSION: &'static str;
@@ -1016,6 +1028,39 @@ impl NoeTradePayload for contracts::execution_normalization::SourceNeutralTradeL
     const COMMIT_VERSION: &'static str = "noe_commit_container_v2";
     const CONTEXT_VERSION: &'static str = "noe_context_container_v2";
     const CONTRACT_VERSION: &'static str = "execution_normalization_v2";
+}
+impl NoeTradePayload<SourceNeutralControlResultV2>
+    for contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2
+{
+    const COMMIT_VERSION: &'static str = "noe_commit_container_v3";
+    const CONTEXT_VERSION: &'static str = "noe_context_container_v3";
+    const CONTRACT_VERSION: &'static str = "execution_normalization_v3";
+}
+pub type DurableCommitV3 = DurableCommit<
+    contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2,
+    SourceNeutralControlResultV2,
+>;
+pub type DurableContextStoreV3 = DurableContextStore<
+    contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2,
+    SourceNeutralControlResultV2,
+>;
+pub type ResolvedNoeResultV3 = ResolvedNoeResult<
+    contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2,
+    SourceNeutralControlResultV2,
+>;
+impl DurableContextStoreV3 {
+    pub fn commit_batch_v3(
+        &mut self,
+        input: crate::NormalizationBatchInputV3,
+        durable_available_at_utc_ms: i64,
+    ) -> Result<DurableCommitOutcomeV1, DurableErrorV1> {
+        self.commit_batch(input, durable_available_at_utc_ms)
+    }
+}
+pub fn read_noe_result_v3(
+    reference: &NoeResultReferenceV1,
+) -> Result<ResolvedNoeResultV3, DurableErrorV1> {
+    read_noe_result(reference)
 }
 pub type DurableCommitV1 =
     DurableCommit<contracts::execution_normalization::SourceNeutralTradeLifecycleResultV1>;

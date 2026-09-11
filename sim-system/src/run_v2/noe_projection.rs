@@ -7,15 +7,15 @@ use contracts::execution_normalization::{
     NoeRunConsumptionManifestV1, SimV2DirectResponseAssociationV1, SimV2SourceRecordReferenceV1,
     SimV2SourceReferenceV1, SimV2SourceWatermarkV1, SourceNeutralAccountBalanceDeltaV1,
     SourceNeutralAccountTransitionKindV1, SourceNeutralCancellationOutcomeV1,
-    SourceNeutralControlResultV1, SourceNeutralMakerRebateAccrualStatusV1,
+    SourceNeutralControlResult, SourceNeutralMakerRebateAccrualStatusV1,
     SourceNeutralMarketEnrollmentResultV1, SourceNeutralOrderLifecycleEventV1,
-    SourceNeutralOrderLifecycleResultV1, SourceNeutralOrderQueryResultV1,
-    SourceNeutralOrderSnapshotV1, SourceNeutralOrderStateV1, SourceNeutralOrdersPageV1,
-    SourceNeutralOrdersQueryResultV1, SourceNeutralOutcomeBalanceDeltaV1,
-    SourceNeutralQueryCursorV1, SourceNeutralQueryOutOfRetentionV1,
-    SourceNeutralSettlementLifecycleResultV1, SourceNeutralSubmissionOutcomeV1,
-    SourceNeutralTradeEconomicDispositionV1, SourceNeutralTradeLifecycleResultV1,
-    SourceNeutralTradeStateV1, SourceNeutralTradesPageV1, SourceNeutralTradesQueryResultV1,
+    SourceNeutralOrderLifecycleResultV1, SourceNeutralOrderQueryResult,
+    SourceNeutralOrderSnapshotV1, SourceNeutralOrderStateV1, SourceNeutralOrdersPage,
+    SourceNeutralOrdersQueryResult, SourceNeutralOutcomeBalanceDeltaV1, SourceNeutralQueryCursorV1,
+    SourceNeutralQueryOutOfRetentionV1, SourceNeutralSettlementLifecycleResultV1,
+    SourceNeutralSubmissionOutcomeV1, SourceNeutralTradeEconomicDispositionV1,
+    SourceNeutralTradeLifecycleResultV1, SourceNeutralTradeStateV1, SourceNeutralTradesPageV1,
+    SourceNeutralTradesQueryResultV1,
 };
 use contracts::{
     AccountInstanceKeyV1, CancelTargetOutcomeV2, DirectResponseMetadataV2,
@@ -39,7 +39,12 @@ use super::{
 };
 use crate::runtime_v2::RunOpenedV2;
 
-pub struct SimNoeProjectionPort<T: NoeFeedbackPayload> {
+pub struct SimNoeProjectionPort<
+    T: NoeFeedbackPayload,
+    P: OrderEvidenceProjection = LegacyOrderEvidence,
+> where
+    T::Result: NoeTradePayload<ControlFor<P>>,
+{
     root: PathBuf,
     opened: RunOpenedV2,
     run_opened_reference: DurableSourceReferenceV1,
@@ -47,7 +52,7 @@ pub struct SimNoeProjectionPort<T: NoeFeedbackPayload> {
     account_opening_evidence_identity: String,
     implementation_identity: String,
     seed: Option<SimV2ContextSeedV1>,
-    store: Option<DurableContextStore<T::Result>>,
+    store: Option<DurableContextStore<T::Result, ControlFor<P>>>,
     observation: SimV2NoeObservationV1,
 }
 
@@ -65,7 +70,10 @@ impl SimV2NoeObservationV1 {
     }
 }
 
-impl<T: NoeFeedbackPayload> SimNoeProjectionPort<T> {
+impl<T: NoeFeedbackPayload, P: OrderEvidenceProjection> SimNoeProjectionPort<T, P>
+where
+    T::Result: NoeTradePayload<ControlFor<P>>,
+{
     pub fn new(
         root: impl AsRef<Path>,
         opened: RunOpenedV2,
@@ -160,7 +168,10 @@ impl<T: NoeFeedbackPayload> SimNoeProjectionPort<T> {
             account_opening_evidence_identity: self.account_opening_evidence_identity.clone(),
             implementation_identity: self.implementation_identity.clone(),
         };
-        match DurableContextStore::<T::Result>::open_or_create_sim_v2(&self.root, seed.clone()) {
+        match DurableContextStore::<T::Result, ControlFor<P>>::open_or_create_sim_v2(
+            &self.root,
+            seed.clone(),
+        ) {
             Ok(store) => {
                 self.seed = Some(seed);
                 self.store = Some(store);
@@ -176,8 +187,9 @@ impl<T: NoeFeedbackPayload> SimNoeProjectionPort<T> {
         let Some(seed) = self.seed.clone() else {
             return false;
         };
-        let Ok(store) = DurableContextStore::<T::Result>::open_or_create_sim_v2(&self.root, seed)
-        else {
+        let Ok(store) = DurableContextStore::<T::Result, ControlFor<P>>::open_or_create_sim_v2(
+            &self.root, seed,
+        ) else {
             return false;
         };
         let durable = store.durable_through().is_some_and(|watermark| {
@@ -190,7 +202,11 @@ impl<T: NoeFeedbackPayload> SimNoeProjectionPort<T> {
     }
 }
 
-impl<T: NoeFeedbackPayload> BusinessProjectionPortV2 for SimNoeProjectionPort<T> {
+impl<T: NoeFeedbackPayload, P: OrderEvidenceProjection> BusinessProjectionPortV2
+    for SimNoeProjectionPort<T, P>
+where
+    T::Result: NoeTradePayload<ControlFor<P>>,
+{
     fn try_accept(&mut self, batch: Arc<BusinessProjectionBatchV2>) -> bool {
         self.try_accept_payload(Arc::new(BusinessProjectionBatchPayloadV1::V2(batch)))
     }
@@ -209,7 +225,7 @@ impl<T: NoeFeedbackPayload> BusinessProjectionPortV2 for SimNoeProjectionPort<T>
         }) {
             return false;
         }
-        let input = match BatchMapper::new(store, &batch).map() {
+        let input = match BatchMapper::<T, P>::new(store, &batch).map() {
             Ok(input) => input,
             Err(()) => return false,
         };
@@ -238,23 +254,29 @@ impl<T: NoeFeedbackPayload> BusinessProjectionPortV2 for SimNoeProjectionPort<T>
         }
         self.store
             .as_ref()
-            .and_then(DurableContextStore::<T::Result>::durable_through)
+            .and_then(DurableContextStore::<T::Result, ControlFor<P>>::durable_through)
             .filter(|watermark| watermark.run_id == run_id)
             .map_or(0, |watermark| watermark.projection_batch_sequence)
     }
 }
 
-struct BatchMapper<'a, T: NoeFeedbackPayload> {
-    store: &'a DurableContextStore<T::Result>,
+struct BatchMapper<'a, T: NoeFeedbackPayload, P: OrderEvidenceProjection = LegacyOrderEvidence>
+where
+    T::Result: NoeTradePayload<ControlFor<P>>,
+{
+    store: &'a DurableContextStore<T::Result, ControlFor<P>>,
     batch: &'a BusinessProjectionBatch<T>,
     watermark: SimV2SourceWatermarkV1,
-    evidence: Vec<SourceNeutralEvidence<T::Result>>,
+    evidence: Vec<SourceNeutralEvidence<T::Result, ControlFor<P>>>,
     next_ordinal: u32,
 }
 
-impl<'a, T: NoeFeedbackPayload> BatchMapper<'a, T> {
+impl<'a, T: NoeFeedbackPayload, P: OrderEvidenceProjection> BatchMapper<'a, T, P>
+where
+    T::Result: NoeTradePayload<ControlFor<P>>,
+{
     fn new(
-        store: &'a DurableContextStore<T::Result>,
+        store: &'a DurableContextStore<T::Result, ControlFor<P>>,
         batch: &'a BusinessProjectionBatch<T>,
     ) -> Self {
         Self {
@@ -269,7 +291,7 @@ impl<'a, T: NoeFeedbackPayload> BatchMapper<'a, T> {
         }
     }
 
-    fn map(mut self) -> Result<NormalizationBatchInput<T::Result>, ()> {
+    fn map(mut self) -> Result<NormalizationBatchInput<T::Result, ControlFor<P>>, ()> {
         if self.batch.run_id != self.store.context().account_identity.run_scope {
             return Err(());
         }
@@ -371,7 +393,7 @@ impl<'a, T: NoeFeedbackPayload> BatchMapper<'a, T> {
                 let result = self.map_order_query(&response.result)?;
                 self.push_direct_request(
                     &response.metadata,
-                    SourceNeutralControlResultV1::OrderQuery { result },
+                    SourceNeutralControlResult::OrderQuery { result },
                 );
                 Ok(())
             }
@@ -379,7 +401,7 @@ impl<'a, T: NoeFeedbackPayload> BatchMapper<'a, T> {
                 let result = self.map_orders_query(&response.result)?;
                 self.push_direct_request(
                     &response.metadata,
-                    SourceNeutralControlResultV1::OrdersQuery { result },
+                    SourceNeutralControlResult::OrdersQuery { result },
                 );
                 Ok(())
             }
@@ -387,7 +409,7 @@ impl<'a, T: NoeFeedbackPayload> BatchMapper<'a, T> {
                 let result = self.map_trades_query(&response.result)?;
                 self.push_direct_request(
                     &response.metadata,
-                    SourceNeutralControlResultV1::TradesQuery { result },
+                    SourceNeutralControlResult::TradesQuery { result },
                 );
                 Ok(())
             }
@@ -400,22 +422,18 @@ impl<'a, T: NoeFeedbackPayload> BatchMapper<'a, T> {
         item: &SubmissionResponseItemV2,
     ) -> Result<(), ()> {
         let outcome = match &item.outcome {
-            SubmissionItemOutcomeV2::Accepted(accepted) => {
-                SourceNeutralSubmissionOutcomeV1::Accepted {
-                    order: SourceNeutralOrderSnapshotV1 {
-                        order_identity: self.entity_order(&accepted.platform_order_id)?,
-                        condition_id: item.condition_id.clone(),
-                        token_id: item.token_id.clone(),
-                        state: map_order_state(&accepted.platform_order_status),
-                    },
-                }
-            }
-            SubmissionItemOutcomeV2::RejectedNoEffect(_) => {
-                SourceNeutralSubmissionOutcomeV1::RejectedNoEffect
-            }
-            SubmissionItemOutcomeV2::EvidenceUnknownNoEffect(_) => {
-                SourceNeutralSubmissionOutcomeV1::EvidenceUnknownNoEffect
-            }
+            SubmissionItemOutcomeV2::Accepted(accepted) => P::accepted(
+                SourceNeutralOrderSnapshotV1 {
+                    order_identity: self.entity_order(&accepted.platform_order_id)?,
+                    condition_id: item.condition_id.clone(),
+                    token_id: item.token_id.clone(),
+                    state: map_order_state(&accepted.platform_order_status),
+                },
+                accepted,
+                item.effective_processing_at_utc_ms,
+            ),
+            SubmissionItemOutcomeV2::RejectedNoEffect(_) => P::rejected(),
+            SubmissionItemOutcomeV2::EvidenceUnknownNoEffect(_) => P::unknown(),
         };
         self.push(
             direct_record(
@@ -430,7 +448,7 @@ impl<'a, T: NoeFeedbackPayload> BatchMapper<'a, T> {
                 batch_item_ordinal: item.batch_item_ordinal,
             },
             SourceNeutralEvidenceKind::Control {
-                result: SourceNeutralControlResultV1::Submission { outcome },
+                result: SourceNeutralControlResult::Submission { outcome },
             },
         );
         Ok(())
@@ -465,7 +483,7 @@ impl<'a, T: NoeFeedbackPayload> BatchMapper<'a, T> {
                 target_ordinal: target.target_ordinal,
             },
             SourceNeutralEvidenceKind::Control {
-                result: SourceNeutralControlResultV1::Cancellation {
+                result: SourceNeutralControlResult::Cancellation {
                     order_identity: self.entity_order(&target.platform_order_id)?,
                     outcome,
                 },
@@ -474,11 +492,7 @@ impl<'a, T: NoeFeedbackPayload> BatchMapper<'a, T> {
         Ok(())
     }
 
-    fn push_direct_request(
-        &mut self,
-        metadata: &DirectResponseMetadataV2,
-        result: SourceNeutralControlResultV1,
-    ) {
+    fn push_direct_request(&mut self, metadata: &DirectResponseMetadataV2, result: ControlFor<P>) {
         self.push(
             direct_record(
                 metadata,
@@ -496,14 +510,14 @@ impl<'a, T: NoeFeedbackPayload> BatchMapper<'a, T> {
     fn map_order_query(
         &self,
         result: &OrderQueryResultV2,
-    ) -> Result<SourceNeutralOrderQueryResultV1, ()> {
+    ) -> Result<SourceNeutralOrderQueryResult<P::Snapshot>, ()> {
         match result {
-            OrderQueryResultV2::Found(order) => Ok(SourceNeutralOrderQueryResultV1::Found {
+            OrderQueryResultV2::Found(order) => Ok(SourceNeutralOrderQueryResult::Found {
                 order: self.map_order(order)?,
             }),
-            OrderQueryResultV2::NotFound => Ok(SourceNeutralOrderQueryResultV1::NotFound),
+            OrderQueryResultV2::NotFound => Ok(SourceNeutralOrderQueryResult::NotFound),
             OrderQueryResultV2::OutOfRetention(range) => Ok(
-                SourceNeutralOrderQueryResultV1::OutOfRetention(map_out_of_retention(range)),
+                SourceNeutralOrderQueryResult::OutOfRetention(map_out_of_retention(range)),
             ),
         }
     }
@@ -511,7 +525,7 @@ impl<'a, T: NoeFeedbackPayload> BatchMapper<'a, T> {
     fn map_orders_query(
         &self,
         result: &OrdersQueryResultV2,
-    ) -> Result<SourceNeutralOrdersQueryResultV1, ()> {
+    ) -> Result<SourceNeutralOrdersQueryResult<P::Snapshot>, ()> {
         match result {
             OrdersQueryResultV2::Page(page) => {
                 let items = page
@@ -519,19 +533,17 @@ impl<'a, T: NoeFeedbackPayload> BatchMapper<'a, T> {
                     .iter()
                     .map(|order| self.map_order(order))
                     .collect::<Result<_, _>>()?;
-                Ok(SourceNeutralOrdersQueryResultV1::Page(
-                    SourceNeutralOrdersPageV1 {
+                Ok(SourceNeutralOrdersQueryResult::Page(
+                    SourceNeutralOrdersPage {
                         root_sequence: page.root_sequence,
                         items,
                         next_cursor: page.next_cursor.as_ref().map(map_cursor),
                     },
                 ))
             }
-            OrdersQueryResultV2::InvalidCursor => {
-                Ok(SourceNeutralOrdersQueryResultV1::InvalidCursor)
-            }
+            OrdersQueryResultV2::InvalidCursor => Ok(SourceNeutralOrdersQueryResult::InvalidCursor),
             OrdersQueryResultV2::OutOfRetention(range) => Ok(
-                SourceNeutralOrdersQueryResultV1::OutOfRetention(map_out_of_retention(range)),
+                SourceNeutralOrdersQueryResult::OutOfRetention(map_out_of_retention(range)),
             ),
         }
     }
@@ -564,13 +576,16 @@ impl<'a, T: NoeFeedbackPayload> BatchMapper<'a, T> {
         }
     }
 
-    fn map_order(&self, order: &OrderProjectionV2) -> Result<SourceNeutralOrderSnapshotV1, ()> {
-        Ok(SourceNeutralOrderSnapshotV1 {
-            order_identity: self.entity_order(&order.platform_order_id)?,
-            condition_id: order.condition_id.clone(),
-            token_id: order.token_id.clone(),
-            state: map_order_state(&order.status),
-        })
+    fn map_order(&self, order: &OrderProjectionV2) -> Result<P::Snapshot, ()> {
+        Ok(P::snapshot(
+            SourceNeutralOrderSnapshotV1 {
+                order_identity: self.entity_order(&order.platform_order_id)?,
+                condition_id: order.condition_id.clone(),
+                token_id: order.token_id.clone(),
+                state: map_order_state(&order.status),
+            },
+            order,
+        ))
     }
 
     fn map_trade(
@@ -995,7 +1010,7 @@ impl<'a, T: NoeFeedbackPayload> BatchMapper<'a, T> {
         &mut self,
         record: SimV2SourceRecordReferenceV1,
         logical_key: SourceNeutralLogicalKeyV1,
-        kind: SourceNeutralEvidenceKind<T::Result>,
+        kind: SourceNeutralEvidenceKind<T::Result, ControlFor<P>>,
     ) {
         let source_ordinal = self.next_ordinal;
         self.next_ordinal += 1;
@@ -1184,6 +1199,470 @@ pub type SimV2NoeProjectionPortV2 = SimNoeProjectionPort<contracts::TradeLifecyc
 #[cfg(test)]
 type BatchMapperV1<'a> = BatchMapper<'a, contracts::TradeLifecycleFeedbackV2>;
 
+type ControlFor<P> = SourceNeutralControlResult<
+    <P as OrderEvidenceProjection>::Submission,
+    <P as OrderEvidenceProjection>::Snapshot,
+>;
+/// 只选择源中立数量载荷；源序、身份、经济和耐久处理继续共用原实现。
+pub trait OrderEvidenceProjection {
+    type Submission: Clone + std::fmt::Debug + Eq + serde::Serialize + serde::de::DeserializeOwned;
+    type Snapshot: Clone + std::fmt::Debug + Eq + serde::Serialize + serde::de::DeserializeOwned;
+    fn accepted(
+        order: SourceNeutralOrderSnapshotV1,
+        source: &contracts::AcceptedSubmissionItemV2,
+        effective_processing_at_utc_ms: i64,
+    ) -> Self::Submission;
+    fn rejected() -> Self::Submission;
+    fn unknown() -> Self::Submission;
+    fn snapshot(
+        identity: SourceNeutralOrderSnapshotV1,
+        source: &OrderProjectionV2,
+    ) -> Self::Snapshot;
+}
+pub struct LegacyOrderEvidence;
+impl OrderEvidenceProjection for LegacyOrderEvidence {
+    type Submission = SourceNeutralSubmissionOutcomeV1;
+    type Snapshot = SourceNeutralOrderSnapshotV1;
+    fn accepted(
+        order: SourceNeutralOrderSnapshotV1,
+        _: &contracts::AcceptedSubmissionItemV2,
+        _: i64,
+    ) -> Self::Submission {
+        SourceNeutralSubmissionOutcomeV1::Accepted { order }
+    }
+    fn rejected() -> Self::Submission {
+        SourceNeutralSubmissionOutcomeV1::RejectedNoEffect
+    }
+    fn unknown() -> Self::Submission {
+        SourceNeutralSubmissionOutcomeV1::EvidenceUnknownNoEffect
+    }
+    fn snapshot(identity: SourceNeutralOrderSnapshotV1, _: &OrderProjectionV2) -> Self::Snapshot {
+        identity
+    }
+}
+pub struct MeasuredOrderEvidence;
+impl OrderEvidenceProjection for MeasuredOrderEvidence {
+    type Submission = contracts::execution_normalization::SourceNeutralSubmissionOutcomeV2;
+    type Snapshot = contracts::execution_normalization::SourceNeutralOrderSnapshotV2;
+    fn accepted(
+        order: SourceNeutralOrderSnapshotV1,
+        source: &contracts::AcceptedSubmissionItemV2,
+        effective_processing_at_utc_ms: i64,
+    ) -> Self::Submission {
+        use contracts::{
+            SubmissionMeasurementV2,
+            execution_normalization::SourceNeutralSubmissionMeasurementV1 as M,
+        };
+        let measurement = match &source.measurement {
+            SubmissionMeasurementV2::Base {
+                matched_base_quantity_shares,
+                open_base_quantity_shares,
+                ..
+            } => M::Base {
+                matched_base_quantity_shares: matched_base_quantity_shares.clone(),
+                open_base_quantity_shares: open_base_quantity_shares.clone(),
+            },
+            SubmissionMeasurementV2::QuoteBudget {
+                actual_matched_base_quantity_shares,
+                ..
+            } => M::QuoteBudget {
+                actual_matched_base_quantity_shares: actual_matched_base_quantity_shares.clone(),
+            },
+        };
+        Self::Submission::Accepted {
+            order,
+            measurement,
+            effective_processing_at_utc_ms,
+        }
+    }
+    fn rejected() -> Self::Submission {
+        Self::Submission::RejectedNoEffect
+    }
+    fn unknown() -> Self::Submission {
+        Self::Submission::EvidenceUnknownNoEffect
+    }
+    fn snapshot(
+        identity: SourceNeutralOrderSnapshotV1,
+        source: &OrderProjectionV2,
+    ) -> Self::Snapshot {
+        use contracts::{
+            OrderQuantityProjectionV2,
+            execution_normalization::SourceNeutralOrderQuantityEvidenceV1 as Q,
+        };
+        let quantities = match &source.quantities {
+            OrderQuantityProjectionV2::Base {
+                matched_base_quantity_shares,
+                active_unfilled_base_quantity_shares,
+                ..
+            } => Q::Base {
+                matched_base_quantity_shares: matched_base_quantity_shares.clone(),
+                active_unfilled_base_quantity_shares: active_unfilled_base_quantity_shares.clone(),
+            },
+            OrderQuantityProjectionV2::QuoteBudget {
+                actual_matched_base_quantity_shares,
+                ..
+            } => Q::QuoteBudget {
+                actual_matched_base_quantity_shares: actual_matched_base_quantity_shares.clone(),
+            },
+        };
+        Self::Snapshot {
+            order_identity: identity.order_identity,
+            condition_id: identity.condition_id,
+            token_id: identity.token_id,
+            state: identity.state,
+            quantities,
+        }
+    }
+}
+pub type SimV2NoeProjectionPortV3 =
+    SimNoeProjectionPort<contracts::TradeLifecycleFeedbackV3, MeasuredOrderEvidence>;
+#[cfg(test)]
+pub(super) fn project_real_query_for_tests(
+    source_path: &Path,
+    opened: &RunOpenedV2,
+    opening: &Arc<contracts::AccountOpeningFactV2>,
+    query: &super::QueryActionResultV2,
+) -> serde_json::Value {
+    let directory = tempfile::tempdir().unwrap();
+    let source = DurableSourceReferenceV1 {
+        source: contracts::execution_normalization::ImmutableSourceReferenceV1::Location(
+            source_path.to_string_lossy().into_owned(),
+        ),
+    };
+    let mut port = SimV2NoeProjectionPortV3::new(
+        directory.path(),
+        opened.clone(),
+        source.clone(),
+        source,
+        "opening".into(),
+        "order-query-test".into(),
+    );
+    let batch = super::BusinessProjectionBatchV3 {
+        run_id: opened.run_id.clone(),
+        projection_batch_sequence: 1,
+        account_opening: Some(Arc::clone(opening)),
+        market_enrollment: None,
+        direct_responses: vec![],
+        order_lifecycle: vec![],
+        trade_lifecycle: vec![],
+        settlement_lifecycle: vec![],
+    };
+    assert!(port.open_from_first_batch(&batch));
+    let mapper = BatchMapper::<_, MeasuredOrderEvidence>::new(port.store.as_ref().unwrap(), &batch);
+    match query {
+        super::QueryActionResultV2::Order(r) => {
+            serde_json::to_value(mapper.map_order_query(r).unwrap()).unwrap()
+        }
+        super::QueryActionResultV2::Orders(r) => {
+            serde_json::to_value(mapper.map_orders_query(r).unwrap()).unwrap()
+        }
+        super::QueryActionResultV2::Trades(_) => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+pub(super) fn assert_order_controls_v3(
+    root: &Path,
+    context: &contracts::execution_normalization::ExecutionNormalizationContextReferenceV1,
+    payloads: &[Arc<BusinessProjectionBatchPayloadV1>],
+) {
+    use contracts::execution_normalization::{
+        SourceNeutralControlResultV2, SourceNeutralSubmissionMeasurementV1,
+        SourceNeutralSubmissionOutcomeV2,
+    };
+    use execution_normalization::{
+        DurableContextStoreV3, NormalizationRecordV3, SourceNeutralEvidenceKindV3,
+    };
+    let mut store = DurableContextStoreV3::open(root, context).unwrap();
+    let records: Vec<_> = store
+        .commits()
+        .iter()
+        .flat_map(|c| c.records.iter().cloned())
+        .collect();
+    let mut seen_submission = false;
+    let mut seen_rejected = false;
+    let mut seen_batch_time_difference = false;
+    for record in &records {
+        if let NormalizationRecordV3::Evidence {
+            evidence:
+                SourceNeutralEvidenceKindV3::Control {
+                    result:
+                        SourceNeutralControlResultV2::Submission {
+                            outcome:
+                                SourceNeutralSubmissionOutcomeV2::Accepted {
+                                    measurement,
+                                    effective_processing_at_utc_ms,
+                                    ..
+                                },
+                        },
+                },
+            source_reference,
+            ..
+        } = record
+        {
+            let contracts::execution_normalization::SimV2SourceRecordReferenceV1::DirectResponse {
+                association:
+                    SimV2DirectResponseAssociationV1::SubmissionItem {
+                        global_request_id,
+                        batch_item_ordinal,
+                    },
+                ..
+            } = &source_reference.record
+            else {
+                panic!("提交源关联");
+            };
+            let item = payloads
+                .iter()
+                .find_map(|p| match p.as_ref() {
+                    BusinessProjectionBatchPayloadV1::V3(b) => {
+                        b.direct_responses().find_map(|r| match r {
+                            BusinessDirectResponseV2::PostOrder(r)
+                                if &r.metadata.global_request_id == global_request_id =>
+                            {
+                                Some(&r.item)
+                            }
+                            BusinessDirectResponseV2::PostOrders(r)
+                                if &r.metadata.global_request_id == global_request_id =>
+                            {
+                                r.items
+                                    .iter()
+                                    .find(|i| &i.batch_item_ordinal == batch_item_ordinal)
+                            }
+                            _ => None,
+                        })
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(*batch_item_ordinal, item.batch_item_ordinal);
+            assert_eq!(
+                *effective_processing_at_utc_ms,
+                item.effective_processing_at_utc_ms
+            );
+            if global_request_id == "quantity-batch"
+                && let SimV2SourceRecordReferenceV1::DirectResponse {
+                    platform_responded_at_utc_ms,
+                    ..
+                } = source_reference.record
+            {
+                seen_batch_time_difference |=
+                    *effective_processing_at_utc_ms != platform_responded_at_utc_ms;
+            }
+
+            let expected = match item.item_id.as_str() {
+                "two-fills-item" => SourceNeutralSubmissionMeasurementV1::Base {
+                    matched_base_quantity_shares: contracts::ExactDecimal("10.005".into()),
+                    open_base_quantity_shares: contracts::ExactDecimal("0".into()),
+                },
+                "improved-fak" => SourceNeutralSubmissionMeasurementV1::QuoteBudget {
+                    actual_matched_base_quantity_shares: contracts::ExactDecimal("6.000001".into()),
+                },
+                "partial-base" => SourceNeutralSubmissionMeasurementV1::Base {
+                    matched_base_quantity_shares: contracts::ExactDecimal("3.999999".into()),
+                    open_base_quantity_shares: contracts::ExactDecimal("3.000001".into()),
+                },
+                "zero-matched" => SourceNeutralSubmissionMeasurementV1::Base {
+                    matched_base_quantity_shares: contracts::ExactDecimal("0".into()),
+                    open_base_quantity_shares: contracts::ExactDecimal("7".into()),
+                },
+                _ => panic!("仅使用真实代表请求"),
+            };
+            assert_eq!(*measurement, expected);
+            if item.item_id == "two-fills-item" {
+                let contracts::SubmissionItemOutcomeV2::Accepted(accepted) = &item.outcome else {
+                    unreachable!()
+                };
+                assert_eq!(
+                    accepted.terminal_reason,
+                    Some(contracts::SimOrderTerminalReasonV2::VenueDustTerminal)
+                );
+            }
+            seen_submission = true;
+        }
+    }
+    for record in &records {
+        if let NormalizationRecordV3::Evidence {
+            evidence: SourceNeutralEvidenceKindV3::Control { result },
+            ..
+        } = record
+        {
+            use contracts::execution_normalization::{
+                SourceNeutralOrderQuantityEvidenceV1 as Q, SourceNeutralOrderQueryResultV2 as O,
+                SourceNeutralOrdersQueryResultV2 as Os,
+            };
+            match result {
+                SourceNeutralControlResultV2::Submission {
+                    outcome: SourceNeutralSubmissionOutcomeV2::RejectedNoEffect,
+                } => seen_rejected = true,
+                SourceNeutralControlResultV2::OrderQuery {
+                    result: O::Found { order },
+                } => assert_eq!(
+                    order.quantities,
+                    Q::Base {
+                        matched_base_quantity_shares: contracts::ExactDecimal("3.999999".into()),
+                        active_unfilled_base_quantity_shares: contracts::ExactDecimal(
+                            "3.000001".into()
+                        )
+                    }
+                ),
+                SourceNeutralControlResultV2::OrdersQuery {
+                    result: Os::Page(page),
+                } => {
+                    assert_eq!(page.items.len(), 2);
+                    assert_eq!(
+                        page.items[0].quantities,
+                        Q::Base {
+                            matched_base_quantity_shares: contracts::ExactDecimal(
+                                "3.999999".into()
+                            ),
+                            active_unfilled_base_quantity_shares: contracts::ExactDecimal(
+                                "3.000001".into()
+                            )
+                        }
+                    );
+                    assert_eq!(
+                        page.items[1].quantities,
+                        Q::Base {
+                            matched_base_quantity_shares: contracts::ExactDecimal("0".into()),
+                            active_unfilled_base_quantity_shares: contracts::ExactDecimal(
+                                "7".into()
+                            )
+                        }
+                    );
+                    let source = payloads
+                        .iter()
+                        .find_map(|p| match p.as_ref() {
+                            BusinessProjectionBatchPayloadV1::V3(b) => {
+                                b.direct_responses().find_map(|r| match r {
+                                    BusinessDirectResponseV2::Orders(r) => match &r.result {
+                                        OrdersQueryResultV2::Page(p) => Some(p),
+                                        _ => None,
+                                    },
+                                    _ => None,
+                                })
+                            }
+                            _ => None,
+                        })
+                        .unwrap();
+                    assert_eq!(page.root_sequence, source.root_sequence);
+                    assert_eq!(
+                        page.next_cursor
+                            .as_ref()
+                            .map(|c| (c.root_sequence, c.next_offset)),
+                        source
+                            .next_cursor
+                            .as_ref()
+                            .map(|c| (c.root_sequence, c.next_offset))
+                    );
+                }
+                _ => {}
+            }
+        }
+    }
+    assert!(seen_rejected);
+    assert!(
+        seen_batch_time_difference,
+        "不得将各项处理时间替换成整批响应时间"
+    );
+    assert!(seen_submission, "真实提交数量不能在 NOE 丢失");
+    assert!(records.iter().any(|r| matches!(r, NormalizationRecordV3::Evidence { evidence: SourceNeutralEvidenceKindV3::Control { result: SourceNeutralControlResultV2::OrderQuery { result: contracts::execution_normalization::SourceNeutralOrderQueryResultV2::Found { .. } } }, .. })));
+    assert!(records.iter().any(|r| matches!(
+        r,
+        NormalizationRecordV3::Evidence {
+            evidence: SourceNeutralEvidenceKindV3::Control {
+                result: SourceNeutralControlResultV2::OrdersQuery { .. }
+            },
+            ..
+        }
+    )));
+    let batch = payloads
+        .iter()
+        .find_map(|p| match p.as_ref() {
+            BusinessProjectionBatchPayloadV1::V3(b)
+                if b.direct_responses()
+                    .any(|r| matches!(r, BusinessDirectResponseV2::PostOrder(_))) =>
+            {
+                Some(b)
+            }
+            _ => None,
+        })
+        .unwrap();
+    let original = BatchMapper::<_, MeasuredOrderEvidence>::new(&store, batch)
+        .map()
+        .unwrap();
+    let next = store.durable_through().unwrap().projection_batch_sequence + 1;
+    for change in 0..3 {
+        let mut input = original.clone();
+        input.source_watermark.projection_batch_sequence = next + change;
+        for e in &mut input.evidence {
+            e.source_reference.watermark = input.source_watermark.clone();
+        }
+        if change != 0 {
+            input.evidence.retain(|e| {
+                matches!(
+                    e.kind,
+                    SourceNeutralEvidenceKind::Control {
+                        result: SourceNeutralControlResultV2::Submission { .. }
+                    }
+                )
+            });
+            for e in &mut input.evidence {
+                if let SourceNeutralEvidenceKind::Control {
+                    result:
+                        SourceNeutralControlResultV2::Submission {
+                            outcome:
+                                SourceNeutralSubmissionOutcomeV2::Accepted {
+                                    measurement:
+                                        SourceNeutralSubmissionMeasurementV1::Base {
+                                            open_base_quantity_shares,
+                                            ..
+                                        },
+                                    effective_processing_at_utc_ms,
+                                    ..
+                                },
+                        },
+                } = &mut e.kind
+                {
+                    if change == 1 {
+                        *open_base_quantity_shares = contracts::ExactDecimal("1".into());
+                    } else {
+                        *effective_processing_at_utc_ms += 1;
+                    }
+                }
+            }
+        }
+        store.commit_batch_v3(input, durable_now_utc_ms()).unwrap();
+        let last = &store.commits().last().unwrap().records;
+        if change == 0 {
+            assert!(
+                last.iter()
+                    .all(|r| matches!(r, NormalizationRecordV3::Duplicate { .. }))
+            );
+        } else {
+            assert!(
+                last.iter()
+                    .all(|r| matches!(r, NormalizationRecordV3::Conflict { .. }))
+            );
+        }
+    }
+    let mut alias = original.clone();
+    alias.source_watermark.projection_batch_sequence = next + 3;
+    alias
+        .evidence
+        .retain(|e| matches!(e.kind, SourceNeutralEvidenceKind::Economic { .. }));
+    alias.evidence.truncate(1);
+    assert_eq!(alias.evidence.len(), 1);
+    alias.evidence[0].source_reference.watermark = alias.source_watermark.clone();
+    alias.evidence[0].logical_key = SourceNeutralLogicalKeyV1::EconomicEvidence {
+        evidence_identity: "same-real-order-economic-evidence".into(),
+    };
+    store.commit_batch_v3(alias, durable_now_utc_ms()).unwrap();
+    assert!(matches!(
+        store.commits().last().unwrap().records.as_slice(),
+        [NormalizationRecordV3::EconomicAlias { .. }]
+    ));
+}
+
 #[cfg(test)]
 pub(super) fn assert_v3_rebuilt_evidence_semantics(
     root: &std::path::Path,
@@ -1194,7 +1673,9 @@ pub(super) fn assert_v3_rebuilt_evidence_semantics(
         DurableContextStoreV2, NormalizationCoreV1, NormalizationRecordV2,
     };
     let mut store = DurableContextStoreV2::open(root, context).unwrap();
-    let original = BatchMapper::new(&store, batch).map().unwrap();
+    let original = BatchMapper::<_, LegacyOrderEvidence>::new(&store, batch)
+        .map()
+        .unwrap();
     let next = store.durable_through().unwrap().projection_batch_sequence + 1;
     let mut duplicate = original.clone();
     duplicate.source_watermark.projection_batch_sequence = next;

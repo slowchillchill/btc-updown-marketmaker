@@ -161,12 +161,12 @@ pub enum NormalizationPendingScopeV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SourceNeutralEvidenceKind<T> {
+pub enum SourceNeutralEvidenceKind<T, C = SourceNeutralControlResultV1> {
     MarketEnrollment {
         result: SourceNeutralMarketEnrollmentResultV1,
     },
     Control {
-        result: SourceNeutralControlResultV1,
+        result: C,
     },
     OrderLifecycle {
         result: SourceNeutralOrderLifecycleResultV1,
@@ -189,17 +189,17 @@ pub enum SourceNeutralEvidenceKind<T> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SourceNeutralEvidence<T> {
+pub struct SourceNeutralEvidence<T, C = SourceNeutralControlResultV1> {
     pub source_reference: SimV2SourceReferenceV1,
     pub source_ordinal: u32,
     pub logical_key: SourceNeutralLogicalKeyV1,
-    pub kind: SourceNeutralEvidenceKind<T>,
+    pub kind: SourceNeutralEvidenceKind<T, C>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NormalizationBatchInput<T> {
+pub struct NormalizationBatchInput<T, C = SourceNeutralControlResultV1> {
     pub source_watermark: SimV2SourceWatermarkV1,
-    pub evidence: Vec<SourceNeutralEvidence<T>>,
+    pub evidence: Vec<SourceNeutralEvidence<T, C>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -219,12 +219,12 @@ pub enum EconomicAliasDecisionV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum NormalizationRecord<T> {
+pub enum NormalizationRecord<T, C = SourceNeutralControlResultV1> {
     Evidence {
         logical_identity: StableLogicalIdentityV1,
         source_order: SourceOrderV1,
         source_reference: SimV2SourceReferenceV1,
-        evidence: SourceNeutralEvidenceKind<T>,
+        evidence: SourceNeutralEvidenceKind<T, C>,
     },
     EconomicFact {
         source_order: SourceOrderV1,
@@ -249,7 +249,7 @@ pub enum NormalizationRecord<T> {
         logical_identity: StableLogicalIdentityV1,
         source_order: SourceOrderV1,
         source_reference: SimV2SourceReferenceV1,
-        evidence: SourceNeutralEvidenceKind<T>,
+        evidence: SourceNeutralEvidenceKind<T, C>,
         scope: NormalizationPendingScopeV1,
     },
     Conflict {
@@ -257,11 +257,11 @@ pub enum NormalizationRecord<T> {
         source_order: SourceOrderV1,
         source_reference: SimV2SourceReferenceV1,
         scope: NormalizationConflictScopeV1,
-        conflicting_evidence: SourceNeutralEvidenceKind<T>,
+        conflicting_evidence: SourceNeutralEvidenceKind<T, C>,
     },
 }
 
-impl<T: Clone + PartialEq> NormalizationRecord<T> {
+impl<T: Clone + PartialEq, C: Clone + PartialEq> NormalizationRecord<T, C> {
     pub fn logical_identity(&self) -> &StableLogicalIdentityV1 {
         match self {
             Self::Evidence {
@@ -324,9 +324,9 @@ impl<T: Clone + PartialEq> NormalizationRecord<T> {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct NormalizationBatch<T> {
+pub struct NormalizationBatch<T, C = SourceNeutralControlResultV1> {
     pub source_watermark: SimV2SourceWatermarkV1,
-    pub records: Vec<NormalizationRecord<T>>,
+    pub records: Vec<NormalizationRecord<T, C>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -368,27 +368,27 @@ impl fmt::Display for CoreErrorV1 {
 impl Error for CoreErrorV1 {}
 
 #[derive(Debug)]
-pub(crate) struct CoreState<T> {
-    logical: BTreeMap<StableLogicalIdentityV1, StoredLogical<T>>,
+pub(crate) struct CoreState<T, C> {
+    logical: BTreeMap<StableLogicalIdentityV1, StoredLogical<T, C>>,
     economic: BTreeMap<SourceNeutralEconomicIdentityV1, SourceNeutralEconomicFactV1>,
 }
 
 #[derive(Debug)]
-pub(crate) struct CoreStateDelta<T> {
-    logical: BTreeMap<StableLogicalIdentityV1, StoredLogical<T>>,
+pub(crate) struct CoreStateDelta<T, C> {
+    logical: BTreeMap<StableLogicalIdentityV1, StoredLogical<T, C>>,
     economic: BTreeMap<SourceNeutralEconomicIdentityV1, SourceNeutralEconomicFactV1>,
 }
 
 #[derive(Clone, Debug)]
-struct StoredLogical<T> {
-    evidence: StoredEvidence<T>,
+struct StoredLogical<T, C> {
+    evidence: StoredEvidence<T, C>,
     cancellation_input_item_refs: Option<Vec<CancelInputItemRefV2>>,
     source_reference: SimV2SourceReferenceV1,
 }
 
 #[derive(Clone, Debug)]
-enum StoredEvidence<T> {
-    Evidence(SourceNeutralEvidenceKind<T>),
+enum StoredEvidence<T, C> {
+    Evidence(SourceNeutralEvidenceKind<T, C>),
     EconomicAlias {
         economic_identity: SourceNeutralEconomicIdentityV1,
     },
@@ -399,34 +399,34 @@ enum StoredEvidence<T> {
 }
 
 #[derive(Clone)]
-struct OrderedEvidence<T> {
+struct OrderedEvidence<T, C> {
     source_reference: SimV2SourceReferenceV1,
     source_order: SourceOrderV1,
-    kind: SourceNeutralEvidenceKind<T>,
+    kind: SourceNeutralEvidenceKind<T, C>,
 }
 
-pub struct PreparedNormalizationBatch<T> {
-    batch: NormalizationBatch<T>,
-    state_delta: CoreStateDelta<T>,
+pub struct PreparedNormalizationBatch<T, C = SourceNeutralControlResultV1> {
+    batch: NormalizationBatch<T, C>,
+    state_delta: CoreStateDelta<T, C>,
 }
 
-impl<T: Clone + PartialEq> PreparedNormalizationBatch<T> {
-    pub fn batch(&self) -> &NormalizationBatch<T> {
+impl<T: Clone + PartialEq, C: Clone + PartialEq> PreparedNormalizationBatch<T, C> {
+    pub fn batch(&self) -> &NormalizationBatch<T, C> {
         &self.batch
     }
 
-    pub(crate) fn into_parts(self) -> (NormalizationBatch<T>, CoreStateDelta<T>) {
+    pub(crate) fn into_parts(self) -> (NormalizationBatch<T, C>, CoreStateDelta<T, C>) {
         (self.batch, self.state_delta)
     }
 }
 
 #[derive(Debug)]
-pub struct NormalizationCore<T> {
+pub struct NormalizationCore<T, C = SourceNeutralControlResultV1> {
     context: ExecutionNormalizationContextV1,
-    state: CoreState<T>,
+    state: CoreState<T, C>,
 }
 
-impl<T: Clone + PartialEq> NormalizationCore<T> {
+impl<T: Clone + PartialEq, C: Clone + PartialEq> NormalizationCore<T, C> {
     pub fn new(context: ExecutionNormalizationContextV1) -> Self {
         Self {
             context,
@@ -436,10 +436,11 @@ impl<T: Clone + PartialEq> NormalizationCore<T> {
 
     pub(crate) fn restore<'a>(
         context: ExecutionNormalizationContextV1,
-        records: impl IntoIterator<Item = &'a NormalizationRecord<T>>,
+        records: impl IntoIterator<Item = &'a NormalizationRecord<T, C>>,
     ) -> Self
     where
         T: 'a,
+        C: 'a,
     {
         let mut core = Self::new(context);
         for record in records {
@@ -578,8 +579,8 @@ impl<T: Clone + PartialEq> NormalizationCore<T> {
 
     pub fn prepare_batch(
         &self,
-        input: NormalizationBatchInput<T>,
-    ) -> Result<PreparedNormalizationBatch<T>, CoreErrorV1> {
+        input: NormalizationBatchInput<T, C>,
+    ) -> Result<PreparedNormalizationBatch<T, C>, CoreErrorV1> {
         let mut ordered = Vec::with_capacity(input.evidence.len());
         for evidence in input.evidence {
             self.check_evidence_boundary(&input.source_watermark, &evidence)?;
@@ -611,7 +612,7 @@ impl<T: Clone + PartialEq> NormalizationCore<T> {
         })
     }
 
-    pub(crate) fn accept_delta(&mut self, state_delta: CoreStateDelta<T>) {
+    pub(crate) fn accept_delta(&mut self, state_delta: CoreStateDelta<T, C>) {
         self.state.logical.extend(state_delta.logical);
         self.state.economic.extend(state_delta.economic);
     }
@@ -619,7 +620,7 @@ impl<T: Clone + PartialEq> NormalizationCore<T> {
     fn check_evidence_boundary(
         &self,
         watermark: &SimV2SourceWatermarkV1,
-        evidence: &SourceNeutralEvidence<T>,
+        evidence: &SourceNeutralEvidence<T, C>,
     ) -> Result<(), CoreErrorV1> {
         if evidence.source_reference.context_reference != self.context.context_reference {
             return Err(CoreErrorV1::ContextReferenceMismatch {
@@ -636,7 +637,7 @@ impl<T: Clone + PartialEq> NormalizationCore<T> {
         Ok(())
     }
 
-    fn source_order(evidence: &SourceNeutralEvidence<T>) -> SourceOrderV1 {
+    fn source_order(evidence: &SourceNeutralEvidence<T, C>) -> SourceOrderV1 {
         let sequence = match &evidence.source_reference.record {
             SimV2SourceRecordReferenceV1::AccountOpening => SourceSequenceV1::AccountOpening,
             SimV2SourceRecordReferenceV1::MarketEnrollment {
@@ -693,10 +694,10 @@ impl<T: Clone + PartialEq> NormalizationCore<T> {
 
     fn normalize_one(
         &self,
-        state_delta: &mut CoreStateDelta<T>,
+        state_delta: &mut CoreStateDelta<T, C>,
         logical_identity: StableLogicalIdentityV1,
-        evidence: OrderedEvidence<T>,
-    ) -> Result<NormalizationRecord<T>, CoreErrorV1> {
+        evidence: OrderedEvidence<T, C>,
+    ) -> Result<NormalizationRecord<T, C>, CoreErrorV1> {
         let cancellation_input_item_refs =
             Self::cancellation_input_item_refs(&evidence.source_reference)
                 .map(<[CancelInputItemRefV2]>::to_vec);
@@ -904,10 +905,10 @@ impl<T: Clone + PartialEq> NormalizationCore<T> {
     fn economic_alias(
         &self,
         logical_identity: StableLogicalIdentityV1,
-        evidence: OrderedEvidence<T>,
+        evidence: OrderedEvidence<T, C>,
         fact: &SourceNeutralEconomicFactV1,
         decision: EconomicAliasDecisionV1,
-    ) -> NormalizationRecord<T> {
+    ) -> NormalizationRecord<T, C> {
         NormalizationRecord::EconomicAlias {
             logical_identity,
             source_order: evidence.source_order,
@@ -958,9 +959,9 @@ impl<T: Clone + PartialEq> NormalizationCore<T> {
 
     fn stored_evidence_matches(
         &self,
-        state_delta: &CoreStateDelta<T>,
-        stored: &StoredEvidence<T>,
-        incoming: &SourceNeutralEvidenceKind<T>,
+        state_delta: &CoreStateDelta<T, C>,
+        stored: &StoredEvidence<T, C>,
+        incoming: &SourceNeutralEvidenceKind<T, C>,
     ) -> bool {
         match (stored, incoming) {
             (StoredEvidence::Evidence(stored), incoming) => stored == incoming,
@@ -1005,7 +1006,7 @@ impl<T: Clone + PartialEq> NormalizationCore<T> {
     }
 }
 
-impl<T> Default for CoreState<T> {
+impl<T, C> Default for CoreState<T, C> {
     fn default() -> Self {
         Self {
             logical: BTreeMap::new(),
@@ -1014,7 +1015,7 @@ impl<T> Default for CoreState<T> {
     }
 }
 
-impl<T> Default for CoreStateDelta<T> {
+impl<T, C> Default for CoreStateDelta<T, C> {
     fn default() -> Self {
         Self {
             logical: BTreeMap::new(),
@@ -1023,7 +1024,7 @@ impl<T> Default for CoreStateDelta<T> {
     }
 }
 
-// 两个载荷版本复用同一规范化算法，每个运行只拥有一个核心状态。
+// 各载荷版本复用同一规范化算法，每个运行只拥有一个核心状态。
 pub type SourceNeutralEvidenceKindV1 =
     SourceNeutralEvidenceKind<SourceNeutralTradeLifecycleResultV1>;
 pub type SourceNeutralEvidenceKindV2 = SourceNeutralEvidenceKind<
@@ -1056,6 +1057,43 @@ impl NormalizationCoreV2 {
         &self,
         input: NormalizationBatchInputV2,
     ) -> Result<PreparedNormalizationBatchV2, CoreErrorV1> {
+        self.prepare_batch(input)
+    }
+}
+
+pub type SourceNeutralEvidenceKindV3 = SourceNeutralEvidenceKind<
+    contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2,
+    contracts::execution_normalization::SourceNeutralControlResultV2,
+>;
+pub type SourceNeutralEvidenceV3 = SourceNeutralEvidence<
+    contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2,
+    contracts::execution_normalization::SourceNeutralControlResultV2,
+>;
+pub type NormalizationBatchInputV3 = NormalizationBatchInput<
+    contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2,
+    contracts::execution_normalization::SourceNeutralControlResultV2,
+>;
+pub type NormalizationRecordV3 = NormalizationRecord<
+    contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2,
+    contracts::execution_normalization::SourceNeutralControlResultV2,
+>;
+pub type NormalizationBatchV3 = NormalizationBatch<
+    contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2,
+    contracts::execution_normalization::SourceNeutralControlResultV2,
+>;
+pub type PreparedNormalizationBatchV3 = PreparedNormalizationBatch<
+    contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2,
+    contracts::execution_normalization::SourceNeutralControlResultV2,
+>;
+pub type NormalizationCoreV3 = NormalizationCore<
+    contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2,
+    contracts::execution_normalization::SourceNeutralControlResultV2,
+>;
+impl NormalizationCoreV3 {
+    pub fn prepare_batch_v3(
+        &self,
+        input: NormalizationBatchInputV3,
+    ) -> Result<PreparedNormalizationBatchV3, CoreErrorV1> {
         self.prepare_batch(input)
     }
 }
