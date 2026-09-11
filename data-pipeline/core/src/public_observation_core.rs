@@ -362,6 +362,27 @@ struct PendingTerminal {
     ws: Option<PendingWs>,
 }
 
+/// 只读有限验收口径：条目数不是分配容量、编码字节或 RSS。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct PublicCoreObjectCountsV1 {
+    pub markets: usize,
+    pub assets: usize,
+    pub pm_quantity_keys: usize,
+    pub pm_level_evidence_keys: usize,
+    pub pm_absence_keys: usize,
+    pub pm_selection_keys: usize,
+    pub public_level_anchor_keys: usize,
+    pub seen_epoch_entries: usize,
+    pub seen_message_entries: usize,
+    pub pending_terminal_keys: usize,
+    pub pending_metadata_sides: usize,
+    pub pending_ws_sides: usize,
+    pub reference_market_states: usize,
+    pub fixed_temporary_references: usize,
+    pub original_retained_state_entries: usize,
+    pub binance_depth_retained_entries: usize,
+}
+
 pub struct PublicObservationCoreV1 {
     header: PublicInputStreamHeaderV1,
     next_input_position: u64,
@@ -437,6 +458,38 @@ impl PublicObservationCoreV1 {
         AppliedIngressPrefixV1 {
             input_stream_id: self.header.input_stream_id.clone(),
             next_input_position: self.next_input_position,
+        }
+    }
+    pub fn object_counts(&self) -> PublicCoreObjectCountsV1 {
+        PublicCoreObjectCountsV1 {
+            markets: self.markets.len(),
+            assets: self.markets.values().map(|m| m.pm.assets.len()).sum(),
+            pm_quantity_keys: self
+                .markets
+                .values()
+                .map(|m| m.pm.quantities.as_ref().map_or(0, BTreeMap::len))
+                .sum(),
+            pm_level_evidence_keys: self.markets.values().map(|m| m.pm.levels.len()).sum(),
+            pm_absence_keys: self.markets.values().map(|m| m.pm.absences.len()).sum(),
+            pm_selection_keys: self.markets.values().map(|m| m.pm.selected.len()).sum(),
+            public_level_anchor_keys: self.markets.values().map(|m| m.level_anchors.len()).sum(),
+            seen_epoch_entries: self.markets.values().map(|m| m.seen_epochs.len()).sum(),
+            seen_message_entries: self.markets.values().map(|m| m.seen_messages.len()).sum(),
+            pending_terminal_keys: self.pending.len(),
+            pending_metadata_sides: self
+                .pending
+                .values()
+                .filter(|p| p.metadata.is_some())
+                .count(),
+            pending_ws_sides: self.pending.values().filter(|p| p.ws.is_some()).count(),
+            reference_market_states: self.references.len(),
+            fixed_temporary_references: self
+                .references
+                .values()
+                .filter(|r| r.temporary.is_some())
+                .count(),
+            original_retained_state_entries: self.retained_state_entries(),
+            binance_depth_retained_entries: self.binance_depth.retained_state_entries(),
         }
     }
     pub fn pending_ws_terminal_count(&self) -> usize {

@@ -1993,3 +1993,38 @@ fn late_exact_open_observation_does_not_replace_already_fixed_reference() {
         EffectiveMarketReferenceV1::OfficialAnchor(_)
     ));
 }
+
+#[test]
+fn object_counts_separate_quantity_evidence_selection_and_are_read_only() {
+    let mut core = core();
+    assert_eq!(core.object_counts().markets, 0);
+    push(&mut core, &meta(0));
+    push(&mut core, &pm(1, 1, 21_000, book("100")));
+    let before = core.object_counts();
+    assert_eq!(before.markets, 1);
+    assert_eq!(before.assets, 2);
+    assert_eq!(before.pm_quantity_keys, 2);
+    assert_eq!(before.pm_level_evidence_keys, 2);
+    assert_eq!(before.pm_selection_keys, 2);
+    assert_eq!(before.pending_terminal_keys, 0);
+    assert_eq!(
+        before.original_retained_state_entries,
+        core.retained_state_entries()
+    );
+    assert_eq!(core.object_counts(), before);
+    push(
+        &mut core,
+        &pm(
+            2,
+            2,
+            21_001,
+            PolymarketOrderbookEvent::PriceChange {
+                price_changes: vec![change(Some("0"))],
+            },
+        ),
+    );
+    let after = core.object_counts();
+    assert_eq!(after.pm_quantity_keys, 1);
+    assert_eq!(after.pm_absence_keys, 1);
+    assert_eq!(after.pm_selection_keys, 2, "选中零量仍有自己的版本键");
+}
