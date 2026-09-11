@@ -2905,7 +2905,7 @@ impl ExecutionStateV2 {
 
         match normalized {
             NormalizedMarketEventV2::InitialL2Snapshot {
-                snapshot,
+                asset: snapshot_asset,
                 bids,
                 asks,
                 ..
@@ -2930,7 +2930,7 @@ impl ExecutionStateV2 {
                     .collect::<Result<Vec<_>, MatchingStateErrorV1>>()?;
                 effects.resources.merge(self.queues.apply_initial_levels(
                     condition_id,
-                    &snapshot.asset.token_id.0,
+                    &snapshot_asset.token_id.0,
                     &bids,
                     &asks,
                 )?);
@@ -2973,7 +2973,9 @@ impl ExecutionStateV2 {
                         .clear_external_segments(),
                 );
             }
-            NormalizedMarketEventV2::MarketLifecycleTransition(_)
+            NormalizedMarketEventV2::MarketLifecycleSnapshot(_)
+            | NormalizedMarketEventV2::InitialTick { .. }
+            | NormalizedMarketEventV2::MarketLifecycleTransition(_)
             | NormalizedMarketEventV2::MarketTradingState(_)
             | NormalizedMarketEventV2::BestBidAsk { .. }
             | NormalizedMarketEventV2::TickSizeChange { .. }

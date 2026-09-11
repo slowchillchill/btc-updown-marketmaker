@@ -136,8 +136,17 @@ impl SimEventLogV2 {
     }
 
     pub(crate) fn append_group(
+        self,
+        inputs: &[BusinessInputV2],
+    ) -> Result<(Self, Range<u64>), SimEventLogErrorV2> {
+        let sync = self.durability_role == RunDurabilityRoleV2::RecoverablePaper;
+        self.append_group_with_sync(inputs, sync)
+    }
+
+    fn append_group_with_sync(
         mut self,
         inputs: &[BusinessInputV2],
+        sync: bool,
     ) -> Result<(Self, Range<u64>), SimEventLogErrorV2> {
         let start = self.next_input_sequence;
         if inputs.is_empty() {
@@ -164,7 +173,7 @@ impl SimEventLogV2 {
         self.write_encoded(&encoded, MeasurementContext::CommitGroup)?;
         #[cfg(not(feature = "measurement"))]
         self.write_encoded(&encoded)?;
-        if self.durability_role == RunDurabilityRoleV2::RecoverablePaper {
+        if sync {
             #[cfg(feature = "measurement")]
             self.sync_data(MeasurementContext::CommitGroup)?;
             #[cfg(not(feature = "measurement"))]
@@ -829,6 +838,91 @@ mod tests {
     }
 
     #[test]
+    fn background_acceptance_precedes_encoding_and_explicit_finish_seals_in_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("background.jsonl");
+        let log = SimEventLogV2::create(
+            &path,
+            &opened(RunDurabilityRoleV2::CleanRun),
+            MAX_GROUP_BYTES,
+        )
+        .unwrap();
+        let initial = std::fs::read(&path).unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let mut first = true;
+        let mut background = BackgroundEventLogV1::start_with_hook(log, 2, move || {
+            if first {
+                first = false;
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            }
+        });
+        background.enqueue(vec![input("a")]).unwrap();
+        entered_rx.recv().unwrap();
+        background.enqueue(vec![input("b")]).unwrap();
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            initial,
+            "后台尚未编码时前台已接受两组"
+        );
+        release_tx.send(()).unwrap();
+        background.finish().unwrap();
+        let (_, recovery) = SimEventLogRecoveryV2::open(&path, MAX_GROUP_BYTES).unwrap();
+        let (_, groups) = read_all_groups(recovery).unwrap();
+        assert_eq!(groups.len(), 2);
+        assert!(
+            matches!(&groups[0][0], LoggedBusinessInputV2::ActivateSession { activation_id } if activation_id == "activation-a")
+        );
+        assert!(
+            matches!(&groups[1][0], LoggedBusinessInputV2::ActivateSession { activation_id } if activation_id == "activation-b")
+        );
+    }
+
+    #[test]
+    fn background_disconnect_and_write_failure_never_seal_normal_end() {
+        let directory = tempfile::tempdir().unwrap();
+        for fail_write in [false, true] {
+            let path = directory
+                .path()
+                .join(format!("incomplete-{fail_write}.jsonl"));
+            let mut log = SimEventLogV2::create(
+                &path,
+                &opened(RunDurabilityRoleV2::CleanRun),
+                MAX_GROUP_BYTES,
+            )
+            .unwrap();
+            if fail_write {
+                log.inject_write_failure_for_tests();
+            }
+            let mut background = BackgroundEventLogV1::start(log, 1);
+            background.enqueue(vec![input("accepted")]).unwrap();
+            if fail_write {
+                assert!(matches!(
+                    background.finish(),
+                    Err(SimEventLogErrorV2::Io { .. })
+                ));
+            } else {
+                let BackgroundEventLogV1 { sender, worker, .. } = background;
+                drop(sender);
+                assert!(matches!(
+                    worker.join().unwrap(),
+                    Err(SimEventLogErrorV2::UnsealedCleanRun)
+                ));
+            }
+            let wire = std::fs::read_to_string(&path).unwrap();
+            assert!(!wire.contains("RUN_SEAL"));
+            let (_, recovery) = SimEventLogRecoveryV2::open(&path, MAX_GROUP_BYTES).unwrap();
+            let (recovery, groups) = read_all_groups(recovery).unwrap();
+            assert_eq!(groups.len(), usize::from(!fail_write));
+            assert!(matches!(
+                recovery.finish_sealed_clean_run(),
+                Err(SimEventLogErrorV2::UnsealedCleanRun)
+            ));
+        }
+    }
+
+    #[test]
     fn injected_write_or_sync_failure_consumes_the_writer_result() {
         let directory = tempfile::tempdir().expect("创建日志测试目录");
         let write_path = directory.path().join("write-failure.jsonl");
@@ -850,5 +944,143 @@ mod tests {
         .expect("创建同步故障日志");
         sync_log.inject_sync_failure_for_tests();
         assert!(sync_log.append_group(&[input("sync")]).is_err());
+    }
+}
+
+/// 同一日志的唯一后台所有者。容量由有限调用方显式提供；未交接批次仍由前台持有。
+enum BackgroundLogCommandV1 {
+    Group(Vec<BusinessInputV2>),
+    Finish,
+    #[cfg(test)]
+    Pause(
+        std::sync::mpsc::SyncSender<()>,
+        std::sync::mpsc::Receiver<()>,
+    ),
+    #[cfg(test)]
+    FailNextWrite,
+}
+pub(crate) struct BackgroundEventLogV1 {
+    sender: std::sync::mpsc::SyncSender<BackgroundLogCommandV1>,
+    pending: Option<Vec<BusinessInputV2>>,
+    failure: std::sync::Arc<std::sync::Mutex<Option<SimEventLogErrorV2>>>,
+    worker: std::thread::JoinHandle<Result<(), SimEventLogErrorV2>>,
+}
+impl BackgroundEventLogV1 {
+    pub(crate) fn start(log: SimEventLogV2, capacity: usize) -> Self {
+        Self::start_with_hook(log, capacity, || {})
+    }
+    fn start_with_hook(
+        log: SimEventLogV2,
+        capacity: usize,
+        mut before_encode: impl FnMut() + Send + 'static,
+    ) -> Self {
+        let (sender, receiver) = std::sync::mpsc::sync_channel::<BackgroundLogCommandV1>(capacity);
+        let failure = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let report = failure.clone();
+        let worker = std::thread::spawn(move || {
+            let result = (|| {
+                let mut log = log;
+                loop {
+                    match receiver.recv() {
+                        Ok(BackgroundLogCommandV1::Group(mut inputs)) => {
+                            before_encode();
+                            for input in &mut inputs {
+                                if let BusinessInputV2::PublicGroup(group) = input {
+                                    group.materialize()?;
+                                }
+                            }
+                            log = log.append_group_with_sync(&inputs, false)?.0;
+                        }
+                        Ok(BackgroundLogCommandV1::Finish) => return log.seal_clean_run(),
+                        #[cfg(test)]
+                        Ok(BackgroundLogCommandV1::Pause(entered, release)) => {
+                            entered.send(()).unwrap();
+                            release.recv().unwrap();
+                        }
+                        #[cfg(test)]
+                        Ok(BackgroundLogCommandV1::FailNextWrite) => {
+                            log.inject_write_failure_for_tests()
+                        }
+                        Err(_) => return Err(SimEventLogErrorV2::UnsealedCleanRun),
+                    }
+                }
+            })();
+            if let Err(error) = &result {
+                *report.lock().unwrap() = Some(error.clone());
+            }
+            result
+        });
+        Self {
+            sender,
+            pending: None,
+            failure,
+            worker,
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn pause_for_tests(&self, fail_next_write: bool) -> std::sync::mpsc::SyncSender<()> {
+        if fail_next_write {
+            self.sender
+                .send(BackgroundLogCommandV1::FailNextWrite)
+                .unwrap();
+        }
+        let (entered, waiting) = std::sync::mpsc::sync_channel(1);
+        let (release, blocked) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .send(BackgroundLogCommandV1::Pause(entered, blocked))
+            .unwrap();
+        waiting.recv().unwrap();
+        release
+    }
+    #[cfg(test)]
+    pub(crate) fn abort_and_join_for_tests(self) -> Result<(), SimEventLogErrorV2> {
+        drop(self.sender);
+        self.worker.join().unwrap()
+    }
+    pub(crate) fn ready(&mut self) -> Result<bool, SimEventLogErrorV2> {
+        if let Some(error) = self.failure.lock().unwrap().clone() {
+            return Err(error);
+        }
+        if let Some(inputs) = self.pending.take() {
+            self.enqueue(inputs)?;
+        }
+        Ok(self.pending.is_none())
+    }
+    pub(crate) fn enqueue(
+        &mut self,
+        inputs: Vec<BusinessInputV2>,
+    ) -> Result<(), SimEventLogErrorV2> {
+        match self.sender.try_send(BackgroundLogCommandV1::Group(inputs)) {
+            Ok(()) => Ok(()),
+            Err(std::sync::mpsc::TrySendError::Full(BackgroundLogCommandV1::Group(inputs))) => {
+                self.pending = Some(inputs);
+                Ok(())
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(BackgroundLogCommandV1::Group(
+                inputs,
+            ))) => {
+                self.pending = Some(inputs);
+                Err(self.failure.lock().unwrap().clone().unwrap_or(
+                    SimEventLogErrorV2::InvalidStructure("后台日志已停止，本轮未完成"),
+                ))
+            }
+            Err(_) => unreachable!("只在此处移交原输入组"),
+        }
+    }
+    pub(crate) fn finish(mut self) -> Result<(), SimEventLogErrorV2> {
+        let sent = self
+            .pending
+            .take()
+            .map_or(Ok(()), |inputs| {
+                self.sender.send(BackgroundLogCommandV1::Group(inputs))
+            })
+            .and_then(|()| self.sender.send(BackgroundLogCommandV1::Finish));
+        drop(self.sender);
+        let result = self
+            .worker
+            .join()
+            .map_err(|_| SimEventLogErrorV2::InvalidStructure("后台日志异常退出，本轮未完成"))?;
+        result?;
+        sent.map_err(|_| SimEventLogErrorV2::UnsealedCleanRun)
     }
 }

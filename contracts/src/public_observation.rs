@@ -446,3 +446,60 @@ pub struct ClosedHiddenStepBucketV1 {
     pub reference_positions: Vec<u64>,
     pub closure: ReplayIndexClosureV1,
 }
+
+/// DPT 已应用组的原位置，不代表磁盘稳定或受信 UTC。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicGroupReferenceV1 {
+    pub input_stream_id: String,
+    pub applied_prefix: AppliedIngressPrefixV1,
+    pub group_position: u64,
+    pub group_id: Sha256Hex,
+    pub closed_at_input_position: u64,
+}
+
+/// 公共规则的精确值与其原来源；历史市场事实仍由同帧观测承载。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicTradingRuleContextV1 {
+    pub version: String,
+    pub snapshot_file_sha256: Sha256Hex,
+    pub market: MarketIdentityV2,
+    pub query_started_at_utc_ms: i64,
+    pub query_completed_at_utc_ms: i64,
+    pub frozen_at_utc_ms: i64,
+    pub queried_minimum_order_size_shares: ExactDecimal,
+    pub limit_min_quantity_shares: ExactDecimal,
+    pub market_buy_min_spend_pusd: ExactDecimal,
+    pub taker_delay_enabled: bool,
+    pub taker_delay_ms: u64,
+    pub delay_requires_itode: bool,
+    pub delay_only_fok_fak_market_buy: bool,
+    pub fees_enabled: bool,
+    pub fee_rate: ExactDecimal,
+    pub fee_exponent: u32,
+    pub fee_taker_only: bool,
+    pub fee_formula_version: String,
+    pub fee_precision_decimal_places: u32,
+    pub minimum_nonzero_fee_pusd: ExactDecimal,
+    pub gtd_lifetime_seconds: [u64; 3],
+    pub gtd_safety_offset_seconds: u64,
+    pub maker_rebate_rate: ExactDecimal,
+    pub taker_rebate_rate: ExactDecimal,
+    pub encoding_contract_reference: Option<String>,
+    pub queried_rules_source: PublicRuleSourceV1,
+    pub delay_rule_source: PublicRuleSourceV1,
+    pub fee_formula_source: PublicRuleSourceV1,
+    pub rebate_source: PublicRuleSourceV1,
+    pub project_rules_source: PublicRuleSourceV1,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PublicRuleSourceCategoryV1 {
+    QueriedPlatform,
+    PublishedPlatformRule,
+    ApprovedProjectRule,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicRuleSourceV1 {
+    pub category: PublicRuleSourceCategoryV1,
+    pub reference: String,
+}

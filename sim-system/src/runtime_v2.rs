@@ -224,6 +224,13 @@ pub(crate) enum BusinessInputV2 {
     PlatformPrefixAdvance(PlatformPrefixAdvanceV2),
     RetentionAdvance(RetentionAdvanceV2),
     ClosedMarketBucket(AcceptedClosedMarketBucketV2),
+    PublicGroup(crate::public_consumption::AcceptedPublicGroupV1),
+    HiddenStepBucket(crate::public_consumption::AcceptedHiddenStepBucketV1),
+    PublicRequest {
+        cutoff: crate::public_consumption::TrustedGroupDecisionCutoffV1,
+        request: BusinessRequestV2,
+    },
+    PublicCloseTime(crate::public_consumption::TrustedPublicTimeClosureV1),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
@@ -244,4 +251,11 @@ pub(crate) enum LoggedBusinessInputV2 {
     PlatformPrefixAdvance(PlatformPrefixAdvanceV2),
     RetentionAdvance(RetentionAdvanceV2),
     ClosedMarketBucket(LoggedClosedMarketBucketV2),
+    PublicGroup(crate::public_consumption::LoggedPublicGroupV1),
+    HiddenStepBucket(crate::public_consumption::LoggedHiddenStepBucketV1),
+    PublicRequest {
+        cutoff: crate::public_consumption::LoggedGroupCutoffV1,
+        request: BusinessRequestV2,
+    },
+    PublicCloseTime(crate::public_consumption::LoggedPublicClosureV1),
 }

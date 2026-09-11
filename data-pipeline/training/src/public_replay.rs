@@ -132,6 +132,20 @@ impl PublicReplayV1 {
     pub fn next_applied(
         &mut self,
     ) -> RecordingResult<Option<(RecordedIngressV1, PublicAppliedIngressV1<'static>)>> {
+        Ok(self
+            .next_prepared_applied()?
+            .map(|(input, applied, _)| (input, applied)))
+    }
+    /// 移交本次来源准备对象；模拟器消费时不重新编码身份或准备盘口摘要。
+    pub fn next_prepared_applied(
+        &mut self,
+    ) -> RecordingResult<
+        Option<(
+            RecordedIngressV1,
+            PublicAppliedIngressV1<'static>,
+            Option<data_pipeline_core::pm_reduction::PreparedPmMessageV1>,
+        )>,
+    > {
         while let Some(row) = self.reader.next_row()? {
             if let PublicStoredRowV1::Input(mut input) = row {
                 let root = self.reader.root().to_path_buf();
@@ -171,13 +185,23 @@ impl PublicReplayV1 {
                             })
                         },
                     )?;
-                    self.core.push(&prepared)?.into_owned()
+                    let applied = self.core.push(&prepared)?.into_owned();
+                    let pm = match prepared.current {
+                        PreparedCanonicalInputV1::PolymarketMessage(pm) => Some(pm),
+                        _ => None,
+                    };
+                    (applied, pm)
                 } else {
                     let prepared =
                         prepare_public_ingress_v1(&self.core, &input, &identity_sources, &deps)?;
-                    self.core.push(&prepared)?.into_owned()
+                    let applied = self.core.push(&prepared)?.into_owned();
+                    let pm = match prepared.current {
+                        PreparedCanonicalInputV1::PolymarketMessage(pm) => Some(pm),
+                        _ => None,
+                    };
+                    (applied, pm)
                 };
-                return Ok(Some((input, result)));
+                return Ok(Some((input, result.0, result.1)));
             }
         }
         Ok(None)

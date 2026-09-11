@@ -1,3 +1,5 @@
+use crate::public_consumption::*;
+use crate::session::PublicVisibilityCursorV1;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -20,7 +22,9 @@ use contracts::{
 };
 
 use crate::account::{PlatformAccountError, PlatformAccountStateV2};
-use crate::event_log::{SimEventLogErrorV2, SimEventLogRecoveryV2, SimEventLogV2};
+use crate::event_log::{
+    BackgroundEventLogV1, SimEventLogErrorV2, SimEventLogRecoveryV2, SimEventLogV2,
+};
 use crate::execution::{
     CancelOrderItemV1, OrdersFilterV1, PostOrderItemV1, SIM_QUERY_PAGE_SIZE_V1, SimBuyOrderKindV1,
     TradesFilterV1, limit_buy_encoding, market_buy_encoding, normalize_gtd_expiration,
@@ -330,6 +334,9 @@ pub trait BusinessProjectionPortV2 {
         }
     }
     fn durable_through(&self, run_id: &str) -> u64;
+    fn actual_delivered_private_feedback(&self, _run_id: &str) -> Option<u64> {
+        None
+    }
 }
 
 struct PendingProjectionBatchV2 {
@@ -636,6 +643,13 @@ struct MarketEnrollmentStateV2 {
 pub(crate) struct BusinessReducerStateV2 {
     session: Option<UniqueSessionStateV2>,
     business_resources: ResourceQuantityV1,
+    pm_materials: Vec<DeferredPublicPmReductionV1>,
+    public_pm_evidence: BTreeMap<
+        String,
+        data_pipeline_core::public_observation_core::PmOwnedStateV1<
+            data_pipeline_core::pm_reduction::PreparedPmEvidenceV1<contracts::SourceEvidenceRefV3>,
+        >,
+    >,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -829,6 +843,21 @@ pub(crate) enum BusinessReducerInputV2<'a> {
     },
     ClosedMarketBucket {
         bucket: AcceptedClosedMarketBucketV2,
+        rules: &'a PlatformRuleSnapshotV3,
+        finality_policy: &'a TradeFinalityPolicyV2,
+    },
+    HiddenStepBucket {
+        bucket: &'a AcceptedHiddenStepBucketV1,
+        rules: &'a PlatformRuleSnapshotV3,
+        finality_policy: &'a TradeFinalityPolicyV2,
+    },
+    PublicGroup {
+        group: &'a AcceptedPublicGroupV1,
+        rules: &'a PlatformRuleSnapshotV3,
+        finality_policy: &'a TradeFinalityPolicyV2,
+    },
+    PublicCloseTime {
+        closure: &'a TrustedPublicTimeClosureV1,
         rules: &'a PlatformRuleSnapshotV3,
         finality_policy: &'a TradeFinalityPolicyV2,
     },
@@ -1204,6 +1233,49 @@ fn reduce_actor_input_v2(
     finality_policy: &TradeFinalityPolicyV2,
 ) -> BusinessReductionResultV2 {
     match input {
+        BusinessInputV2::HiddenStepBucket(bucket) => drive_business_input_at_v2(
+            state,
+            BusinessReducerInputV2::HiddenStepBucket {
+                bucket,
+                rules,
+                finality_policy,
+            },
+        ),
+        BusinessInputV2::PublicGroup(group) => drive_business_input_at_v2(
+            state,
+            BusinessReducerInputV2::PublicGroup {
+                group,
+                rules,
+                finality_policy,
+            },
+        ),
+        BusinessInputV2::PublicCloseTime(closure) => drive_business_input_at_v2(
+            state,
+            BusinessReducerInputV2::PublicCloseTime {
+                closure,
+                rules,
+                finality_policy,
+            },
+        ),
+        BusinessInputV2::PublicRequest { cutoff, request } => {
+            let legacy = TrustedDecisionCutoffV2 {
+                logical_time_utc_ms: cutoff.decision_time.logical_time_utc_ms(),
+                public_visibility: PublicVisibilityCursorV1::default(),
+                private_feedback_sequence: cutoff.private_feedback_sequence,
+            };
+            reduce_business_input_v2(
+                opened,
+                initial_market_directory,
+                state,
+                BusinessReducerInputV2::RegisterNewRequest {
+                    cutoff: &legacy,
+                    request,
+                    input_sequence,
+                    latency_profile,
+                    rules,
+                },
+            )
+        }
         BusinessInputV2::CreateSession(spec) => reduce_business_input_v2(
             opened,
             initial_market_directory,
@@ -1809,6 +1881,8 @@ pub(crate) struct SimRunActorV2 {
     log_path: PathBuf,
     max_group_bytes: usize,
     log: Option<SimEventLogV2>,
+    background_log: Option<BackgroundEventLogV1>,
+    applied_input_sequence: u64,
     state: Option<BusinessReducerStateV2>,
     projection_port: Box<dyn BusinessProjectionPortV2>,
     pending_projections: VecDeque<PendingProjectionBatchV2>,
@@ -1852,6 +1926,8 @@ impl RequiredLogicalDriveScheduleV2 {
 #[derive(Debug, PartialEq, Eq)]
 pub enum SimRunActorErrorV2 {
     Closed,
+    RecordingBackpressured,
+    PublicConsumptionSource(String),
     InvalidRunId,
     RuleSnapshotIdentityMismatch,
     FinalityPolicyIdentityMismatch,
@@ -1883,6 +1959,10 @@ pub enum SimRunActorErrorV2 {
 impl std::fmt::Display for SimRunActorErrorV2 {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::PublicConsumptionSource(message) => {
+                write!(formatter, "公共消费来源未完成：{message}")
+            }
+            Self::RecordingBackpressured => write!(formatter, "记录材料尚待交接，暂停供料"),
             Self::Closed => write!(formatter, "运行根已经关闭"),
             Self::InvalidRunId => write!(formatter, "运行身份非法"),
             Self::RuleSnapshotIdentityMismatch => write!(formatter, "运行根规则文件身份不一致"),
@@ -1974,6 +2054,7 @@ struct ReplayedEventLogV2 {
 fn materialize_logged_input_v2<F>(
     input: LoggedBusinessInputV2,
     read_bucket: &mut F,
+    read_public: &mut Option<&mut dyn PublicConsumptionMaterialReaderV1>,
 ) -> Result<BusinessInputV2, SimRunActorErrorV2>
 where
     F: FnMut(
@@ -1981,6 +2062,43 @@ where
     ) -> Result<Arc<[ExecutionMarketEventV3]>, SimRunActorErrorV2>,
 {
     Ok(match input {
+        LoggedBusinessInputV2::HiddenStepBucket(bucket) => {
+            let records = read_public
+                .as_mut()
+                .ok_or(SimRunActorErrorV2::CompletionNotReady(
+                    "隐藏桶恢复需要原记录读取器",
+                ))?
+                .hidden_bucket(&bucket.reference)?;
+            BusinessInputV2::HiddenStepBucket(AcceptedHiddenStepBucketV1 {
+                reference: bucket.reference,
+                records,
+            })
+        }
+        LoggedBusinessInputV2::PublicGroup(group) => {
+            let prepared = read_public
+                .as_mut()
+                .ok_or(SimRunActorErrorV2::CompletionNotReady(
+                    "公共组恢复需要原记录读取器",
+                ))?
+                .public_group(&group.reference)?;
+            BusinessInputV2::PublicGroup(AcceptedPublicGroupV1 {
+                reference: group.reference,
+                execution_time: TrustedActorExecutionTimeV1(group.execution_time),
+                prepared,
+                pm_materials: Vec::new(),
+                pm_step_bindings: group.pm_step_bindings,
+                pm_reports: group.pm_reports,
+            })
+        }
+        LoggedBusinessInputV2::PublicRequest { cutoff, request } => {
+            BusinessInputV2::PublicRequest {
+                cutoff: cutoff.into_trusted(),
+                request,
+            }
+        }
+        LoggedBusinessInputV2::PublicCloseTime(closure) => {
+            BusinessInputV2::PublicCloseTime(closure.into_trusted())
+        }
         LoggedBusinessInputV2::CreateSession(spec) => BusinessInputV2::CreateSession(spec),
         LoggedBusinessInputV2::ActivateSession { activation_id } => {
             BusinessInputV2::ActivateSession { activation_id }
@@ -2018,6 +2136,7 @@ fn replay_event_log_v2<F>(
     max_group_bytes: usize,
     projection_port: Option<&dyn BusinessProjectionPortV2>,
     mut read_bucket: F,
+    mut read_public: Option<&mut dyn PublicConsumptionMaterialReaderV1>,
 ) -> Result<ReplayedEventLogV2, SimRunActorErrorV2>
 where
     F: FnMut(
@@ -2036,6 +2155,8 @@ where
     let durable_through = projection_port.map(|port| port.durable_through(&opened.run_id));
     let mut state = BusinessReducerStateV2 {
         session: None,
+        public_pm_evidence: BTreeMap::new(),
+        pm_materials: Vec::new(),
         business_resources: ResourceQuantityV1::default(),
     };
     let mut pending_projections = VecDeque::new();
@@ -2048,7 +2169,7 @@ where
             break;
         };
         for logged in group {
-            let input = materialize_logged_input_v2(logged, &mut read_bucket)?;
+            let input = materialize_logged_input_v2(logged, &mut read_bucket, &mut read_public)?;
             let reduced = reduce_actor_input_v2(
                 &opened,
                 scenario.initial_market_directory(),
@@ -2067,6 +2188,7 @@ where
             let (next_state, _, projection) =
                 finalize_projection_batch_v2(&opened.run_id, next_state, output, latency_profile)?;
             state = next_state;
+            state.pm_materials.clear();
             if let Some(projection) = projection
                 && durable_through
                     .is_some_and(|watermark| projection.projection_batch_sequence > watermark)
@@ -2393,8 +2515,12 @@ impl SimRunActorV2 {
             log_path: path.to_path_buf(),
             max_group_bytes,
             log: Some(log),
+            background_log: None,
+            applied_input_sequence: 1,
             state: Some(BusinessReducerStateV2 {
                 session: None,
+                public_pm_evidence: BTreeMap::new(),
+                pm_materials: Vec::new(),
                 business_resources: ResourceQuantityV1::default(),
             }),
             projection_port,
@@ -2430,6 +2556,7 @@ impl SimRunActorV2 {
             max_group_bytes,
             Some(projection_port.as_ref()),
             read_bucket,
+            None,
         )?;
         if replayed.opened.durability_role != RunDurabilityRoleV2::RecoverablePaper {
             return Err(SimRunActorErrorV2::Log(
@@ -2451,6 +2578,8 @@ impl SimRunActorV2 {
             log_path: path.to_path_buf(),
             max_group_bytes,
             log: Some(log),
+            background_log: None,
+            applied_input_sequence: 1,
             state: Some(replayed.state),
             projection_port,
             pending_projections: replayed.pending_projections,
@@ -2477,6 +2606,33 @@ impl SimRunActorV2 {
             &DurableMarketBucketReferenceV2,
         ) -> Result<Arc<[ExecutionMarketEventV3]>, SimRunActorErrorV2>,
     {
+        Self::recover_sealed_clean_run_with_materials(
+            path,
+            rule_snapshot,
+            finality_policy,
+            scenario,
+            latency_profile,
+            max_group_bytes,
+            read_bucket,
+            None,
+        )
+    }
+
+    pub(crate) fn recover_sealed_clean_run_with_materials<F>(
+        path: &Path,
+        rule_snapshot: Arc<SealedProcessRuleSnapshotV3>,
+        finality_policy: Arc<TradeFinalityPolicyV2>,
+        scenario: Arc<SealedPlatformScenarioV1>,
+        latency_profile: Arc<EmpiricalDelayProfile>,
+        max_group_bytes: usize,
+        read_bucket: F,
+        read_public: Option<&mut dyn PublicConsumptionMaterialReaderV1>,
+    ) -> Result<UnpublishedRunArtifactCandidateV2, SimRunActorErrorV2>
+    where
+        F: FnMut(
+            &DurableMarketBucketReferenceV2,
+        ) -> Result<Arc<[ExecutionMarketEventV3]>, SimRunActorErrorV2>,
+    {
         #[cfg(feature = "measurement")]
         let recovery_started = Instant::now();
         let replayed = replay_event_log_v2(
@@ -2488,6 +2644,7 @@ impl SimRunActorV2 {
             max_group_bytes,
             None,
             read_bucket,
+            read_public,
         )?;
         if replayed.opened.durability_role != RunDurabilityRoleV2::CleanRun {
             return Err(SimRunActorErrorV2::Log(
@@ -2513,8 +2670,21 @@ impl SimRunActorV2 {
     }
 
     pub(crate) fn complete_clean_run<F>(
+        self,
+        read_bucket: F,
+    ) -> Result<UnpublishedRunArtifactCandidateV2, SimRunActorErrorV2>
+    where
+        F: FnMut(
+            &DurableMarketBucketReferenceV2,
+        ) -> Result<Arc<[ExecutionMarketEventV3]>, SimRunActorErrorV2>,
+    {
+        self.complete_clean_run_with_materials(read_bucket, None)
+    }
+
+    pub(crate) fn complete_clean_run_with_materials<F>(
         mut self,
         read_bucket: F,
+        read_public: Option<&mut dyn PublicConsumptionMaterialReaderV1>,
     ) -> Result<UnpublishedRunArtifactCandidateV2, SimRunActorErrorV2>
     where
         F: FnMut(
@@ -2581,14 +2751,18 @@ impl SimRunActorV2 {
                 "合格市场判定尚未完成既有因果闭合",
             ));
         }
-        self.log
-            .take()
-            .ok_or(SimRunActorErrorV2::Closed)?
-            .seal_clean_run()
-            .map_err(SimRunActorErrorV2::Log)?;
+        if let Some(background) = self.background_log.take() {
+            background.finish().map_err(SimRunActorErrorV2::Log)?;
+        } else {
+            self.log
+                .take()
+                .ok_or(SimRunActorErrorV2::Closed)?
+                .seal_clean_run()
+                .map_err(SimRunActorErrorV2::Log)?;
+        }
         #[cfg(feature = "measurement")]
         let seal_observations = self.measurement_probe.drain();
-        let candidate = Self::recover_sealed_clean_run(
+        let candidate = Self::recover_sealed_clean_run_with_materials(
             &self.log_path,
             self._rule_snapshot,
             self._finality_policy,
@@ -2596,6 +2770,7 @@ impl SimRunActorV2 {
             self._latency_profile,
             self.max_group_bytes,
             read_bucket,
+            read_public,
         )?;
         #[cfg(feature = "measurement")]
         let candidate = {
@@ -2802,7 +2977,7 @@ impl SimRunActorV2 {
 
     pub(crate) fn commit_group(
         &mut self,
-        inputs: Vec<BusinessInputV2>,
+        mut inputs: Vec<BusinessInputV2>,
     ) -> Result<BusinessGroupCommitV2, SimRunActorErrorV2> {
         self.deliver_pending_projections();
         if self
@@ -2812,16 +2987,22 @@ impl SimRunActorV2 {
         {
             return Err(SimRunActorErrorV2::ProjectionBackpressured);
         }
-        let start_sequence = self
-            .log
-            .as_ref()
-            .ok_or(SimRunActorErrorV2::Closed)?
-            .next_input_sequence();
+        let start_sequence = if let Some(background) = &mut self.background_log {
+            if !background.ready().map_err(SimRunActorErrorV2::Log)? {
+                return Err(SimRunActorErrorV2::RecordingBackpressured);
+            }
+            self.applied_input_sequence
+        } else {
+            self.log
+                .as_ref()
+                .ok_or(SimRunActorErrorV2::Closed)?
+                .next_input_sequence()
+        };
         let mut state = self.take_state()?;
         let mut outputs = Vec::with_capacity(inputs.len());
         let mut projections = Vec::new();
         let mut unaccepted = None;
-        for (index, input) in inputs.iter().enumerate() {
+        for (index, input) in inputs.iter_mut().enumerate() {
             let input_sequence = start_sequence
                 .checked_add(index as u64)
                 .expect("有界输入组序号不得溢出");
@@ -2843,7 +3024,7 @@ impl SimRunActorV2 {
                 MeasurementPhase::Reducer,
                 elapsed_ns_v2(reducer_started),
             );
-            let (next_state, output) = match reduced {
+            let (mut next_state, output) = match reduced {
                 Ok(result) => result,
                 Err(BusinessReductionErrorV2::Unaccepted {
                     state: returned,
@@ -2855,6 +3036,9 @@ impl SimRunActorV2 {
                 }
                 Err(BusinessReductionErrorV2::Fatal(error)) => return Err(error),
             };
+            if let BusinessInputV2::PublicGroup(group) = input {
+                group.pm_materials = std::mem::take(&mut next_state.pm_materials);
+            }
             #[cfg(feature = "measurement")]
             let projection_started = Instant::now();
             let (next_state, output, projection) = finalize_projection_batch_v2(
@@ -2883,12 +3067,22 @@ impl SimRunActorV2 {
             });
         }
         let accepted_len = outputs.len();
-        let log = self.log.take().ok_or(SimRunActorErrorV2::Closed)?;
-        let (log, _) = log
-            .append_group(&inputs[..accepted_len])
-            .map_err(SimRunActorErrorV2::Log)?;
-        self.log = Some(log);
-        self.state = Some(state);
+        if let Some(background) = &mut self.background_log {
+            self.state = Some(state);
+            self.applied_input_sequence += accepted_len as u64;
+            let mut accepted = inputs;
+            accepted.truncate(accepted_len);
+            background
+                .enqueue(accepted)
+                .map_err(SimRunActorErrorV2::Log)?;
+        } else {
+            let log = self.log.take().ok_or(SimRunActorErrorV2::Closed)?;
+            let (log, _) = log
+                .append_group(&inputs[..accepted_len])
+                .map_err(SimRunActorErrorV2::Log)?;
+            self.log = Some(log);
+            self.state = Some(state);
+        }
         #[cfg(test)]
         record_group_state_install_for_tests();
         #[cfg(feature = "measurement")]
@@ -2984,7 +3178,7 @@ impl SimRunActorV2 {
     }
 
     fn take_state(&mut self) -> Result<BusinessReducerStateV2, SimRunActorErrorV2> {
-        if self.log.is_none() {
+        if self.log.is_none() && self.background_log.is_none() {
             return Err(SimRunActorErrorV2::Closed);
         }
         self.state.take().ok_or(SimRunActorErrorV2::Closed)
@@ -5135,6 +5329,9 @@ pub(crate) fn drive_business_input_at_v2(
         bucket,
         rules,
         finality_policy,
+        public_group,
+        public_closure,
+        hidden_bucket,
     ) = match input {
         BusinessReducerInputV2::PlatformPrefixAdvance {
             advance,
@@ -5148,6 +5345,9 @@ pub(crate) fn drive_business_input_at_v2(
             None,
             rules,
             finality_policy,
+            None,
+            None,
+            None,
         ),
         BusinessReducerInputV2::ClosedMarketBucket {
             bucket,
@@ -5163,8 +5363,59 @@ pub(crate) fn drive_business_input_at_v2(
                 Some(bucket),
                 rules,
                 finality_policy,
+                None,
+                None,
+                None,
             )
         }
+        BusinessReducerInputV2::HiddenStepBucket {
+            bucket,
+            rules,
+            finality_policy,
+        } => (
+            MarketEventPathV1::HiddenPlatform,
+            bucket.reference.bucket_time_utc_ms,
+            bucket.reference.index_end,
+            Some(bucket.reference.index_start),
+            None,
+            rules,
+            finality_policy,
+            None,
+            None,
+            Some(bucket),
+        ),
+        BusinessReducerInputV2::PublicGroup {
+            group,
+            rules,
+            finality_policy,
+        } => (
+            MarketEventPathV1::PublicVisibility,
+            group.execution_time.logical_time_utc_ms(),
+            group.reference.group_position + 1,
+            Some(group.reference.group_position),
+            None,
+            rules,
+            finality_policy,
+            Some(group),
+            None,
+            None,
+        ),
+        BusinessReducerInputV2::PublicCloseTime {
+            closure,
+            rules,
+            finality_policy,
+        } => (
+            MarketEventPathV1::PublicVisibility,
+            closure.execution_time.logical_time_utc_ms(),
+            closure.next_group_position,
+            None,
+            None,
+            rules,
+            finality_policy,
+            None,
+            Some(closure),
+            None,
+        ),
         _ => {
             return Err(BusinessReductionErrorV2::Fatal(
                 SimRunActorErrorV2::MarketEvent(MarketEventErrorV1::InvalidBucket(
@@ -5213,7 +5464,19 @@ pub(crate) fn drive_business_input_at_v2(
             .closed_through_utc_ms
             .is_some_and(|closed| logical_at_utc_ms <= closed)
         || next_index_position < frontier.next_index_position;
-    let payload_invalid = if let Some(bucket) = &bucket {
+    let closes_time = public_group.is_none();
+    let payload_invalid = if public_group.is_some() {
+        start_index_position.is_some_and(|start| start < frontier.next_index_position)
+    } else if let Some(hidden) = hidden_bucket {
+        start_index_position.is_some_and(|start| start < frontier.next_index_position)
+            || next_index_position < hidden.reference.index_start
+            || frontier
+                .next_event_at_utc_ms
+                .is_some_and(|expected| logical_at_utc_ms != expected)
+            || matches!(hidden.reference.closure, contracts::ReplayIndexClosureV1::NextGlobalEventAt(next_at) if next_at <= logical_at_utc_ms)
+    } else if public_closure.is_some() {
+        false
+    } else if let Some(bucket) = &bucket {
         start_index_position.is_some_and(|start| start < frontier.next_index_position)
             || next_index_position < bucket.reference.start_index_position
             || frontier
@@ -5241,6 +5504,54 @@ pub(crate) fn drive_business_input_at_v2(
         ));
     }
 
+    if let Some(group) = public_group {
+        if let Err(error) = validate_public_group_membership_v1(
+            &state.session.as_ref().unwrap().market_directory,
+            group,
+        ) {
+            return Err(unaccepted_business_input_v2(
+                state,
+                SimRunActorErrorV2::MarketEvent(error),
+            ));
+        }
+    }
+    if let Some(bucket) = hidden_bucket {
+        let directory = &state.session.as_ref().unwrap().market_directory;
+        for record in bucket.records.iter() {
+            let result = match record {
+                HiddenExecutionRecordV1::MarketFact(fact) => validate_membership_v1(
+                    directory,
+                    &fact.market,
+                    fact_membership_v1(&fact.payload),
+                ),
+                HiddenExecutionRecordV1::Step { market, step } => {
+                    use data_pipeline_core::pm_reduction::PmStepChangeV1 as S;
+                    let assets = match &step.change {
+                        S::InitialSnapshot { asset, .. } => MembershipAssetsV1::One(asset),
+                        S::LevelChange { transition, .. } => {
+                            MembershipAssetsV1::One(&transition.asset)
+                        }
+                        S::BestBidAsk { quote, .. } => MembershipAssetsV1::One(&quote.asset),
+                        S::Tick { tick, .. } => MembershipAssetsV1::One(&tick.asset),
+                        S::PublicTrade { trade } => MembershipAssetsV1::One(&trade.asset),
+                        S::Quality { boundary } => match &boundary.scope {
+                            contracts::QualityScopeV1::Asset(a) => MembershipAssetsV1::One(a),
+                            _ => MembershipAssetsV1::None,
+                        },
+                        _ => continue,
+                    };
+                    validate_membership_v1(directory, market, assets)
+                }
+                HiddenExecutionRecordV1::Reference(_) => Ok(()),
+            };
+            if let Err(error) = result {
+                return Err(unaccepted_business_input_v2(
+                    state,
+                    SimRunActorErrorV2::MarketEvent(error),
+                ));
+            }
+        }
+    }
     let mut output = LogicalDriveOutputV2::default();
     if drives_execution {
         state = drain_scheduled_obligations_at_v2(
@@ -5291,7 +5602,49 @@ pub(crate) fn drive_business_input_at_v2(
             })?;
         }
     }
-    if drives_execution {
+    if let Some(hidden) = hidden_bucket {
+        let (next, effects) = reduce_hidden_step_bucket_v1(state, hidden, rules, finality_policy)?;
+        state = next;
+        for execution in effects.execution {
+            output.lifecycle.extend(
+                execution.into_lifecycle_feedback().map_err(|e| {
+                    BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(e))
+                })?,
+            );
+        }
+        if hidden.reference.closure == contracts::ReplayIndexClosureV1::EndOfInput {
+            state
+                .session
+                .as_ref()
+                .unwrap()
+                .hidden_platform_markets
+                .as_ref()
+                .unwrap()
+                .validate_input_complete()
+                .map_err(|e| BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::MarketEvent(e)))?;
+        }
+    }
+    if let Some(group) = public_group {
+        let (next, effects) = reduce_public_group_v1(state, group, rules, finality_policy)?;
+        state = next;
+        for execution in effects.execution {
+            output.lifecycle.extend(
+                execution.into_lifecycle_feedback().map_err(|e| {
+                    BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(e))
+                })?,
+            );
+        }
+    }
+    if public_closure.is_some_and(|c| c.closure == contracts::ReplayIndexClosureV1::EndOfInput) {
+        state
+            .session
+            .as_ref()
+            .unwrap()
+            .public_markets
+            .validate_input_complete()
+            .map_err(|e| BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::MarketEvent(e)))?;
+    }
+    if drives_execution && closes_time {
         while state.session.as_ref().and_then(|session| {
             session
                 .mutation_requests
@@ -5313,9 +5666,15 @@ pub(crate) fn drive_business_input_at_v2(
         }
     }
     let successful_execution_eof = drives_execution
-        && bucket.as_ref().is_some_and(|bucket| {
+        && (bucket.as_ref().is_some_and(|bucket| {
             bucket.reference.closure == crate::market::MillisecondBucketClosureV1::EndOfInput
-        });
+        }) || public_closure
+            .is_some_and(|c| c.closure == contracts::ReplayIndexClosureV1::EndOfInput));
+    let successful_execution_eof = successful_execution_eof
+        || (drives_execution
+            && hidden_bucket.is_some_and(|b| {
+                b.reference.closure == contracts::ReplayIndexClosureV1::EndOfInput
+            }));
     if successful_execution_eof {
         while let Some(next_at) = next_scheduled_obligation_at_v2(&state) {
             state = drain_scheduled_obligations_at_v2(
@@ -5333,7 +5692,9 @@ pub(crate) fn drive_business_input_at_v2(
         MarketEventPathV1::HiddenPlatform => &mut session.hidden_platform_frontier,
         MarketEventPathV1::PublicVisibility => &mut session.public_visibility_frontier,
     };
-    frontier.closed_through_utc_ms = Some(logical_at_utc_ms);
+    if closes_time {
+        frontier.closed_through_utc_ms = Some(logical_at_utc_ms);
+    }
     frontier.next_index_position = next_index_position;
     if let Some(bucket) = bucket {
         match bucket.reference.closure {
@@ -5341,6 +5702,28 @@ pub(crate) fn drive_business_input_at_v2(
                 frontier.next_event_at_utc_ms = Some(next_at);
             }
             crate::market::MillisecondBucketClosureV1::EndOfInput => {
+                frontier.next_event_at_utc_ms = None;
+                frontier.sealed = true;
+            }
+        }
+    }
+    if let Some(hidden) = hidden_bucket {
+        match hidden.reference.closure {
+            contracts::ReplayIndexClosureV1::NextGlobalEventAt(at) => {
+                frontier.next_event_at_utc_ms = Some(at)
+            }
+            contracts::ReplayIndexClosureV1::EndOfInput => {
+                frontier.next_event_at_utc_ms = None;
+                frontier.sealed = true;
+            }
+        }
+    }
+    if let Some(closure) = public_closure {
+        match closure.closure {
+            contracts::ReplayIndexClosureV1::NextGlobalEventAt(at) => {
+                frontier.next_event_at_utc_ms = Some(at)
+            }
+            contracts::ReplayIndexClosureV1::EndOfInput => {
                 frontier.next_event_at_utc_ms = None;
                 frontier.sealed = true;
             }
@@ -5558,7 +5941,10 @@ fn reduce_business_input_v2(
             BusinessReducerOutputV2::RetentionAdvanced
         }
         logical @ (BusinessReducerInputV2::PlatformPrefixAdvance { .. }
-        | BusinessReducerInputV2::ClosedMarketBucket { .. }) => {
+        | BusinessReducerInputV2::ClosedMarketBucket { .. }
+        | BusinessReducerInputV2::HiddenStepBucket { .. }
+        | BusinessReducerInputV2::PublicGroup { .. }
+        | BusinessReducerInputV2::PublicCloseTime { .. }) => {
             return drive_business_input_at_v2(state, logical);
         }
     };
@@ -5566,11 +5952,11 @@ fn reduce_business_input_v2(
 }
 
 #[allow(clippy::result_large_err)]
-fn reduce_market_event_slice_v2(
-    mut state: BusinessReducerStateV2,
+fn reduce_market_event_slice_v2<I: crate::market::MarketEventIdentityV1, E>(
+    state: BusinessReducerStateV2,
     path: MarketEventPathV1,
     platform_effective_at_utc_ms: i64,
-    events: &[ExecutionMarketEventV3],
+    events: &[ExecutionMarketEventV3<I, E>],
     rules: &PlatformRuleSnapshotV3,
     finality_policy: &TradeFinalityPolicyV2,
 ) -> Result<(BusinessReducerStateV2, SessionMarketEventEffectsV2), MarketEventSliceReductionErrorV2>
@@ -5606,6 +5992,41 @@ fn reduce_market_event_slice_v2(
         }
     };
 
+    let keys: Vec<_> = events
+        .iter()
+        .map(|event| event.event_id.identity_key())
+        .collect();
+    let headers: Vec<_> = events
+        .iter()
+        .zip(&keys)
+        .map(|(event, identity)| crate::market::MarketEventHeaderV1 {
+            identity,
+            market: &event.market,
+            time: &event.time,
+            quality: &event.quality,
+        })
+        .collect();
+    reduce_normalized_market_slice_v1(
+        state,
+        path,
+        platform_effective_at_utc_ms,
+        &headers,
+        &normalized,
+        rules,
+        finality_policy,
+    )
+}
+
+fn reduce_normalized_market_slice_v1(
+    mut state: BusinessReducerStateV2,
+    path: MarketEventPathV1,
+    platform_effective_at_utc_ms: i64,
+    events: &[crate::market::MarketEventHeaderV1<'_>],
+    normalized: &[crate::market::NormalizedMarketEventV2<'_>],
+    rules: &PlatformRuleSnapshotV3,
+    finality_policy: &TradeFinalityPolicyV2,
+) -> Result<(BusinessReducerStateV2, SessionMarketEventEffectsV2), MarketEventSliceReductionErrorV2>
+{
     let session = state
         .session
         .as_mut()
@@ -5615,7 +6036,7 @@ fn reduce_market_event_slice_v2(
     let mut effects = SessionMarketEventEffectsV2::default();
     let mut resources = BusinessResourceDeltaV2::default();
     let mut query_projection_changed = false;
-    for (event, normalized) in events.iter().zip(&normalized) {
+    for (event, normalized) in events.iter().zip(normalized) {
         let end_at_utc_ms = session
             .market_directory
             .market(&event.market.condition_id.0)
@@ -5632,7 +6053,7 @@ fn reduce_market_event_slice_v2(
                 MarketEventPathV1::PublicVisibility => &mut session.public_markets,
             };
             role_markets
-                .apply_admitted_event(
+                .apply_admitted_header(
                     event,
                     normalized,
                     platform_effective_at_utc_ms,
@@ -5718,64 +6139,131 @@ fn reduce_market_event_slice_v2(
     Ok((state, effects))
 }
 
-fn validate_event_membership_v2(
+enum MembershipAssetsV1<'a> {
+    None,
+    One(&'a contracts::AssetIdentityV1),
+    Exact(&'a [contracts::AssetIdentityV1]),
+    Terminal(&'a contracts::MarketResolutionTerminalV3),
+}
+fn validate_membership_v1(
     directory: &SessionMarketDirectoryV1,
-    event: &ExecutionMarketEventV3,
+    market: &contracts::MarketIdentityV2,
+    assets: MembershipAssetsV1<'_>,
 ) -> Result<(), MarketEventErrorV1> {
     let member = directory
-        .market(&event.market.condition_id.0)
-        .ok_or_else(|| MarketEventErrorV1::UnknownMarket(event.market.condition_id.0.clone()))?;
-    if member.market() != &event.market {
+        .market(&market.condition_id.0)
+        .ok_or_else(|| MarketEventErrorV1::UnknownMarket(market.condition_id.0.clone()))?;
+    if member.market() != market {
         return Err(MarketEventErrorV1::MarketIdentityConflict(
-            event.market.condition_id.0.clone(),
+            market.condition_id.0.clone(),
         ));
     }
-    let admitted_asset = |asset: &contracts::AssetIdentityV1| {
-        member
-            .assets()
-            .contains(asset)
-            .then_some(())
-            .ok_or_else(|| MarketEventErrorV1::UnknownAsset(asset.token_id.0.clone()))
-    };
-    match &event.payload {
-        ExecutionMarketEventPayloadV3::MarketLifecycleTransition(transition) => {
-            if transition.assets.as_slice() != member.assets().as_slice() {
+    match assets {
+        MembershipAssetsV1::None => {}
+        MembershipAssetsV1::One(asset) => {
+            if !member.assets().contains(asset) {
+                return Err(MarketEventErrorV1::UnknownAsset(asset.token_id.0.clone()));
+            }
+        }
+        MembershipAssetsV1::Exact(assets) => {
+            if assets != member.assets().as_slice() {
                 return Err(MarketEventErrorV1::ResolutionAssetConflict);
             }
         }
-        ExecutionMarketEventPayloadV3::InitialL2Snapshot(snapshot) => {
-            admitted_asset(&snapshot.asset)?;
-        }
-        ExecutionMarketEventPayloadV3::BestBidAsk(best) => {
-            admitted_asset(&best.asset)?;
-        }
-        ExecutionMarketEventPayloadV3::TickSizeChange(change) => {
-            admitted_asset(&change.asset)?;
-        }
-        ExecutionMarketEventPayloadV3::PublicTrade(trade) => {
-            admitted_asset(&trade.asset)?;
-        }
-        ExecutionMarketEventPayloadV3::LevelExecutionTransition(transition) => {
-            admitted_asset(&transition.asset)?;
-        }
-        ExecutionMarketEventPayloadV3::QualityBoundary(boundary) => {
-            if let contracts::QualityScopeV1::Asset(asset) = &boundary.scope {
-                admitted_asset(asset)?;
-            }
-        }
-        ExecutionMarketEventPayloadV3::MarketResolutionTerminal(
-            contracts::MarketResolutionTerminalV3::Resolved { payout_vector, .. },
-        ) => {
+        MembershipAssetsV1::Terminal(contracts::MarketResolutionTerminalV3::Resolved {
+            payout_vector,
+            ..
+        }) => {
             if payout_vector.len() != member.assets().len()
                 || !payout_vector
                     .iter()
-                    .map(|entry| &entry.asset)
+                    .map(|p| &p.asset)
                     .eq(member.assets().iter())
             {
                 return Err(MarketEventErrorV1::ResolutionAssetConflict);
             }
         }
-        ExecutionMarketEventPayloadV3::MarketTradingState(_) => {}
+    }
+    Ok(())
+}
+fn fact_membership_v1(payload: &contracts::CanonicalMarketFactPayloadV1) -> MembershipAssetsV1<'_> {
+    use contracts::CanonicalMarketFactPayloadV1 as F;
+    match payload {
+        F::FixedIdentity { assets } | F::MarketLifecycleSnapshot { assets, .. } => {
+            MembershipAssetsV1::Exact(assets)
+        }
+        F::InitialTick { asset, .. } => MembershipAssetsV1::One(asset),
+        F::LifecycleTransition(t) => MembershipAssetsV1::Exact(&t.assets),
+        F::Terminal(t) => MembershipAssetsV1::Terminal(t),
+        F::QualityBoundary(b) => match &b.scope {
+            contracts::QualityScopeV1::Asset(a) => MembershipAssetsV1::One(a),
+            _ => MembershipAssetsV1::None,
+        },
+        F::TradingState(_) => MembershipAssetsV1::None,
+    }
+}
+fn validate_event_membership_v2<I, E>(
+    directory: &SessionMarketDirectoryV1,
+    event: &ExecutionMarketEventV3<I, E>,
+) -> Result<(), MarketEventErrorV1> {
+    use ExecutionMarketEventPayloadV3 as F;
+    let assets = match &event.payload {
+        F::MarketLifecycleTransition(t) => MembershipAssetsV1::Exact(&t.assets),
+        F::InitialL2Snapshot(v) => MembershipAssetsV1::One(&v.asset),
+        F::BestBidAsk(v) => MembershipAssetsV1::One(&v.asset),
+        F::TickSizeChange(v) => MembershipAssetsV1::One(&v.asset),
+        F::PublicTrade(v) => MembershipAssetsV1::One(&v.asset),
+        F::LevelExecutionTransition(v) => MembershipAssetsV1::One(&v.asset),
+        F::QualityBoundary(b) => match &b.scope {
+            contracts::QualityScopeV1::Asset(a) => MembershipAssetsV1::One(a),
+            _ => MembershipAssetsV1::None,
+        },
+        F::MarketResolutionTerminal(t) => MembershipAssetsV1::Terminal(t),
+        F::MarketTradingState(_) => MembershipAssetsV1::None,
+    };
+    validate_membership_v1(directory, &event.market, assets)
+}
+fn validate_public_group_membership_v1(
+    directory: &SessionMarketDirectoryV1,
+    group: &AcceptedPublicGroupV1,
+) -> Result<(), MarketEventErrorV1> {
+    use contracts::{
+        CanonicalBookFactV1 as B, CanonicalPmPayloadV1 as P, PublicBusinessPayloadV1 as F,
+    };
+    for fact in &group.prepared.group.records {
+        match &fact.payload {
+            F::MarketFact { market, payload } => {
+                validate_membership_v1(directory, market, fact_membership_v1(payload))?
+            }
+            F::PolymarketMessage(message) => {
+                validate_membership_v1(directory, &message.market, MembershipAssetsV1::None)?;
+                match &message.payload {
+                    P::Book {
+                        fact: B::FullBook { asset, .. },
+                    }
+                    | P::BestBidAsk { asset, .. }
+                    | P::TickSizeChange { asset, .. }
+                    | P::PublicTrade { asset, .. } => validate_membership_v1(
+                        directory,
+                        &message.market,
+                        MembershipAssetsV1::One(asset),
+                    )?,
+                    P::Book {
+                        fact: B::AbsoluteLevelChanges { changes },
+                    } => {
+                        for change in changes {
+                            validate_membership_v1(
+                                directory,
+                                &message.market,
+                                MembershipAssetsV1::One(&change.asset),
+                            )?;
+                        }
+                    }
+                    P::NewMarket { .. } => {}
+                }
+            }
+            F::ReferenceFact(_) => {}
+        }
     }
     Ok(())
 }
@@ -18185,5 +18673,603 @@ mod tests {
                 );
             }
         }
+    }
+    mod public_consumption_tests {
+        include!("public_consumption_tests.rs");
+    }
+}
+
+fn reduce_public_group_v1(
+    mut state: BusinessReducerStateV2,
+    group: &AcceptedPublicGroupV1,
+    rules: &PlatformRuleSnapshotV3,
+    finality_policy: &TradeFinalityPolicyV2,
+) -> Result<(BusinessReducerStateV2, SessionMarketEventEffectsV2), BusinessReductionErrorV2> {
+    use crate::market::MarketEventIdentityV1;
+    use data_pipeline_core::pm_reduction::*;
+    let fail = |error| BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::MarketEvent(error));
+    let adapt = |error| match error {
+        MarketEventSliceReductionErrorV2::Unaccepted { state, error } => {
+            BusinessReductionErrorV2::Unaccepted { state, error }
+        }
+        MarketEventSliceReductionErrorV2::Fatal(error) => BusinessReductionErrorV2::Fatal(error),
+    };
+    let at = group.execution_time.logical_time_utc_ms();
+    let mut effects = SessionMarketEventEffectsV2::default();
+    for context in &group.prepared.pm_contexts {
+        state
+            .public_pm_evidence
+            .entry(context.market.condition_id.0.clone())
+            .or_insert_with(|| {
+                data_pipeline_core::public_observation_core::PmOwnedStateV1::new_evidence_only(
+                    context.clone(),
+                )
+            });
+    }
+    for fact in &group.prepared.group.records {
+        match &fact.payload {
+            contracts::PublicBusinessPayloadV1::PolymarketMessage(message) => {
+                let (position, prepared) = group
+                    .prepared
+                    .pm_inputs
+                    .iter()
+                    .find(|(_, p)| p.message().event_id == message.event_id)
+                    .expect("公共供料包含当前规范PM的原准备材料");
+                let evidence = &state.public_pm_evidence[&message.market.condition_id.0];
+                let read = SimPmReadV1 {
+                    evidence,
+                    markets: &state.session.as_ref().unwrap().public_markets,
+                };
+                let reduction = compute_pm_message_steps_v1(
+                    evidence.context(),
+                    &read,
+                    prepared,
+                    &format!("{}:public", group.execution_time.run_id()),
+                    *position,
+                    true,
+                )
+                .map_err(|error| {
+                    fail(MarketEventErrorV1::Decode {
+                        index: 0,
+                        message: error.to_string(),
+                    })
+                })?;
+                for step in &reduction.steps {
+                    let l2 = matches!(
+                        step.change,
+                        PmStepChangeV1::InitialSnapshot { .. } | PmStepChangeV1::LevelChange { .. }
+                    );
+                    let applies = !l2
+                        || state
+                            .session
+                            .as_ref()
+                            .unwrap()
+                            .public_markets
+                            .applies_pm_l2(
+                                &message.market.condition_id.0,
+                                at,
+                                message.market.window.end_at_utc_ms,
+                            );
+                    if let Some(normalized) =
+                        crate::market::normalize_pm_step_v1(step).map_err(fail)?
+                    {
+                        let identity =
+                            PublicExecutionIdentityV1::Step(step.derived_id.clone()).identity_key();
+                        let header = crate::market::MarketEventHeaderV1 {
+                            identity: &identity,
+                            market: &message.market,
+                            time: &step.dependency_time,
+                            quality: &step.quality,
+                        };
+                        let (next, applied) = reduce_normalized_market_slice_v1(
+                            state,
+                            MarketEventPathV1::PublicVisibility,
+                            at,
+                            &[header],
+                            &[normalized],
+                            rules,
+                            finality_policy,
+                        )
+                        .map_err(adapt)?;
+                        state = next;
+                        effects.execution.extend(applied.execution);
+                    }
+                    if applies {
+                        state
+                            .public_pm_evidence
+                            .get_mut(&message.market.condition_id.0)
+                            .unwrap()
+                            .apply_step(step);
+                    }
+                }
+                state
+                    .pm_materials
+                    .push(DeferredPublicPmReductionV1::capture(reduction));
+            }
+            contracts::PublicBusinessPayloadV1::MarketFact { market, payload } => {
+                if let Some(normalized) =
+                    crate::market::normalize_public_market_fact_v1(payload, &fact.quality)
+                        .map_err(fail)?
+                {
+                    let identity =
+                        PublicExecutionIdentityV1::Fact(fact.position.clone()).identity_key();
+                    let header = crate::market::MarketEventHeaderV1 {
+                        identity: &identity,
+                        market,
+                        time: &fact.dependency_time,
+                        quality: &fact.quality,
+                    };
+                    let (next, applied) = reduce_normalized_market_slice_v1(
+                        state,
+                        MarketEventPathV1::PublicVisibility,
+                        at,
+                        &[header],
+                        &[normalized],
+                        rules,
+                        finality_policy,
+                    )
+                    .map_err(adapt)?;
+                    state = next;
+                    effects.execution.extend(applied.execution);
+                }
+            }
+            contracts::PublicBusinessPayloadV1::ReferenceFact(_) => {}
+        }
+    }
+    Ok((state, effects))
+}
+
+/// 持有唯一执行器的新消费接口；构造时移交日志所有权，不暴露旧同步驱动。
+pub struct PublicSimExecutionV1 {
+    actor: SimRunActorV2,
+}
+impl PublicSimExecutionV1 {
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_new(
+        path: &Path,
+        opened: PublicRunOpenedV1,
+        rules: Arc<SealedProcessRuleSnapshotV3>,
+        finality: Arc<TradeFinalityPolicyV2>,
+        scenario: Arc<SealedPlatformScenarioV1>,
+        latency: Arc<EmpiricalDelayProfile>,
+        projection: Box<dyn PublicProjectionPortV1>,
+        max_group_bytes: usize,
+        finite_in_flight_groups: usize,
+    ) -> Result<Self, SimRunActorErrorV2> {
+        let mut actor = SimRunActorV2::create_new(
+            path,
+            opened.into_record(),
+            rules,
+            finality,
+            scenario,
+            latency,
+            Box::new(PublicProjectionAdapterV1(projection)),
+            max_group_bytes,
+        )?;
+        let log = actor.log.take().expect("新建运行唯一日志");
+        actor.background_log = Some(BackgroundEventLogV1::start(log, finite_in_flight_groups));
+        Ok(Self { actor })
+    }
+    pub fn create_session(
+        &mut self,
+        spec: SessionSpecV3,
+    ) -> Result<CreateSessionControlResultV2, SimRunActorErrorV2> {
+        self.actor.create_session(spec)
+    }
+    pub fn activate_session(
+        &mut self,
+        activation_id: String,
+    ) -> Result<SessionInitializationControlResultV2, SimRunActorErrorV2> {
+        self.actor.activate_session(activation_id)
+    }
+    pub fn fail_session_initialization(
+        &mut self,
+        failure_id: String,
+    ) -> Result<SessionInitializationControlResultV2, SimRunActorErrorV2> {
+        self.actor.fail_session_initialization(failure_id)
+    }
+    pub fn enroll_market(
+        &mut self,
+        request: MarketEnrollmentRequestV1,
+    ) -> Result<MarketEnrollmentV2, SimRunActorErrorV2> {
+        self.actor.enroll_market(request)
+    }
+    pub fn complete(
+        self,
+        materials: &mut dyn PublicConsumptionMaterialReaderV1,
+    ) -> Result<UnpublishedRunArtifactCandidateV2, SimRunActorErrorV2> {
+        self.actor.complete_clean_run_with_materials(
+            |_| {
+                Err(SimRunActorErrorV2::CompletionNotReady(
+                    "新消费运行不引用旧桶正文",
+                ))
+            },
+            Some(materials),
+        )
+    }
+    fn apply_public_group(
+        &mut self,
+        prepared: Arc<PreparedPublicGroupV1>,
+        time: TrustedActorExecutionTimeV1,
+    ) -> Result<PublicGroupAppliedReceiptV1, SimRunActorErrorV2> {
+        let reference = prepared.reference.clone();
+        let sequence = self.actor.applied_input_sequence;
+        let accepted = AcceptedPublicGroupV1 {
+            reference: reference.clone(),
+            execution_time: time.clone(),
+            prepared,
+            pm_materials: Vec::new(),
+            pm_step_bindings: Vec::new(),
+            pm_reports: Vec::new(),
+        };
+        let committed = self
+            .actor
+            .commit_group(vec![BusinessInputV2::PublicGroup(accepted)])?;
+        if let Some(error) = committed.unaccepted {
+            return Err(error);
+        }
+        let session = self
+            .actor
+            .state
+            .as_ref()
+            .and_then(|s| s.session.as_ref())
+            .expect("成功应用公开组的唯一会话");
+        Ok(PublicGroupAppliedReceiptV1 {
+            session_id: session.opening_fact.session_id.clone(),
+            group: reference,
+            actor_input_sequence: sequence,
+            execution_time: time,
+        })
+    }
+    fn decision_cutoff(
+        &self,
+        receipt: PublicGroupAppliedReceiptV1,
+    ) -> TrustedGroupDecisionCutoffV1 {
+        let delivered = self
+            .actor
+            .projection_port
+            .actual_delivered_private_feedback(&self.actor.opened.run_id)
+            .expect("新构造边界必有真实反馈交付能力");
+        TrustedGroupDecisionCutoffV1 {
+            decision_time: receipt.execution_time.clone(),
+            receipt,
+            private_feedback_sequence: delivered,
+        }
+    }
+    fn request(
+        &mut self,
+        cutoff: TrustedGroupDecisionCutoffV1,
+        request: BusinessRequestV2,
+    ) -> Result<MutationRequestReceiptV2, SimRunActorErrorV2> {
+        if let Some(existing) = existing_mutation_request_receipt_v2(
+            self.actor
+                .state
+                .as_ref()
+                .ok_or(SimRunActorErrorV2::Closed)?,
+            &request.context().global_request_id,
+        ) {
+            return Ok(existing);
+        }
+        let mut committed = self
+            .actor
+            .commit_group(vec![BusinessInputV2::PublicRequest { cutoff, request }])?;
+        if let Some(error) = committed.unaccepted {
+            return Err(error);
+        }
+        let Some(CommittedBusinessOutputV2::RequestRegistration(result)) = committed.outputs.pop()
+        else {
+            unreachable!("请求归约结果")
+        };
+        Ok(result)
+    }
+    pub fn hidden_bucket(
+        &mut self,
+        bucket: AcceptedHiddenStepBucketV1,
+    ) -> Result<(), SimRunActorErrorV2> {
+        while let Some(required) = self.actor.next_required_logical_drive() {
+            if required.path != MarketEventPathV1::HiddenPlatform
+                || required.required_at_utc_ms >= bucket.reference.bucket_time_utc_ms
+            {
+                break;
+            }
+            let next_index_position = self
+                .actor
+                .state
+                .as_ref()
+                .and_then(|s| s.session.as_ref())
+                .expect("到期义务具有会话")
+                .hidden_platform_frontier
+                .next_index_position;
+            self.actor.drive_platform_prefix(PlatformPrefixAdvanceV2 {
+                path: MarketEventPathV1::HiddenPlatform,
+                closed_through_utc_ms: required.required_at_utc_ms,
+                next_index_position,
+            })?;
+        }
+        let committed = self
+            .actor
+            .commit_group(vec![BusinessInputV2::HiddenStepBucket(bucket)])?;
+        if let Some(error) = committed.unaccepted {
+            return Err(error);
+        }
+        Ok(())
+    }
+    fn close_public_time(
+        &mut self,
+        closure: TrustedPublicTimeClosureV1,
+    ) -> Result<(), SimRunActorErrorV2> {
+        let committed = self
+            .actor
+            .commit_group(vec![BusinessInputV2::PublicCloseTime(closure)])?;
+        if let Some(error) = committed.unaccepted {
+            return Err(error);
+        }
+        Ok(())
+    }
+}
+
+/// 原序有限供料；只保留下一项及上次回执，独立推进真实完整时间边界。
+pub struct FinitePublicConsumptionV1<
+    I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>,
+> {
+    execution: PublicSimExecutionV1,
+    source: std::iter::Peekable<I>,
+    consumption_sequence_ref: String,
+    last_receipt: Option<PublicGroupAppliedReceiptV1>,
+    last_cutoff: Option<TrustedGroupDecisionCutoffV1>,
+    last_prepared: Option<Arc<PreparedPublicGroupV1>>,
+    rules: BTreeMap<String, Arc<contracts::PublicTradingRuleContextV1>>,
+    close_pending: bool,
+    drive_position: u64,
+    source_failure: Option<String>,
+}
+impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
+    FinitePublicConsumptionV1<I>
+{
+    pub fn new(
+        execution: PublicSimExecutionV1,
+        source: I,
+        consumption_sequence_ref: String,
+    ) -> Self {
+        let rules = execution
+            .actor
+            .state
+            .as_ref()
+            .and_then(|state| state.session.as_ref())
+            .into_iter()
+            .flat_map(|session| session.market_directory.markets())
+            .map(|market| {
+                (
+                    market.market().condition_id.0.clone(),
+                    Arc::new(
+                        execution
+                            .actor
+                            ._rule_snapshot
+                            .public_rule_context(market.market().clone()),
+                    ),
+                )
+            })
+            .collect();
+        Self {
+            execution,
+            source: source.peekable(),
+            consumption_sequence_ref,
+            last_receipt: None,
+            last_cutoff: None,
+            last_prepared: None,
+            rules,
+            close_pending: false,
+            drive_position: 0,
+            source_failure: None,
+        }
+    }
+    fn time(&self, at: i64) -> TrustedActorExecutionTimeV1 {
+        TrustedActorExecutionTimeV1(ActorTimeRecordV1 {
+            run_id: self.execution.actor.opened.run_id.clone(),
+            drive_position: self.drive_position,
+            logical_time_utc_ms: at,
+        })
+    }
+    pub fn next_group(
+        &mut self,
+    ) -> Result<
+        Option<(PublicGroupAppliedReceiptV1, TrustedGroupDecisionCutoffV1)>,
+        SimRunActorErrorV2,
+    > {
+        if let Some(message) = &self.source_failure {
+            return Err(SimRunActorErrorV2::PublicConsumptionSource(message.clone()));
+        }
+        let next_time = match self.source.peek() {
+            Some(Ok(item)) => Some(item.delivered_at_utc_ms),
+            Some(Err(error)) => {
+                let message = error.to_string();
+                self.source_failure = Some(message.clone());
+                return Err(SimRunActorErrorV2::PublicConsumptionSource(message));
+            }
+            None => None,
+        };
+        if self.close_pending {
+            let last = self.last_receipt.as_ref().expect("待关闭组已有回执");
+            let at = last.execution_time.logical_time_utc_ms();
+            if next_time != Some(at) {
+                let closure = TrustedPublicTimeClosureV1 {
+                    execution_time: self.time(at),
+                    consumption_sequence_ref: self.consumption_sequence_ref.clone(),
+                    next_group_position: last.group.group_position + 1,
+                    closure: next_time.map_or(
+                        contracts::ReplayIndexClosureV1::EndOfInput,
+                        contracts::ReplayIndexClosureV1::NextGlobalEventAt,
+                    ),
+                };
+                self.execution.close_public_time(closure)?;
+                self.drive_position += 1;
+                self.close_pending = false;
+            }
+        }
+        let Some(at) = next_time else {
+            return Ok(None);
+        };
+        while let Some(required) = self.execution.actor.next_required_logical_drive() {
+            if required.path != MarketEventPathV1::PublicVisibility
+                || required.required_at_utc_ms >= at
+            {
+                break;
+            }
+            let next_group_position = self
+                .last_receipt
+                .as_ref()
+                .map_or(0, |r| r.group.group_position + 1);
+            let closure = TrustedPublicTimeClosureV1 {
+                execution_time: self.time(required.required_at_utc_ms),
+                consumption_sequence_ref: self.consumption_sequence_ref.clone(),
+                next_group_position,
+                closure: contracts::ReplayIndexClosureV1::NextGlobalEventAt(at),
+            };
+            self.execution.close_public_time(closure)?;
+            self.drive_position += 1;
+        }
+        let prepared = Arc::clone(
+            &self
+                .source
+                .peek()
+                .expect("下一项已观察")
+                .as_ref()
+                .expect("成功项")
+                .prepared,
+        );
+        let receipt = self
+            .execution
+            .apply_public_group(Arc::clone(&prepared), self.time(at))?;
+        self.source.next();
+        self.drive_position += 1;
+        self.close_pending = true;
+        self.last_receipt = Some(receipt.clone());
+        let cutoff = self.execution.decision_cutoff(receipt.clone());
+        self.last_cutoff = Some(cutoff.clone());
+        self.last_prepared = Some(prepared);
+        Ok(Some((receipt, cutoff)))
+    }
+    pub fn frames(&self) -> Vec<PublicObservationFrameV1<'_>> {
+        let Some(prepared) = &self.last_prepared else {
+            return Vec::new();
+        };
+        prepared
+            .group
+            .observations
+            .iter()
+            .map(|observation| PublicObservationFrameV1 {
+                observation,
+                rule_context: Arc::clone(
+                    self.rules
+                        .get(&observation.market.condition_id.0)
+                        .expect("组市场已登记"),
+                ),
+                receipt: self.last_receipt.as_ref().unwrap().clone(),
+                decision_cutoff: self.last_cutoff.as_ref().unwrap().clone(),
+            })
+            .collect()
+    }
+    pub fn decision(&mut self) -> Option<PublicGroupDecisionV1<'_, I>> {
+        let cutoff = self.last_cutoff.clone()?;
+        Some(PublicGroupDecisionV1 {
+            driver: self,
+            cutoff,
+        })
+    }
+    pub fn hidden_bucket(
+        &mut self,
+        bucket: AcceptedHiddenStepBucketV1,
+    ) -> Result<(), SimRunActorErrorV2> {
+        self.execution.hidden_bucket(bucket)
+    }
+    pub fn complete(
+        self,
+        materials: &mut dyn PublicConsumptionMaterialReaderV1,
+    ) -> Result<UnpublishedRunArtifactCandidateV2, SimRunActorErrorV2> {
+        self.execution.complete(materials)
+    }
+}
+
+fn reduce_hidden_step_bucket_v1(
+    mut state: BusinessReducerStateV2,
+    bucket: &AcceptedHiddenStepBucketV1,
+    rules: &PlatformRuleSnapshotV3,
+    finality: &TradeFinalityPolicyV2,
+) -> Result<(BusinessReducerStateV2, SessionMarketEventEffectsV2), BusinessReductionErrorV2> {
+    let mut effects = SessionMarketEventEffectsV2::default();
+    let fail = |error| BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::MarketEvent(error));
+    for record in bucket.records.iter() {
+        let (normalized, market, identity, time, quality) = match record {
+            HiddenExecutionRecordV1::Step { market, step } => (
+                crate::market::normalize_pm_step_v1(step).map_err(fail)?,
+                market,
+                &step.derived_id.0,
+                &step.dependency_time,
+                &step.quality,
+            ),
+            HiddenExecutionRecordV1::MarketFact(fact) => (
+                crate::market::normalize_public_market_fact_v1(&fact.payload, &fact.quality)
+                    .map_err(fail)?,
+                &fact.market,
+                &fact.event_id.0,
+                &fact.dependency_time,
+                &fact.quality,
+            ),
+            HiddenExecutionRecordV1::Reference(_) => continue,
+        };
+        let Some(normalized) = normalized else {
+            continue;
+        };
+        let header = crate::market::MarketEventHeaderV1 {
+            identity,
+            market,
+            time,
+            quality,
+        };
+        let (next, applied) = reduce_normalized_market_slice_v1(
+            state,
+            MarketEventPathV1::HiddenPlatform,
+            bucket.reference.bucket_time_utc_ms,
+            &[header],
+            &[normalized],
+            rules,
+            finality,
+        )
+        .map_err(|error| match error {
+            MarketEventSliceReductionErrorV2::Unaccepted { state, error } => {
+                BusinessReductionErrorV2::Unaccepted { state, error }
+            }
+            MarketEventSliceReductionErrorV2::Fatal(error) => {
+                BusinessReductionErrorV2::Fatal(error)
+            }
+        })?;
+        state = next;
+        effects.execution.extend(applied.execution);
+    }
+    Ok((state, effects))
+}
+
+/// 组决定持有同一驱动器的独占借用；业务调用方不能替换其冻结截止或跨运行投递。
+pub struct PublicGroupDecisionV1<
+    'a,
+    I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>,
+> {
+    driver: &'a mut FinitePublicConsumptionV1<I>,
+    cutoff: TrustedGroupDecisionCutoffV1,
+}
+impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
+    PublicGroupDecisionV1<'_, I>
+{
+    pub fn cutoff(&self) -> &TrustedGroupDecisionCutoffV1 {
+        &self.cutoff
+    }
+    pub fn frames(&self) -> Vec<PublicObservationFrameV1<'_>> {
+        self.driver.frames()
+    }
+    pub fn request(
+        &mut self,
+        request: BusinessRequestV2,
+    ) -> Result<MutationRequestReceiptV2, SimRunActorErrorV2> {
+        self.driver.execution.request(self.cutoff.clone(), request)
     }
 }
