@@ -1156,6 +1156,101 @@ fn prepared_binance_inputs_keep_stateful_results_before_late_materialization() {
             .contains("conflicting payloads")
     );
     // 真实 V2 来源保留物理绑定；延后物化仍取第一次真实状态。
+    let mut old_depth = BinanceDepthReducer::new(RULE_VERSION).unwrap();
+    let mut pending_depth = BinanceDepthReducer::new(RULE_VERSION).unwrap();
+    let mut depth_results = Vec::new();
+    for row in [
+        snapshot("legacy-compare", 100, 1),
+        snapshot("legacy-compare", 100, 2),
+    ] {
+        let expected = old_depth
+            .apply_snapshot(&row, &sha('a'), &sha('b'))
+            .unwrap();
+        let source = data_pipeline_core::source_evidence_from_typed_raw(
+            &TypedRawRow::BinanceDepthSnapshot(row.clone()),
+            &sha('a'),
+            &sha('b'),
+        )
+        .unwrap();
+        let actual = pending_depth
+            .compute_snapshot(&row, PreparedPmEvidenceV1::prepare(source, None).unwrap())
+            .unwrap();
+        depth_results.push((actual, expected));
+    }
+    let changed = update(
+        "legacy-compare",
+        101,
+        101,
+        3,
+        Some(100),
+        None,
+        BinanceDepthStitchVerdict::Applied,
+        vec![level("64100", "0.2")],
+    );
+    let expected = old_depth
+        .apply_update(&changed, &sha('a'), &sha('c'))
+        .unwrap();
+    let source = data_pipeline_core::source_evidence_from_typed_raw(
+        &TypedRawRow::BinanceDepthUpdate(changed.clone()),
+        &sha('a'),
+        &sha('c'),
+    )
+    .unwrap();
+    let actual = pending_depth
+        .compute_update(
+            &changed,
+            PreparedPmEvidenceV1::prepare(source, None).unwrap(),
+        )
+        .unwrap();
+    depth_results.push((actual, expected));
+    for (pending, expected) in depth_results {
+        let actual =
+            data_pipeline_core::reduction::materialize_legacy_reference_reduction_v1(pending)
+                .unwrap();
+        assert_eq!(
+            serde_json::to_value((&actual.event, &actual.report)).unwrap(),
+            serde_json::to_value((&expected.event, &expected.report)).unwrap()
+        );
+    }
+    let mut old_trades = BinanceAggTradeReducer::new(RULE_VERSION).unwrap();
+    let mut deferred_trades = BinanceAggTradeReducer::new(RULE_VERSION).unwrap();
+    let mut trade_results = Vec::new();
+    for (position, raw) in [trade(300, 1, "64000"), trade(300, 2, "64000")]
+        .into_iter()
+        .enumerate()
+    {
+        let expected = old_trades.apply(&raw, &sha('a'), &sha('b')).unwrap();
+        let v2 = data_pipeline_core::source_evidence_from_typed_raw(
+            &TypedRawRow::BinanceAggTrade(raw.clone()),
+            &sha('a'),
+            &sha('b'),
+        )
+        .unwrap();
+        let input = recorded(TypedRawRow::BinanceAggTrade(raw), position as u64);
+        let prepared =
+            prepare_ingress_v1(&input, None, &Default::default(), &[], RULE_VERSION).unwrap();
+        let PreparedCanonicalInputV1::BinanceAggregateTrade { row, payload, .. } = prepared.current
+        else {
+            panic!("trade")
+        };
+        let actual = deferred_trades
+            .compute(
+                row,
+                PreparedPmEvidenceV1::prepare(v2, None).unwrap(),
+                payload.as_ref(),
+            )
+            .unwrap();
+        trade_results.push((actual, expected));
+    }
+    for (pending, expected) in trade_results {
+        let actual =
+            data_pipeline_core::reduction::materialize_legacy_reference_reduction_v1(pending)
+                .unwrap();
+        assert_eq!(
+            serde_json::to_value((&actual.event, &actual.report)).unwrap(),
+            serde_json::to_value((&expected.event, &expected.report)).unwrap()
+        );
+    }
     let row = snapshot("legacy", 100, 1);
     let source = data_pipeline_core::source_evidence_from_typed_raw(
         &TypedRawRow::BinanceDepthSnapshot(row.clone()),

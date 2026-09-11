@@ -1,4 +1,8 @@
 //! 阶段5显式有限验收；配置与输入身份由运行前冻结，结果不是生产运行承诺。
+#[path = "public_finite_acceptance/recorded_times.rs"]
+mod recorded_times;
+#[path = "public_finite_acceptance/simulation.rs"]
+mod simulation;
 use contracts::*;
 use data_pipeline_core::{
     public_input::*, public_observation_core::*,
@@ -19,6 +23,7 @@ use std::{
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Config {
     files: Vec<PublicFiniteFileV1>,
+    manifest_sha256: Sha256Hex,
     received_start: i64,
     received_end: i64,
     condition: Option<String>,
@@ -41,15 +46,23 @@ struct Rows<'a> {
     metrics: std::rc::Rc<std::cell::RefCell<DecodeMetrics>>,
     files: std::slice::Iter<'a, PublicFiniteFileV1>,
     stream: Option<TypedRawParquetStream<TypedRawRowV2>>,
+    current_file: Option<&'a PublicFiniteFileV1>,
+    bindings: Option<&'a std::cell::RefCell<PublicRecordingWriterV1>>,
     pending: std::vec::IntoIter<TypedRawRowV2>,
 }
 impl<'a> Rows<'a> {
-    fn new(config: &'a Config, metrics: std::rc::Rc<std::cell::RefCell<DecodeMetrics>>) -> Self {
+    fn new(
+        config: &'a Config,
+        metrics: std::rc::Rc<std::cell::RefCell<DecodeMetrics>>,
+        bindings: Option<&'a std::cell::RefCell<PublicRecordingWriterV1>>,
+    ) -> Self {
         Self {
             config,
             metrics,
             files: config.files.iter(),
             stream: None,
+            current_file: None,
+            bindings,
             pending: Vec::new().into_iter(),
         }
     }
@@ -95,6 +108,31 @@ impl Iterator for Rows<'_> {
                 {
                     continue;
                 }
+                if let Some(writer) = self.bindings {
+                    let file = self.current_file.expect("当前行来自已打开文件");
+                    let relative_path = format!(
+                        "{}/{}",
+                        file.path
+                            .parent()
+                            .unwrap()
+                            .file_name()
+                            .unwrap()
+                            .to_string_lossy(),
+                        file.path.file_name().unwrap().to_string_lossy()
+                    );
+                    if let Err(error) =
+                        writer
+                            .borrow_mut()
+                            .record_source_binding(SourceArtifactBindingV1 {
+                                source_message_id: source.source_message_id,
+                                manifest_sha256: self.config.manifest_sha256.clone(),
+                                file_sha256: Sha256Hex(file.sha256.clone()),
+                                relative_path,
+                            })
+                    {
+                        return Some(Err(error));
+                    }
+                }
                 return Some(Ok(row));
             }
             if let Some(stream) = &mut self.stream {
@@ -119,6 +157,7 @@ impl Iterator for Rows<'_> {
                 }
             }
             let file = self.files.next()?;
+            self.current_file = Some(file);
             match open_finite_public_input_v1(
                 file,
                 self.config.canonical.decode_batch_rows,
@@ -180,7 +219,14 @@ fn measure_result(
 fn run() -> RecordingResult<()> {
     let args: Vec<_> = std::env::args().collect();
     if args.len() != 5 {
-        return Err("用法: public_finite_acceptance <record|replay> <config.json> <output> <recording-root>".into());
+        return Err("用法: public_finite_acceptance <record|replay|hidden|hidden-probe|simulate> <config.json> <output> <recording-root>".into());
+    }
+    if args[1] == "simulate" {
+        return simulation::run(
+            std::path::Path::new(&args[2]),
+            std::path::Path::new(&args[3]),
+            std::path::Path::new(&args[4]),
+        );
     }
     let config: Config = serde_json::from_reader(File::open(&args[2])?)?;
     let out = PathBuf::from(&args[3]);
@@ -191,11 +237,22 @@ fn run() -> RecordingResult<()> {
     let recording = PathBuf::from(&args[4]);
     if args[1] == "record" {
         let decode = std::rc::Rc::new(std::cell::RefCell::new(DecodeMetrics::default()));
+        let writer = std::cell::RefCell::new(PublicRecordingWriterV1::create(
+            &recording,
+            &config.header,
+            config.output.clone(),
+        )?);
+        let writer_ref = &writer;
+        let mut first_read = true;
         let mut merge = prepare_historical_rows_v1(
             &out.join("source-order"),
             &config.canonical,
             config.header.input_stream_id.clone(),
-            || Ok(Rows::new(&config, decode.clone())),
+            || {
+                let bindings = if first_read { Some(writer_ref) } else { None };
+                first_read = false;
+                Ok(Rows::new(&config, decode.clone(), bindings))
+            },
         )?;
         serde_json::to_writer_pretty(
             File::create(out.join("source-sort-metrics.json"))?,
@@ -206,8 +263,7 @@ fn run() -> RecordingResult<()> {
             &*decode.borrow(),
         )?;
         let mut core = PublicObservationCoreV1::new(config.header.clone())?;
-        let mut writer =
-            PublicRecordingWriterV1::create(&recording, &config.header, config.output.clone())?;
+        let mut writer = writer.into_inner();
         let mut count = 0;
         while let Some(input) = merge.next_input()? {
             let prepared = prepare_public_ingress_v1(&core, &input, &BTreeMap::new(), &[])?;
@@ -266,8 +322,73 @@ fn run() -> RecordingResult<()> {
             File::create(out.join("completion.json"))?,
             &serde_json::json!({"messages": count}),
         )?;
+    } else if args[1] == "hidden" || args[1] == "hidden-probe" {
+        use data_pipeline_training::hidden_preparation::*;
+        let mut replay = PublicReplayV1::open(
+            &recording,
+            config.canonical.decode_batch_rows,
+            config.canonical.max_decode_batch_bytes,
+        )?;
+        while replay.next_applied()?.is_some() {}
+        let reader = PublicRecordingReaderV1::recover(
+            &recording,
+            config.output.sort.batch_rows,
+            config.canonical.max_decode_batch_bytes,
+        )?;
+        let prepared = prepare_hidden_v1(
+            replay.into_core(),
+            reader,
+            &out.join("hidden"),
+            &config.output,
+            format!("{}:hidden", config.header.input_stream_id),
+        )?;
+        serde_json::to_writer_pretty(File::create(out.join("hidden-reference.json"))?, &prepared)?;
+        if args[1] == "hidden-probe" {
+            let mut reader = HiddenMaterialReaderV1::open(
+                &prepared,
+                &recording,
+                config.output.sort.batch_rows,
+                config.canonical.max_decode_batch_bytes,
+            )?;
+            // 仅诊断原读取器最初两页，不签发完整消费凭据。
+            for _ in 0..2 {
+                if reader.next_page()?.is_empty() {
+                    break;
+                }
+                write_line(&mut metrics, reader.metrics())?;
+                metrics.flush()?;
+            }
+            serde_json::to_writer_pretty(
+                File::create(out.join("probe.json"))?,
+                &serde_json::json!({"read_metrics": reader.metrics(), "unmeasured": ["file_open_count", "row_group_reads"]}),
+            )?;
+            return Ok(());
+        }
+        let mut buckets = sim_system::public_consumption::RecordedHiddenBucketSourceV1::open(
+            &prepared,
+            &recording,
+            config.output.sort.batch_rows,
+            config.canonical.max_decode_batch_bytes,
+        )?;
+        let mut count = 0_u64;
+        let mut peak_members = 0_usize;
+        let mut peak_encoded_bytes = 0;
+        while let Some(bucket) = buckets.next_bucket()? {
+            peak_members = peak_members.max(bucket.records().len());
+            count += 1;
+            let material = encoded_digest(&bucket.records())?;
+            peak_encoded_bytes = peak_encoded_bytes.max(material.1);
+            write_line(
+                &mut results,
+                &serde_json::json!({"bucket": bucket.reference(), "material": material}),
+            )?;
+        }
+        serde_json::to_writer_pretty(
+            File::create(out.join("completion.json"))?,
+            &serde_json::json!({"complete_buckets": count, "peak_bucket_index_members": peak_members, "peak_bucket_encoded_bytes": peak_encoded_bytes, "read_metrics": buckets.read_metrics(), "unmeasured": ["file_open_count", "row_group_reads"]}),
+        )?;
     } else {
-        return Err("入口只接受 record/replay".into());
+        return Err("入口只接受 record/replay/hidden/hidden-probe/simulate".into());
     }
     results.flush()?;
     metrics.flush()?;

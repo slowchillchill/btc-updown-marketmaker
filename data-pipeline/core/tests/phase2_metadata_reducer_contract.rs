@@ -521,6 +521,65 @@ fn prepared_metadata_keeps_initial_lifecycle_and_only_public_narrow_snapshot() {
             dependency_record_refs: vec![],
         }
     };
+    // 同一合法 V2 前序：原包装与无摘要计算延后物化的完整旧域事件/报告一致。
+    let v2_initial = metadata_input(metadata_snapshot_row());
+    let outcomes = data_pipeline_core::typed_raw::map_metadata_outcomes(
+        &v2_initial.row.asset_ids,
+        v2_initial.row.outcomes_raw.as_deref(),
+        v2_initial.row.outcome_prices_raw.as_deref(),
+    )
+    .unwrap();
+    let tick = data_pipeline_core::typed_raw::extract_metadata_initial_tick(
+        v2_initial
+            .row
+            .source_evidence_payload_json
+            .as_deref()
+            .unwrap(),
+    )
+    .unwrap();
+    let (mut legacy, _, original_initial) =
+        PolymarketMetadataReducer::from_identity_snapshot(v2_initial.clone(), "rule-v3").unwrap();
+    let (mut delayed, _, deferred_initial) = PolymarketMetadataReducer::compute_identity_snapshot(
+        PolymarketMetadataInputV1 {
+            row: v2_initial.row.clone(),
+            evidence: PreparedPmEvidenceV1::prepare(v2_initial.evidence, None).unwrap(),
+        },
+        outcomes.clone(),
+        tick,
+        "rule-v3",
+    )
+    .unwrap();
+    let mut changed = v2_initial.row;
+    changed.timestamp_received += 1000;
+    changed.collector_admission_sequence += 1;
+    changed.collector_admission_time_utc_ms = changed.timestamp_received + 1;
+    changed.source_evidence_received_at_utc = Some(changed.timestamp_received);
+    changed.row_evidence_validation_completed_at_utc = Some(changed.timestamp_received + 1);
+    changed.closed = Some(true);
+    changed.accepting_orders = Some(false);
+    let input = metadata_input(changed);
+    let original_changed = legacy.reduce_metadata(input.clone()).unwrap();
+    let deferred_changed = delayed
+        .compute_metadata(
+            PolymarketMetadataInputV1 {
+                row: input.row,
+                evidence: PreparedPmEvidenceV1::prepare(input.evidence, None).unwrap(),
+            },
+            &outcomes,
+            false,
+        )
+        .unwrap();
+    for (pending, original) in [
+        (deferred_initial, original_initial),
+        (deferred_changed, original_changed),
+    ] {
+        let actual =
+            data_pipeline_core::reduction::materialize_legacy_market_reduction_v1(pending).unwrap();
+        assert_eq!(
+            serde_json::to_value((&actual.events, &actual.reports)).unwrap(),
+            serde_json::to_value((&original.events, &original.reports)).unwrap()
+        );
+    }
     let initial_row = metadata_snapshot_row();
     let initial = prepare(initial_row.clone(), 0);
     let prepared = prepare_ingress_v1(&initial, None, &Default::default(), &[], "rule-v3").unwrap();

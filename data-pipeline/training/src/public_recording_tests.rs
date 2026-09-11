@@ -488,6 +488,24 @@ fn hidden_buckets_cross_pages_and_reference_only_buckets_close_globally() {
     assert!(last.steps.is_empty());
     assert_eq!(last.reference_positions, reference_indices);
     assert_eq!(last.closure, ReplayIndexClosureV1::EndOfInput);
+    let mut material = HiddenMaterialReaderV1::open(&prepared, &root, 2, 1 << 20).unwrap();
+    assert_eq!(material.metrics(), &HiddenMaterialReadMetricsV1::default());
+    let mut positions = Vec::new();
+    loop {
+        let page = material.next_page().unwrap();
+        if page.is_empty() {
+            break;
+        }
+        positions.extend(page.into_iter().map(|(position, _)| position));
+    }
+    assert_eq!(positions, (0..last.index_end).collect::<Vec<_>>());
+    assert_eq!(material.metrics().index_entries, last.index_end);
+    assert_eq!(material.metrics().peak_page_entries, 2);
+    assert!(material.metrics().decoded_derived_rows > 0);
+    assert!(material.metrics().decoded_recording_rows > 0);
+    let completed = material.metrics().clone();
+    assert!(material.next_page().unwrap().is_empty());
+    assert_eq!(material.metrics(), &completed);
 }
 #[test]
 fn source_heads_preserve_real_within_source_order_before_receive_ties() {

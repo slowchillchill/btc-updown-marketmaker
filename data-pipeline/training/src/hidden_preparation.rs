@@ -373,6 +373,15 @@ pub enum ResolvedHiddenRecordV1 {
         record: CanonicalEventRecordV2,
     },
 }
+/// 实际解码扫描计数；不等于磁盘物理读取字节或操作系统缓存未命中。
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct HiddenMaterialReadMetricsV1 {
+    pub pages: u64,
+    pub index_entries: u64,
+    pub decoded_derived_rows: u64,
+    pub decoded_recording_rows: u64,
+    pub peak_page_entries: usize,
+}
 /// 按索引页定位原文件；只持有当前页，派生文件物理顺序不参与消费排序。
 pub struct HiddenMaterialReaderV1 {
     prepared: HiddenPreparationV1,
@@ -380,6 +389,7 @@ pub struct HiddenMaterialReaderV1 {
     index: HiddenIndexReaderV1,
     rows: usize,
     bytes: usize,
+    metrics: HiddenMaterialReadMetricsV1,
 }
 impl HiddenMaterialReaderV1 {
     pub fn open(
@@ -394,7 +404,11 @@ impl HiddenMaterialReaderV1 {
             index: HiddenIndexReaderV1::open(prepared, rows, bytes)?,
             rows,
             bytes,
+            metrics: HiddenMaterialReadMetricsV1::default(),
         })
+    }
+    pub fn metrics(&self) -> &HiddenMaterialReadMetricsV1 {
+        &self.metrics
     }
     pub fn next_page(&mut self) -> RecordingResult<Vec<(u64, ResolvedHiddenRecordV1)>> {
         let mut entries = Vec::new();
@@ -407,6 +421,9 @@ impl HiddenMaterialReaderV1 {
         if entries.is_empty() {
             return Ok(Vec::new());
         }
+        self.metrics.pages += 1;
+        self.metrics.index_entries += entries.len() as u64;
+        self.metrics.peak_page_entries = self.metrics.peak_page_entries.max(entries.len());
         let mut step_slots = BTreeMap::new();
         let mut fact_slots = BTreeMap::new();
         let mut step_market_slots: BTreeMap<u64, Vec<usize>> = BTreeMap::new();
@@ -433,6 +450,7 @@ impl HiddenMaterialReaderV1 {
         if !step_slots.is_empty() {
             let mut reader = HiddenStepReaderV1::open(&self.prepared, self.rows, self.bytes)?;
             while let Some(row) = reader.next_row()? {
+                self.metrics.decoded_derived_rows += 1;
                 if let HiddenStoredRowV1::Step(step) = row {
                     if let Some(slot) = step_slots.remove(&step.reference.derivation_position) {
                         stored_steps[slot] = Some(step);
@@ -451,6 +469,7 @@ impl HiddenMaterialReaderV1 {
                 self.bytes,
             )?;
             while let Some(row) = reader.next_row()? {
+                self.metrics.decoded_recording_rows += 1;
                 if let PublicStoredRowV1::Canonical {
                     canonical_position,
                     record,

@@ -471,7 +471,7 @@ impl<T: PublicConsumptionTimeSourceV1> Iterator for RecordedPublicGroupSourceV1<
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum HiddenExecutionRecordV1 {
     Step {
         market: MarketIdentityV2,
@@ -485,6 +485,14 @@ pub struct AcceptedHiddenStepBucketV1 {
     pub(crate) reference: ClosedHiddenStepBucketV1,
     #[serde(skip_serializing)]
     pub(crate) records: Arc<[HiddenExecutionRecordV1]>,
+}
+impl AcceptedHiddenStepBucketV1 {
+    pub fn reference(&self) -> &ClosedHiddenStepBucketV1 {
+        &self.reference
+    }
+    pub fn records(&self) -> &[HiddenExecutionRecordV1] {
+        &self.records
+    }
 }
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub(crate) struct LoggedHiddenStepBucketV1 {
@@ -517,6 +525,11 @@ impl RecordedHiddenBucketSourceV1 {
             )?,
             page: std::collections::VecDeque::new(),
         })
+    }
+    pub fn read_metrics(
+        &self,
+    ) -> &data_pipeline_training::hidden_preparation::HiddenMaterialReadMetricsV1 {
+        self.materials.metrics()
     }
     pub fn next_bucket(
         &mut self,
@@ -612,4 +625,13 @@ impl DeferredPublicPmReductionV1 {
         }
         reduction
     }
+}
+
+/// 新消费当前所属资源；异步日志字节和稳定序号由后台独占，未在此读取。
+#[cfg(feature = "measurement")]
+#[derive(Clone, Copy, Debug, Serialize)]
+pub struct PublicConsumptionResourceSnapshotV1 {
+    pub business: crate::resource::ResourceQuantityV1,
+    pub pending_projection: crate::resource::ResourceQuantityV1,
+    pub applied_input_sequence: u64,
 }

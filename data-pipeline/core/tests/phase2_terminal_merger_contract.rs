@@ -857,6 +857,60 @@ fn prepared_ws_and_gamma_terminal_share_one_state_and_materialize_original_resul
         source_evidence_v3_from_existing, source_evidence_v3_from_typed_raw_v2,
     };
     let market = market('1', "123");
+    let original_context = market_context(market.clone());
+    let mut original_merger =
+        PolymarketTerminalMerger::new(original_context.clone(), "rule-v3").unwrap();
+    let mut deferred_merger = PolymarketTerminalMerger::new(
+        PolymarketMarketContextV1 {
+            market: original_context.market,
+            assets: original_context.assets,
+            identity_source_evidence: original_context
+                .identity_source_evidence
+                .into_iter()
+                .map(|source| PreparedPmEvidenceV1::prepare(source, None).unwrap())
+                .collect(),
+        },
+        "rule-v3",
+    )
+    .unwrap();
+    let mut pending = Vec::new();
+    for (metadata, ws) in [
+        terminal_inputs(&market),
+        terminal_redelivery_inputs(&market),
+    ] {
+        let original = original_merger
+            .merge_ws_terminal(metadata.clone(), ws.clone())
+            .unwrap();
+        let outcomes = data_pipeline_core::typed_raw::map_metadata_outcomes(
+            &metadata.row.asset_ids,
+            metadata.row.outcomes_raw.as_deref(),
+            metadata.row.outcome_prices_raw.as_deref(),
+        )
+        .unwrap();
+        let delayed = deferred_merger
+            .compute_ws_terminal(
+                PolymarketMetadataInputV1 {
+                    row: metadata.row,
+                    evidence: PreparedPmEvidenceV1::prepare(metadata.evidence, None).unwrap(),
+                },
+                &outcomes,
+                PolymarketOrderbookInputV1 {
+                    row: ws.row,
+                    evidence: PreparedPmEvidenceV1::prepare(ws.evidence, None).unwrap(),
+                },
+            )
+            .unwrap();
+        pending.push((delayed, original));
+    }
+    // 先推进到原重复报告，再物化首终态；胜出、状态事件、所有摘要和报告一起比较。
+    for (delayed, original) in pending {
+        let actual =
+            data_pipeline_core::reduction::materialize_legacy_market_reduction_v1(delayed).unwrap();
+        assert_eq!(
+            serde_json::to_value((&actual.events, &actual.reports)).unwrap(),
+            serde_json::to_value((&original.events, &original.reports)).unwrap()
+        );
+    }
     let old_context = market_context(market.clone());
     let context = PolymarketMarketContextV1 {
         market: old_context.market,
