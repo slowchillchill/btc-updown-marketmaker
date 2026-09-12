@@ -19149,6 +19149,19 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
         self.last_prepared = Some(prepared);
         Ok(Some((receipt, cutoff)))
     }
+    #[cfg(feature = "measurement")]
+    pub fn measurement_resources(&self) -> PublicConsumptionResourceSnapshotV1 {
+        let resources = self.execution.actor.measurement_resource_snapshot();
+        PublicConsumptionResourceSnapshotV1 {
+            business: resources.business,
+            pending_projection: resources.pending_projection,
+            applied_input_sequence: self.execution.actor.applied_input_sequence,
+        }
+    }
+    #[cfg(feature = "measurement")]
+    pub fn drain_measurement_observations(&self) -> Vec<MeasurementObservation> {
+        self.execution.actor.measurement_probe.drain()
+    }
     pub fn frames(&self) -> Vec<PublicObservationFrameV1<'_>> {
         let Some(prepared) = &self.last_prepared else {
             return Vec::new();

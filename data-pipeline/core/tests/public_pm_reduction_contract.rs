@@ -1401,7 +1401,18 @@ fn prepared_steps_keep_complete_positions_and_original_prestate_after_later_appl
         true,
     )
     .unwrap();
-    assert!(initial.steps.iter().any(|step| matches!(&step.change, PmStepChangeV1::InitialSnapshot { book_digest_sha256, .. } if book_digest_sha256.0.len() == 64)));
+    // 原域字面材料独立于准备/归约/物化算法；保留字段顺序及十进制原规范。
+    let original_book_material = br#"{"asset":{"token_id":"123","outcome":{"index":0,"label":"UP"}},"bids":[{"price_pusd_per_share":"0.5","quantity_shares":"100"}],"asks":[{"price_pusd_per_share":"0.6","quantity_shares":"80"}]}"#;
+    let mut original_hash = Sha256::new();
+    original_hash.update(b"data-pipeline/polymarket-book-digest/v1\0");
+    original_hash.update((original_book_material.len() as u64).to_be_bytes());
+    original_hash.update(original_book_material);
+    let original_digest = format!("{:x}", original_hash.finalize());
+    assert_eq!(
+        original_digest,
+        "07b1fc7567ca36ddbc82f45705cc1d414fb6510432efd8ca03967c3155eea4fb"
+    );
+    assert!(initial.steps.iter().any(|step| matches!(&step.change, PmStepChangeV1::InitialSnapshot { book_digest_sha256, .. } if book_digest_sha256.0 == original_digest)));
     state.apply(&initial);
     let middle = compute_pm_message_steps_v1(
         &prepared_context,

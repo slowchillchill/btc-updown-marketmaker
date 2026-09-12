@@ -488,6 +488,61 @@ fn hidden_buckets_cross_pages_and_reference_only_buckets_close_globally() {
     assert!(last.steps.is_empty());
     assert_eq!(last.reference_positions, reference_indices);
     assert_eq!(last.closure, ReplayIndexClosureV1::EndOfInput);
+    let mut material = HiddenMaterialReaderV1::open(&prepared, &root, 2, 1 << 20).unwrap();
+    assert_eq!(material.metrics(), &HiddenMaterialReadMetricsV1::default());
+    let mut positions = Vec::new();
+    let mut actual_references = Vec::new();
+    loop {
+        let page = material.next_page().unwrap();
+        if page.is_empty() {
+            break;
+        }
+        for (position, record) in page {
+            positions.push(position);
+            if let ResolvedHiddenRecordV1::Reference {
+                canonical_position,
+                record,
+            } = record
+            {
+                actual_references.push((canonical_position, serde_json::to_value(record).unwrap()));
+            }
+        }
+    }
+    assert_eq!(positions, (0..last.index_end).collect::<Vec<_>>());
+    assert_eq!(material.metrics().index_entries, last.index_end);
+    assert_eq!(material.metrics().peak_page_entries, 2);
+    assert!(material.metrics().decoded_derived_rows > 0);
+    assert!(material.metrics().decoded_recording_rows > 0);
+    // 原位置递增且同一消息跨页时，不应反复读取已经消费的历史。
+    let mut all = PublicRecordingReaderV1::recover(&root, 2, 1 << 20).unwrap();
+    let mut recording_rows = 0;
+    let mut expected_references = Vec::new();
+    while let Some(row) = all.next_row().unwrap() {
+        recording_rows += 1;
+        if let PublicStoredRowV1::Canonical {
+            canonical_position: 7,
+            record,
+            ..
+        } = row
+        {
+            expected_references.push((7, serde_json::to_value(record).unwrap()));
+        }
+    }
+    assert_eq!(actual_references, expected_references);
+    let mut all = HiddenStepReaderV1::open(&prepared, 2, 1 << 20).unwrap();
+    let mut derived_rows = 0;
+    while all.next_row().unwrap().is_some() {
+        derived_rows += 1;
+    }
+    assert!(
+        material.metrics().decoded_recording_rows <= recording_rows,
+        "原序跨页重复扫描: {:?}, 原文件行数 {recording_rows}",
+        material.metrics()
+    );
+    assert!(material.metrics().decoded_derived_rows <= derived_rows);
+    let completed = material.metrics().clone();
+    assert!(material.next_page().unwrap().is_empty());
+    assert_eq!(material.metrics(), &completed);
 }
 #[test]
 fn source_heads_preserve_real_within_source_order_before_receive_ties() {
@@ -713,6 +768,53 @@ fn hidden_typed_steps_keep_cross_epoch_predecessor_counterexample_and_missing_ti
         .unwrap();
     assert!(recovery < old);
     assert_ne!(order[recovery].2, order[old].1); // 消费时真实前量15与原步骤before10冲突，不改写材料。
+    // 外排时间使索引位置真实倒退到更早派生记录；分页不得跳过或重排。
+    let mut originals = BTreeMap::new();
+    let mut reader = HiddenStepReaderV1::open(&prepared, 2, 1 << 20).unwrap();
+    while let Some(row) = reader.next_row().unwrap() {
+        if let HiddenStoredRowV1::Step(step) = row {
+            originals.insert(
+                step.reference.derivation_position,
+                serde_json::to_value(step).unwrap(),
+            );
+        }
+    }
+    let mut index = HiddenIndexReaderV1::open(&prepared, 2, 1 << 20).unwrap();
+    let mut expected = Vec::new();
+    while let Some((position, entry)) = index.next_entry().unwrap() {
+        if let HiddenIndexEntryV1::Step(step) = entry {
+            expected.push((position, step.derivation_position));
+        }
+    }
+    assert!(expected.windows(2).any(|pair| pair[0].1 > pair[1].1));
+    for page_rows in [1, 2, 20] {
+        let mut reader =
+            HiddenMaterialReaderV1::open(&prepared, &root, page_rows, 1 << 20).unwrap();
+        let mut actual = Vec::new();
+        let mut previous_scanned = 0;
+        loop {
+            let page = reader.next_page().unwrap();
+            if page.is_empty() {
+                break;
+            }
+            assert!(reader.metrics().decoded_recording_rows >= previous_scanned);
+            previous_scanned = reader.metrics().decoded_recording_rows;
+            for (position, value) in page {
+                let ResolvedHiddenRecordV1::Step {
+                    stored,
+                    market: observed_market,
+                } = value
+                else {
+                    panic!()
+                };
+                assert_eq!(observed_market, market());
+                let derived = stored.reference.derivation_position;
+                assert_eq!(serde_json::to_value(stored).unwrap(), originals[&derived]);
+                actual.push((position, derived));
+            }
+        }
+        assert_eq!(actual, expected);
+    }
 }
 #[test]
 fn abort_and_binding_write_failure_cannot_become_normal_stable_end() {

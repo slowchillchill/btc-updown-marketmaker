@@ -2342,11 +2342,11 @@ pub struct TypedRawParquetStream<Row = TypedRawRow> {
 }
 
 impl<Row> TypedRawParquetStream<Row> {
-    pub(crate) const fn last_physical_batch_rows(&self) -> usize {
+    pub const fn last_physical_batch_rows(&self) -> usize {
         self.last_physical_batch_rows
     }
 
-    pub(crate) const fn last_physical_batch_bytes(&self) -> usize {
+    pub const fn last_physical_batch_bytes(&self) -> usize {
         self.last_physical_batch_bytes
     }
 }

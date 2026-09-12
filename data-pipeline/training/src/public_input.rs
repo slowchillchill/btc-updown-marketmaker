@@ -290,6 +290,39 @@ fn decode_public_batch(
     Ok(rows)
 }
 
+/// 有限验收的固定所选文件事实，期望值来自原合同/清单，而非当前文件自证。
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PublicFiniteFileV1 {
+    pub path: std::path::PathBuf,
+    pub source_kind: String,
+    pub schema_version: String,
+    pub bytes: u64,
+    pub rows: u64,
+    pub sha256: String,
+}
+/// 只复用原单文件身份、页脚、模式及解码边界；不签发全日准入对象。
+pub fn open_finite_public_input_v1(
+    file: &PublicFiniteFileV1,
+    batch_rows: usize,
+    max_batch_bytes: usize,
+) -> Result<TypedRawParquetStream<TypedRawRowV2>, TypedRawReadError> {
+    open_parquet_with_decoder(
+        ParquetInputFacts {
+            path: &file.path,
+            source_kind: &file.source_kind,
+            schema_version: &file.schema_version,
+            bytes: file.bytes,
+            rows: file.rows,
+            sha256: &file.sha256,
+        },
+        batch_rows,
+        None,
+        Some(max_batch_bytes),
+        expected_public_schema,
+        decode_public_batch,
+    )
+}
+
 /// 文件事实必须来自显式新版或原每日清单准入；旧六来源继续调用原解码器。
 pub fn open_validated_public_input_parquet_v1(
     file: &ValidatedDirectSourceParquetFileV3,

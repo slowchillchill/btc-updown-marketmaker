@@ -35,6 +35,7 @@ pub struct HistoricalMergeV1 {
     heads: Vec<Option<HistoricalIngressV1>>,
     stream: String,
     position: u64,
+    sort_metrics: Vec<crate::SortMetrics>,
 }
 impl HistoricalMergeV1 {
     fn prepare(
@@ -58,8 +59,10 @@ impl HistoricalMergeV1 {
         }
         let mut cursors = Vec::new();
         let mut heads = Vec::new();
+        let mut sort_metrics = Vec::new();
         for sorter in sorters {
             let output = sorter.finish()?;
+            sort_metrics.push(output.metrics.clone());
             let mut cursor =
                 RunCursor::open(&output.output_path, config.batch_rows, config.max_run_bytes)?;
             heads.push(
@@ -75,7 +78,11 @@ impl HistoricalMergeV1 {
             heads,
             stream,
             position: 0,
+            sort_metrics,
         })
+    }
+    pub fn sort_metrics(&self) -> &[crate::SortMetrics] {
+        &self.sort_metrics
     }
     pub fn next_input(&mut self) -> RecordingResult<Option<RecordedIngressV1>> {
         let chosen = self
