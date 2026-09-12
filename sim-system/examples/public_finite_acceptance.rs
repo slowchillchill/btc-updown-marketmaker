@@ -283,14 +283,18 @@ fn measure_binance_boundary(
 }
 fn run() -> RecordingResult<()> {
     let args: Vec<_> = std::env::args().collect();
-    if args.len() != 5 && !(args.len() == 4 && args[1] == "core") {
-        return Err("用法: public_finite_acceptance <core|record|replay|hidden|hidden-probe|simulate|terminal-order> <config.json> <output> [recording-root]（core无需记录目录）".into());
+    if !(args.len() == 5 && args[1] != "simulate-hidden")
+        && !(args.len() == 4 && args[1] == "core")
+        && !(args.len() == 6 && args[1] == "simulate-hidden")
+    {
+        return Err("用法: public_finite_acceptance <core|record|replay|hidden|hidden-probe|simulate|simulate-hidden|terminal-order> <config.json> <output> [recording-root] [hidden-reference.json]（core无需记录目录，simulate-hidden使用既有隐藏准备引用）".into());
     }
-    if args[1] == "simulate" {
+    if args[1] == "simulate" || args[1] == "simulate-hidden" {
         return simulation::run(
             std::path::Path::new(&args[2]),
             std::path::Path::new(&args[3]),
             std::path::Path::new(&args[4]),
+            args.get(5).map(std::path::Path::new),
         );
     }
     let config: Config = serde_json::from_reader(File::open(&args[2])?)?;
@@ -477,7 +481,7 @@ fn run() -> RecordingResult<()> {
         )?;
     } else {
         return Err(
-            "入口只接受 core/record/replay/hidden/hidden-probe/simulate/terminal-order".into(),
+            "入口只接受 core/record/replay/hidden/hidden-probe/simulate/simulate-hidden/terminal-order".into(),
         );
     }
     results.flush()?;
