@@ -95,6 +95,8 @@ pub(crate) fn recoverable_rtds_network_envelope(source: Error, diagnostic: Strin
 enum ConnectionExit {
     NormalShutdown,
     Recoverable(Error),
+    #[cfg(feature = "rtds")]
+    RtdsControl,
     Parser,
     Terminal(String),
 }
@@ -117,6 +119,21 @@ struct OutboundQueue {
     receiver: mpsc::UnboundedReceiver<OutboundRequest>,
     published_generation: Arc<AtomicU64>,
     active_generation: u64,
+}
+
+// 仅 RTDS 控制错误进入此阶段；其他连接仍在握手成功时重置。
+struct ConnectionRecovery {
+    backoff: backoff::ExponentialBackoff,
+    awaiting_rtds_message: bool,
+}
+
+impl ConnectionRecovery {
+    fn new(config: &Config) -> Self {
+        Self {
+            backoff: config.reconnect.clone().into(),
+            awaiting_rtds_message: false,
+        }
+    }
 }
 
 struct ConnectionSignals {
@@ -245,6 +262,7 @@ where
         };
 
         // Spawn connection task
+        let recovery = ConnectionRecovery::new(&config);
         let connection_config = config;
         let connection_endpoint = endpoint;
         let broadcast_tx_clone = broadcast_tx.clone();
@@ -261,6 +279,7 @@ where
                 broadcast_tx_clone,
                 parser,
                 signals,
+                recovery,
             )
             .await;
         });
@@ -285,9 +304,9 @@ where
         broadcast_tx: broadcast::Sender<M>,
         parser: P,
         mut signals: ConnectionSignals,
+        mut recovery: ConnectionRecovery,
     ) {
         let mut attempt = 0_u32;
-        let mut backoff: backoff::ExponentialBackoff = config.reconnect.clone().into();
         let mut has_connected = false;
 
         loop {
@@ -320,7 +339,9 @@ where
             match connected {
                 Ok((ws_stream, _)) => {
                     attempt = 0;
-                    backoff.reset();
+                    if !recovery.awaiting_rtds_message {
+                        recovery.backoff.reset();
+                    }
                     if has_connected {
                         match outbound.advance_generation() {
                             Ok(()) => {}
@@ -352,6 +373,7 @@ where
                         config.clone(),
                         &parser,
                         &mut signals,
+                        &mut recovery,
                     )
                     .await
                     {
@@ -359,6 +381,8 @@ where
                             _ = signals.state_tx.send(ConnectionState::Disconnected);
                             break;
                         }
+                        #[cfg(feature = "rtds")]
+                        ConnectionExit::RtdsControl => {}
                         ConnectionExit::Recoverable(e) => {
                             #[cfg(feature = "tracing")]
                             tracing::error!("Error handling connection: {e:?}");
@@ -402,7 +426,7 @@ where
                 .state_tx
                 .send(ConnectionState::Reconnecting { attempt });
 
-            if let Some(duration) = backoff.next_backoff() {
+            if let Some(duration) = recovery.backoff.next_backoff() {
                 sleep(duration).await;
             }
         }
@@ -416,6 +440,7 @@ where
         config: Config,
         parser: &P,
         signals: &mut ConnectionSignals,
+        recovery: &mut ConnectionRecovery,
     ) -> ConnectionExit {
         let (mut write, mut read) = ws_stream.split();
 
@@ -448,6 +473,10 @@ where
                             // Parse messages using the provided parser
                             match parser.parse(text.as_bytes()) {
                                 Ok(messages) => {
+                                    if recovery.awaiting_rtds_message && !messages.is_empty() {
+                                        recovery.backoff.reset();
+                                        recovery.awaiting_rtds_message = false;
+                                    }
                                     for message in messages {
                                         #[cfg(feature = "tracing")]
                                         tracing::trace!(?message, "Parsed WebSocket message");
@@ -456,12 +485,14 @@ where
                                 }
                                 Err(error) => {
                                     #[cfg(feature = "rtds")]
-                                    if error
+                                    if let Some(envelope) = error
                                         .downcast_ref::<RecoverableRtdsNetworkEnvelope>()
-                                        .is_some()
                                     {
+                                        // 只输出受限诊断，避免递归 Debug 回显原始错误。
+                                        eprintln!("RTDS recoverable control error: {}", envelope.diagnostic);
+                                        recovery.awaiting_rtds_message = true;
                                         heartbeat_handle.abort();
-                                        return ConnectionExit::Recoverable(error);
+                                        return ConnectionExit::RtdsControl;
                                     }
 
                                     let message = error.to_string();
@@ -740,6 +771,201 @@ where
 mod tests {
     use super::*;
 
+    #[cfg(feature = "rtds")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn rtds_control_recovery_keeps_backoff_until_nonempty_typed_messages() {
+        use crate::rtds::{RtdsMessage, subscription::SimpleParser};
+        use std::time::Duration;
+
+        // 用确定性退避输入检验真实握手、读取和重试循环。
+        let config = Config {
+            require_text_pong: false,
+            heartbeat_interval: Duration::from_secs(30),
+            ..Config::default()
+        };
+        let mut recovery = ConnectionRecovery::new(&config);
+        recovery.backoff.initial_interval = Duration::from_millis(80);
+        recovery.backoff.current_interval = Duration::from_millis(80);
+        recovery.backoff.max_interval = Duration::from_millis(640);
+        recovery.backoff.multiplier = 2.0;
+        recovery.backoff.randomization_factor = 0.0;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut previous_sent = None;
+            for (step, expected_ms) in [0, 80, 160, 320, 640, 80, 80, 80].into_iter().enumerate() {
+                let (stream, _) = timeout(Duration::from_secs(3), listener.accept())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                if let Some(sent) = previous_sent {
+                    let waited = Instant::now().duration_since(sent);
+                    assert!(
+                        waited >= Duration::from_millis(expected_ms - 10),
+                        "step {step}: {waited:?} < {expected_ms}ms"
+                    );
+                    assert!(
+                        waited < Duration::from_millis(expected_ms + 60),
+                        "step {step}: {waited:?} > {expected_ms}ms"
+                    );
+                }
+                if step == 1 {
+                    // 恢复阶段内 TCP 成功，但 WebSocket 握手失败。
+                    previous_sent = Some(Instant::now());
+                    drop(stream);
+                    continue;
+                }
+                let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                if step == 2 || step == 5 {
+                    previous_sent = Some(Instant::now());
+                    drop(socket); // 同时覆盖恢复阶段内和阶段外的 EOF。
+                    continue;
+                }
+                if step == 3 {
+                    for empty in ["PONG", "   ", "[]"] {
+                        socket.send(Message::Text(empty.into())).await.unwrap();
+                    }
+                }
+                if step == 4 {
+                    socket.send(Message::Text(r#"{"topic":"crypto_prices_chainlink","type":"update","timestamp":1,"payload":{}}"#.into())).await.unwrap();
+                    previous_sent = Some(Instant::now());
+                    drop(socket); // 非空消息已结束恢复；后续普通握手再次恢复原重置行为。
+                    continue;
+                }
+                let frame = match step {
+                    0 => r#"{"message":"Network error communicating with endpoint"}"#,
+                    3 => r#"{"message":"Too Many Requests"}"#,
+                    6 => r#"{"message":"Endpoint request timed out"}"#,
+                    7 => r#"{"message":"unknown endpoint error"}"#,
+                    _ => unreachable!(),
+                };
+                previous_sent = Some(Instant::now());
+                socket.send(Message::Text(frame.into())).await.unwrap();
+                // 保持对端连接，直到 SDK 关闭当前代际。
+                while let Some(Ok(message)) = socket.next().await {
+                    if matches!(message, Message::Close(_)) {
+                        break;
+                    }
+                }
+            }
+        });
+        let (_sender, receiver) = mpsc::unbounded_channel();
+        let generation = Arc::new(AtomicU64::new(0));
+        let outbound = OutboundQueue {
+            receiver,
+            published_generation: Arc::clone(&generation),
+            active_generation: 0,
+        };
+        let (broadcast_tx, mut messages) = broadcast::channel(8);
+        let (state_tx, _state_rx) = watch::channel(ConnectionState::Disconnected);
+        let (fault_tx, fault_rx) = watch::channel(None);
+        timeout(
+            Duration::from_secs(10),
+            ConnectionManager::<RtdsMessage, SimpleParser>::connection_loop(
+                format!("ws://{address}"),
+                config,
+                outbound,
+                broadcast_tx,
+                SimpleParser::default(),
+                ConnectionSignals { state_tx, fault_tx },
+                recovery,
+            ),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+        assert_eq!(generation.load(Ordering::Acquire), 6);
+        assert_eq!(messages.try_recv().unwrap().payload, serde_json::json!({}));
+        assert!(messages.try_recv().is_err());
+        assert!(matches!(
+            &*fault_rx.borrow(),
+            Some(ConnectionFault::Parser(_))
+        ));
+    }
+
+    #[cfg(feature = "rtds")]
+    #[test]
+    fn rtds_control_diagnostics_are_once_and_bounded() {
+        // 子进程捕获实际 stderr，分别验证有无 tracing 的构建。
+        const CHILD: &str = "SDK_RTDS_DIAGNOSTIC_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            #[cfg(feature = "tracing")]
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::INFO)
+                .with_writer(std::io::stderr)
+                .init();
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async {
+                use crate::rtds::{RtdsMessage, subscription::SimpleParser};
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let server = tokio::spawn(async move {
+                    for message in ["Network error communicating with endpoint", "Too Many Requests", "Endpoint request timed out"] {
+                        let (stream, _) = listener.accept().await.unwrap();
+                        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                        // 据诊断重建控制对象，不冒充完整原始网络帧。
+                        let mut frame = serde_json::json!({"message": message, "connectionId": "c", "requestId": "r", "private": {"secret": "RAW_SECRET_MUST_NOT_LEAK"}});
+                        for index in 0..100 { frame[format!("extra_{index:03}_{}", "界".repeat(20))] = serde_json::json!(null); }
+                        socket.send(Message::Text(frame.to_string().into())).await.unwrap();
+                        while let Some(Ok(message)) = socket.next().await {
+                            if matches!(message, Message::Close(_)) { break; }
+                        }
+                    }
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    socket.send(Message::Text(r#"{"message":"unknown"}"#.into())).await.unwrap();
+                });
+                let mut config = Config::default();
+                config.require_text_pong = false;
+                config.reconnect.initial_backoff = std::time::Duration::from_millis(1);
+                config.reconnect.max_backoff = std::time::Duration::from_millis(2);
+                let connection = ConnectionManager::<RtdsMessage, SimpleParser>::new(format!("ws://{address}"), config, SimpleParser::default()).unwrap();
+                let mut faults = connection.fault_receiver();
+                timeout(std::time::Duration::from_secs(3), async {
+                    while faults.borrow_and_update().is_none() { faults.changed().await.unwrap(); }
+                }).await.unwrap();
+                server.await.unwrap();
+            });
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "ws::connection::tests::rtds_control_diagnostics_are_once_and_bounded",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        let prefix = "RTDS recoverable control error: ";
+        let lines: Vec<_> = stderr
+            .lines()
+            .filter(|line| line.starts_with(prefix))
+            .collect();
+        assert_eq!(lines.len(), 3, "{stderr}");
+        for line in lines {
+            assert!(line.len() <= prefix.len() + 2048);
+            assert!(
+                line.len() >= prefix.len() + 2000,
+                "exercise truncation boundary"
+            );
+            assert!(line.contains("sha256="));
+        }
+        assert!(!stderr.contains("RAW_SECRET_MUST_NOT_LEAK"));
+        assert!(!stderr.contains("RecoverableRtdsNetworkEnvelope"));
+        assert!(!stderr.contains("Error handling connection"));
+    }
+
     #[cfg(all(feature = "tracing", feature = "rtds"))]
     struct CaptureWriter(Arc<std::sync::Mutex<Vec<u8>>>);
 
@@ -837,6 +1063,7 @@ mod tests {
                 Config::default(),
                 &TestParser,
                 &mut signals,
+                &mut ConnectionRecovery::new(&Config::default()),
             ),
         )
         .await
@@ -868,6 +1095,7 @@ mod tests {
                 config,
                 &TestParser,
                 &mut signals,
+                &mut ConnectionRecovery::new(&Config::default()),
             ),
         )
         .await
@@ -998,6 +1226,7 @@ mod tests {
                 config,
                 &TestParser,
                 &mut signals,
+                &mut ConnectionRecovery::new(&Config::default()),
             ),
         )
         .await
@@ -1013,6 +1242,26 @@ mod tests {
     #[cfg(all(feature = "tracing", feature = "rtds"))]
     #[tokio::test(flavor = "current_thread")]
     async fn rtds_raw_trace_is_explicit_but_warn_and_sticky_fault_are_bounded() {
+        // 隔离 tracing 的全局调用点缓存，避免其他无订阅者连接测试影响 TRACE 捕获。
+        const CHILD: &str = "SDK_RTDS_RAW_TRACE_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "ws::connection::tests::rtds_raw_trace_is_explicit_but_warn_and_sticky_fault_are_bounded",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "stdout={} stderr={}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
         use tracing_subscriber::layer::SubscriberExt as _;
 
         use crate::rtds::RtdsMessage;
@@ -1240,6 +1489,7 @@ mod tests {
             Config::default(),
             &TestParser,
             &mut signals,
+            &mut ConnectionRecovery::new(&Config::default()),
         )
         .await;
 

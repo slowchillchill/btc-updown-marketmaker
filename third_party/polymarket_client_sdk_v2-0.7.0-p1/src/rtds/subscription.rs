@@ -408,10 +408,12 @@ fn is_recoverable_network_error_envelope(bytes: &[u8]) -> bool {
         return false;
     };
 
-    object.get("message").and_then(Value::as_str) == Some(RTDS_RECOVERABLE_NETWORK_ERROR)
-        && RTDS_MESSAGE_FIELDS
-            .iter()
-            .all(|field| !object.contains_key(*field))
+    matches!(
+        object.get("message").and_then(Value::as_str),
+        Some(RTDS_RECOVERABLE_NETWORK_ERROR | "Too Many Requests" | "Endpoint request timed out")
+    ) && RTDS_MESSAGE_FIELDS
+        .iter()
+        .all(|field| !object.contains_key(*field))
 }
 
 impl crate::ws::traits::MessageParser<RtdsMessage> for SimpleParser {
@@ -728,6 +730,38 @@ impl SubscriptionManager {
 mod diagnostic_tests {
     use super::*;
     use crate::ws::traits::MessageParser as _;
+
+    #[test]
+    fn control_envelopes_use_exact_messages_and_preserve_target_field_exclusion() {
+        // 据已见诊断重建对象，不作为归档原始网络帧。
+        for message in [
+            RTDS_RECOVERABLE_NETWORK_ERROR,
+            "Too Many Requests",
+            "Endpoint request timed out",
+        ] {
+            let bytes = serde_json::to_vec(
+                &serde_json::json!({"message": message, "connectionId": "c", "requestId": "r"}),
+            )
+            .unwrap();
+            assert!(parse_messages(&bytes).is_err());
+            let error = SimpleParser.parse(&bytes).unwrap_err();
+            assert_eq!(error.kind(), crate::error::Kind::WebSocket);
+            assert!(error.to_string().contains(message));
+        }
+        for frame in [
+            r#"{"message":"Too Many Requests","payload":null}"#,
+            r#"{"message":"Endpoint request timed out "}"#,
+            r#"[{"message":"Too Many Requests"}]"#,
+        ] {
+            let error = SimpleParser.parse(frame.as_bytes()).unwrap_err();
+            assert!(
+                error.downcast_ref::<RtdsParseDiagnosticError>().is_some(),
+                "{frame}"
+            );
+        }
+        let typed = br#"{"message":"Too Many Requests","topic":"crypto_prices_chainlink","type":"update","timestamp":1,"payload":{}}"#;
+        assert_eq!(SimpleParser.parse(typed).unwrap().len(), 1);
+    }
 
     const VALID_MESSAGE: &str = r#"{
         "topic":"crypto_prices_chainlink",

@@ -894,6 +894,15 @@ async fn rtds_desired_before_actor_first_poll_is_applied() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn rtds_immediate_close_flaps_replay_only_the_latest_desired_subscription() {
+    rtds_flaps_replay_latest_subscription(None).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rtds_control_error_flaps_replay_only_the_latest_desired_subscription() {
+    rtds_flaps_replay_latest_subscription(Some("Too Many Requests")).await;
+}
+
+async fn rtds_flaps_replay_latest_subscription(control: Option<&'static str>) {
     const FLAPS: usize = 8;
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -902,7 +911,10 @@ async fn rtds_immediate_close_flaps_replay_only_the_latest_desired_subscription(
         for _ in 0..FLAPS {
             let (stream, _) = listener.accept().await.unwrap();
             let mut socket = accept_async(stream).await.unwrap();
-            socket.send(Message::Close(None)).await.unwrap();
+            let frame = control.map_or(Message::Close(None), |message| {
+                Message::Text(json!({"message": message}).to_string().into())
+            });
+            socket.send(frame).await.unwrap();
             drop(socket);
         }
 
