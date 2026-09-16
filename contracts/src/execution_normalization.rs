@@ -147,42 +147,42 @@ pub struct SourceNeutralAccountBalanceDeltaV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SourceNeutralAccountTransitionKindV1 {
+pub enum SourceNeutralAccountTransitionKindV1<I = StableLogicalIdentityV1> {
     OrderAcceptedEncumbranceApplied {
-        order_identity: StableLogicalIdentityV1,
+        order_identity: I,
     },
     FakUnspentEncumbranceReleased {
-        order_identity: StableLogicalIdentityV1,
+        order_identity: I,
     },
     CallerCancellationEncumbranceReleased {
-        order_identity: StableLogicalIdentityV1,
+        order_identity: I,
     },
     GtdExpirationEncumbranceReleased {
-        order_identity: StableLogicalIdentityV1,
+        order_identity: I,
         encoded_expires_at_utc_ms: i64,
     },
     VenueDustEncumbranceReleased {
-        order_identity: StableLogicalIdentityV1,
+        order_identity: I,
     },
     MarketResolutionEncumbranceReleased {
-        resolution_identity: StableLogicalIdentityV1,
-        order_identity: StableLogicalIdentityV1,
+        resolution_identity: I,
+        order_identity: I,
     },
     FillFinalityEconomicApplied {
-        trade_identity: StableLogicalIdentityV1,
+        trade_identity: I,
         path_ordinal: u32,
     },
     FillFinalityUnappliedFailureReleased {
-        trade_identity: StableLogicalIdentityV1,
+        trade_identity: I,
         path_ordinal: u32,
     },
     FillFinalityCompensationApplied {
-        trade_identity: StableLogicalIdentityV1,
+        trade_identity: I,
         path_ordinal: u32,
     },
     MakerRebateAccrualFinalized,
     TakerRebateAccrualApplied {
-        trade_identity: StableLogicalIdentityV1,
+        trade_identity: I,
     },
     MakerRebateDayFinalized {
         attribution_day_utc_ms: i64,
@@ -197,30 +197,31 @@ pub enum SourceNeutralAccountTransitionKindV1 {
         attribution_day_utc_ms: i64,
     },
     AutoRedeemApplied {
-        resolution_identity: StableLogicalIdentityV1,
+        resolution_identity: I,
     },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SourceNeutralEconomicDispositionV1 {
+pub enum SourceNeutralEconomicDispositionV1<I = StableLogicalIdentityV1> {
     AccountOpening {
         available_pusd: ExactDecimal,
     },
     AccountTransition {
         economic_effective_at_utc_ms: i64,
         condition_id: Option<ConditionId>,
-        transition: SourceNeutralAccountTransitionKindV1,
+        transition: SourceNeutralAccountTransitionKindV1<I>,
         balance_delta: Box<SourceNeutralAccountBalanceDeltaV1>,
     },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SourceNeutralEconomicFactV1 {
-    pub fact_reference: NoeEconomicFactReferenceV1,
-    pub logical_identity: StableLogicalIdentityV1,
+pub struct SourceNeutralEconomicFactV1<I = StableLogicalIdentityV1, F = NoeEconomicFactReferenceV1>
+{
+    pub fact_reference: F,
+    pub logical_identity: I,
     pub economic_identity: SourceNeutralEconomicIdentityV1,
     pub source_reference: SimV2SourceReferenceV1,
-    pub disposition: SourceNeutralEconomicDispositionV1,
+    pub disposition: SourceNeutralEconomicDispositionV1<I>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -256,16 +257,18 @@ pub enum SourceNeutralOrderStateV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SourceNeutralOrderSnapshotV1 {
-    pub order_identity: StableLogicalIdentityV1,
+pub struct SourceNeutralOrderSnapshotV1<I = StableLogicalIdentityV1> {
+    pub order_identity: I,
     pub condition_id: ConditionId,
     pub token_id: TokenId,
     pub state: SourceNeutralOrderStateV1,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SourceNeutralSubmissionOutcomeV1 {
-    Accepted { order: SourceNeutralOrderSnapshotV1 },
+pub enum SourceNeutralSubmissionOutcomeV1<I = StableLogicalIdentityV1> {
+    Accepted {
+        order: SourceNeutralOrderSnapshotV1<I>,
+    },
     RejectedNoEffect,
     EvidenceUnknownNoEffect,
 }
@@ -339,9 +342,9 @@ pub enum SourceNeutralTradeEconomicDispositionV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SourceNeutralTradeLifecycleResultV1 {
-    pub trade_identity: StableLogicalIdentityV1,
-    pub order_identity: StableLogicalIdentityV1,
+pub struct SourceNeutralTradeLifecycleResultV1<I = StableLogicalIdentityV1> {
+    pub trade_identity: I,
+    pub order_identity: I,
     pub condition_id: ConditionId,
     pub token_id: TokenId,
     pub state: SourceNeutralTradeStateV1,
@@ -349,9 +352,9 @@ pub struct SourceNeutralTradeLifecycleResultV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SourceNeutralTradeLifecycleResultV2 {
-    pub trade_identity: StableLogicalIdentityV1,
-    pub order_identity: StableLogicalIdentityV1,
+pub struct SourceNeutralTradeLifecycleResultV2<I = StableLogicalIdentityV1> {
+    pub trade_identity: I,
+    pub order_identity: I,
     pub condition_id: ConditionId,
     pub token_id: TokenId,
     pub state: SourceNeutralTradeStateV1,
@@ -367,26 +370,26 @@ pub struct SourceNeutralTradeLifecycleResultV2 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SourceNeutralTradesPageV1 {
+pub struct SourceNeutralTradesPageV1<I = StableLogicalIdentityV1> {
     pub root_sequence: u64,
-    pub items: Vec<SourceNeutralTradeLifecycleResultV1>,
+    pub items: Vec<SourceNeutralTradeLifecycleResultV1<I>>,
     pub next_cursor: Option<SourceNeutralQueryCursorV1>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SourceNeutralTradesQueryResultV1 {
-    Page(SourceNeutralTradesPageV1),
+pub enum SourceNeutralTradesQueryResultV1<I = StableLogicalIdentityV1> {
+    Page(SourceNeutralTradesPageV1<I>),
     InvalidCursor,
     OutOfRetention(SourceNeutralQueryOutOfRetentionV1),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SourceNeutralControlResult<S, O> {
+pub enum SourceNeutralControlResult<S, O, I = StableLogicalIdentityV1> {
     Submission {
         outcome: S,
     },
     Cancellation {
-        order_identity: StableLogicalIdentityV1,
+        order_identity: I,
         outcome: SourceNeutralCancellationOutcomeV1,
     },
     OrderQuery {
@@ -396,30 +399,26 @@ pub enum SourceNeutralControlResult<S, O> {
         result: SourceNeutralOrdersQueryResult<O>,
     },
     TradesQuery {
-        result: SourceNeutralTradesQueryResultV1,
+        result: SourceNeutralTradesQueryResultV1<I>,
     },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SourceNeutralOrderLifecycleEventV1 {
-    Accepted {
-        state: SourceNeutralOrderStateV1,
-    },
+pub enum SourceNeutralOrderLifecycleEventV1<I = StableLogicalIdentityV1> {
+    Accepted { state: SourceNeutralOrderStateV1 },
     FakUnspentReleased,
     VenueDustTerminal,
-    MarketResolvedCanceled {
-        resolution_identity: StableLogicalIdentityV1,
-    },
+    MarketResolvedCanceled { resolution_identity: I },
     CallerCanceled,
     GtdExpired,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SourceNeutralOrderLifecycleResultV1 {
-    pub order_identity: StableLogicalIdentityV1,
+pub struct SourceNeutralOrderLifecycleResultV1<I = StableLogicalIdentityV1> {
+    pub order_identity: I,
     pub condition_id: ConditionId,
     pub token_id: TokenId,
-    pub event: SourceNeutralOrderLifecycleEventV1,
+    pub event: SourceNeutralOrderLifecycleEventV1<I>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -437,13 +436,13 @@ pub enum SourceNeutralMakerRebateAccrualStatusV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SourceNeutralSettlementLifecycleResultV1 {
+pub enum SourceNeutralSettlementLifecycleResultV1<I = StableLogicalIdentityV1> {
     MakerRebateAccrualFinalized {
         condition_id: ConditionId,
         status: SourceNeutralMakerRebateAccrualStatusV1,
     },
     TakerRebateAccrualApplied {
-        trade_identity: StableLogicalIdentityV1,
+        trade_identity: I,
         condition_id: ConditionId,
         attribution_day_start_utc_ms: i64,
     },
@@ -461,7 +460,7 @@ pub enum SourceNeutralSettlementLifecycleResultV1 {
     },
     AutoRedeemApplied {
         condition_id: ConditionId,
-        resolution_identity: StableLogicalIdentityV1,
+        resolution_identity: I,
         resolution_source_event_at_utc_ms: i64,
     },
 }
@@ -517,9 +516,9 @@ pub enum SourceNeutralSubmissionMeasurementV1 {
     },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SourceNeutralSubmissionOutcomeV2 {
+pub enum SourceNeutralSubmissionOutcomeV2<I = StableLogicalIdentityV1> {
     Accepted {
-        order: SourceNeutralOrderSnapshotV1,
+        order: SourceNeutralOrderSnapshotV1<I>,
         measurement: SourceNeutralSubmissionMeasurementV1,
         effective_processing_at_utc_ms: i64,
     },
@@ -537,8 +536,8 @@ pub enum SourceNeutralOrderQuantityEvidenceV1 {
     },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SourceNeutralOrderSnapshotV2 {
-    pub order_identity: StableLogicalIdentityV1,
+pub struct SourceNeutralOrderSnapshotV2<I = StableLogicalIdentityV1> {
+    pub order_identity: I,
     pub condition_id: ConditionId,
     pub token_id: TokenId,
     pub state: SourceNeutralOrderStateV1,

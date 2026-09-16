@@ -59,7 +59,12 @@ use crate::runtime_v2::{
 use crate::scenario::{PlatformMarketV1, SealedPlatformScenarioV1};
 use crate::session::MarketEnrollmentRequestV1;
 
-mod noe_projection;
+pub(crate) mod noe_projection;
+pub use noe_projection::{
+    AcceptedNoeProjectionV1, MemoryNoeBatch, MemoryNoeErrorV1, MemoryNoeFeedback,
+    MemoryNoeObservationV2, MemoryNoeObservationV3, MemoryNoeProjectionPortV2,
+    MemoryNoeProjectionPortV3, MemoryNoeRecord,
+};
 pub use noe_projection::{
     SimV2NoeObservationV1, SimV2NoeProjectionPortV1, SimV2NoeProjectionPortV2,
     SimV2NoeProjectionPortV3,
@@ -325,6 +330,19 @@ impl BusinessProjectionBatchV3 {
     }
 }
 pub trait BusinessProjectionPortV2 {
+    fn uses_background_normalization(&self) -> bool {
+        false
+    }
+    fn accept_for_background(
+        &mut self,
+        _: Arc<BusinessProjectionBatchPayloadV1>,
+    ) -> Result<noe_projection::AcceptedNoeProjectionV1, noe_projection::MemoryNoeErrorV1> {
+        Err(noe_projection::MemoryNoeErrorV1::InvalidProjection(
+            "端口不支持后台归一化材料",
+        ))
+    }
+    fn close_receive_prefix(&mut self, _at: i64) {}
+
     fn try_accept(&mut self, batch: Arc<BusinessProjectionBatchV2>) -> bool;
 
     fn try_accept_payload(&mut self, batch: Arc<BusinessProjectionBatchPayloadV1>) -> bool {
@@ -1952,6 +1970,7 @@ pub enum SimRunActorErrorV2 {
     Matching(MatchingStateErrorV1),
     Account(PlatformAccountError),
     Log(SimEventLogErrorV2),
+    Noe(noe_projection::MemoryNoeErrorV1),
     ProjectionBackpressured,
     CompletionNotReady(&'static str),
 }
@@ -1963,6 +1982,7 @@ impl std::fmt::Display for SimRunActorErrorV2 {
                 write!(formatter, "公共消费来源未完成：{message}")
             }
             Self::RecordingBackpressured => write!(formatter, "记录材料尚待交接，暂停供料"),
+            Self::Noe(error) => write!(formatter, "{error}"),
             Self::Closed => write!(formatter, "运行根已经关闭"),
             Self::InvalidRunId => write!(formatter, "运行身份非法"),
             Self::RuleSnapshotIdentityMismatch => write!(formatter, "运行根规则文件身份不一致"),
@@ -3072,9 +3092,40 @@ impl SimRunActorV2 {
             self.applied_input_sequence += accepted_len as u64;
             let mut accepted = inputs;
             accepted.truncate(accepted_len);
+            let mut normalized = Vec::new();
+            let mut normalization_error = None;
+            if self.projection_port.uses_background_normalization() {
+                for projection in projections.drain(..) {
+                    match self.projection_port.accept_for_background(Arc::new(
+                        projection.into_payload(self.opened.projection_version),
+                    )) {
+                        Ok(batch) => normalized.push(batch),
+                        Err(error) => {
+                            normalization_error = Some(error);
+                            break;
+                        }
+                    }
+                }
+            }
+            // 现有平台前缀闭合后，非负出站时延保证此接收时间之前不再产生遗漏反馈。
+            // Paper 使用公共平台路径；训练/离线使用隐藏平台路径，与是否存在同毫秒公共组无关。
+            if let Some(session) = self.state.as_ref().and_then(|state| state.session.as_ref()) {
+                let frontier = match session.opening_fact.account_instance_key.caller_role {
+                    SimCallerRoleV1::Paper => &session.public_visibility_frontier,
+                    SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation => {
+                        &session.hidden_platform_frontier
+                    }
+                };
+                if let Some(at) = frontier.closed_through_utc_ms {
+                    self.projection_port.close_receive_prefix(at);
+                }
+            }
             background
-                .enqueue(accepted)
+                .enqueue_with_noe(accepted, normalized, normalization_error.clone())
                 .map_err(SimRunActorErrorV2::Log)?;
+            if let Some(error) = normalization_error {
+                return Err(SimRunActorErrorV2::Noe(error));
+            }
         } else {
             let log = self.log.take().ok_or(SimRunActorErrorV2::Closed)?;
             let (log, _) = log

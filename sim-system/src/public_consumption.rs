@@ -305,6 +305,22 @@ pub trait PublicProjectionPortV1: crate::run_v2::BusinessProjectionPortV2 {
 }
 pub(crate) struct PublicProjectionAdapterV1(pub Box<dyn PublicProjectionPortV1>);
 impl crate::run_v2::BusinessProjectionPortV2 for PublicProjectionAdapterV1 {
+    fn uses_background_normalization(&self) -> bool {
+        self.0.uses_background_normalization()
+    }
+    fn accept_for_background(
+        &mut self,
+        batch: Arc<crate::run_v2::BusinessProjectionBatchPayloadV1>,
+    ) -> Result<
+        crate::run_v2::noe_projection::AcceptedNoeProjectionV1,
+        crate::run_v2::noe_projection::MemoryNoeErrorV1,
+    > {
+        self.0.accept_for_background(batch)
+    }
+    fn close_receive_prefix(&mut self, at: i64) {
+        self.0.close_receive_prefix(at);
+    }
+
     fn try_accept(&mut self, batch: Arc<crate::run_v2::BusinessProjectionBatchV2>) -> bool {
         self.0.try_accept(batch)
     }

@@ -39,25 +39,8 @@ struct SimulationConfig {
     #[serde(default)]
     hidden_bucket_checkpoints: Vec<u64>,
 }
-// 本有限入口不发送业务请求，因此实际已交付私有响应前缀始终为零。
-// 经济投影仍由已有 NOE 端口消费/持久确认，不伪造耐久确认。
-struct Projection(SimV2NoeProjectionPortV2);
-impl BusinessProjectionPortV2 for Projection {
-    fn try_accept(&mut self, batch: Arc<BusinessProjectionBatchV2>) -> bool {
-        self.0.try_accept(batch)
-    }
-    fn try_accept_payload(&mut self, batch: Arc<BusinessProjectionBatchPayloadV1>) -> bool {
-        self.0.try_accept_payload(batch)
-    }
-    fn durable_through(&self, run: &str) -> u64 {
-        self.0.durable_through(run)
-    }
-}
-impl PublicProjectionPortV1 for Projection {
-    fn delivered_private_feedback(&self, _: &str) -> u64 {
-        0
-    }
-}
+// 无业务请求的有限入口不会实际领取私有反馈，交付前缀保持零。
+// NOE 接纳交给真实内存核心，耐久由同一 SIM 后台所有者在 Finish 发布。
 type Source = RecordedPublicGroupSourceV1<RecordedReceivedTimes>;
 fn source(root: &Path, config: &Config) -> RecordingResult<Source> {
     let rows = config.canonical.decode_batch_rows;
@@ -164,14 +147,14 @@ pub fn run(
     let evidence = |position| DurableSourceReferenceV1 {
         source: ImmutableSourceReferenceV1::Location(format!("{}#input={position}", log.display())),
     };
-    let projection = Projection(SimV2NoeProjectionPortV2::new(
+    let projection = MemoryNoeProjectionPortV2::new(
         out.join("noe"),
         opened.clone(),
         evidence(0),
         evidence(1),
         config.session.creation_request_id.clone(),
         "issue88-finite-consumption".into(),
-    ));
+    );
     let mut execution = PublicSimExecutionV1::create_new(
         &log,
         PublicRunOpenedV1 {
@@ -419,7 +402,7 @@ mod tests {
                 directory.join("sim.jsonl").display().to_string(),
             ),
         };
-        let projection = SimV2NoeProjectionPortV2::new(
+        let projection = MemoryNoeProjectionPortV2::new(
             directory.join("noe"),
             opened.clone(),
             reference.clone(),
@@ -444,7 +427,7 @@ mod tests {
             finality,
             scenario,
             latency,
-            Box::new(Projection(projection)),
+            Box::new(projection),
             262144,
             4,
         )
@@ -465,13 +448,16 @@ mod tests {
             })
             .unwrap();
         execution.activate_session("activate".into()).unwrap();
-        assert_eq!(observation.result_references().len(), 1);
-        assert!(directory.join("noe").exists());
+        assert_eq!(observation.accepted_through(), 1);
+        assert!(
+            observation.result_references().is_empty(),
+            "Finish 前没有耐久引用"
+        );
         execution
     }
 
     #[test]
-    fn finite_projection_accepts_real_account_opening_and_persists_it() {
+    fn finite_projection_accepts_real_account_opening_without_premature_durability() {
         let directory = tempfile::tempdir().unwrap();
         let _execution = offline_execution(directory.path(), SimCallerRoleV1::Paper);
     }
