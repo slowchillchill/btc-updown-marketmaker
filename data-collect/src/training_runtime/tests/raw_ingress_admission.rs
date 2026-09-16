@@ -40,6 +40,7 @@ async fn send_event_accepts_exact_one_mib_owned_row_and_rejects_one_byte_more() 
         .await
         .expect_err("a row over 1 MiB must fail before queueing");
     assert!(error.to_string().contains("max_typed_row_bytes_exceeded"));
+    assert_eq!(crate::runtime::collector_exit_code(error.as_ref()), 76);
     assert!(rx.try_recv().is_err());
 }
 
@@ -159,4 +160,55 @@ async fn closed_source_queue_returns_error_and_releases_budget() {
         budget.available(),
         (GLOBAL_INFLIGHT_MAX_ROWS, GLOBAL_INFLIGHT_MAX_BYTES)
     );
+}
+
+#[tokio::test]
+async fn exhausted_global_budgets_stop_admission_with_a_gap_and_ordinary_failure() {
+    for exhaust_rows in [true, false] {
+        let budget = InflightBudget::with_limits(1, MAX_TYPED_ROW_BYTES);
+        let held = if exhaust_rows {
+            budget.try_acquire(1, 0)
+        } else {
+            budget.try_acquire(0, MAX_TYPED_ROW_BYTES)
+        };
+        let (tx, mut rx) = mpsc::channel(1);
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        let received = now_ms();
+        install_active_raw_day_gate(&stats, received).await;
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let sink = SourceEventSink {
+            tx,
+            gaps: Arc::clone(&gaps),
+            source_queue_backpressure: Arc::clone(&stats),
+            inflight_budget: budget.clone(),
+            enqueue_lock: Arc::new(AsyncMutex::new(())),
+        };
+        let started = Instant::now();
+        let error = send_event(&sink, started, test_raw_event("binance_aggtrade", received))
+            .await
+            .expect_err("真实额度耗尽必须停止本轮准入");
+        assert!(started.elapsed() >= BUFFER_ACQUIRE_TIMEOUT);
+        assert_eq!(
+            error.downcast_ref::<io::Error>().unwrap().kind(),
+            io::ErrorKind::TimedOut
+        );
+        let reason = if exhaust_rows {
+            "global_inflight_row_acquire_timeout"
+        } else {
+            "global_inflight_byte_acquire_timeout"
+        };
+        assert!(error.to_string().starts_with(reason));
+        assert_eq!(crate::runtime::collector_exit_code(error.as_ref()), 1);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(stats.aggtrade_admission_sequence.load(Ordering::Relaxed), 0);
+        assert_eq!(stats.timeout_count.load(Ordering::Relaxed), 1);
+        assert_eq!(stats.dropped_rows.load(Ordering::Relaxed), 1);
+        assert!(gaps.lock().unwrap().iter().any(|gap| gap.contains(reason)));
+        drop(held);
+        assert_eq!(budget.available(), (1, MAX_TYPED_ROW_BYTES));
+        let mixed = io::Error::other(format!(
+            "{reason};operator_intervention_required:invalid_path"
+        ));
+        assert_eq!(crate::runtime::collector_exit_code(&mixed), 76);
+    }
 }

@@ -23,8 +23,9 @@ use crate::writer::sha256_file;
 
 pub const RESOURCE_HARD_THRESHOLD_EXIT_CODE: i32 = 75;
 pub const OPERATOR_INTERVENTION_REQUIRED_EXIT_CODE: i32 = 76;
+/// 已废弃容量参数的兼容默认值，仅保留原参数和配置摘要。
 pub const DEFAULT_TRAINING_DATASET_MAX_BYTES: u64 = 50_000_000_000;
-pub const TRAINING_COLLECTOR_USAGE: &str = "usage: data-collect-training-collector --dataset-root <absolute-path> [--collector-region <region>] [--run-forever | --max-runtime-secs <seconds>] [--max-dataset-bytes <bytes>]";
+pub const TRAINING_COLLECTOR_USAGE: &str = "usage: data-collect-training-collector --dataset-root <absolute-path> [--collector-region <region>] [--run-forever | --max-runtime-secs <seconds>] [--max-dataset-bytes <bytes>]\n--max-dataset-bytes 已废弃：仅为旧命令兼容接受正整数，不再限制数据集容量。";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct CliArgs {
@@ -32,6 +33,7 @@ pub struct CliArgs {
     pub max_runtime_secs: Option<u64>,
     pub run_forever: bool,
     pub collector_region: Option<String>,
+    /// 已废弃，仅为旧正整数参数和配置摘要保留，不再限制数据集容量。
     pub max_dataset_bytes: u64,
 }
 
@@ -237,8 +239,8 @@ where
         tokio::net::UnixStream,
         CollectorStartupReceipt,
         std::time::Instant,
-        std::time::Instant,
-        i64,
+        Option<std::time::Instant>,
+        Option<i64>,
     ) -> Fut,
     Fut: std::future::Future<Output = Result<()>>,
 {
@@ -481,6 +483,96 @@ mod tests {
                 .exists()
         );
         assert!(!root.path().join("training").exists());
+    }
+
+    #[tokio::test]
+    async fn hot_explicit_deadline_includes_consumer_and_session_waits() {
+        use crate::handoff::{read_handoff_v2, write_handoff_v2};
+        use data_pipeline_core::public_input::DataCollectHandoffV2;
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
+        use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+        for confirm in [true, false] {
+            let root = tempfile::tempdir().unwrap();
+            let socket = root.path().join("paper/data_collect_handoff/hot.sock");
+            let started_sources = Arc::new(AtomicBool::new(false));
+            let observed = Arc::clone(&started_sources);
+            let args = vec![
+                "--dataset-root".into(),
+                root.path().as_os_str().to_owned(),
+                "--run-id".into(),
+                "wait-deadline".into(),
+                "--collector-region".into(),
+                "fixture".into(),
+                "--max-runtime-secs".into(),
+                "1".into(),
+            ];
+            let server = tokio::spawn(run_hot_collector_with_runner(
+                CollectorBinaryRole::PaperHot,
+                args,
+                move |_, _, started, deadline, deadline_ms| async move {
+                    observed.store(true, Ordering::Relaxed);
+                    assert!(started.elapsed() >= Duration::from_millis(400));
+                    assert_eq!(deadline, Some(started + Duration::from_secs(1)));
+                    let wall_now = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis() as i64;
+                    let wall_remaining = deadline_ms.unwrap() - wall_now;
+                    let remaining = deadline
+                        .unwrap()
+                        .saturating_duration_since(Instant::now())
+                        .as_millis() as i64;
+                    assert!(
+                        (wall_remaining - remaining).abs() < 100,
+                        "UTC 与单调截止必须对应同一期限"
+                    );
+                    Ok(())
+                },
+            ));
+            tokio::time::timeout(Duration::from_secs(30), async {
+                while !socket.exists() {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .unwrap();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let mut stream = tokio::net::UnixStream::connect(&socket).await.unwrap();
+            assert!(matches!(
+                read_handoff_v2(&mut stream).await.unwrap(),
+                DataCollectHandoffV2::Session(_)
+            ));
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert!(!started_sources.load(Ordering::Relaxed));
+            if confirm {
+                write_handoff_v2(
+                    &mut stream,
+                    &DataCollectHandoffV2::Received {
+                        transport_sequence: 0,
+                    },
+                )
+                .await
+                .unwrap();
+                server.await.unwrap().unwrap();
+                assert!(started_sources.load(Ordering::Relaxed));
+            } else {
+                let error = tokio::time::timeout(Duration::from_millis(750), server)
+                    .await
+                    .expect("原一秒期限必须包含消费者和 Session 等待")
+                    .unwrap()
+                    .unwrap_err();
+                assert!(
+                    error
+                        .to_string()
+                        .contains("hot session was not confirmed before runtime cutoff")
+                );
+                assert!(!started_sources.load(Ordering::Relaxed));
+            }
+            assert!(!socket.exists());
+        }
     }
 
     #[test]

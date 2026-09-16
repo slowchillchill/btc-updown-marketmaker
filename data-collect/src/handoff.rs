@@ -293,7 +293,13 @@ pub(crate) async fn run_source_handoff_server<F, Fut>(
     run_sources: F,
 ) -> Result<()>
 where
-    F: FnOnce(tokio::net::UnixStream, CollectorStartupReceipt, Instant, Instant, i64) -> Fut,
+    F: FnOnce(
+        tokio::net::UnixStream,
+        CollectorStartupReceipt,
+        Instant,
+        Option<Instant>,
+        Option<i64>,
+    ) -> Fut,
     Fut: std::future::Future<Output = Result<()>>,
 {
     fs::create_dir_all(&config.handoff_root)?;
@@ -302,11 +308,14 @@ where
     }
     let listener = UnixListener::bind(&config.socket_path)?;
     let started = Instant::now();
-    let duration = Duration::from_secs(max_runtime_secs.unwrap_or(7 * 24 * 60 * 60));
-    let deadline = started + duration;
-    let deadline_ms = now_ms().saturating_add(duration.as_millis() as i64);
+    let duration = max_runtime_secs.map(Duration::from_secs);
+    let deadline = duration.map(|duration| started + duration);
+    let deadline_ms = duration.map(|duration| now_ms().saturating_add(duration.as_millis() as i64));
     let result = async {
-        let accepted = tokio::time::timeout_at(deadline.into(), listener.accept()).await;
+        let accepted = match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline.into(), listener.accept()).await,
+            None => Ok(listener.accept().await),
+        };
         let (mut stream, _) = match accepted {
             Ok(result) => result?,
             Err(_) => return Ok(()),
@@ -321,17 +330,21 @@ where
             collector_host_id: receipt.collector_host_id.clone(),
             collector_region: receipt.collector_region.clone(),
         });
-        tokio::time::timeout_at(deadline.into(), async {
+        let confirmed = async {
             write_handoff_v2(&mut stream, &session).await?;
             receive_confirmation(&mut stream, 0).await
-        })
-        .await
-        .map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::TimedOut,
-                "hot session was not confirmed before runtime cutoff",
-            )
-        })??;
+        };
+        match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline.into(), confirmed)
+                .await
+                .map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "hot session was not confirmed before runtime cutoff",
+                    )
+                })??,
+            None => confirmed.await?,
+        }
         drop(session);
         run_sources(stream, receipt, started, deadline, deadline_ms).await
     }

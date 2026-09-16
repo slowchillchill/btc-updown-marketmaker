@@ -79,18 +79,24 @@ fn help_and_version_fast_paths_are_successful_and_create_nothing() {
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(!output.stdout.is_empty());
+        if flag == "--help" {
+            assert!(String::from_utf8_lossy(&output.stdout).contains("已废弃"));
+        }
         assert!(!nonexistent_dataset.exists());
     }
     assert!(fs::read_dir(tmp.path()).unwrap().next().is_none());
 }
 
 #[test]
-fn startup_capacity_gate_exits_75_without_manifest_or_network_startup() {
+fn startup_path_check_rejects_training_root_symlink_before_network_startup() {
     let tmp = tempdir().unwrap();
     let dataset_root = tmp.path().join("datasets");
     let training_root = dataset_root.join("training");
-    fs::create_dir_all(&training_root).unwrap();
-    fs::write(training_root.join("existing-byte"), [1_u8]).unwrap();
+    fs::create_dir_all(&dataset_root).unwrap();
+    let outside = tmp.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("existing-byte"), [1_u8]).unwrap();
+    std::os::unix::fs::symlink(&outside, &training_root).unwrap();
 
     let output = Command::new(training_binary())
         .args([
@@ -108,9 +114,9 @@ fn startup_capacity_gate_exits_75_without_manifest_or_network_startup() {
 
     assert_eq!(
         output.status.code(),
-        Some(RESOURCE_HARD_THRESHOLD_EXIT_CODE)
+        Some(OPERATOR_INTERVENTION_REQUIRED_EXIT_CODE)
     );
-    assert!(String::from_utf8_lossy(&output.stderr).contains("dataset_capacity_reached"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("dataset_path_check_failed"));
     assert!(training_root.join("existing-byte").is_file());
     assert!(!training_root.join("typed_raw").exists());
     assert!(!training_root.join("run_manifests").exists());
@@ -140,4 +146,13 @@ fn recoverable_backpressure_wait_is_not_a_live_source_gap() {
     assert!(is_training_runtime_source_gap_reason(
         "writer_queue_disconnected:polymarket_market"
     ));
+}
+
+#[test]
+fn obsolete_capacity_option_keeps_its_positive_integer_domain() {
+    let cli = parse_args(["--dataset-root", "/tmp/data", "--max-dataset-bytes", "1"]).unwrap();
+    assert_eq!(cli.max_dataset_bytes, 1);
+    for value in ["0", "-1", "invalid"] {
+        assert!(parse_args(["--dataset-root", "/tmp/data", "--max-dataset-bytes", value]).is_err());
+    }
 }

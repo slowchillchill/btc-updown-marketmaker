@@ -52,9 +52,7 @@ impl InflightBudget {
             .map_err(|_| {
                 io::Error::new(
                     io::ErrorKind::TimedOut,
-                    format!(
-                        "operator_intervention_required:global_inflight_row_acquire_timeout:rows={rows}"
-                    ),
+                    format!("global_inflight_row_acquire_timeout:rows={rows}"),
                 )
             })?
             .map_err(|_| io::Error::other("global inflight row budget closed"))?;
@@ -70,9 +68,7 @@ impl InflightBudget {
             Err(_) => {
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
-                    format!(
-                        "operator_intervention_required:global_inflight_byte_acquire_timeout:bytes={bytes}"
-                    ),
+                    format!("global_inflight_byte_acquire_timeout:bytes={bytes}"),
                 ));
             }
         };

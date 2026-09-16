@@ -8,8 +8,8 @@ pub(crate) async fn run_hot_sources(
     stream: UnixStream,
     receipt: CollectorStartupReceipt,
     run_started: Instant,
-    deadline: Instant,
-    deadline_ms: i64,
+    deadline: Option<Instant>,
+    deadline_ms: Option<i64>,
 ) -> Result<()> {
     run_hot_sources_with_specs(
         stream,
@@ -26,8 +26,8 @@ pub(super) async fn run_hot_sources_with_specs(
     stream: UnixStream,
     receipt: CollectorStartupReceipt,
     run_started: Instant,
-    deadline: Instant,
-    deadline_ms: i64,
+    deadline: Option<Instant>,
+    deadline_ms: Option<i64>,
     specs: TrainingSourceSpecs,
 ) -> Result<()> {
     let session_gate = HotSessionGate::new(deadline);
@@ -65,7 +65,7 @@ pub(super) async fn run_hot_sources_with_specs(
             receipt.dataset_root_canonical,
             sink.fork_logical_producer(),
             identity.clone(),
-            Some(deadline_ms),
+            deadline_ms,
             run_started,
             pm_rx,
             PolymarketRestartRecovery {
@@ -82,7 +82,7 @@ pub(super) async fn run_hot_sources_with_specs(
             TimedFingerprintWindow::with_limits(RTDS_DEDUPE_WINDOW_MS, RTDS_DEDUPE_MAX_KEYS),
             sink.fork_logical_producer(),
             identity.clone(),
-            Some(deadline),
+            deadline,
             run_started,
         ),
         Arc::clone(&gate),
@@ -93,7 +93,7 @@ pub(super) async fn run_hot_sources_with_specs(
             specs.depth,
             sink.fork_logical_producer(),
             identity.clone(),
-            Some(deadline),
+            deadline,
             run_started,
             Some(depth_rx),
         ),
@@ -108,7 +108,7 @@ pub(super) async fn run_hot_sources_with_specs(
             specs.aggtrade,
             sink.fork_logical_producer(),
             identity,
-            Some(deadline),
+            deadline,
             run_started,
             agg_rx,
         ),
@@ -122,7 +122,13 @@ pub(super) async fn run_hot_sources_with_specs(
         let admission = SourceAdmissionGate::Hot(Arc::clone(&stop_gate));
         tokio::select! {
             () = shutdown_signal() => stop_gate.stop(RuntimeCloseCause::OperatorStop),
-            () = tokio::time::sleep_until(deadline.into()) => stop_gate.stop(RuntimeCloseCause::RunDeadline),
+            () = async {
+                if let Some(deadline) = deadline {
+                    tokio::time::sleep_until(deadline.into()).await;
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            } => stop_gate.stop(RuntimeCloseCause::RunDeadline),
             () = admission.wait_for_hot_cutoff() => {},
         }
         let (reply, _) = oneshot::channel();

@@ -299,6 +299,7 @@ pub struct TrainingRuntimeConfig {
     pub code_version: String,
     pub collector_binary_sha256: String,
     pub source_config_digest: String,
+    /// 已废弃，仅保留旧正整数配置兼容；不再控制数据集容量。
     pub max_dataset_bytes: u64,
 }
 
@@ -343,18 +344,11 @@ where
         )
         .into());
     }
-    let startup_dataset_bytes = training_dataset_size_bytes(&dataset_root).map_err(|error| {
+    validate_training_dataset_paths(&dataset_root).map_err(|error| {
         invalid_data(format!(
-            "operator_intervention_required:dataset_size_scan_failed:{error}"
+            "operator_intervention_required:dataset_path_check_failed:{error}"
         ))
     })?;
-    if startup_dataset_bytes >= config.max_dataset_bytes {
-        return Err(io::Error::other(format!(
-            "dataset_capacity_reached:bytes={startup_dataset_bytes}:limit={}",
-            config.max_dataset_bytes
-        ))
-        .into());
-    }
     let duration_secs = config
         .duration_secs
         .unwrap_or(DEFAULT_CONTINUOUS_DURATION_SECS);
@@ -3553,12 +3547,16 @@ mod tests {
         let mode = ComposedLoopbackMode::all_unavailable();
         let fixture = ComposedLoopbackFixture::spawn(mode).await;
         let (stop_tx, stop_rx) = oneshot::channel();
-        let runtime_root = dataset_root.clone();
-        let runtime = spawn_composed_runtime_thread(
-            composed_runtime_config(runtime_root, "all-unavailable"),
-            fixture.specs.clone(),
-            stop_rx,
-        );
+        let retained = dataset_root.join("training/existing-evidence");
+        fs::create_dir_all(retained.parent().unwrap()).unwrap();
+        fs::write(
+            &retained,
+            b"must remain despite the obsolete one-byte limit",
+        )
+        .unwrap();
+        let mut config = composed_runtime_config(dataset_root.clone(), "all-unavailable");
+        config.max_dataset_bytes = 1;
+        let runtime = spawn_composed_runtime_thread(config, fixture.specs.clone(), stop_rx);
         fixture.wait_ready(&runtime).await;
         assert_eq!(fixture.counters.clob_connections.load(Ordering::Relaxed), 0);
         assert_eq!(
@@ -3576,6 +3574,10 @@ mod tests {
         let day_dir = typed_raw_root(&dataset_root).join(format!("utc_day={utc_day}"));
         let manifest = load_day_manifest(&day_dir).unwrap().unwrap();
         assert_composed_artifacts("all-unavailable", mode, &receipt, &manifest);
+        assert_eq!(
+            fs::read(retained).unwrap(),
+            b"must remain despite the obsolete one-byte limit"
+        );
         fixture.shutdown().await;
     }
 

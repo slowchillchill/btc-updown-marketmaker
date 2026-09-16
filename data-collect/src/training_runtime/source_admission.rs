@@ -14,7 +14,7 @@ impl From<Arc<RawDayGate>> for SourceAdmissionGate {
 }
 
 pub(super) struct HotSessionGate {
-    deadline: Instant,
+    deadline: Option<Instant>,
     stopped: Mutex<Option<RuntimeCloseCause>>,
     failure: Mutex<Option<String>>,
     changes: watch::Sender<u64>,
@@ -25,7 +25,7 @@ pub(super) struct HotSessionGate {
 }
 
 impl HotSessionGate {
-    pub(super) fn new(deadline: Instant) -> Self {
+    pub(super) fn new(deadline: Option<Instant>) -> Self {
         Self {
             deadline,
             stopped: Mutex::new(None),
@@ -48,7 +48,10 @@ impl HotSessionGate {
     }
 
     pub(super) fn cutoff(&self) -> bool {
-        if Instant::now() >= self.deadline {
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
             self.stop(RuntimeCloseCause::RunDeadline);
         }
         self.stopped
