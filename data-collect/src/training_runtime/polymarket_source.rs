@@ -613,19 +613,12 @@ where
     if !context.pending_requires_fence() {
         return Ok(());
     }
-    let (latest_exhausted_applied_at_utc_ms, fatal_integrity) =
-        finalize_polymarket_ready_pending_while_paused(
-            timeline_now,
-            context,
-            sink,
-            collector_identity,
-            run_started,
-        )
-        .await?;
-    wait_for_polymarket_exhausted_clock_barrier(
+    let fatal_integrity = finalize_polymarket_ready_pending_while_paused(
         timeline_now,
         context,
-        latest_exhausted_applied_at_utc_ms,
+        sink,
+        collector_identity,
+        run_started,
     )
     .await?;
     if let Some(reason) = fatal_integrity {
@@ -873,7 +866,7 @@ where
                             .await?;
                         }
                     }
-                    let (latest_exhausted_applied_at_utc_ms, fatal_integrity) =
+                    let fatal_integrity =
                         finalize_polymarket_ready_pending_while_paused(
                             &*timeline_now,
                             context,
@@ -882,12 +875,6 @@ where
                             run_started,
                         )
                         .await?;
-                    wait_for_polymarket_exhausted_clock_barrier(
-                        &*timeline_now,
-                        context,
-                        latest_exhausted_applied_at_utc_ms,
-                    )
-                    .await?;
                     if let Some(reason) = fatal_integrity {
                         return Err(invalid_data(reason).into());
                     }
@@ -3454,7 +3441,7 @@ where
             )
             .await?;
             ensure_polymarket_resolution_task_bound(resolution_poll_tasks, context)?;
-            let (latest_exhausted_applied_at_utc_ms, fatal_integrity) =
+            let fatal_integrity =
                 finalize_polymarket_ready_pending_while_paused(
                     timeline_now,
                     context,
@@ -3463,12 +3450,6 @@ where
                     run_started,
                 )
                 .await?;
-            wait_for_polymarket_exhausted_clock_barrier(
-                timeline_now,
-                context,
-                latest_exhausted_applied_at_utc_ms,
-            )
-            .await?;
             if let Some(reason) = fatal_integrity {
                 return Err(invalid_data(reason).into());
             }
@@ -4872,19 +4853,12 @@ where
     .await?;
     abort_ws_claimed_gamma_resolution_polls(context);
 
-    let (latest_exhausted_applied_at_utc_ms, fatal_integrity) =
-        finalize_polymarket_ready_pending_while_paused(
-            timeline_now,
-            context,
-            sink,
-            collector_identity,
-            run_started,
-        )
-        .await?;
-    wait_for_polymarket_exhausted_clock_barrier(
+    let fatal_integrity = finalize_polymarket_ready_pending_while_paused(
         timeline_now,
         context,
-        latest_exhausted_applied_at_utc_ms,
+        sink,
+        collector_identity,
+        run_started,
     )
     .await?;
     resume
@@ -4913,7 +4887,7 @@ pub(super) async fn finalize_polymarket_ready_pending_while_paused<N>(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-) -> Result<(Option<i64>, Option<String>)>
+) -> Result<Option<String>>
 where
     N: Fn() -> PolymarketTimelineNow + Send + Sync,
 {
@@ -4935,7 +4909,6 @@ where
         .map(|(slug, _)| slug.clone())
         .collect::<Vec<_>>();
     let mut fatal_integrity = None;
-    let mut latest_exhausted_applied_at_utc_ms = None;
     for slug in ready_slugs {
         let applied_at_utc_ms = timeline_now().utc_ms;
         context.actor_now_utc_ms = applied_at_utc_ms;
@@ -5053,47 +5026,13 @@ where
                     ))
                     .into());
                 }
-                latest_exhausted_applied_at_utc_ms = Some(
-                    latest_exhausted_applied_at_utc_ms.map_or(applied_at_utc_ms, |latest: i64| {
-                        latest.max(applied_at_utc_ms)
-                    }),
-                );
             }
             PendingFinalization::NotReady => {}
         }
     }
     context.rebuild_asset_to_slug();
     context.ensure_pending_bounds()?;
-    Ok((latest_exhausted_applied_at_utc_ms, fatal_integrity))
-}
-
-async fn wait_for_polymarket_exhausted_clock_barrier<N>(
-    timeline_now: &N,
-    context: &mut PolymarketProcessingContext,
-    latest_exhausted_applied_at_utc_ms: Option<i64>,
-) -> Result<()>
-where
-    N: Fn() -> PolymarketTimelineNow + Send + Sync,
-{
-    if let Some(latest_exhausted_applied_at_utc_ms) = latest_exhausted_applied_at_utc_ms {
-        let resumed_at_utc_ms = timeout(BUFFER_ACQUIRE_TIMEOUT, async {
-            loop {
-                let resumed_at_utc_ms = timeline_now().utc_ms;
-                if resumed_at_utc_ms > latest_exhausted_applied_at_utc_ms {
-                    return resumed_at_utc_ms;
-                }
-                sleep(Duration::from_millis(1)).await;
-            }
-        })
-        .await
-        .map_err(|_| {
-            invalid_data(format!(
-                "Polymarket exhausted role-exit clock barrier timeout:applied={latest_exhausted_applied_at_utc_ms}"
-            ))
-        })?;
-        context.actor_now_utc_ms = resumed_at_utc_ms;
-    }
-    Ok(())
+    Ok(fatal_integrity)
 }
 
 pub(super) async fn abort_polymarket_discovery_tasks<A, B>(
