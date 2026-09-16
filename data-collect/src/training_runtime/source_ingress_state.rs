@@ -94,8 +94,11 @@ pub(super) enum DeferredIngressBatch {
 
 #[derive(Default)]
 pub(super) struct SourceQueueBackpressureStats {
+    #[cfg(test)]
     pub(super) wait_count: AtomicU64,
+    #[cfg(test)]
     pub(super) timeout_count: AtomicU64,
+    #[cfg(test)]
     pub(super) dropped_rows: AtomicU64,
     pub(super) aggtrade_admission_sequence: AtomicU64,
     pub(super) depth_admission_sequence: AtomicU64,
@@ -233,15 +236,18 @@ impl SourceQueueBackpressureStats {
     }
 
     pub(super) fn record_wait(&self) {
+        #[cfg(test)]
         self.wait_count.fetch_add(1, Ordering::Relaxed);
     }
 
     pub(super) fn record_timeout(&self) {
+        #[cfg(test)]
         self.timeout_count.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub(super) fn record_drop(&self, rows: u64) {
-        self.dropped_rows.fetch_add(rows, Ordering::Relaxed);
+    pub(super) fn record_drop(&self, _rows: u64) {
+        #[cfg(test)]
+        self.dropped_rows.fetch_add(_rows, Ordering::Relaxed);
     }
 
     pub(super) fn record_structural_dedupe(

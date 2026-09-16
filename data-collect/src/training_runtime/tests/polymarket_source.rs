@@ -8758,7 +8758,6 @@ async fn polymarket_two_ready_pending_sample_applied_time_per_transition() {
         pending.exhaustion_ticket = Some(exhaustion_ticket.clone());
     }
     let second_applied_at_utc_ms = first_applied_at_utc_ms + 1_000;
-    let resumed_at_utc_ms = second_applied_at_utc_ms + 1;
     let post_horizon_ws = json!({
         "id": pending_one.id,
         "market": pending_one.condition_id,
@@ -8868,8 +8867,11 @@ async fn polymarket_two_ready_pending_sample_applied_time_per_transition() {
         .await
         .unwrap();
         let pending_is_empty = context.pending.is_empty();
-        match runtime.recv(Duration::from_millis(100)).await {
+        post_horizon_tx.send(()).unwrap();
+        match runtime.recv(Duration::from_secs(2)).await {
             Ok(Some(PolymarketDrainEvent::Message(message))) => {
+                assert_eq!(message.recv_time_utc_ms, second_applied_at_utc_ms);
+                assert!(matches!(&message.message, WsMessage::MarketResolved(_)));
                 process_polymarket_budgeted_message(
                     message,
                     &mut context,
@@ -8881,7 +8883,9 @@ async fn polymarket_two_ready_pending_sample_applied_time_per_transition() {
                 .await
                 .unwrap();
             }
-            Ok(None) => {}
+            Ok(None) => {
+                panic!("same-millisecond old-market message must actually pass the real pump")
+            }
             Ok(Some(PolymarketDrainEvent::Fence { .. })) => {
                 panic!("unexpected fence after exhausted role-exit")
             }
@@ -8913,16 +8917,13 @@ async fn polymarket_two_ready_pending_sample_applied_time_per_transition() {
         .unwrap()
         .unwrap()
         .into_event();
-    assert!(!finalize.is_finished());
-    post_horizon_tx.send(()).unwrap();
-    sleep(Duration::from_millis(20)).await;
     assert!(
-        rx.try_recv().is_err(),
-        "post-marker WS must remain behind the exhausted clock barrier"
+        timeout(Duration::from_secs(4), finalize)
+            .await
+            .expect("exhausted finalization and real message processing must complete at fixed UTC")
+            .unwrap()
     );
-    assert!(!finalize.is_finished());
-    *timeline_utc_ms.lock().unwrap() = resumed_at_utc_ms;
-    assert!(finalize.await.unwrap());
+    assert_eq!(*timeline_utc_ms.lock().unwrap(), second_applied_at_utc_ms);
     assert_eq!(stats.wait_count.load(Ordering::Relaxed), 2);
 
     let rows = [first, second].map(|event| {
