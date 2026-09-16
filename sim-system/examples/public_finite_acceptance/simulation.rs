@@ -470,7 +470,6 @@ mod tests {
             ordering_version: "original-input-v1".into(),
             input_scope: "constructed-finite".into(),
             max_pending_ws_terminals: 2,
-            max_retained_reducer_state_entries: 163840,
             initial_state: PublicInitialStateV1::Empty,
         };
         let mut output = data_pipeline_training::gate_a_formal_output_config();

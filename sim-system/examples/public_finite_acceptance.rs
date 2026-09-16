@@ -220,7 +220,7 @@ fn measure_result(
 }
 // 窄代际样本只保留本代最初14条的实际公开观测，供独立窗口断言。
 fn measure_pm_boundary(
-    input: &RecordedIngressV1,
+    input: &RecordedIngressViewV1<'_>,
     result: &PublicAppliedIngressV1<'_>,
     writer: &mut impl Write,
 ) -> RecordingResult<()> {
@@ -254,7 +254,7 @@ fn measure_pm_boundary(
 }
 // 快照和紧接快照编号的更新只作有限机制见证，全部输入仍完整归约。
 fn measure_binance_boundary(
-    input: &RecordedIngressV1,
+    input: &RecordedIngressViewV1<'_>,
     result: &PublicAppliedIngressV1<'_>,
     writer: &mut impl Write,
 ) -> RecordingResult<()> {
@@ -343,14 +343,14 @@ fn run() -> RecordingResult<()> {
         let mut writer = writer.map(std::cell::RefCell::into_inner);
         let mut count = 0;
         let mut observations = 0_u64;
-        while let Some(input) = merge.next_input()? {
-            let prepared = prepare_public_ingress_v1(&core, &input, &BTreeMap::new(), &[])?;
+        while let Some(mut input) = merge.next_input()? {
+            let prepared = merge.prepare_input(&core, &mut input)?;
             let result = core
                 .push(&prepared)
-                .map_err(|e| format!("input_position={}: {e}", input.input_position))?;
+                .map_err(|e| format!("input_position={}: {e}", prepared.recorded.input_position))?;
             measure_result(&result, &mut results)?;
-            measure_pm_boundary(&input, &result, &mut boundary)?;
-            measure_binance_boundary(&input, &result, &mut binance_boundary)?;
+            measure_pm_boundary(&prepared.recorded, &result, &mut boundary)?;
+            measure_binance_boundary(&prepared.recorded, &result, &mut binance_boundary)?;
             count += 1;
             observations += result
                 .applied
@@ -361,11 +361,12 @@ fn run() -> RecordingResult<()> {
             if config.checkpoints.contains(&count) {
                 write_line(
                     &mut metrics,
-                    &serde_json::json!({"input_count": count, "core": core.object_counts(), "groups_this_input": result.applied.closed_groups.len(), "input_encoded_bytes": serde_json::to_vec(&input)?.len(), "applied_encoded_bytes": serde_json::to_vec(&result.applied)?.len(), "unmeasured": ["allocator_capacity", "heap_bytes", "cgroup_memory_peak"]}),
+                    &serde_json::json!({"input_count": count, "core": core.object_counts(), "groups_this_input": result.applied.closed_groups.len(), "input_encoded_bytes": serde_json::to_vec(&prepared.recorded)?.len(), "applied_encoded_bytes": serde_json::to_vec(&result.applied)?.len(), "unmeasured": ["allocator_capacity", "heap_bytes", "cgroup_memory_peak"]}),
                 )?;
             }
             if let Some(writer) = &mut writer {
                 let result = result.into_owned();
+                drop(prepared);
                 writer.record(input, result)?;
             }
         }
@@ -396,8 +397,14 @@ fn run() -> RecordingResult<()> {
         let mut count = 0;
         while let Some((input, result)) = replay.next_applied()? {
             measure_result(&result, &mut results)?;
-            measure_pm_boundary(&input, &result, &mut boundary)?;
-            measure_binance_boundary(&input, &result, &mut binance_boundary)?;
+            let view = RecordedIngressViewV1 {
+                input_stream_id: input.input_stream_id.clone(),
+                input_position: input.input_position,
+                ingress: &input.ingress,
+                dependency_record_refs: input.dependency_record_refs.clone(),
+            };
+            measure_pm_boundary(&view, &result, &mut boundary)?;
+            measure_binance_boundary(&view, &result, &mut binance_boundary)?;
             if matches!(input.ingress, DptIngressV1::Message { .. }) {
                 count += 1;
             }

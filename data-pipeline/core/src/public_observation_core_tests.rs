@@ -412,7 +412,6 @@ fn core() -> PublicObservationCoreV1 {
         ordering_version: "original-input-v1".to_owned(),
         input_scope: "constructed-finite".to_owned(),
         max_pending_ws_terminals: 2,
-        max_retained_reducer_state_entries: 163840,
         initial_state: PublicInitialStateV1::Empty,
     })
     .unwrap()
@@ -1810,14 +1809,13 @@ fn multiple_ready_claims_follow_original_acceptance_not_key_sort_and_release() {
 }
 
 #[test]
-fn retained_limit_counts_original_quantity_objects_not_new_version_keys() {
+fn retained_statistics_remain_available_without_a_public_capacity_gate() {
     let mut core = core();
     push(&mut core, &meta(0));
     push(&mut core, &pm(1, 1, 21_000, book("100")));
     let before = core.retained_state_entries();
     assert_eq!(before, 5); // 代际、准入、两价位、完整簿缺价基准。
     assert!(!core.markets[CONDITION_ID].pm.selected.is_empty());
-    core.header.max_retained_reducer_state_entries = before;
     let input = pm(
         2,
         2,
@@ -1828,14 +1826,9 @@ fn retained_limit_counts_original_quantity_objects_not_new_version_keys() {
     );
     let ids = BTreeMap::new();
     let prepared = prepare_public_ingress_v1(&core, &input, &ids, &[]).unwrap();
-    assert!(matches!(
-        crate::without_identity_encoding(|| core.push(&prepared)),
-        Err(DptCoreErrorV1::RetainedReducerStateLimit {
-            observed: 6,
-            limit: 5
-        })
-    ));
-    assert_eq!(core.applied_prefix().next_input_position, 2); // 失败不交付半组，也不声称状态回滚。
+    crate::without_identity_encoding(|| core.push(&prepared)).unwrap();
+    assert_eq!(core.retained_state_entries(), 6);
+    assert_eq!(core.applied_prefix().next_input_position, 3);
 }
 
 #[test]
@@ -2027,4 +2020,35 @@ fn object_counts_separate_quantity_evidence_selection_and_are_read_only() {
     assert_eq!(after.pm_quantity_keys, 1);
     assert_eq!(after.pm_absence_keys, 1);
     assert_eq!(after.pm_selection_keys, 2, "选中零量仍有自己的版本键");
+}
+
+#[test]
+fn original_input_identity_and_position_are_checked_before_core_mutation() {
+    let mut core = core();
+    let before = core.applied_prefix();
+    let mut wrong = meta(0);
+    wrong.input_stream_id = "another-stream".into();
+    let ids = BTreeMap::new();
+    let prepared = prepare_public_ingress_v1(&core, &wrong, &ids, &[]).unwrap();
+    assert!(core.push(&prepared).is_err());
+    assert_eq!(core.applied_prefix(), before);
+    assert_eq!(core.fixed_markets().count(), 0);
+    let wrong = meta(1);
+    let prepared = prepare_public_ingress_v1(&core, &wrong, &ids, &[]).unwrap();
+    assert!(core.push(&prepared).is_err());
+    assert_eq!(core.applied_prefix(), before);
+    push(&mut core, &meta(0));
+    assert_eq!(core.applied_prefix().next_input_position, 1);
+}
+
+#[test]
+fn old_public_header_ignores_removed_capacity_field_and_new_header_omits_it() {
+    let header = core().header().clone();
+    let mut old = serde_json::to_value(&header).unwrap();
+    assert!(old.get("max_retained_reducer_state_entries").is_none());
+    old["max_retained_reducer_state_entries"] = serde_json::json!(163840);
+    assert_eq!(
+        serde_json::from_value::<PublicInputStreamHeaderV1>(old).unwrap(),
+        header
+    );
 }

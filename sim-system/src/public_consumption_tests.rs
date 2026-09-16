@@ -158,7 +158,6 @@ fn core() -> PublicObservationCoreV1 {
         ordering_version: "original-input-v1".to_owned(),
         input_scope: "constructed-finite".to_owned(),
         max_pending_ws_terminals: 2,
-        max_retained_reducer_state_entries: 163840,
         initial_state: PublicInitialStateV1::Empty,
     })
     .unwrap()

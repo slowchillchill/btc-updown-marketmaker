@@ -293,7 +293,6 @@ pub struct PublicInputStreamHeaderV1 {
     pub ordering_version: String,
     pub input_scope: String,
     pub max_pending_ws_terminals: usize,
-    pub max_retained_reducer_state_entries: usize,
     pub initial_state: PublicInitialStateV1,
 }
 

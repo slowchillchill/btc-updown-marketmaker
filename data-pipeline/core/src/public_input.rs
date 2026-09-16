@@ -268,6 +268,7 @@ pub enum PreparedCanonicalInputV1<'a> {
 }
 
 /// 借用唯一原输入；小量坐标/引用供本次调用使用，不复制原消息。
+#[derive(Serialize)]
 pub struct RecordedIngressViewV1<'a> {
     pub input_stream_id: String,
     pub input_position: u64,

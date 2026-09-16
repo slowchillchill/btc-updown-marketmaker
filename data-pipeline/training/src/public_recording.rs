@@ -284,7 +284,9 @@ pub struct PublicRecordingReaderV1 {
     pub header: PublicInputStreamHeaderV1,
     pub prefix: Option<CommittedIngressPrefixV1>,
     root: PathBuf,
-    segments: std::vec::IntoIter<PathBuf>,
+    segments: std::vec::IntoIter<(PathBuf, CommittedIngressPrefixV1)>,
+    segment_prefix: Option<CommittedIngressPrefixV1>,
+    observed: CommittedIngressPrefixV1,
     cursor: Option<RunCursor>,
     batch_rows: usize,
     max_batch_bytes: usize,
@@ -296,7 +298,6 @@ impl PublicRecordingReaderV1 {
         batch_rows: usize,
         max_batch_bytes: usize,
     ) -> RecordingResult<Self> {
-        let header = serde_json::from_reader(File::open(root.join("stream.json"))?)?;
         let mut segments: Vec<_> = fs::read_dir(root)?
             .collect::<Result<Vec<_>, _>>()?
             .into_iter()
@@ -312,45 +313,83 @@ impl PublicRecordingReaderV1 {
         let prefix = segments
             .last()
             .map(|p| -> RecordingResult<_> {
-                Ok(serde_json::from_reader(File::open(p.join("prefix.json"))?)?)
+                let prefix: CommittedIngressPrefixV1 =
+                    serde_json::from_reader(File::open(p.join("prefix.json"))?)?;
+                if p.file_name().unwrap() != prefix.stable_storage_ref.as_str() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "稳定末端目录与凭据不符",
+                    )
+                    .into());
+                }
+                Ok(prefix)
             })
             .transpose()?;
-        Ok(Self {
-            header,
-            prefix,
-            root: root.into(),
-            segments: segments.into_iter(),
-            cursor: None,
-            batch_rows,
-            max_batch_bytes,
-        })
+        Self::open_committed(root, prefix, batch_rows, max_batch_bytes)
     }
-    /// 持续读取只使用写入方已经返回的凭据；重命名但尚未确认的更晚目录不进入视图。
+    /// 持续读取只使用写入方已经返回的凭据；更晚目录不进入视图。
     pub fn open_committed(
         root: &Path,
         prefix: Option<CommittedIngressPrefixV1>,
         batch_rows: usize,
         max_batch_bytes: usize,
     ) -> RecordingResult<Self> {
-        let header = serde_json::from_reader(File::open(root.join("stream.json"))?)?;
+        let header: PublicInputStreamHeaderV1 =
+            serde_json::from_reader(File::open(root.join("stream.json"))?)?;
         let mut segments = Vec::new();
         if let Some(bound) = &prefix {
+            let mut paths = Vec::new();
             for entry in fs::read_dir(root)? {
                 let entry = entry?;
                 let name = entry.file_name();
                 let name = name.to_string_lossy();
                 if name.starts_with("stable-") && name.as_ref() <= bound.stable_storage_ref.as_str()
                 {
-                    segments.push(entry.path());
+                    paths.push(entry.path());
                 }
             }
+            paths.sort();
+            for (index, path) in paths.into_iter().enumerate() {
+                let expected = format!("stable-{index:020}");
+                let segment: CommittedIngressPrefixV1 =
+                    serde_json::from_reader(File::open(path.join("prefix.json"))?)?;
+                if path.file_name().unwrap() != expected.as_str()
+                    || segment.stable_storage_ref != expected
+                    || segment.input_stream_id != header.input_stream_id
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "稳定分片不连续或流身份不符",
+                    )
+                    .into());
+                }
+                segments.push((path, segment));
+            }
+            if segments.last().map(|(_, p)| p) != Some(bound) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "声明的稳定末端凭据缺失或不符",
+                )
+                .into());
+            }
         }
-        segments.sort();
+        let observed = CommittedIngressPrefixV1 {
+            input_stream_id: header.input_stream_id.clone(),
+            next_input_position: 0,
+            next_canonical_position: 0,
+            next_group_position: 0,
+            next_observation_position: 0,
+            next_public_index_position: 0,
+            stable_storage_ref: String::new(),
+            normal_end: false,
+        };
         Ok(Self {
             header,
             prefix,
             root: root.into(),
             segments: segments.into_iter(),
+            segment_prefix: None,
+            observed,
             cursor: None,
             batch_rows,
             max_batch_bytes,
@@ -363,18 +402,71 @@ impl PublicRecordingReaderV1 {
         loop {
             if let Some(cursor) = &mut self.cursor {
                 if let Some(row) = cursor.next_row()? {
-                    return Ok(Some(serde_json::from_slice(row.payload())?));
+                    let row: PublicStoredRowV1 = serde_json::from_slice(row.payload())?;
+                    self.observe(&row)?;
+                    return Ok(Some(row));
                 }
             }
-            let Some(path) = self.segments.next() else {
+            if let Some(expected) = self.segment_prefix.take() {
+                self.observed.stable_storage_ref = expected.stable_storage_ref.clone();
+                if self.observed != expected {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "稳定分片内容与前缀计数不符",
+                    )
+                    .into());
+                }
+            }
+            let Some((path, prefix)) = self.segments.next() else {
                 return Ok(None);
             };
+            self.segment_prefix = Some(prefix);
             self.cursor = Some(RunCursor::open(
                 &path.join("captured.parquet"),
                 self.batch_rows,
                 self.max_batch_bytes,
             )?);
         }
+    }
+    fn observe(&mut self, row: &PublicStoredRowV1) -> RecordingResult<()> {
+        let p = &mut self.observed;
+        let valid = match row {
+            PublicStoredRowV1::Input(input) => {
+                let valid = input.input_stream_id == p.input_stream_id
+                    && input.input_position == p.next_input_position;
+                p.next_input_position += 1;
+                p.normal_end = matches!(input.ingress, DptIngressV1::EndOfInput);
+                valid
+            }
+            PublicStoredRowV1::Canonical {
+                canonical_position,
+                binding,
+                ..
+            } => {
+                let valid = *canonical_position == p.next_canonical_position
+                    && binding.position.input_stream_id == p.input_stream_id;
+                p.next_canonical_position += 1;
+                valid
+            }
+            PublicStoredRowV1::Group(group) => {
+                let valid = group.group_position == p.next_group_position;
+                p.next_group_position += 1;
+                p.next_public_index_position += 1;
+                valid
+            }
+            PublicStoredRowV1::Observation(observation) => {
+                let valid = observation.observation_position == p.next_observation_position;
+                p.next_observation_position += 1;
+                valid
+            }
+            _ => true,
+        };
+        if !valid {
+            return Err(
+                io::Error::new(io::ErrorKind::InvalidData, "稳定记录原序或流身份不符").into(),
+            );
+        }
+        Ok(())
     }
     pub fn next_page(&mut self, rows: usize) -> RecordingResult<Vec<PublicStoredRowV1>> {
         let mut output = Vec::new();
