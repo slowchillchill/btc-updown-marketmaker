@@ -65,7 +65,6 @@ async fn run_boundary_exit_poll_order(
     let mut writer_handles =
         start_writer_workers(&dataset_root, &provenance, &manifest_tx, &runtime_stats).unwrap();
     let mut batches = PendingIngressBatches::for_training_source_kinds();
-    let mut writer_queue_tracker = QueueDurationTracker::new("writer_chunk_queue");
     let run_started = Instant::now();
     let mut coordinator = RolloverCoordinatorState::new(ManifestActivationAckMode::Send);
 
@@ -102,8 +101,6 @@ async fn run_boundary_exit_poll_order(
             &mut batches,
             &source_gaps,
             &runtime_stats,
-            &mut writer_queue_tracker,
-            run_started,
             &manifest_tx,
             &mut coordinator,
         )
@@ -215,7 +212,6 @@ async fn run_boundary_exit_poll_order(
         bounded_event_queue::<SourceIngressPayload>(DEFAULT_QUEUE_CAPACITY).unwrap();
     let mut coverage = BTreeMap::new();
     let mut received_rows = 0;
-    let mut average_event_bytes = 512;
     let mut release_stop_issued = false;
     let drive_outcome = drive_normal_rollover(
         ready,
@@ -227,11 +223,8 @@ async fn run_boundary_exit_poll_order(
         &mut batches,
         &mut coverage,
         &mut received_rows,
-        &mut average_event_bytes,
         &source_gaps,
         &runtime_stats,
-        &mut writer_queue_tracker,
-        run_started,
         &mut coordinator,
         &mut release_stop_issued,
         None,
@@ -271,10 +264,8 @@ async fn run_boundary_exit_poll_order(
         &mut batches,
         &mut coverage,
         &mut received_rows,
-        &mut average_event_bytes,
         &source_gaps,
         &runtime_stats,
-        &mut writer_queue_tracker,
         run_started,
         &manifest_tx,
         &mut coordinator,
@@ -497,9 +488,7 @@ async fn run_writer_rendezvous_poll_order(
     let mut batches = PendingIngressBatches::for_training_source_kinds();
     let mut coverage = BTreeMap::new();
     let mut received_rows = 0;
-    let mut average_event_bytes = 512;
-    let mut writer_queue_tracker = QueueDurationTracker::new("writer_chunk_queue");
-    let run_started = Instant::now();
+
     let (_runtime_exit_tx, mut runtime_exit_rx) = mpsc::channel(1);
     let (_event_tx, mut event_rx) =
         bounded_event_queue::<SourceIngressPayload>(DEFAULT_QUEUE_CAPACITY).unwrap();
@@ -515,11 +504,8 @@ async fn run_writer_rendezvous_poll_order(
             &mut batches,
             &mut coverage,
             &mut received_rows,
-            &mut average_event_bytes,
             &source_gaps,
             &runtime_stats,
-            &mut writer_queue_tracker,
-            run_started,
             &mut coordinator,
             &mut release_stop_issued,
             None,
@@ -684,8 +670,6 @@ async fn pending_exit_synthetic_barriers_receive_exact_stop_and_finalize_cleanly
     let mut batches = PendingIngressBatches::for_training_source_kinds();
     let mut coverage = BTreeMap::new();
     let mut received_rows = 0;
-    let mut average_event_bytes = 512;
-    let mut writer_queue_tracker = QueueDurationTracker::new("writer_chunk_queue");
     let run_started = Instant::now();
     let mut coordinator = RolloverCoordinatorState::new(ManifestActivationAckMode::Send);
     let mut runtime_failure = None;
@@ -702,10 +686,8 @@ async fn pending_exit_synthetic_barriers_receive_exact_stop_and_finalize_cleanly
         &mut batches,
         &mut coverage,
         &mut received_rows,
-        &mut average_event_bytes,
         &source_gaps,
         &runtime_stats,
-        &mut writer_queue_tracker,
         run_started,
         &manifest_tx,
         &mut coordinator,
@@ -829,6 +811,8 @@ async fn post_activation_exit_waits_for_all_flushes_then_stops_exact_next_genera
     );
 
     let source_gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+    record_gap_for_day(&source_gaps, &close.utc_day, "old_day_gap".to_owned());
+    record_gap_for_day(&source_gaps, &close.next_utc_day, "next_day_gap".to_owned());
     let runtime_stats = Arc::new(SourceQueueBackpressureStats::default());
     runtime_stats
         .install_raw_day_gate(Arc::clone(&raw_day_gate))
@@ -837,8 +821,7 @@ async fn post_activation_exit_waits_for_all_flushes_then_stops_exact_next_genera
     let mut writer_handles =
         start_writer_workers(&dataset_root, &provenance, &manifest_tx, &runtime_stats).unwrap();
     let mut batches = PendingIngressBatches::for_training_source_kinds();
-    let mut writer_queue_tracker = QueueDurationTracker::new("writer_chunk_queue");
-    let run_started = Instant::now();
+
     let mut coordinator = RolloverCoordinatorState::new(ManifestActivationAckMode::Send);
 
     let (flush_seen_tx, mut flush_seen_rx) = mpsc::channel(LOGICAL_PRODUCERS.len());
@@ -857,8 +840,6 @@ async fn post_activation_exit_waits_for_all_flushes_then_stops_exact_next_genera
             &mut batches,
             &source_gaps,
             &runtime_stats,
-            &mut writer_queue_tracker,
-            run_started,
             &manifest_tx,
             &mut coordinator,
         )
@@ -919,6 +900,10 @@ async fn post_activation_exit_waits_for_all_flushes_then_stops_exact_next_genera
     }
     drop(flush_seen_tx);
     drop(final_phase_tx);
+    assert_eq!(
+        source_gaps.lock().unwrap().reasons_for_day(&close.utc_day),
+        vec!["old_day_gap"]
+    );
     let ready = timeout(Duration::from_secs(2), rollover_ready_rx.recv())
         .await
         .unwrap()
@@ -934,7 +919,6 @@ async fn post_activation_exit_waits_for_all_flushes_then_stops_exact_next_genera
     let drive = async move {
         let mut coverage = BTreeMap::new();
         let mut received_rows = 0;
-        let mut average_event_bytes = 512;
         let mut release_stop_issued = false;
         let outcome = drive_normal_rollover(
             ready,
@@ -946,11 +930,8 @@ async fn post_activation_exit_waits_for_all_flushes_then_stops_exact_next_genera
             &mut batches,
             &mut coverage,
             &mut received_rows,
-            &mut average_event_bytes,
             &drive_gaps,
             &drive_stats,
-            &mut writer_queue_tracker,
-            run_started,
             &mut coordinator,
             &mut release_stop_issued,
             None,
@@ -1029,7 +1010,14 @@ async fn post_activation_exit_waits_for_all_flushes_then_stops_exact_next_genera
         raw_day_gate.current_state(),
         RawDayGateState::Closing(ref actual) if actual == &close
     ));
-    assert!(source_gaps.lock().unwrap().is_empty());
+    let gaps = source_gaps.lock().unwrap();
+    assert!(gaps.reasons_for_day(&close.utc_day).is_empty());
+    assert_eq!(
+        gaps.reasons_for_day(&close.next_utc_day),
+        vec!["next_day_gap"]
+    );
+    assert_eq!(gaps.all_reasons(), vec!["old_day_gap", "next_day_gap"]);
+    drop(gaps);
     let writer_outcome = shutdown_writer_workers_with_budget(
         writer_handles,
         prepared_close.identity.clone(),
@@ -1066,4 +1054,107 @@ async fn post_activation_exit_waits_for_all_flushes_then_stops_exact_next_genera
         .unwrap();
     shutdown_rx.await.unwrap().unwrap();
     owner_handle.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn old_close_dropped_reply_retains_day_gaps_and_owner_material() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let close = test_rollover_close(1_783_468_800_000);
+    let (mut owner, day_dir) = test_manifest_owner(&root, &close.utc_day);
+    owner
+        .activate_initial(
+            &close.utc_day,
+            close.boundary_utc_ms - 1_000,
+            close.generation,
+        )
+        .unwrap();
+    let gate = Arc::new(RawDayGate::new());
+    gate.activate_startup(close.utc_day.clone(), close.generation)
+        .await
+        .unwrap();
+    gate.close_for_rollover(&close.utc_day, close.boundary_utc_ms)
+        .await
+        .unwrap();
+    let mut coordinator = RolloverCoordinatorState::new(ManifestActivationAckMode::Send);
+    let mut receivers = Vec::new();
+    for producer in LOGICAL_PRODUCERS {
+        let (tx, rx) = oneshot::channel();
+        receivers.push(rx);
+        coordinator
+            .register_producer_barrier((*producer).to_owned(), close.clone(), tx)
+            .unwrap();
+        owner
+            .record_producer_barrier(
+                close.clone(),
+                (*producer).to_owned(),
+                &["retained_gap".to_owned()],
+                &BTreeMap::new(),
+            )
+            .unwrap();
+    }
+    let mut ready = None;
+    for source in training_source_kinds() {
+        ready = owner
+            .record_writer_ack(close.clone(), (*source).to_owned())
+            .unwrap();
+    }
+    gate.publish_writer_rendezvous(&close).unwrap();
+    let (manifest_tx, mut manifest_rx) = mpsc::channel(1);
+    let owner_task = tokio::spawn(async move {
+        let ManifestCommand::CommitRolloverOldDay {
+            close,
+            mode,
+            normal_gate,
+            deadline,
+            reply,
+        } = manifest_rx.recv().await.unwrap()
+        else {
+            panic!("old-day commit")
+        };
+        normal_gate
+            .unwrap()
+            .commit_old_day_if_no_exit(&close, deadline, || {
+                owner.commit_rollover_old_day(&close, mode)
+            })
+            .unwrap();
+        drop(reply); // The durable mutation completed, but its acknowledgment was lost.
+        owner
+    });
+    let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+    record_gap_for_day(&gaps, &close.utc_day, "retained_gap".to_owned());
+    let (_exit_tx, mut exit_rx) = mpsc::channel(1);
+    let (_event_tx, mut event_rx) = mpsc::channel(1);
+    let error = drive_normal_rollover(
+        ready.unwrap(),
+        &manifest_tx,
+        &gate,
+        &mut exit_rx,
+        &mut event_rx,
+        &mut BTreeMap::new(),
+        &mut PendingIngressBatches::default(),
+        &mut BTreeMap::new(),
+        &mut 0,
+        &gaps,
+        &SourceQueueBackpressureStats::default(),
+        &mut coordinator,
+        &mut false,
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("reply dropped"), "{error}");
+    assert_eq!(
+        coordinator.cutpoint(),
+        Some(RolloverCutpoint::OutcomeUncertain)
+    );
+    assert_eq!(
+        gaps.lock().unwrap().reasons_for_day(&close.utc_day),
+        vec!["retained_gap"]
+    );
+    assert_eq!(owner_task.await.unwrap().retained_day_counts(), (1, 1));
+    assert_eq!(
+        manifest_state(&load_day_manifest(&day_dir).unwrap().unwrap()).unwrap(),
+        "closed"
+    );
 }

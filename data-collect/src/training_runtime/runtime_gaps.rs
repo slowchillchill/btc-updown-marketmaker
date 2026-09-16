@@ -10,6 +10,10 @@ pub(super) struct SourceGapStore {
 }
 
 impl SourceGapStore {
+    pub(super) fn release_closed_day(&mut self, utc_day: &str) {
+        self.by_utc_day.remove(utc_day);
+    }
+
     pub(super) fn all_reasons(&self) -> Vec<String> {
         self.all.clone()
     }

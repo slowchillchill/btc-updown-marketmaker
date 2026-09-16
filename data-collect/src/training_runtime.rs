@@ -145,7 +145,6 @@ use crate::inflight::{BUFFER_ACQUIRE_TIMEOUT, InflightBudget, InflightReservatio
 pub use crate::inflight::{
     GLOBAL_INFLIGHT_MAX_BYTES, GLOBAL_INFLIGHT_MAX_ROWS, MAX_TYPED_ROW_BYTES,
 };
-use crate::latency::{LatencyStats, QueueDurationTracker};
 use crate::manifest::SourceCoverage;
 use crate::market_discovery::{
     BtcUpdownDiscovery, BtcUpdownMarketCandidate, CandidateRejectReason, DiscoveredBtcUpdownMarket,
@@ -319,18 +318,43 @@ pub struct TrainingFinalizedSegment {
 }
 
 pub async fn run_training_runtime(config: TrainingRuntimeConfig) -> Result<TrainingRunSummary> {
-    run_training_runtime_with_sources_and_stop(
+    run_training_runtime_inner(
         config,
         TrainingSourceSpecs::production(),
         shutdown_signal(),
+        true,
     )
     .await
 }
 
+#[cfg(test)]
 async fn run_training_runtime_with_sources_and_stop<S>(
     config: TrainingRuntimeConfig,
     source_specs: TrainingSourceSpecs,
     operator_stop: S,
+) -> Result<TrainingRunSummary>
+where
+    S: Future<Output = ()> + Send + 'static,
+{
+    run_training_runtime_inner(config, source_specs, operator_stop, true).await
+}
+
+pub(crate) async fn run_training_runtime_for_cli(config: TrainingRuntimeConfig) -> Result<()> {
+    run_training_runtime_inner(
+        config,
+        TrainingSourceSpecs::production(),
+        shutdown_signal(),
+        false,
+    )
+    .await
+    .map(|_| ())
+}
+
+async fn run_training_runtime_inner<S>(
+    config: TrainingRuntimeConfig,
+    source_specs: TrainingSourceSpecs,
+    operator_stop: S,
+    retain_finalized_segments: bool,
 ) -> Result<TrainingRunSummary>
 where
     S: Future<Output = ()> + Send + 'static,
@@ -404,11 +428,7 @@ where
     };
     let mut coverage = BTreeMap::<String, CoverageStats>::new();
     let mut batches = PendingIngressBatches::for_training_source_kinds();
-    let mut source_queue_tracker = QueueDurationTracker::new("source_event_queue");
-    let mut writer_queue_tracker = QueueDurationTracker::new("writer_chunk_queue");
     let mut next_flush = run_started + Duration::from_millis(DEFAULT_MAX_FLUSH_INTERVAL_MS);
-    let mut next_queue_sample = run_started;
-    let mut average_event_bytes = 512_u64;
     let mut received_rows = 0_u64;
     let mut operator_shutdown = false;
     let mut runtime_failure = None::<String>;
@@ -485,6 +505,7 @@ where
         run_manifest_owner(manifest_owner, manifest_rx, rollover_ready_tx).await
     });
     let (mut writer_handles, writer_startup_releases) = match start_writer_workers_gated(
+        retain_finalized_segments,
         &dataset_root,
         &artifact_identity,
         &manifest_tx,
@@ -764,11 +785,8 @@ where
                                 &mut batches,
                                 &mut coverage,
                                 &mut received_rows,
-                                &mut average_event_bytes,
                                 &source_gaps,
                                 &source_queue_backpressure,
-                                &mut writer_queue_tracker,
-                                run_started,
                                 &mut rollover_coordinator,
                                 &mut rollover_release_stop_issued,
                                 runtime_deadline,
@@ -810,11 +828,8 @@ where
                                 &mut batches,
                                 &mut coverage,
                                 &mut received_rows,
-                                &mut average_event_bytes,
                                 &source_gaps,
                                 &source_queue_backpressure,
-                                &mut writer_queue_tracker,
-                                run_started,
                                 &manifest_tx,
                                 &mut rollover_coordinator,
                             )
@@ -907,8 +922,6 @@ where
                     &mut batches,
                     &source_gaps,
                     &source_queue_backpressure,
-                    &mut writer_queue_tracker,
-                    run_started,
                 )
                 .await
                 {
@@ -922,27 +935,6 @@ where
                     break;
                 }
                 next_flush += Duration::from_millis(DEFAULT_MAX_FLUSH_INTERVAL_MS);
-            }
-            if Instant::now() >= next_queue_sample {
-                source_queue_backpressure.apply_to_tracker(&mut source_queue_tracker);
-                let writer_queue_rows = writer_handles
-                    .values()
-                    .map(|handle| handle.queue_rows.load(Ordering::Relaxed))
-                    .sum::<u64>();
-                let source_queue_rows = event_rx.len() as u64;
-                let source_queue_bytes = source_queue_rows.saturating_mul(average_event_bytes);
-                let writer_queue_bytes = writer_queue_rows.saturating_mul(average_event_bytes);
-                source_queue_tracker.observe(
-                    monotonic_ms(run_started),
-                    source_queue_rows,
-                    source_queue_bytes,
-                );
-                writer_queue_tracker.observe(
-                    monotonic_ms(run_started),
-                    writer_queue_rows,
-                    writer_queue_bytes,
-                );
-                next_queue_sample += Duration::from_secs(1);
             }
         }
     }
@@ -1034,10 +1026,8 @@ where
                     &mut batches,
                     &mut coverage,
                     &mut received_rows,
-                    &mut average_event_bytes,
                     &source_gaps,
                     &source_queue_backpressure,
-                    &mut writer_queue_tracker,
                     run_started,
                     &manifest_tx,
                     &mut rollover_coordinator,
@@ -1278,11 +1268,8 @@ where
                 &mut batches,
                 &mut coverage,
                 &mut received_rows,
-                &mut average_event_bytes,
                 &source_gaps,
                 &source_queue_backpressure,
-                &mut writer_queue_tracker,
-                run_started,
                 &manifest_tx,
                 &mut rollover_coordinator,
             )
@@ -1299,8 +1286,6 @@ where
                 &mut batches,
                 &source_gaps,
                 &source_queue_backpressure,
-                &mut writer_queue_tracker,
-                run_started,
             )
             .await
             {
@@ -1455,11 +1440,8 @@ where
             &mut batches,
             &mut coverage,
             &mut received_rows,
-            &mut average_event_bytes,
             &source_gaps,
             &source_queue_backpressure,
-            &mut writer_queue_tracker,
-            run_started,
             &manifest_tx,
             &mut rollover_coordinator,
         )
@@ -1485,8 +1467,6 @@ where
                 &mut batches,
                 &source_gaps,
                 &source_queue_backpressure,
-                &mut writer_queue_tracker,
-                run_started,
             ),
         )
         .await
@@ -1603,8 +1583,8 @@ where
     }
 
     let finalized_segments = writer_outputs
-        .iter()
-        .flat_map(|output| output.finalized_segments.clone())
+        .into_iter()
+        .flat_map(|output| output.finalized_segments)
         .collect::<Vec<_>>();
     let manifest_shutdown_result =
         if let Some(prepared_runtime_close) = prepared_runtime_close.as_ref() {
@@ -1720,9 +1700,6 @@ where
         .iter()
         .filter_map(|(source_kind, stats)| stats.to_source_coverage(source_kind))
         .collect::<Vec<_>>();
-    source_queue_backpressure.apply_to_tracker(&mut source_queue_tracker);
-    let _ = source_queue_tracker.finish(monotonic_ms(run_started));
-    let _ = writer_queue_tracker.finish(monotonic_ms(run_started));
     if Instant::now() > coordinated_shutdown_deadline {
         let message = "coordinated_shutdown_timeout".to_owned();
         record_gap(&source_gaps, message.clone());
@@ -2051,6 +2028,7 @@ mod tests {
             .unwrap();
         let (ready_tx, ready_rx) = mpsc::channel(STARTUP_READY_CHANNEL_CAPACITY);
         let (mut writer_handles, writer_releases) = start_writer_workers_gated(
+            true,
             &dataset_root,
             &test_artifact_identity(),
             &manifest_tx,
@@ -4480,8 +4458,6 @@ mod tests {
         let mut batches = PendingIngressBatches::for_training_source_kinds();
         let mut coverage = BTreeMap::<String, CoverageStats>::new();
         let mut received_rows = 0_u64;
-        let mut average_event_bytes = 0_u64;
-        let mut writer_queue_tracker = QueueDurationTracker::new("writer_chunk_queue");
         let mut rollover_coordinator =
             RolloverCoordinatorState::new(ManifestActivationAckMode::Send);
         timeout(Duration::from_secs(30), async {
@@ -4496,11 +4472,8 @@ mod tests {
                     &mut batches,
                     &mut coverage,
                     &mut received_rows,
-                    &mut average_event_bytes,
                     &gaps,
                     &runtime_stats,
-                    &mut writer_queue_tracker,
-                    run_started,
                     &manifest_tx,
                     &mut rollover_coordinator,
                 )
@@ -4620,16 +4593,9 @@ mod tests {
         assert!(event_rx.try_recv().is_err());
         assert_eq!(received_rows, u64::try_from(total_rows).unwrap());
 
-        flush_all_batches(
-            &mut writers,
-            &mut batches,
-            &gaps,
-            &runtime_stats,
-            &mut writer_queue_tracker,
-            run_started,
-        )
-        .await
-        .unwrap();
+        flush_all_batches(&mut writers, &mut batches, &gaps, &runtime_stats)
+            .await
+            .unwrap();
         assert!(batches.raw_events.values().all(Vec::is_empty));
         assert!(batches.polymarket_orderbook_v3.is_empty());
         let writer_outcome =
@@ -4661,12 +4627,7 @@ mod tests {
         ]);
         for output in &writer_outcome.outputs {
             let expected = expected_rows[output.source_kind.as_str()];
-            assert_eq!(output.stats.events_received, expected);
-            assert_eq!(output.stats.events_written, expected);
-            assert_eq!(output.stats.typed_rows_written, expected);
-            assert_eq!(output.stats.events_dropped, 0);
-            assert_eq!(output.stats.typed_rows_dropped, 0);
-            assert_eq!(output.stats.finalized_segment_rows, expected);
+
             let mut parquet_rows = 0_u64;
             for segment in &output.finalized_segments {
                 let reader = ParquetRecordBatchReaderBuilder::try_new(

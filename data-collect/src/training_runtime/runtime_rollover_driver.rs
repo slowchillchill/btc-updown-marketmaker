@@ -108,11 +108,8 @@ pub(super) async fn drive_normal_rollover(
     batches: &mut PendingIngressBatches,
     coverage: &mut BTreeMap<String, CoverageStats>,
     received_rows: &mut u64,
-    average_event_bytes: &mut u64,
     source_gaps: &SharedSourceGaps,
     source_queue_backpressure: &SourceQueueBackpressureStats,
-    writer_queue_tracker: &mut QueueDurationTracker,
-    run_started: Instant,
     rollover_coordinator: &mut RolloverCoordinatorState,
     release_stop_issued: &mut bool,
     runtime_deadline: Option<RuntimeDeadlineCandidate>,
@@ -150,7 +147,12 @@ pub(super) async fn drive_normal_rollover(
         )
         .await?
     {
-        OldDayCommitAck::Confirmed => {}
+        OldDayCommitAck::Confirmed => {
+            source_gaps
+                .lock()
+                .expect("source gap mutex poisoned")
+                .release_closed_day(&close.utc_day);
+        }
         OldDayCommitAck::PreparedExitWon => {
             rollover_coordinator.issue_stop_with_close()?;
             return Ok(RolloverCommitOutcome::PendingExit);
@@ -433,11 +435,8 @@ pub(super) async fn drive_normal_rollover(
                     batches,
                     coverage,
                     received_rows,
-                    average_event_bytes,
                     source_gaps,
                     source_queue_backpressure,
-                    writer_queue_tracker,
-                    run_started,
                     manifest_tx,
                     rollover_coordinator,
                 ).await {
@@ -478,11 +477,8 @@ pub(super) async fn drive_normal_rollover(
             batches,
             coverage,
             received_rows,
-            average_event_bytes,
             source_gaps,
             source_queue_backpressure,
-            writer_queue_tracker,
-            run_started,
             manifest_tx,
             rollover_coordinator,
         )
@@ -503,8 +499,6 @@ pub(super) async fn drive_normal_rollover(
         batches,
         source_gaps,
         source_queue_backpressure,
-        writer_queue_tracker,
-        run_started,
     )
     .await
     {
@@ -627,10 +621,8 @@ pub(super) async fn complete_pending_exit_rollover(
     batches: &mut PendingIngressBatches,
     coverage: &mut BTreeMap<String, CoverageStats>,
     received_rows: &mut u64,
-    average_event_bytes: &mut u64,
     source_gaps: &SharedSourceGaps,
     source_queue_backpressure: &SourceQueueBackpressureStats,
-    writer_queue_tracker: &mut QueueDurationTracker,
     run_started: Instant,
     manifest_tx: &mpsc::Sender<ManifestCommand>,
     rollover_coordinator: &mut RolloverCoordinatorState,
@@ -793,11 +785,8 @@ pub(super) async fn complete_pending_exit_rollover(
                 batches,
                 coverage,
                 received_rows,
-                average_event_bytes,
                 source_gaps,
                 source_queue_backpressure,
-                writer_queue_tracker,
-                run_started,
                 manifest_tx,
                 rollover_coordinator,
             )
@@ -839,11 +828,8 @@ pub(super) async fn complete_pending_exit_rollover(
                     batches,
                     coverage,
                     received_rows,
-                    average_event_bytes,
                     source_gaps,
                     source_queue_backpressure,
-                    writer_queue_tracker,
-                    run_started,
                     manifest_tx,
                     rollover_coordinator,
                 )
@@ -854,8 +840,6 @@ pub(super) async fn complete_pending_exit_rollover(
                 batches,
                 source_gaps,
                 source_queue_backpressure,
-                writer_queue_tracker,
-                run_started,
             )
             .await?;
             let writer_outcome = shutdown_writer_workers_with_budget(
@@ -923,11 +907,8 @@ pub(super) async fn complete_pending_exit_rollover(
                     batches,
                     coverage,
                     received_rows,
-                    average_event_bytes,
                     source_gaps,
                     source_queue_backpressure,
-                    writer_queue_tracker,
-                    run_started,
                     manifest_tx,
                     rollover_coordinator,
                 )

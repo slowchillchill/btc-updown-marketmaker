@@ -4014,6 +4014,7 @@ fn start_cold_polymarket_v3_writer_for_test(
     let worker_stats = Arc::clone(runtime_stats);
     let thread = std::thread::spawn(move || {
         let result = source_writer_worker_with_startup(
+            true,
             worker_root,
             worker_provenance,
             "polymarket_market".to_owned(),
@@ -4095,9 +4096,7 @@ async fn legacy_v2_writer_rejects_polymarket_v3_ingress_without_mutating_batches
     let mut batches = PendingIngressBatches::for_training_source_kinds();
     let mut coverage = BTreeMap::new();
     let mut received_rows = 0;
-    let mut average_event_bytes = 0;
     let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
-    let mut tracker = QueueDurationTracker::new("writer_chunk_queue");
     let (manifest_tx, _manifest_rx) = mpsc::channel(1);
     let mut coordinator = RolloverCoordinatorState::new(ManifestActivationAckMode::Send);
 
@@ -4107,11 +4106,8 @@ async fn legacy_v2_writer_rejects_polymarket_v3_ingress_without_mutating_batches
         &mut batches,
         &mut coverage,
         &mut received_rows,
-        &mut average_event_bytes,
         &gaps,
         &stats,
-        &mut tracker,
-        Instant::now(),
         &manifest_tx,
         &mut coordinator,
     )
@@ -4174,8 +4170,6 @@ async fn cold_v3_ingress_uses_one_writer_and_actual_manifest_schema() {
     let mut batches = PendingIngressBatches::for_training_source_kinds();
     let mut coverage = BTreeMap::new();
     let mut received_rows = 0;
-    let mut average_event_bytes = 0;
-    let mut tracker = QueueDurationTracker::new("writer_chunk_queue");
     let mut coordinator = RolloverCoordinatorState::new(ManifestActivationAckMode::Send);
 
     process_ingress_event(
@@ -4184,11 +4178,8 @@ async fn cold_v3_ingress_uses_one_writer_and_actual_manifest_schema() {
         &mut batches,
         &mut coverage,
         &mut received_rows,
-        &mut average_event_bytes,
         &gaps,
         &stats,
-        &mut tracker,
-        Instant::now(),
         &manifest_tx,
         &mut coordinator,
     )
@@ -4196,16 +4187,9 @@ async fn cold_v3_ingress_uses_one_writer_and_actual_manifest_schema() {
     .unwrap();
     assert_eq!(received_rows, 1);
     assert_eq!(batches.polymarket_orderbook_v3.len(), 1);
-    flush_all_batches(
-        &mut writers,
-        &mut batches,
-        &gaps,
-        &stats,
-        &mut tracker,
-        Instant::now(),
-    )
-    .await
-    .unwrap();
+    flush_all_batches(&mut writers, &mut batches, &gaps, &stats)
+        .await
+        .unwrap();
     assert!(batches.polymarket_orderbook_v3.is_empty());
 
     let mut writer = writers.remove("polymarket_market").unwrap();
@@ -4215,8 +4199,7 @@ async fn cold_v3_ingress_uses_one_writer_and_actual_manifest_schema() {
         .unwrap()
         .unwrap();
     writer.thread.take().unwrap().join().unwrap();
-    assert_eq!(output.stats.events_written, 1);
-    assert_eq!(output.stats.typed_rows_written, 1);
+
     assert_eq!(output.finalized_segments.len(), 1);
     assert_eq!(budget.available(), baseline);
 
@@ -4311,8 +4294,6 @@ async fn v3_writer_disconnect_releases_command_reservations_and_records_drop() {
     let mut batches = PendingIngressBatches::for_training_source_kinds();
     let mut coverage = BTreeMap::new();
     let mut received_rows = 0;
-    let mut average_event_bytes = 0;
-    let mut tracker = QueueDurationTracker::new("writer_chunk_queue");
     let (manifest_tx, _manifest_rx) = mpsc::channel(1);
     let mut coordinator = RolloverCoordinatorState::new(ManifestActivationAckMode::Send);
 
@@ -4322,11 +4303,8 @@ async fn v3_writer_disconnect_releases_command_reservations_and_records_drop() {
         &mut batches,
         &mut coverage,
         &mut received_rows,
-        &mut average_event_bytes,
         &gaps,
         &stats,
-        &mut tracker,
-        Instant::now(),
         &manifest_tx,
         &mut coordinator,
     )
@@ -4335,21 +4313,13 @@ async fn v3_writer_disconnect_releases_command_reservations_and_records_drop() {
     assert_eq!(batches.polymarket_orderbook_v3.len(), 1);
     assert_ne!(budget.available(), baseline);
 
-    let error = flush_all_batches(
-        &mut writers,
-        &mut batches,
-        &gaps,
-        &stats,
-        &mut tracker,
-        Instant::now(),
-    )
-    .await
-    .expect_err("a disconnected v3 writer must stop the runtime");
+    let error = flush_all_batches(&mut writers, &mut batches, &gaps, &stats)
+        .await
+        .expect_err("a disconnected v3 writer must stop the runtime");
 
     assert!(error.to_string().contains("writer_queue_disconnected"));
     assert!(batches.polymarket_orderbook_v3.is_empty());
     assert_eq!(queue_rows.load(Ordering::Relaxed), 0);
-    assert_eq!(tracker.finish(0).dropped_rows, 1);
     assert_eq!(
         stats.drain_operational_day(&utc_day)["polymarket_market"].dropped_rows,
         1
@@ -4417,18 +4387,10 @@ async fn v3_writer_backpressure_timeout_releases_command_reservations_and_record
             thread: None,
         },
     )]);
-    let mut tracker = QueueDurationTracker::new("writer_chunk_queue");
 
-    let error = flush_polymarket_orderbook_v3_batch(
-        &mut writers,
-        &mut batch,
-        &gaps,
-        &stats,
-        &mut tracker,
-        Instant::now(),
-    )
-    .await
-    .expect_err("a persistently full v3 writer queue must time out");
+    let error = flush_polymarket_orderbook_v3_batch(&mut writers, &mut batch, &gaps, &stats)
+        .await
+        .expect_err("a persistently full v3 writer queue must time out");
 
     assert!(
         error
@@ -4437,9 +4399,6 @@ async fn v3_writer_backpressure_timeout_releases_command_reservations_and_record
     );
     assert!(batch.is_empty());
     assert_eq!(queue_rows.load(Ordering::Relaxed), 0);
-    let summary = tracker.finish(0);
-    assert_eq!(summary.backpressure_timeout_count, 1);
-    assert_eq!(summary.dropped_rows, 1);
     assert_eq!(
         stats.drain_operational_day(&utc_day)["polymarket_market"].dropped_rows,
         1
@@ -4520,8 +4479,6 @@ async fn v3_sequence_state_survives_live_segment_rollover() {
     let mut batches = PendingIngressBatches::for_training_source_kinds();
     let mut coverage = BTreeMap::new();
     let mut received_rows = 0;
-    let mut average_event_bytes = 0;
-    let mut tracker = QueueDurationTracker::new("writer_chunk_queue");
     let mut coordinator = RolloverCoordinatorState::new(ManifestActivationAckMode::Send);
 
     process_ingress_event(
@@ -4530,26 +4487,16 @@ async fn v3_sequence_state_survives_live_segment_rollover() {
         &mut batches,
         &mut coverage,
         &mut received_rows,
-        &mut average_event_bytes,
         &gaps,
         &stats,
-        &mut tracker,
-        Instant::now(),
         &manifest_tx,
         &mut coordinator,
     )
     .await
     .unwrap();
-    flush_all_batches(
-        &mut writers,
-        &mut batches,
-        &gaps,
-        &stats,
-        &mut tracker,
-        Instant::now(),
-    )
-    .await
-    .unwrap();
+    flush_all_batches(&mut writers, &mut batches, &gaps, &stats)
+        .await
+        .unwrap();
     let first_hour = HourlyPartitionPolicy::new(&dataset_root)
         .unwrap()
         .partition("polymarket_market", first_recv_time_utc_ms, None)
@@ -4565,26 +4512,16 @@ async fn v3_sequence_state_survives_live_segment_rollover() {
         &mut batches,
         &mut coverage,
         &mut received_rows,
-        &mut average_event_bytes,
         &gaps,
         &stats,
-        &mut tracker,
-        Instant::now(),
         &manifest_tx,
         &mut coordinator,
     )
     .await
     .unwrap();
-    flush_all_batches(
-        &mut writers,
-        &mut batches,
-        &gaps,
-        &stats,
-        &mut tracker,
-        Instant::now(),
-    )
-    .await
-    .unwrap();
+    flush_all_batches(&mut writers, &mut batches, &gaps, &stats)
+        .await
+        .unwrap();
 
     let mut writer = writers.remove("polymarket_market").unwrap();
     drop(writer.tx);
@@ -4657,8 +4594,6 @@ async fn v3_sequence_state_survives_utc_day_rollover() {
     let mut batches = PendingIngressBatches::for_training_source_kinds();
     let mut coverage = BTreeMap::new();
     let mut received_rows = 0;
-    let mut average_event_bytes = 0;
-    let mut tracker = QueueDurationTracker::new("writer_chunk_queue");
     let mut coordinator = RolloverCoordinatorState::new(ManifestActivationAckMode::Send);
 
     process_ingress_event(
@@ -4667,26 +4602,16 @@ async fn v3_sequence_state_survives_utc_day_rollover() {
         &mut batches,
         &mut coverage,
         &mut received_rows,
-        &mut average_event_bytes,
         &gaps,
         &stats,
-        &mut tracker,
-        Instant::now(),
         &manifest_tx,
         &mut coordinator,
     )
     .await
     .unwrap();
-    flush_all_batches(
-        &mut writers,
-        &mut batches,
-        &gaps,
-        &stats,
-        &mut tracker,
-        Instant::now(),
-    )
-    .await
-    .unwrap();
+    flush_all_batches(&mut writers, &mut batches, &gaps, &stats)
+        .await
+        .unwrap();
 
     let close = gate
         .close_for_rollover(&old_utc_day, boundary_utc_ms)
@@ -4723,26 +4648,16 @@ async fn v3_sequence_state_survives_utc_day_rollover() {
         &mut batches,
         &mut coverage,
         &mut received_rows,
-        &mut average_event_bytes,
         &gaps,
         &stats,
-        &mut tracker,
-        Instant::now(),
         &manifest_tx,
         &mut coordinator,
     )
     .await
     .unwrap();
-    flush_all_batches(
-        &mut writers,
-        &mut batches,
-        &gaps,
-        &stats,
-        &mut tracker,
-        Instant::now(),
-    )
-    .await
-    .unwrap();
+    flush_all_batches(&mut writers, &mut batches, &gaps, &stats)
+        .await
+        .unwrap();
 
     let mut writer = writers.remove("polymarket_market").unwrap();
     drop(writer.tx);
@@ -12680,8 +12595,6 @@ async fn polymarket_five_thousand_message_burst_traverses_the_composed_ingress_p
     let mut batches = PendingIngressBatches::for_training_source_kinds();
     let mut coverage = BTreeMap::<String, CoverageStats>::new();
     let mut received_rows = 0_u64;
-    let mut average_event_bytes = 0_u64;
-    let mut writer_queue_tracker = QueueDurationTracker::new("writer_chunk_queue");
     let mut rollover_coordinator = RolloverCoordinatorState::new(ManifestActivationAckMode::Send);
     let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
     let (tx, mut rx) = mpsc::channel(6_000);
@@ -12788,11 +12701,8 @@ async fn polymarket_five_thousand_message_burst_traverses_the_composed_ingress_p
             &mut batches,
             &mut coverage,
             &mut received_rows,
-            &mut average_event_bytes,
             &gaps,
             &runtime_stats,
-            &mut writer_queue_tracker,
-            run_started,
             &manifest_tx,
             &mut rollover_coordinator,
         )
@@ -12800,16 +12710,9 @@ async fn polymarket_five_thousand_message_burst_traverses_the_composed_ingress_p
         .unwrap();
     }
     assert!(rx.try_recv().is_err());
-    flush_all_batches(
-        &mut writers,
-        &mut batches,
-        &gaps,
-        &runtime_stats,
-        &mut writer_queue_tracker,
-        run_started,
-    )
-    .await
-    .unwrap();
+    flush_all_batches(&mut writers, &mut batches, &gaps, &runtime_stats)
+        .await
+        .unwrap();
     let writer_outcome = stop_writer_workers_with_budget(writers, Duration::from_secs(30)).await;
     assert!(writer_outcome.all_terminal);
     assert!(
@@ -12822,10 +12725,7 @@ async fn polymarket_five_thousand_message_burst_traverses_the_composed_ingress_p
         .iter()
         .find(|output| output.source_kind == "polymarket_market")
         .unwrap();
-    assert_eq!(polymarket_output.stats.events_received, 5_000);
-    assert_eq!(polymarket_output.stats.events_written, 5_000);
-    assert_eq!(polymarket_output.stats.typed_rows_written, 5_000);
-    assert_eq!(polymarket_output.stats.events_dropped, 0);
+
     assert_eq!(polymarket_output.finalized_segments.len(), 1);
     let segment = &polymarket_output.finalized_segments[0];
     assert_eq!(segment.row_count, 5_000);

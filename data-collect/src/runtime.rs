@@ -17,7 +17,7 @@ use crate::handoff::{HandoffRuntimeConfig, run_source_handoff_server};
 use crate::publish::PaperLiveEnvironment;
 use crate::training_runtime::{
     TrainingRuntimeConfig, production_training_source_endpoints, run_hot_sources,
-    run_training_runtime,
+    run_training_runtime_for_cli,
 };
 use crate::writer::sha256_file;
 
@@ -86,7 +86,7 @@ where
         None => resolve_collector_region().await,
     };
 
-    run_training_runtime(TrainingRuntimeConfig {
+    run_training_runtime_for_cli(TrainingRuntimeConfig {
         dataset_root: cli.dataset_root,
         duration_secs: cli.max_runtime_secs,
         run_forever: cli.run_forever,

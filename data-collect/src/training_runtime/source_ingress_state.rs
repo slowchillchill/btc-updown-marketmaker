@@ -334,21 +334,6 @@ impl SourceQueueBackpressureStats {
             sources.remove(source_kind);
         }
     }
-
-    pub(super) fn apply_to_tracker(&self, tracker: &mut QueueDurationTracker) {
-        let wait_count = self.wait_count.swap(0, Ordering::Relaxed);
-        for _ in 0..wait_count {
-            tracker.record_backpressure_wait();
-        }
-        let timeout_count = self.timeout_count.swap(0, Ordering::Relaxed);
-        for _ in 0..timeout_count {
-            tracker.record_backpressure_timeout();
-        }
-        let dropped_rows = self.dropped_rows.swap(0, Ordering::Relaxed);
-        if dropped_rows > 0 {
-            tracker.record_drop(dropped_rows);
-        }
-    }
 }
 
 #[derive(Clone)]

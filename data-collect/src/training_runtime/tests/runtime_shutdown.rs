@@ -170,6 +170,7 @@ async fn post_spawn_failure_converges_all_owned_runtime_resources() {
     let (manifest_tx, _manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
     let runtime_stats = Arc::new(SourceQueueBackpressureStats::default());
     let (mut writers, releases) = start_writer_workers_inner(
+        true,
         &dataset_root,
         &test_artifact_identity(),
         &manifest_tx,

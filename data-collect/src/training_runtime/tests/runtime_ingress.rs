@@ -27,9 +27,7 @@ async fn ingress_rejects_an_event_whose_real_enqueue_permit_was_removed() {
     let mut batches = PendingIngressBatches::default();
     let mut coverage = BTreeMap::new();
     let mut received_rows = 0;
-    let mut average_event_bytes = 0;
     let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
-    let mut writer_queue_tracker = QueueDurationTracker::new("writer_queue");
     let (manifest_tx, _manifest_rx) = mpsc::channel(1);
     let mut rollover_coordinator = RolloverCoordinatorState::new(ManifestActivationAckMode::Send);
 
@@ -39,11 +37,8 @@ async fn ingress_rejects_an_event_whose_real_enqueue_permit_was_removed() {
         &mut batches,
         &mut coverage,
         &mut received_rows,
-        &mut average_event_bytes,
         &gaps,
         &stats,
-        &mut writer_queue_tracker,
-        Instant::now(),
         &manifest_tx,
         &mut rollover_coordinator,
     )
