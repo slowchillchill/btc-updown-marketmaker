@@ -20,6 +20,7 @@ use std::{
     fs::{self, File},
     io::{BufWriter, Write},
     path::PathBuf,
+    time::Instant,
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -34,6 +35,8 @@ struct Config {
     output: GateAOutputConfig,
     header: PublicInputStreamHeaderV1,
     checkpoints: Vec<u64>,
+    #[serde(default)]
+    binance_witness_positions: Vec<u64>,
 }
 #[derive(Default, Serialize)]
 struct DecodeMetrics {
@@ -252,10 +255,11 @@ fn measure_pm_boundary(
     }
     Ok(())
 }
-// 快照和紧接快照编号的更新只作有限机制见证，全部输入仍完整归约。
+// 保留原边界选择，并可显式补充有限输入位置；全部输入仍完整归约。
 fn measure_binance_boundary(
     input: &RecordedIngressViewV1<'_>,
     result: &PublicAppliedIngressV1<'_>,
+    witness_positions: &[u64],
     writer: &mut impl Write,
 ) -> RecordingResult<()> {
     let DptIngressV1::Message {
@@ -272,7 +276,7 @@ fn measure_binance_boundary(
         }
         _ => false,
     };
-    if boundary {
+    if boundary || witness_positions.contains(&input.input_position) {
         let reports: Vec<_> = result.reductions.iter().map(|r| &r.reports).collect();
         write_line(
             writer,
@@ -283,6 +287,9 @@ fn measure_binance_boundary(
 }
 fn run() -> RecordingResult<()> {
     let args: Vec<_> = std::env::args().collect();
+    run_with_args(&args)
+}
+fn run_with_args(args: &[String]) -> RecordingResult<()> {
     if !(args.len() == 5 && args[1] != "simulate-hidden")
         && !(args.len() == 4 && args[1] == "core")
         && !(args.len() == 6 && args[1] == "simulate-hidden")
@@ -306,6 +313,8 @@ fn run() -> RecordingResult<()> {
     let mut boundary = BufWriter::new(File::create(out.join("pm-boundary.jsonl"))?);
     let mut binance_boundary = BufWriter::new(File::create(out.join("binance-boundary.jsonl"))?);
     let recording = args.get(4).map(PathBuf::from).unwrap_or_default();
+    // core/record 包含历史来源准备；replay 包含打开记录器，不计配置与输出文件创建。
+    let started = Instant::now();
     if args[1] == "terminal-order" {
         terminal_order::run(&config, &out, &recording)?;
     } else if args[1] == "record" || args[1] == "core" {
@@ -350,7 +359,12 @@ fn run() -> RecordingResult<()> {
                 .map_err(|e| format!("input_position={}: {e}", prepared.recorded.input_position))?;
             measure_result(&result, &mut results)?;
             measure_pm_boundary(&prepared.recorded, &result, &mut boundary)?;
-            measure_binance_boundary(&prepared.recorded, &result, &mut binance_boundary)?;
+            measure_binance_boundary(
+                &prepared.recorded,
+                &result,
+                &config.binance_witness_positions,
+                &mut binance_boundary,
+            )?;
             count += 1;
             observations += result
                 .applied
@@ -361,8 +375,9 @@ fn run() -> RecordingResult<()> {
             if config.checkpoints.contains(&count) {
                 write_line(
                     &mut metrics,
-                    &serde_json::json!({"input_count": count, "core": core.object_counts(), "groups_this_input": result.applied.closed_groups.len(), "input_encoded_bytes": serde_json::to_vec(&prepared.recorded)?.len(), "applied_encoded_bytes": serde_json::to_vec(&result.applied)?.len(), "unmeasured": ["allocator_capacity", "heap_bytes", "cgroup_memory_peak"]}),
+                    &serde_json::json!({"input_count": count, "elapsed_ms": started.elapsed().as_millis(), "core": core.object_counts(), "groups_this_input": result.applied.closed_groups.len(), "input_encoded_bytes": serde_json::to_vec(&prepared.recorded)?.len(), "applied_encoded_bytes": serde_json::to_vec(&result.applied)?.len(), "unmeasured": ["allocator_capacity", "heap_bytes", "cgroup_memory_peak"]}),
                 )?;
+                metrics.flush()?;
             }
             if let Some(writer) = &mut writer {
                 let result = result.into_owned();
@@ -404,7 +419,12 @@ fn run() -> RecordingResult<()> {
                 dependency_record_refs: input.dependency_record_refs.clone(),
             };
             measure_pm_boundary(&view, &result, &mut boundary)?;
-            measure_binance_boundary(&view, &result, &mut binance_boundary)?;
+            measure_binance_boundary(
+                &view,
+                &result,
+                &config.binance_witness_positions,
+                &mut binance_boundary,
+            )?;
             if matches!(input.ingress, DptIngressV1::Message { .. }) {
                 count += 1;
             }
@@ -413,8 +433,9 @@ fn run() -> RecordingResult<()> {
             {
                 write_line(
                     &mut metrics,
-                    &serde_json::json!({"input_count": count, "core": replay.core.object_counts(), "groups_this_input": result.applied.closed_groups.len(), "input_encoded_bytes": serde_json::to_vec(&input)?.len(), "applied_encoded_bytes": serde_json::to_vec(&result.applied)?.len(), "unmeasured": ["allocator_capacity", "heap_bytes", "cgroup_memory_peak"]}),
+                    &serde_json::json!({"input_count": count, "elapsed_ms": started.elapsed().as_millis(), "core": replay.core.object_counts(), "groups_this_input": result.applied.closed_groups.len(), "input_encoded_bytes": serde_json::to_vec(&input)?.len(), "applied_encoded_bytes": serde_json::to_vec(&result.applied)?.len(), "unmeasured": ["allocator_capacity", "heap_bytes", "cgroup_memory_peak"]}),
                 )?;
+                metrics.flush()?;
             }
         }
         serde_json::to_writer_pretty(
@@ -501,5 +522,195 @@ fn main() {
     if let Err(error) = run() {
         eprintln!("finite_acceptance_failed: {error}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_binance_witness_preserves_unselected_inputs_and_result_digests() {
+        // 沿用 Binance reducer 的合法快照/连续更新夹具，通过强类型入口与真实核心。
+        let snapshot = serde_json::json!({
+            "timestamp_received": 2001, "snapshot_fetch_start_utc": 900,
+            "last_update_id": 100, "bids": [{"price":"64000","quantity":"0.5"}],
+            "asks": [{"price":"64200","quantity":"0.4"}], "symbol":"BTCUSDT",
+            "source_endpoint":"https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=1000",
+            "snapshot_status":"complete", "source_sequence_epoch_id":"epoch-a", "connection_generation":1,
+            "depth_ingress_sequence":1, "collector_admission_sequence":1,
+            "collector_admission_time_utc_ms":2101, "collector_host_id":"collector-1",
+            "collector_region":"eu-west-1", "schema_version":"binance_depth_snapshot_v3"
+        });
+        let first = serde_json::json!({
+            "timestamp_received":2002, "event_type":"depthUpdate", "event_time":1502, "symbol":"BTCUSDT",
+            "first_update_id":101, "final_update_id":101, "bids":[{"price":"64000","quantity":"0.7"}], "asks":[],
+            "stream":"btcusdt@depth", "snapshot_last_update_id":100, "local_u_before":null,
+            "stitch_verdict":"Applied", "stitch_evidence":"continuous_depth_update", "stitch_gap_reason":null,
+            "source_sequence_epoch_id":"epoch-a", "connection_generation":1,
+            "depth_ingress_sequence":2, "collector_admission_sequence":2, "collector_admission_time_utc_ms":2102,
+            "collector_host_id":"collector-1", "collector_region":"eu-west-1",
+            "source_endpoint":"wss://stream.binance.com:9443/ws/btcusdt@depth", "schema_version":"binance_depth_update_v4"
+        });
+        let mut second = first.clone();
+        for (field, value) in [
+            ("timestamp_received", 2003),
+            ("event_time", 1503),
+            ("first_update_id", 102),
+            ("final_update_id", 102),
+            ("local_u_before", 101),
+            ("depth_ingress_sequence", 3),
+            ("collector_admission_sequence", 3),
+            ("collector_admission_time_utc_ms", 2103),
+        ] {
+            second[field] = value.into();
+        }
+        second["bids"][0]["quantity"] = "0".into();
+        let rows = [
+            TypedRawRow::BinanceDepthSnapshot(serde_json::from_value(snapshot).unwrap()),
+            TypedRawRow::BinanceDepthUpdate(serde_json::from_value(first).unwrap()),
+            TypedRawRow::BinanceDepthUpdate(serde_json::from_value(second).unwrap()),
+        ];
+        let header = PublicInputStreamHeaderV1 {
+            input_stream_id: "witness-test".into(),
+            canonical_rule_version: "canonical-rule-v3".into(),
+            observation_version: "public-observation-v1".into(),
+            ordering_version: "original-input-v1".into(),
+            input_scope: "constructed-finite".into(),
+            max_pending_ws_terminals: 2,
+            initial_state: PublicInitialStateV1::Empty,
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let recording = temp.path().join("recording");
+        let mut output = data_pipeline_training::gate_a_formal_output_config();
+        output.sort.batch_rows = 2;
+        let mut writer =
+            PublicRecordingWriterV1::create(&recording, &header, output.clone()).unwrap();
+        let mut core = PublicObservationCoreV1::new(header.clone()).unwrap();
+        let mut expected_results = Vec::new();
+        let mut expected_witnesses = Vec::new();
+        for (position, row) in rows.into_iter().map(Some).chain([None]).enumerate() {
+            let ingress = if let Some(row) = row {
+                let row = TypedRawRowV2::Existing(row);
+                DptIngressV1::Message {
+                    source_evidence: source_evidence_v3_from_typed_raw_v2(&row).unwrap(),
+                    row,
+                }
+            } else {
+                DptIngressV1::EndOfInput
+            };
+            let input = RecordedIngressV1 {
+                input_stream_id: header.input_stream_id.clone(),
+                input_position: position as u64,
+                ingress,
+                dependency_record_refs: vec![],
+            };
+            let prepared = prepare_public_ingress_v1(&core, &input, &BTreeMap::new(), &[]).unwrap();
+            let result = core.push(&prepared).unwrap();
+            measure_result(&result, &mut expected_results).unwrap();
+            measure_binance_boundary(&prepared.recorded, &result, &[1], &mut expected_witnesses)
+                .unwrap();
+            let result = result.into_owned();
+            drop(prepared);
+            writer.record(input, result).unwrap();
+        }
+        writer.stabilize().unwrap();
+        let config = Config {
+            files: vec![],
+            manifest_sha256: Sha256Hex("a".repeat(64)),
+            received_start: 0,
+            received_end: 10000,
+            condition: None,
+            omit_initial_books_epoch: None,
+            canonical: data_pipeline_training::gate_a_formal_canonical_config(),
+            output,
+            header,
+            checkpoints: vec![1, 2, 3],
+            binance_witness_positions: vec![],
+        };
+        let mut old_config = serde_json::to_value(config).unwrap();
+        old_config
+            .as_object_mut()
+            .unwrap()
+            .remove("binance_witness_positions");
+        assert!(
+            serde_json::from_value::<Config>(old_config.clone())
+                .unwrap()
+                .binance_witness_positions
+                .is_empty()
+        );
+        for explicit in [false, true] {
+            let mut value = old_config.clone();
+            if explicit {
+                value["binance_witness_positions"] = serde_json::json!([1]);
+            }
+            let config_path = temp.path().join(format!("config-{explicit}.json"));
+            fs::write(&config_path, serde_json::to_vec(&value).unwrap()).unwrap();
+            let out = temp.path().join(format!("output-{explicit}"));
+            run_with_args(&[
+                "example".into(),
+                "replay".into(),
+                config_path.to_string_lossy().into(),
+                out.to_string_lossy().into(),
+                recording.to_string_lossy().into(),
+            ])
+            .unwrap();
+            assert_eq!(
+                fs::read(out.join("results.jsonl")).unwrap(),
+                expected_results
+            );
+            let read_lines = |name| -> Vec<serde_json::Value> {
+                fs::read_to_string(out.join(name))
+                    .unwrap()
+                    .lines()
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect()
+            };
+            let witnesses = read_lines("binance-boundary.jsonl");
+            if explicit {
+                assert_eq!(
+                    fs::read(out.join("binance-boundary.jsonl")).unwrap(),
+                    expected_witnesses
+                );
+                let witnessed: RecordedIngressV1 =
+                    serde_json::from_value(witnesses[1]["input"].clone()).unwrap();
+                let DptIngressV1::Message {
+                    row: TypedRawRowV2::Existing(TypedRawRow::BinanceDepthUpdate(row)),
+                    ..
+                } = witnessed.ingress
+                else {
+                    panic!("selected first Applied update");
+                };
+                assert_eq!(row.local_u_before, None);
+                assert_eq!(row.stitch_verdict, BinanceDepthStitchVerdict::Applied);
+            }
+            assert_eq!(
+                witnesses
+                    .iter()
+                    .map(|v| v["input"]["input_position"].as_u64().unwrap())
+                    .collect::<Vec<_>>(),
+                if explicit { vec![0, 1] } else { vec![0] }
+            );
+            let checkpoints = read_lines("checkpoints.jsonl");
+            assert_eq!(
+                checkpoints
+                    .iter()
+                    .map(|v| v["input_count"].as_u64().unwrap())
+                    .collect::<Vec<_>>(),
+                vec![1, 2, 3]
+            );
+            assert!(
+                checkpoints
+                    .iter()
+                    .all(|v| v["elapsed_ms"].as_u64().is_some())
+            );
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(
+                    &fs::read(out.join("completion.json")).unwrap()
+                )
+                .unwrap()["messages"],
+                3
+            );
+        }
     }
 }
