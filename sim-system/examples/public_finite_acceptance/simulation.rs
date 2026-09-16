@@ -538,6 +538,7 @@ mod tests {
             output,
             header,
             checkpoints: vec![],
+            binance_witness_positions: vec![],
         };
         let mut source = RecordedHiddenBucketSourceV1::open(
             &hidden,
