@@ -28,32 +28,19 @@ pub(super) async fn flush_all_batches(
     batches: &mut PendingIngressBatches,
     gaps: &SharedSourceGaps,
     runtime_stats: &SourceQueueBackpressureStats,
-    writer_queue_tracker: &mut QueueDurationTracker,
-    run_started: Instant,
 ) -> Result<()> {
     let sources = batches.raw_events.keys().cloned().collect::<Vec<_>>();
     for source_kind in sources {
         let Some(batch) = batches.raw_events.get_mut(&source_kind) else {
             continue;
         };
-        flush_source_batch(
-            writers,
-            &source_kind,
-            batch,
-            gaps,
-            runtime_stats,
-            writer_queue_tracker,
-            run_started,
-        )
-        .await?;
+        flush_source_batch(writers, &source_kind, batch, gaps, runtime_stats).await?;
     }
     flush_polymarket_orderbook_v3_batch(
         writers,
         &mut batches.polymarket_orderbook_v3,
         gaps,
         runtime_stats,
-        writer_queue_tracker,
-        run_started,
     )
     .await?;
     Ok(())
@@ -66,8 +53,6 @@ pub(super) async fn handle_ingress_control(
     batches: &mut PendingIngressBatches,
     gaps: &SharedSourceGaps,
     runtime_stats: &SourceQueueBackpressureStats,
-    writer_queue_tracker: &mut QueueDurationTracker,
-    run_started: Instant,
     manifest_tx: &mpsc::Sender<ManifestCommand>,
     rollover_coordinator: &mut RolloverCoordinatorState,
 ) -> Result<()> {
@@ -81,24 +66,13 @@ pub(super) async fn handle_ingress_control(
                     "missing source batch for hour finalize: {source_kind}"
                 ))
             })?;
-            flush_source_batch(
-                writers,
-                &source_kind,
-                batch,
-                gaps,
-                runtime_stats,
-                writer_queue_tracker,
-                run_started,
-            )
-            .await?;
+            flush_source_batch(writers, &source_kind, batch, gaps, runtime_stats).await?;
             if source_kind == "polymarket_market" {
                 flush_polymarket_orderbook_v3_batch(
                     writers,
                     &mut batches.polymarket_orderbook_v3,
                     gaps,
                     runtime_stats,
-                    writer_queue_tracker,
-                    run_started,
                 )
                 .await?;
             }
@@ -114,15 +88,7 @@ pub(super) async fn handle_ingress_control(
                 close.clone(),
                 reply,
             )?;
-            flush_all_batches(
-                writers,
-                batches,
-                gaps,
-                runtime_stats,
-                writer_queue_tracker,
-                run_started,
-            )
-            .await?;
+            flush_all_batches(writers, batches, gaps, runtime_stats).await?;
             send_writer_day_finalize(writers, &producer, &close).await?;
             let gap_snapshot = gaps
                 .lock()
@@ -155,11 +121,8 @@ pub(super) async fn process_ingress_event(
     batches: &mut PendingIngressBatches,
     coverage: &mut BTreeMap<String, CoverageStats>,
     received_rows: &mut u64,
-    average_event_bytes: &mut u64,
     gaps: &SharedSourceGaps,
     runtime_stats: &SourceQueueBackpressureStats,
-    writer_queue_tracker: &mut QueueDurationTracker,
-    run_started: Instant,
     manifest_tx: &mpsc::Sender<ManifestCommand>,
     rollover_coordinator: &mut RolloverCoordinatorState,
 ) -> Result<()> {
@@ -209,12 +172,6 @@ pub(super) async fn process_ingress_event(
             }
             *received_rows = received_rows.saturating_add(1);
             update_polymarket_v3_coverage(coverage, &event.message);
-            *average_event_bytes = rolling_average_bytes(
-                *average_event_bytes,
-                u64::try_from(event.message.owned_bytes())
-                    .map_err(|_| invalid_data("Polymarket v3 owned bytes do not fit in u64"))?,
-                *received_rows,
-            );
             batches.polymarket_orderbook_v3.push(event);
             if batches.polymarket_orderbook_v3.len() >= DEFAULT_FLUSH_ROWS {
                 flush_polymarket_orderbook_v3_batch(
@@ -222,8 +179,6 @@ pub(super) async fn process_ingress_event(
                     &mut batches.polymarket_orderbook_v3,
                     gaps,
                     runtime_stats,
-                    writer_queue_tracker,
-                    run_started,
                 )
                 .await?;
             }
@@ -238,8 +193,6 @@ pub(super) async fn process_ingress_event(
             batches,
             gaps,
             runtime_stats,
-            writer_queue_tracker,
-            run_started,
             manifest_tx,
             rollover_coordinator,
         )
@@ -263,36 +216,11 @@ pub(super) async fn process_ingress_event(
     *received_rows = received_rows.saturating_add(1);
     let event = &inflight_event.event;
     update_coverage(coverage, event);
-    *average_event_bytes = rolling_average_bytes(
-        *average_event_bytes,
-        estimated_event_bytes(event),
-        *received_rows,
-    );
     let source_kind = event.source_kind.clone();
     let batch = batches.raw_events.entry(source_kind.clone()).or_default();
     batch.push(inflight_event);
     if batch.len() >= DEFAULT_FLUSH_ROWS {
-        flush_source_batch(
-            writers,
-            &source_kind,
-            batch,
-            gaps,
-            runtime_stats,
-            writer_queue_tracker,
-            run_started,
-        )
-        .await?;
+        flush_source_batch(writers, &source_kind, batch, gaps, runtime_stats).await?;
     }
     Ok(())
-}
-
-fn rolling_average_bytes(previous_average: u64, current_value: u64, observed_rows: u64) -> u64 {
-    if observed_rows <= 1 {
-        return current_value.max(1);
-    }
-    let prior_weight = observed_rows.saturating_sub(1);
-    previous_average
-        .saturating_mul(prior_weight)
-        .saturating_add(current_value)
-        / observed_rows
 }

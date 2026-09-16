@@ -632,3 +632,157 @@ fn rejected_shutdown_identity_preserves_manifest_digest() {
         "a rejected shutdown identity must not change the disk manifest"
     );
 }
+
+#[test]
+fn multi_day_writer_deltas_release_closed_owner_material_without_losing_files() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let first_boundary = 1_783_468_800_000;
+    let first = test_rollover_close(first_boundary);
+    let (mut owner, _) = test_manifest_owner(&root, &first.utc_day);
+    owner
+        .activate_initial(&first.utc_day, first_boundary - 1_000, first.generation)
+        .unwrap();
+    let (tx, rx) = std::sync::mpsc::sync_channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
+    let (manifest_tx, mut manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
+    let writer_root = root.clone();
+    let worker = std::thread::spawn(move || {
+        source_writer_worker_with_startup(
+            false,
+            writer_root,
+            test_artifact_identity(),
+            "binance_aggtrade".to_owned(),
+            TypedParquetSegmentWriter::current_schema_version("binance_aggtrade")
+                .unwrap()
+                .to_owned(),
+            rx,
+            Arc::new(AtomicU64::new(3)),
+            Arc::new(Mutex::new(true)),
+            Arc::new(SourceQueueBackpressureStats::default()),
+            manifest_tx,
+            None,
+            WriterEpochCell::default(),
+            None,
+        )
+    });
+    for offset in 0..3 {
+        tx.send(WriterCommand::Events(vec![InflightRawEvent::for_test(
+            test_raw_event(
+                "binance_aggtrade",
+                first_boundary - 1_000 + offset * UTC_DAY_MS,
+            ),
+        )]))
+        .unwrap();
+    }
+    drop(tx);
+    let output = worker.join().unwrap().unwrap();
+    assert!(
+        output.finalized_segments.is_empty(),
+        "CLI retention must not keep final history"
+    );
+    let mut parquet = Vec::new();
+    for offset in 0..3 {
+        let ManifestCommand::Finalized(delta) = manifest_rx.blocking_recv().unwrap() else {
+            panic!("finalized delta")
+        };
+        let close = RawDayClose {
+            generation: first.generation + offset as u64,
+            next_generation: first.next_generation + offset as u64,
+            close_id: first.close_id + offset as u64,
+            ..test_rollover_close(first_boundary + offset * UTC_DAY_MS)
+        };
+        assert_eq!(delta.utc_day, close.utc_day);
+        assert_eq!(delta.event_type_counts.values().sum::<u64>(), 1);
+        parquet.push(delta.final_path.clone());
+        owner.apply_finalized(delta).unwrap();
+        let day_dir = typed_raw_root(&root).join(format!("utc_day={}", close.utc_day));
+        let operational = BTreeMap::from([(
+            "binance_aggtrade".to_owned(),
+            SourceOperationalCounterDelta {
+                dropped_rows: 2,
+                ..Default::default()
+            },
+        )]);
+        let empty = BTreeMap::new();
+        for (index, producer) in LOGICAL_PRODUCERS.iter().enumerate() {
+            owner
+                .record_producer_barrier(
+                    close.clone(),
+                    (*producer).to_owned(),
+                    &[format!("day_gap_{offset}")],
+                    if index == 0 { &operational } else { &empty },
+                )
+                .unwrap();
+            assert_eq!(owner.retained_day_counts(), (1, 1));
+        }
+        for source in training_source_kinds() {
+            owner
+                .record_writer_ack(close.clone(), (*source).to_owned())
+                .unwrap();
+        }
+        owner
+            .commit_rollover_old_day(&close, ManifestRolloverCommitMode::Normal)
+            .unwrap();
+        assert_eq!(
+            owner.retained_day_counts(),
+            (1, 1),
+            "retain until old close is confirmed by successor activation"
+        );
+        let closed = load_day_manifest(&day_dir).unwrap().unwrap();
+        assert_eq!(closed["source_counters"]["binance_aggtrade"]["rows"], 1);
+        assert_eq!(
+            closed["source_counters"]["binance_aggtrade"]["dropped_rows"],
+            2
+        );
+        assert_eq!(manifest_state(&closed).unwrap(), "closed");
+        owner.activate_rollover_new_day(&close).unwrap();
+        assert_eq!(owner.retained_day_counts(), (1, 1));
+        let error = owner.ensure_open(&close.utc_day).unwrap_err();
+        assert!(error.to_string().contains("closed"), "{error}");
+        assert_eq!(load_day_manifest(&day_dir).unwrap().unwrap(), closed);
+    }
+    assert_eq!(parquet.len(), 3);
+    for file in parquet {
+        let reader = SerializedFileReader::new(File::open(file).unwrap()).unwrap();
+        assert_eq!(reader.metadata().file_metadata().num_rows(), 1);
+    }
+}
+
+#[test]
+fn failed_old_day_close_keeps_manifest_and_activation_material() {
+    let tmp = tempdir().unwrap();
+    let root = tmp.path().canonicalize().unwrap();
+    let close = test_rollover_close(1_783_468_800_000);
+    let (mut owner, day_dir) = test_manifest_owner(&root, &close.utc_day);
+    owner
+        .activate_initial(
+            &close.utc_day,
+            close.boundary_utc_ms - 1_000,
+            close.generation,
+        )
+        .unwrap();
+    for producer in LOGICAL_PRODUCERS {
+        owner
+            .record_producer_barrier(close.clone(), (*producer).to_owned(), &[], &BTreeMap::new())
+            .unwrap();
+    }
+    for source in training_source_kinds() {
+        owner
+            .record_writer_ack(close.clone(), (*source).to_owned())
+            .unwrap();
+    }
+    let before = load_day_manifest(&day_dir).unwrap().unwrap();
+    let obstruction = day_dir.join(format!("{DAILY_MANIFEST_FILE_NAME}.tmp"));
+    fs::write(&obstruction, b"existing pending material").unwrap();
+    let error = owner
+        .commit_rollover_old_day(&close, ManifestRolloverCommitMode::Normal)
+        .unwrap_err();
+    assert_eq!(
+        error.downcast_ref::<io::Error>().unwrap().kind(),
+        io::ErrorKind::AlreadyExists
+    );
+    assert_eq!(owner.retained_day_counts(), (1, 1));
+    assert!(owner.active_epoch.is_some());
+    assert_eq!(load_day_manifest(&day_dir).unwrap().unwrap(), before);
+    assert_eq!(fs::read(obstruction).unwrap(), b"existing pending material");
+}

@@ -9,6 +9,7 @@ async fn writer_workers_report_ready_only_after_local_initialization() {
     let (manifest_tx, _manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
     let (ready_tx, mut ready_rx) = mpsc::channel(STARTUP_READY_CHANNEL_CAPACITY);
     let (writers, releases) = start_writer_workers_gated(
+        true,
         &dataset_root,
         &provenance,
         &manifest_tx,
@@ -61,6 +62,7 @@ async fn committed_startup_stop_runs_writers_until_centralized_exact_shutdown() 
     let (manifest_tx, _manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
     let (ready_tx, mut ready_rx) = mpsc::channel(STARTUP_READY_CHANNEL_CAPACITY);
     let (writers, releases) = start_writer_workers_gated(
+        true,
         &dataset_root,
         &provenance,
         &manifest_tx,
@@ -602,25 +604,13 @@ fn source_writer_output_uses_aggregated_stats_without_per_event_receipts() {
 
     let output = handle.join().unwrap().unwrap();
     assert_eq!(output.source_kind, "binance_aggtrade");
-    assert_eq!(output.stats.source_kind, "binance_aggtrade");
-    assert_eq!(output.stats.events_received, 2);
-    assert_eq!(
-        output.stats.events_received,
-        output
-            .stats
-            .events_written
-            .saturating_add(output.stats.events_dropped)
-    );
+
     let finalized_rows = output
         .finalized_segments
         .iter()
         .map(|segment| segment.row_count)
         .sum::<u64>();
-    assert_eq!(output.stats.typed_rows_written, finalized_rows);
-    assert_eq!(
-        output.stats.write_events_us.count,
-        output.stats.events_received
-    );
+    assert_eq!(finalized_rows, 2);
 
     let artifact_dir = dataset_root.join("training/runtime_artifacts/stats-run");
     if artifact_dir.exists() {
@@ -666,7 +656,6 @@ fn completed_writer_with_close(
             outcome: WriterTaskOutcome::Returned(Ok(SourceWriterOutput {
                 source_kind: source_kind.to_owned(),
                 finalized_segments: Vec::new(),
-                stats: SourceWriterStats::empty(source_kind.to_owned()),
                 coordinated_close: Some(close.clone()),
                 observed_utc_ms: now_ms(),
             })),
@@ -872,7 +861,6 @@ async fn writer_report_is_not_terminal_until_the_os_thread_is_joined() {
                 outcome: WriterTaskOutcome::Returned(Ok(SourceWriterOutput {
                     source_kind: "binance_aggtrade".to_owned(),
                     finalized_segments: Vec::new(),
-                    stats: SourceWriterStats::empty("binance_aggtrade".to_owned()),
                     coordinated_close: None,
                     observed_utc_ms: now_ms(),
                 })),
@@ -917,6 +905,7 @@ fn partial_writer_spawn_failure_joins_started_workers_and_releases_the_lease() {
     let (ready_tx, _ready_rx) = mpsc::channel(STARTUP_READY_CHANNEL_CAPACITY);
 
     let result = start_writer_workers_inner(
+        true,
         &dataset_root,
         &test_artifact_identity(),
         &manifest_tx,
@@ -1021,6 +1010,7 @@ async fn production_writer_report_preserves_reliable_terminal_lifecycle_epoch() 
         .await
         .unwrap();
     let (mut writers, releases) = start_writer_workers_inner(
+        true,
         &dataset_root,
         &test_artifact_identity(),
         &manifest_tx,
@@ -1110,7 +1100,6 @@ async fn writer_close_proof_rejects_a_precompleted_or_wrong_identity_result() {
                 outcome: WriterTaskOutcome::Returned(Ok(SourceWriterOutput {
                     source_kind: "binance_aggtrade".to_owned(),
                     finalized_segments: Vec::new(),
-                    stats: SourceWriterStats::empty("binance_aggtrade".to_owned()),
                     coordinated_close: Some(wrong),
                     observed_utc_ms: now_ms(),
                 })),
@@ -1158,7 +1147,6 @@ async fn writer_stop_collects_late_terminal_state_after_another_writer_failed() 
                 outcome: WriterTaskOutcome::Returned(Ok(SourceWriterOutput {
                     source_kind: "binance_depth_update".to_owned(),
                     finalized_segments: Vec::new(),
-                    stats: SourceWriterStats::empty("binance_depth_update".to_owned()),
                     coordinated_close: None,
                     observed_utc_ms: now_ms(),
                 })),
@@ -1301,10 +1289,14 @@ async fn polymarket_price_change_stats_count_one_canonical_v3_message_row() {
     drop(tx);
 
     let output = handle.join().unwrap().unwrap();
-    assert_eq!(output.stats.events_received, 1);
-    assert_eq!(output.stats.events_written, 1);
-    assert_eq!(output.stats.typed_rows_written, 1);
-    assert_eq!(output.stats.finalized_segment_rows, 1);
+    assert_eq!(
+        output
+            .finalized_segments
+            .iter()
+            .map(|s| s.row_count)
+            .sum::<u64>(),
+        1
+    );
 
     let ManifestCommand::Finalized(delta) = manifest_rx.recv().await.unwrap() else {
         panic!("expected finalized-file delta");
@@ -1345,7 +1337,15 @@ fn binance_depth_manifest_carries_compact_stitch_evidence() {
     drop(tx);
 
     let output = handle.join().unwrap().unwrap();
-    assert_eq!(output.stats.typed_rows_written, 1);
+    assert_eq!(
+        output
+            .finalized_segments
+            .iter()
+            .map(|s| s.row_count)
+            .sum::<u64>(),
+        1
+    );
+
     let ManifestCommand::Finalized(delta) = manifest_rx.blocking_recv().unwrap() else {
         panic!("expected finalized-file delta");
     };
@@ -1637,7 +1637,6 @@ async fn missing_writer_is_a_runtime_error() {
     let mut writers = BTreeMap::new();
     let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
     let runtime_stats = SourceQueueBackpressureStats::default();
-    let mut tracker = QueueDurationTracker::new("writer_chunk_queue");
     let mut batch = vec![InflightRawEvent::for_test(test_raw_event(
         "binance_aggtrade",
         1_783_392_404_599,
@@ -1649,14 +1648,10 @@ async fn missing_writer_is_a_runtime_error() {
         &mut batch,
         &gaps,
         &runtime_stats,
-        &mut tracker,
-        Instant::now(),
     )
     .await
     .expect_err("a missing writer must stop the runtime");
 
-    let summary = tracker.finish(0);
-    assert_eq!(summary.dropped_rows, 1);
     assert!(
         gaps.lock()
             .unwrap()
@@ -1699,7 +1694,6 @@ async fn disconnected_writer_channel_is_a_runtime_error() {
     )]);
     let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
     let runtime_stats = SourceQueueBackpressureStats::default();
-    let mut tracker = QueueDurationTracker::new("writer_chunk_queue");
     let mut batch = vec![InflightRawEvent::for_test(test_raw_event(
         "binance_aggtrade",
         1_783_392_404_599,
@@ -1711,14 +1705,11 @@ async fn disconnected_writer_channel_is_a_runtime_error() {
         &mut batch,
         &gaps,
         &runtime_stats,
-        &mut tracker,
-        Instant::now(),
     )
     .await
     .expect_err("a disconnected writer must stop the runtime");
 
     assert!(error.to_string().contains("writer_queue_disconnected"));
-    assert_eq!(tracker.finish(0).dropped_rows, 1);
     assert_eq!(
         runtime_stats.drain_all_operational()["2026-07-07"]["binance_aggtrade"].dropped_rows,
         1
@@ -1734,7 +1725,6 @@ async fn writer_parser_failure_is_reported_when_workers_stop() {
     let mut writers =
         start_writer_workers(tmp.path(), &provenance, &manifest_tx, &runtime_stats).unwrap();
     let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
-    let mut tracker = QueueDurationTracker::new("writer_chunk_queue");
     let mut event = test_raw_event("binance_aggtrade", 1_783_392_404_599);
     event.raw_json = json!({"e": "serverShutdown", "E": 1_783_392_404_599_i64}).to_string();
     let mut batch = vec![InflightRawEvent::for_test(event)];
@@ -1745,8 +1735,6 @@ async fn writer_parser_failure_is_reported_when_workers_stop() {
         &mut batch,
         &gaps,
         &runtime_stats,
-        &mut tracker,
-        Instant::now(),
     )
     .await
     .unwrap();

@@ -131,6 +131,11 @@ pub(super) struct ManifestOwnerState {
 }
 
 impl ManifestOwnerState {
+    #[cfg(test)]
+    pub(super) fn retained_day_counts(&self) -> (usize, usize) {
+        (self.manifests.len(), self.activation_attempts.len())
+    }
+
     pub(super) fn new(dataset_root: PathBuf, identity: TrainingArtifactIdentity) -> Self {
         Self {
             dataset_root,
@@ -529,6 +534,9 @@ impl ManifestOwnerState {
             generation: close.next_generation,
         });
         self.rollover = None;
+        // Successor activation proves the coordinator received the old-day close acknowledgment.
+        self.manifests.remove(&close.utc_day);
+        self.activation_attempts.remove(&close.utc_day);
         Ok(())
     }
 
