@@ -437,6 +437,7 @@ pub(crate) struct SequentialCaptureWriter {
     path: PathBuf,
     writer: ArrowWriter<SharedQuotaWriter>,
     rows: Vec<SortRow>,
+    row_inner_bytes: usize,
     max_payload_bytes: usize,
     max_batch_rows: usize,
     max_batch_bytes: usize,
@@ -478,6 +479,7 @@ impl SequentialCaptureWriter {
             path,
             writer,
             rows: Vec::with_capacity(output_config.sort.batch_rows),
+            row_inner_bytes: 0,
             max_payload_bytes: output_config.max_artifact_payload_bytes,
             max_batch_rows: output_config.sort.batch_rows,
             max_batch_bytes: output_config.sort.max_run_bytes,
@@ -505,14 +507,14 @@ impl SequentialCaptureWriter {
             ));
         }
         let row = SortRow::from_sort_key(key, payload.to_vec());
-        let mut prospective_bytes = sort_row_buffer_bytes(&self.rows)
+        let mut prospective_bytes = sort_row_buffer_bytes(&self.rows, self.row_inner_bytes)
             .and_then(|bytes| bytes.checked_add(sort_row_inner_bytes(&row)?));
         if !self.rows.is_empty()
             && (self.rows.len() >= self.max_batch_rows
                 || prospective_bytes.is_none_or(|bytes| bytes > self.max_batch_bytes))
         {
             self.flush_batch()?;
-            prospective_bytes = sort_row_buffer_bytes(&self.rows)
+            prospective_bytes = sort_row_buffer_bytes(&self.rows, self.row_inner_bytes)
                 .and_then(|bytes| bytes.checked_add(sort_row_inner_bytes(&row)?));
         }
         let observed = prospective_bytes.ok_or_else(|| {
@@ -527,6 +529,7 @@ impl SequentialCaptureWriter {
                 ),
             ));
         }
+        self.row_inner_bytes += sort_row_inner_bytes(&row).expect("validated row capacity");
         self.rows.push(row);
         self.expected_sequence = self
             .expected_sequence
@@ -563,6 +566,7 @@ impl SequentialCaptureWriter {
             .checked_add(1)
             .ok_or_else(|| io::Error::other("捕获产物行组计数溢出"))?;
         self.rows.clear();
+        self.row_inner_bytes = 0;
         Ok(())
     }
 
@@ -3599,15 +3603,25 @@ pub(crate) mod tests {
         )
         .unwrap();
         for sequence in 0u64..9 {
-            writer
-                .push(
-                    sequence,
-                    sequence.to_be_bytes().to_vec(),
-                    &vec![b'x'; 32_720],
-                )
-                .unwrap();
+            let mut key = sequence.to_be_bytes().to_vec();
+            key.reserve(128);
+            assert!(key.capacity() > key.len());
+            writer.push(sequence, key, &vec![b'x'; 32_720]).unwrap();
+            let scanned = writer.rows.capacity() * std::mem::size_of::<SortRow>()
+                + writer
+                    .rows
+                    .iter()
+                    .map(|row| row.sort_key.capacity() + row.payload.capacity())
+                    .sum::<usize>();
+            assert_eq!(
+                sort_row_buffer_bytes(&writer.rows, writer.row_inner_bytes),
+                Some(scanned)
+            );
+            assert_eq!(writer.metrics.peak_write_buffer_bytes, scanned);
         }
-
+        writer.flush_batch().unwrap();
+        assert!(writer.rows.is_empty());
+        assert_eq!(writer.row_inner_bytes, 0);
         let outcome = writer.finish(&output_config).unwrap();
         let builder =
             ParquetRecordBatchReaderBuilder::try_new(File::open(outcome.output_path).unwrap())
@@ -3621,6 +3635,41 @@ pub(crate) mod tests {
                     .is_ok_and(|rows| rows <= outcome.metrics.peak_write_buffer_rows)
             }),
             "捕获 Parquet writer 不得跨越已经按字节上限刷新的内存批次重新累计大行组"
+        );
+    }
+
+    #[test]
+    fn capture_failed_write_keeps_owned_rows_and_capacity() {
+        let temporary = TempDir::new().unwrap();
+        let (_, mut config) = micro_configs();
+        config.max_capture_output_bytes = 4;
+        let mut writer = SequentialCaptureWriter::create(
+            "test_records",
+            &temporary.path().join("capture"),
+            Arc::new(Mutex::new(0)),
+            &config,
+        )
+        .unwrap();
+        let mut key = 0u64.to_be_bytes().to_vec();
+        key.reserve(128);
+        writer.push(0, key, b"payload").unwrap();
+        let scanned = writer.rows.capacity() * std::mem::size_of::<SortRow>()
+            + writer
+                .rows
+                .iter()
+                .map(|row| row.sort_key.capacity() + row.payload.capacity())
+                .sum::<usize>();
+        let error = writer.flush_batch().unwrap_err();
+        assert!(
+            error.to_string().contains("捕获产物超过冻结的总字节上限"),
+            "{error}"
+        );
+        assert_eq!(writer.rows.len(), 1);
+        assert_eq!(writer.rows[0].payload(), b"payload");
+        assert_eq!(writer.expected_sequence, 1);
+        assert_eq!(
+            sort_row_buffer_bytes(&writer.rows, writer.row_inner_bytes),
+            Some(scanned)
         );
     }
 
