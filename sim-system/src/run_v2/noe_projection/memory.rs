@@ -77,6 +77,7 @@ struct ObservationState<P: MemoryOrderEvidence> {
     durable: u64,
     delivered: u64,
     closed_receive_time: Option<i64>,
+    public_visible_time: Option<i64>,
     feedback: VecDeque<PendingFeedback<P>>,
     durable_references: Vec<NoeResultReferenceV1>,
 }
@@ -114,11 +115,13 @@ impl<P: MemoryOrderEvidence> MemoryNoeObservation<P> {
     pub fn result_references(&self) -> Vec<NoeResultReferenceV1> {
         self.0.lock().unwrap().durable_references.clone()
     }
-    /// 唯一实际反馈消费者领取已闭合接收前缀，按接收时间及原稳定发射序分配交付序。
+    /// 唯一实际反馈消费者只领取已闭合且不晚于成功公开组受信时点的反馈。
+    /// 按接收时间及原稳定发射序分配交付序；平台预取/闭合不能推进公开可见时点。
     /// 同一源反馈的多个 NOE 记录共享交付序；原来源字段不改号。返回值不能作为耐久引用。
     pub fn take_closed_feedback(&self) -> Vec<MemoryNoeFeedback<P>> {
         let mut state = self.0.lock().unwrap();
-        let Some(closed) = state.closed_receive_time else {
+        let (Some(closed), Some(visible)) = (state.closed_receive_time, state.public_visible_time)
+        else {
             return Vec::new();
         };
         let mut ready = Vec::new();
@@ -129,7 +132,7 @@ impl<P: MemoryOrderEvidence> MemoryNoeObservation<P> {
             for ordinal in pending.ordinals {
                 let record = &batch.records[ordinal];
                 if let Some((received, sequence)) = feedback_coordinate::<P>(record) {
-                    if received <= closed {
+                    if received <= closed && received <= visible {
                         ready.push((
                             received,
                             sequence,
@@ -404,6 +407,12 @@ impl<P: MemoryOrderEvidence> BusinessProjectionPortV2 for MemoryNoeProjectionPor
     }
     fn close_receive_prefix(&mut self, at: i64) {
         self.observation.0.lock().unwrap().closed_receive_time = Some(at);
+    }
+    fn observe_public_time(
+        &mut self,
+        time: &crate::public_consumption::TrustedActorExecutionTimeV1,
+    ) {
+        self.observation.0.lock().unwrap().public_visible_time = Some(time.logical_time_utc_ms());
     }
 }
 impl<P: MemoryOrderEvidence> crate::public_consumption::PublicProjectionPortV1

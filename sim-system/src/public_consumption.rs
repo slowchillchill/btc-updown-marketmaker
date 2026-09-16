@@ -320,6 +320,9 @@ impl crate::run_v2::BusinessProjectionPortV2 for PublicProjectionAdapterV1 {
     fn close_receive_prefix(&mut self, at: i64) {
         self.0.close_receive_prefix(at);
     }
+    fn observe_public_time(&mut self, time: &TrustedActorExecutionTimeV1) {
+        self.0.observe_public_time(time);
+    }
 
     fn try_accept(&mut self, batch: Arc<crate::run_v2::BusinessProjectionBatchV2>) -> bool {
         self.0.try_accept(batch)

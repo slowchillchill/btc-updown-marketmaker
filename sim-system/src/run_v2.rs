@@ -342,6 +342,7 @@ pub trait BusinessProjectionPortV2 {
         ))
     }
     fn close_receive_prefix(&mut self, _at: i64) {}
+    fn observe_public_time(&mut self, _time: &TrustedActorExecutionTimeV1) {}
 
     fn try_accept(&mut self, batch: Arc<BusinessProjectionBatchV2>) -> bool;
 
@@ -19207,6 +19208,10 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
         let receipt = self
             .execution
             .apply_public_group(Arc::clone(&prepared), self.time(at))?;
+        self.execution
+            .actor
+            .projection_port
+            .observe_public_time(receipt.execution_time());
         self.source.next();
         self.drive_position += 1;
         self.close_pending = true;
@@ -19230,6 +19235,15 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
         self.execution.actor.measurement_probe.drain()
     }
     pub fn frames(&self) -> Vec<PublicObservationFrameV1<'_>> {
+        let Some(cutoff) = &self.last_cutoff else {
+            return Vec::new();
+        };
+        self.frames_with_cutoff(cutoff)
+    }
+    fn frames_with_cutoff(
+        &self,
+        cutoff: &TrustedGroupDecisionCutoffV1,
+    ) -> Vec<PublicObservationFrameV1<'_>> {
         let Some(prepared) = &self.last_prepared else {
             return Vec::new();
         };
@@ -19245,12 +19259,12 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
                         .expect("组市场已登记"),
                 ),
                 receipt: self.last_receipt.as_ref().unwrap().clone(),
-                decision_cutoff: self.last_cutoff.as_ref().unwrap().clone(),
+                decision_cutoff: cutoff.clone(),
             })
             .collect()
     }
     pub fn decision(&mut self) -> Option<PublicGroupDecisionV1<'_, I>> {
-        let cutoff = self.last_cutoff.clone()?;
+        let cutoff = self.execution.decision_cutoff(self.last_receipt.clone()?);
         Some(PublicGroupDecisionV1 {
             driver: self,
             cutoff,
@@ -19344,7 +19358,7 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
         &self.cutoff
     }
     pub fn frames(&self) -> Vec<PublicObservationFrameV1<'_>> {
-        self.driver.frames()
+        self.driver.frames_with_cutoff(&self.cutoff)
     }
     pub fn request(
         &mut self,

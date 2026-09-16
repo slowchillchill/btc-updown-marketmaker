@@ -189,11 +189,26 @@ async fn real_memory_noe_delivers_closed_order_feedback_and_cancel_before_finish
         "未闭合响应接收时刻不可见"
     );
     close_at(&mut driver, received);
-    let delivered = observation.take_closed_feedback();
     assert!(
-        before.is_empty(),
-        "此真实延迟样本中较晚发射的提交响应先收到"
+        observation.take_closed_feedback().is_empty(),
+        "Paper 前缀关闭不能冒充公开消费时钟"
     );
+    close_at(&mut driver, 25_999);
+    assert!(observation.take_closed_feedback().is_empty());
+    let (_, before_drain) = driver.next_group().unwrap().unwrap();
+    assert_eq!(before_drain.private_feedback_sequence(), 0);
+    let available = observation.take_closed_feedback();
+    let delivered = available
+        .iter()
+        .filter(|feedback| {
+            matches!(
+                feedback.record().source_reference().record,
+                SimV2SourceRecordReferenceV1::DirectResponse { .. }
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(before.is_empty());
+    assert!(!delivered.is_empty());
     assert!(
         delivered
             .iter()
@@ -206,11 +221,6 @@ async fn real_memory_noe_delivers_closed_order_feedback_and_cancel_before_finish
             ..
         }
     )));
-    assert_eq!(
-        observation.delivered_through(),
-        1,
-        "不能将原发射序最大值 2 冒作已交付两个反馈"
-    );
     let order_identity = delivered
         .iter()
         .find_map(|feedback| match feedback.record() {
@@ -239,8 +249,15 @@ async fn real_memory_noe_delivers_closed_order_feedback_and_cancel_before_finish
         driver.execution.actor.pending_projections.is_empty(),
         "已完整移交的投影正文不再由 actor 重复保留"
     );
-    close_at(&mut driver, 25_999);
-    let late = observation.take_closed_feedback();
+    let late = available
+        .iter()
+        .filter(|feedback| {
+            matches!(
+                feedback.record().source_reference().record,
+                SimV2SourceRecordReferenceV1::OrderLifecycle { .. }
+            )
+        })
+        .collect::<Vec<_>>();
     assert!(
         late.len() >= 2,
         "同一订单事件同时携带生命周期与占用经济记录"
@@ -262,11 +279,12 @@ async fn real_memory_noe_delivers_closed_order_feedback_and_cancel_before_finish
         "晚到的先发射反馈仍推进一次交付位置"
     );
     assert!(observation.take_closed_feedback().is_empty());
-    let (_, cutoff) = driver.next_group().unwrap().unwrap();
+    let cutoff = driver.decision().unwrap().cutoff().clone();
     assert_eq!(
         cutoff.private_feedback_sequence(),
         observation.delivered_through()
     );
+    assert_eq!(before_drain.private_feedback_sequence(), 0);
     driver
         .decision()
         .unwrap()
@@ -551,4 +569,198 @@ async fn finite_legacy_order_consumer_keeps_noe_v2_context_and_reader() {
         assert_eq!(value.context.contract_version, "execution_normalization_v2");
     }
     assert!(observation.durable_through() > 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn training_hidden_prefetch_cannot_advance_public_feedback_visibility_or_old_cutoff() {
+    use contracts::execution_normalization::SimV2SourceRecordReferenceV1;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let core = recorded_memory_complete(&root);
+    let context = core.pm_context(CONDITION_ID).unwrap();
+    let scenario = sealed_scenario_for_markets(vec![
+        crate::scenario::PlatformMarketV1::try_new(
+            context.market,
+            context
+                .assets
+                .into_iter()
+                .map(|a| a.asset)
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+        )
+        .unwrap(),
+    ]);
+    let path = temp.path().join("sim.jsonl");
+    let (execution, observation) = memory_execution_with_scenario_capacity::<
+        noe_projection::MeasuredOrderEvidence,
+    >(&path, scenario, SimCallerRoleV1::ModelTrain, 128, None)
+    .await;
+    let hidden = prepare_hidden_v1(
+        core,
+        PublicRecordingReaderV1::recover(&root, 1, 1 << 20).unwrap(),
+        &temp.path().join("hidden"),
+        &config(),
+        "memory-hidden-prefetch".into(),
+    )
+    .unwrap();
+    let mut buckets = RecordedHiddenBucketSourceV1::open(&hidden, &root, 1, 1 << 20).unwrap();
+    let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, MemoryRecordedTimes).unwrap();
+    let release = execution
+        .actor
+        .background_log
+        .as_ref()
+        .unwrap()
+        .pause_for_tests(false);
+    let mut driver =
+        FinitePublicConsumptionV1::new(execution, source, "finite-recorded-times".into());
+    driver.next_group().unwrap().unwrap();
+    for at in [21_000, 21_001] {
+        let bucket = buckets.next_bucket().unwrap().unwrap();
+        assert_eq!(bucket.reference.bucket_time_utc_ms, at);
+        driver.hidden_bucket(bucket).unwrap();
+    }
+    let (at_t, old_t_cutoff) = driver.next_group().unwrap().unwrap();
+    assert_eq!(at_t.execution_time().logical_time_utc_ms(), 22_000);
+    driver
+        .decision()
+        .unwrap()
+        .request(BusinessRequestV2::PostOrder(PostOrderRequestV2 {
+            context: RequestContextV2 {
+                global_request_id: "memory-buy".into(),
+                caller_correlation_id: None,
+            },
+            item: post_item(
+                "buy-item",
+                &ConditionId(CONDITION_ID.into()),
+                &TokenId(UP_TOKEN_ID.into()),
+                SimBuyOrderKindV1::GtcLimit {
+                    limit_price_pusd_per_share: Decimal::new(2, 1),
+                    size_shares: Decimal::from(5),
+                    post_only: true,
+                },
+            ),
+        }))
+        .unwrap();
+    let bucket = buckets.next_bucket().unwrap().unwrap();
+    let h = bucket.reference.bucket_time_utc_ms;
+    assert_eq!(h, 25_000);
+    driver.hidden_bucket(bucket).unwrap();
+    let response = completed_post_response(&driver.execution.actor, "memory-buy").unwrap();
+    let received = response.metadata.response_received_at_utc_ms;
+    assert!(22_000 < received && received <= h);
+    let future = observation.take_closed_feedback();
+    if !future.is_empty() {
+        release.send(()).unwrap();
+        panic!(
+            "旧实现反例：public T=22000，hidden H={h}，真实响应 R={received}；仅前缀闭合竟领取 {} 条未来 NOE 记录",
+            future.len()
+        );
+    }
+    let (_, same_time) = driver.next_group().unwrap().unwrap();
+    assert_eq!(same_time.decision_time().logical_time_utc_ms(), 22_000);
+    assert_eq!(same_time.private_feedback_sequence(), 0);
+    assert!(observation.take_closed_feedback().is_empty());
+    assert_eq!(
+        driver
+            .decision()
+            .unwrap()
+            .cutoff()
+            .private_feedback_sequence(),
+        0
+    );
+    for _ in 3..=4 {
+        driver.next_group().unwrap().unwrap();
+    }
+    let (at_r, before_drain) = driver.next_group().unwrap().unwrap();
+    assert_eq!(at_r.execution_time().logical_time_utc_ms(), 26_000);
+    let frozen_frame = driver.frames()[0].decision_cutoff.clone();
+    let delivered = observation.take_closed_feedback();
+    assert!(!delivered.is_empty());
+    assert_eq!(observation.delivered_through(), 2);
+    let order_records = delivered
+        .iter()
+        .filter(|f| {
+            matches!(
+                f.record().source_reference().record,
+                SimV2SourceRecordReferenceV1::OrderLifecycle {
+                    private_feedback_sequence: 1,
+                    ..
+                }
+            )
+        })
+        .collect::<Vec<_>>();
+    assert!(order_records.len() >= 2);
+    assert!(
+        order_records
+            .iter()
+            .all(|f| f.delivery_sequence() == order_records[0].delivery_sequence())
+    );
+    assert!(observation.take_closed_feedback().is_empty());
+    assert_eq!(observation.delivered_through(), 2);
+    let new_cutoff = {
+        let mut decision = driver.decision().unwrap();
+        let cutoff = decision.cutoff().clone();
+        assert_eq!(cutoff.receipt(), &at_r);
+        assert_eq!(cutoff.decision_time(), at_r.execution_time());
+        assert_eq!(cutoff.private_feedback_sequence(), 2);
+        assert!(
+            decision
+                .frames()
+                .iter()
+                .all(|frame| frame.decision_cutoff == cutoff)
+        );
+        decision
+            .request(BusinessRequestV2::CancelAllOrders(
+                CancelAllOrdersRequestV2 {
+                    context: RequestContextV2 {
+                        global_request_id: "training-visible-cancel".into(),
+                        caller_correlation_id: None,
+                    },
+                },
+            ))
+            .unwrap();
+        cutoff
+    };
+    for snapshot in [&old_t_cutoff, &same_time, &before_drain, &frozen_frame] {
+        assert_eq!(snapshot.private_feedback_sequence(), 0);
+    }
+    assert_eq!(
+        driver.frames()[0].decision_cutoff,
+        frozen_frame,
+        "驱动快照不被新 decision 回写"
+    );
+    while let Some(bucket) = buckets.next_bucket().unwrap() {
+        driver.hidden_bucket(bucket).unwrap();
+    }
+    while driver.next_group().unwrap().is_some() {}
+    assert_eq!(observation.durable_through(), 0);
+    release.send(()).unwrap();
+    driver
+        .complete(&mut RecordedMaterials {
+            root,
+            hidden: Some(hidden),
+        })
+        .unwrap();
+    let (_, mut reader) = SimEventLogRecoveryV2::open(&path, MAX_GROUP_BYTES).unwrap();
+    let mut saw_request = false;
+    loop {
+        let (next, group) = reader.next_group().unwrap();
+        reader = next;
+        let Some(group) = group else { break };
+        for input in group {
+            if let LoggedBusinessInputV2::PublicRequest { cutoff, request } = input {
+                if request.context().global_request_id == "training-visible-cancel" {
+                    assert_eq!(cutoff.into_trusted(), new_cutoff);
+                    saw_request = true;
+                }
+            }
+        }
+    }
+    assert!(saw_request);
+    reader.finish_sealed_clean_run().unwrap();
+    assert!(observation.result_references().iter().any(|reference| {
+        let result = ::execution_normalization::read_noe_result_v3(reference).unwrap();
+        matches!(result.record.source_reference().record, SimV2SourceRecordReferenceV1::DirectResponse { response_received_at_utc_ms, .. } if response_received_at_utc_ms == received)
+    }));
 }
