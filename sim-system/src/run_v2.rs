@@ -15228,10 +15228,14 @@ mod tests {
         );
 
         assert_eq!(
-            actor.enroll_market(MarketEnrollmentRequestV1 {
-                enrollment_request_id: "projection-enroll-blocked".to_owned(),
-                market: market('4', "987", "7", "8"),
-            }),
+            public_consumption_tests::finite_feeding::feed(
+                &mut actor,
+                |actor| actor.enroll_market(MarketEnrollmentRequestV1 {
+                    enrollment_request_id: "projection-enroll-blocked".to_owned(),
+                    market: market('4', "987", "7", "8"),
+                }),
+                |_| panic!("投影未接纳不得进入日志容量等待")
+            ),
             Err(SimRunActorErrorV2::ProjectionBackpressured)
         );
         assert_eq!(group_commit_counts_for_tests(), (2, 2, 1));
@@ -18850,6 +18854,15 @@ impl PublicSimExecutionV1 {
         actor.background_log = Some(BackgroundEventLogV1::start(log, finite_in_flight_groups));
         Ok(Self { actor })
     }
+    /// 有限宿主显式暂停供料时使用；业务接纳本身保持非阻塞。
+    pub fn wait_for_recording_capacity(&mut self) -> Result<(), SimRunActorErrorV2> {
+        self.actor
+            .background_log
+            .as_mut()
+            .ok_or(SimRunActorErrorV2::Closed)?
+            .wait_for_capacity()
+            .map_err(SimRunActorErrorV2::Log)
+    }
     pub fn create_session(
         &mut self,
         spec: SessionSpecV3,
@@ -19069,6 +19082,9 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
             drive_position: self.drive_position,
             logical_time_utc_ms: at,
         })
+    }
+    pub fn wait_for_recording_capacity(&mut self) -> Result<(), SimRunActorErrorV2> {
+        self.execution.wait_for_recording_capacity()
     }
     pub fn next_group(
         &mut self,

@@ -957,6 +957,11 @@ enum BackgroundLogCommandV1 {
         std::sync::mpsc::Receiver<()>,
     ),
     #[cfg(test)]
+    PauseWrite(
+        std::sync::mpsc::SyncSender<()>,
+        std::sync::mpsc::Receiver<()>,
+    ),
+    #[cfg(test)]
     FailNextWrite,
 }
 pub(crate) struct BackgroundEventLogV1 {
@@ -980,10 +985,20 @@ impl BackgroundEventLogV1 {
         let worker = std::thread::spawn(move || {
             let result = (|| {
                 let mut log = log;
+                #[cfg(test)]
+                let mut write_pause: Option<(
+                    std::sync::mpsc::SyncSender<()>,
+                    std::sync::mpsc::Receiver<()>,
+                )> = None;
                 loop {
                     match receiver.recv() {
                         Ok(BackgroundLogCommandV1::Group(mut inputs)) => {
                             before_encode();
+                            #[cfg(test)]
+                            if let Some((entered, release)) = write_pause.take() {
+                                entered.send(()).unwrap();
+                                release.recv().unwrap();
+                            }
                             for input in &mut inputs {
                                 if let BusinessInputV2::PublicGroup(group) = input {
                                     group.materialize()?;
@@ -998,6 +1013,10 @@ impl BackgroundEventLogV1 {
                             release.recv().unwrap();
                         }
                         #[cfg(test)]
+                        Ok(BackgroundLogCommandV1::PauseWrite(entered, release)) => {
+                            write_pause = Some((entered, release));
+                        }
+                        #[cfg(test)]
                         Ok(BackgroundLogCommandV1::FailNextWrite) => {
                             log.inject_write_failure_for_tests()
                         }
@@ -1008,6 +1027,8 @@ impl BackgroundEventLogV1 {
             if let Err(error) = &result {
                 *report.lock().unwrap() = Some(error.clone());
             }
+            // 先发布原错误，再释放唯一接收端，唤醒等待交接的有限供料方。
+            drop(receiver);
             result
         });
         Self {
@@ -1033,6 +1054,23 @@ impl BackgroundEventLogV1 {
         release
     }
     #[cfg(test)]
+    pub(crate) fn pause_write_for_tests(
+        &self,
+    ) -> (
+        std::sync::mpsc::Receiver<()>,
+        std::sync::mpsc::SyncSender<()>,
+    ) {
+        self.sender
+            .send(BackgroundLogCommandV1::FailNextWrite)
+            .unwrap();
+        let (entered, waiting) = std::sync::mpsc::sync_channel(1);
+        let (release, blocked) = std::sync::mpsc::sync_channel(1);
+        self.sender
+            .send(BackgroundLogCommandV1::PauseWrite(entered, blocked))
+            .unwrap();
+        (waiting, release)
+    }
+    #[cfg(test)]
     pub(crate) fn abort_and_join_for_tests(self) -> Result<(), SimEventLogErrorV2> {
         drop(self.sender);
         self.worker.join().unwrap()
@@ -1045,6 +1083,23 @@ impl BackgroundEventLogV1 {
             self.enqueue(inputs)?;
         }
         Ok(self.pending.is_none())
+    }
+    /// 仅等待当前唯一待交接组进入原通道，不表示写入或耐久完成。
+    pub(crate) fn wait_for_capacity(&mut self) -> Result<(), SimEventLogErrorV2> {
+        if let Some(error) = self.failure.lock().unwrap().clone() {
+            return Err(error);
+        }
+        if let Some(inputs) = self.pending.take() {
+            if let Err(std::sync::mpsc::SendError(BackgroundLogCommandV1::Group(inputs))) =
+                self.sender.send(BackgroundLogCommandV1::Group(inputs))
+            {
+                self.pending = Some(inputs);
+                return Err(self.failure.lock().unwrap().clone().unwrap_or(
+                    SimEventLogErrorV2::InvalidStructure("后台日志已停止，本轮未完成"),
+                ));
+            }
+        }
+        self.failure.lock().unwrap().clone().map_or(Ok(()), Err)
     }
     pub(crate) fn enqueue(
         &mut self,

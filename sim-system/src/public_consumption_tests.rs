@@ -302,6 +302,15 @@ async fn public_execution(
     core: &PublicObservationCoreV1,
     role: SimCallerRoleV1,
 ) -> (PublicSimExecutionV1, Rc<DeliveredFeedbackState>) {
+    public_execution_capacity(path, core, role, 32, None).await
+}
+async fn public_execution_capacity(
+    path: &Path,
+    core: &PublicObservationCoreV1,
+    role: SimCallerRoleV1,
+    capacity: usize,
+    rules: Option<Arc<SealedProcessRuleSnapshotV3>>,
+) -> (PublicSimExecutionV1, Rc<DeliveredFeedbackState>) {
     let context = core.pm_context(CONDITION_ID).unwrap();
     let scenario = sealed_scenario_for_markets(vec![
         crate::scenario::PlatformMarketV1::try_new(
@@ -316,14 +325,26 @@ async fn public_execution(
         )
         .unwrap(),
     ]);
-    public_execution_with_scenario(path, scenario, role).await
+    public_execution_with_scenario_capacity(path, scenario, role, capacity, rules).await
 }
 async fn public_execution_with_scenario(
     path: &Path,
     scenario: Arc<SealedPlatformScenarioV1>,
     role: SimCallerRoleV1,
 ) -> (PublicSimExecutionV1, Rc<DeliveredFeedbackState>) {
-    let rules = successful_snapshot_v3_for_sim_tests().await;
+    public_execution_with_scenario_capacity(path, scenario, role, 32, None).await
+}
+async fn public_execution_with_scenario_capacity(
+    path: &Path,
+    scenario: Arc<SealedPlatformScenarioV1>,
+    role: SimCallerRoleV1,
+    capacity: usize,
+    rules: Option<Arc<SealedProcessRuleSnapshotV3>>,
+) -> (PublicSimExecutionV1, Rc<DeliveredFeedbackState>) {
+    let rules = match rules {
+        Some(rules) => rules,
+        None => successful_snapshot_v3_for_sim_tests().await,
+    };
     let finality = successful_policy_v2_for_tests();
     let latency = load_embedded_proxy_latency_profile().unwrap();
     let opened = opened(
@@ -356,15 +377,23 @@ async fn public_execution_with_scenario(
             delivered: delivered.clone(),
         }),
         MAX_GROUP_BYTES,
-        32,
+        capacity,
     )
     .unwrap();
     let mut session = spec("public-consumption-test", "create-public");
     session.caller_role = role;
-    execution.create_session(session).unwrap();
-    execution
-        .activate_session("activate-public".into())
-        .unwrap();
+    finite_feeding::feed(
+        &mut execution,
+        |execution| execution.create_session(session.clone()),
+        PublicSimExecutionV1::wait_for_recording_capacity,
+    )
+    .unwrap();
+    finite_feeding::feed(
+        &mut execution,
+        |execution| execution.activate_session("activate-public".into()),
+        PublicSimExecutionV1::wait_for_recording_capacity,
+    )
+    .unwrap();
     (execution, delivered)
 }
 #[tokio::test(flavor = "current_thread")]
@@ -1443,4 +1472,423 @@ async fn enrolled_market_has_the_same_snapshot_rule_frame() {
     assert_eq!(frames[0].rule_context.as_ref(), &expected);
     assert_eq!(frames[0].receipt, receipt);
     assert_eq!(frames[0].decision_cutoff, cutoff);
+}
+
+
+// 与两个真实有限例程共用供料策略；不向生产 API 暴露后台测试屏障。
+pub(super) mod finite_feeding {
+    use crate as sim_system;
+    include!("../examples/public_finite_acceptance/feeding.rs");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn finite_public_feed_continues_after_closed_time_and_due_action_without_reapplying() {
+    struct Times;
+    impl PublicConsumptionTimeSourceV1 for Times {
+        fn execution_time_for_group(
+            &mut self,
+            group: &PublicGroupReferenceV1,
+        ) -> Result<i64, SimRunActorErrorV2> {
+            Ok(match group.group_position {
+                0 => 10_000,
+                1 => 21_000,
+                2..=4 => 22_000,
+                _ => TERMINAL_ADMITTED_TIME_MS,
+            })
+        }
+    }
+    let rules = successful_snapshot_v3_for_sim_tests().await;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let core = recorded_complete(&root);
+    let mut reference = None;
+    let mut prior_steps = 0;
+    for blocked in [false, true] {
+        let path = temp.path().join(format!("public-{blocked}.jsonl"));
+        let (execution, delivered) = public_execution_capacity(
+            &path,
+            &core,
+            SimCallerRoleV1::Paper,
+            if blocked {
+                prior_steps as usize - 1
+            } else {
+                32
+            },
+            Some(rules.clone()),
+        )
+        .await;
+        let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, Times).unwrap();
+        let mut driver = FinitePublicConsumptionV1::new(execution, source, "finite-times".into());
+        let mut outputs = Vec::new();
+        for _ in 0..2 {
+            let value = finite_feeding::feed(
+                &mut driver,
+                FinitePublicConsumptionV1::next_group,
+                FinitePublicConsumptionV1::wait_for_recording_capacity,
+            )
+            .unwrap()
+            .unwrap();
+            outputs.push(serde_json::json!([value, driver.frames()]));
+        }
+        finite_feeding::feed(
+            &mut driver,
+            |driver| {
+                driver
+                    .decision()
+                    .unwrap()
+                    .request(BusinessRequestV2::CancelAllOrders(
+                        CancelAllOrdersRequestV2 {
+                            context: RequestContextV2 {
+                                global_request_id: "finite-due".into(),
+                                caller_correlation_id: None,
+                            },
+                        },
+                    ))
+            },
+            FinitePublicConsumptionV1::wait_for_recording_capacity,
+        )
+        .unwrap();
+        let due = driver
+            .execution
+            .actor
+            .next_required_logical_drive()
+            .unwrap();
+        assert!((21_001..22_000).contains(&due.required_at_utc_ms));
+        driver.wait_for_recording_capacity().unwrap();
+        let mut release = blocked.then(|| {
+            driver
+                .execution
+                .actor
+                .background_log
+                .as_ref()
+                .unwrap()
+                .pause_for_tests(false)
+        });
+        let before = driver.execution.actor.applied_input_sequence;
+        let drive_before = driver.drive_position;
+        let mut waits = 0;
+        let value = finite_feeding::feed(
+            &mut driver,
+            FinitePublicConsumptionV1::next_group,
+            |driver| {
+                waits += 1;
+                assert_eq!(
+                    driver.execution.actor.applied_input_sequence,
+                    before + prior_steps
+                );
+                assert_eq!(driver.drive_position, drive_before + prior_steps);
+                assert!(!driver.close_pending);
+                assert_eq!(
+                    driver
+                        .source
+                        .peek()
+                        .unwrap()
+                        .as_ref()
+                        .unwrap()
+                        .prepared
+                        .reference
+                        .group_position,
+                    2
+                );
+                assert_eq!(
+                    driver.last_receipt.as_ref().unwrap().group.group_position,
+                    1
+                );
+                assert!(
+                    driver
+                        .execution
+                        .actor
+                        .next_required_logical_drive()
+                        .is_none_or(|required| required.required_at_utc_ms >= 22_000)
+                );
+                release.take().unwrap().send(()).unwrap();
+                driver.wait_for_recording_capacity()
+            },
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(waits, usize::from(blocked));
+        if !blocked {
+            prior_steps = driver.execution.actor.applied_input_sequence - before - 1;
+        }
+        outputs.push(serde_json::json!([value, driver.frames()]));
+        while let Some(value) = finite_feeding::feed(
+            &mut driver,
+            FinitePublicConsumptionV1::next_group,
+            FinitePublicConsumptionV1::wait_for_recording_capacity,
+        )
+        .unwrap()
+        {
+            outputs.push(serde_json::json!([value, driver.frames()]));
+        }
+        assert_eq!(outputs.len(), 6);
+        let actual = serde_json::json!({"outputs":outputs, "sequence":driver.execution.actor.applied_input_sequence,
+            "drive_position":driver.drive_position,"responses":*delivered.responses.borrow()});
+        if let Some(expected) = &reference {
+            assert_eq!(&actual, expected);
+        } else {
+            reference = Some(actual);
+        }
+        driver
+            .complete(&mut RecordedMaterials {
+                root: root.clone(),
+                hidden: None,
+            })
+            .unwrap();
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn finite_hidden_feed_resumes_after_due_actions_and_applies_each_bucket_once() {
+    let rules = successful_snapshot_v3_for_sim_tests().await;
+    let temp = tempfile::tempdir().unwrap();
+    let mut reference = None;
+    let mut prior_steps = 0;
+    for blocked in [false, true] {
+        let root = temp.path().join(format!("dpt-{blocked}"));
+        let core = recorded_complete(&root);
+        let path = temp.path().join(format!("hidden-{blocked}.jsonl"));
+        let (execution, delivered) = public_execution_capacity(
+            &path,
+            &core,
+            SimCallerRoleV1::ModelTrain,
+            if blocked {
+                prior_steps as usize - 1
+            } else {
+                32
+            },
+            Some(rules.clone()),
+        )
+        .await;
+        let hidden = prepare_hidden_v1(
+            core,
+            PublicRecordingReaderV1::recover(&root, 1, 1 << 20).unwrap(),
+            &temp.path().join(format!("material-{blocked}")),
+            &config(),
+            "hidden-test".into(),
+        )
+        .unwrap();
+        let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, RecordedTimes).unwrap();
+        let mut driver = FinitePublicConsumptionV1::new(execution, source, "finite-times".into());
+        finite_feeding::feed(
+            &mut driver,
+            FinitePublicConsumptionV1::next_group,
+            FinitePublicConsumptionV1::wait_for_recording_capacity,
+        )
+        .unwrap()
+        .unwrap();
+        finite_feeding::feed(
+            &mut driver,
+            |driver| {
+                driver
+                    .decision()
+                    .unwrap()
+                    .request(BusinessRequestV2::CancelAllOrders(
+                        CancelAllOrdersRequestV2 {
+                            context: RequestContextV2 {
+                                global_request_id: "hidden-due".into(),
+                                caller_correlation_id: None,
+                            },
+                        },
+                    ))
+            },
+            FinitePublicConsumptionV1::wait_for_recording_capacity,
+        )
+        .unwrap();
+        assert!(
+            driver
+                .execution
+                .actor
+                .next_required_logical_drive()
+                .unwrap()
+                .required_at_utc_ms
+                < 21_000
+        );
+        driver.wait_for_recording_capacity().unwrap();
+        let mut release = blocked.then(|| {
+            driver
+                .execution
+                .actor
+                .background_log
+                .as_ref()
+                .unwrap()
+                .pause_for_tests(false)
+        });
+        let before = driver.execution.actor.applied_input_sequence;
+        let mut buckets = RecordedHiddenBucketSourceV1::open(&hidden, &root, 1, 1 << 20).unwrap();
+        let mut outputs = Vec::new();
+        let mut waits = 0;
+        while let Some(bucket) = buckets.next_bucket().unwrap() {
+            finite_feeding::feed(
+                &mut driver,
+                |driver| driver.hidden_bucket(bucket.clone()),
+                |driver| {
+                    if let Some(release) = release.take() {
+                        waits += 1;
+                        assert_eq!(
+                            driver.execution.actor.applied_input_sequence,
+                            before + prior_steps
+                        );
+                        let session = driver
+                            .execution
+                            .actor
+                            .state
+                            .as_ref()
+                            .unwrap()
+                            .session
+                            .as_ref()
+                            .unwrap();
+                        assert_eq!(session.hidden_platform_frontier.next_index_position, 0);
+                        assert!(
+                            driver
+                                .execution
+                                .actor
+                                .next_required_logical_drive()
+                                .is_none_or(|required| required.required_at_utc_ms
+                                    >= bucket.reference.bucket_time_utc_ms)
+                        );
+                        release.send(()).unwrap();
+                    }
+                    driver.wait_for_recording_capacity()
+                },
+            )
+            .unwrap();
+            if !blocked && outputs.is_empty() {
+                prior_steps = driver.execution.actor.applied_input_sequence - before - 1;
+            }
+            let session = driver
+                .execution
+                .actor
+                .state
+                .as_ref()
+                .unwrap()
+                .session
+                .as_ref()
+                .unwrap();
+            if bucket.reference.bucket_time_utc_ms == 21_001 {
+                assert_eq!(
+                    session
+                        .hidden_platform_markets
+                        .as_ref()
+                        .unwrap()
+                        .pm_quantity(CONDITION_ID, UP_TOKEN_ID, BookSide::Bid, Decimal::new(5, 1)),
+                    Decimal::from(80)
+                );
+            }
+            outputs.push(serde_json::json!({"bucket":bucket.reference(), "records":bucket.records(),
+                "frontier":[session.hidden_platform_frontier.closed_through_utc_ms, session.hidden_platform_frontier.next_index_position],"sequence":driver.execution.actor.applied_input_sequence}));
+        }
+        assert_eq!(outputs.len(), 3);
+        assert_eq!(waits, usize::from(blocked));
+        let actual =
+            serde_json::json!({"outputs":outputs,"responses":*delivered.responses.borrow()});
+        if let Some(expected) = &reference {
+            assert_eq!(&actual, expected);
+        } else {
+            reference = Some(actual);
+        }
+        driver.wait_for_recording_capacity().unwrap();
+        let background = driver.execution.actor.background_log.take().unwrap();
+        assert!(matches!(
+            background.abort_and_join_for_tests(),
+            Err(crate::event_log::SimEventLogErrorV2::UnsealedCleanRun)
+        ));
+        assert!(!fs::read_to_string(path).unwrap().contains("RUN_SEAL"));
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn finite_feed_wait_propagates_original_background_io_and_stops_without_seal() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let core = recorded_books(&root);
+    let path = temp.path().join("sim.jsonl");
+    let (mut execution, _) =
+        public_execution_capacity(&path, &core, SimCallerRoleV1::Paper, 0, None).await;
+    execution.wait_for_recording_capacity().unwrap();
+    let (entered, release) = execution
+        .actor
+        .background_log
+        .as_ref()
+        .unwrap()
+        .pause_write_for_tests();
+    let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, RecordedTimes).unwrap();
+    let mut driver = FinitePublicConsumptionV1::new(execution, source, "finite-times".into());
+    let first = driver.next_group().unwrap().unwrap();
+    driver.wait_for_recording_capacity().unwrap();
+    entered.recv().unwrap();
+    let before = driver.execution.actor.applied_input_sequence;
+    let mut waits = 0;
+    let mut outputs = Vec::new();
+    let result = finite_feeding::feed(
+        &mut driver,
+        FinitePublicConsumptionV1::next_group,
+        |driver| {
+            waits += 1;
+            assert_eq!(driver.execution.actor.applied_input_sequence, before + 1);
+            assert_eq!(
+                driver
+                    .source
+                    .peek()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .prepared
+                    .reference
+                    .group_position,
+                1
+            );
+            release.send(()).unwrap();
+            driver.wait_for_recording_capacity()
+        },
+    );
+    if let Ok(Some(value)) = &result {
+        outputs.push(value.clone());
+    }
+    let Err(SimRunActorErrorV2::Log(error @ crate::event_log::SimEventLogErrorV2::Io { .. })) =
+        result
+    else {
+        panic!("必须传播真实后台写错误")
+    };
+    assert_eq!(waits, 1);
+    assert!(outputs.is_empty());
+    assert_eq!(driver.last_receipt.as_ref(), Some(&first.0));
+    assert_eq!(driver.execution.actor.applied_input_sequence, before + 1);
+    let background = driver.execution.actor.background_log.take().unwrap();
+    assert_eq!(background.abort_and_join_for_tests().unwrap_err(), error);
+    assert!(!fs::read_to_string(&path).unwrap().contains("RUN_SEAL"));
+    let (_, mut reader) = SimEventLogRecoveryV2::open(&path, MAX_GROUP_BYTES).unwrap();
+    loop {
+        let (next, group) = reader.next_group().unwrap();
+        reader = next;
+        if group.is_none() {
+            break;
+        }
+    }
+    assert!(matches!(
+        reader.finish_sealed_clean_run(),
+        Err(crate::event_log::SimEventLogErrorV2::UnsealedCleanRun)
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn finite_session_feed_does_not_wait_on_a_real_business_error() {
+    let temp = tempfile::tempdir().unwrap();
+    let core = recorded_books(&temp.path().join("dpt"));
+    let (mut execution, _) = public_execution(
+        &temp.path().join("sim.jsonl"),
+        &core,
+        SimCallerRoleV1::Paper,
+    )
+    .await;
+    execution.wait_for_recording_capacity().unwrap();
+    let before = execution.actor.applied_input_sequence;
+    let error = finite_feeding::feed(
+        &mut execution,
+        |execution| execution.create_session(spec("public-consumption-test", "another-creation")),
+        |_| panic!("业务错误不得进入日志等待"),
+    )
+    .unwrap_err();
+    assert!(matches!(error, SimRunActorErrorV2::SessionAlreadyCreated));
+    assert_eq!(execution.actor.applied_input_sequence, before);
 }
