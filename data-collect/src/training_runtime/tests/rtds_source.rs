@@ -1644,3 +1644,138 @@ async fn rtds_hong_kong_vpn_eight_hour_probe() {
         "RTDS probe row/order error: {first_row_error:?}"
     );
 }
+
+#[tokio::test]
+async fn rtds_control_errors_recover_in_real_source_and_bad_payload_still_fails() {
+    let dataset_root = tempdir().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (tx, mut rx) = mpsc::channel(8);
+    let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+    let stats = Arc::new(SourceQueueBackpressureStats::default());
+    install_active_raw_day_gate(&stats, now_ms()).await;
+    let (bad_tx, bad_rx) = oneshot::channel();
+    let server = tokio::spawn(async move {
+        let mut initial = None;
+        let mut bad_rx = Some(bad_rx);
+        for control in [
+            Some("Too Many Requests"),
+            Some("Endpoint request timed out"),
+            None,
+        ] {
+            let (stream, _) = timeout(Duration::from_secs(2), listener.accept())
+                .await
+                .unwrap()
+                .unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let subscription = loop {
+                if let Some(Ok(Message::Text(text))) = socket.next().await
+                    && text != "PING"
+                {
+                    break serde_json::from_str::<Value>(&text).unwrap();
+                }
+            };
+            assert_eq!(subscription["action"], "subscribe");
+            if let Some(initial) = &initial {
+                assert_eq!(&subscription, initial);
+            } else {
+                initial = Some(subscription);
+            }
+            assert_remaining_twap_subscriptions(&mut socket).await;
+            assert!(
+                timeout(Duration::from_millis(30), async {
+                    while let Some(Ok(message)) = socket.next().await {
+                        if let Message::Text(text) = message
+                            && text != "PING"
+                        {
+                            return;
+                        }
+                    }
+                    panic!("socket closed before sending control");
+                })
+                .await
+                .is_err(),
+                "each generation replays the desired set only once"
+            );
+            if let Some(message) = control {
+                socket.send(Message::Text(json!({"message": message, "connectionId": "reconstructed", "requestId": "control"}).to_string().into())).await.unwrap();
+                continue;
+            }
+            let timestamp = now_ms();
+            let mut frame = json!({"topic": "crypto_prices_chainlink", "type": "update", "timestamp": timestamp,
+                "payload": {"symbol": "btc/usd", "timestamp": timestamp, "value": "65000.10"}});
+            socket
+                .send(Message::Text(frame.to_string().into()))
+                .await
+                .unwrap();
+            bad_rx.take().unwrap().await.unwrap();
+            frame["payload"].as_object_mut().unwrap().remove("value");
+            socket
+                .send(Message::Text(frame.to_string().into()))
+                .await
+                .unwrap();
+            while let Some(Ok(message)) = socket.next().await {
+                if matches!(message, Message::Close(_)) {
+                    break;
+                }
+            }
+        }
+    });
+    let mut spec = RtdsSourceSpec::production();
+    spec.endpoint = format!("ws://{address}");
+    spec.ws_config.reconnect.initial_backoff = Duration::from_millis(5);
+    spec.ws_config.reconnect.max_backoff = Duration::from_millis(10);
+    let source = tokio::spawn(run_rtds_source_with_spec(
+        spec,
+        dataset_root.path().canonicalize().unwrap(),
+        SourceEventSink {
+            tx,
+            gaps: Arc::clone(&gaps),
+            source_queue_backpressure: Arc::clone(&stats),
+            inflight_budget: InflightBudget::new(),
+            enqueue_lock: Arc::new(AsyncMutex::new(())),
+        },
+        CollectorIdentity {
+            host_id: "collector-test".to_owned(),
+            region: "local-test".to_owned(),
+        },
+        None,
+        Instant::now(),
+    ));
+    let event = timeout(Duration::from_secs(3), rx.recv())
+        .await
+        .unwrap()
+        .expect("source keeps collecting after both control errors");
+    assert_eq!(
+        rtds_row_from_event(&event.event).unwrap().freshness_status,
+        "fresh"
+    );
+    assert!(!source.is_finished());
+    assert!(gaps.lock().unwrap().is_empty());
+    let counters = stats.drain_all_operational();
+    for source_kind in [
+        "polymarket_rtds_chainlink_btc_usd",
+        "polymarket_rtds_chainlink_twap",
+    ] {
+        let counter = counters
+            .values()
+            .find_map(|sources| sources.get(source_kind))
+            .unwrap();
+        assert_eq!(counter.reconnect_events, 2);
+        assert_eq!(counter.lag_events, 0);
+    }
+    bad_tx.send(()).unwrap();
+    let error = timeout(Duration::from_secs(2), source)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap_err();
+    assert!(error.to_string().contains("RTDS Chainlink payload invalid"));
+    assert!(
+        gaps.lock()
+            .unwrap()
+            .iter()
+            .any(|gap| gap.starts_with("rtds_unparseable_chainlink_payload:"))
+    );
+    server.await.unwrap();
+}
