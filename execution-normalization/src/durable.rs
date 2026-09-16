@@ -65,6 +65,42 @@ pub struct DurableCommit<T, C = SourceNeutralControlResultV1> {
     pub container_reference: NoePublishedContainerReferenceV1,
 }
 
+pub fn sim_v2_context(
+    seed: SimV2ContextSeedV1,
+    contract_version: &str,
+) -> Result<ExecutionNormalizationContextV1, DurableErrorV1> {
+    let account_scope = serde_json::to_string(&seed.account_instance_key).map_err(|error| {
+        DurableErrorV1::Core(CoreErrorV1::IdentityEncoding {
+            message: error.to_string(),
+        })
+    })?;
+    let account_identity = SourceNeutralAccountIdentityV1 {
+        source_category: "platform".to_owned(),
+        environment: "simulation".to_owned(),
+        run_scope: seed.run_id,
+        account_scope,
+    };
+    let source = SimV2ContextSourceV1 {
+        account_instance_key: seed.account_instance_key,
+        run_opened: seed.run_opened,
+        account_opening_evidence_identity: seed.account_opening_evidence_identity,
+        account_opening: seed.account_opening,
+    };
+    let context_reference = derive_sim_v2_context_reference(
+        contract_version,
+        &account_identity,
+        &source,
+        &seed.implementation_identity,
+    )?;
+    Ok(ExecutionNormalizationContextV1 {
+        context_reference: context_reference.clone(),
+        account_identity,
+        source,
+        contract_version: contract_version.to_owned(),
+        implementation_identity: seed.implementation_identity,
+    })
+}
+
 impl<
     T: NoeTradePayload<C>,
     C: Clone + std::fmt::Debug + Eq + Serialize + serde::de::DeserializeOwned,
@@ -295,36 +331,8 @@ impl<
         seed: SimV2ContextSeedV1,
     ) -> Result<Self, DurableErrorV1> {
         let root = root.as_ref();
-        let account_scope = serde_json::to_string(&seed.account_instance_key).map_err(|error| {
-            DurableErrorV1::Core(CoreErrorV1::IdentityEncoding {
-                message: error.to_string(),
-            })
-        })?;
-        let account_identity = SourceNeutralAccountIdentityV1 {
-            source_category: "platform".to_owned(),
-            environment: "simulation".to_owned(),
-            run_scope: seed.run_id,
-            account_scope,
-        };
-        let source = SimV2ContextSourceV1 {
-            account_instance_key: seed.account_instance_key,
-            run_opened: seed.run_opened,
-            account_opening_evidence_identity: seed.account_opening_evidence_identity,
-            account_opening: seed.account_opening,
-        };
-        let context_reference = derive_sim_v2_context_reference(
-            T::CONTRACT_VERSION,
-            &account_identity,
-            &source,
-            &seed.implementation_identity,
-        )?;
-        let context = ExecutionNormalizationContextV1 {
-            context_reference: context_reference.clone(),
-            account_identity,
-            source,
-            contract_version: T::CONTRACT_VERSION.to_owned(),
-            implementation_identity: seed.implementation_identity,
-        };
+        let context = sim_v2_context(seed, T::CONTRACT_VERSION)?;
+        let context_reference = context.context_reference.clone();
 
         match Self::open(root, &context_reference) {
             Ok(store) => Ok(store),
@@ -337,48 +345,8 @@ impl<
         root: impl AsRef<Path>,
         context: ExecutionNormalizationContextV1,
     ) -> Result<Self, DurableErrorV1> {
-        let root = root.as_ref();
-        fs::create_dir_all(root).map_err(|error| io_error("创建耐久根", root, error))?;
-        let context_directory = context_directory(root, &context.context_reference);
-        match fs::create_dir(&context_directory) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                return Err(DurableErrorV1::ContextAlreadyExists {
-                    path: context_directory,
-                });
-            }
-            Err(error) => {
-                return Err(io_error("创建上下文目录", &context_directory, error));
-            }
-        }
-        let commits_directory = context_directory.join(COMMITS_DIRECTORY_NAME);
-        fs::create_dir(&commits_directory)
-            .map_err(|error| io_error("创建提交目录", &commits_directory, error))?;
-
-        let context_path = context_directory.join(CONTEXT_FILE_NAME);
-        let payload = ContextPayloadV1 {
-            container_version: T::CONTEXT_VERSION.to_owned(),
-            encoding: NOE_CONTAINER_ENCODING_V1.to_owned(),
-            context: context.clone(),
-        };
-        let container = ContextContainerV1 {
-            boundary_sha256: payload_digest(&payload, &context_path)?,
-            payload,
-        };
-        let context_container_reference = NoePublishedContainerReferenceV1 {
-            location: context_path.to_string_lossy().into_owned(),
-            boundary_sha256: container.boundary_sha256.clone(),
-        };
-        let bytes = encode_container(&container, &context_path)?;
-        publish_no_replace(
-            &context_directory,
-            ".context.json.tmp",
-            CONTEXT_FILE_NAME,
-            &bytes,
-            None,
-            PublishFaultV1::default(),
-        )?;
-        sync_directory(root, "同步耐久根")?;
+        let (context_directory, context_container_reference) =
+            create_context_container::<T, C>(root.as_ref(), &context)?;
 
         let core = NormalizationCore::new(context.clone());
         Ok(Self {
@@ -632,6 +600,181 @@ impl<
             commit_sequence,
             container_reference,
         })
+    }
+}
+
+fn create_context_container<
+    T: NoeTradePayload<C>,
+    C: Clone + std::fmt::Debug + Eq + Serialize + serde::de::DeserializeOwned,
+>(
+    root: &Path,
+    context: &ExecutionNormalizationContextV1,
+) -> Result<(PathBuf, NoePublishedContainerReferenceV1), DurableErrorV1> {
+    fs::create_dir_all(root).map_err(|error| io_error("创建耐久根", root, error))?;
+    let context_directory = context_directory(root, &context.context_reference);
+    match fs::create_dir(&context_directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(DurableErrorV1::ContextAlreadyExists {
+                path: context_directory,
+            });
+        }
+        Err(error) => {
+            return Err(io_error("创建上下文目录", &context_directory, error));
+        }
+    }
+    let commits_directory = context_directory.join(COMMITS_DIRECTORY_NAME);
+    fs::create_dir(&commits_directory)
+        .map_err(|error| io_error("创建提交目录", &commits_directory, error))?;
+
+    let context_path = context_directory.join(CONTEXT_FILE_NAME);
+    let payload = ContextPayloadV1 {
+        container_version: T::CONTEXT_VERSION.to_owned(),
+        encoding: NOE_CONTAINER_ENCODING_V1.to_owned(),
+        context: context.clone(),
+    };
+    let container = ContextContainerV1 {
+        boundary_sha256: payload_digest(&payload, &context_path)?,
+        payload,
+    };
+    let context_container_reference = NoePublishedContainerReferenceV1 {
+        location: context_path.to_string_lossy().into_owned(),
+        boundary_sha256: container.boundary_sha256.clone(),
+    };
+    let bytes = encode_container(&container, &context_path)?;
+    publish_no_replace(
+        &context_directory,
+        ".context.json.tmp",
+        CONTEXT_FILE_NAME,
+        &bytes,
+        None,
+        PublishFaultV1::default(),
+    )?;
+    sync_directory(root, "同步耐久根")?;
+
+    Ok((context_directory, context_container_reference))
+}
+
+/// 新内存运行的唯一后台写入器：不持有核心，不重做归一化。
+/// 原始批与最终容器的候选文件独立，发布失败不能删除唯一原始材料。
+pub struct StagedNormalizationWriter<T, C> {
+    context_directory: PathBuf,
+    context: ExecutionNormalizationContextV1,
+    staged: u64,
+    published: u64,
+    payload: std::marker::PhantomData<(T, C)>,
+}
+
+impl<
+    T: NoeTradePayload<C>,
+    C: Clone + std::fmt::Debug + Eq + Serialize + serde::de::DeserializeOwned,
+> StagedNormalizationWriter<T, C>
+{
+    pub fn create(
+        root: &Path,
+        context: ExecutionNormalizationContextV1,
+    ) -> Result<Self, DurableErrorV1> {
+        let (context_directory, _) = create_context_container::<T, C>(root, &context)?;
+        Ok(Self {
+            context_directory,
+            context,
+            staged: 0,
+            published: 0,
+            payload: std::marker::PhantomData,
+        })
+    }
+
+    pub fn stage<MT: Serialize, MC: Serialize, I: Serialize, F: Serialize>(
+        &mut self,
+        batch: &crate::core::NormalizationBatch<MT, MC, I, F>,
+    ) -> Result<(), DurableErrorV1> {
+        let path = self.stage_path(self.staged);
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .map_err(|error| io_error("创建归一化批暂存", &path, error))?;
+        let mut file = std::io::BufWriter::new(file);
+        serde_json::to_writer(&mut file, batch).map_err(|error| {
+            if error.is_io() {
+                DurableErrorV1::Io {
+                    operation: "写入归一化批暂存",
+                    path: path.clone(),
+                    message: error.to_string(),
+                }
+            } else {
+                DurableErrorV1::ContainerDecode {
+                    path: path.clone(),
+                    message: error.to_string(),
+                }
+            }
+        })?;
+        file.flush()
+            .map_err(|error| io_error("写入归一化批暂存", &path, error))?;
+        self.staged += 1;
+        Ok(())
+    }
+
+    fn stage_path(&self, sequence: u64) -> PathBuf {
+        self.context_directory
+            .join(COMMITS_DIRECTORY_NAME)
+            .join(format!(".{sequence:020}.batch.json.tmp"))
+    }
+
+    /// 调用方必须先稳定关联的 SIM 输入；时间绑定本次稳定尝试。
+    /// 每次只读取一个已归一化批，成功发布后才交付耐久引用并移除原暂存。
+    pub fn stabilize(
+        &mut self,
+        mut now: impl FnMut() -> i64,
+        mut published: impl FnMut(&DurableCommit<T, C>),
+    ) -> Result<(), DurableErrorV1> {
+        while self.published < self.staged {
+            let sequence = self.published;
+            let stage_path = self.stage_path(sequence);
+            let batch: crate::core::NormalizationBatch<T, C> = decode_container(&stage_path)?;
+            let payload = CommitPayload {
+                container_version: T::COMMIT_VERSION.to_owned(),
+                encoding: NOE_CONTAINER_ENCODING_V1.to_owned(),
+                commit_sequence: sequence,
+                boundary: NoeSourceCommitBoundaryV1 {
+                    context_reference: self.context.context_reference.clone(),
+                    source_watermark: batch.source_watermark,
+                    durable_available_at_utc_ms: now(),
+                },
+                records: batch.records,
+            };
+            let target_name = commit_file_name(sequence);
+            let directory = self.context_directory.join(COMMITS_DIRECTORY_NAME);
+            let target_path = directory.join(&target_name);
+            let boundary_sha256 = payload_digest(&payload, &target_path)?;
+            let container = CommitContainer {
+                payload,
+                boundary_sha256: boundary_sha256.clone(),
+            };
+            let bytes = encode_container(&container, &target_path)?;
+            publish_no_replace(
+                &directory,
+                &format!(".{target_name}.tmp"),
+                &target_name,
+                &bytes,
+                Some(sequence),
+                PublishFaultV1::default(),
+            )?;
+            let commit = DurableCommit {
+                commit_sequence: sequence,
+                boundary: container.payload.boundary,
+                records: container.payload.records,
+                container_reference: NoePublishedContainerReferenceV1 {
+                    location: target_path.to_string_lossy().into_owned(),
+                    boundary_sha256,
+                },
+            };
+            published(&commit);
+            self.published += 1;
+            fs::remove_file(&stage_path)
+                .map_err(|error| io_error("移除已发布归一化批暂存", &stage_path, error))?;
+        }
+        Ok(())
     }
 }
 
@@ -1287,5 +1430,151 @@ mod tests {
             reopened.commits()[0].records[0],
             NormalizationRecordV1::Evidence { .. }
         ));
+    }
+    fn memory_batch(
+        sequence: u64,
+    ) -> crate::core::NormalizationBatchInput<
+        contracts::execution_normalization::SourceNeutralTradeLifecycleResultV1,
+        SourceNeutralControlResultV1,
+        crate::identity::MemoryLogicalIdentityV1,
+    > {
+        let input = batch(sequence);
+        crate::core::NormalizationBatchInput {
+            source_watermark: input.source_watermark,
+            evidence: input
+                .evidence
+                .into_iter()
+                .map(|evidence| crate::core::SourceNeutralEvidence {
+                    source_reference: evidence.source_reference,
+                    source_ordinal: evidence.source_ordinal,
+                    logical_key: evidence.logical_key,
+                    kind: crate::core::SourceNeutralEvidenceKind::Control {
+                        result: SourceNeutralControlResultV1::Submission {
+                            outcome: SourceNeutralSubmissionOutcomeV1::RejectedNoEffect,
+                        },
+                    },
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn memory_normalizes_once_without_hot_identity_encoding_and_publishes_legacy_bytes() {
+        use crate::identity::{MemoryEconomicFactReferenceV1, MemoryLogicalIdentityV1};
+        type Trade = contracts::execution_normalization::SourceNeutralTradeLifecycleResultV1;
+        let old = TempDir::new().unwrap();
+        let new = TempDir::new().unwrap();
+        let mut store = DurableContextStoreV1::create(old.path(), context()).unwrap();
+        for sequence in 1..=2 {
+            store.commit_batch(batch(sequence), 3_000).unwrap();
+        }
+        let mut core = crate::core::NormalizationCore::<
+            Trade,
+            SourceNeutralControlResultV1,
+            MemoryLogicalIdentityV1,
+            MemoryEconomicFactReferenceV1,
+        >::new(context());
+        use crate::identity::NormalizationIdentity;
+        let account = std::sync::Arc::clone(core.account_identity());
+        let entity_key = SourceNeutralEntityKeyV1::Order {
+            source_order_id: "actual-order-id".into(),
+        };
+        let economic = contracts::execution_normalization::SourceNeutralEconomicIdentityV1::AccountTransition { account_identity: (*account).clone(), account_transition_seq: 1 };
+        let expected_entity = contracts::execution_normalization::StableLogicalIdentityV1::entity(
+            &account,
+            &entity_key,
+        )
+        .unwrap();
+        let expected_fact =
+            contracts::execution_normalization::StableLogicalIdentityV1::fact_reference(&economic)
+                .unwrap();
+        crate::identity::ENCODINGS.with(|count| count.set(0));
+        crate::core::NORMALIZATIONS.with(|count| count.set(0));
+        let memory_entity = MemoryLogicalIdentityV1::entity(&account, &entity_key).unwrap();
+        let memory_fact = MemoryLogicalIdentityV1::fact_reference(&economic).unwrap();
+        assert!(std::sync::Arc::ptr_eq(
+            &memory_entity.account,
+            core.account_identity()
+        ));
+        let first = core.normalize_and_accept(memory_batch(1)).unwrap();
+        let second = core.normalize_and_accept(memory_batch(2)).unwrap();
+        assert_eq!(crate::core::NORMALIZATIONS.with(|count| count.get()), 2);
+        assert_eq!(crate::identity::ENCODINGS.with(|count| count.get()), 0);
+        assert!(matches!(
+            second.records[0],
+            NormalizationRecord::Duplicate { .. }
+        ));
+        let new_path = new.path().to_owned();
+        std::thread::spawn(move || {
+            assert_eq!(
+                serde_json::to_vec(&memory_entity).unwrap(),
+                serde_json::to_vec(&expected_entity).unwrap()
+            );
+            assert_eq!(
+                serde_json::to_vec(&memory_fact).unwrap(),
+                serde_json::to_vec(&expected_fact).unwrap()
+            );
+            let mut writer =
+                StagedNormalizationWriter::<Trade, SourceNeutralControlResultV1>::create(
+                    &new_path,
+                    context(),
+                )
+                .unwrap();
+            writer.stage(&first).unwrap();
+            writer.stage(&second).unwrap();
+            assert!(crate::identity::ENCODINGS.with(|count| count.get()) > 0);
+            assert_eq!(
+                crate::core::NORMALIZATIONS.with(|count| count.get()),
+                0,
+                "后台不重复归一化"
+            );
+            writer.stabilize(|| 3_000, |_| {}).unwrap();
+        })
+        .join()
+        .unwrap();
+        for sequence in 0..2 {
+            let relative = format!("commits/{sequence:020}.json");
+            let old_file =
+                context_directory(old.path(), &context().context_reference).join(&relative);
+            let new_file =
+                context_directory(new.path(), &context().context_reference).join(&relative);
+            assert_eq!(
+                fs::read(old_file).unwrap(),
+                fs::read(new_file).unwrap(),
+                "固定上下文与稳定尝试时间保留旧字节/identity"
+            );
+        }
+    }
+
+    #[test]
+    fn memory_source_order_ties_keep_legacy_string_order() {
+        use crate::identity::{MemoryEconomicFactReferenceV1, MemoryLogicalIdentityV1};
+        type Trade = contracts::execution_normalization::SourceNeutralTradeLifecycleResultV1;
+        let mut old = batch(1);
+        let mut memory = memory_batch(1);
+        // 同一合法 SourceOrder 的数字字符串序不同于枚举/数字派生序。
+        for ordinal in [2, 10] {
+            let key = SourceNeutralLogicalKeyV1::SubmissionItem {
+                global_request_id: "request-55-sync-fault".into(),
+                batch_item_ordinal: ordinal,
+            };
+            let mut e = old.evidence[0].clone();
+            e.logical_key = key.clone();
+            old.evidence.push(e);
+            let mut e = memory.evidence[0].clone();
+            e.logical_key = key;
+            memory.evidence.push(e);
+        }
+        let mut old_core = crate::core::NormalizationCore::<Trade>::new(context());
+        let mut memory_core = crate::core::NormalizationCore::<
+            Trade,
+            SourceNeutralControlResultV1,
+            MemoryLogicalIdentityV1,
+            MemoryEconomicFactReferenceV1,
+        >::new(context());
+        assert_eq!(
+            serde_json::to_vec(&old_core.normalize_and_accept(old).unwrap()).unwrap(),
+            serde_json::to_vec(&memory_core.normalize_and_accept(memory).unwrap()).unwrap()
+        );
     }
 }

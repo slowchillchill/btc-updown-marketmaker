@@ -37,6 +37,8 @@ enum SimEventLogLineRefV2<'a> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SimEventLogErrorV2 {
+    Noe(execution_normalization::DurableErrorV1),
+    NoeNormalization(crate::run_v2::MemoryNoeErrorV1),
     Io {
         operation: &'static str,
         message: String,
@@ -57,6 +59,8 @@ impl std::fmt::Display for SimEventLogErrorV2 {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Io { operation, message } => write!(formatter, "{operation}: {message}"),
+            Self::NoeNormalization(error) => write!(formatter, "NOE 前台归一化失败：{error}"),
+            Self::Noe(error) => write!(formatter, "NOE 后台物化失败：{error}"),
             Self::Encode(message) => write!(formatter, "日志组编码失败：{message}"),
             Self::CompleteLineDecode { offset, message } => {
                 write!(formatter, "完整日志行在字节 {offset} 无法解码：{message}")
@@ -948,8 +952,13 @@ mod tests {
 }
 
 /// 同一日志的唯一后台所有者。容量由有限调用方显式提供；未交接批次仍由前台持有。
+struct BackgroundGroupV1 {
+    inputs: Vec<BusinessInputV2>,
+    noe: Vec<crate::run_v2::noe_projection::AcceptedNoeProjectionV1>,
+    normalization_error: Option<crate::run_v2::MemoryNoeErrorV1>,
+}
 enum BackgroundLogCommandV1 {
-    Group(Vec<BusinessInputV2>),
+    Group(BackgroundGroupV1),
     Finish,
     #[cfg(test)]
     Pause(
@@ -966,7 +975,7 @@ enum BackgroundLogCommandV1 {
 }
 pub(crate) struct BackgroundEventLogV1 {
     sender: std::sync::mpsc::SyncSender<BackgroundLogCommandV1>,
-    pending: Option<Vec<BusinessInputV2>>,
+    pending: Option<BackgroundGroupV1>,
     failure: std::sync::Arc<std::sync::Mutex<Option<SimEventLogErrorV2>>>,
     worker: std::thread::JoinHandle<Result<(), SimEventLogErrorV2>>,
 }
@@ -985,6 +994,7 @@ impl BackgroundEventLogV1 {
         let worker = std::thread::spawn(move || {
             let result = (|| {
                 let mut log = log;
+                let mut noe = None;
                 #[cfg(test)]
                 let mut write_pause: Option<(
                     std::sync::mpsc::SyncSender<()>,
@@ -992,7 +1002,8 @@ impl BackgroundEventLogV1 {
                 )> = None;
                 loop {
                     match receiver.recv() {
-                        Ok(BackgroundLogCommandV1::Group(mut inputs)) => {
+                        Ok(BackgroundLogCommandV1::Group(group)) => {
+                            let mut inputs = group.inputs;
                             before_encode();
                             #[cfg(test)]
                             if let Some((entered, release)) = write_pause.take() {
@@ -1005,8 +1016,26 @@ impl BackgroundEventLogV1 {
                                 }
                             }
                             log = log.append_group_with_sync(&inputs, false)?.0;
+                            for batch in group.noe {
+                                crate::run_v2::noe_projection::BackgroundNoeWriterV1::stage(
+                                    &mut noe, batch,
+                                )
+                                .map_err(SimEventLogErrorV2::Noe)?;
+                            }
+                            if let Some(error) = group.normalization_error {
+                                return Err(SimEventLogErrorV2::NoeNormalization(error));
+                            }
                         }
-                        Ok(BackgroundLogCommandV1::Finish) => return log.seal_clean_run(),
+                        Ok(BackgroundLogCommandV1::Finish) => {
+                            #[cfg(feature = "measurement")]
+                            log.sync_data(MeasurementContext::CleanSeal)?;
+                            #[cfg(not(feature = "measurement"))]
+                            log.sync_data()?;
+                            if let Some(noe) = &mut noe {
+                                noe.stabilize().map_err(SimEventLogErrorV2::Noe)?;
+                            }
+                            return log.seal_clean_run();
+                        }
                         #[cfg(test)]
                         Ok(BackgroundLogCommandV1::Pause(entered, release)) => {
                             entered.send(()).unwrap();
@@ -1080,7 +1109,7 @@ impl BackgroundEventLogV1 {
             return Err(error);
         }
         if let Some(inputs) = self.pending.take() {
-            self.enqueue(inputs)?;
+            self.enqueue_group(inputs)?;
         }
         Ok(self.pending.is_none())
     }
@@ -1105,6 +1134,21 @@ impl BackgroundEventLogV1 {
         &mut self,
         inputs: Vec<BusinessInputV2>,
     ) -> Result<(), SimEventLogErrorV2> {
+        self.enqueue_with_noe(inputs, Vec::new(), None)
+    }
+    pub(crate) fn enqueue_with_noe(
+        &mut self,
+        inputs: Vec<BusinessInputV2>,
+        noe: Vec<crate::run_v2::noe_projection::AcceptedNoeProjectionV1>,
+        normalization_error: Option<crate::run_v2::MemoryNoeErrorV1>,
+    ) -> Result<(), SimEventLogErrorV2> {
+        self.enqueue_group(BackgroundGroupV1 {
+            inputs,
+            noe,
+            normalization_error,
+        })
+    }
+    fn enqueue_group(&mut self, inputs: BackgroundGroupV1) -> Result<(), SimEventLogErrorV2> {
         match self.sender.try_send(BackgroundLogCommandV1::Group(inputs)) {
             Ok(()) => Ok(()),
             Err(std::sync::mpsc::TrySendError::Full(BackgroundLogCommandV1::Group(inputs))) => {

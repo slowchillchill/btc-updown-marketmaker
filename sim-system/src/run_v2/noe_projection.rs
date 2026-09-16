@@ -1,11 +1,14 @@
+mod memory;
+pub use memory::*;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use contracts::execution_normalization::{
-    DurableSourceReferenceV1, NoeInclusiveSequenceRangeV1, NoeResultReferenceV1,
-    NoeRunConsumptionManifestV1, SimV2DirectResponseAssociationV1, SimV2SourceRecordReferenceV1,
-    SimV2SourceReferenceV1, SimV2SourceWatermarkV1, SourceNeutralAccountBalanceDeltaV1,
+    DurableSourceReferenceV1, ExecutionNormalizationContextV1, NoeEconomicFactReferenceV1,
+    NoeInclusiveSequenceRangeV1, NoeResultReferenceV1, NoeRunConsumptionManifestV1,
+    SimV2DirectResponseAssociationV1, SimV2SourceRecordReferenceV1, SimV2SourceReferenceV1,
+    SimV2SourceWatermarkV1, SourceNeutralAccountBalanceDeltaV1,
     SourceNeutralAccountTransitionKindV1, SourceNeutralCancellationOutcomeV1,
     SourceNeutralControlResult, SourceNeutralMakerRebateAccrualStatusV1,
     SourceNeutralMarketEnrollmentResultV1, SourceNeutralOrderLifecycleEventV1,
@@ -15,7 +18,7 @@ use contracts::execution_normalization::{
     SourceNeutralQueryOutOfRetentionV1, SourceNeutralSettlementLifecycleResultV1,
     SourceNeutralSubmissionOutcomeV1, SourceNeutralTradeEconomicDispositionV1,
     SourceNeutralTradeLifecycleResultV1, SourceNeutralTradeStateV1, SourceNeutralTradesPageV1,
-    SourceNeutralTradesQueryResultV1,
+    SourceNeutralTradesQueryResultV1, StableLogicalIdentityV1,
 };
 use contracts::{
     AccountInstanceKeyV1, CancelTargetOutcomeV2, DirectResponseMetadataV2,
@@ -28,9 +31,9 @@ use contracts::{
 };
 use execution_normalization::{
     DurableCommitOutcomeV1, DurableContextStore, DurableErrorV1, NoeTradePayload,
-    NormalizationBatchInput, SimV2ContextSeedV1, SourceNeutralEconomicEvidenceV1,
-    SourceNeutralEntityKeyV1, SourceNeutralEvidence, SourceNeutralEvidenceKind,
-    SourceNeutralLogicalKeyV1,
+    NormalizationBatchInput, NormalizationIdentity, SimV2ContextSeedV1,
+    SourceNeutralEconomicEvidenceV1, SourceNeutralEntityKeyV1, SourceNeutralEvidence,
+    SourceNeutralEvidenceKind, SourceNeutralLogicalKeyV1,
 };
 
 use super::{
@@ -44,6 +47,7 @@ pub struct SimNoeProjectionPort<
     P: OrderEvidenceProjection = LegacyOrderEvidence,
 > where
     T::Result: NoeTradePayload<ControlFor<P>>,
+    ControlFor<P>: serde::de::DeserializeOwned,
 {
     root: PathBuf,
     opened: RunOpenedV2,
@@ -73,6 +77,7 @@ impl SimV2NoeObservationV1 {
 impl<T: NoeFeedbackPayload, P: OrderEvidenceProjection> SimNoeProjectionPort<T, P>
 where
     T::Result: NoeTradePayload<ControlFor<P>>,
+    ControlFor<P>: serde::de::DeserializeOwned,
 {
     pub fn new(
         root: impl AsRef<Path>,
@@ -206,6 +211,7 @@ impl<T: NoeFeedbackPayload, P: OrderEvidenceProjection> BusinessProjectionPortV2
     for SimNoeProjectionPort<T, P>
 where
     T::Result: NoeTradePayload<ControlFor<P>>,
+    ControlFor<P>: serde::de::DeserializeOwned,
 {
     fn try_accept(&mut self, batch: Arc<BusinessProjectionBatchV2>) -> bool {
         self.try_accept_payload(Arc::new(BusinessProjectionBatchPayloadV1::V2(batch)))
@@ -225,7 +231,7 @@ where
         }) {
             return false;
         }
-        let input = match BatchMapper::<T, P>::new(store, &batch).map() {
+        let input = match BatchMapper::<T, P>::new(store.context(), &batch).map() {
             Ok(input) => input,
             Err(()) => return false,
         };
@@ -260,27 +266,44 @@ where
     }
 }
 
-struct BatchMapper<'a, T: NoeFeedbackPayload, P: OrderEvidenceProjection = LegacyOrderEvidence>
-where
-    T::Result: NoeTradePayload<ControlFor<P>>,
+struct BatchMapper<
+    'a,
+    T: NoeFeedbackPayload<I>,
+    P: OrderEvidenceProjection<I> = LegacyOrderEvidence,
+    I = StableLogicalIdentityV1,
+    F = NoeEconomicFactReferenceV1,
+> where
+    I: NormalizationIdentity<F> + serde::Serialize,
 {
-    store: &'a DurableContextStore<T::Result, ControlFor<P>>,
+    context: &'a ExecutionNormalizationContextV1,
+    account: Arc<contracts::execution_normalization::SourceNeutralAccountIdentityV1>,
+    identity: std::marker::PhantomData<(I, F)>,
     batch: &'a BusinessProjectionBatch<T>,
     watermark: SimV2SourceWatermarkV1,
-    evidence: Vec<SourceNeutralEvidence<T::Result, ControlFor<P>>>,
+    evidence: Vec<SourceNeutralEvidence<T::Result, ControlFor<P, I>, I>>,
     next_ordinal: u32,
 }
 
-impl<'a, T: NoeFeedbackPayload, P: OrderEvidenceProjection> BatchMapper<'a, T, P>
+impl<'a, T: NoeFeedbackPayload<I>, P: OrderEvidenceProjection<I>, I, F> BatchMapper<'a, T, P, I, F>
 where
-    T::Result: NoeTradePayload<ControlFor<P>>,
+    I: NormalizationIdentity<F> + serde::Serialize,
 {
     fn new(
-        store: &'a DurableContextStore<T::Result, ControlFor<P>>,
+        context: &'a ExecutionNormalizationContextV1,
+        batch: &'a BusinessProjectionBatch<T>,
+    ) -> Self {
+        Self::with_account(context, Arc::new(context.account_identity.clone()), batch)
+    }
+
+    fn with_account(
+        context: &'a ExecutionNormalizationContextV1,
+        account: Arc<contracts::execution_normalization::SourceNeutralAccountIdentityV1>,
         batch: &'a BusinessProjectionBatch<T>,
     ) -> Self {
         Self {
-            store,
+            account,
+            context,
+            identity: std::marker::PhantomData,
             batch,
             watermark: SimV2SourceWatermarkV1 {
                 run_id: batch.run_id.clone(),
@@ -291,20 +314,19 @@ where
         }
     }
 
-    fn map(mut self) -> Result<NormalizationBatchInput<T::Result, ControlFor<P>>, ()> {
-        if self.batch.run_id != self.store.context().account_identity.run_scope {
+    fn map(mut self) -> Result<NormalizationBatchInput<T::Result, ControlFor<P, I>, I>, ()> {
+        if self.batch.run_id != self.context.account_identity.run_scope {
             return Err(());
         }
         if let Some(opening) = &self.batch.account_opening {
-            if opening.account_instance_key != self.store.context().source.account_instance_key {
+            if opening.account_instance_key != self.context.source.account_instance_key {
                 return Err(());
             }
             self.push(
                 SimV2SourceRecordReferenceV1::AccountOpening,
                 SourceNeutralLogicalKeyV1::AccountOpening {
                     opening_evidence_identity: self
-                        .store
-                        .context()
+                        .context
                         .source
                         .account_opening_evidence_identity
                         .clone(),
@@ -312,8 +334,7 @@ where
                 SourceNeutralEvidenceKind::Economic {
                     evidence: SourceNeutralEconomicEvidenceV1::AccountOpening {
                         opening_evidence_identity: self
-                            .store
-                            .context()
+                            .context
                             .source
                             .account_opening_evidence_identity
                             .clone(),
@@ -492,7 +513,11 @@ where
         Ok(())
     }
 
-    fn push_direct_request(&mut self, metadata: &DirectResponseMetadataV2, result: ControlFor<P>) {
+    fn push_direct_request(
+        &mut self,
+        metadata: &DirectResponseMetadataV2,
+        result: ControlFor<P, I>,
+    ) {
         self.push(
             direct_record(
                 metadata,
@@ -551,7 +576,7 @@ where
     fn map_trades_query(
         &self,
         result: &TradesQueryResultV2,
-    ) -> Result<SourceNeutralTradesQueryResultV1, ()> {
+    ) -> Result<SourceNeutralTradesQueryResultV1<I>, ()> {
         match result {
             TradesQueryResultV2::Page(page) => {
                 let items = page
@@ -591,7 +616,7 @@ where
     fn map_trade(
         &self,
         trade: &TradeProjectionV2,
-    ) -> Result<SourceNeutralTradeLifecycleResultV1, ()> {
+    ) -> Result<SourceNeutralTradeLifecycleResultV1<I>, ()> {
         Ok(SourceNeutralTradeLifecycleResultV1 {
             trade_identity: self.entity_trade(&trade.trade_id)?,
             order_identity: self.entity_order(&trade.platform_order_id)?,
@@ -968,55 +993,52 @@ where
     }
 
     fn check_account(&self, account: &AccountInstanceKeyV1) -> Result<(), ()> {
-        (account == &self.store.context().source.account_instance_key)
+        (account == &self.context.source.account_instance_key)
             .then_some(())
             .ok_or(())
     }
 
-    fn entity_order(
-        &self,
-        source_order_id: &str,
-    ) -> Result<contracts::execution_normalization::StableLogicalIdentityV1, ()> {
-        self.store
-            .entity_identity(&SourceNeutralEntityKeyV1::Order {
+    fn entity_order(&self, source_order_id: &str) -> Result<I, ()> {
+        I::entity(
+            &self.account,
+            &SourceNeutralEntityKeyV1::Order {
                 source_order_id: source_order_id.to_owned(),
-            })
-            .map_err(|_| ())
+            },
+        )
+        .map_err(|_| ())
     }
 
-    fn entity_trade(
-        &self,
-        source_trade_id: &str,
-    ) -> Result<contracts::execution_normalization::StableLogicalIdentityV1, ()> {
-        self.store
-            .entity_identity(&SourceNeutralEntityKeyV1::Trade {
+    fn entity_trade(&self, source_trade_id: &str) -> Result<I, ()> {
+        I::entity(
+            &self.account,
+            &SourceNeutralEntityKeyV1::Trade {
                 source_trade_id: source_trade_id.to_owned(),
-            })
-            .map_err(|_| ())
+            },
+        )
+        .map_err(|_| ())
     }
 
-    fn entity_resolution(
-        &self,
-        source_resolution_id: &str,
-    ) -> Result<contracts::execution_normalization::StableLogicalIdentityV1, ()> {
-        self.store
-            .entity_identity(&SourceNeutralEntityKeyV1::Resolution {
+    fn entity_resolution(&self, source_resolution_id: &str) -> Result<I, ()> {
+        I::entity(
+            &self.account,
+            &SourceNeutralEntityKeyV1::Resolution {
                 source_resolution_id: source_resolution_id.to_owned(),
-            })
-            .map_err(|_| ())
+            },
+        )
+        .map_err(|_| ())
     }
 
     fn push(
         &mut self,
         record: SimV2SourceRecordReferenceV1,
         logical_key: SourceNeutralLogicalKeyV1,
-        kind: SourceNeutralEvidenceKind<T::Result, ControlFor<P>>,
+        kind: SourceNeutralEvidenceKind<T::Result, ControlFor<P, I>, I>,
     ) {
         let source_ordinal = self.next_ordinal;
         self.next_ordinal += 1;
         self.evidence.push(SourceNeutralEvidence {
             source_reference: SimV2SourceReferenceV1 {
-                context_reference: self.store.context().context_reference.clone(),
+                context_reference: self.context.context_reference.clone(),
                 watermark: self.watermark.clone(),
                 record,
             },
@@ -1136,20 +1158,22 @@ fn durable_now_utc_ms() -> i64 {
 }
 
 /// 只在公开反馈版本边界选型，核心处理前保留完整成交证据。
-pub trait NoeFeedbackPayload: Clone {
-    type Result: NoeTradePayload;
+pub trait NoeFeedbackPayload<I = StableLogicalIdentityV1>: Clone {
+    type Result: Clone + std::fmt::Debug + Eq + serde::Serialize;
     fn legacy(&self) -> &contracts::TradeLifecycleFeedbackV2;
-    fn normalized(&self, identity: SourceNeutralTradeLifecycleResultV1) -> Self::Result;
+    fn normalized(&self, identity: SourceNeutralTradeLifecycleResultV1<I>) -> Self::Result;
     fn batch(
         payload: &BusinessProjectionBatchPayloadV1,
     ) -> Option<Arc<BusinessProjectionBatch<Self>>>;
 }
-impl NoeFeedbackPayload for contracts::TradeLifecycleFeedbackV2 {
-    type Result = SourceNeutralTradeLifecycleResultV1;
+impl<I: Clone + std::fmt::Debug + Eq + serde::Serialize> NoeFeedbackPayload<I>
+    for contracts::TradeLifecycleFeedbackV2
+{
+    type Result = SourceNeutralTradeLifecycleResultV1<I>;
     fn legacy(&self) -> &Self {
         self
     }
-    fn normalized(&self, identity: SourceNeutralTradeLifecycleResultV1) -> Self::Result {
+    fn normalized(&self, identity: SourceNeutralTradeLifecycleResultV1<I>) -> Self::Result {
         identity
     }
     fn batch(
@@ -1161,12 +1185,14 @@ impl NoeFeedbackPayload for contracts::TradeLifecycleFeedbackV2 {
         }
     }
 }
-impl NoeFeedbackPayload for contracts::TradeLifecycleFeedbackV3 {
-    type Result = contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2;
+impl<I: Clone + std::fmt::Debug + Eq + serde::Serialize> NoeFeedbackPayload<I>
+    for contracts::TradeLifecycleFeedbackV3
+{
+    type Result = contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2<I>;
     fn legacy(&self) -> &contracts::TradeLifecycleFeedbackV2 {
         &self.feedback
     }
-    fn normalized(&self, identity: SourceNeutralTradeLifecycleResultV1) -> Self::Result {
+    fn normalized(&self, identity: SourceNeutralTradeLifecycleResultV1<I>) -> Self::Result {
         Self::Result {
             trade_identity: identity.trade_identity,
             order_identity: identity.order_identity,
@@ -1199,32 +1225,36 @@ pub type SimV2NoeProjectionPortV2 = SimNoeProjectionPort<contracts::TradeLifecyc
 #[cfg(test)]
 type BatchMapperV1<'a> = BatchMapper<'a, contracts::TradeLifecycleFeedbackV2>;
 
-type ControlFor<P> = SourceNeutralControlResult<
-    <P as OrderEvidenceProjection>::Submission,
-    <P as OrderEvidenceProjection>::Snapshot,
+type ControlFor<P, I = StableLogicalIdentityV1> = SourceNeutralControlResult<
+    <P as OrderEvidenceProjection<I>>::Submission,
+    <P as OrderEvidenceProjection<I>>::Snapshot,
+    I,
 >;
 /// 只选择源中立数量载荷；源序、身份、经济和耐久处理继续共用原实现。
-pub trait OrderEvidenceProjection {
-    type Submission: Clone + std::fmt::Debug + Eq + serde::Serialize + serde::de::DeserializeOwned;
-    type Snapshot: Clone + std::fmt::Debug + Eq + serde::Serialize + serde::de::DeserializeOwned;
+pub trait OrderEvidenceProjection<I = StableLogicalIdentityV1> {
+    type Submission: Clone + std::fmt::Debug + Eq + serde::Serialize;
+    type Snapshot: Clone + std::fmt::Debug + Eq + serde::Serialize;
     fn accepted(
-        order: SourceNeutralOrderSnapshotV1,
+        order: SourceNeutralOrderSnapshotV1<I>,
         source: &contracts::AcceptedSubmissionItemV2,
         effective_processing_at_utc_ms: i64,
     ) -> Self::Submission;
     fn rejected() -> Self::Submission;
     fn unknown() -> Self::Submission;
     fn snapshot(
-        identity: SourceNeutralOrderSnapshotV1,
+        identity: SourceNeutralOrderSnapshotV1<I>,
         source: &OrderProjectionV2,
     ) -> Self::Snapshot;
 }
+#[derive(Clone, Debug, Default)]
 pub struct LegacyOrderEvidence;
-impl OrderEvidenceProjection for LegacyOrderEvidence {
-    type Submission = SourceNeutralSubmissionOutcomeV1;
-    type Snapshot = SourceNeutralOrderSnapshotV1;
+impl<I: Clone + std::fmt::Debug + Eq + serde::Serialize> OrderEvidenceProjection<I>
+    for LegacyOrderEvidence
+{
+    type Submission = SourceNeutralSubmissionOutcomeV1<I>;
+    type Snapshot = SourceNeutralOrderSnapshotV1<I>;
     fn accepted(
-        order: SourceNeutralOrderSnapshotV1,
+        order: SourceNeutralOrderSnapshotV1<I>,
         _: &contracts::AcceptedSubmissionItemV2,
         _: i64,
     ) -> Self::Submission {
@@ -1236,16 +1266,22 @@ impl OrderEvidenceProjection for LegacyOrderEvidence {
     fn unknown() -> Self::Submission {
         SourceNeutralSubmissionOutcomeV1::EvidenceUnknownNoEffect
     }
-    fn snapshot(identity: SourceNeutralOrderSnapshotV1, _: &OrderProjectionV2) -> Self::Snapshot {
+    fn snapshot(
+        identity: SourceNeutralOrderSnapshotV1<I>,
+        _: &OrderProjectionV2,
+    ) -> Self::Snapshot {
         identity
     }
 }
+#[derive(Clone, Debug, Default)]
 pub struct MeasuredOrderEvidence;
-impl OrderEvidenceProjection for MeasuredOrderEvidence {
-    type Submission = contracts::execution_normalization::SourceNeutralSubmissionOutcomeV2;
-    type Snapshot = contracts::execution_normalization::SourceNeutralOrderSnapshotV2;
+impl<I: Clone + std::fmt::Debug + Eq + serde::Serialize> OrderEvidenceProjection<I>
+    for MeasuredOrderEvidence
+{
+    type Submission = contracts::execution_normalization::SourceNeutralSubmissionOutcomeV2<I>;
+    type Snapshot = contracts::execution_normalization::SourceNeutralOrderSnapshotV2<I>;
     fn accepted(
-        order: SourceNeutralOrderSnapshotV1,
+        order: SourceNeutralOrderSnapshotV1<I>,
         source: &contracts::AcceptedSubmissionItemV2,
         effective_processing_at_utc_ms: i64,
     ) -> Self::Submission {
@@ -1282,7 +1318,7 @@ impl OrderEvidenceProjection for MeasuredOrderEvidence {
         Self::Submission::EvidenceUnknownNoEffect
     }
     fn snapshot(
-        identity: SourceNeutralOrderSnapshotV1,
+        identity: SourceNeutralOrderSnapshotV1<I>,
         source: &OrderProjectionV2,
     ) -> Self::Snapshot {
         use contracts::{
@@ -1348,7 +1384,10 @@ pub(super) fn project_real_query_for_tests(
         settlement_lifecycle: vec![],
     };
     assert!(port.open_from_first_batch(&batch));
-    let mapper = BatchMapper::<_, MeasuredOrderEvidence>::new(port.store.as_ref().unwrap(), &batch);
+    let mapper = BatchMapper::<_, MeasuredOrderEvidence>::new(
+        port.store.as_ref().unwrap().context(),
+        &batch,
+    );
     match query {
         super::QueryActionResultV2::Order(r) => {
             serde_json::to_value(mapper.map_order_query(r).unwrap()).unwrap()
@@ -1587,7 +1626,7 @@ pub(super) fn assert_order_controls_v3(
             _ => None,
         })
         .unwrap();
-    let original = BatchMapper::<_, MeasuredOrderEvidence>::new(&store, batch)
+    let original = BatchMapper::<_, MeasuredOrderEvidence>::new(store.context(), batch)
         .map()
         .unwrap();
     let next = store.durable_through().unwrap().projection_batch_sequence + 1;
@@ -1673,7 +1712,7 @@ pub(super) fn assert_v3_rebuilt_evidence_semantics(
         DurableContextStoreV2, NormalizationCoreV1, NormalizationRecordV2,
     };
     let mut store = DurableContextStoreV2::open(root, context).unwrap();
-    let original = BatchMapper::<_, LegacyOrderEvidence>::new(&store, batch)
+    let original = BatchMapper::<_, LegacyOrderEvidence>::new(store.context(), batch)
         .map()
         .unwrap();
     let next = store.durable_through().unwrap().projection_batch_sequence + 1;

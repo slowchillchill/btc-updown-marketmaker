@@ -1892,3 +1892,8 @@ async fn finite_session_feed_does_not_wait_on_a_real_business_error() {
     assert!(matches!(error, SimRunActorErrorV2::SessionAlreadyCreated));
     assert_eq!(execution.actor.applied_input_sequence, before);
 }
+
+mod memory_noe_tests {
+    use super::*;
+    include!("memory_noe_tests.rs");
+}
