@@ -144,9 +144,9 @@ async fn hot_anchor_started_before_cutoff_keeps_actual_response_after_cutoff() {
         release_rx.await.unwrap();
         write_loopback_http_response(&mut stream, "200 OK", &body).await;
     });
-    let gate = Arc::new(HotSessionGate::new(
+    let gate = Arc::new(HotSessionGate::new(Some(
         Instant::now() + Duration::from_secs(60),
-    ));
+    )));
     let stats = Arc::new(SourceQueueBackpressureStats::default());
     stats.install_hot_session(Arc::clone(&gate)).unwrap();
     let (tx, mut rx) = mpsc::channel(8);
@@ -6475,9 +6475,9 @@ async fn polymarket_stop_materializes_accepted_current_ws_after_e_before_reply()
 
         let stats = Arc::new(SourceQueueBackpressureStats::default());
         let admission_gate = if clean_exit.starts_with("hot_") {
-            let gate = Arc::new(HotSessionGate::new(
+            let gate = Arc::new(HotSessionGate::new(Some(
                 Instant::now() + Duration::from_secs(60),
-            ));
+            )));
             stats.install_hot_session(Arc::clone(&gate)).unwrap();
             SourceAdmissionGate::Hot(gate)
         } else {

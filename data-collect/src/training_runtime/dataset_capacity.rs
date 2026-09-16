@@ -1,10 +1,10 @@
 use super::*;
 
-pub(super) fn training_dataset_size_bytes(dataset_root: &Path) -> io::Result<u64> {
+pub(super) fn validate_training_dataset_paths(dataset_root: &Path) -> io::Result<()> {
     let training_root = dataset_root.join("training");
     let metadata = match fs::symlink_metadata(&training_root) {
         Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     };
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -16,11 +16,10 @@ pub(super) fn training_dataset_size_bytes(dataset_root: &Path) -> io::Result<u64
             ),
         ));
     }
-    directory_tree_size_bytes(&training_root)
+    validate_directory_tree(&training_root)
 }
 
-fn directory_tree_size_bytes(path: &Path) -> io::Result<u64> {
-    let mut total = 0_u64;
+fn validate_directory_tree(path: &Path) -> io::Result<()> {
     for entry in fs::read_dir(path)? {
         let entry = entry?;
         let file_type = entry.file_type()?;
@@ -34,10 +33,8 @@ fn directory_tree_size_bytes(path: &Path) -> io::Result<u64> {
             ));
         }
         if file_type.is_dir() {
-            total = total.saturating_add(directory_tree_size_bytes(&entry.path())?);
-        } else if file_type.is_file() {
-            total = total.saturating_add(entry.metadata()?.len());
-        } else {
+            validate_directory_tree(&entry.path())?;
+        } else if !file_type.is_file() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!(
@@ -47,5 +44,5 @@ fn directory_tree_size_bytes(path: &Path) -> io::Result<u64> {
             ));
         }
     }
-    Ok(total)
+    Ok(())
 }

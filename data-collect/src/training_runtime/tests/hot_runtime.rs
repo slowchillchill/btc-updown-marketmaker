@@ -90,6 +90,30 @@ pub(in crate::training_runtime) fn record_same_input_cold_parquet(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn real_hot_roles_wait_for_session_then_deliver_all_seven_source_types() {
+    exercise_real_hot_roles(Some(3)).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_hot_roles_without_deadline_deliver_until_operator_stop() {
+    const CHILD: &str = "DATA_COLLECT_UNBOUNDED_HOT_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        // SIGTERM 只发给独立测试进程，不影响并行测试或宿主服务。
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "training_runtime::tests::hot_runtime::real_hot_roles_without_deadline_deliver_until_operator_stop", "--nocapture"])
+            .env(CHILD, "1").output().unwrap();
+        assert!(
+            output.status.success(),
+            "stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    exercise_real_hot_roles(None).await;
+}
+
+async fn exercise_real_hot_roles(max_runtime_secs: Option<u64>) {
     for (role, environment) in [
         (CollectorBinaryRole::PaperHot, "paper"),
         (CollectorBinaryRole::LiveHot, "live"),
@@ -103,20 +127,26 @@ async fn real_hot_roles_wait_for_session_then_deliver_all_seven_source_types() {
             .path()
             .join("training/typed_raw/utc_day=2026-08-08/manifest.json");
         fs::write(&old_manifest, b"existing cold evidence is untouched").unwrap();
-        let args = vec![
+        let mut args = vec![
             "--dataset-root".into(),
             root.path().as_os_str().to_owned(),
             "--run-id".into(),
             format!("{environment}-controlled").into(),
             "--collector-region".into(),
             "fixture".into(),
-            "--max-runtime-secs".into(),
-            "3".into(),
         ];
+        if let Some(seconds) = max_runtime_secs {
+            args.extend(["--max-runtime-secs".into(), seconds.to_string().into()]);
+        }
         let runtime = tokio::spawn(crate::runtime::run_hot_collector_with_runner(
             role,
             args,
             move |stream, receipt, started, deadline, deadline_ms| {
+                assert_eq!(
+                    deadline,
+                    max_runtime_secs.map(|seconds| started + Duration::from_secs(seconds))
+                );
+                assert_eq!(deadline_ms.is_some(), max_runtime_secs.is_some());
                 Box::pin(
                     crate::training_runtime::hot_runtime::run_hot_sources_with_specs(
                         stream,
@@ -180,6 +210,7 @@ async fn real_hot_roles_wait_for_session_then_deliver_all_seven_source_types() {
         let mut windows = BTreeSet::new();
         let mut last = 0;
         let mut anchor_seen = false;
+        let mut stop_sent = false;
         timeout(Duration::from_secs(15), async {
             loop {
                 match read_handoff_v2(&mut stream).await.unwrap() {
@@ -253,6 +284,21 @@ async fn real_hot_roles_wait_for_session_then_deliver_all_seven_source_types() {
                         .await
                         .unwrap();
                         last = transport_sequence;
+                        if max_runtime_secs.is_none()
+                            && !stop_sent
+                            && sources.len() == 7
+                            && anchor_seen
+                        {
+                            assert!(!runtime.is_finished());
+                            assert!(
+                                std::process::Command::new("kill")
+                                    .args(["-TERM", &std::process::id().to_string()])
+                                    .status()
+                                    .unwrap()
+                                    .success()
+                            );
+                            stop_sent = true;
+                        }
                     }
                     DataCollectHandoffV2::End {
                         last_confirmed_sequence,
@@ -267,6 +313,7 @@ async fn real_hot_roles_wait_for_session_then_deliver_all_seven_source_types() {
         .await
         .unwrap();
         runtime.await.unwrap().unwrap();
+        assert_eq!(stop_sent, max_runtime_secs.is_none());
         assert_eq!(sources, training_source_kinds().iter().copied().collect());
         assert_eq!(windows, BTreeSet::from([60]));
         assert!(anchor_seen);
@@ -281,9 +328,9 @@ async fn real_hot_roles_wait_for_session_then_deliver_all_seven_source_types() {
 
 #[tokio::test]
 async fn accepted_hot_tickets_survive_midnight_cutoff_and_keep_http_and_terminal_derivatives() {
-    let gate = Arc::new(HotSessionGate::new(
+    let gate = Arc::new(HotSessionGate::new(Some(
         Instant::now() + Duration::from_secs(60),
-    ));
+    )));
     let admission = SourceAdmissionGate::Hot(Arc::clone(&gate));
     let midnight = 1_783_209_600_000_i64;
     let ws = admission
@@ -392,7 +439,7 @@ async fn hot_price_change_keeps_all_members_in_one_socket_message() {
         _row_reservation: budget.try_acquire(1, 0),
         _byte_reservation: budget.try_acquire(0, owned),
     });
-    let mut gate = HotSessionGate::new(Instant::now() + Duration::from_secs(60));
+    let mut gate = HotSessionGate::new(Some(Instant::now() + Duration::from_secs(60)));
     gate.comparison_root = std::env::var_os("DATA_COLLECT_HOT_COMPARISON_ROOT")
         .map(PathBuf::from)
         .map(|path| path.join("price-change-members-controlled"));
@@ -489,9 +536,9 @@ pub(in crate::training_runtime) fn measured_new_market_public_owned_bytes(
 async fn hot_handoff_resource_prefixes_measure_source_encoding_and_receive_ownership() {
     const N: u64 = 64;
     let budget = InflightBudget::new();
-    let gate = Arc::new(HotSessionGate::new(
+    let gate = Arc::new(HotSessionGate::new(Some(
         Instant::now() + Duration::from_secs(60),
-    ));
+    )));
     *gate.send_measurements.lock().unwrap() = Some(Vec::new());
     let (tx, mut rx) = bounded_event_queue(DEFAULT_QUEUE_CAPACITY).unwrap();
     for sequence in 1..=N {
@@ -609,7 +656,7 @@ async fn hot_one_mib_source_rule_is_not_a_frame_cap_or_a_second_budget_acquire()
     assert_eq!(budget.available(), (0, 0));
     let (mut writer, mut reader) = tokio::net::UnixStream::pair().unwrap();
     let sender = tokio::spawn(async move {
-        let gate = HotSessionGate::new(Instant::now() + Duration::from_secs(60));
+        let gate = HotSessionGate::new(Some(Instant::now() + Duration::from_secs(60)));
         let mut usable = true;
         crate::training_runtime::hot_runtime::send_public_payload(
             &mut writer,
@@ -697,9 +744,9 @@ async fn hot_source_failure_keeps_a_healthy_unconfirmed_message_deliverable() {
         _row_reservation: budget.try_acquire(1, 0),
         _byte_reservation: budget.try_acquire(0, owned),
     });
-    let gate = Arc::new(HotSessionGate::new(
+    let gate = Arc::new(HotSessionGate::new(Some(
         Instant::now() + Duration::from_secs(60),
-    ));
+    )));
     let sender_gate = Arc::clone(&gate);
     let (mut writer, mut reader) = tokio::net::UnixStream::pair().unwrap();
     let sender = tokio::spawn(async move {
@@ -763,9 +810,9 @@ async fn hot_source_failure_keeps_a_healthy_unconfirmed_message_deliverable() {
 
 #[tokio::test]
 async fn hot_raw_enqueue_already_waiting_for_capacity_survives_cutoff() {
-    let gate = Arc::new(HotSessionGate::new(
+    let gate = Arc::new(HotSessionGate::new(Some(
         Instant::now() + Duration::from_secs(60),
-    ));
+    )));
     let stats = Arc::new(SourceQueueBackpressureStats::default());
     stats.install_hot_session(Arc::clone(&gate)).unwrap();
     let (tx, mut rx) = mpsc::channel(1);
