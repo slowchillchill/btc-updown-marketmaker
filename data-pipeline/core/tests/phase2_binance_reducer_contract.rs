@@ -1283,3 +1283,121 @@ fn prepared_binance_inputs_keep_stateful_results_before_late_materialization() {
         matches!(first.payload, CanonicalReferenceEventPayloadV1::BinanceDepthState(value) if value.last_update_id == 100)
     );
 }
+
+#[test]
+fn consecutive_snapshotless_epochs_move_one_book_and_preserve_evidence() {
+    let mut reducer = BinanceDepthReducer::new(RULE_VERSION).unwrap();
+    let mut outcomes = vec![
+        reducer
+            .apply_snapshot(&snapshot("epoch-1", 100, 1), &sha('a'), &sha('b'))
+            .unwrap(),
+    ];
+    let mut retained = vec![reducer.retained_state_entries()];
+    for (sequence, quantity, file) in [(2, "0", 'c'), (3, "0.8", 'd')] {
+        outcomes.push(
+            reducer
+                .apply_update(
+                    &update(
+                        "epoch-1",
+                        99 + sequence,
+                        99 + sequence,
+                        sequence,
+                        Some(100),
+                        (sequence > 2).then_some(98 + sequence),
+                        BinanceDepthStitchVerdict::Applied,
+                        vec![level("64100", quantity)],
+                    ),
+                    &sha('a'),
+                    &sha(file),
+                )
+                .unwrap(),
+        );
+        retained.push(reducer.retained_state_entries());
+    }
+    let restored = produced_event(&outcomes[2]).clone();
+    assert!(
+        restored
+            .lineage
+            .source_evidence
+            .iter()
+            .any(|evidence| evidence
+                .collector_admission
+                .as_ref()
+                .is_some_and(|coordinate| coordinate.collector_admission_sequence == 2)),
+        "重现保留删除前序证据"
+    );
+    for (epoch, sequence, file) in [("epoch-2", 4, 'e'), ("epoch-3", 5, 'f')] {
+        outcomes.push(
+            reducer
+                .apply_update(
+                    &update(
+                        epoch,
+                        200 + sequence,
+                        200 + sequence,
+                        sequence,
+                        None,
+                        None,
+                        BinanceDepthStitchVerdict::NotAppliedSnapshotUnavailable,
+                        vec![level("65000", "2")],
+                    ),
+                    &sha('a'),
+                    &sha(file),
+                )
+                .unwrap(),
+        );
+        retained.push(reducer.retained_state_entries());
+    }
+    let missing = produced_event(&outcomes[3]);
+    assert_eq!(missing.payload, restored.payload);
+    assert_eq!(missing.quality.availability, MarketDataQuality::Missing);
+    assert_eq!(missing.quality.resync, ResyncQuality::Required);
+    assert_eq!(missing.time.source_event_at_utc_ms, Some(1504));
+    assert_eq!(missing.time.received_at_utc_ms, 2004);
+    assert_no_output_with_evidence(&outcomes[4]);
+    assert_eq!(
+        outcomes[4].report.reason_code,
+        "BINANCE_DEPTH_SNAPSHOT_UNAVAILABLE"
+    );
+    let mut fresh = snapshot("epoch-3", 300, 6);
+    fresh.bids = vec![level("65000", "2")];
+    fresh.asks = vec![level("65100", "3")];
+    outcomes.push(
+        reducer
+            .apply_snapshot(&fresh, &sha('a'), &sha('1'))
+            .unwrap(),
+    );
+    retained.push(reducer.retained_state_entries());
+    let resynced = produced_event(&outcomes[5]);
+    assert_eq!(resynced.quality.resync, ResyncQuality::ResyncBoundary);
+    assert_eq!(resynced.time.received_at_utc_ms, 2006);
+    assert!(resynced.lineage.source_evidence.iter().all(|evidence| {
+        evidence
+            .collector_admission
+            .as_ref()
+            .is_some_and(|coordinate| coordinate.source_sequence_epoch_id == "epoch-3")
+    }));
+    let error = reducer
+        .apply_snapshot(&snapshot("epoch-1", 400, 7), &sha('a'), &sha('2'))
+        .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("completed Binance depth epoch cannot resume")
+    );
+    assert_eq!(reducer.retained_state_entries(), *retained.last().unwrap());
+    let semantic_bytes = serde_json::to_vec(
+        &outcomes
+            .iter()
+            .map(|outcome| (&outcome.event, &outcome.report))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    // 固定合法轨迹在修改前主线 9d1b290 的完整事件、身份、证据、双时间与报告摘要。
+    let digest = format!("{:x}", Sha256::digest(semantic_bytes));
+    assert_eq!(
+        digest,
+        "7c2782f7526fbcfeb0d17078533102809a48b1f86e7655008356f1d5ddcf10ed"
+    );
+    assert_eq!(retained, vec![6, 6, 6, 7, 8, 6]);
+    println!("semantic_sha256={digest}; retained={retained:?}");
+}

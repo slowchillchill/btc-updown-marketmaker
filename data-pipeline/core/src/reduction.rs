@@ -804,13 +804,10 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
         let (prior_book, prior_awaiting_after_confirmed_gap, prior_epoch_switch_missing_emitted) =
             self.current_epoch
                 .as_ref()
-                .and_then(|current| self.epochs.get(current))
+                .and_then(|current| self.epochs.remove(current))
                 .map(|state| {
                     (
-                        state
-                            .book
-                            .clone()
-                            .or_else(|| state.epoch_switch_prior_book.clone()),
+                        state.book.or(state.epoch_switch_prior_book),
                         state.awaiting_after_confirmed_gap,
                         state.epoch_switch_missing_emitted,
                     )

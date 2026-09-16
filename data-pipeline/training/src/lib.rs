@@ -1821,14 +1821,10 @@ fn sort_row_inner_bytes(row: &SortRow) -> Option<usize> {
     row.sort_key.capacity().checked_add(row.payload.capacity())
 }
 
-fn sort_row_buffer_bytes(rows: &Vec<SortRow>) -> Option<usize> {
+fn sort_row_buffer_bytes(rows: &Vec<SortRow>, inner_bytes: usize) -> Option<usize> {
     rows.capacity()
         .checked_mul(size_of::<SortRow>())
-        .and_then(|bytes| {
-            rows.iter().try_fold(bytes, |total, row| {
-                total.checked_add(sort_row_inner_bytes(row)?)
-            })
-        })
+        .and_then(|bytes| bytes.checked_add(inner_bytes))
 }
 
 /// 单次排序调用的显式硬上限。
@@ -1970,6 +1966,7 @@ pub(crate) struct ExternalSorter {
     metrics: SortMetrics,
     runs: Vec<RunInfo>,
     pending_rows: Vec<SortRow>,
+    pending_inner_bytes: usize,
     current_temp_bytes: u64,
     active_temp_run_files: usize,
     next_file_id: usize,
@@ -1995,16 +1992,19 @@ impl ExternalSorter {
             metrics: SortMetrics::default(),
             runs: Vec::new(),
             pending_rows: Vec::with_capacity(config.max_run_rows),
+            pending_inner_bytes: 0,
             current_temp_bytes: 0,
             active_temp_run_files: 0,
             next_file_id: 0,
             retain_work_directory: false,
         };
         let pending_base_bytes =
-            sort_row_buffer_bytes(&sorter.pending_rows).ok_or(SortError::RowMemoryLimit {
-                observed: usize::MAX,
-                limit: config.max_run_bytes,
-            })?;
+            sort_row_buffer_bytes(&sorter.pending_rows, sorter.pending_inner_bytes).ok_or(
+                SortError::RowMemoryLimit {
+                    observed: usize::MAX,
+                    limit: config.max_run_bytes,
+                },
+            )?;
         if pending_base_bytes > config.max_run_bytes {
             return Err(SortError::RowMemoryLimit {
                 observed: pending_base_bytes,
@@ -2017,31 +2017,34 @@ impl ExternalSorter {
 
     pub(crate) fn push(&mut self, row: SortRow) -> Result<(), SortError> {
         let exceeds_rows = self.pending_rows.len() >= self.config.max_run_rows;
-        let mut prospective_bytes = sort_row_buffer_bytes(&self.pending_rows)
-            .and_then(|bytes| bytes.checked_add(sort_row_inner_bytes(&row)?))
-            .filter(|bytes| *bytes <= self.config.max_run_bytes);
+        let mut prospective_bytes =
+            sort_row_buffer_bytes(&self.pending_rows, self.pending_inner_bytes)
+                .and_then(|bytes| bytes.checked_add(sort_row_inner_bytes(&row)?))
+                .filter(|bytes| *bytes <= self.config.max_run_bytes);
         let exceeds_bytes = prospective_bytes.is_none();
         if exceeds_rows || exceeds_bytes {
             if self.pending_rows.is_empty() {
                 return Err(SortError::RowMemoryLimit {
-                    observed: sort_row_buffer_bytes(&self.pending_rows)
+                    observed: sort_row_buffer_bytes(&self.pending_rows, self.pending_inner_bytes)
                         .and_then(|bytes| bytes.checked_add(sort_row_inner_bytes(&row)?))
                         .unwrap_or(usize::MAX),
                     limit: self.config.max_run_bytes,
                 });
             }
             self.flush_pending()?;
-            prospective_bytes = sort_row_buffer_bytes(&self.pending_rows)
+            prospective_bytes = sort_row_buffer_bytes(&self.pending_rows, self.pending_inner_bytes)
                 .and_then(|bytes| bytes.checked_add(sort_row_inner_bytes(&row)?))
                 .filter(|bytes| *bytes <= self.config.max_run_bytes);
         }
 
         let observed = prospective_bytes.ok_or(SortError::RowMemoryLimit {
-            observed: sort_row_buffer_bytes(&self.pending_rows)
+            observed: sort_row_buffer_bytes(&self.pending_rows, self.pending_inner_bytes)
                 .and_then(|bytes| bytes.checked_add(sort_row_inner_bytes(&row)?))
                 .unwrap_or(usize::MAX),
             limit: self.config.max_run_bytes,
         })?;
+        // The prospective total above checked both the inner sum and descriptor allocation.
+        self.pending_inner_bytes += sort_row_inner_bytes(&row).expect("validated row capacity");
         self.pending_rows.push(row);
         self.metrics.input_rows += 1;
         self.metrics.peak_run_rows = self.metrics.peak_run_rows.max(self.pending_rows.len());
@@ -2050,8 +2053,10 @@ impl ExternalSorter {
     }
 
     fn flush_pending(&mut self) -> Result<(), SortError> {
+        let rows = std::mem::take(&mut self.pending_rows);
+        self.pending_inner_bytes = 0;
         let run = flush_initial_run(
-            std::mem::take(&mut self.pending_rows),
+            rows,
             RunDestination {
                 work_directory: &self.work_directory,
                 pass: 0,
@@ -2079,10 +2084,12 @@ impl ExternalSorter {
 
         self.pending_rows = Vec::with_capacity(self.config.max_run_rows);
         let pending_base_bytes =
-            sort_row_buffer_bytes(&self.pending_rows).ok_or(SortError::RowMemoryLimit {
-                observed: usize::MAX,
-                limit: self.config.max_run_bytes,
-            })?;
+            sort_row_buffer_bytes(&self.pending_rows, self.pending_inner_bytes).ok_or(
+                SortError::RowMemoryLimit {
+                    observed: usize::MAX,
+                    limit: self.config.max_run_bytes,
+                },
+            )?;
         if pending_base_bytes > self.config.max_run_bytes {
             return Err(SortError::RowMemoryLimit {
                 observed: pending_base_bytes,
@@ -2526,6 +2533,7 @@ struct RunWriter {
     quota_exceeded: Arc<AtomicBool>,
     max_temp_bytes: u64,
     buffer: Vec<SortRow>,
+    buffer_inner_bytes: usize,
     max_buffer_rows: usize,
     max_buffer_bytes: usize,
     rows: u64,
@@ -2545,7 +2553,7 @@ impl RunWriter {
             active_temp_run_files,
             config,
             metrics,
-            Vec::with_capacity(config.batch_rows),
+            config.batch_rows,
         )
     }
 
@@ -2562,7 +2570,7 @@ impl RunWriter {
             active_temp_run_files,
             config,
             metrics,
-            Vec::new(),
+            0,
         )
     }
 
@@ -2572,7 +2580,7 @@ impl RunWriter {
         active_temp_run_files: usize,
         config: &SortConfig,
         metrics: &mut SortMetrics,
-        buffer: Vec<SortRow>,
+        buffer_capacity: usize,
     ) -> Result<Self, SortError> {
         if active_temp_run_files >= config.max_temp_run_files {
             return Err(SortError::TempRunFileLimit {
@@ -2586,8 +2594,9 @@ impl RunWriter {
             .ok_or(SortError::TempByteLimit {
                 limit: config.max_temp_bytes,
             })?;
+        let buffer = Vec::with_capacity(buffer_capacity);
         let buffer_base_bytes =
-            sort_row_buffer_bytes(&buffer).ok_or(SortError::RowMemoryLimit {
+            sort_row_buffer_bytes(&buffer, 0).ok_or(SortError::RowMemoryLimit {
                 observed: usize::MAX,
                 limit: config.max_run_bytes,
             })?;
@@ -2625,6 +2634,7 @@ impl RunWriter {
             quota_exceeded,
             max_temp_bytes: config.max_temp_bytes,
             buffer,
+            buffer_inner_bytes: 0,
             max_buffer_rows: config.batch_rows,
             max_buffer_bytes: config.max_run_bytes,
             rows: 0,
@@ -2633,30 +2643,31 @@ impl RunWriter {
 
     fn push(&mut self, row: SortRow, metrics: &mut SortMetrics) -> Result<(), SortError> {
         let exceeds_rows = self.buffer.len() >= self.max_buffer_rows;
-        let mut prospective_bytes = sort_row_buffer_bytes(&self.buffer)
+        let mut prospective_bytes = sort_row_buffer_bytes(&self.buffer, self.buffer_inner_bytes)
             .and_then(|bytes| bytes.checked_add(sort_row_inner_bytes(&row)?))
             .filter(|bytes| *bytes <= self.max_buffer_bytes);
         let exceeds_bytes = prospective_bytes.is_none();
         if exceeds_rows || exceeds_bytes {
             if self.buffer.is_empty() {
                 return Err(SortError::RowMemoryLimit {
-                    observed: sort_row_buffer_bytes(&self.buffer)
+                    observed: sort_row_buffer_bytes(&self.buffer, self.buffer_inner_bytes)
                         .and_then(|bytes| bytes.checked_add(sort_row_inner_bytes(&row)?))
                         .unwrap_or(usize::MAX),
                     limit: self.max_buffer_bytes,
                 });
             }
             self.flush_buffer(metrics)?;
-            prospective_bytes = sort_row_buffer_bytes(&self.buffer)
+            prospective_bytes = sort_row_buffer_bytes(&self.buffer, self.buffer_inner_bytes)
                 .and_then(|bytes| bytes.checked_add(sort_row_inner_bytes(&row)?))
                 .filter(|bytes| *bytes <= self.max_buffer_bytes);
         }
         let observed = prospective_bytes.ok_or(SortError::RowMemoryLimit {
-            observed: sort_row_buffer_bytes(&self.buffer)
+            observed: sort_row_buffer_bytes(&self.buffer, self.buffer_inner_bytes)
                 .and_then(|bytes| bytes.checked_add(sort_row_inner_bytes(&row)?))
                 .unwrap_or(usize::MAX),
             limit: self.max_buffer_bytes,
         })?;
+        self.buffer_inner_bytes += sort_row_inner_bytes(&row).expect("validated row capacity");
         self.buffer.push(row);
         metrics.peak_write_buffer_rows = metrics.peak_write_buffer_rows.max(self.buffer.len());
         metrics.peak_write_buffer_bytes = metrics.peak_write_buffer_bytes.max(observed);
@@ -2677,8 +2688,9 @@ impl RunWriter {
         let batch = batch_from_rows(&self.buffer)?;
         self.write_batch(&batch, self.buffer.len())?;
         self.buffer.clear();
-        let buffer_base_bytes =
-            sort_row_buffer_bytes(&self.buffer).ok_or(SortError::RowMemoryLimit {
+        self.buffer_inner_bytes = 0;
+        let buffer_base_bytes = sort_row_buffer_bytes(&self.buffer, self.buffer_inner_bytes)
+            .ok_or(SortError::RowMemoryLimit {
                 observed: usize::MAX,
                 limit: self.max_buffer_bytes,
             })?;
@@ -3985,6 +3997,24 @@ mod tests {
         )
     }
 
+    fn row_with_spare_capacity(sequence: u64) -> SortRow {
+        let mut row = row(sequence);
+        row.sort_key.reserve(64);
+        row.payload.reserve(128);
+        assert!(row.sort_key.capacity() > row.sort_key.len());
+        assert!(row.payload.capacity() > row.payload.len());
+        row
+    }
+
+    // Independent test oracle: scan actual owned allocations rather than the maintained sum.
+    fn scanned_buffer_bytes(rows: &Vec<SortRow>) -> usize {
+        rows.capacity() * size_of::<SortRow>()
+            + rows
+                .iter()
+                .map(|row| row.sort_key.capacity() + row.payload.capacity())
+                .sum::<usize>()
+    }
+
     fn config(max_run_rows: usize, merge_fan_in: usize) -> SortConfig {
         SortConfig {
             max_run_rows,
@@ -4231,8 +4261,8 @@ mod tests {
 
     #[test]
     fn initial_pending_rows_flushes_before_outer_descriptor_capacity_exceeds_run_budget() {
-        let first = row(1);
-        let second = row(2);
+        let first = row_with_spare_capacity(1);
+        let second = row_with_spare_capacity(2);
         let descriptor_capacity = sort_row_inner_bytes(&second)
             .expect("第二行容量可以表示")
             .div_ceil(size_of::<SortRow>())
@@ -4268,16 +4298,29 @@ mod tests {
         assert!(old_counted_is_within);
         assert!(actual_counted_exceeds);
 
-        let outcome = external_sort(vec![first, second], temp.path(), &boundary_config)
-            .expect("第二行前必须切分初始 run");
+        let mut sorter = ExternalSorter::new(temp.path(), &boundary_config).unwrap();
+        sorter.push(first).unwrap();
+        assert_eq!(
+            sort_row_buffer_bytes(&sorter.pending_rows, sorter.pending_inner_bytes),
+            Some(scanned_buffer_bytes(&sorter.pending_rows))
+        );
+        sorter.push(second).expect("第二行前必须切分初始 run");
+        assert_eq!(sorter.runs.len(), 1);
+        assert_eq!(
+            sort_row_buffer_bytes(&sorter.pending_rows, sorter.pending_inner_bytes),
+            Some(scanned_buffer_bytes(&sorter.pending_rows))
+        );
+        assert_eq!(sorter.metrics.peak_run_bytes, max_run_bytes);
+        let outcome = sorter.finish().unwrap();
+        assert_eq!(read_rows(&outcome.output_path, 1), vec![row(1), row(2)]);
 
         assert_eq!(outcome.metrics.initial_runs, 2);
     }
 
     #[test]
     fn run_writer_buffer_flushes_before_outer_descriptor_capacity_exceeds_run_budget() {
-        let first = row(1);
-        let second = row(2);
+        let first = row_with_spare_capacity(1);
+        let second = row_with_spare_capacity(2);
         let descriptor_capacity = sort_row_inner_bytes(&second)
             .expect("第二行容量可以表示")
             .div_ceil(size_of::<SortRow>())
@@ -4323,12 +4366,65 @@ mod tests {
         assert!(actual_counted_exceeds);
 
         writer.push(first, &mut metrics).expect("写入第一行");
+        assert_eq!(
+            sort_row_buffer_bytes(&writer.buffer, writer.buffer_inner_bytes),
+            Some(scanned_buffer_bytes(&writer.buffer))
+        );
         writer
             .push(second, &mut metrics)
             .expect("第二行前必须刷新写缓冲");
 
+        assert_eq!(
+            sort_row_buffer_bytes(&writer.buffer, writer.buffer_inner_bytes),
+            Some(scanned_buffer_bytes(&writer.buffer))
+        );
+        assert_eq!(metrics.peak_write_buffer_bytes, max_run_bytes);
         assert_eq!(metrics.peak_write_buffer_rows, 1);
         let run = writer.finish(&mut metrics).expect("完成写缓冲");
         assert_eq!(read_rows(&run.path, 1), vec![row(1), row(2)]);
+    }
+    #[test]
+    fn sorter_transferred_rows_are_not_counted_after_failed_run_write() {
+        let temp = TempDir::new().unwrap();
+        let mut cfg = config(2, 2);
+        cfg.max_temp_bytes = 3;
+        let mut sorter = ExternalSorter::new(temp.path(), &cfg).unwrap();
+        sorter.push(row_with_spare_capacity(1)).unwrap();
+        assert_eq!(
+            sort_row_buffer_bytes(&sorter.pending_rows, sorter.pending_inner_bytes),
+            Some(scanned_buffer_bytes(&sorter.pending_rows))
+        );
+        let error = sorter.flush_pending().unwrap_err();
+        assert!(matches!(error, SortError::TempByteLimit { limit: 3 }));
+        assert!(sorter.pending_rows.is_empty());
+        assert_eq!(sorter.pending_rows.capacity(), 0);
+        assert_eq!(sorter.pending_inner_bytes, 0);
+        assert_eq!(
+            sort_row_buffer_bytes(&sorter.pending_rows, sorter.pending_inner_bytes),
+            Some(scanned_buffer_bytes(&sorter.pending_rows))
+        );
+    }
+
+    #[test]
+    fn run_writer_keeps_row_capacity_after_failed_flush() {
+        let temp = TempDir::new().unwrap();
+        let mut cfg = config(2, 2);
+        cfg.max_temp_bytes = 4;
+        let mut metrics = SortMetrics::default();
+        let mut writer =
+            RunWriter::new(temp.path().join("quota.parquet"), 0, 0, &cfg, &mut metrics).unwrap();
+        writer
+            .push(row_with_spare_capacity(1), &mut metrics)
+            .unwrap();
+        let before = scanned_buffer_bytes(&writer.buffer);
+        let error = writer.flush_buffer(&mut metrics).unwrap_err();
+        assert!(matches!(error, SortError::TempByteLimit { limit: 4 }));
+        assert_eq!(writer.buffer.len(), 1);
+        assert_eq!(writer.buffer[0], row(1));
+        assert_eq!(scanned_buffer_bytes(&writer.buffer), before);
+        assert_eq!(
+            sort_row_buffer_bytes(&writer.buffer, writer.buffer_inner_bytes),
+            Some(before)
+        );
     }
 }
