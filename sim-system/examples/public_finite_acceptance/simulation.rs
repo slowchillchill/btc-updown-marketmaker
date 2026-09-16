@@ -1,4 +1,6 @@
 //! 显式有限消费组件；不设生产容量或构造交易请求。
+#[path = "feeding.rs"]
+mod feeding;
 use super::recorded_times::RecordedReceivedTimes;
 use super::{Config, encoded_digest, write_line};
 use contracts::{
@@ -8,6 +10,7 @@ use contracts::{
 use data_pipeline_training::{
     hidden_preparation::HiddenPreparationV1, public_recording::RecordingResult,
 };
+use feeding::feed;
 use serde::Deserialize;
 use sim_system::{
     execution::*, finality::TradeFinalityPolicyV2,
@@ -189,8 +192,16 @@ pub fn run(
         config.max_group_bytes,
         config.finite_in_flight_groups,
     )?;
-    execution.create_session(config.session)?;
-    execution.activate_session("issue88-finite-activate".into())?;
+    feed(
+        &mut execution,
+        |execution| execution.create_session(config.session.clone()),
+        PublicSimExecutionV1::wait_for_recording_capacity,
+    )?;
+    feed(
+        &mut execution,
+        |execution| execution.activate_session("issue88-finite-activate".into()),
+        PublicSimExecutionV1::wait_for_recording_capacity,
+    )?;
     if let Some(reference) = hidden_reference {
         return run_hidden(
             execution,
@@ -211,7 +222,11 @@ pub fn run(
     let mut phases = BufWriter::new(File::create(out.join("phases.jsonl"))?);
     let mut groups = 0;
     loop {
-        let next = driver.next_group();
+        let next = feed(
+            &mut driver,
+            FinitePublicConsumptionV1::next_group,
+            FinitePublicConsumptionV1::wait_for_recording_capacity,
+        );
         for phase in driver.drain_measurement_observations() {
             write_line(&mut phases, &phase)?;
         }
@@ -282,7 +297,11 @@ fn run_hidden(
         let reference = bucket.reference().clone();
         let member_count = bucket.records().len();
         // 克隆只共享原桶 Arc；实际前量校对成功返回后才进行独立验收编码。
-        driver.hidden_bucket(bucket.clone())?;
+        feed(
+            &mut driver,
+            |driver| driver.hidden_bucket(bucket.clone()),
+            FinitePublicConsumptionV1::wait_for_recording_capacity,
+        )?;
         let material = encoded_digest(&bucket.records())?;
         count += 1;
         members += member_count;
