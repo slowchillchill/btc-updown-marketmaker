@@ -100,6 +100,13 @@ where
         }
     }
 
+    #[cfg(test)]
+    pub(super) fn store_for_resource_observation(
+        &self,
+    ) -> &DurableContextStore<T::Result, ControlFor<P>> {
+        self.store.as_ref().expect("实际接纳开户后存在耐久上下文")
+    }
+
     pub fn observation(&self) -> SimV2NoeObservationV1 {
         self.observation.clone()
     }

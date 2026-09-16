@@ -6525,6 +6525,10 @@ mod tests {
     use crate::scenario::{PLATFORM_SCENARIO_SCHEMA_V1, SimulationScenarioArtifactV1};
     use crate::session::PublicVisibilityCursorV1;
 
+    mod noe_resource_tests {
+        include!("noe_resource_tests.rs");
+    }
+
     const MAX_GROUP_BYTES: usize = 64 * 1024;
 
     #[derive(Default)]
@@ -19224,7 +19228,20 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
     #[cfg(feature = "measurement")]
     pub fn measurement_resources(&self) -> PublicConsumptionResourceSnapshotV1 {
         let resources = self.execution.actor.measurement_resource_snapshot();
+        let mut public_pm_evidence =
+            data_pipeline_core::public_observation_core::PmEvidenceObjectCountsV1::default();
+        if let Some(state) = &self.execution.actor.state {
+            for evidence in state.public_pm_evidence.values() {
+                let counts = evidence.evidence_object_counts();
+                public_pm_evidence.markets += counts.markets;
+                public_pm_evidence.assets += counts.assets;
+                public_pm_evidence.levels += counts.levels;
+                public_pm_evidence.absences += counts.absences;
+                public_pm_evidence.selected += counts.selected;
+            }
+        }
         PublicConsumptionResourceSnapshotV1 {
+            public_pm_evidence,
             business: resources.business,
             pending_projection: resources.pending_projection,
             applied_input_sequence: self.execution.actor.applied_input_sequence,

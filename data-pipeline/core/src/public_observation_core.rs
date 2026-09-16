@@ -12,6 +12,16 @@ use std::str::FromStr;
 
 type LevelKey = (String, bool, Decimal);
 
+/// 按需读取的证据对象数量，不是字节数；不包含字符串容量或临时归约材料。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize)]
+pub struct PmEvidenceObjectCountsV1 {
+    pub markets: usize,
+    pub assets: usize,
+    pub levels: usize,
+    pub absences: usize,
+    pub selected: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct PmOwnedStateV1<E = SourceEvidenceRefV3> {
     context: PmMarketContextV1<E>,
@@ -31,6 +41,15 @@ fn d(value: &str) -> Decimal {
 }
 
 impl<E: PmEvidenceV1> PmOwnedStateV1<E> {
+    pub fn evidence_object_counts(&self) -> PmEvidenceObjectCountsV1 {
+        PmEvidenceObjectCountsV1 {
+            markets: 1,
+            assets: self.assets.len(),
+            levels: self.levels.len(),
+            absences: self.absences.len(),
+            selected: self.selected.len(),
+        }
+    }
     pub fn context(&self) -> &PmMarketContextV1<E> {
         &self.context
     }
