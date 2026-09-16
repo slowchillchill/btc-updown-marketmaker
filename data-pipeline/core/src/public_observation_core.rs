@@ -289,10 +289,6 @@ pub enum DptCoreErrorV1 {
     UnpairedWsTerminalMetadata {
         count: usize,
     },
-    RetainedReducerStateLimit {
-        observed: usize,
-        limit: usize,
-    },
     Aborted {
         reason: String,
     },
@@ -581,6 +577,15 @@ impl PublicObservationCoreV1 {
         &mut self,
         input: &'a PreparedIngressV1<'_>,
     ) -> Result<PublicAppliedIngressV1<'a>, DptCoreErrorV1> {
+        if input.recorded.input_stream_id != self.header.input_stream_id
+            || input.recorded.input_position != self.next_input_position
+        {
+            return Err(ContractError::InvalidField {
+                field: "recorded_ingress".into(),
+                reason: "输入必须属于同一流并从零连续递增".into(),
+            }
+            .into());
+        }
         let mut result = PublicAppliedIngressV1 {
             applied: AppliedIngressV1 {
                 applied_prefix: self.applied_prefix(),
@@ -871,13 +876,6 @@ impl PublicObservationCoreV1 {
                     );
                 }
             }
-        }
-        let observed = self.retained_state_entries();
-        if observed > self.header.max_retained_reducer_state_entries {
-            return Err(DptCoreErrorV1::RetainedReducerStateLimit {
-                observed,
-                limit: self.header.max_retained_reducer_state_entries,
-            });
         }
         self.next_input_position += 1;
         result.applied.applied_prefix = self.applied_prefix();

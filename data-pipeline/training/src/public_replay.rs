@@ -6,7 +6,11 @@ use data_pipeline_core::{
     public_input::*, public_observation_core::*, public_reference::*, typed_raw::TypedRawRow,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fs, path::Path};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum HistoricalSourceV1 {
@@ -29,13 +33,18 @@ struct HistoricalIngressV1 {
     pub source_order_key: Vec<u8>,
     pub ingress: DptIngressV1,
 }
-/// 分来源外排之后只保留六个首项；深度快照/更新必须使用同一个 BinanceDepth 来源。
+/// 分来源外排后归并只比较六个首项；深度快照/更新必须使用同一个 BinanceDepth 来源。
 pub struct HistoricalMergeV1 {
     cursors: Vec<RunCursor>,
     heads: Vec<Option<HistoricalIngressV1>>,
     stream: String,
     position: u64,
     sort_metrics: Vec<crate::SortMetrics>,
+    twap_path: PathBuf,
+    // 与 TWAP 外排原序一一对应；不保存载荷或业务选择结果。
+    twap_positions: Vec<u64>,
+    page_rows: usize,
+    page_bytes: usize,
 }
 impl HistoricalMergeV1 {
     fn prepare(
@@ -60,8 +69,12 @@ impl HistoricalMergeV1 {
         let mut cursors = Vec::new();
         let mut heads = Vec::new();
         let mut sort_metrics = Vec::new();
-        for sorter in sorters {
+        let mut twap_path = PathBuf::new();
+        for (index, sorter) in sorters.into_iter().enumerate() {
             let output = sorter.finish()?;
+            if index == HistoricalSourceV1::Twap.index() {
+                twap_path = output.output_path.clone();
+            }
             sort_metrics.push(output.metrics.clone());
             let mut cursor =
                 RunCursor::open(&output.output_path, config.batch_rows, config.max_run_bytes)?;
@@ -79,6 +92,10 @@ impl HistoricalMergeV1 {
             stream,
             position: 0,
             sort_metrics,
+            twap_path,
+            twap_positions: Vec::new(),
+            page_rows: config.batch_rows,
+            page_bytes: config.max_run_bytes,
         })
     }
     pub fn sort_metrics(&self) -> &[crate::SortMetrics] {
@@ -107,6 +124,9 @@ impl HistoricalMergeV1 {
             .next_row()?
             .map(|r| serde_json::from_slice(r.payload()))
             .transpose()?;
+        if i == HistoricalSourceV1::Twap.index() {
+            self.twap_positions.push(self.position);
+        }
         let result = RecordedIngressV1 {
             input_stream_id: self.stream.clone(),
             input_position: self.position,
@@ -115,6 +135,98 @@ impl HistoricalMergeV1 {
         };
         self.position += 1;
         Ok(Some(result))
+    }
+    /// 有限 core/record 共用准备入口；只按需重读 TWAP 外排页，索引仅保存已接纳原坐标。
+    pub fn prepare_input<'a>(
+        &self,
+        core: &PublicObservationCoreV1,
+        input: &'a mut RecordedIngressV1,
+    ) -> RecordingResult<PreparedIngressV1<'a>> {
+        let Some(market) = reference_market_for_input(core, input) else {
+            return Ok(prepare_public_ingress_v1(
+                core,
+                input,
+                &BTreeMap::new(),
+                &[],
+            )?);
+        };
+        // 选择器先检查规则/正式锚价；不需要候选时不打开外排文件。
+        let mut reader = None;
+        let mut ordinal = 0;
+        Ok(prepare_public_ingress_with_reference_v1(
+            core,
+            input,
+            &BTreeMap::new(),
+            &[],
+            &market,
+            |cursor| {
+                let page = (|| -> RecordingResult<_> {
+                    if reader.is_none() {
+                        reader = Some(RunCursor::open(
+                            &self.twap_path,
+                            self.page_rows,
+                            self.page_bytes,
+                        )?);
+                    }
+                    let reader = reader.as_mut().unwrap();
+                    let mut values = Vec::new();
+                    let mut next = cursor;
+                    while ordinal < self.twap_positions.len() && values.len() < self.page_rows {
+                        let position = self.twap_positions[ordinal];
+                        ordinal += 1;
+                        let row = reader.next_row()?.ok_or("TWAP 外排记录缺失")?;
+                        if position < cursor.next_input_position {
+                            continue;
+                        }
+                        let entry: HistoricalIngressV1 = serde_json::from_slice(row.payload())?;
+                        let DptIngressV1::Message {
+                            row: TypedRawRowV2::PolymarketRtdsChainlinkTwap(row),
+                            source_evidence,
+                        } = entry.ingress
+                        else {
+                            return Err("TWAP 外排记录类型不符".into());
+                        };
+                        let event = canonicalize_chainlink_twap_v1(
+                            &row,
+                            &source_evidence,
+                            &core.header().canonical_rule_version,
+                        )?;
+                        let source = &event.lineage.source_evidence[0];
+                        let pos = PublicFactPositionV1 {
+                            input_stream_id: self.stream.clone(),
+                            closed_at_input_position: position,
+                            fact_ordinal: 0,
+                        };
+                        values.push(TemporaryReferenceCandidateV1 {
+                            record_ref: CanonicalInputRecordRefV1 {
+                                input_stream_id: self.stream.clone(),
+                                input_position: position,
+                            },
+                            anchor: DirectObservationAnchorV1 {
+                                field_path: if row.window_s == 30 {
+                                    "chainlink_twap_thirty"
+                                } else {
+                                    "chainlink_twap_sixty"
+                                }
+                                .into(),
+                                position: pos,
+                                group_id: source.source_message_id.clone(),
+                                source_message_id: source.source_message_id.clone(),
+                                source_event_at_utc_ms: source.source_event_at_utc_ms,
+                                received_at_utc_ms: source.received_at_utc_ms,
+                            },
+                            canonical_fact: event,
+                        });
+                        next.next_input_position = position + 1;
+                    }
+                    Ok((values, next, ordinal == self.twap_positions.len()))
+                })();
+                page.map_err(|error| data_pipeline_core::ContractError::InvalidField {
+                    field: "reference_page".into(),
+                    reason: error.to_string(),
+                })
+            },
+        )?)
     }
 }
 

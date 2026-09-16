@@ -205,7 +205,6 @@ fn core() -> PublicObservationCoreV1 {
         ordering_version: "original-input-v1".to_owned(),
         input_scope: "constructed-finite".to_owned(),
         max_pending_ws_terminals: 2,
-        max_retained_reducer_state_entries: 163840,
         initial_state: PublicInitialStateV1::Empty,
     })
     .unwrap()
@@ -1256,5 +1255,223 @@ fn replay_first_identity_selects_prior_twap_at_its_original_position() {
             actual.push((input, fingerprint(&result)));
         }
         assert_eq!(actual, expected);
+    }
+}
+
+#[test]
+fn stable_segments_require_the_complete_prefix_and_declared_receipt() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("recording");
+    let mut core = core();
+    let mut writer = PublicRecordingWriterV1::create(&root, core.header(), config()).unwrap();
+    let mut row = metadata_snapshot_row();
+    row.market_end_utc = row.market_start_utc + 300_000;
+    row.validate().unwrap();
+    let input = record(
+        0,
+        TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(row))),
+    );
+    writer
+        .record(input.clone(), apply(&mut core, &input))
+        .unwrap();
+    let first = writer.stabilize().unwrap().unwrap();
+    assert!(!first.normal_end);
+    let input = end(1);
+    writer
+        .record(input.clone(), apply(&mut core, &input))
+        .unwrap();
+    let last = writer.stabilize().unwrap().unwrap();
+    assert!(last.normal_end);
+    assert_eq!(last.next_input_position, 2);
+    assert_eq!(last.next_group_position, 1);
+    assert_eq!(last.next_public_index_position, 1);
+    let mut old =
+        PublicRecordingReaderV1::open_committed(&root, Some(first.clone()), 1, 1 << 20).unwrap();
+    while old.next_row().unwrap().is_some() {}
+    assert_eq!(old.prefix.as_ref(), Some(&first));
+    assert_eq!(
+        all_rows(&root, 1)
+            .iter()
+            .filter(|r| matches!(r, PublicStoredRowV1::Input(_)))
+            .count(),
+        2
+    );
+    let mut mismatched = last.clone();
+    mismatched.next_input_position += 1;
+    assert!(PublicRecordingReaderV1::open_committed(&root, Some(mismatched), 1, 1 << 20).is_err());
+    let copy = temp.path().join("missing-first");
+    fs::create_dir(&copy).unwrap();
+    fs::copy(root.join("stream.json"), copy.join("stream.json")).unwrap();
+    fs::create_dir(copy.join(&last.stable_storage_ref)).unwrap();
+    for name in ["prefix.json", "captured.parquet"] {
+        fs::copy(
+            root.join(&last.stable_storage_ref).join(name),
+            copy.join(&last.stable_storage_ref).join(name),
+        )
+        .unwrap();
+    }
+    assert!(PublicRecordingReaderV1::recover(&copy, 1, 1 << 20).is_err());
+    fs::remove_dir_all(root.join(&last.stable_storage_ref)).unwrap();
+    assert!(PublicRecordingReaderV1::open_committed(&root, Some(last), 1, 1 << 20).is_err());
+    let mut recovered = PublicRecordingReaderV1::recover(&root, 1, 1 << 20).unwrap();
+    while recovered.next_row().unwrap().is_some() {}
+    assert_eq!(recovered.prefix, Some(first));
+}
+
+#[test]
+fn stable_segment_payload_counts_are_checked_during_the_only_read_pass() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("recording");
+    let mut core = core();
+    let mut writer = PublicRecordingWriterV1::create(&root, core.header(), config()).unwrap();
+    let input = meta(0);
+    writer
+        .record(input.clone(), apply(&mut core, &input))
+        .unwrap();
+    let mut prefix = writer.stabilize().unwrap().unwrap();
+    prefix.next_canonical_position += 1;
+    serde_json::to_writer(
+        File::create(root.join(&prefix.stable_storage_ref).join("prefix.json")).unwrap(),
+        &prefix,
+    )
+    .unwrap();
+    let mut reader = PublicRecordingReaderV1::recover(&root, 1, 1 << 20).unwrap();
+    loop {
+        match reader.next_row() {
+            Ok(Some(_)) => {}
+            Err(_) => break,
+            Ok(None) => panic!("未核对分片末端计数"),
+        }
+    }
+}
+
+#[test]
+fn finite_prepare_current_and_late_reference_match_record_and_paged_replay() {
+    for (case, order) in [
+        ("current", ["identity", "rule", "twap"]),
+        ("late-rule", ["identity", "twap", "rule"]),
+        ("late-identity", ["twap", "rule", "identity"]),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let mut rows = Vec::new();
+        for (index, kind) in order.into_iter().chain(["official"]).enumerate() {
+            let received = 21_010 + index as i64 * 10;
+            let input = match kind {
+                "identity" => {
+                    let mut row = metadata_snapshot_row();
+                    row.market_end_utc = MARKET_START_AT + 300_000;
+                    row.timestamp_received = received;
+                    row.collector_admission_time_utc_ms = received + 1;
+                    row.collector_admission_sequence = index as u64 + 1;
+                    row.market_lifecycle_state = MetadataMarketLifecycleState::Active;
+                    row.market_runtime_role = MetadataMarketRuntimeRole::Current;
+                    record(
+                        0,
+                        TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(
+                            row,
+                        ))),
+                    )
+                }
+                "twap" => twap_record(index as u64, 60, received, "65000000000000000000000"),
+                _ => {
+                    let input =
+                        rule_record(index as u64, 60, (kind == "official").then_some("64999"));
+                    let DptIngressV1::Message {
+                        row: TypedRawRowV2::PolymarketMarketMetadataV6(mut row),
+                        ..
+                    } = input.ingress
+                    else {
+                        panic!()
+                    };
+                    let PolymarketMarketMetadataV6Input::AnchorRule(rule) = row.as_mut() else {
+                        panic!()
+                    };
+                    rule.market_end_utc = MARKET_START_AT + 300_000;
+                    rule.timestamp_received = received;
+                    rule.collector_admission_time_utc_ms = received + 1;
+                    rule.http_received_at_utc = Some(received);
+                    record(0, TypedRawRowV2::PolymarketMarketMetadataV6(row))
+                }
+            };
+            let DptIngressV1::Message { row, .. } = input.ingress else {
+                panic!()
+            };
+            rows.push(row);
+        }
+        let mut limits = crate::gate_a_formal_canonical_config();
+        limits.sort = config().sort;
+        limits.sort.batch_rows = 1;
+        let mut expected = Vec::new();
+        let root = temp.path().join("recording");
+        for recorded in [false, true] {
+            let mut merge = prepare_historical_rows_v1(
+                &temp
+                    .path()
+                    .join(if recorded { "record-sort" } else { "core-sort" }),
+                &limits,
+                "core-test".into(),
+                || Ok(rows.clone().into_iter().map(Ok)),
+            )
+            .unwrap();
+            let mut core = core();
+            let mut writer = recorded
+                .then(|| PublicRecordingWriterV1::create(&root, core.header(), config()).unwrap());
+            let mut actual = Vec::new();
+            while let Some(mut input) = merge.next_input().unwrap() {
+                let prepared = merge.prepare_input(&core, &mut input).unwrap();
+                let result = core.push(&prepared).unwrap().into_owned();
+                drop(prepared);
+                if input.input_position == 2 {
+                    let state = core.reference_state(CONDITION_ID).unwrap();
+                    let selected = state.temporary.as_ref().unwrap();
+                    let twap_position =
+                        order.iter().position(|kind| *kind == "twap").unwrap() as u64;
+                    assert_eq!(
+                        selected.selected_position.closed_at_input_position, twap_position,
+                        "{case}"
+                    );
+                    assert_eq!(selected.direct_anchor.position, selected.selected_position);
+                    if case != "current" {
+                        assert_eq!(
+                            input.dependency_record_refs[0].input_position,
+                            twap_position
+                        );
+                    }
+                }
+                if input.input_position == 3 {
+                    assert!(
+                        core.reference_state(CONDITION_ID)
+                            .unwrap()
+                            .official
+                            .value
+                            .is_some()
+                    );
+                }
+                actual.push((input.clone(), fingerprint(&result)));
+                if let Some(writer) = &mut writer {
+                    writer.record(input, result).unwrap();
+                }
+            }
+            let mut input = end(4);
+            let prepared = merge.prepare_input(&core, &mut input).unwrap();
+            let result = core.push(&prepared).unwrap().into_owned();
+            actual.push((input.clone(), fingerprint(&result)));
+            if let Some(writer) = &mut writer {
+                assert!(writer.committed_prefix().is_none());
+                writer.record(input, result).unwrap();
+                writer.stabilize().unwrap();
+                assert_eq!(actual, expected, "{case}");
+            } else {
+                expected = actual;
+            }
+        }
+        for page_rows in [1, 4] {
+            let mut replay = PublicReplayV1::open(&root, page_rows, 1 << 20).unwrap();
+            let mut actual = Vec::new();
+            while let Some((input, result)) = replay.next_applied().unwrap() {
+                actual.push((input, fingerprint(&result)));
+            }
+            assert_eq!(actual, expected, "{case}, page={page_rows}");
+        }
     }
 }
