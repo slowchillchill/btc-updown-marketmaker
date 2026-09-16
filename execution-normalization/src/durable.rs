@@ -478,6 +478,10 @@ impl<
         &self.context_container_reference
     }
 
+    pub fn retained_index_counts(&self) -> crate::core::NormalizationIndexCountsV1 {
+        self.core.retained_index_counts()
+    }
+
     pub fn commits(&self) -> &[DurableCommit<T, C>] {
         &self.commits
     }

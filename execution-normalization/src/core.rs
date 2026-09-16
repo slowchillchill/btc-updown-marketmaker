@@ -385,6 +385,13 @@ impl fmt::Display for CoreErrorV1 {
 
 impl Error for CoreErrorV1 {}
 
+/// 必要幂等与经济身份索引的当前条目数；按需读取，不估算堆字节。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct NormalizationIndexCountsV1 {
+    pub logical: usize,
+    pub economic: usize,
+}
+
 #[derive(Debug)]
 pub(crate) struct CoreState<T, C, I, F> {
     logical: BTreeMap<I, StoredLogical<T, C, I>>,
@@ -463,6 +470,13 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I: NormalizationIdentity<F>, F:
             account: std::sync::Arc::new(context.account_identity.clone()),
             context,
             state: CoreState::default(),
+        }
+    }
+
+    pub fn retained_index_counts(&self) -> NormalizationIndexCountsV1 {
+        NormalizationIndexCountsV1 {
+            logical: self.state.logical.len(),
+            economic: self.state.economic.len(),
         }
     }
 

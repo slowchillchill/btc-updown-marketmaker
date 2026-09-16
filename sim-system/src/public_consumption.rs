@@ -650,6 +650,8 @@ impl DeferredPublicPmReductionV1 {
 #[cfg(feature = "measurement")]
 #[derive(Clone, Copy, Debug, Serialize)]
 pub struct PublicConsumptionResourceSnapshotV1 {
+    /// 独立于 business 字节的证据对象计数；未测堆/字符串容量、临时 pm_materials 和后台共享材料。
+    pub public_pm_evidence: data_pipeline_core::public_observation_core::PmEvidenceObjectCountsV1,
     pub business: crate::resource::ResourceQuantityV1,
     pub pending_projection: crate::resource::ResourceQuantityV1,
     pub applied_input_sequence: u64,

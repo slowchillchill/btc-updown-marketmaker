@@ -1897,3 +1897,116 @@ mod memory_noe_tests {
     use super::*;
     include!("memory_noe_tests.rs");
 }
+
+#[cfg(feature = "measurement")]
+#[tokio::test(flavor = "current_thread")]
+async fn public_pm_evidence_counts_follow_delete_and_epoch_reset() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let mut core = core();
+    let mut writer = PublicRecordingWriterV1::create(&root, core.header(), config()).unwrap();
+    for input in [
+        meta(0),
+        pm(1, 1, 21_000, book("100")),
+        pm(
+            2,
+            2,
+            21_001,
+            PolymarketOrderbookEvent::PriceChange {
+                price_changes: vec![change(Some("0"))],
+            },
+        ),
+        record(
+            3,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row(
+                "epoch-b",
+                1,
+                21_002,
+                22_000,
+                PolymarketOrderbookEvent::LastTradePrice {
+                    asset_id: UP_TOKEN_ID.into(),
+                    price: "0.55".into(),
+                    size: None,
+                    side: None,
+                    fee_rate_bps: None,
+                },
+            ))),
+        ),
+        end(4),
+    ] {
+        let result = apply(&mut core, &input);
+        writer.record(input, result).unwrap();
+    }
+    writer.stabilize().unwrap();
+    let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, RecordedTimes).unwrap();
+    let (execution, _) = public_execution(
+        &temp.path().join("sim.jsonl"),
+        &core,
+        SimCallerRoleV1::Paper,
+    )
+    .await;
+    let mut driver = FinitePublicConsumptionV1::new(execution, source, "evidence-lifecycle".into());
+    driver.next_group().unwrap().unwrap();
+    let mut observed = Vec::new();
+    for expected_quantity in [100, 0, 0] {
+        driver.next_group().unwrap().unwrap();
+        let resources = driver.measurement_resources();
+        assert_eq!(
+            resources.business,
+            driver
+                .execution
+                .actor
+                .measurement_resource_snapshot()
+                .business
+        );
+        assert_eq!(
+            resources.public_pm_evidence,
+            driver.measurement_resources().public_pm_evidence
+        );
+        let session = driver
+            .execution
+            .actor
+            .state
+            .as_ref()
+            .unwrap()
+            .session
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            session.public_markets.pm_quantity(
+                CONDITION_ID,
+                UP_TOKEN_ID,
+                BookSide::Bid,
+                Decimal::new(5, 1)
+            ),
+            Decimal::from(expected_quantity)
+        );
+        observed.push(resources.public_pm_evidence);
+    }
+    assert_eq!(
+        observed,
+        vec![
+            PmEvidenceObjectCountsV1 {
+                markets: 1,
+                assets: 2,
+                levels: 2,
+                absences: 0,
+                selected: 2
+            },
+            PmEvidenceObjectCountsV1 {
+                markets: 1,
+                assets: 2,
+                levels: 1,
+                absences: 1,
+                selected: 2
+            },
+            PmEvidenceObjectCountsV1 {
+                markets: 1,
+                assets: 2,
+                levels: 0,
+                absences: 0,
+                selected: 0
+            },
+        ]
+    );
+}
