@@ -126,3 +126,55 @@ impl Serialize for MemoryEconomicFactReferenceV1 {
         value.serialize(serializer)
     }
 }
+
+// 仅在耐久读取边界还原原编码。内存消费者直接借用强类型身份。
+impl<'de> serde::Deserialize<'de> for MemoryLogicalIdentityV1 {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let value = <String as serde::Deserialize>::deserialize(d)?;
+        Self::from_stable(&StableLogicalIdentityV1(value)).map_err(serde::de::Error::custom)
+    }
+}
+impl MemoryLogicalIdentityV1 {
+    pub fn from_stable(value: &StableLogicalIdentityV1) -> Result<Self, CoreErrorV1> {
+        let decode = || -> Result<Self, Box<dyn std::error::Error>> {
+            if let Some(v) = value.0.strip_prefix("noe-entity-v1:") {
+                let (_version, account, _entity, key): (
+                    String,
+                    SourceNeutralAccountIdentityV1,
+                    String,
+                    SourceNeutralEntityKeyV1,
+                ) = serde_json::from_str(v)?;
+                Ok(Self {
+                    account: Arc::new(account),
+                    key: MemoryIdentityKeyV1::Entity(key),
+                })
+            } else if let Some(v) = value.0.strip_prefix("noe-logical-v1:") {
+                let (_version, account, key): (
+                    String,
+                    SourceNeutralAccountIdentityV1,
+                    SourceNeutralLogicalKeyV1,
+                ) = serde_json::from_str(v)?;
+                Ok(Self {
+                    account: Arc::new(account),
+                    key: MemoryIdentityKeyV1::Logical(key),
+                })
+            } else {
+                Err("未知NOE身份编码".into())
+            }
+        };
+        decode().map_err(|e| CoreErrorV1::IdentityEncoding {
+            message: e.to_string(),
+        })
+    }
+}
+impl<'de> serde::Deserialize<'de> for MemoryEconomicFactReferenceV1 {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let value = <String as serde::Deserialize>::deserialize(d)?;
+        let raw = value
+            .strip_prefix("noe-economic-fact-v1:")
+            .ok_or_else(|| serde::de::Error::custom("未知经济身份编码"))?;
+        let (_, identity): (String, SourceNeutralEconomicIdentityV1) =
+            serde_json::from_str(raw).map_err(serde::de::Error::custom)?;
+        Ok(Self(identity))
+    }
+}

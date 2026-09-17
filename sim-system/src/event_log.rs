@@ -37,6 +37,8 @@ enum SimEventLogLineRefV2<'a> {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SimEventLogErrorV2 {
+    #[cfg(feature = "shared-execution")]
+    Ledger(ledger::LedgerDurableErrorV1),
     Noe(execution_normalization::DurableErrorV1),
     NoeNormalization(crate::run_v2::MemoryNoeErrorV1),
     Io {
@@ -58,6 +60,8 @@ pub enum SimEventLogErrorV2 {
 impl std::fmt::Display for SimEventLogErrorV2 {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            #[cfg(feature = "shared-execution")]
+            Self::Ledger(error) => write!(formatter, "Ledger 后台物化失败：{error}"),
             Self::Io { operation, message } => write!(formatter, "{operation}: {message}"),
             Self::NoeNormalization(error) => write!(formatter, "NOE 前台归一化失败：{error}"),
             Self::Noe(error) => write!(formatter, "NOE 后台物化失败：{error}"),
@@ -952,14 +956,68 @@ mod tests {
 }
 
 /// 同一日志的唯一后台所有者。容量由有限调用方显式提供；未交接批次仍由前台持有。
+#[cfg(feature = "shared-execution")]
+type LedgerIntakeV2 = std::sync::Arc<std::sync::Mutex<Vec<ledger::LedgerRecordMaterialV2>>>;
+#[cfg(feature = "shared-execution")]
+struct LedgerBatchV2 {
+    root: std::path::PathBuf,
+    materials: Vec<ledger::LedgerRecordMaterialV2>,
+}
+#[cfg(feature = "shared-execution")]
+#[derive(Default)]
+struct BackgroundLedgerV2 {
+    writer: Option<ledger::LedgerBackgroundWriterV2>,
+    pending: std::collections::VecDeque<ledger::LedgerRecordMaterialV2>,
+}
+#[cfg(feature = "shared-execution")]
+impl BackgroundLedgerV2 {
+    fn accept(&mut self, batch: Option<LedgerBatchV2>) -> Result<(), SimEventLogErrorV2> {
+        if let Some(batch) = batch {
+            self.writer
+                .get_or_insert_with(|| ledger::LedgerBackgroundWriterV2::new(batch.root));
+            self.pending.extend(batch.materials);
+        }
+        if let Some(writer) = &mut self.writer {
+            while let Some(material) = self.pending.front() {
+                if !writer.write(material).map_err(ledger_background_error)? {
+                    break;
+                }
+                self.pending.pop_front();
+            }
+        }
+        Ok(())
+    }
+    fn finish(&mut self) -> Result<(), SimEventLogErrorV2> {
+        self.accept(None)?;
+        if !self.pending.is_empty() {
+            return Err(SimEventLogErrorV2::InvalidStructure(
+                "Ledger 来源尚未稳定，本轮未完成",
+            ));
+        }
+        if let Some(writer) = &mut self.writer {
+            writer.finish().map_err(ledger_background_error)?;
+        }
+        Ok(())
+    }
+}
+#[cfg(feature = "shared-execution")]
+fn ledger_background_error(error: ledger::LedgerDurableErrorV1) -> SimEventLogErrorV2 {
+    SimEventLogErrorV2::Ledger(error)
+}
 struct BackgroundGroupV1 {
     inputs: Vec<BusinessInputV2>,
     noe: Vec<crate::run_v2::noe_projection::AcceptedNoeProjectionV1>,
     normalization_error: Option<crate::run_v2::MemoryNoeErrorV1>,
+    #[cfg(feature = "shared-execution")]
+    ledger: Option<LedgerBatchV2>,
+}
+struct BackgroundFinishV1 {
+    #[cfg(feature = "shared-execution")]
+    ledger: Option<LedgerBatchV2>,
 }
 enum BackgroundLogCommandV1 {
     Group(BackgroundGroupV1),
-    Finish,
+    Finish(BackgroundFinishV1),
     #[cfg(test)]
     Pause(
         std::sync::mpsc::SyncSender<()>,
@@ -976,6 +1034,8 @@ enum BackgroundLogCommandV1 {
 pub(crate) struct BackgroundEventLogV1 {
     sender: std::sync::mpsc::SyncSender<BackgroundLogCommandV1>,
     pending: Option<BackgroundGroupV1>,
+    #[cfg(feature = "shared-execution")]
+    ledger: Option<(std::path::PathBuf, LedgerIntakeV2)>,
     failure: std::sync::Arc<std::sync::Mutex<Option<SimEventLogErrorV2>>>,
     worker: std::thread::JoinHandle<Result<(), SimEventLogErrorV2>>,
 }
@@ -995,6 +1055,8 @@ impl BackgroundEventLogV1 {
             let result = (|| {
                 let mut log = log;
                 let mut noe = None;
+                #[cfg(feature = "shared-execution")]
+                let mut ledger = BackgroundLedgerV2::default();
                 #[cfg(test)]
                 let mut write_pause: Option<(
                     std::sync::mpsc::SyncSender<()>,
@@ -1022,17 +1084,38 @@ impl BackgroundEventLogV1 {
                                 )
                                 .map_err(SimEventLogErrorV2::Noe)?;
                             }
+                            #[cfg(feature = "shared-execution")]
+                            {
+                                ledger.accept(group.ledger)?;
+                                if ledger.pending.front().is_some_and(
+                                    ledger::LedgerRecordMaterialV2::waiting_for_noe_stability,
+                                ) {
+                                    #[cfg(feature = "measurement")]
+                                    log.sync_data(MeasurementContext::CommitGroup)?;
+                                    #[cfg(not(feature = "measurement"))]
+                                    log.sync_data()?;
+                                    if let Some(noe) = &mut noe {
+                                        noe.stabilize().map_err(SimEventLogErrorV2::Noe)?;
+                                    }
+                                    ledger.accept(None)?;
+                                }
+                            }
                             if let Some(error) = group.normalization_error {
                                 return Err(SimEventLogErrorV2::NoeNormalization(error));
                             }
                         }
-                        Ok(BackgroundLogCommandV1::Finish) => {
+                        Ok(BackgroundLogCommandV1::Finish(_finish)) => {
                             #[cfg(feature = "measurement")]
                             log.sync_data(MeasurementContext::CleanSeal)?;
                             #[cfg(not(feature = "measurement"))]
                             log.sync_data()?;
                             if let Some(noe) = &mut noe {
                                 noe.stabilize().map_err(SimEventLogErrorV2::Noe)?;
+                            }
+                            #[cfg(feature = "shared-execution")]
+                            {
+                                ledger.accept(_finish.ledger)?;
+                                ledger.finish()?;
                             }
                             return log.seal_clean_run();
                         }
@@ -1063,9 +1146,27 @@ impl BackgroundEventLogV1 {
         Self {
             sender,
             pending: None,
+            #[cfg(feature = "shared-execution")]
+            ledger: None,
             failure,
             worker,
         }
+    }
+    #[cfg(feature = "shared-execution")]
+    pub(crate) fn bind_ledger(&mut self, writer: &mut ledger::LedgerWriterV1, root: &Path) {
+        let intake = LedgerIntakeV2::default();
+        let sink = intake.clone();
+        writer.bind_record_sink_v2(Box::new(move |material| {
+            sink.lock().unwrap().push(material)
+        }));
+        self.ledger = Some((root.to_owned(), intake));
+    }
+    #[cfg(feature = "shared-execution")]
+    fn take_ledger(&mut self) -> Option<LedgerBatchV2> {
+        self.ledger.as_ref().map(|(root, intake)| LedgerBatchV2 {
+            root: root.clone(),
+            materials: std::mem::take(&mut *intake.lock().unwrap()),
+        })
     }
     #[cfg(test)]
     pub(crate) fn pause_for_tests(&self, fail_next_write: bool) -> std::sync::mpsc::SyncSender<()> {
@@ -1142,7 +1243,11 @@ impl BackgroundEventLogV1 {
         noe: Vec<crate::run_v2::noe_projection::AcceptedNoeProjectionV1>,
         normalization_error: Option<crate::run_v2::MemoryNoeErrorV1>,
     ) -> Result<(), SimEventLogErrorV2> {
+        #[cfg(feature = "shared-execution")]
+        let ledger = self.take_ledger();
         self.enqueue_group(BackgroundGroupV1 {
+            #[cfg(feature = "shared-execution")]
+            ledger,
             inputs,
             noe,
             normalization_error,
@@ -1167,13 +1272,21 @@ impl BackgroundEventLogV1 {
         }
     }
     pub(crate) fn finish(mut self) -> Result<(), SimEventLogErrorV2> {
-        let sent = self
-            .pending
-            .take()
-            .map_or(Ok(()), |inputs| {
-                self.sender.send(BackgroundLogCommandV1::Group(inputs))
-            })
-            .and_then(|()| self.sender.send(BackgroundLogCommandV1::Finish));
+        #[cfg(feature = "shared-execution")]
+        let materials = self.take_ledger();
+        let sent = match self.pending.take() {
+            Some(inputs) => self.sender.send(BackgroundLogCommandV1::Group(inputs)),
+            None => Ok(()),
+        };
+        let sent = match sent {
+            Ok(()) => self
+                .sender
+                .send(BackgroundLogCommandV1::Finish(BackgroundFinishV1 {
+                    #[cfg(feature = "shared-execution")]
+                    ledger: materials,
+                })),
+            Err(error) => Err(error),
+        };
         drop(self.sender);
         let result = self
             .worker

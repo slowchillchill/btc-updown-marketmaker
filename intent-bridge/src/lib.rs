@@ -9,7 +9,8 @@ pub use live_adapter::{
     LiveAdapterV1, LiveIntentCallContextV1, LiveIntentErrorV1, LiveIntentImmediateSuccessV1,
 };
 pub use sim_adapter::{
-    SimAdapterV1, SimIntentCallContextV1, SimIntentErrorV1, SimIntentImmediateSuccessV1,
+    SimAdapterV1, SimGroupAdapterV1, SimIntentCallContextV1, SimIntentErrorV1,
+    SimIntentImmediateSuccessV1,
 };
 
 mod private {

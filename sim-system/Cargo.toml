@@ -9,6 +9,7 @@ default = []
 public-consumption = ["dep:data-pipeline-training"]
 measurement = ["tokio/rt"]
 gate-a-measurement = ["measurement", "dep:data-pipeline-training"]
+shared-execution = ["public-consumption", "dep:ledger"]
 gate-b-flow = ["gate-a-measurement", "dep:ledger"]
 
 [dependencies]

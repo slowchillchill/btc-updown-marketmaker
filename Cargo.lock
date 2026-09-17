@@ -4226,6 +4226,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "shared-run"
+version = "0.1.0"
+dependencies = [
+ "contracts",
+ "data-pipeline-core",
+ "data-pipeline-training",
+ "execution-normalization",
+ "intent-bridge",
+ "ledger",
+ "num-bigint",
+ "num-traits",
+ "rust_decimal",
+ "serde_json",
+ "sha2",
+ "sim-system",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

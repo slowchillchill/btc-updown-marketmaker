@@ -18910,6 +18910,20 @@ impl PublicSimExecutionV1 {
         actor.background_log = Some(BackgroundEventLogV1::start(log, finite_in_flight_groups));
         Ok(Self { actor })
     }
+    /// 在首次 Ledger 应用前，将原材料接入本运行的唯一后台所有者。
+    #[cfg(feature = "shared-execution")]
+    pub fn bind_ledger_recording_v2(
+        &mut self,
+        ledger: &mut ledger::LedgerWriterV1,
+        root: &Path,
+    ) -> Result<(), SimRunActorErrorV2> {
+        self.actor
+            .background_log
+            .as_mut()
+            .ok_or(SimRunActorErrorV2::Closed)?
+            .bind_ledger(ledger, root);
+        Ok(())
+    }
     /// 有限宿主显式暂停供料时使用；业务接纳本身保持非阻塞。
     pub fn wait_for_recording_capacity(&mut self) -> Result<(), SimRunActorErrorV2> {
         self.actor

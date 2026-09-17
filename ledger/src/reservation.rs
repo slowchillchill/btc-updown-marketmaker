@@ -26,7 +26,7 @@ pub enum LedgerReservationOutcomeV1 {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub(crate) enum ReservationStatusV1 {
+pub enum ReservationStatusV1 {
     ReservedBeforeSend,
     SubmittedUnknown,
     PlatformConfirmedPendingEconomicFact,
@@ -62,7 +62,7 @@ pub(crate) struct MarketLocalPendingV1 {
     pub(crate) after_send_unknown_count: u64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct ReservationStateV1 {
     pub(crate) requests: BTreeMap<LedgerRequestIdentityV1, CachedReservationRequestV1>,
     pub(crate) applied_local_events: BTreeMap<LedgerLocalEventIdentityV1, u64>,

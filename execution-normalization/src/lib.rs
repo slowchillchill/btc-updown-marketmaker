@@ -7,3 +7,6 @@ pub use artifacts::*;
 pub use core::*;
 pub use durable::*;
 pub use identity::*;
+
+pub mod consumption;
+pub use consumption::*;

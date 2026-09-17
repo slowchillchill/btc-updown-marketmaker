@@ -1,3 +1,8 @@
+use crate::identity::{LedgerIdentity, LedgerIdentityKeyV1};
+use execution_normalization::{
+    NoeConsumedRecordRefV1, NoeConsumedRecordReferenceV1, NoeConsumptionVisibilityV1,
+    NoeRecordPositionV1,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
@@ -6,17 +11,14 @@ use std::path::Path;
 use contracts::execution_normalization::{
     NoeResultReferenceV1, SimV2DirectResponseAssociationV1, SimV2SourceRecordReferenceV1,
     SourceNeutralAccountBalanceDeltaV1, SourceNeutralAccountTransitionKindV1,
-    SourceNeutralCancellationOutcomeV1, SourceNeutralControlResultV1,
-    SourceNeutralEconomicDispositionV1, SourceNeutralEconomicIdentityV1,
-    SourceNeutralOrderLifecycleEventV1, SourceNeutralOrderLifecycleResultV1,
-    SourceNeutralOrderQueryResultV1, SourceNeutralOrderSnapshotV1, SourceNeutralOrderStateV1,
+    SourceNeutralCancellationOutcomeV1, SourceNeutralEconomicDispositionV1,
+    SourceNeutralEconomicIdentityV1, SourceNeutralOrderLifecycleEventV1,
+    SourceNeutralOrderLifecycleResultV1, SourceNeutralOrderSnapshotV1, SourceNeutralOrderStateV1,
     SourceNeutralSettlementLifecycleResultV1, SourceNeutralSubmissionOutcomeV1,
     SourceNeutralTradeEconomicDispositionV1, SourceNeutralTradeLifecycleResultV1,
 };
 use contracts::{AccountInstanceKeyV1, ConditionId, ExactDecimal, TokenId};
-use execution_normalization::{
-    DurableErrorV1, NormalizationRecordV1, SourceNeutralEvidenceKindV1, read_noe_result_v1,
-};
+use execution_normalization::{DurableErrorV1, NormalizationRecordV1, read_noe_result_v1};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 
@@ -39,6 +41,19 @@ use crate::reservation::{
     ReservationStatusV1, ReserveIntentV1,
 };
 
+type LedgerControl<I = contracts::execution_normalization::StableLogicalIdentityV1> =
+    contracts::execution_normalization::SourceNeutralControlResult<
+        SourceNeutralSubmissionOutcomeV1<I>,
+        SourceNeutralOrderSnapshotV1<I>,
+        I,
+    >;
+type LedgerEvidence<I = contracts::execution_normalization::StableLogicalIdentityV1> =
+    execution_normalization::SourceNeutralEvidenceKind<
+        SourceNeutralTradeLifecycleResultV1<I>,
+        LedgerControl<I>,
+        I,
+    >;
+use contracts::execution_normalization::SourceNeutralOrderQueryResult;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LedgerApplyOutcomeV1 {
     NewlyApplied {
@@ -226,6 +241,9 @@ type LedgerEntryV1 = (LedgerAccountV1, LedgerAssetV1, Decimal);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 enum LedgerTransactionSourceV1 {
+    #[serde(skip)]
+    Memory(NoeConsumedRecordRefV1),
+    NoeConsumed(NoeConsumedRecordReferenceV1),
     Noe(NoeResultReferenceV1),
     LocalReservation(LedgerRequestIdentityV1),
     LocalSubmissionEvent {
@@ -257,7 +275,7 @@ struct OutcomeBalanceStateV1 {
     balance: Decimal,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct BalanceStateV1 {
     cash_pusd: Decimal,
     available_pusd: Decimal,
@@ -290,18 +308,18 @@ impl BalanceStateV1 {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct MarketStateV1 {
     condition_id: ConditionId,
     balances: BalanceStateV1,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct OpenedAccountStateV1 {
     account_instance_key: AccountInstanceKeyV1,
     opening_evidence_identity: String,
     platform_source_prefix: u64,
-    available_through_utc_ms: i64,
+    available_through_utc_ms: Option<i64>,
     balances: BalanceStateV1,
     markets: BTreeMap<String, MarketStateV1>,
 }
@@ -319,7 +337,7 @@ struct ParsedBalanceDeltaV1 {
     taker_rebate_locked_remainder_pusd: Decimal,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct BalanceUpdateV1 {
     cash_pusd: Decimal,
     available_pusd: Decimal,
@@ -332,30 +350,32 @@ struct BalanceUpdateV1 {
     taker_rebate_locked_remainder_pusd: Decimal,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct MarketBalanceCommittedPatchV1 {
     condition_id: ConditionId,
     update: BalanceUpdateV1,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 enum AccountCommittedPatchV1 {
     Open(OpenedAccountStateV1),
     Update {
-        available_through_utc_ms: i64,
+        available_through_utc_ms: Option<i64>,
         platform_source_prefix: Option<u64>,
         global_balance_update: Option<BalanceUpdateV1>,
         market_balance_update: Option<MarketBalanceCommittedPatchV1>,
     },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct LedgerCommittedEffectV1 {
     transaction: LedgerTransactionV1,
     account: Option<AccountCommittedPatchV1>,
     reservations: Option<ReservationStateV1>,
     lifecycle: Option<LifecycleStateV1>,
     ledger_local_prefix: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    funds: Option<self::funds::FundsPatchV1>,
 }
 
 impl LedgerCommittedEffectV1 {
@@ -373,6 +393,9 @@ pub struct LedgerWriterV1 {
     current_ledger_entry_seq: u64,
     applied_references: BTreeMap<NoeReferenceKeyV1, u64>,
     durable: Option<DurableLedgerV1>,
+    applied_memory: BTreeMap<NoeRecordPositionV1, u64>,
+    record_sink: Option<Box<dyn FnMut(self::memory::LedgerRecordMaterialV2)>>,
+    funds: self::funds::FundsStateV1,
 }
 
 #[cfg(test)]
@@ -427,6 +450,9 @@ impl LedgerWriterV1 {
             current_ledger_entry_seq: 0,
             applied_references: BTreeMap::new(),
             durable: None,
+            applied_memory: BTreeMap::new(),
+            record_sink: None,
+            funds: self::funds::FundsStateV1::default(),
         }
     }
 
@@ -756,6 +782,7 @@ impl LedgerWriterV1 {
             },
         );
         self.commit_effect(LedgerCommittedEffectV1 {
+            funds: None,
             transaction,
             account: None,
             reservations: Some(reservations),
@@ -836,6 +863,7 @@ impl LedgerWriterV1 {
         ensure_balanced(&transaction.entries)?;
 
         self.commit_effect(LedgerCommittedEffectV1 {
+            funds: None,
             transaction,
             account: None,
             reservations: Some(reservations),
@@ -889,6 +917,7 @@ impl LedgerWriterV1 {
         ensure_balanced(&transaction.entries)?;
 
         self.commit_effect(LedgerCommittedEffectV1 {
+            funds: None,
             transaction,
             account: None,
             reservations: Some(reservations),
@@ -961,6 +990,7 @@ impl LedgerWriterV1 {
         ensure_balanced(&transaction.entries)?;
 
         self.commit_effect(LedgerCommittedEffectV1 {
+            funds: None,
             transaction,
             account: None,
             reservations: Some(reservations),
@@ -981,15 +1011,16 @@ impl LedgerWriterV1 {
             });
         }
 
+        let source = LedgerTransactionSourceV1::Noe(reference.clone());
         let resolved = read_noe_result_v1(reference)?;
         match &resolved.record {
             NormalizationRecordV1::EconomicFact { fact, .. } => match &fact.disposition {
                 SourceNeutralEconomicDispositionV1::AccountOpening { available_pusd } => self
                     .apply_opening(
-                        reference,
+                        &source,
                         &resolved.context.source.account_instance_key,
                         &resolved.context.source.account_opening_evidence_identity,
-                        resolved.boundary.durable_available_at_utc_ms,
+                        Some(resolved.boundary.durable_available_at_utc_ms),
                         available_pusd,
                     ),
                 SourceNeutralEconomicDispositionV1::AccountTransition {
@@ -1006,10 +1037,10 @@ impl LedgerWriterV1 {
                         unreachable!("NOE 经济事实保证账户变化身份与正文一致")
                     };
                     self.apply_transition(
-                        reference,
+                        &source,
                         &resolved.context.source.account_instance_key,
                         *account_transition_seq,
-                        resolved.boundary.durable_available_at_utc_ms,
+                        Some(resolved.boundary.durable_available_at_utc_ms),
                         condition_id.as_ref(),
                         transition,
                         balance_delta,
@@ -1022,31 +1053,31 @@ impl LedgerWriterV1 {
                 evidence,
                 ..
             } => self.apply_lifecycle_evidence(
-                reference,
+                &source,
                 &resolved.context.source.account_instance_key,
-                resolved.boundary.durable_available_at_utc_ms,
+                Some(resolved.boundary.durable_available_at_utc_ms),
                 &source_reference.record,
                 evidence,
             ),
             NormalizationRecordV1::Pending {
                 source_reference, ..
             } if self.account.is_some() => self.apply_pending_result(
-                reference,
+                &source,
                 &resolved.context.source.account_instance_key,
-                resolved.boundary.durable_available_at_utc_ms,
+                Some(resolved.boundary.durable_available_at_utc_ms),
                 &source_reference.record,
             ),
             _ => Err(LedgerErrorV1::NonEconomicRecord),
         }
     }
 
-    fn apply_lifecycle_evidence(
+    fn apply_lifecycle_evidence<I: LedgerIdentity>(
         &mut self,
-        reference: &NoeResultReferenceV1,
+        reference: &LedgerTransactionSourceV1,
         account_instance_key: &AccountInstanceKeyV1,
-        available_through_utc_ms: i64,
+        available_through_utc_ms: Option<i64>,
         source_record: &SimV2SourceRecordReferenceV1,
-        evidence: &SourceNeutralEvidenceKindV1,
+        evidence: &LedgerEvidence<I>,
     ) -> Result<LedgerApplyOutcomeV1, LedgerErrorV1> {
         self.ensure_noe_account(account_instance_key)?;
         let ledger_entry_seq = self.next_ledger_entry_seq()?;
@@ -1057,20 +1088,20 @@ impl LedgerWriterV1 {
         let before_lifecycle = lifecycle_state_slice(&self.lifecycle, &keys);
         let mut lifecycle = lifecycle_state_slice(&self.lifecycle, &keys);
         match evidence {
-            SourceNeutralEvidenceKindV1::Control { result } => apply_control_lifecycle(
+            LedgerEvidence::Control { result } => apply_control_lifecycle(
                 &mut reservations,
                 &mut lifecycle,
                 source_record,
                 result,
                 ledger_entry_seq,
             )?,
-            SourceNeutralEvidenceKindV1::OrderLifecycle { result } => {
+            LedgerEvidence::OrderLifecycle { result } => {
                 apply_order_lifecycle(&mut lifecycle, result, ledger_entry_seq)?;
             }
-            SourceNeutralEvidenceKindV1::TradeLifecycle { result } => {
+            LedgerEvidence::TradeLifecycle { result } => {
                 apply_trade_lifecycle(&mut lifecycle, result, ledger_entry_seq)?;
             }
-            SourceNeutralEvidenceKindV1::SettlementLifecycle { result } => {
+            LedgerEvidence::SettlementLifecycle { result } => {
                 apply_settlement_lifecycle(&mut lifecycle, result);
             }
             _ => return Err(LedgerErrorV1::NonEconomicRecord),
@@ -1084,7 +1115,7 @@ impl LedgerWriterV1 {
         )?;
         let transaction = LedgerTransactionV1 {
             ledger_entry_seq,
-            source: LedgerTransactionSourceV1::Noe(reference.clone()),
+            source: reference.clone(),
             entries,
         };
         ensure_balanced(&transaction.entries)?;
@@ -1096,6 +1127,7 @@ impl LedgerWriterV1 {
             .available_through_utc_ms
             .max(available_through_utc_ms);
         self.commit_effect(LedgerCommittedEffectV1 {
+            funds: None,
             transaction,
             account: Some(AccountCommittedPatchV1::Update {
                 available_through_utc_ms: next_available_through_utc_ms,
@@ -1112,16 +1144,16 @@ impl LedgerWriterV1 {
 
     fn apply_pending_result(
         &mut self,
-        reference: &NoeResultReferenceV1,
+        reference: &LedgerTransactionSourceV1,
         account_instance_key: &AccountInstanceKeyV1,
-        available_through_utc_ms: i64,
+        available_through_utc_ms: Option<i64>,
         _source_record: &SimV2SourceRecordReferenceV1,
     ) -> Result<LedgerApplyOutcomeV1, LedgerErrorV1> {
         self.ensure_noe_account(account_instance_key)?;
         let ledger_entry_seq = self.next_ledger_entry_seq()?;
         let transaction = LedgerTransactionV1 {
             ledger_entry_seq,
-            source: LedgerTransactionSourceV1::Noe(reference.clone()),
+            source: reference.clone(),
             entries: Vec::new(),
         };
         ensure_balanced(&transaction.entries)?;
@@ -1133,6 +1165,7 @@ impl LedgerWriterV1 {
             .available_through_utc_ms
             .max(available_through_utc_ms);
         self.commit_effect(LedgerCommittedEffectV1 {
+            funds: None,
             transaction,
             account: Some(AccountCommittedPatchV1::Update {
                 available_through_utc_ms: next_available_through_utc_ms,
@@ -1279,7 +1312,7 @@ impl LedgerWriterV1 {
             ledger_entry_seq: self.current_ledger_entry_seq(),
             platform_source_prefix: account.platform_source_prefix,
             ledger_local_prefix: self.ledger_local_prefix,
-            available_through_utc_ms: account.available_through_utc_ms,
+            available_through_utc_ms: account.available_through_utc_ms.unwrap_or_default(),
             platform_confirmed_projection,
             local_pending_reservation_projection: LedgerLocalPendingReservationProjectionV1 {
                 principal_pusd: exact(self.reservations.principal_pusd),
@@ -1303,10 +1336,10 @@ impl LedgerWriterV1 {
 
     fn apply_opening(
         &mut self,
-        reference: &NoeResultReferenceV1,
+        reference: &LedgerTransactionSourceV1,
         account_instance_key: &AccountInstanceKeyV1,
         opening_evidence_identity: &str,
-        available_through_utc_ms: i64,
+        available_through_utc_ms: Option<i64>,
         available_pusd: &ExactDecimal,
     ) -> Result<LedgerApplyOutcomeV1, LedgerErrorV1> {
         if let Some(account) = &self.account {
@@ -1327,12 +1360,13 @@ impl LedgerWriterV1 {
         let entries = opening_entries(available)?;
         let transaction = LedgerTransactionV1 {
             ledger_entry_seq,
-            source: LedgerTransactionSourceV1::Noe(reference.clone()),
+            source: reference.clone(),
             entries,
         };
         ensure_balanced(&transaction.entries)?;
 
         self.commit_effect(LedgerCommittedEffectV1 {
+            funds: None,
             transaction,
             account: Some(AccountCommittedPatchV1::Open(OpenedAccountStateV1 {
                 account_instance_key: account_instance_key.clone(),
@@ -1350,14 +1384,14 @@ impl LedgerWriterV1 {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn apply_transition(
+    fn apply_transition<I: LedgerIdentity>(
         &mut self,
-        reference: &NoeResultReferenceV1,
+        reference: &LedgerTransactionSourceV1,
         account_instance_key: &AccountInstanceKeyV1,
         account_transition_seq: u64,
-        available_through_utc_ms: i64,
+        available_through_utc_ms: Option<i64>,
         condition_id: Option<&ConditionId>,
-        transition: &SourceNeutralAccountTransitionKindV1,
+        transition: &SourceNeutralAccountTransitionKindV1<I>,
         balance_delta: &SourceNeutralAccountBalanceDeltaV1,
         source_record: &SimV2SourceRecordReferenceV1,
     ) -> Result<LedgerApplyOutcomeV1, LedgerErrorV1> {
@@ -1428,7 +1462,7 @@ impl LedgerWriterV1 {
         )?);
         let transaction = LedgerTransactionV1 {
             ledger_entry_seq,
-            source: LedgerTransactionSourceV1::Noe(reference.clone()),
+            source: reference.clone(),
             entries,
         };
         ensure_balanced(&transaction.entries)?;
@@ -1441,6 +1475,7 @@ impl LedgerWriterV1 {
                     update,
                 });
         self.commit_effect(LedgerCommittedEffectV1 {
+            funds: None,
             transaction,
             account: Some(AccountCommittedPatchV1::Update {
                 available_through_utc_ms,
@@ -1491,6 +1526,9 @@ impl LedgerWriterV1 {
         if let Some(durable) = &mut self.durable {
             durable.append(&payload)?;
         }
+        if let Some(sink) = &mut self.record_sink {
+            sink(self::memory::LedgerRecordMaterialV2::new(payload.clone()));
+        }
         let DurablePayloadV1::ReservationDecision {
             request_identity,
             request,
@@ -1515,7 +1553,8 @@ impl LedgerWriterV1 {
             })
     }
 
-    fn commit_effect(&mut self, effect: LedgerCommittedEffectV1) -> Result<(), LedgerErrorV1> {
+    fn commit_effect(&mut self, mut effect: LedgerCommittedEffectV1) -> Result<(), LedgerErrorV1> {
+        effect.funds = self.funds.prepare(&effect)?;
         let payload = DurablePayloadV1::Transaction(Box::new(effect));
         if let Some(durable) = &mut self.durable {
             durable.append(&payload)?;
@@ -1523,6 +1562,11 @@ impl LedgerWriterV1 {
         let DurablePayloadV1::Transaction(effect) = payload else {
             unreachable!("刚构造的 Ledger 交易保持其耐久记录类型")
         };
+        if let Some(sink) = &mut self.record_sink {
+            sink(self::memory::LedgerRecordMaterialV2::new(
+                DurablePayloadV1::Transaction(effect.clone()),
+            ));
+        }
         self.apply_committed_effect(*effect);
         Ok(())
     }
@@ -1555,6 +1599,12 @@ impl LedgerWriterV1 {
                         effect.ledger_entry_seq()
                     )));
                 }
+                if let LedgerTransactionSourceV1::NoeConsumed(source) = &effect.transaction.source {
+                    let view = execution_normalization::read_durable_noe_record_v1(source.result())
+                        .map_err(|e| LedgerDurableErrorV1::InvalidStructure(e.to_string()))?;
+                    self.applied_memory
+                        .insert(view.position(), effect.ledger_entry_seq());
+                }
                 self.apply_committed_effect(*effect);
                 Ok(())
             }
@@ -1562,6 +1612,9 @@ impl LedgerWriterV1 {
     }
 
     fn apply_committed_effect(&mut self, effect: LedgerCommittedEffectV1) {
+        if let Some(patch) = effect.funds {
+            self.funds.commit(patch);
+        }
         if let Some(account_patch) = effect.account {
             match account_patch {
                 AccountCommittedPatchV1::Open(account) => self.account = Some(account),
@@ -1602,6 +1655,11 @@ impl LedgerWriterV1 {
             self.ledger_local_prefix = ledger_local_prefix;
         }
         match &effect.transaction.source {
+            LedgerTransactionSourceV1::Memory(record) => {
+                self.applied_memory
+                    .insert(record.position(), effect.transaction.ledger_entry_seq);
+            }
+            LedgerTransactionSourceV1::NoeConsumed(_) => {}
             LedgerTransactionSourceV1::Noe(reference) => {
                 self.applied_references.insert(
                     NoeReferenceKeyV1::from(reference),
@@ -1707,9 +1765,9 @@ struct SparseLedgerStateKeysV1 {
     conditions: BTreeSet<String>,
     submission_items: BTreeSet<LedgerSubmissionItemIdentityV1>,
     query_requests: BTreeSet<String>,
-    orders: BTreeSet<String>,
-    trades: BTreeSet<String>,
-    fills: BTreeSet<(String, u32)>,
+    orders: BTreeSet<LedgerIdentityKeyV1>,
+    trades: BTreeSet<LedgerIdentityKeyV1>,
+    fills: BTreeSet<(LedgerIdentityKeyV1, u32)>,
     outcome_tokens: BTreeSet<String>,
 }
 
@@ -1733,7 +1791,7 @@ impl SparseLedgerStateKeysV1 {
         }
     }
 
-    fn add_order(&mut self, lifecycle: &LifecycleStateV1, order_identity: &str) {
+    fn add_order(&mut self, lifecycle: &LifecycleStateV1, order_identity: &LedgerIdentityKeyV1) {
         self.orders.insert(order_identity.to_owned());
         if let Some(condition_id) = lifecycle
             .orders
@@ -1744,14 +1802,19 @@ impl SparseLedgerStateKeysV1 {
         }
     }
 
-    fn add_trade(&mut self, lifecycle: &LifecycleStateV1, trade_identity: &str) {
+    fn add_trade(&mut self, lifecycle: &LifecycleStateV1, trade_identity: &LedgerIdentityKeyV1) {
         self.trades.insert(trade_identity.to_owned());
         if let Some(trade) = lifecycle.trades.get(trade_identity) {
             self.add_condition(&trade.condition_id);
         }
     }
 
-    fn add_fill(&mut self, lifecycle: &LifecycleStateV1, trade_identity: &str, path_ordinal: u32) {
+    fn add_fill(
+        &mut self,
+        lifecycle: &LifecycleStateV1,
+        trade_identity: &LedgerIdentityKeyV1,
+        path_ordinal: u32,
+    ) {
         let key = (trade_identity.to_owned(), path_ordinal);
         self.fills.insert(key.clone());
         if let Some(fill) = lifecycle.applied_fills.get(&key) {
@@ -2237,16 +2300,16 @@ fn query_global_request_id(source_record: &SimV2SourceRecordReferenceV1) -> Opti
     Some(global_request_id)
 }
 
-fn lifecycle_evidence_keys(
+fn lifecycle_evidence_keys<I: LedgerIdentity>(
     reservations: &ReservationStateV1,
     lifecycle: &LifecycleStateV1,
     source_record: &SimV2SourceRecordReferenceV1,
-    evidence: &SourceNeutralEvidenceKindV1,
+    evidence: &LedgerEvidence<I>,
 ) -> SparseLedgerStateKeysV1 {
     let mut keys = SparseLedgerStateKeysV1::default();
     match evidence {
-        SourceNeutralEvidenceKindV1::Control { result } => match result {
-            SourceNeutralControlResultV1::Submission { outcome } => {
+        LedgerEvidence::Control { result } => match result {
+            LedgerControl::Submission { outcome } => {
                 if let Some(submission_item) = submission_item_identity(source_record) {
                     if let Some(request_identity) =
                         lifecycle.submission_requests.get(&submission_item)
@@ -2256,34 +2319,33 @@ fn lifecycle_evidence_keys(
                     keys.submission_items.insert(submission_item);
                 }
                 if let SourceNeutralSubmissionOutcomeV1::Accepted { order } = outcome {
-                    keys.add_order(lifecycle, &order.order_identity.0);
+                    keys.add_order(lifecycle, &order.order_identity.ledger_key());
                     keys.add_condition(&order.condition_id);
                 }
             }
-            SourceNeutralControlResultV1::OrderQuery { result } => {
+            LedgerControl::OrderQuery { result } => {
                 if let Some(query_request) = query_global_request_id(source_record) {
                     if let Some(request_identity) = lifecycle.query_requests.get(query_request) {
                         keys.add_request(reservations, request_identity);
                     }
                     keys.query_requests.insert(query_request.to_owned());
                 }
-                if let SourceNeutralOrderQueryResultV1::Found { order } = result {
-                    keys.add_order(lifecycle, &order.order_identity.0);
+                if let SourceNeutralOrderQueryResult::Found { order } = result {
+                    keys.add_order(lifecycle, &order.order_identity.ledger_key());
                     keys.add_condition(&order.condition_id);
                 }
             }
-            SourceNeutralControlResultV1::Cancellation { order_identity, .. } => {
-                keys.add_order(lifecycle, &order_identity.0);
+            LedgerControl::Cancellation { order_identity, .. } => {
+                keys.add_order(lifecycle, &order_identity.ledger_key());
             }
-            SourceNeutralControlResultV1::OrdersQuery { .. }
-            | SourceNeutralControlResultV1::TradesQuery { .. } => {}
+            LedgerControl::OrdersQuery { .. } | LedgerControl::TradesQuery { .. } => {}
         },
-        SourceNeutralEvidenceKindV1::OrderLifecycle { result } => {
-            keys.add_order(lifecycle, &result.order_identity.0);
+        LedgerEvidence::OrderLifecycle { result } => {
+            keys.add_order(lifecycle, &result.order_identity.ledger_key());
             keys.add_condition(&result.condition_id);
         }
-        SourceNeutralEvidenceKindV1::TradeLifecycle { result } => {
-            keys.add_trade(lifecycle, &result.trade_identity.0);
+        LedgerEvidence::TradeLifecycle { result } => {
+            keys.add_trade(lifecycle, &result.trade_identity.ledger_key());
             keys.add_condition(&result.condition_id);
         }
         _ => {}
@@ -2291,11 +2353,11 @@ fn lifecycle_evidence_keys(
     keys
 }
 
-fn economic_transition_keys(
+fn economic_transition_keys<I: LedgerIdentity>(
     reservations: &ReservationStateV1,
     lifecycle: &LifecycleStateV1,
     condition_id: Option<&ConditionId>,
-    transition: &SourceNeutralAccountTransitionKindV1,
+    transition: &SourceNeutralAccountTransitionKindV1<I>,
     delta: &ParsedBalanceDeltaV1,
     source_record: &SimV2SourceRecordReferenceV1,
 ) -> SparseLedgerStateKeysV1 {
@@ -2307,7 +2369,7 @@ fn economic_transition_keys(
         SourceNeutralAccountTransitionKindV1::OrderAcceptedEncumbranceApplied {
             order_identity,
         } => {
-            keys.add_order(lifecycle, &order_identity.0);
+            keys.add_order(lifecycle, &order_identity.ledger_key());
             if let Some(submission_item) = submission_item_identity(source_record) {
                 if let Some(request_identity) = lifecycle.submission_requests.get(&submission_item)
                 {
@@ -2317,7 +2379,7 @@ fn economic_transition_keys(
             }
             if let Some(request_identity) = lifecycle
                 .orders
-                .get(&order_identity.0)
+                .get(&order_identity.ledger_key())
                 .and_then(|order| order.request_identity.as_ref())
             {
                 keys.add_request(reservations, request_identity);
@@ -2335,7 +2397,7 @@ fn economic_transition_keys(
         | SourceNeutralAccountTransitionKindV1::MarketResolutionEncumbranceReleased {
             order_identity,
             ..
-        } => keys.add_order(lifecycle, &order_identity.0),
+        } => keys.add_order(lifecycle, &order_identity.ledger_key()),
         SourceNeutralAccountTransitionKindV1::FillFinalityEconomicApplied {
             trade_identity,
             path_ordinal,
@@ -2343,7 +2405,7 @@ fn economic_transition_keys(
         | SourceNeutralAccountTransitionKindV1::FillFinalityCompensationApplied {
             trade_identity,
             path_ordinal,
-        } => keys.add_fill(lifecycle, &trade_identity.0, *path_ordinal),
+        } => keys.add_fill(lifecycle, &trade_identity.ledger_key(), *path_ordinal),
         SourceNeutralAccountTransitionKindV1::FillFinalityUnappliedFailureReleased { .. }
         | SourceNeutralAccountTransitionKindV1::MakerRebateAccrualFinalized
         | SourceNeutralAccountTransitionKindV1::TakerRebateAccrualApplied { .. }
@@ -2362,15 +2424,15 @@ fn economic_transition_keys(
     keys
 }
 
-fn apply_control_lifecycle(
+fn apply_control_lifecycle<I: LedgerIdentity>(
     reservations: &mut ReservationStateV1,
     lifecycle: &mut LifecycleStateV1,
     source_record: &SimV2SourceRecordReferenceV1,
-    result: &SourceNeutralControlResultV1,
+    result: &LedgerControl<I>,
     ledger_entry_seq: u64,
 ) -> Result<(), LedgerErrorV1> {
     match result {
-        SourceNeutralControlResultV1::Submission { outcome } => {
+        LedgerControl::Submission { outcome } => {
             let request_identity = submission_item_identity(source_record)
                 .and_then(|identity| lifecycle.submission_requests.get(&identity).cloned());
             let Some(request_identity) = request_identity else {
@@ -2397,13 +2459,13 @@ fn apply_control_lifecycle(
                 }
             }
         }
-        SourceNeutralControlResultV1::OrderQuery { result } => {
+        LedgerControl::OrderQuery { result } => {
             let request_identity = query_global_request_id(source_record)
                 .and_then(|identity| lifecycle.query_requests.get(identity).cloned());
             let Some(request_identity) = request_identity else {
                 return Ok(());
             };
-            if let SourceNeutralOrderQueryResultV1::Found { order } = result
+            if let SourceNeutralOrderQueryResult::Found { order } = result
                 && matches!(
                     order.state,
                     SourceNeutralOrderStateV1::Open | SourceNeutralOrderStateV1::Matched
@@ -2418,29 +2480,35 @@ fn apply_control_lifecycle(
                 )?;
             }
         }
-        SourceNeutralControlResultV1::Cancellation {
+        LedgerControl::Cancellation {
             order_identity,
             outcome: SourceNeutralCancellationOutcomeV1::Canceled,
         } => {
-            set_order_open(lifecycle, &order_identity.0, None, false, ledger_entry_seq)?;
+            set_order_open(
+                lifecycle,
+                &order_identity.ledger_key(),
+                None,
+                false,
+                ledger_entry_seq,
+            )?;
         }
-        SourceNeutralControlResultV1::Cancellation { .. }
-        | SourceNeutralControlResultV1::OrdersQuery { .. }
-        | SourceNeutralControlResultV1::TradesQuery { .. } => {}
+        LedgerControl::Cancellation { .. }
+        | LedgerControl::OrdersQuery { .. }
+        | LedgerControl::TradesQuery { .. } => {}
     }
     Ok(())
 }
 
-fn accept_order_for_request(
+fn accept_order_for_request<I: LedgerIdentity>(
     reservations: &mut ReservationStateV1,
     lifecycle: &mut LifecycleStateV1,
     request_identity: &LedgerRequestIdentityV1,
-    order: &SourceNeutralOrderSnapshotV1,
+    order: &SourceNeutralOrderSnapshotV1<I>,
     ledger_entry_seq: u64,
 ) -> Result<(), LedgerErrorV1> {
     let mut order_index = lifecycle
         .orders
-        .remove(&order.order_identity.0)
+        .remove(&order.order_identity.ledger_key())
         .unwrap_or_default();
     let economic_applied = order_index.economic_applied;
     let transition = apply_definitive_reservation_result(
@@ -2466,10 +2534,10 @@ fn accept_order_for_request(
     order_index.last_ledger_entry_seq = ledger_entry_seq;
     lifecycle
         .orders
-        .insert(order.order_identity.0.clone(), order_index);
+        .insert(order.order_identity.ledger_key().clone(), order_index);
     set_order_open(
         lifecycle,
-        &order.order_identity.0,
+        &order.order_identity.ledger_key(),
         Some(&order.condition_id),
         matches!(order.state, SourceNeutralOrderStateV1::Open),
         ledger_entry_seq,
@@ -2497,7 +2565,7 @@ fn add_cumulative_accepted_principal(
 
 fn set_order_open(
     lifecycle: &mut LifecycleStateV1,
-    order_identity: &str,
+    order_identity: &LedgerIdentityKeyV1,
     condition_id: Option<&ConditionId>,
     open: bool,
     ledger_entry_seq: u64,
@@ -2541,15 +2609,15 @@ fn set_order_open(
     Ok(())
 }
 
-fn apply_order_lifecycle(
+fn apply_order_lifecycle<I: LedgerIdentity>(
     lifecycle: &mut LifecycleStateV1,
-    result: &SourceNeutralOrderLifecycleResultV1,
+    result: &SourceNeutralOrderLifecycleResultV1<I>,
     ledger_entry_seq: u64,
 ) -> Result<(), LedgerErrorV1> {
     match &result.event {
         SourceNeutralOrderLifecycleEventV1::Accepted { state } => set_order_open(
             lifecycle,
-            &result.order_identity.0,
+            &result.order_identity.ledger_key(),
             Some(&result.condition_id),
             matches!(state, SourceNeutralOrderStateV1::Open),
             ledger_entry_seq,
@@ -2560,7 +2628,7 @@ fn apply_order_lifecycle(
         | SourceNeutralOrderLifecycleEventV1::CallerCanceled
         | SourceNeutralOrderLifecycleEventV1::GtdExpired => set_order_open(
             lifecycle,
-            &result.order_identity.0,
+            &result.order_identity.ledger_key(),
             Some(&result.condition_id),
             false,
             ledger_entry_seq,
@@ -2568,9 +2636,9 @@ fn apply_order_lifecycle(
     }
 }
 
-fn apply_trade_lifecycle(
+fn apply_trade_lifecycle<I: LedgerIdentity>(
     lifecycle: &mut LifecycleStateV1,
-    result: &SourceNeutralTradeLifecycleResultV1,
+    result: &SourceNeutralTradeLifecycleResultV1<I>,
     ledger_entry_seq: u64,
 ) -> Result<(), LedgerErrorV1> {
     let pending = matches!(
@@ -2580,7 +2648,7 @@ fn apply_trade_lifecycle(
     );
     set_trade_pending(
         lifecycle,
-        &result.trade_identity.0,
+        &result.trade_identity.ledger_key(),
         &result.condition_id,
         pending,
         ledger_entry_seq,
@@ -2589,7 +2657,7 @@ fn apply_trade_lifecycle(
 
 fn set_trade_pending(
     lifecycle: &mut LifecycleStateV1,
-    trade_identity: &str,
+    trade_identity: &LedgerIdentityKeyV1,
     condition_id: &ConditionId,
     pending: bool,
     ledger_entry_seq: u64,
@@ -2639,18 +2707,18 @@ fn set_trade_pending(
     Ok(())
 }
 
-fn apply_settlement_lifecycle(
+fn apply_settlement_lifecycle<I: LedgerIdentity>(
     lifecycle: &mut LifecycleStateV1,
-    result: &SourceNeutralSettlementLifecycleResultV1,
+    result: &SourceNeutralSettlementLifecycleResultV1<I>,
 ) {
     let _ = (lifecycle, result);
 }
 
-fn apply_economic_lifecycle(
+fn apply_economic_lifecycle<I: LedgerIdentity>(
     reservations: &mut ReservationStateV1,
     lifecycle: &mut LifecycleStateV1,
     condition_id: Option<&ConditionId>,
-    transition: &SourceNeutralAccountTransitionKindV1,
+    transition: &SourceNeutralAccountTransitionKindV1<I>,
     delta: &ParsedBalanceDeltaV1,
     source_record: &SimV2SourceRecordReferenceV1,
     ledger_entry_seq: u64,
@@ -2661,7 +2729,7 @@ fn apply_economic_lifecycle(
         } => {
             let mut order = lifecycle
                 .orders
-                .remove(&order_identity.0)
+                .remove(&order_identity.ledger_key())
                 .unwrap_or_default();
             let request_identity = submission_item_identity(source_record)
                 .and_then(|identity| lifecycle.submission_requests.get(&identity).cloned())
@@ -2702,7 +2770,9 @@ fn apply_economic_lifecycle(
             order.request_identity = request_identity;
             order.economic_applied = true;
             order.last_ledger_entry_seq = ledger_entry_seq;
-            lifecycle.orders.insert(order_identity.0.clone(), order);
+            lifecycle
+                .orders
+                .insert(order_identity.ledger_key().clone(), order);
         }
         SourceNeutralAccountTransitionKindV1::FakUnspentEncumbranceReleased { order_identity }
         | SourceNeutralAccountTransitionKindV1::CallerCancellationEncumbranceReleased {
@@ -2719,7 +2789,7 @@ fn apply_economic_lifecycle(
         } => {
             set_order_open(
                 lifecycle,
-                &order_identity.0,
+                &order_identity.ledger_key(),
                 condition_id,
                 false,
                 ledger_entry_seq,
@@ -2751,7 +2821,7 @@ fn apply_economic_lifecycle(
             }
             change_fees(lifecycle, condition_id, fee_pusd)?;
             lifecycle.applied_fills.insert(
-                (trade_identity.0.clone(), *path_ordinal),
+                (trade_identity.ledger_key().clone(), *path_ordinal),
                 AppliedFillIndexV1 {
                     condition_id: condition_id.cloned(),
                     token_id,
@@ -2766,7 +2836,7 @@ fn apply_economic_lifecycle(
             trade_identity,
             path_ordinal,
         } => {
-            let fill_key = (trade_identity.0.clone(), *path_ordinal);
+            let fill_key = (trade_identity.ledger_key().clone(), *path_ordinal);
             if let Some(fill) = lifecycle.applied_fills.get(&fill_key).cloned()
                 && fill.active
             {
@@ -4044,10 +4114,10 @@ mod tests {
         writer.inject_durable_append_failure();
         assert!(matches!(
             writer.apply_opening(
-                &reference,
+                &LedgerTransactionSourceV1::Noe(reference.clone()),
                 &account_instance_key,
                 "opening-durable-failure",
-                1,
+                Some(1),
                 &ExactDecimal("10".to_owned()),
             ),
             Err(LedgerErrorV1::Durable(LedgerDurableErrorV1::Io { .. }))
@@ -4057,10 +4127,10 @@ mod tests {
         writer.inject_durable_sync_failure();
         assert!(matches!(
             writer.apply_opening(
-                &reference,
+                &LedgerTransactionSourceV1::Noe(reference.clone()),
                 &account_instance_key,
                 "opening-durable-failure",
-                1,
+                Some(1),
                 &ExactDecimal("10".to_owned()),
             ),
             Err(LedgerErrorV1::Durable(LedgerDurableErrorV1::Io { .. }))
@@ -4103,10 +4173,10 @@ mod tests {
         let mut writer = LedgerWriterV1::create_durable(policy, temporary.path()).unwrap();
         writer
             .apply_opening(
-                &reference,
+                &LedgerTransactionSourceV1::Noe(reference.clone()),
                 &account_instance_key,
                 "opening-durable-capacity",
-                1,
+                Some(1),
                 &ExactDecimal("10".to_owned()),
             )
             .unwrap();
@@ -4134,3 +4204,9 @@ mod tests {
         assert_eq!(recovered.projection().unwrap().ledger_entry_seq, 1);
     }
 }
+
+#[path = "memory.rs"]
+pub(crate) mod memory;
+
+#[path = "funds.rs"]
+pub(crate) mod funds;

@@ -1,5 +1,6 @@
 mod core;
 mod durable;
+mod identity;
 mod lifecycle;
 mod projection;
 mod reservation;
@@ -20,3 +21,9 @@ pub use reservation::{
     LedgerLocalEventIdentityV1, LedgerRequestIdentityV1, LedgerReservationOutcomeV1,
     ReserveIntentV1,
 };
+
+pub use core::memory::*;
+pub use projection::LedgerProjectionV2;
+
+pub use core::funds::{LedgerFundsReadV1, OrderFundsReadV1, RequestFundsReadV1};
+pub use reservation::ReservationStatusV1;

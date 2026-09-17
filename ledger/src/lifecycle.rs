@@ -1,3 +1,4 @@
+use crate::identity::LedgerIdentityKeyV1;
 use std::collections::BTreeMap;
 
 use contracts::{ConditionId, TokenId};
@@ -64,16 +65,18 @@ pub(crate) struct AppliedFillIndexV1 {
     pub(crate) active: bool,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct LifecycleStateV1 {
     #[serde(with = "submission_requests_serde")]
     pub(crate) submission_requests:
         BTreeMap<LedgerSubmissionItemIdentityV1, LedgerRequestIdentityV1>,
     pub(crate) query_requests: BTreeMap<String, LedgerRequestIdentityV1>,
-    pub(crate) orders: BTreeMap<String, OrderLifecycleIndexV1>,
-    pub(crate) trades: BTreeMap<String, TradeLifecycleIndexV1>,
+    #[serde(with = "crate::identity::map")]
+    pub(crate) orders: BTreeMap<LedgerIdentityKeyV1, OrderLifecycleIndexV1>,
+    #[serde(with = "crate::identity::map")]
+    pub(crate) trades: BTreeMap<LedgerIdentityKeyV1, TradeLifecycleIndexV1>,
     #[serde(with = "applied_fills_serde")]
-    pub(crate) applied_fills: BTreeMap<(String, u32), AppliedFillIndexV1>,
+    pub(crate) applied_fills: BTreeMap<(LedgerIdentityKeyV1, u32), AppliedFillIndexV1>,
     pub(crate) totals: LifecycleTotalsV1,
     pub(crate) outcome_cost_basis_pusd: BTreeMap<String, OutcomeCostBasisV1>,
     pub(crate) markets: BTreeMap<String, MarketLifecycleStateV1>,
@@ -108,7 +111,7 @@ mod applied_fills_serde {
     use super::*;
 
     pub(super) fn serialize<S>(
-        value: &BTreeMap<(String, u32), AppliedFillIndexV1>,
+        value: &BTreeMap<(LedgerIdentityKeyV1, u32), AppliedFillIndexV1>,
         serializer: S,
     ) -> Result<S::Ok, S::Error>
     where
@@ -119,11 +122,11 @@ mod applied_fills_serde {
 
     pub(super) fn deserialize<'de, D>(
         deserializer: D,
-    ) -> Result<BTreeMap<(String, u32), AppliedFillIndexV1>, D::Error>
+    ) -> Result<BTreeMap<(LedgerIdentityKeyV1, u32), AppliedFillIndexV1>, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        Vec::<((String, u32), AppliedFillIndexV1)>::deserialize(deserializer)
+        Vec::<((LedgerIdentityKeyV1, u32), AppliedFillIndexV1)>::deserialize(deserializer)
             .map(IntoIterator::into_iter)
             .map(Iterator::collect)
     }
