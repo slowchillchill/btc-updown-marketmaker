@@ -1432,3 +1432,11 @@ pub struct GateAReceiptV3 {
     pub training_split_manifest_id: String,
     pub training_split_manifest_sha256: String,
 }
+
+/// 公共读取的真实零、缺失和不适用。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum ExecutionReadValueV1<T> {
+    Known(T),
+    Unavailable,
+    NotApplicable,
+}

@@ -245,7 +245,7 @@ pub fn read_ledger_projection_v1(
     Ok(container.projection)
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "body", rename_all = "SCREAMING_SNAKE_CASE")]
 pub(crate) enum DurablePayloadV1 {
     Genesis {
@@ -348,10 +348,24 @@ impl DurableLedgerV1 {
         Self::create_inner(directory, policy, false)
     }
 
+    pub(crate) fn create_v2(
+        directory: &Path,
+        policy: &AccountAdmissionPolicyV1,
+    ) -> Result<Self, LedgerDurableErrorV1> {
+        Self::create_version(directory, policy, false, 2)
+    }
     fn create_inner(
         directory: &Path,
         policy: &AccountAdmissionPolicyV1,
         fail_after_publish: bool,
+    ) -> Result<Self, LedgerDurableErrorV1> {
+        Self::create_version(directory, policy, fail_after_publish, 1)
+    }
+    fn create_version(
+        directory: &Path,
+        policy: &AccountAdmissionPolicyV1,
+        fail_after_publish: bool,
+        version: u16,
     ) -> Result<Self, LedgerDurableErrorV1> {
         match fs::create_dir(directory) {
             Ok(()) => {}
@@ -398,7 +412,7 @@ impl DurableLedgerV1 {
         let genesis = DurablePayloadV1::Genesis {
             policy: policy.clone(),
         };
-        let encoded = encode_record(1, &genesis)?;
+        let encoded = encode_record_version(1, &genesis, version)?;
         let mut candidate = OpenOptions::new()
             .create_new(true)
             .read(true)
@@ -549,10 +563,23 @@ impl DurableLedgerV1 {
         &mut self,
         payload: &DurablePayloadV1,
     ) -> Result<(), LedgerDurableErrorV1> {
+        self.append_version(payload, 1)
+    }
+    pub(crate) fn append_v2(
+        &mut self,
+        payload: &DurablePayloadV1,
+    ) -> Result<(), LedgerDurableErrorV1> {
+        self.append_version(payload, 2)
+    }
+    fn append_version(
+        &mut self,
+        payload: &DurablePayloadV1,
+        version: u16,
+    ) -> Result<(), LedgerDurableErrorV1> {
         if self.poisoned {
             return Err(LedgerDurableErrorV1::HandlePoisoned);
         }
-        let encoded = encode_record(self.next_record_seq, payload)?;
+        let encoded = encode_record_version(self.next_record_seq, payload, version)?;
         let previous_len = self.byte_count;
         let next_byte_count = previous_len
             .checked_add(encoded.len() as u64)
@@ -806,13 +833,18 @@ fn recover_active_segment(
     ))
 }
 
-fn encode_record(
+fn encode_record_version(
     durable_record_seq: u64,
     payload: &DurablePayloadV1,
+    version: u16,
 ) -> Result<Vec<u8>, LedgerDurableErrorV1> {
     let envelope = DurableEnvelopeRefV1 {
-        version: RECORD_VERSION,
-        encoding: RECORD_ENCODING,
+        version,
+        encoding: if version == 2 {
+            "ledger_transaction_segment_v2"
+        } else {
+            RECORD_ENCODING
+        },
         durable_record_seq,
         payload,
     };
@@ -926,7 +958,9 @@ fn decode_segment(
                 message: error.to_string(),
             }
         })?;
-        if envelope.version != RECORD_VERSION || envelope.encoding != RECORD_ENCODING {
+        if !((envelope.version == RECORD_VERSION && envelope.encoding == RECORD_ENCODING)
+            || (envelope.version == 2 && envelope.encoding == "ledger_transaction_segment_v2"))
+        {
             return Err(LedgerDurableErrorV1::InvalidStructure(format!(
                 "{} 的记录版本或编码不受支持",
                 path.display()

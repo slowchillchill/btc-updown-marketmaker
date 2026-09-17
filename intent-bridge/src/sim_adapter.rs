@@ -238,6 +238,97 @@ fn sim_order_kind(order: &BuyOrderIntentV1) -> Result<SimBuyOrderKindV1, SimRunA
     })
 }
 
+/// 仅借用当前组的 sealed 后端；不接受调用方替换 cutoff。
+pub struct SimGroupAdapterV1<
+    'd,
+    'run,
+    I: Iterator<
+        Item = Result<sim_system::public_consumption::PublicGroupDeliveryV1, SimRunActorErrorV2>,
+    >,
+> {
+    decision: &'d mut sim_system::execution::PublicGroupDecisionV1<'run, I>,
+}
+impl<
+    'd,
+    'run,
+    I: Iterator<
+        Item = Result<sim_system::public_consumption::PublicGroupDeliveryV1, SimRunActorErrorV2>,
+    >,
+> crate::IntentBridge<SimGroupAdapterV1<'d, 'run, I>>
+{
+    pub fn bind_sim_group(
+        decision: &'d mut sim_system::execution::PublicGroupDecisionV1<'run, I>,
+    ) -> Self {
+        Self::new(SimGroupAdapterV1 { decision })
+    }
+}
+impl<
+    I: Iterator<
+        Item = Result<sim_system::public_consumption::PublicGroupDeliveryV1, SimRunActorErrorV2>,
+    >,
+> BridgeBackendV1 for SimGroupAdapterV1<'_, '_, I>
+{
+    type CallContext = RequestContextV2;
+    type ImmediateSuccess = MutationRequestReceiptV2;
+    type Error = SimRunActorErrorV2;
+}
+impl<
+    I: Iterator<
+        Item = Result<sim_system::public_consumption::PublicGroupDeliveryV1, SimRunActorErrorV2>,
+    >,
+> private::Sealed for SimGroupAdapterV1<'_, '_, I>
+{
+    type DispatchFuture<'a>
+        = Ready<Result<MutationRequestReceiptV2, SimRunActorErrorV2>>
+    where
+        Self: 'a;
+    fn dispatch<'a, K>(
+        &'a mut self,
+        context: <Self as BridgeBackendV1>::CallContext,
+        intent: &'a ModelIntentV1,
+    ) -> Self::DispatchFuture<'a>
+    where
+        Self: 'a,
+        K: private::DispatchKey,
+    {
+        use sim_system::execution::BusinessRequestV2;
+        let request = (|| {
+            Ok(match intent {
+                ModelIntentV1::SubmitSingleBuy {
+                    condition_id,
+                    order,
+                } => {
+                    BusinessRequestV2::PostOrder(single_buy_request(context, condition_id, order)?)
+                }
+                ModelIntentV1::SubmitPairedBuy {
+                    condition_id,
+                    orders,
+                } => BusinessRequestV2::PostOrders(paired_buy_request(
+                    context,
+                    condition_id,
+                    orders,
+                )?),
+                ModelIntentV1::CancelOrder { platform_order_id } => {
+                    BusinessRequestV2::CancelOrder(cancel_order_request(context, platform_order_id))
+                }
+                ModelIntentV1::CancelOrders { platform_order_ids } => {
+                    BusinessRequestV2::CancelOrders(cancel_orders_request(
+                        context,
+                        platform_order_ids,
+                    )?)
+                }
+                ModelIntentV1::CancelMarketOrders { condition_id } => {
+                    BusinessRequestV2::CancelMarketOrders(cancel_market_orders_request(
+                        context,
+                        condition_id,
+                    ))
+                }
+            })
+        })();
+        ready(request.and_then(|request| self.decision.request(request)))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::cell::RefCell;

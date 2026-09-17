@@ -7,7 +7,11 @@ use execution_normalization::{
     MemoryEconomicFactReferenceV1 as FactReference, MemoryLogicalIdentityV1 as Identity,
     NormalizationBatch, NormalizationCore, NormalizationRecord, StagedNormalizationWriter,
 };
-use std::collections::VecDeque;
+use execution_normalization::{
+    NoeBatchDurabilityV1, NoeConsumedRecordRefV1, NoeConsumptionSourceV1,
+    NoeConsumptionVisibilityV1,
+};
+use std::collections::{BTreeMap, VecDeque};
 
 type Trade = SourceNeutralTradeLifecycleResultV2<Identity>;
 type Control<P> = ControlFor<P, Identity>;
@@ -30,10 +34,27 @@ pub trait MemoryOrderEvidence:
     + std::fmt::Debug
     + Default
 {
+    fn accept_consumption(
+        source: &mut NoeConsumptionSourceV1,
+        context: Arc<ExecutionNormalizationContextV1>,
+        batch: Arc<MemoryNoeBatch<Self>>,
+    ) -> Option<NoeBatchDurabilityV1>;
+    fn consumed_record(record: &NoeConsumedRecordRefV1) -> &MemoryNoeRecord<Self>;
     fn contract_version() -> &'static str;
     fn into_background(accepted: AcceptedMemoryProjection<Self>) -> AcceptedNoeProjectionV1;
 }
 impl MemoryOrderEvidence for LegacyOrderEvidence {
+    fn accept_consumption(
+        _: &mut NoeConsumptionSourceV1,
+        _: Arc<ExecutionNormalizationContextV1>,
+        _: Arc<MemoryNoeBatch<Self>>,
+    ) -> Option<NoeBatchDurabilityV1> {
+        None
+    }
+    fn consumed_record(_: &NoeConsumedRecordRefV1) -> &MemoryNoeRecord<Self> {
+        unreachable!("旧端口不产生V3领取引用")
+    }
+
     fn contract_version() -> &'static str {
         <SourceNeutralTradeLifecycleResultV2 as NoeTradePayload>::CONTRACT_VERSION
     }
@@ -42,6 +63,17 @@ impl MemoryOrderEvidence for LegacyOrderEvidence {
     }
 }
 impl MemoryOrderEvidence for MeasuredOrderEvidence {
+    fn accept_consumption(
+        source: &mut NoeConsumptionSourceV1,
+        context: Arc<ExecutionNormalizationContextV1>,
+        batch: Arc<MemoryNoeBatch<Self>>,
+    ) -> Option<NoeBatchDurabilityV1> {
+        Some(source.accept(context, batch))
+    }
+    fn consumed_record(record: &NoeConsumedRecordRefV1) -> &MemoryNoeRecord<Self> {
+        record.record()
+    }
+
     fn contract_version() -> &'static str {
         <SourceNeutralTradeLifecycleResultV2 as NoeTradePayload<SourceNeutralControlResultV2>>::CONTRACT_VERSION
     }
@@ -80,6 +112,7 @@ struct ObservationState<P: MemoryOrderEvidence> {
     public_visible_time: Option<i64>,
     feedback: VecDeque<PendingFeedback<P>>,
     durable_references: Vec<NoeResultReferenceV1>,
+    consumption: NoeConsumptionSourceV1,
 }
 // 消费者仅保留同一不可变批的 Arc 与未交付记录坐标，不复制归一化正文。
 struct PendingFeedback<P: MemoryOrderEvidence> {
@@ -87,9 +120,16 @@ struct PendingFeedback<P: MemoryOrderEvidence> {
     ordinals: Vec<usize>,
 }
 #[derive(Clone, Debug)]
+enum FeedbackRecord<P: MemoryOrderEvidence> {
+    Legacy {
+        batch: Arc<MemoryNoeBatch<P>>,
+        ordinal: usize,
+    },
+    Measured(NoeConsumedRecordRefV1),
+}
+#[derive(Clone, Debug)]
 pub struct MemoryNoeFeedback<P: MemoryOrderEvidence> {
-    batch: Arc<MemoryNoeBatch<P>>,
-    record_ordinal: usize,
+    record: FeedbackRecord<P>,
     delivery_sequence: u64,
 }
 impl<P: MemoryOrderEvidence> MemoryNoeFeedback<P> {
@@ -97,7 +137,18 @@ impl<P: MemoryOrderEvidence> MemoryNoeFeedback<P> {
         self.delivery_sequence
     }
     pub fn record(&self) -> &MemoryNoeRecord<P> {
-        &self.batch.records[self.record_ordinal]
+        match &self.record {
+            FeedbackRecord::Legacy { batch, ordinal } => &batch.records[*ordinal],
+            FeedbackRecord::Measured(record) => P::consumed_record(record),
+        }
+    }
+}
+impl MemoryNoeFeedback<MeasuredOrderEvidence> {
+    pub fn consumed_record(&self) -> &NoeConsumedRecordRefV1 {
+        let FeedbackRecord::Measured(record) = &self.record else {
+            unreachable!("V3真实领取")
+        };
+        record
     }
 }
 #[derive(Clone, Default)]
@@ -124,6 +175,25 @@ impl<P: MemoryOrderEvidence> MemoryNoeObservation<P> {
         else {
             return Vec::new();
         };
+        if state.consumption.opening_record().is_some() {
+            let records = state.consumption.take_closed(closed, visible);
+            state.delivered = state.consumption.delivered_through();
+            return records
+                .into_iter()
+                .map(|record| {
+                    let NoeConsumptionVisibilityV1::Feedback {
+                        delivery_sequence, ..
+                    } = *record.visibility()
+                    else {
+                        unreachable!("反馈领取不含开户")
+                    };
+                    MemoryNoeFeedback {
+                        record: FeedbackRecord::Measured(record),
+                        delivery_sequence,
+                    }
+                })
+                .collect();
+        }
         let mut ready = Vec::new();
         let mut remaining = VecDeque::new();
         while let Some(pending) = state.feedback.pop_front() {
@@ -138,8 +208,10 @@ impl<P: MemoryOrderEvidence> MemoryNoeObservation<P> {
                             sequence,
                             record.source_order().ordinal,
                             MemoryNoeFeedback {
-                                batch: Arc::clone(&batch),
-                                record_ordinal: ordinal,
+                                record: FeedbackRecord::Legacy {
+                                    batch: Arc::clone(&batch),
+                                    ordinal,
+                                },
                                 delivery_sequence: 0,
                             },
                         ));
@@ -170,6 +242,22 @@ impl<P: MemoryOrderEvidence> MemoryNoeObservation<P> {
                 }
                 feedback.delivery_sequence = state.delivered;
                 feedback
+            })
+            .collect()
+    }
+}
+impl MemoryNoeObservation<MeasuredOrderEvidence> {
+    pub fn opening_record(&self) -> Option<NoeConsumedRecordRefV1> {
+        self.0.lock().unwrap().consumption.opening_record()
+    }
+    pub fn take_closed_records(&self) -> Vec<NoeConsumedRecordRefV1> {
+        self.take_closed_feedback()
+            .into_iter()
+            .map(|feedback| {
+                let FeedbackRecord::Measured(record) = feedback.record else {
+                    unreachable!("V3真实领取")
+                };
+                record
             })
             .collect()
     }
@@ -206,6 +294,7 @@ pub struct AcceptedMemoryProjection<P: MemoryOrderEvidence> {
     context: Arc<ExecutionNormalizationContextV1>,
     batch: Arc<MemoryNoeBatch<P>>,
     observation: MemoryNoeObservation<P>,
+    durability: Option<NoeBatchDurabilityV1>,
 }
 pub enum AcceptedNoeProjectionV1 {
     Legacy(AcceptedMemoryProjection<LegacyOrderEvidence>),
@@ -218,6 +307,7 @@ pub(crate) enum BackgroundNoeWriterV1 {
 pub(crate) struct BackgroundNoeWriter<P: MemoryOrderEvidence> {
     writer: Writer<P>,
     observation: MemoryNoeObservation<P>,
+    pending_mappings: BTreeMap<u64, NoeBatchDurabilityV1>,
 }
 impl<P: MemoryOrderEvidence> BackgroundNoeWriter<P>
 where
@@ -228,13 +318,24 @@ where
         Ok(Self {
             writer: Writer::<P>::create(&accepted.root, (*accepted.context).clone())?,
             observation: accepted.observation.clone(),
+            pending_mappings: BTreeMap::new(),
         })
     }
-    fn stage(&mut self, batch: &MemoryNoeBatch<P>) -> Result<(), DurableErrorV1> {
-        self.writer.stage(batch)
+    fn stage(
+        &mut self,
+        batch: &MemoryNoeBatch<P>,
+        durability: Option<NoeBatchDurabilityV1>,
+    ) -> Result<(), DurableErrorV1> {
+        self.writer.stage(batch)?;
+        if let Some(mapping) = durability {
+            self.pending_mappings
+                .insert(batch.source_watermark.projection_batch_sequence, mapping);
+        }
+        Ok(())
     }
     fn stabilize(&mut self) -> Result<(), DurableErrorV1> {
         let observation = self.observation.clone();
+        let mappings = &mut self.pending_mappings;
         self.writer.stabilize(
             || {
                 SystemTime::now()
@@ -243,6 +344,11 @@ where
                     .as_millis() as i64
             },
             |commit| {
+                if let Some(mapping) =
+                    mappings.remove(&commit.boundary.source_watermark.projection_batch_sequence)
+                {
+                    mapping.publish(&commit.container_reference);
+                }
                 let mut state = observation.0.lock().unwrap();
                 state.durable = commit.boundary.source_watermark.projection_batch_sequence;
                 state.durable_references.extend(commit.result_references());
@@ -263,7 +369,7 @@ impl BackgroundNoeWriterV1 {
                 let Some(Self::Legacy(writer)) = writer else {
                     unreachable!("同一运行端口的订单证据类型固定")
                 };
-                writer.stage(&accepted.batch)
+                writer.stage(&accepted.batch, accepted.durability)
             }
             AcceptedNoeProjectionV1::Measured(accepted) => {
                 if writer.is_none() {
@@ -272,7 +378,7 @@ impl BackgroundNoeWriterV1 {
                 let Some(Self::Measured(writer)) = writer else {
                     unreachable!("同一运行端口的订单证据类型固定")
                 };
-                writer.stage(&accepted.batch)
+                writer.stage(&accepted.batch, accepted.durability)
             }
         }
     }
@@ -365,13 +471,15 @@ impl<P: MemoryOrderEvidence> MemoryNoeProjectionPort<P> {
         );
         let mut state = self.observation.0.lock().unwrap();
         state.accepted = batch.source_watermark.projection_batch_sequence;
+        let durability =
+            P::accept_consumption(&mut state.consumption, context.clone(), batch.clone());
         let ordinals = batch
             .records
             .iter()
             .enumerate()
             .filter_map(|(ordinal, record)| feedback_coordinate::<P>(record).map(|_| ordinal))
             .collect::<Vec<_>>();
-        if !ordinals.is_empty() {
+        if durability.is_none() && !ordinals.is_empty() {
             state.feedback.push_back(PendingFeedback {
                 batch: Arc::clone(&batch),
                 ordinals,
@@ -382,6 +490,7 @@ impl<P: MemoryOrderEvidence> MemoryNoeProjectionPort<P> {
             context: Arc::clone(context),
             batch,
             observation: self.observation.clone(),
+            durability,
         }))
     }
 }

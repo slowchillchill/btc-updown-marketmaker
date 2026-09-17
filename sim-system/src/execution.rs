@@ -19,10 +19,10 @@ pub use crate::run_v2::{
     CreateSessionControlResultV2, CreateSessionDispositionV2, FinitePublicConsumptionV1,
     MemoryNoeBatch, MemoryNoeErrorV1, MemoryNoeFeedback, MemoryNoeObservationV2,
     MemoryNoeObservationV3, MemoryNoeProjectionPortV2, MemoryNoeProjectionPortV3, MemoryNoeRecord,
-    MutationRequestReceiptV2, NextRequiredLogicalDriveV2, PublicSimExecutionV1,
-    SessionInitializationControlResultV2, SimExecution, SimRunActorErrorV2, SimV2NoeObservationV1,
-    SimV2NoeProjectionPortV1, SimV2NoeProjectionPortV2, SimV2NoeProjectionPortV3,
-    UnpublishedRunArtifactCandidateV2,
+    MutationRequestReceiptV2, NextRequiredLogicalDriveV2, PublicGroupDecisionV1,
+    PublicSimExecutionV1, SessionInitializationControlResultV2, SimExecution, SimRunActorErrorV2,
+    SimV2NoeObservationV1, SimV2NoeProjectionPortV1, SimV2NoeProjectionPortV2,
+    SimV2NoeProjectionPortV3, UnpublishedRunArtifactCandidateV2,
 };
 pub use crate::runtime_v2::{
     AcceptedClosedMarketBucketV2, BusinessProjectionVersionV1, BusinessRequestV2,

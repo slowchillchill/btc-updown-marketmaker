@@ -8,6 +8,7 @@ members = [
     "intent-bridge",
     "ledger",
     "sim-system",
+    "shared-run",
 ]
 exclude = ["third_party/polymarket_client_sdk_v2-0.7.0-p1"]
 resolver = "3"

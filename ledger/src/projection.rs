@@ -91,3 +91,15 @@ pub struct LedgerProjectionV1 {
     pub local_pending_reservation_projection: LedgerLocalPendingReservationProjectionV1,
     pub market_projections: Vec<LedgerMarketProjectionV1>,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LedgerProjectionV2 {
+    pub account_instance_key: AccountInstanceKeyV1,
+    pub ledger_entry_seq: u64,
+    pub platform_source_prefix: u64,
+    pub ledger_local_prefix: u64,
+    pub available_through_utc_ms: Option<i64>,
+    pub platform_confirmed_projection: LedgerPlatformConfirmedProjectionV1,
+    pub local_pending_reservation_projection: LedgerLocalPendingReservationProjectionV1,
+    pub market_projections: Vec<LedgerMarketProjectionV1>,
+}

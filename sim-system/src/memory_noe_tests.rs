@@ -10,6 +10,12 @@ async fn memory_execution_with_scenario_capacity<
     PublicSimExecutionV1,
     noe_projection::MemoryNoeObservation<P>,
 ) {
+    memory_execution_with_cash::<P>(path, scenario, role, capacity, rules, "10").await
+}
+async fn memory_execution_with_cash<P: noe_projection::MemoryOrderEvidence + 'static>(
+    path: &Path, scenario: Arc<SealedPlatformScenarioV1>, role: SimCallerRoleV1,
+    capacity: usize, rules: Option<Arc<SealedProcessRuleSnapshotV3>>, cash: &str,
+) -> (PublicSimExecutionV1,noe_projection::MemoryNoeObservation<P>) {
     let rules = match rules {
         Some(rules) => rules,
         None => successful_snapshot_v3_for_sim_tests().await,
@@ -62,6 +68,7 @@ async fn memory_execution_with_scenario_capacity<
     .unwrap();
     let mut session = spec("public-consumption-test", "create-public");
     session.caller_role = role;
+    session.initial_account_state.available_pusd = ExactDecimal(cash.into());
     finite_feeding::feed(
         &mut execution,
         |execution| execution.create_session(session.clone()),
@@ -349,7 +356,8 @@ async fn real_memory_noe_delivers_closed_order_feedback_and_cancel_before_finish
     assert!(std::fs::read_to_string(path).unwrap().contains("RUN_SEAL"));
 }
 
-fn recorded_memory_complete(root: &Path) -> PublicObservationCoreV1 {
+fn recorded_memory_complete(root: &Path) -> PublicObservationCoreV1 { recorded_memory_with_probe(root, false) }
+fn recorded_memory_with_probe(root: &Path, probe: bool) -> PublicObservationCoreV1 {
     let mut core = core();
     let mut writer = PublicRecordingWriterV1::create(root, core.header(), config()).unwrap();
     let mut down = book("100");
@@ -369,7 +377,7 @@ fn recorded_memory_complete(root: &Path) -> PublicObservationCoreV1 {
         1,
         TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(active))),
     );
-    for input in [
+    let mut inputs = vec![
         meta(0),
         active,
         pm(2, 1, 21_000, book("100")),
@@ -405,7 +413,12 @@ fn recorded_memory_complete(root: &Path) -> PublicObservationCoreV1 {
             ))),
         ),
         end(8),
-    ] {
+    ];
+    if probe {
+        for input in &mut inputs[6..] {input.input_position+=1;}
+        inputs.insert(6,record(6,TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",5,27_000,27_001,book("80"))))));
+    }
+    for input in inputs {
         let result = apply(&mut core, &input);
         writer.record(input, result).unwrap();
     }
@@ -763,4 +776,12 @@ async fn training_hidden_prefetch_cannot_advance_public_feedback_visibility_or_o
         let result = ::execution_normalization::read_noe_result_v3(reference).unwrap();
         matches!(result.record.source_reference().record, SimV2SourceRecordReferenceV1::DirectResponse { response_received_at_utc_ms, .. } if response_received_at_utc_ms == received)
     }));
+}
+
+#[cfg(feature="shared-execution")]
+include!("shared_ledger_tests.rs");
+
+struct SharedRecordedTimes;
+impl PublicConsumptionTimeSourceV1 for SharedRecordedTimes {
+fn execution_time_for_group(&mut self,group:&PublicGroupReferenceV1)->Result<i64,SimRunActorErrorV2>{Ok(match group.group_position {0=>SNAPSHOT_RECEIVED_AT,1..=4=>22_000,5=>26_000,6=>28_000,_=>TERMINAL_ADMITTED_TIME_MS})}
 }
