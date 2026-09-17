@@ -11,6 +11,7 @@ mod gate_a_sim_adapter;
 pub mod hidden_preparation;
 pub mod observation;
 pub mod public_input;
+pub mod public_online;
 pub mod public_recording;
 pub mod public_replay;
 pub mod typed_raw;

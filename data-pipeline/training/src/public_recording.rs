@@ -509,4 +509,4 @@ pub(crate) mod faults {
 }
 #[cfg(test)]
 #[path = "public_recording_tests.rs"]
-mod tests;
+pub(crate) mod tests;

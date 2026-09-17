@@ -122,7 +122,7 @@ fn row(
     }
 }
 
-fn book(quantity: &str) -> PolymarketOrderbookEvent {
+pub(crate) fn book(quantity: &str) -> PolymarketOrderbookEvent {
     PolymarketOrderbookEvent::Book {
         asset_id: UP_TOKEN_ID.to_owned(),
         bids: vec![PolymarketPriceLevel {
@@ -137,7 +137,7 @@ fn book(quantity: &str) -> PolymarketOrderbookEvent {
     }
 }
 
-fn change(quantity: Option<&str>) -> PolymarketPriceChangeEntry {
+pub(crate) fn change(quantity: Option<&str>) -> PolymarketPriceChangeEntry {
     PolymarketPriceChangeEntry {
         asset_id: UP_TOKEN_ID.to_owned(),
         price: "0.5".to_owned(),
@@ -164,7 +164,9 @@ fn anchor_input() -> data_pipeline_core::public_input::MarketAnchorRuleUpdateInp
     })).unwrap()
 }
 
-fn twap_input(window_s: u64) -> data_pipeline_core::public_input::PolymarketRtdsChainlinkTwapInput {
+pub(crate) fn twap_input(
+    window_s: u64,
+) -> data_pipeline_core::public_input::PolymarketRtdsChainlinkTwapInput {
     use data_pipeline_core::typed_raw::{PolymarketRtdsChainlinkBtcUsdRow, RtdsFreshnessStatus};
     data_pipeline_core::public_input::PolymarketRtdsChainlinkTwapInput {
         common: PolymarketRtdsChainlinkBtcUsdRow {
@@ -197,7 +199,7 @@ fn twap_input(window_s: u64) -> data_pipeline_core::public_input::PolymarketRtds
     }
 }
 
-fn core() -> PublicObservationCoreV1 {
+pub(crate) fn core() -> PublicObservationCoreV1 {
     PublicObservationCoreV1::new(PublicInputStreamHeaderV1 {
         input_stream_id: "core-test".to_owned(),
         canonical_rule_version: "rule-v1".to_owned(),
@@ -210,7 +212,7 @@ fn core() -> PublicObservationCoreV1 {
     .unwrap()
 }
 
-fn record(position: u64, row: TypedRawRowV2) -> RecordedIngressV1 {
+pub(crate) fn record(position: u64, row: TypedRawRowV2) -> RecordedIngressV1 {
     let source_evidence = source_evidence_v3_from_typed_raw_v2(&row).unwrap();
     RecordedIngressV1 {
         input_stream_id: "core-test".to_owned(),
@@ -223,7 +225,7 @@ fn record(position: u64, row: TypedRawRowV2) -> RecordedIngressV1 {
     }
 }
 
-fn meta(position: u64) -> RecordedIngressV1 {
+pub(crate) fn meta(position: u64) -> RecordedIngressV1 {
     record(
         position,
         TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(
@@ -232,7 +234,12 @@ fn meta(position: u64) -> RecordedIngressV1 {
     )
 }
 
-fn pm(position: u64, seq: u64, source: i64, event: PolymarketOrderbookEvent) -> RecordedIngressV1 {
+pub(crate) fn pm(
+    position: u64,
+    seq: u64,
+    source: i64,
+    event: PolymarketOrderbookEvent,
+) -> RecordedIngressV1 {
     record(
         position,
         TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row(
@@ -241,7 +248,12 @@ fn pm(position: u64, seq: u64, source: i64, event: PolymarketOrderbookEvent) -> 
     )
 }
 
-fn twap_record(position: u64, window: u64, received: i64, price: &str) -> RecordedIngressV1 {
+pub(crate) fn twap_record(
+    position: u64,
+    window: u64,
+    received: i64,
+    price: &str,
+) -> RecordedIngressV1 {
     let mut row = twap_input(window);
     row.common.timestamp_received = received;
     row.common.payload_timestamp = received - 2;
@@ -253,7 +265,7 @@ fn twap_record(position: u64, window: u64, received: i64, price: &str) -> Record
     record(position, TypedRawRowV2::PolymarketRtdsChainlinkTwap(row))
 }
 
-fn rule_record(position: u64, window: u32, price: Option<&str>) -> RecordedIngressV1 {
+pub(crate) fn rule_record(position: u64, window: u32, price: Option<&str>) -> RecordedIngressV1 {
     let mut row = anchor_input();
     row.condition_id = CONDITION_ID.into();
     row.clob_market_id = CLOB_MARKET_ID.into();
@@ -274,7 +286,7 @@ fn rule_record(position: u64, window: u32, price: Option<&str>) -> RecordedIngre
         )),
     )
 }
-fn config() -> GateAOutputConfig {
+pub(crate) fn config() -> GateAOutputConfig {
     let mut config = crate::gate_a_formal_output_config();
     config.sort.batch_rows = 2;
     config.sort.max_run_rows = 4;
@@ -888,7 +900,11 @@ fn level(price: &str, quantity: &str) -> DepthLevel {
     }
 }
 
-fn snapshot(epoch: &str, last_update_id: u64, admission_sequence: u64) -> BinanceDepthSnapshotRow {
+pub(crate) fn snapshot(
+    epoch: &str,
+    last_update_id: u64,
+    admission_sequence: u64,
+) -> BinanceDepthSnapshotRow {
     BinanceDepthSnapshotRow {
         timestamp_received: 2_000 + admission_sequence as i64,
         snapshot_fetch_start_utc: 900,
@@ -910,7 +926,7 @@ fn snapshot(epoch: &str, last_update_id: u64, admission_sequence: u64) -> Binanc
     }
 }
 
-fn update(
+pub(crate) fn update(
     epoch: &str,
     first_update_id: u64,
     final_update_id: u64,
