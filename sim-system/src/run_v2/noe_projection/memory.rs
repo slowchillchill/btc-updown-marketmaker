@@ -473,17 +473,19 @@ impl<P: MemoryOrderEvidence> MemoryNoeProjectionPort<P> {
         state.accepted = batch.source_watermark.projection_batch_sequence;
         let durability =
             P::accept_consumption(&mut state.consumption, context.clone(), batch.clone());
-        let ordinals = batch
-            .records
-            .iter()
-            .enumerate()
-            .filter_map(|(ordinal, record)| feedback_coordinate::<P>(record).map(|_| ordinal))
-            .collect::<Vec<_>>();
-        if durability.is_none() && !ordinals.is_empty() {
-            state.feedback.push_back(PendingFeedback {
-                batch: Arc::clone(&batch),
-                ordinals,
-            });
+        if durability.is_none() {
+            let ordinals = batch
+                .records
+                .iter()
+                .enumerate()
+                .filter_map(|(ordinal, record)| feedback_coordinate::<P>(record).map(|_| ordinal))
+                .collect::<Vec<_>>();
+            if !ordinals.is_empty() {
+                state.feedback.push_back(PendingFeedback {
+                    batch: Arc::clone(&batch),
+                    ordinals,
+                });
+            }
         }
         Ok(P::into_background(AcceptedMemoryProjection {
             root: Arc::clone(&self.root),

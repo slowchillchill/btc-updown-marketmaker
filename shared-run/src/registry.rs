@@ -59,7 +59,7 @@ struct Submitted {
     receipt: Option<MutationRequestReceiptV2>,
     outcomes: BTreeMap<u16, Option<Identity>>,
 }
-/// 普通已稳定NOE读取不能进入共享业务登记。
+/// 普通已稳定 NOE 读取不能直接传入共享登记；这不是公开生产者接口的来源认证。
 /// ```compile_fail
 /// fn observe(registry: &mut shared_run::SharedExecutionRegistryV1,
 ///            view: &execution_normalization::NoeDurableRecordViewV1) {
@@ -416,6 +416,12 @@ impl SharedExecutionRegistryV1 {
             start(a)
                 .cmp(&start(b))
                 .then_with(|| {
+                    order_condition(&self.orders[a.order_identity])
+                        .unwrap()
+                        .0
+                        .cmp(&order_condition(&self.orders[b.order_identity]).unwrap().0)
+                })
+                .then_with(|| {
                     source_sequence(a.formed.unwrap()).cmp(&source_sequence(b.formed.unwrap()))
                 })
                 .then_with(|| a.order_identity.cmp(b.order_identity))
@@ -427,6 +433,7 @@ impl SharedExecutionRegistryV1 {
             })
             .collect();
         let set: BTreeSet<_> = eligible.iter().map(|o| o.order_identity).collect();
+        let mut paired = Vec::new();
         for submitted in self.intents.values() {
             if !matches!(
                 submitted.origin.intent(),
@@ -439,11 +446,25 @@ impl SharedExecutionRegistryV1 {
                 && set.contains(a)
                 && set.contains(b)
             {
-                objects.push(CancelObjectReadV1::Paired {
-                    origin: &submitted.origin,
-                    orders: [self.order(a).unwrap(), self.order(b).unwrap()],
-                });
+                let orders = [self.order(a).unwrap(), self.order(b).unwrap()];
+                let condition = order_condition(&self.orders[a]).unwrap();
+                let mut members = [
+                    (source_sequence(orders[0].formed.unwrap()), a),
+                    (source_sequence(orders[1].formed.unwrap()), b),
+                ];
+                // 排序键按真实成员形成序；返回的两成员数组仍保持原 ordinal 0/1。
+                members.sort();
+                let key = (
+                    self.markets[&condition.0].market.window.start_at_utc_ms,
+                    &condition.0,
+                    members,
+                );
+                paired.push((key, &submitted.origin, orders));
             }
+        }
+        paired.sort_by_key(|(key, _, _)| *key);
+        for (_, origin, orders) in paired {
+            objects.push(CancelObjectReadV1::Paired { origin, orders });
         }
         let mut markets: BTreeMap<&str, (&ConditionId, Vec<ExecutionOrderReadV1<'_>>)> =
             BTreeMap::new();

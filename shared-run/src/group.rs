@@ -93,9 +93,6 @@ impl SharedExecutionV1 {
     pub fn ledger(&self) -> &LedgerWriterV1 {
         &self.ledger
     }
-    pub fn ledger_mut(&mut self) -> &mut LedgerWriterV1 {
-        &mut self.ledger
-    }
     pub fn registry(&self) -> &SharedExecutionRegistryV1 {
         &self.registry
     }

@@ -479,19 +479,23 @@ pub fn execution_with_seed(
     })
     .unwrap();
     let finality = Arc::new(TradeFinalityPolicyV2::decode_and_seal(policy).unwrap());
-    let c = core.pm_context(CONDITION_ID).unwrap();
-    let scenario = PlatformScenarioV1::try_new(vec![
-        PlatformMarketV1::try_new(
-            c.market,
-            c.assets
-                .into_iter()
-                .map(|a| a.asset)
-                .collect::<Vec<_>>()
-                .try_into()
-                .unwrap(),
-        )
-        .unwrap(),
-    ])
+    let scenario = PlatformScenarioV1::try_new(
+        core.fixed_markets()
+            .map(|market| {
+                let c = core.pm_context(&market.condition_id.0).unwrap();
+                PlatformMarketV1::try_new(
+                    c.market,
+                    c.assets
+                        .into_iter()
+                        .map(|a| a.asset)
+                        .collect::<Vec<_>>()
+                        .try_into()
+                        .unwrap(),
+                )
+                .unwrap()
+            })
+            .collect(),
+    )
     .unwrap();
     let artifact = SimulationScenarioArtifactV1 {
         schema_version: PLATFORM_SCENARIO_SCHEMA_V1.into(),
@@ -852,4 +856,86 @@ fn reference_after(at: i64, sequence: u64) -> PolymarketRtdsChainlinkTwapInput {
         collector_admission_sequence: sequence,
         collector_admission_time_utc_ms: at + 1,
     }
+}
+
+pub const OTHER_CONDITION_ID: &str =
+    "0x2222222222222222222222222222222222222222222222222222222222222222";
+pub fn recorded_equal_start_markets(root: &Path) -> (PublicObservationCoreV1, TradingTimes) {
+    let mut core = core();
+    let mut writer = PublicRecordingWriterV1::create(root, core.header(), config()).unwrap();
+    let mut rows = Vec::new();
+    let mut times = Vec::new();
+    for active in [false, true] {
+        for high in [true, false] {
+            let mut metadata = metadata_snapshot_row();
+            metadata.collector_admission_sequence = rows.len() as u64 + 1;
+            if high {
+                metadata.condition_id = OTHER_CONDITION_ID.into();
+                metadata.clob_market_id = "3195577".into();
+                metadata.asset_ids = "[\"21\",\"4\"]".into();
+            }
+            if active {
+                metadata.timestamp_received = 20_000;
+                metadata.collector_admission_time_utc_ms = 20_001;
+                metadata.metadata_fetch_start_utc = Some(19_990);
+                metadata.source_evidence_received_at_utc = Some(20_000);
+                metadata.row_evidence_validation_completed_at_utc = Some(20_001);
+                metadata.market_lifecycle_state = MetadataMarketLifecycleState::Active;
+                metadata.market_runtime_role = MetadataMarketRuntimeRole::Current;
+            }
+            rows.push(TypedRawRowV2::Existing(
+                TypedRawRow::PolymarketMarketMetadata(Box::new(metadata)),
+            ));
+            times.push(if active { 22_000 } else { 10_000 });
+        }
+    }
+    let mut sequence = 0;
+    for (high, token) in [
+        (true, "21"),
+        (true, "4"),
+        (false, UP_TOKEN_ID),
+        (false, DOWN_TOKEN_ID),
+    ] {
+        sequence += 1;
+        let mut event = book("100");
+        if let PolymarketOrderbookEvent::Book { asset_id, .. } = &mut event {
+            *asset_id = token.into();
+        }
+        let mut r = row("epoch-two", sequence, 21_000, 21_001, event);
+        if high {
+            r.market = OTHER_CONDITION_ID.into();
+        }
+        rows.push(TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(r)));
+        times.push(22_000);
+    }
+    for at in [25_000, 27_000] {
+        for high in [true, false] {
+            sequence += 1;
+            let mut r = row(
+                "epoch-two",
+                sequence,
+                at,
+                at + 1,
+                PolymarketOrderbookEvent::LastTradePrice {
+                    asset_id: if high { "21" } else { UP_TOKEN_ID }.into(),
+                    price: "0.6".into(),
+                    size: None,
+                    side: None,
+                    fee_rate_bps: None,
+                },
+            );
+            if high {
+                r.market = OTHER_CONDITION_ID.into();
+            }
+            rows.push(TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(r)));
+            times.push(at + 1000);
+        }
+    }
+    for (position, row) in rows.into_iter().enumerate() {
+        let input = record(position as u64, row);
+        let result = apply(&mut core, &input);
+        writer.record(input, result).unwrap();
+    }
+    writer.stabilize().unwrap();
+    (core, TradingTimes(times))
 }

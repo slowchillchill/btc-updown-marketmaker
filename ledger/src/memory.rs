@@ -66,7 +66,7 @@ impl LedgerWriterV1 {
             market_projections: p.market_projections,
         })
     }
-    /// 耐久数据不能成为业务应用能力。
+    /// 耐久数据不能直接作为此入口的消费引用；以下仅验证直接类型区分，不证明生产者来源真实性。
     /// ```compile_fail
     /// fn apply(writer: &mut ledger::LedgerWriterV1,
     ///          view: &execution_normalization::NoeDurableRecordViewV1) {

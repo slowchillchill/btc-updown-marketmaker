@@ -1,4 +1,5 @@
-//! NOE 所属来源交付能力。耐久读取只有正文，不能生成业务领取引用。
+//! NOE 所属消费引用及受信宿主接线。耐久视图与消费引用保持直接类型区分。
+//! 公开生产者接口不提供不可伪造来源保证；宿主须传真实批及驱动时点，不能重建耐久数据伪造交付。
 use crate::*;
 use contracts::execution_normalization::*;
 use serde::{Deserialize, Serialize};
@@ -52,6 +53,7 @@ struct Batch {
     batch: Arc<NoeMemoryBatchV3>,
     durable: NoeBatchDurabilityV1,
 }
+/// 原批及已建立可见性的借用；私有字段不等于任意公开生产者调用的来源认证。
 #[derive(Clone, Debug)]
 pub struct NoeConsumedRecordRefV1 {
     batch: Arc<Batch>,
@@ -143,7 +145,9 @@ pub fn read_durable_noe_record_v1(
 }
 
 /// 来源适配器持有真实已接纳批；消费侧只获得 observation 返回的单记录能力。
-/// 此适配器由运行源拥有，业务消费者不持有，也没有按整数任选记录的接口。
+/// 正式接线由运行源拥有；只接受本运行的实际规范化批和真实驱动时点。
+/// 这些公开方法用于受信进程内协作：调用方仍可手工重建批并自填时点取得引用，
+/// 因此来源真实性由宿主接线负责，不以该类型、私有字段或直接类型编译反例证明。
 #[derive(Debug, Default)]
 pub struct NoeConsumptionSourceV1 {
     opening: Option<NoeConsumedRecordRefV1>,
@@ -151,6 +155,7 @@ pub struct NoeConsumptionSourceV1 {
     delivered: u64,
 }
 impl NoeConsumptionSourceV1 {
+    /// 开户事实经真实归约及原 NOE 规范化产生即为 Initialization，不等待后台交接或耐久。
     pub fn accept(
         &mut self,
         context: Arc<ExecutionNormalizationContextV1>,

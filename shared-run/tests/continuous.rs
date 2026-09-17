@@ -1443,3 +1443,189 @@ async fn real_expiry_dust_and_market_terminal_close_without_reopening() {
         assert_eq!(late.cancellable, ExecutionReadValueV1::Known(false));
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn pairs_follow_real_formation_not_request_name() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let core = recorded_memory_complete(&root);
+    let (execution, observation) = execution(&temp.path().join("sim.jsonl"), &core, SUCCESS_POLICY);
+    let ledger = LedgerWriterV1::new(AccountAdmissionPolicyV1 {
+        per_market_all_in_commitment_limit_pusd: ExactDecimal("1000".into()),
+    });
+    let mut shared = SharedExecutionV1::from_opening(ledger, observation)
+        .unwrap()
+        .unwrap();
+    let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, MemoryRecordedTimes).unwrap();
+    let mut driver = FinitePublicConsumptionV1::new(execution, source, "review-paired".into());
+    driver.next_group().unwrap().unwrap();
+    driver.next_group().unwrap().unwrap();
+    shared.action_before(&mut driver).unwrap().unwrap();
+    for name in ["z-first", "a-second"] {
+        shared
+            .execute(
+                &mut driver.decision().unwrap(),
+                RequestContextV2 {
+                    global_request_id: name.into(),
+                    caller_correlation_id: None,
+                },
+                Some(Arc::new(ModelIntentV1::SubmitPairedBuy {
+                    condition_id: ConditionId(CONDITION_ID.into()),
+                    orders: [leg(UP_TOKEN_ID, 5), leg(DOWN_TOKEN_ID, 5)],
+                })),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    for _ in 2..=6 {
+        driver.next_group().unwrap().unwrap();
+    }
+    let snapshot = shared.action_before(&mut driver).unwrap().unwrap();
+    let ExecutionReadValueV1::Known(objects) = snapshot.cancel_objects() else {
+        panic!("missing real objects")
+    };
+    let singles: Vec<_> = objects
+        .iter()
+        .filter_map(|o| match o {
+            CancelObjectReadV1::Single { order } => {
+                Some(order.origin.as_ref().unwrap().intent.global_request_id())
+            }
+            _ => None,
+        })
+        .collect();
+    let pairs: Vec<_> = objects
+        .iter()
+        .filter_map(|o| match o {
+            CancelObjectReadV1::Paired { origin, .. } => Some(origin.global_request_id()),
+            _ => None,
+        })
+        .collect();
+    for object in &objects {
+        if let CancelObjectReadV1::Paired { orders, .. } = object {
+            assert_eq!(orders[0].origin.as_ref().unwrap().batch_item_ordinal, 0);
+            assert_eq!(orders[1].origin.as_ref().unwrap().batch_item_ordinal, 1);
+        }
+    }
+    println!("Singles ordered by real formation: {singles:?}; Paired: {pairs:?}");
+    assert_eq!(singles, vec!["z-first", "z-first", "a-second", "a-second"]);
+    assert_eq!(
+        pairs,
+        vec!["z-first", "a-second"],
+        "paired must retain formation order independently of request id"
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn equal_start_markets_sort_condition_before_order_formation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let (core, times) = recorded_equal_start_markets(&root);
+    use sim_system::latency_profile::{DelaySampleDomainV1, load_embedded_proxy_latency_profile};
+    let latency = load_embedded_proxy_latency_profile().unwrap();
+    let seed = (0u64..100)
+        .map(|n| format!("{n:064x}"))
+        .find(|seed| {
+            latency.sample_delay_ms(
+                seed.as_bytes(),
+                "higher-first",
+                DelaySampleDomainV1::RequestOutbound,
+            ) < latency.sample_delay_ms(
+                seed.as_bytes(),
+                "lower-second",
+                DelaySampleDomainV1::RequestOutbound,
+            )
+        })
+        .unwrap();
+    let (execution, observation) = execution_with_seed(
+        &temp.path().join("sim.jsonl"),
+        &core,
+        SUCCESS_POLICY,
+        None,
+        seed,
+    );
+    let ledger = LedgerWriterV1::new(AccountAdmissionPolicyV1 {
+        per_market_all_in_commitment_limit_pusd: ExactDecimal("1000".into()),
+    });
+    let mut shared = SharedExecutionV1::from_opening(ledger, observation)
+        .unwrap()
+        .unwrap();
+    let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times).unwrap();
+    let mut driver = FinitePublicConsumptionV1::new(execution, source, "condition-order".into());
+    for _ in 0..8 {
+        driver.next_group().unwrap().unwrap();
+    }
+    for (condition, tokens, name) in [
+        (OTHER_CONDITION_ID, ["21", "4"], "higher-first"),
+        (CONDITION_ID, [UP_TOKEN_ID, DOWN_TOKEN_ID], "lower-second"),
+    ] {
+        shared
+            .execute(
+                &mut driver.decision().unwrap(),
+                context(name),
+                Some(Arc::new(ModelIntentV1::SubmitPairedBuy {
+                    condition_id: ConditionId(condition.into()),
+                    orders: [leg(tokens[0], 5), leg(tokens[1], 5)],
+                })),
+            )
+            .await
+            .unwrap();
+    }
+    for _ in 0..4 {
+        driver.next_group().unwrap().unwrap();
+    }
+    let view = shared.action_before(&mut driver).unwrap().unwrap();
+    let first_source = |name: &str| {
+        shared.registry().orders().filter(|order|order.origin.as_ref().unwrap().intent.global_request_id()==name).map(|order|match order.formed.unwrap().record().source_reference().record {contracts::execution_normalization::SimV2SourceRecordReferenceV1::OrderLifecycle{private_feedback_sequence,..}=>private_feedback_sequence,_=>panic!("原形成事件")}).min().unwrap()
+    };
+    assert!(
+        first_source("higher-first") < first_source("lower-second"),
+        "真实形成序须与condition顺序相反"
+    );
+    let ExecutionReadValueV1::Known(objects) = view.cancel_objects() else {
+        panic!("完整实际对象")
+    };
+    let single: Vec<_> = objects
+        .iter()
+        .filter_map(|o| {
+            if let CancelObjectReadV1::Single { order } = o {
+                Some(order.origin.as_ref().unwrap().intent.global_request_id())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        single,
+        vec![
+            "lower-second",
+            "lower-second",
+            "higher-first",
+            "higher-first"
+        ]
+    );
+    let pairs: Vec<_> = objects
+        .iter()
+        .filter_map(|o| {
+            if let CancelObjectReadV1::Paired { origin, orders } = o {
+                assert_eq!(orders[0].origin.as_ref().unwrap().batch_item_ordinal, 0);
+                assert_eq!(orders[1].origin.as_ref().unwrap().batch_item_ordinal, 1);
+                Some(origin.global_request_id())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(pairs, vec!["lower-second", "higher-first"]);
+    let markets: Vec<_> = objects
+        .iter()
+        .filter_map(|o| {
+            if let CancelObjectReadV1::Market { condition_id, .. } = o {
+                Some(condition_id.0.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(markets, vec![CONDITION_ID, OTHER_CONDITION_ID]);
+}
