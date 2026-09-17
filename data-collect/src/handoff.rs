@@ -74,18 +74,15 @@ pub struct HandoffReceiveSummary {
     pub aborted_reason: Option<String>,
 }
 
-/// 本轮有限交接验证入口；同步借用消费返回后释放对象，再发送 Received。
-pub async fn consume_handoff_v2<S, F>(
-    stream: &mut S,
-    mut consume: F,
-) -> Result<HandoffReceiveSummary>
-where
-    S: AsyncRead + AsyncWrite + Unpin,
-    F: FnMut(&TypedRawRowV2) -> Result<()>,
-{
-    let mut confirmed = 0_u64;
-    let result: Result<HandoffReceiveSummary> = async {
-        let DataCollectHandoffV2::Session(session) = read_handoff_v2(stream).await? else {
+/// 原单消费者协议的逐帧接收端；控制帧不被转换成业务 EOF。
+pub struct HandoffReceiverV2<S> {
+    stream: S,
+    session: DataCollectHandoffSessionV2,
+    confirmed: u64,
+}
+impl<S: AsyncRead + AsyncWrite + Unpin> HandoffReceiverV2<S> {
+    pub async fn start(mut stream: S) -> Result<Self> {
+        let DataCollectHandoffV2::Session(session) = read_handoff_v2(&mut stream).await? else {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "handoff must begin with Session",
@@ -98,74 +95,97 @@ where
             );
         }
         write_handoff_v2(
-            stream,
+            &mut stream,
             &DataCollectHandoffV2::Received {
                 transport_sequence: 0,
             },
         )
         .await?;
+        Ok(Self {
+            stream,
+            session,
+            confirmed: 0,
+        })
+    }
+    pub fn session(&self) -> &DataCollectHandoffSessionV2 {
+        &self.session
+    }
+    pub fn last_confirmed_sequence(&self) -> u64 {
+        self.confirmed
+    }
+    pub async fn next_frame(&mut self) -> Result<DataCollectHandoffV2> {
+        let frame = read_handoff_v2(&mut self.stream).await?;
+        let invalid = match &frame {
+            DataCollectHandoffV2::Message {
+                transport_sequence, ..
+            } => (self.confirmed.checked_add(1) != Some(*transport_sequence))
+                .then_some("handoff business sequence is not consecutive"),
+            DataCollectHandoffV2::End {
+                last_confirmed_sequence,
+            } => (*last_confirmed_sequence != self.confirmed)
+                .then_some("handoff End does not match confirmed prefix"),
+            DataCollectHandoffV2::Aborted {
+                last_confirmed_sequence,
+                ..
+            } => (*last_confirmed_sequence != self.confirmed)
+                .then_some("handoff Aborted does not match confirmed prefix"),
+            _ => Some("unexpected handoff control frame"),
+        };
+        if let Some(reason) = invalid {
+            return Err(io::Error::new(io::ErrorKind::InvalidData, reason).into());
+        }
+        Ok(frame)
+    }
+    /// 当前对象消费并移交后确认；不表明核心应用或后台稳定。
+    pub async fn confirm(&mut self, transport_sequence: u64) -> Result<()> {
+        write_handoff_v2(
+            &mut self.stream,
+            &DataCollectHandoffV2::Received { transport_sequence },
+        )
+        .await?;
+        self.confirmed = transport_sequence;
+        Ok(())
+    }
+}
+
+/// 同步借用消费返回后释放当前对象，再发送原 Received。
+pub async fn consume_handoff_v2<S, F>(
+    stream: &mut S,
+    mut consume: F,
+) -> Result<HandoffReceiveSummary>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnMut(&TypedRawRowV2) -> Result<()>,
+{
+    let mut confirmed = 0;
+    let result: Result<HandoffReceiveSummary> = async {
+        let mut receiver = HandoffReceiverV2::start(stream).await?;
         loop {
-            match read_handoff_v2(stream).await? {
+            match receiver.next_frame().await? {
                 DataCollectHandoffV2::Message {
                     transport_sequence,
                     row,
                 } => {
-                    if confirmed.checked_add(1) != Some(transport_sequence) {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "handoff business sequence is not consecutive",
-                        )
-                        .into());
-                    }
                     consume(&row)?;
                     drop(row);
-                    write_handoff_v2(
-                        stream,
-                        &DataCollectHandoffV2::Received { transport_sequence },
-                    )
-                    .await?;
+                    receiver.confirm(transport_sequence).await?;
                     confirmed = transport_sequence;
                 }
-                DataCollectHandoffV2::End {
-                    last_confirmed_sequence,
-                } => {
-                    if last_confirmed_sequence != confirmed {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "handoff End does not match confirmed prefix",
-                        )
-                        .into());
-                    }
+                DataCollectHandoffV2::End { .. } => {
                     return Ok(HandoffReceiveSummary {
-                        session,
+                        session: receiver.session,
                         last_confirmed_sequence: confirmed,
                         aborted_reason: None,
                     });
                 }
-                DataCollectHandoffV2::Aborted {
-                    last_confirmed_sequence,
-                    reason,
-                } => {
-                    if last_confirmed_sequence != confirmed {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidData,
-                            "handoff Aborted does not match confirmed prefix",
-                        )
-                        .into());
-                    }
+                DataCollectHandoffV2::Aborted { reason, .. } => {
                     return Ok(HandoffReceiveSummary {
-                        session,
+                        session: receiver.session,
                         last_confirmed_sequence: confirmed,
                         aborted_reason: Some(reason),
                     });
                 }
-                _ => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "unexpected handoff control frame",
-                    )
-                    .into());
-                }
+                _ => unreachable!("接收器已核对控制帧"),
             }
         }
     }

@@ -462,6 +462,20 @@ impl ReferenceCandidateReaderV1 {
             cutoff,
         })
     }
+    /// 在线来源准备绑定写入方实际交付的稳定凭据，不扫描活跃尾部。
+    pub fn open_committed(
+        root: &Path,
+        prefix: Option<CommittedIngressPrefixV1>,
+        rows: usize,
+        bytes: usize,
+        cutoff: u64,
+    ) -> RecordingResult<Self> {
+        Ok(Self {
+            reader: PublicRecordingReaderV1::open_committed(root, prefix, rows, bytes)?,
+            limit: rows,
+            cutoff,
+        })
+    }
     pub fn page(
         &mut self,
         cursor: TemporaryReferenceCursorV1,
@@ -495,31 +509,8 @@ impl ReferenceCandidateReaderV1 {
                 ) {
                     continue;
                 }
-                let source = &event.lineage.source_evidence[0];
                 next.next_input_position = pos.closed_at_input_position + 1;
-                values.push(TemporaryReferenceCandidateV1 {
-                    record_ref: CanonicalInputRecordRefV1 {
-                        input_stream_id: pos.input_stream_id.clone(),
-                        input_position: pos.closed_at_input_position,
-                    },
-                    anchor: DirectObservationAnchorV1 {
-                        field_path: match &event.payload {
-                            CanonicalReferenceEventPayloadV2::ChainlinkBtcUsdTwap(v)
-                                if v.window_s == 30 =>
-                            {
-                                "chainlink_twap_thirty"
-                            }
-                            _ => "chainlink_twap_sixty",
-                        }
-                        .into(),
-                        position: pos,
-                        group_id: source.source_message_id.clone(),
-                        source_message_id: source.source_message_id.clone(),
-                        source_event_at_utc_ms: source.source_event_at_utc_ms,
-                        received_at_utc_ms: source.received_at_utc_ms,
-                    },
-                    canonical_fact: event,
-                });
+                values.push(reference_candidate(pos, event));
             }
         }
         Ok((values, next, false))
@@ -661,5 +652,34 @@ impl Iterator for TypedFileRowsV1<'_> {
                 Err(e) => return Some(Err(e.into())),
             }
         }
+    }
+}
+
+/// 同一规范参考事实的页表达；只包装原位置和证据，不判断适用性。
+pub(crate) fn reference_candidate(
+    pos: PublicFactPositionV1,
+    event: CanonicalReferenceEventV2,
+) -> TemporaryReferenceCandidateV1 {
+    let source = &event.lineage.source_evidence[0];
+    TemporaryReferenceCandidateV1 {
+        record_ref: CanonicalInputRecordRefV1 {
+            input_stream_id: pos.input_stream_id.clone(),
+            input_position: pos.closed_at_input_position,
+        },
+        anchor: DirectObservationAnchorV1 {
+            field_path: match &event.payload {
+                CanonicalReferenceEventPayloadV2::ChainlinkBtcUsdTwap(v) if v.window_s == 30 => {
+                    "chainlink_twap_thirty"
+                }
+                _ => "chainlink_twap_sixty",
+            }
+            .into(),
+            position: pos,
+            group_id: source.source_message_id.clone(),
+            source_message_id: source.source_message_id.clone(),
+            source_event_at_utc_ms: source.source_event_at_utc_ms,
+            received_at_utc_ms: source.received_at_utc_ms,
+        },
+        canonical_fact: event,
     }
 }

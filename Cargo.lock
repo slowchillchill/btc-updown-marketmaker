@@ -1684,6 +1684,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "time",
+ "tokio",
 ]
 
 [[package]]

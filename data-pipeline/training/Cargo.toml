@@ -10,6 +10,8 @@ arrow-ord = { version = "=59.0.0", default-features = false }
 arrow-schema = { version = "=59.0.0", default-features = false }
 contracts = { path = "../../contracts" }
 data-pipeline-core = { path = "../core" }
+data-collect = { path = "../../data-collect" }
+tokio = { version = "1.49.0", features = ["io-util", "macros", "net", "rt", "sync", "signal"] }
 parquet = { version = "=59.0.0", default-features = false, features = ["arrow", "zstd"] }
 rustix = { version = "=1.1.4", default-features = false, features = ["fs", "std"] }
 serde = { version = "1", features = ["derive"] }
@@ -18,5 +20,4 @@ sha2 = "=0.10.9"
 time = { version = "=0.3.53", default-features = false, features = ["macros", "parsing"] }
 
 [dev-dependencies]
-data-collect = { path = "../../data-collect" }
 tempfile = "=3.27.0"
