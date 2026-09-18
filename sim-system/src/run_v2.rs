@@ -19490,6 +19490,10 @@ impl PublicConsumptionStateV1 {
             drive_position: 0,
         }
     }
+    /// 查询原成功登记映射，不另存宿主市场集合。
+    pub fn has_enrolled_market(&self, condition: &contracts::ConditionId) -> bool {
+        self.rules.contains_key(&condition.0)
+    }
     /// 沿原会话登记规则扩展市场；重复请求以原成功结果确定规则映射。
     pub fn enroll_market(
         &mut self,
