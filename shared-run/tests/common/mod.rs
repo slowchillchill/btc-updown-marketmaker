@@ -939,3 +939,22 @@ pub fn recorded_equal_start_markets(root: &Path) -> (PublicObservationCoreV1, Tr
     writer.stabilize().unwrap();
     (core, TradingTimes(times))
 }
+
+pub fn recorded_reference_then_market(root: &Path) -> (PublicObservationCoreV1, TradingTimes) {
+    let mut core = core();
+    let mut writer = PublicRecordingWriterV1::create(root, core.header(), config()).unwrap();
+    let inputs = vec![
+        record(
+            0,
+            TypedRawRowV2::PolymarketRtdsChainlinkTwap(reference_after(9_000, 1)),
+        ),
+        meta(1),
+        pm(2, 1, 22_000, book("100")),
+    ];
+    for input in inputs {
+        let applied = apply(&mut core, &input);
+        writer.record(input, applied).unwrap();
+    }
+    writer.stabilize().unwrap();
+    (core, TradingTimes(vec![9_001, 10_001, 22_000]))
+}

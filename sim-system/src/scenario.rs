@@ -190,9 +190,6 @@ pub struct MarketSetV1 {
 
 impl MarketSetV1 {
     pub fn try_new(mut markets: Vec<PlatformMarketV1>) -> Result<Self, PlatformScenarioErrorV1> {
-        if markets.is_empty() {
-            return Err(PlatformScenarioErrorV1::EmptyMarketSet);
-        }
         markets.sort_by(|left, right| left.market.condition_id.0.cmp(&right.market.condition_id.0));
         let mut condition_ids = BTreeSet::new();
         if markets
@@ -448,6 +445,24 @@ mod tests {
             ],
         )
         .expect("构造测试市场")
+    }
+
+    #[test]
+    fn empty_initial_market_set_round_trips_through_original_scenario_file() {
+        let set = MarketSetV1::try_new(Vec::new()).unwrap();
+        assert!(set.markets().is_empty());
+        let scenario = PlatformScenarioV1::from_market_set(set).unwrap();
+        let bytes = serde_json::to_vec(&SimulationScenarioArtifactV1 {
+            schema_version: PLATFORM_SCENARIO_SCHEMA_V1.into(),
+            scenario_sha256: scenario.scenario_sha256().clone(),
+            market_set_sha256: scenario.market_set_sha256().clone(),
+            markets: Vec::new(),
+        })
+        .unwrap();
+        let sealed = SealedPlatformScenarioV1::decode_and_seal(&bytes).unwrap();
+        assert_eq!(sealed.scenario(), &scenario);
+        assert_eq!(sealed.initial_market_directory().markets().len(), 0);
+        assert_eq!(sealed.file_sha256(), &sha256_file_bytes(&bytes));
     }
 
     #[test]
