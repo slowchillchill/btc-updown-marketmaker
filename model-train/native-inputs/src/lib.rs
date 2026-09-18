@@ -16,6 +16,7 @@ pub use root::{
 pub enum InputError {
     Ledger(ledger::LedgerErrorV1),
     MissingAssociation,
+    IncompleteBuyPrefix,
 }
 impl From<ledger::LedgerErrorV1> for InputError {
     fn from(value: ledger::LedgerErrorV1) -> Self {

@@ -201,7 +201,7 @@ PendingApplied/成功/补偿、QuoteBudget 三态、真实撤单人口 N=0/2/256
 
 `NoTrade` 传原 `None`，不调用参数图、不生成请求或撤销旧挂单。状态帧先由既有消费者推进一次；
 后续撤单参数调用仅复用该帧 z、规则与完整对象归约，不推进 GRU。这里不计算六族支持集、
-训练采样或联合概率，也不交付 BUY 装配、完整 Actor 或阶段验收。
+训练采样或联合概率，也不交付完整 Actor 或阶段验收。
 
 新增原生测试覆盖真实 86 对的 259 对象前史、一腿取消后的 257 对象、256+1 与 128+129 分块、
 尾块市场对象、同族跨 128 边界并列、padding 排除、顺序市场切换后的指定市场取消，以及
@@ -217,3 +217,22 @@ NATIVE_CANCEL_GRAPH=/path/to/original/MAIN-1x256 \
 该测试使用项目局部 `.venv`、原初始权重和真实公共组，经 Python 实际参数图输出回到 Rust
 原生宿主执行；检查每帧状态调用一次、参数调用零次 GRU。归档路径未给出时，普通测试明确
 标记该项为 ignored，不能计作已完成真实图验证。
+
+## 已选精确 BUY 参数的执行接线
+
+同一个 `execute_selected` 也接收 `SelectedAction::Buy(&PrefixState)`，复用原共享执行、冻结意图、
+Bridge、SDK 请求构造和回执。调用方先完成原合法选择；此处只装配，不重查现金、费用或数量支持。
+未完成的前缀返回 `IncompleteBuyPrefix`，不转成 NoTrade，也不调用参数图或再推进 GRU。
+
+数量 `n` 保持 BigUint 并转换为 `q=n/100`，每腿价格是该帧精确 `k*tick`。
+按 F.4 已保证的编码域，以系数 `n`、`m=10000p`、`nm` 和 scale 2、4、6 构造 Decimal 后 normalize。
+LIMIT 保留原 q、p、post_only；FOK/FAK 保留 `spend=q*p`、`worst=p`。
+GTD 到期秒数是 `ceil(decision_logical_time_ms/1000)+60+lifetime`，Bridge 沿原路径转换毫秒；
+提交延迟不重启锚点，实际处理时仍可能由原平台规则拒绝。到期值不裁到市场结束。
+同帧动作上下文仅增加按 outcome index 0/1 取得的 token 身份，配对始终为 [A,B]，单 B 使用 B 的 tick。
+
+原生测试通过真实公共前史取得帧，验证相邻 `n>2^53` 的四变体精确意图、反序 assets、独立 tick、
+冻结后更新、三种 GTD 寿命与混合双腿，再以开户 2000 的原链检验四变体请求、ordinal 和回执。
+大数装配测试不是巨额合法业务执行；SDK LIMIT 编码边界继续由已有
+`sim-system::buy_cost::tests::limit_cost_keeps_encoding_boundary_and_unaffordable_fee_exact` 验证。
+本增量不提供完整 BUY 条件选择/采样，不证明一般非零 MARKET 最大费用，也不宣称阶段通过。

@@ -1,10 +1,13 @@
 //! 给定已选族后的推断解码；不计算六族支持集或训练概率。
 use crate::{
     NativeInputGroup,
-    prefix::{Family, PrefixState, Stage},
+    prefix::{Family, Leg, Lifetime, PrefixState, Stage, Variant},
 };
-use contracts::{ExecutionReadValueV1, ModelIntentV1};
+use contracts::{BuyLegIntentV1, BuyOrderIntentV1, ExecutionReadValueV1, ModelIntentV1};
 use execution_normalization::{MemoryIdentityKeyV1, SourceNeutralEntityKeyV1};
+use num_bigint::BigUint;
+use num_traits::ToPrimitive;
+use rust_decimal::Decimal;
 use shared_run::{CancelObjectReadV1, SharedExecutionV1};
 use sim_system::execution::{
     MutationRequestReceiptV2, PublicGroupDecisionV1, RequestContextV2, SimRunActorErrorV2,
@@ -18,9 +21,10 @@ pub enum CancelFamily {
     Market,
 }
 #[derive(Clone, Copy, Debug)]
-pub enum SelectedAction {
+pub enum SelectedAction<'a> {
     NoTrade,
     Cancel(CancelFamily),
+    Buy(&'a PrefixState),
 }
 /// 参数图原输出及该块实际成员数；padding 不参与选择。
 pub struct CancelScoreBlock {
@@ -35,6 +39,87 @@ pub enum ActionError<E> {
     Execution(SimRunActorErrorV2),
 }
 impl NativeInputGroup {
+    /// 已选参数的精确装配；合法性及 F.4 编码域由原选择责任保证。
+    pub fn buy_intent(
+        &self,
+        row: usize,
+        state: &PrefixState,
+    ) -> Result<ModelIntentV1, crate::InputError> {
+        use crate::InputError::IncompleteBuyPrefix;
+        let frame = &self.rows[row];
+        let action = frame.action_context.as_ref().ok_or(IncompleteBuyPrefix)?;
+        let n = state
+            .quantity_hundredths
+            .as_ref()
+            .ok_or(IncompleteBuyPrefix)?;
+        fn decimal(coefficient: &BigUint, scale: u32) -> Decimal {
+            Decimal::from_i128_with_scale(coefficient.to_i128().expect("F.4 已选编码域"), scale)
+                .normalize()
+        }
+        let q = decimal(n, 2);
+        let order = |i: usize| -> Result<BuyLegIntentV1, crate::InputError> {
+            let selected = &state.legs[i];
+            let k = selected.price_index.as_ref().ok_or(IncompleteBuyPrefix)?;
+            let tick = action.ticks[i]
+                .as_ref()
+                .ok_or(IncompleteBuyPrefix)?
+                .public();
+            let numerator: BigUint = tick.numerator.parse().expect("合法正 tick");
+            let denominator: BigUint = tick.denominator.parse().expect("合法正 tick");
+            let m = k * numerator * BigUint::from(10000u32) / denominator;
+            let p = decimal(&m, 4);
+            let value = match selected.variant.ok_or(IncompleteBuyPrefix)? {
+                Variant::GtcLimit => BuyOrderIntentV1::GtcLimit {
+                    limit_price_pusd_per_share: p,
+                    size_shares: q,
+                    post_only: selected.post_only.ok_or(IncompleteBuyPrefix)?,
+                },
+                Variant::GtdLimit => {
+                    let lifetime = match selected.lifetime.ok_or(IncompleteBuyPrefix)? {
+                        Lifetime::Seconds180 => 180,
+                        Lifetime::Seconds240 => 240,
+                        Lifetime::Seconds300 => 300,
+                    };
+                    let millis = i128::from(self.cutoff.decision_time().logical_time_utc_ms());
+                    let anchor = millis.div_euclid(1000) + i128::from(millis.rem_euclid(1000) != 0);
+                    BuyOrderIntentV1::GtdLimit {
+                        limit_price_pusd_per_share: p,
+                        size_shares: q,
+                        post_only: selected.post_only.ok_or(IncompleteBuyPrefix)?,
+                        expires_at_utc_sec: (anchor + 60 + lifetime)
+                            .try_into()
+                            .expect("i64 毫秒的 GTD 秒值"),
+                    }
+                }
+                Variant::FokMarket => BuyOrderIntentV1::FokMarket {
+                    spend_pusd: decimal(&(n * &m), 6),
+                    worst_price_pusd_per_share: p,
+                },
+                Variant::FakMarket => BuyOrderIntentV1::FakMarket {
+                    spend_pusd: decimal(&(n * &m), 6),
+                    worst_price_pusd_per_share: p,
+                },
+            };
+            Ok(BuyLegIntentV1 {
+                token_id: action.tokens[i].clone().ok_or(IncompleteBuyPrefix)?,
+                order: value,
+            })
+        };
+        let condition_id = frame.hidden_state_key.condition_id.clone();
+        match state.family {
+            Some(Family::SubmitSingleBuy) => Ok(ModelIntentV1::SubmitSingleBuy {
+                condition_id,
+                order: order(usize::from(
+                    state.single_leg.ok_or(IncompleteBuyPrefix)? == Leg::B,
+                ))?,
+            }),
+            Some(Family::SubmitPairedBuy) => Ok(ModelIntentV1::SubmitPairedBuy {
+                condition_id,
+                orders: [order(0)?, order(1)?],
+            }),
+            _ => Err(IncompleteBuyPrefix),
+        }
+    }
     /// 各块保持 cancel 的完整原顺序；只对给定族比较，严格大于才替换。
     pub fn cancel_intent(
         &self,
@@ -91,7 +176,7 @@ impl NativeInputGroup {
     pub async fn execute_selected<E>(
         &self,
         row: usize,
-        selected: SelectedAction,
+        selected: SelectedAction<'_>,
         shared: &mut SharedExecutionV1,
         decision: &mut PublicGroupDecisionV1<'_>,
         context: RequestContextV2,
@@ -99,6 +184,9 @@ impl NativeInputGroup {
     ) -> Result<Option<MutationRequestReceiptV2>, ActionError<E>> {
         let intent = match selected {
             SelectedAction::NoTrade => None,
+            SelectedAction::Buy(state) => Some(Arc::new(
+                self.buy_intent(row, state).map_err(ActionError::Input)?,
+            )),
             SelectedAction::Cancel(family) => {
                 let action = self.rows[row]
                     .action_context
