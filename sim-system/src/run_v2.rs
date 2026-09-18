@@ -678,6 +678,8 @@ struct SessionMarketEventEffectsV2 {
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct LogicalDriveOutputV2 {
+    // 本次 lifecycle 前缀中补入的旧返佣数量及实际处理时刻，仅活到投影物化。
+    late_rebate_feedback: Option<(usize, i64)>,
     lifecycle: Vec<LifecycleFeedbackEffectV2>,
     mutations: Vec<MutationActionTransitionEffectsV2>,
 }
@@ -1001,6 +1003,7 @@ fn finalize_lifecycle_feedback_v2(
     session_seed: &Sha256Hex,
     latency_profile: &EmpiricalDelayProfile,
     private_feedback_sequence: u64,
+    processed_at_utc_ms: Option<i64>,
 ) -> Result<FinalizedLifecycleFeedbackV2, SimRunActorErrorV2> {
     let platform_event_at_utc_ms = match &effect {
         LifecycleFeedbackEffectV2::Order(effect) => effect.platform_event_at_utc_ms,
@@ -1016,7 +1019,10 @@ fn finalize_lifecycle_feedback_v2(
     let metadata = contracts::LifecycleFeedbackMetadataV2 {
         account_instance_key: account_instance_key.clone(),
         platform_event_at_utc_ms,
-        feedback_received_at_utc_ms: checked_add_delay_v2(platform_event_at_utc_ms, delay_ms)?,
+        feedback_received_at_utc_ms: checked_add_delay_v2(
+            processed_at_utc_ms.unwrap_or(platform_event_at_utc_ms),
+            delay_ms,
+        )?,
         private_feedback_sequence,
     };
     Ok(match effect {
@@ -1068,7 +1074,7 @@ enum FinalizedLifecycleFeedbackV2 {
 }
 
 enum ProjectionDraftV2 {
-    Lifecycle(LifecycleFeedbackEffectV2),
+    Lifecycle(LifecycleFeedbackEffectV2, Option<i64>),
     Direct(Arc<StoredDirectResponseV2>),
 }
 
@@ -1110,7 +1116,7 @@ fn finalize_projection_batch_v2(
                 effect
                     .lifecycle
                     .into_iter()
-                    .map(ProjectionDraftV2::Lifecycle),
+                    .map(|effect| ProjectionDraftV2::Lifecycle(effect, None)),
             );
             if let Some(response) = effect.completed_response {
                 drafts.push(ProjectionDraftV2::Direct(response));
@@ -1122,14 +1128,21 @@ fn finalize_projection_batch_v2(
                 output
                     .lifecycle
                     .into_iter()
-                    .map(ProjectionDraftV2::Lifecycle),
+                    .enumerate()
+                    .map(|(index, effect)| {
+                        let processed_at = output
+                            .late_rebate_feedback
+                            .filter(|(count, _)| index < *count)
+                            .map(|(_, at)| at);
+                        ProjectionDraftV2::Lifecycle(effect, processed_at)
+                    }),
             );
             for mutation in output.mutations {
                 drafts.extend(
                     mutation
                         .lifecycle
                         .into_iter()
-                        .map(ProjectionDraftV2::Lifecycle),
+                        .map(|effect| ProjectionDraftV2::Lifecycle(effect, None)),
                 );
                 if let Some(response) = mutation.completed_response {
                     drafts.push(ProjectionDraftV2::Direct(response));
@@ -1164,13 +1177,14 @@ fn finalize_projection_batch_v2(
     let mut settlement_lifecycle = Vec::new();
     for draft in drafts {
         match draft {
-            ProjectionDraftV2::Lifecycle(effect) => {
+            ProjectionDraftV2::Lifecycle(effect, processed_at) => {
                 let finalized = finalize_lifecycle_feedback_v2(
                     effect,
                     &session.opening_fact.account_instance_key,
                     &session.session_seed,
                     latency_profile,
                     next_private_feedback_sequence,
+                    processed_at,
                 )?;
                 match finalized {
                     FinalizedLifecycleFeedbackV2::Order(feedback) => {
@@ -5306,26 +5320,30 @@ fn drain_scheduled_obligations_at_v2(
         .and_then(|session| session.execution_state.next_rebate_clock_at_utc_ms())
         == Some(logical_at_utc_ms)
     {
-        let session = state.session.take().expect("逻辑驱动已确认唯一会话");
-        let (session, effects) = session
-            .map_execution_state(|execution| {
-                execution.advance_next_rebate_clock_at(logical_at_utc_ms)
-            })
-            .map_err(|error| {
-                BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(error))
-            })?;
-        state.business_resources = effects.resources.apply_to(state.business_resources).ok_or(
-            BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(
-                MatchingStateErrorV1::QueuePredecessorConflict,
-            )),
-        )?;
-        output
-            .lifecycle
-            .extend(effects.into_lifecycle_feedback().map_err(|error| {
-                BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(error))
-            })?);
-        state.session = Some(session);
+        state = advance_rebate_due_v2(state, logical_at_utc_ms, output)
+            .map_err(BusinessReductionErrorV2::Fatal)?;
     }
+    Ok(state)
+}
+
+fn advance_rebate_due_v2(
+    mut state: BusinessReducerStateV2,
+    due: i64,
+    output: &mut LogicalDriveOutputV2,
+) -> Result<BusinessReducerStateV2, SimRunActorErrorV2> {
+    let session = state.session.take().expect("逻辑驱动已确认唯一会话");
+    let (session, effects) = session
+        .map_execution_state(|execution| execution.advance_next_rebate_clock_at(due))
+        .map_err(SimRunActorErrorV2::Matching)?;
+    state.business_resources = effects.resources.apply_to(state.business_resources).ok_or(
+        SimRunActorErrorV2::Matching(MatchingStateErrorV1::QueuePredecessorConflict),
+    )?;
+    output.lifecycle.extend(
+        effects
+            .into_lifecycle_feedback()
+            .map_err(SimRunActorErrorV2::Matching)?,
+    );
+    state.session = Some(session);
     Ok(state)
 }
 
@@ -5605,6 +5623,32 @@ pub(crate) fn drive_business_input_at_v2(
         }
     }
     let mut output = LogicalDriveOutputV2::default();
+    // 仅 PAPER 公共组与在线关闭补入旧返佣。迟入以 logical_at 判定，
+    // 实际处理 E 仅影响这些新反馈的 received，不改变经济 due 或普通 timer。
+    let late_rebate_processed_at = if caller_role == SimCallerRoleV1::Paper {
+        if public_group.is_some() {
+            Some(logical_at_utc_ms)
+        } else {
+            public_closure.and_then(|closure| match closure.closure {
+                PublicTimeClosureReasonV1::ExecutionClockAdvancedTo(now) => Some(now),
+                _ => None,
+            })
+        }
+    } else {
+        None
+    };
+    if let Some(processed_at) = late_rebate_processed_at {
+        while let Some(due) = state
+            .session
+            .as_ref()
+            .and_then(|session| session.execution_state.next_rebate_clock_at_utc_ms())
+            .filter(|due| *due < logical_at_utc_ms)
+        {
+            state = advance_rebate_due_v2(state, due, &mut output)
+                .map_err(BusinessReductionErrorV2::Fatal)?;
+        }
+        output.late_rebate_feedback = Some((output.lifecycle.len(), processed_at));
+    }
     if drives_execution {
         state = drain_scheduled_obligations_at_v2(
             state,
@@ -5687,7 +5731,7 @@ pub(crate) fn drive_business_input_at_v2(
             );
         }
     }
-    if public_closure.is_some_and(|c| c.closure == contracts::ReplayIndexClosureV1::EndOfInput) {
+    if public_closure.is_some_and(|c| c.closure == PublicTimeClosureReasonV1::EndOfInput) {
         state
             .session
             .as_ref()
@@ -5721,7 +5765,7 @@ pub(crate) fn drive_business_input_at_v2(
         && (bucket.as_ref().is_some_and(|bucket| {
             bucket.reference.closure == crate::market::MillisecondBucketClosureV1::EndOfInput
         }) || public_closure
-            .is_some_and(|c| c.closure == contracts::ReplayIndexClosureV1::EndOfInput));
+            .is_some_and(|c| c.closure == PublicTimeClosureReasonV1::EndOfInput));
     let successful_execution_eof = successful_execution_eof
         || (drives_execution
             && hidden_bucket.is_some_and(|b| {
@@ -5772,10 +5816,13 @@ pub(crate) fn drive_business_input_at_v2(
     }
     if let Some(closure) = public_closure {
         match closure.closure {
-            contracts::ReplayIndexClosureV1::NextGlobalEventAt(at) => {
+            PublicTimeClosureReasonV1::NextGlobalEventAt(at) => {
                 frontier.next_event_at_utc_ms = Some(at)
             }
-            contracts::ReplayIndexClosureV1::EndOfInput => {
+            PublicTimeClosureReasonV1::ExecutionClockAdvancedTo(_) => {
+                frontier.next_event_at_utc_ms = None;
+            }
+            PublicTimeClosureReasonV1::EndOfInput => {
                 frontier.next_event_at_utc_ms = None;
                 frontier.sealed = true;
             }
@@ -19100,12 +19147,9 @@ impl PublicSimExecutionV1 {
     }
 }
 
-/// 原序有限供料；只保留下一项及上次回执，独立推进真实完整时间边界。
-pub struct FinitePublicConsumptionV1<
-    I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>,
-> {
+/// 有限与持续入口共用的唯一消费状态；不拥有来源或独立业务状态。
+pub struct PublicConsumptionStateV1 {
     execution: PublicSimExecutionV1,
-    source: std::iter::Peekable<I>,
     consumption_sequence_ref: String,
     last_receipt: Option<PublicGroupAppliedReceiptV1>,
     last_cutoff: Option<TrustedGroupDecisionCutoffV1>,
@@ -19113,16 +19157,9 @@ pub struct FinitePublicConsumptionV1<
     rules: BTreeMap<String, Arc<contracts::PublicTradingRuleContextV1>>,
     close_pending: bool,
     drive_position: u64,
-    source_failure: Option<String>,
 }
-impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
-    FinitePublicConsumptionV1<I>
-{
-    pub fn new(
-        execution: PublicSimExecutionV1,
-        source: I,
-        consumption_sequence_ref: String,
-    ) -> Self {
+impl PublicConsumptionStateV1 {
+    fn new(execution: PublicSimExecutionV1, consumption_sequence_ref: String) -> Self {
         let rules = execution
             .actor
             .state
@@ -19144,7 +19181,6 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
             .collect();
         Self {
             execution,
-            source: source.peekable(),
             consumption_sequence_ref,
             last_receipt: None,
             last_cutoff: None,
@@ -19152,7 +19188,6 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
             rules,
             close_pending: false,
             drive_position: 0,
-            source_failure: None,
         }
     }
     /// 沿原会话登记规则扩展市场；重复请求以原成功结果确定规则映射。
@@ -19183,88 +19218,52 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
     pub fn wait_for_recording_capacity(&mut self) -> Result<(), SimRunActorErrorV2> {
         self.execution.wait_for_recording_capacity()
     }
-    pub fn next_group(
+    fn apply_group(
         &mut self,
-    ) -> Result<
-        Option<(PublicGroupAppliedReceiptV1, TrustedGroupDecisionCutoffV1)>,
-        SimRunActorErrorV2,
-    > {
-        if let Some(message) = &self.source_failure {
-            return Err(SimRunActorErrorV2::PublicConsumptionSource(message.clone()));
-        }
-        let next_time = match self.source.peek() {
-            Some(Ok(item)) => Some(item.delivered_at_utc_ms),
-            Some(Err(error)) => {
-                let message = error.to_string();
-                self.source_failure = Some(message.clone());
-                return Err(SimRunActorErrorV2::PublicConsumptionSource(message));
-            }
-            None => None,
-        };
-        if self.close_pending {
-            let last = self.last_receipt.as_ref().expect("待关闭组已有回执");
-            let at = last.execution_time.logical_time_utc_ms();
-            if next_time != Some(at) {
-                let closure = TrustedPublicTimeClosureV1 {
-                    execution_time: self.time(at),
-                    consumption_sequence_ref: self.consumption_sequence_ref.clone(),
-                    next_group_position: last.group.group_position + 1,
-                    closure: next_time.map_or(
-                        contracts::ReplayIndexClosureV1::EndOfInput,
-                        contracts::ReplayIndexClosureV1::NextGlobalEventAt,
-                    ),
-                };
-                self.execution.close_public_time(closure)?;
-                self.drive_position += 1;
-                self.close_pending = false;
-            }
-        }
-        let Some(at) = next_time else {
-            return Ok(None);
-        };
-        while let Some(required) = self.execution.actor.next_required_logical_drive() {
-            if required.path != MarketEventPathV1::PublicVisibility
-                || required.required_at_utc_ms >= at
-            {
-                break;
-            }
-            let next_group_position = self
-                .last_receipt
-                .as_ref()
-                .map_or(0, |r| r.group.group_position + 1);
-            let closure = TrustedPublicTimeClosureV1 {
-                execution_time: self.time(required.required_at_utc_ms),
-                consumption_sequence_ref: self.consumption_sequence_ref.clone(),
-                next_group_position,
-                closure: contracts::ReplayIndexClosureV1::NextGlobalEventAt(at),
-            };
-            self.execution.close_public_time(closure)?;
-            self.drive_position += 1;
-        }
-        let prepared = Arc::clone(
-            &self
-                .source
-                .peek()
-                .expect("下一项已观察")
-                .as_ref()
-                .expect("成功项")
-                .prepared,
-        );
+        prepared: Arc<PreparedPublicGroupV1>,
+        at: i64,
+    ) -> Result<(PublicGroupAppliedReceiptV1, TrustedGroupDecisionCutoffV1), SimRunActorErrorV2>
+    {
+        let time = self.time(at);
         let receipt = self
             .execution
-            .apply_public_group(Arc::clone(&prepared), self.time(at))?;
+            .apply_public_group(Arc::clone(&prepared), time)?;
         self.execution
             .actor
             .projection_port
             .observe_public_time(receipt.execution_time());
-        self.source.next();
         self.drive_position += 1;
         self.close_pending = true;
         self.last_receipt = Some(receipt.clone());
         let cutoff = self.execution.decision_cutoff(receipt.clone());
         self.last_cutoff = Some(cutoff.clone());
         self.last_prepared = Some(prepared);
-        Ok(Some((receipt, cutoff)))
+        Ok((receipt, cutoff))
+    }
+    fn close_at(
+        &mut self,
+        at: i64,
+        reason: PublicTimeClosureReasonV1,
+    ) -> Result<(), SimRunActorErrorV2> {
+        let closure = TrustedPublicTimeClosureV1 {
+            execution_time: self.time(at),
+            consumption_sequence_ref: self.consumption_sequence_ref.clone(),
+            next_group_position: self
+                .last_receipt
+                .as_ref()
+                .map_or(0, |r| r.group.group_position + 1),
+            closure: reason,
+        };
+        self.execution.close_public_time(closure)?;
+        self.drive_position += 1;
+        if self
+            .last_receipt
+            .as_ref()
+            .is_some_and(|r| r.execution_time.logical_time_utc_ms() <= at)
+        {
+            self.close_pending = false;
+        }
+        Ok(())
     }
     #[cfg(feature = "measurement")]
     pub fn measurement_resources(&self) -> PublicConsumptionResourceSnapshotV1 {
@@ -19321,7 +19320,7 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
             })
             .collect()
     }
-    pub fn decision(&mut self) -> Option<PublicGroupDecisionV1<'_, I>> {
+    pub fn decision(&mut self) -> Option<PublicGroupDecisionV1<'_>> {
         let cutoff = self.execution.decision_cutoff(self.last_receipt.clone()?);
         Some(PublicGroupDecisionV1 {
             driver: self,
@@ -19334,15 +19333,273 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
     ) -> Result<(), SimRunActorErrorV2> {
         self.execution.hidden_bucket(bucket)
     }
+}
+/// 原序有限供料；迭代结束仅使用原有限关闭语义。
+pub struct FinitePublicConsumptionV1<
+    I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>,
+> {
+    state: PublicConsumptionStateV1,
+    source: std::iter::Peekable<I>,
+    source_failure: Option<String>,
+}
+impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>> std::ops::Deref
+    for FinitePublicConsumptionV1<I>
+{
+    type Target = PublicConsumptionStateV1;
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>> std::ops::DerefMut
+    for FinitePublicConsumptionV1<I>
+{
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state
+    }
+}
+impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
+    FinitePublicConsumptionV1<I>
+{
+    pub fn new(
+        execution: PublicSimExecutionV1,
+        source: I,
+        consumption_sequence_ref: String,
+    ) -> Self {
+        Self {
+            state: PublicConsumptionStateV1::new(execution, consumption_sequence_ref),
+            source: source.peekable(),
+            source_failure: None,
+        }
+    }
+    pub fn wait_for_recording_capacity(&mut self) -> Result<(), SimRunActorErrorV2> {
+        self.state.wait_for_recording_capacity()
+    }
+    pub fn next_group(
+        &mut self,
+    ) -> Result<
+        Option<(PublicGroupAppliedReceiptV1, TrustedGroupDecisionCutoffV1)>,
+        SimRunActorErrorV2,
+    > {
+        if let Some(message) = &self.source_failure {
+            return Err(SimRunActorErrorV2::PublicConsumptionSource(message.clone()));
+        }
+        let next_time = match self.source.peek() {
+            Some(Ok(item)) => Some(item.delivered_at_utc_ms),
+            Some(Err(error)) => {
+                let message = error.to_string();
+                self.source_failure = Some(message.clone());
+                return Err(SimRunActorErrorV2::PublicConsumptionSource(message));
+            }
+            None => None,
+        };
+        if self.close_pending {
+            let at = self
+                .last_receipt
+                .as_ref()
+                .expect("待关闭组已有回执")
+                .execution_time
+                .logical_time_utc_ms();
+            if next_time != Some(at) {
+                self.state.close_at(
+                    at,
+                    next_time.map_or(
+                        PublicTimeClosureReasonV1::EndOfInput,
+                        PublicTimeClosureReasonV1::NextGlobalEventAt,
+                    ),
+                )?;
+            }
+        }
+        let Some(at) = next_time else {
+            return Ok(None);
+        };
+        while let Some(required) = self.execution.actor.next_required_logical_drive() {
+            if required.path != MarketEventPathV1::PublicVisibility
+                || required.required_at_utc_ms >= at
+            {
+                break;
+            }
+            self.state.close_at(
+                required.required_at_utc_ms,
+                PublicTimeClosureReasonV1::NextGlobalEventAt(at),
+            )?;
+        }
+        let prepared = Arc::clone(
+            &self
+                .source
+                .peek()
+                .expect("下一项已观察")
+                .as_ref()
+                .expect("成功项")
+                .prepared,
+        );
+        let result = self.state.apply_group(prepared, at)?;
+        self.source.next();
+        Ok(Some(result))
+    }
     /// 停止读取来源，沿同一后台排空已接纳材料；不消费迭代器剩余项。
     pub fn stop_and_drain(self) -> Result<(), SimRunActorErrorV2> {
-        self.execution.stop_and_drain()
+        self.state.execution.stop_and_drain()
     }
     pub fn complete(
         self,
         materials: &mut dyn PublicConsumptionMaterialReaderV1,
     ) -> Result<UnpublishedRunArtifactCandidateV2, SimRunActorErrorV2> {
-        self.execution.complete(materials)
+        self.state.execution.complete(materials)
+    }
+}
+
+/// 一个运行只建立一次 UTC 锚与单调起点；来源时间不参与执行时钟。
+struct PaperExecutionClockV1 {
+    utc_anchor_ms: i64,
+    started: std::time::Instant,
+    #[cfg(test)]
+    controlled: Option<Arc<std::sync::atomic::AtomicI64>>,
+}
+impl PaperExecutionClockV1 {
+    fn new() -> Self {
+        let started = std::time::Instant::now();
+        let utc_anchor_ms = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+        {
+            Ok(value) => value.as_millis() as i64,
+            Err(value) => -(value.duration().as_millis() as i64),
+        };
+        Self {
+            utc_anchor_ms,
+            started,
+            #[cfg(test)]
+            controlled: None,
+        }
+    }
+    fn now_ms(&self) -> i64 {
+        #[cfg(test)]
+        if let Some(clock) = &self.controlled {
+            return clock.load(std::sync::atomic::Ordering::SeqCst);
+        }
+        self.utc_anchor_ms + self.started.elapsed().as_millis() as i64
+    }
+}
+
+/// 持续公开消费入口。宿主串行交付真实组，并按下一唤醒时间调用空闲推进。
+/// 供料和空闲推进共用原执行器；同步记录容量等待后重新读取实际执行时刻。
+pub struct ContinuousPublicConsumptionV1 {
+    state: PublicConsumptionStateV1,
+    clock: PaperExecutionClockV1,
+}
+impl std::ops::Deref for ContinuousPublicConsumptionV1 {
+    type Target = PublicConsumptionStateV1;
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
+}
+impl std::ops::DerefMut for ContinuousPublicConsumptionV1 {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.state
+    }
+}
+impl ContinuousPublicConsumptionV1 {
+    pub fn new(execution: PublicSimExecutionV1, consumption_sequence_ref: String) -> Self {
+        Self {
+            state: PublicConsumptionStateV1::new(execution, consumption_sequence_ref),
+            clock: PaperExecutionClockV1::new(),
+        }
+    }
+    fn required_at(&self) -> Option<i64> {
+        self.state
+            .execution
+            .actor
+            .next_required_logical_drive()
+            .filter(|required| required.path == MarketEventPathV1::PublicVisibility)
+            .map(|required| required.required_at_utc_ms)
+    }
+    fn required_close_at(&self) -> Option<i64> {
+        let due = self.required_at()?;
+        let frontier = self
+            .state
+            .execution
+            .actor
+            .state
+            .as_ref()
+            .and_then(|state| state.session.as_ref())
+            .and_then(|session| session.public_visibility_frontier.closed_through_utc_ms);
+        let last = self
+            .state
+            .last_receipt
+            .as_ref()
+            .map(|receipt| receipt.execution_time.logical_time_utc_ms());
+        Some(
+            std::iter::once(due)
+                .chain(frontier.map(|at| at + 1))
+                .chain(last)
+                .max()
+                .unwrap(),
+        )
+    }
+    fn close_before(&self, now: i64, supplying: bool) -> Option<i64> {
+        let due = self.required_close_at().filter(|at| *at < now);
+        if !supplying && due.is_none() {
+            return None;
+        }
+        let pending = self
+            .state
+            .last_receipt
+            .as_ref()
+            .filter(|_| self.state.close_pending)
+            .map(|receipt| receipt.execution_time.logical_time_utc_ms())
+            .filter(|at| *at < now);
+        pending.into_iter().chain(due).min()
+    }
+    /// 在串行应用点分配时间，不接受调用方指定的每组执行时间。
+    pub fn apply_group(
+        &mut self,
+        prepared: Arc<PreparedPublicGroupV1>,
+    ) -> Result<(PublicGroupAppliedReceiptV1, TrustedGroupDecisionCutoffV1), SimRunActorErrorV2>
+    {
+        loop {
+            self.state.wait_for_recording_capacity()?;
+            let now = self.clock.now_ms();
+            if let Some(at) = self.close_before(now, true) {
+                match self
+                    .state
+                    .close_at(at, PublicTimeClosureReasonV1::ExecutionClockAdvancedTo(now))
+                {
+                    Ok(()) | Err(SimRunActorErrorV2::RecordingBackpressured) => continue,
+                    Err(error) => return Err(error),
+                }
+            }
+            match self.state.apply_group(Arc::clone(&prepared), now) {
+                Err(SimRunActorErrorV2::RecordingBackpressured) => continue,
+                result => return result,
+            }
+        }
+    }
+    /// 无新行情时只推进真实到期义务，不生成 frame 或公开可见时间。
+    pub fn advance_due(&mut self) -> Result<(), SimRunActorErrorV2> {
+        while self.close_before(self.clock.now_ms(), false).is_some() {
+            self.state.wait_for_recording_capacity()?;
+            let now = self.clock.now_ms();
+            let Some(at) = self.close_before(now, false) else {
+                break;
+            };
+            match self
+                .state
+                .close_at(at, PublicTimeClosureReasonV1::ExecutionClockAdvancedTo(now))
+            {
+                Ok(()) | Err(SimRunActorErrorV2::RecordingBackpressured) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+    /// 原下一义务所在毫秒严格结束后的唤醒；无义务时不要求定时唤醒。
+    pub fn next_wake_after(&self) -> Option<std::time::Duration> {
+        self.required_close_at().map(|at| {
+            let delay = (i128::from(at) + 1 - i128::from(self.clock.now_ms())).max(0);
+            std::time::Duration::from_millis(delay as u64)
+        })
+    }
+    /// 不推进未来义务，沿同一后台排空已接纳材料。
+    pub fn stop_and_drain(self) -> Result<(), SimRunActorErrorV2> {
+        self.state.execution.stop_and_drain()
     }
 }
 
@@ -19406,16 +19663,11 @@ fn reduce_hidden_step_bucket_v1(
 }
 
 /// 组决定持有同一驱动器的独占借用；业务调用方不能替换其冻结截止或跨运行投递。
-pub struct PublicGroupDecisionV1<
-    'a,
-    I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>,
-> {
-    driver: &'a mut FinitePublicConsumptionV1<I>,
+pub struct PublicGroupDecisionV1<'a> {
+    driver: &'a mut PublicConsumptionStateV1,
     cutoff: TrustedGroupDecisionCutoffV1,
 }
-impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
-    PublicGroupDecisionV1<'_, I>
-{
+impl PublicGroupDecisionV1<'_> {
     pub fn cutoff(&self) -> &TrustedGroupDecisionCutoffV1 {
         &self.cutoff
     }
