@@ -712,3 +712,6 @@ fn recorded_cancel_switch(
     writer.stabilize().unwrap();
     (core, TradingTimes(times))
 }
+
+#[path = "buy_tests.rs"]
+mod buy_tests;

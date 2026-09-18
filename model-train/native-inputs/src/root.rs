@@ -44,9 +44,41 @@ pub struct AccountInputRow {
 /// 同帧规则、tick 与精确前缀共用；账户冻结读取仍由 NativeInputGroup 持有。
 pub struct NativeActionContext {
     pub rules: std::sync::Arc<PublicTradingRuleContextV1>,
-    ticks: [Option<contracts::economics::EconomicRational>; 2],
+    pub(crate) ticks: [Option<contracts::economics::EconomicRational>; 2],
+    pub(crate) tokens: [Option<TokenId>; 2],
 }
 impl NativeActionContext {
+    pub(crate) fn from_observation(
+        observation: &MarketBusinessObservationV1,
+        rules: std::sync::Arc<PublicTradingRuleContextV1>,
+    ) -> Self {
+        let ticks = std::array::from_fn(|i| {
+            observation
+                .assets
+                .iter()
+                .find(|a| a.asset.outcome.index as usize == i)
+                .filter(|a| {
+                    matches!(
+                        a.tick.quality,
+                        MarketDataQuality::Fresh | MarketDataQuality::Stale
+                    )
+                })
+                .and_then(|a| a.tick.value.as_ref())
+                .map(crate::exact::decimal)
+        });
+        let tokens = std::array::from_fn(|i| {
+            observation
+                .assets
+                .iter()
+                .find(|a| a.asset.outcome.index as usize == i)
+                .map(|a| a.asset.token_id.clone())
+        });
+        Self {
+            rules,
+            ticks,
+            tokens,
+        }
+    }
     pub fn prefix_features(&self, state: &crate::prefix::PrefixState) -> [f32; 60] {
         state.encode(&self.ticks)
     }
@@ -206,31 +238,16 @@ impl NativeInputRoot {
                     .find(|f| f.observation.market.condition_id == id)
                     .unwrap();
                 let rule = crate::market::rules(frame.observation, &frame.rule_context, now);
-                let ticks = std::array::from_fn(|i| {
-                    frame
-                        .observation
-                        .assets
-                        .iter()
-                        .find(|a| a.asset.outcome.index as usize == i)
-                        .filter(|a| {
-                            matches!(
-                                a.tick.quality,
-                                MarketDataQuality::Fresh | MarketDataQuality::Stale
-                            )
-                        })
-                        .and_then(|a| a.tick.value.as_ref())
-                        .map(crate::exact::decimal)
-                });
                 rows.push(AccountInputRow {
                     hidden_state_key: self.key(&id.0),
                     role,
                     fast: Vec::new(),
                     rule,
                     action_context: (role == InputRole::DecisionRequired).then(|| {
-                        NativeActionContext {
-                            rules: frame.rule_context.clone(),
-                            ticks,
-                        }
+                        NativeActionContext::from_observation(
+                            frame.observation,
+                            frame.rule_context.clone(),
+                        )
                     }),
                     slow: crate::account::encode(
                         read,
