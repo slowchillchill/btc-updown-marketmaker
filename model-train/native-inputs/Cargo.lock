@@ -4249,13 +4249,17 @@ name = "shared-run"
 version = "0.1.0"
 dependencies = [
  "contracts",
+ "data-pipeline-training",
  "execution-normalization",
  "intent-bridge",
  "ledger",
  "num-bigint",
  "num-traits",
  "rust_decimal",
+ "serde",
+ "serde_json",
  "sim-system",
+ "tokio",
 ]
 
 [[package]]
