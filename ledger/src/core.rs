@@ -207,13 +207,19 @@ enum LedgerAccountV1 {
     },
     Fees(Option<String>),
     RealizedPnl(Option<String>),
+    SettlementFeeLiability,
+    ActualTakerFeeLiability,
     Balancing,
 }
 
 impl LedgerAccountV1 {
     fn supports(&self, asset: &LedgerAssetV1) -> bool {
         match self {
-            Self::Cash | Self::Available | Self::Balancing => {
+            Self::Cash
+            | Self::Available
+            | Self::SettlementFeeLiability
+            | Self::ActualTakerFeeLiability
+            | Self::Balancing => {
                 matches!(asset, LedgerAssetV1::Pusd) || matches!(self, Self::Balancing)
             }
             Self::PrincipalEncumbrance(_)
@@ -376,6 +382,8 @@ pub(crate) struct LedgerCommittedEffectV1 {
     ledger_local_prefix: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     funds: Option<self::funds::FundsPatchV1>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    economics: Option<self::economics::EconomicsPatch>,
 }
 
 impl LedgerCommittedEffectV1 {
@@ -384,8 +392,12 @@ impl LedgerCommittedEffectV1 {
     }
 }
 
+enum AdmissionPolicy {
+    Legacy(AccountAdmissionPolicyV1),
+    DualCash(crate::projection::AccountAdmissionPolicyV2),
+}
 pub struct LedgerWriterV1 {
-    policy: AccountAdmissionPolicyV1,
+    policy: AdmissionPolicy,
     account: Option<OpenedAccountStateV1>,
     ledger_local_prefix: u64,
     reservations: ReservationStateV1,
@@ -396,6 +408,7 @@ pub struct LedgerWriterV1 {
     applied_memory: BTreeMap<NoeRecordPositionV1, u64>,
     record_sink: Option<Box<dyn FnMut(self::memory::LedgerRecordMaterialV2)>>,
     funds: self::funds::FundsStateV1,
+    economics: self::economics::EconomicsState,
 }
 
 #[cfg(test)]
@@ -441,6 +454,12 @@ impl LedgerHotIndexCountsV1 {
 
 impl LedgerWriterV1 {
     pub fn new(policy: AccountAdmissionPolicyV1) -> Self {
+        Self::with_policy(AdmissionPolicy::Legacy(policy))
+    }
+    pub fn new_with_admission_v2(policy: crate::projection::AccountAdmissionPolicyV2) -> Self {
+        Self::with_policy(AdmissionPolicy::DualCash(policy))
+    }
+    fn with_policy(policy: AdmissionPolicy) -> Self {
         Self {
             policy,
             account: None,
@@ -453,6 +472,7 @@ impl LedgerWriterV1 {
             applied_memory: BTreeMap::new(),
             record_sink: None,
             funds: self::funds::FundsStateV1::default(),
+            economics: self::economics::EconomicsState::default(),
         }
     }
 
@@ -461,7 +481,10 @@ impl LedgerWriterV1 {
         directory: impl AsRef<Path>,
     ) -> Result<Self, LedgerErrorV1> {
         let mut writer = Self::new(policy);
-        writer.durable = Some(DurableLedgerV1::create(directory.as_ref(), &writer.policy)?);
+        writer.durable = Some(DurableLedgerV1::create(
+            directory.as_ref(),
+            writer.admission_policy(),
+        )?);
         Ok(writer)
     }
 
@@ -496,6 +519,15 @@ impl LedgerWriterV1 {
                     ));
                 }
                 *recovered = Some(Self::new(policy));
+                Ok(())
+            }
+            DurablePayloadV1::GenesisV2 { policy } => {
+                if recovered.is_some() {
+                    return Err(LedgerDurableErrorV1::InvalidStructure(
+                        "Ledger 重复 genesis".into(),
+                    ));
+                }
+                *recovered = Some(Self::new_with_admission_v2(policy));
                 Ok(())
             }
             payload => recovered
@@ -534,8 +566,26 @@ impl LedgerWriterV1 {
             .map_err(Into::into)
     }
 
+    /// 旧 V1 实例的政策；V2 调用者使用 admission_policy_v2。
     pub fn admission_policy(&self) -> &AccountAdmissionPolicyV1 {
-        &self.policy
+        match &self.policy {
+            AdmissionPolicy::Legacy(policy) => policy,
+            AdmissionPolicy::DualCash(_) => panic!("V2 实例没有 V1 市场额度政策"),
+        }
+    }
+    pub fn admission_policy_v2(&self) -> Option<crate::projection::AccountAdmissionPolicyV2> {
+        match self.policy {
+            AdmissionPolicy::DualCash(policy) => Some(policy),
+            AdmissionPolicy::Legacy(_) => None,
+        }
+    }
+    fn genesis(&self) -> DurablePayloadV1 {
+        match &self.policy {
+            AdmissionPolicy::Legacy(policy) => DurablePayloadV1::Genesis {
+                policy: policy.clone(),
+            },
+            AdmissionPolicy::DualCash(policy) => DurablePayloadV1::GenesisV2 { policy: *policy },
+        }
     }
 
     pub fn try_reserve_intent(
@@ -589,6 +639,18 @@ impl LedgerWriterV1 {
             );
         }
 
+        if matches!(self.policy, AdmissionPolicy::DualCash(_)) {
+            let total_reserved = account.balances.principal_encumbrance_pusd
+                + account.balances.immediate_taker_fee_encumbrance_pusd
+                + pending_total;
+            let maker_available = self.economics.cash.maker_cash - total_reserved;
+            if requested_total > maker_available {
+                return self.cache_capacity_outcome(
+                    request_identity,
+                    LedgerReservationOutcomeV1::InsufficientMakerAvailableFunds,
+                );
+            }
+        }
         let platform_market = account.markets.get(&condition_id.0);
         let platform_principal = platform_market
             .map(|market| market.balances.principal_encumbrance_pusd)
@@ -604,65 +666,67 @@ impl LedgerWriterV1 {
         let local_fee = local_market
             .map(|market| market.immediate_fee_pusd)
             .unwrap_or(Decimal::ZERO);
-        let platform_commitment = checked_add(
-            platform_principal,
-            platform_fee,
-            "reservation.platform_market_commitment",
-        )?;
-        let platform_pending_commitment = lifecycle_market
-            .map(|market| {
-                checked_add(
-                    market.totals.platform_pending_principal_pusd,
-                    market.totals.platform_pending_immediate_fee_pusd,
-                    "reservation.market_platform_pending_commitment",
-                )
-            })
-            .transpose()?
-            .unwrap_or(Decimal::ZERO);
-        let position_commitment = lifecycle_market
-            .map(|market| {
-                checked_add(
-                    market.totals.position_cost_basis_pusd,
-                    market.totals.fees_pusd,
-                    "reservation.market_position_commitment",
-                )
-            })
-            .transpose()?
-            .unwrap_or(Decimal::ZERO);
-        let platform_commitment = checked_add(
-            platform_commitment,
-            platform_pending_commitment,
-            "reservation.platform_and_pending_market_commitment",
-        )?;
-        let platform_commitment = checked_add(
-            platform_commitment,
-            position_commitment,
-            "reservation.platform_current_market_commitment",
-        )?;
-        let local_commitment = checked_add(
-            local_principal,
-            local_fee,
-            "reservation.local_market_commitment",
-        )?;
-        let current_market_commitment = checked_add(
-            platform_commitment,
-            local_commitment,
-            "reservation.current_market_commitment",
-        )?;
-        let market_commitment_after_request = checked_add(
-            current_market_commitment,
-            requested_total,
-            "reservation.market_commitment_after_request",
-        )?;
-        let market_limit = parse_decimal(
-            &self.policy.per_market_all_in_commitment_limit_pusd,
-            "admission_policy.per_market_all_in_commitment_limit_pusd",
-        )?;
-        if market_commitment_after_request > market_limit {
-            return self.cache_capacity_outcome(
-                request_identity,
-                LedgerReservationOutcomeV1::PerMarketLimitExceeded,
-            );
+        if let AdmissionPolicy::Legacy(policy) = &self.policy {
+            let platform_commitment = checked_add(
+                platform_principal,
+                platform_fee,
+                "reservation.platform_market_commitment",
+            )?;
+            let platform_pending_commitment = lifecycle_market
+                .map(|market| {
+                    checked_add(
+                        market.totals.platform_pending_principal_pusd,
+                        market.totals.platform_pending_immediate_fee_pusd,
+                        "reservation.market_platform_pending_commitment",
+                    )
+                })
+                .transpose()?
+                .unwrap_or(Decimal::ZERO);
+            let position_commitment = lifecycle_market
+                .map(|market| {
+                    checked_add(
+                        market.totals.position_cost_basis_pusd,
+                        market.totals.fees_pusd,
+                        "reservation.market_position_commitment",
+                    )
+                })
+                .transpose()?
+                .unwrap_or(Decimal::ZERO);
+            let platform_commitment = checked_add(
+                platform_commitment,
+                platform_pending_commitment,
+                "reservation.platform_and_pending_market_commitment",
+            )?;
+            let platform_commitment = checked_add(
+                platform_commitment,
+                position_commitment,
+                "reservation.platform_current_market_commitment",
+            )?;
+            let local_commitment = checked_add(
+                local_principal,
+                local_fee,
+                "reservation.local_market_commitment",
+            )?;
+            let current_market_commitment = checked_add(
+                platform_commitment,
+                local_commitment,
+                "reservation.current_market_commitment",
+            )?;
+            let market_commitment_after_request = checked_add(
+                current_market_commitment,
+                requested_total,
+                "reservation.market_commitment_after_request",
+            )?;
+            let market_limit = parse_decimal(
+                &policy.per_market_all_in_commitment_limit_pusd,
+                "admission_policy.per_market_all_in_commitment_limit_pusd",
+            )?;
+            if market_commitment_after_request > market_limit {
+                return self.cache_capacity_outcome(
+                    request_identity,
+                    LedgerReservationOutcomeV1::PerMarketLimitExceeded,
+                );
+            }
         }
 
         let next_global_principal = checked_add(
@@ -783,6 +847,7 @@ impl LedgerWriterV1 {
         );
         self.commit_effect(LedgerCommittedEffectV1 {
             funds: None,
+            economics: None,
             transaction,
             account: None,
             reservations: Some(reservations),
@@ -790,6 +855,71 @@ impl LedgerWriterV1 {
             ledger_local_prefix: Some(ledger_local_prefix),
         })?;
         Ok(outcome)
+    }
+
+    /// 同一动作的各身份先按共同现金精确求和；不产生“首腿已占用、次腿资金不足”的局部预留。
+    /// 双现金宿主使用此入口；既有单身份粘滞决定和原记录机制保持。
+    pub fn try_reserve_action_v2(
+        &mut self,
+        intents: &[ReserveIntentV1],
+    ) -> Result<Vec<LedgerReservationOutcomeV1>, LedgerErrorV1> {
+        let read = self
+            .economic_read()
+            .ok_or(LedgerErrorV1::AccountNotOpened)?;
+        let actual = parse_decimal(
+            &read.cash().actual_available_pusd,
+            "action.actual_available",
+        )?;
+        let maker = parse_decimal(&read.cash().maker_available_pusd, "action.maker_available")?;
+        let mut total = Decimal::ZERO;
+        let mut seen = std::collections::BTreeSet::new();
+        for intent in intents {
+            if self
+                .reservations
+                .requests
+                .contains_key(&intent.request_identity)
+                || !seen.insert(&intent.request_identity)
+            {
+                continue;
+            }
+            let principal = parse_decimal(&intent.requested_principal_pusd, "action.principal")?;
+            let fee = parse_decimal(&intent.immediate_fee_reserve_pusd, "action.immediate_fee")?;
+            total = checked_add(
+                total,
+                checked_add(principal, fee, "action.item_total")?,
+                "action.total",
+            )?;
+        }
+        let unavailable = if total > actual {
+            Some(LedgerReservationOutcomeV1::InsufficientGlobalAvailableFunds)
+        } else if matches!(self.policy, AdmissionPolicy::DualCash(_)) && total > maker {
+            Some(LedgerReservationOutcomeV1::InsufficientMakerAvailableFunds)
+        } else {
+            None
+        };
+        if let Some(outcome) = unavailable {
+            return intents
+                .iter()
+                .map(|intent| {
+                    if let Some(cached) = self.reservations.requests.get(&intent.request_identity) {
+                        Ok(cached.outcome.clone())
+                    } else {
+                        self.cache_capacity_outcome(&intent.request_identity, outcome.clone())
+                    }
+                })
+                .collect();
+        }
+        intents
+            .iter()
+            .map(|intent| {
+                self.try_reserve_intent(
+                    &intent.request_identity,
+                    &intent.condition_id,
+                    &intent.requested_principal_pusd,
+                    &intent.immediate_fee_reserve_pusd,
+                )
+            })
+            .collect()
     }
 
     pub fn try_reserve_intents(
@@ -864,6 +994,7 @@ impl LedgerWriterV1 {
 
         self.commit_effect(LedgerCommittedEffectV1 {
             funds: None,
+            economics: None,
             transaction,
             account: None,
             reservations: Some(reservations),
@@ -918,6 +1049,7 @@ impl LedgerWriterV1 {
 
         self.commit_effect(LedgerCommittedEffectV1 {
             funds: None,
+            economics: None,
             transaction,
             account: None,
             reservations: Some(reservations),
@@ -991,6 +1123,7 @@ impl LedgerWriterV1 {
 
         self.commit_effect(LedgerCommittedEffectV1 {
             funds: None,
+            economics: None,
             transaction,
             account: None,
             reservations: Some(reservations),
@@ -1128,6 +1261,7 @@ impl LedgerWriterV1 {
             .max(available_through_utc_ms);
         self.commit_effect(LedgerCommittedEffectV1 {
             funds: None,
+            economics: None,
             transaction,
             account: Some(AccountCommittedPatchV1::Update {
                 available_through_utc_ms: next_available_through_utc_ms,
@@ -1166,6 +1300,7 @@ impl LedgerWriterV1 {
             .max(available_through_utc_ms);
         self.commit_effect(LedgerCommittedEffectV1 {
             funds: None,
+            economics: None,
             transaction,
             account: Some(AccountCommittedPatchV1::Update {
                 available_through_utc_ms: next_available_through_utc_ms,
@@ -1367,6 +1502,7 @@ impl LedgerWriterV1 {
 
         self.commit_effect(LedgerCommittedEffectV1 {
             funds: None,
+            economics: None,
             transaction,
             account: Some(AccountCommittedPatchV1::Open(OpenedAccountStateV1 {
                 account_instance_key: account_instance_key.clone(),
@@ -1392,6 +1528,29 @@ impl LedgerWriterV1 {
         available_through_utc_ms: Option<i64>,
         condition_id: Option<&ConditionId>,
         transition: &SourceNeutralAccountTransitionKindV1<I>,
+        balance_delta: &SourceNeutralAccountBalanceDeltaV1,
+        source_record: &SimV2SourceRecordReferenceV1,
+    ) -> Result<LedgerApplyOutcomeV1, LedgerErrorV1> {
+        self.apply_transition_common(
+            reference,
+            account_instance_key,
+            account_transition_seq,
+            available_through_utc_ms,
+            condition_id,
+            Some(transition),
+            balance_delta,
+            source_record,
+        )
+    }
+
+    fn apply_transition_common<I: LedgerIdentity>(
+        &mut self,
+        reference: &LedgerTransactionSourceV1,
+        account_instance_key: &AccountInstanceKeyV1,
+        account_transition_seq: u64,
+        available_through_utc_ms: Option<i64>,
+        condition_id: Option<&ConditionId>,
+        transition: Option<&SourceNeutralAccountTransitionKindV1<I>>,
         balance_delta: &SourceNeutralAccountBalanceDeltaV1,
         source_record: &SimV2SourceRecordReferenceV1,
     ) -> Result<LedgerApplyOutcomeV1, LedgerErrorV1> {
@@ -1432,27 +1591,33 @@ impl LedgerWriterV1 {
             .transpose()?;
 
         let ledger_entry_seq = self.next_ledger_entry_seq()?;
-        let keys = economic_transition_keys(
-            &self.reservations,
-            &self.lifecycle,
-            condition_id,
-            transition,
-            &parsed,
-            source_record,
-        );
+        let keys = transition
+            .map(|transition| {
+                economic_transition_keys(
+                    &self.reservations,
+                    &self.lifecycle,
+                    condition_id,
+                    transition,
+                    &parsed,
+                    source_record,
+                )
+            })
+            .unwrap_or_default();
         let before_reservations = reservation_state_slice(&self.reservations, &keys);
         let mut reservations = reservation_state_slice(&self.reservations, &keys);
         let before_lifecycle = lifecycle_state_slice(&self.lifecycle, &keys);
         let mut lifecycle = lifecycle_state_slice(&self.lifecycle, &keys);
-        apply_economic_lifecycle(
-            &mut reservations,
-            &mut lifecycle,
-            condition_id,
-            transition,
-            &parsed,
-            source_record,
-            ledger_entry_seq,
-        )?;
+        if let Some(transition) = transition {
+            apply_economic_lifecycle(
+                &mut reservations,
+                &mut lifecycle,
+                condition_id,
+                transition,
+                &parsed,
+                source_record,
+                ledger_entry_seq,
+            )?;
+        }
         let mut entries = transition_entries(condition_id, &parsed)?;
         entries.extend(lifecycle_change_entries(
             &before_reservations,
@@ -1476,6 +1641,7 @@ impl LedgerWriterV1 {
                 });
         self.commit_effect(LedgerCommittedEffectV1 {
             funds: None,
+            economics: None,
             transaction,
             account: Some(AccountCommittedPatchV1::Update {
                 available_through_utc_ms,
@@ -1554,7 +1720,41 @@ impl LedgerWriterV1 {
     }
 
     fn commit_effect(&mut self, mut effect: LedgerCommittedEffectV1) -> Result<(), LedgerErrorV1> {
+        if let LedgerTransactionSourceV1::Memory(source) = &effect.transaction.source
+            && let execution_normalization::NormalizationRecord::EconomicFactV2 { fact, .. } =
+                source.record()
+            && let contracts::economics::SourceNeutralEconomicDispositionV2::AccountTransition {
+                balance_delta,
+                ..
+            } = &fact.disposition
+        {
+            for (account, amount) in [
+                (
+                    LedgerAccountV1::SettlementFeeLiability,
+                    &balance_delta.settlement_fee_liability_pusd_delta,
+                ),
+                (
+                    LedgerAccountV1::ActualTakerFeeLiability,
+                    &balance_delta.actual_taker_fee_liability_pusd_delta,
+                ),
+            ] {
+                let amount = parse_decimal(amount, "economic liability")?;
+                if !amount.is_zero() {
+                    effect
+                        .transaction
+                        .entries
+                        .push((account, LedgerAssetV1::Pusd, amount));
+                    effect.transaction.entries.push((
+                        LedgerAccountV1::Balancing,
+                        LedgerAssetV1::Pusd,
+                        -amount,
+                    ));
+                }
+            }
+            ensure_balanced(&effect.transaction.entries)?;
+        }
         effect.funds = self.funds.prepare(&effect)?;
+        effect.economics = self.economics.prepare(&effect)?;
         let payload = DurablePayloadV1::Transaction(Box::new(effect));
         if let Some(durable) = &mut self.durable {
             durable.append(&payload)?;
@@ -1576,9 +1776,11 @@ impl LedgerWriterV1 {
         payload: DurablePayloadV1,
     ) -> Result<(), LedgerDurableErrorV1> {
         match payload {
-            DurablePayloadV1::Genesis { .. } => Err(LedgerDurableErrorV1::InvalidStructure(
-                "Ledger 耐久历史包含非首条 genesis".to_owned(),
-            )),
+            DurablePayloadV1::Genesis { .. } | DurablePayloadV1::GenesisV2 { .. } => {
+                Err(LedgerDurableErrorV1::InvalidStructure(
+                    "Ledger 耐久历史包含非首条 genesis".to_owned(),
+                ))
+            }
             DurablePayloadV1::ReservationDecision {
                 request_identity,
                 request,
@@ -1612,6 +1814,9 @@ impl LedgerWriterV1 {
     }
 
     fn apply_committed_effect(&mut self, effect: LedgerCommittedEffectV1) {
+        if let Some(patch) = effect.economics {
+            self.economics.commit(patch);
+        }
         if let Some(patch) = effect.funds {
             self.funds.commit(patch);
         }
@@ -4210,3 +4415,6 @@ pub(crate) mod memory;
 
 #[path = "funds.rs"]
 pub(crate) mod funds;
+
+#[path = "economics.rs"]
+pub(crate) mod economics;

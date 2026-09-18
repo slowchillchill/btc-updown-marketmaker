@@ -30,3 +30,10 @@ pub(crate) mod session;
 
 #[cfg(test)]
 mod task21_tests;
+
+/// 请求式赎回仅供公共宿主，非模型动作。
+pub use matching::settlement::{
+    ResolutionRedeemScenarioEventV1, ResolutionRedeemScenarioStepV1, ResolutionRedeemScenarioV1,
+    ScenarioSettlementCostV1, SettlementQueryReplyV1, SettlementSimulationReadV1,
+    SettlementSubmissionReceiptV1, SettlementTerminalV1,
+};

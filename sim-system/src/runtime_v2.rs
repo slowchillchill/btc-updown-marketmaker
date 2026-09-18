@@ -211,6 +211,7 @@ pub struct RetentionAdvanceV2 {
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "input", content = "body", rename_all = "SCREAMING_SNAKE_CASE")]
 pub(crate) enum BusinessInputV2 {
+    Settlement(crate::matching::settlement::SettlementOperationV1),
     CreateSession(SessionSpecV3),
     ActivateSession {
         activation_id: String,
@@ -238,6 +239,7 @@ pub(crate) enum BusinessInputV2 {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(tag = "input", content = "body", rename_all = "SCREAMING_SNAKE_CASE")]
 pub(crate) enum LoggedBusinessInputV2 {
+    Settlement(crate::matching::settlement::SettlementOperationV1),
     CreateSession(SessionSpecV3),
     ActivateSession {
         activation_id: String,

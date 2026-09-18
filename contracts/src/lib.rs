@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+pub mod economics;
 pub mod execution_normalization;
+pub use economics::ExactRationalV1;
 mod public_observation;
 pub use public_observation::*;
 mod public_book;
@@ -180,6 +182,7 @@ pub struct PlatformAccountDeltaV1 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "reason", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum PlatformAccountDeltaReasonV2 {
+    RequestedSettlement(economics::SourceNeutralAccountTransitionKindV2<String>),
     OrderAcceptedEncumbranceApplied {
         platform_order_id: String,
     },
@@ -723,6 +726,8 @@ pub struct TradeLifecycleFeedbackV2 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TradeLifecycleFeedbackV3 {
+    #[serde(default)]
+    pub maker_fee_equivalent_pusd: Option<ExactDecimal>,
     #[serde(flatten)]
     pub feedback: TradeLifecycleFeedbackV2,
     pub fill_sequence: u64,
@@ -761,6 +766,20 @@ pub struct MakerRebateFillContributionV2 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SettlementLifecycleEventV2 {
+    ExternalCash {
+        fact: economics::ExternalCashFactV1<String>,
+        account_delta: PlatformAccountDeltaV2,
+    },
+    RequestedSettlement {
+        result: economics::RequestedSettlementResultV1,
+        account_delta: Option<PlatformAccountDeltaV2>,
+        settlement_fee_liability_pusd_delta: ExactDecimal,
+    },
+    ResolvedPosition {
+        condition_id: ConditionId,
+        resolution_event_id: String,
+        resolution: MarketResolutionTerminalV3,
+    },
     MakerRebateAccrualFinalized {
         condition_id: ConditionId,
         status: MakerRebateAccrualStatusV2,
@@ -779,6 +798,8 @@ pub enum SettlementLifecycleEventV2 {
         account_delta: PlatformAccountDeltaV2,
     },
     MakerRebateDayFinalized {
+        #[serde(default)]
+        contribution_trade_ids: Vec<String>,
         attribution_day_start_utc_ms: i64,
         accrual_pusd: ExactDecimal,
         payable_pusd: ExactDecimal,
@@ -786,6 +807,8 @@ pub enum SettlementLifecycleEventV2 {
         account_delta: Option<PlatformAccountDeltaV2>,
     },
     TakerRebateDayFinalized {
+        #[serde(default)]
+        contribution_trade_ids: Vec<String>,
         attribution_day_start_utc_ms: i64,
         accrual_pusd: ExactDecimal,
         payable_pusd: ExactDecimal,

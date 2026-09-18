@@ -593,6 +593,18 @@ impl PlatformAccountStateV2 {
         self.next_account_transition_seq
     }
 
+    pub(crate) fn has_resolution_payout(&self, payouts: &[(TokenId, Decimal); 2]) -> bool {
+        payouts.iter().any(|(token, payout)| {
+            *payout > Decimal::ZERO
+                && self
+                    .outcome_balance_units
+                    .get(&token.0)
+                    .copied()
+                    .unwrap_or(0)
+                    > 0
+        })
+    }
+
     pub(crate) fn outcome_balance_record_count(&self) -> usize {
         self.outcome_balance_units.len()
     }
@@ -999,6 +1011,51 @@ impl PlatformAccountStateV2 {
             None,
             platform_effective_at_utc_ms,
             rebate_paid_movement(paid_pusd, maker)?,
+        )
+    }
+
+    pub(crate) fn apply_external_cash(
+        &mut self,
+        identity: &str,
+        delta: Decimal,
+        at: i64,
+    ) -> Result<PlatformAccountDeltaV2, PlatformAccountError> {
+        let units = positive_i128(decimal_to_micro_units(delta.abs(), "external cash")?)?
+            * if delta.is_sign_negative() { -1 } else { 1 };
+        let mut movement = PlatformAccountMovement::pusd(units, 0, 0);
+        movement.cash_pusd_units_delta = units;
+        self.apply_transition(
+            PlatformAccountDeltaReasonV2::RequestedSettlement(
+                contracts::economics::SourceNeutralAccountTransitionKindV2::ExternalCashApplied {
+                    cash_identity: identity.into(),
+                },
+            ),
+            None,
+            at,
+            movement,
+        )
+    }
+
+    pub(crate) fn apply_settlement_cost(
+        &mut self,
+        condition: &ConditionId,
+        transition: contracts::economics::SourceNeutralAccountTransitionKindV2<String>,
+        at: i64,
+        paid: Decimal,
+    ) -> Result<PlatformAccountDeltaV2, PlatformAccountError> {
+        let units = positive_i128(decimal_to_micro_units(paid.abs(), "settlement payment")?)?;
+        let units = if paid.is_sign_negative() {
+            -units
+        } else {
+            units
+        };
+        let mut movement = PlatformAccountMovement::pusd(-units, 0, 0);
+        movement.cash_pusd_units_delta = -units;
+        self.apply_transition(
+            PlatformAccountDeltaReasonV2::RequestedSettlement(transition),
+            Some(condition),
+            at,
+            movement,
         )
     }
 
