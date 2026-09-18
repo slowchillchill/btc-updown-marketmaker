@@ -26,7 +26,7 @@ Ledger 继续使用同一应用核心，V2 材料包含 Genesis、Transaction、
 
 宿主可按 `next_wake_after()` 返回的相对时长唤醒并调用 `advance_due()`，无原义务时返回 `None`。空闲推进只执行已到期原义务，不生成行情 frame、不推进 NOE 的公开可见时间；后续实际组仍按原领取条件放行，不保证首个后继组反馈齐备。供料和空闲调用串行，容量不足沿原同步等待，不另建线程、队列或等待窗口。`stop_and_drain` 不推进剩余义务。
 
-SIM 公共关闭日志新增 `ExecutionClockAdvancedTo` 依据，未扩展 DPT 的 replay-index 关闭合同。原有限 `NextGlobalEventAt` / `EndOfInput` JSON 形状不变，新读取器读取旧日志；旧二进制读取新关闭理由没有兼容保证。完整 PAPER 进程宿主及线上长时资源验证仍未交付。
+SIM 公共关闭日志新增 `ExecutionClockAdvancedTo` 依据，未扩展 DPT 的 replay-index 关闭合同。原有限 `NextGlobalEventAt` / `EndOfInput` JSON 形状不变，新读取器读取旧日志；旧二进制读取新关闭理由没有兼容保证。PAPER 进程宿主见下节；线上长时资源验证仍未交付。
 
 按 #109 修正方案 A′，迟登记带来的旧返佣不回开已关闭时间。持续驱动从原下一义务 `d`、已关闭前沿 `F` 和最后真实组时间 `L` 选择 `c=max(d,F+1,L)`（缺省项忽略），timer 严格越过 `c` 才关闭，唤醒为 `c+1`；`now==c` 的真实组仍可先进入原归约。最后组时间始终参与，不依赖其是否尚待关闭。正常义务按原最早时序推进，不跨过中间 BUY。
 
@@ -34,4 +34,28 @@ SIM 公共关闭日志新增 `ExecutionClockAdvancedTo` 依据，未扩展 DPT �
 
 共用 PAPER 公共组不区分有限/持续标记，因此上述组分支适用于两者。隐藏 ModelTrain/OfflineEvaluation、有限 `NextGlobalEventAt` / `EndOfInput` 关闭保持原行为；旧有限 next_group 的旧 due 调度/EOF 缺陷不在本次修复范围，不能据此宣称全路径已修好。新增公共驱动测试验证合法五分钟市场的零返佣时序、真实反馈领取及中间 BUY；非零返佣/日支付的经济算法验证复用原 matching 测试。
 
-在线组合通过 `PreparedPublicGroupV1::from_online(&mut pending)` 消费 DPT 同次材料，复用有限来源的组引用、规范位置与 PM 上下文组装。组的 `Arc` 与 DPT 记录器、SIM 后台及驱动当前组共享；不复制完整组或重新准备 PM。宿主按原序在首个相关组前登记市场，然后调用持续驱动、共享读取与 Bridge，再完成 DPT 的记录确认。`tests/continuous.rs` 的原 socket 组合验证半帧期间保留同一 future 并调用真实 `advance_due`；DPT 自身测试覆盖异步记录容量等待。同步 SIM 容量等待仍不承诺并行 timer，恢复顺序沿原持续驱动。这里没有交付完整运行二进制或脚本平台。
+在线组合通过 `PreparedPublicGroupV1::from_online(&mut pending)` 消费 DPT 同次材料，复用有限来源的组引用、规范位置与 PM 上下文组装。组的 `Arc` 与 DPT 记录器、SIM 后台及驱动当前组共享；不复制完整组或重新准备 PM。宿主按原序在首个相关组前登记市场，然后调用持续驱动、共享读取与 Bridge，再完成 DPT 的记录确认。`tests/continuous.rs` 的原 socket 组合验证半帧期间保留同一 future 并调用真实 `advance_due`；DPT 自身测试覆盖异步记录容量等待。同步 SIM 容量等待仍不承诺并行 timer，恢复顺序沿原持续驱动。该组件组合不提供通用脚本平台；下节给出本次最短 PAPER 运行入口。
+
+
+## PAPER 运行入口（#109 任务 7）
+
+`cargo run -p shared-run --bin paper --locked --offline -- <显式配置.json>` 启动独立消费者。二进制仅调用原固定官方 HTTPS 冷启动规则加载器，随后调用 `paper::run_paper_v1`，不启动或管理采集器。此命令描述接口，本轮未执行真实在线业务。受控测试通过原历史加载器得到合法封存规则后调用同一个装配/运行函数，不存在生产历史测试模式、外部每组时钟或任意 HTTP 端点。
+
+配置类型为 `PaperConfigV1`，字段均必填：
+
+- `socket_path`、`dpt_root`、`sim_log`、`noe_root`、`ledger_root` 分别指定原 Unix 交接及唯一产物位置；各原写入器保留创建和错误语义。
+- `public_online` 直接使用 `PublicOnlineConfigV1`，包括原输入头、记录额度、在途输入数、稳定触发和分页参数。
+- `reference_market`、`rule_snapshot_path`、`implementation_identity` 组成原 `CurrentProcessSnapshotRequestV1`；`finality_policy_path` 指向原最终性策略。延迟固定使用内嵌经验分布，没有替换文件入口。
+- `session` 提供原运行/会话/账户/调用方/开户/Bridge 身份、`initial_account_state` 和 `session_seed`，装配固定原 `Paper` 角色。`activation_id`、`consumption_sequence_ref`、`noe_implementation_identity` 明确提供原接线标识。
+- `admission_policy` 直接使用 `AccountAdmissionPolicyV1`；`max_group_bytes`、`finite_in_flight_groups` 明确提供原 SIM 记录容量。
+- `script` 提供目标 `condition_id`、`token_id`、原 GTC `limit_price_pusd_per_share`、`size_shares`、`post_only` 及独立 `submit_context`、`cancel_context`。本入口不选择生产参数、容量或策略，不增加父策略风险检查。
+
+冷启动后创建空场景与真实 NOE 开户，绑定原唯一后台 Ledger 材料，再构造共享读取、激活和连接 socket。开户不等待市场。每次原输入闭组使用 `from_online` 的同次材料；首次相关组前按原 PM 上下文登记市场，仅查询驱动已有规则表。组经持续 SIM、完整外生事实/新截止共享读取与原 Bridge 后，才完成 DPT Record→confirm。
+
+最短脚本仅保存当前步骤，意图/请求仍归原 registry：首个可用共享组 NoTrade 零请求；后续目标组只提交一次 GTC；按原请求身份找到真实形成、实际可撤订单才取原平台 ID 提交一次取消。只有本次取消请求关联的原 `Cancellation(Canceled)` 才是取消成功，其他结果保持原语义，不造 ID、不重试。若市场双侧初始化或后续反馈尚未到齐，正常输入结束也可以报告步骤未覆盖。
+
+同一个 `next_applied` future 在等待半帧或原异步容量期间保持，按 `next_wake_after` 服务原 `advance_due`。返回输入后 Record→confirm、真实 End 完成段及 Stopped 排空段均不插 timer。SIM 同步容量等待仍串行；恢复后沿原时钟规则。SIGINT/SIGTERM 请求消费者计划停止，不替采集器生成 End。
+
+正常 End 或 Stopped 后只调用 SIM `stop_and_drain`，不推进未来业务、不生成 RunSeal、不撤单清仓。报告分别保留 DPT 结果/确认/应用/稳定前缀、SIM/NOE/Ledger 记录排空、Ledger 实际已消费投影和脚本步骤；`collector_exit: null` 表示没有外部退出证据。基础设施失败以错误和非零退出报告，既有应用/确认/稳定进度保留，不能以成功排空掩盖失败。记录排空、脚本覆盖、账户完成和采集器退出是不同结论。
+
+`tests/paper.rs` 直接覆盖同一入口的双侧盘口与真实 GTC/取消、关联反馈、半帧期间原 timer、单边盘口 Unknown 未覆盖、正常 End、Stopped/Aborted/断连、原后台 I/O 失败及参数错误。测试只使用本地 Unix 对端。原 DPT reserve/取消和 SIM 同毫秒/返佣/背压机制反例继续复用组件测试。本次不证明真实线上稳定性、长运行资源、收益或整个 PAPER 阶段完成。

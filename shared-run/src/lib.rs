@@ -8,3 +8,5 @@ mod quantity;
 
 mod economics;
 pub use economics::*;
+
+pub mod paper;
