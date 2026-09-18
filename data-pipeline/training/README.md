@@ -15,3 +15,11 @@
 配置必须显式提供 `header`、原 `GateAOutputConfig` 的 `recording`、`recording_in_flight_inputs`、`stabilize_every_inputs`、`read_page_rows` 和 `max_read_batch_bytes`。这些字段没有新生产默认值。记录目录须为新目录；恢复和事故续接不在本入口范围。标准输出仅包含最终完成计量，失败时标准错误包含实际错误和已有进度；唯一事实记录仍在记录目录。
 
 本地 socket 测试覆盖两个角色、七类来源、多成员完整组、同值与新代际输入、跨稳定边界分页参考、暂满恢复、真实 I/O 故障与静默对端、取消/损坏/断连，以及未配对终态的原错误。官方来源有限验证的参数、投入和结果按当前 Issue 冻结；构造测试不冒充官方来源证据。
+
+## 同次材料交接
+
+`PublicOnlineSessionV1::start` 保留原接收器、核心及唯一记录后台。`PublicOnlineProgressV1` 保存原计量，放在宿主作用域，显式取消整个运行后仍可报告真实前缀。`next_applied(self, stop)` 移动会话所有权，在原异步容量或帧读取期间等待；宿主把这一个 future 固定保留，在 timer 唤醒后继续轮询它，不能取消后重建半帧读取。
+
+返回 `Applied(pending)` 后，读取 `applied()` 及同次 `materials()`：闭组为共享 `Arc`，PM 对象从原准备结果移动，规范位置起点直接来自核心。宿主先完成市场登记和同步业务消费，再完整等待 `pending.complete()` 的原 Record→confirm；实际 End 同段完成原稳定操作。此段不选择 timer 或计划停止。只有 `Continue(session)` 才能接纳下一输入；丢弃 pending 即放弃未完成会话，不能漏记后继续。消费失败仍未完成，不声称回滚。
+
+停止信号只在原等待边界返回 `Stopped(session)`，不在 `next_applied` 内等待后台。宿主退出 timer 选择后调用 `session.stop_and_drain()`，沿原既有前缀排空。旧显式 cancel 仍可取消整个运行并返回未完成错误。正常 DPT End 只证明来源输入完成，不代表 SIM 业务完成。旧消费函数包装同一实现，记录格式及稳定参考分页语义不变；本接口没有增加来源协议或通用宿主。

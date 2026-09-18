@@ -4234,6 +4234,7 @@ name = "shared-run"
 version = "0.1.0"
 dependencies = [
  "contracts",
+ "data-collect",
  "data-pipeline-core",
  "data-pipeline-training",
  "execution-normalization",

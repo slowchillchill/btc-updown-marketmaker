@@ -1962,3 +1962,430 @@ async fn continuous_empty_reference_enrollment_uses_same_shared_chain_without_re
     );
     assert!(!std::fs::read_to_string(path).unwrap().contains("RunSeal"));
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn online_same_input_handoff_serves_timers_then_enrolls_and_executes_once() {
+    use data_collect::handoff::{read_handoff_v2, write_handoff_v2};
+    use data_pipeline_core::{public_input::*, public_observation_core::PublicObservationCoreV1};
+    use data_pipeline_training::public_online::*;
+    use sim_system::scenario::PlatformMarketV1;
+    use tokio::io::AsyncWriteExt;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let config = online_config();
+    let core = PublicObservationCoreV1::new(config.header.clone()).unwrap();
+    let path = temp.path().join("sim.jsonl");
+    let (mut execution, observation) = execution(&path, &core, SUCCESS_POLICY);
+    let opening = observation.opening_record().unwrap();
+    let mut ledger = LedgerWriterV1::new(AccountAdmissionPolicyV1 {
+        per_market_all_in_commitment_limit_pusd: ExactDecimal("1000".into()),
+    });
+    execution
+        .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
+        .unwrap();
+    let mut shared = SharedExecutionV1::from_opening(ledger, observation.clone())
+        .unwrap()
+        .unwrap();
+    let initial = shared.ledger().projection_v2().unwrap();
+    let mut driver = ContinuousPublicConsumptionV1::new(execution, "socket-online".into());
+    let (client, mut server) = tokio::net::UnixStream::pair().unwrap();
+    let (partial_sent, partial_received) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    let peer = tokio::spawn(async move {
+        write_handoff_v2(
+            &mut server,
+            &DataCollectHandoffV2::Session(DataCollectHandoffSessionV2 {
+                frame_schema_version: DATA_COLLECT_HANDOFF_SCHEMA_V2.into(),
+                environment: "paper".into(),
+                run_id: "socket-online".into(),
+                git_commit: "test".into(),
+                binary_sha256: "test".into(),
+                config_digest: "test".into(),
+                collector_host_id: "test".into(),
+                collector_region: "test".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            read_handoff_v2(&mut server).await.unwrap(),
+            DataCollectHandoffV2::Received {
+                transport_sequence: 0
+            }
+        );
+        let mut partial_sent = Some(partial_sent);
+        let mut released = Some(released);
+        for (index, input) in reference_then_market_inputs().into_iter().enumerate() {
+            let DptIngressV1::Message { row, .. } = input.ingress else {
+                panic!()
+            };
+            let frame = DataCollectHandoffV2::Message {
+                row,
+                transport_sequence: index as u64 + 1,
+            };
+            if index == 1 {
+                let bytes = serde_json::to_vec(&frame).unwrap();
+                let split = bytes.len() / 2;
+                server.write_u64(bytes.len() as u64).await.unwrap();
+                server.write_all(&bytes[..split]).await.unwrap();
+                partial_sent.take().unwrap().send(()).unwrap();
+                released.take().unwrap().await.unwrap();
+                server.write_all(&bytes[split..]).await.unwrap();
+            } else {
+                write_handoff_v2(&mut server, &frame).await.unwrap();
+            }
+            assert_eq!(
+                read_handoff_v2(&mut server).await.unwrap(),
+                DataCollectHandoffV2::Received {
+                    transport_sequence: index as u64 + 1
+                }
+            );
+        }
+        write_handoff_v2(
+            &mut server,
+            &DataCollectHandoffV2::End {
+                last_confirmed_sequence: 3,
+            },
+        )
+        .await
+        .unwrap();
+    });
+    let mut progress = PublicOnlineProgressV1::default();
+    let mut session = PublicOnlineSessionV1::start(client, &root, config, &mut progress)
+        .await
+        .unwrap();
+    let mut release = Some(release);
+    let mut partial_received = Some(partial_received);
+    let mut group_count = 0;
+    let mut request_count = 0;
+    let mut pm_positions = Vec::new();
+    for input_index in 0..4 {
+        let mut next = Box::pin(session.next_applied(std::future::pending()));
+        if input_index == 1 {
+            partial_received.take().unwrap().await.unwrap();
+            for _ in 0..3 {
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_millis(2), &mut next)
+                        .await
+                        .is_err()
+                );
+                driver.advance_due().unwrap(); // 真实 timer 消费入口，保留原半帧 future。
+                assert!(driver.frames().is_empty());
+                assert!(shared.action_before(&mut driver).unwrap().is_none());
+            }
+            release.take().unwrap().send(()).unwrap();
+        }
+        let PublicOnlineNextV1::Applied(mut pending) = next.await.unwrap() else {
+            panic!()
+        };
+        assert_eq!(pending.input().input_position, input_index);
+        let groups = PreparedPublicGroupV1::from_online(&mut pending);
+        for (index, group) in groups.into_iter().enumerate() {
+            assert!(Arc::ptr_eq(
+                &group.group,
+                &pending.applied().closed_groups[index]
+            ));
+            for (position, _) in &group.pm_inputs {
+                pm_positions.push(*position);
+            }
+            if group_count == 1 {
+                assert!(driver.frames().is_empty());
+                let context = &group.pm_contexts[0];
+                let market = PlatformMarketV1::try_new(
+                    context.market.clone(),
+                    context
+                        .assets
+                        .iter()
+                        .map(|a| a.asset.clone())
+                        .collect::<Vec<_>>()
+                        .try_into()
+                        .unwrap(),
+                )
+                .unwrap();
+                driver
+                    .enroll_market(MarketEnrollmentRequestV1 {
+                        enrollment_request_id: "first-online-market".into(),
+                        market,
+                    })
+                    .unwrap();
+            }
+            let (receipt, _) = driver.apply_group(group).unwrap();
+            assert_eq!(receipt.group().group_position, group_count);
+            group_count += 1;
+            if input_index == 0 {
+                assert!(driver.frames().is_empty());
+                assert!(shared.action_before(&mut driver).unwrap().is_none());
+                assert_eq!(shared.ledger().projection_v2().unwrap(), initial);
+            } else {
+                let before = shared.action_before(&mut driver).unwrap().unwrap();
+                assert_eq!(
+                    before.ledger().account_instance_key,
+                    initial.account_instance_key
+                );
+                assert_eq!(
+                    before.ledger().platform_confirmed_projection,
+                    initial.platform_confirmed_projection
+                );
+                if input_index == 1 {
+                    let request = shared
+                        .execute(
+                            &mut driver.decision().unwrap(),
+                            context("socket-cancel-market"),
+                            Some(Arc::new(ModelIntentV1::CancelMarketOrders {
+                                condition_id: ConditionId(CONDITION_ID.into()),
+                            })),
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(request.scheduled_action_count(), 1);
+                    request_count += 1;
+                }
+            }
+        }
+        match pending.complete().await.unwrap() {
+            PublicOnlineCompletedInputV1::Continue(next) => session = next,
+            PublicOnlineCompletedInputV1::End(end) => {
+                assert_eq!(input_index, 3);
+                assert_eq!(end.last_received_transport_sequence, 3);
+                assert!(end.committed_prefix.normal_end);
+                break;
+            }
+        }
+    }
+    peer.await.unwrap();
+    assert_eq!(group_count, 3);
+    assert_eq!(request_count, 1);
+    assert_eq!(pm_positions, vec![6]); // 一条参考事实 + metadata 的五条事实。
+    assert_eq!(
+        observation.opening_record().unwrap().position(),
+        opening.position()
+    );
+    driver.stop_and_drain().unwrap();
+    assert!(!std::fs::read_to_string(path).unwrap().contains("RunSeal"));
+    // 原 reader 可直接读取同次在线记录，无新持久形状。
+    let mut replay =
+        data_pipeline_training::public_replay::PublicReplayV1::open(&root, 1, 1 << 20).unwrap();
+    let mut count = 0;
+    while replay.next_applied().unwrap().is_some() {
+        count += 1;
+    }
+    assert_eq!(count, 4);
+}
+
+fn online_config() -> data_pipeline_training::public_online::PublicOnlineConfigV1 {
+    data_pipeline_training::public_online::PublicOnlineConfigV1 {
+        header: core().header().clone(),
+        recording: config(),
+        recording_in_flight_inputs: 1.try_into().unwrap(),
+        stabilize_every_inputs: 100.try_into().unwrap(),
+        read_page_rows: 1.try_into().unwrap(),
+        max_read_batch_bytes: (1 << 20).try_into().unwrap(),
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn online_multi_group_and_zero_step_pm_keep_canonical_positions_and_original_format() {
+    use data_collect::handoff::{read_handoff_v2, write_handoff_v2};
+    use data_pipeline_core::{public_input::*, typed_raw::*};
+    use data_pipeline_training::{public_online::*, public_recording::*};
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let zero = pm(
+        4,
+        2,
+        31_001,
+        PolymarketOrderbookEvent::NewMarket {
+            clob_market_id: market().clob_market_id.0,
+            question: None,
+            description: None,
+            asset_ids: vec![UP_TOKEN_ID.into(), DOWN_TOKEN_ID.into()],
+            outcomes: vec!["UP".into(), "DOWN".into()],
+            event_message: None,
+        },
+    );
+    let notice = pm(
+        3,
+        1,
+        31_000,
+        PolymarketOrderbookEvent::NewMarket {
+            clob_market_id: market().clob_market_id.0,
+            question: None,
+            description: None,
+            asset_ids: vec![UP_TOKEN_ID.into(), DOWN_TOKEN_ID.into()],
+            outcomes: vec!["UP".into(), "DOWN".into()],
+            event_message: None,
+        },
+    );
+    let rows = vec![
+        record(
+            0,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(terminal_orderbook_row(
+                &market(),
+            ))),
+        ),
+        record(
+            1,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(
+                terminal_metadata_row(&market()),
+            ))),
+        ),
+        meta(2),
+        notice,
+        zero.clone(),
+        RecordedIngressV1 {
+            input_position: 5,
+            ..zero
+        },
+    ];
+    let (client, mut server) = tokio::net::UnixStream::pair().unwrap();
+    let peer = tokio::spawn(async move {
+        write_handoff_v2(
+            &mut server,
+            &DataCollectHandoffV2::Session(DataCollectHandoffSessionV2 {
+                frame_schema_version: DATA_COLLECT_HANDOFF_SCHEMA_V2.into(),
+                environment: "paper".into(),
+                run_id: "online-multi".into(),
+                git_commit: "test".into(),
+                binary_sha256: "test".into(),
+                config_digest: "test".into(),
+                collector_host_id: "test".into(),
+                collector_region: "test".into(),
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            read_handoff_v2(&mut server).await.unwrap(),
+            DataCollectHandoffV2::Received {
+                transport_sequence: 0
+            }
+        );
+        for (i, input) in rows.into_iter().enumerate() {
+            let DptIngressV1::Message { row, .. } = input.ingress else {
+                panic!()
+            };
+            write_handoff_v2(
+                &mut server,
+                &DataCollectHandoffV2::Message {
+                    row,
+                    transport_sequence: i as u64 + 1,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                read_handoff_v2(&mut server).await.unwrap(),
+                DataCollectHandoffV2::Received {
+                    transport_sequence: i as u64 + 1
+                }
+            );
+        }
+        write_handoff_v2(
+            &mut server,
+            &DataCollectHandoffV2::End {
+                last_confirmed_sequence: 6,
+            },
+        )
+        .await
+        .unwrap();
+    });
+    let mut progress = PublicOnlineProgressV1::default();
+    let mut session = PublicOnlineSessionV1::start(client, &root, online_config(), &mut progress)
+        .await
+        .unwrap();
+    let mut observed = Vec::new();
+    let mut pm_positions = Vec::new();
+    loop {
+        let PublicOnlineNextV1::Applied(mut pending) =
+            session.next_applied(std::future::pending()).await.unwrap()
+        else {
+            panic!()
+        };
+        let index = pending.input().input_position;
+        observed.push(pending.applied().clone());
+        let groups = PreparedPublicGroupV1::from_online(&mut pending);
+        if index == 2 {
+            assert_eq!(groups.len(), 2); // 身份组及原先等待配对的终态组，同一次 push 释放。
+            assert_eq!(groups[0].group.member_input_positions, vec![2]);
+            assert_eq!(groups[1].group.member_input_positions, vec![0, 1, 2]);
+            assert!(groups.iter().all(|g| g.pm_inputs.is_empty()));
+        } else if index == 3 || index == 4 {
+            assert_eq!(groups.len(), 1);
+            assert_eq!(groups[0].pm_inputs.len(), 1);
+            pm_positions.push(groups[0].pm_inputs[0].0);
+            assert!(matches!(
+                groups[0].pm_inputs[0].1.message().payload,
+                CanonicalPmPayloadV1::NewMarket { .. }
+            ));
+        } else {
+            assert!(groups.is_empty());
+        }
+        for (i, group) in groups.iter().enumerate() {
+            assert!(Arc::ptr_eq(
+                &group.group,
+                &pending.applied().closed_groups[i]
+            ));
+            assert_eq!(
+                group.reference.applied_prefix.next_input_position,
+                index + 1
+            );
+        }
+        match pending.complete().await.unwrap() {
+            PublicOnlineCompletedInputV1::Continue(next) => session = next,
+            PublicOnlineCompletedInputV1::End(end) => {
+                assert_eq!(end.last_received_transport_sequence, 6);
+                break;
+            }
+        }
+    }
+    peer.await.unwrap();
+    let mut reader = PublicRecordingReaderV1::recover(&root, 1, 1 << 20).unwrap();
+    let mut canonical_count = 0;
+    let mut reports = Vec::new();
+    let mut duplicate = false;
+    while let Some(row) = reader.next_row().unwrap() {
+        match row {
+            PublicStoredRowV1::Canonical {
+                canonical_position,
+                record,
+                ..
+            } => {
+                assert_eq!(canonical_position, canonical_count);
+                canonical_count += 1;
+                if matches!(record, CanonicalEventRecordV2::PolymarketMessage(_)) {
+                    assert!(pm_positions.contains(&canonical_position));
+                }
+            }
+            PublicStoredRowV1::PmStepBinding(binding) => {
+                assert_ne!(
+                    Some(&binding.position.canonical_record_position),
+                    pm_positions.last(),
+                    "同代际第二个通知仅报告"
+                );
+            }
+            PublicStoredRowV1::PmReport {
+                canonical_position,
+                report,
+                ..
+            } if Some(&canonical_position) == pm_positions.last() => {
+                reports.push(report.reason_code);
+            }
+            PublicStoredRowV1::Report { report, .. } => {
+                duplicate |= report.report.reason_code == "POLYMARKET_IDENTICAL_MESSAGE_RETRY";
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(pm_positions.len(), 2);
+    assert_eq!(pm_positions[1], pm_positions[0] + 1);
+    assert_eq!(reports, vec!["POLYMARKET_NEW_MARKET_IDENTITY_CONFIRMED"]);
+    assert!(duplicate);
+    let mut replay =
+        data_pipeline_training::public_replay::PublicReplayV1::open(&root, 1, 1 << 20).unwrap();
+    let mut replayed = Vec::new();
+    while let Some((_, applied)) = replay.next_applied().unwrap() {
+        replayed.push(applied.applied);
+    }
+    assert_eq!(observed, replayed);
+}
