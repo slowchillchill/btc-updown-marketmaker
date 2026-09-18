@@ -1103,3 +1103,496 @@ async fn continuous_idle_uses_real_noe_without_early_delivery() {
     );
     driver.stop_and_drain().unwrap();
 }
+
+fn recorded_late_five_minute_markets(
+    root: &Path,
+) -> (
+    PublicObservationCoreV1,
+    Vec<crate::scenario::PlatformMarketV1>,
+) {
+    let mut core = core();
+    let mut writer = PublicRecordingWriterV1::create(root, core.header(), config()).unwrap();
+    for position in 0..4 {
+        let mut reference = twap_input(30);
+        let received = 100_000 + position as i64;
+        reference.common.timestamp_received = received;
+        reference.common.message_timestamp = received - 1;
+        reference.common.payload_timestamp = received - 2;
+        reference.collector_admission_sequence = position + 1;
+        reference.collector_admission_time_utc_ms = received + 1;
+        let input = record(
+            position,
+            TypedRawRowV2::PolymarketRtdsChainlinkTwap(reference),
+        );
+        let result = apply(&mut core, &input);
+        writer.record(input, result).unwrap();
+    }
+    let other = "0x2222222222222222222222222222222222222222222222222222222222222222";
+    for (index, (condition, clob, assets, end_at)) in [
+        (CONDITION_ID, CLOB_MARKET_ID, "[\"20\",\"3\"]", 600_000),
+        (other, "3195577", "[\"21\",\"4\"]", 900_000),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut metadata = metadata_snapshot_row();
+        let seen = (end_at - 50).min(400_000);
+        metadata.condition_id = condition.into();
+        metadata.clob_market_id = clob.into();
+        metadata.asset_ids = assets.into();
+        metadata.market_start_utc = end_at - 300_000;
+        metadata.market_end_utc = end_at;
+        metadata.timestamp_received = seen;
+        metadata.collector_admission_sequence = index as u64 + 1;
+        metadata.collector_admission_time_utc_ms = seen + 1;
+        metadata.fixed_identity_verified_at_utc = seen - 1;
+        metadata.metadata_fetch_start_utc = Some(seen - 10);
+        metadata.source_evidence_received_at_utc = Some(seen);
+        metadata.row_evidence_validation_completed_at_utc = Some(seen + 1);
+        metadata.market_lifecycle_state = if seen < metadata.market_start_utc {
+            MetadataMarketLifecycleState::Prefetched
+        } else {
+            MetadataMarketLifecycleState::Active
+        };
+        metadata.market_runtime_role = if seen < metadata.market_start_utc {
+            MetadataMarketRuntimeRole::Next
+        } else {
+            MetadataMarketRuntimeRole::Current
+        };
+        let input = record(
+            4 + index as u64,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(metadata))),
+        );
+        let result = apply(&mut core, &input);
+        writer.record(input, result).unwrap();
+    }
+    let mut active = metadata_snapshot_row();
+    active.condition_id = other.into();
+    active.clob_market_id = "3195577".into();
+    active.asset_ids = "[\"21\",\"4\"]".into();
+    active.market_start_utc = 600_000;
+    active.market_end_utc = 900_000;
+    active.timestamp_received = 650_000;
+    active.collector_admission_sequence = 3;
+    active.collector_admission_time_utc_ms = 650_001;
+    active.fixed_identity_verified_at_utc = 399_999;
+    active.metadata_fetch_start_utc = Some(649_990);
+    active.source_evidence_received_at_utc = Some(650_000);
+    active.row_evidence_validation_completed_at_utc = Some(650_001);
+    active.market_lifecycle_state = MetadataMarketLifecycleState::Active;
+    active.market_runtime_role = MetadataMarketRuntimeRole::Current;
+    let input = record(
+        6,
+        TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(active))),
+    );
+    let result = apply(&mut core, &input);
+    writer.record(input, result).unwrap();
+    for (index, token) in ["21", "4"].into_iter().enumerate() {
+        let mut payload = book("100");
+        if let PolymarketOrderbookEvent::Book { asset_id, .. } = &mut payload {
+            *asset_id = token.into();
+        }
+        let mut raw = row(
+            "late-markets",
+            index as u64 + 1,
+            650_010 + index as i64,
+            650_011 + index as i64,
+            payload,
+        );
+        raw.market = other.into();
+        let input = record(
+            7 + index as u64,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(raw)),
+        );
+        let result = apply(&mut core, &input);
+        writer.record(input, result).unwrap();
+    }
+    for position in 9..12 {
+        let mut reference = twap_input(30);
+        let received = if position == 9 {
+            650_015
+        } else {
+            920_000 + position as i64
+        };
+        reference.common.timestamp_received = received;
+        reference.common.message_timestamp = received - 1;
+        reference.common.payload_timestamp = received - 2;
+        reference.collector_admission_sequence = position - 4;
+        reference.collector_admission_time_utc_ms = reference.common.timestamp_received + 1;
+        let input = record(
+            position,
+            TypedRawRowV2::PolymarketRtdsChainlinkTwap(reference),
+        );
+        let result = apply(&mut core, &input);
+        writer.record(input, result).unwrap();
+    }
+    writer.stabilize().unwrap();
+    let markets = [CONDITION_ID, other]
+        .into_iter()
+        .map(|condition| {
+            let context = core.pm_context(condition).unwrap();
+            assert_eq!(
+                context.market.window.end_at_utc_ms - context.market.window.start_at_utc_ms,
+                300_000
+            );
+            assert_eq!(context.market.window.start_at_utc_ms.rem_euclid(300_000), 0);
+            crate::scenario::PlatformMarketV1::try_new(
+                context.market,
+                context
+                    .assets
+                    .into_iter()
+                    .map(|a| a.asset)
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .unwrap(),
+            )
+            .unwrap()
+        })
+        .collect();
+    (core, markets)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn continuous_late_rebates_keep_due_but_use_actual_processing_time_and_real_noe_gates() {
+    use contracts::execution_normalization::SimV2SourceRecordReferenceV1;
+    use std::sync::atomic::Ordering;
+    for mode in [
+        "single-reference-timer",
+        "closed-frontier-timer",
+        "closed-frontier-group",
+        "capacity-resume-timer",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dpt");
+        let (_, markets) = recorded_late_five_minute_markets(&root);
+        let (execution, observation) =
+            memory_execution_with_scenario_capacity::<noe_projection::MeasuredOrderEvidence>(
+                &temp.path().join("sim.jsonl"),
+                sealed_scenario_for_markets(vec![]),
+                SimCallerRoleV1::Paper,
+                if mode == "capacity-resume-timer" {
+                    1
+                } else {
+                    128
+                },
+                None,
+            )
+            .await;
+        let seed = execution
+            .actor
+            .state
+            .as_ref()
+            .unwrap()
+            .session
+            .as_ref()
+            .unwrap()
+            .session_seed
+            .clone();
+        let latency = Arc::clone(&execution.actor._latency_profile);
+        let (mut driver, clock) = controlled_continuous(execution, 900_100);
+        let mut source =
+            RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, MemoryRecordedTimes).unwrap();
+        driver
+            .apply_group(source.next().unwrap().unwrap().prepared)
+            .unwrap();
+        if mode != "single-reference-timer" {
+            clock.store(900_101, Ordering::SeqCst);
+            driver
+                .apply_group(source.next().unwrap().unwrap().prepared)
+                .unwrap();
+            assert_eq!(
+                driver
+                    .execution
+                    .actor
+                    .state
+                    .as_ref()
+                    .unwrap()
+                    .session
+                    .as_ref()
+                    .unwrap()
+                    .public_visibility_frontier
+                    .closed_through_utc_ms,
+                Some(900_100)
+            );
+        }
+        let frozen = driver.decision().unwrap().cutoff().clone();
+        for (index, market) in markets.into_iter().enumerate() {
+            driver.wait_for_recording_capacity().unwrap();
+            driver
+                .enroll_market(MarketEnrollmentRequestV1 {
+                    enrollment_request_id: format!("late-{index}"),
+                    market,
+                })
+                .unwrap();
+        }
+        let before = driver.execution.actor.applied_input_sequence;
+        driver.advance_due().unwrap(); // now==c，不回关或忙转。
+        assert_eq!(driver.execution.actor.applied_input_sequence, before);
+        assert_eq!(
+            driver.next_wake_after(),
+            Some(std::time::Duration::from_millis(1))
+        );
+        let processed_at = if mode == "closed-frontier-group" {
+            900_101
+        } else {
+            901_000
+        };
+        let resume = if mode == "capacity-resume-timer" {
+            driver.wait_for_recording_capacity().unwrap();
+            let release = driver
+                .execution
+                .actor
+                .background_log
+                .as_ref()
+                .unwrap()
+                .pause_for_tests(false);
+            for id in ["capacity-first", "capacity-second"] {
+                driver
+                    .decision()
+                    .unwrap()
+                    .request(BusinessRequestV2::CancelAllOrders(
+                        CancelAllOrdersRequestV2 {
+                            context: RequestContextV2 {
+                                global_request_id: id.into(),
+                                caller_correlation_id: None,
+                            },
+                        },
+                    ))
+                    .unwrap();
+            }
+            assert!(
+                !driver
+                    .execution
+                    .actor
+                    .background_log
+                    .as_mut()
+                    .unwrap()
+                    .ready()
+                    .unwrap()
+            );
+            // 先令 timer 确已到期，再在原容量释放前推进处理时钟，避免测试自身抢跑 now==c。
+            clock.store(900_102, Ordering::SeqCst);
+            let clock = Arc::clone(&clock);
+            Some(std::thread::spawn(move || {
+                clock.store(processed_at, Ordering::SeqCst);
+                release.send(()).unwrap();
+            }))
+        } else {
+            clock.store(processed_at, Ordering::SeqCst);
+            None
+        };
+        if mode == "closed-frontier-group" {
+            driver
+                .apply_group(source.next().unwrap().unwrap().prepared)
+                .unwrap();
+        } else {
+            driver.advance_due().unwrap();
+        }
+        if let Some(resume) = resume {
+            resume.join().unwrap();
+        }
+        assert!(
+            observation.take_closed_feedback().is_empty(),
+            "{mode}: 不得借旧 visible 领取新生成反馈"
+        );
+        assert_eq!(
+            driver
+                .decision()
+                .unwrap()
+                .cutoff()
+                .private_feedback_sequence(),
+            0
+        );
+        assert_eq!(frozen.private_feedback_sequence(), 0);
+        let sequence = driver.execution.actor.applied_input_sequence;
+        driver.advance_due().unwrap();
+        assert_eq!(
+            driver.execution.actor.applied_input_sequence, sequence,
+            "无新义务不重复经济结果"
+        );
+        clock.store(920_000, Ordering::SeqCst);
+        driver
+            .apply_group(source.next().unwrap().unwrap().prepared)
+            .unwrap();
+        // 第一组本身不保证关闭前沿已经覆盖接收时刻；第二组使原前缀真正闭合。
+        let mut feedback = observation.take_closed_feedback();
+        if feedback.is_empty() {
+            clock.store(920_001, Ordering::SeqCst);
+            // 此时参考组可能耗尽，后继真实元数据组已经沿原登记建立身份。
+            driver
+                .apply_group(source.next().unwrap().unwrap().prepared)
+                .unwrap();
+            feedback = observation.take_closed_feedback();
+        }
+        let mut due_times = Vec::new();
+        for item in &feedback {
+            if let SimV2SourceRecordReferenceV1::SettlementLifecycle {
+                private_feedback_sequence,
+                platform_event_at_utc_ms,
+                feedback_received_at_utc_ms,
+            } = item.record().source_reference().record
+            {
+                let delay = latency.sample_delay_ms(
+                    seed.0.as_bytes(),
+                    &private_feedback_sequence.to_string(),
+                    DelaySampleDomainV1::LifecycleFeedbackInbound,
+                );
+                assert_eq!(
+                    feedback_received_at_utc_ms,
+                    processed_at + delay as i64,
+                    "{mode}"
+                );
+                due_times.push(platform_event_at_utc_ms);
+            }
+        }
+        due_times.sort();
+        assert_eq!(due_times, vec![600_000, 900_000], "{mode}");
+        assert!(observation.take_closed_feedback().is_empty());
+        assert!(
+            driver
+                .decision()
+                .unwrap()
+                .cutoff()
+                .private_feedback_sequence()
+                > 0
+        );
+        assert_eq!(frozen.private_feedback_sequence(), 0);
+        driver.stop_and_drain().unwrap();
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn continuous_normal_late_timer_preserves_due_delay_and_buy_between_rebates() {
+    use contracts::execution_normalization::SimV2SourceRecordReferenceV1;
+    use std::sync::atomic::Ordering;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let (_, markets) = recorded_late_five_minute_markets(&root);
+    let (execution, observation) =
+        memory_execution_with_scenario_capacity::<noe_projection::MeasuredOrderEvidence>(
+            &temp.path().join("sim.jsonl"),
+            sealed_scenario_for_markets(vec![]),
+            SimCallerRoleV1::Paper,
+            128,
+            None,
+        )
+        .await;
+    let seed = execution
+        .actor
+        .state
+        .as_ref()
+        .unwrap()
+        .session
+        .as_ref()
+        .unwrap()
+        .session_seed
+        .clone();
+    let latency = Arc::clone(&execution.actor._latency_profile);
+    let (mut driver, clock) = controlled_continuous(execution, 500_000);
+    let mut source =
+        RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, MemoryRecordedTimes).unwrap();
+    driver
+        .apply_group(source.next().unwrap().unwrap().prepared)
+        .unwrap();
+    for (index, market) in markets.into_iter().enumerate() {
+        driver
+            .enroll_market(MarketEnrollmentRequestV1 {
+                enrollment_request_id: format!("normal-{index}"),
+                market,
+            })
+            .unwrap();
+    }
+    for _ in 1..6 {
+        driver
+            .apply_group(source.next().unwrap().unwrap().prepared)
+            .unwrap();
+    }
+    clock.store(650_020, Ordering::SeqCst);
+    for _ in 6..9 {
+        driver
+            .apply_group(source.next().unwrap().unwrap().prepared)
+            .unwrap();
+    }
+    driver
+        .decision()
+        .unwrap()
+        .request(BusinessRequestV2::PostOrder(PostOrderRequestV2 {
+            context: RequestContextV2 {
+                global_request_id: "between-rebates-buy".into(),
+                caller_correlation_id: None,
+            },
+            item: post_item(
+                "middle",
+                &ConditionId(
+                    "0x2222222222222222222222222222222222222222222222222222222222222222".into(),
+                ),
+                &TokenId("21".into()),
+                SimBuyOrderKindV1::GtcLimit {
+                    limit_price_pusd_per_share: Decimal::new(2, 1),
+                    size_shares: Decimal::from(5),
+                    post_only: true,
+                },
+            ),
+        }))
+        .unwrap();
+    let due = driver.required_at().unwrap();
+    assert!(600_000 < due && due < 900_000);
+    clock.store(due, Ordering::SeqCst);
+    let before = driver.execution.actor.applied_input_sequence;
+    driver.advance_due().unwrap();
+    assert_eq!(driver.execution.actor.applied_input_sequence, before);
+    assert_eq!(
+        driver.next_wake_after(),
+        Some(std::time::Duration::from_millis(1))
+    );
+    driver
+        .apply_group(source.next().unwrap().unwrap().prepared)
+        .unwrap();
+    assert!(completed_post_response(&driver.execution.actor, "between-rebates-buy").is_none());
+    clock.store(920_100, Ordering::SeqCst);
+    driver.advance_due().unwrap();
+    let response = completed_post_response(&driver.execution.actor, "between-rebates-buy").unwrap();
+    assert!(matches!(
+        response.item.outcome,
+        PostOrderItemOutcomeV2::Accepted(_)
+    ));
+    assert_eq!(response.metadata.platform_responded_at_utc_ms, due);
+    let buy_sequence = response.metadata.private_feedback_sequence;
+    let mut records = observation.take_closed_feedback();
+    driver
+        .apply_group(source.next().unwrap().unwrap().prepared)
+        .unwrap();
+    clock.store(920_101, Ordering::SeqCst);
+    driver
+        .apply_group(source.next().unwrap().unwrap().prepared)
+        .unwrap();
+    records.extend(observation.take_closed_feedback());
+    let mut settlement_sequences = Vec::new();
+    for record in records {
+        if let SimV2SourceRecordReferenceV1::SettlementLifecycle {
+            private_feedback_sequence,
+            platform_event_at_utc_ms,
+            feedback_received_at_utc_ms,
+        } = record.record().source_reference().record
+        {
+            let delay = latency.sample_delay_ms(
+                seed.0.as_bytes(),
+                &private_feedback_sequence.to_string(),
+                DelaySampleDomainV1::LifecycleFeedbackInbound,
+            );
+            assert_eq!(
+                feedback_received_at_utc_ms,
+                platform_event_at_utc_ms + delay as i64,
+                "普通 timer 虽晚处理，logical_at==due 时不改接收时间"
+            );
+            settlement_sequences.push((platform_event_at_utc_ms, private_feedback_sequence));
+        }
+    }
+    settlement_sequences.sort();
+    assert_eq!(settlement_sequences.len(), 2);
+    assert_eq!(settlement_sequences[0].0, 600_000);
+    assert_eq!(settlement_sequences[1].0, 900_000);
+    assert!(settlement_sequences[0].1 < buy_sequence && buy_sequence < settlement_sequences[1].1);
+    assert!(observation.take_closed_feedback().is_empty());
+    driver.stop_and_drain().unwrap();
+}

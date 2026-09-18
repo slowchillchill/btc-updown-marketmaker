@@ -678,6 +678,8 @@ struct SessionMarketEventEffectsV2 {
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct LogicalDriveOutputV2 {
+    // 本次 lifecycle 前缀中补入的旧返佣数量及实际处理时刻，仅活到投影物化。
+    late_rebate_feedback: Option<(usize, i64)>,
     lifecycle: Vec<LifecycleFeedbackEffectV2>,
     mutations: Vec<MutationActionTransitionEffectsV2>,
 }
@@ -1001,6 +1003,7 @@ fn finalize_lifecycle_feedback_v2(
     session_seed: &Sha256Hex,
     latency_profile: &EmpiricalDelayProfile,
     private_feedback_sequence: u64,
+    processed_at_utc_ms: Option<i64>,
 ) -> Result<FinalizedLifecycleFeedbackV2, SimRunActorErrorV2> {
     let platform_event_at_utc_ms = match &effect {
         LifecycleFeedbackEffectV2::Order(effect) => effect.platform_event_at_utc_ms,
@@ -1016,7 +1019,10 @@ fn finalize_lifecycle_feedback_v2(
     let metadata = contracts::LifecycleFeedbackMetadataV2 {
         account_instance_key: account_instance_key.clone(),
         platform_event_at_utc_ms,
-        feedback_received_at_utc_ms: checked_add_delay_v2(platform_event_at_utc_ms, delay_ms)?,
+        feedback_received_at_utc_ms: checked_add_delay_v2(
+            processed_at_utc_ms.unwrap_or(platform_event_at_utc_ms),
+            delay_ms,
+        )?,
         private_feedback_sequence,
     };
     Ok(match effect {
@@ -1068,7 +1074,7 @@ enum FinalizedLifecycleFeedbackV2 {
 }
 
 enum ProjectionDraftV2 {
-    Lifecycle(LifecycleFeedbackEffectV2),
+    Lifecycle(LifecycleFeedbackEffectV2, Option<i64>),
     Direct(Arc<StoredDirectResponseV2>),
 }
 
@@ -1110,7 +1116,7 @@ fn finalize_projection_batch_v2(
                 effect
                     .lifecycle
                     .into_iter()
-                    .map(ProjectionDraftV2::Lifecycle),
+                    .map(|effect| ProjectionDraftV2::Lifecycle(effect, None)),
             );
             if let Some(response) = effect.completed_response {
                 drafts.push(ProjectionDraftV2::Direct(response));
@@ -1122,14 +1128,21 @@ fn finalize_projection_batch_v2(
                 output
                     .lifecycle
                     .into_iter()
-                    .map(ProjectionDraftV2::Lifecycle),
+                    .enumerate()
+                    .map(|(index, effect)| {
+                        let processed_at = output
+                            .late_rebate_feedback
+                            .filter(|(count, _)| index < *count)
+                            .map(|(_, at)| at);
+                        ProjectionDraftV2::Lifecycle(effect, processed_at)
+                    }),
             );
             for mutation in output.mutations {
                 drafts.extend(
                     mutation
                         .lifecycle
                         .into_iter()
-                        .map(ProjectionDraftV2::Lifecycle),
+                        .map(|effect| ProjectionDraftV2::Lifecycle(effect, None)),
                 );
                 if let Some(response) = mutation.completed_response {
                     drafts.push(ProjectionDraftV2::Direct(response));
@@ -1164,13 +1177,14 @@ fn finalize_projection_batch_v2(
     let mut settlement_lifecycle = Vec::new();
     for draft in drafts {
         match draft {
-            ProjectionDraftV2::Lifecycle(effect) => {
+            ProjectionDraftV2::Lifecycle(effect, processed_at) => {
                 let finalized = finalize_lifecycle_feedback_v2(
                     effect,
                     &session.opening_fact.account_instance_key,
                     &session.session_seed,
                     latency_profile,
                     next_private_feedback_sequence,
+                    processed_at,
                 )?;
                 match finalized {
                     FinalizedLifecycleFeedbackV2::Order(feedback) => {
@@ -5306,26 +5320,30 @@ fn drain_scheduled_obligations_at_v2(
         .and_then(|session| session.execution_state.next_rebate_clock_at_utc_ms())
         == Some(logical_at_utc_ms)
     {
-        let session = state.session.take().expect("逻辑驱动已确认唯一会话");
-        let (session, effects) = session
-            .map_execution_state(|execution| {
-                execution.advance_next_rebate_clock_at(logical_at_utc_ms)
-            })
-            .map_err(|error| {
-                BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(error))
-            })?;
-        state.business_resources = effects.resources.apply_to(state.business_resources).ok_or(
-            BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(
-                MatchingStateErrorV1::QueuePredecessorConflict,
-            )),
-        )?;
-        output
-            .lifecycle
-            .extend(effects.into_lifecycle_feedback().map_err(|error| {
-                BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(error))
-            })?);
-        state.session = Some(session);
+        state = advance_rebate_due_v2(state, logical_at_utc_ms, output)
+            .map_err(BusinessReductionErrorV2::Fatal)?;
     }
+    Ok(state)
+}
+
+fn advance_rebate_due_v2(
+    mut state: BusinessReducerStateV2,
+    due: i64,
+    output: &mut LogicalDriveOutputV2,
+) -> Result<BusinessReducerStateV2, SimRunActorErrorV2> {
+    let session = state.session.take().expect("逻辑驱动已确认唯一会话");
+    let (session, effects) = session
+        .map_execution_state(|execution| execution.advance_next_rebate_clock_at(due))
+        .map_err(SimRunActorErrorV2::Matching)?;
+    state.business_resources = effects.resources.apply_to(state.business_resources).ok_or(
+        SimRunActorErrorV2::Matching(MatchingStateErrorV1::QueuePredecessorConflict),
+    )?;
+    output.lifecycle.extend(
+        effects
+            .into_lifecycle_feedback()
+            .map_err(SimRunActorErrorV2::Matching)?,
+    );
+    state.session = Some(session);
     Ok(state)
 }
 
@@ -5605,6 +5623,32 @@ pub(crate) fn drive_business_input_at_v2(
         }
     }
     let mut output = LogicalDriveOutputV2::default();
+    // 仅 PAPER 公共组与在线关闭补入旧返佣。迟入以 logical_at 判定，
+    // 实际处理 E 仅影响这些新反馈的 received，不改变经济 due 或普通 timer。
+    let late_rebate_processed_at = if caller_role == SimCallerRoleV1::Paper {
+        if public_group.is_some() {
+            Some(logical_at_utc_ms)
+        } else {
+            public_closure.and_then(|closure| match closure.closure {
+                PublicTimeClosureReasonV1::ExecutionClockAdvancedTo(now) => Some(now),
+                _ => None,
+            })
+        }
+    } else {
+        None
+    };
+    if let Some(processed_at) = late_rebate_processed_at {
+        while let Some(due) = state
+            .session
+            .as_ref()
+            .and_then(|session| session.execution_state.next_rebate_clock_at_utc_ms())
+            .filter(|due| *due < logical_at_utc_ms)
+        {
+            state = advance_rebate_due_v2(state, due, &mut output)
+                .map_err(BusinessReductionErrorV2::Fatal)?;
+        }
+        output.late_rebate_feedback = Some((output.lifecycle.len(), processed_at));
+    }
     if drives_execution {
         state = drain_scheduled_obligations_at_v2(
             state,
@@ -19467,8 +19511,31 @@ impl ContinuousPublicConsumptionV1 {
             .filter(|required| required.path == MarketEventPathV1::PublicVisibility)
             .map(|required| required.required_at_utc_ms)
     }
+    fn required_close_at(&self) -> Option<i64> {
+        let due = self.required_at()?;
+        let frontier = self
+            .state
+            .execution
+            .actor
+            .state
+            .as_ref()
+            .and_then(|state| state.session.as_ref())
+            .and_then(|session| session.public_visibility_frontier.closed_through_utc_ms);
+        let last = self
+            .state
+            .last_receipt
+            .as_ref()
+            .map(|receipt| receipt.execution_time.logical_time_utc_ms());
+        Some(
+            std::iter::once(due)
+                .chain(frontier.map(|at| at + 1))
+                .chain(last)
+                .max()
+                .unwrap(),
+        )
+    }
     fn close_before(&self, now: i64, supplying: bool) -> Option<i64> {
-        let due = self.required_at().filter(|at| *at < now);
+        let due = self.required_close_at().filter(|at| *at < now);
         if !supplying && due.is_none() {
             return None;
         }
@@ -19525,7 +19592,7 @@ impl ContinuousPublicConsumptionV1 {
     }
     /// 原下一义务所在毫秒严格结束后的唤醒；无义务时不要求定时唤醒。
     pub fn next_wake_after(&self) -> Option<std::time::Duration> {
-        self.required_at().map(|at| {
+        self.required_close_at().map(|at| {
             let delay = (i128::from(at) + 1 - i128::from(self.clock.now_ms())).max(0);
             std::time::Duration::from_millis(delay as u64)
         })
