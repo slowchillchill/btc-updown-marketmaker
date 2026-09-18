@@ -1,6 +1,7 @@
 """同一归档权重/八图的固定技术切片三端对照，不推进经济系统。"""
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import time
@@ -98,6 +99,8 @@ def main():
     parser.add_argument('--graphs',type=Path,required=True);parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--binary',type=Path,default=Path('rust-ort-validation/target/debug/model-graph-ort-validation'))
     args=parser.parse_args();config=next(c for c in CONFIGURATIONS if c.name==args.config)
+    torch.set_num_threads(args.threads)
+    torch.set_num_interop_threads(1)
     args.output.mkdir(parents=True,exist_ok=True)
     data=suite(config);input_path=args.output/'inputs.json';input_path.write_text(json.dumps(data))
     native=next((Path(ort.__file__).parent/'capi').glob('libonnxruntime.so.*')).resolve()
@@ -105,7 +108,6 @@ def main():
     started=time.monotonic()
     with raw.open('w') as stdout,err.open('w') as stderr:
         subprocess.run([str(args.binary.resolve()),str(native),str(args.graphs.resolve()),str(args.threads),str(input_path.resolve())],stdout=stdout,stderr=stderr,check=True)
-    torch.set_num_threads(args.threads)
     model=TwoGraphs(config).eval();model.load_state_dict(torch.load(args.graphs/'initial_weights.pt',weights_only=True,map_location='cpu'))
     state=call_ort(session(args.graphs/'state_encoder.onnx',args.threads),STATE_INPUTS)
     action=call_ort(session(args.graphs/'action_decoder.onnx',args.threads),ACTION_INPUTS)
@@ -136,7 +138,10 @@ def main():
                     for name,old,new in zip(('PyTorch','PythonORT','RustORT'),split_records[canonical],current):
                         compare(old,new,{**context,'runtime':name,'partition':'256+1 vs128+129'},stats,exact)
         assert stream.read()==''
-    stats.update(elapsed_seconds=time.monotonic()-started,rust=metadata,native_sha256=sha(native),
+    stats.update(pytorch_runtime={'intra_threads':torch.get_num_threads(),
+        'interop_threads':torch.get_num_interop_threads(),'OMP_NUM_THREADS':os.environ.get('OMP_NUM_THREADS'),
+        'MKL_NUM_THREADS':os.environ.get('MKL_NUM_THREADS'),'build':torch.__config__.show(),
+        'parallel_backend':torch.__config__.parallel_info()},elapsed_seconds=time.monotonic()-started,rust=metadata,native_sha256=sha(native),
         python_ort_version=ort.__version__,python_ort_extension_sha256=sha(next(native.parent.glob('onnxruntime_pybind11_state*.so'))),
         inputs_sha256=sha(input_path),rust_output_sha256=sha(raw),
         graphs={p.name:sha(p) for p in args.graphs.iterdir() if p.suffix in ('.onnx','.data','.pt')})

@@ -94,10 +94,13 @@ CPU结果不代表目标CPU容量或GPU模式验收。
 
 ```bash
 cargo build --manifest-path rust-ort-validation/Cargo.toml --locked --offline
-.venv/bin/python -m model_train.validate_three_runtimes --config MAIN-1x256 --threads 1 --graphs "$GRAPHS" --output "$OUTPUT"
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python -m model_train.validate_three_runtimes --config MAIN-1x256 --threads 1 --graphs "$GRAPHS" --output "$OUTPUT"
 cargo fmt --manifest-path rust-ort-validation/Cargo.toml --check
 cargo clippy --manifest-path rust-ort-validation/Cargo.toml --locked --offline -- -D warnings
 ```
+
+4线程时同时将 `OMP_NUM_THREADS`、`MKL_NUM_THREADS` 和 `--threads` 改为4。驱动在夹具与模型计算前一次性设置
+PyTorch算子内N/算子间1线程，结果记录实际线程值、环境变量与构建/并行计算后端。
 
 首次准备 Cargo 缓存需按局部 `Cargo.lock` 下载依赖，之后可离线执行。四配置分别运行1/4线程。
 Python驱动把原合法技术切片写为 `inputs.json`，其中没有隐藏状态、z或对象归约；

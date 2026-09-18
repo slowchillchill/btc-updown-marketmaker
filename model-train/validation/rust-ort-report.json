@@ -29,7 +29,15 @@
       "comparisons": 1460,
       "max_absolute_error": 2.288818359375e-05,
       "cases": 18,
-      "elapsed_seconds": 1.5447518120054156,
+      "pytorch_runtime": {
+        "intra_threads": 1,
+        "interop_threads": 1,
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "build": "PyTorch built with:\n  - GCC 13.3\n  - C++ Version: 201703\n  - Intel(R) oneAPI Math Kernel Library Version 2024.2-Product Build 20240605 for Intel(R) 64 architecture applications\n  - Intel(R) MKL-DNN v3.10.2 (Git Hash f1d471933dc852f956fd05389f9313c7148783d5)\n  - OpenMP 201511 (a.k.a. OpenMP 4.5)\n  - LAPACK is enabled (usually provided by MKL)\n  - NNPACK is enabled\n  - CPU capability usage: AVX512\n  - Build settings: BLAS_INFO=mkl, BUILD_TYPE=Release, COMMIT_SHA=70d99e998b4955e0049d13a98d77ae1b14db1f45, CXX_COMPILER=/opt/rh/gcc-toolset-13/root/usr/bin/c++, CXX_FLAGS= -fvisibility-inlines-hidden -DUSE_PTHREADPOOL -DNDEBUG -DUSE_KINETO -DLIBKINETO_NOCUPTI -DLIBKINETO_NOROCTRACER -DLIBKINETO_NOXPUPTI=ON -DUSE_FBGEMM -DUSE_PYTORCH_QNNPACK -DUSE_XNNPACK -DSYMBOLICATE_MOBILE_DEBUG_HANDLE -O2 -fPIC -DC10_NODEPRECATED -Wall -Wextra -Werror=return-type -Werror=non-virtual-dtor -Werror=range-loop-construct -Werror=bool-operation -Wnarrowing -Wno-missing-field-initializers -Wno-unknown-pragmas -Wno-unused-parameter -Wno-strict-overflow -Wno-strict-aliasing -Wno-stringop-overflow -Wsuggest-override -Wno-psabi -Wno-error=old-style-cast -faligned-new -Wno-maybe-uninitialized -fno-math-errno -fno-trapping-math -Werror=format -Wno-dangling-reference -Wno-error=dangling-reference -Wno-stringop-overflow, LAPACK_INFO=mkl, PERF_WITH_AVX=1, PERF_WITH_AVX2=1, TORCH_VERSION=2.11.0, USE_CUDA=0, USE_CUDNN=OFF, USE_CUSPARSELT=OFF, USE_GFLAGS=OFF, USE_GLOG=OFF, USE_GLOO=ON, USE_MKL=ON, USE_MKLDNN=ON, USE_MPI=OFF, USE_NCCL=OFF, USE_NNPACK=ON, USE_OPENMP=ON, USE_ROCM=OFF, USE_ROCM_KERNEL_ASSERT=OFF, USE_XCCL=OFF, USE_XPU=OFF, \n",
+        "parallel_backend": "ATen/Parallel:\n\tat::get_num_threads() : 1\n\tat::get_num_interop_threads() : 1\nOpenMP 201511 (a.k.a. OpenMP 4.5)\n\tomp_get_max_threads() : 1\nIntel(R) oneAPI Math Kernel Library Version 2024.2-Product Build 20240605 for Intel(R) 64 architecture applications\n\tmkl_get_max_threads() : 1\nIntel(R) MKL-DNN v3.10.2 (Git Hash f1d471933dc852f956fd05389f9313c7148783d5)\nstd::thread::hardware_concurrency() : 32\nEnvironment variables:\n\tOMP_NUM_THREADS : 1\n\tMKL_NUM_THREADS : 1\nATen parallel backend: OpenMP\n"
+      },
+      "elapsed_seconds": 1.4130632050073473,
       "rust": {
         "api": 27,
         "build": "ORT Build Info: git-branch=HEAD, git-commit-id=45de2a8b06, fp8-kv-cache=1, build type=Release",
@@ -39,7 +47,7 @@
       "python_ort_version": "1.28.0",
       "python_ort_extension_sha256": "785fd605cc824705d3ee992f94446f757d6db40cc6f54b81450e34120bdf5755",
       "inputs_sha256": "3ad2fad47e25f2757f87b5d819c1fe2c6124b3b038bc0f81f48e6246fd194d2e",
-      "rust_output_sha256": "c9fc4067fd214c83d7428ab42d170711aef9412661b50a6480597b4a521fd86f",
+      "rust_output_sha256": "c0ea35e7115fbe912f5557d0a7a3190f5b0c65c89bc36463e9116954c8dda593",
       "graphs": {
         "state_encoder.onnx": "a8c9127e800c5c4a85bda134b143739e7e16283d0d238bd76cb6b126edd4a827",
         "action_decoder.onnx.data": "e09c08dc22bcfdd0a88abd54cf51dc120b6dfc437e79c669c311ed8afdc26745",
@@ -47,8 +55,8 @@
         "action_decoder.onnx": "f5932580bf4633d0e9f91150886bdbb0a5dd83d272463f6eb70d5920d08281cc",
         "state_encoder.onnx.data": "82fa18ef9e1cb59276c684f9df9685c650e7c160572cac3f29decd56148994f6"
       },
-      "evidence": "artifacts/rust-ort/verified/BASELINE-1x256/threads1/result.json",
-      "result_sha256": "bd3de18c42276974162ff2c563e59f31930755076f7822b60aeaaf3025313658"
+      "evidence": "artifacts/rust-ort/thread-corrected/BASELINE-1x256/threads1/result.json",
+      "result_sha256": "fa561274af8889ac76aa53f440756b6bb45c9234f6d9c69ac3c7e971a2fba036"
     },
     {
       "config": "BASELINE-1x256",
@@ -56,7 +64,15 @@
       "comparisons": 1460,
       "max_absolute_error": 2.288818359375e-05,
       "cases": 18,
-      "elapsed_seconds": 1.5505424639995908,
+      "pytorch_runtime": {
+        "intra_threads": 4,
+        "interop_threads": 1,
+        "OMP_NUM_THREADS": "4",
+        "MKL_NUM_THREADS": "4",
+        "build": "PyTorch built with:\n  - GCC 13.3\n  - C++ Version: 201703\n  - Intel(R) oneAPI Math Kernel Library Version 2024.2-Product Build 20240605 for Intel(R) 64 architecture applications\n  - Intel(R) MKL-DNN v3.10.2 (Git Hash f1d471933dc852f956fd05389f9313c7148783d5)\n  - OpenMP 201511 (a.k.a. OpenMP 4.5)\n  - LAPACK is enabled (usually provided by MKL)\n  - NNPACK is enabled\n  - CPU capability usage: AVX512\n  - Build settings: BLAS_INFO=mkl, BUILD_TYPE=Release, COMMIT_SHA=70d99e998b4955e0049d13a98d77ae1b14db1f45, CXX_COMPILER=/opt/rh/gcc-toolset-13/root/usr/bin/c++, CXX_FLAGS= -fvisibility-inlines-hidden -DUSE_PTHREADPOOL -DNDEBUG -DUSE_KINETO -DLIBKINETO_NOCUPTI -DLIBKINETO_NOROCTRACER -DLIBKINETO_NOXPUPTI=ON -DUSE_FBGEMM -DUSE_PYTORCH_QNNPACK -DUSE_XNNPACK -DSYMBOLICATE_MOBILE_DEBUG_HANDLE -O2 -fPIC -DC10_NODEPRECATED -Wall -Wextra -Werror=return-type -Werror=non-virtual-dtor -Werror=range-loop-construct -Werror=bool-operation -Wnarrowing -Wno-missing-field-initializers -Wno-unknown-pragmas -Wno-unused-parameter -Wno-strict-overflow -Wno-strict-aliasing -Wno-stringop-overflow -Wsuggest-override -Wno-psabi -Wno-error=old-style-cast -faligned-new -Wno-maybe-uninitialized -fno-math-errno -fno-trapping-math -Werror=format -Wno-dangling-reference -Wno-error=dangling-reference -Wno-stringop-overflow, LAPACK_INFO=mkl, PERF_WITH_AVX=1, PERF_WITH_AVX2=1, TORCH_VERSION=2.11.0, USE_CUDA=0, USE_CUDNN=OFF, USE_CUSPARSELT=OFF, USE_GFLAGS=OFF, USE_GLOG=OFF, USE_GLOO=ON, USE_MKL=ON, USE_MKLDNN=ON, USE_MPI=OFF, USE_NCCL=OFF, USE_NNPACK=ON, USE_OPENMP=ON, USE_ROCM=OFF, USE_ROCM_KERNEL_ASSERT=OFF, USE_XCCL=OFF, USE_XPU=OFF, \n",
+        "parallel_backend": "ATen/Parallel:\n\tat::get_num_threads() : 4\n\tat::get_num_interop_threads() : 1\nOpenMP 201511 (a.k.a. OpenMP 4.5)\n\tomp_get_max_threads() : 4\nIntel(R) oneAPI Math Kernel Library Version 2024.2-Product Build 20240605 for Intel(R) 64 architecture applications\n\tmkl_get_max_threads() : 4\nIntel(R) MKL-DNN v3.10.2 (Git Hash f1d471933dc852f956fd05389f9313c7148783d5)\nstd::thread::hardware_concurrency() : 32\nEnvironment variables:\n\tOMP_NUM_THREADS : 4\n\tMKL_NUM_THREADS : 4\nATen parallel backend: OpenMP\n"
+      },
+      "elapsed_seconds": 1.4274188109993702,
       "rust": {
         "api": 27,
         "build": "ORT Build Info: git-branch=HEAD, git-commit-id=45de2a8b06, fp8-kv-cache=1, build type=Release",
@@ -66,7 +82,7 @@
       "python_ort_version": "1.28.0",
       "python_ort_extension_sha256": "785fd605cc824705d3ee992f94446f757d6db40cc6f54b81450e34120bdf5755",
       "inputs_sha256": "3ad2fad47e25f2757f87b5d819c1fe2c6124b3b038bc0f81f48e6246fd194d2e",
-      "rust_output_sha256": "8ce22e555e831147cc45cd58dc54b043097b40b1710ece4030b1c62da0dcc18b",
+      "rust_output_sha256": "41bae63354d1b9cb5be880d4f3ab8af53297e787a10769aebb9b82e58a25fcda",
       "graphs": {
         "state_encoder.onnx": "a8c9127e800c5c4a85bda134b143739e7e16283d0d238bd76cb6b126edd4a827",
         "action_decoder.onnx.data": "e09c08dc22bcfdd0a88abd54cf51dc120b6dfc437e79c669c311ed8afdc26745",
@@ -74,8 +90,8 @@
         "action_decoder.onnx": "f5932580bf4633d0e9f91150886bdbb0a5dd83d272463f6eb70d5920d08281cc",
         "state_encoder.onnx.data": "82fa18ef9e1cb59276c684f9df9685c650e7c160572cac3f29decd56148994f6"
       },
-      "evidence": "artifacts/rust-ort/verified/BASELINE-1x256/threads4/result.json",
-      "result_sha256": "84232aca30852484020b0208daab38c90a31e3d050e17e0df9b0c098f8882aaf"
+      "evidence": "artifacts/rust-ort/thread-corrected/BASELINE-1x256/threads4/result.json",
+      "result_sha256": "360ede840029bc56ca657522589efd97135e5afef72ad9e5c7ff19eaecfc1a18"
     },
     {
       "config": "BASELINE-2x256",
@@ -83,7 +99,15 @@
       "comparisons": 1460,
       "max_absolute_error": 3.0517578125e-05,
       "cases": 18,
-      "elapsed_seconds": 1.5548490820074221,
+      "pytorch_runtime": {
+        "intra_threads": 1,
+        "interop_threads": 1,
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "build": "PyTorch built with:\n  - GCC 13.3\n  - C++ Version: 201703\n  - Intel(R) oneAPI Math Kernel Library Version 2024.2-Product Build 20240605 for Intel(R) 64 architecture applications\n  - Intel(R) MKL-DNN v3.10.2 (Git Hash f1d471933dc852f956fd05389f9313c7148783d5)\n  - OpenMP 201511 (a.k.a. OpenMP 4.5)\n  - LAPACK is enabled (usually provided by MKL)\n  - NNPACK is enabled\n  - CPU capability usage: AVX512\n  - Build settings: BLAS_INFO=mkl, BUILD_TYPE=Release, COMMIT_SHA=70d99e998b4955e0049d13a98d77ae1b14db1f45, CXX_COMPILER=/opt/rh/gcc-toolset-13/root/usr/bin/c++, CXX_FLAGS= -fvisibility-inlines-hidden -DUSE_PTHREADPOOL -DNDEBUG -DUSE_KINETO -DLIBKINETO_NOCUPTI -DLIBKINETO_NOROCTRACER -DLIBKINETO_NOXPUPTI=ON -DUSE_FBGEMM -DUSE_PYTORCH_QNNPACK -DUSE_XNNPACK -DSYMBOLICATE_MOBILE_DEBUG_HANDLE -O2 -fPIC -DC10_NODEPRECATED -Wall -Wextra -Werror=return-type -Werror=non-virtual-dtor -Werror=range-loop-construct -Werror=bool-operation -Wnarrowing -Wno-missing-field-initializers -Wno-unknown-pragmas -Wno-unused-parameter -Wno-strict-overflow -Wno-strict-aliasing -Wno-stringop-overflow -Wsuggest-override -Wno-psabi -Wno-error=old-style-cast -faligned-new -Wno-maybe-uninitialized -fno-math-errno -fno-trapping-math -Werror=format -Wno-dangling-reference -Wno-error=dangling-reference -Wno-stringop-overflow, LAPACK_INFO=mkl, PERF_WITH_AVX=1, PERF_WITH_AVX2=1, TORCH_VERSION=2.11.0, USE_CUDA=0, USE_CUDNN=OFF, USE_CUSPARSELT=OFF, USE_GFLAGS=OFF, USE_GLOG=OFF, USE_GLOO=ON, USE_MKL=ON, USE_MKLDNN=ON, USE_MPI=OFF, USE_NCCL=OFF, USE_NNPACK=ON, USE_OPENMP=ON, USE_ROCM=OFF, USE_ROCM_KERNEL_ASSERT=OFF, USE_XCCL=OFF, USE_XPU=OFF, \n",
+        "parallel_backend": "ATen/Parallel:\n\tat::get_num_threads() : 1\n\tat::get_num_interop_threads() : 1\nOpenMP 201511 (a.k.a. OpenMP 4.5)\n\tomp_get_max_threads() : 1\nIntel(R) oneAPI Math Kernel Library Version 2024.2-Product Build 20240605 for Intel(R) 64 architecture applications\n\tmkl_get_max_threads() : 1\nIntel(R) MKL-DNN v3.10.2 (Git Hash f1d471933dc852f956fd05389f9313c7148783d5)\nstd::thread::hardware_concurrency() : 32\nEnvironment variables:\n\tOMP_NUM_THREADS : 1\n\tMKL_NUM_THREADS : 1\nATen parallel backend: OpenMP\n"
+      },
+      "elapsed_seconds": 1.440757673990447,
       "rust": {
         "api": 27,
         "build": "ORT Build Info: git-branch=HEAD, git-commit-id=45de2a8b06, fp8-kv-cache=1, build type=Release",
@@ -93,7 +117,7 @@
       "python_ort_version": "1.28.0",
       "python_ort_extension_sha256": "785fd605cc824705d3ee992f94446f757d6db40cc6f54b81450e34120bdf5755",
       "inputs_sha256": "3dea49bfd1734184031c0925862bcd6560d4afbb6cb6577b03ddfab5105df735",
-      "rust_output_sha256": "1a5bf411464c0b44ea3235cc8969af07576976e6bf480d0414304f3cdc536c8f",
+      "rust_output_sha256": "b9d8ceeefc3af291386398dfcf30f18bfcf5de1d907e927f91d1c55737d7e64f",
       "graphs": {
         "state_encoder.onnx": "f3f469eff20d4ce851fee3e1edcdd5ed687eabc48d18fc401458b287898b024a",
         "action_decoder.onnx.data": "9c32da1001dc6d9deeac2a8a96a95f7a0edf0b14699ff8c9bc16d4b517ebeaed",
@@ -101,8 +125,8 @@
         "action_decoder.onnx": "d637ba4199b3d0325c746568d5a4f8cac9254db5ff5403af4d2bbd1c649165a9",
         "state_encoder.onnx.data": "1f005ec181291651a235ce085911c57ad6497c565d0bc7edc82c7bf5f2cba5bf"
       },
-      "evidence": "artifacts/rust-ort/verified/BASELINE-2x256/threads1/result.json",
-      "result_sha256": "1681eb762aac4d46a984d383238010fd2e1b38420680d48546bb993df4c903d5"
+      "evidence": "artifacts/rust-ort/thread-corrected/BASELINE-2x256/threads1/result.json",
+      "result_sha256": "246ce5771808b924c8950571ba39d229bc2f12ee68bb4cefff4f05596457cb3f"
     },
     {
       "config": "BASELINE-2x256",
@@ -110,7 +134,15 @@
       "comparisons": 1460,
       "max_absolute_error": 3.0517578125e-05,
       "cases": 18,
-      "elapsed_seconds": 1.515452470004675,
+      "pytorch_runtime": {
+        "intra_threads": 4,
+        "interop_threads": 1,
+        "OMP_NUM_THREADS": "4",
+        "MKL_NUM_THREADS": "4",
+        "build": "PyTorch built with:\n  - GCC 13.3\n  - C++ Version: 201703\n  - Intel(R) oneAPI Math Kernel Library Version 2024.2-Product Build 20240605 for Intel(R) 64 architecture applications\n  - Intel(R) MKL-DNN v3.10.2 (Git Hash f1d471933dc852f956fd05389f9313c7148783d5)\n  - OpenMP 201511 (a.k.a. OpenMP 4.5)\n  - LAPACK is enabled (usually provided by MKL)\n  - NNPACK is enabled\n  - CPU capability usage: AVX512\n  - Build settings: BLAS_INFO=mkl, BUILD_TYPE=Release, COMMIT_SHA=70d99e998b4955e0049d13a98d77ae1b14db1f45, CXX_COMPILER=/opt/rh/gcc-toolset-13/root/usr/bin/c++, CXX_FLAGS= -fvisibility-inlines-hidden -DUSE_PTHREADPOOL -DNDEBUG -DUSE_KINETO -DLIBKINETO_NOCUPTI -DLIBKINETO_NOROCTRACER -DLIBKINETO_NOXPUPTI=ON -DUSE_FBGEMM -DUSE_PYTORCH_QNNPACK -DUSE_XNNPACK -DSYMBOLICATE_MOBILE_DEBUG_HANDLE -O2 -fPIC -DC10_NODEPRECATED -Wall -Wextra -Werror=return-type -Werror=non-virtual-dtor -Werror=range-loop-construct -Werror=bool-operation -Wnarrowing -Wno-missing-field-initializers -Wno-unknown-pragmas -Wno-unused-parameter -Wno-strict-overflow -Wno-strict-aliasing -Wno-stringop-overflow -Wsuggest-override -Wno-psabi -Wno-error=old-style-cast -faligned-new -Wno-maybe-uninitialized -fno-math-errno -fno-trapping-math -Werror=format -Wno-dangling-reference -Wno-error=dangling-reference -Wno-stringop-overflow, LAPACK_INFO=mkl, PERF_WITH_AVX=1, PERF_WITH_AVX2=1, TORCH_VERSION=2.11.0, USE_CUDA=0, USE_CUDNN=OFF, USE_CUSPARSELT=OFF, USE_GFLAGS=OFF, USE_GLOG=OFF, USE_GLOO=ON, USE_MKL=ON, USE_MKLDNN=ON, USE_MPI=OFF, USE_NCCL=OFF, USE_NNPACK=ON, USE_OPENMP=ON, USE_ROCM=OFF, USE_ROCM_KERNEL_ASSERT=OFF, USE_XCCL=OFF, USE_XPU=OFF, \n",
+        "parallel_backend": "ATen/Parallel:\n\tat::get_num_threads() : 4\n\tat::get_num_interop_threads() : 1\nOpenMP 201511 (a.k.a. OpenMP 4.5)\n\tomp_get_max_threads() : 4\nIntel(R) oneAPI Math Kernel Library Version 2024.2-Product Build 20240605 for Intel(R) 64 architecture applications\n\tmkl_get_max_threads() : 4\nIntel(R) MKL-DNN v3.10.2 (Git Hash f1d471933dc852f956fd05389f9313c7148783d5)\nstd::thread::hardware_concurrency() : 32\nEnvironment variables:\n\tOMP_NUM_THREADS : 4\n\tMKL_NUM_THREADS : 4\nATen parallel backend: OpenMP\n"
+      },
+      "elapsed_seconds": 1.4123529369971948,
       "rust": {
         "api": 27,
         "build": "ORT Build Info: git-branch=HEAD, git-commit-id=45de2a8b06, fp8-kv-cache=1, build type=Release",
@@ -120,7 +152,7 @@
       "python_ort_version": "1.28.0",
       "python_ort_extension_sha256": "785fd605cc824705d3ee992f94446f757d6db40cc6f54b81450e34120bdf5755",
       "inputs_sha256": "3dea49bfd1734184031c0925862bcd6560d4afbb6cb6577b03ddfab5105df735",
-      "rust_output_sha256": "1c7176f12b16f2e7edbfed816f17c34bbf152d0b13c9f9f899800e91020518b5",
+      "rust_output_sha256": "ae16dc37562d0a6ffaeb6d60b9ef534d8fc91783dff984c51473f3895274dc78",
       "graphs": {
         "state_encoder.onnx": "f3f469eff20d4ce851fee3e1edcdd5ed687eabc48d18fc401458b287898b024a",
         "action_decoder.onnx.data": "9c32da1001dc6d9deeac2a8a96a95f7a0edf0b14699ff8c9bc16d4b517ebeaed",
@@ -128,8 +160,8 @@
         "action_decoder.onnx": "d637ba4199b3d0325c746568d5a4f8cac9254db5ff5403af4d2bbd1c649165a9",
         "state_encoder.onnx.data": "1f005ec181291651a235ce085911c57ad6497c565d0bc7edc82c7bf5f2cba5bf"
       },
-      "evidence": "artifacts/rust-ort/verified/BASELINE-2x256/threads4/result.json",
-      "result_sha256": "1a97a1ebf2764b216fbbed189b5ca0ca52009a8ae6b5e5216909277001c624ce"
+      "evidence": "artifacts/rust-ort/thread-corrected/BASELINE-2x256/threads4/result.json",
+      "result_sha256": "305b42cf66932bbcb0b0aae9339e94e8bf5ba5e2265e999eac5f33aa53a9ed47"
     },
     {
       "config": "MAIN-1x256",
@@ -137,7 +169,15 @@
       "comparisons": 1460,
       "max_absolute_error": 1.9073486328125e-05,
       "cases": 18,
-      "elapsed_seconds": 1.5051150990038877,
+      "pytorch_runtime": {
+        "intra_threads": 1,
+        "interop_threads": 1,
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "build": "PyTorch built with:\n  - GCC 13.3\n  - C++ Version: 201703\n  - Intel(R) oneAPI Math Kernel Library Version 2024.2-Product Build 20240605 for Intel(R) 64 architecture applications\n  - Intel(R) MKL-DNN v3.10.2 (Git Hash f1d471933dc852f956fd05389f9313c7148783d5)\n  - OpenMP 201511 (a.k.a. OpenMP 4.5)\n  - LAPACK is enabled (usually provided by MKL)\n  - NNPACK is enabled\n  - CPU capability usage: AVX512\n  - Build settings: BLAS_INFO=mkl, BUILD_TYPE=Release, COMMIT_SHA=70d99e998b4955e0049d13a98d77ae1b14db1f45, CXX_COMPILER=/opt/rh/gcc-toolset-13/root/usr/bin/c++, CXX_FLAGS= -fvisibility-inlines-hidden -DUSE_PTHREADPOOL -DNDEBUG -DUSE_KINETO -DLIBKINETO_NOCUPTI -DLIBKINETO_NOROCTRACER -DLIBKINETO_NOXPUPTI=ON -DUSE_FBGEMM -DUSE_PYTORCH_QNNPACK -DUSE_XNNPACK -DSYMBOLICATE_MOBILE_DEBUG_HANDLE -O2 -fPIC -DC10_NODEPRECATED -Wall -Wextra -Werror=return-type -Werror=non-virtual-dtor -Werror=range-loop-construct -Werror=bool-operation -Wnarrowing -Wno-missing-field-initializers -Wno-unknown-pragmas -Wno-unused-parameter -Wno-strict-overflow -Wno-strict-aliasing -Wno-stringop-overflow -Wsuggest-override -Wno-psabi -Wno-error=old-style-cast -faligned-new -Wno-maybe-uninitialized -fno-math-errno -fno-trapping-math -Werror=format -Wno-dangling-reference -Wno-error=dangling-reference -Wno-stringop-overflow, LAPACK_INFO=mkl, PERF_WITH_AVX=1, PERF_WITH_AVX2=1, TORCH_VERSION=2.11.0, USE_CUDA=0, USE_CUDNN=OFF, USE_CUSPARSELT=OFF, USE_GFLAGS=OFF, USE_GLOG=OFF, USE_GLOO=ON, USE_MKL=ON, USE_MKLDNN=ON, USE_MPI=OFF, USE_NCCL=OFF, USE_NNPACK=ON, USE_OPENMP=ON, USE_ROCM=OFF, USE_ROCM_KERNEL_ASSERT=OFF, USE_XCCL=OFF, USE_XPU=OFF, \n",
+        "parallel_backend": "ATen/Parallel:\n\tat::get_num_threads() : 1\n\tat::get_num_interop_threads() : 1\nOpenMP 201511 (a.k.a. OpenMP 4.5)\n\tomp_get_max_threads() : 1\nIntel(R) oneAPI Math Kernel Library Version 2024.2-Product Build 20240605 for Intel(R) 64 architecture applications\n\tmkl_get_max_threads() : 1\nIntel(R) MKL-DNN v3.10.2 (Git Hash f1d471933dc852f956fd05389f9313c7148783d5)\nstd::thread::hardware_concurrency() : 32\nEnvironment variables:\n\tOMP_NUM_THREADS : 1\n\tMKL_NUM_THREADS : 1\nATen parallel backend: OpenMP\n"
+      },
+      "elapsed_seconds": 1.5007592080073664,
       "rust": {
         "api": 27,
         "build": "ORT Build Info: git-branch=HEAD, git-commit-id=45de2a8b06, fp8-kv-cache=1, build type=Release",
@@ -147,7 +187,7 @@
       "python_ort_version": "1.28.0",
       "python_ort_extension_sha256": "785fd605cc824705d3ee992f94446f757d6db40cc6f54b81450e34120bdf5755",
       "inputs_sha256": "3ad2fad47e25f2757f87b5d819c1fe2c6124b3b038bc0f81f48e6246fd194d2e",
-      "rust_output_sha256": "9a036cdb058ed63fa9237ceb83434465af7cb1e4d1f2a67baf1b41889cc61102",
+      "rust_output_sha256": "943d58c921c316a364c8d704dcb13c382a06bf67879687ad057dcb6e246fdd58",
       "graphs": {
         "state_encoder.onnx": "f03e15e6a199cc57d6735056d2aa82ec92d18f030569dcf7e286d1c09bb30505",
         "action_decoder.onnx.data": "2029cb69c98c950aacbeaf4e0949da06309b8bcfcd10a8fcb72968a0b6aea479",
@@ -155,8 +195,8 @@
         "action_decoder.onnx": "da27ff5b7ae2964d18bea1e4e2281672e1995aa947ddf6e40efcee79c151e3bc",
         "state_encoder.onnx.data": "14cb057b63377e9c63c520f754f5051da7e4f2a7af4c5bea811f9ec215ecc738"
       },
-      "evidence": "artifacts/rust-ort/verified/MAIN-1x256/threads1/result.json",
-      "result_sha256": "3f15ccfcada88f061d719f86ccb6d29a9595823e1de3af02d801e475058791aa"
+      "evidence": "artifacts/rust-ort/thread-corrected/MAIN-1x256/threads1/result.json",
+      "result_sha256": "0c851dfb7c1d33cf1a7d987f3ceb24156843629cf6e79b93258c9b0b9a0d61fa"
     },
     {
       "config": "MAIN-1x256",
@@ -164,7 +204,15 @@
       "comparisons": 1460,
       "max_absolute_error": 1.9073486328125e-05,
       "cases": 18,
-      "elapsed_seconds": 1.5542436620016815,
+      "pytorch_runtime": {
+        "intra_threads": 4,
+        "interop_threads": 1,
+        "OMP_NUM_THREADS": "4",
+        "MKL_NUM_THREADS": "4",
+        "build": "PyTorch built with:\n  - GCC 13.3\n  - C++ Version: 201703\n  - Intel(R) oneAPI Math Kernel Library Version 2024.2-Product Build 20240605 for Intel(R) 64 architecture applications\n  - Intel(R) MKL-DNN v3.10.2 (Git Hash f1d471933dc852f956fd05389f9313c7148783d5)\n  - OpenMP 201511 (a.k.a. OpenMP 4.5)\n  - LAPACK is enabled (usually provided by MKL)\n  - NNPACK is enabled\n  - CPU capability usage: AVX512\n  - Build settings: BLAS_INFO=mkl, BUILD_TYPE=Release, COMMIT_SHA=70d99e998b4955e0049d13a98d77ae1b14db1f45, CXX_COMPILER=/opt/rh/gcc-toolset-13/root/usr/bin/c++, CXX_FLAGS= -fvisibility-inlines-hidden -DUSE_PTHREADPOOL -DNDEBUG -DUSE_KINETO -DLIBKINETO_NOCUPTI -DLIBKINETO_NOROCTRACER -DLIBKINETO_NOXPUPTI=ON -DUSE_FBGEMM -DUSE_PYTORCH_QNNPACK -DUSE_XNNPACK -DSYMBOLICATE_MOBILE_DEBUG_HANDLE -O2 -fPIC -DC10_NODEPRECATED -Wall -Wextra -Werror=return-type -Werror=non-virtual-dtor -Werror=range-loop-construct -Werror=bool-operation -Wnarrowing -Wno-missing-field-initializers -Wno-unknown-pragmas -Wno-unused-parameter -Wno-strict-overflow -Wno-strict-aliasing -Wno-stringop-overflow -Wsuggest-override -Wno-psabi -Wno-error=old-style-cast -faligned-new -Wno-maybe-uninitialized -fno-math-errno -fno-trapping-math -Werror=format -Wno-dangling-reference -Wno-error=dangling-reference -Wno-stringop-overflow, LAPACK_INFO=mkl, PERF_WITH_AVX=1, PERF_WITH_AVX2=1, TORCH_VERSION=2.11.0, USE_CUDA=0, USE_CUDNN=OFF, USE_CUSPARSELT=OFF, USE_GFLAGS=OFF, USE_GLOG=OFF, USE_GLOO=ON, USE_MKL=ON, USE_MKLDNN=ON, USE_MPI=OFF, USE_NCCL=OFF, USE_NNPACK=ON, USE_OPENMP=ON, USE_ROCM=OFF, USE_ROCM_KERNEL_ASSERT=OFF, USE_XCCL=OFF, USE_XPU=OFF, \n",
+        "parallel_backend": "ATen/Parallel:\n\tat::get_num_threads() : 4\n\tat::get_num_interop_threads() : 1\nOpenMP 201511 (a.k.a. OpenMP 4.5)\n\tomp_get_max_threads() : 4\nIntel(R) oneAPI Math Kernel Library Version 2024.2-Product Build 20240605 for Intel(R) 64 architecture applications\n\tmkl_get_max_threads() : 4\nIntel(R) MKL-DNN v3.10.2 (Git Hash f1d471933dc852f956fd05389f9313c7148783d5)\nstd::thread::hardware_concurrency() : 32\nEnvironment variables:\n\tOMP_NUM_THREADS : 4\n\tMKL_NUM_THREADS : 4\nATen parallel backend: OpenMP\n"
+      },
+      "elapsed_seconds": 1.423657320003258,
       "rust": {
         "api": 27,
         "build": "ORT Build Info: git-branch=HEAD, git-commit-id=45de2a8b06, fp8-kv-cache=1, build type=Release",
@@ -174,7 +222,7 @@
       "python_ort_version": "1.28.0",
       "python_ort_extension_sha256": "785fd605cc824705d3ee992f94446f757d6db40cc6f54b81450e34120bdf5755",
       "inputs_sha256": "3ad2fad47e25f2757f87b5d819c1fe2c6124b3b038bc0f81f48e6246fd194d2e",
-      "rust_output_sha256": "b49e771a1172146863861ff8a9e88d805c80ebd1b14bc9069f20fa582d394ae9",
+      "rust_output_sha256": "3f9a1e40b707863fd5ba62e4229763eace0a9a081c55c7822a0f869512fa3dce",
       "graphs": {
         "state_encoder.onnx": "f03e15e6a199cc57d6735056d2aa82ec92d18f030569dcf7e286d1c09bb30505",
         "action_decoder.onnx.data": "2029cb69c98c950aacbeaf4e0949da06309b8bcfcd10a8fcb72968a0b6aea479",
@@ -182,8 +230,8 @@
         "action_decoder.onnx": "da27ff5b7ae2964d18bea1e4e2281672e1995aa947ddf6e40efcee79c151e3bc",
         "state_encoder.onnx.data": "14cb057b63377e9c63c520f754f5051da7e4f2a7af4c5bea811f9ec215ecc738"
       },
-      "evidence": "artifacts/rust-ort/verified/MAIN-1x256/threads4/result.json",
-      "result_sha256": "c355a21321e46402558d302915014e22cd165b3255e50d08cae87eb1838d4ddf"
+      "evidence": "artifacts/rust-ort/thread-corrected/MAIN-1x256/threads4/result.json",
+      "result_sha256": "4908c23daca776dbf3dc5342e062634fd6180f5f7df283adfa2109c3859588a2"
     },
     {
       "config": "MAIN-30x1024",
@@ -191,7 +239,15 @@
       "comparisons": 1460,
       "max_absolute_error": 6.103515625e-05,
       "cases": 18,
-      "elapsed_seconds": 12.487453285997617,
+      "pytorch_runtime": {
+        "intra_threads": 1,
+        "interop_threads": 1,
+        "OMP_NUM_THREADS": "1",
+        "MKL_NUM_THREADS": "1",
+        "build": "PyTorch built with:\n  - GCC 13.3\n  - C++ Version: 201703\n  - Intel(R) oneAPI Math Kernel Library Version 2024.2-Product Build 20240605 for Intel(R) 64 architecture applications\n  - Intel(R) MKL-DNN v3.10.2 (Git Hash f1d471933dc852f956fd05389f9313c7148783d5)\n  - OpenMP 201511 (a.k.a. OpenMP 4.5)\n  - LAPACK is enabled (usually provided by MKL)\n  - NNPACK is enabled\n  - CPU capability usage: AVX512\n  - Build settings: BLAS_INFO=mkl, BUILD_TYPE=Release, COMMIT_SHA=70d99e998b4955e0049d13a98d77ae1b14db1f45, CXX_COMPILER=/opt/rh/gcc-toolset-13/root/usr/bin/c++, CXX_FLAGS= -fvisibility-inlines-hidden -DUSE_PTHREADPOOL -DNDEBUG -DUSE_KINETO -DLIBKINETO_NOCUPTI -DLIBKINETO_NOROCTRACER -DLIBKINETO_NOXPUPTI=ON -DUSE_FBGEMM -DUSE_PYTORCH_QNNPACK -DUSE_XNNPACK -DSYMBOLICATE_MOBILE_DEBUG_HANDLE -O2 -fPIC -DC10_NODEPRECATED -Wall -Wextra -Werror=return-type -Werror=non-virtual-dtor -Werror=range-loop-construct -Werror=bool-operation -Wnarrowing -Wno-missing-field-initializers -Wno-unknown-pragmas -Wno-unused-parameter -Wno-strict-overflow -Wno-strict-aliasing -Wno-stringop-overflow -Wsuggest-override -Wno-psabi -Wno-error=old-style-cast -faligned-new -Wno-maybe-uninitialized -fno-math-errno -fno-trapping-math -Werror=format -Wno-dangling-reference -Wno-error=dangling-reference -Wno-stringop-overflow, LAPACK_INFO=mkl, PERF_WITH_AVX=1, PERF_WITH_AVX2=1, TORCH_VERSION=2.11.0, USE_CUDA=0, USE_CUDNN=OFF, USE_CUSPARSELT=OFF, USE_GFLAGS=OFF, USE_GLOG=OFF, USE_GLOO=ON, USE_MKL=ON, USE_MKLDNN=ON, USE_MPI=OFF, USE_NCCL=OFF, USE_NNPACK=ON, USE_OPENMP=ON, USE_ROCM=OFF, USE_ROCM_KERNEL_ASSERT=OFF, USE_XCCL=OFF, USE_XPU=OFF, \n",
+        "parallel_backend": "ATen/Parallel:\n\tat::get_num_threads() : 1\n\tat::get_num_interop_threads() : 1\nOpenMP 201511 (a.k.a. OpenMP 4.5)\n\tomp_get_max_threads() : 1\nIntel(R) oneAPI Math Kernel Library Version 2024.2-Product Build 20240605 for Intel(R) 64 architecture applications\n\tmkl_get_max_threads() : 1\nIntel(R) MKL-DNN v3.10.2 (Git Hash f1d471933dc852f956fd05389f9313c7148783d5)\nstd::thread::hardware_concurrency() : 32\nEnvironment variables:\n\tOMP_NUM_THREADS : 1\n\tMKL_NUM_THREADS : 1\nATen parallel backend: OpenMP\n"
+      },
+      "elapsed_seconds": 11.680424017991754,
       "rust": {
         "api": 27,
         "build": "ORT Build Info: git-branch=HEAD, git-commit-id=45de2a8b06, fp8-kv-cache=1, build type=Release",
@@ -201,7 +257,7 @@
       "python_ort_version": "1.28.0",
       "python_ort_extension_sha256": "785fd605cc824705d3ee992f94446f757d6db40cc6f54b81450e34120bdf5755",
       "inputs_sha256": "fdbaaa4e859a4e22b5d96b0953d277960e48be4a0d4e9c6c23470141edb8ff77",
-      "rust_output_sha256": "41833075fdae195369a5d2cc2e321c1a3ec917b0ba263e45cf68cf04bef8a767",
+      "rust_output_sha256": "5778450d174b04baee4df8cb3bb0ddc974e4cb059b9d19ea9734d5073296ed53",
       "graphs": {
         "state_encoder.onnx": "1d06f16c653bb6469219baffe597e92a70465f673512dce184199b1dd97fe4a4",
         "action_decoder.onnx.data": "e71b7a79ac95891477da7127a42ab79bfff190c94bb797302f886a2d579151bc",
@@ -209,8 +265,8 @@
         "action_decoder.onnx": "b6b7a8fb5c84a10435157643198cd4089949c378fd0370078b01f390c3ee0d69",
         "state_encoder.onnx.data": "ee35669b9a986063473cb9b3c94ae8d6c3ba2551972eb3a24cbe469034f5b566"
       },
-      "evidence": "artifacts/rust-ort/verified/MAIN-30x1024/threads1/result.json",
-      "result_sha256": "2749f2a25ac92f344d78dde30cee903aeb4899c2c90a6901f3c56f7d722e2d44"
+      "evidence": "artifacts/rust-ort/thread-corrected/MAIN-30x1024/threads1/result.json",
+      "result_sha256": "72cf1b82b91d5a833fda437cf3027f3dac33ce4e1766140642b1d020bc0141f0"
     },
     {
       "config": "MAIN-30x1024",
@@ -218,7 +274,15 @@
       "comparisons": 1460,
       "max_absolute_error": 6.103515625e-05,
       "cases": 18,
-      "elapsed_seconds": 9.040502454008674,
+      "pytorch_runtime": {
+        "intra_threads": 4,
+        "interop_threads": 1,
+        "OMP_NUM_THREADS": "4",
+        "MKL_NUM_THREADS": "4",
+        "build": "PyTorch built with:\n  - GCC 13.3\n  - C++ Version: 201703\n  - Intel(R) oneAPI Math Kernel Library Version 2024.2-Product Build 20240605 for Intel(R) 64 architecture applications\n  - Intel(R) MKL-DNN v3.10.2 (Git Hash f1d471933dc852f956fd05389f9313c7148783d5)\n  - OpenMP 201511 (a.k.a. OpenMP 4.5)\n  - LAPACK is enabled (usually provided by MKL)\n  - NNPACK is enabled\n  - CPU capability usage: AVX512\n  - Build settings: BLAS_INFO=mkl, BUILD_TYPE=Release, COMMIT_SHA=70d99e998b4955e0049d13a98d77ae1b14db1f45, CXX_COMPILER=/opt/rh/gcc-toolset-13/root/usr/bin/c++, CXX_FLAGS= -fvisibility-inlines-hidden -DUSE_PTHREADPOOL -DNDEBUG -DUSE_KINETO -DLIBKINETO_NOCUPTI -DLIBKINETO_NOROCTRACER -DLIBKINETO_NOXPUPTI=ON -DUSE_FBGEMM -DUSE_PYTORCH_QNNPACK -DUSE_XNNPACK -DSYMBOLICATE_MOBILE_DEBUG_HANDLE -O2 -fPIC -DC10_NODEPRECATED -Wall -Wextra -Werror=return-type -Werror=non-virtual-dtor -Werror=range-loop-construct -Werror=bool-operation -Wnarrowing -Wno-missing-field-initializers -Wno-unknown-pragmas -Wno-unused-parameter -Wno-strict-overflow -Wno-strict-aliasing -Wno-stringop-overflow -Wsuggest-override -Wno-psabi -Wno-error=old-style-cast -faligned-new -Wno-maybe-uninitialized -fno-math-errno -fno-trapping-math -Werror=format -Wno-dangling-reference -Wno-error=dangling-reference -Wno-stringop-overflow, LAPACK_INFO=mkl, PERF_WITH_AVX=1, PERF_WITH_AVX2=1, TORCH_VERSION=2.11.0, USE_CUDA=0, USE_CUDNN=OFF, USE_CUSPARSELT=OFF, USE_GFLAGS=OFF, USE_GLOG=OFF, USE_GLOO=ON, USE_MKL=ON, USE_MKLDNN=ON, USE_MPI=OFF, USE_NCCL=OFF, USE_NNPACK=ON, USE_OPENMP=ON, USE_ROCM=OFF, USE_ROCM_KERNEL_ASSERT=OFF, USE_XCCL=OFF, USE_XPU=OFF, \n",
+        "parallel_backend": "ATen/Parallel:\n\tat::get_num_threads() : 4\n\tat::get_num_interop_threads() : 1\nOpenMP 201511 (a.k.a. OpenMP 4.5)\n\tomp_get_max_threads() : 4\nIntel(R) oneAPI Math Kernel Library Version 2024.2-Product Build 20240605 for Intel(R) 64 architecture applications\n\tmkl_get_max_threads() : 4\nIntel(R) MKL-DNN v3.10.2 (Git Hash f1d471933dc852f956fd05389f9313c7148783d5)\nstd::thread::hardware_concurrency() : 32\nEnvironment variables:\n\tOMP_NUM_THREADS : 4\n\tMKL_NUM_THREADS : 4\nATen parallel backend: OpenMP\n"
+      },
+      "elapsed_seconds": 9.011669080995489,
       "rust": {
         "api": 27,
         "build": "ORT Build Info: git-branch=HEAD, git-commit-id=45de2a8b06, fp8-kv-cache=1, build type=Release",
@@ -228,7 +292,7 @@
       "python_ort_version": "1.28.0",
       "python_ort_extension_sha256": "785fd605cc824705d3ee992f94446f757d6db40cc6f54b81450e34120bdf5755",
       "inputs_sha256": "fdbaaa4e859a4e22b5d96b0953d277960e48be4a0d4e9c6c23470141edb8ff77",
-      "rust_output_sha256": "0cdf0e28d9f63f98a78f603c94ee030c57365adffcbf427fad69d100ffbc5dc1",
+      "rust_output_sha256": "dd93588117568b6ed21202c7172389c067dd9f6ffc6464f6b6c6478685461def",
       "graphs": {
         "state_encoder.onnx": "1d06f16c653bb6469219baffe597e92a70465f673512dce184199b1dd97fe4a4",
         "action_decoder.onnx.data": "e71b7a79ac95891477da7127a42ab79bfff190c94bb797302f886a2d579151bc",
@@ -236,8 +300,8 @@
         "action_decoder.onnx": "b6b7a8fb5c84a10435157643198cd4089949c378fd0370078b01f390c3ee0d69",
         "state_encoder.onnx.data": "ee35669b9a986063473cb9b3c94ae8d6c3ba2551972eb3a24cbe469034f5b566"
       },
-      "evidence": "artifacts/rust-ort/verified/MAIN-30x1024/threads4/result.json",
-      "result_sha256": "8dcd6619299eea08a628ff2c367d6c4c7d7ae9f379ffb299d6614b3a0007ba40"
+      "evidence": "artifacts/rust-ort/thread-corrected/MAIN-30x1024/threads4/result.json",
+      "result_sha256": "7bba1805af6787529d94abdae319c23594f54c2470d0abcb9ea3298a5fb12343"
     }
   ],
   "workspace": {
@@ -249,13 +313,14 @@
       "ignored": 22,
       "filtered": 1769
     },
-    "count_note": "Raw successful test-summary totals include nested subprocess tests; not a unique test count. Existing ignored tests unchanged; only specified UTC fixture explicitly skipped."
+    "count_note": "Raw successful test-summary totals include nested subprocess tests; not a unique test count. Existing ignored tests unchanged; only specified UTC fixture explicitly skipped.",
+    "reuse_note": "Executed on 33edb74 source based on d136d11. This revision changes only Python thread setup, README and result summary; root workspace and Rust sources unchanged, so the previous successful fixed workspace regression is reused."
   },
   "python": {
-    "command": ".venv/bin/python -m unittest discover -s tests -v",
+    "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python -m unittest discover -s tests -v",
     "cwd": "model-train",
     "passed": 16,
-    "sha256": "fa597748021a0c2dd60e0b2a6586c95e2a156364eacc94393e3fb85af142bcce"
+    "sha256": "b5274b6f3f5f6ca6ba7acdaace358ed527de5c4b62fce2e14936dd356dc4be3c"
   },
   "local_rust": [
     "cargo build --locked --offline",
@@ -268,5 +333,12 @@
     "no full economic features/support or final ModelIntent equivalence",
     "no 70-minute C run, long-memory, target CPU/GPU validation",
     "no training, deployment, wallet or funds actions"
-  ]
+  ],
+  "thread_correction": {
+    "review": "https://github.com/slowchillchill/btc-updown-marketmaker/pull/113#discussion_r4044176597",
+    "previous_head": "33edb74db300ad3c6ccb97c44921be49a228f98e",
+    "previous_evidence": "preserved, not overwritten; numerical comparison passed but required PyTorch thread setup incomplete",
+    "review_reproduction": "Previous implementation left torch.get_num_interop_threads() at 32, even with OMP_NUM_THREADS=1 and MKL_NUM_THREADS=1.",
+    "current": "All eight runs repeated after setting intra=N and interop=1 before fixture/model computation; actual runtime/environment/backend recorded."
+  }
 }
