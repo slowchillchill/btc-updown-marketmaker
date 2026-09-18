@@ -62,7 +62,7 @@ struct Pending {
 }
 enum Command {
     Record(Box<Pending>),
-    Finish(oneshot::Sender<RecordingResult<CommittedIngressPrefixV1>>),
+    Finish(oneshot::Sender<RecordingResult<Option<CommittedIngressPrefixV1>>>),
 }
 struct Background {
     sender: mpsc::UnboundedSender<Command>,
@@ -105,8 +105,7 @@ impl Background {
                                 drop(pending._capacity);
                             }
                             Command::Finish(reply) => {
-                                let prefix =
-                                    publish(&mut writer, &state)?.ok_or("没有可签发的稳定输入")?;
+                                let prefix = publish(&mut writer, &state)?;
                                 let _ = reply.send(Ok(prefix));
                                 return Ok(());
                             }
@@ -145,7 +144,7 @@ impl Background {
         self.check()?;
         permit.map_err(|_| io::Error::other("公共记录后台已停止").into())
     }
-    async fn finish(&self) -> RecordingResult<CommittedIngressPrefixV1> {
+    async fn finish(&self) -> RecordingResult<Option<CommittedIngressPrefixV1>> {
         let (sender, receiver) = oneshot::channel();
         self.sender
             .send(Command::Finish(sender))
@@ -202,9 +201,51 @@ pub async fn consume_public_online_until_v1<S, F>(
     stream: S,
     recording_root: &Path,
     config: PublicOnlineConfigV1,
-    mut consume: F,
+    consume: F,
     cancel: impl std::future::Future<Output = RecordingResult<()>>,
 ) -> RecordingResult<PublicOnlineCompletionV1>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+    F: FnMut(&AppliedIngressV1) -> RecordingResult<()>,
+{
+    match consume_public_online_with_stop_v1(
+        stream,
+        recording_root,
+        config,
+        consume,
+        cancel,
+        std::future::pending(),
+    )
+    .await?
+    {
+        PublicOnlineOutcomeV1::End(completion) => Ok(completion),
+        PublicOnlineOutcomeV1::Stopped(_) => unreachable!("此入口没有计划停止信号"),
+    }
+}
+
+/// 计划停止只在输入应用、记录移交和交接确认完成的边界生效。
+/// Stopped 仅证明当前消费者的既有前缀稳定，不证明生产者正常结束。
+#[derive(Clone, Debug, Serialize)]
+pub struct PublicOnlineStoppedV1 {
+    pub session: DataCollectHandoffSessionV2,
+    pub last_received_transport_sequence: u64,
+    pub measurements: PublicOnlineMeasurementsV1,
+}
+#[derive(Clone, Debug, Serialize)]
+pub enum PublicOnlineOutcomeV1 {
+    End(PublicOnlineCompletionV1),
+    Stopped(PublicOnlineStoppedV1),
+}
+
+/// cancel 保持未完成错误；stop 独立请求排空既有前缀。停止后丢弃连接，不恢复半帧。
+pub async fn consume_public_online_with_stop_v1<S, F>(
+    stream: S,
+    recording_root: &Path,
+    config: PublicOnlineConfigV1,
+    mut consume: F,
+    cancel: impl std::future::Future<Output = RecordingResult<()>>,
+    stop: impl std::future::Future<Output = ()>,
+) -> RecordingResult<PublicOnlineOutcomeV1>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     F: FnMut(&AppliedIngressV1) -> RecordingResult<()>,
@@ -213,15 +254,28 @@ where
     let background = Background::start(recording_root, &config)?;
     let mut measurements = PublicOnlineMeasurementsV1::default();
     let mut confirmed = 0;
-    let outcome: RecordingResult<PublicOnlineCompletionV1> = {
+    let outcome: RecordingResult<PublicOnlineOutcomeV1> = {
+        tokio::pin!(stop);
         let running = async {
             let mut receiver = HandoffReceiverV2::start(stream).await?;
             loop {
-                // 容量恢复后才读取下一完整帧；当前连接仍只有一个待确认对象。
-                let permit = background.reserve().await?;
-                let frame = tokio::select! {
-                    result = receiver.next_frame() => result?,
+                // 等待容量和下一帧期间可停止；核心应用至 Record/Received 之间不取消。
+                let (permit, frame) = tokio::select! {
+                    biased;
                     result = background.failure() => { result?; return Err(io::Error::other("公共记录后台停止").into()); }
+                    () = &mut stop => {
+                        measurements.stable_prefix = background.finish().await?;
+                        return Ok(PublicOnlineOutcomeV1::Stopped(PublicOnlineStoppedV1 {
+                            session: receiver.session().clone(),
+                            last_received_transport_sequence: confirmed,
+                            measurements: measurements.clone(),
+                        }));
+                    }
+                    result = async {
+                        let permit = background.reserve().await?;
+                        let frame = receiver.next_frame().await?;
+                        Ok::<_, Box<dyn std::error::Error + Send + Sync>>((permit, frame))
+                    } => result?,
                 };
                 background.check()?;
                 let (ingress, transport, ended) = match frame {
@@ -376,14 +430,15 @@ where
                     confirmed = sequence;
                 }
                 if ended {
-                    let committed_prefix = background.finish().await?;
+                    let committed_prefix =
+                        background.finish().await?.ok_or("没有可签发的稳定输入")?;
                     measurements.stable_prefix = Some(committed_prefix.clone());
-                    return Ok(PublicOnlineCompletionV1 {
+                    return Ok(PublicOnlineOutcomeV1::End(PublicOnlineCompletionV1 {
                         session: receiver.session().clone(),
                         last_received_transport_sequence: receiver.last_confirmed_sequence(),
                         measurements: measurements.clone(),
                         committed_prefix,
-                    });
+                    }));
                 }
             }
         };

@@ -67,3 +67,42 @@ async fn memory_ledger_real_source_background_v2_gap_idempotence_and_funds() {
     for r in records.iter().chain(&remaining) {gap.apply_noe_memory_v1(r).unwrap();}
     assert_eq!(gap.projection_v2().unwrap().platform_source_prefix,expected.platform_source_prefix);
 }
+
+#[tokio::test(flavor="current_thread")]
+async fn planned_stop_stabilizes_opening_and_last_ledger_intake_without_next_group() {
+    use ledger::*;
+    let temp = tempfile::tempdir().unwrap();
+    let core = recorded_memory_with_probe(&temp.path().join("dpt"), true);
+    let context = core.pm_context(CONDITION_ID).unwrap();
+    let scenario = sealed_scenario_for_markets(vec![crate::scenario::PlatformMarketV1::try_new(context.market, context.assets.into_iter().map(|a|a.asset).collect::<Vec<_>>().try_into().unwrap()).unwrap()]);
+    let path = temp.path().join("sim.jsonl");
+    let (mut execution, observation) = memory_execution_with_cash::<noe_projection::MeasuredOrderEvidence>(&path, scenario, SimCallerRoleV1::Paper, 1, None, "100").await;
+    let release = execution.actor.background_log.as_ref().unwrap().pause_for_tests(false);
+    let opening = observation.opening_record().unwrap();
+    assert!(opening.durable_reference().is_none());
+    let mut ledger = LedgerWriterV1::new(AccountAdmissionPolicyV1 { per_market_all_in_commitment_limit_pusd: ExactDecimal("1000".into()) });
+    let ledger_root = temp.path().join("ledger");
+    execution.bind_ledger_recording_v2(&mut ledger, &ledger_root).unwrap();
+    ledger.apply_noe_memory_v1(&opening).unwrap();
+    let request = LedgerRequestIdentityV1("last-reserve-no-following-group".into());
+    let condition = ConditionId(CONDITION_ID.into());
+    let principal = ExactDecimal("80".into());
+    let fee = ExactDecimal("0".into());
+    let reserved = ledger.try_reserve_intent(&request, &condition, &principal, &fee).unwrap();
+    let expected = ledger.projection_v2().unwrap();
+    let before = std::fs::read(&path).unwrap();
+    // 原后台屏障保证物化还没开始；停止不得生成新业务组。
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    let releaser = std::thread::spawn(move || release.send(()).unwrap());
+    execution.stop_and_drain().unwrap();
+    releaser.join().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(opening.durable_reference().is_some());
+    assert_eq!(ledger.projection_v2().unwrap(), expected);
+    let mut recovered = LedgerWriterV1::open_durable(&ledger_root).unwrap();
+    assert_eq!(recovered.projection_v2().unwrap(), expected);
+    assert_eq!(recovered.try_reserve_intent(&request, &condition, &principal, &fee).unwrap(), reserved);
+    let (_, mut reader) = SimEventLogRecoveryV2::open(&path, MAX_GROUP_BYTES).unwrap();
+    loop { let (next, group) = reader.next_group().unwrap(); reader = next; if group.is_none() { break; } }
+    assert!(matches!(reader.finish_sealed_clean_run(), Err(crate::event_log::SimEventLogErrorV2::UnsealedCleanRun)));
+}

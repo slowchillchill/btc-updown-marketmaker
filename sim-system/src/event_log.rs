@@ -648,7 +648,7 @@ mod tests {
                 source_identity_sha256: sha('5'),
                 cargo_lock_sha256: sha('6'),
             },
-            market_event_source_identity_sha256: sha('7'),
+            market_event_source_identity_sha256: Some(sha('7')),
         }
     }
 
@@ -669,6 +669,42 @@ mod tests {
                 return Ok((recovery, groups));
             };
             groups.push(group);
+        }
+    }
+
+    #[test]
+    fn source_digest_old_string_and_absent_use_real_log_codec() {
+        for digest in [Some(sha('7')), None] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
+            let mut header = opened(RunDurabilityRoleV2::CleanRun);
+            header.market_event_source_identity_sha256 = digest.clone();
+            SimEventLogV2::create(&path, &header, MAX_GROUP_BYTES)
+                .unwrap()
+                .seal_clean_run()
+                .unwrap();
+            let line: serde_json::Value = serde_json::from_str(
+                std::fs::read_to_string(&path)
+                    .unwrap()
+                    .lines()
+                    .next()
+                    .unwrap(),
+            )
+            .unwrap();
+            let encoded = serde_json::to_string(&line).unwrap();
+            if let Some(value) = &digest {
+                assert!(encoded.contains(&format!(
+                    "\"market_event_source_identity_sha256\":\"{}\"",
+                    value.0
+                )));
+            } else {
+                assert!(!encoded.contains("market_event_source_identity_sha256"));
+            }
+            let (decoded, recovery) = SimEventLogRecoveryV2::open(&path, MAX_GROUP_BYTES).unwrap();
+            assert_eq!(decoded, header);
+            let (recovery, groups) = read_all_groups(recovery).unwrap();
+            assert!(groups.is_empty());
+            recovery.finish_sealed_clean_run().unwrap();
         }
     }
 
@@ -888,6 +924,53 @@ mod tests {
     }
 
     #[test]
+    fn planned_stop_transfers_pending_group_and_preserves_write_error_without_seal() {
+        for fail in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("stop.jsonl");
+            let mut log = SimEventLogV2::create(
+                &path,
+                &opened(RunDurabilityRoleV2::CleanRun),
+                MAX_GROUP_BYTES,
+            )
+            .unwrap();
+            if fail {
+                // 实际只读文件描述符使原 write_all 返回操作系统写入错误。
+                log.file = OpenOptions::new().read(true).open(&path).unwrap();
+            }
+            let mut background = BackgroundEventLogV1::start(log, 1);
+            let release = background.pause_for_tests(false);
+            background.enqueue(vec![input("a")]).unwrap();
+            background.enqueue(vec![input("b")]).unwrap();
+            assert!(background.pending.is_some());
+            let stopper = std::thread::spawn(move || background.stop_and_drain());
+            release.send(()).unwrap();
+            let result = stopper.join().unwrap();
+            if fail {
+                assert!(matches!(result, Err(SimEventLogErrorV2::Io { .. })));
+            } else {
+                result.unwrap();
+                let (_, reader) = SimEventLogRecoveryV2::open(&path, MAX_GROUP_BYTES).unwrap();
+                let (reader, first) = reader.next_group().unwrap();
+                let (reader, second) = reader.next_group().unwrap();
+                assert!(
+                    matches!(&first.unwrap()[0], LoggedBusinessInputV2::ActivateSession { activation_id } if activation_id == "activation-a")
+                );
+                assert!(
+                    matches!(&second.unwrap()[0], LoggedBusinessInputV2::ActivateSession { activation_id } if activation_id == "activation-b")
+                );
+                let (reader, end) = reader.next_group().unwrap();
+                assert!(end.is_none());
+                assert!(matches!(
+                    reader.finish_sealed_clean_run(),
+                    Err(SimEventLogErrorV2::UnsealedCleanRun)
+                ));
+            }
+            assert!(!std::fs::read_to_string(path).unwrap().contains("RunSeal"));
+        }
+    }
+
+    #[test]
     fn background_disconnect_and_write_failure_never_seal_normal_end() {
         let directory = tempfile::tempdir().unwrap();
         for fail_write in [false, true] {
@@ -1012,6 +1095,7 @@ struct BackgroundGroupV1 {
     ledger: Option<LedgerBatchV2>,
 }
 struct BackgroundFinishV1 {
+    seal_clean_run: bool,
     #[cfg(feature = "shared-execution")]
     ledger: Option<LedgerBatchV2>,
 }
@@ -1106,7 +1190,11 @@ impl BackgroundEventLogV1 {
                         }
                         Ok(BackgroundLogCommandV1::Finish(_finish)) => {
                             #[cfg(feature = "measurement")]
-                            log.sync_data(MeasurementContext::CleanSeal)?;
+                            log.sync_data(if _finish.seal_clean_run {
+                                MeasurementContext::CleanSeal
+                            } else {
+                                MeasurementContext::CommitGroup
+                            })?;
                             #[cfg(not(feature = "measurement"))]
                             log.sync_data()?;
                             if let Some(noe) = &mut noe {
@@ -1117,7 +1205,11 @@ impl BackgroundEventLogV1 {
                                 ledger.accept(_finish.ledger)?;
                                 ledger.finish()?;
                             }
-                            return log.seal_clean_run();
+                            return if _finish.seal_clean_run {
+                                log.seal_clean_run()
+                            } else {
+                                Ok(())
+                            };
                         }
                         #[cfg(test)]
                         Ok(BackgroundLogCommandV1::Pause(entered, release)) => {
@@ -1271,7 +1363,13 @@ impl BackgroundEventLogV1 {
             Err(_) => unreachable!("只在此处移交原输入组"),
         }
     }
-    pub(crate) fn finish(mut self) -> Result<(), SimEventLogErrorV2> {
+    pub(crate) fn finish(self) -> Result<(), SimEventLogErrorV2> {
+        self.finish_recording(true)
+    }
+    pub(crate) fn stop_and_drain(self) -> Result<(), SimEventLogErrorV2> {
+        self.finish_recording(false)
+    }
+    fn finish_recording(mut self, seal_clean_run: bool) -> Result<(), SimEventLogErrorV2> {
         #[cfg(feature = "shared-execution")]
         let materials = self.take_ledger();
         let sent = match self.pending.take() {
@@ -1282,6 +1380,7 @@ impl BackgroundEventLogV1 {
             Ok(()) => self
                 .sender
                 .send(BackgroundLogCommandV1::Finish(BackgroundFinishV1 {
+                    seal_clean_run,
                     #[cfg(feature = "shared-execution")]
                     ledger: materials,
                 })),

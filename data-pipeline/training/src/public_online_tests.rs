@@ -513,3 +513,259 @@ async fn explicit_host_cancel_reports_applied_prefix_without_creating_end() {
     assert!(failure.reason.contains("宿主取消"));
     assert!(failure.measurements.stable_prefix.is_none());
 }
+
+#[tokio::test]
+async fn planned_stop_drains_applied_input_without_end_and_empty_prefix_is_none() {
+    for count in [0, 1] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("record");
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let (signal, stop) = oneshot::channel();
+        let peer = tokio::spawn(async move {
+            start(&mut server, "paper").await;
+            if count != 0 {
+                message(&mut server, 1, fixture::meta(0)).await;
+            }
+            signal.send(()).unwrap();
+            // 保留真实静默连接，Stopped 不能冒充生产者 End。
+            std::future::pending::<()>().await;
+        });
+        let mut applied = Vec::new();
+        let outcome = consume_public_online_with_stop_v1(
+            client,
+            &root,
+            config(100, 1),
+            |a| {
+                applied.push(a.clone());
+                Ok(())
+            },
+            std::future::pending(),
+            async {
+                stop.await.unwrap();
+            },
+        )
+        .await
+        .unwrap();
+        peer.abort();
+        let PublicOnlineOutcomeV1::Stopped(stopped) = outcome else {
+            panic!("不生成 End")
+        };
+        assert_eq!(stopped.measurements.applied_inputs, count);
+        assert_eq!(stopped.last_received_transport_sequence, count);
+        assert_eq!(applied.len(), count as usize);
+        let recovered = PublicRecordingReaderV1::recover(&root, 1, 1 << 20).unwrap();
+        assert_eq!(recovered.prefix, stopped.measurements.stable_prefix);
+        if count == 0 {
+            assert!(recovered.prefix.is_none());
+        } else {
+            let prefix = recovered.prefix.unwrap();
+            assert!(!prefix.normal_end);
+            assert_eq!(prefix.next_input_position, 1);
+        }
+    }
+}
+
+#[tokio::test]
+async fn planned_stop_waits_for_accepted_record_and_preserves_real_write_failure() {
+    for fail in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("record");
+        let (client, mut server) = UnixStream::pair().unwrap();
+        let (gate, entered) = block_writer();
+        let (signal, stop) = oneshot::channel();
+        let peer = tokio::spawn(async move {
+            start(&mut server, "paper").await;
+            message(&mut server, 1, fixture::meta(0)).await;
+            signal.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        let mut run = Box::pin(consume_public_online_with_stop_v1(
+            client,
+            &root,
+            config(100, 1),
+            |_| Ok(()),
+            std::future::pending(),
+            async {
+                stop.await.unwrap();
+            },
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut run)
+                .await
+                .is_err()
+        );
+        assert!(entered.load(Ordering::SeqCst));
+        if fail {
+            std::fs::write(
+                root.join("pending-00000000000000000000"),
+                b"not a directory",
+            )
+            .unwrap();
+        }
+        release(&gate);
+        let result = run.await;
+        peer.abort();
+        if fail {
+            let error = result.unwrap_err();
+            let failure = error.downcast_ref::<PublicOnlineFailureV1>().unwrap();
+            assert_eq!(failure.measurements.applied_inputs, 1);
+            assert!(failure.reason.contains("公共记录后台失败"));
+            assert!(failure.measurements.stable_prefix.is_none());
+        } else {
+            let PublicOnlineOutcomeV1::Stopped(stopped) = result.unwrap() else {
+                panic!()
+            };
+            assert_eq!(
+                stopped
+                    .measurements
+                    .stable_prefix
+                    .unwrap()
+                    .next_input_position,
+                1
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn planned_stop_at_applied_boundary_never_polls_next_source_input() {
+    use std::{
+        pin::Pin,
+        task::{Context, Poll},
+    };
+    use tokio::io::ReadBuf;
+    struct CountReads {
+        socket: UnixStream,
+        stopped: Arc<AtomicBool>,
+        later_reads: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl AsyncRead for CountReads {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            if self.stopped.load(Ordering::SeqCst) {
+                self.later_reads.fetch_add(1, Ordering::SeqCst);
+            }
+            Pin::new(&mut self.socket).poll_read(cx, buf)
+        }
+    }
+    impl AsyncWrite for CountReads {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<io::Result<usize>> {
+            Pin::new(&mut self.socket).poll_write(cx, buf)
+        }
+        fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.socket).poll_flush(cx)
+        }
+        fn poll_shutdown(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+            Pin::new(&mut self.socket).poll_shutdown(cx)
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("record");
+    let (client, mut server) = UnixStream::pair().unwrap();
+    let stopped = Arc::new(AtomicBool::new(false));
+    let later_reads = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let client = CountReads {
+        socket: client,
+        stopped: stopped.clone(),
+        later_reads: later_reads.clone(),
+    };
+    let flag = stopped.clone();
+    let peer = tokio::spawn(async move {
+        start(&mut server, "paper").await;
+        message(&mut server, 1, fixture::meta(0)).await;
+        std::future::pending::<()>().await;
+    });
+    let outcome = consume_public_online_with_stop_v1(
+        client,
+        &root,
+        config(100, 1),
+        |_| {
+            stopped.store(true, Ordering::SeqCst);
+            Ok(())
+        },
+        std::future::pending(),
+        std::future::poll_fn(move |_| {
+            if flag.load(Ordering::SeqCst) {
+                Poll::Ready(())
+            } else {
+                Poll::Pending
+            }
+        }),
+    )
+    .await
+    .unwrap();
+    peer.abort();
+    let PublicOnlineOutcomeV1::Stopped(result) = outcome else {
+        panic!()
+    };
+    assert_eq!(
+        result.last_received_transport_sequence, 1,
+        "停止前必须确认实际已应用输入"
+    );
+    assert_eq!(
+        result
+            .measurements
+            .stable_prefix
+            .unwrap()
+            .next_input_position,
+        1
+    );
+    assert_eq!(
+        later_reads.load(Ordering::SeqCst),
+        0,
+        "已就绪停止必须优先于任何下一输入读取"
+    );
+}
+
+#[tokio::test]
+async fn planned_stop_never_masks_callback_failure_after_core_application() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("record");
+    let (client, mut server) = UnixStream::pair().unwrap();
+    let (signal, stop) = oneshot::channel();
+    let mut signal = Some(signal);
+    let peer = tokio::spawn(async move {
+        start(&mut server, "paper").await;
+        let DptIngressV1::Message { row, .. } = fixture::meta(0).ingress else {
+            panic!()
+        };
+        write_handoff_v2(
+            &mut server,
+            &DataCollectHandoffV2::Message {
+                transport_sequence: 1,
+                row,
+            },
+        )
+        .await
+        .unwrap();
+        std::future::pending::<()>().await;
+    });
+    let error = consume_public_online_with_stop_v1(
+        client,
+        &root,
+        config(100, 1),
+        |_| {
+            signal.take().unwrap().send(()).unwrap();
+            Err(io::Error::other("actual consumer failure").into())
+        },
+        std::future::pending(),
+        async {
+            stop.await.unwrap();
+        },
+    )
+    .await
+    .unwrap_err();
+    peer.abort();
+    let failure = error.downcast_ref::<PublicOnlineFailureV1>().unwrap();
+    assert!(failure.reason.contains("actual consumer failure"));
+    assert_eq!(failure.measurements.applied_inputs, 1);
+    assert_eq!(failure.last_received_transport_sequence, 0);
+    assert!(failure.measurements.stable_prefix.is_none());
+}

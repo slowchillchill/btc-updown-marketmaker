@@ -41,7 +41,9 @@ pub struct RunOpenedV2 {
     pub platform_scenario_file_sha256: Sha256Hex,
     pub proxy_latency_profile_file_sha256: Sha256Hex,
     pub implementation_identity: ImplementationIdentityV1,
-    pub market_event_source_identity_sha256: Sha256Hex,
+    /// 离线来源的真实摘要；在线来源不预先承诺未来输入。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub market_event_source_identity_sha256: Option<Sha256Hex>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

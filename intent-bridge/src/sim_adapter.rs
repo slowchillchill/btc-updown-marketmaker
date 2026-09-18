@@ -505,7 +505,7 @@ mod tests {
                     source_identity_sha256: Sha256Hex("b".repeat(64)),
                     cargo_lock_sha256: Sha256Hex("c".repeat(64)),
                 },
-                market_event_source_identity_sha256: Sha256Hex("d".repeat(64)),
+                market_event_source_identity_sha256: Some(Sha256Hex("d".repeat(64))),
             };
             let mut execution = SimExecution::create_new(
                 &directory.path().join("sim-event-log.jsonl"),

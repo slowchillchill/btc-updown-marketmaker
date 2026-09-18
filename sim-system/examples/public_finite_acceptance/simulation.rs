@@ -141,7 +141,7 @@ pub fn run(
         platform_scenario_file_sha256: scenario.file_sha256().clone(),
         proxy_latency_profile_file_sha256: latency.file_sha256().clone(),
         implementation_identity: config.implementation_identity,
-        market_event_source_identity_sha256: config.recording_file_sha256,
+        market_event_source_identity_sha256: Some(config.recording_file_sha256),
     };
     let log = out.join("sim.jsonl");
     let evidence = |position| DurableSourceReferenceV1 {
@@ -395,7 +395,7 @@ mod tests {
                 source_identity_sha256: Sha256Hex("b".repeat(64)),
                 cargo_lock_sha256: Sha256Hex("c".repeat(64)),
             },
-            market_event_source_identity_sha256: Sha256Hex("d".repeat(64)),
+            market_event_source_identity_sha256: Some(Sha256Hex("d".repeat(64))),
         };
         let reference = DurableSourceReferenceV1 {
             source: ImmutableSourceReferenceV1::Location(

@@ -1304,9 +1304,9 @@ mod enabled {
                 platform_scenario_file_sha256: scenario.file_sha256().clone(),
                 proxy_latency_profile_file_sha256: latency.file_sha256().clone(),
                 implementation_identity: args.identity.clone(),
-                market_event_source_identity_sha256: adapter
-                    .canonical_event_store_manifest_sha256()
-                    .clone(),
+                market_event_source_identity_sha256: Some(
+                    adapter.canonical_event_store_manifest_sha256().clone(),
+                ),
             };
             let mut execution = SimExecution::create_new(
                 &log_path,
@@ -2042,7 +2042,7 @@ mod enabled {
                 platform_scenario_file_sha256: scenario.file_sha256().clone(),
                 proxy_latency_profile_file_sha256: latency.file_sha256().clone(),
                 implementation_identity: identity,
-                market_event_source_identity_sha256: Sha256Hex(golden_sha256.to_owned()),
+                market_event_source_identity_sha256: Some(Sha256Hex(golden_sha256.to_owned())),
             },
             Arc::clone(&snapshot),
             Arc::clone(&finality),
@@ -2850,7 +2850,7 @@ mod enabled {
                 platform_scenario_file_sha256: scenario.file_sha256().clone(),
                 proxy_latency_profile_file_sha256: latency.file_sha256().clone(),
                 implementation_identity: identity.clone(),
-                market_event_source_identity_sha256: Sha256Hex("7".repeat(64)),
+                market_event_source_identity_sha256: Some(Sha256Hex("7".repeat(64))),
             },
             Arc::clone(&snapshot),
             Arc::clone(&finality),
@@ -3340,7 +3340,7 @@ mod enabled {
             platform_scenario_file_sha256: scenario.file_sha256().clone(),
             proxy_latency_profile_file_sha256: latency.file_sha256().clone(),
             implementation_identity: identity,
-            market_event_source_identity_sha256: Sha256Hex("7".repeat(64)),
+            market_event_source_identity_sha256: Some(Sha256Hex("7".repeat(64))),
         };
         let mut execution = SimExecution::create_new(
             &log_path,
