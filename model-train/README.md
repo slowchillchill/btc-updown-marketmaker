@@ -77,7 +77,7 @@ OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 .venv/bin/python -m model_train.measure_padd
 计时保持同一模型/会话，预热一次后测10次，记录两遍加宿主归约的中位数/最大值和原样本；旧逻辑只作成本对照。
 CPU结果不代表目标CPU容量或GPU模式验收。
 
-本交付不包含真实经济特征接线、完整精确支持集、三端最终意图一致性、70分钟C场景、长期内存、
+上述纯图交付不包含真实经济特征接线、完整精确支持集、三端最终意图一致性、70分钟C场景、长期内存、
 目标CPU/GPU测量、训练、部署或资金动作；不关闭任务1.5或阶段#6。非零FOK/FAK费用证明仍属原剩余依赖。
 
 
@@ -116,7 +116,7 @@ Rust的 `rust.jsonl` 保留实际各步输出，`rust.stderr` 保留加载/执�
 证据摘要见 `validation/rust-ort-report.json`，原始大输出保存在本次任务产物目录，不提交Git。
 这些结果仅证明固定纯图技术切片三端一致，不代表三端经济最终意图、目标CPU/GPU容量或阶段完成。
 
-## 原生账户与撤单输入
+## 原生特征与状态、参数组件输入
 
 `native-inputs/` 是独立 Cargo 工程，消费原公共组、`SharedExecutionV1` 与同组
 `ActionBeforeReadV1`，实现 #6 正式续篇的 412 槽账户输入和 129 槽撤单对象。
@@ -130,11 +130,36 @@ Ledger 市场并集，因此仅有本地预留的旧市场也参与汇总。根�
 关联未齐或撤单全集仍为 `Unavailable` 时返回 `MissingAssociation`，不输出成功组、
 推进 hidden 或替代为 NoTrade。调用方不得把这一结果解释成新的重试或跳组策略。
 
-`NativeInputGroup` 仅承接当前账户/对象组件输入和冻结引用，没有填造 fast 特征、
-完整 `ModelFrameV1` 或动作支持集。`model_train.native_inputs.NativeComponentConsumer`
-将实际 412/129 输入交给既有 MAIN 慢支路、`object_encoder` 与全对象归约。
-`on_frame` 的验收只证明机械隐藏操作与调用次数；完整状态图 GRU、Actor、真实参数链
-和两图业务序列仍待其余输入交付。一般非零费用的 FOK/FAK 完整支持也未在此完成。
+`NativeInputGroup` 现在从同一公共帧编码完整 836 市场输入、412 账户输入和 129 撤单对象。
+30 槽规则只生成一次，逐值复用于 `fast[806..836]` 和参数图。动态 tick 来自真实 A/B
+资产字段；公共冷规则保留精确来源，参数价格用同帧 tick 乘原整数，不用神经投影反解。
+`PrefixState` 持有原 BigUint 数量区间/叶子及真实腿、变体、post_only、寿命、价格整数，
+编码 60 槽；它不生成合法支持集、不采样动作，也不以固定前缀证明完整 BUY 费用支持。
+实际布局、来源、单位、变换与缺失规则见 `native-inputs/feature_schema.json`，业务合同仍为 #6。
+
+市场编码只读公共参考/TWAP、盘口、直接 BBA、完整最近成交及本组全部原成交。
+全侧统计包含第五档之外的数量；组内统计使用固定累积量，不保存整组成交副本。
+时间来自字段关联的直接锚点，整数求差后投影，保留缺来源时间及负差；不读 dependency
+或 lineage 补时间。当前 Binance 公共输出只有整本锚点，因此其合法价量和相邻帧净变保留，
+逐档 T5 未知、侧 E9 为空；整本时间仅用于事件统计，不冒充档位来源或中价历史身份。
+
+每个原 hidden key 仅增加合同规定的六条最多 16 样本历史及前帧侧统计。按源事实身份变化
+追加，同值新事实可追加，无关组和参数调用不追加；缺失不追加历史，而前帧侧未知会阻断
+盘口净差。历史随原 Retire 释放，开市沿用预热。RMS 先精确求增量平方和，复用原有理区间
+投影，以 sqrt/log 两端最终同舍入确定 f32，不增加预算、精度拒绝或业务门。
+
+`NativeComponentConsumer` 机械执行根操作，用真实 fast/slow 对每帧调用原 Bare/Residual
+状态图一次，保存全部层隐藏值。整组完成后，参数组件使用冻结 z_t、rule、原生 prefix 与
+完整对象归约，调用参数图不会再次推进 GRU。对象截点可单独通过 `objects` 消费；缺少前序
+hidden 的对象测试不伪装成完整连续帧。Rust ORT 原验证程序增加 `--native` 入口，读取同一
+原生组、机械执行根操作并独立递推状态；Python ORT 也用自己的 h_next 独立递推，同
+PyTorch 及 Rust ORT 使用同一真实序列和原容差。三端各用自身状态图的 z_t、真实冻结规则与撤单人口，
+独立计算对象嵌入及全局 sum/mean/max，再比较固定前缀当前字段的适用参数头；
+同时核对参数调用后的 hidden 不变。每个配置包含 12 个状态帧、9 次对象归约和 45 次参数输出对照，
+不代表完整 Actor 选择链。复用原归档图与权重，不重新导出或训练。
+
+本增量完成真实特征与状态/参数组件输入；完整 Actor 合法选择链、一般非零费用 FOK/FAK
+支持、最终意图的两图业务验收及阶段 #6 通过仍未完成。
 
 在仓库根目录运行独立原生验证（工作区命令不会包含此工程）：
 
@@ -150,9 +175,16 @@ cargo fmt --manifest-path model-train/native-inputs/Cargo.toml -- --check
 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python -m unittest discover -s tests -p test_native_inputs.py -v
 ```
 
+`NATIVE_BASELINE_GRAPH` 和 `NATIVE_MAIN_GRAPH` 分别指向已归档 BASELINE-2x256 与
+MAIN-1x256 的两图/权重目录，可同时执行真实原生序列的 PyTorch/Python ORT/Rust ORT 对照（未提供时明确跳过）。
 `NATIVE_COMPONENT_WEIGHTS` 可指向原已验证的 MAIN-1x256 `initial_weights.pt`，避免重新
 导出或训练。测试从 Rust 正式公共入口生成临时组件输入；不手造 Ledger 投影或模型帧。
 覆盖冷启动、重叠预热及切换、同组 100/后组 80、仅本地预留旧市场、平均成本与精确返佣、
 PendingApplied/成功/补偿、QuoteBudget 三态、真实撤单人口 N=0/2/256/257/259 和不同分块。
 缺 formed 的年龄测试沿既有 registry 入口重放真实 consumed 引用，明确属于缺源组件读取；
 46k 未齐关联也单独验证为组合未完成，两者均不声称连续合法模型组。
+
+新增字段验收覆盖远档数量、前帧未知、值缺但直接时间存在、负差与多锚点、原成交缺量/方向、
+同值新确认/无关组/16 样本、Binance 只更新一档时不冒造其他档时间、两腿独立 tick、前缀
+未选/false/首类别/0.5/B腿/数量叶子，以及真实裸 GRU 两层和残差 GRU 的逐帧递推。
+固定前缀只用于实际参数组件验收；参数图没有完整合法选择宿主，不能视为模型动作验收。

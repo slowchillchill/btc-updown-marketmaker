@@ -120,3 +120,25 @@ pub fn signed_log_f32(value: &R) -> f32 {
         terms *= 2;
     }
 }
+
+/// 非负精确平方均值的 sqrt/log1p 投影；有理区间端点同舍入才返回。
+pub(crate) fn sqrt_log_f32(value: &R) -> f32 {
+    if value.is_zero() {
+        return 0.;
+    }
+    let p = value.public();
+    let n: BigUint = p.numerator.parse().unwrap();
+    let d: BigUint = p.denominator.parse().unwrap();
+    let mut bits = 32usize;
+    loop {
+        let scale = BigUint::one() << bits;
+        let q = ((&n << (2 * bits)) / &d).sqrt();
+        let low = ratio(BigInt::from(q.clone()), BigInt::from(scale.clone()));
+        let high = ratio(BigInt::from(q + BigUint::one()), BigInt::from(scale));
+        let (a, b) = (signed_log_f32(&low), signed_log_f32(&high));
+        if a.to_bits() == b.to_bits() {
+            return a;
+        }
+        bits *= 2;
+    }
+}

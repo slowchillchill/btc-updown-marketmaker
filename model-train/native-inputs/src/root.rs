@@ -36,8 +36,22 @@ pub struct AccountInputRow {
     pub hidden_state_key: HiddenKey,
     pub role: InputRole,
     pub slow: Vec<f32>,
+    pub fast: Vec<f32>,
+    pub rule: [f32; 30],
+    #[serde(skip)]
+    pub action_context: Option<NativeActionContext>,
 }
-/// 真实慢支路/对象组件输入；尚未实现的 fast/action 支持不在此伪造 ModelFrame。
+/// 同帧规则、tick 与精确前缀共用；账户冻结读取仍由 NativeInputGroup 持有。
+pub struct NativeActionContext {
+    pub rules: std::sync::Arc<PublicTradingRuleContextV1>,
+    ticks: [Option<contracts::economics::EconomicRational>; 2],
+}
+impl NativeActionContext {
+    pub fn prefix_features(&self, state: &crate::prefix::PrefixState) -> [f32; 60] {
+        state.encode(&self.ticks)
+    }
+}
+/// 原生完整特征输入；本增量不实现完整 Actor 合法选择链。
 #[derive(Serialize)]
 pub struct NativeInputGroup {
     pub cutoff: TrustedGroupDecisionCutoffV1,
@@ -61,6 +75,7 @@ pub struct NativeInputRoot {
     reset: bool,
     markets: BTreeMap<String, MarketBinding>,
     hidden: BTreeSet<String>,
+    histories: BTreeMap<String, crate::market::MarketHistory>,
 }
 impl NativeInputRoot {
     pub fn new(
@@ -75,6 +90,7 @@ impl NativeInputRoot {
             reset: false,
             markets: BTreeMap::new(),
             hidden: BTreeSet::new(),
+            histories: BTreeMap::new(),
         }
     }
     fn key(&self, c: &str) -> HiddenKey {
@@ -185,9 +201,37 @@ impl NativeInputRoot {
         let mut cancel = Vec::new();
         if let Some(read) = &before {
             for (role, id) in roles {
+                let frame = frames
+                    .iter()
+                    .find(|f| f.observation.market.condition_id == id)
+                    .unwrap();
+                let rule = crate::market::rules(frame.observation, &frame.rule_context, now);
+                let ticks = std::array::from_fn(|i| {
+                    frame
+                        .observation
+                        .assets
+                        .iter()
+                        .find(|a| a.asset.outcome.index as usize == i)
+                        .filter(|a| {
+                            matches!(
+                                a.tick.quality,
+                                MarketDataQuality::Fresh | MarketDataQuality::Stale
+                            )
+                        })
+                        .and_then(|a| a.tick.value.as_ref())
+                        .map(crate::exact::decimal)
+                });
                 rows.push(AccountInputRow {
                     hidden_state_key: self.key(&id.0),
                     role,
+                    fast: Vec::new(),
+                    rule,
+                    action_context: (role == InputRole::DecisionRequired).then(|| {
+                        NativeActionContext {
+                            rules: frame.rule_context.clone(),
+                            ticks,
+                        }
+                    }),
                     slow: crate::account::encode(
                         read,
                         current.as_ref(),
@@ -204,6 +248,20 @@ impl NativeInputRoot {
                 }
             }
         }
+        for row in &mut rows {
+            let id = &row.hidden_state_key.condition_id;
+            let frame = frames
+                .iter()
+                .find(|f| &f.observation.market.condition_id == id)
+                .unwrap();
+            row.fast = crate::market::encode(
+                frame.observation,
+                &row.rule,
+                now,
+                self.histories.entry(id.0.clone()).or_default(),
+            )
+            .to_vec();
+        }
         self.reset = true;
         for op in &pre {
             if let HiddenOp::InitializeZero { hidden_state_key } = op {
@@ -219,6 +277,7 @@ impl NativeInputRoot {
         let mut post = Vec::new();
         for id in retiring {
             self.hidden.remove(&id);
+            self.histories.remove(&id);
             post.push(HiddenOp::Retire {
                 hidden_state_key: self.key(&id),
             });

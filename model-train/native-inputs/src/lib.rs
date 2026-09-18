@@ -2,9 +2,14 @@
 mod account;
 mod cancel;
 pub mod exact;
+mod market;
+pub mod prefix;
 mod root;
 mod values;
-pub use root::{HiddenKey, HiddenOp, InputRole, NativeInputGroup, NativeInputRoot};
+pub use root::{
+    AccountInputRow, HiddenKey, HiddenOp, InputRole, NativeActionContext, NativeInputGroup,
+    NativeInputRoot,
+};
 #[derive(Debug)]
 pub enum InputError {
     Ledger(ledger::LedgerErrorV1),
@@ -18,3 +23,6 @@ impl From<ledger::LedgerErrorV1> for InputError {
 
 #[cfg(test)]
 mod public_input_tests;
+
+#[cfg(test)]
+mod market_tests;

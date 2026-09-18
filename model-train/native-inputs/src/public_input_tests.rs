@@ -1,6 +1,6 @@
 #[allow(dead_code)]
 #[path = "../../../shared-run/tests/common/mod.rs"]
-mod common;
+pub(crate) mod common;
 use crate::*;
 use common::*;
 use contracts::{economics::*, *};
@@ -56,6 +56,7 @@ async fn real_public_chain_freezes_cash_encodes_original_legs_and_cold_root() {
     let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, MemoryRecordedTimes).unwrap();
     let mut driver = FinitePublicConsumptionV1::new(execution, source, "native".into());
     let mut exported = Vec::new();
+    let mut frozen = None;
     for index in 0..2 {
         driver.next_group().unwrap().unwrap();
         let group = native.consume(&mut shared, &mut driver).unwrap().unwrap();
@@ -78,9 +79,12 @@ async fn real_public_chain_freezes_cash_encodes_original_legs_and_cold_root() {
             assert_eq!(group.rows[0].slow[110], projection("100"));
             assert!(group.pre_frame_hidden_ops.is_empty());
         }
-        exported.push(serde_json::to_value(&group).unwrap());
+        exported.push(exported_group(&group));
+        if index == 1 {
+            frozen = Some(group);
+        }
     }
-    let frozen = native.consume(&mut shared, &mut driver).unwrap().unwrap();
+    let frozen = frozen.unwrap();
     shared
         .execute(
             &mut driver.decision().unwrap(),
@@ -165,7 +169,7 @@ async fn real_public_chain_freezes_cash_encodes_original_legs_and_cold_root() {
             assert_eq!(group.cancel[3][105], projection("1"));
             assert_eq!(group.cancel[3][108], projection("1"));
         }
-        exported.push(serde_json::to_value(&group).unwrap());
+        exported.push(exported_group(&group));
     }
     assert!(saw_orders);
     assert_eq!(retired, 1);
@@ -255,9 +259,11 @@ fn overlap_context_reads_current_reserve_and_old_local_only_survives_switch() {
     )
     .unwrap();
     let mut driver = FinitePublicConsumptionV1::new(execution, source, "overlap".into());
+    let mut exported = Vec::new();
     for index in 0..4 {
         driver.next_group().unwrap().unwrap();
         let group = native.consume(&mut shared, &mut driver).unwrap().unwrap();
+        exported.push(exported_group(&group));
         if index == 1 {
             assert_eq!(
                 shared
@@ -293,6 +299,9 @@ fn overlap_context_reads_current_reserve_and_old_local_only_survives_switch() {
             assert_eq!(group.rows[0].slow[27], projection("20"));
             assert_eq!(&group.rows[0].slow[0..3], &[0., 1., 1.]);
         }
+    }
+    if let Some(path) = std::env::var_os("NATIVE_OVERLAP_FIXTURE_OUTPUT") {
+        std::fs::write(path, serde_json::to_vec(&exported).unwrap()).unwrap();
     }
 }
 
@@ -1020,4 +1029,67 @@ async fn old_pairing_is_market_local_before_sum() {
     crate::values::slot(&mut slots, 0, crate::account::paired_shares(&read, &ids));
     assert_eq!(slots, [0., 1., 1.], "跨市场A5/B5不能变成pair5");
     driver.stop_and_drain().unwrap();
+}
+
+fn exported_group(group: &NativeInputGroup) -> serde_json::Value {
+    use crate::prefix::*;
+    use num_bigint::BigUint;
+    let mut output = serde_json::to_value(group).unwrap();
+    for (row, json) in group
+        .rows
+        .iter()
+        .zip(output["rows"].as_array_mut().unwrap())
+    {
+        assert_eq!(row.fast.len(), 836);
+        assert_eq!(&row.fast[806..], &row.rule);
+        let Some(action_context) = row.action_context.as_ref() else {
+            assert_eq!(row.role, InputRole::ContextOnly);
+            continue;
+        };
+        let mut prefixes = vec![
+            action_context
+                .prefix_features(&PrefixState::default())
+                .to_vec(),
+        ];
+        // 固定 LIMIT 属性前缀，只验证编码，不作为完整 BUY 支持或费用求解器。
+        let mut state = PrefixState {
+            family: Some(Family::SubmitSingleBuy),
+            stage: Stage::QuantityBranch,
+            single_leg: Some(Leg::B),
+            interval: Some(QuantityInterval {
+                upper: BigUint::from(1000u32),
+                lo: BigUint::from(500u32),
+                hi: BigUint::from(1000u32),
+            }),
+            ..Default::default()
+        };
+        let interval = action_context.prefix_features(&state);
+        assert_eq!(interval[16], 0.);
+        assert_eq!(interval[18], 0.5);
+        prefixes.push(interval.to_vec());
+        state.select_quantity(BigUint::from(500u32));
+        state.stage = Stage::Variant(Leg::B);
+        let leaf = action_context.prefix_features(&state);
+        assert_eq!(&leaf[17..21], &[0.; 4]);
+        assert_eq!(leaf[23], 1.);
+        assert_eq!(&leaf[24..42], &[0.; 18]);
+        prefixes.push(leaf.to_vec());
+        state.legs[1].variant = Some(Variant::GtcLimit);
+        state.stage = Stage::PostOnly(Leg::B);
+        prefixes.push(action_context.prefix_features(&state).to_vec());
+        state.legs[1].post_only = Some(false);
+        state.stage = Stage::Price(Leg::B);
+        let selected = action_context.prefix_features(&state);
+        assert_eq!(selected[42], 1.);
+        assert_eq!(selected[48], 1.);
+        assert_eq!(selected[51], 1.);
+        prefixes.push(selected.to_vec());
+        // 精确已选0.5由同帧tick确定；仅用于投影核对，不制造完成后图调用。
+        state.legs[1].price_index = Some(BigUint::from(50u32));
+        let completed = action_context.prefix_features(&state);
+        assert_eq!(completed[57], 0.);
+        assert_eq!(completed[59], 1.);
+        json["fixture_prefixes"] = serde_json::to_value(prefixes).unwrap();
+    }
+    output
 }
