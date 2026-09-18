@@ -115,3 +115,44 @@ Rust的 `rust.jsonl` 保留实际各步输出，`rust.stderr` 保留加载/执�
 所有数值比较以PyTorch为rtol参考、拒绝非有限值；索引与行映射要求精确相等。
 证据摘要见 `validation/rust-ort-report.json`，原始大输出保存在本次任务产物目录，不提交Git。
 这些结果仅证明固定纯图技术切片三端一致，不代表三端经济最终意图、目标CPU/GPU容量或阶段完成。
+
+## 原生账户与撤单输入
+
+`native-inputs/` 是独立 Cargo 工程，消费原公共组、`SharedExecutionV1` 与同组
+`ActionBeforeReadV1`，实现 #6 正式续篇的 412 槽账户输入和 129 槽撤单对象。
+它从根起点、真实市场窗口与公共观测确定预热、当前和旧市场范围；旧集合取完整
+Ledger 市场并集，因此仅有本地预留的旧市场也参与汇总。根操作由 Rust 产生，Python
+只执行 `ResetRootHidden`、`InitializeZero`、`Retire` 的顺序。
+
+所有组内行借用同一个动作前读取。金额、数量、计数与旧集合先在精确域计算，再用
+有理数区间确定自然对数的 float32 最近偶数舍入；不先经 f64 或截断 Decimal。
+撤单对象直接保留原集合顺序、真实腿、原 ordinal 和逐身份资金，不另算资格。
+关联未齐或撤单全集仍为 `Unavailable` 时返回 `MissingAssociation`，不输出成功组、
+推进 hidden 或替代为 NoTrade。调用方不得把这一结果解释成新的重试或跳组策略。
+
+`NativeInputGroup` 仅承接当前账户/对象组件输入和冻结引用，没有填造 fast 特征、
+完整 `ModelFrameV1` 或动作支持集。`model_train.native_inputs.NativeComponentConsumer`
+将实际 412/129 输入交给既有 MAIN 慢支路、`object_encoder` 与全对象归约。
+`on_frame` 的验收只证明机械隐藏操作与调用次数；完整状态图 GRU、Actor、真实参数链
+和两图业务序列仍待其余输入交付。一般非零费用的 FOK/FAK 完整支持也未在此完成。
+
+在仓库根目录运行独立原生验证（工作区命令不会包含此工程）：
+
+```bash
+cargo test --manifest-path model-train/native-inputs/Cargo.toml --locked --offline
+cargo clippy --manifest-path model-train/native-inputs/Cargo.toml --all-targets --locked --offline -- -D warnings
+cargo fmt --manifest-path model-train/native-inputs/Cargo.toml -- --check
+```
+
+在 `model-train/` 运行组件验证：
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python -m unittest discover -s tests -p test_native_inputs.py -v
+```
+
+`NATIVE_COMPONENT_WEIGHTS` 可指向原已验证的 MAIN-1x256 `initial_weights.pt`，避免重新
+导出或训练。测试从 Rust 正式公共入口生成临时组件输入；不手造 Ledger 投影或模型帧。
+覆盖冷启动、重叠预热及切换、同组 100/后组 80、仅本地预留旧市场、平均成本与精确返佣、
+PendingApplied/成功/补偿、QuoteBudget 三态、真实撤单人口 N=0/2/256/257/259 和不同分块。
+缺 formed 的年龄测试沿既有 registry 入口重放真实 consumed 引用，明确属于缺源组件读取；
+46k 未齐关联也单独验证为组合未完成，两者均不声称连续合法模型组。

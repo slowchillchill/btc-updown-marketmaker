@@ -470,8 +470,18 @@ pub fn execution_with_seed_and_cash(
     seed: String,
     cash: &str,
 ) -> (PublicSimExecutionV1, MemoryNoeObservationV3) {
-    let original = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../sim-system/tests/fixtures/platform-rule-snapshot-v3-gate-b.json");
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = Path::new(file!());
+    // workspace 编译的 file! 带包目录；独立 #[path] 消费则相对调用包。
+    let source = manifest.join(
+        source
+            .strip_prefix(manifest.file_name().unwrap())
+            .unwrap_or(source),
+    );
+    let original = source
+        .parent()
+        .unwrap()
+        .join("../../../sim-system/tests/fixtures/platform-rule-snapshot-v3-gate-b.json");
     let (rule_path, rule_sha) = if let Some(delay) = delay {
         let mut value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&original).unwrap()).unwrap();
