@@ -6794,6 +6794,7 @@ fn add_resource_quantity_v2(
 
 #[cfg(test)]
 mod tests {
+    include!("limit_cost_submission_tests.rs");
     use std::cell::RefCell;
     use std::fs;
     use std::io::Write;
