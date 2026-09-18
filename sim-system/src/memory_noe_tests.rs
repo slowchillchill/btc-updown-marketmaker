@@ -785,3 +785,220 @@ struct SharedRecordedTimes;
 impl PublicConsumptionTimeSourceV1 for SharedRecordedTimes {
 fn execution_time_for_group(&mut self,group:&PublicGroupReferenceV1)->Result<i64,SimRunActorErrorV2>{Ok(match group.group_position {0=>SNAPSHOT_RECEIVED_AT,1..=4=>22_000,5=>26_000,6=>28_000,_=>TERMINAL_ADMITTED_TIME_MS})}
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn empty_initial_markets_open_before_activation_and_do_not_forge_input_completion() {
+    for complete in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("sim.jsonl");
+        let rules = successful_snapshot_v3_for_sim_tests().await;
+        let finality = successful_policy_v2_for_tests();
+        let scenario = sealed_scenario_for_markets(Vec::new());
+        let latency = load_embedded_proxy_latency_profile().unwrap();
+        let mut header = opened(
+            "public-consumption-test",
+            &rules,
+            &finality,
+            &scenario,
+            &latency,
+        );
+        header.projection_version = crate::runtime_v2::BusinessProjectionVersionV1::V3;
+        header.market_event_source_identity_sha256 = None;
+        let reference = contracts::execution_normalization::DurableSourceReferenceV1 {
+            source: contracts::execution_normalization::ImmutableSourceReferenceV1::Location(
+                path.display().to_string(),
+            ),
+        };
+        let port =
+            noe_projection::MemoryNoeProjectionPort::<noe_projection::MeasuredOrderEvidence>::new(
+                temp.path().join("noe"),
+                header.clone(),
+                reference.clone(),
+                reference,
+                "create-public".into(),
+                "empty-start".into(),
+            );
+        let observation = port.observation();
+        let spec_opened = PublicRunOpenedV1 {
+            projection_version: header.projection_version,
+            run_id: header.run_id,
+            platform_rule_snapshot_file_sha256: header.platform_rule_snapshot_file_sha256,
+            trade_finality_policy_file_sha256: header.trade_finality_policy_file_sha256,
+            platform_scenario_file_sha256: header.platform_scenario_file_sha256,
+            proxy_latency_profile_file_sha256: header.proxy_latency_profile_file_sha256,
+            implementation_identity: header.implementation_identity,
+            market_event_source_identity_sha256: header.market_event_source_identity_sha256,
+        };
+        let mut execution = PublicSimExecutionV1::create_new(
+            &path,
+            spec_opened,
+            rules,
+            finality,
+            scenario,
+            latency,
+            Box::new(port),
+            MAX_GROUP_BYTES,
+            8,
+        )
+        .unwrap();
+        let release = execution
+            .actor
+            .background_log
+            .as_ref()
+            .unwrap()
+            .pause_for_tests(false);
+        let before = std::fs::read(&path).unwrap();
+        assert!(observation.opening_record().is_none());
+        let mut session = spec("public-consumption-test", "create-public");
+        session.caller_role = SimCallerRoleV1::Paper;
+        execution.create_session(session).unwrap();
+        let opening = observation.opening_record().unwrap();
+        assert_eq!(
+            opening.visibility(),
+            &::execution_normalization::NoeConsumptionVisibilityV1::Initialization
+        );
+        assert!(opening.durable_reference().is_none());
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            before,
+            "开户不等待原后台编码或稳定"
+        );
+        let state = execution
+            .actor
+            .state
+            .as_ref()
+            .unwrap()
+            .session
+            .as_ref()
+            .unwrap();
+        assert_eq!(state.market_directory.markets().len(), 0);
+        assert!(matches!(
+            state.initialization,
+            SessionInitializationV2::PreparedLedgerInit
+        ));
+        release.send(()).unwrap();
+        execution.activate_session("activate-empty".into()).unwrap();
+        let mut driver =
+            FinitePublicConsumptionV1::new(execution, std::iter::empty(), "empty-source".into());
+        assert!(driver.next_group().unwrap().is_none());
+        assert!(
+            !driver
+                .execution
+                .actor
+                .state
+                .as_ref()
+                .unwrap()
+                .session
+                .as_ref()
+                .unwrap()
+                .public_visibility_frontier
+                .sealed
+        );
+        if complete {
+            assert!(matches!(
+                driver.complete(&mut RecordedMaterials {
+                    root: temp.path().join("unused"),
+                    hidden: None
+                }),
+                Err(SimRunActorErrorV2::CompletionNotReady(
+                    "市场输入路径尚未全部成功结束"
+                ))
+            ));
+        } else {
+            driver.stop_and_drain().unwrap();
+            assert!(opening.durable_reference().is_some());
+        }
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("RunSeal"));
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn empty_initial_markets_driver_enrollment_preserves_failures_idempotence_and_mode_freeze() {
+    for role in [
+        SimCallerRoleV1::Paper,
+        SimCallerRoleV1::ModelTrain,
+        SimCallerRoleV1::OfflineEvaluation,
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dpt");
+        let core = recorded_books(&root);
+        let context = core.pm_context(CONDITION_ID).unwrap();
+        let member = crate::scenario::PlatformMarketV1::try_new(
+            context.market,
+            context
+                .assets
+                .into_iter()
+                .map(|a| a.asset)
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+        )
+        .unwrap();
+        let mut different_market = member.market().clone();
+        different_market.condition_id = ConditionId(format!("0x{}", "2".repeat(64)));
+        different_market.clob_market_id = ClobMarketId("3195577".into());
+        let mut assets = member.assets().clone();
+        assets[0].token_id = TokenId("21".into());
+        assets[1].token_id = TokenId("4".into());
+        let different =
+            crate::scenario::PlatformMarketV1::try_new(different_market.clone(), assets).unwrap();
+        let (execution, _) =
+            memory_execution_with_scenario_capacity::<noe_projection::MeasuredOrderEvidence>(
+                &temp.path().join("sim.jsonl"),
+                sealed_scenario_for_markets(Vec::new()),
+                role,
+                128,
+                None,
+            )
+            .await;
+        let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, RecordedTimes).unwrap();
+        let mut driver = FinitePublicConsumptionV1::new(execution, source, "enrollment".into());
+        assert!(driver.rules.is_empty());
+        assert_eq!(
+            driver.enroll_market(MarketEnrollmentRequestV1 {
+                enrollment_request_id: "".into(),
+                market: different.clone()
+            }),
+            Err(SimRunActorErrorV2::InvalidMarketEnrollment(
+                "enrollment_request_id 为空或含首尾空白"
+            ))
+        );
+        assert!(driver.rules.is_empty());
+        let enrolled = driver
+            .enroll_market(MarketEnrollmentRequestV1 {
+                enrollment_request_id: "first".into(),
+                market: member,
+            })
+            .unwrap();
+        assert_eq!(driver.rules.len(), 1);
+        let rule = Arc::clone(driver.rules.get(CONDITION_ID).unwrap());
+        assert_eq!(
+            driver
+                .enroll_market(MarketEnrollmentRequestV1 {
+                    enrollment_request_id: "first".into(),
+                    market: different.clone()
+                })
+                .unwrap(),
+            enrolled
+        );
+        assert_eq!(driver.rules.len(), 1);
+        assert!(!driver.rules.contains_key(&different_market.condition_id.0));
+        assert!(Arc::ptr_eq(&rule, driver.rules.get(CONDITION_ID).unwrap()));
+        driver.next_group().unwrap().unwrap();
+        let later = driver.enroll_market(MarketEnrollmentRequestV1 {
+            enrollment_request_id: "later".into(),
+            market: different,
+        });
+        if role == SimCallerRoleV1::Paper {
+            assert_eq!(later.unwrap().market, different_market);
+            assert_eq!(driver.rules.len(), 2);
+        } else {
+            assert_eq!(
+                later,
+                Err(SimRunActorErrorV2::MarketEnrollmentFrozenAfterBusinessInput)
+            );
+            assert_eq!(driver.rules.len(), 1);
+        }
+        driver.stop_and_drain().unwrap();
+    }
+}

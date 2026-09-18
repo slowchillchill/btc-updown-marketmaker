@@ -19155,6 +19155,24 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
             source_failure: None,
         }
     }
+    /// 沿原会话登记规则扩展市场；重复请求以原成功结果确定规则映射。
+    pub fn enroll_market(
+        &mut self,
+        request: MarketEnrollmentRequestV1,
+    ) -> Result<MarketEnrollmentV2, SimRunActorErrorV2> {
+        let enrolled = self.execution.enroll_market(request)?;
+        self.rules
+            .entry(enrolled.market.condition_id.0.clone())
+            .or_insert_with(|| {
+                Arc::new(
+                    self.execution
+                        .actor
+                        ._rule_snapshot
+                        .public_rule_context(enrolled.market.clone()),
+                )
+            });
+        Ok(enrolled)
+    }
     fn time(&self, at: i64) -> TrustedActorExecutionTimeV1 {
         TrustedActorExecutionTimeV1(ActorTimeRecordV1 {
             run_id: self.execution.actor.opened.run_id.clone(),

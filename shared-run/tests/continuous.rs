@@ -1722,3 +1722,92 @@ async fn planned_stop_preserves_open_orders_and_does_not_read_next_group() {
     assert!(!text.contains("CancelOrder"));
     assert!(!text.contains("CancelAllOrders"));
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn empty_initial_markets_consume_reference_before_enrollment_without_reopening_account() {
+    use data_pipeline_core::public_observation_core::PublicObservationCoreV1;
+    use sim_system::scenario::PlatformMarketV1;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let (core, times) = recorded_reference_then_market(&root);
+    let empty = PublicObservationCoreV1::new(core.header().clone()).unwrap();
+    assert_eq!(empty.fixed_markets().count(), 0);
+    let path = temp.path().join("sim.jsonl");
+    let (mut execution, observation) = execution(&path, &empty, SUCCESS_POLICY);
+    let opening = observation.opening_record().unwrap();
+    let mut ledger = LedgerWriterV1::new(AccountAdmissionPolicyV1 {
+        per_market_all_in_commitment_limit_pusd: ExactDecimal("1000".into()),
+    });
+    let ledger_root = temp.path().join("ledger");
+    execution
+        .bind_ledger_recording_v2(&mut ledger, &ledger_root)
+        .unwrap();
+    let mut shared = SharedExecutionV1::from_opening(ledger, observation.clone())
+        .unwrap()
+        .unwrap();
+    let initial = shared.ledger().projection_v2().unwrap();
+    let mut source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times)
+        .unwrap()
+        .peekable();
+    let reference = source.peek().unwrap().as_ref().unwrap();
+    assert!(reference.prepared.group.observations.is_empty());
+    assert!(
+        reference
+            .prepared
+            .group
+            .records
+            .iter()
+            .any(|r| matches!(r.payload, PublicBusinessPayloadV1::ReferenceFact(_)))
+    );
+    let mut driver =
+        FinitePublicConsumptionV1::new(execution, source, "empty-first-reference".into());
+    let (first, _) = driver.next_group().unwrap().unwrap();
+    assert_eq!(first.group().group_position, 0);
+    assert!(driver.frames().is_empty());
+    assert!(shared.action_before(&mut driver).unwrap().is_none());
+    assert_eq!(shared.ledger().projection_v2().unwrap(), initial);
+    // 参考组已被真实消费，随后才将原 DPT 身份交给原登记入口。
+    let context = core.pm_context(CONDITION_ID).unwrap();
+    let market = PlatformMarketV1::try_new(
+        context.market,
+        context
+            .assets
+            .into_iter()
+            .map(|a| a.asset)
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap(),
+    )
+    .unwrap();
+    let enrollment = driver
+        .enroll_market(MarketEnrollmentRequestV1 {
+            enrollment_request_id: "first-arrived-market".into(),
+            market,
+        })
+        .unwrap();
+    let (second, _) = driver.next_group().unwrap().unwrap();
+    assert_eq!(second.group().group_position, 1);
+    assert!(second.actor_input_sequence() > first.actor_input_sequence());
+    let frames = driver.frames();
+    assert_eq!(frames.len(), 1);
+    assert_eq!(frames[0].rule_context.market, enrollment.market);
+    assert_eq!(
+        frames[0].rule_context.snapshot_file_sha256.0,
+        "d63c0e7b09edc4b2c4c3f0295f806b25f6f5fd03663cdf60ff062117e53e4e54"
+    );
+    assert!(shared.action_before(&mut driver).unwrap().is_some());
+    assert_eq!(shared.ledger().projection_v2().unwrap(), initial);
+    assert_eq!(
+        observation.opening_record().unwrap().position(),
+        opening.position()
+    );
+    driver.stop_and_drain().unwrap();
+    assert_eq!(
+        LedgerWriterV1::open_durable(&ledger_root)
+            .unwrap()
+            .projection_v2()
+            .unwrap(),
+        initial
+    );
+    assert!(!std::fs::read_to_string(path).unwrap().contains("RunSeal"));
+}
