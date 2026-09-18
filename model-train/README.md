@@ -152,7 +152,8 @@ Ledger 市场并集，因此仅有本地预留的旧市场也参与汇总。根�
 状态图一次，保存全部层隐藏值。整组完成后，参数组件使用冻结 z_t、rule、原生 prefix 与
 完整对象归约，调用参数图不会再次推进 GRU。对象截点可单独通过 `objects` 消费；缺少前序
 hidden 的对象测试不伪装成完整连续帧。Rust ORT 原验证程序增加 `--native` 入口，读取同一
-原生组、机械执行根操作并独立递推状态，复用原归档图与权重，不重新导出或训练。
+原生组、机械执行根操作并独立递推状态；Python ORT 也用自己的 h_next 独立递推，同
+PyTorch 及 Rust ORT 使用同一真实序列和原容差。复用原归档图与权重，不重新导出或训练。
 
 本增量完成真实特征与状态/参数组件输入；完整 Actor 合法选择链、一般非零费用 FOK/FAK
 支持、最终意图的两图业务验收及阶段 #6 通过仍未完成。
@@ -172,7 +173,7 @@ OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python -m unittest discover -s tes
 ```
 
 `NATIVE_BASELINE_GRAPH` 和 `NATIVE_MAIN_GRAPH` 分别指向已归档 BASELINE-2x256 与
-MAIN-1x256 的两图/权重目录，可同时执行真实原生序列的 Rust ORT 对照（未提供时明确跳过）。
+MAIN-1x256 的两图/权重目录，可同时执行真实原生序列的 PyTorch/Python ORT/Rust ORT 对照（未提供时明确跳过）。
 `NATIVE_COMPONENT_WEIGHTS` 可指向原已验证的 MAIN-1x256 `initial_weights.pt`，避免重新
 导出或训练。测试从 Rust 正式公共入口生成临时组件输入；不手造 Ledger 投影或模型帧。
 覆盖冷启动、重叠预热及切换、同组 100/后组 80、仅本地预留旧市场、平均成本与精确返佣、

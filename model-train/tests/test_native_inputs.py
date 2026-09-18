@@ -90,7 +90,7 @@ class NativeInputTests(unittest.TestCase):
             self.assertEqual(len(consumer.hidden), 1)  # 下一市场继续，开市不重置。
 
     @unittest.skipUnless(os.environ.get("NATIVE_MAIN_GRAPH") and os.environ.get("NATIVE_BASELINE_GRAPH"), "requires original frozen graph archive")
-    def test_real_native_sequence_in_original_rust_ort(self):
+    def test_real_native_sequence_in_original_three_runtimes(self):
         import onnxruntime
         import numpy as np
         root = Path(__file__).resolve().parents[1]
@@ -107,6 +107,30 @@ class NativeInputTests(unittest.TestCase):
                 for group in self.groups:
                     consumer.consume(group)
             handle.remove()
+            # Python ORT 用自己的 h_next 递推；不喂入 PyTorch/Rust 隐藏结果。
+            from model_train.validate_graphs import session
+            from model_train.native_inputs import hidden_key
+            python_ort = session(archive / "state_encoder.onnx", 1)
+            operations = NativeComponentConsumer(graphs)
+            ort_values = []
+            for group in self.groups:
+                operations._operations(group["pre_frame_hidden_ops"])
+                for row in group["rows"]:
+                    key = hidden_key(row["hidden_state_key"])
+                    z, h = python_ort.run(None, {
+                        "fast_features":np.asarray([row["fast"]], dtype=np.float32),
+                        "slow_features":np.asarray([row["slow"]], dtype=np.float32),
+                        "h_prev":operations.hidden[key].numpy()})
+                    operations.hidden[key] = torch.from_numpy(h)
+                    ort_values.append([z.reshape(-1), h.reshape(-1)])
+                operations._operations(group["post_frame_hidden_ops"])
+            for got, want in zip(ort_values, expected):
+                for a, b in zip(got, want):
+                    self.assertTrue(np.isfinite(a).all())
+                    np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-5)
+            if self.evidence:
+                (self.evidence / f"{config.name}-python-ort.json").write_text(
+                    json.dumps([[v.tolist() for v in row] for row in ort_values]))
             fixture = Path(self.temp.name) / f"native-{config.name}.json"
             fixture.write_text(json.dumps({"layers":config.layers, "hidden":config.hidden, "groups":self.groups}))
             process = subprocess.run(["cargo", "run", "--manifest-path", str(root / "rust-ort-validation/Cargo.toml"),
@@ -122,6 +146,7 @@ class NativeInputTests(unittest.TestCase):
             self.assertEqual(len(actual), len(expected))
             for got, want in zip(actual, expected):
                 for a, b in zip(got, want):
+                    self.assertTrue(np.isfinite(a).all())
                     np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-5)
 
     def test_actual_complete_objects_and_two_257_partitions(self):
