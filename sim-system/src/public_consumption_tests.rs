@@ -976,30 +976,26 @@ async fn decision_cutoff_uses_delivered_feedback_and_frame_borrows_original_obse
         assert_eq!(cutoff.private_feedback_sequence(), 0);
     }
     let last = driver.last_receipt.as_ref().unwrap().clone();
-    driver
-        .execution
-        .close_public_time(TrustedPublicTimeClosureV1 {
+    let closure = TrustedPublicTimeClosureV1 {
             execution_time: driver.time(22_000),
             consumption_sequence_ref: driver.consumption_sequence_ref.clone(),
             next_group_position: 5,
-            closure: contracts::ReplayIndexClosureV1::NextGlobalEventAt(TERMINAL_ADMITTED_TIME_MS),
-        })
-        .unwrap();
+            closure: PublicTimeClosureReasonV1::NextGlobalEventAt(TERMINAL_ADMITTED_TIME_MS),
+        };
+    driver.execution.close_public_time(closure).unwrap();
     driver.close_pending = false;
     let required = driver
         .execution
         .actor
         .next_required_logical_drive()
         .unwrap();
-    driver
-        .execution
-        .close_public_time(TrustedPublicTimeClosureV1 {
+    let closure = TrustedPublicTimeClosureV1 {
             execution_time: driver.time(required.required_at_utc_ms),
             consumption_sequence_ref: driver.consumption_sequence_ref.clone(),
             next_group_position: 5,
-            closure: contracts::ReplayIndexClosureV1::NextGlobalEventAt(TERMINAL_ADMITTED_TIME_MS),
-        })
-        .unwrap();
+            closure: PublicTimeClosureReasonV1::NextGlobalEventAt(TERMINAL_ADMITTED_TIME_MS),
+        };
+    driver.execution.close_public_time(closure).unwrap();
     let response = delivered.responses.borrow()[0].clone();
     delivered.deliver_through(response.response_received_at_utc_ms - 1);
     assert_eq!(
@@ -2009,4 +2005,480 @@ async fn public_pm_evidence_counts_follow_delete_and_epoch_reset() {
             },
         ]
     );
+}
+
+fn controlled_continuous(
+    execution: PublicSimExecutionV1,
+    at: i64,
+) -> (
+    ContinuousPublicConsumptionV1,
+    Arc<std::sync::atomic::AtomicI64>,
+) {
+    let clock = Arc::new(std::sync::atomic::AtomicI64::new(at));
+    let mut driver = ContinuousPublicConsumptionV1::new(execution, "online-test".into());
+    driver.clock.controlled = Some(Arc::clone(&clock));
+    (driver, clock)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn continuous_same_millisecond_groups_precede_buy_and_idle_never_observes_public_time() {
+    use std::sync::atomic::Ordering;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let mut core = core();
+    let mut writer = PublicRecordingWriterV1::create(&root, core.header(), config()).unwrap();
+    let mut active = metadata_snapshot_row();
+    active.timestamp_received = 20_000;
+    active.collector_admission_sequence = 2;
+    active.collector_admission_time_utc_ms = 20_001;
+    active.metadata_fetch_start_utc = Some(19_990);
+    active.source_evidence_received_at_utc = Some(20_000);
+    active.row_evidence_validation_completed_at_utc = Some(20_001);
+    active.market_lifecycle_state = MetadataMarketLifecycleState::Active;
+    active.market_runtime_role = MetadataMarketRuntimeRole::Current;
+    let mut down = book("100");
+    if let PolymarketOrderbookEvent::Book { asset_id, .. } = &mut down {
+        *asset_id = DOWN_TOKEN_ID.into();
+    }
+    let mut removal = book("100");
+    if let PolymarketOrderbookEvent::Book { asks, .. } = &mut removal {
+        asks.clear();
+    }
+    for input in [
+        meta(0),
+        record(
+            1,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(active))),
+        ),
+        pm(2, 1, 21_000, down),
+        pm(3, 2, 21_000, book("100")),
+        pm(4, 3, 21_000, removal),
+        end(5),
+    ] {
+        let result = apply(&mut core, &input);
+        writer.record(input, result).unwrap();
+    }
+    writer.stabilize().unwrap();
+    let path = temp.path().join("sim.jsonl");
+    let (execution, _) = public_execution(&path, &core, SimCallerRoleV1::Paper).await;
+    let (mut driver, clock) = controlled_continuous(execution, 10_000);
+    let mut source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, RecordedTimes).unwrap();
+    driver
+        .apply_group(source.next().unwrap().unwrap().prepared)
+        .unwrap();
+    clock.store(20_001, Ordering::SeqCst);
+    driver
+        .apply_group(source.next().unwrap().unwrap().prepared)
+        .unwrap();
+    clock.store(22_000, Ordering::SeqCst);
+    driver
+        .apply_group(source.next().unwrap().unwrap().prepared)
+        .unwrap();
+    let first = source.next().unwrap().unwrap().prepared;
+    let before = serde_json::to_value(&first.group).unwrap();
+    driver.apply_group(Arc::clone(&first)).unwrap();
+    driver
+        .decision()
+        .unwrap()
+        .request(BusinessRequestV2::PostOrder(PostOrderRequestV2 {
+            context: RequestContextV2 {
+                global_request_id: "online-buy".into(),
+                caller_correlation_id: None,
+            },
+            item: post_item(
+                "buy",
+                &ConditionId(CONDITION_ID.into()),
+                &TokenId(UP_TOKEN_ID.into()),
+                SimBuyOrderKindV1::FokMarket {
+                    spend_pusd: Decimal::from(3),
+                    worst_price_pusd_per_share: Decimal::new(6, 1),
+                },
+            ),
+        }))
+        .unwrap();
+    let second = source.next().unwrap().unwrap().prepared;
+    let receipt = driver.apply_group(second).unwrap().0;
+    assert_eq!(receipt.execution_time().logical_time_utc_ms(), 22_000);
+    assert_eq!(serde_json::to_value(&first.group).unwrap(), before);
+    let due = driver.required_at().unwrap();
+    assert!(due >= 22_000);
+    clock.store(due, Ordering::SeqCst);
+    driver.advance_due().unwrap();
+    assert!(completed_post_response(&driver.execution.actor, "online-buy").is_none());
+    assert_eq!(
+        driver.next_wake_after(),
+        Some(std::time::Duration::from_millis(1))
+    );
+    clock.store(due + 1, Ordering::SeqCst);
+    driver.advance_due().unwrap();
+    let response = completed_post_response(&driver.execution.actor, "online-buy").unwrap();
+    assert_eq!(response.metadata.platform_responded_at_utc_ms, due);
+    assert_eq!(
+        response.item.outcome,
+        PostOrderItemOutcomeV2::RejectedNoEffect(SubmissionRejectedReasonV2::FokNotFullyFilled)
+    );
+    assert_eq!(driver.last_receipt.as_ref().unwrap(), &receipt);
+    assert_eq!(driver.frames()[0].receipt, receipt);
+    assert_eq!(
+        driver
+            .decision()
+            .unwrap()
+            .cutoff()
+            .private_feedback_sequence(),
+        0
+    );
+    driver.stop_and_drain().unwrap();
+    let log = std::fs::read_to_string(path).unwrap();
+    assert!(log.contains("ExecutionClockAdvancedTo"));
+    assert!(!log.contains("RunSeal"));
+    assert!(!log.contains("EndOfInput"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn continuous_actual_clock_splits_old_source_times_and_drains_earlier_due_before_group() {
+    use std::sync::atomic::Ordering;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let core = recorded_complete(&root);
+    let (execution, delivered) = public_execution(
+        &temp.path().join("sim.jsonl"),
+        &core,
+        SimCallerRoleV1::Paper,
+    )
+    .await;
+    let (mut driver, clock) = controlled_continuous(execution, 10_000);
+    // 初始市场已经携带窗口结束 30000 的原返佣时钟，不能按“无请求”等同无义务。
+    let execution_state = &driver
+        .execution
+        .actor
+        .state
+        .as_ref()
+        .unwrap()
+        .session
+        .as_ref()
+        .unwrap()
+        .execution_state;
+    assert_eq!(
+        execution_state.next_rebate_clock_at_utc_ms(),
+        Some(MARKET_END_AT)
+    );
+    assert_eq!(execution_state.next_gtd_deadline_at_utc_ms(), None);
+    assert_eq!(execution_state.next_scheduled_finality_at_utc_ms(), None);
+    assert_eq!(
+        driver.next_wake_after(),
+        Some(std::time::Duration::from_millis(
+            (MARKET_END_AT + 1 - 10_000) as u64
+        ))
+    );
+    let mut source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, RecordedTimes).unwrap();
+    driver
+        .apply_group(source.next().unwrap().unwrap().prepared)
+        .unwrap();
+    clock.store(20_001, Ordering::SeqCst);
+    driver
+        .apply_group(source.next().unwrap().unwrap().prepared)
+        .unwrap();
+    clock.store(22_000, Ordering::SeqCst);
+    let first = source.next().unwrap().unwrap().prepared;
+    let first_original = serde_json::to_value(&first.group).unwrap();
+    let first_receipt = driver.apply_group(Arc::clone(&first)).unwrap().0;
+    driver
+        .decision()
+        .unwrap()
+        .request(BusinessRequestV2::CancelAllOrders(
+            CancelAllOrdersRequestV2 {
+                context: RequestContextV2 {
+                    global_request_id: "clock-earlier-due".into(),
+                    caller_correlation_id: None,
+                },
+            },
+        ))
+        .unwrap();
+    let due = driver.required_at().unwrap();
+    assert!(due >= 22_000);
+    let second = source.next().unwrap().unwrap().prepared;
+    let second_original = serde_json::to_value(&second.group).unwrap();
+    clock.store(due + 10, Ordering::SeqCst);
+    let second_receipt = driver.apply_group(Arc::clone(&second)).unwrap().0;
+    assert_eq!(first_receipt.execution_time().logical_time_utc_ms(), 22_000);
+    assert_eq!(
+        second_receipt.execution_time().logical_time_utc_ms(),
+        due + 10
+    );
+    assert_eq!(delivered.responses.borrow().len(), 1);
+    assert_eq!(
+        delivered.responses.borrow()[0].platform_responded_at_utc_ms,
+        due
+    );
+    assert_eq!(serde_json::to_value(&first.group).unwrap(), first_original);
+    assert_eq!(
+        serde_json::to_value(&second.group).unwrap(),
+        second_original
+    );
+    assert_eq!(
+        driver.last_prepared.as_ref().unwrap().reference,
+        second.reference
+    );
+    assert!(
+        !driver
+            .execution
+            .actor
+            .state
+            .as_ref()
+            .unwrap()
+            .session
+            .as_ref()
+            .unwrap()
+            .public_visibility_frontier
+            .sealed
+    );
+    driver.stop_and_drain().unwrap();
+}
+
+#[test]
+fn continuous_closure_codec_retains_both_old_finite_shapes() {
+    for old in [
+        contracts::ReplayIndexClosureV1::NextGlobalEventAt(123),
+        contracts::ReplayIndexClosureV1::EndOfInput,
+    ] {
+        let wire = serde_json::to_value(old).unwrap();
+        let decoded: PublicTimeClosureReasonV1 = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), wire);
+    }
+    let reason = PublicTimeClosureReasonV1::ExecutionClockAdvancedTo(124);
+    assert_eq!(
+        serde_json::from_str::<PublicTimeClosureReasonV1>(&serde_json::to_string(&reason).unwrap())
+            .unwrap(),
+        reason
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn continuous_capacity_resume_samples_clock_and_never_reapplies_accepted_groups() {
+    use std::sync::atomic::Ordering;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let core = recorded_complete(&root);
+    let (execution, _) = public_execution_capacity(
+        &temp.path().join("sim.jsonl"),
+        &core,
+        SimCallerRoleV1::Paper,
+        1,
+        None,
+    )
+    .await;
+    let (mut driver, clock) = controlled_continuous(execution, 22_000);
+    driver.wait_for_recording_capacity().unwrap();
+    let release = driver
+        .execution
+        .actor
+        .background_log
+        .as_ref()
+        .unwrap()
+        .pause_for_tests(false);
+    let mut source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, RecordedTimes).unwrap();
+    let initial = driver.execution.actor.applied_input_sequence;
+    for position in 0..2 {
+        let receipt = driver
+            .apply_group(source.next().unwrap().unwrap().prepared)
+            .unwrap()
+            .0;
+        assert_eq!(receipt.group.group_position, position);
+    }
+    assert!(
+        !driver
+            .execution
+            .actor
+            .background_log
+            .as_mut()
+            .unwrap()
+            .ready()
+            .unwrap()
+    );
+    assert_eq!(driver.execution.actor.applied_input_sequence, initial + 2);
+    let resume = std::thread::spawn(move || {
+        clock.store(23_000, Ordering::SeqCst);
+        release.send(()).unwrap();
+    });
+    let receipt = driver
+        .apply_group(source.next().unwrap().unwrap().prepared)
+        .unwrap()
+        .0;
+    resume.join().unwrap();
+    assert_eq!(receipt.group.group_position, 2);
+    assert_eq!(receipt.execution_time().logical_time_utc_ms(), 23_000);
+    assert_eq!(driver.drive_position, 4); // 三个组，旧 22000 毫秒关闭一次。
+    assert_eq!(driver.execution.actor.applied_input_sequence, initial + 4);
+    driver.stop_and_drain().unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn continuous_equal_time_finality_gtd_and_rebate_keep_original_pre_market_priority() {
+    use std::sync::atomic::Ordering;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let mut core = core();
+    let mut writer = PublicRecordingWriterV1::create(&root, core.header(), config()).unwrap();
+    let mut metadata = metadata_snapshot_row();
+    metadata.market_end_utc = 600_000;
+    let initial = record(
+        0,
+        TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(
+            metadata.clone(),
+        ))),
+    );
+    metadata.timestamp_received = 20_000;
+    metadata.collector_admission_sequence = 2;
+    metadata.collector_admission_time_utc_ms = 20_001;
+    metadata.metadata_fetch_start_utc = Some(19_990);
+    metadata.source_evidence_received_at_utc = Some(20_000);
+    metadata.row_evidence_validation_completed_at_utc = Some(20_001);
+    metadata.market_lifecycle_state = MetadataMarketLifecycleState::Active;
+    metadata.market_runtime_role = MetadataMarketRuntimeRole::Current;
+    let active = record(
+        1,
+        TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(metadata))),
+    );
+    let mut down = book("100");
+    if let PolymarketOrderbookEvent::Book { asset_id, .. } = &mut down {
+        *asset_id = DOWN_TOKEN_ID.into();
+    }
+    let inputs = [
+        initial,
+        active,
+        pm(2, 1, 21_000, down),
+        pm(3, 2, 21_000, book("100")),
+        pm(4, 3, 21_000, book("100")),
+        pm(5, 4, 21_000, book("100")),
+        pm(6, 5, 21_000, book("100")),
+        end(7),
+    ];
+    for input in inputs {
+        let result = apply(&mut core, &input);
+        writer.record(input, result).unwrap();
+    }
+    writer.stabilize().unwrap();
+    let (execution, _) = public_execution(
+        &temp.path().join("sim.jsonl"),
+        &core,
+        SimCallerRoleV1::Paper,
+    )
+    .await;
+    let (mut driver, clock) = controlled_continuous(execution, 22_000);
+    let mut source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, RecordedTimes).unwrap();
+    for _ in 0..4 {
+        driver
+            .apply_group(source.next().unwrap().unwrap().prepared)
+            .unwrap();
+    }
+    let deadline = encoded_gtd_expiration_for_lead_for_tests(
+        driver.execution.actor.state.as_ref().unwrap(),
+        driver.execution.actor._latency_profile.as_ref(),
+        "online-gtd",
+        22_000,
+        240,
+    );
+    for (id, kind) in [
+        (
+            "online-gtd",
+            SimBuyOrderKindV1::GtdLimit {
+                limit_price_pusd_per_share: Decimal::new(2, 1),
+                size_shares: Decimal::from(5),
+                post_only: true,
+                expires_at_utc_ms: deadline,
+            },
+        ),
+        (
+            "online-fok",
+            SimBuyOrderKindV1::FokMarket {
+                spend_pusd: Decimal::from(3),
+                worst_price_pusd_per_share: Decimal::new(6, 1),
+            },
+        ),
+    ] {
+        driver
+            .decision()
+            .unwrap()
+            .request(BusinessRequestV2::PostOrder(PostOrderRequestV2 {
+                context: RequestContextV2 {
+                    global_request_id: id.into(),
+                    caller_correlation_id: None,
+                },
+                item: post_item(
+                    id,
+                    &ConditionId(CONDITION_ID.into()),
+                    &TokenId(UP_TOKEN_ID.into()),
+                    kind,
+                ),
+            }))
+            .unwrap();
+    }
+    while completed_post_response(&driver.execution.actor, "online-gtd").is_none()
+        || completed_post_response(&driver.execution.actor, "online-fok").is_none()
+    {
+        let at = driver.required_at().unwrap();
+        assert!(at < deadline);
+        clock.store(at + 1, Ordering::SeqCst);
+        driver.advance_due().unwrap();
+    }
+    for id in ["online-gtd", "online-fok"] {
+        assert!(matches!(
+            completed_post_response(&driver.execution.actor, id)
+                .unwrap()
+                .item
+                .outcome,
+            PostOrderItemOutcomeV2::Accepted(_)
+        ));
+    }
+    let state = &driver
+        .execution
+        .actor
+        .state
+        .as_ref()
+        .unwrap()
+        .session
+        .as_ref()
+        .unwrap()
+        .execution_state;
+    assert_eq!(state.next_gtd_deadline_at_utc_ms(), Some(deadline));
+    let finality_at = state.next_scheduled_finality_at_utc_ms().unwrap();
+    for (at, class) in [
+        (finality_at, "finality"),
+        (deadline, "gtd"),
+        (600_000, "rebate"),
+    ] {
+        clock.store(at, Ordering::SeqCst);
+        let receipt = driver
+            .apply_group(source.next().unwrap().unwrap().prepared)
+            .unwrap()
+            .0;
+        assert_eq!(receipt.execution_time().logical_time_utc_ms(), at);
+        let session = driver
+            .execution
+            .actor
+            .state
+            .as_ref()
+            .unwrap()
+            .session
+            .as_ref()
+            .unwrap();
+        assert!(
+            session
+                .public_visibility_frontier
+                .closed_through_utc_ms
+                .is_none_or(|closed| closed < at)
+        );
+        match class {
+            "finality" => assert_ne!(
+                session.execution_state.next_scheduled_finality_at_utc_ms(),
+                Some(at)
+            ),
+            "gtd" => assert_eq!(session.execution_state.next_gtd_deadline_at_utc_ms(), None),
+            _ => assert_ne!(
+                session.execution_state.next_rebate_clock_at_utc_ms(),
+                Some(at)
+            ),
+        }
+    }
+    driver.stop_and_drain().unwrap();
 }

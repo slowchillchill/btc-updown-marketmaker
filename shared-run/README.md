@@ -12,10 +12,18 @@
 
 Ledger 继续使用同一应用核心，V2 材料包含 Genesis、Transaction、ReservationDecision，交给原 SIM 日志后台 worker。来源交易需要真实 NOE 稳定映射时，后台先同步原 SIM 日志，再沿原 NOE stabilize 发布，按原顺序物化 Ledger；本地事件不虚构 NOE 依赖，也不越过未物化前项。没有第二线程、编号器或满队列策略。完成时原 NOE 稳定、Ledger 段封口后才允许原 SIM seal；实际 I/O 错误原样使本轮未完成。V1 同步记录和恢复保持兼容，V2 恢复还原原应用效果、visibility 和幂等位置，不重放业务领取。
 
-宿主计划停止时，先结束已开始的同步调用并停止新组、请求及 Ledger 追加，然后消耗 `PublicSimExecutionV1` 或 `FinitePublicConsumptionV1` 调用 `stop_and_drain`。它只沿同一后台移交 pending 组、同步 SIM、稳定 NOE、接收最后一批 Ledger 材料并封口 Ledger 段，等待原后台退出；不调用下一组、CloseTime、EndOfInput 或 `complete`，不撤单、清仓或改变已有订单/持仓事实。成功不生成 `RunSeal`，不返回完整冷产物或可恢复账户。原 `complete` 仍要求真实业务闭合。来源摘要 `market_event_source_identity_sha256` 对离线材料保留真实值，在线创建时传 `None`；新读取器兼容旧字符串字段，其他身份摘要保持原合同。
+宿主计划停止时，先结束已开始的同步调用并停止新组、请求及 Ledger 追加，然后消耗 `PublicSimExecutionV1`、`FinitePublicConsumptionV1` 或 `ContinuousPublicConsumptionV1` 调用 `stop_and_drain`。它只沿同一后台移交 pending 组、同步 SIM、稳定 NOE、接收最后一批 Ledger 材料并封口 Ledger 段，等待原后台退出；不调用下一组、CloseTime、EndOfInput 或 `complete`，不撤单、清仓或改变已有订单/持仓事实。成功不生成 `RunSeal`，不返回完整冷产物或可恢复账户。原 `complete` 仍要求真实业务闭合。来源摘要 `market_event_source_identity_sha256` 对离线材料保留真实值，在线创建时传 `None`；新读取器兼容旧字符串字段，其他身份摘要保持原合同。
 
 逐请求资金取原预留状态，逐订单资金归属取实际 Ledger 分录及来源关联。迟到 trade 关联只补原分录归属，不重复经济入账；未足够归属的行返回 `Unavailable`，不按腿均分。原 Ledger 生命周期投影的计算语义保持不变：实际接收顺序若为 FinalSuccess 后 PendingApplied，其原 pending 计数仍随输入更新；共享订单/承诺则按源序保留终局。二者不能互相替代。
 
 连续组合测试见 `tests/continuous.rs`，同一源码的真实 typed_raw 准备、DPT 记录、模拟器入口生成材料，覆盖成交、终态、撤单、承诺、资金归属、组冻结和后台失败。`ledger/tests/memory_v2.rs` 覆盖原返佣经济事实下的粘滞拒绝及恢复；`sim-system/src/shared_ledger_tests.rs` 覆盖实际原队列、同 delivery 多 ordinal 和原 worker 耐久。编译反例仅验证只读耐久材料不能直接传参。验证不声称长运行资源、在线平台全域或模型宿主已经交付。
 
-空初始市场场景沿原场景格式创建账户，不需要占位市场。真实开户仍立即产生 Initialization；没有市场观测的参考组按原序推进消费，`action_before` 返回 `None`。真实市场身份到达后，宿主在其首组前调用有限驱动的 `enroll_market`，它沿原执行器登记，并根据返回的真实登记身份及原规则快照补入已有规则映射；重复请求不会使用不同候选身份改写映射。登记模式限制、失败和训练/离线业务开始后的冻结不变。空迭代器不能替代正常输入封口；计划停止只排空原前缀。旧二进制可能拒绝新空场景，本组件接线不代表完整持续 PAPER 宿主已经交付。
+空初始市场场景沿原场景格式创建账户，不需要占位市场。真实开户仍立即产生 Initialization；没有市场观测的参考组按原序推进消费，`action_before` 返回 `None`。真实市场身份到达后，宿主在其首组前调用两种驱动共用的 `enroll_market`，它沿原执行器登记，并根据返回的真实登记身份及原规则快照补入已有规则映射；重复请求不会使用不同候选身份改写映射。登记模式限制、失败和训练/离线业务开始后的冻结不变。空迭代器不能替代正常输入封口；计划停止只排空原前缀。旧二进制可能拒绝新空场景，本组件接线不代表完整持续 PAPER 宿主已经交付。
+
+任务 #109 的持续入口 `ContinuousPublicConsumptionV1` 与有限入口共用 `PublicConsumptionStateV1`，包含原执行器、规则映射、组回执和决策状态。`PublicGroupDecisionV1` 不再携带有限迭代器类型；Shared 与 Bridge 借用相同组决策，消费、NOE 放行、Ledger/registry 应用、重新获取 cutoff、冻结读取及请求顺序保持不变。
+
+持续 PAPER 入口创建时只取一次 UTC 锚与单调起点，`apply_group(Arc<PreparedPublicGroupV1>)` 在实际串行应用点分配执行毫秒，不接收外部每组时间。来源和接收时间原样保留；处理或同步记录容量等待可以把同来源毫秒的组分到不同执行毫秒，这是在线边界，不证明训练更保守。应用前先处理更早的原义务，容量恢复或前序处理后重新取时钟。相同执行毫秒的 BUY/原 pending mutation 等待时钟严格越过后关闭；GTD、终局和返佣仍经原归约在同刻行情之前处理。
+
+宿主可按 `next_wake_after()` 返回的相对时长唤醒并调用 `advance_due()`，无原义务时返回 `None`。空闲推进只执行已到期原义务，不生成行情 frame、不推进 NOE 的公开可见时间；后续实际组仍按原领取条件放行，不保证首个后继组反馈齐备。供料和空闲调用串行，容量不足沿原同步等待，不另建线程、队列或等待窗口。`stop_and_drain` 不推进剩余义务。
+
+SIM 公共关闭日志新增 `ExecutionClockAdvancedTo` 依据，未扩展 DPT 的 replay-index 关闭合同。原有限 `NextGlobalEventAt` / `EndOfInput` JSON 形状不变，新读取器读取旧日志；旧二进制读取新关闭理由没有兼容保证。本增量不包含 DPT 在线所有权改造、连续准备材料或完整 PAPER 进程宿主，也没有线上长时资源验证。

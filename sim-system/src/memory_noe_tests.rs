@@ -89,19 +89,17 @@ fn close_at<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>
     at: i64,
 ) {
     let next = driver.last_receipt.as_ref().unwrap().group.group_position + 1;
-    driver
-        .execution
-        .close_public_time(TrustedPublicTimeClosureV1 {
+    let closure = TrustedPublicTimeClosureV1 {
             execution_time: driver.time(at),
             consumption_sequence_ref: driver.consumption_sequence_ref.clone(),
             next_group_position: next,
-            closure: ReplayIndexClosureV1::NextGlobalEventAt(if next <= 5 {
+            closure: PublicTimeClosureReasonV1::NextGlobalEventAt(if next <= 5 {
                 26_000
             } else {
                 TERMINAL_ADMITTED_TIME_MS
             }),
-        })
-        .unwrap();
+        };
+    driver.execution.close_public_time(closure).unwrap();
     driver.drive_position += 1;
     driver.close_pending = false;
 }
@@ -1001,4 +999,107 @@ async fn empty_initial_markets_driver_enrollment_preserves_failures_idempotence_
         }
         driver.stop_and_drain().unwrap();
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn continuous_idle_uses_real_noe_without_early_delivery() {
+    use std::sync::atomic::Ordering;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let core = recorded_memory_with_probe(&root, true);
+    let context = core.pm_context(CONDITION_ID).unwrap();
+    let scenario = sealed_scenario_for_markets(vec![
+        crate::scenario::PlatformMarketV1::try_new(
+            context.market,
+            context
+                .assets
+                .into_iter()
+                .map(|a| a.asset)
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+        )
+        .unwrap(),
+    ]);
+    let (execution, observation) =
+        memory_execution_with_scenario_capacity::<noe_projection::MeasuredOrderEvidence>(
+            &temp.path().join("sim.jsonl"),
+            scenario,
+            SimCallerRoleV1::Paper,
+            128,
+            None,
+        )
+        .await;
+    let (mut driver, clock) = controlled_continuous(execution, 22_000);
+    let mut source =
+        RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, MemoryRecordedTimes).unwrap();
+    for _ in 0..5 {
+        driver
+            .apply_group(source.next().unwrap().unwrap().prepared)
+            .unwrap();
+    }
+    driver
+        .decision()
+        .unwrap()
+        .request(BusinessRequestV2::PostOrder(PostOrderRequestV2 {
+            context: RequestContextV2 {
+                global_request_id: "online-memory-buy".into(),
+                caller_correlation_id: None,
+            },
+            item: post_item(
+                "buy",
+                &ConditionId(CONDITION_ID.into()),
+                &TokenId(UP_TOKEN_ID.into()),
+                SimBuyOrderKindV1::GtcLimit {
+                    limit_price_pusd_per_share: Decimal::new(2, 1),
+                    size_shares: Decimal::from(5),
+                    post_only: true,
+                },
+            ),
+        }))
+        .unwrap();
+    let due = driver.required_at().unwrap();
+    clock.store(due + 1, Ordering::SeqCst);
+    driver.advance_due().unwrap();
+    let received = completed_post_response(&driver.execution.actor, "online-memory-buy")
+        .unwrap()
+        .metadata
+        .response_received_at_utc_ms;
+    assert!(received > 22_000);
+    clock.store((received + 1).max(26_000), Ordering::SeqCst);
+    driver.advance_due().unwrap();
+    assert!(observation.take_closed_feedback().is_empty());
+    assert_eq!(
+        driver
+            .decision()
+            .unwrap()
+            .cutoff()
+            .private_feedback_sequence(),
+        0
+    );
+    let old_receipt = driver.last_receipt.as_ref().unwrap().clone();
+    let receipt = driver
+        .apply_group(source.next().unwrap().unwrap().prepared)
+        .unwrap()
+        .0;
+    assert!(
+        receipt.execution_time().logical_time_utc_ms()
+            > old_receipt.execution_time().logical_time_utc_ms()
+    );
+    // 首个后继组只更新 visible，原关闭前缀仍未覆盖响应；不得承诺立即齐备。
+    assert!(observation.take_closed_feedback().is_empty());
+    clock.store((received + 2).max(28_000), Ordering::SeqCst);
+    driver
+        .apply_group(source.next().unwrap().unwrap().prepared)
+        .unwrap();
+    assert!(!observation.take_closed_feedback().is_empty());
+    assert!(
+        driver
+            .decision()
+            .unwrap()
+            .cutoff()
+            .private_feedback_sequence()
+            > 0
+    );
+    driver.stop_and_drain().unwrap();
 }

@@ -63,12 +63,19 @@ impl TrustedGroupDecisionCutoffV1 {
         self.private_feedback_sequence
     }
 }
+/// SIM 公共时钟关闭依据；有限两种变体保留原序列化形状。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PublicTimeClosureReasonV1 {
+    NextGlobalEventAt(i64),
+    EndOfInput,
+    ExecutionClockAdvancedTo(i64),
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct TrustedPublicTimeClosureV1 {
     pub(crate) execution_time: TrustedActorExecutionTimeV1,
     pub(crate) consumption_sequence_ref: String,
     pub(crate) next_group_position: u64,
-    pub(crate) closure: ReplayIndexClosureV1,
+    pub(crate) closure: PublicTimeClosureReasonV1,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct PublicObservationFrameV1<'a> {
@@ -214,7 +221,7 @@ pub(crate) struct LoggedPublicClosureV1 {
     pub execution_time: ActorTimeRecordV1,
     pub consumption_sequence_ref: String,
     pub next_group_position: u64,
-    pub closure: ReplayIndexClosureV1,
+    pub closure: PublicTimeClosureReasonV1,
 }
 impl LoggedPublicClosureV1 {
     pub(crate) fn into_trusted(self) -> TrustedPublicTimeClosureV1 {
