@@ -91,7 +91,7 @@ impl PublicRecordingWriterV1 {
     pub fn committed_prefix(&self) -> Option<&CommittedIngressPrefixV1> {
         self.committed.as_ref()
     }
-    fn write(&mut self, row: PublicStoredRowV1) -> RecordingResult<()> {
+    fn write(&mut self, row: impl Serialize) -> RecordingResult<()> {
         if self.writer.is_none() {
             let mut writer = SequentialCaptureWriter::create(
                 "public_recording_v1",
@@ -184,37 +184,52 @@ impl PublicRecordingWriterV1 {
         }
         for group in result.applied.closed_groups {
             let refs = group.records.iter().map(|f| f.position.clone()).collect();
-            for fact in group.records {
-                let (binding, record) = match fact.payload {
-                    PublicBusinessPayloadV1::PolymarketMessage(message) => (
-                        PublicFactBindingV1 {
-                            position: fact.position,
+            for fact in &group.records {
+                if let PublicBusinessPayloadV1::PolymarketMessage(message) = &fact.payload {
+                    // 共享组只借用编码；字段/枚举形状与原 PublicStoredRowV1 完全相同。
+                    #[derive(Serialize)]
+                    enum Record<'a> {
+                        PolymarketMessage(&'a CanonicalPmMessageV1),
+                    }
+                    #[derive(Serialize)]
+                    enum Row<'a> {
+                        Canonical {
+                            canonical_position: u64,
+                            binding: PublicFactBindingV1,
+                            record: Record<'a>,
+                        },
+                    }
+                    self.write(Row::Canonical {
+                        canonical_position: self.pending.next_canonical_position,
+                        binding: PublicFactBindingV1 {
+                            position: fact.position.clone(),
                             event_id: message.event_id.clone(),
                         },
-                        CanonicalEventRecordV2::PolymarketMessage(message),
-                    ),
-                    _ => batches
+                        record: Record::PolymarketMessage(message),
+                    })?;
+                } else {
+                    let (binding, record) = batches
                         .remove(&fact.position)
-                        .expect("同次归约材料对应当组事实"),
-                };
-                self.write(PublicStoredRowV1::Canonical {
-                    canonical_position: self.pending.next_canonical_position,
-                    binding,
-                    record,
-                })?;
+                        .expect("同次归约材料对应当组事实");
+                    self.write(PublicStoredRowV1::Canonical {
+                        canonical_position: self.pending.next_canonical_position,
+                        binding,
+                        record,
+                    })?;
+                }
                 self.pending.next_canonical_position += 1;
             }
             let mut observation_positions = Vec::new();
-            for observation in group.observations {
+            for observation in &group.observations {
                 let index = PublicObservationIndexV1 {
                     observation_position: self.pending.next_observation_position,
-                    market: observation.market,
+                    market: observation.market.clone(),
                     group_position: observation.group_position,
-                    visible_prefix: observation.visible_prefix,
+                    visible_prefix: observation.visible_prefix.clone(),
                     group_events: observation
                         .group_events
-                        .into_iter()
-                        .map(|f| f.position)
+                        .iter()
+                        .map(|f| f.position.clone())
                         .collect(),
                 };
                 observation_positions.push(index.observation_position);
@@ -222,9 +237,9 @@ impl PublicRecordingWriterV1 {
                 self.pending.next_observation_position += 1;
             }
             self.write(PublicStoredRowV1::Group(PublicGroupIndexV1 {
-                group_id: group.group_id,
+                group_id: group.group_id.clone(),
                 group_position: group.group_position,
-                member_input_positions: group.member_input_positions,
+                member_input_positions: group.member_input_positions.clone(),
                 closed_at_input_position: group.closed_at_input_position,
                 records: refs,
                 observation_positions,

@@ -17,7 +17,7 @@ pub const DOWN_TOKEN_ID: &str = "3";
 const SNAPSHOT_RECEIVED_AT: i64 = 10_000;
 const MARKET_START_AT: i64 = 20_000;
 const MARKET_END_AT: i64 = 30_000;
-fn market() -> MarketIdentityV2 {
+pub fn market() -> MarketIdentityV2 {
     MarketIdentityV2 {
         condition_id: ConditionId(CONDITION_ID.to_owned()),
         clob_market_id: ClobMarketId(CLOB_MARKET_ID.to_owned()),
@@ -155,7 +155,7 @@ fn change(quantity: Option<&str>) -> PolymarketPriceChangeEntry {
     }
 }
 
-fn core() -> PublicObservationCoreV1 {
+pub fn core() -> PublicObservationCoreV1 {
     PublicObservationCoreV1::new(PublicInputStreamHeaderV1 {
         input_stream_id: "core-test".to_owned(),
         canonical_rule_version: "rule-v1".to_owned(),
@@ -168,7 +168,7 @@ fn core() -> PublicObservationCoreV1 {
     .unwrap()
 }
 
-fn record(position: u64, row: TypedRawRowV2) -> RecordedIngressV1 {
+pub fn record(position: u64, row: TypedRawRowV2) -> RecordedIngressV1 {
     let source_evidence = source_evidence_v3_from_typed_raw_v2(&row).unwrap();
     RecordedIngressV1 {
         input_stream_id: "core-test".to_owned(),
@@ -181,7 +181,7 @@ fn record(position: u64, row: TypedRawRowV2) -> RecordedIngressV1 {
     }
 }
 
-fn meta(position: u64) -> RecordedIngressV1 {
+pub fn meta(position: u64) -> RecordedIngressV1 {
     record(
         position,
         TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(
@@ -190,7 +190,12 @@ fn meta(position: u64) -> RecordedIngressV1 {
     )
 }
 
-fn pm(position: u64, seq: u64, source: i64, event: PolymarketOrderbookEvent) -> RecordedIngressV1 {
+pub fn pm(
+    position: u64,
+    seq: u64,
+    source: i64,
+    event: PolymarketOrderbookEvent,
+) -> RecordedIngressV1 {
     record(
         position,
         TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row(
@@ -199,7 +204,7 @@ fn pm(position: u64, seq: u64, source: i64, event: PolymarketOrderbookEvent) -> 
     )
 }
 
-fn config() -> data_pipeline_training::gate_a::GateAOutputConfig {
+pub fn config() -> data_pipeline_training::gate_a::GateAOutputConfig {
     let mut config = data_pipeline_training::gate_a_formal_output_config();
     config.sort.batch_rows = 2;
     config.sort.max_run_rows = 4;
@@ -229,7 +234,7 @@ const TERMINAL_ADMITTED_TIME_MS: i64 = 31_003;
 const TERMINAL_SOURCE_TIME_MS: i64 = 31_000;
 const WS_EPOCH: &str = "epoch-a";
 const WS_ADMISSION_SEQUENCE: u64 = 50;
-fn terminal_metadata_row(market: &MarketIdentityV2) -> PolymarketMarketMetadataRow {
+pub fn terminal_metadata_row(market: &MarketIdentityV2) -> PolymarketMarketMetadataRow {
     PolymarketMarketMetadataRow {
         metadata_row_kind: PolymarketMetadataRowKind::ResolutionTerminalWs,
         timestamp_received: TERMINAL_RECEIVED_TIME_MS,
@@ -304,7 +309,7 @@ fn terminal_metadata_row(market: &MarketIdentityV2) -> PolymarketMarketMetadataR
         ws_claimant_collector_admission_sequence: Some(WS_ADMISSION_SEQUENCE),
     }
 }
-fn terminal_orderbook_row(market: &MarketIdentityV2) -> PolymarketOrderbookRow {
+pub fn terminal_orderbook_row(market: &MarketIdentityV2) -> PolymarketOrderbookRow {
     PolymarketOrderbookRow {
         timestamp_received: TERMINAL_RECEIVED_TIME_MS,
         timestamp: Some(TERMINAL_SOURCE_TIME_MS),
@@ -1029,14 +1034,7 @@ fn recorded_two_market_rebate(
 pub fn recorded_reference_then_market(root: &Path) -> (PublicObservationCoreV1, TradingTimes) {
     let mut core = core();
     let mut writer = PublicRecordingWriterV1::create(root, core.header(), config()).unwrap();
-    let inputs = vec![
-        record(
-            0,
-            TypedRawRowV2::PolymarketRtdsChainlinkTwap(reference_after(9_000, 1)),
-        ),
-        meta(1),
-        pm(2, 1, 22_000, book("100")),
-    ];
+    let inputs = reference_then_market_inputs();
     for input in inputs {
         let applied = apply(&mut core, &input);
         writer.record(input, applied).unwrap();
@@ -1163,4 +1161,16 @@ pub fn recorded_average_pool(
     }
     writer.stabilize().unwrap();
     (core, TradingTimes(times))
+}
+
+/// 在线测试直接用原构造材料，不经记录读取回灌。
+pub fn reference_then_market_inputs() -> Vec<RecordedIngressV1> {
+    vec![
+        record(
+            0,
+            TypedRawRowV2::PolymarketRtdsChainlinkTwap(reference_after(9_000, 1)),
+        ),
+        meta(1),
+        pm(2, 1, 22_000, book("100")),
+    ]
 }

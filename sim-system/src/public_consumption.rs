@@ -92,6 +92,72 @@ pub struct PreparedPublicGroupV1 {
     pub pm_inputs: Vec<(u64, PreparedPmMessageV1)>,
     pub pm_contexts: Vec<PmMarketContextV1<PreparedPmEvidenceV1<SourceEvidenceRefV3>>>,
 }
+#[cfg(any(test, feature = "public-consumption"))]
+impl PreparedPublicGroupV1 {
+    /// 同次在线应用材料：共享原组 Arc，移动 PM 原准备对象，不重解析或读盘。
+    /// 宿主按返回组原序登记/消费后，再完成 pending 的记录确认。
+    pub fn from_online<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+        pending: &mut data_pipeline_training::public_online::PublicOnlinePendingV1<'_, S>,
+    ) -> Vec<Arc<Self>> {
+        let (applied, materials) = pending.materials();
+        prepare_public_groups(
+            applied,
+            materials.first_canonical_position,
+            &mut materials.prepared_pm,
+            |condition| materials.pm_contexts.get(condition).cloned(),
+        )
+    }
+}
+#[cfg(any(test, feature = "public-consumption"))]
+fn prepare_public_groups(
+    applied: &AppliedIngressV1,
+    mut canonical_position: u64,
+    prepared_pm: &mut Option<PreparedPmMessageV1>,
+    mut context: impl FnMut(
+        &str,
+    ) -> Option<PmMarketContextV1<PreparedPmEvidenceV1<SourceEvidenceRefV3>>>,
+) -> Vec<Arc<PreparedPublicGroupV1>> {
+    applied
+        .closed_groups
+        .iter()
+        .map(|group| {
+            let reference = PublicGroupReferenceV1 {
+                input_stream_id: applied.applied_prefix.input_stream_id.clone(),
+                applied_prefix: applied.applied_prefix.clone(),
+                group_position: group.group_position,
+                group_id: group.group_id.clone(),
+                closed_at_input_position: group.closed_at_input_position,
+            };
+            let mut pm_inputs = Vec::new();
+            let mut contexts = std::collections::BTreeMap::new();
+            for fact in &group.records {
+                let market = match &fact.payload {
+                    PublicBusinessPayloadV1::PolymarketMessage(message) => {
+                        if let Some(pm) = prepared_pm.take() {
+                            pm_inputs.push((canonical_position, pm));
+                        }
+                        Some(&message.market)
+                    }
+                    PublicBusinessPayloadV1::MarketFact { market, .. } => Some(market),
+                    _ => None,
+                };
+                if let Some(market) = market
+                    && let Some(value) = context(&market.condition_id.0)
+                {
+                    contexts.insert(market.condition_id.0.clone(), value);
+                }
+                canonical_position += 1;
+            }
+            Arc::new(PreparedPublicGroupV1 {
+                reference,
+                group: Arc::clone(group),
+                pm_inputs,
+                pm_contexts: contexts.into_values().collect(),
+            })
+        })
+        .collect()
+}
+
 impl std::fmt::Debug for PreparedPublicGroupV1 {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.reference.fmt(f)
@@ -397,7 +463,6 @@ pub struct RecordedPublicGroupSourceV1<T> {
     replay: data_pipeline_training::public_replay::PublicReplayV1,
     times: T,
     pending: std::collections::VecDeque<PublicGroupDeliveryV1>,
-    canonical_position: u64,
     normal_end: bool,
 }
 #[cfg(any(test, feature = "public-consumption"))]
@@ -414,7 +479,6 @@ impl<T: PublicConsumptionTimeSourceV1> RecordedPublicGroupSourceV1<T> {
             )?,
             times,
             pending: std::collections::VecDeque::new(),
-            canonical_position: 0,
             normal_end: false,
         })
     }
@@ -427,6 +491,7 @@ impl<T: PublicConsumptionTimeSourceV1> Iterator for RecordedPublicGroupSourceV1<
             if let Some(item) = self.pending.pop_front() {
                 return Some(Ok(item));
             }
+            let first_canonical_position = self.replay.core.next_canonical_position();
             let (input, applied, mut prepared_pm) = match self.replay.next_prepared_applied() {
                 Ok(Some(result)) => result,
                 Ok(None) if self.normal_end => return None,
@@ -449,49 +514,19 @@ impl<T: PublicConsumptionTimeSourceV1> Iterator for RecordedPublicGroupSourceV1<
                 input.ingress,
                 data_pipeline_core::public_input::DptIngressV1::EndOfInput
             );
-            let prefix = applied.applied.applied_prefix;
-            for group in applied.applied.closed_groups {
-                let reference = PublicGroupReferenceV1 {
-                    input_stream_id: prefix.input_stream_id.clone(),
-                    applied_prefix: prefix.clone(),
-                    group_position: group.group_position,
-                    group_id: group.group_id.clone(),
-                    closed_at_input_position: group.closed_at_input_position,
-                };
-                let at = match self.times.execution_time_for_group(&reference) {
+            for prepared in prepare_public_groups(
+                &applied.applied,
+                first_canonical_position,
+                &mut prepared_pm,
+                |condition| self.replay.core.prepared_pm_context(condition),
+            ) {
+                let at = match self.times.execution_time_for_group(&prepared.reference) {
                     Ok(at) => at,
                     Err(error) => return Some(Err(error)),
                 };
-                let mut pm_inputs = Vec::new();
-                let mut contexts = std::collections::BTreeMap::new();
-                for fact in &group.records {
-                    let market = match &fact.payload {
-                        PublicBusinessPayloadV1::PolymarketMessage(message) => {
-                            if let Some(pm) = prepared_pm.take() {
-                                pm_inputs.push((self.canonical_position, pm));
-                            }
-                            Some(&message.market)
-                        }
-                        PublicBusinessPayloadV1::MarketFact { market, .. } => Some(market),
-                        _ => None,
-                    };
-                    if let Some(market) = market {
-                        if let Some(context) =
-                            self.replay.core.prepared_pm_context(&market.condition_id.0)
-                        {
-                            contexts.insert(market.condition_id.0.clone(), context);
-                        }
-                    }
-                    self.canonical_position += 1;
-                }
                 self.pending.push_back(PublicGroupDeliveryV1 {
                     delivered_at_utc_ms: at,
-                    prepared: Arc::new(PreparedPublicGroupV1 {
-                        reference,
-                        group: Arc::new(group),
-                        pm_inputs,
-                        pm_contexts: contexts.into_values().collect(),
-                    }),
+                    prepared,
                 });
             }
         }

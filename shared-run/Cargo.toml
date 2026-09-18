@@ -20,4 +20,5 @@ data-pipeline-training = { path = "../data-pipeline/training" }
 serde_json = "=1.0.150"
 sha2 = "=0.10.9"
 tempfile = "=3.27.0"
-tokio = { version = "=1.52.3", default-features = false, features = ["macros", "rt"] }
+tokio = { version = "=1.52.3", default-features = false, features = ["macros", "rt", "net", "io-util", "time"] }
+data-collect = { path = "../data-collect" }

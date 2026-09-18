@@ -373,7 +373,7 @@ pub struct ClosedBusinessGroupV1 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppliedIngressV1 {
     pub applied_prefix: AppliedIngressPrefixV1,
-    pub closed_groups: Vec<ClosedBusinessGroupV1>,
+    pub closed_groups: Vec<std::sync::Arc<ClosedBusinessGroupV1>>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

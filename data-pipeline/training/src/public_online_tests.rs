@@ -769,3 +769,194 @@ async fn planned_stop_never_masks_callback_failure_after_core_application() {
     assert_eq!(failure.last_received_transport_sequence, 0);
     assert!(failure.measurements.stable_prefix.is_none());
 }
+
+#[tokio::test]
+async fn owned_input_handoff_waits_same_future_and_records_before_confirmation() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("record");
+    let (client, server) = UnixStream::pair().unwrap();
+    let (gate, entered) = block_writer();
+    let (first_confirmed, first_confirmation) = oneshot::channel();
+    let peer = tokio::spawn(async move {
+        let mut server = server;
+        start(&mut server, "paper").await;
+        message(&mut server, 1, fixture::meta(0)).await;
+        first_confirmed.send(()).unwrap();
+        message(
+            &mut server,
+            2,
+            fixture::pm(1, 1, 22000, fixture::book("100")),
+        )
+        .await;
+        write_handoff_v2(
+            &mut server,
+            &DataCollectHandoffV2::End {
+                last_confirmed_sequence: 2,
+            },
+        )
+        .await
+        .unwrap();
+    });
+    let mut progress = PublicOnlineProgressV1::default();
+    let session = PublicOnlineSessionV1::start(client, &root, config(100, 1), &mut progress)
+        .await
+        .unwrap();
+    let PublicOnlineNextV1::Applied(first) =
+        session.next_applied(std::future::pending()).await.unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(first.input().input_position, 0);
+    // core.push 已发生，尚未 Record；真实生产者仍收不到 Received。
+    let mut first_confirmation = Box::pin(first_confirmation);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), &mut first_confirmation)
+            .await
+            .is_err()
+    );
+    assert!(!entered.load(Ordering::SeqCst));
+    let shared_group = first.applied().closed_groups[0].clone();
+    let PublicOnlineCompletedInputV1::Continue(session) = first.complete().await.unwrap() else {
+        panic!()
+    };
+    first_confirmation.await.unwrap();
+    let mut next = Box::pin(session.next_applied(std::future::pending()));
+    for _ in 0..3 {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut next)
+                .await
+                .is_err()
+        );
+        assert!(entered.load(Ordering::SeqCst));
+        // 记录后台确实持有原 Arc，容量未释放；不重新 next/重解析。
+        assert_eq!(Arc::strong_count(&shared_group), 2);
+    }
+    release(&gate);
+    let PublicOnlineNextV1::Applied(second) = next.await.unwrap() else {
+        panic!()
+    };
+    assert_eq!(second.input().input_position, 1);
+    assert_eq!(second.materials.first_canonical_position, 5); // 原 metadata 的五条规范事实。
+    assert!(second.materials.prepared_pm.is_some());
+    let PublicOnlineCompletedInputV1::Continue(session) = second.complete().await.unwrap() else {
+        panic!()
+    };
+    let PublicOnlineNextV1::Applied(end) =
+        session.next_applied(std::future::pending()).await.unwrap()
+    else {
+        panic!()
+    };
+    assert!(matches!(end.input().ingress, DptIngressV1::EndOfInput));
+    let PublicOnlineCompletedInputV1::End(completion) = end.complete().await.unwrap() else {
+        panic!()
+    };
+    peer.await.unwrap();
+    assert_eq!(completion.measurements.applied_inputs, 3);
+    assert_eq!(completion.measurements.consumed_groups, 2);
+    assert_eq!(completion.last_received_transport_sequence, 2);
+    assert!(completion.committed_prefix.normal_end);
+    let mut replay = PublicReplayV1::open(&root, 1, 1 << 20).unwrap();
+    let mut positions = Vec::new();
+    while let Some((input, _)) = replay.next_applied().unwrap() {
+        positions.push(input.input_position);
+    }
+    assert_eq!(positions, vec![0, 1, 2]);
+}
+
+#[tokio::test]
+async fn dropping_applied_owner_ends_connection_without_confirmation_or_forged_end() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("record");
+    let (client, mut server) = UnixStream::pair().unwrap();
+    let peer = tokio::spawn(async move {
+        start(&mut server, "paper").await;
+        let DptIngressV1::Message { row, .. } = fixture::meta(0).ingress else {
+            panic!()
+        };
+        write_handoff_v2(
+            &mut server,
+            &DataCollectHandoffV2::Message {
+                row,
+                transport_sequence: 1,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(read_handoff_v2(&mut server).await.is_err());
+    });
+    let mut progress = PublicOnlineProgressV1::default();
+    let session = PublicOnlineSessionV1::start(client, &root, config(100, 1), &mut progress)
+        .await
+        .unwrap();
+    let PublicOnlineNextV1::Applied(pending) =
+        session.next_applied(std::future::pending()).await.unwrap()
+    else {
+        panic!()
+    };
+    assert_eq!(pending.applied().applied_prefix.next_input_position, 1);
+    drop(pending); // 不存在可继续 next 的 session；不是自动记录或可恢复取消。
+    peer.await.unwrap();
+    assert_eq!(progress.measurements.applied_inputs, 1);
+    assert_eq!(progress.last_received_transport_sequence, 0);
+    assert!(
+        PublicRecordingReaderV1::recover(&root, 1, 1 << 20)
+            .unwrap()
+            .prefix
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn owned_stop_leaves_waiting_future_before_background_drain() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("record");
+    let (client, mut server) = UnixStream::pair().unwrap();
+    let (gate, entered) = block_writer();
+    let peer = tokio::spawn(async move {
+        start(&mut server, "paper").await;
+        message(&mut server, 1, fixture::meta(0)).await;
+        std::future::pending::<()>().await;
+    });
+    let mut progress = PublicOnlineProgressV1::default();
+    let session = PublicOnlineSessionV1::start(client, &root, config(100, 1), &mut progress)
+        .await
+        .unwrap();
+    let PublicOnlineNextV1::Applied(input) =
+        session.next_applied(std::future::pending()).await.unwrap()
+    else {
+        panic!()
+    };
+    let PublicOnlineCompletedInputV1::Continue(session) = input.complete().await.unwrap() else {
+        panic!()
+    };
+    let (stop, stopped) = oneshot::channel();
+    let mut waiting = Box::pin(session.next_applied(async {
+        stopped.await.unwrap();
+    }));
+    for _ in 0..3 {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut waiting)
+                .await
+                .is_err()
+        );
+    }
+    assert!(entered.load(Ordering::SeqCst));
+    stop.send(()).unwrap();
+    let PublicOnlineNextV1::Stopped(session) = waiting.await.unwrap() else {
+        panic!()
+    };
+    // 已退出可协作 timer 的 future；原 writer 仍阻塞，next 没有偷偷开始 finish。
+    let mut drain = Box::pin(session.stop_and_drain());
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), &mut drain)
+            .await
+            .is_err()
+    );
+    release(&gate);
+    let stopped = drain.await.unwrap();
+    assert_eq!(stopped.last_received_transport_sequence, 1);
+    let prefix = stopped.measurements.stable_prefix.unwrap();
+    assert_eq!(prefix.next_input_position, 1);
+    assert!(!prefix.normal_end);
+    peer.abort();
+}

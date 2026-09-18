@@ -9,6 +9,7 @@ use contracts::*;
 use rust_decimal::Decimal;
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
+use std::sync::Arc;
 
 type LevelKey = (String, bool, Decimal);
 
@@ -516,6 +517,10 @@ impl PublicObservationCoreV1 {
     /// 仅投影已知固定身份；来源准备可借此构造规范消息。
     pub fn fixed_markets(&self) -> impl Iterator<Item = MarketIdentityV2> + '_ {
         self.markets.values().map(|m| m.pm.context.market.clone())
+    }
+    /// 原规范事实位置；供同次材料消费者按组内事实原序绑定。
+    pub fn next_canonical_position(&self) -> u64 {
+        self.next_canonical_position
     }
     /// 来源准备的同一证据材料，只投影固定上下文，不复制数量状态。
     pub fn prepared_pm_context(
@@ -1063,7 +1068,7 @@ impl PublicObservationCoreV1 {
         group_id: Sha256Hex,
         members: Vec<u64>,
         records: Vec<PublicBusinessFactV1>,
-        groups: &mut Vec<ClosedBusinessGroupV1>,
+        groups: &mut Vec<Arc<ClosedBusinessGroupV1>>,
     ) {
         let depth = ObservedFactV1 {
             value: if self.global.depth.value.is_some() {
@@ -1095,14 +1100,14 @@ impl PublicObservationCoreV1 {
             })
             .collect();
         self.next_canonical_position += records.len() as u64;
-        groups.push(ClosedBusinessGroupV1 {
+        groups.push(Arc::new(ClosedBusinessGroupV1 {
             group_id,
             group_position: self.next_group_position,
             member_input_positions: members,
             closed_at_input_position: self.next_input_position,
             records,
             observations,
-        });
+        }));
         self.next_group_position += 1;
     }
     fn apply_fact(&mut self, fact: &PublicBusinessFactV1, group: &Sha256Hex) {
