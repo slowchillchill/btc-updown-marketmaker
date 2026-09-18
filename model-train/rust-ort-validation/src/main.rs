@@ -278,6 +278,87 @@ fn object_case(
     }
     Ok(())
 }
+// 真实原生组的状态图窄验收；操作顺序由Rust输入给定，不重推资格。
+#[derive(Deserialize)]
+struct NativeSuite {
+    layers: usize,
+    hidden: usize,
+    groups: Vec<NativeGroup>,
+}
+#[derive(Deserialize)]
+struct NativeGroup {
+    pre_frame_hidden_ops: Vec<serde_json::Value>,
+    rows: Vec<NativeRow>,
+    post_frame_hidden_ops: Vec<serde_json::Value>,
+}
+#[derive(Deserialize)]
+struct NativeRow {
+    hidden_state_key: serde_json::Value,
+    fast: Vec<f32>,
+    slow: Vec<f32>,
+}
+fn native_operations(
+    ops: &[serde_json::Value],
+    hidden: &mut std::collections::BTreeMap<String, Vec<f32>>,
+    layers: usize,
+    width: usize,
+) -> Result<()> {
+    for op in ops {
+        if let Some(root) = op.get("ResetRootHidden") {
+            hidden.retain(|key, _| {
+                let key: serde_json::Value = serde_json::from_str(key).unwrap();
+                key["trajectory_id"] != root["trajectory_id"]
+                    || key["account_id"] != root["account_id"]
+            });
+        } else if let Some(value) = op.get("InitializeZero") {
+            hidden.insert(
+                serde_json::to_string(&value["hidden_state_key"])?,
+                vec![0.; layers * width],
+            );
+        } else if let Some(value) = op.get("Retire") {
+            hidden.remove(&serde_json::to_string(&value["hidden_state_key"])?);
+        } else {
+            return Err("unknown native hidden operation".into());
+        }
+    }
+    Ok(())
+}
+fn native_state(session: &mut Session, path: &Path, out: &mut impl Write) -> Result<()> {
+    let suite: NativeSuite = serde_json::from_reader(std::fs::File::open(path)?)?;
+    let mut hidden = std::collections::BTreeMap::new();
+    for (g, group) in suite.groups.iter().enumerate() {
+        native_operations(
+            &group.pre_frame_hidden_ops,
+            &mut hidden,
+            suite.layers,
+            suite.hidden,
+        )?;
+        for (r, row) in group.rows.iter().enumerate() {
+            let key = serde_json::to_string(&row.hidden_state_key)?;
+            let previous = hidden
+                .get(&key)
+                .ok_or("native hidden key not initialized")?;
+            let outputs=session.run(ort::inputs!["fast_features"=>tensor(&[1,836],&row.fast)?,"slow_features"=>tensor(&[1,412],&row.slow)?,"h_prev"=>tensor(&[suite.layers,1,suite.hidden],previous)?])?;
+            let values = ["z_t", "h_next"]
+                .iter()
+                .map(|name| {
+                    outputs[*name]
+                        .try_extract_tensor::<f32>()
+                        .map(|(_, v)| v.to_vec())
+                })
+                .collect::<ort::Result<Vec<_>>>()?;
+            hidden.insert(key, values[1].clone());
+            emit(out, &format!("native/{g}/{r}"), &values)?;
+        }
+        native_operations(
+            &group.post_frame_hidden_ops,
+            &mut hidden,
+            suite.layers,
+            suite.hidden,
+        )?;
+    }
+    Ok(())
+}
 fn main() -> Result<()> {
     let args = std::env::args().collect::<Vec<_>>();
     let library = Path::new(&args[1]).canonicalize()?;
@@ -285,7 +366,7 @@ fn main() -> Result<()> {
     let threads: usize = args[3].parse()?;
     let mut state_session = session(&Path::new(&args[2]).join("state_encoder.onnx"), threads)?;
     let mut action_session = session(&Path::new(&args[2]).join("action_decoder.onnx"), threads)?;
-    let suite: Suite = serde_json::from_reader(std::fs::File::open(&args[4])?)?;
+
     let mut out = BufWriter::new(std::io::stdout().lock());
     writeln!(
         out,
@@ -293,6 +374,12 @@ fn main() -> Result<()> {
         serde_json::json!({"build":ort::info(),"api":ort::MINOR_VERSION,"library":library,
         "mapped":std::fs::read_to_string("/proc/self/maps")?.lines().filter(|l|l.contains("libonnxruntime.so")).collect::<Vec<_>>(),"threads":threads})
     )?;
+    if args[4] == "--native" {
+        native_state(&mut state_session, Path::new(&args[5]), &mut out)?;
+        out.flush()?;
+        return Ok(());
+    }
+    let suite: Suite = serde_json::from_reader(std::fs::File::open(&args[4])?)?;
     for c in &suite.cases {
         let mut h = vec![0.; suite.layers * c.batch * suite.hidden];
         for step in 0..c.steps {

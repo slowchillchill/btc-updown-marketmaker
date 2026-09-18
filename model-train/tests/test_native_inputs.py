@@ -19,54 +19,127 @@ class NativeInputTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[1]
         groups = Path(cls.temp.name) / "groups.json"
         populations = Path(cls.temp.name) / "populations.json"
+        overlap = Path(cls.temp.name) / "overlap.json"
         env = dict(os.environ, NATIVE_INPUT_FIXTURE_OUTPUT=str(groups),
-                   NATIVE_OBJECT_FIXTURE_OUTPUT=str(populations))
+                   NATIVE_OBJECT_FIXTURE_OUTPUT=str(populations), NATIVE_OVERLAP_FIXTURE_OUTPUT=str(overlap))
         subprocess.run(["cargo", "test", "--manifest-path", str(root / "native-inputs/Cargo.toml"),
                         "--locked", "--offline", "--lib"], env=env, check=True)
-        cls.groups = json.loads(groups.read_text())
+        cls.groups = json.loads(groups.read_text()) + json.loads(overlap.read_text())
         cls.populations = json.loads(populations.read_text())
+        cls.evidence = Path(os.environ["NATIVE_VALIDATION_OUTPUT"]) if os.environ.get("NATIVE_VALIDATION_OUTPUT") else None
+        if cls.evidence:
+            cls.evidence.mkdir(parents=True, exist_ok=True)
+            (cls.evidence / "groups.json").write_text(json.dumps(cls.groups))
+            (cls.evidence / "populations.json").write_text(populations.read_text())
         cls.graphs = TwoGraphs(CONFIGURATIONS[2]).eval()
         # 原验收权重可由调用方明确传入；默认复用原构造器相同冻结种子。
         if path := os.environ.get("NATIVE_COMPONENT_WEIGHTS"):
             cls.graphs.load_state_dict(torch.load(path, map_location="cpu", weights_only=True))
 
-    def test_real_slow_branch_and_mechanical_hidden_operations(self):
-        consumer = NativeComponentConsumer(self.graphs)
-        calls = []
-        def advance(row, encoded, previous):
-            calls.append(row["hidden_state_key"])
-            self.assertEqual(encoded.shape, (1, 128))
-            # 状态宿主调用计数探针；不填造836槽或把探针当实际GRU前向。
-            return previous + 1
-        for group in self.groups:
-            result = consumer.consume(group, on_frame=advance)
-            for row, actual in zip(group["rows"], result.slow_embeddings):
-                expected = self.graphs.state.slow_encoder(torch.tensor([row["slow"]]))
-                torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-            before = len(calls)
-            # 参数消费只读已编码结果，不再次消费组，不触发隐藏推进。
-            result.cancel_reduced.sum().item()
-            result.cancel_embeddings.sum().item()
-            self.assertEqual(len(calls), before)
-        self.assertEqual(len(calls), sum(len(group["rows"]) for group in self.groups))
-        self.assertEqual(consumer.hidden, {})
+    def test_real_complete_state_and_frozen_parameter_consumption(self):
+        for config in (CONFIGURATIONS[1], CONFIGURATIONS[2]):
+            graphs = self.graphs if not config.baseline else TwoGraphs(config).eval()
+            consumer = NativeComponentConsumer(graphs)
+            expected_hidden = {}
+            calls = []
+            handle = graphs.state.register_forward_hook(lambda *args: calls.append(1))
+            previous_cash = {}
+            for group in self.groups:
+                # 独立顺序重放全部层状态；同一原生真实特征，不用回调替身。
+                oracle = NativeComponentConsumer(graphs)
+                oracle.hidden = expected_hidden
+                oracle._operations(group["pre_frame_hidden_ops"])
+                expected = []
+                from model_train.native_inputs import hidden_key
+                for row in group["rows"]:
+                    key = hidden_key(row["hidden_state_key"])
+                    with torch.no_grad():
+                        z, h = graphs.state(torch.tensor([row["fast"]]),
+                                            torch.tensor([row["slow"]]), oracle.hidden[key])
+                    oracle.hidden[key] = h
+                    expected.append(z)
+                    self.assertEqual(row["fast"][806:], row["rule"])
+                    if row["role"] == "DecisionRequired":
+                        cash = row["slow"][110]
+                        root_key=key[:2]
+                        if root_key in previous_cash and cash != previous_cash[root_key]:
+                            self.assertAlmostEqual(cash, torch.log1p(torch.tensor(80.)).item(), places=6)
+                        previous_cash[root_key] = cash
+                oracle._operations(group["post_frame_hidden_ops"])
+                expected_hidden = oracle.hidden
+                calls.clear()
+                with torch.no_grad():
+                    result = consumer.consume(group)
+                self.assertEqual(len(calls), len(group["rows"]))
+                for actual, want in zip(result.states, expected):
+                    torch.testing.assert_close(actual, want, rtol=0, atol=0)
+                for key, state in expected_hidden.items():
+                    torch.testing.assert_close(consumer.hidden[key], state, rtol=0, atol=0)
+                saved = {k:v.clone() for k,v in consumer.hidden.items()}
+                for i, row in enumerate(group["rows"]):
+                    if row["role"] != "DecisionRequired":
+                        continue
+                    for prefix in row["fixture_prefixes"]:
+                        with torch.no_grad():
+                            scores = consumer.parameters(result, i, prefix)
+                        self.assertTrue(torch.isfinite(scores[0][0]).all())
+                self.assertEqual(len(calls), len(group["rows"]))
+                for key, h in saved.items():
+                    torch.testing.assert_close(consumer.hidden[key], h, rtol=0, atol=0)
+            handle.remove()
+            self.assertEqual(len(consumer.hidden), 1)  # 下一市场继续，开市不重置。
+
+    @unittest.skipUnless(os.environ.get("NATIVE_MAIN_GRAPH") and os.environ.get("NATIVE_BASELINE_GRAPH"), "requires original frozen graph archive")
+    def test_real_native_sequence_in_original_rust_ort(self):
+        import onnxruntime
+        import numpy as np
+        root = Path(__file__).resolve().parents[1]
+        library = next((Path(onnxruntime.__file__).parent / "capi").glob("libonnxruntime.so.*"))
+        for config in (CONFIGURATIONS[1], CONFIGURATIONS[2]):
+            archive = Path(os.environ["NATIVE_BASELINE_GRAPH" if config.baseline else "NATIVE_MAIN_GRAPH"])
+            graphs = TwoGraphs(config).eval()
+            graphs.load_state_dict(torch.load(archive / "initial_weights.pt", map_location="cpu", weights_only=True))
+            expected = []
+            handle = graphs.state.register_forward_hook(
+                lambda module, inputs, output: expected.append([t.detach().numpy().reshape(-1) for t in output]))
+            consumer = NativeComponentConsumer(graphs)
+            with torch.no_grad():
+                for group in self.groups:
+                    consumer.consume(group)
+            handle.remove()
+            fixture = Path(self.temp.name) / f"native-{config.name}.json"
+            fixture.write_text(json.dumps({"layers":config.layers, "hidden":config.hidden, "groups":self.groups}))
+            process = subprocess.run(["cargo", "run", "--manifest-path", str(root / "rust-ort-validation/Cargo.toml"),
+                                      "--locked", "--offline", "--", str(library), str(archive), "1", "--native", str(fixture)],
+                                     capture_output=True, text=True)
+            if self.evidence:
+                (self.evidence / f"{config.name}-native.json").write_text(fixture.read_text())
+                (self.evidence / f"{config.name}-rust.jsonl").write_text(process.stdout)
+                (self.evidence / f"{config.name}-rust.stderr").write_text(process.stderr)
+            process.check_returncode()
+            actual = [json.loads(line)["values"] for line in process.stdout.splitlines()
+                      if json.loads(line).get("label", "").startswith("native/")]
+            self.assertEqual(len(actual), len(expected))
+            for got, want in zip(actual, expected):
+                for a, b in zip(got, want):
+                    np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-5)
 
     def test_actual_complete_objects_and_two_257_partitions(self):
         empty = next(group for group in self.groups if not group["cancel"])
         for group in [empty, *self.populations]:
             count = len(group["cancel"])
             self.assertIn(count, (0, 2, 256, 257, 259))
-            result = NativeComponentConsumer(self.graphs).consume(group)
+            _, objects, actual_reduced, actual_exists = NativeComponentConsumer(self.graphs).objects(group["cancel"])
             features = torch.tensor(group["cancel"], dtype=torch.float32).reshape(1, count, 129)
             expected = self.graphs.action.object_encoder(features)
-            torch.testing.assert_close(result.cancel_embeddings, expected, rtol=2e-5, atol=2e-6)
+            torch.testing.assert_close(objects, expected, rtol=2e-5, atol=2e-6)
             mask = torch.ones((1, count), dtype=torch.bool)
             reduced, exists = reduce_objects([(expected, mask)])
-            torch.testing.assert_close(result.cancel_reduced, reduced, rtol=2e-5, atol=2e-6)
-            self.assertEqual(result.cancel_exists.item(), exists.item())
+            torch.testing.assert_close(actual_reduced, reduced, rtol=2e-5, atol=2e-6)
+            self.assertEqual(actual_exists.item(), exists.item())
             if count == 257:
-                other = NativeComponentConsumer(self.graphs).consume(group, lengths=[128, 129])
-                torch.testing.assert_close(result.cancel_reduced, other.cancel_reduced,
+                _, _, other_reduced, _ = NativeComponentConsumer(self.graphs).objects(group["cancel"], lengths=[128, 129])
+                torch.testing.assert_close(actual_reduced, other_reduced,
                                            rtol=2e-5, atol=2e-6)
 
 

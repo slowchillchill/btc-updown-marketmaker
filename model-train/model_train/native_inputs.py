@@ -1,6 +1,5 @@
-"""原生412/129输入的组件消费；此处不构造完整ModelFrame或动作支持集。"""
+"""原生836/412状态输入与30/60/129参数组件消费；不推导动作支持集。"""
 from dataclasses import dataclass
-from collections.abc import Callable
 
 import torch
 from torch import Tensor
@@ -14,7 +13,10 @@ def hidden_key(value: dict) -> tuple:
 
 @dataclass
 class ComponentGroup:
-    slow_embeddings: list[Tensor]
+    states: list[Tensor]
+    rules: list[Tensor]
+    roles: list[str]
+    cancel_features: Tensor
     cancel_embeddings: Tensor
     cancel_reduced: Tensor
     cancel_exists: Tensor
@@ -35,31 +37,38 @@ class NativeComponentConsumer:
                 self.hidden = {key: state for key, state in self.hidden.items() if key[:2] != root}
             elif kind == "InitializeZero":
                 key = hidden_key(value["hidden_state_key"])
-                self.hidden[key] = parameter.new_zeros((len(self.graphs.state.grus), 1,
-                                                       self.graphs.state.grus[0].hidden_size))
+                state = self.graphs.state
+                layers = len(state.grus) if hasattr(state, "grus") else state.gru.num_layers
+                hidden = state.grus[0].hidden_size if hasattr(state, "grus") else state.gru.hidden_size
+                self.hidden[key] = parameter.new_zeros((layers, 1, hidden))
             elif kind == "Retire":
                 del self.hidden[hidden_key(value["hidden_state_key"])]
             else:
                 raise ValueError(f"unknown native hidden operation: {kind}")
 
-    def consume(self, group: dict, *, lengths: list[int] | None = None,
-                on_frame: Callable[[dict, Tensor, Tensor], Tensor] | None = None) -> ComponentGroup:
-        """on_frame在真实完整帧宿主中承接状态推进；组件验收无需填造fast特征。
-
-        每个Rust帧调用一次；参数头直接使用返回对象，不重新消费组或推进隐藏值。
-        """
+    def consume(self, group: dict, *, lengths: list[int] | None = None) -> ComponentGroup:
+        """整组逐帧一次状态前向；返回冻结 z_t，供后续参数组件调用。"""
         parameter = next(self.graphs.parameters())
         self._operations(group["pre_frame_hidden_ops"])
-        slow = []
+        states, rules, roles = [], [], []
         for row in group["rows"]:
-            features = parameter.new_tensor(row["slow"]).reshape(1, 412)
-            encoded = self.graphs.state.slow_encoder(features)
-            slow.append(encoded)
-            if on_frame is not None:
-                key = hidden_key(row["hidden_state_key"])
-                self.hidden[key] = on_frame(row, encoded, self.hidden[key])
-        features = parameter.new_tensor(group["cancel"]).reshape(1, -1, 129)
-        count = len(group["cancel"])
+            key = hidden_key(row["hidden_state_key"])
+            fast = parameter.new_tensor(row["fast"]).reshape(1, 836)
+            slow = parameter.new_tensor(row["slow"]).reshape(1, 412)
+            z, next_hidden = self.graphs.state(fast, slow, self.hidden[key])
+            self.hidden[key] = next_hidden
+            states.append(z)
+            rules.append(parameter.new_tensor(row["rule"]).reshape(1, 30))
+            roles.append(row["role"])
+        features, objects, reduced, exists = self.objects(group["cancel"], lengths=lengths)
+        self._operations(group["post_frame_hidden_ops"])
+        return ComponentGroup(states, rules, roles, features, objects, reduced, exists)
+
+    def objects(self, values: list[list[float]], *, lengths: list[int] | None = None):
+        """完整对象人口组件可独立消费，不把缺少前序hidden的截点冒称连续帧。"""
+        parameter = next(self.graphs.parameters())
+        features = parameter.new_tensor(values).reshape(1, -1, 129)
+        count = len(values)
         mask = torch.ones((1, count), dtype=torch.bool, device=parameter.device)
         if lengths is None:
             lengths = [min(256, count - offset) for offset in range(0, count, 256)] or [0]
@@ -69,5 +78,19 @@ class NativeComponentConsumer:
                   for f, m, length in object_blocks(features, mask, lengths, empty=count == 0)]
         reduced, exists = reduce_objects(blocks)
         objects = torch.cat([value for value, _ in blocks], dim=1)
-        self._operations(group["post_frame_hidden_ops"])
-        return ComponentGroup(slow, objects, reduced, exists)
+        return features, objects, reduced, exists
+
+    def parameters(self, group: ComponentGroup, row: int, prefix: list[float],
+                   *, lengths: list[int] | None = None) -> list[tuple[Tensor, ...]]:
+        """实际参数图消费 Rust 精确状态投影；复用该帧 z/rule 和全局对象归约。"""
+        if group.roles[row] != "DecisionRequired":
+            raise ValueError("ContextOnly has no parameter invocation")
+        features = group.cancel_features
+        count = features.shape[1]
+        lengths = lengths if lengths is not None else [min(256, count - i)
+                    for i in range(0, count, 256)] or [0]
+        mask = torch.ones((1, count), dtype=torch.bool, device=features.device)
+        prefix = features.new_tensor(prefix).reshape(1, 60)
+        return [self.graphs.action(group.states[row], group.rules[row], prefix, f, m,
+                                  group.cancel_reduced, group.cancel_exists)
+                for f, m, _ in object_blocks(features, mask, lengths, empty=count == 0)]
