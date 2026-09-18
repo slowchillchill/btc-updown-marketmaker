@@ -5971,7 +5971,7 @@ pub(crate) fn taker_fee_pusd_v1(
     let mut total = ExactRatioV1::zero();
     for (base_units, price) in fills {
         total = total.add(exact_taker_fee_contribution_v1(
-            *base_units,
+            &BigUint::from(*base_units),
             *price,
             &rate,
             exponent,
@@ -6005,7 +6005,8 @@ fn allocate_taker_fee_micro_units_by_key<K: Ord>(
     let mut floor_units = Vec::with_capacity(fills.len());
     let mut remainders = Vec::with_capacity(fills.len());
     for (_, base_units, price) in fills {
-        let contribution = exact_taker_fee_contribution_v1(*base_units, *price, &rate, exponent)?;
+        let contribution =
+            exact_taker_fee_contribution_v1(&BigUint::from(*base_units), *price, &rate, exponent)?;
         let (floor, remainder) =
             (&contribution.numerator * &fee_unit_scale).div_rem(&contribution.denominator);
         floor_units.push(floor);
@@ -6069,8 +6070,8 @@ pub(crate) fn allocate_taker_fee_micro_units_v1(
     allocate_taker_fee_micro_units_by_key(fills, rate, exponent)
 }
 
-fn exact_taker_fee_contribution_v1(
-    base_units: u128,
+pub(crate) fn exact_taker_fee_contribution_v1(
+    base_units: &BigUint,
     price: Decimal,
     rate: &ExactRatioV1,
     exponent: u32,
@@ -6078,22 +6079,22 @@ fn exact_taker_fee_contribution_v1(
     if price <= Decimal::ZERO || price >= Decimal::ONE {
         return Err(MatchingMathErrorV1::InvalidPrice);
     }
-    if base_units == 0 {
+    if base_units.is_zero() {
         return Ok(ExactRatioV1::zero());
     }
     let price = positive_decimal_ratio(price)?;
     let curve_numerator = &price.numerator * (&price.denominator - &price.numerator);
     let curve_denominator = &price.denominator * &price.denominator;
     ExactRatioV1::new(
-        BigUint::from(base_units) * &rate.numerator * curve_numerator.pow(exponent),
+        base_units * &rate.numerator * curve_numerator.pow(exponent),
         BigUint::from(1_000_000_u32) * &rate.denominator * curve_denominator.pow(exponent),
     )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct ExactRatioV1 {
-    numerator: BigUint,
-    denominator: BigUint,
+pub(crate) struct ExactRatioV1 {
+    pub(crate) numerator: BigUint,
+    pub(crate) denominator: BigUint,
 }
 
 impl ExactRatioV1 {
@@ -6129,7 +6130,9 @@ impl ExactRatioV1 {
     }
 }
 
-fn nonnegative_decimal_ratio(value: Decimal) -> Result<ExactRatioV1, MatchingMathErrorV1> {
+pub(crate) fn nonnegative_decimal_ratio(
+    value: Decimal,
+) -> Result<ExactRatioV1, MatchingMathErrorV1> {
     if value.is_sign_negative() {
         return Err(MatchingMathErrorV1::NegativeAmount);
     }
@@ -6170,7 +6173,7 @@ fn fee_upper_bound_rounds_to_zero(
     exact_less_than_power_of_two_shift(&left, &right_unshifted, u64::from(exponent) * 2)
 }
 
-fn exact_less_than_power_of_two_shift(
+pub(crate) fn exact_less_than_power_of_two_shift(
     left: &BigUint,
     right_unshifted: &BigUint,
     shift: u64,
@@ -6193,7 +6196,7 @@ fn exact_less_than_power_of_two_shift(
     }
 }
 
-fn rounded_fee_units_v1(total: &ExactRatioV1) -> BigUint {
+pub(crate) fn rounded_fee_units_v1(total: &ExactRatioV1) -> BigUint {
     if total.numerator.is_zero() {
         return BigUint::zero();
     }

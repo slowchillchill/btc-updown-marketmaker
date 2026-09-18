@@ -3030,6 +3030,29 @@ pub(crate) mod tests {
         .await
     }
 
+    pub(crate) async fn snapshot_v3_with_fee_for_cost_tests(
+        rate: &str,
+        exponent: u32,
+    ) -> Arc<SealedProcessRuleSnapshotV3> {
+        // 经相同 HTTP 解析、来源比对与密封入口建立合法规则；不改内部快照。
+        let clob = String::from_utf8(CLOB_REAL.to_vec())
+            .unwrap()
+            .replace("0.07", rate)
+            .replace("\"e\":1", &format!("\"e\":{exponent}"));
+        let gamma = String::from_utf8(GAMMA_CLOSED_REAL.to_vec())
+            .unwrap()
+            .replace("0.0700", rate)
+            .replace("\"1.0\"", &format!("\"{exponent}\""));
+        let server = ScriptedServer::start(vec![
+            ResponseSpec::json(200, clob.into_bytes()),
+            ResponseSpec::json(200, GAMMA_OPEN_EMPTY),
+            ResponseSpec::json(200, gamma.into_bytes()),
+        ])
+        .await;
+        let directory = tempfile::tempdir().unwrap();
+        create_successful_snapshot_v3(&server, directory.path().join("cost-rules.json")).await
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn process_snapshot_queries_only_one_reference_and_is_shared_without_refresh() {
         let server = ScriptedServer::start(successful_responses()).await;
