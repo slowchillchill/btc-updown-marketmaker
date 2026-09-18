@@ -188,3 +188,32 @@ PendingApplied/成功/补偿、QuoteBudget 三态、真实撤单人口 N=0/2/256
 同值新确认/无关组/16 样本、Binance 只更新一档时不冒造其他档时间、两腿独立 tick、前缀
 未选/false/首类别/0.5/B腿/数量叶子，以及真实裸 GRU 两层和残差 GRU 的逐帧递推。
 固定前缀只用于实际参数组件验收；参数图没有完整合法选择宿主，不能视为模型动作验收。
+
+## 给定撤单族后的执行接线
+
+`NativeInputGroup::execute_selected` 接收调用方已经选定的撤单族或 `NoTrade`。
+它从本组 `action_before.cancel_objects()` 读取完整资格与稳定顺序，沿原 129 行索引消费
+`NativeComponentConsumer.cancel_scores` 返回的参数图原分数。各 `CancelScoreBlock` 按完整人口顺序
+覆盖全部实际行，`valid_len` 排除块内 padding；跨块比较严格更大的分数，并列保留原首对象。
+单笔恢复原平台订单 ID，配对保持原 ordinal 0/1，市场对象保留原 condition_id，分别形成既有
+`CancelOrder`、`CancelOrders`、`CancelMarketOrders` 后直接交 `SharedExecutionV1::execute`。
+同组后续调用仍使用原冻结对象，竞争结果由原反馈确认；不复制对象资格或执行状态。
+
+`NoTrade` 传原 `None`，不调用参数图、不生成请求或撤销旧挂单。状态帧先由既有消费者推进一次；
+后续撤单参数调用仅复用该帧 z、规则与完整对象归约，不推进 GRU。这里不计算六族支持集、
+训练采样或联合概率，也不交付 BUY 装配、完整 Actor 或阶段验收。
+
+新增原生测试覆盖真实 86 对的 259 对象前史、一腿取消后的 257 对象、256+1 与 128+129 分块、
+尾块市场对象、同族跨 128 边界并列、padding 排除、顺序市场切换后的指定市场取消，以及
+NoTrade 后原挂单的真实未来成交。多对象与切换案例是明确截点验证，不冒称完整连续两图验收。
+普通独立 crate 测试之外，真实归档图到原意图、发送和回执的测试需显式执行：
+
+```bash
+NATIVE_CANCEL_GRAPH=/path/to/original/MAIN-1x256 \
+  cargo test --manifest-path model-train/native-inputs/Cargo.toml --locked --offline \
+  action_tests::actual_graph_pair_intent_execution_and_frozen_cancel_race -- --ignored
+```
+
+该测试使用项目局部 `.venv`、原初始权重和真实公共组，经 Python 实际参数图输出回到 Rust
+原生宿主执行；检查每帧状态调用一次、参数调用零次 GRU。归档路径未给出时，普通测试明确
+标记该项为 ignored，不能计作已完成真实图验证。
