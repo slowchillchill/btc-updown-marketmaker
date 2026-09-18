@@ -1629,3 +1629,96 @@ async fn equal_start_markets_sort_condition_before_order_formation() {
         .collect();
     assert_eq!(markets, vec![CONDITION_ID, OTHER_CONDITION_ID]);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn planned_stop_preserves_open_orders_and_does_not_read_next_group() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let (core, times) = recorded_trading(&root, "2", true);
+    let path = temp.path().join("sim.jsonl");
+    let (mut execution, observation) = execution(&path, &core, SUCCESS_POLICY);
+    let mut ledger = LedgerWriterV1::new(AccountAdmissionPolicyV1 {
+        per_market_all_in_commitment_limit_pusd: ExactDecimal("1000".into()),
+    });
+    let ledger_root = temp.path().join("ledger");
+    execution
+        .bind_ledger_recording_v2(&mut ledger, &ledger_root)
+        .unwrap();
+    let mut shared = SharedExecutionV1::from_opening(ledger, observation.clone())
+        .unwrap()
+        .unwrap();
+    let reads = std::rc::Rc::new(std::cell::Cell::new(0));
+    let counter = reads.clone();
+    let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times)
+        .unwrap()
+        .inspect(move |_| counter.set(counter.get() + 1));
+    let mut driver = FinitePublicConsumptionV1::new(execution, source, "stop-open".into());
+    for _ in 0..4 {
+        driver.next_group().unwrap().unwrap();
+    }
+    shared.action_before(&mut driver).unwrap().unwrap();
+    shared
+        .execute(
+            &mut driver.decision().unwrap(),
+            context("open-with-position"),
+            Some(Arc::new(ModelIntentV1::SubmitSingleBuy {
+                condition_id: ConditionId(CONDITION_ID.into()),
+                order: BuyLegIntentV1 {
+                    token_id: TokenId(UP_TOKEN_ID.into()),
+                    order: BuyOrderIntentV1::GtcLimit {
+                        limit_price_pusd_per_share: Decimal::new(6, 1),
+                        size_shares: Decimal::from(10),
+                        post_only: false,
+                    },
+                },
+            })),
+        )
+        .await
+        .unwrap();
+    loop {
+        driver.next_group().unwrap().unwrap();
+        let action = shared.action_before(&mut driver).unwrap().unwrap();
+        if action.cutoff().decision_time().logical_time_utc_ms() == 36_000 {
+            let orders: Vec<_> = action.orders().collect();
+            assert_eq!(orders.len(), 1);
+            assert_eq!(
+                orders[0].active_unfilled_shares,
+                ExecutionReadValueV1::Known(ExactDecimal("5".into()))
+            );
+            break;
+        }
+    }
+    let expected = shared.ledger().projection_v2().unwrap();
+    assert_ne!(
+        expected
+            .platform_confirmed_projection
+            .principal_encumbrance_pusd
+            .0,
+        "0"
+    );
+    assert!(
+        expected
+            .platform_confirmed_projection
+            .outcome_balances
+            .iter()
+            .any(|b| b.token_id.0 == UP_TOKEN_ID && b.balance_shares.0 == "5")
+    );
+    let count = reads.get();
+    let delivered = observation.take_closed_records();
+    assert!(delivered.is_empty());
+    driver.stop_and_drain().unwrap();
+    assert_eq!(reads.get(), count, "停止不能调用来源 next 或处理未来终态");
+    assert!(observation.take_closed_records().is_empty());
+    assert_eq!(shared.ledger().projection_v2().unwrap(), expected);
+    assert_eq!(
+        LedgerWriterV1::open_durable(&ledger_root)
+            .unwrap()
+            .projection_v2()
+            .unwrap(),
+        expected
+    );
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(!text.contains("RunSeal"));
+    assert!(!text.contains("CancelOrder"));
+    assert!(!text.contains("CancelAllOrders"));
+}

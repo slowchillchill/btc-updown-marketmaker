@@ -341,7 +341,7 @@ impl crate::run_v2::BusinessProjectionPortV2 for PublicProjectionAdapterV1 {
     }
 }
 
-/// 新消费运行固定采用异步记录及正常封口，不提供事故账户恢复入口。
+/// 新消费运行固定采用异步记录；完整完成才正常封口，不提供事故账户恢复入口。
 pub struct PublicRunOpenedV1 {
     pub projection_version: crate::runtime_v2::BusinessProjectionVersionV1,
     pub run_id: String,
@@ -350,7 +350,8 @@ pub struct PublicRunOpenedV1 {
     pub platform_scenario_file_sha256: Sha256Hex,
     pub proxy_latency_profile_file_sha256: Sha256Hex,
     pub implementation_identity: crate::platform_rules::ImplementationIdentityV1,
-    pub market_event_source_identity_sha256: Sha256Hex,
+    /// 离线来源的真实摘要；在线来源不预先承诺未来输入。
+    pub market_event_source_identity_sha256: Option<Sha256Hex>,
 }
 impl PublicRunOpenedV1 {
     pub(crate) fn into_record(self) -> crate::runtime_v2::RunOpenedV2 {

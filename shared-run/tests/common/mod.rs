@@ -520,7 +520,7 @@ pub fn execution_with_seed(
             source_identity_sha256: Sha256Hex("b".repeat(64)),
             cargo_lock_sha256: Sha256Hex("c".repeat(64)),
         },
-        market_event_source_identity_sha256: Sha256Hex("d".repeat(64)),
+        market_event_source_identity_sha256: Some(Sha256Hex("d".repeat(64))),
     };
     let reference = contracts::execution_normalization::DurableSourceReferenceV1 {
         source: contracts::execution_normalization::ImmutableSourceReferenceV1::Location(

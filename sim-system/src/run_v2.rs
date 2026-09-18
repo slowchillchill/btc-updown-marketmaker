@@ -6738,7 +6738,7 @@ mod tests {
                 source_identity_sha256: sha('5'),
                 cargo_lock_sha256: sha('6'),
             },
-            market_event_source_identity_sha256: sha('7'),
+            market_event_source_identity_sha256: Some(sha('7')),
         }
     }
 
@@ -17776,13 +17776,13 @@ mod tests {
             &latency_profile,
         );
         run_opened.implementation_identity = implementation_identity;
-        run_opened.market_event_source_identity_sha256 = canonical_manifest.clone();
+        run_opened.market_event_source_identity_sha256 = Some(canonical_manifest.clone());
         assert_eq!(
             run_opened.platform_rule_snapshot_file_sha256,
             *rule_snapshot.file_sha256()
         );
         let mut golden_opened = run_opened.clone();
-        golden_opened.market_event_source_identity_sha256 = sha('9');
+        golden_opened.market_event_source_identity_sha256 = Some(sha('9'));
         assert_ne!(
             run_opened.market_event_source_identity_sha256,
             golden_opened.market_event_source_identity_sha256
@@ -18957,6 +18957,15 @@ impl PublicSimExecutionV1 {
     ) -> Result<MarketEnrollmentV2, SimRunActorErrorV2> {
         self.actor.enroll_market(request)
     }
+    /// 排空已经接纳的记录，不推进业务时间、不领取后续反馈，也不生成 RunSeal。
+    pub fn stop_and_drain(mut self) -> Result<(), SimRunActorErrorV2> {
+        self.actor
+            .background_log
+            .take()
+            .ok_or(SimRunActorErrorV2::Closed)?
+            .stop_and_drain()
+            .map_err(SimRunActorErrorV2::Log)
+    }
     pub fn complete(
         self,
         materials: &mut dyn PublicConsumptionMaterialReaderV1,
@@ -19306,6 +19315,10 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
         bucket: AcceptedHiddenStepBucketV1,
     ) -> Result<(), SimRunActorErrorV2> {
         self.execution.hidden_bucket(bucket)
+    }
+    /// 停止读取来源，沿同一后台排空已接纳材料；不消费迭代器剩余项。
+    pub fn stop_and_drain(self) -> Result<(), SimRunActorErrorV2> {
+        self.execution.stop_and_drain()
     }
     pub fn complete(
         self,

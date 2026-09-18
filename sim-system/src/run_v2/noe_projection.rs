@@ -1855,7 +1855,7 @@ mod tests {
                 source_identity_sha256: sha('5'),
                 cargo_lock_sha256: sha('6'),
             },
-            market_event_source_identity_sha256: sha('7'),
+            market_event_source_identity_sha256: Some(sha('7')),
         }
     }
 

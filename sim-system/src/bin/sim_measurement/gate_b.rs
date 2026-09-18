@@ -69,7 +69,7 @@ fn prepare_gate_b_flow(input: GateBFlowPreparation<'_>) -> Result<PreparedGateBF
         platform_scenario_file_sha256: input.scenario.file_sha256().clone(),
         proxy_latency_profile_file_sha256: input.latency.file_sha256().clone(),
         implementation_identity: input.implementation_identity,
-        market_event_source_identity_sha256: input.market_event_source_identity_sha256,
+        market_event_source_identity_sha256: Some(input.market_event_source_identity_sha256),
     };
     let noe_port = sim_system::execution::SimV2NoeProjectionPortV1::new(
         input.output_dir.join("noe"),
