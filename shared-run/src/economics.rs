@@ -75,19 +75,12 @@ pub struct SettlementCoordinatorV1 {
     handled: std::collections::BTreeMap<String, contracts::economics::SettlementObservationV1>,
 }
 impl SettlementCoordinatorV1 {
-    pub(crate) fn advance<
-        I: Iterator<
-            Item = Result<
-                sim_system::public_consumption::PublicGroupDeliveryV1,
-                sim_system::execution::SimRunActorErrorV2,
-            >,
-        >,
-    >(
+    pub(crate) fn advance(
         &mut self,
         registry: &crate::SharedExecutionRegistryV1,
         read: &LedgerEconomicReadV1<'_>,
         account: &contracts::AccountInstanceKeyV1,
-        decision: &mut sim_system::execution::PublicGroupDecisionV1<'_, I>,
+        decision: &mut sim_system::execution::PublicGroupDecisionV1<'_>,
     ) -> Result<(), sim_system::execution::SimRunActorErrorV2> {
         use contracts::economics::*;
         use execution_normalization::{MemoryIdentityKeyV1, SourceNeutralEntityKeyV1};

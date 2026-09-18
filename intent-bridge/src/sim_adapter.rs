@@ -239,45 +239,22 @@ fn sim_order_kind(order: &BuyOrderIntentV1) -> Result<SimBuyOrderKindV1, SimRunA
 }
 
 /// 仅借用当前组的 sealed 后端；不接受调用方替换 cutoff。
-pub struct SimGroupAdapterV1<
-    'd,
-    'run,
-    I: Iterator<
-        Item = Result<sim_system::public_consumption::PublicGroupDeliveryV1, SimRunActorErrorV2>,
-    >,
-> {
-    decision: &'d mut sim_system::execution::PublicGroupDecisionV1<'run, I>,
+pub struct SimGroupAdapterV1<'d, 'run> {
+    decision: &'d mut sim_system::execution::PublicGroupDecisionV1<'run>,
 }
-impl<
-    'd,
-    'run,
-    I: Iterator<
-        Item = Result<sim_system::public_consumption::PublicGroupDeliveryV1, SimRunActorErrorV2>,
-    >,
-> crate::IntentBridge<SimGroupAdapterV1<'d, 'run, I>>
-{
+impl<'d, 'run> crate::IntentBridge<SimGroupAdapterV1<'d, 'run>> {
     pub fn bind_sim_group(
-        decision: &'d mut sim_system::execution::PublicGroupDecisionV1<'run, I>,
+        decision: &'d mut sim_system::execution::PublicGroupDecisionV1<'run>,
     ) -> Self {
         Self::new(SimGroupAdapterV1 { decision })
     }
 }
-impl<
-    I: Iterator<
-        Item = Result<sim_system::public_consumption::PublicGroupDeliveryV1, SimRunActorErrorV2>,
-    >,
-> BridgeBackendV1 for SimGroupAdapterV1<'_, '_, I>
-{
+impl BridgeBackendV1 for SimGroupAdapterV1<'_, '_> {
     type CallContext = RequestContextV2;
     type ImmediateSuccess = MutationRequestReceiptV2;
     type Error = SimRunActorErrorV2;
 }
-impl<
-    I: Iterator<
-        Item = Result<sim_system::public_consumption::PublicGroupDeliveryV1, SimRunActorErrorV2>,
-    >,
-> private::Sealed for SimGroupAdapterV1<'_, '_, I>
-{
+impl private::Sealed for SimGroupAdapterV1<'_, '_> {
     type DispatchFuture<'a>
         = Ready<Result<MutationRequestReceiptV2, SimRunActorErrorV2>>
     where

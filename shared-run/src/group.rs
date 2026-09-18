@@ -2,10 +2,7 @@ use crate::*;
 use contracts::{ConditionId, ExactDecimal, ExecutionReadValueV1, ModelIntentV1};
 use execution_normalization::{MemoryLogicalIdentityV1, NoeConsumedRecordRefV1};
 use ledger::*;
-use sim_system::{
-    execution::*,
-    public_consumption::{PublicGroupDeliveryV1, TrustedGroupDecisionCutoffV1},
-};
+use sim_system::{execution::*, public_consumption::TrustedGroupDecisionCutoffV1};
 use std::sync::Arc;
 
 struct RequestFunds {
@@ -136,12 +133,10 @@ impl SharedExecutionV1 {
         }
     }
     /// 与模型帧无关：所有本组事实应用后才驱动原结算宿主。
-    pub fn advance_settlement<
-        I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>,
-    >(
+    pub fn advance_settlement(
         &mut self,
         coordinator: &mut SettlementCoordinatorV1,
-        driver: &mut FinitePublicConsumptionV1<I>,
+        driver: &mut PublicConsumptionStateV1,
     ) -> Result<bool, SharedSettlementErrorV1> {
         if !self
             .apply_closed()
@@ -166,9 +161,9 @@ impl SharedExecutionV1 {
             .map_err(SharedSettlementErrorV1::Sim)?;
         Ok(true)
     }
-    pub fn action_before<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>(
+    pub fn action_before(
         &mut self,
-        driver: &mut FinitePublicConsumptionV1<I>,
+        driver: &mut PublicConsumptionStateV1,
     ) -> Result<Option<ActionBeforeReadV1>, LedgerErrorV1> {
         if !self.apply_closed()? {
             return Ok(None);
@@ -239,9 +234,9 @@ impl SharedExecutionV1 {
         }))
     }
     /// None为宿主已作出的NoTrade；不制造意图，不调用Bridge。
-    pub async fn execute<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>(
+    pub async fn execute(
         &mut self,
-        decision: &mut PublicGroupDecisionV1<'_, I>,
+        decision: &mut PublicGroupDecisionV1<'_>,
         context: RequestContextV2,
         intent: Option<Arc<ModelIntentV1>>,
     ) -> Result<Option<MutationRequestReceiptV2>, SimRunActorErrorV2> {
