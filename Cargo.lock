@@ -4243,6 +4243,7 @@ dependencies = [
  "num-bigint",
  "num-traits",
  "rust_decimal",
+ "serde",
  "serde_json",
  "sha2",
  "sim-system",
