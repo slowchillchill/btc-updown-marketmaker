@@ -1,0 +1,351 @@
+//! 仅用于阶段 #6 固定技术切片；输入没有 Python 隐藏状态或归约结果。
+use ort::{
+    ep,
+    session::{Session, builder::GraphOptimizationLevel},
+    value::Tensor,
+};
+use serde::{Deserialize, Serialize};
+use std::{
+    error::Error,
+    io::{BufWriter, Write},
+    path::Path,
+};
+type Result<T> = std::result::Result<T, Box<dyn Error>>;
+#[derive(Deserialize)]
+struct Suite {
+    layers: usize,
+    hidden: usize,
+    cases: Vec<Case>,
+}
+#[derive(Deserialize)]
+struct Case {
+    name: String,
+    mode: String,
+    batch: usize,
+    steps: usize,
+    slots: usize,
+    empty: bool,
+    fast: Vec<f32>,
+    slow: Vec<f32>,
+    rule: Vec<f32>,
+    prefix: Vec<f32>,
+    objects: Vec<f32>,
+    mask: Vec<bool>,
+    splits: Vec<Vec<usize>>,
+    prefixes: Vec<Vec<f32>>,
+    active: Vec<usize>,
+}
+#[derive(Serialize)]
+struct Record<'a> {
+    label: &'a str,
+    values: &'a [Vec<f32>],
+}
+fn emit(out: &mut impl Write, label: &str, values: &[Vec<f32>]) -> Result<()> {
+    serde_json::to_writer(&mut *out, &Record { label, values })?;
+    writeln!(out)?;
+    Ok(())
+}
+fn session(path: &Path, threads: usize) -> Result<Session> {
+    Ok(Session::builder()?
+        .with_execution_providers([ep::CPU::default().with_arena_allocator(true).build()])?
+        .with_intra_threads(threads)?
+        .with_inter_threads(1)?
+        .with_parallel_execution(false)?
+        .with_optimization_level(GraphOptimizationLevel::All)?
+        .with_memory_pattern(false)?
+        .with_intra_op_spinning(false)?
+        .with_inter_op_spinning(false)?
+        .commit_from_file(path)?)
+}
+fn tensor(shape: &[usize], values: &[f32]) -> Result<Tensor<f32>> {
+    Ok(Tensor::from_array((shape.to_vec(), values.to_vec()))?)
+}
+fn state(
+    session: &mut Session,
+    case: &Case,
+    layers: usize,
+    hidden: usize,
+    h: &[f32],
+) -> Result<Vec<Vec<f32>>> {
+    let outputs = session.run(ort::inputs![
+        "fast_features" => tensor(&[case.batch,836], &case.fast)?,
+        "slow_features" => tensor(&[case.batch,412], &case.slow)?,
+        "h_prev" => tensor(&[layers,case.batch,hidden], h)?
+    ])?;
+    Ok(["z_t", "h_next"]
+        .iter()
+        .map(|name| {
+            outputs[*name]
+                .try_extract_tensor::<f32>()
+                .map(|(_, v)| v.to_vec())
+        })
+        .collect::<ort::Result<_>>()?)
+}
+// 参数调用只收到本进程计算的 z/reduced，永远不接收或更新隐藏状态。
+#[allow(clippy::too_many_arguments)]
+fn action(
+    session: &mut Session,
+    batch: usize,
+    hidden: usize,
+    slots: usize,
+    z: &[f32],
+    rule: &[f32],
+    prefix: &[f32],
+    objects: &[f32],
+    mask: &[bool],
+    reduced: &[f32],
+    exists: &[bool],
+) -> Result<Vec<Vec<f32>>> {
+    let outputs = session.run(ort::inputs![
+        "z_t" => tensor(&[batch,hidden], z)?, "rule_features" => tensor(&[batch,30],rule)?,
+        "prefix_features" => tensor(&[batch,60],prefix)?, "cancel_features" => tensor(&[batch,slots,129],objects)?,
+        "cancel_mask" => Tensor::from_array(([batch,slots],mask.to_vec()))?,
+        "cancel_reduced" => tensor(&[batch,3*hidden/2],reduced)?,
+        "cancel_exists" => Tensor::from_array(([batch],exists.to_vec()))?
+    ])?;
+    Ok([
+        "family_logits",
+        "quantity_branch_logits",
+        "buy_variant_logits",
+        "price_logits",
+        "post_only_logits",
+        "expiry_logits",
+        "cancel_embeddings",
+        "cancel_logits",
+    ]
+    .iter()
+    .map(|name| {
+        outputs[*name]
+            .try_extract_tensor::<f32>()
+            .map(|(_, v)| v.to_vec())
+    })
+    .collect::<ort::Result<_>>()?)
+}
+fn rows<T: Clone>(data: &[T], width: usize, selected: &[usize]) -> Vec<T> {
+    selected
+        .iter()
+        .flat_map(|&row| data[row * width..(row + 1) * width].iter().cloned())
+        .collect()
+}
+fn block(
+    case: &Case,
+    offset: usize,
+    length: usize,
+    padded: usize,
+    family: Option<usize>,
+) -> (Vec<f32>, Vec<bool>) {
+    let mut x = vec![0.; case.batch * padded * 129];
+    let mut mask = vec![false; case.batch * padded];
+    for row in 0..case.batch {
+        for j in 0..length {
+            let source = (row * case.slots + offset + j) * 129;
+            let dest = (row * padded + j) * 129;
+            x[dest..dest + 129].copy_from_slice(&case.objects[source..source + 129]);
+            mask[row * padded + j] = case.mask[row * case.slots + offset + j]
+                && family.is_none_or(|f| case.objects[source + f] == 1.);
+        }
+    }
+    (x, mask)
+}
+fn selected(scores: &[f32], indices: &[usize]) -> Vec<f32> {
+    if scores.is_empty() {
+        return vec![-1.];
+    }
+    let mut best = 0;
+    for i in 1..scores.len() {
+        if scores[i] > scores[best] {
+            best = i;
+        }
+    }
+    vec![indices[best] as f32]
+}
+fn object_case(
+    session: &mut Session,
+    c: &Case,
+    hidden: usize,
+    z: &[f32],
+    out: &mut impl Write,
+) -> Result<()> {
+    let d = hidden / 2;
+    for (split, lengths) in c.splits.iter().enumerate() {
+        let mut sum = vec![0f64; c.batch * d];
+        let mut max = vec![f64::NEG_INFINITY; c.batch * d];
+        let mut counts = vec![0usize; c.batch];
+        let mut offset = 0;
+        for (part, &length) in lengths.iter().enumerate() {
+            let k = if c.empty { 1 } else { 256 };
+            let (x, mask) = block(c, offset, length, k, None);
+            let result = action(
+                session,
+                c.batch,
+                hidden,
+                k,
+                z,
+                &c.rule,
+                &c.prefix,
+                &x,
+                &mask,
+                &vec![0.; c.batch * 3 * d],
+                &vec![false; c.batch],
+            )?;
+            let mut embeddings = Vec::new();
+            for row in 0..c.batch {
+                for j in 0..length {
+                    let embedding = &result[6][(row * k + j) * d..(row * k + j + 1) * d];
+                    embeddings.extend_from_slice(embedding);
+                    if mask[row * k + j] {
+                        counts[row] += 1;
+                        for f in 0..d {
+                            let v = f64::from(embedding[f]);
+                            sum[row * d + f] += v;
+                            if v > max[row * d + f] {
+                                max[row * d + f] = v;
+                            }
+                        }
+                    }
+                }
+            }
+            emit(
+                out,
+                &format!("{}/split{split}/embedding{part}", c.name),
+                &[embeddings],
+            )?;
+            offset += length;
+        }
+        let mut reduced = vec![0f32; c.batch * 3 * d];
+        let exists = counts.iter().map(|&n| n > 0).collect::<Vec<_>>();
+        for row in 0..c.batch {
+            if counts[row] > 0 {
+                for f in 0..d {
+                    reduced[row * 3 * d + f] = sum[row * d + f] as f32;
+                    reduced[row * 3 * d + d + f] = (sum[row * d + f] / counts[row] as f64) as f32;
+                    reduced[row * 3 * d + 2 * d + f] = max[row * d + f] as f32;
+                }
+            }
+        }
+        emit(
+            out,
+            &format!("{}/split{split}/reduced", c.name),
+            &[
+                reduced.clone(),
+                counts.iter().map(|&n| f32::from(n > 0)).collect(),
+            ],
+        )?;
+        let (x, mask) = block(c, 0, 1, 1, None);
+        emit(
+            out,
+            &format!("{}/split{split}/family", c.name),
+            &action(
+                session, c.batch, hidden, 1, z, &c.rule, &c.prefix, &x, &mask, &reduced, &exists,
+            )?,
+        )?;
+        for family in 0..3 {
+            let mut prefix = vec![0.; c.batch * 60];
+            for row in 0..c.batch {
+                for j in [family + 3, 6, 13] {
+                    prefix[row * 60 + j] = 1.;
+                }
+            }
+            let mut scores = vec![Vec::new(); c.batch];
+            let mut indices = vec![Vec::new(); c.batch];
+            let mut offset = 0;
+            for &length in lengths {
+                let k = if c.empty { 1 } else { 256 };
+                let (x, mask) = block(c, offset, length, k, Some(family));
+                let result = action(
+                    session, c.batch, hidden, k, z, &c.rule, &prefix, &x, &mask, &reduced, &exists,
+                )?;
+                for row in 0..c.batch {
+                    for j in 0..length {
+                        if mask[row * k + j] {
+                            scores[row].push(result[7][row * k + j]);
+                            indices[row].push(offset + j);
+                        }
+                    }
+                }
+                offset += length;
+            }
+            for row in 0..c.batch {
+                let label = format!("{}/split{split}/family{family}/row{row}", c.name);
+                emit(out, &label, &[scores[row].clone()])?;
+                emit(
+                    out,
+                    &format!("{label}/selected"),
+                    &[selected(&scores[row], &indices[row])],
+                )?;
+            }
+        }
+    }
+    Ok(())
+}
+fn main() -> Result<()> {
+    let args = std::env::args().collect::<Vec<_>>();
+    let library = Path::new(&args[1]).canonicalize()?;
+    ort::init_from(&library)?.commit();
+    let threads: usize = args[3].parse()?;
+    let mut state_session = session(&Path::new(&args[2]).join("state_encoder.onnx"), threads)?;
+    let mut action_session = session(&Path::new(&args[2]).join("action_decoder.onnx"), threads)?;
+    let suite: Suite = serde_json::from_reader(std::fs::File::open(&args[4])?)?;
+    let mut out = BufWriter::new(std::io::stdout().lock());
+    writeln!(
+        out,
+        "{}",
+        serde_json::json!({"build":ort::info(),"api":ort::MINOR_VERSION,"library":library,
+        "mapped":std::fs::read_to_string("/proc/self/maps")?.lines().filter(|l|l.contains("libonnxruntime.so")).collect::<Vec<_>>(),"threads":threads})
+    )?;
+    for c in &suite.cases {
+        let mut h = vec![0.; suite.layers * c.batch * suite.hidden];
+        for step in 0..c.steps {
+            let outputs = state(&mut state_session, c, suite.layers, suite.hidden, &h)?;
+            let z = &outputs[0];
+            h = outputs[1].clone();
+            emit(&mut out, &format!("{}/state{step}", c.name), &outputs)?;
+            let zero = vec![0.; c.batch * 3 * suite.hidden / 2];
+            let absent = vec![false; c.batch];
+            if c.mode == "objects" {
+                object_case(&mut action_session, c, suite.hidden, z, &mut out)?;
+            } else {
+                let prefixes = if c.prefixes.is_empty() {
+                    vec![c.prefix.clone()]
+                } else {
+                    c.prefixes.clone()
+                };
+                for (p, prefix) in prefixes.iter().enumerate() {
+                    let selected_rows = if c.mode == "active" {
+                        c.active.clone()
+                    } else {
+                        (0..c.batch).collect()
+                    };
+                    emit(
+                        &mut out,
+                        &format!("{}/step{step}/prefix{p}/rows", c.name),
+                        &[selected_rows.iter().map(|&r| r as f32).collect()],
+                    )?;
+                    if selected_rows.is_empty() {
+                        continue;
+                    }
+                    let result = action(
+                        &mut action_session,
+                        selected_rows.len(),
+                        suite.hidden,
+                        c.slots,
+                        &rows(z, suite.hidden, &selected_rows),
+                        &rows(&c.rule, 30, &selected_rows),
+                        &rows(prefix, 60, &selected_rows),
+                        &rows(&c.objects, c.slots * 129, &selected_rows),
+                        &rows(&c.mask, c.slots, &selected_rows),
+                        &rows(&zero, 3 * suite.hidden / 2, &selected_rows),
+                        &rows(&absent, 1, &selected_rows),
+                    )?;
+                    emit(
+                        &mut out,
+                        &format!("{}/step{step}/prefix{p}/action", c.name),
+                        &result,
+                    )?;
+                }
+            }
+        }
+    }
+    out.flush()?;
+    Ok(())
+}

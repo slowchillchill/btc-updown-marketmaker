@@ -77,5 +77,41 @@ OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 .venv/bin/python -m model_train.measure_padd
 计时保持同一模型/会话，预热一次后测10次，记录两遍加宿主归约的中位数/最大值和原样本；旧逻辑只作成本对照。
 CPU结果不代表目标CPU容量或GPU模式验收。
 
-本交付不包含Rust ORT、真实经济特征接线、完整精确支持集、三端最终意图一致性、70分钟C场景、长期内存、
+本交付不包含真实经济特征接线、完整精确支持集、三端最终意图一致性、70分钟C场景、长期内存、
 目标CPU/GPU测量、训练、部署或资金动作；不关闭任务1.5或阶段#6。非零FOK/FAK费用证明仍属原剩余依赖。
+
+
+## Rust ORT 三端技术验证
+
+按 [任务1.5分配](https://github.com/slowchillchill/btc-updown-marketmaker/issues/6#issuecomment-5725576224)，
+`rust-ort-validation` 是独立局部 Cargo 工程，锁定 `ort/ort-sys 2.0.0-rc.13`、`api-27`。
+它用 `init_from` 绝对路径加载锁定 Python ORT 1.28.0 wheel 内的原生库，随后提交环境再创建会话；
+不从系统自动选择另一 ORT。Python扩展和独立原生库是 wheel 中两个不同文件，分别记录哈希。
+会话显式 CPU、arena开启、顺序执行、全优化、intra1或4、inter1、关闭空转及memory pattern。
+
+从本目录运行；`GRAPHS` 指向已有对应配置的归档目录（必须同时含两图、外部参数与原 `initial_weights.pt`），
+不同运行使用不同 `OUTPUT`。该命令只加载原产物，不导出或保存新权重。
+
+```bash
+cargo build --manifest-path rust-ort-validation/Cargo.toml --locked --offline
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python -m model_train.validate_three_runtimes --config MAIN-1x256 --threads 1 --graphs "$GRAPHS" --output "$OUTPUT"
+cargo fmt --manifest-path rust-ort-validation/Cargo.toml --check
+cargo clippy --manifest-path rust-ort-validation/Cargo.toml --locked --offline -- -D warnings
+```
+
+4线程时同时将 `OMP_NUM_THREADS`、`MKL_NUM_THREADS` 和 `--threads` 改为4。驱动在夹具与模型计算前一次性设置
+PyTorch算子内N/算子间1线程，结果记录实际线程值、环境变量与构建/并行计算后端。
+
+首次准备 Cargo 缓存需按局部 `Cargo.lock` 下载依赖，之后可离线执行。四配置分别运行1/4线程。
+Python驱动把原合法技术切片写为 `inputs.json`，其中没有隐藏状态、z或对象归约；
+Rust自行从零递推全部层状态，并在两遍对象调用之间按全局稳定顺序执行float64 sum/mean/max。
+最大值只在严格更大时替换。Python ORT和PyTorch也独立递推并归约。
+Rust的 `rust.jsonl` 保留实际各步输出，`rust.stderr` 保留加载/执行错误；`result.json` 只在完整比较通过后写入。
+三端不向账本或模拟器提交动作。
+
+每配置每线程18个场景覆盖B1/2/3各12步、K1/2/128/129/255/256、六种完整对象集合及混合空行、
+合法GTC前缀和活动行0/2及空活动集合。N257的256+1与128+129在每端均比较逐对象分数、归约和严格首项argmax；
+空集合仍K1全假，非空两遍每逻辑块补到256再修剪。原分块结果不能只以归约相近替代选择一致。
+所有数值比较以PyTorch为rtol参考、拒绝非有限值；索引与行映射要求精确相等。
+证据摘要见 `validation/rust-ort-report.json`，原始大输出保存在本次任务产物目录，不提交Git。
+这些结果仅证明固定纯图技术切片三端一致，不代表三端经济最终意图、目标CPU/GPU容量或阶段完成。
