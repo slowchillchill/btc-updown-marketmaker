@@ -14,7 +14,15 @@ fn anchor_discovery_now() -> BtcUpdownDiscovery {
 
 #[tokio::test]
 async fn anchor_prefetch_empty_is_refreshed_at_open_and_same_values_are_not_cached() {
-    let discovery = anchor_discovery_now();
+    let mut discovery = test_btc_discovery();
+    // 使用上一完整窗口，模拟推进到开盘后20秒也不超前于真实准入时钟。
+    let start_s = (now_ms().div_euclid(300_000) - 1) * 300;
+    discovery.current.slug = format!("btc-updown-5m-{start_s}");
+    discovery.current.start_ts_s = start_s;
+    discovery.current.end_ts_s = start_s + 300;
+    discovery.current.candidate_start_ts_s = start_s;
+    discovery.current.candidate_end_ts_s = start_s + 300;
+    refresh_test_discovery_evidence(&mut discovery.current, start_s * 1_000 - 1);
     let start = discovery.current.start_ts_s * 1_000;
     let (gamma, server) = anchor_http_fixture(
         &discovery.current,

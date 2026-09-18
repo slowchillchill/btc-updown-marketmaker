@@ -77,6 +77,7 @@ async fn planned_stop_stabilizes_opening_and_last_ledger_intake_without_next_gro
     let scenario = sealed_scenario_for_markets(vec![crate::scenario::PlatformMarketV1::try_new(context.market, context.assets.into_iter().map(|a|a.asset).collect::<Vec<_>>().try_into().unwrap()).unwrap()]);
     let path = temp.path().join("sim.jsonl");
     let (mut execution, observation) = memory_execution_with_cash::<noe_projection::MeasuredOrderEvidence>(&path, scenario, SimCallerRoleV1::Paper, 1, None, "100").await;
+    execution.wait_for_recording_capacity().unwrap();
     let release = execution.actor.background_log.as_ref().unwrap().pause_for_tests(false);
     let opening = observation.opening_record().unwrap();
     assert!(opening.durable_reference().is_none());
