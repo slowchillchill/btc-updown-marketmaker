@@ -24,6 +24,7 @@ struct OrderFunds {
 }
 /// 持有同一组必要标量和原Arc引用；后续动作不能改写本组读取。
 pub struct ActionBeforeReadV1 {
+    economics: AccountEconomicsReadV1,
     cutoff: TrustedGroupDecisionCutoffV1,
     ledger: LedgerProjectionV2,
     registry: SharedExecutionRegistryV1,
@@ -31,6 +32,9 @@ pub struct ActionBeforeReadV1 {
     orders: Vec<OrderFunds>,
 }
 impl ActionBeforeReadV1 {
+    pub fn economics(&self) -> &AccountEconomicsReadV1 {
+        &self.economics
+    }
     pub fn cutoff(&self) -> &TrustedGroupDecisionCutoffV1 {
         &self.cutoff
     }
@@ -90,6 +94,12 @@ impl SharedExecutionV1 {
             pending: Vec::new(),
         }))
     }
+    pub fn reserve_action_v2(
+        &mut self,
+        intents: &[ReserveIntentV1],
+    ) -> Result<Vec<LedgerReservationOutcomeV1>, LedgerErrorV1> {
+        self.ledger.try_reserve_action_v2(intents)
+    }
     pub fn ledger(&self) -> &LedgerWriterV1 {
         &self.ledger
     }
@@ -106,7 +116,10 @@ impl SharedExecutionV1 {
                 match self.ledger.apply_noe_memory_v1(&record)? {
                     LedgerMemoryApplyOutcomeV1::Applied(
                         LedgerApplyOutcomeV1::MissingPlatformPredecessor { .. },
-                    ) => waiting.push(record),
+                    )
+                    | LedgerMemoryApplyOutcomeV1::MissingEconomicAssociation => {
+                        waiting.push(record)
+                    }
                     _ => {
                         self.registry.observe(&record);
                         applied = true;
@@ -121,6 +134,36 @@ impl SharedExecutionV1 {
                 return Ok(false);
             }
         }
+    }
+    /// 与模型帧无关：所有本组事实应用后才驱动原结算宿主。
+    pub fn advance_settlement<
+        I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>,
+    >(
+        &mut self,
+        coordinator: &mut SettlementCoordinatorV1,
+        driver: &mut FinitePublicConsumptionV1<I>,
+    ) -> Result<bool, SharedSettlementErrorV1> {
+        if !self
+            .apply_closed()
+            .map_err(SharedSettlementErrorV1::Ledger)?
+        {
+            return Ok(false);
+        }
+        let Some(mut decision) = driver.decision() else {
+            return Ok(false);
+        };
+        let Some(read) = self.ledger.economic_read() else {
+            return Ok(false);
+        };
+        let opening = self.observation.opening_record().expect("共享根已经开户");
+        coordinator
+            .advance(
+                &read,
+                &opening.context().source.account_instance_key,
+                &mut decision,
+            )
+            .map_err(SharedSettlementErrorV1::Sim)?;
+        Ok(true)
     }
     pub fn action_before<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>(
         &mut self,
@@ -184,6 +227,9 @@ impl SharedExecutionV1 {
             })
             .collect();
         Ok(Some(ActionBeforeReadV1 {
+            economics: AccountEconomicsReadV1::from_ledger(
+                &self.ledger.economic_read().expect("同组 Ledger 已开户"),
+            ),
             cutoff,
             ledger,
             registry,
@@ -210,4 +256,10 @@ impl SharedExecutionV1 {
         self.registry.record_sim_receipt(&frozen, &receipt);
         Ok(Some(receipt))
     }
+}
+
+#[derive(Debug)]
+pub enum SharedSettlementErrorV1 {
+    Ledger(LedgerErrorV1),
+    Sim(SimRunActorErrorV2),
 }

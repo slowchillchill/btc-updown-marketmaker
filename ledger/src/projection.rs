@@ -103,3 +103,8 @@ pub struct LedgerProjectionV2 {
     pub local_pending_reservation_projection: LedgerLocalPendingReservationProjectionV1,
     pub market_projections: Vec<LedgerMarketProjectionV1>,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AccountAdmissionPolicyV2 {
+    DualCashNoMarketLimit,
+}

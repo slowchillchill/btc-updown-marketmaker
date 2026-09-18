@@ -73,6 +73,12 @@ impl FundsStateV1 {
                     row=Some(result.order_identity.clone()); condition=Some(result.condition_id.clone());
                     patch.unassigned=Some((result.trade_identity.clone(),Vec::new()));
                 }
+                SourceNeutralEvidenceKind::TradeLifecycleV3 {result} => {
+                    let result = &result.result;
+                    patch.trade=Some((result.trade_identity.clone(),result.order_identity.clone()));
+                    row=Some(result.order_identity.clone()); condition=Some(result.condition_id.clone());
+                    patch.unassigned=Some((result.trade_identity.clone(),Vec::new()));
+                }
                 SourceNeutralEvidenceKind::OrderLifecycle {result} => {row=Some(result.order_identity.clone());condition=Some(result.condition_id.clone());}
                 SourceNeutralEvidenceKind::Control {result: contracts::execution_normalization::SourceNeutralControlResult::Submission {outcome: contracts::execution_normalization::SourceNeutralSubmissionOutcomeV2::Accepted {order,..}}} => {row=Some(order.order_identity.clone());condition=Some(order.condition_id.clone());}
                 _=>{}

@@ -16,6 +16,10 @@ use contracts::{CancelInputItemRefV2, ConditionId, ExactDecimal};
 use serde::{Deserialize, Serialize};
 
 use crate::identity::NormalizationIdentity;
+use contracts::economics::{
+    SourceNeutralEconomicDispositionV2, SourceNeutralEconomicFactV2,
+    SourceNeutralSettlementLifecycleResultV2, SourceNeutralTradeLifecycleResultV3,
+};
 use contracts::execution_normalization::SourceNeutralAccountIdentityV1;
 
 #[cfg(test)]
@@ -38,6 +42,13 @@ pub struct SourceOrderV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum SourceNeutralLogicalKeyV1 {
+    RebateDay {
+        kind: contracts::economics::RebateKindV1,
+        attribution_day_start_utc_ms: i64,
+    },
+    InitialMarket {
+        condition_id: String,
+    },
     AccountOpening {
         opening_evidence_identity: String,
     },
@@ -139,11 +150,30 @@ impl<I: Clone> SourceNeutralEconomicEvidenceV1<I> {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceNeutralEconomicEvidenceV2<I = StableLogicalIdentityV1> {
+    pub economic_key: SourceNeutralEconomicKeyV1,
+    pub disposition: SourceNeutralEconomicDispositionV2<I>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum SourceNeutralEntityKeyV1 {
-    Order { source_order_id: String },
-    Trade { source_trade_id: String },
-    Resolution { source_resolution_id: String },
+    ExternalCash {
+        source_cash_id: String,
+    },
+    Order {
+        source_order_id: String,
+    },
+    Trade {
+        source_trade_id: String,
+    },
+    Resolution {
+        source_resolution_id: String,
+    },
+    SettlementCost {
+        source_resolution_id: String,
+        source_cost_id: String,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -169,6 +199,9 @@ pub enum NormalizationPendingScopeV1 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SourceNeutralEvidenceKind<T, C = SourceNeutralControlResultV1, I = StableLogicalIdentityV1>
 {
+    InitialMarket {
+        result: contracts::economics::SourceNeutralInitialMarketV1,
+    },
     MarketEnrollment {
         result: SourceNeutralMarketEnrollmentResultV1,
     },
@@ -183,6 +216,15 @@ pub enum SourceNeutralEvidenceKind<T, C = SourceNeutralControlResultV1, I = Stab
     },
     SettlementLifecycle {
         result: SourceNeutralSettlementLifecycleResultV1<I>,
+    },
+    TradeLifecycleV3 {
+        result: SourceNeutralTradeLifecycleResultV3<I>,
+    },
+    SettlementLifecycleV2 {
+        result: SourceNeutralSettlementLifecycleResultV2<I>,
+    },
+    EconomicV2 {
+        evidence: SourceNeutralEconomicEvidenceV2<I>,
     },
     Economic {
         evidence: SourceNeutralEconomicEvidenceV1<I>,
@@ -243,6 +285,10 @@ pub enum NormalizationRecord<
         source_order: SourceOrderV1,
         fact: SourceNeutralEconomicFactV1<I, F>,
     },
+    EconomicFactV2 {
+        source_order: SourceOrderV1,
+        fact: SourceNeutralEconomicFactV2<I, F>,
+    },
     Duplicate {
         logical_identity: I,
         source_order: SourceOrderV1,
@@ -293,6 +339,7 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I, F> NormalizationRecord<T, C,
                 logical_identity, ..
             } => logical_identity,
             Self::EconomicFact { fact, .. } => &fact.logical_identity,
+            Self::EconomicFactV2 { fact, .. } => &fact.logical_identity,
         }
     }
 
@@ -300,6 +347,7 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I, F> NormalizationRecord<T, C,
         match self {
             Self::Evidence { source_order, .. }
             | Self::EconomicFact { source_order, .. }
+            | Self::EconomicFactV2 { source_order, .. }
             | Self::Duplicate { source_order, .. }
             | Self::EconomicAlias { source_order, .. }
             | Self::Pending { source_order, .. }
@@ -325,6 +373,7 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I, F> NormalizationRecord<T, C,
                 source_reference, ..
             } => source_reference,
             Self::EconomicFact { fact, .. } => &fact.source_reference,
+            Self::EconomicFactV2 { fact, .. } => &fact.source_reference,
         }
     }
 
@@ -395,13 +444,13 @@ pub struct NormalizationIndexCountsV1 {
 #[derive(Debug)]
 pub(crate) struct CoreState<T, C, I, F> {
     logical: BTreeMap<I, StoredLogical<T, C, I>>,
-    economic: BTreeMap<SourceNeutralEconomicIdentityV1, SourceNeutralEconomicFactV1<I, F>>,
+    economic: BTreeMap<SourceNeutralEconomicIdentityV1, SourceNeutralEconomicFactV2<I, F>>,
 }
 
 #[derive(Debug)]
 pub(crate) struct CoreStateDelta<T, C, I, F> {
     logical: BTreeMap<I, StoredLogical<T, C, I>>,
-    economic: BTreeMap<SourceNeutralEconomicIdentityV1, SourceNeutralEconomicFactV1<I, F>>,
+    economic: BTreeMap<SourceNeutralEconomicIdentityV1, SourceNeutralEconomicFactV2<I, F>>,
 }
 
 #[derive(Clone, Debug)]
@@ -419,7 +468,7 @@ enum StoredEvidence<T, C, I> {
     },
     Economic {
         economic_identity: SourceNeutralEconomicIdentityV1,
-        disposition: SourceNeutralEconomicDispositionV1<I>,
+        disposition: SourceNeutralEconomicDispositionV2<I>,
     },
 }
 
@@ -527,6 +576,25 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I: NormalizationIdentity<F>, F:
                         StoredLogical {
                             evidence: StoredEvidence::Economic {
                                 economic_identity: fact.economic_identity.clone(),
+                                disposition: fact.disposition.clone().into(),
+                            },
+                            cancellation_input_item_refs: Self::cancellation_input_item_refs(
+                                &fact.source_reference,
+                            )
+                            .map(<[CancelInputItemRefV2]>::to_vec),
+                            source_reference: fact.source_reference.clone(),
+                        },
+                    );
+                    core.state
+                        .economic
+                        .insert(fact.economic_identity.clone(), fact.clone().into());
+                }
+                NormalizationRecord::EconomicFactV2 { fact, .. } => {
+                    core.state.logical.insert(
+                        fact.logical_identity.clone(),
+                        StoredLogical {
+                            evidence: StoredEvidence::Economic {
+                                economic_identity: fact.economic_identity.clone(),
                                 disposition: fact.disposition.clone(),
                             },
                             cancellation_input_item_refs: Self::cancellation_input_item_refs(
@@ -582,7 +650,13 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I: NormalizationIdentity<F>, F:
                         SourceNeutralEvidenceKind::Economic { evidence } => {
                             StoredEvidence::Economic {
                                 economic_identity: core.economic_identity(&evidence.key()),
-                                disposition: evidence.disposition(),
+                                disposition: evidence.disposition().into(),
+                            }
+                        }
+                        SourceNeutralEvidenceKind::EconomicV2 { evidence } => {
+                            StoredEvidence::Economic {
+                                economic_identity: core.economic_identity(&evidence.economic_key),
+                                disposition: evidence.disposition.clone(),
                             }
                         }
                         evidence => StoredEvidence::Evidence(evidence.clone()),
@@ -797,11 +871,18 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I: NormalizationIdentity<F>, F:
         }
 
         match &evidence.kind {
-            SourceNeutralEvidenceKind::Economic {
-                evidence: economic_evidence,
-            } => {
-                let economic_identity = self.economic_identity(&economic_evidence.key());
-                let disposition = economic_evidence.disposition();
+            SourceNeutralEvidenceKind::Economic { .. }
+            | SourceNeutralEvidenceKind::EconomicV2 { .. } => {
+                let (key, disposition) = match &evidence.kind {
+                    SourceNeutralEvidenceKind::Economic { evidence } => {
+                        (evidence.key(), evidence.disposition().into())
+                    }
+                    SourceNeutralEvidenceKind::EconomicV2 { evidence } => {
+                        (evidence.economic_key.clone(), evidence.disposition.clone())
+                    }
+                    _ => unreachable!(),
+                };
+                let economic_identity = self.economic_identity(&key);
                 if let Some(existing) = state_delta
                     .economic
                     .get(&economic_identity)
@@ -845,7 +926,7 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I: NormalizationIdentity<F>, F:
                     });
                 }
 
-                let fact = SourceNeutralEconomicFactV1 {
+                let fact = SourceNeutralEconomicFactV2 {
                     fact_reference: self.fact_reference(&economic_identity)?,
                     logical_identity: logical_identity.clone(),
                     economic_identity: economic_identity.clone(),
@@ -866,10 +947,24 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I: NormalizationIdentity<F>, F:
                 state_delta
                     .economic
                     .insert(fact.economic_identity.clone(), fact.clone());
-                Ok(NormalizationRecord::EconomicFact {
-                    source_order: evidence.source_order,
-                    fact,
-                })
+                match evidence.kind {
+                    SourceNeutralEvidenceKind::Economic { evidence: old } => {
+                        Ok(NormalizationRecord::EconomicFact {
+                            source_order: evidence.source_order,
+                            fact: SourceNeutralEconomicFactV1 {
+                                fact_reference: fact.fact_reference,
+                                logical_identity: fact.logical_identity,
+                                economic_identity: fact.economic_identity,
+                                source_reference: fact.source_reference,
+                                disposition: old.disposition(),
+                            },
+                        })
+                    }
+                    _ => Ok(NormalizationRecord::EconomicFactV2 {
+                        source_order: evidence.source_order,
+                        fact,
+                    }),
+                }
             }
             SourceNeutralEvidenceKind::LateEconomicCoverage { economic_key } => {
                 let economic_identity = self.economic_identity(economic_key);
@@ -933,11 +1028,14 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I: NormalizationIdentity<F>, F:
                 );
                 Ok(record)
             }
-            SourceNeutralEvidenceKind::MarketEnrollment { .. }
+            SourceNeutralEvidenceKind::InitialMarket { .. }
+            | SourceNeutralEvidenceKind::MarketEnrollment { .. }
             | SourceNeutralEvidenceKind::Control { .. }
             | SourceNeutralEvidenceKind::OrderLifecycle { .. }
             | SourceNeutralEvidenceKind::TradeLifecycle { .. }
-            | SourceNeutralEvidenceKind::SettlementLifecycle { .. } => {
+            | SourceNeutralEvidenceKind::SettlementLifecycle { .. }
+            | SourceNeutralEvidenceKind::SettlementLifecycleV2 { .. }
+            | SourceNeutralEvidenceKind::TradeLifecycleV3 { .. } => {
                 let record = NormalizationRecord::Evidence {
                     logical_identity: logical_identity.clone(),
                     source_order: evidence.source_order.clone(),
@@ -961,7 +1059,7 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I: NormalizationIdentity<F>, F:
         &self,
         logical_identity: I,
         evidence: OrderedEvidence<T, C, I>,
-        fact: &SourceNeutralEconomicFactV1<I, F>,
+        fact: &SourceNeutralEconomicFactV2<I, F>,
         decision: EconomicAliasDecisionV1,
     ) -> NormalizationRecord<T, C, I, F> {
         NormalizationRecord::EconomicAlias {
@@ -1029,7 +1127,7 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I: NormalizationIdentity<F>, F:
                         .economic
                         .get(economic_identity)
                         .or_else(|| self.state.economic.get(economic_identity))
-                        .is_some_and(|fact| fact.disposition == evidence.disposition())
+                        .is_some_and(|fact| fact.disposition == evidence.disposition().into())
             }
             (
                 StoredEvidence::Economic {
@@ -1039,7 +1137,28 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I: NormalizationIdentity<F>, F:
                 SourceNeutralEvidenceKind::Economic { evidence },
             ) => {
                 economic_identity == &self.economic_identity(&evidence.key())
-                    && disposition == &evidence.disposition()
+                    && disposition == &evidence.disposition().into()
+            }
+            (
+                StoredEvidence::EconomicAlias { economic_identity },
+                SourceNeutralEvidenceKind::EconomicV2 { evidence },
+            ) => {
+                economic_identity == &self.economic_identity(&evidence.economic_key)
+                    && state_delta
+                        .economic
+                        .get(economic_identity)
+                        .or_else(|| self.state.economic.get(economic_identity))
+                        .is_some_and(|fact| fact.disposition == evidence.disposition)
+            }
+            (
+                StoredEvidence::Economic {
+                    economic_identity,
+                    disposition,
+                },
+                SourceNeutralEvidenceKind::EconomicV2 { evidence },
+            ) => {
+                economic_identity == &self.economic_identity(&evidence.economic_key)
+                    && disposition == &evidence.disposition
             }
             (StoredEvidence::EconomicAlias { .. } | StoredEvidence::Economic { .. }, _) => false,
         }

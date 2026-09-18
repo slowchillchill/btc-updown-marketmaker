@@ -22,6 +22,7 @@ pub struct ReserveIntentV1 {
 pub enum LedgerReservationOutcomeV1 {
     Reserved { ledger_entry_seq: u64 },
     InsufficientGlobalAvailableFunds,
+    InsufficientMakerAvailableFunds,
     PerMarketLimitExceeded,
 }
 

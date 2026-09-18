@@ -1463,6 +1463,10 @@ dependencies = [
 name = "contracts"
 version = "0.1.0"
 dependencies = [
+ "alloy-primitives",
+ "num-bigint",
+ "num-integer",
+ "num-traits",
  "rust_decimal",
  "serde",
 ]

@@ -1,3 +1,4 @@
+pub mod settlement;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
@@ -1056,6 +1057,7 @@ struct ScheduledFinalityTransitionKeyV2 {
 #[allow(dead_code)]
 #[derive(Debug, Default, PartialEq, Eq)]
 struct RebateDayStateV2 {
+    contribution_trade_ids: Vec<String>,
     pending_predecessor_count: u64,
     accrued_pusd: Decimal,
     maturity_reached: bool,
@@ -1314,6 +1316,7 @@ pub(crate) enum CallerCancelDispositionV2 {
 #[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct TradeFinalityTransitionEffectV2 {
+    pub(crate) maker_fee_equivalent_pusd: Option<ExactDecimal>,
     pub(crate) fill_sequence: u64,
     pub(crate) trade_id: String,
     pub(crate) platform_order_id: String,
@@ -1346,6 +1349,7 @@ pub(crate) struct OrderLifecycleEffectV2 {
 #[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct TradeLifecycleEffectV2 {
+    pub(crate) maker_fee_equivalent_pusd: Option<ExactDecimal>,
     pub(crate) fill_sequence: u64,
     pub(crate) matched_at_utc_ms: i64,
     pub(crate) platform_event_at_utc_ms: i64,
@@ -1366,8 +1370,10 @@ pub(crate) struct TradeLifecycleEffectV2 {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct SettlementLifecycleEffectV2 {
+    /// 重发保留原事件时间，以实际重发时刻起算原入站延迟。
+    pub(crate) repeated_at_utc_ms: Option<i64>,
     pub(crate) platform_event_at_utc_ms: i64,
     pub(crate) event: SettlementLifecycleEventV2,
 }
@@ -1498,6 +1504,7 @@ impl TradeFinalityTransitionEffectV2 {
         account_delta: Option<PlatformAccountDeltaV2>,
     ) -> Result<LifecycleFeedbackEffectV2, MatchingStateErrorV1> {
         Ok(LifecycleFeedbackEffectV2::Trade(TradeLifecycleEffectV2 {
+            maker_fee_equivalent_pusd: self.maker_fee_equivalent_pusd,
             fill_sequence: self.fill_sequence,
             matched_at_utc_ms: self.matched_at_utc_ms,
             platform_event_at_utc_ms: self.platform_event_at_utc_ms,
@@ -1527,6 +1534,22 @@ fn economic_lifecycle_effect_v2(
     account_deltas: &mut BTreeMap<u64, PlatformAccountDeltaV2>,
 ) -> Result<LifecycleFeedbackEffectV2, MatchingStateErrorV1> {
     match effect {
+        EconomicLifecycleEffectV2::ResolvedPosition {
+            condition_id,
+            resolution_event_id,
+            resolution,
+            platform_effective_at_utc_ms,
+        } => Ok(LifecycleFeedbackEffectV2::Settlement(
+            SettlementLifecycleEffectV2 {
+                repeated_at_utc_ms: None,
+                platform_event_at_utc_ms: platform_effective_at_utc_ms,
+                event: SettlementLifecycleEventV2::ResolvedPosition {
+                    condition_id,
+                    resolution_event_id,
+                    resolution,
+                },
+            },
+        )),
         EconomicLifecycleEffectV2::MarketResolutionOrder(effect) => {
             let canceled_base_units = effect
                 .pending_base_units_before
@@ -1585,6 +1608,7 @@ fn economic_lifecycle_effect_v2(
                 .collect::<Result<Vec<_>, MatchingStateErrorV1>>()?;
             Ok(LifecycleFeedbackEffectV2::Settlement(
                 SettlementLifecycleEffectV2 {
+                    repeated_at_utc_ms: None,
                     platform_event_at_utc_ms: effect.platform_effective_at_utc_ms,
                     event: SettlementLifecycleEventV2::MakerRebateAccrualFinalized {
                         condition_id: effect.condition_id,
@@ -1602,6 +1626,7 @@ fn economic_lifecycle_effect_v2(
                     .expect("V2 taker 应计效果必须拥有同次唯一账户变化");
             Ok(LifecycleFeedbackEffectV2::Settlement(
                 SettlementLifecycleEffectV2 {
+                    repeated_at_utc_ms: None,
                     platform_event_at_utc_ms: effect.platform_effective_at_utc_ms,
                     event: SettlementLifecycleEventV2::TakerRebateAccrualApplied {
                         trade_id: effect.trade_id,
@@ -1618,6 +1643,7 @@ fn economic_lifecycle_effect_v2(
         }
         EconomicLifecycleEffectV2::AutoRedeem(effect) => Ok(LifecycleFeedbackEffectV2::Settlement(
             SettlementLifecycleEffectV2 {
+                repeated_at_utc_ms: None,
                 platform_event_at_utc_ms: effect.platform_effective_at_utc_ms,
                 event: SettlementLifecycleEventV2::AutoRedeemApplied {
                     condition_id: effect.condition_id,
@@ -1636,6 +1662,7 @@ fn economic_lifecycle_effect_v2(
         EconomicLifecycleEffectV2::DayFinalized(effect) => {
             let event = match effect.kind {
                 RebateKindV1::Maker => SettlementLifecycleEventV2::MakerRebateDayFinalized {
+                    contribution_trade_ids: effect.contribution_trade_ids,
                     attribution_day_start_utc_ms: effect.attribution_day_utc_ms,
                     accrual_pusd: exact_decimal_v2(effect.accrued_pusd),
                     payable_pusd: exact_decimal_v2(effect.payable_pusd),
@@ -1646,6 +1673,7 @@ fn economic_lifecycle_effect_v2(
                     ),
                 },
                 RebateKindV1::Taker => SettlementLifecycleEventV2::TakerRebateDayFinalized {
+                    contribution_trade_ids: effect.contribution_trade_ids,
                     attribution_day_start_utc_ms: effect.attribution_day_utc_ms,
                     accrual_pusd: exact_decimal_v2(effect.accrued_pusd),
                     payable_pusd: exact_decimal_v2(effect.payable_pusd),
@@ -1658,6 +1686,7 @@ fn economic_lifecycle_effect_v2(
             };
             Ok(LifecycleFeedbackEffectV2::Settlement(
                 SettlementLifecycleEffectV2 {
+                    repeated_at_utc_ms: None,
                     platform_event_at_utc_ms: effect.platform_effective_at_utc_ms,
                     event,
                 },
@@ -1681,6 +1710,7 @@ fn economic_lifecycle_effect_v2(
             };
             Ok(LifecycleFeedbackEffectV2::Settlement(
                 SettlementLifecycleEffectV2 {
+                    repeated_at_utc_ms: None,
                     platform_event_at_utc_ms: effect.platform_effective_at_utc_ms,
                     event,
                 },
@@ -1718,6 +1748,7 @@ pub(crate) struct MakerRebateMarketFinalizedEffectV2 {
 #[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct RebateDayFinalizedEffectV2 {
+    pub(crate) contribution_trade_ids: Vec<String>,
     pub(crate) kind: RebateKindV1,
     pub(crate) attribution_day_utc_ms: i64,
     pub(crate) platform_effective_at_utc_ms: i64,
@@ -1767,6 +1798,12 @@ pub(crate) struct AutoRedeemEffectV2 {
 #[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum EconomicLifecycleEffectV2 {
+    ResolvedPosition {
+        condition_id: ConditionId,
+        resolution_event_id: String,
+        resolution: MarketResolutionTerminalV3,
+        platform_effective_at_utc_ms: i64,
+    },
     MarketResolutionOrder(MarketResolutionOrderEffectV2),
     MakerMarketFinalized(MakerRebateMarketFinalizedEffectV2),
     TakerAccrual(TakerRebateAccrualEffectV2),
@@ -2595,6 +2632,7 @@ pub(crate) struct ExecutionStateV2 {
     taker_rebate: TakerRebateStateV2,
     maker_rebate: MakerRebateStateV2,
     market_resolutions: BTreeMap<String, MarketResolutionObligationV2>,
+    requested_settlement: settlement::RequestedSettlementStateV1,
     next_order_sequence: u64,
     next_fill_sequence: u64,
 }
@@ -2616,6 +2654,7 @@ impl ExecutionStateV2 {
             taker_rebate: TakerRebateStateV2::default(),
             maker_rebate: MakerRebateStateV2::new(directory),
             market_resolutions: BTreeMap::new(),
+            requested_settlement: settlement::RequestedSettlementStateV1::default(),
             next_order_sequence: 1,
             next_fill_sequence: 1,
         }
@@ -2784,6 +2823,7 @@ impl ExecutionStateV2 {
         quote_units: u128,
         immediate_taker_fee_units: u128,
         finality_policy: &TradeFinalityPolicyV2,
+        rules: &PlatformRuleSnapshotV3,
     ) -> Result<
         (
             TradeFinalityTransitionEffectV2,
@@ -2833,6 +2873,14 @@ impl ExecutionStateV2 {
             .map(|delta| delta.account_transition_seq);
         let initial_finality_state = path.steps()[0].state();
         let effect = TradeFinalityTransitionEffectV2 {
+            maker_fee_equivalent_pusd: maker_fee_equivalent(
+                &trade_id,
+                matched_at_utc_ms,
+                base_units,
+                price_pusd_per_share,
+                liquidity_role,
+                rules,
+            )?,
             fill_sequence,
             trade_id: trade_id.clone(),
             platform_order_id: order.platform_order_id.clone(),
@@ -3076,6 +3124,14 @@ impl ExecutionStateV2 {
                 .push(EconomicLifecycleEffectV2::MarketResolutionOrder(effect));
             effects.query_projection_changed = true;
         }
+        effects
+            .settlement
+            .push(EconomicLifecycleEffectV2::ResolvedPosition {
+                condition_id: condition.clone(),
+                resolution_event_id: resolution.resolution_event_id.clone(),
+                resolution: resolution.terminal.clone(),
+                platform_effective_at_utc_ms,
+            });
         let obligation = MarketResolutionObligationV2 {
             resolution_event_id: resolution.resolution_event_id.clone(),
             resolution_source_event_at_utc_ms: resolution.resolution_source_event_at_utc_ms,
@@ -3383,6 +3439,7 @@ impl ExecutionStateV2 {
                 fill_quote_units,
                 0,
                 finality_policy,
+                rules,
             )?;
             let fill = self
                 .fills
@@ -3872,6 +3929,7 @@ impl ExecutionStateV2 {
                 fill.quote_units,
                 immediate_taker_fee_units,
                 finality_policy,
+                rules,
             )?;
             let fill = self
                 .fills
@@ -4644,6 +4702,14 @@ impl ExecutionStateV2 {
             | TradeFinalityStateV1::Mined => TradeEconomicDispositionStateV1::PendingUnapplied,
         };
         let trade_finality = TradeFinalityTransitionEffectV2 {
+            maker_fee_equivalent_pusd: maker_fee_equivalent(
+                &trade_id,
+                matched_at_utc_ms,
+                base_units,
+                source_price_pusd_per_share,
+                liquidity_role,
+                rules,
+            )?,
             fill_sequence: key.fill_sequence,
             trade_id: trade_id.clone(),
             platform_order_id,
@@ -4700,6 +4766,7 @@ impl ExecutionStateV2 {
                         key.platform_event_at_utc_ms,
                         &mut settlement,
                         account_deltas,
+                        resources,
                     )?,
                 SimLiquidityRoleV1::Taker => {}
             }
@@ -4741,6 +4808,7 @@ impl ExecutionStateV2 {
         platform_effective_at_utc_ms: i64,
         settlement: &mut Vec<EconomicLifecycleEffectV2>,
         account_deltas: &mut Vec<PlatformAccountDeltaV2>,
+        resources: &mut BusinessResourceDeltaV2,
     ) -> Result<(), MatchingStateErrorV1> {
         let attribution_day_utc_ms = utc_day_start(matched_at_utc_ms)?;
         let accrual_effect = if succeeded {
@@ -4779,6 +4847,8 @@ impl ExecutionStateV2 {
             .get_mut(&attribution_day_utc_ms)
             .expect("正手续费成交终态只引用已登记 taker 日桶");
         if let Some(accrual) = &accrual_effect {
+            resources.add_record(trade_id.len() as u64);
+            day.contribution_trade_ids.push(trade_id.to_owned());
             day.accrued_pusd = day
                 .accrued_pusd
                 .checked_add(accrual.accrual_pusd)
@@ -4935,6 +5005,14 @@ impl ExecutionStateV2 {
                 .pending_predecessor_count
                 .checked_sub(1)
                 .expect("maker 市场终态只闭合一个共享日桶前驱");
+            for contribution in contributions
+                .iter()
+                .filter(|c| c.attribution_day_utc_ms == attribution_day_utc_ms)
+            {
+                resources.add_record(contribution.trade_id.len() as u64);
+                day.contribution_trade_ids
+                    .push(contribution.trade_id.clone());
+            }
             day.accrued_pusd = day
                 .accrued_pusd
                 .checked_add(
@@ -5007,6 +5085,16 @@ impl ExecutionStateV2 {
             (payout_vector[0].asset.token_id.clone(), parsed_payouts[0]),
             (payout_vector[1].asset.token_id.clone(), parsed_payouts[1]),
         ];
+        if self.requested_settlement.scenario.is_some() {
+            // 原终局、补偿和应计屏障已闭合，最终纯输家没有请求或费用。
+            if !self.account.has_resolution_payout(&parsed_binary_payout) {
+                self.market_resolutions
+                    .get_mut(&condition_id.0)
+                    .expect("已有合格判定")
+                    .redeemed_at_utc_ms = Some(platform_effective_at_utc_ms);
+            }
+            return Ok(None);
+        }
         let AutoRedeemAccountEffectV2 {
             redeemed_outcome_balances,
             redeemed_pusd,
@@ -5112,6 +5200,22 @@ impl ExecutionStateV2 {
                 }
                 settlement.push(EconomicLifecycleEffectV2::DayFinalized(
                     RebateDayFinalizedEffectV2 {
+                        contribution_trade_ids: match kind {
+                            RebateKindV1::Maker => self
+                                .maker_rebate
+                                .days
+                                .get(&attribution_day_utc_ms)
+                                .expect("已准备日桶")
+                                .contribution_trade_ids
+                                .clone(),
+                            RebateKindV1::Taker => self
+                                .taker_rebate
+                                .days
+                                .get(&attribution_day_utc_ms)
+                                .expect("已准备日桶")
+                                .contribution_trade_ids
+                                .clone(),
+                        },
                         kind,
                         attribution_day_utc_ms,
                         platform_effective_at_utc_ms,
@@ -8459,6 +8563,14 @@ mod tests {
     ) {
         for effect in effects {
             match effect {
+                EconomicLifecycleEffectV2::ResolvedPosition {
+                    resolution_event_id: id,
+                    platform_effective_at_utc_ms,
+                    ..
+                } => {
+                    assert_eq!(id, resolution_event_id);
+                    assert_eq!(*platform_effective_at_utc_ms, resolution_at_utc_ms);
+                }
                 EconomicLifecycleEffectV2::MarketResolutionOrder(effect) => {
                     counts[0] += 1;
                     assert_eq!(effect.platform_order_id, "sim-1");
@@ -8745,7 +8857,10 @@ mod tests {
             );
             assert!(matches!(
                 effects.settlement.as_slice(),
-                [EconomicLifecycleEffectV2::MarketResolutionOrder(_)]
+                [
+                    EconomicLifecycleEffectV2::MarketResolutionOrder(_),
+                    EconomicLifecycleEffectV2::ResolvedPosition { .. }
+                ]
             ));
             assert_eq!(effects.resources.added_records, 3);
             assert_eq!(effects.resources.removed_records, 1);
@@ -8755,7 +8870,14 @@ mod tests {
             let lifecycle = effects
                 .into_lifecycle_feedback()
                 .expect("最终性前判定必须冻结订单关闭生命周期效果");
-            let [LifecycleFeedbackEffectV2::Order(order_lifecycle)] = lifecycle.as_slice() else {
+            let [
+                LifecycleFeedbackEffectV2::Order(order_lifecycle),
+                LifecycleFeedbackEffectV2::Settlement(SettlementLifecycleEffectV2 {
+                    event: SettlementLifecycleEventV2::ResolvedPosition { .. },
+                    ..
+                }),
+            ] = lifecycle.as_slice()
+            else {
                 panic!("最终性前判定只能先形成订单关闭效果")
             };
             assert!(matches!(
@@ -8807,10 +8929,11 @@ mod tests {
             }
             let expected_resources = match platform_event_at_utc_ms {
                 6_310 | 6_500 => (1, 1, 0, 0),
-                7_310 if resolution_first => (2, 5, 6, 5),
-                7_310 => (2, 4, 6, 5),
-                7_500 if resolution_first => (0, 2, 0, 0),
-                7_500 => (0, 1, 0, 0),
+                // 成功贡献的原 trade_id 从市场迁入日桶；Taker 终局也保留其贡献引用。
+                7_310 if resolution_first => (3, 5, 11, 5),
+                7_310 => (3, 4, 11, 5),
+                7_500 if resolution_first => (1, 2, 5, 0),
+                7_500 => (1, 1, 5, 0),
                 _ => unreachable!("判定顺序测试只推进四个固定最终性时点"),
             };
             assert_eq!(
@@ -8891,6 +9014,7 @@ mod tests {
                 effects.settlement.as_slice(),
                 [
                     EconomicLifecycleEffectV2::MarketResolutionOrder(_),
+                    EconomicLifecycleEffectV2::ResolvedPosition { .. },
                     EconomicLifecycleEffectV2::AutoRedeem(_)
                 ]
             ));
@@ -8907,6 +9031,10 @@ mod tests {
                 [
                     LifecycleFeedbackEffectV2::Order(OrderLifecycleEffectV2 {
                         event: OrderLifecycleEventV2::MarketResolvedCanceled { .. },
+                        ..
+                    }),
+                    LifecycleFeedbackEffectV2::Settlement(SettlementLifecycleEffectV2 {
+                        event: SettlementLifecycleEventV2::ResolvedPosition { .. },
                         ..
                     }),
                     LifecycleFeedbackEffectV2::Settlement(SettlementLifecycleEffectV2 {
@@ -9087,8 +9215,8 @@ mod tests {
                 outcome_balances: vec![("1".to_owned(), Decimal::ZERO)],
                 fill_finality_ordinals: vec![(1, 2, true), (2, 2, true)],
                 effect_counts: [1, 1, 1, 1, 2, 2],
-                economic_record_delta: -6,
-                economic_byte_delta: 61,
+                economic_record_delta: -4,
+                economic_byte_delta: 71, // 两个日桶保留原 sim-1 / sim-2 贡献引用。
                 next_account_transition_seq: 12,
             }
         );
@@ -9168,7 +9296,11 @@ mod tests {
         let effects = state
             .apply_qualified_resolution(&condition_id.0, &resolution, 4_000, &finality_policy)
             .expect("零余额合格判定仍必须形成一次赎回终态");
-        let [EconomicLifecycleEffectV2::AutoRedeem(redeem)] = effects.settlement.as_slice() else {
+        let [
+            EconomicLifecycleEffectV2::ResolvedPosition { .. },
+            EconomicLifecycleEffectV2::AutoRedeem(redeem),
+        ] = effects.settlement.as_slice()
+        else {
             panic!("零余额合格判定必须只形成一次自动赎回终态")
         };
         assert_eq!(redeem.resolution_event_id, resolution.resolution_event_id);
@@ -9216,11 +9348,17 @@ mod tests {
         let redemption_lifecycle = effects
             .into_lifecycle_feedback()
             .expect("零余额赎回必须形成自包含结算终态效果");
-        let [LifecycleFeedbackEffectV2::Settlement(redemption_lifecycle)] =
-            redemption_lifecycle.as_slice()
+        let [
+            LifecycleFeedbackEffectV2::Settlement(resolved),
+            LifecycleFeedbackEffectV2::Settlement(redemption_lifecycle),
+        ] = redemption_lifecycle.as_slice()
         else {
-            panic!("零余额判定只能形成一个自动赎回生命周期效果")
+            panic!("零余额判定先公开原判定事实，再形成唯一自动赎回生命周期效果")
         };
+        assert!(matches!(
+            resolved.event,
+            SettlementLifecycleEventV2::ResolvedPosition { .. }
+        ));
         let SettlementLifecycleEventV2::AutoRedeemApplied {
             resolution_event_id,
             redeemed_outcome_balances,
@@ -9310,4 +9448,32 @@ mod tests {
         assert_eq!(allocations, vec![0, 10]);
         assert_eq!(allocations.iter().sum::<u128>(), total);
     }
+}
+
+fn maker_fee_equivalent(
+    trade_id: &str,
+    matched_at: i64,
+    base_units: u128,
+    price: Decimal,
+    role: SimLiquidityRoleV1,
+    rules: &PlatformRuleSnapshotV3,
+) -> Result<Option<ExactDecimal>, MatchingStateErrorV1> {
+    if role == SimLiquidityRoleV1::Taker {
+        return Ok(None);
+    }
+    let contribution = maker_rebate_contribution_v1(
+        trade_id,
+        matched_at,
+        base_units,
+        price,
+        rules.synchronized_platform_rules.fee_schedule.rate.value(),
+        rules.synchronized_platform_rules.fee_schedule.exponent,
+        rules
+            .project_account_rules
+            .rebate_settlement
+            .value
+            .fixed_maker_rebate_rate
+            .value(),
+    )?;
+    Ok(Some(exact_decimal_v2(contribution.fee_equivalent_pusd)))
 }

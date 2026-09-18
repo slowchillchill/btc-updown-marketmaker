@@ -1102,6 +1102,7 @@ struct BackgroundFinishV1 {
 enum BackgroundLogCommandV1 {
     Group(BackgroundGroupV1),
     Finish(BackgroundFinishV1),
+    Stabilize(BackgroundFinishV1, std::sync::mpsc::SyncSender<()>),
     #[cfg(test)]
     Pause(
         std::sync::mpsc::SyncSender<()>,
@@ -1187,6 +1188,21 @@ impl BackgroundEventLogV1 {
                             if let Some(error) = group.normalization_error {
                                 return Err(SimEventLogErrorV2::NoeNormalization(error));
                             }
+                        }
+                        Ok(BackgroundLogCommandV1::Stabilize(_finish, acknowledged)) => {
+                            #[cfg(feature = "measurement")]
+                            log.sync_data(MeasurementContext::CommitGroup)?;
+                            #[cfg(not(feature = "measurement"))]
+                            log.sync_data()?;
+                            if let Some(noe) = &mut noe {
+                                noe.stabilize().map_err(SimEventLogErrorV2::Noe)?;
+                            }
+                            #[cfg(feature = "shared-execution")]
+                            {
+                                ledger.accept(_finish.ledger)?;
+                                ledger.finish()?;
+                            }
+                            let _ = acknowledged.send(());
                         }
                         Ok(BackgroundLogCommandV1::Finish(_finish)) => {
                             #[cfg(feature = "measurement")]
@@ -1322,6 +1338,26 @@ impl BackgroundEventLogV1 {
             }
         }
         self.failure.lock().unwrap().clone().map_or(Ok(()), Err)
+    }
+    /// 有限宿主显式稳定已有原材料；不推进业务时间、不停止运行或创建账户快照。
+    pub(crate) fn stabilize(&mut self) -> Result<(), SimEventLogErrorV2> {
+        self.wait_for_capacity()?;
+        let (acknowledged, completed) = std::sync::mpsc::sync_channel(1);
+        let finish = BackgroundFinishV1 {
+            seal_clean_run: false,
+            #[cfg(feature = "shared-execution")]
+            ledger: self.take_ledger(),
+        };
+        self.sender
+            .send(BackgroundLogCommandV1::Stabilize(finish, acknowledged))
+            .map_err(|_| SimEventLogErrorV2::InvalidStructure("原记录后台已停止"))?;
+        completed.recv().map_err(|_| {
+            self.failure
+                .lock()
+                .unwrap()
+                .clone()
+                .unwrap_or(SimEventLogErrorV2::InvalidStructure("原记录后台未完成稳定"))
+        })
     }
     pub(crate) fn enqueue(
         &mut self,

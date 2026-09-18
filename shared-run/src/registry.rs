@@ -240,6 +240,21 @@ impl SharedExecutionRegistryV1 {
                     }
                 }
             }
+            SourceNeutralEvidenceKind::TradeLifecycleV3 { result } => {
+                let result = &result.result;
+                let state = self
+                    .orders
+                    .entry(result.order_identity.clone())
+                    .or_default();
+                match state.trades.get(&result.trade_identity) {
+                    Some(prior) if source_sequence(prior) >= source_sequence(record) => {}
+                    _ => {
+                        state
+                            .trades
+                            .insert(result.trade_identity.clone(), record.clone());
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -639,6 +654,10 @@ fn trade(r: &Ref) -> Option<&SourceNeutralTradeLifecycleResultV2<Identity>> {
             evidence: SourceNeutralEvidenceKind::TradeLifecycle { result },
             ..
         } => Some(result),
+        NormalizationRecord::Evidence {
+            evidence: SourceNeutralEvidenceKind::TradeLifecycleV3 { result },
+            ..
+        } => Some(&result.result),
         _ => None,
     }
 }
@@ -704,7 +723,8 @@ fn replace_source(slot: &mut Option<Ref>, r: &Ref) {
 }
 fn replace_delivery(slot: &mut Option<Ref>, r: &Ref) {
     let seq = |r: &Ref| match r.visibility() {
-        NoeConsumptionVisibilityV1::Initialization => 0,
+        NoeConsumptionVisibilityV1::Initialization
+        | NoeConsumptionVisibilityV1::ControlAdmission => 0,
         NoeConsumptionVisibilityV1::Feedback {
             delivery_sequence, ..
         } => *delivery_sequence,

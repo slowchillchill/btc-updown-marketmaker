@@ -251,15 +251,14 @@ impl MemoryNoeObservation<MeasuredOrderEvidence> {
         self.0.lock().unwrap().consumption.opening_record()
     }
     pub fn take_closed_records(&self) -> Vec<NoeConsumedRecordRefV1> {
-        self.take_closed_feedback()
-            .into_iter()
-            .map(|feedback| {
-                let FeedbackRecord::Measured(record) = feedback.record else {
-                    unreachable!("V3真实领取")
-                };
-                record
-            })
-            .collect()
+        let mut admitted = self.0.lock().unwrap().consumption.take_admitted_records();
+        admitted.extend(self.take_closed_feedback().into_iter().map(|feedback| {
+            let FeedbackRecord::Measured(record) = feedback.record else {
+                unreachable!("V3真实领取")
+            };
+            record
+        }));
+        admitted
     }
 }
 fn feedback_coordinate<P: MemoryOrderEvidence>(record: &MemoryNoeRecord<P>) -> Option<(i64, u64)> {

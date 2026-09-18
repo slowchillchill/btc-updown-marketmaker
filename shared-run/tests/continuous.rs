@@ -377,7 +377,7 @@ async fn actual_pending_four_keeps_ten_then_finality_and_cancel_close_separate_r
                     assert_eq!(records.len(), 1);
                     let ::execution_normalization::NormalizationRecord::Evidence {
                         evidence:
-                            ::execution_normalization::SourceNeutralEvidenceKind::TradeLifecycle {
+                            ::execution_normalization::SourceNeutralEvidenceKind::TradeLifecycleV3 {
                                 result,
                             },
                         ..
@@ -385,6 +385,7 @@ async fn actual_pending_four_keeps_ten_then_finality_and_cancel_close_separate_r
                     else {
                         panic!("原成交引用")
                     };
+                    let result = &result.result;
                     use contracts::execution_normalization::SourceNeutralTradeEconomicDispositionV1::*;
                     assert_eq!(
                         result.economic_disposition,
@@ -1263,10 +1264,10 @@ async fn actual_trade_association_late_only_attributes_existing_entries() {
     for record in records {
         match record.record() {
             NormalizationRecord::Evidence {
-                evidence: SourceNeutralEvidenceKind::TradeLifecycle { result },
+                evidence: SourceNeutralEvidenceKind::TradeLifecycleV3 { result },
                 ..
             } => {
-                order = Some(result.order_identity.clone());
+                order = Some(result.result.order_identity.clone());
                 association.push(record);
             }
             _ => pending.push(record),
@@ -1796,7 +1797,21 @@ async fn empty_initial_markets_consume_reference_before_enrollment_without_reope
         "d63c0e7b09edc4b2c4c3f0295f806b25f6f5fd03663cdf60ff062117e53e4e54"
     );
     assert!(shared.action_before(&mut driver).unwrap().is_some());
-    assert_eq!(shared.ledger().projection_v2().unwrap(), initial);
+    let enrolled = shared.ledger().projection_v2().unwrap();
+    // 新经济索引保留实际市场/腿映射，登记自身不重开户或改变现金、UTC。
+    assert_eq!(enrolled.ledger_entry_seq, initial.ledger_entry_seq + 1);
+    let mut financial_only = enrolled.clone();
+    financial_only.ledger_entry_seq = initial.ledger_entry_seq;
+    assert_eq!(financial_only, initial);
+    assert_eq!(
+        shared
+            .ledger()
+            .economic_read()
+            .unwrap()
+            .market_totals()
+            .count(),
+        1
+    );
     assert_eq!(
         observation.opening_record().unwrap().position(),
         opening.position()
@@ -1807,7 +1822,7 @@ async fn empty_initial_markets_consume_reference_before_enrollment_without_reope
             .unwrap()
             .projection_v2()
             .unwrap(),
-        initial
+        enrolled
     );
     assert!(!std::fs::read_to_string(path).unwrap().contains("RunSeal"));
 }

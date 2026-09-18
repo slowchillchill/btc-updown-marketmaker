@@ -9,6 +9,7 @@ use std::sync::Arc;
 pub enum LedgerMemoryApplyOutcomeV1 {
     Applied(LedgerApplyOutcomeV1),
     NotApplicable,
+    MissingEconomicAssociation,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LedgerRecordMaterialKindV2 {
@@ -31,7 +32,9 @@ impl LedgerRecordMaterialV2 {
     }
     pub fn kind(&self) -> LedgerRecordMaterialKindV2 {
         match self.payload.as_ref() {
-            DurablePayloadV1::Genesis { .. } => LedgerRecordMaterialKindV2::Genesis,
+            DurablePayloadV1::Genesis { .. } | DurablePayloadV1::GenesisV2 { .. } => {
+                LedgerRecordMaterialKindV2::Genesis
+            }
             DurablePayloadV1::Transaction(_) => LedgerRecordMaterialKindV2::Transaction,
             DurablePayloadV1::ReservationDecision { .. } => {
                 LedgerRecordMaterialKindV2::ReservationDecision
@@ -48,9 +51,7 @@ impl LedgerRecordMaterialV2 {
 impl LedgerWriterV1 {
     /// 新内存实例初始化接线；不同时绑定旧同步耐久路径。
     pub fn bind_record_sink_v2(&mut self, mut sink: Box<dyn FnMut(LedgerRecordMaterialV2)>) {
-        sink(LedgerRecordMaterialV2::new(DurablePayloadV1::Genesis {
-            policy: self.policy.clone(),
-        }));
+        sink(LedgerRecordMaterialV2::new(self.genesis()));
         self.record_sink = Some(sink);
     }
     pub fn projection_v2(&self) -> Option<LedgerProjectionV2> {
@@ -90,9 +91,13 @@ impl LedgerWriterV1 {
                 },
             ));
         }
+        if !self.economics.dependencies_present(record) {
+            return Ok(LedgerMemoryApplyOutcomeV1::MissingEconomicAssociation);
+        }
         let source = LedgerTransactionSourceV1::Memory(record.clone());
         let at = match record.visibility() {
-            NoeConsumptionVisibilityV1::Initialization => None,
+            NoeConsumptionVisibilityV1::Initialization
+            | NoeConsumptionVisibilityV1::ControlAdmission => None,
             NoeConsumptionVisibilityV1::Feedback {
                 available_at_utc_ms,
                 ..
@@ -139,12 +144,75 @@ impl LedgerWriterV1 {
                     )?
                 }
             },
+            NormalizationRecord::EconomicFactV2 { fact, .. } => {
+                use contracts::economics::{
+                    SourceNeutralAccountTransitionKindV2 as T,
+                    SourceNeutralEconomicDispositionV2 as D,
+                };
+                match &fact.disposition {
+                    D::AccountOpening { available_pusd } => self.apply_opening(
+                        &source,
+                        account,
+                        &record.context().source.account_opening_evidence_identity,
+                        at,
+                        available_pusd,
+                    )?,
+                    D::AccountTransition {
+                        condition_id,
+                        transition,
+                        balance_delta,
+                        ..
+                    } => {
+                        let SourceNeutralEconomicIdentityV1::AccountTransition {
+                            account_transition_seq,
+                            ..
+                        } = fact.economic_identity
+                        else {
+                            unreachable!("NOE 经济身份")
+                        };
+                        let existing = match transition {
+                            T::Existing(t) => Some(t.clone()),
+                            T::ResolutionRedeemApplied {
+                                resolution_identity,
+                                ..
+                            } => Some(SourceNeutralAccountTransitionKindV1::AutoRedeemApplied {
+                                resolution_identity: resolution_identity.clone(),
+                            }),
+                            _ => None,
+                        };
+                        self.apply_transition_common(
+                            &source,
+                            account,
+                            account_transition_seq,
+                            at,
+                            condition_id.as_ref(),
+                            existing.as_ref(),
+                            &balance_delta.existing,
+                            &fact.source_reference.record,
+                        )?
+                    }
+                }
+            }
             NormalizationRecord::Evidence {
                 evidence,
                 source_reference,
                 ..
             } => {
                 let Some(evidence) = ledger_evidence(evidence) else {
+                    if matches!(
+                        evidence,
+                        SourceNeutralEvidenceKind::InitialMarket { .. }
+                            | SourceNeutralEvidenceKind::MarketEnrollment { .. }
+                            | SourceNeutralEvidenceKind::SettlementLifecycleV2 { .. }
+                    ) {
+                        let out = self.apply_pending_result(
+                            &source,
+                            account,
+                            at,
+                            &source_reference.record,
+                        )?;
+                        return Ok(LedgerMemoryApplyOutcomeV1::Applied(out));
+                    }
                     return Ok(LedgerMemoryApplyOutcomeV1::NotApplicable);
                 };
                 self.apply_lifecycle_evidence(
@@ -264,6 +332,19 @@ fn ledger_evidence(
                 economic_disposition: r.economic_disposition.clone(),
             },
         },
+        SourceNeutralEvidenceKind::TradeLifecycleV3 { result } => {
+            let r = &result.result;
+            LedgerEvidence::TradeLifecycle {
+                result: SourceNeutralTradeLifecycleResultV1 {
+                    trade_identity: r.trade_identity.clone(),
+                    order_identity: r.order_identity.clone(),
+                    condition_id: r.condition_id.clone(),
+                    token_id: r.token_id.clone(),
+                    state: r.state.clone(),
+                    economic_disposition: r.economic_disposition.clone(),
+                },
+            }
+        }
         SourceNeutralEvidenceKind::SettlementLifecycle { result } => {
             LedgerEvidence::SettlementLifecycle {
                 result: result.clone(),
@@ -293,6 +374,14 @@ impl LedgerBackgroundWriterV2 {
         match material.payload.as_ref() {
             DurablePayloadV1::Genesis { policy } => {
                 self.writer = Some(DurableLedgerV1::create_v2(&self.root, policy)?);
+            }
+            DurablePayloadV1::GenesisV2 { .. } => {
+                self.writer = Some(DurableLedgerV1::create_genesis(
+                    &self.root,
+                    material.payload.as_ref().clone(),
+                    false,
+                    2,
+                )?);
             }
             DurablePayloadV1::Transaction(effect) => {
                 let mut effect = (**effect).clone();

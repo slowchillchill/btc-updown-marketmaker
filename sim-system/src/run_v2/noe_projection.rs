@@ -350,6 +350,17 @@ where
                 },
             );
         }
+        for market in &self.batch.initial_markets {
+            self.push(
+                SimV2SourceRecordReferenceV1::AccountOpening,
+                SourceNeutralLogicalKeyV1::InitialMarket {
+                    condition_id: market.market.condition_id.0.clone(),
+                },
+                SourceNeutralEvidenceKind::InitialMarket {
+                    result: market.clone(),
+                },
+            );
+        }
         if let Some(enrollment) = &self.batch.market_enrollment {
             self.push(
                 SimV2SourceRecordReferenceV1::MarketEnrollment {
@@ -717,15 +728,21 @@ where
                 trade_identity: legacy.trade_id.clone(),
                 occurrence: legacy.metadata.private_feedback_sequence,
             },
-            SourceNeutralEvidenceKind::TradeLifecycle {
-                result: feedback.normalized(SourceNeutralTradeLifecycleResultV1 {
+            {
+                let identity = SourceNeutralTradeLifecycleResultV1 {
                     trade_identity: self.entity_trade(&legacy.trade_id)?,
                     order_identity: self.entity_order(&legacy.platform_order_id)?,
                     condition_id: legacy.condition_id.clone(),
                     token_id: legacy.token_id.clone(),
                     state: map_trade_state(&legacy.status),
                     economic_disposition: map_trade_disposition(legacy.economic_disposition),
-                }),
+                };
+                match feedback.enriched(identity.clone()) {
+                    Some(result) => SourceNeutralEvidenceKind::TradeLifecycleV3 { result },
+                    None => SourceNeutralEvidenceKind::TradeLifecycle {
+                        result: feedback.normalized(identity),
+                    },
+                }
             },
         );
         if let Some(delta) = &legacy.account_delta {
@@ -739,7 +756,118 @@ where
         feedback: &contracts::SettlementLifecycleFeedbackV2,
     ) -> Result<(), ()> {
         self.check_account(&feedback.metadata.account_instance_key)?;
+        if let SettlementLifecycleEventV2::ExternalCash {
+            fact,
+            account_delta,
+        } = &feedback.event
+        {
+            let record = SimV2SourceRecordReferenceV1::SettlementLifecycle {
+                private_feedback_sequence: feedback.metadata.private_feedback_sequence,
+                platform_event_at_utc_ms: feedback.metadata.platform_event_at_utc_ms,
+                feedback_received_at_utc_ms: feedback.metadata.feedback_received_at_utc_ms,
+            };
+            self.push(record.clone(), SourceNeutralLogicalKeyV1::SettlementLifecycle { private_feedback_sequence: feedback.metadata.private_feedback_sequence },
+                SourceNeutralEvidenceKind::SettlementLifecycleV2 { result: contracts::economics::SourceNeutralSettlementLifecycleResultV2::ExternalCash(contracts::economics::ExternalCashFactV1 {
+                    identity: self.external_cash_identity(&fact.identity)?, signed_delta_pusd: fact.signed_delta_pusd.clone(), attribution: fact.attribution.clone(),
+                    correction_of: fact.correction_of.as_ref().map(|id| self.external_cash_identity(id)).transpose()?,
+                }) });
+            self.push_requested_economic(
+                record,
+                account_delta,
+                &contracts::ExactDecimal("0".into()),
+            )?;
+            return Ok(());
+        }
+        if let SettlementLifecycleEventV2::RequestedSettlement {
+            result,
+            account_delta,
+            settlement_fee_liability_pusd_delta,
+        } = &feedback.event
+        {
+            use contracts::economics::{
+                RequestedSettlementResultV1 as Raw, SettlementCostFactV1, SettlementRequestFactV1,
+                SourceNeutralSettlementLifecycleResultV2 as Normalized,
+            };
+            let result = match result {
+                Raw::Request(fact) => Normalized::Request(SettlementRequestFactV1 {
+                    index_sets: fact.index_sets,
+                    outcome: fact.outcome,
+                    observation: fact.observation,
+                    settlement_request_id: self
+                        .settlement_request_identity(&fact.settlement_request_id)?,
+                }),
+                Raw::Cost(fact) => Normalized::Cost(SettlementCostFactV1 {
+                    settlement_request_id: self
+                        .settlement_request_identity(&fact.settlement_request_id)?,
+                    cost_identity: self.settlement_cost_identity(
+                        &fact.settlement_request_id.resolution_identity,
+                        &fact.cost_identity,
+                    )?,
+                    recognized_pusd: fact.recognized_pusd.clone(),
+                    paid_pusd: fact.paid_pusd.clone(),
+                    correction_of: fact
+                        .correction_of
+                        .as_ref()
+                        .map(|id| {
+                            self.settlement_cost_identity(
+                                &fact.settlement_request_id.resolution_identity,
+                                id,
+                            )
+                        })
+                        .transpose()?,
+                }),
+            };
+            let record = SimV2SourceRecordReferenceV1::SettlementLifecycle {
+                private_feedback_sequence: feedback.metadata.private_feedback_sequence,
+                platform_event_at_utc_ms: feedback.metadata.platform_event_at_utc_ms,
+                feedback_received_at_utc_ms: feedback.metadata.feedback_received_at_utc_ms,
+            };
+            self.push(
+                record.clone(),
+                SourceNeutralLogicalKeyV1::SettlementLifecycle {
+                    private_feedback_sequence: feedback.metadata.private_feedback_sequence,
+                },
+                SourceNeutralEvidenceKind::SettlementLifecycleV2 { result },
+            );
+            if let Some(delta) = account_delta {
+                self.push_requested_economic(record, delta, settlement_fee_liability_pusd_delta)?;
+            }
+            return Ok(());
+        }
+        if let SettlementLifecycleEventV2::ResolvedPosition {
+            condition_id,
+            resolution_event_id,
+            resolution,
+        } = &feedback.event
+        {
+            self.push(
+                SimV2SourceRecordReferenceV1::SettlementLifecycle {
+                    private_feedback_sequence: feedback.metadata.private_feedback_sequence,
+                    platform_event_at_utc_ms: feedback.metadata.platform_event_at_utc_ms,
+                    feedback_received_at_utc_ms: feedback.metadata.feedback_received_at_utc_ms,
+                },
+                SourceNeutralLogicalKeyV1::SettlementLifecycle {
+                    private_feedback_sequence: feedback.metadata.private_feedback_sequence,
+                },
+                SourceNeutralEvidenceKind::SettlementLifecycleV2 {
+                    result:
+                        contracts::economics::SourceNeutralSettlementLifecycleResultV2::Resolved(
+                            contracts::economics::ResolvedPositionFactV1 {
+                                condition_id: condition_id.clone(),
+                                resolution_identity: self.entity_resolution(resolution_event_id)?,
+                                payout_vector: resolution.clone(),
+                            },
+                        ),
+                },
+            );
+            return Ok(());
+        }
         let (result, account_delta) = match &feedback.event {
+            SettlementLifecycleEventV2::ExternalCash { .. }
+            | SettlementLifecycleEventV2::RequestedSettlement { .. }
+            | SettlementLifecycleEventV2::ResolvedPosition { .. } => {
+                unreachable!("上方已规范化合格判定")
+            }
             SettlementLifecycleEventV2::MakerRebateAccrualFinalized {
                 condition_id,
                 status,
@@ -836,16 +964,262 @@ where
             platform_event_at_utc_ms: feedback.metadata.platform_event_at_utc_ms,
             feedback_received_at_utc_ms: feedback.metadata.feedback_received_at_utc_ms,
         };
-        self.push(
-            record.clone(),
-            SourceNeutralLogicalKeyV1::SettlementLifecycle {
+        let enriched = if T::economic_details() {
+            self.economic_settlement(&feedback.event)?
+        } else {
+            None
+        };
+        let key = match &enriched {
+            Some(contracts::economics::SourceNeutralSettlementLifecycleResultV2::DayFinalized(
+                day,
+            )) => SourceNeutralLogicalKeyV1::RebateDay {
+                kind: day.kind,
+                attribution_day_start_utc_ms: day.attribution_day_start_utc_ms,
+            },
+            _ => SourceNeutralLogicalKeyV1::SettlementLifecycle {
                 private_feedback_sequence: feedback.metadata.private_feedback_sequence,
             },
-            SourceNeutralEvidenceKind::SettlementLifecycle { result },
+        };
+        self.push(
+            record.clone(),
+            key,
+            match enriched {
+                Some(result) => SourceNeutralEvidenceKind::SettlementLifecycleV2 { result },
+                None => SourceNeutralEvidenceKind::SettlementLifecycle { result },
+            },
         );
         if let Some(delta) = account_delta {
             self.push_economic(record, delta)?;
         }
+        Ok(())
+    }
+
+    fn economic_settlement(
+        &self,
+        event: &SettlementLifecycleEventV2,
+    ) -> Result<Option<contracts::economics::SourceNeutralSettlementLifecycleResultV2<I>>, ()> {
+        use contracts::economics::{
+            RebateContributionFactV1, RebateDayResultV1, RebateKindV1 as K, RebatePaymentFactV1,
+            SourceNeutralSettlementLifecycleResultV2 as S,
+        };
+        Ok(Some(match event {
+            SettlementLifecycleEventV2::MakerRebateAccrualFinalized {
+                condition_id,
+                status,
+                contributions,
+                ..
+            } => S::MakerAccrualFinalized {
+                condition_id: condition_id.clone(),
+                status: match status {
+                    MakerRebateAccrualStatusV2::Calculated => {
+                        SourceNeutralMakerRebateAccrualStatusV1::Calculated
+                    }
+                    MakerRebateAccrualStatusV2::ZeroNoEligibleMakerFill => {
+                        SourceNeutralMakerRebateAccrualStatusV1::ZeroNoEligibleMakerFill
+                    }
+                    MakerRebateAccrualStatusV2::UnknownIncomplete => {
+                        SourceNeutralMakerRebateAccrualStatusV1::UnknownIncomplete
+                    }
+                },
+                contributions: contributions
+                    .iter()
+                    .map(|c| {
+                        Ok(RebateContributionFactV1 {
+                            trade_identity: self.entity_trade(&c.trade_id)?,
+                            condition_id: condition_id.clone(),
+                            kind: K::Maker,
+                            attribution_day_start_utc_ms: c.attribution_day_start_utc_ms,
+                            contribution_pusd: c.rebate_contribution_pusd.clone(),
+                        })
+                    })
+                    .collect::<Result<_, ()>>()?,
+            },
+            SettlementLifecycleEventV2::TakerRebateAccrualApplied {
+                trade_id,
+                condition_id,
+                attribution_day_start_utc_ms,
+                accrual_pusd,
+                ..
+            } => S::Contribution(RebateContributionFactV1 {
+                trade_identity: self.entity_trade(trade_id)?,
+                condition_id: condition_id.clone(),
+                kind: K::Taker,
+                attribution_day_start_utc_ms: *attribution_day_start_utc_ms,
+                contribution_pusd: accrual_pusd.clone(),
+            }),
+            SettlementLifecycleEventV2::MakerRebateDayFinalized {
+                attribution_day_start_utc_ms,
+                accrual_pusd,
+                payable_pusd,
+                locked_remainder_pusd,
+                contribution_trade_ids,
+                ..
+            }
+            | SettlementLifecycleEventV2::TakerRebateDayFinalized {
+                attribution_day_start_utc_ms,
+                accrual_pusd,
+                payable_pusd,
+                locked_remainder_pusd,
+                contribution_trade_ids,
+                ..
+            } => S::DayFinalized(RebateDayResultV1 {
+                kind: if matches!(
+                    event,
+                    SettlementLifecycleEventV2::MakerRebateDayFinalized { .. }
+                ) {
+                    K::Maker
+                } else {
+                    K::Taker
+                },
+                attribution_day_start_utc_ms: *attribution_day_start_utc_ms,
+                accrued_pusd: accrual_pusd.clone(),
+                payable_pusd: payable_pusd.clone(),
+                locked_remainder_pusd: locked_remainder_pusd.clone(),
+                contribution_refs: contribution_trade_ids
+                    .iter()
+                    .map(|trade| self.entity_trade(trade))
+                    .collect::<Result<_, _>>()?,
+            }),
+            SettlementLifecycleEventV2::MakerRebatePaid {
+                attribution_day_start_utc_ms,
+                paid_pusd,
+                ..
+            }
+            | SettlementLifecycleEventV2::TakerRebatePaid {
+                attribution_day_start_utc_ms,
+                paid_pusd,
+                ..
+            } => {
+                let kind = if matches!(event, SettlementLifecycleEventV2::MakerRebatePaid { .. }) {
+                    K::Maker
+                } else {
+                    K::Taker
+                };
+                S::Payment(RebatePaymentFactV1 {
+                    kind,
+                    attribution_day_start_utc_ms: *attribution_day_start_utc_ms,
+                    day_result_identity: I::logical(
+                        &self.account,
+                        &SourceNeutralLogicalKeyV1::RebateDay {
+                            kind,
+                            attribution_day_start_utc_ms: *attribution_day_start_utc_ms,
+                        },
+                    )
+                    .map_err(|_| ())?,
+                    paid_pusd: paid_pusd.clone(),
+                })
+            }
+            _ => return Ok(None),
+        }))
+    }
+
+    fn external_cash_identity(&self, identity: &str) -> Result<I, ()> {
+        I::entity(
+            &self.account,
+            &SourceNeutralEntityKeyV1::ExternalCash {
+                source_cash_id: identity.into(),
+            },
+        )
+        .map_err(|_| ())
+    }
+
+    fn settlement_request_identity(
+        &self,
+        request: &contracts::economics::SettlementRequestIdV1<String>,
+    ) -> Result<contracts::economics::SettlementRequestIdV1<I>, ()> {
+        self.check_account(&request.account)?;
+        Ok(contracts::economics::SettlementRequestIdV1 {
+            account: request.account.clone(),
+            condition_id: request.condition_id.clone(),
+            resolution_identity: self.entity_resolution(&request.resolution_identity)?,
+            policy_version: request.policy_version.clone(),
+        })
+    }
+
+    fn settlement_cost_identity(&self, resolution: &str, cost: &str) -> Result<I, ()> {
+        I::entity(
+            &self.account,
+            &SourceNeutralEntityKeyV1::SettlementCost {
+                source_resolution_id: resolution.to_owned(),
+                source_cost_id: cost.to_owned(),
+            },
+        )
+        .map_err(|_| ())
+    }
+
+    fn push_requested_economic(
+        &mut self,
+        record: SimV2SourceRecordReferenceV1,
+        delta: &PlatformAccountDeltaV2,
+        liability: &contracts::ExactDecimal,
+    ) -> Result<(), ()> {
+        use contracts::economics::{
+            SourceNeutralAccountBalanceDeltaV2, SourceNeutralAccountTransitionKindV2 as K,
+            SourceNeutralEconomicDispositionV2,
+        };
+        self.check_account(&delta.account_instance_key)?;
+        let PlatformAccountDeltaReasonV2::RequestedSettlement(raw) = &delta.reason else {
+            return Err(());
+        };
+        let transition = match raw {
+            K::ResolutionRedeemApplied {
+                resolution_identity,
+                settlement_request_id,
+            } => K::ResolutionRedeemApplied {
+                resolution_identity: self.entity_resolution(resolution_identity)?,
+                settlement_request_id: self.settlement_request_identity(settlement_request_id)?,
+            },
+            K::SettlementCostRecognized {
+                settlement_request_id,
+                cost_identity,
+            } => K::SettlementCostRecognized {
+                settlement_request_id: self.settlement_request_identity(settlement_request_id)?,
+                cost_identity: self.settlement_cost_identity(
+                    &settlement_request_id.resolution_identity,
+                    cost_identity,
+                )?,
+            },
+            K::SettlementCostPaid {
+                settlement_request_id,
+                cost_identity,
+            } => K::SettlementCostPaid {
+                settlement_request_id: self.settlement_request_identity(settlement_request_id)?,
+                cost_identity: self.settlement_cost_identity(
+                    &settlement_request_id.resolution_identity,
+                    cost_identity,
+                )?,
+            },
+            K::ExternalCashApplied { cash_identity } => K::ExternalCashApplied {
+                cash_identity: self.external_cash_identity(cash_identity)?,
+            },
+            K::Existing(_) => return Err(()),
+        };
+        self.push(
+            record,
+            SourceNeutralLogicalKeyV1::AccountTransition {
+                account_transition_seq: delta.account_transition_seq,
+            },
+            SourceNeutralEvidenceKind::EconomicV2 {
+                evidence: execution_normalization::SourceNeutralEconomicEvidenceV2 {
+                    economic_key:
+                        execution_normalization::SourceNeutralEconomicKeyV1::AccountTransition {
+                            account_transition_seq: delta.account_transition_seq,
+                        },
+                    disposition: SourceNeutralEconomicDispositionV2::AccountTransition {
+                        economic_effective_at_utc_ms: delta.platform_effective_at_utc_ms,
+                        condition_id: delta.condition_id.clone(),
+                        transition,
+                        balance_delta: Box::new(SourceNeutralAccountBalanceDeltaV2 {
+                            existing: normalized_balance_delta(delta),
+                            settlement_fee_liability_pusd_delta: liability.clone(),
+                            actual_taker_fee_liability_pusd_delta: contracts::ExactDecimal(
+                                "0".into(),
+                            ),
+                        }),
+                    },
+                },
+            },
+        );
         Ok(())
     }
 
@@ -856,6 +1230,7 @@ where
     ) -> Result<(), ()> {
         self.check_account(&delta.account_instance_key)?;
         let transition = match &delta.reason {
+            PlatformAccountDeltaReasonV2::RequestedSettlement(_) => return Err(()),
             PlatformAccountDeltaReasonV2::OrderAcceptedEncumbranceApplied { platform_order_id } => {
                 SourceNeutralAccountTransitionKindV1::OrderAcceptedEncumbranceApplied {
                     order_identity: self.entity_order(platform_order_id)?,
@@ -956,43 +1331,7 @@ where
                     economic_effective_at_utc_ms: delta.platform_effective_at_utc_ms,
                     condition_id: delta.condition_id.clone(),
                     transition,
-                    balance_delta: Box::new(SourceNeutralAccountBalanceDeltaV1 {
-                        cash_pusd_delta: delta.balance_delta.cash_pusd_delta.clone(),
-                        available_pusd_delta: delta.balance_delta.available_pusd_delta.clone(),
-                        principal_encumbrance_pusd_delta: delta
-                            .balance_delta
-                            .principal_encumbrance_pusd_delta
-                            .clone(),
-                        immediate_taker_fee_encumbrance_pusd_delta: delta
-                            .balance_delta
-                            .immediate_taker_fee_encumbrance_pusd_delta
-                            .clone(),
-                        outcome_balance_deltas: delta
-                            .balance_delta
-                            .outcome_balance_deltas
-                            .iter()
-                            .map(|balance| SourceNeutralOutcomeBalanceDeltaV1 {
-                                token_id: balance.token_id.clone(),
-                                balance_shares_delta: balance.balance_shares_delta.clone(),
-                            })
-                            .collect(),
-                        maker_rebate_receivable_pusd_delta: delta
-                            .balance_delta
-                            .maker_rebate_receivable_pusd_delta
-                            .clone(),
-                        taker_rebate_receivable_pusd_delta: delta
-                            .balance_delta
-                            .taker_rebate_receivable_pusd_delta
-                            .clone(),
-                        maker_rebate_locked_remainder_pusd_delta: delta
-                            .balance_delta
-                            .maker_rebate_locked_remainder_pusd_delta
-                            .clone(),
-                        taker_rebate_locked_remainder_pusd_delta: delta
-                            .balance_delta
-                            .taker_rebate_locked_remainder_pusd_delta
-                            .clone(),
-                    }),
+                    balance_delta: Box::new(normalized_balance_delta(delta)),
                 },
             },
         );
@@ -1166,9 +1505,19 @@ fn durable_now_utc_ms() -> i64 {
 
 /// 只在公开反馈版本边界选型，核心处理前保留完整成交证据。
 pub trait NoeFeedbackPayload<I = StableLogicalIdentityV1>: Clone {
+    fn economic_details() -> bool {
+        false
+    }
     type Result: Clone + std::fmt::Debug + Eq + serde::Serialize;
     fn legacy(&self) -> &contracts::TradeLifecycleFeedbackV2;
     fn normalized(&self, identity: SourceNeutralTradeLifecycleResultV1<I>) -> Self::Result;
+    fn enriched(
+        &self,
+        _identity: SourceNeutralTradeLifecycleResultV1<I>,
+    ) -> Option<contracts::economics::SourceNeutralTradeLifecycleResultV3<I>> {
+        None
+    }
+
     fn batch(
         payload: &BusinessProjectionBatchPayloadV1,
     ) -> Option<Arc<BusinessProjectionBatch<Self>>>;
@@ -1196,6 +1545,9 @@ impl<I: Clone + std::fmt::Debug + Eq + serde::Serialize> NoeFeedbackPayload<I>
     for contracts::TradeLifecycleFeedbackV3
 {
     type Result = contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2<I>;
+    fn economic_details() -> bool {
+        true
+    }
     fn legacy(&self) -> &contracts::TradeLifecycleFeedbackV2 {
         &self.feedback
     }
@@ -1217,6 +1569,24 @@ impl<I: Clone + std::fmt::Debug + Eq + serde::Serialize> NoeFeedbackPayload<I>
             economic_application_account_transition_seq: self
                 .economic_application_account_transition_seq,
         }
+    }
+    fn enriched(
+        &self,
+        identity: SourceNeutralTradeLifecycleResultV1<I>,
+    ) -> Option<contracts::economics::SourceNeutralTradeLifecycleResultV3<I>> {
+        Some(contracts::economics::SourceNeutralTradeLifecycleResultV3 {
+            result: self.normalized(identity),
+            maker_fee_equivalent_pusd: match self.liquidity_role {
+                contracts::TradeLiquidityRoleV2::Taker => {
+                    contracts::ExecutionReadValueV1::NotApplicable
+                }
+                contracts::TradeLiquidityRoleV2::MakerInferred => self
+                    .maker_fee_equivalent_pusd
+                    .clone()
+                    .map(contracts::ExecutionReadValueV1::Known)
+                    .unwrap_or(contracts::ExecutionReadValueV1::Unavailable),
+            },
+        })
     }
     fn batch(
         payload: &BusinessProjectionBatchPayloadV1,
@@ -1381,6 +1751,7 @@ pub(super) fn project_real_query_for_tests(
         "order-query-test".into(),
     );
     let batch = super::BusinessProjectionBatchV3 {
+        initial_markets: Vec::new(),
         run_id: opened.run_id.clone(),
         projection_batch_sequence: 1,
         account_opening: Some(Arc::clone(opening)),
@@ -1772,14 +2143,14 @@ pub(super) fn assert_v3_rebuilt_evidence_semantics(
         let mut changed = original
             .evidence
             .iter()
-            .find(|e| matches!(e.kind, SourceNeutralEvidenceKind::TradeLifecycle { .. }))
+            .find(|e| matches!(e.kind, SourceNeutralEvidenceKind::TradeLifecycleV3 { .. }))
             .unwrap()
             .clone();
-        if let SourceNeutralEvidenceKind::TradeLifecycle { result } = &mut changed.kind {
+        if let SourceNeutralEvidenceKind::TradeLifecycleV3 { result } = &mut changed.kind {
             if change_sequence {
-                result.fill_sequence += 1;
+                result.result.fill_sequence += 1;
             } else {
-                result.matched_at_utc_ms += 1;
+                result.result.matched_at_utc_ms += 1;
             }
         }
         let mut conflicting = original.clone();
@@ -2259,6 +2630,7 @@ mod tests {
             feedback(
                 42,
                 SettlementLifecycleEventV2::MakerRebateDayFinalized {
+                    contribution_trade_ids: Vec::new(),
                     attribution_day_start_utc_ms: 0,
                     accrual_pusd: ExactDecimal("0".to_owned()),
                     payable_pusd: ExactDecimal("0".to_owned()),
@@ -2269,6 +2641,7 @@ mod tests {
             feedback(
                 43,
                 SettlementLifecycleEventV2::TakerRebateDayFinalized {
+                    contribution_trade_ids: Vec::new(),
                     attribution_day_start_utc_ms: 0,
                     accrual_pusd: ExactDecimal("0".to_owned()),
                     payable_pusd: ExactDecimal("0".to_owned()),
@@ -2329,6 +2702,7 @@ mod tests {
 
     fn representative_batch(account_id: &str) -> Arc<BusinessProjectionBatchV2> {
         Arc::new(BusinessProjectionBatchV2 {
+            initial_markets: Vec::new(),
             run_id: "run-noe-58".to_owned(),
             projection_batch_sequence: 1,
             account_opening: Some(opening(account_id)),
@@ -2342,6 +2716,7 @@ mod tests {
 
     fn empty_batch(sequence: u64, with_opening: bool) -> Arc<BusinessProjectionBatchV2> {
         Arc::new(BusinessProjectionBatchV2 {
+            initial_markets: Vec::new(),
             run_id: "run-noe-58".to_owned(),
             projection_batch_sequence: sequence,
             account_opening: with_opening.then(|| opening("account-noe-58")),
@@ -2573,6 +2948,7 @@ mod tests {
         let mut port = new_port(temporary.path());
         assert!(port.try_accept(empty_batch(1, true)));
         let wrong_account = Arc::new(BusinessProjectionBatchV2 {
+            initial_markets: Vec::new(),
             run_id: "run-noe-58".to_owned(),
             projection_batch_sequence: 2,
             account_opening: Some(opening("other-account")),
@@ -2587,6 +2963,7 @@ mod tests {
         assert_eq!(port.durable_through("other-run"), 0);
 
         let wrong_run = BusinessProjectionBatchV2 {
+            initial_markets: Vec::new(),
             run_id: "other-run".to_owned(),
             projection_batch_sequence: 2,
             account_opening: None,
@@ -2618,6 +2995,7 @@ mod tests {
 
         for (sequence, enrollment) in [(2, first_market), (3, second_market)] {
             assert!(port.try_accept(Arc::new(BusinessProjectionBatchV2 {
+                initial_markets: Vec::new(),
                 run_id: "run-noe-58".to_owned(),
                 projection_batch_sequence: sequence,
                 account_opening: None,
@@ -2687,5 +3065,45 @@ mod tests {
                 "durable_bytes_growth_per_batch": growth_bytes as f64 / growth_batches as f64,
             })
         );
+    }
+}
+
+fn normalized_balance_delta(delta: &PlatformAccountDeltaV2) -> SourceNeutralAccountBalanceDeltaV1 {
+    SourceNeutralAccountBalanceDeltaV1 {
+        cash_pusd_delta: delta.balance_delta.cash_pusd_delta.clone(),
+        available_pusd_delta: delta.balance_delta.available_pusd_delta.clone(),
+        principal_encumbrance_pusd_delta: delta
+            .balance_delta
+            .principal_encumbrance_pusd_delta
+            .clone(),
+        immediate_taker_fee_encumbrance_pusd_delta: delta
+            .balance_delta
+            .immediate_taker_fee_encumbrance_pusd_delta
+            .clone(),
+        outcome_balance_deltas: delta
+            .balance_delta
+            .outcome_balance_deltas
+            .iter()
+            .map(|balance| SourceNeutralOutcomeBalanceDeltaV1 {
+                token_id: balance.token_id.clone(),
+                balance_shares_delta: balance.balance_shares_delta.clone(),
+            })
+            .collect(),
+        maker_rebate_receivable_pusd_delta: delta
+            .balance_delta
+            .maker_rebate_receivable_pusd_delta
+            .clone(),
+        taker_rebate_receivable_pusd_delta: delta
+            .balance_delta
+            .taker_rebate_receivable_pusd_delta
+            .clone(),
+        maker_rebate_locked_remainder_pusd_delta: delta
+            .balance_delta
+            .maker_rebate_locked_remainder_pusd_delta
+            .clone(),
+        taker_rebate_locked_remainder_pusd_delta: delta
+            .balance_delta
+            .taker_rebate_locked_remainder_pusd_delta
+            .clone(),
     }
 }

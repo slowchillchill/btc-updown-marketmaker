@@ -248,6 +248,9 @@ pub fn read_ledger_projection_v1(
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "body", rename_all = "SCREAMING_SNAKE_CASE")]
 pub(crate) enum DurablePayloadV1 {
+    GenesisV2 {
+        policy: crate::projection::AccountAdmissionPolicyV2,
+    },
     Genesis {
         policy: AccountAdmissionPolicyV1,
     },
@@ -261,7 +264,7 @@ pub(crate) enum DurablePayloadV1 {
 impl DurablePayloadV1 {
     fn ledger_entry_seq(&self) -> Option<u64> {
         match self {
-            Self::Genesis { .. } => None,
+            Self::Genesis { .. } | Self::GenesisV2 { .. } => None,
             Self::Transaction(effect) => Some(effect.ledger_entry_seq()),
             Self::ReservationDecision { .. } => None,
         }
@@ -367,6 +370,21 @@ impl DurableLedgerV1 {
         fail_after_publish: bool,
         version: u16,
     ) -> Result<Self, LedgerDurableErrorV1> {
+        Self::create_genesis(
+            directory,
+            DurablePayloadV1::Genesis {
+                policy: policy.clone(),
+            },
+            fail_after_publish,
+            version,
+        )
+    }
+    pub(crate) fn create_genesis(
+        directory: &Path,
+        genesis: DurablePayloadV1,
+        fail_after_publish: bool,
+        version: u16,
+    ) -> Result<Self, LedgerDurableErrorV1> {
         match fs::create_dir(directory) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -409,9 +427,6 @@ impl DurableLedgerV1 {
                 });
             }
         }
-        let genesis = DurablePayloadV1::Genesis {
-            policy: policy.clone(),
-        };
         let encoded = encode_record_version(1, &genesis, version)?;
         let mut candidate = OpenOptions::new()
             .create_new(true)

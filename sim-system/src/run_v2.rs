@@ -265,6 +265,7 @@ pub enum BusinessDirectResponseV2 {
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct BusinessProjectionBatch<T> {
+    pub initial_markets: Vec<contracts::economics::SourceNeutralInitialMarketV1>,
     pub run_id: String,
     pub projection_batch_sequence: u64,
     pub account_opening: Option<Arc<AccountOpeningFactV2>>,
@@ -312,6 +313,7 @@ impl BusinessProjectionBatchV3 {
             }
             crate::runtime_v2::BusinessProjectionVersionV1::V2 => {
                 BusinessProjectionBatchPayloadV1::V2(Arc::new(BusinessProjectionBatchV2 {
+                    initial_markets: self.initial_markets,
                     run_id: self.run_id,
                     projection_batch_sequence: self.projection_batch_sequence,
                     account_opening: self.account_opening,
@@ -1007,6 +1009,12 @@ fn finalize_lifecycle_feedback_v2(
         LifecycleFeedbackEffectV2::Trade(effect) => effect.platform_event_at_utc_ms,
         LifecycleFeedbackEffectV2::Settlement(effect) => effect.platform_event_at_utc_ms,
     };
+    let sent_at_utc_ms = match &effect {
+        LifecycleFeedbackEffectV2::Settlement(effect) => effect
+            .repeated_at_utc_ms
+            .unwrap_or(platform_event_at_utc_ms),
+        _ => platform_event_at_utc_ms,
+    };
     let stable_sequence = private_feedback_sequence.to_string();
     let delay_ms = latency_profile.sample_delay_ms(
         session_seed.0.as_bytes(),
@@ -1016,7 +1024,7 @@ fn finalize_lifecycle_feedback_v2(
     let metadata = contracts::LifecycleFeedbackMetadataV2 {
         account_instance_key: account_instance_key.clone(),
         platform_event_at_utc_ms,
-        feedback_received_at_utc_ms: checked_add_delay_v2(platform_event_at_utc_ms, delay_ms)?,
+        feedback_received_at_utc_ms: checked_add_delay_v2(sent_at_utc_ms, delay_ms)?,
         private_feedback_sequence,
     };
     Ok(match effect {
@@ -1031,6 +1039,7 @@ fn finalize_lifecycle_feedback_v2(
         }
         LifecycleFeedbackEffectV2::Trade(effect) => {
             FinalizedLifecycleFeedbackV2::Trade(contracts::TradeLifecycleFeedbackV3 {
+                maker_fee_equivalent_pusd: effect.maker_fee_equivalent_pusd,
                 fill_sequence: effect.fill_sequence,
                 matched_at_utc_ms: effect.matched_at_utc_ms,
                 feedback: TradeLifecycleFeedbackV2 {
@@ -1094,11 +1103,23 @@ fn finalize_projection_batch_v2(
     SimRunActorErrorV2,
 > {
     let mut account_opening = None;
+    let mut initial_markets = Vec::new();
     let mut market_enrollment = None;
     let mut drafts = Vec::new();
     let committed = match output {
         BusinessReducerOutputV2::CreateSession(result) => {
             account_opening = Some(Arc::clone(&result.opening_fact));
+            initial_markets = state
+                .session
+                .as_ref()
+                .expect("实际开户已创建会话")
+                .market_directory
+                .markets()
+                .map(|m| contracts::economics::SourceNeutralInitialMarketV1 {
+                    market: m.market().clone(),
+                    assets: m.assets().clone(),
+                })
+                .collect();
             CommittedBusinessOutputV2::CreateSession(result)
         }
         BusinessReducerOutputV2::MarketEnrollment(result) => {
@@ -1212,6 +1233,7 @@ fn finalize_projection_batch_v2(
         state,
         committed,
         Some(BusinessProjectionBatchV3 {
+            initial_markets,
             run_id: run_id.to_owned(),
             projection_batch_sequence,
             account_opening,
@@ -1252,6 +1274,59 @@ fn reduce_actor_input_v2(
     finality_policy: &TradeFinalityPolicyV2,
 ) -> BusinessReductionResultV2 {
     match input {
+        BusinessInputV2::Settlement(operation) => {
+            let mut state = state;
+            let Some(session) = state.session.as_mut() else {
+                return Err(unaccepted_business_input_v2(
+                    state,
+                    SimRunActorErrorV2::CompletionNotReady("结算需要已开户会话"),
+                ));
+            };
+            let before_resources = session.execution_state.requested_settlement_resources();
+            let mut operation = operation.clone();
+            use crate::matching::settlement::SettlementOperationV1 as Op;
+            let arrival = match &mut operation {
+                Op::Request {
+                    request,
+                    requested_at_utc_ms,
+                } => Some((&request.identity.resolution_identity, requested_at_utc_ms)),
+                Op::Query {
+                    identity,
+                    requested_at_utc_ms,
+                } => Some((&identity.resolution_identity, requested_at_utc_ms)),
+                Op::Configure(_) | Op::ExternalCash { .. } => None,
+            };
+            if let Some((identity, at)) = arrival {
+                *at = checked_add_delay_v2(
+                    *at,
+                    latency_profile.sample_delay_ms(
+                        session.session_seed.0.as_bytes(),
+                        identity,
+                        DelaySampleDomainV1::RequestOutbound,
+                    ),
+                )
+                .map_err(BusinessReductionErrorV2::Fatal)?;
+            }
+            let lifecycle = session
+                .execution_state
+                .settlement_operation(&operation)
+                .map_err(|error| {
+                    BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(error))
+                })?;
+            let after_resources = session.execution_state.requested_settlement_resources();
+            state.business_resources.records = state.business_resources.records
+                - before_resources.records
+                + after_resources.records;
+            state.business_resources.bytes =
+                state.business_resources.bytes - before_resources.bytes + after_resources.bytes;
+            Ok((
+                state,
+                BusinessReducerOutputV2::LogicalDrive(LogicalDriveOutputV2 {
+                    lifecycle,
+                    mutations: Vec::new(),
+                }),
+            ))
+        }
         BusinessInputV2::HiddenStepBucket(bucket) => drive_business_input_at_v2(
             state,
             BusinessReducerInputV2::HiddenStepBucket {
@@ -1418,8 +1493,66 @@ fn account_key_owned_bytes_v2(key: &AccountInstanceKeyV1) -> u64 {
     (key.run_id.len() + key.caller_instance_id.len() + key.account_id.len()) as u64
 }
 
+pub(crate) fn settlement_request_owned_bytes_v1(
+    id: &contracts::economics::SettlementRequestIdV1<String>,
+) -> u64 {
+    account_key_owned_bytes_v2(&id.account)
+        + (id.condition_id.0.len() + id.resolution_identity.len() + id.policy_version.len()) as u64
+}
+
+fn settlement_transition_owned_bytes_v1(
+    transition: &contracts::economics::SourceNeutralAccountTransitionKindV2<String>,
+) -> u64 {
+    use contracts::economics::SourceNeutralAccountTransitionKindV2 as K;
+    match transition {
+        K::ResolutionRedeemApplied {
+            resolution_identity,
+            settlement_request_id,
+        } => {
+            resolution_identity.len() as u64
+                + settlement_request_owned_bytes_v1(settlement_request_id)
+        }
+        K::SettlementCostRecognized {
+            settlement_request_id,
+            cost_identity,
+        }
+        | K::SettlementCostPaid {
+            settlement_request_id,
+            cost_identity,
+        } => cost_identity.len() as u64 + settlement_request_owned_bytes_v1(settlement_request_id),
+        K::ExternalCashApplied { cash_identity } => cash_identity.len() as u64,
+        K::Existing(transition) => {
+            use contracts::execution_normalization::SourceNeutralAccountTransitionKindV1 as Old;
+            match transition {
+                Old::OrderAcceptedEncumbranceApplied { order_identity }
+                | Old::FakUnspentEncumbranceReleased { order_identity }
+                | Old::CallerCancellationEncumbranceReleased { order_identity }
+                | Old::VenueDustEncumbranceReleased { order_identity }
+                | Old::GtdExpirationEncumbranceReleased { order_identity, .. } => {
+                    order_identity.len() as u64
+                }
+                Old::MarketResolutionEncumbranceReleased {
+                    resolution_identity,
+                    order_identity,
+                } => (resolution_identity.len() + order_identity.len()) as u64,
+                Old::FillFinalityEconomicApplied { trade_identity, .. }
+                | Old::FillFinalityUnappliedFailureReleased { trade_identity, .. }
+                | Old::FillFinalityCompensationApplied { trade_identity, .. }
+                | Old::TakerRebateAccrualApplied { trade_identity } => trade_identity.len() as u64,
+                Old::AutoRedeemApplied {
+                    resolution_identity,
+                } => resolution_identity.len() as u64,
+                _ => 0,
+            }
+        }
+    }
+}
+
 fn account_delta_owned_bytes_v2(delta: &contracts::PlatformAccountDeltaV2) -> u64 {
     let reason = match &delta.reason {
+        contracts::PlatformAccountDeltaReasonV2::RequestedSettlement(transition) => {
+            settlement_transition_owned_bytes_v1(transition)
+        }
         contracts::PlatformAccountDeltaReasonV2::OrderAcceptedEncumbranceApplied {
             platform_order_id,
         }
@@ -1747,9 +1880,69 @@ fn trade_lifecycle_owned_bytes_v2(feedback: &TradeLifecycleFeedbackV2) -> u64 {
 }
 
 fn settlement_lifecycle_owned_bytes_v2(feedback: &SettlementLifecycleFeedbackV2) -> u64 {
+    lifecycle_metadata_owned_bytes_v2(&feedback.metadata)
+        + settlement_event_owned_bytes_v2(&feedback.event)
+}
+pub(crate) fn settlement_event_owned_bytes_v2(
+    event: &contracts::SettlementLifecycleEventV2,
+) -> u64 {
     use contracts::SettlementLifecycleEventV2 as Event;
-
-    let event = match &feedback.event {
+    match event {
+        Event::ExternalCash {
+            fact,
+            account_delta,
+        } => {
+            (fact.identity.len()
+                + fact.signed_delta_pusd.0.len()
+                + fact.correction_of.as_ref().map_or(0, String::len)) as u64
+                + account_delta_owned_bytes_v2(account_delta)
+        }
+        Event::RequestedSettlement {
+            result,
+            account_delta,
+            settlement_fee_liability_pusd_delta,
+        } => {
+            use contracts::economics::RequestedSettlementResultV1 as R;
+            let result_bytes = match result {
+                R::Request(fact) => settlement_request_owned_bytes_v1(&fact.settlement_request_id),
+                R::Cost(fact) => {
+                    settlement_request_owned_bytes_v1(&fact.settlement_request_id)
+                        + (fact.cost_identity.len()
+                            + fact.recognized_pusd.0.len()
+                            + fact.paid_pusd.0.len()
+                            + fact.correction_of.as_ref().map_or(0, String::len))
+                            as u64
+                }
+            };
+            result_bytes
+                + optional_account_delta_owned_bytes_v2(account_delta.as_ref())
+                + settlement_fee_liability_pusd_delta.0.len() as u64
+        }
+        Event::ResolvedPosition {
+            condition_id,
+            resolution_event_id,
+            resolution,
+        } => {
+            let contracts::MarketResolutionTerminalV3::Resolved {
+                winning_asset_id,
+                winning_outcome,
+                payout_vector,
+                mapping_rule_version,
+            } = resolution;
+            (condition_id.0.len()
+                + resolution_event_id.len()
+                + winning_asset_id.len()
+                + winning_outcome.len()
+                + mapping_rule_version.len()) as u64
+                + payout_vector
+                    .iter()
+                    .map(|p| {
+                        (p.asset.token_id.0.len()
+                            + p.asset.outcome.label.len()
+                            + p.payout_pusd_per_share.0.len()) as u64
+                    })
+                    .sum::<u64>()
+        }
         Event::MakerRebateAccrualFinalized {
             condition_id,
             contributions,
@@ -1853,8 +2046,7 @@ fn settlement_lifecycle_owned_bytes_v2(feedback: &SettlementLifecycleFeedbackV2)
                     .sum::<u64>()
                 + optional_account_delta_owned_bytes_v2(account_delta.as_ref())
         }
-    };
-    lifecycle_metadata_owned_bytes_v2(&feedback.metadata) + event
+    }
 }
 
 #[derive(Debug)]
@@ -1925,6 +2117,7 @@ struct RequiredLogicalDriveScheduleV2 {
     gtd_at_utc_ms: Option<i64>,
     finality_at_utc_ms: Option<i64>,
     rebate_at_utc_ms: Option<i64>,
+    settlement_at_utc_ms: Option<i64>,
     mutation_at_utc_ms: Option<i64>,
 }
 
@@ -1934,6 +2127,7 @@ impl RequiredLogicalDriveScheduleV2 {
             self.gtd_at_utc_ms,
             self.finality_at_utc_ms,
             self.rebate_at_utc_ms,
+            self.settlement_at_utc_ms,
             self.mutation_at_utc_ms,
         ]
         .into_iter()
@@ -2083,6 +2277,7 @@ where
     ) -> Result<Arc<[ExecutionMarketEventV3]>, SimRunActorErrorV2>,
 {
     Ok(match input {
+        LoggedBusinessInputV2::Settlement(operation) => BusinessInputV2::Settlement(operation),
         LoggedBusinessInputV2::HiddenStepBucket(bucket) => {
             let records = read_public
                 .as_mut()
@@ -5176,6 +5371,7 @@ fn next_scheduled_obligation_at_v2(state: &BusinessReducerStateV2) -> Option<i64
         session.execution_state.next_gtd_deadline_at_utc_ms(),
         session.execution_state.next_scheduled_finality_at_utc_ms(),
         session.execution_state.next_rebate_clock_at_utc_ms(),
+        session.execution_state.next_settlement_clock_at_utc_ms(),
     ]
     .into_iter()
     .flatten()
@@ -5196,6 +5392,7 @@ fn next_required_logical_drive_v2(
         gtd_at_utc_ms: session.execution_state.next_gtd_deadline_at_utc_ms(),
         finality_at_utc_ms: session.execution_state.next_scheduled_finality_at_utc_ms(),
         rebate_at_utc_ms: session.execution_state.next_rebate_clock_at_utc_ms(),
+        settlement_at_utc_ms: session.execution_state.next_settlement_clock_at_utc_ms(),
         mutation_at_utc_ms: session
             .mutation_requests
             .pending_actions
@@ -5223,6 +5420,56 @@ fn drain_scheduled_obligations_at_v2(
     finality_policy: &TradeFinalityPolicyV2,
     output: &mut LogicalDriveOutputV2,
 ) -> Result<BusinessReducerStateV2, BusinessReductionErrorV2> {
+    if let Some(session) = state.session.as_mut() {
+        if session.execution_state.next_settlement_clock_at_utc_ms() == Some(logical_at_utc_ms) {
+            let before_resources = session.execution_state.requested_settlement_resources();
+            let effects = session
+                .execution_state
+                .advance_settlement_at(logical_at_utc_ms)
+                .map_err(|error| {
+                    BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(error))
+                })?;
+            for effect in &effects {
+                if let LifecycleFeedbackEffectV2::Settlement(
+                    crate::matching::SettlementLifecycleEffectV2 {
+                        event:
+                            contracts::SettlementLifecycleEventV2::RequestedSettlement {
+                                result:
+                                    contracts::economics::RequestedSettlementResultV1::Request(request),
+                                ..
+                            },
+                        ..
+                    },
+                ) = effect
+                {
+                    if request.outcome
+                        == contracts::economics::SettlementRequestOutcomeV1::FinalSuccess
+                    {
+                        let condition = &request.settlement_request_id.condition_id.0;
+                        if let Some(terminal) = session
+                            .execution_state
+                            .redeemed_market_resolution(condition)
+                        {
+                            let _ = session
+                                .public_markets
+                                .mark_resolution_terminal_if_qualified(condition, terminal);
+                            if let Some(hidden) = &mut session.hidden_platform_markets {
+                                let _ = hidden
+                                    .mark_resolution_terminal_if_qualified(condition, terminal);
+                            }
+                        }
+                    }
+                }
+            }
+            let after_resources = session.execution_state.requested_settlement_resources();
+            state.business_resources.records = state.business_resources.records
+                - before_resources.records
+                + after_resources.records;
+            state.business_resources.bytes =
+                state.business_resources.bytes - before_resources.bytes + after_resources.bytes;
+            output.lifecycle.extend(effects);
+        }
+    }
     while state
         .session
         .as_ref()
@@ -5276,6 +5523,18 @@ fn drain_scheduled_obligations_at_v2(
             session.query_state.advance_revision();
         }
         if let Some(transition) = effects.transition.as_ref() {
+            let condition = &transition.trade_finality.condition_id.0;
+            if let Some(terminal) = session
+                .execution_state
+                .redeemed_market_resolution(condition)
+            {
+                let _ = session
+                    .public_markets
+                    .mark_resolution_terminal_if_qualified(condition, terminal);
+                if let Some(hidden) = &mut session.hidden_platform_markets {
+                    let _ = hidden.mark_resolution_terminal_if_qualified(condition, terminal);
+                }
+            }
             for settlement in &transition.settlement {
                 if let crate::matching::EconomicLifecycleEffectV2::AutoRedeem(redeem) = settlement {
                     let _ = session
@@ -8234,7 +8493,7 @@ mod tests {
         let BusinessReducerOutputV2::LogicalDrive(output) = output else {
             panic!("双市场 EOF 必须返回逻辑驱动效果")
         };
-        assert_eq!(output.lifecycle.len(), 2);
+        assert_eq!(output.lifecycle.len(), 4);
         let session = state.session.as_ref().expect("双市场 EOF 后会话存在");
         assert!(session.hidden_platform_frontier.sealed);
         for market in success_markets {
@@ -13545,7 +13804,7 @@ mod tests {
         };
         assert!(matches!(
             hidden_execution.settlement_for_tests(),
-            [crate::matching::EconomicLifecycleEffectV2::AutoRedeem(
+            [crate::matching::EconomicLifecycleEffectV2::ResolvedPosition { .. }, crate::matching::EconomicLifecycleEffectV2::AutoRedeem(
                 crate::matching::AutoRedeemEffectV2 {
                     redeemed_pusd,
                     account_transition_seq: None,
@@ -15785,6 +16044,7 @@ mod tests {
             gtd_at_utc_ms: Some(1_400),
             finality_at_utc_ms: Some(1_300),
             rebate_at_utc_ms: Some(1_500),
+            settlement_at_utc_ms: None,
             mutation_at_utc_ms: Some(1_200),
         };
 
@@ -18499,7 +18759,9 @@ mod tests {
                             fact.fact_reference.clone(),
                             fact.logical_identity.clone(),
                             fact.economic_identity.clone(),
-                            fact.disposition.clone(),
+                            contracts::economics::SourceNeutralEconomicDispositionV2::from(
+                                fact.disposition.clone(),
+                            ),
                             fact.source_reference.watermark.clone(),
                             fact.source_reference.record.clone(),
                         ));
@@ -18550,7 +18812,20 @@ mod tests {
                     result.record.logical_identity().clone(),
                     result.record.source_order().clone(),
                 ));
-                if let Some(fact) = result.record.economic_fact() {
+                // 旧 Economic 来源仍产生 V1；V3 成交扩展不改写其经济载荷版本。
+                if let NormalizationRecordV2::EconomicFact { fact, .. } = &result.record {
+                    economics.push((
+                        fact.fact_reference.clone(),
+                        fact.logical_identity.clone(),
+                        fact.economic_identity.clone(),
+                        contracts::economics::SourceNeutralEconomicDispositionV2::from(
+                            fact.disposition.clone(),
+                        ),
+                        fact.source_reference.watermark.clone(),
+                        fact.source_reference.record.clone(),
+                    ));
+                }
+                if let NormalizationRecordV2::EconomicFactV2 { fact, .. } = &result.record {
                     economics.push((
                         fact.fact_reference.clone(),
                         fact.logical_identity.clone(),
@@ -18562,10 +18837,11 @@ mod tests {
                 }
                 if let NormalizationRecordV2::Evidence {
                     source_reference,
-                    evidence: SourceNeutralEvidenceKindV2::TradeLifecycle { result },
+                    evidence: SourceNeutralEvidenceKindV2::TradeLifecycleV3 { result },
                     ..
                 } = result.record
                 {
+                    let result = result.result;
                     let contracts::execution_normalization::SimV2SourceRecordReferenceV1::TradeLifecycle { private_feedback_sequence, platform_event_at_utc_ms, feedback_received_at_utc_ms } = source_reference.record else { panic!("成交直接来源"); };
                     let original = new_feedback
                         .iter()
@@ -18910,6 +19186,20 @@ impl PublicSimExecutionV1 {
         actor.background_log = Some(BackgroundEventLogV1::start(log, finite_in_flight_groups));
         Ok(Self { actor })
     }
+    /// 有限模拟场景沿原输入记录持久化；真实业务不从脚本直接写 Ledger。
+    pub fn configure_resolution_redeem_v1(
+        &mut self,
+        scenario: crate::ResolutionRedeemScenarioV1,
+    ) -> Result<(), SimRunActorErrorV2> {
+        let committed = self.actor.commit_group(vec![BusinessInputV2::Settlement(
+            crate::matching::settlement::SettlementOperationV1::Configure(scenario),
+        )])?;
+        if let Some(error) = committed.unaccepted {
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// 在首次 Ledger 应用前，将原材料接入本运行的唯一后台所有者。
     #[cfg(feature = "shared-execution")]
     pub fn bind_ledger_recording_v2(
@@ -18956,6 +19246,15 @@ impl PublicSimExecutionV1 {
         request: MarketEnrollmentRequestV1,
     ) -> Result<MarketEnrollmentV2, SimRunActorErrorV2> {
         self.actor.enroll_market(request)
+    }
+    /// 有限宿主在原后台稳定已接纳输入、NOE和Ledger材料，不生成账户快照。
+    pub fn stabilize_recording(&mut self) -> Result<(), SimRunActorErrorV2> {
+        self.actor
+            .background_log
+            .as_mut()
+            .ok_or(SimRunActorErrorV2::Closed)?
+            .stabilize()
+            .map_err(SimRunActorErrorV2::Log)
     }
     /// 排空已经接纳的记录，不推进业务时间、不领取后续反馈，也不生成 RunSeal。
     pub fn stop_and_drain(mut self) -> Result<(), SimRunActorErrorV2> {
@@ -19183,6 +19482,9 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
     pub fn wait_for_recording_capacity(&mut self) -> Result<(), SimRunActorErrorV2> {
         self.execution.wait_for_recording_capacity()
     }
+    pub fn stabilize_recording(&mut self) -> Result<(), SimRunActorErrorV2> {
+        self.execution.stabilize_recording()
+    }
     pub fn next_group(
         &mut self,
     ) -> Result<
@@ -19335,6 +19637,19 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
         self.execution.hidden_bucket(bucket)
     }
     /// 停止读取来源，沿同一后台排空已接纳材料；不消费迭代器剩余项。
+    pub fn settlement_simulation_read(
+        &self,
+        condition: &contracts::ConditionId,
+    ) -> Option<crate::SettlementSimulationReadV1> {
+        self.execution
+            .actor
+            .state
+            .as_ref()?
+            .session
+            .as_ref()?
+            .execution_state
+            .settlement_simulation_read(condition)
+    }
     pub fn stop_and_drain(self) -> Result<(), SimRunActorErrorV2> {
         self.execution.stop_and_drain()
     }
@@ -19421,6 +19736,83 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
     }
     pub fn frames(&self) -> Vec<PublicObservationFrameV1<'_>> {
         self.driver.frames_with_cutoff(&self.cutoff)
+    }
+    /// 显式已批准的模拟外部现金事实，不是模型动作。
+    pub fn apply_external_cash_fact_v1(
+        &mut self,
+        fact: contracts::economics::ExternalCashFactV1<String>,
+    ) -> Result<(), SimRunActorErrorV2> {
+        let committed =
+            self.driver
+                .execution
+                .actor
+                .commit_group(vec![BusinessInputV2::Settlement(
+                    crate::matching::settlement::SettlementOperationV1::ExternalCash {
+                        fact,
+                        at_utc_ms: self.cutoff.decision_time.logical_time_utc_ms(),
+                    },
+                )])?;
+        if let Some(error) = committed.unaccepted {
+            return Err(error);
+        }
+        Ok(())
+    }
+    pub fn request_resolution_redeem_v1(
+        &mut self,
+        request: contracts::economics::SettlementRequestV1,
+    ) -> Result<contracts::economics::SettlementRequestReceiptV1, SimRunActorErrorV2> {
+        let identity = request.identity.clone();
+        let duplicate = self
+            .driver
+            .execution
+            .actor
+            .state
+            .as_ref()
+            .and_then(|state| state.session.as_ref())
+            .and_then(|session| {
+                session
+                    .execution_state
+                    .settlement_simulation_read(&identity.condition_id)
+            })
+            .is_some();
+        let committed =
+            self.driver
+                .execution
+                .actor
+                .commit_group(vec![BusinessInputV2::Settlement(
+                    crate::matching::settlement::SettlementOperationV1::Request {
+                        request,
+                        requested_at_utc_ms: self.cutoff.decision_time.logical_time_utc_ms(),
+                    },
+                )])?;
+        if let Some(error) = committed.unaccepted {
+            return Err(error);
+        }
+        Ok(contracts::economics::SettlementRequestReceiptV1 {
+            identity,
+            registered: true,
+            duplicate,
+        })
+    }
+    /// 查询只请求后端核对；结果仍按原反馈时延进入 NOE，不直接泄漏隐藏状态。
+    pub fn query_resolution_redeem_v1(
+        &mut self,
+        identity: contracts::economics::SettlementRequestIdV1<String>,
+    ) -> Result<(), SimRunActorErrorV2> {
+        let committed =
+            self.driver
+                .execution
+                .actor
+                .commit_group(vec![BusinessInputV2::Settlement(
+                    crate::matching::settlement::SettlementOperationV1::Query {
+                        identity,
+                        requested_at_utc_ms: self.cutoff.decision_time.logical_time_utc_ms(),
+                    },
+                )])?;
+        if let Some(error) = committed.unaccepted {
+            return Err(error);
+        }
+        Ok(())
     }
     pub fn request(
         &mut self,

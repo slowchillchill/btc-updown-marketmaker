@@ -34,6 +34,7 @@ pub struct NoeRecordPositionV1 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NoeConsumptionVisibilityV1 {
     Initialization,
+    ControlAdmission,
     Feedback {
         delivery_sequence: u64,
         available_at_utc_ms: i64,
@@ -151,6 +152,7 @@ pub fn read_durable_noe_record_v1(
 #[derive(Debug, Default)]
 pub struct NoeConsumptionSourceV1 {
     opening: Option<NoeConsumedRecordRefV1>,
+    admitted: Vec<NoeConsumedRecordRefV1>,
     pending: Vec<(Arc<Batch>, Vec<usize>)>,
     delivered: u64,
 }
@@ -177,6 +179,20 @@ impl NoeConsumptionSourceV1 {
                     visibility: NoeConsumptionVisibilityV1::Initialization,
                 });
             }
+            if matches!(
+                record,
+                NormalizationRecord::Evidence {
+                    evidence: crate::SourceNeutralEvidenceKind::InitialMarket { .. }
+                        | crate::SourceNeutralEvidenceKind::MarketEnrollment { .. },
+                    ..
+                }
+            ) {
+                self.admitted.push(NoeConsumedRecordRefV1 {
+                    batch: batch.clone(),
+                    ordinal,
+                    visibility: NoeConsumptionVisibilityV1::ControlAdmission,
+                });
+            }
             if feedback_coordinate(record).is_some() {
                 ordinals.push(ordinal);
             }
@@ -185,6 +201,10 @@ impl NoeConsumptionSourceV1 {
             self.pending.push((batch, ordinals));
         }
         durable
+    }
+    /// 真实同步接纳的目录事实；不编造接收反馈坐标或初始化 UTC。
+    pub fn take_admitted_records(&mut self) -> Vec<NoeConsumedRecordRefV1> {
+        std::mem::take(&mut self.admitted)
     }
     pub fn opening_record(&self) -> Option<NoeConsumedRecordRefV1> {
         self.opening.clone()
