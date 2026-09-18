@@ -94,3 +94,13 @@ class NativeComponentConsumer:
         return [self.graphs.action(group.states[row], group.rules[row], prefix, f, m,
                                   group.cancel_reduced, group.cancel_exists)
                 for f, m, _ in object_blocks(features, mask, lengths, empty=count == 0)]
+
+    def cancel_scores(self, group: ComponentGroup, row: int, prefix: list[float],
+                      *, lengths: list[int] | None = None) -> list[dict]:
+        """原图 raw score；Rust 按原对象族/身份选择，全局归约沿完整人口复用。"""
+        count = group.cancel_features.shape[1]
+        lengths = lengths if lengths is not None else [min(256, count - i)
+                   for i in range(0, count, 256)] or [0]
+        outputs = self.parameters(group, row, prefix, lengths=lengths)
+        return [{"scores": value[7][0].detach().cpu().tolist(), "valid_len": length}
+                for value, length in zip(outputs, lengths)]
