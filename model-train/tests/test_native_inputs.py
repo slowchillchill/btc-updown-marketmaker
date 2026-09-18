@@ -93,44 +93,107 @@ class NativeInputTests(unittest.TestCase):
     def test_real_native_sequence_in_original_three_runtimes(self):
         import onnxruntime
         import numpy as np
+        from model_train.validate_graphs import session, call_ort
+        from model_train.graphs import encode_all, object_blocks
+        from model_train.native_inputs import hidden_key
         root = Path(__file__).resolve().parents[1]
         library = next((Path(onnxruntime.__file__).parent / "capi").glob("libonnxruntime.so.*"))
+
+        def put(records, label, values):
+            records[label] = [v.detach().numpy().reshape(-1) if isinstance(v, torch.Tensor)
+                              else np.asarray(v).reshape(-1) for v in values]
+
+        def head(prefix):
+            return (0, 1, 2, 4, 5, 3, 7)[prefix[7:14].index(1.)]
+
+        def compare(actual, expected):
+            self.assertEqual(actual.keys(), expected.keys())
+            for label, values in actual.items():
+                self.assertEqual(len(values), len(expected[label]))
+                for a, b in zip(values, expected[label]):
+                    self.assertTrue(np.isfinite(a).all(), label)
+                    self.assertTrue(np.isfinite(b).all(), label)
+                    np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-5, err_msg=label)
+
         for config in (CONFIGURATIONS[1], CONFIGURATIONS[2]):
             archive = Path(os.environ["NATIVE_BASELINE_GRAPH" if config.baseline else "NATIVE_MAIN_GRAPH"])
             graphs = TwoGraphs(config).eval()
             graphs.load_state_dict(torch.load(archive / "initial_weights.pt", map_location="cpu", weights_only=True))
-            expected = []
-            handle = graphs.state.register_forward_hook(
-                lambda module, inputs, output: expected.append([t.detach().numpy().reshape(-1) for t in output]))
             consumer = NativeComponentConsumer(graphs)
+            expected = {}
+            frame_outputs = []
+            handle = graphs.state.register_forward_hook(lambda module, inputs, output: frame_outputs.append(output))
             with torch.no_grad():
-                for group in self.groups:
-                    consumer.consume(group)
+                for g, group in enumerate(self.groups):
+                    frame_outputs.clear()
+                    result = consumer.consume(group)
+                    for r, (row, values) in enumerate(zip(group["rows"], frame_outputs)):
+                        label = f"native/{g}/{r}"
+                        put(expected, label + "/state", values)
+                        if row["role"] != "DecisionRequired":
+                            continue
+                        count = len(group["cancel"])
+                        lengths = [min(256, count - i) for i in range(0, count, 256)] or [0]
+                        offset = 0
+                        for part, length in enumerate(lengths):
+                            put(expected, f"{label}/embedding{part}", [result.cancel_embeddings[:, offset:offset+length]])
+                            offset += length
+                        put(expected, label + "/reduced", [result.cancel_reduced, result.cancel_exists.float()])
+                        before = consumer.hidden[hidden_key(row["hidden_state_key"])].clone()
+                        for p, prefix in enumerate(row["fixture_prefixes"]):
+                            for part, outputs in enumerate(consumer.parameters(result, r, prefix)):
+                                put(expected, f"{label}/prefix{p}/part{part}", [outputs[head(prefix)]])
+                        self.assertEqual(len(frame_outputs), len(group["rows"]))
+                        torch.testing.assert_close(consumer.hidden[hidden_key(row["hidden_state_key"])], before, rtol=0, atol=0)
+                        put(expected, label + "/hidden_after_parameters", [before])
             handle.remove()
-            # Python ORT 用自己的 h_next 递推；不喂入 PyTorch/Rust 隐藏结果。
-            from model_train.validate_graphs import session
-            from model_train.native_inputs import hidden_key
-            python_ort = session(archive / "state_encoder.onnx", 1)
+
+            # Python ORT 的状态、z、对象和全局归约全部在本端产生。
+            state_session = session(archive / "state_encoder.onnx", 1)
+            action = call_ort(session(archive / "action_decoder.onnx", 1),
+                              ("z_t", "rule_features", "prefix_features", "cancel_features",
+                               "cancel_mask", "cancel_reduced", "cancel_exists"))
             operations = NativeComponentConsumer(graphs)
-            ort_values = []
-            for group in self.groups:
+            ort_values = {}
+            for g, group in enumerate(self.groups):
                 operations._operations(group["pre_frame_hidden_ops"])
-                for row in group["rows"]:
+                states = []
+                for r, row in enumerate(group["rows"]):
                     key = hidden_key(row["hidden_state_key"])
-                    z, h = python_ort.run(None, {
+                    z, h = state_session.run(None, {
                         "fast_features":np.asarray([row["fast"]], dtype=np.float32),
                         "slow_features":np.asarray([row["slow"]], dtype=np.float32),
                         "h_prev":operations.hidden[key].numpy()})
                     operations.hidden[key] = torch.from_numpy(h)
-                    ort_values.append([z.reshape(-1), h.reshape(-1)])
+                    states.append(torch.from_numpy(z))
+                    put(ort_values, f"native/{g}/{r}/state", [z, h])
+                for r, row in enumerate(group["rows"]):
+                    if row["role"] != "DecisionRequired":
+                        continue
+                    label = f"native/{g}/{r}"
+                    z, rule = states[r], torch.tensor([row["rule"]])
+                    count = len(group["cancel"])
+                    features = torch.tensor(group["cancel"]).reshape(1, count, 129)
+                    mask = torch.ones((1, count), dtype=torch.bool)
+                    lengths = [min(256, count-i) for i in range(0, count, 256)] or [0]
+                    embeddings = []
+                    def first_pass(*args):
+                        outputs = action(*args)
+                        embeddings.append(outputs[6])
+                        return outputs
+                    reduced, exists = encode_all(first_pass, z, rule, features, mask, lengths, empty=count == 0)
+                    for part, (values, length) in enumerate(zip(embeddings, lengths)):
+                        put(ort_values, f"{label}/embedding{part}", [values[:, :length]])
+                    put(ort_values, label + "/reduced", [reduced, exists.float()])
+                    before = operations.hidden[hidden_key(row["hidden_state_key"])].clone()
+                    for p, prefix in enumerate(row["fixture_prefixes"]):
+                        for part, (f, m, _) in enumerate(object_blocks(features, mask, lengths, empty=count == 0)):
+                            outputs = action(z, rule, torch.tensor([prefix]), f, m, reduced, exists)
+                            put(ort_values, f"{label}/prefix{p}/part{part}", [outputs[head(prefix)]])
+                    torch.testing.assert_close(operations.hidden[hidden_key(row["hidden_state_key"])], before, rtol=0, atol=0)
+                    put(ort_values, label + "/hidden_after_parameters", [before])
                 operations._operations(group["post_frame_hidden_ops"])
-            for got, want in zip(ort_values, expected):
-                for a, b in zip(got, want):
-                    self.assertTrue(np.isfinite(a).all())
-                    np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-5)
-            if self.evidence:
-                (self.evidence / f"{config.name}-python-ort.json").write_text(
-                    json.dumps([[v.tolist() for v in row] for row in ort_values]))
+            compare(ort_values, expected)
             fixture = Path(self.temp.name) / f"native-{config.name}.json"
             fixture.write_text(json.dumps({"layers":config.layers, "hidden":config.hidden, "groups":self.groups}))
             process = subprocess.run(["cargo", "run", "--manifest-path", str(root / "rust-ort-validation/Cargo.toml"),
@@ -140,14 +203,13 @@ class NativeInputTests(unittest.TestCase):
                 (self.evidence / f"{config.name}-native.json").write_text(fixture.read_text())
                 (self.evidence / f"{config.name}-rust.jsonl").write_text(process.stdout)
                 (self.evidence / f"{config.name}-rust.stderr").write_text(process.stderr)
+                for name, values in (("pytorch", expected), ("python-ort", ort_values)):
+                    (self.evidence / f"{config.name}-{name}.json").write_text(
+                        json.dumps({key:[v.tolist() for v in row] for key,row in values.items()}))
             process.check_returncode()
-            actual = [json.loads(line)["values"] for line in process.stdout.splitlines()
-                      if json.loads(line).get("label", "").startswith("native/")]
-            self.assertEqual(len(actual), len(expected))
-            for got, want in zip(actual, expected):
-                for a, b in zip(got, want):
-                    self.assertTrue(np.isfinite(a).all())
-                    np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-5)
+            actual = {item["label"]:item["values"] for item in map(json.loads, process.stdout.splitlines())
+                      if item.get("label", "").startswith("native/")}
+            compare(actual, expected)
 
     def test_actual_complete_objects_and_two_257_partitions(self):
         empty = next(group for group in self.groups if not group["cancel"])

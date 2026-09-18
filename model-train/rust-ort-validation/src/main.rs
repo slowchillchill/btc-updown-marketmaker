@@ -159,6 +159,77 @@ fn selected(scores: &[f32], indices: &[usize]) -> Vec<f32> {
     }
     vec![indices[best] as f32]
 }
+fn encode_reduce(
+    session: &mut Session,
+    c: &Case,
+    hidden: usize,
+    z: &[f32],
+    lengths: &[usize],
+    label: &str,
+    out: &mut impl Write,
+) -> Result<(Vec<f32>, Vec<bool>)> {
+    let d = hidden / 2;
+    let mut sum = vec![0f64; c.batch * d];
+    let mut max = vec![f64::NEG_INFINITY; c.batch * d];
+    let mut counts = vec![0usize; c.batch];
+    let mut offset = 0;
+    for (part, &length) in lengths.iter().enumerate() {
+        let k = if c.empty { 1 } else { 256 };
+        let (x, mask) = block(c, offset, length, k, None);
+        let result = action(
+            session,
+            c.batch,
+            hidden,
+            k,
+            z,
+            &c.rule,
+            &c.prefix,
+            &x,
+            &mask,
+            &vec![0.; c.batch * 3 * d],
+            &vec![false; c.batch],
+        )?;
+        let mut embeddings = Vec::new();
+        for row in 0..c.batch {
+            for j in 0..length {
+                let embedding = &result[6][(row * k + j) * d..(row * k + j + 1) * d];
+                embeddings.extend_from_slice(embedding);
+                if mask[row * k + j] {
+                    counts[row] += 1;
+                    for f in 0..d {
+                        let v = f64::from(embedding[f]);
+                        sum[row * d + f] += v;
+                        if v > max[row * d + f] {
+                            max[row * d + f] = v;
+                        }
+                    }
+                }
+            }
+        }
+        emit(out, &format!("{label}/embedding{part}"), &[embeddings])?;
+        offset += length;
+    }
+    let mut reduced = vec![0f32; c.batch * 3 * d];
+    let exists = counts.iter().map(|&n| n > 0).collect::<Vec<_>>();
+    for row in 0..c.batch {
+        if counts[row] > 0 {
+            for f in 0..d {
+                reduced[row * 3 * d + f] = sum[row * d + f] as f32;
+                reduced[row * 3 * d + d + f] = (sum[row * d + f] / counts[row] as f64) as f32;
+                reduced[row * 3 * d + 2 * d + f] = max[row * d + f] as f32;
+            }
+        }
+    }
+    emit(
+        out,
+        &format!("{label}/reduced"),
+        &[
+            reduced.clone(),
+            counts.iter().map(|&n| f32::from(n > 0)).collect(),
+        ],
+    )?;
+    Ok((reduced, exists))
+}
 fn object_case(
     session: &mut Session,
     c: &Case,
@@ -166,70 +237,15 @@ fn object_case(
     z: &[f32],
     out: &mut impl Write,
 ) -> Result<()> {
-    let d = hidden / 2;
     for (split, lengths) in c.splits.iter().enumerate() {
-        let mut sum = vec![0f64; c.batch * d];
-        let mut max = vec![f64::NEG_INFINITY; c.batch * d];
-        let mut counts = vec![0usize; c.batch];
-        let mut offset = 0;
-        for (part, &length) in lengths.iter().enumerate() {
-            let k = if c.empty { 1 } else { 256 };
-            let (x, mask) = block(c, offset, length, k, None);
-            let result = action(
-                session,
-                c.batch,
-                hidden,
-                k,
-                z,
-                &c.rule,
-                &c.prefix,
-                &x,
-                &mask,
-                &vec![0.; c.batch * 3 * d],
-                &vec![false; c.batch],
-            )?;
-            let mut embeddings = Vec::new();
-            for row in 0..c.batch {
-                for j in 0..length {
-                    let embedding = &result[6][(row * k + j) * d..(row * k + j + 1) * d];
-                    embeddings.extend_from_slice(embedding);
-                    if mask[row * k + j] {
-                        counts[row] += 1;
-                        for f in 0..d {
-                            let v = f64::from(embedding[f]);
-                            sum[row * d + f] += v;
-                            if v > max[row * d + f] {
-                                max[row * d + f] = v;
-                            }
-                        }
-                    }
-                }
-            }
-            emit(
-                out,
-                &format!("{}/split{split}/embedding{part}", c.name),
-                &[embeddings],
-            )?;
-            offset += length;
-        }
-        let mut reduced = vec![0f32; c.batch * 3 * d];
-        let exists = counts.iter().map(|&n| n > 0).collect::<Vec<_>>();
-        for row in 0..c.batch {
-            if counts[row] > 0 {
-                for f in 0..d {
-                    reduced[row * 3 * d + f] = sum[row * d + f] as f32;
-                    reduced[row * 3 * d + d + f] = (sum[row * d + f] / counts[row] as f64) as f32;
-                    reduced[row * 3 * d + 2 * d + f] = max[row * d + f] as f32;
-                }
-            }
-        }
-        emit(
+        let (reduced, exists) = encode_reduce(
+            session,
+            c,
+            hidden,
+            z,
+            lengths,
+            &format!("{}/split{split}", c.name),
             out,
-            &format!("{}/split{split}/reduced", c.name),
-            &[
-                reduced.clone(),
-                counts.iter().map(|&n| f32::from(n > 0)).collect(),
-            ],
         )?;
         let (x, mask) = block(c, 0, 1, 1, None);
         emit(
@@ -290,12 +306,17 @@ struct NativeGroup {
     pre_frame_hidden_ops: Vec<serde_json::Value>,
     rows: Vec<NativeRow>,
     post_frame_hidden_ops: Vec<serde_json::Value>,
+    cancel: Vec<Vec<f32>>,
 }
 #[derive(Deserialize)]
 struct NativeRow {
     hidden_state_key: serde_json::Value,
     fast: Vec<f32>,
     slow: Vec<f32>,
+    role: String,
+    rule: Vec<f32>,
+    #[serde(default)]
+    fixture_prefixes: Vec<Vec<f32>>,
 }
 fn native_operations(
     ops: &[serde_json::Value],
@@ -323,7 +344,12 @@ fn native_operations(
     }
     Ok(())
 }
-fn native_state(session: &mut Session, path: &Path, out: &mut impl Write) -> Result<()> {
+fn native_state(
+    session: &mut Session,
+    actions: &mut Session,
+    path: &Path,
+    out: &mut impl Write,
+) -> Result<()> {
     let suite: NativeSuite = serde_json::from_reader(std::fs::File::open(path)?)?;
     let mut hidden = std::collections::BTreeMap::new();
     for (g, group) in suite.groups.iter().enumerate() {
@@ -333,6 +359,7 @@ fn native_state(session: &mut Session, path: &Path, out: &mut impl Write) -> Res
             suite.layers,
             suite.hidden,
         )?;
+        let mut states = Vec::new();
         for (r, row) in group.rows.iter().enumerate() {
             let key = serde_json::to_string(&row.hidden_state_key)?;
             let previous = hidden
@@ -348,7 +375,82 @@ fn native_state(session: &mut Session, path: &Path, out: &mut impl Write) -> Res
                 })
                 .collect::<ort::Result<Vec<_>>>()?;
             hidden.insert(key, values[1].clone());
-            emit(out, &format!("native/{g}/{r}"), &values)?;
+            emit(out, &format!("native/{g}/{r}/state"), &values)?;
+            states.push(values[0].clone());
+        }
+        // 整组状态帧完成后才消费参数；函数没有隐藏状态输入或更新。
+        for (r, row) in group
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.role == "DecisionRequired")
+        {
+            let count = group.cancel.len();
+            let empty = count == 0;
+            let lengths = if empty {
+                vec![0]
+            } else {
+                (0..count)
+                    .step_by(256)
+                    .map(|i| (count - i).min(256))
+                    .collect::<Vec<_>>()
+            };
+            let c = Case {
+                name: format!("native/{g}/{r}"),
+                mode: "native".into(),
+                batch: 1,
+                steps: 1,
+                slots: count,
+                empty,
+                fast: row.fast.clone(),
+                slow: row.slow.clone(),
+                rule: row.rule.clone(),
+                prefix: row.fixture_prefixes[0].clone(),
+                objects: group.cancel.iter().flatten().copied().collect(),
+                mask: vec![true; count],
+                splits: vec![],
+                prefixes: vec![],
+                active: vec![],
+            };
+            let z = &states[r];
+            let (reduced, exists) =
+                encode_reduce(actions, &c, suite.hidden, z, &lengths, &c.name, out)?;
+            for (p, prefix) in row.fixture_prefixes.iter().enumerate() {
+                let mut offset = 0;
+                for (part, &length) in lengths.iter().enumerate() {
+                    let k = if empty { 1 } else { 256 };
+                    let (objects, mask) = block(&c, offset, length, k, None);
+                    let values = action(
+                        actions,
+                        1,
+                        suite.hidden,
+                        k,
+                        z,
+                        &row.rule,
+                        prefix,
+                        &objects,
+                        &mask,
+                        &reduced,
+                        &exists,
+                    )?;
+                    let stage = prefix[7..14]
+                        .iter()
+                        .position(|v| *v == 1.)
+                        .expect("fixture stage");
+                    let head = [0, 1, 2, 4, 5, 3, 7][stage];
+                    emit(
+                        out,
+                        &format!("{}/prefix{p}/part{part}", c.name),
+                        &[values[head].clone()],
+                    )?;
+                    offset += length;
+                }
+            }
+            emit(
+                out,
+                &format!("{}/hidden_after_parameters", c.name),
+                &[hidden[&serde_json::to_string(&row.hidden_state_key)?].clone()],
+            )?;
         }
         native_operations(
             &group.post_frame_hidden_ops,
@@ -375,7 +477,12 @@ fn main() -> Result<()> {
         "mapped":std::fs::read_to_string("/proc/self/maps")?.lines().filter(|l|l.contains("libonnxruntime.so")).collect::<Vec<_>>(),"threads":threads})
     )?;
     if args[4] == "--native" {
-        native_state(&mut state_session, Path::new(&args[5]), &mut out)?;
+        native_state(
+            &mut state_session,
+            &mut action_session,
+            Path::new(&args[5]),
+            &mut out,
+        )?;
         out.flush()?;
         return Ok(());
     }
