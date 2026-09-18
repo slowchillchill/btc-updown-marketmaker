@@ -850,7 +850,7 @@ pub struct ResolutionAccountReadV1<'a> {
     pub resolved: &'a ResolvedPositionFactV1<Identity>,
     pub request: Option<&'a SettlementRequestFactV1<Identity>>,
     pub settlement_cost_attribution: SettlementCostAttributionV1,
-    pub redeem_ready: ExecutionReadValueV1<bool>,
+    pub economic_predecessors_closed: ExecutionReadValueV1<bool>,
     pub paired_receivable_pusd: ExactDecimal,
     pub winner_orphan_receivable_pusd: ExactDecimal,
 }
@@ -1067,7 +1067,7 @@ impl LedgerEconomicReadV1<'_> {
                 resolved: &resolution.fact,
                 request: resolution.request.as_ref(),
                 settlement_cost_attribution: resolution.category,
-                redeem_ready: ExecutionReadValueV1::Known(
+                economic_predecessors_closed: ExecutionReadValueV1::Known(
                     !pending && market.maker_accrual_finalized,
                 ),
                 paired_receivable_pusd: exact(pair),

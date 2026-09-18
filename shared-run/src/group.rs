@@ -158,6 +158,7 @@ impl SharedExecutionV1 {
         let opening = self.observation.opening_record().expect("共享根已经开户");
         coordinator
             .advance(
+                &self.registry,
                 &read,
                 &opening.context().source.account_instance_key,
                 &mut decision,

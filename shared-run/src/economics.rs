@@ -84,6 +84,7 @@ impl SettlementCoordinatorV1 {
         >,
     >(
         &mut self,
+        registry: &crate::SharedExecutionRegistryV1,
         read: &LedgerEconomicReadV1<'_>,
         account: &contracts::AccountInstanceKeyV1,
         decision: &mut sim_system::execution::PublicGroupDecisionV1<'_, I>,
@@ -131,7 +132,13 @@ impl SettlementCoordinatorV1 {
                     _ => {}
                 }
                 self.handled.insert(key.clone(), request.observation);
-            } else if resolution.redeem_ready == ExecutionReadValueV1::Known(true)
+            } else if !registry.all_commitments().any(|commitment| {
+                matches!(commitment.origin.intent.intent(),
+                    contracts::ModelIntentV1::SubmitSingleBuy { condition_id, .. }
+                    | contracts::ModelIntentV1::SubmitPairedBuy { condition_id, .. }
+                    if condition_id == &resolution.resolved.condition_id)
+            }) && resolution.economic_predecessors_closed
+                == ExecutionReadValueV1::Known(true)
                 && (amount(&resolution.paired_receivable_pusd).is_positive()
                     || amount(&resolution.winner_orphan_receivable_pusd).is_positive())
             {

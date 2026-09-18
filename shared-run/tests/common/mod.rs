@@ -656,7 +656,8 @@ pub fn recorded_trading_window(
     )
 }
 pub fn recorded_settlement(root: &Path) -> (PublicObservationCoreV1, TradingTimes) {
-    recorded_trading_with_tail(root, "5", None, 60_000, 40, "100")
+    // 覆盖显式 2Δ 顺序的 S3 最后成功及费用支付，不改变任何原代理延迟。
+    recorded_trading_with_tail(root, "5", None, 60_000, 80, "100")
 }
 pub fn recorded_settlement_pending_loser(root: &Path) -> (PublicObservationCoreV1, TradingTimes) {
     recorded_trading_with_tail(root, "6", None, 60_000, 40, "6")

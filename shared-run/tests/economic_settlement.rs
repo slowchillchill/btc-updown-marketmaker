@@ -13,6 +13,9 @@ fn r(n: &str, d: &str) -> ExactRationalV1 {
         denominator: d.into(),
     }
 }
+// 原代理延迟档最大值 29697ms，亦大于这些场景的成交/结算固定延迟。
+// 显式有限脚本 v1：Δ=max(1ms, 所用延迟最大值)，顺序步骤相隔 2Δ。
+const SETTLEMENT_DELTA_MS: u64 = 29_697;
 fn script(case: usize) -> ResolutionRedeemScenarioV1 {
     use ResolutionRedeemScenarioEventV1::*;
     use SettlementQueryReplyV1 as Q;
@@ -65,12 +68,26 @@ fn script(case: usize) -> ResolutionRedeemScenarioV1 {
         ],
         _ => unreachable!(),
     };
+    assert_eq!(
+        sim_system::latency_profile::load_embedded_proxy_latency_profile()
+            .unwrap()
+            .statistics()
+            .max_delay_ms,
+        SETTLEMENT_DELTA_MS
+    );
+    // 首个明确接纳：S1 的查询、S2 的查询成功、S3 的重试接纳。
+    // Unknown 对照只在终态成功首次证明接纳。
+    let accepted_offset = match case {
+        1 | 2 => 4,
+        3 | 7 => 8,
+        _ => 0,
+    } * SETTLEMENT_DELTA_MS;
     let mut scenario = ResolutionRedeemScenarioV1 {
         steps: events
             .into_iter()
             .enumerate()
             .map(|(i, event)| ResolutionRedeemScenarioStepV1 {
-                offset_ms: i as u64 * 10_000,
+                offset_ms: i as u64 * 2 * SETTLEMENT_DELTA_MS,
                 event,
             })
             .collect(),
@@ -80,8 +97,15 @@ fn script(case: usize) -> ResolutionRedeemScenarioV1 {
             vec![ScenarioSettlementCostV1 {
                 correction_of: None,
                 cost_identity: "gas-1".into(),
-                recognition_offset_ms: 60_000,
-                payment_offset_ms: Some(if case == 6 { 60_000 } else { 70_000 }),
+                recognition_offset_ms: accepted_offset,
+                payment_offset_ms: Some(
+                    accepted_offset
+                        + if case == 6 {
+                            0
+                        } else {
+                            2 * SETTLEMENT_DELTA_MS
+                        },
+                ),
                 amount_pusd: ExactDecimal("0.1".into()),
             }]
         },
@@ -90,12 +114,225 @@ fn script(case: usize) -> ResolutionRedeemScenarioV1 {
         scenario.costs.push(ScenarioSettlementCostV1 {
             correction_of: Some("gas-1".into()),
             cost_identity: "refund-1".into(),
-            recognition_offset_ms: 80_000,
-            payment_offset_ms: Some(90_000),
+            recognition_offset_ms: 6 * SETTLEMENT_DELTA_MS,
+            payment_offset_ms: Some(8 * SETTLEMENT_DELTA_MS),
             amount_pusd: ExactDecimal("-0.1".into()),
         });
     }
     scenario
+}
+fn assert_first_visible_acceptance(
+    case: usize,
+    at: i64,
+    read: &LedgerEconomicReadV1<'_>,
+    first_accepted_at: &mut Option<i64>,
+) {
+    if case == 4 || case == 5 || first_accepted_at.is_some() {
+        return;
+    }
+    let accepted = read
+        .resolutions()
+        .next()
+        .and_then(|r| r.request)
+        .is_some_and(|r| {
+            matches!(
+                r.observation,
+                SettlementObservationV1::Registered
+                    | SettlementObservationV1::QueryAcceptedPending
+                    | SettlementObservationV1::QueryFinalSuccess
+                    | SettlementObservationV1::TerminalSuccess
+            )
+        });
+    let costs: Vec<_> = read.settlement_costs().collect();
+    if !accepted {
+        assert!(
+            costs.is_empty(),
+            "case {case}, t={at}: 首次接纳可见前不应确认费用"
+        );
+        return;
+    }
+    assert_eq!(
+        costs.len(),
+        1,
+        "case {case}, t={at}: 首次接纳可见截点即有费用事实"
+    );
+    assert_eq!(costs[0].fact.recognized_pusd.0, "0.1");
+    assert_eq!(
+        costs[0].fact.paid_pusd.0,
+        if case == 6 { "0.1" } else { "0" }
+    );
+    assert_eq!(
+        read.market_totals()
+            .next()
+            .unwrap()
+            .unpaid_settlement_fee_pusd
+            .0,
+        if case == 6 { "0" } else { "0.1" }
+    );
+    *first_accepted_at = Some(at);
+    eprintln!(
+        "case {case}: 首次接纳与费用同一公开截点 t={at}, recognized=0.1, paid={}",
+        costs[0].fact.paid_pusd.0
+    );
+}
+// 截点预期仅由已冻结脚本、原买入本金3与独立费用0.084计算；不由待测余额反推。
+fn assert_settlement_cut(
+    case: usize,
+    elapsed: u64,
+    read: &LedgerEconomicReadV1<'_>,
+    seen: &mut std::collections::BTreeSet<u64>,
+) {
+    use ResolutionRedeemScenarioEventV1 as E;
+    let scenario = script(case);
+    let mut cuts: Vec<_> = scenario
+        .steps
+        .iter()
+        .map(|s| s.offset_ms)
+        .chain(scenario.costs.iter().flat_map(|c| {
+            [Some(c.recognition_offset_ms), c.payment_offset_ms]
+                .into_iter()
+                .flatten()
+        }))
+        .collect();
+    cuts.sort_unstable();
+    cuts.dedup();
+    let Some(&cut) = cuts
+        .iter()
+        .rev()
+        .find(|&&t| t + SETTLEMENT_DELTA_MS <= elapsed)
+    else {
+        return;
+    };
+    if cuts.iter().any(|&t| t > cut && t <= elapsed) || !seen.insert(cut) {
+        return;
+    }
+    let step = scenario
+        .steps
+        .iter()
+        .rev()
+        .find(|s| s.offset_ms <= cut)
+        .unwrap();
+    let expected_observation = match &step.event {
+        E::SubmissionReceipt(SettlementSubmissionReceiptV1::Registered) => {
+            SettlementObservationV1::Registered
+        }
+        E::SubmissionReceipt(SettlementSubmissionReceiptV1::Unknown) => {
+            SettlementObservationV1::SubmissionUnknown
+        }
+        E::ObservationTimeout => SettlementObservationV1::ObservationTimeout,
+        E::QueryReply(SettlementQueryReplyV1::AcceptedPending) => {
+            SettlementObservationV1::QueryAcceptedPending
+        }
+        E::QueryReply(SettlementQueryReplyV1::FinalSuccess) => {
+            SettlementObservationV1::QueryFinalSuccess
+        }
+        E::QueryReply(SettlementQueryReplyV1::ConfirmedNoAcceptedOrSuccessfulTransaction) => {
+            SettlementObservationV1::QueryConfirmedNoTransaction
+        }
+        E::QueryReply(SettlementQueryReplyV1::Unknown) => SettlementObservationV1::QueryUnknown,
+        E::RetryAuthorized if case == 3 => SettlementObservationV1::RetryAuthorized,
+        E::RetryAuthorized => SettlementObservationV1::RetryNotAuthorized,
+        E::Terminal(SettlementTerminalV1::Success) if case == 2 => {
+            SettlementObservationV1::QueryFinalSuccess
+        }
+        E::Terminal(SettlementTerminalV1::Success) => SettlementObservationV1::TerminalSuccess,
+        E::Terminal(SettlementTerminalV1::FailureNoEffect) => {
+            SettlementObservationV1::TerminalFailureNoEffect
+        }
+        // 旧回执不回退已终局状态。
+        E::RepeatPriorReceipt { .. } if case == 4 => {
+            SettlementObservationV1::TerminalFailureNoEffect
+        }
+        E::RepeatPriorReceipt { .. } => SettlementObservationV1::TerminalSuccess,
+    };
+    let resolution = read.resolutions().next().unwrap();
+    assert_eq!(
+        resolution.request.unwrap().observation,
+        expected_observation,
+        "case {case}, cut {cut}"
+    );
+    assert_eq!(
+        resolution.settlement_cost_attribution,
+        SettlementCostAttributionV1::Directional
+    );
+    let success = scenario.steps.iter().any(|s| {
+        s.offset_ms <= cut
+            && matches!(
+                s.event,
+                E::Terminal(SettlementTerminalV1::Success)
+                    | E::QueryReply(SettlementQueryReplyV1::FinalSuccess)
+            )
+    });
+    let mut recognized = Decimal::ZERO;
+    let mut paid = Decimal::ZERO;
+    for cost in &scenario.costs {
+        let amount = Decimal::from_str_exact(&cost.amount_pusd.0).unwrap();
+        if cost.recognition_offset_ms <= cut {
+            recognized += amount;
+        }
+        if cost.payment_offset_ms.is_some_and(|t| t <= cut) {
+            paid += amount;
+        }
+    }
+    let market = read.market_totals().next().unwrap();
+    assert_eq!(
+        Decimal::from_str_exact(&market.unpaid_settlement_fee_pusd.0).unwrap(),
+        recognized - paid,
+        "case {case}, cut {cut}"
+    );
+    assert_eq!(
+        Decimal::from_str_exact(&read.cash().actual_available_pusd.0).unwrap(),
+        Decimal::new(96916, 3)
+            + if success {
+                Decimal::from(5)
+            } else {
+                Decimal::ZERO
+            }
+            - paid,
+        "case {case}, cut {cut}"
+    );
+    assert_eq!(read.cash().maker_available_pusd.0, "96.916");
+    assert_eq!(read.cash().actual_reserved_pusd.0, "0");
+    assert_eq!(read.cash().maker_reserved_pusd.0, "0");
+    assert_eq!(
+        market.winner_orphan_receivable_pusd.0,
+        if success { "0" } else { "5" }
+    );
+    let nav = AccountEconomicsReadV1::from_ledger(read);
+    assert_eq!(nav.worst_case_maker_nav_pusd, r("24229", "250"));
+    assert_eq!(
+        nav.directional_residual_pusd,
+        EconomicRational::from_decimal(Decimal::from(5) - recognized).public()
+    );
+    assert_eq!(nav.other_account_residual_pusd, r("0", "1"));
+    assert_eq!(
+        nav.conservative_nav_pusd,
+        EconomicRational::from_decimal(Decimal::new(101916, 3) - recognized).public()
+    );
+    assert_eq!(
+        EconomicRational::try_from(&nav.conservative_nav_pusd).unwrap(),
+        EconomicRational::try_from(&nav.worst_case_maker_nav_pusd)
+            .unwrap()
+            .add(&EconomicRational::try_from(&nav.directional_residual_pusd).unwrap())
+            .add(&EconomicRational::try_from(&nav.other_account_residual_pusd).unwrap())
+    );
+}
+fn assert_all_settlement_cuts(case: usize, seen: &std::collections::BTreeSet<u64>) {
+    let scenario = script(case);
+    let expected: std::collections::BTreeSet<_> = scenario
+        .steps
+        .iter()
+        .map(|s| s.offset_ms)
+        .chain(scenario.costs.iter().flat_map(|c| {
+            [Some(c.recognition_offset_ms), c.payment_offset_ms]
+                .into_iter()
+                .flatten()
+        }))
+        .collect();
+    assert_eq!(
+        seen, &expected,
+        "case {case}: 每个独立等待/费用/终态截点均实际观察"
+    );
 }
 #[tokio::test(flavor = "current_thread")]
 async fn actual_chain_requested_settlement_s0_to_s4_and_stable_ledger() {
@@ -145,6 +382,9 @@ async fn actual_chain_requested_settlement_s0_to_s4_and_stable_ledger() {
             .unwrap();
         let mut coordinator = SettlementCoordinatorV1::default();
         let mut observed_resolution = false;
+        let mut requested_at = None;
+        let mut seen_cuts = std::collections::BTreeSet::new();
+        let mut first_accepted_at = None;
         while driver.next_group().unwrap().is_some() {
             if !shared
                 .advance_settlement(&mut coordinator, &mut driver)
@@ -158,7 +398,24 @@ async fn actual_chain_requested_settlement_s0_to_s4_and_stable_ledger() {
                 );
                 continue;
             }
+            let at = driver
+                .decision()
+                .unwrap()
+                .cutoff()
+                .decision_time()
+                .logical_time_utc_ms();
+            if requested_at.is_none()
+                && driver
+                    .settlement_simulation_read(&ConditionId(CONDITION_ID.into()))
+                    .is_some()
+            {
+                requested_at = Some(at);
+            }
             let read = shared.ledger().economic_read().unwrap();
+            assert_first_visible_acceptance(case, at, &read, &mut first_accepted_at);
+            if let Some(start) = requested_at {
+                assert_settlement_cut(case, (at - start) as u64, &read, &mut seen_cuts);
+            }
             for resolution in read.resolutions() {
                 observed_resolution = true;
                 assert_eq!(
@@ -168,6 +425,8 @@ async fn actual_chain_requested_settlement_s0_to_s4_and_stable_ledger() {
             }
         }
         assert!(shared.apply_closed().unwrap());
+        assert_all_settlement_cuts(case, &seen_cuts);
+        assert_eq!(first_accepted_at.is_some(), case != 4 && case != 5);
         assert!(
             observed_resolution,
             "case {case}: true qualified resolution consumed"
@@ -669,8 +928,14 @@ async fn resolution_before_late_success_fixes_fee_bucket_and_updates_pi_without_
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("dpt");
         let (core, times) = recorded_settlement(&root);
-        let policy = br#"{"schema_version":"trade_finality_policy_v2","normal_path":{"steps":[{"state":"MATCHED","offset_ms":0},{"state":"MINED","offset_ms":10},{"state":"CONFIRMED","offset_ms":20000}],"economic_application_ordinal":1},"failure_overrides":[]}"#;
-        let (mut execution, observation) = execution(&temp.path().join("sim.jsonl"), &core, policy);
+        let policy = br#"{"schema_version":"trade_finality_policy_v2","normal_path":{"steps":[{"state":"MATCHED","offset_ms":0},{"state":"MINED","offset_ms":10000},{"state":"CONFIRMED","offset_ms":20000}],"economic_application_ordinal":1},"failure_overrides":[]}"#;
+        let (mut execution, observation) = execution_with_seed(
+            &temp.path().join("sim.jsonl"),
+            &core,
+            policy,
+            None,
+            "00000000000000000000000000000000000000000000000000000000000023c8".into(),
+        );
         execution.configure_resolution_redeem_v1(script(0)).unwrap();
         let mut ledger =
             LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
@@ -690,6 +955,8 @@ async fn resolution_before_late_success_fixes_fee_bucket_and_updates_pi_without_
         let mut coordinator = SettlementCoordinatorV1::default();
         let mut saw_pending_resolution = false;
         let mut saw_pair = false;
+        let mut saw_unseen_trade = false;
+        let mut saw_unpaid_fee = false;
         loop {
             let at = driver
                 .decision()
@@ -728,6 +995,51 @@ async fn resolution_before_late_success_fixes_fee_bucket_and_updates_pi_without_
                     sent_b = true;
                 }
             }
+            if late && at == 71_000 {
+                assert!(shared.apply_closed().unwrap());
+                let read = shared.ledger().economic_read().unwrap();
+                let resolution = read.resolutions().next().unwrap();
+                assert_eq!(
+                    resolution.economic_predecessors_closed,
+                    ExecutionReadValueV1::Known(true)
+                );
+                assert_eq!(resolution.winner_orphan_receivable_pusd.0, "5");
+                assert!(resolution.request.is_none());
+                let commitment = shared
+                    .registry()
+                    .all_commitments()
+                    .find(|c| c.origin.intent.global_request_id() == "later-b")
+                    .unwrap();
+                assert_eq!(
+                    commitment.remaining_target_shares,
+                    ExecutionReadValueV1::Unavailable
+                );
+                let order = shared
+                    .registry()
+                    .orders()
+                    .find(|o| {
+                        o.origin
+                            .as_ref()
+                            .is_some_and(|o| o.intent.global_request_id() == "later-b")
+                    })
+                    .unwrap();
+                assert!(order.accepted.is_some());
+                // Accepted 已说明匹配 5，但首个成交事实尚未公开，不能据此闭合承诺。
+                assert_eq!(
+                    order.matched_shares,
+                    ExecutionReadValueV1::Known(ExactDecimal("5".into()))
+                );
+                assert_eq!(
+                    read.market_totals().next().unwrap().executed[1].shares.0,
+                    "5"
+                );
+                assert!(
+                    driver
+                        .settlement_simulation_read(&ConditionId(CONDITION_ID.into()))
+                        .is_none()
+                );
+                saw_unseen_trade = true;
+            }
             if shared
                 .advance_settlement(&mut coordinator, &mut driver)
                 .unwrap()
@@ -744,16 +1056,15 @@ async fn resolution_before_late_success_fixes_fee_bucket_and_updates_pi_without_
                     );
                     if late && resolution.winner_orphan_receivable_pusd.0 == "5" {
                         assert_eq!(resolution.paired_receivable_pusd.0, "0");
-                        assert_eq!(resolution.redeem_ready, ExecutionReadValueV1::Known(false));
+                        if at == 71_000 {
+                            assert!(
+                                driver
+                                    .settlement_simulation_read(&ConditionId(CONDITION_ID.into()))
+                                    .is_none()
+                            );
+                        }
                         assert!(resolution.request.is_none());
-                        let day = read
-                            .rebate_days()
-                            .find(|d| d.kind == RebateKindV1::Taker)
-                            .unwrap();
-                        assert_eq!(
-                            day.amounts.estimated_pusd,
-                            ExecutionReadValueV1::Known(r("21", "3125"))
-                        );
+
                         saw_pending_resolution = true;
                     }
                     if resolution.paired_receivable_pusd.0 == "5" {
@@ -761,6 +1072,32 @@ async fn resolution_before_late_success_fixes_fee_bucket_and_updates_pi_without_
                     }
                 }
                 let nav = AccountEconomicsReadV1::from_ledger(&read);
+                if read
+                    .market_totals()
+                    .next()
+                    .unwrap()
+                    .unpaid_settlement_fee_pusd
+                    .0
+                    == "0.1"
+                {
+                    // 两腿本金6、Taker费0.168，配对应收5，结算费用0.1尚未付款。
+                    assert_eq!(read.cash().actual_available_pusd.0, "93.832");
+                    assert_eq!(read.cash().maker_available_pusd.0, "93.832");
+                    assert_eq!(nav.conservative_nav_pusd, r("24683", "250"));
+                    assert_eq!(
+                        nav.worst_case_maker_nav_pusd,
+                        if late {
+                            r("12354", "125")
+                        } else {
+                            r("24683", "250")
+                        }
+                    );
+                    assert_eq!(
+                        nav.directional_residual_pusd,
+                        if late { r("-1", "10") } else { r("0", "1") }
+                    );
+                    saw_unpaid_fee = true;
+                }
                 assert_eq!(
                     EconomicRational::try_from(&nav.conservative_nav_pusd).unwrap(),
                     EconomicRational::try_from(&nav.worst_case_maker_nav_pusd)
@@ -777,6 +1114,13 @@ async fn resolution_before_late_success_fixes_fee_bucket_and_updates_pi_without_
         }
         assert!(shared.apply_closed().unwrap());
         assert_eq!(saw_pending_resolution, late);
+        assert_eq!(saw_unseen_trade, late);
+        assert!(saw_unpaid_fee);
+        let stats = driver
+            .settlement_simulation_read(&ConditionId(CONDITION_ID.into()))
+            .unwrap();
+        assert_eq!(stats.sends, 1);
+        assert!(stats.final_success);
         assert!(saw_pair);
         let read = shared.ledger().economic_read().unwrap();
         let nav = AccountEconomicsReadV1::from_ledger(&read);
@@ -855,9 +1199,32 @@ async fn stable_request_material_queries_pending_success_and_controlled_retry() 
         let mut coordinator = SettlementCoordinatorV1::default();
         let mut restored_request = None;
         let mut retried = false;
+        let mut requested_at = None;
+        let mut seen_cuts = std::collections::BTreeSet::new();
+        let mut first_accepted_at = None;
         while driver.next_group().unwrap().is_some() {
             if !shared.apply_closed().unwrap() {
                 continue;
+            }
+            let at = driver
+                .decision()
+                .unwrap()
+                .cutoff()
+                .decision_time()
+                .logical_time_utc_ms();
+            assert_first_visible_acceptance(
+                case,
+                at,
+                &shared.ledger().economic_read().unwrap(),
+                &mut first_accepted_at,
+            );
+            if let Some(start) = requested_at {
+                assert_settlement_cut(
+                    case,
+                    (at - start) as u64,
+                    &shared.ledger().economic_read().unwrap(),
+                    &mut seen_cuts,
+                );
             }
             if restored_request.is_none() {
                 let has_request = shared
@@ -870,6 +1237,13 @@ async fn stable_request_material_queries_pending_success_and_controlled_retry() 
                     shared
                         .advance_settlement(&mut coordinator, &mut driver)
                         .unwrap();
+                    if requested_at.is_none()
+                        && driver
+                            .settlement_simulation_read(&ConditionId(CONDITION_ID.into()))
+                            .is_some()
+                    {
+                        requested_at = Some(at);
+                    }
                     continue;
                 }
                 // 只排空原记录材料；模拟后端继续保有原状态，没有恢复训练账户。
@@ -922,6 +1296,8 @@ async fn stable_request_material_queries_pending_success_and_controlled_retry() 
                 }
             }
         }
+        assert_all_settlement_cuts(case, &seen_cuts);
+        assert_eq!(first_accepted_at.is_some(), case != 4 && case != 5);
         assert!(shared.apply_closed().unwrap());
         let nav = AccountEconomicsReadV1::from_ledger(&shared.ledger().economic_read().unwrap());
         let stats = driver
@@ -997,7 +1373,10 @@ async fn pure_loser_closes_without_settlement_request_after_original_barriers() 
     assert!(shared.apply_closed().unwrap());
     let read = shared.ledger().economic_read().unwrap();
     let resolution = read.resolutions().next().unwrap();
-    assert_eq!(resolution.redeem_ready, ExecutionReadValueV1::Known(true));
+    assert_eq!(
+        resolution.economic_predecessors_closed,
+        ExecutionReadValueV1::Known(true)
+    );
     assert!(resolution.request.is_none());
     assert_eq!(resolution.paired_receivable_pusd.0, "0");
     assert_eq!(resolution.winner_orphan_receivable_pusd.0, "0");
@@ -1100,7 +1479,7 @@ async fn paired_receivable_precedes_loser_failure_and_compensation_barrier() {
                     resolution.settlement_cost_attribution,
                     SettlementCostAttributionV1::Maker
                 );
-                if resolution.redeem_ready == ExecutionReadValueV1::Known(false) {
+                if resolution.economic_predecessors_closed == ExecutionReadValueV1::Known(false) {
                     assert_eq!(resolution.paired_receivable_pusd.0, "5");
                     assert_eq!(resolution.winner_orphan_receivable_pusd.0, "1");
                     assert!(resolution.request.is_none());
