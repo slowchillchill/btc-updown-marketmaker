@@ -13,6 +13,9 @@ use polymarket_client_sdk_v2::types::{B256, U256};
 use reqwest::StatusCode;
 use reqwest::redirect::Policy;
 use rust_decimal::Decimal;
+
+/// D-0007：FOK/FAK BUY 原请求最低本金；不约束部分成交实付额。
+pub(crate) const MARKET_BUY_MINIMUM_PRINCIPAL_PUSD: Decimal = Decimal::ONE;
 use rust_decimal::prelude::ToPrimitive;
 use rustix::fs::{AtFlags, Mode, OFlags, RenameFlags, open, openat, renameat_with, unlinkat};
 use serde::de::Error as _;
@@ -158,7 +161,9 @@ impl SealedProcessRuleSnapshotV3 {
             frozen_at_utc_ms: snapshot.provenance.rules_observed_at_utc_ms,
             queried_minimum_order_size_shares: decimal(&synchronized.minimum_order_size_shares),
             limit_min_quantity_shares: contracts::ExactDecimal("5".into()),
-            market_buy_min_spend_pusd: contracts::ExactDecimal("1".into()),
+            market_buy_min_spend_pusd: contracts::ExactDecimal(
+                MARKET_BUY_MINIMUM_PRINCIPAL_PUSD.to_string(),
+            ),
             taker_delay_enabled: synchronized.taker_order_delay_enabled,
             taker_delay_ms: documented.taker_delay.value.delay_ms,
             delay_requires_itode: documented.taker_delay.value.enabled_only_when_itode,

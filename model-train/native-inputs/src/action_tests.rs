@@ -65,7 +65,7 @@ impl Harness {
         } else {
             recorded_trading_window(&root, "100", maker.then_some(("0.5", "5")), 320_000, true)
         };
-        let (mut execution, observation) = execution_with_seed_and_cash(
+        let (mut execution, observation, rules) = execution_with_rules(
             &temp.path().join("sim.jsonl"),
             &core,
             SUCCESS_POLICY,
@@ -90,6 +90,7 @@ impl Harness {
             format!("cancel-{pair_count}-{maker}-{multi}"),
             account,
             -10_000,
+            rules.clone(),
         );
         let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times).unwrap();
         let driver = FinitePublicConsumptionV1::new(execution, source, "cancel".into());
@@ -139,6 +140,50 @@ impl Harness {
         }
     }
 }
+fn assert_native_cancel_families(group: Arc<NativeInputGroup>) {
+    let ExecutionReadValueV1::Known(objects) =
+        group.action_before.as_ref().unwrap().cancel_objects()
+    else {
+        panic!()
+    };
+    for family in 3..=5 {
+        let mut actor = NativeActor::new(group.clone(), 0).unwrap();
+        assert!(actor.support().unwrap()[family]);
+        actor.choose(family).unwrap();
+        let expected = objects
+            .iter()
+            .map(|object| {
+                matches!(
+                    (family, object),
+                    (3, CancelObjectReadV1::Single { .. })
+                        | (4, CancelObjectReadV1::Paired { .. })
+                        | (5, CancelObjectReadV1::Market { .. })
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(actor.support().unwrap(), expected);
+        // 末个合法对象包含尾块；不能用首块或压缩后的索引替换原索引。
+        let index = expected.iter().rposition(|legal| *legal).unwrap();
+        actor.choose(index).unwrap();
+        let intent = match &objects[index] {
+            CancelObjectReadV1::Single { order } => ModelIntentV1::CancelOrder {
+                platform_order_id: platform(order),
+            },
+            CancelObjectReadV1::Paired { orders, .. } => ModelIntentV1::CancelOrders {
+                platform_order_ids: orders.iter().map(platform).collect(),
+            },
+            CancelObjectReadV1::Market { condition_id, .. } => ModelIntentV1::CancelMarketOrders {
+                condition_id: (*condition_id).clone(),
+            },
+        };
+        assert_eq!(actor.intent().unwrap(), Some(intent));
+    }
+    let mut no_trade = NativeActor::new(group, 0).unwrap();
+    no_trade.choose(0).unwrap();
+    assert!(no_trade.is_complete());
+    assert_eq!(no_trade.intent().unwrap(), None);
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn complete_pair_terminal_leg_and_257_global_selection() {
     let mut h = Harness::new(86, false, false);
@@ -160,11 +205,13 @@ async fn complete_pair_terminal_leg_and_257_global_selection() {
         if ![36_000, 56_000].contains(&at) {
             continue;
         }
-        let g = h
-            .native
-            .consume(&mut h.shared, &mut h.driver)
-            .unwrap()
-            .unwrap();
+        let g = Arc::new(
+            h.native
+                .consume(&mut h.shared, &mut h.driver)
+                .unwrap()
+                .unwrap(),
+        );
+        assert_native_cancel_families(g.clone());
         if at == 36_000 {
             assert_eq!(g.cancel.len(), 259);
             let ExecutionReadValueV1::Known(objects) =
@@ -210,16 +257,18 @@ async fn complete_pair_terminal_leg_and_257_global_selection() {
             );
             scores.fill(0.);
             scores[last.0] = 2.;
-            g.execute_selected(
-                0,
-                SelectedAction::Cancel(CancelFamily::Single),
-                &mut h.shared,
-                &mut h.driver.decision().unwrap(),
-                context("close-b"),
-                |_, _, _| Ok::<_, ()>(blocks(&scores, &[256, 3])),
-            )
-            .await
-            .unwrap();
+            let mut actor = NativeActor::new(g.clone(), 0).unwrap();
+            actor.choose(3).unwrap();
+            actor.choose(last.0).unwrap();
+            actor
+                .execute(
+                    &mut h.shared,
+                    &mut h.driver.decision().unwrap(),
+                    context("close-b"),
+                )
+                .await
+                .unwrap()
+                .unwrap();
             // 原冻集合保持，发送不能抢先改写它。
             assert_eq!(g.cancel.len(), 259);
             closed_b = Some(last.1);
@@ -296,6 +345,7 @@ async fn no_trade_keeps_order_and_later_real_fill() {
     let mut no_trade = false;
     let mut fill = false;
     while let Some(g) = h.next() {
+        let g = Arc::new(g);
         let at = g.cutoff.decision_time().logical_time_utc_ms();
         if at == 28_000 {
             let before = g.action_before.as_ref().unwrap();
@@ -306,16 +356,13 @@ async fn no_trade_keeps_order_and_later_real_fill() {
                 ExecutionReadValueV1::Known(true)
             );
             let funds = before.request_funds().count();
-            let receipt = g
-                .execute_selected(
-                    0,
-                    SelectedAction::NoTrade,
+            let mut actor = NativeActor::new(g.clone(), 0).unwrap();
+            actor.choose(0).unwrap();
+            let receipt = actor
+                .execute(
                     &mut h.shared,
                     &mut h.driver.decision().unwrap(),
                     context("no-trade"),
-                    |_, _, _| -> Result<Vec<CancelScoreBlock>, ()> {
-                        panic!("NoTrade must not call parameters")
-                    },
                 )
                 .await
                 .unwrap();
@@ -715,3 +762,250 @@ fn recorded_cancel_switch(
 
 #[path = "buy_tests.rs"]
 mod buy_tests;
+
+#[cfg(all(feature = "python", feature = "ort"))]
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "requires explicitly supplied exported graphs and matching Python wheel ORT library"]
+async fn same_process_cancel_actor_all_objects_and_original_identities() {
+    use pyo3::prelude::*;
+    let directory = std::env::var("ACTOR_GRAPH_DIRECTORY").unwrap();
+    ort::init_from(std::env::var("ORT_DYLIB_PATH").unwrap())
+        .unwrap()
+        .commit();
+    let mut h = Harness::new(86, false, false);
+    let mut history = Vec::new();
+    for _ in 0..4 {
+        history.push(Arc::new(h.next().unwrap()));
+    }
+    h.pairs(86).await;
+    let g = loop {
+        assert!(h.driver.next_group().unwrap().is_some());
+        let Some(group) = h.native.consume(&mut h.shared, &mut h.driver).unwrap() else {
+            continue;
+        };
+        let group = Arc::new(group);
+        if group.cutoff.decision_time().logical_time_utc_ms() == 36_000 {
+            break group;
+        }
+        history.push(group);
+    };
+    assert_eq!(g.cancel.len(), 259);
+    type Step = (Vec<bool>, String, Vec<f32>, Vec<f32>);
+    type Trace = (Vec<f32>, Vec<f32>);
+    type PythonEvidence = (Vec<Trace>, Vec<Vec<usize>>, Vec<Vec<Step>>, usize, usize);
+    let (traces, paths, records, layers, hidden): PythonEvidence = Python::attach(|py| {
+        let module = py.import("model_train.actor_validation").unwrap();
+        let group = Py::new(py, crate::python::PythonGroup { group: g.clone() }).unwrap();
+        let history = crate::python::value(
+            py,
+            serde_json::to_value(history.iter().map(|g| g.as_ref()).collect::<Vec<_>>()).unwrap(),
+        )
+        .unwrap();
+        let directory = py
+            .import("pathlib")
+            .unwrap()
+            .getattr("Path")
+            .unwrap()
+            .call1((&directory,))
+            .unwrap();
+        module
+            .getattr("validate_cancel")
+            .unwrap()
+            .call1((group, history, directory))
+            .unwrap()
+            .extract()
+            .unwrap()
+    });
+    let session = |file| {
+        ort::session::Session::builder()
+            .unwrap()
+            .with_intra_threads(1)
+            .unwrap()
+            .with_inter_threads(1)
+            .unwrap()
+            .with_parallel_execution(false)
+            .unwrap()
+            .with_memory_pattern(false)
+            .unwrap()
+            .with_intra_op_spinning(false)
+            .unwrap()
+            .with_inter_op_spinning(false)
+            .unwrap()
+            .commit_from_file(std::path::Path::new(&directory).join(file))
+            .unwrap()
+    };
+    let mut state = session("state_encoder.onnx");
+    let mut h_prev = vec![0f32; layers * hidden];
+    let mut z = Vec::new();
+    let mut frame = 0;
+    for group in history.iter().chain(std::iter::once(&g)) {
+        for row in &group.rows {
+            let output = state.run(ort::inputs![
+                "fast_features" => ort::value::Tensor::from_array(([1,836], row.fast.clone())).unwrap(),
+                "slow_features" => ort::value::Tensor::from_array(([1,412], row.slow.clone())).unwrap(),
+                "h_prev" => ort::value::Tensor::from_array(([layers,1,hidden], h_prev)).unwrap()
+            ]).unwrap();
+            z = output["z_t"]
+                .try_extract_tensor::<f32>()
+                .unwrap()
+                .1
+                .to_vec();
+            h_prev = output["h_next"]
+                .try_extract_tensor::<f32>()
+                .unwrap()
+                .1
+                .to_vec();
+            for (got, want) in [(&z, &traces[frame].0), (&h_prev, &traces[frame].1)] {
+                assert_eq!(got.len(), want.len());
+                for (&a, &b) in got.iter().zip(want) {
+                    assert!((a - b).abs() <= 1e-5 + 1e-4 * b.abs());
+                }
+            }
+            frame += 1;
+        }
+    }
+    assert_eq!(frame, traces.len());
+    let mut scorer = crate::ort_actor::OrtActorScorer {
+        session: session("action_decoder.onnx"),
+        hidden,
+    };
+    let mut actual = NativeActor::new(g.clone(), 0).unwrap();
+    scorer.greedy(&mut actual, &z).unwrap();
+    assert_eq!(actual.path, paths[0]);
+    let reduced = scorer.reduced(&actual, &z).unwrap();
+    for (path, steps) in paths.iter().zip(records) {
+        let mut actor = NativeActor::new(g.clone(), 0).unwrap();
+        for (&choice, (support, prefix, features, want)) in path.iter().zip(steps) {
+            assert_eq!(actor.support().unwrap(), support);
+            assert_eq!(format!("{:?}", actor.state), prefix);
+            assert_eq!(actor.prefix_features().as_slice(), features);
+            let got = scorer.scores(&actor, &z, &reduced).unwrap();
+            assert_eq!(got.len(), want.len());
+            for (&a, &b) in got.iter().zip(&want) {
+                assert!((a - b).abs() <= 1e-5 + 1e-4 * b.abs());
+            }
+            if actor.head_index() == 7 {
+                assert_eq!(got.len(), 259);
+                let mut best = None;
+                for (i, (&legal, &value)) in support.iter().zip(&got).enumerate() {
+                    if legal && best.is_none_or(|(_, old)| value > old) {
+                        best = Some((i, value));
+                    }
+                }
+                assert_eq!(best.unwrap().0, choice);
+            }
+            actor.choose(choice).unwrap();
+        }
+        if path[0] >= 3 {
+            assert_eq!(
+                actor.intent().unwrap(),
+                g.cancel_index_intent(*path.last().unwrap())
+                    .map(Some)
+                    .unwrap()
+            );
+        }
+    }
+    // 只执行真实图实际选择，外生三族探针不覆盖模型决定。
+    let intent = actual.intent().unwrap();
+    let receipt = actual
+        .execute(
+            &mut h.shared,
+            &mut h.driver.decision().unwrap(),
+            context("actual-cancel-graph"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(receipt.is_some(), intent.is_some());
+    eprintln!("cancel actual path={:?}, intent={intent:?}", actual.path);
+    let mut successors = 0;
+    loop {
+        assert!(h.driver.next_group().unwrap().is_some());
+        if h.native
+            .consume(&mut h.shared, &mut h.driver)
+            .unwrap()
+            .is_some()
+        {
+            successors += 1;
+        }
+        if h.driver
+            .decision()
+            .unwrap()
+            .cutoff()
+            .decision_time()
+            .logical_time_utc_ms()
+            == 56_000
+        {
+            break;
+        }
+    }
+    assert_eq!(successors, 2);
+    let after = h.shared.action_before(&mut h.driver).unwrap().unwrap();
+    let before = g.action_before.as_ref().unwrap();
+    match &intent {
+        None => {
+            assert_eq!(after.orders().count(), 172);
+            assert!(
+                after
+                    .orders()
+                    .all(|order| order.cancellable == ExecutionReadValueV1::Known(true))
+            );
+            assert_eq!(after.economics().cash, before.economics().cash);
+            assert_eq!(
+                after.request_funds().count(),
+                before.request_funds().count()
+            );
+        }
+        Some(ModelIntentV1::CancelOrder { platform_order_id }) => {
+            assert_eq!(
+                after
+                    .orders()
+                    .filter(|order| order.cancellable == ExecutionReadValueV1::Known(true))
+                    .count(),
+                171
+            );
+            assert!(
+                after
+                    .orders()
+                    .filter(|order| platform(order) == *platform_order_id)
+                    .all(|order| order.cancellable == ExecutionReadValueV1::Known(false))
+            );
+        }
+        Some(ModelIntentV1::CancelOrders { platform_order_ids }) => {
+            assert_eq!(
+                after
+                    .orders()
+                    .filter(|order| order.cancellable == ExecutionReadValueV1::Known(true))
+                    .count(),
+                170
+            );
+            assert!(
+                after
+                    .orders()
+                    .filter(|order| platform_order_ids.contains(&platform(order)))
+                    .all(|order| order.cancellable == ExecutionReadValueV1::Known(false))
+            );
+        }
+        Some(ModelIntentV1::CancelMarketOrders { .. }) => {
+            assert!(
+                after
+                    .orders()
+                    .all(|order| order.cancellable == ExecutionReadValueV1::Known(false))
+            );
+            assert_eq!(after.economics().cash.actual_available_pusd.0, "2000");
+        }
+        Some(ModelIntentV1::SubmitSingleBuy { .. } | ModelIntentV1::SubmitPairedBuy { .. }) => {
+            // 接受／拒绝均由真实反馈消费；发送未知预留不得留在该反馈截点。
+            assert!(
+                after
+                    .request_funds()
+                    .all(|request| request.reservation_state
+                        != ReservationStatusV1::SubmittedUnknown)
+            );
+        }
+    }
+    eprintln!(
+        "cancel population=259 actual path={:?}, intent={intent:?}",
+        actual.path
+    );
+    h.driver.stop_and_drain().unwrap();
+}

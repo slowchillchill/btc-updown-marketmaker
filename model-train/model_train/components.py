@@ -98,6 +98,7 @@ class ActorScores(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_size // 2, 1),
         )
+        self.fee_weight = nn.Linear(hidden_size // 2, 1, bias=False)
 
     def forward(
         self,
@@ -106,6 +107,7 @@ class ActorScores(nn.Module):
         prefix_context: Tensor,
         cancel_summary: Tensor,
         objects: Tensor,
+        price_fee_features: Tensor | None = None,
     ) -> dict[str, Tensor]:
         """z_t 为 [B,H]，上下文为 [B,H/2]，objects 为 [B,N,H/2]。"""
         family = self.family(torch.cat((z_t, rule_context, cancel_summary), dim=-1))
@@ -115,7 +117,8 @@ class ActorScores(nn.Module):
             "family": family,
             "quantity": self.quantity(decoder),
             "variant": self.variant(decoder),
-            "price": self.price(decoder),
+            "price": self.price(decoder) + (self.fee_weight(decoder) * price_fee_features
+                                             if price_fee_features is not None else 0.0),
             "post_only": self.post_only(decoder),
             "expiry": self.expiry(decoder),
             "cancel": self.cancel(torch.cat((object_decoder, objects), dim=-1)),

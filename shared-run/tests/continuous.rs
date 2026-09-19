@@ -338,6 +338,32 @@ async fn actual_pending_four_keeps_ten_then_finality_and_cancel_close_separate_r
                         commitment,
                         ExecutionReadValueV1::Known(ExactDecimal("10".into()))
                     );
+                    let order = view.orders().next().unwrap();
+                    let formed = order.formed.unwrap();
+                    let mut partial =
+                        SharedExecutionRegistryV1::new(Arc::new(formed.context().clone()));
+                    partial.observe(formed);
+                    assert!(matches!(formed.record(),
+                        ::execution_normalization::NormalizationRecord::Evidence {
+                            evidence: ::execution_normalization::SourceNeutralEvidenceKind::OrderLifecycle {
+                                result: contracts::execution_normalization::SourceNeutralOrderLifecycleResultV1 {
+                                    event: contracts::execution_normalization::SourceNeutralOrderLifecycleEventV1::Accepted {
+                                        state: contracts::execution_normalization::SourceNeutralOrderStateV1::Open,
+                                    }, ..
+                                }
+                            }, ..
+                        }
+                    ));
+                    let read = partial.order(order.order_identity).unwrap();
+                    assert_eq!(read.cancellable, ExecutionReadValueV1::Unavailable);
+                    assert_eq!(
+                        read.active_unfilled_shares,
+                        ExecutionReadValueV1::Unavailable
+                    );
+                    assert!(matches!(
+                        partial.cancel_objects(),
+                        ExecutionReadValueV1::Unavailable
+                    ));
                     if cancel {
                         shared
                             .execute(
@@ -484,6 +510,39 @@ async fn actual_quote_orders_keep_original_target_until_complete_initial_set_is_
                         &ConditionId(CONDITION_ID.into()),
                         &TokenId(UP_TOKEN_ID.into())
                     ),
+                    ExecutionReadValueV1::Known(ExactDecimal("10".into()))
+                );
+                // 只消费真实反馈引用，先让接受生命周期可见、提交回执尚不可见。
+                incomplete.observe(order.formed.unwrap());
+                incomplete.observe(order.latest_lifecycle.unwrap());
+                let partial = incomplete.order(order.order_identity).unwrap();
+                assert!(partial.origin.is_none());
+                assert!(partial.accepted.is_none());
+                assert_eq!(partial.cancellable, ExecutionReadValueV1::Known(false));
+                assert_eq!(
+                    partial.active_unfilled_shares,
+                    ExecutionReadValueV1::Unavailable
+                );
+                assert_eq!(partial.matched_shares, ExecutionReadValueV1::Unavailable);
+                if !fok {
+                    assert!(matches!(
+                        partial.latest_lifecycle.unwrap().record(),
+                        ::execution_normalization::NormalizationRecord::Evidence {
+                            evidence: ::execution_normalization::SourceNeutralEvidenceKind::OrderLifecycle {
+                                result: contracts::execution_normalization::SourceNeutralOrderLifecycleResultV1 {
+                                    event: contracts::execution_normalization::SourceNeutralOrderLifecycleEventV1::FakUnspentReleased { .. },
+                                    ..
+                                }
+                            }, ..
+                        }
+                    ));
+                }
+                assert_eq!(
+                    incomplete
+                        .all_commitments()
+                        .next()
+                        .unwrap()
+                        .remaining_target_shares,
                     ExecutionReadValueV1::Known(ExactDecimal("10".into()))
                 );
                 incomplete.observe(order.accepted.unwrap());

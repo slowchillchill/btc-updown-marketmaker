@@ -4411,8 +4411,10 @@ fn post_terms_v2(
             ) else {
                 return Ok(Err(SubmissionRejectedReasonV2::OrderEncodingRejected));
             };
-            if encoding.taker_amount < minimum_shares {
-                return Ok(Err(SubmissionRejectedReasonV2::BelowMinimumShares));
+            if *spend_pusd < crate::platform_rules::MARKET_BUY_MINIMUM_PRINCIPAL_PUSD {
+                return Ok(Err(
+                    SubmissionRejectedReasonV2::BelowMarketBuyMinimumPrincipal,
+                ));
             }
             BuyOrderTermsV2::Fok {
                 worst_price_pusd_per_share: encoding.price,
@@ -4435,8 +4437,10 @@ fn post_terms_v2(
             ) else {
                 return Ok(Err(SubmissionRejectedReasonV2::OrderEncodingRejected));
             };
-            if encoding.taker_amount < minimum_shares {
-                return Ok(Err(SubmissionRejectedReasonV2::BelowMinimumShares));
+            if *spend_pusd < crate::platform_rules::MARKET_BUY_MINIMUM_PRINCIPAL_PUSD {
+                return Ok(Err(
+                    SubmissionRejectedReasonV2::BelowMarketBuyMinimumPrincipal,
+                ));
             }
             BuyOrderTermsV2::Fak {
                 worst_price_pusd_per_share: encoding.price,
@@ -11088,6 +11092,153 @@ mod tests {
             2,
             "查询本身不得推进公开修订"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn d0007_market_buy_minimum_is_original_principal_not_five_shares_or_partial_fill() {
+        for (case, spend, depth, market) in [
+            ("fok-one", "1", "100", 0),
+            ("fak-one", "1", "100", 1),
+            ("fok-below", ".99", "100", 0),
+            ("fak-below", ".99", "100", 1),
+            ("fak-partial", "1", "1", 1),
+            ("gtc-two", "1", "100", 2),
+            ("gtd-two", "1", "100", 3),
+        ] {
+            let (_directory, mut actor) =
+                active_market_actor(SimCallerRoleV1::ModelTrain, case).await;
+            let initial = decoded_initial_market_events(depth)
+                .into_iter()
+                .map(|mut event| {
+                    let ExecutionMarketEventPayloadV3::InitialL2Snapshot(book) = &mut event.payload
+                    else {
+                        unreachable!()
+                    };
+                    book.asks[0].price_pusd_per_share = ExactDecimal("0.5".into());
+                    book.asks[0].quantity_shares = ExactDecimal(depth.into());
+                    event.event_id =
+                        data_pipeline_core::derive_execution_market_event_v3_id(&event).unwrap();
+                    let bytes =
+                        data_pipeline_core::encode_execution_market_event_v3(&event).unwrap();
+                    data_pipeline_core::decode_execution_market_event_v3(&bytes).unwrap()
+                })
+                .collect::<Vec<_>>();
+            let condition = initial[0].market.condition_id.clone();
+            let token = TokenId("1".into());
+            let (state, _) = reduce_market_event_slice_v2(
+                actor.state.take().unwrap(),
+                MarketEventPathV1::HiddenPlatform,
+                1100,
+                &initial,
+                actor._rule_snapshot.snapshot(),
+                actor._finality_policy.as_ref(),
+            )
+            .unwrap_or_else(|_| panic!("valid original book"));
+            let before = state
+                .session
+                .as_ref()
+                .unwrap()
+                .execution_state
+                .account_balances_for_tests();
+            let kind = match market {
+                0 => SimBuyOrderKindV1::FokMarket {
+                    spend_pusd: spend.parse().unwrap(),
+                    worst_price_pusd_per_share: ".5".parse().unwrap(),
+                },
+                1 => SimBuyOrderKindV1::FakMarket {
+                    spend_pusd: spend.parse().unwrap(),
+                    worst_price_pusd_per_share: ".5".parse().unwrap(),
+                },
+                2 => SimBuyOrderKindV1::GtcLimit {
+                    limit_price_pusd_per_share: ".5".parse().unwrap(),
+                    size_shares: 2.into(),
+                    post_only: false,
+                },
+                _ => SimBuyOrderKindV1::GtdLimit {
+                    limit_price_pusd_per_share: ".5".parse().unwrap(),
+                    size_shares: 2.into(),
+                    post_only: false,
+                    expires_at_utc_ms: 300_000,
+                },
+            };
+            let request = BusinessRequestV2::PostOrder(PostOrderRequestV2 {
+                context: RequestContextV2 {
+                    global_request_id: case.into(),
+                    caller_correlation_id: None,
+                },
+                item: post_item(case, &condition, &token, kind),
+            });
+            let (state, _, effects, lifecycle) = register_and_drain_post_candidate(
+                &actor.opened,
+                actor.scenario.initial_market_directory(),
+                state,
+                &request,
+                123,
+                1200,
+                actor._latency_profile.as_ref(),
+                actor._rule_snapshot.snapshot(),
+                actor._finality_policy.as_ref(),
+            );
+            assert_eq!(effects.len(), 1);
+            if spend == ".99" || market >= 2 {
+                assert!(
+                    matches!(&effects[0].outcome, PostOrderItemOutcomeV2::RejectedNoEffect(reason) if *reason==if market>=2 {SubmissionRejectedReasonV2::BelowMinimumShares}else{SubmissionRejectedReasonV2::BelowMarketBuyMinimumPrincipal})
+                );
+                assert!(lifecycle.is_empty());
+                assert_eq!(
+                    state
+                        .session
+                        .as_ref()
+                        .unwrap()
+                        .execution_state
+                        .account_balances_for_tests(),
+                    before
+                );
+                assert_eq!(
+                    state
+                        .session
+                        .as_ref()
+                        .unwrap()
+                        .execution_state
+                        .fill_shape_for_tests()
+                        .0,
+                    0
+                );
+            } else {
+                let PostOrderItemOutcomeV2::Accepted(accepted) = &effects[0].outcome else {
+                    panic!("{case}: {:?}", effects[0].outcome)
+                };
+                let contracts::SubmissionMeasurementV2::QuoteBudget {
+                    accepted_quote_budget_pusd,
+                    used_quote_amount_pusd,
+                    released_or_unspent_quote_amount_pusd,
+                    actual_matched_base_quantity_shares,
+                    sdk_taker_amount_audit_base_quantity_shares,
+                    ..
+                } = &accepted.measurement
+                else {
+                    panic!()
+                };
+                assert_eq!(accepted_quote_budget_pusd.0, "1");
+                assert_eq!(sdk_taker_amount_audit_base_quantity_shares.0, "2");
+                assert_eq!(
+                    used_quote_amount_pusd.0,
+                    if depth == "1" { "0.5" } else { "1" }
+                );
+                assert_eq!(
+                    actual_matched_base_quantity_shares.0,
+                    if depth == "1" { "1" } else { "2.000001" }
+                );
+                assert_eq!(
+                    released_or_unspent_quote_amount_pusd.0,
+                    if depth == "1" { "0.5" } else { "0" }
+                );
+                assert!(!accepted.fills.is_empty());
+                if depth == "1" {
+                    assert!(lifecycle.iter().any(|event|matches!(event,LifecycleFeedbackEffectV2::Order(order) if matches!(&order.event, contracts::OrderLifecycleEventV2::FakUnspentReleased{released_quote_amount_pusd,..} if released_quote_amount_pusd.0=="0.5"))));
+                }
+            }
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]

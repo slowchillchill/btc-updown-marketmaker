@@ -36,6 +36,8 @@ def session(path, threads):
 
 def call_ort(sess, names):
     def call(*args):
+        if names == ACTION_INPUTS and len(args) == 7:
+            args = (*args, torch.zeros((args[0].shape[0], 9999), dtype=torch.float32))
         return tuple(torch.from_numpy(x) for x in sess.run(None, {
             n: v.detach().numpy() for n, v in zip(names, args)}))
     return call
@@ -85,8 +87,8 @@ def export(model, config, directory):
     K = torch.export.Dim('K', min=1, max=256)
     examples = (
         (model.state, (fast, slow, h), STATE_INPUTS, STATE_OUTPUTS, ({0:B}, {0:B}, {1:B}), 'state_encoder'),
-        (model.action, (z, rule, prefix, objects, mask, torch.zeros(2, 3*config.hidden//2), torch.zeros(2, dtype=torch.bool)),
-         ACTION_INPUTS, ACTION_OUTPUTS, ({0:B}, {0:B}, {0:B}, {0:B,1:K}, {0:B,1:K}, {0:B}, {0:B}), 'action_decoder'))
+        (model.action, (z, rule, prefix, objects, mask, torch.zeros(2, 3*config.hidden//2), torch.zeros(2, dtype=torch.bool), torch.zeros(2, 9999)),
+         ACTION_INPUTS, ACTION_OUTPUTS, ({0:B}, {0:B}, {0:B}, {0:B,1:K}, {0:B,1:K}, {0:B}, {0:B}, {0:B}), 'action_decoder'))
     metadata = {}
     for module, args, inputs, outputs, dynamic, name in examples:
         program = torch.onnx.export(module, args, dynamo=True, opset_version=18, optimize=True,

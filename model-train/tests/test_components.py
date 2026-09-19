@@ -182,7 +182,8 @@ class ComponentTests(unittest.TestCase):
         fixture_weights(model)
         inputs = [leaf(torch.randn(2, width, dtype=torch.double)) for width in (8, 4, 4, 4)]
         inputs.append(leaf(torch.randn(2, 3, 4, dtype=torch.double)))
-        z, rule, prefix, summary, objects = [leaf(x) for x in inputs]
+        inputs.append(leaf(torch.randn(2, 9999, dtype=torch.double)))
+        z, rule, prefix, summary, objects, fees = [leaf(x) for x in inputs]
         parameters = {name: leaf(p) for name, p in model.named_parameters()}
         family = encode(torch.cat((z, rule, summary), -1), parameters, "family")
         decoder = F.silu(linear(norm(torch.cat((z, rule, prefix), -1), parameters,
@@ -190,6 +191,7 @@ class ComponentTests(unittest.TestCase):
         expected = {"family": family}
         for name in ("quantity", "variant", "price", "post_only", "expiry"):
             expected[name] = linear(decoder, parameters, name)
+        expected["price"] = expected["price"] + F.linear(decoder, parameters["fee_weight.weight"]) * fees
         # 按对象分别求值，独立于实现中的扩展和批量拼接路径。
         expected["cancel"] = torch.stack([
             encode(torch.cat((decoder, objects[:, index]), -1), parameters, "cancel")
@@ -198,7 +200,7 @@ class ComponentTests(unittest.TestCase):
         actual = model(*inputs)
         self.assertEqual(set(actual), set(expected))
         self.assert_output_and_gradients(
-            model, list(zip(inputs, (z, rule, prefix, summary, objects))),
+            model, list(zip(inputs, (z, rule, prefix, summary, objects, fees))),
             list(actual.values()), [expected[name] for name in actual], parameters,
         )
 
@@ -223,7 +225,7 @@ class ComponentTests(unittest.TestCase):
         self.assertEqual(
             {name for name, module in model.named_modules() if isinstance(module, nn.Linear)},
             {"family.1", "family.3", "decoder.1", "quantity", "variant", "price",
-             "post_only", "expiry", "cancel.1", "cancel.3"},
+             "post_only", "expiry", "cancel.1", "cancel.3", "fee_weight"},
         )
         self.assertEqual(base["family"].shape, (2, 6))
         self.assertEqual(base["cancel"].shape, (2, 3, 1))

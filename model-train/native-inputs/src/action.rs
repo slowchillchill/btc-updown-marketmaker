@@ -24,6 +24,7 @@ pub enum CancelFamily {
 pub enum SelectedAction<'a> {
     NoTrade,
     Cancel(CancelFamily),
+    CancelIndex(usize),
     Buy(&'a PrefixState),
 }
 /// 参数图原输出及该块实际成员数；padding 不参与选择。
@@ -37,6 +38,8 @@ pub enum ActionError<E> {
     Scoring(E),
     NoObjectForSelectedFamily,
     Execution(SimRunActorErrorV2),
+    Ledger(ledger::LedgerErrorV1),
+    Reservation(Vec<ledger::LedgerReservationOutcomeV1>),
 }
 impl NativeInputGroup {
     /// 已选参数的精确装配；合法性及 F.4 编码域由原选择责任保证。
@@ -150,25 +153,22 @@ impl NativeInputGroup {
                 best = Some((object, score));
             }
         }
-        fn id(order: &shared_run::ExecutionOrderReadV1<'_>) -> String {
-            let MemoryIdentityKeyV1::Entity(SourceNeutralEntityKeyV1::Order { source_order_id }) =
-                &order.order_identity.key
-            else {
-                unreachable!("public cancel object is an order")
-            };
-            source_order_id.clone()
-        }
-        Ok(best.map(|(object, _)| match object {
-            CancelObjectReadV1::Single { order } => ModelIntentV1::CancelOrder {
-                platform_order_id: id(&order),
-            },
-            CancelObjectReadV1::Paired { orders, .. } => ModelIntentV1::CancelOrders {
-                platform_order_ids: orders.iter().map(id).collect(),
-            },
-            CancelObjectReadV1::Market { condition_id, .. } => ModelIntentV1::CancelMarketOrders {
-                condition_id: condition_id.clone(),
-            },
-        }))
+        Ok(best.map(|(object, _)| cancel_object_intent(object)))
+    }
+    pub fn cancel_index_intent(&self, index: usize) -> Result<ModelIntentV1, crate::InputError> {
+        let ExecutionReadValueV1::Known(objects) = self
+            .action_before
+            .as_ref()
+            .ok_or(crate::InputError::MissingAssociation)?
+            .cancel_objects()
+        else {
+            return Err(crate::InputError::MissingAssociation);
+        };
+        objects
+            .into_iter()
+            .nth(index)
+            .map(cancel_object_intent)
+            .ok_or(crate::InputError::UnsupportedChoice)
     }
     /// 整组状态消费完成后，对同组 DecisionRequired 行调用。
     /// score 返回覆盖本组完整 cancel 人口的有序有效块；图消费者只评分，
@@ -184,6 +184,10 @@ impl NativeInputGroup {
     ) -> Result<Option<MutationRequestReceiptV2>, ActionError<E>> {
         let intent = match selected {
             SelectedAction::NoTrade => None,
+            SelectedAction::CancelIndex(index) => Some(Arc::new(
+                self.cancel_index_intent(index)
+                    .map_err(ActionError::Input)?,
+            )),
             SelectedAction::Buy(state) => Some(Arc::new(
                 self.buy_intent(row, state).map_err(ActionError::Input)?,
             )),
@@ -209,9 +213,113 @@ impl NativeInputGroup {
                 Some(Arc::new(intent))
             }
         };
+        if let (SelectedAction::Buy(state), Some(_)) = (selected, &intent) {
+            use ledger::{
+                LedgerLocalEventIdentityV1, LedgerRequestIdentityV1, LedgerReservationOutcomeV1,
+                LedgerSubmissionItemIdentityV1, ReserveIntentV1,
+            };
+            let action = self.rows[row].action_context.as_ref().unwrap();
+            let sides: Vec<usize> = if state.family == Some(Family::SubmitPairedBuy) {
+                vec![0, 1]
+            } else {
+                vec![usize::from(state.single_leg.unwrap() == Leg::B)]
+            };
+            let n = state.quantity_hundredths.as_ref().unwrap();
+            let mut reserves = Vec::new();
+            let mut items = Vec::new();
+            for (ordinal, i) in sides.into_iter().enumerate() {
+                let item = LedgerSubmissionItemIdentityV1 {
+                    global_request_id: context.global_request_id.clone(),
+                    batch_item_ordinal: ordinal as u16,
+                };
+                // 元组编码保持全局请求与批内序号的边界，不依赖展示字符串拼接。
+                let identity =
+                    LedgerRequestIdentityV1(serde_json::to_string(&item).expect("身份序列化"));
+                let selected = &state.legs[i];
+                let tick_ratio = action.ticks[i].as_ref().unwrap().public();
+                let tick = (tick_ratio.numerator.parse::<Decimal>().unwrap()
+                    / tick_ratio.denominator.parse::<Decimal>().unwrap())
+                .normalize()
+                .to_string();
+                let k = selected.price_index.as_ref().unwrap().to_u16().unwrap();
+                let cost = action
+                    .snapshot
+                    .limit_buy_cost_v1(
+                        n,
+                        k,
+                        &contracts::ExactDecimal(tick),
+                        selected.post_only.unwrap_or(true),
+                    )
+                    .map_err(|e| ActionError::Input(crate::InputError::Fee(e)))?;
+                let fee = if matches!(
+                    selected.variant,
+                    Some(Variant::FokMarket | Variant::FakMarket)
+                ) {
+                    BigUint::from(0u32)
+                } else {
+                    cost.fee_1e5_units
+                };
+                let money = |value: BigUint, scale| {
+                    contracts::ExactDecimal(
+                        Decimal::from_i128_with_scale(
+                            value.to_i128().expect("已选现金编码域"),
+                            scale,
+                        )
+                        .normalize()
+                        .to_string(),
+                    )
+                };
+                reserves.push(ReserveIntentV1 {
+                    request_identity: identity,
+                    condition_id: self.rows[row].hidden_state_key.condition_id.clone(),
+                    requested_principal_pusd: money(cost.principal_micro, 6),
+                    immediate_fee_reserve_pusd: money(fee, 5),
+                });
+                items.push(item);
+            }
+            let outcomes = shared
+                .reserve_action_v2(&reserves)
+                .map_err(ActionError::Ledger)?;
+            if outcomes
+                .iter()
+                .any(|v| !matches!(v, LedgerReservationOutcomeV1::Reserved { .. }))
+            {
+                return Err(ActionError::Reservation(outcomes));
+            }
+            for (reserve, item) in reserves.iter().zip(&items) {
+                let event = LedgerLocalEventIdentityV1(
+                    serde_json::to_string(&("submission-started", item)).expect("身份序列化"),
+                );
+                shared
+                    .record_submission_started(&event, &reserve.request_identity, item)
+                    .map_err(ActionError::Ledger)?;
+            }
+        }
         shared
             .execute(decision, context, intent)
             .await
             .map_err(ActionError::Execution)
+    }
+}
+
+fn cancel_object_intent(object: CancelObjectReadV1<'_>) -> ModelIntentV1 {
+    fn id(order: &shared_run::ExecutionOrderReadV1<'_>) -> String {
+        let MemoryIdentityKeyV1::Entity(SourceNeutralEntityKeyV1::Order { source_order_id }) =
+            &order.order_identity.key
+        else {
+            unreachable!("public cancel object is an order")
+        };
+        source_order_id.clone()
+    }
+    match object {
+        CancelObjectReadV1::Single { order } => ModelIntentV1::CancelOrder {
+            platform_order_id: id(&order),
+        },
+        CancelObjectReadV1::Paired { orders, .. } => ModelIntentV1::CancelOrders {
+            platform_order_ids: orders.iter().map(id).collect(),
+        },
+        CancelObjectReadV1::Market { condition_id, .. } => ModelIntentV1::CancelMarketOrders {
+            condition_id: condition_id.clone(),
+        },
     }
 }

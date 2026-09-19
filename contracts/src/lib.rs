@@ -491,6 +491,8 @@ pub enum SubmissionRejectedReasonV2 {
     AssetNotInMarket,
     OrderEncodingRejected,
     BelowMinimumShares,
+    /// SIM：FOK/FAK 每腿原请求本金低于市场 BUY 最低本金。
+    BelowMarketBuyMinimumPrincipal,
     PostOnlyWouldTake,
     BelowMarketableLimitBuyMinimumPrincipal,
     GtdExpirationTooSoon,

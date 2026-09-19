@@ -8,7 +8,7 @@
 最终特征索引见 [#6](https://github.com/slowchillchill/btc-updown-marketmaker/issues/6) 正文及两条正式续篇。
 
 状态图输入为 `fast[B,836]`、`slow[B,412]`、`h_prev[L,B,H]`，返回 `z_t` 与全部层 `h_next`。
-参数图输入规则30维、前缀60维、对象129维、布尔掩码及全局归约，返回六个固定头和逐对象表示/分数。
+参数图输入规则30维、前缀60维、对象129维、布尔掩码、全局归约及 `price_fee_features[B,9999]`，返回六个固定头和逐对象表示/分数。
 参数图无 GRU，不改变隐藏状态；价格轴9999，数量分支2，变体4，post_only 2，有效期3，动作族6。
 
 四配置及初始化种子固定为 `BASELINE-1x256:741001`、`BASELINE-2x256:741002`、
@@ -78,7 +78,7 @@ OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 .venv/bin/python -m model_train.measure_padd
 CPU结果不代表目标CPU容量或GPU模式验收。
 
 上述纯图交付不包含真实经济特征接线、完整精确支持集、三端最终意图一致性、70分钟C场景、长期内存、
-目标CPU/GPU测量、训练、部署或资金动作；不关闭任务1.5或阶段#6。非零FOK/FAK费用证明仍属原剩余依赖。
+目标CPU/GPU测量、训练、部署或资金动作；不关闭任务1.5或阶段#6。市价估费与实际收费按 D-0232 分离；本轮 Actor 接线见下节。
 
 
 ## Rust ORT 三端技术验证
@@ -134,7 +134,7 @@ Ledger 市场并集，因此仅有本地预留的旧市场也参与汇总。根�
 30 槽规则只生成一次，逐值复用于 `fast[806..836]` 和参数图。动态 tick 来自真实 A/B
 资产字段；公共冷规则保留精确来源，参数价格用同帧 tick 乘原整数，不用神经投影反解。
 `PrefixState` 持有原 BigUint 数量区间/叶子及真实腿、变体、post_only、寿命、价格整数，
-编码 60 槽；它不生成合法支持集、不采样动作，也不以固定前缀证明完整 BUY 费用支持。
+编码 60 槽；`NativeActor` 在同一 Rust 精确状态上生成完整支持并推进选择路径。Python 只消费支持与模型分数。
 实际布局、来源、单位、变换与缺失规则见 `native-inputs/feature_schema.json`，业务合同仍为 #6。
 
 市场编码只读公共参考/TWAP、盘口、直接 BBA、完整最近成交及本组全部原成交。
@@ -158,8 +158,8 @@ PyTorch 及 Rust ORT 使用同一真实序列和原容差。三端各用自身�
 同时核对参数调用后的 hidden 不变。每个配置包含 12 个状态帧、9 次对象归约和 45 次参数输出对照，
 不代表完整 Actor 选择链。复用原归档图与权重，不重新导出或训练。
 
-本增量完成真实特征与状态/参数组件输入；完整 Actor 合法选择链、一般非零费用 FOK/FAK
-支持、最终意图的两图业务验收及阶段 #6 通过仍未完成。
+上述旧组件验收记录只覆盖其当时范围。当前第一 PR 的 Actor 与有限真实三端闭环见下节；
+70 分钟完整 C/P、长期观察及阶段 #6 完成仍待后续同阶段 PR。
 
 在仓库根目录运行独立原生验证（工作区命令不会包含此工程）：
 
@@ -236,3 +236,44 @@ GTD 到期秒数是 `ceil(decision_logical_time_ms/1000)+60+lifetime`，Bridge �
 大数装配测试不是巨额合法业务执行；SDK LIMIT 编码边界继续由已有
 `sim-system::buy_cost::tests::limit_cost_keeps_encoding_boundary_and_unaffordable_fee_exact` 验证。
 本增量不提供完整 BUY 条件选择/采样，不证明一般非零 MARKET 最大费用，也不宣称阶段通过。
+
+
+## 完整 Actor 与同进程宿主
+
+`NativeInputRoot::new` 接收创建执行器所用的同一个 `Arc<SealedProcessRuleSnapshotV3>`。
+`NativeActor` 借用冻结组，在 Rust 内保留现金根、BigUint 区间、真实修复侧及全部精确选择；
+完成性才与既有编码域相交。六族、数量、全部腿属性、全部腿价格按原顺序推进，撤单沿原对象索引。
+LIMIT 复用公共最大费；FOK/FAK 只按原本金支持和预留，参考费不作为现金硬门。
+`execute` 复用原意图装配、稳定请求及 ordinal，先批预留、逐腿登记 SubmittedUnknown，再调用原执行。
+SIM 的 FOK/FAK 最低门是每腿原请求本金 1 pUSD；实际 FAK 部分成交金额可以更小，LIMIT 仍有最低份额。
+
+`python` feature 提供 PyO3 `PythonGroup`/`PythonActor`，由 Rust 宿主传入实际组；Python 不构造财务状态。
+`features()` 直接传 Python 容器，不经逐步 JSON 字符串或文件。`consume_actor` 调用标准 Categorical，
+单分支不消耗随机数；重算沿 Rust 原路径，返回的条件熵和不声称是精确联合熵。
+`ort` feature 的 `OrtActorScorer` 使用同一 NativeActor，严格最大值选择且同分保留原首项。
+
+当前 FOK/FAK Price 步骤的费用轴由同帧公共估费逐候选投影 `log1p(fee/1 pUSD)`，
+其余步骤、LIMIT、原规则非法坐标均为零。图内无偏置 `fee_weight` 产生有符号系数；
+新层注册在所有原模块之后，保留四个原种子和全部原参数值。新图另存，不覆盖旧权重。
+
+在本目录用精确版本 uv/Python 恢复环境并构建扩展：
+
+```bash
+uv sync --locked
+VIRTUAL_ENV="$PWD/.venv" PYO3_PYTHON="$PWD/.venv/bin/python" .venv/bin/maturin develop
+.venv/bin/python -c 'import model_native_inputs'
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python -m model_train.actor_validation --graphs "$NEW_GRAPHS" --old-graphs "$OLD_GRAPHS" --output "$OUTPUT"
+```
+
+验证器对四配置逐参数核对旧权重，嵌入同一 Python wheel 的 ORT 原库。有限真实帧逐端独立递推，
+逐帧比较 `z_t` 与全部 `h_next`；实际选择路径比较支持集、精确前缀、适用分数和最终原意图。
+实际图意图进入原共享执行并消费后继反馈；NoTrade 验证不造请求，预设 FOK/FAK 路径独立标为定向探针。
+同帧真实估费覆盖不适用及两腿不同 tick 的混合批次；参数调用不推进 GRU。
+真实259对象人口核对三撤单族全局支持、完整分数（含尾块）与原身份；原259→257案例仍验证单腿关闭。
+真实 Rust 前缀的采样及原路径重算比较联合 `log_prob` 和梯度，族内单对象路径不消耗随机数。
+
+单独 cargo 默认忽略需要外部图产物的三端测试；上述命令显式启用 `python,ort` 并串行运行两项。
+普通独立 crate 回归不需要图产物。撤单有限场景沿原夹具观察至56000，核对实际动作后继结果；
+扩展到该窗口后曾在396000之后的下一组遇到 `InvalidBucket`，失败材料保留，当前未修改公共尾部行为。
+本项不声称该人口夹具已成功消费到文件结束，也不替代后续完整 C/P、长期观察与目标 CPU 验收。
+目标主机尚未准备，本地结果不作为目标容量结论；不启动训练、GPU 或部署。
