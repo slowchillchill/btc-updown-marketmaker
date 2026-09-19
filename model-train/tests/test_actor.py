@@ -6,6 +6,13 @@ from model_train.graph_fixtures import fixture
 
 
 class ActorTests(unittest.TestCase):
+    def test_runtime_comparison_rejects_nonfinite_values(self):
+        from model_train.actor_validation import assert_close
+        for reference, actual in [(float("inf"), float("inf")), (float("inf"), 1.), (1., float("nan"))]:
+            with self.subTest(reference=reference, actual=actual), self.assertRaises(AssertionError):
+                assert_close(torch.tensor([reference]), torch.tensor([actual]))
+        assert_close(torch.tensor([1.]), torch.tensor([1.]))
+
     def test_normalization_tie_singleton_rng_and_replay(self):
         logits = torch.tensor([2., 100., 2.], requires_grad=True)
         selected, logp, entropy = conditional_choice(logits, [True,False,True], deterministic=True)

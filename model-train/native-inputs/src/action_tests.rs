@@ -792,30 +792,39 @@ async fn same_process_cancel_actor_all_objects_and_original_identities() {
     assert_eq!(g.cancel.len(), 259);
     type Step = (Vec<bool>, String, Vec<f32>, Vec<f32>);
     type Trace = (Vec<f32>, Vec<f32>);
-    type PythonEvidence = (Vec<Trace>, Vec<Vec<usize>>, Vec<Vec<Step>>, usize, usize);
-    let (traces, paths, records, layers, hidden): PythonEvidence = Python::attach(|py| {
-        let module = py.import("model_train.actor_validation").unwrap();
-        let group = Py::new(py, crate::python::PythonGroup { group: g.clone() }).unwrap();
-        let history = crate::python::value(
-            py,
-            serde_json::to_value(history.iter().map(|g| g.as_ref()).collect::<Vec<_>>()).unwrap(),
-        )
-        .unwrap();
-        let directory = py
-            .import("pathlib")
-            .unwrap()
-            .getattr("Path")
-            .unwrap()
-            .call1((&directory,))
+    type PythonEvidence = (
+        Vec<Trace>,
+        Vec<Vec<usize>>,
+        Vec<Vec<Step>>,
+        usize,
+        usize,
+        Py<PyAny>,
+    );
+    let (traces, paths, records, layers, hidden, continuation): PythonEvidence =
+        Python::attach(|py| {
+            let module = py.import("model_train.actor_validation").unwrap();
+            let group = Py::new(py, crate::python::PythonGroup { group: g.clone() }).unwrap();
+            let history = crate::python::value(
+                py,
+                serde_json::to_value(history.iter().map(|g| g.as_ref()).collect::<Vec<_>>())
+                    .unwrap(),
+            )
             .unwrap();
-        module
-            .getattr("validate_cancel")
-            .unwrap()
-            .call1((group, history, directory))
-            .unwrap()
-            .extract()
-            .unwrap()
-    });
+            let directory = py
+                .import("pathlib")
+                .unwrap()
+                .getattr("Path")
+                .unwrap()
+                .call1((&directory,))
+                .unwrap();
+            module
+                .getattr("validate_cancel")
+                .unwrap()
+                .call1((group, history, directory))
+                .unwrap()
+                .extract()
+                .unwrap()
+        });
     let session = |file| {
         ort::session::Session::builder()
             .unwrap()
@@ -858,7 +867,7 @@ async fn same_process_cancel_actor_all_objects_and_original_identities() {
             for (got, want) in [(&z, &traces[frame].0), (&h_prev, &traces[frame].1)] {
                 assert_eq!(got.len(), want.len());
                 for (&a, &b) in got.iter().zip(want) {
-                    assert!((a - b).abs() <= 1e-5 + 1e-4 * b.abs());
+                    assert!(finite_close(a, b));
                 }
             }
             frame += 1;
@@ -882,7 +891,7 @@ async fn same_process_cancel_actor_all_objects_and_original_identities() {
             let got = scorer.scores(&actor, &z, &reduced).unwrap();
             assert_eq!(got.len(), want.len());
             for (&a, &b) in got.iter().zip(&want) {
-                assert!((a - b).abs() <= 1e-5 + 1e-4 * b.abs());
+                assert!(finite_close(a, b));
             }
             if actor.head_index() == 7 {
                 assert_eq!(got.len(), 259);
@@ -920,11 +929,16 @@ async fn same_process_cancel_actor_all_objects_and_original_identities() {
     let mut successors = 0;
     loop {
         assert!(h.driver.next_group().unwrap().is_some());
-        if h.native
-            .consume(&mut h.shared, &mut h.driver)
-            .unwrap()
-            .is_some()
-        {
+        if let Some(successor) = h.native.consume(&mut h.shared, &mut h.driver).unwrap() {
+            continue_three_runtime(
+                Arc::new(successor),
+                &continuation,
+                &mut state,
+                &mut h_prev,
+                &mut scorer,
+                layers,
+                hidden,
+            );
             successors += 1;
         }
         if h.driver
@@ -1008,4 +1022,119 @@ async fn same_process_cancel_actor_all_objects_and_original_identities() {
         actual.path
     );
     h.driver.stop_and_drain().unwrap();
+}
+
+fn finite_close(actual: f32, reference: f32) -> bool {
+    actual.is_finite()
+        && reference.is_finite()
+        && (actual - reference).abs() <= 1e-5 + 1e-4 * reference.abs()
+}
+
+#[test]
+fn numeric_comparison_rejects_nonfinite_reference_and_actual() {
+    for (actual, reference) in [
+        (f32::INFINITY, f32::INFINITY),
+        (1., f32::INFINITY),
+        (f32::NAN, 1.),
+    ] {
+        assert!(!finite_close(actual, reference));
+    }
+    assert!(finite_close(1., 1.));
+}
+
+#[cfg(all(feature = "python", feature = "ort"))]
+fn continue_three_runtime(
+    group: Arc<NativeInputGroup>,
+    continuation: &pyo3::Py<pyo3::PyAny>,
+    state: &mut ort::session::Session,
+    previous_hidden: &mut Vec<f32>,
+    scorer: &mut crate::ort_actor::OrtActorScorer,
+    layers: usize,
+    hidden: usize,
+) {
+    use pyo3::prelude::*;
+    type Step = (Vec<bool>, String, Vec<f32>, Vec<f32>);
+    type Evidence = (
+        Vec<(Vec<f32>, Vec<f32>)>,
+        Vec<(usize, Vec<usize>, Vec<Step>)>,
+    );
+    let (traces, decisions): Evidence = Python::attach(|py| {
+        let native = Py::new(
+            py,
+            crate::python::PythonGroup {
+                group: group.clone(),
+            },
+        )
+        .unwrap();
+        continuation
+            .call1(py, (native,))
+            .unwrap()
+            .extract(py)
+            .unwrap()
+    });
+    assert_eq!(traces.len(), group.rows.len());
+    let mut decision_index = 0;
+    for (row_index, row) in group.rows.iter().enumerate() {
+        let output = state.run(ort::inputs![
+            "fast_features" => ort::value::Tensor::from_array(([1,836],row.fast.clone())).unwrap(),
+            "slow_features" => ort::value::Tensor::from_array(([1,412],row.slow.clone())).unwrap(),
+            "h_prev" => ort::value::Tensor::from_array(([layers,1,hidden],previous_hidden.clone())).unwrap()
+        ]).unwrap();
+        let z = output["z_t"]
+            .try_extract_tensor::<f32>()
+            .unwrap()
+            .1
+            .to_vec();
+        *previous_hidden = output["h_next"]
+            .try_extract_tensor::<f32>()
+            .unwrap()
+            .1
+            .to_vec();
+        for (actual, reference) in [
+            (&z, &traces[row_index].0),
+            (&*previous_hidden, &traces[row_index].1),
+        ] {
+            assert_eq!(actual.len(), reference.len());
+            assert!(
+                actual
+                    .iter()
+                    .zip(reference)
+                    .all(|(&a, &b)| finite_close(a, b))
+            );
+        }
+        if row.role != InputRole::DecisionRequired {
+            continue;
+        }
+        let (expected_row, path, steps) = &decisions[decision_index];
+        assert_eq!(*expected_row, row_index);
+        let mut actor = NativeActor::new(group.clone(), row_index).unwrap();
+        scorer.greedy(&mut actor, &z).unwrap();
+        assert_eq!(&actor.path, path);
+        let mut replay = NativeActor::new(group.clone(), row_index).unwrap();
+        let reduced = scorer.reduced(&replay, &z).unwrap();
+        assert_eq!(path.len(), steps.len());
+        for (&choice, (support, prefix, features, scores)) in path.iter().zip(steps) {
+            assert_eq!(&replay.support().unwrap(), support);
+            assert_eq!(&format!("{:?}", replay.state), prefix);
+            assert_eq!(replay.prefix_features().as_slice(), features);
+            assert!(features.iter().all(|v| v.is_finite()));
+            let actual = scorer.scores(&replay, &z, &reduced).unwrap();
+            assert_eq!(actual.len(), scores.len());
+            assert!(actual.iter().zip(scores).all(|(&a, &b)| finite_close(a, b)));
+            replay.choose(choice).unwrap();
+        }
+        assert_eq!(actor.intent().unwrap(), replay.intent().unwrap());
+        eprintln!(
+            "successor cutoff={} row={row_index} path={path:?}",
+            group.cutoff.decision_time().logical_time_utc_ms()
+        );
+        decision_index += 1;
+    }
+    assert_eq!(decision_index, decisions.len());
+    eprintln!(
+        "successor group cutoff={} frames={} decisions={}",
+        group.cutoff.decision_time().logical_time_utc_ms(),
+        group.rows.len(),
+        decisions.len()
+    );
 }

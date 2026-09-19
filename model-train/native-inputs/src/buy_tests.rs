@@ -571,8 +571,9 @@ async fn same_process_python_and_rust_ort_share_native_actor_and_final_intent() 
         Vec<Vec<f32>>,
         usize,
         usize,
+        Py<PyAny>,
     );
-    let (traces, path, actual_scores, scores, mixed_scores, layers, hidden): PythonEvidence =
+    let (traces, path, actual_scores, scores, mixed_scores, layers, hidden, continuation): PythonEvidence =
         Python::attach(|py| {
             let module = py.import("model_train.actor_validation").unwrap();
             let group = Py::new(py, crate::python::PythonGroup { group: g.clone() }).unwrap();
@@ -639,10 +640,7 @@ async fn same_process_python_and_rust_ort_share_native_actor_and_final_intent() 
             for (actual, expected) in [(&z, &traces[frame].0), (&hidden_state, &traces[frame].1)] {
                 assert_eq!(actual.len(), expected.len());
                 for (&a, &b) in actual.iter().zip(expected) {
-                    assert!(
-                        (a - b).abs() <= 1e-5 + 1e-4 * b.abs(),
-                        "frame={frame}: {a} != {b}"
-                    );
+                    assert!(finite_close(a, b), "frame={frame}: {a} != {b}");
                 }
             }
             frame += 1;
@@ -681,10 +679,7 @@ async fn same_process_python_and_rust_ort_share_native_actor_and_final_intent() 
             let got = scorer.scores(&reference, &z, &reduced).unwrap();
             assert_eq!(got.len(), want.len());
             for (&a, &b) in got.iter().zip(want) {
-                assert!(
-                    a.is_finite() && b.is_finite() && (a - b).abs() <= 1e-5 + 1e-4 * b.abs(),
-                    "{a} != {b}"
-                );
+                assert!(finite_close(a, b), "{a} != {b}");
             }
             reference.choose(chosen).unwrap();
         }
@@ -727,7 +722,7 @@ async fn same_process_python_and_rust_ort_share_native_actor_and_final_intent() 
         .1;
     for (i, (actual, expected)) in values.chunks_exact(9999).zip(&mixed_scores).enumerate() {
         for (&a, &b) in actual.iter().zip(expected) {
-            assert!((a - b).abs() <= 1e-5 + 1e-4 * b.abs());
+            assert!(finite_close(a, b));
         }
         if i > 0 {
             let best = |values: &[f32]| {
@@ -749,6 +744,7 @@ async fn same_process_python_and_rust_ort_share_native_actor_and_final_intent() 
             assert_eq!(best(actual), best(expected));
         }
     }
+    drop(outputs);
     assert_eq!(hidden_state, frozen_hidden);
     // 实际三端贪心原意图进入真实执行；NoTrade 不能创造请求。
     let intent = actor.intent().unwrap();
@@ -762,7 +758,16 @@ async fn same_process_python_and_rust_ort_share_native_actor_and_final_intent() 
         .unwrap();
     assert_eq!(receipt.is_some(), intent.is_some());
     for _ in 0..4 {
-        h.next().unwrap();
+        let successor = Arc::new(h.next().unwrap());
+        continue_three_runtime(
+            successor,
+            &continuation,
+            &mut state_graph,
+            &mut hidden_state,
+            &mut scorer,
+            layers,
+            hidden,
+        );
     }
     if intent.is_none() {
         assert_eq!(h.shared.registry().orders().count(), 0);
