@@ -1,4 +1,4 @@
-//! 原 LIMIT 编码本金与最大即时费用；不读取盘口、账户或推进运行时。
+//! LIMIT 最大即时成本与市价单价情景估费；不读取盘口、账户或推进运行时。
 
 use contracts::ExactDecimal;
 use num_bigint::BigUint;
@@ -19,7 +19,33 @@ pub struct ExactBuyCostV1 {
     pub fee_1e5_units: BigUint,
 }
 
+/// 市价候选 q、p 的单价情景估计；不是最大费、预留或实际成交费用。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MarketFeeEstimateV1 {
+    pub fee_1e5_units: BigUint,
+}
+
 impl SealedProcessRuleSnapshotV3 {
+    /// 按同一冻结费表计算 H5(q*r*[p*(1-p)]^e)，只供模型参考。
+    /// 调用方沿原数量、价格和 SDK 编码域；本方法不判断支持集或改变本金。
+    pub fn market_buy_fee_estimate_v1(
+        &self,
+        target_centishares: &BigUint,
+        price_index: u16,
+        tick: &ExactDecimal,
+    ) -> Result<MarketFeeEstimateV1, MatchingMathErrorV1> {
+        let tick: Decimal = tick
+            .0
+            .parse()
+            .map_err(|_| MatchingMathErrorV1::InvalidPrice)?;
+        let price = tick
+            .checked_mul(Decimal::from(price_index))
+            .ok_or(MatchingMathErrorV1::ArithmeticOverflow)?;
+        Ok(MarketFeeEstimateV1 {
+            fee_1e5_units: self.buy_fee_at_price(target_centishares, price)?,
+        })
+    }
+
     /// #6 正式续篇 G／I：GTC 与 GTD 共用的单笔 LIMIT 最大准入成本。
     ///
     /// 调用方保持原 SDK 编码域、六档 tick、数量与价格轴及非资金资格；
@@ -57,27 +83,31 @@ impl SealedProcessRuleSnapshotV3 {
         if post_only || result.principal_micro < BigUint::from(minimum_micro) {
             return Ok(result);
         }
-        let fee = &snapshot.synchronized_platform_rules.fee_schedule;
+        result.fee_1e5_units =
+            self.buy_fee_at_price(target_centishares, price.min(Decimal::new(5, 1)))?;
+        Ok(result)
+    }
+
+    fn buy_fee_at_price(
+        &self,
+        target_centishares: &BigUint,
+        price: Decimal,
+    ) -> Result<BigUint, MatchingMathErrorV1> {
+        let fee = &self.snapshot().synchronized_platform_rules.fee_schedule;
         let rate = nonnegative_decimal_ratio(fee.rate.value())?;
-        // I.3 的严格半单位判据依赖实际 n；不把 I.5 的域内 e≥95
-        // 证书误用为任意 BigUint 输入的新上限或无条件零费分支。
+        // q*r/4^e 严格小于半个五位单位才归零；等于时须沿原核向上舍入。
+        // 依赖实际 n，不将域内统一指数证书变成人为 BigUint 数量上限。
         let left = target_centishares * &rate.numerator * BigUint::from(2_000_u32);
         if exact_less_than_power_of_two_shift(
             &left,
             &rate.denominator,
             u64::from(fee.exponent) * 2,
         )? {
-            return Ok(result);
+            return Ok(BigUint::zero());
         }
         let base_units = target_centishares * BigUint::from(10_000_u32);
-        let total = exact_taker_fee_contribution_v1(
-            &base_units,
-            price.min(Decimal::new(5, 1)),
-            &rate,
-            fee.exponent,
-        )?;
-        result.fee_1e5_units = rounded_fee_units_v1(&total);
-        Ok(result)
+        let total = exact_taker_fee_contribution_v1(&base_units, price, &rate, fee.exponent)?;
+        Ok(rounded_fee_units_v1(&total))
     }
 }
 
@@ -173,5 +203,58 @@ mod tests {
             )
             .is_err()
         );
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn market_estimate_uses_candidate_price_and_actual_tick_without_mutation() {
+        let rules = successful_snapshot_v3_for_sim_tests().await;
+        let before = (*rules).clone();
+        // q=5, r=.07：p=.9 的情景费 .0315，不是 LIMIT 的 .0875 最大费。
+        for (index, tick, expected) in [
+            (90, "0.01", 3150_u32),
+            (25, "0.01", 6563),
+            (100, "0.0025", 6563),
+        ] {
+            let fee = rules
+                .market_buy_fee_estimate_v1(
+                    &BigUint::from(500_u32),
+                    index,
+                    &ExactDecimal(tick.into()),
+                )
+                .unwrap();
+            assert_eq!(fee.fee_1e5_units, BigUint::from(expected));
+        }
+        assert_eq!(*rules, before);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn market_estimate_keeps_half_unit_large_exponent_and_large_integer_exact() {
+        let tick = ExactDecimal("0.1".into());
+        for (rate, expected) in [("0.000004", 1_u32), ("0.0000039999", 0)] {
+            let rules = snapshot_v3_with_fee_for_cost_tests(rate, 1).await;
+            assert_eq!(
+                rules
+                    .market_buy_fee_estimate_v1(&BigUint::from(500_u32), 5, &tick)
+                    .unwrap()
+                    .fee_1e5_units,
+                BigUint::from(expected)
+            );
+        }
+        let n: BigUint = "7922816251426433759354395".parse().unwrap();
+        let rate: BigUint = "79228162514264337593543950335".parse().unwrap();
+        let rules = snapshot_v3_with_fee_for_cost_tests(&rate.to_string(), 1).await;
+        let fee = rules.market_buy_fee_estimate_v1(&n, 9, &tick).unwrap();
+        // n/100 * r * .9*.1 * 100000 = n*r*90，无 Decimal/u128 中间量。
+        assert_eq!(fee.fee_1e5_units, &n * &rate * BigUint::from(90_u8));
+        assert!(fee.fee_1e5_units > BigUint::from(u128::MAX));
+        for exponent in [95, u32::MAX] {
+            let rules = snapshot_v3_with_fee_for_cost_tests(&rate.to_string(), exponent).await;
+            assert_eq!(
+                rules
+                    .market_buy_fee_estimate_v1(&n, 5, &tick)
+                    .unwrap()
+                    .fee_1e5_units,
+                BigUint::zero()
+            );
+        }
     }
 }
