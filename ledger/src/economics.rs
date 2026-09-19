@@ -232,7 +232,8 @@ impl EconomicsState {
                 evidence: SourceNeutralEvidenceKind::SettlementLifecycleV2 { result },
                 ..
             } => match result {
-                SourceNeutralSettlementLifecycleResultV2::Contribution(c) => contribution_ready(c),
+                // 原 Taker 贡献已是独立事实；不以用户成交成功反馈的到达先后作为接纳条件。
+                SourceNeutralSettlementLifecycleResultV2::Contribution(_) => true,
                 SourceNeutralSettlementLifecycleResultV2::MakerAccrualFinalized {
                     contributions,
                     ..

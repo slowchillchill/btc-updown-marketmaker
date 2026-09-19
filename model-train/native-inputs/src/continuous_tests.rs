@@ -1430,6 +1430,7 @@ struct ObservationDirectory {
     directory: Option<tempfile::TempDir>,
     last_applied_cutoffs: Vec<i64>,
     stage: &'static str,
+    current_groups: Vec<serde_json::Value>,
 }
 impl ObservationDirectory {
     fn new(parent: &Path, roots: usize) -> Self {
@@ -1437,6 +1438,7 @@ impl ObservationDirectory {
             directory: Some(tempfile::tempdir_in(parent).unwrap()),
             last_applied_cutoffs: vec![0; roots],
             stage: "initialization",
+            current_groups: vec![serde_json::Value::Null; roots],
         }
     }
     fn path(&self) -> &Path {
@@ -1447,7 +1449,7 @@ impl Drop for ObservationDirectory {
     fn drop(&mut self) {
         if std::thread::panicking() {
             let path = self.directory.take().unwrap().keep();
-            let detail = serde_json::json!({"stage":self.stage,"last_applied_cutoffs":self.last_applied_cutoffs,"scope":"original failed observation; actual retained SIM/NOE/Ledger files, no successor consumption; full error in process log"});
+            let detail = serde_json::json!({"stage":self.stage,"last_applied_cutoffs":self.last_applied_cutoffs,"current_groups":self.current_groups,"scope":"original failed observation; actual retained SIM/NOE/Ledger files, no successor consumption; full error in process log"});
             let _ = std::fs::write(path.join("failure-cutoff.json"), detail.to_string());
             eprintln!("failed observation retained at {} {detail}", path.display());
         }
@@ -1509,6 +1511,44 @@ async fn warm_continuous_runtime(runtime: &mut crate::continuous_runtime::ThreeR
     started.elapsed().as_secs_f64()
 }
 
+// 从原录制及实际交付时刻独立列举合法行；不依赖 Native 的返回或模型帧总数。
+fn recorded_frame_expectations(
+    replay: &mut data_pipeline_training::public_replay::PublicReplayV1,
+    times: &TradingTimes,
+    started_at: i64,
+    end: i64,
+) -> BTreeMap<u64, Vec<(bool, String)>> {
+    let mut expected = BTreeMap::new();
+    while let Some((_, applied)) = replay.next_applied().unwrap() {
+        for group in applied.applied.closed_groups {
+            let at = times.0[group.group_position as usize];
+            if at > end {
+                continue;
+            }
+            let mut rows = group
+                .observations
+                .iter()
+                .filter_map(|observation| {
+                    let window = &observation.market.window;
+                    if started_at > window.start_at_utc_ms - 30000
+                        || at < window.start_at_utc_ms - 30000
+                        || at >= window.end_at_utc_ms
+                    {
+                        return None;
+                    }
+                    Some((
+                        at >= window.start_at_utc_ms,
+                        observation.market.condition_id.0.clone(),
+                    ))
+                })
+                .collect::<Vec<_>>();
+            rows.sort();
+            assert!(expected.insert(group.group_position, rows).is_none());
+        }
+    }
+    expected
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "正式每配置/线程完整C1/C2三变体三次；需原图和证据目录"]
 async fn continuous_three_runtime_matrix() {
@@ -1566,6 +1606,7 @@ async fn continuous_three_runtime_matrix() {
                 let mut temp = ObservationDirectory::new(Path::new(&output), roots_count);
                 let fixture_started = std::time::Instant::now();
                 let mut roots = Vec::new();
+                let mut recorded_frames = Vec::new();
                 // 根索引同时用于独立账户身份和原录制路径，保留明确的根数边界。
                 #[allow(clippy::needless_range_loop)]
                 for index in 0..roots_count {
@@ -1586,7 +1627,13 @@ async fn continuous_three_runtime_matrix() {
                         1 << 20,
                     )
                     .unwrap();
-                    while replay.next_applied().unwrap().is_some() {}
+                    let expected = recorded_frame_expectations(
+                        &mut replay,
+                        &times,
+                        START + offset,
+                        END + offset,
+                    );
+                    recorded_frames.push(expected);
                     let core = replay.into_core();
                     let recording = recording.join("dpt");
                     roots.push(ContinuousRoot::new(
@@ -1610,7 +1657,7 @@ async fn continuous_three_runtime_matrix() {
                 let mut group_times = Vec::new();
                 let mut execute_times = Vec::new();
                 let mut retired = 0;
-                writeln!(evidence,"{}",serde_json::json!({"phase":"start","c":roots_count,"scenario":format!("{scenario:?}"),"repeat":repeat,"input_seed":742000+roots_count,"book_depths":parameters[case],"fixture_seconds":fixture_started.elapsed().as_secs_f64(),"resources":runtime.sample(),"sources":roots.iter_mut().map(ContinuousRoot::source_sample).collect::<Vec<_>>()})).unwrap();
+                writeln!(evidence,"{}",serde_json::json!({"phase":"start","expected_frames_by_root":recorded_frames.iter().map(|groups|groups.values().map(Vec::len).sum::<usize>()).collect::<Vec<_>>(),"c":roots_count,"scenario":format!("{scenario:?}"),"repeat":repeat,"input_seed":742000+roots_count,"book_depths":parameters[case],"fixture_seconds":fixture_started.elapsed().as_secs_f64(),"resources":runtime.sample(),"sources":roots.iter_mut().map(ContinuousRoot::source_sample).collect::<Vec<_>>()})).unwrap();
                 while complete.iter().any(|done| !*done) {
                     let group_started = std::time::Instant::now();
                     let mut groups = Vec::new();
@@ -1633,14 +1680,45 @@ async fn continuous_three_runtime_matrix() {
                             .logical_time_utc_ms();
                         cutoffs.push(at);
                         temp.last_applied_cutoffs[index] = at;
+                        let cutoff = root.driver.decision().unwrap().cutoff().clone();
+                        temp.current_groups[index] =
+                            serde_json::json!({"phase":"before-exogenous","cutoff":cutoff});
+                        let position = cutoff.receipt().group().group_position;
+                        let expected_rows = recorded_frames[index]
+                            .remove(&position)
+                            .expect("原录制组只能消费一次");
                         temp.stage = "settlement-native-consume-script";
-                        root.shared
+                        let facts_complete = root
+                            .shared
                             .advance_settlement(&mut root.coordinator, &mut root.driver)
                             .unwrap();
-                        if let Some(group) = root
+                        let cutoff = root.driver.decision().unwrap().cutoff().clone();
+                        temp.current_groups[index] =
+                            serde_json::json!({"phase":"after-exogenous","cutoff":cutoff});
+                        assert!(facts_complete, "原公共组外生事实未完整应用: {cutoff:?}");
+                        let consumed = root
                             .native
                             .consume(&mut root.shared, &mut root.driver)
-                            .unwrap()
+                            .unwrap();
+                        let cutoff = root.driver.decision().unwrap().cutoff().clone();
+                        temp.current_groups[index] =
+                            serde_json::json!({"phase":"after-native-consume","cutoff":cutoff});
+                        let group = consumed
+                            .unwrap_or_else(|| panic!("原公共组未完成Native消费: {cutoff:?}"));
+                        let actual_rows = group
+                            .rows
+                            .iter()
+                            .map(|r| {
+                                (
+                                    r.role == InputRole::DecisionRequired,
+                                    r.hidden_state_key.condition_id.0.clone(),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        assert_eq!(
+                            actual_rows, expected_rows,
+                            "原录制合法帧必须完整消费: {cutoff:?}"
+                        );
                         {
                             root.check_inputs(&group);
                             if root.scenario == Scenario::Rebate && at == FIRST + offset + 3_600_000
@@ -1762,6 +1840,10 @@ async fn continuous_three_runtime_matrix() {
                     group_times.push(group_started.elapsed().as_secs_f64());
                 }
                 assert!(n2_seen.iter().all(|seen| *seen), "每根真实N=2两图交接");
+                assert!(
+                    recorded_frames.iter().all(BTreeMap::is_empty),
+                    "截止内原录制组必须全部消费"
+                );
                 for (root_index, mut root) in roots.into_iter().enumerate() {
                     root.assert_coverage();
                     writeln!(evidence,"{}",serde_json::json!({"phase":"end-before-drain","c":roots_count,"scenario":format!("{scenario:?}"),"repeat":repeat,"sources":root.source_sample(),"checks":root.checks,"retained_orders":root.shared.registry().orders().map(|o|serde_json::json!({"identity":format!("{:?}",o.order_identity),"active_unfilled_shares":o.active_unfilled_shares,"cancellable":o.cancellable,"accepted":o.accepted.is_some(),"formed":o.formed.is_some()})).collect::<Vec<_>>(),"retained_commitments":root.shared.registry().all_commitments().map(|c|serde_json::json!({"request":c.origin.intent.global_request_id(),"ordinal":c.origin.batch_item_ordinal,"order_identity":c.order_identity.map(|id|format!("{id:?}")),"remaining_target_shares":c.remaining_target_shares})).collect::<Vec<_>>(),"resources":root.driver.measurement_resources()})).unwrap();
@@ -2578,4 +2660,162 @@ async fn continuous_late_formation_regression() {
     assert!(n2_seen);
     root.driver.stop_and_drain().unwrap();
     runtime.release_observation();
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "原贡献先于成交终局的真实三端有界回归；需原图/录制/永久证据目录"]
+async fn continuous_contribution_before_success_regression() {
+    use std::sync::Arc;
+    let output = std::env::var("CONTINUOUS_OUTPUT").unwrap();
+    let directory = std::env::var("MODEL_GRAPH_DIR").unwrap();
+    let mut runtime = crate::continuous_runtime::ThreeRuntime::new(&directory, 1);
+    runtime.frames = 13601;
+    let recording = Path::new(&std::env::var("CONTINUOUS_RECORDINGS").unwrap()).join("C1-1-0");
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(recording.join("fixture.json")).unwrap()).unwrap();
+    assert_eq!(metadata["offset"], 86400000);
+    let times = TradingTimes(serde_json::from_value(metadata["delivery_times"].clone()).unwrap());
+    let mut replay = data_pipeline_training::public_replay::PublicReplayV1::open(
+        &recording.join("dpt"),
+        128,
+        1 << 20,
+    )
+    .unwrap();
+    let mut expected =
+        recorded_frame_expectations(&mut replay, &times, START + 86400000, 173733000);
+    let core = replay.into_core();
+    let mut root = ContinuousRoot::new(
+        Path::new(&output),
+        &recording.join("dpt"),
+        &core,
+        times,
+        Scenario::Orphan,
+        86400000,
+        "C1-1-0-0",
+    );
+    let mut n2_seen = false;
+    loop {
+        next_recorded_group(&mut root.driver);
+        let cutoff = root.driver.decision().unwrap().cutoff().clone();
+        let at = cutoff.decision_time().logical_time_utc_ms();
+        assert!(at <= 173733000, "禁止消费诊断上界之后组");
+
+        let settled = root
+            .shared
+            .advance_settlement(&mut root.coordinator, &mut root.driver)
+            .unwrap();
+        assert!(settled, "原组事实必须完整应用: {cutoff:?}");
+        let consumed = root
+            .native
+            .consume(&mut root.shared, &mut root.driver)
+            .unwrap();
+        let group = consumed.unwrap_or_else(|| panic!("原组必须完整消费: {cutoff:?}"));
+        if at == 173732000 || at == 173733000 {
+            assert_eq!(group.rows.len(), 1);
+            assert_eq!(group.rows[0].role, InputRole::DecisionRequired);
+            assert_eq!(group.rows[0].hidden_state_key.condition_id.0, condition(4));
+            let read = root.shared.ledger().economic_read().unwrap();
+            let target = |id: &execution_normalization::MemoryLogicalIdentityV1| matches!(&id.key,execution_normalization::MemoryIdentityKeyV1::Entity(execution_normalization::SourceNeutralEntityKeyV1::Trade{source_trade_id}) if source_trade_id=="sim-28");
+            let success = read.successful_trades().any(|t| target(t.trade_identity));
+            assert_eq!(success, at == 173733000);
+            if !success {
+                assert!(
+                    read.paired_allocations()
+                        .all(|p| !target(&p.source_trade_identity)
+                            && p.contribution_refs.iter().flatten().all(|id| !target(id)))
+                );
+            }
+            let day = read
+                .rebate_days()
+                .find(|d| {
+                    d.kind == contracts::economics::RebateKindV1::Taker
+                        && d.attribution_day_start_utc_ms == 172800000
+                })
+                .unwrap();
+            let contributions = day
+                .contributions
+                .iter()
+                .filter(|c| target(&c.trade_identity))
+                .collect::<Vec<_>>();
+            assert_eq!(contributions.len(), 1);
+            assert_eq!(contributions[0].contribution_pusd.0, "0.0022528");
+            assert_eq!(day.amounts.confirmed_unpaid_pusd, rational("0", "1"));
+            assert_eq!(day.amounts.paid_pusd, rational("0", "1"));
+            eprintln!(
+                "contribution_before_success at={at} success={success} contribution_count={} amounts={:?} sources={}",
+                contributions.len(),
+                day.amounts,
+                root.source_sample()
+            );
+        }
+        let want = expected
+            .remove(&cutoff.receipt().group().group_position)
+            .unwrap();
+        assert_eq!(
+            group
+                .rows
+                .iter()
+                .map(|r| (
+                    r.role == InputRole::DecisionRequired,
+                    r.hidden_state_key.condition_id.0.clone()
+                ))
+                .collect::<Vec<_>>(),
+            want
+        );
+        root.check_inputs(&group);
+        root.script().await;
+        let autonomous = at >= FIRST + 86400000 + 1000000;
+        if autonomous {
+            root.model_continuation_started = true;
+        }
+        let selected = autonomous
+            || (!n2_seen
+                && group.cancel.len() == 2
+                && group
+                    .rows
+                    .iter()
+                    .any(|r| r.role == InputRole::DecisionRequired));
+        let actors = runtime.advance_selected(&[Arc::new(group)], &[selected]);
+        for (_, actor) in actors {
+            if !autonomous {
+                n2_seen = true;
+                continue;
+            }
+            if at >= 173732000 {
+                continue;
+            }
+            actor
+                .execute(
+                    &mut root.shared,
+                    &mut root.driver.decision().unwrap(),
+                    RequestContextV2 {
+                        global_request_id: format!("model-0-{}", runtime.frames),
+                        caller_correlation_id: None,
+                    },
+                )
+                .await
+                .unwrap();
+        }
+        root.driver.drain_measurement_observations();
+        if at == 173732000 {
+            assert_eq!(runtime.frames, 13601 + 1456);
+        }
+        if at == 173733000 {
+            assert_eq!(runtime.frames, 13601 + 1457);
+            eprintln!(
+                "contribution_regression_complete frames={} sources={}",
+                runtime.frames,
+                root.source_sample()
+            );
+            break;
+        }
+    }
+    assert!(expected.is_empty());
+    let sources = root.source_sample();
+    root.driver.stop_and_drain().unwrap();
+    eprintln!(
+        "diagnostic_drained_already_accepted pre_drain_sources={} runtime={}",
+        sources,
+        runtime.sample()
+    );
 }
