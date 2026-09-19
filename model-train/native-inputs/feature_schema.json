@@ -6,9 +6,10 @@
     "slow": 412,
     "rule": 30,
     "prefix": 60,
-    "cancel": 129
+    "cancel": 129,
+    "price_fee_features": 9999
   },
-  "authority": "MarketBusinessObservationV1 + same-frame PublicTradingRuleContextV1 + TrustedGroupDecisionCutoffV1 + frozen ActionBeforeReadV1; prefix from Rust PrefixState",
+  "authority": "MarketBusinessObservationV1 + same-frame PublicTradingRuleContextV1 + TrustedGroupDecisionCutoffV1 + frozen ActionBeforeReadV1; prefix from Rust PrefixState + same frozen SealedProcessRuleSnapshotV3 Arc",
   "numeric": {
     "L": "log1p(x/u)",
     "S": "sign(x)*log1p(abs(x)/u)",
@@ -311,5 +312,12 @@
   ],
   "history_policy": "Six per-hidden-key sequences at most16 samples; source identity changes only; missing/unrelated group adds nothing; previous-frame side stats separately; released at original Retire.",
   "account_and_cancel": "Existing #6 continuation1 B/E + continuation2 section3; account.rs412/cancel.rs129 unchanged by this increment.",
-  "scope": "Input and actual state/parameter components; not complete Actor support, general nonzero fees, training or phase acceptance."
+  "scope": "Input and actual state/parameter components; not complete Actor support, general nonzero fees, training or phase acceptance.",
+  "price_fee_features": {
+    "shape": "float32[B,9999]",
+    "source": "NativeActor::price_fee_features -> same-frame snapshot.market_buy_fee_estimate_v1(n,k,tick)",
+    "projection": "log1p(fee_pUSD / 1 pUSD), exact rational to nearest-even f32",
+    "applicability": "current FOK/FAK Price(leg); illegal platform coordinate, other stage, LIMIT => 0",
+    "decoder": "price_logits + bias-free signed Linear(H/2,1)(decoder) * price_fee_features"
+  }
 }

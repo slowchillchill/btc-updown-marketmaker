@@ -43,6 +43,8 @@ pub struct AccountInputRow {
 }
 /// 同帧规则、tick 与精确前缀共用；账户冻结读取仍由 NativeInputGroup 持有。
 pub struct NativeActionContext {
+    pub snapshot: std::sync::Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>,
+    pub(crate) buy_enabled: bool,
     pub rules: std::sync::Arc<PublicTradingRuleContextV1>,
     pub(crate) ticks: [Option<contracts::economics::EconomicRational>; 2],
     pub(crate) tokens: [Option<TokenId>; 2],
@@ -51,6 +53,7 @@ impl NativeActionContext {
     pub(crate) fn from_observation(
         observation: &MarketBusinessObservationV1,
         rules: std::sync::Arc<PublicTradingRuleContextV1>,
+        snapshot: std::sync::Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>,
     ) -> Self {
         let ticks = std::array::from_fn(|i| {
             observation
@@ -74,6 +77,11 @@ impl NativeActionContext {
                 .map(|a| a.asset.token_id.clone())
         });
         Self {
+            snapshot,
+            buy_enabled: observation.active.value != Some(false)
+                && observation.closed.value != Some(true)
+                && observation.accepting_orders.value != Some(false)
+                && observation.terminal.value.is_none(),
             rules,
             ticks,
             tokens,
@@ -101,6 +109,7 @@ pub(crate) struct MarketBinding {
     pub assets: Vec<AssetIdentityV1>,
 }
 pub struct NativeInputRoot {
+    snapshot: std::sync::Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>,
     trajectory: String,
     account: AccountInstanceKeyV1,
     started_at: i64,
@@ -114,8 +123,10 @@ impl NativeInputRoot {
         trajectory_id: String,
         account_id: AccountInstanceKeyV1,
         root_started_at_utc_ms: i64,
+        snapshot: std::sync::Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>,
     ) -> Self {
         Self {
+            snapshot,
             trajectory: trajectory_id,
             account: account_id,
             started_at: root_started_at_utc_ms,
@@ -247,6 +258,7 @@ impl NativeInputRoot {
                         NativeActionContext::from_observation(
                             frame.observation,
                             frame.rule_context.clone(),
+                            self.snapshot.clone(),
                         )
                     }),
                     slow: crate::account::encode(

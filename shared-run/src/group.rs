@@ -97,6 +97,15 @@ impl SharedExecutionV1 {
     ) -> Result<Vec<LedgerReservationOutcomeV1>, LedgerErrorV1> {
         self.ledger.try_reserve_action_v2(intents)
     }
+    /// 原稳定请求身份的发送登记；不改变其他 execute 消费者的默认行为。
+    pub fn record_submission_started(
+        &mut self,
+        event: &LedgerLocalEventIdentityV1,
+        request: &LedgerRequestIdentityV1,
+        item: &LedgerSubmissionItemIdentityV1,
+    ) -> Result<LedgerApplyOutcomeV1, LedgerErrorV1> {
+        self.ledger.record_submission_started(event, request, item)
+    }
     pub fn ledger(&self) -> &LedgerWriterV1 {
         &self.ledger
     }

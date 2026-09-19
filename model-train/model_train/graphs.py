@@ -25,7 +25,7 @@ CONFIGURATIONS = (
 STATE_INPUTS = ("fast_features", "slow_features", "h_prev")
 STATE_OUTPUTS = ("z_t", "h_next")
 ACTION_INPUTS = ("z_t", "rule_features", "prefix_features", "cancel_features",
-                 "cancel_mask", "cancel_reduced", "cancel_exists")
+                 "cancel_mask", "cancel_reduced", "cancel_exists", "price_fee_features")
 ACTION_OUTPUTS = ("family_logits", "quantity_branch_logits", "buy_variant_logits",
                   "price_logits", "post_only_logits", "expiry_logits",
                   "cancel_embeddings", "cancel_logits")
@@ -43,11 +43,12 @@ class ActionDecoder(nn.Module):
 
     def forward(self, z_t: Tensor, rule_features: Tensor, prefix_features: Tensor,
                 cancel_features: Tensor, cancel_mask: Tensor,
-                cancel_reduced: Tensor, cancel_exists: Tensor) -> tuple[Tensor, ...]:
+                cancel_reduced: Tensor, cancel_exists: Tensor,
+                price_fee_features: Tensor | None = None) -> tuple[Tensor, ...]:
         objects = self.object_encoder(cancel_features)
         objects = torch.where(cancel_mask.unsqueeze(-1), objects, 0.0)
         summary = torch.where(cancel_exists.unsqueeze(-1), self.summary(cancel_reduced), 0.0)
-        scores = self.actor(z_t, self.rule(rule_features), self.prefix(prefix_features), summary, objects)
+        scores = self.actor(z_t, self.rule(rule_features), self.prefix(prefix_features), summary, objects, price_fee_features)
         return (scores["family"], scores["quantity"], scores["variant"], scores["price"],
                 scores["post_only"], scores["expiry"], objects,
                 torch.where(cancel_mask, scores["cancel"].squeeze(-1), 0.0))

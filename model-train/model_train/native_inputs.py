@@ -81,7 +81,7 @@ class NativeComponentConsumer:
         return features, objects, reduced, exists
 
     def parameters(self, group: ComponentGroup, row: int, prefix: list[float],
-                   *, lengths: list[int] | None = None) -> list[tuple[Tensor, ...]]:
+                   *, lengths: list[int] | None = None, price_fee_features=None) -> list[tuple[Tensor, ...]]:
         """实际参数图消费 Rust 精确状态投影；复用该帧 z/rule 和全局对象归约。"""
         if group.roles[row] != "DecisionRequired":
             raise ValueError("ContextOnly has no parameter invocation")
@@ -92,7 +92,8 @@ class NativeComponentConsumer:
         mask = torch.ones((1, count), dtype=torch.bool, device=features.device)
         prefix = features.new_tensor(prefix).reshape(1, 60)
         return [self.graphs.action(group.states[row], group.rules[row], prefix, f, m,
-                                  group.cancel_reduced, group.cancel_exists)
+                                  group.cancel_reduced, group.cancel_exists,
+                                  features.new_tensor(price_fee_features).reshape(1,9999) if price_fee_features is not None else features.new_zeros((1,9999)))
                 for f, m, _ in object_blocks(features, mask, lengths, empty=count == 0)]
 
     def cancel_scores(self, group: ComponentGroup, row: int, prefix: list[float],

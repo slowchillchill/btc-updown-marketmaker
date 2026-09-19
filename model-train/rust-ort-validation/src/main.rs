@@ -101,7 +101,8 @@ fn action(
         "prefix_features" => tensor(&[batch,60],prefix)?, "cancel_features" => tensor(&[batch,slots,129],objects)?,
         "cancel_mask" => Tensor::from_array(([batch,slots],mask.to_vec()))?,
         "cancel_reduced" => tensor(&[batch,3*hidden/2],reduced)?,
-        "cancel_exists" => Tensor::from_array(([batch],exists.to_vec()))?
+        "cancel_exists" => Tensor::from_array(([batch],exists.to_vec()))?,
+        "price_fee_features" => tensor(&[batch,9999], &vec![0.;batch*9999])?
     ])?;
     Ok([
         "family_logits",

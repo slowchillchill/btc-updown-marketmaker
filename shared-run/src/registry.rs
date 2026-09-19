@@ -88,10 +88,17 @@ impl SharedExecutionRegistryV1 {
             .or_insert_with(|| rules.clone());
     }
     pub(crate) fn action_snapshot(&self) -> Self {
-        let orders:BTreeMap<_,_>=self.orders.iter().filter(|(id,state)|{
-            let cancellable=self.order(id).unwrap().cancellable;
-            !matches!(cancellable,Known(false)) || state.trades.values().filter_map(trade).any(|t|!final_disposition(&t.economic_disposition)) || state.origin.as_ref().and_then(|(request,ordinal)|self.intents.get(request).and_then(|s|leg(s.origin.intent(),*ordinal))).is_some_and(|(_,leg)|!matches!(self.remaining(id,&leg.order),Known(v) if decimal(&v).is_zero()))
-        }).map(|(id,state)|(id.clone(),state.clone())).collect();
+        let orders: BTreeMap<_, _> = self.orders.iter().filter(|(id, state)| {
+            let cancellable = self.order(id).unwrap().cancellable;
+            !matches!(cancellable, Known(false))
+                || state.trades.values().filter_map(trade)
+                    .any(|t| !final_disposition(&t.economic_disposition))
+                // 不可撤不代表原关联、累计成交覆盖和承诺已经闭合。
+                || state.origin.as_ref()
+                    .and_then(|(request, ordinal)| self.intents.get(request)
+                        .and_then(|s| leg(s.origin.intent(), *ordinal)))
+                    .is_none_or(|(_, leg)| !matches!(self.remaining(id, &leg.order), Known(v) if decimal(&v).is_zero()))
+        }).map(|(id, state)| (id.clone(), state.clone())).collect();
         let needed: BTreeSet<_> = self
             .all_commitments()
             .map(|r| r.origin.intent.global_request_id())
@@ -267,7 +274,22 @@ impl SharedExecutionRegistryV1 {
             })
         });
         let (matched, active) = quantities(state);
-        let cancellable = if is_closed(state) || is_quote(state) {
+        // 接受记录独立保留；后续 FAK 余款释放不能遮蔽已有的不可撤事实。
+        let accepted_matched = matches!(
+            state.formed.as_ref().map(Ref::record),
+            Some(NormalizationRecord::Evidence {
+                evidence: SourceNeutralEvidenceKind::OrderLifecycle {
+                    result: SourceNeutralOrderLifecycleResultV1 {
+                        event: SourceNeutralOrderLifecycleEventV1::Accepted {
+                            state: SourceNeutralOrderStateV1::Matched,
+                        },
+                        ..
+                    },
+                },
+                ..
+            })
+        );
+        let cancellable = if is_closed(state) || is_quote(state) || accepted_matched {
             Known(false)
         } else {
             match &active {

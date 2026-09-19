@@ -35,8 +35,8 @@ async fn real_public_chain_freezes_cash_encodes_original_legs_and_cold_root() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("dpt");
     let core = recorded_memory_complete(&root);
-    let (mut execution, observation) =
-        execution(&temp.path().join("sim.jsonl"), &core, SUCCESS_POLICY);
+    let (mut execution, observation, rules) =
+        native_execution(&temp.path().join("sim.jsonl"), &core, SUCCESS_POLICY);
     let mut ledger = LedgerWriterV1::new(AccountAdmissionPolicyV1 {
         per_market_all_in_commitment_limit_pusd: ExactDecimal("1000".into()),
     });
@@ -51,8 +51,9 @@ async fn real_public_chain_freezes_cash_encodes_original_legs_and_cold_root() {
         .projection_v2()
         .unwrap()
         .account_instance_key;
-    let mut native = NativeInputRoot::new("trajectory".into(), account.clone(), -10_000);
-    let mut cold = NativeInputRoot::new("cold".into(), account, 0);
+    let mut native =
+        NativeInputRoot::new("trajectory".into(), account.clone(), -10_000, rules.clone());
+    let mut cold = NativeInputRoot::new("cold".into(), account, 0, rules.clone());
     let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, MemoryRecordedTimes).unwrap();
     let mut driver = FinitePublicConsumptionV1::new(execution, source, "native".into());
     let mut exported = Vec::new();
@@ -235,8 +236,8 @@ fn overlap_context_reads_current_reserve_and_old_local_only_survives_switch() {
         writer.record(input, applied).unwrap();
     }
     writer.stabilize().unwrap();
-    let (mut execution, observation) =
-        execution(&temp.path().join("sim.jsonl"), &core, SUCCESS_POLICY);
+    let (mut execution, observation, rules) =
+        native_execution(&temp.path().join("sim.jsonl"), &core, SUCCESS_POLICY);
     let mut ledger =
         LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
     execution
@@ -250,7 +251,7 @@ fn overlap_context_reads_current_reserve_and_old_local_only_survives_switch() {
         .projection_v2()
         .unwrap()
         .account_instance_key;
-    let mut native = NativeInputRoot::new("overlap".into(), account, -10_000);
+    let mut native = NativeInputRoot::new("overlap".into(), account, -10_000, rules.clone());
     let source = RecordedPublicGroupSourceV1::open(
         &root,
         1,
@@ -317,8 +318,8 @@ async fn native_partial_makers_project_average_cost_and_nonterminating_fraction(
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("dpt");
         let (core, times) = recorded_average_pool(&root, fractional);
-        let (mut execution, observation) =
-            execution(&temp.path().join("sim.jsonl"), &core, SUCCESS_POLICY);
+        let (mut execution, observation, rules) =
+            native_execution(&temp.path().join("sim.jsonl"), &core, SUCCESS_POLICY);
         let mut ledger =
             LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
         execution
@@ -334,7 +335,7 @@ async fn native_partial_makers_project_average_cost_and_nonterminating_fraction(
             .projection_v2()
             .unwrap()
             .account_instance_key;
-        let mut native = NativeInputRoot::new("average".into(), account, -10_000);
+        let mut native = NativeInputRoot::new("average".into(), account, -10_000, rules.clone());
         for _ in 0..4 {
             driver.next_group().unwrap().unwrap();
             native.consume(&mut shared, &mut driver).unwrap().unwrap();
@@ -552,7 +553,7 @@ async fn complete_real_object_population_crosses_block_boundary() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("dpt");
         let (core, times) = recorded_trading_window(&root, "100", None, 320_000, true);
-        let (mut execution, observation) = execution_with_seed_and_cash(
+        let (mut execution, observation, rules) = execution_with_rules(
             &temp.path().join("sim.jsonl"),
             &core,
             SUCCESS_POLICY,
@@ -573,7 +574,8 @@ async fn complete_real_object_population_crosses_block_boundary() {
             .projection_v2()
             .unwrap()
             .account_instance_key;
-        let mut native = NativeInputRoot::new(format!("objects-{count}"), account, -10_000);
+        let mut native =
+            NativeInputRoot::new(format!("objects-{count}"), account, -10_000, rules.clone());
         let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times).unwrap();
         let mut driver = FinitePublicConsumptionV1::new(execution, source, "population".into());
         for _ in 0..4 {
@@ -639,8 +641,8 @@ async fn complete_population_keeps_uncancellable_pending_and_quote_base_na() {
             policy["failure_overrides"] = serde_json::json!([{"selector":{"selector_domain":"REQUEST","account_instance_key":AccountInstanceKeyV1{run_id:"shared-combination".into(),caller_role:SimCallerRoleV1::Paper,caller_instance_id:"shared-caller".into(),account_id:"shared-account".into(),platform_source:PlatformSourceV1::Simulated},"global_request_id":"take"},"path":path}]);
         }
         let policy = serde_json::to_vec(&policy).unwrap();
-        let (mut execution, observation) =
-            execution(&temp.path().join("sim.jsonl"), &core, &policy);
+        let (mut execution, observation, rules) =
+            native_execution(&temp.path().join("sim.jsonl"), &core, &policy);
         let mut ledger =
             LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
         execution
@@ -654,7 +656,7 @@ async fn complete_population_keeps_uncancellable_pending_and_quote_base_na() {
             .projection_v2()
             .unwrap()
             .account_instance_key;
-        let mut native = NativeInputRoot::new("pending".into(), account, -10_000);
+        let mut native = NativeInputRoot::new("pending".into(), account, -10_000, rules.clone());
         let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times).unwrap();
         let mut driver = FinitePublicConsumptionV1::new(execution, source, "pending".into());
         for _ in 0..4 {
@@ -741,7 +743,7 @@ async fn native_rebates_project_exact_contribution_ratios_and_old_sum() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("dpt");
     let (core, times) = recorded_rebate_contributions(&root);
-    let (mut execution, observation) = execution_with_seed_and_cash(
+    let (mut execution, observation, _rules) = execution_with_rules(
         &temp.path().join("sim.jsonl"),
         &core,
         SUCCESS_POLICY,
@@ -867,7 +869,8 @@ async fn late_success_updates_old_account_without_reviving_hidden() {
     let root = temp.path().join("dpt");
     let (core, times) = recorded_settlement(&root);
     let policy=br#"{"schema_version":"trade_finality_policy_v2","normal_path":{"steps":[{"state":"MATCHED","offset_ms":0},{"state":"MINED","offset_ms":10000},{"state":"CONFIRMED","offset_ms":50000}],"economic_application_ordinal":1},"failure_overrides":[]}"#;
-    let (mut execution, observation) = execution(&temp.path().join("sim.jsonl"), &core, policy);
+    let (mut execution, observation, rules) =
+        native_execution(&temp.path().join("sim.jsonl"), &core, policy);
     let mut ledger =
         LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
     execution
@@ -881,7 +884,7 @@ async fn late_success_updates_old_account_without_reviving_hidden() {
         .projection_v2()
         .unwrap()
         .account_instance_key;
-    let mut native = NativeInputRoot::new("late".into(), account, -10_000);
+    let mut native = NativeInputRoot::new("late".into(), account, -10_000, rules.clone());
     let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times).unwrap();
     let mut driver = FinitePublicConsumptionV1::new(execution, source, "late".into());
     for _ in 0..4 {
@@ -949,8 +952,8 @@ async fn old_pairing_is_market_local_before_sum() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("dpt");
     let (core, times) = recorded_rebate_contributions(&root);
-    let (mut execution, observation) =
-        execution(&temp.path().join("sim.jsonl"), &core, SUCCESS_POLICY);
+    let (mut execution, observation, _rules) =
+        native_execution(&temp.path().join("sim.jsonl"), &core, SUCCESS_POLICY);
     let mut ledger =
         LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
     execution
@@ -1092,4 +1095,16 @@ fn exported_group(group: &NativeInputGroup) -> serde_json::Value {
         json["fixture_prefixes"] = serde_json::to_value(prefixes).unwrap();
     }
     output
+}
+
+fn native_execution(
+    path: &std::path::Path,
+    core: &data_pipeline_core::public_observation_core::PublicObservationCoreV1,
+    policy: &[u8],
+) -> (
+    sim_system::execution::PublicSimExecutionV1,
+    sim_system::execution::MemoryNoeObservationV3,
+    std::sync::Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>,
+) {
+    execution_with_rules(path, core, policy, None, "e".repeat(64), "100")
 }
