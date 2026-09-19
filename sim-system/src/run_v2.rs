@@ -19882,6 +19882,27 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
                 PublicTimeClosureReasonV1::NextGlobalEventAt(at),
             )?;
         }
+        // 真实下一公开组证明此前空档；仅闭合到 t-1。
+        // t 本身保持开放，同毫秒后续组和请求仍按原顺序处理。
+        if let Some(before) = at.checked_sub(1) {
+            let close_gap = self
+                .execution
+                .actor
+                .state
+                .as_ref()
+                .and_then(|state| state.session.as_ref())
+                .is_some_and(|session| {
+                    session.opening_fact.account_instance_key.caller_role == SimCallerRoleV1::Paper
+                        && session
+                            .public_visibility_frontier
+                            .closed_through_utc_ms
+                            .is_none_or(|closed| closed < before)
+                });
+            if close_gap {
+                self.state
+                    .close_at(before, PublicTimeClosureReasonV1::NextGlobalEventAt(at))?;
+            }
+        }
         let prepared = Arc::clone(
             &self
                 .source

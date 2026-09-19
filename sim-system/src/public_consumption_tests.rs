@@ -426,7 +426,7 @@ async fn recorded_public_groups_apply_immediately_without_closing_the_millisecon
         .unwrap();
     assert_eq!(
         session.public_visibility_frontier.closed_through_utc_ms,
-        Some(10_000)
+        Some(21_999)
     );
     assert_eq!(
         session.public_markets.pm_quantity(
@@ -467,7 +467,7 @@ async fn recorded_public_groups_apply_immediately_without_closing_the_millisecon
         .unwrap();
     assert_eq!(
         session.public_visibility_frontier.closed_through_utc_ms,
-        Some(10_000)
+        Some(21_999)
     );
     assert_eq!(
         session.public_markets.pm_quantity(
@@ -1802,15 +1802,14 @@ async fn finite_feed_wait_propagates_original_background_io_and_stops_without_se
     let (mut execution, _) =
         public_execution_capacity(&path, &core, SimCallerRoleV1::Paper, 0, None).await;
     execution.wait_for_recording_capacity().unwrap();
-    let (entered, release) = execution
-        .actor
-        .background_log
-        .as_ref()
-        .unwrap()
-        .pause_write_for_tests();
     let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, RecordedTimes).unwrap();
     let mut driver = FinitePublicConsumptionV1::new(execution, source, "finite-times".into());
-    let first = driver.next_group().unwrap().unwrap();
+    let first = finite_feeding::feed(&mut driver, FinitePublicConsumptionV1::next_group,
+        FinitePublicConsumptionV1::wait_for_recording_capacity).unwrap().unwrap();
+    driver.wait_for_recording_capacity().unwrap();
+    let (entered, release) = driver.execution.actor.background_log.as_ref().unwrap().pause_write_for_tests();
+    // 先让真实上一组闭合占住后台写屏障，再测空档闭合后的原背压错误传播。
+    driver.state.close_at(10_000, PublicTimeClosureReasonV1::NextGlobalEventAt(22_000)).unwrap();
     driver.wait_for_recording_capacity().unwrap();
     entered.recv().unwrap();
     let before = driver.execution.actor.applied_input_sequence;

@@ -424,7 +424,37 @@ impl SharedExecutionRegistryV1 {
                 .map(|t| Known(t.base_quantity_shares.clone())),
         ))
     }
-    /// 缺形成序时不能输出自称完整的撤单集合。
+    fn processing_key(&self, order: &ExecutionOrderReadV1<'_>) -> Option<(i64, u64, u16)> {
+        let origin = order.origin.as_ref()?;
+        let receipt = self
+            .intents
+            .get(origin.intent.global_request_id())?
+            .receipt?;
+        let NormalizationRecord::Evidence {
+            evidence:
+                SourceNeutralEvidenceKind::Control {
+                    result:
+                        SourceNeutralControlResult::Submission {
+                            outcome:
+                                SourceNeutralSubmissionOutcomeV2::Accepted {
+                                    effective_processing_at_utc_ms,
+                                    ..
+                                },
+                        },
+                },
+            ..
+        } = order.accepted?.record()
+        else {
+            return None;
+        };
+        Some((
+            *effective_processing_at_utc_ms,
+            receipt.input_sequence(),
+            origin.batch_item_ordinal,
+        ))
+    }
+    /// 形成顺序使用整集合的完备公开证据；不把尚未收到的形成反馈补造成已知。
+
     pub fn cancel_objects(&self) -> ExecutionReadValueV1<Vec<CancelObjectReadV1<'_>>> {
         if self.orders().any(|o| matches!(o.cancellable, Unavailable)) {
             return Unavailable;
@@ -434,15 +464,26 @@ impl SharedExecutionRegistryV1 {
             .filter(|o| matches!(o.cancellable, Known(true)))
             .collect();
         if eligible.iter().any(|o| {
-            o.formed.is_none()
-                || self
-                    .orders
-                    .get(o.order_identity)
-                    .and_then(order_condition)
-                    .is_none_or(|c| !self.markets.contains_key(&c.0))
+            self.orders
+                .get(o.order_identity)
+                .and_then(order_condition)
+                .is_none_or(|c| !self.markets.contains_key(&c.0))
         }) {
             return Unavailable;
         }
+        // SIM 原动作按有效处理时间、首次请求序号和原 ordinal 处理，
+        // 与形成反馈源序严格保序。缺回执的原消费者仍可使用完整形成源序。
+        let use_processing = eligible.iter().all(|o| self.processing_key(o).is_some());
+        if !use_processing && eligible.iter().any(|o| o.formed.is_none()) {
+            return Unavailable;
+        }
+        let formation = |o: &ExecutionOrderReadV1<'_>| {
+            if use_processing {
+                FormationOrderKey::Processing(self.processing_key(o).unwrap())
+            } else {
+                FormationOrderKey::Source(source_sequence(o.formed.unwrap()))
+            }
+        };
         eligible.sort_by(|a, b| {
             let start = |o: &ExecutionOrderReadV1<'_>| {
                 self.markets[&order_condition(&self.orders[o.order_identity]).unwrap().0]
@@ -458,9 +499,7 @@ impl SharedExecutionRegistryV1 {
                         .0
                         .cmp(&order_condition(&self.orders[b.order_identity]).unwrap().0)
                 })
-                .then_with(|| {
-                    source_sequence(a.formed.unwrap()).cmp(&source_sequence(b.formed.unwrap()))
-                })
+                .then_with(|| formation(a).cmp(&formation(b)))
                 .then_with(|| a.order_identity.cmp(b.order_identity))
         });
         let mut objects: Vec<_> = eligible
@@ -485,10 +524,7 @@ impl SharedExecutionRegistryV1 {
             {
                 let orders = [self.order(a).unwrap(), self.order(b).unwrap()];
                 let condition = order_condition(&self.orders[a]).unwrap();
-                let mut members = [
-                    (source_sequence(orders[0].formed.unwrap()), a),
-                    (source_sequence(orders[1].formed.unwrap()), b),
-                ];
+                let mut members = [(formation(&orders[0]), a), (formation(&orders[1]), b)];
                 // 排序键按真实成员形成序；返回的两成员数组仍保持原 ordinal 0/1。
                 members.sort();
                 let key = (
@@ -534,6 +570,11 @@ impl SharedExecutionRegistryV1 {
         }
         Known(objects)
     }
+}
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum FormationOrderKey {
+    Processing((i64, u64, u16)),
+    Source(u64),
 }
 pub struct IntentCommitmentReadV1<'a> {
     pub origin: SubmittedLegReadV1<'a>,

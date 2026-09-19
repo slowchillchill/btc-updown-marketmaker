@@ -37,6 +37,12 @@ mod market_tests;
 #[cfg(test)]
 mod action_tests;
 
+#[cfg(all(test, feature = "continuous-validation"))]
+mod continuous_tests;
+
+#[cfg(all(test, feature = "continuous-validation"))]
+mod continuous_runtime;
+
 #[cfg(feature = "python")]
 pub mod python;
 

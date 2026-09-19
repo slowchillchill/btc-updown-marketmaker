@@ -24,6 +24,9 @@ fn fixture_cash(cash: &str) -> Harness {
     fixture_config(cash, ["0.0025", "0.005"])
 }
 fn fixture_config(cash: &str, ticks: [&str; 2]) -> Harness {
+    fixture_config_at(cash, ticks, 24_999)
+}
+fn fixture_config_at(cash: &str, ticks: [&str; 2], intermediate_at: i64) -> Harness {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("dpt");
     let mut core = core();
@@ -78,7 +81,7 @@ fn fixture_config(cash: &str, ticks: [&str; 2]) -> Harness {
         (23_001, 23_900, DOWN_TOKEN_ID, "0.01", ticks[1]),
         (
             24_000,
-            24_999,
+            intermediate_at,
             DOWN_TOKEN_ID,
             ticks[1],
             if ticks[1] == "0.005" {
@@ -663,7 +666,12 @@ async fn same_process_python_and_rust_ort_share_native_actor_and_final_intent() 
         .unwrap()
         .commit_from_file(std::path::Path::new(&directory).join("action_decoder.onnx"))
         .unwrap();
-    let mut scorer = crate::ort_actor::OrtActorScorer { session, hidden };
+    let mut scorer = crate::ort_actor::OrtActorScorer {
+        #[cfg(feature = "continuous-validation")]
+        measurement: (0, None),
+        session,
+        hidden,
+    };
     let mut actor = NativeActor::new(g.clone(), 0).unwrap();
     scorer.greedy(&mut actor, &z).unwrap();
     assert_eq!(actor.path, path);
@@ -853,7 +861,10 @@ fn cash_root_is_not_replaced_by_encoding_limit() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn actor_pair_reserves_once_and_rejected_leg_releases_without_erasing_other_fill() {
-    let mut h = fixture();
+    // 原源事件 24000，Matched received=24171，首成交 received=24173，
+    // Accepted received=24250。24172 截点只闭合到 24171。
+    // 在真实两者之间读取，不能依赖旧驱动把已接收关联拖到下一组。
+    let mut h = fixture_config_at("2000", ["0.0025", "0.005"], 24_172);
     let g = Arc::new(ready(&mut h));
     let mut actor = NativeActor::new(g, 0).unwrap();
     actor.choose(2).unwrap();
@@ -899,7 +910,7 @@ async fn actor_pair_reserves_once_and_rejected_leg_releases_without_erasing_othe
     let intermediate = h.next().unwrap();
     assert_eq!(
         intermediate.cutoff.decision_time().logical_time_utc_ms(),
-        24_999
+        24_172
     );
     assert!(intermediate.cancel.is_empty());
     let view = intermediate.action_before.as_ref().unwrap();

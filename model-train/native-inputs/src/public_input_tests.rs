@@ -389,55 +389,22 @@ async fn native_partial_makers_project_average_cost_and_nonterminating_fraction(
                 .cutoff()
                 .decision_time()
                 .logical_time_utc_ms();
-            // 每个截点先读取，再实施原脚本动作。46k是明确诊断中间读取，
-            // 不把该组或从它继续的测试探针宣称完整合法模型序列。
-            let read = shared.action_before(&mut driver).unwrap().unwrap();
+            // 补齐有限 PAPER 的已证空档后，原 b-first 关联在 46k 已可见，
+            // 此组继续正常编码，不把旧驱动的延迟领取当作未知关联。
+            let group = native.consume(&mut shared, &mut driver).unwrap().unwrap();
             if at == 46_000 {
-                assert!(matches!(
-                    read.cancel_objects(),
-                    ExecutionReadValueV1::Unavailable
-                ));
+                let read = group.action_before.as_ref().unwrap();
                 assert_eq!(read.orders().count(), 2);
                 assert!(
                     read.orders()
-                        .any(|o| o.origin.is_none() && o.formed.is_some())
+                        .all(|order| order.origin.is_some() && order.accepted.is_some())
                 );
-                let bindings = driver
-                    .frames()
-                    .iter()
-                    .map(|f| {
-                        (
-                            f.observation.market.condition_id.0.clone(),
-                            crate::root::MarketBinding {
-                                market: f.observation.market.clone(),
-                                assets: f
-                                    .observation
-                                    .assets
-                                    .iter()
-                                    .map(|a| a.asset.clone())
-                                    .collect(),
-                            },
-                        )
-                    })
-                    .collect();
-                let input = crate::account::encode(
-                    &read,
-                    Some(&ConditionId(CONDITION_ID.into())),
-                    &[],
-                    &bindings,
-                    at,
-                    InputRole::DecisionRequired,
-                )
-                .unwrap();
-                assert_eq!(&input[406..409], &[projection("2"), 1., 1.]);
-                assert_eq!(&input[388..391], &[0., 0., 1.]);
                 assert!(matches!(
-                    native.consume(&mut shared, &mut driver),
-                    Err(InputError::MissingAssociation)
+                    read.cancel_objects(),
+                    ExecutionReadValueV1::Known(_)
                 ));
-                continue;
             }
-            let group = native.consume(&mut shared, &mut driver).unwrap().unwrap();
+
             if at >= 28_000 && !second {
                 second = true;
                 let old = shared
@@ -723,10 +690,7 @@ async fn complete_population_keeps_uncancellable_pending_and_quote_base_na() {
                     assert_eq!(&slow[406..409], &[projection("1"), 1., 1.]);
                     assert_eq!(slow[122], 0.);
                     pending = true;
-                } else if at == 46_000 {
-                    assert_eq!(slow[54], projection("5"));
-                    assert_eq!(slow[122], 0.);
-                } else if at == 56_000 {
+                } else if at == 46_000 || at == 56_000 {
                     assert_eq!(slow[54], if compensated { 0. } else { projection("5") });
                     assert_eq!(slow[122], if compensated { 0. } else { projection("5") });
                     assert_eq!(slow[185], projection("5"));

@@ -386,15 +386,9 @@ async fn actual_pending_four_keeps_ten_then_finality_and_cancel_close_separate_r
                         )),
                         "{outcome}"
                     );
-                    observed.push(at);
-                }
-                if at == 46_000 {
-                    assert_eq!(
-                        commitment,
-                        ExecutionReadValueV1::Known(ExactDecimal(
-                            if cancel { "4" } else { "10" }.into()
-                        ))
-                    );
+                    // 36k 仍是原未终局成交；终局反馈 received=37022，
+                    // 已证空档闭合后在下一真实 46k 组可见。
+
                     let trade = shared.registry().orders().next().unwrap();
                     let records: Vec<_> = shared
                         .registry()
@@ -423,7 +417,7 @@ async fn actual_pending_four_keeps_ten_then_finality_and_cancel_close_separate_r
                     );
                     observed.push(at);
                 }
-                if at == 56_000 {
+                if at == 46_000 || at == 56_000 {
                     assert_eq!(
                         commitment,
                         ExecutionReadValueV1::Known(ExactDecimal(
@@ -1098,6 +1092,27 @@ async fn real_same_arrival_delayed_batch_forms_r1_s0_r0_without_reordering_origi
         .await
         .unwrap()
         .unwrap();
+    // 原冻结意图的重复提交必须返回首次 receipt，不改变跨请求处理键。
+    let original = shared
+        .registry()
+        .all_commitments()
+        .find(|c| c.origin.intent.global_request_id() == r)
+        .unwrap()
+        .origin
+        .intent
+        .intent()
+        .clone();
+    let repeated = shared
+        .execute(
+            &mut driver.decision().unwrap(),
+            context(&r),
+            Some(Arc::new(original)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(repeated, r_receipt);
+    assert!(r_receipt.input_sequence() < s_receipt.input_sequence());
     assert_eq!(
         r_receipt.platform_arrived_at_utc_ms(),
         s_receipt.platform_arrived_at_utc_ms()
@@ -1150,6 +1165,45 @@ async fn real_same_arrival_delayed_batch_forms_r1_s0_r0_without_reordering_origi
         source_in_delivery.windows(2).any(|pair| pair[0] > pair[1]),
         "夹具须真实包含接收反序: {delivered:?}"
     );
+    let mut processed = shared
+        .registry()
+        .orders()
+        .map(|order| {
+            let origin = order.origin.unwrap();
+            let ::execution_normalization::NormalizationRecord::Evidence {
+                evidence:
+                    ::execution_normalization::SourceNeutralEvidenceKind::Control {
+                        result:
+                            SourceNeutralControlResult::Submission {
+                                outcome:
+                                    SourceNeutralSubmissionOutcomeV2::Accepted {
+                                        effective_processing_at_utc_ms,
+                                        ..
+                                    },
+                            },
+                    },
+                ..
+            } = order.accepted.unwrap().record()
+            else {
+                panic!("原Accepted逐项处理时间")
+            };
+            let receipt = if origin.intent.global_request_id() == r {
+                r_receipt
+            } else {
+                s_receipt
+            };
+            (
+                (
+                    *effective_processing_at_utc_ms,
+                    receipt.input_sequence(),
+                    origin.batch_item_ordinal,
+                ),
+                origin.intent.global_request_id().to_owned(),
+                origin.batch_item_ordinal,
+            )
+        })
+        .collect::<Vec<_>>();
+    processed.sort();
     formed.sort();
     assert_eq!(
         formed
@@ -1157,6 +1211,16 @@ async fn real_same_arrival_delayed_batch_forms_r1_s0_r0_without_reordering_origi
             .map(|(_, id, ordinal)| (id.as_str(), *ordinal))
             .collect::<Vec<_>>(),
         vec![(r.as_str(), 1), (s.as_str(), 0), (r.as_str(), 0)]
+    );
+    assert_eq!(
+        processed
+            .iter()
+            .map(|(_, id, ordinal)| (id, ordinal))
+            .collect::<Vec<_>>(),
+        formed
+            .iter()
+            .map(|(_, id, ordinal)| (id, ordinal))
+            .collect::<Vec<_>>()
     );
 }
 #[tokio::test(flavor = "current_thread")]

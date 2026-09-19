@@ -47,15 +47,58 @@ fn blocks(scores: &[f32], lengths: &[usize]) -> Vec<CancelScoreBlock> {
         })
         .collect()
 }
-struct Harness {
+pub(super) struct Harness {
     _temp: tempfile::TempDir,
-    shared: SharedExecutionV1,
-    native: NativeInputRoot,
-    driver: FinitePublicConsumptionV1<RecordedPublicGroupSourceV1<TradingTimes>>,
+    pub(super) shared: SharedExecutionV1,
+    pub(super) native: NativeInputRoot,
+    pub(super) driver: FinitePublicConsumptionV1<RecordedPublicGroupSourceV1<TradingTimes>>,
     groups: Vec<serde_json::Value>,
+}
+
+#[test]
+fn long_window_fixture_delivers_terminal_and_tail_in_causal_order() {
+    let mut h = Harness::new(0, false, false);
+    let root = h._temp.path().join("dpt");
+    let (_, times) = recorded_trading_window(
+        &h._temp.path().join("delivery-diagnostic"),
+        "100",
+        None,
+        320_000,
+        true,
+    );
+    let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times).unwrap();
+    let mut previous = None;
+    for item in source {
+        let delivery = item.unwrap();
+        let at = delivery.delivered_at_utc_ms;
+        eprintln!(
+            "fixture delivery position={} next={at} prior_frontier={previous:?}",
+            delivery.prepared.reference.group_position
+        );
+        let result = h.driver.next_group();
+        eprintln!("fixture consumption={result:?}");
+        assert!(
+            previous.is_none_or(|prior| at >= prior),
+            "fixture delivery reversed: {previous:?} -> {at}"
+        );
+        result.unwrap().unwrap();
+        h.native.consume(&mut h.shared, &mut h.driver).unwrap();
+        previous = Some(at);
+    }
+    assert_eq!(previous, Some(331_000));
+    assert!(h.driver.next_group().unwrap().is_none());
 }
 impl Harness {
     fn new(pair_count: usize, maker: bool, multi: bool) -> Self {
+        Self::named(pair_count, maker, multi, "shared-combination", "100")
+    }
+    pub(super) fn named(
+        pair_count: usize,
+        maker: bool,
+        multi: bool,
+        identity: &str,
+        depth: &str,
+    ) -> Self {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("dpt");
         let (core, times) = if multi {
@@ -63,15 +106,16 @@ impl Harness {
         } else if maker {
             recorded_average_pool(&root, false)
         } else {
-            recorded_trading_window(&root, "100", maker.then_some(("0.5", "5")), 320_000, true)
+            recorded_trading_window(&root, depth, maker.then_some(("0.5", "5")), 320_000, true)
         };
-        let (mut execution, observation, rules) = execution_with_rules(
+        let (mut execution, observation, rules) = execution_with_identity(
             &temp.path().join("sim.jsonl"),
             &core,
             SUCCESS_POLICY,
             None,
             "e".repeat(64),
             "2000",
+            identity,
         );
         let mut ledger =
             LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
@@ -120,7 +164,7 @@ impl Harness {
         self.groups.push(serde_json::to_value(&group).unwrap());
         Some(group)
     }
-    async fn pairs(&mut self, count: usize) {
+    pub(super) async fn pairs(&mut self, count: usize) {
         for i in 0..count {
             self.driver.wait_for_recording_capacity().unwrap();
             self.shared
@@ -478,17 +522,7 @@ async fn market_cancel_uses_only_selected_condition() {
             .unwrap();
             sent = true;
         }
-        if at == 346_000 {
-            assert_eq!(g.cutoff.private_feedback_sequence(), 5);
-            assert!(
-                g.action_before
-                    .as_ref()
-                    .unwrap()
-                    .orders()
-                    .all(|o| o.cancellable == ExecutionReadValueV1::Known(true))
-            );
-        }
-        if at == 356_000 {
+        if at == 346_000 || at == 356_000 {
             assert_eq!(g.cutoff.private_feedback_sequence(), 7);
             assert_eq!(g.action_before.as_ref().unwrap().orders().count(), 1);
             assert_eq!(g.cancel.len(), 2);
@@ -503,8 +537,10 @@ async fn market_cancel_uses_only_selected_condition() {
                     ExecutionReadValueV1::Known(condition_id.0 != CONDITION_ID)
                 );
             }
-            verified = true;
-            break;
+            if at == 356_000 {
+                verified = true;
+                break;
+            }
         }
     }
     assert!(sent && verified);
@@ -875,6 +911,8 @@ async fn same_process_cancel_actor_all_objects_and_original_identities() {
     }
     assert_eq!(frame, traces.len());
     let mut scorer = crate::ort_actor::OrtActorScorer {
+        #[cfg(feature = "continuous-validation")]
+        measurement: (0, None),
         session: session("action_decoder.onnx"),
         hidden,
     };

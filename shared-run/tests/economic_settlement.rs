@@ -995,7 +995,9 @@ async fn resolution_before_late_success_fixes_fee_bucket_and_updates_pi_without_
                     sent_b = true;
                 }
             }
-            if late && at == 71_000 {
+            // 原 Accepted received=56031；首成交 received=66832、MINED=66022。
+            // 66000 组仍在经济反馈之前，71000 已能领取 PendingApplied。
+            if late && at == 66_000 {
                 assert!(shared.apply_closed().unwrap());
                 let read = shared.ledger().economic_read().unwrap();
                 let resolution = read.resolutions().next().unwrap();
@@ -1056,7 +1058,7 @@ async fn resolution_before_late_success_fixes_fee_bucket_and_updates_pi_without_
                     );
                     if late && resolution.winner_orphan_receivable_pusd.0 == "5" {
                         assert_eq!(resolution.paired_receivable_pusd.0, "0");
-                        if at == 71_000 {
+                        if at == 66_000 {
                             assert!(
                                 driver
                                     .settlement_simulation_read(&ConditionId(CONDITION_ID.into()))
