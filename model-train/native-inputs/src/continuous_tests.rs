@@ -1816,6 +1816,82 @@ async fn continuous_three_runtime_matrix() {
     }
 }
 
+// P 表期望独立写明；只聚合原公共读取，不从模型张量反算资金。
+fn assert_population_economics(
+    shared: &SharedExecutionV1,
+    count: usize,
+    removed: bool,
+    j: usize,
+    root: usize,
+    at: i64,
+) {
+    use contracts::ExecutionReadValueV1::Known;
+    use rust_decimal::Decimal;
+    let (families, shares, principal, available) = match (count, removed) {
+        (0, _) => ([0, 0, 0], ["0", "0"], ["0", "0"], "2000"),
+        (1, false) => ([2, 1, 1], ["5", "5"], ["0.5", "0.5"], "1999"),
+        (1, true) => ([1, 0, 1], ["5", "0"], ["0.5", "0"], "1999.5"),
+        (85, false) => ([170, 85, 1], ["425", "425"], ["42.5", "42.5"], "1915"),
+        (86, false) => ([172, 86, 1], ["430", "430"], ["43", "43"], "1914"),
+        (86, true) => ([171, 85, 1], ["430", "425"], ["43", "42.5"], "1914.5"),
+        _ => unreachable!(),
+    };
+    let decimal = |s: &str| s.parse::<Decimal>().unwrap();
+    let known = |v: contracts::ExecutionReadValueV1<contracts::ExactDecimal>| match v {
+        Known(v) => decimal(&v.0),
+        other => panic!("P真实读取不可用: {other:?}"),
+    };
+    let registry = shared.registry();
+    let Known(objects) = registry.cancel_objects() else {
+        panic!("完整人口不可用")
+    };
+    let mut actual_families = [0usize; 3];
+    for object in objects {
+        actual_families[match object {
+            CancelObjectReadV1::Single { .. } => 0,
+            CancelObjectReadV1::Paired { .. } => 1,
+            CancelObjectReadV1::Market { .. } => 2,
+        }] += 1;
+    }
+    assert_eq!(actual_families, families);
+    let funds = shared.ledger().funds_read_v1();
+    let mut active = [Decimal::ZERO; 2];
+    let mut money = [Decimal::ZERO; 2];
+    let mut fee = [Decimal::ZERO; 2];
+    for order in registry.orders() {
+        let ordinal = order.origin.as_ref().unwrap().batch_item_ordinal as usize;
+        active[ordinal] += known(order.active_unfilled_shares);
+        let funding = funds.order(order.order_identity).unwrap();
+        money[ordinal] += known(funding.principal_encumbrance_pusd);
+        fee[ordinal] += known(funding.immediate_fee_encumbrance_pusd);
+    }
+    assert_eq!(active, shares.map(decimal));
+    assert_eq!(money, principal.map(decimal));
+    assert_eq!(fee, [Decimal::ZERO; 2]);
+    let projection = funds.projection().unwrap();
+    let applied = &projection.platform_confirmed_projection;
+    assert_eq!(decimal(&applied.cash_pusd.0), decimal("2000"));
+    assert_eq!(decimal(&applied.available_pusd.0), decimal(available));
+    assert_eq!(
+        decimal(&applied.principal_encumbrance_pusd.0),
+        money.iter().sum()
+    );
+    assert_eq!(
+        decimal(&applied.immediate_taker_fee_encumbrance_pusd.0),
+        Decimal::ZERO
+    );
+    let economic = shared.ledger().economic_read().unwrap();
+    let cash = economic.cash();
+    assert_eq!(decimal(&cash.actual_available_pusd.0), decimal(available));
+    assert_eq!(decimal(&cash.maker_available_pusd.0), decimal(available));
+    assert_eq!(decimal(&cash.actual_reserved_pusd.0), money.iter().sum());
+    assert_eq!(decimal(&cash.maker_reserved_pusd.0), money.iter().sum());
+    eprintln!(
+        "population_economics={}",
+        serde_json::json!({"j":j,"root":root,"cutoff":at,"families":actual_families,"active_shares":active,"principal":money,"immediate_fee":fee,"applied":applied,"cash":{"actual_available":cash.actual_available_pusd,"actual_reserved":cash.actual_reserved_pusd,"maker_available":cash.maker_available_pusd,"maker_reserved":cash.maker_reserved_pusd}})
+    );
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "两MAIN的真实P3—P7人口/批次/分块/梯度；需原图"]
 async fn continuous_real_population_probes() {
@@ -1906,6 +1982,16 @@ async fn continuous_real_population_probes() {
             );
             let actors = runtime.advance(&groups, at == 56000);
             if at == 36000 || at == 56000 {
+                for (index, h) in roots.iter().enumerate() {
+                    assert_population_economics(
+                        &h.shared,
+                        counts[index],
+                        at == 56000 && [4, 6, 7].contains(&j),
+                        j,
+                        index,
+                        at,
+                    );
+                }
                 let sources = roots
                     .iter_mut()
                     .map(|h| {

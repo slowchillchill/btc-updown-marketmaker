@@ -199,6 +199,144 @@ impl ThreeRuntime {
             assert!(self.scorer.scores_batch(&[]).unwrap().is_empty());
             assert_eq!(self.scorer.measurement.0, before_empty);
         }
+        // P6/P7 在同一真实人口上直接调用原公开块入口；不改变 C 的生产分块。
+        if groups.iter().any(|g| g.cancel.len() == 257) {
+            for family in [3, 4, 5] {
+                let actors = groups
+                    .iter()
+                    .map(|g| {
+                        let row = g
+                            .rows
+                            .iter()
+                            .position(|r| r.role == InputRole::DecisionRequired)
+                            .unwrap();
+                        let mut actor = NativeActor::new(g.clone(), row).unwrap();
+                        if !g.cancel.is_empty() {
+                            actor.choose(family).unwrap();
+                        }
+                        actor
+                    })
+                    .collect::<Vec<_>>();
+                let width = self.width / 2;
+                let zero = vec![0.; 3 * width];
+                let fees = vec![0.; 9999];
+                let mut layouts = Vec::new();
+                for lengths in [[256usize, 1], [128, 129]] {
+                    let before = self.scorer.measurement.0;
+                    let mut sums = vec![vec![0f64; width]; groups.len()];
+                    let mut maxima = vec![vec![f32::NEG_INFINITY; width]; groups.len()];
+                    let mut offset = 0;
+                    for length in lengths {
+                        let rows = actors
+                            .iter()
+                            .enumerate()
+                            .map(|(i, a)| {
+                                let n = a.group.cancel.len();
+                                (
+                                    a,
+                                    self.last_states[i][a.row].as_slice(),
+                                    &a.group.cancel[offset.min(n)..(offset + length).min(n)],
+                                    zero.as_slice(),
+                                    false,
+                                    fees.as_slice(),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        let output = self.scorer.blocks(&rows).unwrap();
+                        for (i, values) in output.iter().enumerate() {
+                            for embedding in
+                                values[6][..rows[i].2.len() * width].chunks_exact(width)
+                            {
+                                for k in 0..width {
+                                    sums[i][k] += f64::from(embedding[k]);
+                                    maxima[i][k] = maxima[i][k].max(embedding[k]);
+                                }
+                            }
+                        }
+                        offset += length;
+                    }
+                    let reduced = groups
+                        .iter()
+                        .enumerate()
+                        .map(|(i, g)| {
+                            if g.cancel.is_empty() {
+                                zero.clone()
+                            } else {
+                                sums[i]
+                                    .iter()
+                                    .map(|x| *x as f32)
+                                    .chain(
+                                        sums[i].iter().map(|x| (*x / g.cancel.len() as f64) as f32),
+                                    )
+                                    .chain(maxima[i].iter().copied())
+                                    .collect::<Vec<_>>()
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    let mut scores = vec![Vec::new(); groups.len()];
+                    let mut offset = 0;
+                    for length in lengths {
+                        let rows = actors
+                            .iter()
+                            .enumerate()
+                            .map(|(i, a)| {
+                                let n = a.group.cancel.len();
+                                (
+                                    a,
+                                    self.last_states[i][a.row].as_slice(),
+                                    &a.group.cancel[offset.min(n)..(offset + length).min(n)],
+                                    reduced[i].as_slice(),
+                                    n > 0,
+                                    fees.as_slice(),
+                                )
+                            })
+                            .collect::<Vec<_>>();
+                        let output = self.scorer.blocks(&rows).unwrap();
+                        for (i, values) in output.iter().enumerate() {
+                            scores[i].extend_from_slice(&values[7][..rows[i].2.len()]);
+                        }
+                        offset += length;
+                    }
+                    assert_eq!(self.scorer.measurement.0 - before, 4);
+                    let mut choices = Vec::new();
+                    for (i, g) in groups.iter().enumerate() {
+                        if g.cancel.is_empty() {
+                            assert!(scores[i].is_empty());
+                            choices.push(None);
+                            continue;
+                        }
+                        let expected = evidence
+                            .iter()
+                            .find(|(root, f, ..)| *root == i && *f == family)
+                            .unwrap();
+                        close(&expected.2, &scores[i]);
+                        let choice = expected
+                            .3
+                            .iter()
+                            .zip(&scores[i])
+                            .enumerate()
+                            .filter(|(_, (legal, _))| **legal)
+                            .max_by(|(ia, (_, a)), (ib, (_, b))| {
+                                a.total_cmp(b).then_with(|| ib.cmp(ia))
+                            })
+                            .unwrap()
+                            .0;
+                        assert_eq!(Some(&choice), expected.4.last());
+                        choices.push(Some(choice));
+                    }
+                    eprintln!(
+                        "population_native_layout={}",
+                        serde_json::json!({"seed":seed,"family":family,"lengths":lengths,"root_mapping":(0..groups.len()).collect::<Vec<_>>(),"graph_calls":self.scorer.measurement.0-before,"sum_mean_max":reduced,"global_scores":scores,"global_choices":choices})
+                    );
+                    layouts.push((reduced, scores, choices));
+                }
+                for i in 0..groups.len() {
+                    close(&layouts[0].0[i], &layouts[1].0[i]);
+                    close(&layouts[0].1[i], &layouts[1].1[i]);
+                }
+                assert_eq!(layouts[0].2, layouts[1].2);
+            }
+        }
         for (root, family, want, support, path) in evidence {
             let row = groups[root]
                 .rows
