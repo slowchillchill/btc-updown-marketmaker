@@ -780,6 +780,18 @@ fn recorded_trading_with_tail(
     tail: u64,
     down_initial: &str,
 ) -> (PublicObservationCoreV1, TradingTimes) {
+    recorded_trading_with_probes(root, initial_taker, maker, end_at, tail, down_initial, &[])
+}
+#[allow(clippy::too_many_arguments)]
+pub fn recorded_trading_with_probes(
+    root: &Path,
+    initial_taker: &str,
+    maker: Option<(&str, &str)>,
+    end_at: i64,
+    tail: u64,
+    down_initial: &str,
+    extra_probes: &[i64],
+) -> (PublicObservationCoreV1, TradingTimes) {
     let mut core = core();
     let mut writer = PublicRecordingWriterV1::create(root, core.header(), config()).unwrap();
     let mut metadata = metadata_snapshot_row();
@@ -860,6 +872,11 @@ fn recorded_trading_with_tail(
     let mut probes = vec![29_000, 35_000, 45_000, 55_000];
     if end_at > 100_000 {
         probes.extend([295_000, 305_000, 315_000, 395_000]);
+    }
+    if !extra_probes.is_empty() {
+        probes.extend(extra_probes);
+        probes.sort_unstable();
+        probes.dedup();
     }
     // 这些探针属于终态前的交易窗口；320s窗口不能先交付396s，
     // 再回退到321.003s终态。更长窗口仍保留395s探针。

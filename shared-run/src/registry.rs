@@ -288,7 +288,9 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
                 } => {
                     let state = self.orders.entry(order.order_identity.clone()).or_default();
                     replace_delivery(&mut state.direct, record);
-                    replace_delivery(&mut state.known_query, record);
+                    if !query_is_terminal(state, &order.order_identity) {
+                        replace_delivery(&mut state.known_query, record);
+                    }
                 }
                 SourceNeutralControlResult::OrdersQuery {
                     result: SourceNeutralOrdersQueryResult::Page(page),
@@ -296,7 +298,9 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
                     for order in &page.items {
                         let state = self.orders.entry(order.order_identity.clone()).or_default();
                         replace_delivery(&mut state.direct, record);
-                        replace_delivery(&mut state.known_query, record);
+                        if !query_is_terminal(state, &order.order_identity) {
+                            replace_delivery(&mut state.known_query, record);
+                        }
                     }
                 }
                 _ => {}
@@ -354,7 +358,7 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
                 batch_item_ordinal: *ordinal,
             })
         });
-        let (matched, mut active) = quantities(state);
+        let (matched, mut active) = quantities(state, id);
         let base_quantity_applicability = measurement(state)
             .map(|m| matches!(m, SourceNeutralSubmissionMeasurementV1::Base { .. }))
             .or_else(|| query_base_applicability(state, id))
@@ -371,7 +375,7 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             });
         if base_quantity_applicability == Some(false) {
             active = NotApplicable;
-        } else if base_quantity_applicability == Some(true) && is_closed(state) {
+        } else if base_quantity_applicability == Some(true) && is_closed(state, id) {
             active = Known(exact(Decimal::ZERO));
         }
 
@@ -390,7 +394,7 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
                 ..
             })
         );
-        let cancellable = if is_closed(state) || is_quote(state) || accepted_matched {
+        let cancellable = if is_closed(state, id) || is_quote(state) || accepted_matched {
             Known(false)
         } else {
             match &active {
@@ -519,7 +523,7 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
         if !coverage {
             return Unavailable;
         }
-        let (_, active) = quantities(order);
+        let (_, active) = quantities(order, id);
         sum(std::iter::once(active).chain(
             order
                 .trades
@@ -778,8 +782,9 @@ fn is_quote<R: Clone + std::fmt::Debug + Eq>(o: &Order<R>) -> bool {
         Some(SourceNeutralSubmissionMeasurementV1::QuoteBudget { .. })
     )
 }
-fn is_closed<R: Clone + std::fmt::Debug + Eq>(o: &Order<R>) -> bool {
-    o.canceled.is_some()
+fn is_closed<R: Clone + std::fmt::Debug + Eq>(o: &Order<R>, id: &Identity) -> bool {
+    query_is_terminal(o, id)
+        || o.canceled.is_some()
         || matches!(
             o.lifecycle.as_ref().map(Ref::record),
             Some(NormalizationRecord::Evidence {
@@ -798,6 +803,7 @@ fn is_closed<R: Clone + std::fmt::Debug + Eq>(o: &Order<R>) -> bool {
 }
 fn quantities<R: Clone + std::fmt::Debug + Eq>(
     o: &Order<R>,
+    id: &Identity,
 ) -> (
     ExecutionReadValueV1<ExactDecimal>,
     ExecutionReadValueV1<ExactDecimal>,
@@ -830,7 +836,7 @@ fn quantities<R: Clone + std::fmt::Debug + Eq>(
             let mut active = Quantity::parse(open_base_quantity_shares);
             active.subtract(&later);
             let matched = Known(matched.exact());
-            let active = if is_closed(o) {
+            let active = if is_closed(o, id) {
                 Known(exact(Decimal::ZERO))
             } else if active.is_negative() {
                 Unavailable
@@ -1204,10 +1210,32 @@ impl SharedExecutionRegistryV2 {
     }
 }
 
+// 已到终态是单调关闭证据；后到旧 Open 只更新 direct，不覆盖这份原查询引用。
+fn query_is_terminal<R: Clone + std::fmt::Debug + Eq>(order: &Order<R>, id: &Identity) -> bool {
+    query_snapshot(order, id).is_some_and(|snapshot| {
+        matches!(
+            snapshot.state,
+            SourceNeutralOrderStateV1::Matched
+                | SourceNeutralOrderStateV1::VenueDustTerminal
+                | SourceNeutralOrderStateV1::MarketResolvedCanceled
+                | SourceNeutralOrderStateV1::Canceled
+                | SourceNeutralOrderStateV1::Expired
+        )
+    })
+}
 fn query_base_applicability<R: Clone + std::fmt::Debug + Eq>(
     order: &Order<R>,
     id: &Identity,
 ) -> Option<bool> {
+    Some(matches!(
+        query_snapshot(order, id)?.quantities,
+        SourceNeutralOrderQuantityEvidenceV1::Base { .. }
+    ))
+}
+fn query_snapshot<'a, R: Clone + std::fmt::Debug + Eq>(
+    order: &'a Order<R>,
+    id: &Identity,
+) -> Option<&'a SourceNeutralOrderSnapshotV2<Identity>> {
     let NormalizationRecord::Evidence {
         evidence: SourceNeutralEvidenceKind::Control { result },
         ..
@@ -1224,8 +1252,5 @@ fn query_base_applicability<R: Clone + std::fmt::Debug + Eq>(
         } => page.items.iter().find(|o| &o.order_identity == id)?,
         _ => return None,
     };
-    Some(matches!(
-        snapshot.quantities,
-        SourceNeutralOrderQuantityEvidenceV1::Base { .. }
-    ))
+    Some(snapshot)
 }

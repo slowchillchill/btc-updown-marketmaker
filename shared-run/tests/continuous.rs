@@ -2932,3 +2932,219 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
         assert_eq!(hits[0]["global_request_id"], "finite-failure");
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn real_terminal_query_then_late_open_precede_lifecycle() {
+    use ::execution_normalization::{NormalizationRecord, SourceNeutralEvidenceKind};
+    use ExecutionReadValueV1::Known;
+    use contracts::execution_normalization::*;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let (core, times) = recorded_trading_with_probes(
+        &root,
+        "2",
+        None,
+        400_000,
+        2,
+        "100",
+        &[298_970, 299_006, 299_007, 299_008, 299_020],
+    );
+    let (execution, observation) = execution(&temp.path().join("sim.jsonl"), &core, SUCCESS_POLICY);
+    let ledger =
+        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+    let mut shared = SharedExecutionV1::from_opening(ledger, observation)
+        .unwrap()
+        .unwrap();
+    let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times).unwrap();
+    let mut driver = FinitePublicConsumptionV1::new(execution, source, "terminal-query".into());
+    for _ in 0..4 {
+        driver.next_group().unwrap().unwrap();
+    }
+    let intent = Arc::new(ModelIntentV1::SubmitPairedBuy {
+        condition_id: ConditionId(CONDITION_ID.into()),
+        orders: [
+            BuyLegIntentV1 {
+                token_id: TokenId(UP_TOKEN_ID.into()),
+                order: BuyOrderIntentV1::GtdLimit {
+                    limit_price_pusd_per_share: Decimal::new(6, 1),
+                    size_shares: Decimal::from(5),
+                    post_only: false,
+                    expires_at_utc_sec: 300,
+                },
+            },
+            leg(DOWN_TOKEN_ID, 5),
+        ],
+    });
+    shared
+        .execute(
+            &mut driver.decision().unwrap(),
+            context("terminal-pair"),
+            Some(intent),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let mut id = None;
+    let mut terminal = None;
+    let mut initial_funds = None;
+    let mut checked = 0;
+    while driver.next_group().unwrap().is_some() {
+        let Some(view) = shared.action_before(&mut driver).unwrap() else {
+            continue;
+        };
+        let at = view.cutoff().decision_time().logical_time_utc_ms();
+        if at == 28_000 {
+            id = Some(
+                view.orders()
+                    .find(|o| o.origin.as_ref().unwrap().batch_item_ordinal == 0)
+                    .unwrap()
+                    .order_identity
+                    .clone(),
+            );
+        }
+        if at == 299_970 {
+            let Known(objects) = view.cancel_objects() else {
+                panic!("完整成员")
+            };
+            assert!(
+                objects
+                    .iter()
+                    .any(|o| matches!(o, CancelObjectReadV1::Paired { .. }))
+            );
+            initial_funds = Some(
+                view.order_funds()
+                    .find(|o| o.order_identity == id.as_ref().unwrap())
+                    .unwrap()
+                    .principal_encumbrance_pusd
+                    .clone(),
+            );
+            assert_eq!(initial_funds, Some(Known(ExactDecimal("1.8".into()))));
+            // 同一原固定种子/经验时延：Open 出站29/入站8，Expired 出站30/入站6。
+            // 处理299999/300000，收到300007/300006；生命周期独立延迟，未改原图或采样器。
+            for request in ["open-query-3645", "terminal-query-248140"] {
+                driver
+                    .decision()
+                    .unwrap()
+                    .request(BusinessRequestV2::Order(OrderRequestV2 {
+                        context: context(request),
+                        platform_order_id: platform_id(id.as_ref().unwrap()),
+                    }))
+                    .unwrap();
+            }
+        }
+        if at == 300_007 || at == 300_008 {
+            let id = id.as_ref().unwrap();
+            let order = shared.registry().order(id).unwrap();
+            let direct = order.latest_direct_feedback.unwrap();
+            let NormalizationRecord::Evidence {
+                evidence:
+                    SourceNeutralEvidenceKind::Control {
+                        result:
+                            SourceNeutralControlResult::OrderQuery {
+                                result: SourceNeutralOrderQueryResult::Found { order: snapshot },
+                            },
+                    },
+                ..
+            } = direct.record()
+            else {
+                panic!("真实 Found 查询: {:?}", direct.record())
+            };
+            assert_eq!(
+                snapshot.state,
+                if at == 300_007 {
+                    SourceNeutralOrderStateV1::Expired
+                } else {
+                    SourceNeutralOrderStateV1::Open
+                }
+            );
+            let SimV2SourceRecordReferenceV1::DirectResponse {
+                platform_responded_at_utc_ms,
+                response_received_at_utc_ms,
+                ..
+            } = direct.record().source_reference().record
+            else {
+                panic!("查询原直接响应来源")
+            };
+            assert_eq!(
+                (platform_responded_at_utc_ms, response_received_at_utc_ms),
+                if at == 300_007 {
+                    (300_000, 300_006)
+                } else {
+                    (299_999, 300_007)
+                }
+            );
+            assert!(
+                !matches!(order.latest_lifecycle.unwrap().record(), NormalizationRecord::Evidence { evidence: SourceNeutralEvidenceKind::OrderLifecycle { result }, .. } if matches!(result.event, SourceNeutralOrderLifecycleEventV1::GtdExpired)),
+                "终态生命周期尚未收到"
+            );
+            if at == 300_007 {
+                terminal = Some(direct.clone());
+            } else {
+                assert!(direct.position() != terminal.as_ref().unwrap().position());
+                let seq =
+                    |r: &::execution_normalization::NoeConsumedRecordRefV1| match r.visibility() {
+                        ::execution_normalization::NoeConsumptionVisibilityV1::Feedback {
+                            delivery_sequence,
+                            ..
+                        } => *delivery_sequence,
+                        _ => 0,
+                    };
+                assert!(
+                    seq(direct) > seq(terminal.as_ref().unwrap()),
+                    "晚Open实际具有更晚交付序号"
+                );
+            }
+            assert_eq!(order.cancellable, Known(false));
+            assert_eq!(
+                order.active_unfilled_shares,
+                Known(ExactDecimal("0".into()))
+            );
+            assert_eq!(
+                view.orders()
+                    .filter(|o| o.cancellable == Known(true))
+                    .count(),
+                1
+            );
+            let Known(objects) = view.cancel_objects() else {
+                panic!("完整成员")
+            };
+            assert!(
+                !objects
+                    .iter()
+                    .any(|o| matches!(o, CancelObjectReadV1::Paired { .. }))
+            );
+            assert_eq!(
+                shared
+                    .ledger()
+                    .funds_read_v1()
+                    .order(id)
+                    .unwrap()
+                    .principal_encumbrance_pusd,
+                *initial_funds.as_ref().unwrap(),
+                "查询不释放真实资金占用"
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 2);
+    let id = id.unwrap();
+    // 仍用真实成交引用检验终态后关联接收与重复接收；不声称改写原成交接收时刻。
+    let mut late =
+        SharedExecutionRegistryV1::new(Arc::new(terminal.as_ref().unwrap().context().clone()));
+    late.observe(&terminal.unwrap());
+    let order = shared.registry().order(&id).unwrap();
+    late.observe(order.accepted.unwrap());
+    let trades: Vec<_> = shared.registry().order_trades(&id).cloned().collect();
+    assert!(!trades.is_empty());
+    for _ in 0..2 {
+        for trade in &trades {
+            late.observe(trade);
+        }
+    }
+    assert_eq!(late.order(&id).unwrap().cancellable, Known(false));
+    assert_eq!(
+        late.order(&id).unwrap().matched_shares,
+        order.matched_shares
+    );
+    assert_eq!(late.order_trades(&id).count(), trades.len());
+}

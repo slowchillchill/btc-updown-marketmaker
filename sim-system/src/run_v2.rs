@@ -16211,7 +16211,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn public_post_order_and_body_bucket_emit_method_result_with_continuous_sequences() {
+    async fn public_v4_post_order_cancel_failure_and_original_log_recovery() {
         let directory = tempfile::tempdir().expect("创建请求投影测试目录");
         let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
         let rule_snapshot = successful_snapshot_v3_for_sim_tests().await;
@@ -16305,7 +16305,7 @@ mod tests {
                     bucket_at_utc_ms: target_arrival_at_utc_ms,
                     start_index_position: 0,
                     next_index_position: initial_events.len() as u64,
-                    closure: crate::market::MillisecondBucketClosureV1::NextEventAt(1_200),
+                    closure: crate::market::MillisecondBucketClosureV1::NextEventAt(10_000),
                 },
                 events: Arc::from(initial_events),
             })
@@ -16372,6 +16372,222 @@ mod tests {
             .and_then(|request| request.completed_response.as_ref())
             .expect("唯一会话必须保留首次最终响应");
         assert!(Arc::ptr_eq(stored_response, &batch.direct_responses[0]));
+        drop(port);
+        execution
+            .actor
+            .commit_group(vec![BusinessInputV2::CancelScenario(
+                crate::runtime_v2::CancelScenarioOperationV1::Configure(
+                    crate::runtime_v2::CancelFailureScenarioV1 {
+                        targets: vec![crate::runtime_v2::CancelFailureTargetV1 {
+                            global_request_id: "finite-failure".into(),
+                            platform_order_id: "sim-1".into(),
+                        }],
+                    },
+                ),
+            )])
+            .unwrap();
+        let replay = |path: &Path, actor: &SimRunActorV2| {
+            replay_event_log_v2(
+                path,
+                &actor._rule_snapshot,
+                &actor._finality_policy,
+                &actor.scenario,
+                &actor._latency_profile,
+                MAX_GROUP_BYTES,
+                None,
+                |reference| {
+                    assert_eq!(reference.bucket_at_utc_ms, 1_100);
+                    Ok(Arc::from(decoded_initial_market_events("10")))
+                },
+                None,
+            )
+            .unwrap()
+        };
+        let before_failure = replay(&path, &execution.actor);
+        let request = crate::runtime_v2::CancelOrderRequestV2 {
+            context: RequestContextV2 {
+                global_request_id: "finite-failure".into(),
+                caller_correlation_id: None,
+            },
+            item: CancelOrderItemV1 {
+                item_id: "failure-item".into(),
+                platform_order_id: "sim-1".into(),
+            },
+        };
+        let receipt = execution
+            .cancel_order(request_cutoff(1_200), request.clone())
+            .unwrap();
+        loop {
+            if execution
+                .actor
+                .state
+                .as_ref()
+                .unwrap()
+                .session
+                .as_ref()
+                .unwrap()
+                .mutation_requests
+                .requests_by_id["finite-failure"]
+                .completed_response
+                .is_some()
+            {
+                break;
+            }
+            let required = execution.next_required_logical_drive().unwrap();
+            execution
+                .drive_platform_prefix(PlatformPrefixAdvanceV2 {
+                    path: required.path,
+                    closed_through_utc_ms: required.required_at_utc_ms,
+                    next_index_position: 2,
+                })
+                .unwrap();
+        }
+        let before_duplicate = execution.actor.next_input_sequence_for_tests();
+        assert_eq!(
+            execution
+                .cancel_order(request_cutoff(1_300), request.clone())
+                .unwrap(),
+            receipt
+        );
+        assert_eq!(
+            execution.actor.next_input_sequence_for_tests(),
+            before_duplicate
+        );
+        let live = execution
+            .actor
+            .state
+            .as_ref()
+            .unwrap()
+            .session
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            live.execution_state,
+            before_failure
+                .state
+                .session
+                .as_ref()
+                .unwrap()
+                .execution_state,
+            "暂失败及重复请求不得改变订单、资金、队列或成交状态"
+        );
+        let result = live.mutation_requests.requests_by_id["finite-failure"]
+            .completed_response
+            .as_ref()
+            .unwrap();
+        let StoredDirectResponse::Final(BusinessDirectResponse::CancelOrder(response)) =
+            result.as_ref()
+        else {
+            panic!("真实撤单最终响应")
+        };
+        assert_eq!(
+            response.target.outcome,
+            contracts::CancelTargetOutcome::NotCanceledNoEffect(
+                contracts::CancelNotCanceledReasonV3::TemporaryFailureNoEffect
+            )
+        );
+        let text = fs::read_to_string(&path).unwrap();
+        let mut lines: Vec<serde_json::Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let hits: Vec<_> = lines
+            .iter()
+            .filter_map(|l| l.pointer("/body/cancel_scenario_hits"))
+            .flat_map(|h| h.as_array().unwrap())
+            .cloned()
+            .collect();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0]["global_request_id"], "finite-failure");
+        assert_eq!(hits[0]["platform_order_id"], "sim-1");
+        assert_eq!(
+            hits[0]["effective_processing_at_utc_ms"],
+            response.target.effective_processing_at_utc_ms
+        );
+        // 原恢复入口从输入重新执行；命中诊断材料从副本移除也必须得到同一结果。
+        let without_hits = directory.path().join("without-hits.jsonl");
+        for line in &mut lines {
+            if let Some(hits) = line.pointer_mut("/body/cancel_scenario_hits") {
+                *hits = serde_json::json!([]);
+            }
+        }
+        fs::write(
+            &without_hits,
+            lines.iter().map(|l| format!("{l}\n")).collect::<String>(),
+        )
+        .unwrap();
+        let result = Arc::clone(result);
+        let expected_next = execution.actor.next_input_sequence_for_tests();
+        let rules = Arc::clone(&execution.actor._rule_snapshot);
+        let policy = Arc::clone(&execution.actor._finality_policy);
+        let scenario = Arc::clone(&execution.actor.scenario);
+        let latency = Arc::clone(&execution.actor._latency_profile);
+        let live_state = execution.actor.state.take().unwrap();
+        drop(execution);
+        let live = live_state.session.as_ref().unwrap();
+        for source in [&path, &without_hits] {
+            let capture = Rc::new(RefCell::new(ControllableProjectionPortStateV4 {
+                accept_limit: usize::MAX,
+                ..ControllableProjectionPortStateV4::default()
+            }));
+            let mut restored = SimExecution::recover_paper(
+                source,
+                rules.clone(),
+                policy.clone(),
+                scenario.clone(),
+                latency.clone(),
+                Box::new(ControllableProjectionPortV4 {
+                    state: capture.clone(),
+                }),
+                MAX_GROUP_BYTES,
+                |reference| {
+                    assert_eq!(reference.bucket_at_utc_ms, 1_100);
+                    Ok(Arc::from(decoded_initial_market_events("10")))
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                restored.actor.opened.projection_version,
+                crate::runtime_v2::BusinessProjectionVersionV1::V4
+            );
+            assert_eq!(
+                restored.actor.next_input_sequence_for_tests(),
+                expected_next
+            );
+            assert_eq!(
+                capture.borrow().accepted,
+                port_state.borrow().accepted,
+                "V4原投影逐字段重建"
+            );
+            assert_eq!(
+                restored
+                    .cancel_order(request_cutoff(1_300), request.clone())
+                    .unwrap(),
+                receipt
+            );
+            assert_eq!(
+                restored.actor.next_input_sequence_for_tests(),
+                expected_next,
+                "恢复后重复请求不追加输入"
+            );
+            let restored = restored
+                .actor
+                .state
+                .as_ref()
+                .unwrap()
+                .session
+                .as_ref()
+                .unwrap();
+            assert_eq!(restored.execution_state, live.execution_state);
+            assert_eq!(
+                restored.mutation_requests.requests_by_id["finite-failure"]
+                    .completed_response
+                    .as_ref()
+                    .unwrap(),
+                &result,
+                "原请求/目标/处理与收到时刻、暂失败原因必须原样恢复"
+            );
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
