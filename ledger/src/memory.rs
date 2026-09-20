@@ -28,7 +28,11 @@ impl LedgerRecordMaterialV2 {
         }
     }
     pub fn waiting_for_noe_stability(&self) -> bool {
-        matches!(self.payload.as_ref(), DurablePayloadV1::Transaction(e) if matches!(&e.transaction.source, LedgerTransactionSourceV1::Memory(r) if r.durable_reference().is_none()))
+        match self.payload.as_ref() {
+            DurablePayloadV1::Transaction(e) => memory_durable_reference(&e.transaction.source)
+                .is_some_and(|reference| reference.is_none()),
+            _ => false,
+        }
     }
     pub fn kind(&self) -> LedgerRecordMaterialKindV2 {
         match self.payload.as_ref() {
@@ -84,6 +88,19 @@ impl LedgerWriterV1 {
         &mut self,
         record: &NoeConsumedRecordRefV1,
     ) -> Result<LedgerMemoryApplyOutcomeV1, LedgerErrorV1> {
+        self.apply_noe_memory(record, LedgerTransactionSourceV1::Memory(record.clone()))
+    }
+    pub fn apply_noe_memory_v2(
+        &mut self,
+        record: &execution_normalization::NoeConsumedRecordRefV2,
+    ) -> Result<LedgerMemoryApplyOutcomeV1, LedgerErrorV1> {
+        self.apply_noe_memory(record, LedgerTransactionSourceV1::MemoryV2(record.clone()))
+    }
+    fn apply_noe_memory<R: Clone + std::fmt::Debug + Eq>(
+        &mut self,
+        record: &execution_normalization::NoeConsumedRecordRef<R>,
+        source: LedgerTransactionSourceV1,
+    ) -> Result<LedgerMemoryApplyOutcomeV1, LedgerErrorV1> {
         if let Some(seq) = self.applied_memory.get(&record.position()) {
             return Ok(LedgerMemoryApplyOutcomeV1::Applied(
                 LedgerApplyOutcomeV1::AlreadyApplied {
@@ -94,7 +111,6 @@ impl LedgerWriterV1 {
         if !self.economics.dependencies_present(record) {
             return Ok(LedgerMemoryApplyOutcomeV1::MissingEconomicAssociation);
         }
-        let source = LedgerTransactionSourceV1::Memory(record.clone());
         let at = match record.visibility() {
             NoeConsumptionVisibilityV1::Initialization
             | NoeConsumptionVisibilityV1::ControlAdmission => None,
@@ -204,6 +220,9 @@ impl LedgerWriterV1 {
                         SourceNeutralEvidenceKind::InitialMarket { .. }
                             | SourceNeutralEvidenceKind::MarketEnrollment { .. }
                             | SourceNeutralEvidenceKind::SettlementLifecycleV2 { .. }
+                            | SourceNeutralEvidenceKind::Control {
+                                result: SourceNeutralControlResult::CancellationRequestCompleted { .. }
+                            }
                     ) {
                         let out = self.apply_pending_result(
                             &source,
@@ -234,10 +253,11 @@ impl LedgerWriterV1 {
     }
 }
 type MemoryIdentity = execution_normalization::MemoryLogicalIdentityV1;
-type MemoryControl = SourceNeutralControlResult<
+type MemoryControl<R> = SourceNeutralControlResult<
     SourceNeutralSubmissionOutcomeV2<MemoryIdentity>,
     SourceNeutralOrderSnapshotV2<MemoryIdentity>,
     MemoryIdentity,
+    R,
 >;
 fn old_order(
     order: &SourceNeutralOrderSnapshotV2<MemoryIdentity>,
@@ -249,8 +269,9 @@ fn old_order(
         state: order.state.clone(),
     }
 }
-fn ledger_control(result: &MemoryControl) -> LedgerControl<MemoryIdentity> {
-    match result {
+fn ledger_control<R>(result: &MemoryControl<R>) -> Option<LedgerControl<MemoryIdentity>> {
+    Some(match result {
+        SourceNeutralControlResult::CancellationRequestCompleted { .. } => return None,
         SourceNeutralControlResult::Submission { outcome } => LedgerControl::Submission {
             outcome: match outcome {
                 SourceNeutralSubmissionOutcomeV2::Accepted { order, .. } => {
@@ -306,18 +327,18 @@ fn ledger_control(result: &MemoryControl) -> LedgerControl<MemoryIdentity> {
         SourceNeutralControlResult::TradesQuery { result } => LedgerControl::TradesQuery {
             result: result.clone(),
         },
-    }
+    })
 }
-fn ledger_evidence(
+fn ledger_evidence<R>(
     e: &SourceNeutralEvidenceKind<
         SourceNeutralTradeLifecycleResultV2<MemoryIdentity>,
-        MemoryControl,
+        MemoryControl<R>,
         MemoryIdentity,
     >,
 ) -> Option<LedgerEvidence<MemoryIdentity>> {
     Some(match e {
         SourceNeutralEvidenceKind::Control { result } => LedgerEvidence::Control {
-            result: ledger_control(result),
+            result: ledger_control(result)?,
         },
         SourceNeutralEvidenceKind::OrderLifecycle { result } => LedgerEvidence::OrderLifecycle {
             result: result.clone(),
@@ -385,8 +406,8 @@ impl LedgerBackgroundWriterV2 {
             }
             DurablePayloadV1::Transaction(effect) => {
                 let mut effect = (**effect).clone();
-                if let LedgerTransactionSourceV1::Memory(record) = &effect.transaction.source {
-                    let Some(reference) = record.durable_reference() else {
+                if let Some(reference) = memory_durable_reference(&effect.transaction.source) {
+                    let Some(reference) = reference else {
                         return Ok(false);
                     };
                     effect.transaction.source = LedgerTransactionSourceV1::NoeConsumed(reference);
@@ -409,5 +430,29 @@ impl LedgerBackgroundWriterV2 {
             writer.seal_active_segment()?;
         }
         Ok(())
+    }
+}
+
+fn memory_durable_reference(
+    source: &LedgerTransactionSourceV1,
+) -> Option<Option<NoeConsumedRecordReferenceV1>> {
+    match source {
+        LedgerTransactionSourceV1::Memory(record) => Some(record.durable_reference()),
+        LedgerTransactionSourceV1::MemoryV2(record) => Some(record.durable_reference()),
+        _ => None,
+    }
+}
+pub(super) fn liability_delta<R: Clone + std::fmt::Debug>(
+    source: &execution_normalization::NoeConsumedRecordRef<R>,
+) -> Option<&contracts::economics::SourceNeutralAccountBalanceDeltaV2> {
+    if let NormalizationRecord::EconomicFactV2 { fact, .. } = source.record()
+        && let contracts::economics::SourceNeutralEconomicDispositionV2::AccountTransition {
+            balance_delta,
+            ..
+        } = &fact.disposition
+    {
+        Some(balance_delta)
+    } else {
+        None
     }
 }

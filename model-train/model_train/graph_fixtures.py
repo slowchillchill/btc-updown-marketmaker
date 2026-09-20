@@ -42,10 +42,12 @@ def account_slice(pair_count=0, removed_a=False):
     a, b = pair_count - int(removed_a), pair_count
     # 所有量是有限场景预期，不从被测公共投影反算。
     reserved = Decimal(a) + Decimal(b) * Decimal('1.5')
-    r = Row(412, "#6 正式续篇1 B；正式续篇2 §3")
-    scalar_starts = list(range(0, 93, 3)) + list(range(95, 356, 3)) + list(range(364, 412, 3))
+    r = Row(433, "#6 正式续篇1 B；正式续篇2 §3")
+    scalar_starts = list(range(0, 93, 3)) + list(range(95, 356, 3)) + list(range(364, 415, 3))
     for i in scalar_starts:
         r.triple(i, 0, "开户/尚无成交/空旧集合的已知结构性零")
+    r.triple(415, 0, "没有在途撤单请求")
+    r.triple(412, 0, "已领取待Ledger应用原记录数；本切片无等待")
     r.put(93, 1, "当前交易帧")
     r.triple(95, reserved, "当前真实本金占用；post-only即时费0")
     r.triple(98, 5*a, "当前A未终局承诺")
@@ -74,6 +76,7 @@ def cancel_slices(pair_count=0, removed_a=False):
         for i in (offset+leg, offset+2, offset+3, offset+4, offset+8, offset+9,
                   offset+11, offset+12, offset+13):
             r.put(i, 1, "真实腿、GTC、post_only=true及各存在/适用位")
+        for i in (50,51,52,53,54,55,56,61): r.put(offset+i,1,"条件适用性已知、可撤性、撤单反馈字段适用")
         price = Decimal('0.2') if leg == 0 else Decimal('0.3')
         for start, raw, name in ((14,price,"原报价"),(17,5,"原目标份额"),
                                  (23,0,"实际累计匹配量"),(26,5,"活动未匹配量"),
@@ -84,20 +87,20 @@ def cancel_slices(pair_count=0, removed_a=False):
                 r.put(offset+start+j,v,"形成/最新直接接纳反馈：S=R=C−1000ms")
 
     def obj(kind, members):
-        r=Row(129,"#6 正式续篇1 B 撤单联合向量")
-        r.put(kind,1,"Single/Paired/Market类别"); r.put(3,1,"属于当前c")
+        r=Row(184,"#6 正式续篇1 B 撤单联合向量")
+        r.put(kind,1,"Single/Paired/Market类别"); r.put(3,1,"属于当前c"); r.put(5,1,"范围已知"); r.triple(166,0,"没有在途撤单请求")
         if kind != 2:
-            for n,(_,leg) in enumerate(members): template(r,5+50*n,leg)
+            for n,(_,leg) in enumerate(members): template(r,6+68*n,leg)
         else:
             counts=[sum(leg==l for _,leg in members) for l in (0,1)]
-            for start,vals,name in ((105,counts,"可撤订单数"),(111,[5*n for n in counts],"活动余量"),
-                                    (117,[Decimal(counts[0]),Decimal(counts[1])*Decimal('1.5')],"本金占用"),
-                                    (123,[0,0],"即时费占用")):
+            for start,vals,name in ((142,counts,"可撤订单数"),(148,[5*n for n in counts],"活动余量"),
+                                    (154,[Decimal(counts[0]),Decimal(counts[1])*Decimal('1.5')],"本金占用"),
+                                    (160,[0,0],"即时费占用")):
                 for leg in (0,1):r.triple(start+3*leg,vals[leg],name)
         return r
     result=[obj(0,[o]) for o in orders]
     result += [obj(1,[(i,0),(i,1)]) for i in range(pair_count) if not (removed_a and i==0)]
-    if orders: result.append(obj(2,orders))
+    result.append(obj(2,orders))
     return result
 
 
@@ -152,17 +155,19 @@ def market_slice(step=0):
     return r,q
 
 
-def fixture(batch=1, pair_count=0, removed_a=False, step=0, mixed=False):
+def fixture(batch=1, pair_count=0, removed_a=False, step=0, mixed=False, empty_probe=False):
     fast,rule=market_slice(step)
     rows=cancel_slices(pair_count,removed_a)
     n=len(rows); k=max(1,n)
-    features=torch.zeros(batch,k,129);mask=torch.zeros(batch,k,dtype=torch.bool)
+    features=torch.zeros(batch,k,184);mask=torch.zeros(batch,k,dtype=torch.bool)
     slow=[]
     for b in range(batch):
-        empty=mixed and b==0
+        empty=(bool(mixed) and b==0) or empty_probe
         slow.append(account_slice(0 if empty else pair_count,False if empty else removed_a).tensor())
         if n and not empty:
             features[b]=torch.stack([row.tensor() for row in rows]);mask[b]=True
+        elif mixed == "market" and b == 0:
+            features[b,0]=cancel_slices()[0].tensor();mask[b,0]=True
     prefix=torch.zeros(batch,60);prefix[:,7]=1
     return (fast.tensor().repeat(batch,1),torch.stack(slow),rule.tensor().repeat(batch,1),
             prefix,features,mask)

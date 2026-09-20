@@ -8,7 +8,7 @@ use execution_normalization::{MemoryIdentityKeyV1, SourceNeutralEntityKeyV1};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
 use rust_decimal::Decimal;
-use shared_run::{CancelObjectReadV1, SharedExecutionV1};
+use shared_run::{CancelObjectReadV2, SharedExecutionV2};
 use sim_system::execution::{
     MutationRequestReceiptV2, PublicGroupDecisionV1, RequestContextV2, SimRunActorErrorV2,
 };
@@ -133,7 +133,9 @@ impl NativeInputGroup {
             .action_before
             .as_ref()
             .ok_or(crate::InputError::MissingAssociation)?;
-        let ExecutionReadValueV1::Known(objects) = read.cancel_objects() else {
+        let ExecutionReadValueV1::Known(objects) =
+            read.cancel_objects_in(self.current.as_ref(), &self.old)
+        else {
             return Err(crate::InputError::MissingAssociation);
         };
         let scores = blocks
@@ -143,9 +145,9 @@ impl NativeInputGroup {
         for (object, &score) in objects.into_iter().zip(scores) {
             if !matches!(
                 (family, &object),
-                (CancelFamily::Single, CancelObjectReadV1::Single { .. })
-                    | (CancelFamily::Paired, CancelObjectReadV1::Paired { .. })
-                    | (CancelFamily::Market, CancelObjectReadV1::Market { .. })
+                (CancelFamily::Single, CancelObjectReadV2::Single { .. })
+                    | (CancelFamily::Paired, CancelObjectReadV2::Paired { .. })
+                    | (CancelFamily::Market, CancelObjectReadV2::Market { .. })
             ) {
                 continue;
             }
@@ -160,7 +162,7 @@ impl NativeInputGroup {
             .action_before
             .as_ref()
             .ok_or(crate::InputError::MissingAssociation)?
-            .cancel_objects()
+            .cancel_objects_in(self.current.as_ref(), &self.old)
         else {
             return Err(crate::InputError::MissingAssociation);
         };
@@ -177,7 +179,7 @@ impl NativeInputGroup {
         &self,
         row: usize,
         selected: SelectedAction<'_>,
-        shared: &mut SharedExecutionV1,
+        shared: &mut SharedExecutionV2,
         decision: &mut PublicGroupDecisionV1<'_>,
         context: RequestContextV2,
         score: impl FnOnce(&Self, usize, &[f32; 60]) -> Result<Vec<CancelScoreBlock>, E>,
@@ -302,8 +304,8 @@ impl NativeInputGroup {
     }
 }
 
-fn cancel_object_intent(object: CancelObjectReadV1<'_>) -> ModelIntentV1 {
-    fn id(order: &shared_run::ExecutionOrderReadV1<'_>) -> String {
+pub(crate) fn cancel_object_intent(object: CancelObjectReadV2<'_>) -> ModelIntentV1 {
+    fn id(order: &shared_run::ExecutionOrderReadV2<'_>) -> String {
         let MemoryIdentityKeyV1::Entity(SourceNeutralEntityKeyV1::Order { source_order_id }) =
             &order.order_identity.key
         else {
@@ -312,13 +314,13 @@ fn cancel_object_intent(object: CancelObjectReadV1<'_>) -> ModelIntentV1 {
         source_order_id.clone()
     }
     match object {
-        CancelObjectReadV1::Single { order } => ModelIntentV1::CancelOrder {
+        CancelObjectReadV2::Single { order } => ModelIntentV1::CancelOrder {
             platform_order_id: id(&order),
         },
-        CancelObjectReadV1::Paired { orders, .. } => ModelIntentV1::CancelOrders {
+        CancelObjectReadV2::Paired { orders, .. } => ModelIntentV1::CancelOrders {
             platform_order_ids: orders.iter().map(id).collect(),
         },
-        CancelObjectReadV1::Market { condition_id, .. } => ModelIntentV1::CancelMarketOrders {
+        CancelObjectReadV2::Market { condition_id, .. } => ModelIntentV1::CancelMarketOrders {
             condition_id: condition_id.clone(),
         },
     }

@@ -76,7 +76,7 @@ def identities_for(pairs, removed):
     singles = [f'Single(pair={i},leg={leg})' for i in range(pairs) for leg in ('A', 'B')
                if not (removed and i == 0 and leg == 'A')]
     groups = [f'Paired(pair={i},ordinals=0/1)' for i in range(pairs) if not (removed and i == 0)]
-    return singles + groups + (['Market(current)'] if pairs else [])
+    return singles + groups + ['Market(current)']
 
 
 def export(model, config, directory):
@@ -125,14 +125,14 @@ def verify(model, config, graph_directory, threads):
                 args = (rule, prefix, objects, mask, torch.zeros(batch, 3*config.hidden//2), torch.zeros(batch, dtype=torch.bool))
                 compare(model.action(zp, *args), action(zo, *args), label, stats)
             stats['cases'].append({'batch':batch, 'independent_recurrence_steps':12})
-        for pairs, removed, mixed in ((0,False,False), (1,True,False), (85,False,False), (86,True,False), (86,False,False), (86,True,True)):
+        for pairs, removed, mixed, empty_probe in ((0,False,False,True), (0,False,False,False), (1,True,False,False), (85,False,False,False), (86,True,False,False), (86,False,False,False), (86,True,True,False), (86,True,"market",False)):
             batch = 2 if mixed else 1
-            fast, slow, rule, prefix, objects, mask = fixture(batch, pairs, removed, mixed=mixed)
+            fast, slow, rule, prefix, objects, mask = fixture(batch, pairs, removed, mixed=mixed, empty_probe=empty_probe)
             zp, hp = model.state(fast, slow, torch.zeros(config.layers, batch, config.hidden))
             zo, ho = state(fast, slow, torch.zeros_like(hp))
             n = objects.shape[1]
             lengths = [256]*(n//256) + ([n%256] if n%256 else [])
-            empty = pairs == 0
+            empty = empty_probe
             label = {'config':config.name, 'B':batch, 'N':mask.sum(1).tolist(), 'blocks':lengths}
             rp, ep = encode_all(model.action, zp, rule, objects, mask, lengths, empty=empty)
             ro, eo = encode_all(action, zo, rule, objects, mask, lengths, empty=empty)
@@ -199,7 +199,9 @@ def main():
     if not weights.exists() and not a.source:
         torch.save(model.state_dict(), weights)
     model.load_state_dict(torch.load(weights, weights_only=True, map_location='cpu'))
-    result = {'configuration':c.__dict__, 'python':platform.python_version(),
+    schema = Path(__file__).resolve().parents[1] / 'native-inputs' / 'feature_schema.json'
+    result = {'input_contract_version': 'native_inputs_v3', 'feature_schema_sha256': sha(schema),
+        'configuration':c.__dict__, 'python':platform.python_version(),
         'versions':{n:importlib.metadata.version(n) for n in ('torch','onnx','onnxruntime','onnxscript','numpy')},
         'torch_backend':torch.__config__.show(), 'ort_build':ort.get_build_info(),
         'providers':['CPUExecutionProvider'], 'initial_weights_sha256':sha(weights),

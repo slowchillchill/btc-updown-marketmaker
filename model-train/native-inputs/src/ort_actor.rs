@@ -45,11 +45,11 @@ impl OrtActorScorer {
         }
         let batch = rows.len();
         let slots = rows.iter().map(|row| row.2.len()).max().unwrap().max(1);
-        let mut objects = vec![0.; batch * slots * 129];
+        let mut objects = vec![0.; batch * slots * 184];
         let mut mask = vec![false; batch * slots];
         for (b, row) in rows.iter().enumerate() {
             for (i, feature) in row.2.iter().enumerate() {
-                objects[(b * slots + i) * 129..(b * slots + i + 1) * 129].copy_from_slice(feature);
+                objects[(b * slots + i) * 184..(b * slots + i + 1) * 184].copy_from_slice(feature);
                 mask[b * slots + i] = true;
             }
         }
@@ -57,7 +57,7 @@ impl OrtActorScorer {
             "z_t"=>Tensor::from_array(([batch,self.hidden],rows.iter().flat_map(|r|r.1.iter().copied()).collect::<Vec<_>>()))?,
             "rule_features"=>Tensor::from_array(([batch,30],rows.iter().flat_map(|r|r.0.group.rows[r.0.row].rule).collect::<Vec<_>>()))?,
             "prefix_features"=>Tensor::from_array(([batch,60],rows.iter().flat_map(|r|r.0.prefix_features()).collect::<Vec<_>>()))?,
-            "cancel_features"=>Tensor::from_array(([batch,slots,129],objects))?,
+            "cancel_features"=>Tensor::from_array(([batch,slots,184],objects))?,
             "cancel_mask"=>Tensor::from_array(([batch,slots],mask))?,
             "cancel_reduced"=>Tensor::from_array(([batch,3*self.hidden/2],rows.iter().flat_map(|r|r.3.iter().copied()).collect::<Vec<_>>()))?,
             "cancel_exists"=>Tensor::from_array(([batch],rows.iter().map(|r|r.4).collect::<Vec<_>>()))?,

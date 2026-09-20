@@ -104,7 +104,7 @@ async fn limit_cost_matches_real_submission_admission_before_price_improvement()
                 rules.snapshot(),
                 actor._finality_policy.as_ref(),
             );
-            let Some(MutationActionBusinessEffectV2::Post(effect)) = effect else {
+            let Some(MutationActionBusinessEffectV3::Post(effect)) = effect else {
                 panic!("真实提交必须形成处理结果")
             };
             if cash != "4.5875" {

@@ -4,7 +4,7 @@ use contracts::{ExactDecimal, ExecutionReadValueV1, economics::EconomicRational 
 use num_bigint::{BigInt, BigUint};
 use num_integer::Integer;
 use num_traits::{One, ToPrimitive, Zero};
-use shared_run::CancelObjectReadV1;
+use shared_run::CancelObjectReadV2;
 use std::sync::Arc;
 
 pub fn encoding_limit() -> BigUint {
@@ -89,7 +89,7 @@ impl NativeActor {
     }
     pub async fn execute(
         &self,
-        shared: &mut shared_run::SharedExecutionV1,
+        shared: &mut shared_run::SharedExecutionV2,
         decision: &mut sim_system::execution::PublicGroupDecisionV1<'_>,
         context: sim_system::execution::RequestContextV2,
     ) -> Result<
@@ -334,8 +334,12 @@ impl NativeActor {
         Ok(total <= self.cash_micro())
     }
     fn cancel_mask(&self, family: Family) -> Result<Vec<bool>, InputError> {
-        let ExecutionReadValueV1::Known(objects) =
-            self.group.action_before.as_ref().unwrap().cancel_objects()
+        let ExecutionReadValueV1::Known(objects) = self
+            .group
+            .action_before
+            .as_ref()
+            .unwrap()
+            .cancel_objects_in(self.group.current.as_ref(), &self.group.old)
         else {
             return Err(InputError::MissingAssociation);
         };
@@ -344,11 +348,11 @@ impl NativeActor {
             .map(|o| {
                 matches!(
                     (family, o),
-                    (Family::CancelOrder, CancelObjectReadV1::Single { .. })
-                        | (Family::CancelOrders, CancelObjectReadV1::Paired { .. })
+                    (Family::CancelOrder, CancelObjectReadV2::Single { .. })
+                        | (Family::CancelOrders, CancelObjectReadV2::Paired { .. })
                         | (
                             Family::CancelMarketOrders,
-                            CancelObjectReadV1::Market { .. }
+                            CancelObjectReadV2::Market { .. }
                         )
                 )
             })

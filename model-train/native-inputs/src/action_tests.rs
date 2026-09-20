@@ -24,7 +24,7 @@ fn leg(token: &str, price: Decimal) -> BuyLegIntentV1 {
         },
     }
 }
-fn platform(order: &ExecutionOrderReadV1<'_>) -> String {
+fn platform(order: &ExecutionOrderReadV2<'_>) -> String {
     let MemoryIdentityKeyV1::Entity(SourceNeutralEntityKeyV1::Order { source_order_id }) =
         &order.order_identity.key
     else {
@@ -49,7 +49,7 @@ fn blocks(scores: &[f32], lengths: &[usize]) -> Vec<CancelScoreBlock> {
 }
 pub(super) struct Harness {
     _temp: tempfile::TempDir,
-    pub(super) shared: SharedExecutionV1,
+    pub(super) shared: SharedExecutionV2,
     pub(super) native: NativeInputRoot,
     pub(super) driver: FinitePublicConsumptionV1<RecordedPublicGroupSourceV1<TradingTimes>>,
     groups: Vec<serde_json::Value>,
@@ -108,7 +108,7 @@ impl Harness {
         } else {
             recorded_trading_window(&root, depth, maker.then_some(("0.5", "5")), 320_000, true)
         };
-        let (mut execution, observation, rules) = execution_with_identity(
+        let (mut execution, observation, rules) = execution_with_identity_v4(
             &temp.path().join("sim.jsonl"),
             &core,
             SUCCESS_POLICY,
@@ -122,7 +122,7 @@ impl Harness {
         execution
             .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
             .unwrap();
-        let shared = SharedExecutionV1::from_opening(ledger, observation)
+        let shared = SharedExecutionV2::from_opening(ledger, observation)
             .unwrap()
             .unwrap();
         let account = shared
@@ -199,9 +199,9 @@ fn assert_native_cancel_families(group: Arc<NativeInputGroup>) {
             .map(|object| {
                 matches!(
                     (family, object),
-                    (3, CancelObjectReadV1::Single { .. })
-                        | (4, CancelObjectReadV1::Paired { .. })
-                        | (5, CancelObjectReadV1::Market { .. })
+                    (3, CancelObjectReadV2::Single { .. })
+                        | (4, CancelObjectReadV2::Paired { .. })
+                        | (5, CancelObjectReadV2::Market { .. })
                 )
             })
             .collect::<Vec<_>>();
@@ -210,13 +210,13 @@ fn assert_native_cancel_families(group: Arc<NativeInputGroup>) {
         let index = expected.iter().rposition(|legal| *legal).unwrap();
         actor.choose(index).unwrap();
         let intent = match &objects[index] {
-            CancelObjectReadV1::Single { order } => ModelIntentV1::CancelOrder {
+            CancelObjectReadV2::Single { order } => ModelIntentV1::CancelOrder {
                 platform_order_id: platform(order),
             },
-            CancelObjectReadV1::Paired { orders, .. } => ModelIntentV1::CancelOrders {
+            CancelObjectReadV2::Paired { orders, .. } => ModelIntentV1::CancelOrders {
                 platform_order_ids: orders.iter().map(platform).collect(),
             },
-            CancelObjectReadV1::Market { condition_id, .. } => ModelIntentV1::CancelMarketOrders {
+            CancelObjectReadV2::Market { condition_id, .. } => ModelIntentV1::CancelMarketOrders {
                 condition_id: (*condition_id).clone(),
             },
         };
@@ -267,7 +267,7 @@ async fn complete_pair_terminal_leg_and_257_global_selection() {
                 .iter()
                 .enumerate()
                 .find_map(|(i, o)| match o {
-                    CancelObjectReadV1::Single { order }
+                    CancelObjectReadV2::Single { order }
                         if order.origin.as_ref().unwrap().intent.global_request_id()
                             == "pair-85"
                             && order.origin.as_ref().unwrap().batch_item_ordinal == 1 =>
@@ -280,7 +280,7 @@ async fn complete_pair_terminal_leg_and_257_global_selection() {
             let expected = objects
                 .iter()
                 .find_map(|o| match o {
-                    CancelObjectReadV1::Paired { origin, orders }
+                    CancelObjectReadV2::Paired { origin, orders }
                         if origin.global_request_id() == "pair-85" =>
                     {
                         assert_eq!(orders[0].origin.as_ref().unwrap().batch_item_ordinal, 0);
@@ -291,7 +291,7 @@ async fn complete_pair_terminal_leg_and_257_global_selection() {
                 })
                 .unwrap();
             let mut scores = vec![0.; 259];
-            scores[objects.iter().position(|o| matches!(o, CancelObjectReadV1::Paired { origin, .. } if origin.global_request_id()=="pair-85")).unwrap()] = 2.;
+            scores[objects.iter().position(|o| matches!(o, CancelObjectReadV2::Paired { origin, .. } if origin.global_request_id()=="pair-85")).unwrap()] = 2.;
             assert_eq!(
                 g.cancel_intent(CancelFamily::Paired, &blocks(&scores, &[256, 3]))
                     .unwrap(),
@@ -327,13 +327,13 @@ async fn complete_pair_terminal_leg_and_257_global_selection() {
             assert_eq!(
                 objects
                     .iter()
-                    .filter(|o| matches!(o, CancelObjectReadV1::Paired { .. }))
+                    .filter(|o| matches!(o, CancelObjectReadV2::Paired { .. }))
                     .count(),
                 85
             );
-            assert!(!objects.iter().any(|o|matches!(o,CancelObjectReadV1::Paired{origin,..} if origin.global_request_id()=="pair-85")));
+            assert!(!objects.iter().any(|o|matches!(o,CancelObjectReadV2::Paired{origin,..} if origin.global_request_id()=="pair-85")));
             assert!(!objects.iter().any(
-                |o| matches!(o,CancelObjectReadV1::Single{order} if Some(platform(order))==closed_b)
+                |o| matches!(o,CancelObjectReadV2::Single{order} if Some(platform(order))==closed_b)
             ));
             // 相同真实257对象：末块市场对象；跨128边界的同族并列仍取原首项。
             for lengths in [&[256, 1][..], &[128, 129][..]] {
@@ -350,7 +350,7 @@ async fn complete_pair_terminal_leg_and_257_global_selection() {
                 scores[0] = 2.;
                 scores[170] = 2.;
                 scores[256] = 100.;
-                let CancelObjectReadV1::Single { order } = &objects[0] else {
+                let CancelObjectReadV2::Single { order } = &objects[0] else {
                     panic!()
                 };
                 assert_eq!(
@@ -507,7 +507,7 @@ async fn market_cancel_uses_only_selected_condition() {
                 panic!()
             };
             assert_eq!(objects.len(), 4);
-            let selected=objects.iter().position(|o|matches!(o,CancelObjectReadV1::Market{condition_id,..} if condition_id.0==CONDITION_ID)).unwrap();
+            let selected=objects.iter().position(|o|matches!(o,CancelObjectReadV2::Market{condition_id,..} if condition_id.0==CONDITION_ID)).unwrap();
             let mut scores = vec![0.; 4];
             scores[selected] = 1.;
             g.execute_selected(
@@ -525,7 +525,7 @@ async fn market_cancel_uses_only_selected_condition() {
         if at == 346_000 || at == 356_000 {
             assert_eq!(g.cutoff.private_feedback_sequence(), 7);
             assert_eq!(g.action_before.as_ref().unwrap().orders().count(), 1);
-            assert_eq!(g.cancel.len(), 2);
+            assert_eq!(g.cancel.len(), 3, "保留当前与旧条件的 Market 候选");
             assert_eq!(h.shared.registry().orders().count(), 2);
             for order in h.shared.registry().orders() {
                 let original = order.origin.as_ref().unwrap().intent.intent();
@@ -887,7 +887,7 @@ async fn same_process_cancel_actor_all_objects_and_original_identities() {
         for row in &group.rows {
             let output = state.run(ort::inputs![
                 "fast_features" => ort::value::Tensor::from_array(([1,836], row.fast.clone())).unwrap(),
-                "slow_features" => ort::value::Tensor::from_array(([1,412], row.slow.clone())).unwrap(),
+                "slow_features" => ort::value::Tensor::from_array(([1,433], row.slow.clone())).unwrap(),
                 "h_prev" => ort::value::Tensor::from_array(([layers,1,hidden], h_prev)).unwrap()
             ]).unwrap();
             z = output["z_t"]
@@ -1115,7 +1115,7 @@ fn continue_three_runtime(
     for (row_index, row) in group.rows.iter().enumerate() {
         let output = state.run(ort::inputs![
             "fast_features" => ort::value::Tensor::from_array(([1,836],row.fast.clone())).unwrap(),
-            "slow_features" => ort::value::Tensor::from_array(([1,412],row.slow.clone())).unwrap(),
+            "slow_features" => ort::value::Tensor::from_array(([1,433],row.slow.clone())).unwrap(),
             "h_prev" => ort::value::Tensor::from_array(([layers,1,hidden],previous_hidden.clone())).unwrap()
         ]).unwrap();
         let z = output["z_t"]

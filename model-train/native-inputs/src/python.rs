@@ -57,6 +57,32 @@ impl PythonGroup {
             serde_json::to_value(self.group.as_ref()).map_err(error)?,
         )
     }
+    #[cfg(test)]
+    fn validation_cancel_objects(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let intents = match self.group.action_before.as_ref() {
+            Some(read) => {
+                let contracts::ExecutionReadValueV1::Known(objects) =
+                    read.cancel_objects_in(self.group.current.as_ref(), &self.group.old)
+                else {
+                    return Err(error("cancel candidates unavailable"));
+                };
+                objects
+                    .into_iter()
+                    .map(crate::action::cancel_object_intent)
+                    .collect::<Vec<_>>()
+            }
+            None => Vec::new(),
+        };
+        value(
+            py,
+            serde_json::json!(
+                intents
+                    .iter()
+                    .map(|intent| format!("{intent:?}"))
+                    .collect::<Vec<_>>()
+            ),
+        )
+    }
     fn actor(&self, row: usize) -> PyResult<PythonActor> {
         Ok(PythonActor {
             actor: NativeActor::new(self.group.clone(), row).map_err(error)?,
@@ -86,6 +112,13 @@ impl PythonActor {
     #[cfg(test)]
     fn validation_state(&self) -> String {
         format!("{:?}", self.actor.state)
+    }
+    #[cfg(test)]
+    fn validation_intent(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        value(
+            py,
+            serde_json::json!(format!("{:?}", self.actor.intent().map_err(error)?)),
+        )
     }
     fn path(&self) -> Vec<usize> {
         self.actor.path.clone()

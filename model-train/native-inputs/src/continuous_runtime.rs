@@ -19,6 +19,22 @@ fn close(reference: &[f32], actual: &[f32]) {
         );
     }
 }
+fn close_supported(reference: &[f32], actual: &[f32], support: &[bool]) {
+    assert_eq!(reference.len(), actual.len());
+    assert_eq!(reference.len(), support.len());
+    for (index, ((&reference, &actual), &legal)) in
+        reference.iter().zip(actual).zip(support).enumerate()
+    {
+        if legal {
+            assert!(
+                reference.is_finite()
+                    && actual.is_finite()
+                    && (reference - actual).abs() <= 1e-5 + 1e-4 * reference.abs(),
+                "supported score mismatch original_index={index} reference={reference} actual={actual}"
+            );
+        }
+    }
+}
 fn key(key: &HiddenKey) -> String {
     serde_json::to_string(key).unwrap()
 }
@@ -191,7 +207,7 @@ impl ThreeRuntime {
                 .iter()
                 .find(|(root, family, ..)| *root == 1 && *family == 4)
                 .unwrap();
-            close(&expected.2, &scores[0]);
+            close_supported(&expected.2, &scores[0], &expected.3);
             actors[1].choose(*expected.4.last().unwrap()).unwrap();
             assert_eq!(actors[0].path, vec![0]);
             assert!(actors.iter().all(NativeActor::is_complete));
@@ -211,7 +227,7 @@ impl ThreeRuntime {
                             .position(|r| r.role == InputRole::DecisionRequired)
                             .unwrap();
                         let mut actor = NativeActor::new(g.clone(), row).unwrap();
-                        if !g.cancel.is_empty() {
+                        if actor.support().unwrap()[family] {
                             actor.choose(family).unwrap();
                         }
                         actor
@@ -276,10 +292,20 @@ impl ThreeRuntime {
                     let mut scores = vec![Vec::new(); groups.len()];
                     let mut offset = 0;
                     for length in lengths {
-                        let rows = actors
+                        let active = actors
                             .iter()
                             .enumerate()
-                            .map(|(i, a)| {
+                            .filter_map(|(i, _)| {
+                                evidence
+                                    .iter()
+                                    .any(|(root, f, ..)| *root == i && *f == family)
+                                    .then_some(i)
+                            })
+                            .collect::<Vec<_>>();
+                        let rows = active
+                            .iter()
+                            .map(|&i| {
+                                let a = &actors[i];
                                 let n = a.group.cancel.len();
                                 (
                                     a,
@@ -292,8 +318,8 @@ impl ThreeRuntime {
                             })
                             .collect::<Vec<_>>();
                         let output = self.scorer.blocks(&rows).unwrap();
-                        for (i, values) in output.iter().enumerate() {
-                            scores[i].extend_from_slice(&values[7][..rows[i].2.len()]);
+                        for ((&i, row), values) in active.iter().zip(&rows).zip(&output) {
+                            scores[i].extend_from_slice(&values[7][..row.2.len()]);
                         }
                         offset += length;
                     }
@@ -305,11 +331,16 @@ impl ThreeRuntime {
                             choices.push(None);
                             continue;
                         }
-                        let expected = evidence
+                        let Some(expected) = evidence
                             .iter()
                             .find(|(root, f, ..)| *root == i && *f == family)
-                            .unwrap();
-                        close(&expected.2, &scores[i]);
+                        else {
+                            assert!(!actors[i].support().unwrap()[family]);
+                            assert!(scores[i].is_empty(), "无支持族不进入第二遍评分");
+                            choices.push(None);
+                            continue;
+                        };
+                        close_supported(&expected.2, &scores[i], &expected.3);
                         let choice = expected
                             .3
                             .iter()
@@ -332,7 +363,14 @@ impl ThreeRuntime {
                 }
                 for i in 0..groups.len() {
                     close(&layouts[0].0[i], &layouts[1].0[i]);
-                    close(&layouts[0].1[i], &layouts[1].1[i]);
+                    if let Some((_, _, _, support, _)) = evidence
+                        .iter()
+                        .find(|(root, f, ..)| *root == i && *f == family)
+                    {
+                        close_supported(&layouts[0].1[i], &layouts[1].1[i], support);
+                    } else {
+                        assert!(layouts[0].1[i].is_empty() && layouts[1].1[i].is_empty());
+                    }
                 }
                 assert_eq!(layouts[0].2, layouts[1].2);
             }
@@ -355,7 +393,7 @@ impl ThreeRuntime {
                 .scores_batch(&[(&actor, &self.last_states[root][row], &reduced)])
                 .unwrap()
                 .remove(0);
-            close(&want, &scores);
+            close_supported(&want, &scores, &support);
             let choice = support
                 .iter()
                 .zip(&scores)
@@ -559,7 +597,7 @@ impl ThreeRuntime {
                 .state
                 .run(ort::inputs![
                     "fast_features" => Tensor::from_array(([batch,836],fast)).unwrap(),
-                    "slow_features" => Tensor::from_array(([batch,412],slow)).unwrap(),
+                    "slow_features" => Tensor::from_array(([batch,433],slow)).unwrap(),
                     "h_prev" => Tensor::from_array(([self.layers,batch,self.width],h)).unwrap()
                 ])
                 .unwrap();
@@ -660,7 +698,7 @@ impl ThreeRuntime {
                 assert_eq!(&actual_support, support);
                 assert_eq!(&format!("{:?}", actor.state), prefix);
                 assert_eq!(actor.prefix_features().as_slice(), features);
-                close(want, &actual);
+                close_supported(want, &actual, support);
                 let mut best = None;
                 for (index, (&legal, &score)) in support.iter().zip(&actual).enumerate() {
                     if legal && best.is_none_or(|(_, old)| score > old) {
@@ -668,7 +706,11 @@ impl ThreeRuntime {
                     }
                 }
                 let choice = best.unwrap().0;
-                assert_eq!(choice, path[step]);
+                assert_eq!(
+                    choice, path[step],
+                    "strict RustORT choice mismatch root={} row={} step={step} cutoff={:?}",
+                    decisions[i].0, decisions[i].1, groups[decisions[i].0].cutoff
+                );
                 actor.choose(choice).unwrap();
             }
             step += 1;

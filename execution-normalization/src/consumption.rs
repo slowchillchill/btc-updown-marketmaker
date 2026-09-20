@@ -5,22 +5,24 @@ use contracts::execution_normalization::*;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, OnceLock};
 
-pub type NoeMemoryRecordV3 = NormalizationRecord<
+pub type NoeMemoryRecord<R> = NormalizationRecord<
     SourceNeutralTradeLifecycleResultV2<MemoryLogicalIdentityV1>,
     SourceNeutralControlResult<
         SourceNeutralSubmissionOutcomeV2<MemoryLogicalIdentityV1>,
         SourceNeutralOrderSnapshotV2<MemoryLogicalIdentityV1>,
         MemoryLogicalIdentityV1,
+        R,
     >,
     MemoryLogicalIdentityV1,
     MemoryEconomicFactReferenceV1,
 >;
-pub type NoeMemoryBatchV3 = NormalizationBatch<
+pub type NoeMemoryBatch<R> = NormalizationBatch<
     SourceNeutralTradeLifecycleResultV2<MemoryLogicalIdentityV1>,
     SourceNeutralControlResult<
         SourceNeutralSubmissionOutcomeV2<MemoryLogicalIdentityV1>,
         SourceNeutralOrderSnapshotV2<MemoryLogicalIdentityV1>,
         MemoryLogicalIdentityV1,
+        R,
     >,
     MemoryLogicalIdentityV1,
     MemoryEconomicFactReferenceV1,
@@ -49,19 +51,19 @@ impl NoeBatchDurabilityV1 {
     }
 }
 #[derive(Clone, Debug)]
-struct Batch {
+struct Batch<R> {
     context: Arc<ExecutionNormalizationContextV1>,
-    batch: Arc<NoeMemoryBatchV3>,
+    batch: Arc<NoeMemoryBatch<R>>,
     durable: NoeBatchDurabilityV1,
 }
 /// 原批及已建立可见性的借用；私有字段不等于任意公开生产者调用的来源认证。
 #[derive(Clone, Debug)]
-pub struct NoeConsumedRecordRefV1 {
-    batch: Arc<Batch>,
+pub struct NoeConsumedRecordRef<R> {
+    batch: Arc<Batch<R>>,
     ordinal: usize,
     visibility: NoeConsumptionVisibilityV1,
 }
-impl NoeConsumedRecordRefV1 {
+impl<R: Clone + std::fmt::Debug> NoeConsumedRecordRef<R> {
     pub fn position(&self) -> NoeRecordPositionV1 {
         NoeRecordPositionV1 {
             context_reference: self.context().context_reference.clone(),
@@ -72,7 +74,7 @@ impl NoeConsumedRecordRefV1 {
     pub fn context(&self) -> &ExecutionNormalizationContextV1 {
         &self.batch.context
     }
-    pub fn record(&self) -> &NoeMemoryRecordV3 {
+    pub fn record(&self) -> &NoeMemoryRecord<R> {
         &self.batch.batch.records[self.ordinal]
     }
     pub fn visibility(&self) -> &NoeConsumptionVisibilityV1 {
@@ -107,19 +109,19 @@ impl NoeConsumedRecordReferenceV1 {
 }
 /// 只读耐久视图，刻意没有业务可见性或可应用引用转换。
 #[derive(Debug)]
-pub struct NoeDurableRecordViewV1 {
+pub struct NoeDurableRecordView<R> {
     position: NoeRecordPositionV1,
     context: ExecutionNormalizationContextV1,
-    record: NoeMemoryRecordV3,
+    record: NoeMemoryRecord<R>,
 }
-impl NoeDurableRecordViewV1 {
+impl<R: Clone + std::fmt::Debug> NoeDurableRecordView<R> {
     pub fn position(&self) -> NoeRecordPositionV1 {
         self.position.clone()
     }
     pub fn context(&self) -> &ExecutionNormalizationContextV1 {
         &self.context
     }
-    pub fn record(&self) -> &NoeMemoryRecordV3 {
+    pub fn record(&self) -> &NoeMemoryRecord<R> {
         &self.record
     }
 }
@@ -127,6 +129,17 @@ pub fn read_durable_noe_record_v1(
     reference: &NoeResultReferenceV1,
 ) -> Result<NoeDurableRecordViewV1, DurableErrorV1> {
     let resolved = read_noe_result_v3(reference)?;
+    durable_record_view(reference, resolved)
+}
+pub fn read_durable_noe_record_v2(
+    reference: &NoeResultReferenceV1,
+) -> Result<NoeDurableRecordViewV2, DurableErrorV1> {
+    durable_record_view(reference, read_noe_result_v4(reference)?)
+}
+fn durable_record_view<C: Serialize, R: serde::de::DeserializeOwned>(
+    reference: &NoeResultReferenceV1,
+    resolved: ResolvedNoeResult<SourceNeutralTradeLifecycleResultV2, C>,
+) -> Result<NoeDurableRecordView<R>, DurableErrorV1> {
     // 冷读取沿原身份编解码，既不规范化，也不创建领取能力。
     let record = serde_json::to_value(&resolved.record)
         .and_then(serde_json::from_value)
@@ -134,7 +147,7 @@ pub fn read_durable_noe_record_v1(
             path: reference.commit_container.location.clone().into(),
             message: e.to_string(),
         })?;
-    Ok(NoeDurableRecordViewV1 {
+    Ok(NoeDurableRecordView {
         position: NoeRecordPositionV1 {
             context_reference: resolved.context.context_reference.clone(),
             source_watermark: resolved.boundary.source_watermark,
@@ -149,19 +162,19 @@ pub fn read_durable_noe_record_v1(
 /// 正式接线由运行源拥有；只接受本运行的实际规范化批和真实驱动时点。
 /// 这些公开方法用于受信进程内协作：调用方仍可手工重建批并自填时点取得引用，
 /// 因此来源真实性由宿主接线负责，不以该类型、私有字段或直接类型编译反例证明。
-#[derive(Debug, Default)]
-pub struct NoeConsumptionSourceV1 {
-    opening: Option<NoeConsumedRecordRefV1>,
-    admitted: Vec<NoeConsumedRecordRefV1>,
-    pending: Vec<(Arc<Batch>, Vec<usize>)>,
+#[derive(Debug)]
+pub struct NoeConsumptionSource<R> {
+    opening: Option<NoeConsumedRecordRef<R>>,
+    admitted: Vec<NoeConsumedRecordRef<R>>,
+    pending: Vec<(Arc<Batch<R>>, Vec<usize>)>,
     delivered: u64,
 }
-impl NoeConsumptionSourceV1 {
+impl<R: Clone + std::fmt::Debug + PartialEq> NoeConsumptionSource<R> {
     /// 开户事实经真实归约及原 NOE 规范化产生即为 Initialization，不等待后台交接或耐久。
     pub fn accept(
         &mut self,
         context: Arc<ExecutionNormalizationContextV1>,
-        batch: Arc<NoeMemoryBatchV3>,
+        batch: Arc<NoeMemoryBatch<R>>,
     ) -> NoeBatchDurabilityV1 {
         let durable = NoeBatchDurabilityV1(Arc::new(OnceLock::new()));
         let batch = Arc::new(Batch {
@@ -173,7 +186,7 @@ impl NoeConsumptionSourceV1 {
         for (ordinal, record) in batch.batch.records.iter().enumerate() {
             if matches!(record, NormalizationRecord::EconomicFact { fact, .. } if matches!(fact.disposition, SourceNeutralEconomicDispositionV1::AccountOpening { .. }))
             {
-                self.opening = Some(NoeConsumedRecordRefV1 {
+                self.opening = Some(NoeConsumedRecordRef {
                     batch: batch.clone(),
                     ordinal,
                     visibility: NoeConsumptionVisibilityV1::Initialization,
@@ -187,7 +200,7 @@ impl NoeConsumptionSourceV1 {
                     ..
                 }
             ) {
-                self.admitted.push(NoeConsumedRecordRefV1 {
+                self.admitted.push(NoeConsumedRecordRef {
                     batch: batch.clone(),
                     ordinal,
                     visibility: NoeConsumptionVisibilityV1::ControlAdmission,
@@ -203,17 +216,17 @@ impl NoeConsumptionSourceV1 {
         durable
     }
     /// 真实同步接纳的目录事实；不编造接收反馈坐标或初始化 UTC。
-    pub fn take_admitted_records(&mut self) -> Vec<NoeConsumedRecordRefV1> {
+    pub fn take_admitted_records(&mut self) -> Vec<NoeConsumedRecordRef<R>> {
         std::mem::take(&mut self.admitted)
     }
-    pub fn opening_record(&self) -> Option<NoeConsumedRecordRefV1> {
+    pub fn opening_record(&self) -> Option<NoeConsumedRecordRef<R>> {
         self.opening.clone()
     }
     pub fn delivered_through(&self) -> u64 {
         self.delivered
     }
     /// 仅由原受信来源驱动器传递其已闭合接收/公开逻辑时点。
-    pub fn take_closed(&mut self, closed: i64, visible: i64) -> Vec<NoeConsumedRecordRefV1> {
+    pub fn take_closed(&mut self, closed: i64, visible: i64) -> Vec<NoeConsumedRecordRef<R>> {
         let mut ready = Vec::new();
         for (batch, ordinals) in &mut self.pending {
             ordinals.retain(|ordinal| {
@@ -244,7 +257,7 @@ impl NoeConsumptionSourceV1 {
                     self.delivered = self.delivered.checked_add(1).expect("原交付序不溢出");
                     source = Some((received, sequence));
                 }
-                NoeConsumedRecordRefV1 {
+                NoeConsumedRecordRef {
                     batch,
                     ordinal,
                     visibility: NoeConsumptionVisibilityV1::Feedback {
@@ -256,7 +269,7 @@ impl NoeConsumptionSourceV1 {
             .collect()
     }
 }
-fn feedback_coordinate(record: &NoeMemoryRecordV3) -> Option<(i64, u64)> {
+fn feedback_coordinate<R: Clone + PartialEq>(record: &NoeMemoryRecord<R>) -> Option<(i64, u64)> {
     match record.source_reference().record {
         SimV2SourceRecordReferenceV1::DirectResponse {
             private_feedback_sequence,
@@ -281,3 +294,24 @@ fn feedback_coordinate(record: &NoeMemoryRecordV3) -> Option<(i64, u64)> {
         _ => None,
     }
 }
+
+impl<R> Default for NoeConsumptionSource<R> {
+    fn default() -> Self {
+        Self {
+            opening: None,
+            admitted: Vec::new(),
+            pending: Vec::new(),
+            delivered: 0,
+        }
+    }
+}
+pub type NoeMemoryRecordV3 = NoeMemoryRecord<NoCancellationRequestCompletionV0>;
+pub type NoeMemoryRecordV4 = NoeMemoryRecord<CancellationRequestCompletedV1>;
+pub type NoeMemoryBatchV3 = NoeMemoryBatch<NoCancellationRequestCompletionV0>;
+pub type NoeMemoryBatchV4 = NoeMemoryBatch<CancellationRequestCompletedV1>;
+pub type NoeConsumedRecordRefV1 = NoeConsumedRecordRef<NoCancellationRequestCompletionV0>;
+pub type NoeConsumedRecordRefV2 = NoeConsumedRecordRef<CancellationRequestCompletedV1>;
+pub type NoeDurableRecordViewV1 = NoeDurableRecordView<NoCancellationRequestCompletionV0>;
+pub type NoeDurableRecordViewV2 = NoeDurableRecordView<CancellationRequestCompletedV1>;
+pub type NoeConsumptionSourceV1 = NoeConsumptionSource<NoCancellationRequestCompletionV0>;
+pub type NoeConsumptionSourceV2 = NoeConsumptionSource<CancellationRequestCompletedV1>;

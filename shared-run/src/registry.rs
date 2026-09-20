@@ -1,6 +1,6 @@
 use crate::quantity::Quantity;
 use ::execution_normalization::{
-    MemoryLogicalIdentityV1 as Identity, NoeConsumedRecordRefV1 as Ref, NoeConsumptionVisibilityV1,
+    MemoryLogicalIdentityV1 as Identity, NoeConsumedRecordRef as Ref, NoeConsumptionVisibilityV1,
     NormalizationRecord, SourceNeutralEvidenceKind,
 };
 use ExecutionReadValueV1::{Known, NotApplicable, Unavailable};
@@ -33,30 +33,54 @@ pub struct SubmittedLegReadV1<'a> {
     pub intent: &'a FrozenIntentRefV1,
     pub batch_item_ordinal: u16,
 }
-pub struct ExecutionOrderReadV1<'a> {
+pub struct ExecutionOrderRead<'a, R> {
     pub order_identity: &'a Identity,
+    pub condition_id: Option<&'a ConditionId>,
+    pub token_id: Option<&'a TokenId>,
+    pub base_quantity_applicability: Option<bool>,
+    pub latest_cancel_feedback: Option<&'a Ref<R>>,
     pub origin: Option<SubmittedLegReadV1<'a>>,
-    pub accepted: Option<&'a Ref>,
-    pub formed: Option<&'a Ref>,
-    pub latest_lifecycle: Option<&'a Ref>,
-    pub latest_direct_feedback: Option<&'a Ref>,
+    pub accepted: Option<&'a Ref<R>>,
+    pub formed: Option<&'a Ref<R>>,
+    pub latest_lifecycle: Option<&'a Ref<R>>,
+    pub latest_direct_feedback: Option<&'a Ref<R>>,
     pub matched_shares: ExecutionReadValueV1<ExactDecimal>,
     pub active_unfilled_shares: ExecutionReadValueV1<ExactDecimal>,
     pub cancellable: ExecutionReadValueV1<bool>,
 }
-#[derive(Clone, Default)]
-struct Order {
+#[derive(Clone)]
+struct Order<R> {
     origin: Option<(String, u16)>,
-    accepted: Option<Ref>,
-    formed: Option<Ref>,
-    lifecycle: Option<Ref>,
-    direct: Option<Ref>,
-    trades: BTreeMap<Identity, Ref>,
+    accepted: Option<Ref<R>>,
+    formed: Option<Ref<R>>,
+    lifecycle: Option<Ref<R>>,
+    direct: Option<Ref<R>>,
+    known_query: Option<Ref<R>>,
+    canceled: Option<Ref<R>>,
+    cancellation: Option<Ref<R>>,
+    trades: BTreeMap<Identity, Ref<R>>,
+}
+impl<R> Default for Order<R> {
+    fn default() -> Self {
+        Self {
+            origin: None,
+            accepted: None,
+            formed: None,
+            lifecycle: None,
+            direct: None,
+            known_query: None,
+            canceled: None,
+            cancellation: None,
+            trades: BTreeMap::new(),
+        }
+    }
 }
 #[derive(Clone)]
-struct Submitted {
+struct Submitted<R> {
     origin: FrozenIntentRefV1,
     receipt: Option<MutationRequestReceiptV2>,
+    completed: Option<Ref<R>>,
+    cancel_targets: Vec<Ref<R>>,
     outcomes: BTreeMap<u16, Option<Identity>>,
 }
 /// 普通已稳定 NOE 读取不能直接传入共享登记；这不是公开生产者接口的来源认证。
@@ -67,19 +91,21 @@ struct Submitted {
 /// }
 /// ```
 #[derive(Clone)]
-pub struct SharedExecutionRegistryV1 {
+pub struct SharedExecutionRegistry<R> {
     context: Arc<ExecutionNormalizationContextV1>,
-    intents: BTreeMap<String, Submitted>,
-    orders: BTreeMap<Identity, Order>,
+    intents: BTreeMap<String, Submitted<R>>,
+    orders: BTreeMap<Identity, Order<R>>,
     markets: BTreeMap<String, Arc<PublicTradingRuleContextV1>>,
+    cancel_locations: BTreeMap<Identity, Ref<R>>,
 }
-impl SharedExecutionRegistryV1 {
+impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
     pub fn new(context: Arc<ExecutionNormalizationContextV1>) -> Self {
         Self {
             context,
             intents: BTreeMap::new(),
             orders: BTreeMap::new(),
             markets: BTreeMap::new(),
+            cancel_locations: BTreeMap::new(),
         }
     }
     pub(crate) fn observe_market(&mut self, rules: &Arc<PublicTradingRuleContextV1>) {
@@ -99,7 +125,7 @@ impl SharedExecutionRegistryV1 {
                         .and_then(|s| leg(s.origin.intent(), *ordinal)))
                     .is_none_or(|(_, leg)| !matches!(self.remaining(id, &leg.order), Known(v) if decimal(&v).is_zero()))
         }).map(|(id, state)| (id.clone(), state.clone())).collect();
-        let needed: BTreeSet<_> = self
+        let mut needed: BTreeSet<_> = self
             .all_commitments()
             .map(|r| r.origin.intent.global_request_id())
             .chain(
@@ -107,7 +133,52 @@ impl SharedExecutionRegistryV1 {
                     .values()
                     .filter_map(|o| o.origin.as_ref().map(|(id, _)| id.as_str())),
             )
+            .map(str::to_owned)
             .collect();
+        needed.extend(
+            self.intents
+                .values()
+                .filter(|r| {
+                    r.receipt.is_some()
+                        && r.completed.is_none()
+                        && cancellation_scope(r.origin.intent()).is_some()
+                })
+                .map(|r| r.origin.global_request_id().to_owned()),
+        );
+        if let Some((request, _)) = self.latest_cancel_request(None) {
+            needed.insert(request.origin.global_request_id().to_owned());
+        }
+        if let Known(objects) = self.cancel_objects() {
+            for object in objects {
+                if let Some((request, _)) =
+                    self.latest_cancel_request(Some(&object.request_scope()))
+                {
+                    needed.insert(request.origin.global_request_id().to_owned());
+                }
+            }
+        }
+        let mut cancel_locations = BTreeMap::new();
+        // 原响应过滤需要其目标的市场证据；只保留仍被选中响应或在途请求引用的订单。
+        for id in &needed {
+            let request = &self.intents[id];
+            let explicit = cancellation_scope(request.origin.intent());
+            for (identity, state) in &self.orders {
+                let referenced = matches!(&explicit, Some(CancellationScopeV1::Orders(ids)) if ids.contains(&platform_id(identity)))
+                    || request.cancel_targets.iter().any(|target| matches!(target.record(),
+                        NormalizationRecord::Evidence { evidence: SourceNeutralEvidenceKind::Control {
+                            result: SourceNeutralControlResult::Cancellation { order_identity, .. }
+                        }, .. } if order_identity == identity));
+                if referenced && !orders.contains_key(identity) {
+                    if let Some(record) =
+                        location_records(state).find(|r| record_location(r, identity).is_some())
+                    {
+                        cancel_locations
+                            .entry(identity.clone())
+                            .or_insert_with(|| record.clone());
+                    }
+                }
+            }
+        }
         let intents = self
             .intents
             .iter()
@@ -119,6 +190,7 @@ impl SharedExecutionRegistryV1 {
             intents,
             orders,
             markets: self.markets.clone(),
+            cancel_locations,
         }
     }
     pub fn freeze(&mut self, id: String, intent: Arc<ModelIntentV1>) -> FrozenIntentRefV1 {
@@ -131,6 +203,8 @@ impl SharedExecutionRegistryV1 {
                     intent,
                 },
                 receipt: None,
+                completed: None,
+                cancel_targets: Vec::new(),
                 outcomes: BTreeMap::new(),
             })
             .origin
@@ -146,7 +220,7 @@ impl SharedExecutionRegistryV1 {
             .expect("本账户先冻结意图")
             .receipt = Some(*receipt);
     }
-    pub fn observe(&mut self, record: &Ref) {
+    pub fn observe(&mut self, record: &Ref<R>) {
         let NormalizationRecord::Evidence { evidence, .. } = record.record() else {
             return;
         };
@@ -182,40 +256,47 @@ impl SharedExecutionRegistryV1 {
                         replace_delivery(&mut state.direct, record);
                     }
                 }
-                SourceNeutralControlResult::Cancellation { order_identity, .. } => {
-                    replace_delivery(
-                        &mut self
-                            .orders
-                            .entry(order_identity.clone())
-                            .or_default()
-                            .direct,
-                        record,
-                    );
+                SourceNeutralControlResult::Cancellation {
+                    order_identity,
+                    outcome,
+                } => {
+                    let state = self.orders.entry(order_identity.clone()).or_default();
+                    replace_delivery(&mut state.direct, record);
+                    replace_delivery(&mut state.cancellation, record);
+                    if matches!(outcome, SourceNeutralCancellationOutcomeV1::Canceled) {
+                        replace_source(&mut state.canceled, record);
+                    }
+                    if let Some(id) = cancellation_request_id(record)
+                        && let Some(request) = self.intents.get_mut(id)
+                        && !request
+                            .cancel_targets
+                            .iter()
+                            .any(|r| r.position() == record.position())
+                    {
+                        request.cancel_targets.push(record.clone());
+                    }
+                }
+                SourceNeutralControlResult::CancellationRequestCompleted { .. } => {
+                    if let Some(id) = cancellation_request_id(record)
+                        && let Some(request) = self.intents.get_mut(id)
+                    {
+                        replace_delivery(&mut request.completed, record);
+                    }
                 }
                 SourceNeutralControlResult::OrderQuery {
                     result: SourceNeutralOrderQueryResult::Found { order },
                 } => {
-                    replace_delivery(
-                        &mut self
-                            .orders
-                            .entry(order.order_identity.clone())
-                            .or_default()
-                            .direct,
-                        record,
-                    );
+                    let state = self.orders.entry(order.order_identity.clone()).or_default();
+                    replace_delivery(&mut state.direct, record);
+                    replace_delivery(&mut state.known_query, record);
                 }
                 SourceNeutralControlResult::OrdersQuery {
                     result: SourceNeutralOrdersQueryResult::Page(page),
                 } => {
                     for order in &page.items {
-                        replace_delivery(
-                            &mut self
-                                .orders
-                                .entry(order.order_identity.clone())
-                                .or_default()
-                                .direct,
-                            record,
-                        );
+                        let state = self.orders.entry(order.order_identity.clone()).or_default();
+                        replace_delivery(&mut state.direct, record);
+                        replace_delivery(&mut state.known_query, record);
                     }
                 }
                 _ => {}
@@ -265,7 +346,7 @@ impl SharedExecutionRegistryV1 {
             _ => {}
         }
     }
-    pub fn order(&self, id: &Identity) -> Option<ExecutionOrderReadV1<'_>> {
+    pub fn order(&self, id: &Identity) -> Option<ExecutionOrderRead<'_, R>> {
         let (id, state) = self.orders.get_key_value(id)?;
         let origin = state.origin.as_ref().and_then(|(id, ordinal)| {
             self.intents.get(id).map(|s| SubmittedLegReadV1 {
@@ -273,7 +354,27 @@ impl SharedExecutionRegistryV1 {
                 batch_item_ordinal: *ordinal,
             })
         });
-        let (matched, active) = quantities(state);
+        let (matched, mut active) = quantities(state);
+        let base_quantity_applicability = measurement(state)
+            .map(|m| matches!(m, SourceNeutralSubmissionMeasurementV1::Base { .. }))
+            .or_else(|| query_base_applicability(state, id))
+            .or_else(|| {
+                origin
+                    .as_ref()
+                    .and_then(|o| leg(o.intent.intent(), o.batch_item_ordinal))
+                    .map(|(_, leg)| {
+                        matches!(
+                            leg.order,
+                            BuyOrderIntentV1::GtcLimit { .. } | BuyOrderIntentV1::GtdLimit { .. }
+                        )
+                    })
+            });
+        if base_quantity_applicability == Some(false) {
+            active = NotApplicable;
+        } else if base_quantity_applicability == Some(true) && is_closed(state) {
+            active = Known(exact(Decimal::ZERO));
+        }
+
         // 接受记录独立保留；后续 FAK 余款释放不能遮蔽已有的不可撤事实。
         let accepted_matched = matches!(
             state.formed.as_ref().map(Ref::record),
@@ -297,8 +398,12 @@ impl SharedExecutionRegistryV1 {
                 _ => Unavailable,
             }
         };
-        Some(ExecutionOrderReadV1 {
+        Some(ExecutionOrderRead {
             order_identity: id,
+            condition_id: order_location(state, id).map(|x| x.0),
+            token_id: order_location(state, id).map(|x| x.1),
+            base_quantity_applicability,
+            latest_cancel_feedback: state.cancellation.as_ref(),
             origin,
             accepted: state.accepted.as_ref(),
             formed: state.formed.as_ref(),
@@ -309,10 +414,10 @@ impl SharedExecutionRegistryV1 {
             cancellable,
         })
     }
-    pub fn orders(&self) -> impl Iterator<Item = ExecutionOrderReadV1<'_>> {
+    pub fn orders(&self) -> impl Iterator<Item = ExecutionOrderRead<'_, R>> {
         self.orders.keys().map(|id| self.order(id).unwrap())
     }
-    pub fn order_trades(&self, id: &Identity) -> impl Iterator<Item = &Ref> {
+    pub fn order_trades(&self, id: &Identity) -> impl Iterator<Item = &Ref<R>> {
         self.orders
             .get(id)
             .into_iter()
@@ -424,7 +529,7 @@ impl SharedExecutionRegistryV1 {
                 .map(|t| Known(t.base_quantity_shares.clone())),
         ))
     }
-    fn processing_key(&self, order: &ExecutionOrderReadV1<'_>) -> Option<(i64, u64, u16)> {
+    fn processing_key(&self, order: &ExecutionOrderRead<'_, R>) -> Option<(i64, u64, u16)> {
         let origin = order.origin.as_ref()?;
         let receipt = self
             .intents
@@ -455,60 +560,56 @@ impl SharedExecutionRegistryV1 {
     }
     /// 形成顺序使用整集合的完备公开证据；不把尚未收到的形成反馈补造成已知。
 
-    pub fn cancel_objects(&self) -> ExecutionReadValueV1<Vec<CancelObjectReadV1<'_>>> {
-        if self.orders().any(|o| matches!(o.cancellable, Unavailable)) {
-            return Unavailable;
-        }
-        let mut eligible: Vec<_> = self
+    pub fn cancel_objects(&self) -> ExecutionReadValueV1<Vec<CancelObjectRead<'_, R>>> {
+        self.cancel_objects_in(self.markets.values().map(|m| &m.market.condition_id))
+    }
+    pub fn cancel_objects_in<'a>(
+        &'a self,
+        conditions: impl IntoIterator<Item = &'a ConditionId>,
+    ) -> ExecutionReadValueV1<Vec<CancelObjectRead<'a, R>>> {
+        let eligible: Vec<_> = self
             .orders()
-            .filter(|o| matches!(o.cancellable, Known(true)))
-            .collect();
-        if eligible.iter().any(|o| {
-            self.orders
-                .get(o.order_identity)
-                .and_then(order_condition)
-                .is_none_or(|c| !self.markets.contains_key(&c.0))
-        }) {
-            return Unavailable;
-        }
-        // SIM 原动作按有效处理时间、首次请求序号和原 ordinal 处理，
-        // 与形成反馈源序严格保序。缺回执的原消费者仍可使用完整形成源序。
-        let use_processing = eligible.iter().all(|o| self.processing_key(o).is_some());
-        if !use_processing && eligible.iter().any(|o| o.formed.is_none()) {
-            return Unavailable;
-        }
-        let formation = |o: &ExecutionOrderReadV1<'_>| {
-            if use_processing {
-                FormationOrderKey::Processing(self.processing_key(o).unwrap())
-            } else {
-                FormationOrderKey::Source(source_sequence(o.formed.unwrap()))
-            }
-        };
-        eligible.sort_by(|a, b| {
-            let start = |o: &ExecutionOrderReadV1<'_>| {
-                self.markets[&order_condition(&self.orders[o.order_identity]).unwrap().0]
-                    .market
-                    .window
-                    .start_at_utc_ms
-            };
-            start(a)
-                .cmp(&start(b))
-                .then_with(|| {
-                    order_condition(&self.orders[a.order_identity])
-                        .unwrap()
-                        .0
-                        .cmp(&order_condition(&self.orders[b.order_identity]).unwrap().0)
-                })
-                .then_with(|| formation(a).cmp(&formation(b)))
-                .then_with(|| a.order_identity.cmp(b.order_identity))
-        });
-        let mut objects: Vec<_> = eligible
-            .iter()
-            .map(|o| CancelObjectReadV1::Single {
-                order: self.order(o.order_identity).unwrap(),
+            .filter(|order| {
+                let state = &self.orders[order.order_identity];
+                !matches!(order.cancellable, Known(false))
+                    && (state.accepted.is_some()
+                        || state.formed.is_some()
+                        || state.lifecycle.is_some()
+                        || state.known_query.is_some()
+                        || !state.trades.is_empty()
+                        || state.canceled.is_some())
             })
             .collect();
-        let set: BTreeSet<_> = eligible.iter().map(|o| o.order_identity).collect();
+        let mut groups: BTreeMap<Option<(i64, &str)>, Vec<&ExecutionOrderRead<'_, R>>> =
+            BTreeMap::new();
+        for order in &eligible {
+            let key = order
+                .condition_id
+                .and_then(|condition| self.markets.get(&condition.0))
+                .map(|market| {
+                    (
+                        market.market.window.start_at_utc_ms,
+                        market.market.condition_id.0.as_str(),
+                    )
+                });
+            groups.entry(key).or_default().push(order);
+        }
+        let unknown = groups.remove(&None).unwrap_or_default();
+        let mut ordered = Vec::new();
+        for members in groups.into_values().chain(std::iter::once(unknown)) {
+            ordered.extend(self.formation_order(&members));
+        }
+        let rank: BTreeMap<_, _> = ordered
+            .iter()
+            .enumerate()
+            .map(|(rank, id)| (*id, rank))
+            .collect();
+        let mut objects: Vec<_> = ordered
+            .iter()
+            .map(|id| CancelObjectRead::Single {
+                order: self.order(id).unwrap(),
+            })
+            .collect();
         let mut paired = Vec::new();
         for submitted in self.intents.values() {
             if !matches!(
@@ -519,79 +620,112 @@ impl SharedExecutionRegistryV1 {
             }
             if let (Some(Some(a)), Some(Some(b))) =
                 (submitted.outcomes.get(&0), submitted.outcomes.get(&1))
-                && set.contains(a)
-                && set.contains(b)
+                && let (Some(&a_rank), Some(&b_rank)) = (rank.get(a), rank.get(b))
             {
-                let orders = [self.order(a).unwrap(), self.order(b).unwrap()];
-                let condition = order_condition(&self.orders[a]).unwrap();
-                let mut members = [(formation(&orders[0]), a), (formation(&orders[1]), b)];
-                // 排序键按真实成员形成序；返回的两成员数组仍保持原 ordinal 0/1。
-                members.sort();
-                let key = (
-                    self.markets[&condition.0].market.window.start_at_utc_ms,
-                    &condition.0,
-                    members,
-                );
-                paired.push((key, &submitted.origin, orders));
+                let mut key = [a_rank, b_rank];
+                key.sort();
+                paired.push((
+                    key,
+                    &submitted.origin,
+                    [self.order(a).unwrap(), self.order(b).unwrap()],
+                ));
             }
         }
         paired.sort_by_key(|(key, _, _)| *key);
-        for (_, origin, orders) in paired {
-            objects.push(CancelObjectReadV1::Paired { origin, orders });
-        }
-        let mut markets: BTreeMap<&str, (&ConditionId, Vec<ExecutionOrderReadV1<'_>>)> =
-            BTreeMap::new();
-        for order in eligible {
-            let Some(condition) = self
-                .orders
-                .get(order.order_identity)
-                .and_then(order_condition)
-            else {
-                return Unavailable;
-            };
-            markets
-                .entry(&condition.0)
-                .or_insert_with(|| (condition, Vec::new()))
-                .1
-                .push(order);
-        }
-        let mut markets: Vec<_> = markets.into_values().collect();
-        markets.sort_by_key(|(condition, _)| {
-            (
-                self.markets[&condition.0].market.window.start_at_utc_ms,
-                &condition.0,
-            )
-        });
-        for (condition_id, orders) in markets {
-            objects.push(CancelObjectReadV1::Market {
+        objects.extend(
+            paired
+                .into_iter()
+                .map(|(_, origin, orders)| CancelObjectRead::Paired { origin, orders }),
+        );
+        let mut markets: Vec<_> = conditions
+            .into_iter()
+            .filter_map(|c| self.markets.get(&c.0))
+            .collect();
+        markets.sort_by_key(|m| (m.market.window.start_at_utc_ms, &m.market.condition_id.0));
+        markets.dedup_by_key(|m| &m.market.condition_id.0);
+        for market in markets {
+            let condition_id = &market.market.condition_id;
+            let orders = ordered
+                .iter()
+                .filter_map(|id| self.order(id))
+                .filter(|o| o.condition_id == Some(condition_id))
+                .collect();
+            objects.push(CancelObjectRead::Market {
                 condition_id,
                 orders,
             });
         }
         Known(objects)
     }
-}
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum FormationOrderKey {
-    Processing((i64, u64, u16)),
-    Source(u64),
+    fn formation_order<'a>(&self, orders: &[&ExecutionOrderRead<'a, R>]) -> Vec<&'a Identity> {
+        let mut processing: Vec<_> = orders
+            .iter()
+            .filter_map(|o| self.processing_key(o).map(|key| (key, o.order_identity)))
+            .collect();
+        let mut source: Vec<_> = orders
+            .iter()
+            .filter_map(|o| o.formed.map(|r| (source_sequence(r), o.order_identity)))
+            .collect();
+        processing.sort();
+        source.sort();
+        let evidenced: BTreeSet<_> = processing
+            .iter()
+            .map(|(_, id)| *id)
+            .chain(source.iter().map(|(_, id)| *id))
+            .collect();
+        let mut chains = Vec::new();
+        if processing.len() == evidenced.len() {
+            chains.push(processing.into_iter().map(|(_, id)| id).collect::<Vec<_>>());
+        } else if source.len() == evidenced.len() {
+            chains.push(source.into_iter().map(|(_, id)| id).collect::<Vec<_>>());
+        } else {
+            chains.push(processing.into_iter().map(|(_, id)| id).collect::<Vec<_>>());
+            chains.push(source.into_iter().map(|(_, id)| id).collect::<Vec<_>>());
+        }
+        let mut predecessors: BTreeMap<_, usize> =
+            orders.iter().map(|o| (o.order_identity, 0)).collect();
+        let mut edges: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
+        for chain in chains {
+            for pair in chain.windows(2) {
+                if edges.entry(pair[0]).or_default().insert(pair[1]) {
+                    *predecessors.get_mut(pair[1]).unwrap() += 1;
+                }
+            }
+        }
+        let mut ready: BTreeSet<_> = predecessors
+            .iter()
+            .filter_map(|(id, n)| (*n == 0).then_some(*id))
+            .collect();
+        let mut ordered = Vec::with_capacity(orders.len());
+        while let Some(id) = ready.pop_first() {
+            ordered.push(id);
+            for next in edges.get(id).into_iter().flatten() {
+                let n = predecessors.get_mut(next).unwrap();
+                *n -= 1;
+                if *n == 0 {
+                    ready.insert(*next);
+                }
+            }
+        }
+        ordered
+    }
 }
 pub struct IntentCommitmentReadV1<'a> {
     pub origin: SubmittedLegReadV1<'a>,
     pub order_identity: Option<&'a Identity>,
     pub remaining_target_shares: ExecutionReadValueV1<ExactDecimal>,
 }
-pub enum CancelObjectReadV1<'a> {
+pub enum CancelObjectRead<'a, R> {
     Single {
-        order: ExecutionOrderReadV1<'a>,
+        order: ExecutionOrderRead<'a, R>,
     },
     Paired {
         origin: &'a FrozenIntentRefV1,
-        orders: [ExecutionOrderReadV1<'a>; 2],
+        orders: [ExecutionOrderRead<'a, R>; 2],
     },
     Market {
         condition_id: &'a ConditionId,
-        orders: Vec<ExecutionOrderReadV1<'a>>,
+        orders: Vec<ExecutionOrderRead<'a, R>>,
     },
 }
 fn leg(intent: &ModelIntentV1, ordinal: u16) -> Option<(&ConditionId, &BuyLegIntentV1)> {
@@ -621,7 +755,9 @@ fn target(order: &BuyOrderIntentV1) -> ExecutionReadValueV1<ExactDecimal> {
         } => crate::quantity::original_target(*spend_pusd, *worst_price_pusd_per_share),
     })
 }
-fn measurement(order: &Order) -> Option<&SourceNeutralSubmissionMeasurementV1> {
+fn measurement<R: Clone + std::fmt::Debug + Eq>(
+    order: &Order<R>,
+) -> Option<&SourceNeutralSubmissionMeasurementV1> {
     match order.accepted.as_ref()?.record() {
         NormalizationRecord::Evidence {
             evidence:
@@ -636,44 +772,38 @@ fn measurement(order: &Order) -> Option<&SourceNeutralSubmissionMeasurementV1> {
         _ => None,
     }
 }
-fn is_quote(o: &Order) -> bool {
+fn is_quote<R: Clone + std::fmt::Debug + Eq>(o: &Order<R>) -> bool {
     matches!(
         measurement(o),
         Some(SourceNeutralSubmissionMeasurementV1::QuoteBudget { .. })
     )
 }
-fn is_closed(o: &Order) -> bool {
-    matches!(
-        o.lifecycle.as_ref().map(Ref::record),
-        Some(NormalizationRecord::Evidence {
-            evidence: SourceNeutralEvidenceKind::OrderLifecycle {
-                result: SourceNeutralOrderLifecycleResultV1 {
-                    event: SourceNeutralOrderLifecycleEventV1::CallerCanceled
-                        | SourceNeutralOrderLifecycleEventV1::GtdExpired
-                        | SourceNeutralOrderLifecycleEventV1::VenueDustTerminal
-                        | SourceNeutralOrderLifecycleEventV1::MarketResolvedCanceled { .. },
-                    ..
-                }
-            },
-            ..
-        })
-    )
+fn is_closed<R: Clone + std::fmt::Debug + Eq>(o: &Order<R>) -> bool {
+    o.canceled.is_some()
+        || matches!(
+            o.lifecycle.as_ref().map(Ref::record),
+            Some(NormalizationRecord::Evidence {
+                evidence: SourceNeutralEvidenceKind::OrderLifecycle {
+                    result: SourceNeutralOrderLifecycleResultV1 {
+                        event: SourceNeutralOrderLifecycleEventV1::CallerCanceled
+                            | SourceNeutralOrderLifecycleEventV1::GtdExpired
+                            | SourceNeutralOrderLifecycleEventV1::VenueDustTerminal
+                            | SourceNeutralOrderLifecycleEventV1::MarketResolvedCanceled { .. },
+                        ..
+                    }
+                },
+                ..
+            })
+        )
 }
-fn quantities(
-    o: &Order,
+fn quantities<R: Clone + std::fmt::Debug + Eq>(
+    o: &Order<R>,
 ) -> (
     ExecutionReadValueV1<ExactDecimal>,
     ExecutionReadValueV1<ExactDecimal>,
 ) {
     let Some(base) = measurement(o) else {
-        return (
-            Unavailable,
-            if is_closed(o) {
-                Known(exact(Decimal::ZERO))
-            } else {
-                Unavailable
-            },
-        );
+        return (Unavailable, Unavailable);
     };
     match base {
         SourceNeutralSubmissionMeasurementV1::QuoteBudget {
@@ -711,7 +841,9 @@ fn quantities(
         }
     }
 }
-fn trade(r: &Ref) -> Option<&SourceNeutralTradeLifecycleResultV2<Identity>> {
+fn trade<R: Clone + std::fmt::Debug + Eq>(
+    r: &Ref<R>,
+) -> Option<&SourceNeutralTradeLifecycleResultV2<Identity>> {
     match r.record() {
         NormalizationRecord::Evidence {
             evidence: SourceNeutralEvidenceKind::TradeLifecycle { result },
@@ -724,26 +856,72 @@ fn trade(r: &Ref) -> Option<&SourceNeutralTradeLifecycleResultV2<Identity>> {
         _ => None,
     }
 }
-fn order_condition(o: &Order) -> Option<&ConditionId> {
-    if let Some(r) = &o.formed
-        && let NormalizationRecord::Evidence {
-            evidence: SourceNeutralEvidenceKind::OrderLifecycle { result },
-            ..
-        } = r.record()
-    {
-        return Some(&result.condition_id);
+fn location_records<R>(o: &Order<R>) -> impl Iterator<Item = &Ref<R>> {
+    o.formed
+        .iter()
+        .chain(o.lifecycle.iter())
+        .chain(o.accepted.iter())
+        .chain(o.trades.values())
+        .chain(o.known_query.iter())
+}
+fn order_location<'a, R: Clone + std::fmt::Debug + Eq>(
+    o: &'a Order<R>,
+    id: &Identity,
+) -> Option<(&'a ConditionId, &'a TokenId)> {
+    location_records(o).find_map(|r| record_location(r, id))
+}
+fn record_location<'a, R: Clone + std::fmt::Debug + Eq>(
+    r: &'a Ref<R>,
+    id: &Identity,
+) -> Option<(&'a ConditionId, &'a TokenId)> {
+    let NormalizationRecord::Evidence { evidence, .. } = r.record() else {
+        return None;
     };
-    match o.accepted.as_ref()?.record() {
-        NormalizationRecord::Evidence {
-            evidence:
-                SourceNeutralEvidenceKind::Control {
-                    result:
-                        SourceNeutralControlResult::Submission {
-                            outcome: SourceNeutralSubmissionOutcomeV2::Accepted { order, .. },
-                        },
+    match evidence {
+        SourceNeutralEvidenceKind::OrderLifecycle { result } => {
+            Some((&result.condition_id, &result.token_id))
+        }
+        SourceNeutralEvidenceKind::TradeLifecycle { result } => {
+            Some((&result.condition_id, &result.token_id))
+        }
+        SourceNeutralEvidenceKind::TradeLifecycleV3 { result } => {
+            Some((&result.result.condition_id, &result.result.token_id))
+        }
+        SourceNeutralEvidenceKind::Control {
+            result:
+                SourceNeutralControlResult::Submission {
+                    outcome: SourceNeutralSubmissionOutcomeV2::Accepted { order, .. },
+                },
+        } => Some((&order.condition_id, &order.token_id)),
+        SourceNeutralEvidenceKind::Control {
+            result:
+                SourceNeutralControlResult::OrderQuery {
+                    result: SourceNeutralOrderQueryResult::Found { order },
+                },
+        } => Some((&order.condition_id, &order.token_id)),
+        SourceNeutralEvidenceKind::Control {
+            result:
+                SourceNeutralControlResult::OrdersQuery {
+                    result: SourceNeutralOrdersQueryResult::Page(page),
+                },
+        } => page
+            .items
+            .iter()
+            .find(|o| &o.order_identity == id)
+            .map(|o| (&o.condition_id, &o.token_id)),
+        _ => None,
+    }
+}
+fn cancellation_request_id<R: Clone + std::fmt::Debug + Eq>(record: &Ref<R>) -> Option<&str> {
+    match &record.record().source_reference().record {
+        SimV2SourceRecordReferenceV1::DirectResponse {
+            association:
+                SimV2DirectResponseAssociationV1::Request { global_request_id }
+                | SimV2DirectResponseAssociationV1::CancellationTarget {
+                    global_request_id, ..
                 },
             ..
-        } => Some(&order.condition_id),
+        } => Some(global_request_id),
         _ => None,
     }
 }
@@ -755,7 +933,7 @@ fn final_disposition(d: &SourceNeutralTradeEconomicDispositionV1) -> bool {
             | SourceNeutralTradeEconomicDispositionV1::FinalFailureCompensated
     )
 }
-fn source_sequence(r: &Ref) -> u64 {
+fn source_sequence<R: Clone + std::fmt::Debug + Eq>(r: &Ref<R>) -> u64 {
     match r.record().source_reference().record {
         SimV2SourceRecordReferenceV1::DirectResponse {
             private_feedback_sequence,
@@ -776,7 +954,7 @@ fn source_sequence(r: &Ref) -> u64 {
         _ => 0,
     }
 }
-fn replace_source(slot: &mut Option<Ref>, r: &Ref) {
+fn replace_source<R: Clone + std::fmt::Debug + Eq>(slot: &mut Option<Ref<R>>, r: &Ref<R>) {
     if slot
         .as_ref()
         .is_none_or(|p| source_sequence(p) < source_sequence(r))
@@ -784,18 +962,24 @@ fn replace_source(slot: &mut Option<Ref>, r: &Ref) {
         *slot = Some(r.clone());
     }
 }
-fn replace_delivery(slot: &mut Option<Ref>, r: &Ref) {
-    let seq = |r: &Ref| match r.visibility() {
-        NoeConsumptionVisibilityV1::Initialization
-        | NoeConsumptionVisibilityV1::ControlAdmission => 0,
-        NoeConsumptionVisibilityV1::Feedback {
-            delivery_sequence, ..
-        } => *delivery_sequence,
-    };
-    if slot.as_ref().is_none_or(|p| seq(p) < seq(r)) {
+fn replace_delivery<R: Clone + std::fmt::Debug + Eq>(slot: &mut Option<Ref<R>>, r: &Ref<R>) {
+    if slot
+        .as_ref()
+        .is_none_or(|p| delivery_key(p) < delivery_key(r))
+    {
         *slot = Some(r.clone());
     }
 }
+fn delivery_key<R: Clone + std::fmt::Debug + Eq>(r: &Ref<R>) -> (u64, u64) {
+    let sequence = match r.visibility() {
+        NoeConsumptionVisibilityV1::Feedback {
+            delivery_sequence, ..
+        } => *delivery_sequence,
+        _ => 0,
+    };
+    (sequence, r.position().record_ordinal)
+}
+
 fn decimal(v: &ExactDecimal) -> Decimal {
     v.0.parse().expect("NOE规范化精确数值")
 }
@@ -811,4 +995,237 @@ fn sum(
         total.add(&crate::quantity::Quantity::parse(&v));
     }
     Known(total.exact())
+}
+
+pub type SharedExecutionRegistryV1 = SharedExecutionRegistry<NoCancellationRequestCompletionV0>;
+pub type SharedExecutionRegistryV2 = SharedExecutionRegistry<CancellationRequestCompletedV1>;
+pub type ExecutionOrderReadV1<'a> = ExecutionOrderRead<'a, NoCancellationRequestCompletionV0>;
+pub type ExecutionOrderReadV2<'a> = ExecutionOrderRead<'a, CancellationRequestCompletedV1>;
+pub type CancelObjectReadV1<'a> = CancelObjectRead<'a, NoCancellationRequestCompletionV0>;
+pub type CancelObjectReadV2<'a> = CancelObjectRead<'a, CancellationRequestCompletedV1>;
+
+/// 请求域来自冻结意图；市场域仅由调用方同组 c/O 绑定提供。
+#[derive(Clone)]
+pub enum CancellationScopeV1<'a> {
+    Orders(Vec<&'a str>),
+    Market(&'a ConditionId),
+}
+impl<'a, R> CancelObjectRead<'a, R> {
+    pub fn request_scope(&self) -> CancellationScopeV1<'a> {
+        match self {
+            Self::Single { order } => {
+                CancellationScopeV1::Orders(vec![platform_id(order.order_identity)])
+            }
+            Self::Paired { orders, .. } => CancellationScopeV1::Orders(
+                orders
+                    .iter()
+                    .map(|o| platform_id(o.order_identity))
+                    .collect(),
+            ),
+            Self::Market { condition_id, .. } => CancellationScopeV1::Market(condition_id),
+        }
+    }
+}
+fn platform_id(id: &Identity) -> &str {
+    match &id.key {
+        ::execution_normalization::MemoryIdentityKeyV1::Entity(
+            ::execution_normalization::SourceNeutralEntityKeyV1::Order { source_order_id },
+        ) => source_order_id,
+        _ => unreachable!("订单读取来自原订单身份"),
+    }
+}
+fn cancellation_scope(intent: &ModelIntentV1) -> Option<CancellationScopeV1<'_>> {
+    Some(match intent {
+        ModelIntentV1::CancelOrder { platform_order_id } => {
+            CancellationScopeV1::Orders(vec![platform_order_id])
+        }
+        ModelIntentV1::CancelOrders { platform_order_ids } => {
+            CancellationScopeV1::Orders(platform_order_ids.iter().map(String::as_str).collect())
+        }
+        ModelIntentV1::CancelMarketOrders { condition_id } => {
+            CancellationScopeV1::Market(condition_id)
+        }
+        _ => return None,
+    })
+}
+impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
+    fn condition_for_platform_id(&self, id: &str) -> Option<&ConditionId> {
+        self.orders
+            .iter()
+            .find(|(identity, _)| platform_id(identity) == id)
+            .and_then(|(identity, state)| order_location(state, identity).map(|(c, _)| c))
+            .or_else(|| {
+                self.cancel_locations
+                    .iter()
+                    .find(|(identity, _)| platform_id(identity) == id)
+                    .and_then(|(identity, r)| record_location(r, identity).map(|(c, _)| c))
+            })
+    }
+    fn relation(&self, a: &CancellationScopeV1<'_>, b: &CancellationScopeV1<'_>) -> Option<bool> {
+        match (a, b) {
+            (CancellationScopeV1::Orders(a), CancellationScopeV1::Orders(b)) => {
+                Some(a.iter().any(|id| b.contains(id)))
+            }
+            (CancellationScopeV1::Market(a), CancellationScopeV1::Market(b)) => Some(a == b),
+            (CancellationScopeV1::Orders(ids), CancellationScopeV1::Market(condition))
+            | (CancellationScopeV1::Market(condition), CancellationScopeV1::Orders(ids)) => {
+                let mut unknown = false;
+                for id in ids {
+                    match self.condition_for_platform_id(id) {
+                        Some(c) if c == *condition => return Some(true),
+                        Some(_) => {}
+                        None => unknown = true,
+                    }
+                }
+                (!unknown).then_some(false)
+            }
+        }
+    }
+    fn latest_cancel_request(
+        &self,
+        scope: Option<&CancellationScopeV1<'_>>,
+    ) -> Option<(&Submitted<R>, bool)> {
+        self.intents
+            .values()
+            .filter_map(|request| {
+                let request_scope = cancellation_scope(request.origin.intent())?;
+                let complete = request.completed.as_ref()?;
+                let relation = scope.map_or(Some(true), |s| self.relation(s, &request_scope));
+                (relation != Some(false)).then_some((
+                    request,
+                    relation.is_some(),
+                    delivery_key(complete),
+                ))
+            })
+            .max_by_key(|(_, _, key)| *key)
+            .map(|(request, known, _)| (request, known))
+    }
+}
+
+pub struct CancellationRequestsReadV1<'a> {
+    pub pending_count: ExecutionReadValueV1<u64>,
+    pub response_counts: [ExecutionReadValueV1<u64>; 3],
+    /// None 为从未收到；Unavailable 为最新可能相关响应无法确定。
+    pub latest_response: ExecutionReadValueV1<Option<&'a Ref<CancellationRequestCompletedV1>>>,
+}
+impl SharedExecutionRegistryV2 {
+    pub fn cancellation_requests(
+        &self,
+        scope: Option<&CancellationScopeV1<'_>>,
+    ) -> CancellationRequestsReadV1<'_> {
+        let mut pending = 0;
+        let mut pending_known = true;
+        for request in self
+            .intents
+            .values()
+            .filter(|r| r.receipt.is_some() && r.completed.is_none())
+        {
+            let Some(request_scope) = cancellation_scope(request.origin.intent()) else {
+                continue;
+            };
+            match scope.map_or(Some(true), |s| self.relation(s, &request_scope)) {
+                Some(true) => pending += 1,
+                Some(false) => {}
+                None => pending_known = false,
+            }
+        }
+        let mut read = CancellationRequestsReadV1 {
+            pending_count: if pending_known {
+                Known(pending)
+            } else {
+                Unavailable
+            },
+            response_counts: [NotApplicable, NotApplicable, NotApplicable],
+            latest_response: Known(None),
+        };
+        let Some((request, known)) = self.latest_cancel_request(scope) else {
+            return read;
+        };
+        if !known {
+            read.response_counts = [Unavailable, Unavailable, Unavailable];
+            read.latest_response = Unavailable;
+            return read;
+        }
+        let complete = request.completed.as_ref().unwrap();
+        read.latest_response = Known(Some(complete));
+        if let Some(scope) = scope {
+            let mut counts = [0; 3];
+            let mut known = [true; 3];
+            for target in &request.cancel_targets {
+                if let NormalizationRecord::Evidence {
+                    evidence:
+                        SourceNeutralEvidenceKind::Control {
+                            result:
+                                SourceNeutralControlResult::Cancellation {
+                                    order_identity,
+                                    outcome,
+                                },
+                        },
+                    ..
+                } = target.record()
+                {
+                    let index = match outcome {
+                        SourceNeutralCancellationOutcomeV1::Canceled => 0,
+                        SourceNeutralCancellationOutcomeV1::NotCanceledNoEffect => 1,
+                        SourceNeutralCancellationOutcomeV1::EvidenceUnknownNoEffect => 2,
+                    };
+                    match self.relation(
+                        scope,
+                        &CancellationScopeV1::Orders(vec![platform_id(order_identity)]),
+                    ) {
+                        Some(true) => counts[index] += 1,
+                        Some(false) => {}
+                        None => known[index] = false,
+                    }
+                }
+            }
+            read.response_counts = std::array::from_fn(|i| {
+                if known[i] {
+                    Known(counts[i])
+                } else {
+                    Unavailable
+                }
+            });
+        } else if let NormalizationRecord::Evidence {
+            evidence:
+                SourceNeutralEvidenceKind::Control {
+                    result: SourceNeutralControlResult::CancellationRequestCompleted { result },
+                },
+            ..
+        } = complete.record()
+        {
+            read.response_counts = [
+                Known(result.canceled_count),
+                Known(result.not_canceled_no_effect_count),
+                Known(result.evidence_unknown_no_effect_count),
+            ];
+        }
+        read
+    }
+}
+
+fn query_base_applicability<R: Clone + std::fmt::Debug + Eq>(
+    order: &Order<R>,
+    id: &Identity,
+) -> Option<bool> {
+    let NormalizationRecord::Evidence {
+        evidence: SourceNeutralEvidenceKind::Control { result },
+        ..
+    } = order.known_query.as_ref()?.record()
+    else {
+        return None;
+    };
+    let snapshot = match result {
+        SourceNeutralControlResult::OrderQuery {
+            result: SourceNeutralOrderQueryResult::Found { order },
+        } => order,
+        SourceNeutralControlResult::OrdersQuery {
+            result: SourceNeutralOrdersQueryResult::Page(page),
+        } => page.items.iter().find(|o| &o.order_identity == id)?,
+        _ => return None,
+    };
+    Some(matches!(
+        snapshot.quantities,
+        SourceNeutralOrderQuantityEvidenceV1::Base { .. }
+    ))
 }

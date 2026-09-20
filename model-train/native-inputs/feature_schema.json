@@ -3,13 +3,13 @@
   "implementation": "native-inputs/src/market.rs; native-inputs/src/prefix.rs; native-inputs/src/root.rs",
   "widths": {
     "fast": 836,
-    "slow": 412,
+    "slow": 433,
     "rule": 30,
     "prefix": 60,
-    "cancel": 129,
+    "cancel": 184,
     "price_fee_features": 9999
   },
-  "authority": "MarketBusinessObservationV1 + same-frame PublicTradingRuleContextV1 + TrustedGroupDecisionCutoffV1 + frozen ActionBeforeReadV1; prefix from Rust PrefixState + same frozen SealedProcessRuleSnapshotV3 Arc",
+  "authority": "MarketBusinessObservationV1 + same-frame PublicTradingRuleContextV1 + TrustedGroupDecisionCutoffV1 + frozen ActionBeforeReadV2; prefix from Rust PrefixState + same frozen SealedProcessRuleSnapshotV3 Arc",
   "numeric": {
     "L": "log1p(x/u)",
     "S": "sign(x)*log1p(abs(x)/u)",
@@ -311,7 +311,7 @@
     }
   ],
   "history_policy": "Six per-hidden-key sequences at most16 samples; source identity changes only; missing/unrelated group adds nothing; previous-frame side stats separately; released at original Retire.",
-  "account_and_cancel": "Existing #6 continuation1 B/E + continuation2 section3; account.rs412/cancel.rs129 unchanged by this increment.",
+  "account_and_cancel": "#6正式续篇3 §4/8；账户433、撤单184；原账户0—414保持，完整请求块与条件适用性由同组原证据投影。",
   "scope": "Input and actual state/parameter components; not complete Actor support, general nonzero fees, training or phase acceptance.",
   "price_fee_features": {
     "shape": "float32[B,9999]",
@@ -319,5 +319,79 @@
     "projection": "log1p(fee_pUSD / 1 pUSD), exact rational to nearest-even f32",
     "applicability": "current FOK/FAK Price(leg); illegal platform coordinate, other stage, LIMIT => 0",
     "decoder": "price_logits + bias-free signed Linear(H/2,1)(decoder) * price_fee_features"
+  },
+  "input_contract_version": "native_inputs_v3",
+  "pending_noe_record_count": {
+    "indices": [
+      412,
+      413,
+      414
+    ],
+    "source": "ActionBeforeReadV1.pending_noe_record_count()",
+    "encoding": "L_count, exists=1, applicable=1",
+    "meaning": "已领取且因依赖未满足而尚待Ledger应用的适用原记录数；零不证明未来已齐，不是禁单门。"
+  },
+  "cancel_layout_v3": {
+    "family_scope": [
+      0,
+      5
+    ],
+    "template_0": [
+      6,
+      73
+    ],
+    "template_1": [
+      74,
+      141
+    ],
+    "market_observed_members": [
+      142,
+      165
+    ],
+    "candidate_requests": [
+      166,
+      183
+    ],
+    "template_additions": {
+      "applicability_known": [
+        50,
+        53
+      ],
+      "cancellable": [
+        54,
+        56
+      ],
+      "latest_target_result": [
+        57,
+        61
+      ],
+      "same_result_T6": [
+        62,
+        67
+      ]
+    }
+  },
+  "cancellation_requests_v1": {
+    "pending": [
+      0,
+      2
+    ],
+    "canceled": [
+      3,
+      5
+    ],
+    "not_canceled_no_effect": [
+      6,
+      8
+    ],
+    "evidence_unknown_no_effect": [
+      9,
+      11
+    ],
+    "same_response_T6": [
+      12,
+      17
+    ],
+    "account_offset": 415
   }
 }

@@ -357,7 +357,7 @@ fn continuous_public_seventy_minutes() {
         "continuous fixture_seconds={}",
         started.elapsed().as_secs_f64()
     );
-    let (mut execution, observation, rules) = execution_with_rules(
+    let (mut execution, observation, rules) = execution_with_rules_v4(
         &temp.path().join("sim.jsonl"),
         &core,
         SUCCESS_POLICY,
@@ -370,7 +370,7 @@ fn continuous_public_seventy_minutes() {
     execution
         .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
         .unwrap();
-    let mut shared = SharedExecutionV1::from_opening(ledger, observation)
+    let mut shared = SharedExecutionV2::from_opening(ledger, observation)
         .unwrap()
         .unwrap();
     let account = shared
@@ -443,7 +443,7 @@ async fn continuous_three_runtime_warmup_cost() {
     for index in 0..2 {
         let root = temp.path().join(format!("root-{index}"));
         std::fs::create_dir(&root).unwrap();
-        let (mut execution, observation, rules) = execution_with_identity(
+        let (mut execution, observation, rules) = execution_with_identity_v4(
             &root.join("sim.jsonl"),
             &core,
             SUCCESS_POLICY,
@@ -457,7 +457,7 @@ async fn continuous_three_runtime_warmup_cost() {
         execution
             .bind_ledger_recording_v2(&mut ledger, &root.join("ledger"))
             .unwrap();
-        let shared = SharedExecutionV1::from_opening(ledger, observation)
+        let shared = SharedExecutionV2::from_opening(ledger, observation)
             .unwrap()
             .unwrap();
         let account = shared
@@ -625,7 +625,7 @@ fn economic_inputs(scenario: Scenario, at: i64) -> Vec<TypedRawRowV2> {
 
 // 只枚举原公共读取的现有引用槽；不声称是全堆Arc或后台队列引用计数。
 fn source_sample(
-    shared: &SharedExecutionV1,
+    shared: &SharedExecutionV2,
     cutoff: Option<&TrustedGroupDecisionCutoffV1>,
 ) -> serde_json::Value {
     let mut slots = 0usize;
@@ -676,7 +676,7 @@ fn source_sample(
 }
 
 struct ContinuousRoot {
-    shared: SharedExecutionV1,
+    shared: SharedExecutionV2,
     native: NativeInputRoot,
     driver: FinitePublicConsumptionV1<RecordedPublicGroupSourceV1<TradingTimes>>,
     coordinator: SettlementCoordinatorV1,
@@ -717,7 +717,7 @@ impl ContinuousRoot {
             policy["failure_overrides"] = serde_json::json!([{"selector":{"selector_domain":"REQUEST","account_instance_key":contracts::AccountInstanceKeyV1 {
                 run_id:identity.into(),caller_role:contracts::SimCallerRoleV1::Paper,caller_instance_id:"shared-caller".into(),account_id:"shared-account".into(),platform_source:contracts::PlatformSourceV1::Simulated},"global_request_id":"script-failed"},"path":failed}]);
         }
-        let (mut execution, observation, rules) = execution_with_identity(
+        let (mut execution, observation, rules) = execution_with_identity_v4(
             &root.join("sim.jsonl"),
             core,
             &serde_json::to_vec(&policy).unwrap(),
@@ -762,7 +762,7 @@ impl ContinuousRoot {
         execution
             .bind_ledger_recording_v2(&mut ledger, &root.join("ledger"))
             .unwrap();
-        let shared = SharedExecutionV1::from_opening(ledger, observation)
+        let shared = SharedExecutionV2::from_opening(ledger, observation)
             .unwrap()
             .unwrap();
         let account = shared
@@ -1688,14 +1688,13 @@ async fn continuous_three_runtime_matrix() {
                             .remove(&position)
                             .expect("原录制组只能消费一次");
                         temp.stage = "settlement-native-consume-script";
-                        let facts_complete = root
+                        let _settlement_advanced = root
                             .shared
                             .advance_settlement(&mut root.coordinator, &mut root.driver)
                             .unwrap();
                         let cutoff = root.driver.decision().unwrap().cutoff().clone();
                         temp.current_groups[index] =
                             serde_json::json!({"phase":"after-exogenous","cutoff":cutoff});
-                        assert!(facts_complete, "原公共组外生事实未完整应用: {cutoff:?}");
                         let consumed = root
                             .native
                             .consume(&mut root.shared, &mut root.driver)
@@ -1900,7 +1899,7 @@ async fn continuous_three_runtime_matrix() {
 
 // P 表期望独立写明；只聚合原公共读取，不从模型张量反算资金。
 fn assert_population_economics(
-    shared: &SharedExecutionV1,
+    shared: &SharedExecutionV2,
     count: usize,
     removed: bool,
     j: usize,
@@ -1910,7 +1909,7 @@ fn assert_population_economics(
     use contracts::ExecutionReadValueV1::Known;
     use rust_decimal::Decimal;
     let (families, shares, principal, available) = match (count, removed) {
-        (0, _) => ([0, 0, 0], ["0", "0"], ["0", "0"], "2000"),
+        (0, _) => ([0, 0, 1], ["0", "0"], ["0", "0"], "2000"),
         (1, false) => ([2, 1, 1], ["5", "5"], ["0.5", "0.5"], "1999"),
         (1, true) => ([1, 0, 1], ["5", "0"], ["0.5", "0"], "1999.5"),
         (85, false) => ([170, 85, 1], ["425", "425"], ["42.5", "42.5"], "1915"),
@@ -1930,9 +1929,9 @@ fn assert_population_economics(
     let mut actual_families = [0usize; 3];
     for object in objects {
         actual_families[match object {
-            CancelObjectReadV1::Single { .. } => 0,
-            CancelObjectReadV1::Paired { .. } => 1,
-            CancelObjectReadV1::Market { .. } => 2,
+            CancelObjectReadV2::Single { .. } => 0,
+            CancelObjectReadV2::Paired { .. } => 1,
+            CancelObjectReadV2::Market { .. } => 2,
         }] += 1;
     }
     assert_eq!(actual_families, families);
@@ -2090,17 +2089,14 @@ async fn continuous_real_population_probes() {
             if at == 36000 {
                 for (group, &index) in groups.iter().zip(&indices) {
                     let count = &counts[index];
-                    assert_eq!(
-                        group.cancel.len(),
-                        if *count == 0 { 0 } else { 3 * count + 1 }
-                    );
+                    assert_eq!(group.cancel.len(), 3 * count + 1);
                     if [4, 6, 7].contains(&j) && *count > 0 {
                         let contracts::ExecutionReadValueV1::Known(objects) =
                             group.action_before.as_ref().unwrap().cancel_objects()
                         else {
                             panic!()
                         };
-                        let target=objects.iter().position(|o|matches!(o,CancelObjectReadV1::Single{order} if order.origin.as_ref().is_some_and(|o|o.intent.global_request_id()==format!("pair-{}",count-1)&&o.batch_item_ordinal==1))).unwrap();
+                        let target=objects.iter().position(|o|matches!(o,CancelObjectReadV2::Single{order} if order.origin.as_ref().is_some_and(|o|o.intent.global_request_id()==format!("pair-{}",count-1)&&o.batch_item_ordinal==1))).unwrap();
                         let mut actor = NativeActor::new(group.clone(), 0).unwrap();
                         actor.choose(3).unwrap();
                         actor.choose(target).unwrap();
@@ -2122,11 +2118,11 @@ async fn continuous_real_population_probes() {
             if at == 56000 {
                 assert_eq!(indices, (0..roots.len()).collect::<Vec<_>>());
                 let expected = match j {
-                    3 => vec![0],
+                    3 => vec![1],
                     4 => vec![2],
                     5 => vec![256],
                     6 => vec![257],
-                    _ => vec![0, 257],
+                    _ => vec![1, 257],
                 };
                 assert_eq!(
                     groups.iter().map(|g| g.cancel.len()).collect::<Vec<_>>(),
@@ -2582,10 +2578,10 @@ async fn continuous_late_formation_regression() {
             let ids = objects
                 .iter()
                 .filter_map(|object| match object {
-                    shared_run::CancelObjectReadV1::Single { order } => {
+                    shared_run::CancelObjectReadV2::Single { order } => {
                         Some(format!("{:?}", order.order_identity))
                     }
-                    shared_run::CancelObjectReadV1::Paired { orders, .. } => {
+                    shared_run::CancelObjectReadV2::Paired { orders, .. } => {
                         assert_eq!(orders[0].origin.as_ref().unwrap().batch_item_ordinal, 0);
                         assert_eq!(orders[1].origin.as_ref().unwrap().batch_item_ordinal, 1);
                         None
@@ -2612,7 +2608,7 @@ async fn continuous_late_formation_regression() {
                 assert!(second.formed.is_some());
                 assert_eq!(ids, original_order);
                 let formed_sequences = objects.iter().filter_map(|o| match o {
-                    shared_run::CancelObjectReadV1::Single { order } => match order.formed.unwrap().record().source_reference().record {
+                    shared_run::CancelObjectReadV2::Single { order } => match order.formed.unwrap().record().source_reference().record {
                         contracts::execution_normalization::SimV2SourceRecordReferenceV1::OrderLifecycle { private_feedback_sequence, .. } => Some(private_feedback_sequence), _ => panic!("原形成引用"),
                     }, _ => None,
                 }).collect::<Vec<_>>();
@@ -2817,5 +2813,351 @@ async fn continuous_contribution_before_success_regression() {
         "diagnostic_drained_already_accepted pre_drain_sources={} runtime={}",
         sources,
         runtime.sample()
+    );
+}
+
+/// 原137/138现场的请求回放；不称为新版模型自主选择或正式连续矩阵。
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "需要保留的原SIM/Ledger现场与原C1录制"]
+async fn received_economics_pending_preserves_native_frame_and_frozen_read() {
+    use contracts::*;
+    use std::sync::Arc;
+    let original = std::path::PathBuf::from(std::env::var("ORIGINAL_EXECUTION").unwrap());
+    let output = std::path::PathBuf::from(std::env::var("CONTINUOUS_OUTPUT").unwrap());
+    std::fs::create_dir_all(&output).unwrap();
+    let recording =
+        std::path::PathBuf::from(std::env::var("CONTINUOUS_RECORDINGS").unwrap()).join("C1-0-0");
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(recording.join("fixture.json")).unwrap()).unwrap();
+    let times = TradingTimes(serde_json::from_value(metadata["delivery_times"].clone()).unwrap());
+    let mut replay = data_pipeline_training::public_replay::PublicReplayV1::open(
+        &recording.join("dpt"),
+        128,
+        1 << 20,
+    )
+    .unwrap();
+    while replay.next_applied().unwrap().is_some() {}
+    let core = replay.into_core();
+    let mut root = ContinuousRoot::new(
+        &output,
+        &recording.join("dpt"),
+        &core,
+        times,
+        Scenario::Trade,
+        0,
+        "C1-0-1-0",
+    );
+    let mut requests: BTreeMap<u64, Vec<serde_json::Value>> = BTreeMap::new();
+    for line in std::fs::read_to_string(original.join("sim.jsonl"))
+        .unwrap()
+        .lines()
+    {
+        let value: serde_json::Value = serde_json::from_str(line).unwrap();
+        if value["kind"] != "ACCEPTED_INPUTS" {
+            continue;
+        }
+        for input in value["body"].as_array().unwrap() {
+            if input["input"] != "PUBLIC_REQUEST" {
+                continue;
+            }
+            let body = &input["body"];
+            if body["request"]["request"]["context"]["global_request_id"]
+                .as_str()
+                .is_some_and(|s| s.starts_with("model-"))
+            {
+                requests
+                    .entry(
+                        body["cutoff"]["receipt"]["group"]["group_position"]
+                            .as_u64()
+                            .unwrap(),
+                    )
+                    .or_default()
+                    .push(body["request"].clone());
+            }
+        }
+    }
+    let mut reservations = BTreeMap::new();
+    for file in std::fs::read_dir(original.join("ledger")).unwrap() {
+        let path = file.unwrap().path();
+        if path.extension().is_none_or(|v| v != "jsonl") {
+            continue;
+        }
+        for line in std::fs::read_to_string(path).unwrap().lines() {
+            let value: serde_json::Value = serde_json::from_str(line).unwrap();
+            let body = &value["payload"]["body"];
+            if let Some(id) = body["transaction"]["source"]["LocalReservation"].as_str()
+                && id.contains("model-")
+            {
+                let v = &body["reservations"]["requests"][id]["reservation"];
+                reservations.insert(
+                    id.to_owned(),
+                    ReserveIntentV1 {
+                        request_identity: LedgerRequestIdentityV1(id.into()),
+                        condition_id: serde_json::from_value(v["condition_id"].clone()).unwrap(),
+                        requested_principal_pusd: serde_json::from_value(
+                            v["principal_pusd"].clone(),
+                        )
+                        .unwrap(),
+                        immediate_fee_reserve_pusd: serde_json::from_value(
+                            v["immediate_fee_pusd"].clone(),
+                        )
+                        .unwrap(),
+                    },
+                );
+            }
+        }
+    }
+    fn leg(order: SimBuyOrderV1) -> BuyLegIntentV1 {
+        BuyLegIntentV1 {
+            token_id: order.token_id,
+            order: match order.kind {
+                SimBuyOrderKindV1::GtcLimit {
+                    limit_price_pusd_per_share,
+                    size_shares,
+                    post_only,
+                } => BuyOrderIntentV1::GtcLimit {
+                    limit_price_pusd_per_share,
+                    size_shares,
+                    post_only,
+                },
+                SimBuyOrderKindV1::GtdLimit {
+                    limit_price_pusd_per_share,
+                    size_shares,
+                    post_only,
+                    expires_at_utc_ms,
+                } => {
+                    assert_eq!(expires_at_utc_ms % 1000, 0);
+                    BuyOrderIntentV1::GtdLimit {
+                        limit_price_pusd_per_share,
+                        size_shares,
+                        post_only,
+                        expires_at_utc_sec: expires_at_utc_ms / 1000,
+                    }
+                }
+                SimBuyOrderKindV1::FokMarket {
+                    spend_pusd,
+                    worst_price_pusd_per_share,
+                } => BuyOrderIntentV1::FokMarket {
+                    spend_pusd,
+                    worst_price_pusd_per_share,
+                },
+                SimBuyOrderKindV1::FakMarket {
+                    spend_pusd,
+                    worst_price_pusd_per_share,
+                } => BuyOrderIntentV1::FakMarket {
+                    spend_pusd,
+                    worst_price_pusd_per_share,
+                },
+            },
+        }
+    }
+    let mut frozen = None;
+    let mut pending_prefix = None;
+    let mut frames = 0;
+    loop {
+        next_recorded_group(&mut root.driver);
+        let cutoff = root.driver.decision().unwrap().cutoff().clone();
+        let at = cutoff.decision_time().logical_time_utc_ms();
+        let advanced = root
+            .shared
+            .advance_settlement(&mut root.coordinator, &mut root.driver)
+            .unwrap();
+        let group = root
+            .native
+            .consume(&mut root.shared, &mut root.driver)
+            .unwrap()
+            .expect("经济等待不能隐去原合法组");
+        frames += group.rows.len();
+        root.check_inputs(&group);
+        root.script().await;
+        if at >= FIRST + 1_000_000 {
+            root.model_continuation_started = true;
+        }
+        if at == 87349000 || at == 87350000 {
+            let view = group.action_before.as_ref().unwrap();
+            let pending = usize::from(at == 87349000);
+            assert_eq!(view.pending_noe_record_count(), pending);
+            assert_eq!(advanced, pending == 0);
+            assert!(
+                view.orders()
+                    .any(|o| format!("{:?}", o.order_identity).contains("sim-46"))
+            );
+            let row = group
+                .rows
+                .iter()
+                .find(|r| r.role == InputRole::DecisionRequired)
+                .unwrap();
+            assert_eq!(&row.slow[412..415], &[(1. + pending as f32).ln(), 1., 1.]);
+            if pending == 1 {
+                pending_prefix = Some(view.ledger().platform_source_prefix);
+                assert!(view.orders().any(|o| {
+                    o.origin.as_ref().is_some_and(|origin| {
+                        origin.intent.global_request_id() == "model-0-6099"
+                            && origin.batch_item_ordinal == 1
+                    })
+                }));
+                assert_eq!(view.cutoff().receipt().group().group_position, 1610);
+                assert_eq!(frames, 1481);
+            } else {
+                assert!(view.ledger().platform_source_prefix > pending_prefix.unwrap());
+                for ordinal in [0, 1] {
+                    assert!(view.orders().any(|o| {
+                        o.accepted.is_some()
+                            && o.origin.as_ref().is_some_and(|origin| {
+                                origin.intent.global_request_id() == "model-0-6099"
+                                    && origin.batch_item_ordinal == ordinal
+                            })
+                    }));
+                }
+                let old: &NativeInputGroup = frozen.as_ref().unwrap();
+                assert_eq!(
+                    old.action_before
+                        .as_ref()
+                        .unwrap()
+                        .pending_noe_record_count(),
+                    1
+                );
+                assert_eq!(
+                    old.action_before
+                        .as_ref()
+                        .unwrap()
+                        .ledger()
+                        .platform_source_prefix,
+                    pending_prefix.unwrap()
+                );
+                let before = root.shared.ledger().projection_v2().unwrap();
+                assert!(root.shared.apply_closed().unwrap());
+                assert_eq!(root.shared.ledger().projection_v2().unwrap(), before);
+            }
+            eprintln!(
+                "received pending positive cutoff={at} frames={frames} pending={pending} source={}",
+                root.source_sample()
+            );
+        }
+        let position = cutoff.receipt().group().group_position;
+        if let Some(original_requests) = requests.remove(&position) {
+            for value in original_requests {
+                let req = &value["request"];
+                let context: RequestContextV2 =
+                    serde_json::from_value(req["context"].clone()).unwrap();
+                let orders: Vec<SimBuyOrderV1> = match value["method"].as_str().unwrap() {
+                    "POST_ORDER" => {
+                        vec![serde_json::from_value(req["item"]["order"].clone()).unwrap()]
+                    }
+                    "POST_ORDERS" => req["items"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .enumerate()
+                        .map(|(i, v)| {
+                            assert_eq!(v["batch_item_ordinal"], i);
+                            serde_json::from_value(v["item"]["order"].clone()).unwrap()
+                        })
+                        .collect(),
+                    _ => vec![],
+                };
+                let intent = if orders.is_empty() {
+                    assert_eq!(value["method"], "CANCEL_MARKET_ORDERS");
+                    ModelIntentV1::CancelMarketOrders {
+                        condition_id: serde_json::from_value(req["condition_id"].clone()).unwrap(),
+                    }
+                } else {
+                    let items = (0..orders.len())
+                        .map(|i| LedgerSubmissionItemIdentityV1 {
+                            global_request_id: context.global_request_id.clone(),
+                            batch_item_ordinal: i as u16,
+                        })
+                        .collect::<Vec<_>>();
+                    let reserves = items
+                        .iter()
+                        .map(|item| {
+                            reservations
+                                .remove(&serde_json::to_string(item).unwrap())
+                                .unwrap()
+                        })
+                        .collect::<Vec<_>>();
+                    assert!(
+                        root.shared
+                            .reserve_action_v2(&reserves)
+                            .unwrap()
+                            .iter()
+                            .all(|v| matches!(v, LedgerReservationOutcomeV1::Reserved { .. }))
+                    );
+                    for (reserve, item) in reserves.iter().zip(&items) {
+                        root.shared
+                            .record_submission_started(
+                                &LedgerLocalEventIdentityV1(
+                                    serde_json::to_string(&("submission-started", item)).unwrap(),
+                                ),
+                                &reserve.request_identity,
+                                item,
+                            )
+                            .unwrap();
+                    }
+                    let condition_id = orders[0].condition_id.clone();
+                    let mut legs = orders.into_iter().map(leg);
+                    let first = legs.next().unwrap();
+                    if let Some(second) = legs.next() {
+                        assert!(legs.next().is_none());
+                        ModelIntentV1::SubmitPairedBuy {
+                            condition_id,
+                            orders: [first, second],
+                        }
+                    } else {
+                        ModelIntentV1::SubmitSingleBuy {
+                            condition_id,
+                            order: first,
+                        }
+                    }
+                };
+                root.driver.wait_for_recording_capacity().unwrap();
+                root.shared
+                    .execute(
+                        &mut root.driver.decision().unwrap(),
+                        context,
+                        Some(Arc::new(intent)),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+        }
+        if at == 87349000 {
+            frozen = Some(group);
+        }
+        root.driver.drain_measurement_observations();
+        if at == 87350000 {
+            break;
+        }
+        assert!(at < 87350000);
+    }
+    assert!(requests.is_empty());
+    root.driver.stop_and_drain().unwrap();
+    let expected = std::fs::read_to_string(original.join("sim.jsonl")).unwrap();
+    let actual = std::fs::read_to_string(output.join("sim.jsonl")).unwrap();
+    let inputs = |text: &str| -> Vec<serde_json::Value> {
+        text.lines()
+            .flat_map(|line| {
+                let value: serde_json::Value = serde_json::from_str(line).unwrap();
+                match value["kind"].as_str() {
+                    Some("ACCEPTED_INPUTS") => value["body"].as_array().unwrap().clone(),
+                    Some("ACCEPTED_INPUTS_V3") => {
+                        value["body"]["inputs"].as_array().unwrap().clone()
+                    }
+                    _ => vec![],
+                }
+            })
+            .collect()
+    };
+    let expected_inputs = inputs(&expected);
+    let actual_inputs = inputs(&actual);
+    assert!(
+        actual_inputs.starts_with(&expected_inputs),
+        "原输入/请求/身份/时间语义前缀保持；V4日志封装明确不同"
+    );
+    eprintln!(
+        "replay_version_difference=RunOpened.projection_version V3->V4, AcceptedInputs->AcceptedInputsV3; prior_input_count={} current_input_count={}",
+        expected_inputs.len(),
+        actual_inputs.len()
     );
 }

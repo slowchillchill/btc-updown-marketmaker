@@ -500,6 +500,71 @@ pub fn execution_with_identity(
     MemoryNoeObservationV3,
     Arc<SealedProcessRuleSnapshotV3>,
 ) {
+    execution_with_evidence::<MeasuredOrderEvidence>(
+        path,
+        core,
+        policy,
+        delay,
+        seed,
+        cash,
+        run_id,
+        BusinessProjectionVersionV1::V3,
+    )
+}
+pub fn execution_with_identity_v4(
+    path: &Path,
+    core: &PublicObservationCoreV1,
+    policy: &[u8],
+    delay: Option<u64>,
+    seed: String,
+    cash: &str,
+    run_id: &str,
+) -> (
+    PublicSimExecutionV1,
+    MemoryNoeObservationV4,
+    Arc<SealedProcessRuleSnapshotV3>,
+) {
+    execution_with_evidence::<MeasuredCancellationEvidence>(
+        path,
+        core,
+        policy,
+        delay,
+        seed,
+        cash,
+        run_id,
+        BusinessProjectionVersionV1::V4,
+    )
+}
+pub fn execution_with_rules_v4(
+    path: &Path,
+    core: &PublicObservationCoreV1,
+    policy: &[u8],
+    delay: Option<u64>,
+    seed: String,
+    cash: &str,
+) -> (
+    PublicSimExecutionV1,
+    MemoryNoeObservationV4,
+    Arc<SealedProcessRuleSnapshotV3>,
+) {
+    execution_with_identity_v4(path, core, policy, delay, seed, cash, "shared-combination")
+}
+// 同一真实夹具仅显式区分源投影版本；不再包装一份运行配置。
+#[allow(clippy::too_many_arguments)]
+fn execution_with_evidence<P: MemoryOrderEvidence + 'static>(
+    path: &Path,
+    core: &PublicObservationCoreV1,
+    policy: &[u8],
+    delay: Option<u64>,
+    seed: String,
+    cash: &str,
+    run_id: &str,
+    projection_version: BusinessProjectionVersionV1,
+) -> (
+    PublicSimExecutionV1,
+    MemoryNoeObservation<P>,
+    Arc<SealedProcessRuleSnapshotV3>,
+) {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let source = Path::new(file!());
     // workspace 编译的 file! 带包目录；独立 #[path] 消费则相对调用包。
@@ -563,7 +628,7 @@ pub fn execution_with_identity(
     );
     let latency = load_embedded_proxy_latency_profile().unwrap();
     let opened = RunOpenedV2 {
-        projection_version: BusinessProjectionVersionV1::V3,
+        projection_version,
         run_id: run_id.into(),
         durability_role: RunDurabilityRoleV2::CleanRun,
         platform_rule_snapshot_file_sha256: rules.file_sha256().clone(),
@@ -582,7 +647,7 @@ pub fn execution_with_identity(
             path.display().to_string(),
         ),
     };
-    let port = MemoryNoeProjectionPortV3::new(
+    let port = MemoryNoeProjectionPort::<P>::new(
         path.parent().unwrap().join("noe"),
         opened.clone(),
         reference.clone(),

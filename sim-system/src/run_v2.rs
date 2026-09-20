@@ -1,5 +1,10 @@
 use crate::public_consumption::*;
 use crate::session::PublicVisibilityCursorV1;
+pub use noe_projection::{
+    CancellationEvidenceProjection, MeasuredCancellationEvidence, MeasuredOrderEvidence,
+    MemoryNoeObservation, MemoryNoeObservationV4, MemoryNoeProjectionPort,
+    MemoryNoeProjectionPortV4, MemoryOrderEvidence, SimV2NoeProjectionPortV4,
+};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -7,18 +12,16 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use contracts::{
-    AccountInstanceKeyV1, AccountOpeningFactV2, CancelAllOrdersDirectResponseV2,
-    CancelInputItemRefV2, CancelMarketOrdersDirectResponseV2, CancelNotCanceledReasonV2,
-    CancelOrderDirectResponseV2, CancelOrdersDirectResponseV2, CancelTargetOutcomeV2,
-    CancelTargetResponseV2, ConditionId, DirectResponseMetadataV2, ExecutionMarketEventPayloadV3,
-    ExecutionMarketEventV3, ExecutionMethodV2, MarketEnrollmentV2, OrderDirectResponseV2,
-    OrderLifecycleFeedbackV2, OrderProjectionV2, OrderQueryResultV2, OrdersDirectResponseV2,
-    OrdersPageV2, OrdersQueryResultV2, PlatformSourceV1, PostOrderDirectResponseV2,
-    PostOrdersDirectResponseV2, QueryCursorV2, QueryOutOfRetentionV2,
-    SettlementLifecycleFeedbackV2, Sha256Hex, SimCallerRoleV1, SimulatedOrderKnownStatusV2,
-    SubmissionEvidenceUnknownReasonV2, SubmissionItemOutcomeV2, SubmissionRejectedReasonV2,
-    SubmissionResponseItemV2, TradeLifecycleFeedbackV2, TradeProjectionV2, TradesDirectResponseV2,
-    TradesPageV2, TradesQueryResultV2,
+    AccountInstanceKeyV1, AccountOpeningFactV2, CancelInputItemRefV2, CancelNotCanceledReasonV2,
+    ConditionId, DirectResponseMetadataV2, ExecutionMarketEventPayloadV3, ExecutionMarketEventV3,
+    ExecutionMethodV2, MarketEnrollmentV2, OrderDirectResponseV2, OrderLifecycleFeedbackV2,
+    OrderProjectionV2, OrderQueryResultV2, OrdersDirectResponseV2, OrdersPageV2,
+    OrdersQueryResultV2, PlatformSourceV1, PostOrderDirectResponseV2, PostOrdersDirectResponseV2,
+    QueryCursorV2, QueryOutOfRetentionV2, SettlementLifecycleFeedbackV2, Sha256Hex,
+    SimCallerRoleV1, SimulatedOrderKnownStatusV2, SubmissionEvidenceUnknownReasonV2,
+    SubmissionItemOutcomeV2, SubmissionRejectedReasonV2, SubmissionResponseItemV2,
+    TradeLifecycleFeedbackV2, TradeProjectionV2, TradesDirectResponseV2, TradesPageV2,
+    TradesQueryResultV2,
 };
 
 use crate::account::{PlatformAccountError, PlatformAccountStateV2};
@@ -187,12 +190,22 @@ enum NewMutationItemsV2 {
     },
 }
 
-type CancelTargetBusinessEffectV2 = CancelTargetResponseV2;
+type CancelTargetBusinessEffectV3 =
+    CancelTargetBusinessEffect<contracts::CancelNotCanceledReasonV3>;
+type MutationActionBusinessEffectV3 =
+    MutationActionBusinessEffect<contracts::CancelNotCanceledReasonV3>;
+type DirectResponsePayloadDraftV3 =
+    DirectResponsePayloadDraft<contracts::CancelNotCanceledReasonV3>;
+type DirectResponseDraftV3 = DirectResponseDraft<contracts::CancelNotCanceledReasonV3>;
+type StoredDirectResponseV3 = StoredDirectResponse<contracts::CancelNotCanceledReasonV3>;
+pub type BusinessDirectResponseV2 = BusinessDirectResponse<CancelNotCanceledReasonV2>;
+pub type BusinessDirectResponseV3 = BusinessDirectResponse<contracts::CancelNotCanceledReasonV3>;
+type CancelTargetBusinessEffect<R> = contracts::CancelTargetResponse<R>;
 
 #[derive(Debug, PartialEq, Eq)]
-enum MutationActionBusinessEffectV2 {
+enum MutationActionBusinessEffect<R> {
     Post(Arc<PostOrderItemBusinessEffectV2>),
-    Cancel(Vec<Arc<CancelTargetBusinessEffectV2>>),
+    Cancel(Vec<Arc<CancelTargetBusinessEffect<R>>>),
     Query(Arc<QueryActionBusinessEffectV2>),
 }
 
@@ -210,37 +223,37 @@ struct QueryActionBusinessEffectV2 {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum DirectResponsePayloadDraftV2 {
+enum DirectResponsePayloadDraft<R> {
     PostOrder(Arc<PostOrderItemBusinessEffectV2>),
     PostOrders(Vec<Arc<PostOrderItemBusinessEffectV2>>),
-    CancelOrder(Arc<CancelTargetBusinessEffectV2>),
-    CancelOrders(Vec<Arc<CancelTargetBusinessEffectV2>>),
-    CancelMarketOrders(Vec<Arc<CancelTargetBusinessEffectV2>>),
-    CancelAllOrders(Vec<Arc<CancelTargetBusinessEffectV2>>),
+    CancelOrder(Arc<CancelTargetBusinessEffect<R>>),
+    CancelOrders(Vec<Arc<CancelTargetBusinessEffect<R>>>),
+    CancelMarketOrders(Vec<Arc<CancelTargetBusinessEffect<R>>>),
+    CancelAllOrders(Vec<Arc<CancelTargetBusinessEffect<R>>>),
     Order(Arc<QueryActionBusinessEffectV2>),
     Orders(Arc<QueryActionBusinessEffectV2>),
     Trades(Arc<QueryActionBusinessEffectV2>),
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct DirectResponseDraftV2 {
+struct DirectResponseDraft<R> {
     global_request_id: String,
     caller_correlation_id: Option<String>,
     method: MutationMethodV2,
     platform_responded_at_utc_ms: i64,
     response_received_at_utc_ms: i64,
-    payload: DirectResponsePayloadDraftV2,
+    payload: DirectResponsePayloadDraft<R>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum StoredDirectResponseV2 {
-    Draft(DirectResponseDraftV2),
-    Final(BusinessDirectResponseV2),
+enum StoredDirectResponse<R> {
+    Draft(DirectResponseDraft<R>),
+    Final(BusinessDirectResponse<R>),
 }
 
 #[cfg(test)]
-impl std::ops::Deref for StoredDirectResponseV2 {
-    type Target = DirectResponseDraftV2;
+impl<R> std::ops::Deref for StoredDirectResponse<R> {
+    type Target = DirectResponseDraft<R>;
 
     fn deref(&self) -> &Self::Target {
         match self {
@@ -251,65 +264,84 @@ impl std::ops::Deref for StoredDirectResponseV2 {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum BusinessDirectResponseV2 {
+pub enum BusinessDirectResponse<R> {
     PostOrder(PostOrderDirectResponseV2),
     PostOrders(PostOrdersDirectResponseV2),
-    CancelOrder(CancelOrderDirectResponseV2),
-    CancelOrders(CancelOrdersDirectResponseV2),
-    CancelMarketOrders(CancelMarketOrdersDirectResponseV2),
-    CancelAllOrders(CancelAllOrdersDirectResponseV2),
+    CancelOrder(contracts::CancelOrderDirectResponse<R>),
+    CancelOrders(contracts::CancelOrdersDirectResponse<R>),
+    CancelMarketOrders(contracts::CancelMarketOrdersDirectResponse<R>),
+    CancelAllOrders(contracts::CancelAllOrdersDirectResponse<R>),
     Order(OrderDirectResponseV2),
     Orders(OrdersDirectResponseV2),
     Trades(TradesDirectResponseV2),
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub struct BusinessProjectionBatch<T> {
+pub struct BusinessProjectionBatch<T, R = CancelNotCanceledReasonV2> {
     pub initial_markets: Vec<contracts::economics::SourceNeutralInitialMarketV1>,
     pub run_id: String,
     pub projection_batch_sequence: u64,
     pub account_opening: Option<Arc<AccountOpeningFactV2>>,
     pub market_enrollment: Option<MarketEnrollmentV2>,
-    direct_responses: Vec<Arc<StoredDirectResponseV2>>,
+    direct_responses: Vec<Arc<StoredDirectResponse<R>>>,
     pub order_lifecycle: Vec<OrderLifecycleFeedbackV2>,
     pub trade_lifecycle: Vec<T>,
     pub settlement_lifecycle: Vec<SettlementLifecycleFeedbackV2>,
 }
 
-impl<T> BusinessProjectionBatch<T> {
-    pub fn direct_responses(&self) -> impl Iterator<Item = &BusinessDirectResponseV2> {
+impl<T, R> BusinessProjectionBatch<T, R> {
+    pub fn direct_responses(&self) -> impl Iterator<Item = &BusinessDirectResponse<R>> {
         self.direct_responses
             .iter()
             .filter_map(|response| match response.as_ref() {
-                StoredDirectResponseV2::Final(response) => Some(response),
-                StoredDirectResponseV2::Draft(_) => None,
+                StoredDirectResponse::Final(response) => Some(response),
+                StoredDirectResponse::Draft(_) => None,
             })
     }
 }
 
 pub type BusinessProjectionBatchV2 = BusinessProjectionBatch<TradeLifecycleFeedbackV2>;
 pub type BusinessProjectionBatchV3 = BusinessProjectionBatch<contracts::TradeLifecycleFeedbackV3>;
+pub type BusinessProjectionBatchV4 = BusinessProjectionBatch<
+    contracts::TradeLifecycleFeedbackV3,
+    contracts::CancelNotCanceledReasonV3,
+>;
 #[derive(Clone)]
 pub enum BusinessProjectionBatchPayloadV1 {
     V2(Arc<BusinessProjectionBatchV2>),
     V3(Arc<BusinessProjectionBatchV3>),
+    V4(Arc<BusinessProjectionBatchV4>),
 }
 impl BusinessProjectionBatchPayloadV1 {
     fn sequence(&self) -> u64 {
         match self {
             Self::V2(b) => b.projection_batch_sequence,
             Self::V3(b) => b.projection_batch_sequence,
+            Self::V4(b) => b.projection_batch_sequence,
         }
     }
 }
-impl BusinessProjectionBatchV3 {
+impl BusinessProjectionBatchV4 {
     fn into_payload(
         self,
         version: crate::runtime_v2::BusinessProjectionVersionV1,
     ) -> BusinessProjectionBatchPayloadV1 {
         match version {
+            crate::runtime_v2::BusinessProjectionVersionV1::V4 => {
+                BusinessProjectionBatchPayloadV1::V4(Arc::new(self))
+            }
             crate::runtime_v2::BusinessProjectionVersionV1::V3 => {
-                BusinessProjectionBatchPayloadV1::V3(Arc::new(self))
+                BusinessProjectionBatchPayloadV1::V3(Arc::new(BusinessProjectionBatchV3 {
+                    initial_markets: self.initial_markets,
+                    run_id: self.run_id,
+                    projection_batch_sequence: self.projection_batch_sequence,
+                    account_opening: self.account_opening,
+                    market_enrollment: self.market_enrollment,
+                    direct_responses: legacy_direct_responses(self.direct_responses),
+                    order_lifecycle: self.order_lifecycle,
+                    trade_lifecycle: self.trade_lifecycle,
+                    settlement_lifecycle: self.settlement_lifecycle,
+                }))
             }
             crate::runtime_v2::BusinessProjectionVersionV1::V2 => {
                 BusinessProjectionBatchPayloadV1::V2(Arc::new(BusinessProjectionBatchV2 {
@@ -318,7 +350,7 @@ impl BusinessProjectionBatchV3 {
                     projection_batch_sequence: self.projection_batch_sequence,
                     account_opening: self.account_opening,
                     market_enrollment: self.market_enrollment,
-                    direct_responses: self.direct_responses,
+                    direct_responses: legacy_direct_responses(self.direct_responses),
                     order_lifecycle: self.order_lifecycle,
                     trade_lifecycle: self
                         .trade_lifecycle
@@ -330,6 +362,88 @@ impl BusinessProjectionBatchV3 {
             }
         }
     }
+}
+// 旧根不能装载撤单场景；这里只编码旧根原有的两类原因。
+fn legacy_direct_responses(
+    responses: Vec<Arc<StoredDirectResponseV3>>,
+) -> Vec<Arc<StoredDirectResponse<CancelNotCanceledReasonV2>>> {
+    fn target(source: &contracts::CancelTargetResponseV3) -> contracts::CancelTargetResponseV2 {
+        contracts::CancelTargetResponse {
+            target_ordinal: source.target_ordinal,
+            platform_order_id: source.platform_order_id.clone(),
+            input_item_refs: source.input_item_refs.clone(),
+            effective_processing_at_utc_ms: source.effective_processing_at_utc_ms,
+            outcome: match &source.outcome {
+                contracts::CancelTargetOutcome::Canceled(value) => {
+                    contracts::CancelTargetOutcome::Canceled(value.clone())
+                }
+                contracts::CancelTargetOutcome::EvidenceUnknownNoEffect => {
+                    contracts::CancelTargetOutcome::EvidenceUnknownNoEffect
+                }
+                contracts::CancelTargetOutcome::NotCanceledNoEffect(reason) => {
+                    contracts::CancelTargetOutcome::NotCanceledNoEffect(match reason {
+                        contracts::CancelNotCanceledReasonV3::NotFoundOrNotOwned => {
+                            CancelNotCanceledReasonV2::NotFoundOrNotOwned
+                        }
+                        contracts::CancelNotCanceledReasonV3::NoCancellableRemainder => {
+                            CancelNotCanceledReasonV2::NoCancellableRemainder
+                        }
+                        contracts::CancelNotCanceledReasonV3::TemporaryFailureNoEffect => {
+                            unreachable!("旧根没有撤单场景输入")
+                        }
+                    })
+                }
+            },
+        }
+    }
+    responses
+        .into_iter()
+        .map(|source| {
+            let StoredDirectResponse::Final(response) = source.as_ref() else {
+                unreachable!("待交付投影批次只能持有最终直接响应")
+            };
+            let response = match response {
+                BusinessDirectResponse::PostOrder(r) => {
+                    BusinessDirectResponse::PostOrder(r.clone())
+                }
+                BusinessDirectResponse::PostOrders(r) => {
+                    BusinessDirectResponse::PostOrders(r.clone())
+                }
+                BusinessDirectResponse::Order(r) => BusinessDirectResponse::Order(r.clone()),
+                BusinessDirectResponse::Orders(r) => BusinessDirectResponse::Orders(r.clone()),
+                BusinessDirectResponse::Trades(r) => BusinessDirectResponse::Trades(r.clone()),
+                BusinessDirectResponse::CancelOrder(r) => {
+                    BusinessDirectResponse::CancelOrder(contracts::CancelOrderDirectResponse {
+                        metadata: r.metadata.clone(),
+                        target: target(&r.target),
+                    })
+                }
+                BusinessDirectResponse::CancelOrders(r) => {
+                    BusinessDirectResponse::CancelOrders(contracts::CancelOrdersDirectResponse {
+                        metadata: r.metadata.clone(),
+                        targets: r.targets.iter().map(target).collect(),
+                    })
+                }
+                BusinessDirectResponse::CancelMarketOrders(r) => {
+                    BusinessDirectResponse::CancelMarketOrders(
+                        contracts::CancelMarketOrdersDirectResponse {
+                            metadata: r.metadata.clone(),
+                            targets: r.targets.iter().map(target).collect(),
+                        },
+                    )
+                }
+                BusinessDirectResponse::CancelAllOrders(r) => {
+                    BusinessDirectResponse::CancelAllOrders(
+                        contracts::CancelAllOrdersDirectResponse {
+                            metadata: r.metadata.clone(),
+                            targets: r.targets.iter().map(target).collect(),
+                        },
+                    )
+                }
+            };
+            Arc::new(StoredDirectResponse::Final(response))
+        })
+        .collect()
 }
 pub trait BusinessProjectionPortV2 {
     fn uses_background_normalization(&self) -> bool {
@@ -351,7 +465,9 @@ pub trait BusinessProjectionPortV2 {
     fn try_accept_payload(&mut self, batch: Arc<BusinessProjectionBatchPayloadV1>) -> bool {
         match batch.as_ref() {
             BusinessProjectionBatchPayloadV1::V2(batch) => self.try_accept(Arc::clone(batch)),
-            BusinessProjectionBatchPayloadV1::V3(_) => false,
+            BusinessProjectionBatchPayloadV1::V3(_) | BusinessProjectionBatchPayloadV1::V4(_) => {
+                false
+            }
         }
     }
     fn durable_through(&self, run_id: &str) -> u64;
@@ -368,9 +484,9 @@ struct PendingProjectionBatchV2 {
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct MutationActionTransitionEffectsV2 {
-    business: MutationActionBusinessEffectV2,
+    business: MutationActionBusinessEffectV3,
     lifecycle: Vec<LifecycleFeedbackEffectV2>,
-    completed_response: Option<Arc<StoredDirectResponseV2>>,
+    completed_response: Option<Arc<StoredDirectResponseV3>>,
 }
 
 #[derive(Debug)]
@@ -384,9 +500,9 @@ struct MutationRequestRecordV2 {
     scheduled_action_count: u64,
     remaining_action_count: u64,
     post_results: Vec<Arc<PostOrderItemBusinessEffectV2>>,
-    cancel_results: Vec<Arc<CancelTargetBusinessEffectV2>>,
+    cancel_results: Vec<Arc<CancelTargetBusinessEffectV3>>,
     query_result: Option<Arc<QueryActionBusinessEffectV2>>,
-    completed_response: Option<Arc<StoredDirectResponseV2>>,
+    completed_response: Option<Arc<StoredDirectResponseV3>>,
 }
 
 #[derive(Debug, Default)]
@@ -833,11 +949,16 @@ impl UniqueSessionStateV2 {
 
     fn apply_caller_cancel(
         self,
+        global_request_id: Option<&str>,
         platform_order_id: &str,
         platform_effective_at_utc_ms: i64,
     ) -> Result<(Self, CallerCancelDispositionV2), MatchingStateErrorV1> {
         self.map_execution_state(|execution_state| {
-            execution_state.apply_caller_cancel(platform_order_id, platform_effective_at_utc_ms)
+            execution_state.apply_caller_cancel_for_request(
+                global_request_id,
+                platform_order_id,
+                platform_effective_at_utc_ms,
+            )
         })
     }
 }
@@ -912,9 +1033,9 @@ fn execution_method_v2(method: MutationMethodV2) -> ExecutionMethodV2 {
 }
 
 fn finalize_direct_response_v2(
-    response: &DirectResponseDraftV2,
+    response: &DirectResponseDraftV3,
     private_feedback_sequence: u64,
-) -> BusinessDirectResponseV2 {
+) -> BusinessDirectResponseV3 {
     let metadata = DirectResponseMetadataV2 {
         global_request_id: response.global_request_id.clone(),
         caller_correlation_id: response.caller_correlation_id.clone(),
@@ -924,26 +1045,26 @@ fn finalize_direct_response_v2(
         private_feedback_sequence,
     };
     match &response.payload {
-        DirectResponsePayloadDraftV2::PostOrder(item) => {
-            BusinessDirectResponseV2::PostOrder(PostOrderDirectResponseV2 {
+        DirectResponsePayloadDraftV3::PostOrder(item) => {
+            BusinessDirectResponse::PostOrder(PostOrderDirectResponseV2 {
                 metadata,
                 item: item.as_ref().clone(),
             })
         }
-        DirectResponsePayloadDraftV2::PostOrders(items) => {
-            BusinessDirectResponseV2::PostOrders(PostOrdersDirectResponseV2 {
+        DirectResponsePayloadDraftV3::PostOrders(items) => {
+            BusinessDirectResponse::PostOrders(PostOrdersDirectResponseV2 {
                 metadata,
                 items: items.iter().map(|item| item.as_ref().clone()).collect(),
             })
         }
-        DirectResponsePayloadDraftV2::CancelOrder(target) => {
-            BusinessDirectResponseV2::CancelOrder(CancelOrderDirectResponseV2 {
+        DirectResponsePayloadDraftV3::CancelOrder(target) => {
+            BusinessDirectResponse::CancelOrder(contracts::CancelOrderDirectResponse {
                 metadata,
                 target: target.as_ref().clone(),
             })
         }
-        DirectResponsePayloadDraftV2::CancelOrders(targets) => {
-            BusinessDirectResponseV2::CancelOrders(CancelOrdersDirectResponseV2 {
+        DirectResponsePayloadDraftV3::CancelOrders(targets) => {
+            BusinessDirectResponse::CancelOrders(contracts::CancelOrdersDirectResponse {
                 metadata,
                 targets: targets
                     .iter()
@@ -951,8 +1072,19 @@ fn finalize_direct_response_v2(
                     .collect(),
             })
         }
-        DirectResponsePayloadDraftV2::CancelMarketOrders(targets) => {
-            BusinessDirectResponseV2::CancelMarketOrders(CancelMarketOrdersDirectResponseV2 {
+        DirectResponsePayloadDraftV3::CancelMarketOrders(targets) => {
+            BusinessDirectResponse::CancelMarketOrders(
+                contracts::CancelMarketOrdersDirectResponse {
+                    metadata,
+                    targets: targets
+                        .iter()
+                        .map(|target| target.as_ref().clone())
+                        .collect(),
+                },
+            )
+        }
+        DirectResponsePayloadDraftV3::CancelAllOrders(targets) => {
+            BusinessDirectResponse::CancelAllOrders(contracts::CancelAllOrdersDirectResponse {
                 metadata,
                 targets: targets
                     .iter()
@@ -960,38 +1092,29 @@ fn finalize_direct_response_v2(
                     .collect(),
             })
         }
-        DirectResponsePayloadDraftV2::CancelAllOrders(targets) => {
-            BusinessDirectResponseV2::CancelAllOrders(CancelAllOrdersDirectResponseV2 {
-                metadata,
-                targets: targets
-                    .iter()
-                    .map(|target| target.as_ref().clone())
-                    .collect(),
-            })
-        }
-        DirectResponsePayloadDraftV2::Order(result) => {
+        DirectResponsePayloadDraftV3::Order(result) => {
             let QueryActionResultV2::Order(result) = &result.result else {
                 unreachable!("Order 响应草稿只携带单订单查询结果")
             };
-            BusinessDirectResponseV2::Order(OrderDirectResponseV2 {
+            BusinessDirectResponse::Order(OrderDirectResponseV2 {
                 metadata,
                 result: result.clone(),
             })
         }
-        DirectResponsePayloadDraftV2::Orders(result) => {
+        DirectResponsePayloadDraftV3::Orders(result) => {
             let QueryActionResultV2::Orders(result) = &result.result else {
                 unreachable!("Orders 响应草稿只携带订单列表查询结果")
             };
-            BusinessDirectResponseV2::Orders(OrdersDirectResponseV2 {
+            BusinessDirectResponse::Orders(OrdersDirectResponseV2 {
                 metadata,
                 result: result.clone(),
             })
         }
-        DirectResponsePayloadDraftV2::Trades(result) => {
+        DirectResponsePayloadDraftV3::Trades(result) => {
             let QueryActionResultV2::Trades(result) = &result.result else {
                 unreachable!("Trades 响应草稿只携带成交列表查询结果")
             };
-            BusinessDirectResponseV2::Trades(TradesDirectResponseV2 {
+            BusinessDirectResponse::Trades(TradesDirectResponseV2 {
                 metadata,
                 result: result.clone(),
             })
@@ -1084,7 +1207,7 @@ enum FinalizedLifecycleFeedbackV2 {
 
 enum ProjectionDraftV2 {
     Lifecycle(LifecycleFeedbackEffectV2, Option<i64>),
-    Direct(Arc<StoredDirectResponseV2>),
+    Direct(Arc<StoredDirectResponseV3>),
 }
 
 pub(crate) enum CommittedBusinessOutputV2 {
@@ -1104,7 +1227,7 @@ fn finalize_projection_batch_v2(
     (
         BusinessReducerStateV2,
         CommittedBusinessOutputV2,
-        Option<BusinessProjectionBatchV3>,
+        Option<BusinessProjectionBatchV4>,
     ),
     SimRunActorErrorV2,
 > {
@@ -1220,11 +1343,11 @@ fn finalize_projection_batch_v2(
                 }
             }
             ProjectionDraftV2::Direct(response) => {
-                let StoredDirectResponseV2::Draft(response_draft) = response.as_ref() else {
+                let StoredDirectResponseV3::Draft(response_draft) = response.as_ref() else {
                     unreachable!("单次归约只会产生尚未投影的直接响应草稿")
                 };
                 let global_request_id = response_draft.global_request_id.clone();
-                let response = Arc::new(StoredDirectResponseV2::Final(
+                let response = Arc::new(StoredDirectResponseV3::Final(
                     finalize_direct_response_v2(response_draft, next_private_feedback_sequence),
                 ));
                 session
@@ -1246,7 +1369,7 @@ fn finalize_projection_batch_v2(
     Ok((
         state,
         committed,
-        Some(BusinessProjectionBatchV3 {
+        Some(BusinessProjectionBatchV4 {
             initial_markets,
             run_id: run_id.to_owned(),
             projection_batch_sequence,
@@ -1288,6 +1411,47 @@ fn reduce_actor_input_v2(
     finality_policy: &TradeFinalityPolicyV2,
 ) -> BusinessReductionResultV2 {
     match input {
+        BusinessInputV2::CancelScenario(
+            crate::runtime_v2::CancelScenarioOperationV1::Configure(scenario),
+        ) => {
+            let mut state = state;
+            if opened.projection_version != crate::runtime_v2::BusinessProjectionVersionV1::V4 {
+                return Err(unaccepted_business_input_v2(
+                    state,
+                    SimRunActorErrorV2::CompletionNotReady("撤单场景只适用于V4根"),
+                ));
+            }
+            let Some(session) = state.session.as_mut() else {
+                return Err(unaccepted_business_input_v2(
+                    state,
+                    SimRunActorErrorV2::CompletionNotReady("撤单场景需要已开户会话"),
+                ));
+            };
+            if scenario.targets.iter().any(|target| {
+                session
+                    .mutation_requests
+                    .requests_by_id
+                    .contains_key(&target.global_request_id)
+            }) {
+                return Err(unaccepted_business_input_v2(
+                    state,
+                    SimRunActorErrorV2::CompletionNotReady("撤单场景必须在指定请求登记前配置"),
+                ));
+            }
+            let before = session.execution_state.cancel_scenario_resources();
+            session
+                .execution_state
+                .configure_cancel_scenario(scenario, input_sequence);
+            let after = session.execution_state.cancel_scenario_resources();
+            state.business_resources.records =
+                state.business_resources.records - before.records + after.records;
+            state.business_resources.bytes =
+                state.business_resources.bytes - before.bytes + after.bytes;
+            Ok((
+                state,
+                BusinessReducerOutputV2::LogicalDrive(LogicalDriveOutputV2::default()),
+            ))
+        }
         BusinessInputV2::Settlement(operation) => {
             let mut state = state;
             let Some(session) = state.session.as_mut() else {
@@ -1451,6 +1615,11 @@ fn projection_resource_quantity_v2(batch: &BusinessProjectionBatchPayloadV1) -> 
         BusinessProjectionBatchPayloadV1::V2(batch) => {
             projection_resource_quantity(batch, trade_lifecycle_owned_bytes_v2)
         }
+        BusinessProjectionBatchPayloadV1::V4(batch) => {
+            projection_resource_quantity(batch, |trade| {
+                trade_lifecycle_owned_bytes_v2(&trade.feedback) + 16
+            })
+        }
         BusinessProjectionBatchPayloadV1::V3(batch) => {
             projection_resource_quantity(batch, |trade| {
                 trade_lifecycle_owned_bytes_v2(&trade.feedback) + 16
@@ -1458,8 +1627,8 @@ fn projection_resource_quantity_v2(batch: &BusinessProjectionBatchPayloadV1) -> 
         }
     }
 }
-fn projection_resource_quantity<T>(
-    batch: &BusinessProjectionBatch<T>,
+fn projection_resource_quantity<T, R>(
+    batch: &BusinessProjectionBatch<T, R>,
     trade_bytes: impl Fn(&T) -> u64,
 ) -> ResourceQuantityV1 {
     let records = 1_u64
@@ -1484,8 +1653,8 @@ fn projection_resource_quantity<T>(
             .direct_responses
             .iter()
             .map(|response| match response.as_ref() {
-                StoredDirectResponseV2::Final(response) => direct_response_owned_bytes_v2(response),
-                StoredDirectResponseV2::Draft(_) => {
+                StoredDirectResponse::Final(response) => direct_response_owned_bytes_v2(response),
+                StoredDirectResponse::Draft(_) => {
                     unreachable!("待交付投影批次只能持有最终直接响应")
                 }
             })
@@ -1716,14 +1885,14 @@ fn submission_item_owned_bytes_v2(item: &SubmissionResponseItemV2) -> u64 {
     (item.item_id.len() + item.condition_id.0.len() + item.token_id.0.len()) as u64 + outcome
 }
 
-fn cancel_target_owned_bytes_v2(target: &CancelTargetResponseV2) -> u64 {
+fn cancel_target_owned_bytes_v2<R>(target: &contracts::CancelTargetResponse<R>) -> u64 {
     let outcome = match &target.outcome {
-        CancelTargetOutcomeV2::Canceled(measurement) => {
+        contracts::CancelTargetOutcome::Canceled(measurement) => {
             (measurement.canceled_base_quantity_shares.0.len()
                 + measurement.released_quote_amount_pusd.0.len()) as u64
         }
-        CancelTargetOutcomeV2::NotCanceledNoEffect(_)
-        | CancelTargetOutcomeV2::EvidenceUnknownNoEffect => 0,
+        contracts::CancelTargetOutcome::NotCanceledNoEffect(_)
+        | contracts::CancelTargetOutcome::EvidenceUnknownNoEffect => 0,
     };
     target.platform_order_id.len() as u64
         + target
@@ -1759,13 +1928,13 @@ fn trades_result_owned_bytes_v2(result: &TradesQueryResultV2) -> u64 {
     }
 }
 
-fn direct_response_owned_bytes_v2(response: &BusinessDirectResponseV2) -> u64 {
+fn direct_response_owned_bytes_v2<R>(response: &BusinessDirectResponse<R>) -> u64 {
     match response {
-        BusinessDirectResponseV2::PostOrder(response) => {
+        BusinessDirectResponse::PostOrder(response) => {
             direct_metadata_owned_bytes_v2(&response.metadata)
                 + submission_item_owned_bytes_v2(&response.item)
         }
-        BusinessDirectResponseV2::PostOrders(response) => {
+        BusinessDirectResponse::PostOrders(response) => {
             direct_metadata_owned_bytes_v2(&response.metadata)
                 + response
                     .items
@@ -1773,11 +1942,11 @@ fn direct_response_owned_bytes_v2(response: &BusinessDirectResponseV2) -> u64 {
                     .map(submission_item_owned_bytes_v2)
                     .sum::<u64>()
         }
-        BusinessDirectResponseV2::CancelOrder(response) => {
+        BusinessDirectResponse::CancelOrder(response) => {
             direct_metadata_owned_bytes_v2(&response.metadata)
                 + cancel_target_owned_bytes_v2(&response.target)
         }
-        BusinessDirectResponseV2::CancelOrders(response) => {
+        BusinessDirectResponse::CancelOrders(response) => {
             direct_metadata_owned_bytes_v2(&response.metadata)
                 + response
                     .targets
@@ -1785,7 +1954,7 @@ fn direct_response_owned_bytes_v2(response: &BusinessDirectResponseV2) -> u64 {
                     .map(cancel_target_owned_bytes_v2)
                     .sum::<u64>()
         }
-        BusinessDirectResponseV2::CancelMarketOrders(response) => {
+        BusinessDirectResponse::CancelMarketOrders(response) => {
             direct_metadata_owned_bytes_v2(&response.metadata)
                 + response
                     .targets
@@ -1793,7 +1962,7 @@ fn direct_response_owned_bytes_v2(response: &BusinessDirectResponseV2) -> u64 {
                     .map(cancel_target_owned_bytes_v2)
                     .sum::<u64>()
         }
-        BusinessDirectResponseV2::CancelAllOrders(response) => {
+        BusinessDirectResponse::CancelAllOrders(response) => {
             direct_metadata_owned_bytes_v2(&response.metadata)
                 + response
                     .targets
@@ -1801,15 +1970,15 @@ fn direct_response_owned_bytes_v2(response: &BusinessDirectResponseV2) -> u64 {
                     .map(cancel_target_owned_bytes_v2)
                     .sum::<u64>()
         }
-        BusinessDirectResponseV2::Order(response) => {
+        BusinessDirectResponse::Order(response) => {
             direct_metadata_owned_bytes_v2(&response.metadata)
                 + order_result_owned_bytes_v2(&response.result)
         }
-        BusinessDirectResponseV2::Orders(response) => {
+        BusinessDirectResponse::Orders(response) => {
             direct_metadata_owned_bytes_v2(&response.metadata)
                 + orders_result_owned_bytes_v2(&response.result)
         }
-        BusinessDirectResponseV2::Trades(response) => {
+        BusinessDirectResponse::Trades(response) => {
             direct_metadata_owned_bytes_v2(&response.metadata)
                 + trades_result_owned_bytes_v2(&response.result)
         }
@@ -2292,6 +2461,9 @@ where
     ) -> Result<Arc<[ExecutionMarketEventV3]>, SimRunActorErrorV2>,
 {
     Ok(match input {
+        LoggedBusinessInputV2::CancelScenario(operation) => {
+            BusinessInputV2::CancelScenario(operation)
+        }
         LoggedBusinessInputV2::Settlement(operation) => BusinessInputV2::Settlement(operation),
         LoggedBusinessInputV2::HiddenStepBucket(bucket) => {
             let records = read_public
@@ -2420,6 +2592,9 @@ where
                 finalize_projection_batch_v2(&opened.run_id, next_state, output, latency_profile)?;
             state = next_state;
             state.pm_materials.clear();
+            if let Some(session) = &mut state.session {
+                session.execution_state.cancel_scenario_hits.clear();
+            }
             if let Some(projection) = projection
                 && durable_through
                     .is_some_and(|watermark| projection.projection_batch_sequence > watermark)
@@ -3298,6 +3473,11 @@ impl SimRunActorV2 {
             });
         }
         let accepted_len = outputs.len();
+        let cancel_scenario_hits = state
+            .session
+            .as_mut()
+            .map(|session| std::mem::take(&mut session.execution_state.cancel_scenario_hits))
+            .unwrap_or_default();
         if let Some(background) = &mut self.background_log {
             self.state = Some(state);
             self.applied_input_sequence += accepted_len as u64;
@@ -3332,7 +3512,12 @@ impl SimRunActorV2 {
                 }
             }
             background
-                .enqueue_with_noe(accepted, normalized, normalization_error.clone())
+                .enqueue_with_noe(
+                    accepted,
+                    normalized,
+                    normalization_error.clone(),
+                    cancel_scenario_hits,
+                )
                 .map_err(SimRunActorErrorV2::Log)?;
             if let Some(error) = normalization_error {
                 return Err(SimRunActorErrorV2::Noe(error));
@@ -3340,7 +3525,7 @@ impl SimRunActorV2 {
         } else {
             let log = self.log.take().ok_or(SimRunActorErrorV2::Closed)?;
             let (log, _) = log
-                .append_group(&inputs[..accepted_len])
+                .append_group_with_hits(&inputs[..accepted_len], &cancel_scenario_hits)
                 .map_err(SimRunActorErrorV2::Log)?;
             self.log = Some(log);
             self.state = Some(state);
@@ -3655,14 +3840,14 @@ fn cancel_market_action_owned_bytes_v2(global_request_id: &str, condition_id: &C
     (global_request_id.len() + condition_id.0.len()) as u64
 }
 
-fn cancel_result_owned_bytes_v2(effect: &CancelTargetBusinessEffectV2) -> u64 {
+fn cancel_result_owned_bytes_v2(effect: &CancelTargetBusinessEffectV3) -> u64 {
     let outcome_bytes = match &effect.outcome {
-        CancelTargetOutcomeV2::Canceled(canceled) => {
+        contracts::CancelTargetOutcome::Canceled(canceled) => {
             canceled.canceled_base_quantity_shares.0.len()
                 + canceled.released_quote_amount_pusd.0.len()
         }
-        CancelTargetOutcomeV2::NotCanceledNoEffect(_)
-        | CancelTargetOutcomeV2::EvidenceUnknownNoEffect => 0,
+        contracts::CancelTargetOutcome::NotCanceledNoEffect(_)
+        | contracts::CancelTargetOutcome::EvidenceUnknownNoEffect => 0,
     };
     (effect.platform_order_id.len()
         + effect
@@ -4580,6 +4765,7 @@ fn apply_post_action_v2(
 
 fn apply_cancel_target_action_v2(
     session: UniqueSessionStateV2,
+    global_request_id: Option<&str>,
     target_ordinal: u64,
     platform_order_id: String,
     input_item_refs: Vec<CancelInputItemRefV2>,
@@ -4587,26 +4773,36 @@ fn apply_cancel_target_action_v2(
 ) -> Result<
     (
         UniqueSessionStateV2,
-        CancelTargetBusinessEffectV2,
+        CancelTargetBusinessEffectV3,
         Vec<LifecycleFeedbackEffectV2>,
         BusinessResourceDeltaV2,
     ),
     SimRunActorErrorV2,
 > {
     let (session, disposition) = session
-        .apply_caller_cancel(&platform_order_id, platform_effective_at_utc_ms)
+        .apply_caller_cancel(
+            global_request_id,
+            &platform_order_id,
+            platform_effective_at_utc_ms,
+        )
         .map_err(SimRunActorErrorV2::Matching)?;
     let mut resources = BusinessResourceDeltaV2::default();
     let (outcome, lifecycle) = match disposition {
+        CallerCancelDispositionV2::TemporaryFailureNoEffect => (
+            contracts::CancelTargetOutcome::NotCanceledNoEffect(
+                contracts::CancelNotCanceledReasonV3::TemporaryFailureNoEffect,
+            ),
+            Vec::new(),
+        ),
         CallerCancelDispositionV2::NotFound => (
-            CancelTargetOutcomeV2::NotCanceledNoEffect(
-                CancelNotCanceledReasonV2::NotFoundOrNotOwned,
+            contracts::CancelTargetOutcome::NotCanceledNoEffect(
+                contracts::CancelNotCanceledReasonV3::NotFoundOrNotOwned,
             ),
             Vec::new(),
         ),
         CallerCancelDispositionV2::NoCancellableRemainder => (
-            CancelTargetOutcomeV2::NotCanceledNoEffect(
-                CancelNotCanceledReasonV2::NoCancellableRemainder,
+            contracts::CancelTargetOutcome::NotCanceledNoEffect(
+                contracts::CancelNotCanceledReasonV3::NoCancellableRemainder,
             ),
             Vec::new(),
         ),
@@ -4616,14 +4812,14 @@ fn apply_cancel_target_action_v2(
                 .map_err(SimRunActorErrorV2::Matching)?;
             resources.merge(state_resources);
             (
-                CancelTargetOutcomeV2::Canceled(measurement),
+                contracts::CancelTargetOutcome::Canceled(measurement),
                 vec![lifecycle],
             )
         }
     };
     Ok((
         session,
-        CancelTargetBusinessEffectV2 {
+        CancelTargetBusinessEffectV3 {
             target_ordinal,
             platform_order_id,
             input_item_refs,
@@ -4637,12 +4833,13 @@ fn apply_cancel_target_action_v2(
 
 fn apply_cancel_targets_action_v2(
     mut session: UniqueSessionStateV2,
+    global_request_id: Option<&str>,
     target_ids: Vec<String>,
     platform_effective_at_utc_ms: i64,
 ) -> Result<
     (
         UniqueSessionStateV2,
-        Vec<CancelTargetBusinessEffectV2>,
+        Vec<CancelTargetBusinessEffectV3>,
         Vec<LifecycleFeedbackEffectV2>,
         BusinessResourceDeltaV2,
     ),
@@ -4655,6 +4852,7 @@ fn apply_cancel_targets_action_v2(
         let (next_session, effect, mut target_lifecycle, target_resources) =
             apply_cancel_target_action_v2(
                 session,
+                global_request_id,
                 target_ordinal as u64,
                 platform_order_id,
                 Vec::new(),
@@ -4674,24 +4872,25 @@ fn apply_cancel_all_action_v2(
 ) -> Result<
     (
         UniqueSessionStateV2,
-        Vec<CancelTargetBusinessEffectV2>,
+        Vec<CancelTargetBusinessEffectV3>,
         Vec<LifecycleFeedbackEffectV2>,
         BusinessResourceDeltaV2,
     ),
     SimRunActorErrorV2,
 > {
     let target_ids = session.execution_state.active_platform_order_ids();
-    apply_cancel_targets_action_v2(session, target_ids, platform_effective_at_utc_ms)
+    apply_cancel_targets_action_v2(session, None, target_ids, platform_effective_at_utc_ms)
 }
 
 fn apply_cancel_market_action_v2(
     session: UniqueSessionStateV2,
+    global_request_id: &str,
     condition_id: &ConditionId,
     platform_effective_at_utc_ms: i64,
 ) -> Result<
     (
         UniqueSessionStateV2,
-        Vec<CancelTargetBusinessEffectV2>,
+        Vec<CancelTargetBusinessEffectV3>,
         Vec<LifecycleFeedbackEffectV2>,
         BusinessResourceDeltaV2,
     ),
@@ -4700,7 +4899,12 @@ fn apply_cancel_market_action_v2(
     let target_ids = session
         .execution_state
         .active_platform_order_ids_for_condition(condition_id);
-    apply_cancel_targets_action_v2(session, target_ids, platform_effective_at_utc_ms)
+    apply_cancel_targets_action_v2(
+        session,
+        Some(global_request_id),
+        target_ids,
+        platform_effective_at_utc_ms,
+    )
 }
 
 fn apply_order_query_action_v2(
@@ -4986,7 +5190,7 @@ fn apply_trades_query_action_v2(
 fn seal_completed_response_v2(
     global_request_id: &str,
     request: &mut MutationRequestRecordV2,
-) -> Result<Arc<StoredDirectResponseV2>, SimRunActorErrorV2> {
+) -> Result<Arc<StoredDirectResponseV3>, SimRunActorErrorV2> {
     debug_assert_eq!(request.remaining_action_count, 0);
     debug_assert!(request.completed_response.is_none());
     request
@@ -5004,7 +5208,7 @@ fn seal_completed_response_v2(
                 .expect("V2 单笔提交完成时必须恰有一个结果");
             (
                 item.effective_processing_at_utc_ms,
-                DirectResponsePayloadDraftV2::PostOrder(item),
+                DirectResponsePayloadDraftV3::PostOrder(item),
             )
         }
         MutationMethodV2::PostOrders => {
@@ -5016,7 +5220,7 @@ fn seal_completed_response_v2(
                 .expect("V2 批量提交完成时必须至少有一个结果");
             (
                 responded_at,
-                DirectResponsePayloadDraftV2::PostOrders(items),
+                DirectResponsePayloadDraftV3::PostOrders(items),
             )
         }
         MutationMethodV2::CancelOrder => {
@@ -5026,7 +5230,7 @@ fn seal_completed_response_v2(
                 .expect("V2 单笔撤单完成时必须恰有一个目标结果");
             (
                 target.effective_processing_at_utc_ms,
-                DirectResponsePayloadDraftV2::CancelOrder(target),
+                DirectResponsePayloadDraftV3::CancelOrder(target),
             )
         }
         MutationMethodV2::CancelOrders => {
@@ -5038,7 +5242,7 @@ fn seal_completed_response_v2(
                 .expect("V2 批量撤单完成时必须至少有一个目标结果");
             (
                 responded_at,
-                DirectResponsePayloadDraftV2::CancelOrders(targets),
+                DirectResponsePayloadDraftV3::CancelOrders(targets),
             )
         }
         MutationMethodV2::CancelMarketOrders => {
@@ -5050,7 +5254,7 @@ fn seal_completed_response_v2(
                 .unwrap_or(request.platform_arrived_at_utc_ms);
             (
                 responded_at,
-                DirectResponsePayloadDraftV2::CancelMarketOrders(targets),
+                DirectResponsePayloadDraftV3::CancelMarketOrders(targets),
             )
         }
         MutationMethodV2::CancelAllOrders => {
@@ -5062,7 +5266,7 @@ fn seal_completed_response_v2(
                 .unwrap_or(request.platform_arrived_at_utc_ms);
             (
                 responded_at,
-                DirectResponsePayloadDraftV2::CancelAllOrders(targets),
+                DirectResponsePayloadDraftV3::CancelAllOrders(targets),
             )
         }
         MutationMethodV2::Order => {
@@ -5072,7 +5276,7 @@ fn seal_completed_response_v2(
                 .expect("V2 单订单查询完成时必须恰有一个结果");
             (
                 result.effective_processing_at_utc_ms,
-                DirectResponsePayloadDraftV2::Order(result),
+                DirectResponsePayloadDraftV3::Order(result),
             )
         }
         MutationMethodV2::Orders => {
@@ -5082,7 +5286,7 @@ fn seal_completed_response_v2(
                 .expect("V2 订单列表查询完成时必须恰有一个结果");
             (
                 result.effective_processing_at_utc_ms,
-                DirectResponsePayloadDraftV2::Orders(result),
+                DirectResponsePayloadDraftV3::Orders(result),
             )
         }
         MutationMethodV2::Trades => {
@@ -5092,13 +5296,13 @@ fn seal_completed_response_v2(
                 .expect("V2 成交列表查询完成时必须恰有一个结果");
             (
                 result.effective_processing_at_utc_ms,
-                DirectResponsePayloadDraftV2::Trades(result),
+                DirectResponsePayloadDraftV3::Trades(result),
             )
         }
     };
     let response_received_at_utc_ms =
         checked_add_delay_v2(platform_responded_at_utc_ms, request.inbound_delay_ms)?;
-    let response = Arc::new(StoredDirectResponseV2::Draft(DirectResponseDraftV2 {
+    let response = Arc::new(StoredDirectResponseV3::Draft(DirectResponseDraftV3 {
         global_request_id: global_request_id.to_owned(),
         caller_correlation_id: request.caller_correlation_id.clone(),
         method: request.method,
@@ -5175,7 +5379,7 @@ fn advance_next_mutation_action_at_v2(
                     global_request_id,
                     action_bytes,
                     session,
-                    MutationActionBusinessEffectV2::Post(effect),
+                    MutationActionBusinessEffectV3::Post(effect),
                     lifecycle,
                     resources,
                 )
@@ -5193,6 +5397,7 @@ fn advance_next_mutation_action_at_v2(
                 );
                 let (session, effect, lifecycle, resources) = apply_cancel_target_action_v2(
                     session,
+                    Some(&global_request_id),
                     target_ordinal,
                     platform_order_id,
                     input_item_refs,
@@ -5204,7 +5409,7 @@ fn advance_next_mutation_action_at_v2(
                     global_request_id,
                     action_bytes,
                     session,
-                    MutationActionBusinessEffectV2::Cancel(vec![effect]),
+                    MutationActionBusinessEffectV3::Cancel(vec![effect]),
                     lifecycle,
                     resources,
                 )
@@ -5217,6 +5422,7 @@ fn advance_next_mutation_action_at_v2(
                     cancel_market_action_owned_bytes_v2(&global_request_id, &condition_id);
                 let (session, effects, lifecycle, resources) = apply_cancel_market_action_v2(
                     session,
+                    &global_request_id,
                     &condition_id,
                     key.effective_processing_at_utc_ms,
                 )
@@ -5225,7 +5431,7 @@ fn advance_next_mutation_action_at_v2(
                     global_request_id,
                     action_bytes,
                     session,
-                    MutationActionBusinessEffectV2::Cancel(
+                    MutationActionBusinessEffectV3::Cancel(
                         effects.into_iter().map(Arc::new).collect(),
                     ),
                     lifecycle,
@@ -5241,7 +5447,7 @@ fn advance_next_mutation_action_at_v2(
                     global_request_id,
                     action_bytes,
                     session,
-                    MutationActionBusinessEffectV2::Cancel(
+                    MutationActionBusinessEffectV3::Cancel(
                         effects.into_iter().map(Arc::new).collect(),
                     ),
                     lifecycle,
@@ -5264,7 +5470,7 @@ fn advance_next_mutation_action_at_v2(
                     global_request_id,
                     action_bytes,
                     session,
-                    MutationActionBusinessEffectV2::Query(Arc::new(effect)),
+                    MutationActionBusinessEffectV3::Query(Arc::new(effect)),
                     Vec::new(),
                     resources,
                 )
@@ -5286,7 +5492,7 @@ fn advance_next_mutation_action_at_v2(
                     global_request_id,
                     action_bytes,
                     session,
-                    MutationActionBusinessEffectV2::Query(Arc::new(effect)),
+                    MutationActionBusinessEffectV3::Query(Arc::new(effect)),
                     Vec::new(),
                     resources,
                 )
@@ -5309,7 +5515,7 @@ fn advance_next_mutation_action_at_v2(
                     global_request_id,
                     action_bytes,
                     session,
-                    MutationActionBusinessEffectV2::Query(Arc::new(effect)),
+                    MutationActionBusinessEffectV3::Query(Arc::new(effect)),
                     Vec::new(),
                     resources,
                 )
@@ -5317,13 +5523,13 @@ fn advance_next_mutation_action_at_v2(
         };
     resources.remove_record(action_bytes);
     let query_projection_changed = match &effect {
-        MutationActionBusinessEffectV2::Post(effect) => {
+        MutationActionBusinessEffectV3::Post(effect) => {
             matches!(&effect.outcome, PostOrderItemOutcomeV2::Accepted(_))
         }
-        MutationActionBusinessEffectV2::Cancel(effects) => effects
+        MutationActionBusinessEffectV3::Cancel(effects) => effects
             .iter()
-            .any(|effect| matches!(&effect.outcome, CancelTargetOutcomeV2::Canceled(_))),
-        MutationActionBusinessEffectV2::Query(_) => false,
+            .any(|effect| matches!(&effect.outcome, contracts::CancelTargetOutcome::Canceled(_))),
+        MutationActionBusinessEffectV3::Query(_) => false,
     };
     if query_projection_changed {
         session.query_state.advance_revision();
@@ -5338,17 +5544,17 @@ fn advance_next_mutation_action_at_v2(
         .checked_sub(1)
         .expect("V2 待处理动作数量必须保持正值");
     match &effect {
-        MutationActionBusinessEffectV2::Post(effect) => {
+        MutationActionBusinessEffectV3::Post(effect) => {
             resources.merge(post_result_resources_v2(effect));
             request.post_results.push(Arc::clone(effect));
         }
-        MutationActionBusinessEffectV2::Cancel(effects) => {
+        MutationActionBusinessEffectV3::Cancel(effects) => {
             for effect in effects {
                 resources.add_record(cancel_result_owned_bytes_v2(effect));
                 request.cancel_results.push(Arc::clone(effect));
             }
         }
-        MutationActionBusinessEffectV2::Query(effect) => {
+        MutationActionBusinessEffectV3::Query(effect) => {
             resources.merge(query_result_resources_v2(&effect.result));
             request.query_result = Some(Arc::clone(effect));
         }
@@ -6889,6 +7095,38 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct ControllableProjectionPortStateV4 {
+        accept_limit: usize,
+        durable_through: u64,
+        accepted: Vec<Arc<BusinessProjectionBatchV4>>,
+    }
+
+    struct ControllableProjectionPortV4 {
+        state: Rc<RefCell<ControllableProjectionPortStateV4>>,
+    }
+
+    impl BusinessProjectionPortV2 for ControllableProjectionPortV4 {
+        fn try_accept(&mut self, _: Arc<BusinessProjectionBatchV2>) -> bool {
+            false
+        }
+        fn try_accept_payload(&mut self, payload: Arc<BusinessProjectionBatchPayloadV1>) -> bool {
+            let BusinessProjectionBatchPayloadV1::V4(batch) = payload.as_ref() else {
+                return false;
+            };
+            let mut state = self.state.borrow_mut();
+            if state.accepted.len() >= state.accept_limit {
+                return false;
+            }
+            state.accepted.push(batch.clone());
+            true
+        }
+
+        fn durable_through(&self, _run_id: &str) -> u64 {
+            self.state.borrow().durable_through
+        }
+    }
+
     #[cfg(feature = "measurement")]
     #[derive(Default)]
     struct CapturingProjectionPortStateV2 {
@@ -7303,7 +7541,7 @@ mod tests {
             .completed_response
             .as_ref()?;
         match response.as_ref() {
-            StoredDirectResponseV2::Final(BusinessDirectResponseV2::PostOrder(response)) => {
+            StoredDirectResponse::Final(BusinessDirectResponse::PostOrder(response)) => {
                 Some(response)
             }
             _ => None,
@@ -7936,7 +8174,7 @@ mod tests {
         finality_policy: &TradeFinalityPolicyV2,
     ) -> (
         BusinessReducerStateV2,
-        Option<MutationActionBusinessEffectV2>,
+        Option<MutationActionBusinessEffectV3>,
     ) {
         let (state, effect) = advance_mutation_candidate_with_outputs(
             opened,
@@ -8222,7 +8460,7 @@ mod tests {
             actor._rule_snapshot.snapshot(),
             actor._finality_policy.as_ref(),
         );
-        let Some(MutationActionBusinessEffectV2::Post(effect)) = mutation else {
+        let Some(MutationActionBusinessEffectV3::Post(effect)) = mutation else {
             panic!("路径隔离 GTD 必须形成提交效果")
         };
         assert!(
@@ -8819,7 +9057,7 @@ mod tests {
         let Some(fok_transition) = fok_transition else {
             panic!("先前 FOK 必须形成真实 mutation 效果")
         };
-        let MutationActionBusinessEffectV2::Post(fok_effect) = fok_transition.business else {
+        let MutationActionBusinessEffectV3::Post(fok_effect) = fok_transition.business else {
             panic!("先前 FOK mutation 必须是提交效果")
         };
         assert!(
@@ -8882,7 +9120,7 @@ mod tests {
         state = next;
         assert!(matches!(
             maker_effect,
-            Some(MutationActionBusinessEffectV2::Post(effect))
+            Some(MutationActionBusinessEffectV3::Post(effect))
                 if matches!(effect.outcome, PostOrderItemOutcomeV2::Accepted(_))
         ));
 
@@ -8910,7 +9148,7 @@ mod tests {
         state = next;
         assert!(matches!(
             gtd_effect,
-            Some(MutationActionBusinessEffectV2::Post(effect))
+            Some(MutationActionBusinessEffectV3::Post(effect))
                 if matches!(effect.outcome, PostOrderItemOutcomeV2::Accepted(_))
         ));
         assert!(
@@ -9042,7 +9280,7 @@ mod tests {
         let [mutation] = output.mutations.as_slice() else {
             panic!("DPT 后必须只处理同刻登记的唯一订单 mutation")
         };
-        let MutationActionBusinessEffectV2::Post(mutation_effect) = &mutation.business else {
+        let MutationActionBusinessEffectV3::Post(mutation_effect) = &mutation.business else {
             panic!("同刻最后一个稳定身份必须是订单 mutation")
         };
         assert!(matches!(
@@ -9116,7 +9354,7 @@ mod tests {
             rules,
             finality_policy,
         );
-        let Some(MutationActionBusinessEffectV2::Query(effect)) = effect else {
+        let Some(MutationActionBusinessEffectV3::Query(effect)) = effect else {
             panic!("查询请求必须形成唯一查询业务效果")
         };
         (state, receipt, effect)
@@ -9175,7 +9413,7 @@ mod tests {
             let Some(transition) = transition else {
                 panic!("提交请求必须形成动作转换效果")
             };
-            let MutationActionBusinessEffectV2::Post(effect) = transition.business else {
+            let MutationActionBusinessEffectV3::Post(effect) = transition.business else {
                 panic!("提交请求必须只形成提交业务效果")
             };
             state = next;
@@ -9381,7 +9619,7 @@ mod tests {
                 .as_ref()
                 .expect("MNB 首次查询必须冻结响应"),
         );
-        let DirectResponsePayloadDraftV2::Trades(first_response_result) = &first_response.payload
+        let DirectResponsePayloadDraftV3::Trades(first_response_result) = &first_response.payload
         else {
             panic!("成交列表查询必须密封成方法特定响应草稿")
         };
@@ -10021,7 +10259,7 @@ mod tests {
             .completed_response
             .as_ref()
             .expect("单笔订单查询必须密封首次直接响应");
-        let DirectResponsePayloadDraftV2::Order(single_response_result) = &single_response.payload
+        let DirectResponsePayloadDraftV3::Order(single_response_result) = &single_response.payload
         else {
             panic!("单笔订单查询必须密封成方法特定响应草稿")
         };
@@ -10412,12 +10650,12 @@ mod tests {
             actor._rule_snapshot.snapshot(),
             actor._finality_policy.as_ref(),
         );
-        let Some(MutationActionBusinessEffectV2::Cancel(cancel_effects)) = cancel_effect else {
+        let Some(MutationActionBusinessEffectV3::Cancel(cancel_effects)) = cancel_effect else {
             panic!("查询根撤单必须形成撤单效果")
         };
         assert!(matches!(
             cancel_effects[0].outcome,
-            CancelTargetOutcomeV2::Canceled(_)
+            contracts::CancelTargetOutcome::Canceled(_)
         ));
         state = next;
         assert_eq!(
@@ -11407,7 +11645,7 @@ mod tests {
                 platform_order_id
             } if platform_order_id == "sim-1"
         ));
-        let MutationActionBusinessEffectV2::Post(gtc_effect) = first_transition.business else {
+        let MutationActionBusinessEffectV3::Post(gtc_effect) = first_transition.business else {
             panic!("首个普通 GTC 动作必须形成提交结果")
         };
         let PostOrderItemOutcomeV2::Accepted(gtc_accepted) = &gtc_effect.outcome else {
@@ -11468,7 +11706,7 @@ mod tests {
             actor._finality_policy.as_ref(),
         );
         state = next;
-        let Some(MutationActionBusinessEffectV2::Post(fok_effect)) = second_effect else {
+        let Some(MutationActionBusinessEffectV3::Post(fok_effect)) = second_effect else {
             panic!("第二个 FOK 动作必须形成提交结果")
         };
         assert!(matches!(
@@ -11544,7 +11782,7 @@ mod tests {
         assert_eq!(initial_trade_lifecycle.path_ordinal, 0);
         assert_eq!(initial_trade_lifecycle.status.raw, "MATCHED");
         assert!(initial_trade_lifecycle.account_delta.is_none());
-        let MutationActionBusinessEffectV2::Post(fak_effect) = third_transition.business else {
+        let MutationActionBusinessEffectV3::Post(fak_effect) = third_transition.business else {
             panic!("第三个 FAK 动作必须形成提交结果")
         };
         let PostOrderItemOutcomeV2::Accepted(fak_accepted) = &fak_effect.outcome else {
@@ -11606,7 +11844,7 @@ mod tests {
                 .expect("完成请求必须保存首次直接响应"),
             &third_response,
         ));
-        let DirectResponsePayloadDraftV2::PostOrders(items) = &third_response.payload else {
+        let DirectResponsePayloadDraftV3::PostOrders(items) = &third_response.payload else {
             panic!("批量提交必须密封成方法特定响应草稿")
         };
         assert_eq!(
@@ -11736,7 +11974,7 @@ mod tests {
                 .account_transition_seq,
             4
         );
-        let MutationActionBusinessEffectV2::Cancel(first_targets) = cancel_first.business else {
+        let MutationActionBusinessEffectV3::Cancel(first_targets) = cancel_first.business else {
             panic!("首个批撤动作必须形成撤单结果")
         };
         assert_eq!(first_targets.len(), 1);
@@ -11751,7 +11989,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![("ref-a", 2), ("ref-c", 0)]
         );
-        let CancelTargetOutcomeV2::Canceled(canceled) = &first_target.outcome else {
+        let contracts::CancelTargetOutcome::Canceled(canceled) = &first_target.outcome else {
             panic!("sim-1 必须成功撤销开放余量")
         };
         assert_eq!(canceled.canceled_base_quantity_shares.0, "5");
@@ -11786,15 +12024,15 @@ mod tests {
                 .as_ref()
                 .expect("批撤最后一项必须一次密封直接响应"),
         );
-        let MutationActionBusinessEffectV2::Cancel(second_targets) = cancel_second.business else {
+        let MutationActionBusinessEffectV3::Cancel(second_targets) = cancel_second.business else {
             panic!("第二个批撤动作必须形成撤单结果")
         };
         assert_eq!(second_targets.len(), 1);
         assert_eq!(second_targets[0].platform_order_id, "sim-999");
         assert!(matches!(
             &second_targets[0].outcome,
-            CancelTargetOutcomeV2::NotCanceledNoEffect(
-                CancelNotCanceledReasonV2::NotFoundOrNotOwned
+            contracts::CancelTargetOutcome::NotCanceledNoEffect(
+                contracts::CancelNotCanceledReasonV3::NotFoundOrNotOwned
             )
         ));
         assert_eq!(
@@ -11817,7 +12055,7 @@ mod tests {
                 .expect("完成批撤必须保存首次直接响应"),
             &cancel_response,
         ));
-        let DirectResponsePayloadDraftV2::CancelOrders(targets) = &cancel_response.payload else {
+        let DirectResponsePayloadDraftV3::CancelOrders(targets) = &cancel_response.payload else {
             panic!("批撤必须密封成方法特定响应草稿")
         };
         assert_eq!(
@@ -11909,7 +12147,7 @@ mod tests {
             actor._finality_policy.as_ref(),
         );
         state = next;
-        let Some(MutationActionBusinessEffectV2::Post(equal_effect)) = equal_effect else {
+        let Some(MutationActionBusinessEffectV3::Post(equal_effect)) = equal_effect else {
             panic!("240 秒等号 GTD 必须形成单笔提交结果")
         };
         let PostOrderItemOutcomeV2::Accepted(equal_accepted) = &equal_effect.outcome else {
@@ -11925,7 +12163,7 @@ mod tests {
             .completed_response
             .as_ref()
             .expect("单笔提交必须密封首次直接响应");
-        let DirectResponsePayloadDraftV2::PostOrder(equal_response_item) = &equal_response.payload
+        let DirectResponsePayloadDraftV3::PostOrder(equal_response_item) = &equal_response.payload
         else {
             panic!("单笔提交必须密封成方法特定响应草稿")
         };
@@ -11969,14 +12207,14 @@ mod tests {
             actor._finality_policy.as_ref(),
         );
         state = next;
-        let Some(MutationActionBusinessEffectV2::Cancel(cancel_one_effects)) = cancel_one_effect
+        let Some(MutationActionBusinessEffectV3::Cancel(cancel_one_effects)) = cancel_one_effect
         else {
             panic!("单笔撤单必须形成目标结果")
         };
         assert_eq!(cancel_one_effects.len(), 1);
         assert!(matches!(
             &cancel_one_effects[0].outcome,
-            CancelTargetOutcomeV2::Canceled(_)
+            contracts::CancelTargetOutcome::Canceled(_)
         ));
         let cancel_one_response = state
             .session
@@ -11987,7 +12225,7 @@ mod tests {
             .completed_response
             .as_ref()
             .expect("单笔撤单必须密封首次直接响应");
-        let DirectResponsePayloadDraftV2::CancelOrder(cancel_one_response_target) =
+        let DirectResponsePayloadDraftV3::CancelOrder(cancel_one_response_target) =
             &cancel_one_response.payload
         else {
             panic!("单笔撤单必须密封成方法特定响应草稿")
@@ -12042,7 +12280,7 @@ mod tests {
             actor._finality_policy.as_ref(),
         );
         state = next;
-        let Some(MutationActionBusinessEffectV2::Post(too_soon_effect)) = too_soon_effect else {
+        let Some(MutationActionBusinessEffectV3::Post(too_soon_effect)) = too_soon_effect else {
             panic!("239 秒 GTD 必须形成单笔提交结果")
         };
         assert!(matches!(
@@ -12097,7 +12335,7 @@ mod tests {
             actor._finality_policy.as_ref(),
         );
         state = next;
-        let Some(MutationActionBusinessEffectV2::Post(post_only_effect)) = post_only_effect else {
+        let Some(MutationActionBusinessEffectV3::Post(post_only_effect)) = post_only_effect else {
             panic!("post-only GTD 必须形成单笔提交结果")
         };
         assert!(matches!(
@@ -12263,7 +12501,7 @@ mod tests {
                 .as_ref()
                 .expect("全撤单一动作必须一次密封直接响应"),
         );
-        let MutationActionBusinessEffectV2::Cancel(cancel_all_effects) = cancel_all_effect.business
+        let MutationActionBusinessEffectV3::Cancel(cancel_all_effects) = cancel_all_effect.business
         else {
             panic!("全撤必须形成目标结果")
         };
@@ -12275,14 +12513,18 @@ mod tests {
             vec!["sim-2", "sim-3"]
         );
         assert!(
-            cancel_all_effects
-                .iter()
-                .all(|effect| matches!(&effect.outcome, CancelTargetOutcomeV2::Canceled(_)))
+            cancel_all_effects.iter().all(|effect| matches!(
+                &effect.outcome,
+                contracts::CancelTargetOutcome::Canceled(_)
+            ))
         );
-        let CancelTargetOutcomeV2::Canceled(first_canceled) = &cancel_all_effects[0].outcome else {
+        let contracts::CancelTargetOutcome::Canceled(first_canceled) =
+            &cancel_all_effects[0].outcome
+        else {
             unreachable!("首个全撤目标已经确认成功")
         };
-        let CancelTargetOutcomeV2::Canceled(second_canceled) = &cancel_all_effects[1].outcome
+        let contracts::CancelTargetOutcome::Canceled(second_canceled) =
+            &cancel_all_effects[1].outcome
         else {
             unreachable!("第二个全撤目标已经确认成功")
         };
@@ -12353,7 +12595,7 @@ mod tests {
             actor._finality_policy.as_ref(),
         );
         state = next;
-        let Some(MutationActionBusinessEffectV2::Post(later_effect)) = later_effect else {
+        let Some(MutationActionBusinessEffectV3::Post(later_effect)) = later_effect else {
             panic!("全撤后的新单必须形成提交结果")
         };
         let PostOrderItemOutcomeV2::Accepted(later_accepted) = &later_effect.outcome else {
@@ -12372,7 +12614,7 @@ mod tests {
                 .expect("全撤完成后必须保存首次直接响应")
                 .payload
             {
-                DirectResponsePayloadDraftV2::CancelAllOrders(results) => results,
+                DirectResponsePayloadDraftV3::CancelAllOrders(results) => results,
                 _ => panic!("全撤必须保存方法特定响应草稿"),
             }
             .iter()
@@ -12497,7 +12739,7 @@ mod tests {
             state = next;
             assert!(matches!(
                 effect,
-                Some(MutationActionBusinessEffectV2::Post(_))
+                Some(MutationActionBusinessEffectV3::Post(_))
             ));
         }
         let request_id = "cancel-target-market";
@@ -12542,7 +12784,7 @@ mod tests {
         state = next;
         let effect = effect.expect("市场撤单必须形成目标结果");
         assert_eq!(effect.lifecycle.len(), 2);
-        let MutationActionBusinessEffectV2::Cancel(targets) = effect.business else {
+        let MutationActionBusinessEffectV3::Cancel(targets) = effect.business else {
             panic!("市场撤单必须形成撤单业务结果")
         };
         assert_eq!(
@@ -12553,9 +12795,10 @@ mod tests {
             vec![(0, "sim-1"), (1, "sim-2")]
         );
         assert!(
-            targets
-                .iter()
-                .all(|target| matches!(target.outcome, CancelTargetOutcomeV2::Canceled(_)))
+            targets.iter().all(|target| matches!(
+                target.outcome,
+                contracts::CancelTargetOutcome::Canceled(_)
+            ))
         );
 
         let session = state.session.as_ref().expect("市场撤单后唯一会话存在");
@@ -12585,7 +12828,7 @@ mod tests {
             .completed_response
             .as_ref()
             .expect("市场撤单必须一次密封直接响应");
-        let BusinessDirectResponseV2::CancelMarketOrders(response) =
+        let BusinessDirectResponse::CancelMarketOrders(response) =
             finalize_direct_response_v2(response, 1)
         else {
             panic!("市场撤单必须保留方法特定响应身份")
@@ -12621,7 +12864,7 @@ mod tests {
             actor._rule_snapshot.snapshot(),
             actor._finality_policy.as_ref(),
         );
-        let Some(MutationActionBusinessEffectV2::Cancel(empty_targets)) = empty_effect else {
+        let Some(MutationActionBusinessEffectV3::Cancel(empty_targets)) = empty_effect else {
             panic!("无匹配市场撤单必须形成空成功结果")
         };
         assert!(empty_targets.is_empty());
@@ -12632,7 +12875,7 @@ mod tests {
             .expect("无匹配市场撤单必须密封直接响应");
         assert!(matches!(
             &response.payload,
-            DirectResponsePayloadDraftV2::CancelMarketOrders(targets) if targets.is_empty()
+            DirectResponsePayloadDraftV3::CancelMarketOrders(targets) if targets.is_empty()
         ));
     }
 
@@ -12806,7 +13049,7 @@ mod tests {
             actor._rule_snapshot.snapshot(),
             actor._finality_policy.as_ref(),
         );
-        let Some(MutationActionBusinessEffectV2::Post(unknown_condition_effect)) =
+        let Some(MutationActionBusinessEffectV3::Post(unknown_condition_effect)) =
             unknown_condition_effect
         else {
             panic!("未知市场下单必须形成正常业务结果")
@@ -12909,7 +13152,7 @@ mod tests {
             actor._rule_snapshot.snapshot(),
             actor._finality_policy.as_ref(),
         );
-        let Some(MutationActionBusinessEffectV2::Post(unknown_token_effect)) = unknown_token_effect
+        let Some(MutationActionBusinessEffectV3::Post(unknown_token_effect)) = unknown_token_effect
         else {
             panic!("未知 token 下单必须形成正常业务结果")
         };
@@ -13031,7 +13274,7 @@ mod tests {
                 .as_ref()
                 .expect("首次查询响应必须冻结在统一请求记录"),
         );
-        let DirectResponsePayloadDraftV2::Orders(first_result) = &first_response.payload else {
+        let DirectResponsePayloadDraftV3::Orders(first_result) = &first_response.payload else {
             panic!("订单列表查询必须密封成方法特定响应草稿")
         };
         assert!(Arc::ptr_eq(first_result, &condition_effect));
@@ -15812,9 +16055,9 @@ mod tests {
         let finality_policy = successful_policy_v2_for_tests();
         let scenario = sealed_scenario();
         let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
-        let port_state = Rc::new(RefCell::new(ControllableProjectionPortStateV2 {
+        let port_state = Rc::new(RefCell::new(ControllableProjectionPortStateV4 {
             accept_limit: usize::MAX,
-            ..ControllableProjectionPortStateV2::default()
+            ..ControllableProjectionPortStateV4::default()
         }));
         let mut run_opened = opened(
             "run-request-projection-v2",
@@ -15823,6 +16066,7 @@ mod tests {
             &scenario,
             &latency_profile,
         );
+        run_opened.projection_version = crate::runtime_v2::BusinessProjectionVersionV1::V4;
         run_opened.durability_role = RunDurabilityRoleV2::RecoverablePaper;
         let mut actor = SimRunActorV2::create_new(
             &path,
@@ -15831,7 +16075,7 @@ mod tests {
             finality_policy,
             scenario,
             Arc::clone(&latency_profile),
-            Box::new(ControllableProjectionPortV2 {
+            Box::new(ControllableProjectionPortV4 {
                 state: Rc::clone(&port_state),
             }),
             MAX_GROUP_BYTES,
@@ -15948,7 +16192,7 @@ mod tests {
             batch.order_lifecycle[0].metadata.private_feedback_sequence,
             1
         );
-        let StoredDirectResponseV2::Final(BusinessDirectResponseV2::PostOrder(response)) =
+        let StoredDirectResponse::Final(BusinessDirectResponse::PostOrder(response)) =
             batch.direct_responses[0].as_ref()
         else {
             panic!("请求投影必须形成 PostOrder 方法特定响应")
@@ -15974,9 +16218,9 @@ mod tests {
         let finality_policy = successful_policy_v2_for_tests();
         let scenario = sealed_scenario();
         let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
-        let port_state = Rc::new(RefCell::new(ControllableProjectionPortStateV2 {
+        let port_state = Rc::new(RefCell::new(ControllableProjectionPortStateV4 {
             accept_limit: usize::MAX,
-            ..ControllableProjectionPortStateV2::default()
+            ..ControllableProjectionPortStateV4::default()
         }));
         let mut run_opened = opened(
             "run-request-projection-v2",
@@ -15985,6 +16229,7 @@ mod tests {
             &scenario,
             &latency_profile,
         );
+        run_opened.projection_version = crate::runtime_v2::BusinessProjectionVersionV1::V4;
         run_opened.durability_role = RunDurabilityRoleV2::RecoverablePaper;
         let mut execution = SimExecution::create_new(
             &path,
@@ -15993,7 +16238,7 @@ mod tests {
             finality_policy,
             scenario,
             Arc::clone(&latency_profile),
-            Box::new(ControllableProjectionPortV2 {
+            Box::new(ControllableProjectionPortV4 {
                 state: Rc::clone(&port_state),
             }),
             MAX_GROUP_BYTES,
@@ -16110,7 +16355,7 @@ mod tests {
             batch.order_lifecycle[0].metadata.private_feedback_sequence,
             1
         );
-        let StoredDirectResponseV2::Final(BusinessDirectResponseV2::PostOrder(response)) =
+        let StoredDirectResponse::Final(BusinessDirectResponse::PostOrder(response)) =
             batch.direct_responses[0].as_ref()
         else {
             panic!("请求投影必须形成 PostOrder 方法特定响应")
@@ -18175,7 +18420,7 @@ mod tests {
             .completed_response
             .as_ref()?;
         match response.as_ref() {
-            StoredDirectResponseV2::Final(BusinessDirectResponseV2::PostOrder(response)) => {
+            StoredDirectResponse::Final(BusinessDirectResponse::PostOrder(response)) => {
                 Some(response)
             }
             _ => None,
@@ -18661,6 +18906,7 @@ mod tests {
                         (Box::new(port), observation)
                     }
                 }
+                BusinessProjectionVersionV1::V4 => unreachable!("此测试逐项验证原 V2/V3 兼容"),
             };
             let accepted = Rc::new(RefCell::new(Vec::new()));
             let mut execution = SimExecution::create_new(
@@ -18924,6 +19170,7 @@ mod tests {
             for (index, payload) in accepted.borrow().iter().enumerate() {
                 assert_eq!(payload.sequence(), index as u64 + 1);
                 match payload.as_ref() {
+                    BusinessProjectionBatchPayloadV1::V4(_) => unreachable!("原版本兼容夹具"),
                     BusinessProjectionBatchPayloadV1::V2(batch) => {
                         feedback.extend(batch.trade_lifecycle.clone())
                     }
@@ -19385,6 +19632,20 @@ impl PublicSimExecutionV1 {
         let log = actor.log.take().expect("新建运行唯一日志");
         actor.background_log = Some(BackgroundEventLogV1::start(log, finite_in_flight_groups));
         Ok(Self { actor })
+    }
+    pub fn configure_cancel_failure_v1(
+        &mut self,
+        scenario: crate::runtime_v2::CancelFailureScenarioV1,
+    ) -> Result<(), SimRunActorErrorV2> {
+        let committed = self
+            .actor
+            .commit_group(vec![BusinessInputV2::CancelScenario(
+                crate::runtime_v2::CancelScenarioOperationV1::Configure(scenario),
+            )])?;
+        if let Some(error) = committed.unaccepted {
+            return Err(error);
+        }
+        Ok(())
     }
     /// 有限模拟场景沿原输入记录持久化；真实业务不从脚本直接写 Ledger。
     pub fn configure_resolution_redeem_v1(
@@ -20251,3 +20512,6 @@ impl PublicGroupDecisionV1<'_> {
         self.driver.execution.request(self.cutoff.clone(), request)
     }
 }
+
+#[cfg(test)]
+type StoredDirectResponseV2 = StoredDirectResponse<CancelNotCanceledReasonV2>;

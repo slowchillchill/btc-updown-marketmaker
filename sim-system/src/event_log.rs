@@ -11,7 +11,10 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "measurement")]
 use crate::measurement_probe::{MeasurementContext, MeasurementPhase, MeasurementProbe};
-use crate::runtime_v2::{BusinessInputV2, LoggedBusinessInputV2, RunDurabilityRoleV2, RunOpenedV2};
+use crate::runtime_v2::{
+    BusinessInputV2, BusinessProjectionVersionV1, CancelScenarioHitV1, LoggedBusinessInputV2,
+    RunDurabilityRoleV2, RunOpenedV2,
+};
 
 pub(crate) const SIM_EVENT_LOG_FILE_NAME_V2: &str = "sim-event-log-v2.jsonl";
 
@@ -24,6 +27,10 @@ pub(crate) fn delete_retained_run_log_v2(path: &Path) -> Result<(), SimEventLogE
 enum SimEventLogLineV2 {
     RunOpened(RunOpenedV2),
     AcceptedInputs(Vec<LoggedBusinessInputV2>),
+    AcceptedInputsV3 {
+        inputs: Vec<LoggedBusinessInputV2>,
+        cancel_scenario_hits: Vec<CancelScenarioHitV1>,
+    },
     RunSeal,
 }
 
@@ -32,6 +39,10 @@ enum SimEventLogLineV2 {
 enum SimEventLogLineRefV2<'a> {
     RunOpened(&'a RunOpenedV2),
     AcceptedInputs(&'a [BusinessInputV2]),
+    AcceptedInputsV3 {
+        inputs: &'a [BusinessInputV2],
+        cancel_scenario_hits: &'a [CancelScenarioHitV1],
+    },
     RunSeal,
 }
 
@@ -83,6 +94,7 @@ impl std::error::Error for SimEventLogErrorV2 {}
 pub(crate) struct SimEventLogV2 {
     file: File,
     durability_role: RunDurabilityRoleV2,
+    projection_version: BusinessProjectionVersionV1,
     byte_count: u64,
     next_input_sequence: u64,
     max_group_bytes: usize,
@@ -120,6 +132,7 @@ impl SimEventLogV2 {
         let mut log = Self {
             file,
             durability_role: opened.durability_role,
+            projection_version: opened.projection_version,
             byte_count: 0,
             next_input_sequence: 1,
             max_group_bytes,
@@ -147,14 +160,22 @@ impl SimEventLogV2 {
         self,
         inputs: &[BusinessInputV2],
     ) -> Result<(Self, Range<u64>), SimEventLogErrorV2> {
+        self.append_group_with_hits(inputs, &[])
+    }
+    pub(crate) fn append_group_with_hits(
+        self,
+        inputs: &[BusinessInputV2],
+        hits: &[CancelScenarioHitV1],
+    ) -> Result<(Self, Range<u64>), SimEventLogErrorV2> {
         let sync = self.durability_role == RunDurabilityRoleV2::RecoverablePaper;
-        self.append_group_with_sync(inputs, sync)
+        self.append_group_with_sync(inputs, sync, hits)
     }
 
     fn append_group_with_sync(
         mut self,
         inputs: &[BusinessInputV2],
         sync: bool,
+        hits: &[CancelScenarioHitV1],
     ) -> Result<(Self, Range<u64>), SimEventLogErrorV2> {
         let start = self.next_input_sequence;
         if inputs.is_empty() {
@@ -167,10 +188,15 @@ impl SimEventLogV2 {
         record_group_append_for_tests(inputs.len() as u64);
         #[cfg(feature = "measurement")]
         let encode_started = Instant::now();
-        let encoded = encode_line(
-            &SimEventLogLineRefV2::AcceptedInputs(inputs),
-            self.max_group_bytes,
-        )?;
+        let line = if self.projection_version == BusinessProjectionVersionV1::V4 {
+            SimEventLogLineRefV2::AcceptedInputsV3 {
+                inputs,
+                cancel_scenario_hits: hits,
+            }
+        } else {
+            SimEventLogLineRefV2::AcceptedInputs(inputs)
+        };
+        let encoded = encode_line(&line, self.max_group_bytes)?;
         #[cfg(feature = "measurement")]
         self.measurement_probe.record(
             MeasurementContext::CommitGroup,
@@ -296,6 +322,7 @@ impl SimEventLogV2 {
 pub(crate) struct SimEventLogRecoveryV2 {
     reader: BufReader<File>,
     durability_role: RunDurabilityRoleV2,
+    projection_version: BusinessProjectionVersionV1,
     max_group_bytes: usize,
     last_complete_offset: u64,
     next_input_sequence: u64,
@@ -327,6 +354,7 @@ impl SimEventLogRecoveryV2 {
         let recovery = Self {
             reader,
             durability_role: opened.durability_role,
+            projection_version: opened.projection_version,
             max_group_bytes,
             last_complete_offset,
             next_input_sequence: 1,
@@ -375,7 +403,8 @@ impl SimEventLogRecoveryV2 {
                         "RunOpened 只能出现一次",
                     ));
                 }
-                SimEventLogLineV2::AcceptedInputs(inputs) => {
+                SimEventLogLineV2::AcceptedInputs(inputs)
+                | SimEventLogLineV2::AcceptedInputsV3 { inputs, .. } => {
                     if self.saw_seal {
                         return Err(SimEventLogErrorV2::InvalidStructure(
                             "RunSeal 后不能再有输入",
@@ -423,6 +452,7 @@ impl SimEventLogRecoveryV2 {
         Ok(SimEventLogV2 {
             file,
             durability_role: self.durability_role,
+            projection_version: self.projection_version,
             byte_count: self.last_complete_offset,
             next_input_sequence: self.next_input_sequence,
             max_group_bytes: self.max_group_bytes,
@@ -1089,6 +1119,7 @@ fn ledger_background_error(error: ledger::LedgerDurableErrorV1) -> SimEventLogEr
 }
 struct BackgroundGroupV1 {
     inputs: Vec<BusinessInputV2>,
+    cancel_scenario_hits: Vec<CancelScenarioHitV1>,
     noe: Vec<crate::run_v2::noe_projection::AcceptedNoeProjectionV1>,
     normalization_error: Option<crate::run_v2::MemoryNoeErrorV1>,
     #[cfg(feature = "shared-execution")]
@@ -1162,7 +1193,13 @@ impl BackgroundEventLogV1 {
                                     group.materialize()?;
                                 }
                             }
-                            log = log.append_group_with_sync(&inputs, false)?.0;
+                            log = log
+                                .append_group_with_sync(
+                                    &inputs,
+                                    false,
+                                    &group.cancel_scenario_hits,
+                                )?
+                                .0;
                             for batch in group.noe {
                                 crate::run_v2::noe_projection::BackgroundNoeWriterV1::stage(
                                     &mut noe, batch,
@@ -1363,13 +1400,14 @@ impl BackgroundEventLogV1 {
         &mut self,
         inputs: Vec<BusinessInputV2>,
     ) -> Result<(), SimEventLogErrorV2> {
-        self.enqueue_with_noe(inputs, Vec::new(), None)
+        self.enqueue_with_noe(inputs, Vec::new(), None, Vec::new())
     }
     pub(crate) fn enqueue_with_noe(
         &mut self,
         inputs: Vec<BusinessInputV2>,
         noe: Vec<crate::run_v2::noe_projection::AcceptedNoeProjectionV1>,
         normalization_error: Option<crate::run_v2::MemoryNoeErrorV1>,
+        cancel_scenario_hits: Vec<CancelScenarioHitV1>,
     ) -> Result<(), SimEventLogErrorV2> {
         #[cfg(feature = "shared-execution")]
         let ledger = self.take_ledger();
@@ -1377,6 +1415,7 @@ impl BackgroundEventLogV1 {
             #[cfg(feature = "shared-execution")]
             ledger,
             inputs,
+            cancel_scenario_hits,
             noe,
             normalization_error,
         })

@@ -14,15 +14,15 @@ from .validate_graphs import call_ort, session, sha, identities_for
 
 def suite(config):
     cases = []
-    def add(name, mode, batch, pairs=1, removed=True, mixed=False, steps=1, slots=None, active=()):
-        values = list(fixture(batch, pairs, removed, mixed=mixed))
+    def add(name, mode, batch, pairs=1, removed=True, mixed=False, steps=1, slots=None, active=(), empty_probe=False):
+        values = list(fixture(batch, pairs, removed, mixed=mixed, empty_probe=empty_probe))
         if slots is not None:
             values[4], values[5] = values[4][:, :slots], values[5][:, :slots]
         n = values[4].shape[1]
         lengths = [256] * (n // 256) + ([n % 256] if n % 256 else [])
-        c = dict(name=name, mode=mode, batch=batch, steps=steps, slots=n, empty=pairs == 0,
+        c = dict(name=name, mode=mode, batch=batch, steps=steps, slots=n, empty=empty_probe,
                  splits=[lengths] + ([[128,129]] if n == 257 else []), prefixes=[], active=list(active),
-                 identities=identities_for(pairs, removed))
+                 identities=identities_for(pairs, removed), mixed_market=mixed == 'market')
         for key, value in zip(('fast','slow','rule','prefix','objects','mask'), values):
             c[key] = value.flatten().tolist()
         cases.append(c)
@@ -31,6 +31,8 @@ def suite(config):
         add(f'recurrent-B{b}', 'recurrent', b, steps=12)
     for pairs, removed, mixed in ((0,False,False),(1,True,False),(85,False,False),(86,True,False),(86,False,False),(86,True,True)):
         add(f'objects-P{pairs}-removed{int(removed)}-mixed{int(mixed)}','objects',2 if mixed else 1,pairs,removed,mixed)
+    add("empty-graph-probe", "objects", 1, 0, False, empty_probe=True)
+    add("mixed-business-1-257", "objects", 2, 86, True, "market")
     for k in (1,2,128,129,255,256):
         add(f'dynamic-K{k}','dynamic',2,85,False,slots=k)
     c = add('gtc-prefix','prefix',2,0,False)
@@ -44,7 +46,7 @@ def trace(state, action, config, data):
     for c in data['cases']:
         b, n, d = c['batch'], c['slots'], config.hidden // 2
         f,s,r,p,x,m = [torch.tensor(c[k],dtype=torch.bool if k=='mask' else torch.float32).reshape(shape)
-            for k,shape in zip(('fast','slow','rule','prefix','objects','mask'),((b,836),(b,412),(b,30),(b,60),(b,n,129),(b,n)))]
+            for k,shape in zip(('fast','slow','rule','prefix','objects','mask'),((b,836),(b,433),(b,30),(b,60),(b,n,184),(b,n)))]
         h = torch.zeros(config.layers,b,config.hidden)
         zero, absent = torch.zeros(b,3*d), torch.zeros(b,dtype=torch.bool)
         for step in range(c['steps']):
@@ -123,10 +125,10 @@ def main():
             context=dict(config=config.name,threads=args.threads,path=label,B=case['batch'],slots=case['slots'])
             if '/family' in label and '/row' in label:
                 kind=int(label.split('/family')[-1].split('/')[0]);row=int(label.split('/row')[-1].split('/')[0])
-                objects=torch.tensor(case['objects']).reshape(case['batch'],case['slots'],129)
+                objects=torch.tensor(case['objects']).reshape(case['batch'],case['slots'],184)
                 mask=torch.tensor(case['mask']).reshape(case['batch'],case['slots'])
                 indices=(mask[row] & (objects[row,:,kind]==1)).nonzero().flatten().tolist()
-                context.update(row=row,family=kind+3,objects=[(i,case['identities'][i]) for i in indices])
+                context.update(row=row,family=kind+3,objects=[(i, 'Market(current)' if case['mixed_market'] and row == 0 else case['identities'][i]) for i in indices])
             exact=label.endswith('/selected') or label.endswith('/rows')
             compare(values,pvalues,{**context,'runtime':'PythonORT'},stats,exact)
             compare(values,rust['values'],{**context,'runtime':'RustORT'},stats,exact)

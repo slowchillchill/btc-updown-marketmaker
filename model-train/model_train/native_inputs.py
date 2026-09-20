@@ -1,4 +1,4 @@
-"""原生836/412状态输入与30/60/129参数组件消费；不推导动作支持集。"""
+"""原生836/433状态输入与30/60/184参数组件消费；不推导动作支持集。"""
 from dataclasses import dataclass
 
 import torch
@@ -73,7 +73,7 @@ class NativeComponentConsumer:
                 features, objects, reduced, exists = self.objects(group["cancel"], lengths=None if lengths is None else lengths[i])
             else:
                 # 无参数消费时只保留原特征；不执行对象编码或伪造一个参数行。
-                features = parameter.new_tensor(group["cancel"]).reshape(1, -1, 129)
+                features = parameter.new_tensor(group["cancel"]).reshape(1, -1, 184)
                 objects = reduced = exists = None
             self._operations(group["post_frame_hidden_ops"])
             results.append(ComponentGroup(states[i],
@@ -91,7 +91,7 @@ class NativeComponentConsumer:
         for offset in range(0, max(max(counts), 1), 256):
             # 空对象行仍参与非撤单头，掩码不会形成候选。
             slots = min(256, max(max(counts) - offset, 1))
-            objects = features.new_zeros((len(entries), slots, 129))
+            objects = features.new_zeros((len(entries), slots, 184))
             mask = torch.zeros((len(entries), slots), dtype=torch.bool, device=features.device)
             for i, (group, row, _) in enumerate(entries):
                 if group.roles[row] != "DecisionRequired":
@@ -114,7 +114,7 @@ class NativeComponentConsumer:
     def objects(self, values: list[list[float]], *, lengths: list[int] | None = None):
         """完整对象人口组件可独立消费，不把缺少前序hidden的截点冒称连续帧。"""
         parameter = next(self.graphs.parameters())
-        features = parameter.new_tensor(values).reshape(1, -1, 129)
+        features = parameter.new_tensor(values).reshape(1, -1, 184)
         count = len(values)
         mask = torch.ones((1, count), dtype=torch.bool, device=parameter.device)
         if lengths is None:

@@ -173,7 +173,7 @@ class NativeInputTests(unittest.TestCase):
                     label = f"native/{g}/{r}"
                     z, rule = states[r], torch.tensor([row["rule"]])
                     count = len(group["cancel"])
-                    features = torch.tensor(group["cancel"]).reshape(1, count, 129)
+                    features = torch.tensor(group["cancel"]).reshape(1, count, 184)
                     mask = torch.ones((1, count), dtype=torch.bool)
                     lengths = [min(256, count-i) for i in range(0, count, 256)] or [0]
                     embeddings = []
@@ -217,7 +217,7 @@ class NativeInputTests(unittest.TestCase):
             count = len(group["cancel"])
             self.assertIn(count, (0, 2, 256, 257, 259))
             _, objects, actual_reduced, actual_exists = NativeComponentConsumer(self.graphs).objects(group["cancel"])
-            features = torch.tensor(group["cancel"], dtype=torch.float32).reshape(1, count, 129)
+            features = torch.tensor(group["cancel"], dtype=torch.float32).reshape(1, count, 184)
             expected = self.graphs.action.object_encoder(features)
             torch.testing.assert_close(objects, expected, rtol=2e-5, atol=2e-6)
             mask = torch.ones((1, count), dtype=torch.bool)

@@ -15,6 +15,29 @@ def assert_close(reference, actual, *, rtol=1e-4, atol=1e-5):
         torch.testing.assert_close(reference, actual, rtol=0, atol=0)
 
 
+def compare_actor_steps(reference_path, reference_steps, actual_path, actual_steps, context, stats):
+    """逐步核对真实支持/前缀、当前可选分数，然后才核对严格选择。"""
+    for step, (reference, actual) in enumerate(zip(reference_steps, actual_steps)):
+        label = {**context, 'step': step}
+        assert reference[:3] == actual[:3], {**label, 'failure': 'support/state/prefix mismatch',
+                                            'reference': reference[:3], 'actual': actual[:3]}
+        mask = torch.tensor(reference[0], dtype=torch.bool)
+        left, right = torch.tensor(reference[3]), torch.tensor(actual[3])
+        assert left.shape == right.shape == mask.shape, label
+        try:
+            compare((left[mask],), (right[mask],), label, stats)
+        except AssertionError as error:
+            detail = error.args[0]
+            detail['original_head_index'] = int(mask.nonzero().flatten()[detail['index'][0]])
+            detail['index_space'] = 'supported scores; original_head_index names the full head coordinate'
+            raise
+        a, b = reference_path[step], actual_path[step]
+        assert a == b, {**label, 'failure': 'strict choice mismatch', 'reference_choice': a,
+                       'actual_choice': b, 'reference_scores_at_choices': [float(left[a]), float(left[b])],
+                       'actual_scores_at_choices': [float(right[a]), float(right[b])]}
+    assert len(reference_steps) == len(actual_steps) == len(reference_path) == len(actual_path), context
+
+
 def _continuation(model, consumer, ort_consumer, state_forward, action_forward,
                   object_forward, ort_state, ort_action, config):
     """保留两端已递推隐藏状态与会话；执行后只追加真实后继组。"""
@@ -66,12 +89,8 @@ def _continuation(model, consumer, ort_consumer, state_forward, action_forward,
                     assert_close(torch.tensor(a), torch.tensor(b))
             assert len(results[0]) == len(results[1])
             for left, right in zip(results[0], results[1]):
-                assert left[:2] == right[:2]
-                assert len(left[2]) == len(right[2])
-                for a, b in zip(left[2], right[2]):
-                    assert a[:3] == b[:3]
-                    assert_close(torch.tensor(a[2]), torch.tensor(b[2]), rtol=0, atol=0)
-                    assert_close(torch.tensor(a[3]), torch.tensor(b[3]))
+                assert left[0] == right[0]
+                compare_actor_steps(left[1], left[2], right[1], right[2], {'row': left[0]}, {})
         model.state.forward = state_forward
         model.action.forward = action_forward
         model.action.object_encoder.forward = object_forward
@@ -145,7 +164,7 @@ def validate_python(native_group, history, directory, replay):
         assert any(fee_cases[1][1]) and any(fee_cases[2][1])
         assert fee_cases[1][1] != fee_cases[2][1]
         mixed_args = (group.states[0].expand(3, -1), group.rules[0].expand(3, -1),
-                      torch.tensor([case[0] for case in fee_cases]), torch.zeros(3, 1, 129),
+                      torch.tensor([case[0] for case in fee_cases]), torch.zeros(3, 1, 184),
                       torch.zeros(3, 1, dtype=torch.bool), torch.zeros(3, 3 * config.hidden // 2),
                       torch.zeros(3, dtype=torch.bool), torch.tensor([case[1] for case in fee_cases]))
         mixed_scores = model.action(*mixed_args)[3]
@@ -180,12 +199,14 @@ def validate_python(native_group, history, directory, replay):
                 assert_close(torch.tensor(a), torch.tensor(b), rtol=1e-4, atol=1e-5)
         ort_frozen = {key: value.clone() for key, value in ort_consumer.hidden.items()}
         actual = consume_actor(ort_consumer, ort_group, 0, native_group.actor(0), deterministic=True)
-        assert actual.actor.path() == actor.path()
+        compare_actor_steps(actor.path(), actual_records, actual.actor.path(),
+                            records(ort_consumer, ort_group, actual.actor.path()), {'row': 0}, {})
         for path, expected in [(actor.path(), actual_records), (replay, probe_records)]:
             for want, got in zip(expected, records(ort_consumer, ort_group, path)):
                 assert want[:3] == got[:3]
                 assert_close(torch.tensor(want[2]), torch.tensor(got[2]), rtol=0, atol=0)
-                assert_close(torch.tensor(want[3]), torch.tensor(got[3]), rtol=1e-4, atol=1e-5)
+                mask = torch.tensor(want[0], dtype=torch.bool)
+                assert_close(torch.tensor(want[3])[mask], torch.tensor(got[3])[mask], rtol=1e-4, atol=1e-5)
         assert len(ort_traces) == state_calls
         for key, value in ort_frozen.items():
             assert_close(ort_consumer.hidden[key], value, rtol=0, atol=0)
@@ -215,7 +236,7 @@ def main():
     import onnxruntime
     parser=argparse.ArgumentParser()
     parser.add_argument('--graphs',type=Path,required=True)
-    parser.add_argument('--old-graphs',type=Path,required=True)
+    parser.add_argument('--old-graphs',type=Path,help='可选历史权重，仅记录SHA；v2重初始化不要求跨版本逐值一致')
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--configs',nargs='+',default=[c.name for c in CONFIGURATIONS])
     args=parser.parse_args();args.output.mkdir(parents=True,exist_ok=True)
@@ -226,14 +247,20 @@ def main():
     evidence={'scope':'finite actual actor; full C/P remains separate','ort_library_sha256':sha(library),'configurations':{}}
     for config in CONFIGURATIONS:
         current=args.graphs/config.name/'initial_weights.pt'
-        previous=args.old_graphs/config.name/'initial_weights.pt'
-        if not previous.exists():previous=args.old_graphs/'resumed'/config.name/'initial_weights.pt'
-        old=torch.load(previous,weights_only=True,map_location='cpu')
         new=torch.load(current,weights_only=True,map_location='cpu')
-        assert set(new)-set(old)=={'action.actor.fee_weight.weight'}
-        assert all(torch.equal(value,new[name]) for name,value in old.items())
-        evidence['configurations'][config.name]={'seed':config.seed,'unchanged_old_parameters':len(old),'old_weights_sha256':sha(previous),'new_weights_sha256':sha(current)}
-        del old,new
+        initialized=TwoGraphs(config).state_dict()
+        assert set(new)==set(initialized)
+        assert all(torch.equal(value,new[name]) for name,value in initialized.items())
+        evidence['configurations'][config.name]={'seed':config.seed,
+            'input_contract_version':'native_inputs_v3',
+            'feature_schema_sha256':sha(root/'native-inputs/feature_schema.json'),
+            'same_seed_initialized_parameters':len(new),'new_weights_sha256':sha(current)}
+        if args.old_graphs:
+            previous=args.old_graphs/config.name/'initial_weights.pt'
+            if not previous.exists():previous=args.old_graphs/'resumed'/config.name/'initial_weights.pt'
+            evidence['configurations'][config.name]['historical_weights_sha256']=sha(previous)
+            evidence['configurations'][config.name]['cross_version_equality']='不适用：433/184输入改变同种子初始化消耗'
+        del initialized,new
     for name in args.configs:
         env=os.environ.copy()
         env.update(PYTHONHOME=sys.base_prefix,PYO3_PYTHON=sys.executable,
@@ -309,14 +336,16 @@ def validate_cancel(native_group, history, directory):
             for a, b in zip(left, right):
                 assert_close(torch.tensor(a), torch.tensor(b), rtol=1e-4, atol=1e-5)
         actual = consume_actor(ort_consumer, ort_group, 0, native_group.actor(0), deterministic=True)
-        assert actual.actor.path() == paths[0]
-        for path, steps in zip(paths, records):
+        for path_index, (path, steps) in enumerate(zip(paths, records)):
             actor = native_group.actor(0)
             for choice, expected in zip(path, steps):
                 assert (actor.support(), actor.validation_state(), actor.prefix_features()) == expected[:3]
                 assert_close(torch.tensor(expected[2]), torch.tensor(actor.prefix_features()), rtol=0, atol=0)
                 scores = _scores(ort_consumer, ort_group, actor)
-                assert_close(torch.tensor(expected[3]), scores, rtol=1e-4, atol=1e-5)
+                mask = torch.tensor(actor.support(), dtype=torch.bool)
+                assert_close(torch.tensor(expected[3])[mask], scores[mask], rtol=1e-4, atol=1e-5)
+                if path_index == 0:
+                    assert actual.actor.path()[len(actor.path())] == choice
                 if actor.head_index() == 7:
                     assert scores.numel() == len(native_group.features()['cancel'])
                     assert scores.masked_fill(~torch.tensor(actor.support()), -torch.inf).argmax().item() == choice

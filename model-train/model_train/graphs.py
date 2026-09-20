@@ -31,13 +31,22 @@ ACTION_OUTPUTS = ("family_logits", "quantity_branch_logits", "buy_variant_logits
                   "cancel_embeddings", "cancel_logits")
 
 
+class ObjectFeatureEncoder(FeatureEncoder):
+    def forward(self, features: Tensor) -> Tensor:
+        # 保持 PyTorch Linear 的二维 addmm 路径，导出为带偏置 Gemm。
+        # 仅展平独立对象前导维；参数、float32 运算、逐对象数学与梯度保持。
+        shape = features.shape
+        encoded = super().forward(features.reshape(-1, shape[-1]))
+        return encoded.reshape(*shape[:-1], encoded.shape[-1])
+
+
 class ActionDecoder(nn.Module):
     def __init__(self, hidden: int):
         super().__init__()
         # 构造次序属于初始化合同；各支路独立权重，对象两遍共享同一编码器。
-        self.rule = FeatureEncoder(30, hidden)
-        self.prefix = FeatureEncoder(60, hidden)
-        self.object_encoder = FeatureEncoder(129, hidden)
+        self.rule = FeatureEncoder(30, hidden, aligned_linear=True)
+        self.prefix = FeatureEncoder(60, hidden, aligned_linear=True)
+        self.object_encoder = ObjectFeatureEncoder(184, hidden)
         self.summary = FeatureEncoder(3 * hidden // 2, hidden)
         self.actor = ActorScores(hidden)
 
@@ -59,8 +68,8 @@ class TwoGraphs(nn.Module):
         super().__init__()
         with torch.random.fork_rng(devices=[]):
             torch.manual_seed(config.seed)
-            self.state = (BareGRU(836, 412, config.layers) if config.baseline
-                          else ResidualGRU(836, 412, config.hidden, config.layers))
+            self.state = (BareGRU(836, 433, config.layers) if config.baseline
+                          else ResidualGRU(836, 433, config.hidden, config.layers))
             self.action = ActionDecoder(config.hidden)
 
 

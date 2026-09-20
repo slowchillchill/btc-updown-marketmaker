@@ -1308,6 +1308,7 @@ impl CallerCancelEffectV2 {
 #[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum CallerCancelDispositionV2 {
+    TemporaryFailureNoEffect,
     NotFound,
     NoCancellableRemainder,
     Canceled(CallerCancelEffectV2),
@@ -2622,6 +2623,8 @@ pub(crate) enum BuyOrderDispositionV2 {
 #[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct ExecutionStateV2 {
+    cancel_scenario: BTreeMap<(String, String), u64>,
+    pub(crate) cancel_scenario_hits: Vec<crate::runtime_v2::CancelScenarioHitV1>,
     queues: ExecutionQueueStateV2,
     account_overlay: AccountBookOverlayStoreV1,
     account: PlatformAccountStateV2,
@@ -2644,6 +2647,8 @@ impl ExecutionStateV2 {
         account: PlatformAccountStateV2,
     ) -> Self {
         Self {
+            cancel_scenario: BTreeMap::new(),
+            cancel_scenario_hits: Vec::new(),
             queues: ExecutionQueueStateV2::new(directory),
             account_overlay: AccountBookOverlayStoreV1::new(directory),
             account,
@@ -4129,8 +4134,40 @@ impl ExecutionStateV2 {
         ))
     }
 
+    pub(crate) fn cancel_scenario_resources(&self) -> crate::resource::ResourceQuantityV1 {
+        crate::resource::ResourceQuantityV1::new(
+            self.cancel_scenario.len() as u64,
+            self.cancel_scenario
+                .keys()
+                .map(|(request, order)| (request.len() + order.len()) as u64)
+                .sum(),
+        )
+    }
+    pub(crate) fn configure_cancel_scenario(
+        &mut self,
+        scenario: &crate::runtime_v2::CancelFailureScenarioV1,
+        input_sequence: u64,
+    ) {
+        for target in &scenario.targets {
+            self.cancel_scenario.insert(
+                (
+                    target.global_request_id.clone(),
+                    target.platform_order_id.clone(),
+                ),
+                input_sequence,
+            );
+        }
+    }
     pub(crate) fn apply_caller_cancel(
+        self,
+        platform_order_id: &str,
+        platform_effective_at_utc_ms: i64,
+    ) -> Result<(Self, CallerCancelDispositionV2), MatchingStateErrorV1> {
+        self.apply_caller_cancel_for_request(None, platform_order_id, platform_effective_at_utc_ms)
+    }
+    pub(crate) fn apply_caller_cancel_for_request(
         mut self,
+        global_request_id: Option<&str>,
         platform_order_id: &str,
         platform_effective_at_utc_ms: i64,
     ) -> Result<(Self, CallerCancelDispositionV2), MatchingStateErrorV1> {
@@ -4151,6 +4188,20 @@ impl ExecutionStateV2 {
         let released_open_quote_units = *open_encumbered_quote_units;
         if pending_base_units_before == 0 && open_base_units_before == 0 {
             return Ok((self, CallerCancelDispositionV2::NoCancellableRemainder));
+        }
+        if let Some(global_request_id) = global_request_id
+            && let Some(&configuration_input_sequence) = self
+                .cancel_scenario
+                .get(&(global_request_id.to_owned(), platform_order_id.to_owned()))
+        {
+            self.cancel_scenario_hits
+                .push(crate::runtime_v2::CancelScenarioHitV1 {
+                    configuration_input_sequence,
+                    global_request_id: global_request_id.to_owned(),
+                    platform_order_id: platform_order_id.to_owned(),
+                    effective_processing_at_utc_ms: platform_effective_at_utc_ms,
+                });
+            return Ok((self, CallerCancelDispositionV2::TemporaryFailureNoEffect));
         }
         let condition_id = order.condition_id.clone();
         let token_id = order.token_id.clone();

@@ -41,9 +41,17 @@ impl FundsStateV1 {
         &self,
         effect: &LedgerCommittedEffectV1,
     ) -> Result<Option<FundsPatchV1>, LedgerErrorV1> {
-        let LedgerTransactionSourceV1::Memory(source) = &effect.transaction.source else {
-            return Ok(None);
-        };
+        match &effect.transaction.source {
+            LedgerTransactionSourceV1::Memory(source) => self.prepare_record(effect, source),
+            LedgerTransactionSourceV1::MemoryV2(source) => self.prepare_record(effect, source),
+            _ => Ok(None),
+        }
+    }
+    fn prepare_record<R: Clone + std::fmt::Debug + Eq>(
+        &self,
+        effect: &LedgerCommittedEffectV1,
+        source: &execution_normalization::NoeConsumedRecordRef<R>,
+    ) -> Result<Option<FundsPatchV1>, LedgerErrorV1> {
         let seq = effect.ledger_entry_seq();
         let mut patch = FundsPatchV1::default();
         let mut row = None;

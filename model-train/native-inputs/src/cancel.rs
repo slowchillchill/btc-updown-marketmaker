@@ -2,94 +2,130 @@
 use crate::{InputError, exact::*, root::MarketBinding, values::*};
 use contracts::ExecutionReadValueV1::{Known, NotApplicable, Unavailable};
 use contracts::{economics::EconomicRational as R, *};
-use shared_run::{ActionBeforeReadV1, CancelObjectReadV1, ExecutionOrderReadV1};
+use shared_run::{ActionBeforeReadV2, CancelObjectReadV2, ExecutionOrderReadV2};
 use std::collections::BTreeMap;
 fn template(
     out: &mut [f32],
     base: usize,
-    order: &ExecutionOrderReadV1<'_>,
-    read: &ActionBeforeReadV1,
+    order: &ExecutionOrderReadV2<'_>,
+    read: &ActionBeforeReadV2,
     markets: &BTreeMap<String, MarketBinding>,
     now: i64,
 ) -> Result<(), InputError> {
-    let origin = order
-        .origin
-        .as_ref()
-        .ok_or(InputError::MissingAssociation)?;
-    let (condition, leg) = leg(origin)?;
-    let mapping = markets
-        .get(&condition.0)
-        .ok_or(InputError::MissingAssociation)?;
-    let s = side(&mapping.assets, &leg.token_id).ok_or(InputError::MissingAssociation)?;
-    out[base + s] = 1.;
-    out[base + 2] = 1.;
-    out[base + 3] = 1.;
-    let (variant, post, price, target, spend, expiry) = match &leg.order {
-        BuyOrderIntentV1::GtcLimit {
-            limit_price_pusd_per_share,
-            size_shares,
-            post_only,
-        } => (
-            0,
-            Some(*post_only),
-            R::from_decimal(*limit_price_pusd_per_share),
-            R::from_decimal(*size_shares),
-            NotApplicable,
-            None,
-        ),
-        BuyOrderIntentV1::GtdLimit {
-            limit_price_pusd_per_share,
-            size_shares,
-            post_only,
-            expires_at_utc_sec,
-        } => (
-            1,
-            Some(*post_only),
-            R::from_decimal(*limit_price_pusd_per_share),
-            R::from_decimal(*size_shares),
-            NotApplicable,
-            Some(*expires_at_utc_sec),
-        ),
-        BuyOrderIntentV1::FokMarket {
-            spend_pusd,
-            worst_price_pusd_per_share,
-        } => (
-            2,
-            None,
-            R::from_decimal(*worst_price_pusd_per_share),
-            R::from_decimal(*spend_pusd).divided_by(&R::from_decimal(*worst_price_pusd_per_share)),
-            Known(R::from_decimal(*spend_pusd)),
-            None,
-        ),
-        BuyOrderIntentV1::FakMarket {
-            spend_pusd,
-            worst_price_pusd_per_share,
-        } => (
-            3,
-            None,
-            R::from_decimal(*worst_price_pusd_per_share),
-            R::from_decimal(*spend_pusd).divided_by(&R::from_decimal(*worst_price_pusd_per_share)),
-            Known(R::from_decimal(*spend_pusd)),
-            None,
-        ),
-    };
-    out[base + 4 + variant] = 1.;
-    out[base + 8] = 1.;
-    out[base + 9] = 1.;
-    if let Some(post) = post {
-        out[base + 10 + usize::from(post)] = 1.;
-        out[base + 12] = 1.;
-        out[base + 13] = 1.;
+    if let (Some(condition), Some(token)) = (order.condition_id, order.token_id)
+        && let Some(s) = markets
+            .get(&condition.0)
+            .and_then(|m| side(&m.assets, token))
+    {
+        out[base + s] = 1.;
+        out[base + 2] = 1.;
     }
-    linear_slot(out, base + 14, &price.mul(&integer(2)).sub(&integer(1)));
-    slot(out, base + 17, Known(target));
-    slot(out, base + 20, spend);
+    out[base + 3] = 1.;
+    let original = order.origin.as_ref().map(leg).transpose()?;
+    if let Some((_, leg)) = original {
+        let (variant, post, price, target, spend, expiry) = match &leg.order {
+            BuyOrderIntentV1::GtcLimit {
+                limit_price_pusd_per_share,
+                size_shares,
+                post_only,
+            } => (
+                0,
+                Some(*post_only),
+                R::from_decimal(*limit_price_pusd_per_share),
+                R::from_decimal(*size_shares),
+                NotApplicable,
+                None,
+            ),
+            BuyOrderIntentV1::GtdLimit {
+                limit_price_pusd_per_share,
+                size_shares,
+                post_only,
+                expires_at_utc_sec,
+            } => (
+                1,
+                Some(*post_only),
+                R::from_decimal(*limit_price_pusd_per_share),
+                R::from_decimal(*size_shares),
+                NotApplicable,
+                Some(*expires_at_utc_sec),
+            ),
+            BuyOrderIntentV1::FokMarket {
+                spend_pusd,
+                worst_price_pusd_per_share,
+            } => (
+                2,
+                None,
+                R::from_decimal(*worst_price_pusd_per_share),
+                R::from_decimal(*spend_pusd)
+                    .divided_by(&R::from_decimal(*worst_price_pusd_per_share)),
+                Known(R::from_decimal(*spend_pusd)),
+                None,
+            ),
+            BuyOrderIntentV1::FakMarket {
+                spend_pusd,
+                worst_price_pusd_per_share,
+            } => (
+                3,
+                None,
+                R::from_decimal(*worst_price_pusd_per_share),
+                R::from_decimal(*spend_pusd)
+                    .divided_by(&R::from_decimal(*worst_price_pusd_per_share)),
+                Known(R::from_decimal(*spend_pusd)),
+                None,
+            ),
+        };
+        out[base + 4 + variant] = 1.;
+        out[base + 8] = 1.;
+        out[base + 9] = 1.;
+        if let Some(post) = post {
+            out[base + 10 + usize::from(post)] = 1.;
+            out[base + 12] = 1.;
+            out[base + 13] = 1.;
+        }
+        linear_slot(out, base + 14, &price.mul(&integer(2)).sub(&integer(1)));
+        slot(out, base + 17, Known(target));
+        slot(out, base + 20, spend);
+        slot(
+            out,
+            base + 47,
+            expiry
+                .map(|expiration| {
+                    Known(ratio(
+                        (i128::from(expiration) - 60) * 1000 - i128::from(now),
+                        1000,
+                    ))
+                })
+                .unwrap_or(NotApplicable),
+        );
+        for offset in [50, 51, 53] {
+            out[base + offset] = 1.;
+        }
+    } else {
+        out[base + 9] = 1.;
+        slot(out, base + 14, Unavailable);
+        slot(out, base + 17, Unavailable);
+        if let Some(base_quantity) = order.base_quantity_applicability {
+            out[base + 50] = 1.;
+            out[base + 51] = 1.;
+            if base_quantity {
+                out[base + 13] = 1.;
+            } else {
+                slot(out, base + 20, Unavailable);
+                out[base + 53] = 1.;
+            }
+        }
+        // 未知 GTD 子型仍不可判断到期适用性。
+    }
+    out[base + 52] = f32::from(order.base_quantity_applicability.is_some());
     slot(out, base + 23, crate::values::read(&order.matched_shares));
     slot(
         out,
         base + 26,
         crate::values::read(&order.active_unfilled_shares),
     );
+    if order.base_quantity_applicability.is_none() {
+        out[base + 28] = 0.;
+    }
     let funds = read
         .order_funds()
         .find(|f| f.order_identity == order.order_identity);
@@ -123,64 +159,75 @@ fn template(
             out[index + 4] = 1.;
         }
     }
-    slot(
-        out,
-        base + 47,
-        expiry
-            .map(|expiration| {
-                Known(ratio(
-                    (i128::from(expiration) - 60) * 1000 - i128::from(now),
-                    1000,
-                ))
-            })
-            .unwrap_or(NotApplicable),
-    );
+    match order.cancellable {
+        Known(value) => out[base + 54..base + 57].copy_from_slice(&[f32::from(value), 1., 1.]),
+        Unavailable => out[base + 56] = 1.,
+        NotApplicable => {}
+    }
+    out[base + 61] = 1.;
+    if let Some(record) = order.latest_cancel_feedback {
+        use ::execution_normalization::{NormalizationRecord, SourceNeutralEvidenceKind};
+        use contracts::execution_normalization::{
+            SourceNeutralCancellationOutcomeV1::*, SourceNeutralControlResult,
+        };
+        if let NormalizationRecord::Evidence {
+            evidence:
+                SourceNeutralEvidenceKind::Control {
+                    result: SourceNeutralControlResult::Cancellation { outcome, .. },
+                },
+            ..
+        } = record.record()
+        {
+            let index = match outcome {
+                Canceled => 0,
+                NotCanceledNoEffect => 1,
+                EvidenceUnknownNoEffect => 2,
+            };
+            out[base + 57 + index] = 1.;
+            out[base + 60] = 1.;
+        }
+    }
+    time_slot(out, base + 62, Known(order.latest_cancel_feedback), now);
     Ok(())
 }
 pub(crate) fn encode(
-    read: &ActionBeforeReadV1,
+    read: &ActionBeforeReadV2,
     current: Option<&ConditionId>,
     old: &[ConditionId],
     markets: &BTreeMap<String, MarketBinding>,
     now: i64,
 ) -> Result<Vec<Vec<f32>>, InputError> {
-    let objects = match read.cancel_objects() {
+    let objects = match read.cancel_objects_in(current, old) {
         Known(v) => v,
         _ => return Err(InputError::MissingAssociation),
     };
     let mut output = Vec::with_capacity(objects.len());
     for object in objects {
-        let mut out = [0.; 129];
+        let mut out = [0.; 184];
         let condition = match &object {
-            CancelObjectReadV1::Single { order } => {
-                leg(order
-                    .origin
-                    .as_ref()
-                    .ok_or(InputError::MissingAssociation)?)?
-                .0
-            }
-            CancelObjectReadV1::Paired { orders, .. } => {
-                leg(orders[0]
-                    .origin
-                    .as_ref()
-                    .ok_or(InputError::MissingAssociation)?)?
-                .0
-            }
-            CancelObjectReadV1::Market { condition_id, .. } => condition_id,
+            CancelObjectReadV2::Single { order } => order.condition_id,
+            CancelObjectReadV2::Paired { orders, .. } => orders[0].condition_id,
+            CancelObjectReadV2::Market { condition_id, .. } => Some(*condition_id),
         };
-        if Some(condition) == current {
+        if condition.is_some() && condition == current {
             out[3] = 1.;
-        } else if old.contains(condition) {
+            out[5] = 1.;
+        } else if condition.is_some_and(|c| old.contains(c)) {
             out[4] = 1.;
-        } else {
-            return Err(InputError::MissingAssociation);
+            out[5] = 1.;
         }
+        request_block(
+            &mut out,
+            166,
+            read.cancellation_requests(Some(&object.request_scope())),
+            now,
+        );
         match object {
-            CancelObjectReadV1::Single { order } => {
+            CancelObjectReadV2::Single { order } => {
                 out[0] = 1.;
-                template(&mut out, 5, &order, read, markets, now)?;
+                template(&mut out, 6, &order, read, markets, now)?;
             }
-            CancelObjectReadV1::Paired { orders, .. } => {
+            CancelObjectReadV2::Paired { orders, .. } => {
                 out[1] = 1.;
                 for order in &orders {
                     let ordinal = order
@@ -190,7 +237,7 @@ pub(crate) fn encode(
                         .batch_item_ordinal;
                     template(
                         &mut out,
-                        5 + usize::from(ordinal) * 50,
+                        6 + usize::from(ordinal) * 68,
                         order,
                         read,
                         markets,
@@ -198,7 +245,7 @@ pub(crate) fn encode(
                     )?;
                 }
             }
-            CancelObjectReadV1::Market {
+            CancelObjectReadV2::Market {
                 condition_id,
                 orders,
             } => {
@@ -208,22 +255,27 @@ pub(crate) fn encode(
                     .ok_or(InputError::MissingAssociation)?;
                 for s in 0..2 {
                     let mut members = Vec::new();
+                    let mut unknown_side = false;
                     for order in &orders {
-                        let (_, leg) = leg(order
-                            .origin
-                            .as_ref()
-                            .ok_or(InputError::MissingAssociation)?)?;
-                        if side(&mapping.assets, &leg.token_id)
-                            .ok_or(InputError::MissingAssociation)?
-                            == s
+                        match order
+                            .token_id
+                            .and_then(|token| side(&mapping.assets, token))
                         {
-                            members.push(order)
+                            Some(leg) if leg == s => members.push(order),
+                            Some(_) => {}
+                            None => unknown_side = true,
                         }
                     }
-                    slot(&mut out, 105 + s * 3, Known(integer(members.len())));
+                    if unknown_side {
+                        for offset in [142, 148, 154, 160] {
+                            slot(&mut out, offset + s * 3, Unavailable);
+                        }
+                        continue;
+                    }
+                    slot(&mut out, 142 + s * 3, Known(integer(members.len())));
                     slot(
                         &mut out,
-                        111 + s * 3,
+                        148 + s * 3,
                         sum(members
                             .iter()
                             .map(|o| crate::values::read(&o.active_unfilled_shares))),
@@ -241,7 +293,7 @@ pub(crate) fn encode(
                                 })
                                 .unwrap_or(Unavailable)
                         }));
-                        slot(&mut out, 117 + usize::from(fee) * 6 + s * 3, total);
+                        slot(&mut out, 154 + usize::from(fee) * 6 + s * 3, total);
                     }
                 }
             }

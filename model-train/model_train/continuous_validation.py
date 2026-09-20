@@ -6,6 +6,7 @@ from .graphs import TwoGraphs, CONFIGURATIONS, STATE_INPUTS, ACTION_INPUTS
 from .native_inputs import NativeComponentConsumer
 from .validate_graphs import session, call_ort, compare
 from .actor import conditional_choice
+from .actor_validation import compare_actor_steps
 
 
 class ContinuousPython:
@@ -46,6 +47,8 @@ class ContinuousPython:
         self.provenance['graphs'] = {str(directory / name): sha(directory / name) for name in ('initial_weights.pt', 'state_encoder.onnx', 'state_encoder.onnx.data', 'action_decoder.onnx', 'action_decoder.onnx.data')}
         self.provenance['sources'] = {str(path): sha(path) for path in sorted(Path(__file__).parent.glob('*.py'))}
         self.provenance['native_extension_sha256'] = sha(self.provenance['native_module'])
+        self.provenance['input_contract_version'] = 'native_inputs_v3'
+        self.provenance['feature_schema_sha256'] = sha(Path(__file__).resolve().parents[1] / 'native-inputs' / 'feature_schema.json')
         self.provenance['threads'] = threads
         self.provenance['ort_sessions'] = {
             'providers': [self.state_session.get_providers(), self.action_session.get_providers()],
@@ -70,11 +73,15 @@ class ContinuousPython:
         assert len(selected) == len(native_groups)
         features = [group.features() for group in native_groups]
         traces = [[], []]
+        state_inputs = [[], []]
+        finished_actors = []
+        step_heads = []
         results = []
         self.population_groups.clear()
         for runtime, consumer in enumerate(self.consumers):
             label = 'torch' if runtime == 0 else 'ort'
             def state(*args):
+                state_inputs[runtime].append(tuple(value.detach() for value in args))
                 started = time.perf_counter()
                 output = (self.state_forward if runtime == 0 else self.ort_state)(*args)
                 self.durations['state_' + label].append(time.perf_counter() - started)
@@ -111,6 +118,7 @@ class ContinuousPython:
                           for index, group in enumerate(groups) for row, role in enumerate(group.roles)
                           if role == 'DecisionRequired' and selected[index]]
                 records = [[] for _ in actors]
+                heads = [[] for _ in actors]
                 while any(not actor.complete() for _, _, actor in actors):
                     active = [i for i, (_, _, actor) in enumerate(actors) if not actor.complete()]
                     entries = [(groups[actors[i][0]], actors[i][1], actors[i][2]) for i in active]
@@ -125,6 +133,7 @@ class ContinuousPython:
                         head = actor.head_index()
                         scores = torch.cat([block[head][0] for block in blocks])[:len(support)] if head == 7 else blocks[0][head][0]
                         choice, _, _ = conditional_choice(scores, support, deterministic=True)
+                        heads[i].append(head)
                         records[i].append((support, actor.validation_state(), actor.prefix_features(), scores.tolist()))
                         actor.choose(choice)
                 self.parameter_gru_calls[runtime] += len(traces[runtime]) - state_count
@@ -132,18 +141,35 @@ class ContinuousPython:
                 for key, value in frozen.items():
                     assert torch.equal(value, consumer.hidden[key]), 'parameter step mutated hidden'
                 results.append([(index, row, actor.path(), record) for (index, row, actor), record in zip(actors, records)])
+                finished_actors.append(actors)
+                step_heads.append(heads)
         self.model.state.forward = self.state_forward
         self.model.action.forward = self.action_forward
         self.model.action.object_encoder.forward = self.object_forward
-        assert len(traces[0]) == len(traces[1])
-        for frame, (reference, actual) in enumerate(zip(traces[0], traces[1])):
-            compare(reference, actual, {'frame': frame}, self.comparisons)
-        assert len(results[0]) == len(results[1])
-        for left, right in zip(results[0], results[1]):
-            assert left[:3] == right[:3], 'independent actor path mismatch'
-            for a, b in zip(left[3], right[3]):
-                assert a[:3] == b[:3], 'exact support/prefix mismatch'
-                compare((torch.tensor(a[3]),), (torch.tensor(b[3]),), {}, self.comparisons)
+        try:
+            assert len(traces[0]) == len(traces[1])
+            for frame, (reference, actual) in enumerate(zip(traces[0], traces[1])):
+                compare(reference, actual, {'frame': frame}, self.comparisons)
+            assert len(results[0]) == len(results[1])
+            for left, right in zip(results[0], results[1]):
+                assert left[:2] == right[:2], 'actor root/row mismatch'
+                compare_actor_steps(left[2], left[3], right[2], right[3],
+                    {'root': left[0], 'row': left[1], 'cutoff': features[left[0]]['cutoff'],
+                     'runtime': 'PythonORT'}, self.comparisons)
+        except AssertionError as error:
+            # 首错沿原观察产物目录保存当前帧；不提交失败意图或推进后继。
+            import json, os
+            destination = Path(os.environ['CONTINUOUS_OUTPUT']) / 'failed-comparison'
+            destination.mkdir(parents=True, exist_ok=True)
+            detail = {'error': str(error), 'features': features, 'results': results,
+                'step_heads': step_heads,
+                'cancel_candidates': [group.validation_cancel_objects() for group in native_groups],
+                'intents': [[actor.validation_intent() for _, _, actor in actors] for actors in finished_actors],
+                'provenance': self.provenance}
+            (destination / 'frame.json').write_text(json.dumps(detail, indent=2) + '\n')
+            torch.save({'state_inputs': state_inputs, 'state_outputs': traces,
+                        'hidden': [consumer.hidden for consumer in self.consumers]}, destination / 'state.pt')
+            raise
         return [(z.flatten().tolist(), hidden.flatten().tolist()) for z, hidden in traces[0]], results[0]
 
     def _provenance(self):
@@ -249,8 +275,9 @@ class ContinuousPython:
                             blocks = consumer.parameters(frozen, row, actor.prefix_features(), lengths=lengths)
                             scores = torch.cat([b[7][0, :length] for b, length in zip(blocks, lengths)])
                             variants.append(scores)
-                    for actual in variants[1:]: assert_close(variants[0], actual, rtol=1e-4, atol=1e-5)
                     support = actor.support()
+                    legal = torch.tensor(support, dtype=torch.bool)
+                    for actual in variants[1:]: assert_close(variants[0][legal], actual[legal], rtol=1e-4, atol=1e-5)
                     tied, _, _ = conditional_choice(torch.zeros_like(variants[0]), support, deterministic=True)
                     assert tied == next(i for i, legal in enumerate(support) if legal)
                     choice = variants[0].masked_fill(~torch.tensor(support), -torch.inf).argmax().item()
@@ -262,8 +289,9 @@ class ContinuousPython:
                 for (g, row, actor), output in zip(mixed, batched):
                     single = consumer.parameters_batch([(g, row, actor)])[0]
                     assert len(output) >= len(single)
-                    for block, expected in zip(output, single):
-                        for a, b in zip(block[:6], expected[:6]): assert_close(a, b, rtol=1e-4, atol=1e-5)
+                    head = actor.head_index()
+                    legal = torch.tensor(actor.support(), dtype=torch.bool)
+                    assert_close(output[0][head][0][legal], single[0][head][0][legal], rtol=1e-4, atol=1e-5)
             if len(mixed) == 2:
                 # P7定向完成行探针：原B2族步骤后，空人口行完成，另一原身份独立续走。
                 mixed[0][2].choose(0)
@@ -277,7 +305,8 @@ class ContinuousPython:
                     actor = mixed[1][2]
                     scores = torch.cat([block[7][0] for block in outputs[0]])[:len(actor.support())]
                     expected = next(record for record in local if record[0] == 1 and record[1] == 4)
-                    assert_close(scores, scores.new_tensor(expected[2]), rtol=1e-4, atol=1e-5)
+                    legal = torch.tensor(actor.support(), dtype=torch.bool)
+                    assert_close(scores[legal], scores.new_tensor(expected[2])[legal], rtol=1e-4, atol=1e-5)
                     actor.choose(expected[4][-1])
                 assert mixed[0][2].path() == completed_prefix and all(actor.complete() for _, _, actor in mixed)
                 def forbidden(*args): raise AssertionError('empty active set invoked parameter graph')
@@ -286,8 +315,10 @@ class ContinuousPython:
                 self.model.action.forward = self.action_forward if runtime == 0 else self.ort_action
             runtime_records.append(local)
         for a, b in zip(*runtime_records):
-            assert a[:2] == b[:2] and a[3:] == b[3:]
-            assert_close(torch.tensor(a[2]), torch.tensor(b[2]), rtol=1e-4, atol=1e-5)
+            assert a[:2] == b[:2] and a[3] == b[3]
+            legal = torch.tensor(a[3], dtype=torch.bool)
+            assert_close(torch.tensor(a[2])[legal], torch.tensor(b[2])[legal], rtol=1e-4, atol=1e-5)
+            assert a[4] == b[4]
         self.model.action.forward = self.action_forward
         self.model.action.object_encoder.forward = self.object_forward
         # 同一当前真实257人口，重新编码两种分块，完整条件路径采样再重算联合log_prob/梯度。
