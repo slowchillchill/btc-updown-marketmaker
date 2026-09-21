@@ -4,3 +4,5 @@
 - [历史资料、归档映射与固定 Git 入口](https://github.com/slowchillchill/btc-updown-marketmaker/issues/21)
 - [模型训练消费边界](https://github.com/slowchillchill/btc-updown-marketmaker/issues/22)
 - [外部磁盘保护与部署证据](https://github.com/slowchillchill/btc-updown-marketmaker/issues/23)
+
+训练采集器不再接受 `--max-dataset-bytes`。配置摘要仅包含现用配置，因此本次删除容量字段后，摘要与旧版本不同；数据集容量清理由外部磁盘保护负责。

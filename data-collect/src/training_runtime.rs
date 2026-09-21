@@ -298,8 +298,6 @@ pub struct TrainingRuntimeConfig {
     pub code_version: String,
     pub collector_binary_sha256: String,
     pub source_config_digest: String,
-    /// 已废弃，仅保留旧正整数配置兼容；不再控制数据集容量。
-    pub max_dataset_bytes: u64,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -362,12 +360,6 @@ where
     fs::create_dir_all(&config.dataset_root)?;
     let dataset_root = config.dataset_root.canonicalize()?;
     let dataset_root_lock = Arc::new(lock_training_dataset_root(&dataset_root)?);
-    if config.max_dataset_bytes == 0 {
-        return Err(invalid_data(
-            "operator_intervention_required:max_dataset_bytes must be greater than zero",
-        )
-        .into());
-    }
     validate_training_dataset_paths(&dataset_root).map_err(|error| {
         invalid_data(format!(
             "operator_intervention_required:dataset_path_check_failed:{error}"
@@ -3265,7 +3257,6 @@ mod tests {
             code_version: format!("stage7-{label}"),
             collector_binary_sha256: "test-binary-sha256".to_owned(),
             source_config_digest: format!("stage7-source-{label}"),
-            max_dataset_bytes: u64::MAX,
         }
     }
 
@@ -3527,13 +3518,8 @@ mod tests {
         let (stop_tx, stop_rx) = oneshot::channel();
         let retained = dataset_root.join("training/existing-evidence");
         fs::create_dir_all(retained.parent().unwrap()).unwrap();
-        fs::write(
-            &retained,
-            b"must remain despite the obsolete one-byte limit",
-        )
-        .unwrap();
-        let mut config = composed_runtime_config(dataset_root.clone(), "all-unavailable");
-        config.max_dataset_bytes = 1;
+        fs::write(&retained, b"existing evidence must remain").unwrap();
+        let config = composed_runtime_config(dataset_root.clone(), "all-unavailable");
         let runtime = spawn_composed_runtime_thread(config, fixture.specs.clone(), stop_rx);
         fixture.wait_ready(&runtime).await;
         assert_eq!(fixture.counters.clob_connections.load(Ordering::Relaxed), 0);
@@ -3554,7 +3540,7 @@ mod tests {
         assert_composed_artifacts("all-unavailable", mode, &receipt, &manifest);
         assert_eq!(
             fs::read(retained).unwrap(),
-            b"must remain despite the obsolete one-byte limit"
+            b"existing evidence must remain"
         );
         fixture.shutdown().await;
     }

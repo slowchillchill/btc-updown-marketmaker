@@ -907,7 +907,7 @@ async fn binance_depth_retry_after_survives_snapshot_future_replacement() {
                 .deadline
                 .lock()
                 .unwrap()
-                .is_some_and(|deadline| deadline > Instant::now());
+                .is_some_and(|(started, duration)| started.elapsed() < duration);
             if gate_is_set {
                 break;
             }
@@ -1672,6 +1672,7 @@ async fn binance_depth_operator_cutoff_discards_unadmitted_pending_and_stops_cle
         let (mut socket, _) = http_listener.accept().await.unwrap();
         let mut request = [0_u8; 1024];
         let _ = socket.read(&mut request).await.unwrap();
+        socket.write_all(b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 18446744073709551615\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
         let _ = server_release_rx.await;
     });
     let ws_server = tokio::spawn(async move {
@@ -1704,6 +1705,7 @@ async fn binance_depth_operator_cutoff_discards_unadmitted_pending_and_stops_cle
         "bootstrap",
     );
     let observed_ingress = context.ingress_sequence.clone();
+    let snapshot_wait = context.snapshot_not_before.clone();
     let (control_tx, mut control_rx) = mpsc::channel(1);
     let source = tokio::spawn(async move {
         run_binance_depth_update_ws_source_with_control(stream, context, Some(&mut control_rx))
@@ -1711,7 +1713,9 @@ async fn binance_depth_operator_cutoff_discards_unadmitted_pending_and_stops_cle
     });
 
     timeout(Duration::from_secs(1), async {
-        while observed_ingress.last.load(Ordering::Relaxed) < 1 {
+        while observed_ingress.last.load(Ordering::Relaxed) < 2
+            || snapshot_wait.deadline.lock().unwrap().is_none()
+        {
             tokio::task::yield_now().await;
         }
     })
@@ -2489,7 +2493,7 @@ fn binance_depth_pending_buffer_enforces_byte_cap_independently_of_row_cap() {
 }
 
 #[test]
-fn binance_depth_retry_after_is_bounded_to_official_maximum_ban_window() {
+fn binance_depth_retry_after_preserves_legal_seconds() {
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         reqwest::header::RETRY_AFTER,
@@ -2497,7 +2501,7 @@ fn binance_depth_retry_after_is_bounded_to_official_maximum_ban_window() {
     );
     assert_eq!(
         binance_snapshot_retry_after(&headers, reqwest::StatusCode::TOO_MANY_REQUESTS),
-        Some(Duration::from_secs(BINANCE_RETRY_AFTER_MAX_SECS))
+        Some(Duration::from_secs(u64::MAX))
     );
     headers.insert(
         reqwest::header::RETRY_AFTER,

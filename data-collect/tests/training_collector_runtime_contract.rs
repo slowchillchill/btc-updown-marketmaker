@@ -2,8 +2,8 @@ use std::fs;
 use std::process::Command;
 
 use data_collect::runtime::{
-    DEFAULT_TRAINING_DATASET_MAX_BYTES, OPERATOR_INTERVENTION_REQUIRED_EXIT_CODE,
-    RESOURCE_HARD_THRESHOLD_EXIT_CODE, collector_exit_code, parse_args,
+    OPERATOR_INTERVENTION_REQUIRED_EXIT_CODE, RESOURCE_HARD_THRESHOLD_EXIT_CODE,
+    collector_exit_code, parse_args,
 };
 use data_collect::training_runtime::{
     is_training_runtime_source_gap_reason, training_source_kinds,
@@ -16,22 +16,17 @@ fn training_binary() -> &'static str {
 
 #[test]
 fn simplified_training_cli_has_one_dataset_root_and_no_run_or_retention_arguments() {
-    let cli = parse_args([
-        "--dataset-root",
-        "/tmp/data-collect-contract",
-        "--collector-region",
-        "eu-west-1",
-        "--run-forever",
-        "--max-dataset-bytes",
-        "50000000000",
-    ])
-    .unwrap();
+    let service = include_str!("../deploy/systemd/data-collect-training-collector.service");
+    let command = service
+        .lines()
+        .find_map(|line| line.strip_prefix("ExecStart="))
+        .unwrap();
+    let cli = parse_args(command.split_whitespace().skip(1)).unwrap();
     assert_eq!(
         cli.dataset_root,
-        std::path::Path::new("/tmp/data-collect-contract")
+        std::path::Path::new("/home/ubuntu/btc-updown-marketmaker/datasets")
     );
     assert!(cli.run_forever);
-    assert_eq!(cli.max_dataset_bytes, DEFAULT_TRAINING_DATASET_MAX_BYTES);
 
     for obsolete in [
         "--run-id",
@@ -80,7 +75,7 @@ fn help_and_version_fast_paths_are_successful_and_create_nothing() {
         );
         assert!(!output.stdout.is_empty());
         if flag == "--help" {
-            assert!(String::from_utf8_lossy(&output.stdout).contains("已废弃"));
+            assert!(String::from_utf8_lossy(&output.stdout).contains("--dataset-root"));
         }
         assert!(!nonexistent_dataset.exists());
     }
@@ -105,8 +100,6 @@ fn startup_path_check_rejects_training_root_symlink_before_network_startup() {
             "--collector-region",
             "eu-west-1",
             "--max-runtime-secs",
-            "1",
-            "--max-dataset-bytes",
             "1",
         ])
         .output()
@@ -146,13 +139,4 @@ fn recoverable_backpressure_wait_is_not_a_live_source_gap() {
     assert!(is_training_runtime_source_gap_reason(
         "writer_queue_disconnected:polymarket_market"
     ));
-}
-
-#[test]
-fn obsolete_capacity_option_keeps_its_positive_integer_domain() {
-    let cli = parse_args(["--dataset-root", "/tmp/data", "--max-dataset-bytes", "1"]).unwrap();
-    assert_eq!(cli.max_dataset_bytes, 1);
-    for value in ["0", "-1", "invalid"] {
-        assert!(parse_args(["--dataset-root", "/tmp/data", "--max-dataset-bytes", value]).is_err());
-    }
 }
