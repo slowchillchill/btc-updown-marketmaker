@@ -6,9 +6,7 @@ use contracts::{
     MarketWindowV2, OutcomeIdentityV1, PriceLevelV1, QueueResultQuality, ResyncQuality, Sha256Hex,
     SourceAttributionQuality, SourceEvidenceRefV2, TokenId,
 };
-use data_pipeline_core::{derive_execution_market_event_v3_id, encode_execution_market_event_v3};
-
-use crate::market::{ClosedMarketEventBucketV1, MillisecondBucketClosureV1};
+use data_pipeline_core::derive_execution_market_event_v3_id;
 
 pub(crate) fn market() -> MarketIdentityV2 {
     MarketIdentityV2 {
@@ -113,26 +111,6 @@ pub(crate) fn initial_snapshot_event(
         }),
         orderbook_evidence(source_at, received_at, sequence),
         fresh_quality(),
-    )
-}
-
-pub(crate) fn hidden_bucket(
-    at: i64,
-    next_position: u64,
-    events: &[ExecutionMarketEventV3],
-) -> ClosedMarketEventBucketV1 {
-    let event_count = u64::try_from(events.len()).expect("test event count fits u64");
-    ClosedMarketEventBucketV1::hidden(
-        at,
-        next_position
-            .checked_sub(event_count)
-            .expect("test bucket positions cover its events"),
-        next_position,
-        MillisecondBucketClosureV1::NextEventAt(at + 1),
-        events
-            .iter()
-            .map(|event| encode_execution_market_event_v3(event).expect("canonical event bytes"))
-            .collect::<Vec<_>>(),
     )
 }
 

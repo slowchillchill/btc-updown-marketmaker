@@ -21,9 +21,6 @@ pub const DPT_OBSERVATION_RECEIPT_SCHEMA_V1: &str = "dpt_observation_receipt_v1"
 pub const EVENT_TIME_INDEX_SCHEMA_V2: &str = "event_time_index_v2";
 pub const VISIBILITY_INDEX_SCHEMA_V2: &str = "visibility_index_v2";
 pub const ACCOUNT_INSTANCE_KEY_SCHEMA_V1: &str = "account_instance_key_v1";
-pub const ACCOUNT_OPENING_ANCHOR_SCHEMA_V1: &str = "account_opening_anchor_v1";
-pub const PLATFORM_ACCOUNT_DELTA_SCHEMA_V1: &str = "platform_account_delta_v1";
-pub const MARKET_ENROLLMENT_SCHEMA_V1: &str = "market_enrollment_v1";
 pub const SIM_EXECUTION_CONTRACT_V2: &str = "sim_execution_contract_v2";
 pub const DATASET_LINEAGE_ROOT: &str = "/home/chillchill/new-datasets";
 pub const DATASET_DATE_FLOOR: &str = "2026-07-30";
@@ -75,73 +72,6 @@ pub struct PlatformOutcomeBalanceV1 {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PlatformAccountSnapshotV1 {
-    pub cash_pusd: ExactDecimal,
-    pub available_pusd: ExactDecimal,
-    pub principal_encumbrance_pusd: ExactDecimal,
-    pub immediate_taker_fee_encumbrance_pusd: ExactDecimal,
-    pub outcome_balances: Vec<PlatformOutcomeBalanceV1>,
-    pub maker_rebate_receivable_pusd: ExactDecimal,
-    pub taker_rebate_receivable_pusd: ExactDecimal,
-    pub maker_rebate_locked_remainder_pusd: ExactDecimal,
-    pub taker_rebate_locked_remainder_pusd: ExactDecimal,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AccountOpeningAnchorV1 {
-    pub schema_version: String,
-    pub anchor_id: String,
-    pub anchor_sha256: Sha256Hex,
-    pub account_instance_key: AccountInstanceKeyV1,
-    pub session_id: String,
-    pub initial_scenario_sha256: Sha256Hex,
-    pub initial_market_set_sha256: Sha256Hex,
-    pub initial_account_state_sha256: Sha256Hex,
-    pub initial_platform_account: PlatformAccountSnapshotV1,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    deny_unknown_fields,
-    tag = "predecessor_type",
-    rename_all = "SCREAMING_SNAKE_CASE"
-)]
-pub enum PlatformAccountDeltaPredecessorV1 {
-    OpeningAnchor {
-        anchor_id: String,
-        anchor_sha256: Sha256Hex,
-    },
-    AccountDelta {
-        delta_id: String,
-        delta_sha256: Sha256Hex,
-        account_transition_seq: u64,
-    },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum PlatformAccountDeltaReasonV1 {
-    OrderAcceptedEncumbranceApplied,
-    FakUnspentEncumbranceReleased,
-    CallerCancellationEncumbranceReleased,
-    GtdExpirationEncumbranceReleased,
-    VenueDustEncumbranceReleased,
-    MarketResolutionEncumbranceReleased,
-    FillFinalityEconomicApplied,
-    FillFinalityUnappliedFailureReleased,
-    FillFinalityCompensationApplied,
-    MakerRebateAccrualFinalized,
-    TakerRebateAccrualApplied,
-    MakerRebateDayFinalized,
-    TakerRebateDayFinalized,
-    MakerRebatePaid,
-    TakerRebatePaid,
-    AutoRedeemApplied,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct PlatformOutcomeBalanceDeltaV1 {
     pub token_id: TokenId,
     pub balance_shares_delta: ExactDecimal,
@@ -159,24 +89,6 @@ pub struct PlatformAccountBalanceDeltaV1 {
     pub taker_rebate_receivable_pusd_delta: ExactDecimal,
     pub maker_rebate_locked_remainder_pusd_delta: ExactDecimal,
     pub taker_rebate_locked_remainder_pusd_delta: ExactDecimal,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PlatformAccountDeltaV1 {
-    pub schema_version: String,
-    pub delta_id: String,
-    pub delta_sha256: Sha256Hex,
-    pub account_instance_key: AccountInstanceKeyV1,
-    pub account_transition_seq: u64,
-    pub predecessor: PlatformAccountDeltaPredecessorV1,
-    pub reason: PlatformAccountDeltaReasonV1,
-    pub reason_identity: String,
-    pub condition_id: Option<ConditionId>,
-    pub platform_effective_at_utc_ms: i64,
-    pub balance_delta: PlatformAccountBalanceDeltaV1,
-    pub account_summary_before_sha256: Sha256Hex,
-    pub account_summary_after_sha256: Sha256Hex,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -244,30 +156,6 @@ pub struct PlatformAccountDeltaV2 {
     pub condition_id: Option<ConditionId>,
     pub platform_effective_at_utc_ms: i64,
     pub balance_delta: PlatformAccountBalanceDeltaV1,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MarketEnrollmentIdentityV1 {
-    pub enrollment_id: String,
-    pub enrollment_sha256: Sha256Hex,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct MarketEnrollmentV1 {
-    pub schema_version: String,
-    pub enrollment_id: String,
-    pub enrollment_sha256: Sha256Hex,
-    pub enrollment_request_id: String,
-    pub account_instance_key: AccountInstanceKeyV1,
-    pub opening_anchor_id: String,
-    pub opening_anchor_sha256: Sha256Hex,
-    pub previous_enrollment: Option<MarketEnrollmentIdentityV1>,
-    pub market: MarketIdentityV2,
-    pub assets: [AssetIdentityV1; 2],
-    pub enrollment_chain_length: u64,
-    pub enrollment_chain_sha256: Sha256Hex,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

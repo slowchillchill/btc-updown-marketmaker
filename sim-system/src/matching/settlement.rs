@@ -67,7 +67,7 @@ pub(crate) enum SettlementOperationV1 {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct RequestedSettlementStateV1 {
     pub scenario: Option<ResolutionRedeemScenarioV1>,
-    external_cash: BTreeMap<String, ExternalCashFactV1<String>>,
+    external_cash: BTreeSet<String>,
     requests: BTreeMap<String, RequestedSettlementV1>,
 }
 #[derive(Debug, PartialEq, Eq)]
@@ -108,13 +108,9 @@ impl ExecutionStateV2 {
                 })
                 .sum::<u64>();
         }
-        for (key, fact) in &self.requested_settlement.external_cash {
+        for identity in &self.requested_settlement.external_cash {
             count.records += 1;
-            count.bytes += (key.len()
-                + fact.identity.len()
-                + fact.signed_delta_pusd.0.len()
-                + fact.correction_of.as_ref().map_or(0, String::len))
-                as u64;
+            count.bytes += identity.len() as u64;
         }
         for (key, r) in &self.requested_settlement.requests {
             count.records += 1 + r.cost_status.len() as u64;
@@ -137,7 +133,7 @@ impl ExecutionStateV2 {
                 if self
                     .requested_settlement
                     .external_cash
-                    .contains_key(&fact.identity)
+                    .contains(&fact.identity)
                 {
                     return Ok(Vec::new());
                 }
@@ -148,7 +144,7 @@ impl ExecutionStateV2 {
                         .apply_external_cash(&fact.identity, amount, *at_utc_ms)?;
                 self.requested_settlement
                     .external_cash
-                    .insert(fact.identity.clone(), fact.clone());
+                    .insert(fact.identity.clone());
                 return Ok(vec![LifecycleFeedbackEffectV2::Settlement(
                     SettlementLifecycleEffectV2 {
                         repeated_at_utc_ms: None,

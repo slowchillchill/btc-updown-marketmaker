@@ -3,9 +3,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 #[cfg(test)]
-use contracts::{
-    ACCOUNT_OPENING_ANCHOR_SCHEMA_V1, AccountOpeningAnchorV1, PlatformAccountSnapshotV1, Sha256Hex,
-};
+use contracts::Sha256Hex;
 use contracts::{
     AccountInstanceKeyV1, AccountOpeningFactV2, ConditionId, ExactDecimal,
     PlatformAccountBalanceDeltaV1, PlatformAccountDeltaReasonV2, PlatformAccountDeltaV2,
@@ -1238,11 +1236,9 @@ fn compare_token_ids(left: &str, right: &str) -> Ordering {
 mod tests {
     use super::*;
 
-    fn funded_anchor() -> AccountOpeningAnchorV1 {
-        AccountOpeningAnchorV1 {
-            schema_version: ACCOUNT_OPENING_ANCHOR_SCHEMA_V1.to_owned(),
-            anchor_id: "anchor-a".to_owned(),
-            anchor_sha256: Sha256Hex("a".repeat(64)),
+    fn funded_account_v2() -> PlatformAccountStateV2 {
+        PlatformAccountStateV2::try_from_opening_fact(&AccountOpeningFactV2 {
+            creation_request_id: "create-a".to_owned(),
             account_instance_key: AccountInstanceKeyV1 {
                 run_id: "run-a".to_owned(),
                 caller_role: contracts::SimCallerRoleV1::ModelTrain,
@@ -1251,39 +1247,7 @@ mod tests {
                 platform_source: contracts::PlatformSourceV1::Simulated,
             },
             session_id: "session-a".to_owned(),
-            initial_scenario_sha256: Sha256Hex("b".repeat(64)),
-            initial_market_set_sha256: Sha256Hex("c".repeat(64)),
-            initial_account_state_sha256: Sha256Hex("d".repeat(64)),
-            initial_platform_account: PlatformAccountSnapshotV1 {
-                cash_pusd: ExactDecimal("10".to_owned()),
-                available_pusd: ExactDecimal("10".to_owned()),
-                principal_encumbrance_pusd: ExactDecimal("0".to_owned()),
-                immediate_taker_fee_encumbrance_pusd: ExactDecimal("0".to_owned()),
-                outcome_balances: vec![
-                    PlatformOutcomeBalanceV1 {
-                        token_id: TokenId("token-a".to_owned()),
-                        balance_shares: ExactDecimal("0".to_owned()),
-                    },
-                    PlatformOutcomeBalanceV1 {
-                        token_id: TokenId("token-b".to_owned()),
-                        balance_shares: ExactDecimal("0".to_owned()),
-                    },
-                ],
-                maker_rebate_receivable_pusd: ExactDecimal("0".to_owned()),
-                taker_rebate_receivable_pusd: ExactDecimal("0".to_owned()),
-                maker_rebate_locked_remainder_pusd: ExactDecimal("0".to_owned()),
-                taker_rebate_locked_remainder_pusd: ExactDecimal("0".to_owned()),
-            },
-        }
-    }
-
-    fn funded_account_v2() -> PlatformAccountStateV2 {
-        let anchor = funded_anchor();
-        PlatformAccountStateV2::try_from_opening_fact(&AccountOpeningFactV2 {
-            creation_request_id: "create-a".to_owned(),
-            account_instance_key: anchor.account_instance_key,
-            session_id: anchor.session_id,
-            initial_platform_scenario_file_sha256: anchor.initial_scenario_sha256,
+            initial_platform_scenario_file_sha256: Sha256Hex("b".repeat(64)),
             initial_account_state: contracts::InitialAccountStateV2 {
                 available_pusd: ExactDecimal("10".to_owned()),
             },
@@ -1309,6 +1273,7 @@ mod tests {
     #[test]
     fn v2_account_uses_shared_arithmetic_without_delta_hash_material() {
         let mut v2 = funded_account_v2();
+        let account_instance_key = v2.account_instance_key().clone();
         let v2_delta = v2
             .apply_order_accepted(
                 "order-a",
@@ -1319,10 +1284,7 @@ mod tests {
             )
             .expect("V2 账户变化");
 
-        assert_eq!(
-            v2.account_instance_key(),
-            &funded_anchor().account_instance_key
-        );
+        assert_eq!(v2.account_instance_key(), &account_instance_key);
         assert_eq!(v2.available_pusd(), Decimal::new(8, 0));
         assert_eq!(v2.principal_encumbrance_pusd(), Decimal::new(2, 0));
         assert_eq!(v2.immediate_taker_fee_encumbrance_pusd(), Decimal::ZERO);

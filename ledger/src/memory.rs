@@ -224,12 +224,7 @@ impl LedgerWriterV1 {
                                 result: SourceNeutralControlResult::CancellationRequestCompleted { .. }
                             }
                     ) {
-                        let out = self.apply_pending_result(
-                            &source,
-                            account,
-                            at,
-                            &source_reference.record,
-                        )?;
+                        let out = self.apply_pending_result(&source, account, at)?;
                         return Ok(LedgerMemoryApplyOutcomeV1::Applied(out));
                     }
                     return Ok(LedgerMemoryApplyOutcomeV1::NotApplicable);
@@ -242,10 +237,8 @@ impl LedgerWriterV1 {
                     &evidence,
                 )?
             }
-            NormalizationRecord::Pending {
-                source_reference, ..
-            } if self.account.is_some() => {
-                self.apply_pending_result(&source, account, at, &source_reference.record)?
+            NormalizationRecord::Pending { .. } if self.account.is_some() => {
+                self.apply_pending_result(&source, account, at)?
             }
             _ => return Ok(LedgerMemoryApplyOutcomeV1::NotApplicable),
         };

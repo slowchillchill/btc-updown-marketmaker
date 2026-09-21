@@ -2730,13 +2730,6 @@ impl SimExecution {
         self.actor.create_session(spec)
     }
 
-    pub fn retry_create_session(
-        &mut self,
-        spec: SessionSpecV3,
-    ) -> Result<CreateSessionControlResultV2, SimRunActorErrorV2> {
-        self.actor.create_session(spec)
-    }
-
     pub fn activate_session(
         &mut self,
         activation_id: String,
@@ -11276,8 +11269,8 @@ mod tests {
                     effects
                         .execution
                         .iter()
-                        .flat_map(ExecutionMarketEventEffectsV2::maker_fill_sequences_for_tests)
-                        .copied()
+                        .flat_map(ExecutionMarketEventEffectsV2::initial_finality_for_tests)
+                        .map(|effect| effect.fill_sequence)
                         .collect::<Vec<_>>(),
                     vec![1]
                 );
@@ -14577,8 +14570,8 @@ mod tests {
             effects
                 .execution
                 .iter()
-                .flat_map(ExecutionMarketEventEffectsV2::maker_fill_sequences_for_tests)
-                .copied()
+                .flat_map(ExecutionMarketEventEffectsV2::initial_finality_for_tests)
+                .map(|effect| effect.fill_sequence)
                 .collect::<Vec<_>>(),
             vec![2]
         );
@@ -14817,11 +14810,6 @@ mod tests {
             Some("sim-1")
         );
         assert_eq!(effects.execution[0].account_delta_count_for_tests(), 1);
-        assert!(
-            effects.execution[0]
-                .maker_fill_sequences_for_tests()
-                .is_empty()
-        );
         assert_eq!(effects.execution[0].initial_finality_count_for_tests(), 0);
         let lifecycle = effects
             .execution
@@ -15434,7 +15422,7 @@ mod tests {
         );
         assert_eq!(
             execution
-                .retry_create_session(session_spec)
+                .create_session(session_spec)
                 .expect("公开物理重试创建")
                 .disposition,
             CreateSessionDispositionV2::ExistingPrepared
@@ -15791,7 +15779,7 @@ mod tests {
         assert_eq!(crate::event_log::group_append_counts_for_tests(), (1, 1));
         assert_eq!(
             execution
-                .retry_create_session(spec(
+                .create_session(spec(
                     "run-public-write-failure-v2",
                     "retry-after-public-write-failure",
                 ))
@@ -15849,7 +15837,7 @@ mod tests {
         assert_eq!(crate::event_log::sync_attempt_count_for_tests(), 1);
         assert_eq!(
             execution
-                .retry_create_session(session_spec.clone())
+                .create_session(session_spec.clone())
                 .expect_err("同步结果未知后当前公开根必须关闭"),
             SimRunActorErrorV2::Closed
         );
@@ -15868,7 +15856,7 @@ mod tests {
         .expect("公开恢复按实际完整组裁决");
         assert_eq!(
             recovered
-                .retry_create_session(session_spec)
+                .create_session(session_spec)
                 .expect("公开重附着稳定会话")
                 .disposition,
             CreateSessionDispositionV2::ExistingPrepared
@@ -20717,21 +20705,7 @@ impl PublicGroupDecisionV1<'_> {
     pub fn request_resolution_redeem_v1(
         &mut self,
         request: contracts::economics::SettlementRequestV1,
-    ) -> Result<contracts::economics::SettlementRequestReceiptV1, SimRunActorErrorV2> {
-        let identity = request.identity.clone();
-        let duplicate = self
-            .driver
-            .execution
-            .actor
-            .state
-            .as_ref()
-            .and_then(|state| state.session.as_ref())
-            .and_then(|session| {
-                session
-                    .execution_state
-                    .settlement_simulation_read(&identity.condition_id)
-            })
-            .is_some();
+    ) -> Result<(), SimRunActorErrorV2> {
         let committed =
             self.driver
                 .execution
@@ -20745,11 +20719,7 @@ impl PublicGroupDecisionV1<'_> {
         if let Some(error) = committed.unaccepted {
             return Err(error);
         }
-        Ok(contracts::economics::SettlementRequestReceiptV1 {
-            identity,
-            registered: true,
-            duplicate,
-        })
+        Ok(())
     }
     /// 查询只请求后端核对；结果仍按原反馈时延进入 NOE，不直接泄漏隐藏状态。
     pub fn query_resolution_redeem_v1(

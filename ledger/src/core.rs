@@ -14,8 +14,8 @@ use contracts::execution_normalization::{
     SourceNeutralCancellationOutcomeV1, SourceNeutralEconomicDispositionV1,
     SourceNeutralEconomicIdentityV1, SourceNeutralOrderLifecycleEventV1,
     SourceNeutralOrderLifecycleResultV1, SourceNeutralOrderSnapshotV1, SourceNeutralOrderStateV1,
-    SourceNeutralSettlementLifecycleResultV1, SourceNeutralSubmissionOutcomeV1,
-    SourceNeutralTradeEconomicDispositionV1, SourceNeutralTradeLifecycleResultV1,
+    SourceNeutralSubmissionOutcomeV1, SourceNeutralTradeEconomicDispositionV1,
+    SourceNeutralTradeLifecycleResultV1,
 };
 use contracts::{AccountInstanceKeyV1, ConditionId, ExactDecimal, TokenId};
 use execution_normalization::{DurableErrorV1, NormalizationRecordV1, read_noe_result_v1};
@@ -1197,14 +1197,12 @@ impl LedgerWriterV1 {
                 &source_reference.record,
                 evidence,
             ),
-            NormalizationRecordV1::Pending {
-                source_reference, ..
-            } if self.account.is_some() => self.apply_pending_result(
-                &source,
-                &resolved.context.source.account_instance_key,
-                Some(resolved.boundary.durable_available_at_utc_ms),
-                &source_reference.record,
-            ),
+            NormalizationRecordV1::Pending { .. } if self.account.is_some() => self
+                .apply_pending_result(
+                    &source,
+                    &resolved.context.source.account_instance_key,
+                    Some(resolved.boundary.durable_available_at_utc_ms),
+                ),
             _ => Err(LedgerErrorV1::NonEconomicRecord),
         }
     }
@@ -1239,9 +1237,7 @@ impl LedgerWriterV1 {
             LedgerEvidence::TradeLifecycle { result } => {
                 apply_trade_lifecycle(&mut lifecycle, result, ledger_entry_seq)?;
             }
-            LedgerEvidence::SettlementLifecycle { result } => {
-                apply_settlement_lifecycle(&mut lifecycle, result);
-            }
+            LedgerEvidence::SettlementLifecycle { .. } => {}
             _ => return Err(LedgerErrorV1::NonEconomicRecord),
         }
 
@@ -1286,7 +1282,6 @@ impl LedgerWriterV1 {
         reference: &LedgerTransactionSourceV1,
         account_instance_key: &AccountInstanceKeyV1,
         available_through_utc_ms: Option<i64>,
-        _source_record: &SimV2SourceRecordReferenceV1,
     ) -> Result<LedgerApplyOutcomeV1, LedgerErrorV1> {
         self.ensure_noe_account(account_instance_key)?;
         let ledger_entry_seq = self.next_ledger_entry_seq()?;
@@ -2921,13 +2916,6 @@ fn set_trade_pending(
         },
     );
     Ok(())
-}
-
-fn apply_settlement_lifecycle<I: LedgerIdentity>(
-    lifecycle: &mut LifecycleStateV1,
-    result: &SourceNeutralSettlementLifecycleResultV1<I>,
-) {
-    let _ = (lifecycle, result);
 }
 
 fn apply_economic_lifecycle<I: LedgerIdentity>(

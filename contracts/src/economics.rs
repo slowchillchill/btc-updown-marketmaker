@@ -354,14 +354,6 @@ pub struct SettlementRequestV1 {
     pub identity: SettlementRequestIdV1<String>,
     pub index_sets: [alloy_primitives::U256; 2],
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-/// 仅表示本地原输入登记；不是平台接纳或兑付成功。
-pub struct SettlementRequestReceiptV1 {
-    pub identity: SettlementRequestIdV1<String>,
-    pub registered: bool,
-    pub duplicate: bool,
-}
-
 /// 模拟赎回后端只生成请求结果和费用事实；其他结算事实仍走原生产入口。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RequestedSettlementResultV1 {
