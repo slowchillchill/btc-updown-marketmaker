@@ -196,6 +196,10 @@ impl TypedParquetSegmentWriter {
         })
     }
 
+    pub(crate) fn row_count(&self) -> u64 {
+        self.row_count
+    }
+
     pub(crate) fn schema_version(&self) -> &str {
         &self.schema_version
     }
@@ -642,13 +646,6 @@ impl TypedParquetSegmentWriter {
         batch: &RecordBatch,
         logical_bytes: u64,
     ) -> Result<()> {
-        if batch.schema().as_ref() != self.schema.as_ref() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "record batch schema does not match typed parquet writer schema",
-            )
-            .into());
-        }
         let rows = u64::try_from(batch.num_rows()).map_err(|_| {
             io::Error::new(
                 io::ErrorKind::InvalidData,

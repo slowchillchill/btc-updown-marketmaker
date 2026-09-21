@@ -4580,6 +4580,7 @@ mod tests {
             ("polymarket_market", u64::try_from(polymarket_rows).unwrap()),
             ("polymarket_market_metadata", 0),
             ("binance_depth_snapshot", 0),
+            ("polymarket_rtds_chainlink_twap", 0),
             (
                 "binance_depth_update",
                 u64::try_from(auxiliary_native_messages).unwrap(),

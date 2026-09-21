@@ -66,7 +66,6 @@ impl HourlyPartitionPolicy {
             .join("typed_raw")
             .join(format!("utc_day={utc_day}"))
             .join(format!("source_kind={source_kind}"));
-        ensure_under_root(&self.dataset_root, &partition_path)?;
 
         let hour = format!("{:02}", hour_start.hour());
         let stem = match part {
@@ -139,22 +138,6 @@ fn validate_path_component<'a>(field: &str, value: &'a str) -> Result<&'a str> {
         .into());
     }
     Ok(value)
-}
-
-fn ensure_under_root(root: &Path, path: &Path) -> Result<()> {
-    reject_parent_components("artifact_path", path)?;
-    if !path.starts_with(root) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "artifact path {} escapes dataset root {}",
-                path.display(),
-                root.display()
-            ),
-        )
-        .into());
-    }
-    Ok(())
 }
 
 fn reject_parent_components(field: &str, path: &Path) -> Result<()> {

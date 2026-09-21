@@ -1,5 +1,5 @@
 use data_collect::deployment::{
-    CollectorBinaryRole, CollectorStartupReceipt, DeploymentRuntimeConfig, validate_runtime_config,
+    CollectorBinaryRole, CollectorStartupReceipt, DeploymentRuntimeConfig,
 };
 use tempfile::tempdir;
 
@@ -34,15 +34,14 @@ fn binary_roles_are_isolated_by_output_roots_and_runtime_contracts() {
 fn deployment_config_rejects_path_traversal_and_missing_run_id() {
     let dataset_root = tempdir().unwrap();
     let dataset_root = dataset_root.path().canonicalize().unwrap();
-    let mut config = DeploymentRuntimeConfig::for_role(
-        CollectorBinaryRole::TrainingCold,
-        dataset_root.clone(),
-        "training-run",
-    )
-    .unwrap();
-
-    config.output_root = dataset_root.join("..").join("outside");
-    assert!(validate_runtime_config(&config).is_err());
+    assert!(
+        DeploymentRuntimeConfig::for_role(
+            CollectorBinaryRole::TrainingCold,
+            dataset_root.join("..").join("outside"),
+            "training-run",
+        )
+        .is_err()
+    );
 
     let config =
         DeploymentRuntimeConfig::for_role(CollectorBinaryRole::PaperHot, dataset_root, "  ");
@@ -65,8 +64,7 @@ fn runtime_receipt_records_binary_and_host_identity() {
         "collector-host",
         "eu-west-1",
         "chrony synchronized",
-    )
-    .unwrap();
+    );
 
     assert_eq!(receipt.binary_role, "training_cold");
     assert_eq!(receipt.git_commit, "git-commit");

@@ -33,7 +33,6 @@ pub fn paper_live_handoff_root(
     let artifact_root = dataset_root
         .join(environment.as_str())
         .join("data_collect_handoff");
-    ensure_under_root(&dataset_root, &artifact_root)?;
     Ok(artifact_root)
 }
 
@@ -47,22 +46,6 @@ fn validate_absolute_root(root: &Path) -> Result<PathBuf> {
     }
     reject_parent_components("dataset_root", root)?;
     Ok(root.to_path_buf())
-}
-
-fn ensure_under_root(root: &Path, path: &Path) -> Result<()> {
-    reject_parent_components("artifact_path", path)?;
-    if !path.starts_with(root) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!(
-                "artifact path {} escapes dataset root {}",
-                path.display(),
-                root.display()
-            ),
-        )
-        .into());
-    }
-    Ok(())
 }
 
 fn reject_parent_components(field: &str, path: &Path) -> Result<()> {

@@ -60,17 +60,19 @@ impl DeploymentRuntimeConfig {
             .output_suffix()
             .split('/')
             .fold(dataset_root.clone(), |path, component| path.join(component));
-        let config = Self {
+        let run_id = run_id.into();
+        if run_id.trim().is_empty() {
+            return Err(invalid_input("run_id must be non-empty").into());
+        }
+        Ok(Self {
             role,
             dataset_root,
             output_root,
-            run_id: run_id.into(),
+            run_id,
             max_runtime_secs: None,
             collector_region_override: None,
             config_path: None,
-        };
-        validate_runtime_config(&config)?;
-        Ok(config)
+        })
     }
 }
 
@@ -99,9 +101,8 @@ impl CollectorStartupReceipt {
         collector_host_id: impl Into<String>,
         collector_region: impl Into<String>,
         host_clock_sync_status: impl Into<String>,
-    ) -> Result<Self> {
-        validate_runtime_config(config)?;
-        let receipt = Self {
+    ) -> Self {
+        Self {
             binary_role: config.role.as_str().to_owned(),
             binary_name: config.role.binary_name().to_owned(),
             run_id: config.run_id.clone(),
@@ -113,59 +114,8 @@ impl CollectorStartupReceipt {
             collector_host_id: collector_host_id.into(),
             collector_region: collector_region.into(),
             host_clock_sync_status: host_clock_sync_status.into(),
-        };
-        receipt.validate()?;
-        Ok(receipt)
-    }
-
-    fn validate(&self) -> Result<()> {
-        for (field, value) in [
-            ("binary_role", self.binary_role.as_str()),
-            ("binary_name", self.binary_name.as_str()),
-            ("run_id", self.run_id.as_str()),
-            ("git_commit", self.git_commit.as_str()),
-            ("binary_sha256", self.binary_sha256.as_str()),
-            ("config_digest", self.config_digest.as_str()),
-            ("collector_host_id", self.collector_host_id.as_str()),
-            ("collector_region", self.collector_region.as_str()),
-            (
-                "host_clock_sync_status",
-                self.host_clock_sync_status.as_str(),
-            ),
-        ] {
-            if value.trim().is_empty() {
-                return Err(invalid_input(format!("{field} must be non-empty")).into());
-            }
-        }
-        Ok(())
-    }
-}
-
-pub fn validate_runtime_config(config: &DeploymentRuntimeConfig) -> Result<()> {
-    if config.run_id.trim().is_empty() {
-        return Err(invalid_input("run_id must be non-empty").into());
-    }
-    validate_path("dataset_root", &config.dataset_root)?;
-    validate_path("output_root", &config.output_root)?;
-    if !config.output_root.starts_with(&config.dataset_root) {
-        return Err(invalid_input(format!(
-            "output root {} escapes dataset root {}",
-            config.output_root.display(),
-            config.dataset_root.display()
-        ))
-        .into());
-    }
-    if let Some(config_path) = config.config_path.as_ref() {
-        validate_path("config_path", config_path)?;
-        if !config_path.is_file() {
-            return Err(invalid_input(format!(
-                "config file does not exist: {}",
-                config_path.display()
-            ))
-            .into());
         }
     }
-    Ok(())
 }
 
 fn normalize_absolute_root(path: &Path) -> Result<PathBuf> {

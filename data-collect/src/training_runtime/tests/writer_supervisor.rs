@@ -505,8 +505,15 @@ fn aggtrade_segment_receive_bounds_allow_admission_order_time_regression() {
         .unwrap();
     let mut segment = ActiveSegment::new(naming, "binance_aggtrade", 0).unwrap();
 
-    segment.observe(&test_raw_event("binance_aggtrade", later), 1);
-    segment.observe(&test_raw_event("binance_aggtrade", earlier), 1);
+    for (index, at) in [later, earlier].into_iter().enumerate() {
+        let mut event = test_raw_event("binance_aggtrade", at);
+        event.collector_admission = Some(RawEventAdmission {
+            sequence: index as u64 + 1,
+            time_utc_ms: at,
+        });
+        let rows = write_typed_event(&mut segment.writer, &event).unwrap();
+        segment.observe(&event, rows);
+    }
 
     let (_, context) = segment.into_parts();
     assert_eq!(context.segment_start_recv_time_utc_ms, earlier);
@@ -1622,45 +1629,58 @@ async fn missing_writer_is_a_runtime_error() {
 }
 
 #[tokio::test]
-async fn disconnected_writer_channel_is_a_runtime_error() {
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    drop(rx);
-    let (_result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
-    let mut writers = BTreeMap::from([(
-        "binance_aggtrade".to_owned(),
-        SourceWriterHandle {
-            schema_version: TypedParquetSegmentWriter::current_schema_version("binance_aggtrade")
+async fn disconnected_or_timed_out_writer_preserves_drop_facts() {
+    for disconnected in [true, false] {
+        let (tx, rx) = std::sync::mpsc::sync_channel(0);
+        let _receiver = if disconnected {
+            drop(rx);
+            None
+        } else {
+            Some(rx)
+        };
+        let (_result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        let mut writers = BTreeMap::from([(
+            "binance_aggtrade".to_owned(),
+            SourceWriterHandle {
+                schema_version: TypedParquetSegmentWriter::current_schema_version(
+                    "binance_aggtrade",
+                )
                 .unwrap()
                 .to_owned(),
-            tx,
-            accepting_commands: Arc::new(Mutex::new(true)),
-            result_rx,
-            completed_result: None,
-            thread: None,
-        },
-    )]);
-    let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
-    let runtime_stats = SourceQueueBackpressureStats::default();
-    let mut batch = vec![InflightRawEvent::for_test(test_raw_event(
-        "binance_aggtrade",
-        1_783_392_404_599,
-    ))];
+                tx,
+                accepting_commands: Arc::new(Mutex::new(true)),
+                result_rx,
+                completed_result: None,
+                thread: None,
+            },
+        )]);
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let runtime_stats = SourceQueueBackpressureStats::default();
+        let mut batch = vec![InflightRawEvent::for_test(test_raw_event(
+            "binance_aggtrade",
+            1_783_392_404_599,
+        ))];
 
-    let error = flush_source_batch(
-        &mut writers,
-        "binance_aggtrade",
-        &mut batch,
-        &gaps,
-        &runtime_stats,
-    )
-    .await
-    .expect_err("a disconnected writer must stop the runtime");
+        let error = flush_source_batch(
+            &mut writers,
+            "binance_aggtrade",
+            &mut batch,
+            &gaps,
+            &runtime_stats,
+        )
+        .await
+        .expect_err("a disconnected or timed out writer must stop the runtime");
 
-    assert!(error.to_string().contains("writer_queue_disconnected"));
-    assert_eq!(
-        runtime_stats.drain_all_operational()["2026-07-07"]["binance_aggtrade"].dropped_rows,
-        1
-    );
+        assert!(error.to_string().contains(if disconnected {
+            "writer_queue_disconnected"
+        } else {
+            "writer_queue_backpressure_timeout"
+        }));
+        assert_eq!(
+            runtime_stats.drain_all_operational()["2026-07-07"]["binance_aggtrade"].dropped_rows,
+            1
+        );
+    }
 }
 
 #[tokio::test]
