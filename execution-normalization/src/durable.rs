@@ -817,7 +817,7 @@ fn read_noe_result<
     reference: &NoeResultReferenceV1,
 ) -> Result<ResolvedNoeResult<T, C>, DurableErrorV1> {
     let context_container = read_result_context(reference)?;
-    read_noe_result_with_context(reference, context_container)
+    read_noe_result_with_context(reference, context_container).map(|(resolved, _)| resolved)
 }
 
 fn read_result_context(
@@ -846,28 +846,75 @@ fn read_result_context(
 pub fn read_durable_noe_record_position(
     reference: &NoeResultReferenceV1,
 ) -> Result<crate::NoeRecordPositionV1, DurableErrorV1> {
+    let (boundary, _) = read_noe_position_material(reference)?;
+    Ok(record_position(reference, &boundary))
+}
+
+/// 仅供一次恢复使用的单槽；已发布容器按不可变提交合同复用，不保留正文或全历史。
+/// 外部违规原地改写在下一次完整读取时检查，命中不承担持续监测职责。
+#[derive(Default)]
+pub struct NoeRecoveryPositionReader {
+    last: Option<(
+        NoePublishedContainerReferenceV1,
+        NoeSourceCommitBoundaryV1,
+        u64,
+    )>,
+}
+impl NoeRecoveryPositionReader {
+    pub fn read(
+        &mut self,
+        reference: &NoeResultReferenceV1,
+    ) -> Result<crate::NoeRecordPositionV1, DurableErrorV1> {
+        if let Some((container, boundary, record_count)) = &self.last
+            && container == &reference.commit_container
+        {
+            if reference.record_ordinal >= *record_count {
+                return Err(DurableErrorV1::RecordOrdinalOutOfRange {
+                    path: reference.commit_container.location.clone().into(),
+                    record_ordinal: reference.record_ordinal,
+                    record_count: *record_count,
+                });
+            }
+            return Ok(record_position(reference, boundary));
+        }
+        let (boundary, record_count) = read_noe_position_material(reference)?;
+        let position = record_position(reference, &boundary);
+        self.last = Some((reference.commit_container.clone(), boundary, record_count));
+        Ok(position)
+    }
+}
+
+fn record_position(
+    reference: &NoeResultReferenceV1,
+    boundary: &NoeSourceCommitBoundaryV1,
+) -> crate::NoeRecordPositionV1 {
+    crate::NoeRecordPositionV1 {
+        context_reference: boundary.context_reference.clone(),
+        source_watermark: boundary.source_watermark.clone(),
+        record_ordinal: reference.record_ordinal,
+    }
+}
+
+fn read_noe_position_material(
+    reference: &NoeResultReferenceV1,
+) -> Result<(NoeSourceCommitBoundaryV1, u64), DurableErrorV1> {
     let context = read_result_context(reference)?;
-    let boundary = match context.1.payload.context.contract_version.as_str() {
+    match context.1.payload.context.contract_version.as_str() {
         "execution_normalization_v3" => {
-            let resolved: ResolvedNoeResultV3 = read_noe_result_with_context(reference, context)?;
-            resolved.boundary
+            let (resolved, count): (ResolvedNoeResultV3, _) =
+                read_noe_result_with_context(reference, context)?;
+            Ok((resolved.boundary, count))
         }
         "execution_normalization_v4" => {
-            let resolved: ResolvedNoeResultV4 = read_noe_result_with_context(reference, context)?;
-            resolved.boundary
+            let (resolved, count): (ResolvedNoeResultV4, _) =
+                read_noe_result_with_context(reference, context)?;
+            Ok((resolved.boundary, count))
         }
-        _ => {
-            return Err(DurableErrorV1::UnsupportedContainerVersion {
-                path: context.0,
-                found: context.1.payload.container_version,
-            });
-        }
-    };
-    Ok(crate::NoeRecordPositionV1 {
-        context_reference: boundary.context_reference,
-        source_watermark: boundary.source_watermark,
-        record_ordinal: reference.record_ordinal,
-    })
+        _ => Err(DurableErrorV1::UnsupportedContainerVersion {
+            path: context.0,
+            found: context.1.payload.container_version,
+        }),
+    }
 }
 
 fn read_noe_result_with_context<
@@ -876,7 +923,7 @@ fn read_noe_result_with_context<
 >(
     reference: &NoeResultReferenceV1,
     (context_path, context_container): (PathBuf, ContextContainerV1),
-) -> Result<ResolvedNoeResult<T, C>, DurableErrorV1> {
+) -> Result<(ResolvedNoeResult<T, C>, u64), DurableErrorV1> {
     let commit_path = PathBuf::from(&reference.commit_container.location);
     let file_sequence = commit_sequence_from_path(&commit_path)?;
     let container: CommitContainer<T, C> = read_commit_container(&commit_path)?;
@@ -905,8 +952,8 @@ fn read_noe_result_with_context<
     let record = container
         .payload
         .records
-        .get(reference.record_ordinal as usize)
-        .cloned()
+        .into_iter()
+        .nth(reference.record_ordinal as usize)
         .ok_or_else(|| DurableErrorV1::RecordOrdinalOutOfRange {
             path: commit_path.clone(),
             record_ordinal: reference.record_ordinal,
@@ -949,11 +996,14 @@ fn read_noe_result_with_context<
         });
     }
 
-    Ok(ResolvedNoeResult {
-        context: context_container.payload.context,
-        boundary: container.payload.boundary,
-        record,
-    })
+    Ok((
+        ResolvedNoeResult {
+            context: context_container.payload.context,
+            boundary: container.payload.boundary,
+            record,
+        },
+        record_count,
+    ))
 }
 
 fn derive_sim_v2_context_reference(

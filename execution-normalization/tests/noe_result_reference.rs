@@ -129,3 +129,82 @@ fn a_wrong_digest_corrupt_container_and_out_of_range_ordinal_are_rejected() {
             | Err(DurableErrorV1::BoundaryDigestMismatch { .. })
     ));
 }
+
+#[test]
+fn recovery_position_slot_checks_each_ordinal_and_revalidates_each_new_key() {
+    use execution_normalization::{
+        DurableContextStoreV3, NoeRecoveryPositionReader, NormalizationBatchInputV3,
+        SourceNeutralEvidenceKindV3, SourceNeutralEvidenceV3, read_durable_noe_record_position,
+    };
+    let temporary = TempDir::new().unwrap();
+    let mut store = DurableContextStoreV3::open_or_create_sim_v2(temporary.path(), seed()).unwrap();
+    for sequence in 1..=2 {
+        let mut input = batch(store.context().context_reference.clone());
+        input.source_watermark.projection_batch_sequence = sequence;
+        let input = NormalizationBatchInputV3 {
+            source_watermark: input.source_watermark.clone(),
+            evidence: input
+                .evidence
+                .into_iter()
+                .map(|e| SourceNeutralEvidenceV3 {
+                    source_reference: SimV2SourceReferenceV1 {
+                        watermark: input.source_watermark.clone(),
+                        ..e.source_reference
+                    },
+                    source_ordinal: e.source_ordinal,
+                    logical_key: SourceNeutralLogicalKeyV1::AuditEvidence {
+                        evidence_identity: format!("{sequence}-{}", e.source_ordinal),
+                    },
+                    kind: SourceNeutralEvidenceKindV3::Pending {
+                        scope: PendingScopeV1::EvidenceGap {
+                            scope_identity: format!("{sequence}-{}", e.source_ordinal),
+                        },
+                    },
+                })
+                .collect(),
+        };
+        store.commit_batch_v3(input, 30).unwrap();
+    }
+    let first = store.commits()[0].result_reference(0).unwrap();
+    let second = store.commits()[0].result_reference(1).unwrap();
+    let next = store.commits()[1].result_reference(0).unwrap();
+    let mut reader = NoeRecoveryPositionReader::default();
+    assert_eq!(
+        reader.read(&first).unwrap(),
+        read_durable_noe_record_position(&first).unwrap()
+    );
+    assert_eq!(
+        reader.read(&second).unwrap(),
+        read_durable_noe_record_position(&second).unwrap()
+    );
+    let mut invalid = first.clone();
+    invalid.record_ordinal = 2;
+    assert!(matches!(
+        reader.read(&invalid),
+        Err(DurableErrorV1::RecordOrdinalOutOfRange { .. })
+    ));
+    let mut wrong_hash = first.clone();
+    wrong_hash.commit_container.boundary_sha256 = Sha256Hex("f".repeat(64));
+    assert!(matches!(
+        reader.read(&wrong_hash),
+        Err(DurableErrorV1::BoundaryDigestMismatch { .. })
+    ));
+    // 已提交文件无合法原地改写路径；同键命中不持续监测，独立读取和新恢复重新检查。
+    let bytes = fs::read(&first.commit_container.location).unwrap();
+    fs::write(&first.commit_container.location, b"broken").unwrap();
+    assert_eq!(reader.read(&second).unwrap().record_ordinal, 1);
+    assert!(read_durable_noe_record_position(&second).is_err());
+    let mut reopened = NoeRecoveryPositionReader::default();
+    assert!(reopened.read(&first).is_err(), "首次损坏不能成为已验证槽");
+    assert_eq!(
+        reader
+            .read(&next)
+            .unwrap()
+            .source_watermark
+            .projection_batch_sequence,
+        2
+    );
+    assert!(reader.read(&first).is_err(), "换批后不能保留全历史命中");
+    fs::write(&first.commit_container.location, bytes).unwrap();
+    assert!(reopened.read(&first).is_ok(), "失败没有保存验证结果");
+}

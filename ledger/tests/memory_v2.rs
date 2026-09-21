@@ -58,6 +58,9 @@ impl Source {
         }
     }
     fn accept(&mut self, kind: Kind) {
+        self.accept_many(vec![kind]);
+    }
+    fn accept_many(&mut self, kinds: Vec<Kind>) {
         let n = self.seq;
         self.seq += 1;
         let watermark = SimV2SourceWatermarkV1 {
@@ -77,18 +80,22 @@ impl Source {
             self.core
                 .normalize_and_accept(NormalizationBatchInput {
                     source_watermark: watermark.clone(),
-                    evidence: vec![SourceNeutralEvidence {
-                        source_reference: SimV2SourceReferenceV1 {
-                            context_reference: self.context.context_reference.clone(),
-                            watermark,
-                            record,
-                        },
-                        source_ordinal: 0,
-                        logical_key: SourceNeutralLogicalKeyV1::EconomicEvidence {
-                            evidence_identity: format!("effect-{n}"),
-                        },
-                        kind,
-                    }],
+                    evidence: kinds
+                        .into_iter()
+                        .enumerate()
+                        .map(|(ordinal, kind)| SourceNeutralEvidence {
+                            source_reference: SimV2SourceReferenceV1 {
+                                context_reference: self.context.context_reference.clone(),
+                                watermark: watermark.clone(),
+                                record: record.clone(),
+                            },
+                            source_ordinal: ordinal as u32,
+                            logical_key: SourceNeutralLogicalKeyV1::EconomicEvidence {
+                                evidence_identity: format!("effect-{n}-{ordinal}"),
+                            },
+                            kind,
+                        })
+                        .collect(),
                 })
                 .unwrap(),
         );
@@ -133,6 +140,11 @@ fn delta(cash: &str, available: &str, rebate: &str) -> SourceNeutralAccountBalan
 }
 #[test]
 fn real_normalization_early_stability_visibility_sticky_decision_and_v2_recovery() {
+    verify_memory_recovery(false);
+    verify_memory_recovery(true);
+}
+
+fn verify_memory_recovery(same_batch: bool) {
     let temp = tempfile::tempdir().unwrap();
     let mut source = Source::new(&temp.path().join("noe"), "memory-sticky");
     source.accept(Kind::Economic {
@@ -159,7 +171,7 @@ fn real_normalization_early_stability_visibility_sticky_decision_and_v2_recovery
         rejected
     );
     assert_eq!(writer.projection_v2().unwrap().ledger_entry_seq, 1);
-    source.accept(Kind::Economic {
+    let first = Kind::Economic {
         evidence: SourceNeutralEconomicEvidenceV1::AccountTransition {
             account_transition_seq: 1,
             economic_effective_at_utc_ms: 101,
@@ -167,8 +179,8 @@ fn real_normalization_early_stability_visibility_sticky_decision_and_v2_recovery
             transition: SourceNeutralAccountTransitionKindV1::MakerRebateAccrualFinalized,
             balance_delta: Box::new(delta("0", "0", "50")),
         },
-    });
-    source.accept(Kind::Economic {
+    };
+    let second = Kind::Economic {
         evidence: SourceNeutralEconomicEvidenceV1::AccountTransition {
             account_transition_seq: 2,
             economic_effective_at_utc_ms: 102,
@@ -178,7 +190,13 @@ fn real_normalization_early_stability_visibility_sticky_decision_and_v2_recovery
             },
             balance_delta: Box::new(delta("50", "50", "-50")),
         },
-    });
+    };
+    if same_batch {
+        source.accept_many(vec![first, second]);
+    } else {
+        source.accept(first);
+        source.accept(second);
+    }
     source.stable();
     assert!(opening.durable_reference().is_some());
     assert!(
@@ -188,8 +206,12 @@ fn real_normalization_early_stability_visibility_sticky_decision_and_v2_recovery
     let records = source.source.take_closed(500, 700);
     assert_eq!(records.len(), 2);
     assert_eq!(
-        records[0].position().record_ordinal,
-        records[1].position().record_ordinal
+        records[0].position().source_watermark == records[1].position().source_watermark,
+        same_batch
+    );
+    assert_eq!(
+        records[0].position().record_ordinal == records[1].position().record_ordinal,
+        !same_batch
     );
     assert_ne!(records[0].position(), records[1].position());
     let mut other = Source::new(&temp.path().join("other-noe"), "different-account");

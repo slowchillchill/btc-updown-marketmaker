@@ -10,7 +10,7 @@
 
 `NoeConsumedRecordRefV1` 在正式接线中由真实来源适配器交付。业务领取位置包含 context、source watermark 与原 ordinal；同一反馈的不同归一化记录共享 delivery。普通 `NoeDurableRecordViewV1` 和序列化引用不能直接传入应用或登记入口。公开生产者接口属于受信进程内宿主协作，宿主负责真实规范化批及驱动时点；手工重建批并自填时间仍可间接取得消费引用，这是 #101 已明确接受的风险，私有字段和直接 compile-fail 不证明来源不可伪造。正式耐久读取与 Ledger 恢复不重建输入以重新应用。开户经真实归约及原 NOE 规范化产生即为 Initialization，不等待后台交接、耐久、激活或公共组。普通内存业务处理不编码身份、不扫描磁盘、不等耐久；明确的市场稳定边界沿下文统一确认。
 
-Ledger 继续使用同一应用核心，V2 材料包含 Genesis、Transaction、ReservationDecision，交给原 SIM 日志后台 worker。来源交易需要真实 NOE 稳定映射时，后台先同步原 SIM 日志，再沿原 NOE stabilize 发布，按原顺序物化 Ledger；本地事件不虚构 NOE 依赖，也不越过未物化前项。没有第二线程、编号器或满队列策略。完成时原 NOE 稳定、Ledger 段封口后才允许原 SIM seal；实际 I/O 错误原样使本轮未完成。V1 同步记录和恢复保持兼容，V2 恢复还原原应用效果、visibility 和幂等位置，不重放业务领取。恢复读取按原 NOE context 的业务版本分别解析 V3／V4 来源，复用同一次上下文读取与原容器校验取得位置；不新增持久字段，也不把耐久记录转换为可应用领取引用。
+Ledger 继续使用同一应用核心，V2 材料包含 Genesis、Transaction、ReservationDecision，交给原 SIM 日志后台 worker。来源交易需要真实 NOE 稳定映射时，后台先同步原 SIM 日志，再沿原 NOE stabilize 发布，按原顺序物化 Ledger；本地事件不虚构 NOE 依赖，也不越过未物化前项。没有第二线程、编号器或满队列策略。完成时原 NOE 稳定、Ledger 段封口后才允许原 SIM seal；实际 I/O 错误原样使本轮未完成。V1 同步记录和恢复保持兼容，V2 恢复还原原应用效果、visibility 和幂等位置，不重放业务领取。恢复读取按原 NOE context 的业务版本分别解析 V3／V4 来源，不新增持久字段，也不把耐久记录转换为可应用领取引用。一次 Ledger 打开仅保留一个已验证批的位置材料，以原始容器位置与预期边界摘要为键；同键复用 boundary 和记录数，每个 ordinal 仍检查范围，换键完整读取，不保留批次正文或全历史。该复用依赖不可变提交合同：违规原地改写在同次恢复的后续命中不再被重复发现，新的恢复和独立公开读取仍完整验证。
 
 宿主计划停止时，先结束已开始的同步调用并停止新组、请求及 Ledger 追加，然后消耗 `PublicSimExecutionV1`、`FinitePublicConsumptionV1` 或 `ContinuousPublicConsumptionV1` 调用 `stop_and_drain`。它只沿同一后台移交 pending 组、同步 SIM、稳定 NOE、接收最后一批 Ledger 材料并封口 Ledger 段，等待原后台退出；不调用下一组、CloseTime、EndOfInput 或 `complete`，不撤单、清仓或改变已有订单/持仓事实。成功不生成 `RunSeal`，不返回完整冷产物或可恢复账户。原 `complete` 仍要求真实业务闭合。来源摘要 `market_event_source_identity_sha256` 对离线材料保留真实值，在线创建时传 `None`；新读取器兼容旧字符串字段，其他身份摘要保持原合同。
 

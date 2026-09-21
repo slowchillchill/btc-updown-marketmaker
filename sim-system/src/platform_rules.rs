@@ -1204,7 +1204,16 @@ async fn query_and_seal_current_process_snapshot_with(
         provenance,
     };
     snapshot.content_sha256 = compute_snapshot_content_sha256(&snapshot)?;
-    validate_snapshot(&snapshot)?;
+    validate_query_time_range(
+        material.query_started_at_utc_ms,
+        material.query_completed_at_utc_ms,
+    )?;
+    validate_http_provenance(
+        &snapshot.provenance.http_requests,
+        &snapshot.provenance.reference_market,
+        snapshot.provenance.query_started_at_utc_ms,
+        snapshot.provenance.query_completed_at_utc_ms,
+    )?;
     let (file_sha256, path, file_bytes) =
         seal_snapshot(&request.target_path, &snapshot, MAX_RULE_SNAPSHOT_BYTES)?;
     Ok(Arc::new(SealedProcessRuleSnapshot {
@@ -1256,7 +1265,16 @@ async fn query_and_seal_current_process_snapshot_v3_with(
             dependencies: direct_dependency_identities(),
         },
     };
-    validate_snapshot_v3(&snapshot)?;
+    validate_query_time_range(
+        material.query_started_at_utc_ms,
+        material.query_completed_at_utc_ms,
+    )?;
+    validate_http_provenance_v3(
+        &snapshot.provenance.http_requests,
+        &snapshot.provenance.reference_market,
+        snapshot.provenance.query_started_at_utc_ms,
+        snapshot.provenance.query_completed_at_utc_ms,
+    )?;
     let (file_sha256, path, _) =
         seal_snapshot(&request.target_path, &snapshot, MAX_RULE_SNAPSHOT_BYTES)?;
     Ok(Arc::new(SealedProcessRuleSnapshotV3 {
@@ -1265,6 +1283,16 @@ async fn query_and_seal_current_process_snapshot_v3_with(
         access_mode: SnapshotAccessMode::CurrentQuery,
         snapshot,
     }))
+}
+
+// 私有构造的身份、配置和规则已由 load_current_rule_material 验证；这里只检查新采集的时间。
+fn validate_query_time_range(started: i64, completed: i64) -> Result<(), RuleSnapshotError> {
+    if started < 0 || completed < started {
+        return Err(RuleSnapshotError::SnapshotIntegrity(
+            "reference provenance invariants are invalid".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 struct LoadedCurrentRuleMaterial {
@@ -3056,6 +3084,45 @@ pub(crate) mod tests {
         .await;
         let directory = tempfile::tempdir().unwrap();
         create_successful_snapshot_v3(&server, directory.path().join("cost-rules.json")).await
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn current_snapshot_rejects_clock_regression_before_sealing_v2_and_v3() {
+        thread_local! {static CALLS: std::cell::Cell<u64> = const {std::cell::Cell::new(0)};}
+        fn backwards() -> Result<i64, RuleSnapshotError> {
+            let call = CALLS.replace(CALLS.get() + 1);
+            Ok(fixed_now_utc_ms()? + i64::from(call == 0))
+        }
+        for v3 in [false, true] {
+            let server = ScriptedServer::start(successful_responses()).await;
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().join("clock.json");
+            CALLS.set(0);
+            let result = if v3 {
+                query_and_seal_current_process_snapshot_v3_with(
+                    current_request(path.clone()),
+                    test_loader_options(&server),
+                    PLATFORM_RULE_CONFIG_BYTES,
+                    backwards,
+                )
+                .await
+                .map(|_| ())
+            } else {
+                query_and_seal_current_process_snapshot_with(
+                    current_request(path.clone()),
+                    test_loader_options(&server),
+                    PLATFORM_RULE_CONFIG_BYTES,
+                    backwards,
+                )
+                .await
+                .map(|_| ())
+            };
+            assert!(matches!(
+                result,
+                Err(RuleSnapshotError::SnapshotIntegrity(_))
+            ));
+            assert!(!path.exists(), "时钟倒退不能密封快照");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
