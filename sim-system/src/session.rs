@@ -9,13 +9,6 @@ pub struct MarketEnrollmentRequestV1 {
     pub market: PlatformMarketV1,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "outcome", rename_all = "SCREAMING_SNAKE_CASE")]
-pub(crate) enum InputPathSealOutcomeV1 {
-    Exhausted,
-    FailedMissingQualifiedMarketTerminal { condition_ids: Vec<String> },
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PublicVisibilityCursorV1 {

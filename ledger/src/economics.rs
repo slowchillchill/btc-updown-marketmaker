@@ -300,14 +300,13 @@ impl EconomicsState {
         effect: &LedgerCommittedEffectV1,
     ) -> Result<Option<EconomicsPatch>, LedgerErrorV1> {
         match &effect.transaction.source {
-            LedgerTransactionSourceV1::Memory(source) => self.prepare_record(effect, source),
-            LedgerTransactionSourceV1::MemoryV2(source) => self.prepare_record(effect, source),
+            LedgerTransactionSourceV1::Memory(source) => self.prepare_record(source),
+            LedgerTransactionSourceV1::MemoryV2(source) => self.prepare_record(source),
             _ => Ok(None),
         }
     }
     fn prepare_record<R: Clone + std::fmt::Debug + Eq>(
         &self,
-        _effect: &LedgerCommittedEffectV1,
         source: &execution_normalization::NoeConsumedRecordRef<R>,
     ) -> Result<Option<EconomicsPatch>, LedgerErrorV1> {
         let mut patch = EconomicsPatch::default();

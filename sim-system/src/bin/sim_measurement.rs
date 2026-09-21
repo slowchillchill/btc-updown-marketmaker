@@ -2879,7 +2879,7 @@ mod enabled {
             .create_session(spec.clone())
             .map_err(|error| format!("创建 targeted 会话失败：{error}"))?;
         execution
-            .retry_create_session(spec)
+            .create_session(spec)
             .map_err(|error| format!("重试 targeted 会话失败：{error}"))?;
         execution
             .activate_session(format!("retention-activate-{trial}"))
@@ -3370,7 +3370,7 @@ mod enabled {
             .create_session(spec.clone())
             .map_err(|error| format!("创建会话失败：{error}"))?;
         execution
-            .retry_create_session(spec)
+            .create_session(spec)
             .map_err(|error| format!("重试创建会话失败：{error}"))?;
         execution
             .activate_session(format!("activate-{root}"))

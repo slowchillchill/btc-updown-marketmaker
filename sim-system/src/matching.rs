@@ -1100,7 +1100,6 @@ impl TakerRebateStateV2 {
 struct MakerRebateMarketStateV2 {
     end_reached: bool,
     pending_fill_count: u64,
-    successful_fill_count: u64,
     pending_by_day: BTreeMap<i64, u64>,
     successful_contributions: BTreeMap<u64, MakerRebateContributionV1>,
     result: Option<MakerRebateMarketResultStatusV1>,
@@ -2523,7 +2522,6 @@ pub(crate) struct ExecutionMarketEventEffectsV2 {
     initial_trade_finality: Vec<TradeFinalityTransitionEffectV2>,
     account_deltas: Vec<PlatformAccountDeltaV2>,
     settlement: Vec<EconomicLifecycleEffectV2>,
-    maker_fill_sequences: Vec<u64>,
     venue_dust: Vec<VenueDustEffectV2>,
     query_projection_changed: bool,
     pub(crate) resources: BusinessResourceDeltaV2,
@@ -2535,7 +2533,6 @@ impl ExecutionMarketEventEffectsV2 {
             .extend(other.initial_trade_finality);
         self.account_deltas.extend(other.account_deltas);
         self.settlement.extend(other.settlement);
-        self.maker_fill_sequences.extend(other.maker_fill_sequences);
         self.venue_dust.extend(other.venue_dust);
         self.query_projection_changed |= other.query_projection_changed;
         self.resources.merge(other.resources);
@@ -2590,12 +2587,12 @@ impl ExecutionMarketEventEffectsV2 {
 
 #[cfg(test)]
 impl ExecutionMarketEventEffectsV2 {
-    pub(crate) fn initial_finality_count_for_tests(&self) -> usize {
-        self.initial_trade_finality.len()
+    pub(crate) fn initial_finality_for_tests(&self) -> &[TradeFinalityTransitionEffectV2] {
+        &self.initial_trade_finality
     }
 
-    pub(crate) fn maker_fill_sequences_for_tests(&self) -> &[u64] {
-        &self.maker_fill_sequences
+    pub(crate) fn initial_finality_count_for_tests(&self) -> usize {
+        self.initial_trade_finality.len()
     }
 
     pub(crate) fn venue_dust_order_id_for_tests(&self) -> Option<&str> {
@@ -3468,7 +3465,6 @@ impl ExecutionStateV2 {
                 platform_effective_at_utc_ms,
             )?);
             self.next_fill_sequence = next_fill_sequence;
-            effects.maker_fill_sequences.push(fill_sequence);
             effects.query_projection_changed = true;
             effects.initial_trade_finality.push(initial);
             if let Some(account_delta) = account_delta {
@@ -4978,10 +4974,6 @@ impl ExecutionStateV2 {
             .checked_sub(1)
             .expect("maker 成交终态只闭合一个市场日成交前驱");
         if let Some(contribution) = contribution {
-            market.successful_fill_count = market
-                .successful_fill_count
-                .checked_add(1)
-                .ok_or(RebateStateErrorV1::ArithmeticOverflow)?;
             resources.add_record(contribution.trade_id.len() as u64);
             market
                 .successful_contributions
@@ -5012,7 +5004,7 @@ impl ExecutionStateV2 {
             .and_then(|market| {
                 (market.end_reached && market.pending_fill_count == 0 && market.result.is_none())
                     .then(|| {
-                        let status = if market.successful_fill_count > 0 {
+                        let status = if !market.successful_contributions.is_empty() {
                             MakerRebateMarketResultStatusV1::Calculated
                         } else {
                             MakerRebateMarketResultStatusV1::ZeroNoEligibleMakerFill
@@ -6643,7 +6635,6 @@ mod tests {
                 .expect("档位增加只追加外部队尾");
             assert!(added_effects.initial_trade_finality.is_empty());
             assert!(added_effects.account_deltas.is_empty());
-            assert!(added_effects.maker_fill_sequences.is_empty());
             assert!(added_effects.venue_dust.is_empty());
             assert_eq!(added_effects.resources.added_records, 1);
             assert_eq!(added_effects.resources.removed_records, 0);
@@ -6668,10 +6659,10 @@ mod tests {
                 )
                 .expect("档位减量按队列原序处理 maker");
             if cycle < 3 {
-                assert!(reduced_effects.maker_fill_sequences.is_empty());
+                assert!(reduced_effects.initial_trade_finality.is_empty());
                 assert_eq!(state.next_fill_sequence, 1);
             } else {
-                assert_eq!(reduced_effects.maker_fill_sequences, vec![1]);
+                assert_eq!(reduced_effects.initial_trade_finality[0].fill_sequence, 1);
                 assert_eq!(reduced_effects.initial_trade_finality.len(), 1);
                 assert_eq!(reduced_effects.account_deltas.len(), 1);
                 assert_eq!(state.next_fill_sequence, 2);
@@ -6770,7 +6761,6 @@ mod tests {
                 .expect("pending 档位事件必须成功");
             assert!(effects.initial_trade_finality.is_empty());
             assert!(effects.account_deltas.is_empty());
-            assert!(effects.maker_fill_sequences.is_empty());
         }
         let OrderQuantityStateV2::Base {
             pending_maker_depletion_base_units,
@@ -6966,7 +6956,6 @@ mod tests {
 
         assert!(effects.initial_trade_finality.is_empty());
         assert!(effects.account_deltas.is_empty());
-        assert!(effects.maker_fill_sequences.is_empty());
         assert!(effects.venue_dust.is_empty());
         assert_eq!(effects.resources.added_records, 0);
         assert_eq!(effects.resources.removed_records, 2);
