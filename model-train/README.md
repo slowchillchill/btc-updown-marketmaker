@@ -364,8 +364,9 @@ P7 保留空订单市场根的原索引与 B2；该根仅调用有支持的 Mark
 完整撤单排序在整集合具有原 SIM 公开材料时，使用 Accepted 的逐项有效处理时间、首次请求回执的
 input_sequence 和原 ordinal；这与生产者真实形成源序保序，不使用整批响应时间或反馈到达顺序。
 原形成反馈尚未到时，形成年龄与时间存在位仍保留缺失；不填造原源序或时间。
-其他原读取方若仅有完整形成源序，整集合继续使用原源序；两种完整材料均不足时仍返回 Unavailable，
-不混合两个数值域排序。单笔、配对和市场全量对象及配对返回的原 ordinal 均保持。
+已有形成依据可由同一种完整材料覆盖时，使用该先后链；否则保留处理时间／回执链P与形成源序链S，
+按两条链的先后约束作稳定拓扑排序，不直接混比两个数值域。无形成依据的对象按真实身份稳定保留，
+不因此删除候选或将整集合改为Unavailable；Paired返回的两腿仍保持原 ordinal。
 Taker Contribution 是独立经济事实，接纳不再额外等待该成交的 FinalSuccess 用户反馈。
 贡献沿原原子应用、位置幂等和贡献去重通路进入 accrued；不强置成交成功、不提前配对或成熟 NAV。
 MakerAccrualFinalized、DayFinalized、Payment 及真实账户经济前驱依赖保持。
@@ -374,7 +375,8 @@ MakerAccrualFinalized、DayFinalized、Payment 及真实账户经济前驱依赖
 
 C 宿主逐组对照原录制的 group_position、实际交付时刻与市场窗口独立列举的合法行，
 比较角色和 condition，截止内原组必须全部消费；不把期望帧数写成固定常量。
-外生应用未完成或 Native 返回 None 时立即保留材料并失败，不能默默推进下一组。
+Native 返回 None，或实际合法行的角色／condition与原录制的独立期望不一致时，立即保留材料并失败。
+真实经济等待本身不跳过合法帧，也不以settlement返回false作为失败门。
 失败快照区分 before-exogenous、after-exogenous 与 after-native-consume，后两者重新领取真实 cutoff。
 此前 v4 曾因贡献额外依赖遗漏合法帧，已全部停测，旧局部结果不拼接为完整验收。
 
