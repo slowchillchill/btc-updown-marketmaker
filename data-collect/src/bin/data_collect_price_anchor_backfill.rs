@@ -34,7 +34,6 @@ const POLICY: &str = "price_anchor_historical_repair_v1";
 const PARQUET_NAME: &str = "historical_price_anchor_repair_v1.parquet";
 const QUERY_INTERVAL: Duration = Duration::from_secs(10);
 const QUERY_TIMEOUT: Duration = Duration::from_secs(20);
-const LEGACY_CONFLICT: &str = "btc-updown-5m-1785196800";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Scope {
@@ -875,13 +874,9 @@ fn load_remaining_sources(config: &Config) -> Result<Sources> {
     let identities = local
         .into_iter()
         .map(|(slug, local)| {
-            let ready = if slug == LEGACY_CONFLICT {
-                None
-            } else {
-                let [ready] = local.ready_values.as_slice() else {
-                    return Err(invalid(format!("{slug}: 原身份就绪证据不一致")));
-                };
-                Some(time_ms(ready)?)
+            let ready = match local.ready_values.as_slice() {
+                [ready] => Some(time_ms(ready)?),
+                _ => None,
             };
             let value = local.identity;
             Ok((
@@ -1482,8 +1477,8 @@ fn remaining_plan(sources: &Sources) -> Result<Vec<RemainingPlannedRequest>> {
 }
 
 fn remaining_v5_reason(sources: &Sources, slug: &str) -> String {
-    if slug == LEGACY_CONFLICT {
-        return "legacy_fixed_identity_conflict".to_owned();
+    if sources.identities[slug].ready.is_none() {
+        return "identity_ready_evidence_not_unique".to_owned();
     }
     let state = sources.remaining_v5.as_ref().unwrap();
     let last = sources
@@ -2466,27 +2461,32 @@ mod tests {
         );
     }
 
+    const CONFLICT: &str = "btc-updown-5m-1785196800";
     const FIRST: &str = "btc-updown-5m-1785181200";
     const SECOND: &str = "btc-updown-5m-1785304800";
 
     fn remaining_fixture(root: &Path) -> Sources {
+        remaining_fixture_with_ready(
+            root,
+            vec!["2026-07-27T23:59:00Z", "2026-07-28T00:01:00Z"],
+            vec!["2026-07-27 19:40:57.836000+00:00"],
+        )
+    }
+
+    fn remaining_fixture_with_ready(
+        root: &Path,
+        old_slug_ready: Vec<&str>,
+        first_ready: Vec<&str>,
+    ) -> Sources {
         let mut identities = BTreeMap::new();
         for (index, (slug, start, ready)) in [
-            (
-                FIRST,
-                "2026-07-27T19:40:00Z",
-                vec!["2026-07-27 19:40:57.836000+00:00"],
-            ),
+            (FIRST, "2026-07-27T19:40:00Z", first_ready),
             (
                 SECOND,
                 "2026-07-29T06:00:00Z",
                 vec!["2026-07-29 06:01:30.995000+00:00"],
             ),
-            (
-                LEGACY_CONFLICT,
-                "2026-07-28T00:00:00Z",
-                vec!["2026-07-27T23:59:00Z", "2026-07-28T00:01:00Z"],
-            ),
+            (CONFLICT, "2026-07-28T00:00:00Z", old_slug_ready),
         ]
         .into_iter()
         .enumerate()
@@ -2515,6 +2515,59 @@ mod tests {
             build_state: "test".to_owned(),
         })
         .unwrap()
+    }
+
+    #[test]
+    fn current_ready_evidence_controls_old_slug_and_other_conflicts() {
+        for unavailable in [vec![], vec!["2026-07-27T23:59:00Z", "2026-07-28T00:01:00Z"]] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut sources =
+                remaining_fixture_with_ready(dir.path(), vec!["2026-07-28T00:01:00Z"], unavailable);
+            assert_eq!(
+                sources.identities[CONFLICT].ready,
+                Some(time_ms("2026-07-28T00:01:00Z").unwrap())
+            );
+            assert!(sources.identities[FIRST].ready.is_none());
+            let plan = remaining_plan(&sources).unwrap();
+            assert!(
+                plan.iter()
+                    .any(|r| r.members.iter().any(|m| m.slug == CONFLICT))
+            );
+            let body = [FIRST, CONFLICT]
+                .map(|slug| {
+                    market_body(
+                        &sources,
+                        slug,
+                        &format!(
+                            r#"[{{"id":"11","slug":"{slug}","eventMetadata":{{"priceToBeat":2}}}}]"#
+                        ),
+                    )
+                })
+                .join(",");
+            let response = test_response(
+                dir.path(),
+                "gamma_markets",
+                format!("[{body}]").as_bytes(),
+                200,
+            );
+            let mut attempt = remaining_attempt(&sources, "gamma_markets");
+            attempt.result = "observed".to_owned();
+            attempt.attempt_completed_at_utc = Some("2026-09-08T07:00:02Z".to_owned());
+            attempt.response_group_id = Some(response.id().unwrap());
+            import_remaining_attempt(&mut sources, attempt, Some(response), false).unwrap();
+            assert!(sources.anchors.contains_key(CONFLICT));
+            assert!(!sources.anchors.contains_key(FIRST));
+            assert!(
+                remaining_plan(&sources)
+                    .unwrap()
+                    .iter()
+                    .all(|r| r.members.iter().all(|m| m.slug != FIRST))
+            );
+            assert_eq!(
+                remaining_v5_reason(&sources, FIRST),
+                "identity_ready_evidence_not_unique"
+            );
+        }
     }
 
     fn remaining_attempt(sources: &Sources, origin: &str) -> RemainingQueryAttemptV1 {
@@ -2646,8 +2699,8 @@ mod tests {
             "pending_gamma_event_detail"
         );
         assert_eq!(
-            remaining_v5_reason(&sources, LEGACY_CONFLICT),
-            "legacy_fixed_identity_conflict"
+            remaining_v5_reason(&sources, CONFLICT),
+            "identity_ready_evidence_not_unique"
         );
         let plan = remaining_plan(&sources).unwrap();
         assert_eq!(plan.len(), 2);
@@ -2668,7 +2721,7 @@ mod tests {
     }
 
     #[test]
-    fn markets_keep_original_member_and_event_indices_and_exclude_the_legacy_conflict() {
+    fn markets_keep_original_member_and_event_indices_and_exclude_conflicting_ready_evidence() {
         let dir = tempfile::tempdir().unwrap();
         let mut sources = remaining_fixture(dir.path());
         let first = market_body(
@@ -2687,10 +2740,8 @@ mod tests {
         );
         let conflict = market_body(
             &sources,
-            LEGACY_CONFLICT,
-            &format!(
-                r#"[{{"id":"11","slug":"{LEGACY_CONFLICT}","eventMetadata":{{"priceToBeat":2}}}}]"#
-            ),
+            CONFLICT,
+            &format!(r#"[{{"id":"11","slug":"{CONFLICT}","eventMetadata":{{"priceToBeat":2}}}}]"#),
         );
         let body = format!("[{second},{conflict},{first}]");
         let response = test_response(dir.path(), "gamma_markets", body.as_bytes(), 200);
@@ -2718,8 +2769,8 @@ mod tests {
         assert_eq!(sources.anchors[SECOND].raw, "7.100e-18");
         assert_eq!(sources.anchors[SECOND].member, 0);
         assert!(sources.anchors.values().all(|anchor| anchor.group == group));
-        assert!(sources.identities[LEGACY_CONFLICT].ready.is_none());
-        assert!(!sources.anchors.contains_key(LEGACY_CONFLICT));
+        assert!(sources.identities[CONFLICT].ready.is_none());
+        assert!(!sources.anchors.contains_key(CONFLICT));
         assert_eq!(
             sources.identities[FIRST].ready,
             Some(time_ms("2026-07-27T19:40:57.836Z").unwrap())

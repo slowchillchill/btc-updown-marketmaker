@@ -8,7 +8,6 @@ const BINANCE_DEPTH_PENDING_MAX_ROWS: usize = 25_000;
 const BINANCE_DEPTH_PENDING_MAX_BYTES: usize = 67_108_864;
 const BINANCE_HTTP_CONNECT_TIMEOUT_SECS: u64 = 5;
 const BINANCE_HTTP_TOTAL_TIMEOUT_SECS: u64 = 15;
-pub(super) const BINANCE_RETRY_AFTER_MAX_SECS: u64 = 3 * 24 * 60 * 60;
 
 pub(super) fn binance_ws_payload(value: &Value) -> &Value {
     value.get("data").unwrap_or(value)
@@ -392,7 +391,7 @@ async fn fetch_binance_depth_snapshot_cycle(
             snapshot_jitter_seed,
         ));
         if let Some(delay) = server_retry_after.into_iter().chain(base_retry).max() {
-            sleep(delay).await;
+            wait_depth_snapshot_delay(delay).await;
         }
     }
     Ok(DepthSnapshotCycleOutcome::Unavailable {
@@ -412,7 +411,7 @@ pub(super) fn binance_snapshot_retry_after(
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<u64>().ok())
-        .map(|seconds| Duration::from_secs(seconds.min(BINANCE_RETRY_AFTER_MAX_SECS)))
+        .map(Duration::from_secs)
 }
 
 pub(super) fn start_binance_depth_snapshot_cycle(
@@ -945,7 +944,7 @@ fn start_binance_depth_snapshot_cycle_after(
     let future = start_binance_depth_snapshot_cycle(context, trigger_reason);
     Box::pin(async move {
         if !delay.is_zero() {
-            sleep(delay).await;
+            wait_depth_snapshot_delay(delay).await;
         }
         future.await
     })
@@ -1308,20 +1307,33 @@ pub(super) struct BinanceDepthUpdateContext {
     pub(super) pending_limits: Option<(usize, usize)>,
 }
 
+// 分段只限制单次定时器跨度，完整 Retry-After 仍按单调时钟累计等待。
+async fn wait_depth_snapshot_delay(delay: Duration) {
+    let started = Instant::now();
+    while let Some(remaining) = delay
+        .checked_sub(started.elapsed())
+        .filter(|d| !d.is_zero())
+    {
+        sleep(remaining.min(Duration::from_secs(24 * 60 * 60))).await;
+    }
+}
+
 #[derive(Clone, Default)]
 pub(super) struct DepthSnapshotNotBefore {
-    pub(super) deadline: Arc<Mutex<Option<Instant>>>,
+    pub(super) deadline: Arc<Mutex<Option<(Instant, Duration)>>>,
 }
 
 impl DepthSnapshotNotBefore {
     fn defer_for(&self, delay: Duration) {
-        let candidate = Instant::now() + delay;
         let mut deadline = self
             .deadline
             .lock()
             .expect("depth snapshot not-before mutex poisoned");
-        if deadline.is_none_or(|current| candidate > current) {
-            *deadline = Some(candidate);
+        let now = Instant::now();
+        if deadline.is_none_or(|(started, duration)| {
+            delay > duration.saturating_sub(now.duration_since(started))
+        }) {
+            *deadline = Some((now, delay));
         }
     }
 
@@ -1331,10 +1343,14 @@ impl DepthSnapshotNotBefore {
                 .deadline
                 .lock()
                 .expect("depth snapshot not-before mutex poisoned");
-            let Some(deadline) = deadline.filter(|deadline| *deadline > Instant::now()) else {
+            let Some(remaining) = deadline.and_then(|(started, duration)| {
+                duration
+                    .checked_sub(started.elapsed())
+                    .filter(|d| !d.is_zero())
+            }) else {
                 return;
             };
-            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+            wait_depth_snapshot_delay(remaining).await;
         }
     }
 }
@@ -1460,5 +1476,31 @@ impl DepthPendingBuffer {
     fn discard_all(&mut self) {
         self.updates.clear();
         self.reserved_bytes = 0;
+    }
+}
+
+#[cfg(test)]
+mod delay_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn binance_depth_large_retry_waits_remain_pending_and_cancellable() {
+        for seconds in [4 * 24 * 60 * 60, u64::MAX] {
+            let delay = Duration::from_secs(seconds);
+            let gate = DepthSnapshotNotBefore::default();
+            gate.defer_for(delay);
+            gate.defer_for(Duration::from_secs(1));
+            assert_eq!(gate.deadline.lock().unwrap().unwrap().1, delay);
+            assert!(
+                timeout(Duration::from_millis(10), gate.wait())
+                    .await
+                    .is_err()
+            );
+            assert!(
+                timeout(Duration::from_millis(10), wait_depth_snapshot_delay(delay))
+                    .await
+                    .is_err()
+            );
+        }
     }
 }

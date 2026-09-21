@@ -23,9 +23,7 @@ use crate::writer::sha256_file;
 
 pub const RESOURCE_HARD_THRESHOLD_EXIT_CODE: i32 = 75;
 pub const OPERATOR_INTERVENTION_REQUIRED_EXIT_CODE: i32 = 76;
-/// 已废弃容量参数的兼容默认值，仅保留原参数和配置摘要。
-pub const DEFAULT_TRAINING_DATASET_MAX_BYTES: u64 = 50_000_000_000;
-pub const TRAINING_COLLECTOR_USAGE: &str = "usage: data-collect-training-collector --dataset-root <absolute-path> [--collector-region <region>] [--run-forever | --max-runtime-secs <seconds>] [--max-dataset-bytes <bytes>]\n--max-dataset-bytes 已废弃：仅为旧命令兼容接受正整数，不再限制数据集容量。";
+pub const TRAINING_COLLECTOR_USAGE: &str = "usage: data-collect-training-collector --dataset-root <absolute-path> [--collector-region <region>] [--run-forever | --max-runtime-secs <seconds>]";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct CliArgs {
@@ -33,8 +31,6 @@ pub struct CliArgs {
     pub max_runtime_secs: Option<u64>,
     pub run_forever: bool,
     pub collector_region: Option<String>,
-    /// 已废弃，仅为旧正整数参数和配置摘要保留，不再限制数据集容量。
-    pub max_dataset_bytes: u64,
 }
 
 #[derive(Serialize)]
@@ -95,7 +91,6 @@ where
         code_version,
         collector_binary_sha256,
         source_config_digest,
-        max_dataset_bytes: cli.max_dataset_bytes,
     })
     .await?;
     Ok(())
@@ -113,10 +108,7 @@ where
         let arg = os_string(arg, "argument")?;
         match arg.as_str() {
             "--run-forever" => run_forever = true,
-            "--dataset-root"
-            | "--max-runtime-secs"
-            | "--collector-region"
-            | "--max-dataset-bytes" => {
+            "--dataset-root" | "--max-runtime-secs" | "--collector-region" => {
                 let value = iter.next().ok_or_else(|| {
                     io::Error::new(
                         io::ErrorKind::InvalidInput,
@@ -156,18 +148,11 @@ where
         )
         .into());
     }
-    let max_dataset_bytes = values
-        .remove("--max-dataset-bytes")
-        .map(|value| parse_positive_u64("--max-dataset-bytes", &value))
-        .transpose()?
-        .unwrap_or(DEFAULT_TRAINING_DATASET_MAX_BYTES);
-
     Ok(CliArgs {
         dataset_root: PathBuf::from(dataset_root),
         max_runtime_secs,
         run_forever,
         collector_region: values.remove("--collector-region"),
-        max_dataset_bytes,
     })
 }
 
@@ -573,21 +558,5 @@ mod tests {
             }
             assert!(!socket.exists());
         }
-    }
-
-    #[test]
-    fn production_source_spec_keeps_the_frozen_training_config_digest_bytes() {
-        let cli = CliArgs {
-            dataset_root: PathBuf::from("/tmp/data-collect-digest-fixture"),
-            max_runtime_secs: Some(45),
-            run_forever: false,
-            collector_region: Some("eu-west-1".to_owned()),
-            max_dataset_bytes: DEFAULT_TRAINING_DATASET_MAX_BYTES,
-        };
-
-        assert_eq!(
-            training_config_digest(&cli).unwrap(),
-            "a88b51d763d8079ce8fea18d2e6962c1a4fb74dab69d5be3081753eb68dd2ddd"
-        );
     }
 }
