@@ -305,6 +305,9 @@ async fn real_memory_noe_delivers_closed_order_feedback_and_cancel_before_finish
         }))
         .unwrap();
     close_at(&mut driver, 26_000);
+    assert_eq!(observation.durable_through(),0,"市场结束前暂停不阻断原业务链");
+    release.send(()).unwrap();
+
     while let Some(required) = driver.execution.actor.next_required_logical_drive() {
         if required.required_at_utc_ms >= TERMINAL_ADMITTED_TIME_MS {
             break;
@@ -312,9 +315,9 @@ async fn real_memory_noe_delivers_closed_order_feedback_and_cancel_before_finish
         close_at(&mut driver, required.required_at_utc_ms);
     }
     while driver.next_group().unwrap().is_some() {}
+    assert!(driver.execution.actor.unstable_market_ends.is_empty(),"已稳定市场截止不常驻历史集合");
     let accepted = observation.accepted_through();
-    assert_eq!(observation.durable_through(), 0, "后台屏障阻止真实写入");
-    release.send(()).unwrap();
+    assert!(observation.durable_through()>0,"市场结束已自动稳定，无需等Finish");
     let mut materials = RecordedMaterials { root, hidden: None };
     driver.complete(&mut materials).unwrap();
     assert_eq!(observation.durable_through(), accepted);
@@ -477,26 +480,27 @@ async fn real_memory_noe_stage_and_publish_failures_preserve_materials_without_s
             .unwrap()
             .path();
         let commits = context_directory.join("commits");
-        let original_stage = commits.join(".00000000000000000000.batch.json.tmp");
+        let original_stage = commits.join(".00000000000000000000.parquet.tmp");
         let original_bytes = std::fs::read(&original_stage).unwrap();
         if stable_publish {
             std::fs::write(
-                commits.join("00000000000000000000.json"),
+                commits.join("00000000000000000000.parquet"),
                 b"existing-target",
             )
             .unwrap();
         } else {
-            std::fs::create_dir(commits.join(".00000000000000000001.batch.json.tmp")).unwrap();
+            std::fs::create_dir(commits.join(".00000000000000000001.parquet.tmp")).unwrap();
         }
         let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, RecordedTimes).unwrap();
         let mut driver =
             FinitePublicConsumptionV1::new(execution, source, "finite-recorded-times".into());
-        while driver.next_group().unwrap().is_some() {}
-        assert_eq!(observation.durable_through(), 0);
+        assert_eq!(observation.durable_through(),0);
         release.send(()).unwrap();
-        let error = match driver.complete(&mut RecordedMaterials { root, hidden: None }) {
-            Err(error) => error,
-            Ok(_) => panic!("损坏现场不能成为完成运行"),
+        let driving_error=loop {
+            match driver.next_group() {Ok(Some(_))=>{},Ok(None)=>break None,Err(error)=>break Some(error)}
+        };
+        let error=if let Some(error)=driving_error {error} else {
+            match driver.complete(&mut RecordedMaterials {root,hidden:None}) {Err(error)=>error,Ok(_)=>panic!("损坏现场不能完成")}
         };
         if stable_publish {
             assert!(matches!(
@@ -508,19 +512,15 @@ async fn real_memory_noe_stage_and_publish_failures_preserve_materials_without_s
                 ))
             ));
             assert_eq!(
-                std::fs::read(commits.join("00000000000000000000.json")).unwrap(),
+                std::fs::read(commits.join("00000000000000000000.parquet")).unwrap(),
                 b"existing-target"
-            );
-            assert!(
-                !commits.join(".00000000000000000000.json.tmp").exists(),
-                "发布器只清理自己的最终容器候选"
             );
         } else {
             assert!(matches!(
                 error,
                 SimRunActorErrorV2::Log(SimEventLogErrorV2::Noe(
                     ::execution_normalization::DurableErrorV1::Io {
-                        operation: "创建归一化批暂存",
+                        operation: "写入归一化 Parquet 批",
                         ..
                     }
                 ))
@@ -566,7 +566,7 @@ async fn finite_legacy_order_consumer_keeps_noe_v2_context_and_reader() {
     let mut driver =
         FinitePublicConsumptionV1::new(execution, source, "finite-recorded-times".into());
     while driver.next_group().unwrap().is_some() {}
-    assert_eq!(observation.durable_through(), 0);
+    assert!(observation.durable_through()>0,"市场结束前缀已自动稳定旧业务版本的新物理容器");
     assert_eq!(
         observation.delivered_through(),
         0,
@@ -741,12 +741,16 @@ async fn training_hidden_prefetch_cannot_advance_public_feedback_visibility_or_o
         frozen_frame,
         "驱动快照不被新 decision 回写"
     );
+    assert_eq!(observation.durable_through(),0);
+    release.send(()).unwrap();
+    let delivered_before_end=observation.delivered_through();
     while let Some(bucket) = buckets.next_bucket().unwrap() {
         driver.hidden_bucket(bucket).unwrap();
     }
+    assert!(driver.execution.actor.unstable_market_ends.is_empty());
+    assert!(observation.durable_through()>0,"隐藏市场结束自动稳定");
+    assert_eq!(observation.delivered_through(),delivered_before_end,"耐久稳定不前移公共反馈交付");
     while driver.next_group().unwrap().is_some() {}
-    assert_eq!(observation.durable_through(), 0);
-    release.send(()).unwrap();
     driver
         .complete(&mut RecordedMaterials {
             root,

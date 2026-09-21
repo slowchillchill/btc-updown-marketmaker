@@ -1,3 +1,4 @@
+mod parquet;
 use std::error::Error;
 use std::fmt;
 use std::fmt::Write as _;
@@ -287,6 +288,7 @@ pub struct DurableContextStore<T, C = SourceNeutralControlResultV1> {
     commits: Vec<DurableCommit<T, C>>,
     core: NormalizationCore<T, C>,
     poison: Option<PoisonedStoreV1>,
+    parquet: bool,
     #[cfg(test)]
     publish_fault: PublishFaultV1,
 }
@@ -346,7 +348,7 @@ impl<
         context: ExecutionNormalizationContextV1,
     ) -> Result<Self, DurableErrorV1> {
         let (context_directory, context_container_reference) =
-            create_context_container::<T, C>(root.as_ref(), &context)?;
+            create_context_container::<T, C>(root.as_ref(), &context, NOE_CONTAINER_ENCODING_V1)?;
 
         let core = NormalizationCore::new(context.clone());
         Ok(Self {
@@ -356,6 +358,7 @@ impl<
             commits: Vec::new(),
             core,
             poison: None,
+            parquet: false,
             #[cfg(test)]
             publish_fault: PublishFaultV1::default(),
         })
@@ -375,7 +378,11 @@ impl<
             &context_path,
             &context_container.payload.container_version,
             T::CONTEXT_VERSION,
-            &context_container.payload.encoding,
+            if context_container.payload.encoding == parquet::FORMAT {
+                NOE_CONTAINER_ENCODING_V1
+            } else {
+                &context_container.payload.encoding
+            },
         )?;
         check_digest(
             &context_path,
@@ -404,7 +411,7 @@ impl<
                     found: file_sequence,
                 });
             }
-            let container: CommitContainer<T, C> = decode_container(&path)?;
+            let container: CommitContainer<T, C> = read_commit_container(&path)?;
             check_container_header(
                 &path,
                 &container.payload.container_version,
@@ -453,6 +460,7 @@ impl<
             location: context_path.to_string_lossy().into_owned(),
             boundary_sha256: context_container.boundary_sha256,
         };
+        let parquet = context_container.payload.encoding == parquet::FORMAT;
         let context = context_container.payload.context;
         let core = NormalizationCore::restore(
             context.clone(),
@@ -465,6 +473,7 @@ impl<
             commits,
             core,
             poison: None,
+            parquet,
             #[cfg(test)]
             publish_fault: PublishFaultV1::default(),
         })
@@ -555,7 +564,11 @@ impl<
             },
             records: batch.records,
         };
-        let target_name = commit_file_name(commit_sequence);
+        let target_name = if self.parquet {
+            format!("{commit_sequence:020}.parquet")
+        } else {
+            commit_file_name(commit_sequence)
+        };
         let target_path = self
             .context_directory
             .join(COMMITS_DIRECTORY_NAME)
@@ -565,27 +578,50 @@ impl<
             payload,
             boundary_sha256: boundary_sha256.clone(),
         };
-        let bytes = encode_container(&container, &target_path)?;
-        let commits_directory = self.context_directory.join(COMMITS_DIRECTORY_NAME);
-        #[cfg(test)]
-        let publish_fault = std::mem::take(&mut self.publish_fault);
-        #[cfg(not(test))]
-        let publish_fault = PublishFaultV1::default();
-        if let Err(error) = publish_no_replace(
-            &commits_directory,
-            &format!(".{target_name}.tmp"),
-            &target_name,
-            &bytes,
-            Some(commit_sequence),
-            publish_fault,
-        ) {
-            if let DurableErrorV1::DurabilityUncertain { path, message } = &error {
+        if self.parquet {
+            let stage_path = target_path.with_file_name(format!(".{target_name}.tmp"));
+            parquet::write_batch(
+                &stage_path,
+                &crate::core::NormalizationBatch {
+                    source_watermark: container.payload.boundary.source_watermark.clone(),
+                    records: container.payload.records.clone(),
+                },
+            )?;
+            if let Err(error) = parquet::publish(
+                &stage_path,
+                &target_path,
+                &container,
+                PublishFaultV1::default(),
+            ) {
                 self.poison = Some(PoisonedStoreV1 {
-                    path: path.clone(),
-                    message: message.clone(),
+                    path: target_path.clone(),
+                    message: error.to_string(),
                 });
+                return Err(error);
             }
-            return Err(error);
+        } else {
+            let bytes = encode_container(&container, &target_path)?;
+            let commits_directory = self.context_directory.join(COMMITS_DIRECTORY_NAME);
+            #[cfg(test)]
+            let publish_fault = std::mem::take(&mut self.publish_fault);
+            #[cfg(not(test))]
+            let publish_fault = PublishFaultV1::default();
+            if let Err(error) = publish_no_replace(
+                &commits_directory,
+                &format!(".{target_name}.tmp"),
+                &target_name,
+                &bytes,
+                Some(commit_sequence),
+                publish_fault,
+            ) {
+                if let DurableErrorV1::DurabilityUncertain { path, message } = &error {
+                    self.poison = Some(PoisonedStoreV1 {
+                        path: path.clone(),
+                        message: message.clone(),
+                    });
+                }
+                return Err(error);
+            }
         }
 
         let container_reference = NoePublishedContainerReferenceV1 {
@@ -613,6 +649,7 @@ fn create_context_container<
 >(
     root: &Path,
     context: &ExecutionNormalizationContextV1,
+    encoding: &str,
 ) -> Result<(PathBuf, NoePublishedContainerReferenceV1), DurableErrorV1> {
     fs::create_dir_all(root).map_err(|error| io_error("创建耐久根", root, error))?;
     let context_directory = context_directory(root, &context.context_reference);
@@ -634,7 +671,7 @@ fn create_context_container<
     let context_path = context_directory.join(CONTEXT_FILE_NAME);
     let payload = ContextPayloadV1 {
         container_version: T::CONTEXT_VERSION.to_owned(),
-        encoding: NOE_CONTAINER_ENCODING_V1.to_owned(),
+        encoding: encoding.to_owned(),
         context: context.clone(),
     };
     let container = ContextContainerV1 {
@@ -664,6 +701,8 @@ fn create_context_container<
 pub struct StagedNormalizationWriter<T, C> {
     context_directory: PathBuf,
     context: ExecutionNormalizationContextV1,
+    #[cfg(test)]
+    publish_fault: PublishFaultV1,
     staged: u64,
     published: u64,
     payload: std::marker::PhantomData<(T, C)>,
@@ -678,10 +717,13 @@ impl<
         root: &Path,
         context: ExecutionNormalizationContextV1,
     ) -> Result<Self, DurableErrorV1> {
-        let (context_directory, _) = create_context_container::<T, C>(root, &context)?;
+        let (context_directory, _) =
+            create_context_container::<T, C>(root, &context, parquet::FORMAT)?;
         Ok(Self {
             context_directory,
             context,
+            #[cfg(test)]
+            publish_fault: PublishFaultV1::default(),
             staged: 0,
             published: 0,
             payload: std::marker::PhantomData,
@@ -693,28 +735,7 @@ impl<
         batch: &crate::core::NormalizationBatch<MT, MC, I, F>,
     ) -> Result<(), DurableErrorV1> {
         let path = self.stage_path(self.staged);
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|error| io_error("创建归一化批暂存", &path, error))?;
-        let mut file = std::io::BufWriter::new(file);
-        serde_json::to_writer(&mut file, batch).map_err(|error| {
-            if error.is_io() {
-                DurableErrorV1::Io {
-                    operation: "写入归一化批暂存",
-                    path: path.clone(),
-                    message: error.to_string(),
-                }
-            } else {
-                DurableErrorV1::ContainerDecode {
-                    path: path.clone(),
-                    message: error.to_string(),
-                }
-            }
-        })?;
-        file.flush()
-            .map_err(|error| io_error("写入归一化批暂存", &path, error))?;
+        parquet::write_batch(&path, batch)?;
         self.staged += 1;
         Ok(())
     }
@@ -722,7 +743,7 @@ impl<
     fn stage_path(&self, sequence: u64) -> PathBuf {
         self.context_directory
             .join(COMMITS_DIRECTORY_NAME)
-            .join(format!(".{sequence:020}.batch.json.tmp"))
+            .join(format!(".{sequence:020}.parquet.tmp"))
     }
 
     /// 调用方必须先稳定关联的 SIM 输入；时间绑定本次稳定尝试。
@@ -735,7 +756,7 @@ impl<
         while self.published < self.staged {
             let sequence = self.published;
             let stage_path = self.stage_path(sequence);
-            let batch: crate::core::NormalizationBatch<T, C> = decode_container(&stage_path)?;
+            let batch: crate::core::NormalizationBatch<T, C> = parquet::read_batch(&stage_path)?;
             let payload = CommitPayload {
                 container_version: T::COMMIT_VERSION.to_owned(),
                 encoding: NOE_CONTAINER_ENCODING_V1.to_owned(),
@@ -747,7 +768,7 @@ impl<
                 },
                 records: batch.records,
             };
-            let target_name = commit_file_name(sequence);
+            let target_name = format!("{sequence:020}.parquet");
             let directory = self.context_directory.join(COMMITS_DIRECTORY_NAME);
             let target_path = directory.join(&target_name);
             let boundary_sha256 = payload_digest(&payload, &target_path)?;
@@ -755,15 +776,11 @@ impl<
                 payload,
                 boundary_sha256: boundary_sha256.clone(),
             };
-            let bytes = encode_container(&container, &target_path)?;
-            publish_no_replace(
-                &directory,
-                &format!(".{target_name}.tmp"),
-                &target_name,
-                &bytes,
-                Some(sequence),
-                PublishFaultV1::default(),
-            )?;
+            #[cfg(test)]
+            let fault = std::mem::take(&mut self.publish_fault);
+            #[cfg(not(test))]
+            let fault = PublishFaultV1::default();
+            parquet::publish(&stage_path, &target_path, &container, fault)?;
             let commit = DurableCommit {
                 commit_sequence: sequence,
                 boundary: container.payload.boundary,
@@ -775,10 +792,21 @@ impl<
             };
             published(&commit);
             self.published += 1;
-            fs::remove_file(&stage_path)
-                .map_err(|error| io_error("移除已发布归一化批暂存", &stage_path, error))?;
         }
         Ok(())
+    }
+}
+
+fn read_commit_container<
+    T: NoeTradePayload<C>,
+    C: Clone + fmt::Debug + Eq + Serialize + serde::de::DeserializeOwned,
+>(
+    path: &Path,
+) -> Result<CommitContainer<T, C>, DurableErrorV1> {
+    if path.extension().is_some_and(|e| e == "parquet") {
+        parquet::read_commit(path)
+    } else {
+        decode_container(path)
     }
 }
 
@@ -803,7 +831,7 @@ fn read_noe_result<
         .parent()
         .expect("固定 commits 目录必有上下文父目录");
     let file_sequence = commit_sequence_from_path(&commit_path)?;
-    let container: CommitContainer<T, C> = decode_container(&commit_path)?;
+    let container: CommitContainer<T, C> = read_commit_container(&commit_path)?;
     check_container_header(
         &commit_path,
         &container.payload.container_version,
@@ -843,7 +871,11 @@ fn read_noe_result<
         &context_path,
         &context_container.payload.container_version,
         T::CONTEXT_VERSION,
-        &context_container.payload.encoding,
+        if context_container.payload.encoding == parquet::FORMAT {
+            NOE_CONTAINER_ENCODING_V1
+        } else {
+            &context_container.payload.encoding
+        },
     )?;
     check_digest(
         &context_path,
@@ -920,7 +952,10 @@ fn commit_sequence_from_path(path: &Path) -> Result<u64, DurableErrorV1> {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or_default();
-    let number = name.strip_suffix(".json").unwrap_or_default();
+    let number = name
+        .strip_suffix(".parquet")
+        .or_else(|| name.strip_suffix(".json"))
+        .unwrap_or_default();
     if number.len() != 20 {
         return Err(DurableErrorV1::ContainerDecode {
             path: path.to_path_buf(),
@@ -942,7 +977,17 @@ fn published_commit_paths(directory: &Path) -> Result<Vec<PathBuf>, DurableError
     for entry in entries {
         let entry = entry.map_err(|error| io_error("读取提交目录项", directory, error))?;
         let path = entry.path();
-        if path.extension().and_then(|extension| extension.to_str()) == Some("json") {
+        if path.to_string_lossy().ends_with(".manifest.json") {
+            paths.push(
+                path.with_file_name(
+                    path.file_name()
+                        .unwrap()
+                        .to_str()
+                        .unwrap()
+                        .replace(".manifest.json", ".parquet"),
+                ),
+            );
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("json") {
             paths.push(path);
         }
     }
@@ -950,15 +995,17 @@ fn published_commit_paths(directory: &Path) -> Result<Vec<PathBuf>, DurableError
 }
 
 fn discard_unpublished_suffixes(directory: &Path) -> Result<(), DurableErrorV1> {
-    let entries =
-        fs::read_dir(directory).map_err(|error| io_error("读取提交目录", directory, error))?;
-    for entry in entries {
-        let entry = entry.map_err(|error| io_error("读取提交目录项", directory, error))?;
+    for entry in fs::read_dir(directory).map_err(|e| io_error("读取未发布后缀", directory, e))?
+    {
+        let entry = entry.map_err(|e| io_error("读取未发布后缀", directory, e))?;
+        let path = entry.path();
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name.starts_with('.') && name.ends_with(".json.tmp") {
-            fs::remove_file(entry.path())
-                .map_err(|error| io_error("清理未发布提交后缀", &entry.path(), error))?;
+        if (name.starts_with('.') && name.ends_with(".tmp"))
+            || (path.extension().is_some_and(|e| e == "parquet")
+                && !path.with_extension("manifest.json").exists())
+        {
+            fs::remove_file(&path).map_err(|e| io_error("清理未发布提交后缀", &path, e))?;
         }
     }
     sync_directory(directory, "同步提交后缀恢复")
@@ -1497,7 +1544,7 @@ mod tests {
     }
 
     #[test]
-    fn memory_normalizes_once_without_hot_identity_encoding_and_publishes_legacy_bytes() {
+    fn memory_normalizes_once_and_parquet_preserves_legacy_payload_and_digest() {
         use crate::identity::{MemoryEconomicFactReferenceV1, MemoryLogicalIdentityV1};
         type Trade = contracts::execution_normalization::SourceNeutralTradeLifecycleResultV1;
         let old = TempDir::new().unwrap();
@@ -1571,17 +1618,115 @@ mod tests {
         .join()
         .unwrap();
         for sequence in 0..2 {
-            let relative = format!("commits/{sequence:020}.json");
-            let old_file =
-                context_directory(old.path(), &context().context_reference).join(&relative);
-            let new_file =
-                context_directory(new.path(), &context().context_reference).join(&relative);
-            assert_eq!(
-                fs::read(old_file).unwrap(),
-                fs::read(new_file).unwrap(),
-                "固定上下文与稳定尝试时间保留旧字节/identity"
-            );
+            let old_file = context_directory(old.path(), &context().context_reference)
+                .join(format!("commits/{sequence:020}.json"));
+            let new_file = context_directory(new.path(), &context().context_reference)
+                .join(format!("commits/{sequence:020}.parquet"));
+            let old: CommitContainer<Trade, SourceNeutralControlResultV1> =
+                read_commit_container(&old_file).unwrap();
+            let new: CommitContainer<Trade, SourceNeutralControlResultV1> =
+                read_commit_container(&new_file).unwrap();
+            assert_eq!(old, new, "原业务记录、边界摘要和身份保持；物理编码改变");
+            assert_eq!(&fs::read(new_file).unwrap()[..4], b"PAR1");
         }
+        let reopened =
+            DurableContextStoreV1::open(new.path(), &context().context_reference).unwrap();
+        assert_eq!(reopened.commits().len(), 2);
+    }
+
+    #[test]
+    fn parquet_empty_batch_and_uncommitted_manifest_never_publish_references() {
+        type Trade = contracts::execution_normalization::SourceNeutralTradeLifecycleResultV1;
+        let root = tempfile::tempdir().unwrap();
+        let mut writer = StagedNormalizationWriter::<Trade, SourceNeutralControlResultV1>::create(
+            root.path(),
+            context(),
+        )
+        .unwrap();
+        let empty = crate::core::NormalizationBatch::<Trade, SourceNeutralControlResultV1> {
+            source_watermark: batch(1).source_watermark,
+            records: vec![],
+        };
+        writer.stage(&empty).unwrap();
+        assert!(
+            published_commit_paths(&writer.context_directory.join(COMMITS_DIRECTORY_NAME))
+                .unwrap()
+                .is_empty()
+        );
+        writer.publish_fault.fail_publish_directory_sync = true;
+        let mut references = 0;
+        assert!(writer.stabilize(|| 3000, |_| references += 1).is_err());
+        assert_eq!(references, 0, "清单目录尚未稳定不得发布引用");
+        drop(writer);
+        let mut restored =
+            DurableContextStoreV1::open(root.path(), &context().context_reference).unwrap();
+        assert!(restored.commits().is_empty(), "未提交 Parquet 不是已耐久批");
+        restored
+            .commit_batch(
+                crate::core::NormalizationBatchInput {
+                    source_watermark: batch(1).source_watermark,
+                    evidence: vec![],
+                },
+                3001,
+            )
+            .unwrap();
+        drop(restored);
+        let restored =
+            DurableContextStoreV1::open(root.path(), &context().context_reference).unwrap();
+        assert_eq!(restored.commits().len(), 1);
+        assert!(restored.commits()[0].records.is_empty());
+        assert_eq!(
+            restored.commits()[0].boundary.durable_available_at_utc_ms,
+            3001
+        );
+        assert!(
+            restored.commits()[0]
+                .container_reference
+                .location
+                .ends_with(".parquet")
+        );
+        let path = restored.commits()[0].container_reference.location.clone();
+        drop(restored);
+        OpenOptions::new()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_len(12)
+            .unwrap();
+        assert!(
+            DurableContextStoreV1::open(root.path(), &context().context_reference).is_err(),
+            "已提交损坏不能恢复为空"
+        );
+    }
+
+    #[test]
+    fn incomplete_parquet_candidate_is_not_a_durable_batch() {
+        type Trade = contracts::execution_normalization::SourceNeutralTradeLifecycleResultV1;
+        let root = tempfile::tempdir().unwrap();
+        let mut writer = StagedNormalizationWriter::<Trade, SourceNeutralControlResultV1>::create(
+            root.path(),
+            context(),
+        )
+        .unwrap();
+        let mut core = crate::core::NormalizationCoreV1::new(context());
+        let batch = core.normalize_and_accept(batch(1)).unwrap();
+        writer.stage(&batch).unwrap();
+        let file = OpenOptions::new()
+            .write(true)
+            .open(writer.stage_path(0))
+            .unwrap();
+        file.set_len(8).unwrap();
+        file.sync_all().unwrap();
+        let mut published = false;
+        assert!(writer.stabilize(|| 3000, |_| published = true).is_err());
+        assert!(!published);
+        drop(writer);
+        assert!(
+            DurableContextStoreV1::open(root.path(), &context().context_reference)
+                .unwrap()
+                .commits()
+                .is_empty()
+        );
     }
 
     #[test]

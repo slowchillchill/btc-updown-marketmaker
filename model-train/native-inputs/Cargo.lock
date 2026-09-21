@@ -1901,7 +1901,10 @@ dependencies = [
 name = "execution-normalization"
 version = "0.1.0"
 dependencies = [
+ "arrow-array",
+ "arrow-schema",
  "contracts",
+ "parquet",
  "rustix",
  "serde",
  "serde_json",

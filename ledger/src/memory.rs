@@ -393,15 +393,10 @@ impl LedgerBackgroundWriterV2 {
         material: &LedgerRecordMaterialV2,
     ) -> Result<bool, LedgerDurableErrorV1> {
         match material.payload.as_ref() {
-            DurablePayloadV1::Genesis { policy } => {
-                self.writer = Some(DurableLedgerV1::create_v2(&self.root, policy)?);
-            }
-            DurablePayloadV1::GenesisV2 { .. } => {
-                self.writer = Some(DurableLedgerV1::create_genesis(
+            DurablePayloadV1::Genesis { .. } | DurablePayloadV1::GenesisV2 { .. } => {
+                self.writer = Some(DurableLedgerV1::create_parquet(
                     &self.root,
                     material.payload.as_ref().clone(),
-                    false,
-                    2,
                 )?);
             }
             DurablePayloadV1::Transaction(effect) => {
@@ -424,6 +419,13 @@ impl LedgerBackgroundWriterV2 {
                 .append_v2(payload)?,
         }
         Ok(true)
+    }
+    /// 原后台交接组结束即写出行组，释放 Arrow 正文；不宣称已稳定。
+    pub fn flush_accepted_batch(&mut self) -> Result<(), LedgerDurableErrorV1> {
+        if let Some(writer) = &mut self.writer {
+            writer.flush_background_batch()?;
+        }
+        Ok(())
     }
     pub fn finish(&mut self) -> Result<(), LedgerDurableErrorV1> {
         if let Some(writer) = &mut self.writer {

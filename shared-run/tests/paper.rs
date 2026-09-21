@@ -521,10 +521,19 @@ async fn one_sided_market_keeps_original_unknown_and_never_invents_cancel() {
     assert_eq!(requests(&config.sim_log).len(), 1);
     let mut unknown = false;
     for context in std::fs::read_dir(&config.noe_root).unwrap() {
-        for entry in std::fs::read_dir(context.unwrap().path().join("commits")).unwrap() {
-            let value: serde_json::Value =
-                serde_json::from_slice(&std::fs::read(entry.unwrap().path()).unwrap()).unwrap();
-            for record in value["payload"]["records"].as_array().unwrap() {
+        let metadata: serde_json::Value = serde_json::from_slice(
+            &std::fs::read(context.unwrap().path().join("context.json")).unwrap(),
+        )
+        .unwrap();
+        let reference =
+            serde_json::from_value(metadata["payload"]["context"]["context_reference"].clone())
+                .unwrap();
+        let store =
+            ::execution_normalization::DurableContextStoreV3::open(&config.noe_root, &reference)
+                .unwrap();
+        for commit in store.commits() {
+            for record in &commit.records {
+                let record = serde_json::to_value(record).unwrap();
                 if record["Evidence"]["evidence"]["Control"]["result"]["Submission"]["outcome"]
                     == "EvidenceUnknownNoEffect"
                 {
@@ -533,6 +542,7 @@ async fn one_sided_market_keeps_original_unknown_and_never_invents_cancel() {
             }
         }
     }
+
     assert!(unknown, "双侧基线未齐时保留原未知反馈，不重试/跳步");
 }
 
