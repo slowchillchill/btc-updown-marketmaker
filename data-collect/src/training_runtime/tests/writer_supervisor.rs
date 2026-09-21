@@ -116,6 +116,48 @@ async fn committed_startup_stop_runs_writers_until_centralized_exact_shutdown() 
 }
 
 #[test]
+fn failed_tail_flush_counts_current_input_only_once() {
+    let tmp = tempdir().unwrap();
+    let received = 1_783_392_400_001;
+    let naming = HourlyPartitionPolicy::new(tmp.path())
+        .unwrap()
+        .partition("binance_aggtrade", received, None)
+        .unwrap();
+    let mut segment = ActiveSegment::new(naming, "binance_aggtrade", 0).unwrap();
+    for id in 1..=10_000 {
+        let row = test_aggtrade_hourly_row(id, received);
+        segment
+            .writer
+            .write_binance_aggtrade_rows_with_logical_bytes(&[row], 1)
+            .unwrap();
+        segment.observe(&test_raw_event("binance_aggtrade", received), 1);
+    }
+    let rows_before_write = segment.writer.row_count();
+    segment.writer.fail_output_with_full_device_for_test();
+    let second = test_aggtrade_hourly_row(10_001, received + 1);
+    let error = segment
+        .writer
+        .write_binance_aggtrade_rows_with_logical_bytes(
+            &[second],
+            PARQUET_ROW_GROUP_MAX_BYTES - 10_000,
+        )
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("No space left on device"),
+        "{error}"
+    );
+    // 仍低于 Arrow 自行封口行数；足够数据穿透其底层缓冲，尾部字节阈值 flush 才失败。
+    assert_eq!(segment.writer.row_count(), 10_001);
+    let stats = SourceQueueBackpressureStats::default();
+    record_unfinalized_segment_drop(&stats, &segment, rows_before_write);
+    record_writer_drop_facts(&stats, &[("binance_aggtrade".to_owned(), received + 1)]);
+    assert_eq!(
+        stats.drain_all_operational()["2026-07-07"]["binance_aggtrade"].dropped_rows,
+        10_001
+    );
+}
+
+#[test]
 fn typed_writer_closes_row_groups_at_exact_row_and_logical_byte_limits() {
     let tmp = tempdir().unwrap();
     let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
@@ -505,8 +547,15 @@ fn aggtrade_segment_receive_bounds_allow_admission_order_time_regression() {
         .unwrap();
     let mut segment = ActiveSegment::new(naming, "binance_aggtrade", 0).unwrap();
 
-    segment.observe(&test_raw_event("binance_aggtrade", later), 1);
-    segment.observe(&test_raw_event("binance_aggtrade", earlier), 1);
+    for (index, at) in [later, earlier].into_iter().enumerate() {
+        let mut event = test_raw_event("binance_aggtrade", at);
+        event.collector_admission = Some(RawEventAdmission {
+            sequence: index as u64 + 1,
+            time_utc_ms: at,
+        });
+        let rows = write_typed_event(&mut segment.writer, &event).unwrap();
+        segment.observe(&event, rows);
+    }
 
     let (_, context) = segment.into_parts();
     assert_eq!(context.segment_start_recv_time_utc_ms, earlier);
@@ -1622,45 +1671,58 @@ async fn missing_writer_is_a_runtime_error() {
 }
 
 #[tokio::test]
-async fn disconnected_writer_channel_is_a_runtime_error() {
-    let (tx, rx) = std::sync::mpsc::sync_channel(1);
-    drop(rx);
-    let (_result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
-    let mut writers = BTreeMap::from([(
-        "binance_aggtrade".to_owned(),
-        SourceWriterHandle {
-            schema_version: TypedParquetSegmentWriter::current_schema_version("binance_aggtrade")
+async fn disconnected_or_timed_out_writer_preserves_drop_facts() {
+    for disconnected in [true, false] {
+        let (tx, rx) = std::sync::mpsc::sync_channel(0);
+        let _receiver = if disconnected {
+            drop(rx);
+            None
+        } else {
+            Some(rx)
+        };
+        let (_result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        let mut writers = BTreeMap::from([(
+            "binance_aggtrade".to_owned(),
+            SourceWriterHandle {
+                schema_version: TypedParquetSegmentWriter::current_schema_version(
+                    "binance_aggtrade",
+                )
                 .unwrap()
                 .to_owned(),
-            tx,
-            accepting_commands: Arc::new(Mutex::new(true)),
-            result_rx,
-            completed_result: None,
-            thread: None,
-        },
-    )]);
-    let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
-    let runtime_stats = SourceQueueBackpressureStats::default();
-    let mut batch = vec![InflightRawEvent::for_test(test_raw_event(
-        "binance_aggtrade",
-        1_783_392_404_599,
-    ))];
+                tx,
+                accepting_commands: Arc::new(Mutex::new(true)),
+                result_rx,
+                completed_result: None,
+                thread: None,
+            },
+        )]);
+        let gaps = Arc::new(Mutex::new(SourceGapStore::default()));
+        let runtime_stats = SourceQueueBackpressureStats::default();
+        let mut batch = vec![InflightRawEvent::for_test(test_raw_event(
+            "binance_aggtrade",
+            1_783_392_404_599,
+        ))];
 
-    let error = flush_source_batch(
-        &mut writers,
-        "binance_aggtrade",
-        &mut batch,
-        &gaps,
-        &runtime_stats,
-    )
-    .await
-    .expect_err("a disconnected writer must stop the runtime");
+        let error = flush_source_batch(
+            &mut writers,
+            "binance_aggtrade",
+            &mut batch,
+            &gaps,
+            &runtime_stats,
+        )
+        .await
+        .expect_err("a disconnected or timed out writer must stop the runtime");
 
-    assert!(error.to_string().contains("writer_queue_disconnected"));
-    assert_eq!(
-        runtime_stats.drain_all_operational()["2026-07-07"]["binance_aggtrade"].dropped_rows,
-        1
-    );
+        assert!(error.to_string().contains(if disconnected {
+            "writer_queue_disconnected"
+        } else {
+            "writer_queue_backpressure_timeout"
+        }));
+        assert_eq!(
+            runtime_stats.drain_all_operational()["2026-07-07"]["binance_aggtrade"].dropped_rows,
+            1
+        );
+    }
 }
 
 #[tokio::test]

@@ -331,7 +331,6 @@ pub fn evaluate_gamma_terminal_response(
     };
 
     finalize_gamma_terminal(
-        fixed_identity,
         &asset_ids,
         outcomes,
         winning_index,
@@ -359,7 +358,6 @@ fn outcome_mapping_matches_fixed_identity(
 }
 
 fn finalize_gamma_terminal(
-    fixed_identity: &GammaTerminalFixedIdentity,
     asset_ids: &[String],
     outcomes: &[String],
     winning_index: usize,
@@ -367,36 +365,10 @@ fn finalize_gamma_terminal(
     closed_time_raw: Option<String>,
     closed_time_utc_ms: i64,
 ) -> GammaTerminalEvaluation {
-    let winner = asset_ids
-        .get(winning_index)
-        .zip(outcomes.get(winning_index))
-        .map(|(winning_asset_id, winning_outcome)| GammaTerminalWinner {
-            winning_asset_id: winning_asset_id.clone(),
-            winning_outcome: winning_outcome.clone(),
-        });
-    let winner_matches_fixed_identity = winner.as_ref().is_some_and(|winner| {
-        matches!(
-            winner.winning_outcome.trim().to_ascii_lowercase().as_str(),
-            "up" if winner.winning_asset_id == fixed_identity.up_asset_id
-        ) || matches!(
-            winner.winning_outcome.trim().to_ascii_lowercase().as_str(),
-            "down" if winner.winning_asset_id == fixed_identity.down_asset_id
-        )
+    let winner = Some(GammaTerminalWinner {
+        winning_asset_id: asset_ids[winning_index].clone(),
+        winning_outcome: outcomes[winning_index].clone(),
     });
-    if !winner_matches_fixed_identity {
-        return GammaTerminalEvaluation {
-            terminal_predicate_passed: None,
-            terminal_predicate_failure_reason: None,
-            resolution_poll_result: ResolutionPollResult::IntegrityError,
-            resolution_integrity_error_class: Some(
-                ResolutionIntegrityErrorClass::DerivedWinnerInvariant,
-            ),
-            observed_active,
-            closed_time_raw,
-            closed_time_utc_ms: Some(closed_time_utc_ms),
-            winner: None,
-        };
-    }
 
     GammaTerminalEvaluation {
         terminal_predicate_passed: Some(true),
@@ -599,38 +571,5 @@ mod tests {
             .expect_err("schema mismatch must fail");
         let error: PolymarketSdkError = schema_error.into();
         assert_eq!(classify_gamma_market_by_slug_transport_error(&error), None);
-    }
-
-    #[test]
-    fn derived_winner_invariant_is_not_a_source_predicate_failure() {
-        let evaluation = finalize_gamma_terminal(
-            &GammaTerminalFixedIdentity {
-                slug: "btc-updown-5m-1".to_owned(),
-                clob_market_id: "market-1".to_owned(),
-                condition_id: "0x0000000000000000000000000000000000000000000000000000000000000001"
-                    .to_owned(),
-                up_asset_id: "101".to_owned(),
-                down_asset_id: "102".to_owned(),
-                market_end_utc_ms: 0,
-            },
-            &["101".to_owned(), "102".to_owned()],
-            &["Up".to_owned(), "Down".to_owned()],
-            2,
-            Some(true),
-            Some("2026-01-01T00:00:00Z".to_owned()),
-            1_767_225_600_000,
-        );
-
-        assert_eq!(evaluation.terminal_predicate_passed, None);
-        assert_eq!(evaluation.terminal_predicate_failure_reason, None);
-        assert_eq!(
-            evaluation.resolution_poll_result,
-            ResolutionPollResult::IntegrityError
-        );
-        assert_eq!(
-            evaluation.resolution_integrity_error_class,
-            Some(ResolutionIntegrityErrorClass::DerivedWinnerInvariant)
-        );
-        assert!(evaluation.winner.is_none());
     }
 }

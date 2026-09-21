@@ -44,10 +44,6 @@ impl FormatValidationReport {
     }
 }
 
-fn raw_json_is_parseable(raw_json: &str) -> bool {
-    serde_json::from_str::<Value>(raw_json).is_ok()
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BinanceDepthLevel {
     pub price: String,
@@ -298,14 +294,14 @@ impl RtdsChainlinkBtcUsdRaw {
         if self.freshness_status != "invalid_timestamp" && self.age_ms.is_none() {
             report.missing_fields.push("age_ms".to_owned());
         }
-        if !raw_json_is_parseable(&self.subscription_raw_json) {
-            report
+        match serde_json::from_str::<Value>(&self.subscription_raw_json) {
+            Err(_) => report
                 .missing_fields
-                .push("subscription_raw_json".to_owned());
-        } else if !rtds_subscription_matches(&self.subscription_raw_json, &self.symbol) {
-            report
+                .push("subscription_raw_json".to_owned()),
+            Ok(value) if !rtds_subscription_matches(&value, &self.symbol) => report
                 .source_gaps
-                .push("rtds_subscription_payload_mismatch".to_owned());
+                .push("rtds_subscription_payload_mismatch".to_owned()),
+            Ok(_) => {}
         }
         if self.ack_or_first_message_evidence.is_none() && self.close_or_error_evidence.is_none() {
             report
@@ -316,10 +312,7 @@ impl RtdsChainlinkBtcUsdRaw {
     }
 }
 
-fn rtds_subscription_matches(raw_json: &str, symbol: &str) -> bool {
-    let Ok(value) = serde_json::from_str::<Value>(raw_json) else {
-        return false;
-    };
+fn rtds_subscription_matches(value: &Value, symbol: &str) -> bool {
     if value.get("action").and_then(Value::as_str) != Some("subscribe") {
         return false;
     }
@@ -327,7 +320,7 @@ fn rtds_subscription_matches(raw_json: &str, symbol: &str) -> bool {
         .get("subscriptions")
         .and_then(Value::as_array)
         .and_then(|items| items.first())
-        .unwrap_or(&value);
+        .unwrap_or(value);
     if subscription.get("topic").and_then(Value::as_str) != Some("crypto_prices_chainlink")
         || subscription.get("type").and_then(Value::as_str) != Some("*")
     {

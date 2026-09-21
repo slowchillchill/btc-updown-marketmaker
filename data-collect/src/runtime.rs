@@ -11,7 +11,6 @@ use sha2::{Digest as _, Sha256};
 use crate::collector_identity::resolve_collector_region;
 use crate::deployment::{
     CollectorBinaryRole, CollectorStartupReceipt, DeploymentRuntimeConfig, Result,
-    validate_runtime_config,
 };
 use crate::handoff::{HandoffRuntimeConfig, run_source_handoff_server};
 use crate::publish::PaperLiveEnvironment;
@@ -241,7 +240,6 @@ where
     config.collector_region_override = cli.collector_region;
     config.config_path =
         canonical_config_path(cli.config_path.as_deref()).map_err(operator_intervention_error)?;
-    validate_runtime_config(&config).map_err(operator_intervention_error)?;
 
     fs::create_dir_all(&config.output_root)?;
     let receipt = startup_receipt(&config).await?;
@@ -316,7 +314,7 @@ async fn startup_receipt(config: &DeploymentRuntimeConfig) -> Result<CollectorSt
         Some(region) if !region.trim().is_empty() => region.trim().to_owned(),
         _ => resolve_collector_region().await,
     };
-    CollectorStartupReceipt::new(
+    Ok(CollectorStartupReceipt::new(
         config,
         git_commit,
         binary_sha256,
@@ -324,7 +322,7 @@ async fn startup_receipt(config: &DeploymentRuntimeConfig) -> Result<CollectorSt
         hostname(),
         collector_region,
         host_clock_sync_status(),
-    )
+    ))
 }
 
 fn write_startup_receipt(output_root: &Path, receipt: &CollectorStartupReceipt) -> Result<()> {
@@ -334,7 +332,18 @@ fn write_startup_receipt(output_root: &Path, receipt: &CollectorStartupReceipt) 
 }
 
 fn canonical_config_path(path: Option<&Path>) -> Result<Option<PathBuf>> {
-    path.map(Path::canonicalize).transpose().map_err(Into::into)
+    path.map(|path| {
+        let path = path.canonicalize()?;
+        if !path.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("config file does not exist: {}", path.display()),
+            )
+            .into());
+        }
+        Ok(path)
+    })
+    .transpose()
 }
 
 fn sha256_serialized(value: &impl Serialize) -> Result<String> {

@@ -78,9 +78,7 @@ impl BinanceAggTradeIngressSequenceAllocator {
                 last.checked_add(1)
             })
             .map_err(|_| BinanceAggTradeIngressSequenceError)?;
-        previous
-            .checked_add(1)
-            .ok_or(BinanceAggTradeIngressSequenceError)
+        Ok(previous + 1)
     }
 }
 

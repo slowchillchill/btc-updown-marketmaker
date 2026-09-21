@@ -97,6 +97,7 @@ fn manifest_for(
     root: &Path,
     segment: &data_collect::writer::PublishedSegment,
     source: &str,
+    version: &str,
     new: bool,
 ) -> PathBuf {
     let day = root.join("2026-07-30/typed_raw/utc_day=2026-07-30");
@@ -121,7 +122,7 @@ fn manifest_for(
         },
         "producer_barriers":crate::REQUIRED_PRODUCER_BARRIERS,
         "writer_finalize_acks":writer_acks,
-        "files":[{"path":relative,"source_kind":source,"schema_version":segment.schema_version,
+        "files":[{"path":relative,"source_kind":source,"schema_version":version,
             "utc_hour":"2026-07-30T00","part":0,"rows":segment.row_count,
             "bytes":fs::metadata(&segment.final_path).unwrap().len(),"sha256":segment.sha256}]
     });
@@ -154,7 +155,13 @@ fn collector_v6_and_legacy_rows_decode_through_the_explicit_versioned_entry() {
         POLYMARKET_MARKET_METADATA_SCHEMA_V6,
         2,
     );
-    let manifest = manifest_for(tmp.path(), &segment, METADATA_SOURCE, true);
+    let manifest = manifest_for(
+        tmp.path(),
+        &segment,
+        METADATA_SOURCE,
+        POLYMARKET_MARKET_METADATA_SCHEMA_V6,
+        true,
+    );
     assert!(crate::validate_daily_manifest_admission_at_root(tmp.path(), &manifest).is_err());
     let admitted =
         crate::validate_daily_manifest_admission_with_public_inputs(tmp.path(), &manifest, true)
@@ -210,7 +217,7 @@ fn public_admission_keeps_six_source_inputs_and_existing_damage_checks() {
         .write_polymarket_market_metadata_v5_rows(&[old_metadata()])
         .unwrap();
     let segment = finalize_with_fact(writer, METADATA_SOURCE, METADATA_V5, 1);
-    let manifest = manifest_for(tmp.path(), &segment, METADATA_SOURCE, false);
+    let manifest = manifest_for(tmp.path(), &segment, METADATA_SOURCE, METADATA_V5, false);
     let old = crate::validate_daily_manifest_admission_at_root(tmp.path(), &manifest).unwrap();
     let new =
         crate::validate_daily_manifest_admission_with_public_inputs(tmp.path(), &manifest, true)
@@ -309,7 +316,7 @@ fn actual_twap_writer_preserves_both_windows_and_full_integer() {
         ParquetInputFacts {
             path: &output.final_path,
             source_kind: TWAP_SOURCE,
-            schema_version: &output.schema_version,
+            schema_version: POLYMARKET_RTDS_CHAINLINK_TWAP_SCHEMA_V1,
             bytes: fs::metadata(&output.final_path).unwrap().len(),
             rows: output.row_count,
             sha256: &output.sha256,
@@ -402,7 +409,13 @@ fn historical_rows_cross_parquet_batches_without_splitting_the_actual_response()
         .write_polymarket_market_metadata_v5_rows(&[original.clone()])
         .unwrap();
     let original_file = finalize_with_fact(original_writer, METADATA_SOURCE, METADATA_V5, 1);
-    let original_manifest = manifest_for(tmp.path(), &original_file, METADATA_SOURCE, false);
+    let original_manifest = manifest_for(
+        tmp.path(),
+        &original_file,
+        METADATA_SOURCE,
+        METADATA_V5,
+        false,
+    );
     let original_manifest_sha = format!(
         "{:x}",
         Sha256::digest(fs::read(&original_manifest).unwrap())
@@ -580,7 +593,7 @@ fn new_source_files_require_the_twap_writer_finalize_ack() {
             version,
             u64::from(source == METADATA_SOURCE),
         );
-        let path = manifest_for(tmp.path(), &segment, source, true);
+        let path = manifest_for(tmp.path(), &segment, source, version, true);
         crate::validate_daily_manifest_admission_with_public_inputs(tmp.path(), &path, true)
             .unwrap();
         let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
@@ -629,7 +642,13 @@ fn a_new_day_without_parquet_still_requires_all_seven_writer_acks() {
         POLYMARKET_MARKET_METADATA_SCHEMA_V6,
         0,
     );
-    let path = manifest_for(tmp.path(), &segment, METADATA_SOURCE, true);
+    let path = manifest_for(
+        tmp.path(),
+        &segment,
+        METADATA_SOURCE,
+        POLYMARKET_MARKET_METADATA_SCHEMA_V6,
+        true,
+    );
     let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
     manifest["files"] = json!([]);
     fs::remove_file(&segment.final_path).unwrap();

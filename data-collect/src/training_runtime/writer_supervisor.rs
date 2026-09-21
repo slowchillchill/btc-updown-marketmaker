@@ -422,20 +422,10 @@ pub(super) async fn flush_source_batch(
         return Ok(());
     }
     let events = std::mem::take(batch);
-    let drop_facts = events
-        .iter()
-        .map(|event| {
-            (
-                event.event.source_kind.clone(),
-                event.event.recv_time_utc_ms,
-            )
-        })
-        .collect::<Vec<_>>();
     send_writer_batch(
         writers,
         source_kind,
         WriterCommand::Events(events),
-        &drop_facts,
         gaps,
         runtime_stats,
     )
@@ -452,83 +442,92 @@ pub(super) async fn flush_polymarket_orderbook_v3_batch(
         return Ok(());
     }
     let events = std::mem::take(batch);
-    let drop_facts = events
-        .iter()
-        .map(|event| {
-            (
-                "polymarket_market".to_owned(),
-                event.message.envelope.timestamp_received,
-            )
-        })
-        .collect::<Vec<_>>();
     send_writer_batch(
         writers,
         "polymarket_market",
         WriterCommand::PolymarketOrderbookV3(events),
-        &drop_facts,
         gaps,
         runtime_stats,
     )
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn send_writer_batch(
     writers: &BTreeMap<String, SourceWriterHandle>,
     source_kind: &str,
     mut command: WriterCommand,
-    drop_facts: &[(String, i64)],
     gaps: &SharedSourceGaps,
     runtime_stats: &SourceQueueBackpressureStats,
 ) -> Result<()> {
     let Some(writer) = writers.get(source_kind) else {
-        record_writer_drop_facts(runtime_stats, drop_facts);
+        record_writer_command_drop(runtime_stats, &command);
         let gap = format!("writer_missing_for_source:{source_kind}");
         record_gap(gaps, gap.clone());
         return Err(io::Error::new(io::ErrorKind::BrokenPipe, gap).into());
     };
-    match try_send_writer_command(writer, command) {
-        Ok(()) => {
-            return Ok(());
-        }
-        Err(std::sync::mpsc::TrySendError::Full(returned)) => {
-            command = returned;
-        }
-        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-            record_writer_drop_facts(runtime_stats, drop_facts);
+    command = match try_send_writer_command(writer, command) {
+        Ok(()) => return Ok(()),
+        Err(std::sync::mpsc::TrySendError::Full(returned)) => returned,
+        Err(std::sync::mpsc::TrySendError::Disconnected(returned)) => {
+            record_writer_command_drop(runtime_stats, &returned);
             let gap = format!("writer_queue_disconnected:{source_kind}");
             record_gap(gaps, gap.clone());
             return Err(io::Error::new(io::ErrorKind::BrokenPipe, gap).into());
         }
-    }
-    match timeout(BUFFER_ACQUIRE_TIMEOUT, async {
-        loop {
-            match try_send_writer_command(writer, command) {
-                Ok(()) => return None,
-                Err(std::sync::mpsc::TrySendError::Full(returned)) => {
-                    command = returned;
-                    sleep(Duration::from_millis(50)).await;
-                }
-                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                    return Some(format!("writer_queue_disconnected:{source_kind}"));
-                }
+    };
+    let deadline = Instant::now() + BUFFER_ACQUIRE_TIMEOUT;
+    loop {
+        match try_send_writer_command(writer, command) {
+            Ok(()) => return Ok(()),
+            Err(std::sync::mpsc::TrySendError::Disconnected(returned)) => {
+                record_writer_command_drop(runtime_stats, &returned);
+                let gap = format!("writer_queue_disconnected:{source_kind}");
+                record_gap(gaps, gap.clone());
+                return Err(io::Error::new(io::ErrorKind::BrokenPipe, gap).into());
             }
+            Err(std::sync::mpsc::TrySendError::Full(returned)) => command = returned,
         }
-    })
-    .await
-    {
-        Ok(Some(gap)) => {
-            record_writer_drop_facts(runtime_stats, drop_facts);
-            record_gap(gaps, gap.clone());
-            Err(io::Error::new(io::ErrorKind::BrokenPipe, gap).into())
-        }
-        Ok(None) => Ok(()),
-        Err(_) => {
-            record_writer_drop_facts(runtime_stats, drop_facts);
+        tokio::time::sleep_until(tokio::time::Instant::from_std(
+            deadline.min(Instant::now() + Duration::from_millis(50)),
+        ))
+        .await;
+        if Instant::now() >= deadline {
+            record_writer_command_drop(runtime_stats, &command);
             let gap = format!("writer_queue_backpressure_timeout:{source_kind}");
             record_gap(gaps, gap.clone());
-            Err(io::Error::new(io::ErrorKind::TimedOut, gap).into())
+            return Err(io::Error::new(io::ErrorKind::TimedOut, gap).into());
         }
+    }
+}
+
+fn record_writer_command_drop(
+    runtime_stats: &SourceQueueBackpressureStats,
+    command: &WriterCommand,
+) {
+    match command {
+        WriterCommand::Events(events) => {
+            runtime_stats.record_drop(events.len() as u64);
+            for event in events {
+                runtime_stats.record_operational_drop(
+                    &event.event.source_kind,
+                    event.event.recv_time_utc_ms,
+                    1,
+                );
+            }
+        }
+        WriterCommand::PolymarketOrderbookV3(events) => {
+            runtime_stats.record_drop(events.len() as u64);
+            for event in events {
+                runtime_stats.record_operational_drop(
+                    "polymarket_market",
+                    event.message.envelope.timestamp_received,
+                    1,
+                );
+            }
+        }
+        WriterCommand::FinalizeHour { .. }
+        | WriterCommand::FinalizeDay { .. }
+        | WriterCommand::Shutdown { .. } => {}
     }
 }
 
@@ -546,7 +545,7 @@ fn try_send_writer_command(
     writer.tx.try_send(command)
 }
 
-fn record_writer_drop_facts(
+pub(super) fn record_writer_drop_facts(
     runtime_stats: &SourceQueueBackpressureStats,
     drop_facts: &[(String, i64)],
 ) {
@@ -1040,6 +1039,7 @@ pub(super) fn source_writer_worker_with_startup(
                     let mut events = events.into_iter();
                     while let Some(inflight_event) = events.next() {
                         let event = &inflight_event.event;
+                        let mut rows_before_write = None;
                         let process_result = (|| -> Result<()> {
                             if let Some(permit) = inflight_event.raw_day_permit.as_ref() {
                                 let event_day = utc_day_string_from_ms(event.recv_time_utc_ms)
@@ -1103,13 +1103,18 @@ pub(super) fn source_writer_worker_with_startup(
                                 )?);
                             }
                             let segment = active.as_mut().expect("active segment exists");
+                            rows_before_write = Some(segment.writer.row_count());
                             let written_rows = write_typed_event(&mut segment.writer, event)?;
                             segment.observe(event, written_rows);
                             Ok(())
                         })();
                         if let Err(error) = process_result {
                             if let Some(segment) = active.as_ref() {
-                                record_unfinalized_segment_drop(&runtime_stats, segment);
+                                record_unfinalized_segment_drop(
+                                    &runtime_stats,
+                                    segment,
+                                    rows_before_write.unwrap_or_else(|| segment.writer.row_count()),
+                                );
                             }
                             record_writer_drop_facts(
                                 &runtime_stats,
@@ -1160,6 +1165,7 @@ pub(super) fn source_writer_worker_with_startup(
                     while let Some(inflight_event) = events.next() {
                         let message = &inflight_event.message;
                         let recv_time_utc_ms = message.envelope.timestamp_received;
+                        let mut rows_before_write = None;
                         let process_result = (|| -> Result<()> {
                             let event_day =
                                 utc_day_string_from_ms(recv_time_utc_ms).ok_or_else(|| {
@@ -1228,13 +1234,7 @@ pub(super) fn source_writer_worker_with_startup(
                                 )?);
                             }
                             let segment = active.as_mut().expect("active segment exists");
-                            if segment.writer.schema_version() != writer_schema_version {
-                                return Err(invalid_data(format!(
-                                    "active segment schema drift:source={source_kind}:expected={writer_schema_version}:actual={}",
-                                    segment.writer.schema_version()
-                                ))
-                                .into());
-                            }
+                            rows_before_write = Some(segment.writer.row_count());
                             segment.writer.write_polymarket_orderbook_v3_messages(
                                 std::slice::from_ref(message),
                                 sequence_state,
@@ -1245,7 +1245,11 @@ pub(super) fn source_writer_worker_with_startup(
                         })();
                         if let Err(error) = process_result {
                             if let Some(segment) = active.as_ref() {
-                                record_unfinalized_segment_drop(&runtime_stats, segment);
+                                record_unfinalized_segment_drop(
+                                    &runtime_stats,
+                                    segment,
+                                    rows_before_write.unwrap_or_else(|| segment.writer.row_count()),
+                                );
                             }
                             record_writer_drop_facts(
                                 &runtime_stats,
@@ -1278,7 +1282,11 @@ pub(super) fn source_writer_worker_with_startup(
                             "writer hour barrier skipped UTC hour: source={source_kind} active={} barrier={utc_hour}",
                             segment.utc_hour
                         ));
-                        record_unfinalized_segment_drop(&runtime_stats, segment);
+                        record_unfinalized_segment_drop(
+                            &runtime_stats,
+                            segment,
+                            segment.writer.row_count(),
+                        );
                         stop_accepting_and_record_queued_drops(
                             &accepting_commands,
                             &rx,
@@ -1323,7 +1331,11 @@ pub(super) fn source_writer_worker_with_startup(
                             "writer finalize identity mismatch: source={source_kind} expected={expected:?} close={close:?}"
                         ));
                         if let Some(segment) = active.as_ref() {
-                            record_unfinalized_segment_drop(&runtime_stats, segment);
+                            record_unfinalized_segment_drop(
+                                &runtime_stats,
+                                segment,
+                                segment.writer.row_count(),
+                            );
                         }
                         stop_accepting_and_record_queued_drops(
                             &accepting_commands,
@@ -1347,6 +1359,7 @@ pub(super) fn source_writer_worker_with_startup(
                             record_unfinalized_segment_drop(
                                 &runtime_stats,
                                 active.as_ref().expect("active segment exists"),
+                                active.as_ref().unwrap().writer.row_count(),
                             );
                             stop_accepting_and_record_queued_drops(
                                 &accepting_commands,
@@ -1420,7 +1433,11 @@ pub(super) fn source_writer_worker_with_startup(
                             "writer shutdown identity mismatch: source={source_kind} expected={expected:?} close={close:?}"
                         ));
                         if let Some(segment) = active.as_ref() {
-                            record_unfinalized_segment_drop(&runtime_stats, segment);
+                            record_unfinalized_segment_drop(
+                                &runtime_stats,
+                                segment,
+                                segment.writer.row_count(),
+                            );
                         }
                         stop_accepting_and_record_queued_drops(
                             &accepting_commands,
@@ -1441,6 +1458,7 @@ pub(super) fn source_writer_worker_with_startup(
                         record_unfinalized_segment_drop(
                             &runtime_stats,
                             active.as_ref().expect("active segment exists"),
+                            active.as_ref().unwrap().writer.row_count(),
                         );
                         stop_accepting_and_record_queued_drops(
                             &accepting_commands,
@@ -1499,7 +1517,7 @@ fn finalize_segment_with_drop_accounting(
     let final_path = segment.writer.final_path().to_path_buf();
     let source_kind = segment.source_kind.clone();
     let recv_time_utc_ms = segment.segment_start_recv_time_utc_ms;
-    let rows = segment.rows;
+    let rows = segment.writer.row_count();
     match finalize_segment(segment, rollover_reason, provenance, manifest_tx) {
         Ok(finalized) => Ok(finalized),
         Err(error) => {
@@ -1512,18 +1530,19 @@ fn finalize_segment_with_drop_accounting(
     }
 }
 
-fn record_unfinalized_segment_drop(
+pub(super) fn record_unfinalized_segment_drop(
     runtime_stats: &SourceQueueBackpressureStats,
     segment: &ActiveSegment,
+    rows: u64,
 ) {
-    if segment.rows == 0 || segment.writer.final_path().exists() {
+    if rows == 0 || segment.writer.final_path().exists() {
         return;
     }
-    runtime_stats.record_drop(segment.rows);
+    runtime_stats.record_drop(rows);
     runtime_stats.record_operational_drop(
         &segment.source_kind,
         segment.segment_start_recv_time_utc_ms,
-        segment.rows,
+        rows,
     );
 }
 
@@ -1596,18 +1615,6 @@ pub(super) fn finalize_segment(
         serde_json::to_string(&recovery_metadata)?,
     )?;
     let published = writer.finalize()?;
-    if published.row_count != recovery_metadata.rows
-        || published.schema_version != recovery_metadata.schema_version
-    {
-        return Err(invalid_data(format!(
-            "finalized Parquet recovery metadata mismatch: source={source_kind} rows={} metadata_rows={} schema={} metadata_schema={}",
-            published.row_count,
-            recovery_metadata.rows,
-            published.schema_version,
-            recovery_metadata.schema_version,
-        ))
-        .into());
-    }
     let bytes = fs::metadata(&published.final_path)?.len();
     let delta = DailyFinalizedFileDelta {
         utc_day: manifest_context.utc_day,
@@ -1699,7 +1706,7 @@ impl ActiveSegment {
             last_recv_time_utc_ms: self.last_recv_time_utc_ms,
             source_ts_start: self.source_ts_start,
             source_ts_end: self.source_ts_end,
-            rows: self.rows,
+            rows: self.writer.row_count(),
             event_type_counts: self.event_type_counts,
             backfill_rows: self.backfill_rows,
             book_rows_with_bids_asks: self.book_rows_with_bids_asks,
@@ -1866,7 +1873,6 @@ pub(super) struct ActiveSegment {
     last_recv_time_utc_ms: i64,
     source_ts_start: Option<String>,
     source_ts_end: Option<String>,
-    rows: u64,
     event_type_counts: BTreeMap<String, u64>,
     backfill_rows: u64,
     book_rows_with_bids_asks: u64,
@@ -1904,7 +1910,6 @@ impl ActiveSegment {
             last_recv_time_utc_ms: 0,
             source_ts_start: None,
             source_ts_end: None,
-            rows: 0,
             event_type_counts: BTreeMap::new(),
             backfill_rows: 0,
             book_rows_with_bids_asks: 0,
@@ -1925,7 +1930,7 @@ impl ActiveSegment {
     }
 
     pub(super) fn observe(&mut self, event: &RawEvent, typed_rows: u64) {
-        if self.rows == 0 {
+        if self.writer.row_count() == typed_rows {
             self.segment_start_recv_time_utc_ms = event.recv_time_utc_ms;
             self.last_recv_time_utc_ms = event.recv_time_utc_ms;
         } else {
@@ -1940,7 +1945,6 @@ impl ActiveSegment {
             }
             self.source_ts_end = Some(source_ts);
         }
-        self.rows = self.rows.saturating_add(typed_rows);
         *self
             .event_type_counts
             .entry(event.source_event_type.clone())
@@ -2072,7 +2076,7 @@ impl ActiveSegment {
         typed_rows: u64,
     ) {
         let recv_time_utc_ms = message.envelope.timestamp_received;
-        if self.rows == 0 {
+        if self.writer.row_count() == typed_rows {
             self.segment_start_recv_time_utc_ms = recv_time_utc_ms;
             self.last_recv_time_utc_ms = recv_time_utc_ms;
         } else {
@@ -2086,7 +2090,6 @@ impl ActiveSegment {
             }
             self.source_ts_end = Some(source_ts);
         }
-        self.rows = self.rows.saturating_add(typed_rows);
         *self
             .event_type_counts
             .entry(message.event_type().to_owned())

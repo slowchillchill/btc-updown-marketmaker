@@ -1312,10 +1312,6 @@ fn five_v5_row_kinds_round_trip_without_the_resolution_digest_alias() {
 
     let published = writer.finalize().unwrap();
     assert_eq!(published.row_count, 5);
-    assert_eq!(
-        published.schema_version,
-        POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION
-    );
 
     let mut reader =
         ParquetRecordBatchReaderBuilder::try_new(File::open(&published.final_path).unwrap())
