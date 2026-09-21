@@ -632,3 +632,54 @@ fn polymarket_business_assets_must_match_their_message_condition() {
         .unwrap(),
     );
 }
+
+#[test]
+fn metadata_public_and_routed_entries_keep_error_precedence() {
+    let discovery = test_btc_discovery();
+    let row = polymarket_metadata_snapshot_row(
+        &discovery.current,
+        MarketRuntimeRole::Current,
+        &CollectorIdentity {
+            host_id: "collector-test".into(),
+            region: "local-test".into(),
+        },
+    )
+    .unwrap();
+    let mut event =
+        polymarket_metadata_raw_event(PolymarketMarketMetadataV5Row::from_common(row, None, None))
+            .unwrap();
+    event.raw_json = "{".into();
+    for error in [
+        polymarket_metadata_rows_from_event(&event).unwrap_err(),
+        polymarket_metadata_v6_rows_from_event(&event).unwrap_err(),
+    ] {
+        assert!(error.to_string().contains("missing collector admission"));
+    }
+    assert!(
+        !polymarket_metadata_v6_rows_for_event(&event)
+            .unwrap_err()
+            .to_string()
+            .contains("missing collector admission")
+    );
+    for version in [
+        "polymarket_market_metadata_v5",
+        "polymarket_market_metadata_v6",
+    ] {
+        event.raw_json = serde_json::json!({"schema_version":version}).to_string();
+        assert!(
+            polymarket_metadata_v6_rows_for_event(&event)
+                .unwrap_err()
+                .to_string()
+                .contains("missing collector admission")
+        );
+        event.collector_admission = Some(RawEventAdmission {
+            sequence: 1,
+            time_utc_ms: 1,
+        });
+        assert!(
+            polymarket_metadata_v6_rows_for_event(&event).is_err(),
+            "缺失必需字段不能因复用而接受"
+        );
+        event.collector_admission = None;
+    }
+}

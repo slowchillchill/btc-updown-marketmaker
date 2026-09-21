@@ -492,8 +492,9 @@ impl LedgerWriterV1 {
 
     pub fn open_durable(directory: impl AsRef<Path>) -> Result<Self, LedgerErrorV1> {
         let mut recovered = None;
+        let mut positions = execution_normalization::NoeRecoveryPositionReader::default();
         let durable = DurableLedgerV1::open(directory.as_ref(), |payload| {
-            Self::apply_recovery_payload(&mut recovered, payload)
+            Self::apply_recovery_payload(&mut recovered, payload, &mut positions)
         })?;
         Self::finish_recovery(recovered, durable)
     }
@@ -503,8 +504,9 @@ impl LedgerWriterV1 {
         directory: impl AsRef<Path>,
     ) -> Result<(Self, RecoveryDurationsV1), LedgerErrorV1> {
         let mut recovered = None;
+        let mut positions = execution_normalization::NoeRecoveryPositionReader::default();
         let (durable, durations) = DurableLedgerV1::open_measured(directory.as_ref(), |payload| {
-            Self::apply_recovery_payload(&mut recovered, payload)
+            Self::apply_recovery_payload(&mut recovered, payload, &mut positions)
         })?;
         Ok((Self::finish_recovery(recovered, durable)?, durations))
     }
@@ -512,6 +514,7 @@ impl LedgerWriterV1 {
     fn apply_recovery_payload(
         recovered: &mut Option<Self>,
         payload: DurablePayloadV1,
+        positions: &mut execution_normalization::NoeRecoveryPositionReader,
     ) -> Result<(), LedgerDurableErrorV1> {
         match payload {
             DurablePayloadV1::Genesis { policy } => {
@@ -539,7 +542,7 @@ impl LedgerWriterV1 {
                         "Ledger 耐久历史在 genesis 前包含业务记录".to_owned(),
                     )
                 })?
-                .apply_recovered_payload(payload),
+                .apply_recovered_payload(payload, positions),
         }
     }
 
@@ -1774,6 +1777,7 @@ impl LedgerWriterV1 {
     fn apply_recovered_payload(
         &mut self,
         payload: DurablePayloadV1,
+        positions: &mut execution_normalization::NoeRecoveryPositionReader,
     ) -> Result<(), LedgerDurableErrorV1> {
         match payload {
             DurablePayloadV1::Genesis { .. } | DurablePayloadV1::GenesisV2 { .. } => {
@@ -1802,9 +1806,9 @@ impl LedgerWriterV1 {
                     )));
                 }
                 if let LedgerTransactionSourceV1::NoeConsumed(source) = &effect.transaction.source {
-                    let position =
-                        execution_normalization::read_durable_noe_record_position(source.result())
-                            .map_err(|e| LedgerDurableErrorV1::InvalidStructure(e.to_string()))?;
+                    let position = positions
+                        .read(source.result())
+                        .map_err(|e| LedgerDurableErrorV1::InvalidStructure(e.to_string()))?;
                     self.applied_memory
                         .insert(position, effect.ledger_entry_seq());
                 }

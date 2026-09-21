@@ -889,7 +889,13 @@ pub(super) fn polymarket_metadata_rows_from_event(
     let admission = event.collector_admission.as_ref().ok_or_else(|| {
         invalid_data("Polymarket metadata v5 event is missing collector admission")
     })?;
-    let mut raw = serde_json::from_str::<Value>(&event.raw_json)?;
+    polymarket_metadata_v5_rows_from_value(serde_json::from_str(&event.raw_json)?, admission)
+}
+
+fn polymarket_metadata_v5_rows_from_value(
+    mut raw: Value,
+    admission: &RawEventAdmission,
+) -> Result<Vec<PolymarketMarketMetadataV5Row>> {
     let object = raw
         .as_object_mut()
         .ok_or_else(|| invalid_data("Polymarket metadata v5 event is not a JSON object"))?;
@@ -947,9 +953,15 @@ pub(super) fn polymarket_metadata_v6_rows_for_event(
 ) -> Result<Vec<PolymarketMarketMetadataV6Row>> {
     let value: Value = serde_json::from_str(&event.raw_json)?;
     let rows = if value["schema_version"] == POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION {
-        polymarket_metadata_v6_rows_from_event(event)?
+        let admission = event.collector_admission.as_ref().ok_or_else(|| {
+            invalid_data("Polymarket metadata v6 event is missing collector admission")
+        })?;
+        polymarket_metadata_v6_rows_from_value(value, admission)?
     } else {
-        polymarket_metadata_rows_from_event(event)?
+        let admission = event.collector_admission.as_ref().ok_or_else(|| {
+            invalid_data("Polymarket metadata v5 event is missing collector admission")
+        })?;
+        polymarket_metadata_v5_rows_from_value(value, admission)?
             .into_iter()
             .map(PolymarketMarketMetadataV6Row::Existing)
             .collect()
@@ -1000,8 +1012,15 @@ pub(super) fn polymarket_metadata_v6_rows_from_event(
     let admission = event.collector_admission.as_ref().ok_or_else(|| {
         invalid_data("Polymarket metadata v6 event is missing collector admission")
     })?;
+    polymarket_metadata_v6_rows_from_value(serde_json::from_str(&event.raw_json)?, admission)
+}
+
+fn polymarket_metadata_v6_rows_from_value(
+    value: Value,
+    admission: &RawEventAdmission,
+) -> Result<Vec<PolymarketMarketMetadataV6Row>> {
     let row = PolymarketMarketMetadataV6Row::from_raw_value(
-        serde_json::from_str(&event.raw_json)?,
+        value,
         admission.sequence,
         admission.time_utc_ms,
     )

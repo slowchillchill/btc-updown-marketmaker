@@ -26,6 +26,10 @@ pub trait PmEvidenceV1:
     fn received_time(&self) -> i64;
     fn semantic_bytes(&self) -> Result<Vec<u8>, ContractError>;
     fn canonicalize(values: Vec<Self>) -> Result<Vec<Self>, ContractError>;
+    fn prepared_keys(&self) -> Result<(Vec<u8>, Vec<u8>), ContractError> {
+        Self::canonicalize(vec![self.clone()])?;
+        Ok((self.semantic_bytes()?, stable_json(self)?))
+    }
     fn source_digest(&self, domain: &[u8]) -> Result<Sha256Hex, ContractError> {
         Ok(hash_domain_bytes(domain, &self.semantic_bytes()?))
     }
@@ -84,6 +88,11 @@ impl PmEvidenceV1 for SourceEvidenceRefV3 {
     }
     fn semantic_bytes(&self) -> Result<Vec<u8>, ContractError> {
         stable_json(self)
+    }
+    fn prepared_keys(&self) -> Result<(Vec<u8>, Vec<u8>), ContractError> {
+        // V3 单项规范化仅编码；语义键与物理键是同一规范字节。
+        let bytes = stable_json(self)?;
+        Ok((bytes.clone(), bytes))
     }
     fn canonicalize(values: Vec<Self>) -> Result<Vec<Self>, ContractError> {
         let mut keyed = values
@@ -1865,10 +1874,8 @@ impl<E: PmEvidenceV1> PreparedPmEvidenceV1<E> {
         value: E,
         payload: Option<&CanonicalPmPayloadV1>,
     ) -> Result<Self, ContractError> {
-        // 沿旧入口的单项证据检查；组合的规范化直接使用原键。
-        E::canonicalize(vec![value.clone()])?;
-        let semantic_key = value.semantic_bytes()?;
-        let physical_key = stable_json(&value)?;
+        // V2 保留自身校验与不同的语义／物理键；V3 只编码一次。
+        let (semantic_key, physical_key) = value.prepared_keys()?;
         let operation_keys = [
             ReductionEvidenceRoleV1::Context,
             ReductionEvidenceRoleV1::Input,
@@ -1879,7 +1886,7 @@ impl<E: PmEvidenceV1> PreparedPmEvidenceV1<E> {
         .map(|role| {
             stable_json(&crate::reduction::ReductionOperationEvidenceV1 {
                 role,
-                source_evidence: value.clone(),
+                source_evidence: &value,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -2164,6 +2171,53 @@ pub fn materialize_pm_step_identity_v1<'m>(
 #[cfg(test)]
 mod no_encoding_tests {
     use super::*;
+    #[test]
+    fn preparation_keeps_v2_semantics_and_v3_canonical_operation_bytes() {
+        let old = SourceEvidenceRefV2 {
+            source_kind: CanonicalSourceKind::PolymarketMarketMetadata,
+            source_native_identity: Some(SourceNativeIdentityV1::SemanticEvidenceSha256 {
+                sha256: Sha256Hex("a".repeat(64)),
+            }),
+            source_event_at_utc_ms: None,
+            received_at_utc_ms: 800,
+            collector_admission: None,
+            input_manifest_sha256: Sha256Hex("b".repeat(64)),
+            input_file_sha256: Sha256Hex("c".repeat(64)),
+        };
+        let prepared = PreparedPmEvidenceV1::prepare(old.clone(), None).unwrap();
+        assert_ne!(
+            prepared.physical_key,
+            prepared.source_identity.evidence_semantic_key
+        );
+        assert_eq!(
+            prepared.source_identity.evidence_semantic_key,
+            old.semantic_bytes().unwrap()
+        );
+        let mut invalid = old.clone();
+        invalid.input_file_sha256 = Sha256Hex("invalid".into());
+        assert!(PreparedPmEvidenceV1::prepare(invalid, None).is_err());
+        let value = crate::public_reference::source_evidence_v3_from_existing(&old).unwrap();
+        let prepared = PreparedPmEvidenceV1::prepare(value.clone(), None).unwrap();
+        assert_eq!(prepared.physical_key, stable_json(&value).unwrap());
+        assert_eq!(
+            prepared.physical_key,
+            prepared.source_identity.evidence_semantic_key
+        );
+        for role in [
+            ReductionEvidenceRoleV1::Context,
+            ReductionEvidenceRoleV1::Input,
+            ReductionEvidenceRoleV1::MatchedExisting,
+            ReductionEvidenceRoleV1::IncomingDuplicate,
+        ] {
+            let expected = stable_json(&crate::reduction::ReductionOperationEvidenceV1 {
+                role,
+                source_evidence: value.clone(),
+            })
+            .unwrap();
+            assert_eq!(prepared.operation_key(role), expected);
+        }
+    }
+
     type E = PreparedPmEvidenceV1<SourceEvidenceRefV3>;
     struct InitialState {
         market: MarketIdentityV2,

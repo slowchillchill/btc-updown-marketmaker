@@ -173,12 +173,20 @@ impl PublicRecordingWriterV1 {
             });
             for (report_ordinal, report) in material.reduction.reports.into_iter().enumerate() {
                 // 原 Prepared 证据的序列化恰为实际 V3 证据；准备缓存不进入持久报告。
-                let report = serde_json::from_value(serde_json::to_value(report)?)?;
-                self.write(PublicStoredRowV1::PmReport {
+                #[derive(Serialize)]
+                enum Row<'a> {
+                    PmReport {
+                        input_position: u64,
+                        canonical_position: u64,
+                        report_ordinal: u32,
+                        report: &'a PmReductionReportV2<PreparedPmEvidenceV1<SourceEvidenceRefV3>>,
+                    },
+                }
+                self.write(Row::PmReport {
                     input_position,
                     canonical_position,
                     report_ordinal: report_ordinal as u32,
-                    report,
+                    report: &report,
                 })?;
             }
         }

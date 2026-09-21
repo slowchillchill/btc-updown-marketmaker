@@ -149,7 +149,6 @@ impl NativeInputRoot {
         driver: &mut PublicConsumptionStateV1,
     ) -> Result<Option<NativeInputGroup>, crate::InputError> {
         // 由原共享组合完成唯一应用；随后重取真实 decision 和公共帧。
-        shared.apply_closed()?;
         let before = shared.action_before(driver)?;
         let Some(decision) = driver.decision() else {
             return Ok(None);
@@ -186,10 +185,16 @@ impl NativeInputRoot {
             })
             .map(|m| m.market.condition_id.clone());
         // 完整账户投影包括仅本地预留的市场；经济成交表不是市场人口权威。
-        let ledger = shared
-            .ledger()
-            .projection_v2()
-            .ok_or(crate::InputError::MissingAssociation)?;
+        let without_frame;
+        let ledger = if let Some(read) = &before {
+            read.ledger()
+        } else {
+            without_frame = shared
+                .ledger()
+                .projection_v2()
+                .ok_or(crate::InputError::MissingAssociation)?;
+            &without_frame
+        };
         let old: Vec<_> = ledger
             .market_projections
             .iter()

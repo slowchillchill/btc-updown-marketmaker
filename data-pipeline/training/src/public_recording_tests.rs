@@ -1491,3 +1491,89 @@ fn finite_prepare_current_and_late_reference_match_record_and_paged_replay() {
         }
     }
 }
+
+#[test]
+fn stored_pm_reports_keep_original_schema_bytes_and_positions_for_all_dispositions() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("reports");
+    let mut core = core();
+    let mut writer = PublicRecordingWriterV1::create(&root, core.header(), config()).unwrap();
+    let inputs = vec![
+        meta(0),
+        pm(
+            1,
+            1,
+            21_000,
+            PolymarketOrderbookEvent::PriceChange {
+                price_changes: vec![change(Some("80"))],
+            },
+        ),
+        pm(2, 2, 21_001, book("100")),
+        pm(3, 3, 21_002, book("100")),
+        end(4),
+    ];
+    let mut next_canonical = 0_u64;
+    let mut expected = Vec::new();
+    let mut dispositions = std::collections::BTreeSet::new();
+    for input in inputs {
+        let result = apply(&mut core, &input);
+        let positions: BTreeMap<_, _> = result
+            .applied
+            .closed_groups
+            .iter()
+            .flat_map(|g| &g.records)
+            .enumerate()
+            .map(|(i, f)| (f.position.clone(), next_canonical + i as u64))
+            .collect();
+        next_canonical += positions.len() as u64;
+        for (position, reduction) in &result.pm_reductions {
+            let material = materialize_pm_step_identity_v1(reduction.clone()).unwrap();
+            for (ordinal, report) in material.reduction.reports.into_iter().enumerate() {
+                // 使用原持久DTO作为独立格式预期，包含原Prepared证据的透明序列化。
+                let report: PmReductionReportV2<SourceEvidenceRefV3> =
+                    serde_json::from_value(serde_json::to_value(report).unwrap()).unwrap();
+                dispositions.insert(match report.disposition {
+                    PmReductionDispositionV2::Produced { .. } => 0,
+                    PmReductionDispositionV2::NoOutput { .. } => 1,
+                    PmReductionDispositionV2::Suppressed { .. } => 2,
+                });
+                expected.push(
+                    serde_json::to_vec(&PublicStoredRowV1::PmReport {
+                        input_position: input.input_position,
+                        canonical_position: positions[position],
+                        report_ordinal: ordinal as u32,
+                        report,
+                    })
+                    .unwrap(),
+                );
+            }
+        }
+        writer.record(input, result).unwrap();
+    }
+    let prefix = writer.stabilize().unwrap().unwrap();
+    assert_eq!(dispositions, [0, 1, 2].into_iter().collect());
+    let decoded: Vec<_> = all_rows(&root, 1)
+        .into_iter()
+        .filter(|r| matches!(r, PublicStoredRowV1::PmReport { .. }))
+        .map(|r| serde_json::to_vec(&r).unwrap())
+        .collect();
+    assert_eq!(decoded, expected);
+    let mut cursor = RunCursor::open(
+        &root
+            .join(prefix.stable_storage_ref)
+            .join("captured.parquet"),
+        1,
+        1 << 20,
+    )
+    .unwrap();
+    let mut bytes = Vec::new();
+    while let Some(row) = cursor.next_row().unwrap() {
+        if matches!(
+            serde_json::from_slice::<PublicStoredRowV1>(row.payload()).unwrap(),
+            PublicStoredRowV1::PmReport { .. }
+        ) {
+            bytes.push(row.payload().to_vec());
+        }
+    }
+    assert_eq!(bytes, expected, "底层正文逐字节保持原格式");
+}
