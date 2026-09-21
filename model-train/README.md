@@ -92,9 +92,16 @@ OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 .venv/bin/python -m model_train.validate_gra
 两端直接导出标准opset18基础算子，不再另行改写导出图，也不强制转换dtype；原双精度独立数学和梯度检查仍适用。
 没有依对象身份、相等输入或分差选择计算路径。历史严格选择反例及局部负结果均保留，
 当前表达已从原初始化通过 MAIN1 原前史至 `C1-1-1-0/176061000` 的三端比较和真实意图执行；
-四配置、1/4线程的固定两图与三端检查、真实 P3—P7 均通过。各完整 C 组结果和仍在途的观察见
-[PR #125](https://github.com/slowchillchill/btc-updown-marketmaker/pull/125)，整体结论以完整 C 和资源记录为准，
-固定夹具或有界窗口不替代完整验收。计算对齐依据见[#6实施记录](https://github.com/slowchillchill/btc-updown-marketmaker/issues/6#issuecomment-5748954118)。
+四配置、1/4线程的固定两图与三端检查、真实 P3—P7 及全部8组完整 C 均通过。
+各 C 组完成18轮、121113个正式观察帧和80730次实际决定（含NoTrade），另有128帧独立预热；
+全部结束记录的三端hidden、native z与观察根清零。MAIN30两组最大绝对误差均为 `9.5367431640625e-6`，
+原逐元素数值门与完整决定严格一致门均通过。结果及证据入口见
+[PR #125](https://github.com/slowchillchill/btc-updown-marketmaker/pull/125)。
+最终汇总为 `native-inputs-v3/aligned-affine/final-observation/final-c-resources.json`，保留原启动源码、图和二进制绑定，
+不将后续修复或文档提交重标为新性能实测。MAIN30三端验证进程结束RSS约4464—4469MiB，
+allocator已用块在C2 Orphan首轮有约4MiB台阶，同c／scene三次重复未呈持续增长；
+这不是生产单端内存或任意长期无泄漏的证明。PR继续保持Draft，整体独立审查与目标CPU验证尚未闭合，
+本地结果不替代目标容量，也不豁免当前第二PR或阶段验收门。计算对齐依据见[#6实施记录](https://github.com/slowchillchill/btc-updown-marketmaker/issues/6#issuecomment-5748954118)。
 导出使用 `dynamo=True`、opset18、float32、`optimize/verify/report=True` 及外部参数文件。
 正式对比使用两端独立递推，显式 CPU、顺序执行、ORT全优化、interop1、关空转和memory pattern、保留arena。
 动态B覆盖1/2/3，图K覆盖1/2/128/129/255/256；宿主分块包含补齐、尾块及混合空行。
