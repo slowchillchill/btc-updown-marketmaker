@@ -4014,10 +4014,10 @@ fn register_new_request_v2(
             }
         }
         BusinessRequestV2::PostOrders(request) => {
-            if request.items.is_empty() || request.items.len() > 15 {
+            if request.items.is_empty() {
                 return Err((
                     state,
-                    SimRunActorErrorV2::InvalidBusinessRequest("批量提交项数必须为 1 至 15"),
+                    SimRunActorErrorV2::InvalidBusinessRequest("批量提交不能为空"),
                 ));
             }
             let mut ordinals = BTreeSet::new();
@@ -4061,10 +4061,10 @@ fn register_new_request_v2(
             }
         }
         BusinessRequestV2::CancelOrders(request) => {
-            if request.items.is_empty() || request.items.len() > 1_000 {
+            if request.items.is_empty() {
                 return Err((
                     state,
-                    SimRunActorErrorV2::InvalidBusinessRequest("批量撤单项数必须为 1 至 1000"),
+                    SimRunActorErrorV2::InvalidBusinessRequest("批量撤单不能为空"),
                 ));
             }
             let mut ordinals = BTreeSet::new();
@@ -4470,7 +4470,7 @@ fn register_new_request_v2(
             .insert(token_id);
     }
     let scheduled_action_count =
-        u64::try_from(pending.len()).expect("V2 提交批量上限保证动作数量可表示为 u64");
+        u64::try_from(pending.len()).expect("V2 唯一 u16 ordinal 保证动作数量可表示为 u64");
     for (key, action) in pending {
         assert!(
             session
@@ -11520,6 +11520,133 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn large_batches_register_all_items_and_preserve_cancel_input_refs() {
+        let (_directory, mut actor) =
+            active_market_actor(SimCallerRoleV1::ModelTrain, "run-large-batches").await;
+        let condition_id = decoded_initial_market_events("10")[0]
+            .market
+            .condition_id
+            .clone();
+        let post = BusinessRequestV2::PostOrders(PostOrdersRequestV2 {
+            context: RequestContextV2 {
+                global_request_id: "large-post".to_owned(),
+                caller_correlation_id: None,
+            },
+            items: (0..16_u16)
+                .map(|ordinal| PostOrderBatchItemV2 {
+                    batch_item_ordinal: ordinal,
+                    item: post_item(
+                        &format!("post-{ordinal}"),
+                        &condition_id,
+                        &TokenId("1".to_owned()),
+                        SimBuyOrderKindV1::GtcLimit {
+                            limit_price_pusd_per_share: "0.3".parse().unwrap(),
+                            size_shares: "5".parse().unwrap(),
+                            post_only: false,
+                        },
+                    ),
+                })
+                .collect(),
+        });
+        let state = actor.state.take().unwrap();
+        let (state, receipt) = register_request_candidate(
+            &actor.opened,
+            actor.scenario.initial_market_directory(),
+            state,
+            &request_cutoff(1_200),
+            &post,
+            11,
+            actor._latency_profile.as_ref(),
+            actor._rule_snapshot.snapshot(),
+        );
+        assert_eq!(receipt.scheduled_action_count, 16);
+        let actions = &state
+            .session
+            .as_ref()
+            .unwrap()
+            .mutation_requests
+            .pending_actions;
+        assert_eq!(actions.len(), 16);
+        let cancel = BusinessRequestV2::CancelOrders(CancelOrdersRequestV2 {
+            context: RequestContextV2 {
+                global_request_id: "large-cancel".to_owned(),
+                caller_correlation_id: None,
+            },
+            items: (0..1001_u16)
+                .map(|ordinal| CancelOrderBatchItemV2 {
+                    batch_item_ordinal: ordinal,
+                    item: CancelOrderItemV1 {
+                        item_id: format!("cancel-{ordinal}"),
+                        platform_order_id: "sim-1".to_owned(),
+                    },
+                })
+                .collect(),
+        });
+        let (mut state, receipt) = register_request_candidate(
+            &actor.opened,
+            actor.scenario.initial_market_directory(),
+            state,
+            &request_cutoff(1_200),
+            &cancel,
+            12,
+            actor._latency_profile.as_ref(),
+            actor._rule_snapshot.snapshot(),
+        );
+        assert_eq!(receipt.scheduled_action_count, 1);
+        // 只执行 16 个提交动作和一个聚合后的撤单动作。
+        let mut completed = None;
+        let mut posted = false;
+        for _ in 0..17 {
+            let at = state
+                .session
+                .as_ref()
+                .unwrap()
+                .mutation_requests
+                .pending_actions
+                .first_key_value()
+                .unwrap()
+                .0
+                .effective_processing_at_utc_ms;
+            let (next, transition) = advance_mutation_candidate_with_outputs(
+                &actor.opened,
+                actor.scenario.initial_market_directory(),
+                state,
+                at,
+                actor._rule_snapshot.snapshot(),
+                actor._finality_policy.as_ref(),
+            );
+            state = next;
+            if let Some(response) = transition.and_then(|t| t.completed_response) {
+                if let DirectResponsePayloadDraftV3::PostOrders(items) = &response.payload {
+                    assert_eq!(
+                        items
+                            .iter()
+                            .map(|item| item.batch_item_ordinal)
+                            .collect::<Vec<_>>(),
+                        (0..16).collect::<Vec<_>>()
+                    );
+                    posted = true;
+                }
+                if let DirectResponsePayloadDraftV3::CancelOrders(targets) = &response.payload {
+                    assert_eq!(targets.len(), 1);
+                    assert_eq!(targets[0].input_item_refs.len(), 1001);
+                    assert_eq!(
+                        targets[0]
+                            .input_item_refs
+                            .last()
+                            .unwrap()
+                            .batch_item_ordinal,
+                        1000
+                    );
+                    completed = Some(response);
+                }
+            }
+        }
+        assert!(completed.is_some());
+        assert!(posted);
     }
 
     #[tokio::test(flavor = "current_thread")]

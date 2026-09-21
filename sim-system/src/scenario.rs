@@ -11,7 +11,6 @@ use crate::market_directory::{SessionMarketDirectoryErrorV1, SessionMarketDirect
 pub const PLATFORM_SCENARIO_SCHEMA_V1: &str = "platform_scenario_v1";
 pub const MARKET_SET_SCHEMA_V1: &str = "market_set_v1";
 pub const BTC_UPDOWN_5M_MARKET_FAMILY_V1: &str = "BTC_UPDOWN_5M";
-pub(crate) const PLATFORM_MARKET_TEXT_MAX_BYTES_V1: usize = 256;
 
 const MARKET_SET_HASH_DOMAIN_V1: &str = "SIM_MARKET_SET_SHA256_V1";
 const PLATFORM_SCENARIO_HASH_DOMAIN_V1: &str = "SIM_PLATFORM_SCENARIO_SHA256_V1";
@@ -20,7 +19,6 @@ const PLATFORM_SCENARIO_HASH_DOMAIN_V1: &str = "SIM_PLATFORM_SCENARIO_SHA256_V1"
 pub enum PlatformScenarioErrorV1 {
     EmptyMarketSet,
     InvalidConditionId,
-    InvalidClobMarketId,
     InvalidMarketWindow,
     InvalidAssetIdentity,
     DuplicateAssetIdentity,
@@ -34,7 +32,6 @@ impl fmt::Display for PlatformScenarioErrorV1 {
         match self {
             Self::EmptyMarketSet => write!(formatter, "场景市场集不能为空"),
             Self::InvalidConditionId => write!(formatter, "场景 condition_id 非法"),
-            Self::InvalidClobMarketId => write!(formatter, "场景 CLOB 市场身份非法"),
             Self::InvalidMarketWindow => write!(formatter, "场景市场时间窗口非法"),
             Self::InvalidAssetIdentity => write!(formatter, "场景资产身份非法"),
             Self::DuplicateAssetIdentity => write!(formatter, "场景市场的资产身份重复"),
@@ -306,11 +303,6 @@ fn validate_market(market: &MarketIdentityV2) -> Result<(), PlatformScenarioErro
     {
         return Err(PlatformScenarioErrorV1::InvalidConditionId);
     }
-    if market.clob_market_id.0.len() > PLATFORM_MARKET_TEXT_MAX_BYTES_V1
-        || !is_unsigned_decimal_id(&market.clob_market_id.0)
-    {
-        return Err(PlatformScenarioErrorV1::InvalidClobMarketId);
-    }
     if market.window.start_at_utc_ms >= market.window.end_at_utc_ms {
         return Err(PlatformScenarioErrorV1::InvalidMarketWindow);
     }
@@ -318,11 +310,7 @@ fn validate_market(market: &MarketIdentityV2) -> Result<(), PlatformScenarioErro
 }
 
 fn validate_asset(asset: &AssetIdentityV1) -> Result<(), PlatformScenarioErrorV1> {
-    if asset.token_id.0.len() > PLATFORM_MARKET_TEXT_MAX_BYTES_V1
-        || asset.outcome.label.len() > PLATFORM_MARKET_TEXT_MAX_BYTES_V1
-        || !is_unsigned_decimal_id(&asset.token_id.0)
-        || asset.outcome.label.is_empty()
-    {
+    if !is_unsigned_decimal_id(&asset.token_id.0) || asset.outcome.label.is_empty() {
         return Err(PlatformScenarioErrorV1::InvalidAssetIdentity);
     }
     Ok(())
@@ -523,48 +511,16 @@ mod tests {
     }
 
     #[test]
-    fn platform_market_text_fields_are_bounded_at_256_utf8_bytes() {
-        assert_eq!(PLATFORM_MARKET_TEXT_MAX_BYTES_V1, 256);
-        let at_limit = "1".repeat(PLATFORM_MARKET_TEXT_MAX_BYTES_V1);
-        let market = market_with_fields(at_limit.clone(), at_limit.clone(), at_limit.clone())
-            .expect("三个市场文本字段恰好达到 256 字节时应被接受");
-        assert_eq!(
-            market.market().clob_market_id.0.len(),
-            PLATFORM_MARKET_TEXT_MAX_BYTES_V1
-        );
-        assert_eq!(
-            market.assets()[1].token_id.0.len(),
-            PLATFORM_MARKET_TEXT_MAX_BYTES_V1
-        );
-        assert_eq!(
-            market.assets()[1].outcome.label.len(),
-            PLATFORM_MARKET_TEXT_MAX_BYTES_V1
-        );
-
-        let over_limit = "1".repeat(PLATFORM_MARKET_TEXT_MAX_BYTES_V1 + 1);
-        assert_eq!(
-            market_with_fields(over_limit.clone(), "1".to_owned(), "Up".to_owned()),
-            Err(PlatformScenarioErrorV1::InvalidClobMarketId)
-        );
-        assert_eq!(
-            market_with_fields("1".to_owned(), over_limit.clone(), "Up".to_owned()),
-            Err(PlatformScenarioErrorV1::InvalidAssetIdentity)
-        );
-        assert_eq!(
-            market_with_fields("1".to_owned(), "1".to_owned(), over_limit),
-            Err(PlatformScenarioErrorV1::InvalidAssetIdentity)
-        );
-
-        let utf8_at_limit = format!("{}a", "界".repeat(85));
-        assert_eq!(utf8_at_limit.len(), PLATFORM_MARKET_TEXT_MAX_BYTES_V1);
-        market_with_fields("1".to_owned(), "1".to_owned(), utf8_at_limit)
-            .expect("多字节标签恰好达到 256 个 UTF-8 字节时应被接受");
-        let utf8_over_limit = "界".repeat(86);
-        assert_eq!(utf8_over_limit.len(), 258);
-        assert_eq!(
-            market_with_fields("1".to_owned(), "1".to_owned(), utf8_over_limit),
-            Err(PlatformScenarioErrorV1::InvalidAssetIdentity)
-        );
+    fn long_market_identity_and_asset_text_preserve_association_and_numeric_order() {
+        let clob_id = format!("market-{}", "界".repeat(100));
+        let token_id = "1".repeat(300);
+        let label = "上".repeat(100);
+        let market = market_with_fields(clob_id.clone(), token_id.clone(), label.clone()).unwrap();
+        assert_eq!(market.market().clob_market_id.0, clob_id);
+        assert_eq!(market.assets()[0].token_id.0, "2");
+        assert_eq!(market.assets()[1].token_id.0, token_id);
+        assert_eq!(market.assets()[1].outcome.label, label);
+        market.validate_for_admission().unwrap();
     }
 
     #[test]
