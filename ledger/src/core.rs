@@ -1802,10 +1802,11 @@ impl LedgerWriterV1 {
                     )));
                 }
                 if let LedgerTransactionSourceV1::NoeConsumed(source) = &effect.transaction.source {
-                    let view = execution_normalization::read_durable_noe_record_v1(source.result())
-                        .map_err(|e| LedgerDurableErrorV1::InvalidStructure(e.to_string()))?;
+                    let position =
+                        execution_normalization::read_durable_noe_record_position(source.result())
+                            .map_err(|e| LedgerDurableErrorV1::InvalidStructure(e.to_string()))?;
                     self.applied_memory
-                        .insert(view.position(), effect.ledger_entry_seq());
+                        .insert(position, effect.ledger_entry_seq());
                 }
                 self.apply_committed_effect(*effect);
                 Ok(())
