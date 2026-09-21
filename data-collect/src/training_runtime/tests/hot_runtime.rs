@@ -59,6 +59,7 @@ pub(in crate::training_runtime) fn record_same_input_cold_parquet(
     writer.append_key_value_metadata(DAILY_FILE_RECOVERY_METADATA_KEY, json!({
         "source_kind":source,"schema_version":writer.schema_version(),"utc_hour":utc_hour,"part":0,"rows":rows,
     }).to_string())?;
+    let schema_version = writer.schema_version().to_owned();
     let segment = writer.finalize()?;
     let day_start = received.div_euclid(UTC_DAY_MS) * UTC_DAY_MS;
     let manifest = json!({
@@ -72,7 +73,7 @@ pub(in crate::training_runtime) fn record_same_input_cold_parquet(
         "producer_barriers":["binance_aggtrade","binance_depth","polymarket","polymarket_rtds"],
         "writer_finalize_acks":training_source_kinds(),
         "files":[{"path":segment.final_path.strip_prefix(&day_root).unwrap(),"source_kind":source,
-            "schema_version":segment.schema_version,"utc_hour":utc_hour,"part":0,"rows":segment.row_count,
+            "schema_version":schema_version,"utc_hour":utc_hour,"part":0,"rows":segment.row_count,
             "bytes":fs::metadata(&segment.final_path)?.len(),"sha256":segment.sha256}]
     });
     fs::write(

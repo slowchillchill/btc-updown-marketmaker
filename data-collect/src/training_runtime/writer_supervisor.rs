@@ -545,7 +545,7 @@ fn try_send_writer_command(
     writer.tx.try_send(command)
 }
 
-fn record_writer_drop_facts(
+pub(super) fn record_writer_drop_facts(
     runtime_stats: &SourceQueueBackpressureStats,
     drop_facts: &[(String, i64)],
 ) {
@@ -1039,6 +1039,7 @@ pub(super) fn source_writer_worker_with_startup(
                     let mut events = events.into_iter();
                     while let Some(inflight_event) = events.next() {
                         let event = &inflight_event.event;
+                        let mut rows_before_write = None;
                         let process_result = (|| -> Result<()> {
                             if let Some(permit) = inflight_event.raw_day_permit.as_ref() {
                                 let event_day = utc_day_string_from_ms(event.recv_time_utc_ms)
@@ -1102,13 +1103,18 @@ pub(super) fn source_writer_worker_with_startup(
                                 )?);
                             }
                             let segment = active.as_mut().expect("active segment exists");
+                            rows_before_write = Some(segment.writer.row_count());
                             let written_rows = write_typed_event(&mut segment.writer, event)?;
                             segment.observe(event, written_rows);
                             Ok(())
                         })();
                         if let Err(error) = process_result {
                             if let Some(segment) = active.as_ref() {
-                                record_unfinalized_segment_drop(&runtime_stats, segment);
+                                record_unfinalized_segment_drop(
+                                    &runtime_stats,
+                                    segment,
+                                    rows_before_write.unwrap_or_else(|| segment.writer.row_count()),
+                                );
                             }
                             record_writer_drop_facts(
                                 &runtime_stats,
@@ -1159,6 +1165,7 @@ pub(super) fn source_writer_worker_with_startup(
                     while let Some(inflight_event) = events.next() {
                         let message = &inflight_event.message;
                         let recv_time_utc_ms = message.envelope.timestamp_received;
+                        let mut rows_before_write = None;
                         let process_result = (|| -> Result<()> {
                             let event_day =
                                 utc_day_string_from_ms(recv_time_utc_ms).ok_or_else(|| {
@@ -1227,6 +1234,7 @@ pub(super) fn source_writer_worker_with_startup(
                                 )?);
                             }
                             let segment = active.as_mut().expect("active segment exists");
+                            rows_before_write = Some(segment.writer.row_count());
                             segment.writer.write_polymarket_orderbook_v3_messages(
                                 std::slice::from_ref(message),
                                 sequence_state,
@@ -1237,7 +1245,11 @@ pub(super) fn source_writer_worker_with_startup(
                         })();
                         if let Err(error) = process_result {
                             if let Some(segment) = active.as_ref() {
-                                record_unfinalized_segment_drop(&runtime_stats, segment);
+                                record_unfinalized_segment_drop(
+                                    &runtime_stats,
+                                    segment,
+                                    rows_before_write.unwrap_or_else(|| segment.writer.row_count()),
+                                );
                             }
                             record_writer_drop_facts(
                                 &runtime_stats,
@@ -1270,7 +1282,11 @@ pub(super) fn source_writer_worker_with_startup(
                             "writer hour barrier skipped UTC hour: source={source_kind} active={} barrier={utc_hour}",
                             segment.utc_hour
                         ));
-                        record_unfinalized_segment_drop(&runtime_stats, segment);
+                        record_unfinalized_segment_drop(
+                            &runtime_stats,
+                            segment,
+                            segment.writer.row_count(),
+                        );
                         stop_accepting_and_record_queued_drops(
                             &accepting_commands,
                             &rx,
@@ -1315,7 +1331,11 @@ pub(super) fn source_writer_worker_with_startup(
                             "writer finalize identity mismatch: source={source_kind} expected={expected:?} close={close:?}"
                         ));
                         if let Some(segment) = active.as_ref() {
-                            record_unfinalized_segment_drop(&runtime_stats, segment);
+                            record_unfinalized_segment_drop(
+                                &runtime_stats,
+                                segment,
+                                segment.writer.row_count(),
+                            );
                         }
                         stop_accepting_and_record_queued_drops(
                             &accepting_commands,
@@ -1339,6 +1359,7 @@ pub(super) fn source_writer_worker_with_startup(
                             record_unfinalized_segment_drop(
                                 &runtime_stats,
                                 active.as_ref().expect("active segment exists"),
+                                active.as_ref().unwrap().writer.row_count(),
                             );
                             stop_accepting_and_record_queued_drops(
                                 &accepting_commands,
@@ -1412,7 +1433,11 @@ pub(super) fn source_writer_worker_with_startup(
                             "writer shutdown identity mismatch: source={source_kind} expected={expected:?} close={close:?}"
                         ));
                         if let Some(segment) = active.as_ref() {
-                            record_unfinalized_segment_drop(&runtime_stats, segment);
+                            record_unfinalized_segment_drop(
+                                &runtime_stats,
+                                segment,
+                                segment.writer.row_count(),
+                            );
                         }
                         stop_accepting_and_record_queued_drops(
                             &accepting_commands,
@@ -1433,6 +1458,7 @@ pub(super) fn source_writer_worker_with_startup(
                         record_unfinalized_segment_drop(
                             &runtime_stats,
                             active.as_ref().expect("active segment exists"),
+                            active.as_ref().unwrap().writer.row_count(),
                         );
                         stop_accepting_and_record_queued_drops(
                             &accepting_commands,
@@ -1504,18 +1530,19 @@ fn finalize_segment_with_drop_accounting(
     }
 }
 
-fn record_unfinalized_segment_drop(
+pub(super) fn record_unfinalized_segment_drop(
     runtime_stats: &SourceQueueBackpressureStats,
     segment: &ActiveSegment,
+    rows: u64,
 ) {
-    if segment.writer.row_count() == 0 || segment.writer.final_path().exists() {
+    if rows == 0 || segment.writer.final_path().exists() {
         return;
     }
-    runtime_stats.record_drop(segment.writer.row_count());
+    runtime_stats.record_drop(rows);
     runtime_stats.record_operational_drop(
         &segment.source_kind,
         segment.segment_start_recv_time_utc_ms,
-        segment.writer.row_count(),
+        rows,
     );
 }
 

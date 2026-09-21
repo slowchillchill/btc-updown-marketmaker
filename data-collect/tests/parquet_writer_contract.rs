@@ -1337,7 +1337,6 @@ fn typed_writer_binance_aggtrade_schema_keeps_distinct_event_and_trade_times() {
         .write_binance_aggtrade_rows(&[websocket_row, invalid_row])
         .unwrap();
     let published = writer.finalize().unwrap();
-    assert_eq!(published.schema_version, BINANCE_AGGTRADE_SCHEMA_VERSION);
     let builder =
         ParquetRecordBatchReaderBuilder::try_new(File::open(&published.final_path).unwrap())
             .unwrap();

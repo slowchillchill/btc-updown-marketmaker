@@ -116,6 +116,48 @@ async fn committed_startup_stop_runs_writers_until_centralized_exact_shutdown() 
 }
 
 #[test]
+fn failed_tail_flush_counts_current_input_only_once() {
+    let tmp = tempdir().unwrap();
+    let received = 1_783_392_400_001;
+    let naming = HourlyPartitionPolicy::new(tmp.path())
+        .unwrap()
+        .partition("binance_aggtrade", received, None)
+        .unwrap();
+    let mut segment = ActiveSegment::new(naming, "binance_aggtrade", 0).unwrap();
+    for id in 1..=10_000 {
+        let row = test_aggtrade_hourly_row(id, received);
+        segment
+            .writer
+            .write_binance_aggtrade_rows_with_logical_bytes(&[row], 1)
+            .unwrap();
+        segment.observe(&test_raw_event("binance_aggtrade", received), 1);
+    }
+    let rows_before_write = segment.writer.row_count();
+    segment.writer.fail_output_with_full_device_for_test();
+    let second = test_aggtrade_hourly_row(10_001, received + 1);
+    let error = segment
+        .writer
+        .write_binance_aggtrade_rows_with_logical_bytes(
+            &[second],
+            PARQUET_ROW_GROUP_MAX_BYTES - 10_000,
+        )
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("No space left on device"),
+        "{error}"
+    );
+    // 仍低于 Arrow 自行封口行数；足够数据穿透其底层缓冲，尾部字节阈值 flush 才失败。
+    assert_eq!(segment.writer.row_count(), 10_001);
+    let stats = SourceQueueBackpressureStats::default();
+    record_unfinalized_segment_drop(&stats, &segment, rows_before_write);
+    record_writer_drop_facts(&stats, &[("binance_aggtrade".to_owned(), received + 1)]);
+    assert_eq!(
+        stats.drain_all_operational()["2026-07-07"]["binance_aggtrade"].dropped_rows,
+        10_001
+    );
+}
+
+#[test]
 fn typed_writer_closes_row_groups_at_exact_row_and_logical_byte_limits() {
     let tmp = tempdir().unwrap();
     let mut writer = TypedParquetSegmentWriter::create_for_typed_source(

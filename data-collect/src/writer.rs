@@ -72,7 +72,6 @@ pub struct PublishedSegment {
     pub final_path: PathBuf,
     pub row_count: u64,
     pub sha256: String,
-    pub schema_version: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -194,6 +193,11 @@ impl TypedParquetSegmentWriter {
             last_binance_depth_admission_sequence: None,
             last_polymarket_metadata_admission_sequence: None,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_output_with_full_device_for_test(&mut self) {
+        *self.writer.inner_mut() = OpenOptions::new().write(true).open("/dev/full").unwrap();
     }
 
     pub(crate) fn row_count(&self) -> u64 {
@@ -719,7 +723,6 @@ impl TypedParquetSegmentWriter {
             final_path: self.final_path,
             row_count: self.row_count,
             sha256,
-            schema_version: self.schema_version,
         })
     }
 }
