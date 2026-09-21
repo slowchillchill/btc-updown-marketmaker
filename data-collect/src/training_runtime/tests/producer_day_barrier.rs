@@ -317,22 +317,14 @@ async fn source_fence_drains_an_accepted_enqueue_before_barrier_freezes_polling(
     .unwrap();
     assert!(matches!(sealed, RawDaySealOutcome::Sealed(_)));
 
-    assert!(
-        timeout(
-            Duration::from_secs(1),
-            wait_for_day_barrier_while_source_runs(
-                source.as_mut(),
-                &sink,
-                run_started,
-                "polymarket_rtds",
-                close.clone(),
-            ),
-        )
-        .await
-        .expect("barrier must proceed after the source fence froze polling")
-        .unwrap()
-        .is_none()
-    );
+    timeout(Duration::from_secs(1), async {
+        let release =
+            send_day_barrier(&sink, run_started, "polymarket_rtds", close.clone()).await?;
+        apply_day_barrier_release(&sink, "polymarket_rtds", &close, release).await
+    })
+    .await
+    .expect("barrier must proceed after the source fence froze polling")
+    .unwrap();
     let (first, second, barrier) = timeout(Duration::from_secs(1), consumer)
         .await
         .expect("source event and barrier must both reach ingress")

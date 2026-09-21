@@ -11,7 +11,7 @@ use tokio::net::UnixStream;
 use tokio::time::{sleep, timeout};
 
 #[test]
-fn paper_and_live_handoff_roots_are_distinct_but_schema_is_shared() {
+fn paper_and_live_handoff_roots_and_sockets_are_distinct() {
     let dataset_root = tempdir().unwrap();
     let dataset_root = dataset_root.path().canonicalize().unwrap();
 
@@ -30,8 +30,6 @@ fn paper_and_live_handoff_roots_are_distinct_but_schema_is_shared() {
             .ends_with("live/data_collect_handoff/hot.sock")
     );
     assert_ne!(paper.socket_path, live.socket_path);
-    assert_eq!(paper.frame_schema_version, HANDOFF_FRAME_SCHEMA_VERSION);
-    assert_eq!(paper.frame_schema_version, live.frame_schema_version);
 
     assert!(
         HandoffRuntimeConfig::for_environment(

@@ -186,7 +186,7 @@ fn training_segment_finalize_emits_daily_delta_without_segment_manifest() {
         time_utc_ms: event.recv_time_utc_ms,
     });
 
-    assert_eq!(segment.writer.write_event(&event).unwrap(), 1);
+    assert_eq!(write_typed_event(&mut segment.writer, &event).unwrap(), 1);
     segment.observe(&event, 1);
     let (manifest_tx, mut manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
     let finalized = finalize_segment(
@@ -338,7 +338,7 @@ fn polymarket_metadata_v6_version_propagates_through_finalize_and_manifest() {
         event.recv_time_utc_ms - 500,
     );
     let mut segment = ActiveSegment::new(naming, "polymarket_market_metadata", 0).unwrap();
-    assert_eq!(segment.writer.write_event(&event).unwrap(), 1);
+    assert_eq!(write_typed_event(&mut segment.writer, &event).unwrap(), 1);
     segment.observe(&event, 1);
 
     let (manifest_tx, mut manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
@@ -413,7 +413,7 @@ fn polymarket_metadata_sort_order_matches_parquet_and_embedded_recovery_facts_by
         .partition("polymarket_market_metadata", 1_783_392_404_599, None)
         .unwrap();
     let segment = ActiveSegment::new(naming, "polymarket_market_metadata", 0).unwrap();
-    let context = SegmentManifestContext::from_segment(&segment);
+    let (_, context) = segment.into_parts();
     let provenance = test_artifact_identity();
 
     for (index, (schema_version, expected_sort_order)) in [
@@ -508,28 +508,9 @@ fn aggtrade_segment_receive_bounds_allow_admission_order_time_regression() {
     segment.observe(&test_raw_event("binance_aggtrade", later), 1);
     segment.observe(&test_raw_event("binance_aggtrade", earlier), 1);
 
-    let context = SegmentManifestContext::from_segment(&segment);
+    let (_, context) = segment.into_parts();
     assert_eq!(context.segment_start_recv_time_utc_ms, earlier);
     assert_eq!(context.last_recv_time_utc_ms, later);
-}
-
-#[test]
-fn training_runtime_keeps_same_hour_file_at_former_max_bytes() {
-    let tmp = tempdir().unwrap();
-    let dataset_root = tmp.path().canonicalize().unwrap();
-    let naming = HourlyPartitionPolicy::new(&dataset_root)
-        .unwrap()
-        .partition("binance_aggtrade", 1_783_392_404_599, None)
-        .unwrap();
-    let mut segment = ActiveSegment::new(naming, "binance_aggtrade", 0).unwrap();
-    let event = test_raw_event("binance_aggtrade", 1_783_392_404_599);
-    segment.observe(&event, 1);
-    segment.bytes = 128 * 1024 * 1024;
-
-    assert_eq!(
-        training_segment_rollover_reason(&segment, "2026-07-07T02"),
-        None
-    );
 }
 
 #[test]
@@ -577,8 +558,6 @@ fn source_writer_output_uses_aggregated_stats_without_per_event_receipts() {
     let dataset_root = tmp.path().canonicalize().unwrap();
     let provenance = test_artifact_identity();
     let (tx, rx) = std::sync::mpsc::sync_channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
-    let queue_rows = Arc::new(AtomicU64::new(0));
-    let queue_rows_for_worker = Arc::clone(&queue_rows);
     let dataset_root_for_worker = dataset_root.clone();
     let (manifest_tx, _manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
     let handle = std::thread::spawn(move || {
@@ -587,7 +566,6 @@ fn source_writer_output_uses_aggregated_stats_without_per_event_receipts() {
             provenance,
             "binance_aggtrade".to_owned(),
             rx,
-            queue_rows_for_worker,
             Arc::new(Mutex::new(true)),
             Arc::new(SourceQueueBackpressureStats::default()),
             manifest_tx,
@@ -598,7 +576,6 @@ fn source_writer_output_uses_aggregated_stats_without_per_event_receipts() {
         InflightRawEvent::for_test(test_raw_event("binance_aggtrade", 1_783_392_404_599)),
         InflightRawEvent::for_test(test_raw_event("binance_aggtrade", 1_783_392_404_600)),
     ];
-    queue_rows.store(events.len() as u64, Ordering::Relaxed);
     tx.send(WriterCommand::Events(events)).unwrap();
     drop(tx);
 
@@ -636,7 +613,6 @@ fn completed_writer_with_close(
             .unwrap_or("unknown_typed_layout")
             .to_owned(),
         tx,
-        queue_rows: Arc::new(AtomicU64::new(0)),
         accepting_commands: Arc::new(Mutex::new(true)),
         result_rx,
         completed_result: Some(WriterTaskReport {
@@ -657,7 +633,6 @@ fn completed_writer_with_close(
                 source_kind: source_kind.to_owned(),
                 finalized_segments: Vec::new(),
                 coordinated_close: Some(close.clone()),
-                observed_utc_ms: now_ms(),
             })),
         }),
         thread: Some(std::thread::spawn(|| {})),
@@ -862,7 +837,6 @@ async fn writer_report_is_not_terminal_until_the_os_thread_is_joined() {
                     source_kind: "binance_aggtrade".to_owned(),
                     finalized_segments: Vec::new(),
                     coordinated_close: None,
-                    observed_utc_ms: now_ms(),
                 })),
             })
             .unwrap();
@@ -876,7 +850,6 @@ async fn writer_report_is_not_terminal_until_the_os_thread_is_joined() {
                 .unwrap()
                 .to_owned(),
             tx,
-            queue_rows: Arc::new(AtomicU64::new(0)),
             accepting_commands: Arc::new(Mutex::new(true)),
             result_rx,
             completed_result: None,
@@ -993,9 +966,12 @@ async fn seven_writers_return_the_exact_coordinated_close_identity() {
     assert!(outcome.all_terminal, "{:?}", outcome.errors);
     assert!(outcome.all_close_proven, "{:?}", outcome.errors);
     assert_eq!(outcome.outputs.len(), training_source_kinds().len());
-    assert!(outcome.outputs.iter().all(|output| {
-        output.coordinated_close.as_ref() == Some(&close) && output.observed_utc_ms > 0
-    }));
+    assert!(
+        outcome
+            .outputs
+            .iter()
+            .all(|output| { output.coordinated_close.as_ref() == Some(&close) })
+    );
 }
 
 #[tokio::test]
@@ -1026,7 +1002,6 @@ async fn production_writer_report_preserves_reliable_terminal_lifecycle_epoch() 
     let SourceWriterHandle {
         schema_version: _,
         tx,
-        queue_rows: _,
         accepting_commands: _,
         result_rx,
         completed_result,
@@ -1080,7 +1055,6 @@ async fn writer_close_proof_rejects_a_precompleted_or_wrong_identity_result() {
                 .unwrap()
                 .to_owned(),
             tx,
-            queue_rows: Arc::new(AtomicU64::new(0)),
             accepting_commands: Arc::new(Mutex::new(true)),
             result_rx,
             completed_result: Some(WriterTaskReport {
@@ -1101,7 +1075,6 @@ async fn writer_close_proof_rejects_a_precompleted_or_wrong_identity_result() {
                     source_kind: "binance_aggtrade".to_owned(),
                     finalized_segments: Vec::new(),
                     coordinated_close: Some(wrong),
-                    observed_utc_ms: now_ms(),
                 })),
             }),
             thread: Some(std::thread::spawn(|| {})),
@@ -1148,7 +1121,6 @@ async fn writer_stop_collects_late_terminal_state_after_another_writer_failed() 
                     source_kind: "binance_depth_update".to_owned(),
                     finalized_segments: Vec::new(),
                     coordinated_close: None,
-                    observed_utc_ms: now_ms(),
                 })),
             })
             .unwrap();
@@ -1163,7 +1135,6 @@ async fn writer_stop_collects_late_terminal_state_after_another_writer_failed() 
                 .unwrap()
                 .to_owned(),
                 tx: failed_tx,
-                queue_rows: Arc::new(AtomicU64::new(0)),
                 accepting_commands: Arc::new(Mutex::new(true)),
                 result_rx: failed_result_rx,
                 completed_result: Some(WriterTaskReport {
@@ -1191,7 +1162,6 @@ async fn writer_stop_collects_late_terminal_state_after_another_writer_failed() 
                 .unwrap()
                 .to_owned(),
                 tx: late_tx,
-                queue_rows: Arc::new(AtomicU64::new(0)),
                 accepting_commands: Arc::new(Mutex::new(true)),
                 result_rx: late_result_rx,
                 completed_result: None,
@@ -1232,8 +1202,6 @@ async fn polymarket_price_change_stats_count_one_canonical_v3_message_row() {
     let dataset_root = tmp.path().canonicalize().unwrap();
     let provenance = test_artifact_identity();
     let (tx, rx) = std::sync::mpsc::sync_channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
-    let queue_rows = Arc::new(AtomicU64::new(0));
-    let queue_rows_for_worker = Arc::clone(&queue_rows);
     let dataset_root_for_worker = dataset_root.clone();
     let (manifest_tx, mut manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
     let handle = std::thread::spawn(move || {
@@ -1242,7 +1210,6 @@ async fn polymarket_price_change_stats_count_one_canonical_v3_message_row() {
             provenance,
             "polymarket_market".to_owned(),
             rx,
-            queue_rows_for_worker,
             Arc::new(Mutex::new(true)),
             Arc::new(SourceQueueBackpressureStats::default()),
             manifest_tx,
@@ -1272,7 +1239,6 @@ async fn polymarket_price_change_stats_count_one_canonical_v3_message_row() {
         .acquire(0, message.owned_bytes(), BUFFER_ACQUIRE_TIMEOUT)
         .await
         .unwrap();
-    queue_rows.store(1, Ordering::Relaxed);
     tx.send(WriterCommand::PolymarketOrderbookV3(vec![
         InflightPolymarketOrderbookV3 {
             message,
@@ -1311,8 +1277,6 @@ fn binance_depth_manifest_carries_compact_stitch_evidence() {
     let dataset_root = tmp.path().canonicalize().unwrap();
     let provenance = test_artifact_identity();
     let (tx, rx) = std::sync::mpsc::sync_channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
-    let queue_rows = Arc::new(AtomicU64::new(0));
-    let queue_rows_for_worker = Arc::clone(&queue_rows);
     let dataset_root_for_worker = dataset_root.clone();
     let (manifest_tx, mut manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
     let handle = std::thread::spawn(move || {
@@ -1321,7 +1285,6 @@ fn binance_depth_manifest_carries_compact_stitch_evidence() {
             provenance,
             "binance_depth_update".to_owned(),
             rx,
-            queue_rows_for_worker,
             Arc::new(Mutex::new(true)),
             Arc::new(SourceQueueBackpressureStats::default()),
             manifest_tx,
@@ -1329,7 +1292,6 @@ fn binance_depth_manifest_carries_compact_stitch_evidence() {
     });
 
     let event = test_binance_depth_update_event(1_783_392_404_600);
-    queue_rows.store(1, Ordering::Relaxed);
     tx.send(WriterCommand::Events(vec![InflightRawEvent::for_test(
         event,
     )]))
@@ -1382,8 +1344,6 @@ fn sparse_depth_snapshot_hour_finalize_closes_without_a_later_event() {
         .partition("binance_depth_snapshot", recv_time_utc_ms, None)
         .unwrap();
     let (tx, rx) = std::sync::mpsc::sync_channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
-    let queue_rows = Arc::new(AtomicU64::new(1));
-    let queue_rows_for_worker = Arc::clone(&queue_rows);
     let dataset_root_for_worker = dataset_root.clone();
     let (manifest_tx, mut manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
     let handle = std::thread::spawn(move || {
@@ -1392,7 +1352,6 @@ fn sparse_depth_snapshot_hour_finalize_closes_without_a_later_event() {
             test_artifact_identity(),
             "binance_depth_snapshot".to_owned(),
             rx,
-            queue_rows_for_worker,
             Arc::new(Mutex::new(true)),
             Arc::new(SourceQueueBackpressureStats::default()),
             manifest_tx,
@@ -1447,7 +1406,6 @@ fn empty_depth_snapshot_hour_finalize_does_not_create_a_file() {
             test_artifact_identity(),
             "binance_depth_snapshot".to_owned(),
             rx,
-            Arc::new(AtomicU64::new(0)),
             Arc::new(Mutex::new(true)),
             Arc::new(SourceQueueBackpressureStats::default()),
             manifest_tx,
@@ -1477,8 +1435,6 @@ fn same_hour_depth_resnapshot_stays_in_the_primary_hour_file() {
         .partition("binance_depth_snapshot", recv_time_utc_ms, None)
         .unwrap();
     let (tx, rx) = std::sync::mpsc::sync_channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
-    let queue_rows = Arc::new(AtomicU64::new(2));
-    let queue_rows_for_worker = Arc::clone(&queue_rows);
     let dataset_root_for_worker = dataset_root.clone();
     let (manifest_tx, mut manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
     let handle = std::thread::spawn(move || {
@@ -1487,7 +1443,6 @@ fn same_hour_depth_resnapshot_stays_in_the_primary_hour_file() {
             test_artifact_identity(),
             "binance_depth_snapshot".to_owned(),
             rx,
-            queue_rows_for_worker,
             Arc::new(Mutex::new(true)),
             Arc::new(SourceQueueBackpressureStats::default()),
             manifest_tx,
@@ -1536,8 +1491,6 @@ fn binance_depth_manifest_counts_resnapshot_trigger_evidence() {
     let dataset_root = tmp.path().canonicalize().unwrap();
     let provenance = test_artifact_identity();
     let (tx, rx) = std::sync::mpsc::sync_channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
-    let queue_rows = Arc::new(AtomicU64::new(0));
-    let queue_rows_for_worker = Arc::clone(&queue_rows);
     let dataset_root_for_worker = dataset_root.clone();
     let (manifest_tx, mut manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
     let handle = std::thread::spawn(move || {
@@ -1546,7 +1499,6 @@ fn binance_depth_manifest_counts_resnapshot_trigger_evidence() {
             provenance,
             "binance_depth_update".to_owned(),
             rx,
-            queue_rows_for_worker,
             Arc::new(Mutex::new(true)),
             Arc::new(SourceQueueBackpressureStats::default()),
             manifest_tx,
@@ -1557,7 +1509,6 @@ fn binance_depth_manifest_counts_resnapshot_trigger_evidence() {
         1_783_392_404_600,
         "stitch_gap:U > local_u + 1",
     );
-    queue_rows.store(1, Ordering::Relaxed);
     tx.send(WriterCommand::Events(vec![InflightRawEvent::for_test(
         event,
     )]))
@@ -1602,9 +1553,6 @@ fn metadata_manifest_distinguishes_complete_and_unavailable_rows() {
         }),
     );
     segment.observe(&unavailable, 1);
-    let context = SegmentManifestContext::from_segment(&segment);
-    assert_eq!(context.metadata_unavailable_rows, 1);
-    assert_eq!(context.metadata_complete_rows, 0);
 
     let complete = test_metadata_raw_event(
         "active_scan",
@@ -1625,7 +1573,7 @@ fn metadata_manifest_distinguishes_complete_and_unavailable_rows() {
         }),
     );
     segment.observe(&complete, 1);
-    let context = SegmentManifestContext::from_segment(&segment);
+    let (_, context) = segment.into_parts();
     assert_eq!(context.metadata_unavailable_rows, 1);
     assert_eq!(context.metadata_complete_rows, 1);
 }
@@ -1685,7 +1633,6 @@ async fn disconnected_writer_channel_is_a_runtime_error() {
                 .unwrap()
                 .to_owned(),
             tx,
-            queue_rows: Arc::new(AtomicU64::new(0)),
             accepting_commands: Arc::new(Mutex::new(true)),
             result_rx,
             completed_result: None,
@@ -1768,7 +1715,6 @@ fn writer_failure_counts_active_current_remaining_and_queued_rows_exactly() {
     let tmp = tempdir().unwrap();
     let dataset_root = tmp.path().canonicalize().unwrap();
     let (tx, rx) = std::sync::mpsc::sync_channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
-    let queue_rows = Arc::new(AtomicU64::new(5));
     let accepting_commands = Arc::new(Mutex::new(true));
     let runtime_stats = Arc::new(SourceQueueBackpressureStats::default());
     let (manifest_tx, _manifest_rx) = mpsc::channel(MANIFEST_CHANNEL_CAPACITY);
@@ -1795,14 +1741,12 @@ fn writer_failure_counts_active_current_remaining_and_queued_rows_exactly() {
         test_artifact_identity(),
         "binance_aggtrade".to_owned(),
         rx,
-        Arc::clone(&queue_rows),
         Arc::clone(&accepting_commands),
         Arc::clone(&runtime_stats),
         manifest_tx,
     );
 
     assert!(!result.unwrap_err().to_string().is_empty());
-    assert_eq!(queue_rows.load(Ordering::Relaxed), 0);
     assert!(!*accepting_commands.lock().unwrap());
     assert_eq!(
         runtime_stats.drain_all_operational()["2026-07-07"]["binance_aggtrade"].dropped_rows,

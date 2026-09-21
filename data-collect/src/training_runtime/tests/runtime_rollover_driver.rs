@@ -459,7 +459,6 @@ async fn run_writer_rendezvous_poll_order(
                 .unwrap()
                 .to_owned(),
             tx: writer_tx,
-            queue_rows: Arc::new(AtomicU64::new(0)),
             accepting_commands: Arc::new(Mutex::new(true)),
             result_rx,
             completed_result: None,

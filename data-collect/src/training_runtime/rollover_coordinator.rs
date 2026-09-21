@@ -23,8 +23,6 @@ pub(super) enum RolloverCutpoint {
     ActivationAcked,
     DeferredFlushing,
     RawActivated,
-    Released,
-    Terminal,
     OutcomeUncertain,
 }
 
@@ -361,13 +359,7 @@ impl RolloverCoordinatorState {
         )
         .await?;
         match timeout(STARTUP_GATE_TIMEOUT, reply_rx).await {
-            Ok(Ok(Ok(()))) => {
-                self.pending
-                    .as_mut()
-                    .expect("pending rollover exists during exit-day preparation")
-                    .cutpoint = RolloverCutpoint::Terminal;
-                Ok(DurableMutationAck::Confirmed)
-            }
+            Ok(Ok(Ok(()))) => Ok(DurableMutationAck::Confirmed),
             Ok(Ok(Err(error))) => Ok(self.mark_outcome_uncertain(format!(
                 "rollover exit-day preparation returned error after command: {error}"
             ))),
@@ -402,13 +394,7 @@ impl RolloverCoordinatorState {
         )
         .await?;
         match timeout(STARTUP_GATE_TIMEOUT, reply_rx).await {
-            Ok(Ok(Ok(()))) => {
-                self.pending
-                    .as_mut()
-                    .expect("pending rollover exists during unclean finish")
-                    .cutpoint = RolloverCutpoint::Terminal;
-                Ok(DurableMutationAck::Confirmed)
-            }
+            Ok(Ok(Ok(()))) => Ok(DurableMutationAck::Confirmed),
             Ok(Ok(Err(error))) => Ok(self.mark_outcome_uncertain(format!(
                 "unclean rollover finish returned error after command: {error}"
             ))),
@@ -746,7 +732,6 @@ impl RolloverCoordinatorState {
             .into());
         }
         controller.set_phase(ProducerReleasePhase::ResumeSources);
-        pending.cutpoint = RolloverCutpoint::Released;
         self.pending.take();
         Ok(())
     }
@@ -768,7 +753,6 @@ impl RolloverCoordinatorState {
             ))
             .into());
         }
-        pending.cutpoint = RolloverCutpoint::Terminal;
         self.pending.take();
         Ok(())
     }

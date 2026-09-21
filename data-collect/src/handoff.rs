@@ -291,7 +291,6 @@ pub struct HandoffRuntimeConfig {
     pub environment: PaperLiveEnvironment,
     pub handoff_root: PathBuf,
     pub socket_path: PathBuf,
-    pub frame_schema_version: String,
 }
 
 impl HandoffRuntimeConfig {
@@ -301,7 +300,6 @@ impl HandoffRuntimeConfig {
             environment,
             socket_path: handoff_root.join("hot.sock"),
             handoff_root,
-            frame_schema_version: HANDOFF_FRAME_SCHEMA_VERSION.to_owned(),
         })
     }
 }

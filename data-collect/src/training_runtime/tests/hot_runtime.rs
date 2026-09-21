@@ -47,13 +47,7 @@ pub(in crate::training_runtime) fn record_same_input_cold_parquet(
         source,
     )?;
     let rows = match payload {
-        SourceIngressPayload::RawEvent(value) => {
-            let mut source_writer = TrainingSegmentWriter::Typed(writer);
-            let count = source_writer.write_event(&value.event)?;
-            let TrainingSegmentWriter::Typed(value) = source_writer;
-            writer = value;
-            count
-        }
+        SourceIngressPayload::RawEvent(value) => write_typed_event(&mut writer, &value.event)?,
         SourceIngressPayload::PolymarketOrderbookV3(value) => {
             writer.write_polymarket_orderbook_v3_messages(
                 std::slice::from_ref(&value.message),

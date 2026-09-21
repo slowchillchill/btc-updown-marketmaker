@@ -114,7 +114,7 @@ pub struct TypedParquetSegmentWriter {
     final_path: PathBuf,
     schema_version: String,
     schema: Arc<Schema>,
-    writer: Option<ArrowWriter<File>>,
+    writer: ArrowWriter<File>,
     row_count: u64,
     row_group_rows: u64,
     row_group_logical_bytes: u64,
@@ -186,7 +186,7 @@ impl TypedParquetSegmentWriter {
             final_path,
             schema_version: schema_version.to_owned(),
             schema,
-            writer: Some(writer),
+            writer,
             row_count: 0,
             row_group_rows: 0,
             row_group_logical_bytes: 0,
@@ -664,10 +664,7 @@ impl TypedParquetSegmentWriter {
             )
             .into());
         }
-        let writer = self
-            .writer
-            .as_mut()
-            .ok_or_else(|| io::Error::other("typed parquet segment already finalized"))?;
+        let writer = &mut self.writer;
         if self.row_group_rows > 0
             && (self.row_group_rows.saturating_add(rows) > PARQUET_ROW_GROUP_MAX_ROWS
                 || self.row_group_logical_bytes.saturating_add(logical_bytes)
@@ -699,10 +696,7 @@ impl TypedParquetSegmentWriter {
             )
             .into());
         }
-        let writer = self
-            .writer
-            .as_mut()
-            .ok_or_else(|| io::Error::other("typed parquet segment already finalized"))?;
+        let writer = &mut self.writer;
         writer.append_key_value_metadata(KeyValue::new(key.to_owned(), value));
         Ok(())
     }
@@ -711,12 +705,8 @@ impl TypedParquetSegmentWriter {
         &self.final_path
     }
 
-    pub fn finalize(mut self) -> Result<PublishedSegment> {
-        let writer = self
-            .writer
-            .take()
-            .ok_or_else(|| io::Error::other("typed parquet segment already finalized"))?;
-        writer.close()?;
+    pub fn finalize(self) -> Result<PublishedSegment> {
+        self.writer.close()?;
         OpenOptions::new()
             .read(true)
             .write(true)
@@ -1334,80 +1324,4 @@ fn validate_segment_stem(stem: &str) -> Result<()> {
         .into());
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::polymarket_orderbook_v3::{
-        PolymarketOrderbookV3Admission, PolymarketOrderbookV3Projection,
-    };
-    use polymarket_client_sdk_v2::clob::ws::WsMessage;
-    use tempfile::tempdir;
-
-    #[test]
-    fn polymarket_v3_sequence_state_does_not_advance_when_write_fails() {
-        let sdk_message = serde_json::from_str::<WsMessage>(
-            r#"{
-                "event_type":"book",
-                "market":"0x0000000000000000000000000000000000000000000000000000000000000002",
-                "asset_id":"101",
-                "timestamp":"1783392404600",
-                "bids":[{"price":"0.49","size":"10"}],
-                "asks":[],
-                "last_trade_price":"0.50"
-            }"#,
-        )
-        .unwrap();
-        let message =
-            PolymarketOrderbookV3Projection::from_target_admitted_sdk_message(&sdk_message)
-                .unwrap()
-                .unwrap()
-                .admit(PolymarketOrderbookV3Admission {
-                    timestamp_received: 1_783_392_404_599,
-                    collector_host_id: "collector-host".to_owned(),
-                    collector_region: "eu-west-1".to_owned(),
-                    source_endpoint: "wss://ws-subscriptions-clob.polymarket.com/ws/market"
-                        .to_owned(),
-                    source_sequence_epoch_id: "source-epoch-a".to_owned(),
-                    collector_admission_sequence: 1,
-                    collector_admission_time_utc_ms: 1_783_392_404_600,
-                })
-                .unwrap();
-        let tmp = tempdir().unwrap();
-        let mut sequence_state = PolymarketOrderbookV3WriteSequenceState::default();
-        let mut failed_writer = TypedParquetSegmentWriter::create_for_typed_source(
-            tmp.path(),
-            "failed-write",
-            POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,
-            "polymarket_market",
-        )
-        .unwrap();
-        failed_writer.writer.take();
-
-        let error = failed_writer
-            .write_polymarket_orderbook_v3_messages(
-                std::slice::from_ref(&message),
-                &mut sequence_state,
-            )
-            .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("typed parquet segment already finalized"),
-            "{error}"
-        );
-
-        let mut retry_writer = TypedParquetSegmentWriter::create_for_typed_source(
-            tmp.path(),
-            "retry-write",
-            POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,
-            "polymarket_market",
-        )
-        .unwrap();
-        retry_writer
-            .write_polymarket_orderbook_v3_messages(&[message], &mut sequence_state)
-            .unwrap();
-        assert_eq!(retry_writer.finalize().unwrap().row_count, 1);
-    }
 }

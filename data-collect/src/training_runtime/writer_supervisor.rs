@@ -115,8 +115,6 @@ where
             return Err(error.into());
         }
         let (tx, rx) = std::sync::mpsc::sync_channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
-        let queue_rows = Arc::new(AtomicU64::new(0));
-        let queue_rows_for_worker = Arc::clone(&queue_rows);
         let accepting_commands = Arc::new(Mutex::new(true));
         let accepting_commands_for_worker = Arc::clone(&accepting_commands);
         let runtime_stats = Arc::clone(runtime_stats);
@@ -159,7 +157,6 @@ where
                         source_kind_owned,
                         worker_schema_version,
                         rx,
-                        queue_rows_for_worker,
                         accepting_commands_for_worker,
                         runtime_stats,
                         manifest_tx,
@@ -262,7 +259,6 @@ where
             SourceWriterHandle {
                 schema_version: writer_schema_version,
                 tx,
-                queue_rows,
                 accepting_commands,
                 result_rx,
                 completed_result: None,
@@ -284,7 +280,6 @@ fn converge_partial_writer_spawn(
         let SourceWriterHandle {
             schema_version: _,
             tx,
-            queue_rows: _,
             accepting_commands: _,
             result_rx,
             completed_result: _,
@@ -407,7 +402,6 @@ pub(super) fn start_writer_workers_with_hung_result(
         SourceWriterHandle {
             schema_version: "unknown_typed_layout".to_owned(),
             tx,
-            queue_rows: Arc::new(AtomicU64::new(0)),
             accepting_commands: Arc::new(Mutex::new(true)),
             result_rx,
             completed_result: None,
@@ -427,7 +421,6 @@ pub(super) async fn flush_source_batch(
     if batch.is_empty() {
         return Ok(());
     }
-    let rows = batch.len() as u64;
     let events = std::mem::take(batch);
     let drop_facts = events
         .iter()
@@ -442,7 +435,6 @@ pub(super) async fn flush_source_batch(
         writers,
         source_kind,
         WriterCommand::Events(events),
-        rows,
         &drop_facts,
         gaps,
         runtime_stats,
@@ -459,7 +451,6 @@ pub(super) async fn flush_polymarket_orderbook_v3_batch(
     if batch.is_empty() {
         return Ok(());
     }
-    let rows = batch.len() as u64;
     let events = std::mem::take(batch);
     let drop_facts = events
         .iter()
@@ -474,7 +465,6 @@ pub(super) async fn flush_polymarket_orderbook_v3_batch(
         writers,
         "polymarket_market",
         WriterCommand::PolymarketOrderbookV3(events),
-        rows,
         &drop_facts,
         gaps,
         runtime_stats,
@@ -487,7 +477,6 @@ async fn send_writer_batch(
     writers: &BTreeMap<String, SourceWriterHandle>,
     source_kind: &str,
     mut command: WriterCommand,
-    rows: u64,
     drop_facts: &[(String, i64)],
     gaps: &SharedSourceGaps,
     runtime_stats: &SourceQueueBackpressureStats,
@@ -498,17 +487,14 @@ async fn send_writer_batch(
         record_gap(gaps, gap.clone());
         return Err(io::Error::new(io::ErrorKind::BrokenPipe, gap).into());
     };
-    writer.queue_rows.fetch_add(rows, Ordering::Relaxed);
     match try_send_writer_command(writer, command) {
         Ok(()) => {
             return Ok(());
         }
         Err(std::sync::mpsc::TrySendError::Full(returned)) => {
-            writer.queue_rows.fetch_sub(rows, Ordering::Relaxed);
             command = returned;
         }
         Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-            writer.queue_rows.fetch_sub(rows, Ordering::Relaxed);
             record_writer_drop_facts(runtime_stats, drop_facts);
             let gap = format!("writer_queue_disconnected:{source_kind}");
             record_gap(gaps, gap.clone());
@@ -517,16 +503,13 @@ async fn send_writer_batch(
     }
     match timeout(BUFFER_ACQUIRE_TIMEOUT, async {
         loop {
-            writer.queue_rows.fetch_add(rows, Ordering::Relaxed);
             match try_send_writer_command(writer, command) {
                 Ok(()) => return None,
                 Err(std::sync::mpsc::TrySendError::Full(returned)) => {
-                    writer.queue_rows.fetch_sub(rows, Ordering::Relaxed);
                     command = returned;
                     sleep(Duration::from_millis(50)).await;
                 }
                 Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                    writer.queue_rows.fetch_sub(rows, Ordering::Relaxed);
                     return Some(format!("writer_queue_disconnected:{source_kind}"));
                 }
             }
@@ -858,7 +841,6 @@ async fn stop_writer_workers_with_optional_close(
         let SourceWriterHandle {
             schema_version: _,
             tx,
-            queue_rows: _,
             accepting_commands: _,
             result_rx,
             completed_result,
@@ -957,7 +939,6 @@ pub(super) fn source_writer_worker(
     provenance: TrainingArtifactIdentity,
     source_kind: String,
     rx: std::sync::mpsc::Receiver<WriterCommand>,
-    queue_rows: Arc<AtomicU64>,
     accepting_commands: Arc<Mutex<bool>>,
     runtime_stats: Arc<SourceQueueBackpressureStats>,
     manifest_tx: mpsc::Sender<ManifestCommand>,
@@ -971,7 +952,6 @@ pub(super) fn source_writer_worker(
         source_kind,
         writer_schema_version,
         rx,
-        queue_rows,
         accepting_commands,
         runtime_stats,
         manifest_tx,
@@ -989,7 +969,6 @@ pub(super) fn source_writer_worker_with_startup(
     source_kind: String,
     writer_schema_version: String,
     rx: std::sync::mpsc::Receiver<WriterCommand>,
-    queue_rows: Arc<AtomicU64>,
     accepting_commands: Arc<Mutex<bool>>,
     runtime_stats: Arc<SourceQueueBackpressureStats>,
     manifest_tx: mpsc::Sender<ManifestCommand>,
@@ -1035,7 +1014,6 @@ pub(super) fn source_writer_worker_with_startup(
         while let Ok(command) = rx.recv() {
             match command {
                 WriterCommand::Events(events) => {
-                    queue_rows.fetch_sub(events.len() as u64, Ordering::Relaxed);
                     if writer_schema_version
                         != TypedParquetSegmentWriter::current_schema_version(&source_kind)?
                     {
@@ -1052,7 +1030,6 @@ pub(super) fn source_writer_worker_with_startup(
                         stop_accepting_and_record_queued_drops(
                             &accepting_commands,
                             &rx,
-                            &queue_rows,
                             &runtime_stats,
                         );
                         return Err(invalid_data(format!(
@@ -1126,7 +1103,7 @@ pub(super) fn source_writer_worker_with_startup(
                                 )?);
                             }
                             let segment = active.as_mut().expect("active segment exists");
-                            let written_rows = segment.writer.write_event(event)?;
+                            let written_rows = write_typed_event(&mut segment.writer, event)?;
                             segment.observe(event, written_rows);
                             Ok(())
                         })();
@@ -1146,7 +1123,6 @@ pub(super) fn source_writer_worker_with_startup(
                             stop_accepting_and_record_queued_drops(
                                 &accepting_commands,
                                 &rx,
-                                &queue_rows,
                                 &runtime_stats,
                             );
                             return Err(error);
@@ -1154,7 +1130,6 @@ pub(super) fn source_writer_worker_with_startup(
                     }
                 }
                 WriterCommand::PolymarketOrderbookV3(events) => {
-                    queue_rows.fetch_sub(events.len() as u64, Ordering::Relaxed);
                     if source_kind != "polymarket_market"
                         || writer_schema_version != POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION
                     {
@@ -1171,7 +1146,6 @@ pub(super) fn source_writer_worker_with_startup(
                         stop_accepting_and_record_queued_drops(
                             &accepting_commands,
                             &rx,
-                            &queue_rows,
                             &runtime_stats,
                         );
                         return Err(invalid_data(format!(
@@ -1261,9 +1235,11 @@ pub(super) fn source_writer_worker_with_startup(
                                 ))
                                 .into());
                             }
-                            let written_rows = segment
-                                .writer
-                                .write_polymarket_orderbook_v3(message, sequence_state)?;
+                            segment.writer.write_polymarket_orderbook_v3_messages(
+                                std::slice::from_ref(message),
+                                sequence_state,
+                            )?;
+                            let written_rows = 1;
                             segment.observe_polymarket_orderbook_v3(message, written_rows);
                             Ok(())
                         })();
@@ -1286,7 +1262,6 @@ pub(super) fn source_writer_worker_with_startup(
                             stop_accepting_and_record_queued_drops(
                                 &accepting_commands,
                                 &rx,
-                                &queue_rows,
                                 &runtime_stats,
                             );
                             return Err(error);
@@ -1307,7 +1282,6 @@ pub(super) fn source_writer_worker_with_startup(
                         stop_accepting_and_record_queued_drops(
                             &accepting_commands,
                             &rx,
-                            &queue_rows,
                             &runtime_stats,
                         );
                         return Err(error.into());
@@ -1332,7 +1306,6 @@ pub(super) fn source_writer_worker_with_startup(
                                 stop_accepting_and_record_queued_drops(
                                     &accepting_commands,
                                     &rx,
-                                    &queue_rows,
                                     &runtime_stats,
                                 );
                                 return Err(error);
@@ -1355,7 +1328,6 @@ pub(super) fn source_writer_worker_with_startup(
                         stop_accepting_and_record_queued_drops(
                             &accepting_commands,
                             &rx,
-                            &queue_rows,
                             &runtime_stats,
                         );
                         return Err(error.into());
@@ -1379,7 +1351,6 @@ pub(super) fn source_writer_worker_with_startup(
                             stop_accepting_and_record_queued_drops(
                                 &accepting_commands,
                                 &rx,
-                                &queue_rows,
                                 &runtime_stats,
                             );
                             return Err(error.into());
@@ -1400,7 +1371,6 @@ pub(super) fn source_writer_worker_with_startup(
                                 stop_accepting_and_record_queued_drops(
                                     &accepting_commands,
                                     &rx,
-                                    &queue_rows,
                                     &runtime_stats,
                                 );
                                 return Err(error);
@@ -1427,7 +1397,6 @@ pub(super) fn source_writer_worker_with_startup(
                         stop_accepting_and_record_queued_drops(
                             &accepting_commands,
                             &rx,
-                            &queue_rows,
                             &runtime_stats,
                         );
                         return Err(error.into());
@@ -1456,7 +1425,6 @@ pub(super) fn source_writer_worker_with_startup(
                         stop_accepting_and_record_queued_drops(
                             &accepting_commands,
                             &rx,
-                            &queue_rows,
                             &runtime_stats,
                         );
                         return Err(error.into());
@@ -1477,7 +1445,6 @@ pub(super) fn source_writer_worker_with_startup(
                         stop_accepting_and_record_queued_drops(
                             &accepting_commands,
                             &rx,
-                            &queue_rows,
                             &runtime_stats,
                         );
                         return Err(error.into());
@@ -1510,7 +1477,6 @@ pub(super) fn source_writer_worker_with_startup(
         source_kind,
         finalized_segments: finalized_segments.unwrap_or_default(),
         coordinated_close,
-        observed_utc_ms: now_ms(),
     })
 }
 
@@ -1564,7 +1530,6 @@ fn record_unfinalized_segment_drop(
 fn stop_accepting_and_record_queued_drops(
     accepting_commands: &Mutex<bool>,
     rx: &std::sync::mpsc::Receiver<WriterCommand>,
-    queue_rows: &AtomicU64,
     runtime_stats: &SourceQueueBackpressureStats,
 ) {
     let mut accepting = accepting_commands
@@ -1575,7 +1540,6 @@ fn stop_accepting_and_record_queued_drops(
     while let Ok(command) = rx.try_recv() {
         match command {
             WriterCommand::Events(events) => {
-                queue_rows.fetch_sub(events.len() as u64, Ordering::Relaxed);
                 drop_facts.extend(
                     events
                         .into_iter()
@@ -1583,7 +1547,6 @@ fn stop_accepting_and_record_queued_drops(
                 );
             }
             WriterCommand::PolymarketOrderbookV3(events) => {
-                queue_rows.fetch_sub(events.len() as u64, Ordering::Relaxed);
                 drop_facts.extend(events.into_iter().map(|event| {
                     (
                         "polymarket_market".to_owned(),
@@ -1601,38 +1564,38 @@ fn stop_accepting_and_record_queued_drops(
 }
 
 pub(super) fn finalize_segment(
-    mut segment: ActiveSegment,
+    segment: ActiveSegment,
     rollover_reason: &str,
     provenance: &TrainingArtifactIdentity,
     manifest_tx: &mpsc::Sender<ManifestCommand>,
 ) -> Result<TrainingFinalizedSegment> {
-    let source_kind = segment.source_kind.clone();
-    let schema_version = segment.writer.schema_version().to_owned();
-    let manifest_context = SegmentManifestContext::from_segment(&segment);
+    let (mut writer, manifest_context) = segment.into_parts();
+    let schema_version = writer.schema_version().to_owned();
     let facts = segment_daily_facts(
         &manifest_context,
         &schema_version,
         rollover_reason,
         provenance,
     );
+    let source_kind = manifest_context.source_kind;
     let recovery_metadata = DailyFileRecoveryMetadata {
         source_kind: source_kind.clone(),
-        utc_hour: manifest_context.utc_hour.clone(),
+        utc_hour: manifest_context.utc_hour,
         part: manifest_context.hour_part,
         rows: manifest_context.rows,
         schema_version,
         first_recv_time_utc_ms: manifest_context.segment_start_recv_time_utc_ms,
         last_recv_time_utc_ms: manifest_context.last_recv_time_utc_ms,
-        source_timestamp_start: manifest_context.source_ts_start.clone(),
-        source_timestamp_end: manifest_context.source_ts_end.clone(),
-        event_type_counts: manifest_context.event_type_counts.clone(),
+        source_timestamp_start: manifest_context.source_ts_start,
+        source_timestamp_end: manifest_context.source_ts_end,
+        event_type_counts: manifest_context.event_type_counts,
         facts,
     };
-    segment.writer.append_key_value_metadata(
+    writer.append_key_value_metadata(
         DAILY_FILE_RECOVERY_METADATA_KEY,
         serde_json::to_string(&recovery_metadata)?,
     )?;
-    let published = segment.writer.finalize()?;
+    let published = writer.finalize()?;
     if published.row_count != recovery_metadata.rows
         || published.schema_version != recovery_metadata.schema_version
     {
@@ -1647,7 +1610,7 @@ pub(super) fn finalize_segment(
     }
     let bytes = fs::metadata(&published.final_path)?.len();
     let delta = DailyFinalizedFileDelta {
-        utc_day: manifest_context.utc_day.clone(),
+        utc_day: manifest_context.utc_day,
         final_path: published.final_path.clone(),
         bytes,
         sha256: published.sha256.clone(),
@@ -1723,37 +1686,38 @@ pub(super) struct SegmentManifestContext {
     pub(super) metadata_unavailable_rows: u64,
 }
 
-impl SegmentManifestContext {
-    pub(super) fn from_segment(segment: &ActiveSegment) -> Self {
-        Self {
-            source_kind: segment.source_kind.clone(),
-            utc_day: segment.utc_day.clone(),
-            utc_hour: segment.utc_hour.clone(),
-            hour_start_utc_ms: segment.hour_start_utc_ms,
-            hour_end_utc_ms: segment.hour_end_utc_ms,
-            hour_part: segment.hour_part,
-            segment_start_recv_time_utc_ms: segment.segment_start_recv_time_utc_ms,
-            last_recv_time_utc_ms: segment.last_recv_time_utc_ms,
-            source_ts_start: segment.source_ts_start.clone(),
-            source_ts_end: segment.source_ts_end.clone(),
-            rows: segment.rows,
-            event_type_counts: segment.event_type_counts.clone(),
-            backfill_rows: segment.backfill_rows,
-            book_rows_with_bids_asks: segment.book_rows_with_bids_asks,
-            covered_market_slugs: segment.covered_market_slugs.clone(),
-            covered_condition_ids: segment.covered_condition_ids.clone(),
-            covered_asset_ids: segment.covered_asset_ids.clone(),
-            depth_snapshot_last_update_id: segment.depth_snapshot_last_update_id,
-            depth_stitch_applied_rows: segment.depth_stitch_applied_rows,
-            depth_stitch_gap_rows: segment.depth_stitch_gap_rows,
-            depth_resnapshot_count: segment.depth_resnapshot_count,
-            depth_local_u_min: segment.depth_local_u_min,
-            depth_local_u_max: segment.depth_local_u_max,
-            depth_first_update_bridged_snapshot: segment.depth_first_update_bridged_snapshot,
-            depth_source_gaps: segment.depth_source_gaps.clone(),
-            metadata_complete_rows: segment.metadata_complete_rows,
-            metadata_unavailable_rows: segment.metadata_unavailable_rows,
-        }
+impl ActiveSegment {
+    pub(super) fn into_parts(self) -> (TypedParquetSegmentWriter, SegmentManifestContext) {
+        let context = SegmentManifestContext {
+            source_kind: self.source_kind,
+            utc_day: self.utc_day,
+            utc_hour: self.utc_hour,
+            hour_start_utc_ms: self.hour_start_utc_ms,
+            hour_end_utc_ms: self.hour_end_utc_ms,
+            hour_part: self.hour_part,
+            segment_start_recv_time_utc_ms: self.segment_start_recv_time_utc_ms,
+            last_recv_time_utc_ms: self.last_recv_time_utc_ms,
+            source_ts_start: self.source_ts_start,
+            source_ts_end: self.source_ts_end,
+            rows: self.rows,
+            event_type_counts: self.event_type_counts,
+            backfill_rows: self.backfill_rows,
+            book_rows_with_bids_asks: self.book_rows_with_bids_asks,
+            covered_market_slugs: self.covered_market_slugs,
+            covered_condition_ids: self.covered_condition_ids,
+            covered_asset_ids: self.covered_asset_ids,
+            depth_snapshot_last_update_id: self.depth_snapshot_last_update_id,
+            depth_stitch_applied_rows: self.depth_stitch_applied_rows,
+            depth_stitch_gap_rows: self.depth_stitch_gap_rows,
+            depth_resnapshot_count: self.depth_resnapshot_count,
+            depth_local_u_min: self.depth_local_u_min,
+            depth_local_u_max: self.depth_local_u_max,
+            depth_first_update_bridged_snapshot: self.depth_first_update_bridged_snapshot,
+            depth_source_gaps: self.depth_source_gaps,
+            metadata_complete_rows: self.metadata_complete_rows,
+            metadata_unavailable_rows: self.metadata_unavailable_rows,
+        };
+        (self.writer, context)
     }
 }
 
@@ -1809,7 +1773,6 @@ fn layout_family_for_source(source_kind: &str) -> &'static str {
 pub(super) struct SourceWriterHandle {
     pub(super) schema_version: String,
     pub(super) tx: std::sync::mpsc::SyncSender<WriterCommand>,
-    pub(super) queue_rows: Arc<AtomicU64>,
     pub(super) accepting_commands: Arc<Mutex<bool>>,
     pub(super) result_rx: std::sync::mpsc::Receiver<WriterTaskReport>,
     pub(super) completed_result: Option<WriterTaskReport>,
@@ -1882,7 +1845,6 @@ pub(super) struct SourceWriterOutput {
     pub(super) source_kind: String,
     pub(super) finalized_segments: Vec<TrainingFinalizedSegment>,
     pub(super) coordinated_close: Option<RuntimeCloseIdentity>,
-    pub(super) observed_utc_ms: i64,
 }
 
 pub(super) struct WriterStopOutcome {
@@ -1894,7 +1856,7 @@ pub(super) struct WriterStopOutcome {
 
 pub(super) struct ActiveSegment {
     source_kind: String,
-    pub(super) writer: TrainingSegmentWriter,
+    pub(super) writer: TypedParquetSegmentWriter,
     utc_day: String,
     utc_hour: String,
     hour_start_utc_ms: i64,
@@ -1905,7 +1867,6 @@ pub(super) struct ActiveSegment {
     source_ts_start: Option<String>,
     source_ts_end: Option<String>,
     rows: u64,
-    pub(super) bytes: u64,
     event_type_counts: BTreeMap<String, u64>,
     backfill_rows: u64,
     book_rows_with_bids_asks: u64,
@@ -1926,7 +1887,11 @@ pub(super) struct ActiveSegment {
 
 impl ActiveSegment {
     pub(super) fn new(naming: HourlyPartition, source_kind: &str, hour_part: u32) -> Result<Self> {
-        let writer = TrainingSegmentWriter::create_for_current_source(&naming, source_kind)?;
+        let writer = TypedParquetSegmentWriter::create_for_current_source(
+            &naming.partition_path,
+            &naming.stem,
+            source_kind,
+        )?;
         Ok(Self {
             source_kind: source_kind.to_owned(),
             utc_day: naming.utc_day.clone(),
@@ -1940,7 +1905,6 @@ impl ActiveSegment {
             source_ts_start: None,
             source_ts_end: None,
             rows: 0,
-            bytes: 0,
             event_type_counts: BTreeMap::new(),
             backfill_rows: 0,
             book_rows_with_bids_asks: 0,
@@ -1977,7 +1941,6 @@ impl ActiveSegment {
             self.source_ts_end = Some(source_ts);
         }
         self.rows = self.rows.saturating_add(typed_rows);
-        self.bytes = self.bytes.saturating_add(estimated_event_bytes(event));
         *self
             .event_type_counts
             .entry(event.source_event_type.clone())
@@ -2124,9 +2087,6 @@ impl ActiveSegment {
             self.source_ts_end = Some(source_ts);
         }
         self.rows = self.rows.saturating_add(typed_rows);
-        self.bytes = self
-            .bytes
-            .saturating_add(u64::try_from(message.owned_bytes()).unwrap_or(u64::MAX));
         *self
             .event_type_counts
             .entry(message.event_type().to_owned())
@@ -2176,69 +2136,10 @@ impl ActiveSegment {
     }
 }
 
-pub(super) enum TrainingSegmentWriter {
-    Typed(TypedParquetSegmentWriter),
-}
-
-impl TrainingSegmentWriter {
-    fn create_for_current_source(naming: &HourlyPartition, source_kind: &str) -> Result<Self> {
-        Ok(Self::Typed(
-            TypedParquetSegmentWriter::create_for_current_source(
-                &naming.partition_path,
-                &naming.stem,
-                source_kind,
-            )?,
-        ))
-    }
-
-    pub(super) fn write_event(&mut self, event: &RawEvent) -> Result<u64> {
-        match self {
-            Self::Typed(writer) => write_typed_event(writer, event),
-        }
-    }
-
-    fn write_polymarket_orderbook_v3(
-        &mut self,
-        message: &PolymarketOrderbookV3Message,
-        sequence_state: &mut PolymarketOrderbookV3WriteSequenceState,
-    ) -> Result<u64> {
-        match self {
-            Self::Typed(writer) => {
-                writer.write_polymarket_orderbook_v3_messages(
-                    std::slice::from_ref(message),
-                    sequence_state,
-                )?;
-                Ok(1)
-            }
-        }
-    }
-
-    fn schema_version(&self) -> &str {
-        match self {
-            Self::Typed(writer) => writer.schema_version(),
-        }
-    }
-
-    fn append_key_value_metadata(&mut self, key: &str, value: String) -> Result<()> {
-        match self {
-            Self::Typed(writer) => writer.append_key_value_metadata(key, value),
-        }
-    }
-
-    fn final_path(&self) -> &Path {
-        match self {
-            Self::Typed(writer) => writer.final_path(),
-        }
-    }
-
-    fn finalize(self) -> Result<PublishedSegment> {
-        match self {
-            Self::Typed(writer) => writer.finalize(),
-        }
-    }
-}
-
-fn write_typed_event(writer: &mut TypedParquetSegmentWriter, event: &RawEvent) -> Result<u64> {
+pub(super) fn write_typed_event(
+    writer: &mut TypedParquetSegmentWriter,
+    event: &RawEvent,
+) -> Result<u64> {
     let logical_bytes = u64::try_from(owned_event_bytes(event))
         .map_err(|_| invalid_data("typed event logical size does not fit in u64"))?;
     match event.source_kind.as_str() {

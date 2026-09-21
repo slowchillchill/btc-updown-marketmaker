@@ -46,17 +46,6 @@ pub(super) fn raw_event_with_recv_time(
     }
 }
 
-pub(super) fn estimated_event_bytes(event: &RawEvent) -> u64 {
-    event.source_kind.len() as u64
-        + event.source_event_type.len() as u64
-        + event.source_identifier.len() as u64
-        + event.source_ts.as_deref().unwrap_or_default().len() as u64
-        + event.collector_host_id.len() as u64
-        + event.collector_region.len() as u64
-        + event.source_endpoint.len() as u64
-        + event.raw_json.len() as u64
-}
-
 pub(super) fn event_envelope(event: &RawEvent, source_kind: SourceKind) -> EventEnvelope {
     EventEnvelope {
         source_kind,
