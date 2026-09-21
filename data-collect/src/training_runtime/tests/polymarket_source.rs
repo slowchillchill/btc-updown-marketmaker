@@ -4010,8 +4010,6 @@ fn start_cold_polymarket_v3_writer_for_test(
     std::sync::mpsc::Receiver<std::result::Result<SourceWriterOutput, String>>,
 ) {
     let (command_tx, command_rx) = std::sync::mpsc::sync_channel(DEFAULT_WRITER_CHANNEL_CAPACITY);
-    let queue_rows = Arc::new(AtomicU64::new(0));
-    let worker_queue_rows = Arc::clone(&queue_rows);
     let accepting_commands = Arc::new(Mutex::new(true));
     let worker_accepting_commands = Arc::clone(&accepting_commands);
     let (output_tx, output_rx) = std::sync::mpsc::sync_channel(1);
@@ -4028,7 +4026,6 @@ fn start_cold_polymarket_v3_writer_for_test(
             "polymarket_market".to_owned(),
             POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION.to_owned(),
             command_rx,
-            worker_queue_rows,
             worker_accepting_commands,
             worker_stats,
             worker_manifest_tx,
@@ -4045,7 +4042,6 @@ fn start_cold_polymarket_v3_writer_for_test(
             SourceWriterHandle {
                 schema_version: POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION.to_owned(),
                 tx: command_tx,
-                queue_rows,
                 accepting_commands,
                 result_rx: report_rx,
                 completed_result: None,
@@ -4094,7 +4090,6 @@ async fn legacy_v2_writer_rejects_polymarket_v3_ingress_without_mutating_batches
         SourceWriterHandle {
             schema_version: "polymarket_orderbook_v2".to_owned(),
             tx: writer_tx,
-            queue_rows: Arc::new(AtomicU64::new(0)),
             accepting_commands: Arc::new(Mutex::new(true)),
             result_rx,
             completed_result: None,
@@ -4286,13 +4281,11 @@ async fn v3_writer_disconnect_releases_command_reservations_and_records_drop() {
     let (writer_tx, writer_rx) = std::sync::mpsc::sync_channel(1);
     drop(writer_rx);
     let (_result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
-    let queue_rows = Arc::new(AtomicU64::new(0));
     let mut writers = BTreeMap::from([(
         "polymarket_market".to_owned(),
         SourceWriterHandle {
             schema_version: POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION.to_owned(),
             tx: writer_tx,
-            queue_rows: Arc::clone(&queue_rows),
             accepting_commands: Arc::new(Mutex::new(true)),
             result_rx,
             completed_result: None,
@@ -4327,7 +4320,6 @@ async fn v3_writer_disconnect_releases_command_reservations_and_records_drop() {
 
     assert!(error.to_string().contains("writer_queue_disconnected"));
     assert!(batches.polymarket_orderbook_v3.is_empty());
-    assert_eq!(queue_rows.load(Ordering::Relaxed), 0);
     assert_eq!(
         stats.drain_operational_day(&utc_day)["polymarket_market"].dropped_rows,
         1
@@ -4382,13 +4374,11 @@ async fn v3_writer_backpressure_timeout_releases_command_reservations_and_record
         })
         .unwrap();
     let (_result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
-    let queue_rows = Arc::new(AtomicU64::new(0));
     let mut writers = BTreeMap::from([(
         "polymarket_market".to_owned(),
         SourceWriterHandle {
             schema_version: POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION.to_owned(),
             tx: writer_tx,
-            queue_rows: Arc::clone(&queue_rows),
             accepting_commands: Arc::new(Mutex::new(true)),
             result_rx,
             completed_result: None,
@@ -4406,7 +4396,6 @@ async fn v3_writer_backpressure_timeout_releases_command_reservations_and_record
             .contains("writer_queue_backpressure_timeout")
     );
     assert!(batch.is_empty());
-    assert_eq!(queue_rows.load(Ordering::Relaxed), 0);
     assert_eq!(
         stats.drain_operational_day(&utc_day)["polymarket_market"].dropped_rows,
         1

@@ -656,7 +656,6 @@ fn multi_day_writer_deltas_release_closed_owner_material_without_losing_files() 
                 .unwrap()
                 .to_owned(),
             rx,
-            Arc::new(AtomicU64::new(3)),
             Arc::new(Mutex::new(true)),
             Arc::new(SourceQueueBackpressureStats::default()),
             manifest_tx,

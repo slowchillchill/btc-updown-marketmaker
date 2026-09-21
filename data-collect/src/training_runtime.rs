@@ -208,8 +208,8 @@ use crate::sources::polymarket::{
     classify_gamma_market_by_slug_transport_error, evaluate_gamma_terminal_response,
 };
 use crate::writer::{
-    DAILY_FILE_RECOVERY_METADATA_KEY, PolymarketOrderbookV3WriteSequenceState, PublishedSegment,
-    RawEvent, RawEventAdmission, TypedParquetSegmentWriter, typed_sort_order,
+    DAILY_FILE_RECOVERY_METADATA_KEY, PolymarketOrderbookV3WriteSequenceState, RawEvent,
+    RawEventAdmission, TypedParquetSegmentWriter, typed_sort_order,
 };
 #[cfg(test)]
 use crate::writer::{PARQUET_ROW_GROUP_MAX_BYTES, PARQUET_ROW_GROUP_MAX_ROWS};
@@ -3932,7 +3932,6 @@ mod tests {
         polymarket_pipeline_messages: u64,
         polymarket_decoded_messages: u64,
         shared_ingress_rows: u64,
-        writer_rows: u64,
         global_inflight_rows: u64,
     }
 
@@ -4038,11 +4037,9 @@ mod tests {
             enqueue_lock: Arc::new(AsyncMutex::new(())),
         };
 
-        let rollover_error =
-            raw_day_gate_for_rollover(&sink, &utc_day_string_from_ms(recv_time_utc_ms).unwrap())
-                .await
-                .err()
-                .expect("a producer wrapper must not synthesize a missing raw-day gate");
+        let rollover_error = raw_day_gate_for_rollover(&sink)
+            .err()
+            .expect("a producer wrapper must not synthesize a missing raw-day gate");
         assert!(
             rollover_error
                 .to_string()
@@ -4232,10 +4229,6 @@ mod tests {
             enqueue_lock: Arc::new(AsyncMutex::new(())),
         };
         let source_queue_tx_for_samples = root_sink.tx.clone();
-        let writer_queue_rows_for_samples = writers
-            .values()
-            .map(|writer| Arc::clone(&writer.queue_rows))
-            .collect::<Vec<_>>();
         let polymarket_sink = root_sink.fork_logical_producer();
         let rtds_sink = root_sink.fork_logical_producer();
         let depth_sink = root_sink.fork_logical_producer();
@@ -4267,10 +4260,6 @@ mod tests {
                 let shared_ingress_rows = source_queue_tx_for_samples
                     .max_capacity()
                     .saturating_sub(source_queue_tx_for_samples.capacity());
-                let writer_rows = writer_queue_rows_for_samples
-                    .iter()
-                    .map(|rows| rows.load(Ordering::Relaxed))
-                    .sum();
                 samples.push(PipelineBacklogSample {
                     polymarket_pipeline_messages: offered.saturating_sub(processed),
                     polymarket_decoded_messages: u64::try_from(
@@ -4278,7 +4267,6 @@ mod tests {
                     )
                     .unwrap(),
                     shared_ingress_rows: u64::try_from(shared_ingress_rows).unwrap(),
-                    writer_rows,
                     global_inflight_rows: u64::try_from(
                         global_baseline.0.saturating_sub(global_available),
                     )
@@ -4557,12 +4545,6 @@ mod tests {
             &backlog_samples,
             |sample| sample.shared_ingress_rows,
             u64::try_from(one_tick_rows).unwrap(),
-        );
-        assert_no_sustained_monotonic_backlog(
-            "writer rows",
-            &backlog_samples,
-            |sample| sample.writer_rows,
-            u64::try_from(DEFAULT_FLUSH_ROWS).unwrap(),
         );
         // Each auxiliary source may legitimately fill one bounded ingress batch during the window.
         assert_no_sustained_monotonic_backlog(

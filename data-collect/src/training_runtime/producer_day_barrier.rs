@@ -63,11 +63,10 @@ async fn complete_source_return_at_pending_rollover(
     let close = gate.seal_prepared_rollover(&exit.close).await?;
     let release = send_day_barrier(sink, run_started, producer, close.clone()).await?;
     match apply_day_barrier_release(sink, producer, &close, release).await {
-        Ok(true) => Err(invalid_data(format!(
+        Ok(()) => Err(invalid_data(format!(
             "source returned during rollover but coordinator resumed producer: {producer}"
         ))
         .into()),
-        Ok(false) => source_result,
         Err(error) if is_exact_coordinated_source_stop(error.as_ref(), producer, &close) => {
             source_result
         }
@@ -109,7 +108,7 @@ where
         if now_ms() >= next_boundary_ms {
             let utc_day = utc_day_string_from_ms(next_boundary_ms.saturating_sub(1))
                 .ok_or_else(|| invalid_data("UTC day unavailable for producer barrier"))?;
-            let raw_day_gate = raw_day_gate_for_rollover(&sink, &utc_day).await?;
+            let raw_day_gate = raw_day_gate_for_rollover(&sink)?;
             let close = raw_day_gate.prepare_rollover(&utc_day, next_boundary_ms)?;
             raw_day_gate
                 .wait_for_other_source_fences(producer, &close)
@@ -124,24 +123,8 @@ where
             } else {
                 raw_day_gate.seal_prepared_rollover(&close).await?
             };
-            if source_started {
-                if let Some(source_result) = wait_for_day_barrier_while_source_runs(
-                    source.as_mut(),
-                    &sink,
-                    run_started,
-                    producer,
-                    close,
-                )
-                .await?
-                {
-                    return source_result;
-                }
-            } else {
-                let release = send_day_barrier(&sink, run_started, producer, close.clone()).await?;
-                if !apply_day_barrier_release(&sink, producer, &close, release).await? {
-                    return Ok(());
-                }
-            }
+            let release = send_day_barrier(&sink, run_started, producer, close.clone()).await?;
+            apply_day_barrier_release(&sink, producer, &close, release).await?;
             next_boundary_ms = next_boundary_ms.saturating_add(UTC_DAY_MS);
             continue;
         }
@@ -161,28 +144,7 @@ where
     }
 }
 
-pub(super) async fn wait_for_day_barrier_while_source_runs<F>(
-    _source: Pin<&mut F>,
-    sink: &SourceEventSink,
-    run_started: Instant,
-    producer: &str,
-    close: RawDayClose,
-) -> Result<Option<Result<()>>>
-where
-    F: Future<Output = Result<()>>,
-{
-    let release = send_day_barrier(sink, run_started, producer, close.clone()).await?;
-    if apply_day_barrier_release(sink, producer, &close, release).await? {
-        Ok(None)
-    } else {
-        Ok(Some(Ok(())))
-    }
-}
-
-pub(super) async fn raw_day_gate_for_rollover(
-    sink: &SourceEventSink,
-    _utc_day: &str,
-) -> Result<Arc<RawDayGate>> {
+pub(super) fn raw_day_gate_for_rollover(sink: &SourceEventSink) -> Result<Arc<RawDayGate>> {
     sink.source_queue_backpressure
         .raw_day_gate()
         .ok_or_else(|| invalid_data("raw-day gate missing from producer rollover wrapper").into())
@@ -207,12 +169,12 @@ pub(super) async fn apply_day_barrier_release(
     producer: &str,
     close: &RawDayClose,
     release: DayBarrierRelease,
-) -> Result<bool> {
+) -> Result<()> {
     match release {
         #[cfg(test)]
         DayBarrierRelease::Resume => {
             flush_deferred_raw_events(sink, producer, close).await?;
-            Ok(true)
+            Ok(())
         }
         DayBarrierRelease::StopWithClose(actual) => {
             let expected = RuntimeCloseIdentity::from_rollover_old_day(close);
@@ -291,7 +253,7 @@ pub(super) async fn apply_day_barrier_release(
             loop {
                 let phase = token.phase_rx.borrow_and_update().clone();
                 match phase {
-                    ProducerReleasePhase::ResumeSources => return Ok(true),
+                    ProducerReleasePhase::ResumeSources => return Ok(()),
                     ProducerReleasePhase::Stop(actual) => {
                         validate_release_stop_identity(close, &actual)?;
                         flush_accepted_deferred_raw_events_for_stop(sink, producer, close).await?;
@@ -408,7 +370,7 @@ where
         if now_ms() >= next_boundary_ms {
             let utc_day = utc_day_string_from_ms(next_boundary_ms.saturating_sub(1))
                 .ok_or_else(|| invalid_data("UTC day unavailable for Polymarket barrier"))?;
-            let raw_day_gate = raw_day_gate_for_rollover(&sink, &utc_day).await?;
+            let raw_day_gate = raw_day_gate_for_rollover(&sink)?;
             let close = raw_day_gate.prepare_rollover(&utc_day, next_boundary_ms)?;
             if source_started {
                 if let Some(source_result) = fence_polymarket_and_send_day_barrier(
@@ -434,9 +396,7 @@ where
                 let close = raw_day_gate.seal_prepared_rollover(&close).await?;
                 let release =
                     send_day_barrier(&sink, run_started, "polymarket", close.clone()).await?;
-                if !apply_day_barrier_release(&sink, "polymarket", &close, release).await? {
-                    return Ok(());
-                }
+                apply_day_barrier_release(&sink, "polymarket", &close, release).await?;
             }
             next_boundary_ms = next_boundary_ms.saturating_add(UTC_DAY_MS);
             continue;
@@ -500,11 +460,10 @@ where
     };
     let release = send_day_barrier(sink, run_started, "polymarket", close.clone()).await?;
     match apply_day_barrier_release(sink, "polymarket", &close, release).await {
-        Ok(true) => {
+        Ok(()) => {
             let _ = resume_tx.send(());
             Ok(None)
         }
-        Ok(false) => Ok(Some(Ok(()))),
         Err(error)
             if coordinated_stop_matches_prepared_source_terminal(
                 error.as_ref(),
@@ -552,7 +511,7 @@ where
         if now_ms() >= next_boundary_ms {
             let utc_day = utc_day_string_from_ms(next_boundary_ms.saturating_sub(1))
                 .ok_or_else(|| invalid_data("UTC day unavailable for aggTrade barrier"))?;
-            let raw_day_gate = raw_day_gate_for_rollover(&sink, &utc_day).await?;
+            let raw_day_gate = raw_day_gate_for_rollover(&sink)?;
             let close = raw_day_gate.prepare_rollover(&utc_day, next_boundary_ms)?;
             if source_started {
                 if let Some(source_result) = flush_aggtrade_and_send_day_barrier(
@@ -578,9 +537,7 @@ where
                 let close = raw_day_gate.seal_prepared_rollover(&close).await?;
                 let release =
                     send_day_barrier(&sink, run_started, "binance_aggtrade", close.clone()).await?;
-                if !apply_day_barrier_release(&sink, "binance_aggtrade", &close, release).await? {
-                    return Ok(());
-                }
+                apply_day_barrier_release(&sink, "binance_aggtrade", &close, release).await?;
             }
             next_boundary_ms = next_boundary_ms.saturating_add(UTC_DAY_MS);
             continue;
@@ -620,7 +577,7 @@ where
         if now_ms() >= next_boundary_ms {
             let utc_day = utc_day_string_from_ms(next_boundary_ms.saturating_sub(1))
                 .ok_or_else(|| invalid_data("UTC day unavailable for depth barrier"))?;
-            let raw_day_gate = raw_day_gate_for_rollover(&sink, &utc_day).await?;
+            let raw_day_gate = raw_day_gate_for_rollover(&sink)?;
             let close = raw_day_gate.prepare_rollover(&utc_day, next_boundary_ms)?;
             if source_started {
                 if let Some(source_result) = fence_depth_and_send_day_barrier(
@@ -646,9 +603,7 @@ where
                 let close = raw_day_gate.seal_prepared_rollover(&close).await?;
                 let release =
                     send_day_barrier(&sink, run_started, "binance_depth", close.clone()).await?;
-                if !apply_day_barrier_release(&sink, "binance_depth", &close, release).await? {
-                    return Ok(());
-                }
+                apply_day_barrier_release(&sink, "binance_depth", &close, release).await?;
             }
             next_boundary_ms = next_boundary_ms.saturating_add(UTC_DAY_MS);
             continue;
@@ -782,12 +737,9 @@ where
         RawDaySealOutcome::SourceEnded(result) => return Ok(Some(result)),
     };
     let release = send_day_barrier(sink, run_started, "binance_depth", close.clone()).await?;
-    if apply_day_barrier_release(sink, "binance_depth", &close, release).await? {
-        let _ = resume_tx.send(());
-        Ok(None)
-    } else {
-        Ok(Some(Ok(())))
-    }
+    apply_day_barrier_release(sink, "binance_depth", &close, release).await?;
+    let _ = resume_tx.send(());
+    Ok(None)
 }
 
 async fn flush_aggtrade_and_send_day_barrier<F>(
@@ -831,10 +783,7 @@ where
         RawDaySealOutcome::SourceEnded(result) => return Ok(Some(result)),
     };
     let release = send_day_barrier(sink, run_started, "binance_aggtrade", close.clone()).await?;
-    if apply_day_barrier_release(sink, "binance_aggtrade", &close, release).await? {
-        let _ = resume_tx.send(());
-        Ok(None)
-    } else {
-        Ok(Some(Ok(())))
-    }
+    apply_day_barrier_release(sink, "binance_aggtrade", &close, release).await?;
+    let _ = resume_tx.send(());
+    Ok(None)
 }
