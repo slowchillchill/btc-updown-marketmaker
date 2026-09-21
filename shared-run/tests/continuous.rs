@@ -2012,9 +2012,17 @@ async fn continuous_empty_reference_enrollment_uses_same_shared_chain_without_re
             market,
         })
         .unwrap();
+    let before_late_market_close = shared.ledger().projection_v2();
     let (second, _) = driver
         .apply_group(source.next().unwrap().unwrap().prepared)
         .unwrap();
+    assert_eq!(
+        LedgerWriterV1::open_durable(&ledger_root)
+            .unwrap()
+            .projection_v2(),
+        before_late_market_close,
+        "PAPER迟登记已结束市场在接纳后的首个真实关闭前缀稳定此前材料，不回溯或等待Finish"
+    );
     assert_eq!(second.group().group_position, 1);
     assert!(second.actor_input_sequence() > first.actor_input_sequence());
     let frames = driver.frames();
@@ -3147,4 +3155,62 @@ async fn real_terminal_query_then_late_open_precede_lifecycle() {
         order.matched_shares
     );
     assert_eq!(late.order_trades(&id).count(), trades.len());
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn real_closed_market_prefix_stabilizes_zero_activity_before_finish() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let (core, times) = recorded_staggered_market_ends(&root);
+    let path = temp.path().join("sim.jsonl");
+    let (mut execution, observation) = execution(&path, &core, SUCCESS_POLICY);
+    let opening = observation.opening_record().unwrap();
+    let mut ledger = LedgerWriterV1::new(AccountAdmissionPolicyV1 {
+        per_market_all_in_commitment_limit_pusd: ExactDecimal("1000".into()),
+    });
+    let ledger_root = temp.path().join("ledger");
+    execution
+        .bind_ledger_recording_v2(&mut ledger, &ledger_root)
+        .unwrap();
+    let mut shared = SharedExecutionV1::from_opening(ledger, observation.clone())
+        .unwrap()
+        .unwrap();
+    let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times).unwrap();
+    let mut driver = FinitePublicConsumptionV1::new(execution, source, "market-stability".into());
+    let mut crossed_first = false;
+    let mut crossed_second = false;
+    let mut prior = shared.ledger().projection_v2();
+    while driver.next_group().unwrap().is_some() {
+        let Some(view) = shared.action_before(&mut driver).unwrap() else {
+            continue;
+        };
+        let at = view.cutoff().decision_time().logical_time_utc_ms();
+        if at == 32_000 || at == 42_000 {
+            let recovered = LedgerWriterV1::open_durable(&ledger_root).unwrap();
+            assert_eq!(
+                recovered.projection_v2(),
+                prior,
+                "30/40秒原关闭前缀各自自动稳定此前Ledger；随后公共帧不倒灌"
+            );
+            assert!(opening.durable_reference().is_some());
+            assert!(!std::fs::read_to_string(&path).unwrap().contains("RUN_SEAL"));
+            if at == 32_000 {
+                crossed_first = true;
+            } else {
+                crossed_second = true;
+                break;
+            }
+        }
+        prior = shared.ledger().projection_v2();
+    }
+    assert!(crossed_first && crossed_second);
+    assert!(shared.registry().orders().next().is_none());
+    let mut restored = LedgerWriterV1::open_durable(&ledger_root).unwrap();
+    assert!(matches!(
+        restored.apply_noe_memory_v1(&opening).unwrap(),
+        LedgerMemoryApplyOutcomeV1::Applied(LedgerApplyOutcomeV1::AlreadyApplied { .. })
+    ));
+    driver.stop_and_drain().unwrap();
+    assert!(!ledger_root.join("ledger-active-v1.jsonl").exists());
+    assert!(!std::fs::read_to_string(path).unwrap().contains("RUN_SEAL"));
 }

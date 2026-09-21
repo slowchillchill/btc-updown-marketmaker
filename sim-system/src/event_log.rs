@@ -1097,6 +1097,9 @@ impl BackgroundLedgerV2 {
                 }
                 self.pending.pop_front();
             }
+            writer
+                .flush_accepted_batch()
+                .map_err(ledger_background_error)?;
         }
         Ok(())
     }
@@ -1133,7 +1136,10 @@ struct BackgroundFinishV1 {
 enum BackgroundLogCommandV1 {
     Group(BackgroundGroupV1),
     Finish(BackgroundFinishV1),
-    Stabilize(BackgroundFinishV1, std::sync::mpsc::SyncSender<()>),
+    Stabilize(
+        BackgroundFinishV1,
+        std::sync::mpsc::SyncSender<Result<(), SimEventLogErrorV2>>,
+    ),
     #[cfg(test)]
     Pause(
         std::sync::mpsc::SyncSender<()>,
@@ -1227,19 +1233,23 @@ impl BackgroundEventLogV1 {
                             }
                         }
                         Ok(BackgroundLogCommandV1::Stabilize(_finish, acknowledged)) => {
-                            #[cfg(feature = "measurement")]
-                            log.sync_data(MeasurementContext::CommitGroup)?;
-                            #[cfg(not(feature = "measurement"))]
-                            log.sync_data()?;
-                            if let Some(noe) = &mut noe {
-                                noe.stabilize().map_err(SimEventLogErrorV2::Noe)?;
-                            }
-                            #[cfg(feature = "shared-execution")]
-                            {
-                                ledger.accept(_finish.ledger)?;
-                                ledger.finish()?;
-                            }
-                            let _ = acknowledged.send(());
+                            let result = (|| {
+                                #[cfg(feature = "measurement")]
+                                log.sync_data(MeasurementContext::CommitGroup)?;
+                                #[cfg(not(feature = "measurement"))]
+                                log.sync_data()?;
+                                if let Some(noe) = &mut noe {
+                                    noe.stabilize().map_err(SimEventLogErrorV2::Noe)?;
+                                }
+                                #[cfg(feature = "shared-execution")]
+                                {
+                                    ledger.accept(_finish.ledger)?;
+                                    ledger.finish()?;
+                                }
+                                Ok(())
+                            })();
+                            let _ = acknowledged.send(result.clone());
+                            result?;
                         }
                         Ok(BackgroundLogCommandV1::Finish(_finish)) => {
                             #[cfg(feature = "measurement")]
@@ -1387,14 +1397,20 @@ impl BackgroundEventLogV1 {
         };
         self.sender
             .send(BackgroundLogCommandV1::Stabilize(finish, acknowledged))
-            .map_err(|_| SimEventLogErrorV2::InvalidStructure("原记录后台已停止"))?;
+            .map_err(|_| {
+                self.failure
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .unwrap_or(SimEventLogErrorV2::InvalidStructure("原记录后台已停止"))
+            })?;
         completed.recv().map_err(|_| {
             self.failure
                 .lock()
                 .unwrap()
                 .clone()
                 .unwrap_or(SimEventLogErrorV2::InvalidStructure("原记录后台未完成稳定"))
-        })
+        })?
     }
     pub(crate) fn enqueue(
         &mut self,

@@ -42,12 +42,13 @@ async fn memory_ledger_real_source_background_v2_gap_idempotence_and_funds() {
     assert_eq!(ledger.projection_v2().unwrap(),before);
     let ::execution_normalization::MemoryIdentityKeyV1::Entity(::execution_normalization::SourceNeutralEntityKeyV1::Order {source_order_id})=&order.key else {panic!("原平台订单实体")};
     driver.decision().unwrap().request(BusinessRequestV2::CancelOrder(CancelOrderRequestV2{context:RequestContextV2{global_request_id:"shared-cancel".into(),caller_correlation_id:None},item:crate::execution::CancelOrderItemV1{item_id:"cancel".into(),platform_order_id:source_order_id.clone()}})).unwrap();
+    // 市场结束现在是强制稳定边界；此前暂停仍证明热链不等待磁盘。
+    release.send(()).unwrap();
     while driver.next_group().unwrap().is_some() {}
     let remaining=observation.take_closed_records();
     for r in &remaining {ledger.apply_noe_memory_v1(r).unwrap();}
     assert_eq!(ledger.funds_read_v1().order(&order).unwrap().principal_encumbrance_pusd,contracts::ExecutionReadValueV1::Known(ExactDecimal("0".into())));
     let expected=ledger.projection_v2().unwrap();
-    release.send(()).unwrap();
     driver.complete(&mut RecordedMaterials{root,hidden:None}).unwrap();
     assert!(opening.durable_reference().is_some());
     let durable=opening.durable_reference().unwrap();

@@ -1,3 +1,4 @@
+mod parquet;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
@@ -329,7 +330,96 @@ impl SegmentStatsV1 {
     }
 }
 
-pub(crate) struct DurableLedgerV1 {
+pub(crate) enum DurableLedgerV1 {
+    Legacy(LegacyDurableLedgerV1),
+    Parquet(Box<parquet::ParquetLedger>),
+}
+impl DurableLedgerV1 {
+    pub(crate) fn create(
+        directory: &Path,
+        policy: &AccountAdmissionPolicyV1,
+    ) -> Result<Self, LedgerDurableErrorV1> {
+        LegacyDurableLedgerV1::create(directory, policy).map(Self::Legacy)
+    }
+    pub(crate) fn create_parquet(
+        directory: &Path,
+        genesis: DurablePayloadV1,
+    ) -> Result<Self, LedgerDurableErrorV1> {
+        parquet::ParquetLedger::create(directory, genesis)
+            .map(|writer| Self::Parquet(Box::new(writer)))
+    }
+    pub(crate) fn open<F: FnMut(DurablePayloadV1) -> Result<(), LedgerDurableErrorV1>>(
+        directory: &Path,
+        apply: F,
+    ) -> Result<Self, LedgerDurableErrorV1> {
+        if directory.join(parquet::MANIFEST).exists() {
+            parquet::ParquetLedger::open(directory, apply)
+                .map(|writer| Self::Parquet(Box::new(writer)))
+        } else {
+            LegacyDurableLedgerV1::open(directory, apply).map(Self::Legacy)
+        }
+    }
+    pub(crate) fn append(
+        &mut self,
+        payload: &DurablePayloadV1,
+    ) -> Result<(), LedgerDurableErrorV1> {
+        match self {
+            Self::Legacy(w) => w.append(payload),
+            Self::Parquet(w) => {
+                // 恢复后的原同步 API 仍先稳定再返回；后台材料另走 append_v2。
+                w.append(payload)?;
+                w.seal()?;
+                Ok(())
+            }
+        }
+    }
+    pub(crate) fn append_v2(
+        &mut self,
+        payload: &DurablePayloadV1,
+    ) -> Result<(), LedgerDurableErrorV1> {
+        match self {
+            Self::Legacy(w) => w.append_v2(payload),
+            Self::Parquet(w) => w.append(payload),
+        }
+    }
+    pub(crate) fn flush_background_batch(&mut self) -> Result<(), LedgerDurableErrorV1> {
+        match self {
+            Self::Legacy(_) => Ok(()),
+            Self::Parquet(writer) => writer.flush(),
+        }
+    }
+    pub(crate) fn seal_active_segment(
+        &mut self,
+    ) -> Result<Option<LedgerSealedSegmentReferenceV1>, LedgerDurableErrorV1> {
+        match self {
+            Self::Legacy(w) => w.seal_active_segment(),
+            Self::Parquet(w) => w.seal(),
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn open_measured<F: FnMut(DurablePayloadV1) -> Result<(), LedgerDurableErrorV1>>(
+        directory: &Path,
+        apply: F,
+    ) -> Result<(Self, RecoveryDurationsV1), LedgerDurableErrorV1> {
+        LegacyDurableLedgerV1::open_measured(directory, apply).map(|(w, d)| (Self::Legacy(w), d))
+    }
+    #[cfg(test)]
+    pub(crate) fn inject_append_failure(&mut self) {
+        match self {
+            Self::Legacy(w) => w.inject_append_failure(),
+            Self::Parquet(_) => panic!("旧活动段故障注入"),
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn inject_sync_failure(&mut self) {
+        match self {
+            Self::Legacy(w) => w.inject_sync_failure(),
+            Self::Parquet(_) => panic!("旧活动段故障注入"),
+        }
+    }
+}
+
+pub(crate) struct LegacyDurableLedgerV1 {
     directory: PathBuf,
     active_path: PathBuf,
     active: File,
@@ -343,7 +433,7 @@ pub(crate) struct DurableLedgerV1 {
     fail_next_sync: bool,
 }
 
-impl DurableLedgerV1 {
+impl LegacyDurableLedgerV1 {
     pub(crate) fn create(
         directory: &Path,
         policy: &AccountAdmissionPolicyV1,
@@ -351,12 +441,6 @@ impl DurableLedgerV1 {
         Self::create_inner(directory, policy, false)
     }
 
-    pub(crate) fn create_v2(
-        directory: &Path,
-        policy: &AccountAdmissionPolicyV1,
-    ) -> Result<Self, LedgerDurableErrorV1> {
-        Self::create_version(directory, policy, false, 2)
-    }
     fn create_inner(
         directory: &Path,
         policy: &AccountAdmissionPolicyV1,
@@ -385,6 +469,11 @@ impl DurableLedgerV1 {
         fail_after_publish: bool,
         version: u16,
     ) -> Result<Self, LedgerDurableErrorV1> {
+        if directory.join(parquet::MANIFEST).exists() {
+            return Err(LedgerDurableErrorV1::InvalidStructure(
+                "已有 Parquet 根必须使用 open_durable".into(),
+            ));
+        }
         match fs::create_dir(directory) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
@@ -798,7 +887,7 @@ fn recover_active_segment(
     directory: &Path,
     cursor: &mut RecoveryCursorV1,
     apply: &mut impl FnMut(DurablePayloadV1) -> Result<(), LedgerDurableErrorV1>,
-) -> Result<DurableLedgerV1, LedgerDurableErrorV1> {
+) -> Result<LegacyDurableLedgerV1, LedgerDurableErrorV1> {
     let active_path = directory.join(ACTIVE_FILE_NAME);
     let mut active_options = OpenOptions::new();
     active_options
@@ -838,7 +927,7 @@ fn recover_active_segment(
     active
         .seek(SeekFrom::End(0))
         .map_err(|error| io_error("定位 Ledger 活动段末尾", &active_path, error))?;
-    Ok(DurableLedgerV1::from_active(
+    Ok(LegacyDurableLedgerV1::from_active(
         directory,
         active_path,
         active,
@@ -1176,15 +1265,15 @@ mod tests {
         let directory = parent.path().join("ledger-instance");
         assert!(!directory.exists());
         assert!(matches!(
-            DurableLedgerV1::create_with_publish_failure(&directory, &policy("80")),
+            LegacyDurableLedgerV1::create_with_publish_failure(&directory, &policy("80")),
             Err(LedgerDurableErrorV1::DurabilityUncertain { .. })
         ));
         assert!(!directory.join(GENESIS_CANDIDATE_FILE_NAME).exists());
         assert!(directory.join(ACTIVE_FILE_NAME).exists());
-        assert!(DurableLedgerV1::create(&directory, &policy("90")).is_err());
+        assert!(LegacyDurableLedgerV1::create(&directory, &policy("90")).is_err());
 
         let mut recovered_policy = None;
-        let _ledger = DurableLedgerV1::open(&directory, |payload| {
+        let _ledger = LegacyDurableLedgerV1::open(&directory, |payload| {
             if let DurablePayloadV1::Genesis { policy } = payload {
                 recovered_policy = Some(policy);
             }

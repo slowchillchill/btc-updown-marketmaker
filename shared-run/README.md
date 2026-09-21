@@ -8,11 +8,17 @@
 
 目标数量沿 #5 的 `q=n/100、P=q*p` 有效生产域从原意图现算，使用整数系数和 scale 保持精确，不缓存 q、不改变 `ExactDecimal`、不增加运行时拒绝或舍入门。旧 Bridge 的宽字段映射不因此被收窄；完整 SDK 数值域证明仍属于其原任务。
 
-`NoeConsumedRecordRefV1` 在正式接线中由真实来源适配器交付。业务领取位置包含 context、source watermark 与原 ordinal；同一反馈的不同归一化记录共享 delivery。普通 `NoeDurableRecordViewV1` 和序列化引用不能直接传入应用或登记入口。公开生产者接口属于受信进程内宿主协作，宿主负责真实规范化批及驱动时点；手工重建批并自填时间仍可间接取得消费引用，这是 #101 已明确接受的风险，私有字段和直接 compile-fail 不证明来源不可伪造。正式耐久读取与 Ledger 恢复不重建输入以重新应用。开户经真实归约及原 NOE 规范化产生即为 Initialization，不等待后台交接、耐久、激活或公共组。热链不编码身份、不扫描磁盘、不等耐久。
+`NoeConsumedRecordRefV1` 在正式接线中由真实来源适配器交付。业务领取位置包含 context、source watermark 与原 ordinal；同一反馈的不同归一化记录共享 delivery。普通 `NoeDurableRecordViewV1` 和序列化引用不能直接传入应用或登记入口。公开生产者接口属于受信进程内宿主协作，宿主负责真实规范化批及驱动时点；手工重建批并自填时间仍可间接取得消费引用，这是 #101 已明确接受的风险，私有字段和直接 compile-fail 不证明来源不可伪造。正式耐久读取与 Ledger 恢复不重建输入以重新应用。开户经真实归约及原 NOE 规范化产生即为 Initialization，不等待后台交接、耐久、激活或公共组。普通内存业务处理不编码身份、不扫描磁盘、不等耐久；明确的市场稳定边界沿下文统一确认。
 
 Ledger 继续使用同一应用核心，V2 材料包含 Genesis、Transaction、ReservationDecision，交给原 SIM 日志后台 worker。来源交易需要真实 NOE 稳定映射时，后台先同步原 SIM 日志，再沿原 NOE stabilize 发布，按原顺序物化 Ledger；本地事件不虚构 NOE 依赖，也不越过未物化前项。没有第二线程、编号器或满队列策略。完成时原 NOE 稳定、Ledger 段封口后才允许原 SIM seal；实际 I/O 错误原样使本轮未完成。V1 同步记录和恢复保持兼容，V2 恢复还原原应用效果、visibility 和幂等位置，不重放业务领取。
 
 宿主计划停止时，先结束已开始的同步调用并停止新组、请求及 Ledger 追加，然后消耗 `PublicSimExecutionV1`、`FinitePublicConsumptionV1` 或 `ContinuousPublicConsumptionV1` 调用 `stop_and_drain`。它只沿同一后台移交 pending 组、同步 SIM、稳定 NOE、接收最后一批 Ledger 材料并封口 Ledger 段，等待原后台退出；不调用下一组、CloseTime、EndOfInput 或 `complete`，不撤单、清仓或改变已有订单/持仓事实。成功不生成 `RunSeal`，不返回完整冷产物或可恢复账户。原 `complete` 仍要求真实业务闭合。来源摘要 `market_event_source_identity_sha256` 对离线材料保留真实值，在线创建时传 `None`；新读取器兼容旧字符串字段，其他身份摘要保持原合同。
+
+新内存运行的物理格式为 NOE `noe_arrow_parquet_v1` 和 Ledger `ledger_arrow_parquet_v1`，与原 NOE 业务版本、`ledger_transaction_segment_v2` 分开。Arrow 的原序号、变体与二进制正文三列逐记录编码；正文明确沿 `serde_json_v1` 保存原变体成员。NOE 一个逻辑批对应一个 Parquet 容器，空批也保留来源水位；Ledger 保留 Genesis、Transaction、ReservationDecision 的原 `durable_record_seq`。批/段边界为单份元数据，未将整个 JSON 文件塞入单元格，也不双写暂存 JSON 或活动 JSONL。SIM 原始 JSONL、NOE context 及独立 LedgerProjection 元数据保持原责任。
+
+唯一后台写出完整 Parquet footer 后同步文件、禁止覆盖地原子发布、同步目录，再发布并同步不可变清单；只有清单稳定后 NOE 才提供原耐久引用，Ledger 封存成功后才确认稳定。清单逐批/段追加，不在后台常驻或重写整次运行的历史清单。NOE `boundary_sha256` 仍对原逻辑 CommitPayload 编码计算，原身份、ordinal 和来源水位不变。读取器兼容旧 JSON／JSONL；旧根合法续写仍用旧格式，不迁移或混写。新 NOE context 的物理编码使旧读取器明确拒绝；旧 Ledger 读取器无法取得新格式 Genesis，不能作为空账户恢复成功。损坏的已提交文件报错，未提交尾部不构成已稳定事实。
+
+每个已登记市场的 `end_at` 首次被原角色驱动的已关闭时间前缀覆盖时，自动沿同一 Stabilize 稳定此前已接纳的 SIM／NOE 和已产生的 Ledger。训练/离线取隐藏前缀，PAPER 取公开前缀；同毫秒公共组和请求处理后才真正关闭，单个公共组不是封口。零订单市场也触发，迟登记的过去市场在接纳后的首个合法关闭前缀处理；成功后释放待稳定截止。该边界不提前交付 NOE、不制造经济前驱、不结束账户或结算，迟到事实进入后续原记录流。`real_closed_market_prefix_stabilizes_zero_activity_before_finish` 用真实双市场及原关闭驱动验证 Finish 前自动稳定，后续公共帧才产生的 Ledger 不倒灌。
 
 逐请求资金取原预留状态，逐订单资金归属取实际 Ledger 分录及来源关联。迟到 trade 关联只补原分录归属，不重复经济入账；未足够归属的行返回 `Unavailable`，不按腿均分。原 Ledger 生命周期投影的计算语义保持不变：实际接收顺序若为 FinalSuccess 后 PendingApplied，其原 pending 计数仍随输入更新；共享订单/承诺则按源序保留终局。二者不能互相替代。
 

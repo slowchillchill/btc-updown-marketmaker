@@ -251,6 +251,31 @@ fn real_normalization_early_stability_visibility_sticky_decision_and_v2_recovery
         assert!(background.write(m).unwrap());
     }
     background.finish().unwrap();
+    // 同一真实三类材料在清单发布失败时，只能恢复先前已提交的Genesis。
+    let failed_root = temp.path().join("ledger-manifest-failure");
+    let mut failed = LedgerBackgroundWriterV2::new(&failed_root);
+    assert!(failed.write(&material[0]).unwrap());
+    failed.finish().unwrap();
+    for m in &material[1..] {
+        assert!(failed.write(m).unwrap());
+    }
+    std::fs::write(
+        failed_root.join(".ledger-parquet-00000000000000000001.manifest.json.tmp"),
+        b"incomplete",
+    )
+    .unwrap();
+    assert!(failed.finish().is_err());
+    assert!(failed.finish().is_err(), "失败句柄不能报告稳定成功");
+    drop(failed);
+    assert!(
+        LedgerWriterV1::open_durable(&failed_root)
+            .unwrap()
+            .projection_v2()
+            .is_none(),
+        "不可变分片存在但清单未提交，不恢复其中Transaction或ReservationDecision"
+    );
+    assert!(!failed_root.join("ledger-active-v1.jsonl").exists());
+
     let mut restored = LedgerWriterV1::open_durable(temp.path().join("ledger")).unwrap();
     assert_eq!(restored.projection_v2(), writer.projection_v2());
     assert_eq!(
@@ -272,4 +297,43 @@ fn real_normalization_early_stability_visibility_sticky_decision_and_v2_recovery
         let view = read_durable_noe_record_v1(stable.result()).unwrap();
         assert_eq!(view.position(), r.position());
     }
+    // 恢复后原本地请求沿同一Parquet记录序列续写，不生成active JSONL。
+    let fresh = LedgerRequestIdentityV1("new-after-stable-recovery".into());
+    restored
+        .try_reserve_intent(&fresh, &condition, &number("1"), &number("0"))
+        .unwrap();
+    let after_append = restored.projection_v2();
+    assert!(
+        restored.seal_active_segment().unwrap().is_none(),
+        "恢复后的同步追加已稳定"
+    );
+    let segment: LedgerSealedSegmentReferenceV1 = serde_json::from_slice(
+        &std::fs::read(
+            temp.path()
+                .join("ledger/ledger-parquet-00000000000000000001.manifest.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(segment.first_durable_record_seq, 6);
+    assert_eq!(segment.last_durable_record_seq, 6);
+    assert!(segment.location.ends_with(".parquet"));
+    drop(restored);
+    assert_eq!(
+        LedgerWriterV1::open_durable(temp.path().join("ledger"))
+            .unwrap()
+            .projection_v2(),
+        after_append
+    );
+    assert!(!temp.path().join("ledger/ledger-active-v1.jsonl").exists());
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(segment.location)
+        .unwrap()
+        .set_len(12)
+        .unwrap();
+    assert!(
+        LedgerWriterV1::open_durable(temp.path().join("ledger")).is_err(),
+        "已提交Parquet损坏不能静默回退到先前账户"
+    );
 }

@@ -1032,14 +1032,18 @@ pub fn reference_after(at: i64, sequence: u64) -> PolymarketRtdsChainlinkTwapInp
 pub const OTHER_CONDITION_ID: &str =
     "0x2222222222222222222222222222222222222222222222222222222222222222";
 pub fn recorded_equal_start_markets(root: &Path) -> (PublicObservationCoreV1, TradingTimes) {
-    recorded_two_market_rebate(root, false)
+    recorded_two_market_rebate(root, false, false)
 }
 pub fn recorded_rebate_contributions(root: &Path) -> (PublicObservationCoreV1, TradingTimes) {
-    recorded_two_market_rebate(root, true)
+    recorded_two_market_rebate(root, true, false)
+}
+pub fn recorded_staggered_market_ends(root: &Path) -> (PublicObservationCoreV1, TradingTimes) {
+    recorded_two_market_rebate(root, false, true)
 }
 fn recorded_two_market_rebate(
     root: &Path,
     rebate: bool,
+    staggered: bool,
 ) -> (PublicObservationCoreV1, TradingTimes) {
     let mut core = core();
     let mut writer = PublicRecordingWriterV1::create(root, core.header(), config()).unwrap();
@@ -1050,6 +1054,9 @@ fn recorded_two_market_rebate(
             let mut metadata = metadata_snapshot_row();
             if rebate {
                 metadata.market_end_utc = 320_000;
+            }
+            if staggered && !high {
+                metadata.market_end_utc = 40_000;
             }
             metadata.collector_admission_sequence = rows.len() as u64 + 1;
             if high {
@@ -1136,6 +1143,14 @@ fn recorded_two_market_rebate(
                 r.market = OTHER_CONDITION_ID.into();
             }
             rows.push(TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(r)));
+            times.push(at + 1000);
+        }
+    }
+    if staggered {
+        for (seq, at) in [(1, 31_000), (2, 41_000), (3, 51_000)] {
+            rows.push(TypedRawRowV2::PolymarketRtdsChainlinkTwap(reference_after(
+                at, seq,
+            )));
             times.push(at + 1000);
         }
     }

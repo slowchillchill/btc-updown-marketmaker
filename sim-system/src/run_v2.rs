@@ -819,6 +819,15 @@ impl MarketEnrollmentStateV2 {
 }
 
 impl UniqueSessionStateV2 {
+    fn recording_closed_through(&self) -> Option<i64> {
+        match self.opening_fact.account_instance_key.caller_role {
+            SimCallerRoleV1::Paper => self.public_visibility_frontier.closed_through_utc_ms,
+            SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation => {
+                self.hidden_platform_frontier.closed_through_utc_ms
+            }
+        }
+    }
+
     fn enroll_market(
         &mut self,
         request: &MarketEnrollmentRequestV1,
@@ -2276,6 +2285,8 @@ pub(crate) struct SimRunActorV2 {
     log_path: PathBuf,
     max_group_bytes: usize,
     log: Option<SimEventLogV2>,
+    // 仅未确认稳定的登记市场截止；成功稳定后删除，不保存历史市场清单。
+    unstable_market_ends: BTreeSet<i64>,
     background_log: Option<BackgroundEventLogV1>,
     applied_input_sequence: u64,
     state: Option<BusinessReducerStateV2>,
@@ -2922,6 +2933,7 @@ impl SimRunActorV2 {
             max_group_bytes,
             log: Some(log),
             background_log: None,
+            unstable_market_ends: BTreeSet::new(),
             applied_input_sequence: 1,
             state: Some(BusinessReducerStateV2 {
                 session: None,
@@ -2985,6 +2997,7 @@ impl SimRunActorV2 {
             max_group_bytes,
             log: Some(log),
             background_log: None,
+            unstable_market_ends: BTreeSet::new(),
             applied_input_sequence: 1,
             state: Some(replayed.state),
             projection_port,
@@ -3404,6 +3417,11 @@ impl SimRunActorV2 {
                 .ok_or(SimRunActorErrorV2::Closed)?
                 .next_input_sequence()
         };
+        let old_closed = self
+            .state
+            .as_ref()
+            .and_then(|s| s.session.as_ref())
+            .and_then(|s| s.recording_closed_through());
         let mut state = self.take_state()?;
         let mut outputs = Vec::with_capacity(inputs.len());
         let mut projections = Vec::new();
@@ -3481,6 +3499,28 @@ impl SimRunActorV2 {
         if let Some(background) = &mut self.background_log {
             self.state = Some(state);
             self.applied_input_sequence += accepted_len as u64;
+            if let Some(session) = self.state.as_ref().and_then(|s| s.session.as_ref()) {
+                for input in &inputs[..accepted_len] {
+                    match input {
+                        BusinessInputV2::CreateSession(_) => self.unstable_market_ends.extend(
+                            session
+                                .market_directory
+                                .markets()
+                                .map(|m| m.market().window.end_at_utc_ms),
+                        ),
+                        BusinessInputV2::EnrollMarket(request) => {
+                            self.unstable_market_ends
+                                .insert(request.market.market().window.end_at_utc_ms);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let new_closed = self
+                .state
+                .as_ref()
+                .and_then(|s| s.session.as_ref())
+                .and_then(|s| s.recording_closed_through());
             let mut accepted = inputs;
             accepted.truncate(accepted_len);
             let mut normalized = Vec::new();
@@ -3521,6 +3561,16 @@ impl SimRunActorV2 {
                 .map_err(SimRunActorErrorV2::Log)?;
             if let Some(error) = normalization_error {
                 return Err(SimRunActorErrorV2::Noe(error));
+            }
+            if new_closed != old_closed
+                && let Some(at) = new_closed.filter(|at| {
+                    self.unstable_market_ends
+                        .first()
+                        .is_some_and(|end| end <= at)
+                })
+            {
+                background.stabilize().map_err(SimRunActorErrorV2::Log)?;
+                self.unstable_market_ends.retain(|end| *end > at);
             }
         } else {
             let log = self.log.take().ok_or(SimRunActorErrorV2::Closed)?;
