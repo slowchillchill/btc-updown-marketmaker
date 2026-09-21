@@ -2710,6 +2710,7 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
         execution
             .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
             .unwrap();
+        let opening = observation.opening_record().unwrap();
         let mut shared = SharedExecutionV2::from_opening(ledger, observation.clone())
             .unwrap()
             .unwrap();
@@ -2910,9 +2911,31 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
         }
         assert!(closed && completed);
 
+        let before_reopen = shared.ledger().projection_v2();
+        let cash_before_reopen = shared.ledger().economic_read().unwrap().cash().clone();
         driver.complete(&mut Materials { root }).unwrap();
+        let mut restored = LedgerWriterV1::open_durable(temp.path().join("ledger")).unwrap();
+        assert_eq!(restored.projection_v2(), before_reopen);
+        assert_eq!(
+            restored.economic_read().unwrap().cash(),
+            &cash_before_reopen
+        );
+        assert!(matches!(
+            restored.apply_noe_memory_v2(&opening).unwrap(),
+            LedgerMemoryApplyOutcomeV1::Applied(LedgerApplyOutcomeV1::AlreadyApplied { .. })
+        ));
+        assert_eq!(
+            restored.projection_v2(),
+            before_reopen,
+            "原引用重交不改变余额或经济序"
+        );
         let reference = empty_completion.durable_reference().unwrap();
         assert!(observation.result_references().contains(reference.result()));
+        assert_eq!(
+            ::execution_normalization::read_durable_noe_record_position(reference.result())
+                .unwrap(),
+            empty_completion.position(),
+        );
         let durable = ::execution_normalization::read_noe_result_v4(reference.result()).unwrap();
         let ::execution_normalization::NormalizationRecord::Evidence {
             evidence: ::execution_normalization::SourceNeutralEvidenceKind::Control {
@@ -3213,4 +3236,86 @@ async fn real_closed_market_prefix_stabilizes_zero_activity_before_finish() {
     driver.stop_and_drain().unwrap();
     assert!(!ledger_root.join("ledger-active-v1.jsonl").exists());
     assert!(!std::fs::read_to_string(path).unwrap().contains("RUN_SEAL"));
+}
+
+#[test]
+fn v3_real_opening_stable_ledger_reopen() {
+    let temp = tempfile::tempdir().unwrap();
+    let core = recorded_memory_complete(&temp.path().join("dpt"));
+    let (mut execution, observation, _) = execution_with_rules(
+        &temp.path().join("sim.jsonl"),
+        &core,
+        SUCCESS_POLICY,
+        None,
+        "e".repeat(64),
+        "100",
+    );
+    let opening = observation.opening_record().unwrap();
+    let mut ledger =
+        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+    let ledger_root = temp.path().join("ledger");
+    execution
+        .bind_ledger_recording_v2(&mut ledger, &ledger_root)
+        .unwrap();
+    let shared = SharedExecutionV1::from_opening(ledger, observation)
+        .unwrap()
+        .unwrap();
+    let before = shared.ledger().projection_v2();
+    execution.stabilize_recording().unwrap();
+    execution.stop_and_drain().unwrap();
+    let reference = opening.durable_reference().unwrap();
+    let view = ::execution_normalization::read_durable_noe_record_v1(reference.result()).unwrap();
+    assert_eq!(view.position(), opening.position());
+    assert_eq!(
+        ::execution_normalization::read_durable_noe_record_position(reference.result()).unwrap(),
+        opening.position(),
+    );
+    let mut restored = LedgerWriterV1::open_durable(&ledger_root).unwrap();
+    assert_eq!(restored.projection_v2(), before);
+    assert!(matches!(
+        restored.apply_noe_memory_v1(&opening).unwrap(),
+        LedgerMemoryApplyOutcomeV1::Applied(LedgerApplyOutcomeV1::AlreadyApplied { .. })
+    ));
+    assert_eq!(restored.projection_v2(), before);
+}
+
+#[test]
+fn v4_real_opening_stable_ledger_reopen() {
+    let temp = tempfile::tempdir().unwrap();
+    let core = recorded_memory_complete(&temp.path().join("dpt"));
+    let (mut execution, observation, _) = execution_with_rules_v4(
+        &temp.path().join("sim.jsonl"),
+        &core,
+        SUCCESS_POLICY,
+        None,
+        "e".repeat(64),
+        "100",
+    );
+    let opening = observation.opening_record().unwrap();
+    let mut ledger =
+        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+    let ledger_root = temp.path().join("ledger");
+    execution
+        .bind_ledger_recording_v2(&mut ledger, &ledger_root)
+        .unwrap();
+    let shared = SharedExecutionV2::from_opening(ledger, observation)
+        .unwrap()
+        .unwrap();
+    let before = shared.ledger().projection_v2();
+    execution.stabilize_recording().unwrap();
+    execution.stop_and_drain().unwrap();
+    let reference = opening.durable_reference().unwrap();
+    let view = ::execution_normalization::read_durable_noe_record_v2(reference.result()).unwrap();
+    assert_eq!(view.position(), opening.position());
+    assert_eq!(
+        ::execution_normalization::read_durable_noe_record_position(reference.result()).unwrap(),
+        opening.position(),
+    );
+    let mut restored = LedgerWriterV1::open_durable(&ledger_root).unwrap();
+    assert_eq!(restored.projection_v2(), before);
+    assert!(matches!(
+        restored.apply_noe_memory_v2(&opening).unwrap(),
+        LedgerMemoryApplyOutcomeV1::Applied(LedgerApplyOutcomeV1::AlreadyApplied { .. })
+    ));
+    assert_eq!(restored.projection_v2(), before);
 }

@@ -816,6 +816,13 @@ fn read_noe_result<
 >(
     reference: &NoeResultReferenceV1,
 ) -> Result<ResolvedNoeResult<T, C>, DurableErrorV1> {
+    let context_container = read_result_context(reference)?;
+    read_noe_result_with_context(reference, context_container)
+}
+
+fn read_result_context(
+    reference: &NoeResultReferenceV1,
+) -> Result<(PathBuf, ContextContainerV1), DurableErrorV1> {
     let commit_path = PathBuf::from(&reference.commit_container.location);
     let commits_directory = commit_path.parent().filter(|path| {
         path.file_name()
@@ -830,6 +837,47 @@ fn read_noe_result<
     let context_directory = commits_directory
         .parent()
         .expect("固定 commits 目录必有上下文父目录");
+    let path = context_directory.join(CONTEXT_FILE_NAME);
+    let container = decode_container(&path)?;
+    Ok((path, container))
+}
+
+/// 恢复已提交效果所需的原位置；按来源自身的业务版本读取，不创建消费能力。
+pub fn read_durable_noe_record_position(
+    reference: &NoeResultReferenceV1,
+) -> Result<crate::NoeRecordPositionV1, DurableErrorV1> {
+    let context = read_result_context(reference)?;
+    let boundary = match context.1.payload.context.contract_version.as_str() {
+        "execution_normalization_v3" => {
+            let resolved: ResolvedNoeResultV3 = read_noe_result_with_context(reference, context)?;
+            resolved.boundary
+        }
+        "execution_normalization_v4" => {
+            let resolved: ResolvedNoeResultV4 = read_noe_result_with_context(reference, context)?;
+            resolved.boundary
+        }
+        _ => {
+            return Err(DurableErrorV1::UnsupportedContainerVersion {
+                path: context.0,
+                found: context.1.payload.container_version,
+            });
+        }
+    };
+    Ok(crate::NoeRecordPositionV1 {
+        context_reference: boundary.context_reference,
+        source_watermark: boundary.source_watermark,
+        record_ordinal: reference.record_ordinal,
+    })
+}
+
+fn read_noe_result_with_context<
+    T: NoeTradePayload<C>,
+    C: Clone + std::fmt::Debug + Eq + Serialize + serde::de::DeserializeOwned,
+>(
+    reference: &NoeResultReferenceV1,
+    (context_path, context_container): (PathBuf, ContextContainerV1),
+) -> Result<ResolvedNoeResult<T, C>, DurableErrorV1> {
+    let commit_path = PathBuf::from(&reference.commit_container.location);
     let file_sequence = commit_sequence_from_path(&commit_path)?;
     let container: CommitContainer<T, C> = read_commit_container(&commit_path)?;
     check_container_header(
@@ -865,8 +913,6 @@ fn read_noe_result<
             record_count,
         })?;
 
-    let context_path = context_directory.join(CONTEXT_FILE_NAME);
-    let context_container: ContextContainerV1 = decode_container(&context_path)?;
     check_container_header(
         &context_path,
         &context_container.payload.container_version,
