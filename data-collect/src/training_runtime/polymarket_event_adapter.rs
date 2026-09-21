@@ -1006,15 +1006,6 @@ pub(super) fn polymarket_metadata_v6_raw_event(
     ))
 }
 
-pub(super) fn polymarket_metadata_v6_rows_from_event(
-    event: &RawEvent,
-) -> Result<Vec<PolymarketMarketMetadataV6Row>> {
-    let admission = event.collector_admission.as_ref().ok_or_else(|| {
-        invalid_data("Polymarket metadata v6 event is missing collector admission")
-    })?;
-    polymarket_metadata_v6_rows_from_value(serde_json::from_str(&event.raw_json)?, admission)
-}
-
 fn polymarket_metadata_v6_rows_from_value(
     value: Value,
     admission: &RawEventAdmission,

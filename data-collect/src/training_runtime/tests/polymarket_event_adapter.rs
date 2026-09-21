@@ -35,7 +35,7 @@ fn polymarket_metadata_v6_preserves_v5_identity_evidence_and_admission() {
         sequence: 7,
         time_utc_ms: discovery.current.fixed_identity_verified_at_utc_ms + 1,
     });
-    let rows = polymarket_metadata_v6_rows_from_event(&event).unwrap();
+    let rows = polymarket_metadata_v6_rows_for_event(&event).unwrap();
     let batch =
         polymarket_market_metadata_v6_rows_to_batch(polymarket_market_metadata_v6_schema(), &rows)
             .unwrap();
@@ -127,7 +127,7 @@ fn polymarket_metadata_v6_anchor_is_independent_and_preserves_exact_http_evidenc
         sequence: 8,
         time_utc_ms: received + 10,
     });
-    let rows = polymarket_metadata_v6_rows_from_event(&event).unwrap();
+    let rows = polymarket_metadata_v6_rows_for_event(&event).unwrap();
     let batch =
         polymarket_market_metadata_v6_rows_to_batch(polymarket_market_metadata_v6_schema(), &rows)
             .unwrap();
@@ -634,7 +634,7 @@ fn polymarket_business_assets_must_match_their_message_condition() {
 }
 
 #[test]
-fn metadata_public_and_routed_entries_keep_error_precedence() {
+fn metadata_v5_writer_and_routed_entries_keep_error_precedence() {
     let discovery = test_btc_discovery();
     let row = polymarket_metadata_snapshot_row(
         &discovery.current,
@@ -649,12 +649,12 @@ fn metadata_public_and_routed_entries_keep_error_precedence() {
         polymarket_metadata_raw_event(PolymarketMarketMetadataV5Row::from_common(row, None, None))
             .unwrap();
     event.raw_json = "{".into();
-    for error in [
-        polymarket_metadata_rows_from_event(&event).unwrap_err(),
-        polymarket_metadata_v6_rows_from_event(&event).unwrap_err(),
-    ] {
-        assert!(error.to_string().contains("missing collector admission"));
-    }
+    assert!(
+        polymarket_metadata_rows_from_event(&event)
+            .unwrap_err()
+            .to_string()
+            .contains("missing collector admission")
+    );
     assert!(
         !polymarket_metadata_v6_rows_for_event(&event)
             .unwrap_err()

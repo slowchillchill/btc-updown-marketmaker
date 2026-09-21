@@ -576,7 +576,7 @@ fn polymarket_metadata_common_rows_from_event(
     let rows = if value["schema_version"]
         == crate::polymarket_market_metadata_v6_layout::POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION
     {
-        polymarket_metadata_v6_rows_from_event(event)?.into_iter().filter_map(|row| match row {
+        polymarket_metadata_v6_rows_for_event(event)?.into_iter().filter_map(|row| match row {
             crate::polymarket_market_metadata_v6_layout::PolymarketMarketMetadataV6Row::Existing(row) => Some(row),
             crate::polymarket_market_metadata_v6_layout::PolymarketMarketMetadataV6Row::AnchorRule(_) => None,
         }).collect()
