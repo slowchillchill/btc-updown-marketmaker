@@ -100,8 +100,8 @@ OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 .venv/bin/python -m model_train.validate_gra
 最终汇总为 `native-inputs-v3/aligned-affine/final-observation/final-c-resources.json`，保留原启动源码、图和二进制绑定，
 不将后续修复或文档提交重标为新性能实测。MAIN30三端验证进程结束RSS约4464—4469MiB，
 allocator已用块在C2 Orphan首轮有约4MiB台阶，同c／scene三次重复未呈持续增长；
-这不是生产单端内存或任意长期无泄漏的证明。PR继续保持Draft，整体独立审查与目标CPU验证尚未闭合，
-本地结果不替代目标容量，也不豁免当前第二PR或阶段验收门。计算对齐依据见[#6实施记录](https://github.com/slowchillchill/btc-updown-marketmaker/issues/6#issuecomment-5748954118)。
+这不是生产单端内存或任意长期无泄漏的证明。本地结果不替代目标容量；按[用户延期决定](https://github.com/slowchillchill/btc-updown-marketmaker/issues/6#issuecomment-5754843215)，
+目标CPU实测移出本次任务1.5、PR #125及阶段1的完成条件，继续整体独立审查、合并与适用阶段收尾。计算对齐依据见[#6实施记录](https://github.com/slowchillchill/btc-updown-marketmaker/issues/6#issuecomment-5748954118)。
 导出使用 `dynamo=True`、opset18、float32、`optimize/verify/report=True` 及外部参数文件。
 正式对比使用两端独立递推，显式 CPU、顺序执行、ORT全优化、interop1、关空转和memory pattern、保留arena。
 动态B覆盖1/2/3，图K覆盖1/2/128/129/255/256；宿主分块包含补齐、尾块及混合空行。
@@ -117,8 +117,8 @@ OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 .venv/bin/python -m model_train.measure_padd
 计时保持同一模型/会话，预热一次后测10次，记录两遍加宿主归约的中位数/最大值和原样本；旧逻辑只作成本对照。
 CPU结果不代表目标CPU容量或GPU模式验收。
 
-上述纯图交付不包含真实经济特征接线、完整精确支持集、三端最终意图一致性、70分钟C场景、长期内存、
-目标CPU/GPU测量、训练、部署或资金动作；不关闭任务1.5或阶段#6。市价估费与实际收费按 D-0232 分离；本轮 Actor 接线见下节。
+上述历史纯图交付切片当时不包含真实经济特征接线、完整精确支持集、三端最终意图一致性、70分钟C场景、长期内存、
+目标CPU/GPU测量、训练、部署或资金动作；该切片本身不关闭任务1.5或阶段#6，后续本地完整验收及当前延期范围见上文和末节。市价估费与实际收费按 D-0232 分离；本轮 Actor 接线见下节。
 
 
 ## Rust ORT 三端技术验证
@@ -400,4 +400,6 @@ cargo test --release --manifest-path model-train/native-inputs/Cargo.toml \
 运行使用该工作树局部 Python 环境、原初始权重和两图（含实际外部参数文件），映射同一 wheel 的 ORT 库；
 来源与二进制、依赖、录制和运行时摘要在初始化时冻结，动态采样不重复哈希大文件。
 本地并行观察须附实际并发环境；描述性时间不是独占性能或目标 CPU 容量结果。
-目标 m7i／c8a 主机尚未提供，目标 CPU 测量未执行；不新增云主机，不进入训练或部署。
+目标 m7i.2xlarge／c8a.2xlarge CPU 测量未执行，已按[用户决定](https://github.com/slowchillchill/btc-updown-marketmaker/issues/6#issuecomment-5754843215)延期，
+不再阻塞本次任务1.5、PR #125及阶段1审查、合并与关闭；仍须完成整体独立审查、适用收尾及准确合并版本的阶段组合审查。
+延期不等于已测或永久取消，不指定后续时间；本地结果不替代目标容量，不新增云主机，不进入训练、部署或下一阶段。
