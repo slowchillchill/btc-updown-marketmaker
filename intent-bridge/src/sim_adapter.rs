@@ -10,9 +10,6 @@ use sim_system::execution::{
 
 use crate::{BridgeBackendV1, private};
 
-const MAX_CANCEL_ORDERS_ITEMS_V1: usize = 1_000;
-const CANCEL_ORDERS_ITEM_COUNT_ERROR_V1: &str = "批量撤单项数必须为 1 至 1000";
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SimIntentCallContextV1 {
     pub request_context: RequestContextV2,
@@ -150,24 +147,22 @@ fn cancel_orders_request(
     context: RequestContextV2,
     platform_order_ids: &[String],
 ) -> Result<CancelOrdersRequestV2, SimRunActorErrorV2> {
-    if platform_order_ids.is_empty() || platform_order_ids.len() > MAX_CANCEL_ORDERS_ITEMS_V1 {
-        return Err(SimRunActorErrorV2::InvalidBusinessRequest(
-            CANCEL_ORDERS_ITEM_COUNT_ERROR_V1,
-        ));
-    }
     let items = platform_order_ids
         .iter()
-        .zip(0_u16..)
-        .map(
-            |(platform_order_id, batch_item_ordinal)| CancelOrderBatchItemV2 {
+        .enumerate()
+        .map(|(index, platform_order_id)| {
+            let batch_item_ordinal = u16::try_from(index).map_err(|_| {
+                SimRunActorErrorV2::InvalidBusinessRequest("批量撤单 ordinal 超出 u16 表示范围")
+            })?;
+            Ok(CancelOrderBatchItemV2 {
                 batch_item_ordinal,
                 item: CancelOrderItemV1 {
                     item_id: sim_item_id(&context.global_request_id, batch_item_ordinal),
                     platform_order_id: platform_order_id.clone(),
                 },
-            },
-        )
-        .collect();
+            })
+        })
+        .collect::<Result<Vec<_>, SimRunActorErrorV2>>()?;
     Ok(CancelOrdersRequestV2 { context, items })
 }
 
@@ -941,7 +936,7 @@ mod tests {
     }
 
     #[test]
-    fn propagates_sim_errors_and_enforces_only_gtd_and_cancel_batch_boundaries() {
+    fn propagates_sim_errors_and_accepts_large_cancel_batches() {
         let mut fixture = SimFixtureV1::new("run-intent-bridge-errors");
         let condition_id = ConditionId(CONDITION_ID.to_owned());
 
@@ -975,24 +970,41 @@ mod tests {
             Err(SimRunActorErrorV2::RequestTimeOverflow)
         );
 
-        for ids in [
-            Vec::new(),
-            (1..=1_001).map(|index| format!("sim-{index}")).collect(),
-        ] {
-            assert_eq!(
-                fixture.execute(
-                    "invalid-cancel-count",
-                    &ModelIntentV1::CancelOrders {
-                        platform_order_ids: ids,
-                    },
-                ),
-                Err(SimRunActorErrorV2::InvalidBusinessRequest(
-                    "批量撤单项数必须为 1 至 1000"
-                ))
-            );
-        }
+        assert_eq!(
+            fixture.execute(
+                "invalid-cancel-count",
+                &ModelIntentV1::CancelOrders {
+                    platform_order_ids: Vec::new()
+                }
+            ),
+            Err(SimRunActorErrorV2::InvalidBusinessRequest(
+                "批量撤单不能为空"
+            ))
+        );
 
-        let thousand_ids = (1..=1_000)
+        let mut maximal_ids = vec!["sim-1".to_owned(); usize::from(u16::MAX) + 1];
+        let converted =
+            cancel_orders_request(request_context("ordinal-end"), &maximal_ids).unwrap();
+        assert_eq!(converted.items.len(), 65_536);
+        assert_eq!(converted.items.last().unwrap().batch_item_ordinal, u16::MAX);
+        assert_eq!(
+            converted.items.last().unwrap().item.item_id,
+            "ordinal-end:65535"
+        );
+        maximal_ids.push("sim-2".to_owned());
+        assert_eq!(
+            fixture.execute(
+                "ordinal-overflow",
+                &ModelIntentV1::CancelOrders {
+                    platform_order_ids: maximal_ids
+                }
+            ),
+            Err(SimRunActorErrorV2::InvalidBusinessRequest(
+                "批量撤单 ordinal 超出 u16 表示范围"
+            ))
+        );
+
+        let thousand_ids = (1..=1_001)
             .map(|index| format!("sim-{index}"))
             .collect::<Vec<_>>();
         let accepted = fixture
@@ -1002,8 +1014,8 @@ mod tests {
                     platform_order_ids: thousand_ids,
                 },
             )
-            .expect("精确 1000 项批撤必须交给 SimExecution");
+            .expect("1001 项批撤必须完整交给 SimExecution");
         assert_eq!(accepted.input_sequence(), 3);
-        assert_eq!(accepted.scheduled_action_count(), 1_000);
+        assert_eq!(accepted.scheduled_action_count(), 1_001);
     }
 }

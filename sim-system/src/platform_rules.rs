@@ -1475,7 +1475,7 @@ fn merge_and_validate_reference_rules(
         .next()
         .expect("length checked before extracting Gamma market");
     if canonical_condition_id(&gamma.condition_id)? != reference.condition_id
-        || canonical_clob_market_id(&gamma.id)? != reference.clob_market_id
+        || gamma.id != reference.clob_market_id.0
         || gamma.slug != reference.slug
     {
         return Err(RuleSnapshotError::InvalidRules(
@@ -1558,7 +1558,7 @@ fn canonical_reference_market(
     reference: ReferenceMarketSpecV1,
 ) -> Result<ReferenceMarketSpecV1, RuleSnapshotError> {
     let condition_id = canonical_condition_id(&reference.condition_id.0)?;
-    let clob_market_id = canonical_clob_market_id(&reference.clob_market_id.0)?;
+    let clob_market_id = reference.clob_market_id;
     if reference.slug.trim() != reference.slug
         || !reference.slug.starts_with(BTC_UPDOWN_SLUG_PREFIX)
         || reference.slug.len() == BTC_UPDOWN_SLUG_PREFIX.len()
@@ -1636,20 +1636,6 @@ fn canonical_token_id(value: &str) -> Result<TokenId, RuleSnapshotError> {
         .map_err(|error| {
             RuleSnapshotError::InvalidReferenceMarket(format!("invalid token id {value}: {error}"))
         })
-}
-
-fn canonical_clob_market_id(value: &str) -> Result<ClobMarketId, RuleSnapshotError> {
-    let parsed = value.parse::<u64>().map_err(|error| {
-        RuleSnapshotError::InvalidReferenceMarket(format!(
-            "invalid CLOB market id {value}: {error}"
-        ))
-    })?;
-    if parsed == 0 {
-        return Err(RuleSnapshotError::InvalidReferenceMarket(
-            "CLOB market id must be positive".to_owned(),
-        ));
-    }
-    Ok(ClobMarketId(parsed.to_string()))
 }
 
 fn process_rule_application_policy() -> EvidenceBackedRuleV1<BtcUpdownProcessRulePolicyV1> {
@@ -3342,6 +3328,60 @@ pub(crate) mod tests {
         assert!(matches!(error, RuleSnapshotError::InvalidRules(_)));
         assert_eq!(server.request_count(), 3);
         assert!(!target.exists());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn clob_identity_is_preserved_across_reference_gamma_and_scenario() {
+        for id in [
+            "18446744073709551616".to_owned(),
+            format!("market-{}", "x".repeat(300)),
+        ] {
+            let gamma = String::from_utf8(GAMMA_CLOSED_REAL.to_vec())
+                .unwrap()
+                .replace("3278040", &id);
+            let server = ScriptedServer::start(vec![
+                ResponseSpec::json(200, CLOB_REAL),
+                ResponseSpec::json(200, GAMMA_OPEN_EMPTY),
+                ResponseSpec::json(200, gamma.into_bytes()),
+            ])
+            .await;
+            let directory = tempfile::tempdir().unwrap();
+            let mut request = current_request(directory.path().join("rules.json"));
+            request.reference_market.clob_market_id = ClobMarketId(id.clone());
+            let sealed = query_and_seal_current_process_snapshot_v3_with(
+                request,
+                test_loader_options(&server),
+                PLATFORM_RULE_CONFIG_BYTES,
+                fixed_now_utc_ms,
+            )
+            .await
+            .unwrap();
+            let reference = &sealed.snapshot().provenance.reference_market;
+            assert_eq!(reference.clob_market_id.0, id);
+            let market = crate::scenario::PlatformMarketV1::try_new(
+                contracts::MarketIdentityV2 {
+                    condition_id: reference.condition_id.clone(),
+                    clob_market_id: reference.clob_market_id.clone(),
+                    window: contracts::MarketWindowV2 {
+                        start_at_utc_ms: 1_000,
+                        end_at_utc_ms: 2_000,
+                    },
+                },
+                std::array::from_fn(|index| contracts::AssetIdentityV1 {
+                    token_id: reference.outcomes[index].token_id.clone(),
+                    outcome: contracts::OutcomeIdentityV1 {
+                        index: index as u32,
+                        label: reference.outcomes[index].outcome.clone(),
+                    },
+                }),
+            )
+            .unwrap();
+            assert_eq!(market.market().clob_market_id.0, id);
+        }
+        let gamma = String::from_utf8(GAMMA_CLOSED_REAL.to_vec())
+            .unwrap()
+            .replace("3278040", "03278040");
+        assert_rule_failure(CLOB_REAL.to_vec(), gamma.into_bytes()).await;
     }
 
     #[tokio::test(flavor = "current_thread")]
