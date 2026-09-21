@@ -1,6 +1,6 @@
 use crate::*;
 use contracts::{ConditionId, ExactDecimal, ExecutionReadValueV1, ModelIntentV1};
-use execution_normalization::{MemoryLogicalIdentityV1, NoeConsumedRecordRefV1};
+use execution_normalization::{MemoryLogicalIdentityV1, NoeConsumedRecordRef};
 use ledger::*;
 use sim_system::{execution::*, public_consumption::TrustedGroupDecisionCutoffV1};
 use std::sync::Arc;
@@ -20,15 +20,20 @@ struct OrderFunds {
     seq: Option<u64>,
 }
 /// 持有同一组必要标量和原Arc引用；后续动作不能改写本组读取。
-pub struct ActionBeforeReadV1 {
+pub struct ActionBeforeRead<R> {
     economics: AccountEconomicsReadV1,
+    pending_noe_record_count: usize,
     cutoff: TrustedGroupDecisionCutoffV1,
     ledger: LedgerProjectionV2,
-    registry: SharedExecutionRegistryV1,
+    registry: SharedExecutionRegistry<R>,
     requests: Vec<RequestFunds>,
     orders: Vec<OrderFunds>,
 }
-impl ActionBeforeReadV1 {
+impl<R: Clone + std::fmt::Debug + Eq> ActionBeforeRead<R> {
+    /// 已领取、因依赖未满足而尚待 Ledger 应用的原记录数；零不证明未来事实已齐。
+    pub fn pending_noe_record_count(&self) -> usize {
+        self.pending_noe_record_count
+    }
     pub fn economics(&self) -> &AccountEconomicsReadV1 {
         &self.economics
     }
@@ -38,14 +43,22 @@ impl ActionBeforeReadV1 {
     pub fn ledger(&self) -> &LedgerProjectionV2 {
         &self.ledger
     }
-    pub fn orders(&self) -> impl Iterator<Item = ExecutionOrderReadV1<'_>> {
+    pub fn orders(&self) -> impl Iterator<Item = ExecutionOrderRead<'_, R>> {
         self.registry.orders()
     }
     pub fn commitments(&self) -> impl Iterator<Item = IntentCommitmentReadV1<'_>> {
         self.registry.all_commitments()
     }
-    pub fn cancel_objects(&self) -> ExecutionReadValueV1<Vec<CancelObjectReadV1<'_>>> {
+    pub fn cancel_objects(&self) -> ExecutionReadValueV1<Vec<CancelObjectRead<'_, R>>> {
         self.registry.cancel_objects()
+    }
+    pub fn cancel_objects_in<'a>(
+        &'a self,
+        current: Option<&'a ConditionId>,
+        old: &'a [ConditionId],
+    ) -> ExecutionReadValueV1<Vec<CancelObjectRead<'a, R>>> {
+        self.registry
+            .cancel_objects_in(current.into_iter().chain(old))
     }
     pub fn request_funds(&self) -> impl Iterator<Item = RequestFundsReadV1<'_>> {
         self.requests.iter().map(|r| RequestFundsReadV1 {
@@ -67,23 +80,23 @@ impl ActionBeforeReadV1 {
     }
 }
 /// 保留缺直接前驱的原领取引用；没有第二业务归约或跳号/超时政策。
-pub struct SharedExecutionV1 {
+pub struct SharedExecution<P: SharedOrderEvidence> {
     ledger: LedgerWriterV1,
-    registry: SharedExecutionRegistryV1,
-    observation: MemoryNoeObservationV3,
-    pending: Vec<NoeConsumedRecordRefV1>,
+    registry: SharedExecutionRegistry<P::Completion>,
+    observation: sim_system::execution::MemoryNoeObservation<P>,
+    pending: Vec<NoeConsumedRecordRef<P::Completion>>,
 }
-impl SharedExecutionV1 {
+impl<P: SharedOrderEvidence> SharedExecution<P> {
     /// 调用方已经在原运行后台绑定此新Ledger的记录接收器。
     pub fn from_opening(
         mut ledger: LedgerWriterV1,
-        observation: MemoryNoeObservationV3,
+        observation: sim_system::execution::MemoryNoeObservation<P>,
     ) -> Result<Option<Self>, LedgerErrorV1> {
         let Some(opening) = observation.opening_record() else {
             return Ok(None);
         };
-        ledger.apply_noe_memory_v1(&opening)?;
-        let registry = SharedExecutionRegistryV1::new(Arc::new(opening.context().clone()));
+        P::apply(&mut ledger, &opening)?;
+        let registry = SharedExecutionRegistry::new(Arc::new(opening.context().clone()));
         Ok(Some(Self {
             ledger,
             registry,
@@ -109,17 +122,20 @@ impl SharedExecutionV1 {
     pub fn ledger(&self) -> &LedgerWriterV1 {
         &self.ledger
     }
-    pub fn registry(&self) -> &SharedExecutionRegistryV1 {
+    pub fn registry(&self) -> &SharedExecutionRegistry<P::Completion> {
         &self.registry
     }
-    /// false精确表示本组仍有尚未应用的外生事实，不产出模型视图。
+    /// false 表示仍有待经济应用的原记录，不阻止实到观察与模型组。
     pub fn apply_closed(&mut self) -> Result<bool, LedgerErrorV1> {
-        self.pending.extend(self.observation.take_closed_records());
+        for record in self.observation.take_closed_records() {
+            self.registry.observe(&record);
+            self.pending.push(record);
+        }
         loop {
             let mut waiting = Vec::new();
             let mut applied = false;
             for record in std::mem::take(&mut self.pending) {
-                match self.ledger.apply_noe_memory_v1(&record)? {
+                match P::apply(&mut self.ledger, &record)? {
                     LedgerMemoryApplyOutcomeV1::Applied(
                         LedgerApplyOutcomeV1::MissingPlatformPredecessor { .. },
                     )
@@ -127,7 +143,6 @@ impl SharedExecutionV1 {
                         waiting.push(record)
                     }
                     _ => {
-                        self.registry.observe(&record);
                         applied = true;
                     }
                 }
@@ -173,11 +188,9 @@ impl SharedExecutionV1 {
     pub fn action_before(
         &mut self,
         driver: &mut PublicConsumptionStateV1,
-    ) -> Result<Option<ActionBeforeReadV1>, LedgerErrorV1> {
-        if !self.apply_closed()? {
-            return Ok(None);
-        }
-        // 领取和完整应用后重新取得真实decision；绝不复用next_group的旧cutoff。
+    ) -> Result<Option<ActionBeforeRead<P::Completion>>, LedgerErrorV1> {
+        self.apply_closed()?;
+        // 领取后重新取得真实 decision；经济依赖仍保留原引用等待，不复用旧 cutoff。
         let Some(decision) = driver.decision() else {
             return Ok(None);
         };
@@ -231,7 +244,8 @@ impl SharedExecutionV1 {
                 seq: r.last_ledger_entry_seq,
             })
             .collect();
-        Ok(Some(ActionBeforeReadV1 {
+        Ok(Some(ActionBeforeRead {
+            pending_noe_record_count: self.pending.len(),
             economics: AccountEconomicsReadV1::from_ledger(
                 &self.ledger.economic_read().expect("同组 Ledger 已开户"),
             ),
@@ -267,4 +281,43 @@ impl SharedExecutionV1 {
 pub enum SharedSettlementErrorV1 {
     Ledger(LedgerErrorV1),
     Sim(SimRunActorErrorV2),
+}
+
+/// 版本选择仅连接同一真实NOE消费与Ledger应用核心。
+pub trait SharedOrderEvidence: sim_system::execution::MemoryOrderEvidence {
+    fn apply(
+        ledger: &mut LedgerWriterV1,
+        record: &NoeConsumedRecordRef<Self::Completion>,
+    ) -> Result<LedgerMemoryApplyOutcomeV1, LedgerErrorV1>;
+}
+impl SharedOrderEvidence for sim_system::execution::MeasuredOrderEvidence {
+    fn apply(
+        ledger: &mut LedgerWriterV1,
+        record: &NoeConsumedRecordRef<Self::Completion>,
+    ) -> Result<LedgerMemoryApplyOutcomeV1, LedgerErrorV1> {
+        ledger.apply_noe_memory_v1(record)
+    }
+}
+impl SharedOrderEvidence for sim_system::execution::MeasuredCancellationEvidence {
+    fn apply(
+        ledger: &mut LedgerWriterV1,
+        record: &NoeConsumedRecordRef<Self::Completion>,
+    ) -> Result<LedgerMemoryApplyOutcomeV1, LedgerErrorV1> {
+        ledger.apply_noe_memory_v2(record)
+    }
+}
+pub type SharedExecutionV1 = SharedExecution<sim_system::execution::MeasuredOrderEvidence>;
+pub type SharedExecutionV2 = SharedExecution<sim_system::execution::MeasuredCancellationEvidence>;
+pub type ActionBeforeReadV1 =
+    ActionBeforeRead<contracts::execution_normalization::NoCancellationRequestCompletionV0>;
+pub type ActionBeforeReadV2 =
+    ActionBeforeRead<contracts::execution_normalization::CancellationRequestCompletedV1>;
+
+impl ActionBeforeReadV2 {
+    pub fn cancellation_requests(
+        &self,
+        scope: Option<&CancellationScopeV1<'_>>,
+    ) -> CancellationRequestsReadV1<'_> {
+        self.registry.cancellation_requests(scope)
+    }
 }

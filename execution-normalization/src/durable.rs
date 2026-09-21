@@ -1209,6 +1209,40 @@ pub fn read_noe_result_v3(
 ) -> Result<ResolvedNoeResultV3, DurableErrorV1> {
     read_noe_result(reference)
 }
+impl NoeTradePayload<contracts::execution_normalization::SourceNeutralControlResultV3>
+    for contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2
+{
+    const COMMIT_VERSION: &'static str = "noe_commit_container_v4";
+    const CONTEXT_VERSION: &'static str = "noe_context_container_v4";
+    const CONTRACT_VERSION: &'static str = "execution_normalization_v4";
+}
+pub type DurableCommitV4 = DurableCommit<
+    contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2,
+    contracts::execution_normalization::SourceNeutralControlResultV3,
+>;
+pub type DurableContextStoreV4 = DurableContextStore<
+    contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2,
+    contracts::execution_normalization::SourceNeutralControlResultV3,
+>;
+pub type ResolvedNoeResultV4 = ResolvedNoeResult<
+    contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2,
+    contracts::execution_normalization::SourceNeutralControlResultV3,
+>;
+impl DurableContextStoreV4 {
+    pub fn commit_batch_v4(
+        &mut self,
+        input: crate::NormalizationBatchInputV4,
+        durable_available_at_utc_ms: i64,
+    ) -> Result<DurableCommitOutcomeV1, DurableErrorV1> {
+        self.commit_batch(input, durable_available_at_utc_ms)
+    }
+}
+pub fn read_noe_result_v4(
+    reference: &NoeResultReferenceV1,
+) -> Result<ResolvedNoeResultV4, DurableErrorV1> {
+    read_noe_result(reference)
+}
+
 pub type DurableCommitV1 =
     DurableCommit<contracts::execution_normalization::SourceNeutralTradeLifecycleResultV1>;
 pub type DurableCommitV2 =

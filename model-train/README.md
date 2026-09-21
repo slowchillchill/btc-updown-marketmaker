@@ -1,14 +1,33 @@
 # model-train 纯计算组件与两图
 
+
+撤单完整响应在公共V4链形成独立非经济完成事实，零目标Market响应也完成真实请求。
+逐目标失败、明确撤成及结果未知分别保留；登记减完成推导在途，多请求互不代替完成。
+已明确撤成的原引用独立保留，后到失败/查询不反转关闭，迟到成交仍按唯一经济事实应用。
+SIM的有限显式暂失败场景经原输入日志配置，在订单仍有余量且未产生效果时命中；命中记录同原输入组，
+重放仍执行原输入与场景条件。没有故障概率、固定冷却、最短挂单时间或自动补撤。
+
+本轮输入合同为 `native_inputs_v3`，具体布局与SHA来源为 `native-inputs/feature_schema.json`。
+`export_metadata.json` 与连续验收来源信息同时记录该版本和 schema SHA。412—414新增
+`ActionBeforeReadV2::pending_noe_record_count()` 的原三态计数编码：已领取且因依赖未满足而尚待
+Ledger应用的适用原记录数。零不证明未来事实已齐；它不是金额、缺序号数量或禁单条件。
+实到NOE引用先进入共享观察，经济应用仍保留原引用和真实前驱条件；正常经济等待不会隐去合法模型组。
+已知现金只描述本地已提交经济前缀与原身份预留，不重复扣待应用差额。
+新增账户415—432为全局请求块；撤单184含两个68槽订单模板、24槽Market及18槽候选请求块。
+四态适用性、可撤性、最新逐目标结果与T6独立编码；原账户0—414及836/30/60布局保持。
+当前可BUY未结算市场的修复缺口按唯一成交事实中已公开FinalSuccess实际份额求差，再扣原非终态承诺；
+164—175与Actor复用同一冻结投影。122—163的成功经济池、本金、配对和NAV仍要求经济应用完成。
+新版短验证和完整C/P使用独立433/184图；旧412或415图结果不作为新版验收通过证据。
+
 `model_train.components` 保留特征编码器、标准裸 GRU、残差 GRU 和 Actor 分数组件。
 `model_train.graphs` 将它们组合为阶段 #6 的状态图与参数图；数学结构来自
 [#5 技术 §8](https://github.com/slowchillchill/btc-updown-marketmaker/issues/5#issuecomment-5565139746)，
 张量与两遍撤单协议来自
 [§14.2.1](https://github.com/slowchillchill/btc-updown-marketmaker/issues/5#issuecomment-5565141870)。
-最终特征索引见 [#6](https://github.com/slowchillchill/btc-updown-marketmaker/issues/6) 正文及两条正式续篇。
+最终特征索引见 [#6](https://github.com/slowchillchill/btc-updown-marketmaker/issues/6) 正文及[正式续篇3](https://github.com/slowchillchill/btc-updown-marketmaker/issues/6#issuecomment-5747531067)。
 
-状态图输入为 `fast[B,836]`、`slow[B,412]`、`h_prev[L,B,H]`，返回 `z_t` 与全部层 `h_next`。
-参数图输入规则30维、前缀60维、对象129维、布尔掩码、全局归约及 `price_fee_features[B,9999]`，返回六个固定头和逐对象表示/分数。
+状态图输入为 `fast[B,836]`、`slow[B,433]`、`h_prev[L,B,H]`，返回 `z_t` 与全部层 `h_next`。
+参数图输入规则30维、前缀60维、对象184维、布尔掩码、全局归约及 `price_fee_features[B,9999]`，返回六个固定头和逐对象表示/分数。
 参数图无 GRU，不改变隐藏状态；价格轴9999，数量分支2，变体4，post_only 2，有效期3，动作族6。
 
 四配置及初始化种子固定为 `BASELINE-1x256:741001`、`BASELINE-2x256:741002`、
@@ -24,9 +43,10 @@ max 用 `torch.max(dim=0)` 保留并列首项梯度。空集合不求 mean/max�
 `active_rows` 只调用有待评分的行，并保留行映射；没有活动行不调用。
 
 按[已批准的故障修复](https://github.com/slowchillchill/btc-updown-marketmaker/issues/6#issuecomment-5725045538)，
-两遍非空逻辑块均以零特征、假掩码补至256槽，返回后按逻辑长度修剪。`empty` 来自宿主已知完整对象数量，
+上述纯图宿主帮助函数的两遍非空逻辑块均以零特征、假掩码补至256槽，返回后按逻辑长度修剪。`empty` 来自宿主已知完整对象数量，
 不是对设备上的掩码求布尔值。完整集合为空仍传 K=1 全假。逻辑分块不改变对象总数、顺序、身份或全局选择；
-它也不改变图的动态 K=1—256 接口。比如 N257 的256+1与128+129均执行两个256槽物理块。
+它也不改变图的动态 K=1—256 接口。比如这些帮助函数的 N257 的256+1与128+129均执行两个256槽物理块。
+真实业务调用继续按当时所选族使用合法动态 K，包含 K3/K4，不要求统一补到256。
 训练归约和第二遍评分都保留到同一对象编码器的梯度；补齐不保证训练总内存与对象数无关。
 
 ## 固定技术切片
@@ -38,12 +58,12 @@ max 用 `torch.max(dim=0)` 保留并列首项梯度。空集合不求 mean/max�
 | 输入 | 切片及掩码依据 |
 | --- | --- |
 | 市场836/规则30 | 市场已开盘60秒；A/B盘口买0.4卖0.6、每侧一档100份，直接BBA同值；Binance买59999卖60001；正式锚点/Chainlink现货60000；未观测成交/TWAP/判定不填造数值，组内仅一个现货事实；参考历史只一个样本。tick均0.01、LIMIT最低5份、市场BUY最低支出1、延迟1秒启用、费率0.07指数1且仅Taker。完整规则30维同时逐值进入fast末30维。 |
-| 账户412 | 初始2000 pUSD、零持仓/成交、空旧市场集合，全部订单均尚未成交。已知结构性零保留exists/applicable；空订单集合的最早/最近年龄不适用。只有post-only GTC本金占用/承诺/开放订单数变化；尚未发生费用或返佣，两种NAV仍2000。 |
-| 撤单129 | 每原pair为A/B各5份，原价0.2/0.3，post_only=true；在截点前1秒接纳。Single保留真实腿；Paired按原ordinal；Market精确汇总所有真实可撤成员。GTC的spend/GTD到期及非本族模板不适用，真实零费有存在位。 |
+| 账户433 | 初始2000 pUSD、零持仓/成交、空旧市场集合，全部订单均尚未成交。已知结构性零保留exists/applicable；空订单集合的最早/最近年龄不适用。只有post-only GTC本金占用/承诺/开放订单数变化；尚未发生费用或返佣，两种NAV仍2000。 |
+| 撤单184 | 每原pair为A/B各5份，原价0.2/0.3，post_only=true；在截点前1秒接纳。Single保留真实腿；Paired按原ordinal；Market精确汇总所有真实可撤成员。GTC的spend/GTD到期及非本族模板不适用，真实零费有存在位。 |
 | 前缀60 | Family未选、三个撤单族已选，以及q=5双腿GTC的逐腿Variant/PostOnly/Price评分前切片。没有伪造完整数量支持或最后意图。 |
 
-P骨架为完整 N0；原pair取消A后 Single(B)+Market=N2；85pair生成N256；86pair生成峰值N259，
-取消A后N257；另有B=2的(0,257)。不存在将单个Single称为完整集合的场景。
+P3真实空订单市场保留唯一Market，完整N1；原pair取消A后 Single(B)+Market=N2；85pair生成N256；86pair生成峰值N259，
+取消A后N257；另有B=2的真实业务(1,257)，并单独保留图级N0及(0,257)零掩码探针。不存在将单个Single称为完整集合的场景。
 `fixture_trace.json` 记录每个槽的数值、原值/掩码说明及合同来源；它是纯图输入证据，不是生产模式冻结件。
 重复固定张量的12步独立递推仅检查数值误差与全部层状态，不能称为真实公共业务帧连续验收。
 
@@ -62,6 +82,26 @@ OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 .venv/bin/python -m model_train.validate_gra
 对四配置分别执行上述两个验证命令。保留已有图/权重时使用 `--source artifacts/original --output artifacts/new-run`；
 来源目录只读，新证据写入新目录。若同时传 `--export`，从来源权重导出到新目录。
 
+对象编码在同一float32 Linear前将B/K前导轴展平，之后还原形状，使导出使用Gemm；
+参数、数学和梯度路径不变。原失败导出及相同权重对照材料保留。
+撤单头末标量层继承原 `nn.Linear` 参数注册与初始化，乘积的末轴归约使用相邻偶／奇切片的固定加法树，
+奇数尾项保留；只展开静态特征宽度，B/K保持动态。LayerNorm沿用原参数、eps和中心化方差定义，
+两次均值复用该归约，标准化采用 `centered * torch.rsqrt(variance + eps)`；未改全对象float64宿主汇总。
+规则与前缀编码的两层仿射、Actor decoder及撤单头的首层仿射沿用原参数，
+逐项乘积后使用同一加法树，按16个输出通道分块；其他仿射、GRU和激活保持原实现。
+两端直接导出标准opset18基础算子，不再另行改写导出图，也不强制转换dtype；原双精度独立数学和梯度检查仍适用。
+没有依对象身份、相等输入或分差选择计算路径。历史严格选择反例及局部负结果均保留，
+当前表达已从原初始化通过 MAIN1 原前史至 `C1-1-1-0/176061000` 的三端比较和真实意图执行；
+四配置、1/4线程的固定两图与三端检查、真实 P3—P7 及全部8组完整 C 均通过。
+各 C 组完成18轮、121113个正式观察帧和80730次实际决定（含NoTrade），另有128帧独立预热；
+全部结束记录的三端hidden、native z与观察根清零。MAIN30两组最大绝对误差均为 `9.5367431640625e-6`，
+原逐元素数值门与完整决定严格一致门均通过。结果及证据入口见
+[PR #125](https://github.com/slowchillchill/btc-updown-marketmaker/pull/125)。
+最终汇总为 `native-inputs-v3/aligned-affine/final-observation/final-c-resources.json`，保留原启动源码、图和二进制绑定，
+不将后续修复或文档提交重标为新性能实测。MAIN30三端验证进程结束RSS约4464—4469MiB，
+allocator已用块在C2 Orphan首轮有约4MiB台阶，同c／scene三次重复未呈持续增长；
+这不是生产单端内存或任意长期无泄漏的证明。本地结果不替代目标容量；按[用户延期决定](https://github.com/slowchillchill/btc-updown-marketmaker/issues/6#issuecomment-5754843215)，
+目标CPU实测移出本次任务1.5、PR #125及阶段1的完成条件，继续整体独立审查、合并与适用阶段收尾。计算对齐依据见[#6实施记录](https://github.com/slowchillchill/btc-updown-marketmaker/issues/6#issuecomment-5748954118)。
 导出使用 `dynamo=True`、opset18、float32、`optimize/verify/report=True` 及外部参数文件。
 正式对比使用两端独立递推，显式 CPU、顺序执行、ORT全优化、interop1、关空转和memory pattern、保留arena。
 动态B覆盖1/2/3，图K覆盖1/2/128/129/255/256；宿主分块包含补齐、尾块及混合空行。
@@ -77,8 +117,8 @@ OMP_NUM_THREADS=4 MKL_NUM_THREADS=4 .venv/bin/python -m model_train.measure_padd
 计时保持同一模型/会话，预热一次后测10次，记录两遍加宿主归约的中位数/最大值和原样本；旧逻辑只作成本对照。
 CPU结果不代表目标CPU容量或GPU模式验收。
 
-上述纯图交付不包含真实经济特征接线、完整精确支持集、三端最终意图一致性、70分钟C场景、长期内存、
-目标CPU/GPU测量、训练、部署或资金动作；不关闭任务1.5或阶段#6。市价估费与实际收费按 D-0232 分离；本轮 Actor 接线见下节。
+上述历史纯图交付切片当时不包含真实经济特征接线、完整精确支持集、三端最终意图一致性、70分钟C场景、长期内存、
+目标CPU/GPU测量、训练、部署或资金动作；该切片本身不关闭任务1.5或阶段#6，后续本地完整验收及当前延期范围见上文和末节。市价估费与实际收费按 D-0232 分离；本轮 Actor 接线见下节。
 
 
 ## Rust ORT 三端技术验证
@@ -109,7 +149,7 @@ Rust自行从零递推全部层状态，并在两遍对象调用之间按全局�
 Rust的 `rust.jsonl` 保留实际各步输出，`rust.stderr` 保留加载/执行错误；`result.json` 只在完整比较通过后写入。
 三端不向账本或模拟器提交动作。
 
-每配置每线程18个场景覆盖B1/2/3各12步、K1/2/128/129/255/256、六种完整对象集合及混合空行、
+每配置每线程20个场景覆盖B1/2/3各12步、K1/2/128/129/255/256、六种完整对象集合及混合空行、
 合法GTC前缀和活动行0/2及空活动集合。N257的256+1与128+129在每端均比较逐对象分数、归约和严格首项argmax；
 空集合仍K1全假，非空两遍每逻辑块补到256再修剪。原分块结果不能只以归约相近替代选择一致。
 所有数值比较以PyTorch为rtol参考、拒绝非有限值；索引与行映射要求精确相等。
@@ -118,8 +158,8 @@ Rust的 `rust.jsonl` 保留实际各步输出，`rust.stderr` 保留加载/执�
 
 ## 原生特征与状态、参数组件输入
 
-`native-inputs/` 是独立 Cargo 工程，消费原公共组、`SharedExecutionV1` 与同组
-`ActionBeforeReadV1`，实现 #6 正式续篇的 412 槽账户输入和 129 槽撤单对象。
+`native-inputs/` 是独立 Cargo 工程，消费原公共组、`SharedExecutionV2` 与同组
+`ActionBeforeReadV2`，实现 #6 正式续篇的 433 槽账户输入和 184 槽撤单对象。
 它从根起点、真实市场窗口与公共观测确定预热、当前和旧市场范围；旧集合取完整
 Ledger 市场并集，因此仅有本地预留的旧市场也参与汇总。根操作由 Rust 产生，Python
 只执行 `ResetRootHidden`、`InitializeZero`、`Retire` 的顺序。
@@ -127,10 +167,11 @@ Ledger 市场并集，因此仅有本地预留的旧市场也参与汇总。根�
 所有组内行借用同一个动作前读取。金额、数量、计数与旧集合先在精确域计算，再用
 有理数区间确定自然对数的 float32 最近偶数舍入；不先经 f64 或截断 Decimal。
 撤单对象直接保留原集合顺序、真实腿、原 ordinal 和逐身份资金，不另算资格。
-关联未齐或撤单全集仍为 `Unavailable` 时返回 `MissingAssociation`，不输出成功组、
-推进 hidden 或替代为 NoTrade。调用方不得把这一结果解释成新的重试或跳组策略。
+可寻址且尚未证实终态的订单保留为候选；缺原形成/接纳、腿或数量的字段保留Unknown，
+不以关联尚未齐备丢弃合法模型组。Single须有真实本账户订单证据；普通失败尝试提及ID不足以证明存在。
+Market范围借用同组冻结的当前c及完整账户经济旧集合O，空Market仍可寻址。
 
-`NativeInputGroup` 现在从同一公共帧编码完整 836 市场输入、412 账户输入和 129 撤单对象。
+`NativeInputGroup` 现在从同一公共帧编码完整 836 市场输入、433 账户输入和 184 撤单对象。
 30 槽规则只生成一次，逐值复用于 `fast[806..836]` 和参数图。动态 tick 来自真实 A/B
 资产字段；公共冷规则保留精确来源，参数价格用同帧 tick 乘原整数，不用神经投影反解。
 `PrefixState` 持有原 BigUint 数量区间/叶子及真实腿、变体、post_only、寿命、价格整数，
@@ -159,7 +200,7 @@ PyTorch 及 Rust ORT 使用同一真实序列和原容差。三端各用自身�
 不代表完整 Actor 选择链。复用原归档图与权重，不重新导出或训练。
 
 上述旧组件验收记录只覆盖其当时范围。当前第一 PR 的 Actor 与有限真实三端闭环见下节；
-70 分钟完整 C/P、长期观察及阶段 #6 完成仍待后续同阶段 PR。
+本次连续增量的 70 分钟 C/P 与长期观察见末节；阶段 #6 完成仍须完整观察结果与审查。
 
 在仓库根目录运行独立原生验证（工作区命令不会包含此工程）：
 
@@ -180,9 +221,10 @@ MAIN-1x256 的两图/权重目录，可同时执行真实原生序列的 PyTorch
 `NATIVE_COMPONENT_WEIGHTS` 可指向原已验证的 MAIN-1x256 `initial_weights.pt`，避免重新
 导出或训练。测试从 Rust 正式公共入口生成临时组件输入；不手造 Ledger 投影或模型帧。
 覆盖冷启动、重叠预热及切换、同组 100/后组 80、仅本地预留旧市场、平均成本与精确返佣、
-PendingApplied/成功/补偿、QuoteBudget 三态、真实撤单人口 N=0/2/256/257/259 和不同分块。
+PendingApplied/成功/补偿、QuoteBudget 三态、真实撤单人口 N=1/2/256/257/259（空订单市场仍保留 Market） 和不同分块。
 缺 formed 的年龄测试沿既有 registry 入口重放真实 consumed 引用，明确属于缺源组件读取；
-46k 未齐关联也单独验证为组合未完成，两者均不声称连续合法模型组。
+原46k关联已随有限PAPER补闭合及时可见；未知成员改在真实24172切点验证。
+首成交24173尚未到时，形成24171已到但Accepted24250未到，原成员与承诺仍保留。
 
 新增字段验收覆盖远档数量、前帧未知、值缺但直接时间存在、负差与多锚点、原成交缺量/方向、
 同值新确认/无关组/16 样本、Binance 只更新一档时不冒造其他档时间、两腿独立 tick、前缀
@@ -192,11 +234,11 @@ PendingApplied/成功/补偿、QuoteBudget 三态、真实撤单人口 N=0/2/256
 ## 给定撤单族后的执行接线
 
 `NativeInputGroup::execute_selected` 接收调用方已经选定的撤单族或 `NoTrade`。
-它从本组 `action_before.cancel_objects()` 读取完整资格与稳定顺序，沿原 129 行索引消费
+它从本组 `action_before.cancel_objects_in(current, old)` 读取完整资格与稳定顺序，沿 184 行索引消费
 `NativeComponentConsumer.cancel_scores` 返回的参数图原分数。各 `CancelScoreBlock` 按完整人口顺序
 覆盖全部实际行，`valid_len` 排除块内 padding；跨块比较严格更大的分数，并列保留原首对象。
 单笔恢复原平台订单 ID，配对保持原 ordinal 0/1，市场对象保留原 condition_id，分别形成既有
-`CancelOrder`、`CancelOrders`、`CancelMarketOrders` 后直接交 `SharedExecutionV1::execute`。
+`CancelOrder`、`CancelOrders`、`CancelMarketOrders` 后直接交 `SharedExecutionV2::execute`。
 同组后续调用仍使用原冻结对象，竞争结果由原反馈确认；不复制对象资格或执行状态。
 
 `NoTrade` 传原 `None`，不调用参数图、不生成请求或撤销旧挂单。状态帧先由既有消费者推进一次；
@@ -254,7 +296,7 @@ SIM 的 FOK/FAK 最低门是每腿原请求本金 1 pUSD；实际 FAK 部分成�
 
 当前 FOK/FAK Price 步骤的费用轴由同帧公共估费逐候选投影 `log1p(fee/1 pUSD)`，
 其余步骤、LIMIT、原规则非法坐标均为零。图内无偏置 `fee_weight` 产生有符号系数；
-新层注册在所有原模块之后，保留四个原种子和全部原参数值。新图另存，不覆盖旧权重。
+首PR的费用层注册在原模块之后，当时保留既有参数值。本轮 `native_inputs_v3` 将慢支路改为433维、对象支路改为184维；四个种子保持，但初始化消耗改变，因此重新冻结全部权重与两图，不要求跨版本逐值一致。旧图及验证材料保留。
 
 在本目录用精确版本 uv/Python 恢复环境并构建扩展：
 
@@ -265,7 +307,7 @@ VIRTUAL_ENV="$PWD/.venv" PYO3_PYTHON="$PWD/.venv/bin/python" .venv/bin/maturin d
 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python -m model_train.actor_validation --graphs "$NEW_GRAPHS" --old-graphs "$OLD_GRAPHS" --output "$OUTPUT"
 ```
 
-验证器对四配置逐参数核对旧权重，嵌入同一 Python wheel 的 ORT 原库。有限真实帧逐端独立递推，
+验证器对四配置逐参数核对433/184维构造器的同种子初始化权重，并嵌入同一 Python wheel 的 ORT 原库。有限真实帧逐端独立递推，
 逐帧比较 `z_t` 与全部 `h_next`；实际选择路径比较支持集、精确前缀、适用分数和最终原意图。
 实际图意图进入原共享执行并消费后继反馈；NoTrade 验证不造请求，预设 FOK/FAK 路径独立标为定向探针。
 首个场景的4个后继组和撤单人口场景的2个后继组继续使用三端原会话与各自隐藏状态，
@@ -276,6 +318,88 @@ OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python -m model_train.actor_valida
 
 单独 cargo 默认忽略需要外部图产物的三端测试；上述命令显式启用 `python,ort` 并串行运行两项。
 普通独立 crate 回归不需要图产物。撤单有限场景沿原夹具观察至56000，核对实际动作后继结果；
-扩展到该窗口后曾在396000之后的下一组遇到 `InvalidBucket`，失败材料保留，当前未修改公共尾部行为。
-本项不声称该人口夹具已成功消费到文件结束，也不替代后续完整 C/P、长期观察与目标 CPU 验收。
+首PR扩展到该窗口后曾在396000之后的下一组遇到 `InvalidBucket`，该失败材料保留。
+下节连续增量修正真实夹具尾部顺序并单独记录 C/P 与长期观察结果，首PR有限证据不替代它们。
 目标主机尚未准备，本地结果不作为目标容量结论；不启动训练、GPU 或部署。
+
+
+## 连续 C/P 本地验收宿主
+
+`continuous-validation` feature 连接原真实 DPT 录制、有限公开消费、共享执行与结算入口。
+C1 为单根，C2 为两个独立账户根；每个根分别运行交易／补偿与配对赎回、孤腿赢家／输家、
+返佣日成熟三个固定变体。前两变体为 23:50 至次日 01:00、首市场 23:55；返佣变体为
+23:45 至次日 00:55、首市场 23:50，均保持完整 70 分钟和后续五分钟市场接续。
+经济前史执行明确指定的原意图，三端隐藏历史全程连续；其后的自主阶段执行各端实际图决定。各根在原前史真实N=2决定帧比较一次三端实际参数路径，
+明确记为不提交意图的交接探针；该探针不推进额外GRU，也不计为自主执行决定。
+独立经济期望覆盖预留、未终局量、成交失败补偿、部分成本、判定应收和付款、原身份现金修正、
+返佣成熟与低额日，不从待测 NAV 反算期望。
+
+输入深度沿 `random.Random(742000+j)` 在闭区间 `[100,200]` 抽取，顺序为三个变体再根索引；
+重复、配置与线程共享同份业务录制和数值，账户根独立。该随机量确实进入公开盘口，固定经济量价不随机化。
+状态图使用真实活动批次，C2／P7 形成 B=2；每端保存自己的全部层隐藏状态并逐实际帧比较。
+参数步按未完成原行压缩和回填，使用同帧 z 与原精确 Actor 前缀，不推进 GRU。
+P3—P7 覆盖真实完整人口 1／2／256／257、259 峰值、双根 `(1,257)`；纯图零对象探针另保留，并以同对象、同权重核对
+`256+1` 与 `128+129` 分块、全局归约与分数、完成行、空集、稳定并列及条件概率梯度。
+原首轮 P 已运行但缺 Rust 第二布局及独立资金核对；审查返工后四项 P 已重新通过。
+Rust 两布局均实际执行首遍嵌入与次遍分数，逐根比较 sum/mean/max、每个对象分数和全局选择；
+P7 保留空订单市场根的原索引与 B2；该根仅调用有支持的 Market 族，N257 根仍比较三族。36000 准备峰和56000取消后分别从原公共读取核对各族计数、
+两腿活动份额、本金、零即时费、已应用2000现金及actual/maker可用与预留，不从张量反算。
+
+每配置／线程使用一个独立根预热恰好 128 个真实帧，再在同进程长寿命会话与 allocator 上
+各做三次完整观察。会话显式使用 CPU、ALL 优化、顺序执行、1／4 intra 线程、1 inter 线程、
+关闭 spinning 和 memory pattern；CPU arena 保持启用。加载、预热、观察分别计时。
+每跨过 128 个实际帧、市场退役、返佣成熟／付款及开始／结束时记录动态 RSS、allocator 可用统计、
+持有引用、隐藏状态和对象数。若一组跨过采样边界，记录实际采样位置及所跨边界，不补造模型帧。
+每组比较后释放临时张量；观察结束排空已接纳材料，再释放该观察根的模型引用，保留会话。
+截止后不推进时钟获取未来事实，结束时仍持有的全部订单身份及其真实未知／未闭合状态、承诺剩余量随结果记录。
+
+原长人口夹具的尾部失败来自截止 320000 的夹具仍交付 396000 探针，随后倒退交付终态。
+探针现在受原观察截止约束，真实终态及后继组按因果顺序交付。另修复有限 PAPER 驱动的空档闭合：
+已知下一真实组时刻 t 且所有 `<t` 义务处理完后，通过原 `CloseTime/NextGlobalEventAt(t)`
+将前沿闭合到 t−1，再应用原组。t 本身仍开放；同毫秒不重复关闭，在线 PAPER 和隐藏路径不变。
+这使原已接收但落在最后调度点与 t 之间的 Accepted 在首个 t 组可领取。真实反证核对 `<t`、`=t`、
+`>t` 接收边界、同毫秒组间登记请求、到期请求晚于全部同毫秒行情，以及原背压／写故障传播。
+新增 CloseTime 数量随排空日志计数，其开销包含在公开组测量内。
+
+完整撤单排序在整集合具有原 SIM 公开材料时，使用 Accepted 的逐项有效处理时间、首次请求回执的
+input_sequence 和原 ordinal；这与生产者真实形成源序保序，不使用整批响应时间或反馈到达顺序。
+原形成反馈尚未到时，形成年龄与时间存在位仍保留缺失；不填造原源序或时间。
+已有形成依据可由同一种完整材料覆盖时，使用该先后链；否则保留处理时间／回执链P与形成源序链S，
+按两条链的先后约束作稳定拓扑排序，不直接混比两个数值域。无形成依据的对象按真实身份稳定保留，
+不因此删除候选或将整集合改为Unavailable；Paired返回的两腿仍保持原 ordinal。
+Taker Contribution 是独立经济事实，接纳不再额外等待该成交的 FinalSuccess 用户反馈。
+贡献沿原原子应用、位置幂等和贡献去重通路进入 accrued；不强置成交成功、不提前配对或成熟 NAV。
+MakerAccrualFinalized、DayFinalized、Payment 及真实账户经济前驱依赖保持。
+有界真实回归在原173732000领取贡献并消费完整三端帧，173733000才领取迟到成功；
+这两个切点仅比较参数、不提交新意图，用于定位，不替代完整自主 C 观察。
+
+C 宿主逐组对照原录制的 group_position、实际交付时刻与市场窗口独立列举的合法行，
+比较角色和 condition，截止内原组必须全部消费；不把期望帧数写成固定常量。
+Native 返回 None，或实际合法行的角色／condition与原录制的独立期望不一致时，立即保留材料并失败。
+真实经济等待本身不跳过合法帧，也不以settlement返回false作为失败门。
+失败快照区分 before-exogenous、after-exogenous 与 after-native-consume，后两者重新领取真实 cutoff。
+此前 v4 曾因贡献额外依赖遗漏合法帧，已全部停测，旧局部结果不拼接为完整验收。
+
+验收宿主发生异常时保留该观察目录内实际写出的原 SIM／NOE／Ledger、最后已应用截止与失败阶段，
+原始错误写入进程日志；异常产物不宣称已干净排空，停止后不继续读取后继事实。
+
+
+以下均为显式 ignored 验收入口，普通 cargo 测试不会替代执行：
+
+```bash
+# 先以 CONTINUOUS_RECORDINGS 指定目录生成一次九份实际录制，后续只读复用。
+cargo test --release --manifest-path model-train/native-inputs/Cargo.toml \
+  --features continuous-validation --locked --offline continuous_prepare_recordings -- --ignored
+# 每个 MODEL_GRAPH_DIR / MODEL_THREADS 独立进程，设置 CONTINUOUS_OUTPUT 为新证据目录。
+cargo test --release --manifest-path model-train/native-inputs/Cargo.toml \
+  --features continuous-validation --locked --offline continuous_three_runtime_matrix -- --ignored --nocapture
+cargo test --release --manifest-path model-train/native-inputs/Cargo.toml \
+  --features continuous-validation --locked --offline continuous_real_population_probes -- --ignored --nocapture
+```
+
+运行使用该工作树局部 Python 环境、原初始权重和两图（含实际外部参数文件），映射同一 wheel 的 ORT 库；
+来源与二进制、依赖、录制和运行时摘要在初始化时冻结，动态采样不重复哈希大文件。
+本地并行观察须附实际并发环境；描述性时间不是独占性能或目标 CPU 容量结果。
+目标 m7i.2xlarge／c8a.2xlarge CPU 测量未执行，已按[用户决定](https://github.com/slowchillchill/btc-updown-marketmaker/issues/6#issuecomment-5754843215)延期，
+不再阻塞本次任务1.5、PR #125及阶段1审查、合并与关闭；仍须完成整体独立审查、适用收尾及准确合并版本的阶段组合审查。
+延期不等于已测或永久取消，不指定后续时间；本地结果不替代目标容量，不新增云主机，不进入训练、部署或下一阶段。

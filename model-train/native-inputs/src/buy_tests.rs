@@ -24,6 +24,26 @@ fn fixture_cash(cash: &str) -> Harness {
     fixture_config(cash, ["0.0025", "0.005"])
 }
 fn fixture_config(cash: &str, ticks: [&str; 2]) -> Harness {
+    fixture_config_at(cash, ticks, 24_999)
+}
+fn fixture_config_at(cash: &str, ticks: [&str; 2], intermediate_at: i64) -> Harness {
+    fixture_config_times(cash, ticks, intermediate_at, &[35_000, 45_000, 55_000])
+}
+fn fixture_config_times(
+    cash: &str,
+    ticks: [&str; 2],
+    intermediate_at: i64,
+    followups: &[i64],
+) -> Harness {
+    fixture_config_depths(cash, ticks, intermediate_at, followups, ["100", "100"])
+}
+fn fixture_config_depths(
+    cash: &str,
+    ticks: [&str; 2],
+    intermediate_at: i64,
+    followups: &[i64],
+    asks: [&str; 2],
+) -> Harness {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("dpt");
     let mut core = core();
@@ -55,7 +75,7 @@ fn fixture_config(cash: &str, ticks: [&str; 2]) -> Harness {
         times.push(at);
     }
     let mut events = Vec::new();
-    for token in [UP_TOKEN_ID, DOWN_TOKEN_ID] {
+    for (token, ask_size) in [UP_TOKEN_ID, DOWN_TOKEN_ID].into_iter().zip(asks) {
         events.push((
             21_000,
             22_000,
@@ -67,7 +87,7 @@ fn fixture_config(cash: &str, ticks: [&str; 2]) -> Harness {
                 }],
                 asks: vec![PolymarketPriceLevel {
                     price: "0.6".into(),
-                    size: "100".into(),
+                    size: ask_size.into(),
                 }],
                 last_trade_price: None,
             },
@@ -78,7 +98,7 @@ fn fixture_config(cash: &str, ticks: [&str; 2]) -> Harness {
         (23_001, 23_900, DOWN_TOKEN_ID, "0.01", ticks[1]),
         (
             24_000,
-            24_999,
+            intermediate_at,
             DOWN_TOKEN_ID,
             ticks[1],
             if ticks[1] == "0.005" {
@@ -98,7 +118,7 @@ fn fixture_config(cash: &str, ticks: [&str; 2]) -> Harness {
             },
         ));
     }
-    for at in [35_000, 45_000, 55_000] {
+    for &at in followups {
         events.push((
             at,
             at + 1000,
@@ -111,6 +131,7 @@ fn fixture_config(cash: &str, ticks: [&str; 2]) -> Harness {
             },
         ));
     }
+    events.sort_by_key(|(_, visible, _)| *visible);
     for (at, visible, event) in events {
         let p = rows.len() as u64;
         let DptIngressV1::Message {
@@ -132,7 +153,7 @@ fn fixture_config(cash: &str, ticks: [&str; 2]) -> Harness {
         writer.record(input, applied).unwrap();
     }
     writer.stabilize().unwrap();
-    let (mut execution, observation, rules) = execution_with_rules(
+    let (mut execution, observation, rules) = execution_with_rules_v4(
         &temp.path().join("sim.jsonl"),
         &core,
         SUCCESS_POLICY,
@@ -145,7 +166,7 @@ fn fixture_config(cash: &str, ticks: [&str; 2]) -> Harness {
     execution
         .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
         .unwrap();
-    let shared = SharedExecutionV1::from_opening(ledger, observation)
+    let shared = SharedExecutionV2::from_opening(ledger, observation)
         .unwrap()
         .unwrap();
     let account = shared
@@ -624,7 +645,7 @@ async fn same_process_python_and_rust_ort_share_native_actor_and_final_intent() 
             );
             let outputs=state_graph.run(ort::inputs![
                 "fast_features"=>ort::value::Tensor::from_array(([1,836],row.fast.clone())).unwrap(),
-                "slow_features"=>ort::value::Tensor::from_array(([1,412],row.slow.clone())).unwrap(),
+                "slow_features"=>ort::value::Tensor::from_array(([1,433],row.slow.clone())).unwrap(),
                 "h_prev"=>ort::value::Tensor::from_array(([layers,1,hidden],hidden_state)).unwrap()
             ]).unwrap();
             z = outputs["z_t"]
@@ -663,7 +684,12 @@ async fn same_process_python_and_rust_ort_share_native_actor_and_final_intent() 
         .unwrap()
         .commit_from_file(std::path::Path::new(&directory).join("action_decoder.onnx"))
         .unwrap();
-    let mut scorer = crate::ort_actor::OrtActorScorer { session, hidden };
+    let mut scorer = crate::ort_actor::OrtActorScorer {
+        #[cfg(feature = "continuous-validation")]
+        measurement: (0, None),
+        session,
+        hidden,
+    };
     let mut actor = NativeActor::new(g.clone(), 0).unwrap();
     scorer.greedy(&mut actor, &z).unwrap();
     assert_eq!(actor.path, path);
@@ -710,7 +736,7 @@ async fn same_process_python_and_rust_ort_share_native_actor_and_final_intent() 
         "z_t" => ort::value::Tensor::from_array(([3, hidden], z.repeat(3))).unwrap(),
         "rule_features" => ort::value::Tensor::from_array(([3,30], g.rows[0].rule.repeat(3))).unwrap(),
         "prefix_features" => ort::value::Tensor::from_array(([3,60], prefixes)).unwrap(),
-        "cancel_features" => ort::value::Tensor::from_array(([3,1,129], vec![0f32;3*129])).unwrap(),
+        "cancel_features" => ort::value::Tensor::from_array(([3,1,184], vec![0f32;3*184])).unwrap(),
         "cancel_mask" => ort::value::Tensor::from_array(([3,1], vec![false;3])).unwrap(),
         "cancel_reduced" => ort::value::Tensor::from_array(([3,3*hidden/2], vec![0f32;9*hidden/2])).unwrap(),
         "cancel_exists" => ort::value::Tensor::from_array(([3], vec![false;3])).unwrap(),
@@ -853,7 +879,10 @@ fn cash_root_is_not_replaced_by_encoding_limit() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn actor_pair_reserves_once_and_rejected_leg_releases_without_erasing_other_fill() {
-    let mut h = fixture();
+    // 原源事件 24000，Matched received=24171，首成交 received=24173，
+    // Accepted received=24250。24172 截点只闭合到 24171。
+    // 在真实两者之间读取，不能依赖旧驱动把已接收关联拖到下一组。
+    let mut h = fixture_config_at("2000", ["0.0025", "0.005"], 24_172);
     let g = Arc::new(ready(&mut h));
     let mut actor = NativeActor::new(g, 0).unwrap();
     actor.choose(2).unwrap();
@@ -899,9 +928,10 @@ async fn actor_pair_reserves_once_and_rejected_leg_releases_without_erasing_othe
     let intermediate = h.next().unwrap();
     assert_eq!(
         intermediate.cutoff.decision_time().logical_time_utc_ms(),
-        24_999
+        24_172
     );
-    assert!(intermediate.cancel.is_empty());
+    assert_eq!(intermediate.cancel.len(), 1, "真实空市场仍有 Market 候选");
+    assert_eq!(intermediate.cancel[0][2], 1.);
     let view = intermediate.action_before.as_ref().unwrap();
     let orders: Vec<_> = view.orders().collect();
     assert_eq!(orders.len(), 1, "不可撤但关联未齐的订单仍在动作快照中");
@@ -1032,4 +1062,165 @@ fn fixed_prefix_variants_and_common_budget_match_small_full_action_oracle() {
             }
         }
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn actual_single_repair_cap_counts_visible_success_and_nonterminal_commitment() {
+    let times = [22_942, 24_017, 24_019]
+        .into_iter()
+        .chain((24_001..28_002).step_by(100))
+        .collect::<Vec<_>>();
+    let mut h = fixture_config_times("2000", ["0.1", "0.1"], 24_999, &times);
+    ready(&mut h);
+    async fn buy(h: &mut Harness, id: &str, token: &str, spend: &str) {
+        h.driver.wait_for_recording_capacity().unwrap();
+        h.shared
+            .execute(
+                &mut h.driver.decision().unwrap(),
+                context(id),
+                Some(Arc::new(ModelIntentV1::SubmitSingleBuy {
+                    condition_id: ConditionId(CONDITION_ID.into()),
+                    order: BuyLegIntentV1 {
+                        token_id: TokenId(token.into()),
+                        order: BuyOrderIntentV1::GtcLimit {
+                            size_shares: spend.parse().unwrap(),
+                            limit_price_pusd_per_share: Decimal::new(6, 1),
+                            post_only: false,
+                        },
+                    },
+                })),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    buy(&mut h, "repair-a-ten", UP_TOKEN_ID, "10").await;
+    let mut sent = false;
+
+    let mut saw_pending = false;
+    let mut saw_terminal = false;
+    let mut saw_economic_pending = false;
+    let mut early_order_group = None;
+    while let Some(group) = h.next() {
+        let group = Arc::new(group);
+        let read = group.action_before.as_ref().unwrap();
+        let at = read.cutoff().decision_time().logical_time_utc_ms();
+        let Some(market) = read
+            .economics()
+            .markets
+            .iter()
+            .find(|m| m.condition_id.0 == CONDITION_ID)
+        else {
+            continue;
+        };
+        let assets = market.assets.as_ref().unwrap();
+        let a = assets
+            .iter()
+            .position(|a| a.token_id.0 == UP_TOKEN_ID)
+            .unwrap();
+        let b = 1 - a;
+        if at == 25_017 {
+            let order = read
+                .orders()
+                .find(|o| o.token_id == Some(&TokenId(DOWN_TOKEN_ID.into())))
+                .unwrap();
+            assert!(order.origin.is_none() && order.accepted.is_none() && order.formed.is_none());
+            assert_eq!(order.cancellable, ExecutionReadValueV1::Unavailable);
+            let single = group
+                .cancel
+                .iter()
+                .find(|v| v[0] == 1.)
+                .expect("实际成交已证明可寻址 ID");
+            assert_eq!(single[7], 1., "已到成交证明 B 腿");
+            assert_eq!(&single[10..14], &[0.; 4], "原订单变体仍未知");
+            assert_eq!(&single[56..60], &[0.; 4], "四个条件字段适用性仍未知");
+            assert_eq!(&single[60..63], &[0., 0., 1.], "可撤性未知仍保留 Single");
+            early_order_group = Some(group.clone());
+        }
+        if at == 25_019 {
+            let order = read
+                .orders()
+                .find(|o| o.token_id == Some(&TokenId(DOWN_TOKEN_ID.into())))
+                .unwrap();
+            assert!(order.origin.is_some() && order.accepted.is_some() && order.formed.is_some());
+            assert_eq!(order.cancellable, ExecutionReadValueV1::Known(false));
+            assert!(
+                early_order_group
+                    .as_ref()
+                    .unwrap()
+                    .action_before
+                    .as_ref()
+                    .unwrap()
+                    .orders()
+                    .any(|o| o.token_id == Some(&TokenId(DOWN_TOKEN_ID.into()))
+                        && o.origin.is_none())
+            );
+        }
+        if at == 23_942 {
+            assert_eq!(market.success_shares[a].0, "0", "原经济前驱尚未到达");
+            assert_eq!(
+                market.repair_gap_shares[b].0, "10",
+                "实际 FinalSuccess 已公开"
+            );
+            let actor = NativeActor::new(group.clone(), 0).unwrap();
+            assert_eq!(
+                actor.root_upper(Family::SubmitSingleBuy).unwrap(),
+                BigUint::from(1000u32)
+            );
+            assert!(read.pending_noe_record_count() > 0);
+            saw_economic_pending = true;
+        }
+        if !sent && market.success_shares[a].0.parse::<Decimal>().unwrap() == Decimal::from(10) {
+            buy(&mut h, "repair-b-four", DOWN_TOKEN_ID, "5").await;
+            eprintln!("repair send B cutoff={at}");
+            sent = true;
+            continue;
+        }
+        if sent {
+            let actor = NativeActor::new(group.clone(), 0).unwrap();
+            let gap = market.repair_gap_shares[b].0.parse::<Decimal>().unwrap();
+            let commitment = h.shared.registry().committed_target_shares(
+                &ConditionId(CONDITION_ID.into()),
+                &TokenId(DOWN_TOKEN_ID.into()),
+            );
+            if commitment == ExecutionReadValueV1::Known(ExactDecimal("5".into())) {
+                assert_eq!(gap, Decimal::from(10));
+                assert_eq!(
+                    actor.root_upper(Family::SubmitSingleBuy).unwrap(),
+                    BigUint::from(500u32)
+                );
+                if !saw_pending {
+                    eprintln!("repair pending cutoff={at}");
+                }
+                saw_pending = true;
+            } else if commitment == ExecutionReadValueV1::Known(ExactDecimal("0".into())) {
+                assert_eq!(gap, Decimal::from(5));
+                assert_eq!(
+                    actor.root_upper(Family::SubmitSingleBuy).unwrap(),
+                    BigUint::from(500u32)
+                );
+                if !saw_terminal {
+                    eprintln!("repair terminal cutoff={at}");
+                }
+                saw_terminal = true;
+                if market.success_shares[b].0.parse::<Decimal>().unwrap() == Decimal::ZERO {
+                    saw_economic_pending = true;
+                    eprintln!(
+                        "repair final-before-economic cutoff={at} pending={} gap={gap} cap=500",
+                        read.pending_noe_record_count()
+                    );
+                }
+            }
+        }
+        if at == 29_001 {
+            break;
+        }
+    }
+    assert!(
+        sent && saw_pending && saw_terminal && early_order_group.is_some(),
+        "真实前史与终局须实际覆盖"
+    );
+    let evidence = h._temp.keep();
+    eprintln!("repair evidence {}", evidence.display());
+    assert!(saw_economic_pending, "必须覆盖终局已公开但经济尚未应用");
 }

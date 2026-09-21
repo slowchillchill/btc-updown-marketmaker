@@ -485,6 +485,86 @@ pub fn execution_with_rules(
     MemoryNoeObservationV3,
     Arc<SealedProcessRuleSnapshotV3>,
 ) {
+    execution_with_identity(path, core, policy, delay, seed, cash, "shared-combination")
+}
+pub fn execution_with_identity(
+    path: &Path,
+    core: &PublicObservationCoreV1,
+    policy: &[u8],
+    delay: Option<u64>,
+    seed: String,
+    cash: &str,
+    run_id: &str,
+) -> (
+    PublicSimExecutionV1,
+    MemoryNoeObservationV3,
+    Arc<SealedProcessRuleSnapshotV3>,
+) {
+    execution_with_evidence::<MeasuredOrderEvidence>(
+        path,
+        core,
+        policy,
+        delay,
+        seed,
+        cash,
+        run_id,
+        BusinessProjectionVersionV1::V3,
+    )
+}
+pub fn execution_with_identity_v4(
+    path: &Path,
+    core: &PublicObservationCoreV1,
+    policy: &[u8],
+    delay: Option<u64>,
+    seed: String,
+    cash: &str,
+    run_id: &str,
+) -> (
+    PublicSimExecutionV1,
+    MemoryNoeObservationV4,
+    Arc<SealedProcessRuleSnapshotV3>,
+) {
+    execution_with_evidence::<MeasuredCancellationEvidence>(
+        path,
+        core,
+        policy,
+        delay,
+        seed,
+        cash,
+        run_id,
+        BusinessProjectionVersionV1::V4,
+    )
+}
+pub fn execution_with_rules_v4(
+    path: &Path,
+    core: &PublicObservationCoreV1,
+    policy: &[u8],
+    delay: Option<u64>,
+    seed: String,
+    cash: &str,
+) -> (
+    PublicSimExecutionV1,
+    MemoryNoeObservationV4,
+    Arc<SealedProcessRuleSnapshotV3>,
+) {
+    execution_with_identity_v4(path, core, policy, delay, seed, cash, "shared-combination")
+}
+// 同一真实夹具仅显式区分源投影版本；不再包装一份运行配置。
+#[allow(clippy::too_many_arguments)]
+fn execution_with_evidence<P: MemoryOrderEvidence + 'static>(
+    path: &Path,
+    core: &PublicObservationCoreV1,
+    policy: &[u8],
+    delay: Option<u64>,
+    seed: String,
+    cash: &str,
+    run_id: &str,
+    projection_version: BusinessProjectionVersionV1,
+) -> (
+    PublicSimExecutionV1,
+    MemoryNoeObservation<P>,
+    Arc<SealedProcessRuleSnapshotV3>,
+) {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
     let source = Path::new(file!());
     // workspace 编译的 file! 带包目录；独立 #[path] 消费则相对调用包。
@@ -548,8 +628,8 @@ pub fn execution_with_rules(
     );
     let latency = load_embedded_proxy_latency_profile().unwrap();
     let opened = RunOpenedV2 {
-        projection_version: BusinessProjectionVersionV1::V3,
-        run_id: "shared-combination".into(),
+        projection_version,
+        run_id: run_id.into(),
         durability_role: RunDurabilityRoleV2::CleanRun,
         platform_rule_snapshot_file_sha256: rules.file_sha256().clone(),
         trade_finality_policy_file_sha256: finality.policy_id().clone(),
@@ -567,7 +647,7 @@ pub fn execution_with_rules(
             path.display().to_string(),
         ),
     };
-    let port = MemoryNoeProjectionPortV3::new(
+    let port = MemoryNoeProjectionPort::<P>::new(
         path.parent().unwrap().join("noe"),
         opened.clone(),
         reference.clone(),
@@ -700,6 +780,18 @@ fn recorded_trading_with_tail(
     tail: u64,
     down_initial: &str,
 ) -> (PublicObservationCoreV1, TradingTimes) {
+    recorded_trading_with_probes(root, initial_taker, maker, end_at, tail, down_initial, &[])
+}
+#[allow(clippy::too_many_arguments)]
+pub fn recorded_trading_with_probes(
+    root: &Path,
+    initial_taker: &str,
+    maker: Option<(&str, &str)>,
+    end_at: i64,
+    tail: u64,
+    down_initial: &str,
+    extra_probes: &[i64],
+) -> (PublicObservationCoreV1, TradingTimes) {
     let mut core = core();
     let mut writer = PublicRecordingWriterV1::create(root, core.header(), config()).unwrap();
     let mut metadata = metadata_snapshot_row();
@@ -781,7 +873,14 @@ fn recorded_trading_with_tail(
     if end_at > 100_000 {
         probes.extend([295_000, 305_000, 315_000, 395_000]);
     }
-    for at in probes {
+    if !extra_probes.is_empty() {
+        probes.extend(extra_probes);
+        probes.sort_unstable();
+        probes.dedup();
+    }
+    // 这些探针属于终态前的交易窗口；320s窗口不能先交付396s，
+    // 再回退到321.003s终态。更长窗口仍保留395s探针。
+    for at in probes.into_iter().filter(|at| *at < end_at) {
         let p = inputs.len() as u64;
         inputs.push(record(
             p,
@@ -844,12 +943,18 @@ fn recorded_trading_with_tail(
         }
     }
     inputs.push(end(inputs.len() as u64));
+    let mut group_times = Vec::new();
     for input in inputs {
         let result = apply(&mut core, &input);
+        // 终态metadata与对应WS可合为一个真实组；消费时序按已关闭组，
+        // 不能把每条输入位置直接当作group_position导致尾部时间错位。
+        for group in &result.applied.closed_groups {
+            group_times.push(times[group.closed_at_input_position as usize]);
+        }
         writer.record(input, result).unwrap();
     }
     writer.stabilize().unwrap();
-    (core, TradingTimes(times))
+    (core, TradingTimes(group_times))
 }
 fn shift_terminal_times(value: &mut serde_json::Value) {
     match value {
@@ -897,7 +1002,7 @@ fn shift_window_times(value: &mut serde_json::Value, delta: i64) {
         _ => {}
     }
 }
-fn reference_after(at: i64, sequence: u64) -> PolymarketRtdsChainlinkTwapInput {
+pub fn reference_after(at: i64, sequence: u64) -> PolymarketRtdsChainlinkTwapInput {
     PolymarketRtdsChainlinkTwapInput {
         common: PolymarketRtdsChainlinkBtcUsdRow {
             timestamp_received: at,

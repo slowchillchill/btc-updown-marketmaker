@@ -249,6 +249,8 @@ type LedgerEntryV1 = (LedgerAccountV1, LedgerAssetV1, Decimal);
 enum LedgerTransactionSourceV1 {
     #[serde(skip)]
     Memory(NoeConsumedRecordRefV1),
+    #[serde(skip)]
+    MemoryV2(execution_normalization::NoeConsumedRecordRefV2),
     NoeConsumed(NoeConsumedRecordReferenceV1),
     Noe(NoeResultReferenceV1),
     LocalReservation(LedgerRequestIdentityV1),
@@ -1720,14 +1722,12 @@ impl LedgerWriterV1 {
     }
 
     fn commit_effect(&mut self, mut effect: LedgerCommittedEffectV1) -> Result<(), LedgerErrorV1> {
-        if let LedgerTransactionSourceV1::Memory(source) = &effect.transaction.source
-            && let execution_normalization::NormalizationRecord::EconomicFactV2 { fact, .. } =
-                source.record()
-            && let contracts::economics::SourceNeutralEconomicDispositionV2::AccountTransition {
-                balance_delta,
-                ..
-            } = &fact.disposition
-        {
+        let balance_delta = match &effect.transaction.source {
+            LedgerTransactionSourceV1::Memory(source) => memory::liability_delta(source),
+            LedgerTransactionSourceV1::MemoryV2(source) => memory::liability_delta(source),
+            _ => None,
+        };
+        if let Some(balance_delta) = balance_delta {
             for (account, amount) in [
                 (
                     LedgerAccountV1::SettlementFeeLiability,
@@ -1861,6 +1861,10 @@ impl LedgerWriterV1 {
         }
         match &effect.transaction.source {
             LedgerTransactionSourceV1::Memory(record) => {
+                self.applied_memory
+                    .insert(record.position(), effect.transaction.ledger_entry_seq);
+            }
+            LedgerTransactionSourceV1::MemoryV2(record) => {
                 self.applied_memory
                     .insert(record.position(), effect.transaction.ledger_entry_seq);
             }
@@ -2514,6 +2518,7 @@ fn lifecycle_evidence_keys<I: LedgerIdentity>(
     let mut keys = SparseLedgerStateKeysV1::default();
     match evidence {
         LedgerEvidence::Control { result } => match result {
+            LedgerControl::CancellationRequestCompleted { result } => match *result {},
             LedgerControl::Submission { outcome } => {
                 if let Some(submission_item) = submission_item_identity(source_record) {
                     if let Some(request_identity) =
@@ -2637,6 +2642,7 @@ fn apply_control_lifecycle<I: LedgerIdentity>(
     ledger_entry_seq: u64,
 ) -> Result<(), LedgerErrorV1> {
     match result {
+        LedgerControl::CancellationRequestCompleted { result } => match *result {},
         LedgerControl::Submission { outcome } => {
             let request_identity = submission_item_identity(source_record)
                 .and_then(|identity| lifecycle.submission_requests.get(&identity).cloned());

@@ -383,8 +383,34 @@ pub enum SourceNeutralTradesQueryResultV1<I = StableLogicalIdentityV1> {
     OutOfRetention(SourceNeutralQueryOutOfRetentionV1),
 }
 
+/// 旧控制版本没有可构造的请求完成载荷。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum SourceNeutralControlResult<S, O, I = StableLogicalIdentityV1> {
+pub enum NoCancellationRequestCompletionV0 {}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancellationRequestCompletedV1 {
+    pub canceled_count: u64,
+    pub not_canceled_no_effect_count: u64,
+    pub evidence_unknown_no_effect_count: u64,
+}
+
+pub type SourceNeutralControlResultV3 = SourceNeutralControlResult<
+    SourceNeutralSubmissionOutcomeV2,
+    SourceNeutralOrderSnapshotV2,
+    StableLogicalIdentityV1,
+    CancellationRequestCompletedV1,
+>;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceNeutralControlResult<
+    S,
+    O,
+    I = StableLogicalIdentityV1,
+    R = NoCancellationRequestCompletionV0,
+> {
+    CancellationRequestCompleted {
+        result: R,
+    },
     Submission {
         outcome: S,
     },

@@ -2,9 +2,20 @@
 use crate::NativeActor;
 use ort::{session::Session, value::Tensor};
 
+pub type ActorBlockRow<'a> = (
+    &'a NativeActor,
+    &'a [f32],
+    &'a [Vec<f32>],
+    &'a [f32],
+    bool,
+    &'a [f32],
+);
+
 pub struct OrtActorScorer {
     pub session: Session,
     pub hidden: usize,
+    #[cfg(all(test, feature = "continuous-validation"))]
+    pub measurement: (usize, Option<Vec<Vec<usize>>>),
 }
 impl OrtActorScorer {
     fn block(
@@ -16,22 +27,44 @@ impl OrtActorScorer {
         exists: bool,
         fees: &[f32],
     ) -> ort::Result<Vec<Vec<f32>>> {
-        let slots = if features.is_empty() { 1 } else { 256 };
-        let mut objects = vec![0.; slots * 129];
-        for (i, row) in features.iter().enumerate() {
-            objects[i * 129..(i + 1) * 129].copy_from_slice(row);
+        Ok(self
+            .blocks(&[(actor, z, features, reduced, exists, fees)])?
+            .remove(0))
+    }
+    /// 独立根的活动参数行合批；每行保留自己的精确前缀、完整归约及掩码。
+    pub fn blocks(&mut self, rows: &[ActorBlockRow<'_>]) -> ort::Result<Vec<Vec<Vec<f32>>>> {
+        if rows.is_empty() {
+            return Ok(Vec::new());
         }
-        let out=self.session.run(ort::inputs![
-            "z_t"=>Tensor::from_array(([1,self.hidden],z.to_vec()))?,
-            "rule_features"=>Tensor::from_array(([1,30],actor.group.rows[actor.row].rule.to_vec()))?,
-            "prefix_features"=>Tensor::from_array(([1,60],actor.prefix_features().to_vec()))?,
-            "cancel_features"=>Tensor::from_array(([1,slots,129],objects))?,
-            "cancel_mask"=>Tensor::from_array(([1,slots],(0..slots).map(|i|i<features.len()).collect::<Vec<_>>()))?,
-            "cancel_reduced"=>Tensor::from_array(([1,3*self.hidden/2],reduced.to_vec()))?,
-            "cancel_exists"=>Tensor::from_array(([1],vec![exists]))?,
-            "price_fee_features"=>Tensor::from_array(([1,9999],fees.to_vec()))?
+        #[cfg(all(test, feature = "continuous-validation"))]
+        {
+            self.measurement.0 += 1;
+            if let Some(blocks) = &mut self.measurement.1 {
+                blocks.push(rows.iter().map(|row| row.2.len()).collect());
+            }
+        }
+        let batch = rows.len();
+        let slots = rows.iter().map(|row| row.2.len()).max().unwrap().max(1);
+        let mut objects = vec![0.; batch * slots * 184];
+        let mut mask = vec![false; batch * slots];
+        for (b, row) in rows.iter().enumerate() {
+            for (i, feature) in row.2.iter().enumerate() {
+                objects[(b * slots + i) * 184..(b * slots + i + 1) * 184].copy_from_slice(feature);
+                mask[b * slots + i] = true;
+            }
+        }
+        let out = self.session.run(ort::inputs![
+            "z_t"=>Tensor::from_array(([batch,self.hidden],rows.iter().flat_map(|r|r.1.iter().copied()).collect::<Vec<_>>()))?,
+            "rule_features"=>Tensor::from_array(([batch,30],rows.iter().flat_map(|r|r.0.group.rows[r.0.row].rule).collect::<Vec<_>>()))?,
+            "prefix_features"=>Tensor::from_array(([batch,60],rows.iter().flat_map(|r|r.0.prefix_features()).collect::<Vec<_>>()))?,
+            "cancel_features"=>Tensor::from_array(([batch,slots,184],objects))?,
+            "cancel_mask"=>Tensor::from_array(([batch,slots],mask))?,
+            "cancel_reduced"=>Tensor::from_array(([batch,3*self.hidden/2],rows.iter().flat_map(|r|r.3.iter().copied()).collect::<Vec<_>>()))?,
+            "cancel_exists"=>Tensor::from_array(([batch],rows.iter().map(|r|r.4).collect::<Vec<_>>()))?,
+            "price_fee_features"=>Tensor::from_array(([batch,9999],rows.iter().flat_map(|r|r.5.iter().copied()).collect::<Vec<_>>()))?
         ])?;
-        [
+        let mut result = vec![Vec::new(); batch];
+        for key in [
             "family_logits",
             "quantity_branch_logits",
             "buy_variant_logits",
@@ -40,14 +73,13 @@ impl OrtActorScorer {
             "expiry_logits",
             "cancel_embeddings",
             "cancel_logits",
-        ]
-        .iter()
-        .map(|key| {
-            out[*key]
-                .try_extract_tensor::<f32>()
-                .map(|(_, data)| data.to_vec())
-        })
-        .collect()
+        ] {
+            let (_, data) = out[key].try_extract_tensor::<f32>()?;
+            for (row, values) in result.iter_mut().zip(data.chunks_exact(data.len() / batch)) {
+                row.push(values.to_vec());
+            }
+        }
+        Ok(result)
     }
     /// 全人口的sum/mean/max沿原顺序使用f64归约；块不改变动作集合。
     pub fn reduced(&mut self, actor: &NativeActor, z: &[f32]) -> ort::Result<Vec<f32>> {
@@ -94,6 +126,46 @@ impl OrtActorScorer {
                 return Ok(output[head].clone());
             }
             scores.extend_from_slice(&output[head][..block.len()]);
+        }
+        Ok(scores)
+    }
+
+    pub fn scores_batch(
+        &mut self,
+        rows: &[(&NativeActor, &[f32], &[f32])],
+    ) -> Result<Vec<Vec<f32>>, Box<dyn std::error::Error>> {
+        let fees = rows
+            .iter()
+            .map(|r| r.0.price_fee_features().map_err(|e| format!("{e:?}")))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut scores = vec![Vec::new(); rows.len()];
+        let count = rows
+            .iter()
+            .map(|r| r.0.group.cancel.len())
+            .max()
+            .unwrap_or(0)
+            .max(1);
+        for offset in (0..count).step_by(256) {
+            let blocks: Vec<_> = rows
+                .iter()
+                .zip(&fees)
+                .map(|(r, fee)| {
+                    let objects = &r.0.group.cancel;
+                    let block =
+                        &objects[offset.min(objects.len())..(offset + 256).min(objects.len())];
+                    (r.0, r.1, block, r.2, !objects.is_empty(), fee.as_slice())
+                })
+                .collect();
+            let output = self.blocks(&blocks)?;
+            for (i, (row, values)) in rows.iter().zip(output).enumerate() {
+                let head = row.0.head_index();
+                if head == 7 {
+                    let valid = row.0.group.cancel.len().saturating_sub(offset).min(256);
+                    scores[i].extend_from_slice(&values[head][..valid]);
+                } else if offset == 0 {
+                    scores[i] = values[head].clone();
+                }
+            }
         }
         Ok(scores)
     }

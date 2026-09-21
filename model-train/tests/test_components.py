@@ -250,8 +250,9 @@ class ComponentTests(unittest.TestCase):
                     self.assertEqual(len(model.grus), layers)
                     self.assertEqual(len(model.layer_norms), layers)
                     for encoder, width in ((model.fast_encoder, 3), (model.slow_encoder, 5)):
-                        self.assertEqual([type(m) for m in encoder],
-                                         [nn.LayerNorm, nn.Linear, nn.SiLU, nn.Linear])
+                        self.assertIsInstance(encoder[0], nn.LayerNorm)
+                        self.assertEqual([type(m) for m in list(encoder)[1:]],
+                                         [nn.Linear, nn.SiLU, nn.Linear])
                         self.assertEqual(encoder[0].normalized_shape, (width,))
                         self.assertEqual(encoder[1].weight.shape, (hidden // 2, width))
                         self.assertEqual(encoder[3].weight.shape, (hidden // 2, hidden // 2))
@@ -278,7 +279,8 @@ class ComponentTests(unittest.TestCase):
                     count += 1
         for layers in (1, 2, 3):
             model = BareGRU(3, 5, layers)
-            self.assertEqual([type(m) for m in model.encoder], [nn.LayerNorm, nn.Linear, nn.SiLU])
+            self.assertIsInstance(model.encoder[0], nn.LayerNorm)
+            self.assertEqual([type(m) for m in list(model.encoder)[1:]], [nn.Linear, nn.SiLU])
             self.assertEqual(model.encoder[0].normalized_shape, (8,))
             self.assertEqual(model.encoder[1].weight.shape, (256, 8))
             self.assertIs(type(model.gru), nn.GRU)

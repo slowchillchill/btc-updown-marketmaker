@@ -62,7 +62,7 @@ pub(crate) fn side(assets: &[AssetIdentityV1], token: &TokenId) -> Option<usize>
         })
 }
 pub(crate) fn times(
-    record: Option<&::execution_normalization::NoeConsumedRecordRefV1>,
+    record: Option<&::execution_normalization::NoeConsumedRecordRefV2>,
 ) -> Option<(i64, i64)> {
     use contracts::execution_normalization::SimV2SourceRecordReferenceV1::*;
     match &record?.record().source_reference().record {
@@ -90,20 +90,47 @@ pub(crate) fn times(
     }
 }
 
-pub(crate) fn order_condition<'a>(
-    order: &'a shared_run::ExecutionOrderReadV1<'a>,
-) -> Result<&'a ConditionId, crate::InputError> {
-    if let Some(origin) = &order.origin {
-        return leg(origin).map(|(condition, _)| condition);
+pub(crate) fn time_slot(
+    out: &mut [f32],
+    at: usize,
+    record: ExecutionReadValueV1<Option<&::execution_normalization::NoeConsumedRecordRefV2>>,
+    now: i64,
+) {
+    match record {
+        Known(Some(record)) => {
+            out[at + 5] = 1.;
+            if let Some((source, received)) = times(Some(record)) {
+                out[at] = signed_log_f32(&ratio(i128::from(now) - i128::from(source), 1000));
+                out[at + 1] = signed_log_f32(&ratio(i128::from(now) - i128::from(received), 1000));
+                out[at + 2] =
+                    signed_log_f32(&ratio(i128::from(received) - i128::from(source), 1000));
+                out[at + 3] = 1.;
+                out[at + 4] = 1.;
+            }
+        }
+        Unavailable => out[at + 5] = 1.,
+        Known(None) | NotApplicable => {}
     }
-    use ::execution_normalization::{NormalizationRecord, SourceNeutralEvidenceKind};
-    if let Some(record) = order.formed
-        && let NormalizationRecord::Evidence {
-            evidence: SourceNeutralEvidenceKind::OrderLifecycle { result },
-            ..
-        } = record.record()
+}
+pub(crate) fn request_block(
+    out: &mut [f32],
+    at: usize,
+    requests: shared_run::CancellationRequestsReadV1<'_>,
+    now: i64,
+) {
+    for (i, value) in std::iter::once(requests.pending_count)
+        .chain(requests.response_counts)
+        .enumerate()
     {
-        return Ok(&result.condition_id);
+        slot(
+            out,
+            at + i * 3,
+            match value {
+                Known(n) => Known(integer(n)),
+                NotApplicable => NotApplicable,
+                Unavailable => Unavailable,
+            },
+        );
     }
-    Err(crate::InputError::MissingAssociation)
+    time_slot(out, at + 12, requests.latest_response, now);
 }

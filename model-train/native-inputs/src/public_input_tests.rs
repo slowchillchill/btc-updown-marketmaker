@@ -43,7 +43,7 @@ async fn real_public_chain_freezes_cash_encodes_original_legs_and_cold_root() {
     execution
         .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
         .unwrap();
-    let mut shared = SharedExecutionV1::from_opening(ledger, observation)
+    let mut shared = SharedExecutionV2::from_opening(ledger, observation)
         .unwrap()
         .unwrap();
     let account = shared
@@ -125,7 +125,7 @@ async fn real_public_chain_freezes_cash_encodes_original_legs_and_cold_root() {
                 // 既有 late registry 正式入口，真实引用缺源组件读取，不是合法组。
                 let read = group.action_before.as_ref().unwrap();
                 let orders = read.orders().collect::<Vec<_>>();
-                let mut late = SharedExecutionRegistryV1::new(Arc::new(
+                let mut late = SharedExecutionRegistryV2::new(Arc::new(
                     orders[0].accepted.unwrap().context().clone(),
                 ));
                 for order in &orders {
@@ -162,13 +162,13 @@ async fn real_public_chain_freezes_cash_encodes_original_legs_and_cold_root() {
             }
             saw_orders = true;
             assert_eq!(group.rows[0].slow[110], projection("80"));
-            assert_eq!(group.cancel[0][5], 1.);
-            assert_eq!(group.cancel[1][6], 1.);
-            assert_eq!(group.cancel[2][5], 1.);
-            assert_eq!(group.cancel[2][56], 1.);
-            assert_eq!(group.cancel[0][34], projection("10"));
-            assert_eq!(group.cancel[3][105], projection("1"));
-            assert_eq!(group.cancel[3][108], projection("1"));
+            assert_eq!(group.cancel[0][6], 1.);
+            assert_eq!(group.cancel[1][7], 1.);
+            assert_eq!(group.cancel[2][6], 1.);
+            assert_eq!(group.cancel[2][75], 1.);
+            assert_eq!(group.cancel[0][35], projection("10"));
+            assert_eq!(group.cancel[3][142], projection("1"));
+            assert_eq!(group.cancel[3][145], projection("1"));
         }
         exported.push(exported_group(&group));
     }
@@ -243,7 +243,7 @@ fn overlap_context_reads_current_reserve_and_old_local_only_survives_switch() {
     execution
         .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
         .unwrap();
-    let mut shared = SharedExecutionV1::from_opening(ledger, observation)
+    let mut shared = SharedExecutionV2::from_opening(ledger, observation)
         .unwrap()
         .unwrap();
     let account = shared
@@ -325,7 +325,7 @@ async fn native_partial_makers_project_average_cost_and_nonterminating_fraction(
         execution
             .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
             .unwrap();
-        let mut shared = SharedExecutionV1::from_opening(ledger, observation)
+        let mut shared = SharedExecutionV2::from_opening(ledger, observation)
             .unwrap()
             .unwrap();
         let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times).unwrap();
@@ -341,7 +341,7 @@ async fn native_partial_makers_project_average_cost_and_nonterminating_fraction(
             native.consume(&mut shared, &mut driver).unwrap().unwrap();
         }
         async fn buy<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>(
-            shared: &mut SharedExecutionV1,
+            shared: &mut SharedExecutionV2,
             driver: &mut FinitePublicConsumptionV1<I>,
             id: &str,
             token: &str,
@@ -380,64 +380,29 @@ async fn native_partial_makers_project_average_cost_and_nonterminating_fraction(
         let mut second = false;
         let mut opposite = false;
         while driver.next_group().unwrap().is_some() {
-            if !shared.apply_closed().unwrap() {
-                continue;
-            }
+            shared.apply_closed().unwrap();
             let at = driver
                 .decision()
                 .unwrap()
                 .cutoff()
                 .decision_time()
                 .logical_time_utc_ms();
-            // 每个截点先读取，再实施原脚本动作。46k是明确诊断中间读取，
-            // 不把该组或从它继续的测试探针宣称完整合法模型序列。
-            let read = shared.action_before(&mut driver).unwrap().unwrap();
+            // 补齐有限 PAPER 的已证空档后，原 b-first 关联在 46k 已可见，
+            // 此组继续正常编码，不把旧驱动的延迟领取当作未知关联。
+            let group = native.consume(&mut shared, &mut driver).unwrap().unwrap();
             if at == 46_000 {
-                assert!(matches!(
-                    read.cancel_objects(),
-                    ExecutionReadValueV1::Unavailable
-                ));
+                let read = group.action_before.as_ref().unwrap();
                 assert_eq!(read.orders().count(), 2);
                 assert!(
                     read.orders()
-                        .any(|o| o.origin.is_none() && o.formed.is_some())
+                        .all(|order| order.origin.is_some() && order.accepted.is_some())
                 );
-                let bindings = driver
-                    .frames()
-                    .iter()
-                    .map(|f| {
-                        (
-                            f.observation.market.condition_id.0.clone(),
-                            crate::root::MarketBinding {
-                                market: f.observation.market.clone(),
-                                assets: f
-                                    .observation
-                                    .assets
-                                    .iter()
-                                    .map(|a| a.asset.clone())
-                                    .collect(),
-                            },
-                        )
-                    })
-                    .collect();
-                let input = crate::account::encode(
-                    &read,
-                    Some(&ConditionId(CONDITION_ID.into())),
-                    &[],
-                    &bindings,
-                    at,
-                    InputRole::DecisionRequired,
-                )
-                .unwrap();
-                assert_eq!(&input[406..409], &[projection("2"), 1., 1.]);
-                assert_eq!(&input[388..391], &[0., 0., 1.]);
                 assert!(matches!(
-                    native.consume(&mut shared, &mut driver),
-                    Err(InputError::MissingAssociation)
+                    read.cancel_objects(),
+                    ExecutionReadValueV1::Known(_)
                 ));
-                continue;
             }
-            let group = native.consume(&mut shared, &mut driver).unwrap().unwrap();
+
             if at >= 28_000 && !second {
                 second = true;
                 let old = shared
@@ -553,7 +518,7 @@ async fn complete_real_object_population_crosses_block_boundary() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("dpt");
         let (core, times) = recorded_trading_window(&root, "100", None, 320_000, true);
-        let (mut execution, observation, rules) = execution_with_rules(
+        let (mut execution, observation, rules) = execution_with_rules_v4(
             &temp.path().join("sim.jsonl"),
             &core,
             SUCCESS_POLICY,
@@ -566,7 +531,7 @@ async fn complete_real_object_population_crosses_block_boundary() {
         execution
             .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
             .unwrap();
-        let mut shared = SharedExecutionV1::from_opening(ledger, observation)
+        let mut shared = SharedExecutionV2::from_opening(ledger, observation)
             .unwrap()
             .unwrap();
         let account = shared
@@ -611,7 +576,7 @@ async fn complete_real_object_population_crosses_block_boundary() {
                     &[projection(&count.to_string()), 1., 1.]
                 );
                 assert_eq!(
-                    group.cancel.last().unwrap()[105],
+                    group.cancel.last().unwrap()[142],
                     projection(&count.to_string())
                 );
                 exports.push(serde_json::to_value(&group).unwrap());
@@ -648,7 +613,7 @@ async fn complete_population_keeps_uncancellable_pending_and_quote_base_na() {
         execution
             .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
             .unwrap();
-        let mut shared = SharedExecutionV1::from_opening(ledger, observation)
+        let mut shared = SharedExecutionV2::from_opening(ledger, observation)
             .unwrap()
             .unwrap();
         let account = shared
@@ -723,10 +688,7 @@ async fn complete_population_keeps_uncancellable_pending_and_quote_base_na() {
                     assert_eq!(&slow[406..409], &[projection("1"), 1., 1.]);
                     assert_eq!(slow[122], 0.);
                     pending = true;
-                } else if at == 46_000 {
-                    assert_eq!(slow[54], projection("5"));
-                    assert_eq!(slow[122], 0.);
-                } else if at == 56_000 {
+                } else if at == 46_000 || at == 56_000 {
                     assert_eq!(slow[54], if compensated { 0. } else { projection("5") });
                     assert_eq!(slow[122], if compensated { 0. } else { projection("5") });
                     assert_eq!(slow[185], projection("5"));
@@ -743,7 +705,7 @@ async fn native_rebates_project_exact_contribution_ratios_and_old_sum() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("dpt");
     let (core, times) = recorded_rebate_contributions(&root);
-    let (mut execution, observation, _rules) = execution_with_rules(
+    let (mut execution, observation, _rules) = execution_with_rules_v4(
         &temp.path().join("sim.jsonl"),
         &core,
         SUCCESS_POLICY,
@@ -756,7 +718,7 @@ async fn native_rebates_project_exact_contribution_ratios_and_old_sum() {
     execution
         .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
         .unwrap();
-    let mut shared = SharedExecutionV1::from_opening(ledger, observation)
+    let mut shared = SharedExecutionV2::from_opening(ledger, observation)
         .unwrap()
         .unwrap();
     let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times).unwrap();
@@ -876,7 +838,7 @@ async fn late_success_updates_old_account_without_reviving_hidden() {
     execution
         .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
         .unwrap();
-    let mut shared = SharedExecutionV1::from_opening(ledger, observation)
+    let mut shared = SharedExecutionV2::from_opening(ledger, observation)
         .unwrap()
         .unwrap();
     let account = shared
@@ -959,7 +921,7 @@ async fn old_pairing_is_market_local_before_sum() {
     execution
         .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
         .unwrap();
-    let mut shared = SharedExecutionV1::from_opening(ledger, observation)
+    let mut shared = SharedExecutionV2::from_opening(ledger, observation)
         .unwrap()
         .unwrap();
     let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times).unwrap();
@@ -1103,8 +1065,8 @@ fn native_execution(
     policy: &[u8],
 ) -> (
     sim_system::execution::PublicSimExecutionV1,
-    sim_system::execution::MemoryNoeObservationV3,
+    sim_system::execution::MemoryNoeObservationV4,
     std::sync::Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>,
 ) {
-    execution_with_rules(path, core, policy, None, "e".repeat(64), "100")
+    execution_with_rules_v4(path, core, policy, None, "e".repeat(64), "100")
 }

@@ -21,13 +21,12 @@ use contracts::execution_normalization::{
     SourceNeutralTradesQueryResultV1, StableLogicalIdentityV1,
 };
 use contracts::{
-    AccountInstanceKeyV1, CancelTargetOutcomeV2, DirectResponseMetadataV2,
-    MakerRebateAccrualStatusV2, OrderLifecycleEventV2, OrderProjectionV2, OrderQueryResultV2,
-    OrdersQueryResultV2, PlatformAccountDeltaReasonV2, PlatformAccountDeltaV2, QueryCursorV2,
-    QueryOutOfRetentionV2, SettlementLifecycleEventV2, SimulatedOrderKnownStatusV2,
-    SimulatedOrderStatusV2, SimulatedTradeKnownStatusV2, SimulatedTradeStatusV2,
-    SubmissionItemOutcomeV2, SubmissionResponseItemV2, TradeEconomicDispositionV2,
-    TradeProjectionV2, TradesQueryResultV2,
+    AccountInstanceKeyV1, DirectResponseMetadataV2, MakerRebateAccrualStatusV2,
+    OrderLifecycleEventV2, OrderProjectionV2, OrderQueryResultV2, OrdersQueryResultV2,
+    PlatformAccountDeltaReasonV2, PlatformAccountDeltaV2, QueryCursorV2, QueryOutOfRetentionV2,
+    SettlementLifecycleEventV2, SimulatedOrderKnownStatusV2, SimulatedOrderStatusV2,
+    SimulatedTradeKnownStatusV2, SimulatedTradeStatusV2, SubmissionItemOutcomeV2,
+    SubmissionResponseItemV2, TradeEconomicDispositionV2, TradeProjectionV2, TradesQueryResultV2,
 };
 use execution_normalization::{
     DurableCommitOutcomeV1, DurableContextStore, DurableErrorV1, NoeTradePayload,
@@ -37,7 +36,7 @@ use execution_normalization::{
 };
 
 use super::{
-    BusinessDirectResponseV2, BusinessProjectionBatch, BusinessProjectionBatchPayloadV1,
+    BusinessDirectResponse, BusinessProjectionBatch, BusinessProjectionBatchPayloadV1,
     BusinessProjectionBatchV2, BusinessProjectionPortV2,
 };
 use crate::runtime_v2::RunOpenedV2;
@@ -162,7 +161,7 @@ where
             .extend(commit.result_references());
     }
 
-    fn open_from_first_batch(&mut self, batch: &BusinessProjectionBatch<T>) -> bool {
+    fn open_from_first_batch(&mut self, batch: &BusinessProjectionBatch<T, P::Reason>) -> bool {
         if self.store.is_some() {
             return true;
         }
@@ -224,7 +223,7 @@ where
         self.try_accept_payload(Arc::new(BusinessProjectionBatchPayloadV1::V2(batch)))
     }
     fn try_accept_payload(&mut self, payload: Arc<BusinessProjectionBatchPayloadV1>) -> bool {
-        let Some(batch) = T::batch(payload.as_ref()) else {
+        let Some(batch) = P::batch::<T, StableLogicalIdentityV1>(payload.as_ref()) else {
             return false;
         };
         if !self.open_from_first_batch(&batch) || batch.run_id != self.opened.run_id {
@@ -285,7 +284,7 @@ struct BatchMapper<
     context: &'a ExecutionNormalizationContextV1,
     account: Arc<contracts::execution_normalization::SourceNeutralAccountIdentityV1>,
     identity: std::marker::PhantomData<(I, F)>,
-    batch: &'a BusinessProjectionBatch<T>,
+    batch: &'a BusinessProjectionBatch<T, P::Reason>,
     watermark: SimV2SourceWatermarkV1,
     evidence: Vec<SourceNeutralEvidence<T::Result, ControlFor<P, I>, I>>,
     next_ordinal: u32,
@@ -297,7 +296,7 @@ where
 {
     fn new(
         context: &'a ExecutionNormalizationContextV1,
-        batch: &'a BusinessProjectionBatch<T>,
+        batch: &'a BusinessProjectionBatch<T, P::Reason>,
     ) -> Self {
         Self::with_account(context, Arc::new(context.account_identity.clone()), batch)
     }
@@ -305,7 +304,7 @@ where
     fn with_account(
         context: &'a ExecutionNormalizationContextV1,
         account: Arc<contracts::execution_normalization::SourceNeutralAccountIdentityV1>,
-        batch: &'a BusinessProjectionBatch<T>,
+        batch: &'a BusinessProjectionBatch<T, P::Reason>,
     ) -> Self {
         Self {
             account,
@@ -396,39 +395,46 @@ where
         })
     }
 
-    fn map_direct_response(&mut self, response: &BusinessDirectResponseV2) -> Result<(), ()> {
+    fn map_direct_response(
+        &mut self,
+        response: &BusinessDirectResponse<P::Reason>,
+    ) -> Result<(), ()> {
         match response {
-            BusinessDirectResponseV2::PostOrder(response) => {
+            BusinessDirectResponse::PostOrder(response) => {
                 self.push_submission(&response.metadata, &response.item)
             }
-            BusinessDirectResponseV2::PostOrders(response) => {
+            BusinessDirectResponse::PostOrders(response) => {
                 for item in &response.items {
                     self.push_submission(&response.metadata, item)?;
                 }
                 Ok(())
             }
-            BusinessDirectResponseV2::CancelOrder(response) => {
-                self.push_cancellation(&response.metadata, &response.target)
+            BusinessDirectResponse::CancelOrder(response) => {
+                self.push_cancellation(&response.metadata, &response.target)?;
+                self.push_cancel_completion(
+                    &response.metadata,
+                    std::slice::from_ref(&response.target),
+                )
             }
-            BusinessDirectResponseV2::CancelOrders(response) => {
+            BusinessDirectResponse::CancelOrders(response) => {
                 for target in &response.targets {
                     self.push_cancellation(&response.metadata, target)?;
                 }
-                Ok(())
+                self.push_cancel_completion(&response.metadata, &response.targets)
             }
-            BusinessDirectResponseV2::CancelMarketOrders(response) => {
+            BusinessDirectResponse::CancelMarketOrders(response) => {
                 for target in &response.targets {
                     self.push_cancellation(&response.metadata, target)?;
                 }
-                Ok(())
+                self.push_cancel_completion(&response.metadata, &response.targets)
             }
-            BusinessDirectResponseV2::CancelAllOrders(response) => {
+            BusinessDirectResponse::CancelAllOrders(response) => {
                 for target in &response.targets {
                     self.push_cancellation(&response.metadata, target)?;
                 }
-                Ok(())
+                self.push_cancel_completion(&response.metadata, &response.targets)
             }
-            BusinessDirectResponseV2::Order(response) => {
+            BusinessDirectResponse::Order(response) => {
                 let result = self.map_order_query(&response.result)?;
                 self.push_direct_request(
                     &response.metadata,
@@ -436,7 +442,7 @@ where
                 );
                 Ok(())
             }
-            BusinessDirectResponseV2::Orders(response) => {
+            BusinessDirectResponse::Orders(response) => {
                 let result = self.map_orders_query(&response.result)?;
                 self.push_direct_request(
                     &response.metadata,
@@ -444,7 +450,7 @@ where
                 );
                 Ok(())
             }
-            BusinessDirectResponseV2::Trades(response) => {
+            BusinessDirectResponse::Trades(response) => {
                 let result = self.map_trades_query(&response.result)?;
                 self.push_direct_request(
                     &response.metadata,
@@ -493,17 +499,49 @@ where
         Ok(())
     }
 
+    fn push_cancel_completion(
+        &mut self,
+        metadata: &DirectResponseMetadataV2,
+        targets: &[contracts::CancelTargetResponse<P::Reason>],
+    ) -> Result<(), ()> {
+        use contracts::execution_normalization::CancellationRequestCompletedV1;
+        let mut result = CancellationRequestCompletedV1 {
+            canceled_count: 0,
+            not_canceled_no_effect_count: 0,
+            evidence_unknown_no_effect_count: 0,
+        };
+        for target in targets {
+            match &target.outcome {
+                contracts::CancelTargetOutcome::Canceled(_) => result.canceled_count += 1,
+                contracts::CancelTargetOutcome::NotCanceledNoEffect(_) => {
+                    result.not_canceled_no_effect_count += 1
+                }
+                contracts::CancelTargetOutcome::EvidenceUnknownNoEffect => {
+                    result.evidence_unknown_no_effect_count += 1
+                }
+            }
+        }
+        if let Some(result) = P::completed(result) {
+            self.push_direct_request(
+                metadata,
+                SourceNeutralControlResult::CancellationRequestCompleted { result },
+            );
+        }
+        Ok(())
+    }
     fn push_cancellation(
         &mut self,
         metadata: &DirectResponseMetadataV2,
-        target: &contracts::CancelTargetResponseV2,
+        target: &contracts::CancelTargetResponse<P::Reason>,
     ) -> Result<(), ()> {
         let outcome = match &target.outcome {
-            CancelTargetOutcomeV2::Canceled(_) => SourceNeutralCancellationOutcomeV1::Canceled,
-            CancelTargetOutcomeV2::NotCanceledNoEffect(_) => {
+            contracts::CancelTargetOutcome::Canceled(_) => {
+                SourceNeutralCancellationOutcomeV1::Canceled
+            }
+            contracts::CancelTargetOutcome::NotCanceledNoEffect(_) => {
                 SourceNeutralCancellationOutcomeV1::NotCanceledNoEffect
             }
-            CancelTargetOutcomeV2::EvidenceUnknownNoEffect => {
+            contracts::CancelTargetOutcome::EvidenceUnknownNoEffect => {
                 SourceNeutralCancellationOutcomeV1::EvidenceUnknownNoEffect
             }
         };
@@ -1518,6 +1556,11 @@ pub trait NoeFeedbackPayload<I = StableLogicalIdentityV1>: Clone {
         None
     }
 
+    fn cancellation_batch(
+        _: &BusinessProjectionBatchPayloadV1,
+    ) -> Option<Arc<BusinessProjectionBatch<Self, contracts::CancelNotCanceledReasonV3>>> {
+        None
+    }
     fn batch(
         payload: &BusinessProjectionBatchPayloadV1,
     ) -> Option<Arc<BusinessProjectionBatch<Self>>>;
@@ -1588,6 +1631,14 @@ impl<I: Clone + std::fmt::Debug + Eq + serde::Serialize> NoeFeedbackPayload<I>
             },
         })
     }
+    fn cancellation_batch(
+        payload: &BusinessProjectionBatchPayloadV1,
+    ) -> Option<Arc<BusinessProjectionBatch<Self, contracts::CancelNotCanceledReasonV3>>> {
+        match payload {
+            BusinessProjectionBatchPayloadV1::V4(batch) => Some(Arc::clone(batch)),
+            _ => None,
+        }
+    }
     fn batch(
         payload: &BusinessProjectionBatchPayloadV1,
     ) -> Option<Arc<BusinessProjectionBatch<Self>>> {
@@ -1602,13 +1653,95 @@ pub type SimV2NoeProjectionPortV2 = SimNoeProjectionPort<contracts::TradeLifecyc
 #[cfg(test)]
 type BatchMapperV1<'a> = BatchMapper<'a, contracts::TradeLifecycleFeedbackV2>;
 
+pub trait CancellationEvidenceProjection {
+    type Reason: Clone + std::fmt::Debug + Eq;
+    type Completion: Clone + std::fmt::Debug + Eq + serde::Serialize;
+    fn completed(
+        result: contracts::execution_normalization::CancellationRequestCompletedV1,
+    ) -> Option<Self::Completion>;
+    fn batch<T: NoeFeedbackPayload<I>, I>(
+        payload: &BusinessProjectionBatchPayloadV1,
+    ) -> Option<Arc<BusinessProjectionBatch<T, Self::Reason>>>;
+}
+impl CancellationEvidenceProjection for LegacyOrderEvidence {
+    type Reason = contracts::CancelNotCanceledReasonV2;
+    type Completion = contracts::execution_normalization::NoCancellationRequestCompletionV0;
+    fn completed(
+        _: contracts::execution_normalization::CancellationRequestCompletedV1,
+    ) -> Option<Self::Completion> {
+        None
+    }
+    fn batch<T: NoeFeedbackPayload<I>, I>(
+        payload: &BusinessProjectionBatchPayloadV1,
+    ) -> Option<Arc<BusinessProjectionBatch<T, Self::Reason>>> {
+        T::batch(payload)
+    }
+}
+impl CancellationEvidenceProjection for MeasuredOrderEvidence {
+    type Reason = contracts::CancelNotCanceledReasonV2;
+    type Completion = contracts::execution_normalization::NoCancellationRequestCompletionV0;
+    fn completed(
+        _: contracts::execution_normalization::CancellationRequestCompletedV1,
+    ) -> Option<Self::Completion> {
+        None
+    }
+    fn batch<T: NoeFeedbackPayload<I>, I>(
+        payload: &BusinessProjectionBatchPayloadV1,
+    ) -> Option<Arc<BusinessProjectionBatch<T, Self::Reason>>> {
+        T::batch(payload)
+    }
+}
+#[derive(Clone, Debug, Default)]
+pub struct MeasuredCancellationEvidence;
+impl CancellationEvidenceProjection for MeasuredCancellationEvidence {
+    type Reason = contracts::CancelNotCanceledReasonV3;
+    type Completion = contracts::execution_normalization::CancellationRequestCompletedV1;
+    fn completed(result: Self::Completion) -> Option<Self::Completion> {
+        Some(result)
+    }
+    fn batch<T: NoeFeedbackPayload<I>, I>(
+        payload: &BusinessProjectionBatchPayloadV1,
+    ) -> Option<Arc<BusinessProjectionBatch<T, Self::Reason>>> {
+        T::cancellation_batch(payload)
+    }
+}
+impl<I: Clone + std::fmt::Debug + Eq + serde::Serialize> OrderEvidenceProjection<I>
+    for MeasuredCancellationEvidence
+{
+    type Submission = <MeasuredOrderEvidence as OrderEvidenceProjection<I>>::Submission;
+    type Snapshot = <MeasuredOrderEvidence as OrderEvidenceProjection<I>>::Snapshot;
+    fn accepted(
+        order: SourceNeutralOrderSnapshotV1<I>,
+        source: &contracts::AcceptedSubmissionItemV2,
+        effective_processing_at_utc_ms: i64,
+    ) -> Self::Submission {
+        MeasuredOrderEvidence::accepted(order, source, effective_processing_at_utc_ms)
+    }
+    fn rejected() -> Self::Submission {
+        <MeasuredOrderEvidence as OrderEvidenceProjection<I>>::rejected()
+    }
+    fn unknown() -> Self::Submission {
+        <MeasuredOrderEvidence as OrderEvidenceProjection<I>>::unknown()
+    }
+    fn snapshot(
+        identity: SourceNeutralOrderSnapshotV1<I>,
+        source: &OrderProjectionV2,
+    ) -> Self::Snapshot {
+        MeasuredOrderEvidence::snapshot(identity, source)
+    }
+}
+pub type SimV2NoeProjectionPortV4 =
+    SimNoeProjectionPort<contracts::TradeLifecycleFeedbackV3, MeasuredCancellationEvidence>;
 type ControlFor<P, I = StableLogicalIdentityV1> = SourceNeutralControlResult<
     <P as OrderEvidenceProjection<I>>::Submission,
     <P as OrderEvidenceProjection<I>>::Snapshot,
     I,
+    <P as CancellationEvidenceProjection>::Completion,
 >;
 /// 只选择源中立数量载荷；源序、身份、经济和耐久处理继续共用原实现。
-pub trait OrderEvidenceProjection<I = StableLogicalIdentityV1> {
+pub trait OrderEvidenceProjection<I = StableLogicalIdentityV1>:
+    CancellationEvidenceProjection
+{
     type Submission: Clone + std::fmt::Debug + Eq + serde::Serialize;
     type Snapshot: Clone + std::fmt::Debug + Eq + serde::Serialize;
     fn accepted(
@@ -1833,12 +1966,12 @@ pub(super) fn assert_order_controls_v3(
                 .find_map(|p| match p.as_ref() {
                     BusinessProjectionBatchPayloadV1::V3(b) => {
                         b.direct_responses().find_map(|r| match r {
-                            BusinessDirectResponseV2::PostOrder(r)
+                            BusinessDirectResponse::PostOrder(r)
                                 if &r.metadata.global_request_id == global_request_id =>
                             {
                                 Some(&r.item)
                             }
-                            BusinessDirectResponseV2::PostOrders(r)
+                            BusinessDirectResponse::PostOrders(r)
                                 if &r.metadata.global_request_id == global_request_id =>
                             {
                                 r.items
@@ -1951,7 +2084,7 @@ pub(super) fn assert_order_controls_v3(
                         .find_map(|p| match p.as_ref() {
                             BusinessProjectionBatchPayloadV1::V3(b) => {
                                 b.direct_responses().find_map(|r| match r {
-                                    BusinessDirectResponseV2::Orders(r) => match &r.result {
+                                    BusinessDirectResponse::Orders(r) => match &r.result {
                                         OrdersQueryResultV2::Page(p) => Some(p),
                                         _ => None,
                                     },
@@ -1997,7 +2130,7 @@ pub(super) fn assert_order_controls_v3(
         .find_map(|p| match p.as_ref() {
             BusinessProjectionBatchPayloadV1::V3(b)
                 if b.direct_responses()
-                    .any(|r| matches!(r, BusinessDirectResponseV2::PostOrder(_))) =>
+                    .any(|r| matches!(r, BusinessDirectResponse::PostOrder(_))) =>
             {
                 Some(b)
             }
@@ -2179,10 +2312,11 @@ mod tests {
     use contracts::{
         AcceptedSubmissionItemV2, AssetIdentityV1, CancelMarketOrdersDirectResponseV2,
         CancelNotCanceledReasonV2, CancelOrderDirectResponseV2, CancelOrdersDirectResponseV2,
-        CancelTargetResponseV2, CanceledTargetMeasurementV2, ClobMarketId, ConditionId,
-        ExactDecimal, ExecutionMethodV2, InitialAccountStateV2, LifecycleFeedbackMetadataV2,
-        MarketEnrollmentV2, MarketIdentityV2, MarketResolutionTerminalV3, MarketWindowV2,
-        OrderDirectResponseV2, OrderLifecycleFeedbackV2, OrdersDirectResponseV2, OutcomeIdentityV1,
+        CancelTargetOutcomeV2, CancelTargetResponseV2, CanceledTargetMeasurementV2, ClobMarketId,
+        ConditionId, ExactDecimal, ExecutionMethodV2, InitialAccountStateV2,
+        LifecycleFeedbackMetadataV2, MarketEnrollmentV2, MarketIdentityV2,
+        MarketResolutionTerminalV3, MarketWindowV2, OrderDirectResponseV2,
+        OrderLifecycleFeedbackV2, OrdersDirectResponseV2, OutcomeIdentityV1,
         PlatformAccountBalanceDeltaV1, PlatformOutcomeBalanceDeltaV1, PlatformSourceV1,
         PostOrderDirectResponseV2, PostOrdersDirectResponseV2, SettlementLifecycleFeedbackV2,
         Sha256Hex, SimCallerRoleV1, SubmissionMeasurementV2, SubmissionResponseItemV2, TokenId,
@@ -2353,13 +2487,13 @@ mod tests {
     fn direct_responses() -> Vec<Arc<StoredDirectResponseV2>> {
         vec![
             Arc::new(StoredDirectResponseV2::Final(
-                BusinessDirectResponseV2::PostOrder(PostOrderDirectResponseV2 {
+                BusinessDirectResponse::PostOrder(PostOrderDirectResponseV2 {
                     metadata: metadata("post-one", ExecutionMethodV2::PostOrder, 1),
                     item: submission_item(accepted_submission()),
                 }),
             )),
             Arc::new(StoredDirectResponseV2::Final(
-                BusinessDirectResponseV2::PostOrders(PostOrdersDirectResponseV2 {
+                BusinessDirectResponse::PostOrders(PostOrdersDirectResponseV2 {
                     metadata: metadata("post-many", ExecutionMethodV2::PostOrders, 2),
                     items: vec![submission_item(
                         SubmissionItemOutcomeV2::EvidenceUnknownNoEffect(
@@ -2369,26 +2503,26 @@ mod tests {
                 }),
             )),
             Arc::new(StoredDirectResponseV2::Final(
-                BusinessDirectResponseV2::CancelOrder(CancelOrderDirectResponseV2 {
+                BusinessDirectResponse::CancelOrder(CancelOrderDirectResponseV2 {
                     metadata: metadata("cancel-one", ExecutionMethodV2::CancelOrder, 3),
-                    target: cancel_target(CancelTargetOutcomeV2::NotCanceledNoEffect(
+                    target: cancel_target(contracts::CancelTargetOutcome::NotCanceledNoEffect(
                         CancelNotCanceledReasonV2::NotFoundOrNotOwned,
                     )),
                 }),
             )),
             Arc::new(StoredDirectResponseV2::Final(
-                BusinessDirectResponseV2::CancelOrders(CancelOrdersDirectResponseV2 {
+                BusinessDirectResponse::CancelOrders(CancelOrdersDirectResponseV2 {
                     metadata: metadata("cancel-many", ExecutionMethodV2::CancelOrders, 4),
                     targets: vec![cancel_target(
-                        CancelTargetOutcomeV2::EvidenceUnknownNoEffect,
+                        contracts::CancelTargetOutcome::EvidenceUnknownNoEffect,
                     )],
                 }),
             )),
             Arc::new(StoredDirectResponseV2::Final(
-                BusinessDirectResponseV2::CancelMarketOrders(CancelMarketOrdersDirectResponseV2 {
+                BusinessDirectResponse::CancelMarketOrders(CancelMarketOrdersDirectResponseV2 {
                     metadata: metadata("cancel-market", ExecutionMethodV2::CancelMarketOrders, 5),
                     targets: vec![
-                        cancel_target(CancelTargetOutcomeV2::Canceled(
+                        cancel_target(contracts::CancelTargetOutcome::Canceled(
                             CanceledTargetMeasurementV2 {
                                 canceled_base_quantity_shares: ExactDecimal("1".to_owned()),
                                 released_quote_amount_pusd: ExactDecimal("10".to_owned()),
@@ -2397,7 +2531,7 @@ mod tests {
                         )),
                         CancelTargetResponseV2 {
                             target_ordinal: 1,
-                            ..cancel_target(CancelTargetOutcomeV2::NotCanceledNoEffect(
+                            ..cancel_target(contracts::CancelTargetOutcome::NotCanceledNoEffect(
                                 CancelNotCanceledReasonV2::NoCancellableRemainder,
                             ))
                         },
@@ -2405,10 +2539,10 @@ mod tests {
                 }),
             )),
             Arc::new(StoredDirectResponseV2::Final(
-                BusinessDirectResponseV2::CancelAllOrders(
+                BusinessDirectResponse::CancelAllOrders(
                     contracts::CancelAllOrdersDirectResponseV2 {
                         metadata: metadata("cancel-all", ExecutionMethodV2::CancelAllOrders, 6),
-                        targets: vec![cancel_target(CancelTargetOutcomeV2::Canceled(
+                        targets: vec![cancel_target(contracts::CancelTargetOutcome::Canceled(
                             CanceledTargetMeasurementV2 {
                                 canceled_base_quantity_shares: ExactDecimal("1".to_owned()),
                                 released_quote_amount_pusd: ExactDecimal("10".to_owned()),
@@ -2419,19 +2553,19 @@ mod tests {
                 ),
             )),
             Arc::new(StoredDirectResponseV2::Final(
-                BusinessDirectResponseV2::Order(OrderDirectResponseV2 {
+                BusinessDirectResponse::Order(OrderDirectResponseV2 {
                     metadata: metadata("order", ExecutionMethodV2::Order, 7),
                     result: OrderQueryResultV2::NotFound,
                 }),
             )),
             Arc::new(StoredDirectResponseV2::Final(
-                BusinessDirectResponseV2::Orders(OrdersDirectResponseV2 {
+                BusinessDirectResponse::Orders(OrdersDirectResponseV2 {
                     metadata: metadata("orders", ExecutionMethodV2::Orders, 8),
                     result: OrdersQueryResultV2::InvalidCursor,
                 }),
             )),
             Arc::new(StoredDirectResponseV2::Final(
-                BusinessDirectResponseV2::Trades(TradesDirectResponseV2 {
+                BusinessDirectResponse::Trades(TradesDirectResponseV2 {
                     metadata: metadata("trades", ExecutionMethodV2::Trades, 9),
                     result: TradesQueryResultV2::OutOfRetention(
                         QueryOutOfRetentionV2::TradeHistory {

@@ -8,7 +8,7 @@ use execution_normalization::{
     NormalizationBatch, NormalizationCore, NormalizationRecord, StagedNormalizationWriter,
 };
 use execution_normalization::{
-    NoeBatchDurabilityV1, NoeConsumedRecordRefV1, NoeConsumptionSourceV1,
+    NoeBatchDurabilityV1, NoeConsumedRecordRef, NoeConsumedRecordRefV1, NoeConsumptionSource,
     NoeConsumptionVisibilityV1,
 };
 use std::collections::{BTreeMap, VecDeque};
@@ -24,6 +24,7 @@ mod sealed {
     pub trait OrderEvidence {}
     impl OrderEvidence for super::LegacyOrderEvidence {}
     impl OrderEvidence for super::MeasuredOrderEvidence {}
+    impl OrderEvidence for super::MeasuredCancellationEvidence {}
 }
 // 仅连接已有两种订单证据表示；每个端口的类型在创建时固定，同一运行不切换版本。
 pub trait MemoryOrderEvidence:
@@ -35,23 +36,23 @@ pub trait MemoryOrderEvidence:
     + Default
 {
     fn accept_consumption(
-        source: &mut NoeConsumptionSourceV1,
+        source: &mut NoeConsumptionSource<Self::Completion>,
         context: Arc<ExecutionNormalizationContextV1>,
         batch: Arc<MemoryNoeBatch<Self>>,
     ) -> Option<NoeBatchDurabilityV1>;
-    fn consumed_record(record: &NoeConsumedRecordRefV1) -> &MemoryNoeRecord<Self>;
+    fn consumed_record(record: &NoeConsumedRecordRef<Self::Completion>) -> &MemoryNoeRecord<Self>;
     fn contract_version() -> &'static str;
     fn into_background(accepted: AcceptedMemoryProjection<Self>) -> AcceptedNoeProjectionV1;
 }
 impl MemoryOrderEvidence for LegacyOrderEvidence {
     fn accept_consumption(
-        _: &mut NoeConsumptionSourceV1,
+        _: &mut NoeConsumptionSource<Self::Completion>,
         _: Arc<ExecutionNormalizationContextV1>,
         _: Arc<MemoryNoeBatch<Self>>,
     ) -> Option<NoeBatchDurabilityV1> {
         None
     }
-    fn consumed_record(_: &NoeConsumedRecordRefV1) -> &MemoryNoeRecord<Self> {
+    fn consumed_record(_: &NoeConsumedRecordRef<Self::Completion>) -> &MemoryNoeRecord<Self> {
         unreachable!("旧端口不产生V3领取引用")
     }
 
@@ -64,13 +65,13 @@ impl MemoryOrderEvidence for LegacyOrderEvidence {
 }
 impl MemoryOrderEvidence for MeasuredOrderEvidence {
     fn accept_consumption(
-        source: &mut NoeConsumptionSourceV1,
+        source: &mut NoeConsumptionSource<Self::Completion>,
         context: Arc<ExecutionNormalizationContextV1>,
         batch: Arc<MemoryNoeBatch<Self>>,
     ) -> Option<NoeBatchDurabilityV1> {
         Some(source.accept(context, batch))
     }
-    fn consumed_record(record: &NoeConsumedRecordRefV1) -> &MemoryNoeRecord<Self> {
+    fn consumed_record(record: &NoeConsumedRecordRef<Self::Completion>) -> &MemoryNoeRecord<Self> {
         record.record()
     }
 
@@ -81,10 +82,33 @@ impl MemoryOrderEvidence for MeasuredOrderEvidence {
         AcceptedNoeProjectionV1::Measured(accepted)
     }
 }
+impl MemoryOrderEvidence for MeasuredCancellationEvidence {
+    fn accept_consumption(
+        source: &mut NoeConsumptionSource<Self::Completion>,
+        context: Arc<ExecutionNormalizationContextV1>,
+        batch: Arc<MemoryNoeBatch<Self>>,
+    ) -> Option<NoeBatchDurabilityV1> {
+        Some(source.accept(context, batch))
+    }
+    fn consumed_record(record: &NoeConsumedRecordRef<Self::Completion>) -> &MemoryNoeRecord<Self> {
+        record.record()
+    }
+
+    fn contract_version() -> &'static str {
+        <SourceNeutralTradeLifecycleResultV2 as NoeTradePayload<
+            contracts::execution_normalization::SourceNeutralControlResultV3,
+        >>::CONTRACT_VERSION
+    }
+    fn into_background(accepted: AcceptedMemoryProjection<Self>) -> AcceptedNoeProjectionV1 {
+        AcceptedNoeProjectionV1::Cancellation(accepted)
+    }
+}
 pub type MemoryNoeProjectionPortV2 = MemoryNoeProjectionPort<LegacyOrderEvidence>;
 pub type MemoryNoeProjectionPortV3 = MemoryNoeProjectionPort<MeasuredOrderEvidence>;
 pub type MemoryNoeObservationV2 = MemoryNoeObservation<LegacyOrderEvidence>;
 pub type MemoryNoeObservationV3 = MemoryNoeObservation<MeasuredOrderEvidence>;
+pub type MemoryNoeProjectionPortV4 = MemoryNoeProjectionPort<MeasuredCancellationEvidence>;
+pub type MemoryNoeObservationV4 = MemoryNoeObservation<MeasuredCancellationEvidence>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum MemoryNoeErrorV1 {
@@ -103,7 +127,6 @@ impl std::fmt::Display for MemoryNoeErrorV1 {
 }
 impl std::error::Error for MemoryNoeErrorV1 {}
 
-#[derive(Default)]
 struct ObservationState<P: MemoryOrderEvidence> {
     accepted: u64,
     durable: u64,
@@ -112,7 +135,21 @@ struct ObservationState<P: MemoryOrderEvidence> {
     public_visible_time: Option<i64>,
     feedback: VecDeque<PendingFeedback<P>>,
     durable_references: Vec<NoeResultReferenceV1>,
-    consumption: NoeConsumptionSourceV1,
+    consumption: NoeConsumptionSource<P::Completion>,
+}
+impl<P: MemoryOrderEvidence> Default for ObservationState<P> {
+    fn default() -> Self {
+        Self {
+            accepted: 0,
+            durable: 0,
+            delivered: 0,
+            closed_receive_time: None,
+            public_visible_time: None,
+            feedback: VecDeque::new(),
+            durable_references: Vec::new(),
+            consumption: NoeConsumptionSource::default(),
+        }
+    }
 }
 // 消费者仅保留同一不可变批的 Arc 与未交付记录坐标，不复制归一化正文。
 struct PendingFeedback<P: MemoryOrderEvidence> {
@@ -125,7 +162,7 @@ enum FeedbackRecord<P: MemoryOrderEvidence> {
         batch: Arc<MemoryNoeBatch<P>>,
         ordinal: usize,
     },
-    Measured(NoeConsumedRecordRefV1),
+    Measured(NoeConsumedRecordRef<P::Completion>),
 }
 #[derive(Clone, Debug)]
 pub struct MemoryNoeFeedback<P: MemoryOrderEvidence> {
@@ -246,11 +283,11 @@ impl<P: MemoryOrderEvidence> MemoryNoeObservation<P> {
             .collect()
     }
 }
-impl MemoryNoeObservation<MeasuredOrderEvidence> {
-    pub fn opening_record(&self) -> Option<NoeConsumedRecordRefV1> {
+impl<P: MemoryOrderEvidence> MemoryNoeObservation<P> {
+    pub fn opening_record(&self) -> Option<NoeConsumedRecordRef<P::Completion>> {
         self.0.lock().unwrap().consumption.opening_record()
     }
-    pub fn take_closed_records(&self) -> Vec<NoeConsumedRecordRefV1> {
+    pub fn take_closed_records(&self) -> Vec<NoeConsumedRecordRef<P::Completion>> {
         let mut admitted = self.0.lock().unwrap().consumption.take_admitted_records();
         admitted.extend(self.take_closed_feedback().into_iter().map(|feedback| {
             let FeedbackRecord::Measured(record) = feedback.record else {
@@ -298,10 +335,12 @@ pub struct AcceptedMemoryProjection<P: MemoryOrderEvidence> {
 pub enum AcceptedNoeProjectionV1 {
     Legacy(AcceptedMemoryProjection<LegacyOrderEvidence>),
     Measured(AcceptedMemoryProjection<MeasuredOrderEvidence>),
+    Cancellation(AcceptedMemoryProjection<MeasuredCancellationEvidence>),
 }
 pub(crate) enum BackgroundNoeWriterV1 {
     Legacy(BackgroundNoeWriter<LegacyOrderEvidence>),
     Measured(BackgroundNoeWriter<MeasuredOrderEvidence>),
+    Cancellation(BackgroundNoeWriter<MeasuredCancellationEvidence>),
 }
 pub(crate) struct BackgroundNoeWriter<P: MemoryOrderEvidence> {
     writer: Writer<P>,
@@ -379,12 +418,22 @@ impl BackgroundNoeWriterV1 {
                 };
                 writer.stage(&accepted.batch, accepted.durability)
             }
+            AcceptedNoeProjectionV1::Cancellation(accepted) => {
+                if writer.is_none() {
+                    *writer = Some(Self::Cancellation(BackgroundNoeWriter::create(&accepted)?));
+                }
+                let Some(Self::Cancellation(writer)) = writer else {
+                    unreachable!("同一运行端口的订单证据类型固定")
+                };
+                writer.stage(&accepted.batch, accepted.durability)
+            }
         }
     }
     pub(crate) fn stabilize(&mut self) -> Result<(), DurableErrorV1> {
         match self {
             Self::Legacy(writer) => writer.stabilize(),
             Self::Measured(writer) => writer.stabilize(),
+            Self::Cancellation(writer) => writer.stabilize(),
         }
     }
 }
@@ -428,9 +477,10 @@ impl<P: MemoryOrderEvidence> MemoryNoeProjectionPort<P> {
         &mut self,
         payload: Arc<BusinessProjectionBatchPayloadV1>,
     ) -> Result<AcceptedNoeProjectionV1, MemoryNoeErrorV1> {
-        let BusinessProjectionBatchPayloadV1::V3(batch) = payload.as_ref() else {
-            return Err(MemoryNoeErrorV1::InvalidProjection("新运行要求 V3 投影"));
-        };
+        let batch = P::batch::<contracts::TradeLifecycleFeedbackV3, Identity>(payload.as_ref())
+            .ok_or(MemoryNoeErrorV1::InvalidProjection(
+                "运行与端口的投影版本不符",
+            ))?;
         if self.core.is_none() {
             let opening = batch
                 .account_opening
@@ -460,7 +510,7 @@ impl<P: MemoryOrderEvidence> MemoryNoeProjectionPort<P> {
             P,
             Identity,
             FactReference,
-        >::with_account(context, Arc::clone(core.account_identity()), batch);
+        >::with_account(context, Arc::clone(core.account_identity()), &batch);
         let input = mapper
             .map()
             .map_err(|()| MemoryNoeErrorV1::InvalidProjection("来源与上下文不符"))?;

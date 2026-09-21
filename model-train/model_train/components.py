@@ -4,15 +4,50 @@ import torch
 from torch import Tensor, nn
 
 
+def fixed_sum_last(features: Tensor) -> Tensor:
+    """仅展开静态特征轴；相邻两项相加，奇数尾项保留，B/K 不参与归约。"""
+    width = features.shape[-1]
+    while width > 1:
+        paired = width // 2 * 2
+        summed = features[..., :paired:2] + features[..., 1:paired:2]
+        features = torch.cat((summed, features[..., paired:]), dim=-1) if width % 2 else summed
+        width = (width + 1) // 2
+    return features
+
+
+class AlignedLayerNorm(nn.LayerNorm):
+    """原中心化方差定义与参数；两个末轴均值使用同一固定加法次序。"""
+    def forward(self, features: Tensor) -> Tensor:
+        width = self.normalized_shape[0]
+        mean = fixed_sum_last(features) / width
+        centered = features - mean
+        variance = fixed_sum_last(centered * centered) / width
+        normalized = centered * torch.rsqrt(variance + self.eps)
+        return normalized * self.weight + self.bias
+
+
+class AlignedLinear(nn.Linear):
+    """原仿射参数；按 16 个输出通道分块，末轴使用共同固定加法树。"""
+
+    def forward(self, features: Tensor) -> Tensor:
+        blocks = [
+            fixed_sum_last(features.unsqueeze(-2) * self.weight[start : start + 16]).squeeze(-1)
+            for start in range(0, self.out_features, 16)
+        ]
+        output = torch.cat(blocks, dim=-1)
+        return output if self.bias is None else output + self.bias
+
+
 class FeatureEncoder(nn.Sequential):
     """将显式指定宽度的特征编码为 H/2 维表示。"""
 
-    def __init__(self, feature_size: int, hidden_size: int):
+    def __init__(self, feature_size: int, hidden_size: int, *, aligned_linear: bool = False):
+        linear = AlignedLinear if aligned_linear else nn.Linear
         super().__init__(
-            nn.LayerNorm(feature_size),
-            nn.Linear(feature_size, hidden_size // 2),
+            AlignedLayerNorm(feature_size),
+            linear(feature_size, hidden_size // 2),
             nn.SiLU(),
-            nn.Linear(hidden_size // 2, hidden_size // 2),
+            linear(hidden_size // 2, hidden_size // 2),
         )
 
 
@@ -27,9 +62,9 @@ class ResidualGRU(nn.Module):
         self.slow_encoder = FeatureEncoder(slow_size, hidden_size)
         self.gate = nn.Linear(hidden_size, hidden_size)
         self.value = nn.Linear(hidden_size, hidden_size)
-        self.fusion_norm = nn.LayerNorm(hidden_size)
+        self.fusion_norm = AlignedLayerNorm(hidden_size)
         self.layer_norms = nn.ModuleList(
-            nn.LayerNorm(hidden_size) for _ in range(num_layers)
+            AlignedLayerNorm(hidden_size) for _ in range(num_layers)
         )
         self.grus = nn.ModuleList(
             nn.GRU(hidden_size, hidden_size) for _ in range(num_layers)
@@ -56,7 +91,7 @@ class BareGRU(nn.Module):
     def __init__(self, fast_size: int, slow_size: int, num_layers: int):
         super().__init__()
         self.encoder = nn.Sequential(
-            nn.LayerNorm(fast_size + slow_size),
+            AlignedLayerNorm(fast_size + slow_size),
             nn.Linear(fast_size + slow_size, 256),
             nn.SiLU(),
         )
@@ -71,20 +106,29 @@ class BareGRU(nn.Module):
         return output.squeeze(0), h_next
 
 
+class ScalarLinear(nn.Linear):
+    """同一标量仿射参数；显式末轴求和使相同对象行共享同一计算表达。"""
+    def __init__(self, in_features: int):
+        super().__init__(in_features, 1)
+
+    def forward(self, features: Tensor) -> Tensor:
+        return fixed_sum_last(features * self.weight) + self.bias
+
+
 class ActorScores(nn.Module):
     """对已编码上下文计算分数；同一参数头可用于任一腿的前缀。"""
 
     def __init__(self, hidden_size: int):
         super().__init__()
         self.family = nn.Sequential(
-            nn.LayerNorm(2 * hidden_size),
+            AlignedLayerNorm(2 * hidden_size),
             nn.Linear(2 * hidden_size, hidden_size // 2),
             nn.SiLU(),
             nn.Linear(hidden_size // 2, 6),
         )
         self.decoder = nn.Sequential(
-            nn.LayerNorm(2 * hidden_size),
-            nn.Linear(2 * hidden_size, hidden_size // 2),
+            AlignedLayerNorm(2 * hidden_size),
+            AlignedLinear(2 * hidden_size, hidden_size // 2),
             nn.SiLU(),
         )
         self.quantity = nn.Linear(hidden_size // 2, 2)
@@ -93,10 +137,10 @@ class ActorScores(nn.Module):
         self.post_only = nn.Linear(hidden_size // 2, 2)
         self.expiry = nn.Linear(hidden_size // 2, 3)
         self.cancel = nn.Sequential(
-            nn.LayerNorm(hidden_size),
-            nn.Linear(hidden_size, hidden_size // 2),
+            AlignedLayerNorm(hidden_size),
+            AlignedLinear(hidden_size, hidden_size // 2),
             nn.SiLU(),
-            nn.Linear(hidden_size // 2, 1),
+            ScalarLinear(hidden_size // 2),
         )
         self.fee_weight = nn.Linear(hidden_size // 2, 1, bias=False)
 

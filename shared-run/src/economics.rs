@@ -75,9 +75,9 @@ pub struct SettlementCoordinatorV1 {
     handled: std::collections::BTreeMap<String, contracts::economics::SettlementObservationV1>,
 }
 impl SettlementCoordinatorV1 {
-    pub(crate) fn advance(
+    pub(crate) fn advance<C: Clone + std::fmt::Debug + Eq>(
         &mut self,
-        registry: &crate::SharedExecutionRegistryV1,
+        registry: &crate::SharedExecutionRegistry<C>,
         read: &LedgerEconomicReadV1<'_>,
         account: &contracts::AccountInstanceKeyV1,
         decision: &mut sim_system::execution::PublicGroupDecisionV1<'_>,

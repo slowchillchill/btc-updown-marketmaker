@@ -89,7 +89,7 @@ class GraphTests(unittest.TestCase):
             torch.testing.assert_close(grad,direct_grads[0],atol=1e-5,rtol=1e-4)
 
     def test_empty_summary_mask_and_active_rows(self):
-        model=TwoGraphs(CONFIGURATIONS[2]).eval();fast,slow,rule,prefix,objects,mask=fixture(2)
+        model=TwoGraphs(CONFIGURATIONS[2]).eval();fast,slow,rule,prefix,objects,mask=fixture(2,empty_probe=True)
         z,h=model.state(fast,slow,torch.zeros(1,2,256))
         reduced,exists=encode_all(model.action,z,rule,objects,mask,[1],empty=True)
         self.assertFalse(exists.any());self.assertEqual(reduced.count_nonzero(),0)
@@ -116,14 +116,14 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(next(object_blocks(features,mask,[1],empty=True))[0].shape[1],1)
 
     def test_legal_fixture_counts_cash_and_masks(self):
-        for pair,removed,n in ((0,False,0),(1,True,2),(85,False,256),(86,True,257),(86,False,259)):
+        for pair,removed,n in ((0,False,1),(1,True,2),(85,False,256),(86,True,257),(86,False,259)):
             self.assertEqual(len(cancel_slices(pair,removed)),n)
         single,market=cancel_slices(1,True)
-        self.assertEqual(single.values[6],1) # B不得搬到A。
-        self.assertEqual(single.values[5],0)
-        self.assertEqual(single.values[16],1) # post-only true
-        self.assertEqual(single.values[25:28],[0,0,0]) # LIMIT spend不适用
-        self.assertEqual(market.values[5:105],[0]*100)
+        self.assertEqual(single.values[7],1) # B不得搬到A。
+        self.assertEqual(single.values[6],0)
+        self.assertEqual(single.values[17],1) # post-only true
+        self.assertEqual(single.values[26:29],[0,0,0]) # LIMIT spend不适用
+        self.assertEqual(market.values[6:142],[0]*136)
         slow=account_slice().values
         self.assertEqual(slow[382:388],[0]*6) # 空订单年龄不适用
         self.assertEqual(slow[394:400],[0]*6)

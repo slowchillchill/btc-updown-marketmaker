@@ -103,11 +103,10 @@ async fn real_group_bridge_registry_ledger_freeze_and_recovery() {
     let mut incomplete = SharedExecutionRegistryV1::new(Arc::new(opening.context().clone()));
     incomplete.observe(orders[0].formed.unwrap());
     assert!(
-        matches!(
-            incomplete.cancel_objects(),
-            ExecutionReadValueV1::Unavailable
-        ),
-        "缺真实数量基点不能报告完整空集"
+        matches!(incomplete.cancel_objects(), ExecutionReadValueV1::Known(objects)
+            if objects.len() == 1 && matches!(&objects[0], CancelObjectReadV1::Single { order }
+                if order.cancellable == ExecutionReadValueV1::Unavailable)),
+        "真实ID可寻址，数量未知保留为Unknown Single"
     );
     let ExecutionReadValueV1::Known(objects) = snapshot.cancel_objects() else {
         panic!("完整形成序可排序")
@@ -362,7 +361,7 @@ async fn actual_pending_four_keeps_ten_then_finality_and_cancel_close_separate_r
                     );
                     assert!(matches!(
                         partial.cancel_objects(),
-                        ExecutionReadValueV1::Unavailable
+                        ExecutionReadValueV1::Known(objects) if objects.len() == 1 && matches!(&objects[0], CancelObjectReadV1::Single { order } if order.cancellable == ExecutionReadValueV1::Unavailable)
                     ));
                     if cancel {
                         shared
@@ -386,15 +385,9 @@ async fn actual_pending_four_keeps_ten_then_finality_and_cancel_close_separate_r
                         )),
                         "{outcome}"
                     );
-                    observed.push(at);
-                }
-                if at == 46_000 {
-                    assert_eq!(
-                        commitment,
-                        ExecutionReadValueV1::Known(ExactDecimal(
-                            if cancel { "4" } else { "10" }.into()
-                        ))
-                    );
+                    // 36k 仍是原未终局成交；终局反馈 received=37022，
+                    // 已证空档闭合后在下一真实 46k 组可见。
+
                     let trade = shared.registry().orders().next().unwrap();
                     let records: Vec<_> = shared
                         .registry()
@@ -423,7 +416,7 @@ async fn actual_pending_four_keeps_ten_then_finality_and_cancel_close_separate_r
                     );
                     observed.push(at);
                 }
-                if at == 56_000 {
+                if at == 46_000 || at == 56_000 {
                     assert_eq!(
                         commitment,
                         ExecutionReadValueV1::Known(ExactDecimal(
@@ -1098,6 +1091,27 @@ async fn real_same_arrival_delayed_batch_forms_r1_s0_r0_without_reordering_origi
         .await
         .unwrap()
         .unwrap();
+    // 原冻结意图的重复提交必须返回首次 receipt，不改变跨请求处理键。
+    let original = shared
+        .registry()
+        .all_commitments()
+        .find(|c| c.origin.intent.global_request_id() == r)
+        .unwrap()
+        .origin
+        .intent
+        .intent()
+        .clone();
+    let repeated = shared
+        .execute(
+            &mut driver.decision().unwrap(),
+            context(&r),
+            Some(Arc::new(original)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(repeated, r_receipt);
+    assert!(r_receipt.input_sequence() < s_receipt.input_sequence());
     assert_eq!(
         r_receipt.platform_arrived_at_utc_ms(),
         s_receipt.platform_arrived_at_utc_ms()
@@ -1150,6 +1164,45 @@ async fn real_same_arrival_delayed_batch_forms_r1_s0_r0_without_reordering_origi
         source_in_delivery.windows(2).any(|pair| pair[0] > pair[1]),
         "夹具须真实包含接收反序: {delivered:?}"
     );
+    let mut processed = shared
+        .registry()
+        .orders()
+        .map(|order| {
+            let origin = order.origin.unwrap();
+            let ::execution_normalization::NormalizationRecord::Evidence {
+                evidence:
+                    ::execution_normalization::SourceNeutralEvidenceKind::Control {
+                        result:
+                            SourceNeutralControlResult::Submission {
+                                outcome:
+                                    SourceNeutralSubmissionOutcomeV2::Accepted {
+                                        effective_processing_at_utc_ms,
+                                        ..
+                                    },
+                            },
+                    },
+                ..
+            } = order.accepted.unwrap().record()
+            else {
+                panic!("原Accepted逐项处理时间")
+            };
+            let receipt = if origin.intent.global_request_id() == r {
+                r_receipt
+            } else {
+                s_receipt
+            };
+            (
+                (
+                    *effective_processing_at_utc_ms,
+                    receipt.input_sequence(),
+                    origin.batch_item_ordinal,
+                ),
+                origin.intent.global_request_id().to_owned(),
+                origin.batch_item_ordinal,
+            )
+        })
+        .collect::<Vec<_>>();
+    processed.sort();
     formed.sort();
     assert_eq!(
         formed
@@ -1157,6 +1210,16 @@ async fn real_same_arrival_delayed_batch_forms_r1_s0_r0_without_reordering_origi
             .map(|(_, id, ordinal)| (id.as_str(), *ordinal))
             .collect::<Vec<_>>(),
         vec![(r.as_str(), 1), (s.as_str(), 0), (r.as_str(), 0)]
+    );
+    assert_eq!(
+        processed
+            .iter()
+            .map(|(_, id, ordinal)| (id, ordinal))
+            .collect::<Vec<_>>(),
+        formed
+            .iter()
+            .map(|(_, id, ordinal)| (id, ordinal))
+            .collect::<Vec<_>>()
     );
 }
 #[tokio::test(flavor = "current_thread")]
@@ -2447,4 +2510,641 @@ async fn online_multi_group_and_zero_step_pm_keep_canonical_positions_and_origin
         replayed.push(applied.applied);
     }
     assert_eq!(observed, replayed);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn actual_partial_fak_final_success_before_economics_drives_gap_without_success_pool() {
+    use ::execution_normalization::{NormalizationRecord, SourceNeutralEvidenceKind};
+    use contracts::execution_normalization::SourceNeutralTradeEconomicDispositionV1 as D;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let (core, times) = recorded_trading(&root, "4", false);
+    let policy = delayed_policy("success");
+    let (execution, observation) = execution(&temp.path().join("sim.jsonl"), &core, &policy);
+    let opening = observation.opening_record().unwrap();
+    let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times).unwrap();
+    let mut driver = FinitePublicConsumptionV1::new(execution, source, "visible-success".into());
+    for _ in 0..4 {
+        driver.next_group().unwrap().unwrap();
+    }
+    let intent = Arc::new(ModelIntentV1::SubmitSingleBuy {
+        condition_id: ConditionId(CONDITION_ID.into()),
+        order: BuyLegIntentV1 {
+            token_id: TokenId(UP_TOKEN_ID.into()),
+            order: BuyOrderIntentV1::FakMarket {
+                spend_pusd: Decimal::from(6),
+                worst_price_pusd_per_share: Decimal::new(6, 1),
+            },
+        },
+    });
+    let receipt = intent_bridge::IntentBridge::bind_sim_group(&mut driver.decision().unwrap())
+        .execute(context("quote10"), &intent)
+        .await
+        .unwrap();
+    let mut records = Vec::new();
+    while driver.next_group().unwrap().is_some() {
+        records.extend(observation.take_closed_records());
+    }
+    records.extend(observation.take_closed_records());
+    let mut ledger = LedgerWriterV1::new(AccountAdmissionPolicyV1 {
+        per_market_all_in_commitment_limit_pusd: ExactDecimal("1000".into()),
+    });
+    ledger.apply_noe_memory_v1(&opening).unwrap();
+    let mut registry = SharedExecutionRegistryV1::new(Arc::new(opening.context().clone()));
+    let origin = registry.freeze("quote10".into(), intent);
+    registry.record_sim_receipt(&origin, &receipt);
+    let mut terminal = Vec::new();
+    let mut pending = Vec::new();
+    for record in &records {
+        match record.record() {
+            NormalizationRecord::Evidence {
+                evidence:
+                    SourceNeutralEvidenceKind::InitialMarket { .. }
+                    | SourceNeutralEvidenceKind::MarketEnrollment { .. },
+                ..
+            } => {
+                ledger.apply_noe_memory_v1(record).unwrap();
+            }
+            NormalizationRecord::Evidence {
+                evidence: SourceNeutralEvidenceKind::TradeLifecycleV3 { result },
+                ..
+            } => {
+                assert_eq!(result.result.base_quantity_shares, ExactDecimal("4".into()));
+                if result.result.economic_disposition == D::FinalSuccess {
+                    terminal.push(record);
+                } else {
+                    pending.push(record);
+                }
+            }
+            _ => {
+                registry.observe(record);
+            }
+        }
+    }
+    assert_eq!(
+        registry.committed_target_shares(
+            &ConditionId(CONDITION_ID.into()),
+            &TokenId(UP_TOKEN_ID.into())
+        ),
+        ExecutionReadValueV1::Known(ExactDecimal("10".into()))
+    );
+    assert!(!terminal.is_empty());
+    assert!(!pending.is_empty());
+    for record in &terminal {
+        ledger.apply_noe_memory_v1(record).unwrap();
+        registry.observe(record);
+    }
+    let assert_visible = |ledger: &LedgerWriterV1, registry: &SharedExecutionRegistryV1| {
+        let read = ledger.economic_read().unwrap();
+        let totals = read
+            .market_totals()
+            .find(|m| m.condition_id.0 == CONDITION_ID)
+            .unwrap();
+        let filled = totals
+            .assets
+            .as_ref()
+            .unwrap()
+            .iter()
+            .position(|a| a.token_id.0 == UP_TOKEN_ID)
+            .unwrap();
+        assert_eq!(totals.repair_gap_shares[filled], ExactDecimal("0".into()));
+        assert_eq!(
+            totals.repair_gap_shares[1 - filled],
+            ExactDecimal("4".into())
+        );
+        assert_eq!(
+            totals.success_shares,
+            [ExactDecimal("0".into()), ExactDecimal("0".into())]
+        );
+        assert_eq!(totals.paired_shares, ExactDecimal("0".into()));
+        assert_eq!(read.successful_trades().count(), 0);
+        assert_eq!(
+            registry.committed_target_shares(
+                &ConditionId(CONDITION_ID.into()),
+                &TokenId(UP_TOKEN_ID.into())
+            ),
+            ExecutionReadValueV1::Known(ExactDecimal("0".into()))
+        );
+    };
+    assert_visible(&ledger, &registry);
+    let before = ledger.projection_v2().unwrap();
+    for record in &terminal {
+        ledger.apply_noe_memory_v1(record).unwrap();
+        registry.observe(record);
+    }
+    assert_eq!(ledger.projection_v2().unwrap(), before);
+    for record in &pending {
+        ledger.apply_noe_memory_v1(record).unwrap();
+        registry.observe(record);
+    }
+    assert_visible(&ledger, &registry);
+    // 最后才应用原经济引用；不改变来源时间，不伪造前驱或成功。
+    let mut waiting = records.iter().collect::<Vec<_>>();
+    while !waiting.is_empty() {
+        let prior = waiting.len();
+        waiting.retain(|record| {
+            matches!(
+                ledger.apply_noe_memory_v1(record).unwrap(),
+                LedgerMemoryApplyOutcomeV1::Applied(
+                    LedgerApplyOutcomeV1::MissingPlatformPredecessor { .. }
+                ) | LedgerMemoryApplyOutcomeV1::MissingEconomicAssociation
+            )
+        });
+        assert!(waiting.len() < prior);
+    }
+    let read = ledger.economic_read().unwrap();
+    let totals = read
+        .market_totals()
+        .find(|m| m.condition_id.0 == CONDITION_ID)
+        .unwrap();
+    let filled = totals
+        .assets
+        .as_ref()
+        .unwrap()
+        .iter()
+        .position(|a| a.token_id.0 == UP_TOKEN_ID)
+        .unwrap();
+    assert_eq!(totals.success_shares[filled], ExactDecimal("4".into()));
+    assert_eq!(totals.success_shares[1 - filled], ExactDecimal("0".into()));
+    assert_eq!(totals.repair_gap_shares[filled], ExactDecimal("0".into()));
+    assert_eq!(
+        totals.repair_gap_shares[1 - filled],
+        ExactDecimal("4".into())
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() {
+    use contracts::ExecutionReadValueV1::Known;
+    for family in ["single", "paired", "market"] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dpt");
+        let (core, times) = recorded_trading_window(&root, "100", None, 60_000, true);
+        let path = temp.path().join("sim.jsonl");
+        let (mut execution, observation, _) =
+            execution_with_rules_v4(&path, &core, SUCCESS_POLICY, None, "e".repeat(64), "100");
+        execution
+            .configure_cancel_failure_v1(CancelFailureScenarioV1 {
+                targets: vec![
+                    CancelFailureTargetV1 {
+                        global_request_id: "finite-failure".into(),
+                        platform_order_id: "sim-1".into(),
+                    },
+                    CancelFailureTargetV1 {
+                        global_request_id: "post-close".into(),
+                        platform_order_id: "sim-1".into(),
+                    },
+                ],
+            })
+            .unwrap();
+        let mut ledger =
+            LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        execution
+            .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
+            .unwrap();
+        let mut shared = SharedExecutionV2::from_opening(ledger, observation.clone())
+            .unwrap()
+            .unwrap();
+        let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times).unwrap();
+        let mut driver = FinitePublicConsumptionV1::new(execution, source, "cancel-v4".into());
+        driver.next_group().unwrap().unwrap();
+        driver.next_group().unwrap().unwrap();
+        shared.action_before(&mut driver).unwrap().unwrap();
+        shared
+            .execute(
+                &mut driver.decision().unwrap(),
+                context("empty-market"),
+                Some(Arc::new(ModelIntentV1::CancelMarketOrders {
+                    condition_id: ConditionId(CONDITION_ID.into()),
+                })),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let pending = shared.action_before(&mut driver).unwrap().unwrap();
+        assert_eq!(pending.cancellation_requests(None).pending_count, Known(1));
+        for _ in 2..5 {
+            driver.next_group().unwrap().unwrap();
+        }
+        let empty = shared.action_before(&mut driver).unwrap().unwrap();
+        let response = empty.cancellation_requests(None);
+        assert_eq!(response.pending_count, Known(0));
+        assert_eq!(response.response_counts, [Known(0), Known(0), Known(0)]);
+        assert!(matches!(response.latest_response, Known(Some(_))));
+        let Known(Some(empty_completion)) = response.latest_response else {
+            unreachable!()
+        };
+        shared
+            .execute(
+                &mut driver.decision().unwrap(),
+                context("pair-after-empty"),
+                Some(Arc::new(ModelIntentV1::SubmitPairedBuy {
+                    condition_id: ConditionId(CONDITION_ID.into()),
+                    orders: [leg(UP_TOKEN_ID, 5), leg(DOWN_TOKEN_ID, 5)],
+                })),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        for _ in 5..=6 {
+            driver.next_group().unwrap().unwrap();
+        }
+        let before = shared.action_before(&mut driver).unwrap().unwrap();
+        let orders: Vec<_> = before.orders().collect();
+        assert_eq!(orders.len(), 2);
+        assert_eq!(platform_id(orders[0].order_identity), "sim-1");
+        assert!(orders.iter().all(|o| o.cancellable == Known(true)));
+        let first = orders[0].order_identity.clone();
+        let intent = match family {
+            "single" => ModelIntentV1::CancelOrder {
+                platform_order_id: "sim-1".into(),
+            },
+            "paired" => ModelIntentV1::CancelOrders {
+                platform_order_ids: vec!["sim-1".into(), "sim-2".into()],
+            },
+            _ => ModelIntentV1::CancelMarketOrders {
+                condition_id: ConditionId(CONDITION_ID.into()),
+            },
+        };
+        let intent = Arc::new(intent);
+        let receipt = shared
+            .execute(
+                &mut driver.decision().unwrap(),
+                context("finite-failure"),
+                Some(intent.clone()),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let duplicate = shared
+            .execute(
+                &mut driver.decision().unwrap(),
+                context("finite-failure"),
+                Some(intent),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(receipt, duplicate);
+        let pending = shared.action_before(&mut driver).unwrap().unwrap();
+        assert_eq!(pending.cancellation_requests(None).pending_count, Known(1));
+        let mut checked = false;
+        while driver.next_group().unwrap().is_some() {
+            let view = shared.action_before(&mut driver).unwrap().unwrap();
+            let requests = view.cancellation_requests(None);
+            if requests.response_counts[1] != Known(1) {
+                continue;
+            }
+            assert_eq!(requests.pending_count, Known(0));
+            assert_eq!(
+                requests.response_counts,
+                [Known(u64::from(family != "single")), Known(1), Known(0)]
+            );
+            let current = shared.registry().order(&first).unwrap();
+            assert_eq!(current.cancellable, Known(true));
+            assert_eq!(
+                current.active_unfilled_shares,
+                Known(ExactDecimal("5".into()))
+            );
+            assert_eq!(current.matched_shares, Known(ExactDecimal("0".into())));
+            assert_eq!(
+                before
+                    .orders()
+                    .filter(|o| o.cancellable == Known(true))
+                    .count(),
+                2,
+                "旧快照不被撤单改写"
+            );
+            let funds = view
+                .order_funds()
+                .find(|f| f.order_identity == &first)
+                .unwrap();
+            let original_funds = before
+                .order_funds()
+                .find(|f| f.order_identity == &first)
+                .unwrap();
+            assert_eq!(
+                funds.principal_encumbrance_pusd,
+                original_funds.principal_encumbrance_pusd
+            );
+            assert_eq!(
+                funds.immediate_fee_encumbrance_pusd,
+                original_funds.immediate_fee_encumbrance_pusd
+            );
+            for request in ["explicit-again-a", "explicit-again-b"] {
+                shared
+                    .execute(
+                        &mut driver.decision().unwrap(),
+                        context(request),
+                        Some(Arc::new(ModelIntentV1::CancelOrder {
+                            platform_order_id: "sim-1".into(),
+                        })),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+            let overlapping = shared.action_before(&mut driver).unwrap().unwrap();
+            assert_eq!(
+                overlapping.cancellation_requests(None).pending_count,
+                Known(2)
+            );
+            assert_eq!(
+                overlapping
+                    .cancellation_requests(Some(&CancellationScopeV1::Orders(vec!["sim-1"])))
+                    .pending_count,
+                Known(2)
+            );
+            assert_eq!(
+                overlapping
+                    .cancellation_requests(Some(&CancellationScopeV1::Orders(vec!["sim-2"])))
+                    .pending_count,
+                Known(0),
+                "同市场不同ID不相交"
+            );
+            checked = true;
+            break;
+        }
+        assert!(checked, "{family} 必须实际收到原响应");
+        let mut closed = false;
+        let mut completed = false;
+        while driver.next_group().unwrap().is_some() {
+            let view = shared.action_before(&mut driver).unwrap().unwrap();
+            let current = shared.registry().order(&first).unwrap();
+            if current.cancellable == Known(false) {
+                assert_eq!(
+                    current.active_unfilled_shares,
+                    Known(ExactDecimal("0".into()))
+                );
+                if !closed {
+                    shared
+                        .execute(
+                            &mut driver.decision().unwrap(),
+                            context("post-close"),
+                            Some(Arc::new(ModelIntentV1::CancelOrder {
+                                platform_order_id: "sim-1".into(),
+                            })),
+                        )
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    closed = true;
+                } else if view.cancellation_requests(None).pending_count == Known(0) {
+                    assert_eq!(
+                        view.cancellation_requests(None).response_counts,
+                        [Known(0), Known(1), Known(0)]
+                    );
+                    completed = true;
+                }
+            } else {
+                assert!(!closed, "后到普通未撤成不能反转明确撤成");
+            }
+        }
+        assert!(closed && completed);
+
+        driver.complete(&mut Materials { root }).unwrap();
+        let reference = empty_completion.durable_reference().unwrap();
+        assert!(observation.result_references().contains(reference.result()));
+        let durable = ::execution_normalization::read_noe_result_v4(reference.result()).unwrap();
+        let ::execution_normalization::NormalizationRecord::Evidence {
+            evidence: ::execution_normalization::SourceNeutralEvidenceKind::Control {
+                result: contracts::execution_normalization::SourceNeutralControlResult::CancellationRequestCompleted { result: persisted },
+            }, ..
+        } = durable.record else { panic!("零目标完成必须持久为原控制事实") };
+        let ::execution_normalization::NormalizationRecord::Evidence {
+            evidence: ::execution_normalization::SourceNeutralEvidenceKind::Control {
+                result: contracts::execution_normalization::SourceNeutralControlResult::CancellationRequestCompleted { result: memory },
+            }, ..
+        } = empty_completion.record() else { unreachable!() };
+        assert_eq!(&persisted, memory, "真实零目标响应持久与内存同一事实");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<serde_json::Value> = text
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let hits: Vec<_> = lines
+            .iter()
+            .filter_map(|line| line.pointer("/body/cancel_scenario_hits"))
+            .flat_map(|v| v.as_array().unwrap())
+            .collect();
+        assert_eq!(hits.len(), 1, "只有实际失败分支记录一次命中：{text}");
+        assert_eq!(hits[0]["platform_order_id"], "sim-1");
+        assert_eq!(hits[0]["global_request_id"], "finite-failure");
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn real_terminal_query_then_late_open_precede_lifecycle() {
+    use ::execution_normalization::{NormalizationRecord, SourceNeutralEvidenceKind};
+    use ExecutionReadValueV1::Known;
+    use contracts::execution_normalization::*;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let (core, times) = recorded_trading_with_probes(
+        &root,
+        "2",
+        None,
+        400_000,
+        2,
+        "100",
+        &[298_970, 299_006, 299_007, 299_008, 299_020],
+    );
+    let (execution, observation) = execution(&temp.path().join("sim.jsonl"), &core, SUCCESS_POLICY);
+    let ledger =
+        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+    let mut shared = SharedExecutionV1::from_opening(ledger, observation)
+        .unwrap()
+        .unwrap();
+    let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times).unwrap();
+    let mut driver = FinitePublicConsumptionV1::new(execution, source, "terminal-query".into());
+    for _ in 0..4 {
+        driver.next_group().unwrap().unwrap();
+    }
+    let intent = Arc::new(ModelIntentV1::SubmitPairedBuy {
+        condition_id: ConditionId(CONDITION_ID.into()),
+        orders: [
+            BuyLegIntentV1 {
+                token_id: TokenId(UP_TOKEN_ID.into()),
+                order: BuyOrderIntentV1::GtdLimit {
+                    limit_price_pusd_per_share: Decimal::new(6, 1),
+                    size_shares: Decimal::from(5),
+                    post_only: false,
+                    expires_at_utc_sec: 300,
+                },
+            },
+            leg(DOWN_TOKEN_ID, 5),
+        ],
+    });
+    shared
+        .execute(
+            &mut driver.decision().unwrap(),
+            context("terminal-pair"),
+            Some(intent),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let mut id = None;
+    let mut terminal = None;
+    let mut initial_funds = None;
+    let mut checked = 0;
+    while driver.next_group().unwrap().is_some() {
+        let Some(view) = shared.action_before(&mut driver).unwrap() else {
+            continue;
+        };
+        let at = view.cutoff().decision_time().logical_time_utc_ms();
+        if at == 28_000 {
+            id = Some(
+                view.orders()
+                    .find(|o| o.origin.as_ref().unwrap().batch_item_ordinal == 0)
+                    .unwrap()
+                    .order_identity
+                    .clone(),
+            );
+        }
+        if at == 299_970 {
+            let Known(objects) = view.cancel_objects() else {
+                panic!("完整成员")
+            };
+            assert!(
+                objects
+                    .iter()
+                    .any(|o| matches!(o, CancelObjectReadV1::Paired { .. }))
+            );
+            initial_funds = Some(
+                view.order_funds()
+                    .find(|o| o.order_identity == id.as_ref().unwrap())
+                    .unwrap()
+                    .principal_encumbrance_pusd
+                    .clone(),
+            );
+            assert_eq!(initial_funds, Some(Known(ExactDecimal("1.8".into()))));
+            // 同一原固定种子/经验时延：Open 出站29/入站8，Expired 出站30/入站6。
+            // 处理299999/300000，收到300007/300006；生命周期独立延迟，未改原图或采样器。
+            for request in ["open-query-3645", "terminal-query-248140"] {
+                driver
+                    .decision()
+                    .unwrap()
+                    .request(BusinessRequestV2::Order(OrderRequestV2 {
+                        context: context(request),
+                        platform_order_id: platform_id(id.as_ref().unwrap()),
+                    }))
+                    .unwrap();
+            }
+        }
+        if at == 300_007 || at == 300_008 {
+            let id = id.as_ref().unwrap();
+            let order = shared.registry().order(id).unwrap();
+            let direct = order.latest_direct_feedback.unwrap();
+            let NormalizationRecord::Evidence {
+                evidence:
+                    SourceNeutralEvidenceKind::Control {
+                        result:
+                            SourceNeutralControlResult::OrderQuery {
+                                result: SourceNeutralOrderQueryResult::Found { order: snapshot },
+                            },
+                    },
+                ..
+            } = direct.record()
+            else {
+                panic!("真实 Found 查询: {:?}", direct.record())
+            };
+            assert_eq!(
+                snapshot.state,
+                if at == 300_007 {
+                    SourceNeutralOrderStateV1::Expired
+                } else {
+                    SourceNeutralOrderStateV1::Open
+                }
+            );
+            let SimV2SourceRecordReferenceV1::DirectResponse {
+                platform_responded_at_utc_ms,
+                response_received_at_utc_ms,
+                ..
+            } = direct.record().source_reference().record
+            else {
+                panic!("查询原直接响应来源")
+            };
+            assert_eq!(
+                (platform_responded_at_utc_ms, response_received_at_utc_ms),
+                if at == 300_007 {
+                    (300_000, 300_006)
+                } else {
+                    (299_999, 300_007)
+                }
+            );
+            assert!(
+                !matches!(order.latest_lifecycle.unwrap().record(), NormalizationRecord::Evidence { evidence: SourceNeutralEvidenceKind::OrderLifecycle { result }, .. } if matches!(result.event, SourceNeutralOrderLifecycleEventV1::GtdExpired)),
+                "终态生命周期尚未收到"
+            );
+            if at == 300_007 {
+                terminal = Some(direct.clone());
+            } else {
+                assert!(direct.position() != terminal.as_ref().unwrap().position());
+                let seq =
+                    |r: &::execution_normalization::NoeConsumedRecordRefV1| match r.visibility() {
+                        ::execution_normalization::NoeConsumptionVisibilityV1::Feedback {
+                            delivery_sequence,
+                            ..
+                        } => *delivery_sequence,
+                        _ => 0,
+                    };
+                assert!(
+                    seq(direct) > seq(terminal.as_ref().unwrap()),
+                    "晚Open实际具有更晚交付序号"
+                );
+            }
+            assert_eq!(order.cancellable, Known(false));
+            assert_eq!(
+                order.active_unfilled_shares,
+                Known(ExactDecimal("0".into()))
+            );
+            assert_eq!(
+                view.orders()
+                    .filter(|o| o.cancellable == Known(true))
+                    .count(),
+                1
+            );
+            let Known(objects) = view.cancel_objects() else {
+                panic!("完整成员")
+            };
+            assert!(
+                !objects
+                    .iter()
+                    .any(|o| matches!(o, CancelObjectReadV1::Paired { .. }))
+            );
+            assert_eq!(
+                shared
+                    .ledger()
+                    .funds_read_v1()
+                    .order(id)
+                    .unwrap()
+                    .principal_encumbrance_pusd,
+                *initial_funds.as_ref().unwrap(),
+                "查询不释放真实资金占用"
+            );
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 2);
+    let id = id.unwrap();
+    // 仍用真实成交引用检验终态后关联接收与重复接收；不声称改写原成交接收时刻。
+    let mut late =
+        SharedExecutionRegistryV1::new(Arc::new(terminal.as_ref().unwrap().context().clone()));
+    late.observe(&terminal.unwrap());
+    let order = shared.registry().order(&id).unwrap();
+    late.observe(order.accepted.unwrap());
+    let trades: Vec<_> = shared.registry().order_trades(&id).cloned().collect();
+    assert!(!trades.is_empty());
+    for _ in 0..2 {
+        for trade in &trades {
+            late.observe(trade);
+        }
+    }
+    assert_eq!(late.order(&id).unwrap().cancellable, Known(false));
+    assert_eq!(
+        late.order(&id).unwrap().matched_shares,
+        order.matched_shares
+    );
+    assert_eq!(late.order_trades(&id).count(), trades.len());
 }

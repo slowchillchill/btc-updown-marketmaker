@@ -69,7 +69,7 @@ fn state(
 ) -> Result<Vec<Vec<f32>>> {
     let outputs = session.run(ort::inputs![
         "fast_features" => tensor(&[case.batch,836], &case.fast)?,
-        "slow_features" => tensor(&[case.batch,412], &case.slow)?,
+        "slow_features" => tensor(&[case.batch,433], &case.slow)?,
         "h_prev" => tensor(&[layers,case.batch,hidden], h)?
     ])?;
     Ok(["z_t", "h_next"]
@@ -98,7 +98,7 @@ fn action(
 ) -> Result<Vec<Vec<f32>>> {
     let outputs = session.run(ort::inputs![
         "z_t" => tensor(&[batch,hidden], z)?, "rule_features" => tensor(&[batch,30],rule)?,
-        "prefix_features" => tensor(&[batch,60],prefix)?, "cancel_features" => tensor(&[batch,slots,129],objects)?,
+        "prefix_features" => tensor(&[batch,60],prefix)?, "cancel_features" => tensor(&[batch,slots,184],objects)?,
         "cancel_mask" => Tensor::from_array(([batch,slots],mask.to_vec()))?,
         "cancel_reduced" => tensor(&[batch,3*hidden/2],reduced)?,
         "cancel_exists" => Tensor::from_array(([batch],exists.to_vec()))?,
@@ -135,13 +135,13 @@ fn block(
     padded: usize,
     family: Option<usize>,
 ) -> (Vec<f32>, Vec<bool>) {
-    let mut x = vec![0.; case.batch * padded * 129];
+    let mut x = vec![0.; case.batch * padded * 184];
     let mut mask = vec![false; case.batch * padded];
     for row in 0..case.batch {
         for j in 0..length {
-            let source = (row * case.slots + offset + j) * 129;
-            let dest = (row * padded + j) * 129;
-            x[dest..dest + 129].copy_from_slice(&case.objects[source..source + 129]);
+            let source = (row * case.slots + offset + j) * 184;
+            let dest = (row * padded + j) * 184;
+            x[dest..dest + 184].copy_from_slice(&case.objects[source..source + 184]);
             mask[row * padded + j] = case.mask[row * case.slots + offset + j]
                 && family.is_none_or(|f| case.objects[source + f] == 1.);
         }
@@ -366,7 +366,7 @@ fn native_state(
             let previous = hidden
                 .get(&key)
                 .ok_or("native hidden key not initialized")?;
-            let outputs=session.run(ort::inputs!["fast_features"=>tensor(&[1,836],&row.fast)?,"slow_features"=>tensor(&[1,412],&row.slow)?,"h_prev"=>tensor(&[suite.layers,1,suite.hidden],previous)?])?;
+            let outputs=session.run(ort::inputs!["fast_features"=>tensor(&[1,836],&row.fast)?,"slow_features"=>tensor(&[1,433],&row.slow)?,"h_prev"=>tensor(&[suite.layers,1,suite.hidden],previous)?])?;
             let values = ["z_t", "h_next"]
                 .iter()
                 .map(|name| {
@@ -527,7 +527,7 @@ fn main() -> Result<()> {
                         &rows(z, suite.hidden, &selected_rows),
                         &rows(&c.rule, 30, &selected_rows),
                         &rows(prefix, 60, &selected_rows),
-                        &rows(&c.objects, c.slots * 129, &selected_rows),
+                        &rows(&c.objects, c.slots * 184, &selected_rows),
                         &rows(&c.mask, c.slots, &selected_rows),
                         &rows(&zero, 3 * suite.hidden / 2, &selected_rows),
                         &rows(&absent, 1, &selected_rows),

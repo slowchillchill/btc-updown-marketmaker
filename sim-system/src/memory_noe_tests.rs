@@ -1596,3 +1596,49 @@ async fn continuous_normal_late_timer_preserves_due_delay_and_buy_between_rebate
     assert!(observation.take_closed_feedback().is_empty());
     driver.stop_and_drain().unwrap();
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn finite_paper_gap_closes_receipts_strictly_before_next_real_group() {
+    use contracts::execution_normalization::SimV2SourceRecordReferenceV1;
+    let mut original_received = None;
+    for delta in [None, Some(-1), Some(0), Some(1)] {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("dpt");
+        let core = recorded_memory_complete(&root);
+        let context = core.pm_context(CONDITION_ID).unwrap();
+        let scenario = sealed_scenario_for_markets(vec![crate::scenario::PlatformMarketV1::try_new(
+            context.market, context.assets.into_iter().map(|a| a.asset).collect::<Vec<_>>().try_into().unwrap(),
+        ).unwrap()]);
+        let (execution, observation) = memory_execution_with_scenario_capacity::<noe_projection::MeasuredOrderEvidence>(
+            &temp.path().join("sim.jsonl"), scenario, SimCallerRoleV1::Paper, 128, None,
+        ).await;
+        let next_at = delta.map_or(26_000, |d| original_received.unwrap() + d);
+        let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, MemoryRecordedTimes).unwrap()
+            .enumerate().map(|(index, value)| value.map(|mut value| {
+                if index == 5 { value.delivered_at_utc_ms = next_at; }
+                value
+            }));
+        let mut driver = FinitePublicConsumptionV1::new(execution, source, "receipt-gap".into());
+        for _ in 0..5 { driver.next_group().unwrap().unwrap(); }
+        driver.decision().unwrap().request(BusinessRequestV2::PostOrder(PostOrderRequestV2 {
+            context: RequestContextV2 { global_request_id: "gap-buy".into(), caller_correlation_id: None },
+            item: post_item("buy", &ConditionId(CONDITION_ID.into()), &TokenId(UP_TOKEN_ID.into()),
+                SimBuyOrderKindV1::GtcLimit { limit_price_pusd_per_share: Decimal::new(2,1), size_shares: Decimal::from(5), post_only: true }),
+        })).unwrap();
+        assert!(observation.take_closed_feedback().is_empty());
+        let receipt = driver.next_group().unwrap().unwrap().0;
+        assert_eq!(receipt.execution_time().logical_time_utc_ms(), next_at);
+        let response = completed_post_response(&driver.execution.actor, "gap-buy").unwrap();
+        let received = response.metadata.response_received_at_utc_ms;
+        assert!(response.metadata.platform_responded_at_utc_ms < received);
+        if let Some(expected) = original_received { assert_eq!(received, expected); }
+        else { original_received = Some(received); }
+        let records = observation.take_closed_feedback();
+        let response_seen = records.iter().any(|r| matches!(r.record().source_reference().record,
+            SimV2SourceRecordReferenceV1::DirectResponse { response_received_at_utc_ms, .. } if response_received_at_utc_ms == received));
+        assert_eq!(response_seen, received < next_at, "=t及>t不得提前领取");
+        assert_eq!(driver.execution.actor.state.as_ref().unwrap().session.as_ref().unwrap()
+            .public_visibility_frontier.closed_through_utc_ms, Some(next_at - 1));
+        driver.stop_and_drain().unwrap();
+    }
+}

@@ -1,4 +1,4 @@
-//! §3 的完整412槽，所有范围先在精确域归约，最后一次投影。
+//! §3 的完整415槽，所有范围先在精确域归约，最后一次投影。
 use crate::{
     InputError,
     exact::*,
@@ -10,7 +10,7 @@ use contracts::{economics::EconomicRational as R, *};
 use ledger::{
     EconomicSettlementStateV1 as S, LedgerMarketProjectionV1 as L, MarketEconomicTotalsReadV1 as M,
 };
-use shared_run::ActionBeforeReadV1;
+use shared_run::ActionBeforeReadV2;
 use std::collections::BTreeMap;
 fn status(s: S) -> usize {
     match s {
@@ -35,7 +35,7 @@ fn esum(
             .unwrap_or_else(|| Known(R::zero()))
     }))
 }
-fn lsum(read: &ActionBeforeReadV1, scope: &[&ConditionId], f: impl Fn(&L) -> Value) -> Value {
+fn lsum(read: &ActionBeforeReadV2, scope: &[&ConditionId], f: impl Fn(&L) -> Value) -> Value {
     sum(scope.iter().map(|id| {
         read.ledger()
             .market_projections
@@ -52,14 +52,14 @@ fn econ_leg(m: &M, side: usize) -> Option<usize> {
         .position(|a| a.outcome.index == side as u32)
 }
 pub(crate) fn encode(
-    read: &ActionBeforeReadV1,
+    read: &ActionBeforeReadV2,
     current: Option<&ConditionId>,
     old: &[ConditionId],
     markets: &BTreeMap<String, MarketBinding>,
     now: i64,
     role: InputRole,
-) -> Result<[f32; 412], InputError> {
-    let mut out = [0.; 412];
+) -> Result<[f32; 433], InputError> {
+    let mut out = [0.; 433];
     let scopes = [
         current.into_iter().collect::<Vec<_>>(),
         old.iter().collect::<Vec<_>>(),
@@ -257,8 +257,12 @@ pub(crate) fn encode(
         }
         // action_snapshot 已保留完整未闭合人口，直接消费，不能再次按可撤资格过滤。
         let mut orders = Vec::new();
+        let mut unknown_scope = false;
         for order in read.orders() {
-            let condition = order_condition(&order)?;
+            let Some(condition) = order.condition_id else {
+                unknown_scope = true;
+                continue;
+            };
             if scope.contains(&condition) {
                 orders.push(order)
             }
@@ -281,6 +285,12 @@ pub(crate) fn encode(
             406 + group * 3,
             wrap(Known(integer(orders.len()))),
         );
+        if unknown_scope && !scope.is_empty() {
+            for offset in [382, 385, 388, 391] {
+                slot(&mut out, offset + group * 12, Unavailable);
+            }
+            slot(&mut out, 406 + group * 3, Unavailable);
+        }
     }
     let mut balances = [R::zero(), R::zero()];
     if let Some(c) = current {
@@ -364,6 +374,12 @@ pub(crate) fn encode(
             )),
         );
     }
+    slot(
+        &mut out,
+        412,
+        Known(integer(read.pending_noe_record_count())),
+    );
+    request_block(&mut out, 415, read.cancellation_requests(None), now);
     Ok(out)
 }
 
@@ -399,7 +415,7 @@ pub(crate) fn encode_rebates(
     }
 }
 
-pub(crate) fn order_ages(orders: &[shared_run::ExecutionOrderReadV1<'_>], now: i64) -> [Value; 2] {
+pub(crate) fn order_ages(orders: &[shared_run::ExecutionOrderReadV2<'_>], now: i64) -> [Value; 2] {
     let ages: Option<Vec<_>> = orders
         .iter()
         .map(|o| {

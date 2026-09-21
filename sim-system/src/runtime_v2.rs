@@ -23,6 +23,7 @@ pub enum BusinessProjectionVersionV1 {
     #[default]
     V2,
     V3,
+    V4,
 }
 impl BusinessProjectionVersionV1 {
     pub fn is_v2(&self) -> bool {
@@ -208,9 +209,32 @@ pub struct RetentionAdvanceV2 {
     pub trade_history_retained_from_utc_ms: Option<i64>,
 }
 
+/// 有限验证明确指定的一次撤单尝试；不定义概率或默认训练分布。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelFailureScenarioV1 {
+    pub targets: Vec<CancelFailureTargetV1>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelFailureTargetV1 {
+    pub global_request_id: String,
+    pub platform_order_id: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CancelScenarioHitV1 {
+    pub configuration_input_sequence: u64,
+    pub global_request_id: String,
+    pub platform_order_id: String,
+    pub effective_processing_at_utc_ms: i64,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum CancelScenarioOperationV1 {
+    Configure(CancelFailureScenarioV1),
+}
+
 #[derive(Debug, PartialEq, Eq, Serialize)]
 #[serde(tag = "input", content = "body", rename_all = "SCREAMING_SNAKE_CASE")]
 pub(crate) enum BusinessInputV2 {
+    CancelScenario(CancelScenarioOperationV1),
     Settlement(crate::matching::settlement::SettlementOperationV1),
     CreateSession(SessionSpecV3),
     ActivateSession {
@@ -239,6 +263,7 @@ pub(crate) enum BusinessInputV2 {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(tag = "input", content = "body", rename_all = "SCREAMING_SNAKE_CASE")]
 pub(crate) enum LoggedBusinessInputV2 {
+    CancelScenario(CancelScenarioOperationV1),
     Settlement(crate::matching::settlement::SettlementOperationV1),
     CreateSession(SessionSpecV3),
     ActivateSession {

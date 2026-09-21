@@ -1,7 +1,7 @@
 //! 根时间资格唯一归属。公共生命周期状态不是模型资格，隐藏值由调用方持有。
 use contracts::*;
 use serde::Serialize;
-use shared_run::{ActionBeforeReadV1, SharedExecutionV1};
+use shared_run::{ActionBeforeReadV2, SharedExecutionV2};
 use sim_system::{
     execution::PublicConsumptionStateV1, public_consumption::TrustedGroupDecisionCutoffV1,
 };
@@ -102,7 +102,7 @@ pub struct NativeInputGroup {
     pub old: Vec<ConditionId>,
     pub cancel: Vec<Vec<f32>>,
     #[serde(skip)]
-    pub action_before: Option<ActionBeforeReadV1>,
+    pub action_before: Option<ActionBeforeReadV2>,
 }
 pub(crate) struct MarketBinding {
     pub market: MarketIdentityV2,
@@ -145,13 +145,11 @@ impl NativeInputRoot {
     }
     pub fn consume(
         &mut self,
-        shared: &mut SharedExecutionV1,
+        shared: &mut SharedExecutionV2,
         driver: &mut PublicConsumptionStateV1,
     ) -> Result<Option<NativeInputGroup>, crate::InputError> {
         // 由原共享组合完成唯一应用；随后重取真实 decision 和公共帧。
-        if !shared.apply_closed()? {
-            return Ok(None);
-        }
+        shared.apply_closed()?;
         let before = shared.action_before(driver)?;
         let Some(decision) = driver.decision() else {
             return Ok(None);

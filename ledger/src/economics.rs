@@ -216,7 +216,10 @@ impl Market {
     }
 }
 impl EconomicsState {
-    pub(crate) fn dependencies_present(&self, record: &NoeConsumedRecordRefV1) -> bool {
+    pub(crate) fn dependencies_present<R: Clone + std::fmt::Debug>(
+        &self,
+        record: &execution_normalization::NoeConsumedRecordRef<R>,
+    ) -> bool {
         let resolution = |condition: &ConditionId| {
             self.markets
                 .get(&condition.0)
@@ -232,7 +235,8 @@ impl EconomicsState {
                 evidence: SourceNeutralEvidenceKind::SettlementLifecycleV2 { result },
                 ..
             } => match result {
-                SourceNeutralSettlementLifecycleResultV2::Contribution(c) => contribution_ready(c),
+                // 原 Taker 贡献已是独立事实；不以用户成交成功反馈的到达先后作为接纳条件。
+                SourceNeutralSettlementLifecycleResultV2::Contribution(_) => true,
                 SourceNeutralSettlementLifecycleResultV2::MakerAccrualFinalized {
                     contributions,
                     ..
@@ -295,9 +299,17 @@ impl EconomicsState {
         &self,
         effect: &LedgerCommittedEffectV1,
     ) -> Result<Option<EconomicsPatch>, LedgerErrorV1> {
-        let LedgerTransactionSourceV1::Memory(source) = &effect.transaction.source else {
-            return Ok(None);
-        };
+        match &effect.transaction.source {
+            LedgerTransactionSourceV1::Memory(source) => self.prepare_record(effect, source),
+            LedgerTransactionSourceV1::MemoryV2(source) => self.prepare_record(effect, source),
+            _ => Ok(None),
+        }
+    }
+    fn prepare_record<R: Clone + std::fmt::Debug + Eq>(
+        &self,
+        _effect: &LedgerCommittedEffectV1,
+        source: &execution_normalization::NoeConsumedRecordRef<R>,
+    ) -> Result<Option<EconomicsPatch>, LedgerErrorV1> {
         let mut patch = EconomicsPatch::default();
         match source.record() {
             NormalizationRecord::EconomicFact { fact, .. } => {
@@ -1101,6 +1113,23 @@ impl LedgerEconomicReadV1<'_> {
                 result.estimated_pusd = self.estimated_rebate(kind, Some(condition), None);
                 result
             });
+            // 修复缺口只看已公开终局实际份额；经济成功池仍沿原入账条件更新。
+            let mut final_success_quantity = [Decimal::ZERO; 2];
+            if let Some(assets) = &m.assets {
+                for trade in self.state.trades.values().filter(|t| {
+                    t.fact.condition_id.0 == *condition
+                        && t.fact.economic_disposition
+                            == SourceNeutralTradeEconomicDispositionV1::FinalSuccess
+                }) {
+                    if let Some(i) = assets
+                        .iter()
+                        .position(|a| a.token_id == trade.fact.token_id)
+                    {
+                        final_success_quantity[i] +=
+                            decimal(&trade.fact.base_quantity_shares).expect("原真实成交份额");
+                    }
+                }
+            }
             MarketEconomicTotalsReadV1 {
                 condition_id: ConditionId(condition.clone()),
                 assets: m.assets.clone(),
@@ -1115,7 +1144,10 @@ impl LedgerEconomicReadV1<'_> {
                     }
                 }),
                 repair_gap_shares: std::array::from_fn(|i| {
-                    exact((m.success_quantity[1 - i] - m.success_quantity[i]).max(Decimal::ZERO))
+                    exact(
+                        (final_success_quantity[1 - i] - final_success_quantity[i])
+                            .max(Decimal::ZERO),
+                    )
                 }),
                 unpaid_taker_fee_pusd: exact(m.unpaid_taker),
                 settlement_state: match &m.resolution {

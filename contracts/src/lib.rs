@@ -587,20 +587,51 @@ pub enum CancelNotCanceledReasonV2 {
     NoCancellableRemainder,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum CancelNotCanceledReasonV3 {
+    NotFoundOrNotOwned,
+    NoCancellableRemainder,
+    TemporaryFailureNoEffect,
+}
+
+impl From<CancelNotCanceledReasonV2> for CancelNotCanceledReasonV3 {
+    fn from(reason: CancelNotCanceledReasonV2) -> Self {
+        match reason {
+            CancelNotCanceledReasonV2::NotFoundOrNotOwned => Self::NotFoundOrNotOwned,
+            CancelNotCanceledReasonV2::NoCancellableRemainder => Self::NoCancellableRemainder,
+        }
+    }
+}
+
+pub type CancelTargetOutcomeV2 = CancelTargetOutcome<CancelNotCanceledReasonV2>;
+pub type CancelTargetOutcomeV3 = CancelTargetOutcome<CancelNotCanceledReasonV3>;
+pub type CancelTargetResponseV2 = CancelTargetResponse<CancelNotCanceledReasonV2>;
+pub type CancelTargetResponseV3 = CancelTargetResponse<CancelNotCanceledReasonV3>;
+pub type CancelOrderDirectResponseV2 = CancelOrderDirectResponse<CancelNotCanceledReasonV2>;
+pub type CancelOrderDirectResponseV3 = CancelOrderDirectResponse<CancelNotCanceledReasonV3>;
+pub type CancelOrdersDirectResponseV2 = CancelOrdersDirectResponse<CancelNotCanceledReasonV2>;
+pub type CancelOrdersDirectResponseV3 = CancelOrdersDirectResponse<CancelNotCanceledReasonV3>;
+pub type CancelMarketOrdersDirectResponseV2 =
+    CancelMarketOrdersDirectResponse<CancelNotCanceledReasonV2>;
+pub type CancelMarketOrdersDirectResponseV3 =
+    CancelMarketOrdersDirectResponse<CancelNotCanceledReasonV3>;
+pub type CancelAllOrdersDirectResponseV2 = CancelAllOrdersDirectResponse<CancelNotCanceledReasonV2>;
+pub type CancelAllOrdersDirectResponseV3 = CancelAllOrdersDirectResponse<CancelNotCanceledReasonV3>;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum CancelTargetOutcomeV2 {
+pub enum CancelTargetOutcome<R> {
     Canceled(CanceledTargetMeasurementV2),
-    NotCanceledNoEffect(CancelNotCanceledReasonV2),
+    NotCanceledNoEffect(R),
     EvidenceUnknownNoEffect,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CancelTargetResponseV2 {
+pub struct CancelTargetResponse<R> {
     pub target_ordinal: u64,
     pub platform_order_id: String,
     pub input_item_refs: Vec<CancelInputItemRefV2>,
     pub effective_processing_at_utc_ms: i64,
-    pub outcome: CancelTargetOutcomeV2,
+    pub outcome: CancelTargetOutcome<R>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -616,27 +647,27 @@ pub struct PostOrdersDirectResponseV2 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CancelOrderDirectResponseV2 {
+pub struct CancelOrderDirectResponse<R> {
     pub metadata: DirectResponseMetadataV2,
-    pub target: CancelTargetResponseV2,
+    pub target: CancelTargetResponse<R>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CancelOrdersDirectResponseV2 {
+pub struct CancelOrdersDirectResponse<R> {
     pub metadata: DirectResponseMetadataV2,
-    pub targets: Vec<CancelTargetResponseV2>,
+    pub targets: Vec<CancelTargetResponse<R>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CancelMarketOrdersDirectResponseV2 {
+pub struct CancelMarketOrdersDirectResponse<R> {
     pub metadata: DirectResponseMetadataV2,
-    pub targets: Vec<CancelTargetResponseV2>,
+    pub targets: Vec<CancelTargetResponse<R>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CancelAllOrdersDirectResponseV2 {
+pub struct CancelAllOrdersDirectResponse<R> {
     pub metadata: DirectResponseMetadataV2,
-    pub targets: Vec<CancelTargetResponseV2>,
+    pub targets: Vec<CancelTargetResponse<R>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

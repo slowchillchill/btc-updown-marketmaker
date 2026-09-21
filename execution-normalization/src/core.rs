@@ -1271,3 +1271,40 @@ impl NormalizationCoreV3 {
         self.prepare_batch(input)
     }
 }
+
+pub type SourceNeutralEvidenceKindV4 = SourceNeutralEvidenceKind<
+    contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2,
+    contracts::execution_normalization::SourceNeutralControlResultV3,
+>;
+pub type SourceNeutralEvidenceV4 = SourceNeutralEvidence<
+    contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2,
+    contracts::execution_normalization::SourceNeutralControlResultV3,
+>;
+pub type NormalizationBatchInputV4 = NormalizationBatchInput<
+    contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2,
+    contracts::execution_normalization::SourceNeutralControlResultV3,
+>;
+pub type NormalizationRecordV4 = NormalizationRecord<
+    contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2,
+    contracts::execution_normalization::SourceNeutralControlResultV3,
+>;
+pub type NormalizationBatchV4 = NormalizationBatch<
+    contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2,
+    contracts::execution_normalization::SourceNeutralControlResultV3,
+>;
+pub type PreparedNormalizationBatchV4 = PreparedNormalizationBatch<
+    contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2,
+    contracts::execution_normalization::SourceNeutralControlResultV3,
+>;
+pub type NormalizationCoreV4 = NormalizationCore<
+    contracts::execution_normalization::SourceNeutralTradeLifecycleResultV2,
+    contracts::execution_normalization::SourceNeutralControlResultV3,
+>;
+impl NormalizationCoreV4 {
+    pub fn prepare_batch_v4(
+        &self,
+        input: NormalizationBatchInputV4,
+    ) -> Result<PreparedNormalizationBatchV4, CoreErrorV1> {
+        self.prepare_batch(input)
+    }
+}
