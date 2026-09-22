@@ -201,3 +201,152 @@ fn recovery_position_slot_checks_each_ordinal_and_revalidates_each_new_key() {
     fs::write(&first.commit_container.location, bytes).unwrap();
     assert!(reopened.read(&first).is_ok(), "失败没有保存验证结果");
 }
+
+#[test]
+fn cold_v3_query_keeps_embedded_account_and_economic_decisions_after_reopen() {
+    use contracts::execution_normalization::*;
+    use contracts::{ConditionId, ExactDecimal, TokenId};
+    use execution_normalization::*;
+    let temporary = TempDir::new().unwrap();
+    let mut store = DurableContextStoreV3::open_or_create_sim_v2(temporary.path(), seed()).unwrap();
+    // 被读取的身份使用其编码内的账户，不能从当前容器上下文重建。
+    let mut other_seed = seed();
+    other_seed.account_instance_key.account_id = "another-account".into();
+    let other_account = std::sync::Arc::new(
+        sim_v2_context(other_seed, &store.context().contract_version)
+            .unwrap()
+            .account_identity,
+    );
+    let order_key = SourceNeutralEntityKeyV1::Order {
+        source_order_id: "original-order".into(),
+    };
+    let order_identity = StableLogicalIdentityV1::entity(&other_account, &order_key).unwrap();
+    let query = SourceNeutralEvidenceKindV3::Control {
+        result: SourceNeutralControlResult::OrdersQuery {
+            result: SourceNeutralOrdersQueryResult::Page(SourceNeutralOrdersPage {
+                root_sequence: 7,
+                items: vec![SourceNeutralOrderSnapshotV2 {
+                    order_identity,
+                    condition_id: ConditionId("condition".into()),
+                    token_id: TokenId("token".into()),
+                    state: SourceNeutralOrderStateV1::Open,
+                    quantities: SourceNeutralOrderQuantityEvidenceV1::Base {
+                        matched_base_quantity_shares: ExactDecimal("2.5".into()),
+                        active_unfilled_base_quantity_shares: ExactDecimal("7.5".into()),
+                    },
+                }],
+                next_cursor: Some(SourceNeutralQueryCursorV1 {
+                    root_sequence: 7,
+                    next_offset: 1,
+                }),
+            }),
+        },
+    };
+    let opening = SourceNeutralEvidenceKindV3::Economic {
+        evidence: SourceNeutralEconomicEvidenceV1::AccountOpening {
+            opening_evidence_identity: "opening-result-58".into(),
+            available_pusd: ExactDecimal("100".into()),
+        },
+    };
+    let make = |ordinal: u32, key: &str, kind| SourceNeutralEvidenceV3 {
+        source_record: batch().evidence.remove(0).source_record,
+        source_ordinal: ordinal,
+        logical_key: SourceNeutralLogicalKeyV1::AuditEvidence {
+            evidence_identity: key.into(),
+        },
+        kind,
+    };
+    let input = NormalizationBatchInputV3 {
+        source_watermark: batch().source_watermark,
+        evidence: vec![
+            make(0, "query", query.clone()),
+            make(1, "query", query),
+            make(
+                2,
+                "query",
+                SourceNeutralEvidenceKindV3::Control {
+                    result: SourceNeutralControlResult::OrdersQuery {
+                        result: SourceNeutralOrdersQueryResult::InvalidCursor,
+                    },
+                },
+            ),
+            make(3, "economic", opening.clone()),
+            make(4, "economic-alias", opening),
+            make(
+                5,
+                "pending",
+                SourceNeutralEvidenceKindV3::Pending {
+                    scope: PendingScopeV1::EvidenceGap {
+                        scope_identity: "gap".into(),
+                    },
+                },
+            ),
+        ],
+    };
+    store.commit_batch_v3(input, 30).unwrap();
+    let refs: Vec<_> = store.commits()[0].result_references().collect();
+    drop(store);
+    let _reopened = DurableContextStoreV3::open_or_create_sim_v2(temporary.path(), seed()).unwrap();
+    let views: Vec<_> = refs
+        .iter()
+        .map(|r| read_durable_noe_record_v1(r).unwrap())
+        .collect();
+    let NormalizationRecord::Evidence {
+        evidence:
+            SourceNeutralEvidenceKind::Control {
+                result:
+                    SourceNeutralControlResult::OrdersQuery {
+                        result: SourceNeutralOrdersQueryResult::Page(page),
+                    },
+            },
+        ..
+    } = views[0].record()
+    else {
+        panic!("原查询页")
+    };
+    assert_eq!(page.root_sequence, 7);
+    assert_eq!(page.next_cursor.as_ref().unwrap().next_offset, 1);
+    assert_eq!(page.items[0].order_identity.account, other_account);
+    assert_eq!(
+        page.items[0].order_identity.key,
+        MemoryIdentityKeyV1::Entity(order_key)
+    );
+    assert!(
+        matches!(&page.items[0].quantities, SourceNeutralOrderQuantityEvidenceV1::Base { active_unfilled_base_quantity_shares, .. } if active_unfilled_base_quantity_shares.0 == "7.5")
+    );
+    assert!(matches!(
+        views[1].record(),
+        NormalizationRecord::Duplicate { .. }
+    ));
+    assert!(matches!(
+        views[2].record(),
+        NormalizationRecord::Conflict {
+            scope: NormalizationConflictScopeV1::LogicalIdentity { .. },
+            conflicting_evidence: SourceNeutralEvidenceKind::Control {
+                result: SourceNeutralControlResult::OrdersQuery {
+                    result: SourceNeutralOrdersQueryResult::InvalidCursor
+                }
+            },
+            ..
+        }
+    ));
+    let NormalizationRecord::EconomicFact { fact, .. } = views[3].record() else {
+        panic!("首次资金事实")
+    };
+    assert!(
+        matches!(&fact.disposition, SourceNeutralEconomicDispositionV1::AccountOpening { available_pusd } if available_pusd.0 == "100")
+    );
+    let NormalizationRecord::EconomicAlias {
+        primary_logical_identity,
+        fact_reference,
+        ..
+    } = views[4].record()
+    else {
+        panic!("同一资金事实别名")
+    };
+    assert_eq!(primary_logical_identity, &fact.logical_identity);
+    assert_eq!(fact_reference, &fact.fact_reference);
+    assert!(
+        matches!(views[5].record(), NormalizationRecord::Pending { scope: NormalizationPendingScopeV1::EvidenceGap { scope_identity }, .. } if scope_identity == "gap")
+    );
+}

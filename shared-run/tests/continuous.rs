@@ -2681,6 +2681,17 @@ async fn actual_partial_fak_final_success_before_economics_drives_gap_without_su
         totals.repair_gap_shares[1 - filled],
         ExactDecimal("4".into())
     );
+    driver.stop_and_drain().unwrap();
+    for record in &records {
+        let reference = record.durable_reference().unwrap();
+        let view =
+            ::execution_normalization::read_durable_noe_record_v1(reference.result()).unwrap();
+        assert_eq!(
+            view.record(),
+            record.record(),
+            "V3 持久冷读保留真实成交与经济事实"
+        );
+    }
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -2938,18 +2949,19 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
                 .unwrap(),
             empty_completion.position(),
         );
-        let durable = ::execution_normalization::read_noe_result_v4(reference.result()).unwrap();
+        let durable =
+            ::execution_normalization::read_durable_noe_record_v2(reference.result()).unwrap();
         let ::execution_normalization::NormalizationRecord::Evidence {
             evidence: ::execution_normalization::SourceNeutralEvidenceKind::Control {
                 result: contracts::execution_normalization::SourceNeutralControlResult::CancellationRequestCompleted { result: persisted },
             }, ..
-        } = durable.record else { panic!("零目标完成必须持久为原控制事实") };
+        } = durable.record() else { panic!("零目标完成必须持久为原控制事实") };
         let ::execution_normalization::NormalizationRecord::Evidence {
             evidence: ::execution_normalization::SourceNeutralEvidenceKind::Control {
                 result: contracts::execution_normalization::SourceNeutralControlResult::CancellationRequestCompleted { result: memory },
             }, ..
         } = empty_completion.record() else { unreachable!() };
-        assert_eq!(&persisted, memory, "真实零目标响应持久与内存同一事实");
+        assert_eq!(persisted, memory, "真实零目标响应持久与内存同一事实");
         let text = std::fs::read_to_string(&path).unwrap();
         let lines: Vec<serde_json::Value> = text
             .lines()

@@ -697,7 +697,11 @@ async fn public_normal_end_replays_original_groups_and_own_pm_bindings() {
     let expected_count = driver.execution.actor.applied_input_sequence - 1;
     let mut original = PublicRecordingReaderV1::recover(&root, 1, 1 << 20).unwrap();
     let mut original_bindings = BTreeMap::new();
+    let mut original_reports = Vec::new();
     while let Some(row) = original.next_row().unwrap() {
+        if let PublicStoredRowV1::PmReport { report, .. } = &row {
+            original_reports.push(report.clone());
+        }
         if let PublicStoredRowV1::PmStepBinding(binding) = row {
             let p = binding.position;
             original_bindings.insert(
@@ -712,6 +716,7 @@ async fn public_normal_end_replays_original_groups_and_own_pm_bindings() {
     let (_, mut reader) = SimEventLogRecoveryV2::open(&path, MAX_GROUP_BYTES).unwrap();
     let mut groups = 0;
     let mut pm_bindings = 0;
+    let mut reports = Vec::new();
     loop {
         let (next, inputs) = reader.next_group().unwrap();
         reader = next;
@@ -721,6 +726,7 @@ async fn public_normal_end_replays_original_groups_and_own_pm_bindings() {
         for input in inputs {
             if let LoggedBusinessInputV2::PublicGroup(group) = input {
                 groups += 1;
+                reports.extend(group.pm_reports);
                 pm_bindings += group.pm_step_bindings.len();
                 for binding in group.pm_step_bindings {
                     let p = binding.position;
@@ -739,6 +745,8 @@ async fn public_normal_end_replays_original_groups_and_own_pm_bindings() {
     }
     reader.finish_sealed_clean_run().unwrap();
     assert_eq!(groups, 6);
+    assert!(!original_reports.is_empty());
+    assert_eq!(reports, original_reports, "报告来源、处置和顺序沿原公共归约保留");
     assert!(
         pm_bindings > 0,
         "模拟器当次前序材料已后台物化，日志不只剩 DPT 引用"
