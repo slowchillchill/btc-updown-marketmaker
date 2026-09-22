@@ -1629,9 +1629,6 @@ impl PolymarketMarketMetadataRow {
             self.source_endpoint_unavailable_reason.is_none(),
         );
         self.require_source_payload_evidence(report);
-        if self.source_evidence_received_at_utc != Some(self.timestamp_received) {
-            report.reject("resolution_terminal_ws:timestamp_not_source_receive");
-        }
         report.require_null(
             "metadata_fetch_start_utc",
             self.metadata_fetch_start_utc.is_none(),

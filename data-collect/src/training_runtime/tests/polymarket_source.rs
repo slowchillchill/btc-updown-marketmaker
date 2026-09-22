@@ -1,4 +1,5 @@
 use super::*;
+use crate::polymarket_market_metadata_v6_layout::POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION;
 
 fn anchor_discovery_now() -> BtcUpdownDiscovery {
     let mut discovery = test_btc_discovery();
@@ -729,6 +730,8 @@ async fn gamma_outer_supervisor_survives_one_hundred_outer_cycles_with_bounded_f
         Instant::now(),
         control_rx,
         PolymarketRestartRecovery {
+            owners: Vec::new(),
+            ws_claims: BTreeMap::new(),
             pending: Vec::new(),
             fixed_identities: RecoveredPolymarketFixedIdentities::default(),
         },
@@ -858,6 +861,8 @@ async fn polymarket_source_spec_uses_private_gamma_endpoint_and_millisecond_dead
             started,
             control_rx,
             PolymarketRestartRecovery {
+                owners: Vec::new(),
+                ws_claims: BTreeMap::new(),
                 pending: Vec::new(),
                 fixed_identities: RecoveredPolymarketFixedIdentities::default(),
             },
@@ -1016,6 +1021,8 @@ async fn initial_fresh_gamma_identity_conflicts_with_recovered_authority_exit_76
                 Instant::now(),
                 control_rx,
                 PolymarketRestartRecovery {
+                    owners: Vec::new(),
+                    ws_claims: BTreeMap::new(),
                     pending: Vec::new(),
                     fixed_identities: recovered,
                 },
@@ -1075,6 +1082,8 @@ async fn pending_only_restart_exact_current_uses_snapshot_for_either_recovered_s
             pending_market.start_ts_s.saturating_mul(1_000) + 1;
         refresh_test_discovery_evidence(&mut pending_market, pending_evidence_received_at_utc_ms);
         let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+            owners: Vec::new(),
+            ws_claims: BTreeMap::new(),
             fixed_identities: RecoveredPolymarketFixedIdentities::default(),
             pending: vec![recovered_pending_for_test(
                 &pending_market,
@@ -1321,6 +1330,8 @@ async fn polymarket_source_recovers_through_gamma_network_rate_limit_and_empty_r
             Instant::now(),
             control_rx,
             PolymarketRestartRecovery {
+                owners: Vec::new(),
+                ws_claims: BTreeMap::new(),
                 pending: Vec::new(),
                 fixed_identities: RecoveredPolymarketFixedIdentities::default(),
             },
@@ -2154,11 +2165,11 @@ fn polymarket_pending_owned_bytes_counts_each_allocation_once() {
         platform_timestamp_utc_ms: 1_783_392_180_050,
         winning_asset_id: string_with_spare_capacity("winning-asset", 8),
         winning_outcome: string_with_spare_capacity("Up", 7),
-        raw_day_ticket: RawDayAcceptedTicket::Defer(RawDayDeferredEpoch {
+        raw_day_ticket: Some(RawDayAcceptedTicket::Defer(RawDayDeferredEpoch {
             utc_day: string_with_spare_capacity("2026-07-28", 6),
             old_generation: 3,
             expected_generation: 4,
-        }),
+        })),
     };
     let expected_ws_dynamic = [
         ws_evidence.source_sequence_epoch_id.capacity(),
@@ -2167,7 +2178,10 @@ fn polymarket_pending_owned_bytes_counts_each_allocation_once() {
         ws_evidence.platform_timestamp_raw.capacity(),
         ws_evidence.winning_asset_id.capacity(),
         ws_evidence.winning_outcome.capacity(),
-        ws_evidence.raw_day_ticket.dynamic_owned_bytes(),
+        ws_evidence
+            .raw_day_ticket
+            .as_ref()
+            .map_or(0, RawDayAcceptedTicket::dynamic_owned_bytes),
     ]
     .into_iter()
     .sum::<usize>();
@@ -2289,60 +2303,12 @@ fn polymarket_pending_union_and_terminal_claim_stay_within_frozen_bounds() {
     assert_eq!(context.desired_assets().unwrap().len(), 8);
     assert_eq!(context.pending.len(), 2);
     assert_eq!(context.source_authorities.len(), 4);
-    assert!(
-        context
-            .register_source_authority(authorities[0].clone())
-            .unwrap_err()
-            .to_string()
-            .contains("source authority bound exceeded")
-    );
-    assert!(context.pending_owned_bytes() < POLYMARKET_PENDING_STATE_MAX_BYTES);
+    context
+        .register_source_authority(authorities[0].clone())
+        .unwrap();
+    assert_eq!(context.source_authorities.len(), 4);
     context.ensure_pending_bounds().unwrap();
 
-    let mut third = PendingPolymarketIdentity::from_discovered(&pending_two).unwrap();
-    third.slug = "btc-updown-5m-1783391400".to_owned();
-    let third_slug = third.slug.clone();
-    context.pending.insert(
-        third_slug.clone(),
-        PendingPolymarketResolution::new(third, None),
-    );
-    assert!(
-        context
-            .ensure_pending_bounds()
-            .unwrap_err()
-            .to_string()
-            .contains("pending market bound exceeded")
-    );
-    let mut invalid_register_context = PolymarketProcessingContext::new(BtcUpdownDiscovery {
-        current: current.clone(),
-        next: None,
-    });
-    for market in [&pending_one, &pending_two] {
-        let identity = PendingPolymarketIdentity::from_discovered(market).unwrap();
-        invalid_register_context.pending.insert(
-            identity.slug.clone(),
-            PendingPolymarketResolution::new(identity, None),
-        );
-    }
-    let mut third = PendingPolymarketIdentity::from_discovered(&pending_two).unwrap();
-    third.slug = third_slug.clone();
-    invalid_register_context.pending.insert(
-        third.slug.clone(),
-        PendingPolymarketResolution::new(third, None),
-    );
-    assert!(
-        invalid_register_context
-            .register_source_authority(authorities[0].clone())
-            .unwrap_err()
-            .to_string()
-            .contains("pending market bound exceeded")
-    );
-    assert!(
-        invalid_register_context.source_authorities.is_empty(),
-        "a failed authority registration must not leave a false commit marker"
-    );
-
-    context.pending.remove(&third_slug);
     let oversized_payload = "x".repeat(POLYMARKET_PENDING_STATE_MAX_BYTES);
     context.early_ws_claims.insert(
         pending_one.slug.clone(),
@@ -2357,7 +2323,7 @@ fn polymarket_pending_union_and_terminal_claim_stay_within_frozen_bounds() {
             platform_timestamp_utc_ms: 1_783_392_180_050,
             winning_asset_id: pending_one.up_asset_id.clone(),
             winning_outcome: "Up".to_owned(),
-            raw_day_ticket: accepted_raw_day_ticket_for_sync_test(1_783_392_180_050),
+            raw_day_ticket: Some(accepted_raw_day_ticket_for_sync_test(1_783_392_180_050)),
         },
     );
     assert!(
@@ -2372,24 +2338,117 @@ fn polymarket_pending_union_and_terminal_claim_stay_within_frozen_bounds() {
 
 #[tokio::test]
 async fn polymarket_recovered_pending_admits_missed_evidence_before_future_slots() {
-    let market = test_btc_discovery().current;
-    let recovered = recovered_pending_for_test(&market, vec![1], vec![2], 3);
+    for deferred in [false, true] {
+        let market = test_btc_discovery().current;
+        let recovered = recovered_pending_for_test(&market, vec![1], vec![2], 3);
+        let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+            owners: Vec::new(),
+            ws_claims: BTreeMap::new(),
+            fixed_identities: RecoveredPolymarketFixedIdentities::default(),
+            pending: vec![recovered],
+        })
+        .unwrap()
+        .unwrap();
+        assert!(context.current.is_none());
+        assert!(context.next.is_none());
+        assert_eq!(context.desired_assets().unwrap().len(), 2);
+
+        let observed_at_utc_ms = context.pending[&market.slug].slot_utc_ms(2) + 1;
+        let stats = Arc::new(SourceQueueBackpressureStats::default());
+        let gate = install_active_raw_day_gate(
+            &stats,
+            if deferred {
+                observed_at_utc_ms - UTC_DAY_MS
+            } else {
+                observed_at_utc_ms
+            },
+        )
+        .await;
+        let (tx, mut rx) = mpsc::channel(2);
+        let sink = SourceEventSink {
+            tx,
+            gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+            source_queue_backpressure: stats,
+            inflight_budget: InflightBudget::new(),
+            enqueue_lock: Arc::new(AsyncMutex::new(())),
+        };
+        admit_recovered_polymarket_missed_slots(
+            observed_at_utc_ms,
+            &mut context,
+            &sink,
+            &CollectorIdentity {
+                host_id: "collector-restart".to_owned(),
+                region: "local-test".to_owned(),
+            },
+            Instant::now(),
+        )
+        .await
+        .unwrap();
+
+        if deferred {
+            assert!(rx.try_recv().is_err());
+            let boundary = observed_at_utc_ms.div_euclid(UTC_DAY_MS) * UTC_DAY_MS;
+            let close = gate
+                .close_for_rollover(
+                    &utc_day_string_from_ms(observed_at_utc_ms - UTC_DAY_MS).unwrap(),
+                    boundary,
+                )
+                .await
+                .unwrap();
+            commit_test_manifest_activation(&gate, &close);
+            gate.activate_after_rollover(&close).await.unwrap();
+            flush_deferred_raw_events(&sink, "polymarket", &close)
+                .await
+                .unwrap();
+        }
+        let event = rx.recv().await.unwrap().into_event();
+        let rows = polymarket_metadata_common_rows_from_event(&event).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].resolution_poll_attempt_ordinal, Some(2));
+        assert_eq!(
+            rows[0].resolution_poll_result,
+            Some(ResolutionPollResult::MissedDueToDowntime)
+        );
+        assert!(rows[0].metadata_fetch_start_utc.is_none());
+        assert!(rows[0].source_evidence_received_at_utc.is_none());
+        assert!(rows[0].source_evidence_payload_json.is_none());
+
+        let pending = &context.pending[&market.slug];
+        assert_eq!(pending.attempts_recorded, 2);
+        assert_eq!(pending.missed_slot_count, 1);
+        assert_eq!(pending.next_attempt_ordinal, 3);
+        assert!(pending.recovery_missed_ordinals.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn recovered_owners_commit_missed_slots_individually_and_leave_unsent_work() {
+    let first = test_btc_discovery().current;
+    let second = next_market_for_test(&first);
+    let third = next_market_for_test(&second);
     let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+        owners: Vec::new(),
+        ws_claims: BTreeMap::new(),
         fixed_identities: RecoveredPolymarketFixedIdentities::default(),
-        pending: vec![recovered],
+        pending: [&first, &second, &third]
+            .into_iter()
+            .map(|market| recovered_pending_for_test(market, vec![1], vec![2], 3))
+            .collect(),
     })
     .unwrap()
     .unwrap();
-    assert!(context.current.is_none());
-    assert!(context.next.is_none());
-    assert_eq!(context.desired_assets().unwrap().len(), 2);
-
-    let observed_at_utc_ms = context.pending[&market.slug].slot_utc_ms(2) + 1;
+    let slugs = context.pending.keys().cloned().collect::<Vec<_>>();
+    let observed = third.end_ts_s * 1_000 + 4 * 60_000;
     let stats = Arc::new(SourceQueueBackpressureStats::default());
-    install_active_raw_day_gate(&stats, observed_at_utc_ms).await;
-    let (tx, mut rx) = mpsc::channel(2);
-    admit_recovered_polymarket_missed_slots(
-        observed_at_utc_ms,
+    install_active_raw_day_gate(&stats, observed).await;
+    let (tx, mut rx) = mpsc::channel(1);
+    let consumer = tokio::spawn(async move {
+        let accepted = rx.recv().await.unwrap();
+        drop(rx);
+        accepted
+    });
+    let result = admit_recovered_polymarket_missed_slots(
+        observed,
         &mut context,
         &SourceEventSink {
             tx,
@@ -2399,37 +2458,42 @@ async fn polymarket_recovered_pending_admits_missed_evidence_before_future_slots
             enqueue_lock: Arc::new(AsyncMutex::new(())),
         },
         &CollectorIdentity {
-            host_id: "collector-restart".to_owned(),
-            region: "local-test".to_owned(),
+            host_id: "restart".into(),
+            region: "test".into(),
         },
         Instant::now(),
     )
-    .await
-    .unwrap();
-
-    let event = rx.recv().await.unwrap().into_event();
-    let rows = polymarket_metadata_common_rows_from_event(&event).unwrap();
+    .await;
+    assert!(result.is_err());
+    let accepted = consumer.await.unwrap().into_event();
+    let rows = polymarket_metadata_common_rows_from_event(&accepted).unwrap();
     assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].resolution_poll_attempt_ordinal, Some(2));
-    assert_eq!(
-        rows[0].resolution_poll_result,
-        Some(ResolutionPollResult::MissedDueToDowntime)
+    assert_eq!(rows[0].slug, slugs[0]);
+    assert!(
+        context.pending[&slugs[0]]
+            .recovery_missed_ordinals
+            .is_empty()
     );
-    assert!(rows[0].metadata_fetch_start_utc.is_none());
-    assert!(rows[0].source_evidence_received_at_utc.is_none());
-    assert!(rows[0].source_evidence_payload_json.is_none());
-
-    let pending = &context.pending[&market.slug];
-    assert_eq!(pending.attempts_recorded, 2);
-    assert_eq!(pending.missed_slot_count, 1);
-    assert_eq!(pending.next_attempt_ordinal, 3);
-    assert!(pending.recovery_missed_ordinals.is_empty());
+    assert_eq!(context.pending[&slugs[0]].attempts_recorded, 2);
+    for slug in &slugs[1..] {
+        assert_eq!(context.pending[slug].attempts_recorded, 1);
+        assert_eq!(
+            context.pending[slug]
+                .recovery_missed_ordinals
+                .iter()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![2]
+        );
+    }
 }
 
 #[test]
 fn polymarket_recovered_pending_reclassifies_elapsed_slots_before_probe() {
     let market = test_btc_discovery().current;
     let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+        owners: Vec::new(),
+        ws_claims: BTreeMap::new(),
         fixed_identities: RecoveredPolymarketFixedIdentities::default(),
         pending: vec![recovered_pending_for_test(
             &market,
@@ -2457,6 +2521,8 @@ fn polymarket_recovered_pending_reclassifies_elapsed_slots_before_probe() {
     assert!(!pending.recovery_reclassification_pending);
 
     let mut expired = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+        owners: Vec::new(),
+        ws_claims: BTreeMap::new(),
         fixed_identities: RecoveredPolymarketFixedIdentities::default(),
         pending: vec![recovered_pending_for_test(
             &market,
@@ -2471,8 +2537,15 @@ fn polymarket_recovered_pending_reclassifies_elapsed_slots_before_probe() {
     expired
         .reclassify_recovered_pending(final_slot_utc_ms)
         .unwrap();
-    assert!(expired.pending.is_empty());
-    assert!(expired.desired_assets().unwrap().is_empty());
+    assert_eq!(expired.pending[&market.slug].next_attempt_ordinal, 7);
+    assert_eq!(
+        expired.pending[&market.slug]
+            .recovery_missed_ordinals
+            .iter()
+            .copied()
+            .collect::<Vec<_>>(),
+        vec![6]
+    );
 }
 
 #[tokio::test]
@@ -2488,6 +2561,8 @@ async fn polymarket_recovered_finalize_allows_fresh_v3_delivery_after_install() 
     let terminal_received_at_utc_ms = identity.market_end_utc_ms + 1;
     let actor_now_utc_ms = terminal_received_at_utc_ms + 1;
     let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+        owners: Vec::new(),
+        ws_claims: BTreeMap::new(),
         fixed_identities: RecoveredPolymarketFixedIdentities::default(),
         pending: vec![recovered_pending_for_test(
             &market,
@@ -2518,7 +2593,9 @@ async fn polymarket_recovered_finalize_allows_fresh_v3_delivery_after_install() 
                 platform_timestamp_utc_ms: terminal_received_at_utc_ms,
                 winning_asset_id: identity.up_asset_id.clone(),
                 winning_outcome: "Up".to_owned(),
-                raw_day_ticket: accepted_raw_day_ticket_for_test(terminal_received_at_utc_ms).await,
+                raw_day_ticket: Some(
+                    accepted_raw_day_ticket_for_test(terminal_received_at_utc_ms).await,
+                ),
             },
         )));
     }
@@ -2634,6 +2711,8 @@ async fn polymarket_recovered_finalize_allows_fresh_v3_delivery_after_install() 
 fn polymarket_many_recovered_lifecycles_release_actor_owned_state() {
     let market = test_btc_discovery().current;
     let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+        owners: Vec::new(),
+        ws_claims: BTreeMap::new(),
         fixed_identities: RecoveredPolymarketFixedIdentities::default(),
         pending: vec![recovered_pending_for_test(
             &market,
@@ -2668,7 +2747,7 @@ fn polymarket_many_recovered_lifecycles_release_actor_owned_state() {
         context.rebuild_asset_to_slug();
         assert!(context.pending.is_empty());
         assert!(context.desired_assets().unwrap().is_empty());
-        assert_eq!(context.pending_owned_bytes(), 0);
+        assert!(context.source_authorities.is_empty());
     }
 }
 
@@ -3059,6 +3138,8 @@ fn polymarket_v3_resolved_target_admission_covers_current_next_and_recovery_pend
     );
 
     let pending_context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+        owners: Vec::new(),
+        ws_claims: BTreeMap::new(),
         fixed_identities: RecoveredPolymarketFixedIdentities::default(),
         pending: vec![recovered_pending_for_test(
             &current,
@@ -4725,7 +4806,7 @@ async fn polymarket_ws_claim_waits_for_completed_gamma_before_fence() {
         platform_timestamp_utc_ms: scheduled_at_utc_ms,
         winning_asset_id: identity.up_asset_id.clone(),
         winning_outcome: "Up".to_owned(),
-        raw_day_ticket: accepted_raw_day_ticket_for_test(scheduled_at_utc_ms).await,
+        raw_day_ticket: Some(accepted_raw_day_ticket_for_test(scheduled_at_utc_ms).await),
     };
     let mut context = PolymarketProcessingContext::new(discovery);
     let mut pending = PendingPolymarketResolution::new(identity, Some(evidence));
@@ -4855,7 +4936,7 @@ async fn polymarket_ws_claim_preserves_late_gamma_classification_matrix() {
             platform_timestamp_utc_ms: scheduled_at_utc_ms,
             winning_asset_id: identity.up_asset_id.clone(),
             winning_outcome: "Up".to_owned(),
-            raw_day_ticket: accepted_raw_day_ticket_for_test(scheduled_at_utc_ms).await,
+            raw_day_ticket: Some(accepted_raw_day_ticket_for_test(scheduled_at_utc_ms).await),
         };
         let mut pending = PendingPolymarketResolution::new(identity.clone(), Some(evidence));
         pending.in_flight_ordinal = Some(if matches!(case, Case::AttemptBinding) {
@@ -5057,7 +5138,7 @@ async fn polymarket_ws_claim_reaps_cancelled_gamma_before_fence() {
         platform_timestamp_utc_ms: identity.market_end_utc_ms,
         winning_asset_id: identity.up_asset_id.clone(),
         winning_outcome: "Up".to_owned(),
-        raw_day_ticket: accepted_raw_day_ticket_for_test(identity.market_end_utc_ms).await,
+        raw_day_ticket: Some(accepted_raw_day_ticket_for_test(identity.market_end_utc_ms).await),
     };
     let mut context = PolymarketProcessingContext::new(discovery);
     let mut pending = PendingPolymarketResolution::new(identity, Some(evidence));
@@ -5439,7 +5520,7 @@ async fn polymarket_terminal_bundle_capacity_rejection_admits_zero_rows() {
         platform_timestamp_utc_ms: scheduled_at_utc_ms,
         winning_asset_id: identity.up_asset_id.clone(),
         winning_outcome: "Up".to_owned(),
-        raw_day_ticket: accepted_raw_day_ticket_for_test(scheduled_at_utc_ms).await,
+        raw_day_ticket: Some(accepted_raw_day_ticket_for_test(scheduled_at_utc_ms).await),
     };
     let mut pending = PendingPolymarketResolution::new(identity.clone(), Some(evidence.clone()));
     pending.in_flight_ordinal = Some(1);
@@ -5529,7 +5610,7 @@ async fn polymarket_terminal_bundle_capacity_rejection_admits_zero_rows() {
 }
 
 #[tokio::test]
-async fn polymarket_ws_terminal_old_day_precedes_deferred_new_day_post() {
+async fn polymarket_ws_terminal_application_day_keeps_buffered_gamma_receive_day() {
     let discovery = test_btc_discovery();
     let identity = PendingPolymarketIdentity::from_discovered(&discovery.current).unwrap();
     let scheduled_at_utc_ms = identity.market_end_utc_ms + 3 * 60_000;
@@ -5537,8 +5618,9 @@ async fn polymarket_ws_terminal_old_day_precedes_deferred_new_day_post() {
         .div_euclid(UTC_DAY_MS)
         .saturating_add(1)
         .saturating_mul(UTC_DAY_MS);
-    let terminal_received_at_utc_ms = boundary_utc_ms - 1;
-    let post_received_at_utc_ms = boundary_utc_ms + 1;
+    let terminal_received_at_utc_ms = boundary_utc_ms - 2;
+    let post_received_at_utc_ms = boundary_utc_ms - 1;
+    let applied_at_utc_ms = boundary_utc_ms + 1;
     let sdk_market = serde_json::from_value::<SdkGammaMarket>(gamma_market_value_for_discovered(
         &discovery.current,
     ))
@@ -5558,14 +5640,14 @@ async fn polymarket_ws_terminal_old_day_precedes_deferred_new_day_post() {
         platform_timestamp_utc_ms: terminal_received_at_utc_ms,
         winning_asset_id: identity.up_asset_id.clone(),
         winning_outcome: "Up".to_owned(),
-        raw_day_ticket: accepted_raw_day_ticket_for_test(terminal_received_at_utc_ms).await,
+        raw_day_ticket: Some(accepted_raw_day_ticket_for_test(terminal_received_at_utc_ms).await),
     };
     let mut pending = PendingPolymarketResolution::new(identity.clone(), Some(evidence.clone()));
     pending.in_flight_ordinal = Some(1);
     let post = polymarket_resolution_attempt_row(
         &pending,
         &GammaResolutionPollCompletion {
-            slug: identity.slug,
+            slug: identity.slug.clone(),
             ordinal: 1,
             scheduled_at_utc_ms,
             fetch_start_utc_ms: scheduled_at_utc_ms,
@@ -5586,7 +5668,7 @@ async fn polymarket_ws_terminal_old_day_precedes_deferred_new_day_post() {
     let terminal = polymarket_resolution_terminal_ws_row(
         &pending,
         &evidence,
-        post_received_at_utc_ms,
+        applied_at_utc_ms,
         &CollectorIdentity {
             host_id: "collector-test".to_owned(),
             region: "local-test".to_owned(),
@@ -5606,7 +5688,7 @@ async fn polymarket_ws_terminal_old_day_precedes_deferred_new_day_post() {
     };
 
     let terminal_ticket =
-        accepted_raw_day_ticket_from_gate_for_test(&gate, terminal_received_at_utc_ms).await;
+        accepted_raw_day_ticket_from_gate_for_test(&gate, applied_at_utc_ms).await;
     let post_ticket =
         accepted_raw_day_ticket_from_gate_for_test(&gate, post_received_at_utc_ms).await;
     send_polymarket_terminal_prefix_ordered(
@@ -5632,32 +5714,22 @@ async fn polymarket_ws_terminal_old_day_precedes_deferred_new_day_post() {
     .await
     .unwrap();
 
-    let terminal_event = rx.recv().await.unwrap();
+    let post_event = rx.recv().await.unwrap();
+    assert_eq!(post_event.event.recv_time_utc_ms, post_received_at_utc_ms);
+    let post_metadata = polymarket_metadata_common_rows_from_event(
+        polymarket_lifecycle_metadata_event(&post_event).unwrap(),
+    )
+    .unwrap()
+    .remove(0);
     assert_eq!(
-        terminal_event.event.recv_time_utc_ms,
-        terminal_received_at_utc_ms
+        post_metadata.metadata_row_kind,
+        PolymarketMetadataRowKind::ResolutionPollAttempt
     );
     assert_eq!(
-        terminal_event
-            .event
-            .collector_admission
-            .as_ref()
-            .unwrap()
-            .sequence,
-        1
+        post_metadata.resolution_poll_result,
+        Some(ResolutionPollResult::PostTerminalClaimObservation)
     );
     assert!(rx.try_recv().is_err());
-    assert_eq!(
-        deferred_ingress_facts(&stats, "polymarket"),
-        vec![DeferredIngressBatchFact {
-            source_kinds: vec!["polymarket_market_metadata".to_owned()],
-            recv_times_utc_ms: vec![post_received_at_utc_ms],
-            has_collector_admission: vec![false],
-            accepted_defer: true,
-            typed_polymarket_v3: false,
-        }]
-    );
-
     let close = gate
         .close_for_rollover(
             &utc_day_string_from_ms(terminal_received_at_utc_ms).unwrap(),
@@ -5670,16 +5742,20 @@ async fn polymarket_ws_terminal_old_day_precedes_deferred_new_day_post() {
     flush_deferred_raw_events(&sink, "polymarket", &close)
         .await
         .unwrap();
-    let post_event = rx.recv().await.unwrap();
-    assert_eq!(post_event.event.recv_time_utc_ms, post_received_at_utc_ms);
+    let terminal_event = rx.recv().await.unwrap();
+    assert_eq!(terminal_event.event.recv_time_utc_ms, applied_at_utc_ms);
+    let terminal_metadata = polymarket_metadata_common_rows_from_event(
+        polymarket_lifecycle_metadata_event(&terminal_event).unwrap(),
+    )
+    .unwrap()
+    .remove(0);
     assert_eq!(
-        post_event
-            .event
-            .collector_admission
-            .as_ref()
-            .unwrap()
-            .sequence,
-        2
+        terminal_metadata.metadata_row_kind,
+        PolymarketMetadataRowKind::ResolutionTerminalWs
+    );
+    assert_eq!(
+        terminal_metadata.winning_asset_id.as_deref(),
+        Some(identity.up_asset_id.as_str())
     );
     assert!(rx.try_recv().is_err());
 }
@@ -5706,6 +5782,8 @@ async fn polymarket_day_fence_orders_ws_old_before_gamma_new() {
     let mut pending = PendingPolymarketResolution::new(identity.clone(), None);
     pending.in_flight_ordinal = Some(1);
     let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+        owners: Vec::new(),
+        ws_claims: BTreeMap::new(),
         fixed_identities: RecoveredPolymarketFixedIdentities::default(),
         pending: vec![recovered_pending_for_test(
             &market,
@@ -5792,27 +5870,9 @@ async fn polymarket_day_fence_orders_ws_old_before_gamma_new() {
     .unwrap();
 
     assert!(context.pending.is_empty());
-    let admitted = [rx.recv().await.unwrap(), rx.recv().await.unwrap()];
-    assert!(polymarket_v3_message(&admitted[0]).is_some());
-    let terminal = polymarket_metadata_common_rows_from_event(
-        polymarket_lifecycle_metadata_event(&admitted[1]).expect("second row must be metadata v5"),
-    )
-    .unwrap()
-    .remove(0);
-    assert_eq!(
-        terminal.metadata_row_kind,
-        PolymarketMetadataRowKind::ResolutionTerminalWs
-    );
-    assert_eq!(
-        deferred_ingress_facts(&stats, "polymarket"),
-        vec![DeferredIngressBatchFact {
-            source_kinds: vec!["polymarket_market_metadata".to_owned()],
-            recv_times_utc_ms: vec![gamma_received_at_utc_ms],
-            has_collector_admission: vec![false],
-            accepted_defer: true,
-            typed_polymarket_v3: false,
-        }]
-    );
+    let admitted_source = rx.recv().await.unwrap();
+    assert!(polymarket_v3_message(&admitted_source).is_some());
+    assert!(rx.try_recv().is_err());
     let close = gate
         .close_for_rollover(
             &utc_day_string_from_ms(ws_received_at_utc_ms).unwrap(),
@@ -5825,6 +5885,18 @@ async fn polymarket_day_fence_orders_ws_old_before_gamma_new() {
     flush_deferred_raw_events(&sink, "polymarket", &close)
         .await
         .unwrap();
+    let terminal = polymarket_metadata_common_rows_from_event(&rx.recv().await.unwrap().event)
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        terminal.metadata_row_kind,
+        PolymarketMetadataRowKind::ResolutionTerminalWs
+    );
+    assert_eq!(
+        terminal.source_evidence_received_at_utc,
+        Some(ws_received_at_utc_ms)
+    );
+    assert!(terminal.timestamp_received >= boundary_utc_ms);
     let post = polymarket_metadata_common_rows_from_event(&rx.recv().await.unwrap().event)
         .unwrap()
         .remove(0);
@@ -5859,6 +5931,8 @@ async fn polymarket_day_fence_orders_gamma_old_before_ws_new() {
         let mut pending = PendingPolymarketResolution::new(identity.clone(), None);
         pending.in_flight_ordinal = Some(1);
         let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+            owners: Vec::new(),
+            ws_claims: BTreeMap::new(),
             fixed_identities: RecoveredPolymarketFixedIdentities::default(),
             pending: vec![recovered_pending_for_test(
                 &market,
@@ -6033,6 +6107,8 @@ async fn polymarket_hour_fence_keeps_gamma_claim_and_rejects_post_horizon_ws() {
     let actor_now_utc_ms = hour_boundary_utc_ms + 1;
 
     let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+        owners: Vec::new(),
+        ws_claims: BTreeMap::new(),
         fixed_identities: RecoveredPolymarketFixedIdentities::default(),
         pending: vec![recovered_pending_for_test(
             &market,
@@ -6151,6 +6227,8 @@ async fn polymarket_connected_stop_deadline_and_control_close_quiesce_ws_and_abo
         let ws_received_at_utc_ms = identity.market_end_utc_ms + 1;
         let actor_now_utc_ms = ws_received_at_utc_ms + 1;
         let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+            owners: Vec::new(),
+            ws_claims: BTreeMap::new(),
             fixed_identities: RecoveredPolymarketFixedIdentities::default(),
             pending: vec![recovered_pending_for_test(
                 &market,
@@ -6505,14 +6583,14 @@ async fn polymarket_stop_materializes_accepted_current_ws_after_e_before_reply()
 }
 
 #[tokio::test]
-async fn polymarket_clean_stop_rejects_current_and_next_pre_e_claims() {
-    for claim_role in ["current", "next"] {
+async fn polymarket_clean_stop_retains_current_and_next_pre_e_claims() {
+    for claim_role in ["current", "next", "both"] {
         let mut discovery = test_btc_discovery();
         discovery.next = Some(next_market_for_test(&discovery.current));
-        let market = if claim_role == "current" {
-            discovery.current.clone()
-        } else {
-            discovery.next.clone().unwrap()
+        let markets = match claim_role {
+            "current" => vec![discovery.current.clone()],
+            "next" => vec![discovery.next.clone().unwrap()],
+            _ => vec![discovery.current.clone(), discovery.next.clone().unwrap()],
         };
         let current_end_utc_ms = discovery.current.end_ts_s.saturating_mul(1_000);
         let ws_received_at_utc_ms = current_end_utc_ms.saturating_sub(2);
@@ -6533,16 +6611,21 @@ async fn polymarket_clean_stop_rejects_current_and_next_pre_e_claims() {
         };
         let global_budget = InflightBudget::new();
         let decoded_budget = InflightBudget::new();
-        let mut ws_message = budgeted_polymarket_message_at_for_test(
-            market_resolved_message_for_test(&market, ws_received_at_utc_ms),
-            ws_received_at_utc_ms,
-            &global_budget,
-            &decoded_budget,
-        )
-        .await;
-        ws_message.raw_day_ticket =
-            accepted_raw_day_ticket_from_gate_for_test(&raw_day_gate, ws_received_at_utc_ms).await;
-        let mut runtime = polymarket_runtime_with_fence_messages_for_test(vec![ws_message]).await;
+        let mut messages = Vec::new();
+        for market in &markets {
+            let mut ws_message = budgeted_polymarket_message_at_for_test(
+                market_resolved_message_for_test(&market, ws_received_at_utc_ms),
+                ws_received_at_utc_ms,
+                &global_budget,
+                &decoded_budget,
+            )
+            .await;
+            ws_message.raw_day_ticket =
+                accepted_raw_day_ticket_from_gate_for_test(&raw_day_gate, ws_received_at_utc_ms)
+                    .await;
+            messages.push(ws_message);
+        }
+        let mut runtime = polymarket_runtime_with_fence_messages_for_test(messages).await;
         let mut resolution_poll_tasks = JoinSet::new();
 
         let collector_identity = CollectorIdentity {
@@ -6555,7 +6638,7 @@ async fn polymarket_clean_stop_rejects_current_and_next_pre_e_claims() {
         };
         let (reply_tx, reply_rx) = oneshot::channel();
 
-        let error = handle_polymarket_source_control(
+        let stopped = handle_polymarket_source_control(
             PolymarketSourceControl::Fence {
                 stop_after_fence: true,
                 day_boundary_utc_ms: None,
@@ -6571,12 +6654,9 @@ async fn polymarket_clean_stop_rejects_current_and_next_pre_e_claims() {
             Instant::now(),
         )
         .await
-        .expect_err("pre-E accepted WS claim must fail a clean stop");
-        let reply_error = reply_rx
-            .await
-            .unwrap()
-            .expect_err("pre-E accepted WS claim must reject the stop reply");
-        assert_eq!(reply_error, error.to_string(), "{claim_role}");
+        .expect("pre-E accepted WS claim must survive a clean stop");
+        assert!(stopped);
+        reply_rx.await.unwrap().unwrap();
 
         assert_eq!(
             context
@@ -6592,13 +6672,15 @@ async fn polymarket_clean_stop_rejects_current_and_next_pre_e_claims() {
             "{claim_role}"
         );
         assert!(context.pending.is_empty(), "{claim_role}");
-        assert_eq!(context.early_ws_claims.len(), 1, "{claim_role}");
+        assert_eq!(context.early_ws_claims.len(), markets.len(), "{claim_role}");
         assert!(
-            context.early_ws_claims.contains_key(&market.slug),
+            markets
+                .iter()
+                .all(|market| context.early_ws_claims.contains_key(&market.slug)),
             "{claim_role}"
         );
         let admitted = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
-        assert_eq!(admitted.len(), 1, "{claim_role}");
+        assert_eq!(admitted.len(), markets.len(), "{claim_role}");
         assert!(
             polymarket_v3_message(&admitted[0]).is_some(),
             "{claim_role}"
@@ -6607,7 +6689,7 @@ async fn polymarket_clean_stop_rejects_current_and_next_pre_e_claims() {
 }
 
 #[tokio::test]
-async fn polymarket_day_fence_rejects_next_pre_e_claim_before_reply() {
+async fn polymarket_day_fence_keeps_next_pre_e_claim_before_reply() {
     let boundary_utc_ms: i64 = 1_783_468_800_000;
     let mut current = test_btc_discovery().current;
     current.start_ts_s = boundary_utc_ms.div_euclid(1_000).saturating_sub(300);
@@ -6662,6 +6744,15 @@ async fn polymarket_day_fence_rejects_next_pre_e_claim_before_reply() {
         host_id: "collector-test".to_owned(),
         region: "local-test".to_owned(),
     };
+    for (market, role) in [
+        (&discovery.current, MarketRuntimeRole::Current),
+        (&next, MarketRuntimeRole::Next),
+    ] {
+        let row = polymarket_metadata_snapshot_row(market, role, &collector_identity).unwrap();
+        context
+            .register_source_authority(discovery_source_authority_from_row(&row).unwrap())
+            .unwrap();
+    }
     let timeline = || PolymarketTimelineNow {
         utc_ms: actor_now_utc_ms,
         monotonic: TokioInstant::now(),
@@ -6694,24 +6785,20 @@ async fn polymarket_day_fence_rejects_next_pre_e_claim_before_reply() {
         )
     })
     .await
-    .expect("next pre-E day fence must fail closed without waiting for resume");
-    let error = result.expect_err("next pre-E day fence must fail");
-    assert_eq!(
-        reply.expect_err("day fence reply must fail"),
-        error.to_string()
+    .expect("next pre-E day fence must complete its barrier");
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("Polymarket day-barrier resume dropped")
     );
+    reply.unwrap();
     assert_eq!(
-        context
-            .current
-            .as_ref()
-            .map(|current| current.slug.as_str()),
-        Some(discovery.current.slug.as_str())
-    );
-    assert_eq!(
-        context.next.as_ref().map(|market| market.slug.as_str()),
+        context.current.as_ref().map(|market| market.slug.as_str()),
         Some(next.slug.as_str())
     );
-    assert!(context.pending.is_empty());
+    assert!(context.next.is_none());
+    assert!(context.pending.contains_key(&discovery.current.slug));
     assert_eq!(context.early_ws_claims.len(), 1);
     assert!(context.early_ws_claims.contains_key(&next.slug));
     let admitted = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
@@ -6966,18 +7053,9 @@ async fn polymarket_2355_day_fence_finalizes_e_minus_one_ws_before_reply() {
                     .expect("23:55 day fence must reply after terminal finalization");
                 let before_activation =
                     std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
-                assert_eq!(before_activation.len(), 2);
+                assert_eq!(before_activation.len(), 1);
                 assert!(polymarket_v3_message(&before_activation[0]).is_some());
-                let terminal =
-                    polymarket_metadata_common_rows_from_event(&before_activation[1].event)
-                        .unwrap()
-                        .remove(0);
-                assert_eq!(
-                    terminal.metadata_row_kind,
-                    PolymarketMetadataRowKind::ResolutionTerminalWs
-                );
-                let deferred = deferred_ingress_facts(&stats, "polymarket");
-                assert_eq!(deferred.len(), 2);
+                assert_eq!(deferred_ingress_facts(&stats, "polymarket").len(), 3);
 
                 for producer in LOGICAL_PRODUCERS {
                     raw_day_gate
@@ -6992,8 +7070,21 @@ async fn polymarket_2355_day_fence_finalizes_e_minus_one_ws_before_reply() {
                     .unwrap();
                 let after_activation =
                     std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
-                assert_eq!(after_activation.len(), 2);
-                let transitions = after_activation
+                assert_eq!(after_activation.len(), 3);
+                let terminal =
+                    polymarket_metadata_common_rows_from_event(&after_activation[2].event)
+                        .unwrap()
+                        .remove(0);
+                assert_eq!(
+                    terminal.metadata_row_kind,
+                    PolymarketMetadataRowKind::ResolutionTerminalWs
+                );
+                assert_eq!(
+                    terminal.source_evidence_received_at_utc,
+                    Some(ws_received_at_utc_ms)
+                );
+                assert_eq!(terminal.timestamp_received, actor_now_utc_ms);
+                let transitions = after_activation[..2]
                     .iter()
                     .map(|event| {
                         polymarket_metadata_common_rows_from_event(&event.event)
@@ -7167,6 +7258,8 @@ async fn polymarket_outer_stop_harvests_ready_gamma_before_reply() {
     let completion_ticket =
         accepted_raw_day_ticket_from_gate_for_test(&raw_day_gate, completed_at_utc_ms).await;
     let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+        owners: Vec::new(),
+        ws_claims: BTreeMap::new(),
         fixed_identities: RecoveredPolymarketFixedIdentities::default(),
         pending: vec![recovered_pending_for_test(
             &market,
@@ -7377,11 +7470,10 @@ async fn polymarket_outer_recovery_day_fence_drains_completed_poll_before_reply(
         platform_timestamp_utc_ms: terminal_received_at_utc_ms,
         winning_asset_id: identity.up_asset_id.clone(),
         winning_outcome: "Up".to_owned(),
-        raw_day_ticket: accepted_raw_day_ticket_from_gate_for_test(
-            &raw_day_gate,
-            terminal_received_at_utc_ms,
-        )
-        .await,
+        raw_day_ticket: Some(
+            accepted_raw_day_ticket_from_gate_for_test(&raw_day_gate, terminal_received_at_utc_ms)
+                .await,
+        ),
     };
     let completion =
         GammaResolutionPollCompletion {
@@ -7439,6 +7531,7 @@ async fn polymarket_outer_recovery_day_fence_drains_completed_poll_before_reply(
     let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
     recovery.set_wait_override(Some(Duration::from_secs(60)));
     let gamma = GammaClient::new("http://127.0.0.1:9").unwrap();
+    let flush_sink = sink.clone();
     let waiter = tokio::spawn(async move {
         let result = wait_for_polymarket_outer_recovery(
             &mut recovery,
@@ -7465,21 +7558,26 @@ async fn polymarket_outer_recovery_day_fence_drains_completed_poll_before_reply(
         .expect("outer recovery fence reply must be bounded")
         .unwrap()
         .unwrap();
+    assert!(event_rx.try_recv().is_err());
+    let close = raw_day_gate
+        .close_for_rollover(
+            &utc_day_string_from_ms(terminal_received_at_utc_ms).unwrap(),
+            boundary_utc_ms,
+        )
+        .await
+        .unwrap();
+    commit_test_manifest_activation(&raw_day_gate, &close);
+    raw_day_gate.activate_after_rollover(&close).await.unwrap();
+    flush_deferred_raw_events(&flush_sink, "polymarket", &close)
+        .await
+        .unwrap();
     let terminal_event = event_rx.recv().await.unwrap();
     assert_eq!(
         terminal_event.event.recv_time_utc_ms,
-        terminal_received_at_utc_ms
+        post_received_at_utc_ms + 1
     );
-    assert_eq!(
-        deferred_ingress_facts(&stats, "polymarket"),
-        vec![DeferredIngressBatchFact {
-            source_kinds: vec!["polymarket_market_metadata".to_owned()],
-            recv_times_utc_ms: vec![post_received_at_utc_ms],
-            has_collector_admission: vec![false],
-            accepted_defer: true,
-            typed_polymarket_v3: false,
-        }]
-    );
+    let post = event_rx.recv().await.unwrap();
+    assert_eq!(post.event.recv_time_utc_ms, post_received_at_utc_ms);
     assert!(!waiter.is_finished());
     resume_tx.send(()).unwrap();
     assert_eq!(waiter.await.unwrap(), (true, true));
@@ -7885,17 +7983,9 @@ async fn polymarket_outer_recovery_day_fence_advances_after_pre_e_select_sample(
                     .unwrap()
                     .expect("outer recovery must finalize the E-1 WS before reply");
                 let admitted = std::iter::from_fn(|| event_rx.try_recv().ok()).collect::<Vec<_>>();
-                assert_eq!(admitted.len(), 2);
+                assert_eq!(admitted.len(), 1);
                 assert!(polymarket_v3_message(&admitted[0]).is_some());
-                let terminal = polymarket_metadata_common_rows_from_event(&admitted[1].event)
-                    .unwrap()
-                    .remove(0);
-                assert_eq!(
-                    terminal.metadata_row_kind,
-                    PolymarketMetadataRowKind::ResolutionTerminalWs
-                );
-                let deferred = deferred_ingress_facts(&stats, "polymarket");
-                assert_eq!(deferred.len(), 2);
+                assert_eq!(deferred_ingress_facts(&stats, "polymarket").len(), 3);
                 resume_tx.send(()).unwrap();
             }
         )
@@ -9116,6 +9206,8 @@ async fn polymarket_context_install_pre_subscription_failure_restores_pending_on
         next: None,
     };
     let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+        owners: Vec::new(),
+        ws_claims: BTreeMap::new(),
         fixed_identities: RecoveredPolymarketFixedIdentities::default(),
         pending: vec![recovered_pending_for_test(
             &pending_market,
@@ -9394,6 +9486,8 @@ async fn switch_subscription_error_commits_candidate_or_new_next_authority() {
     let pending_received_at_utc_ms = pending.start_ts_s.saturating_mul(1_000).saturating_add(1);
     refresh_test_discovery_evidence(&mut pending, pending_received_at_utc_ms);
     let pending_context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+        owners: Vec::new(),
+        ws_claims: BTreeMap::new(),
         fixed_identities: RecoveredPolymarketFixedIdentities::default(),
         pending: vec![recovered_pending_for_test(
             &pending,
@@ -9704,6 +9798,8 @@ async fn pending_only_rollover_terminal_before_ack_commits_snapshot_and_retains_
     let fresh_current = next_market_for_test(&pending_market);
     let old_fixed_at_utc_ms = now_ms().saturating_sub(1_000);
     let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+        owners: Vec::new(),
+        ws_claims: BTreeMap::new(),
         fixed_identities: RecoveredPolymarketFixedIdentities::default(),
         pending: vec![recovered_pending_for_test(
             &pending_market,
@@ -10091,6 +10187,8 @@ async fn pending_only_expired_current_then_recovered_next_uses_monotonic_snapsho
         .saturating_add(1);
     refresh_test_discovery_evidence(&mut pending_market, pending_received_at_utc_ms);
     let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
+        owners: Vec::new(),
+        ws_claims: BTreeMap::new(),
         fixed_identities: RecoveredPolymarketFixedIdentities::default(),
         pending: vec![recovered_pending_for_test(
             &pending_market,
@@ -13719,7 +13817,7 @@ fn polymarket_terminal_post_batch_rejects_future_post_without_consuming_sequence
         platform_timestamp_utc_ms: scheduled_at_utc_ms,
         winning_asset_id: identity.up_asset_id.clone(),
         winning_outcome: "Up".to_owned(),
-        raw_day_ticket: accepted_raw_day_ticket_for_sync_test(scheduled_at_utc_ms),
+        raw_day_ticket: Some(accepted_raw_day_ticket_for_sync_test(scheduled_at_utc_ms)),
     };
     let mut pending = PendingPolymarketResolution::new(identity.clone(), Some(evidence.clone()));
     pending.in_flight_ordinal = Some(1);
@@ -14078,4 +14176,214 @@ async fn polymarket_invalid_market_resolved_fails_before_v3_admission() {
         rx.try_recv(),
         Err(mpsc::error::TryRecvError::Empty) | Err(mpsc::error::TryRecvError::Disconnected)
     ));
+}
+
+#[tokio::test]
+async fn accepted_claim_survives_stop_long_downtime_current_day_terminal_and_pruning() {
+    let mut discovery = anchor_discovery_now();
+    let start = (now_ms().div_euclid(UTC_DAY_MS) - 4) * UTC_DAY_MS;
+    let market = &mut discovery.current;
+    market.start_ts_s = start / 1_000;
+    market.end_ts_s = market.start_ts_s + 300;
+    market.candidate_start_ts_s = market.start_ts_s;
+    market.candidate_end_ts_s = market.end_ts_s;
+    market.slug = format!("btc-updown-5m-{}", market.start_ts_s);
+    refresh_test_discovery_evidence(market, start - 2_000);
+    discovery.next = None;
+    let market = discovery.current.clone();
+    // The prefetched owner can receive its source before its own start.
+    let receive = start - 1;
+    let collector = CollectorIdentity {
+        host_id: "collector-test".to_owned(),
+        region: "local-test".to_owned(),
+    };
+    let stats = Arc::new(SourceQueueBackpressureStats::default());
+    let gate = install_active_raw_day_gate(&stats, receive).await;
+    let (tx, mut rx) = mpsc::channel(8);
+    let sink = SourceEventSink {
+        tx,
+        gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+        source_queue_backpressure: stats,
+        inflight_budget: InflightBudget::new(),
+        enqueue_lock: Arc::new(AsyncMutex::new(())),
+    };
+    let mut context = PolymarketProcessingContext::new(discovery);
+    context.actor_now_utc_ms = receive + 1;
+    let snapshot =
+        polymarket_metadata_snapshot_row(&market, MarketRuntimeRole::Current, &collector).unwrap();
+    let mut snapshot_event = polymarket_metadata_raw_event(
+        PolymarketMarketMetadataV5Row::from_common(snapshot, None, None),
+    )
+    .unwrap();
+    stamp_source_admission(&mut snapshot_event, &sink).unwrap();
+    let WsMessage::MarketResolved(message) = market_resolved_message_for_test(&market, receive)
+    else {
+        unreachable!()
+    };
+    process_polymarket_market_resolved(
+        &message,
+        receive,
+        &mut context,
+        &sink,
+        &collector,
+        Instant::now(),
+        accepted_raw_day_ticket_from_gate_for_test(&gate, receive).await,
+    )
+    .await
+    .unwrap();
+    let admitted = rx.recv().await.unwrap();
+    let source = polymarket_v3_message(&admitted).unwrap().clone();
+    let original_payload = context.early_ws_claims[&market.slug]
+        .source_payload_json
+        .clone();
+    let original_digest = context.early_ws_claims[&market.slug]
+        .source_payload_sha256
+        .clone();
+    let mut runtime = polymarket_runtime_with_fence_messages_for_test(Vec::new()).await;
+    let mut tasks = JoinSet::new();
+    let (reply_tx, reply_rx) = oneshot::channel();
+    handle_polymarket_source_control(
+        PolymarketSourceControl::Fence {
+            stop_after_fence: true,
+            day_boundary_utc_ms: None,
+            resume_after_barrier: None,
+            reply: reply_tx,
+        },
+        &mut runtime,
+        &mut context,
+        &mut tasks,
+        &|| PolymarketTimelineNow {
+            utc_ms: receive + 1,
+            monotonic: TokioInstant::now(),
+        },
+        &sink,
+        &collector,
+        Instant::now(),
+    )
+    .await
+    .unwrap();
+    reply_rx.await.unwrap().unwrap();
+    assert!(rx.try_recv().is_err());
+    assert!(context.early_ws_claims.contains_key(&market.slug));
+
+    let root = tempdir().unwrap();
+    let source_day = utc_day_string_from_ms(receive).unwrap();
+    let source_root = root
+        .path()
+        .join("training/typed_raw")
+        .join(format!("utc_day={source_day}"));
+    let mut metadata_writer = TypedParquetSegmentWriter::create_for_typed_source(
+        &source_root.join("source_kind=polymarket_market_metadata"),
+        "metadata-01",
+        POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION,
+        "polymarket_market_metadata",
+    )
+    .unwrap();
+    write_polymarket_metadata_event(
+        &mut metadata_writer,
+        &snapshot_event,
+        owned_event_bytes(&snapshot_event) as u64,
+    )
+    .unwrap();
+    metadata_writer.finalize().unwrap();
+    let mut source_writer = TypedParquetSegmentWriter::create_for_typed_source(
+        &source_root.join("source_kind=polymarket_market"),
+        "source-01",
+        POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,
+        "polymarket_market",
+    )
+    .unwrap();
+    source_writer
+        .write_polymarket_orderbook_v3_messages(
+            std::slice::from_ref(&source),
+            &mut PolymarketOrderbookV3WriteSequenceState::default(),
+        )
+        .unwrap();
+    source_writer.finalize().unwrap();
+    let early_recovery = restore_polymarket_resolution_recovery(root.path(), receive + 1).unwrap();
+    assert!(early_recovery.pending.is_empty());
+    assert_eq!(early_recovery.owners.len(), 1);
+    let early_context = PolymarketProcessingContext::from_recovery(early_recovery)
+        .unwrap()
+        .unwrap();
+    assert!(early_context.early_ws_claims.contains_key(&market.slug));
+    assert!(early_context.current.is_some() || early_context.next.is_some());
+    let recovery = restore_polymarket_resolution_recovery(root.path(), now_ms()).unwrap();
+    let recovered_claim = &recovery.ws_claims[&market.slug];
+    assert_eq!(recovered_claim.source_payload_json, original_payload);
+    assert_eq!(recovered_claim.source_payload_sha256, original_digest);
+    assert_eq!(
+        recovered_claim.collector_admission_sequence,
+        source.envelope.collector_admission_sequence
+    );
+    assert_eq!(
+        recovered_claim.collector_admission_time_utc_ms,
+        source.envelope.collector_admission_time_utc_ms
+    );
+    assert_eq!(recovery.pending.len(), 1);
+    let mut recovered = PolymarketProcessingContext::from_recovery(recovery)
+        .unwrap()
+        .unwrap();
+    let stats = Arc::new(SourceQueueBackpressureStats::default());
+    install_active_raw_day_gate(&stats, now_ms()).await;
+    let (tx, mut rx) = mpsc::channel(4);
+    let sink = SourceEventSink {
+        tx,
+        gaps: Arc::new(Mutex::new(SourceGapStore::default())),
+        source_queue_backpressure: stats,
+        inflight_budget: InflightBudget::new(),
+        enqueue_lock: Arc::new(AsyncMutex::new(())),
+    };
+    let applied = now_ms();
+    finalize_polymarket_ready_pending_while_paused(
+        &|| PolymarketTimelineNow {
+            utc_ms: applied,
+            monotonic: TokioInstant::now(),
+        },
+        &mut recovered,
+        &sink,
+        &collector,
+        Instant::now(),
+    )
+    .await
+    .unwrap();
+    assert!(recovered.pending.is_empty());
+    let terminal = rx.recv().await.unwrap();
+    let terminal_event = polymarket_lifecycle_metadata_event(&terminal).unwrap();
+    let row = polymarket_metadata_common_rows_from_event(terminal_event)
+        .unwrap()
+        .remove(0);
+    assert_eq!(row.timestamp_received, applied);
+    assert_eq!(row.source_evidence_received_at_utc, Some(receive));
+    assert!(row.collector_admission_time_utc_ms >= applied);
+    let current_day = utc_day_string_from_ms(applied).unwrap();
+    assert_ne!(source_day, current_day);
+    let target = root
+        .path()
+        .join("training/typed_raw")
+        .join(format!("utc_day={current_day}"))
+        .join("source_kind=polymarket_market_metadata");
+    let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
+        &target,
+        "metadata-01",
+        POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION,
+        "polymarket_market_metadata",
+    )
+    .unwrap();
+    write_polymarket_metadata_event(
+        &mut writer,
+        terminal_event,
+        owned_event_bytes(terminal_event) as u64,
+    )
+    .unwrap();
+    writer.finalize().unwrap();
+    for prune in [false, true] {
+        if prune {
+            fs::remove_dir_all(&source_root).unwrap();
+        }
+        let recovered = restore_polymarket_resolution_recovery(root.path(), now_ms()).unwrap();
+        assert!(recovered.pending.is_empty());
+        assert!(recovered.owners.is_empty());
+        assert!(recovered.ws_claims.is_empty());
+    }
 }

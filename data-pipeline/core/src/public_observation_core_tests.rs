@@ -624,13 +624,17 @@ fn whole_array_and_same_millisecond_messages_keep_steps_and_delayed_materializat
 fn terminal_both_orders_and_identity_last_close_once_with_real_direct_anchors() {
     for order in [[0, 1, 2], [1, 0, 2], [2, 1, 0]] {
         let mut core = core();
+        let mut metadata = terminal_metadata_row(&market());
+        metadata.timestamp_received += 86_400_000;
+        metadata.collector_admission_time_utc_ms += 86_400_000;
+        metadata.row_evidence_validation_completed_at_utc = Some(metadata.timestamp_received);
+        metadata.lifecycle_applied_at_utc = Some(metadata.timestamp_received);
+        metadata.runtime_role_applied_at_utc = Some(metadata.timestamp_received);
         let inputs = [
             meta(0),
             record(
                 0,
-                TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(
-                    terminal_metadata_row(&market()),
-                ))),
+                TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(metadata))),
             ),
             record(
                 0,
@@ -695,8 +699,8 @@ fn pending_duplicate_error_precedes_limit_end_is_unpaired_and_abort_is_not_eof()
     core.header.max_pending_ws_terminals = 1;
     let first = record(
         0,
-        TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(terminal_orderbook_row(
-            &market(),
+        TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(
+            terminal_metadata_row(&market()),
         ))),
     );
     assert!(push(&mut core, &first).closed_groups.is_empty());

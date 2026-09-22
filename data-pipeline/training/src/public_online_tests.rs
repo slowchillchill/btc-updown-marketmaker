@@ -448,7 +448,7 @@ async fn seven_source_objects_and_new_pm_epoch_keep_existing_business_semantics(
 }
 
 #[tokio::test]
-async fn unpaired_terminal_end_preserves_original_core_error_and_no_normal_prefix() {
+async fn source_only_end_preserves_an_unclosed_market_and_normal_prefix() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("record");
     let (client, server) = UnixStream::pair().unwrap();
@@ -467,26 +467,27 @@ async fn unpaired_terminal_end_preserves_original_core_error_and_no_normal_prefi
             winning_outcome: "UP".into(),
         },
     );
+    let mut observed = Vec::new();
     let (result, ()) = tokio::join!(
-        consume_public_online_v1(client, &root, config(1, 1), |_| Ok(())),
+        consume_public_online_v1(client, &root, config(1, 1), |applied| {
+            observed.push(applied.clone());
+            Ok(())
+        }),
         send_rows(server, vec![fixture::meta(0), terminal], "paper")
     );
-    let error = result.unwrap_err();
-    let failure = error.downcast_ref::<PublicOnlineFailureV1>().unwrap();
-    assert_eq!(failure.measurements.applied_inputs, 2);
-    assert!(
-        failure.reason.contains("Unpaired") || failure.reason.contains("未配对"),
-        "{}",
-        failure.reason
-    );
-    assert!(
-        !failure
-            .measurements
-            .stable_prefix
-            .as_ref()
-            .unwrap()
-            .normal_end
-    );
+    let completion = result.unwrap();
+    assert_eq!(completion.measurements.applied_inputs, 3);
+    assert!(completion.committed_prefix.normal_end);
+    for applied in observed {
+        for group in applied.closed_groups {
+            assert!(
+                group
+                    .observations
+                    .iter()
+                    .all(|observation| observation.terminal.value.is_none())
+            );
+        }
+    }
 }
 
 #[tokio::test]

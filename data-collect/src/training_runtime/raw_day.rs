@@ -1911,14 +1911,14 @@ impl RawDayGate {
         self: &Arc<Self>,
         parent: &RawDayAcceptedTicket,
         recv_time_utc_ms: i64,
-    ) -> Result<RawDayAcceptedTicket> {
+    ) -> Result<Option<RawDayAcceptedTicket>> {
         let event_day = utc_day_string_from_ms(recv_time_utc_ms)
             .ok_or_else(|| invalid_data("UTC day unavailable for derived Polymarket event"))?;
         let ordinary = self
             .accept_unadmitted_event_ticket("polymarket", recv_time_utc_ms)
             .await?;
         if let Some(ticket) = ordinary {
-            return Ok(ticket);
+            return Ok(Some(ticket));
         }
         let state = self.current_state();
         let parent_matches_state = match (parent, &state) {
@@ -1962,10 +1962,7 @@ impl RawDayGate {
             _ => false,
         };
         if !parent_matches_state {
-            return Err(invalid_data(format!(
-                "accepted parent ticket cannot authorize derived Polymarket event: event_day={event_day} parent={parent:?} state={state:?}"
-            ))
-            .into());
+            return Ok(None);
         }
 
         match self.prepared_runtime_exit() {
@@ -1975,7 +1972,7 @@ impl RawDayGate {
                     RuntimeCloseCause::OperatorStop | RuntimeCloseCause::RunDeadline
                 ) && event_day == close.identity.utc_day =>
             {
-                Ok(parent.clone())
+                Ok(Some(parent.clone()))
             }
             Some(PreparedRuntimeExit::Rollover(exit))
                 if matches!(
@@ -1995,16 +1992,13 @@ impl RawDayGate {
                         RawDayAcceptedTicket::HotSession => false,
                     } =>
             {
-                Ok(RawDayAcceptedTicket::Defer(RawDayDeferredEpoch {
+                Ok(Some(RawDayAcceptedTicket::Defer(RawDayDeferredEpoch {
                     utc_day: exit.close.next_utc_day,
                     old_generation: exit.close.generation,
                     expected_generation: exit.close.next_generation,
-                }))
+                })))
             }
-            exit => Err(invalid_data(format!(
-                "controlled cutoff cannot authorize derived Polymarket event: event_day={event_day} parent={parent:?} state={state:?} exit={exit:?}"
-            ))
-            .into()),
+            _ => Ok(None),
         }
     }
 

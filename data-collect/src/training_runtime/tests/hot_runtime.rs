@@ -369,6 +369,7 @@ async fn accepted_hot_tickets_survive_midnight_cutoff_and_keep_http_and_terminal
     let terminal_metadata = admission
         .accept_derived_polymarket_event_ticket(&ws, midnight + 6)
         .await
+        .unwrap()
         .unwrap();
     assert!(matches!(
         admission

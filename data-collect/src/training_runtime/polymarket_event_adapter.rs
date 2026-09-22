@@ -807,7 +807,7 @@ pub(super) fn polymarket_resolution_terminal_ws_row(
         &pending.identity,
         PolymarketMetadataRowKind::ResolutionTerminalWs,
         PolymarketMetadataOrigin::MarketResolvedWs,
-        evidence.source_received_at_utc_ms,
+        applied_at_utc_ms,
         MarketLifecycleState::Retired,
         MarketRuntimeRole::None,
         collector_identity,

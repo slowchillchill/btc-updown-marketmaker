@@ -1,3 +1,5 @@
+use serde_json::json;
+use sha2::{Digest as _, Sha256};
 use std::error::Error;
 use std::io;
 use std::sync::Arc;
@@ -1098,16 +1100,7 @@ fn decode_event(
                     "winning_outcome",
                 ],
             )?;
-            PolymarketOrderbookV3Event::MarketResolved(PolymarketMarketResolvedV3 {
-                clob_market_id: required_string_column(batch, row, "clob_market_id")?,
-                question: optional_string_column(batch, row, "question")?,
-                description: optional_string_column(batch, row, "description")?,
-                asset_ids: required_string_list(batch, row, "asset_ids")?,
-                outcomes: required_string_list(batch, row, "outcomes")?,
-                event_message: optional_event_message(batch, row)?,
-                winning_asset_id: required_string_column(batch, row, "winning_asset_id")?,
-                winning_outcome: required_string_column(batch, row, "winning_outcome")?,
-            })
+            PolymarketOrderbookV3Event::MarketResolved(market_resolved_from_batch(batch, row)?)
         }
         _ => {
             return Err(invalid_data(format!(
@@ -1305,7 +1298,7 @@ fn required_string_list(batch: &RecordBatch, row: usize, name: &str) -> Result<V
         .collect()
 }
 
-fn optional_event_message(
+pub(crate) fn optional_event_message(
     batch: &RecordBatch,
     row: usize,
 ) -> Result<Option<PolymarketEventMessageV3>> {
@@ -1681,4 +1674,74 @@ fn list_of_utf8_field(name: &str) -> Field {
         DataType::List(Arc::new(Field::new_list_field(DataType::Utf8, false))),
         true,
     )
+}
+
+fn market_resolved_from_batch(
+    batch: &RecordBatch,
+    row: usize,
+) -> Result<PolymarketMarketResolvedV3> {
+    Ok(PolymarketMarketResolvedV3 {
+        clob_market_id: required_string_column(batch, row, "clob_market_id")?,
+        question: optional_string_column(batch, row, "question")?,
+        description: optional_string_column(batch, row, "description")?,
+        asset_ids: required_string_list(batch, row, "asset_ids")?,
+        outcomes: required_string_list(batch, row, "outcomes")?,
+        event_message: optional_event_message(batch, row)?,
+        winning_asset_id: required_string_column(batch, row, "winning_asset_id")?,
+        winning_outcome: required_string_column(batch, row, "winning_outcome")?,
+    })
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PolymarketMarketResolvedAdmissionEvidence {
+    pub(crate) source_evidence_payload_json: String,
+    pub(crate) source_evidence_raw_sha256: String,
+    pub(crate) platform_timestamp_utc_ms: i64,
+    pub(crate) winning_asset_id: String,
+    pub(crate) winning_outcome: String,
+}
+
+pub(crate) fn polymarket_market_resolved_admission_evidence(
+    market: &str,
+    slug: Option<&str>,
+    timestamp: Option<i64>,
+    resolved: &PolymarketMarketResolvedV3,
+) -> Result<PolymarketMarketResolvedAdmissionEvidence> {
+    let platform_timestamp_utc_ms = timestamp.ok_or_else(|| {
+        invalid_data("admitted Polymarket market_resolved is missing its platform timestamp")
+    })?;
+    let event_message = resolved.event_message.as_ref().map(|event_message| {
+        json!({
+            "id": event_message.id,
+            "ticker": event_message.ticker,
+            "slug": event_message.slug,
+            "title": event_message.title,
+            "description": event_message.description,
+        })
+    });
+    let source_evidence_payload_json = serde_json::to_string(&json!({
+        "event_type": "market_resolved",
+        "market": market,
+        "slug": slug,
+        "clob_market_id": resolved.clob_market_id,
+        "question": resolved.question,
+        "description": resolved.description,
+        "asset_ids": resolved.asset_ids,
+        "outcomes": resolved.outcomes,
+        "event_message": event_message,
+        "winning_asset_id": resolved.winning_asset_id,
+        "winning_outcome": resolved.winning_outcome,
+        "timestamp": platform_timestamp_utc_ms,
+    }))?;
+    let source_evidence_raw_sha256 = Sha256::digest(source_evidence_payload_json.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    Ok(PolymarketMarketResolvedAdmissionEvidence {
+        source_evidence_payload_json,
+        source_evidence_raw_sha256,
+        platform_timestamp_utc_ms,
+        winning_asset_id: resolved.winning_asset_id.clone(),
+        winning_outcome: resolved.winning_outcome.clone(),
+    })
 }

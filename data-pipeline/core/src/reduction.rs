@@ -2878,9 +2878,7 @@ fn terminal_conflict_reason(
     {
         return Ok(Some("POLYMARKET_TERMINAL_SOURCE_TIME_CONFLICT"));
     }
-    if metadata.source_evidence_received_at_utc != Some(orderbook.timestamp_received)
-        || metadata.timestamp_received != orderbook.timestamp_received
-    {
+    if metadata.source_evidence_received_at_utc != Some(orderbook.timestamp_received) {
         return Ok(Some("POLYMARKET_TERMINAL_RECEIVE_TIME_CONFLICT"));
     }
     if metadata.condition_id != market.condition_id.0

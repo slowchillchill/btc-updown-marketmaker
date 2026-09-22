@@ -300,10 +300,6 @@ pub enum CanonicalRunError {
         observed: usize,
         limit: usize,
     },
-    MissingWsTerminalMetadata {
-        epoch: String,
-        collector_admission_sequence: u64,
-    },
     UnpairedWsTerminalMetadata {
         count: usize,
     },
@@ -367,13 +363,6 @@ impl fmt::Display for CanonicalRunError {
             Self::RetainedReducerStateLimit { observed, limit } => write!(
                 formatter,
                 "归约器保留集合条目数 {observed} 超过上限 {limit}"
-            ),
-            Self::MissingWsTerminalMetadata {
-                epoch,
-                collector_admission_sequence,
-            } => write!(
-                formatter,
-                "MarketResolved 缺少对应 metadata：epoch={epoch}, sequence={collector_admission_sequence}"
             ),
             Self::UnpairedWsTerminalMetadata { count } => {
                 write!(formatter, "运行结束仍有 {count} 条 WS 终态 metadata 未配对")
@@ -1231,6 +1220,7 @@ struct PolymarketRunState {
     orderbook: Option<PolymarketReducer>,
     terminal: Option<PolymarketTerminalMerger>,
     pending_ws_terminals: BTreeMap<(String, u64), PolymarketMetadataInputV1>,
+    pending_ws_sources: BTreeMap<(String, u64), PolymarketOrderbookInputV1>,
 }
 
 fn validate_pending_ws_terminal_insert(
@@ -1259,15 +1249,19 @@ impl PolymarketRunState {
             orderbook: None,
             terminal: None,
             pending_ws_terminals: BTreeMap::new(),
+            pending_ws_sources: BTreeMap::new(),
         }
     }
 
     fn retained_state_entries(&self) -> usize {
-        self.pending_ws_terminals.len().saturating_add(
-            self.orderbook
-                .as_ref()
-                .map_or(0, PolymarketReducer::retained_state_entries),
-        )
+        self.pending_ws_terminals
+            .len()
+            .saturating_add(self.pending_ws_sources.len())
+            .saturating_add(
+                self.orderbook
+                    .as_ref()
+                    .map_or(0, PolymarketReducer::retained_state_entries),
+            )
     }
 
     fn initialize(
@@ -1324,6 +1318,14 @@ impl PolymarketRunState {
                 )
             })?;
             let key = (epoch.clone(), collector_admission_sequence);
+            if let Some(source) = self.pending_ws_sources.remove(&key) {
+                let batch = self
+                    .terminal
+                    .as_mut()
+                    .expect("身份初始化同时建立终态合并器")
+                    .merge_ws_terminal(input, source)?;
+                return sink.push_polymarket_batch(batch);
+            }
             validate_pending_ws_terminal_insert(
                 self.pending_ws_terminals.contains_key(&key),
                 self.pending_ws_terminals.len(),
@@ -1377,12 +1379,15 @@ impl PolymarketRunState {
                 input.row.source_sequence_epoch_id.clone(),
                 input.row.collector_admission_sequence,
             );
-            let metadata = self.pending_ws_terminals.remove(&key).ok_or_else(|| {
-                CanonicalRunError::MissingWsTerminalMetadata {
-                    epoch: key.0.clone(),
-                    collector_admission_sequence: key.1,
+            let Some(metadata) = self.pending_ws_terminals.remove(&key) else {
+                if self.pending_ws_sources.insert(key.clone(), input).is_some() {
+                    return Err(CanonicalRunError::DuplicateWsTerminalClaim {
+                        epoch: key.0,
+                        collector_admission_sequence: key.1,
+                    });
                 }
-            })?;
+                return Ok(());
+            };
             let batch = self
                 .terminal
                 .as_mut()
@@ -1599,6 +1604,130 @@ pub(crate) fn reduce_frozen_input_with_capture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ws_source_and_next_day_terminal_pair_in_either_input_order() {
+        use data_pipeline_core::public_input::{DptIngressV1, TypedRawRowV2};
+        use data_pipeline_core::typed_raw::*;
+        let DptIngressV1::Message {
+            row: TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(snapshot)),
+            ..
+        } = crate::public_recording::tests::meta(0).ingress
+        else {
+            panic!("snapshot")
+        };
+        let DptIngressV1::Message {
+            row: TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(source)),
+            ..
+        } = crate::public_recording::tests::pm(
+            1,
+            2,
+            31_000,
+            PolymarketOrderbookEvent::MarketResolved {
+                clob_market_id: snapshot.clob_market_id.clone(),
+                question: None,
+                description: None,
+                asset_ids: vec!["20".into(), "3".into()],
+                outcomes: vec!["Up".into(), "Down".into()],
+                event_message: None,
+                winning_asset_id: "20".into(),
+                winning_outcome: "Up".into(),
+            },
+        )
+        .ingress
+        else {
+            panic!("source")
+        };
+        let mut terminal = (*snapshot).clone();
+        terminal.metadata_row_kind = PolymarketMetadataRowKind::ResolutionTerminalWs;
+        terminal.metadata_origin = PolymarketMetadataOrigin::MarketResolvedWs;
+        terminal.timestamp_received = 86_431_000;
+        terminal.collector_admission_time_utc_ms = 86_431_001;
+        terminal.collector_admission_sequence = 3;
+        terminal.market_lifecycle_state = MetadataMarketLifecycleState::Retired;
+        terminal.market_runtime_role = MetadataMarketRuntimeRole::None;
+        terminal.market_lifecycle_transition =
+            Some(MetadataMarketLifecycleTransition::ActiveToRetired);
+        terminal.market_runtime_role_transition =
+            Some(MetadataMarketRuntimeRoleTransition::ResolutionPendingToNone);
+        terminal.lifecycle_applied_at_utc = Some(86_431_000);
+        terminal.runtime_role_applied_at_utc = Some(86_431_000);
+        terminal.source_evidence_origin = Some(MetadataSourceEvidenceOrigin::MarketResolvedWs);
+        terminal.source_evidence_event_type = Some(MetadataSourceEvidenceEventType::MarketResolved);
+        terminal.source_evidence_channel = Some(MetadataSourceEvidenceChannel::Market);
+        terminal.source_evidence_received_at_utc = Some(source.timestamp_received);
+        terminal.row_evidence_validation_completed_at_utc = Some(86_430_999);
+        terminal.source_evidence_payload_json = None;
+        terminal.ws_platform_timestamp_raw = source.timestamp.map(|value| value.to_string());
+        terminal.ws_platform_timestamp_utc = source.timestamp;
+        terminal.winning_asset_id = Some("20".into());
+        terminal.winning_outcome = Some("Up".into());
+        terminal.closed = None;
+        terminal.accepting_orders = None;
+        terminal.outcome_prices_raw = None;
+        terminal.resolution_evidence_source =
+            Some(MetadataResolutionEvidenceSource::MarketResolvedWs);
+        terminal.terminal_claim_owner = Some(MetadataTerminalClaimOwner::MarketResolvedWs);
+        terminal.resolution_followup_status = Some(MetadataResolutionFollowupStatus::TerminalWs);
+        terminal.ws_claimant_source_sequence_epoch_id =
+            Some(source.source_sequence_epoch_id.clone());
+        terminal.ws_claimant_collector_admission_sequence =
+            Some(source.collector_admission_sequence);
+        let evidence = |row: &TypedRawRow| {
+            source_evidence_from_typed_raw(
+                row,
+                &Sha256Hex("a".repeat(64)),
+                &Sha256Hex("b".repeat(64)),
+            )
+            .unwrap()
+        };
+        for source_first in [true, false] {
+            let mut state = PolymarketRunState::new();
+            let mut sink = OutputSink::new(None);
+            let mut metrics = CanonicalRunMetrics::default();
+            state
+                .handle_metadata(
+                    PolymarketMetadataInputV1 {
+                        row: (*snapshot).clone(),
+                        evidence: evidence(&TypedRawRow::PolymarketMarketMetadata(
+                            snapshot.clone(),
+                        )),
+                    },
+                    "test-rule",
+                    16,
+                    &mut sink,
+                    &mut metrics,
+                )
+                .unwrap();
+            let before = sink.execution_market_events;
+            let source_input = PolymarketOrderbookInputV1 {
+                row: source.clone(),
+                evidence: evidence(&TypedRawRow::PolymarketOrderbook(source.clone())),
+            };
+            let terminal_input = PolymarketMetadataInputV1 {
+                row: terminal.clone(),
+                evidence: evidence(&TypedRawRow::PolymarketMarketMetadata(Box::new(
+                    terminal.clone(),
+                ))),
+            };
+            if source_first {
+                state.handle_orderbook(source_input, &mut sink).unwrap();
+                assert_eq!(sink.execution_market_events, before);
+                state
+                    .handle_metadata(terminal_input, "test-rule", 16, &mut sink, &mut metrics)
+                    .unwrap();
+            } else {
+                state
+                    .handle_metadata(terminal_input, "test-rule", 16, &mut sink, &mut metrics)
+                    .unwrap();
+                assert_eq!(sink.execution_market_events, before);
+                state.handle_orderbook(source_input, &mut sink).unwrap();
+            }
+            assert!(state.pending_ws_sources.is_empty());
+            assert!(state.pending_ws_terminals.is_empty());
+            assert!(sink.execution_market_events > before);
+        }
+    }
 
     #[test]
     fn temporary_input_keeps_legacy_row_digest_and_wire_bytes() {
