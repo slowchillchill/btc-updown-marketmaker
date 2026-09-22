@@ -15,14 +15,6 @@ type R = EconomicRational;
 pub(crate) struct Pool {
     pub quantity: Decimal,
     pub cost: R,
-    pub contributors: Vec<Identity>,
-}
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct FixedPairedAllocationV1 {
-    pub source_trade_identity: Identity,
-    pub quantity_shares: ExactDecimal,
-    pub principal_cost_pusd: [ExactRationalV1; 2],
-    pub contribution_refs: [Vec<Identity>; 2],
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Trade {
@@ -90,7 +82,6 @@ pub(crate) struct EconomicsState {
     pub trades: BTreeMap<Identity, Trade>,
     pub days: BTreeMap<(RebateKindV1, i64), RebateDay>,
     pub costs: BTreeMap<Identity, Cost>,
-    pub allocations: Vec<FixedPairedAllocationV1>,
     // 经济效果可能先于首次 trade 详情公开；只保留尚待关联的原身份。
     pub unapportioned_trades: BTreeMap<Identity, (bool, Decimal)>,
 }
@@ -100,11 +91,27 @@ pub(crate) struct EconomicsPatch {
     pub cash: Option<CashAttribution>,
     pub markets: Vec<(String, Market)>,
     pub trades: Vec<(Identity, Trade)>,
-    pub days: Vec<((RebateKindV1, i64), RebateDay)>,
+    #[serde(alias = "days")]
+    pub day_updates: Vec<((RebateKindV1, i64), RebateDayUpdate)>,
     pub costs: Vec<(Identity, Cost)>,
-    pub allocations: Vec<FixedPairedAllocationV1>,
     pub unapportioned_trades: Vec<(Identity, Option<(bool, Decimal)>)>,
 }
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) enum RebateDayUpdate {
+    Contributions {
+        additions: Vec<(Identity, RebateContributionFactV1<Identity>)>,
+    },
+    Finalized {
+        result: (Identity, RebateDayResultV1<Identity>),
+    },
+    Paid {
+        paid: Decimal,
+    },
+    // 旧持久补丁保存完整日状态；冷恢复直接移动替换，不把历史误作新增贡献。
+    #[serde(untagged)]
+    Existing(RebateDay),
+}
+
 fn decimal(value: &ExactDecimal) -> Result<Decimal, LedgerErrorV1> {
     Decimal::from_str_exact(&value.0).map_err(|_| LedgerErrorV1::DecimalParse {
         field: "economic attribution",
@@ -165,11 +172,7 @@ impl Market {
         self.pi = pi;
         Ok(())
     }
-    fn apply_success(
-        &mut self,
-        trade: &Trade,
-        patch: &mut EconomicsPatch,
-    ) -> Result<(), LedgerErrorV1> {
+    fn apply_success(&mut self, trade: &Trade) -> Result<(), LedgerErrorV1> {
         let assets = self
             .assets
             .as_ref()
@@ -185,7 +188,6 @@ impl Market {
         let pool = &mut self.pools[leg];
         pool.quantity = add(pool.quantity, q)?;
         pool.cost = pool.cost.add(&c);
-        pool.contributors.push(trade.fact.trade_identity.clone());
         let quantity = self.pools[0].quantity.min(self.pools[1].quantity);
         if quantity > Decimal::ZERO {
             let costs: [R; 2] = std::array::from_fn(|i| {
@@ -193,23 +195,11 @@ impl Market {
                     .mul(&self.pools[i].cost)
                     .divided_by(&R::from_decimal(self.pools[i].quantity))
             });
-            patch.allocations.push(FixedPairedAllocationV1 {
-                source_trade_identity: trade.fact.trade_identity.clone(),
-                quantity_shares: exact(quantity),
-                principal_cost_pusd: [costs[0].public(), costs[1].public()],
-                contribution_refs: [
-                    self.pools[0].contributors.clone(),
-                    self.pools[1].contributors.clone(),
-                ],
-            });
             self.paired = add(self.paired, quantity)?;
             for (i, cost) in costs.into_iter().enumerate() {
                 self.paired_cost[i] = self.paired_cost[i].add(&cost);
                 self.pools[i].quantity -= quantity;
                 self.pools[i].cost = self.pools[i].cost.sub(&cost);
-                if self.pools[i].quantity.is_zero() {
-                    self.pools[i].contributors.clear();
-                }
             }
         }
         Ok(())
@@ -424,22 +414,18 @@ impl EconomicsState {
             )?;
             market.executed_fees[r] = add(market.executed_fees[r], trade.net_fee)?;
         }
-        Self::success(&mut market, &mut trade, patch)?;
+        Self::success(&mut market, &mut trade)?;
         patch.markets.push((fact.condition_id.0.clone(), market));
         patch.trades.push((fact.trade_identity.clone(), trade));
         Ok(())
     }
-    fn success(
-        market: &mut Market,
-        trade: &mut Trade,
-        patch: &mut EconomicsPatch,
-    ) -> Result<(), LedgerErrorV1> {
+    fn success(market: &mut Market, trade: &mut Trade) -> Result<(), LedgerErrorV1> {
         if trade.economic_applied
             && !trade.success_applied
             && trade.fact.economic_disposition
                 == SourceNeutralTradeEconomicDispositionV1::FinalSuccess
         {
-            market.apply_success(trade, patch)?;
+            market.apply_success(trade)?;
             trade.success_applied = true;
         }
         Ok(())
@@ -493,7 +479,7 @@ impl EconomicsState {
                                     let r = role(trade.fact.liquidity_role);
                                     market.executed_fees[r] = add(market.executed_fees[r], fee - trade.net_fee)?;
                                     trade.net_fee = fee;
-                                    Self::success(&mut market, &mut trade, patch)?;
+                                    Self::success(&mut market, &mut trade)?;
                                     patch.markets.push((trade.fact.condition_id.0.clone(), market));
                                     patch.trades.push((trade_identity.clone(), trade));
                                 } else {
@@ -599,28 +585,27 @@ impl EconomicsState {
                     status,
                     SourceNeutralMakerRebateAccrualStatusV1::UnknownIncomplete
                 );
-                let mut days = BTreeMap::new();
+                let mut days: BTreeMap<_, Vec<(Identity, RebateContributionFactV1<Identity>)>> =
+                    BTreeMap::new();
                 for contribution in contributions {
                     let key = (contribution.kind, contribution.attribution_day_start_utc_ms);
-                    let day = days.entry(key).or_insert_with(|| {
-                        self.days.get(&key).cloned().unwrap_or(RebateDay {
-                            kind: key.0,
-                            day: key.1,
-                            contributions: Vec::new(),
-                            result: None,
-                            paid: Decimal::ZERO,
-                        })
-                    });
-                    if !day
-                        .contributions
-                        .iter()
+                    let additions = days.entry(key).or_default();
+                    if !self
+                        .days
+                        .get(&key)
+                        .into_iter()
+                        .flat_map(|day| &day.contributions)
+                        .chain(additions.iter())
                         .any(|(_, c)| c.trade_identity == contribution.trade_identity)
                     {
-                        day.contributions
-                            .push((identity.clone(), contribution.clone()));
+                        additions.push((identity.clone(), contribution.clone()));
                     }
                 }
-                patch.days.extend(days);
+                patch.day_updates.extend(
+                    days.into_iter().map(|(key, additions)| {
+                        (key, RebateDayUpdate::Contributions { additions })
+                    }),
+                );
                 patch.markets.push((condition_id.0.clone(), market));
             }
             SourceNeutralSettlementLifecycleResultV2::Resolved(fact) => {
@@ -723,37 +708,31 @@ impl EconomicsState {
             }
             SourceNeutralSettlementLifecycleResultV2::Contribution(fact) => {
                 let key = (fact.kind, fact.attribution_day_start_utc_ms);
-                let mut day = self.days.get(&key).cloned().unwrap_or(RebateDay {
-                    kind: key.0,
-                    day: key.1,
-                    contributions: Vec::new(),
-                    result: None,
-                    paid: Decimal::ZERO,
-                });
-                if !day
-                    .contributions
-                    .iter()
-                    .any(|(_, c)| c.trade_identity == fact.trade_identity)
-                {
-                    day.contributions.push((identity.clone(), fact.clone()));
-                }
-                patch.days.push((key, day));
+                let additions = if self.days.get(&key).is_some_and(|day| {
+                    day.contributions
+                        .iter()
+                        .any(|(_, c)| c.trade_identity == fact.trade_identity)
+                }) {
+                    Vec::new()
+                } else {
+                    vec![(identity.clone(), fact.clone())]
+                };
+                patch
+                    .day_updates
+                    .push((key, RebateDayUpdate::Contributions { additions }));
             }
             SourceNeutralSettlementLifecycleResultV2::DayFinalized(fact) => {
                 let key = (fact.kind, fact.attribution_day_start_utc_ms);
-                let mut day = self.days.get(&key).cloned().unwrap_or(RebateDay {
-                    kind: key.0,
-                    day: key.1,
-                    contributions: Vec::new(),
-                    result: None,
-                    paid: Decimal::ZERO,
-                });
-                if day.result.is_none() {
+                let day = self.days.get(&key);
+                if day.is_none_or(|day| day.result.is_none()) {
+                    let contributions = day
+                        .map(|day| day.contributions.as_slice())
+                        .unwrap_or_default();
                     let total = R::from_decimal(decimal(&fact.accrued_pusd)?);
-                    if total.is_positive() && !day.contributions.is_empty() {
+                    if total.is_positive() && !contributions.is_empty() {
                         let payable = R::from_decimal(decimal(&fact.payable_pusd)?);
                         let mut changed = BTreeMap::new();
-                        for (_, contribution) in &day.contributions {
+                        for (_, contribution) in contributions {
                             let market = changed
                                 .entry(contribution.condition_id.0.clone())
                                 .or_insert_with(|| {
@@ -769,19 +748,25 @@ impl EconomicsState {
                         }
                         patch.markets.extend(changed);
                     }
-                    day.result = Some((identity.clone(), fact.clone()));
+                    patch.day_updates.push((
+                        key,
+                        RebateDayUpdate::Finalized {
+                            result: (identity.clone(), fact.clone()),
+                        },
+                    ));
                 }
-                patch.days.push((key, day));
             }
             SourceNeutralSettlementLifecycleResultV2::Payment(fact) => {
                 let key = (fact.kind, fact.attribution_day_start_utc_ms);
-                let mut day = self
-                    .days
+                self.days
                     .get(&key)
-                    .cloned()
                     .ok_or(LedgerErrorV1::NonEconomicRecord)?;
-                day.paid = decimal(&fact.paid_pusd)?;
-                patch.days.push((key, day));
+                patch.day_updates.push((
+                    key,
+                    RebateDayUpdate::Paid {
+                        paid: decimal(&fact.paid_pusd)?,
+                    },
+                ));
             }
         }
         Ok(())
@@ -793,9 +778,22 @@ impl EconomicsState {
         self.external_cash.extend(patch.external_cash);
         self.markets.extend(patch.markets);
         self.trades.extend(patch.trades);
-        self.days.extend(patch.days);
+        for (key, update) in patch.day_updates {
+            let day = self.days.entry(key).or_insert_with(|| RebateDay {
+                kind: key.0,
+                day: key.1,
+                contributions: Vec::new(),
+                result: None,
+                paid: Decimal::ZERO,
+            });
+            match update {
+                RebateDayUpdate::Contributions { additions } => day.contributions.extend(additions),
+                RebateDayUpdate::Finalized { result } => day.result = Some(result),
+                RebateDayUpdate::Paid { paid } => day.paid = paid,
+                RebateDayUpdate::Existing(previous) => *day = previous,
+            }
+        }
         self.costs.extend(patch.costs);
-        self.allocations.extend(patch.allocations);
         for (identity, value) in patch.unapportioned_trades {
             if let Some(value) = value {
                 self.unapportioned_trades.insert(identity, value);
@@ -896,9 +894,11 @@ pub struct LedgerEconomicReadV1<'a> {
     state: &'a EconomicsState,
 }
 impl LedgerWriterV1 {
-    pub fn economic_read(&self) -> Option<LedgerEconomicReadV1<'_>> {
-        let base = self.projection_v2()?;
-        let account = self.account.as_ref()?;
+    pub(crate) fn cash_balances(&self) -> Result<(Decimal, Decimal, Decimal), LedgerErrorV1> {
+        let account = self
+            .account
+            .as_ref()
+            .ok_or(LedgerErrorV1::AccountNotOpened)?;
         let pending = self.reservations.principal_pusd
             + self.reservations.immediate_fee_pusd
             + self.lifecycle.totals.platform_pending_principal_pusd
@@ -906,10 +906,19 @@ impl LedgerWriterV1 {
         let reserved = account.balances.principal_encumbrance_pusd
             + account.balances.immediate_taker_fee_encumbrance_pusd
             + pending;
+        Ok((
+            account.balances.available_pusd - pending,
+            self.economics.cash.maker_cash - reserved,
+            reserved,
+        ))
+    }
+    pub fn economic_read(&self) -> Option<LedgerEconomicReadV1<'_>> {
+        let base = self.projection_v2()?;
+        let (actual, maker, reserved) = self.cash_balances().ok()?;
         let cash = DualCashReadV1 {
-            actual_available_pusd: exact(account.balances.available_pusd - pending),
+            actual_available_pusd: exact(actual),
             actual_reserved_pusd: exact(reserved),
-            maker_available_pusd: exact(self.economics.cash.maker_cash - reserved),
+            maker_available_pusd: exact(maker),
             maker_reserved_pusd: exact(reserved),
         };
         Some(LedgerEconomicReadV1 {
@@ -932,9 +941,6 @@ impl LedgerEconomicReadV1<'_> {
     }
     pub fn residual_cash(&self) -> &ResidualCashReadV1 {
         &self.residual
-    }
-    pub fn paired_allocations(&self) -> impl Iterator<Item = &FixedPairedAllocationV1> {
-        self.state.allocations.iter()
     }
     pub fn settlement_costs(&self) -> impl Iterator<Item = SettlementCostReadV1<'_>> {
         self.state.costs.values().map(|cost| SettlementCostReadV1 {

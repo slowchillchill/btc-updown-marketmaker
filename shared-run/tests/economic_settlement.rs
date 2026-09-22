@@ -657,9 +657,6 @@ async fn real_partial_makers_fix_average_cost_and_nonterminating_fraction() {
         }
         assert!(shared.apply_closed().unwrap());
         let read = shared.ledger().economic_read().unwrap();
-        let allocations: Vec<_> = read.paired_allocations().collect();
-        assert_eq!(allocations.len(), 1);
-        assert_eq!(allocations[0].quantity_shares.0, "1");
         let m = read.market_totals().next().unwrap();
         let up = m
             .assets
@@ -668,11 +665,9 @@ async fn real_partial_makers_fix_average_cost_and_nonterminating_fraction() {
             .iter()
             .position(|a| a.token_id.0 == UP_TOKEN_ID)
             .unwrap();
-        assert_eq!(
-            allocations[0].principal_cost_pusd[up],
-            if fractional { r("1", "3") } else { r("1", "2") }
-        );
-        assert_eq!(allocations[0].principal_cost_pusd[1 - up], r("1", "5"));
+        assert_eq!(m.paired_shares.0, "1");
+        assert_eq!(m.success_principal_cost_pusd[up], r("1", "1"));
+        assert_eq!(m.success_principal_cost_pusd[1 - up], r("1", "5"));
         assert_eq!(
             m.confirmed_net_pnl_pusd,
             if fractional {
@@ -843,7 +838,153 @@ async fn actual_two_market_maker_day_allocates_exact_contribution_ratios() {
         assert_eq!(market.confirmed_net_pnl_pusd, expected);
         assert_eq!(market.rebates[0].confirmed_unpaid_pusd, r("0", "1"));
     }
+    let expected_markets: Vec<_> = read.market_totals().collect();
     driver.stop_and_drain().unwrap();
+    let restored = LedgerWriterV1::open_durable(temp.path().join("ledger")).unwrap();
+    let read = restored.economic_read().unwrap();
+    assert_eq!(read.market_totals().collect::<Vec<_>>(), expected_markets);
+    let day = read
+        .rebate_days()
+        .find(|day| day.kind == RebateKindV1::Maker)
+        .unwrap();
+    let mut contributions: Vec<_> = day
+        .contributions
+        .iter()
+        .map(|c| c.contribution_pusd.0.as_str())
+        .collect();
+    contributions.sort();
+    assert_eq!(contributions, ["0.50002", "0.50004"]);
+    assert_eq!(day.amounts.paid_pusd, r("1", "1"));
+    assert_eq!(day.amounts.locked_remainder_pusd, r("3", "50000"));
+    assert_old_day_snapshots_accept_new_payment(
+        &temp.path().join("ledger"),
+        &temp.path().join("legacy-ledger"),
+    );
+}
+
+// 从本场景真实落盘的交易生成旧 days 完整快照布局，保留实际来源与经济字段。
+// 第一次支付及其后续记录继续使用当前增量布局，验证旧前缀可继续读入新记录。
+fn assert_old_day_snapshots_accept_new_payment(
+    current_root: &std::path::Path,
+    legacy_root: &std::path::Path,
+) {
+    use std::io::Write;
+    let mut manifests: Vec<_> = std::fs::read_dir(current_root)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| {
+            path.file_name()
+                .unwrap()
+                .to_string_lossy()
+                .ends_with(".manifest.json")
+        })
+        .collect();
+    manifests.sort();
+    let mut days = std::collections::BTreeMap::<String, serde_json::Value>::new();
+    let mut old_prefix = Vec::new();
+    let mut new_tail = Vec::new();
+    let mut snapshots = 0;
+    let mut payment_seen = false;
+    for manifest in manifests {
+        let reference: LedgerSealedSegmentReferenceV1 =
+            serde_json::from_slice(&std::fs::read(manifest).unwrap()).unwrap();
+        ::execution_normalization::record_file::visit(
+            std::path::Path::new(&reference.location), "ledger_arrow_parquet_v1", |(seq, kind, bytes)| {
+                let mut body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                if let Some(patch) = body.get_mut("economics").and_then(|v| v.as_object_mut()) {
+                    let updates = patch["day_updates"].as_array().unwrap();
+                    payment_seen |= updates.iter().any(|entry| entry[1].get("Paid").is_some());
+                    if !payment_seen {
+                        let updates = patch.remove("day_updates").unwrap();
+                        let mut full_days = Vec::new();
+                        for entry in updates.as_array().unwrap() {
+                            let key = &entry[0];
+                            let update = &entry[1];
+                            let day = days.entry(key.to_string()).or_insert_with(|| serde_json::json!({
+                                "kind": key[0], "day": key[1], "contributions": [], "result": null, "paid": "0"
+                            }));
+                            if let Some(additions) = update.get("Contributions").and_then(|v| v.get("additions")) {
+                                day["contributions"].as_array_mut().unwrap().extend(additions.as_array().unwrap().iter().cloned());
+                            }
+                            if let Some(result) = update.get("Finalized").and_then(|v| v.get("result")) { day["result"] = result.clone(); }
+                            full_days.push(serde_json::json!([key, day]));
+                            snapshots += 1;
+                        }
+                        patch.insert("days".into(), full_days.into());
+                        patch.insert("allocations".into(), serde_json::json!([]));
+                        for market in patch["markets"].as_array_mut().unwrap() {
+                            for pool in market[1]["pools"].as_array_mut().unwrap() {
+                                pool.as_object_mut().unwrap().insert("contributors".into(), serde_json::json!([]));
+                            }
+                        }
+                    }
+                }
+                let mut line = serde_json::to_vec(&serde_json::json!({
+                    "version": 2, "encoding": "ledger_transaction_segment_v2",
+                    "durable_record_seq": seq, "payload": {"kind": kind, "body": body}
+                })).unwrap();
+                line.push(b'\n');
+                if payment_seen { new_tail.extend(line); } else { old_prefix.extend(line); }
+                Ok(())
+            }
+        ).unwrap();
+    }
+    assert!(snapshots >= 2);
+    assert!(payment_seen);
+    std::fs::create_dir(legacy_root).unwrap();
+    let active = legacy_root.join("ledger-active-v1.jsonl");
+    // 旧完整快照缺实际贡献材料时，不能被误解为只有 paid 的新操作。
+    let broken_root = legacy_root.with_extension("missing-contributions");
+    std::fs::create_dir(&broken_root).unwrap();
+    let mut broken = Vec::new();
+    let mut removed = false;
+    for line in old_prefix
+        .split(|b| *b == b'\n')
+        .filter(|line| !line.is_empty())
+    {
+        let mut row: serde_json::Value = serde_json::from_slice(line).unwrap();
+        if !removed {
+            if let Some(days) = row["payload"]["body"]["economics"]["days"].as_array_mut() {
+                if let Some(day) = days.first_mut() {
+                    day[1].as_object_mut().unwrap().remove("contributions");
+                    removed = true;
+                }
+            }
+        }
+        serde_json::to_writer(&mut broken, &row).unwrap();
+        broken.push(b'\n');
+    }
+    assert!(removed);
+    std::fs::write(broken_root.join("ledger-active-v1.jsonl"), broken).unwrap();
+    assert!(LedgerWriterV1::open_durable(&broken_root).is_err());
+    std::fs::write(&active, old_prefix).unwrap();
+    let before = LedgerWriterV1::open_durable(legacy_root).unwrap();
+    let read = before.economic_read().unwrap();
+    let day = read
+        .rebate_days()
+        .find(|day| day.kind == RebateKindV1::Maker)
+        .unwrap();
+    assert_eq!(day.contributions.len(), 2);
+    assert_eq!(day.amounts.confirmed_unpaid_pusd, r("1", "1"));
+    assert_eq!(day.amounts.paid_pusd, r("0", "1"));
+    drop(before);
+    let mut append = std::fs::OpenOptions::new()
+        .append(true)
+        .open(active)
+        .unwrap();
+    append.write_all(&new_tail).unwrap();
+    append.sync_all().unwrap();
+    drop(append);
+    let after = LedgerWriterV1::open_durable(legacy_root).unwrap();
+    let read = after.economic_read().unwrap();
+    let day = read
+        .rebate_days()
+        .find(|day| day.kind == RebateKindV1::Maker)
+        .unwrap();
+    assert_eq!(day.contributions.len(), 2);
+    assert_eq!(day.amounts.confirmed_unpaid_pusd, r("0", "1"));
+    assert_eq!(day.amounts.paid_pusd, r("1", "1"));
+    assert_eq!(day.amounts.locked_remainder_pusd, r("3", "50000"));
 }
 
 #[tokio::test(flavor = "current_thread")]

@@ -482,9 +482,6 @@ async fn native_partial_makers_project_average_cost_and_nonterminating_fraction(
         }
         assert!(shared.apply_closed().unwrap());
         let read = shared.ledger().economic_read().unwrap();
-        let allocations: Vec<_> = read.paired_allocations().collect();
-        assert_eq!(allocations.len(), 1);
-        assert_eq!(allocations[0].quantity_shares.0, "1");
         let m = read.market_totals().next().unwrap();
         let up = m
             .assets
@@ -493,11 +490,9 @@ async fn native_partial_makers_project_average_cost_and_nonterminating_fraction(
             .iter()
             .position(|a| a.token_id.0 == UP_TOKEN_ID)
             .unwrap();
-        assert_eq!(
-            allocations[0].principal_cost_pusd[up],
-            if fractional { r("1", "3") } else { r("1", "2") }
-        );
-        assert_eq!(allocations[0].principal_cost_pusd[1 - up], r("1", "5"));
+        assert_eq!(m.paired_shares.0, "1");
+        assert_eq!(m.success_principal_cost_pusd[up], r("1", "1"));
+        assert_eq!(m.success_principal_cost_pusd[1 - up], r("1", "5"));
         assert_eq!(
             m.confirmed_net_pnl_pusd,
             if fractional {

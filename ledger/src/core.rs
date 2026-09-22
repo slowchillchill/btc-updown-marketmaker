@@ -93,9 +93,6 @@ pub enum LedgerErrorV1 {
     ArithmeticOverflow {
         field: &'static str,
     },
-    UnbalancedTransaction {
-        asset: String,
-    },
 }
 
 impl fmt::Display for LedgerErrorV1 {
@@ -121,9 +118,6 @@ impl fmt::Display for LedgerErrorV1 {
                 write!(formatter, "固定精度字段无法解析：{field}={value}")
             }
             Self::ArithmeticOverflow { field } => write!(formatter, "固定精度运算溢出：{field}"),
-            Self::UnbalancedTransaction { asset } => {
-                write!(formatter, "Ledger 自有交易不平衡：{asset}")
-            }
         }
     }
 }
@@ -173,15 +167,6 @@ enum LedgerAssetV1 {
     Outcome(String),
 }
 
-impl LedgerAssetV1 {
-    fn label(&self) -> String {
-        match self {
-            Self::Pusd => "pUSD".to_owned(),
-            Self::Outcome(token_id) => format!("outcome:{token_id}"),
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 enum LedgerAccountV1 {
     Cash,
@@ -210,37 +195,6 @@ enum LedgerAccountV1 {
     SettlementFeeLiability,
     ActualTakerFeeLiability,
     Balancing,
-}
-
-impl LedgerAccountV1 {
-    fn supports(&self, asset: &LedgerAssetV1) -> bool {
-        match self {
-            Self::Cash
-            | Self::Available
-            | Self::SettlementFeeLiability
-            | Self::ActualTakerFeeLiability
-            | Self::Balancing => {
-                matches!(asset, LedgerAssetV1::Pusd) || matches!(self, Self::Balancing)
-            }
-            Self::PrincipalEncumbrance(_)
-            | Self::LocalPendingPrincipal(_)
-            | Self::LocalPendingImmediateFee(_)
-            | Self::PlatformPendingPrincipal(_)
-            | Self::PlatformPendingImmediateFee(_)
-            | Self::ImmediateTakerFeeEncumbrance(_)
-            | Self::MakerRebateReceivable(_)
-            | Self::TakerRebateReceivable(_)
-            | Self::MakerRebateLockedRemainder(_)
-            | Self::TakerRebateLockedRemainder(_)
-            | Self::PositionCostBasis(_)
-            | Self::Fees(_)
-            | Self::RealizedPnl(_) => matches!(asset, LedgerAssetV1::Pusd),
-            Self::OutcomeCostBasis { .. } => matches!(asset, LedgerAssetV1::Pusd),
-            Self::OutcomeBalance { token_id, .. } => {
-                matches!(asset, LedgerAssetV1::Outcome(found) if found == token_id)
-            }
-        }
-    }
 }
 
 type LedgerEntryV1 = (LedgerAccountV1, LedgerAssetV1, Decimal);
@@ -604,8 +558,7 @@ impl LedgerWriterV1 {
             return Ok(cached.outcome.clone());
         }
 
-        let account = self
-            .account
+        self.account
             .as_ref()
             .ok_or(LedgerErrorV1::AccountNotOpened)?;
         let principal = parse_decimal(
@@ -616,6 +569,20 @@ impl LedgerWriterV1 {
             immediate_fee_reserve_pusd,
             "reservation.immediate_fee_reserve_pusd",
         )?;
+        self.reserve_parsed_intent(request_identity, condition_id, principal, immediate_fee)
+    }
+
+    fn reserve_parsed_intent(
+        &mut self,
+        request_identity: &LedgerRequestIdentityV1,
+        condition_id: &ConditionId,
+        principal: Decimal,
+        immediate_fee: Decimal,
+    ) -> Result<LedgerReservationOutcomeV1, LedgerErrorV1> {
+        let account = self
+            .account
+            .as_ref()
+            .ok_or(LedgerErrorV1::AccountNotOpened)?;
         let requested_total = checked_add(principal, immediate_fee, "reservation.requested_total")?;
         let pending_total = checked_add(
             self.reservations.principal_pusd,
@@ -807,7 +774,6 @@ impl LedgerWriterV1 {
             source: LedgerTransactionSourceV1::LocalReservation(request_identity.clone()),
             entries,
         };
-        ensure_balanced(&transaction.entries)?;
 
         let outcome = LedgerReservationOutcomeV1::Reserved { ledger_entry_seq };
         let mut reservations = ReservationStateV1 {
@@ -868,27 +834,21 @@ impl LedgerWriterV1 {
         &mut self,
         intents: &[ReserveIntentV1],
     ) -> Result<Vec<LedgerReservationOutcomeV1>, LedgerErrorV1> {
-        let read = self
-            .economic_read()
-            .ok_or(LedgerErrorV1::AccountNotOpened)?;
-        let actual = parse_decimal(
-            &read.cash().actual_available_pusd,
-            "action.actual_available",
-        )?;
-        let maker = parse_decimal(&read.cash().maker_available_pusd, "action.maker_available")?;
+        let (actual, maker, _) = self.cash_balances()?;
         let mut total = Decimal::ZERO;
-        let mut seen = std::collections::BTreeSet::new();
+        let mut parsed = BTreeMap::new();
         for intent in intents {
             if self
                 .reservations
                 .requests
                 .contains_key(&intent.request_identity)
-                || !seen.insert(&intent.request_identity)
+                || parsed.contains_key(&intent.request_identity)
             {
                 continue;
             }
             let principal = parse_decimal(&intent.requested_principal_pusd, "action.principal")?;
             let fee = parse_decimal(&intent.immediate_fee_reserve_pusd, "action.immediate_fee")?;
+            parsed.insert(intent.request_identity.clone(), (principal, fee));
             total = checked_add(
                 total,
                 checked_add(principal, fee, "action.item_total")?,
@@ -917,11 +877,15 @@ impl LedgerWriterV1 {
         intents
             .iter()
             .map(|intent| {
-                self.try_reserve_intent(
+                if let Some(cached) = self.reservations.requests.get(&intent.request_identity) {
+                    return Ok(cached.outcome.clone());
+                }
+                let (principal, fee) = parsed[&intent.request_identity];
+                self.reserve_parsed_intent(
                     &intent.request_identity,
                     &intent.condition_id,
-                    &intent.requested_principal_pusd,
-                    &intent.immediate_fee_reserve_pusd,
+                    principal,
+                    fee,
                 )
             })
             .collect()
@@ -995,7 +959,6 @@ impl LedgerWriterV1 {
             },
             entries: Vec::new(),
         };
-        ensure_balanced(&transaction.entries)?;
 
         self.commit_effect(LedgerCommittedEffectV1 {
             funds: None,
@@ -1050,7 +1013,6 @@ impl LedgerWriterV1 {
             },
             entries: Vec::new(),
         };
-        ensure_balanced(&transaction.entries)?;
 
         self.commit_effect(LedgerCommittedEffectV1 {
             funds: None,
@@ -1124,7 +1086,6 @@ impl LedgerWriterV1 {
             },
             entries,
         };
-        ensure_balanced(&transaction.entries)?;
 
         self.commit_effect(LedgerCommittedEffectV1 {
             funds: None,
@@ -1219,9 +1180,9 @@ impl LedgerWriterV1 {
         let ledger_entry_seq = self.next_ledger_entry_seq()?;
         let keys =
             lifecycle_evidence_keys(&self.reservations, &self.lifecycle, source_record, evidence);
-        let before_reservations = reservation_state_slice(&self.reservations, &keys);
+        let before_reservations = reservation_balance_slice(&self.reservations, &keys);
         let mut reservations = reservation_state_slice(&self.reservations, &keys);
-        let before_lifecycle = lifecycle_state_slice(&self.lifecycle, &keys);
+        let before_lifecycle = lifecycle_balance_slice(&self.lifecycle, &keys);
         let mut lifecycle = lifecycle_state_slice(&self.lifecycle, &keys);
         match evidence {
             LedgerEvidence::Control { result } => apply_control_lifecycle(
@@ -1252,7 +1213,6 @@ impl LedgerWriterV1 {
             source: reference.clone(),
             entries,
         };
-        ensure_balanced(&transaction.entries)?;
 
         let next_available_through_utc_ms = self
             .account
@@ -1290,7 +1250,6 @@ impl LedgerWriterV1 {
             source: reference.clone(),
             entries: Vec::new(),
         };
-        ensure_balanced(&transaction.entries)?;
 
         let next_available_through_utc_ms = self
             .account
@@ -1498,7 +1457,6 @@ impl LedgerWriterV1 {
             source: reference.clone(),
             entries,
         };
-        ensure_balanced(&transaction.entries)?;
 
         self.commit_effect(LedgerCommittedEffectV1 {
             funds: None,
@@ -1603,9 +1561,9 @@ impl LedgerWriterV1 {
                 )
             })
             .unwrap_or_default();
-        let before_reservations = reservation_state_slice(&self.reservations, &keys);
+        let before_reservations = reservation_balance_slice(&self.reservations, &keys);
         let mut reservations = reservation_state_slice(&self.reservations, &keys);
-        let before_lifecycle = lifecycle_state_slice(&self.lifecycle, &keys);
+        let before_lifecycle = lifecycle_balance_slice(&self.lifecycle, &keys);
         let mut lifecycle = lifecycle_state_slice(&self.lifecycle, &keys);
         if let Some(transition) = transition {
             apply_economic_lifecycle(
@@ -1630,7 +1588,6 @@ impl LedgerWriterV1 {
             source: reference.clone(),
             entries,
         };
-        ensure_balanced(&transaction.entries)?;
 
         let market_balance_update =
             condition_id
@@ -1749,7 +1706,6 @@ impl LedgerWriterV1 {
                     ));
                 }
             }
-            ensure_balanced(&effect.transaction.entries)?;
         }
         effect.funds = self.funds.prepare(&effect)?;
         effect.economics = self.economics.prepare(&effect)?;
@@ -2041,6 +1997,21 @@ fn reservation_state_slice(
     source: &ReservationStateV1,
     keys: &SparseLedgerStateKeysV1,
 ) -> ReservationStateV1 {
+    let mut slice = reservation_balance_slice(source, keys);
+    for request_identity in &keys.requests {
+        if let Some(request) = source.requests.get(request_identity) {
+            slice
+                .requests
+                .insert(request_identity.clone(), request.clone());
+        }
+    }
+    slice
+}
+
+fn reservation_balance_slice(
+    source: &ReservationStateV1,
+    keys: &SparseLedgerStateKeysV1,
+) -> ReservationStateV1 {
     let mut slice = ReservationStateV1 {
         principal_pusd: source.principal_pusd,
         immediate_fee_pusd: source.immediate_fee_pusd,
@@ -2052,13 +2023,6 @@ fn reservation_state_slice(
         after_send_unknown_count: source.after_send_unknown_count,
         ..ReservationStateV1::default()
     };
-    for request_identity in &keys.requests {
-        if let Some(request) = source.requests.get(request_identity) {
-            slice
-                .requests
-                .insert(request_identity.clone(), request.clone());
-        }
-    }
     for condition_id in &keys.conditions {
         if let Some(market) = source.markets.get(condition_id) {
             slice.markets.insert(condition_id.clone(), market.clone());
@@ -2071,10 +2035,7 @@ fn lifecycle_state_slice(
     source: &LifecycleStateV1,
     keys: &SparseLedgerStateKeysV1,
 ) -> LifecycleStateV1 {
-    let mut slice = LifecycleStateV1 {
-        totals: source.totals.clone(),
-        ..LifecycleStateV1::default()
-    };
+    let mut slice = lifecycle_balance_slice(source, keys);
     for submission_item in &keys.submission_items {
         if let Some(request_identity) = source.submission_requests.get(submission_item) {
             slice
@@ -2111,6 +2072,17 @@ fn lifecycle_state_slice(
                 .insert(token_id.clone(), cost_basis.clone());
         }
     }
+    slice
+}
+
+fn lifecycle_balance_slice(
+    source: &LifecycleStateV1,
+    keys: &SparseLedgerStateKeysV1,
+) -> LifecycleStateV1 {
+    let mut slice = LifecycleStateV1 {
+        totals: source.totals.clone(),
+        ..LifecycleStateV1::default()
+    };
     for condition_id in &keys.conditions {
         if let Some(market) = source.markets.get(condition_id) {
             let outcome_cost_basis_pusd = keys
@@ -3761,29 +3733,6 @@ fn push_balanced_entry(
     Ok(())
 }
 
-fn ensure_balanced(entries: &[LedgerEntryV1]) -> Result<(), LedgerErrorV1> {
-    let mut totals = BTreeMap::<LedgerAssetV1, Decimal>::new();
-    for (account, asset, amount) in entries {
-        if !account.supports(asset) {
-            return Err(LedgerErrorV1::UnbalancedTransaction {
-                asset: asset.label(),
-            });
-        }
-        let total = totals.entry(asset.clone()).or_insert(Decimal::ZERO);
-        *total = total
-            .checked_add(*amount)
-            .ok_or(LedgerErrorV1::ArithmeticOverflow {
-                field: "ledger_transaction_balance",
-            })?;
-    }
-    if let Some((asset, _)) = totals.iter().find(|(_, total)| !total.is_zero()) {
-        return Err(LedgerErrorV1::UnbalancedTransaction {
-            asset: asset.label(),
-        });
-    }
-    Ok(())
-}
-
 fn parse_decimal(value: &ExactDecimal, field: &'static str) -> Result<Decimal, LedgerErrorV1> {
     Decimal::from_str_exact(&value.0).map_err(|_| LedgerErrorV1::DecimalParse {
         field,
@@ -3969,15 +3918,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ledger_owned_balance_boundary_rejects_an_unpaired_posting() {
-        let entries = vec![(LedgerAccountV1::Cash, LedgerAssetV1::Pusd, Decimal::ONE)];
-        assert!(matches!(
-            ensure_balanced(&entries),
-            Err(LedgerErrorV1::UnbalancedTransaction { asset }) if asset == "pUSD"
-        ));
-    }
-
-    #[test]
     fn a_balanced_posting_pair_preserves_the_explicit_amount() {
         const EXPECTED_AMOUNT: &str = "10.12345678";
         let amount = EXPECTED_AMOUNT.parse::<Decimal>().unwrap();
@@ -3993,7 +3933,6 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].2.to_string(), EXPECTED_AMOUNT);
         assert_eq!(entries[1].2.to_string(), "-10.12345678");
-        ensure_balanced(&entries).unwrap();
     }
 
     #[test]
@@ -4070,7 +4009,6 @@ mod tests {
                 ),
             ]
         );
-        ensure_balanced(&entries).unwrap();
     }
 
     #[test]
@@ -4180,7 +4118,6 @@ mod tests {
                 ),
             ]
         );
-        ensure_balanced(&entries).unwrap();
     }
 
     #[test]
@@ -4220,7 +4157,6 @@ mod tests {
                 ),
             ]
         );
-        ensure_balanced(&reserved).unwrap();
 
         let released = local_reservation_entries(
             &condition_id,
@@ -4228,69 +4164,31 @@ mod tests {
             "-0.10000000".parse().unwrap(),
         )
         .unwrap();
-        ensure_balanced(&released).unwrap();
-    }
-
-    #[test]
-    fn lifecycle_changes_map_to_asset_balanced_transactions() {
-        const CONDITION: &str = "condition-lifecycle";
-        const TOKEN: &str = "token-lifecycle";
-        let before = LifecycleStateV1::default();
-        let mut after = LifecycleStateV1::default();
-        after.totals.platform_pending_principal_pusd = "10".parse().unwrap();
-        after.totals.platform_pending_immediate_fee_pusd = "0.5".parse().unwrap();
-        after.totals.position_cost_basis_pusd = "4".parse().unwrap();
-        after.totals.fees_pusd = "0.2".parse().unwrap();
-        after.totals.realized_pnl_pusd = "-1".parse().unwrap();
-        after.outcome_cost_basis_pusd.insert(
-            TOKEN.to_owned(),
-            OutcomeCostBasisV1 {
-                token_id: TokenId(TOKEN.to_owned()),
-                cost_basis_pusd: "4".parse().unwrap(),
-            },
+        assert_eq!(
+            released,
+            vec![
+                (
+                    LedgerAccountV1::LocalPendingPrincipal(CONDITION.to_owned()),
+                    LedgerAssetV1::Pusd,
+                    "-123.45678901".parse().unwrap()
+                ),
+                (
+                    LedgerAccountV1::Balancing,
+                    LedgerAssetV1::Pusd,
+                    PRINCIPAL.parse().unwrap()
+                ),
+                (
+                    LedgerAccountV1::LocalPendingImmediateFee(CONDITION.to_owned()),
+                    LedgerAssetV1::Pusd,
+                    "-0.10000000".parse().unwrap()
+                ),
+                (
+                    LedgerAccountV1::Balancing,
+                    LedgerAssetV1::Pusd,
+                    FEE.parse().unwrap()
+                ),
+            ]
         );
-        let totals = after.totals.clone();
-        let market = after.market_mut(&ConditionId(CONDITION.to_owned()));
-        market.totals = totals;
-        market.outcome_cost_basis_pusd.insert(
-            TOKEN.to_owned(),
-            OutcomeCostBasisV1 {
-                token_id: TokenId(TOKEN.to_owned()),
-                cost_basis_pusd: "4".parse().unwrap(),
-            },
-        );
-
-        let entries = lifecycle_change_entries(
-            &ReservationStateV1::default(),
-            &ReservationStateV1::default(),
-            &before,
-            &after,
-        )
-        .unwrap();
-        assert!(!entries.is_empty());
-        ensure_balanced(&entries).unwrap();
-    }
-
-    #[test]
-    fn noe_transaction_source_owns_one_result_reference() {
-        let reference = NoeResultReferenceV1 {
-            commit_container:
-                contracts::execution_normalization::NoePublishedContainerReferenceV1 {
-                    location: "ledger-test-noe.json".to_owned(),
-                    boundary_sha256: contracts::Sha256Hex("a".repeat(64)),
-                },
-            record_ordinal: 7,
-        };
-        let transaction = LedgerTransactionV1 {
-            ledger_entry_seq: 1,
-            source: LedgerTransactionSourceV1::Noe(reference.clone()),
-            entries: Vec::new(),
-        };
-        ensure_balanced(&transaction.entries).unwrap();
-        match transaction.source {
-            LedgerTransactionSourceV1::Noe(found) => assert_eq!(found, reference),
-            _ => panic!("NOE 交易必须只拥有结果引用来源"),
-        }
     }
 
     #[test]

@@ -69,6 +69,15 @@ impl Source {
         };
         let record = if n == 0 {
             SimV2SourceRecordReferenceV1::AccountOpening
+        } else if matches!(kinds.first(), Some(Kind::Control { .. })) {
+            SimV2SourceRecordReferenceV1::DirectResponse {
+                private_feedback_sequence: n,
+                platform_responded_at_utc_ms: 100 + n as i64,
+                response_received_at_utc_ms: 200 + n as i64,
+                association: SimV2DirectResponseAssociationV1::Request {
+                    global_request_id: format!("query-{n}"),
+                },
+            }
         } else {
             SimV2SourceRecordReferenceV1::SettlementLifecycle {
                 private_feedback_sequence: n,
@@ -354,4 +363,78 @@ fn verify_memory_recovery(same_batch: bool) {
         LedgerWriterV1::open_durable(temp.path().join("ledger")).is_err(),
         "已提交Parquet损坏不能静默回退到先前账户"
     );
+}
+
+#[test]
+fn query_pages_keep_their_committed_sequence_and_recovery() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut source = Source::new(&temp.path().join("noe"), "query-pages");
+    source.accept(Kind::Economic {
+        evidence: SourceNeutralEconomicEvidenceV1::AccountOpening {
+            opening_evidence_identity: "opening".into(),
+            available_pusd: number("100"),
+        },
+    });
+    let mut writer = LedgerWriterV1::new(AccountAdmissionPolicyV1 {
+        per_market_all_in_commitment_limit_pusd: number("1000"),
+    });
+    let materials = Arc::new(Mutex::new(Vec::new()));
+    let sink = materials.clone();
+    writer.bind_record_sink_v2(Box::new(move |m| sink.lock().unwrap().push(m)));
+    writer
+        .apply_noe_memory_v1(&source.source.opening_record().unwrap())
+        .unwrap();
+    source.accept(Kind::Control {
+        result: Control::OrdersQuery {
+            result: SourceNeutralOrdersQueryResult::Page(SourceNeutralOrdersPage {
+                root_sequence: 1,
+                items: vec![],
+                next_cursor: None,
+            }),
+        },
+    });
+    source.accept(Kind::Control {
+        result: Control::TradesQuery {
+            result: SourceNeutralTradesQueryResultV1::Page(SourceNeutralTradesPageV1 {
+                root_sequence: 2,
+                items: vec![],
+                next_cursor: None,
+            }),
+        },
+    });
+    source.stable();
+    let records = source.source.take_closed(500, 700);
+    assert_eq!(records.len(), 2);
+    for (i, record) in records.iter().enumerate() {
+        assert_eq!(
+            writer.apply_noe_memory_v1(record).unwrap(),
+            LedgerMemoryApplyOutcomeV1::Applied(LedgerApplyOutcomeV1::NewlyApplied {
+                ledger_entry_seq: i as u64 + 2,
+            })
+        );
+    }
+    assert_eq!(
+        writer
+            .projection_v2()
+            .unwrap()
+            .platform_confirmed_projection
+            .cash_pusd,
+        number("100")
+    );
+    let root = temp.path().join("ledger");
+    let mut background = LedgerBackgroundWriterV2::new(&root);
+    for material in materials.lock().unwrap().iter() {
+        assert!(background.write(material).unwrap());
+    }
+    background.finish().unwrap();
+    let mut restored = LedgerWriterV1::open_durable(&root).unwrap();
+    assert_eq!(restored.projection_v2(), writer.projection_v2());
+    for (i, record) in records.iter().enumerate() {
+        assert_eq!(
+            restored.apply_noe_memory_v1(record).unwrap(),
+            LedgerMemoryApplyOutcomeV1::Applied(LedgerApplyOutcomeV1::AlreadyApplied {
+                ledger_entry_seq: i as u64 + 2,
+            })
+        );
+    }
 }
