@@ -18,21 +18,16 @@ pub struct OrtActorScorer {
     pub measurement: (usize, Option<Vec<Vec<usize>>>),
 }
 impl OrtActorScorer {
-    fn block(
-        &mut self,
-        actor: &NativeActor,
-        z: &[f32],
-        features: &[Vec<f32>],
-        reduced: &[f32],
-        exists: bool,
-        fees: &[f32],
-    ) -> ort::Result<Vec<Vec<f32>>> {
-        Ok(self
-            .blocks(&[(actor, z, features, reduced, exists, fees)])?
-            .remove(0))
-    }
     /// 独立根的活动参数行合批；每行保留自己的精确前缀、完整归约及掩码。
     pub fn blocks(&mut self, rows: &[ActorBlockRow<'_>]) -> ort::Result<Vec<Vec<Vec<f32>>>> {
+        let prefixes: Vec<_> = rows.iter().map(|r| r.0.prefix_features()).collect();
+        self.blocks_with_prefixes(rows, &prefixes)
+    }
+    fn blocks_with_prefixes(
+        &mut self,
+        rows: &[ActorBlockRow<'_>],
+        prefixes: &[[f32; 60]],
+    ) -> ort::Result<Vec<Vec<Vec<f32>>>> {
         if rows.is_empty() {
             return Ok(Vec::new());
         }
@@ -56,7 +51,7 @@ impl OrtActorScorer {
         let out = self.session.run(ort::inputs![
             "z_t"=>Tensor::from_array(([batch,self.hidden],rows.iter().flat_map(|r|r.1.iter().copied()).collect::<Vec<_>>()))?,
             "rule_features"=>Tensor::from_array(([batch,30],rows.iter().flat_map(|r|r.0.group.rows[r.0.row].rule).collect::<Vec<_>>()))?,
-            "prefix_features"=>Tensor::from_array(([batch,60],rows.iter().flat_map(|r|r.0.prefix_features()).collect::<Vec<_>>()))?,
+            "prefix_features"=>Tensor::from_array(([batch,60],prefixes.iter().flatten().copied().collect::<Vec<_>>()))?,
             "cancel_features"=>Tensor::from_array(([batch,slots,184],objects))?,
             "cancel_mask"=>Tensor::from_array(([batch,slots],mask))?,
             "cancel_reduced"=>Tensor::from_array(([batch,3*self.hidden/2],rows.iter().flat_map(|r|r.3.iter().copied()).collect::<Vec<_>>()))?,
@@ -88,8 +83,11 @@ impl OrtActorScorer {
         let mut max = vec![f32::NEG_INFINITY; width];
         let zero = vec![0.; 3 * width];
         let fees = vec![0.; 9999];
+        let prefixes = [actor.prefix_features()];
         for block in actor.group.cancel.chunks(256) {
-            let output = self.block(actor, z, block, &zero, false, &fees)?;
+            let output = self
+                .blocks_with_prefixes(&[(actor, z, block, &zero, false, &fees)], &prefixes)?
+                .remove(0);
             for row in output[6][..block.len() * width].chunks_exact(width) {
                 for i in 0..width {
                     sum[i] += f64::from(row[i]);
@@ -117,11 +115,17 @@ impl OrtActorScorer {
         let fees = actor.price_fee_features().map_err(|e| format!("{e:?}"))?;
         let mut scores = Vec::new();
         let head = actor.head_index();
+        let prefixes = [actor.prefix_features()];
         if actor.group.cancel.is_empty() {
-            return Ok(self.block(actor, z, &[], reduced, false, &fees)?[head].clone());
+            return Ok(self
+                .blocks_with_prefixes(&[(actor, z, &[], reduced, false, &fees)], &prefixes)?
+                .remove(0)
+                .swap_remove(head));
         }
         for block in actor.group.cancel.chunks(256) {
-            let output = self.block(actor, z, block, reduced, true, &fees)?;
+            let output = self
+                .blocks_with_prefixes(&[(actor, z, block, reduced, true, &fees)], &prefixes)?
+                .remove(0);
             if head != 7 {
                 return Ok(output[head].clone());
             }
@@ -138,6 +142,8 @@ impl OrtActorScorer {
             .iter()
             .map(|r| r.0.price_fee_features().map_err(|e| format!("{e:?}")))
             .collect::<Result<Vec<_>, _>>()?;
+        let prefixes: Vec<_> = rows.iter().map(|r| r.0.prefix_features()).collect();
+        let heads: Vec<_> = rows.iter().map(|r| r.0.head_index()).collect();
         let mut scores = vec![Vec::new(); rows.len()];
         let count = rows
             .iter()
@@ -146,23 +152,37 @@ impl OrtActorScorer {
             .unwrap_or(0)
             .max(1);
         for offset in (0..count).step_by(256) {
-            let blocks: Vec<_> = rows
+            let active: Vec<_> = (0..rows.len())
+                .filter(|&i| offset == 0 || heads[i] == 7 && rows[i].0.group.cancel.len() > offset)
+                .collect();
+            if active.is_empty() {
+                break;
+            }
+            let blocks: Vec<_> = active
                 .iter()
-                .zip(&fees)
-                .map(|(r, fee)| {
+                .map(|&i| {
+                    let r = rows[i];
                     let objects = &r.0.group.cancel;
                     let block =
                         &objects[offset.min(objects.len())..(offset + 256).min(objects.len())];
-                    (r.0, r.1, block, r.2, !objects.is_empty(), fee.as_slice())
+                    (
+                        r.0,
+                        r.1,
+                        block,
+                        r.2,
+                        !objects.is_empty(),
+                        fees[i].as_slice(),
+                    )
                 })
                 .collect();
-            let output = self.blocks(&blocks)?;
-            for (i, (row, values)) in rows.iter().zip(output).enumerate() {
-                let head = row.0.head_index();
+            let block_prefixes: Vec<_> = active.iter().map(|&i| prefixes[i]).collect();
+            let output = self.blocks_with_prefixes(&blocks, &block_prefixes)?;
+            for (i, values) in active.into_iter().zip(output) {
+                let head = heads[i];
                 if head == 7 {
-                    let valid = row.0.group.cancel.len().saturating_sub(offset).min(256);
+                    let valid = rows[i].0.group.cancel.len().saturating_sub(offset).min(256);
                     scores[i].extend_from_slice(&values[head][..valid]);
-                } else if offset == 0 {
+                } else {
                     scores[i] = values[head].clone();
                 }
             }

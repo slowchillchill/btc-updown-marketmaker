@@ -270,8 +270,8 @@ class ContinuousPython:
                     for lengths in layouts:
                         self.population_report['layouts'].append({'runtime': runtime, 'root': root, 'row': row, 'family': family, 'valid_lengths': lengths})
                         with torch.no_grad():
-                            features, embeddings, reduced, exists = consumer.objects(native.features()['cancel'], lengths=lengths)
-                            frozen = replace(g, cancel_features=features, cancel_embeddings=embeddings, cancel_reduced=reduced, cancel_exists=exists)
+                            features, reduced, exists = consumer.objects(native.features()['cancel'], lengths=lengths)
+                            frozen = replace(g, cancel_features=features, cancel_reduced=reduced, cancel_exists=exists)
                             blocks = consumer.parameters(frozen, row, actor.prefix_features(), lengths=lengths)
                             scores = torch.cat([b[7][0, :length] for b, length in zip(blocks, lengths)])
                             variants.append(scores)
@@ -328,8 +328,8 @@ class ContinuousPython:
             row = next(i for i, role in enumerate(g.roles) if role == 'DecisionRequired')
             trained = []
             for lengths in ([256, 1], [128, 129]):
-                features, embeddings, reduced, exists = self.consumers[0].objects(native.features()['cancel'], lengths=lengths)
-                trained.append(replace(g, cancel_features=features, cancel_embeddings=embeddings, cancel_reduced=reduced, cancel_exists=exists))
+                features, reduced, exists = self.consumers[0].objects(native.features()['cancel'], lengths=lengths)
+                trained.append(replace(g, cancel_features=features, cancel_reduced=reduced, cancel_exists=exists))
             a = native.actor(row); a.choose(4)
             sampled = consume_actor(self.consumers[0], trained[0], row, a)
             b = native.actor(row); b.choose(4)

@@ -284,6 +284,36 @@ def validate_cancel(native_group, history, directory):
     config = next(c for c in CONFIGURATIONS if c.name == directory.name)
     model = TwoGraphs(config).eval()
     model.load_state_dict(torch.load(directory / 'initial_weights.pt', weights_only=True))
+    def mixed_blocks(consumer, group, *, gradients=False):
+        actors = [native_group.actor(0) for _ in range(3)]
+        actors[0].choose(3)
+        actors[2].choose(4)
+        calls = []
+        hook = model.action.register_forward_hook(
+            lambda module, inputs, outputs: calls.append(tuple(inputs[4].sum(dim=1).tolist())))
+        outputs = consumer.parameters_batch([(group, 0, actor) for actor in actors])
+        hook.remove()
+        assert calls == [(256, 256, 256), (3, 3)]
+        assert list(map(len, outputs)) == [2, 1, 2]
+        batched_loss = single_loss = 0
+        for actor, blocks in zip(actors, outputs):
+            actual = (torch.cat([block[7][0] for block in blocks])[:259]
+                      if actor.head_index() == 7 else blocks[0][actor.head_index()][0])
+            single = _scores(consumer, group, actor)
+            assert_close(actual, single, rtol=1e-4, atol=1e-5)
+            if gradients:
+                batched_loss = batched_loss + actual.square().mean()
+                single_loss = single_loss + single.square().mean()
+        assert consumer.parameters_batch([]) == []
+        if gradients:
+            parameters = tuple(model.parameters())
+            batched = torch.autograd.grad(batched_loss, parameters, allow_unused=True, retain_graph=True)
+            singles = torch.autograd.grad(single_loss, parameters, allow_unused=True, retain_graph=True)
+            for left, right in zip(batched, singles):
+                assert (left is None) == (right is None)
+                if left is not None:
+                    assert_close(left, right, rtol=1e-4, atol=1e-5)
+
     consumer = NativeComponentConsumer(model)
     traces = []
     forward = model.state.forward
@@ -296,6 +326,7 @@ def validate_cancel(native_group, history, directory):
         for prior in history:
             consumer.consume(prior)
         group = consumer.consume(native_group.features())
+        mixed_blocks(consumer, group)
         result = consume_actor(consumer, group, 0, native_group.actor(0), deterministic=True)
         paths = [result.actor.path()]
         for family in (3, 4, 5):
@@ -332,6 +363,7 @@ def validate_cancel(native_group, history, directory):
         for prior in history:
             ort_consumer.consume(prior)
         ort_group = ort_consumer.consume(native_group.features())
+        mixed_blocks(ort_consumer, ort_group)
         for left, right in zip(traces, ort_traces):
             for a, b in zip(left, right):
                 assert_close(torch.tensor(a), torch.tensor(b), rtol=1e-4, atol=1e-5)
@@ -359,6 +391,7 @@ def validate_cancel(native_group, history, directory):
     for prior in history:
         training.consume(prior)
     current = training.consume(native_group.features())
+    mixed_blocks(training, current, gradients=True)
     # 真实Market对象头只有一项，完整consume_actor路径不耗随机数。
     singleton = native_group.actor(0)
     singleton.choose(5)

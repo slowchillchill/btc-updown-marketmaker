@@ -105,7 +105,7 @@ def cancel_slices(pair_count=0, removed_a=False):
 
 
 def market_slice(step=0):
-    """合法已激活市场截面；静态盘口，1秒后仍为同一原事实，时间不刷新。"""
+    """抽象数值探针：手填锚点、中价历史与静态盘口，用于图数值比较，不代表原生市场事实。"""
     r=Row(836,"#6 市场/规则完整布局及37维参考表")
     age=log_value(step)
     r.put(0,1,"适用Chainlink现货参考");r.put(5,1,"OfficialAnchor")

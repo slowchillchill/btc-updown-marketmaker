@@ -94,7 +94,7 @@ class NativeInputTests(unittest.TestCase):
         import onnxruntime
         import numpy as np
         from model_train.validate_graphs import session, call_ort
-        from model_train.graphs import encode_all, object_blocks
+        from model_train.graphs import ACTION_INPUTS, encode_all, object_blocks
         from model_train.native_inputs import hidden_key
         root = Path(__file__).resolve().parents[1]
         library = next((Path(onnxruntime.__file__).parent / "capi").glob("libonnxruntime.so.*"))
@@ -136,7 +136,7 @@ class NativeInputTests(unittest.TestCase):
                         lengths = [min(256, count - i) for i in range(0, count, 256)] or [0]
                         offset = 0
                         for part, length in enumerate(lengths):
-                            put(expected, f"{label}/embedding{part}", [result.cancel_embeddings[:, offset:offset+length]])
+                            put(expected, f"{label}/embedding{part}", [graphs.action.object_encoder(result.cancel_features[:, offset:offset+length])])
                             offset += length
                         put(expected, label + "/reduced", [result.cancel_reduced, result.cancel_exists.float()])
                         before = consumer.hidden[hidden_key(row["hidden_state_key"])].clone()
@@ -150,9 +150,7 @@ class NativeInputTests(unittest.TestCase):
 
             # Python ORT 的状态、z、对象和全局归约全部在本端产生。
             state_session = session(archive / "state_encoder.onnx", 1)
-            action = call_ort(session(archive / "action_decoder.onnx", 1),
-                              ("z_t", "rule_features", "prefix_features", "cancel_features",
-                               "cancel_mask", "cancel_reduced", "cancel_exists"))
+            action = call_ort(session(archive / "action_decoder.onnx", 1), ACTION_INPUTS)
             operations = NativeComponentConsumer(graphs)
             ort_values = {}
             for g, group in enumerate(self.groups):
@@ -188,6 +186,8 @@ class NativeInputTests(unittest.TestCase):
                     before = operations.hidden[hidden_key(row["hidden_state_key"])].clone()
                     for p, prefix in enumerate(row["fixture_prefixes"]):
                         for part, (f, m, _) in enumerate(object_blocks(features, mask, lengths, empty=count == 0)):
+                            if part and head(prefix) != 7:
+                                break
                             outputs = action(z, rule, torch.tensor([prefix]), f, m, reduced, exists)
                             put(ort_values, f"{label}/prefix{p}/part{part}", [outputs[head(prefix)]])
                     torch.testing.assert_close(operations.hidden[hidden_key(row["hidden_state_key"])], before, rtol=0, atol=0)
@@ -216,16 +216,15 @@ class NativeInputTests(unittest.TestCase):
         for group in [empty, *self.populations]:
             count = len(group["cancel"])
             self.assertIn(count, (0, 2, 256, 257, 259))
-            _, objects, actual_reduced, actual_exists = NativeComponentConsumer(self.graphs).objects(group["cancel"])
+            _, actual_reduced, actual_exists = NativeComponentConsumer(self.graphs).objects(group["cancel"])
             features = torch.tensor(group["cancel"], dtype=torch.float32).reshape(1, count, 184)
             expected = self.graphs.action.object_encoder(features)
-            torch.testing.assert_close(objects, expected, rtol=2e-5, atol=2e-6)
             mask = torch.ones((1, count), dtype=torch.bool)
             reduced, exists = reduce_objects([(expected, mask)])
             torch.testing.assert_close(actual_reduced, reduced, rtol=2e-5, atol=2e-6)
             self.assertEqual(actual_exists.item(), exists.item())
             if count == 257:
-                _, _, other_reduced, _ = NativeComponentConsumer(self.graphs).objects(group["cancel"], lengths=[128, 129])
+                _, other_reduced, _ = NativeComponentConsumer(self.graphs).objects(group["cancel"], lengths=[128, 129])
                 torch.testing.assert_close(actual_reduced, other_reduced,
                                            rtol=2e-5, atol=2e-6)
 
