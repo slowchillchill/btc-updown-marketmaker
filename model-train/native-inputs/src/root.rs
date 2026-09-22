@@ -103,6 +103,8 @@ pub struct NativeInputGroup {
     pub cancel: Vec<Vec<f32>>,
     #[serde(skip)]
     pub action_before: Option<ActionBeforeReadV2>,
+    #[serde(skip)]
+    pub(crate) cancel_intents: Vec<ModelIntentV1>,
 }
 pub(crate) struct MarketBinding {
     pub market: MarketIdentityV2,
@@ -245,8 +247,40 @@ impl NativeInputRoot {
         });
         let mut rows = Vec::new();
         let mut cancel = Vec::new();
-        if let Some(read) = &before {
+        let mut cancel_intents = Vec::new();
+        if let Some(read) = &before
+            && !roles.is_empty()
+        {
+            let slow = crate::account::encode(read, current.as_ref(), &old, &self.markets, now)?;
+            if roles
+                .iter()
+                .any(|(role, _)| *role == InputRole::DecisionRequired)
+            {
+                let ExecutionReadValueV1::Known(objects) =
+                    read.cancel_objects_in(current.as_ref(), &old)
+                else {
+                    return Err(crate::InputError::MissingAssociation);
+                };
+                cancel = crate::cancel::encode(
+                    read,
+                    &objects,
+                    current.as_ref(),
+                    &old,
+                    &self.markets,
+                    now,
+                )?;
+                cancel_intents = objects
+                    .into_iter()
+                    .map(crate::action::cancel_object_intent)
+                    .collect();
+            }
             for (role, id) in roles {
+                let mut slow = slow;
+                slow[if role == InputRole::DecisionRequired {
+                    93
+                } else {
+                    94
+                }] = 1.;
                 let frame = frames
                     .iter()
                     .find(|f| f.observation.market.condition_id == id)
@@ -264,20 +298,8 @@ impl NativeInputRoot {
                             self.snapshot.clone(),
                         )
                     }),
-                    slow: crate::account::encode(
-                        read,
-                        current.as_ref(),
-                        &old,
-                        &self.markets,
-                        now,
-                        role,
-                    )?
-                    .to_vec(),
+                    slow: slow.to_vec(),
                 });
-                if role == InputRole::DecisionRequired {
-                    cancel =
-                        crate::cancel::encode(read, current.as_ref(), &old, &self.markets, now)?;
-                }
             }
         }
         for row in &mut rows {
@@ -323,6 +345,7 @@ impl NativeInputRoot {
             old,
             cancel,
             action_before: before,
+            cancel_intents,
         }))
     }
 }

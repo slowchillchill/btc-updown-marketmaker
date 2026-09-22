@@ -1,10 +1,5 @@
 //! §3 的完整415槽，所有范围先在精确域归约，最后一次投影。
-use crate::{
-    InputError,
-    exact::*,
-    root::{InputRole, MarketBinding},
-    values::*,
-};
+use crate::{InputError, exact::*, root::MarketBinding, values::*};
 use contracts::ExecutionReadValueV1::{Known, NotApplicable, Unavailable};
 use contracts::{economics::EconomicRational as R, *};
 use ledger::{
@@ -57,7 +52,6 @@ pub(crate) fn encode(
     old: &[ConditionId],
     markets: &BTreeMap<String, MarketBinding>,
     now: i64,
-    role: InputRole,
 ) -> Result<[f32; 433], InputError> {
     let mut out = [0.; 433];
     let scopes = [
@@ -324,11 +318,6 @@ pub(crate) fn encode(
         out[362] = 1.;
         out[363] = 1.;
     }
-    out[if role == InputRole::DecisionRequired {
-        93
-    } else {
-        94
-    }] = 1.;
     let cash = &read.economics().cash;
     for (i, v) in [
         &cash.actual_available_pusd,

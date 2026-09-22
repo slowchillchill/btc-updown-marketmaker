@@ -285,12 +285,15 @@ GTD 到期秒数是 `ceil(decision_logical_time_ms/1000)+60+lifetime`，Bridge �
 `NativeInputRoot::new` 接收创建执行器所用的同一个 `Arc<SealedProcessRuleSnapshotV3>`。
 `NativeActor` 借用冻结组，在 Rust 内保留现金根、BigUint 区间、真实修复侧及全部精确选择；
 完成性才与既有编码域相交。六族、数量、全部腿属性、全部腿价格按原顺序推进，撤单沿原对象索引。
+同组撤单特征、族支持与最终意图共用一次形成的有序人口；UnknownSingle、空市场和配对原 ordinal 保持。
+`support()` 提供完整评分分布，`choose()` 只计算当前选中分支；公开状态改变后重新按当次状态计算，不跨调用缓存支持集。
+账户433项中431个公共项在组内计算一次，各行再填93/94角色位；不同组或时刻不复用旧特征。
 LIMIT 复用公共最大费；FOK/FAK 只按原本金支持和预留，参考费不作为现金硬门。
 `execute` 复用原意图装配、稳定请求及 ordinal，先批预留、逐腿登记 SubmittedUnknown，再调用原执行。
 SIM 的 FOK/FAK 最低门是每腿原请求本金 1 pUSD；实际 FAK 部分成交金额可以更小，LIMIT 仍有最低份额。
 
 `python` feature 提供 PyO3 `PythonGroup`/`PythonActor`，由 Rust 宿主传入实际组；Python 不构造财务状态。
-`features()` 直接传 Python 容器，不经逐步 JSON 字符串或文件。`consume_actor` 调用标准 Categorical，
+`features()` 从现有字段直接创建 Python 容器，不先构造 serde Value 中间树；枚举标签、None、整数、浮点及省略字段保持。`consume_actor` 调用标准 Categorical，
 单分支不消耗随机数；重算沿 Rust 原路径，返回的条件熵和不声称是精确联合熵。
 `ort` feature 的 `OrtActorScorer` 使用同一 NativeActor，严格最大值选择且同分保留原首项。
 

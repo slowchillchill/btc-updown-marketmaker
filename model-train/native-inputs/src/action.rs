@@ -3,7 +3,7 @@ use crate::{
     NativeInputGroup,
     prefix::{Family, Leg, Lifetime, PrefixState, Stage, Variant},
 };
-use contracts::{BuyLegIntentV1, BuyOrderIntentV1, ExecutionReadValueV1, ModelIntentV1};
+use contracts::{BuyLegIntentV1, BuyOrderIntentV1, ModelIntentV1};
 use execution_normalization::{MemoryIdentityKeyV1, SourceNeutralEntityKeyV1};
 use num_bigint::BigUint;
 use num_traits::ToPrimitive;
@@ -63,13 +63,9 @@ impl NativeInputGroup {
         let order = |i: usize| -> Result<BuyLegIntentV1, crate::InputError> {
             let selected = &state.legs[i];
             let k = selected.price_index.as_ref().ok_or(IncompleteBuyPrefix)?;
-            let tick = action.ticks[i]
-                .as_ref()
-                .ok_or(IncompleteBuyPrefix)?
-                .public();
-            let numerator: BigUint = tick.numerator.parse().expect("合法正 tick");
-            let denominator: BigUint = tick.denominator.parse().expect("合法正 tick");
-            let m = k * numerator * BigUint::from(10000u32) / denominator;
+            let tick = action.ticks[i].as_ref().ok_or(IncompleteBuyPrefix)?;
+            let m = k * tick.numerator().magnitude() * BigUint::from(10000u32)
+                / tick.denominator().magnitude();
             let p = decimal(&m, 4);
             let value = match selected.variant.ok_or(IncompleteBuyPrefix)? {
                 Variant::GtcLimit => BuyOrderIntentV1::GtcLimit {
@@ -129,25 +125,19 @@ impl NativeInputGroup {
         family: CancelFamily,
         blocks: &[CancelScoreBlock],
     ) -> Result<Option<ModelIntentV1>, crate::InputError> {
-        let read = self
-            .action_before
-            .as_ref()
-            .ok_or(crate::InputError::MissingAssociation)?;
-        let ExecutionReadValueV1::Known(objects) =
-            read.cancel_objects_in(self.current.as_ref(), &self.old)
-        else {
-            return Err(crate::InputError::MissingAssociation);
-        };
         let scores = blocks
             .iter()
             .flat_map(|b| b.scores.iter().take(b.valid_len));
         let mut best = None;
-        for (object, &score) in objects.into_iter().zip(scores) {
+        for (object, &score) in self.cancel_intents.iter().zip(scores) {
             if !matches!(
-                (family, &object),
-                (CancelFamily::Single, CancelObjectReadV2::Single { .. })
-                    | (CancelFamily::Paired, CancelObjectReadV2::Paired { .. })
-                    | (CancelFamily::Market, CancelObjectReadV2::Market { .. })
+                (family, object),
+                (CancelFamily::Single, ModelIntentV1::CancelOrder { .. })
+                    | (CancelFamily::Paired, ModelIntentV1::CancelOrders { .. })
+                    | (
+                        CancelFamily::Market,
+                        ModelIntentV1::CancelMarketOrders { .. }
+                    )
             ) {
                 continue;
             }
@@ -155,23 +145,15 @@ impl NativeInputGroup {
                 best = Some((object, score));
             }
         }
-        Ok(best.map(|(object, _)| cancel_object_intent(object)))
+        Ok(best.map(|(object, _)| object.clone()))
     }
     pub fn cancel_index_intent(&self, index: usize) -> Result<ModelIntentV1, crate::InputError> {
-        let ExecutionReadValueV1::Known(objects) = self
-            .action_before
-            .as_ref()
-            .ok_or(crate::InputError::MissingAssociation)?
-            .cancel_objects_in(self.current.as_ref(), &self.old)
-        else {
-            return Err(crate::InputError::MissingAssociation);
-        };
-        objects
-            .into_iter()
-            .nth(index)
-            .map(cancel_object_intent)
+        self.cancel_intents
+            .get(index)
+            .cloned()
             .ok_or(crate::InputError::UnsupportedChoice)
     }
+
     /// 整组状态消费完成后，对同组 DecisionRequired 行调用。
     /// score 返回覆盖本组完整 cancel 人口的有序有效块；图消费者只评分，
     /// 身份、意图及发送继续留在原生宿主和共享执行。
@@ -238,9 +220,20 @@ impl NativeInputGroup {
                 let identity =
                     LedgerRequestIdentityV1(serde_json::to_string(&item).expect("身份序列化"));
                 let selected = &state.legs[i];
-                let tick_ratio = action.ticks[i].as_ref().unwrap().public();
-                let tick = (tick_ratio.numerator.parse::<Decimal>().unwrap()
-                    / tick_ratio.denominator.parse::<Decimal>().unwrap())
+                let tick_ratio = action.ticks[i].as_ref().unwrap();
+                let tick = (Decimal::from_i128_with_scale(
+                    tick_ratio
+                        .numerator()
+                        .to_i128()
+                        .expect("合法 tick 系数可表示"),
+                    0,
+                ) / Decimal::from_i128_with_scale(
+                    tick_ratio
+                        .denominator()
+                        .to_i128()
+                        .expect("合法 tick 分母可表示"),
+                    0,
+                ))
                 .normalize()
                 .to_string();
                 let k = selected.price_index.as_ref().unwrap().to_u16().unwrap();

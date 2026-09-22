@@ -192,15 +192,12 @@ fn template(
 }
 pub(crate) fn encode(
     read: &ActionBeforeReadV2,
+    objects: &[CancelObjectReadV2<'_>],
     current: Option<&ConditionId>,
     old: &[ConditionId],
     markets: &BTreeMap<String, MarketBinding>,
     now: i64,
 ) -> Result<Vec<Vec<f32>>, InputError> {
-    let objects = match read.cancel_objects_in(current, old) {
-        Known(v) => v,
-        _ => return Err(InputError::MissingAssociation),
-    };
     let mut output = Vec::with_capacity(objects.len());
     for object in objects {
         let mut out = [0.; 184];
@@ -229,7 +226,7 @@ pub(crate) fn encode(
             }
             CancelObjectReadV2::Paired { orders, .. } => {
                 out[1] = 1.;
-                for order in &orders {
+                for order in orders {
                     let ordinal = order
                         .origin
                         .as_ref()
@@ -256,7 +253,7 @@ pub(crate) fn encode(
                 for s in 0..2 {
                     let mut members = Vec::new();
                     let mut unknown_side = false;
-                    for order in &orders {
+                    for order in orders {
                         match order
                             .token_id
                             .and_then(|token| side(&mapping.assets, token))

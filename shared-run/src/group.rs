@@ -185,10 +185,10 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
             .map_err(SharedSettlementErrorV1::Sim)?;
         Ok(true)
     }
-    pub fn action_before(
+    pub(crate) fn prepare_action_group(
         &mut self,
         driver: &mut PublicConsumptionStateV1,
-    ) -> Result<Option<ActionBeforeRead<P::Completion>>, LedgerErrorV1> {
+    ) -> Result<Option<TrustedGroupDecisionCutoffV1>, LedgerErrorV1> {
         self.apply_closed()?;
         // 领取后重新取得真实 decision；经济依赖仍保留原引用等待，不复用旧 cutoff。
         let Some(decision) = driver.decision() else {
@@ -202,6 +202,15 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
         for frame in &frames {
             self.registry.observe_market(&frame.rule_context);
         }
+        Ok(Some(cutoff))
+    }
+    pub fn action_before(
+        &mut self,
+        driver: &mut PublicConsumptionStateV1,
+    ) -> Result<Option<ActionBeforeRead<P::Completion>>, LedgerErrorV1> {
+        let Some(cutoff) = self.prepare_action_group(driver)? else {
+            return Ok(None);
+        };
         let registry = self.registry.action_snapshot();
         let funds = self.ledger.funds_read_v1();
         let Some(ledger) = funds.projection() else {
@@ -236,7 +245,7 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
             .collect();
         let orders = funds
             .orders()
-            .filter(|r| registry.order(r.order_identity).is_some())
+            .filter(|r| registry.contains_order(r.order_identity))
             .map(|r| OrderFunds {
                 id: r.order_identity.clone(),
                 principal: r.principal_encumbrance_pusd,

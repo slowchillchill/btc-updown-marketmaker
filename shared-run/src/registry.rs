@@ -29,10 +29,12 @@ impl FrozenIntentRefV1 {
         &self.intent
     }
 }
+#[derive(Clone)]
 pub struct SubmittedLegReadV1<'a> {
     pub intent: &'a FrozenIntentRefV1,
     pub batch_item_ordinal: u16,
 }
+#[derive(Clone)]
 pub struct ExecutionOrderRead<'a, R> {
     pub order_identity: &'a Identity,
     pub condition_id: Option<&'a ConditionId>,
@@ -115,7 +117,7 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
     }
     pub(crate) fn action_snapshot(&self) -> Self {
         let orders: BTreeMap<_, _> = self.orders.iter().filter(|(id, state)| {
-            let cancellable = self.order(id).unwrap().cancellable;
+            let cancellable = self.order_from(id, state).cancellable;
             !matches!(cancellable, Known(false))
                 || state.trades.values().filter_map(trade)
                     .any(|t| !final_disposition(&t.economic_disposition))
@@ -350,8 +352,18 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             _ => {}
         }
     }
+    pub(crate) fn contains_order(&self, id: &Identity) -> bool {
+        self.orders.contains_key(id)
+    }
     pub fn order(&self, id: &Identity) -> Option<ExecutionOrderRead<'_, R>> {
         let (id, state) = self.orders.get_key_value(id)?;
+        Some(self.order_from(id, state))
+    }
+    fn order_from<'a>(
+        &'a self,
+        id: &'a Identity,
+        state: &'a Order<R>,
+    ) -> ExecutionOrderRead<'a, R> {
         let origin = state.origin.as_ref().and_then(|(id, ordinal)| {
             self.intents.get(id).map(|s| SubmittedLegReadV1 {
                 intent: &s.origin,
@@ -402,10 +414,11 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
                 _ => Unavailable,
             }
         };
-        Some(ExecutionOrderRead {
+        let location = order_location(state, id);
+        ExecutionOrderRead {
             order_identity: id,
-            condition_id: order_location(state, id).map(|x| x.0),
-            token_id: order_location(state, id).map(|x| x.1),
+            condition_id: location.map(|x| x.0),
+            token_id: location.map(|x| x.1),
             base_quantity_applicability,
             latest_cancel_feedback: state.cancellation.as_ref(),
             origin,
@@ -416,10 +429,12 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             matched_shares: matched,
             active_unfilled_shares: active,
             cancellable,
-        })
+        }
     }
     pub fn orders(&self) -> impl Iterator<Item = ExecutionOrderRead<'_, R>> {
-        self.orders.keys().map(|id| self.order(id).unwrap())
+        self.orders
+            .iter()
+            .map(|(id, state)| self.order_from(id, state))
     }
     pub fn order_trades(&self, id: &Identity) -> impl Iterator<Item = &Ref<R>> {
         self.orders
@@ -571,22 +586,26 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
         &'a self,
         conditions: impl IntoIterator<Item = &'a ConditionId>,
     ) -> ExecutionReadValueV1<Vec<CancelObjectRead<'a, R>>> {
-        let eligible: Vec<_> = self
-            .orders()
-            .filter(|order| {
-                let state = &self.orders[order.order_identity];
-                !matches!(order.cancellable, Known(false))
-                    && (state.accepted.is_some()
-                        || state.formed.is_some()
-                        || state.lifecycle.is_some()
-                        || state.known_query.is_some()
-                        || !state.trades.is_empty()
-                        || state.canceled.is_some())
+        let eligible: BTreeMap<_, _> = self
+            .orders
+            .iter()
+            .filter_map(|(id, state)| {
+                if !(state.accepted.is_some()
+                    || state.formed.is_some()
+                    || state.lifecycle.is_some()
+                    || state.known_query.is_some()
+                    || !state.trades.is_empty()
+                    || state.canceled.is_some())
+                {
+                    return None;
+                }
+                let order = self.order_from(id, state);
+                (!matches!(order.cancellable, Known(false))).then_some((id, order))
             })
             .collect();
         let mut groups: BTreeMap<Option<(i64, &str)>, Vec<&ExecutionOrderRead<'_, R>>> =
             BTreeMap::new();
-        for order in &eligible {
+        for order in eligible.values() {
             let key = order
                 .condition_id
                 .and_then(|condition| self.markets.get(&condition.0))
@@ -611,7 +630,7 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
         let mut objects: Vec<_> = ordered
             .iter()
             .map(|id| CancelObjectRead::Single {
-                order: self.order(id).unwrap(),
+                order: eligible[*id].clone(),
             })
             .collect();
         let mut paired = Vec::new();
@@ -631,7 +650,7 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
                 paired.push((
                     key,
                     &submitted.origin,
-                    [self.order(a).unwrap(), self.order(b).unwrap()],
+                    [eligible[a].clone(), eligible[b].clone()],
                 ));
             }
         }
@@ -651,8 +670,9 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             let condition_id = &market.market.condition_id;
             let orders = ordered
                 .iter()
-                .filter_map(|id| self.order(id))
+                .map(|id| &eligible[*id])
                 .filter(|o| o.condition_id == Some(condition_id))
+                .cloned()
                 .collect();
             objects.push(CancelObjectRead::Market {
                 condition_id,
