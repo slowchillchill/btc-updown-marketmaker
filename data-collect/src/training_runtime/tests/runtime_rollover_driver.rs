@@ -1095,7 +1095,7 @@ async fn old_close_dropped_reply_retains_day_gaps_and_owner_material() {
     let mut ready = None;
     for source in training_source_kinds() {
         ready = owner
-            .record_writer_ack(close.clone(), (*source).to_owned())
+            .record_writer_ack(close.clone(), (*source).to_owned(), Arc::clone(&gate))
             .unwrap();
     }
     gate.publish_writer_rendezvous(&close).unwrap();

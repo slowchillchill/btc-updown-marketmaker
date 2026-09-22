@@ -129,11 +129,10 @@ use crate::daily_manifest::{
     SourceOperationalCounterDelta, TrainingArtifactIdentity, activate_collection_day_coverage,
     add_manifest_operational_counters, close_day_manifest_with_collection_end,
     close_day_manifest_with_unclean_end, close_reconciled_day_manifest, day_has_finalized_parquet,
-    load_day_manifest, manifest_collection_day_coverage, manifest_state,
-    mark_collection_day_coverage_ended_known, mark_collection_day_coverage_unclean,
-    merge_finalized_file_delta, reconcile_open_day_manifest, record_day_barrier_state,
-    record_manifest_gaps, remove_unowned_stale_temporary_files, typed_raw_root,
-    utc_day_directories, validate_manifest_day, validate_manifest_recovery_files,
+    load_day_manifest, manifest_state, mark_collection_day_coverage_ended_known,
+    mark_collection_day_coverage_unclean, merge_finalized_file_delta, reconcile_open_day_manifest,
+    record_day_barrier_state, record_manifest_gaps, remove_unowned_stale_temporary_files,
+    typed_raw_root, utc_day_directories, validate_manifest_day, validate_manifest_recovery_files,
     validate_unmanifested_recovery_files,
 };
 use crate::dedupe::{
@@ -2328,7 +2327,11 @@ mod tests {
         raw_day_gate.seal_prepared_rollover(&close).await.unwrap();
         for source in training_source_kinds() {
             owner
-                .record_writer_ack(close.clone(), (*source).to_owned())
+                .record_writer_ack(
+                    close.clone(),
+                    (*source).to_owned(),
+                    Arc::clone(&raw_day_gate),
+                )
                 .unwrap();
         }
         owner

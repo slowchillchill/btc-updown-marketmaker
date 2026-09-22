@@ -115,23 +115,11 @@ where
         let confirmed_ms = sample_clock()?;
         let confirmed_day = utc_day_string_from_ms(confirmed_ms)
             .ok_or_else(|| invalid_data("UTC day unavailable after startup recovery"))?;
-        if confirmed_day < recovery_day {
-            return Err(invalid_data(format!(
-                "UTC day moved backward during startup recovery: started={recovery_day} confirmed={confirmed_day}"
-            ))
-            .into());
-        }
         if confirmed_day == recovery_day {
             let polymarket = restore_polymarket_resolution_recovery(dataset_root, confirmed_ms)?;
             let recovery_completed_ms = sample_clock()?;
             let recovery_completed_day = utc_day_string_from_ms(recovery_completed_ms)
                 .ok_or_else(|| invalid_data("UTC day unavailable after Polymarket recovery"))?;
-            if recovery_completed_day < recovery_day {
-                return Err(invalid_data(format!(
-                    "UTC day moved backward during Polymarket recovery: started={recovery_day} completed={recovery_completed_day}"
-                ))
-                .into());
-            }
             if recovery_completed_day > recovery_day {
                 continue;
             }
@@ -171,11 +159,11 @@ pub(super) fn restore_binance_aggtrade_recovery(
             }
             continue;
         };
-        validate_manifest_day(&manifest, day)?;
+        let coverage = validate_manifest_day(&manifest, day)?;
         let state = manifest_state(&manifest)?;
         validate_manifest_recovery_files(day_dir, &manifest, state == "open")?;
         if state == "open" {
-            if manifest_collection_day_coverage(&manifest)?.is_some() {
+            if coverage.is_some() {
                 add_manifest_operational_counters(
                     day_dir,
                     &mut manifest,
@@ -276,7 +264,11 @@ pub(super) fn restore_binance_transport_dedupe_with_limit(
     let mut paths = all_finalized_source_parquet_paths(dataset_root, "binance_aggtrade")?;
     paths.reverse();
     'files: for path in paths {
-        let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&path)?)?;
+        let file = File::open(&path)?;
+        let metadata =
+            parquet::arrow::arrow_reader::ArrowReaderMetadata::load(&file, Default::default())?;
+        let builder =
+            ParquetRecordBatchReaderBuilder::new_with_metadata(file.try_clone()?, metadata.clone());
         if builder.schema().index_of("aggregate_trade_id").is_err()
             || builder
                 .schema()
@@ -300,7 +292,10 @@ pub(super) fn restore_binance_transport_dedupe_with_limit(
         };
         let projection = ProjectionMask::columns(builder.parquet_schema(), projection_columns);
         for row_group in (0..builder.metadata().num_row_groups()).rev() {
-            let row_group_builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&path)?)?;
+            let row_group_builder = ParquetRecordBatchReaderBuilder::new_with_metadata(
+                file.try_clone()?,
+                metadata.clone(),
+            );
             let mut reader = row_group_builder
                 .with_projection(projection.clone())
                 .with_row_groups(vec![row_group])

@@ -44,6 +44,7 @@ pub(super) fn manifest_file_digest(day_dir: &Path) -> String {
 
 #[test]
 fn normal_rollover_waits_for_four_producers_and_seven_writers() {
+    let writer_ack_gate = Arc::new(RawDayGate::new());
     let tmp = tempdir().unwrap();
     let dataset_root = tmp.path().canonicalize().unwrap();
     let boundary_utc_ms = 1_783_468_800_000;
@@ -72,7 +73,11 @@ fn normal_rollover_waits_for_four_producers_and_seven_writers() {
     for source in &training_source_kinds()[..training_source_kinds().len() - 1] {
         assert!(
             owner
-                .record_writer_ack(close.clone(), (*source).to_owned())
+                .record_writer_ack(
+                    close.clone(),
+                    (*source).to_owned(),
+                    Arc::clone(&writer_ack_gate)
+                )
                 .unwrap()
                 .is_none()
         );
@@ -91,6 +96,7 @@ fn normal_rollover_waits_for_four_producers_and_seven_writers() {
             .record_writer_ack(
                 close.clone(),
                 training_source_kinds().last().unwrap().to_string(),
+                Arc::clone(&writer_ack_gate)
             )
             .unwrap()
             .is_some()
@@ -104,6 +110,7 @@ fn normal_rollover_waits_for_four_producers_and_seven_writers() {
 
 #[test]
 fn pending_exit_rollover_closes_old_day_without_activating_new_day() {
+    let writer_ack_gate = Arc::new(RawDayGate::new());
     let tmp = tempdir().unwrap();
     let dataset_root = tmp.path().canonicalize().unwrap();
     let close = test_rollover_close(1_783_468_800_000);
@@ -122,7 +129,11 @@ fn pending_exit_rollover_closes_old_day_without_activating_new_day() {
     }
     for source in training_source_kinds() {
         owner
-            .record_writer_ack(close.clone(), (*source).to_owned())
+            .record_writer_ack(
+                close.clone(),
+                (*source).to_owned(),
+                Arc::clone(&writer_ack_gate),
+            )
             .unwrap();
     }
 
@@ -157,6 +168,7 @@ fn pending_exit_rollover_closes_old_day_without_activating_new_day() {
 
 #[test]
 fn unclean_pending_exit_closes_old_day_without_creating_new_day() {
+    let writer_ack_gate = Arc::new(RawDayGate::new());
     let tmp = tempdir().unwrap();
     let dataset_root = tmp.path().canonicalize().unwrap();
     let close = test_rollover_close(1_783_468_800_000);
@@ -175,7 +187,11 @@ fn unclean_pending_exit_closes_old_day_without_creating_new_day() {
     }
     for source in training_source_kinds() {
         owner
-            .record_writer_ack(close.clone(), (*source).to_owned())
+            .record_writer_ack(
+                close.clone(),
+                (*source).to_owned(),
+                Arc::clone(&writer_ack_gate),
+            )
             .unwrap();
     }
 
@@ -199,6 +215,7 @@ fn unclean_pending_exit_closes_old_day_without_creating_new_day() {
 
 #[test]
 fn rollover_rejects_wrong_generation_or_close_id() {
+    let writer_ack_gate = Arc::new(RawDayGate::new());
     let tmp = tempdir().unwrap();
     let dataset_root = tmp.path().canonicalize().unwrap();
     let close = test_rollover_close(1_783_468_800_000);
@@ -239,7 +256,11 @@ fn rollover_rejects_wrong_generation_or_close_id() {
     wrong_close_id.close_id += 1;
     assert!(
         owner
-            .record_writer_ack(wrong_close_id, training_source_kinds()[0].to_owned())
+            .record_writer_ack(
+                wrong_close_id,
+                training_source_kinds()[0].to_owned(),
+                Arc::clone(&writer_ack_gate)
+            )
             .unwrap_err()
             .to_string()
             .contains("tuple mismatch")
@@ -248,6 +269,7 @@ fn rollover_rejects_wrong_generation_or_close_id() {
 
 #[test]
 fn rejected_duplicate_or_late_producer_barrier_preserves_manifest_digest() {
+    let writer_ack_gate = Arc::new(RawDayGate::new());
     let tmp = tempdir().unwrap();
     let dataset_root = tmp.path().canonicalize().unwrap();
     let close = test_rollover_close(1_783_468_800_000);
@@ -303,7 +325,11 @@ fn rejected_duplicate_or_late_producer_barrier_preserves_manifest_digest() {
     let mut ready = None;
     for source_kind in training_source_kinds() {
         ready = owner
-            .record_writer_ack(close.clone(), (*source_kind).to_owned())
+            .record_writer_ack(
+                close.clone(),
+                (*source_kind).to_owned(),
+                Arc::clone(&writer_ack_gate),
+            )
             .unwrap()
             .or(ready);
     }
@@ -332,6 +358,7 @@ fn rejected_duplicate_or_late_producer_barrier_preserves_manifest_digest() {
 
 #[test]
 fn manifest_owner_requires_rendezvous_then_two_normal_rollover_cutpoints() {
+    let writer_ack_gate = Arc::new(RawDayGate::new());
     let tmp = tempdir().unwrap();
     let dataset_root = tmp.path().canonicalize().unwrap();
     let day = "2026-07-07";
@@ -381,7 +408,11 @@ fn manifest_owner_requires_rendezvous_then_two_normal_rollover_cutpoints() {
     for source in &training_source_kinds()[..training_source_kinds().len() - 1] {
         assert!(
             owner
-                .record_writer_ack(close.clone(), (*source).to_owned())
+                .record_writer_ack(
+                    close.clone(),
+                    (*source).to_owned(),
+                    Arc::clone(&writer_ack_gate)
+                )
                 .unwrap()
                 .is_none()
         );
@@ -394,6 +425,7 @@ fn manifest_owner_requires_rendezvous_then_two_normal_rollover_cutpoints() {
         .record_writer_ack(
             close.clone(),
             training_source_kinds().last().unwrap().to_string(),
+            Arc::clone(&writer_ack_gate),
         )
         .unwrap()
         .expect("ten-participant rendezvous must become ready exactly once");
@@ -468,6 +500,7 @@ fn manifest_owner_requires_rendezvous_then_two_normal_rollover_cutpoints() {
 
 #[test]
 fn manifest_owner_unclean_rollover_preserves_reactivation() {
+    let writer_ack_gate = Arc::new(RawDayGate::new());
     let tmp = tempdir().unwrap();
     let dataset_root = tmp.path().canonicalize().unwrap();
     let boundary_utc_ms = 1_783_468_800_000;
@@ -494,7 +527,11 @@ fn manifest_owner_unclean_rollover_preserves_reactivation() {
     }
     for (index, source_kind) in training_source_kinds().iter().enumerate() {
         let ready = owner
-            .record_writer_ack(close.clone(), (*source_kind).to_owned())
+            .record_writer_ack(
+                close.clone(),
+                (*source_kind).to_owned(),
+                Arc::clone(&writer_ack_gate),
+            )
             .unwrap();
         assert_eq!(ready.is_some(), index + 1 == training_source_kinds().len());
     }
@@ -635,6 +672,7 @@ fn rejected_shutdown_identity_preserves_manifest_digest() {
 
 #[test]
 fn multi_day_writer_deltas_release_closed_owner_material_without_losing_files() {
+    let writer_ack_gate = Arc::new(RawDayGate::new());
     let tmp = tempdir().unwrap();
     let root = tmp.path().canonicalize().unwrap();
     let first_boundary = 1_783_468_800_000;
@@ -716,7 +754,11 @@ fn multi_day_writer_deltas_release_closed_owner_material_without_losing_files() 
         }
         for source in training_source_kinds() {
             owner
-                .record_writer_ack(close.clone(), (*source).to_owned())
+                .record_writer_ack(
+                    close.clone(),
+                    (*source).to_owned(),
+                    Arc::clone(&writer_ack_gate),
+                )
                 .unwrap();
         }
         owner
@@ -749,6 +791,7 @@ fn multi_day_writer_deltas_release_closed_owner_material_without_losing_files() 
 
 #[test]
 fn failed_old_day_close_keeps_manifest_and_activation_material() {
+    let writer_ack_gate = Arc::new(RawDayGate::new());
     let tmp = tempdir().unwrap();
     let root = tmp.path().canonicalize().unwrap();
     let close = test_rollover_close(1_783_468_800_000);
@@ -767,7 +810,11 @@ fn failed_old_day_close_keeps_manifest_and_activation_material() {
     }
     for source in training_source_kinds() {
         owner
-            .record_writer_ack(close.clone(), (*source).to_owned())
+            .record_writer_ack(
+                close.clone(),
+                (*source).to_owned(),
+                Arc::clone(&writer_ack_gate),
+            )
             .unwrap();
     }
     let before = load_day_manifest(&day_dir).unwrap().unwrap();

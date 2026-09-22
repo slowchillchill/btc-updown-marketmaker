@@ -62,7 +62,7 @@ fn stop_post_activation_release_unclean(
                 let message = format!(
                     "post-activation release abandonment failed after exact stop: stage={stage} error={error}"
                 );
-                rollover_coordinator.mark_outcome_uncertain(message.clone());
+                rollover_coordinator.mark_outcome_uncertain();
                 return Err(invalid_data(message).into());
             }
             Ok(close)
@@ -73,7 +73,7 @@ fn stop_post_activation_release_unclean(
             let message = format!(
                 "post-activation close ownership is uncertain; old-generation stop issued: stage={stage} error={error}"
             );
-            rollover_coordinator.mark_outcome_uncertain(message.clone());
+            rollover_coordinator.mark_outcome_uncertain();
             Err(invalid_data(message).into())
         }
     }
@@ -91,7 +91,7 @@ fn stop_post_activation_release_known(
         let message = format!(
             "post-activation release abandonment failed after known exact stop: error={error}"
         );
-        rollover_coordinator.mark_outcome_uncertain(message.clone());
+        rollover_coordinator.mark_outcome_uncertain();
         return Err(invalid_data(message).into());
     }
     Ok(())
@@ -322,9 +322,7 @@ pub(super) async fn drive_normal_rollover(
     let mut post_activation_exit = if let Some(prepared) = raw_day_gate.prepared_runtime_exit() {
         let PreparedRuntimeExit::SameDay(close) = prepared else {
             release.stop();
-            let _ = rollover_coordinator.mark_outcome_uncertain(
-                "post-activation exit retained old-generation ownership".to_owned(),
-            );
+            rollover_coordinator.mark_outcome_uncertain();
             return Err(
                 invalid_data("post-activation exit retained old-generation ownership").into(),
             );
@@ -387,9 +385,7 @@ pub(super) async fn drive_normal_rollover(
                 let PreparedRuntimeExit::SameDay(close) = prepared else {
                     *release_stop_issued = true;
                     release.stop();
-                    let _ = rollover_coordinator.mark_outcome_uncertain(
-                        "runtime exit during deferred flush retained old-generation ownership".to_owned(),
-                    );
+                    rollover_coordinator.mark_outcome_uncertain();
                     return Err(invalid_data(
                         "runtime exit during deferred flush retained old-generation ownership",
                     ).into());
@@ -457,9 +453,7 @@ pub(super) async fn drive_normal_rollover(
                     let PreparedRuntimeExit::SameDay(close) = prepared else {
                         *release_stop_issued = true;
                         release.stop();
-                        let _ = rollover_coordinator.mark_outcome_uncertain(
-                            "prepared exit during deferred flush retained old-generation ownership".to_owned(),
-                        );
+                        rollover_coordinator.mark_outcome_uncertain();
                         return Err(invalid_data(
                             "prepared exit during deferred flush retained old-generation ownership",
                         ).into());
@@ -518,9 +512,7 @@ pub(super) async fn drive_normal_rollover(
         let PreparedRuntimeExit::SameDay(close) = prepared else {
             *release_stop_issued = true;
             release.stop();
-            let _ = rollover_coordinator.mark_outcome_uncertain(
-                "prepared exit before raw activation retained old-generation ownership".to_owned(),
-            );
+            rollover_coordinator.mark_outcome_uncertain();
             return Err(invalid_data(
                 "prepared exit before raw activation retained old-generation ownership",
             )

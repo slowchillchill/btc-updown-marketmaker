@@ -322,12 +322,6 @@ fn remove_stale_files_in_directory(
         let path = entry.path();
         let metadata = entry.metadata()?;
         require_expected_owner(&path, &metadata, expected_uid, "stale temporary file")?;
-        if accessible_process_holds(&path)? {
-            return Err(io::Error::new(
-                io::ErrorKind::WouldBlock,
-                format!("stale temporary file is still open: {}", path.display()),
-            ));
-        }
         let _lease = acquire_exclusive_cleanup_lease(&path)?;
         fs::remove_file(&path)?;
         removed.push(
@@ -419,57 +413,6 @@ fn require_expected_owner(
     ))
 }
 
-#[cfg(unix)]
-fn accessible_process_holds(path: &Path) -> io::Result<bool> {
-    let target = fs::metadata(path)?;
-    for process in fs::read_dir("/proc")? {
-        let process = process?;
-        let pid = process.file_name();
-        let pid = pid.to_string_lossy();
-        if !pid.bytes().all(|byte| byte.is_ascii_digit()) {
-            continue;
-        }
-        let descriptors = match fs::read_dir(process.path().join("fd")) {
-            Ok(descriptors) => descriptors,
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
-                ) =>
-            {
-                continue;
-            }
-            Err(error) => return Err(error),
-        };
-        for descriptor in descriptors {
-            let descriptor = descriptor?;
-            match fs::metadata(descriptor.path()) {
-                Ok(metadata)
-                    if metadata.dev() == target.dev() && metadata.ino() == target.ino() =>
-                {
-                    return Ok(true);
-                }
-                Ok(_) => {}
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        io::ErrorKind::NotFound | io::ErrorKind::PermissionDenied
-                    ) => {}
-                Err(error) => return Err(error),
-            }
-        }
-    }
-    Ok(false)
-}
-
-#[cfg(not(unix))]
-fn accessible_process_holds(_path: &Path) -> io::Result<bool> {
-    Err(io::Error::new(
-        io::ErrorKind::Unsupported,
-        "stale temporary open-file check requires Unix /proc",
-    ))
-}
-
 #[cfg(target_os = "linux")]
 fn acquire_exclusive_cleanup_lease(path: &Path) -> io::Result<File> {
     let file = OpenOptions::new().read(true).write(true).open(path)?;
@@ -548,7 +491,7 @@ pub fn manifest_collection_day_coverage(
         ));
     }
     let coverage: CollectionDayCoverage =
-        serde_json::from_value(value.clone()).map_err(|error| {
+        CollectionDayCoverage::deserialize(value).map_err(|error| {
             io::Error::new(
                 io::ErrorKind::InvalidData,
                 format!("invalid collection_day_coverage: {error}"),
@@ -568,7 +511,13 @@ pub fn manifest_collection_day_coverage(
 pub fn require_manifest_collection_day_coverage(
     manifest: &Value,
 ) -> io::Result<CollectionDayCoverage> {
-    manifest_collection_day_coverage(manifest)?.ok_or_else(|| {
+    require_collection_day_coverage(manifest_collection_day_coverage(manifest)?)
+}
+
+fn require_collection_day_coverage(
+    coverage: Option<CollectionDayCoverage>,
+) -> io::Result<CollectionDayCoverage> {
+    coverage.ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             "collection_day_coverage missing from writable daily manifest",
@@ -707,7 +656,10 @@ fn utc_day_bounds_ms(utc_day: &str) -> io::Result<(i64, i64)> {
     Ok((day_start, day_end))
 }
 
-pub fn validate_manifest_day(manifest: &Value, expected_day: &str) -> io::Result<()> {
+pub fn validate_manifest_day(
+    manifest: &Value,
+    expected_day: &str,
+) -> io::Result<Option<CollectionDayCoverage>> {
     let schema_version = manifest
         .get("schema_version")
         .and_then(Value::as_str)
@@ -725,7 +677,6 @@ pub fn validate_manifest_day(manifest: &Value, expected_day: &str) -> io::Result
             ),
         ));
     }
-    manifest_identity(manifest)?;
     let actual_day = manifest
         .get("utc_day")
         .and_then(Value::as_str)
@@ -744,8 +695,7 @@ pub fn validate_manifest_day(manifest: &Value, expected_day: &str) -> io::Result
         ));
     }
     validate_legacy_binance_continuity_field(manifest)?;
-    manifest_collection_day_coverage(manifest)?;
-    Ok(())
+    manifest_collection_day_coverage(manifest)
 }
 
 pub fn manifest_state(manifest: &Value) -> io::Result<&str> {
@@ -762,13 +712,12 @@ fn validate_legacy_binance_continuity_field(manifest: &Value) -> io::Result<()> 
     else {
         return Ok(());
     };
-    let continuity: LegacyBinanceAggTradeContinuityState = serde_json::from_value(value.clone())
-        .map_err(|error| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("invalid legacy Binance continuity in daily manifest: {error}"),
-            )
-        })?;
+    let continuity = LegacyBinanceAggTradeContinuityState::deserialize(value).map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("invalid legacy Binance continuity in daily manifest: {error}"),
+        )
+    })?;
     if let Some(epoch) = continuity.latest_epoch
         && (epoch.epoch_start_id == 0
             || epoch.epoch_start_id > epoch.last_contiguous_id
@@ -822,11 +771,16 @@ pub fn activate_collection_day_coverage(
     manifest: &mut Value,
     started_utc_ms: i64,
 ) -> io::Result<CollectionDayCoverage> {
-    let mut next_manifest = manifest.clone();
-    let utc_day = manifest_utc_day(&next_manifest)?.to_owned();
-    validate_manifest_day(&next_manifest, &utc_day)?;
-    require_open_manifest(&next_manifest, "activate collection-day coverage")?;
-    let current = require_manifest_collection_day_coverage(&next_manifest)?;
+    let utc_day = manifest_utc_day(manifest)?.to_owned();
+    require_open_manifest(manifest, "activate collection-day coverage")?;
+    let current = require_collection_day_coverage(validate_manifest_day(manifest, &utc_day)?)?;
+    let (day_start, day_end) = utc_day_bounds_ms(&utc_day)?;
+    if !(day_start..day_end).contains(&started_utc_ms) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "collection-day start lies outside its UTC day",
+        ));
+    }
     let next = match current.state {
         CollectionDayCoverageState::NotStarted => CollectionDayCoverage {
             schema_version: COLLECTION_DAY_COVERAGE_SCHEMA_VERSION.to_owned(),
@@ -867,10 +821,16 @@ pub fn activate_collection_day_coverage(
             }
         }
     };
-    set_manifest_collection_day_coverage(&mut next_manifest, &next)?;
-    validate_manifest_day(&next_manifest, &utc_day)?;
-    write_json_atomic(&day_dir.join(DAILY_MANIFEST_FILE_NAME), &next_manifest)?;
-    *manifest = next_manifest;
+    write_manifest_updates(
+        day_dir,
+        manifest,
+        [(
+            COLLECTION_DAY_COVERAGE_FIELD.to_owned(),
+            serde_json::to_value(&next).map_err(io::Error::other)?,
+        )]
+        .into_iter()
+        .collect(),
+    )?;
     Ok(next)
 }
 
@@ -878,20 +838,24 @@ pub fn mark_collection_day_coverage_unclean(
     day_dir: &Path,
     manifest: &mut Value,
 ) -> io::Result<CollectionDayCoverage> {
-    let mut next_manifest = manifest.clone();
-    let utc_day = manifest_utc_day(&next_manifest)?.to_owned();
-    validate_manifest_day(&next_manifest, &utc_day)?;
-    require_open_manifest(&next_manifest, "mark collection-day coverage unclean")?;
-    let current = require_manifest_collection_day_coverage(&next_manifest)?;
+    let utc_day = manifest_utc_day(manifest)?.to_owned();
+    require_open_manifest(manifest, "mark collection-day coverage unclean")?;
+    let current = require_collection_day_coverage(validate_manifest_day(manifest, &utc_day)?)?;
     let already_unclean = current.state == CollectionDayCoverageState::UncleanEndUnknown;
     let next = collection_day_coverage_unclean(current)?;
     if already_unclean {
         return Ok(next);
     }
-    set_manifest_collection_day_coverage(&mut next_manifest, &next)?;
-    validate_manifest_day(&next_manifest, &utc_day)?;
-    write_json_atomic(&day_dir.join(DAILY_MANIFEST_FILE_NAME), &next_manifest)?;
-    *manifest = next_manifest;
+    write_manifest_updates(
+        day_dir,
+        manifest,
+        [(
+            COLLECTION_DAY_COVERAGE_FIELD.to_owned(),
+            serde_json::to_value(&next).map_err(io::Error::other)?,
+        )]
+        .into_iter()
+        .collect(),
+    )?;
     Ok(next)
 }
 
@@ -900,45 +864,59 @@ pub fn mark_collection_day_coverage_ended_known(
     manifest: &mut Value,
     ended_utc_ms: i64,
 ) -> io::Result<CollectionDayCoverage> {
-    let mut next_manifest = manifest.clone();
-    let utc_day = manifest_utc_day(&next_manifest)?.to_owned();
-    validate_manifest_day(&next_manifest, &utc_day)?;
-    require_open_manifest(&next_manifest, "end collection-day coverage")?;
-    let current = require_manifest_collection_day_coverage(&next_manifest)?;
-    let next = collection_day_coverage_ended_known(current, ended_utc_ms)?;
-    set_manifest_collection_day_coverage(&mut next_manifest, &next)?;
-    validate_manifest_day(&next_manifest, &utc_day)?;
-    write_json_atomic(&day_dir.join(DAILY_MANIFEST_FILE_NAME), &next_manifest)?;
-    *manifest = next_manifest;
+    let utc_day = manifest_utc_day(manifest)?.to_owned();
+    require_open_manifest(manifest, "end collection-day coverage")?;
+    let current = require_collection_day_coverage(validate_manifest_day(manifest, &utc_day)?)?;
+    let next = collection_day_coverage_ended_known(current, &utc_day, ended_utc_ms)?;
+    write_manifest_updates(
+        day_dir,
+        manifest,
+        [(
+            COLLECTION_DAY_COVERAGE_FIELD.to_owned(),
+            serde_json::to_value(&next).map_err(io::Error::other)?,
+        )]
+        .into_iter()
+        .collect(),
+    )?;
     Ok(next)
 }
 
 pub fn reconcile_prior_day_collection_coverage(
     manifest: &mut Value,
 ) -> io::Result<PriorDayCoverageDisposition> {
-    let utc_day = manifest_utc_day(manifest)?.to_owned();
-    validate_manifest_day(manifest, &utc_day)?;
+    let current = validate_manifest_day(manifest, manifest_utc_day(manifest)?)?;
     require_open_manifest(manifest, "reconcile prior-day collection coverage")?;
-    let Some(current) = manifest_collection_day_coverage(manifest)? else {
-        return Ok(PriorDayCoverageDisposition::LegacyUnknown);
+    let (disposition, next) = reconciled_collection_coverage(current);
+    if let Some(next) = next {
+        set_manifest_collection_day_coverage(manifest, &next)?;
+    }
+    Ok(disposition)
+}
+
+fn reconciled_collection_coverage(
+    current: Option<CollectionDayCoverage>,
+) -> (PriorDayCoverageDisposition, Option<CollectionDayCoverage>) {
+    let Some(current) = current else {
+        return (PriorDayCoverageDisposition::LegacyUnknown, None);
     };
-    match current.state {
+    let disposition = match current.state {
         CollectionDayCoverageState::Active => {
-            let next = CollectionDayCoverage {
-                state: CollectionDayCoverageState::UncleanEndUnknown,
-                ended_utc_ms: None,
-                ..current
-            };
-            set_manifest_collection_day_coverage(manifest, &next)?;
-            validate_manifest_day(manifest, &utc_day)?;
-            Ok(PriorDayCoverageDisposition::ActiveMarkedUnclean)
+            return (
+                PriorDayCoverageDisposition::ActiveMarkedUnclean,
+                Some(CollectionDayCoverage {
+                    state: CollectionDayCoverageState::UncleanEndUnknown,
+                    ended_utc_ms: None,
+                    ..current
+                }),
+            );
         }
         CollectionDayCoverageState::UncleanEndUnknown => {
-            Ok(PriorDayCoverageDisposition::AlreadyUnclean)
+            PriorDayCoverageDisposition::AlreadyUnclean
         }
-        CollectionDayCoverageState::NotStarted => Ok(PriorDayCoverageDisposition::NotStarted),
-        CollectionDayCoverageState::EndedKnown => Ok(PriorDayCoverageDisposition::EndedKnown),
-    }
+        CollectionDayCoverageState::NotStarted => PriorDayCoverageDisposition::NotStarted,
+        CollectionDayCoverageState::EndedKnown => PriorDayCoverageDisposition::EndedKnown,
+    };
+    (disposition, None)
 }
 
 pub fn close_day_manifest_with_collection_end(
@@ -948,27 +926,16 @@ pub fn close_day_manifest_with_collection_end(
     ended_utc_ms: i64,
 ) -> io::Result<CollectionDayCoverage> {
     ensure_no_stale_temporary_files(day_dir)?;
-    let mut next_manifest = manifest.clone();
-    let utc_day = manifest_utc_day(&next_manifest)?.to_owned();
-    validate_manifest_day(&next_manifest, &utc_day)?;
-    require_open_manifest(&next_manifest, "close daily manifest")?;
-    let current = require_manifest_collection_day_coverage(&next_manifest)?;
-    let next = collection_day_coverage_ended_known(current, ended_utc_ms)?;
-    set_manifest_collection_day_coverage(&mut next_manifest, &next)?;
-    let object = next_manifest.as_object_mut().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "daily manifest is not an object",
-        )
-    })?;
-    object.insert("state".to_owned(), Value::String("closed".to_owned()));
-    object.insert(
-        "closure_reason".to_owned(),
-        Value::String(closure_reason.to_owned()),
+    let utc_day = manifest_utc_day(manifest)?.to_owned();
+    let current = require_collection_day_coverage(validate_manifest_day(manifest, &utc_day)?)?;
+    require_open_manifest(manifest, "close daily manifest")?;
+    let next = collection_day_coverage_ended_known(current, &utc_day, ended_utc_ms)?;
+    let mut updates = closure_updates(closure_reason);
+    updates.insert(
+        COLLECTION_DAY_COVERAGE_FIELD.to_owned(),
+        serde_json::to_value(&next).map_err(io::Error::other)?,
     );
-    validate_manifest_day(&next_manifest, &utc_day)?;
-    write_json_atomic(&day_dir.join(DAILY_MANIFEST_FILE_NAME), &next_manifest)?;
-    *manifest = next_manifest;
+    write_manifest_updates(day_dir, manifest, updates)?;
     Ok(next)
 }
 
@@ -979,28 +946,17 @@ pub fn close_day_manifest_with_unclean_end(
     gaps: &[String],
 ) -> io::Result<CollectionDayCoverage> {
     ensure_no_stale_temporary_files(day_dir)?;
-    let mut next_manifest = manifest.clone();
-    let utc_day = manifest_utc_day(&next_manifest)?.to_owned();
-    validate_manifest_day(&next_manifest, &utc_day)?;
-    require_open_manifest(&next_manifest, "close daily manifest with unclean end")?;
-    let current = require_manifest_collection_day_coverage(&next_manifest)?;
+    let utc_day = manifest_utc_day(manifest)?.to_owned();
+    let current = require_collection_day_coverage(validate_manifest_day(manifest, &utc_day)?)?;
+    require_open_manifest(manifest, "close daily manifest with unclean end")?;
     let next = collection_day_coverage_unclean(current)?;
-    set_manifest_collection_day_coverage(&mut next_manifest, &next)?;
-    merge_manifest_gaps(&mut next_manifest, gaps)?;
-    let object = next_manifest.as_object_mut().ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "daily manifest is not an object",
-        )
-    })?;
-    object.insert("state".to_owned(), Value::String("closed".to_owned()));
-    object.insert(
-        "closure_reason".to_owned(),
-        Value::String(closure_reason.to_owned()),
+    let mut updates = closure_updates(closure_reason);
+    updates.insert(
+        COLLECTION_DAY_COVERAGE_FIELD.to_owned(),
+        serde_json::to_value(&next).map_err(io::Error::other)?,
     );
-    validate_manifest_day(&next_manifest, &utc_day)?;
-    write_json_atomic(&day_dir.join(DAILY_MANIFEST_FILE_NAME), &next_manifest)?;
-    *manifest = next_manifest;
+    updates.insert("gaps".to_owned(), merged_manifest_gaps(manifest, gaps));
+    write_manifest_updates(day_dir, manifest, updates)?;
     Ok(next)
 }
 
@@ -1025,12 +981,25 @@ fn collection_day_coverage_unclean(
 
 fn collection_day_coverage_ended_known(
     current: CollectionDayCoverage,
+    utc_day: &str,
     ended_utc_ms: i64,
 ) -> io::Result<CollectionDayCoverage> {
     if current.state != CollectionDayCoverageState::Active {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "only active collection_day_coverage can end known",
+        ));
+    }
+    let (_, day_end) = utc_day_bounds_ms(utc_day)?;
+    if ended_utc_ms
+        < current
+            .last_started_utc_ms
+            .expect("active coverage has a last start")
+        || ended_utc_ms > day_end
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "collection-day end lies before its last start or after its UTC day",
         ));
     }
     Ok(CollectionDayCoverage {
@@ -1099,56 +1068,39 @@ fn require_open_manifest(manifest: &Value, operation: &str) -> io::Result<()> {
 
 fn validate_writable_manifest_collection_coverage(manifest: &Value) -> io::Result<()> {
     let utc_day = manifest_utc_day(manifest)?;
-    validate_manifest_day(manifest, utc_day)?;
-    require_manifest_collection_day_coverage(manifest)?;
+    require_collection_day_coverage(validate_manifest_day(manifest, utc_day)?)?;
     Ok(())
 }
 
 pub fn close_reconciled_day_manifest(day_dir: &Path, manifest: &mut Value) -> io::Result<()> {
-    let mut next_manifest = manifest.clone();
-    let utc_day = manifest_utc_day(&next_manifest)?.to_owned();
-    validate_manifest_day(&next_manifest, &utc_day)?;
-    require_open_manifest(&next_manifest, "reconcile closed UTC day")?;
-    let disposition = reconcile_prior_day_collection_coverage(&mut next_manifest)?;
-    let existing_source_counters = next_manifest.get("source_counters").cloned();
-    let files = reconciled_manifest_file_facts(day_dir, &next_manifest, true)?;
-    {
-        let object = next_manifest.as_object_mut().ok_or_else(|| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                "daily manifest is not an object",
-            )
-        })?;
-        object.insert("files".to_owned(), Value::Array(files));
-        object.insert(
-            "source_counters".to_owned(),
-            source_counters_from_files(
-                object
-                    .get("files")
-                    .and_then(Value::as_array)
-                    .expect("files inserted as an array"),
-                existing_source_counters.as_ref(),
-            ),
+    let current = validate_manifest_day(manifest, manifest_utc_day(manifest)?)?;
+    require_open_manifest(manifest, "reconcile closed UTC day")?;
+    let (disposition, next) = reconciled_collection_coverage(current);
+    let identity = manifest_identity(manifest)?;
+    let files = reconciled_manifest_file_facts(day_dir, manifest, &identity, true)?;
+    let source_counters = source_counters_from_files(&files, manifest.get("source_counters"));
+    let mut updates = closure_updates(disposition.closure_reason());
+    updates.insert("files".to_owned(), Value::Array(files));
+    updates.insert("source_counters".to_owned(), source_counters);
+    if let Some(next) = next {
+        updates.insert(
+            COLLECTION_DAY_COVERAGE_FIELD.to_owned(),
+            serde_json::to_value(next).map_err(io::Error::other)?,
         );
     }
     if disposition.requires_unclean_gap() {
-        merge_manifest_gaps(
-            &mut next_manifest,
-            &["unclean_exit_recovery_gap:previous_process_ended_without_day_barrier".to_owned()],
-        )?;
+        updates.insert(
+            "gaps".to_owned(),
+            merged_manifest_gaps(
+                manifest,
+                &[
+                    "unclean_exit_recovery_gap:previous_process_ended_without_day_barrier"
+                        .to_owned(),
+                ],
+            ),
+        );
     }
-    let object = next_manifest
-        .as_object_mut()
-        .expect("manifest object was validated");
-    object.insert("state".to_owned(), Value::String("closed".to_owned()));
-    object.insert(
-        "closure_reason".to_owned(),
-        Value::String(disposition.closure_reason().to_owned()),
-    );
-    validate_manifest_day(&next_manifest, &utc_day)?;
-    write_json_atomic(&day_dir.join(DAILY_MANIFEST_FILE_NAME), &next_manifest)?;
-    *manifest = next_manifest;
-    Ok(())
+    write_manifest_updates(day_dir, manifest, updates)
 }
 
 pub fn reconcile_open_day_manifest(
@@ -1175,17 +1127,18 @@ pub fn reconcile_open_day_manifest(
             "collection_day_coverage": collection_day_coverage_not_started(),
         })
     });
-    validate_manifest_day(&manifest, utc_day)?;
+    let coverage = validate_manifest_day(&manifest, utc_day)?;
     if manifest_state(&manifest)? != "open" {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("cannot reopen closed UTC day manifest: {utc_day}"),
         ));
     }
-    require_identity(&manifest, identity)?;
-    require_manifest_collection_day_coverage(&manifest)?;
-    let existing_source_counters = manifest.get("source_counters").cloned();
-    let files = reconciled_manifest_file_facts(day_dir, &manifest, true)?;
+    let actual_identity = manifest_identity(&manifest)?;
+    require_identity(&actual_identity, identity)?;
+    require_collection_day_coverage(coverage)?;
+    let files = reconciled_manifest_file_facts(day_dir, &manifest, &actual_identity, true)?;
+    let source_counters = source_counters_from_files(&files, manifest.get("source_counters"));
     let object = manifest.as_object_mut().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
@@ -1193,16 +1146,7 @@ pub fn reconcile_open_day_manifest(
         )
     })?;
     object.insert("files".to_owned(), Value::Array(files));
-    object.insert(
-        "source_counters".to_owned(),
-        source_counters_from_files(
-            object
-                .get("files")
-                .and_then(Value::as_array)
-                .expect("files inserted as an array"),
-            existing_source_counters.as_ref(),
-        ),
-    );
+    object.insert("source_counters".to_owned(), source_counters);
     write_json_atomic(&path, &manifest)?;
     Ok(manifest)
 }
@@ -1212,8 +1156,7 @@ pub fn merge_finalized_file_delta(
     manifest: &mut Value,
     delta: &DailyFinalizedFileDelta,
 ) -> io::Result<()> {
-    validate_manifest_day(manifest, &delta.utc_day)?;
-    require_manifest_collection_day_coverage(manifest)?;
+    require_collection_day_coverage(validate_manifest_day(manifest, &delta.utc_day)?)?;
     if manifest_state(manifest)? != "open" {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -1280,8 +1223,7 @@ pub fn merge_finalized_file_delta(
             "daily manifest is not an object",
         )
     })?;
-    let existing_source_counters = object.get("source_counters").cloned();
-    let source_counters = {
+    {
         let files = object
             .entry("files")
             .or_insert_with(|| Value::Array(Vec::new()))
@@ -1303,8 +1245,11 @@ pub fn merge_finalized_file_delta(
             files.push(file_fact);
             files.sort_by(|left, right| left["path"].as_str().cmp(&right["path"].as_str()));
         }
-        source_counters_from_files(files, existing_source_counters.as_ref())
-    };
+    }
+    let source_counters = source_counters_from_files(
+        object["files"].as_array().expect("files is an array"),
+        object.get("source_counters"),
+    );
     object.insert("source_counters".to_owned(), source_counters);
     write_json_atomic(&day_dir.join(DAILY_MANIFEST_FILE_NAME), manifest)
 }
@@ -1393,13 +1338,19 @@ pub fn record_manifest_gaps(
 }
 
 fn merge_manifest_gaps(manifest: &mut Value, new_gaps: &[String]) -> io::Result<()> {
+    let gaps = merged_manifest_gaps(manifest, new_gaps);
     let object = manifest.as_object_mut().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             "daily manifest is not an object",
         )
     })?;
-    let existing_gaps = object
+    object.insert("gaps".to_owned(), gaps);
+    Ok(())
+}
+
+fn merged_manifest_gaps(manifest: &Value, new_gaps: &[String]) -> Value {
+    let existing_gaps = manifest
         .get("gaps")
         .and_then(Value::as_array)
         .into_iter()
@@ -1427,8 +1378,7 @@ fn merge_manifest_gaps(manifest: &mut Value, new_gaps: &[String]) -> io::Result<
     if overflow > 0 {
         bounded.push(format!("manifest_gap_overflow_count:{overflow}"));
     }
-    object.insert("gaps".to_owned(), json!(bounded));
-    Ok(())
+    json!(bounded)
 }
 
 pub fn record_day_barrier_state(
@@ -1459,25 +1409,51 @@ pub fn close_day_manifest(
     closure_reason: &str,
 ) -> io::Result<()> {
     ensure_no_stale_temporary_files(day_dir)?;
-    let mut next_manifest = manifest.clone();
-    let utc_day = manifest_utc_day(&next_manifest)?.to_owned();
-    validate_manifest_day(&next_manifest, &utc_day)?;
-    require_manifest_collection_day_coverage(&next_manifest)?;
-    require_open_manifest(&next_manifest, "close daily manifest")?;
-    let object = next_manifest.as_object_mut().ok_or_else(|| {
+    let coverage = require_collection_day_coverage(validate_manifest_day(
+        manifest,
+        manifest_utc_day(manifest)?,
+    )?)?;
+    require_open_manifest(manifest, "close daily manifest")?;
+    if coverage.state == CollectionDayCoverageState::Active {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "closed daily manifest cannot have active collection_day_coverage",
+        ));
+    }
+    write_manifest_updates(day_dir, manifest, closure_updates(closure_reason))
+}
+
+fn closure_updates(reason: &str) -> serde_json::Map<String, Value> {
+    [
+        ("state".to_owned(), Value::String("closed".to_owned())),
+        (
+            "closure_reason".to_owned(),
+            Value::String(reason.to_owned()),
+        ),
+    ]
+    .into_iter()
+    .collect()
+}
+
+fn write_manifest_updates(
+    day_dir: &Path,
+    manifest: &mut Value,
+    updates: serde_json::Map<String, Value>,
+) -> io::Result<()> {
+    let object = manifest.as_object_mut().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             "daily manifest is not an object",
         )
     })?;
-    object.insert("state".to_owned(), Value::String("closed".to_owned()));
-    object.insert(
-        "closure_reason".to_owned(),
-        Value::String(closure_reason.to_owned()),
-    );
-    validate_manifest_day(&next_manifest, &utc_day)?;
-    write_json_atomic(&day_dir.join(DAILY_MANIFEST_FILE_NAME), &next_manifest)?;
-    *manifest = next_manifest;
+    // 仅组合顶层借用；持久写入成功后才修改内存中的原值。
+    let mut fields: BTreeMap<&str, &Value> = object
+        .iter()
+        .map(|(key, value)| (key.as_str(), value))
+        .collect();
+    fields.extend(updates.iter().map(|(key, value)| (key.as_str(), value)));
+    write_json_atomic(&day_dir.join(DAILY_MANIFEST_FILE_NAME), &fields)?;
+    object.extend(updates);
     Ok(())
 }
 
@@ -1525,7 +1501,8 @@ pub fn validate_manifest_recovery_files(
     manifest: &Value,
     allow_unrecorded_files: bool,
 ) -> io::Result<()> {
-    reconciled_manifest_file_facts(day_dir, manifest, allow_unrecorded_files).map(|_| ())
+    let identity = manifest_identity(manifest)?;
+    reconciled_manifest_file_facts(day_dir, manifest, &identity, allow_unrecorded_files).map(|_| ())
 }
 
 pub fn validate_unmanifested_recovery_files(
@@ -1539,6 +1516,7 @@ pub fn validate_unmanifested_recovery_files(
 fn reconciled_manifest_file_facts(
     day_dir: &Path,
     manifest: &Value,
+    identity: &TrainingArtifactIdentity,
     allow_unrecorded_files: bool,
 ) -> io::Result<Vec<Value>> {
     ensure_no_stale_temporary_files(day_dir)?;
@@ -1548,10 +1526,9 @@ fn reconciled_manifest_file_facts(
         .ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidData, "manifest files is not an array")
         })?;
-    let identity = manifest_identity(manifest)?;
     let files = merge_existing_and_disk_file_facts(
         existing_files,
-        finalized_file_facts(day_dir, &identity)?,
+        finalized_file_facts(day_dir, identity)?,
     )?;
     if !allow_unrecorded_files && files.len() != existing_files.len() {
         return Err(io::Error::new(
@@ -2011,9 +1988,9 @@ fn source_counters_from_files(files: &[Value], existing: Option<&Value>) -> Valu
         let entry = counters
             .entry(source_kind.to_owned())
             .or_insert_with(empty_source_counter);
-        let Some(object) = entry.as_object_mut() else {
-            continue;
-        };
+        let object = entry
+            .as_object_mut()
+            .expect("source counter constructed as object");
         let file_count = object.get("files").and_then(Value::as_u64).unwrap_or(0);
         object.insert("files".to_owned(), json!(file_count.saturating_add(1)));
         let rows = object.get("rows").and_then(Value::as_u64).unwrap_or(0);
@@ -2071,9 +2048,9 @@ fn source_counters_from_files(files: &[Value], existing: Option<&Value>) -> Valu
             let counter = counters
                 .entry(source_kind.clone())
                 .or_insert_with(empty_source_counter);
-            let Some(counter) = counter.as_object_mut() else {
-                continue;
-            };
+            let counter = counter
+                .as_object_mut()
+                .expect("source counter constructed as object");
             for field in OPERATIONAL_COUNTER_FIELDS {
                 if let Some(value) = previous.get(*field).and_then(Value::as_u64) {
                     counter.insert((*field).to_owned(), json!(value));
@@ -2174,8 +2151,10 @@ fn invalid_part(file_name: &str) -> io::Error {
     )
 }
 
-fn require_identity(manifest: &Value, identity: &TrainingArtifactIdentity) -> io::Result<()> {
-    let actual_identity = manifest_identity(manifest)?;
+fn require_identity(
+    actual_identity: &TrainingArtifactIdentity,
+    identity: &TrainingArtifactIdentity,
+) -> io::Result<()> {
     for (field, expected) in [
         ("build_commit", identity.git_commit.as_str()),
         (
@@ -2879,6 +2858,28 @@ mod tests {
             manifest,
             "the only persisted image contains both nested and top-level close"
         );
+    }
+
+    #[test]
+    fn failed_close_publication_keeps_live_coverage_and_state() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join(DAILY_MANIFEST_FILE_NAME);
+        fs::create_dir(&path).unwrap();
+        let mut manifest = test_manifest(Some(active_coverage(TEST_DAY_START_MS)));
+        close_day_manifest_with_collection_end(
+            tmp.path(),
+            &mut manifest,
+            "utc_day_barrier",
+            TEST_DAY_END_MS,
+        )
+        .expect_err("rename cannot replace a directory with the manifest file");
+        assert_eq!(manifest_state(&manifest).unwrap(), "open");
+        let coverage = require_manifest_collection_day_coverage(&manifest).unwrap();
+        assert_eq!(coverage.state, CollectionDayCoverageState::Active);
+        assert_eq!(coverage.ended_utc_ms, None);
+        assert!(manifest.get("closure_reason").is_none());
+        assert!(path.is_dir());
+        assert!(!tmp.path().join("manifest.json.tmp").exists());
     }
 
     #[test]

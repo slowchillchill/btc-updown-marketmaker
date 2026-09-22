@@ -1,4 +1,5 @@
 use super::*;
+use crate::daily_manifest::manifest_collection_day_coverage;
 
 pub(super) const MANIFEST_CHANNEL_CAPACITY: usize = 64;
 
@@ -301,11 +302,12 @@ impl ManifestOwnerState {
         &mut self,
         close: RawDayClose,
         source_kind: String,
+        raw_day_gate: Arc<RawDayGate>,
     ) -> Result<Option<ManifestRolloverReady>> {
         if !training_source_kinds().contains(&source_kind.as_str()) {
             return Err(invalid_data(format!("unknown writer finalize ack: {source_kind}")).into());
         }
-        self.ensure_rollover_identity(&close)?;
+        self.register_rollover_gate(&close, raw_day_gate)?;
         let rollover = self.rollover.as_mut().expect("rollover was ensured");
         if rollover.ready_sent {
             return Err(invalid_data("writer finalize ack arrived after rollover ready").into());
@@ -379,15 +381,18 @@ impl ManifestOwnerState {
 
     fn persist_rollover_barriers(&mut self) -> Result<()> {
         let rollover = self.rollover.as_ref().expect("rollover was ensured");
-        let utc_day = rollover.close.utc_day.clone();
-        let producers = rollover.producer_barriers.clone();
-        let writers = rollover.writer_finalize_acks.clone();
-        let day_dir = self.day_dir(&utc_day);
+        let day_dir =
+            typed_raw_root(&self.dataset_root).join(format!("utc_day={}", rollover.close.utc_day));
         let manifest = self
             .manifests
-            .get_mut(&utc_day)
+            .get_mut(&rollover.close.utc_day)
             .expect("manifest was ensured");
-        record_day_barrier_state(&day_dir, manifest, &producers, &writers)?;
+        record_day_barrier_state(
+            &day_dir,
+            manifest,
+            &rollover.producer_barriers,
+            &rollover.writer_finalize_acks,
+        )?;
         Ok(())
     }
 
@@ -428,20 +433,7 @@ impl ManifestOwnerState {
     }
 
     fn publish_rollover_ready(&self, ready: &ManifestRolloverReady) -> Result<()> {
-        let rollover = self
-            .rollover
-            .as_ref()
-            .ok_or_else(|| invalid_data("rollover ready has no owner rendezvous"))?;
-        if rollover.close != ready.close
-            || !rollover.ready_sent
-            || rollover.producer_barriers.len() != LOGICAL_PRODUCERS.len()
-            || rollover.writer_finalize_acks.len() != training_source_kinds().len()
-        {
-            return Err(invalid_data(format!(
-                "rollover ready witness lacks the complete owner rendezvous: ready={ready:?}"
-            ))
-            .into());
-        }
+        let rollover = self.rollover.as_ref().expect("owner formed rollover ready");
         rollover
             .raw_day_gate
             .as_ref()
@@ -527,7 +519,6 @@ impl ManifestOwnerState {
         if self.active_epoch.is_some() {
             return Err(invalid_data("new-day activation found an active manifest epoch").into());
         }
-        self.ensure_open(&close.next_utc_day)?;
         self.activate_coverage(&close.next_utc_day, close.boundary_utc_ms)?;
         self.active_epoch = Some(ManifestActiveEpoch {
             utc_day: close.next_utc_day.clone(),
@@ -736,8 +727,7 @@ pub(super) async fn run_manifest_owner(
                 source_kind,
                 raw_day_gate,
             } => {
-                owner.register_rollover_gate(&close, Arc::clone(&raw_day_gate))?;
-                let ready = owner.record_writer_ack(close.clone(), source_kind)?;
+                let ready = owner.record_writer_ack(close, source_kind, raw_day_gate)?;
                 if let Some(ready) = ready {
                     owner.publish_rollover_ready(&ready)?;
                     rollover_ready_tx.send(ready).await.map_err(|_| {
