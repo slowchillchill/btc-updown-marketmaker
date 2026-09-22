@@ -225,7 +225,7 @@ async fn script_group(
     driver: &mut ContinuousPublicConsumptionV1,
     shared: &mut SharedExecutionV1,
 ) -> Result<(), PaperError> {
-    let Some(_before) = shared.action_before(driver)? else {
+    let Some(_) = shared.prepare_action_group(driver)? else {
         return Ok(());
     };
     match step {

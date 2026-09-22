@@ -1224,3 +1224,49 @@ async fn actual_single_repair_cap_counts_visible_success_and_nonterminal_commitm
     eprintln!("repair evidence {}", evidence.display());
     assert!(saw_economic_pending, "必须覆盖终局已公开但经济尚未应用");
 }
+
+#[cfg(feature = "python")]
+#[test]
+fn python_features_consumes_real_native_groups_with_the_original_public_shape() {
+    use pyo3::prelude::*;
+    let mut h = fixture_config_times(
+        "2000",
+        ["0.0025", "0.005"],
+        24_999,
+        &[35_000, 319_000, 320_000],
+    );
+    let mut groups = 0;
+    loop {
+        let group = h.next().expect("有限公开来源含到期后的组");
+        let retired = group
+            .post_frame_hidden_ops
+            .iter()
+            .any(|op| matches!(op, HiddenOp::Retire { .. }));
+        let expected = serde_json::to_value(&group).unwrap();
+        Python::attach(|py| {
+            let expected = crate::python::value(py, expected).unwrap();
+            let native = Py::new(
+                py,
+                crate::python::PythonGroup {
+                    group: Arc::new(group),
+                },
+            )
+            .unwrap();
+            let actual = native.call_method0(py, "features").unwrap();
+            assert!(actual.bind(py).eq(expected.bind(py)).unwrap());
+            let rows = actual.bind(py).get_item("rows").unwrap();
+            for row in rows.try_iter().unwrap() {
+                let row = row.unwrap();
+                assert!(!row.contains("action_context").unwrap());
+                assert_eq!(row.get_item("slow").unwrap().len().unwrap(), 433);
+                assert_eq!(row.get_item("fast").unwrap().len().unwrap(), 836);
+            }
+        });
+        groups += 1;
+        if retired {
+            break;
+        }
+    }
+    assert!(groups >= 6);
+    h.driver.stop_and_drain().unwrap();
+}

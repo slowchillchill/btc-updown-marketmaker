@@ -1,20 +1,19 @@
 //! #6 C/F.4/H.2：唯一精确完成性与前缀推进；模型分数不参与支持集。
 use crate::{InputError, NativeActionContext, NativeInputGroup, exact::*, prefix::*};
+use contracts::ModelIntentV1;
 use contracts::{ExactDecimal, ExecutionReadValueV1, economics::EconomicRational as R};
 use num_bigint::{BigInt, BigUint};
 use num_integer::Integer;
 use num_traits::{One, ToPrimitive, Zero};
-use shared_run::CancelObjectReadV2;
 use std::sync::Arc;
 
 pub fn encoding_limit() -> BigUint {
     ((BigUint::one() << 96) - BigUint::one()) / 10_000u32
 }
 fn floor_positive(r: &R) -> BigUint {
-    let p = r.public();
-    let n: BigInt = p.numerator.parse().unwrap();
-    let d: BigInt = p.denominator.parse().unwrap();
-    (n / d).to_biguint().unwrap_or_default()
+    (r.numerator() / r.denominator())
+        .to_biguint()
+        .unwrap_or_default()
 }
 fn index(leg: Leg) -> usize {
     usize::from(leg == Leg::B)
@@ -333,75 +332,97 @@ impl NativeActor {
         }
         Ok(total <= self.cash_micro())
     }
-    fn cancel_mask(&self, family: Family) -> Result<Vec<bool>, InputError> {
-        let ExecutionReadValueV1::Known(objects) = self
-            .group
-            .action_before
-            .as_ref()
-            .unwrap()
-            .cancel_objects_in(self.group.current.as_ref(), &self.group.old)
-        else {
-            return Err(InputError::MissingAssociation);
-        };
-        Ok(objects
-            .iter()
-            .map(|o| {
-                matches!(
-                    (family, o),
-                    (Family::CancelOrder, CancelObjectReadV2::Single { .. })
-                        | (Family::CancelOrders, CancelObjectReadV2::Paired { .. })
-                        | (
-                            Family::CancelMarketOrders,
-                            CancelObjectReadV2::Market { .. }
-                        )
+    fn cancel_matches(family: Family, intent: &ModelIntentV1) -> bool {
+        matches!(
+            (family, intent),
+            (Family::CancelOrder, ModelIntentV1::CancelOrder { .. })
+                | (Family::CancelOrders, ModelIntentV1::CancelOrders { .. })
+                | (
+                    Family::CancelMarketOrders,
+                    ModelIntentV1::CancelMarketOrders { .. }
                 )
-            })
-            .collect())
+        )
+    }
+    fn choice_count(&self) -> usize {
+        if self.done {
+            return 0;
+        }
+        match self.state.stage {
+            Stage::Family => 6,
+            Stage::QuantityBranch | Stage::PostOnly(_) => 2,
+            Stage::Variant(_) => 4,
+            Stage::Expiry(_) => 3,
+            Stage::Price(_) => 9999,
+            Stage::CancelObject => self.group.cancel_intents.len(),
+        }
+    }
+    fn supports_choice(&self, choice: usize) -> Result<bool, InputError> {
+        if choice >= self.choice_count() {
+            return Ok(false);
+        }
+        match self.state.stage {
+            Stage::Family => {
+                let family = families()[choice];
+                match family {
+                    Family::NoTrade => Ok(true),
+                    Family::SubmitSingleBuy | Family::SubmitPairedBuy => {
+                        let state = PrefixState {
+                            family: Some(family),
+                            single_leg: self.repair()?.map(|x| x.0),
+                            ..Default::default()
+                        };
+                        self.has_completion(&BigUint::one(), &self.root_upper(family)?, &state)
+                    }
+                    _ => Ok(self
+                        .group
+                        .cancel_intents
+                        .iter()
+                        .any(|o| Self::cancel_matches(family, o))),
+                }
+            }
+            Stage::QuantityBranch => {
+                let q = self.state.interval.as_ref().unwrap();
+                let mid = (&q.lo + &q.hi) / 2u32;
+                if choice == 0 {
+                    self.has_completion(&q.lo, &mid, &self.state)
+                } else {
+                    self.has_completion(&(mid + 1u32), &q.hi, &self.state)
+                }
+            }
+            Stage::CancelObject => Ok(Self::cancel_matches(
+                self.state.family.unwrap(),
+                &self.group.cancel_intents[choice],
+            )),
+            _ => {
+                let mut state = self.state.clone();
+                Self::set_parameter(&mut state, choice);
+                self.fixed_completion(state.quantity_hundredths.as_ref().unwrap(), &state)
+            }
+        }
     }
     pub fn support(&self) -> Result<Vec<bool>, InputError> {
-        if self.done {
-            return Ok(vec![]);
-        }
-        if self.state.stage == Stage::Family {
-            let mut mask = vec![true, false, false, false, false, false];
-            for (i, f) in families().into_iter().enumerate().skip(1) {
-                mask[i] = if i < 3 {
-                    let mut s = PrefixState {
-                        family: Some(f),
-                        ..Default::default()
-                    };
-                    s.single_leg = self.repair()?.map(|x| x.0);
-                    self.has_completion(&BigUint::one(), &self.root_upper(f)?, &s)?
-                } else {
-                    self.cancel_mask(f)?.iter().any(|v| *v)
+        if !self.done && self.state.stage == Stage::Family {
+            let mut mask = vec![
+                true,
+                self.supports_choice(1)?,
+                self.supports_choice(2)?,
+                false,
+                false,
+                false,
+            ];
+            for intent in &self.group.cancel_intents {
+                let i = match intent {
+                    ModelIntentV1::CancelOrder { .. } => 3,
+                    ModelIntentV1::CancelOrders { .. } => 4,
+                    ModelIntentV1::CancelMarketOrders { .. } => 5,
+                    _ => unreachable!("冻结撤单人口只包含撤单意图"),
                 };
+                mask[i] = true;
             }
             return Ok(mask);
         }
-        if self.state.stage == Stage::QuantityBranch {
-            let q = self.state.interval.as_ref().unwrap();
-            let mid = (&q.lo + &q.hi) / 2u32;
-            return Ok(vec![
-                self.has_completion(&q.lo, &mid, &self.state)?,
-                self.has_completion(&(mid + 1u32), &q.hi, &self.state)?,
-            ]);
-        }
-        if self.state.stage == Stage::CancelObject {
-            return self.cancel_mask(self.state.family.unwrap());
-        }
-        let count = match self.state.stage {
-            Stage::Variant(_) => 4,
-            Stage::PostOnly(_) => 2,
-            Stage::Expiry(_) => 3,
-            Stage::Price(_) => 9999,
-            _ => unreachable!(),
-        };
-        (0..count)
-            .map(|k| {
-                let mut s = self.state.clone();
-                Self::set_parameter(&mut s, k);
-                self.fixed_completion(s.quantity_hundredths.as_ref().unwrap(), &s)
-            })
+        (0..self.choice_count())
+            .map(|choice| self.supports_choice(choice))
             .collect()
     }
     fn set_parameter(s: &mut PrefixState, k: usize) {
@@ -422,7 +443,7 @@ impl NativeActor {
         }
     }
     pub fn choose(&mut self, choice: usize) -> Result<(), InputError> {
-        if !self.support()?.get(choice).copied().unwrap_or(false) {
+        if !self.supports_choice(choice)? {
             return Err(InputError::UnsupportedChoice);
         }
         self.path.push(choice);

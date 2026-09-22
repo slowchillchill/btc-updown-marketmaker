@@ -17,6 +17,7 @@ pub struct PythonActor {
 fn error(e: impl std::fmt::Debug) -> PyErr {
     pyo3::exceptions::PyValueError::new_err(format!("{e:?}"))
 }
+#[cfg(test)]
 pub(crate) fn value(py: Python<'_>, input: serde_json::Value) -> PyResult<Py<PyAny>> {
     Ok(match input {
         serde_json::Value::Null => py.None(),
@@ -48,31 +49,140 @@ pub(crate) fn value(py: Python<'_>, input: serde_json::Value) -> PyResult<Py<PyA
         }
     })
 }
+fn time<'py>(
+    py: Python<'py>,
+    t: &sim_system::public_consumption::TrustedActorExecutionTimeV1,
+) -> PyResult<Bound<'py, PyDict>> {
+    let out = PyDict::new(py);
+    out.set_item("run_id", t.run_id())?;
+    out.set_item("drive_position", t.drive_position())?;
+    out.set_item("logical_time_utc_ms", t.logical_time_utc_ms())?;
+    Ok(out)
+}
+fn account<'py>(
+    py: Python<'py>,
+    a: &contracts::AccountInstanceKeyV1,
+) -> PyResult<Bound<'py, PyDict>> {
+    let out = PyDict::new(py);
+    out.set_item("run_id", &a.run_id)?;
+    out.set_item(
+        "caller_role",
+        match a.caller_role {
+            contracts::SimCallerRoleV1::ModelTrain => "MODEL_TRAIN",
+            contracts::SimCallerRoleV1::OfflineEvaluation => "OFFLINE_EVALUATION",
+            contracts::SimCallerRoleV1::Paper => "PAPER",
+        },
+    )?;
+    out.set_item("caller_instance_id", &a.caller_instance_id)?;
+    out.set_item("account_id", &a.account_id)?;
+    out.set_item(
+        "platform_source",
+        match a.platform_source {
+            contracts::PlatformSourceV1::Simulated => "SIMULATED",
+        },
+    )?;
+    Ok(out)
+}
+fn hidden_key<'py>(py: Python<'py>, key: &crate::HiddenKey) -> PyResult<Bound<'py, PyDict>> {
+    let out = PyDict::new(py);
+    out.set_item("trajectory_id", &key.trajectory_id)?;
+    out.set_item("account_id", account(py, &key.account_id)?)?;
+    out.set_item("condition_id", &key.condition_id.0)?;
+    Ok(out)
+}
+fn hidden_ops<'py>(py: Python<'py>, ops: &[crate::HiddenOp]) -> PyResult<Bound<'py, PyList>> {
+    let out = PyList::empty(py);
+    for op in ops {
+        let tagged = PyDict::new(py);
+        let fields = PyDict::new(py);
+        let tag = match op {
+            crate::HiddenOp::ResetRootHidden {
+                trajectory_id,
+                account_id,
+            } => {
+                fields.set_item("trajectory_id", trajectory_id)?;
+                fields.set_item("account_id", account(py, account_id)?)?;
+                "ResetRootHidden"
+            }
+            crate::HiddenOp::InitializeZero { hidden_state_key } => {
+                fields.set_item("hidden_state_key", hidden_key(py, hidden_state_key)?)?;
+                "InitializeZero"
+            }
+            crate::HiddenOp::Retire { hidden_state_key } => {
+                fields.set_item("hidden_state_key", hidden_key(py, hidden_state_key)?)?;
+                "Retire"
+            }
+        };
+        tagged.set_item(tag, fields)?;
+        out.append(tagged)?;
+    }
+    Ok(out)
+}
 #[pymethods]
 impl PythonGroup {
     fn features(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        // serde 数据模型只投影已有公开特征，未编码为 JSON 字符串或文件。
-        value(
-            py,
-            serde_json::to_value(self.group.as_ref()).map_err(error)?,
-        )
+        let group = self.group.as_ref();
+        let out = PyDict::new(py);
+        let cutoff = PyDict::new(py);
+        let receipt = PyDict::new(py);
+        let source = group.cutoff.receipt();
+        receipt.set_item("session_id", source.session_id())?;
+        let reference = PyDict::new(py);
+        let r = source.group();
+        reference.set_item("input_stream_id", &r.input_stream_id)?;
+        let prefix = PyDict::new(py);
+        prefix.set_item("input_stream_id", &r.applied_prefix.input_stream_id)?;
+        prefix.set_item("next_input_position", r.applied_prefix.next_input_position)?;
+        reference.set_item("applied_prefix", prefix)?;
+        reference.set_item("group_position", r.group_position)?;
+        reference.set_item("group_id", &r.group_id.0)?;
+        reference.set_item("closed_at_input_position", r.closed_at_input_position)?;
+        receipt.set_item("group", reference)?;
+        receipt.set_item("actor_input_sequence", source.actor_input_sequence())?;
+        receipt.set_item("execution_time", time(py, source.execution_time())?)?;
+        cutoff.set_item("receipt", receipt)?;
+        cutoff.set_item("decision_time", time(py, group.cutoff.decision_time())?)?;
+        cutoff.set_item(
+            "private_feedback_sequence",
+            group.cutoff.private_feedback_sequence(),
+        )?;
+        out.set_item("cutoff", cutoff)?;
+        out.set_item(
+            "pre_frame_hidden_ops",
+            hidden_ops(py, &group.pre_frame_hidden_ops)?,
+        )?;
+        out.set_item(
+            "post_frame_hidden_ops",
+            hidden_ops(py, &group.post_frame_hidden_ops)?,
+        )?;
+        let rows = PyList::empty(py);
+        for row in &group.rows {
+            let item = PyDict::new(py);
+            item.set_item("hidden_state_key", hidden_key(py, &row.hidden_state_key)?)?;
+            item.set_item(
+                "role",
+                match row.role {
+                    crate::InputRole::ContextOnly => "ContextOnly",
+                    crate::InputRole::DecisionRequired => "DecisionRequired",
+                },
+            )?;
+            item.set_item("slow", &row.slow)?;
+            item.set_item("fast", &row.fast)?;
+            item.set_item("rule", row.rule.as_slice())?;
+            rows.append(item)?;
+        }
+        out.set_item("rows", rows)?;
+        out.set_item("current", group.current.as_ref().map(|c| c.0.as_str()))?;
+        out.set_item(
+            "old",
+            group.old.iter().map(|c| c.0.as_str()).collect::<Vec<_>>(),
+        )?;
+        out.set_item("cancel", &group.cancel)?;
+        Ok(out.into_any().unbind())
     }
     #[cfg(test)]
     fn validation_cancel_objects(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let intents = match self.group.action_before.as_ref() {
-            Some(read) => {
-                let contracts::ExecutionReadValueV1::Known(objects) =
-                    read.cancel_objects_in(self.group.current.as_ref(), &self.group.old)
-                else {
-                    return Err(error("cancel candidates unavailable"));
-                };
-                objects
-                    .into_iter()
-                    .map(crate::action::cancel_object_intent)
-                    .collect::<Vec<_>>()
-            }
-            None => Vec::new(),
-        };
+        let intents = &self.group.cancel_intents;
         value(
             py,
             serde_json::json!(

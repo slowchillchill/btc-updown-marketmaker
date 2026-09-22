@@ -2,7 +2,7 @@
 
 本库连接既有公开组决策入口、Intent Bridge、NOE 实际领取队列与唯一 Ledger。合同见任务 #104、共享规格 #101，以及模型生产合同 #5 和 Intent Bridge 合同 #6；不创建模型宿主、账户调度或新的执行策略。
 
-调用方先创建原 `PublicSimExecutionV1` 和 V3 observation，在新 Ledger 首次应用前调用 `bind_ledger_recording_v2`，再调用 `SharedExecutionV1::from_opening`。开户来自原 `EconomicFact`，投影可见时间为 `None`。每组由 `action_before` 排空已放行的原记录并应用全部外生事实，然后重新取得 `decision.frames`；返回值冻结该组必要资金标量与原记录/意图引用。缺经济直接前驱时保留原引用、返回未完成，不产出带洞模型视图。
+调用方先创建原 `PublicSimExecutionV1` 和 V3 observation，在新 Ledger 首次应用前调用 `bind_ledger_recording_v2`，再调用 `SharedExecutionV1::from_opening`。开户来自原 `EconomicFact`，投影可见时间为 `None`。每组由 `action_before` 排空已放行的原记录并应用全部外生事实，然后重新取得 `decision.frames`；返回值冻结该组必要资金标量与原记录/意图引用。缺经济直接前驱时保留原引用等待，合法公共帧仍继续消费，冻结读取携带尚未应用的记录数。PAPER 共用应用事实、重新取得 decision 和观察市场的准备步骤，但不构造无人读取的完整账户快照。
 
 `execute` 接收宿主已经决定的原 `ModelIntentV1`，同一请求只冻结一次。`None` 表示 NoTrade。五类动作经原 sealed Bridge 构造后调用一次 `decision.request`，实际回执只登记提交，不充当平台接受或经济事实。订单基点、形成序、最新来源生命周期及实际交付顺序各取其原证据；初始 Taker 不重复增加 Accepted 的 matched，后续 Maker 按 trade 身份计一次。GTC/GTD 承诺包含 active 和未终局成交；FOK/FAK 在完整初始成交集合全部终局前保留原 spend/worst 目标。
 

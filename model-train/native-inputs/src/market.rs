@@ -361,9 +361,10 @@ fn lifecycle(out: &mut [f32], o: &MarketBusinessObservationV1, now: i64) {
     }
     out[63..69].copy_from_slice(&quality(o.terminal.quality));
     let a = anchors(&o.terminal, "terminal");
-    out[72..81].copy_from_slice(&envelope(now, &a));
-    out[83..92].copy_from_slice(&envelope(now, &a));
-    out[94..103].copy_from_slice(&envelope(now, &a));
+    let terminal_envelope = envelope(now, &a);
+    out[72..81].copy_from_slice(&terminal_envelope);
+    out[83..92].copy_from_slice(&terminal_envelope);
+    out[94..103].copy_from_slice(&terminal_envelope);
     if let Some(MarketResolutionTerminalV3::Resolved {
         winning_asset_id,
         payout_vector,
