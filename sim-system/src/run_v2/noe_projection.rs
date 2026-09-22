@@ -5,6 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[cfg(test)]
+use contracts::AccountInstanceKeyV1;
+#[cfg(test)]
 use contracts::execution_normalization::SimV2SourceReferenceV1;
 use contracts::execution_normalization::{
     DurableSourceReferenceV1, ExecutionNormalizationContextV1, NoeEconomicFactReferenceV1,
@@ -23,12 +25,12 @@ use contracts::execution_normalization::{
     StableLogicalIdentityV1,
 };
 use contracts::{
-    AccountInstanceKeyV1, DirectResponseMetadataV2, MakerRebateAccrualStatusV2,
-    OrderLifecycleEventV2, OrderProjectionV2, OrderQueryResultV2, OrdersQueryResultV2,
-    PlatformAccountDeltaReasonV2, PlatformAccountDeltaV2, QueryCursorV2, QueryOutOfRetentionV2,
-    SettlementLifecycleEventV2, SimulatedOrderKnownStatusV2, SimulatedOrderStatusV2,
-    SimulatedTradeKnownStatusV2, SimulatedTradeStatusV2, SubmissionItemOutcomeV2,
-    SubmissionResponseItemV2, TradeEconomicDispositionV2, TradeProjectionV2, TradesQueryResultV2,
+    DirectResponseMetadataV2, MakerRebateAccrualStatusV2, OrderLifecycleEventV2, OrderProjectionV2,
+    OrderQueryResultV2, OrdersQueryResultV2, PlatformAccountDeltaReasonV2, PlatformAccountDeltaV2,
+    QueryCursorV2, QueryOutOfRetentionV2, SettlementLifecycleEventV2, SimulatedOrderKnownStatusV2,
+    SimulatedOrderStatusV2, SimulatedTradeKnownStatusV2, SimulatedTradeStatusV2,
+    SubmissionItemOutcomeV2, SubmissionResponseItemV2, TradeEconomicDispositionV2,
+    TradeProjectionV2, TradesQueryResultV2,
 };
 use execution_normalization::{
     DurableCommitOutcomeV1, DurableContextStore, DurableErrorV1, NoeTradePayload,
@@ -682,7 +684,6 @@ where
         &mut self,
         feedback: &contracts::OrderLifecycleFeedbackV2,
     ) -> Result<(), ()> {
-        self.check_account(&feedback.metadata.account_instance_key)?;
         let order_identity = self.entity_order(&feedback.platform_order_id)?;
         let (event, account_delta) = match &feedback.event {
             OrderLifecycleEventV2::OrderAccepted {
@@ -749,7 +750,6 @@ where
 
     fn map_trade_lifecycle(&mut self, feedback: &T) -> Result<(), ()> {
         let legacy = feedback.legacy();
-        self.check_account(&legacy.metadata.account_instance_key)?;
         let record = SimV2SourceRecordReferenceV1::TradeLifecycle {
             private_feedback_sequence: legacy.metadata.private_feedback_sequence,
             platform_event_at_utc_ms: legacy.metadata.platform_event_at_utc_ms,
@@ -788,7 +788,6 @@ where
         &mut self,
         feedback: &contracts::SettlementLifecycleFeedbackV2,
     ) -> Result<(), ()> {
-        self.check_account(&feedback.metadata.account_instance_key)?;
         if let SettlementLifecycleEventV2::ExternalCash {
             fact,
             account_delta,
@@ -1191,7 +1190,6 @@ where
         &self,
         request: &contracts::economics::SettlementRequestIdV1<String>,
     ) -> Result<contracts::economics::SettlementRequestIdV1<I>, ()> {
-        self.check_account(&request.account)?;
         Ok(contracts::economics::SettlementRequestIdV1 {
             account: request.account.clone(),
             condition_id: request.condition_id.clone(),
@@ -1221,7 +1219,6 @@ where
             SourceNeutralAccountBalanceDeltaV2, SourceNeutralAccountTransitionKindV2 as K,
             SourceNeutralEconomicDispositionV2,
         };
-        self.check_account(&delta.account_instance_key)?;
         let PlatformAccountDeltaReasonV2::RequestedSettlement(raw) = &delta.reason else {
             return Err(());
         };
@@ -1292,7 +1289,6 @@ where
         record: SimV2SourceRecordReferenceV1,
         delta: &PlatformAccountDeltaV2,
     ) -> Result<(), ()> {
-        self.check_account(&delta.account_instance_key)?;
         let transition = match &delta.reason {
             PlatformAccountDeltaReasonV2::RequestedSettlement(_) => return Err(()),
             PlatformAccountDeltaReasonV2::OrderAcceptedEncumbranceApplied { platform_order_id } => {
@@ -1400,12 +1396,6 @@ where
             },
         );
         Ok(())
-    }
-
-    fn check_account(&self, account: &AccountInstanceKeyV1) -> Result<(), ()> {
-        (account == &self.context.source.account_instance_key)
-            .then_some(())
-            .ok_or(())
     }
 
     fn entity_order(&self, source_order_id: &str) -> Result<I, ()> {
