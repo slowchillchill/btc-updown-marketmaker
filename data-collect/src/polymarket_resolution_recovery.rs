@@ -161,8 +161,6 @@ pub struct RecoveredPolymarketPending {
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct FixedIdentity {
     authority: VerifiedPolymarketMarketIdentity,
-    up_asset_id: String,
-    down_asset_id: String,
 }
 
 impl std::ops::Deref for FixedIdentity {
@@ -209,9 +207,7 @@ impl FixedIdentity {
             .into());
         }
         Ok(Self {
-            authority: record.identity_authority(),
-            up_asset_id: asset_ids[0].clone(),
-            down_asset_id: asset_ids[1].clone(),
+            authority: record.identity_authority([asset_ids[0].clone(), asset_ids[1].clone()]),
         })
     }
 
@@ -920,13 +916,17 @@ impl MetadataRecord {
         Ok(())
     }
 
-    fn identity_authority(&self) -> VerifiedPolymarketMarketIdentity {
+    fn identity_authority(
+        &self,
+        [up_asset_id, down_asset_id]: [String; 2],
+    ) -> VerifiedPolymarketMarketIdentity {
         VerifiedPolymarketMarketIdentity {
             market: PolymarketMarketIdentity {
                 slug: self.slug.clone(),
                 condition_id: self.condition_id.clone(),
                 clob_market_id: self.clob_market_id.clone(),
-                ordered_up_down_asset_ids_json: self.asset_ids_json.clone(),
+                up_asset_id,
+                down_asset_id,
                 market_start_utc_ms: self.market_start_utc_ms,
                 market_end_utc_ms: self.market_end_utc_ms,
             },
@@ -937,7 +937,7 @@ impl MetadataRecord {
     fn source_authority(&self) -> Option<SourceAuthority> {
         self.source_payload_json.as_ref()?;
         Some(SourceAuthority {
-            identity: self.identity_authority(),
+            identity: self.identity_authority(serde_json::from_str(&self.asset_ids_json).ok()?),
             origin: self.source_origin.clone()?,
             evidence: SourceEvidenceLocator {
                 received_at_utc_ms: self.source_received_at_utc_ms?,
@@ -957,7 +957,9 @@ impl MetadataRecord {
             slug: self.slug.clone(),
         };
         Ok(Some(SourceReference {
-            identity: self.identity_authority(),
+            identity: self.identity_authority(
+                serde_json::from_str(&self.asset_ids_json).map_err(|_| missing())?,
+            ),
             origin: self.source_origin.clone().ok_or_else(missing)?,
             evidence: SourceEvidenceLocator {
                 received_at_utc_ms: self.source_received_at_utc_ms.ok_or_else(missing)?,

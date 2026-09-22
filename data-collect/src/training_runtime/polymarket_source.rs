@@ -194,7 +194,12 @@ impl PolymarketDrainRuntime {
         &mut self,
         stop_after_fence: bool,
     ) -> Result<PolymarketFenceRequest> {
-        self.request_fence_inner(stop_after_fence, None).await
+        Ok(
+            match self.request_fence_inner(stop_after_fence, None).await? {
+                Some(id) => PolymarketFenceRequest::Queued(id),
+                None => PolymarketFenceRequest::PumpClosed,
+            },
+        )
     }
 
     pub(super) async fn request_paused_fence(&mut self) -> Result<PolymarketFenceRequest> {
@@ -203,11 +208,8 @@ impl PolymarketDrainRuntime {
             .request_fence_inner(false, Some(resume_after_fence))
             .await?
         {
-            PolymarketFenceRequest::Queued(id) => Ok(PolymarketFenceRequest::Paused { id, resume }),
-            PolymarketFenceRequest::PumpClosed => Ok(PolymarketFenceRequest::PumpClosed),
-            PolymarketFenceRequest::Paused { .. } => {
-                Err(invalid_data("nested Polymarket paused fence request").into())
-            }
+            Some(id) => Ok(PolymarketFenceRequest::Paused { id, resume }),
+            None => Ok(PolymarketFenceRequest::PumpClosed),
         }
     }
 
@@ -215,7 +217,7 @@ impl PolymarketDrainRuntime {
         &mut self,
         stop_after_fence: bool,
         resume_after_fence: Option<oneshot::Receiver<()>>,
-    ) -> Result<PolymarketFenceRequest> {
+    ) -> Result<Option<u64>> {
         self.next_fence_id = self
             .next_fence_id
             .checked_add(1)
@@ -232,8 +234,8 @@ impl PolymarketDrainRuntime {
         .await
         {
             Err(_) => Err(invalid_data("Polymarket fast-drain control queue timeout").into()),
-            Ok(Ok(())) => Ok(PolymarketFenceRequest::Queued(id)),
-            Ok(Err(_)) => Ok(PolymarketFenceRequest::PumpClosed),
+            Ok(Ok(())) => Ok(Some(id)),
+            Ok(Err(_)) => Ok(None),
         }
     }
 
@@ -663,7 +665,6 @@ where
             sink,
             collector_identity,
             run_started,
-            recovery,
         )
         .await),
         result => result,
@@ -699,7 +700,6 @@ where
             sink,
             collector_identity,
             run_started,
-            recovery,
         )
         .await?;
         return Ok(false);
@@ -778,7 +778,6 @@ where
                         sink,
                         collector_identity,
                         run_started,
-                        recovery,
                     )
                     .await?;
                     return Ok(false);
@@ -798,7 +797,6 @@ where
                         sink,
                         collector_identity,
                         run_started,
-                        recovery,
                     )
                     .await;
                     match result {
@@ -823,7 +821,7 @@ where
                 let finalize_result: Result<()> = async {
                     let mut anchors = Vec::new();
                     collect_all_market_anchor_items(context, &mut anchors).await?;
-                    process_polymarket_boundary_drain_items(anchors, day_boundary_utc_ms, &*timeline_now, context, sink, collector_identity, run_started, recovery).await?;
+                    process_polymarket_boundary_drain_items(anchors, day_boundary_utc_ms, &*timeline_now, context, sink, collector_identity, run_started).await?;
                     drain_all_gamma_resolution_polls(
                         resolution_poll_tasks,
                         &*timeline_now,
@@ -935,7 +933,6 @@ where
                         sink,
                         collector_identity,
                         run_started,
-                        recovery,
                     )
                     .await?;
                     return Ok(false);
@@ -1022,14 +1019,8 @@ pub(super) async fn run_polymarket_source_with_spec(
         if let Some(recovered) = context.as_mut() {
             recovered.reclassify_recovered_pending(now_ms())?;
         }
-        if clear_empty_polymarket_context(
-            &mut context,
-            &sink,
-            &collector_identity,
-            run_started,
-            &mut recovery,
-        )
-        .await?
+        if clear_empty_polymarket_context(&mut context, &sink, &collector_identity, run_started)
+            .await?
         {
             continue;
         }
@@ -1073,7 +1064,6 @@ pub(super) async fn run_polymarket_source_with_spec(
                     &sink,
                     &collector_identity,
                     run_started,
-                    &mut recovery,
                 )
                 .await
             }
@@ -1085,7 +1075,6 @@ pub(super) async fn run_polymarket_source_with_spec(
                     &sink,
                     &collector_identity,
                     run_started,
-                    &mut recovery,
                 )
                 .await
             }
@@ -1123,7 +1112,6 @@ pub(super) async fn clear_empty_polymarket_context(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    recovery: &mut SourceRecoverySupervisor,
 ) -> Result<bool> {
     let Some(retired) = context
         .as_mut()
@@ -1141,7 +1129,6 @@ pub(super) async fn clear_empty_polymarket_context(
         sink,
         collector_identity,
         run_started,
-        recovery,
     )
     .await?;
     *context = None;
@@ -1463,24 +1450,6 @@ impl PendingPolymarketIdentity {
             market_end_utc_ms: self.market_end_utc_ms,
         }
     }
-
-    fn identity_authority(&self) -> VerifiedPolymarketMarketIdentity {
-        VerifiedPolymarketMarketIdentity {
-            market: PolymarketMarketIdentity {
-                slug: self.slug.clone(),
-                condition_id: self.condition_id.clone(),
-                clob_market_id: self.clob_market_id.clone(),
-                ordered_up_down_asset_ids_json: serde_json::to_string(&[
-                    self.up_asset_id.as_str(),
-                    self.down_asset_id.as_str(),
-                ])
-                .unwrap_or_default(),
-                market_start_utc_ms: self.market_start_utc_ms,
-                market_end_utc_ms: self.market_end_utc_ms,
-            },
-            first_verified_at_utc_ms: self.fixed_identity_verified_at_utc_ms,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -1755,6 +1724,15 @@ impl PolymarketProcessingContext {
         self.rebuild_asset_to_slug();
     }
 
+    pub(super) fn discovery_view(&self) -> Option<PolymarketDiscoveryView<'_>> {
+        self.current
+            .as_ref()
+            .map(|current| PolymarketDiscoveryView {
+                current,
+                next: self.next.as_ref(),
+            })
+    }
+
     pub(super) fn discovery_snapshot(&self) -> Option<BtcUpdownDiscovery> {
         self.current.clone().map(|current| BtcUpdownDiscovery {
             current,
@@ -1960,35 +1938,33 @@ impl PolymarketProcessingContext {
     }
 }
 
-fn discovered_identity_authority(
-    market: &DiscoveredBtcUpdownMarket,
-) -> VerifiedPolymarketMarketIdentity {
-    VerifiedPolymarketMarketIdentity {
-        market: discovered_market_identity(market),
-        first_verified_at_utc_ms: market.fixed_identity_verified_at_utc_ms,
-    }
-}
-
-fn discovered_market_identity(market: &DiscoveredBtcUpdownMarket) -> PolymarketMarketIdentity {
-    PolymarketMarketIdentity {
-        slug: market.slug.clone(),
-        condition_id: market.condition_id.clone(),
-        clob_market_id: market.id.clone(),
-        ordered_up_down_asset_ids_json: serde_json::to_string(&[
-            market.up_asset_id.as_str(),
-            market.down_asset_id.as_str(),
-        ])
-        .unwrap_or_default(),
-        market_start_utc_ms: market.start_ts_s.saturating_mul(1_000),
-        market_end_utc_ms: market.end_ts_s.saturating_mul(1_000),
-    }
+fn same_discovered_market_identity(
+    left: &DiscoveredBtcUpdownMarket,
+    right: &DiscoveredBtcUpdownMarket,
+) -> bool {
+    left.slug == right.slug
+        && left.condition_id == right.condition_id
+        && left.id == right.id
+        && left.up_asset_id == right.up_asset_id
+        && left.down_asset_id == right.down_asset_id
+        && left.start_ts_s.saturating_mul(1_000) == right.start_ts_s.saturating_mul(1_000)
+        && left.end_ts_s.saturating_mul(1_000) == right.end_ts_s.saturating_mul(1_000)
 }
 
 fn polymarket_authority_matches_discovered(
     authority: &SourceAuthority,
     market: &DiscoveredBtcUpdownMarket,
 ) -> bool {
-    same_identity_authority(&authority.identity, &discovered_identity_authority(market))
+    let identity = &authority.identity;
+    let fixed = &identity.market;
+    fixed.slug == market.slug
+        && fixed.condition_id == market.condition_id
+        && fixed.clob_market_id == market.id
+        && fixed.market_start_utc_ms == market.start_ts_s.saturating_mul(1_000)
+        && fixed.market_end_utc_ms == market.end_ts_s.saturating_mul(1_000)
+        && identity.first_verified_at_utc_ms == market.fixed_identity_verified_at_utc_ms
+        && fixed.up_asset_id == market.up_asset_id
+        && fixed.down_asset_id == market.down_asset_id
 }
 
 pub(super) fn polymarket_context_discovery_authorities_complete(
@@ -2010,7 +1986,15 @@ fn polymarket_authority_matches_identity(
     authority: &SourceAuthority,
     identity: &PendingPolymarketIdentity,
 ) -> bool {
-    same_identity_authority(&authority.identity, &identity.identity_authority())
+    let fixed = &authority.identity.market;
+    fixed.slug == identity.slug
+        && fixed.condition_id == identity.condition_id
+        && fixed.clob_market_id == identity.clob_market_id
+        && fixed.up_asset_id == identity.up_asset_id
+        && fixed.down_asset_id == identity.down_asset_id
+        && fixed.market_start_utc_ms == identity.market_start_utc_ms
+        && fixed.market_end_utc_ms == identity.market_end_utc_ms
+        && authority.identity.first_verified_at_utc_ms == identity.fixed_identity_verified_at_utc_ms
 }
 
 fn polymarket_authority_dynamic_owned_bytes(authority: &SourceAuthority) -> usize {
@@ -2021,13 +2005,8 @@ fn polymarket_authority_dynamic_owned_bytes(authority: &SourceAuthority) -> usiz
         .capacity()
         .saturating_add(authority.identity.market.condition_id.capacity())
         .saturating_add(authority.identity.market.clob_market_id.capacity())
-        .saturating_add(
-            authority
-                .identity
-                .market
-                .ordered_up_down_asset_ids_json
-                .capacity(),
-        )
+        .saturating_add(authority.identity.market.up_asset_id.capacity())
+        .saturating_add(authority.identity.market.down_asset_id.capacity())
         .saturating_add(authority.origin.capacity())
         .saturating_add(authority.evidence.raw_sha256.capacity())
 }
@@ -2089,7 +2068,6 @@ pub(super) async fn process_polymarket_budgeted_message(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    _recovery: &mut SourceRecoverySupervisor,
 ) -> Result<()> {
     let BudgetedPolymarketMessage {
         message,
@@ -2125,11 +2103,11 @@ pub(super) async fn process_polymarket_budgeted_message(
     let routed_asset_to_slug = post_end_asset_to_slug
         .as_ref()
         .unwrap_or(&context.active_asset_to_slug);
-    let Some(discovery) = context.discovery_snapshot() else {
+    let Some(discovery) = context.discovery_view() else {
         return Ok(());
     };
     let Some(admitted) =
-        target_admitted_polymarket_message(&message, &discovery, routed_asset_to_slug)?
+        target_admitted_polymarket_message(&message, discovery, routed_asset_to_slug)?
     else {
         return Ok(());
     };
@@ -2493,7 +2471,6 @@ pub(super) async fn stop_polymarket_after_processing_error(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    recovery: &mut SourceRecoverySupervisor,
 ) -> Result<()> {
     let mut primary_error = first_error;
     let mut can_process = !polymarket_processing_sink_unusable(primary_error.as_ref(), sink);
@@ -2525,7 +2502,6 @@ pub(super) async fn stop_polymarket_after_processing_error(
                         sink,
                         collector_identity,
                         run_started,
-                        recovery,
                     )
                     .await
                     {
@@ -2592,7 +2568,6 @@ pub(super) async fn stop_polymarket_after_processing_error(
             sink,
             collector_identity,
             run_started,
-            recovery,
         )
         .await;
     }
@@ -2605,7 +2580,6 @@ async fn drain_polymarket_anchors_after_processing_error(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    recovery: &mut SourceRecoverySupervisor,
 ) -> Box<dyn Error + Send + Sync> {
     let mut anchors = Vec::new();
     if let Err(error) = collect_all_market_anchor_items(context, &mut anchors).await {
@@ -2627,7 +2601,6 @@ async fn drain_polymarket_anchors_after_processing_error(
         sink,
         collector_identity,
         run_started,
-        recovery,
     )
     .await
     .expect("primary processing error is retained")
@@ -2642,7 +2615,6 @@ async fn drain_polymarket_fence(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    recovery: &mut SourceRecoverySupervisor,
 ) -> Result<Option<oneshot::Sender<()>>> {
     let (expected_id, resume) = match request {
         PolymarketFenceRequest::Queued(id) => (Some(id), None),
@@ -2658,7 +2630,6 @@ async fn drain_polymarket_fence(
                     sink,
                     collector_identity,
                     run_started,
-                    recovery,
                 )
                 .await
                 {
@@ -2670,7 +2641,6 @@ async fn drain_polymarket_fence(
                         sink,
                         collector_identity,
                         run_started,
-                        recovery,
                     )
                     .await
                     .map(|()| None);
@@ -2735,10 +2705,9 @@ pub(super) async fn fence_polymarket_processor(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    recovery: &mut SourceRecoverySupervisor,
 ) -> Result<()> {
     let request = market_runtime.request_fence(stop_after_fence).await?;
-    let resume = drain_polymarket_fence(
+    drain_polymarket_fence(
         market_runtime,
         request,
         stop_after_fence,
@@ -2746,12 +2715,8 @@ pub(super) async fn fence_polymarket_processor(
         sink,
         collector_identity,
         run_started,
-        recovery,
     )
     .await?;
-    if resume.is_some() {
-        return Err(invalid_data("ordinary Polymarket fence returned a pause handle").into());
-    }
     if stop_after_fence {
         market_runtime.wait_pump_stopped().await?;
         let mut anchors = Vec::new();
@@ -2768,7 +2733,6 @@ pub(super) async fn fence_polymarket_processor(
             sink,
             collector_identity,
             run_started,
-            recovery,
         )
         .await?;
     }
@@ -2822,7 +2786,6 @@ async fn process_polymarket_boundary_drain_item<N>(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    recovery: &mut SourceRecoverySupervisor,
 ) -> Result<()>
 where
     N: Fn() -> PolymarketTimelineNow + Send + Sync,
@@ -2838,7 +2801,6 @@ where
                 sink,
                 collector_identity,
                 run_started,
-                recovery,
             )
             .await
         }
@@ -2865,7 +2827,6 @@ pub(super) async fn process_polymarket_boundary_drain_items<N>(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    recovery: &mut SourceRecoverySupervisor,
 ) -> Result<()>
 where
     N: Fn() -> PolymarketTimelineNow + Send + Sync,
@@ -2879,7 +2840,6 @@ where
         sink,
         collector_identity,
         run_started,
-        recovery,
     )
     .await
     {
@@ -2897,7 +2857,6 @@ async fn process_polymarket_subscription_drain_items<N>(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    recovery: &mut SourceRecoverySupervisor,
 ) -> Option<Box<dyn Error + Send + Sync>>
 where
     N: Fn() -> PolymarketTimelineNow + Send + Sync,
@@ -2943,7 +2902,6 @@ where
             sink,
             collector_identity,
             run_started,
-            recovery,
         )
         .await
         {
@@ -3135,7 +3093,6 @@ async fn arbitrate_polymarket_ready_items<N>(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    recovery: &mut SourceRecoverySupervisor,
 ) -> Result<()>
 where
     N: Fn() -> PolymarketTimelineNow + Send + Sync,
@@ -3153,7 +3110,6 @@ where
         sink,
         collector_identity,
         run_started,
-        recovery,
     )
     .await?;
     ensure_polymarket_resolution_task_bound(resolution_poll_tasks, context)
@@ -3168,17 +3124,13 @@ pub(super) async fn arbitrate_polymarket_fence_with_ready_gamma<N>(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    recovery: &mut SourceRecoverySupervisor,
 ) -> Result<()>
 where
     N: Fn() -> PolymarketTimelineNow + Send + Sync,
 {
     let request = market_runtime.request_fence(false).await?;
-    let (resume, messages) =
+    let (_, messages) =
         collect_polymarket_fence_messages(market_runtime, request, false, sink).await?;
-    if resume.is_some() {
-        return Err(invalid_data("ordinary Polymarket fence returned a pause handle").into());
-    }
     arbitrate_polymarket_ready_items(
         messages,
         resolution_poll_tasks,
@@ -3188,7 +3140,6 @@ where
         sink,
         collector_identity,
         run_started,
-        recovery,
     )
     .await
 }
@@ -3202,7 +3153,6 @@ async fn quiesce_polymarket_resolution_actor<N>(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    recovery: &mut SourceRecoverySupervisor,
 ) -> Result<()>
 where
     N: Fn() -> PolymarketTimelineNow + Send + Sync,
@@ -3222,7 +3172,6 @@ where
         sink,
         collector_identity,
         run_started,
-        recovery,
     )
     .await?;
     let now = timeline_now();
@@ -3255,17 +3204,13 @@ pub(super) async fn quiesce_connected_polymarket_source<N>(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    recovery: &mut SourceRecoverySupervisor,
 ) -> Result<()>
 where
     N: Fn() -> PolymarketTimelineNow + Send + Sync,
 {
     let request = market_runtime.request_fence(true).await?;
-    let (resume, messages) =
+    let (_, messages) =
         collect_polymarket_fence_messages(market_runtime, request, true, sink).await?;
-    if resume.is_some() {
-        return Err(invalid_data("stopping Polymarket fence returned a pause handle").into());
-    }
     market_runtime.wait_pump_stopped().await?;
     quiesce_polymarket_resolution_actor(
         messages,
@@ -3275,7 +3220,6 @@ where
         sink,
         collector_identity,
         run_started,
-        recovery,
     )
     .await
 }
@@ -3331,7 +3275,6 @@ pub(super) async fn handle_polymarket_source_control<N>(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    recovery: &mut SourceRecoverySupervisor,
 ) -> Result<bool>
 where
     N: Fn() -> PolymarketTimelineNow + Send + Sync,
@@ -3356,7 +3299,6 @@ where
             sink,
             collector_identity,
             run_started,
-            recovery,
         )
         .await;
         match result {
@@ -3416,7 +3358,6 @@ where
                 sink,
                 collector_identity,
                 run_started,
-                recovery,
             )
             .await?;
             let boundary_now = timeline_now();
@@ -3475,7 +3416,6 @@ where
             sink,
             collector_identity,
             run_started,
-            recovery,
         )
         .await?;
         return Ok(false);
@@ -3494,7 +3434,6 @@ where
         sink,
         collector_identity,
         run_started,
-        recovery,
     )
     .await;
     match result {
@@ -3524,7 +3463,6 @@ pub(super) async fn apply_polymarket_subscription_while_draining(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    recovery: &mut SourceRecoverySupervisor,
 ) -> Result<()> {
     let progress = {
         let sdk = &mut market_runtime.sdk;
@@ -3636,7 +3574,6 @@ pub(super) async fn apply_polymarket_subscription_while_draining(
                     sink,
                     collector_identity,
                     run_started,
-                    recovery,
                 )
                 .await;
             }
@@ -3675,7 +3612,6 @@ pub(super) async fn apply_polymarket_subscription_while_draining(
                 sink,
                 collector_identity,
                 run_started,
-                recovery,
             )
             .await
         }
@@ -3687,7 +3623,6 @@ pub(super) async fn apply_polymarket_subscription_while_draining(
                 sink,
                 collector_identity,
                 run_started,
-                recovery,
             )
             .await
         }
@@ -3739,7 +3674,6 @@ pub(super) async fn install_polymarket_context(
         sink,
         collector_identity,
         run_started,
-        recovery,
     )
     .await
     .err();
@@ -3908,7 +3842,7 @@ pub(super) async fn install_polymarket_context_if_current(
 }
 
 pub(super) fn validate_polymarket_context_switch(
-    current: &BtcUpdownDiscovery,
+    current: PolymarketDiscoveryView<'_>,
     replacement: &BtcUpdownDiscovery,
 ) -> Result<()> {
     if current.current.slug == replacement.current.slug {
@@ -3921,10 +3855,7 @@ pub(super) fn validate_polymarket_context_switch(
     else {
         return Ok(());
     };
-    if !same_market_identity(
-        &discovered_market_identity(prefetched),
-        &discovered_market_identity(&replacement.current),
-    ) {
+    if !same_discovered_market_identity(prefetched, &replacement.current) {
         return Err(invalid_data(format!(
             "Polymarket prefetched market identity changed before promotion:slug={}",
             prefetched.slug
@@ -3935,20 +3866,17 @@ pub(super) fn validate_polymarket_context_switch(
 }
 
 pub(super) fn validate_polymarket_discovery_identity_continuity(
-    previous: &BtcUpdownDiscovery,
+    previous: PolymarketDiscoveryView<'_>,
     current: &BtcUpdownDiscovery,
 ) -> Result<()> {
-    for previous_market in std::iter::once(&previous.current).chain(previous.next.as_ref()) {
+    for previous_market in previous.markets() {
         let Some(current_market) = std::iter::once(&current.current)
             .chain(current.next.as_ref())
             .find(|market| market.slug == previous_market.slug)
         else {
             continue;
         };
-        if !same_market_identity(
-            &discovered_market_identity(previous_market),
-            &discovered_market_identity(current_market),
-        ) {
+        if !same_discovered_market_identity(previous_market, current_market) {
             return Err(invalid_data(format!(
                 "Polymarket market identity changed across transport recovery:slug={}",
                 previous_market.slug
@@ -3960,15 +3888,15 @@ pub(super) fn validate_polymarket_discovery_identity_continuity(
 }
 
 pub(super) fn preserve_polymarket_fixed_identity_authority(
-    previous: &BtcUpdownDiscovery,
+    previous: PolymarketDiscoveryView<'_>,
     replacement: &mut BtcUpdownDiscovery,
 ) -> Result<()> {
     validate_polymarket_discovery_identity_continuity(previous, replacement)?;
     for replacement_market in
         std::iter::once(&mut replacement.current).chain(replacement.next.as_mut())
     {
-        let Some(previous_market) = std::iter::once(&previous.current)
-            .chain(previous.next.as_ref())
+        let Some(previous_market) = previous
+            .markets()
             .find(|market| market.slug == replacement_market.slug)
         else {
             continue;
@@ -4064,21 +3992,13 @@ pub(super) fn recovered_polymarket_fixed_identity_matches(
     recovered: &RecoveredPolymarketFixedIdentity,
     fresh: &DiscoveredBtcUpdownMarket,
 ) -> bool {
-    same_market_identity(
-        &PolymarketMarketIdentity {
-            slug: recovered.slug.clone(),
-            condition_id: recovered.condition_id.clone(),
-            clob_market_id: recovered.clob_market_id.clone(),
-            ordered_up_down_asset_ids_json: serde_json::to_string(&[
-                recovered.up_asset_id.as_str(),
-                recovered.down_asset_id.as_str(),
-            ])
-            .unwrap_or_default(),
-            market_start_utc_ms: recovered.market_start_utc_ms,
-            market_end_utc_ms: recovered.market_end_utc_ms,
-        },
-        &discovered_market_identity(fresh),
-    )
+    recovered.slug == fresh.slug
+        && recovered.condition_id == fresh.condition_id
+        && recovered.clob_market_id == fresh.id
+        && recovered.up_asset_id == fresh.up_asset_id
+        && recovered.down_asset_id == fresh.down_asset_id
+        && recovered.market_start_utc_ms == fresh.start_ts_s.saturating_mul(1_000)
+        && recovered.market_end_utc_ms == fresh.end_ts_s.saturating_mul(1_000)
 }
 
 pub(super) fn polymarket_restart_discovery_integrity_error(
@@ -4143,9 +4063,9 @@ pub(super) async fn switch_polymarket_context<N>(
 where
     N: Fn() -> PolymarketTimelineNow + Send + Sync,
 {
-    if let Some(current) = context.discovery_snapshot()
-        && let Err(error) = validate_polymarket_context_switch(&current, &discovery)
-            .and_then(|()| preserve_polymarket_fixed_identity_authority(&current, &mut discovery))
+    if let Some(current) = context.discovery_view()
+        && let Err(error) = validate_polymarket_context_switch(current, &discovery)
+            .and_then(|()| preserve_polymarket_fixed_identity_authority(current, &mut discovery))
     {
         record_gap(
             &sink.gaps,
@@ -4161,7 +4081,6 @@ where
         sink,
         collector_identity,
         run_started,
-        recovery,
     )
     .await?;
     install_polymarket_context_if_current(
@@ -4819,18 +4738,15 @@ pub(super) async fn finalize_polymarket_pending_after_fence<N>(
     sink: &SourceEventSink,
     collector_identity: &CollectorIdentity,
     run_started: Instant,
-    recovery: &mut SourceRecoverySupervisor,
 ) -> Result<()>
 where
     N: Fn() -> PolymarketTimelineNow + Send + Sync,
 {
-    let ready_slugs = context
+    if !context
         .pending
-        .iter()
-        .filter(|(_, pending)| pending.requires_fence())
-        .map(|(slug, _)| slug.clone())
-        .collect::<Vec<_>>();
-    if ready_slugs.is_empty() {
+        .values()
+        .any(|pending| pending.requires_fence())
+    {
         return Ok(());
     }
 
@@ -4848,7 +4764,6 @@ where
         sink,
         collector_identity,
         run_started,
-        recovery,
     )
     .await?;
     abort_ws_claimed_gamma_resolution_polls(context);
@@ -4872,7 +4787,6 @@ where
         sink,
         collector_identity,
         run_started,
-        recovery,
     )
     .await?;
     if let Some(reason) = fatal_integrity {
@@ -4912,9 +4826,7 @@ where
     for slug in ready_slugs {
         let applied_at_utc_ms = timeline_now().utc_ms;
         context.actor_now_utc_ms = applied_at_utc_ms;
-        let Some(pending) = context.pending.get(&slug) else {
-            continue;
-        };
+        let pending = &context.pending[&slug];
         let finalization = if let Some(claim) = &pending.claim {
             let terminal_row = match claim {
                 PolymarketTerminalClaim::MarketResolvedWs(evidence) => {
@@ -5006,12 +4918,7 @@ where
                 fatal_integrity: terminal_fatal_integrity,
             } => {
                 send_polymarket_terminal_prefix_ordered(sink, run_started, rows).await?;
-                if context.pending.remove(&slug).is_none() {
-                    return Err(invalid_data(format!(
-                        "Polymarket terminal owner disappeared after successful enqueue:slug={slug}"
-                    ))
-                    .into());
-                }
+                context.pending.remove(&slug);
                 if terminal_fatal_integrity {
                     fatal_integrity = Some(format!(
                         "Gamma resolution integrity failure after WS terminal:slug={slug}"
@@ -5020,12 +4927,7 @@ where
             }
             PendingFinalization::Exhausted { row } => {
                 send_polymarket_metadata_row_with_ticket(sink, run_started, *row).await?;
-                if context.pending.remove(&slug).is_none() {
-                    return Err(invalid_data(format!(
-                        "Polymarket exhausted owner disappeared after successful enqueue:slug={slug}"
-                    ))
-                    .into());
-                }
+                context.pending.remove(&slug);
             }
             PendingFinalization::NotReady => {}
         }
@@ -5154,7 +5056,6 @@ where
             sink,
             collector_identity,
             run_started,
-            recovery,
         )
         .await?;
         admit_missing_polymarket_context_metadata(
@@ -5201,7 +5102,6 @@ where
                         sink,
                         collector_identity,
                         run_started,
-                        recovery,
                     )
                     .await?
                     {
@@ -5231,7 +5131,6 @@ where
                         sink,
                         collector_identity,
                         run_started,
-                        recovery,
                     )
                     .await?;
                     return Ok(());
@@ -5254,7 +5153,6 @@ where
                 sink,
                 collector_identity,
                 run_started,
-                recovery,
             )
             .await?;
             let boundary_now = timeline_now();
@@ -5299,7 +5197,6 @@ where
                 sink,
                 collector_identity,
                 run_started,
-                recovery,
             )
             .await?;
             continue;
@@ -5319,7 +5216,6 @@ where
                 sink,
                 collector_identity,
                 run_started,
-                recovery,
             )
             .await?;
             return Ok(());
@@ -5340,7 +5236,6 @@ where
                 sink,
                 collector_identity,
                 run_started,
-                recovery,
             )
             .await?
             {
@@ -5375,7 +5270,7 @@ where
             sink,
         )?;
 
-        if let Some(current) = context.current.clone()
+        if let Some(current) = context.current.as_ref()
             && context.next.is_none()
             && next_discovery_tasks.is_empty()
             && now.monotonic >= next_discovery_at
@@ -5606,7 +5501,6 @@ where
                         sink,
                         collector_identity,
                         run_started,
-                        recovery,
                     )
                     .await?;
                     return Ok(());
@@ -5629,7 +5523,6 @@ where
                     sink,
                     collector_identity,
                     run_started,
-                    recovery,
                 )
                 .await?
                 {
@@ -5652,7 +5545,6 @@ where
                         sink,
                         collector_identity,
                         run_started,
-                        recovery,
                     )
                     .await
                     {
@@ -5663,7 +5555,6 @@ where
                             sink,
                             collector_identity,
                             run_started,
-                            recovery,
                         )
                         .await;
                     }

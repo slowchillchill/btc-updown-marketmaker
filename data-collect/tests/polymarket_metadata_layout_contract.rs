@@ -1198,7 +1198,7 @@ fn source_payloads_reconstruct_through_the_pinned_sdk_and_unique_terminal_evalua
 }
 
 #[test]
-fn five_v3_row_kinds_and_local_reference_rules_remain_frozen() {
+fn five_v3_row_kinds_keep_local_reference_identity_and_evidence() {
     let mut rows = [
         metadata_snapshot_v3(),
         market_state_transition_v3(),
@@ -1242,6 +1242,18 @@ fn five_v3_row_kinds_and_local_reference_rules_remain_frozen() {
     }
 
     validate_polymarket_metadata_local_references(&rows).unwrap();
+
+    let mut equivalent_asset_spelling = rows.to_vec();
+    equivalent_asset_spelling[1].asset_ids = r#"[ "\u003101", "102" ]"#.to_owned();
+    validate_polymarket_metadata_local_references(&equivalent_asset_spelling)
+        .expect("JSON 拼写不改变相同资产值与顺序的身份关联");
+
+    let mut reversed_assets = rows.to_vec();
+    reversed_assets[1].asset_ids = r#"["102","101"]"#.to_owned();
+    assert!(matches!(
+        validate_polymarket_metadata_local_references(&reversed_assets),
+        Err(PolymarketMetadataReferenceIntegrityError::Missing { .. })
+    ));
 
     let mut unique_digest_collision = rows.to_vec();
     let mut different_payload = rows[0].clone();

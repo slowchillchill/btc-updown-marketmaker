@@ -452,8 +452,11 @@ fn create_rtds_runtime(
     spec: &RtdsSourceSpec,
     subscriptions: &[Subscription],
 ) -> Result<RtdsSdkRuntime> {
-    let mut runtime = RtdsSdkRuntime::new(spec.endpoint.clone(), spec.ws_config.clone())?;
-    runtime.replace_subscriptions(subscriptions.to_vec())?;
+    let runtime = RtdsSdkRuntime::new(
+        spec.endpoint.clone(),
+        spec.ws_config.clone(),
+        subscriptions.to_vec(),
+    )?;
     Ok(runtime)
 }
 
@@ -586,10 +589,9 @@ pub(super) async fn run_rtds_source_with_dedupe(
         }
         let state = runtime.connection_state();
         let generation = runtime.connection_generation();
-        let desired_revision = runtime.subscription_revision();
-        let subscription_applied = runtime.applied_subscription().is_some_and(|applied| {
-            applied.generation == generation && applied.revision >= desired_revision
-        });
+        let subscription_applied = runtime
+            .applied_subscription()
+            .is_some_and(|applied| applied.generation == generation);
         business_recovery.reconcile_current(state, generation, subscription_applied, now);
         if !business_recovery.replacement_due(now) {
             continue;

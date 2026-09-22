@@ -7,7 +7,6 @@ use serde::{Deserialize, Serialize};
 use crate::polymarket_identity::{
     PolymarketMarketIdentity, SourceAuthority, SourceEvidenceLocator, SourceReference,
     VerifiedPolymarketMarketIdentity, source_reference_candidate_matches_authority,
-    source_reference_matches_authority,
 };
 use sha2::{Digest as _, Sha256};
 
@@ -669,18 +668,19 @@ pub(crate) fn validate_polymarket_source_references(
     references: &[SourceReference],
 ) -> Result<(), PolymarketMetadataReferenceIntegrityError> {
     for reference in references {
-        let candidates = authorities
-            .iter()
-            .filter(|authority| source_reference_candidate_matches_authority(reference, authority))
-            .collect::<Vec<_>>();
-        let matches = candidates
-            .iter()
-            .copied()
-            .filter(|authority| source_reference_matches_authority(reference, authority))
-            .collect::<Vec<_>>();
-        match matches.as_slice() {
-            [] => {
-                if candidates.is_empty() {
+        let mut candidates = 0_usize;
+        let mut matches = 0_usize;
+        for authority in authorities {
+            if source_reference_candidate_matches_authority(reference, authority) {
+                candidates += 1;
+                if reference.evidence.raw_sha256 == authority.evidence.raw_sha256 {
+                    matches += 1;
+                }
+            }
+        }
+        match matches {
+            0 => {
+                if candidates == 0 {
                     return Err(PolymarketMetadataReferenceIntegrityError::Missing {
                         slug: reference.identity.market.slug.clone(),
                     });
@@ -689,11 +689,11 @@ pub(crate) fn validate_polymarket_source_references(
                     slug: reference.identity.market.slug.clone(),
                 });
             }
-            [_authority] => {}
+            1 => {}
             _ => {
                 return Err(PolymarketMetadataReferenceIntegrityError::Multiple {
                     slug: reference.identity.market.slug.clone(),
-                    matches: matches.len(),
+                    matches,
                 });
             }
         }
@@ -703,18 +703,20 @@ pub(crate) fn validate_polymarket_source_references(
 
 pub(crate) fn verified_identity_from_metadata_row(
     row: &PolymarketMarketMetadataRow,
-) -> VerifiedPolymarketMarketIdentity {
-    VerifiedPolymarketMarketIdentity {
+) -> Option<VerifiedPolymarketMarketIdentity> {
+    let [up_asset_id, down_asset_id] = serde_json::from_str::<[String; 2]>(&row.asset_ids).ok()?;
+    Some(VerifiedPolymarketMarketIdentity {
         market: PolymarketMarketIdentity {
             slug: row.slug.clone(),
             condition_id: row.condition_id.clone(),
             clob_market_id: row.clob_market_id.clone(),
-            ordered_up_down_asset_ids_json: row.asset_ids.clone(),
+            up_asset_id,
+            down_asset_id,
             market_start_utc_ms: row.market_start_utc,
             market_end_utc_ms: row.market_end_utc,
         },
         first_verified_at_utc_ms: row.fixed_identity_verified_at_utc,
-    }
+    })
 }
 
 pub(crate) fn source_authority_from_metadata_row(
@@ -726,7 +728,7 @@ pub(crate) fn source_authority_from_metadata_row(
         .clone()
         .filter(|digest| !digest.is_empty())?;
     Some(SourceAuthority {
-        identity: verified_identity_from_metadata_row(row),
+        identity: verified_identity_from_metadata_row(row)?,
         origin: row.source_evidence_origin?.as_str().to_owned(),
         evidence: SourceEvidenceLocator {
             received_at_utc_ms: row.source_evidence_received_at_utc?,
@@ -747,7 +749,7 @@ pub(crate) fn source_reference_from_metadata_row(
         slug: row.slug.clone(),
     };
     Ok(Some(SourceReference {
-        identity: verified_identity_from_metadata_row(row),
+        identity: verified_identity_from_metadata_row(row).ok_or_else(missing)?,
         origin: row
             .source_evidence_origin
             .map(|origin| origin.as_str().to_owned())
@@ -793,10 +795,12 @@ impl PolymarketMarketMetadataRow {
             violations: Vec::new(),
             validate_legacy_resolution_digest,
         };
+        let asset_ids = serde_json::from_str::<Vec<String>>(&self.asset_ids).ok();
         self.validate_common(
             &mut report,
             expected_schema_version,
             require_collector_admission,
+            asset_ids.as_deref(),
         );
         match self.metadata_row_kind {
             PolymarketMetadataRowKind::MetadataSnapshot => {
@@ -806,10 +810,10 @@ impl PolymarketMarketMetadataRow {
                 self.validate_market_state_transition(&mut report)
             }
             PolymarketMetadataRowKind::ResolutionPollAttempt => {
-                self.validate_resolution_poll_attempt(&mut report)
+                self.validate_resolution_poll_attempt(&mut report, asset_ids.as_deref())
             }
             PolymarketMetadataRowKind::ResolutionTerminalWs => {
-                self.validate_resolution_terminal_ws(&mut report)
+                self.validate_resolution_terminal_ws(&mut report, asset_ids.as_deref())
             }
             PolymarketMetadataRowKind::ResolutionFollowupSummary => {
                 self.validate_resolution_followup_summary(&mut report)
@@ -823,6 +827,7 @@ impl PolymarketMarketMetadataRow {
         report: &mut PolymarketMarketMetadataValidation,
         expected_schema_version: &str,
         require_collector_admission: bool,
+        asset_ids: Option<&[String]>,
     ) {
         report.require("timestamp_received", self.timestamp_received > 0);
         if require_collector_admission {
@@ -856,7 +861,7 @@ impl PolymarketMarketMetadataRow {
                 _ => "schema_version:unexpected",
             });
         }
-        self.validate_fixed_identity(report, require_collector_admission);
+        self.validate_fixed_identity(report, require_collector_admission, asset_ids);
         self.validate_source_times_and_digests(report, require_collector_admission);
         self.validate_closed_time(report);
         self.validate_active_reason(report);
@@ -867,6 +872,7 @@ impl PolymarketMarketMetadataRow {
         &self,
         report: &mut PolymarketMarketMetadataValidation,
         require_collector_admission: bool,
+        asset_ids: Option<&[String]>,
     ) {
         report.require("market_start_utc", self.market_start_utc > 0);
         report.require("market_end_utc", self.market_end_utc > 0);
@@ -883,8 +889,8 @@ impl PolymarketMarketMetadataRow {
             report.reject("fixed_identity_verified_at_utc:after_admission");
         }
 
-        match serde_json::from_str::<Vec<String>>(&self.asset_ids) {
-            Ok(asset_ids)
+        match asset_ids {
+            Some(asset_ids)
                 if asset_ids.len() == 2
                     && asset_ids.iter().all(|asset_id| !asset_id.trim().is_empty())
                     && asset_ids[0] != asset_ids[1]
@@ -1194,7 +1200,7 @@ impl PolymarketMarketMetadataRow {
         }
         self.require_local_response_fields_null(report);
         self.require_discovery_evidence(report, false, false, false);
-        self.require_timer_transition_times(report, self.market_start_utc, true);
+        self.require_timer_transition_times(report, self.market_start_utc);
         report.require_null(
             "resolution_budget_horizon_utc",
             self.resolution_budget_horizon_utc.is_none(),
@@ -1224,7 +1230,7 @@ impl PolymarketMarketMetadataRow {
             report.reject("active_unavailable_reason:candidate_to_active");
         }
         self.require_discovery_evidence(report, true, true, true);
-        self.require_timer_transition_times(report, self.market_start_utc, true);
+        self.require_timer_transition_times(report, self.market_start_utc);
         if self.row_evidence_validation_completed_at_utc
             != Some(self.fixed_identity_verified_at_utc)
         {
@@ -1290,7 +1296,11 @@ impl PolymarketMarketMetadataRow {
         }
     }
 
-    fn validate_resolution_poll_attempt(&self, report: &mut PolymarketMarketMetadataValidation) {
+    fn validate_resolution_poll_attempt(
+        &self,
+        report: &mut PolymarketMarketMetadataValidation,
+        asset_ids: Option<&[String]>,
+    ) {
         report.require(
             "resolution_poll_attempt_ordinal",
             self.resolution_poll_attempt_ordinal.is_some(),
@@ -1333,7 +1343,9 @@ impl PolymarketMarketMetadataRow {
         );
 
         match self.resolution_poll_result {
-            Some(ResolutionPollResult::Terminal) => self.validate_terminal_gamma_attempt(report),
+            Some(ResolutionPollResult::Terminal) => {
+                self.validate_terminal_gamma_attempt(report, asset_ids)
+            }
             Some(ResolutionPollResult::ValidNonterminal) => {
                 self.validate_valid_nonterminal_attempt(report)
             }
@@ -1349,7 +1361,11 @@ impl PolymarketMarketMetadataRow {
         }
     }
 
-    fn validate_terminal_gamma_attempt(&self, report: &mut PolymarketMarketMetadataValidation) {
+    fn validate_terminal_gamma_attempt(
+        &self,
+        report: &mut PolymarketMarketMetadataValidation,
+        asset_ids: Option<&[String]>,
+    ) {
         self.require_gamma_decoded_evidence(report);
         self.require_gamma_terminal_response(report);
         self.require_completed_terminal_transition(report);
@@ -1366,7 +1382,7 @@ impl PolymarketMarketMetadataRow {
         if self.resolution_evidence_source != Some(ResolutionEvidenceSource::GammaBySlug) {
             report.reject("resolution_evidence_source:terminal_gamma_attempt");
         }
-        self.require_owned_terminal_values(report);
+        self.require_owned_terminal_values(report, asset_ids);
         if self.terminal_predicate_passed != Some(true) {
             report.reject("terminal_predicate_passed:terminal_gamma_attempt");
         }
@@ -1632,7 +1648,11 @@ impl PolymarketMarketMetadataRow {
         );
     }
 
-    fn validate_resolution_terminal_ws(&self, report: &mut PolymarketMarketMetadataValidation) {
+    fn validate_resolution_terminal_ws(
+        &self,
+        report: &mut PolymarketMarketMetadataValidation,
+        asset_ids: Option<&[String]>,
+    ) {
         if self.metadata_origin != PolymarketMetadataOrigin::MarketResolvedWs {
             report.reject("metadata_origin:resolution_terminal_ws");
         }
@@ -1653,7 +1673,7 @@ impl PolymarketMarketMetadataRow {
             "source_endpoint_unavailable_reason",
             self.source_endpoint_unavailable_reason.is_none(),
         );
-        self.require_source_payload_evidence(report, true);
+        self.require_source_payload_evidence(report);
         if self.source_evidence_received_at_utc != Some(self.timestamp_received) {
             report.reject("resolution_terminal_ws:timestamp_not_source_receive");
         }
@@ -1696,7 +1716,7 @@ impl PolymarketMarketMetadataRow {
         if self.resolution_evidence_source != Some(ResolutionEvidenceSource::MarketResolvedWs) {
             report.reject("resolution_evidence_source:resolution_terminal_ws");
         }
-        self.require_owned_terminal_values(report);
+        self.require_owned_terminal_values(report, asset_ids);
         if self.terminal_predicate_passed != Some(true) {
             report.reject("terminal_predicate_passed:resolution_terminal_ws");
         }
@@ -1919,7 +1939,7 @@ impl PolymarketMarketMetadataRow {
         {
             report.reject("source_evidence_event_type:expected_gamma_by_slug_response");
         }
-        self.require_source_payload_evidence(report, true);
+        self.require_source_payload_evidence(report);
         report.require(
             "metadata_fetch_start_utc",
             self.metadata_fetch_start_utc.is_some(),
@@ -1938,11 +1958,7 @@ impl PolymarketMarketMetadataRow {
         }
     }
 
-    fn require_source_payload_evidence(
-        &self,
-        report: &mut PolymarketMarketMetadataValidation,
-        validation_required: bool,
-    ) {
+    fn require_source_payload_evidence(&self, report: &mut PolymarketMarketMetadataValidation) {
         report.require(
             "source_evidence_received_at_utc",
             self.source_evidence_received_at_utc.is_some(),
@@ -1955,12 +1971,10 @@ impl PolymarketMarketMetadataRow {
             "source_evidence_raw_sha256",
             non_empty(self.source_evidence_raw_sha256.as_deref()),
         );
-        if validation_required {
-            report.require(
-                "row_evidence_validation_completed_at_utc",
-                self.row_evidence_validation_completed_at_utc.is_some(),
-            );
-        }
+        report.require(
+            "row_evidence_validation_completed_at_utc",
+            self.row_evidence_validation_completed_at_utc.is_some(),
+        );
     }
 
     fn require_gamma_request_without_response(
@@ -2293,7 +2307,6 @@ impl PolymarketMarketMetadataRow {
         &self,
         report: &mut PolymarketMarketMetadataValidation,
         scheduled: i64,
-        both_transitions: bool,
     ) {
         report.require(
             "lifecycle_scheduled_at_utc",
@@ -2303,18 +2316,16 @@ impl PolymarketMarketMetadataRow {
             "lifecycle_applied_at_utc",
             self.lifecycle_applied_at_utc.is_some(),
         );
-        if both_transitions {
-            report.require(
-                "runtime_role_scheduled_at_utc",
-                self.runtime_role_scheduled_at_utc == Some(scheduled),
-            );
-            report.require(
-                "runtime_role_applied_at_utc",
-                self.runtime_role_applied_at_utc.is_some(),
-            );
-            if self.lifecycle_applied_at_utc != self.runtime_role_applied_at_utc {
-                report.reject("market_state_transition:applied_times_differ");
-            }
+        report.require(
+            "runtime_role_scheduled_at_utc",
+            self.runtime_role_scheduled_at_utc == Some(scheduled),
+        );
+        report.require(
+            "runtime_role_applied_at_utc",
+            self.runtime_role_applied_at_utc.is_some(),
+        );
+        if self.lifecycle_applied_at_utc != self.runtime_role_applied_at_utc {
+            report.reject("market_state_transition:applied_times_differ");
         }
         if self
             .lifecycle_applied_at_utc
@@ -2324,7 +2335,11 @@ impl PolymarketMarketMetadataRow {
         }
     }
 
-    fn require_owned_terminal_values(&self, report: &mut PolymarketMarketMetadataValidation) {
+    fn require_owned_terminal_values(
+        &self,
+        report: &mut PolymarketMarketMetadataValidation,
+        asset_ids: Option<&[String]>,
+    ) {
         report.require(
             "winning_asset_id",
             non_empty(self.winning_asset_id.as_deref()),
@@ -2339,10 +2354,8 @@ impl PolymarketMarketMetadataRow {
                 non_empty(self.resolution_evidence_raw_sha256.as_deref()),
             );
         }
-        if let (Some(winner), Ok(asset_ids)) = (
-            self.winning_asset_id.as_deref(),
-            serde_json::from_str::<Vec<String>>(&self.asset_ids),
-        ) && !asset_ids.iter().any(|asset_id| asset_id == winner)
+        if let (Some(winner), Some(asset_ids)) = (self.winning_asset_id.as_deref(), asset_ids)
+            && !asset_ids.iter().any(|asset_id| asset_id == winner)
         {
             report.reject("winning_asset_id:not_in_fixed_identity");
         }
