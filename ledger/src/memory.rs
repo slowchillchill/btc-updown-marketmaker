@@ -222,6 +222,8 @@ impl LedgerWriterV1 {
                             | SourceNeutralEvidenceKind::SettlementLifecycleV2 { .. }
                             | SourceNeutralEvidenceKind::Control {
                                 result: SourceNeutralControlResult::CancellationRequestCompleted { .. }
+                                    | SourceNeutralControlResult::OrdersQuery { .. }
+                                    | SourceNeutralControlResult::TradesQuery { .. }
                             }
                     ) {
                         let out = self.apply_pending_result(&source, account, at)?;
@@ -300,26 +302,8 @@ fn ledger_control<R>(result: &MemoryControl<R>) -> Option<LedgerControl<MemoryId
                 }
             },
         },
-        SourceNeutralControlResult::OrdersQuery { result } => LedgerControl::OrdersQuery {
-            result: match result {
-                SourceNeutralOrdersQueryResult::Page(p) => {
-                    SourceNeutralOrdersQueryResult::Page(SourceNeutralOrdersPage {
-                        root_sequence: p.root_sequence,
-                        items: p.items.iter().map(old_order).collect(),
-                        next_cursor: p.next_cursor.clone(),
-                    })
-                }
-                SourceNeutralOrdersQueryResult::InvalidCursor => {
-                    SourceNeutralOrdersQueryResult::InvalidCursor
-                }
-                SourceNeutralOrdersQueryResult::OutOfRetention(x) => {
-                    SourceNeutralOrdersQueryResult::OutOfRetention(x.clone())
-                }
-            },
-        },
-        SourceNeutralControlResult::TradesQuery { result } => LedgerControl::TradesQuery {
-            result: result.clone(),
-        },
+        SourceNeutralControlResult::OrdersQuery { .. }
+        | SourceNeutralControlResult::TradesQuery { .. } => return None,
     })
 }
 fn ledger_evidence<R>(

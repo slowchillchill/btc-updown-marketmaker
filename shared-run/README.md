@@ -10,7 +10,7 @@
 
 `NoeConsumedRecordRefV1` 在正式接线中由真实来源适配器交付。业务领取位置包含 context、source watermark 与原 ordinal；同一反馈的不同归一化记录共享 delivery。普通 `NoeDurableRecordViewV1` 和序列化引用不能直接传入应用或登记入口。公开生产者接口属于受信进程内宿主协作，宿主负责真实规范化批及驱动时点；手工重建批并自填时间仍可间接取得消费引用，这是 #101 已明确接受的风险，私有字段和直接 compile-fail 不证明来源不可伪造。正式耐久读取与 Ledger 恢复不重建输入以重新应用。开户经真实归约及原 NOE 规范化产生即为 Initialization，不等待后台交接、耐久、激活或公共组。普通内存业务处理不编码身份、不扫描磁盘、不等耐久；明确的市场稳定边界沿下文统一确认。
 
-Ledger 继续使用同一应用核心，V2 材料包含 Genesis、Transaction、ReservationDecision，交给原 SIM 日志后台 worker。来源交易需要真实 NOE 稳定映射时，后台先同步原 SIM 日志，再沿原 NOE stabilize 发布，按原顺序物化 Ledger；本地事件不虚构 NOE 依赖，也不越过未物化前项。没有第二线程、编号器或满队列策略。完成时原 NOE 稳定、Ledger 段封口后才允许原 SIM seal；实际 I/O 错误原样使本轮未完成。V1 同步记录和恢复保持兼容，V2 恢复还原原应用效果、visibility 和幂等位置，不重放业务领取。恢复读取按原 NOE context 的业务版本分别解析 V3／V4 来源，不新增持久字段，也不把耐久记录转换为可应用领取引用。一次 Ledger 打开仅保留一个已验证批的位置材料，以原始容器位置与预期边界摘要为键；同键复用 boundary 和记录数，每个 ordinal 仍检查范围，换键完整读取，不保留批次正文或全历史。该复用依赖不可变提交合同：违规原地改写在同次恢复的后续命中不再被重复发现，新的恢复和独立公开读取仍完整验证。
+Ledger 继续使用同一应用核心，V2 材料包含 Genesis、Transaction、ReservationDecision，交给原 SIM 日志后台 worker。来源交易需要真实 NOE 稳定映射时，后台先同步原 SIM 日志，再沿原 NOE stabilize 发布，按原顺序物化 Ledger；本地事件不虚构 NOE 依赖，也不越过未物化前项。没有第二线程、编号器或满队列策略。完成时原 NOE 稳定、Ledger 段封口后才允许原 SIM seal；实际 I/O 错误原样使本轮未完成。V1 同步记录和 V2 后台记录共用当前应用效果表示；V2 恢复还原原应用效果、visibility 和幂等位置，不重放业务领取。恢复读取按原 NOE context 的业务版本分别解析 V3／V4 来源，不新增持久字段，也不把耐久记录转换为可应用领取引用。一次 Ledger 打开仅保留一个已验证批的位置材料，以原始容器位置与预期边界摘要为键；同键复用 boundary 和记录数，每个 ordinal 仍检查范围，换键完整读取，不保留批次正文或全历史。该复用依赖不可变提交合同：违规原地改写在同次恢复的后续命中不再被重复发现，新的恢复和独立公开读取仍完整验证。
 
 宿主计划停止时，先结束已开始的同步调用并停止新组、请求及 Ledger 追加，然后消耗 `PublicSimExecutionV1`、`FinitePublicConsumptionV1` 或 `ContinuousPublicConsumptionV1` 调用 `stop_and_drain`。它只沿同一后台移交 pending 组、同步 SIM、稳定 NOE、接收最后一批 Ledger 材料并封口 Ledger 段，等待原后台退出；不调用下一组、CloseTime、EndOfInput 或 `complete`，不撤单、清仓或改变已有订单/持仓事实。成功不生成 `RunSeal`，不返回完整冷产物或可恢复账户。原 `complete` 仍要求真实业务闭合。来源摘要 `market_event_source_identity_sha256` 对离线材料保留真实值，在线创建时传 `None`；新读取器兼容旧字符串字段，其他身份摘要保持原合同。
 
@@ -42,6 +42,10 @@ SIM 公共关闭日志新增 `ExecutionClockAdvancedTo` 依据，未扩展 DPT �
 
 在线组合通过 `PreparedPublicGroupV1::from_online(&mut pending)` 消费 DPT 同次材料，复用有限来源的组引用、规范位置与 PM 上下文组装。组的 `Arc` 与 DPT 记录器、SIM 后台及驱动当前组共享；不复制完整组或重新准备 PM。宿主按原序在首个相关组前登记市场，然后调用持续驱动、共享读取与 Bridge，再完成 DPT 的记录确认。`tests/continuous.rs` 的原 socket 组合验证半帧期间保留同一 future 并调用真实 `advance_due`；DPT 自身测试覆盖异步记录容量等待。同步 SIM 容量等待仍不承诺并行 timer，恢复顺序沿原持续驱动。该组件组合不提供通用脚本平台；下节给出本次最短 PAPER 运行入口。
 
+
+Ledger 经济更新按 #107 F1b 使用 `EconomicsPatch.day_updates`：追加新贡献、设置日结果或设置已支付额，不在每次更新中保存完整历史贡献。`RebateDay.contributions` 仍参与实际日汇总和前驱关联。配对的份额与成本仍保存，已删除无业务消费者的 `Pool.contributors`、`allocations` 及 `paired_allocations` 历史明细出口。所有可失败计算仍在耐久 append 前完成，append 成功后才应用内存更新。
+
+该变化影响同步 JSONL 和后台 LedgerV2 交易中的经济补丁字段。同一冷读取入口接受旧 `EconomicsPatch.days` 完整日快照，恢复时直接移动替换，而非重复追加历史贡献；新写入只生成增量更新，不维护另一份完整日副本。旧程序不能读取新 `day_updates` 补丁；NOE V3／V4 的来源接线保持原版本。
 
 ## PAPER 运行入口（#109 任务 7）
 

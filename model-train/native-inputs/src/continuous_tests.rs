@@ -1247,18 +1247,11 @@ impl ContinuousRoot {
                 });
             }
             if elapsed == 575000 {
-                let pair = read
-                    .paired_allocations()
-                    .find(|p| p.quantity_shares.0 == "1")
-                    .unwrap();
-                assert_eq!(
-                    pair.principal_cost_pusd,
-                    [rational("1", "2"), rational("1", "5")]
-                );
                 let m = read
                     .market_totals()
                     .find(|m| m.condition_id.0 == condition(1))
                     .unwrap();
+                assert_eq!(m.paired_shares.0, "1");
                 assert_eq!(m.confirmed_net_pnl_pusd, rational("3", "10"));
                 self.checks.insert("partial-cost-0.7-profit-0.3");
             }
@@ -2714,13 +2707,6 @@ async fn continuous_contribution_before_success_regression() {
             let target = |id: &execution_normalization::MemoryLogicalIdentityV1| matches!(&id.key,execution_normalization::MemoryIdentityKeyV1::Entity(execution_normalization::SourceNeutralEntityKeyV1::Trade{source_trade_id}) if source_trade_id=="sim-28");
             let success = read.successful_trades().any(|t| target(t.trade_identity));
             assert_eq!(success, at == 173733000);
-            if !success {
-                assert!(
-                    read.paired_allocations()
-                        .all(|p| !target(&p.source_trade_identity)
-                            && p.contribution_refs.iter().flatten().all(|id| !target(id)))
-                );
-            }
             let day = read
                 .rebate_days()
                 .find(|d| {
