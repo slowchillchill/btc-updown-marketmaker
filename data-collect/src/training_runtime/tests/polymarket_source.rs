@@ -576,12 +576,12 @@ fn polymarket_metadata_common_rows_from_event(
     let rows = if value["schema_version"]
         == crate::polymarket_market_metadata_v6_layout::POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION
     {
-        polymarket_metadata_v6_rows_for_event(event)?.into_iter().filter_map(|row| match row {
-            crate::polymarket_market_metadata_v6_layout::PolymarketMarketMetadataV6Row::Existing(row) => Some(row),
-            crate::polymarket_market_metadata_v6_layout::PolymarketMarketMetadataV6Row::AnchorRule(_) => None,
-        }).collect()
+        match polymarket_metadata_v6_row_for_event(event)? {
+            crate::polymarket_market_metadata_v6_layout::PolymarketMarketMetadataV6Row::Existing(row) => vec![row],
+            crate::polymarket_market_metadata_v6_layout::PolymarketMarketMetadataV6Row::AnchorRule(_) => Vec::new(),
+        }
     } else {
-        polymarket_metadata_rows_from_event(event)?
+        vec![polymarket_metadata_row_from_event(event)?]
     };
     rows.into_iter()
         .map(|row| {

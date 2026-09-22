@@ -266,17 +266,20 @@ impl PolymarketOrderbookV3Projection {
         self,
         admission: PolymarketOrderbookV3Admission,
     ) -> Result<PolymarketOrderbookV3Message> {
-        self.prepare_admission(
-            admission.timestamp_received,
-            admission.collector_host_id,
-            admission.collector_region,
-            admission.source_endpoint,
-            admission.source_sequence_epoch_id,
-        )?
-        .admit(
-            admission.collector_admission_sequence,
-            admission.collector_admission_time_utc_ms,
-        )
+        let message = self
+            .prepare_admission(
+                admission.timestamp_received,
+                admission.collector_host_id,
+                admission.collector_region,
+                admission.source_endpoint,
+                admission.source_sequence_epoch_id,
+            )?
+            .admit(
+                admission.collector_admission_sequence,
+                admission.collector_admission_time_utc_ms,
+            );
+        message.envelope.validate_admission()?;
+        Ok(message)
     }
 
     pub(crate) fn prepare_admission(
@@ -287,7 +290,6 @@ impl PolymarketOrderbookV3Projection {
         source_endpoint: String,
         source_sequence_epoch_id: String,
     ) -> Result<PendingPolymarketOrderbookV3Admission> {
-        self.validate()?;
         if timestamp_received <= 0 {
             return Err(invalid_data(
                 "Polymarket v3 timestamp_received must be positive",
@@ -337,11 +339,10 @@ impl PendingPolymarketOrderbookV3Admission {
         mut self,
         collector_admission_sequence: u64,
         collector_admission_time_utc_ms: i64,
-    ) -> Result<PolymarketOrderbookV3Message> {
+    ) -> PolymarketOrderbookV3Message {
         self.message.envelope.collector_admission_sequence = collector_admission_sequence;
         self.message.envelope.collector_admission_time_utc_ms = collector_admission_time_utc_ms;
-        self.message.validate()?;
-        Ok(self.message)
+        self.message
     }
 }
 
@@ -390,6 +391,10 @@ impl PolymarketOrderbookV3Envelope {
             ));
         }
         require_non_empty("source_sequence_epoch_id", &self.source_sequence_epoch_id)?;
+        self.validate_admission()
+    }
+
+    fn validate_admission(&self) -> Result<()> {
         if self.collector_admission_sequence == 0 {
             return Err(invalid_data(
                 "Polymarket v3 collector admission sequence must be positive",
@@ -1216,6 +1221,8 @@ fn required_price_levels(
         .ok_or_else(|| invalid_data(format!("Polymarket v3 list {name} has corrupt items")))?;
     let prices = struct_string_child(values, 0, name)?;
     let sizes = struct_string_child(values, 1, name)?;
+    let price_name = format!("{name}.price");
+    let size_name = format!("{name}.size");
     range
         .map(|index| {
             if values.is_null(index) {
@@ -1224,8 +1231,8 @@ fn required_price_levels(
                 )));
             }
             Ok(PolymarketPriceLevelV3 {
-                price: required_string(prices, index, &format!("{name}.price"))?,
-                size: required_string(sizes, index, &format!("{name}.size"))?,
+                price: required_string(prices, index, &price_name)?,
+                size: required_string(sizes, index, &size_name)?,
             })
         })
         .collect()
@@ -1292,8 +1299,9 @@ fn required_string_list(batch: &RecordBatch, row: usize, name: &str) -> Result<V
         .as_any()
         .downcast_ref::<StringArray>()
         .ok_or_else(|| invalid_data(format!("Polymarket v3 list {name} has corrupt items")))?;
+    let item_name = format!("{name}.item");
     range
-        .map(|index| required_string(values, index, &format!("{name}.item")))
+        .map(|index| required_string(values, index, &item_name))
         .collect()
 }
 

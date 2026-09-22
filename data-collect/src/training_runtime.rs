@@ -183,9 +183,7 @@ use crate::polymarket_resolution_recovery::{
 use crate::polymarket_sdk_runtime::{
     MarketSdkMessageReceiver, MarketSdkRuntime, RtdsRuntimeEvent, RtdsSdkRuntime, SdkStreamError,
 };
-use crate::source_format::{
-    BinanceDepthOrdering, RtdsChainlinkBtcUsdRaw, plausible_unix_timestamp_ms,
-};
+use crate::source_format::{BinanceDepthOrdering, plausible_unix_timestamp_ms};
 #[cfg(test)]
 use crate::source_hourly_layout::BinanceAggTradeOrdering;
 use crate::source_hourly_layout::{
@@ -201,7 +199,7 @@ use crate::source_hourly_layout::{
 };
 use crate::sources::binance::{
     BINANCE_AGGTRADE_WS_ENDPOINT, BINANCE_DEPTH_SNAPSHOT_ENDPOINT, DepthUpdateAssessment,
-    DepthUpdateVerdict, assess_depth_update, parse_depth_snapshot_raw, parse_depth_update_raw,
+    DepthUpdateVerdict, assess_depth_sequence, parse_depth_snapshot_raw, parse_depth_update_raw,
 };
 use crate::sources::polymarket::{
     GammaTerminalAttemptContext, GammaTerminalFixedIdentity, GammaTerminalResponse,

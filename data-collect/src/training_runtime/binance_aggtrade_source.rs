@@ -87,14 +87,14 @@ pub(super) async fn run_binance_ws_source(
 
         let frame_inactivity_window = Duration::from_secs(spec.frame_inactivity_timeout_secs);
         let mut frame_inactivity_deadline = Instant::now() + frame_inactivity_window;
-        let _reconnect_reason = loop {
+        loop {
             if deadline_reached(deadline) {
                 break 'connections;
             }
             let frame_inactivity_remaining =
                 frame_inactivity_deadline.saturating_duration_since(Instant::now());
             if frame_inactivity_remaining.is_zero() {
-                break "frame_inactivity_timeout".to_owned();
+                break;
             }
             let read_timeout = deadline_remaining(deadline)
                 .map(|remaining| remaining.min(frame_inactivity_remaining))
@@ -143,10 +143,10 @@ pub(super) async fn run_binance_ws_source(
                             BUFFER_ACQUIRE_TIMEOUT,
                         )
                         .await?;
-                    let raw_bytes = text.as_bytes().to_vec();
                     let value = match serde_json::from_str::<Value>(text.as_str()) {
                         Ok(value) => value,
                         Err(error) => {
+                            let raw_bytes = text.as_bytes().to_vec();
                             drop(text);
                             match emit_aggtrade_websocket_invalid(
                                 raw_bytes,
@@ -171,7 +171,6 @@ pub(super) async fn run_binance_ws_source(
                             continue;
                         }
                     };
-                    drop(text);
                     let (payload, stream_name) = match (value.get("stream"), value.get("data")) {
                         (None, None) => (&value, "btcusdt@aggTrade"),
                         (Some(Value::String(stream_name)), Some(payload)) => {
@@ -179,6 +178,8 @@ pub(super) async fn run_binance_ws_source(
                         }
                         _ => {
                             drop(value);
+                            let raw_bytes = text.as_bytes().to_vec();
+                            drop(text);
                             match emit_aggtrade_websocket_invalid(
                                 raw_bytes,
                                 recv_time_utc_ms,
@@ -204,6 +205,8 @@ pub(super) async fn run_binance_ws_source(
                     };
                     let Some(event_type) = payload.get("e").and_then(Value::as_str) else {
                         drop(value);
+                        let raw_bytes = text.as_bytes().to_vec();
+                        drop(text);
                         match emit_aggtrade_websocket_invalid(
                             raw_bytes,
                             recv_time_utc_ms,
@@ -227,10 +230,12 @@ pub(super) async fn run_binance_ws_source(
                     };
                     let event_type = event_type.to_owned();
                     if event_type == "serverShutdown" {
-                        break "server_shutdown".to_owned();
+                        break;
                     }
                     if event_type != spec.default_event_type {
                         drop(value);
+                        let raw_bytes = text.as_bytes().to_vec();
+                        drop(text);
                         match emit_aggtrade_websocket_invalid(
                             raw_bytes,
                             recv_time_utc_ms,
@@ -261,6 +266,8 @@ pub(super) async fn run_binance_ws_source(
                         Ok(websocket) => websocket,
                         Err(error) => {
                             drop(value);
+                            let raw_bytes = text.as_bytes().to_vec();
+                            drop(text);
                             match emit_aggtrade_websocket_invalid(
                                 raw_bytes,
                                 recv_time_utc_ms,
@@ -285,7 +292,7 @@ pub(super) async fn run_binance_ws_source(
                         }
                     };
                     drop(value);
-                    drop(raw_bytes);
+                    drop(text);
                     let native_id = websocket.shared.aggregate_trade_id;
                     let payload_conflict = match websocket_dedupe
                         .observe(native_id, websocket.source_native_payload_json.as_bytes())
@@ -380,15 +387,15 @@ pub(super) async fn run_binance_ws_source(
                         .map(|remaining| remaining.min(Duration::from_secs(WS_WRITE_TIMEOUT_SECS)))
                         .unwrap_or_else(|| Duration::from_secs(WS_WRITE_TIMEOUT_SECS));
                     if write_timeout.is_zero() {
-                        break "source_deadline_before_pong".to_owned();
+                        break;
                     }
                     match timeout(write_timeout, stream.send(Message::Pong(payload))).await {
                         Ok(Ok(())) => {}
-                        Ok(Err(error)) => break format!("pong_send_error:{error}"),
-                        Err(_) => break "pong_send_timeout".to_owned(),
+                        Ok(Err(_)) => break,
+                        Err(_) => break,
                     }
                 }
-                Ok(Some(Ok(Message::Close(frame)))) => break format!("closed:{frame:?}"),
+                Ok(Some(Ok(Message::Close(_)))) => break,
                 Ok(Some(Ok(_))) => {}
                 Ok(Some(Err(TungsteniteError::Capacity(CapacityError::MessageTooLong {
                     size,
@@ -442,17 +449,17 @@ pub(super) async fn run_binance_ws_source(
                     {
                         EventAdmissionOutcome::Admitted | EventAdmissionOutcome::Deferred => {}
                         EventAdmissionOutcome::Cutoff => {
-                            break "oversize_application_message".to_owned();
+                            break;
                         }
                     }
-                    break "oversize_application_message".to_owned();
+                    break;
                 }
-                Ok(Some(Err(error))) => break format!("error:{error}"),
-                Ok(None) => break "stream_ended".to_owned(),
+                Ok(Some(Err(_))) => break,
+                Ok(None) => break,
                 Err(_) if deadline_reached(deadline) => break 'connections,
-                Err(_) => break "frame_inactivity_timeout".to_owned(),
+                Err(_) => break,
             }
-        };
+        }
 
         if !wait_for_source_recovery(&mut recovery, &sink, deadline).await {
             break;

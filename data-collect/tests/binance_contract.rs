@@ -98,7 +98,7 @@ fn binance_depth_stitch_contract() {
     }"#;
     let update = parse_depth_update_raw(
         envelope(SourceKind::BinanceDepthUpdate, "depthUpdate", raw_update),
-        raw_update,
+        &serde_json::from_str(raw_update).unwrap(),
     )
     .expect("parse official depth update");
     assert!(update.validate_contract().is_complete());
@@ -115,7 +115,7 @@ fn binance_depth_stitch_contract() {
             "depth_snapshot",
             raw_snapshot,
         ),
-        raw_snapshot,
+        &serde_json::from_str(raw_snapshot).unwrap(),
         1,
         2,
         BINANCE_DEPTH_SNAPSHOT_ENDPOINT,
@@ -137,7 +137,10 @@ fn binance_depth_stitch_contract() {
             "depthUpdate",
             r#"{"e":"depthUpdate","E":1,"s":"BTCUSDT","U":104,"u":105,"b":[["100","1"]],"a":[]}"#,
         ),
-        r#"{"e":"depthUpdate","E":1,"s":"BTCUSDT","U":104,"u":105,"b":[["100","1"]],"a":[]}"#,
+        &serde_json::from_str(
+            r#"{"e":"depthUpdate","E":1,"s":"BTCUSDT","U":104,"u":105,"b":[["100","1"]],"a":[]}"#,
+        )
+        .unwrap(),
     )
     .expect("parse one-sided depth update");
     assert_eq!(
@@ -153,7 +156,7 @@ fn binance_depth_stitch_contract() {
             "depthUpdate",
             r#"{"e":"depthUpdate","E":1,"s":"BTCUSDT","U":90,"u":100,"b":[["100","1"]],"a":[["101","1"]]}"#,
         ),
-        r#"{"e":"depthUpdate","E":1,"s":"BTCUSDT","U":90,"u":100,"b":[["100","1"]],"a":[["101","1"]]}"#,
+        &serde_json::from_str(r#"{"e":"depthUpdate","E":1,"s":"BTCUSDT","U":90,"u":100,"b":[["100","1"]],"a":[["101","1"]]}"#).unwrap(),
     )
     .expect("parse stale");
     assert_eq!(
@@ -169,7 +172,7 @@ fn binance_depth_stitch_contract() {
             "depthUpdate",
             r#"{"e":"depthUpdate","E":1,"s":"BTCUSDT","U":120,"u":121,"b":[["100","1"]],"a":[["101","1"]]}"#,
         ),
-        r#"{"e":"depthUpdate","E":1,"s":"BTCUSDT","U":120,"u":121,"b":[["100","1"]],"a":[["101","1"]]}"#,
+        &serde_json::from_str(r#"{"e":"depthUpdate","E":1,"s":"BTCUSDT","U":120,"u":121,"b":[["100","1"]],"a":[["101","1"]]}"#).unwrap(),
     )
     .expect("parse gap");
     assert_eq!(
@@ -185,7 +188,7 @@ fn binance_depth_stitch_contract() {
             "depthUpdate",
             r#"{"e":"depthUpdate","E":1,"s":"ETHUSDT","U":101,"u":103,"b":[["100","1"]],"a":[["101","1"]]}"#,
         ),
-        r#"{"e":"depthUpdate","E":1,"s":"ETHUSDT","U":101,"u":103,"b":[["100","1"]],"a":[["101","1"]]}"#,
+        &serde_json::from_str(r#"{"e":"depthUpdate","E":1,"s":"ETHUSDT","U":101,"u":103,"b":[["100","1"]],"a":[["101","1"]]}"#).unwrap(),
     );
     assert!(wrong_symbol.is_err());
 
@@ -195,7 +198,7 @@ fn binance_depth_stitch_contract() {
             "depthUpdate",
             r#"{"stream":"ethusdt@depth","data":{"e":"depthUpdate","E":1,"s":"BTCUSDT","U":101,"u":103,"b":[["100","1"]],"a":[["101","1"]]}}"#,
         ),
-        r#"{"stream":"ethusdt@depth","data":{"e":"depthUpdate","E":1,"s":"BTCUSDT","U":101,"u":103,"b":[["100","1"]],"a":[["101","1"]]}}"#,
+        &serde_json::from_str(r#"{"stream":"ethusdt@depth","data":{"e":"depthUpdate","E":1,"s":"BTCUSDT","U":101,"u":103,"b":[["100","1"]],"a":[["101","1"]]}}"#).unwrap(),
     );
     assert!(wrong_stream.is_err());
 
@@ -205,7 +208,7 @@ fn binance_depth_stitch_contract() {
             "depth_snapshot",
             r#"{"lastUpdateId":100,"bids":[],"asks":[]}"#,
         ),
-        r#"{"lastUpdateId":100,"bids":[],"asks":[]}"#,
+        &serde_json::from_str(r#"{"lastUpdateId":100,"bids":[],"asks":[]}"#).unwrap(),
         1,
         2,
         BINANCE_DEPTH_SNAPSHOT_ENDPOINT,

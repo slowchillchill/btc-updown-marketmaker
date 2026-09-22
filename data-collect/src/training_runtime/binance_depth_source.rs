@@ -308,19 +308,21 @@ async fn fetch_binance_depth_snapshot_cycle(
                 "depth_ingress_sequence".to_owned(),
                 json!(depth_ingress_sequence),
             );
-            let mut event = raw_event(
-                "binance_depth_snapshot",
-                "depth_snapshot",
-                "BTCUSDT",
-                None,
-                &snapshot_endpoint,
-                &collector_identity,
-                snapshot_value,
-            );
-            event.recv_time_utc_ms = timestamp_received;
+            let event = RawEvent {
+                source_kind: "binance_depth_snapshot".to_owned(),
+                source_event_type: "depth_snapshot".to_owned(),
+                source_identifier: "BTCUSDT".to_owned(),
+                source_ts: None,
+                recv_time_utc_ms: timestamp_received,
+                collector_host_id: collector_identity.host_id.clone(),
+                collector_region: collector_identity.region.clone(),
+                source_endpoint: snapshot_endpoint.clone(),
+                raw_json: snapshot_value.to_string(),
+                collector_admission: None,
+            };
             let parsed = parse_depth_snapshot_raw(
                 event_envelope(&event, SourceKind::BinanceDepthSnapshot),
-                &event.raw_json,
+                &snapshot_value,
                 snapshot_fetch_start_utc,
                 timestamp_received,
                 snapshot_endpoint.clone(),
@@ -464,7 +466,7 @@ pub(super) async fn run_binance_depth_update_ws_source_with_control(
         context.initial_snapshot_trigger_reason.clone(),
     ));
     let mut snapshot_unavailable_cycles = 0_u32;
-    let mut saw_business = false;
+
     let mut saw_transport = false;
     let mut frame_inactivity = Box::pin(sleep(depth_frame_inactivity_wait(
         context.deadline,
@@ -483,7 +485,6 @@ pub(super) async fn run_binance_depth_update_ws_source_with_control(
                     return fail_depth_session_after_pending_release(
                         &context,
                         &mut pending,
-                        &mut saw_business,
                         invalid_data("depth source control channel closed").into(),
                     )
                     .await;
@@ -494,7 +495,6 @@ pub(super) async fn run_binance_depth_update_ws_source_with_control(
                     &mut snapshot_future,
                     &mut pending,
                     &mut continuity,
-                    &mut saw_business,
                 )
                 .await?
                 {
@@ -527,7 +527,6 @@ pub(super) async fn run_binance_depth_update_ws_source_with_control(
                         return fail_depth_session_after_pending_release(
                             &context,
                             &mut pending,
-                            &mut saw_business,
                             error,
                         )
                         .await;
@@ -541,7 +540,6 @@ pub(super) async fn run_binance_depth_update_ws_source_with_control(
                             *record,
                             &mut pending,
                             &mut continuity,
-                            &mut saw_business,
                         )
                         .await
                         {
@@ -550,7 +548,6 @@ pub(super) async fn run_binance_depth_update_ws_source_with_control(
                                 return fail_depth_session_after_pending_release(
                                     &context,
                                     &mut pending,
-                                    &mut saw_business,
                                     error,
                                 )
                                 .await;
@@ -570,7 +567,6 @@ pub(super) async fn run_binance_depth_update_ws_source_with_control(
                         neutral_release_depth_pending(
                             &context,
                             &mut pending,
-                            &mut saw_business,
                         )
                         .await?;
                         continuity = DepthContinuityState::AwaitingSnapshot;
@@ -603,13 +599,12 @@ pub(super) async fn run_binance_depth_update_ws_source_with_control(
                         neutral_release_depth_pending(
                             &context,
                             &mut pending,
-                            &mut saw_business,
                         )
                         .await?;
                     }
                     return Ok(BinanceDepthUpdateExit::DeadlineReached);
                 }
-                neutral_release_depth_pending(&context, &mut pending, &mut saw_business).await?;
+                neutral_release_depth_pending(&context, &mut pending).await?;
                 return Ok(BinanceDepthUpdateExit::StreamEnded {
                     reason: "full_frame_inactivity".to_owned(),
                     saw_transport,
@@ -630,7 +625,6 @@ pub(super) async fn run_binance_depth_update_ws_source_with_control(
                         return fail_depth_session_after_pending_release(
                             &context,
                             &mut pending,
-                            &mut saw_business,
                             invalid_data(format!("binance_depth_ingress_integrity:{error}")).into(),
                         )
                         .await;
@@ -642,7 +636,6 @@ pub(super) async fn run_binance_depth_update_ws_source_with_control(
                         return fail_depth_session_after_pending_release(
                             &context,
                             &mut pending,
-                            &mut saw_business,
                             invalid_data(format!(
                                 "binance_depth_update_parse_error:parse_depth_update_json:{error}"
                             ))
@@ -656,7 +649,6 @@ pub(super) async fn run_binance_depth_update_ws_source_with_control(
                     return fail_depth_session_after_pending_release(
                         &context,
                         &mut pending,
-                        &mut saw_business,
                         invalid_data("binance_depth_update_parse_error:missing_string_field:e")
                             .into(),
                     )
@@ -666,7 +658,6 @@ pub(super) async fn run_binance_depth_update_ws_source_with_control(
                     neutral_release_depth_pending(
                         &context,
                         &mut pending,
-                        &mut saw_business,
                     )
                     .await?;
                     return Ok(BinanceDepthUpdateExit::StreamEnded {
@@ -678,7 +669,6 @@ pub(super) async fn run_binance_depth_update_ws_source_with_control(
                     return fail_depth_session_after_pending_release(
                         &context,
                         &mut pending,
-                        &mut saw_business,
                         invalid_data(format!(
                             "binance_depth_update_parse_error:unexpected_depth_event_type:{event_type}"
                         ))
@@ -698,19 +688,18 @@ pub(super) async fn run_binance_depth_update_ws_source_with_control(
                     collector_host_id: context.collector_identity.host_id.clone(),
                     collector_region: context.collector_identity.region.clone(),
                     source_endpoint: context.spec.websocket_endpoint.clone(),
-                    raw_json: raw_json.clone(),
+                    raw_json,
                     collector_admission: None,
                 };
                 let parsed = match parse_depth_update_raw(
                     event_envelope(&base_event, SourceKind::BinanceDepthUpdate),
-                    &raw_json,
+                    &value,
                 ) {
                     Ok(parsed) => parsed,
                     Err(error) => {
                         return fail_depth_session_after_pending_release(
                             &context,
                             &mut pending,
-                            &mut saw_business,
                             invalid_data(format!("binance_depth_update_parse_error:{error}"))
                                 .into(),
                         )
@@ -722,7 +711,6 @@ pub(super) async fn run_binance_depth_update_ws_source_with_control(
                     return fail_depth_session_after_pending_release(
                         &context,
                         &mut pending,
-                        &mut saw_business,
                         invalid_data(format!(
                             "binance_depth_update_contract_error:{}",
                             validation.missing_fields.join(",")
@@ -731,6 +719,8 @@ pub(super) async fn run_binance_depth_update_ws_source_with_control(
                     )
                     .await;
                 }
+                let update_ids = (parsed.first_update_id, parsed.final_update_id);
+                drop(parsed);
                 saw_transport = true;
                 let recv_utc_day = utc_day_string_from_ms(recv_time_utc_ms)
                     .unwrap_or_else(|| "unknown".to_owned());
@@ -749,23 +739,24 @@ pub(super) async fn run_binance_depth_update_ws_source_with_control(
                 }
                 match continuity {
                     DepthContinuityState::AwaitingSnapshot => {
-                        let owned_bytes = owned_event_bytes(&base_event);
+                        let owned_bytes = owned_event_bytes(&base_event)
+                            .saturating_add(std::mem::size_of_val(&update_ids));
                         let buffered = BufferedDepthUpdate {
                             event: base_event,
                             depth_ingress_sequence,
+                            update_ids,
                             owned_bytes,
                         };
-                        if pending.would_exceed(owned_bytes) {
+                        drop(value);
+                        if let Err(buffered) = pending.push(buffered) {
                             neutral_release_depth_pending(
                                 &context,
                                 &mut pending,
-                                &mut saw_business,
                             )
                             .await?;
                             neutral_release_one_depth_update(
                                 &context,
                                 buffered,
-                                &mut saw_business,
                             )
                             .await?;
                             continuity = DepthContinuityState::AwaitingSnapshot;
@@ -782,8 +773,6 @@ pub(super) async fn run_binance_depth_update_ws_source_with_control(
                                     ),
                                 ));
                             }
-                        } else {
-                            pending.push(buffered)?;
                         }
                     }
                     DepthContinuityState::Ready { .. } => {
@@ -791,11 +780,13 @@ pub(super) async fn run_binance_depth_update_ws_source_with_control(
                             &context,
                             base_event,
                             depth_ingress_sequence,
-                            depth_continuity_coordinates(&continuity)?,
+                            update_ids,
+                            Some(value),
+                            depth_continuity_coordinates(&continuity),
                         )
                         .await?;
                         if let Some(assessment) = assessment {
-                            saw_business = true;
+
                             if let Some(trigger) =
                                 apply_depth_assessment(&mut continuity, &assessment)?
                             {
@@ -823,7 +814,6 @@ pub(super) async fn run_binance_depth_update_ws_source_with_control(
                     neutral_release_depth_pending(
                         &context,
                         &mut pending,
-                        &mut saw_business,
                     )
                     .await?;
                     return Ok(BinanceDepthUpdateExit::StreamEnded {
@@ -839,7 +829,7 @@ pub(super) async fn run_binance_depth_update_ws_source_with_control(
                     context.deadline,
                     context.spec.frame_inactivity_timeout,
                 );
-                neutral_release_depth_pending(&context, &mut pending, &mut saw_business).await?;
+                neutral_release_depth_pending(&context, &mut pending).await?;
                 return Ok(BinanceDepthUpdateExit::StreamEnded {
                     reason: format!("ws_closed:{frame:?}"),
                     saw_transport,
@@ -862,7 +852,6 @@ pub(super) async fn run_binance_depth_update_ws_source_with_control(
                 return fail_depth_session_after_pending_release(
                     &context,
                     &mut pending,
-                    &mut saw_business,
                     invalid_data("binance_depth_update_binary_payload_integrity_fatal").into(),
                 )
                 .await;
@@ -875,14 +864,14 @@ pub(super) async fn run_binance_depth_update_ws_source_with_control(
                 );
             }
             Some(Err(err)) => {
-                neutral_release_depth_pending(&context, &mut pending, &mut saw_business).await?;
+                neutral_release_depth_pending(&context, &mut pending).await?;
                 return Ok(BinanceDepthUpdateExit::StreamEnded {
                     reason: format!("ws_error:{err}"),
                     saw_transport,
                 });
             }
             None => {
-                neutral_release_depth_pending(&context, &mut pending, &mut saw_business).await?;
+                neutral_release_depth_pending(&context, &mut pending).await?;
                 return Ok(BinanceDepthUpdateExit::StreamEnded {
                     reason: "ws_ended".to_owned(),
                     saw_transport,
@@ -894,7 +883,7 @@ pub(super) async fn run_binance_depth_update_ws_source_with_control(
     if depth_controlled_cutoff_is_active(&context) {
         pending.discard_all();
     } else {
-        neutral_release_depth_pending(&context, &mut pending, &mut saw_business).await?;
+        neutral_release_depth_pending(&context, &mut pending).await?;
     }
     Ok(BinanceDepthUpdateExit::DeadlineReached)
 }
@@ -950,16 +939,14 @@ fn start_binance_depth_snapshot_cycle_after(
     })
 }
 
-fn depth_continuity_coordinates(
-    continuity: &DepthContinuityState,
-) -> Result<(Option<u64>, Option<u64>)> {
+fn depth_continuity_coordinates(continuity: &DepthContinuityState) -> (Option<u64>, Option<u64>) {
     match continuity {
-        DepthContinuityState::AwaitingSnapshot => Ok((None, None)),
+        DepthContinuityState::AwaitingSnapshot => (None, None),
         DepthContinuityState::Ready {
             snapshot_last_update_id,
             local_u,
             ..
-        } => Ok((Some(*snapshot_last_update_id), *local_u)),
+        } => (Some(*snapshot_last_update_id), *local_u),
     }
 }
 
@@ -967,16 +954,22 @@ pub(super) async fn admit_depth_update(
     context: &BinanceDepthUpdateContext,
     mut event: RawEvent,
     depth_ingress_sequence: u64,
+    (first_update_id, final_update_id): (u64, u64),
+    parsed_value: Option<Value>,
     (snapshot_last_update_id, local_u_before): (Option<u64>, Option<u64>),
 ) -> Result<Option<DepthUpdateAssessment>> {
-    let parsed = parse_depth_update_raw(
-        event_envelope(&event, SourceKind::BinanceDepthUpdate),
-        &event.raw_json,
+    let assessment = assess_depth_sequence(
+        snapshot_last_update_id,
+        local_u_before,
+        first_update_id,
+        final_update_id,
     )
-    .map_err(|error| invalid_data(format!("binance_depth_update_parse_error:{error}")))?;
-    let assessment = assess_depth_update(snapshot_last_update_id, local_u_before, &parsed)
-        .map_err(invalid_data)?;
-    let mut enriched = serde_json::from_str::<Value>(&event.raw_json)?;
+    .map_err(invalid_data)?;
+    // Ready 直接移交接收时的 JSON；pending 等待期间仅保留原串，释放时再形成 JSON。
+    let mut enriched = match parsed_value {
+        Some(value) => value,
+        None => serde_json::from_str::<Value>(&event.raw_json)?,
+    };
     let object = enriched
         .as_object_mut()
         .ok_or_else(|| invalid_data("Binance depth update payload is not an object"))?;
@@ -1071,32 +1064,25 @@ pub(super) fn apply_depth_assessment(
 async fn neutral_release_one_depth_update(
     context: &BinanceDepthUpdateContext,
     update: BufferedDepthUpdate,
-    saw_business: &mut bool,
 ) -> Result<()> {
-    let Some(assessment) = admit_depth_update(
+    admit_depth_update(
         context,
         update.event,
         update.depth_ingress_sequence,
+        update.update_ids,
+        None,
         (None, None),
     )
-    .await?
-    else {
-        return Ok(());
-    };
-    if assessment.verdict != DepthUpdateVerdict::NotAppliedSnapshotUnavailable {
-        return Err(invalid_data("neutral depth release produced a non-neutral verdict").into());
-    }
-    *saw_business = true;
+    .await?;
     Ok(())
 }
 
 async fn neutral_release_depth_pending(
     context: &BinanceDepthUpdateContext,
     pending: &mut DepthPendingBuffer,
-    saw_business: &mut bool,
 ) -> Result<()> {
     while let Some(update) = pending.pop_front()? {
-        neutral_release_one_depth_update(context, update, saw_business).await?;
+        neutral_release_one_depth_update(context, update).await?;
     }
     Ok(())
 }
@@ -1104,11 +1090,9 @@ async fn neutral_release_depth_pending(
 async fn fail_depth_session_after_pending_release(
     context: &BinanceDepthUpdateContext,
     pending: &mut DepthPendingBuffer,
-    saw_business: &mut bool,
     terminal_error: Box<dyn Error + Send + Sync>,
 ) -> Result<BinanceDepthUpdateExit> {
-    if let Err(release_error) = neutral_release_depth_pending(context, pending, saw_business).await
-    {
+    if let Err(release_error) = neutral_release_depth_pending(context, pending).await {
         return Err(io::Error::other(format!(
             "binance_depth_terminal_pending_release_failed:terminal={terminal_error}:release={release_error}"
         ))
@@ -1121,7 +1105,6 @@ async fn drain_depth_pending(
     context: &BinanceDepthUpdateContext,
     pending: &mut DepthPendingBuffer,
     continuity: &mut DepthContinuityState,
-    saw_business: &mut bool,
 ) -> Result<Option<String>> {
     while matches!(continuity, DepthContinuityState::Ready { .. }) {
         let Some(update) = pending.pop_front()? else {
@@ -1131,14 +1114,16 @@ async fn drain_depth_pending(
             context,
             update.event,
             update.depth_ingress_sequence,
-            depth_continuity_coordinates(continuity)?,
+            update.update_ids,
+            None,
+            depth_continuity_coordinates(continuity),
         )
         .await?
         else {
             pending.discard_all();
             break;
         };
-        *saw_business = true;
+
         if let Some(trigger) = apply_depth_assessment(continuity, &assessment)? {
             return Ok(Some(trigger));
         }
@@ -1151,7 +1136,6 @@ async fn admit_depth_snapshot_and_drain(
     record: DepthSnapshotRecord,
     pending: &mut DepthPendingBuffer,
     continuity: &mut DepthContinuityState,
-    saw_business: &mut bool,
 ) -> Result<Option<String>> {
     match send_event_with_admission_outcome(&context.sink, context.run_started, record.event)
         .await?
@@ -1168,7 +1152,7 @@ async fn admit_depth_snapshot_and_drain(
         local_u: None,
         snapshot_utc_day: record.snapshot_utc_day,
     };
-    drain_depth_pending(context, pending, continuity, saw_business).await
+    drain_depth_pending(context, pending, continuity).await
 }
 
 async fn handle_active_depth_source_control(
@@ -1177,7 +1161,6 @@ async fn handle_active_depth_source_control(
     snapshot_future: &mut Option<DepthSnapshotFuture>,
     pending: &mut DepthPendingBuffer,
     continuity: &mut DepthContinuityState,
-    saw_business: &mut bool,
 ) -> Result<bool> {
     let DepthSourceControl::Fence {
         kind,
@@ -1199,7 +1182,7 @@ async fn handle_active_depth_source_control(
             if depth_controlled_cutoff_is_active(context) {
                 pending.discard_all();
             } else {
-                neutral_release_depth_pending(context, pending, saw_business).await?;
+                neutral_release_depth_pending(context, pending).await?;
             }
             *continuity = DepthContinuityState::AwaitingSnapshot;
         }
@@ -1209,7 +1192,7 @@ async fn handle_active_depth_source_control(
         && resume.await.is_err()
     {
         drop(snapshot_future.take());
-        neutral_release_depth_pending(context, pending, saw_business).await?;
+        neutral_release_depth_pending(context, pending).await?;
         *continuity = DepthContinuityState::AwaitingSnapshot;
         return Err(invalid_data("depth barrier owner dropped source resume signal").into());
     }
@@ -1407,6 +1390,7 @@ pub(super) enum DepthContinuityState {
 struct BufferedDepthUpdate {
     event: RawEvent,
     depth_ingress_sequence: u64,
+    update_ids: (u64, u64),
     owned_bytes: usize,
 }
 
@@ -1446,14 +1430,14 @@ impl DepthPendingBuffer {
                 .is_none_or(|total| total > self.max_bytes)
     }
 
-    fn push(&mut self, update: BufferedDepthUpdate) -> Result<()> {
+    fn push(
+        &mut self,
+        update: BufferedDepthUpdate,
+    ) -> std::result::Result<(), BufferedDepthUpdate> {
         if self.would_exceed(update.owned_bytes) {
-            return Err(invalid_data("Binance depth pending buffer cap exceeded").into());
+            return Err(update);
         }
-        self.reserved_bytes = self
-            .reserved_bytes
-            .checked_add(update.owned_bytes)
-            .ok_or_else(|| invalid_data("Binance depth pending byte count overflow"))?;
+        self.reserved_bytes += update.owned_bytes;
         self.updates.push_back(update);
         Ok(())
     }

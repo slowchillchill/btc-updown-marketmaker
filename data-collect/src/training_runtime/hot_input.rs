@@ -16,7 +16,7 @@ pub(super) fn binance_depth_snapshot_row_from_event(
     let snapshot_fetch_start_utc = required_i64(&value, "snapshot_fetch_start_utc")?;
     let raw = parse_depth_snapshot_raw(
         event_envelope(event, SourceKind::BinanceDepthSnapshot),
-        &event.raw_json,
+        &value,
         snapshot_fetch_start_utc,
         event.recv_time_utc_ms,
         event.source_endpoint.clone(),
@@ -35,7 +35,7 @@ pub(super) fn binance_depth_update_row_from_event(
     let value = serde_json::from_str::<Value>(&event.raw_json)?;
     let raw = parse_depth_update_raw(
         event_envelope(event, SourceKind::BinanceDepthUpdate),
-        &event.raw_json,
+        &value,
     )
     .map_err(invalid_data)?;
     let stitch_verdict = required_value_string(&value, "stitch_verdict")?;
@@ -156,7 +156,8 @@ pub(super) fn binance_aggtrade_row_from_event(
 }
 
 pub(super) fn rtds_row_from_event(event: &RawEvent) -> Result<RtdsChainlinkBtcUsdHourlyRow> {
-    let row = rtds_common_row_from_event(event)?;
+    let value = serde_json::from_str::<Value>(&event.raw_json)?;
+    let row = rtds_common_row_from_event(event, &value)?;
     let validation = row.validate();
     if !validation.is_complete() {
         return Err(invalid_data(format!(
@@ -168,30 +169,31 @@ pub(super) fn rtds_row_from_event(event: &RawEvent) -> Result<RtdsChainlinkBtcUs
     Ok(row)
 }
 
-fn rtds_common_row_from_event(event: &RawEvent) -> Result<RtdsChainlinkBtcUsdHourlyRow> {
-    let value = serde_json::from_str::<Value>(&event.raw_json)?;
-    let raw = RtdsChainlinkBtcUsdRaw {
-        envelope: event_envelope(event, SourceKind::PolymarketRtdsChainlinkBtcUsd),
-        message_timestamp_ms: required_i64(&value, "message_timestamp")?,
-        payload_timestamp_ms: required_i64(&value, "payload_timestamp")?,
-        symbol: required_value_string(&value, "symbol")?,
-        value: required_value_string(&value, "value")?,
-        source_topic: required_value_string(&value, "topic")?,
-        message_type: required_value_string(&value, "type")?,
-        age_ms: optional_i64(&value, "age_ms"),
-        freshness_status: required_value_string(&value, "freshness_status")?,
-        subscription_raw_json: value
+fn rtds_common_row_from_event(
+    event: &RawEvent,
+    value: &Value,
+) -> Result<RtdsChainlinkBtcUsdHourlyRow> {
+    Ok(RtdsChainlinkBtcUsdHourlyRow {
+        timestamp_received: event.recv_time_utc_ms,
+        message_timestamp: required_i64(value, "message_timestamp")?,
+        payload_timestamp: required_i64(value, "payload_timestamp")?,
+        symbol: required_value_string(value, "symbol")?,
+        value: required_value_string(value, "value")?,
+        topic: required_value_string(value, "topic")?,
+        message_type: required_value_string(value, "type")?,
+        age_ms: optional_i64(value, "age_ms"),
+        freshness_status: required_value_string(value, "freshness_status")?,
+        subscription_filter: value
             .get("subscription_raw_json")
             .and_then(Value::as_str)
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(rtds_subscription_evidence_json),
-        ack_or_first_message_evidence: Some("first_chainlink_price_message".to_owned()),
-        close_or_error_evidence: None,
-    };
-    let mut row = RtdsChainlinkBtcUsdHourlyRow::from_raw(&raw);
-    row.source_native_payload_json = required_value_string(&value, "source_native_payload_json")?;
-    row.schema_version = "polymarket_rtds_chainlink_btc_usd_v4".to_owned();
-    Ok(row)
+            .unwrap_or_else(|| rtds_subscription_evidence_json())
+            .to_owned(),
+        source_native_payload_json: required_value_string(value, "source_native_payload_json")?,
+        collector_host_id: event.collector_host_id.clone(),
+        collector_region: event.collector_region.clone(),
+        source_endpoint: event.source_endpoint.clone(),
+        schema_version: "polymarket_rtds_chainlink_btc_usd_v4".to_owned(),
+    })
 }
 
 pub(super) fn rtds_twap_row_from_event(event: &RawEvent) -> Result<RtdsChainlinkTwapHourlyRow> {
@@ -203,7 +205,7 @@ pub(super) fn rtds_twap_row_from_event(event: &RawEvent) -> Result<RtdsChainlink
         .collector_admission
         .as_ref()
         .ok_or_else(|| invalid_data("TWAP collector admission missing"))?;
-    let mut common = rtds_common_row_from_event(event)?;
+    let mut common = rtds_common_row_from_event(event, &value)?;
     common.schema_version = RTDS_CHAINLINK_TWAP_SCHEMA_VERSION.to_owned();
     let row = RtdsChainlinkTwapHourlyRow {
         common,
@@ -287,9 +289,7 @@ pub(super) fn json_scalar_to_string(value: &Value) -> Result<String> {
 pub(super) fn raw_event_to_public_input(event: &RawEvent) -> Result<Option<TypedRawRowV2>> {
     let row = match event.source_kind.as_str() {
         "polymarket_market_metadata" => {
-            let Some(row) = polymarket_metadata_v6_rows_for_event(event)?.pop() else {
-                return Ok(None);
-            };
+            let row = polymarket_metadata_v6_row_for_event(event)?;
             let input = match row {
                 PolymarketMarketMetadataV6Row::Existing(row) => {
                     PolymarketMarketMetadataV6Input::Existing(metadata_public_row(row)?)
