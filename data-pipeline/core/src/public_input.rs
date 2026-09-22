@@ -348,7 +348,6 @@ fn prepare_ingress_view_v1<'a>(
     let prepared_source = || PreparedPmEvidenceV1::prepare(source.clone(), None);
     let mut prepared_group_id = Some(source.source_message_id.clone());
     let metadata = |row: &'a PolymarketMarketMetadataRow| -> Result<PreparedCanonicalInputV1<'a>, crate::ContractError> {
-        row.validate().map_err(crate::typed_raw_contract_error)?;
         let outcomes = crate::typed_raw::map_metadata_outcomes(&row.asset_ids, row.outcomes_raw.as_deref(), row.outcome_prices_raw.as_deref()).map_err(crate::typed_raw_contract_error)?;
         let initial_tick = if row.metadata_row_kind == crate::typed_raw::PolymarketMetadataRowKind::MetadataSnapshot {
             row.source_evidence_payload_json.as_deref().map(crate::typed_raw::extract_metadata_initial_tick).transpose().map_err(crate::typed_raw_contract_error)?.flatten()
@@ -357,7 +356,6 @@ fn prepare_ingress_view_v1<'a>(
     };
     let current = match row {
         TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row)) => {
-            row.validate().map_err(crate::typed_raw_contract_error)?;
             if matches!(row.event, PolymarketOrderbookEvent::MarketResolved { .. }) {
                 prepared_group_id = Some(crate::hash_domain_bytes(
                     b"data-pipeline/public-pm-message-group/v1\0",
@@ -410,21 +408,18 @@ fn prepare_ingress_view_v1<'a>(
             }
         },
         TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(row)) => {
-            row.validate().map_err(crate::typed_raw_contract_error)?;
             PreparedCanonicalInputV1::BinanceDepthSnapshot {
                 row,
                 source: prepared_source()?,
             }
         }
         TypedRawRowV2::Existing(TypedRawRow::BinanceDepthUpdate(row)) => {
-            row.validate().map_err(crate::typed_raw_contract_error)?;
             PreparedCanonicalInputV1::BinanceDepthUpdate {
                 row,
                 source: prepared_source()?,
             }
         }
         TypedRawRowV2::Existing(TypedRawRow::BinanceAggTrade(row)) => {
-            row.validate().map_err(crate::typed_raw_contract_error)?;
             let payload = match &row.record {
                 BinanceAggTradeRecord::Trade { .. } => {
                     Some(crate::prepare_binance_aggregate_trade_payload(row)?)
@@ -438,7 +433,6 @@ fn prepare_ingress_view_v1<'a>(
             }
         }
         TypedRawRowV2::Existing(TypedRawRow::PolymarketRtdsChainlinkBtcUsd(row)) => {
-            row.validate().map_err(crate::typed_raw_contract_error)?;
             PreparedCanonicalInputV1::ChainlinkSpot(canonicalize_chainlink_spot_v1(
                 row,
                 source,

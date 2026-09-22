@@ -283,12 +283,7 @@ impl PublicReplayV1 {
                     self.page_bytes,
                 )?;
                 let result = if let Some(market) = target {
-                    let mut page_reader = ReferenceCandidateReaderV1::open(
-                        &root,
-                        self.page_rows,
-                        self.page_bytes,
-                        cutoff,
-                    )?;
+                    let mut page_reader = None;
                     let prepared = prepare_public_ingress_with_reference_v1(
                         &self.core,
                         &mut input,
@@ -296,7 +291,18 @@ impl PublicReplayV1 {
                         &deps,
                         &market,
                         |cursor| {
-                            page_reader.page(cursor).map_err(|e| {
+                            (|| -> RecordingResult<_> {
+                                if page_reader.is_none() {
+                                    page_reader = Some(ReferenceCandidateReaderV1::open(
+                                        &root,
+                                        self.page_rows,
+                                        self.page_bytes,
+                                        cutoff,
+                                    )?);
+                                }
+                                page_reader.as_mut().unwrap().page(cursor)
+                            })()
+                            .map_err(|e| {
                                 data_pipeline_core::ContractError::InvalidField {
                                     field: "reference_page".into(),
                                     reason: e.to_string(),
@@ -532,30 +538,47 @@ where
     let mut depth = BTreeMap::new();
     for row in read()? {
         let row = row?;
-        let evidence = source_evidence_v3_from_typed_raw_v2(&row)?;
-        let target = match evidence.source_kind {
-            CanonicalSourceKindV2::PolymarketOrderbook => Some((&mut pm, "polymarket_market")),
-            CanonicalSourceKindV2::BinanceDepthSnapshot
-            | CanonicalSourceKindV2::BinanceDepthUpdate => Some((&mut depth, "binance_depth")),
-            _ => None,
-        };
-        if let Some((starts, kind)) = target {
-            let c = evidence
-                .collector_admission
-                .as_ref()
-                .expect("已解析的PM/深度包含原采集坐标");
-            update_epoch_start(
-                starts,
-                &c.source_sequence_epoch_id,
+        use data_pipeline_core::typed_raw::TypedRawRow;
+        let (starts, kind, epoch, coordinate) = match &row {
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row)) => (
+                &mut pm,
+                "polymarket_market",
+                &row.source_sequence_epoch_id,
                 CaptureCoordinate {
-                    admitted_at_utc_ms: c.admitted_at_utc_ms,
-                    received_at_utc_ms: evidence.received_at_utc_ms,
-                    collector_admission_sequence: c.collector_admission_sequence,
+                    admitted_at_utc_ms: row.collector_admission_time_utc_ms,
+                    received_at_utc_ms: row.timestamp_received,
+                    collector_admission_sequence: row.collector_admission_sequence,
                 },
-                kind,
-                config.max_epoch_count_per_source,
-            )?;
-        }
+            ),
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(row)) => (
+                &mut depth,
+                "binance_depth",
+                &row.source_sequence_epoch_id,
+                CaptureCoordinate {
+                    admitted_at_utc_ms: row.collector_admission_time_utc_ms,
+                    received_at_utc_ms: row.timestamp_received,
+                    collector_admission_sequence: row.collector_admission_sequence,
+                },
+            ),
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthUpdate(row)) => (
+                &mut depth,
+                "binance_depth",
+                &row.source_sequence_epoch_id,
+                CaptureCoordinate {
+                    admitted_at_utc_ms: row.collector_admission_time_utc_ms,
+                    received_at_utc_ms: row.timestamp_received,
+                    collector_admission_sequence: row.collector_admission_sequence,
+                },
+            ),
+            _ => continue,
+        };
+        update_epoch_start(
+            starts,
+            epoch,
+            coordinate,
+            kind,
+            config.max_epoch_count_per_source,
+        )?;
     }
     let pm = rank_epochs(pm, "polymarket_market")?;
     let depth = rank_epochs(depth, "binance_depth")?;
