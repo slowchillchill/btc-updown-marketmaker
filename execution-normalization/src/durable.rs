@@ -1424,7 +1424,7 @@ mod tests {
     use crate::NormalizationBatchInputV1;
     use contracts::execution_normalization::{
         DurableSourceReferenceV1, ImmutableSourceReferenceV1, SimV2ContextSourceV1,
-        SimV2DirectResponseAssociationV1, SimV2SourceRecordReferenceV1, SimV2SourceReferenceV1,
+        SimV2DirectResponseAssociationV1, SimV2SourceRecordReferenceV1,
         SourceNeutralAccountIdentityV1, SourceNeutralControlResultV1,
         SourceNeutralSubmissionOutcomeV1,
     };
@@ -1479,21 +1479,15 @@ mod tests {
             projection_batch_sequence: sequence,
         };
         NormalizationBatchInputV1 {
-            source_watermark: source_watermark.clone(),
+            source_watermark,
             evidence: vec![SourceNeutralEvidenceV1 {
-                source_reference: SimV2SourceReferenceV1 {
-                    context_reference: ExecutionNormalizationContextReferenceV1(
-                        "context-55-sync-fault".to_owned(),
-                    ),
-                    watermark: source_watermark,
-                    record: SimV2SourceRecordReferenceV1::DirectResponse {
-                        private_feedback_sequence: 100 + sequence,
-                        platform_responded_at_utc_ms: 2_000 + sequence as i64,
-                        response_received_at_utc_ms: 2_100 + sequence as i64,
-                        association: SimV2DirectResponseAssociationV1::SubmissionItem {
-                            global_request_id: "request-55-sync-fault".to_owned(),
-                            batch_item_ordinal: 0,
-                        },
+                source_record: SimV2SourceRecordReferenceV1::DirectResponse {
+                    private_feedback_sequence: 100 + sequence,
+                    platform_responded_at_utc_ms: 2_000 + sequence as i64,
+                    response_received_at_utc_ms: 2_100 + sequence as i64,
+                    association: SimV2DirectResponseAssociationV1::SubmissionItem {
+                        global_request_id: "request-55-sync-fault".to_owned(),
+                        batch_item_ordinal: 0,
                     },
                 },
                 source_ordinal: 0,
@@ -1626,7 +1620,7 @@ mod tests {
                 .evidence
                 .into_iter()
                 .map(|evidence| crate::core::SourceNeutralEvidence {
-                    source_reference: evidence.source_reference,
+                    source_record: evidence.source_record,
                     source_ordinal: evidence.source_ordinal,
                     logical_key: evidence.logical_key,
                     kind: crate::core::SourceNeutralEvidenceKind::Control {

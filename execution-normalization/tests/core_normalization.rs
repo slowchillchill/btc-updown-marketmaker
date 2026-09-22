@@ -1,8 +1,8 @@
 use contracts::execution_normalization::{
     DurableSourceReferenceV1, ExecutionNormalizationContextReferenceV1,
     ExecutionNormalizationContextV1, ImmutableSourceReferenceV1, SimV2ContextSourceV1,
-    SimV2DirectResponseAssociationV1, SimV2SourceRecordReferenceV1, SimV2SourceReferenceV1,
-    SimV2SourceWatermarkV1, SourceNeutralAccountBalanceDeltaV1, SourceNeutralAccountIdentityV1,
+    SimV2DirectResponseAssociationV1, SimV2SourceRecordReferenceV1, SimV2SourceWatermarkV1,
+    SourceNeutralAccountBalanceDeltaV1, SourceNeutralAccountIdentityV1,
     SourceNeutralAccountTransitionKindV1, SourceNeutralCancellationOutcomeV1,
     SourceNeutralControlResultV1, SourceNeutralEconomicIdentityV1,
     SourceNeutralOrderLifecycleEventV1, SourceNeutralOrderLifecycleResultV1,
@@ -64,32 +64,27 @@ fn watermark(sequence: u64) -> SimV2SourceWatermarkV1 {
     }
 }
 
-fn source_reference(batch_sequence: u64, private_feedback_sequence: u64) -> SimV2SourceReferenceV1 {
-    SimV2SourceReferenceV1 {
-        context_reference: ExecutionNormalizationContextReferenceV1("context-55".to_owned()),
-        watermark: watermark(batch_sequence),
-        record: SimV2SourceRecordReferenceV1::OrderLifecycle {
-            private_feedback_sequence,
-            platform_event_at_utc_ms: 1_000 + private_feedback_sequence as i64,
-            feedback_received_at_utc_ms: 1_100 + private_feedback_sequence as i64,
-        },
+fn source_record(private_feedback_sequence: u64) -> SimV2SourceRecordReferenceV1 {
+    SimV2SourceRecordReferenceV1::OrderLifecycle {
+        private_feedback_sequence,
+        platform_event_at_utc_ms: 1_000 + private_feedback_sequence as i64,
+        feedback_received_at_utc_ms: 1_100 + private_feedback_sequence as i64,
     }
 }
 
 fn evidence(
-    batch_sequence: u64,
     source_sequence: u64,
     ordinal: u32,
     logical_key: SourceNeutralLogicalKeyV1,
     kind: SourceNeutralEvidenceKindV1,
 ) -> SourceNeutralEvidenceV1 {
-    let mut source_reference = source_reference(batch_sequence, source_sequence);
+    let mut source_record = source_record(source_sequence);
     if let SourceNeutralLogicalKeyV1::SubmissionItem {
         global_request_id,
         batch_item_ordinal,
     } = &logical_key
     {
-        source_reference.record = SimV2SourceRecordReferenceV1::DirectResponse {
+        source_record = SimV2SourceRecordReferenceV1::DirectResponse {
             private_feedback_sequence: source_sequence,
             platform_responded_at_utc_ms: 1_000 + source_sequence as i64,
             response_received_at_utc_ms: 1_100 + source_sequence as i64,
@@ -100,7 +95,7 @@ fn evidence(
         };
     }
     SourceNeutralEvidenceV1 {
-        source_reference,
+        source_record,
         source_ordinal: ordinal,
         logical_key,
         kind,
@@ -162,7 +157,6 @@ fn feedback_sorting_preserves_submission_layers_partial_fill_and_zero_effects() 
             source_watermark: watermark(0),
             evidence: vec![
                 evidence(
-                    0,
                     14,
                     0,
                     SourceNeutralLogicalKeyV1::OrderLifecycle {
@@ -172,7 +166,6 @@ fn feedback_sorting_preserves_submission_layers_partial_fill_and_zero_effects() 
                     order_lifecycle(SourceNeutralOrderLifecycleEventV1::CallerCanceled),
                 ),
                 evidence(
-                    0,
                     10,
                     0,
                     SourceNeutralLogicalKeyV1::SubmissionItem {
@@ -182,7 +175,6 @@ fn feedback_sorting_preserves_submission_layers_partial_fill_and_zero_effects() 
                     submission(SourceNeutralSubmissionOutcomeV1::EvidenceUnknownNoEffect),
                 ),
                 evidence(
-                    0,
                     13,
                     0,
                     SourceNeutralLogicalKeyV1::OrderLifecycle {
@@ -192,7 +184,6 @@ fn feedback_sorting_preserves_submission_layers_partial_fill_and_zero_effects() 
                     order_lifecycle(SourceNeutralOrderLifecycleEventV1::VenueDustTerminal),
                 ),
                 evidence(
-                    0,
                     12,
                     0,
                     SourceNeutralLogicalKeyV1::OrderLifecycle {
@@ -204,7 +195,6 @@ fn feedback_sorting_preserves_submission_layers_partial_fill_and_zero_effects() 
                     }),
                 ),
                 evidence(
-                    0,
                     11,
                     0,
                     SourceNeutralLogicalKeyV1::OrderLifecycle {
@@ -308,21 +298,18 @@ fn stable_logical_identity_is_deterministic_idempotent_and_conflict_scoped() {
             source_watermark: watermark(0),
             evidence: vec![
                 evidence(
-                    0,
                     20,
                     0,
                     logical_key.clone(),
                     submission(SourceNeutralSubmissionOutcomeV1::RejectedNoEffect),
                 ),
                 evidence(
-                    0,
                     21,
                     0,
                     logical_key.clone(),
                     submission(SourceNeutralSubmissionOutcomeV1::RejectedNoEffect),
                 ),
                 evidence(
-                    0,
                     22,
                     0,
                     logical_key,
@@ -364,7 +351,6 @@ fn economic_identity_is_applied_once_and_late_coverage_becomes_alias() {
             source_watermark: watermark(0),
             evidence: vec![
                 evidence(
-                    0,
                     30,
                     0,
                     SourceNeutralLogicalKeyV1::EconomicEvidence {
@@ -375,7 +361,6 @@ fn economic_identity_is_applied_once_and_late_coverage_becomes_alias() {
                     },
                 ),
                 evidence(
-                    0,
                     31,
                     0,
                     SourceNeutralLogicalKeyV1::EconomicEvidence {
@@ -386,7 +371,6 @@ fn economic_identity_is_applied_once_and_late_coverage_becomes_alias() {
                     },
                 ),
                 evidence(
-                    0,
                     32,
                     0,
                     SourceNeutralLogicalKeyV1::AuditEvidence {
@@ -397,7 +381,6 @@ fn economic_identity_is_applied_once_and_late_coverage_becomes_alias() {
                     },
                 ),
                 evidence(
-                    0,
                     33,
                     0,
                     SourceNeutralLogicalKeyV1::EconomicEvidence {
@@ -452,7 +435,6 @@ fn alias_and_economic_conflict_claim_their_new_logical_identity_in_the_same_batc
             source_watermark: watermark(0),
             evidence: vec![
                 evidence(
-                    0,
                     30,
                     0,
                     SourceNeutralLogicalKeyV1::EconomicEvidence {
@@ -463,7 +445,6 @@ fn alias_and_economic_conflict_claim_their_new_logical_identity_in_the_same_batc
                     },
                 ),
                 evidence(
-                    0,
                     31,
                     0,
                     alias_logical_key.clone(),
@@ -472,7 +453,6 @@ fn alias_and_economic_conflict_claim_their_new_logical_identity_in_the_same_batc
                     },
                 ),
                 evidence(
-                    0,
                     33,
                     0,
                     alias_logical_key,
@@ -481,7 +461,6 @@ fn alias_and_economic_conflict_claim_their_new_logical_identity_in_the_same_batc
                     },
                 ),
                 evidence(
-                    0,
                     34,
                     0,
                     conflict_logical_key.clone(),
@@ -490,7 +469,6 @@ fn alias_and_economic_conflict_claim_their_new_logical_identity_in_the_same_batc
                     },
                 ),
                 evidence(
-                    0,
                     36,
                     0,
                     conflict_logical_key,
@@ -548,9 +526,8 @@ fn late_coverage_stays_pending_until_the_economic_fact_is_committed() {
         .prepare_batch(NormalizationBatchInputV1 {
             source_watermark: watermark(0),
             evidence: vec![
-                evidence(0, 40, 0, late_key.clone(), late_kind.clone()),
+                evidence(40, 0, late_key.clone(), late_kind.clone()),
                 evidence(
-                    0,
                     41,
                     0,
                     SourceNeutralLogicalKeyV1::EconomicEvidence {
@@ -560,7 +537,7 @@ fn late_coverage_stays_pending_until_the_economic_fact_is_committed() {
                         evidence: economic_evidence(77, "-10"),
                     },
                 ),
-                evidence(0, 42, 0, late_key, late_kind),
+                evidence(42, 0, late_key, late_kind),
             ],
         })
         .unwrap();
@@ -578,7 +555,6 @@ fn late_coverage_stays_pending_until_the_economic_fact_is_committed() {
 fn private_feedback_sequence_from_the_source_reference_is_authoritative() {
     let core = NormalizationCoreV1::new(context());
     let source_ten = evidence(
-        0,
         10,
         0,
         SourceNeutralLogicalKeyV1::OrderLifecycle {
@@ -590,7 +566,6 @@ fn private_feedback_sequence_from_the_source_reference_is_authoritative() {
         }),
     );
     let source_twenty = evidence(
-        0,
         20,
         0,
         SourceNeutralLogicalKeyV1::OrderLifecycle {
@@ -623,27 +598,22 @@ fn private_feedback_sequence_from_the_source_reference_is_authoritative() {
     assert_eq!(source_sequences, vec![10, 20]);
 }
 
-fn cancellation_source_reference(
-    batch_sequence: u64,
+fn cancellation_source_record(
     private_feedback_sequence: u64,
     item_id: &str,
-) -> SimV2SourceReferenceV1 {
-    SimV2SourceReferenceV1 {
-        context_reference: ExecutionNormalizationContextReferenceV1("context-55".to_owned()),
-        watermark: watermark(batch_sequence),
-        record: SimV2SourceRecordReferenceV1::DirectResponse {
-            private_feedback_sequence,
-            platform_responded_at_utc_ms: 4_000,
-            response_received_at_utc_ms: 4_100,
-            association: SimV2DirectResponseAssociationV1::CancellationTarget {
-                global_request_id: "cancel-request-55".to_owned(),
-                method: ExecutionMethodV2::CancelOrders,
-                target_ordinal: 3,
-                input_item_refs: vec![CancelInputItemRefV2 {
-                    item_id: item_id.to_owned(),
-                    batch_item_ordinal: 7,
-                }],
-            },
+) -> SimV2SourceRecordReferenceV1 {
+    SimV2SourceRecordReferenceV1::DirectResponse {
+        private_feedback_sequence,
+        platform_responded_at_utc_ms: 4_000,
+        response_received_at_utc_ms: 4_100,
+        association: SimV2DirectResponseAssociationV1::CancellationTarget {
+            global_request_id: "cancel-request-55".to_owned(),
+            method: ExecutionMethodV2::CancelOrders,
+            target_ordinal: 3,
+            input_item_refs: vec![CancelInputItemRefV2 {
+                item_id: item_id.to_owned(),
+                batch_item_ordinal: 7,
+            }],
         },
     }
 }
@@ -666,19 +636,19 @@ fn cancellation_input_item_refs_participate_in_same_payload_decisions() {
             source_watermark: watermark(0),
             evidence: vec![
                 SourceNeutralEvidenceV1 {
-                    source_reference: cancellation_source_reference(0, 50, "cancel-item-a"),
+                    source_record: cancellation_source_record(50, "cancel-item-a"),
                     source_ordinal: 0,
                     logical_key: logical_key.clone(),
                     kind: kind.clone(),
                 },
                 SourceNeutralEvidenceV1 {
-                    source_reference: cancellation_source_reference(0, 51, "cancel-item-a"),
+                    source_record: cancellation_source_record(51, "cancel-item-a"),
                     source_ordinal: 0,
                     logical_key: logical_key.clone(),
                     kind: kind.clone(),
                 },
                 SourceNeutralEvidenceV1 {
-                    source_reference: cancellation_source_reference(0, 52, "cancel-item-b"),
+                    source_record: cancellation_source_record(52, "cancel-item-b"),
                     source_ordinal: 0,
                     logical_key,
                     kind,
@@ -708,14 +678,12 @@ fn conflict_record_keeps_the_incoming_minimum_evidence() {
             source_watermark: watermark(0),
             evidence: vec![
                 evidence(
-                    0,
                     60,
                     0,
                     logical_key.clone(),
                     submission(SourceNeutralSubmissionOutcomeV1::RejectedNoEffect),
                 ),
                 evidence(
-                    0,
                     61,
                     0,
                     logical_key,
@@ -739,7 +707,6 @@ fn pending_economic_identity_is_derived_from_the_current_context() {
         .prepare_batch(NormalizationBatchInputV1 {
             source_watermark: watermark(0),
             evidence: vec![evidence(
-                0,
                 70,
                 0,
                 SourceNeutralLogicalKeyV1::AuditEvidence {

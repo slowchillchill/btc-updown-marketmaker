@@ -1,8 +1,8 @@
 use std::fs;
 
 use contracts::execution_normalization::{
-    DurableSourceReferenceV1, ExecutionNormalizationContextReferenceV1, ImmutableSourceReferenceV1,
-    SimV2SourceRecordReferenceV1, SimV2SourceReferenceV1, SimV2SourceWatermarkV1,
+    DurableSourceReferenceV1, ImmutableSourceReferenceV1, SimV2SourceRecordReferenceV1,
+    SimV2SourceWatermarkV1,
 };
 use contracts::{AccountInstanceKeyV1, PlatformSourceV1, Sha256Hex, SimCallerRoleV1};
 use execution_normalization::{
@@ -33,23 +33,19 @@ fn seed() -> SimV2ContextSeedV1 {
     }
 }
 
-fn batch(context_reference: ExecutionNormalizationContextReferenceV1) -> NormalizationBatchInputV1 {
+fn batch() -> NormalizationBatchInputV1 {
     let watermark = SimV2SourceWatermarkV1 {
         run_id: "run-result-58".to_owned(),
         projection_batch_sequence: 1,
     };
     NormalizationBatchInputV1 {
-        source_watermark: watermark.clone(),
+        source_watermark: watermark,
         evidence: (0..2)
             .map(|ordinal| SourceNeutralEvidenceV1 {
-                source_reference: SimV2SourceReferenceV1 {
-                    context_reference: context_reference.clone(),
-                    watermark: watermark.clone(),
-                    record: SimV2SourceRecordReferenceV1::OrderLifecycle {
-                        private_feedback_sequence: 1,
-                        platform_event_at_utc_ms: 10,
-                        feedback_received_at_utc_ms: 20,
-                    },
+                source_record: SimV2SourceRecordReferenceV1::OrderLifecycle {
+                    private_feedback_sequence: 1,
+                    platform_event_at_utc_ms: 10,
+                    feedback_received_at_utc_ms: 20,
                 },
                 source_ordinal: ordinal,
                 logical_key: SourceNeutralLogicalKeyV1::AuditEvidence {
@@ -70,7 +66,7 @@ fn one_reference_reads_the_same_context_boundary_and_record_after_reopen() {
     let temporary = TempDir::new().unwrap();
     let mut store = DurableContextStoreV1::open_or_create_sim_v2(temporary.path(), seed()).unwrap();
     let context = store.context().clone();
-    let input = batch(context.context_reference.clone());
+    let input = batch();
     store.commit_batch(input.clone(), 30).unwrap();
     let references: Vec<_> = store.commits()[0].result_references().collect();
     assert_eq!(references.len(), 2);
@@ -101,7 +97,7 @@ fn one_reference_reads_the_same_context_boundary_and_record_after_reopen() {
 fn a_wrong_digest_corrupt_container_and_out_of_range_ordinal_are_rejected() {
     let temporary = TempDir::new().unwrap();
     let mut store = DurableContextStoreV1::open_or_create_sim_v2(temporary.path(), seed()).unwrap();
-    let input = batch(store.context().context_reference.clone());
+    let input = batch();
     store.commit_batch(input, 30).unwrap();
     let reference = store.commits()[0].result_reference(0).unwrap();
 
@@ -139,7 +135,7 @@ fn recovery_position_slot_checks_each_ordinal_and_revalidates_each_new_key() {
     let temporary = TempDir::new().unwrap();
     let mut store = DurableContextStoreV3::open_or_create_sim_v2(temporary.path(), seed()).unwrap();
     for sequence in 1..=2 {
-        let mut input = batch(store.context().context_reference.clone());
+        let mut input = batch();
         input.source_watermark.projection_batch_sequence = sequence;
         let input = NormalizationBatchInputV3 {
             source_watermark: input.source_watermark.clone(),
@@ -147,10 +143,7 @@ fn recovery_position_slot_checks_each_ordinal_and_revalidates_each_new_key() {
                 .evidence
                 .into_iter()
                 .map(|e| SourceNeutralEvidenceV3 {
-                    source_reference: SimV2SourceReferenceV1 {
-                        watermark: input.source_watermark.clone(),
-                        ..e.source_reference
-                    },
+                    source_record: e.source_record,
                     source_ordinal: e.source_ordinal,
                     logical_key: SourceNeutralLogicalKeyV1::AuditEvidence {
                         evidence_identity: format!("{sequence}-{}", e.source_ordinal),

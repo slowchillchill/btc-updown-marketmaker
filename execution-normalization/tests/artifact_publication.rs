@@ -1,8 +1,7 @@
 use contracts::execution_normalization::{
     DurableSourceReferenceV1, ExecutionNormalizationContextReferenceV1, ImmutableSourceReferenceV1,
     NoeComponentCapabilityReceiptV1, NoeInclusiveSequenceRangeV1, NoePublishedContainerReferenceV1,
-    NoeRunConsumptionManifestV1, SimV2SourceRecordReferenceV1, SimV2SourceReferenceV1,
-    SimV2SourceWatermarkV1,
+    NoeRunConsumptionManifestV1, SimV2SourceRecordReferenceV1, SimV2SourceWatermarkV1,
 };
 use contracts::{AccountInstanceKeyV1, PlatformSourceV1, Sha256Hex, SimCallerRoleV1};
 use execution_normalization::{
@@ -136,14 +135,10 @@ fn publish_stage2_evidence_bundle_when_explicitly_requested() {
             NormalizationBatchInputV1 {
                 source_watermark: watermark.clone(),
                 evidence: vec![SourceNeutralEvidenceV1 {
-                    source_reference: SimV2SourceReferenceV1 {
-                        context_reference: store.context().context_reference.clone(),
-                        watermark: watermark.clone(),
-                        record: SimV2SourceRecordReferenceV1::OrderLifecycle {
-                            private_feedback_sequence: 1,
-                            platform_event_at_utc_ms: 1,
-                            feedback_received_at_utc_ms: 2,
-                        },
+                    source_record: SimV2SourceRecordReferenceV1::OrderLifecycle {
+                        private_feedback_sequence: 1,
+                        platform_event_at_utc_ms: 1,
+                        feedback_received_at_utc_ms: 2,
                     },
                     source_ordinal: 0,
                     logical_key: SourceNeutralLogicalKeyV1::AuditEvidence {

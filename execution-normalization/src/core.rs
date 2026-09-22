@@ -3,11 +3,10 @@ use std::error::Error;
 use std::fmt;
 
 use contracts::execution_normalization::{
-    ExecutionNormalizationContextReferenceV1, ExecutionNormalizationContextV1,
-    NoeEconomicFactReferenceV1, SimV2DirectResponseAssociationV1, SimV2SourceRecordReferenceV1,
-    SimV2SourceReferenceV1, SimV2SourceWatermarkV1, SourceNeutralAccountBalanceDeltaV1,
-    SourceNeutralAccountTransitionKindV1, SourceNeutralControlResultV1,
-    SourceNeutralEconomicDispositionV1, SourceNeutralEconomicFactV1,
+    ExecutionNormalizationContextV1, NoeEconomicFactReferenceV1, SimV2DirectResponseAssociationV1,
+    SimV2SourceRecordReferenceV1, SimV2SourceReferenceV1, SimV2SourceWatermarkV1,
+    SourceNeutralAccountBalanceDeltaV1, SourceNeutralAccountTransitionKindV1,
+    SourceNeutralControlResultV1, SourceNeutralEconomicDispositionV1, SourceNeutralEconomicFactV1,
     SourceNeutralEconomicIdentityV1, SourceNeutralMarketEnrollmentResultV1,
     SourceNeutralOrderLifecycleResultV1, SourceNeutralSettlementLifecycleResultV1,
     SourceNeutralTradeLifecycleResultV1, StableLogicalIdentityV1,
@@ -239,7 +238,8 @@ pub enum SourceNeutralEvidenceKind<T, C = SourceNeutralControlResultV1, I = Stab
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SourceNeutralEvidence<T, C = SourceNeutralControlResultV1, I = StableLogicalIdentityV1> {
-    pub source_reference: SimV2SourceReferenceV1,
+    /// 当前记录自身坐标；上下文归核心，水位归输入批。
+    pub source_record: SimV2SourceRecordReferenceV1,
     pub source_ordinal: u32,
     pub logical_key: SourceNeutralLogicalKeyV1,
     pub kind: SourceNeutralEvidenceKind<T, C, I>,
@@ -398,35 +398,12 @@ pub struct NormalizationBatch<
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CoreErrorV1 {
-    ContextReferenceMismatch {
-        expected: ExecutionNormalizationContextReferenceV1,
-        found: ExecutionNormalizationContextReferenceV1,
-    },
-    SourceWatermarkMismatch {
-        expected: SimV2SourceWatermarkV1,
-        found: SimV2SourceWatermarkV1,
-    },
-    IdentityEncoding {
-        message: String,
-    },
+    IdentityEncoding { message: String },
 }
 
 impl fmt::Display for CoreErrorV1 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::ContextReferenceMismatch { expected, found } => write!(
-                formatter,
-                "上下文引用不匹配：期望 {}，实际 {}",
-                expected.0, found.0
-            ),
-            Self::SourceWatermarkMismatch { expected, found } => write!(
-                formatter,
-                "来源水位不匹配：期望 {}:{}，实际 {}:{}",
-                expected.run_id,
-                expected.projection_batch_sequence,
-                found.run_id,
-                found.projection_batch_sequence
-            ),
             Self::IdentityEncoding { message } => write!(formatter, "身份编码失败：{message}"),
         }
     }
@@ -456,7 +433,6 @@ pub(crate) struct CoreStateDelta<T, C, I, F> {
 #[derive(Clone, Debug)]
 struct StoredLogical<T, C, I> {
     evidence: StoredEvidence<T, C, I>,
-    cancellation_input_item_refs: Option<Vec<CancelInputItemRefV2>>,
     source_reference: SimV2SourceReferenceV1,
 }
 
@@ -562,10 +538,6 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I: NormalizationIdentity<F>, F:
                         logical_identity.clone(),
                         StoredLogical {
                             evidence: StoredEvidence::Evidence(evidence.clone()),
-                            cancellation_input_item_refs: Self::cancellation_input_item_refs(
-                                source_reference,
-                            )
-                            .map(<[CancelInputItemRefV2]>::to_vec),
                             source_reference: source_reference.clone(),
                         },
                     );
@@ -578,10 +550,6 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I: NormalizationIdentity<F>, F:
                                 economic_identity: fact.economic_identity.clone(),
                                 disposition: fact.disposition.clone().into(),
                             },
-                            cancellation_input_item_refs: Self::cancellation_input_item_refs(
-                                &fact.source_reference,
-                            )
-                            .map(<[CancelInputItemRefV2]>::to_vec),
                             source_reference: fact.source_reference.clone(),
                         },
                     );
@@ -597,10 +565,6 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I: NormalizationIdentity<F>, F:
                                 economic_identity: fact.economic_identity.clone(),
                                 disposition: fact.disposition.clone(),
                             },
-                            cancellation_input_item_refs: Self::cancellation_input_item_refs(
-                                &fact.source_reference,
-                            )
-                            .map(<[CancelInputItemRefV2]>::to_vec),
                             source_reference: fact.source_reference.clone(),
                         },
                     );
@@ -631,10 +595,6 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I: NormalizationIdentity<F>, F:
                         logical_identity.clone(),
                         StoredLogical {
                             evidence,
-                            cancellation_input_item_refs: Self::cancellation_input_item_refs(
-                                source_reference,
-                            )
-                            .map(<[CancelInputItemRefV2]>::to_vec),
                             source_reference: source_reference.clone(),
                         },
                     );
@@ -665,10 +625,6 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I: NormalizationIdentity<F>, F:
                         logical_identity.clone(),
                         StoredLogical {
                             evidence,
-                            cancellation_input_item_refs: Self::cancellation_input_item_refs(
-                                source_reference,
-                            )
-                            .map(<[CancelInputItemRefV2]>::to_vec),
                             source_reference: source_reference.clone(),
                         },
                     );
@@ -699,14 +655,17 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I: NormalizationIdentity<F>, F:
         NORMALIZATIONS.with(|count| count.set(count.get() + 1));
         let mut ordered = Vec::with_capacity(input.evidence.len());
         for evidence in input.evidence {
-            self.check_evidence_boundary(&input.source_watermark, &evidence)?;
             let logical_identity = self.logical_identity(&evidence.logical_key)?;
             let source_order = Self::source_order(&evidence);
             ordered.push((
                 source_order.clone(),
                 logical_identity,
                 OrderedEvidence {
-                    source_reference: evidence.source_reference,
+                    source_reference: SimV2SourceReferenceV1 {
+                        context_reference: self.context.context_reference.clone(),
+                        watermark: input.source_watermark.clone(),
+                        record: evidence.source_record,
+                    },
                     source_order,
                     kind: evidence.kind,
                 },
@@ -760,28 +719,8 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I: NormalizationIdentity<F>, F:
         self.state.economic.extend(state_delta.economic);
     }
 
-    fn check_evidence_boundary(
-        &self,
-        watermark: &SimV2SourceWatermarkV1,
-        evidence: &SourceNeutralEvidence<T, C, I>,
-    ) -> Result<(), CoreErrorV1> {
-        if evidence.source_reference.context_reference != self.context.context_reference {
-            return Err(CoreErrorV1::ContextReferenceMismatch {
-                expected: self.context.context_reference.clone(),
-                found: evidence.source_reference.context_reference.clone(),
-            });
-        }
-        if evidence.source_reference.watermark != *watermark {
-            return Err(CoreErrorV1::SourceWatermarkMismatch {
-                expected: watermark.clone(),
-                found: evidence.source_reference.watermark.clone(),
-            });
-        }
-        Ok(())
-    }
-
     fn source_order(evidence: &SourceNeutralEvidence<T, C, I>) -> SourceOrderV1 {
-        let sequence = match &evidence.source_reference.record {
+        let sequence = match &evidence.source_record {
             SimV2SourceRecordReferenceV1::AccountOpening => SourceSequenceV1::AccountOpening,
             SimV2SourceRecordReferenceV1::MarketEnrollment {
                 enrollment_sequence,
@@ -827,17 +766,14 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I: NormalizationIdentity<F>, F:
         logical_identity: I,
         evidence: OrderedEvidence<T, C, I>,
     ) -> Result<NormalizationRecord<T, C, I, F>, CoreErrorV1> {
-        let cancellation_input_item_refs =
-            Self::cancellation_input_item_refs(&evidence.source_reference)
-                .map(<[CancelInputItemRefV2]>::to_vec);
         if let Some(existing) = state_delta
             .logical
             .get(&logical_identity)
             .or_else(|| self.state.logical.get(&logical_identity))
         {
             if self.stored_evidence_matches(state_delta, &existing.evidence, &evidence.kind)
-                && existing.cancellation_input_item_refs.as_deref()
-                    == cancellation_input_item_refs.as_deref()
+                && Self::cancellation_input_item_refs(&existing.source_reference)
+                    == Self::cancellation_input_item_refs(&evidence.source_reference)
             {
                 if let SourceNeutralEvidenceKind::LateEconomicCoverage { economic_key } =
                     &evidence.kind
@@ -895,7 +831,6 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I: NormalizationIdentity<F>, F:
                                 evidence: StoredEvidence::EconomicAlias {
                                     economic_identity: economic_identity.clone(),
                                 },
-                                cancellation_input_item_refs,
                                 source_reference: evidence.source_reference.clone(),
                             },
                         );
@@ -913,7 +848,6 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I: NormalizationIdentity<F>, F:
                                 economic_identity: economic_identity.clone(),
                                 disposition: disposition.clone(),
                             },
-                            cancellation_input_item_refs,
                             source_reference: evidence.source_reference.clone(),
                         },
                     );
@@ -940,7 +874,6 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I: NormalizationIdentity<F>, F:
                             economic_identity,
                             disposition: fact.disposition.clone(),
                         },
-                        cancellation_input_item_refs,
                         source_reference: evidence.source_reference.clone(),
                     },
                 );
@@ -992,7 +925,6 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I: NormalizationIdentity<F>, F:
                     logical_identity,
                     StoredLogical {
                         evidence: StoredEvidence::Evidence(evidence.kind),
-                        cancellation_input_item_refs,
                         source_reference: evidence.source_reference,
                     },
                 );
@@ -1022,7 +954,6 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I: NormalizationIdentity<F>, F:
                     logical_identity,
                     StoredLogical {
                         evidence: StoredEvidence::Evidence(evidence.kind),
-                        cancellation_input_item_refs,
                         source_reference: evidence.source_reference,
                     },
                 );
@@ -1046,7 +977,6 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I: NormalizationIdentity<F>, F:
                     logical_identity,
                     StoredLogical {
                         evidence: StoredEvidence::Evidence(evidence.kind),
-                        cancellation_input_item_refs,
                         source_reference: evidence.source_reference,
                     },
                 );

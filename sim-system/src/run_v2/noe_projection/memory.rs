@@ -481,6 +481,16 @@ impl<P: MemoryOrderEvidence> MemoryNoeProjectionPort<P> {
             .ok_or(MemoryNoeErrorV1::InvalidProjection(
                 "运行与端口的投影版本不符",
             ))?;
+        if batch.run_id != self.opened.run_id {
+            return Err(MemoryNoeErrorV1::InvalidProjection("来源运行与端口不符"));
+        }
+        if let Some(context) = &self.context {
+            if batch.account_opening.as_ref().is_some_and(|opening| {
+                opening.account_instance_key != context.source.account_instance_key
+            }) {
+                return Err(MemoryNoeErrorV1::InvalidProjection("来源账户与上下文不符"));
+            }
+        }
         if self.core.is_none() {
             let opening = batch
                 .account_opening
