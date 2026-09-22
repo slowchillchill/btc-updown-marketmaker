@@ -14321,9 +14321,8 @@ async fn accepted_claim_survives_stop_long_downtime_current_day_terminal_and_pru
         source.envelope.collector_admission_time_utc_ms
     );
     assert_eq!(recovery.pending.len(), 1);
-    let mut recovered = PolymarketProcessingContext::from_recovery(recovery)
-        .unwrap()
-        .unwrap();
+    // 保留恢复出的 E 前 owner，走实际 boundary 移交后再写终态。
+    let mut recovered = early_context;
     let stats = Arc::new(SourceQueueBackpressureStats::default());
     install_active_raw_day_gate(&stats, now_ms()).await;
     let (tx, mut rx) = mpsc::channel(4);
@@ -14334,7 +14333,60 @@ async fn accepted_claim_survives_stop_long_downtime_current_day_terminal_and_pru
         inflight_budget: InflightBudget::new(),
         enqueue_lock: Arc::new(AsyncMutex::new(())),
     };
+    // 单独验证晚于 E 四日的恢复结果确实能交给 actor 完成 claim。
+    let mut late_recovered = PolymarketProcessingContext::from_recovery(recovery)
+        .unwrap()
+        .unwrap();
+    let late_applied = now_ms();
+    finalize_polymarket_ready_pending_while_paused(
+        &|| PolymarketTimelineNow {
+            utc_ms: late_applied,
+            monotonic: TokioInstant::now(),
+        },
+        &mut late_recovered,
+        &sink,
+        &collector,
+        Instant::now(),
+    )
+    .await
+    .unwrap();
+    assert!(late_recovered.pending.is_empty());
+    let late_terminal = rx.recv().await.unwrap();
+    let late_row = polymarket_metadata_common_rows_from_event(
+        polymarket_lifecycle_metadata_event(&late_terminal).unwrap(),
+    )
+    .unwrap()
+    .remove(0);
+    assert_eq!(
+        late_row.metadata_row_kind,
+        PolymarketMetadataRowKind::ResolutionTerminalWs
+    );
+    assert_eq!(late_row.timestamp_received, late_applied);
+    assert_eq!(late_row.source_evidence_received_at_utc, Some(receive));
+    assert_eq!(
+        late_row.source_evidence_raw_sha256.as_deref(),
+        Some(original_digest.as_str())
+    );
+    assert_eq!(
+        late_row.winning_asset_id.as_deref(),
+        Some(market.up_asset_id.as_str())
+    );
+
     let applied = now_ms();
+    advance_polymarket_boundaries(applied, &mut recovered, &sink, &collector, Instant::now())
+        .await
+        .unwrap();
+    let transition = rx.recv().await.unwrap();
+    let transition_event = polymarket_lifecycle_metadata_event(&transition).unwrap();
+    let transition_row = polymarket_metadata_common_rows_from_event(transition_event)
+        .unwrap()
+        .remove(0);
+    assert_eq!(
+        transition_row.metadata_row_kind,
+        PolymarketMetadataRowKind::MarketStateTransition
+    );
+    assert_eq!(transition_row.timestamp_received, applied);
+    assert!(transition_row.source_evidence_received_at_utc.unwrap() < applied - 2 * UTC_DAY_MS);
     finalize_polymarket_ready_pending_while_paused(
         &|| PolymarketTimelineNow {
             utc_ms: applied,
@@ -14368,6 +14420,12 @@ async fn accepted_claim_survives_stop_long_downtime_current_day_terminal_and_pru
         "metadata-01",
         POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION,
         "polymarket_market_metadata",
+    )
+    .unwrap();
+    write_polymarket_metadata_event(
+        &mut writer,
+        transition_event,
+        owned_event_bytes(transition_event) as u64,
     )
     .unwrap();
     write_polymarket_metadata_event(

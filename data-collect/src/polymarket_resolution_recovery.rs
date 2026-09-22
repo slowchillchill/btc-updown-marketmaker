@@ -22,8 +22,7 @@ use crate::market_discovery::{
     validate_recovered_btc_updown_market_from_sdk_payload,
 };
 use crate::polymarket_identity::{
-    PolymarketMarketIdentity, SourceAuthority, SourceEvidenceLocator, SourceReference,
-    VerifiedPolymarketMarketIdentity, same_identity_authority,
+    PolymarketMarketIdentity, VerifiedPolymarketMarketIdentity, same_identity_authority,
 };
 use crate::polymarket_market_metadata_layout::{
     POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
@@ -31,7 +30,6 @@ use crate::polymarket_market_metadata_layout::{
     PolymarketMarketMetadataRow, PolymarketMarketMetadataV4Row, PolymarketMarketMetadataV5Row,
     ResolutionPollResult, SourceEvidenceOrigin, polymarket_market_metadata_v3_schema,
     polymarket_market_metadata_v4_schema, polymarket_market_metadata_v5_schema,
-    validate_polymarket_source_references,
 };
 use crate::polymarket_market_metadata_v6_layout::{
     POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION, PolymarketMarketMetadataV6Row,
@@ -1011,7 +1009,6 @@ struct RecoveryMetadata {
     summary: Option<MetadataRecord>,
     first_post: Option<MetadataRecord>,
     counters: AttemptCounters,
-    discovery_authority: Option<SourceAuthority>,
 }
 
 impl RecoveryMetadata {
@@ -1024,7 +1021,6 @@ impl RecoveryMetadata {
             summary: None,
             first_post: None,
             counters: AttemptCounters::default(),
-            discovery_authority: None,
         };
         history.observe(record, identity)?;
         Ok(history)
@@ -1039,45 +1035,10 @@ impl RecoveryMetadata {
             ))
             .into());
         }
-        if record.kind == "market_state_transition" && record.source_payload_json.is_none() {
-            let reference = SourceReference {
-                identity: identity.authority.clone(),
-                origin: record
-                    .source_origin
-                    .clone()
-                    .ok_or_else(|| invalid_data("transition has no source origin"))?,
-                evidence: SourceEvidenceLocator {
-                    received_at_utc_ms: record
-                        .source_received_at_utc_ms
-                        .ok_or_else(|| invalid_data("transition has no source receive"))?,
-                    raw_sha256: record
-                        .source_raw_sha256
-                        .clone()
-                        .ok_or_else(|| invalid_data("transition has no source digest"))?,
-                },
-            };
-            validate_polymarket_source_references(
-                self.discovery_authority.as_slice(),
-                std::slice::from_ref(&reference),
-            )?;
-        }
         if let Some(discovery) = record.discovered.take() {
             if self.discovery.as_ref().is_none_or(|old| {
                 old.metadata_received_utc_ms <= discovery.metadata_received_utc_ms
             }) {
-                self.discovery_authority = Some(SourceAuthority {
-                    identity: identity.authority,
-                    origin: "gamma_markets_discovery".to_owned(),
-                    evidence: SourceEvidenceLocator {
-                        received_at_utc_ms: discovery
-                            .metadata_received_utc_ms
-                            .expect("decoded discovery has source time"),
-                        raw_sha256: discovery
-                            .raw_json_sha256
-                            .clone()
-                            .expect("decoded discovery has source digest"),
-                    },
-                });
                 self.discovery = Some(discovery);
             }
         }
@@ -4245,7 +4206,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_fixed_identity_digest_and_local_reference_conflicts() {
+    fn rejects_fixed_identity_and_payload_conflicts() {
         let recovery_time = E + 4 * 60_000;
 
         let tmp = tempdir().unwrap();
