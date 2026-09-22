@@ -771,7 +771,23 @@ struct DailyManifestHeaderDto {
 }
 
 #[derive(Deserialize)]
+struct DailyManifestDto {
+    #[serde(flatten)]
+    header: DailyManifestHeaderDto,
+    files: Vec<DailyManifestAdmissionFileDto>,
+    #[serde(default)]
+    producer_barriers: Vec<String>,
+    #[serde(default)]
+    writer_finalize_acks: Vec<String>,
+    #[serde(default)]
+    source_counters: serde_json::Value,
+}
+
+// 独立路径查询只读取其消费的字段，不要求完整准入材料。
+#[derive(Deserialize)]
 struct DailyManifestFilesDto {
+    #[serde(flatten)]
+    header: DailyManifestHeaderDto,
     files: Vec<DailyManifestFilePathDto>,
 }
 
@@ -781,20 +797,8 @@ struct DailyManifestFilePathDto {
 }
 
 #[derive(Deserialize)]
-struct DailyManifestAdmissionDto {
-    files: Vec<DailyManifestAdmissionFileDto>,
-    producer_barriers: Vec<String>,
-    writer_finalize_acks: Vec<String>,
-}
-
-#[derive(Deserialize)]
-struct PublicDailyManifestSourcesDto {
-    #[serde(default)]
-    source_counters: serde_json::Value,
-}
-
-#[derive(Deserialize)]
 struct DailyManifestAdmissionFileDto {
+    path: String,
     source_kind: String,
     schema_version: String,
     utc_hour: String,
@@ -914,6 +918,21 @@ fn qualify_direct_source_daily_manifest_files_at_root(
     root: &Path,
     manifest_path: &Path,
 ) -> Result<QualifiedDailyManifestFileSetV3, ManifestFileSetQualificationError> {
+    let (qualified, bytes) = read_daily_manifest_at_root(root, manifest_path)?;
+    let manifest: DailyManifestFilesDto =
+        serde_json::from_slice(&bytes).map_err(ManifestFileSetQualificationError::Json)?;
+    qualify_daily_manifest_files(
+        qualified,
+        bytes,
+        manifest.header,
+        manifest.files.iter().map(|file| file.path.as_str()),
+    )
+}
+
+fn read_daily_manifest_at_root(
+    root: &Path,
+    manifest_path: &Path,
+) -> Result<(QualifiedSourceManifestPath, Vec<u8>), ManifestFileSetQualificationError> {
     let qualified = qualify_manifest_path(root, manifest_path).map_err(|error| {
         ManifestFileSetQualificationError::Header(ManifestHeaderValidationError::Path(error))
     })?;
@@ -921,10 +940,17 @@ fn qualify_direct_source_daily_manifest_files_at_root(
         File::open(qualified.manifest_path()).map_err(ManifestFileSetQualificationError::Io)?;
     let bytes = read_qualified_manifest_file(root, &qualified, file)
         .map_err(ManifestFileSetQualificationError::Header)?;
-    let header = validate_daily_manifest_header_bytes(qualified.utc_day(), &bytes)
+    Ok((qualified, bytes))
+}
+
+fn qualify_daily_manifest_files<'a>(
+    qualified: QualifiedSourceManifestPath,
+    bytes: Vec<u8>,
+    header: DailyManifestHeaderDto,
+    paths: impl ExactSizeIterator<Item = &'a str>,
+) -> Result<QualifiedDailyManifestFileSetV3, ManifestFileSetQualificationError> {
+    let header = validate_daily_manifest_header(qualified.utc_day(), header)
         .map_err(ManifestFileSetQualificationError::Header)?;
-    let manifest: DailyManifestFilesDto =
-        serde_json::from_slice(&bytes).map_err(ManifestFileSetQualificationError::Json)?;
     let day_dir = qualified.manifest_path().parent().ok_or_else(|| {
         ManifestFileSetQualificationError::Io(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -932,13 +958,12 @@ fn qualify_direct_source_daily_manifest_files_at_root(
         ))
     })?;
     let mut seen_relative_paths = BTreeSet::new();
-    let mut files = Vec::with_capacity(manifest.files.len());
-    for file in manifest.files {
-        let unsafe_text_component = file
-            .path
+    let mut files = Vec::with_capacity(paths.len());
+    for path in paths {
+        let unsafe_text_component = path
             .split('/')
             .any(|component| component.is_empty() || component == "." || component == "..");
-        let manifest_relative_path = PathBuf::from(file.path);
+        let manifest_relative_path = PathBuf::from(path);
         if unsafe_text_component
             || !manifest_relative_path
                 .components()
@@ -1153,8 +1178,23 @@ fn validate_daily_manifest_admission_with_public_inputs(
     manifest_path: &Path,
     public_inputs: bool,
 ) -> Result<ValidatedDirectSourceDailyInputV3, ManifestAdmissionValidationError> {
-    let file_set = qualify_direct_source_daily_manifest_files_at_root(root, manifest_path)
+    let (qualified, bytes) = read_daily_manifest_at_root(root, manifest_path)
         .map_err(ManifestAdmissionValidationError::FileSet)?;
+    let DailyManifestDto {
+        header,
+        files: manifest_files,
+        producer_barriers,
+        writer_finalize_acks,
+        source_counters,
+    }: DailyManifestDto =
+        serde_json::from_slice(&bytes).map_err(ManifestAdmissionValidationError::Json)?;
+    let file_set = qualify_daily_manifest_files(
+        qualified,
+        bytes,
+        header,
+        manifest_files.iter().map(|file| file.path.as_str()),
+    )
+    .map_err(ManifestAdmissionValidationError::FileSet)?;
     if file_set.header().closure_reason() != "utc_day_barrier"
         || file_set.header().coverage_state() != "ended_known"
     {
@@ -1165,29 +1205,22 @@ fn validate_daily_manifest_admission_with_public_inputs(
             },
         );
     }
-    let manifest: DailyManifestAdmissionDto = serde_json::from_slice(&file_set.manifest_bytes)
-        .map_err(ManifestAdmissionValidationError::Json)?;
-    if !matches_exact_evidence_set(&manifest.producer_barriers, &REQUIRED_PRODUCER_BARRIERS) {
+    if !matches_exact_evidence_set(&producer_barriers, &REQUIRED_PRODUCER_BARRIERS) {
         return Err(ManifestAdmissionValidationError::BarrierEvidenceMismatch {
             evidence_kind: "producer_barriers",
         });
     }
     let requires_twap_writer = if public_inputs {
-        let sources: PublicDailyManifestSourcesDto =
-            serde_json::from_slice(&file_set.manifest_bytes)
-                .map_err(ManifestAdmissionValidationError::Json)?;
         // 新采集器在零行日期也为全部来源保存计数条目，不用行情是否到达推断屏障参与者。
-        sources
-            .source_counters
+        source_counters
             .get("polymarket_rtds_chainlink_twap")
             .is_some()
-            || manifest.files.iter().any(|file| {
+            || manifest_files.iter().any(|file| {
                 file.source_kind == "polymarket_rtds_chainlink_twap"
                     || (file.source_kind == "polymarket_market_metadata"
                         && file.schema_version == "polymarket_market_metadata_v6")
             })
-            || manifest
-                .writer_finalize_acks
+            || writer_finalize_acks
                 .iter()
                 .any(|source| source == "polymarket_rtds_chainlink_twap")
     } else {
@@ -1198,14 +1231,14 @@ fn validate_daily_manifest_admission_with_public_inputs(
     } else {
         REQUIRED_WRITER_FINALIZE_ACKS.as_slice()
     };
-    if !matches_exact_evidence_set(&manifest.writer_finalize_acks, required_writer_acks) {
+    if !matches_exact_evidence_set(&writer_finalize_acks, required_writer_acks) {
         return Err(ManifestAdmissionValidationError::BarrierEvidenceMismatch {
             evidence_kind: "writer_finalize_acks",
         });
     }
 
     let mut files = Vec::with_capacity(file_set.files().len());
-    for (qualified_file, manifest_file) in file_set.files().iter().zip(&manifest.files) {
+    for (qualified_file, manifest_file) in file_set.files().iter().zip(&manifest_files) {
         let expected = if public_inputs {
             derived_manifest_file_identity_with_schema(
                 qualified_file.manifest_relative_path(),
@@ -1624,6 +1657,13 @@ fn validate_daily_manifest_header_bytes(
 ) -> Result<ValidatedDailyManifestHeaderV3, ManifestHeaderValidationError> {
     let header: DailyManifestHeaderDto =
         serde_json::from_slice(bytes).map_err(ManifestHeaderValidationError::Json)?;
+    validate_daily_manifest_header(qualified_utc_day, header)
+}
+
+fn validate_daily_manifest_header(
+    qualified_utc_day: &str,
+    header: DailyManifestHeaderDto,
+) -> Result<ValidatedDailyManifestHeaderV3, ManifestHeaderValidationError> {
     if header.schema_version != DAILY_MANIFEST_SCHEMA_VERSION_V3 {
         return Err(ManifestHeaderValidationError::UnsupportedManifestSchema {
             found: header.schema_version,

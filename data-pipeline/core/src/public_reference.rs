@@ -392,7 +392,6 @@ pub fn source_evidence_v3_from_typed_raw_v2(
         TypedRawRowV2::Existing(row) => existing_row_source_evidence_v3(row),
         TypedRawRowV2::PolymarketMarketMetadataV6(row) => match row.as_ref() {
             PolymarketMarketMetadataV6Input::Existing(row) => {
-                row.validate().map_err(crate::typed_raw_contract_error)?;
                 source_evidence_v3_from_parts(crate::metadata_source_evidence_parts(row)?)
             }
             PolymarketMarketMetadataV6Input::AnchorRule(row) => {
@@ -409,7 +408,6 @@ pub fn source_evidence_v3_from_typed_raw_v2(
 fn existing_row_source_evidence_v3(
     row: &crate::typed_raw::TypedRawRow,
 ) -> Result<SourceEvidenceRefV3, ContractError> {
-    row.validate().map_err(crate::typed_raw_contract_error)?;
     source_evidence_v3_from_parts(crate::source_evidence_parts_from_typed_raw(row)?)
 }
 

@@ -1969,10 +1969,12 @@ fn validate_depth_common(
 fn validate_depth_levels(levels: &[DepthLevel], field: &str) -> Result<(), TypedRawError> {
     let mut prices = BTreeSet::new();
     for (index, level) in levels.iter().enumerate() {
-        require_positive_decimal(&level.price, &format!("{field}[{index}].price"))?;
+        let price_field = format!("{field}[{index}].price");
+        let canonical_price = normalize_decimal_text(&level.price, &price_field)?;
+        if canonical_price.0 == "0" || canonical_price.0.starts_with('-') {
+            return Err(invalid(&price_field, "must be positive"));
+        }
         require_nonnegative_decimal(&level.quantity, &format!("{field}[{index}].quantity"))?;
-        let canonical_price =
-            normalize_decimal_text(&level.price, &format!("{field}[{index}].price"))?;
         if !prices.insert(canonical_price.0) {
             return Err(invalid(field, "contains a duplicate canonical price"));
         }
