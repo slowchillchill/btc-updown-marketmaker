@@ -163,13 +163,13 @@ impl SourceAdmissionGate {
         &self,
         parent: &RawDayAcceptedTicket,
         received: i64,
-    ) -> Result<RawDayAcceptedTicket> {
+    ) -> Result<Option<RawDayAcceptedTicket>> {
         match self {
             Self::Training(gate) => {
                 gate.accept_derived_polymarket_event_ticket(parent, received)
                     .await
             }
-            Self::Hot(_) => Ok(parent.clone()),
+            Self::Hot(_) => Ok(Some(parent.clone())),
         }
     }
 
@@ -211,10 +211,10 @@ impl SourceAdmissionGate {
         received: i64,
     ) -> Result<Option<RawDayAcceptedTicket>> {
         match parent {
-            Some(parent) => self
-                .accept_derived_polymarket_event_ticket(parent, received)
-                .await
-                .map(Some),
+            Some(parent) => {
+                self.accept_derived_polymarket_event_ticket(parent, received)
+                    .await
+            }
             None => {
                 self.accept_unadmitted_event_ticket("polymarket", received)
                     .await

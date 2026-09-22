@@ -69,6 +69,8 @@ pub(super) async fn run_hot_sources_with_specs(
             run_started,
             pm_rx,
             PolymarketRestartRecovery {
+                owners: Vec::new(),
+                ws_claims: BTreeMap::new(),
                 pending: Vec::new(),
                 fixed_identities: RecoveredPolymarketFixedIdentities::default(),
             },

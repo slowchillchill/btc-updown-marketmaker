@@ -627,9 +627,14 @@ impl PublicObservationCoreV1 {
         };
         match &input.current {
             PreparedCanonicalInputV1::EndOfInput => {
-                if !self.pending.is_empty() {
+                let missing_sources = self
+                    .pending
+                    .values()
+                    .filter(|pair| pair.metadata.is_some())
+                    .count();
+                if missing_sources != 0 {
                     return Err(DptCoreErrorV1::UnpairedWsTerminalMetadata {
-                        count: self.pending.len(),
+                        count: missing_sources,
                     });
                 }
             }

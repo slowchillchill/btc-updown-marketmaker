@@ -287,7 +287,9 @@ fn polymarket_metadata_v5_ws_claimant_raw_event_round_trips_and_writes() {
         platform_timestamp_utc_ms: source_received_at_utc_ms,
         winning_asset_id: identity.up_asset_id.clone(),
         winning_outcome: "Up".to_owned(),
-        raw_day_ticket: accepted_raw_day_ticket_for_sync_test(source_received_at_utc_ms),
+        raw_day_ticket: Some(accepted_raw_day_ticket_for_sync_test(
+            source_received_at_utc_ms,
+        )),
     };
     let pending = PendingPolymarketResolution::new(identity, None);
     let collector_identity = CollectorIdentity {

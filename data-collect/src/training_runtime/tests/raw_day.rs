@@ -627,6 +627,7 @@ async fn derived_polymarket_ticket_prefers_ordinary_and_bounds_controlled_fallba
         let derived = gate
             .accept_derived_polymarket_event_ticket(&parent, same_day_utc_ms + 1)
             .await
+            .unwrap()
             .unwrap();
         assert_eq!(derived, parent);
     }
@@ -651,6 +652,7 @@ async fn derived_polymarket_ticket_prefers_ordinary_and_bounds_controlled_fallba
             let derived = gate
                 .accept_derived_polymarket_event_ticket(&parent, boundary_utc_ms + 3)
                 .await
+                .unwrap()
                 .unwrap();
             assert_eq!(
                 derived,
@@ -675,6 +677,7 @@ async fn derived_polymarket_ticket_prefers_ordinary_and_bounds_controlled_fallba
     let ordinary = gate
         .accept_derived_polymarket_event_ticket(&old_day_parent, boundary_utc_ms + 1)
         .await
+        .unwrap()
         .unwrap();
     assert_eq!(
         ordinary,
@@ -704,9 +707,8 @@ async fn derived_polymarket_ticket_prefers_ordinary_and_bounds_controlled_fallba
         assert!(
             gate.accept_derived_polymarket_event_ticket(&invalid_parent, same_day_utc_ms + 1,)
                 .await
-                .unwrap_err()
-                .to_string()
-                .contains("accepted parent ticket cannot authorize")
+                .unwrap()
+                .is_none()
         );
     }
     assert!(
@@ -715,9 +717,8 @@ async fn derived_polymarket_ticket_prefers_ordinary_and_bounds_controlled_fallba
             same_day_utc_ms + UTC_DAY_MS + 1,
         )
         .await
-        .unwrap_err()
-        .to_string()
-        .contains("controlled cutoff cannot authorize")
+        .unwrap()
+        .is_none()
     );
 }
 

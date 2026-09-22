@@ -18,40 +18,41 @@ use sha2::{Digest as _, Sha256};
 use time::OffsetDateTime;
 
 use crate::market_discovery::{
-    MarketWindow, discovery_windows, validate_recovered_btc_updown_market_from_sdk_payload,
+    DiscoveredBtcUpdownMarket, MarketWindow, discovery_windows,
+    validate_recovered_btc_updown_market_from_sdk_payload,
 };
 use crate::polymarket_identity::{
-    PolymarketMarketIdentity, SourceAuthority, SourceEvidenceLocator, SourceReference,
-    VerifiedPolymarketMarketIdentity, same_identity_authority,
-    source_reference_candidate_matches_authority,
+    PolymarketMarketIdentity, VerifiedPolymarketMarketIdentity, same_identity_authority,
 };
 use crate::polymarket_market_metadata_layout::{
     POLYMARKET_MARKET_METADATA_V2_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION,
     POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION, POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION,
     PolymarketMarketMetadataRow, PolymarketMarketMetadataV4Row, PolymarketMarketMetadataV5Row,
-    PolymarketMetadataReferenceIntegrityError, ResolutionPollResult, SourceEvidenceOrigin,
-    polymarket_market_metadata_v3_schema, polymarket_market_metadata_v4_schema,
-    polymarket_market_metadata_v5_schema, validate_polymarket_source_references,
+    ResolutionPollResult, SourceEvidenceOrigin, polymarket_market_metadata_v3_schema,
+    polymarket_market_metadata_v4_schema, polymarket_market_metadata_v5_schema,
 };
 use crate::polymarket_market_metadata_v6_layout::{
     POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION, PolymarketMarketMetadataV6Row,
     polymarket_market_metadata_v6_row_from_batch, polymarket_market_metadata_v6_schema,
 };
 use crate::polymarket_orderbook_v3::{
-    POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION, polymarket_orderbook_v3_schema, same_outcome_label,
+    POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION, PolymarketMarketResolvedAdmissionEvidence,
+    PolymarketMarketResolvedV3, optional_event_message,
+    polymarket_market_resolved_admission_evidence, polymarket_orderbook_v3_schema,
+    same_outcome_label,
 };
 use crate::sources::polymarket::{
     GammaTerminalAttemptContext, GammaTerminalFixedIdentity, GammaTerminalResponse,
     evaluate_gamma_terminal_response,
 };
 
+#[cfg(test)]
 const UTC_DAY_MS: i64 = 86_400_000;
 const RESOLUTION_ATTEMPT_COUNT: u8 = 6;
 const FIRST_SLOT_DELAY_MS: i64 = 3 * 60_000;
 const SLOT_INTERVAL_MS: i64 = 60_000;
 #[cfg(test)]
 const BUDGET_HORIZON_MS: i64 = 8 * 60_000;
-const MAX_RECOVERED_PENDING: usize = 2;
 const POLYMARKET_ORDERBOOK_V2_SCHEMA_VERSION: &str = "polymarket_orderbook_v2";
 const RECOVERY_BATCH_MAX_ROWS: usize = 16;
 
@@ -65,7 +66,7 @@ const LEGACY_V2_ROUTING_PROJECTION: [&str; 5] = [
     "schema_version",
 ];
 
-const TYPED_V3_RESOLUTION_PROJECTION: [&str; 13] = [
+const TYPED_V3_RESOLUTION_PROJECTION: [&str; 17] = [
     "timestamp_received",
     "event_type",
     "market",
@@ -79,6 +80,10 @@ const TYPED_V3_RESOLUTION_PROJECTION: [&str; 13] = [
     "outcomes",
     "winning_asset_id",
     "winning_outcome",
+    "timestamp",
+    "question",
+    "description",
+    "event_message",
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,6 +121,22 @@ impl MetadataLayout {
 pub struct PolymarketRestartRecovery {
     pub pending: Vec<RecoveredPolymarketPending>,
     pub fixed_identities: RecoveredPolymarketFixedIdentities,
+    pub owners: Vec<DiscoveredBtcUpdownMarket>,
+    pub ws_claims: BTreeMap<String, RecoveredPolymarketWsClaim>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RecoveredPolymarketWsClaim {
+    pub source_sequence_epoch_id: String,
+    pub collector_admission_sequence: u64,
+    pub collector_admission_time_utc_ms: i64,
+    pub source_received_at_utc_ms: i64,
+    pub validation_completed_at_utc_ms: i64,
+    pub source_payload_json: String,
+    pub source_payload_sha256: String,
+    pub platform_timestamp_utc_ms: i64,
+    pub winning_asset_id: String,
+    pub winning_outcome: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -279,6 +300,7 @@ fn select_restart_fixed_identities(
 
 #[derive(Clone, Debug)]
 struct MetadataRecord {
+    discovered: Option<DiscoveredBtcUpdownMarket>,
     artifact_position: FinalizedArtifactPosition,
     kind: String,
     timestamp_received: i64,
@@ -321,10 +343,15 @@ struct MetadataRecord {
     budget_horizon_utc_ms: Option<i64>,
     #[cfg(test)]
     followup_status: Option<String>,
+    #[cfg(test)]
     attempts_recorded: Option<u32>,
+    #[cfg(test)]
     valid_response_count: Option<u32>,
+    #[cfg(test)]
     transport_unavailable_count: Option<u32>,
+    #[cfg(test)]
     missed_slot_count: Option<u32>,
+    #[cfg(test)]
     last_valid_metadata_received_at_utc_ms: Option<i64>,
     ws_claimant_source_sequence_epoch_id: Option<String>,
     ws_claimant_collector_admission_sequence: Option<u64>,
@@ -485,21 +512,21 @@ fn metadata_v3_json_value(batch: &RecordBatch, row: usize, field: &Field) -> Res
 
 fn validate_finalized_metadata_v3_payload_semantics(
     row: &PolymarketMarketMetadataRow,
-) -> Result<()> {
+) -> Result<Option<DiscoveredBtcUpdownMarket>> {
     match (
         row.source_evidence_origin,
         row.source_evidence_payload_json.as_deref(),
     ) {
         (Some(SourceEvidenceOrigin::GammaMarketsDiscovery), Some(payload)) => {
-            validate_finalized_discovery_payload(row, payload)
+            validate_finalized_discovery_payload(row, payload).map(Some)
         }
         (Some(SourceEvidenceOrigin::GammaBySlug), Some(payload)) => {
-            validate_finalized_gamma_attempt_payload(row, payload)
+            validate_finalized_gamma_attempt_payload(row, payload).map(|()| None)
         }
         (Some(SourceEvidenceOrigin::MarketResolvedWs), Some(payload)) => {
-            validate_finalized_ws_payload_platform_timestamp(row, payload)
+            validate_finalized_ws_payload_platform_timestamp(row, payload).map(|()| None)
         }
-        _ => Ok(()),
+        _ => Ok(None),
     }
 }
 
@@ -556,7 +583,7 @@ fn validate_finalized_ws_payload_platform_timestamp(
 fn validate_finalized_discovery_payload(
     row: &PolymarketMarketMetadataRow,
     payload: &str,
-) -> Result<()> {
+) -> Result<DiscoveredBtcUpdownMarket> {
     let market = serde_json::from_str::<SdkGammaMarket>(payload).map_err(|error| {
         invalid_data(format!(
             "discovery SDK payload decode failed:slug={}:error={error}",
@@ -575,7 +602,7 @@ fn validate_finalized_discovery_payload(
         end_ts_s: row.market_end_utc.div_euclid(1_000),
         slug: row.slug.clone(),
     };
-    let discovered = validate_recovered_btc_updown_market_from_sdk_payload(
+    let mut discovered = validate_recovered_btc_updown_market_from_sdk_payload(
         &market,
         &window,
         row.fixed_identity_verified_at_utc,
@@ -603,7 +630,15 @@ fn validate_finalized_discovery_payload(
         ))
         .into());
     }
-    validate_persisted_gamma_response_fields(row, &market)
+    validate_persisted_gamma_response_fields(row, &market)?;
+    discovered.raw_json = Some(payload.to_owned());
+    discovered.raw_json_sha256 = row.source_evidence_raw_sha256.clone();
+    discovered.metadata_fetch_start_utc_ms = row.metadata_fetch_start_utc;
+    discovered.metadata_received_utc_ms = row.source_evidence_received_at_utc;
+    discovered.metadata_validation_completed_at_utc_ms = row
+        .row_evidence_validation_completed_at_utc
+        .unwrap_or(row.fixed_identity_verified_at_utc);
+    Ok(discovered)
 }
 
 fn validate_finalized_gamma_attempt_payload(
@@ -739,168 +774,133 @@ impl MetadataRecord {
         artifact_position: FinalizedArtifactPosition,
         layout: MetadataLayout,
     ) -> Result<Option<Self>> {
-        let full_row = if layout == MetadataLayout::V6 {
+        let (
+            full_row,
+            ws_claimant_source_sequence_epoch_id,
+            ws_claimant_collector_admission_sequence,
+        ) = if layout == MetadataLayout::V6 {
             match polymarket_market_metadata_v6_row_from_batch(batch, row).map_err(invalid_data)? {
-                PolymarketMarketMetadataV6Row::Existing(existing) => existing.common().clone(),
-                // 锚点更新已经按 V6 验证；它不产生身份、终态或轮询次数。
+                PolymarketMarketMetadataV6Row::Existing(mut existing) => {
+                    let epoch = existing.ws_claimant_source_sequence_epoch_id.take();
+                    let sequence = existing.ws_claimant_collector_admission_sequence;
+                    (existing.into_common(), epoch, sequence)
+                }
                 PolymarketMarketMetadataV6Row::AnchorRule(_) => return Ok(None),
             }
         } else {
-            finalized_metadata_v3_row_from_batch(batch, row, layout)?
-        };
-        let (
-            validation,
-            ws_claimant_source_sequence_epoch_id,
-            ws_claimant_collector_admission_sequence,
-        ) = match layout {
-            MetadataLayout::V3 => (full_row.validate_v3(), None, None),
-            MetadataLayout::V4 => {
-                let v4 = PolymarketMarketMetadataV4Row {
-                    common: full_row.clone(),
-                    ws_claimant_source_sequence_epoch_id: optional_string(
-                        batch,
-                        row,
-                        "ws_claimant_source_sequence_epoch_id",
-                    )?,
-                    ws_claimant_collector_admission_sequence: optional_u64(
-                        batch,
-                        row,
-                        "ws_claimant_collector_admission_sequence",
-                    )?,
-                };
+            let full_row = finalized_metadata_v3_row_from_batch(batch, row, layout)?;
+            let (epoch, sequence) = if layout == MetadataLayout::V3 {
+                (None, None)
+            } else {
                 (
-                    v4.validate(),
-                    v4.ws_claimant_source_sequence_epoch_id,
-                    v4.ws_claimant_collector_admission_sequence,
-                )
-            }
-            MetadataLayout::V5 | MetadataLayout::V6 => {
-                if full_row.schema_version != POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION {
-                    return Err(invalid_data(format!(
-                        "Polymarket restart finalized metadata row schema version mismatch:file={}:row={row}:actual={}:expected={POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION}",
-                        artifact_position.path.display(),
-                        full_row.schema_version,
-                    ))
-                    .into());
-                }
-                let v5 = PolymarketMarketMetadataV5Row::from_common(
-                    full_row.clone(),
                     optional_string(batch, row, "ws_claimant_source_sequence_epoch_id")?,
                     optional_u64(batch, row, "ws_claimant_collector_admission_sequence")?,
-                );
-                (
-                    v5.validate(),
-                    v5.ws_claimant_source_sequence_epoch_id,
-                    v5.ws_claimant_collector_admission_sequence,
                 )
+            };
+            let (full_row, validation) = match layout {
+                MetadataLayout::V3 => {
+                    let validation = full_row.validate_v3();
+                    (full_row, validation)
+                }
+                MetadataLayout::V4 => {
+                    let typed = PolymarketMarketMetadataV4Row {
+                        common: full_row,
+                        ws_claimant_source_sequence_epoch_id: epoch.clone(),
+                        ws_claimant_collector_admission_sequence: sequence,
+                    };
+                    let validation = typed.validate();
+                    (typed.common, validation)
+                }
+                MetadataLayout::V5 => {
+                    let typed = PolymarketMarketMetadataV5Row::from_common(
+                        full_row,
+                        epoch.clone(),
+                        sequence,
+                    );
+                    let validation = typed.validate();
+                    (typed.into_common(), validation)
+                }
+                _ => return Err(invalid_data("unsupported metadata recovery layout").into()),
+            };
+            if !validation.is_complete() {
+                return Err(invalid_data(format!("Polymarket restart finalized metadata violates canonical schema:file={}:row={row}:violations={:?}", artifact_position.path.display(), validation.violations)).into());
             }
-            MetadataLayout::V2 => {
-                return Err(invalid_data("metadata v2 cannot produce a recovery record").into());
-            }
+            (full_row, epoch, sequence)
         };
-        if !validation.is_complete() {
-            return Err(invalid_data(format!(
-                "Polymarket restart finalized {} row violates canonical schema:file={}:row={row}:violations={:?}",
-                layout.version(),
-                artifact_position.path.display(),
-                validation.violations
-            ))
-            .into());
-        }
-        validate_finalized_metadata_v3_payload_semantics(&full_row).map_err(|error| {
+        let discovered = validate_finalized_metadata_v3_payload_semantics(&full_row).map_err(|error| {
             invalid_data(format!(
                 "Polymarket restart finalized metadata payload semantics failed:file={}:row={row}:error={error}",
                 artifact_position.path.display()
             ))
         })?;
         Ok(Some(Self {
+            discovered,
             artifact_position,
-            kind: required_string(batch, row, "metadata_row_kind")?,
-            timestamp_received: required_timestamp(batch, row, "timestamp_received")?,
-            admission_sequence: required_u64(batch, row, "collector_admission_sequence")?,
-            admission_time_utc_ms: required_timestamp(
-                batch,
-                row,
-                "collector_admission_time_utc_ms",
-            )?,
-            metadata_origin: required_string(batch, row, "metadata_origin")?,
-            slug: required_string(batch, row, "slug")?,
-            condition_id: required_string(batch, row, "condition_id")?,
-            clob_market_id: required_string(batch, row, "clob_market_id")?,
-            asset_ids_json: required_string(batch, row, "asset_ids")?,
-            market_start_utc_ms: required_timestamp(batch, row, "market_start_utc")?,
-            market_end_utc_ms: required_timestamp(batch, row, "market_end_utc")?,
-            fixed_identity_verified_at_utc_ms: required_timestamp(
-                batch,
-                row,
-                "fixed_identity_verified_at_utc",
-            )?,
-            lifecycle_state: required_string(batch, row, "market_lifecycle_state")?,
-            runtime_role: required_string(batch, row, "market_runtime_role")?,
-            source_origin: optional_string(batch, row, "source_evidence_origin")?,
-            source_received_at_utc_ms: optional_timestamp(
-                batch,
-                row,
-                "source_evidence_received_at_utc",
-            )?,
-            source_payload_json: optional_string(batch, row, "source_evidence_payload_json")?,
-            source_raw_sha256: optional_string(batch, row, "source_evidence_raw_sha256")?,
+            kind: full_row.metadata_row_kind.as_str().to_owned(),
+            metadata_origin: full_row.metadata_origin.as_str().to_owned(),
+            asset_ids_json: full_row.asset_ids,
+            market_start_utc_ms: full_row.market_start_utc,
+            market_end_utc_ms: full_row.market_end_utc,
+            fixed_identity_verified_at_utc_ms: full_row.fixed_identity_verified_at_utc,
+            lifecycle_state: full_row.market_lifecycle_state.as_str().to_owned(),
+            runtime_role: full_row.market_runtime_role.as_str().to_owned(),
+            source_origin: full_row
+                .source_evidence_origin
+                .map(|v| v.as_str().to_owned()),
+            source_received_at_utc_ms: full_row.source_evidence_received_at_utc,
+            source_payload_json: full_row.source_evidence_payload_json,
+            source_raw_sha256: full_row.source_evidence_raw_sha256,
             #[cfg(test)]
-            lifecycle_transition: optional_string(batch, row, "market_lifecycle_transition")?,
+            lifecycle_transition: full_row
+                .market_lifecycle_transition
+                .map(|v| v.as_str().to_owned()),
             #[cfg(test)]
-            lifecycle_applied_at_utc_ms: optional_timestamp(
-                batch,
-                row,
-                "lifecycle_applied_at_utc",
-            )?,
-            runtime_role_transition: optional_string(batch, row, "market_runtime_role_transition")?,
-            runtime_role_applied_at_utc_ms: optional_timestamp(
-                batch,
-                row,
-                "runtime_role_applied_at_utc",
-            )?,
-            winning_asset_id: optional_string(batch, row, "winning_asset_id")?,
-            winning_outcome: optional_string(batch, row, "winning_outcome")?,
+            lifecycle_applied_at_utc_ms: full_row.lifecycle_applied_at_utc,
+            runtime_role_transition: full_row
+                .market_runtime_role_transition
+                .map(|v| v.as_str().to_owned()),
+            runtime_role_applied_at_utc_ms: full_row.runtime_role_applied_at_utc,
             #[cfg(test)]
-            resolution_evidence_source: optional_string(batch, row, "resolution_evidence_source")?,
+            resolution_evidence_source: full_row
+                .resolution_evidence_source
+                .map(|v| v.as_str().to_owned()),
             #[cfg(test)]
-            resolution_evidence_raw_sha256: if matches!(
-                layout,
-                MetadataLayout::V5 | MetadataLayout::V6
-            ) {
-                None
-            } else {
-                optional_string(batch, row, "resolution_evidence_raw_sha256")?
-            },
+            terminal_claim_owner: full_row.terminal_claim_owner.map(|v| v.as_str().to_owned()),
+            attempt_ordinal: full_row.resolution_poll_attempt_ordinal,
             #[cfg(test)]
-            terminal_claim_owner: optional_string(batch, row, "terminal_claim_owner")?,
-            attempt_ordinal: optional_u8(batch, row, "resolution_poll_attempt_ordinal")?,
+            attempt_scheduled_utc_ms: full_row.resolution_poll_scheduled_utc,
+            attempt_result: full_row
+                .resolution_poll_result
+                .map(|v| v.as_str().to_owned()),
+            integrity_error_class: full_row
+                .resolution_integrity_error_class
+                .map(|v| v.as_str().to_owned()),
             #[cfg(test)]
-            attempt_scheduled_utc_ms: optional_timestamp(
-                batch,
-                row,
-                "resolution_poll_scheduled_utc",
-            )?,
-            attempt_result: optional_string(batch, row, "resolution_poll_result")?,
-            integrity_error_class: optional_string(batch, row, "resolution_integrity_error_class")?,
+            budget_horizon_utc_ms: full_row.resolution_budget_horizon_utc,
             #[cfg(test)]
-            budget_horizon_utc_ms: optional_timestamp(batch, row, "resolution_budget_horizon_utc")?,
+            followup_status: full_row
+                .resolution_followup_status
+                .map(|v| v.as_str().to_owned()),
             #[cfg(test)]
-            followup_status: optional_string(batch, row, "resolution_followup_status")?,
-            attempts_recorded: optional_u32(batch, row, "resolution_poll_attempts_recorded")?,
-            valid_response_count: optional_u32(batch, row, "resolution_valid_response_count")?,
-            transport_unavailable_count: optional_u32(
-                batch,
-                row,
-                "resolution_transport_unavailable_count",
-            )?,
-            missed_slot_count: optional_u32(batch, row, "resolution_missed_slot_count")?,
-            last_valid_metadata_received_at_utc_ms: optional_timestamp(
-                batch,
-                row,
-                "last_valid_metadata_received_utc",
-            )?,
-
+            attempts_recorded: full_row.resolution_poll_attempts_recorded,
+            #[cfg(test)]
+            valid_response_count: full_row.resolution_valid_response_count,
+            #[cfg(test)]
+            transport_unavailable_count: full_row.resolution_transport_unavailable_count,
+            #[cfg(test)]
+            missed_slot_count: full_row.resolution_missed_slot_count,
+            #[cfg(test)]
+            last_valid_metadata_received_at_utc_ms: full_row.last_valid_metadata_received_utc,
+            timestamp_received: full_row.timestamp_received,
+            slug: full_row.slug,
+            condition_id: full_row.condition_id,
+            clob_market_id: full_row.clob_market_id,
+            winning_asset_id: full_row.winning_asset_id,
+            winning_outcome: full_row.winning_outcome,
+            #[cfg(test)]
+            resolution_evidence_raw_sha256: full_row.resolution_evidence_raw_sha256,
+            admission_sequence: full_row.collector_admission_sequence,
+            admission_time_utc_ms: full_row.collector_admission_time_utc_ms,
             ws_claimant_source_sequence_epoch_id,
             ws_claimant_collector_admission_sequence,
         }))
@@ -911,7 +911,6 @@ impl MetadataRecord {
     }
 
     fn validate_recovery_eligibility(&self) -> Result<()> {
-        self.fixed_identity()?;
         if self.attempt_result.as_deref() == Some("integrity_error")
             || self.integrity_error_class.is_some()
         {
@@ -940,40 +939,6 @@ impl MetadataRecord {
             },
             first_verified_at_utc_ms: self.fixed_identity_verified_at_utc_ms,
         }
-    }
-
-    fn source_authority(&self) -> Option<SourceAuthority> {
-        self.source_payload_json.as_ref()?;
-        Some(SourceAuthority {
-            identity: self.identity_authority(serde_json::from_str(&self.asset_ids_json).ok()?),
-            origin: self.source_origin.clone()?,
-            evidence: SourceEvidenceLocator {
-                received_at_utc_ms: self.source_received_at_utc_ms?,
-                raw_sha256: self.source_raw_sha256.clone()?,
-            },
-        })
-    }
-
-    fn source_reference(
-        &self,
-    ) -> std::result::Result<Option<SourceReference>, PolymarketMetadataReferenceIntegrityError>
-    {
-        if self.kind != "market_state_transition" || self.source_payload_json.is_some() {
-            return Ok(None);
-        }
-        let missing = || PolymarketMetadataReferenceIntegrityError::Missing {
-            slug: self.slug.clone(),
-        };
-        Ok(Some(SourceReference {
-            identity: self.identity_authority(
-                serde_json::from_str(&self.asset_ids_json).map_err(|_| missing())?,
-            ),
-            origin: self.source_origin.clone().ok_or_else(missing)?,
-            evidence: SourceEvidenceLocator {
-                received_at_utc_ms: self.source_received_at_utc_ms.ok_or_else(missing)?,
-                raw_sha256: self.source_raw_sha256.clone().ok_or_else(missing)?,
-            },
-        }))
     }
 
     fn is_current_authority(&self) -> bool {
@@ -1007,6 +972,11 @@ struct QualifiedTypedSource {
     winning_outcome: String,
 }
 
+struct RecoveredTypedSource {
+    source: QualifiedTypedSource,
+    evidence: Option<PolymarketMarketResolvedAdmissionEvidence>,
+}
+
 struct ProjectedMarketResolvedSource {
     timestamp_received: i64,
     collector_admission_time_utc_ms: i64,
@@ -1031,6 +1001,148 @@ struct AttemptCounters {
     last_valid_received: Option<i64>,
 }
 
+struct RecoveryMetadata {
+    identity: FixedIdentity,
+    discovery: Option<DiscoveredBtcUpdownMarket>,
+    authority: Option<MetadataRecord>,
+    terminal: Option<MetadataRecord>,
+    summary: Option<MetadataRecord>,
+    first_post: Option<MetadataRecord>,
+    counters: AttemptCounters,
+}
+
+impl RecoveryMetadata {
+    fn new(record: MetadataRecord, identity: FixedIdentity) -> Result<Self> {
+        let mut history = Self {
+            identity: identity.clone(),
+            discovery: None,
+            authority: None,
+            terminal: None,
+            summary: None,
+            first_post: None,
+            counters: AttemptCounters::default(),
+        };
+        history.observe(record, identity)?;
+        Ok(history)
+    }
+
+    fn observe(&mut self, mut record: MetadataRecord, identity: FixedIdentity) -> Result<()> {
+        record.validate_recovery_eligibility()?;
+        if !same_identity_authority(&self.identity.authority, &identity.authority) {
+            return Err(invalid_data(format!(
+                "Polymarket restart fixed identity conflict:slug={}",
+                record.slug
+            ))
+            .into());
+        }
+        if let Some(discovery) = record.discovered.take() {
+            if self.discovery.as_ref().is_none_or(|old| {
+                old.metadata_received_utc_ms <= discovery.metadata_received_utc_ms
+            }) {
+                self.discovery = Some(discovery);
+            }
+        }
+        // 正文已在首次读取时解码，仅未闭 owner 保有真实 discovery。
+        if self.terminal.is_some() || self.summary.is_some() {
+            self.discovery = None;
+        }
+        record.source_payload_json = None;
+        if record.kind == "resolution_poll_attempt" {
+            self.counters.observe(&record)?;
+        }
+        if record.kind == "resolution_terminal_ws"
+            || record.attempt_result.as_deref() == Some("terminal")
+        {
+            if self.terminal.is_some() {
+                return Err(invalid_data(format!(
+                    "Polymarket restart has duplicate terminal rows:slug={}",
+                    record.slug
+                ))
+                .into());
+            }
+            self.terminal = Some(record);
+            self.discovery = None;
+        } else if record.kind == "resolution_followup_summary" {
+            if self.summary.is_some() {
+                return Err(invalid_data(format!(
+                    "Polymarket restart has duplicate followup summaries:slug={}",
+                    record.slug
+                ))
+                .into());
+            }
+            self.summary = Some(record);
+            self.discovery = None;
+        } else if record.attempt_result.as_deref() == Some("post_terminal_claim_observation") {
+            if self
+                .first_post
+                .as_ref()
+                .is_none_or(|old| record.artifact_position.precedes(&old.artifact_position))
+            {
+                self.first_post = Some(record);
+            }
+        } else if record.is_current_authority()
+            || record.is_pending_transition()
+            || record.runtime_role == "next"
+        {
+            if self.authority.as_ref().is_none_or(|old| {
+                (old.timestamp_received, old.admission_sequence)
+                    < (record.timestamp_received, record.admission_sequence)
+            }) {
+                self.authority = Some(record);
+            }
+        }
+        Ok(())
+    }
+}
+
+impl AttemptCounters {
+    fn observe(&mut self, record: &MetadataRecord) -> Result<()> {
+        let ordinal = record
+            .attempt_ordinal
+            .expect("validated attempt has ordinal");
+        if !self.ordinals.insert(ordinal) {
+            return Err(invalid_data(format!(
+                "Polymarket restart has duplicate attempt ordinal:slug={}:ordinal={ordinal}",
+                record.slug
+            ))
+            .into());
+        }
+        self.attempts += 1;
+        match record.attempt_result.as_deref() {
+            Some("valid_nonterminal") => {
+                let received = record
+                    .source_received_at_utc_ms
+                    .ok_or_else(|| invalid_data("valid response has no source receive"))?;
+                self.valid += 1;
+                self.last_valid_received = Some(
+                    self.last_valid_received
+                        .map_or(received, |last| last.max(received)),
+                );
+            }
+            Some("transport_unavailable") => self.transport += 1,
+            Some("missed_due_to_downtime") => self.missed += 1,
+            Some("terminal" | "post_terminal_claim_observation") => (),
+            other => {
+                return Err(invalid_data(format!(
+                    "Polymarket restart cannot count attempt result:{other:?}"
+                ))
+                .into());
+            }
+        }
+        Ok(())
+    }
+    fn validate_prefix(&self, slug: &str) -> Result<()> {
+        let prefix = (1..=u8::try_from(self.ordinals.len())?).collect::<BTreeSet<_>>();
+        if self.ordinals != prefix {
+            return Err(invalid_data(format!(
+                "Polymarket restart durable attempt ordinals are not a prefix:slug={slug}"
+            ))
+            .into());
+        }
+        Ok(())
+    }
+}
+
 pub fn restore_polymarket_resolution_recovery(
     dataset_root: &Path,
     recovery_time_ms: i64,
@@ -1038,82 +1150,20 @@ pub fn restore_polymarket_resolution_recovery(
     if recovery_time_ms <= 0 {
         return Err(invalid_data("Polymarket restart recovery time must be positive").into());
     }
-    let days = recovery_days(recovery_time_ms)?;
-    let metadata = read_finalized_metadata_for_validation(dataset_root, &days)?;
-    if metadata.is_empty() {
-        read_qualified_typed_market_sources(
-            dataset_root,
-            &days,
-            &BTreeMap::new(),
-            recovery_time_ms,
-        )?;
-        return Ok(PolymarketRestartRecovery {
-            pending: Vec::new(),
-            fixed_identities: RecoveredPolymarketFixedIdentities::default(),
-        });
-    }
-
-    let mut grouped = BTreeMap::<String, Vec<MetadataRecord>>::new();
-    for record in metadata {
-        record.validate_recovery_eligibility()?;
-        grouped.entry(record.slug.clone()).or_default().push(record);
-    }
-
-    let mut identities = BTreeMap::new();
-    for (slug, records) in &mut grouped {
-        records.sort_by_key(|record| {
-            (
-                record.timestamp_received,
-                record.admission_sequence,
-                record.kind.clone(),
-            )
-        });
-        let identity = records[0].fixed_identity()?;
-        if records.iter().any(|record| {
-            !record.fixed_identity().is_ok_and(|candidate| {
-                same_identity_authority(&candidate.authority, &identity.authority)
-            })
-        }) {
-            return Err(invalid_data(format!(
-                "Polymarket restart fixed identity conflict:slug={slug}"
-            ))
-            .into());
-        }
-        identities.insert(slug.clone(), identity);
-    }
+    let days = recovery_days(dataset_root)?;
+    let mut grouped = read_finalized_metadata_for_validation(dataset_root, &days)?;
+    let mut identities = grouped
+        .iter()
+        .map(|(slug, history)| (slug.clone(), history.identity.clone()))
+        .collect::<BTreeMap<_, _>>();
     let fixed_identities = select_restart_fixed_identities(&identities, recovery_time_ms)?;
-    reject_dual_metadata_layout_for_current_lifecycles(
+    let qualified_typed = read_qualified_typed_market_sources(
         dataset_root,
         &days,
-        grouped.keys().map(String::as_str).collect(),
+        &identities,
+        &grouped,
+        recovery_time_ms,
     )?;
-
-    let reference_authorities =
-        read_precise_metadata_reference_authorities(dataset_root, &days, &grouped)?;
-    for authority in &reference_authorities {
-        authority.validate_recovery_eligibility()?;
-    }
-    let reference_records = grouped
-        .values()
-        .flatten()
-        .chain(reference_authorities.iter())
-        .collect::<Vec<_>>();
-    let authorities = reference_records
-        .iter()
-        .filter_map(|record| record.source_authority())
-        .collect::<Vec<_>>();
-    let references = reference_records
-        .iter()
-        .filter_map(|record| record.source_reference().transpose())
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    validate_polymarket_source_references(&authorities, &references).map_err(|error| {
-        invalid_data(format!(
-            "Polymarket restart source reference integrity:{error}"
-        ))
-    })?;
-
-    let qualified_typed =
-        read_qualified_typed_market_sources(dataset_root, &days, &identities, recovery_time_ms)?;
 
     let mut pending_counters = BTreeMap::new();
     for (slug, records) in &grouped {
@@ -1122,66 +1172,87 @@ pub fn restore_polymarket_resolution_recovery(
             .expect("grouped validation identity has fixed identity");
         let matching_typed = qualified_typed
             .get(slug)
-            .map(Vec::as_slice)
+            .map(|entry| std::slice::from_ref(&entry.source))
             .unwrap_or_default();
 
-        let terminals = terminal_rows(records);
-        let summaries = records
-            .iter()
-            .filter(|record| record.kind == "resolution_followup_summary")
-            .collect::<Vec<_>>();
-        if terminals.len() > 1 {
-            return Err(invalid_data(format!(
-                "Polymarket restart has duplicate terminal rows:slug={slug}:count={}",
-                terminals.len()
-            ))
-            .into());
-        }
-        if summaries.len() > 1 {
-            return Err(invalid_data(format!(
-                "Polymarket restart has duplicate followup summaries:slug={slug}:count={}",
-                summaries.len()
-            ))
-            .into());
-        }
-        if !terminals.is_empty() && !summaries.is_empty() {
+        if records.terminal.is_some() && records.summary.is_some() {
             return Err(invalid_data(format!(
                 "Polymarket restart terminal and summary coexist:slug={slug}"
             ))
             .into());
         }
-        validate_post_rows(records, terminals.first().copied())?;
-
-        let counters = attempt_counters(records)?;
-        if let Some(terminal) = terminals.first().copied() {
-            validate_terminal_typed_sources(terminal, matching_typed, identity)?;
-            continue;
-        }
-        if let Some(summary) = summaries.first().copied() {
-            validate_typed_summary(summary, &counters, matching_typed)?;
-            continue;
-        }
-        if !matching_typed.is_empty() {
+        if records.first_post.is_some()
+            && records
+                .terminal
+                .as_ref()
+                .is_none_or(|terminal| terminal.kind != "resolution_terminal_ws")
+            && matching_typed.is_empty()
+        {
             return Err(invalid_data(format!(
-                "Polymarket restart matching source has no terminal or summary:slug={slug}"
+                "Polymarket restart orphan post-terminal observation:slug={slug}"
             ))
             .into());
         }
-        pending_counters.insert(slug.clone(), counters);
+        if let Some(terminal) = &records.terminal {
+            // 已闭 owner 不需要重放；其原始来源日可能已正常清理。
+            if !matching_typed.is_empty() {
+                validate_terminal_typed_sources(terminal, matching_typed, identity)?;
+            }
+            continue;
+        }
+        if records.summary.is_some() {
+            if !matching_typed.is_empty() {
+                return Err(invalid_data(format!("Polymarket restart exhausted summary coexists with typed market_resolved source:slug={slug}")).into());
+            }
+            continue;
+        }
+        if matching_typed.is_empty() {
+            records.counters.validate_prefix(slug)?;
+        }
+        pending_counters.insert(slug.clone(), ());
     }
 
     let mut recovered = Vec::new();
-    for (slug, counters) in pending_counters {
+    let mut owners = Vec::new();
+    let mut ws_claims = BTreeMap::new();
+    for (slug, ()) in pending_counters {
         let identity = identities
             .remove(&slug)
             .expect("validated pending identity has fixed identity");
         let records = grouped
             .remove(&slug)
             .expect("validated pending identity has metadata records");
+        let counters = &records.counters;
+        if let Some(entry) = qualified_typed.get(&slug) {
+            let evidence = entry
+                .evidence
+                .as_ref()
+                .expect("unclosed source retains its canonical evidence");
+            ws_claims.insert(
+                slug.clone(),
+                RecoveredPolymarketWsClaim {
+                    source_sequence_epoch_id: entry.source.source_sequence_epoch_id.clone(),
+                    collector_admission_sequence: entry.source.collector_admission_sequence,
+                    collector_admission_time_utc_ms: entry.source.collector_admission_time_utc_ms,
+                    source_received_at_utc_ms: entry.source.timestamp_received,
+                    validation_completed_at_utc_ms: i64::try_from(
+                        OffsetDateTime::now_utc().unix_timestamp_nanos() / 1_000_000,
+                    )?,
+                    source_payload_json: evidence.source_evidence_payload_json.clone(),
+                    source_payload_sha256: evidence.source_evidence_raw_sha256.clone(),
+                    platform_timestamp_utc_ms: evidence.platform_timestamp_utc_ms,
+                    winning_asset_id: evidence.winning_asset_id.clone(),
+                    winning_outcome: evidence.winning_outcome.clone(),
+                },
+            );
+        }
         if recovery_time_ms < identity.market_end_utc_ms {
+            if let Some(owner) = records.discovery {
+                owners.push(owner);
+            }
             continue;
         }
-        let Some(authority) = durable_current_authority(&records) else {
+        let Some(authority) = records.authority.as_ref() else {
             continue;
         };
         let mut missed_attempt_ordinals = Vec::new();
@@ -1196,9 +1267,7 @@ pub fn restore_polymarket_resolution_recovery(
                 next_attempt_ordinal = Some(ordinal);
             }
         }
-        let Some(next_attempt_ordinal) = next_attempt_ordinal else {
-            continue;
-        };
+        let next_attempt_ordinal = next_attempt_ordinal.unwrap_or(RESOLUTION_ATTEMPT_COUNT + 1);
         recovered.push(RecoveredPolymarketPending {
             slug: identity.slug.clone(),
             clob_market_id: identity.clob_market_id.clone(),
@@ -1225,124 +1294,12 @@ pub fn restore_polymarket_resolution_recovery(
             last_valid_metadata_received_at_utc_ms: counters.last_valid_received,
         });
     }
-    if recovered.len() > MAX_RECOVERED_PENDING {
-        return Err(invalid_data(format!(
-            "Polymarket restart pending bound exceeded:count={}:limit={MAX_RECOVERED_PENDING}",
-            recovered.len()
-        ))
-        .into());
-    }
     Ok(PolymarketRestartRecovery {
         pending: recovered,
         fixed_identities,
+        owners,
+        ws_claims,
     })
-}
-
-fn terminal_rows(records: &[MetadataRecord]) -> Vec<&MetadataRecord> {
-    records
-        .iter()
-        .filter(|record| {
-            record.kind == "resolution_terminal_ws"
-                || (record.kind == "resolution_poll_attempt"
-                    && record.attempt_result.as_deref() == Some("terminal"))
-        })
-        .collect()
-}
-
-fn validate_post_rows(records: &[MetadataRecord], terminal: Option<&MetadataRecord>) -> Result<()> {
-    for post in records.iter().filter(|record| {
-        record.kind == "resolution_poll_attempt"
-            && record.attempt_result.as_deref() == Some("post_terminal_claim_observation")
-    }) {
-        let Some(terminal) = terminal else {
-            return Err(invalid_data(format!(
-                "Polymarket restart orphan post-terminal observation:slug={}",
-                post.slug
-            ))
-            .into());
-        };
-        if terminal.kind != "resolution_terminal_ws"
-            || !terminal.artifact_position.precedes(&post.artifact_position)
-            || terminal.admission_sequence >= post.admission_sequence
-        {
-            return Err(invalid_data(format!(
-                "Polymarket restart post-terminal prefix is invalid:slug={}:ordinal={}:terminal={}:{}:post={}:{}",
-                post.slug,
-                post.attempt_ordinal.unwrap_or_default(),
-                terminal.artifact_position.path.display(),
-                terminal.artifact_position.file_row,
-                post.artifact_position.path.display(),
-                post.artifact_position.file_row,
-            ))
-            .into());
-        }
-    }
-    Ok(())
-}
-
-fn attempt_counters(records: &[MetadataRecord]) -> Result<AttemptCounters> {
-    let mut counters = AttemptCounters::default();
-    for record in records
-        .iter()
-        .filter(|record| record.kind == "resolution_poll_attempt")
-    {
-        let ordinal = record
-            .attempt_ordinal
-            .expect("validated attempt has ordinal");
-        if !counters.ordinals.insert(ordinal) {
-            return Err(invalid_data(format!(
-                "Polymarket restart has duplicate attempt ordinal:slug={}:ordinal={ordinal}",
-                record.slug
-            ))
-            .into());
-        }
-        counters.attempts = counters.attempts.saturating_add(1);
-        match record.attempt_result.as_deref() {
-            Some("valid_nonterminal") => {
-                let received = record.source_received_at_utc_ms.ok_or_else(|| {
-                    invalid_data(format!(
-                        "Polymarket restart valid response has no source receive:slug={}:ordinal={ordinal}",
-                        record.slug
-                    ))
-                })?;
-                counters.valid = counters.valid.saturating_add(1);
-                counters.last_valid_received = Some(
-                    counters
-                        .last_valid_received
-                        .map_or(received, |last| last.max(received)),
-                );
-            }
-            Some("transport_unavailable") => {
-                counters.transport = counters.transport.saturating_add(1);
-            }
-            Some("missed_due_to_downtime") => {
-                counters.missed = counters.missed.saturating_add(1);
-            }
-            Some("terminal" | "post_terminal_claim_observation") => {}
-            other => {
-                return Err(invalid_data(format!(
-                    "Polymarket restart cannot count attempt result:slug={}:result={other:?}",
-                    record.slug
-                ))
-                .into());
-            }
-        }
-    }
-    let durable_prefix = (1..=u8::try_from(counters.ordinals.len())
-        .map_err(|_| invalid_data("Polymarket restart attempt prefix length exceeds u8"))?)
-        .collect::<BTreeSet<_>>();
-    if counters.ordinals != durable_prefix {
-        let slug = records
-            .first()
-            .map(|record| record.slug.as_str())
-            .unwrap_or("<unknown>");
-        return Err(invalid_data(format!(
-            "Polymarket restart durable attempt ordinals are not a prefix:slug={slug}:ordinals={:?}",
-            counters.ordinals
-        ))
-        .into());
-    }
-    Ok(counters)
 }
 
 fn validate_terminal_typed_sources(
@@ -1421,58 +1378,6 @@ fn validate_terminal_typed_sources(
     Ok(())
 }
 
-fn validate_typed_summary(
-    summary: &MetadataRecord,
-    counters: &AttemptCounters,
-    sources: &[QualifiedTypedSource],
-) -> Result<()> {
-    validate_summary_counters(summary, counters)?;
-    if !sources.is_empty() {
-        return Err(invalid_data(format!(
-            "Polymarket restart exhausted summary coexists with typed market_resolved source:slug={}",
-            summary.slug
-        ))
-        .into());
-    }
-    Ok(())
-}
-
-fn validate_summary_counters(summary: &MetadataRecord, counters: &AttemptCounters) -> Result<()> {
-    if counters.ordinals != BTreeSet::from([1, 2, 3, 4, 5, 6])
-        || counters.attempts != u32::from(RESOLUTION_ATTEMPT_COUNT)
-        || summary.attempts_recorded != Some(counters.attempts)
-        || summary.valid_response_count != Some(counters.valid)
-        || summary.transport_unavailable_count != Some(counters.transport)
-        || summary.missed_slot_count != Some(counters.missed)
-        || counters
-            .valid
-            .saturating_add(counters.transport)
-            .saturating_add(counters.missed)
-            != u32::from(RESOLUTION_ATTEMPT_COUNT)
-        || summary.last_valid_metadata_received_at_utc_ms != counters.last_valid_received
-    {
-        return Err(invalid_data(format!(
-            "Polymarket restart summary counters do not reconstruct six slots:slug={}",
-            summary.slug
-        ))
-        .into());
-    }
-    Ok(())
-}
-
-fn durable_current_authority(records: &[MetadataRecord]) -> Option<&MetadataRecord> {
-    let current = records
-        .iter()
-        .filter(|record| record.is_current_authority())
-        .max_by_key(|record| (record.timestamp_received, record.admission_sequence))?;
-    let basis = records
-        .iter()
-        .filter(|record| record.is_pending_transition())
-        .max_by_key(|record| (record.timestamp_received, record.admission_sequence))
-        .unwrap_or(current);
-    Some(basis)
-}
-
 fn relevant_raw_error(identity: &FixedIdentity, detail: impl std::fmt::Display) -> io::Error {
     invalid_data(format!(
         "Polymarket restart relevant raw is invalid:slug={}:detail={detail}",
@@ -1499,8 +1404,9 @@ fn winner_matches(identity: &FixedIdentity, asset_id: &str, outcome: &str) -> bo
 fn read_finalized_metadata_for_validation(
     dataset_root: &Path,
     days: &BTreeSet<String>,
-) -> Result<Vec<MetadataRecord>> {
-    let mut records = Vec::new();
+) -> Result<BTreeMap<String, RecoveryMetadata>> {
+    let mut records = BTreeMap::<String, RecoveryMetadata>::new();
+    let mut legacy_slugs = BTreeSet::new();
     for (file_order, path) in
         finalized_source_paths(dataset_root, days, "polymarket_market_metadata")?
             .into_iter()
@@ -1511,6 +1417,21 @@ fn read_finalized_metadata_for_validation(
             builder.metadata().file_metadata().key_value_metadata(),
             &path,
         )?;
+        if layout == MetadataLayout::V3 {
+            require_canonical_metadata_schema(builder.schema().as_ref(), &path, layout)?;
+            let projection = ProjectionMask::columns(builder.parquet_schema(), ["slug"]);
+            for batch in builder
+                .with_projection(projection)
+                .with_batch_size(RECOVERY_BATCH_MAX_ROWS)
+                .build()?
+            {
+                let batch = batch?;
+                for row in 0..batch.num_rows() {
+                    legacy_slugs.insert(required_string(&batch, row, "slug")?);
+                }
+            }
+            continue;
+        }
         if !matches!(
             layout,
             MetadataLayout::V4 | MetadataLayout::V5 | MetadataLayout::V6
@@ -1533,124 +1454,24 @@ fn read_finalized_metadata_for_validation(
                     },
                     layout,
                 )?;
-                records.extend(record);
+                if let Some(record) = record {
+                    let slug = record.slug.clone();
+                    let identity = record.fixed_identity()?;
+                    match records.entry(slug) {
+                        std::collections::btree_map::Entry::Vacant(entry) => {
+                            entry.insert(RecoveryMetadata::new(record, identity)?);
+                        }
+                        std::collections::btree_map::Entry::Occupied(mut entry) => {
+                            entry.get_mut().observe(record, identity)?
+                        }
+                    }
+                }
                 file_row = file_row.saturating_add(1);
             }
         }
     }
-    Ok(records)
-}
-
-fn reject_dual_metadata_layout_for_current_lifecycles(
-    dataset_root: &Path,
-    days: &BTreeSet<String>,
-    current_slugs: BTreeSet<&str>,
-) -> Result<()> {
-    if current_slugs.is_empty() {
-        return Ok(());
-    }
-    let forbidden_layout = MetadataLayout::V3;
-    for path in finalized_source_paths(dataset_root, days, "polymarket_market_metadata")? {
-        let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&path)?)?;
-        let layout = metadata_layout(
-            builder.metadata().file_metadata().key_value_metadata(),
-            &path,
-        )?;
-        if layout != forbidden_layout {
-            continue;
-        }
-        require_canonical_metadata_schema(builder.schema().as_ref(), &path, layout)?;
-        let mut reader = builder.with_batch_size(RECOVERY_BATCH_MAX_ROWS).build()?;
-        for batch in &mut reader {
-            let batch = batch?;
-            for row in 0..batch.num_rows() {
-                let slug = required_string(&batch, row, "slug")?;
-                if current_slugs.contains(slug.as_str()) {
-                    return Err(invalid_data(format!(
-                        "Polymarket restart detected dual metadata layouts for slug={slug}:forbidden_layout={}",
-                        layout.version()
-                    ))
-                    .into());
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn read_precise_metadata_reference_authorities(
-    dataset_root: &Path,
-    default_days: &BTreeSet<String>,
-    grouped: &BTreeMap<String, Vec<MetadataRecord>>,
-) -> Result<Vec<MetadataRecord>> {
-    let mut lookups_by_day = BTreeMap::<String, BTreeSet<SourceReference>>::new();
-    for record in grouped.values().flatten() {
-        let Some(reference) = record.source_reference()? else {
-            continue;
-        };
-        let day = utc_day(reference.evidence.received_at_utc_ms)?;
-        if !default_days.contains(&day) {
-            lookups_by_day.entry(day).or_default().insert(reference);
-        }
-    }
-
-    let mut records = Vec::new();
-    for (day, lookups) in lookups_by_day {
-        let days = BTreeSet::from([day]);
-        for (file_order, path) in
-            finalized_source_paths(dataset_root, &days, "polymarket_market_metadata")?
-                .into_iter()
-                .enumerate()
-        {
-            let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&path)?)?;
-            let layout = metadata_layout(
-                builder.metadata().file_metadata().key_value_metadata(),
-                &path,
-            )?;
-            if !matches!(
-                layout,
-                MetadataLayout::V4 | MetadataLayout::V5 | MetadataLayout::V6
-            ) {
-                continue;
-            }
-            require_canonical_metadata_schema(builder.schema().as_ref(), &path, layout)?;
-            let mut reader = builder.with_batch_size(RECOVERY_BATCH_MAX_ROWS).build()?;
-            let mut file_row = 0_u64;
-            for batch in &mut reader {
-                let batch = batch?;
-                for row in 0..batch.num_rows() {
-                    let slug = required_string(&batch, row, "slug")?;
-                    let source_received_at_utc_ms =
-                        optional_timestamp(&batch, row, "source_evidence_received_at_utc")?;
-                    if !lookups.iter().any(|lookup| {
-                        lookup.identity.market.slug == slug
-                            && source_received_at_utc_ms == Some(lookup.evidence.received_at_utc_ms)
-                    }) {
-                        file_row = file_row.saturating_add(1);
-                        continue;
-                    }
-                    let record = MetadataRecord::from_batch(
-                        &batch,
-                        row,
-                        FinalizedArtifactPosition {
-                            path: path.clone(),
-                            file_order,
-                            file_row,
-                        },
-                        layout,
-                    )?;
-                    if let Some(record) = record
-                        && let Some(authority) = record.source_authority()
-                        && lookups.iter().any(|reference| {
-                            source_reference_candidate_matches_authority(reference, &authority)
-                        })
-                    {
-                        records.push(record);
-                    }
-                    file_row = file_row.saturating_add(1);
-                }
-            }
-        }
+    if let Some(slug) = legacy_slugs.iter().find(|slug| records.contains_key(*slug)) {
+        return Err(invalid_data(format!("Polymarket restart detected dual metadata layouts for slug={slug}:forbidden_layout=polymarket_market_metadata_v3")).into());
     }
     Ok(records)
 }
@@ -1735,9 +1556,10 @@ fn read_qualified_typed_market_sources(
     dataset_root: &Path,
     days: &BTreeSet<String>,
     identities: &BTreeMap<String, FixedIdentity>,
+    histories: &BTreeMap<String, RecoveryMetadata>,
     recovery_time_ms: i64,
-) -> Result<BTreeMap<String, Vec<QualifiedTypedSource>>> {
-    let mut qualified = BTreeMap::<String, Vec<QualifiedTypedSource>>::new();
+) -> Result<BTreeMap<String, RecoveredTypedSource>> {
+    let mut qualified = BTreeMap::<String, RecoveredTypedSource>::new();
     let mut last_sequence_by_epoch = BTreeMap::<String, u64>::new();
     for path in finalized_source_paths(dataset_root, days, "polymarket_market")? {
         let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&path)?)?;
@@ -1822,48 +1644,96 @@ fn read_qualified_typed_market_sources(
                             ))
                             .into());
                         }
+                        let slug = optional_string(&batch, row, "slug")?;
+                        let identity = slug.as_deref().and_then(|slug| identities.get(slug)).ok_or_else(|| invalid_data(format!("Polymarket restart v3 market_resolved has no current metadata identity:slug={slug:?}")))?;
                         let projected = ProjectedMarketResolvedSource {
                             timestamp_received,
                             collector_admission_time_utc_ms,
                             source_sequence_epoch_id,
                             collector_admission_sequence,
                             market: required_string(&batch, row, "market")?,
-                            slug: optional_string(&batch, row, "slug")?,
+                            slug,
                             clob_market_id: required_string(&batch, row, "clob_market_id")?,
                             asset_ids: required_string_list(&batch, row, "asset_ids")?,
                             outcomes: required_string_list(&batch, row, "outcomes")?,
                             winning_asset_id: required_string(&batch, row, "winning_asset_id")?,
                             winning_outcome: required_string(&batch, row, "winning_outcome")?,
                         };
-                        let candidates = identities
-                            .values()
-                            .filter(|identity| {
-                                projected.timestamp_received >= identity.market_start_utc_ms
-                                    && (projected.market == identity.condition_id
-                                        || projected.slug.as_deref()
-                                            == Some(identity.slug.as_str())
-                                        || projected.clob_market_id == identity.clob_market_id)
-                            })
-                            .collect::<Vec<_>>();
-                        let [identity] = candidates.as_slice() else {
-                            let detail = if candidates.is_empty() {
-                                "no current metadata identity"
-                            } else {
-                                "multiple current metadata identities"
-                            };
-                            return Err(invalid_data(format!(
-                                "Polymarket restart v3 market_resolved has {detail}:market={}:slug={:?}:clob_market_id={}",
-                                projected.market,
-                                projected.slug,
-                                projected.clob_market_id
-                            ))
-                            .into());
-                        };
                         let source = validate_typed_market_source(&projected, identity)?;
-                        qualified
-                            .entry(identity.slug.clone())
-                            .or_default()
-                            .push(source);
+                        let history = &histories[&identity.slug];
+                        if let Some(terminal) = &history.terminal {
+                            if terminal.winning_asset_id.as_deref()
+                                != Some(source.winning_asset_id.as_str())
+                                || !same_outcome_label(
+                                    terminal.winning_outcome.as_deref().unwrap_or_default(),
+                                    &source.winning_outcome,
+                                )
+                            {
+                                return Err(relevant_raw_error(
+                                    identity,
+                                    "typed terminal/source winner mismatch",
+                                )
+                                .into());
+                            }
+                            if source.timestamp_received
+                                > terminal.runtime_role_applied_at_utc_ms.unwrap_or_default()
+                                || source.collector_admission_time_utc_ms
+                                    > terminal.admission_time_utc_ms
+                            {
+                                return Err(relevant_raw_error(
+                                    identity,
+                                    "typed source later than terminal role exit/admission",
+                                )
+                                .into());
+                            }
+                        }
+                        if let Some(previous) = qualified.get(&identity.slug) {
+                            if previous.source.winning_asset_id != source.winning_asset_id
+                                || !same_outcome_label(
+                                    &previous.source.winning_outcome,
+                                    &source.winning_outcome,
+                                )
+                            {
+                                return Err(relevant_raw_error(
+                                    identity,
+                                    "contradictory market_resolved sources",
+                                )
+                                .into());
+                            }
+                        }
+                        let is_claimant = history.terminal.as_ref().is_some_and(|terminal| {
+                            terminal.ws_claimant_source_sequence_epoch_id.as_deref()
+                                == Some(source.source_sequence_epoch_id.as_str())
+                                && terminal.ws_claimant_collector_admission_sequence
+                                    == Some(source.collector_admission_sequence)
+                        });
+                        if !qualified.contains_key(&identity.slug) || is_claimant {
+                            let evidence =
+                                if history.terminal.is_none() && history.summary.is_none() {
+                                    let resolved = PolymarketMarketResolvedV3 {
+                                        clob_market_id: projected.clob_market_id,
+                                        question: optional_string(&batch, row, "question")?,
+                                        description: optional_string(&batch, row, "description")?,
+                                        asset_ids: projected.asset_ids,
+                                        outcomes: projected.outcomes,
+                                        event_message: optional_event_message(&batch, row)?,
+                                        winning_asset_id: projected.winning_asset_id,
+                                        winning_outcome: projected.winning_outcome,
+                                    };
+                                    Some(polymarket_market_resolved_admission_evidence(
+                                        &projected.market,
+                                        projected.slug.as_deref(),
+                                        optional_timestamp(&batch, row, "timestamp")?,
+                                        &resolved,
+                                    )?)
+                                } else {
+                                    None
+                                };
+                            qualified.insert(
+                                identity.slug.clone(),
+                                RecoveredTypedSource { source, evidence },
+                            );
+                        }
                     }
                 }
             }
@@ -2062,13 +1932,30 @@ fn finalized_parquet_order_key(path: &Path) -> (String, u32) {
     )
 }
 
-fn recovery_days(recovery_time_ms: i64) -> Result<BTreeSet<String>> {
-    Ok(BTreeSet::from([
-        utc_day(recovery_time_ms.saturating_sub(UTC_DAY_MS))?,
-        utc_day(recovery_time_ms)?,
-    ]))
+fn recovery_days(dataset_root: &Path) -> Result<BTreeSet<String>> {
+    let root = dataset_root.join("training").join("typed_raw");
+    let entries = match fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(BTreeSet::new()),
+        Err(error) => return Err(error.into()),
+    };
+    let mut days = BTreeSet::new();
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            if let Some(day) = entry
+                .file_name()
+                .to_str()
+                .and_then(|name| name.strip_prefix("utc_day="))
+            {
+                days.insert(day.to_owned());
+            }
+        }
+    }
+    Ok(days)
 }
 
+#[cfg(test)]
 fn utc_day(utc_ms: i64) -> Result<String> {
     let timestamp =
         OffsetDateTime::from_unix_timestamp(utc_ms.div_euclid(1_000)).map_err(|error| {
@@ -2173,16 +2060,6 @@ fn required_u64(batch: &RecordBatch, row: usize, name: &str) -> Result<u64> {
 
 fn optional_u64(batch: &RecordBatch, row: usize, name: &str) -> Result<Option<u64>> {
     let values = typed_column::<UInt64Array>(batch, name)?;
-    Ok(values.is_valid(row).then(|| values.value(row)))
-}
-
-fn optional_u8(batch: &RecordBatch, row: usize, name: &str) -> Result<Option<u8>> {
-    let values = typed_column::<UInt8Array>(batch, name)?;
-    Ok(values.is_valid(row).then(|| values.value(row)))
-}
-
-fn optional_u32(batch: &RecordBatch, row: usize, name: &str) -> Result<Option<u32>> {
-    let values = typed_column::<UInt32Array>(batch, name)?;
     Ok(values.is_valid(row).then(|| values.value(row)))
 }
 
@@ -2326,6 +2203,7 @@ mod tests {
     fn base_record(sequence: u64) -> MetadataRecord {
         let payload = discovery_payload();
         MetadataRecord {
+            discovered: None,
             artifact_position: FinalizedArtifactPosition {
                 path: PathBuf::from("<fixture>"),
                 file_order: 0,
@@ -3183,15 +3061,7 @@ mod tests {
     #[test]
     fn typed_v3_recovery_projection_is_bounded_and_excludes_heavy_payloads() {
         assert_eq!(RECOVERY_BATCH_MAX_ROWS, 16);
-        assert_eq!(TYPED_V3_RESOLUTION_PROJECTION.len(), 13);
-        for excluded in [
-            "bids",
-            "asks",
-            "price_changes",
-            "question",
-            "description",
-            "event_message",
-        ] {
+        for excluded in ["bids", "asks", "price_changes"] {
             assert!(
                 !TYPED_V3_RESOLUTION_PROJECTION.contains(&excluded),
                 "{excluded}"
@@ -3605,29 +3475,6 @@ mod tests {
     }
 
     #[test]
-    fn rejects_v5_row_with_mismatched_embedded_schema_version() {
-        let tmp = tempdir().unwrap();
-        let recovery_time = E + 4 * 60_000;
-        let mut row = metadata_v5_fixture_row(&base_record(1), None);
-        row.common_mut().schema_version = POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION.to_owned();
-        write_metadata_v5_rows(
-            &day_dir(tmp.path(), recovery_time, "polymarket_market_metadata")
-                .join("polymarket_market_metadata_02.parquet"),
-            &[row],
-        );
-
-        let error = restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
-            .unwrap_err()
-            .to_string();
-        assert!(
-            error.contains("metadata row schema version mismatch")
-                && error.contains(POLYMARKET_MARKET_METADATA_V4_SCHEMA_VERSION)
-                && error.contains(POLYMARKET_MARKET_METADATA_V5_SCHEMA_VERSION),
-            "{error}"
-        );
-    }
-
-    #[test]
     fn current_source_v3_metadata_v5_ws_claimant_and_agreeing_duplicate_are_terminal_complete() {
         let tmp = tempdir().unwrap();
         let epoch = "source-epoch-current";
@@ -3954,8 +3801,8 @@ mod tests {
             (E + FIRST_SLOT_DELAY_MS - 1, Some(1), Vec::new()),
             (E + FIRST_SLOT_DELAY_MS, Some(2), vec![1]),
             (E + BUDGET_HORIZON_MS - 1, Some(6), vec![1, 2, 3, 4, 5]),
-            (E + BUDGET_HORIZON_MS, None, Vec::new()),
-            (E + BUDGET_HORIZON_MS + 1, None, Vec::new()),
+            (E + BUDGET_HORIZON_MS, Some(7), vec![1, 2, 3, 4, 5, 6]),
+            (E + BUDGET_HORIZON_MS + 1, Some(7), vec![1, 2, 3, 4, 5, 6]),
         ] {
             let tmp = tempdir().unwrap();
             write_finalized_fixture(tmp.path(), recovery_time, &[base_record(1)]);
@@ -4057,7 +3904,7 @@ mod tests {
     }
 
     #[test]
-    fn cross_day_candidate_loads_only_its_precise_older_source_authority() {
+    fn cross_day_recovery_retains_all_unclosed_owners_with_available_material() {
         let day_start = T.div_euclid(UTC_DAY_MS).saturating_mul(UTC_DAY_MS);
         let recovery_time = day_start + 10 * 60_000;
         let source_day_receive = day_start - UTC_DAY_MS - 5 * 60_000;
@@ -4109,10 +3956,14 @@ mod tests {
         );
 
         let recovery = restore_polymarket_resolution_recovery(tmp.path(), recovery_time).unwrap();
-        assert_eq!(recovery.pending.len(), 1);
-        assert_eq!(recovery.pending[0].slug, candidate_slug);
+        assert_eq!(recovery.pending.len(), 2);
+        let candidate = recovery
+            .pending
+            .iter()
+            .find(|pending| pending.slug == candidate_slug)
+            .unwrap();
         assert_eq!(
-            recovery.pending[0].discovery_source_raw_sha256,
+            candidate.discovery_source_raw_sha256,
             candidate_authority.source_raw_sha256.unwrap()
         );
     }
@@ -4355,7 +4206,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_fixed_identity_digest_and_local_reference_conflicts() {
+    fn rejects_fixed_identity_and_payload_conflicts() {
         let recovery_time = E + 4 * 60_000;
 
         let tmp = tempdir().unwrap();
@@ -4400,11 +4251,12 @@ mod tests {
             recovery_time,
             &[base_record(1), transition, duplicate],
         );
-        assert!(
+        assert_eq!(
             restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
-                .unwrap_err()
-                .to_string()
-                .contains("multiple metadata source authorities")
+                .unwrap()
+                .pending
+                .len(),
+            1
         );
     }
 
@@ -4527,7 +4379,7 @@ mod tests {
     }
 
     #[test]
-    fn ws_terminal_uses_current_typed_claimant_and_prefixes_post_observations() {
+    fn ws_terminal_uses_current_typed_claimant_without_physical_post_order() {
         let recovery_time = E + 5 * 60_000;
         let receive = E + 240_000;
 
@@ -4572,9 +4424,9 @@ mod tests {
         );
         assert!(
             restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
-                .unwrap_err()
-                .to_string()
-                .contains("post-terminal prefix")
+                .unwrap()
+                .pending
+                .is_empty()
         );
 
         let tmp = tempdir().unwrap();
@@ -4592,7 +4444,7 @@ mod tests {
     }
 
     #[test]
-    fn post_terminal_observation_requires_an_earlier_finalized_artifact_position() {
+    fn post_terminal_observation_can_precede_terminal_artifact() {
         let recovery_time = E + 5 * 60_000;
         let receive = E + 4 * 60_000;
 
@@ -4635,10 +4487,9 @@ mod tests {
             &metadata_dir.join("polymarket_market_metadata_03.parquet"),
             &[ws_terminal(2, receive)],
         );
-        let error = restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("post-terminal prefix"), "{error}");
+        let restored = restore_polymarket_resolution_recovery(tmp.path(), recovery_time).unwrap();
+        assert!(restored.pending.is_empty());
+        assert!(restored.ws_claims.is_empty());
     }
 
     #[test]
@@ -4727,33 +4578,6 @@ mod tests {
                 .unwrap()
                 .pending
                 .is_empty()
-        );
-    }
-
-    #[test]
-    fn summary_reconstructs_six_ordinals_and_requires_zero_typed_source() {
-        let attempts = (1..=6)
-            .map(|ordinal| {
-                let result = match ordinal {
-                    1..=4 => "valid_nonterminal",
-                    5 => "transport_unavailable",
-                    _ => "missed_due_to_downtime",
-                };
-                attempt(u64::from(ordinal) + 1, ordinal, result)
-            })
-            .collect::<Vec<_>>();
-        let summary = summary(8, &attempts);
-        summary.validate_recovery_eligibility().unwrap();
-        let counters = attempt_counters(&attempts).unwrap();
-        validate_typed_summary(&summary, &counters, &[]).unwrap();
-
-        let mut bad_summary = summary;
-        bad_summary.valid_response_count = Some(3);
-        assert!(
-            validate_typed_summary(&bad_summary, &counters, &[])
-                .unwrap_err()
-                .to_string()
-                .contains("do not reconstruct six slots")
         );
     }
 
@@ -4947,15 +4771,15 @@ mod tests {
     }
 
     #[test]
-    fn never_recovers_at_or_after_last_slot_and_enforces_two_pending_bound() {
+    fn retains_unclosed_owners_after_last_slot_and_more_than_two_markets() {
         let tmp = tempdir().unwrap();
         let recovery_time = E + BUDGET_HORIZON_MS;
         write_finalized_fixture(tmp.path(), recovery_time, &[base_record(1)]);
-        assert!(
-            restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
-                .unwrap()
-                .pending
-                .is_empty()
+        let recovered = restore_polymarket_resolution_recovery(tmp.path(), recovery_time).unwrap();
+        assert_eq!(recovered.pending.len(), 1);
+        assert_eq!(
+            recovered.pending[0].missed_attempt_ordinals,
+            vec![1, 2, 3, 4, 5, 6]
         );
 
         let tmp = tempdir().unwrap();
@@ -4983,11 +4807,26 @@ mod tests {
             })
             .collect::<Vec<_>>();
         write_finalized_fixture(tmp.path(), recovery_time, &records);
-        assert!(
+        assert_eq!(
             restore_polymarket_resolution_recovery(tmp.path(), recovery_time)
-                .unwrap_err()
-                .to_string()
-                .contains("pending bound exceeded")
+                .unwrap()
+                .pending
+                .len(),
+            3
+        );
+    }
+    #[test]
+    fn repeated_discovery_history_recovers_one_unclosed_owner() {
+        let tmp = tempdir().unwrap();
+        let records = (1..=2_000).map(base_record).collect::<Vec<_>>();
+        write_finalized_fixture(tmp.path(), E, &records);
+        let recovery =
+            restore_polymarket_resolution_recovery(tmp.path(), E + 4 * UTC_DAY_MS).unwrap();
+        assert_eq!(recovery.pending.len(), 1);
+        assert_eq!(recovery.pending[0].slug, SLUG);
+        assert_eq!(
+            recovery.pending[0].missed_attempt_ordinals,
+            vec![1, 2, 3, 4, 5, 6]
         );
     }
 }
