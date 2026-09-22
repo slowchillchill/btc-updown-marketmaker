@@ -546,9 +546,8 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I: NormalizationIdentity<F>, F:
                     core.state.logical.insert(
                         fact.logical_identity.clone(),
                         StoredLogical {
-                            evidence: StoredEvidence::Economic {
+                            evidence: StoredEvidence::EconomicAlias {
                                 economic_identity: fact.economic_identity.clone(),
-                                disposition: fact.disposition.clone().into(),
                             },
                             source_reference: fact.source_reference.clone(),
                         },
@@ -561,9 +560,8 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I: NormalizationIdentity<F>, F:
                     core.state.logical.insert(
                         fact.logical_identity.clone(),
                         StoredLogical {
-                            evidence: StoredEvidence::Economic {
+                            evidence: StoredEvidence::EconomicAlias {
                                 economic_identity: fact.economic_identity.clone(),
-                                disposition: fact.disposition.clone(),
                             },
                             source_reference: fact.source_reference.clone(),
                         },
@@ -870,10 +868,7 @@ impl<T: Clone + PartialEq, C: Clone + PartialEq, I: NormalizationIdentity<F>, F:
                 state_delta.logical.insert(
                     logical_identity,
                     StoredLogical {
-                        evidence: StoredEvidence::Economic {
-                            economic_identity,
-                            disposition: fact.disposition.clone(),
-                        },
+                        evidence: StoredEvidence::EconomicAlias { economic_identity },
                         source_reference: evidence.source_reference.clone(),
                     },
                 );

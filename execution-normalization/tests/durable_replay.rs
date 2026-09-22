@@ -447,6 +447,19 @@ fn reopen_restores_alias_and_economic_conflict_logical_decisions() {
             .iter()
             .all(|record| record.economic_fact().is_none())
     );
+    reopened
+        .commit_batch(
+            normalization_batch(
+                4,
+                vec![opening_economic_evidence_record(0, "A", "E1", "100")],
+            ),
+            3_300,
+        )
+        .unwrap();
+    assert!(matches!(
+        reopened.commits()[3].records.as_slice(),
+        [NormalizationRecordV1::Duplicate { .. }]
+    ));
 }
 
 #[test]
