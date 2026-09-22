@@ -1857,18 +1857,33 @@ pub fn materialize_pm_reduction<'m, E: PmEvidenceV1, I: PmStepIndexV1>(
     })
 }
 
-/// 后台来源准备保存原规范字节，热计算只比较已有键。
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(transparent)]
-pub struct PreparedPmEvidenceV1<E> {
+/// 后台来源准备保存原规范字节；状态与步骤共享同一不可变材料。
+#[derive(Clone, Debug)]
+pub struct PreparedPmEvidenceV1<E>(std::sync::Arc<PreparedEvidenceData<E>>);
+
+#[derive(Debug)]
+struct PreparedEvidenceData<E> {
     value: E,
-    #[serde(skip)]
     physical_key: Vec<u8>,
-    #[serde(skip)]
     operation_keys: Vec<Vec<u8>>,
-    #[serde(skip)]
-    source_identity: std::sync::Arc<PreparedPmSourceIdentityV1>,
+    semantic_key: Vec<u8>,
+    book_digests_by_member: BTreeMap<String, Sha256Hex>,
+    causal_group_id: std::sync::OnceLock<Sha256Hex>,
+    public_trade_id: std::sync::OnceLock<Sha256Hex>,
 }
+impl<E: Serialize> Serialize for PreparedPmEvidenceV1<E> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.value.serialize(serializer)
+    }
+}
+impl<E: PartialEq> PartialEq for PreparedPmEvidenceV1<E> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.value == other.0.value
+            && self.0.book_digests_by_member == other.0.book_digests_by_member
+    }
+}
+impl<E: Eq> Eq for PreparedPmEvidenceV1<E> {}
+
 impl<E: PmEvidenceV1> PreparedPmEvidenceV1<E> {
     pub fn prepare(
         value: E,
@@ -1907,36 +1922,31 @@ impl<E: PmEvidenceV1> PreparedPmEvidenceV1<E> {
                 )?,
             );
         }
-        Ok(Self {
-            source_identity: std::sync::Arc::new(PreparedPmSourceIdentityV1 {
-                causal_group_id: hash_domain_bytes(
-                    b"data-pipeline/polymarket-causal-group/v1\0",
-                    &semantic_key,
-                ),
-                public_trade_id: hash_domain_bytes(
-                    b"data-pipeline/polymarket-public-trade-id/v1\0",
-                    &semantic_key,
-                ),
-                evidence_semantic_key: semantic_key,
-                book_digests_by_member: book_digests,
-            }),
+        let pm_digest = |domain: &[u8]| {
+            if payload.is_some() {
+                std::sync::OnceLock::from(hash_domain_bytes(domain, &semantic_key))
+            } else {
+                std::sync::OnceLock::new()
+            }
+        };
+        let causal_group_id = pm_digest(b"data-pipeline/polymarket-causal-group/v1\0");
+        let public_trade_id = pm_digest(b"data-pipeline/polymarket-public-trade-id/v1\0");
+        Ok(Self(std::sync::Arc::new(PreparedEvidenceData {
             value,
             physical_key,
             operation_keys,
-        })
+            semantic_key,
+            book_digests_by_member: book_digests,
+            causal_group_id,
+            public_trade_id,
+        })))
     }
 
     pub fn source(&self) -> &E {
-        &self.value
-    }
-    pub fn source_identity(&self) -> &PreparedPmSourceIdentityV1 {
-        &self.source_identity
-    }
-    pub fn shared_source_identity(&self) -> std::sync::Arc<PreparedPmSourceIdentityV1> {
-        self.source_identity.clone()
+        &self.0.value
     }
     pub(crate) fn operation_key(&self, role: ReductionEvidenceRoleV1) -> &[u8] {
-        &self.operation_keys[match role {
+        &self.0.operation_keys[match role {
             ReductionEvidenceRoleV1::Context => 0,
             ReductionEvidenceRoleV1::Input => 1,
             ReductionEvidenceRoleV1::MatchedExisting => 2,
@@ -1947,56 +1957,45 @@ impl<E: PmEvidenceV1> PreparedPmEvidenceV1<E> {
 impl<E: PmEvidenceV1> sealed::Evidence for PreparedPmEvidenceV1<E> {}
 impl<E: PmEvidenceV1> PmEvidenceV1 for PreparedPmEvidenceV1<E> {
     fn is_metadata_identity(&self) -> bool {
-        self.value.is_metadata_identity()
+        self.0.value.is_metadata_identity()
     }
     fn source_time(&self) -> Option<i64> {
-        self.value.source_time()
+        self.0.value.source_time()
     }
     fn received_time(&self) -> i64 {
-        self.value.received_time()
+        self.0.value.received_time()
     }
     fn semantic_bytes(&self) -> Result<Vec<u8>, ContractError> {
-        Ok(self.source_identity.evidence_semantic_key.clone())
+        Ok(self.0.semantic_key.clone())
     }
     fn canonicalize(mut values: Vec<Self>) -> Result<Vec<Self>, ContractError> {
         values.sort_by(|a, b| {
-            a.source_identity
-                .evidence_semantic_key
-                .cmp(&b.source_identity.evidence_semantic_key)
-                .then_with(|| a.physical_key.cmp(&b.physical_key))
+            a.0.semantic_key
+                .cmp(&b.0.semantic_key)
+                .then_with(|| a.0.physical_key.cmp(&b.0.physical_key))
         });
-        values.dedup_by(|a, b| {
-            a.source_identity.evidence_semantic_key == b.source_identity.evidence_semantic_key
-        });
+        values.dedup_by(|a, b| a.0.semantic_key == b.0.semantic_key);
         Ok(values)
     }
     fn source_digest(&self, domain: &[u8]) -> Result<Sha256Hex, ContractError> {
-        Ok(match domain {
-            b"data-pipeline/polymarket-causal-group/v1\0" => {
-                self.source_identity.causal_group_id.clone()
-            }
-            b"data-pipeline/polymarket-public-trade-id/v1\0" => {
-                self.source_identity.public_trade_id.clone()
-            }
+        let digest = match domain {
+            b"data-pipeline/polymarket-causal-group/v1\0" => &self.0.causal_group_id,
+            b"data-pipeline/polymarket-public-trade-id/v1\0" => &self.0.public_trade_id,
             _ => unreachable!("共同业务算法只有两类来源摘要"),
-        })
+        };
+        Ok(digest
+            .get_or_init(|| hash_domain_bytes(domain, &self.0.semantic_key))
+            .clone())
     }
+
     fn prepared_book_digest(
         &self,
         asset: &AssetIdentityV1,
         _: &BTreeMap<Decimal, &PriceLevelV1>,
         _: &BTreeMap<Decimal, &PriceLevelV1>,
     ) -> Result<Sha256Hex, ContractError> {
-        Ok(self.source_identity.book_digests_by_member[&asset.token_id.0].clone())
+        Ok(self.0.book_digests_by_member[&asset.token_id.0].clone())
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PreparedPmSourceIdentityV1 {
-    pub causal_group_id: Sha256Hex,
-    pub public_trade_id: Sha256Hex,
-    pub evidence_semantic_key: Vec<u8>,
-    pub book_digests_by_member: BTreeMap<String, Sha256Hex>,
 }
 
 pub struct PreparedPmMessageV1 {
@@ -2039,12 +2038,12 @@ pub fn compute_pm_message_steps_v1<'m>(
             source: &message.evidence,
             source_at: message
                 .evidence
-                .value
+                .source()
                 .source_event_at_utc_ms
                 .expect("准备已取得来源时间"),
             admission: message
                 .evidence
-                .value
+                .source()
                 .collector_admission
                 .as_ref()
                 .expect("准备已取得准入坐标"),
@@ -2185,24 +2184,15 @@ mod no_encoding_tests {
             input_file_sha256: Sha256Hex("c".repeat(64)),
         };
         let prepared = PreparedPmEvidenceV1::prepare(old.clone(), None).unwrap();
-        assert_ne!(
-            prepared.physical_key,
-            prepared.source_identity.evidence_semantic_key
-        );
-        assert_eq!(
-            prepared.source_identity.evidence_semantic_key,
-            old.semantic_bytes().unwrap()
-        );
+        assert_ne!(prepared.0.physical_key, prepared.0.semantic_key);
+        assert_eq!(prepared.0.semantic_key, old.semantic_bytes().unwrap());
         let mut invalid = old.clone();
         invalid.input_file_sha256 = Sha256Hex("invalid".into());
         assert!(PreparedPmEvidenceV1::prepare(invalid, None).is_err());
         let value = crate::public_reference::source_evidence_v3_from_existing(&old).unwrap();
         let prepared = PreparedPmEvidenceV1::prepare(value.clone(), None).unwrap();
-        assert_eq!(prepared.physical_key, stable_json(&value).unwrap());
-        assert_eq!(
-            prepared.physical_key,
-            prepared.source_identity.evidence_semantic_key
-        );
+        assert_eq!(prepared.0.physical_key, stable_json(&value).unwrap());
+        assert_eq!(prepared.0.physical_key, prepared.0.semantic_key);
         for role in [
             ReductionEvidenceRoleV1::Context,
             ReductionEvidenceRoleV1::Input,

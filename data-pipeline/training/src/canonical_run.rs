@@ -525,21 +525,53 @@ impl Write for BoundedVecWriter {
     }
 }
 
-fn encode_bounded_json<T: Serialize>(
-    value: &T,
+fn encode_temporary_input_row(
+    row: &TypedRawRow,
+    manifest_sha256: &str,
+    file_sha256: &str,
     limit: usize,
-) -> Result<Vec<u8>, CanonicalRunError> {
+) -> Result<(Vec<u8>, Vec<u8>), CanonicalRunError> {
     let mut writer = BoundedVecWriter::new(limit);
-    if let Err(error) = serde_json::to_writer(&mut writer, value) {
-        if writer.exceeded {
-            return Err(CanonicalRunError::TemporaryRowTooLarge {
-                observed_at_least: limit.saturating_add(1),
-                limit,
-            });
-        }
-        return Err(error.into());
+    // 与 TemporaryInputRow 保持字段顺序；row 的同一段编码同时用于冲突排序摘要。
+    let result = (|| -> Result<_, CanonicalRunError> {
+        writer.write_all(b"{\"input_manifest_sha256\":")?;
+        serde_json::to_writer(&mut writer, manifest_sha256)?;
+        writer.write_all(b",\"input_file_sha256\":")?;
+        serde_json::to_writer(&mut writer, file_sha256)?;
+        writer.write_all(b",\"row\":")?;
+        let row_start = writer.bytes.len();
+        serde_json::to_writer(&mut writer, row)?;
+        let row_digest = Sha256::digest(&writer.bytes[row_start..]).to_vec();
+        writer.write_all(b"}")?;
+        Ok(row_digest)
+    })();
+    if writer.exceeded {
+        return Err(CanonicalRunError::TemporaryRowTooLarge {
+            observed_at_least: limit.saturating_add(1),
+            limit,
+        });
     }
-    Ok(writer.bytes)
+    Ok((writer.bytes, result?))
+}
+
+fn row_source_event_time(row: &TypedRawRow) -> Option<i64> {
+    use data_pipeline_core::typed_raw::{MetadataSourceEvidenceOrigin, RtdsFreshnessStatus};
+    match row {
+        TypedRawRow::PolymarketOrderbook(row) => row.timestamp,
+        TypedRawRow::PolymarketMarketMetadata(row) => (row.source_evidence_origin
+            == Some(MetadataSourceEvidenceOrigin::MarketResolvedWs))
+        .then_some(row.ws_platform_timestamp_utc)
+        .flatten(),
+        TypedRawRow::PolymarketRtdsChainlinkBtcUsd(row) => (row.freshness_status
+            != RtdsFreshnessStatus::InvalidTimestamp)
+            .then_some(row.payload_timestamp),
+        TypedRawRow::BinanceDepthSnapshot(_) => None,
+        TypedRawRow::BinanceDepthUpdate(row) => Some(row.event_time),
+        TypedRawRow::BinanceAggTrade(row) => match &row.record {
+            BinanceAggTradeRecord::Trade { trade_time, .. } => Some(*trade_time),
+            BinanceAggTradeRecord::InvalidInput { .. } => None,
+        },
+    }
 }
 
 fn checked_increment(counter: &mut u64, name: &'static str) -> Result<(), CanonicalRunError> {
@@ -963,8 +995,6 @@ fn stage_sorted_input(
             &read_scope,
             config.max_decode_batch_bytes,
         )?;
-        let manifest_sha256 = Sha256Hex(selected.manifest_sha256.to_owned());
-        let file_sha256 = Sha256Hex(selected.file.sha256().to_owned());
         let mut file_row_index = 0_u64;
 
         while let Some(batch) = stream.next() {
@@ -992,26 +1022,18 @@ fn stage_sorted_input(
                     continue;
                 }
 
-                let evidence =
-                    source_evidence_from_typed_raw(&row, &manifest_sha256, &file_sha256)?;
-                let row_bytes = encode_bounded_json(&row, config.max_temporary_row_bytes)?;
-                let row_digest = Sha256::digest(&row_bytes);
-                metrics.peak_temporary_row_bytes =
-                    metrics.peak_temporary_row_bytes.max(row_bytes.len());
-                drop(row_bytes);
-
-                let temporary = TemporaryInputRow {
-                    input_manifest_sha256: selected.manifest_sha256.to_owned(),
-                    input_file_sha256: selected.file.sha256().to_owned(),
-                    row,
-                };
-                let payload = encode_bounded_json(&temporary, config.max_temporary_row_bytes)?;
+                let (payload, row_digest) = encode_temporary_input_row(
+                    &row,
+                    selected.manifest_sha256,
+                    selected.file.sha256(),
+                    config.max_temporary_row_bytes,
+                )?;
                 metrics.peak_temporary_row_bytes =
                     metrics.peak_temporary_row_bytes.max(payload.len());
-                metrics.selected_rows.increment(temporary.row.source_kind());
+                metrics.selected_rows.increment(row.source_kind());
                 let sort_key = temporary_sort_key(
-                    &temporary.row,
-                    evidence.source_event_at_utc_ms,
+                    &row,
+                    row_source_event_time(&row),
                     ranks,
                     row_digest.as_slice(),
                     selected.manifest_sha256,
@@ -1578,6 +1600,36 @@ pub(crate) fn reduce_frozen_input_with_capture(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn temporary_input_keeps_legacy_row_digest_and_wire_bytes() {
+        let input = crate::public_recording::tests::meta(0);
+        let data_pipeline_core::public_input::DptIngressV1::Message {
+            row: data_pipeline_core::public_input::TypedRawRowV2::Existing(row),
+            ..
+        } = input.ingress
+        else {
+            panic!("metadata fixture")
+        };
+        let manifest = "a".repeat(64);
+        let file = "b".repeat(64);
+        let legacy_row_bytes = serde_json::to_vec(&row).unwrap();
+        let legacy_wrapper_bytes = serde_json::to_vec(&TemporaryInputRow {
+            input_manifest_sha256: manifest.clone(),
+            input_file_sha256: file.clone(),
+            row: row.clone(),
+        })
+        .unwrap();
+        let (encoded, digest) =
+            encode_temporary_input_row(&row, &manifest, &file, legacy_wrapper_bytes.len()).unwrap();
+        // 排序仍按旧的行级 SHA 排列冲突，不使用 wrapper 或新的 JSON 字段顺序。
+        assert_eq!(digest, Sha256::digest(&legacy_row_bytes).as_slice());
+        assert_eq!(encoded, legacy_wrapper_bytes);
+        assert!(matches!(
+            encode_temporary_input_row(&row, &manifest, &file, encoded.len() - 1),
+            Err(CanonicalRunError::TemporaryRowTooLarge { .. })
+        ));
+    }
 
     #[test]
     fn admitted_utc_hour_format_maps_to_its_exact_interval() {

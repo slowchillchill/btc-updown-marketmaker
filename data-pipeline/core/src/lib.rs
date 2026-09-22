@@ -425,8 +425,8 @@ struct ExecutionEventIdentityMaterialV3<'a> {
     payload: &'a ExecutionMarketEventPayloadV3,
 }
 
-fn execution_event_identity_material_v3(
-    event: &ExecutionMarketEventV3,
+fn execution_event_identity_material_v3<I>(
+    event: &ExecutionMarketEventV3<I>,
 ) -> ExecutionEventIdentityMaterialV3<'_> {
     ExecutionEventIdentityMaterialV3 {
         schema_version: &event.schema_version,
@@ -450,8 +450,8 @@ fn execution_event_identity_material_v3(
     }
 }
 
-pub fn derive_execution_market_event_v3_id(
-    event: &ExecutionMarketEventV3,
+pub fn derive_execution_market_event_v3_id<I>(
+    event: &ExecutionMarketEventV3<I>,
 ) -> Result<CanonicalEventId, ContractError> {
     let bytes = stable_json(&execution_event_identity_material_v3(event))?;
     Ok(CanonicalEventId(
@@ -1377,8 +1377,8 @@ struct ReferenceEventIdentityMaterialV1<'a> {
     payload: &'a CanonicalReferenceEventPayloadV1,
 }
 
-fn reference_event_identity_material_v1(
-    event: &CanonicalReferenceEventV1,
+fn reference_event_identity_material_v1<I>(
+    event: &CanonicalReferenceEventV1<I>,
 ) -> ReferenceEventIdentityMaterialV1<'_> {
     ReferenceEventIdentityMaterialV1 {
         schema_version: &event.schema_version,
@@ -1395,8 +1395,8 @@ fn reference_event_identity_material_v1(
     }
 }
 
-pub fn derive_reference_event_v1_id(
-    event: &CanonicalReferenceEventV1,
+pub fn derive_reference_event_v1_id<I>(
+    event: &CanonicalReferenceEventV1<I>,
 ) -> Result<CanonicalEventId, ContractError> {
     let bytes = stable_json(&reference_event_identity_material_v1(event))?;
     Ok(CanonicalEventId(
@@ -1753,7 +1753,6 @@ pub fn validate_canonical_event_record_v1(
 pub fn encode_canonical_event_record_v1(
     record: &CanonicalEventRecordV1,
 ) -> Result<Vec<u8>, ContractError> {
-    validate_canonical_event_record_v1(record)?;
     stable_json(record)
 }
 
@@ -1776,7 +1775,6 @@ fn record_identity_and_time(record: &CanonicalEventRecordV1) -> (&CanonicalEvent
 pub fn project_record_event_time_index_entry(
     record: &CanonicalEventRecordV1,
 ) -> Result<Option<EventTimeIndexEntryV2>, ContractError> {
-    validate_canonical_event_record_v1(record)?;
     let (event_id, time) = record_identity_and_time(record);
     Ok(time
         .source_event_at_utc_ms
@@ -1790,7 +1788,6 @@ pub fn project_record_event_time_index_entry(
 pub fn project_record_visibility_index_entry(
     record: &CanonicalEventRecordV1,
 ) -> Result<VisibilityIndexEntryV2, ContractError> {
-    validate_canonical_event_record_v1(record)?;
     let (event_id, time) = record_identity_and_time(record);
     Ok(VisibilityIndexEntryV2 {
         schema_version: VISIBILITY_INDEX_SCHEMA_V2.to_owned(),

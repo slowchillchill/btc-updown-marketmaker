@@ -14,8 +14,7 @@ use crate::{
     ContractError, derive_execution_market_event_v3_id, derive_reference_event_v1_id,
     hash_domain_bytes, invalid, parse_canonical_decimal, semantic_source_evidence,
     source_evidence_from_typed_raw, stable_json, typed_raw_contract_error, validate_event_id,
-    validate_execution_market_event_v3, validate_market, validate_reference_event_v1,
-    validate_source_evidence,
+    validate_market, validate_source_evidence,
 };
 
 pub const REDUCTION_REPORT_SCHEMA_V1: &str = "canonical_reduction_report_v1";
@@ -216,9 +215,6 @@ fn finalize_execution_event_legacy(
     quality: EventQualityV2,
     payload: ExecutionMarketEventPayloadV3,
 ) -> Result<ExecutionMarketEventV3, ContractError> {
-    if canonical_rule_version.trim().is_empty() {
-        return Err(invalid("canonical_rule_version", "must not be empty"));
-    }
     let evidence = canonicalize_source_evidence(evidence)?;
     let mut event = ExecutionMarketEventV3 {
         schema_version: EXECUTION_MARKET_EVENT_SCHEMA_V3.to_owned(),
@@ -233,7 +229,6 @@ fn finalize_execution_event_legacy(
         payload,
     };
     event.event_id = derive_execution_market_event_v3_id(&event)?;
-    validate_execution_market_event_v3(&event)?;
     Ok(event)
 }
 
@@ -243,9 +238,6 @@ fn finalize_reference_event_legacy(
     quality: EventQualityV2,
     payload: CanonicalReferenceEventPayloadV1,
 ) -> Result<CanonicalReferenceEventV1, ContractError> {
-    if canonical_rule_version.trim().is_empty() {
-        return Err(invalid("canonical_rule_version", "must not be empty"));
-    }
     let evidence = canonicalize_source_evidence(evidence)?;
     let mut event = CanonicalReferenceEventV1 {
         schema_version: CANONICAL_REFERENCE_EVENT_SCHEMA_V1.to_owned(),
@@ -259,7 +251,6 @@ fn finalize_reference_event_legacy(
         payload,
     };
     event.event_id = derive_reference_event_v1_id(&event)?;
-    validate_reference_event_v1(&event)?;
     Ok(event)
 }
 
@@ -352,7 +343,6 @@ fn validate_reduction_report<E: ReductionEvidenceV1>(
 pub fn encode_reduction_report_entry_v1(
     report: &ReductionReportEntryV1,
 ) -> Result<Vec<u8>, ContractError> {
-    validate_reduction_report_entry_v1(report)?;
     stable_json(report)
 }
 
@@ -384,7 +374,6 @@ fn produced_report<E: ReductionEvidenceV1>(
             result_event_id: event_id,
         },
     };
-    validate_reduction_report::<E>(&report)?;
     Ok(report)
 }
 
@@ -423,7 +412,6 @@ fn non_event_report<E: ReductionEvidenceV1>(
         quantity_conservation: None,
         disposition,
     };
-    validate_reduction_report::<E>(&report)?;
     Ok(report)
 }
 
@@ -465,7 +453,6 @@ pub(crate) fn duplicate_suppressed_report<E: ReductionEvidenceV1>(
             operation_evidence: E::canonicalize_operations(evidence)?,
         },
     };
-    validate_reduction_report::<E>(&report)?;
     Ok(report)
 }
 
@@ -780,7 +767,7 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
                     scope,
                     ReductionOperationKindV1::Overwrite,
                     "BINANCE_DEPTH_APPLIED_UPDATE",
-                    Some(summary),
+                    Some(summary.into_report()),
                     event.event_id.clone(),
                 )?;
                 Ok(ReferenceReductionOutcomeV1 {
@@ -921,47 +908,33 @@ fn same_reference_levels<E: ReductionEvidenceV1>(
             })
 }
 
-impl QuantityConservationV1 {
-    fn zero() -> Self {
-        Self {
-            quantity_before: ExactDecimal("0".to_owned()),
-            quantity_after: ExactDecimal("0".to_owned()),
-            quantity_added: ExactDecimal("0".to_owned()),
-            quantity_reduced: ExactDecimal("0".to_owned()),
-        }
-    }
-
+#[derive(Default)]
+struct QuantityTotals {
+    before: Decimal,
+    after: Decimal,
+    added: Decimal,
+    reduced: Decimal,
+}
+impl QuantityTotals {
     fn combine(self, other: Self) -> Result<Self, ContractError> {
-        let sum = |left: &ExactDecimal, right: &ExactDecimal, field: &str| {
-            parse_canonical_decimal(left, field)?
-                .checked_add(parse_canonical_decimal(right, field)?)
-                .map(exact_from_decimal)
+        let sum = |left: Decimal, right: Decimal, field: &str| {
+            left.checked_add(right)
                 .ok_or_else(|| invalid(field, "decimal addition overflow"))
         };
-        let combined = Self {
-            quantity_before: sum(
-                &self.quantity_before,
-                &other.quantity_before,
-                "quantity_before",
-            )?,
-            quantity_after: sum(
-                &self.quantity_after,
-                &other.quantity_after,
-                "quantity_after",
-            )?,
-            quantity_added: sum(
-                &self.quantity_added,
-                &other.quantity_added,
-                "quantity_added",
-            )?,
-            quantity_reduced: sum(
-                &self.quantity_reduced,
-                &other.quantity_reduced,
-                "quantity_reduced",
-            )?,
-        };
-        validate_quantity_conservation(&combined)?;
-        Ok(combined)
+        Ok(Self {
+            before: sum(self.before, other.before, "quantity_before")?,
+            after: sum(self.after, other.after, "quantity_after")?,
+            added: sum(self.added, other.added, "quantity_added")?,
+            reduced: sum(self.reduced, other.reduced, "quantity_reduced")?,
+        })
+    }
+    fn into_report(self) -> QuantityConservationV1 {
+        QuantityConservationV1 {
+            quantity_before: exact_from_decimal(self.before),
+            quantity_after: exact_from_decimal(self.after),
+            quantity_added: exact_from_decimal(self.added),
+            quantity_reduced: exact_from_decimal(self.reduced),
+        }
     }
 }
 
@@ -971,9 +944,9 @@ fn apply_reference_level_updates<E: ReductionEvidenceV1>(
     updates: &[DepthLevel],
     evidence: &E,
     field: &str,
-) -> Result<(QuantityConservationV1, Vec<E>), ContractError> {
+) -> Result<(QuantityTotals, Vec<E>), ContractError> {
     let mut seen = BTreeSet::new();
-    let mut summary = QuantityConservationV1::zero();
+    let mut summary = QuantityTotals::default();
     let mut prior_evidence = Vec::new();
     for (index, update) in updates.iter().enumerate() {
         let price =
@@ -1004,11 +977,11 @@ fn apply_reference_level_updates<E: ReductionEvidenceV1>(
             Ordering::Less => (Decimal::ZERO, before - after),
             Ordering::Equal => (Decimal::ZERO, Decimal::ZERO),
         };
-        summary = summary.combine(QuantityConservationV1 {
-            quantity_before: exact_from_decimal(before),
-            quantity_after: exact_from_decimal(after),
-            quantity_added: exact_from_decimal(added),
-            quantity_reduced: exact_from_decimal(reduced),
+        summary = summary.combine(QuantityTotals {
+            before,
+            after,
+            added,
+            reduced,
         })?;
         if after.is_zero() {
             levels.remove(&key);
@@ -3197,25 +3170,13 @@ impl ReductionEvidenceV1 for SourceEvidenceRefV2 {
     fn execution_identity(
         event: &ExecutionMarketEventV3<(), Self>,
     ) -> Result<Self::Identity, ContractError> {
-        Ok(finalize_execution_event_legacy(
-            event.market.clone(),
-            &event.lineage.canonical_rule_version,
-            event.lineage.source_evidence.clone(),
-            event.quality.clone(),
-            event.payload.clone(),
-        )?
-        .event_id)
+        derive_execution_market_event_v3_id(event)
     }
+
     fn reference_identity(
         event: &CanonicalReferenceEventV1<(), Self>,
     ) -> Result<Self::Identity, ContractError> {
-        Ok(finalize_reference_event_legacy(
-            &event.lineage.canonical_rule_version,
-            event.lineage.source_evidence.clone(),
-            event.quality.clone(),
-            event.payload.clone(),
-        )?
-        .event_id)
+        derive_reference_event_v1_id(event)
     }
     fn canonicalize_operations(
         values: Vec<ReductionOperationEvidenceV1<Self>>,
@@ -3290,9 +3251,6 @@ fn finalize_execution_event<E: ReductionEvidenceV1>(
     quality: EventQualityV2,
     payload: ExecutionMarketEventPayloadV3,
 ) -> Result<ExecutionMarketEventV3<E::Identity, E>, ContractError> {
-    if canonical_rule_version.trim().is_empty() {
-        return Err(invalid("canonical_rule_version", "must not be empty"));
-    }
     let evidence = canonicalize_reduction_evidence::<E>(evidence)?;
     let time = event_time_from_prepared_evidence(&evidence);
     let material = ExecutionMarketEventV3 {
@@ -3324,9 +3282,6 @@ fn finalize_reference_event<E: ReductionEvidenceV1>(
     quality: EventQualityV2,
     payload: CanonicalReferenceEventPayloadV1,
 ) -> Result<CanonicalReferenceEventV1<E::Identity, E>, ContractError> {
-    if canonical_rule_version.trim().is_empty() {
-        return Err(invalid("canonical_rule_version", "must not be empty"));
-    }
     let evidence = canonicalize_reduction_evidence::<E>(evidence)?;
     let time = event_time_from_prepared_evidence(&evidence);
     let material = CanonicalReferenceEventV1 {
@@ -3688,7 +3643,6 @@ fn materialize_legacy_report(
             }
         },
     };
-    validate_reduction_report_entry_v1(&report)?;
     Ok(report)
 }
 

@@ -282,7 +282,6 @@ pub struct PreparedIngressV1<'a> {
     pub dependencies: std::borrow::Cow<'a, [contracts::CanonicalReferenceEventV2]>,
     pub reference_selection: Option<contracts::PreparedReferenceSelectionV1>,
     pub reference_selection_market: Option<contracts::MarketIdentityV2>,
-    pub pm_source_identity: Option<std::sync::Arc<crate::pm_reduction::PreparedPmSourceIdentityV1>>,
 }
 
 /// 来源所属方调用；此处可以编码，返回后业务入口只消费已有类型和规范键。
@@ -330,7 +329,6 @@ fn prepare_ingress_view_v1<'a>(
                 dependencies: std::borrow::Cow::Borrowed(dependencies),
                 reference_selection: None,
                 reference_selection_market: None,
-                pm_source_identity: None,
             });
         }
         DptIngressV1::Aborted { reason } => {
@@ -341,7 +339,6 @@ fn prepare_ingress_view_v1<'a>(
                 dependencies: std::borrow::Cow::Borrowed(dependencies),
                 reference_selection: None,
                 reference_selection_market: None,
-                pm_source_identity: None,
             });
         }
     };
@@ -453,12 +450,6 @@ fn prepare_ingress_view_v1<'a>(
             }
         }
     };
-    let pm_source_identity = match &current {
-        PreparedCanonicalInputV1::PolymarketMessage(message) => {
-            Some(message.evidence().shared_source_identity())
-        }
-        _ => None,
-    };
     Ok(PreparedIngressV1 {
         recorded,
         current,
@@ -466,7 +457,6 @@ fn prepare_ingress_view_v1<'a>(
         dependencies: std::borrow::Cow::Borrowed(dependencies),
         reference_selection: None,
         reference_selection_market: None,
-        pm_source_identity,
     })
 }
 
