@@ -883,19 +883,19 @@ pub(super) fn polymarket_metadata_raw_event(
     ))
 }
 
-pub(super) fn polymarket_metadata_rows_from_event(
+pub(super) fn polymarket_metadata_row_from_event(
     event: &RawEvent,
-) -> Result<Vec<PolymarketMarketMetadataV5Row>> {
+) -> Result<PolymarketMarketMetadataV5Row> {
     let admission = event.collector_admission.as_ref().ok_or_else(|| {
         invalid_data("Polymarket metadata v5 event is missing collector admission")
     })?;
-    polymarket_metadata_v5_rows_from_value(serde_json::from_str(&event.raw_json)?, admission)
+    polymarket_metadata_v5_row_from_value(serde_json::from_str(&event.raw_json)?, admission)
 }
 
-fn polymarket_metadata_v5_rows_from_value(
+fn polymarket_metadata_v5_row_from_value(
     mut raw: Value,
     admission: &RawEventAdmission,
-) -> Result<Vec<PolymarketMarketMetadataV5Row>> {
+) -> Result<PolymarketMarketMetadataV5Row> {
     let object = raw
         .as_object_mut()
         .ok_or_else(|| invalid_data("Polymarket metadata v5 event is not a JSON object"))?;
@@ -927,7 +927,7 @@ fn polymarket_metadata_v5_rows_from_value(
         PolymarketMarketMetadataV5Row::from_common(common, claimant_epoch, claimant_sequence);
     row.common_mut().collector_admission_sequence = admission.sequence;
     row.common_mut().collector_admission_time_utc_ms = admission.time_utc_ms;
-    Ok(vec![row])
+    Ok(row)
 }
 
 pub(super) fn write_polymarket_metadata_event(
@@ -936,38 +936,35 @@ pub(super) fn write_polymarket_metadata_event(
     logical_bytes: u64,
 ) -> Result<u64> {
     if writer.schema_version() == POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION {
-        let rows = polymarket_metadata_v6_rows_for_event(event)?;
-        let written = rows.len() as u64;
-        writer.write_polymarket_market_metadata_v6_rows_with_logical_bytes(&rows, logical_bytes)?;
-        return Ok(written);
+        let row = polymarket_metadata_v6_row_for_event(event)?;
+        writer
+            .write_polymarket_market_metadata_v6_rows_with_logical_bytes(&[row], logical_bytes)?;
+    } else {
+        let row = polymarket_metadata_row_from_event(event)?;
+        writer
+            .write_polymarket_market_metadata_v5_rows_with_logical_bytes(&[row], logical_bytes)?;
     }
-    let rows = polymarket_metadata_rows_from_event(event)?;
-    let written = rows.len() as u64;
-    require_at_most_one_typed_row(event, written)?;
-    writer.write_polymarket_market_metadata_v5_rows_with_logical_bytes(&rows, logical_bytes)?;
-    Ok(written)
+    Ok(1)
 }
 
-pub(super) fn polymarket_metadata_v6_rows_for_event(
+pub(super) fn polymarket_metadata_v6_row_for_event(
     event: &RawEvent,
-) -> Result<Vec<PolymarketMarketMetadataV6Row>> {
+) -> Result<PolymarketMarketMetadataV6Row> {
     let value: Value = serde_json::from_str(&event.raw_json)?;
-    let rows = if value["schema_version"] == POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION {
+    let row = if value["schema_version"] == POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION {
         let admission = event.collector_admission.as_ref().ok_or_else(|| {
             invalid_data("Polymarket metadata v6 event is missing collector admission")
         })?;
-        polymarket_metadata_v6_rows_from_value(value, admission)?
+        polymarket_metadata_v6_row_from_value(value, admission)?
     } else {
         let admission = event.collector_admission.as_ref().ok_or_else(|| {
             invalid_data("Polymarket metadata v5 event is missing collector admission")
         })?;
-        polymarket_metadata_v5_rows_from_value(value, admission)?
-            .into_iter()
-            .map(PolymarketMarketMetadataV6Row::Existing)
-            .collect()
+        PolymarketMarketMetadataV6Row::Existing(polymarket_metadata_v5_row_from_value(
+            value, admission,
+        )?)
     };
-    require_at_most_one_typed_row(event, rows.len() as u64)?;
-    Ok(rows)
+    Ok(row)
 }
 
 pub(super) fn polymarket_metadata_v6_raw_event(
@@ -1006,26 +1003,15 @@ pub(super) fn polymarket_metadata_v6_raw_event(
     ))
 }
 
-fn polymarket_metadata_v6_rows_from_value(
+fn polymarket_metadata_v6_row_from_value(
     value: Value,
     admission: &RawEventAdmission,
-) -> Result<Vec<PolymarketMarketMetadataV6Row>> {
+) -> Result<PolymarketMarketMetadataV6Row> {
     let row = PolymarketMarketMetadataV6Row::from_raw_value(
         value,
         admission.sequence,
         admission.time_utc_ms,
     )
     .map_err(invalid_data)?;
-    Ok(vec![row])
-}
-
-fn require_at_most_one_typed_row(event: &RawEvent, rows: u64) -> Result<()> {
-    if rows <= 1 {
-        return Ok(());
-    }
-    Err(invalid_data(format!(
-        "typed event fan-out must be split before ingress: source={} event_type={} rows={rows}",
-        event.source_kind, event.source_event_type
-    ))
-    .into())
+    Ok(row)
 }

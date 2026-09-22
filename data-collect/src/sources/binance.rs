@@ -237,13 +237,11 @@ pub fn assess_depth_sequence(
 
 pub fn parse_depth_update_raw(
     envelope: EventEnvelope,
-    raw_json: &str,
+    raw_value: &Value,
 ) -> Result<BinanceDepthUpdateRaw, String> {
     if envelope.source_kind != SourceKind::BinanceDepthUpdate {
         return Err("envelope_source_kind_mismatch".to_owned());
     }
-    let raw_value = serde_json::from_str::<Value>(raw_json)
-        .map_err(|err| format!("parse_depth_update_json:{err}"))?;
     let (combined_stream, value) = match raw_value.get("data") {
         Some(data) => (
             raw_value
@@ -252,7 +250,7 @@ pub fn parse_depth_update_raw(
                 .map(ToOwned::to_owned),
             data,
         ),
-        None => (None, &raw_value),
+        None => (None, raw_value),
     };
 
     let event_type = str_field(value, "e")?;
@@ -291,7 +289,7 @@ pub fn parse_depth_update_raw(
 
 pub fn parse_depth_snapshot_raw(
     envelope: EventEnvelope,
-    raw_json: &str,
+    value: &Value,
     snapshot_fetch_start_utc_ms: i64,
     snapshot_recv_time_utc_ms: i64,
     official_rest_endpoint: impl Into<String>,
@@ -299,13 +297,11 @@ pub fn parse_depth_snapshot_raw(
     if envelope.source_kind != SourceKind::BinanceDepthSnapshot {
         return Err("envelope_source_kind_mismatch".to_owned());
     }
-    let value = serde_json::from_str::<Value>(raw_json)
-        .map_err(|err| format!("parse_depth_snapshot_json:{err}"))?;
     Ok(BinanceDepthSnapshotRaw {
         envelope,
-        last_update_id: u64_field(&value, "lastUpdateId")?,
-        bids: parse_levels(&value, "bids")?,
-        asks: parse_levels(&value, "asks")?,
+        last_update_id: u64_field(value, "lastUpdateId")?,
+        bids: parse_levels(value, "bids")?,
+        asks: parse_levels(value, "asks")?,
         snapshot_fetch_start_utc_ms,
         snapshot_recv_time_utc_ms,
         official_rest_endpoint: official_rest_endpoint.into(),

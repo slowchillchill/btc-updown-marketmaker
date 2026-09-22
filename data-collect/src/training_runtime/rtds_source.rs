@@ -313,11 +313,16 @@ impl RtdsBusinessRecovery {
     }
 }
 
-pub(super) fn rtds_subscription_evidence_json() -> String {
-    serde_json::to_string(
-        &polymarket_client_sdk_v2::rtds::SubscriptionRequest::subscribe(rtds_price_subscriptions()),
-    )
-    .expect("固定公开 RTDS 订阅可序列化")
+pub(super) fn rtds_subscription_evidence_json() -> &'static str {
+    static SUBSCRIPTION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    SUBSCRIPTION.get_or_init(|| {
+        serde_json::to_string(
+            &polymarket_client_sdk_v2::rtds::SubscriptionRequest::subscribe(
+                rtds_price_subscriptions(),
+            ),
+        )
+        .expect("固定公开 RTDS 订阅可序列化")
+    })
 }
 
 fn rtds_price_subscriptions() -> Vec<Subscription> {

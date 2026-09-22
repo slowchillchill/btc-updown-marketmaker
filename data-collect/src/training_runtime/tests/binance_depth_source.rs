@@ -1799,9 +1799,22 @@ async fn binance_depth_cutoff_does_not_apply_unadmitted_ready_update() {
     gate.prepare_runtime_exit_with_cause(observed_utc_ms, RuntimeCloseCause::OperatorStop)
         .unwrap();
 
-    let assessment = admit_depth_update(&context, event, 1, (Some(100), Some(101)))
-        .await
-        .unwrap();
+    let value = serde_json::from_str(&event.raw_json).unwrap();
+    let parsed = parse_depth_update_raw(
+        event_envelope(&event, SourceKind::BinanceDepthUpdate),
+        &value,
+    )
+    .unwrap();
+    let assessment = admit_depth_update(
+        &context,
+        event,
+        1,
+        (parsed.first_update_id, parsed.final_update_id),
+        Some(value),
+        (Some(100), Some(101)),
+    )
+    .await
+    .unwrap();
     if let Some(assessment) = assessment {
         let _ = apply_depth_assessment(&mut continuity, &assessment).unwrap();
         panic!("an update after the controlled cutoff must not be applied");

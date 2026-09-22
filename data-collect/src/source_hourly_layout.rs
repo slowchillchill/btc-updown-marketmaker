@@ -866,14 +866,17 @@ impl BinanceAggTradeHourlyRow {
             "source_native_payload_json",
             &self.source_native_payload_json,
         );
-        if serde_json::from_str::<serde_json::Value>(&self.source_native_payload_json).is_err() {
+        let payload = serde_json::from_str::<serde_json::Value>(&self.source_native_payload_json);
+        if payload.is_err() {
             report
                 .missing_fields
                 .push("source_native_payload_json_parseable".to_owned());
         }
         match self.record_kind.as_str() {
             BINANCE_AGGTRADE_RECORD_TRADE => self.validate_trade(&mut report),
-            BINANCE_AGGTRADE_RECORD_INVALID_INPUT => self.validate_invalid_input(&mut report),
+            BINANCE_AGGTRADE_RECORD_INVALID_INPUT => {
+                self.validate_invalid_input(&mut report, payload.ok())
+            }
             _ => report.missing_fields.push("record_kind_valid".to_owned()),
         }
         report.require_non_empty("collector_host_id", &self.collector_host_id);
@@ -935,7 +938,11 @@ impl BinanceAggTradeHourlyRow {
         }
     }
 
-    fn validate_invalid_input(&self, report: &mut SourceHourlyValidation) {
+    fn validate_invalid_input(
+        &self,
+        report: &mut SourceHourlyValidation,
+        payload: Option<serde_json::Value>,
+    ) {
         if self.event_type.is_some()
             || self.event_time.is_some()
             || self.trade_time.is_some()
@@ -992,7 +999,7 @@ impl BinanceAggTradeHourlyRow {
                 .missing_fields
                 .push("payload_capture_status".to_owned()),
         }
-        if let Err(field) = validate_invalid_evidence_envelope(self) {
+        if let Err(field) = validate_invalid_evidence_envelope(self, payload) {
             report.missing_fields.push(field.to_owned());
         }
     }
@@ -1363,7 +1370,10 @@ fn valid_sha256_hex(value: &str) -> bool {
     value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
-fn validate_invalid_evidence_envelope(row: &BinanceAggTradeHourlyRow) -> Result<(), &'static str> {
+fn validate_invalid_evidence_envelope(
+    row: &BinanceAggTradeHourlyRow,
+    payload: Option<serde_json::Value>,
+) -> Result<(), &'static str> {
     const REQUIRED_FIELDS: [&str; 13] = [
         "evidence_schema",
         "transport",
@@ -1380,8 +1390,7 @@ fn validate_invalid_evidence_envelope(row: &BinanceAggTradeHourlyRow) -> Result<
         "capture_limit_bytes",
     ];
 
-    let value = serde_json::from_str::<serde_json::Value>(&row.source_native_payload_json)
-        .map_err(|_| "invalid_evidence_envelope_parseable")?;
+    let value = payload.ok_or("invalid_evidence_envelope_parseable")?;
     let object = value
         .as_object()
         .ok_or("invalid_evidence_envelope_object")?;

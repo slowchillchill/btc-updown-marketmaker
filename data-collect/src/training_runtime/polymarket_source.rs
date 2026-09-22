@@ -6811,18 +6811,10 @@ fn admit_polymarket_orderbook_v3_pending(
                 &format!("sequence_allocation_failed:{error}"),
             );
         })?;
-    let message = pending
-        .admit(
-            collector_admission_sequence,
-            collector_admission_time_utc_ms,
-        )
-        .inspect_err(|error| {
-            record_polymarket_v3_admission_failure(
-                sink,
-                recv_time_utc_ms,
-                &format!("canonical_admission_failed:{error}"),
-            );
-        })?;
+    let message = pending.admit(
+        collector_admission_sequence,
+        collector_admission_time_utc_ms,
+    );
     debug_assert_eq!(message.owned_bytes(), owned_bytes);
     let market_resolved = polymarket_market_resolved_admission_evidence(&message)?;
     let receipt = PolymarketOrderbookV3AdmissionReceipt {

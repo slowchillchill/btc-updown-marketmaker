@@ -1,26 +1,5 @@
 use super::*;
 
-pub(super) fn raw_event(
-    source_kind: &str,
-    source_event_type: &str,
-    source_identifier: &str,
-    source_ts: Option<String>,
-    source_endpoint: &str,
-    collector_identity: &CollectorIdentity,
-    raw: Value,
-) -> RawEvent {
-    raw_event_with_recv_time(
-        source_kind,
-        source_event_type,
-        source_identifier,
-        source_ts,
-        now_ms(),
-        source_endpoint,
-        collector_identity,
-        raw,
-    )
-}
-
 #[allow(clippy::too_many_arguments)]
 pub(super) fn raw_event_with_recv_time(
     source_kind: &str,

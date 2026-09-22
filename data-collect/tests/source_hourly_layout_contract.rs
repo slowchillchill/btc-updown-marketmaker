@@ -166,7 +166,7 @@ fn binance_depth_snapshot_hourly_row_keeps_snapshot_boundary_and_full_depth() {
             "depth_snapshot",
             raw_snapshot,
         ),
-        raw_snapshot,
+        &serde_json::from_str(raw_snapshot).unwrap(),
         1_766_789_469_100,
         1_766_789_469_200,
         BINANCE_DEPTH_SNAPSHOT_ENDPOINT,
@@ -215,7 +215,7 @@ fn binance_depth_update_hourly_row_keeps_official_fields_and_stitch_evidence() {
     }"#;
     let update = parse_depth_update_raw(
         envelope(SourceKind::BinanceDepthUpdate, "depthUpdate", raw_update),
-        raw_update,
+        &serde_json::from_str(raw_update).unwrap(),
     )
     .expect("parse depth update");
     let assessment = assess_depth_update(Some(100), None, &update).expect("assess update");
@@ -251,7 +251,7 @@ fn binance_depth_update_v4_verdict_contract_is_closed_and_consistent() {
     }"#;
     let update = parse_depth_update_raw(
         envelope(SourceKind::BinanceDepthUpdate, "depthUpdate", raw_update),
-        raw_update,
+        &serde_json::from_str(raw_update).unwrap(),
     )
     .unwrap();
 
@@ -357,7 +357,7 @@ fn binance_depth_schema_compatibility_is_exact_or_legacy_unknown_and_rejects_par
             "depth_snapshot",
             raw_snapshot,
         ),
-        raw_snapshot,
+        &serde_json::from_str(raw_snapshot).unwrap(),
         1_766_789_469_100,
         1_766_789_469_200,
         BINANCE_DEPTH_SNAPSHOT_ENDPOINT,
@@ -398,7 +398,7 @@ fn binance_depth_schema_compatibility_is_exact_or_legacy_unknown_and_rejects_par
     }"#;
     let update = parse_depth_update_raw(
         envelope(SourceKind::BinanceDepthUpdate, "depthUpdate", raw_update),
-        raw_update,
+        &serde_json::from_str(raw_update).unwrap(),
     )
     .unwrap();
     let legacy_update = BinanceDepthUpdateHourlyRow::from_legacy_raw(

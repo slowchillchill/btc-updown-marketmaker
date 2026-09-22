@@ -35,9 +35,9 @@ fn polymarket_metadata_v6_preserves_v5_identity_evidence_and_admission() {
         sequence: 7,
         time_utc_ms: discovery.current.fixed_identity_verified_at_utc_ms + 1,
     });
-    let rows = polymarket_metadata_v6_rows_for_event(&event).unwrap();
+    let row = polymarket_metadata_v6_row_for_event(&event).unwrap();
     let batch =
-        polymarket_market_metadata_v6_rows_to_batch(polymarket_market_metadata_v6_schema(), &rows)
+        polymarket_market_metadata_v6_rows_to_batch(polymarket_market_metadata_v6_schema(), &[row])
             .unwrap();
     let decoded = polymarket_market_metadata_v6_row_from_batch(&batch, 0).unwrap();
     let common = decoded.existing().unwrap().common();
@@ -127,9 +127,9 @@ fn polymarket_metadata_v6_anchor_is_independent_and_preserves_exact_http_evidenc
         sequence: 8,
         time_utc_ms: received + 10,
     });
-    let rows = polymarket_metadata_v6_rows_for_event(&event).unwrap();
+    let row = polymarket_metadata_v6_row_for_event(&event).unwrap();
     let batch =
-        polymarket_market_metadata_v6_rows_to_batch(polymarket_market_metadata_v6_schema(), &rows)
+        polymarket_market_metadata_v6_rows_to_batch(polymarket_market_metadata_v6_schema(), &[row])
             .unwrap();
     let decoded = polymarket_market_metadata_v6_row_from_batch(&batch, 0).unwrap();
     assert!(decoded.existing().is_none());
@@ -238,19 +238,18 @@ fn polymarket_metadata_v5_nonclaimant_raw_event_round_trips_and_writes() {
         .unwrap()
         .insert("resolution_evidence_raw_sha256".to_owned(), Value::Null);
     forbidden_event.raw_json = serde_json::to_string(&forbidden_draft).unwrap();
-    let error = polymarket_metadata_rows_from_event(&forbidden_event)
+    let error = polymarket_metadata_row_from_event(&forbidden_event)
         .unwrap_err()
         .to_string();
     assert!(error.contains("contains removed field"), "{error}");
 
-    let rows = polymarket_metadata_rows_from_event(&event).unwrap();
-    assert_eq!(rows.len(), 1);
-    assert_eq!(rows[0].common().collector_admission_sequence, 1);
+    let row = polymarket_metadata_row_from_event(&event).unwrap();
+    assert_eq!(row.common().collector_admission_sequence, 1);
     assert_eq!(
-        rows[0].common().collector_admission_time_utc_ms,
+        row.common().collector_admission_time_utc_ms,
         admission_time_utc_ms
     );
-    assert!(rows[0].validate().is_complete());
+    assert!(row.validate().is_complete());
 
     let tmp = tempdir().unwrap();
     let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
@@ -321,13 +320,13 @@ fn polymarket_metadata_v5_ws_claimant_raw_event_round_trips_and_writes() {
         sequence: 2,
         time_utc_ms: applied_at_utc_ms + 1,
     });
-    let rows = polymarket_metadata_rows_from_event(&event).unwrap();
+    let row = polymarket_metadata_row_from_event(&event).unwrap();
     assert_eq!(
-        rows[0].ws_claimant_source_sequence_epoch_id.as_deref(),
+        row.ws_claimant_source_sequence_epoch_id.as_deref(),
         Some("source-epoch-1")
     );
-    assert_eq!(rows[0].ws_claimant_collector_admission_sequence, Some(41));
-    assert!(rows[0].validate().is_complete());
+    assert_eq!(row.ws_claimant_collector_admission_sequence, Some(41));
+    assert!(row.validate().is_complete());
 
     let tmp = tempdir().unwrap();
     let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
@@ -650,13 +649,13 @@ fn metadata_v5_writer_and_routed_entries_keep_error_precedence() {
             .unwrap();
     event.raw_json = "{".into();
     assert!(
-        polymarket_metadata_rows_from_event(&event)
+        polymarket_metadata_row_from_event(&event)
             .unwrap_err()
             .to_string()
             .contains("missing collector admission")
     );
     assert!(
-        !polymarket_metadata_v6_rows_for_event(&event)
+        !polymarket_metadata_v6_row_for_event(&event)
             .unwrap_err()
             .to_string()
             .contains("missing collector admission")
@@ -667,7 +666,7 @@ fn metadata_v5_writer_and_routed_entries_keep_error_precedence() {
     ] {
         event.raw_json = serde_json::json!({"schema_version":version}).to_string();
         assert!(
-            polymarket_metadata_v6_rows_for_event(&event)
+            polymarket_metadata_v6_row_for_event(&event)
                 .unwrap_err()
                 .to_string()
                 .contains("missing collector admission")
@@ -677,7 +676,7 @@ fn metadata_v5_writer_and_routed_entries_keep_error_precedence() {
             time_utc_ms: 1,
         });
         assert!(
-            polymarket_metadata_v6_rows_for_event(&event).is_err(),
+            polymarket_metadata_v6_row_for_event(&event).is_err(),
             "缺失必需字段不能因复用而接受"
         );
         event.collector_admission = None;
