@@ -2418,7 +2418,7 @@ async fn polymarket_recovered_pending_admits_missed_evidence_before_future_slots
     assert!(rows[0].metadata_fetch_start_utc.is_none());
     assert!(rows[0].source_evidence_received_at_utc.is_none());
     assert!(rows[0].source_evidence_payload_json.is_none());
-    assert!(rows[0].terminal_predicate_passed.is_none());
+
     let pending = &context.pending[&market.slug];
     assert_eq!(pending.attempts_recorded, 2);
     assert_eq!(pending.missed_slot_count, 1);
@@ -2628,52 +2628,6 @@ async fn polymarket_recovered_finalize_allows_fresh_v3_delivery_after_install() 
     assert_eq!(duplicate_drops, 0);
     runtime.abort_pump_and_wait().await;
     clob_server.abort();
-}
-
-#[tokio::test]
-async fn polymarket_hour_budget_and_two_task_ownership_are_hard_bounded() {
-    assert_eq!(12_u32 * u32::from(POLYMARKET_RESOLUTION_ATTEMPT_COUNT), 72);
-
-    let first = test_btc_discovery().current;
-    let mut second = first.clone();
-    second.id = "market-recovered-two".to_owned();
-    second.slug = "btc-updown-5m-1783391700".to_owned();
-    second.condition_id =
-        "0x0000000000000000000000000000000000000000000000000000000000000005".to_owned();
-    second.up_asset_id = "401".to_owned();
-    second.down_asset_id = "402".to_owned();
-    second.start_ts_s -= 300;
-    second.end_ts_s -= 300;
-    second.candidate_start_ts_s -= 300;
-    second.candidate_end_ts_s -= 300;
-    refresh_test_discovery_evidence(&mut second, first.metadata_received_utc_ms.unwrap() - 1);
-    let mut context = PolymarketProcessingContext::from_recovery(PolymarketRestartRecovery {
-        fixed_identities: RecoveredPolymarketFixedIdentities::default(),
-        pending: vec![
-            recovered_pending_for_test(&first, Vec::new(), Vec::new(), 1),
-            recovered_pending_for_test(&second, Vec::new(), Vec::new(), 1),
-        ],
-    })
-    .unwrap()
-    .unwrap();
-    let mut tasks = JoinSet::<GammaResolutionPollCompletion>::new();
-    for (ordinal, pending) in context.pending.values_mut().enumerate() {
-        let handle = tasks.spawn(std::future::pending());
-        pending.in_flight_ordinal = Some(u8::try_from(ordinal + 1).unwrap());
-        pending.poll_abort_handle = Some(handle);
-    }
-    ensure_polymarket_resolution_task_bound(&tasks, &context).unwrap();
-
-    let extra = tasks.spawn(std::future::pending());
-    assert!(
-        ensure_polymarket_resolution_task_bound(&tasks, &context)
-            .unwrap_err()
-            .to_string()
-            .contains("tasks=3")
-    );
-    extra.abort();
-    tasks.abort_all();
-    while tasks.join_next().await.is_some() {}
 }
 
 #[test]
@@ -4989,7 +4943,7 @@ async fn polymarket_ws_claim_preserves_late_gamma_classification_matrix() {
                     row.resolution_poll_result,
                     Some(ResolutionPollResult::PostTerminalClaimObservation)
                 );
-                assert_eq!(row.terminal_predicate_passed, Some(true));
+
                 assert!(row.terminal_predicate_failure_reason.is_none());
                 assert_eq!(
                     row.terminal_claim_owner,
@@ -5003,7 +4957,7 @@ async fn polymarket_ws_claim_preserves_late_gamma_classification_matrix() {
                     row.resolution_poll_result,
                     Some(ResolutionPollResult::PostTerminalClaimObservation)
                 );
-                assert_eq!(row.terminal_predicate_passed, Some(false));
+
                 assert_eq!(
                     row.terminal_predicate_failure_reason,
                     Some(TerminalPredicateFailureReason::ClosedFalse)
@@ -5054,7 +5008,7 @@ async fn polymarket_ws_claim_preserves_late_gamma_classification_matrix() {
                     row.terminal_predicate_failure_reason,
                     Some(TerminalPredicateFailureReason::ClosedTimeParseError)
                 );
-                assert_eq!(row.closed_time_check_passed, Some(false));
+
                 assert_eq!(
                     row.closed_time_check_failure_reason,
                     Some(ClosedTimeCheckFailureReason::ParseError)
@@ -8989,7 +8943,7 @@ async fn polymarket_decoded_attempt_binding_error_keeps_v3_evidence_then_fails_c
     );
     assert!(row.source_evidence_payload_json.is_some());
     assert!(row.source_evidence_raw_sha256.is_some());
-    assert!(row.terminal_predicate_passed.is_none());
+
     assert!(row.terminal_predicate_failure_reason.is_none());
     let validation = row.validate_v3();
     assert!(

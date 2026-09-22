@@ -498,7 +498,6 @@ fn metadata_public_row(
         closed: row.closed,
         closed_time_raw: row.closed_time_raw,
         closed_time_utc: row.closed_time_utc,
-        closed_time_check_passed: row.closed_time_check_passed,
         closed_time_check_failure_reason: row
             .closed_time_check_failure_reason
             .map(|value| value.as_str().try_into())
@@ -550,7 +549,6 @@ fn metadata_public_row(
         resolution_transport_unavailable_count: row.resolution_transport_unavailable_count,
         resolution_missed_slot_count: row.resolution_missed_slot_count,
         last_valid_metadata_received_utc: row.last_valid_metadata_received_utc,
-        terminal_predicate_passed: row.terminal_predicate_passed,
         terminal_predicate_failure_reason: row
             .terminal_predicate_failure_reason
             .map(|value| value.as_str().try_into())

@@ -398,6 +398,12 @@ pub fn polymarket_market_metadata_v6_row_from_batch(
 ) -> Result<PolymarketMarketMetadataV6Row, String> {
     let mut object = serde_json::Map::new();
     for (field, array) in batch.schema().fields().iter().zip(batch.columns()) {
+        if matches!(
+            field.name().as_str(),
+            "terminal_predicate_passed" | "closed_time_check_passed"
+        ) {
+            continue;
+        }
         let value = if array.is_null(row) {
             Value::Null
         } else {

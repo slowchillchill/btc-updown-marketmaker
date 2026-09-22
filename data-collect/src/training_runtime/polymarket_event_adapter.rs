@@ -394,7 +394,6 @@ fn polymarket_metadata_base_row(
         closed: None,
         closed_time_raw: None,
         closed_time_utc: None,
-        closed_time_check_passed: None,
         closed_time_check_failure_reason: None,
         automatically_resolved: None,
         uma_resolution_status: None,
@@ -423,7 +422,6 @@ fn polymarket_metadata_base_row(
         resolution_transport_unavailable_count: None,
         resolution_missed_slot_count: None,
         last_valid_metadata_received_utc: None,
-        terminal_predicate_passed: None,
         terminal_predicate_failure_reason: None,
         response_fields_unavailable_reason: Some(
             ResponseFieldsUnavailableReason::NotApplicableForRowKind,
@@ -692,22 +690,16 @@ where
             row.closed_time_utc = evaluation.closed_time_utc_ms;
             match evaluation.terminal_predicate_failure_reason {
                 Some(TerminalPredicateFailureReason::ClosedTimeMissing) => {
-                    row.closed_time_check_passed = Some(false);
                     row.closed_time_check_failure_reason =
                         Some(ClosedTimeCheckFailureReason::Missing);
                 }
                 Some(TerminalPredicateFailureReason::ClosedTimeParseError) => {
-                    row.closed_time_check_passed = Some(false);
                     row.closed_time_check_failure_reason =
                         Some(ClosedTimeCheckFailureReason::ParseError);
                 }
                 Some(TerminalPredicateFailureReason::ClosedTimeBeforeMarketEnd) => {
-                    row.closed_time_check_passed = Some(false);
                     row.closed_time_check_failure_reason =
                         Some(ClosedTimeCheckFailureReason::BeforeMarketEnd);
-                }
-                _ if evaluation.closed_time_utc_ms.is_some() => {
-                    row.closed_time_check_passed = Some(true);
                 }
                 _ => {}
             }
@@ -731,7 +723,7 @@ where
             row.accepting_orders = market.accepting_orders;
             row.resolution_poll_result = Some(result);
             row.resolution_integrity_error_class = evaluation.resolution_integrity_error_class;
-            row.terminal_predicate_passed = evaluation.terminal_predicate_passed;
+
             row.terminal_predicate_failure_reason = evaluation.terminal_predicate_failure_reason;
             row.response_fields_unavailable_reason = None;
 
@@ -837,7 +829,7 @@ pub(super) fn polymarket_resolution_terminal_ws_row(
     row.terminal_claim_owner = Some(TerminalClaimOwner::MarketResolvedWs);
     row.resolution_budget_horizon_utc = Some(pending.budget_horizon_utc_ms());
     row.resolution_followup_status = Some(ResolutionFollowupStatus::TerminalWs);
-    row.terminal_predicate_passed = Some(true);
+
     row.response_fields_unavailable_reason = None;
     complete_polymarket_terminal_transition(&mut row, applied_at_utc_ms);
     Ok(row)

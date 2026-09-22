@@ -137,7 +137,6 @@ fn v3_base(
         closed: None,
         closed_time_raw: None,
         closed_time_utc: None,
-        closed_time_check_passed: None,
         closed_time_check_failure_reason: None,
         automatically_resolved: None,
         uma_resolution_status: None,
@@ -166,7 +165,6 @@ fn v3_base(
         resolution_transport_unavailable_count: None,
         resolution_missed_slot_count: None,
         last_valid_metadata_received_utc: None,
-        terminal_predicate_passed: None,
         terminal_predicate_failure_reason: None,
         response_fields_unavailable_reason: Some(
             ResponseFieldsUnavailableReason::NotApplicableForRowKind,
@@ -259,7 +257,7 @@ fn decoded_gamma_attempt_v3() -> PolymarketMarketMetadataRow {
     row.resolution_poll_result = Some(ResolutionPollResult::ValidNonterminal);
     row.resolution_budget_horizon_utc = Some(E + 480_000);
     row.resolution_followup_status = Some(ResolutionFollowupStatus::Pending);
-    row.terminal_predicate_passed = Some(false);
+
     row.terminal_predicate_failure_reason = Some(TerminalPredicateFailureReason::ClosedFalse);
     row.response_fields_unavailable_reason = None;
     row
@@ -278,7 +276,7 @@ fn terminal_gamma_attempt_v3() -> PolymarketMarketMetadataRow {
     row.closed = Some(true);
     row.closed_time_raw = Some(TERMINAL_CLOSED_TIME.to_owned());
     row.closed_time_utc = Some(E + 16_000);
-    row.closed_time_check_passed = Some(true);
+
     row.uma_resolution_status = Some(" ReSoLvEd ".to_owned());
     row.outcomes_raw = Some(r#"["Up","Down"]"#.to_owned());
     row.outcome_prices_raw = Some(r#"["1","0"]"#.to_owned());
@@ -289,7 +287,7 @@ fn terminal_gamma_attempt_v3() -> PolymarketMarketMetadataRow {
     row.resolution_evidence_source = Some(ResolutionEvidenceSource::GammaBySlug);
     row.resolution_evidence_raw_sha256 = row.source_evidence_raw_sha256.clone();
     row.terminal_claim_owner = Some(TerminalClaimOwner::GammaBySlug);
-    row.terminal_predicate_passed = Some(true);
+
     row.terminal_predicate_failure_reason = None;
     row
 }
@@ -326,7 +324,7 @@ fn resolution_terminal_ws_v3() -> PolymarketMarketMetadataRow {
     row.terminal_claim_owner = Some(TerminalClaimOwner::MarketResolvedWs);
     row.resolution_budget_horizon_utc = Some(E + 480_000);
     row.resolution_followup_status = Some(ResolutionFollowupStatus::TerminalWs);
-    row.terminal_predicate_passed = Some(true);
+
     row.response_fields_unavailable_reason = None;
     row
 }
@@ -521,7 +519,6 @@ fn v3_schema_has_the_frozen_fields_types_and_utc_units() {
         "closed",
         "closed_time_raw",
         "closed_time_utc",
-        "closed_time_check_passed",
         "closed_time_check_failure_reason",
         "automatically_resolved",
         "uma_resolution_status",
@@ -550,7 +547,6 @@ fn v3_schema_has_the_frozen_fields_types_and_utc_units() {
         "resolution_transport_unavailable_count",
         "resolution_missed_slot_count",
         "last_valid_metadata_received_utc",
-        "terminal_predicate_passed",
         "terminal_predicate_failure_reason",
         "response_fields_unavailable_reason",
     ];
@@ -1117,10 +1113,7 @@ fn source_payloads_reconstruct_through_the_pinned_sdk_and_unique_terminal_evalua
         attempt,
         GammaTerminalResponse::Decoded(&decoded_gamma),
     );
-    assert_eq!(
-        evaluation.terminal_predicate_passed,
-        gamma_row.terminal_predicate_passed
-    );
+
     assert_eq!(
         evaluation.terminal_predicate_failure_reason,
         gamma_row.terminal_predicate_failure_reason
@@ -1425,7 +1418,7 @@ fn v3_subtype_contracts_cover_transition_attempt_and_summary_variants() {
     transport.accepting_orders = None;
     transport.resolution_poll_result = Some(ResolutionPollResult::TransportUnavailable);
     transport.resolution_transport_error_class = Some(ResolutionTransportErrorClass::Timeout);
-    transport.terminal_predicate_passed = None;
+
     transport.terminal_predicate_failure_reason = None;
     transport.response_fields_unavailable_reason =
         Some(ResponseFieldsUnavailableReason::TransportUnavailable);
@@ -1434,7 +1427,7 @@ fn v3_subtype_contracts_cover_transition_attempt_and_summary_variants() {
     binding.resolution_poll_result = Some(ResolutionPollResult::IntegrityError);
     binding.resolution_integrity_error_class =
         Some(ResolutionIntegrityErrorClass::AttemptBindingInvariant);
-    binding.terminal_predicate_passed = None;
+
     binding.terminal_predicate_failure_reason = None;
 
     let mut decode = decoded_gamma_attempt_v3();
@@ -1451,7 +1444,7 @@ fn v3_subtype_contracts_cover_transition_attempt_and_summary_variants() {
     decode.resolution_poll_result = Some(ResolutionPollResult::IntegrityError);
     decode.resolution_integrity_error_class =
         Some(ResolutionIntegrityErrorClass::SdkDecodeOrSchema);
-    decode.terminal_predicate_passed = None;
+
     decode.terminal_predicate_failure_reason = None;
     decode.response_fields_unavailable_reason =
         Some(ResponseFieldsUnavailableReason::SdkDecodeOrSchemaError);
@@ -1577,7 +1570,7 @@ fn v3_validator_rejects_required_null_ownership_and_causal_time_violations() {
     closed_time_mismatch.closed_time_raw = Some("2026-07-07T02:50:17Z".to_owned());
 
     let mut parse_error_with_valid_raw = terminal_gamma_attempt_v3();
-    parse_error_with_valid_raw.closed_time_check_passed = Some(false);
+
     parse_error_with_valid_raw.closed_time_check_failure_reason =
         Some(ClosedTimeCheckFailureReason::ParseError);
     parse_error_with_valid_raw.closed_time_utc = None;

@@ -326,8 +326,6 @@ struct MetadataRecord {
     transport_unavailable_count: Option<u32>,
     missed_slot_count: Option<u32>,
     last_valid_metadata_received_at_utc_ms: Option<i64>,
-    #[cfg(test)]
-    terminal_predicate_passed: Option<bool>,
     ws_claimant_source_sequence_epoch_id: Option<String>,
     ws_claimant_collector_admission_sequence: Option<u64>,
 }
@@ -367,17 +365,29 @@ fn require_canonical_metadata_schema(
         ))
         .into());
     }
-    if schema.fields().len() != expected.fields().len() {
+    // 旧文件可保留废弃布尔列；恢复仅使用现存业务材料。
+    let actual_fields = schema
+        .fields()
+        .iter()
+        .filter(|field| {
+            !matches!(
+                field.name().as_str(),
+                "terminal_predicate_passed" | "closed_time_check_passed"
+            )
+        })
+        .collect::<Vec<_>>();
+    if actual_fields.len() != expected.fields().len() {
         return Err(invalid_data(format!(
             "Polymarket restart finalized {} schema field count mismatch:file={}:expected={}:actual={}",
             layout.version(),
             path.display(),
             expected.fields().len(),
-            schema.fields().len()
+            actual_fields.len()
         ))
         .into());
     }
-    for (index, (actual, expected)) in schema.fields().iter().zip(expected.fields()).enumerate() {
+    for (index, (actual, expected)) in actual_fields.into_iter().zip(expected.fields()).enumerate()
+    {
         if actual.name() != expected.name()
             || actual.data_type() != expected.data_type()
             || actual.is_nullable() != expected.is_nullable()
@@ -659,7 +669,6 @@ fn validate_finalized_gamma_attempt_payload(
     };
     if !result_matches
         || row.resolution_integrity_error_class != evaluation.resolution_integrity_error_class
-        || row.terminal_predicate_passed != evaluation.terminal_predicate_passed
         || row.terminal_predicate_failure_reason != evaluation.terminal_predicate_failure_reason
         || row.active != evaluation.observed_active
         || row.closed_time_raw != evaluation.closed_time_raw
@@ -891,8 +900,7 @@ impl MetadataRecord {
                 row,
                 "last_valid_metadata_received_utc",
             )?,
-            #[cfg(test)]
-            terminal_predicate_passed: optional_bool(batch, row, "terminal_predicate_passed")?,
+
             ws_claimant_source_sequence_epoch_id,
             ws_claimant_collector_admission_sequence,
         }))
@@ -2178,12 +2186,6 @@ fn optional_u32(batch: &RecordBatch, row: usize, name: &str) -> Result<Option<u3
     Ok(values.is_valid(row).then(|| values.value(row)))
 }
 
-#[cfg(test)]
-fn optional_bool(batch: &RecordBatch, row: usize, name: &str) -> Result<Option<bool>> {
-    let values = typed_column::<arrow_array::BooleanArray>(batch, name)?;
-    Ok(values.is_valid(row).then(|| values.value(row)))
-}
-
 fn typed_column<'a, T: 'static>(batch: &'a RecordBatch, name: &str) -> Result<&'a T> {
     let index = batch.schema().index_of(name)?;
     batch
@@ -2367,7 +2369,6 @@ mod tests {
             transport_unavailable_count: None,
             missed_slot_count: None,
             last_valid_metadata_received_at_utc_ms: None,
-            terminal_predicate_passed: None,
             ws_claimant_source_sequence_epoch_id: None,
             ws_claimant_collector_admission_sequence: None,
         }
@@ -2478,7 +2479,7 @@ mod tests {
         record.resolution_evidence_raw_sha256 = record.source_raw_sha256.clone();
         record.terminal_claim_owner = Some("gamma_by_slug".to_owned());
         record.followup_status = Some("terminal_gamma_fallback".to_owned());
-        record.terminal_predicate_passed = Some(true);
+
         record
     }
 
@@ -2506,14 +2507,14 @@ mod tests {
         record.terminal_claim_owner = Some("market_resolved_ws".to_owned());
         record.budget_horizon_utc_ms = Some(E + BUDGET_HORIZON_MS);
         record.followup_status = Some("terminal_ws".to_owned());
-        record.terminal_predicate_passed = Some(true);
+
         record
     }
 
     fn post_observation(sequence: u64, ordinal: u8) -> MetadataRecord {
         let mut record = attempt(sequence, ordinal, "post_terminal_claim_observation");
         record.terminal_claim_owner = Some("market_resolved_ws".to_owned());
-        record.terminal_predicate_passed = Some(false);
+
         record
     }
 
@@ -2704,7 +2705,6 @@ mod tests {
             closed: None,
             closed_time_raw: None,
             closed_time_utc: None,
-            closed_time_check_passed: None,
             closed_time_check_failure_reason: None,
             automatically_resolved: None,
             uma_resolution_status: None,
@@ -2737,7 +2737,6 @@ mod tests {
             resolution_transport_unavailable_count: record.transport_unavailable_count,
             resolution_missed_slot_count: record.missed_slot_count,
             last_valid_metadata_received_utc: record.last_valid_metadata_received_at_utc_ms,
-            terminal_predicate_passed: record.terminal_predicate_passed,
             terminal_predicate_failure_reason: None,
             response_fields_unavailable_reason: Some(
                 ResponseFieldsUnavailableReason::NotApplicableForRowKind,
@@ -2810,27 +2809,21 @@ mod tests {
                 row.closed_time_utc = evaluation.closed_time_utc_ms;
                 match evaluation.terminal_predicate_failure_reason {
                     Some(TerminalPredicateFailureReason::ClosedTimeMissing) => {
-                        row.closed_time_check_passed = Some(false);
                         row.closed_time_check_failure_reason =
                             Some(ClosedTimeCheckFailureReason::Missing);
                     }
                     Some(TerminalPredicateFailureReason::ClosedTimeParseError) => {
-                        row.closed_time_check_passed = Some(false);
                         row.closed_time_check_failure_reason =
                             Some(ClosedTimeCheckFailureReason::ParseError);
                     }
                     Some(TerminalPredicateFailureReason::ClosedTimeBeforeMarketEnd) => {
-                        row.closed_time_check_passed = Some(false);
                         row.closed_time_check_failure_reason =
                             Some(ClosedTimeCheckFailureReason::BeforeMarketEnd);
-                    }
-                    _ if evaluation.closed_time_utc_ms.is_some() => {
-                        row.closed_time_check_passed = Some(true);
                     }
                     _ => {}
                 }
                 row.resolution_integrity_error_class = evaluation.resolution_integrity_error_class;
-                row.terminal_predicate_passed = evaluation.terminal_predicate_passed;
+
                 row.terminal_predicate_failure_reason =
                     evaluation.terminal_predicate_failure_reason;
             }
@@ -3431,57 +3424,134 @@ mod tests {
         };
         use crate::writer::TypedParquetSegmentWriter;
 
-        let tmp = tempdir().unwrap();
-        let recovery_time = E + 4 * 60_000;
-        let metadata_dir = day_dir(tmp.path(), recovery_time, "polymarket_market_metadata");
-        let identity = metadata_v5_fixture_row(&base_record(1), None);
-        write_metadata_v5_rows(
-            &metadata_dir.join("polymarket_market_metadata_02.parquet"),
-            &[identity.clone()],
-        );
-        let common = identity.common();
-        let anchor = PolymarketMarketMetadataV6Row::AnchorRule(MarketAnchorRuleUpdateRow {
-            timestamp_received: T + 1_000,
-            collector_admission_sequence: 2,
-            collector_admission_time_utc_ms: T + 1_001,
-            metadata_origin: MarketAnchorOrigin::GammaEventBySlug,
-            collector_host_id: common.collector_host_id.clone(),
-            collector_region: common.collector_region.clone(),
-            identity: MarketAnchorIdentity {
-                slug: common.slug.clone(),
-                condition_id: common.condition_id.clone(),
-                clob_market_id: common.clob_market_id.clone(),
-                asset_ids: common.asset_ids.clone(),
-                market_start_utc: common.market_start_utc,
-                market_end_utc: common.market_end_utc,
-                fixed_identity_verified_at_utc: common.fixed_identity_verified_at_utc,
-            },
-            market_lifecycle_state: common.market_lifecycle_state,
-            market_runtime_role: common.market_runtime_role,
-            metadata_fetch_start_utc: T,
-            anchor_query_source_epoch_id: "anchor-test-epoch".to_owned(),
-            anchor_query_ordinal: 1,
-            observation: MarketAnchorObservation::unavailable(MarketAnchorQueryResult::Timeout),
-        });
-        let mut writer = TypedParquetSegmentWriter::create_for_current_source(
-            &metadata_dir,
-            "polymarket_market_metadata_03",
-            "polymarket_market_metadata",
-        )
-        .unwrap();
-        writer
-            .write_polymarket_market_metadata_v6_rows(&[
-                anchor,
-                PolymarketMarketMetadataV6Row::Existing(metadata_v5_fixture_row(
-                    &attempt(3, 1, "valid_nonterminal"),
-                    None,
-                )),
-            ])
+        for legacy_columns in [false, true] {
+            let tmp = tempdir().unwrap();
+            let recovery_time = E + 4 * 60_000;
+            let metadata_dir = day_dir(tmp.path(), recovery_time, "polymarket_market_metadata");
+            let identity = metadata_v5_fixture_row(&base_record(1), None);
+            write_metadata_v5_rows(
+                &metadata_dir.join("polymarket_market_metadata_02.parquet"),
+                &[identity.clone()],
+            );
+            let common = identity.common();
+            let anchor = PolymarketMarketMetadataV6Row::AnchorRule(MarketAnchorRuleUpdateRow {
+                timestamp_received: T + 1_000,
+                collector_admission_sequence: 2,
+                collector_admission_time_utc_ms: T + 1_001,
+                metadata_origin: MarketAnchorOrigin::GammaEventBySlug,
+                collector_host_id: common.collector_host_id.clone(),
+                collector_region: common.collector_region.clone(),
+                identity: MarketAnchorIdentity {
+                    slug: common.slug.clone(),
+                    condition_id: common.condition_id.clone(),
+                    clob_market_id: common.clob_market_id.clone(),
+                    asset_ids: common.asset_ids.clone(),
+                    market_start_utc: common.market_start_utc,
+                    market_end_utc: common.market_end_utc,
+                    fixed_identity_verified_at_utc: common.fixed_identity_verified_at_utc,
+                },
+                market_lifecycle_state: common.market_lifecycle_state,
+                market_runtime_role: common.market_runtime_role,
+                metadata_fetch_start_utc: T,
+                anchor_query_source_epoch_id: "anchor-test-epoch".to_owned(),
+                anchor_query_ordinal: 1,
+                observation: MarketAnchorObservation::unavailable(MarketAnchorQueryResult::Timeout),
+            });
+            let mut writer = TypedParquetSegmentWriter::create_for_current_source(
+                &metadata_dir,
+                "polymarket_market_metadata_03",
+                "polymarket_market_metadata",
+            )
             .unwrap();
-        writer.finalize().unwrap();
-        let recovery = restore_polymarket_resolution_recovery(tmp.path(), recovery_time).unwrap();
-        assert_eq!(recovery.pending.len(), 1);
-        assert_eq!(recovery.pending[0].finalized_attempt_ordinals, [1]);
+            writer
+                .write_polymarket_market_metadata_v6_rows(&[
+                    anchor,
+                    PolymarketMarketMetadataV6Row::Existing(metadata_v5_fixture_row(
+                        &attempt(3, 1, "valid_nonterminal"),
+                        None,
+                    )),
+                ])
+                .unwrap();
+            let segment = writer.finalize().unwrap();
+            if legacy_columns {
+                let legacy_path = segment.final_path;
+
+                // 重建历史两列的真实 Parquet；其值不再参与终态业务判定。
+                let builder =
+                    parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+                        std::fs::File::open(&legacy_path).unwrap(),
+                    )
+                    .unwrap();
+                let metadata = builder
+                    .metadata()
+                    .file_metadata()
+                    .key_value_metadata()
+                    .cloned();
+                let batches = builder
+                    .build()
+                    .unwrap()
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .unwrap();
+                let mut writer = None;
+                for batch in batches {
+                    let mut fields = batch
+                        .schema()
+                        .fields()
+                        .iter()
+                        .map(|field| field.as_ref().clone())
+                        .collect::<Vec<_>>();
+                    let mut columns = batch.columns().to_vec();
+                    for (name, before) in [
+                        (
+                            "closed_time_check_passed",
+                            "closed_time_check_failure_reason",
+                        ),
+                        (
+                            "terminal_predicate_passed",
+                            "terminal_predicate_failure_reason",
+                        ),
+                    ] {
+                        let index = fields
+                            .iter()
+                            .position(|field| field.name() == before)
+                            .unwrap();
+                        fields.insert(
+                            index,
+                            arrow_schema::Field::new(name, arrow_schema::DataType::Boolean, true),
+                        );
+                        columns.insert(
+                            index,
+                            std::sync::Arc::new(arrow_array::BooleanArray::from(vec![
+                                Some(false);
+                                batch
+                                    .num_rows(
+                                    )
+                            ])),
+                        );
+                    }
+                    let schema = std::sync::Arc::new(arrow_schema::Schema::new(fields));
+                    let batch = arrow_array::RecordBatch::try_new(schema.clone(), columns).unwrap();
+                    let writer = writer.get_or_insert_with(|| {
+                        parquet::arrow::ArrowWriter::try_new(
+                            std::fs::File::create(&legacy_path).unwrap(),
+                            schema,
+                            Some(
+                                parquet::file::properties::WriterProperties::builder()
+                                    .set_key_value_metadata(metadata.clone())
+                                    .build(),
+                            ),
+                        )
+                        .unwrap()
+                    });
+                    writer.write(&batch).unwrap();
+                }
+                writer.unwrap().close().unwrap();
+            }
+            let recovery =
+                restore_polymarket_resolution_recovery(tmp.path(), recovery_time).unwrap();
+            assert_eq!(recovery.pending.len(), 1);
+            assert_eq!(recovery.pending[0].finalized_attempt_ordinals, [1]);
+        }
     }
 
     #[test]

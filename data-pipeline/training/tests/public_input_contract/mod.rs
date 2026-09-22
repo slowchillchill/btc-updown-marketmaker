@@ -132,71 +132,148 @@ fn manifest_for(
 
 #[test]
 fn collector_v6_and_legacy_rows_decode_through_the_explicit_versioned_entry() {
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp
-        .path()
-        .join("2026-07-30/typed_raw/utc_day=2026-07-30/source_kind=polymarket_market_metadata");
-    fs::create_dir_all(&dir).unwrap();
-    let mut writer = TypedParquetSegmentWriter::create_for_current_source(
-        &dir,
-        "polymarket_market_metadata_00",
-        METADATA_SOURCE,
-    )
-    .unwrap();
-    writer
-        .write_polymarket_market_metadata_v6_rows(&[
-            PolymarketMarketMetadataV6Row::Existing(old_metadata()),
-            anchor_row(),
-        ])
+    for legacy_columns in [false, true] {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp
+            .path()
+            .join("2026-07-30/typed_raw/utc_day=2026-07-30/source_kind=polymarket_market_metadata");
+        fs::create_dir_all(&dir).unwrap();
+        let mut writer = TypedParquetSegmentWriter::create_for_current_source(
+            &dir,
+            "polymarket_market_metadata_00",
+            METADATA_SOURCE,
+        )
         .unwrap();
-    let segment = finalize_with_fact(
-        writer,
-        METADATA_SOURCE,
-        POLYMARKET_MARKET_METADATA_SCHEMA_V6,
-        2,
-    );
-    let manifest = manifest_for(
-        tmp.path(),
-        &segment,
-        METADATA_SOURCE,
-        POLYMARKET_MARKET_METADATA_SCHEMA_V6,
-        true,
-    );
-    assert!(crate::validate_daily_manifest_admission_at_root(tmp.path(), &manifest).is_err());
-    let admitted =
-        crate::validate_daily_manifest_admission_with_public_inputs(tmp.path(), &manifest, true)
+        writer
+            .write_polymarket_market_metadata_v6_rows(&[
+                PolymarketMarketMetadataV6Row::Existing(old_metadata()),
+                anchor_row(),
+            ])
             .unwrap();
-    assert!(typed_raw::open_validated_typed_raw_parquet(&admitted.files()[0], 1).is_err());
-    let rows = open_validated_public_input_parquet_v1(&admitted.files()[0], 1)
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap()
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>();
-    assert_eq!(rows.len(), 2);
-    let TypedRawRowV2::PolymarketMarketMetadataV6(row) = &rows[0] else {
-        panic!()
-    };
-    let PolymarketMarketMetadataV6Input::Existing(row) = row.as_ref() else {
-        panic!()
-    };
-    assert_eq!(row.schema_version, METADATA_V5);
-    assert_eq!(row.collector_admission_sequence, 1);
-    let TypedRawRowV2::PolymarketMarketMetadataV6(row) = &rows[1] else {
-        panic!()
-    };
-    let PolymarketMarketMetadataV6Input::AnchorRule(row) = row.as_ref() else {
-        panic!()
-    };
-    assert_eq!(
-        row.price_to_beat_decimal.as_deref(),
-        Some("64950.014218511440012345")
-    );
-    assert_eq!(row.anchor_source_computed_at_utc, None);
-    assert_eq!(row.http_received_at_utc, Some(RECEIVED));
-    assert_eq!(row.collector_admission_sequence, 2);
-    assert_eq!(row.twap_lookback_seconds, Some(30));
+        let mut segment = finalize_with_fact(
+            writer,
+            METADATA_SOURCE,
+            POLYMARKET_MARKET_METADATA_SCHEMA_V6,
+            2,
+        );
+        if legacy_columns {
+            let legacy_path = segment.final_path.clone();
+
+            // 重建历史两列的真实 Parquet；其值不再参与终态业务判定。
+            let builder = parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder::try_new(
+                std::fs::File::open(&legacy_path).unwrap(),
+            )
+            .unwrap();
+            let metadata = builder
+                .metadata()
+                .file_metadata()
+                .key_value_metadata()
+                .cloned();
+            let batches = builder
+                .build()
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            let mut writer = None;
+            for batch in batches {
+                let mut fields = batch
+                    .schema()
+                    .fields()
+                    .iter()
+                    .map(|field| field.as_ref().clone())
+                    .collect::<Vec<_>>();
+                let mut columns = batch.columns().to_vec();
+                for (name, before) in [
+                    (
+                        "closed_time_check_passed",
+                        "closed_time_check_failure_reason",
+                    ),
+                    (
+                        "terminal_predicate_passed",
+                        "terminal_predicate_failure_reason",
+                    ),
+                ] {
+                    let index = fields
+                        .iter()
+                        .position(|field| field.name() == before)
+                        .unwrap();
+                    fields.insert(
+                        index,
+                        arrow_schema::Field::new(name, arrow_schema::DataType::Boolean, true),
+                    );
+                    columns.insert(
+                        index,
+                        std::sync::Arc::new(arrow_array::BooleanArray::from(vec![
+                            Some(false);
+                            batch.num_rows()
+                        ])),
+                    );
+                }
+                let schema = std::sync::Arc::new(arrow_schema::Schema::new(fields));
+                let batch = arrow_array::RecordBatch::try_new(schema.clone(), columns).unwrap();
+                let writer = writer.get_or_insert_with(|| {
+                    parquet::arrow::ArrowWriter::try_new(
+                        std::fs::File::create(&legacy_path).unwrap(),
+                        schema,
+                        Some(
+                            parquet::file::properties::WriterProperties::builder()
+                                .set_key_value_metadata(metadata.clone())
+                                .build(),
+                        ),
+                    )
+                    .unwrap()
+                });
+                writer.write(&batch).unwrap();
+            }
+            writer.unwrap().close().unwrap();
+            segment.sha256 = format!("{:x}", Sha256::digest(fs::read(&legacy_path).unwrap()));
+        }
+        let manifest = manifest_for(
+            tmp.path(),
+            &segment,
+            METADATA_SOURCE,
+            POLYMARKET_MARKET_METADATA_SCHEMA_V6,
+            true,
+        );
+        assert!(crate::validate_daily_manifest_admission_at_root(tmp.path(), &manifest).is_err());
+        let admitted = crate::validate_daily_manifest_admission_with_public_inputs(
+            tmp.path(),
+            &manifest,
+            true,
+        )
+        .unwrap();
+        assert!(typed_raw::open_validated_typed_raw_parquet(&admitted.files()[0], 1).is_err());
+        let rows = open_validated_public_input_parquet_v1(&admitted.files()[0], 1)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 2);
+        let TypedRawRowV2::PolymarketMarketMetadataV6(row) = &rows[0] else {
+            panic!()
+        };
+        let PolymarketMarketMetadataV6Input::Existing(row) = row.as_ref() else {
+            panic!()
+        };
+        assert_eq!(row.schema_version, METADATA_V5);
+        assert_eq!(row.collector_admission_sequence, 1);
+        let TypedRawRowV2::PolymarketMarketMetadataV6(row) = &rows[1] else {
+            panic!()
+        };
+        let PolymarketMarketMetadataV6Input::AnchorRule(row) = row.as_ref() else {
+            panic!()
+        };
+        assert_eq!(
+            row.price_to_beat_decimal.as_deref(),
+            Some("64950.014218511440012345")
+        );
+        assert_eq!(row.anchor_source_computed_at_utc, None);
+        assert_eq!(row.http_received_at_utc, Some(RECEIVED));
+        assert_eq!(row.collector_admission_sequence, 2);
+        assert_eq!(row.twap_lookback_seconds, Some(30));
+    }
 }
 
 #[test]
