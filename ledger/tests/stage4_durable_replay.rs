@@ -3,14 +3,14 @@ use std::io::Write;
 
 use contracts::execution_normalization::{
     DurableSourceReferenceV1, ImmutableSourceReferenceV1, NoeResultReferenceV1,
-    SimV2DirectResponseAssociationV1, SimV2SourceRecordReferenceV1, SimV2SourceReferenceV1,
-    SimV2SourceWatermarkV1, SourceNeutralAccountBalanceDeltaV1,
-    SourceNeutralAccountTransitionKindV1, SourceNeutralControlResultV1,
-    SourceNeutralOrderLifecycleEventV1, SourceNeutralOrderLifecycleResultV1,
-    SourceNeutralOrderQueryResultV1, SourceNeutralOrderSnapshotV1, SourceNeutralOrderStateV1,
-    SourceNeutralOutcomeBalanceDeltaV1, SourceNeutralSettlementLifecycleResultV1,
-    SourceNeutralSubmissionOutcomeV1, SourceNeutralTradeEconomicDispositionV1,
-    SourceNeutralTradeLifecycleResultV1, SourceNeutralTradeStateV1, StableLogicalIdentityV1,
+    SimV2DirectResponseAssociationV1, SimV2SourceRecordReferenceV1, SimV2SourceWatermarkV1,
+    SourceNeutralAccountBalanceDeltaV1, SourceNeutralAccountTransitionKindV1,
+    SourceNeutralControlResultV1, SourceNeutralOrderLifecycleEventV1,
+    SourceNeutralOrderLifecycleResultV1, SourceNeutralOrderQueryResultV1,
+    SourceNeutralOrderSnapshotV1, SourceNeutralOrderStateV1, SourceNeutralOutcomeBalanceDeltaV1,
+    SourceNeutralSettlementLifecycleResultV1, SourceNeutralSubmissionOutcomeV1,
+    SourceNeutralTradeEconomicDispositionV1, SourceNeutralTradeLifecycleResultV1,
+    SourceNeutralTradeStateV1, StableLogicalIdentityV1,
 };
 use contracts::{
     AccountInstanceKeyV1, ConditionId, ExactDecimal, PlatformSourceV1, Sha256Hex, SimCallerRoleV1,
@@ -270,17 +270,12 @@ impl NoeFixture {
             run_id: self.run_id.clone(),
             projection_batch_sequence: sequence,
         };
-        let context_reference = self.store.context().context_reference.clone();
         self.store
             .commit_batch(
                 NormalizationBatchInputV1 {
-                    source_watermark: watermark.clone(),
+                    source_watermark: watermark,
                     evidence: vec![SourceNeutralEvidenceV1 {
-                        source_reference: SimV2SourceReferenceV1 {
-                            context_reference,
-                            watermark,
-                            record,
-                        },
+                        source_record: record,
                         source_ordinal: 0,
                         logical_key,
                         kind,

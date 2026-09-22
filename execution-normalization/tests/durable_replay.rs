@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use contracts::execution_normalization::{
     DurableSourceReferenceV1, ExecutionNormalizationContextReferenceV1,
     ExecutionNormalizationContextV1, ImmutableSourceReferenceV1, SimV2ContextSourceV1,
-    SimV2SourceRecordReferenceV1, SimV2SourceReferenceV1, SimV2SourceWatermarkV1,
-    SourceNeutralAccountIdentityV1, SourceNeutralControlResultV1, SourceNeutralEconomicIdentityV1,
+    SimV2SourceRecordReferenceV1, SimV2SourceWatermarkV1, SourceNeutralAccountIdentityV1,
+    SourceNeutralControlResultV1, SourceNeutralEconomicIdentityV1,
     SourceNeutralSubmissionOutcomeV1,
 };
 use contracts::{AccountInstanceKeyV1, ExactDecimal, PlatformSourceV1, SimCallerRoleV1};
@@ -67,14 +67,9 @@ fn watermark(sequence: u64) -> SimV2SourceWatermarkV1 {
 fn batch(sequence: u64) -> NormalizationBatchInputV1 {
     let source_watermark = watermark(sequence);
     NormalizationBatchInputV1 {
-        source_watermark: source_watermark.clone(),
+        source_watermark,
         evidence: vec![SourceNeutralEvidenceV1 {
-            source_reference: SimV2SourceReferenceV1 {
-                context_reference: ExecutionNormalizationContextReferenceV1(
-                    "context-55-durable".to_owned(),
-                ),
-                watermark: source_watermark,
-                record: SimV2SourceRecordReferenceV1::DirectResponse {
+            source_record: SimV2SourceRecordReferenceV1::DirectResponse {
                     private_feedback_sequence: 100 + sequence,
                     platform_responded_at_utc_ms: 2_000 + sequence as i64,
                     response_received_at_utc_ms: 2_100 + sequence as i64,
@@ -83,7 +78,6 @@ fn batch(sequence: u64) -> NormalizationBatchInputV1 {
                         batch_item_ordinal: 0,
                     },
                 },
-            },
             source_ordinal: 0,
             logical_key: SourceNeutralLogicalKeyV1::SubmissionItem {
                 global_request_id: format!("request-{sequence}"),
@@ -101,23 +95,16 @@ fn batch(sequence: u64) -> NormalizationBatchInputV1 {
 fn economic_batch(sequence: u64) -> NormalizationBatchInputV1 {
     NormalizationBatchInputV1 {
         source_watermark: watermark(sequence),
-        evidence: vec![economic_evidence_record(
-            sequence,
-            0,
-            "opening-economic-55",
-            "100",
-        )],
+        evidence: vec![economic_evidence_record(0, "opening-economic-55", "100")],
     }
 }
 
 fn economic_evidence_record(
-    sequence: u64,
     source_ordinal: u32,
     evidence_identity: &str,
     available_pusd: &str,
 ) -> SourceNeutralEvidenceV1 {
     opening_economic_evidence_record(
-        sequence,
         source_ordinal,
         evidence_identity,
         "opening-55-durable",
@@ -126,21 +113,13 @@ fn economic_evidence_record(
 }
 
 fn opening_economic_evidence_record(
-    sequence: u64,
     source_ordinal: u32,
     evidence_identity: &str,
     opening_evidence_identity: &str,
     available_pusd: &str,
 ) -> SourceNeutralEvidenceV1 {
-    let source_watermark = watermark(sequence);
     SourceNeutralEvidenceV1 {
-        source_reference: SimV2SourceReferenceV1 {
-            context_reference: ExecutionNormalizationContextReferenceV1(
-                "context-55-durable".to_owned(),
-            ),
-            watermark: source_watermark,
-            record: SimV2SourceRecordReferenceV1::AccountOpening,
-        },
+        source_record: SimV2SourceRecordReferenceV1::AccountOpening,
         source_ordinal,
         logical_key: SourceNeutralLogicalKeyV1::EconomicEvidence {
             evidence_identity: evidence_identity.to_owned(),
@@ -161,16 +140,10 @@ fn late_opening_coverage_record(
     opening_evidence_identity: &str,
 ) -> SourceNeutralEvidenceV1 {
     SourceNeutralEvidenceV1 {
-        source_reference: SimV2SourceReferenceV1 {
-            context_reference: ExecutionNormalizationContextReferenceV1(
-                "context-55-durable".to_owned(),
-            ),
-            watermark: watermark(sequence),
-            record: SimV2SourceRecordReferenceV1::OrderLifecycle {
-                private_feedback_sequence: 500 + sequence,
-                platform_event_at_utc_ms: 2_500 + sequence as i64,
-                feedback_received_at_utc_ms: 2_600 + sequence as i64,
-            },
+        source_record: SimV2SourceRecordReferenceV1::OrderLifecycle {
+            private_feedback_sequence: 500 + sequence,
+            platform_event_at_utc_ms: 2_500 + sequence as i64,
+            feedback_received_at_utc_ms: 2_600 + sequence as i64,
         },
         source_ordinal,
         logical_key: SourceNeutralLogicalKeyV1::AuditEvidence {
@@ -188,9 +161,9 @@ fn economic_classification_batch(sequence: u64) -> NormalizationBatchInputV1 {
     NormalizationBatchInputV1 {
         source_watermark: watermark(sequence),
         evidence: vec![
-            economic_evidence_record(sequence, 0, "opening-economic-55", "100"),
-            economic_evidence_record(sequence, 1, &format!("opening-alias-{sequence}"), "100"),
-            economic_evidence_record(sequence, 2, &format!("opening-conflict-{sequence}"), "101"),
+            economic_evidence_record(0, "opening-economic-55", "100"),
+            economic_evidence_record(1, &format!("opening-alias-{sequence}"), "100"),
+            economic_evidence_record(2, &format!("opening-conflict-{sequence}"), "101"),
         ],
     }
 }
@@ -388,7 +361,7 @@ fn reopen_restores_alias_and_economic_conflict_logical_decisions() {
         .commit_batch(
             normalization_batch(
                 1,
-                vec![opening_economic_evidence_record(1, 0, "A", "E1", "100")],
+                vec![opening_economic_evidence_record(0, "A", "E1", "100")],
             ),
             3_000,
         )
@@ -398,8 +371,8 @@ fn reopen_restores_alias_and_economic_conflict_logical_decisions() {
             normalization_batch(
                 2,
                 vec![
-                    opening_economic_evidence_record(2, 0, "B", "E1", "100"),
-                    opening_economic_evidence_record(2, 1, "C", "E1", "101"),
+                    opening_economic_evidence_record(0, "B", "E1", "100"),
+                    opening_economic_evidence_record(1, "C", "E1", "101"),
                     late_opening_coverage_record(2, 0, "L", "E1"),
                 ],
             ),
@@ -441,10 +414,10 @@ fn reopen_restores_alias_and_economic_conflict_logical_decisions() {
             normalization_batch(
                 3,
                 vec![
-                    opening_economic_evidence_record(3, 0, "B", "E1", "100"),
-                    opening_economic_evidence_record(3, 1, "B", "E2", "200"),
-                    opening_economic_evidence_record(3, 2, "C", "E1", "101"),
-                    opening_economic_evidence_record(3, 3, "C", "E2", "200"),
+                    opening_economic_evidence_record(0, "B", "E1", "100"),
+                    opening_economic_evidence_record(1, "B", "E2", "200"),
+                    opening_economic_evidence_record(2, "C", "E1", "101"),
+                    opening_economic_evidence_record(3, "C", "E2", "200"),
                     late_opening_coverage_record(3, 0, "L", "E1"),
                 ],
             ),
@@ -508,4 +481,97 @@ fn reopen_preserves_the_incoming_minimum_conflict_evidence() {
             ..
         }
     ));
+}
+
+#[test]
+fn reopened_cancellation_keeps_reference_presence_order_and_content() {
+    use contracts::execution_normalization::{
+        SimV2DirectResponseAssociationV1 as Association, SourceNeutralCancellationOutcomeV1,
+        StableLogicalIdentityV1,
+    };
+    use contracts::{CancelInputItemRefV2, ExecutionMethodV2};
+    let item = |id: &str, ordinal| CancelInputItemRefV2 {
+        item_id: id.into(),
+        batch_item_ordinal: ordinal,
+    };
+    let original = vec![item("a", 0), item("b", 1)];
+    let evidence = |sequence, target_ordinal, refs: Option<Vec<CancelInputItemRefV2>>| {
+        SourceNeutralEvidenceV1 {
+            source_record: SimV2SourceRecordReferenceV1::DirectResponse {
+                private_feedback_sequence: sequence,
+                platform_responded_at_utc_ms: 2000,
+                response_received_at_utc_ms: 2100,
+                association: match refs {
+                    Some(input_item_refs) => Association::CancellationTarget {
+                        global_request_id: "cancel".into(),
+                        method: ExecutionMethodV2::CancelOrders,
+                        target_ordinal,
+                        input_item_refs,
+                    },
+                    None => Association::Request {
+                        global_request_id: "cancel".into(),
+                    },
+                },
+            },
+            source_ordinal: 0,
+            logical_key: SourceNeutralLogicalKeyV1::CancellationTarget {
+                global_request_id: "cancel".into(),
+                target_ordinal,
+            },
+            kind: SourceNeutralEvidenceKindV1::Control {
+                result: SourceNeutralControlResultV1::Cancellation {
+                    order_identity: StableLogicalIdentityV1("order".into()),
+                    outcome: SourceNeutralCancellationOutcomeV1::NotCanceledNoEffect,
+                },
+            },
+        }
+    };
+    let temporary = TempDir::new().unwrap();
+    let mut store = DurableContextStoreV1::create(temporary.path(), context()).unwrap();
+    store
+        .commit_batch(
+            NormalizationBatchInputV1 {
+                source_watermark: watermark(1),
+                evidence: vec![
+                    evidence(1, 0, Some(original.clone())),
+                    evidence(2, 1, Some(vec![])),
+                ],
+            },
+            3000,
+        )
+        .unwrap();
+    drop(store);
+    let mut reopened =
+        DurableContextStoreV1::open(temporary.path(), &context().context_reference).unwrap();
+    reopened
+        .commit_batch(
+            NormalizationBatchInputV1 {
+                source_watermark: watermark(2),
+                evidence: vec![
+                    evidence(2, 0, Some(original)),
+                    evidence(3, 0, Some(vec![item("b", 1), item("a", 0)])),
+                    evidence(4, 0, Some(vec![])),
+                    evidence(5, 0, None),
+                    evidence(6, 0, Some(vec![item("a", 0), item("changed", 1)])),
+                    evidence(7, 1, None),
+                    evidence(8, 1, Some(vec![])),
+                ],
+            },
+            3001,
+        )
+        .unwrap();
+    let records = &reopened.commits()[1].records;
+    assert!(matches!(
+        records[0],
+        NormalizationRecordV1::Duplicate { .. }
+    ));
+    assert!(matches!(
+        records[6],
+        NormalizationRecordV1::Duplicate { .. }
+    ));
+    assert!(
+        records[1..6]
+            .iter()
+            .all(|record| matches!(record, NormalizationRecordV1::Conflict { .. }))
+    );
 }

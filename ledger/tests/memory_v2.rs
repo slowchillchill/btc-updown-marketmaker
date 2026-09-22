@@ -79,16 +79,12 @@ impl Source {
         let batch = Arc::new(
             self.core
                 .normalize_and_accept(NormalizationBatchInput {
-                    source_watermark: watermark.clone(),
+                    source_watermark: watermark,
                     evidence: kinds
                         .into_iter()
                         .enumerate()
                         .map(|(ordinal, kind)| SourceNeutralEvidence {
-                            source_reference: SimV2SourceReferenceV1 {
-                                context_reference: self.context.context_reference.clone(),
-                                watermark: watermark.clone(),
-                                record: record.clone(),
-                            },
+                            source_record: record.clone(),
                             source_ordinal: ordinal as u32,
                             logical_key: SourceNeutralLogicalKeyV1::EconomicEvidence {
                                 evidence_identity: format!("effect-{n}-{ordinal}"),
