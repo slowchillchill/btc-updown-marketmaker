@@ -1,7 +1,10 @@
 //! 显式有限的 RESOLUTION_REDEEM_ONLY 后端。调度、记录和资金仍归原执行器。
+//! 首次请求后固定脚本：内存调度共享 Arc，Configure 的持久输入仍是原脚本结构。
+//! 同一条件的重送沿首次登记请求和重试状态推进；费用只在确认或支付到点时解析。
 use super::*;
 use contracts::economics::*;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResolutionRedeemScenarioV1 {
@@ -66,7 +69,7 @@ pub(crate) enum SettlementOperationV1 {
 }
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct RequestedSettlementStateV1 {
-    pub scenario: Option<ResolutionRedeemScenarioV1>,
+    pub scenario: Option<Arc<ResolutionRedeemScenarioV1>>,
     external_cash: BTreeSet<String>,
     requests: BTreeMap<String, RequestedSettlementV1>,
 }
@@ -161,7 +164,7 @@ impl ExecutionStateV2 {
                 if !self.requested_settlement.requests.is_empty() {
                     return Err(MatchingStateErrorV1::QueuePredecessorConflict);
                 }
-                self.requested_settlement.scenario = Some(scenario.clone());
+                self.requested_settlement.scenario = Some(Arc::new(scenario.clone()));
             }
             SettlementOperationV1::Request {
                 request,
@@ -172,9 +175,6 @@ impl ExecutionStateV2 {
                 };
                 let key = &request.identity.condition_id.0;
                 if let Some(existing) = self.requested_settlement.requests.get_mut(key) {
-                    if existing.request != *request {
-                        return Err(MatchingStateErrorV1::QueuePredecessorConflict);
-                    }
                     if existing.retry_authorized
                         && !existing.accepted
                         && !existing.succeeded
@@ -407,14 +407,17 @@ impl ExecutionStateV2 {
                 output.push(LifecycleFeedbackEffectV2::Settlement(receipt));
             }
             for (cost, status) in scenario.costs.iter().zip(&mut r.cost_status) {
-                let amount = Decimal::from_str_exact(&cost.amount_pusd.0)
-                    .map_err(|_| MatchingStateErrorV1::QueuePredecessorConflict)?;
                 let recognize =
                     !status.0 && r.first_request_at + cost.recognition_offset_ms as i64 == at;
                 let pay = !status.1
                     && cost
                         .payment_offset_ms
                         .is_some_and(|ms| r.first_request_at + ms as i64 == at);
+                if !recognize && !pay {
+                    continue;
+                }
+                let amount = Decimal::from_str_exact(&cost.amount_pusd.0)
+                    .map_err(|_| MatchingStateErrorV1::QueuePredecessorConflict)?;
                 for is_payment in [false, true] {
                     if !(if is_payment { pay } else { recognize }) {
                         continue;

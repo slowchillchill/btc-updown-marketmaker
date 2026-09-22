@@ -7,8 +7,8 @@ use rust_decimal::Decimal;
 
 pub use crate::matching::MatchingMathErrorV1;
 use crate::matching::{
-    exact_less_than_power_of_two_shift, exact_taker_fee_contribution_v1, micro_units_v1,
-    nonnegative_decimal_ratio, rounded_fee_units_v1,
+    exact_less_than_power_of_two_shift, exact_taker_fee_contribution_v1, fee_price_ratio_v1,
+    micro_units_v1, nonnegative_decimal_ratio, rounded_fee_units_v1,
 };
 use crate::platform_rules::SealedProcessRuleSnapshotV3;
 
@@ -106,7 +106,8 @@ impl SealedProcessRuleSnapshotV3 {
             return Ok(BigUint::zero());
         }
         let base_units = target_centishares * BigUint::from(10_000_u32);
-        let total = exact_taker_fee_contribution_v1(&base_units, price, &rate, fee.exponent)?;
+        let price = fee_price_ratio_v1(price)?;
+        let total = exact_taker_fee_contribution_v1(&base_units, &price, &rate, fee.exponent)?;
         Ok(rounded_fee_units_v1(&total))
     }
 }

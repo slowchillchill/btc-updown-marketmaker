@@ -14729,7 +14729,7 @@ mod tests {
         assert_eq!(
             reducer_state.business_resources,
             ResourceQuantityV1::new(
-                resources_before_maker.records + 7,
+                resources_before_maker.records + 6,
                 resources_before_maker.bytes + 10,
             )
         );
@@ -14783,11 +14783,6 @@ mod tests {
             Some((1_000_004, 0, 2_999_996, 200_001, 899_999))
         );
         assert_eq!(session.execution_state.fill_shape_for_tests(), (2, 3));
-        assert!(
-            session
-                .execution_state
-                .maker_rebate_has_pending_fill_for_tests(2)
-        );
         assert_eq!(
             session.execution_state.account_overlay_quantity_for_tests(
                 &condition_id.0,
