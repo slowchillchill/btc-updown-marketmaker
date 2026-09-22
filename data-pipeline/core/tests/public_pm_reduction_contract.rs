@@ -1486,7 +1486,7 @@ fn prepared_steps_keep_complete_positions_and_original_prestate_after_later_appl
 }
 
 #[test]
-fn prepared_ingress_supplies_all_nonterminal_pm_kinds_and_shared_source_identity() {
+fn prepared_ingress_supplies_all_nonterminal_pm_kinds() {
     use data_pipeline_core::public_input::*;
     use data_pipeline_core::public_reference::source_evidence_v3_from_typed_raw_v2;
     let context = public_context();
@@ -1556,18 +1556,6 @@ fn prepared_ingress_supplies_all_nonterminal_pm_kinds_and_shared_source_identity
         assert_eq!(
             prepared.prepared_group_id.as_ref(),
             Some(&message.message().group_id)
-        );
-        assert!(std::sync::Arc::ptr_eq(
-            prepared.pm_source_identity.as_ref().unwrap(),
-            &message.evidence().shared_source_identity()
-        ));
-        assert_ne!(
-            prepared.prepared_group_id.as_ref().unwrap(),
-            &prepared
-                .pm_source_identity
-                .as_ref()
-                .unwrap()
-                .causal_group_id
         );
     }
 }

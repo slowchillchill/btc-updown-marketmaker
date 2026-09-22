@@ -649,7 +649,6 @@ impl CaptureArtifacts {
 
 impl CanonicalRunCapture for CaptureArtifacts {
     fn capture_record(&mut self, emission_sequence: u64, encoded: &[u8]) -> io::Result<()> {
-        decode_canonical_event_record_v1(encoded).map_err(io::Error::other)?;
         self.records.push(
             emission_sequence,
             emission_sequence.to_be_bytes().to_vec(),
@@ -658,7 +657,6 @@ impl CanonicalRunCapture for CaptureArtifacts {
     }
 
     fn capture_report(&mut self, emission_sequence: u64, encoded: &[u8]) -> io::Result<()> {
-        decode_reduction_report_entry_v1(encoded).map_err(io::Error::other)?;
         self.reports.push(
             emission_sequence,
             emission_sequence.to_be_bytes().to_vec(),

@@ -52,6 +52,20 @@ pub enum HiddenStoredRowV1 {
         report: PmReductionReportV2<SourceEvidenceRefV3>,
     },
 }
+// 写入端借用同一 wire 形状；读取端继续拥有实际反序列化的来源。
+#[derive(Serialize)]
+enum HiddenStoredRowRef<'s, 'm, E> {
+    Step {
+        reference: &'s HiddenDerivedStepRefV1,
+        step: &'s PmReductionStepV1<'m, E>,
+    },
+    Report {
+        canonical_position: u64,
+        report_ordinal: u32,
+        report: &'s PmReductionReportV2<E>,
+    },
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HiddenPreparationV1 {
     pub prefix: CommittedIngressPrefixV1,
@@ -203,23 +217,22 @@ pub fn prepare_hidden_v1(
             derived.push(
                 row_position,
                 row_position.to_be_bytes().to_vec(),
-                &serde_json::to_vec(&HiddenStoredRowV1::Step(HiddenStoredStepV1 {
-                    reference,
-                    step: serde_json::from_value(serde_json::to_value(step)?)?,
-                }))?,
+                &serde_json::to_vec(&HiddenStoredRowRef::Step {
+                    reference: &reference,
+                    step: &step,
+                })?,
             )?;
             row_position += 1;
             derivation_position += 1;
         }
         for (ordinal, report) in material.reduction.reports.into_iter().enumerate() {
-            let report = serde_json::from_value(serde_json::to_value(report)?)?;
             derived.push(
                 row_position,
                 row_position.to_be_bytes().to_vec(),
-                &serde_json::to_vec(&HiddenStoredRowV1::Report {
+                &serde_json::to_vec(&HiddenStoredRowRef::Report {
                     canonical_position,
                     report_ordinal: ordinal as u32,
-                    report,
+                    report: &report,
                 })?,
             )?;
             row_position += 1;

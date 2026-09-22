@@ -1004,6 +1004,12 @@ fn reduction_report_round_trips_and_rejects_broken_quantity_conservation() {
         )
         .unwrap();
 
+    let totals = outcome.report.quantity_conservation.as_ref().unwrap();
+    assert_eq!(totals.quantity_before.0, "0.7");
+    assert_eq!(totals.quantity_after.0, "0.8");
+    assert_eq!(totals.quantity_added.0, "0.1");
+    assert_eq!(totals.quantity_reduced.0, "0");
+
     let encoded = encode_reduction_report_entry_v1(&outcome.report).unwrap();
     assert_eq!(
         decode_reduction_report_entry_v1(&encoded).unwrap(),
@@ -1017,6 +1023,34 @@ fn reduction_report_round_trips_and_rejects_broken_quantity_conservation() {
         .expect("applied depth update must carry conservation evidence")
         .quantity_after = contracts::ExactDecimal("999".to_owned());
     assert!(validate_reduction_report_entry_v1(&broken).is_err());
+}
+
+#[test]
+fn depth_update_reports_actual_decimal_total_overflow() {
+    let mut reducer = BinanceDepthReducer::new(RULE_VERSION).unwrap();
+    reducer
+        .apply_snapshot(&snapshot("depth-epoch-1", 100, 1), &sha('a'), &sha('b'))
+        .unwrap();
+    let row = update(
+        "depth-epoch-1",
+        101,
+        101,
+        2,
+        Some(100),
+        None,
+        BinanceDepthStitchVerdict::Applied,
+        vec![
+            level("64001", "79228162514264337593543950335"),
+            level("64002", "1"),
+        ],
+    );
+    let error = reducer
+        .apply_update(&row, &sha('a'), &sha('c'))
+        .unwrap_err();
+    assert!(
+        matches!(error, data_pipeline_core::ContractError::InvalidField { field, reason }
+        if field == "quantity_after" && reason == "decimal addition overflow")
+    );
 }
 
 #[test]

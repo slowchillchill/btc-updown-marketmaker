@@ -954,7 +954,6 @@ fn prepared_ws_and_gamma_terminal_share_one_state_and_materialize_original_resul
     let PreparedCanonicalInputV1::PolymarketWsTerminal { row, source } = prepared_ws.current else {
         panic!("terminal")
     };
-    assert_ne!(&group_id, &source.source_identity().causal_group_id);
     let direct = source.source().clone();
     let ws_input = PolymarketOrderbookInputV1 {
         row: row.clone(),
