@@ -6,7 +6,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, fmt, str::FromStr};
 
-/// 唯一公共有理叶子；规范形式分母为正、互素、零为 0/1。
+/// 公共整数比；计算与输出归一化为正分母、互素、零为 0/1。
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExactRationalV1 {
     pub numerator: String,
@@ -17,7 +17,7 @@ pub struct ExactRationalV1 {
 pub struct RationalEncodingErrorV1;
 impl fmt::Display for RationalEncodingErrorV1 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("精确经济分数不是规范整数比")
+        f.write_str("精确经济分数含无效整数或零分母")
     }
 }
 impl std::error::Error for RationalEncodingErrorV1 {}
@@ -46,7 +46,8 @@ impl EconomicRational {
             BigInt::from(10u8).pow(value.scale()),
         )
     }
-    fn ratio(mut numerator: BigInt, mut denominator: BigInt) -> Self {
+    /// 从非零分母的整数比构造数值，沿同一入口约分并归一化符号。
+    pub fn ratio(mut numerator: BigInt, mut denominator: BigInt) -> Self {
         assert!(!denominator.is_zero(), "内部有理除法要求已知非零分母");
         if denominator.is_negative() {
             numerator = -numerator;
@@ -57,6 +58,12 @@ impl EconomicRational {
             numerator: numerator / &gcd,
             denominator: denominator / gcd,
         }
+    }
+    pub fn numerator(&self) -> &BigInt {
+        &self.numerator
+    }
+    pub fn denominator(&self) -> &BigInt {
+        &self.denominator
     }
     pub fn is_zero(&self) -> bool {
         self.numerator.is_zero()
@@ -110,14 +117,10 @@ impl TryFrom<&ExactRationalV1> for EconomicRational {
     fn try_from(value: &ExactRationalV1) -> Result<Self, Self::Error> {
         let n = BigInt::from_str(&value.numerator).map_err(|_| RationalEncodingErrorV1)?;
         let d = BigInt::from_str(&value.denominator).map_err(|_| RationalEncodingErrorV1)?;
-        if !d.is_positive() {
+        if d.is_zero() {
             return Err(RationalEncodingErrorV1);
         }
-        let result = Self::ratio(n, d);
-        if result.public() != *value {
-            return Err(RationalEncodingErrorV1);
-        }
-        Ok(result)
+        Ok(Self::ratio(n, d))
     }
 }
 impl Serialize for EconomicRational {

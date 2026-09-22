@@ -750,7 +750,8 @@ impl EconomicsState {
                 });
                 if day.result.is_none() {
                     let total = R::from_decimal(decimal(&fact.accrued_pusd)?);
-                    if total.is_positive() {
+                    if total.is_positive() && !day.contributions.is_empty() {
+                        let payable = R::from_decimal(decimal(&fact.payable_pusd)?);
                         let mut changed = BTreeMap::new();
                         for (_, contribution) in &day.contributions {
                             let market = changed
@@ -763,9 +764,8 @@ impl EconomicsState {
                                 });
                             let share = R::from_decimal(decimal(&contribution.contribution_pusd)?)
                                 .divided_by(&total);
-                            market.confirmed_rebate = market
-                                .confirmed_rebate
-                                .add(&R::from_decimal(decimal(&fact.payable_pusd)?).mul(&share));
+                            market.confirmed_rebate =
+                                market.confirmed_rebate.add(&payable.mul(&share));
                         }
                         patch.markets.extend(changed);
                     }
@@ -838,18 +838,6 @@ pub struct RebateAmountsReadV1 {
     pub confirmed_unpaid_pusd: ExactRationalV1,
     pub paid_pusd: ExactRationalV1,
     pub locked_remainder_pusd: ExactRationalV1,
-}
-impl Default for RebateAmountsReadV1 {
-    fn default() -> Self {
-        Self {
-            estimated_pusd: ExecutionReadValueV1::Known(R::zero().public()),
-            accrued_unmatured_pusd: R::zero().public(),
-            below_threshold_pusd: R::zero().public(),
-            confirmed_unpaid_pusd: R::zero().public(),
-            paid_pusd: R::zero().public(),
-            locked_remainder_pusd: R::zero().public(),
-        }
-    }
 }
 pub struct RebateDayReadV1<'a> {
     pub kind: RebateKindV1,
@@ -1002,8 +990,10 @@ impl LedgerEconomicReadV1<'_> {
         }));
         keys.into_iter().map(|(kind, day)| {
             let stored = self.state.days.get(&(kind, day));
-            let mut amounts = stored.map_or_else(RebateAmountsReadV1::default, |d| d.amounts(None));
-            amounts.estimated_pusd = self.estimated_rebate(kind, None, Some(day));
+            let amounts = RebateAmountsReadV1::from_amounts(
+                stored.map_or_else(|| std::array::from_fn(|_| R::zero()), |d| d.amounts(None)),
+                self.estimated_rebate(kind, None, Some(day)),
+            );
             RebateDayReadV1 {
                 kind,
                 attribution_day_start_utc_ms: day,
@@ -1105,12 +1095,16 @@ impl LedgerEconomicReadV1<'_> {
                 } else {
                     RebateKindV1::Taker
                 };
-                let mut result = RebateAmountsReadV1::default();
+                let mut amounts: [R; 5] = std::array::from_fn(|_| R::zero());
                 for day in self.state.days.values().filter(|d| d.kind == kind) {
-                    result.accumulate(&day.amounts(Some(condition)));
+                    for (sum, value) in amounts.iter_mut().zip(day.amounts(Some(condition))) {
+                        *sum = sum.add(&value);
+                    }
                 }
-                result.estimated_pusd = self.estimated_rebate(kind, Some(condition), None);
-                result
+                RebateAmountsReadV1::from_amounts(
+                    amounts,
+                    self.estimated_rebate(kind, Some(condition), None),
+                )
             });
             // 修复缺口只看已公开终局实际份额；经济成功池仍沿原入账条件更新。
             let mut final_success_quantity = [Decimal::ZERO; 2];
@@ -1222,26 +1216,22 @@ impl Market {
     }
 }
 impl RebateAmountsReadV1 {
-    fn accumulate(&mut self, rhs: &Self) {
-        for (a, b) in [
-            (
-                &mut self.accrued_unmatured_pusd,
-                &rhs.accrued_unmatured_pusd,
-            ),
-            (&mut self.below_threshold_pusd, &rhs.below_threshold_pusd),
-            (&mut self.confirmed_unpaid_pusd, &rhs.confirmed_unpaid_pusd),
-            (&mut self.paid_pusd, &rhs.paid_pusd),
-            (&mut self.locked_remainder_pusd, &rhs.locked_remainder_pusd),
-        ] {
-            *a = R::try_from(&*a)
-                .expect("内部规范分数")
-                .add(&R::try_from(b).expect("内部规范分数"))
-                .public();
+    fn from_amounts(
+        [accrued, below_threshold, unpaid, paid, locked]: [R; 5],
+        estimated_pusd: ExecutionReadValueV1<ExactRationalV1>,
+    ) -> Self {
+        Self {
+            estimated_pusd,
+            accrued_unmatured_pusd: accrued.public(),
+            below_threshold_pusd: below_threshold.public(),
+            confirmed_unpaid_pusd: unpaid.public(),
+            paid_pusd: paid.public(),
+            locked_remainder_pusd: locked.public(),
         }
     }
 }
 impl RebateDay {
-    fn amounts(&self, condition: Option<&str>) -> RebateAmountsReadV1 {
+    fn amounts(&self, condition: Option<&str>) -> [R; 5] {
         let contribution = self
             .contributions
             .iter()
@@ -1251,30 +1241,80 @@ impl RebateDay {
                     decimal(&c.contribution_pusd).expect("已验证贡献"),
                 ))
             });
-        let mut amounts = RebateAmountsReadV1::default();
+        let mut amounts = std::array::from_fn(|_| R::zero());
         if let Some((_, result)) = &self.result {
-            let total = R::from_decimal(decimal(&result.accrued_pusd).expect("已验证日累计"));
+            let accrued = decimal(&result.accrued_pusd).expect("已验证日累计");
+            let total = R::from_decimal(accrued);
             if !total.is_zero() {
                 let fraction = contribution.divided_by(&total);
-                if decimal(&result.accrued_pusd).expect("已验证日累计") < Decimal::ONE {
-                    amounts.below_threshold_pusd = contribution.public();
+                if accrued < Decimal::ONE {
+                    amounts[1] = contribution;
                 } else {
-                    amounts.confirmed_unpaid_pusd = R::from_decimal(
+                    amounts[2] = R::from_decimal(
                         decimal(&result.payable_pusd).expect("已验证应付") - self.paid,
                     )
-                    .mul(&fraction)
-                    .public();
-                    amounts.paid_pusd = R::from_decimal(self.paid).mul(&fraction).public();
-                    amounts.locked_remainder_pusd = R::from_decimal(
+                    .mul(&fraction);
+                    amounts[3] = R::from_decimal(self.paid).mul(&fraction);
+                    amounts[4] = R::from_decimal(
                         decimal(&result.locked_remainder_pusd).expect("已验证余项"),
                     )
-                    .mul(&fraction)
-                    .public();
+                    .mul(&fraction);
                 }
             }
         } else {
-            amounts.accrued_unmatured_pusd = contribution.public();
+            amounts[0] = contribution;
         }
         amounts
+    }
+}
+
+#[cfg(test)]
+mod rational_tests {
+    use super::*;
+
+    #[test]
+    fn integer_ratios_normalize_for_arithmetic_and_persistence() {
+        let half = EconomicRational::from_decimal(Decimal::new(5, 1));
+        for (n, d) in [("2", "4"), ("01", "02"), ("-1", "-2")] {
+            let input = ExactRationalV1 {
+                numerator: n.into(),
+                denominator: d.into(),
+            };
+            let value = EconomicRational::try_from(&input).unwrap();
+            assert_eq!(value, half);
+            assert_eq!(
+                value.add(&half),
+                EconomicRational::from_decimal(Decimal::ONE)
+            );
+            let restored: EconomicRational =
+                serde_json::from_str(&serde_json::to_string(&input).unwrap()).unwrap();
+            assert_eq!(restored, half);
+            assert_eq!(
+                serde_json::to_string(&restored).unwrap(),
+                r#"{"numerator":"1","denominator":"2"}"#
+            );
+        }
+        let negative: EconomicRational =
+            serde_json::from_str(r#"{"numerator":"1","denominator":"-2"}"#).unwrap();
+        assert!(negative < EconomicRational::zero());
+        assert_eq!(negative.add(&half), EconomicRational::zero());
+        let zero: EconomicRational =
+            serde_json::from_str(r#"{"numerator":"0","denominator":"-7"}"#).unwrap();
+        assert_eq!(
+            zero.public(),
+            ExactRationalV1 {
+                numerator: "0".into(),
+                denominator: "1".into()
+            }
+        );
+        for (n, d) in [("bad", "2"), ("1", "bad"), ("1", "0")] {
+            assert!(
+                EconomicRational::try_from(&ExactRationalV1 {
+                    numerator: n.into(),
+                    denominator: d.into()
+                })
+                .is_err()
+            );
+        }
     }
 }

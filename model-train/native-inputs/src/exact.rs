@@ -6,19 +6,13 @@ use num_traits::{One, Signed, ToPrimitive, Zero};
 use rust_decimal::Decimal;
 
 pub(crate) fn ratio(n: impl Into<BigInt>, d: impl Into<BigInt>) -> R {
-    let (n, d) = (n.into(), d.into());
-    let g = n.gcd(&d);
-    R::try_from(&ExactRationalV1 {
-        numerator: (n / &g).to_string(),
-        denominator: (d / g).to_string(),
-    })
-    .unwrap()
+    R::ratio(n.into(), d.into())
 }
 pub(crate) fn decimal(d: &ExactDecimal) -> R {
     R::from_decimal(Decimal::from_str_exact(&d.0).expect("公共精确金额"))
 }
 pub(crate) fn rational(r: &ExactRationalV1) -> R {
-    R::try_from(r).expect("公共规范有理数")
+    R::try_from(r).expect("公共整数比")
 }
 pub(crate) fn integer(n: impl Into<BigInt>) -> R {
     ratio(n, 1)
@@ -26,9 +20,8 @@ pub(crate) fn integer(n: impl Into<BigInt>) -> R {
 
 /// 一次最近偶数舍入，指数与余数比较全部在整数域。
 pub fn round_f32(value: &R) -> f32 {
-    let public = value.public();
-    let n: BigInt = public.numerator.parse().unwrap();
-    let d: BigUint = public.denominator.parse().unwrap();
+    let n = value.numerator();
+    let d = value.denominator().magnitude();
     let sign = if n.is_negative() { 1u32 << 31 } else { 0 };
     let n = n.magnitude();
     if n.is_zero() {
@@ -36,9 +29,9 @@ pub fn round_f32(value: &R) -> f32 {
     }
     let mut e = i128::from(n.bits()) - i128::from(d.bits());
     let lower = if e >= 0 {
-        n < &(&d << usize::try_from(e).unwrap())
+        n < &(d << usize::try_from(e).unwrap())
     } else {
-        (n << usize::try_from(-e).unwrap()) < d
+        &(n << usize::try_from(-e).unwrap()) < d
     };
     if lower {
         e -= 1;
@@ -51,9 +44,9 @@ pub fn round_f32(value: &R) -> f32 {
     }
     let shift = (e - 23).max(-149);
     let (a, b) = if shift >= 0 {
-        (n.clone(), &d << usize::try_from(shift).unwrap())
+        (n.clone(), d << usize::try_from(shift).unwrap())
     } else {
-        (n << usize::try_from(-shift).unwrap(), d)
+        (n << usize::try_from(-shift).unwrap(), d.clone())
     };
     let (mut q, r) = a.div_rem(&b);
     if (&r << 1) > b || ((&r << 1) == b && q.is_odd()) {
@@ -96,15 +89,14 @@ pub fn signed_log_f32(value: &R) -> f32 {
     if value.is_zero() {
         return 0.0;
     }
-    let p = value.public();
-    let n: BigInt = p.numerator.parse().unwrap();
-    let b: BigInt = p.denominator.parse().unwrap();
-    let a = n.abs() + &b;
+    let n = value.numerator();
+    let b = value.denominator();
+    let a = n.abs() + b;
     let mut k = a.bits() - b.bits();
-    if a < (&b << usize::try_from(k).unwrap()) {
+    if a < (b << usize::try_from(k).unwrap()) {
         k -= 1;
     }
-    let scaled = &b << usize::try_from(k).unwrap();
+    let scaled = b << usize::try_from(k).unwrap();
     let t = ratio(&a - &scaled, &a + &scaled);
     let ln2t = ratio(1, 3);
     let mut terms = BigInt::from(8);
@@ -126,13 +118,12 @@ pub(crate) fn sqrt_log_f32(value: &R) -> f32 {
     if value.is_zero() {
         return 0.;
     }
-    let p = value.public();
-    let n: BigUint = p.numerator.parse().unwrap();
-    let d: BigUint = p.denominator.parse().unwrap();
+    let n = value.numerator().magnitude();
+    let d = value.denominator().magnitude();
     let mut bits = 32usize;
     loop {
         let scale = BigUint::one() << bits;
-        let q = ((&n << (2 * bits)) / &d).sqrt();
+        let q = ((n << (2 * bits)) / d).sqrt();
         let low = ratio(BigInt::from(q.clone()), BigInt::from(scale.clone()));
         let high = ratio(BigInt::from(q + BigUint::one()), BigInt::from(scale));
         let (a, b) = (signed_log_f32(&low), signed_log_f32(&high));
