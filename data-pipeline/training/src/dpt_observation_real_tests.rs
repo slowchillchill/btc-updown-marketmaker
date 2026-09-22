@@ -111,7 +111,7 @@ fn ms_real_001_build_child() -> AnyResult<()> {
     println!(
         "构建与结束完整准入复核通过：{}",
         serde_json::to_string(
-            &json!({"selected_rows": quality.selected_source_rows, "artifact_rows": quality.artifact_rows, "scope": quality.scope, "input_set_identity_sha256": quality.input_set_identity_sha256, "input_manifest_set_sha256": quality.input_manifest_set_sha256})
+            &json!({"selected_rows": quality.facts.selected_source_rows, "artifact_rows": quality.facts.artifact_rows, "scope": quality.facts.scope, "input_set_identity_sha256": quality.facts.input_set_identity_sha256, "input_manifest_set_sha256": quality.facts.input_manifest_set_sha256})
         )?
     );
     Ok(())

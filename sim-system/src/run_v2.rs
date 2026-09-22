@@ -6842,7 +6842,7 @@ fn validate_public_group_membership_v1(
     use contracts::{
         CanonicalBookFactV1 as B, CanonicalPmPayloadV1 as P, PublicBusinessPayloadV1 as F,
     };
-    for fact in &group.prepared.group.records {
+    for fact in group.prepared.group.records.iter() {
         match &fact.payload {
             F::MarketFact { market, payload } => {
                 validate_membership_v1(directory, market, fact_membership_v1(payload))?
@@ -19870,7 +19870,7 @@ fn reduce_public_group_v1(
                 )
             });
     }
-    for fact in &group.prepared.group.records {
+    for fact in group.prepared.group.records.iter() {
         match &fact.payload {
             contracts::PublicBusinessPayloadV1::PolymarketMessage(message) => {
                 let (position, prepared) = group

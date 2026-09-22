@@ -167,7 +167,7 @@ impl PublicRecordingWriterV1 {
                         .applied
                         .closed_groups
                         .iter()
-                        .flat_map(|g| &g.records)
+                        .flat_map(|g| g.records.iter())
                         .position(|f| f.position == position)
                         .unwrap() as u64
             });
@@ -192,7 +192,7 @@ impl PublicRecordingWriterV1 {
         }
         for group in result.applied.closed_groups {
             let refs = group.records.iter().map(|f| f.position.clone()).collect();
-            for fact in &group.records {
+            for fact in group.records.iter() {
                 if let PublicBusinessPayloadV1::PolymarketMessage(message) = &fact.payload {
                     // 共享组只借用编码；字段/枚举形状与原 PublicStoredRowV1 完全相同。
                     #[derive(Serialize)]

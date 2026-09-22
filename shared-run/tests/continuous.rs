@@ -2013,6 +2013,8 @@ async fn continuous_empty_reference_enrollment_uses_same_shared_chain_without_re
         })
         .unwrap();
     let before_late_market_close = shared.ledger().projection_v2();
+    // 持续入口只有在执行毫秒严格结束后才闭合前缀；不能用夹具处理耗时保证跨毫秒。
+    tokio::time::sleep(driver.next_wake_after().expect("迟登记市场的公共关闭义务")).await;
     let (second, _) = driver
         .apply_group(source.next().unwrap().unwrap().prepared)
         .unwrap();

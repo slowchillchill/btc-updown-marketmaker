@@ -539,7 +539,7 @@ impl<'a, S: AsyncRead + AsyncWrite + Unpin> PublicOnlineSessionV1<'a, S> {
             .applied
             .closed_groups
             .iter()
-            .flat_map(|g| &g.records)
+            .flat_map(|g| g.records.iter())
         {
             let market = match &fact.payload {
                 PublicBusinessPayloadV1::PolymarketMessage(message) => Some(&message.market),

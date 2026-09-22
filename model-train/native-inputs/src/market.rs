@@ -599,7 +599,7 @@ fn event_class(p: &PublicBusinessPayloadV1) -> (usize, usize) {
 fn events(out: &mut [f32], o: &MarketBusinessObservationV1, now: i64) {
     let mut counts = [0usize; 23];
     let mut times: [TimeStats; 9] = std::array::from_fn(|_| TimeStats::default());
-    for event in &o.group_events {
+    for event in o.group_events.iter() {
         let (c, t) = event_class(&event.payload);
         counts[c] += 1;
         for source in &event.direct_sources {

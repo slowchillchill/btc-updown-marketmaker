@@ -270,7 +270,7 @@ fn full_group_statistics_keep_incomplete_members_and_original_order() {
                 },
             ),
         );
-        members.extend(o.group_events);
+        members.extend(o.group_events.iter().cloned());
     }
     // 同一生产统计器消费上述真实公共原成员；不构造模型帧或假完整成交。
     let mut rows = Vec::new();

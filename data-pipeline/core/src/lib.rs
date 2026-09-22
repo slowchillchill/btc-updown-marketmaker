@@ -2126,7 +2126,6 @@ fn validate_sorted_event_ids_allow_empty(
 pub fn encode_market_observation_causal_shell_v3(
     observation: &MarketObservationCausalShellV3,
 ) -> Result<Vec<u8>, ContractError> {
-    validate_market_observation_causal_shell_v3(observation)?;
     stable_json(observation)
 }
 
