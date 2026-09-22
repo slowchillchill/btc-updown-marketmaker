@@ -180,7 +180,6 @@ struct MakerQueueDepletionV2 {
 struct AssetVenueDustCandidateV2 {
     platform_order_id: String,
     price_pusd_per_share: Decimal,
-    remaining_base_units: u128,
 }
 
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -321,7 +320,6 @@ impl AssetQueueV2 {
                 Some(AssetVenueDustCandidateV2 {
                     platform_order_id: existing.clone(),
                     price_pusd_per_share: price,
-                    remaining_base_units: *remaining_base_units,
                 })
             }
             Some(QueueSegmentV2::External { .. }) | Some(QueueSegmentV2::Account { .. }) | None => {
@@ -356,7 +354,7 @@ impl AssetQueueV2 {
         &mut self,
         price: Decimal,
         platform_order_id: &str,
-    ) -> Option<(u128, BusinessResourceDeltaV2)> {
+    ) -> Option<BusinessResourceDeltaV2> {
         let queue = self.bids.get_mut(&price)?;
         let index = queue.segments.iter().position(|segment| {
             matches!(segment, QueueSegmentV2::Account {
@@ -364,23 +362,14 @@ impl AssetQueueV2 {
                 ..
             } if existing == platform_order_id)
         })?;
-        let QueueSegmentV2::Account {
-            remaining_base_units,
-            ..
-        } = queue
-            .segments
-            .remove(index)
-            .expect("刚定位的 V2 账户队列段必须仍存在")
-        else {
-            unreachable!("V2 账户订单定位只能命中账户队列段")
-        };
+        queue.segments.remove(index);
         let mut resources = BusinessResourceDeltaV2::default();
         resources.remove_record(platform_order_id.len() as u64);
         if queue.segments.is_empty() && queue.account_taker_depletion_debt_units == 0 {
             self.bids.remove(&price);
             resources.remove_record(0);
         }
-        Some((remaining_base_units, resources))
+        Some(resources)
     }
 
     fn calculate_taker_buy(
@@ -642,7 +631,6 @@ impl AssetQueueV2 {
                     }) if *remaining_base_units > 0 => Some(AssetVenueDustCandidateV2 {
                         platform_order_id: platform_order_id.clone(),
                         price_pusd_per_share: price,
-                        remaining_base_units: *remaining_base_units,
                     }),
                     Some(QueueSegmentV2::External { .. })
                     | Some(QueueSegmentV2::Account { .. })
@@ -1107,8 +1095,8 @@ struct MakerRebateMarketStateV2 {
 
 #[allow(dead_code)]
 #[derive(Debug, Default, PartialEq, Eq)]
+// 成熟前驱由各市场总数和日归属持有；兑付另有 MarketResolution 的实际成交屏障。
 struct MakerRebateStateV2 {
-    pending_fill_sequences: BTreeSet<u64>,
     markets: BTreeMap<String, MakerRebateMarketStateV2>,
     days: BTreeMap<i64, RebateDayStateV2>,
     market_end_clocks: BTreeSet<(i64, String)>,
@@ -1134,14 +1122,12 @@ impl MakerRebateStateV2 {
 
     fn register_fill(
         &mut self,
-        fill_sequence: u64,
         condition_id: &str,
         matched_at_utc_ms: i64,
     ) -> Result<BusinessResourceDeltaV2, RebateStateErrorV1> {
         let attribution_day_utc_ms = utc_day_start(matched_at_utc_ms)?;
         let maturity_at_utc_ms = rebate_maturity_at(RebateKindV1::Maker, attribution_day_utc_ms)?;
         let creates_day = !self.days.contains_key(&attribution_day_utc_ms);
-        let _ = self.pending_fill_sequences.insert(fill_sequence);
         let market = self
             .markets
             .get_mut(condition_id)
@@ -1170,7 +1156,6 @@ impl MakerRebateStateV2 {
                 .ok_or(RebateStateErrorV1::ArithmeticOverflow)?;
         }
         let mut resources = BusinessResourceDeltaV2::default();
-        resources.add_record(0);
         if creates_market_day {
             resources.add_record(0);
         }
@@ -2795,13 +2780,6 @@ impl ExecutionStateV2 {
         (self.fills.len(), self.next_fill_sequence)
     }
 
-    #[cfg(test)]
-    pub(crate) fn maker_rebate_has_pending_fill_for_tests(&self, fill_sequence: u64) -> bool {
-        self.maker_rebate
-            .pending_fill_sequences
-            .contains(&fill_sequence)
-    }
-
     fn apply_initial_levels(
         &mut self,
         condition_id: &str,
@@ -3059,13 +3037,8 @@ impl ExecutionStateV2 {
         platform_effective_at_utc_ms: i64,
         finality_policy: &TradeFinalityPolicyV2,
     ) -> Result<ExecutionMarketEventEffectsV2, MatchingStateErrorV1> {
-        if let Some(existing) = self.market_resolutions.get(condition_id) {
-            if existing.terminal == resolution.terminal {
-                return Ok(ExecutionMarketEventEffectsV2::default());
-            }
-            return Err(MatchingStateErrorV1::ResolutionConflict(
-                condition_id.to_owned(),
-            ));
+        if self.market_resolutions.contains_key(condition_id) {
+            return Ok(ExecutionMarketEventEffectsV2::default());
         }
         let condition = ConditionId(condition_id.to_owned());
         let pending_fill_sequences = self
@@ -3218,7 +3191,7 @@ impl ExecutionStateV2 {
             };
         if open_base_units_before > 0 {
             if !self.queues.matching_closed(&order.condition_id.0)?
-                && let Some((_, queue_resources)) = self
+                && let Some(queue_resources) = self
                     .queues
                     .asset_mut(&order.condition_id.0, &order.token_id.0)?
                     .remove_account_order_at_price(
@@ -3459,11 +3432,10 @@ impl ExecutionStateV2 {
             if self.account.outcome_balance_record_count() > outcome_balances_before {
                 effects.resources.add_record(token_id.len() as u64);
             }
-            effects.resources.merge(self.maker_rebate.register_fill(
-                fill_sequence,
-                condition_id,
-                platform_effective_at_utc_ms,
-            )?);
+            effects.resources.merge(
+                self.maker_rebate
+                    .register_fill(condition_id, platform_effective_at_utc_ms)?,
+            );
             self.next_fill_sequence = next_fill_sequence;
             effects.query_projection_changed = true;
             effects.initial_trade_finality.push(initial);
@@ -3543,7 +3515,6 @@ impl ExecutionStateV2 {
             || *pending_maker_depletion_base_units > 0
             || *open_base_units == 0
             || *open_base_units >= upper_exclusive
-            || *open_base_units != candidate.remaining_base_units
         {
             self.orders.insert(order.platform_order_id.clone(), order);
             return Ok(());
@@ -4210,18 +4181,13 @@ impl ExecutionStateV2 {
         let mut resources = BusinessResourceDeltaV2::default();
         if open_base_units_before > 0 {
             if !self.queues.matching_closed(&condition_id.0)? {
-                let (removed_base_units, queue_resources) = self
+                let queue_resources = self
                     .queues
                     .asset_mut(&condition_id.0, &token_id.0)?
                     .remove_account_order_at_price(price_pusd_per_share, platform_order_id)
                     .ok_or_else(|| {
                         MatchingStateErrorV1::AccountOrderConflict(platform_order_id.to_owned())
                     })?;
-                if removed_base_units != open_base_units_before {
-                    return Err(MatchingStateErrorV1::AccountOrderConflict(
-                        platform_order_id.to_owned(),
-                    ));
-                }
                 resources.merge(queue_resources);
             }
             let overlay_before = self.account_overlay.quantity(
@@ -4447,7 +4413,7 @@ impl ExecutionStateV2 {
 
         if open_base_units_before > 0 {
             if !self.queues.matching_closed(&condition_id.0)?
-                && let Some((_, queue_resources)) = self
+                && let Some(queue_resources) = self
                     .queues
                     .asset_mut(&condition_id.0, &token_id.0)?
                     .remove_account_order_at_price(price_pusd_per_share, &platform_order_id)
@@ -4928,16 +4894,6 @@ impl ExecutionStateV2 {
         account_deltas: &mut Vec<PlatformAccountDeltaV2>,
         resources: &mut BusinessResourceDeltaV2,
     ) -> Result<(), MatchingStateErrorV1> {
-        if !self
-            .maker_rebate
-            .pending_fill_sequences
-            .remove(&fill_sequence)
-        {
-            return Err(MatchingStateErrorV1::Rebate(format!(
-                "maker 成交前驱不存在：{fill_sequence}"
-            )));
-        }
-        resources.remove_record(0);
         let attribution_day_utc_ms = utc_day_start(matched_at_utc_ms)?;
         let contribution = succeeded
             .then(|| {
@@ -5732,15 +5688,10 @@ pub(crate) fn maximum_base_for_limit_order_segment_v1(
         }
         std::cmp::Ordering::Equal => {
             if offset < BigInt::zero() {
-                return verified_limit_segment_result_v1(
+                return limit_segment_result_v1(
                     external_total_base_units,
                     external_total_quote_units,
                     external_consumed_base_units,
-                    order_total_base_units,
-                    order_total_quote_units,
-                    order_matched_base_units,
-                    order_used_quote_units,
-                    upper,
                     upper,
                 );
             }
@@ -5785,29 +5736,19 @@ pub(crate) fn maximum_base_for_limit_order_segment_v1(
                     right = midpoint - 1;
                 }
             }
-            return verified_limit_segment_result_v1(
+            return limit_segment_result_v1(
                 external_total_base_units,
                 external_total_quote_units,
                 external_consumed_base_units,
-                order_total_base_units,
-                order_total_quote_units,
-                order_matched_base_units,
-                order_used_quote_units,
                 left,
-                upper,
             );
         }
         if slope > BigInt::zero() && ambiguous_lower > lower {
-            return verified_limit_segment_result_v1(
+            return limit_segment_result_v1(
                 external_total_base_units,
                 external_total_quote_units,
                 external_consumed_base_units,
-                order_total_base_units,
-                order_total_quote_units,
-                order_matched_base_units,
-                order_used_quote_units,
                 ambiguous_lower - 1,
-                upper,
             );
         }
     }
@@ -5865,35 +5806,30 @@ fn limit_segment_delta_v1(
     ))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn verified_limit_segment_result_v1(
+fn limit_segment_result_v1(
     external_total_base_units: u128,
     external_total_quote_units: u128,
     external_consumed_base_units: u128,
-    order_total_base_units: u128,
-    order_total_quote_units: u128,
-    order_matched_base_units: u128,
-    order_used_quote_units: u128,
     delta_base_units: u128,
-    maximum_additional_base_units: u128,
 ) -> Result<Option<(u128, u128)>, MatchingMathErrorV1> {
-    if delta_base_units == 0 || delta_base_units > maximum_additional_base_units {
-        return Err(MatchingMathErrorV1::InvalidSegment);
-    }
-    let (external_delta_quote, order_quote_allowance) = limit_segment_delta_v1(
+    let before = cumulative_segment_quote_units_v1(
         external_total_base_units,
         external_total_quote_units,
         external_consumed_base_units,
-        order_total_base_units,
-        order_total_quote_units,
-        order_matched_base_units,
-        order_used_quote_units,
-        delta_base_units,
     )?;
-    if external_delta_quote == 0 || external_delta_quote > order_quote_allowance {
-        return Err(MatchingMathErrorV1::InvalidSegment);
-    }
-    Ok(Some((delta_base_units, external_delta_quote)))
+    let after = cumulative_segment_quote_units_v1(
+        external_total_base_units,
+        external_total_quote_units,
+        external_consumed_base_units
+            .checked_add(delta_base_units)
+            .ok_or(MatchingMathErrorV1::ArithmeticOverflow)?,
+    )?;
+    Ok(Some((
+        delta_base_units,
+        after
+            .checked_sub(before)
+            .ok_or(MatchingMathErrorV1::InvalidSegment)?,
+    )))
 }
 
 fn first_true_u128_v1(
@@ -6007,15 +5943,20 @@ pub(crate) fn taker_fee_pusd_v1(
     if rate.numerator.is_zero() || fills.iter().all(|(base_units, _)| *base_units == 0) {
         return Ok(Decimal::ZERO);
     }
-    if fee_upper_bound_rounds_to_zero(fills, &rate, exponent)? {
+    let prices = fills
+        .iter()
+        .map(|(_, price)| fee_price_ratio_v1(*price))
+        .collect::<Result<Vec<_>, _>>()?;
+    let total_base_units = fills.iter().map(|(base, _)| BigUint::from(*base)).sum();
+    if fee_upper_bound_rounds_to_zero(total_base_units, &rate, exponent)? {
         return Ok(Decimal::ZERO);
     }
 
     let mut total = ExactRatioV1::zero();
-    for (base_units, price) in fills {
+    for ((base_units, _), price) in fills.iter().zip(&prices) {
         total = total.add(exact_taker_fee_contribution_v1(
             &BigUint::from(*base_units),
-            *price,
+            price,
             &rate,
             exponent,
         )?)?;
@@ -6032,14 +5973,15 @@ fn allocate_taker_fee_micro_units_by_key<K: Ord>(
         return Err(MatchingMathErrorV1::InvalidSegment);
     }
     let rate = nonnegative_decimal_ratio(rate)?;
-    let fee_inputs = fills
-        .iter()
-        .map(|(_, base_units, price)| (*base_units, *price))
-        .collect::<Vec<_>>();
     if rate.numerator.is_zero() || fills.iter().all(|(_, base_units, _)| *base_units == 0) {
         return Ok((0, vec![0; fills.len()]));
     }
-    if fee_upper_bound_rounds_to_zero(&fee_inputs, &rate, exponent)? {
+    let prices = fills
+        .iter()
+        .map(|(_, _, price)| fee_price_ratio_v1(*price))
+        .collect::<Result<Vec<_>, _>>()?;
+    let total_base_units = fills.iter().map(|(_, base, _)| BigUint::from(*base)).sum();
+    if fee_upper_bound_rounds_to_zero(total_base_units, &rate, exponent)? {
         return Ok((0, vec![0; fills.len()]));
     }
 
@@ -6047,9 +5989,9 @@ fn allocate_taker_fee_micro_units_by_key<K: Ord>(
     let mut total = ExactRatioV1::zero();
     let mut floor_units = Vec::with_capacity(fills.len());
     let mut remainders = Vec::with_capacity(fills.len());
-    for (_, base_units, price) in fills {
+    for ((_, base_units, _), price) in fills.iter().zip(&prices) {
         let contribution =
-            exact_taker_fee_contribution_v1(&BigUint::from(*base_units), *price, &rate, exponent)?;
+            exact_taker_fee_contribution_v1(&BigUint::from(*base_units), price, &rate, exponent)?;
         let (floor, remainder) =
             (&contribution.numerator * &fee_unit_scale).div_rem(&contribution.denominator);
         floor_units.push(floor);
@@ -6115,17 +6057,13 @@ pub(crate) fn allocate_taker_fee_micro_units_v1(
 
 pub(crate) fn exact_taker_fee_contribution_v1(
     base_units: &BigUint,
-    price: Decimal,
+    price: &ExactRatioV1,
     rate: &ExactRatioV1,
     exponent: u32,
 ) -> Result<ExactRatioV1, MatchingMathErrorV1> {
-    if price <= Decimal::ZERO || price >= Decimal::ONE {
-        return Err(MatchingMathErrorV1::InvalidPrice);
-    }
     if base_units.is_zero() {
         return Ok(ExactRatioV1::zero());
     }
-    let price = positive_decimal_ratio(price)?;
     let curve_numerator = &price.numerator * (&price.denominator - &price.numerator);
     let curve_denominator = &price.denominator * &price.denominator;
     ExactRatioV1::new(
@@ -6182,8 +6120,8 @@ pub(crate) fn nonnegative_decimal_ratio(
     decimal_ratio(value)
 }
 
-fn positive_decimal_ratio(value: Decimal) -> Result<ExactRatioV1, MatchingMathErrorV1> {
-    if value <= Decimal::ZERO {
+pub(crate) fn fee_price_ratio_v1(value: Decimal) -> Result<ExactRatioV1, MatchingMathErrorV1> {
+    if value <= Decimal::ZERO || value >= Decimal::ONE {
         return Err(MatchingMathErrorV1::InvalidPrice);
     }
     decimal_ratio(value)
@@ -6197,20 +6135,10 @@ fn decimal_ratio(value: Decimal) -> Result<ExactRatioV1, MatchingMathErrorV1> {
 }
 
 fn fee_upper_bound_rounds_to_zero(
-    fills: &[(u128, Decimal)],
+    total_base_units: BigUint,
     rate: &ExactRatioV1,
     exponent: u32,
 ) -> Result<bool, MatchingMathErrorV1> {
-    for (_, price) in fills {
-        if *price <= Decimal::ZERO || *price >= Decimal::ONE {
-            return Err(MatchingMathErrorV1::InvalidPrice);
-        }
-    }
-    let total_base_units = fills
-        .iter()
-        .fold(BigUint::zero(), |total, (base_units, _)| {
-            total + BigUint::from(*base_units)
-        });
     let left = total_base_units * &rate.numerator * BigUint::from(200_000_u32);
     let right_unshifted = BigUint::from(1_000_000_u32) * &rate.denominator;
     exact_less_than_power_of_two_shift(&left, &right_unshifted, u64::from(exponent) * 2)
@@ -6296,6 +6224,55 @@ mod tests {
             .zip(allocations)
             .map(|((identity, _, _), units)| ((*identity).to_owned(), *units))
             .collect()
+    }
+
+    #[test]
+    fn limit_segment_matches_finite_cash_allowance_enumeration() {
+        // 独立枚举实际付款与订单剩余额度，包含三种斜率、floor 余数和改善价信用。
+        for (
+            external_base,
+            external_quote,
+            consumed,
+            limit,
+            order_base,
+            order_quote,
+            matched,
+            used,
+        ) in [
+            (10_u128, 5, 0, 10, 10, 5, 0, 0),
+            (10, 4, 0, 10, 10, 6, 0, 0),
+            (10, 7, 0, 10, 10, 4, 0, 0),
+            (11, 7, 3, 6, 13, 8, 4, 2),
+            (11, 7, 3, 6, 13, 8, 4, 0),
+            (12, 6, 1, 7, 14, 7, 3, 1),
+            (17, 12, 2, 8, 19, 8, 5, 0),
+            (10, 1, 0, 9, 10, 5, 0, 0),
+            (10, 1, 0, 10, 10, 5, 0, 0),
+        ] {
+            let expected = (1..=limit)
+                .filter_map(|delta| {
+                    let charge = (consumed + delta) * external_quote / external_base
+                        - consumed * external_quote / external_base;
+                    let allowance = (matched + delta) * order_quote / order_base - used;
+                    (charge > 0 && charge <= allowance).then_some((delta, charge))
+                })
+                .last();
+            assert_eq!(
+                maximum_base_for_limit_order_segment_v1(
+                    external_base,
+                    external_quote,
+                    consumed,
+                    limit,
+                    order_base,
+                    order_quote,
+                    matched,
+                    used,
+                )
+                .expect("有效限价段可计算"),
+                expected,
+                "external={external_base}/{external_quote}, consumed={consumed}, limit={limit}, order={order_base}/{order_quote}, matched={matched}, used={used}"
+            );
+        }
     }
 
     #[test]
@@ -6449,7 +6426,6 @@ mod tests {
             Some(AssetVenueDustCandidateV2 {
                 platform_order_id: "immediate-dust-order".to_owned(),
                 price_pusd_per_share: bid_price,
-                remaining_base_units: 2,
             })
         );
 
@@ -6464,7 +6440,6 @@ mod tests {
             Some(AssetVenueDustCandidateV2 {
                 platform_order_id: "dust-order".to_owned(),
                 price_pusd_per_share: bid_price,
-                remaining_base_units: 3,
             })
         );
     }
@@ -6698,7 +6673,6 @@ mod tests {
         );
         assert_eq!(state.fills[&1].base_units, 4);
         assert_eq!(state.fills[&1].quote_units, 1);
-        assert!(state.maker_rebate.pending_fill_sequences.contains(&1));
         assert_eq!(
             state.maker_rebate.markets[&condition_id.0].pending_fill_count,
             1
@@ -8973,8 +8947,8 @@ mod tests {
             let expected_resources = match platform_event_at_utc_ms {
                 6_310 | 6_500 => (1, 1, 0, 0),
                 // 成功贡献的原 trade_id 从市场迁入日桶；Taker 终局也保留其贡献引用。
-                7_310 if resolution_first => (3, 5, 11, 5),
-                7_310 => (3, 4, 11, 5),
+                7_310 if resolution_first => (3, 4, 11, 5),
+                7_310 => (3, 3, 11, 5),
                 7_500 if resolution_first => (1, 2, 5, 0),
                 7_500 => (1, 1, 5, 0),
                 _ => unreachable!("判定顺序测试只推进四个固定最终性时点"),
@@ -9258,7 +9232,7 @@ mod tests {
                 outcome_balances: vec![("1".to_owned(), Decimal::ZERO)],
                 fill_finality_ordinals: vec![(1, 2, true), (2, 2, true)],
                 effect_counts: [1, 1, 1, 1, 2, 2],
-                economic_record_delta: -4,
+                economic_record_delta: -3,
                 economic_byte_delta: 71, // 两个日桶保留原 sim-1 / sim-2 贡献引用。
                 next_account_transition_seq: 12,
             }
