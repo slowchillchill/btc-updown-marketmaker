@@ -69,7 +69,6 @@ fn metadata_snapshot_row() -> PolymarketMarketMetadataRow {
         closed: Some(false),
         closed_time_raw: None,
         closed_time_utc: None,
-        closed_time_check_passed: None,
         closed_time_check_failure_reason: None,
         automatically_resolved: None,
         uma_resolution_status: None,
@@ -97,7 +96,6 @@ fn metadata_snapshot_row() -> PolymarketMarketMetadataRow {
         resolution_transport_unavailable_count: None,
         resolution_missed_slot_count: None,
         last_valid_metadata_received_utc: None,
-        terminal_predicate_passed: None,
         terminal_predicate_failure_reason: None,
         response_fields_unavailable_reason: None,
         ws_claimant_source_sequence_epoch_id: None,
@@ -177,7 +175,7 @@ fn resolution_followup_summary_row(
     row.closed = None;
     row.closed_time_raw = None;
     row.closed_time_utc = None;
-    row.closed_time_check_passed = None;
+
     row.closed_time_check_failure_reason = None;
     row.automatically_resolved = None;
     row.uma_resolution_status = None;
@@ -214,7 +212,7 @@ fn resolution_followup_summary_row(
         }
         _ => {}
     }
-    row.terminal_predicate_passed = None;
+
     row.terminal_predicate_failure_reason = None;
     row.response_fields_unavailable_reason =
         Some(MetadataResponseFieldsUnavailableReason::NotApplicableForRowKind);

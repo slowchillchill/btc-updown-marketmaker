@@ -123,7 +123,6 @@ fn terminal_metadata_row(market: &MarketIdentityV2) -> PolymarketMarketMetadataR
         closed: None,
         closed_time_raw: None,
         closed_time_utc: None,
-        closed_time_check_passed: None,
         closed_time_check_failure_reason: None,
         automatically_resolved: None,
         uma_resolution_status: None,
@@ -151,7 +150,6 @@ fn terminal_metadata_row(market: &MarketIdentityV2) -> PolymarketMarketMetadataR
         resolution_transport_unavailable_count: None,
         resolution_missed_slot_count: None,
         last_valid_metadata_received_utc: None,
-        terminal_predicate_passed: Some(true),
         terminal_predicate_failure_reason: None,
         response_fields_unavailable_reason: None,
         ws_claimant_source_sequence_epoch_id: Some(WS_EPOCH.to_owned()),
@@ -266,7 +264,7 @@ fn gamma_terminal_metadata_row(market: &MarketIdentityV2) -> PolymarketMarketMet
     row.closed = Some(true);
     row.closed_time_raw = Some("1970-01-01T00:05:01.018Z".to_owned());
     row.closed_time_utc = Some(market.window.end_at_utc_ms + 18_000);
-    row.closed_time_check_passed = Some(true);
+
     row.closed_time_check_failure_reason = None;
     row.automatically_resolved = Some(true);
     row.uma_resolution_status = Some("resolved".to_owned());
@@ -284,7 +282,7 @@ fn gamma_terminal_metadata_row(market: &MarketIdentityV2) -> PolymarketMarketMet
     row.resolution_poll_result = Some(MetadataResolutionPollResult::Terminal);
     row.resolution_followup_status = Some(MetadataResolutionFollowupStatus::TerminalGammaFallback);
     row.resolution_integrity_error_class = None;
-    row.terminal_predicate_passed = Some(true);
+
     row.terminal_predicate_failure_reason = None;
     row.response_fields_unavailable_reason = None;
     row.ws_claimant_source_sequence_epoch_id = None;

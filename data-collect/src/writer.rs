@@ -963,7 +963,6 @@ fn polymarket_market_metadata_common_columns(
         optional_bool_values(rows.iter().map(|row| row.closed)),
         optional_strings(rows.iter().map(|row| row.closed_time_raw.as_deref())),
         optional_timestamp_values(rows.iter().map(|row| row.closed_time_utc)),
-        optional_bool_values(rows.iter().map(|row| row.closed_time_check_passed)),
         optional_strings(rows.iter().map(|row| {
             row.closed_time_check_failure_reason
                 .map(|value| value.as_str())
@@ -1029,7 +1028,6 @@ fn polymarket_market_metadata_common_columns(
         ),
         optional_uint32_values(rows.iter().map(|row| row.resolution_missed_slot_count)),
         optional_timestamp_values(rows.iter().map(|row| row.last_valid_metadata_received_utc)),
-        optional_bool_values(rows.iter().map(|row| row.terminal_predicate_passed)),
         optional_strings(rows.iter().map(|row| {
             row.terminal_predicate_failure_reason
                 .map(|value| value.as_str())

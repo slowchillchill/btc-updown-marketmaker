@@ -94,7 +94,6 @@ pub struct GammaTerminalWinner {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GammaTerminalEvaluation {
-    pub terminal_predicate_passed: Option<bool>,
     pub terminal_predicate_failure_reason: Option<TerminalPredicateFailureReason>,
     pub resolution_poll_result: ResolutionPollResult,
     pub resolution_integrity_error_class: Option<ResolutionIntegrityErrorClass>,
@@ -371,7 +370,6 @@ fn finalize_gamma_terminal(
     });
 
     GammaTerminalEvaluation {
-        terminal_predicate_passed: Some(true),
         terminal_predicate_failure_reason: None,
         resolution_poll_result: ResolutionPollResult::Terminal,
         resolution_integrity_error_class: None,
@@ -389,7 +387,6 @@ fn source_failure(
     closed_time_utc_ms: Option<i64>,
 ) -> GammaTerminalEvaluation {
     GammaTerminalEvaluation {
-        terminal_predicate_passed: Some(false),
         terminal_predicate_failure_reason: Some(reason),
         resolution_poll_result: reason.poll_result(),
         resolution_integrity_error_class: reason.integrity_error_class(),
@@ -406,7 +403,6 @@ fn not_evaluated(
     closed_time_raw: Option<String>,
 ) -> GammaTerminalEvaluation {
     GammaTerminalEvaluation {
-        terminal_predicate_passed: None,
         terminal_predicate_failure_reason: None,
         resolution_poll_result: ResolutionPollResult::IntegrityError,
         resolution_integrity_error_class: Some(class),

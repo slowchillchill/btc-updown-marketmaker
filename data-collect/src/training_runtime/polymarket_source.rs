@@ -1904,14 +1904,6 @@ impl PolymarketProcessingContext {
             updated.retain(|candidate| !same_identity(candidate));
         }
         updated.push(authority);
-        if updated.len() > POLYMARKET_PENDING_MAX_MARKETS.saturating_add(2) {
-            return Err(invalid_data(format!(
-                "Polymarket source authority bound exceeded:count={}:limit={}",
-                updated.len(),
-                POLYMARKET_PENDING_MAX_MARKETS.saturating_add(2)
-            ))
-            .into());
-        }
         let previous = std::mem::replace(&mut self.source_authorities, updated);
         if let Err(error) = self.ensure_pending_bounds() {
             self.source_authorities = previous;
@@ -3112,7 +3104,7 @@ where
         run_started,
     )
     .await?;
-    ensure_polymarket_resolution_task_bound(resolution_poll_tasks, context)
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3184,7 +3176,7 @@ where
         run_started,
     )
     .await?;
-    ensure_polymarket_resolution_task_bound(resolution_poll_tasks, context)?;
+
     finalize_polymarket_outer_ready_pending(
         timeline_now,
         context,
@@ -3381,7 +3373,7 @@ where
                 run_started,
             )
             .await?;
-            ensure_polymarket_resolution_task_bound(resolution_poll_tasks, context)?;
+
             let fatal_integrity =
                 finalize_polymarket_ready_pending_while_paused(
                     timeline_now,
@@ -4474,7 +4466,7 @@ where
         )
         .await?;
     }
-    ensure_polymarket_resolution_task_bound(resolution_poll_tasks, context)
+    Ok(())
 }
 
 async fn drain_all_gamma_resolution_polls<N>(
@@ -4498,35 +4490,6 @@ where
             run_started,
         )
         .await?;
-    }
-    ensure_polymarket_resolution_task_bound(resolution_poll_tasks, context)
-}
-
-pub(super) fn ensure_polymarket_resolution_task_bound(
-    resolution_poll_tasks: &JoinSet<GammaResolutionPollCompletion>,
-    context: &PolymarketProcessingContext,
-) -> Result<()> {
-    let in_flight = context
-        .pending
-        .values()
-        .filter(|pending| pending.in_flight_ordinal.is_some())
-        .count();
-    let abort_handles = context
-        .pending
-        .values()
-        .filter(|pending| pending.poll_abort_handle.is_some())
-        .count();
-    let tasks = resolution_poll_tasks.len();
-    if tasks > POLYMARKET_PENDING_MAX_MARKETS
-        || in_flight > POLYMARKET_PENDING_MAX_MARKETS
-        || abort_handles > POLYMARKET_PENDING_MAX_MARKETS
-        || tasks != in_flight
-        || tasks != abort_handles
-    {
-        return Err(invalid_data(format!(
-            "Polymarket resolution task ownership invariant failed:tasks={tasks}:in_flight={in_flight}:abort_handles={abort_handles}:limit={POLYMARKET_PENDING_MAX_MARKETS}"
-        ))
-        .into());
     }
     Ok(())
 }
@@ -4620,7 +4583,7 @@ where
         pending.in_flight_ordinal = Some(ordinal);
         pending.poll_abort_handle = Some(handle);
     }
-    ensure_polymarket_resolution_task_bound(resolution_poll_tasks, context)
+    Ok(())
 }
 
 fn next_polymarket_outer_actor_at<N>(

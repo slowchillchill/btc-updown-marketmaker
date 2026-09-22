@@ -2832,7 +2832,6 @@ fn terminal_conflict_reason(
             != Some(MetadataResolutionEvidenceSource::MarketResolvedWs)
         || metadata.terminal_claim_owner != Some(MetadataTerminalClaimOwner::MarketResolvedWs)
         || metadata.resolution_followup_status != Some(MetadataResolutionFollowupStatus::TerminalWs)
-        || metadata.terminal_predicate_passed != Some(true)
         || metadata.market_lifecycle_state != MetadataMarketLifecycleState::Retired
         || metadata.market_lifecycle_transition
             != Some(MetadataMarketLifecycleTransition::ActiveToRetired)
@@ -3008,11 +3007,13 @@ fn gamma_terminal_conflict_reason<E: ReductionEvidenceV1>(
         || row.resolution_poll_result != Some(MetadataResolutionPollResult::Terminal)
         || row.resolution_followup_status
             != Some(MetadataResolutionFollowupStatus::TerminalGammaFallback)
-        || row.terminal_predicate_passed != Some(true)
         || row.resolution_integrity_error_class.is_some()
         || row.closed != Some(true)
         || row.accepting_orders != Some(false)
-        || row.closed_time_check_passed != Some(true)
+        || row
+            .closed_time_utc
+            .is_none_or(|closed| closed < row.market_end_utc)
+        || row.closed_time_check_failure_reason.is_some()
         || !row
             .uma_resolution_status
             .as_deref()

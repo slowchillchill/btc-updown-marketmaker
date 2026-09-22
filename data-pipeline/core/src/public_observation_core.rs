@@ -750,7 +750,6 @@ impl PublicObservationCoreV1 {
                         == PolymarketMetadataRowKind::ResolutionPollAttempt
                         && row.resolution_poll_result
                             == Some(MetadataResolutionPollResult::Terminal)
-                        && row.terminal_predicate_passed == Some(true)
                         && row.resolution_evidence_source
                             == Some(MetadataResolutionEvidenceSource::GammaBySlug);
                     let batch = if gamma {

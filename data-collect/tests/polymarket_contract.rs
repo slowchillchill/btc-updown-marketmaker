@@ -70,7 +70,7 @@ fn gamma_terminal_predicate_contract() {
         gamma_terminal_attempt(),
         GammaTerminalResponse::Decoded(&market),
     );
-    assert_eq!(evaluation.terminal_predicate_passed, Some(true));
+
     assert_eq!(evaluation.terminal_predicate_failure_reason, None);
     assert_eq!(
         evaluation.resolution_poll_result,
@@ -105,7 +105,7 @@ fn gamma_terminal_predicate_contract() {
         gamma_terminal_attempt(),
         GammaTerminalResponse::Decoded(&future_closed_time_market),
     );
-    assert_eq!(evaluation.terminal_predicate_passed, Some(true));
+
     assert!(
         evaluation.closed_time_utc_ms.unwrap() > gamma_terminal_attempt().received_at_utc_ms,
         "closedTime has no future-skew gate against response receive time"
@@ -138,7 +138,7 @@ fn gamma_terminal_predicate_contract() {
         gamma_terminal_attempt(),
         GammaTerminalResponse::Decoded(&active_null_market),
     );
-    assert_eq!(evaluation.terminal_predicate_passed, Some(true));
+
     assert_eq!(evaluation.observed_active, None);
     assert_eq!(
         evaluation.resolution_poll_result,
@@ -153,7 +153,7 @@ fn gamma_terminal_predicate_contract() {
         gamma_terminal_attempt(),
         GammaTerminalResponse::Decoded(&active_false_market),
     );
-    assert_eq!(evaluation.terminal_predicate_passed, Some(true));
+
     assert_eq!(evaluation.observed_active, Some(false));
     assert_eq!(
         evaluation.resolution_poll_result,
@@ -313,12 +313,7 @@ fn gamma_terminal_predicate_contract() {
             gamma_terminal_attempt(),
             GammaTerminalResponse::Decoded(&market),
         );
-        assert_eq!(
-            evaluation.terminal_predicate_passed,
-            Some(false),
-            "{} predicate",
-            expected_reason.as_str()
-        );
+
         assert_eq!(
             evaluation.terminal_predicate_failure_reason,
             Some(expected_reason),
@@ -381,7 +376,7 @@ fn gamma_terminal_predicate_not_evaluated_boundaries() {
             attempt,
             GammaTerminalResponse::Decoded(&market),
         );
-        assert_eq!(evaluation.terminal_predicate_passed, None);
+
         assert_eq!(evaluation.terminal_predicate_failure_reason, None);
         assert_eq!(evaluation.observed_active, Some(true));
         assert_eq!(
@@ -399,7 +394,7 @@ fn gamma_terminal_predicate_not_evaluated_boundaries() {
         gamma_terminal_attempt(),
         GammaTerminalResponse::SdkDecodeOrSchemaError,
     );
-    assert_eq!(evaluation.terminal_predicate_passed, None);
+
     assert_eq!(evaluation.terminal_predicate_failure_reason, None);
     assert_eq!(evaluation.observed_active, None);
     assert_eq!(evaluation.closed_time_raw, None);

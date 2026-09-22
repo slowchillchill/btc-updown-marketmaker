@@ -569,7 +569,6 @@ pub struct PolymarketMarketMetadataRow {
     pub closed: Option<bool>,
     pub closed_time_raw: Option<String>,
     pub closed_time_utc: Option<i64>,
-    pub closed_time_check_passed: Option<bool>,
     pub closed_time_check_failure_reason: Option<ClosedTimeCheckFailureReason>,
     pub automatically_resolved: Option<bool>,
     pub uma_resolution_status: Option<String>,
@@ -598,7 +597,6 @@ pub struct PolymarketMarketMetadataRow {
     pub resolution_transport_unavailable_count: Option<u32>,
     pub resolution_missed_slot_count: Option<u32>,
     pub last_valid_metadata_received_utc: Option<i64>,
-    pub terminal_predicate_passed: Option<bool>,
     pub terminal_predicate_failure_reason: Option<TerminalPredicateFailureReason>,
     pub response_fields_unavailable_reason: Option<ResponseFieldsUnavailableReason>,
 }
@@ -989,16 +987,44 @@ impl PolymarketMarketMetadataRow {
     }
 
     fn validate_closed_time(&self, report: &mut PolymarketMarketMetadataValidation) {
-        match self.closed_time_check_passed {
-            Some(true) => {
+        match self.closed_time_check_failure_reason {
+            Some(ClosedTimeCheckFailureReason::Missing) => {
+                report.require_null("closed_time_raw", self.closed_time_raw.is_none());
+                report.require_null("closed_time_utc", self.closed_time_utc.is_none());
+            }
+            Some(ClosedTimeCheckFailureReason::ParseError) => {
+                report.require(
+                    "closed_time_raw",
+                    non_empty(self.closed_time_raw.as_deref()),
+                );
+                report.require_null("closed_time_utc", self.closed_time_utc.is_none());
+                if self
+                    .closed_time_raw
+                    .as_deref()
+                    .and_then(parse_polymarket_gamma_closed_time_utc_ms)
+                    .is_some()
+                {
+                    report.reject("closed_time_raw:unexpected_parse_success");
+                }
+            }
+            Some(ClosedTimeCheckFailureReason::BeforeMarketEnd) => {
                 report.require(
                     "closed_time_raw",
                     non_empty(self.closed_time_raw.as_deref()),
                 );
                 report.require("closed_time_utc", self.closed_time_utc.is_some());
-                report.require_null(
-                    "closed_time_check_failure_reason",
-                    self.closed_time_check_failure_reason.is_none(),
+                self.validate_closed_time_raw_matches_utc(report);
+                if self
+                    .closed_time_utc
+                    .is_some_and(|closed_time| closed_time >= self.market_end_utc)
+                {
+                    report.reject("closed_time_utc:not_before_market_end");
+                }
+            }
+            None if self.closed_time_utc.is_some() => {
+                report.require(
+                    "closed_time_raw",
+                    non_empty(self.closed_time_raw.as_deref()),
                 );
                 self.validate_closed_time_raw_matches_utc(report);
                 if self
@@ -1008,46 +1034,7 @@ impl PolymarketMarketMetadataRow {
                     report.reject("closed_time_utc:before_market_end");
                 }
             }
-            Some(false) => match self.closed_time_check_failure_reason {
-                Some(ClosedTimeCheckFailureReason::Missing) => {
-                    report.require_null("closed_time_raw", self.closed_time_raw.is_none());
-                    report.require_null("closed_time_utc", self.closed_time_utc.is_none());
-                }
-                Some(ClosedTimeCheckFailureReason::ParseError) => {
-                    report.require(
-                        "closed_time_raw",
-                        non_empty(self.closed_time_raw.as_deref()),
-                    );
-                    report.require_null("closed_time_utc", self.closed_time_utc.is_none());
-                    if self
-                        .closed_time_raw
-                        .as_deref()
-                        .and_then(parse_polymarket_gamma_closed_time_utc_ms)
-                        .is_some()
-                    {
-                        report.reject("closed_time_raw:unexpected_parse_success");
-                    }
-                }
-                Some(ClosedTimeCheckFailureReason::BeforeMarketEnd) => {
-                    report.require(
-                        "closed_time_raw",
-                        non_empty(self.closed_time_raw.as_deref()),
-                    );
-                    report.require("closed_time_utc", self.closed_time_utc.is_some());
-                    self.validate_closed_time_raw_matches_utc(report);
-                    if self
-                        .closed_time_utc
-                        .is_some_and(|closed_time| closed_time >= self.market_end_utc)
-                    {
-                        report.reject("closed_time_utc:not_before_market_end");
-                    }
-                }
-                None => report.require("closed_time_check_failure_reason", false),
-            },
-            None => report.require_null(
-                "closed_time_check_failure_reason",
-                self.closed_time_check_failure_reason.is_none(),
-            ),
+            None => {}
         }
     }
 
@@ -1128,10 +1115,6 @@ impl PolymarketMarketMetadataRow {
             self.resolution_followup_status.is_none(),
         );
         report.require_null(
-            "terminal_predicate_passed",
-            self.terminal_predicate_passed.is_none(),
-        );
-        report.require_null(
             "terminal_predicate_failure_reason",
             self.terminal_predicate_failure_reason.is_none(),
         );
@@ -1161,10 +1144,6 @@ impl PolymarketMarketMetadataRow {
         self.require_no_attempt(report);
         self.require_no_terminal_ownership(report);
         self.require_no_summary_counters(report);
-        report.require_null(
-            "terminal_predicate_passed",
-            self.terminal_predicate_passed.is_none(),
-        );
         report.require_null(
             "terminal_predicate_failure_reason",
             self.terminal_predicate_failure_reason.is_none(),
@@ -1383,9 +1362,6 @@ impl PolymarketMarketMetadataRow {
             report.reject("resolution_evidence_source:terminal_gamma_attempt");
         }
         self.require_owned_terminal_values(report, asset_ids);
-        if self.terminal_predicate_passed != Some(true) {
-            report.reject("terminal_predicate_passed:terminal_gamma_attempt");
-        }
         report.require_null(
             "terminal_predicate_failure_reason",
             self.terminal_predicate_failure_reason.is_none(),
@@ -1409,9 +1385,6 @@ impl PolymarketMarketMetadataRow {
         self.require_gamma_decoded_evidence(report);
         if self.metadata_origin != PolymarketMetadataOrigin::GammaBySlug {
             report.reject("metadata_origin:valid_nonterminal_attempt");
-        }
-        if self.terminal_predicate_passed != Some(false) {
-            report.reject("terminal_predicate_passed:valid_nonterminal_attempt");
         }
         if !self
             .terminal_predicate_failure_reason
@@ -1511,9 +1484,6 @@ impl PolymarketMarketMetadataRow {
             }
             Some(ResolutionIntegrityErrorClass::SourceIdentityOrShapeContradiction) => {
                 self.require_gamma_decoded_evidence(report);
-                if self.terminal_predicate_passed != Some(false) {
-                    report.reject("terminal_predicate_passed:source_integrity_attempt");
-                }
                 if !self
                     .terminal_predicate_failure_reason
                     .is_some_and(|reason| {
@@ -1528,9 +1498,6 @@ impl PolymarketMarketMetadataRow {
             }
             Some(ResolutionIntegrityErrorClass::ClosedTimeInvalid) => {
                 self.require_gamma_decoded_evidence(report);
-                if self.terminal_predicate_passed != Some(false) {
-                    report.reject("terminal_predicate_passed:closed_time_integrity_attempt");
-                }
                 if !self
                     .terminal_predicate_failure_reason
                     .is_some_and(|reason| {
@@ -1600,21 +1567,9 @@ impl PolymarketMarketMetadataRow {
         if self.terminal_claim_owner != Some(TerminalClaimOwner::MarketResolvedWs) {
             report.reject("terminal_claim_owner:post_terminal_attempt");
         }
-        report.require(
-            "terminal_predicate_passed",
-            self.terminal_predicate_passed.is_some(),
-        );
-        if self.terminal_predicate_passed == Some(true) {
-            report.require_null(
-                "terminal_predicate_failure_reason",
-                self.terminal_predicate_failure_reason.is_none(),
-            );
-        } else if self.terminal_predicate_passed == Some(false)
-            && !self
-                .terminal_predicate_failure_reason
-                .is_some_and(|reason| {
-                    reason.poll_result() == ResolutionPollResult::ValidNonterminal
-                })
+        if self
+            .terminal_predicate_failure_reason
+            .is_some_and(|reason| reason.poll_result() != ResolutionPollResult::ValidNonterminal)
         {
             report.reject("terminal_predicate_failure_reason:post_terminal_attempt");
         }
@@ -1717,9 +1672,6 @@ impl PolymarketMarketMetadataRow {
             report.reject("resolution_evidence_source:resolution_terminal_ws");
         }
         self.require_owned_terminal_values(report, asset_ids);
-        if self.terminal_predicate_passed != Some(true) {
-            report.reject("terminal_predicate_passed:resolution_terminal_ws");
-        }
         report.require_null(
             "terminal_predicate_failure_reason",
             self.terminal_predicate_failure_reason.is_none(),
@@ -2050,10 +2002,6 @@ impl PolymarketMarketMetadataRow {
             ("closed_time_raw", self.closed_time_raw.is_none()),
             ("closed_time_utc", self.closed_time_utc.is_none()),
             (
-                "closed_time_check_passed",
-                self.closed_time_check_passed.is_none(),
-            ),
-            (
                 "closed_time_check_failure_reason",
                 self.closed_time_check_failure_reason.is_none(),
             ),
@@ -2205,10 +2153,6 @@ impl PolymarketMarketMetadataRow {
 
     fn require_not_evaluated_predicate(&self, report: &mut PolymarketMarketMetadataValidation) {
         report.require_null(
-            "terminal_predicate_passed",
-            self.terminal_predicate_passed.is_none(),
-        );
-        report.require_null(
             "terminal_predicate_failure_reason",
             self.terminal_predicate_failure_reason.is_none(),
         );
@@ -2237,9 +2181,11 @@ impl PolymarketMarketMetadataRow {
         if self.accepting_orders != Some(false) {
             report.reject("accepting_orders:terminal_gamma_attempt");
         }
-        if self.closed_time_check_passed != Some(true) {
-            report.reject("closed_time_check_passed:terminal_gamma_attempt");
-        }
+        report.require("closed_time_utc", self.closed_time_utc.is_some());
+        report.require_null(
+            "closed_time_check_failure_reason",
+            self.closed_time_check_failure_reason.is_none(),
+        );
         if self
             .uma_resolution_status
             .as_deref()
@@ -2544,7 +2490,6 @@ pub fn polymarket_market_metadata_v3_schema() -> Arc<Schema> {
         Field::new("closed", DataType::Boolean, true),
         Field::new("closed_time_raw", DataType::Utf8, true),
         v3_timestamp_field("closed_time_utc", true),
-        Field::new("closed_time_check_passed", DataType::Boolean, true),
         Field::new("closed_time_check_failure_reason", DataType::Utf8, true),
         Field::new("automatically_resolved", DataType::Boolean, true),
         Field::new("uma_resolution_status", DataType::Utf8, true),
@@ -2577,7 +2522,6 @@ pub fn polymarket_market_metadata_v3_schema() -> Arc<Schema> {
         ),
         Field::new("resolution_missed_slot_count", DataType::UInt32, true),
         v3_timestamp_field("last_valid_metadata_received_utc", true),
-        Field::new("terminal_predicate_passed", DataType::Boolean, true),
         Field::new("terminal_predicate_failure_reason", DataType::Utf8, true),
         Field::new("response_fields_unavailable_reason", DataType::Utf8, true),
     ]))

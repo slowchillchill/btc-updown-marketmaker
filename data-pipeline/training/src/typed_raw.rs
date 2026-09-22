@@ -330,7 +330,19 @@ pub(crate) fn validate_physical_schema_against(
     expected: &Schema,
     actual: &Schema,
 ) -> Result<(), TypedRawReadError> {
-    if expected.fields().len() != actual.fields().len() {
+    // 历史 metadata 文件中的两列自证布尔已废弃，读取只投影现用业务字段。
+    let actual_fields = actual
+        .fields()
+        .iter()
+        .filter(|field| {
+            source_kind != POLYMARKET_METADATA_SOURCE
+                || !matches!(
+                    field.name().as_str(),
+                    "terminal_predicate_passed" | "closed_time_check_passed"
+                )
+        })
+        .collect::<Vec<_>>();
+    if expected.fields().len() != actual_fields.len() {
         return Err(TypedRawReadError::PhysicalSchema {
             source_kind: source_kind.to_owned(),
             schema_version: schema_version.to_owned(),
@@ -338,16 +350,11 @@ pub(crate) fn validate_physical_schema_against(
             detail: format!(
                 "字段数期望 {}，实际 {}",
                 expected.fields().len(),
-                actual.fields().len()
+                actual_fields.len()
             ),
         });
     }
-    for (index, (expected, actual)) in expected
-        .fields()
-        .iter()
-        .zip(actual.fields().iter())
-        .enumerate()
-    {
+    for (index, (expected, actual)) in expected.fields().iter().zip(actual_fields).enumerate() {
         if expected.name() != actual.name()
             || expected.data_type() != actual.data_type()
             || expected.is_nullable() != actual.is_nullable()
@@ -490,7 +497,6 @@ fn polymarket_metadata_schema() -> SchemaRef {
         Field::new("closed", DataType::Boolean, true),
         Field::new("closed_time_raw", DataType::Utf8, true),
         timestamp_field("closed_time_utc", true),
-        Field::new("closed_time_check_passed", DataType::Boolean, true),
         Field::new("closed_time_check_failure_reason", DataType::Utf8, true),
         Field::new("automatically_resolved", DataType::Boolean, true),
         Field::new("uma_resolution_status", DataType::Utf8, true),
@@ -522,7 +528,6 @@ fn polymarket_metadata_schema() -> SchemaRef {
         ),
         Field::new("resolution_missed_slot_count", DataType::UInt32, true),
         timestamp_field("last_valid_metadata_received_utc", true),
-        Field::new("terminal_predicate_passed", DataType::Boolean, true),
         Field::new("terminal_predicate_failure_reason", DataType::Utf8, true),
         Field::new("response_fields_unavailable_reason", DataType::Utf8, true),
         Field::new("ws_claimant_source_sequence_epoch_id", DataType::Utf8, true),
@@ -1621,118 +1626,111 @@ fn decode_polymarket_metadata(
                     "closed_time_utc",
                     context,
                 )?,
-                closed_time_check_passed: optional_bool_column(
-                    batch,
-                    36,
-                    row,
-                    "closed_time_check_passed",
-                    context,
-                )?,
                 closed_time_check_failure_reason: optional_enum_column::<
                     MetadataClosedTimeCheckFailureReason,
                 >(
                     batch,
-                    37,
+                    36,
                     row,
                     "closed_time_check_failure_reason",
                     context,
                 )?,
                 automatically_resolved: optional_bool_column(
                     batch,
-                    38,
+                    37,
                     row,
                     "automatically_resolved",
                     context,
                 )?,
                 uma_resolution_status: optional_string_column(
                     batch,
-                    39,
+                    38,
                     row,
                     "uma_resolution_status",
                     context,
                 )?,
-                outcomes_raw: optional_string_column(batch, 40, row, "outcomes_raw", context)?,
+                outcomes_raw: optional_string_column(batch, 39, row, "outcomes_raw", context)?,
                 outcome_prices_raw: optional_string_column(
                     batch,
-                    41,
+                    40,
                     row,
                     "outcome_prices_raw",
                     context,
                 )?,
-                active: optional_bool_column(batch, 42, row, "active", context)?,
+                active: optional_bool_column(batch, 41, row, "active", context)?,
                 active_unavailable_reason: optional_enum_column::<MetadataActiveUnavailableReason>(
                     batch,
-                    43,
+                    42,
                     row,
                     "active_unavailable_reason",
                     context,
                 )?,
                 accepting_orders: optional_bool_column(
                     batch,
-                    44,
+                    43,
                     row,
                     "accepting_orders",
                     context,
                 )?,
                 ws_platform_timestamp_raw: optional_string_column(
                     batch,
-                    45,
+                    44,
                     row,
                     "ws_platform_timestamp_raw",
                     context,
                 )?,
                 ws_platform_timestamp_utc: optional_timestamp_column(
                     batch,
-                    46,
+                    45,
                     row,
                     "ws_platform_timestamp_utc",
                     context,
                 )?,
                 winning_asset_id: optional_string_column(
                     batch,
-                    47,
+                    46,
                     row,
                     "winning_asset_id",
                     context,
                 )?,
                 winning_outcome: optional_string_column(
                     batch,
-                    48,
+                    47,
                     row,
                     "winning_outcome",
                     context,
                 )?,
                 resolution_evidence_source: optional_enum_column::<MetadataResolutionEvidenceSource>(
                     batch,
-                    49,
+                    48,
                     row,
                     "resolution_evidence_source",
                     context,
                 )?,
                 terminal_claim_owner: optional_enum_column::<MetadataTerminalClaimOwner>(
                     batch,
-                    50,
+                    49,
                     row,
                     "terminal_claim_owner",
                     context,
                 )?,
                 resolution_poll_attempt_ordinal: optional_u8_column(
                     batch,
-                    51,
+                    50,
                     row,
                     "resolution_poll_attempt_ordinal",
                     context,
                 )?,
                 resolution_poll_scheduled_utc: optional_timestamp_column(
                     batch,
-                    52,
+                    51,
                     row,
                     "resolution_poll_scheduled_utc",
                     context,
                 )?,
                 resolution_poll_result: optional_enum_column::<MetadataResolutionPollResult>(
                     batch,
-                    53,
+                    52,
                     row,
                     "resolution_poll_result",
                     context,
@@ -1741,14 +1739,14 @@ fn decode_polymarket_metadata(
                     MetadataResolutionTransportErrorClass,
                 >(
                     batch,
-                    54,
+                    53,
                     row,
                     "resolution_transport_error_class",
                     context,
                 )?,
                 resolution_transport_http_status: optional_u16_column(
                     batch,
-                    55,
+                    54,
                     row,
                     "resolution_transport_http_status",
                     context,
@@ -1757,72 +1755,65 @@ fn decode_polymarket_metadata(
                     MetadataResolutionIntegrityErrorClass,
                 >(
                     batch,
-                    56,
+                    55,
                     row,
                     "resolution_integrity_error_class",
                     context,
                 )?,
                 resolution_budget_horizon_utc: optional_timestamp_column(
                     batch,
-                    57,
+                    56,
                     row,
                     "resolution_budget_horizon_utc",
                     context,
                 )?,
                 resolution_followup_status: optional_enum_column::<MetadataResolutionFollowupStatus>(
                     batch,
-                    58,
+                    57,
                     row,
                     "resolution_followup_status",
                     context,
                 )?,
                 resolution_poll_attempts_recorded: optional_u32_column(
                     batch,
-                    59,
+                    58,
                     row,
                     "resolution_poll_attempts_recorded",
                     context,
                 )?,
                 resolution_valid_response_count: optional_u32_column(
                     batch,
-                    60,
+                    59,
                     row,
                     "resolution_valid_response_count",
                     context,
                 )?,
                 resolution_transport_unavailable_count: optional_u32_column(
                     batch,
-                    61,
+                    60,
                     row,
                     "resolution_transport_unavailable_count",
                     context,
                 )?,
                 resolution_missed_slot_count: optional_u32_column(
                     batch,
-                    62,
+                    61,
                     row,
                     "resolution_missed_slot_count",
                     context,
                 )?,
                 last_valid_metadata_received_utc: optional_timestamp_column(
                     batch,
-                    63,
+                    62,
                     row,
                     "last_valid_metadata_received_utc",
-                    context,
-                )?,
-                terminal_predicate_passed: optional_bool_column(
-                    batch,
-                    64,
-                    row,
-                    "terminal_predicate_passed",
                     context,
                 )?,
                 terminal_predicate_failure_reason: optional_enum_column::<
                     MetadataTerminalPredicateFailureReason,
                 >(
                     batch,
-                    65,
+                    63,
                     row,
                     "terminal_predicate_failure_reason",
                     context,
@@ -1831,21 +1822,21 @@ fn decode_polymarket_metadata(
                     MetadataResponseFieldsUnavailableReason,
                 >(
                     batch,
-                    66,
+                    64,
                     row,
                     "response_fields_unavailable_reason",
                     context,
                 )?,
                 ws_claimant_source_sequence_epoch_id: optional_string_column(
                     batch,
-                    67,
+                    65,
                     row,
                     "ws_claimant_source_sequence_epoch_id",
                     context,
                 )?,
                 ws_claimant_collector_admission_sequence: optional_u64_column(
                     batch,
-                    68,
+                    66,
                     row,
                     "ws_claimant_collector_admission_sequence",
                     context,

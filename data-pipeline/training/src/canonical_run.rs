@@ -1342,7 +1342,6 @@ impl PolymarketRunState {
         let is_gamma_terminal = input.row.metadata_row_kind
             == PolymarketMetadataRowKind::ResolutionPollAttempt
             && input.row.resolution_poll_result == Some(MetadataResolutionPollResult::Terminal)
-            && input.row.terminal_predicate_passed == Some(true)
             && input.row.resolution_evidence_source
                 == Some(MetadataResolutionEvidenceSource::GammaBySlug);
         if is_gamma_terminal {
