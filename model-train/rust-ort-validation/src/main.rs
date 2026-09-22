@@ -419,6 +419,9 @@ fn native_state(
             for (p, prefix) in row.fixture_prefixes.iter().enumerate() {
                 let mut offset = 0;
                 for (part, &length) in lengths.iter().enumerate() {
+                    if part > 0 && prefix[13] != 1. {
+                        break;
+                    }
                     let k = if empty { 1 } else { 256 };
                     let (objects, mask) = block(&c, offset, length, k, None);
                     let values = action(

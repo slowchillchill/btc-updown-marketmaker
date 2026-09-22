@@ -916,6 +916,38 @@ async fn same_process_cancel_actor_all_objects_and_original_identities() {
         session: session("action_decoder.onnx"),
         hidden,
     };
+    let mut single = NativeActor::new(g.clone(), 0).unwrap();
+    single.choose(3).unwrap();
+    let family = NativeActor::new(g.clone(), 0).unwrap();
+    let mut paired = NativeActor::new(g.clone(), 0).unwrap();
+    paired.choose(4).unwrap();
+    let reduced = scorer.reduced(&family, &z).unwrap();
+    let rows = [
+        (&single, z.as_slice(), reduced.as_slice()),
+        (&family, z.as_slice(), reduced.as_slice()),
+        (&paired, z.as_slice(), reduced.as_slice()),
+    ];
+    #[cfg(feature = "continuous-validation")]
+    {
+        scorer.measurement = (0, Some(Vec::new()));
+    }
+    let batch = scorer.scores_batch(&rows).unwrap();
+    #[cfg(feature = "continuous-validation")]
+    assert_eq!(
+        scorer.measurement,
+        (2, Some(vec![vec![256, 256, 256], vec![3, 3]]))
+    );
+    for (row, actual) in rows.iter().zip(batch) {
+        let expected = scorer.scores(row.0, row.1, row.2).unwrap();
+        assert_eq!(actual.len(), expected.len());
+        assert!(
+            actual
+                .iter()
+                .zip(expected)
+                .all(|(&a, b)| finite_close(a, b))
+        );
+    }
+    assert!(scorer.scores_batch(&[]).unwrap().is_empty());
     let mut actual = NativeActor::new(g.clone(), 0).unwrap();
     scorer.greedy(&mut actual, &z).unwrap();
     assert_eq!(actual.path, paths[0]);
