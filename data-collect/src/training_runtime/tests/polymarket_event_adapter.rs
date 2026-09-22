@@ -362,9 +362,10 @@ fn polymarket_v3_target_admission_keeps_one_ordered_mixed_price_change_projectio
     )
     .unwrap();
 
-    let admitted = target_admitted_polymarket_message(&message, &discovery, &asset_to_slug)
-        .unwrap()
-        .expect("mixed message retains target entries");
+    let admitted =
+        target_admitted_polymarket_message(&message, (&discovery).into(), &asset_to_slug)
+            .unwrap()
+            .expect("mixed message retains target entries");
     assert_eq!(
         admitted.matched_assets,
         BTreeSet::from(["101".to_owned(), "102".to_owned()])
@@ -400,7 +401,7 @@ fn polymarket_v3_target_admission_ignores_unmatched_and_rejects_target_contradic
     )
     .unwrap();
     assert!(
-        target_admitted_polymarket_message(&unmatched, &discovery, &asset_to_slug)
+        target_admitted_polymarket_message(&unmatched, (&discovery).into(), &asset_to_slug)
             .unwrap()
             .is_none()
     );
@@ -417,7 +418,7 @@ fn polymarket_v3_target_admission_ignores_unmatched_and_rejects_target_contradic
     )
     .unwrap();
     assert!(
-        target_admitted_polymarket_message(&contradictory, &discovery, &asset_to_slug,)
+        target_admitted_polymarket_message(&contradictory, (&discovery).into(), &asset_to_slug,)
             .unwrap_err()
             .to_string()
             .contains("contradictory condition_id")
@@ -491,9 +492,10 @@ fn polymarket_v3_seven_parser_fixtures_round_trip_after_real_target_admission() 
     for (index, raw) in cases.into_iter().enumerate() {
         let parsed = parse_if_interested(raw.as_bytes(), &MessageInterest::ALL).unwrap();
         assert_eq!(parsed.len(), 1);
-        let admitted = target_admitted_polymarket_message(&parsed[0], &discovery, &asset_to_slug)
-            .unwrap()
-            .expect("fixture must pass the real target-admission owner");
+        let admitted =
+            target_admitted_polymarket_message(&parsed[0], (&discovery).into(), &asset_to_slug)
+                .unwrap()
+                .expect("fixture must pass the real target-admission owner");
         messages.push(
             admitted
                 .polymarket_v3_projection()
@@ -590,8 +592,9 @@ fn polymarket_business_assets_must_match_their_message_condition() {
     };
     let asset_to_slug = discovery_asset_to_slug(&discovery);
     let assert_error = |message: WsMessage| {
-        let error = target_admitted_polymarket_message(&message, &discovery, &asset_to_slug)
-            .expect_err("a target asset under the wrong condition must be terminal");
+        let error =
+            target_admitted_polymarket_message(&message, (&discovery).into(), &asset_to_slug)
+                .expect_err("a target asset under the wrong condition must be terminal");
         assert!(error.to_string().contains("contradictory condition_id"));
     };
 

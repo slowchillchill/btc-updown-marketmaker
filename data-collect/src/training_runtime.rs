@@ -150,10 +150,7 @@ use crate::market_discovery::{
     BtcUpdownDiscovery, BtcUpdownMarketCandidate, CandidateRejectReason, DiscoveredBtcUpdownMarket,
     DiscoverySelectionError, discovery_windows, select_btc_updown_markets,
 };
-use crate::polymarket_identity::{
-    PolymarketMarketIdentity, SourceAuthority, VerifiedPolymarketMarketIdentity,
-    same_identity_authority, same_market_identity,
-};
+use crate::polymarket_identity::{SourceAuthority, same_identity_authority};
 #[cfg(test)]
 use crate::polymarket_market_metadata_layout::POLYMARKET_MARKET_METADATA_V3_SCHEMA_VERSION;
 use crate::polymarket_market_metadata_layout::{
@@ -4277,7 +4274,6 @@ mod tests {
                 next: None,
             };
             let mut context = PolymarketProcessingContext::new(discovery);
-            let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
             for _ in 0..polymarket_native_messages {
                 let message = match polymarket_runtime.recv(Duration::from_secs(5)).await {
                     Ok(Some(PolymarketDrainEvent::Message(message))) => message,
@@ -4293,7 +4289,6 @@ mod tests {
                     &polymarket_sink,
                     &polymarket_identity,
                     run_started,
-                    &mut recovery,
                 )
                 .await
                 .unwrap();
@@ -4306,7 +4301,6 @@ mod tests {
                 &polymarket_sink,
                 &polymarket_identity,
                 run_started,
-                &mut recovery,
             )
             .await
             .unwrap();

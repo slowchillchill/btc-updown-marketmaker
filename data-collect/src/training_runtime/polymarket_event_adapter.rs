@@ -4,6 +4,27 @@ use crate::polymarket_market_metadata_v6_layout::{
     POLYMARKET_MARKET_METADATA_V6_SCHEMA_VERSION, PolymarketMarketMetadataV6Row,
 };
 
+#[derive(Clone, Copy)]
+pub(super) struct PolymarketDiscoveryView<'a> {
+    pub(super) current: &'a DiscoveredBtcUpdownMarket,
+    pub(super) next: Option<&'a DiscoveredBtcUpdownMarket>,
+}
+
+impl<'a> From<&'a BtcUpdownDiscovery> for PolymarketDiscoveryView<'a> {
+    fn from(discovery: &'a BtcUpdownDiscovery) -> Self {
+        Self {
+            current: &discovery.current,
+            next: discovery.next.as_ref(),
+        }
+    }
+}
+
+impl<'a> PolymarketDiscoveryView<'a> {
+    pub(super) fn markets(self) -> impl Iterator<Item = &'a DiscoveredBtcUpdownMarket> + Clone {
+        std::iter::once(self.current).chain(self.next)
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct TargetAdmittedPolymarketMessage<'a> {
     pub(super) message: &'a WsMessage,
@@ -13,7 +34,7 @@ pub(super) struct TargetAdmittedPolymarketMessage<'a> {
 
 pub(super) fn target_admitted_polymarket_message<'a>(
     message: &'a WsMessage,
-    discovery: &BtcUpdownDiscovery,
+    discovery: PolymarketDiscoveryView<'_>,
     asset_to_slug: &BTreeMap<String, String>,
 ) -> Result<Option<TargetAdmittedPolymarketMessage<'a>>> {
     let mut matched_assets = BTreeSet::new();
@@ -162,13 +183,13 @@ impl TargetAdmittedPolymarketMessage<'_> {
 }
 
 fn verify_polymarket_business_asset<'a>(
-    discovery: &'a BtcUpdownDiscovery,
+    discovery: PolymarketDiscoveryView<'a>,
     asset_to_slug: &BTreeMap<String, String>,
     condition_id: &str,
     asset_id: &str,
 ) -> Result<Option<&'a str>> {
-    let Some(market) = std::iter::once(&discovery.current)
-        .chain(discovery.next.as_ref())
+    let Some(market) = discovery
+        .markets()
         .find(|market| market.up_asset_id == asset_id || market.down_asset_id == asset_id)
     else {
         return Ok(None);
@@ -187,7 +208,7 @@ fn verify_polymarket_business_asset<'a>(
 
 #[allow(clippy::too_many_arguments)]
 fn verify_target_market_identity<'a>(
-    discovery: &'a BtcUpdownDiscovery,
+    discovery: PolymarketDiscoveryView<'a>,
     clob_market_id: &str,
     condition_id: &str,
     slug: Option<&str>,
@@ -205,7 +226,10 @@ fn verify_target_market_identity<'a>(
         .iter()
         .map(ToString::to_string)
         .collect::<BTreeSet<_>>();
-    let target_assets = discovery.asset_ids();
+    let target_assets = discovery
+        .markets()
+        .flat_map(|market| [market.up_asset_id.clone(), market.down_asset_id.clone()])
+        .collect::<BTreeSet<_>>();
     let observed_target_assets = observed_assets
         .intersection(&target_assets)
         .cloned()
@@ -214,7 +238,7 @@ fn verify_target_market_identity<'a>(
     let winning_target_asset = winning_asset
         .as_ref()
         .filter(|asset| target_assets.contains(*asset));
-    let markets = std::iter::once(&discovery.current).chain(discovery.next.as_ref());
+    let markets = discovery.markets();
     let id_match = markets.clone().find(|market| market.id == clob_market_id);
     let condition_match = markets
         .clone()

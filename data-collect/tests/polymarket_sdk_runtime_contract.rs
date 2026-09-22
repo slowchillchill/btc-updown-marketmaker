@@ -145,7 +145,7 @@ async fn dropping_market_runtime_closes_socket_without_reconnect() {
 #[tokio::test(flavor = "current_thread")]
 async fn dropping_rtds_runtime_closes_socket_without_reconnect() {
     let (endpoint, healthy_heartbeat_rx, server) = pong_until_client_closes().await;
-    let mut runtime = RtdsSdkRuntime::new(endpoint, drop_test_config()).unwrap();
+    let mut runtime = RtdsSdkRuntime::new(endpoint, drop_test_config(), vec![]).unwrap();
     runtime
         .wait_connected(Duration::from_secs(2))
         .await
@@ -515,19 +515,21 @@ async fn rtds_uses_one_direct_receiver_and_exposes_parser_fault() {
         sleep(Duration::from_millis(200)).await;
     });
 
-    let mut runtime = RtdsSdkRuntime::new(format!("ws://{address}"), fast_config()).unwrap();
+    let mut runtime = RtdsSdkRuntime::new(
+        format!("ws://{address}"),
+        fast_config(),
+        vec![Subscription::chainlink_prices(Some("btc/usd".to_owned()))],
+    )
+    .unwrap();
     runtime
         .wait_connected(Duration::from_secs(2))
         .await
         .unwrap();
     runtime
-        .subscribe(
-            Subscription::chainlink_prices(Some("btc/usd".to_owned())),
-            Duration::from_secs(2),
-        )
+        .wait_subscription_applied(Duration::from_secs(2))
         .await
         .unwrap();
-    assert_eq!(runtime.subscription_count(), 1);
+
     assert!(matches!(
         runtime.recv(Duration::from_secs(2)).await,
         Err(SdkStreamError::Parser(_))
@@ -569,16 +571,18 @@ async fn rtds_manager_resubscribes_in_the_new_connection_generation() {
         vec![initial, resubscription]
     });
 
-    let mut runtime = RtdsSdkRuntime::new(format!("ws://{address}"), fast_config()).unwrap();
+    let mut runtime = RtdsSdkRuntime::new(
+        format!("ws://{address}"),
+        fast_config(),
+        vec![Subscription::chainlink_prices(Some("btc/usd".to_owned()))],
+    )
+    .unwrap();
     runtime
         .wait_connected(Duration::from_secs(2))
         .await
         .unwrap();
     runtime
-        .subscribe(
-            Subscription::chainlink_prices(Some("btc/usd".to_owned())),
-            Duration::from_secs(2),
-        )
+        .wait_subscription_applied(Duration::from_secs(2))
         .await
         .unwrap();
     assert!(
@@ -655,12 +659,14 @@ async fn rtds_network_error_reconnects_once_but_target_like_frame_remains_termin
 
     let mut config = fast_config();
     config.require_text_pong = false;
-    let mut runtime = RtdsSdkRuntime::new(format!("ws://{address}"), config).unwrap();
+    let mut runtime = RtdsSdkRuntime::new(
+        format!("ws://{address}"),
+        config,
+        vec![Subscription::chainlink_prices(Some("btc/usd".to_owned()))],
+    )
+    .unwrap();
     runtime
-        .subscribe(
-            Subscription::chainlink_prices(Some("btc/usd".to_owned())),
-            Duration::from_secs(2),
-        )
+        .wait_subscription_applied(Duration::from_secs(2))
         .await
         .unwrap();
     let initial_generation = runtime.connection_generation();
@@ -725,9 +731,10 @@ async fn rtds_natural_reconnect_replays_once_without_unsubscribe() {
     let subscription = Subscription::chainlink_prices(Some("btc/usd".to_owned()));
     let mut config = fast_config();
     config.require_text_pong = false;
-    let mut runtime = RtdsSdkRuntime::new(format!("ws://{address}"), config).unwrap();
+    let mut runtime =
+        RtdsSdkRuntime::new(format!("ws://{address}"), config, vec![subscription]).unwrap();
     runtime
-        .subscribe(subscription, Duration::from_secs(2))
+        .wait_subscription_applied(Duration::from_secs(2))
         .await
         .unwrap();
     let generation = runtime.connection_generation();
@@ -740,9 +747,9 @@ async fn rtds_natural_reconnect_replays_once_without_unsubscribe() {
     })
     .await
     .unwrap();
-    let revision = runtime.subscription_revision();
+
     runtime
-        .wait_subscription_applied(revision, Duration::from_secs(2))
+        .wait_subscription_applied(Duration::from_secs(2))
         .await
         .unwrap();
 
@@ -809,16 +816,18 @@ async fn rtds_one_hundred_natural_reconnects_keep_one_actor_and_replay_per_gener
 
     let mut config = fast_config();
     config.require_text_pong = false;
-    let mut runtime = RtdsSdkRuntime::new(format!("ws://{address}"), config).unwrap();
+    let mut runtime = RtdsSdkRuntime::new(
+        format!("ws://{address}"),
+        config,
+        vec![Subscription::chainlink_prices(Some("btc/usd".to_owned()))],
+    )
+    .unwrap();
     runtime
-        .subscribe(
-            Subscription::chainlink_prices(Some("btc/usd".to_owned())),
-            Duration::from_secs(2),
-        )
+        .wait_subscription_applied(Duration::from_secs(2))
         .await
         .unwrap();
     assert_eq!(replay_rx.recv().await.unwrap(), 0);
-    let revision = runtime.subscription_revision();
+
     let steady_tasks = tokio::runtime::Handle::current()
         .metrics()
         .num_alive_tasks();
@@ -836,7 +845,7 @@ async fn rtds_one_hundred_natural_reconnects_keep_one_actor_and_replay_per_gener
         .await
         .expect("next RTDS generation");
         runtime
-            .wait_subscription_applied(revision, Duration::from_secs(2))
+            .wait_subscription_applied(Duration::from_secs(2))
             .await
             .unwrap();
         assert_eq!(runtime.connection_generation(), generation + 1);
@@ -855,7 +864,6 @@ async fn rtds_one_hundred_natural_reconnects_keep_one_actor_and_replay_per_gener
         })
         .await
         .expect("RTDS actor/heartbeat tasks must not accumulate");
-        assert_eq!(runtime.subscription_count(), 1);
     }
 
     #[cfg(target_os = "linux")]
@@ -878,31 +886,33 @@ async fn rtds_desired_before_actor_first_poll_is_applied() {
         next_text(&mut socket).await
     });
 
-    let mut runtime = RtdsSdkRuntime::new(format!("ws://{address}"), fast_config()).unwrap();
-    let revision = runtime
-        .replace_subscription(Subscription::chainlink_prices(Some("btc/usd".to_owned())))
-        .unwrap();
+    let mut runtime = RtdsSdkRuntime::new(
+        format!("ws://{address}"),
+        fast_config(),
+        vec![Subscription::chainlink_prices(Some("btc/usd".to_owned()))],
+    )
+    .unwrap();
+
     runtime
-        .wait_subscription_applied(revision, Duration::from_secs(2))
+        .wait_subscription_applied(Duration::from_secs(2))
         .await
         .unwrap();
 
     let request: Value = serde_json::from_str(&server.await.unwrap()).unwrap();
     assert_eq!(request["action"], "subscribe");
-    assert_eq!(runtime.subscription_count(), 1);
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn rtds_immediate_close_flaps_replay_only_the_latest_desired_subscription() {
-    rtds_flaps_replay_latest_subscription(None).await;
+async fn rtds_immediate_close_flaps_replay_fixed_subscription() {
+    rtds_flaps_replay_fixed_subscription(None).await;
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn rtds_control_error_flaps_replay_only_the_latest_desired_subscription() {
-    rtds_flaps_replay_latest_subscription(Some("Too Many Requests")).await;
+async fn rtds_control_error_flaps_replay_fixed_subscription() {
+    rtds_flaps_replay_fixed_subscription(Some("Too Many Requests")).await;
 }
 
-async fn rtds_flaps_replay_latest_subscription(control: Option<&'static str>) {
+async fn rtds_flaps_replay_fixed_subscription(control: Option<&'static str>) {
     const FLAPS: usize = 8;
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -925,22 +935,20 @@ async fn rtds_flaps_replay_latest_subscription(control: Option<&'static str>) {
             timeout(Duration::from_millis(200), next_text(&mut socket))
                 .await
                 .is_err(),
-            "the stable RTDS epoch must receive only the latest desired subscription"
+            "稳定 RTDS 连接应只收到一次固定订阅"
         );
         request
     });
 
-    let mut runtime = RtdsSdkRuntime::new(format!("ws://{address}"), fast_config()).unwrap();
-    let mut final_revision = 0;
-    for value in 1..=10_000_u64 {
-        final_revision = runtime
-            .replace_subscription(Subscription::chainlink_prices(Some(format!(
-                "btc/usd-{value}"
-            ))))
-            .unwrap();
-    }
+    let mut runtime = RtdsSdkRuntime::new(
+        format!("ws://{address}"),
+        fast_config(),
+        vec![Subscription::chainlink_prices(Some("btc/usd".to_owned()))],
+    )
+    .unwrap();
+
     runtime
-        .wait_subscription_applied(final_revision, Duration::from_secs(2))
+        .wait_subscription_applied(Duration::from_secs(2))
         .await
         .unwrap();
 
@@ -948,7 +956,7 @@ async fn rtds_flaps_replay_latest_subscription(control: Option<&'static str>) {
     assert_eq!(request["action"], "subscribe");
     assert_eq!(
         request["subscriptions"][0]["filters"],
-        r#"{"symbol":"btc/usd-10000"}"#
+        r#"{"symbol":"btc/usd"}"#
     );
 }
 
@@ -982,16 +990,18 @@ async fn rtds_single_receiver_exposes_broadcast_lag() {
         sleep(Duration::from_secs(2)).await;
     });
 
-    let mut runtime = RtdsSdkRuntime::new(format!("ws://{address}"), fast_config()).unwrap();
+    let mut runtime = RtdsSdkRuntime::new(
+        format!("ws://{address}"),
+        fast_config(),
+        vec![Subscription::chainlink_prices(Some("btc/usd".to_owned()))],
+    )
+    .unwrap();
     runtime
         .wait_connected(Duration::from_secs(2))
         .await
         .unwrap();
     runtime
-        .subscribe(
-            Subscription::chainlink_prices(Some("btc/usd".to_owned())),
-            Duration::from_secs(2),
-        )
+        .wait_subscription_applied(Duration::from_secs(2))
         .await
         .unwrap();
     sleep(Duration::from_millis(500)).await;
@@ -1141,7 +1151,8 @@ async fn rtds_retry_exhaustion_is_terminal_and_visible() {
     let address = probe.local_addr().unwrap();
     drop(probe);
 
-    let mut runtime = RtdsSdkRuntime::new(format!("ws://{address}"), exhausting_config()).unwrap();
+    let mut runtime =
+        RtdsSdkRuntime::new(format!("ws://{address}"), exhausting_config(), vec![]).unwrap();
     assert_eq!(
         runtime.wait_connected(Duration::from_secs(2)).await,
         Err(SdkStreamError::TerminalDisconnected)

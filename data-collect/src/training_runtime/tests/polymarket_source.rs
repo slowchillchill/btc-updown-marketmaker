@@ -311,15 +311,9 @@ async fn polymarket_empty_context_reset_drains_anchor_with_its_original_identity
     context.current = None;
     let mut context = Some(context);
     assert!(
-        clear_empty_polymarket_context(
-            &mut context,
-            &sink,
-            &collector,
-            Instant::now(),
-            &mut SourceRecoverySupervisor::new("polymarket_market", 0),
-        )
-        .await
-        .unwrap()
+        clear_empty_polymarket_context(&mut context, &sink, &collector, Instant::now(),)
+            .await
+            .unwrap()
     );
     assert!(context.is_none());
     let payload = rx
@@ -479,7 +473,6 @@ async fn assert_anchor_survives_processing_error(outer_recovery: bool) {
             &sink,
             &collector,
             Instant::now(),
-            &mut recovery,
         )
         .await
         .unwrap_err();
@@ -2196,11 +2189,8 @@ fn polymarket_pending_owned_bytes_counts_each_allocation_once() {
         authority.identity.market.slug.capacity(),
         authority.identity.market.condition_id.capacity(),
         authority.identity.market.clob_market_id.capacity(),
-        authority
-            .identity
-            .market
-            .ordered_up_down_asset_ids_json
-            .capacity(),
+        authority.identity.market.up_asset_id.capacity(),
+        authority.identity.market.down_asset_id.capacity(),
         authority.origin.capacity(),
         authority.evidence.raw_sha256.capacity(),
     ]
@@ -2616,7 +2606,6 @@ async fn polymarket_recovered_finalize_allows_fresh_v3_delivery_after_install() 
         &sink,
         &collector_identity,
         Instant::now(),
-        &mut recovery,
     )
     .await
     .unwrap();
@@ -2934,7 +2923,6 @@ async fn polymarket_market_resolved_at_e_moves_early_claim_into_pending_once() {
         "event_type": "market_resolved"
     });
     let message = || serde_json::from_value::<WsMessage>(resolved_json.clone()).unwrap();
-    let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
     let run_started = Instant::now();
     for _ in 0..2 {
         process_polymarket_budgeted_message(
@@ -2949,7 +2937,6 @@ async fn polymarket_market_resolved_at_e_moves_early_claim_into_pending_once() {
             &sink,
             &collector_identity,
             run_started,
-            &mut recovery,
         )
         .await
         .unwrap();
@@ -5797,7 +5784,7 @@ async fn polymarket_day_fence_orders_ws_old_before_gamma_new() {
         host_id: "collector-test".to_owned(),
         region: "local-test".to_owned(),
     };
-    let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
+
     let global_budget = InflightBudget::new();
     let decoded_budget = InflightBudget::new();
     let items = vec![
@@ -5837,7 +5824,6 @@ async fn polymarket_day_fence_orders_ws_old_before_gamma_new() {
         &sink,
         &collector_identity,
         Instant::now(),
-        &mut recovery,
     )
     .await
     .unwrap();
@@ -5951,7 +5937,7 @@ async fn polymarket_day_fence_orders_gamma_old_before_ws_new() {
             host_id: "collector-test".to_owned(),
             region: "local-test".to_owned(),
         };
-        let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
+
         let global_budget = InflightBudget::new();
         let decoded_budget = InflightBudget::new();
         let gamma_market = if gamma_terminal {
@@ -5996,7 +5982,6 @@ async fn polymarket_day_fence_orders_gamma_old_before_ws_new() {
             &sink,
             &collector_identity,
             Instant::now(),
-            &mut recovery,
         )
         .await
         .unwrap();
@@ -6150,7 +6135,7 @@ async fn polymarket_hour_fence_keeps_gamma_claim_and_rejects_post_horizon_ws() {
         host_id: "collector-test".to_owned(),
         region: "local-test".to_owned(),
     };
-    let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
+
     let timeline = || PolymarketTimelineNow {
         utc_ms: actor_now_utc_ms,
         monotonic: TokioInstant::now(),
@@ -6164,7 +6149,6 @@ async fn polymarket_hour_fence_keeps_gamma_claim_and_rejects_post_horizon_ws() {
         &sink,
         &collector_identity,
         Instant::now(),
-        &mut recovery,
     )
     .await
     .unwrap();
@@ -6274,7 +6258,7 @@ async fn polymarket_connected_stop_deadline_and_control_close_quiesce_ws_and_abo
             host_id: "collector-test".to_owned(),
             region: "local-test".to_owned(),
         };
-        let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
+
         let timeline = || PolymarketTimelineNow {
             utc_ms: actor_now_utc_ms,
             monotonic: TokioInstant::now(),
@@ -6298,7 +6282,6 @@ async fn polymarket_connected_stop_deadline_and_control_close_quiesce_ws_and_abo
                     &sink,
                     &collector_identity,
                     Instant::now(),
-                    &mut recovery,
                 )
                 .await
                 .unwrap()
@@ -6313,7 +6296,6 @@ async fn polymarket_connected_stop_deadline_and_control_close_quiesce_ws_and_abo
                 &sink,
                 &collector_identity,
                 Instant::now(),
-                &mut recovery,
             )
             .await
             .unwrap();
@@ -6438,7 +6420,7 @@ async fn polymarket_stop_materializes_accepted_current_ws_after_e_before_reply()
         }
 
         let mut resolution_poll_tasks = JoinSet::new();
-        let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
+
         let timeline = || PolymarketTimelineNow {
             utc_ms: actor_now_utc_ms,
             monotonic: TokioInstant::now(),
@@ -6460,7 +6442,6 @@ async fn polymarket_stop_materializes_accepted_current_ws_after_e_before_reply()
                 &sink,
                 &collector_identity,
                 Instant::now(),
-                &mut recovery,
             )
             .await
             .unwrap()
@@ -6609,7 +6590,7 @@ async fn polymarket_clean_stop_rejects_current_and_next_pre_e_claims() {
             accepted_raw_day_ticket_from_gate_for_test(&raw_day_gate, ws_received_at_utc_ms).await;
         let mut runtime = polymarket_runtime_with_fence_messages_for_test(vec![ws_message]).await;
         let mut resolution_poll_tasks = JoinSet::new();
-        let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
+
         let collector_identity = CollectorIdentity {
             host_id: "collector-test".to_owned(),
             region: "local-test".to_owned(),
@@ -6634,7 +6615,6 @@ async fn polymarket_clean_stop_rejects_current_and_next_pre_e_claims() {
             &sink,
             &collector_identity,
             Instant::now(),
-            &mut recovery,
         )
         .await
         .expect_err("pre-E accepted WS claim must fail a clean stop");
@@ -6723,7 +6703,7 @@ async fn polymarket_day_fence_rejects_next_pre_e_claim_before_reply() {
         accepted_raw_day_ticket_from_gate_for_test(&raw_day_gate, ws_received_at_utc_ms).await;
     let mut runtime = polymarket_runtime_with_fence_messages_for_test(vec![ws_message]).await;
     let mut resolution_poll_tasks = JoinSet::new();
-    let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
+
     let collector_identity = CollectorIdentity {
         host_id: "collector-test".to_owned(),
         region: "local-test".to_owned(),
@@ -6751,7 +6731,6 @@ async fn polymarket_day_fence_rejects_next_pre_e_claim_before_reply() {
                 &sink,
                 &collector_identity,
                 Instant::now(),
-                &mut recovery,
             ),
             async {
                 let reply = reply_rx.await.unwrap();
@@ -6850,7 +6829,7 @@ async fn polymarket_2355_stop_defers_raw_e_transition_and_terminal_without_deadl
         enqueue_lock: Arc::new(AsyncMutex::new(())),
     };
     let mut resolution_poll_tasks = JoinSet::new();
-    let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
+
     let timeline = || PolymarketTimelineNow {
         utc_ms: actor_now_utc_ms,
         monotonic: TokioInstant::now(),
@@ -6874,7 +6853,6 @@ async fn polymarket_2355_stop_defers_raw_e_transition_and_terminal_without_deadl
                 &sink,
                 &collector_identity,
                 Instant::now(),
-                &mut recovery,
             ),
         )
         .await
@@ -7002,7 +6980,7 @@ async fn polymarket_2355_day_fence_finalizes_e_minus_one_ws_before_reply() {
         enqueue_lock: Arc::new(AsyncMutex::new(())),
     };
     let mut resolution_poll_tasks = JoinSet::new();
-    let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
+
     let timeline = || PolymarketTimelineNow {
         utc_ms: actor_now_utc_ms,
         monotonic: TokioInstant::now(),
@@ -7026,7 +7004,6 @@ async fn polymarket_2355_day_fence_finalizes_e_minus_one_ws_before_reply() {
                 &sink,
                 &collector_identity,
                 Instant::now(),
-                &mut recovery,
             ),
             async {
                 reply_rx
@@ -7895,7 +7872,6 @@ async fn polymarket_outer_recovery_day_fence_advances_after_pre_e_select_sample(
         &sink,
         &collector_identity,
         run_started,
-        &mut recovery,
     )
     .await
     .unwrap();
@@ -8496,7 +8472,7 @@ async fn polymarket_terminal_fence_finalizes_three_reverse_races_once() {
             inflight_budget: global_budget,
             enqueue_lock: Arc::new(AsyncMutex::new(())),
         };
-        let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
+
         let run_started = Instant::now();
 
         if mode == "ws_first_post" {
@@ -8556,7 +8532,6 @@ async fn polymarket_terminal_fence_finalizes_three_reverse_races_once() {
             &sink,
             &collector_identity,
             run_started,
-            &mut recovery,
         )
         .await
         .unwrap();
@@ -8845,7 +8820,7 @@ async fn polymarket_two_ready_pending_sample_applied_time_per_transition() {
         host_id: "collector-test".to_owned(),
         region: "local-test".to_owned(),
     };
-    let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
+
     let finalize = tokio::spawn(async move {
         let mut resolution_poll_tasks = JoinSet::new();
         finalize_polymarket_pending_after_fence(
@@ -8859,7 +8834,6 @@ async fn polymarket_two_ready_pending_sample_applied_time_per_transition() {
             &sink,
             &collector_identity,
             Instant::now(),
-            &mut recovery,
         )
         .await
         .unwrap();
@@ -8875,7 +8849,6 @@ async fn polymarket_two_ready_pending_sample_applied_time_per_transition() {
                     &sink,
                     &collector_identity,
                     Instant::now(),
-                    &mut recovery,
                 )
                 .await
                 .unwrap();
@@ -9054,14 +9027,17 @@ async fn polymarket_rollover_rejects_prefetched_identity_mutation_before_fence_o
     };
     let mut skipped_window = replacement.clone();
     skipped_window.current.slug = "btc-updown-5m-1783392900".to_owned();
-    assert!(validate_polymarket_context_switch(&discovery, &skipped_window).is_ok());
+    assert!(validate_polymarket_context_switch((&discovery).into(), &skipped_window).is_ok());
     let promoted_without_mutation = BtcUpdownDiscovery {
         current: discovery.next.clone().unwrap(),
         next: None,
     };
     assert!(
-        validate_polymarket_discovery_identity_continuity(&discovery, &promoted_without_mutation,)
-            .is_ok()
+        validate_polymarket_discovery_identity_continuity(
+            (&discovery).into(),
+            &promoted_without_mutation,
+        )
+        .is_ok()
     );
     let prefetched_fixed_identity_verified_at_utc_ms = promoted_without_mutation
         .current
@@ -9074,7 +9050,8 @@ async fn polymarket_rollover_rejects_prefetched_identity_mutation_before_fence_o
     let refreshed_validation_completed_at_utc_ms = refreshed_promotion
         .current
         .metadata_validation_completed_at_utc_ms;
-    preserve_polymarket_fixed_identity_authority(&discovery, &mut refreshed_promotion).unwrap();
+    preserve_polymarket_fixed_identity_authority((&discovery).into(), &mut refreshed_promotion)
+        .unwrap();
     assert_eq!(
         refreshed_promotion
             .current
@@ -9104,15 +9081,18 @@ async fn polymarket_rollover_rejects_prefetched_identity_mutation_before_fence_o
         identity_mutations.push(mutation);
     }
     assert!(identity_mutations.iter().all(|mutation| {
-        validate_polymarket_discovery_identity_continuity(&discovery, mutation).is_err()
+        validate_polymarket_discovery_identity_continuity((&discovery).into(), mutation).is_err()
     }));
     let skipped_transport_window = BtcUpdownDiscovery {
         current: skipped_window.current.clone(),
         next: None,
     };
     assert!(
-        validate_polymarket_discovery_identity_continuity(&discovery, &skipped_transport_window,)
-            .is_ok()
+        validate_polymarket_discovery_identity_continuity(
+            (&discovery).into(),
+            &skipped_transport_window,
+        )
+        .is_ok()
     );
 
     let global_budget = InflightBudget::new();
@@ -9407,7 +9387,7 @@ async fn retry_installed_context_without_metadata(
         enqueue_lock: Arc::new(AsyncMutex::new(())),
     };
     let mut resolution_poll_tasks = JoinSet::new();
-    let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
+
     apply_polymarket_subscription_while_draining(
         &mut runtime,
         context.desired_assets().unwrap(),
@@ -9419,7 +9399,6 @@ async fn retry_installed_context_without_metadata(
             region: "local-test".to_owned(),
         },
         Instant::now(),
-        &mut recovery,
     )
     .await
     .unwrap();
@@ -11401,7 +11380,6 @@ async fn polymarket_rollover_loopback_keeps_retained_lifecycle_and_filters_retir
         &sink,
         &identity,
         run_started,
-        &mut recovery,
     )
     .await
     .unwrap();
@@ -11471,7 +11449,6 @@ async fn polymarket_rollover_loopback_keeps_retained_lifecycle_and_filters_retir
         &sink,
         &identity,
         run_started,
-        &mut recovery,
     )
     .await
     .unwrap();
@@ -12182,7 +12159,7 @@ async fn polymarket_day_stop_drains_paused_fifo_into_exact_source_termination() 
             .await
             .ok_or_else(|| invalid_data("test Polymarket control channel closed"))?;
         let mut resolution_poll_tasks = JoinSet::new();
-        let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
+
         handle_polymarket_source_control(
             control,
             &mut runtime,
@@ -12195,7 +12172,6 @@ async fn polymarket_day_stop_drains_paused_fifo_into_exact_source_termination() 
             &inner_sink,
             &inner_identity,
             Instant::now(),
-            &mut recovery,
         )
         .await?;
         Ok(())
@@ -12620,7 +12596,7 @@ async fn polymarket_five_thousand_message_burst_traverses_the_composed_ingress_p
         next: None,
     };
     let mut context = PolymarketProcessingContext::new(discovery.clone());
-    let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
+
     let run_started = Instant::now();
 
     let Some(PolymarketDrainEvent::Message(zero_timestamp)) = runtime
@@ -12656,16 +12632,9 @@ async fn polymarket_five_thousand_message_burst_traverses_the_composed_ingress_p
         else {
             panic!("expected decoded market message");
         };
-        process_polymarket_budgeted_message(
-            message,
-            &mut context,
-            &sink,
-            &identity,
-            run_started,
-            &mut recovery,
-        )
-        .await
-        .unwrap();
+        process_polymarket_budgeted_message(message, &mut context, &sink, &identity, run_started)
+            .await
+            .unwrap();
     }
     fence_polymarket_processor(
         &mut runtime,
@@ -12674,7 +12643,6 @@ async fn polymarket_five_thousand_message_burst_traverses_the_composed_ingress_p
         &sink,
         &identity,
         run_started,
-        &mut recovery,
     )
     .await
     .unwrap();
@@ -12796,7 +12764,7 @@ async fn polymarket_processing_error_drains_later_messages_and_preserves_first_e
     };
     let discovery = test_btc_discovery();
     let mut context = PolymarketProcessingContext::new(discovery.clone());
-    let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
+
     let first_error_text =
         "operator_intervention_required:max_typed_row_bytes_exceeded:polymarket_market";
 
@@ -12807,7 +12775,6 @@ async fn polymarket_processing_error_drains_later_messages_and_preserves_first_e
         &sink,
         &identity,
         Instant::now(),
-        &mut recovery,
     )
     .await
     .expect_err("the original processing error must remain primary");
@@ -12931,7 +12898,6 @@ async fn polymarket_subscription_drain_preserves_fifo_across_batching_and_clock_
         context.actor_now_utc_ms = recv_time_utc_ms + 2;
         let target_assets = context.desired_assets().unwrap();
         let mut resolution_poll_tasks = JoinSet::new();
-        let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
 
         let error = apply_polymarket_subscription_while_draining(
             &mut runtime,
@@ -12941,7 +12907,6 @@ async fn polymarket_subscription_drain_preserves_fifo_across_batching_and_clock_
             &sink,
             &identity,
             Instant::now(),
-            &mut recovery,
         )
         .await
         .expect_err("the first message's closed-ingress failure must remain primary");
@@ -13038,18 +13003,12 @@ async fn polymarket_closed_ingress_abandons_exact_later_rows_and_joins_pump() {
     };
     let discovery = test_btc_discovery();
     let mut context = PolymarketProcessingContext::new(discovery.clone());
-    let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
+
     let run_started = Instant::now();
-    let first_error = process_polymarket_budgeted_message(
-        first,
-        &mut context,
-        &sink,
-        &identity,
-        run_started,
-        &mut recovery,
-    )
-    .await
-    .expect_err("closed ingress must reject the first message");
+    let first_error =
+        process_polymarket_budgeted_message(first, &mut context, &sink, &identity, run_started)
+            .await
+            .expect_err("closed ingress must reject the first message");
 
     let returned = stop_polymarket_after_processing_error(
         first_error,
@@ -13058,7 +13017,6 @@ async fn polymarket_closed_ingress_abandons_exact_later_rows_and_joins_pump() {
         &sink,
         &identity,
         run_started,
-        &mut recovery,
     )
     .await
     .expect_err("the first ingress error must remain primary");
@@ -13159,7 +13117,6 @@ async fn polymarket_abandoned_messages_are_reported_per_day_without_invented_row
     };
     let discovery = test_btc_discovery();
     let mut context = PolymarketProcessingContext::new(discovery.clone());
-    let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
 
     stop_polymarket_after_processing_error(
         io::Error::new(io::ErrorKind::BrokenPipe, "closed ingress").into(),
@@ -13168,7 +13125,6 @@ async fn polymarket_abandoned_messages_are_reported_per_day_without_invented_row
         &sink,
         &identity,
         Instant::now(),
-        &mut recovery,
     )
     .await
     .expect_err("the original closed-ingress error remains primary");
@@ -13240,7 +13196,6 @@ async fn polymarket_retryable_cleanup_terminal_does_not_create_a_false_gap() {
     };
     let discovery = test_btc_discovery();
     let mut context = PolymarketProcessingContext::new(discovery.clone());
-    let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
 
     let error = stop_polymarket_after_processing_error(
         SdkStreamError::Connection("primary transport".to_owned()).into(),
@@ -13249,7 +13204,6 @@ async fn polymarket_retryable_cleanup_terminal_does_not_create_a_false_gap() {
         &sink,
         &identity,
         Instant::now(),
-        &mut recovery,
     )
     .await
     .expect_err("the retryable primary error must be returned for outer recovery");
@@ -13318,7 +13272,6 @@ async fn polymarket_cleanup_preserves_retryable_primary_after_later_v3_delivery(
     };
     let discovery = test_btc_discovery();
     let mut context = PolymarketProcessingContext::new(discovery.clone());
-    let mut recovery = SourceRecoverySupervisor::new("polymarket_market", 7);
 
     let error = stop_polymarket_after_processing_error(
         SdkStreamError::Connection("retryable primary".to_owned()).into(),
@@ -13327,7 +13280,6 @@ async fn polymarket_cleanup_preserves_retryable_primary_after_later_v3_delivery(
         &sink,
         &identity,
         Instant::now(),
-        &mut recovery,
     )
     .await
     .expect_err("cleanup must return the retryable primary after admitting the later v3 row");
@@ -13934,10 +13886,12 @@ fn polymarket_lifecycle_identity_contradictions_are_terminal() {
         event
     };
     let assert_error = |message: WsMessage, expected: &str| {
-        let error = match target_admitted_polymarket_message(&message, &discovery, &asset_to_slug) {
-            Err(error) => error,
-            Ok(_) => panic!("a target identity contradiction must be terminal"),
-        };
+        let error =
+            match target_admitted_polymarket_message(&message, (&discovery).into(), &asset_to_slug)
+            {
+                Err(error) => error,
+                Ok(_) => panic!("a target identity contradiction must be terminal"),
+            };
         assert!(
             error.to_string().contains(expected),
             "unexpected identity error: {error}"
