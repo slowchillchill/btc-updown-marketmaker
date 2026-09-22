@@ -13,8 +13,8 @@ struct Prepared {
     stage: PathBuf,
     quality: DptObservationQualityReportV1,
     resource: GateAResourceHighWaterReportV1,
-    measured: DptObservationMeasuredBuildStateV1,
-    tests: DptObservationTestEvidenceReportV1,
+    measured: GateAMeasuredBuildStateV1,
+    tests: GateATestEvidenceReportV1,
 }
 
 fn prepare(
@@ -75,7 +75,7 @@ fn prepare(
     let output = "仅测试夹具：模拟成功的外部测试记录，不是实际命令执行证据";
     let tests = build_dpt_observation_test_evidence_report(
         "1".repeat(40),
-        quality.artifact_manifests.clone(),
+        quality.facts.artifact_manifests.clone(),
         vec![GateATestCommandEvidenceV1 {
             argv: vec!["fixture-only".into()],
             working_directory: "/home/chillchill/btc-updown-marketmaker".into(),
@@ -109,7 +109,7 @@ pub(super) fn assert_publication(
         output.path().join(".fixture.candidate"),
     );
     assert_eq!(
-        prepared.quality.selected_source_rows,
+        prepared.quality.facts.selected_source_rows,
         expected.canonical_metrics.selected_rows
     );
     let published =
@@ -336,6 +336,7 @@ fn recovered_gap_before_identity_is_published_without_fabricated_observation_wit
     let prepared = prepare(&input, &scope(), output.path().join(".fixture.candidate"));
     let gap = prepared
         .quality
+        .facts
         .evidence
         .iter()
         .find(|e| e.evidence_id == "quality/gap-resync-watermark")
@@ -347,8 +348,8 @@ fn recovered_gap_before_identity_is_published_without_fabricated_observation_wit
     );
     assert!(gap.event_ids.is_empty());
     assert!(gap.observation_ids.is_empty());
-    assert_eq!(prepared.quality.event_quality_counts.confirmed_gap, 1);
-    assert_eq!(prepared.quality.fresh_resync_boundary, 1);
+    assert_eq!(prepared.quality.facts.event_quality_counts.confirmed_gap, 1);
+    assert_eq!(prepared.quality.facts.fresh_resync_boundary, 1);
     let published =
         finalize_and_publish_dpt_observation_candidate(&prepared.stage, &prepared.tests).unwrap();
     let opened =
@@ -425,7 +426,7 @@ fn failed_or_missing_test_and_failed_resource_evidence_cannot_publish() {
             }
             prepared.tests = build_dpt_observation_test_evidence_report(
                 "1".repeat(40),
-                prepared.quality.artifact_manifests.clone(),
+                prepared.quality.facts.artifact_manifests.clone(),
                 commands,
             )
             .unwrap();
@@ -536,7 +537,7 @@ fn reopen_keeps_producer_identity_separate_and_rejects_rehashed_false_statistics
     let published =
         finalize_and_publish_dpt_observation_candidate(&prepared.stage, &prepared.tests).unwrap();
     let producer = Sha256Hex("e".repeat(64));
-    prepared.quality.pipeline_core_identity_sha256 = producer.clone();
+    prepared.quality.facts.pipeline_core_identity_sha256 = producer.clone();
     prepared.resource.pipeline_core_identity_sha256 = producer.clone();
     prepared.tests.pipeline_core_identity_sha256 = producer.clone();
     let root = rewrite_control_closure(
@@ -559,12 +560,14 @@ fn reopen_keeps_producer_identity_separate_and_rejects_rehashed_false_statistics
     assert_eq!(before, immutable_file_snapshot(&root));
     let (reason, count) = prepared
         .quality
+        .facts
         .reduction_reason_counts
         .pop_first()
         .unwrap();
     assert_ne!(reason, "fixture/not-an-observed-reason");
     prepared
         .quality
+        .facts
         .reduction_reason_counts
         .insert("fixture/not-an-observed-reason".into(), count);
     let root = rewrite_control_closure(

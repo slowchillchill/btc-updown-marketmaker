@@ -130,7 +130,7 @@ fn prepare_public_groups(
             };
             let mut pm_inputs = Vec::new();
             let mut contexts = std::collections::BTreeMap::new();
-            for fact in &group.records {
+            for fact in group.records.iter() {
                 let market = match &fact.payload {
                     PublicBusinessPayloadV1::PolymarketMessage(message) => {
                         if let Some(pm) = prepared_pm.take() {

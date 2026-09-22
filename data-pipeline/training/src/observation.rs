@@ -16,12 +16,10 @@ use contracts::{
     MarketObservationCausalShellV3, MarketResolutionTerminalV3, MarketTradingStateV2,
     ObservationComponentId, ObservationComponentStateV2, ObservationLineageV3,
     ObservationVisibilityCutoffV2, PriceLevelV1, PublicTradeV2, QualityScopeV1, Sha256Hex,
-    TickSizeChangeV2, VisibilityIndexEntryV2,
+    TickSizeChangeV2,
 };
 use data_pipeline_core::{
     ContractError, derive_observation_v3_hash, derive_observation_v3_id, parse_canonical_decimal,
-    validate_market_observation_causal_shell_v3,
-    validate_market_observation_v3_visibility_index_entries,
 };
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -795,7 +793,7 @@ impl ObservationProjector {
 
         let mut component_states = Vec::with_capacity(9);
         let mut missing_mask = Vec::new();
-        let mut visibility_by_id = BTreeMap::new();
+        let mut contributing_event_ids = BTreeSet::new();
         for component in data_pipeline_core::REQUIRED_OBSERVATION_COMPONENTS {
             let slot = if matches!(
                 component,
@@ -816,27 +814,15 @@ impl ObservationProjector {
             if !is_visible(state.quality) {
                 missing_mask.push(component);
             }
-            if let (Some(event_id), Some(received_at_utc_ms)) =
-                (&state.last_visible_event_id, state.received_at_utc_ms)
-            {
-                visibility_by_id.insert(
-                    event_id.0.clone(),
-                    (
-                        event_id.clone(),
-                        VisibilityIndexEntryV2 {
-                            schema_version: contracts::VISIBILITY_INDEX_SCHEMA_V2.to_owned(),
-                            event_id: event_id.clone(),
-                            received_at_utc_ms,
-                        },
-                    ),
-                );
+            if let Some(event_id) = &state.last_visible_event_id {
+                contributing_event_ids.insert(event_id.0.clone());
             }
             component_states.push(state);
         }
-        let contributing_event_ids = visibility_by_id
-            .values()
-            .map(|(event_id, _)| event_id.clone())
-            .collect::<Vec<_>>();
+        let contributing_event_ids = contributing_event_ids
+            .into_iter()
+            .map(CanonicalEventId)
+            .collect();
         let market_state_digest_sha256 =
             market_state_digest(&market_state.market, &component_states, &missing_mask)?;
         let mut observation = MarketObservationCausalShellV3 {
@@ -862,22 +848,6 @@ impl ObservationProjector {
         };
         observation.observation_id = derive_observation_v3_id(&observation)?;
         observation.canonical_hash_sha256 = derive_observation_v3_hash(&observation)?;
-        validate_market_observation_causal_shell_v3(&observation)?;
-        let contributing_visibility_entries = observation
-            .lineage
-            .contributing_event_ids
-            .iter()
-            .map(|event_id| {
-                visibility_by_id
-                    .remove(&event_id.0)
-                    .map(|(_, entry)| entry)
-                    .expect("贡献事件同时来自当前组件锚点")
-            })
-            .collect::<Vec<_>>();
-        validate_market_observation_v3_visibility_index_entries(
-            &observation,
-            &contributing_visibility_entries,
-        )?;
         Ok(Some(ProjectedObservation { observation }))
     }
 

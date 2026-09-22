@@ -895,7 +895,7 @@ impl PublicObservationCoreV1 {
                     self.close_group(
                         msg.group_id.clone(),
                         vec![self.next_input_position],
-                        vec![fact],
+                        vec![fact].into(),
                         &mut result.applied.closed_groups,
                     );
                 }
@@ -1026,7 +1026,7 @@ impl PublicObservationCoreV1 {
         input: &PreparedIngressV1<'_>,
         output: &mut PublicAppliedIngressV1<'_>,
     ) {
-        for fact in &batch.facts {
+        for fact in batch.facts.iter() {
             self.apply_fact(fact, &group);
         }
         self.commit_selection(input);
@@ -1067,7 +1067,7 @@ impl PublicObservationCoreV1 {
         &mut self,
         group_id: Sha256Hex,
         members: Vec<u64>,
-        records: Vec<PublicBusinessFactV1>,
+        records: Arc<[PublicBusinessFactV1]>,
         groups: &mut Vec<Arc<ClosedBusinessGroupV1>>,
     ) {
         let depth = ObservedFactV1 {
@@ -1327,7 +1327,7 @@ impl MarketState {
         group: &Sha256Hex,
         group_position: u64,
         prefix: AppliedIngressPrefixV1,
-        events: &[PublicBusinessFactV1],
+        events: &Arc<[PublicBusinessFactV1]>,
         reference: Option<&PublicMarketReferenceStateV1>,
         global: &GlobalReferences,
         depth: &ObservedFactV1<BinanceDepthStateReferenceV1>,
@@ -1430,7 +1430,7 @@ impl MarketState {
             chainlink_twap_sixty: global.sixty.clone(),
             binance_depth: depth.clone(),
             binance_trade: global.trade.clone(),
-            group_events: events.to_vec(),
+            group_events: Arc::clone(events),
         }
     }
 }

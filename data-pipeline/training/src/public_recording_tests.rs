@@ -1521,7 +1521,7 @@ fn stored_pm_reports_keep_original_schema_bytes_and_positions_for_all_dispositio
             .applied
             .closed_groups
             .iter()
-            .flat_map(|g| &g.records)
+            .flat_map(|g| g.records.iter())
             .enumerate()
             .map(|(i, f)| (f.position.clone(), next_canonical + i as u64))
             .collect();

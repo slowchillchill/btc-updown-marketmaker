@@ -31,7 +31,7 @@ pub struct PublicReductionReportV1<I = PublicFactPositionV1> {
 
 #[derive(Clone, Debug)]
 pub struct PublicReductionBatchV1 {
-    pub facts: Vec<PublicBusinessFactV1>,
+    pub facts: std::sync::Arc<[PublicBusinessFactV1]>,
     pub reports: Vec<PublicReductionReportV1>,
     group_id: Sha256Hex,
     direct_source_message_ids: Vec<Sha256Hex>,
@@ -160,7 +160,7 @@ fn finish(
         })
         .collect();
     PublicReductionBatchV1 {
-        facts,
+        facts: facts.into(),
         reports,
         group_id: context.group_id,
         direct_source_message_ids: context
@@ -208,6 +208,14 @@ pub fn bind_market_reduction_v1(
     batch: PolymarketReductionBatch<PreparedPublicEvidenceV1, PendingBusinessIdentityV1>,
     context: PublicReductionContextV1,
 ) -> PublicReductionBatchV1 {
+    bind_market_reduction_with_prefix(batch, context, Vec::new())
+}
+
+fn bind_market_reduction_with_prefix(
+    batch: PolymarketReductionBatch<PreparedPublicEvidenceV1, PendingBusinessIdentityV1>,
+    context: PublicReductionContextV1,
+    mut facts: Vec<PublicBusinessFactV1>,
+) -> PublicReductionBatchV1 {
     let snapshot_ids = batch
         .reports
         .iter()
@@ -218,51 +226,52 @@ pub fn bind_market_reduction_v1(
         })
         .collect::<Vec<_>>();
     let mut identities = Vec::with_capacity(batch.events.len());
-    let facts = batch
-        .events
-        .into_iter()
-        .enumerate()
-        .map(|(ordinal, event)| {
-            let lifecycle_snapshot = snapshot_ids
-                .iter()
-                .any(|identity| identity == &event.event_id);
-            identities.push(event.event_id);
-            let payload = match event.payload {
-                ExecutionMarketEventPayloadV3::MarketLifecycleTransition(value)
-                    if lifecycle_snapshot =>
-                {
-                    CanonicalMarketFactPayloadV1::MarketLifecycleSnapshot {
-                        current_state: value.current_state,
-                        assets: value.assets,
+    facts.extend(
+        batch
+            .events
+            .into_iter()
+            .enumerate()
+            .map(|(ordinal, event)| {
+                let lifecycle_snapshot = snapshot_ids
+                    .iter()
+                    .any(|identity| identity == &event.event_id);
+                identities.push(event.event_id);
+                let payload = match event.payload {
+                    ExecutionMarketEventPayloadV3::MarketLifecycleTransition(value)
+                        if lifecycle_snapshot =>
+                    {
+                        CanonicalMarketFactPayloadV1::MarketLifecycleSnapshot {
+                            current_state: value.current_state,
+                            assets: value.assets,
+                        }
                     }
-                }
-                ExecutionMarketEventPayloadV3::MarketLifecycleTransition(value) => {
-                    CanonicalMarketFactPayloadV1::LifecycleTransition(value)
-                }
-                ExecutionMarketEventPayloadV3::MarketTradingState(value) => {
-                    CanonicalMarketFactPayloadV1::TradingState(value)
-                }
-                ExecutionMarketEventPayloadV3::MarketResolutionTerminal(value) => {
-                    CanonicalMarketFactPayloadV1::Terminal(value)
-                }
-                ExecutionMarketEventPayloadV3::QualityBoundary(value) => {
-                    CanonicalMarketFactPayloadV1::QualityBoundary(value)
-                }
-                _ => unreachable!("已准备市场归约只由元数据和终态的唯一业务方法产生"),
-            };
-            fact(
-                &context,
-                ordinal,
-                PublicBusinessPayloadV1::MarketFact {
-                    market: event.market,
-                    payload,
-                },
-                event.lineage,
-                event.time,
-                event.quality,
-            )
-        })
-        .collect();
+                    ExecutionMarketEventPayloadV3::MarketLifecycleTransition(value) => {
+                        CanonicalMarketFactPayloadV1::LifecycleTransition(value)
+                    }
+                    ExecutionMarketEventPayloadV3::MarketTradingState(value) => {
+                        CanonicalMarketFactPayloadV1::TradingState(value)
+                    }
+                    ExecutionMarketEventPayloadV3::MarketResolutionTerminal(value) => {
+                        CanonicalMarketFactPayloadV1::Terminal(value)
+                    }
+                    ExecutionMarketEventPayloadV3::QualityBoundary(value) => {
+                        CanonicalMarketFactPayloadV1::QualityBoundary(value)
+                    }
+                    _ => unreachable!("已准备市场归约只由元数据和终态的唯一业务方法产生"),
+                };
+                fact(
+                    &context,
+                    ordinal,
+                    PublicBusinessPayloadV1::MarketFact {
+                        market: event.market,
+                        payload,
+                    },
+                    event.lineage,
+                    event.time,
+                    event.quality,
+                )
+            }),
+    );
     finish(context, facts, batch.reports, identities)
 }
 
@@ -272,11 +281,14 @@ pub fn materialize_public_reduction_v1(
 ) -> Result<MaterializedPublicReductionV1, ContractError> {
     let mut records = Vec::with_capacity(batch.facts.len());
     let mut bindings = Vec::with_capacity(batch.facts.len());
-    for fact in batch.facts {
-        let (record, event_id) = match fact.payload {
+    for fact in batch.facts.iter() {
+        let (record, event_id) = match &fact.payload {
             PublicBusinessPayloadV1::PolymarketMessage(message) => {
                 let id = message.event_id.clone();
-                (CanonicalEventRecordV2::PolymarketMessage(message), id)
+                (
+                    CanonicalEventRecordV2::PolymarketMessage(message.clone()),
+                    id,
+                )
             }
             PublicBusinessPayloadV1::ReferenceFact(payload) => {
                 let event = if let Some(binding) = batch
@@ -287,17 +299,17 @@ pub fn materialize_public_reduction_v1(
                     CanonicalReferenceEventV2 {
                         schema_version: CANONICAL_REFERENCE_EVENT_SCHEMA_V2.to_owned(),
                         event_id: binding.event_id.clone(),
-                        time: fact.dependency_time,
-                        lineage: fact.lineage,
-                        quality: fact.quality,
-                        payload,
+                        time: fact.dependency_time.clone(),
+                        lineage: fact.lineage.clone(),
+                        quality: fact.quality.clone(),
+                        payload: payload.clone(),
                     }
                 } else {
                     crate::public_reference::materialize_reference_v2(
-                        fact.lineage,
-                        fact.dependency_time,
-                        fact.quality,
-                        payload,
+                        fact.lineage.clone(),
+                        fact.dependency_time.clone(),
+                        fact.quality.clone(),
+                        payload.clone(),
                     )?
                 };
                 let id = event.event_id.clone();
@@ -321,14 +333,14 @@ pub fn materialize_public_reduction_v1(
                         b"data-pipeline/canonical-event-id/market-fact/v1\0",
                         &stable_json(&Identity {
                             schema_version: CANONICAL_MARKET_FACT_SCHEMA_V1,
-                            market: &market,
+                            market,
                             group_id: &batch.group_id,
                             direct_source_message_ids: &batch.direct_source_message_ids,
                             lineage: &fact.lineage,
                             direct_time: &fact.direct_time,
                             dependency_time: &fact.dependency_time,
                             quality: &fact.quality,
-                            payload: &payload,
+                            payload,
                         })?,
                     )
                     .0,
@@ -336,21 +348,21 @@ pub fn materialize_public_reduction_v1(
                 let event = CanonicalMarketFactV1 {
                     schema_version: CANONICAL_MARKET_FACT_SCHEMA_V1.to_owned(),
                     event_id: id.clone(),
-                    market,
+                    market: market.clone(),
                     group_id: batch.group_id.clone(),
-                    source_refs: fact.source_refs,
+                    source_refs: fact.source_refs.clone(),
                     direct_source_message_ids: batch.direct_source_message_ids.clone(),
-                    lineage: fact.lineage,
-                    direct_time: fact.direct_time,
-                    dependency_time: fact.dependency_time,
-                    quality: fact.quality,
-                    payload,
+                    lineage: fact.lineage.clone(),
+                    direct_time: fact.direct_time.clone(),
+                    dependency_time: fact.dependency_time.clone(),
+                    quality: fact.quality.clone(),
+                    payload: payload.clone(),
                 };
                 (CanonicalEventRecordV2::MarketFact(event), id)
             }
         };
         bindings.push(PublicFactBindingV1 {
-            position: fact.position,
+            position: fact.position.clone(),
             event_id,
         });
         records.push(record);
@@ -452,10 +464,7 @@ pub fn bind_initial_market_reduction_v1(
         ));
     }
     context.first_fact_ordinal += facts.len() as u32;
-    let mut result = bind_market_reduction_v1(batch, context);
-    facts.append(&mut result.facts);
-    result.facts = facts;
-    result
+    bind_market_reduction_with_prefix(batch, context, facts)
 }
 
 /// 已规范的来源事实绑定原 ID，不在后台重算来源身份。
@@ -465,7 +474,7 @@ pub fn bind_prepared_reference_facts_v1(
 ) -> PublicReductionBatchV1 {
     let mut prepared_reference_ids = Vec::with_capacity(events.len());
     let direct_time = source_time(&context.direct_sources);
-    let facts = events
+    let facts: Vec<_> = events
         .into_iter()
         .enumerate()
         .map(|(ordinal, event)| {
@@ -487,7 +496,7 @@ pub fn bind_prepared_reference_facts_v1(
         })
         .collect();
     PublicReductionBatchV1 {
-        facts,
+        facts: facts.into(),
         reports: Vec::new(),
         group_id: context.group_id,
         direct_source_message_ids: context

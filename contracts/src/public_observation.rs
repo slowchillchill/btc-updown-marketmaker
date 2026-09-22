@@ -359,7 +359,8 @@ pub struct MarketBusinessObservationV1 {
     pub chainlink_twap_sixty: ObservedFactV1<ChainlinkBtcUsdTwapReferenceV1>,
     pub binance_depth: ObservedFactV1<BinanceDepthStateReferenceV1>,
     pub binance_trade: ObservedFactV1<BinanceAggregateTradeReferenceV1>,
-    pub group_events: Vec<PublicBusinessFactV1>,
+    /// 与关闭组共享全部事实；跨市场事件仍参与组统计与时序。
+    pub group_events: std::sync::Arc<[PublicBusinessFactV1]>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClosedBusinessGroupV1 {
@@ -367,7 +368,7 @@ pub struct ClosedBusinessGroupV1 {
     pub group_position: u64,
     pub member_input_positions: Vec<u64>,
     pub closed_at_input_position: u64,
-    pub records: Vec<PublicBusinessFactV1>,
+    pub records: std::sync::Arc<[PublicBusinessFactV1]>,
     pub observations: Vec<MarketBusinessObservationV1>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
