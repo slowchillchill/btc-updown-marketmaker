@@ -198,12 +198,42 @@ impl AcceptedPublicGroupV1 {
                 .map_err(|e| crate::event_log::SimEventLogErrorV2::Encode(e.to_string()))?;
             self.pm_step_bindings.extend(result.bindings);
             for report in result.reduction.reports {
-                self.pm_reports.push(
-                    serde_json::from_value(serde_json::to_value(report).map_err(|e| {
-                        crate::event_log::SimEventLogErrorV2::Encode(e.to_string())
-                    })?)
-                    .map_err(|e| crate::event_log::SimEventLogErrorV2::Encode(e.to_string()))?,
-                );
+                let operation_evidence = |items: Vec<
+                    PmOperationEvidenceV2<PreparedPmEvidenceV1<SourceEvidenceRefV3>>,
+                >| {
+                    items
+                        .into_iter()
+                        .map(|item| PmOperationEvidenceV2 {
+                            role: item.role,
+                            source_evidence: item.source_evidence.source().clone(),
+                        })
+                        .collect()
+                };
+                let disposition = match report.disposition {
+                    PmReductionDispositionV2::Produced { derived_id } => {
+                        PmReductionDispositionV2::Produced { derived_id }
+                    }
+                    PmReductionDispositionV2::NoOutput {
+                        operation_evidence: items,
+                    } => PmReductionDispositionV2::NoOutput {
+                        operation_evidence: operation_evidence(items),
+                    },
+                    PmReductionDispositionV2::Suppressed {
+                        operation_evidence: items,
+                    } => PmReductionDispositionV2::Suppressed {
+                        operation_evidence: operation_evidence(items),
+                    },
+                };
+                self.pm_reports.push(PmReductionReportV2 {
+                    canonical_fact_id: report.canonical_fact_id,
+                    member_index: report.member_index,
+                    canonical_rule_version: report.canonical_rule_version,
+                    scope: report.scope,
+                    operation: report.operation,
+                    reason_code: report.reason_code,
+                    quantity_conservation: report.quantity_conservation,
+                    disposition,
+                });
             }
         }
         Ok(())

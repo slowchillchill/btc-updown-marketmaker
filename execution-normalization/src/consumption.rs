@@ -1,5 +1,7 @@
 //! NOE 所属消费引用及受信宿主接线。耐久视图与消费引用保持直接类型区分。
 //! 公开生产者接口不提供不可伪造来源保证；宿主须传真实批及驱动时点，不能重建耐久数据伪造交付。
+mod mapping;
+
 use crate::*;
 use contracts::execution_normalization::*;
 use serde::{Deserialize, Serialize};
@@ -136,17 +138,24 @@ pub fn read_durable_noe_record_v2(
 ) -> Result<NoeDurableRecordViewV2, DurableErrorV1> {
     durable_record_view(reference, read_noe_result_v4(reference)?)
 }
-fn durable_record_view<C: Serialize, R: serde::de::DeserializeOwned>(
+fn durable_record_view<R>(
     reference: &NoeResultReferenceV1,
-    resolved: ResolvedNoeResult<SourceNeutralTradeLifecycleResultV2, C>,
+    resolved: ResolvedNoeResult<
+        SourceNeutralTradeLifecycleResultV2,
+        SourceNeutralControlResult<
+            SourceNeutralSubmissionOutcomeV2,
+            SourceNeutralOrderSnapshotV2,
+            StableLogicalIdentityV1,
+            R,
+        >,
+    >,
 ) -> Result<NoeDurableRecordView<R>, DurableErrorV1> {
-    // 冷读取沿原身份编解码，既不规范化，也不创建领取能力。
-    let record = serde_json::to_value(&resolved.record)
-        .and_then(serde_json::from_value)
-        .map_err(|e| DurableErrorV1::ContainerDecode {
+    let record = mapping::map_normalization_record(resolved.record).map_err(|e| {
+        DurableErrorV1::ContainerDecode {
             path: reference.commit_container.location.clone().into(),
             message: e.to_string(),
-        })?;
+        }
+    })?;
     Ok(NoeDurableRecordView {
         position: NoeRecordPositionV1 {
             context_reference: resolved.context.context_reference.clone(),
