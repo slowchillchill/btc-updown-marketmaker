@@ -146,8 +146,10 @@ pub(super) async fn run_binance_ws_source(
                     let value = match serde_json::from_str::<Value>(text.as_str()) {
                         Ok(value) => value,
                         Err(error) => {
+                            let raw_bytes = text.as_bytes().to_vec();
+                            drop(text);
                             match emit_aggtrade_websocket_invalid(
-                                text.as_bytes().to_vec(),
+                                raw_bytes,
                                 recv_time_utc_ms,
                                 ingress_coordinate,
                                 BinanceAggTradeInvalidReason::InvalidJson,
@@ -176,8 +178,10 @@ pub(super) async fn run_binance_ws_source(
                         }
                         _ => {
                             drop(value);
+                            let raw_bytes = text.as_bytes().to_vec();
+                            drop(text);
                             match emit_aggtrade_websocket_invalid(
-                                text.as_bytes().to_vec(),
+                                raw_bytes,
                                 recv_time_utc_ms,
                                 ingress_coordinate,
                                 BinanceAggTradeInvalidReason::InvalidPayload,
@@ -201,8 +205,10 @@ pub(super) async fn run_binance_ws_source(
                     };
                     let Some(event_type) = payload.get("e").and_then(Value::as_str) else {
                         drop(value);
+                        let raw_bytes = text.as_bytes().to_vec();
+                        drop(text);
                         match emit_aggtrade_websocket_invalid(
-                            text.as_bytes().to_vec(),
+                            raw_bytes,
                             recv_time_utc_ms,
                             ingress_coordinate,
                             BinanceAggTradeInvalidReason::InvalidPayload,
@@ -228,8 +234,10 @@ pub(super) async fn run_binance_ws_source(
                     }
                     if event_type != spec.default_event_type {
                         drop(value);
+                        let raw_bytes = text.as_bytes().to_vec();
+                        drop(text);
                         match emit_aggtrade_websocket_invalid(
-                            text.as_bytes().to_vec(),
+                            raw_bytes,
                             recv_time_utc_ms,
                             ingress_coordinate,
                             BinanceAggTradeInvalidReason::InvalidPayload,
@@ -258,8 +266,10 @@ pub(super) async fn run_binance_ws_source(
                         Ok(websocket) => websocket,
                         Err(error) => {
                             drop(value);
+                            let raw_bytes = text.as_bytes().to_vec();
+                            drop(text);
                             match emit_aggtrade_websocket_invalid(
-                                text.as_bytes().to_vec(),
+                                raw_bytes,
                                 recv_time_utc_ms,
                                 ingress_coordinate,
                                 BinanceAggTradeInvalidReason::InvalidPayload,
