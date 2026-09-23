@@ -587,3 +587,9 @@ betting on future events across various topics.
 Studies show prediction markets are often more accurate than pundits because they combine news, polls, and expert
 opinions into a single value that represents the market’s view of an event’s odds. Our markets reflect accurate, unbiased,
 and real-time probabilities for the events that matter most to you. Markets seek truth.
+
+## 本地 RTDS 失败诊断
+
+RTDS 帧仍先从原始字节解析为消息，保留单帧、数组和重复字段的原解析语义。仅在失败后解析一次帧 JSON，借用同一结果区分控制包与生成简短诊断。只有对象的 `message` 精确匹配既有三种网络、限流或超时消息，且不含 `topic`、`type`、`timestamp`、`payload`，才沿原可恢复控制包路径处理；混杂业务字段仍保留解析故障及原错误来源。
+
+诊断保留帧长度、JSON 形状、选定标量字段及错误状态。字符串 `body` 内嵌的另一段 JSON 按实际需要解析以提取原因，不输出完整正文。诊断不再生成原帧或正文 SHA，不再编码规范 JSON，也不为定位数组中首个不匹配元素重新解析全部消息；因此人工指纹和该数组定位信息不再提供。原错误类别、原因链、故障保持与重连分流不变。2048 字节的 UTF-8 安全截断只限制诊断输出，不是帧接受上限。
