@@ -7,8 +7,53 @@ struct Manifest {
     commit_sequence: u64,
     context_reference: ExecutionNormalizationContextReferenceV1,
     durable_available_at_utc_ms: i64,
-    boundary_sha256: contracts::Sha256Hex,
 }
+#[derive(Serialize, Deserialize)]
+struct EvidenceBody<T0, T1, T2, T3> {
+    logical_identity: T0,
+    source_order: T1,
+    source_reference: T2,
+    evidence: T3,
+}
+#[derive(Serialize, Deserialize)]
+struct EconomicFactBody<T0, T1> {
+    source_order: T0,
+    fact: T1,
+}
+#[derive(Serialize, Deserialize)]
+struct DuplicateBody<T0, T1, T2, T3> {
+    logical_identity: T0,
+    source_order: T1,
+    source_reference: T2,
+    original_source_reference: T3,
+}
+#[derive(Serialize, Deserialize)]
+struct EconomicAliasBody<T0, T1, T2, T3, T4, T5, T6> {
+    logical_identity: T0,
+    source_order: T1,
+    source_reference: T2,
+    decision: T3,
+    economic_identity: T4,
+    primary_logical_identity: T5,
+    fact_reference: T6,
+}
+#[derive(Serialize, Deserialize)]
+struct PendingBody<T0, T1, T2, T3, T4> {
+    logical_identity: T0,
+    source_order: T1,
+    source_reference: T2,
+    evidence: T3,
+    scope: T4,
+}
+#[derive(Serialize, Deserialize)]
+struct ConflictBody<T0, T1, T2, T3, T4> {
+    logical_identity: T0,
+    source_order: T1,
+    source_reference: T2,
+    scope: T3,
+    conflicting_evidence: T4,
+}
+
 fn parquet_error(path: &Path, error: impl fmt::Display) -> DurableErrorV1 {
     DurableErrorV1::ContainerDecode {
         path: path.to_owned(),
@@ -17,27 +62,111 @@ fn parquet_error(path: &Path, error: impl fmt::Display) -> DurableErrorV1 {
 }
 pub(super) fn write_batch<MT: Serialize, MC: Serialize, I: Serialize, F: Serialize>(
     path: &Path,
-    batch: &crate::core::NormalizationBatch<MT, MC, I, F>,
+    source_watermark: &SimV2SourceWatermarkV1,
+    records: &[NormalizationRecord<MT, MC, I, F>],
 ) -> Result<(), DurableErrorV1> {
-    let rows = batch
-        .records
+    let rows = records
         .iter()
         .enumerate()
         .map(|(ordinal, record)| {
-            let value = serde_json::to_value(record).map_err(|e| parquet_error(path, e))?;
-            let (kind, body) = value
-                .as_object()
-                .and_then(|v| v.iter().next())
-                .expect("原外部标记记录");
+            let (kind, body) = match record {
+                NormalizationRecord::Evidence {
+                    logical_identity,
+                    source_order,
+                    source_reference,
+                    evidence,
+                } => (
+                    "Evidence",
+                    serde_json::to_vec(&EvidenceBody {
+                        logical_identity,
+                        source_order,
+                        source_reference,
+                        evidence,
+                    }),
+                ),
+                NormalizationRecord::EconomicFact { source_order, fact } => (
+                    "EconomicFact",
+                    serde_json::to_vec(&EconomicFactBody { source_order, fact }),
+                ),
+                NormalizationRecord::EconomicFactV2 { source_order, fact } => (
+                    "EconomicFactV2",
+                    serde_json::to_vec(&EconomicFactBody { source_order, fact }),
+                ),
+                NormalizationRecord::Duplicate {
+                    logical_identity,
+                    source_order,
+                    source_reference,
+                    original_source_reference,
+                } => (
+                    "Duplicate",
+                    serde_json::to_vec(&DuplicateBody {
+                        logical_identity,
+                        source_order,
+                        source_reference,
+                        original_source_reference,
+                    }),
+                ),
+                NormalizationRecord::EconomicAlias {
+                    logical_identity,
+                    source_order,
+                    source_reference,
+                    decision,
+                    economic_identity,
+                    primary_logical_identity,
+                    fact_reference,
+                } => (
+                    "EconomicAlias",
+                    serde_json::to_vec(&EconomicAliasBody {
+                        logical_identity,
+                        source_order,
+                        source_reference,
+                        decision,
+                        economic_identity,
+                        primary_logical_identity,
+                        fact_reference,
+                    }),
+                ),
+                NormalizationRecord::Pending {
+                    logical_identity,
+                    source_order,
+                    source_reference,
+                    evidence,
+                    scope,
+                } => (
+                    "Pending",
+                    serde_json::to_vec(&PendingBody {
+                        logical_identity,
+                        source_order,
+                        source_reference,
+                        evidence,
+                        scope,
+                    }),
+                ),
+                NormalizationRecord::Conflict {
+                    logical_identity,
+                    source_order,
+                    source_reference,
+                    scope,
+                    conflicting_evidence,
+                } => (
+                    "Conflict",
+                    serde_json::to_vec(&ConflictBody {
+                        logical_identity,
+                        source_order,
+                        source_reference,
+                        scope,
+                        conflicting_evidence,
+                    }),
+                ),
+            };
             Ok((
                 ordinal as u64,
-                kind.clone(),
-                serde_json::to_vec(body).map_err(|e| parquet_error(path, e))?,
+                kind.to_owned(),
+                body.map_err(|e| parquet_error(path, e))?,
             ))
         })
         .collect::<Result<Vec<_>, DurableErrorV1>>()?;
-    let boundary =
-        serde_json::to_string(&batch.source_watermark).map_err(|e| parquet_error(path, e))?;
+    let boundary = serde_json::to_string(source_watermark).map_err(|e| parquet_error(path, e))?;
     crate::record_file::write(path, FORMAT, &boundary, &rows)
         .map_err(|e| io_error("写入归一化 Parquet 批", path, e))
 }
@@ -57,12 +186,99 @@ pub(super) fn read_batch<
             if seq != expected as u64 {
                 return Err(parquet_error(path, "记录 ordinal 不连续"));
             }
-            let body: serde_json::Value =
-                serde_json::from_slice(&body).map_err(|e| parquet_error(path, e))?;
-            serde_json::from_value(serde_json::Value::Object(serde_json::Map::from_iter([(
-                kind, body,
-            )])))
-            .map_err(|e| parquet_error(path, e))
+            match kind.as_str() {
+                "Evidence" => {
+                    let EvidenceBody {
+                        logical_identity,
+                        source_order,
+                        source_reference,
+                        evidence,
+                    } = serde_json::from_slice(&body).map_err(|e| parquet_error(path, e))?;
+                    Ok(NormalizationRecord::Evidence {
+                        logical_identity,
+                        source_order,
+                        source_reference,
+                        evidence,
+                    })
+                }
+                "EconomicFact" => {
+                    let EconomicFactBody { source_order, fact } =
+                        serde_json::from_slice(&body).map_err(|e| parquet_error(path, e))?;
+                    Ok(NormalizationRecord::EconomicFact { source_order, fact })
+                }
+                "EconomicFactV2" => {
+                    let EconomicFactBody { source_order, fact } =
+                        serde_json::from_slice(&body).map_err(|e| parquet_error(path, e))?;
+                    Ok(NormalizationRecord::EconomicFactV2 { source_order, fact })
+                }
+                "Duplicate" => {
+                    let DuplicateBody {
+                        logical_identity,
+                        source_order,
+                        source_reference,
+                        original_source_reference,
+                    } = serde_json::from_slice(&body).map_err(|e| parquet_error(path, e))?;
+                    Ok(NormalizationRecord::Duplicate {
+                        logical_identity,
+                        source_order,
+                        source_reference,
+                        original_source_reference,
+                    })
+                }
+                "EconomicAlias" => {
+                    let EconomicAliasBody {
+                        logical_identity,
+                        source_order,
+                        source_reference,
+                        decision,
+                        economic_identity,
+                        primary_logical_identity,
+                        fact_reference,
+                    } = serde_json::from_slice(&body).map_err(|e| parquet_error(path, e))?;
+                    Ok(NormalizationRecord::EconomicAlias {
+                        logical_identity,
+                        source_order,
+                        source_reference,
+                        decision,
+                        economic_identity,
+                        primary_logical_identity,
+                        fact_reference,
+                    })
+                }
+                "Pending" => {
+                    let PendingBody {
+                        logical_identity,
+                        source_order,
+                        source_reference,
+                        evidence,
+                        scope,
+                    } = serde_json::from_slice(&body).map_err(|e| parquet_error(path, e))?;
+                    Ok(NormalizationRecord::Pending {
+                        logical_identity,
+                        source_order,
+                        source_reference,
+                        evidence,
+                        scope,
+                    })
+                }
+                "Conflict" => {
+                    let ConflictBody {
+                        logical_identity,
+                        source_order,
+                        source_reference,
+                        scope,
+                        conflicting_evidence,
+                    } = serde_json::from_slice(&body).map_err(|e| parquet_error(path, e))?;
+                    Ok(NormalizationRecord::Conflict {
+                        logical_identity,
+                        source_order,
+                        source_reference,
+                        scope,
+                        conflicting_evidence,
+                    })
+                }
+                _ => Err(parquet_error(path, format!("未知 NOE 记录变体：{kind}"))),
+            }
         })
         .collect::<Result<Vec<_>, _>>()?;
     Ok(crate::core::NormalizationBatch {
@@ -96,16 +312,48 @@ pub(super) fn read_commit<
             },
             records: batch.records,
         },
-        boundary_sha256: manifest.boundary_sha256,
     })
 }
-pub(super) fn publish<
-    T: NoeTradePayload<C>,
-    C: Clone + fmt::Debug + Eq + Serialize + serde::de::DeserializeOwned,
->(
+pub(super) fn read_position(
+    path: &Path,
+    expected_version: &str,
+) -> Result<(NoeSourceCommitBoundaryV1, u64), DurableErrorV1> {
+    let manifest: Manifest = decode_container(&manifest_path(path))?;
+    if manifest.physical_format != FORMAT {
+        return Err(parquet_error(path, "不支持的 NOE 物理格式"));
+    }
+    check_container_header(
+        path,
+        &manifest.container_version,
+        expected_version,
+        NOE_CONTAINER_ENCODING_V1,
+    )?;
+    let file_sequence = commit_sequence_from_path(path)?;
+    if manifest.commit_sequence != file_sequence {
+        return Err(DurableErrorV1::CommitSequenceMismatch {
+            expected: file_sequence,
+            found: manifest.commit_sequence,
+        });
+    }
+    let (watermark, rows) =
+        crate::record_file::read_metadata(path, FORMAT).map_err(|e| parquet_error(path, e))?;
+    Ok((
+        NoeSourceCommitBoundaryV1 {
+            context_reference: manifest.context_reference,
+            source_watermark: serde_json::from_str(&watermark)
+                .map_err(|e| parquet_error(path, e))?,
+            durable_available_at_utc_ms: manifest.durable_available_at_utc_ms,
+        },
+        rows,
+    ))
+}
+
+pub(super) fn publish(
     stage: &Path,
     target: &Path,
-    container: &CommitContainer<T, C>,
+    container_version: &str,
+    commit_sequence: u64,
+    boundary: &NoeSourceCommitBoundaryV1,
     fault: PublishFaultV1,
 ) -> Result<(), DurableErrorV1> {
     let directory = target.parent().expect("提交目录");
@@ -121,7 +369,7 @@ pub(super) fn publish<
     .map_err(|e| {
         if e == rustix::io::Errno::EXIST {
             DurableErrorV1::CommitAlreadyExists {
-                commit_sequence: container.payload.commit_sequence,
+                commit_sequence: commit_sequence,
             }
         } else {
             io_error("发布归一化 Parquet", target, e.into())
@@ -132,11 +380,10 @@ pub(super) fn publish<
         .map_err(|e| io_error("同步 Parquet 目录", directory, e))?;
     let manifest = Manifest {
         physical_format: FORMAT.into(),
-        container_version: container.payload.container_version.clone(),
-        commit_sequence: container.payload.commit_sequence,
-        context_reference: container.payload.boundary.context_reference.clone(),
-        durable_available_at_utc_ms: container.payload.boundary.durable_available_at_utc_ms,
-        boundary_sha256: container.boundary_sha256.clone(),
+        container_version: container_version.to_owned(),
+        commit_sequence: commit_sequence,
+        context_reference: boundary.context_reference.clone(),
+        durable_available_at_utc_ms: boundary.durable_available_at_utc_ms,
     };
     let path = manifest_path(target);
     let name = path.file_name().unwrap().to_str().unwrap();

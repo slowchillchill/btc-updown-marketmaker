@@ -303,6 +303,58 @@ fn verify_memory_recovery(same_batch: bool) {
     );
     assert!(!failed_root.join("ledger-active-v1.jsonl").exists());
 
+    // 使用真实 Parquet 读取/写入补回旧已持久引用字段，再经正式 Ledger 恢复。
+    // 分片摘要仍属于尚未改动的 Ledger 格式，因此这里只更新夹具的真实文件摘要。
+    {
+        use sha2::{Digest, Sha256};
+        fn old_reference(value: &mut serde_json::Value) -> usize {
+            match value {
+                serde_json::Value::Object(fields) => {
+                    let mut count = 0;
+                    if let Some(container) = fields
+                        .get_mut("commit_container")
+                        .and_then(serde_json::Value::as_object_mut)
+                    {
+                        container
+                            .insert("boundary_sha256".into(), serde_json::json!("a".repeat(64)));
+                        count += 1;
+                    }
+                    count + fields.values_mut().map(old_reference).sum::<usize>()
+                }
+                serde_json::Value::Array(values) => values.iter_mut().map(old_reference).sum(),
+                _ => 0,
+            }
+        }
+        let manifest_path = temp
+            .path()
+            .join("ledger/ledger-parquet-00000000000000000000.manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        let path = std::path::PathBuf::from(manifest["location"].as_str().unwrap());
+        let (boundary, mut rows) =
+            ::execution_normalization::record_file::read(&path, "ledger_arrow_parquet_v1").unwrap();
+        let mut inserted = 0;
+        for (_, _, bytes) in &mut rows {
+            let mut value: serde_json::Value = serde_json::from_slice(bytes).unwrap();
+            inserted += old_reference(&mut value);
+            *bytes = serde_json::to_vec(&value).unwrap();
+        }
+        assert!(inserted > 0);
+        let replacement = path.with_extension("legacy-fixture");
+        ::execution_normalization::record_file::write(
+            &replacement,
+            "ledger_arrow_parquet_v1",
+            &boundary,
+            &rows,
+        )
+        .unwrap();
+        std::fs::rename(replacement, &path).unwrap();
+        manifest["sha256"] = serde_json::json!(format!(
+            "{:x}",
+            Sha256::digest(std::fs::read(&path).unwrap())
+        ));
+        std::fs::write(manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    }
     let mut restored = LedgerWriterV1::open_durable(temp.path().join("ledger")).unwrap();
     assert_eq!(restored.projection_v2(), writer.projection_v2());
     assert_eq!(

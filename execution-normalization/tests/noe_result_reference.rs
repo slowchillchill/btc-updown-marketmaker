@@ -94,19 +94,12 @@ fn one_reference_reads_the_same_context_boundary_and_record_after_reopen() {
 }
 
 #[test]
-fn a_wrong_digest_corrupt_container_and_out_of_range_ordinal_are_rejected() {
+fn corrupt_container_and_out_of_range_ordinal_are_rejected() {
     let temporary = TempDir::new().unwrap();
     let mut store = DurableContextStoreV1::open_or_create_sim_v2(temporary.path(), seed()).unwrap();
     let input = batch();
     store.commit_batch(input, 30).unwrap();
     let reference = store.commits()[0].result_reference(0).unwrap();
-
-    let mut wrong_digest = reference.clone();
-    wrong_digest.commit_container.boundary_sha256 = Sha256Hex("f".repeat(64));
-    assert!(matches!(
-        read_noe_result_v1(&wrong_digest),
-        Err(DurableErrorV1::BoundaryDigestMismatch { .. })
-    ));
 
     let mut out_of_range = reference.clone();
     out_of_range.record_ordinal = 2;
@@ -122,7 +115,6 @@ fn a_wrong_digest_corrupt_container_and_out_of_range_ordinal_are_rejected() {
     assert!(matches!(
         read_noe_result_v1(&reference),
         Err(DurableErrorV1::ContainerDecode { .. })
-            | Err(DurableErrorV1::BoundaryDigestMismatch { .. })
     ));
 }
 
@@ -175,12 +167,6 @@ fn recovery_position_slot_checks_each_ordinal_and_revalidates_each_new_key() {
     assert!(matches!(
         reader.read(&invalid),
         Err(DurableErrorV1::RecordOrdinalOutOfRange { .. })
-    ));
-    let mut wrong_hash = first.clone();
-    wrong_hash.commit_container.boundary_sha256 = Sha256Hex("f".repeat(64));
-    assert!(matches!(
-        reader.read(&wrong_hash),
-        Err(DurableErrorV1::BoundaryDigestMismatch { .. })
     ));
     // 已提交文件无合法原地改写路径；同键命中不持续监测，独立读取和新恢复重新检查。
     let bytes = fs::read(&first.commit_container.location).unwrap();
