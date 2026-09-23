@@ -5,95 +5,10 @@ use sim_system::execution::{
     CancelMarketOrdersRequestV2, CancelOrderBatchItemV2, CancelOrderItemV1, CancelOrderRequestV2,
     CancelOrdersRequestV2, MutationRequestReceiptV2, PostOrderBatchItemV2, PostOrderItemV1,
     PostOrderRequestV2, PostOrdersRequestV2, RequestContextV2, SimBuyOrderKindV1, SimBuyOrderV1,
-    SimExecution, SimRunActorErrorV2, TrustedDecisionCutoffV2,
+    SimRunActorErrorV2,
 };
 
 use crate::{BridgeBackendV1, private};
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SimIntentCallContextV1 {
-    pub request_context: RequestContextV2,
-    pub trusted_decision_cutoff: TrustedDecisionCutoffV2,
-}
-
-pub type SimIntentImmediateSuccessV1 = MutationRequestReceiptV2;
-pub type SimIntentErrorV1 = SimRunActorErrorV2;
-
-pub struct SimAdapterV1<'execution> {
-    execution: &'execution mut SimExecution,
-}
-
-impl<'execution> SimAdapterV1<'execution> {
-    pub(crate) fn bind(execution: &'execution mut SimExecution) -> Self {
-        Self { execution }
-    }
-
-    fn dispatch_intent(
-        &mut self,
-        context: SimIntentCallContextV1,
-        intent: &ModelIntentV1,
-    ) -> Result<MutationRequestReceiptV2, SimRunActorErrorV2> {
-        let SimIntentCallContextV1 {
-            request_context,
-            trusted_decision_cutoff,
-        } = context;
-        match intent {
-            ModelIntentV1::SubmitSingleBuy {
-                condition_id,
-                order,
-            } => self.execution.post_order(
-                trusted_decision_cutoff,
-                single_buy_request(request_context, condition_id, order)?,
-            ),
-            ModelIntentV1::SubmitPairedBuy {
-                condition_id,
-                orders,
-            } => self.execution.post_orders(
-                trusted_decision_cutoff,
-                paired_buy_request(request_context, condition_id, orders)?,
-            ),
-            ModelIntentV1::CancelOrder { platform_order_id } => self.execution.cancel_order(
-                trusted_decision_cutoff,
-                cancel_order_request(request_context, platform_order_id),
-            ),
-            ModelIntentV1::CancelOrders { platform_order_ids } => self.execution.cancel_orders(
-                trusted_decision_cutoff,
-                cancel_orders_request(request_context, platform_order_ids)?,
-            ),
-            ModelIntentV1::CancelMarketOrders { condition_id } => {
-                self.execution.cancel_market_orders(
-                    trusted_decision_cutoff,
-                    cancel_market_orders_request(request_context, condition_id),
-                )
-            }
-        }
-    }
-}
-
-impl<'execution> private::Sealed for SimAdapterV1<'execution> {
-    type DispatchFuture<'a>
-        = Ready<Result<MutationRequestReceiptV2, SimRunActorErrorV2>>
-    where
-        Self: 'a;
-
-    fn dispatch<'a, K>(
-        &'a mut self,
-        context: <Self as BridgeBackendV1>::CallContext,
-        intent: &'a ModelIntentV1,
-    ) -> Self::DispatchFuture<'a>
-    where
-        'execution: 'a,
-        K: private::DispatchKey,
-    {
-        ready(self.dispatch_intent(context, intent))
-    }
-}
-
-impl<'execution> BridgeBackendV1 for SimAdapterV1<'execution> {
-    type CallContext = SimIntentCallContextV1;
-    type ImmediateSuccess = MutationRequestReceiptV2;
-    type Error = SimRunActorErrorV2;
-}
 
 fn sim_item_id(global_request_id: &str, batch_item_ordinal: u16) -> String {
     format!("{global_request_id}:{batch_item_ordinal}")
@@ -316,11 +231,10 @@ mod tests {
     use sim_system::execution::{
         BusinessDirectResponseV2, BusinessProjectionBatchV2, BusinessProjectionPortV2,
         CancelMarketOrdersRequestV2, CancelOrderBatchItemV2, CancelOrderItemV1,
-        CancelOrderRequestV2, CancelOrdersRequestV2, Decimal, MutationRequestReceiptV2,
-        PlatformPrefixAdvanceV2, PostOrderBatchItemV2, PostOrderItemV1, PostOrderRequestV2,
-        PostOrdersRequestV2, PublicVisibilityCursorV1, RequestContextV2, RunDurabilityRoleV2,
-        RunOpenedV2, SessionSpecV3, SimBuyOrderKindV1, SimBuyOrderV1, SimExecution,
-        SimRunActorErrorV2, TrustedDecisionCutoffV2,
+        CancelOrderRequestV2, CancelOrdersRequestV2, Decimal, FinitePublicConsumptionV1,
+        MutationRequestReceiptV2, PostOrderBatchItemV2, PostOrderItemV1, PostOrderRequestV2,
+        PostOrdersRequestV2, PublicSimExecutionV1, RequestContextV2, SessionSpecV3,
+        SimBuyOrderKindV1, SimBuyOrderV1, SimRunActorErrorV2,
     };
     use sim_system::finality::TradeFinalityPolicyV2;
     use sim_system::latency_profile::load_embedded_proxy_latency_profile;
@@ -328,13 +242,16 @@ mod tests {
         HistoricalProcessSnapshotRequestV1, ImplementationIdentityV1,
         load_historical_process_snapshot_v3,
     };
+    use sim_system::public_consumption::{
+        PreparedPublicGroupV1, PublicGroupDeliveryV1, PublicProjectionPortV1, PublicRunOpenedV1,
+    };
     use sim_system::scenario::SealedPlatformScenarioV1;
 
     use crate::IntentBridge;
 
     use super::{
-        SimIntentCallContextV1, cancel_market_orders_request, cancel_order_request,
-        cancel_orders_request, paired_buy_request, sim_order_kind, single_buy_request,
+        cancel_market_orders_request, cancel_order_request, cancel_orders_request,
+        paired_buy_request, sim_order_kind, single_buy_request,
     };
 
     const CONDITION_ID: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
@@ -350,17 +267,6 @@ mod tests {
         RequestContextV2 {
             global_request_id: global_request_id.to_owned(),
             caller_correlation_id: Some(format!("correlation-{global_request_id}")),
-        }
-    }
-
-    fn call_context(global_request_id: &str) -> SimIntentCallContextV1 {
-        SimIntentCallContextV1 {
-            request_context: request_context(global_request_id),
-            trusted_decision_cutoff: TrustedDecisionCutoffV2 {
-                logical_time_utc_ms: 1_200,
-                public_visibility: PublicVisibilityCursorV1::default(),
-                private_feedback_sequence: 0,
-            },
         }
     }
 
@@ -403,8 +309,56 @@ mod tests {
         }
     }
 
+    impl PublicProjectionPortV1 for CapturingProjectionPortV1 {
+        fn delivered_private_feedback(&self, _run_id: &str) -> u64 {
+            0
+        }
+    }
+
+    // 由实际 RTDS 输入归约形成组；订单簿未观察时，请求结果由 SIM 正常业务路径决定。
+    fn public_deliveries() -> Vec<Result<PublicGroupDeliveryV1, SimRunActorErrorV2>> {
+        use data_pipeline_core::{
+            public_input::*, public_observation_core::*, public_reference::*, typed_raw::*,
+        };
+        let mut core = PublicObservationCoreV1::new(contracts::PublicInputStreamHeaderV1 {
+            input_stream_id: "bridge-input".into(),
+            canonical_rule_version: "rule-v1".into(),
+            observation_version: "public-observation-v1".into(),
+            ordering_version: "original-input-v1".into(),
+            input_scope: "bridge-finite".into(),
+            max_pending_ws_terminals: 2,
+            initial_state: contracts::PublicInitialStateV1::Empty,
+        })
+        .unwrap();
+        [1_200, 100_000].into_iter().enumerate().map(|(index, time)| {
+            let payload = serde_json::json!({"topic":"crypto_prices_chainlink","type":"update","timestamp":time,"payload":{"symbol":"btc/usd","timestamp":time,"value":60000}}).to_string();
+            let row = TypedRawRowV2::Existing(TypedRawRow::PolymarketRtdsChainlinkBtcUsd(PolymarketRtdsChainlinkBtcUsdRow {
+                timestamp_received: time, message_timestamp: time, payload_timestamp: time, age_ms: Some(0),
+                symbol: "btc/usd".into(), value: "60000".into(), topic: "crypto_prices_chainlink".into(),
+                message_type: "update".into(), freshness_status: RtdsFreshnessStatus::Fresh,
+                subscription_filter: r#"{"symbol":"btc/usd"}"#.into(), source_native_payload_json: payload,
+                collector_host_id: "bridge-fixture".into(), collector_region: "local".into(),
+                source_endpoint: "wss://ws-live-data.polymarket.com".into(), schema_version: POLYMARKET_RTDS_CHAINLINK_BTC_USD_SCHEMA.into(),
+            }));
+            let source_evidence = source_evidence_v3_from_typed_raw_v2(&row).unwrap();
+            let recorded = RecordedIngressV1 { input_stream_id: "bridge-input".into(), input_position: index as u64,
+                ingress: DptIngressV1::Message { row, source_evidence }, dependency_record_refs: vec![] };
+            let identities = std::collections::BTreeMap::new();
+            let prepared = prepare_public_ingress_v1(&core, &recorded, &identities, &[]).unwrap();
+            let applied = core.push(&prepared).unwrap();
+            let group = Arc::clone(&applied.applied.closed_groups[0]);
+            Ok(PublicGroupDeliveryV1 { delivered_at_utc_ms: time, prepared: Arc::new(PreparedPublicGroupV1 {
+                reference: contracts::PublicGroupReferenceV1 { input_stream_id: "bridge-input".into(), applied_prefix: applied.applied.applied_prefix.clone(),
+                    group_position: group.group_position, group_id: group.group_id.clone(), closed_at_input_position: group.closed_at_input_position },
+                group, pm_inputs: vec![], pm_contexts: vec![],
+            }) })
+        }).collect()
+    }
+
     struct SimFixtureV1 {
-        execution: SimExecution,
+        execution: FinitePublicConsumptionV1<
+            std::vec::IntoIter<Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>,
+        >,
         captured: Rc<RefCell<CapturedProjectionsV1>>,
         _directory: tempfile::TempDir,
     }
@@ -440,8 +394,6 @@ mod tests {
                 SealedPlatformScenarioV1::decode_and_seal(
                     br#"{
                         "schema_version":"platform_scenario_v1",
-                        "scenario_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-                        "market_set_sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                         "markets":[{
                             "market":{
                                 "condition_id":"0x1111111111111111111111111111111111111111111111111111111111111111",
@@ -464,10 +416,9 @@ mod tests {
             let projection_port = Box::new(CapturingProjectionPortV1 {
                 captured: Rc::clone(&captured),
             });
-            let opened = RunOpenedV2 {
+            let opened = PublicRunOpenedV1 {
                 projection_version: Default::default(),
                 run_id: run_id.to_owned(),
-                durability_role: RunDurabilityRoleV2::CleanRun,
                 platform_rule_snapshot_file_sha256: rule_snapshot.file_sha256().clone(),
                 trade_finality_policy_file_sha256: finality_policy.policy_id().clone(),
                 platform_scenario_file_sha256: scenario.file_sha256().clone(),
@@ -479,7 +430,7 @@ mod tests {
                 },
                 market_event_source_identity_sha256: Some(Sha256Hex("d".repeat(64))),
             };
-            let mut execution = SimExecution::create_new(
+            let mut execution = PublicSimExecutionV1::create_new(
                 &directory.path().join("sim-event-log.jsonl"),
                 opened,
                 rule_snapshot,
@@ -488,6 +439,7 @@ mod tests {
                 latency_profile,
                 projection_port,
                 MAX_GROUP_BYTES,
+                128,
             )
             .expect("创建真实 SimExecution 夹具");
             execution
@@ -495,7 +447,7 @@ mod tests {
                     run_id: run_id.to_owned(),
                     session_id: "session-intent-bridge".to_owned(),
                     account_id: "account-intent-bridge".to_owned(),
-                    caller_role: SimCallerRoleV1::ModelTrain,
+                    caller_role: SimCallerRoleV1::Paper,
                     caller_instance_id: "caller-intent-bridge".to_owned(),
                     creation_request_id: "create-intent-bridge".to_owned(),
                     response_bridge_binding_id: "response-intent-bridge".to_owned(),
@@ -508,6 +460,15 @@ mod tests {
             execution
                 .activate_session("activate-intent-bridge".to_owned())
                 .expect("激活真实 SimExecution 会话夹具");
+            let mut execution = FinitePublicConsumptionV1::new(
+                execution,
+                public_deliveries().into_iter(),
+                "bridge-input".into(),
+            );
+            execution
+                .next_group()
+                .expect("应用实际公共组")
+                .expect("首组存在");
             Self {
                 execution,
                 captured,
@@ -520,8 +481,15 @@ mod tests {
             global_request_id: &str,
             intent: &ModelIntentV1,
         ) -> Result<MutationRequestReceiptV2, SimRunActorErrorV2> {
-            let mut bridge = IntentBridge::bind_sim(&mut self.execution);
-            resolve_ready(bridge.execute(call_context(global_request_id), intent))
+            let mut decision = self.execution.decision().expect("已应用组提供决策截止");
+            let mut bridge = IntentBridge::bind_sim_group(&mut decision);
+            resolve_ready(bridge.execute(request_context(global_request_id), intent))
+        }
+
+        fn stop(self) {
+            self.execution
+                .stop_and_drain()
+                .expect("停止有限供料并排空已接纳记录");
         }
 
         fn drive_until_responses(&mut self, request_ids: &[&str]) {
@@ -539,17 +507,9 @@ mod tests {
                 if all_seen {
                     return;
                 }
-                let required = self
-                    .execution
-                    .next_required_logical_drive()
-                    .expect("未完成请求必须存在必要逻辑推进");
                 self.execution
-                    .drive_platform_prefix(PlatformPrefixAdvanceV2 {
-                        path: required.path,
-                        closed_through_utc_ms: required.required_at_utc_ms,
-                        next_index_position: 0,
-                    })
-                    .expect("推进真实 SimExecution 到直接响应");
+                    .next_group()
+                    .expect("按真实下一组/结束推进响应");
             }
             panic!("固定逻辑推进次数内未收到全部直接响应");
         }
@@ -847,7 +807,7 @@ mod tests {
                 .iter()
                 .map(MutationRequestReceiptV2::input_sequence)
                 .collect::<Vec<_>>(),
-            vec![3, 4, 5, 6, 7]
+            vec![5, 6, 7, 8, 9]
         );
         assert_eq!(
             receipts
@@ -933,6 +893,8 @@ mod tests {
             cancel_market.metadata.method,
             ExecutionMethodV2::CancelMarketOrders
         );
+        drop(captured);
+        fixture.stop();
     }
 
     #[test]
@@ -1015,7 +977,8 @@ mod tests {
                 },
             )
             .expect("1001 项批撤必须完整交给 SimExecution");
-        assert_eq!(accepted.input_sequence(), 3);
+        assert_eq!(accepted.input_sequence(), 5);
         assert_eq!(accepted.scheduled_action_count(), 1_001);
+        fixture.stop();
     }
 }

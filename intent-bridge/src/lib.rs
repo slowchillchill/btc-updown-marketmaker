@@ -8,10 +8,7 @@ mod sim_adapter;
 pub use live_adapter::{
     LiveAdapterV1, LiveIntentCallContextV1, LiveIntentErrorV1, LiveIntentImmediateSuccessV1,
 };
-pub use sim_adapter::{
-    SimAdapterV1, SimGroupAdapterV1, SimIntentCallContextV1, SimIntentErrorV1,
-    SimIntentImmediateSuccessV1,
-};
+pub use sim_adapter::SimGroupAdapterV1;
 
 mod private {
     use super::{BridgeBackendV1, Future, ModelIntentV1};
@@ -87,12 +84,6 @@ impl<B> IntentBridge<B> {
     }
 }
 
-impl<'execution> IntentBridge<SimAdapterV1<'execution>> {
-    pub fn bind_sim(execution: &'execution mut sim_system::execution::SimExecution) -> Self {
-        Self::new(SimAdapterV1::bind(execution))
-    }
-}
-
 impl<'live, S, K> IntentBridge<LiveAdapterV1<'live, S, K>>
 where
     S: polymarket_client_sdk_v2::auth::Signer,
@@ -128,19 +119,13 @@ mod tests {
     use std::future::{Future, Ready, ready};
     use std::task::{Context, Poll, Waker};
 
+    use super::{
+        BridgeBackendV1, IntentBridge, LiveIntentCallContextV1, LiveIntentErrorV1,
+        LiveIntentImmediateSuccessV1, private,
+    };
     use contracts::{ConditionId, ModelIntentV1};
     use polymarket_client_sdk_v2::clob::types::response::{
         CancelOrdersResponse, PostOrderResponse,
-    };
-    use sim_system::execution::{
-        MutationRequestReceiptV2, PublicVisibilityCursorV1, RequestContextV2, SimRunActorErrorV2,
-        TrustedDecisionCutoffV2,
-    };
-
-    use super::{
-        BridgeBackendV1, IntentBridge, LiveIntentCallContextV1, LiveIntentErrorV1,
-        LiveIntentImmediateSuccessV1, SimIntentCallContextV1, SimIntentErrorV1,
-        SimIntentImmediateSuccessV1, private,
     };
 
     #[derive(Debug, PartialEq, Eq)]
@@ -244,37 +229,6 @@ mod tests {
             bridge.backend.seen_context,
             Some(ProbeContext("error-context"))
         );
-    }
-
-    #[test]
-    fn sim_call_context_contains_only_the_two_existing_contexts() {
-        let call_context = SimIntentCallContextV1 {
-            request_context: RequestContextV2 {
-                global_request_id: "request-82".to_owned(),
-                caller_correlation_id: Some("caller-82".to_owned()),
-            },
-            trusted_decision_cutoff: TrustedDecisionCutoffV2 {
-                logical_time_utc_ms: 82_000,
-                public_visibility: PublicVisibilityCursorV1::default(),
-                private_feedback_sequence: 82,
-            },
-        };
-
-        let SimIntentCallContextV1 {
-            request_context,
-            trusted_decision_cutoff,
-        } = call_context;
-        assert_eq!(request_context.global_request_id, "request-82");
-        assert_eq!(trusted_decision_cutoff.logical_time_utc_ms, 82_000);
-
-        fn success_type(value: MutationRequestReceiptV2) -> SimIntentImmediateSuccessV1 {
-            value
-        }
-        fn error_type(value: SimRunActorErrorV2) -> SimIntentErrorV1 {
-            value
-        }
-        let _ = success_type as fn(MutationRequestReceiptV2) -> SimIntentImmediateSuccessV1;
-        let _ = error_type as fn(SimRunActorErrorV2) -> SimIntentErrorV1;
     }
 
     #[test]
