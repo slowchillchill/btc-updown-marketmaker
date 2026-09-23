@@ -483,30 +483,6 @@ pub struct OrderMessage {
     pub status: Option<OrderStatusType>,
 }
 
-/// Order status for WebSocket order messages.
-#[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum OrderStatus {
-    /// Order is open and active
-    Open,
-    /// Order has been matched with a counterparty
-    Matched,
-    /// Order has been partially filled
-    PartiallyFilled,
-    /// Order has been cancelled
-    Cancelled,
-    /// Order has been placed (initial status)
-    Placement,
-    /// Order update (partial match)
-    Update,
-    /// Order cancellation in progress
-    Cancellation,
-    /// Unknown order status from the API (captures the raw value for debugging).
-    #[serde(untagged)]
-    Unknown(String),
-}
-
 /// Calculated midpoint update (derived from orderbook).
 #[non_exhaustive]
 #[serde_as]

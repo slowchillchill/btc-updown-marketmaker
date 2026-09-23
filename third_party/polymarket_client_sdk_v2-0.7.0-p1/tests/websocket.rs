@@ -1281,36 +1281,6 @@ mod client_state {
     use super::*;
 
     #[tokio::test]
-    async fn is_connected_returns_false_before_subscription() {
-        let server = MockWsServer::start().await;
-        let endpoint = server.ws_url("/ws/market");
-
-        let client = Client::new(&endpoint, Config::default()).unwrap();
-
-        // Before any subscription, connection should not be established
-        assert!(!client.is_connected(ChannelType::Market));
-        assert!(!client.is_connected(ChannelType::User));
-    }
-
-    #[tokio::test]
-    async fn is_connected_returns_true_after_subscription() {
-        let mut server = MockWsServer::start().await;
-        let endpoint = server.ws_url("/ws/market");
-
-        let client = Client::new(&endpoint, Config::default()).unwrap();
-
-        // Subscribe to trigger connection
-        let _stream = client
-            .subscribe_orderbook(vec![payloads::asset_id()])
-            .unwrap();
-        let _: Option<String> = server.recv_subscription().await;
-
-        // Now should be connected
-        assert!(client.is_connected(ChannelType::Market));
-        assert!(!client.is_connected(ChannelType::User));
-    }
-
-    #[tokio::test]
     async fn connection_state_is_connected_after_subscription() {
         let mut server = MockWsServer::start().await;
         let endpoint = server.ws_url("/ws/market");

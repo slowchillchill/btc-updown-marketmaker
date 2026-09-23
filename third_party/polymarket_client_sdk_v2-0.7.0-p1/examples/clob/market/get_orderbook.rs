@@ -3,7 +3,7 @@
     reason = "Examples print their results to stdout"
 )]
 
-//! Fetch the orderbook summary for a token, then compute its hash.
+//! 获取指定资产的订单簿摘要。
 
 use std::str::FromStr as _;
 
@@ -27,6 +27,5 @@ async fn main() -> anyhow::Result<()> {
         .await?;
 
     println!("{book:?}");
-    println!("hash: {}", client.order_book_hash(&book)?);
     Ok(())
 }

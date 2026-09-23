@@ -51,11 +51,6 @@ pub fn encode_market_buy_order(
     minimum_tick_size: Decimal,
 ) -> Result<BuyOrderEncoding> {
     let spend = Amount::usdc(spend)?.as_inner();
-    if spend.is_sign_negative() {
-        return Err(Error::validation(format!(
-            "Unable to encode market BUY due to negative USDC amount {spend}"
-        )));
-    }
     let price = validate_market_order_price(price, minimum_tick_size)?;
     encode_market_buy_amounts(price, spend, minimum_tick_size)
 }
@@ -338,7 +333,7 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
 
         let (taker_amount, maker_amount) = match side {
             Side::Buy => {
-                let encoding = encode_limit_buy_order(price, size, minimum_tick_size)?;
+                let encoding = encode_limit_buy_amounts(price, size, minimum_tick_size)?;
                 (encoding.taker_amount, encoding.maker_amount)
             }
             Side::Sell => (
@@ -359,8 +354,8 @@ impl<K: AuthKind> OrderBuilder<Limit, K> {
             .build_payload(
                 token_id,
                 side,
-                to_fixed_u128(maker_amount),
-                to_fixed_u128(taker_amount),
+                to_fixed_u128(maker_amount)?,
+                to_fixed_u128(taker_amount)?,
                 salt,
                 expiration_u256,
             )
@@ -582,7 +577,7 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
 
         let (taker_amount, maker_amount) = match (side, amount.0) {
             (Side::Buy, AmountInner::Usdc(_)) => {
-                let encoding = encode_market_buy_order(price, raw_amount, minimum_tick_size)?;
+                let encoding = encode_market_buy_amounts(price, raw_amount, minimum_tick_size)?;
                 (encoding.taker_amount, encoding.maker_amount)
             }
             (Side::Buy, AmountInner::Shares(_)) => {
@@ -607,8 +602,8 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
             .build_payload(
                 token_id,
                 side,
-                to_fixed_u128(maker_amount),
-                to_fixed_u128(taker_amount),
+                to_fixed_u128(maker_amount)?,
+                to_fixed_u128(taker_amount)?,
                 salt,
                 U256::ZERO,
             )
@@ -657,13 +652,18 @@ impl<K: AuthKind> OrderBuilder<Market, K> {
     }
 }
 
-/// Removes trailing zeros, truncates to [`USDC_DECIMALS`] decimal places, and quanitizes as an
-/// integer.
-fn to_fixed_u128(d: Decimal) -> u128 {
-    quantize_order_amount(d)
-        .mantissa()
-        .to_u128()
-        .expect("The `build` call in `OrderBuilder<S, OrderKind, K>` ensures that only positive values are being multiplied/divided")
+/// 按实际 Decimal 小数位截断并转换为六位微单位，不要求补位后的尾数仍可装入 Decimal。
+fn to_fixed_u128(amount: Decimal) -> Result<u128> {
+    let mantissa = u128::try_from(amount.mantissa()).map_err(|_| {
+        Error::validation(format!("Unable to encode negative order amount {amount}"))
+    })?;
+    let scale = amount.scale();
+    if scale > USDC_DECIMALS {
+        Ok(mantissa / 10_u128.pow(scale - USDC_DECIMALS))
+    } else {
+        // Decimal 的 96 位尾数最多补六位，目标值可由 u128 表示。
+        Ok(mantissa * 10_u128.pow(USDC_DECIMALS - scale))
+    }
 }
 
 /// `Number.MAX_SAFE_INTEGER` (2^53 − 1). The CLOB backend deserializes the order's
@@ -764,16 +764,6 @@ fn quantize_order_amount(amount: Decimal) -> Decimal {
     amount.normalize().trunc_with_scale(USDC_DECIMALS)
 }
 
-fn final_buy_order_amount(amount: Decimal) -> Result<Decimal> {
-    let amount = quantize_order_amount(amount);
-    if amount.scale() != USDC_DECIMALS {
-        return Err(Error::validation(format!(
-            "Unable to encode order amount {amount} at {USDC_DECIMALS} decimal places"
-        )));
-    }
-    Ok(amount)
-}
-
 fn encode_limit_buy_amounts(
     price: Decimal,
     size: Decimal,
@@ -785,8 +775,8 @@ fn encode_limit_buy_amounts(
         .trunc_with_scale(intermediate_amount_scale(minimum_tick_size));
     Ok(BuyOrderEncoding {
         price,
-        maker_amount: final_buy_order_amount(maker_amount)?,
-        taker_amount: final_buy_order_amount(size)?,
+        maker_amount: quantize_order_amount(maker_amount),
+        taker_amount: quantize_order_amount(size),
     })
 }
 
@@ -795,14 +785,19 @@ fn encode_market_buy_amounts(
     spend: Decimal,
     minimum_tick_size: Decimal,
 ) -> Result<BuyOrderEncoding> {
+    if spend.is_sign_negative() {
+        return Err(Error::validation(format!(
+            "Unable to encode market BUY due to negative USDC amount {spend}"
+        )));
+    }
     let taker_amount = spend
         .checked_div(price)
         .ok_or_else(|| Error::validation("Market BUY share division overflowed"))?
         .trunc_with_scale(intermediate_amount_scale(minimum_tick_size));
     Ok(BuyOrderEncoding {
         price,
-        maker_amount: final_buy_order_amount(spend)?,
-        taker_amount: final_buy_order_amount(taker_amount)?,
+        maker_amount: quantize_order_amount(spend),
+        taker_amount: quantize_order_amount(taker_amount),
     })
 }
 
@@ -839,19 +834,19 @@ mod tests {
 
     #[test]
     fn to_fixed_u128_should_succeed() {
-        assert_eq!(to_fixed_u128(dec!(123.456)), 123_456_000);
-        assert_eq!(to_fixed_u128(dec!(123.456789)), 123_456_789);
-        assert_eq!(to_fixed_u128(dec!(123.456789111111111)), 123_456_789);
-        assert_eq!(to_fixed_u128(dec!(3.456789111111111)), 3_456_789);
-        assert_eq!(to_fixed_u128(Decimal::ZERO), 0);
+        assert_eq!(to_fixed_u128(dec!(123.456)).unwrap(), 123_456_000);
+        assert_eq!(to_fixed_u128(dec!(123.456789)).unwrap(), 123_456_789);
+        assert_eq!(
+            to_fixed_u128(dec!(123.456789111111111)).unwrap(),
+            123_456_789
+        );
+        assert_eq!(to_fixed_u128(dec!(3.456789111111111)).unwrap(), 3_456_789);
+        assert_eq!(to_fixed_u128(Decimal::ZERO).unwrap(), 0);
     }
 
     #[test]
-    #[should_panic(
-        expected = "The `build` call in `OrderBuilder<S, OrderKind, K>` ensures that only positive values are being multiplied/divided"
-    )]
-    fn to_fixed_u128_panics() {
-        to_fixed_u128(dec!(-123.456));
+    fn to_fixed_u128_rejects_negative_amount() {
+        assert!(to_fixed_u128(dec!(-123.456)).is_err());
     }
 
     #[test]
@@ -863,8 +858,8 @@ mod tests {
         assert_eq!(limit.taker_amount, dec!(5));
         assert_eq!(limit.maker_amount.scale(), USDC_DECIMALS);
         assert_eq!(limit.taker_amount.scale(), USDC_DECIMALS);
-        assert_eq!(to_fixed_u128(limit.maker_amount), 2_716_050);
-        assert_eq!(to_fixed_u128(limit.taker_amount), 5_000_000);
+        assert_eq!(to_fixed_u128(limit.maker_amount).unwrap(), 2_716_050);
+        assert_eq!(to_fixed_u128(limit.taker_amount).unwrap(), 5_000_000);
 
         let exact_market = encode_market_buy_order(dec!(0.6), dec!(3), dec!(0.00001))
             .expect("market BUY at mos boundary");
@@ -877,7 +872,10 @@ mod tests {
         let quantized_market = encode_market_buy_order(dec!(0.3), dec!(1), dec!(0.00001))
             .expect("market BUY final fixed quantization");
         assert_eq!(quantized_market.taker_amount, dec!(3.333333));
-        assert_eq!(to_fixed_u128(quantized_market.taker_amount), 3_333_333);
+        assert_eq!(
+            to_fixed_u128(quantized_market.taker_amount).unwrap(),
+            3_333_333
+        );
     }
 
     #[test]
@@ -910,7 +908,15 @@ mod tests {
             encode_market_buy_order(Decimal::new(1, 28), Decimal::MAX, Decimal::new(1, 28))
                 .is_err()
         );
-        assert!(encode_limit_buy_order(dec!(0.99), Decimal::MAX, dec!(0.01)).is_err());
+        let limit = encode_limit_buy_order(dec!(0.1), Decimal::MAX, dec!(0.1)).unwrap();
+        assert_eq!(
+            to_fixed_u128(limit.taker_amount).unwrap(),
+            79228162514264337593543950335000000
+        );
+        assert_eq!(
+            to_fixed_u128(limit.maker_amount).unwrap(),
+            7922816251426433759354395033500000
+        );
     }
 
     #[test]

@@ -12,10 +12,8 @@ use serde_with::{
     DefaultOnError, DefaultOnNull, DisplayFromStr, NoneAsEmptyString, TimestampMilliSeconds,
     TimestampSeconds, TryFromInto, serde_as,
 };
-use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
-use crate::Result;
 use crate::auth::ApiKey;
 use crate::clob::types::{OrderStatusType, OrderType, Side, TickSize, TradeStatusType, TraderSide};
 use crate::serde_helpers::StringFromAny;
@@ -135,18 +133,6 @@ pub struct OrderBookSummaryResponse {
     #[serde(default)]
     #[serde_as(deserialize_as = "DefaultOnError")]
     pub last_trade_price: Option<Decimal>,
-}
-
-impl OrderBookSummaryResponse {
-    pub fn hash(&self) -> Result<String> {
-        let json = serde_json::to_string(&self)?;
-
-        let mut hasher = Sha256::new();
-        hasher.update(json.as_bytes());
-        let result = hasher.finalize();
-
-        Ok(format!("{result:x}"))
-    }
 }
 
 #[non_exhaustive]
