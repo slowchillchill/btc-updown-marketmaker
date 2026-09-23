@@ -154,17 +154,6 @@ fn append_json_string(diagnostic: &mut BoundedDiagnostic, value: &str) {
     diagnostic.push("\"");
 }
 
-fn append_scalar(diagnostic: &mut BoundedDiagnostic, value: &Value) -> bool {
-    match value {
-        Value::Null => diagnostic.push("null"),
-        Value::Bool(value) => diagnostic.push(if *value { "true" } else { "false" }),
-        Value::Number(value) => diagnostic.push(&value.to_string()),
-        Value::String(value) => append_json_string(diagnostic, value),
-        Value::Array(_) | Value::Object(_) => return false,
-    }
-    true
-}
-
 fn append_object_diagnostic(
     diagnostic: &mut BoundedDiagnostic,
     object: &Map<String, Value>,
@@ -184,17 +173,33 @@ fn append_object_diagnostic(
         let Some(value) = object.get(*field) else {
             continue;
         };
-        if matches!(value, Value::Array(_) | Value::Object(_)) {
-            continue;
+        let mut begin_field = |diagnostic: &mut BoundedDiagnostic| {
+            if !first {
+                diagnostic.push(",");
+            }
+            diagnostic.push(field);
+            diagnostic.push("=");
+            first = false;
+        };
+        match value {
+            Value::Null => {
+                begin_field(diagnostic);
+                diagnostic.push("null");
+            }
+            Value::Bool(value) => {
+                begin_field(diagnostic);
+                diagnostic.push(if *value { "true" } else { "false" });
+            }
+            Value::Number(value) => {
+                begin_field(diagnostic);
+                diagnostic.push(&value.to_string());
+            }
+            Value::String(value) => {
+                begin_field(diagnostic);
+                append_json_string(diagnostic, value);
+            }
+            Value::Array(_) | Value::Object(_) => {}
         }
-        if !first {
-            diagnostic.push(",");
-        }
-        diagnostic.push(field);
-        diagnostic.push("=");
-        let appended = append_scalar(diagnostic, value);
-        debug_assert!(appended, "non-scalar values are filtered above");
-        first = false;
     }
     diagnostic.push("} ");
     diagnostic.push(fields_label);
