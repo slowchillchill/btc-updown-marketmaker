@@ -7285,8 +7285,6 @@ mod tests {
         let scenario = crate::scenario::scenario_for_sim_tests();
         let artifact = SimulationScenarioArtifactV1 {
             schema_version: PLATFORM_SCENARIO_SCHEMA_V1.to_owned(),
-            scenario_sha256: scenario.scenario_sha256().clone(),
-            market_set_sha256: scenario.market_set_sha256().clone(),
             markets: scenario.market_set().markets().to_vec(),
         };
         let bytes = serde_json::to_vec(&artifact).expect("编码场景文件测试夹具");
@@ -7300,8 +7298,6 @@ mod tests {
             .expect("构造多市场逻辑驱动测试场景");
         let artifact = SimulationScenarioArtifactV1 {
             schema_version: PLATFORM_SCENARIO_SCHEMA_V1.to_owned(),
-            scenario_sha256: scenario.scenario_sha256().clone(),
-            market_set_sha256: scenario.market_set_sha256().clone(),
             markets: scenario.market_set().markets().to_vec(),
         };
         let bytes = serde_json::to_vec(&artifact).expect("编码多市场逻辑驱动测试场景");

@@ -14,34 +14,6 @@ limitation = "用户依据公告批准固定为 150ms，不随平台后续变化
 version = "CLOB_V2_2026-09-04"
 failure_semantics = "Missing itode means false; invalid wire values reject cold start"
 
-[documented_platform_rules.post_orders_batch.value]
-max_items = 15
-per_item_results = true
-request_is_atomic = false
-
-[documented_platform_rules.post_orders_batch.evidence]
-category = "OFFICIAL_SDK_CONTRACT"
-source = "third_party/polymarket_client_sdk_v2-0.7.0-p1/src/clob/client.rs"
-reviewed_on_utc_date = "2026-08-09"
-scope = "post_orders"
-limitation = "Applies only to the frozen V1 simulation execution contract"
-version = "polymarket_client_sdk_v2_0.7.0-p1"
-failure_semantics = "More than 15 items reject before state change"
-
-[documented_platform_rules.cancel_orders_batch.value]
-max_items = 1000
-per_item_results = true
-request_is_atomic = false
-
-[documented_platform_rules.cancel_orders_batch.evidence]
-category = "UNCERTAINTY_PROFILE"
-source = "user-decision:2026-08-02:conservative-cancel-batch-limit"
-reviewed_on_utc_date = "2026-08-09"
-scope = "cancel_orders"
-limitation = "Official sources conflict between 1000 and 3000"
-version = "SIM_CANCEL_BATCH_LIMIT_V1"
-failure_semantics = "More than 1000 items reject before state change"
-
 [documented_platform_rules.gtd_timing.value]
 minimum_lead_seconds = 180
 safety_offset_seconds = 60

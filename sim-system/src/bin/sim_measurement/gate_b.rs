@@ -386,8 +386,6 @@ fn scenario_from_gate_a(
         .map_err(|error| format!("构造 Gate B 单市场场景失败：{error}"))?;
     let artifact = SimulationScenarioArtifactV1 {
         schema_version: PLATFORM_SCENARIO_SCHEMA_V1.to_owned(),
-        scenario_sha256: scenario.scenario_sha256().clone(),
-        market_set_sha256: scenario.market_set_sha256().clone(),
         markets: scenario.market_set().markets().to_vec(),
     };
     let bytes = serde_json::to_vec(&artifact)

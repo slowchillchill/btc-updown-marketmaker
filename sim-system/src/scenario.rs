@@ -9,11 +9,6 @@ use sha2::{Digest, Sha256};
 use crate::market_directory::{SessionMarketDirectoryErrorV1, SessionMarketDirectoryV1};
 
 pub const PLATFORM_SCENARIO_SCHEMA_V1: &str = "platform_scenario_v1";
-pub const MARKET_SET_SCHEMA_V1: &str = "market_set_v1";
-pub const BTC_UPDOWN_5M_MARKET_FAMILY_V1: &str = "BTC_UPDOWN_5M";
-
-const MARKET_SET_HASH_DOMAIN_V1: &str = "SIM_MARKET_SET_SHA256_V1";
-const PLATFORM_SCENARIO_HASH_DOMAIN_V1: &str = "SIM_PLATFORM_SCENARIO_SHA256_V1";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PlatformScenarioErrorV1 {
@@ -24,7 +19,6 @@ pub enum PlatformScenarioErrorV1 {
     DuplicateAssetIdentity,
     DuplicateOutcomeIndex,
     DuplicateMarketIdentity,
-    Serialization(String),
 }
 
 impl fmt::Display for PlatformScenarioErrorV1 {
@@ -37,7 +31,6 @@ impl fmt::Display for PlatformScenarioErrorV1 {
             Self::DuplicateAssetIdentity => write!(formatter, "场景市场的资产身份重复"),
             Self::DuplicateOutcomeIndex => write!(formatter, "场景市场的 outcome index 重复"),
             Self::DuplicateMarketIdentity => write!(formatter, "场景 condition_id 重复"),
-            Self::Serialization(message) => write!(formatter, "场景规范序列化失败：{message}"),
         }
     }
 }
@@ -78,8 +71,6 @@ impl SealedPlatformScenarioV1 {
             .map_err(|error| PlatformScenarioFileErrorV1::Json(error.to_string()))?;
         let SimulationScenarioArtifactV1 {
             schema_version,
-            scenario_sha256: _,
-            market_set_sha256: _,
             markets,
         } = artifact;
         if schema_version != PLATFORM_SCENARIO_SCHEMA_V1 {
@@ -115,11 +106,8 @@ impl SealedPlatformScenarioV1 {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct SimulationScenarioArtifactV1 {
     pub schema_version: String,
-    pub scenario_sha256: Sha256Hex,
-    pub market_set_sha256: Sha256Hex,
     pub markets: Vec<PlatformMarketV1>,
 }
 
@@ -182,7 +170,6 @@ impl PlatformMarketV1 {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MarketSetV1 {
     markets: Vec<PlatformMarketV1>,
-    sha256: Sha256Hex,
 }
 
 impl MarketSetV1 {
@@ -195,89 +182,33 @@ impl MarketSetV1 {
         {
             return Err(PlatformScenarioErrorV1::DuplicateMarketIdentity);
         }
-        let material = MarketSetIdentityMaterialV1 {
-            schema_version: MARKET_SET_SCHEMA_V1,
-            markets: &markets,
-        };
-        let sha256 = hash_json(MARKET_SET_HASH_DOMAIN_V1, &material)?;
-        Ok(Self { markets, sha256 })
+        Ok(Self { markets })
     }
 
     #[must_use]
     pub fn markets(&self) -> &[PlatformMarketV1] {
         &self.markets
     }
-
-    #[must_use]
-    pub fn sha256(&self) -> &Sha256Hex {
-        &self.sha256
-    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PlatformScenarioV1 {
     market_set: MarketSetV1,
-    sha256: Sha256Hex,
 }
 
 impl PlatformScenarioV1 {
     pub fn try_new(markets: Vec<PlatformMarketV1>) -> Result<Self, PlatformScenarioErrorV1> {
-        Self::from_market_set(MarketSetV1::try_new(markets)?)
+        Ok(Self::from_market_set(MarketSetV1::try_new(markets)?))
     }
 
-    pub fn from_market_set(market_set: MarketSetV1) -> Result<Self, PlatformScenarioErrorV1> {
-        let material = PlatformScenarioIdentityMaterialV1 {
-            schema_version: PLATFORM_SCENARIO_SCHEMA_V1,
-            market_family: BTC_UPDOWN_5M_MARKET_FAMILY_V1,
-            market_set_sha256: market_set.sha256(),
-        };
-        let sha256 = hash_json(PLATFORM_SCENARIO_HASH_DOMAIN_V1, &material)?;
-        Ok(Self { market_set, sha256 })
+    pub fn from_market_set(market_set: MarketSetV1) -> Self {
+        Self { market_set }
     }
 
     #[must_use]
     pub fn market_set(&self) -> &MarketSetV1 {
         &self.market_set
     }
-
-    #[must_use]
-    pub fn market_set_sha256(&self) -> &Sha256Hex {
-        self.market_set.sha256()
-    }
-
-    #[must_use]
-    pub fn scenario_sha256(&self) -> &Sha256Hex {
-        &self.sha256
-    }
-}
-
-#[derive(Serialize)]
-struct MarketSetIdentityMaterialV1<'a> {
-    schema_version: &'static str,
-    markets: &'a [PlatformMarketV1],
-}
-
-#[derive(Serialize)]
-struct PlatformScenarioIdentityMaterialV1<'a> {
-    schema_version: &'static str,
-    market_family: &'static str,
-    market_set_sha256: &'a Sha256Hex,
-}
-
-fn hash_json<T: Serialize>(domain: &str, value: &T) -> Result<Sha256Hex, PlatformScenarioErrorV1> {
-    let bytes = serde_json::to_vec(value)
-        .map_err(|error| PlatformScenarioErrorV1::Serialization(error.to_string()))?;
-    let mut hash = Sha256::new();
-    hash.update((domain.len() as u64).to_be_bytes());
-    hash.update(domain.as_bytes());
-    hash.update((bytes.len() as u64).to_be_bytes());
-    hash.update(bytes);
-    let mut encoded = String::with_capacity(64);
-    for byte in hash.finalize() {
-        use fmt::Write as _;
-        write!(&mut encoded, "{byte:02x}").expect("写入 String 不会失败");
-    }
-    Ok(Sha256Hex(encoded))
 }
 
 fn sha256_file_bytes(bytes: &[u8]) -> Sha256Hex {
@@ -439,11 +370,9 @@ mod tests {
     fn empty_initial_market_set_round_trips_through_original_scenario_file() {
         let set = MarketSetV1::try_new(Vec::new()).unwrap();
         assert!(set.markets().is_empty());
-        let scenario = PlatformScenarioV1::from_market_set(set).unwrap();
+        let scenario = PlatformScenarioV1::from_market_set(set);
         let bytes = serde_json::to_vec(&SimulationScenarioArtifactV1 {
             schema_version: PLATFORM_SCENARIO_SCHEMA_V1.into(),
-            scenario_sha256: scenario.scenario_sha256().clone(),
-            market_set_sha256: scenario.market_set_sha256().clone(),
             markets: Vec::new(),
         })
         .unwrap();
@@ -457,13 +386,13 @@ mod tests {
     fn sealed_scenario_uses_file_bytes_without_trusting_legacy_object_digests() {
         let scenario = scenario_for_sim_tests();
         let artifact = |scenario_sha256: Sha256Hex, market_set_sha256: Sha256Hex| {
-            serde_json::to_vec(&SimulationScenarioArtifactV1 {
-                schema_version: PLATFORM_SCENARIO_SCHEMA_V1.to_owned(),
-                scenario_sha256,
-                market_set_sha256,
-                markets: scenario.market_set().markets().to_vec(),
-            })
-            .expect("编码场景文件")
+            serde_json::to_vec(&serde_json::json!({
+                "schema_version": PLATFORM_SCENARIO_SCHEMA_V1,
+                "scenario_sha256": scenario_sha256,
+                "market_set_sha256": market_set_sha256,
+                "markets": scenario.market_set().markets(),
+            }))
+            .expect("编码旧场景文件")
         };
         let first_bytes = artifact(Sha256Hex("a".repeat(64)), Sha256Hex("b".repeat(64)));
         let second_bytes = artifact(Sha256Hex("c".repeat(64)), Sha256Hex("d".repeat(64)));
@@ -483,8 +412,6 @@ mod tests {
         let artifact_bytes = |markets| {
             serde_json::to_vec(&SimulationScenarioArtifactV1 {
                 schema_version: PLATFORM_SCENARIO_SCHEMA_V1.to_owned(),
-                scenario_sha256: Sha256Hex("a".repeat(64)),
-                market_set_sha256: Sha256Hex("b".repeat(64)),
                 markets,
             })
             .expect("编码场景文件")
@@ -542,8 +469,6 @@ mod tests {
             serde_json::from_value(encoded).expect("Serde 只负责结构反序列化");
         let bytes = serde_json::to_vec(&SimulationScenarioArtifactV1 {
             schema_version: PLATFORM_SCENARIO_SCHEMA_V1.to_owned(),
-            scenario_sha256: Sha256Hex("a".repeat(64)),
-            market_set_sha256: Sha256Hex("b".repeat(64)),
             markets: vec![unchecked],
         })
         .expect("编码损坏边界样本");
