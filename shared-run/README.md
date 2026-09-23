@@ -14,7 +14,7 @@ Ledger 继续使用同一应用核心，V2 材料包含 Genesis、Transaction、
 
 宿主计划停止时，先结束已开始的同步调用并停止新组、请求及 Ledger 追加，然后消耗 `PublicSimExecutionV1`、`FinitePublicConsumptionV1` 或 `ContinuousPublicConsumptionV1` 调用 `stop_and_drain`。它只沿同一后台移交 pending 组、同步 SIM、稳定 NOE、接收最后一批 Ledger 材料并封口 Ledger 段，等待原后台退出；不调用下一组、CloseTime、EndOfInput 或 `complete`，不撤单、清仓或改变已有订单/持仓事实。成功不生成 `RunSeal`，不返回完整冷产物或可恢复账户。原 `complete` 仍要求真实业务闭合。来源摘要 `market_event_source_identity_sha256` 对离线材料保留真实值，在线创建时传 `None`；新读取器兼容旧字符串字段，其他身份摘要保持原合同。
 
-新内存运行的物理格式为 NOE `noe_arrow_parquet_v1` 和 Ledger `ledger_arrow_parquet_v1`，与原 NOE 业务版本、`ledger_transaction_segment_v2` 分开。Arrow 的原序号、变体与二进制正文三列逐记录编码；正文明确沿 `serde_json_v1` 保存原变体成员。NOE 一个逻辑批对应一个 Parquet 容器，空批也保留来源水位；Ledger 保留 Genesis、Transaction、ReservationDecision 的原 `durable_record_seq`。批/段边界为单份元数据，未将整个 JSON 文件塞入单元格，也不双写暂存 JSON 或活动 JSONL。SIM 原始 JSONL、NOE context 及独立 LedgerProjection 元数据保持原责任。
+新内存运行的物理格式为 NOE `noe_arrow_parquet_v1` 和 Ledger `ledger_arrow_parquet_v1`，与原 NOE 业务版本、`ledger_transaction_segment_v2` 分开。Arrow 的原序号、变体与二进制正文三列逐记录编码；正文明确沿 `serde_json_v1` 保存原变体成员。NOE 一个逻辑批对应一个 Parquet 容器，空批也保留来源水位；Ledger 保留 Genesis、Transaction、ReservationDecision 的原 `durable_record_seq`。批/段边界为单份元数据，未将整个 JSON 文件塞入单元格，也不双写暂存 JSON 或活动 JSONL。SIM 原始 JSONL 和 NOE context 保持原责任，账户投影继续由 Ledger 查询接口按需生成。
 
 唯一后台写出完整 Parquet footer 后同步文件、禁止覆盖地原子发布、同步目录，再发布并同步不可变清单；只有清单稳定后 NOE 才提供原耐久引用，Ledger 封存成功后才确认稳定。清单逐批/段追加，不在后台常驻或重写整次运行的历史清单。NOE 容器引用只携带实际位置，结果引用再携带 ordinal；Ledger 已应用引用按位置和 ordinal 去重，来源水位仍用于业务推进。NOE 暂存写入后只保存未稳定批次的水位和记录数，稳定时完成实际发布并取得当时时刻，不重读正文或常驻整批记录。位置恢复从 Parquet 清单与 footer 读取真实边界和行数，V3/V4 各自分派；独立历史正文读取仍解析完整记录。读取器兼容旧 JSON／JSONL；旧根合法续写仍用旧格式，不迁移或混写。新 NOE context 的物理编码使旧读取器明确拒绝；旧 Ledger 读取器无法取得新格式 Genesis，不能作为空账户恢复成功。实际读取时无法解析的已提交文件报错，未提交尾部不构成已稳定事实。
 
@@ -72,4 +72,10 @@ Ledger 经济更新按 #107 F1b 使用 `EconomicsPatch.day_updates`：追加新�
 
 NOE 有限报告按借用参数直接编码，Parquet 记录变体按实际结构编码/解码，不经过中间 JSON Value 树。新 NOE context、commit、Parquet 清单及共享引用不再写 `boundary_sha256`；旧额外字段被读取忽略，旧 JSON 和 Parquet 的实际重开/重复入账由有限场景覆盖。旧读取器要求该字段，不能读取缺字段的新产物。记录字段与 variant 语义保持，但直接结构编码的字段顺序和物理字节不承诺与旧 Value 编码相同。
 
-去掉 NOE 正文摘要后，仍可解析的正文改写不再单因字节变化被拒绝；成功 stage 后另行破坏文件也不会在 stabilize 被自读发现，后续实际历史解析承担其读取错误。位置恢复不扫描正文，不负责发现未消费正文的损坏。真实 write/close/sync、禁止覆盖发布和目录同步错误仍返回，未稳定发布不触发回调；不将返回错误等同于所有物理文件均已回滚。实际 context 身份派生及账户/目录关联继续保留。Ledger 自身分片摘要、旧 JSONL 行比较和 projection 内容寻址在本批未改，后续 H4b 另处理已分配余项。
+去掉 NOE 正文摘要后，仍可解析的正文改写不再单因字节变化被拒绝；成功 stage 后另行破坏文件也不会在 stabilize 被自读发现，后续实际历史解析承担其读取错误。位置恢复不扫描正文，不负责发现未消费正文的损坏。真实 write/close/sync、禁止覆盖发布和目录同步错误仍返回，未稳定发布不触发回调；不将返回错误等同于所有物理文件均已回滚。实际 context 身份派生及账户/目录关联继续保留。Ledger 的持久读取变化见下文。
+
+Ledger JSONL 恢复保留前一成功消费的完整原始行（含换行），跨封存段与活动段比较重复尾；同序号、同结构但原字节不同仍拒绝，不再逐行计算 SHA。只在活动段保留首个唯一记录序号用于封口命名；新段名为 `ledger-sealed-v1--{first}.jsonl`，旧五字段名字只取首序号排序，不重命名旧文件或复核废弃字段。
+
+Ledger Parquet 清单现在只写实际位置，旧清单中的摘要和四项范围字段被忽略；正文四种变体直接结构编解码，实际序号、金额、请求粘滞结果和幂等恢复不变。旧清单经过真实重开、追加再重开验证。新短段名及缺字段清单不能供要求旧格式的读取器使用，直接结构编码也可能改变正文 JSON 字段顺序。封口/打开不再全文计算或复核分片 SHA，空但可解析的段、连续可解析的内容变化、没有后继缺口的完整后缀删除不再因旧摘要/范围门被拒绝；真实解码失败、封存段半条尾、序号缺口及业务恢复错误仍报错。真实关闭、同步、禁止覆盖、清单提交和未提交尾清理保持。
+
+未接线的磁盘投影发布/读取接口及其专用证明测试已退役，不删除已有投影文件，也不提供替代磁盘格式；`projection()` / `projection_v2()` 及账户投影业务类型继续使用。生命周期分录仍计算每市场本金、费用和账户残差，只移除专为全局/市场平台差额自比维护的两项累计。

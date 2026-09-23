@@ -866,19 +866,37 @@ fn multiple_sealed_segments_keep_record_and_ledger_continuity() {
     let mut writer = LedgerWriterV1::create_durable(policy("100"), durable.path()).unwrap();
     writer.apply_noe_result(&opening).unwrap();
     let first = writer.seal_active_segment().unwrap().unwrap();
-    assert_eq!(first.first_durable_record_seq, 1);
-    assert_eq!(first.last_durable_record_seq, 2);
-    assert_eq!(first.first_ledger_entry_seq, Some(1));
-    assert_eq!(first.last_ledger_entry_seq, Some(1));
     writer
         .try_reserve_intent(&request, &condition, &decimal("10"), &decimal("1"))
         .unwrap();
     let second = writer.seal_active_segment().unwrap().unwrap();
-    assert_eq!(second.first_durable_record_seq, 3);
-    assert_eq!(second.last_durable_record_seq, 3);
-    assert_eq!(second.first_ledger_entry_seq, Some(2));
-    assert_eq!(second.last_ledger_entry_seq, Some(2));
     drop(writer);
+    // 与原 writer 相同的旧五字段名字，和新首序号名字混合恢复。
+    use sha2::{Digest, Sha256};
+    let first_bytes = fs::read(&first.location).unwrap();
+    let old_name = format!(
+        "ledger-sealed-v1--1--2--1--1--{:x}.jsonl",
+        Sha256::digest(&first_bytes)
+    );
+    fs::rename(&first.location, durable.path().join(old_name)).unwrap();
+    let active = durable.path().join(ACTIVE_FILE_NAME);
+    let last_line = fs::read(&second.location).unwrap();
+    fs::write(&active, &last_line).unwrap();
+    let recovered = LedgerWriterV1::open_durable(durable.path()).unwrap();
+    assert_eq!(recovered.projection().unwrap().ledger_entry_seq, 2);
+    drop(recovered);
+    assert!(fs::read(&active).unwrap().is_empty());
+    // 同结构但不同原字节，不能作为跨封存段的相同尾记录。
+    let mut changed_line = last_line.clone();
+    changed_line.insert(0, b' ');
+    fs::write(&active, changed_line).unwrap();
+    assert!(matches!(
+        LedgerWriterV1::open_durable(durable.path()),
+        Err(LedgerErrorV1::Durable(
+            LedgerDurableErrorV1::InvalidStructure(_)
+        ))
+    ));
+    fs::write(&active, []).unwrap();
 
     let mut recovered = LedgerWriterV1::open_durable(durable.path()).unwrap();
     assert_eq!(recovered.projection().unwrap().ledger_entry_seq, 2);
@@ -897,7 +915,7 @@ fn multiple_sealed_segments_keep_record_and_ledger_continuity() {
 }
 
 #[test]
-fn one_corrupted_sealed_byte_is_rejected_by_the_outer_sha() {
+fn unreadable_sealed_record_is_rejected_by_actual_decode() {
     let durable = TempDir::new().unwrap();
     let mut writer = LedgerWriterV1::create_durable(policy("100"), durable.path()).unwrap();
     let sealed = writer.seal_active_segment().unwrap().unwrap();
@@ -910,7 +928,7 @@ fn one_corrupted_sealed_byte_is_rejected_by_the_outer_sha() {
     assert!(matches!(
         LedgerWriterV1::open_durable(durable.path()),
         Err(LedgerErrorV1::Durable(
-            LedgerDurableErrorV1::SealedSegmentHashMismatch { .. }
+            LedgerDurableErrorV1::CompleteRecordDecode { .. }
         ))
     ));
 }

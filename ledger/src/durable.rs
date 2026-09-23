@@ -1,18 +1,16 @@
 mod parquet;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(test)]
 use std::time::{Duration, Instant};
 
 use rustix::fs::{RenameFlags, renameat_with};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::core::LedgerCommittedEffectV1;
-use crate::projection::{AccountAdmissionPolicyV1, LedgerProjectionV1};
+use crate::projection::AccountAdmissionPolicyV1;
 use crate::reservation::{CachedReservationRequestV1, LedgerRequestIdentityV1};
 
 const ACTIVE_FILE_NAME: &str = "ledger-active-v1.jsonl";
@@ -21,12 +19,6 @@ const SEGMENT_PREFIX: &str = "ledger-sealed-v1--";
 const SEGMENT_SUFFIX: &str = ".jsonl";
 const RECORD_VERSION: u16 = 1;
 const RECORD_ENCODING: &str = "ledger-jsonl-v1";
-const PROJECTION_CANDIDATE_PREFIX: &str = ".ledger-projection-v1.candidate-";
-const PROJECTION_PREFIX: &str = "ledger-projection-v1--";
-const PROJECTION_SUFFIX: &str = ".json";
-const PROJECTION_VERSION: u16 = 1;
-const PROJECTION_ENCODING: &str = "ledger-projection-json-v1";
-static PROJECTION_CANDIDATE_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum LedgerDurableErrorV1 {
@@ -42,16 +34,6 @@ pub enum LedgerDurableErrorV1 {
         message: String,
     },
     InvalidStructure(String),
-    SealedSegmentHashMismatch {
-        path: PathBuf,
-        expected: String,
-        found: String,
-    },
-    ProjectionHashMismatch {
-        path: PathBuf,
-        expected: String,
-        found: String,
-    },
     DurabilityUncertain {
         operation: &'static str,
         message: String,
@@ -78,24 +60,6 @@ impl fmt::Display for LedgerDurableErrorV1 {
                 path.display()
             ),
             Self::InvalidStructure(message) => write!(formatter, "Ledger 耐久结构非法：{message}"),
-            Self::SealedSegmentHashMismatch {
-                path,
-                expected,
-                found,
-            } => write!(
-                formatter,
-                "Ledger 封存段 SHA-256 不匹配 {}：预期 {expected}，实际 {found}",
-                path.display()
-            ),
-            Self::ProjectionHashMismatch {
-                path,
-                expected,
-                found,
-            } => write!(
-                formatter,
-                "Ledger 投影 SHA-256 不匹配 {}：预期 {expected}，实际 {found}",
-                path.display()
-            ),
             Self::DurabilityUncertain { operation, message } => {
                 write!(formatter, "Ledger 耐久结果不确定（{operation}）：{message}")
             }
@@ -109,141 +73,6 @@ impl std::error::Error for LedgerDurableErrorV1 {}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LedgerSealedSegmentReferenceV1 {
     pub location: String,
-    pub sha256: String,
-    pub first_durable_record_seq: u64,
-    pub last_durable_record_seq: u64,
-    pub first_ledger_entry_seq: Option<u64>,
-    pub last_ledger_entry_seq: Option<u64>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct LedgerProjectionReferenceV1 {
-    pub location: String,
-    pub sha256: String,
-    pub ledger_entry_seq: u64,
-}
-
-#[derive(Deserialize)]
-struct LedgerProjectionContainerV1 {
-    version: u16,
-    encoding: String,
-    projection: LedgerProjectionV1,
-}
-
-#[derive(Serialize)]
-struct LedgerProjectionContainerRefV1<'a> {
-    version: u16,
-    encoding: &'static str,
-    projection: &'a LedgerProjectionV1,
-}
-
-pub fn publish_ledger_projection_v1(
-    directory: &Path,
-    projection: &LedgerProjectionV1,
-) -> Result<LedgerProjectionReferenceV1, LedgerDurableErrorV1> {
-    let encoded = serde_json::to_vec(&LedgerProjectionContainerRefV1 {
-        version: PROJECTION_VERSION,
-        encoding: PROJECTION_ENCODING,
-        projection,
-    })
-    .map_err(|error| LedgerDurableErrorV1::Encode(error.to_string()))?;
-    let sha256 = sha256_bytes(&encoded);
-    let file_name = projection_file_name(projection.ledger_entry_seq, &sha256);
-    let final_path = directory.join(&file_name);
-    let (mut candidate, candidate_file_name, candidate_path) =
-        create_projection_candidate(directory)?;
-    if let Err(error) = candidate
-        .write_all(&encoded)
-        .and_then(|()| candidate.sync_all())
-    {
-        drop(candidate);
-        return cleanup_projection_candidate(
-            directory,
-            &candidate_path,
-            io_error("写入并同步 Ledger 投影候选", &candidate_path, error),
-        );
-    }
-    drop(candidate);
-    let parent = match File::open(directory) {
-        Ok(parent) => parent,
-        Err(error) => {
-            return cleanup_projection_candidate(
-                directory,
-                &candidate_path,
-                io_error("打开 Ledger 投影目录", directory, error),
-            );
-        }
-    };
-    if let Err(error) = renameat_with(
-        &parent,
-        &candidate_file_name,
-        &parent,
-        &file_name,
-        RenameFlags::NOREPLACE,
-    ) {
-        return cleanup_projection_candidate(
-            directory,
-            &candidate_path,
-            LedgerDurableErrorV1::Io {
-                operation: "禁止覆盖地发布 Ledger 投影",
-                path: final_path,
-                message: error.to_string(),
-            },
-        );
-    }
-    sync_directory(directory, "同步 Ledger 投影发布").map_err(|error| {
-        LedgerDurableErrorV1::DurabilityUncertain {
-            operation: "发布 Ledger 投影",
-            message: error.to_string(),
-        }
-    })?;
-    Ok(LedgerProjectionReferenceV1 {
-        location: directory.join(file_name).to_string_lossy().into_owned(),
-        sha256,
-        ledger_entry_seq: projection.ledger_entry_seq,
-    })
-}
-
-pub fn read_ledger_projection_v1(
-    reference: &LedgerProjectionReferenceV1,
-) -> Result<LedgerProjectionV1, LedgerDurableErrorV1> {
-    let path = Path::new(&reference.location);
-    let expected_file_name = projection_file_name(reference.ledger_entry_seq, &reference.sha256);
-    if path.file_name().and_then(|value| value.to_str()) != Some(expected_file_name.as_str()) {
-        return Err(LedgerDurableErrorV1::InvalidStructure(format!(
-            "Ledger 投影引用文件名与序号或 SHA-256 不一致：{}",
-            path.display()
-        )));
-    }
-    let encoded = fs::read(path).map_err(|error| io_error("读取 Ledger 投影", path, error))?;
-    let found = sha256_bytes(&encoded);
-    if found != reference.sha256 {
-        return Err(LedgerDurableErrorV1::ProjectionHashMismatch {
-            path: path.to_path_buf(),
-            expected: reference.sha256.clone(),
-            found,
-        });
-    }
-    let container: LedgerProjectionContainerV1 =
-        serde_json::from_slice(&encoded).map_err(|error| {
-            LedgerDurableErrorV1::InvalidStructure(format!(
-                "Ledger 投影容器 {} 无法解码：{error}",
-                path.display()
-            ))
-        })?;
-    if container.version != PROJECTION_VERSION || container.encoding != PROJECTION_ENCODING {
-        return Err(LedgerDurableErrorV1::InvalidStructure(format!(
-            "Ledger 投影容器 {} 的版本或编码不受支持",
-            path.display()
-        )));
-    }
-    if container.projection.ledger_entry_seq != reference.ledger_entry_seq {
-        return Err(LedgerDurableErrorV1::InvalidStructure(format!(
-            "Ledger 投影容器 {} 的序号与引用不一致",
-            path.display()
-        )));
-    }
-    Ok(container.projection)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -288,18 +117,10 @@ struct DurableEnvelopeRefV1<'a> {
     payload: &'a DurablePayloadV1,
 }
 
-#[derive(Default)]
-struct SegmentStatsV1 {
-    first_record_seq: Option<u64>,
-    last_record_seq: Option<u64>,
-    first_ledger_entry_seq: Option<u64>,
-    last_ledger_entry_seq: Option<u64>,
-}
-
 struct RecoveryCursorV1 {
     expected_record_seq: u64,
     expected_ledger_entry_seq: u64,
-    previous_record_sha256: Option<[u8; 32]>,
+    previous_record: Vec<u8>,
 }
 
 impl Default for RecoveryCursorV1 {
@@ -307,7 +128,7 @@ impl Default for RecoveryCursorV1 {
         Self {
             expected_record_seq: 1,
             expected_ledger_entry_seq: 1,
-            previous_record_sha256: None,
+            previous_record: Vec::new(),
         }
     }
 }
@@ -317,17 +138,6 @@ impl Default for RecoveryCursorV1 {
 pub(crate) struct RecoveryDurationsV1 {
     pub(crate) sealed_replay: Duration,
     pub(crate) active_replay: Duration,
-}
-
-impl SegmentStatsV1 {
-    fn observe(&mut self, record_seq: u64, ledger_entry_seq: Option<u64>) {
-        self.first_record_seq.get_or_insert(record_seq);
-        self.last_record_seq = Some(record_seq);
-        if let Some(ledger_entry_seq) = ledger_entry_seq {
-            self.first_ledger_entry_seq.get_or_insert(ledger_entry_seq);
-            self.last_ledger_entry_seq = Some(ledger_entry_seq);
-        }
-    }
 }
 
 pub(crate) enum DurableLedgerV1 {
@@ -425,7 +235,7 @@ pub(crate) struct LegacyDurableLedgerV1 {
     active: File,
     byte_count: u64,
     next_record_seq: u64,
-    segment_stats: SegmentStatsV1,
+    first_record_seq: Option<u64>,
     poisoned: bool,
     #[cfg(test)]
     fail_next_append: bool,
@@ -588,15 +398,13 @@ impl LegacyDurableLedgerV1 {
                 message: error.to_string(),
             }
         })?;
-        let mut stats = SegmentStatsV1::default();
-        stats.observe(1, None);
         Ok(Self::from_active(
             directory,
             active_path,
             active,
             encoded.len() as u64,
             2,
-            stats,
+            Some(1),
         ))
     }
 
@@ -646,7 +454,7 @@ impl LegacyDurableLedgerV1 {
         active: File,
         byte_count: u64,
         next_record_seq: u64,
-        segment_stats: SegmentStatsV1,
+        first_record_seq: Option<u64>,
     ) -> Self {
         Self {
             directory: directory.to_path_buf(),
@@ -654,7 +462,7 @@ impl LegacyDurableLedgerV1 {
             active,
             byte_count,
             next_record_seq,
-            segment_stats,
+            first_record_seq,
             poisoned: false,
             #[cfg(test)]
             fail_next_append: false,
@@ -732,8 +540,7 @@ impl LegacyDurableLedgerV1 {
         }
 
         self.byte_count = next_byte_count;
-        self.segment_stats
-            .observe(self.next_record_seq, payload.ledger_entry_seq());
+        self.first_record_seq.get_or_insert(self.next_record_seq);
         self.next_record_seq = next_record_seq;
         Ok(())
     }
@@ -744,26 +551,13 @@ impl LegacyDurableLedgerV1 {
         if self.poisoned {
             return Err(LedgerDurableErrorV1::HandlePoisoned);
         }
-        let Some(first_record_seq) = self.segment_stats.first_record_seq else {
+        let Some(first_record_seq) = self.first_record_seq else {
             return Ok(None);
         };
         self.active
             .sync_all()
             .map_err(|error| io_error("封存前同步 Ledger 活动段", &self.active_path, error))?;
-        let sha256 = sha256_file(&self.active_path)?;
-        let last_record_seq = self
-            .segment_stats
-            .last_record_seq
-            .expect("非空活动段拥有末记录序号");
-        let first_ledger_entry_seq = self.segment_stats.first_ledger_entry_seq;
-        let last_ledger_entry_seq = self.segment_stats.last_ledger_entry_seq;
-        let file_name = segment_file_name(
-            first_record_seq,
-            last_record_seq,
-            first_ledger_entry_seq,
-            last_ledger_entry_seq,
-            &sha256,
-        );
+        let file_name = segment_file_name(first_record_seq);
         let parent = File::open(&self.directory)
             .map_err(|error| io_error("打开 Ledger 耐久目录", &self.directory, error))?;
         if let Err(error) = renameat_with(
@@ -813,18 +607,13 @@ impl LegacyDurableLedgerV1 {
         }
         self.active = new_active;
         self.byte_count = 0;
-        self.segment_stats = SegmentStatsV1::default();
+        self.first_record_seq = None;
         Ok(Some(LedgerSealedSegmentReferenceV1 {
             location: self
                 .directory
                 .join(file_name)
                 .to_string_lossy()
                 .into_owned(),
-            sha256,
-            first_durable_record_seq: first_record_seq,
-            last_durable_record_seq: last_record_seq,
-            first_ledger_entry_seq,
-            last_ledger_entry_seq,
         }))
     }
 
@@ -852,33 +641,23 @@ fn recover_sealed_segments(
         let file_name = entry.file_name();
         let file_name = file_name.to_string_lossy();
         if file_name.starts_with(SEGMENT_PREFIX) && file_name.ends_with(SEGMENT_SUFFIX) {
-            sealed.push(parse_segment_reference(&entry.path(), &file_name)?);
+            sealed.push((parse_segment_first_record(&file_name)?, entry.path()));
         }
     }
-    sealed.sort_by_key(|reference| reference.first_durable_record_seq);
+    sealed.sort_by_key(|(first, _)| *first);
 
-    for reference in &sealed {
-        let sealed_path = Path::new(&reference.location);
-        let found_hash = sha256_file(sealed_path)?;
-        if found_hash != reference.sha256 {
-            return Err(LedgerDurableErrorV1::SealedSegmentHashMismatch {
-                path: sealed_path.to_path_buf(),
-                expected: reference.sha256.clone(),
-                found: found_hash,
-            });
-        }
+    for (_, sealed_path) in &sealed {
         let sealed_file = File::open(sealed_path)
             .map_err(|error| io_error("打开 Ledger 封存段", sealed_path, error))?;
-        let (stats, _) = decode_segment(
+        let _ = decode_segment(
             sealed_path,
             BufReader::new(sealed_file),
             false,
             &mut cursor.expected_record_seq,
             &mut cursor.expected_ledger_entry_seq,
-            &mut cursor.previous_record_sha256,
+            &mut cursor.previous_record,
             apply,
         )?;
-        validate_segment_reference(reference, &stats)?;
     }
     Ok(())
 }
@@ -909,13 +688,13 @@ fn recover_active_segment(
     let reader_file = active
         .try_clone()
         .map_err(|error| io_error("复制 Ledger 活动段读取句柄", &active_path, error))?;
-    let (segment_stats, last_complete_unique_offset) = decode_segment(
+    let (first_record_seq, last_complete_unique_offset) = decode_segment(
         &active_path,
         BufReader::new(reader_file),
         true,
         &mut cursor.expected_record_seq,
         &mut cursor.expected_ledger_entry_seq,
-        &mut cursor.previous_record_sha256,
+        &mut cursor.previous_record,
         apply,
     )?;
     if last_complete_unique_offset != original_len {
@@ -933,7 +712,7 @@ fn recover_active_segment(
         active,
         last_complete_unique_offset,
         cursor.expected_record_seq,
-        segment_stats,
+        first_record_seq,
     ))
 }
 
@@ -982,58 +761,16 @@ fn cleanup_genesis_candidate<T>(
     Err(original_error)
 }
 
-fn cleanup_projection_candidate<T>(
-    directory: &Path,
-    candidate_path: &Path,
-    original_error: LedgerDurableErrorV1,
-) -> Result<T, LedgerDurableErrorV1> {
-    match fs::remove_file(candidate_path) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(LedgerDurableErrorV1::DurabilityUncertain {
-                operation: "清理失败的 Ledger 投影候选",
-                message: format!("原始错误：{original_error}；清理错误：{error}"),
-            });
-        }
-    }
-    if let Err(error) = sync_directory_io(directory) {
-        return Err(LedgerDurableErrorV1::DurabilityUncertain {
-            operation: "同步 Ledger 投影候选清理",
-            message: format!("原始错误：{original_error}；目录同步错误：{error}"),
-        });
-    }
-    Err(original_error)
-}
-
-fn create_projection_candidate(
-    directory: &Path,
-) -> Result<(File, String, PathBuf), LedgerDurableErrorV1> {
-    loop {
-        let sequence = PROJECTION_CANDIDATE_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-        let file_name = format!(
-            "{PROJECTION_CANDIDATE_PREFIX}{}-{sequence}",
-            std::process::id()
-        );
-        let path = directory.join(&file_name);
-        match OpenOptions::new().create_new(true).write(true).open(&path) {
-            Ok(file) => return Ok((file, file_name, path)),
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => return Err(io_error("创建 Ledger 投影候选", &path, error)),
-        }
-    }
-}
-
 fn decode_segment(
     path: &Path,
     mut reader: impl BufRead,
     active: bool,
     expected_record_seq: &mut u64,
     expected_ledger_entry_seq: &mut u64,
-    previous_record_sha256: &mut Option<[u8; 32]>,
+    previous_record: &mut Vec<u8>,
     apply: &mut impl FnMut(DurablePayloadV1) -> Result<(), LedgerDurableErrorV1>,
-) -> Result<(SegmentStatsV1, u64), LedgerDurableErrorV1> {
-    let mut stats = SegmentStatsV1::default();
+) -> Result<(Option<u64>, u64), LedgerDurableErrorV1> {
+    let mut first_record_seq = None;
     let mut line = Vec::new();
     let mut offset = 0_u64;
     let mut last_complete_unique_offset = 0_u64;
@@ -1071,8 +808,7 @@ fn decode_segment(
             )));
         }
         if active && envelope.durable_record_seq.checked_add(1) == Some(*expected_record_seq) {
-            let duplicate_sha256: [u8; 32] = Sha256::digest(&line).into();
-            if previous_record_sha256.as_ref() != Some(&duplicate_sha256) {
+            if previous_record != &line {
                 return Err(LedgerDurableErrorV1::InvalidStructure(format!(
                     "{} 的重复尾记录内容与已提交记录不同",
                     path.display()
@@ -1110,122 +846,32 @@ fn decode_segment(
                     LedgerDurableErrorV1::InvalidStructure("Ledger 序号溢出".to_owned())
                 })?;
         }
-        stats.observe(
-            envelope.durable_record_seq,
-            envelope.payload.ledger_entry_seq(),
-        );
+        first_record_seq.get_or_insert(envelope.durable_record_seq);
         *expected_record_seq = expected_record_seq
             .checked_add(1)
             .ok_or_else(|| LedgerDurableErrorV1::InvalidStructure("耐久记录序号溢出".to_owned()))?;
         apply(envelope.payload)?;
-        *previous_record_sha256 = Some(Sha256::digest(&line).into());
+        std::mem::swap(previous_record, &mut line);
         offset += read as u64;
         last_complete_unique_offset = offset;
     }
-    Ok((stats, last_complete_unique_offset))
+    Ok((first_record_seq, last_complete_unique_offset))
 }
 
-fn segment_file_name(
-    first_record: u64,
-    last_record: u64,
-    first_ledger: Option<u64>,
-    last_ledger: Option<u64>,
-    sha256: &str,
-) -> String {
-    format!(
-        "{SEGMENT_PREFIX}{first_record}--{last_record}--{}--{}--{sha256}{SEGMENT_SUFFIX}",
-        optional_seq(first_ledger),
-        optional_seq(last_ledger)
-    )
+fn segment_file_name(first_record: u64) -> String {
+    format!("{SEGMENT_PREFIX}{first_record}{SEGMENT_SUFFIX}")
 }
 
-fn projection_file_name(ledger_entry_seq: u64, sha256: &str) -> String {
-    format!("{PROJECTION_PREFIX}{ledger_entry_seq}--{sha256}{PROJECTION_SUFFIX}")
-}
-
-fn optional_seq(value: Option<u64>) -> String {
-    value.map_or_else(|| "none".to_owned(), |value| value.to_string())
-}
-
-fn parse_optional_seq(value: &str) -> Result<Option<u64>, LedgerDurableErrorV1> {
-    if value == "none" {
-        Ok(None)
-    } else {
-        value.parse::<u64>().map(Some).map_err(|_| {
-            LedgerDurableErrorV1::InvalidStructure(format!("封存段可选序号非法：{value}"))
-        })
-    }
-}
-
-fn parse_segment_reference(
-    path: &Path,
-    file_name: &str,
-) -> Result<LedgerSealedSegmentReferenceV1, LedgerDurableErrorV1> {
+fn parse_segment_first_record(file_name: &str) -> Result<u64, LedgerDurableErrorV1> {
     let body = file_name
         .strip_prefix(SEGMENT_PREFIX)
         .and_then(|value| value.strip_suffix(SEGMENT_SUFFIX))
         .ok_or_else(|| LedgerDurableErrorV1::InvalidStructure("封存段文件名非法".to_owned()))?;
-    let fields = body.split("--").collect::<Vec<_>>();
-    if fields.len() != 5 {
-        return Err(LedgerDurableErrorV1::InvalidStructure(format!(
-            "封存段文件名非法：{file_name}"
-        )));
-    }
-    let parse_seq = |value: &str| {
-        value
-            .parse::<u64>()
-            .map_err(|_| LedgerDurableErrorV1::InvalidStructure(format!("封存段序号非法：{value}")))
-    };
-    Ok(LedgerSealedSegmentReferenceV1 {
-        location: path.to_string_lossy().into_owned(),
-        sha256: fields[4].to_owned(),
-        first_durable_record_seq: parse_seq(fields[0])?,
-        last_durable_record_seq: parse_seq(fields[1])?,
-        first_ledger_entry_seq: parse_optional_seq(fields[2])?,
-        last_ledger_entry_seq: parse_optional_seq(fields[3])?,
-    })
-}
-
-fn validate_segment_reference(
-    reference: &LedgerSealedSegmentReferenceV1,
-    stats: &SegmentStatsV1,
-) -> Result<(), LedgerDurableErrorV1> {
-    if stats.first_record_seq != Some(reference.first_durable_record_seq)
-        || stats.last_record_seq != Some(reference.last_durable_record_seq)
-        || stats.first_ledger_entry_seq != reference.first_ledger_entry_seq
-        || stats.last_ledger_entry_seq != reference.last_ledger_entry_seq
-    {
-        return Err(LedgerDurableErrorV1::InvalidStructure(format!(
-            "封存段 {} 的文件名序号范围与内容不一致",
-            reference.location
-        )));
-    }
-    Ok(())
-}
-
-fn sha256_file(path: &Path) -> Result<String, LedgerDurableErrorV1> {
-    let mut file =
-        File::open(path).map_err(|error| io_error("打开 Ledger 段以计算 SHA-256", path, error))?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = file
-            .read(&mut buffer)
-            .map_err(|error| io_error("读取 Ledger 段以计算 SHA-256", path, error))?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let digest = hasher.finalize();
-    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
-}
-
-fn sha256_bytes(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    // 旧五字段段名仅使用首序号排序，不复核已退役的范围和摘要。
+    let first = body.split("--").next().unwrap_or(body);
+    first
+        .parse()
+        .map_err(|_| LedgerDurableErrorV1::InvalidStructure(format!("封存段首序号非法：{first}")))
 }
 
 fn sync_directory(path: &Path, operation: &'static str) -> Result<(), LedgerDurableErrorV1> {
@@ -1246,7 +892,6 @@ fn io_error(operation: &'static str, path: &Path, error: std::io::Error) -> Ledg
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
 
     use contracts::ExactDecimal;
     use tempfile::TempDir;
@@ -1281,23 +926,5 @@ mod tests {
         })
         .unwrap();
         assert_eq!(recovered_policy, Some(policy("80")));
-    }
-
-    #[test]
-    fn projection_candidates_are_owned_by_the_call_that_created_them() {
-        let directory = TempDir::new().unwrap();
-        let (mut first, first_name, first_path) =
-            create_projection_candidate(directory.path()).unwrap();
-        first.write_all(b"first").unwrap();
-        first.sync_all().unwrap();
-
-        let (mut second, second_name, second_path) =
-            create_projection_candidate(directory.path()).unwrap();
-        second.write_all(b"second").unwrap();
-        second.sync_all().unwrap();
-
-        assert_ne!(first_name, second_name);
-        assert_eq!(fs::read(first_path).unwrap(), b"first");
-        assert_eq!(fs::read(second_path).unwrap(), b"second");
     }
 }
