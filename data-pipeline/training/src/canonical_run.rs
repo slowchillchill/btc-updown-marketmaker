@@ -1,9 +1,9 @@
 //! 任务 2.4 使用的唯一生产计算编排路径。
 //!
 //! 本模块只把已冻结的直接源输入接入既有解码、归约与双时间投影，并返回同次运行的
-//! 暂存摘要和资源计数。`TypedRawRow` 的 JSON 只在本次运行的临时工作区内承载外部
+//! 暂存定位和资源计数。`TypedRawRow` 的 JSON 只在本次运行的临时工作区内承载外部
 //! 排序载荷，不是持久 schema、规范事件身份或门 A 产物。正式事件存储、索引物化、
-//! 运行清单和门 A 回执仍由任务 2.5 实现。
+//! 产物发布由 gate_a 与 gate_a_publication 实现。
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -23,9 +23,7 @@ use data_pipeline_core::typed_raw::{
     PolymarketMetadataRowKind, PolymarketOrderbookEvent, TypedRawRow, TypedRawSourceKind,
 };
 use data_pipeline_core::{
-    ContractError, encode_canonical_event_record_v1, encode_event_time_index_entry,
-    encode_visibility_index_entry, project_record_event_time_index_entry,
-    project_record_visibility_index_entry, source_evidence_from_typed_raw,
+    ContractError, encode_canonical_event_record_v1, source_evidence_from_typed_raw,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -43,14 +41,6 @@ use crate::{
 
 const WORK_DIRECTORY: &str = "dpt-canonical-run";
 const SORT_ROOT: &str = "typed-raw-sort";
-pub(crate) const RECORD_DIGEST_DOMAIN: &[u8] = b"data-pipeline/task-2.4/record-stream/v1\0";
-pub(crate) const EVENT_TIME_PROJECTION_DIGEST_DOMAIN: &[u8] =
-    b"data-pipeline/task-2.4/event-time-projection-stream/v1\0";
-pub(crate) const VISIBILITY_PROJECTION_DIGEST_DOMAIN: &[u8] =
-    b"data-pipeline/task-2.4/visibility-projection-stream/v1\0";
-pub(crate) const REDUCTION_REPORT_DIGEST_DOMAIN: &[u8] =
-    b"data-pipeline/task-2.4/reduction-report-stream/v1\0";
-
 /// 单市场最小完整真实运行范围；时间区间使用左闭右开语义。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -232,18 +222,8 @@ pub struct CanonicalRunMetrics {
     pub visibility_projections: u64,
     pub reduction_reports: u64,
     pub peak_canonical_record_bytes: usize,
-    pub peak_projection_bytes: usize,
     pub peak_reduction_report_bytes: usize,
     pub sort: SortMetrics,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct CanonicalRunDigests {
-    pub canonical_records_sha256: String,
-    pub event_time_projections_sha256: String,
-    pub visibility_projections_sha256: String,
-    pub reduction_reports_sha256: String,
 }
 
 /// 仅属于同次运行的暂存结果；它不是正式门 A 产物或回执。
@@ -256,8 +236,6 @@ pub struct CanonicalRunStaging {
     pub scope: CanonicalRunScope,
     pub config: CanonicalRunConfig,
     pub selected_files: Vec<CanonicalRunInputFile>,
-    pub temporary_sort_logical_sha256: String,
-    pub digests: CanonicalRunDigests,
     pub metrics: CanonicalRunMetrics,
 }
 
@@ -972,7 +950,7 @@ fn stage_sorted_input(
     ranks: &EpochRanks,
     sort_root: &Path,
     metrics: &mut CanonicalRunMetrics,
-) -> Result<crate::SortOutcome, CanonicalRunError> {
+) -> Result<(PathBuf, SortMetrics), CanonicalRunError> {
     let mut sorter = ExternalSorter::new(sort_root, &config.sort)?;
     let read_scope = typed_raw_read_scope(scope);
 
@@ -1034,37 +1012,7 @@ fn stage_sorted_input(
         }
     }
 
-    sorter.finish_with_digest().map_err(Into::into)
-}
-
-pub(crate) struct StreamDigest {
-    hasher: Sha256,
-    count: u64,
-}
-
-impl StreamDigest {
-    pub(crate) fn new(domain: &[u8]) -> Self {
-        let mut hasher = Sha256::new();
-        hasher.update(domain);
-        Self { hasher, count: 0 }
-    }
-
-    pub(crate) fn push(
-        &mut self,
-        bytes: &[u8],
-        counter: &'static str,
-    ) -> Result<(), CanonicalRunError> {
-        let length =
-            u64::try_from(bytes.len()).map_err(|_| CanonicalRunError::CounterOverflow(counter))?;
-        self.hasher.update(length.to_be_bytes());
-        self.hasher.update(bytes);
-        checked_increment(&mut self.count, counter)
-    }
-
-    pub(crate) fn finish(mut self) -> String {
-        self.hasher.update(self.count.to_be_bytes());
-        format!("{:x}", self.hasher.finalize())
-    }
+    sorter.finish(None).map_err(Into::into)
 }
 
 pub(crate) trait CanonicalRunCapture {
@@ -1075,18 +1023,12 @@ pub(crate) trait CanonicalRunCapture {
 
 struct OutputSink<'a> {
     capture: Option<&'a mut dyn CanonicalRunCapture>,
-    records: StreamDigest,
-    event_time_projections: StreamDigest,
-    visibility_projections: StreamDigest,
-    reports: StreamDigest,
     canonical_records: u64,
     execution_market_events: u64,
     reference_events: u64,
     event_time_projection_count: u64,
-    visibility_projection_count: u64,
     reduction_report_count: u64,
     peak_canonical_record_bytes: usize,
-    peak_projection_bytes: usize,
     peak_reduction_report_bytes: usize,
 }
 
@@ -1094,51 +1036,32 @@ impl<'a> OutputSink<'a> {
     fn new(capture: Option<&'a mut dyn CanonicalRunCapture>) -> Self {
         Self {
             capture,
-            records: StreamDigest::new(RECORD_DIGEST_DOMAIN),
-            event_time_projections: StreamDigest::new(EVENT_TIME_PROJECTION_DIGEST_DOMAIN),
-            visibility_projections: StreamDigest::new(VISIBILITY_PROJECTION_DIGEST_DOMAIN),
-            reports: StreamDigest::new(REDUCTION_REPORT_DIGEST_DOMAIN),
             canonical_records: 0,
             execution_market_events: 0,
             reference_events: 0,
             event_time_projection_count: 0,
-            visibility_projection_count: 0,
             reduction_report_count: 0,
             peak_canonical_record_bytes: 0,
-            peak_projection_bytes: 0,
             peak_reduction_report_bytes: 0,
         }
     }
 
     fn push_record(&mut self, record: CanonicalEventRecordV1) -> Result<(), CanonicalRunError> {
         let is_execution = matches!(record, CanonicalEventRecordV1::ExecutionMarketEvent(_));
-        let record_encoded = encode_canonical_event_record_v1(&record)?;
-        self.peak_canonical_record_bytes =
-            self.peak_canonical_record_bytes.max(record_encoded.len());
-        self.records.push(&record_encoded, "canonical_records")?;
-
-        if let Some(entry) = project_record_event_time_index_entry(&record)? {
-            let encoded = encode_event_time_index_entry(&entry)?;
-            self.peak_projection_bytes = self.peak_projection_bytes.max(encoded.len());
-            self.event_time_projections
-                .push(&encoded, "event_time_projections")?;
+        let time = match &record {
+            CanonicalEventRecordV1::ExecutionMarketEvent(event) => &event.time,
+            CanonicalEventRecordV1::ReferenceEvent(event) => &event.time,
+        };
+        if time.source_event_at_utc_ms.is_some() {
             checked_increment(
                 &mut self.event_time_projection_count,
                 "event_time_projections",
             )?;
         }
-
-        let visibility = project_record_visibility_index_entry(&record)?;
-        let encoded = encode_visibility_index_entry(&visibility)?;
-        self.peak_projection_bytes = self.peak_projection_bytes.max(encoded.len());
-        self.visibility_projections
-            .push(&encoded, "visibility_projections")?;
-        checked_increment(
-            &mut self.visibility_projection_count,
-            "visibility_projections",
-        )?;
         if let Some(capture) = self.capture.as_mut() {
-            capture.capture_record(self.canonical_records, &record_encoded)?;
+            let encoded = encode_canonical_event_record_v1(&record)?;
+            self.peak_canonical_record_bytes = self.peak_canonical_record_bytes.max(encoded.len());
+            capture.capture_record(self.canonical_records, &encoded)?;
         }
         checked_increment(&mut self.canonical_records, "canonical_records")?;
         if is_execution {
@@ -1169,10 +1092,9 @@ impl<'a> OutputSink<'a> {
     }
 
     fn push_report(&mut self, report: ReductionReportEntryV1) -> Result<(), CanonicalRunError> {
-        let encoded = encode_reduction_report_entry_v1(&report)?;
-        self.peak_reduction_report_bytes = self.peak_reduction_report_bytes.max(encoded.len());
-        self.reports.push(&encoded, "reduction_reports")?;
         if let Some(capture) = self.capture.as_mut() {
+            let encoded = encode_reduction_report_entry_v1(&report)?;
+            self.peak_reduction_report_bytes = self.peak_reduction_report_bytes.max(encoded.len());
             capture.capture_report(self.reduction_report_count, &encoded)?;
         }
         checked_increment(&mut self.reduction_report_count, "reduction_reports")
@@ -1196,22 +1118,15 @@ impl<'a> OutputSink<'a> {
         self.push_reports(batch.reports)
     }
 
-    fn finish(self, metrics: &mut CanonicalRunMetrics) -> CanonicalRunDigests {
+    fn finish(self, metrics: &mut CanonicalRunMetrics) {
         metrics.canonical_records = self.canonical_records;
         metrics.execution_market_events = self.execution_market_events;
         metrics.reference_events = self.reference_events;
         metrics.event_time_projections = self.event_time_projection_count;
-        metrics.visibility_projections = self.visibility_projection_count;
+        metrics.visibility_projections = self.canonical_records;
         metrics.reduction_reports = self.reduction_report_count;
         metrics.peak_canonical_record_bytes = self.peak_canonical_record_bytes;
-        metrics.peak_projection_bytes = self.peak_projection_bytes;
         metrics.peak_reduction_report_bytes = self.peak_reduction_report_bytes;
-        CanonicalRunDigests {
-            canonical_records_sha256: self.records.finish(),
-            event_time_projections_sha256: self.event_time_projections.finish(),
-            visibility_projections_sha256: self.visibility_projections.finish(),
-            reduction_reports_sha256: self.reports.finish(),
-        }
     }
 }
 
@@ -1410,7 +1325,7 @@ fn process_sorted_input(
     config: &CanonicalRunConfig,
     metrics: &mut CanonicalRunMetrics,
     capture: Option<&mut dyn CanonicalRunCapture>,
-) -> Result<CanonicalRunDigests, CanonicalRunError> {
+) -> Result<(), CanonicalRunError> {
     let mut cursor = RunCursor::open(
         sorted_path,
         config.sort.batch_rows,
@@ -1556,23 +1471,22 @@ fn reduce_frozen_input(
 
     let mut metrics = CanonicalRunMetrics::default();
     let ranks = discover_epoch_ranks(&files, scope, config, &mut metrics)?;
-    let sorted = stage_sorted_input(&files, scope, config, &ranks, &sort_root, &mut metrics)?;
-    metrics.sort = sorted.metrics.clone();
-    let digests = process_sorted_input(&sorted.output_path, config, &mut metrics, capture)?;
+    let (sorted_path, sort_metrics) =
+        stage_sorted_input(&files, scope, config, &ranks, &sort_root, &mut metrics)?;
+    metrics.sort = sort_metrics;
+    process_sorted_input(&sorted_path, config, &mut metrics, capture)?;
 
     // 冻结发生在调用方构造 `input` 时；运行结束重新完整准入，证明处理中输入未改变。
     input.verify_unchanged()?;
 
     let staging = CanonicalRunStaging {
         workspace_path: workspace.path.clone(),
-        temporary_sorted_input_path: sorted.output_path,
+        temporary_sorted_input_path: sorted_path,
         input_set_identity_sha256: input.input_set_identity_sha256().to_owned(),
         input_manifest_set_sha256: input.input_manifest_set_sha256().to_owned(),
         scope: scope.clone(),
         config: config.clone(),
         selected_files,
-        temporary_sort_logical_sha256: sorted.logical_sha256,
-        digests,
         metrics,
     };
     workspace.retain = true;

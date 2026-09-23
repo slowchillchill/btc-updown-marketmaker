@@ -21,7 +21,7 @@ use crate::canonical_run::{CanonicalRunError, CanonicalRunScope, SourceRowCounts
 use crate::gate_a::{
     CanonicalEventStoreCursor, EventTimeIndexCursor, GateACandidate, GateAError,
     MarketObservationCursor, ReductionReportCursor, VisibilityIndexCursor, build_gate_a_candidate,
-    validate_gate_a_candidate,
+    open_gate_a_artifacts,
 };
 use crate::gate_a_publication::{gate_a_formal_canonical_config, gate_a_formal_output_config};
 
@@ -732,7 +732,7 @@ fn identity_only_empty_and_missing_identity_do_not_fabricate_observations() {
         }
         let candidate = result.unwrap();
         let rows = observations(&candidate);
-        assert_eq!(candidate.resource_metrics.peak_observation_l2_levels, 0);
+        assert_eq!(candidate.peak_observation_l2_levels, 0);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].visibility_cutoff.received_at_utc_ms, START);
         assert_eq!(candidate.event_time_index.manifest.file.rows, 0);
@@ -803,7 +803,11 @@ fn unrecovered_cross_day_gap_and_real_same_epoch_recovery_are_preserved() {
         assert_eq!(candidate.scope, selected_scope);
         publication_tests::assert_publication(&input, &candidate);
         assert_eq!(
-            candidate.input_manifest_set_sha256.0,
+            candidate
+                .canonical_event_store
+                .manifest
+                .input_manifest_set_sha256
+                .0,
             input.input_manifest_set_sha256()
         );
         let rows = observations(&candidate);
@@ -898,7 +902,6 @@ fn complete_and_zero_source_inputs_are_invariant_to_physical_batching() {
             first.canonical_metrics.selected_rows,
             second.canonical_metrics.selected_rows
         );
-        assert_eq!(first.canonical_digests, second.canonical_digests);
         let semantic_observations = |candidate: &GateACandidate| {
             observations(candidate)
                 .into_iter()
@@ -944,13 +947,8 @@ fn complete_and_zero_source_inputs_are_invariant_to_physical_batching() {
         };
         assert_eq!(event_index(&first), event_index(&second));
         assert_eq!(visibility_index(&first), visibility_index(&second));
-        for (name, candidate) in [("validate-first", &first), ("validate-second", &second)] {
-            validate_gate_a_candidate(
-                &candidate.candidate_path,
-                &output.path().join(name),
-                &candidate.output_config,
-            )
-            .unwrap();
+        for candidate in [&first, &second] {
+            open_gate_a_artifacts(&candidate.candidate_path).unwrap();
         }
     }
 }

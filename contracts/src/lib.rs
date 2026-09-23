@@ -15,9 +15,6 @@ pub const EXECUTION_MARKET_EVENT_SCHEMA_V3: &str = "execution_market_event_v3";
 pub const CANONICAL_REFERENCE_EVENT_SCHEMA_V1: &str = "canonical_reference_event_v1";
 pub const CANONICAL_EVENT_RECORD_SCHEMA_V1: &str = "canonical_event_record_v1";
 pub const MARKET_OBSERVATION_CAUSAL_SHELL_SCHEMA_V3: &str = "market_observation_causal_shell_v3";
-pub const GATE_A_CAPABILITY_MATRIX_SCHEMA_V2: &str = "gate_a_capability_matrix_v2";
-pub const GATE_A_RECEIPT_SCHEMA_V3: &str = "real_execution_tape_receipt_v3";
-pub const DPT_OBSERVATION_RECEIPT_SCHEMA_V1: &str = "dpt_observation_receipt_v1";
 pub const EVENT_TIME_INDEX_SCHEMA_V2: &str = "event_time_index_v2";
 pub const VISIBILITY_INDEX_SCHEMA_V2: &str = "visibility_index_v2";
 pub const ACCOUNT_INSTANCE_KEY_SCHEMA_V1: &str = "account_instance_key_v1";
@@ -1288,93 +1285,6 @@ pub struct MarketObservationCausalShellV3 {
     pub component_states: Vec<ObservationComponentStateV2>,
     pub missing_mask: Vec<ObservationComponentId>,
     pub canonical_hash_sha256: Sha256Hex,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum GateACapabilityId {
-    InputAdmissionAndSixSchemaMapping,
-    CanonicalIdentityAndDualTimeProjection,
-    MarketIdentityWindowAndLifecycle,
-    InitialL2SnapshotEpochCursorAndDigest,
-    PriceLevelQuantityTransition,
-    BestBidAsk,
-    DynamicTickSize,
-    PublicTradeEvidence,
-    LevelExecutionTransition,
-    QualityGapResyncAndWatermark,
-    MarketResolutionTerminal,
-    ObservationSharedLineageAndVisibilityCutoff,
-    ImmutableEventStoreAndDualIndexes,
-    DeterminismAndSourceTraceability,
-    BoundedResourcesAndAtomicPublication,
-    ForbiddenLowFrequencyFields,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum CapabilityStatus {
-    Pass,
-    Fail,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GateACapabilityEntryV2 {
-    pub capability: GateACapabilityId,
-    pub status: CapabilityStatus,
-    pub contract_field_paths: Vec<String>,
-    pub evidence_ids: Vec<String>,
-    pub blocking_reason: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GateACapabilityMatrixV2 {
-    pub schema_version: String,
-    pub entries: Vec<GateACapabilityEntryV2>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DptObservationReceiptV1 {
-    pub schema_version: String,
-    pub receipt_id: Sha256Hex,
-    pub pipeline_core_identity_sha256: Sha256Hex,
-    pub input_set_identity_sha256: Sha256Hex,
-    pub input_manifest_set_sha256: Sha256Hex,
-    pub observation_run_manifest_sha256: Sha256Hex,
-    pub training_dataset_ready: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct GateAReceiptV3 {
-    pub schema_version: String,
-    pub receipt_id: Sha256Hex,
-    pub requirement_id: String,
-    pub pipeline_core_identity_sha256: Sha256Hex,
-    pub canonical_event_record_contract_version: String,
-    pub execution_event_contract_version: String,
-    pub reference_event_contract_version: String,
-    pub observation_contract_version: String,
-    pub event_time_index_contract_version: String,
-    pub visibility_index_contract_version: String,
-    pub dataset_lineage_root: String,
-    pub dataset_date_floor: String,
-    pub covered_utc_dates: Vec<String>,
-    pub input_set_identity_sha256: Sha256Hex,
-    pub supported_schema_set_identity_sha256: Sha256Hex,
-    pub input_manifest_set_sha256: Sha256Hex,
-    pub canonical_event_store_manifest_sha256: Sha256Hex,
-    pub event_time_index_manifest_sha256: Sha256Hex,
-    pub visibility_index_manifest_sha256: Sha256Hex,
-    pub observation_manifest_sha256: Sha256Hex,
-    pub capability_matrix_sha256: Sha256Hex,
-    pub run_manifest_sha256: Sha256Hex,
-    pub training_dataset_ready: bool,
-    pub training_split_manifest_id: String,
-    pub training_split_manifest_sha256: String,
 }
 
 /// 公共读取的真实零、缺失和不适用。

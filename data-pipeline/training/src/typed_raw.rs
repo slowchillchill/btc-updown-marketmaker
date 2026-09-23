@@ -304,17 +304,6 @@ pub(crate) fn expected_schema(
     Ok(schema)
 }
 
-pub(crate) fn expected_projection_columns(
-    source_kind: &str,
-    schema_version: &str,
-) -> Result<Vec<String>, TypedRawReadError> {
-    Ok(expected_schema(source_kind, schema_version)?
-        .fields()
-        .iter()
-        .map(|field| field.name().to_owned())
-        .collect())
-}
-
 fn validate_physical_schema(
     source_kind: &str,
     schema_version: &str,

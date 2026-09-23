@@ -68,18 +68,17 @@ fn real_scoped_six_source_run_uses_one_deterministic_production_path() {
     .expect("批次和排序分区扰动后的真实生产路径运行必须成功");
 
     eprintln!(
-        "task_2_4_first={{scope:{:?},input_set:{},manifest_set:{},files:{:?},config:{:?},digests:{:?},metrics:{:?}}}",
+        "task_2_4_first={{scope:{:?},input_set:{},manifest_set:{},files:{:?},config:{:?},metrics:{:?}}}",
         first.scope,
         first.input_set_identity_sha256,
         first.input_manifest_set_sha256,
         first.selected_files,
         first.config,
-        first.digests,
         first.metrics,
     );
     eprintln!(
-        "task_2_4_second={{config:{:?},digests:{:?},metrics:{:?}}}",
-        second.config, second.digests, second.metrics,
+        "task_2_4_second={{config:{:?},metrics:{:?}}}",
+        second.config, second.metrics,
     );
 
     assert_eq!(first.scope, scope);
@@ -92,11 +91,6 @@ fn real_scoped_six_source_run_uses_one_deterministic_production_path() {
         second.input_manifest_set_sha256
     );
     assert_eq!(first.selected_files, second.selected_files);
-    assert_eq!(
-        first.temporary_sort_logical_sha256,
-        second.temporary_sort_logical_sha256
-    );
-    assert_eq!(first.digests, second.digests);
     assert_eq!(first.metrics.selected_rows, second.metrics.selected_rows);
     assert_eq!(
         first.metrics.canonical_records,

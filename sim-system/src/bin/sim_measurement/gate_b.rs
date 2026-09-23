@@ -192,20 +192,13 @@ pub(super) fn run(args: Args, _run_started: Instant) -> Result<(), String> {
             },
         ))
         .map_err(|error| format!("Gate B runner 唯一 CURRENT_QUERY 失败：{error}"))?;
-    let validation_work = parent.join(format!(
-        ".gate-b-final-validation-{}",
-        std::process::id()
-    ));
-    let gate_a = open_published_gate_a_final(&gate.gate_a_root, &validation_work)
-        .map_err(|error| format!("只读打开显式 Gate A final 失败：{error}"))?;
-    if validation_work.exists() {
-        return Err("Gate A 外置 validation 工作目录未清理".to_owned());
-    }
+    let gate_a = open_published_gate_a_final(&gate.gate_a_root)
+        .map_err(|error| format!("只读打开显式 Gate A 产物失败：{error}"))?;
     let scenario = scenario_from_gate_a(&gate_a)?;
     let finality = successful_finality()?;
     let latency = load_embedded_proxy_latency_profile()
         .map_err(|error| format!("加载 Gate B 时延档失败：{error}"))?;
-    let output = &gate_a.run_manifest().output_config;
+    let output = data_pipeline_training::gate_a_formal_output_config();
     let mut adapter = GateASimulationReplayAdapter::open(
         &gate_a,
         output.sort.batch_rows,
@@ -337,8 +330,8 @@ pub(super) fn run(args: Args, _run_started: Instant) -> Result<(), String> {
         .projection()
         .ok_or_else(|| "Gate B 真实 NOE 流未形成 Ledger 投影".to_owned())?;
     println!(
-        "gate_b_flow=PASS receipt_id={} noe_result_references={} ledger_entry_seq={} clean_run_accepted_inputs={} output={}",
-        gate_a.receipt().receipt_id.0,
+        "gate_b_flow=PASS canonical_manifest_sha256={} noe_result_references={} ledger_entry_seq={} clean_run_accepted_inputs={} output={}",
+        gate_a.artifacts().canonical_event_store.manifest_sha256().0,
         finished.applied_noe_count,
         projection.ledger_entry_seq,
         finished.candidate.accepted_input_count(),
@@ -360,9 +353,9 @@ fn exact_recovery_bucket_body(
 }
 
 fn scenario_from_gate_a(
-    gate_a: &ValidatedPublishedGateAFinal,
+    gate_a: &PublishedGateAFinal,
 ) -> Result<Arc<SealedPlatformScenarioV1>, String> {
-    let output = &gate_a.run_manifest().output_config;
+    let output = data_pipeline_training::gate_a_formal_output_config();
     let mut adapter = GateASimulationReplayAdapter::open(
         gate_a,
         output.sort.batch_rows,

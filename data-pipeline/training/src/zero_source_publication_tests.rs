@@ -1,149 +1,58 @@
-//! 隔离夹具的发布闭包验证；外部资源与命令记录均为明确标记的测试数据，非真实发布证据。
-
+//! 发布后通过真实游标读取，保留业务结果与目录所有权。
 use super::*;
-use crate::gate_a_publication::tests::{immutable_file_snapshot, passing_external_resource_facts};
 use crate::gate_a_publication::*;
 use contracts::Sha256Hex;
 
 fn digest(bytes: &[u8]) -> Sha256Hex {
     Sha256Hex(format!("{:x}", Sha256::digest(bytes)))
 }
-
-struct Prepared {
-    stage: PathBuf,
-    quality: DptObservationQualityReportV1,
-    resource: GateAResourceHighWaterReportV1,
-    measured: GateAMeasuredBuildStateV1,
-    tests: GateATestEvidenceReportV1,
+fn immutable_file_snapshot(root: &Path) -> Vec<(PathBuf, Vec<u8>)> {
+    fn visit(root: &Path, path: &Path, out: &mut Vec<(PathBuf, Vec<u8>)>) {
+        for entry in fs::read_dir(path).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                visit(root, &path, out);
+            } else {
+                out.push((
+                    path.strip_prefix(root).unwrap().to_owned(),
+                    fs::read(path).unwrap(),
+                ));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    visit(root, root, &mut out);
+    out.sort();
+    out
 }
-
 fn prepare(
     input: &crate::FrozenDirectSourceInputSetV1,
-    selected_scope: &CanonicalRunScope,
+    scope: &CanonicalRunScope,
     stage: PathBuf,
-) -> Prepared {
-    fs::create_dir(&stage).unwrap();
-    fs::create_dir(stage.join("reports")).unwrap();
-    let mut candidate = build(input, selected_scope, &stage.join("artifacts"), false).unwrap();
-    let validated = validate_gate_a_candidate(
-        &candidate.candidate_path,
-        &stage.join(".prepare-validation"),
-        &candidate.output_config,
+) -> PathBuf {
+    build_gate_a_publication(
+        input,
+        scope,
+        &stage,
+        &gate_a_formal_canonical_config(),
+        &gate_a_formal_output_config(),
     )
     .unwrap();
-    candidate
-        .resource_metrics
-        .peak_formal_work_directory_bytes_bound = candidate
-        .resource_metrics
-        .peak_formal_work_directory_bytes_bound
-        .max(validated.peak_formal_work_directory_bytes_bound);
-    let quality = build_dpt_observation_quality_report(input, &candidate, &validated).unwrap();
-    let bytes = encode_dpt_observation_quality_report(&quality).unwrap();
-    fs::write(stage.join("reports/quality-isolation-report.json"), &bytes).unwrap();
-    let measured = build_dpt_observation_measured_build_state(
-        &candidate,
-        digest(&bytes),
-        regular_directory_bytes(&candidate.candidate_path).unwrap(),
-        "1".repeat(40),
-    )
-    .unwrap();
-    assert_eq!(
-        decode_dpt_observation_measured_build_state(
-            &encode_dpt_observation_measured_build_state(&measured).unwrap()
-        )
-        .unwrap(),
-        measured
-    );
-    let resource = build_dpt_observation_resource_report_from_state(
-        &measured,
-        GateAHostFactsV1 {
-            operating_system: "fixture-only".into(),
-            architecture: "fixture-only".into(),
-            cpu_model: "fixture-only".into(),
-            logical_cpu_count: 1,
-            physical_memory_bytes: 1,
-        },
-        passing_external_resource_facts(),
-    )
-    .unwrap();
-    assert!(resource.evidence.passed, "{resource:#?}");
-    fs::write(
-        stage.join("reports/resource-evidence.json"),
-        encode_resource_high_water_report(&resource).unwrap(),
-    )
-    .unwrap();
-    let output = "仅测试夹具：模拟成功的外部测试记录，不是实际命令执行证据";
-    let tests = build_dpt_observation_test_evidence_report(
-        "1".repeat(40),
-        quality.facts.artifact_manifests.clone(),
-        vec![GateATestCommandEvidenceV1 {
-            argv: vec!["fixture-only".into()],
-            working_directory: "/home/chillchill/btc-updown-marketmaker".into(),
-            exit_code: 0,
-            combined_output: output.into(),
-            combined_output_sha256: digest(output.as_bytes()),
-            covered_evidence_ids: REQUIRED_DPT_OBSERVATION_TEST_EVIDENCE_IDS
-                .iter()
-                .map(|id| (*id).into())
-                .collect(),
-        }],
-    )
-    .unwrap();
-    Prepared {
-        stage,
-        quality,
-        resource,
-        measured,
-        tests,
-    }
+    stage
 }
-
 pub(super) fn assert_publication(
     input: &crate::FrozenDirectSourceInputSetV1,
     expected: &GateACandidate,
 ) {
     let output = TempDir::new().unwrap();
-    let prepared = prepare(
-        input,
-        &expected.scope,
-        output.path().join(".fixture.candidate"),
-    );
-    assert_eq!(
-        prepared.quality.facts.selected_source_rows,
-        expected.canonical_metrics.selected_rows
-    );
-    let published =
-        finalize_and_publish_dpt_observation_candidate(&prepared.stage, &prepared.tests).unwrap();
-    assert!(!prepared.stage.exists());
-    assert!(!published.receipt.training_dataset_ready);
-    let before = immutable_file_snapshot(&published.root);
-    let opened =
-        open_published_dpt_observation(&published.root, &output.path().join("read-validation"))
-            .unwrap();
-    assert_eq!(before, immutable_file_snapshot(&published.root));
-    assert_eq!(opened.receipt(), &published.receipt);
-    assert_eq!(
-        opened.producer_pipeline_core_identity_sha256(),
-        &crate::gate_a::pipeline_core_identity_sha256()
-    );
-    assert_eq!(
-        opened.reader_pipeline_core_identity_sha256(),
-        &crate::gate_a::pipeline_core_identity_sha256()
-    );
-    assert_eq!(
-        opened.run_manifest().input_manifests.len(),
-        input.admitted_daily_inputs().len()
-    );
-    assert_eq!(
-        opened.run_manifest().input_manifest_set_sha256.0,
-        input.input_manifest_set_sha256()
-    );
-    assert_eq!(
-        opened.candidate().recomputed_stream_digests,
-        expected.canonical_digests
-    );
-    // 五种游标均读取已重新验证的发布产物，逐行对照构建测试中已有固定业务断言的候选。
-    let actual = opened.candidate();
+    let stage = prepare(input, &expected.scope, output.path().join("candidate"));
+    let published = publish_gate_a_candidate(&stage, &output.path().join("published")).unwrap();
+    assert!(!stage.exists());
+    let before = immutable_file_snapshot(&published);
+    let opened = open_published_gate_a_final(&published).unwrap();
+    assert_eq!(before, immutable_file_snapshot(&published));
+    // 五种真实游标逐行对照已有固定业务断言的候选。
+    let actual = opened.artifacts();
     let mut events = CanonicalEventStoreCursor::open(
         actual.canonical_event_store.manifest_path(),
         2,
@@ -213,9 +122,6 @@ pub(super) fn assert_publication(
         visibility.next_page(100).unwrap(),
         expected_visibility.next_page(100).unwrap()
     );
-    assert!(
-        open_published_gate_a_final(&published.root, &output.path().join("wrong-purpose")).is_err()
-    );
 }
 
 #[test]
@@ -234,7 +140,7 @@ fn identity_only_publication_reopens_with_empty_event_index_and_zero_l2() {
     let output = TempDir::new().unwrap();
     let candidate = build(&input, &scope(), &output.path().join("candidate"), false).unwrap();
     assert_eq!(candidate.event_time_index.manifest.file.rows, 0);
-    assert_eq!(candidate.resource_metrics.peak_observation_l2_levels, 0);
+    assert_eq!(candidate.peak_observation_l2_levels, 0);
     assert_publication(&input, &candidate);
 }
 
@@ -334,35 +240,12 @@ fn recovered_gap_before_identity_is_published_without_fabricated_observation_wit
     let input = fixture.freeze();
     let output = TempDir::new().unwrap();
     let prepared = prepare(&input, &scope(), output.path().join(".fixture.candidate"));
-    let gap = prepared
-        .quality
-        .facts
-        .evidence
-        .iter()
-        .find(|e| e.evidence_id == "quality/gap-resync-watermark")
-        .unwrap();
-    assert!(!gap.passed, "{gap:#?}");
+    let published = publish_gate_a_candidate(&prepared, &output.path().join("published")).unwrap();
+    let opened = open_published_gate_a_final(&published).unwrap();
     assert_eq!(
-        gap.blocking_reason.as_deref(),
-        Some("quality/gap-resync-watermark/witness_not_observed")
-    );
-    assert!(gap.event_ids.is_empty());
-    assert!(gap.observation_ids.is_empty());
-    assert_eq!(prepared.quality.facts.event_quality_counts.confirmed_gap, 1);
-    assert_eq!(prepared.quality.facts.fresh_resync_boundary, 1);
-    let published =
-        finalize_and_publish_dpt_observation_candidate(&prepared.stage, &prepared.tests).unwrap();
-    let opened =
-        open_published_dpt_observation(&published.root, &output.path().join("validate")).unwrap();
-    assert_eq!(
-        opened.candidate().market_observations.manifest().file.rows,
+        opened.artifacts().market_observations.manifest().file.rows,
         1
     );
-    let actual = decode_dpt_observation_quality_report(
-        &fs::read(published.root.join("reports/quality-isolation-report.json")).unwrap(),
-    )
-    .unwrap();
-    assert_eq!(actual, prepared.quality);
 }
 
 #[test]
@@ -388,205 +271,50 @@ fn explicit_range_and_all_frozen_manifests_survive_without_original_inputs() {
         &selected_scope,
         output.path().join(".fixture.candidate"),
     );
-    let published =
-        finalize_and_publish_dpt_observation_candidate(&prepared.stage, &prepared.tests).unwrap();
+    let published = publish_gate_a_candidate(&prepared, &output.path().join("published")).unwrap();
     drop(input);
     drop(fixture);
-    let before = immutable_file_snapshot(&published.root);
-    let opened =
-        open_published_dpt_observation(&published.root, &output.path().join("validate")).unwrap();
-    assert_eq!(opened.run_manifest().covered_utc_dates, [DAY, "2026-08-09"]);
-    assert_eq!(
-        opened
-            .run_manifest()
-            .input_manifests
-            .iter()
-            .map(|binding| binding.utc_day.as_str())
-            .collect::<Vec<_>>(),
-        [DAY, "2026-08-09", "2026-08-10"]
-    );
-    assert_eq!(opened.run_manifest().selected_files.len(), 1);
-    assert_eq!(before, immutable_file_snapshot(&published.root));
+    let before = immutable_file_snapshot(&published);
+    let opened = open_published_gate_a_final(&published).unwrap();
+    let manifest = opened.artifacts().canonical_event_store.manifest();
+    assert_eq!(manifest.received_start_utc_ms, START);
+    assert_eq!(manifest.received_end_utc_ms, DAY_START + 2 * DAY_MS);
+    assert_eq!(before, immutable_file_snapshot(&published));
 }
 
 #[test]
-fn failed_or_missing_test_and_failed_resource_evidence_cannot_publish() {
-    let mut fixture = Fixture::new();
-    fixture.day(DAY, DAY_START, complete_sources());
-    let input = fixture.freeze();
-    for mode in 0..3 {
-        let output = TempDir::new().unwrap();
-        let mut prepared = prepare(&input, &scope(), output.path().join(".fixture.candidate"));
-        if mode < 2 {
-            let mut commands = prepared.tests.commands;
-            if mode == 0 {
-                commands[0].exit_code = 1;
-            } else {
-                commands[0].covered_evidence_ids.pop();
-            }
-            prepared.tests = build_dpt_observation_test_evidence_report(
-                "1".repeat(40),
-                prepared.quality.facts.artifact_manifests.clone(),
-                commands,
-            )
-            .unwrap();
-            assert!(prepared.tests.evidence.iter().any(|e| !e.passed));
-        } else {
-            let mut external = passing_external_resource_facts();
-            external.memory_peak_bytes = GATE_A_CGROUP_MEMORY_MAX_BYTES + 1;
-            prepared.resource = build_dpt_observation_resource_report_from_state(
-                &prepared.measured,
-                prepared.resource.host.clone(),
-                external,
-            )
-            .unwrap();
-            assert!(!prepared.resource.evidence.passed);
-            fs::write(
-                prepared.stage.join("reports/resource-evidence.json"),
-                encode_resource_high_water_report(&prepared.resource).unwrap(),
-            )
-            .unwrap();
-        }
-        assert!(
-            finalize_and_publish_dpt_observation_candidate(&prepared.stage, &prepared.tests)
-                .is_err()
-        );
-        assert!(!prepared.stage.exists());
-        assert_eq!(fs::read_dir(output.path()).unwrap().count(), 0);
-    }
-}
-
-#[test]
-fn existing_receipt_directory_is_never_replaced() {
+fn existing_publication_is_not_replaced_and_failed_publish_keeps_input() {
     let mut fixture = Fixture::new();
     fixture.day(DAY, DAY_START, complete_sources());
     let input = fixture.freeze();
     let output = TempDir::new().unwrap();
-    let first = prepare(&input, &scope(), output.path().join(".first.candidate"));
-    let published =
-        finalize_and_publish_dpt_observation_candidate(&first.stage, &first.tests).unwrap();
-    let before = immutable_file_snapshot(&published.root);
-    let second = prepare(&input, &scope(), output.path().join(".second.candidate"));
-    assert_eq!(first.quality, second.quality);
-    assert_eq!(first.resource, second.resource);
-    assert!(finalize_and_publish_dpt_observation_candidate(&second.stage, &second.tests).is_err());
-    assert!(!second.stage.exists());
-    assert_eq!(before, immutable_file_snapshot(&published.root));
-    open_published_dpt_observation(&published.root, &output.path().join("validate")).unwrap();
-}
-
-// 仅测试持久化边界：以完整摘要闭包模拟另一实现生产的产物，或攻击者重签的虚假统计。
-fn rewrite_control_closure(
-    root: &Path,
-    prepared: &mut Prepared,
-    validation_path: &Path,
-) -> PathBuf {
-    let validated = validate_gate_a_candidate(
-        &root.join("artifacts"),
-        validation_path,
-        &prepared.resource.output_config,
-    )
-    .unwrap();
-    let quality_bytes = encode_dpt_observation_quality_report(&prepared.quality).unwrap();
-    prepared.resource.quality_isolation_report_sha256 = digest(&quality_bytes);
-    let manifest = build_dpt_observation_run_manifest(
-        &prepared.quality,
-        &prepared.resource,
-        &prepared.tests,
-        &validated,
-    )
-    .unwrap();
-    let receipt = build_dpt_observation_receipt(&manifest).unwrap();
-    fs::write(
-        root.join("reports/quality-isolation-report.json"),
-        quality_bytes,
-    )
-    .unwrap();
-    fs::write(
-        root.join("reports/resource-evidence.json"),
-        encode_resource_high_water_report(&prepared.resource).unwrap(),
-    )
-    .unwrap();
-    fs::write(
-        root.join("reports/test-evidence.json"),
-        encode_dpt_observation_test_evidence_report(&prepared.tests).unwrap(),
-    )
-    .unwrap();
-    fs::write(
-        root.join("observation-run-manifest.json"),
-        encode_dpt_observation_run_manifest(&manifest).unwrap(),
-    )
-    .unwrap();
-    fs::write(
-        root.join("observation-receipt.json"),
-        data_pipeline_core::encode_dpt_observation_receipt_v1(&receipt).unwrap(),
-    )
-    .unwrap();
-    let renamed = root.parent().unwrap().join(receipt.receipt_id.0);
-    fs::rename(root, &renamed).unwrap();
-    renamed
+    let first = prepare(&input, &scope(), output.path().join("first"));
+    let destination = output.path().join("published");
+    publish_gate_a_candidate(&first, &destination).unwrap();
+    let before = immutable_file_snapshot(&destination);
+    let second = prepare(&input, &scope(), output.path().join("second"));
+    let second_before = immutable_file_snapshot(&second);
+    assert!(publish_gate_a_candidate(&second, &destination).is_err());
+    assert_eq!(before, immutable_file_snapshot(&destination));
+    assert_eq!(second_before, immutable_file_snapshot(&second));
+    open_published_gate_a_final(&destination).unwrap();
 }
 
 #[test]
-fn reopen_keeps_producer_identity_separate_and_rejects_rehashed_false_statistics() {
+fn failed_build_only_cleans_the_directory_it_created() {
     let mut fixture = Fixture::new();
     fixture.day(DAY, DAY_START, complete_sources());
     let input = fixture.freeze();
-    let output = TempDir::new().unwrap();
-    let mut prepared = prepare(&input, &scope(), output.path().join(".fixture.candidate"));
-    let published =
-        finalize_and_publish_dpt_observation_candidate(&prepared.stage, &prepared.tests).unwrap();
-    let producer = Sha256Hex("e".repeat(64));
-    prepared.quality.facts.pipeline_core_identity_sha256 = producer.clone();
-    prepared.resource.pipeline_core_identity_sha256 = producer.clone();
-    prepared.tests.pipeline_core_identity_sha256 = producer.clone();
-    let root = rewrite_control_closure(
-        &published.root,
-        &mut prepared,
-        &output.path().join("producer-binding"),
-    );
-    let before = immutable_file_snapshot(&root);
-    let opened =
-        open_published_dpt_observation(&root, &output.path().join("open-older-producer")).unwrap();
-    assert_eq!(opened.producer_pipeline_core_identity_sha256(), &producer);
-    assert_eq!(
-        opened.reader_pipeline_core_identity_sha256(),
-        &crate::gate_a::pipeline_core_identity_sha256()
-    );
-    assert_ne!(
-        opened.producer_pipeline_core_identity_sha256(),
-        opened.reader_pipeline_core_identity_sha256()
-    );
-    assert_eq!(before, immutable_file_snapshot(&root));
-    let (reason, count) = prepared
-        .quality
-        .facts
-        .reduction_reason_counts
-        .pop_first()
-        .unwrap();
-    assert_ne!(reason, "fixture/not-an-observed-reason");
-    prepared
-        .quality
-        .facts
-        .reduction_reason_counts
-        .insert("fixture/not-an-observed-reason".into(), count);
-    let root = rewrite_control_closure(
-        &root,
-        &mut prepared,
-        &output.path().join("rehashed-statistics"),
-    );
-    // 单个报告及回执均可解码且摘要闭合，但真正归约事实必须由产物重建，不能只信回执。
-    data_pipeline_core::decode_dpt_observation_receipt_v1(
-        &fs::read(root.join("observation-receipt.json")).unwrap(),
-    )
-    .unwrap();
-    let before = immutable_file_snapshot(&root);
-    let error =
-        open_published_dpt_observation(&root, &output.path().join("reject-false-statistics"))
-            .unwrap_err();
-    assert!(
-        error.to_string().contains("观测质量事实不能从产物"),
-        "{error}"
-    );
-    assert_eq!(before, immutable_file_snapshot(&root));
+    let root = TempDir::new().unwrap();
+    let existing = root.path().join("existing");
+    fs::create_dir(&existing).unwrap();
+    fs::write(existing.join("user-content"), b"keep").unwrap();
+    let config = gate_a_formal_canonical_config();
+    let mut output = gate_a_formal_output_config();
+    assert!(build_gate_a_publication(&input, &scope(), &existing, &config, &output).is_err());
+    assert_eq!(fs::read(existing.join("user-content")).unwrap(), b"keep");
+    output.max_artifact_payload_bytes = 0;
+    let fresh = root.path().join("fresh");
+    assert!(build_gate_a_publication(&input, &scope(), &fresh, &config, &output).is_err());
+    assert!(!fresh.exists());
 }

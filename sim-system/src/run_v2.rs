@@ -18825,14 +18825,8 @@ mod tests {
             crate::platform_rules::SnapshotAccessMode::CurrentQuery
         );
 
-        let validation_path = directory.path().join("gate-a-final-validation");
-        let final_gate_a =
-            open_published_gate_a_final(Path::new(REAL_GATE_A_FINAL), &validation_path)
-                .expect("只读打开冻结 Gate A V2 final");
-        assert!(
-            !validation_path.exists(),
-            "外置 final validation 路径必须清理"
-        );
+        let final_gate_a = open_published_gate_a_final(Path::new(REAL_GATE_A_FINAL))
+            .expect("只读打开冻结 Gate A 产物");
         let output = gate_a_formal_output_config();
         let mut adapter = GateASimulationReplayAdapter::open(
             &final_gate_a,

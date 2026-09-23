@@ -3,10 +3,8 @@ use std::sync::Arc;
 
 use contracts::{CanonicalEventRecordV1, ExecutionMarketEventV3, Sha256Hex};
 
-use crate::ValidatedPublishedGateAFinal;
-use crate::gate_a::{
-    GateAError, PlatformReplayCursor, ValidatedGateACandidate, VisibilityReplayCursor,
-};
+use crate::PublishedGateAFinal;
+use crate::gate_a::{GateAArtifacts, GateAError, PlatformReplayCursor, VisibilityReplayCursor};
 
 pub use contracts::ReplayIndexClosureV1;
 
@@ -210,13 +208,13 @@ pub struct GateASimulationReplayAdapter {
 
 impl GateASimulationReplayAdapter {
     pub fn open(
-        final_gate_a: &ValidatedPublishedGateAFinal,
+        final_gate_a: &PublishedGateAFinal,
         batch_rows: usize,
         max_batch_bytes: usize,
         max_page_rows: usize,
     ) -> Result<Self, GateAError> {
         Self::open_candidate(
-            final_gate_a.candidate(),
+            final_gate_a.artifacts(),
             batch_rows,
             max_batch_bytes,
             max_page_rows,
@@ -225,7 +223,7 @@ impl GateASimulationReplayAdapter {
 
     #[cfg(test)]
     pub(crate) fn open_candidate_for_tests(
-        candidate: &ValidatedGateACandidate,
+        candidate: &GateAArtifacts,
         batch_rows: usize,
         max_batch_bytes: usize,
         max_page_rows: usize,
@@ -234,7 +232,7 @@ impl GateASimulationReplayAdapter {
     }
 
     fn open_candidate(
-        candidate: &ValidatedGateACandidate,
+        candidate: &GateAArtifacts,
         batch_rows: usize,
         max_batch_bytes: usize,
         max_page_rows: usize,
@@ -301,7 +299,7 @@ mod tests {
 
     fn adapter(fixture: &crate::gate_a::tests::MicroCandidate) -> GateASimulationReplayAdapter {
         GateASimulationReplayAdapter::open_candidate_for_tests(
-            &fixture.validated,
+            &fixture.artifacts,
             fixture.output_config.sort.batch_rows,
             fixture.output_config.sort.max_run_bytes,
             1,
@@ -326,11 +324,11 @@ mod tests {
         assert_eq!(adapter.platform_next_logical_position(), 0);
         assert_eq!(
             adapter.canonical_event_store_manifest_sha256(),
-            fixture.validated.canonical_event_store.manifest_sha256()
+            fixture.artifacts.canonical_event_store.manifest_sha256()
         );
         assert_eq!(
             adapter.event_time_index_manifest_sha256(),
-            fixture.validated.event_time_index.manifest_sha256()
+            fixture.artifacts.event_time_index.manifest_sha256()
         );
 
         let first = adapter.next_platform_bucket().unwrap().unwrap();
@@ -400,7 +398,7 @@ mod tests {
         assert_eq!(adapter.visibility_next_logical_position(), 0);
         assert_eq!(
             adapter.visibility_index_manifest_sha256(),
-            fixture.validated.visibility_index.manifest_sha256()
+            fixture.artifacts.visibility_index.manifest_sha256()
         );
 
         let references_only = adapter.next_visibility_bucket().unwrap().unwrap();
