@@ -742,19 +742,6 @@ fn observation_rejects_visible_component_in_missing_mask() {
 }
 
 #[test]
-fn dataset_floor_is_terminal_and_eligible_dates_remain_unassigned() {
-    assert_eq!(
-        classify_dataset_date("2026-07-29").unwrap(),
-        DatasetDateEligibility::IneligibleBeforeDatasetFloor
-    );
-    assert_eq!(
-        classify_dataset_date("2026-07-30").unwrap(),
-        DatasetDateEligibility::Unassigned
-    );
-    assert!(classify_dataset_date("2026-02-30").is_err());
-}
-
-#[test]
 fn unknown_observation_field_is_rejected() {
     let mut value = serde_json::to_value(base_observation(&base_event())).unwrap();
     value["future_label"] = json!(1);

@@ -1,9 +1,11 @@
+// 仅用于已有本地归档 ignored 测试。
+const DATASET_LINEAGE_ROOT: &str = "/home/chillchill/new-datasets";
 use std::path::Path;
 
 use contracts::{
     AssetIdentityV1, BookSide, CanonicalEventRecordV1, CanonicalSourceKind, ConditionId,
-    DATASET_LINEAGE_ROOT, ExactDecimal, ExecutionMarketEventPayloadV3, ExecutionMarketEventV3,
-    KnownMarketLifecycleState, LevelExecutionBasis, MappedMarketLifecycleStateV1, MarketIdentityV2,
+    ExactDecimal, ExecutionMarketEventPayloadV3, ExecutionMarketEventV3, KnownMarketLifecycleState,
+    LevelExecutionBasis, MappedMarketLifecycleStateV1, MarketIdentityV2,
     MarketResolutionTerminalV3, MarketWindowV2, OutcomeIdentityV1, Sha256Hex, TokenId,
 };
 use data_pipeline_core::reduction::{

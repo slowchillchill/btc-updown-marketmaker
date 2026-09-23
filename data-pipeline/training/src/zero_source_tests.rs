@@ -240,13 +240,8 @@ impl Fixture {
     }
 
     fn freeze(&self) -> crate::FrozenDirectSourceInputSetV1 {
-        let mut input =
-            crate::freeze_direct_source_input_set_with_admission(&self.manifests, |path| {
-                crate::validate_daily_manifest_admission_at_root(self.root.path(), path)
-            })
-            .expect("夹具必须通过完整清单及文件准入");
-        input.test_admission_root = Some(self.root.path().to_path_buf());
-        input
+        crate::freeze_direct_source_input_set(&self.manifests)
+            .expect("夹具必须通过实际公共输入入口")
     }
 }
 
@@ -954,7 +949,7 @@ fn complete_and_zero_source_inputs_are_invariant_to_physical_batching() {
 }
 
 #[test]
-fn frozen_input_rechecks_the_same_complete_admission_after_file_damage() {
+fn selected_file_damage_after_freeze_is_rejected_by_actual_build() {
     let mut fixture = Fixture::new();
     fixture.day(
         DAY,
@@ -966,16 +961,157 @@ fn frozen_input_rechecks_the_same_complete_admission_after_file_damage() {
         )],
     );
     let input = fixture.freeze();
-    input.verify_unchanged().unwrap();
-    let path = input.admitted_daily_inputs()[0].files()[0].canonical_path();
+    let path = input.admitted_daily_inputs()[0].files()[0].file_path();
     let mut bytes = fs::read(path).unwrap();
     let offset = bytes.len() / 2;
     bytes[offset] ^= 1;
     fs::write(path, bytes).unwrap();
-    assert!(matches!(
-        input.verify_unchanged(),
-        Err(crate::InputSetSnapshotError::Admission { .. })
-    ));
     let output = TempDir::new().unwrap();
     assert!(build(&input, &scope(), &output.path().join("candidate"), false).is_err());
+}
+
+#[test]
+fn explicit_input_paths_and_pre_floor_date_build_publish_and_read() {
+    let day = "2026-07-29";
+    let day_start = 1_785_283_200_000;
+    let at = day_start + 1000;
+    let mut fixture = Fixture {
+        root: tempfile::tempdir_in(".").unwrap(),
+        manifests: Vec::new(),
+    };
+    fixture.day(
+        day,
+        day_start,
+        vec![
+            (
+                POLYMARKET_METADATA_SOURCE,
+                POLYMARKET_METADATA_SCHEMA,
+                vec![metadata(at)],
+            ),
+            (
+                POLYMARKET_ORDERBOOK_SOURCE,
+                POLYMARKET_ORDERBOOK_SCHEMA,
+                vec![bba(at + 102)],
+            ),
+        ],
+    );
+    let original = fixture.freeze();
+    let selected = CanonicalRunScope::new(CONDITION, at, at + 200).unwrap();
+    let outputs = TempDir::new().unwrap();
+    let expected = build(
+        &original,
+        &selected,
+        &outputs.path().join("original"),
+        false,
+    )
+    .unwrap();
+    assert!(!observations(&expected).is_empty());
+
+    let relocated = fixture.root.path().join("arbitrary-input");
+    fs::create_dir_all(&relocated).unwrap();
+    let old_manifest = &fixture.manifests[0];
+    let mut manifest: Value = serde_json::from_slice(&fs::read(old_manifest).unwrap()).unwrap();
+    for (index, entry) in manifest["files"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+    {
+        let renamed = format!("nested/materials/row-{index}.bin");
+        let destination = relocated.join(&renamed);
+        fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        fs::rename(
+            old_manifest
+                .parent()
+                .unwrap()
+                .join(entry["path"].as_str().unwrap()),
+            destination,
+        )
+        .unwrap();
+        entry["path"] = json!(renamed);
+    }
+    fs::write(relocated.join("unlisted-running.parquet"), b"unrelated").unwrap();
+    let manifest_path = relocated.join("explicit-input.json");
+    fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let input = crate::freeze_direct_source_input_set(&[manifest_path.clone()]).unwrap();
+    let initial_manifest_hash = input.admitted_daily_inputs()[0]
+        .manifest_sha256()
+        .to_owned();
+    fs::remove_file(&manifest_path).unwrap();
+    let actual = build(&input, &selected, &outputs.path().join("relocated"), false).unwrap();
+    let actual_observations = observations(&actual);
+    let expected_observations = observations(&expected);
+    assert_eq!(actual_observations.len(), expected_observations.len());
+    for (actual, expected) in actual_observations.iter().zip(&expected_observations) {
+        assert_eq!(actual.market, expected.market);
+        assert_eq!(actual.visibility_cutoff, expected.visibility_cutoff);
+        assert_eq!(actual.component_states, expected.component_states);
+        assert_eq!(actual.missing_mask, expected.missing_mask);
+        assert_eq!(
+            actual.market_state_digest_sha256,
+            expected.market_state_digest_sha256
+        );
+    }
+    // 真实定位 manifest 的字节会随产物路径变化，lineage/观测身份不承诺逐字相同。
+
+    let actual_records = records(&actual);
+    let expected_records = records(&expected);
+    assert_eq!(actual_records.len(), expected_records.len());
+    for (actual, expected) in actual_records.iter().zip(&expected_records) {
+        let actual = actual.as_execution_market_event().unwrap();
+        let expected = expected.as_execution_market_event().unwrap();
+        assert_eq!(actual.event_id, expected.event_id);
+        assert_eq!(actual.market, expected.market);
+        assert_eq!(actual.time, expected.time);
+        assert_eq!(actual.payload, expected.payload);
+        assert_eq!(actual.quality, expected.quality);
+        assert_eq!(
+            actual.lineage.source_evidence.len(),
+            expected.lineage.source_evidence.len()
+        );
+        for (actual_source, expected_source) in actual
+            .lineage
+            .source_evidence
+            .iter()
+            .zip(&expected.lineage.source_evidence)
+        {
+            assert_eq!(actual_source.input_manifest_sha256.0, initial_manifest_hash);
+            assert_eq!(
+                expected_source.input_manifest_sha256.0,
+                original.admitted_daily_inputs()[0].manifest_sha256()
+            );
+            assert_eq!(
+                actual_source.input_file_sha256,
+                expected_source.input_file_sha256
+            );
+            assert_eq!(
+                actual_source.source_native_identity,
+                expected_source.source_native_identity
+            );
+        }
+    }
+    assert_eq!(
+        input.admitted_daily_inputs()[0].manifest_sha256(),
+        initial_manifest_hash
+    );
+    publication_tests::assert_publication(&input, &actual);
+
+    let narrower = CanonicalRunScope::new(CONDITION, at, at + 50).unwrap();
+    let narrowed = build(&input, &narrower, &outputs.path().join("narrower"), false).unwrap();
+    assert!(records(&narrowed).len() < actual_records.len());
+    assert!(records(&narrowed).iter().all(|record| {
+        record
+            .as_execution_market_event()
+            .unwrap()
+            .time
+            .received_at_utc_ms
+            < at + 50
+    }));
+    let other = CanonicalRunScope::new(&format!("0x{}", "1".repeat(64)), at, at + 200).unwrap();
+    assert!(matches!(
+        build(&input, &other, &outputs.path().join("other-market"), false),
+        Err(GateAError::CanonicalRun(
+            CanonicalRunError::MissingIdentitySnapshot
+        ))
+    ));
 }

@@ -1,8 +1,10 @@
+// 仅用于已有本地归档 ignored 测试。
+const DATASET_LINEAGE_ROOT: &str = "/home/chillchill/new-datasets";
 use std::path::Path;
 
 use contracts::{
     BinanceDepthStateReferenceV1, CanonicalReferenceEventPayloadV1, CanonicalReferenceEventV1,
-    DATASET_LINEAGE_ROOT, Sha256Hex,
+    Sha256Hex,
 };
 use data_pipeline_core::reduction::{
     BinanceDepthReducer, ReductionDispositionV1, ReductionOperationKindV1, ReductionReportEntryV1,

@@ -130,6 +130,32 @@ fn manifest_for(
     path
 }
 
+fn relocate_explicit_manifest(original: &Path, directory: &Path) -> PathBuf {
+    let mut manifest: Value = serde_json::from_slice(&fs::read(original).unwrap()).unwrap();
+    fs::create_dir_all(directory.join("nested/materials")).unwrap();
+    for (index, file) in manifest["files"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .enumerate()
+    {
+        let relative = format!("nested/materials/input-{index}.bin");
+        fs::copy(
+            original
+                .parent()
+                .unwrap()
+                .join(file["path"].as_str().unwrap()),
+            directory.join(&relative),
+        )
+        .unwrap();
+        file["path"] = json!(relative);
+    }
+    fs::write(directory.join("unlisted.running"), b"unrelated").unwrap();
+    let path = directory.join("input.json");
+    fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    path
+}
+
 #[test]
 fn collector_v6_and_legacy_rows_decode_through_the_explicit_versioned_entry() {
     for legacy_columns in [false, true] {
@@ -235,13 +261,10 @@ fn collector_v6_and_legacy_rows_decode_through_the_explicit_versioned_entry() {
             POLYMARKET_MARKET_METADATA_SCHEMA_V6,
             true,
         );
-        assert!(crate::validate_daily_manifest_admission_at_root(tmp.path(), &manifest).is_err());
-        let admitted = crate::validate_daily_manifest_admission_with_public_inputs(
-            tmp.path(),
-            &manifest,
-            true,
-        )
-        .unwrap();
+        let manifest = relocate_explicit_manifest(&manifest, &tmp.path().join("arbitrary-input"));
+        assert!(crate::validate_direct_source_daily_manifest_admission(&manifest).is_err());
+        let admitted =
+            crate::validate_public_source_daily_manifest_admission_v1(&manifest).unwrap();
         assert!(typed_raw::open_validated_typed_raw_parquet(&admitted.files()[0], 1).is_err());
         let rows = open_validated_public_input_parquet_v1(&admitted.files()[0], 1)
             .unwrap()
@@ -295,10 +318,8 @@ fn public_admission_keeps_six_source_inputs_and_existing_damage_checks() {
         .unwrap();
     let segment = finalize_with_fact(writer, METADATA_SOURCE, METADATA_V5, 1);
     let manifest = manifest_for(tmp.path(), &segment, METADATA_SOURCE, METADATA_V5, false);
-    let old = crate::validate_daily_manifest_admission_at_root(tmp.path(), &manifest).unwrap();
-    let new =
-        crate::validate_daily_manifest_admission_with_public_inputs(tmp.path(), &manifest, true)
-            .unwrap();
+    let old = crate::validate_direct_source_daily_manifest_admission(&manifest).unwrap();
+    let new = crate::validate_public_source_daily_manifest_admission_v1(&manifest).unwrap();
     let expected = typed_raw::open_validated_typed_raw_parquet(&old.files()[0], 1)
         .unwrap()
         .next()
@@ -325,22 +346,12 @@ fn public_admission_keeps_six_source_inputs_and_existing_damage_checks() {
         let mut damaged = original.clone();
         damaged[key] = value;
         fs::write(&manifest, serde_json::to_vec(&damaged).unwrap()).unwrap();
-        assert!(
-            crate::validate_daily_manifest_admission_with_public_inputs(
-                tmp.path(),
-                &manifest,
-                true
-            )
-            .is_err()
-        );
+        assert!(crate::validate_public_source_daily_manifest_admission_v1(&manifest).is_err());
     }
     let mut damaged = original.clone();
     damaged["files"][0]["rows"] = json!(2);
     fs::write(&manifest, serde_json::to_vec(&damaged).unwrap()).unwrap();
-    assert!(
-        crate::validate_daily_manifest_admission_with_public_inputs(tmp.path(), &manifest, true)
-            .is_err()
-    );
+    assert!(crate::validate_public_source_daily_manifest_admission_v1(&manifest).is_err());
     fs::write(&manifest, serde_json::to_vec(&original).unwrap()).unwrap();
     fs::write(&segment.final_path, b"damaged").unwrap();
     assert!(open_validated_public_input_parquet_v1(&new.files()[0], 1).is_err());
@@ -388,23 +399,29 @@ fn actual_twap_writer_preserves_both_windows_and_full_integer() {
     writer
         .write_rtds_chainlink_twap_rows_with_logical_bytes(&rows, 100)
         .unwrap();
-    let output = writer.finalize().unwrap();
-    let stream = open_parquet_with_decoder(
-        ParquetInputFacts {
-            path: &output.final_path,
-            source_kind: TWAP_SOURCE,
-            schema_version: POLYMARKET_RTDS_CHAINLINK_TWAP_SCHEMA_V1,
-            bytes: fs::metadata(&output.final_path).unwrap().len(),
-            rows: output.row_count,
-            sha256: &output.sha256,
-        },
-        1,
-        None,
-        None,
-        expected_public_schema,
-        decode_public_batch,
-    )
-    .unwrap();
+    let output = finalize_with_fact(
+        writer,
+        TWAP_SOURCE,
+        POLYMARKET_RTDS_CHAINLINK_TWAP_SCHEMA_V1,
+        2,
+    );
+    // 独立 writer 的文件先放到清单的实际父目录，再搬到无日期/无文件名资格的位置。
+    let day = tmp.path().join("2026-07-30/typed_raw/utc_day=2026-07-30");
+    fs::create_dir_all(&day).unwrap();
+    let mut output = output;
+    let moved = day.join("twap.parquet");
+    fs::rename(&output.final_path, &moved).unwrap();
+    output.final_path = moved;
+    let manifest = manifest_for(
+        tmp.path(),
+        &output,
+        TWAP_SOURCE,
+        POLYMARKET_RTDS_CHAINLINK_TWAP_SCHEMA_V1,
+        true,
+    );
+    let manifest = relocate_explicit_manifest(&manifest, &tmp.path().join("twap-input"));
+    let input = crate::validate_public_source_daily_manifest_admission_v1(&manifest).unwrap();
+    let stream = open_validated_public_input_parquet_v1(&input.files()[0], 1).unwrap();
     let decoded = stream
         .collect::<Result<Vec<_>, _>>()
         .unwrap()
@@ -671,8 +688,7 @@ fn new_source_files_require_the_twap_writer_finalize_ack() {
             u64::from(source == METADATA_SOURCE),
         );
         let path = manifest_for(tmp.path(), &segment, source, version, true);
-        crate::validate_daily_manifest_admission_with_public_inputs(tmp.path(), &path, true)
-            .unwrap();
+        crate::validate_public_source_daily_manifest_admission_v1(&path).unwrap();
         let mut manifest: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         manifest["writer_finalize_acks"]
             .as_array_mut()
@@ -681,11 +697,7 @@ fn new_source_files_require_the_twap_writer_finalize_ack() {
         fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
         assert!(
             matches!(
-                crate::validate_daily_manifest_admission_with_public_inputs(
-                    tmp.path(),
-                    &path,
-                    true
-                ),
+                crate::validate_public_source_daily_manifest_admission_v1(&path),
                 Err(
                     crate::ManifestAdmissionValidationError::BarrierEvidenceMismatch {
                         evidence_kind: "writer_finalize_acks"
@@ -748,7 +760,7 @@ fn a_new_day_without_parquet_still_requires_all_seven_writer_acks() {
     assert_eq!(manifest["source_counters"][TWAP_SOURCE]["rows"], json!(0));
     manifest["state"] = json!("closed");
     fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-    crate::validate_daily_manifest_admission_with_public_inputs(tmp.path(), &path, true).unwrap();
+    crate::validate_public_source_daily_manifest_admission_v1(&path).unwrap();
     manifest["writer_finalize_acks"]
         .as_array_mut()
         .unwrap()
@@ -756,7 +768,7 @@ fn a_new_day_without_parquet_still_requires_all_seven_writer_acks() {
     fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
     assert!(
         matches!(
-            crate::validate_daily_manifest_admission_with_public_inputs(tmp.path(), &path, true),
+            crate::validate_public_source_daily_manifest_admission_v1(&path),
             Err(
                 crate::ManifestAdmissionValidationError::BarrierEvidenceMismatch {
                     evidence_kind: "writer_finalize_acks"
@@ -770,6 +782,6 @@ fn a_new_day_without_parquet_still_requires_all_seven_writer_acks() {
         .unwrap()
         .remove(TWAP_SOURCE);
     fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
-    crate::validate_daily_manifest_admission_with_public_inputs(tmp.path(), &path, true).unwrap();
-    crate::validate_daily_manifest_admission_at_root(tmp.path(), &path).unwrap();
+    crate::validate_public_source_daily_manifest_admission_v1(&path).unwrap();
+    crate::validate_direct_source_daily_manifest_admission(&path).unwrap();
 }
