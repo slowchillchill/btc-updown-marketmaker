@@ -1047,8 +1047,6 @@ mod enabled {
         .map_err(|error| format!("构造 Gate A 代表市场场景失败：{error}"))?;
         let artifact = SimulationScenarioArtifactV1 {
             schema_version: PLATFORM_SCENARIO_SCHEMA_V1.to_owned(),
-            scenario_sha256: scenario.scenario_sha256().clone(),
-            market_set_sha256: scenario.market_set_sha256().clone(),
             markets: scenario.market_set().markets().to_vec(),
         };
         let bytes = serde_json::to_vec(&artifact)
@@ -4789,8 +4787,6 @@ mod enabled {
             .map_err(|error| format!("构造固定双市场场景失败：{error}"))?;
         let artifact = SimulationScenarioArtifactV1 {
             schema_version: PLATFORM_SCENARIO_SCHEMA_V1.to_owned(),
-            scenario_sha256: scenario.scenario_sha256().clone(),
-            market_set_sha256: scenario.market_set_sha256().clone(),
             markets: scenario.market_set().markets().to_vec(),
         };
         serde_json::to_vec(&artifact).map_err(|error| format!("编码固定场景失败：{error}"))

@@ -615,8 +615,6 @@ fn execution_with_evidence<P: MemoryOrderEvidence + 'static>(
     .unwrap();
     let artifact = SimulationScenarioArtifactV1 {
         schema_version: PLATFORM_SCENARIO_SCHEMA_V1.into(),
-        scenario_sha256: scenario.scenario_sha256().clone(),
-        market_set_sha256: scenario.market_set_sha256().clone(),
         markets: scenario.market_set().markets().to_vec(),
     };
     let scenario = Arc::new(

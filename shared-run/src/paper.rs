@@ -129,11 +129,8 @@ fn assemble(
     let finality = Arc::new(TradeFinalityPolicyV2::decode_and_seal(&std::fs::read(
         &config.finality_policy_path,
     )?)?);
-    let empty = PlatformScenarioV1::try_new(vec![])?;
     let artifact = SimulationScenarioArtifactV1 {
         schema_version: PLATFORM_SCENARIO_SCHEMA_V1.into(),
-        scenario_sha256: empty.scenario_sha256().clone(),
-        market_set_sha256: empty.market_set_sha256().clone(),
         markets: vec![],
     };
     let scenario = Arc::new(SealedPlatformScenarioV1::decode_and_seal(

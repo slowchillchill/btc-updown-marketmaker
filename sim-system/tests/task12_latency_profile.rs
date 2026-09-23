@@ -1,8 +1,8 @@
 use sim_system::latency_profile::{DelaySampleDomainV1, load_embedded_proxy_latency_profile};
 
 #[test]
-fn embedded_profile_recomputes_declared_statistics() {
-    let profile = load_embedded_proxy_latency_profile().expect("正式配置档必须通过完整校验");
+fn embedded_profile_exposes_recorded_statistics() {
+    let profile = load_embedded_proxy_latency_profile().expect("解析内嵌配置档");
     let statistics = profile.statistics();
 
     assert_eq!(
@@ -28,7 +28,7 @@ fn embedded_profile_recomputes_declared_statistics() {
 
 #[test]
 fn deterministic_samples_are_identity_stable_and_domain_separated() {
-    let profile = load_embedded_proxy_latency_profile().expect("正式配置档必须通过完整校验");
+    let profile = load_embedded_proxy_latency_profile().expect("解析内嵌配置档");
     let seed = b"task12-fixed-session-seed";
     let request_id = "request-000002";
 
