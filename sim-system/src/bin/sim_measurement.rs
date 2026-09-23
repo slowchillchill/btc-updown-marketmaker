@@ -175,8 +175,8 @@ mod enabled {
     };
     #[cfg(feature = "gate-a-measurement")]
     use data_pipeline_training::{
-        ClosedExecutionMarketIndexBucketV1, GateASimulationReplayAdapter, ReplayIndexClosureV1,
-        ValidatedPublishedGateAFinal, open_published_gate_a_final,
+        ClosedExecutionMarketIndexBucketV1, GateASimulationReplayAdapter, PublishedGateAFinal,
+        ReplayIndexClosureV1, open_published_gate_a_final,
     };
     #[cfg(feature = "measurement")]
     use rustix::fs::{RenameFlags, renameat_with};
@@ -1113,8 +1113,8 @@ mod enabled {
     }
 
     #[cfg(feature = "gate-a-measurement")]
-    fn gate_a_inventory(final_gate_a: &ValidatedPublishedGateAFinal) -> Result<Vec<Value>, String> {
-        let candidate = final_gate_a.candidate();
+    fn gate_a_inventory(final_gate_a: &PublishedGateAFinal) -> Result<Vec<Value>, String> {
+        let candidate = final_gate_a.artifacts();
         let mut inventory = Vec::new();
         for artifact in [
             &candidate.canonical_event_store,
@@ -1146,30 +1146,7 @@ mod enabled {
                 "sha256":artifact.manifest_sha256()
             }));
         }
-        for relative in [
-            "gate-a-capability-matrix.json",
-            "gate-a-receipt.json",
-            "reports/quality-isolation-report.json",
-            "reports/resource-evidence.json",
-            "reports/test-evidence.json",
-            "run-manifest.json",
-        ] {
-            let path = final_gate_a.root().join(relative);
-            inventory.push(json!({
-                "path":relative,
-                "bytes":fs::metadata(&path)
-                    .map_err(|error| format!("读取 Gate A 控制文件 metadata 失败：{error}"))?
-                    .len(),
-                "sha256":sha256_file(&path)?
-            }));
-        }
         inventory.sort_by(|left, right| left["path"].as_str().cmp(&right["path"].as_str()));
-        if inventory.len() != 16 {
-            return Err(format!(
-                "Gate A inventory 必须恰有 16 项，actual={}",
-                inventory.len()
-            ));
-        }
         Ok(inventory)
     }
 
@@ -1264,25 +1241,17 @@ mod enabled {
             proc_high_water = proc_max(proc_high_water, proc_snapshot()?);
 
             let gate_a_open_started = Instant::now();
-            let validation_work_path = parent.join(format!(
-                ".{final_name}.gate-a-final-validation-{}",
-                std::process::id()
-            ));
-            let final_gate_a =
-                open_published_gate_a_final(&gate.gate_a_root, &validation_work_path)
-                    .map_err(|error| format!("只读打开冻结 Gate A final 失败：{error}"))?;
-            if validation_work_path.exists() {
-                return Err("Gate A 外置 validation 工作目录未清理".to_owned());
-            }
+            let final_gate_a = open_published_gate_a_final(&gate.gate_a_root)
+                .map_err(|error| format!("只读打开 Gate A 产物失败：{error}"))?;
             let gate_a_open_elapsed_ns = elapsed_ns(gate_a_open_started);
             record_stage_sample(
                 &mut samples_writer,
-                "open_and_validate_gate_a_final",
+                "open_gate_a_final",
                 gate_a_open_elapsed_ns,
             )?;
             proc_high_water = proc_max(proc_high_water, proc_snapshot()?);
 
-            let output = &final_gate_a.run_manifest().output_config;
+            let output = data_pipeline_training::gate_a_formal_output_config();
             let mut adapter = GateASimulationReplayAdapter::open(
                 &final_gate_a,
                 output.sort.batch_rows,
@@ -1586,7 +1555,7 @@ mod enabled {
                 },
                 "input_counts":{
                     "unique_execution_market_events":unique_event_count,
-                    "canonical_store_rows_including_reference":final_gate_a.candidate().canonical_event_store.manifest().file.rows,
+                    "canonical_store_rows_including_reference":final_gate_a.artifacts().canonical_event_store.manifest().file.rows,
                     "platform_path":platform_stats,
                     "visibility_path":visibility_stats,
                     "raw_rows_are_not_reported_as_sim_events":true,
@@ -1686,7 +1655,7 @@ mod enabled {
                     },
                     "phase_elapsed_ns":{
                         "current_query_rule_sync":rule_sync_elapsed_ns,
-                        "open_and_validate_gate_a_final":gate_a_open_elapsed_ns,
+                        "open_gate_a_final":gate_a_open_elapsed_ns,
                         "real_dual_path_drive":real_drive_elapsed_ns,
                         "seal_representative_market_report":report_seal_elapsed_ns,
                         "end_to_end_through_input_completion":end_to_end_elapsed_ns
@@ -1714,24 +1683,19 @@ mod enabled {
                     "source_identity_sha256":args.identity.source_identity_sha256,
                     "cargo_lock_sha256":args.identity.cargo_lock_sha256,
                     "binary_sha256":binary_sha256,
-                    "reader_pipeline_core_identity_sha256":final_gate_a.reader_pipeline_core_identity_sha256(),
                     "adapter_identity":"data_pipeline_training::GateASimulationReplayAdapter",
                     "runner_identity":GATE_A_RUNNER_IDENTITY
                 },
                 "gate_a":{
                     "root":final_gate_a.root(),
-                    "receipt_id":final_gate_a.receipt().receipt_id,
-                    "receipt_file_sha256":sha256_file(&final_gate_a.root().join("gate-a-receipt.json"))?,
-                    "run_manifest_sha256":final_gate_a.receipt().run_manifest_sha256,
-                    "producer_pipeline_core_identity_sha256":final_gate_a.producer_pipeline_core_identity_sha256(),
-                    "input_set_identity_sha256":final_gate_a.receipt().input_set_identity_sha256,
-                    "input_manifest_set_sha256":final_gate_a.receipt().input_manifest_set_sha256,
+                    "input_set_identity_sha256":final_gate_a.artifacts().canonical_event_store.manifest().input_set_identity_sha256,
+                    "input_manifest_set_sha256":final_gate_a.artifacts().canonical_event_store.manifest().input_manifest_set_sha256,
                     "artifact_manifests":{
-                        "canonical_event_store":final_gate_a.candidate().canonical_event_store.manifest_sha256(),
-                        "event_time_index":final_gate_a.candidate().event_time_index.manifest_sha256(),
-                        "visibility_index":final_gate_a.candidate().visibility_index.manifest_sha256(),
-                        "market_observations":final_gate_a.candidate().market_observations.manifest_sha256(),
-                        "reduction_reports":final_gate_a.candidate().reduction_reports.manifest_sha256()
+                        "canonical_event_store":final_gate_a.artifacts().canonical_event_store.manifest_sha256(),
+                        "event_time_index":final_gate_a.artifacts().event_time_index.manifest_sha256(),
+                        "visibility_index":final_gate_a.artifacts().visibility_index.manifest_sha256(),
+                        "market_observations":final_gate_a.artifacts().market_observations.manifest_sha256(),
+                        "reduction_reports":final_gate_a.artifacts().reduction_reports.manifest_sha256()
                     },
                     "inventory_reference_not_copy":gate_a_input_inventory
                 },
@@ -1754,8 +1718,8 @@ mod enabled {
                     "max_page_rows":adapter.max_page_rows(),
                     "platform_final_next_logical_position":adapter.platform_next_logical_position(),
                     "visibility_final_next_logical_position":adapter.visibility_next_logical_position(),
-                    "platform_index_file_bytes_scanned":final_gate_a.candidate().event_time_index.manifest().file.bytes,
-                    "visibility_index_file_bytes_scanned":final_gate_a.candidate().visibility_index.manifest().file.bytes,
+                    "platform_index_file_bytes_scanned":final_gate_a.artifacts().event_time_index.manifest().file.bytes,
+                    "visibility_index_file_bytes_scanned":final_gate_a.artifacts().visibility_index.manifest().file.bytes,
                     "logical_terminal":true
                 },
                 "artifacts":{

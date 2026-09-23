@@ -16,19 +16,16 @@ pub mod public_recording;
 pub mod public_replay;
 pub mod typed_raw;
 
-pub use gate_a_publication::observation_publication::*;
 pub use gate_a_publication::{
-    GateAArtifactManifestBindingsV1, GateACgroupMemoryEventsV1, GateAExternalResourceFactsV1,
-    GateAHostFactsV1, GateAPublicationError, GateAResourceHighWaterReportV1, GateARunManifestV2,
-    GateATestCommandEvidenceV1, ValidatedPublishedGateAFinal, decode_resource_high_water_report,
-    encode_resource_high_water_report, gate_a_formal_canonical_config, gate_a_formal_output_config,
-    open_published_gate_a_final, regular_directory_bytes,
+    GateAPublicationError, PublishedGateAFinal, build_gate_a_publication,
+    gate_a_formal_canonical_config, gate_a_formal_output_config, open_published_gate_a_final,
+    publish_gate_a_candidate,
 };
 pub use gate_a_sim_adapter::{
     ClosedExecutionMarketIndexBucketV1, GateASimulationReplayAdapter, ReplayIndexClosureV1,
 };
 
-/// 运行唯一正式门 A 命令入口；参数解析、测量和签发检查均在库内私有实现中完成。
+/// 运行显式构建和发布命令入口。
 pub fn run_dpt_gate_a_cli() {
     dpt_gate_a_cli::main();
 }
@@ -47,7 +44,7 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use arrow_array::{Array, ArrayRef, BinaryArray, RecordBatch};
 use arrow_ord::sort::{SortColumn, SortOptions, lexsort_to_indices};
 use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
-use contracts::{DATASET_LINEAGE_ROOT, DatasetDateEligibility, GateAReceiptV3};
+use contracts::{DATASET_LINEAGE_ROOT, DatasetDateEligibility};
 use data_pipeline_core::classify_dataset_date;
 use parquet::arrow::ArrowWriter;
 use parquet::arrow::arrow_reader::{
@@ -97,30 +94,6 @@ const PUBLIC_WRITER_FINALIZE_ACKS: [&str; 7] = [
     "polymarket_rtds_chainlink_btc_usd",
     "polymarket_rtds_chainlink_twap",
 ];
-
-/// 仅有门 A 成功回执仍不构成训练数据集准入。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum TrainingAdmissionError {
-    GateAIsNotTrainingDatasetReady,
-}
-
-impl fmt::Display for TrainingAdmissionError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::GateAIsNotTrainingDatasetReady => {
-                write!(formatter, "门 A 回执不能替代门 B 训练数据集成功回执")
-            }
-        }
-    }
-}
-
-impl std::error::Error for TrainingAdmissionError {}
-
-pub fn admit_gate_a_receipt_for_training(
-    _receipt: &GateAReceiptV3,
-) -> Result<(), TrainingAdmissionError> {
-    Err(TrainingAdmissionError::GateAIsNotTrainingDatasetReady)
-}
 
 /// 已通过固定数据根和日期下限检查的清单路径。
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -2944,6 +2917,7 @@ fn hash_sort_row(hasher: &mut Sha256, row: &SortRow) -> Result<(), SortError> {
     hash_length_prefixed(hasher, &row.payload)
 }
 
+#[cfg(test)]
 fn scan_logical_output(
     path: &Path,
     batch_rows: usize,
@@ -2999,68 +2973,6 @@ mod tests {
     use serde_json::{Value, json};
     use std::os::unix::fs::symlink;
     use tempfile::TempDir;
-
-    fn gate_a_only_receipt() -> (GateAReceiptV3, contracts::GateACapabilityMatrixV2) {
-        let sha = || contracts::Sha256Hex("a".repeat(64));
-        let matrix = contracts::GateACapabilityMatrixV2 {
-            schema_version: contracts::GATE_A_CAPABILITY_MATRIX_SCHEMA_V2.to_owned(),
-            entries: data_pipeline_core::REQUIRED_GATE_A_CAPABILITIES
-                .into_iter()
-                .enumerate()
-                .map(|(index, capability)| contracts::GateACapabilityEntryV2 {
-                    capability,
-                    status: contracts::CapabilityStatus::Pass,
-                    contract_field_paths: vec!["training.admission".to_owned()],
-                    evidence_ids: vec![format!("training-admission-{index}")],
-                    blocking_reason: None,
-                })
-                .collect(),
-        };
-        let mut receipt = GateAReceiptV3 {
-            schema_version: contracts::GATE_A_RECEIPT_SCHEMA_V3.to_owned(),
-            receipt_id: contracts::Sha256Hex("0".repeat(64)),
-            requirement_id: "DATA-PIPELINE-TRAINING-20260803".to_owned(),
-            pipeline_core_identity_sha256: sha(),
-            canonical_event_record_contract_version: contracts::CANONICAL_EVENT_RECORD_SCHEMA_V1
-                .to_owned(),
-            execution_event_contract_version: contracts::EXECUTION_MARKET_EVENT_SCHEMA_V3
-                .to_owned(),
-            reference_event_contract_version: contracts::CANONICAL_REFERENCE_EVENT_SCHEMA_V1
-                .to_owned(),
-            observation_contract_version: contracts::MARKET_OBSERVATION_CAUSAL_SHELL_SCHEMA_V3
-                .to_owned(),
-            event_time_index_contract_version: contracts::EVENT_TIME_INDEX_SCHEMA_V2.to_owned(),
-            visibility_index_contract_version: contracts::VISIBILITY_INDEX_SCHEMA_V2.to_owned(),
-            dataset_lineage_root: DATASET_LINEAGE_ROOT.to_owned(),
-            dataset_date_floor: contracts::DATASET_DATE_FLOOR.to_owned(),
-            covered_utc_dates: vec!["2026-08-03".to_owned()],
-            input_set_identity_sha256: sha(),
-            supported_schema_set_identity_sha256: sha(),
-            input_manifest_set_sha256: sha(),
-            canonical_event_store_manifest_sha256: sha(),
-            event_time_index_manifest_sha256: sha(),
-            visibility_index_manifest_sha256: sha(),
-            observation_manifest_sha256: sha(),
-            capability_matrix_sha256: data_pipeline_core::gate_a_capability_matrix_digest(&matrix)
-                .unwrap(),
-            run_manifest_sha256: sha(),
-            training_dataset_ready: false,
-            training_split_manifest_id: "N/A".to_owned(),
-            training_split_manifest_sha256: "N/A".to_owned(),
-        };
-        receipt.receipt_id = data_pipeline_core::derive_gate_a_receipt_v3_id(&receipt).unwrap();
-        (receipt, matrix)
-    }
-
-    #[test]
-    fn gate_a_receipt_alone_is_rejected_by_training_admission() {
-        let (receipt, matrix) = gate_a_only_receipt();
-        data_pipeline_core::validate_gate_a_receipt_v3(&receipt, &matrix).unwrap();
-        assert_eq!(
-            admit_gate_a_receipt_for_training(&receipt),
-            Err(TrainingAdmissionError::GateAIsNotTrainingDatasetReady)
-        );
-    }
 
     fn valid_daily_manifest_header_value() -> Value {
         json!({
@@ -4477,3 +4389,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod dpt_observation_real_tests;
