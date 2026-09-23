@@ -287,7 +287,7 @@ impl RolloverCoordinatorState {
         .await
         {
             let error = format!("old-day rollover commit was not enqueued: {error}");
-            self.mark_outcome_uncertain(error.clone());
+            self.mark_outcome_uncertain();
             return Ok(OldDayCommitAck::OutcomeUncertain(error));
         }
         self.pending
@@ -312,26 +312,30 @@ impl RolloverCoordinatorState {
             Ok(Ok(Err(error))) => {
                 let error =
                     format!("old-day rollover commit returned error after command: {error}");
-                self.mark_outcome_uncertain(error.clone());
+                self.mark_outcome_uncertain();
                 Ok(OldDayCommitAck::OutcomeUncertain(error))
             }
             Ok(Err(_)) => {
                 let error = "old-day rollover commit reply dropped after command".to_owned();
-                self.mark_outcome_uncertain(error.clone());
+                self.mark_outcome_uncertain();
                 Ok(OldDayCommitAck::OutcomeUncertain(error))
             }
             Err(_) => {
                 let error = "old-day rollover commit reply timeout after command".to_owned();
-                self.mark_outcome_uncertain(error.clone());
+                self.mark_outcome_uncertain();
                 Ok(OldDayCommitAck::OutcomeUncertain(error))
             }
         }
     }
 
-    pub(super) fn mark_outcome_uncertain(&mut self, error: String) -> DurableMutationAck {
+    pub(super) fn mark_outcome_uncertain(&mut self) {
         if let Some(pending) = self.pending.as_mut() {
             pending.cutpoint = RolloverCutpoint::OutcomeUncertain;
         }
+    }
+
+    fn outcome_uncertain_ack(&mut self, error: String) -> DurableMutationAck {
+        self.mark_outcome_uncertain();
         DurableMutationAck::OutcomeUncertain(error)
     }
 
@@ -360,13 +364,13 @@ impl RolloverCoordinatorState {
         .await?;
         match timeout(STARTUP_GATE_TIMEOUT, reply_rx).await {
             Ok(Ok(Ok(()))) => Ok(DurableMutationAck::Confirmed),
-            Ok(Ok(Err(error))) => Ok(self.mark_outcome_uncertain(format!(
+            Ok(Ok(Err(error))) => Ok(self.outcome_uncertain_ack(format!(
                 "rollover exit-day preparation returned error after command: {error}"
             ))),
-            Ok(Err(_)) => Ok(self.mark_outcome_uncertain(
+            Ok(Err(_)) => Ok(self.outcome_uncertain_ack(
                 "rollover exit-day preparation reply dropped after command".to_owned(),
             )),
-            Err(_) => Ok(self.mark_outcome_uncertain(
+            Err(_) => Ok(self.outcome_uncertain_ack(
                 "rollover exit-day preparation reply timeout after command".to_owned(),
             )),
         }
@@ -395,13 +399,13 @@ impl RolloverCoordinatorState {
         .await?;
         match timeout(STARTUP_GATE_TIMEOUT, reply_rx).await {
             Ok(Ok(Ok(()))) => Ok(DurableMutationAck::Confirmed),
-            Ok(Ok(Err(error))) => Ok(self.mark_outcome_uncertain(format!(
+            Ok(Ok(Err(error))) => Ok(self.outcome_uncertain_ack(format!(
                 "unclean rollover finish returned error after command: {error}"
             ))),
-            Ok(Err(_)) => Ok(self.mark_outcome_uncertain(
+            Ok(Err(_)) => Ok(self.outcome_uncertain_ack(
                 "unclean rollover finish reply dropped after command".to_owned(),
             )),
-            Err(_) => Ok(self.mark_outcome_uncertain(
+            Err(_) => Ok(self.outcome_uncertain_ack(
                 "unclean rollover finish reply timeout after command".to_owned(),
             )),
         }
@@ -668,17 +672,17 @@ impl RolloverCoordinatorState {
             }
             Ok(Ok(Err(error))) => {
                 let error = format!("new-day activation returned error after command: {error}");
-                self.mark_outcome_uncertain(error.clone());
+                self.mark_outcome_uncertain();
                 Ok(ActivationMutationAck::OutcomeUncertain(error))
             }
             Ok(Err(_)) => {
                 let error = "new-day activation reply dropped after command".to_owned();
-                self.mark_outcome_uncertain(error.clone());
+                self.mark_outcome_uncertain();
                 Ok(ActivationMutationAck::OutcomeUncertain(error))
             }
             Err(_) => {
                 let error = "new-day activation reply timeout after command".to_owned();
-                self.mark_outcome_uncertain(error.clone());
+                self.mark_outcome_uncertain();
                 Ok(ActivationMutationAck::OutcomeUncertain(error))
             }
         }

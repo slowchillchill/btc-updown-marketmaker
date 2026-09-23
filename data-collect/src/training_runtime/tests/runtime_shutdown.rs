@@ -59,7 +59,11 @@ async fn failed_manifest_shutdown_aborts_a_blocked_owner_before_a_late_mutation(
     for source_kind in &training_source_kinds()[..training_source_kinds().len() - 1] {
         assert!(
             owner
-                .record_writer_ack(close.clone(), (*source_kind).to_owned())
+                .record_writer_ack(
+                    close.clone(),
+                    (*source_kind).to_owned(),
+                    Arc::clone(&raw_day_gate)
+                )
                 .unwrap()
                 .is_none()
         );

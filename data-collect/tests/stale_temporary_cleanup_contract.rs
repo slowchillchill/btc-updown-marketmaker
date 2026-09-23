@@ -2,12 +2,17 @@ use std::fs::{self, File};
 use std::io::Read as _;
 use std::os::unix::fs::symlink;
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
 
 use data_collect::daily_manifest::remove_unowned_stale_temporary_files;
 use tempfile::tempdir;
 
+// 子进程 exec 前会继承其他线程的 CLOEXEC 文件描述符，隔离各租约场景的持有期。
+static HOLDER_SCENARIO: Mutex<()> = Mutex::new(());
+
 #[test]
 fn stale_cleanup_removes_only_unowned_temporary_files_inside_typed_raw() {
+    let _scenario = HOLDER_SCENARIO.lock().unwrap();
     let tmp = tempdir().unwrap();
     let source = tmp
         .path()
@@ -40,6 +45,7 @@ fn stale_cleanup_removes_only_unowned_temporary_files_inside_typed_raw() {
 
 #[test]
 fn stale_cleanup_refuses_a_file_held_by_the_current_uid() {
+    let _scenario = HOLDER_SCENARIO.lock().unwrap();
     let tmp = tempdir().unwrap();
     let source = tmp
         .path()
@@ -66,6 +72,7 @@ fn stale_cleanup_refuses_a_file_held_by_the_current_uid() {
 
 #[test]
 fn stale_cleanup_refuses_a_non_collector_same_uid_process_holder() {
+    let _scenario = HOLDER_SCENARIO.lock().unwrap();
     let tmp = tempdir().unwrap();
     let source = tmp
         .path()
@@ -106,6 +113,7 @@ fn stale_cleanup_refuses_a_non_collector_same_uid_process_holder() {
 
 #[test]
 fn stale_cleanup_rejects_symlink_escape_without_touching_target() {
+    let _scenario = HOLDER_SCENARIO.lock().unwrap();
     let tmp = tempdir().unwrap();
     let outside = tempdir().unwrap();
     let day = tmp.path().join("training/typed_raw/utc_day=2026-07-14");
