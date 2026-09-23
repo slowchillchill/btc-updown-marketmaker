@@ -959,7 +959,7 @@ mod tests {
                 line.len() >= prefix.len() + 2000,
                 "exercise truncation boundary"
             );
-            assert!(line.contains("sha256="));
+            assert!(line.contains("top_level=object"));
         }
         assert!(!stderr.contains("RAW_SECRET_MUST_NOT_LEAK"));
         assert!(!stderr.contains("RecoverableRtdsNetworkEnvelope"));
@@ -1333,7 +1333,7 @@ mod tests {
             .expect("bounded diagnostic")
             .1;
         assert!(diagnostic.len() <= 2_048);
-        assert!(diagnostic.contains("sha256="));
+        assert!(diagnostic.contains("top_level=object"));
         let late_faults = connection.fault_receiver();
         assert_eq!(
             late_faults.borrow().as_ref(),
