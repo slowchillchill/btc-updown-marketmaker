@@ -1888,7 +1888,7 @@ pub struct SortConfig {
     pub max_temp_bytes: u64,
 }
 
-/// 实测资源用量与行守恒计数器。
+/// 实测资源用量与实际输入、输出行数。
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SortMetrics {
@@ -1998,7 +1998,7 @@ where
     for row in rows {
         sorter.push(row)?;
     }
-    sorter.finish()
+    sorter.finish_with_digest()
 }
 
 pub(crate) struct ExternalSorter {
@@ -2072,7 +2072,7 @@ impl ExternalSorter {
                     limit: self.config.max_run_bytes,
                 });
             }
-            self.flush_pending()?;
+            self.flush_pending(None)?;
             prospective_bytes = sort_row_buffer_bytes(&self.pending_rows, self.pending_inner_bytes)
                 .and_then(|bytes| bytes.checked_add(sort_row_inner_bytes(&row)?))
                 .filter(|bytes| *bytes <= self.config.max_run_bytes);
@@ -2093,7 +2093,7 @@ impl ExternalSorter {
         Ok(())
     }
 
-    fn flush_pending(&mut self) -> Result<(), SortError> {
+    fn flush_pending(&mut self, digest: Option<&mut Sha256>) -> Result<(), SortError> {
         let rows = std::mem::take(&mut self.pending_rows);
         self.pending_inner_bytes = 0;
         let run = flush_initial_run(
@@ -2107,6 +2107,7 @@ impl ExternalSorter {
             },
             &self.config,
             &mut self.metrics,
+            digest,
         )?;
         self.next_file_id += 1;
         self.current_temp_bytes =
@@ -2141,9 +2142,28 @@ impl ExternalSorter {
         Ok(())
     }
 
-    pub(crate) fn finish(mut self) -> Result<SortOutcome, SortError> {
+    pub(crate) fn finish_with_digest(self) -> Result<SortOutcome, SortError> {
+        let mut digest = logical_hasher();
+        let (output_path, metrics) = self.finish(Some(&mut digest))?;
+        digest.update(metrics.output_rows.to_be_bytes());
+        Ok(SortOutcome {
+            output_path,
+            logical_sha256: bytes_to_hex(&digest.finalize()),
+            metrics,
+        })
+    }
+
+    pub(crate) fn finish(
+        mut self,
+        mut digest: Option<&mut Sha256>,
+    ) -> Result<(PathBuf, SortMetrics), SortError> {
         if !self.pending_rows.is_empty() {
-            self.flush_pending()?;
+            let final_initial_run = self.runs.is_empty();
+            self.flush_pending(if final_initial_run {
+                digest.as_deref_mut()
+            } else {
+                None
+            })?;
         }
 
         self.metrics.initial_runs = self.runs.len();
@@ -2161,18 +2181,9 @@ impl ExternalSorter {
             self.metrics.peak_temp_bytes = empty_run.bytes;
             self.metrics.peak_temp_run_files = 1;
             self.metrics.peak_open_files = 1;
-            let (logical_sha256, output_rows) = scan_logical_output(
-                &final_path,
-                self.config.batch_rows,
-                self.config.max_run_bytes,
-            )?;
-            self.metrics.output_rows = output_rows;
+            self.metrics.output_rows = empty_run.rows;
             self.retain_work_directory = true;
-            return Ok(SortOutcome {
-                output_path: final_path,
-                logical_sha256,
-                metrics: std::mem::take(&mut self.metrics),
-            });
+            return Ok((final_path, std::mem::take(&mut self.metrics)));
         }
 
         let mut runs = std::mem::take(&mut self.runs);
@@ -2181,6 +2192,7 @@ impl ExternalSorter {
             pass += 1;
             self.metrics.merge_passes += 1;
             let mut next_runs = Vec::with_capacity(runs.len().div_ceil(self.config.merge_fan_in));
+            let final_merge = runs.len() <= self.config.merge_fan_in;
             let mut remaining = runs.into_iter();
 
             loop {
@@ -2204,15 +2216,12 @@ impl ExternalSorter {
                     },
                     &self.config,
                     &mut self.metrics,
+                    if final_merge {
+                        digest.as_deref_mut()
+                    } else {
+                        None
+                    },
                 )?;
-                let expected_rows = group.iter().try_fold(0u64, |total, run| {
-                    total
-                        .checked_add(run.rows)
-                        .ok_or(SortError::InvalidRun("run 行数记账溢出"))
-                })?;
-                if merged.rows != expected_rows {
-                    return Err(SortError::InvalidRun("合并行守恒检查失败"));
-                }
                 self.next_file_id += 1;
 
                 self.current_temp_bytes = self.current_temp_bytes.checked_add(merged.bytes).ok_or(
@@ -2245,28 +2254,12 @@ impl ExternalSorter {
         }
 
         let final_run = runs.pop().expect("run 列表非空");
-        if final_run.rows != self.metrics.input_rows {
-            return Err(SortError::InvalidRun("run 行守恒检查失败"));
-        }
         let final_path = self.work_directory.join("sorted.parquet");
         fs::rename(&final_run.path, &final_path)?;
         self.metrics.peak_open_files = self.metrics.peak_open_files.max(1);
-        let (logical_sha256, output_rows) = scan_logical_output(
-            &final_path,
-            self.config.batch_rows,
-            self.config.max_run_bytes,
-        )?;
-        self.metrics.output_rows = output_rows;
-        if self.metrics.output_rows != self.metrics.input_rows {
-            return Err(SortError::InvalidRun("行守恒检查失败"));
-        }
-
+        self.metrics.output_rows = final_run.rows;
         self.retain_work_directory = true;
-        Ok(SortOutcome {
-            output_path: final_path,
-            logical_sha256,
-            metrics: std::mem::take(&mut self.metrics),
-        })
+        Ok((final_path, std::mem::take(&mut self.metrics)))
     }
 }
 
@@ -2350,6 +2343,7 @@ fn flush_initial_run(
     destination: RunDestination<'_>,
     config: &SortConfig,
     metrics: &mut SortMetrics,
+    mut digest: Option<&mut Sha256>,
 ) -> Result<RunInfo, SortError> {
     let sorted = sort_rows_with_arrow(rows)?;
     ensure_unique_keys(&sorted)?;
@@ -2367,6 +2361,11 @@ fn flush_initial_run(
     )?;
     for rows in sorted.chunks(config.batch_rows) {
         writer.write_unbuffered(rows)?;
+        if let Some(digest) = digest.as_deref_mut() {
+            for row in rows {
+                hash_sort_row(digest, row)?;
+            }
+        }
     }
     writer.finish(metrics)
 }
@@ -2376,6 +2375,7 @@ fn merge_group(
     destination: RunDestination<'_>,
     config: &SortConfig,
     metrics: &mut SortMetrics,
+    mut digest: Option<&mut Sha256>,
 ) -> Result<RunInfo, SortError> {
     let open_files = group
         .len()
@@ -2431,6 +2431,9 @@ fn merge_group(
         }
         previous_key = Some(entry.row.sort_key.clone());
         let run_slot = entry.run_slot;
+        if let Some(digest) = digest.as_deref_mut() {
+            hash_sort_row(digest, &entry.row)?;
+        }
         writer.push(entry.row, metrics)?;
 
         if let Some(row) = cursors[run_slot].next_row()? {
@@ -2443,10 +2446,10 @@ fn merge_group(
 }
 
 fn sort_rows_with_arrow(mut rows: Vec<SortRow>) -> Result<Vec<SortRow>, SortError> {
-    let batch = batch_from_rows(&rows)?;
+    let keys = BinaryArray::from_iter_values(rows.iter().map(|row| row.sort_key.as_slice()));
     let indices = lexsort_to_indices(
         &[SortColumn {
-            values: batch.column(0).clone(),
+            values: Arc::new(keys),
             options: Some(SortOptions {
                 descending: false,
                 nulls_first: false,
@@ -2454,25 +2457,8 @@ fn sort_rows_with_arrow(mut rows: Vec<SortRow>) -> Result<Vec<SortRow>, SortErro
         }],
         None,
     )?;
-    drop(batch);
-
     let indices = indices.values();
-    if indices.len() != rows.len() {
-        return Err(SortError::InvalidRun("Arrow 排序索引长度不匹配"));
-    }
     let mut visited = vec![false; rows.len()];
-    for &index in indices {
-        let source = index as usize;
-        if source >= rows.len() || visited[source] {
-            return Err(SortError::InvalidRun("Arrow 排序索引无效或重复"));
-        }
-        visited[source] = true;
-    }
-    if visited.iter().any(|seen| !seen) {
-        return Err(SortError::InvalidRun("Arrow 排序索引未覆盖全部输入行"));
-    }
-
-    visited.fill(false);
     for target in 0..rows.len() {
         if visited[target] {
             continue;
@@ -2811,15 +2797,15 @@ impl<W> QuotaWriter<W> {
 impl QuotaWriter<File> {
     fn sync_data_and_drop_cache(&mut self) -> io::Result<()> {
         self.inner.sync_data()?;
-        fadvise(&self.inner, 0, None, Advice::DontNeed)
-            .map_err(|error| io::Error::from_raw_os_error(error.raw_os_error()))
+        let _ = fadvise(&self.inner, 0, None, Advice::DontNeed);
+        Ok(())
     }
 }
 
-fn drop_file_cache(path: &Path) -> io::Result<()> {
-    let file = File::open(path)?;
-    fadvise(&file, 0, None, Advice::DontNeed)
-        .map_err(|error| io::Error::from_raw_os_error(error.raw_os_error()))
+fn drop_file_cache(path: &Path) {
+    if let Ok(file) = File::open(path) {
+        let _ = fadvise(&file, 0, None, Advice::DontNeed);
+    }
 }
 
 impl<W: Write> Write for QuotaWriter<W> {
@@ -2916,7 +2902,7 @@ impl RunCursor {
                 }
                 None => {
                     self.reader = None;
-                    drop_file_cache(&self.path)?;
+                    drop_file_cache(&self.path);
                 }
             }
         }
@@ -2945,6 +2931,17 @@ impl PartialEq for HeapEntry {
     fn eq(&self, other: &Self) -> bool {
         self.row.sort_key == other.row.sort_key
     }
+}
+
+fn logical_hasher() -> Sha256 {
+    let mut hasher = Sha256::new();
+    hasher.update(DIGEST_DOMAIN);
+    hasher
+}
+
+fn hash_sort_row(hasher: &mut Sha256, row: &SortRow) -> Result<(), SortError> {
+    hash_length_prefixed(hasher, &row.sort_key)?;
+    hash_length_prefixed(hasher, &row.payload)
 }
 
 fn scan_logical_output(
@@ -4107,6 +4104,17 @@ mod tests {
     }
 
     #[test]
+    fn final_write_digest_matches_the_published_rows_for_empty_single_and_merged_outputs() {
+        for count in [0, 1, 17] {
+            let temp = TempDir::new().unwrap();
+            let outcome =
+                external_sort((0..count).rev().map(row), temp.path(), &config(2, 2)).unwrap();
+            let published = scan_logical_output(&outcome.output_path, 3, 4 * 1024).unwrap();
+            assert_eq!(published, (outcome.logical_sha256, count));
+        }
+    }
+
+    #[test]
     fn parquet_row_groups_follow_the_bounded_write_batches() {
         let temp = TempDir::new().expect("创建临时目录");
         let mut sort_config = config(2, 2);
@@ -4174,7 +4182,7 @@ mod tests {
         for row in input.clone() {
             incremental.push(row).expect("增量写入排序行");
         }
-        let incremental = incremental.finish().expect("完成增量排序");
+        let incremental = incremental.finish_with_digest().expect("完成增量排序");
 
         assert_eq!(wrapper.logical_sha256, incremental.logical_sha256);
         assert_eq!(wrapper.metrics, incremental.metrics);
@@ -4352,7 +4360,7 @@ mod tests {
             Some(scanned_buffer_bytes(&sorter.pending_rows))
         );
         assert_eq!(sorter.metrics.peak_run_bytes, max_run_bytes);
-        let outcome = sorter.finish().unwrap();
+        let outcome = sorter.finish_with_digest().unwrap();
         assert_eq!(read_rows(&outcome.output_path, 1), vec![row(1), row(2)]);
 
         assert_eq!(outcome.metrics.initial_runs, 2);
@@ -4435,7 +4443,7 @@ mod tests {
             sort_row_buffer_bytes(&sorter.pending_rows, sorter.pending_inner_bytes),
             Some(scanned_buffer_bytes(&sorter.pending_rows))
         );
-        let error = sorter.flush_pending().unwrap_err();
+        let error = sorter.flush_pending(None).unwrap_err();
         assert!(matches!(error, SortError::TempByteLimit { limit: 3 }));
         assert!(sorter.pending_rows.is_empty());
         assert_eq!(sorter.pending_rows.capacity(), 0);

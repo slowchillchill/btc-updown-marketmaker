@@ -1034,7 +1034,7 @@ fn stage_sorted_input(
         }
     }
 
-    sorter.finish().map_err(Into::into)
+    sorter.finish_with_digest().map_err(Into::into)
 }
 
 pub(crate) struct StreamDigest {

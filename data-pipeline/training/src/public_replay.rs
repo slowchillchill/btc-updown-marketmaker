@@ -71,13 +71,13 @@ impl HistoricalMergeV1 {
         let mut sort_metrics = Vec::new();
         let mut twap_path = PathBuf::new();
         for (index, sorter) in sorters.into_iter().enumerate() {
-            let output = sorter.finish()?;
+            let (output_path, metrics) = sorter.finish(None)?;
             if index == HistoricalSourceV1::Twap.index() {
-                twap_path = output.output_path.clone();
+                twap_path = output_path.clone();
             }
-            sort_metrics.push(output.metrics.clone());
+            sort_metrics.push(metrics);
             let mut cursor =
-                RunCursor::open(&output.output_path, config.batch_rows, config.max_run_bytes)?;
+                RunCursor::open(&output_path, config.batch_rows, config.max_run_bytes)?;
             heads.push(
                 cursor
                     .next_row()?

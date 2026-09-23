@@ -147,9 +147,9 @@ pub fn prepare_hidden_v1(
             }
         }
     }
-    let sorted = messages.finish()?;
+    let (sorted_path, _) = messages.finish(None)?;
     let mut cursor = RunCursor::open(
-        &sorted.output_path,
+        &sorted_path,
         config.sort.batch_rows,
         config.sort.max_run_bytes,
     )?;
@@ -240,13 +240,13 @@ pub fn prepare_hidden_v1(
     }
     drop(states);
     let derived_path = derived.close_segment()?;
-    let sorted_index = index.finish()?;
+    let (index_path, _) = index.finish(None)?;
     crate::gate_a_publication::sync_tree(root)?;
     Ok(HiddenPreparationV1 {
         prefix,
         consumer_stream_id,
         derived_path,
-        index_path: sorted_index.output_path,
+        index_path,
     })
 }
 fn signed_key(value: i64) -> [u8; 8] {
