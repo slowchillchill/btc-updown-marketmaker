@@ -506,7 +506,7 @@ async fn actual_chain_requested_settlement_s0_to_s4_and_stable_ledger() {
         if case == 4 {
             driver.stop_and_drain().unwrap();
         } else {
-            driver.complete(&mut Materials { root }).unwrap();
+            driver.complete().unwrap();
         }
         let recovered = LedgerWriterV1::open_durable(&ledger_root).unwrap();
         let recovered = recovered.economic_read().unwrap();
@@ -1048,7 +1048,7 @@ async fn original_external_cash_identity_correction_and_no_frame_nav() {
     assert_eq!(nav.conservative_nav_pusd, r("99", "1"));
     assert_eq!(nav.worst_case_maker_nav_pusd, r("97", "1"));
     assert_eq!(nav.other_account_residual_pusd, r("2", "1"));
-    driver.complete(&mut Materials { root }).unwrap();
+    driver.complete().unwrap();
     let restored = LedgerWriterV1::open_durable(&ledger_root).unwrap();
     assert_eq!(
         AccountEconomicsReadV1::from_ledger(&restored.economic_read().unwrap()),
@@ -1276,7 +1276,7 @@ async fn resolution_before_late_success_fixes_fee_bucket_and_updates_pi_without_
         let market = read.market_totals().next().unwrap();
         assert_eq!(market.confirmed_net_pnl_pusd, r("-317", "250"));
         assert_eq!(market.maximum_confirmed_net_loss_pusd, r("317", "250"));
-        driver.complete(&mut Materials { root }).unwrap();
+        driver.complete().unwrap();
         let restored = LedgerWriterV1::open_durable(&ledger_root).unwrap();
         assert_eq!(
             AccountEconomicsReadV1::from_ledger(&restored.economic_read().unwrap()),
@@ -1444,7 +1444,7 @@ async fn stable_request_material_queries_pending_success_and_controlled_retry() 
         assert_eq!(retried, case == 3);
         assert!(stats.final_success);
         assert_eq!(nav.conservative_nav_pusd, r("12727", "125"));
-        driver.complete(&mut Materials { root }).unwrap();
+        driver.complete().unwrap();
         let restored = LedgerWriterV1::open_durable(&ledger_root).unwrap();
         assert_eq!(
             AccountEconomicsReadV1::from_ledger(&restored.economic_read().unwrap()),
@@ -1527,7 +1527,7 @@ async fn pure_loser_closes_without_settlement_request_after_original_barriers() 
         read.market_totals().next().unwrap().confirmed_net_pnl_pusd,
         r("-771", "250")
     );
-    driver.complete(&mut Materials { root }).unwrap();
+    driver.complete().unwrap();
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1642,7 +1642,7 @@ async fn paired_receivable_precedes_loser_failure_and_compensation_barrier() {
             .sends,
         1
     );
-    driver.complete(&mut Materials { root }).unwrap();
+    driver.complete().unwrap();
     let restored = LedgerWriterV1::open_durable(&ledger_root).unwrap();
     assert_eq!(
         restored

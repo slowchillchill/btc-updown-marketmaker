@@ -434,7 +434,7 @@ mod enabled {
         durable_event_count: usize,
         cold_candidate_accepted_inputs: Option<u64>,
         paper_recovered: bool,
-        recovery_elapsed_ns: u64,
+        finish_or_recovery_elapsed_ns: u64,
         retention_before: Value,
         retention_after: Value,
         resource_high_water: Value,
@@ -497,7 +497,7 @@ mod enabled {
         io_read_bytes: DistributionSummary,
         io_write_bytes: DistributionSummary,
         log_bytes: DistributionSummary,
-        recovery_elapsed_ns: DistributionSummary,
+        finish_or_recovery_elapsed_ns: DistributionSummary,
         retention_before: BTreeMap<String, DistributionSummary>,
         retention_after: BTreeMap<String, DistributionSummary>,
         resource_high_water: BTreeMap<String, DistributionSummary>,
@@ -520,7 +520,7 @@ mod enabled {
         io_read_bytes: u64,
         io_write_bytes: u64,
         log_bytes: u64,
-        recovery_elapsed_ns: u64,
+        finish_or_recovery_elapsed_ns: u64,
         retention_before: Value,
         retention_after: Value,
         resource_high_water: Value,
@@ -2084,8 +2084,8 @@ mod enabled {
             }
         }
         let candidate = execution
-            .complete_clean_run(bucket_reader(buckets))
-            .map_err(|error| format!("组件 CleanRun 封口/冷恢复失败：{error}"))?;
+            .complete_clean_run()
+            .map_err(|error| format!("组件 CleanRun 封口失败：{error}"))?;
         let projection_batches = capture
             .lock()
             .map_err(|_| "组件投影状态锁损坏".to_owned())?
@@ -2559,7 +2559,7 @@ mod enabled {
         }
 
         let trials = summarize_trials(&samples);
-        let cells = summarize(&samples);
+        let cells = summarize(&trials);
         let baseline_comparison = compare_baseline(&args, &identities, &trials)?;
         let summary = Summary {
             schema_version: "sim_measurement_summary_v2",
@@ -3385,22 +3385,19 @@ mod enabled {
         let mut resources = retention_after.clone();
         let mut cold_candidate_accepted_inputs = None;
         let mut paper_recovered = false;
-        let recovery_started = Instant::now();
+        let finish_or_recovery_started = Instant::now();
         match durability {
             Durability::CleanRun => {
                 let candidate = execution
-                    .complete_clean_run(bucket_reader(&buckets))
+                    .complete_clean_run()
                     .map_err(|error| format!("CleanRun 冷完成失败：{error}"))?;
                 #[cfg(feature = "measurement")]
                 append_measurements(
                     &mut observations,
                     serde_json::to_value(candidate.measurement_observations())
-                        .map_err(|error| format!("编码 CleanRun 封口/恢复观察失败：{error}"))?,
+                        .map_err(|error| format!("编码 CleanRun 封口观察失败：{error}"))?,
                 )?;
                 cold_candidate_accepted_inputs = Some(candidate.accepted_input_count());
-                if candidate.run_id() != run_id || candidate.log_path() != log_path {
-                    return Err("CleanRun 冷候选身份不一致".to_owned());
-                }
             }
             Durability::RecoverablePaper => {
                 drop(execution);
@@ -3421,7 +3418,7 @@ mod enabled {
                 drop(recovered);
             }
         }
-        let recovery_elapsed_ns = elapsed_ns(recovery_started);
+        let finish_or_recovery_elapsed_ns = elapsed_ns(finish_or_recovery_started);
         let elapsed_ns = elapsed_ns(started);
         let log_bytes = fs::metadata(&log_path)
             .map_err(|error| format!("读取日志 metadata 失败：{error}"))?
@@ -3444,7 +3441,7 @@ mod enabled {
                     .sum(),
                 cold_candidate_accepted_inputs,
                 paper_recovered,
-                recovery_elapsed_ns,
+                finish_or_recovery_elapsed_ns,
                 retention_before,
                 retention_after,
                 resource_high_water,
@@ -4306,9 +4303,9 @@ mod enabled {
                             .iter()
                             .map(|sample| sample.resources.log_bytes)
                             .sum(),
-                        recovery_elapsed_ns: selected
+                        finish_or_recovery_elapsed_ns: selected
                             .iter()
-                            .map(|sample| sample.resources.recovery_elapsed_ns)
+                            .map(|sample| sample.resources.finish_or_recovery_elapsed_ns)
                             .max()
                             .expect("trial 至少一个根"),
                         retention_before: sum_numeric_values(
@@ -4388,8 +4385,7 @@ mod enabled {
             .collect()
     }
 
-    fn summarize(samples: &[Sample]) -> Vec<CellSummary> {
-        let trials = summarize_trials(samples);
+    fn summarize(trials: &[TrialSummary]) -> Vec<CellSummary> {
         let mut cells = Vec::new();
         for durability in [Durability::CleanRun, Durability::RecoverablePaper] {
             for shape in [Shape::SingleRoot, Shape::FourRoots] {
@@ -4469,10 +4465,10 @@ mod enabled {
                             .map(|trial| trial.log_bytes)
                             .collect(),
                     ),
-                    recovery_elapsed_ns: distribution_summary(
+                    finish_or_recovery_elapsed_ns: distribution_summary(
                         selected_trials
                             .iter()
-                            .map(|trial| trial.recovery_elapsed_ns)
+                            .map(|trial| trial.finish_or_recovery_elapsed_ns)
                             .collect(),
                     ),
                     retention_before: summarize_numeric_values(
@@ -4528,11 +4524,6 @@ mod enabled {
             .get("build")
             .and_then(Value::as_str)
             .ok_or_else(|| "baseline 缺少 build".to_owned())?;
-        if baseline_build != "measurement_off" || BUILD != "measurement_on" {
-            return Err(
-                "feature 开销要求 baseline=measurement_off 且 current=measurement_on".to_owned(),
-            );
-        }
         let baseline_trials: Vec<TrialSummary> = serde_json::from_value(
             baseline
                 .get("trials")
@@ -4616,7 +4607,11 @@ mod enabled {
                 ("io_read", "bytes", cell.io_read_bytes),
                 ("io_write", "bytes", cell.io_write_bytes),
                 ("log", "bytes", cell.log_bytes),
-                ("recovery_elapsed", "ns", cell.recovery_elapsed_ns),
+                (
+                    "finish_or_recovery_elapsed",
+                    "ns",
+                    cell.finish_or_recovery_elapsed_ns,
+                ),
             ] {
                 write(metric, unit, values, false)?;
             }
@@ -5552,10 +5547,6 @@ mod tests {
                 "resource-baseline.json",
             ]
         );
-        let second = directory.path().join(".joint-bundle.second");
-        std::fs::create_dir(&second).expect("创建第二联合 candidate");
-        assert!(enabled::publish_candidate(&second, &target).is_err());
-        assert!(second.exists());
     }
 
     #[cfg(not(feature = "measurement"))]

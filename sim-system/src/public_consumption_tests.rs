@@ -635,48 +635,8 @@ fn recorded_complete(root: &Path) -> PublicObservationCoreV1 {
     writer.stabilize().unwrap();
     core
 }
-struct RecordedMaterials {
-    root: std::path::PathBuf,
-    hidden: Option<HiddenPreparationV1>,
-}
-impl PublicConsumptionMaterialReaderV1 for RecordedMaterials {
-    fn public_group(
-        &mut self,
-        reference: &PublicGroupReferenceV1,
-    ) -> Result<Arc<PreparedPublicGroupV1>, SimRunActorErrorV2> {
-        for result in
-            RecordedPublicGroupSourceV1::open(&self.root, 1, 1 << 20, RecordedTimes).unwrap()
-        {
-            let group = result?;
-            if group.prepared.reference.group_position == reference.group_position {
-                assert_eq!(&group.prepared.reference, reference);
-                return Ok(group.prepared);
-            }
-        }
-        panic!("原记录组缺失")
-    }
-    fn hidden_bucket(
-        &mut self,
-        reference: &ClosedHiddenStepBucketV1,
-    ) -> Result<Arc<[HiddenExecutionRecordV1]>, SimRunActorErrorV2> {
-        let mut reader = RecordedHiddenBucketSourceV1::open(
-            self.hidden.as_ref().unwrap(),
-            &self.root,
-            1,
-            1 << 20,
-        )
-        .unwrap();
-        while let Some(bucket) = reader.next_bucket().unwrap() {
-            if bucket.reference.index_start == reference.index_start {
-                assert_eq!(&bucket.reference, reference);
-                return Ok(bucket.records);
-            }
-        }
-        panic!("原隐藏桶缺失")
-    }
-}
 #[tokio::test(flavor = "current_thread")]
-async fn public_normal_end_replays_original_groups_and_own_pm_bindings() {
+async fn public_normal_end_reads_original_groups_and_own_pm_bindings() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("dpt");
     let core = recorded_complete(&root);
@@ -706,8 +666,7 @@ async fn public_normal_end_replays_original_groups_and_own_pm_bindings() {
             );
         }
     }
-    let mut materials = RecordedMaterials { root, hidden: None };
-    let candidate = driver.complete(&mut materials).unwrap();
+    let candidate = driver.complete().unwrap();
     assert_eq!(candidate.accepted_input_count(), expected_count);
     let (_, mut reader) = SimEventLogRecoveryV2::open(&path, MAX_GROUP_BYTES).unwrap();
     let mut groups = 0;
@@ -888,11 +847,7 @@ async fn hidden_index_pages_preserve_real_steps_market_facts_and_execution_isola
     assert!(wide.next_bucket().unwrap().is_none());
     assert_eq!(times, [21_000, 21_001, 31_000]);
     assert_eq!(terminal_count, 1, "WS 终态的规范市场事实只消费一次");
-    let mut materials = RecordedMaterials {
-        root,
-        hidden: Some(hidden),
-    };
-    driver.complete(&mut materials).unwrap();
+    driver.complete().unwrap();
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -1630,10 +1585,7 @@ async fn finite_public_feed_continues_after_closed_time_and_due_action_without_r
             reference = Some(actual);
         }
         driver
-            .complete(&mut RecordedMaterials {
-                root: root.clone(),
-                hidden: None,
-            })
+            .complete()
             .unwrap();
     }
 }

@@ -134,18 +134,10 @@ fn prepare_gate_b_flow(input: GateBFlowPreparation<'_>) -> Result<PreparedGateBF
     })
 }
 
-fn finish_gate_b_flow<F>(
-    mut prepared: PreparedGateBFlow,
-    read_bucket: F,
-) -> Result<FinishedGateBFlow, FinishGateBFlowError>
-where
-    F: FnMut(
-        &DurableMarketBucketReferenceV2,
-    ) -> Result<Arc<[ExecutionMarketEventV3]>, SimRunActorErrorV2>,
-{
+fn finish_gate_b_flow(mut prepared: PreparedGateBFlow) -> Result<FinishedGateBFlow, FinishGateBFlowError> {
     let candidate = prepared
         .execution
-        .complete_clean_run(read_bucket)
+        .complete_clean_run()
         .map_err(FinishGateBFlowError::Completion)?;
     apply_new_noe_results(
         &prepared.noe_observation,
@@ -304,27 +296,7 @@ pub(super) fn run(args: Args, _run_started: Instant) -> Result<(), String> {
     if let Some(required) = prepared.execution.next_required_logical_drive() {
         return Err(format!("Gate B 双路结束后仍有必要逻辑推进：{required:?}"));
     }
-    let mut recovery_adapter = GateASimulationReplayAdapter::open(
-        &gate_a,
-        output.sort.batch_rows,
-        output.sort.max_run_bytes,
-        output.sort.batch_rows,
-    )
-    .map_err(|error| format!("重新打开 Gate A 冷恢复适配器失败：{error}"))?;
-    let finished = finish_gate_b_flow(prepared, |reference| {
-        let bucket = match reference.path {
-            MarketEventPathV1::HiddenPlatform => recovery_adapter.next_platform_bucket(),
-            MarketEventPathV1::PublicVisibility => recovery_adapter.next_visibility_bucket(),
-        }
-        .map_err(|_| {
-            SimRunActorErrorV2::CompletionNotReady("冷恢复读取 Gate A 市场桶失败")
-        })?
-        .ok_or(SimRunActorErrorV2::CompletionNotReady(
-            "冷恢复缺少日志引用的 Gate A 市场桶",
-        ))?;
-        exact_recovery_bucket_body(reference, gate_a_bucket(reference.path, &bucket))
-    })
-    .map_err(|error| error.to_string())?;
+    let finished = finish_gate_b_flow(prepared).map_err(|error| error.to_string())?;
     let projection = finished
         .ledger
         .projection()
@@ -338,18 +310,6 @@ pub(super) fn run(args: Args, _run_started: Instant) -> Result<(), String> {
         args.output_dir.display()
     );
     Ok(())
-}
-
-fn exact_recovery_bucket_body(
-    requested: &DurableMarketBucketReferenceV2,
-    accepted: AcceptedClosedMarketBucketV2,
-) -> Result<Arc<[ExecutionMarketEventV3]>, SimRunActorErrorV2> {
-    if &accepted.reference != requested {
-        return Err(SimRunActorErrorV2::CompletionNotReady(
-            "冷恢复 Gate A 市场桶引用不匹配",
-        ));
-    }
-    Ok(accepted.events)
 }
 
 fn scenario_from_gate_a(
@@ -615,9 +575,7 @@ mod tests {
             sim_system::execution::SessionInitializationControlResultV2::Activated
         );
         assert!(matches!(
-            finish_gate_b_flow(incomplete, |_| Err(
-                SimRunActorErrorV2::CompletionNotReady("不应读取未完成轨迹")
-            )),
+            finish_gate_b_flow(incomplete),
             Err(FinishGateBFlowError::Completion(
                 SimRunActorErrorV2::CompletionNotReady(_)
             ))
@@ -670,7 +628,7 @@ mod tests {
             next_bucket += 1;
         }
         let observation = complete.noe_observation.clone();
-        let finished = finish_gate_b_flow(complete, bucket_reader(&buckets))
+        let finished = finish_gate_b_flow(complete)
             .expect("完整轨迹必须经过真实 CleanRun 完成门");
         assert_eq!(finished.candidate.run_id(), "gate-b-complete");
         assert_eq!(
@@ -684,25 +642,4 @@ mod tests {
         assert!(finished.ledger.projection().is_some());
     }
 
-    #[test]
-    fn recovery_reader_rejects_a_substituted_bucket_reference() {
-        let requested = DurableMarketBucketReferenceV2 {
-            path: MarketEventPathV1::HiddenPlatform,
-            bucket_at_utc_ms: 100,
-            start_index_position: 0,
-            next_index_position: 1,
-            closure: MillisecondBucketClosureV1::EndOfInput,
-        };
-        let substituted = AcceptedClosedMarketBucketV2 {
-            reference: DurableMarketBucketReferenceV2 {
-                bucket_at_utc_ms: 101,
-                ..requested.clone()
-            },
-            events: Arc::from([]),
-        };
-        assert_eq!(
-            exact_recovery_bucket_body(&requested, substituted).unwrap_err(),
-            SimRunActorErrorV2::CompletionNotReady("冷恢复 Gate A 市场桶引用不匹配")
-        );
-    }
 }

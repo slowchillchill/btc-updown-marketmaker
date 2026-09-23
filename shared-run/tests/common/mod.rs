@@ -690,31 +690,6 @@ fn execution_with_evidence<P: MemoryOrderEvidence + 'static>(
     (run, observation, rules)
 }
 pub const SUCCESS_POLICY:&[u8]=br#"{"schema_version":"trade_finality_policy_v2","normal_path":{"steps":[{"state":"MATCHED","offset_ms":0},{"state":"MINED","offset_ms":10},{"state":"CONFIRMED","offset_ms":20}],"economic_application_ordinal":1},"failure_overrides":[]}"#;
-pub struct Materials {
-    pub root: std::path::PathBuf,
-}
-impl PublicConsumptionMaterialReaderV1 for Materials {
-    fn public_group(
-        &mut self,
-        reference: &PublicGroupReferenceV1,
-    ) -> Result<Arc<PreparedPublicGroupV1>, SimRunActorErrorV2> {
-        for result in
-            RecordedPublicGroupSourceV1::open(&self.root, 1, 1 << 20, MemoryRecordedTimes).unwrap()
-        {
-            let group = result?;
-            if group.prepared.reference == *reference {
-                return Ok(group.prepared);
-            }
-        }
-        panic!("原组引用必须存在")
-    }
-    fn hidden_bucket(
-        &mut self,
-        _: &ClosedHiddenStepBucketV1,
-    ) -> Result<Arc<[HiddenExecutionRecordV1]>, SimRunActorErrorV2> {
-        panic!("此夹具只含公共组")
-    }
-}
 #[derive(Clone)]
 pub struct TradingTimes(pub Vec<i64>);
 impl PublicConsumptionTimeSourceV1 for TradingTimes {
