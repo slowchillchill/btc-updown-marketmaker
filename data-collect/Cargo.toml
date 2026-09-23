@@ -12,6 +12,7 @@ bench = false
 arrow-array = "59.0.0"
 arrow-schema = "59.0.0"
 base64 = "0.22.1"
+bytes = "1"
 data-pipeline-core = { path = "../data-pipeline/core" }
 futures = "0.3"
 libc = "0.2"

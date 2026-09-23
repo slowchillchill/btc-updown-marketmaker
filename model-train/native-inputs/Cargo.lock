@@ -1638,6 +1638,7 @@ dependencies = [
  "arrow-array",
  "arrow-schema",
  "base64",
+ "bytes",
  "data-pipeline-core",
  "futures",
  "libc",
