@@ -19,8 +19,6 @@ pub const EVENT_TIME_INDEX_SCHEMA_V2: &str = "event_time_index_v2";
 pub const VISIBILITY_INDEX_SCHEMA_V2: &str = "visibility_index_v2";
 pub const ACCOUNT_INSTANCE_KEY_SCHEMA_V1: &str = "account_instance_key_v1";
 pub const SIM_EXECUTION_CONTRACT_V2: &str = "sim_execution_contract_v2";
-pub const DATASET_LINEAGE_ROOT: &str = "/home/chillchill/new-datasets";
-pub const DATASET_DATE_FLOOR: &str = "2026-07-30";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -758,13 +756,6 @@ pub enum SettlementLifecycleEventV2 {
 pub struct SettlementLifecycleFeedbackV2 {
     pub metadata: LifecycleFeedbackMetadataV2,
     pub event: SettlementLifecycleEventV2,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
-pub enum DatasetDateEligibility {
-    IneligibleBeforeDatasetFloor,
-    Unassigned,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

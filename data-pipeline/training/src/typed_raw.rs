@@ -2469,7 +2469,7 @@ pub(crate) fn open_validated_parquet_with_decoder<Row>(
 ) -> Result<TypedRawParquetStream<Row>, TypedRawReadError> {
     open_parquet_with_decoder(
         ParquetInputFacts {
-            path: file.canonical_path(),
+            path: file.file_path(),
             source_kind: file.source_kind(),
             schema_version: file.schema_version(),
             bytes: file.bytes(),
@@ -2792,9 +2792,8 @@ mod tests {
             .expect("编码合法微型清单"),
         )
         .expect("写入合法微型清单");
-        let admitted =
-            crate::validate_daily_manifest_admission_at_root(temp.path(), &manifest_path)
-                .expect("合法微型 Parquet 必须经阶段 1 入口准入");
+        let admitted = crate::validate_direct_source_daily_manifest_admission(&manifest_path)
+            .expect("合法微型 Parquet 必须经阶段 1 入口准入");
         let admitted_file = admitted.files().first().expect("必须有一个已准入文件");
 
         let mut replacement = original_bytes;

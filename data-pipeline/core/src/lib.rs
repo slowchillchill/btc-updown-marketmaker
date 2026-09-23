@@ -80,50 +80,6 @@ fn invalid(field: impl Into<String>, reason: impl Into<String>) -> ContractError
     }
 }
 
-fn validate_iso_date(date: &str, field: &str) -> Result<(), ContractError> {
-    let parts = date.split('-').collect::<Vec<_>>();
-    if parts.len() != 3
-        || parts[0].len() != 4
-        || parts[1].len() != 2
-        || parts[2].len() != 2
-        || parts
-            .iter()
-            .any(|part| !part.as_bytes().iter().all(u8::is_ascii_digit))
-    {
-        return Err(invalid(field, "must use YYYY-MM-DD"));
-    }
-    let year = parts[0]
-        .parse::<u32>()
-        .map_err(|error| invalid(field, error.to_string()))?;
-    let month = parts[1]
-        .parse::<u32>()
-        .map_err(|error| invalid(field, error.to_string()))?;
-    let day = parts[2]
-        .parse::<u32>()
-        .map_err(|error| invalid(field, error.to_string()))?;
-    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
-    let max_day = match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 if leap => 29,
-        2 => 28,
-        _ => 0,
-    };
-    if day == 0 || day > max_day {
-        return Err(invalid(field, "is not a real calendar date"));
-    }
-    Ok(())
-}
-
-pub fn classify_dataset_date(date: &str) -> Result<DatasetDateEligibility, ContractError> {
-    validate_iso_date(date, "dataset_date")?;
-    Ok(if date < DATASET_DATE_FLOOR {
-        DatasetDateEligibility::IneligibleBeforeDatasetFloor
-    } else {
-        DatasetDateEligibility::Unassigned
-    })
-}
-
 fn stable_json<T: Serialize>(value: &T) -> Result<Vec<u8>, ContractError> {
     #[cfg(test)]
     assert!(

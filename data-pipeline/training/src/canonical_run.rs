@@ -35,8 +35,8 @@ use crate::typed_raw::{
     open_validated_typed_raw_parquet_in_scope,
 };
 use crate::{
-    ExternalSorter, FrozenDirectSourceInputSetV1, InputSetSnapshotError, RunCursor, SortConfig,
-    SortError, SortMetrics, SortRow, ValidatedDirectSourceParquetFileV3,
+    ExternalSorter, FrozenDirectSourceInputSetV1, RunCursor, SortConfig, SortError, SortMetrics,
+    SortRow, ValidatedDirectSourceParquetFileV3,
 };
 
 const WORK_DIRECTORY: &str = "dpt-canonical-run";
@@ -284,7 +284,6 @@ pub enum CanonicalRunError {
     InvalidTemporaryRow(String),
     CounterOverflow(&'static str),
     Io(io::Error),
-    InputChanged(InputSetSnapshotError),
     TypedRaw(TypedRawReadError),
     Sort(SortError),
     Contract(ContractError),
@@ -350,7 +349,6 @@ impl fmt::Display for CanonicalRunError {
             }
             Self::CounterOverflow(counter) => write!(formatter, "运行计数器溢出：{counter}"),
             Self::Io(error) => write!(formatter, "I/O 错误：{error}"),
-            Self::InputChanged(error) => write!(formatter, "冻结输入在运行期间变化：{error}"),
             Self::TypedRaw(error) => write!(formatter, "typed_raw 读取失败：{error}"),
             Self::Sort(error) => write!(formatter, "外部排序失败：{error}"),
             Self::Contract(error) => write!(formatter, "规范核心拒绝输入：{error}"),
@@ -364,12 +362,6 @@ impl std::error::Error for CanonicalRunError {}
 impl From<io::Error> for CanonicalRunError {
     fn from(error: io::Error) -> Self {
         Self::Io(error)
-    }
-}
-
-impl From<InputSetSnapshotError> for CanonicalRunError {
-    fn from(error: InputSetSnapshotError) -> Self {
-        Self::InputChanged(error)
     }
 }
 
@@ -1475,9 +1467,6 @@ fn reduce_frozen_input(
         stage_sorted_input(&files, scope, config, &ranks, &sort_root, &mut metrics)?;
     metrics.sort = sort_metrics;
     process_sorted_input(&sorted_path, config, &mut metrics, capture)?;
-
-    // 冻结发生在调用方构造 `input` 时；运行结束重新完整准入，证明处理中输入未改变。
-    input.verify_unchanged()?;
 
     let staging = CanonicalRunStaging {
         workspace_path: workspace.path.clone(),

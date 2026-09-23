@@ -32,7 +32,7 @@ Arrow 排序只构造实际排序键列，按返回的置换移动已有行；�
 
 ## 离线产物构建、发布与读取
 
-`dpt-gate-a build --manifest <清单> --condition-id <市场> --received-start-utc-ms <开始> --received-end-utc-ms <结束> --candidate-dir <新目录>` 构建显式市场/时间范围；`--manifest` 可重复。`dpt-gate-a publish --candidate-dir <已有候选> --output-dir <目标目录>` 同步文件并以 `NOREPLACE` 重命名发布。H3a 仍沿用 `freeze_direct_source_input_set` 的原输入目录/日期资格；这些输入资格由 H3b 单独迁移，本批没有新增绕过入口。
+`dpt-gate-a build --manifest <清单> --condition-id <市场> --received-start-utc-ms <开始> --received-end-utc-ms <结束> --candidate-dir <新目录>` 构建显式市场/时间范围；`--manifest` 可重复。`dpt-gate-a publish --candidate-dir <已有候选> --output-dir <目标目录>` 同步文件并以 `NOREPLACE` 重命名发布。输入只取调用者明确列出的 manifest：读取一次，以头部 `utc_day` 和文件条目的来源/schema/hour/part 为事实，从清单父目录定位列出文件。目录和文件可改名、改变层级；不要求个人数据根、日期下限或目录闭集，未列出的旁文件不参与输入。合法历史日期不会自动被选中，市场和时间范围仍由调用者给出，日历/小时换算与实际文件解码仍按真实消费执行。
 
 发布目录只需要 `artifacts/manifests` 中五份定位清单及其数据：规范事件、事件时间索引、可见时间索引、市场观测、归约报告。不再生成质量/测试/资源证明、capability matrix、receipt 或额外 run manifest；没有“训练就绪”布尔或准入 API。两种原发布用途使用同一实际格式。普通构建不要求固定个人输出目录、文件系统类型、特定服务/进程数、隔离工具或源码身份，也不执行扰动物理布局的第二次构建。
 
@@ -43,3 +43,7 @@ Arrow 排序只构造实际排序键列，按返回的置换移动已有行；�
 构建清理仅限本次成功创建的目录；既有目录不会因构建失败被删除。显式发布失败保留调用者目录；如果重命名成功后父目录同步失败，仍返回 I/O 错误，但产物已经位于目标位置，不承诺回滚。后台 public recording 的自有 segment 提交沿原独立生命周期处理。
 
 旧报告失去消费者后，归约不再维护四份规范流摘要或临时排序逻辑摘要，也不提前为摘要编码两套索引投影。真正捕获记录/报告时才编码所需载荷；仅运行暂存归约、不捕获输出时，相应编码字节峰值为0。实际事件时间索引与可见时间索引仍在物化时分别构建；输入行摘要仍用于冲突排序，不改变其排序选择。构建结果只保留实际scope/文件选择与归约计量、五份产物定位和L2峰值，不再复制整份构建配置或证书资源状态。
+
+输入集合保存首次清单和文件摘要，供来源身份、排序和 lineage 使用；不锁定或复制输入文件。每次实际打开选中的文件仍检查字节数、SHA、schema/footer，读取前同长度损坏仍失败。归约结束不再重新读取全部清单和文件：原清单删除/变化、未选文件变化、最后读取后变化不会据此否决结果；也少了一次发现“打开摘要检查后、解码期间原地修改并持续到结束”的机会。旧末尾扫描同样不保证文件连续不变。
+
+公共 V6/TWAP 的显式 admission 入口采用相同路径处理，保留其实际公共格式读取能力；旧 `freeze_direct_source_input_set`/GateA canonical reducer 的支持来源没有增加，不因此获得 TWAP 构建能力。本次不改变 Parquet 或 manifest 字段格式，删除的是目录资格 API、日期资格类型和末尾重验 API。
