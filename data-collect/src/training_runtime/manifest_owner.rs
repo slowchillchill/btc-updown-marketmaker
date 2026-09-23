@@ -295,7 +295,7 @@ impl ManifestOwnerState {
             .producer_barriers
             .insert(producer);
         self.persist_rollover_barriers()?;
-        self.maybe_mark_rollover_ready()
+        Ok(self.maybe_mark_rollover_ready())
     }
 
     pub(super) fn record_writer_ack(
@@ -320,7 +320,7 @@ impl ManifestOwnerState {
             .into());
         }
         self.persist_rollover_barriers()?;
-        self.maybe_mark_rollover_ready()
+        Ok(self.maybe_mark_rollover_ready())
     }
 
     fn ensure_rollover_identity(&mut self, close: &RawDayClose) -> Result<()> {
@@ -396,20 +396,17 @@ impl ManifestOwnerState {
         Ok(())
     }
 
-    fn maybe_mark_rollover_ready(&mut self) -> Result<Option<ManifestRolloverReady>> {
+    fn maybe_mark_rollover_ready(&mut self) -> Option<ManifestRolloverReady> {
         let rollover = self.rollover.as_mut().expect("rollover was ensured");
         if rollover.producer_barriers.len() != LOGICAL_PRODUCERS.len()
             || rollover.writer_finalize_acks.len() != training_source_kinds().len()
         {
-            return Ok(None);
-        }
-        if rollover.ready_sent {
-            return Err(invalid_data("rollover rendezvous became ready more than once").into());
+            return None;
         }
         rollover.ready_sent = true;
-        Ok(Some(ManifestRolloverReady {
+        Some(ManifestRolloverReady {
             close: rollover.close.clone(),
-        }))
+        })
     }
 
     fn register_rollover_gate(
