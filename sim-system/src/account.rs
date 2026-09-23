@@ -603,8 +603,20 @@ impl PlatformAccountStateV2 {
         })
     }
 
-    pub(crate) fn outcome_balance_record_count(&self) -> usize {
-        self.outcome_balance_units.len()
+    #[cfg(feature = "measurement")]
+    pub(crate) fn measurement_resources(&self) -> crate::resource::ResourceQuantityV1 {
+        let key = &self.account_instance_key;
+        crate::resource::ResourceQuantityV1::new(
+            1 + self.outcome_balance_units.len() as u64,
+            (key.run_id.len()
+                + key.account_id.len()
+                + key.caller_instance_id.len()
+                + self
+                    .outcome_balance_units
+                    .keys()
+                    .map(String::len)
+                    .sum::<usize>()) as u64,
+        )
     }
 
     #[cfg(test)]

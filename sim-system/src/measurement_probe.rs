@@ -66,6 +66,9 @@ impl MeasurementProbe {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+/// 调用时扫描现有业务对象和待投影批次，不在业务变更时维护计量副本。
+/// records 表示所列逻辑对象数量，bytes 表示这些对象的自有文本长度；
+/// 不包含容器容量、固定宽度字段、分配器开销，也不是 RSS 或逐事件峰值。
 pub struct MeasurementResourceSnapshot {
     pub business: ResourceQuantityV1,
     pub pending_projection: ResourceQuantityV1,
@@ -123,20 +126,5 @@ mod tests {
             ]
         );
         assert!(probe.drain().is_empty());
-    }
-
-    #[test]
-    fn resource_snapshot_copies_only_current_counters() {
-        let snapshot = MeasurementResourceSnapshot::new(
-            ResourceQuantityV1::new(3, 30),
-            ResourceQuantityV1::new(2, 20),
-            50,
-            9,
-        );
-
-        assert_eq!(snapshot.business.records, 3);
-        assert_eq!(snapshot.pending_projection.bytes, 20);
-        assert_eq!(snapshot.log_byte_count, 50);
-        assert_eq!(snapshot.next_input_sequence, 9);
     }
 }

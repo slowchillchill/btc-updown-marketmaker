@@ -13,58 +13,17 @@ impl ResourceQuantityV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct BusinessResourceDeltaV2 {
-    pub(crate) added_records: u64,
-    pub(crate) removed_records: u64,
-    pub(crate) added_bytes: u64,
-    pub(crate) removed_bytes: u64,
-}
-
-impl BusinessResourceDeltaV2 {
-    pub(crate) fn add_record(&mut self, owned_bytes: u64) {
-        self.added_records += 1;
-        self.added_bytes += owned_bytes;
+#[cfg(feature = "measurement")]
+impl ResourceQuantityV1 {
+    pub(crate) fn add_record(&mut self, bytes: u64) {
+        self.records += 1;
+        self.bytes += bytes;
     }
-
-    pub(crate) fn remove_record(&mut self, owned_bytes: u64) {
-        self.removed_records += 1;
-        self.removed_bytes += owned_bytes;
-    }
-
     pub(crate) fn add_records(&mut self, records: u64) {
-        self.added_records += records;
+        self.records += records;
     }
-
-    pub(crate) fn remove_records(&mut self, records: u64) {
-        self.removed_records += records;
-    }
-
-    pub(crate) fn replace_bytes(&mut self, previous: u64, next: u64) {
-        if next >= previous {
-            self.added_bytes += next - previous;
-        } else {
-            self.removed_bytes += previous - next;
-        }
-    }
-
-    pub(crate) fn merge(&mut self, other: Self) {
-        self.added_records += other.added_records;
-        self.removed_records += other.removed_records;
-        self.added_bytes += other.added_bytes;
-        self.removed_bytes += other.removed_bytes;
-    }
-
-    pub(crate) fn apply_to(self, current: ResourceQuantityV1) -> Option<ResourceQuantityV1> {
-        Some(ResourceQuantityV1::new(
-            current
-                .records
-                .checked_add(self.added_records)?
-                .checked_sub(self.removed_records)?,
-            current
-                .bytes
-                .checked_add(self.added_bytes)?
-                .checked_sub(self.removed_bytes)?,
-        ))
+    pub(crate) fn include(&mut self, other: Self) {
+        self.records += other.records;
+        self.bytes += other.bytes;
     }
 }

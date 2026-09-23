@@ -13,7 +13,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::market_directory::SessionMarketDirectoryV1;
 use crate::matching::MatchingStateErrorV1;
-use crate::resource::BusinessResourceDeltaV2;
 use crate::scenario::PlatformMarketV1;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -248,7 +247,6 @@ pub(crate) struct QualifiedMarketResolutionV2 {
 
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct MarketStateApplicationV2 {
-    pub(crate) resources: BusinessResourceDeltaV2,
     pub(crate) qualified_resolution: Option<QualifiedMarketResolutionV2>,
     pub(crate) resolution_invalidation_reason: Option<String>,
 }
@@ -467,20 +465,19 @@ impl MarketStateStoreV2 {
         &mut self,
         directory: &crate::market_directory::SessionMarketDirectoryV1,
         platform_effective_at_utc_ms: i64,
-    ) -> Result<BusinessResourceDeltaV2, MarketEventErrorV1> {
-        let mut resources = BusinessResourceDeltaV2::default();
+    ) -> Result<(), MarketEventErrorV1> {
         for admitted in directory.markets() {
             let condition_id = &admitted.market().condition_id.0;
             let market = self
                 .markets
                 .get_mut(condition_id)
                 .ok_or_else(|| MarketEventErrorV1::UnknownMarket(condition_id.clone()))?;
-            resources.merge(market.advance_time(
+            market.advance_time(
                 platform_effective_at_utc_ms,
                 admitted.market().window.end_at_utc_ms,
-            ));
+            );
         }
-        Ok(resources)
+        Ok(())
     }
 
     pub(crate) fn validate_input_complete(&self) -> Result<(), MarketEventErrorV1> {
@@ -607,9 +604,8 @@ impl MarketStateV2 {
         platform_effective_at_utc_ms: i64,
         end_at_utc_ms: i64,
     ) -> Result<MarketStateApplicationV2, MarketEventErrorV1> {
-        let mut resources = BusinessResourceDeltaV2::default();
         let mut resolution_invalidation_reason = None;
-        resources.merge(self.advance_time(platform_effective_at_utc_ms, end_at_utc_ms));
+        self.advance_time(platform_effective_at_utc_ms, end_at_utc_ms);
         match normalized {
             NormalizedMarketEventV2::InitialL2Snapshot { .. }
             | NormalizedMarketEventV2::LevelExecutionTransition { .. }
@@ -624,17 +620,10 @@ impl MarketStateV2 {
                 {
                     return Err(MarketEventErrorV1::LifecyclePredecessorConflict);
                 }
-                resources.replace_bytes(
-                    mapped_lifecycle_owned_bytes(self.mapped_lifecycle_state.as_ref()),
-                    mapped_lifecycle_owned_bytes(Some(&transition.current_state)),
-                );
+
                 self.mapped_lifecycle_state = Some(transition.current_state.clone());
             }
             NormalizedMarketEventV2::MarketLifecycleSnapshot(current) => {
-                resources.replace_bytes(
-                    mapped_lifecycle_owned_bytes(self.mapped_lifecycle_state.as_ref()),
-                    mapped_lifecycle_owned_bytes(Some(current)),
-                );
                 self.mapped_lifecycle_state = Some((*current).clone());
             }
             NormalizedMarketEventV2::InitialTick { asset, tick } => {
@@ -660,7 +649,7 @@ impl MarketStateV2 {
                 asset.current_tick_size_pusd_per_share = Some(*initial_tick_size_pusd_per_share);
                 asset.quality = event.quality.availability;
                 asset.external_book = ExactExternalBookV2::from_levels(bids, asks);
-                resources.add_records(asset.external_book.level_count() as u64);
+
                 if self.assets.values().all(|asset| asset.initialized) {
                     self.lifecycle_phase = MarketLifecyclePhaseV1::Active;
                 }
@@ -715,11 +704,6 @@ impl MarketStateV2 {
                     *price_pusd_per_share,
                     *quantity_after_shares,
                 );
-                if quantity_before_shares.is_zero() && !quantity_after_shares.is_zero() {
-                    resources.add_record(0);
-                } else if !quantity_before_shares.is_zero() && quantity_after_shares.is_zero() {
-                    resources.remove_record(0);
-                }
             }
             NormalizedMarketEventV2::QualityBoundary { boundary, resync } => {
                 match &boundary.scope {
@@ -745,7 +729,6 @@ impl MarketStateV2 {
                             ));
                         }
                         if *resync == ResyncQuality::Required {
-                            resources.remove_records(asset.external_book.level_count() as u64);
                             asset.external_book.clear();
                         }
                         asset.quality = boundary.current_quality;
@@ -782,7 +765,7 @@ impl MarketStateV2 {
                             terminal: (*terminal).clone(),
                             parsed_payouts: *parsed_payouts,
                         };
-                        resources.replace_bytes(0, source_resolution_owned_bytes_v2(&evidence));
+
                         self.source_qualified_resolution = Some(evidence);
                     }
                     if self.lifecycle_phase != MarketLifecyclePhaseV1::ResolutionTerminal {
@@ -791,30 +774,22 @@ impl MarketStateV2 {
                 }
             }
         }
-        resources.merge(self.advance_time(platform_effective_at_utc_ms, end_at_utc_ms));
+        self.advance_time(platform_effective_at_utc_ms, end_at_utc_ms);
         Ok(MarketStateApplicationV2 {
-            resources,
             qualified_resolution: self.qualified_resolution(),
             resolution_invalidation_reason,
         })
     }
 
-    fn advance_time(
-        &mut self,
-        platform_effective_at_utc_ms: i64,
-        end_at_utc_ms: i64,
-    ) -> BusinessResourceDeltaV2 {
-        let mut resources = BusinessResourceDeltaV2::default();
+    fn advance_time(&mut self, platform_effective_at_utc_ms: i64, end_at_utc_ms: i64) {
         if platform_effective_at_utc_ms >= end_at_utc_ms
             && self.lifecycle_phase == MarketLifecyclePhaseV1::Active
         {
             self.lifecycle_phase = MarketLifecyclePhaseV1::PostEndPendingResolution;
             for asset in self.assets.values_mut() {
-                resources.remove_records(asset.external_book.level_count() as u64);
                 asset.external_book.clear();
             }
         }
-        resources
     }
 
     fn qualified_resolution(&self) -> Option<QualifiedMarketResolutionV2> {
@@ -944,6 +919,7 @@ impl ExactExternalBookV2 {
     }
 }
 
+#[cfg(feature = "measurement")]
 fn mapped_lifecycle_owned_bytes(state: Option<&MappedMarketLifecycleStateV1>) -> u64 {
     match state {
         Some(MappedMarketLifecycleStateV1::UnknownUnmodeled { raw_value }) => {
@@ -1245,6 +1221,7 @@ fn parse_decimal(value: &contracts::ExactDecimal) -> Result<Decimal, MarketEvent
     })
 }
 
+#[cfg(feature = "measurement")]
 fn source_resolution_owned_bytes_v2(resolution: &SourceQualifiedResolutionV2) -> u64 {
     let MarketResolutionTerminalV3::Resolved {
         winning_asset_id,
@@ -1272,6 +1249,41 @@ fn resolution_matches_assets<'a>(
 ) -> bool {
     let MarketResolutionTerminalV3::Resolved { payout_vector, .. } = terminal;
     payout_vector.iter().map(|entry| &entry.asset).eq(expected)
+}
+
+#[cfg(feature = "measurement")]
+impl MarketStateStoreV2 {
+    pub(crate) fn measurement_resources(&self) -> crate::resource::ResourceQuantityV1 {
+        let mut total = crate::resource::ResourceQuantityV1::default();
+        for (condition, market) in &self.markets {
+            total.add_record(
+                condition.len() as u64
+                    + mapped_lifecycle_owned_bytes(market.mapped_lifecycle_state.as_ref()),
+            );
+            for (token, asset) in &market.assets {
+                total.add_record(token.len() as u64);
+                total.add_records(asset.external_book.level_count() as u64);
+            }
+            if let Some(resolution) = &market.source_qualified_resolution {
+                total.add_record(source_resolution_owned_bytes_v2(resolution));
+            }
+        }
+        total
+    }
+}
+#[cfg(feature = "measurement")]
+impl AccountBookOverlayStoreV1 {
+    pub(crate) fn measurement_resources(&self) -> crate::resource::ResourceQuantityV1 {
+        let mut total = crate::resource::ResourceQuantityV1::default();
+        for (condition, assets) in &self.markets {
+            total.add_record(condition.len() as u64);
+            for (token, book) in assets {
+                total.add_record(token.len() as u64);
+                total.add_records((book.bids.len() + book.asks.len()) as u64);
+            }
+        }
+        total
+    }
 }
 
 #[cfg(test)]
