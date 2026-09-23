@@ -967,8 +967,7 @@ fn sha256_file(path: &Path) -> Result<String, GateAError> {
         hasher.update(&buffer[..read]);
     }
     let digest = format!("{:x}", hasher.finalize());
-    fadvise(&file, 0, None, Advice::DontNeed)
-        .map_err(|error| io::Error::from_raw_os_error(error.raw_os_error()))?;
+    let _ = fadvise(&file, 0, None, Advice::DontNeed);
     Ok(digest)
 }
 
@@ -1987,7 +1986,6 @@ pub(crate) mod tests {
 
     pub(crate) struct MicroCandidate {
         pub(crate) _temporary: TempDir,
-        pub(crate) candidate: GateACandidate,
         pub(crate) candidate_path: PathBuf,
         pub(crate) output_config: GateAOutputConfig,
         pub(crate) artifacts: GateAArtifacts,
@@ -2317,7 +2315,7 @@ pub(crate) mod tests {
             input_manifest_set_sha256: "d".repeat(64),
             scope,
             config: config.clone(),
-            selected_files: selected_files.clone(),
+            selected_files,
             metrics: CanonicalRunMetrics {
                 selected_rows,
                 parallelism: 1,
@@ -2378,7 +2376,7 @@ pub(crate) mod tests {
             &output_config,
         )
         .unwrap();
-        let event_time = build_event_time_index(
+        build_event_time_index(
             &candidate_path.join(&store.manifest.file.relative_path),
             &candidate_path,
             &staging,
@@ -2398,7 +2396,7 @@ pub(crate) mod tests {
             &output_config,
         )
         .unwrap();
-        let (observations, peak_observation_l2_levels) = build_observations(
+        build_observations(
             &visibility_material,
             &candidate_path,
             &staging,
@@ -2406,7 +2404,7 @@ pub(crate) mod tests {
             &visibility.manifest_sha256,
         )
         .unwrap();
-        let reduction_reports = finish_artifact(
+        finish_artifact(
             report_capture,
             &work_path.join(CAPTURE_REPORT_DIRECTORY),
             &candidate_path,
@@ -2416,22 +2414,9 @@ pub(crate) mod tests {
         )
         .unwrap();
         fs::remove_dir_all(&work_path).unwrap();
-        let candidate = GateACandidate {
-            candidate_path: candidate_path.clone(),
-            scope: staging.scope,
-            selected_files,
-            canonical_metrics: staging.metrics,
-            canonical_event_store: store,
-            event_time_index: event_time,
-            visibility_index: visibility,
-            market_observations: observations,
-            reduction_reports,
-            peak_observation_l2_levels,
-        };
         let artifacts = open_gate_a_artifacts(&candidate_path).unwrap();
         MicroCandidate {
             _temporary: temporary,
-            candidate,
             candidate_path,
             output_config,
             artifacts,
