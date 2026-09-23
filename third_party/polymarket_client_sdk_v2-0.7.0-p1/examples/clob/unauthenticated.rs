@@ -264,13 +264,11 @@ async fn main() -> anyhow::Result<()> {
             .build();
         match client.order_book(&order_book_request).await {
             Ok(book) => {
-                let hash = book.hash().unwrap_or_default();
                 info!(
                     endpoint = "order_book",
                     token_id = %token_id,
                     bids = book.bids.len(),
-                    asks = book.asks.len(),
-                    hash = %hash
+                    asks = book.asks.len()
                 );
             }
             Err(e) => error!(endpoint = "order_book", token_id = %token_id, error = %e),

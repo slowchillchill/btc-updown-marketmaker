@@ -173,7 +173,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn limit_cost_keeps_encoding_boundary_and_unaffordable_fee_exact() {
+    async fn limit_cost_keeps_micro_units_and_unaffordable_fee_exact() {
         let n: BigUint = "7922816251426433759354395".parse().unwrap();
         let d: BigUint = "79228162514264337593543950335".parse().unwrap();
         let rules = snapshot_v3_with_fee_for_cost_tests(&d.to_string(), 1).await;
@@ -194,7 +194,9 @@ mod tests {
         .unwrap();
         assert_eq!(
             cost.principal_micro.to_string(),
-            encoded.maker_amount.mantissa().to_string()
+            crate::matching::micro_units_v1(encoded.maker_amount)
+                .unwrap()
+                .to_string()
         );
         assert!(
             polymarket_client_sdk_v2::clob::order_builder::encode_limit_buy_order(
@@ -202,7 +204,7 @@ mod tests {
                 size + Decimal::new(1, 2),
                 Decimal::new(1, 4),
             )
-            .is_err()
+            .is_ok()
         );
     }
     #[tokio::test(flavor = "current_thread")]

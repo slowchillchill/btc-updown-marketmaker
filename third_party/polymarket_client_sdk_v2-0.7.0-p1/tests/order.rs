@@ -5066,3 +5066,33 @@ mod v1 {
         }
     }
 }
+
+#[tokio::test]
+async fn decimal_max_size_encodes_actual_micro_units() -> anyhow::Result<()> {
+    let server = MockServer::start();
+    let client = create_authenticated(&server).await?;
+    ensure_requirements(&server, token_1(), TickSize::Tenth);
+    let limit = client
+        .limit_order()
+        .token_id(token_1())
+        .side(Side::Buy)
+        .price(dec!(0.1))
+        .size(Decimal::MAX)
+        .build()
+        .await?;
+    let base = U256::from(79_228_162_514_264_337_593_543_950_335_000_000_u128);
+    let quote = U256::from(7_922_816_251_426_433_759_354_395_033_500_000_u128);
+    assert_eq!(limit.order().makerAmount, quote);
+    assert_eq!(limit.order().takerAmount, base);
+    let market = client
+        .market_order()
+        .token_id(token_1())
+        .side(Side::Buy)
+        .price(dec!(0.1))
+        .amount(Amount::usdc(Decimal::MAX * dec!(0.1))?)
+        .build()
+        .await?;
+    assert_eq!(market.order().makerAmount, quote);
+    assert_eq!(market.order().takerAmount, base);
+    Ok(())
+}
