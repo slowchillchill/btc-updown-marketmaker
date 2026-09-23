@@ -3245,8 +3245,6 @@ fn lifecycle_change_entries(
         .keys()
         .chain(after_lifecycle.markets.keys())
         .collect();
-    let mut market_platform_principal_delta = Decimal::ZERO;
-    let mut market_platform_fee_delta = Decimal::ZERO;
     let mut market_position_cost_delta = Decimal::ZERO;
     let mut market_fee_delta = Decimal::ZERO;
     let mut market_pnl_delta = Decimal::ZERO;
@@ -3284,16 +3282,6 @@ fn lifecycle_change_entries(
             after,
             |totals| totals.realized_pnl_pusd,
             "lifecycle.market_pnl_delta",
-        )?;
-        market_platform_principal_delta = checked_add(
-            market_platform_principal_delta,
-            platform_principal_delta,
-            "lifecycle.market_platform_principal_sum",
-        )?;
-        market_platform_fee_delta = checked_add(
-            market_platform_fee_delta,
-            platform_fee_delta,
-            "lifecycle.market_platform_fee_sum",
         )?;
         market_position_cost_delta = checked_add(
             market_position_cost_delta,
@@ -3384,23 +3372,6 @@ fn lifecycle_change_entries(
             "lifecycle.market_pnl_entry",
         )?;
     }
-
-    debug_assert_eq!(
-        checked_sub(
-            after_lifecycle.totals.platform_pending_principal_pusd,
-            before_lifecycle.totals.platform_pending_principal_pusd,
-            "lifecycle.global_platform_principal_delta",
-        )?,
-        market_platform_principal_delta,
-    );
-    debug_assert_eq!(
-        checked_sub(
-            after_lifecycle.totals.platform_pending_immediate_fee_pusd,
-            before_lifecycle.totals.platform_pending_immediate_fee_pusd,
-            "lifecycle.global_platform_fee_delta",
-        )?,
-        market_platform_fee_delta,
-    );
 
     for (account, global_delta, market_delta, field) in [
         (

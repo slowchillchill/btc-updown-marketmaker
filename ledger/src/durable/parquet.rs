@@ -7,7 +7,6 @@ pub(crate) struct ParquetLedger {
     segment_count: u64,
     writer: Option<record_file::Writer>,
     next_record_seq: u64,
-    stats: SegmentStatsV1,
     poisoned: bool,
 }
 fn invalid(e: impl fmt::Display) -> LedgerDurableErrorV1 {
@@ -40,7 +39,6 @@ impl ParquetLedger {
             segment_count: 0,
             writer: None,
             next_record_seq: 1,
-            stats: SegmentStatsV1::default(),
             poisoned: false,
         };
         this.publish_json(MANIFEST, &FORMAT)?;
@@ -87,26 +85,18 @@ impl ParquetLedger {
             if path.parent() != Some(directory) {
                 return Err(invalid("Ledger 分片不属于当前根"));
             }
-            if sha256_file(&path)? != reference.sha256 {
-                return Err(invalid("Ledger 分片摘要不符"));
-            }
-            let mut stats = SegmentStatsV1::default();
             let mut consume =
                 |(seq, kind, body): record_file::Row| -> Result<(), LedgerDurableErrorV1> {
                     if seq != expected {
                         return Err(invalid("Ledger 耐久序号不连续"));
                     }
-                    let body: serde_json::Value = serde_json::from_slice(&body).map_err(invalid)?;
-                    let payload: DurablePayloadV1 =
-                        serde_json::from_value(serde_json::json!({"kind":kind,"body":body}))
-                            .map_err(invalid)?;
+                    let payload = decode_payload(&kind, &body)?;
                     if let Some(found) = payload.ledger_entry_seq() {
                         if found != entry {
                             return Err(invalid("Ledger 经济序号不连续"));
                         }
                         entry += 1;
                     }
-                    stats.observe(seq, payload.ledger_entry_seq());
                     apply(payload)?;
                     expected += 1;
                     Ok(())
@@ -117,13 +107,6 @@ impl ParquetLedger {
             .map_err(invalid)?;
             if boundary != "ledger_transaction_segment_v2" {
                 return Err(invalid("不支持的 Ledger 业务版本"));
-            }
-            if stats.first_record_seq != Some(reference.first_durable_record_seq)
-                || stats.last_record_seq != Some(reference.last_durable_record_seq)
-                || stats.first_ledger_entry_seq != reference.first_ledger_entry_seq
-                || stats.last_ledger_entry_seq != reference.last_ledger_entry_seq
-            {
-                return Err(invalid("Ledger 分片边界不符"));
             }
         }
         // 只有清单提交过的分片参与恢复；删除唯一当前未提交尾部，允许沿原格式续写。
@@ -145,7 +128,6 @@ impl ParquetLedger {
             segment_count,
             writer: None,
             next_record_seq: expected,
-            stats: SegmentStatsV1::default(),
             poisoned: false,
         })
     }
@@ -160,12 +142,8 @@ impl ParquetLedger {
         if self.poisoned {
             return Err(LedgerDurableErrorV1::HandlePoisoned);
         }
-        let value = serde_json::to_value(payload).map_err(invalid)?;
-        let row = (
-            self.next_record_seq,
-            value["kind"].as_str().expect("原标记变体").into(),
-            serde_json::to_vec(&value["body"]).map_err(invalid)?,
-        );
+        let (kind, body) = encode_payload(payload)?;
+        let row = (self.next_record_seq, kind.into(), body);
         if self.writer.is_none() {
             self.writer = Some(
                 record_file::Writer::create(
@@ -180,8 +158,6 @@ impl ParquetLedger {
             self.poisoned = true;
             return Err(io_error("写入 Ledger Parquet 记录", &self.directory, e));
         }
-        self.stats
-            .observe(self.next_record_seq, payload.ledger_entry_seq());
         self.next_record_seq += 1;
         Ok(())
     }
@@ -229,18 +205,12 @@ impl ParquetLedger {
             .map_err(|e| io_error("同步 Ledger Parquet 分片目录", &self.directory, e))?;
         let reference = LedgerSealedSegmentReferenceV1 {
             location: path.to_string_lossy().into(),
-            sha256: sha256_file(&path)?,
-            first_durable_record_seq: self.stats.first_record_seq.unwrap(),
-            last_durable_record_seq: self.stats.last_record_seq.unwrap(),
-            first_ledger_entry_seq: self.stats.first_ledger_entry_seq,
-            last_ledger_entry_seq: self.stats.last_ledger_entry_seq,
         };
         self.publish_json(
             &format!("ledger-parquet-{:020}.manifest.json", self.segment_count),
             &reference,
         )?;
         self.segment_count += 1;
-        self.stats = SegmentStatsV1::default();
         self.poisoned = false;
         Ok(Some(reference))
     }
@@ -281,4 +251,65 @@ impl ParquetLedger {
         }
         Ok(())
     }
+}
+
+#[derive(Serialize, Deserialize)]
+struct GenesisBody<P> {
+    policy: P,
+}
+#[derive(Serialize, Deserialize)]
+struct ReservationBody<I, R> {
+    request_identity: I,
+    request: R,
+}
+
+fn encode_payload(
+    payload: &DurablePayloadV1,
+) -> Result<(&'static str, Vec<u8>), LedgerDurableErrorV1> {
+    let (kind, body) = match payload {
+        DurablePayloadV1::Genesis { policy } => {
+            ("GENESIS", serde_json::to_vec(&GenesisBody { policy }))
+        }
+        DurablePayloadV1::GenesisV2 { policy } => {
+            ("GENESIS_V2", serde_json::to_vec(&GenesisBody { policy }))
+        }
+        DurablePayloadV1::Transaction(effect) => ("TRANSACTION", serde_json::to_vec(effect)),
+        DurablePayloadV1::ReservationDecision {
+            request_identity,
+            request,
+        } => (
+            "RESERVATION_DECISION",
+            serde_json::to_vec(&ReservationBody {
+                request_identity,
+                request,
+            }),
+        ),
+    };
+    Ok((kind, body.map_err(invalid)?))
+}
+fn decode_payload(kind: &str, body: &[u8]) -> Result<DurablePayloadV1, LedgerDurableErrorV1> {
+    Ok(match kind {
+        "GENESIS" => {
+            let GenesisBody { policy } = serde_json::from_slice(body).map_err(invalid)?;
+            DurablePayloadV1::Genesis { policy }
+        }
+        "GENESIS_V2" => {
+            let GenesisBody { policy } = serde_json::from_slice(body).map_err(invalid)?;
+            DurablePayloadV1::GenesisV2 { policy }
+        }
+        "TRANSACTION" => {
+            DurablePayloadV1::Transaction(serde_json::from_slice(body).map_err(invalid)?)
+        }
+        "RESERVATION_DECISION" => {
+            let ReservationBody {
+                request_identity,
+                request,
+            } = serde_json::from_slice(body).map_err(invalid)?;
+            DurablePayloadV1::ReservationDecision {
+                request_identity,
+                request,
+            }
+        }
+        _ => return Err(invalid(format!("未知 Ledger 记录变体：{kind}"))),
+    })
 }

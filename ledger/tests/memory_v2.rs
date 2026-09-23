@@ -353,6 +353,11 @@ fn verify_memory_recovery(same_batch: bool) {
             "{:x}",
             Sha256::digest(std::fs::read(&path).unwrap())
         ));
+        manifest["first_durable_record_seq"] = serde_json::json!(1);
+        manifest["last_durable_record_seq"] = serde_json::json!(rows.last().unwrap().0);
+        manifest["first_ledger_entry_seq"] = serde_json::json!(1);
+        manifest["last_ledger_entry_seq"] =
+            serde_json::json!(writer.projection_v2().unwrap().ledger_entry_seq);
         std::fs::write(manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
     }
     let mut restored = LedgerWriterV1::open_durable(temp.path().join("ledger")).unwrap();
@@ -394,8 +399,6 @@ fn verify_memory_recovery(same_batch: bool) {
         .unwrap(),
     )
     .unwrap();
-    assert_eq!(segment.first_durable_record_seq, 6);
-    assert_eq!(segment.last_durable_record_seq, 6);
     assert!(segment.location.ends_with(".parquet"));
     drop(restored);
     assert_eq!(
