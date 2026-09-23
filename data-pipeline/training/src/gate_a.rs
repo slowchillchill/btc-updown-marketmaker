@@ -44,7 +44,8 @@ use crate::canonical_run::{
 use crate::observation::{ObservationBuildError, ObservationProjector};
 use crate::{
     ExternalSorter, FrozenDirectSourceInputSetV1, RunCursor, SortError, SortMetrics, SortOutcome,
-    SortRow, batch_from_rows, scan_logical_output, sort_row_buffer_bytes, sort_row_inner_bytes,
+    SortRow, batch_from_rows, bytes_to_hex, hash_sort_row, logical_hasher, scan_logical_output,
+    sort_row_buffer_bytes, sort_row_inner_bytes,
 };
 
 pub const GATE_A_ARTIFACT_MANIFEST_SCHEMA_V1: &str = "gate_a_artifact_manifest_v1";
@@ -397,8 +398,8 @@ struct SharedQuotaWriter {
 impl SharedQuotaWriter {
     fn sync_data_and_drop_cache(&mut self) -> io::Result<()> {
         self.file.sync_data()?;
-        fadvise(&self.file, 0, None, Advice::DontNeed)
-            .map_err(|error| io::Error::from_raw_os_error(error.raw_os_error()))
+        let _ = fadvise(&self.file, 0, None, Advice::DontNeed);
+        Ok(())
     }
 }
 
@@ -434,6 +435,7 @@ impl Write for SharedQuotaWriter {
 pub(crate) struct SequentialCaptureWriter {
     stream_name: &'static str,
     sync_batches: bool,
+    logical_digest: Option<Sha256>,
     path: PathBuf,
     writer: ArrowWriter<SharedQuotaWriter>,
     rows: Vec<SortRow>,
@@ -476,6 +478,7 @@ impl SequentialCaptureWriter {
         Ok(Self {
             stream_name,
             sync_batches: true,
+            logical_digest: Some(logical_hasher()),
             path,
             writer,
             rows: Vec::with_capacity(output_config.sort.batch_rows),
@@ -536,7 +539,6 @@ impl SequentialCaptureWriter {
             .checked_add(1)
             .ok_or_else(|| io::Error::other("捕获产物发射位置溢出"))?;
         self.metrics.input_rows = self.expected_sequence;
-        self.metrics.output_rows = self.expected_sequence;
         self.metrics.peak_write_buffer_rows =
             self.metrics.peak_write_buffer_rows.max(self.rows.len());
         self.metrics.peak_write_buffer_bytes = self.metrics.peak_write_buffer_bytes.max(observed);
@@ -560,6 +562,12 @@ impl SequentialCaptureWriter {
             self.writer.sync()?;
             self.writer.inner_mut().sync_data_and_drop_cache()?;
         }
+        if let Some(digest) = &mut self.logical_digest {
+            for row in &self.rows {
+                hash_sort_row(digest, row).map_err(io::Error::other)?;
+            }
+        }
+        self.metrics.output_rows += self.rows.len() as u64;
         self.metrics.initial_runs = self
             .metrics
             .initial_runs
@@ -570,9 +578,10 @@ impl SequentialCaptureWriter {
         Ok(())
     }
 
-    /// 新后台批次在显式稳定边界关闭；不执行旧离线逻辑摘要扫描。
+    /// 新后台批次在显式稳定边界关闭；不维护无消费者的离线逻辑摘要。
     pub(crate) fn defer_batch_sync(&mut self) {
         self.sync_batches = false;
+        self.logical_digest = None;
     }
     pub(crate) fn close_segment(mut self) -> Result<PathBuf, GateAError> {
         self.write_batch(false)?;
@@ -582,22 +591,17 @@ impl SequentialCaptureWriter {
         Ok(self.path)
     }
 
-    fn finish(mut self, output_config: &GateAOutputConfig) -> Result<SortOutcome, GateAError> {
+    fn finish(mut self) -> Result<SortOutcome, GateAError> {
         self.flush_batch()?;
         self.writer
             .close()
             .map_err(|error| GateAError::Io(io::Error::other(error)))?;
         File::open(&self.path)?.sync_all()?;
-        let (logical_sha256, rows) = scan_logical_output(
-            &self.path,
-            output_config.sort.batch_rows,
-            output_config.sort.max_run_bytes,
-        )?;
-        if rows != self.metrics.output_rows {
-            return Err(GateAError::ArtifactMismatch(
-                "捕获产物关闭后的行数不守恒".to_owned(),
-            ));
-        }
+        let mut digest = self
+            .logical_digest
+            .expect("offline capture maintains its output digest");
+        digest.update(self.metrics.output_rows.to_be_bytes());
+        let logical_sha256 = bytes_to_hex(&digest.finalize());
         Ok(SortOutcome {
             output_path: self.path,
             logical_sha256,
@@ -633,13 +637,10 @@ impl CaptureArtifacts {
         })
     }
 
-    fn finish(
-        self,
-        output_config: &GateAOutputConfig,
-    ) -> Result<(SortOutcome, SortOutcome, u64), GateAError> {
+    fn finish(self) -> Result<(SortOutcome, SortOutcome, u64), GateAError> {
         let total_bytes = Arc::clone(&self.total_bytes);
-        let records = self.records.finish(output_config)?;
-        let reports = self.reports.finish(output_config)?;
+        let records = self.records.finish()?;
+        let reports = self.reports.finish()?;
         let total = *total_bytes
             .lock()
             .map_err(|_| GateAError::InvalidCapture("捕获产物字节计数锁已损坏"))?;
@@ -692,7 +693,7 @@ pub fn build_gate_a_candidate(
     let work_path = candidate_path.join(WORK_DIRECTORY);
     let mut capture = CaptureArtifacts::create(&work_path, output_config)?;
     let staging = reduce_frozen_input_with_capture(input, scope, &work_path, config, &mut capture)?;
-    let (record_capture, report_capture, total_capture_bytes) = capture.finish(output_config)?;
+    let (record_capture, report_capture, total_capture_bytes) = capture.finish()?;
     let canonical_record_capture_bytes = fs::metadata(&record_capture.output_path)?.len();
     let reduction_report_capture_bytes = fs::metadata(&report_capture.output_path)?.len();
     if canonical_record_capture_bytes.checked_add(reduction_report_capture_bytes)
@@ -899,7 +900,7 @@ fn build_event_time_index(
         }
     }
     finish_artifact(
-        sorter.finish()?,
+        sorter.finish_with_digest()?,
         &stage_root,
         candidate_path,
         GateAArtifactKind::EventTimeIndex,
@@ -940,16 +941,16 @@ fn build_visibility_material(
             .checked_add(1)
             .ok_or_else(|| GateAError::ArtifactMismatch("模型可见物化行数溢出".to_owned()))?;
     }
-    let outcome = sorter.finish()?;
-    if rows != staging.metrics.visibility_projections || outcome.metrics.output_rows != rows {
+    let (output_path, metrics) = sorter.finish(None)?;
+    if rows != staging.metrics.visibility_projections || metrics.output_rows != rows {
         return Err(GateAError::ArtifactMismatch(
             "模型可见中间流与规范投影计数不一致".to_owned(),
         ));
     }
     let destination = work_path.join("visibility-material.parquet");
-    fs::rename(&outcome.output_path, &destination)?;
+    fs::rename(&output_path, &destination)?;
     fs::remove_dir_all(&stage_root)?;
-    Ok((destination, outcome.metrics))
+    Ok((destination, metrics))
 }
 
 fn build_visibility_index(
@@ -979,7 +980,7 @@ fn build_visibility_index(
         )?)?;
     }
     finish_artifact(
-        sorter.finish()?,
+        sorter.finish_with_digest()?,
         &stage_root,
         candidate_path,
         GateAArtifactKind::VisibilityIndex,
@@ -1024,7 +1025,7 @@ fn build_observations(
     }
     let peak_retained_l2_levels = projector.peak_retained_l2_levels();
     let descriptor = finish_artifact(
-        sorter.finish()?,
+        sorter.finish_with_digest()?,
         &stage_root,
         candidate_path,
         GateAArtifactKind::MarketObservations,
@@ -1648,23 +1649,21 @@ pub fn validate_gate_a_candidate(
             ));
         }
         record_digest.push(store_row.payload(), "candidate_canonical_records")?;
-        let expected_visibility = project_record_visibility_index_entry(&record)?;
-        let expected_visibility_bytes = encode_visibility_index_entry(&expected_visibility)?;
         event_id_sorter.push(bounded_sort_row(
             event_id_sort_key(record_event_id(&record)),
-            expected_visibility_bytes,
+            Vec::new(),
             output_config,
         )?)?;
         emission_sequence = emission_sequence
             .checked_add(1)
             .ok_or_else(|| GateAError::ArtifactMismatch("规范事件发射位置溢出".to_owned()))?;
     }
-    let event_ids = event_id_sorter.finish()?;
+    let (event_ids_path, event_ids_metrics) = event_id_sorter.finish(None)?;
     observe_validation_stage_peak(
         &mut peak_formal_work_directory_bytes_bound,
         candidate_directory_bytes,
         validation_base_bytes,
-        &event_ids.metrics,
+        &event_ids_metrics,
         validation_work_path,
         output_config,
     )?;
@@ -1715,17 +1714,18 @@ pub fn validate_gate_a_candidate(
             .checked_add(1)
             .ok_or_else(|| GateAError::ArtifactMismatch("规范事件发射位置溢出".to_owned()))?;
     }
-    let visibility_material = visibility_material.finish()?;
+    let (visibility_material_path, visibility_material_metrics) =
+        visibility_material.finish(None)?;
     observe_validation_stage_peak(
         &mut peak_formal_work_directory_bytes_bound,
         candidate_directory_bytes,
         validation_base_bytes,
-        &visibility_material.metrics,
+        &visibility_material_metrics,
         validation_work_path,
         output_config,
     )?;
     let mut expected_visibility = RunCursor::open(
-        &visibility_material.output_path,
+        &visibility_material_path,
         output_config.sort.batch_rows,
         output_config.sort.max_run_bytes,
     )?;
@@ -1785,17 +1785,18 @@ pub fn validate_gate_a_candidate(
             .checked_add(1)
             .ok_or_else(|| GateAError::ArtifactMismatch("规范事件发射位置溢出".to_owned()))?;
     }
-    let expected_event_time = expected_event_time.finish()?;
+    let (expected_event_time_path, expected_event_time_metrics) =
+        expected_event_time.finish(None)?;
     observe_validation_stage_peak(
         &mut peak_formal_work_directory_bytes_bound,
         candidate_directory_bytes,
         validation_base_bytes,
-        &expected_event_time.metrics,
+        &expected_event_time_metrics,
         validation_work_path,
         output_config,
     )?;
     compare_sorted_artifacts(
-        &expected_event_time.output_path,
+        &expected_event_time_path,
         event_time_index.artifact_path(),
         output_config,
         "事件时间索引不是唯一事件存储的精确投影",
@@ -1804,7 +1805,7 @@ pub fn validate_gate_a_candidate(
     fs::remove_dir_all(&expected_event_time_stage)?;
 
     let (peak_observation_l2_levels, projection_witnesses) = validate_observation_projection(
-        &visibility_material.output_path,
+        &visibility_material_path,
         canonical_event_store.manifest(),
         &market_observations,
         visibility_index.manifest_sha256(),
@@ -1846,20 +1847,17 @@ pub fn validate_gate_a_candidate(
             .checked_add(1)
             .ok_or_else(|| GateAError::ArtifactMismatch("归约报告发射位置溢出".to_owned()))?;
     }
-    let report_references = report_reference_sorter.finish()?;
+    let (report_references_path, report_references_metrics) =
+        report_reference_sorter.finish(None)?;
     observe_validation_stage_peak(
         &mut peak_formal_work_directory_bytes_bound,
         candidate_directory_bytes,
         validation_base_bytes,
-        &report_references.metrics,
+        &report_references_metrics,
         validation_work_path,
         output_config,
     )?;
-    validate_event_report_closure(
-        &event_ids.output_path,
-        &report_references.output_path,
-        output_config,
-    )?;
+    validate_event_report_closure(&event_ids_path, &report_references_path, output_config)?;
     let reduction_reports_sha256 = report_digest.finish();
 
     fs::remove_dir_all(&event_id_stage)?;
@@ -3044,7 +3042,8 @@ impl PlatformReplayCursor {
         if requests.is_empty() {
             return Ok(Vec::new());
         }
-        let mut scan_order = requests.clone();
+        let request_count = requests.len();
+        let mut scan_order = requests;
         scan_order.sort_by_key(|request| request.sequence);
         if scan_order
             .windows(2)
@@ -3055,7 +3054,7 @@ impl PlatformReplayCursor {
             ));
         }
 
-        let mut resolved = vec![None; requests.len()];
+        let mut resolved = vec![None; request_count];
         let mut store = RunCursor::open(&self.store_path, self.batch_rows, self.max_batch_bytes)?;
         let mut store_position = 0u64;
         let mut request_position = 0usize;
@@ -3206,7 +3205,8 @@ impl VisibilityReplayCursor {
         if requests.is_empty() {
             return Ok(Vec::new());
         }
-        let mut scan_order = requests.clone();
+        let request_count = requests.len();
+        let mut scan_order = requests;
         scan_order.sort_by_key(|request| request.sequence);
         if scan_order
             .windows(2)
@@ -3217,7 +3217,7 @@ impl VisibilityReplayCursor {
             ));
         }
 
-        let mut resolved = vec![None; requests.len()];
+        let mut resolved = vec![None; request_count];
         let mut store = RunCursor::open(&self.store_path, self.batch_rows, self.max_batch_bytes)?;
         let mut store_position = 0u64;
         let mut request_position = 0usize;
@@ -3620,7 +3620,11 @@ pub(crate) mod tests {
         writer.flush_batch().unwrap();
         assert!(writer.rows.is_empty());
         assert_eq!(writer.row_inner_bytes, 0);
-        let outcome = writer.finish(&output_config).unwrap();
+        let outcome = writer.finish().unwrap();
+        assert_eq!(
+            scan_logical_output(&outcome.output_path, 2, 64 * 1024).unwrap(),
+            (outcome.logical_sha256, 9)
+        );
         let builder =
             ParquetRecordBatchReaderBuilder::try_new(File::open(outcome.output_path).unwrap())
                 .unwrap();
@@ -3956,7 +3960,7 @@ pub(crate) mod tests {
                 .capture_report(u64::try_from(sequence).unwrap(), encoded)
                 .unwrap();
         }
-        let (record_capture, report_capture, _) = capture.finish(&output_config).unwrap();
+        let (record_capture, report_capture, _) = capture.finish().unwrap();
         let canonical_record_capture_bytes =
             fs::metadata(&record_capture.output_path).unwrap().len();
         let reduction_report_capture_bytes =
@@ -4638,7 +4642,7 @@ pub(crate) mod tests {
                 Vec::new(),
             ))
             .unwrap();
-        let event_ids = event_ids.finish().unwrap();
+        let (event_ids_path, _) = event_ids.finish(None).unwrap();
         let mut references = ExternalSorter::new(
             &temporary.path().join("report-references"),
             &output_config.sort,
@@ -4650,14 +4654,11 @@ pub(crate) mod tests {
                 Vec::new(),
             ))
             .unwrap();
-        let references = references.finish().unwrap();
+        let (references_path, _) = references.finish(None).unwrap();
 
-        let error = validate_event_report_closure(
-            &event_ids.output_path,
-            &references.output_path,
-            &output_config,
-        )
-        .unwrap_err();
+        let error =
+            validate_event_report_closure(&event_ids_path, &references_path, &output_config)
+                .unwrap_err();
         assert!(
             error
                 .to_string()
