@@ -1579,14 +1579,10 @@ fn projection_resource_quantity_v2(batch: &BusinessProjectionBatchPayloadV1) -> 
             projection_resource_quantity(batch, trade_lifecycle_owned_bytes_v2)
         }
         BusinessProjectionBatchPayloadV1::V4(batch) => {
-            projection_resource_quantity(batch, |trade| {
-                trade_lifecycle_owned_bytes_v2(&trade.feedback) + 16
-            })
+            projection_resource_quantity(batch, trade_lifecycle_owned_bytes_v3)
         }
         BusinessProjectionBatchPayloadV1::V3(batch) => {
-            projection_resource_quantity(batch, |trade| {
-                trade_lifecycle_owned_bytes_v2(&trade.feedback) + 16
-            })
+            projection_resource_quantity(batch, trade_lifecycle_owned_bytes_v3)
         }
     }
 }
@@ -2040,6 +2036,15 @@ fn trade_lifecycle_owned_bytes_v2(feedback: &TradeLifecycleFeedbackV2) -> u64 {
             + feedback.quote_amount_pusd.0.len()
             + feedback.immediate_taker_fee_pusd.0.len()) as u64
         + optional_account_delta_owned_bytes_v2(feedback.account_delta.as_ref())
+}
+
+#[cfg(feature = "measurement")]
+fn trade_lifecycle_owned_bytes_v3(trade: &contracts::TradeLifecycleFeedbackV3) -> u64 {
+    trade_lifecycle_owned_bytes_v2(&trade.feedback)
+        + trade
+            .maker_fee_equivalent_pusd
+            .as_ref()
+            .map_or(0, |fee| fee.0.len() as u64)
 }
 
 #[cfg(feature = "measurement")]
