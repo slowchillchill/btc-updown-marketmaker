@@ -3,6 +3,7 @@
 ## GitHub 治理与裁决回顾
 
 - 本仓库采用全局 `AGENTS.md` 的 GitHub 任务治理。
+- 项目看板：https://github.com/users/slowchillchill/projects/2
 - 准备提出新裁决或收到用户新决定时，按[项目裁决索引 #62](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62)
   的维护规则回读相关原始决定、替代关系和当前合同，由 `orchestrator` 同步获批结果与索引。
 
