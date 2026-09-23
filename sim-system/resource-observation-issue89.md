@@ -4,7 +4,7 @@
 
 ## PM 证据对象
 
-`FinitePublicConsumptionV1::measurement_resources` 按需读取 `public_pm_evidence` 中真实 `PmOwnedStateV1::new_evidence_only` 所有者，分别输出 markets、assets、levels、absences、selected。该状态没有第二份数量簿，数量仍由 SIM 原业务簿持有；原 `business` 字节口径不变。新增字段是对象数量，不是字节或 RSS。
+`FinitePublicConsumptionV1::measurement_resources` 按需读取 `public_pm_evidence` 中真实 `PmOwnedStateV1::new_evidence_only` 所有者，分别输出 markets、assets、levels、absences、selected。该状态没有第二份数量簿，数量仍由 SIM 原业务簿持有；该次实验的 `business` 字节口径未变（Issue #107 后的口径见文末）。新增字段是对象数量，不是字节或 RSS。
 
 `public_pm_evidence_counts_follow_delete_and_epoch_reset` 经真实 DPT 记录、公开组消费和共享归约执行，得到：
 
@@ -51,3 +51,9 @@ NOE_FINITE_OBSERVATION_ROOT="$PWD/target/issue89-316c-noe-business-final" cargo 
 ```
 
 结果写入该目录的 `resource-observation.json`，并保留 `noe/`、SIM 事件日志及三个前缀 manifest。路径属于持久引用身份，换输出目录可能改变文件字节数；时间、RSS 也会受环境影响。普通回归未设置该变量时使用临时目录，不保留产物。以上资源数值来自该独立 invocation，不取自并行全套测试进程。
+
+## Issue #107 后的采样口径
+
+上述历史数值保持原实验结果。当前实现已移除撮合、订单、结算、查询根及待投影队列的增减计量副本；仅在启用 `measurement` 且实际请求快照时，扫描当时持有的业务对象与待投影批次。普通业务路径不再因计量加减溢出或下溢而拒绝执行，实际金额运算、队列、水位和背压不变。
+
+当前 `records` 统计所列逻辑对象，`bytes` 累计这些对象的自有文本长度，不计容器容量、固定宽度字段或分配器开销，不代表 RSS。公共 PM 归约对象仍由有限宿主单独按需观察。GateA 有限宿主在会话开启、每 4096 桶及结束时采样，`business_high_water` 是这些样本的最大值，并非每事件峰值。新口径不与上面的历史增减计数视作完全同义，也没有据此重新测量或推导性能收益。

@@ -1,3 +1,5 @@
+#[cfg(feature = "measurement")]
+use crate::matching::{order_projection_owned_bytes_v2, trade_projection_owned_bytes_v2};
 use crate::public_consumption::*;
 use crate::session::PublicVisibilityCursorV1;
 pub use noe_projection::{
@@ -45,7 +47,6 @@ use crate::matching::{
     BuyOrderActionV2, BuyOrderDispositionV2, BuyOrderRejectedReasonV2, BuyOrderTermsV2,
     CallerCancelDispositionV2, ExecutionMarketEventEffectsV2, ExecutionStateV2,
     LifecycleFeedbackEffectV2, MatchingStateErrorV1, micro_units_v1,
-    order_projection_owned_bytes_v2, trade_projection_owned_bytes_v2,
 };
 #[cfg(feature = "measurement")]
 use crate::measurement_probe::{
@@ -53,13 +54,16 @@ use crate::measurement_probe::{
     MeasurementResourceSnapshot,
 };
 use crate::platform_rules::{PlatformRuleSnapshotV3, SealedProcessRuleSnapshotV3};
-use crate::resource::{BusinessResourceDeltaV2, ResourceQuantityV1};
+#[cfg(feature = "measurement")]
+use crate::resource::ResourceQuantityV1;
 use crate::runtime_v2::{
     AcceptedClosedMarketBucketV2, BusinessInputV2, BusinessRequestV2,
     DurableMarketBucketReferenceV2, LoggedBusinessInputV2, PlatformPrefixAdvanceV2,
     RetentionAdvanceV2, RunDurabilityRoleV2, RunOpenedV2, SessionSpecV3, TrustedDecisionCutoffV2,
 };
-use crate::scenario::{PlatformMarketV1, SealedPlatformScenarioV1};
+#[cfg(any(feature = "measurement", test))]
+use crate::scenario::PlatformMarketV1;
+use crate::scenario::SealedPlatformScenarioV1;
 use crate::session::MarketEnrollmentRequestV1;
 
 pub(crate) mod noe_projection;
@@ -478,7 +482,7 @@ pub trait BusinessProjectionPortV2 {
 
 struct PendingProjectionBatchV2 {
     batch: Arc<BusinessProjectionBatchPayloadV1>,
-    resources: ResourceQuantityV1,
+
     accepted: bool,
 }
 
@@ -553,20 +557,14 @@ impl From<&TradesFilterV1> for TradesQueryKeyV2 {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-struct QueryRootRowsV2<T> {
-    rows: Vec<T>,
-    resources: ResourceQuantityV1,
-}
-
 #[derive(Debug, Default, PartialEq, Eq)]
 struct QueryStateV2 {
     current_revision: u64,
     earliest_retained_root_sequence: u64,
     order_history_retained_from_utc_ms: Option<i64>,
     trade_history_retained_from_utc_ms: Option<i64>,
-    order_roots: BTreeMap<(u64, OrdersQueryKeyV2), QueryRootRowsV2<OrderProjectionV2>>,
-    trade_roots: BTreeMap<(u64, TradesQueryKeyV2), QueryRootRowsV2<TradeProjectionV2>>,
+    order_roots: BTreeMap<(u64, OrdersQueryKeyV2), Vec<OrderProjectionV2>>,
+    trade_roots: BTreeMap<(u64, TradesQueryKeyV2), Vec<TradeProjectionV2>>,
 }
 
 impl QueryStateV2 {
@@ -577,10 +575,7 @@ impl QueryStateV2 {
             .expect("V2 查询可观察修订不得溢出");
     }
 
-    fn advance_retention(
-        &mut self,
-        advance: RetentionAdvanceV2,
-    ) -> Result<BusinessResourceDeltaV2, SimRunActorErrorV2> {
+    fn advance_retention(&mut self, advance: RetentionAdvanceV2) -> Result<(), SimRunActorErrorV2> {
         let advances_optional_floor = |current: Option<i64>, next: Option<i64>| match current {
             None => true,
             Some(current) => next.is_some_and(|next| next >= current),
@@ -599,7 +594,6 @@ impl QueryStateV2 {
             return Err(SimRunActorErrorV2::InvalidRetentionAdvance);
         }
 
-        let mut resources = BusinessResourceDeltaV2::default();
         while self
             .order_roots
             .first_key_value()
@@ -607,9 +601,7 @@ impl QueryStateV2 {
                 *root_sequence < advance.earliest_retained_root_sequence
             })
         {
-            let (_, root) = self.order_roots.pop_first().expect("待释放订单查询根存在");
-            resources.removed_records += root.resources.records;
-            resources.removed_bytes += root.resources.bytes;
+            self.order_roots.pop_first();
         }
         while self
             .trade_roots
@@ -618,56 +610,26 @@ impl QueryStateV2 {
                 *root_sequence < advance.earliest_retained_root_sequence
             })
         {
-            let (_, root) = self.trade_roots.pop_first().expect("待释放成交查询根存在");
-            resources.removed_records += root.resources.records;
-            resources.removed_bytes += root.resources.bytes;
+            self.trade_roots.pop_first();
         }
         self.earliest_retained_root_sequence = advance.earliest_retained_root_sequence;
         self.order_history_retained_from_utc_ms = advance.order_history_retained_from_utc_ms;
         self.trade_history_retained_from_utc_ms = advance.trade_history_retained_from_utc_ms;
-        Ok(resources)
+        Ok(())
     }
 }
 
+#[cfg(feature = "measurement")]
 fn orders_query_key_owned_bytes_v2(key: &OrdersQueryKeyV2) -> u64 {
     (key.condition_id.as_ref().map_or(0, String::len)
         + key.token_id.as_ref().map_or(0, String::len)) as u64
 }
 
+#[cfg(feature = "measurement")]
 fn trades_query_key_owned_bytes_v2(key: &TradesQueryKeyV2) -> u64 {
     (key.trade_id.as_ref().map_or(0, String::len)
         + key.condition_id.as_ref().map_or(0, String::len)
         + key.token_id.as_ref().map_or(0, String::len)) as u64
-}
-
-fn orders_root_resource_delta_v2(
-    key: &OrdersQueryKeyV2,
-    rows: &[OrderProjectionV2],
-) -> (ResourceQuantityV1, BusinessResourceDeltaV2) {
-    let mut resources = BusinessResourceDeltaV2::default();
-    resources.add_record(orders_query_key_owned_bytes_v2(key));
-    for row in rows {
-        resources.add_record(order_projection_owned_bytes_v2(row));
-    }
-    (
-        ResourceQuantityV1::new(resources.added_records, resources.added_bytes),
-        resources,
-    )
-}
-
-fn trades_root_resource_delta_v2(
-    key: &TradesQueryKeyV2,
-    rows: &[TradeProjectionV2],
-) -> (ResourceQuantityV1, BusinessResourceDeltaV2) {
-    let mut resources = BusinessResourceDeltaV2::default();
-    resources.add_record(trades_query_key_owned_bytes_v2(key));
-    for row in rows {
-        resources.add_record(trade_projection_owned_bytes_v2(row));
-    }
-    (
-        ResourceQuantityV1::new(resources.added_records, resources.added_bytes),
-        resources,
-    )
 }
 
 fn orders_page_from_root_v2(
@@ -779,7 +741,7 @@ struct MarketEnrollmentStateV2 {
 #[derive(Debug)]
 pub(crate) struct BusinessReducerStateV2 {
     session: Option<UniqueSessionStateV2>,
-    business_resources: ResourceQuantityV1,
+
     pm_materials: Vec<DeferredPublicPmReductionV1>,
     public_pm_evidence: BTreeMap<
         String,
@@ -1447,15 +1409,11 @@ fn reduce_actor_input_v2(
                     SimRunActorErrorV2::CompletionNotReady("撤单场景必须在指定请求登记前配置"),
                 ));
             }
-            let before = session.execution_state.cancel_scenario_resources();
+
             session
                 .execution_state
                 .configure_cancel_scenario(scenario, input_sequence);
-            let after = session.execution_state.cancel_scenario_resources();
-            state.business_resources.records =
-                state.business_resources.records - before.records + after.records;
-            state.business_resources.bytes =
-                state.business_resources.bytes - before.bytes + after.bytes;
+
             Ok((
                 state,
                 BusinessReducerOutputV2::LogicalDrive(LogicalDriveOutputV2::default()),
@@ -1469,7 +1427,7 @@ fn reduce_actor_input_v2(
                     SimRunActorErrorV2::CompletionNotReady("结算需要已开户会话"),
                 ));
             };
-            let before_resources = session.execution_state.requested_settlement_resources();
+
             let mut operation = operation.clone();
             use crate::matching::settlement::SettlementOperationV1 as Op;
             let arrival = match &mut operation {
@@ -1500,12 +1458,7 @@ fn reduce_actor_input_v2(
                 .map_err(|error| {
                     BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(error))
                 })?;
-            let after_resources = session.execution_state.requested_settlement_resources();
-            state.business_resources.records = state.business_resources.records
-                - before_resources.records
-                + after_resources.records;
-            state.business_resources.bytes =
-                state.business_resources.bytes - before_resources.bytes + after_resources.bytes;
+
             Ok((
                 state,
                 BusinessReducerOutputV2::LogicalDrive(LogicalDriveOutputV2 {
@@ -1619,6 +1572,7 @@ fn reduce_actor_input_v2(
     }
 }
 
+#[cfg(feature = "measurement")]
 fn projection_resource_quantity_v2(batch: &BusinessProjectionBatchPayloadV1) -> ResourceQuantityV1 {
     match batch {
         BusinessProjectionBatchPayloadV1::V2(batch) => {
@@ -1636,6 +1590,7 @@ fn projection_resource_quantity_v2(batch: &BusinessProjectionBatchPayloadV1) -> 
         }
     }
 }
+#[cfg(feature = "measurement")]
 fn projection_resource_quantity<T, R>(
     batch: &BusinessProjectionBatch<T, R>,
     trade_bytes: impl Fn(&T) -> u64,
@@ -1682,10 +1637,12 @@ fn projection_resource_quantity<T, R>(
     ResourceQuantityV1::new(records, bytes)
 }
 
+#[cfg(feature = "measurement")]
 fn account_key_owned_bytes_v2(key: &AccountInstanceKeyV1) -> u64 {
     (key.run_id.len() + key.caller_instance_id.len() + key.account_id.len()) as u64
 }
 
+#[cfg(feature = "measurement")]
 pub(crate) fn settlement_request_owned_bytes_v1(
     id: &contracts::economics::SettlementRequestIdV1<String>,
 ) -> u64 {
@@ -1693,6 +1650,7 @@ pub(crate) fn settlement_request_owned_bytes_v1(
         + (id.condition_id.0.len() + id.resolution_identity.len() + id.policy_version.len()) as u64
 }
 
+#[cfg(feature = "measurement")]
 fn settlement_transition_owned_bytes_v1(
     transition: &contracts::economics::SourceNeutralAccountTransitionKindV2<String>,
 ) -> u64 {
@@ -1741,6 +1699,7 @@ fn settlement_transition_owned_bytes_v1(
     }
 }
 
+#[cfg(feature = "measurement")]
 fn account_delta_owned_bytes_v2(delta: &contracts::PlatformAccountDeltaV2) -> u64 {
     let reason = match &delta.reason {
         contracts::PlatformAccountDeltaReasonV2::RequestedSettlement(transition) => {
@@ -1816,6 +1775,7 @@ fn account_delta_owned_bytes_v2(delta: &contracts::PlatformAccountDeltaV2) -> u6
             .sum::<u64>()
 }
 
+#[cfg(feature = "measurement")]
 fn direct_metadata_owned_bytes_v2(metadata: &DirectResponseMetadataV2) -> u64 {
     (metadata.global_request_id.len()
         + metadata
@@ -1824,6 +1784,7 @@ fn direct_metadata_owned_bytes_v2(metadata: &DirectResponseMetadataV2) -> u64 {
             .map_or(0, String::len)) as u64
 }
 
+#[cfg(feature = "measurement")]
 fn submission_item_owned_bytes_v2(item: &SubmissionResponseItemV2) -> u64 {
     let outcome = match &item.outcome {
         SubmissionItemOutcomeV2::Accepted(accepted) => {
@@ -1894,6 +1855,7 @@ fn submission_item_owned_bytes_v2(item: &SubmissionResponseItemV2) -> u64 {
     (item.item_id.len() + item.condition_id.0.len() + item.token_id.0.len()) as u64 + outcome
 }
 
+#[cfg(feature = "measurement")]
 fn cancel_target_owned_bytes_v2<R>(target: &contracts::CancelTargetResponse<R>) -> u64 {
     let outcome = match &target.outcome {
         contracts::CancelTargetOutcome::Canceled(measurement) => {
@@ -1912,6 +1874,7 @@ fn cancel_target_owned_bytes_v2<R>(target: &contracts::CancelTargetResponse<R>) 
         + outcome
 }
 
+#[cfg(feature = "measurement")]
 fn order_result_owned_bytes_v2(result: &OrderQueryResultV2) -> u64 {
     match result {
         OrderQueryResultV2::Found(order) => order_projection_owned_bytes_v2(order),
@@ -1919,6 +1882,7 @@ fn order_result_owned_bytes_v2(result: &OrderQueryResultV2) -> u64 {
     }
 }
 
+#[cfg(feature = "measurement")]
 fn orders_result_owned_bytes_v2(result: &OrdersQueryResultV2) -> u64 {
     match result {
         OrdersQueryResultV2::Page(page) => {
@@ -1928,6 +1892,7 @@ fn orders_result_owned_bytes_v2(result: &OrdersQueryResultV2) -> u64 {
     }
 }
 
+#[cfg(feature = "measurement")]
 fn trades_result_owned_bytes_v2(result: &TradesQueryResultV2) -> u64 {
     match result {
         TradesQueryResultV2::Page(page) => {
@@ -1937,6 +1902,7 @@ fn trades_result_owned_bytes_v2(result: &TradesQueryResultV2) -> u64 {
     }
 }
 
+#[cfg(feature = "measurement")]
 fn direct_response_owned_bytes_v2<R>(response: &BusinessDirectResponse<R>) -> u64 {
     match response {
         BusinessDirectResponse::PostOrder(response) => {
@@ -1994,14 +1960,17 @@ fn direct_response_owned_bytes_v2<R>(response: &BusinessDirectResponse<R>) -> u6
     }
 }
 
+#[cfg(feature = "measurement")]
 fn lifecycle_metadata_owned_bytes_v2(metadata: &contracts::LifecycleFeedbackMetadataV2) -> u64 {
     account_key_owned_bytes_v2(&metadata.account_instance_key)
 }
 
+#[cfg(feature = "measurement")]
 fn optional_account_delta_owned_bytes_v2(delta: Option<&contracts::PlatformAccountDeltaV2>) -> u64 {
     delta.map_or(0, account_delta_owned_bytes_v2)
 }
 
+#[cfg(feature = "measurement")]
 fn order_lifecycle_owned_bytes_v2(feedback: &OrderLifecycleFeedbackV2) -> u64 {
     let event = match &feedback.event {
         contracts::OrderLifecycleEventV2::OrderAccepted {
@@ -2058,6 +2027,7 @@ fn order_lifecycle_owned_bytes_v2(feedback: &OrderLifecycleFeedbackV2) -> u64 {
         + event
 }
 
+#[cfg(feature = "measurement")]
 fn trade_lifecycle_owned_bytes_v2(feedback: &TradeLifecycleFeedbackV2) -> u64 {
     lifecycle_metadata_owned_bytes_v2(&feedback.metadata)
         + (feedback.trade_id.len()
@@ -2072,10 +2042,12 @@ fn trade_lifecycle_owned_bytes_v2(feedback: &TradeLifecycleFeedbackV2) -> u64 {
         + optional_account_delta_owned_bytes_v2(feedback.account_delta.as_ref())
 }
 
+#[cfg(feature = "measurement")]
 fn settlement_lifecycle_owned_bytes_v2(feedback: &SettlementLifecycleFeedbackV2) -> u64 {
     lifecycle_metadata_owned_bytes_v2(&feedback.metadata)
         + settlement_event_owned_bytes_v2(&feedback.event)
 }
+#[cfg(feature = "measurement")]
 pub(crate) fn settlement_event_owned_bytes_v2(
     event: &contracts::SettlementLifecycleEventV2,
 ) -> u64 {
@@ -2290,7 +2262,7 @@ pub(crate) struct SimRunActorV2 {
     state: Option<BusinessReducerStateV2>,
     projection_port: Box<dyn BusinessProjectionPortV2>,
     pending_projections: VecDeque<PendingProjectionBatchV2>,
-    pending_projection_resources: ResourceQuantityV1,
+
     #[cfg(feature = "measurement")]
     measurement_probe: Arc<MeasurementProbe>,
 }
@@ -2455,7 +2427,7 @@ struct ReplayedEventLogV2 {
     state: BusinessReducerStateV2,
     recovery: SimEventLogRecoveryV2,
     pending_projections: VecDeque<PendingProjectionBatchV2>,
-    pending_projection_resources: ResourceQuantityV1,
+
     accepted_input_count: u64,
 }
 
@@ -2549,10 +2521,9 @@ where
         session: None,
         public_pm_evidence: BTreeMap::new(),
         pm_materials: Vec::new(),
-        business_resources: ResourceQuantityV1::default(),
     };
     let mut pending_projections = VecDeque::new();
-    let mut pending_projection_resources = ResourceQuantityV1::default();
+
     let mut input_sequence = 1_u64;
     loop {
         let (next, group) = recovery.next_group().map_err(SimRunActorErrorV2::Log)?;
@@ -2589,12 +2560,10 @@ where
                     .is_some_and(|watermark| projection.projection_batch_sequence > watermark)
             {
                 let projection = projection.into_payload(opened.projection_version);
-                let resources = projection_resource_quantity_v2(&projection);
-                pending_projection_resources =
-                    add_resource_quantity_v2(pending_projection_resources, resources);
+
                 pending_projections.push_back(PendingProjectionBatchV2 {
                     batch: Arc::new(projection),
-                    resources,
+
                     accepted: false,
                 });
             }
@@ -2608,7 +2577,7 @@ where
         state,
         recovery,
         pending_projections,
-        pending_projection_resources,
+
         accepted_input_count: input_sequence - 1,
     })
 }
@@ -2903,11 +2872,10 @@ impl SimRunActorV2 {
                 session: None,
                 public_pm_evidence: BTreeMap::new(),
                 pm_materials: Vec::new(),
-                business_resources: ResourceQuantityV1::default(),
             }),
             projection_port,
             pending_projections: VecDeque::new(),
-            pending_projection_resources: ResourceQuantityV1::default(),
+
             #[cfg(feature = "measurement")]
             measurement_probe,
         })
@@ -2964,7 +2932,7 @@ impl SimRunActorV2 {
             state: Some(replayed.state),
             projection_port,
             pending_projections: replayed.pending_projections,
-            pending_projection_resources: replayed.pending_projection_resources,
+
             #[cfg(feature = "measurement")]
             measurement_probe,
         };
@@ -3486,13 +3454,11 @@ impl SimRunActorV2 {
         let had_projections = !projections.is_empty();
         for projection in projections {
             let projection = projection.into_payload(self.opened.projection_version);
-            let resources = projection_resource_quantity_v2(&projection);
-            self.pending_projection_resources =
-                add_resource_quantity_v2(self.pending_projection_resources, resources);
+
             self.pending_projections
                 .push_back(PendingProjectionBatchV2 {
                     batch: Arc::new(projection),
-                    resources,
+
                     accepted: false,
                 });
         }
@@ -3520,12 +3486,9 @@ impl SimRunActorV2 {
             .front()
             .is_some_and(|pending| pending.accepted && pending.batch.sequence() <= durable_through)
         {
-            let pending = self
-                .pending_projections
+            self.pending_projections
                 .pop_front()
                 .expect("已确认投影前缀存在");
-            self.pending_projection_resources.records -= pending.resources.records;
-            self.pending_projection_resources.bytes -= pending.resources.bytes;
         }
         for pending in &mut self.pending_projections {
             if pending.accepted {
@@ -3545,12 +3508,9 @@ impl SimRunActorV2 {
             .front()
             .is_some_and(|pending| pending.accepted && pending.batch.sequence() <= durable_through)
         {
-            let pending = self
-                .pending_projections
+            self.pending_projections
                 .pop_front()
                 .expect("已确认投影前缀存在");
-            self.pending_projection_resources.records -= pending.resources.records;
-            self.pending_projection_resources.bytes -= pending.resources.bytes;
         }
     }
 
@@ -3560,7 +3520,7 @@ impl SimRunActorV2 {
             .state
             .as_ref()
             .map_or(ResourceQuantityV1::default(), |state| {
-                state.business_resources
+                business_resource_snapshot_v2(state)
             });
         let (log_byte_count, next_input_sequence) = self
             .log
@@ -3568,7 +3528,13 @@ impl SimRunActorV2 {
             .map_or((0, 0), |log| (log.byte_count(), log.next_input_sequence()));
         MeasurementResourceSnapshot::new(
             business,
-            self.pending_projection_resources,
+            self.pending_projections.iter().fold(
+                ResourceQuantityV1::default(),
+                |mut total, pending| {
+                    total.include(projection_resource_quantity_v2(&pending.batch));
+                    total
+                },
+            ),
             log_byte_count,
             next_input_sequence,
         )
@@ -3693,6 +3659,7 @@ fn validate_cancel_item_v2(item: &CancelOrderItemV1) -> Result<(), SimRunActorEr
     Ok(())
 }
 
+#[cfg(feature = "measurement")]
 fn post_action_owned_bytes_v2(global_request_id: &str, item: &PostOrderItemV1) -> u64 {
     (global_request_id.len()
         + item.item_id.len()
@@ -3700,6 +3667,7 @@ fn post_action_owned_bytes_v2(global_request_id: &str, item: &PostOrderItemV1) -
         + item.order.token_id.0.len()) as u64
 }
 
+#[cfg(feature = "measurement")]
 fn submission_measurement_owned_bytes_v2(measurement: &contracts::SubmissionMeasurementV2) -> u64 {
     match measurement {
         contracts::SubmissionMeasurementV2::Base {
@@ -3751,28 +3719,7 @@ fn submission_measurement_owned_bytes_v2(measurement: &contracts::SubmissionMeas
     }
 }
 
-fn post_result_resources_v2(effect: &PostOrderItemBusinessEffectV2) -> BusinessResourceDeltaV2 {
-    let mut resources = BusinessResourceDeltaV2::default();
-    let mut owned_bytes =
-        (effect.item_id.len() + effect.condition_id.0.len() + effect.token_id.0.len()) as u64;
-    if let PostOrderItemOutcomeV2::Accepted(accepted) = &effect.outcome {
-        owned_bytes += (accepted.platform_order_id.len() + accepted.platform_order_status.raw.len())
-            as u64
-            + submission_measurement_owned_bytes_v2(&accepted.measurement);
-        for fill in &accepted.fills {
-            resources.add_record(
-                (fill.trade_id.len()
-                    + fill.source_price_pusd_per_share.0.len()
-                    + fill.base_quantity_shares.0.len()
-                    + fill.quote_amount_pusd.0.len()) as u64,
-            );
-        }
-        resources.add_records(accepted.account_transition_sequences.len() as u64);
-    }
-    resources.add_record(owned_bytes);
-    resources
-}
-
+#[cfg(feature = "measurement")]
 fn cancel_action_owned_bytes_v2(
     global_request_id: &str,
     platform_order_id: &str,
@@ -3786,11 +3733,13 @@ fn cancel_action_owned_bytes_v2(
             .sum::<usize>()) as u64
 }
 
+#[cfg(feature = "measurement")]
 fn cancel_market_action_owned_bytes_v2(global_request_id: &str, condition_id: &ConditionId) -> u64 {
     (global_request_id.len() + condition_id.0.len()) as u64
 }
 
-fn cancel_result_owned_bytes_v2(effect: &CancelTargetBusinessEffectV3) -> u64 {
+#[cfg(feature = "measurement")]
+fn cancel_result_owned_bytes_v2<R>(effect: &CancelTargetBusinessEffect<R>) -> u64 {
     let outcome_bytes = match &effect.outcome {
         contracts::CancelTargetOutcome::Canceled(canceled) => {
             canceled.canceled_base_quantity_shares.0.len()
@@ -3808,10 +3757,12 @@ fn cancel_result_owned_bytes_v2(effect: &CancelTargetBusinessEffectV3) -> u64 {
         + outcome_bytes) as u64
 }
 
+#[cfg(feature = "measurement")]
 fn order_query_action_owned_bytes_v2(global_request_id: &str, platform_order_id: &str) -> u64 {
     (global_request_id.len() + platform_order_id.len()) as u64
 }
 
+#[cfg(feature = "measurement")]
 fn orders_query_action_owned_bytes_v2(global_request_id: &str, filter: &OrdersFilterV1) -> u64 {
     (global_request_id.len()
         + filter
@@ -3824,6 +3775,7 @@ fn orders_query_action_owned_bytes_v2(global_request_id: &str, filter: &OrdersFi
             .map_or(0, |token_id| token_id.0.len())) as u64
 }
 
+#[cfg(feature = "measurement")]
 fn trades_query_action_owned_bytes_v2(global_request_id: &str, filter: &TradesFilterV1) -> u64 {
     (global_request_id.len()
         + filter.trade_id.as_ref().map_or(0, String::len)
@@ -3835,36 +3787,6 @@ fn trades_query_action_owned_bytes_v2(global_request_id: &str, filter: &TradesFi
             .token_id
             .as_ref()
             .map_or(0, |token_id| token_id.0.len())) as u64
-}
-
-fn query_result_resources_v2(result: &QueryActionResultV2) -> BusinessResourceDeltaV2 {
-    let mut resources = BusinessResourceDeltaV2::default();
-    resources.add_record(0);
-    match result {
-        QueryActionResultV2::Order(OrderQueryResultV2::Found(order)) => {
-            resources.add_record(order_projection_owned_bytes_v2(order));
-        }
-        QueryActionResultV2::Orders(OrdersQueryResultV2::Page(page)) => {
-            for order in &page.items {
-                resources.add_record(order_projection_owned_bytes_v2(order));
-            }
-        }
-        QueryActionResultV2::Trades(TradesQueryResultV2::Page(page)) => {
-            for trade in &page.items {
-                resources.add_record(trade_projection_owned_bytes_v2(trade));
-            }
-        }
-        QueryActionResultV2::Order(
-            OrderQueryResultV2::NotFound | OrderQueryResultV2::OutOfRetention(_),
-        )
-        | QueryActionResultV2::Orders(
-            OrdersQueryResultV2::InvalidCursor | OrdersQueryResultV2::OutOfRetention(_),
-        )
-        | QueryActionResultV2::Trades(
-            TradesQueryResultV2::InvalidCursor | TradesQueryResultV2::OutOfRetention(_),
-        ) => {}
-    }
-    resources
 }
 
 fn existing_mutation_request_receipt_v2(
@@ -4106,14 +4028,7 @@ fn register_new_request_v2(
             Err(error) => return Err((state, error)),
         };
     let mut pending = Vec::new();
-    let mut resources = BusinessResourceDeltaV2::default();
-    resources.add_record(
-        (context.global_request_id.len()
-            + context
-                .caller_correlation_id
-                .as_ref()
-                .map_or(0, String::len)) as u64,
-    );
+
     let method = match items {
         NewMutationItemsV2::Post { method, items } => {
             pending.reserve(items.len());
@@ -4154,10 +4069,7 @@ fn register_new_request_v2(
                     | SimBuyOrderKindV1::FokMarket { .. }
                     | SimBuyOrderKindV1::FakMarket { .. } => None,
                 };
-                resources.add_record(post_action_owned_bytes_v2(
-                    &context.global_request_id,
-                    &item,
-                ));
+
                 pending.push((
                     MutationActionKeyV2 {
                         effective_processing_at_utc_ms,
@@ -4176,12 +4088,6 @@ fn register_new_request_v2(
         NewMutationItemsV2::Cancel { method, targets } => {
             pending.reserve(targets.len());
             for target in targets {
-                resources.add_record(cancel_action_owned_bytes_v2(
-                    &context.global_request_id,
-                    &target.platform_order_id,
-                    &target.input_item_refs,
-                ));
-                resources.add_records(target.input_item_refs.len() as u64);
                 pending.push((
                     MutationActionKeyV2 {
                         effective_processing_at_utc_ms: platform_arrived_at_utc_ms,
@@ -4199,10 +4105,6 @@ fn register_new_request_v2(
             method
         }
         NewMutationItemsV2::CancelMarket { condition_id } => {
-            resources.add_record(cancel_market_action_owned_bytes_v2(
-                &context.global_request_id,
-                &condition_id,
-            ));
             pending.push((
                 MutationActionKeyV2 {
                     effective_processing_at_utc_ms: platform_arrived_at_utc_ms,
@@ -4217,7 +4119,6 @@ fn register_new_request_v2(
             MutationMethodV2::CancelMarketOrders
         }
         NewMutationItemsV2::CancelAll => {
-            resources.add_record(context.global_request_id.len() as u64);
             pending.push((
                 MutationActionKeyV2 {
                     effective_processing_at_utc_ms: platform_arrived_at_utc_ms,
@@ -4231,10 +4132,6 @@ fn register_new_request_v2(
             MutationMethodV2::CancelAllOrders
         }
         NewMutationItemsV2::OrderQuery { platform_order_id } => {
-            resources.add_record(order_query_action_owned_bytes_v2(
-                &context.global_request_id,
-                &platform_order_id,
-            ));
             pending.push((
                 MutationActionKeyV2 {
                     effective_processing_at_utc_ms: platform_arrived_at_utc_ms,
@@ -4249,10 +4146,6 @@ fn register_new_request_v2(
             MutationMethodV2::Order
         }
         NewMutationItemsV2::OrdersQuery { filter, cursor } => {
-            resources.add_record(orders_query_action_owned_bytes_v2(
-                &context.global_request_id,
-                &filter,
-            ));
             pending.push((
                 MutationActionKeyV2 {
                     effective_processing_at_utc_ms: platform_arrived_at_utc_ms,
@@ -4268,10 +4161,6 @@ fn register_new_request_v2(
             MutationMethodV2::Orders
         }
         NewMutationItemsV2::TradesQuery { filter, cursor } => {
-            resources.add_record(trades_query_action_owned_bytes_v2(
-                &context.global_request_id,
-                &filter,
-            ));
             pending.push((
                 MutationActionKeyV2 {
                     effective_processing_at_utc_ms: platform_arrived_at_utc_ms,
@@ -4308,7 +4197,6 @@ fn register_new_request_v2(
                     .contains(&item.order.condition_id.0)
                 && !condition_fences.contains(&item.order.condition_id.0)
             {
-                resources.add_record(item.order.condition_id.0.len() as u64);
                 condition_fences.push(item.order.condition_id.0.clone());
             }
         }
@@ -4337,7 +4225,6 @@ fn register_new_request_v2(
                         .contains(&condition_id.0)
                     && !condition_fences.contains(&condition_id.0)
                 {
-                    resources.add_record(condition_id.0.len() as u64);
                     condition_fences.push(condition_id.0.clone());
                 }
             } else if let Some(token_id) = token_id
@@ -4348,17 +4235,10 @@ fn register_new_request_v2(
                     .contains(&token_id.0)
                 && !token_fences.contains(&token_id.0)
             {
-                resources.add_record(token_id.0.len() as u64);
                 token_fences.push(token_id.0.clone());
             }
         }
     }
-    let Some(next_resources) = resources.apply_to(state.business_resources) else {
-        return Err((
-            state,
-            SimRunActorErrorV2::Matching(MatchingStateErrorV1::QueuePredecessorConflict),
-        ));
-    };
 
     let session = state
         .session
@@ -4416,7 +4296,7 @@ fn register_new_request_v2(
         },
     );
     session.market_enrollment.business_input_started = true;
-    state.business_resources = next_resources;
+
     Ok((
         state,
         MutationRequestReceiptV2 {
@@ -4604,7 +4484,6 @@ fn apply_post_action_v2(
         UniqueSessionStateV2,
         PostOrderItemBusinessEffectV2,
         Vec<LifecycleFeedbackEffectV2>,
-        BusinessResourceDeltaV2,
     ),
     SimRunActorErrorV2,
 > {
@@ -4660,17 +4539,17 @@ fn apply_post_action_v2(
                         let (session, disposition) = session
                             .apply_buy_order(input, rules, finality_policy)
                             .map_err(SimRunActorErrorV2::Matching)?;
-                        let mut resources = BusinessResourceDeltaV2::default();
+
                         let (outcome, lifecycle) = match disposition {
                             BuyOrderDispositionV2::Accepted(accepted) => {
-                                let (accepted, lifecycle, execution_resources) = accepted
+                                let (accepted, lifecycle) = accepted
                                     .into_output_effects(
                                         item.order.condition_id.clone(),
                                         item.order.token_id.clone(),
                                         key.effective_processing_at_utc_ms,
                                     )
                                     .map_err(SimRunActorErrorV2::Matching)?;
-                                resources.merge(execution_resources);
+
                                 (PostOrderItemOutcomeV2::Accepted(accepted), lifecycle)
                             }
                             BuyOrderDispositionV2::RejectedNoEffect(reason) => (
@@ -4691,7 +4570,6 @@ fn apply_post_action_v2(
                                 outcome,
                             },
                             lifecycle,
-                            resources,
                         ));
                     }
                 },
@@ -4709,7 +4587,6 @@ fn apply_post_action_v2(
             outcome,
         },
         Vec::new(),
-        BusinessResourceDeltaV2::default(),
     ))
 }
 
@@ -4725,7 +4602,6 @@ fn apply_cancel_target_action_v2(
         UniqueSessionStateV2,
         CancelTargetBusinessEffectV3,
         Vec<LifecycleFeedbackEffectV2>,
-        BusinessResourceDeltaV2,
     ),
     SimRunActorErrorV2,
 > {
@@ -4736,7 +4612,7 @@ fn apply_cancel_target_action_v2(
             platform_effective_at_utc_ms,
         )
         .map_err(SimRunActorErrorV2::Matching)?;
-    let mut resources = BusinessResourceDeltaV2::default();
+
     let (outcome, lifecycle) = match disposition {
         CallerCancelDispositionV2::TemporaryFailureNoEffect => (
             contracts::CancelTargetOutcome::NotCanceledNoEffect(
@@ -4757,10 +4633,10 @@ fn apply_cancel_target_action_v2(
             Vec::new(),
         ),
         CallerCancelDispositionV2::Canceled(effect) => {
-            let (measurement, lifecycle, state_resources) = effect
+            let (measurement, lifecycle) = effect
                 .into_output_effects(platform_order_id.clone(), platform_effective_at_utc_ms)
                 .map_err(SimRunActorErrorV2::Matching)?;
-            resources.merge(state_resources);
+
             (
                 contracts::CancelTargetOutcome::Canceled(measurement),
                 vec![lifecycle],
@@ -4777,7 +4653,6 @@ fn apply_cancel_target_action_v2(
             outcome,
         },
         lifecycle,
-        resources,
     ))
 }
 
@@ -4791,29 +4666,27 @@ fn apply_cancel_targets_action_v2(
         UniqueSessionStateV2,
         Vec<CancelTargetBusinessEffectV3>,
         Vec<LifecycleFeedbackEffectV2>,
-        BusinessResourceDeltaV2,
     ),
     SimRunActorErrorV2,
 > {
     let mut effects = Vec::with_capacity(target_ids.len());
     let mut lifecycle = Vec::with_capacity(target_ids.len());
-    let mut resources = BusinessResourceDeltaV2::default();
+
     for (target_ordinal, platform_order_id) in target_ids.into_iter().enumerate() {
-        let (next_session, effect, mut target_lifecycle, target_resources) =
-            apply_cancel_target_action_v2(
-                session,
-                global_request_id,
-                target_ordinal as u64,
-                platform_order_id,
-                Vec::new(),
-                platform_effective_at_utc_ms,
-            )?;
+        let (next_session, effect, mut target_lifecycle) = apply_cancel_target_action_v2(
+            session,
+            global_request_id,
+            target_ordinal as u64,
+            platform_order_id,
+            Vec::new(),
+            platform_effective_at_utc_ms,
+        )?;
         session = next_session;
-        resources.merge(target_resources);
+
         effects.push(effect);
         lifecycle.append(&mut target_lifecycle);
     }
-    Ok((session, effects, lifecycle, resources))
+    Ok((session, effects, lifecycle))
 }
 
 fn apply_cancel_all_action_v2(
@@ -4824,7 +4697,6 @@ fn apply_cancel_all_action_v2(
         UniqueSessionStateV2,
         Vec<CancelTargetBusinessEffectV3>,
         Vec<LifecycleFeedbackEffectV2>,
-        BusinessResourceDeltaV2,
     ),
     SimRunActorErrorV2,
 > {
@@ -4842,7 +4714,6 @@ fn apply_cancel_market_action_v2(
         UniqueSessionStateV2,
         Vec<CancelTargetBusinessEffectV3>,
         Vec<LifecycleFeedbackEffectV2>,
-        BusinessResourceDeltaV2,
     ),
     SimRunActorErrorV2,
 > {
@@ -4861,14 +4732,7 @@ fn apply_order_query_action_v2(
     session: UniqueSessionStateV2,
     platform_order_id: String,
     platform_effective_at_utc_ms: i64,
-) -> Result<
-    (
-        UniqueSessionStateV2,
-        QueryActionBusinessEffectV2,
-        BusinessResourceDeltaV2,
-    ),
-    SimRunActorErrorV2,
-> {
+) -> Result<(UniqueSessionStateV2, QueryActionBusinessEffectV2), SimRunActorErrorV2> {
     let result = match session
         .execution_state
         .order_query_projection_v2(&platform_order_id)
@@ -4907,7 +4771,6 @@ fn apply_order_query_action_v2(
             effective_processing_at_utc_ms: platform_effective_at_utc_ms,
             result: QueryActionResultV2::Order(result),
         },
-        BusinessResourceDeltaV2::default(),
     ))
 }
 
@@ -4916,16 +4779,9 @@ fn apply_orders_query_action_v2(
     filter: OrdersFilterV1,
     cursor: Option<QueryCursorV2>,
     platform_effective_at_utc_ms: i64,
-) -> Result<
-    (
-        UniqueSessionStateV2,
-        QueryActionBusinessEffectV2,
-        BusinessResourceDeltaV2,
-    ),
-    SimRunActorErrorV2,
-> {
+) -> Result<(UniqueSessionStateV2, QueryActionBusinessEffectV2), SimRunActorErrorV2> {
     let key = OrdersQueryKeyV2::from(&filter);
-    let mut resources = BusinessResourceDeltaV2::default();
+
     let result = if let Some(cursor) = cursor {
         if cursor.root_sequence < session.query_state.earliest_retained_root_sequence {
             OrdersQueryResultV2::OutOfRetention(QueryOutOfRetentionV2::RootSnapshot {
@@ -4941,7 +4797,7 @@ fn apply_orders_query_action_v2(
                 .get(&(cursor.root_sequence, key))
             {
                 Some(root) => {
-                    orders_page_from_root_v2(cursor.root_sequence, &root.rows, cursor.next_offset)
+                    orders_page_from_root_v2(cursor.root_sequence, root, cursor.next_offset)
                 }
                 None => OrdersQueryResultV2::InvalidCursor,
             }
@@ -4971,22 +4827,18 @@ fn apply_orders_query_action_v2(
                 (left.created_at_utc_ms, &left.platform_order_id)
                     .cmp(&(right.created_at_utc_ms, &right.platform_order_id))
             });
-            let (root_resources, root_delta) = orders_root_resource_delta_v2(&key, &rows);
-            resources.merge(root_delta);
-            session.query_state.order_roots.insert(
-                root_key.clone(),
-                QueryRootRowsV2 {
-                    rows,
-                    resources: root_resources,
-                },
-            );
+
+            session
+                .query_state
+                .order_roots
+                .insert(root_key.clone(), rows);
         }
         let root = session
             .query_state
             .order_roots
             .get(&root_key)
             .expect("V2 订单查询首页必须物化或复用精确根");
-        orders_page_from_root_v2(root_sequence, &root.rows, 0)
+        orders_page_from_root_v2(root_sequence, root, 0)
     };
     Ok((
         session,
@@ -4994,7 +4846,6 @@ fn apply_orders_query_action_v2(
             effective_processing_at_utc_ms: platform_effective_at_utc_ms,
             result: QueryActionResultV2::Orders(result),
         },
-        resources,
     ))
 }
 
@@ -5004,16 +4855,9 @@ fn apply_trades_query_action_v2(
     cursor: Option<QueryCursorV2>,
     platform_effective_at_utc_ms: i64,
     finality_policy: &TradeFinalityPolicyV2,
-) -> Result<
-    (
-        UniqueSessionStateV2,
-        QueryActionBusinessEffectV2,
-        BusinessResourceDeltaV2,
-    ),
-    SimRunActorErrorV2,
-> {
+) -> Result<(UniqueSessionStateV2, QueryActionBusinessEffectV2), SimRunActorErrorV2> {
     let key = TradesQueryKeyV2::from(&filter);
-    let mut resources = BusinessResourceDeltaV2::default();
+
     let result = if let Some(cursor) = cursor {
         if cursor.root_sequence < session.query_state.earliest_retained_root_sequence {
             TradesQueryResultV2::OutOfRetention(QueryOutOfRetentionV2::RootSnapshot {
@@ -5029,7 +4873,7 @@ fn apply_trades_query_action_v2(
                 .get(&(cursor.root_sequence, key))
             {
                 Some(root) => {
-                    trades_page_from_root_v2(cursor.root_sequence, &root.rows, cursor.next_offset)
+                    trades_page_from_root_v2(cursor.root_sequence, root, cursor.next_offset)
                 }
                 None => TradesQueryResultV2::InvalidCursor,
             }
@@ -5076,7 +4920,6 @@ fn apply_trades_query_action_v2(
                             },
                         )),
                     },
-                    resources,
                 ));
             }
             let mut rows = if empty_open_interval {
@@ -5110,22 +4953,18 @@ fn apply_trades_query_action_v2(
                 (left.matched_at_utc_ms, &left.trade_id)
                     .cmp(&(right.matched_at_utc_ms, &right.trade_id))
             });
-            let (root_resources, root_delta) = trades_root_resource_delta_v2(&key, &rows);
-            resources.merge(root_delta);
-            session.query_state.trade_roots.insert(
-                root_key.clone(),
-                QueryRootRowsV2 {
-                    rows,
-                    resources: root_resources,
-                },
-            );
+
+            session
+                .query_state
+                .trade_roots
+                .insert(root_key.clone(), rows);
         }
         let root = session
             .query_state
             .trade_roots
             .get(&root_key)
             .expect("V2 成交查询首页必须物化或复用精确根");
-        trades_page_from_root_v2(root_sequence, &root.rows, 0)
+        trades_page_from_root_v2(root_sequence, root, 0)
     };
     Ok((
         session,
@@ -5133,7 +4972,6 @@ fn apply_trades_query_action_v2(
             effective_processing_at_utc_ms: platform_effective_at_utc_ms,
             result: QueryActionResultV2::Trades(result),
         },
-        resources,
     ))
 }
 
@@ -5306,172 +5144,140 @@ fn advance_next_mutation_action_at_v2(
         .pending_actions
         .pop_first()
         .expect("刚读取的 V2 逻辑动作必须仍是首项");
-    let (global_request_id, action_bytes, mut session, effect, lifecycle, mut resources) =
-        match action {
-            MutationActionV2::PostItem {
-                global_request_id,
+    let (global_request_id, mut session, effect, lifecycle) = match action {
+        MutationActionV2::PostItem {
+            global_request_id,
+            item,
+            normalized_gtd_expires_at_utc_ms,
+        } => {
+            let (session, effect, lifecycle) = apply_post_action_v2(
+                session,
+                key,
+                global_request_id.clone(),
                 item,
                 normalized_gtd_expires_at_utc_ms,
-            } => {
-                let action_bytes = post_action_owned_bytes_v2(&global_request_id, &item);
-                let (session, effect, lifecycle, resources) = apply_post_action_v2(
-                    session,
-                    key,
-                    global_request_id.clone(),
-                    item,
-                    normalized_gtd_expires_at_utc_ms,
-                    rules,
-                    finality_policy,
-                )
-                .map_err(BusinessReductionErrorV2::Fatal)?;
-                let effect = Arc::new(effect);
-                (
-                    global_request_id,
-                    action_bytes,
-                    session,
-                    MutationActionBusinessEffectV3::Post(effect),
-                    lifecycle,
-                    resources,
-                )
-            }
-            MutationActionV2::CancelTarget {
+                rules,
+                finality_policy,
+            )
+            .map_err(BusinessReductionErrorV2::Fatal)?;
+            let effect = Arc::new(effect);
+            (
                 global_request_id,
+                session,
+                MutationActionBusinessEffectV3::Post(effect),
+                lifecycle,
+            )
+        }
+        MutationActionV2::CancelTarget {
+            global_request_id,
+            target_ordinal,
+            platform_order_id,
+            input_item_refs,
+        } => {
+            let (session, effect, lifecycle) = apply_cancel_target_action_v2(
+                session,
+                Some(&global_request_id),
                 target_ordinal,
                 platform_order_id,
                 input_item_refs,
-            } => {
-                let action_bytes = cancel_action_owned_bytes_v2(
-                    &global_request_id,
-                    &platform_order_id,
-                    &input_item_refs,
-                );
-                let (session, effect, lifecycle, resources) = apply_cancel_target_action_v2(
-                    session,
-                    Some(&global_request_id),
-                    target_ordinal,
-                    platform_order_id,
-                    input_item_refs,
-                    key.effective_processing_at_utc_ms,
-                )
-                .map_err(BusinessReductionErrorV2::Fatal)?;
-                let effect = Arc::new(effect);
-                (
-                    global_request_id,
-                    action_bytes,
-                    session,
-                    MutationActionBusinessEffectV3::Cancel(vec![effect]),
-                    lifecycle,
-                    resources,
-                )
-            }
-            MutationActionV2::CancelMarket {
+                key.effective_processing_at_utc_ms,
+            )
+            .map_err(BusinessReductionErrorV2::Fatal)?;
+            let effect = Arc::new(effect);
+            (
                 global_request_id,
-                condition_id,
-            } => {
-                let action_bytes =
-                    cancel_market_action_owned_bytes_v2(&global_request_id, &condition_id);
-                let (session, effects, lifecycle, resources) = apply_cancel_market_action_v2(
-                    session,
-                    &global_request_id,
-                    &condition_id,
-                    key.effective_processing_at_utc_ms,
-                )
-                .map_err(BusinessReductionErrorV2::Fatal)?;
-                (
-                    global_request_id,
-                    action_bytes,
-                    session,
-                    MutationActionBusinessEffectV3::Cancel(
-                        effects.into_iter().map(Arc::new).collect(),
-                    ),
-                    lifecycle,
-                    resources,
-                )
-            }
-            MutationActionV2::CancelAll { global_request_id } => {
-                let action_bytes = global_request_id.len() as u64;
-                let (session, effects, lifecycle, resources) =
-                    apply_cancel_all_action_v2(session, key.effective_processing_at_utc_ms)
-                        .map_err(BusinessReductionErrorV2::Fatal)?;
-                (
-                    global_request_id,
-                    action_bytes,
-                    session,
-                    MutationActionBusinessEffectV3::Cancel(
-                        effects.into_iter().map(Arc::new).collect(),
-                    ),
-                    lifecycle,
-                    resources,
-                )
-            }
-            MutationActionV2::OrderQuery {
+                session,
+                MutationActionBusinessEffectV3::Cancel(vec![effect]),
+                lifecycle,
+            )
+        }
+        MutationActionV2::CancelMarket {
+            global_request_id,
+            condition_id,
+        } => {
+            let (session, effects, lifecycle) = apply_cancel_market_action_v2(
+                session,
+                &global_request_id,
+                &condition_id,
+                key.effective_processing_at_utc_ms,
+            )
+            .map_err(BusinessReductionErrorV2::Fatal)?;
+            (
                 global_request_id,
+                session,
+                MutationActionBusinessEffectV3::Cancel(effects.into_iter().map(Arc::new).collect()),
+                lifecycle,
+            )
+        }
+        MutationActionV2::CancelAll { global_request_id } => {
+            let (session, effects, lifecycle) =
+                apply_cancel_all_action_v2(session, key.effective_processing_at_utc_ms)
+                    .map_err(BusinessReductionErrorV2::Fatal)?;
+            (
+                global_request_id,
+                session,
+                MutationActionBusinessEffectV3::Cancel(effects.into_iter().map(Arc::new).collect()),
+                lifecycle,
+            )
+        }
+        MutationActionV2::OrderQuery {
+            global_request_id,
+            platform_order_id,
+        } => {
+            let (session, effect) = apply_order_query_action_v2(
+                session,
                 platform_order_id,
-            } => {
-                let action_bytes =
-                    order_query_action_owned_bytes_v2(&global_request_id, &platform_order_id);
-                let (session, effect, resources) = apply_order_query_action_v2(
-                    session,
-                    platform_order_id,
-                    key.effective_processing_at_utc_ms,
-                )
-                .map_err(BusinessReductionErrorV2::Fatal)?;
-                (
-                    global_request_id,
-                    action_bytes,
-                    session,
-                    MutationActionBusinessEffectV3::Query(Arc::new(effect)),
-                    Vec::new(),
-                    resources,
-                )
-            }
-            MutationActionV2::OrdersQuery {
+                key.effective_processing_at_utc_ms,
+            )
+            .map_err(BusinessReductionErrorV2::Fatal)?;
+            (
                 global_request_id,
+                session,
+                MutationActionBusinessEffectV3::Query(Arc::new(effect)),
+                Vec::new(),
+            )
+        }
+        MutationActionV2::OrdersQuery {
+            global_request_id,
+            filter,
+            cursor,
+        } => {
+            let (session, effect) = apply_orders_query_action_v2(
+                session,
                 filter,
                 cursor,
-            } => {
-                let action_bytes = orders_query_action_owned_bytes_v2(&global_request_id, &filter);
-                let (session, effect, resources) = apply_orders_query_action_v2(
-                    session,
-                    filter,
-                    cursor,
-                    key.effective_processing_at_utc_ms,
-                )
-                .map_err(BusinessReductionErrorV2::Fatal)?;
-                (
-                    global_request_id,
-                    action_bytes,
-                    session,
-                    MutationActionBusinessEffectV3::Query(Arc::new(effect)),
-                    Vec::new(),
-                    resources,
-                )
-            }
-            MutationActionV2::TradesQuery {
+                key.effective_processing_at_utc_ms,
+            )
+            .map_err(BusinessReductionErrorV2::Fatal)?;
+            (
                 global_request_id,
+                session,
+                MutationActionBusinessEffectV3::Query(Arc::new(effect)),
+                Vec::new(),
+            )
+        }
+        MutationActionV2::TradesQuery {
+            global_request_id,
+            filter,
+            cursor,
+        } => {
+            let (session, effect) = apply_trades_query_action_v2(
+                session,
                 filter,
                 cursor,
-            } => {
-                let action_bytes = trades_query_action_owned_bytes_v2(&global_request_id, &filter);
-                let (session, effect, resources) = apply_trades_query_action_v2(
-                    session,
-                    filter,
-                    cursor,
-                    key.effective_processing_at_utc_ms,
-                    finality_policy,
-                )
-                .map_err(BusinessReductionErrorV2::Fatal)?;
-                (
-                    global_request_id,
-                    action_bytes,
-                    session,
-                    MutationActionBusinessEffectV3::Query(Arc::new(effect)),
-                    Vec::new(),
-                    resources,
-                )
-            }
-        };
-    resources.remove_record(action_bytes);
+                key.effective_processing_at_utc_ms,
+                finality_policy,
+            )
+            .map_err(BusinessReductionErrorV2::Fatal)?;
+            (
+                global_request_id,
+                session,
+                MutationActionBusinessEffectV3::Query(Arc::new(effect)),
+                Vec::new(),
+            )
+        }
+    };
+
     let query_projection_changed = match &effect {
         MutationActionBusinessEffectV3::Post(effect) => {
             matches!(&effect.outcome, PostOrderItemOutcomeV2::Accepted(_))
@@ -5495,17 +5301,14 @@ fn advance_next_mutation_action_at_v2(
         .expect("V2 待处理动作数量必须保持正值");
     match &effect {
         MutationActionBusinessEffectV3::Post(effect) => {
-            resources.merge(post_result_resources_v2(effect));
             request.post_results.push(Arc::clone(effect));
         }
         MutationActionBusinessEffectV3::Cancel(effects) => {
             for effect in effects {
-                resources.add_record(cancel_result_owned_bytes_v2(effect));
                 request.cancel_results.push(Arc::clone(effect));
             }
         }
         MutationActionBusinessEffectV3::Query(effect) => {
-            resources.merge(query_result_resources_v2(&effect.result));
             request.query_result = Some(Arc::clone(effect));
         }
     }
@@ -5517,11 +5320,7 @@ fn advance_next_mutation_action_at_v2(
     } else {
         None
     };
-    state.business_resources = resources.apply_to(state.business_resources).ok_or({
-        BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(
-            MatchingStateErrorV1::QueuePredecessorConflict,
-        ))
-    })?;
+
     state.session = Some(session);
     Ok((
         state,
@@ -5597,7 +5396,6 @@ fn drain_scheduled_obligations_at_v2(
 ) -> Result<BusinessReducerStateV2, BusinessReductionErrorV2> {
     if let Some(session) = state.session.as_mut() {
         if session.execution_state.next_settlement_clock_at_utc_ms() == Some(logical_at_utc_ms) {
-            let before_resources = session.execution_state.requested_settlement_resources();
             let effects = session
                 .execution_state
                 .advance_settlement_at(logical_at_utc_ms)
@@ -5636,12 +5434,7 @@ fn drain_scheduled_obligations_at_v2(
                     }
                 }
             }
-            let after_resources = session.execution_state.requested_settlement_resources();
-            state.business_resources.records = state.business_resources.records
-                - before_resources.records
-                + after_resources.records;
-            state.business_resources.bytes =
-                state.business_resources.bytes - before_resources.bytes + after_resources.bytes;
+
             output.lifecycle.extend(effects);
         }
     }
@@ -5659,11 +5452,7 @@ fn drain_scheduled_obligations_at_v2(
             .map_err(|error| {
                 BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(error))
             })?;
-        state.business_resources = effects.resources.apply_to(state.business_resources).ok_or(
-            BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(
-                MatchingStateErrorV1::QueuePredecessorConflict,
-            )),
-        )?;
+
         output
             .lifecycle
             .extend(effects.into_lifecycle_feedback().map_err(|error| {
@@ -5689,11 +5478,7 @@ fn drain_scheduled_obligations_at_v2(
             .map_err(|error| {
                 BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(error))
             })?;
-        state.business_resources = effects.resources.apply_to(state.business_resources).ok_or(
-            BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(
-                MatchingStateErrorV1::QueuePredecessorConflict,
-            )),
-        )?;
+
         if effects.transition.is_some() {
             session.query_state.advance_revision();
         }
@@ -5755,9 +5540,7 @@ fn advance_rebate_due_v2(
     let (session, effects) = session
         .map_execution_state(|execution| execution.advance_next_rebate_clock_at(due))
         .map_err(SimRunActorErrorV2::Matching)?;
-    state.business_resources = effects.resources.apply_to(state.business_resources).ok_or(
-        SimRunActorErrorV2::Matching(MatchingStateErrorV1::QueuePredecessorConflict),
-    )?;
+
     output.lifecycle.extend(
         effects
             .into_lifecycle_feedback()
@@ -5775,7 +5558,7 @@ fn advance_role_time_at_v2(
     logical_at_utc_ms: i64,
 ) -> Result<BusinessReducerStateV2, BusinessReductionErrorV2> {
     let session = state.session.as_mut().expect("逻辑驱动已确认唯一会话");
-    let mut resources = match path {
+    match path {
         MarketEventPathV1::HiddenPlatform => session
             .hidden_platform_markets
             .as_mut()
@@ -5787,20 +5570,14 @@ fn advance_role_time_at_v2(
     }
     .map_err(|error| BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::MarketEvent(error)))?;
     if drives_execution {
-        let execution = session
+        session
             .execution_state
             .advance_market_time(&session.market_directory, logical_at_utc_ms)
             .map_err(|error| {
                 BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(error))
             })?;
-        resources.merge(execution.resources);
     }
-    state.business_resources =
-        resources
-            .apply_to(state.business_resources)
-            .ok_or(BusinessReductionErrorV2::Fatal(
-                SimRunActorErrorV2::Matching(MatchingStateErrorV1::QueuePredecessorConflict),
-            ))?;
+
     Ok(state)
 }
 
@@ -6303,8 +6080,7 @@ fn reduce_business_input_v2(
                 SimCallerRoleV1::Paper => None,
             };
             let execution_state = ExecutionStateV2::new(&market_directory, account);
-            let business_resources =
-                initial_session_resource_quantity_v2(spec, &opening_fact, &market_directory);
+
             state.session = Some(UniqueSessionStateV2 {
                 opening_fact: Arc::clone(&opening_fact),
                 response_bridge_binding_id: spec.response_bridge_binding_id.clone(),
@@ -6322,7 +6098,7 @@ fn reduce_business_input_v2(
                 hidden_platform_frontier: LogicalPathFrontierV2::default(),
                 public_visibility_frontier: LogicalPathFrontierV2::default(),
             });
-            state.business_resources = business_resources;
+
             BusinessReducerOutputV2::CreateSession(CreateSessionControlResultV2 {
                 disposition: CreateSessionDispositionV2::NewPrepared,
                 opening_fact,
@@ -6354,7 +6130,7 @@ fn reduce_business_input_v2(
             session.initialization = SessionInitializationV2::Active {
                 activation_id: activation_id.to_owned(),
             };
-            state.business_resources.bytes += activation_id.len() as u64;
+
             BusinessReducerOutputV2::SessionInitialization(
                 SessionInitializationControlResultV2::Activated,
             )
@@ -6385,7 +6161,7 @@ fn reduce_business_input_v2(
             session.initialization = SessionInitializationV2::InitializationFailedClosed {
                 failure_id: failure_id.to_owned(),
             };
-            state.business_resources.bytes += failure_id.len() as u64;
+
             BusinessReducerOutputV2::SessionInitialization(
                 SessionInitializationControlResultV2::FailedClosed,
             )
@@ -6397,15 +6173,11 @@ fn reduce_business_input_v2(
                     SimRunActorErrorV2::SessionNotCreated,
                 ));
             };
-            let caller_role = session.opening_fact.account_instance_key.caller_role;
             let enrollment = match session.enroll_market(request) {
                 Ok(enrollment) => enrollment,
                 Err(error) => return Err(unaccepted_business_input_v2(state, error)),
             };
-            state.business_resources = add_resource_quantity_v2(
-                state.business_resources,
-                enrollment_resource_quantity_v2(request, caller_role),
-            );
+
             BusinessReducerOutputV2::MarketEnrollment(enrollment)
         }
         BusinessReducerInputV2::RegisterNewRequest {
@@ -6448,15 +6220,11 @@ fn reduce_business_input_v2(
                     SimRunActorErrorV2::SessionNotCreated,
                 ));
             };
-            let resources = match session.query_state.advance_retention(advance) {
-                Ok(resources) => resources,
+            match session.query_state.advance_retention(advance) {
+                Ok(()) => (),
                 Err(error) => return Err(unaccepted_business_input_v2(state, error)),
             };
-            state.business_resources = resources.apply_to(state.business_resources).ok_or(
-                BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(
-                    MatchingStateErrorV1::QueuePredecessorConflict,
-                )),
-            )?;
+
             BusinessReducerOutputV2::RetentionAdvanced
         }
         logical @ (BusinessReducerInputV2::PlatformPrefixAdvance { .. }
@@ -6553,7 +6321,7 @@ fn reduce_normalized_market_slice_v1(
     let caller_role = session.opening_fact.account_instance_key.caller_role;
     let drives_execution = market_path_drives_execution_for(caller_role, path);
     let mut effects = SessionMarketEventEffectsV2::default();
-    let mut resources = BusinessResourceDeltaV2::default();
+
     let mut query_projection_changed = false;
     for (event, normalized) in events.iter().zip(normalized) {
         let end_at_utc_ms = session
@@ -6582,7 +6350,7 @@ fn reduce_normalized_market_slice_v1(
                     MarketEventSliceReductionErrorV2::Fatal(SimRunActorErrorV2::MarketEvent(error))
                 })?
         };
-        resources.merge(market_application.resources);
+
         if drives_execution {
             let mut execution = session
                 .execution_state
@@ -6598,11 +6366,9 @@ fn reduce_normalized_market_slice_v1(
                     MarketEventSliceReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(error))
                 })?;
             if let Some(reason_code) = market_application.resolution_invalidation_reason {
-                execution.resources.merge(
-                    session
-                        .execution_state
-                        .invalidate_qualified_resolution(&event.market.condition_id.0, reason_code),
-                );
+                session
+                    .execution_state
+                    .invalidate_qualified_resolution(&event.market.condition_id.0, reason_code);
             }
             if let Some(qualified_resolution) = market_application.qualified_resolution {
                 execution.merge(
@@ -6621,7 +6387,7 @@ fn reduce_normalized_market_slice_v1(
                         })?,
                 );
             }
-            resources.merge(execution.resources);
+
             query_projection_changed |= execution.query_projection_changed();
             effects.execution.push(execution);
         }
@@ -6646,11 +6412,7 @@ fn reduce_normalized_market_slice_v1(
             );
         }
     }
-    state.business_resources = resources.apply_to(state.business_resources).ok_or({
-        MarketEventSliceReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(
-            MatchingStateErrorV1::QueuePredecessorConflict,
-        ))
-    })?;
+
     session.market_enrollment.business_input_started = true;
     if query_projection_changed {
         session.query_state.advance_revision();
@@ -6864,67 +6626,7 @@ fn is_stable_text(value: &str) -> bool {
     !value.is_empty() && value.trim() == value
 }
 
-fn initial_session_resource_quantity_v2(
-    spec: &SessionSpecV3,
-    opening_fact: &AccountOpeningFactV2,
-    directory: &SessionMarketDirectoryV1,
-) -> ResourceQuantityV1 {
-    let account_key = &opening_fact.account_instance_key;
-    let mut quantity = ResourceQuantityV1::new(
-        1,
-        [
-            opening_fact.creation_request_id.len(),
-            account_key.run_id.len(),
-            account_key.caller_instance_id.len(),
-            account_key.account_id.len(),
-            opening_fact.session_id.len(),
-            opening_fact.initial_platform_scenario_file_sha256.0.len(),
-            opening_fact.initial_account_state.available_pusd.0.len(),
-            spec.response_bridge_binding_id.len(),
-            spec.session_seed.0.len(),
-            account_key.run_id.len(),
-            account_key.caller_instance_id.len(),
-            account_key.account_id.len(),
-        ]
-        .into_iter()
-        .map(|length| length as u64)
-        .sum(),
-    );
-    let role_market_count = role_market_state_count(spec.caller_role);
-    for market in directory.markets() {
-        let asset_count = market.assets().len() as u64;
-        quantity.records += 3 + role_market_count + asset_count * 2;
-        quantity.bytes += market_payload_bytes(market)
-            + market.market().condition_id.0.len() as u64
-            + market_index_bytes(market) * (role_market_count + 2)
-            + market.market().condition_id.0.len() as u64 * 2;
-    }
-    quantity
-}
-
-fn enrollment_resource_quantity_v2(
-    request: &MarketEnrollmentRequestV1,
-    caller_role: SimCallerRoleV1,
-) -> ResourceQuantityV1 {
-    let role_market_count = role_market_state_count(caller_role);
-    let asset_count = request.market.assets().len() as u64;
-    ResourceQuantityV1::new(
-        1 + role_market_count + asset_count * 2 + 4,
-        market_payload_bytes(&request.market) * 2
-            + request.market.market().condition_id.0.len() as u64
-            + market_index_bytes(&request.market) * (role_market_count + 2)
-            + (request.enrollment_request_id.len() as u64) * 2
-            + request.market.market().condition_id.0.len() as u64 * 2,
-    )
-}
-
-fn role_market_state_count(caller_role: SimCallerRoleV1) -> u64 {
-    match caller_role {
-        SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation => 2,
-        SimCallerRoleV1::Paper => 1,
-    }
-}
-
+#[cfg(feature = "measurement")]
 fn market_payload_bytes(market: &PlatformMarketV1) -> u64 {
     let identity = market.market();
     (identity.condition_id.0.len()
@@ -6936,20 +6638,220 @@ fn market_payload_bytes(market: &PlatformMarketV1) -> u64 {
             .sum::<usize>()) as u64
 }
 
-fn market_index_bytes(market: &PlatformMarketV1) -> u64 {
-    (market.market().condition_id.0.len()
-        + market
-            .assets()
-            .iter()
-            .map(|asset| asset.token_id.0.len())
-            .sum::<usize>()) as u64
+#[cfg(feature = "measurement")]
+fn post_result_resources_v2(effect: &PostOrderItemBusinessEffectV2) -> ResourceQuantityV1 {
+    let mut resources = ResourceQuantityV1::default();
+    let mut owned_bytes =
+        (effect.item_id.len() + effect.condition_id.0.len() + effect.token_id.0.len()) as u64;
+    if let PostOrderItemOutcomeV2::Accepted(accepted) = &effect.outcome {
+        owned_bytes += (accepted.platform_order_id.len() + accepted.platform_order_status.raw.len())
+            as u64
+            + submission_measurement_owned_bytes_v2(&accepted.measurement);
+        for fill in &accepted.fills {
+            resources.add_record(
+                (fill.trade_id.len()
+                    + fill.source_price_pusd_per_share.0.len()
+                    + fill.base_quantity_shares.0.len()
+                    + fill.quote_amount_pusd.0.len()) as u64,
+            );
+        }
+        resources.add_records(accepted.account_transition_sequences.len() as u64);
+    }
+    resources.add_record(owned_bytes);
+    resources
 }
 
-fn add_resource_quantity_v2(
-    current: ResourceQuantityV1,
-    delta: ResourceQuantityV1,
-) -> ResourceQuantityV1 {
-    ResourceQuantityV1::new(current.records + delta.records, current.bytes + delta.bytes)
+#[cfg(feature = "measurement")]
+fn query_result_resources_v2(result: &QueryActionResultV2) -> ResourceQuantityV1 {
+    let mut resources = ResourceQuantityV1::default();
+    resources.add_record(0);
+    match result {
+        QueryActionResultV2::Order(OrderQueryResultV2::Found(order)) => {
+            resources.add_record(order_projection_owned_bytes_v2(order));
+        }
+        QueryActionResultV2::Orders(OrdersQueryResultV2::Page(page)) => {
+            for order in &page.items {
+                resources.add_record(order_projection_owned_bytes_v2(order));
+            }
+        }
+        QueryActionResultV2::Trades(TradesQueryResultV2::Page(page)) => {
+            for trade in &page.items {
+                resources.add_record(trade_projection_owned_bytes_v2(trade));
+            }
+        }
+        QueryActionResultV2::Order(
+            OrderQueryResultV2::NotFound | OrderQueryResultV2::OutOfRetention(_),
+        )
+        | QueryActionResultV2::Orders(
+            OrdersQueryResultV2::InvalidCursor | OrdersQueryResultV2::OutOfRetention(_),
+        )
+        | QueryActionResultV2::Trades(
+            TradesQueryResultV2::InvalidCursor | TradesQueryResultV2::OutOfRetention(_),
+        ) => {}
+    }
+    resources
+}
+
+#[cfg(feature = "measurement")]
+fn direct_response_draft_owned_bytes_v2<R>(draft: &DirectResponseDraft<R>) -> u64 {
+    (draft.global_request_id.len() + draft.caller_correlation_id.as_ref().map_or(0, String::len))
+        as u64
+        + match &draft.payload {
+            DirectResponsePayloadDraft::PostOrder(item) => post_result_resources_v2(item).bytes,
+            DirectResponsePayloadDraft::PostOrders(items) => items
+                .iter()
+                .map(|item| post_result_resources_v2(item).bytes)
+                .sum(),
+            DirectResponsePayloadDraft::CancelOrder(item) => cancel_result_owned_bytes_v2(item),
+            DirectResponsePayloadDraft::CancelOrders(items)
+            | DirectResponsePayloadDraft::CancelMarketOrders(items)
+            | DirectResponsePayloadDraft::CancelAllOrders(items) => items
+                .iter()
+                .map(|item| cancel_result_owned_bytes_v2(item))
+                .sum(),
+            DirectResponsePayloadDraft::Order(item)
+            | DirectResponsePayloadDraft::Orders(item)
+            | DirectResponsePayloadDraft::Trades(item) => {
+                query_result_resources_v2(&item.result).bytes
+            }
+        }
+}
+
+#[cfg(feature = "measurement")]
+fn business_resource_snapshot_v2(state: &BusinessReducerStateV2) -> ResourceQuantityV1 {
+    let mut total = ResourceQuantityV1::default();
+    let Some(session) = &state.session else {
+        return total;
+    };
+    let opening = &session.opening_fact;
+    total.add_record(
+        account_key_owned_bytes_v2(&opening.account_instance_key)
+            + (opening.creation_request_id.len()
+                + opening.session_id.len()
+                + opening.initial_platform_scenario_file_sha256.0.len()
+                + opening.initial_account_state.available_pusd.0.len()
+                + session.response_bridge_binding_id.len()
+                + session.session_seed.0.len()) as u64,
+    );
+    total.bytes += match &session.initialization {
+        SessionInitializationV2::PreparedLedgerInit => 0,
+        SessionInitializationV2::Active { activation_id } => activation_id.len() as u64,
+        SessionInitializationV2::InitializationFailedClosed { failure_id } => {
+            failure_id.len() as u64
+        }
+    };
+    for market in session.market_directory.markets() {
+        total.add_record(market_payload_bytes(market));
+    }
+    total.include(session.public_markets.measurement_resources());
+    if let Some(hidden) = &session.hidden_platform_markets {
+        total.include(hidden.measurement_resources());
+    }
+    total.include(session.execution_state.measurement_resources());
+    for record in &session.market_enrollment.records {
+        total.add_record(
+            (record.enrollment_request_id.len()
+                + record.market.condition_id.0.len()
+                + record.market.clob_market_id.0.len()
+                + record
+                    .assets
+                    .iter()
+                    .map(|a| a.token_id.0.len() + a.outcome.label.len())
+                    .sum::<usize>()) as u64,
+        );
+    }
+    for id in session
+        .market_enrollment
+        .records_by_request_id
+        .keys()
+        .chain(
+            session
+                .market_enrollment
+                .paper_candidate_condition_ids
+                .iter(),
+        )
+        .chain(session.market_enrollment.paper_candidate_token_ids.iter())
+    {
+        total.add_record(id.len() as u64);
+    }
+    for (id, request) in &session.mutation_requests.requests_by_id {
+        total.add_record(
+            (id.len()
+                + request
+                    .caller_correlation_id
+                    .as_ref()
+                    .map_or(0, String::len)) as u64,
+        );
+        for post in &request.post_results {
+            total.include(post_result_resources_v2(post));
+        }
+        for cancel in &request.cancel_results {
+            total.add_record(cancel_result_owned_bytes_v2(cancel));
+        }
+        if let Some(query) = &request.query_result {
+            total.include(query_result_resources_v2(&query.result));
+        }
+        if let Some(response) = &request.completed_response {
+            match response.as_ref() {
+                StoredDirectResponse::Final(response) => {
+                    total.add_record(direct_response_owned_bytes_v2(response))
+                }
+                StoredDirectResponse::Draft(draft) => {
+                    total.add_record(direct_response_draft_owned_bytes_v2(draft))
+                }
+            }
+        }
+    }
+    for action in session.mutation_requests.pending_actions.values() {
+        let bytes = match action {
+            MutationActionV2::PostItem {
+                global_request_id,
+                item,
+                ..
+            } => post_action_owned_bytes_v2(global_request_id, item),
+            MutationActionV2::CancelTarget {
+                global_request_id,
+                platform_order_id,
+                input_item_refs,
+                ..
+            } => {
+                cancel_action_owned_bytes_v2(global_request_id, platform_order_id, input_item_refs)
+            }
+            MutationActionV2::CancelMarket {
+                global_request_id,
+                condition_id,
+            } => cancel_market_action_owned_bytes_v2(global_request_id, condition_id),
+            MutationActionV2::CancelAll { global_request_id } => global_request_id.len() as u64,
+            MutationActionV2::OrderQuery {
+                global_request_id,
+                platform_order_id,
+            } => order_query_action_owned_bytes_v2(global_request_id, platform_order_id),
+            MutationActionV2::OrdersQuery {
+                global_request_id,
+                filter,
+                ..
+            } => orders_query_action_owned_bytes_v2(global_request_id, filter),
+            MutationActionV2::TradesQuery {
+                global_request_id,
+                filter,
+                ..
+            } => trades_query_action_owned_bytes_v2(global_request_id, filter),
+        };
+        total.add_record(bytes);
+    }
+    for ((_, key), root) in &session.query_state.order_roots {
+        total.add_record(orders_query_key_owned_bytes_v2(key));
+        for row in root {
+            total.add_record(order_projection_owned_bytes_v2(row));
+        }
+    }
+    for ((_, key), root) in &session.query_state.trade_roots {
+        total.add_record(trades_query_key_owned_bytes_v2(key));
+        for row in root {
+            total.add_record(trade_projection_owned_bytes_v2(row));
+        }
+    }
+    total
 }
 
 #[cfg(test)]
@@ -7900,10 +7802,7 @@ mod tests {
         let BuyOrderDispositionV2::Accepted(accepted) = disposition else {
             panic!("maker 会话轨迹的 GTC 必须被接受")
         };
-        state.business_resources = accepted
-            .resources
-            .apply_to(state.business_resources)
-            .expect("BUY 资源增量必须能应用于唯一聚合计数");
+
         query_state.advance_revision();
         state.session = Some(UniqueSessionStateV2 {
             opening_fact,
@@ -7952,10 +7851,7 @@ mod tests {
         let (execution_state, effects) = execution_state
             .advance_next_rebate_clock_at(platform_effective_at_utc_ms)
             .expect("返佣时钟候选必须成功");
-        state.business_resources = effects
-            .resources
-            .apply_to(state.business_resources)
-            .expect("返佣时钟资源增量必须能应用于唯一聚合计数");
+
         state.session = Some(UniqueSessionStateV2 {
             opening_fact,
             response_bridge_binding_id,
@@ -8005,10 +7901,7 @@ mod tests {
         let (execution_state, effects) = execution_state
             .advance_next_scheduled_finality_at(platform_event_at_utc_ms, finality_policy, rules)
             .expect("最终性候选必须成功");
-        state.business_resources = effects
-            .resources
-            .apply_to(state.business_resources)
-            .expect("最终性资源增量必须能应用于唯一聚合计数");
+
         if effects.transition.is_some() {
             query_state.advance_revision();
         }
@@ -9369,84 +9262,6 @@ mod tests {
         (state, receipt, effects, lifecycle)
     }
 
-    fn order_projection_owned_bytes_for_query_test(order: &OrderProjectionV2) -> u64 {
-        let quantity_bytes = match &order.quantities {
-            contracts::OrderQuantityProjectionV2::Base {
-                accepted_base_quantity_shares,
-                matched_base_quantity_shares,
-                active_unfilled_base_quantity_shares,
-                venue_dust_closed_base_quantity_shares,
-                market_resolved_canceled_base_quantity_shares,
-                canceled_base_quantity_shares,
-                expired_base_quantity_shares,
-                accepted_quote_amount_pusd,
-                matched_quote_amount_pusd,
-                open_encumbered_quote_amount_pusd,
-                venue_dust_released_quote_amount_pusd,
-                market_resolved_released_quote_amount_pusd,
-                released_price_improvement_quote_amount_pusd,
-                canceled_released_quote_amount_pusd,
-                expired_released_quote_amount_pusd,
-            } => [
-                accepted_base_quantity_shares,
-                matched_base_quantity_shares,
-                active_unfilled_base_quantity_shares,
-                venue_dust_closed_base_quantity_shares,
-                market_resolved_canceled_base_quantity_shares,
-                canceled_base_quantity_shares,
-                expired_base_quantity_shares,
-                accepted_quote_amount_pusd,
-                matched_quote_amount_pusd,
-                open_encumbered_quote_amount_pusd,
-                venue_dust_released_quote_amount_pusd,
-                market_resolved_released_quote_amount_pusd,
-                released_price_improvement_quote_amount_pusd,
-                canceled_released_quote_amount_pusd,
-                expired_released_quote_amount_pusd,
-            ]
-            .into_iter()
-            .map(|value| value.0.len() as u64)
-            .sum::<u64>(),
-            contracts::OrderQuantityProjectionV2::QuoteBudget {
-                accepted_quote_budget_pusd,
-                matched_quote_amount_pusd,
-                released_or_unspent_quote_amount_pusd,
-                actual_matched_base_quantity_shares,
-                sdk_taker_amount_audit_base_quantity_shares,
-            } => [
-                accepted_quote_budget_pusd,
-                matched_quote_amount_pusd,
-                released_or_unspent_quote_amount_pusd,
-                actual_matched_base_quantity_shares,
-                sdk_taker_amount_audit_base_quantity_shares,
-            ]
-            .into_iter()
-            .map(|value| value.0.len() as u64)
-            .sum::<u64>(),
-        };
-        (order.platform_order_id.len()
-            + order.global_request_id.len()
-            + order.item_id.len()
-            + order.condition_id.0.len()
-            + order.token_id.0.len()
-            + order.source_price_pusd_per_share.0.len()
-            + order.status.raw.len()
-            + order.immediate_taker_fee_encumbered_pusd.0.len()) as u64
-            + quantity_bytes
-    }
-
-    fn trade_projection_owned_bytes_for_query_test(trade: &TradeProjectionV2) -> u64 {
-        (trade.trade_id.len()
-            + trade.platform_order_id.len()
-            + trade.condition_id.0.len()
-            + trade.token_id.0.len()
-            + trade.status.raw.len()
-            + trade.source_price_pusd_per_share.0.len()
-            + trade.base_quantity_shares.0.len()
-            + trade.quote_amount_pusd.0.len()
-            + trade.immediate_taker_fee_pusd.0.len()) as u64
-    }
-
     #[tokio::test(flavor = "current_thread")]
     async fn trades_query_exposes_mnb_at_fill_creation_and_freezes_old_root() {
         let finality_policy = matched_not_broadcasted_policy_v2_for_tests();
@@ -10146,7 +9961,6 @@ mod tests {
             102
         );
 
-        let resources_before_single_query = state.business_resources;
         let single_request = BusinessRequestV2::Order(OrderRequestV2 {
             context: RequestContextV2 {
                 global_request_id: "query-root-single".to_owned(),
@@ -10166,23 +9980,13 @@ mod tests {
             actor._finality_policy.as_ref(),
         );
         state = next;
-        assert_eq!(
-            state.business_resources.records,
-            resources_before_single_query.records + 3,
-            "单笔 Found 必须只保留请求、结果和一行冻结投影"
-        );
+
         let QueryActionResultV2::Order(OrderQueryResultV2::Found(single_order)) =
             &single_effect.result
         else {
             panic!("活动订单单笔查询必须返回 Found")
         };
-        assert_eq!(
-            state.business_resources.bytes,
-            resources_before_single_query.bytes
-                + "query-root-single".len() as u64
-                + order_projection_owned_bytes_for_query_test(single_order),
-            "单笔查询必须精确计入请求身份和冻结订单投影的变长正文"
-        );
+
         assert_eq!(single_order.platform_order_id, "sim-1");
         assert_eq!(
             single_order.status.known,
@@ -10211,7 +10015,6 @@ mod tests {
         };
         assert!(Arc::ptr_eq(single_response_result, &single_effect));
 
-        let resources_before_all_query = state.business_resources;
         let all_request = BusinessRequestV2::Orders(OrdersRequestV2 {
             context: RequestContextV2 {
                 global_request_id: "query-root-all".to_owned(),
@@ -10232,11 +10035,7 @@ mod tests {
             actor._finality_policy.as_ref(),
         );
         state = next;
-        assert_eq!(
-            state.business_resources.records,
-            resources_before_all_query.records + 205,
-            "102 行新根首页必须只保留请求、103 条根记录及 101 条结果记录"
-        );
+
         let QueryActionResultV2::Orders(OrdersQueryResultV2::Page(all_page)) = &all_effect.result
         else {
             panic!("全量活动订单首页必须返回页面")
@@ -10260,36 +10059,6 @@ mod tests {
                 .all(|o| o.get("quantities").is_some())
         );
 
-        let all_root_rows = &state
-            .session
-            .as_ref()
-            .expect("全量订单根后会话存在")
-            .query_state
-            .order_roots
-            .get(&(102, OrdersQueryKeyV2::from(&OrdersFilterV1::default())))
-            .expect("全量订单根存在")
-            .rows;
-        let all_root_bytes = all_root_rows
-            .iter()
-            .map(order_projection_owned_bytes_for_query_test)
-            .sum::<u64>();
-        let all_page_bytes = all_page
-            .items
-            .iter()
-            .map(order_projection_owned_bytes_for_query_test)
-            .sum::<u64>();
-        assert_eq!(
-            all_page_bytes, 14_387,
-            "代表性 100 项订单页的逻辑变长正文测量必须保持可复现"
-        );
-        assert_eq!(
-            state.business_resources.bytes,
-            resources_before_all_query.bytes
-                + "query-root-all".len() as u64
-                + all_root_bytes
-                + all_page_bytes,
-            "100 项订单首页必须精确计入完整冻结根和本页各自拥有的变长正文"
-        );
         assert_eq!(all_page.root_sequence, 102);
         assert_eq!(all_page.items.len(), 100);
         assert_eq!(
@@ -10304,7 +10073,7 @@ mod tests {
             condition_id: Some(condition_id.clone()),
             token_id: Some(first_token_id.clone()),
         };
-        let resources_before_first_token_query = state.business_resources;
+
         let first_token_request = BusinessRequestV2::Orders(OrdersRequestV2 {
             context: RequestContextV2 {
                 global_request_id: "query-root-first-token".to_owned(),
@@ -10325,43 +10094,13 @@ mod tests {
             actor._finality_policy.as_ref(),
         );
         state = next;
-        assert_eq!(
-            state.business_resources.records,
-            resources_before_first_token_query.records + 204,
-            "101 行复合过滤新根首页必须只保留请求、102 条根记录及 101 条结果记录"
-        );
+
         let QueryActionResultV2::Orders(OrdersQueryResultV2::Page(first_token_page)) =
             &first_token_effect.result
         else {
             panic!("资产过滤活动订单首页必须返回页面")
         };
-        let first_token_root_rows = &state
-            .session
-            .as_ref()
-            .expect("复合过滤订单根后会话存在")
-            .query_state
-            .order_roots
-            .get(&(102, OrdersQueryKeyV2::from(&first_token_filter)))
-            .expect("复合过滤订单根存在")
-            .rows;
-        let first_token_root_bytes = first_token_root_rows
-            .iter()
-            .map(order_projection_owned_bytes_for_query_test)
-            .sum::<u64>();
-        let first_token_page_bytes = first_token_page
-            .items
-            .iter()
-            .map(order_projection_owned_bytes_for_query_test)
-            .sum::<u64>();
-        assert_eq!(
-            state.business_resources.bytes,
-            resources_before_first_token_query.bytes
-                + "query-root-first-token".len() as u64
-                + (condition_id.0.len() + first_token_id.0.len()) as u64
-                + first_token_root_bytes
-                + first_token_page_bytes,
-            "复合过滤根键、完整根和首页必须分别精确计量"
-        );
+
         assert_eq!(first_token_page.root_sequence, 102);
         assert_eq!(first_token_page.items.len(), 100);
         assert_eq!(first_token_page.next_cursor, all_page.next_cursor);
@@ -10373,7 +10112,7 @@ mod tests {
             after_utc_ms: Some(1_299),
             before_utc_ms: Some(1_301),
         };
-        let resources_before_trade_query = state.business_resources;
+
         let trade_request = BusinessRequestV2::Trades(TradesRequestV2 {
             context: RequestContextV2 {
                 global_request_id: "query-root-trade".to_owned(),
@@ -10394,43 +10133,13 @@ mod tests {
             finality_policy.as_ref(),
         );
         state = next;
-        assert_eq!(
-            state.business_resources.records,
-            resources_before_trade_query.records + 5,
-            "单行成交新根必须只保留请求、两条根记录及两条结果记录"
-        );
+
         let QueryActionResultV2::Trades(TradesQueryResultV2::Page(trade_page)) =
             &trade_effect.result
         else {
             panic!("同修订成交复合根必须返回页面")
         };
-        let trade_root_rows = &state
-            .session
-            .as_ref()
-            .expect("成交复合根后会话存在")
-            .query_state
-            .trade_roots
-            .get(&(102, TradesQueryKeyV2::from(&trade_filter)))
-            .expect("成交复合根存在")
-            .rows;
-        let trade_root_bytes = trade_root_rows
-            .iter()
-            .map(trade_projection_owned_bytes_for_query_test)
-            .sum::<u64>();
-        let trade_page_bytes = trade_page
-            .items
-            .iter()
-            .map(trade_projection_owned_bytes_for_query_test)
-            .sum::<u64>();
-        assert_eq!(
-            state.business_resources.bytes,
-            resources_before_trade_query.bytes
-                + "query-root-trade".len() as u64
-                + ("sim-1".len() + condition_id.0.len() + first_token_id.0.len()) as u64
-                + trade_root_bytes
-                + trade_page_bytes,
-            "成交复合根键、完整根和页面必须分别精确计量"
-        );
+
         assert_eq!(trade_page.root_sequence, 102);
         assert_eq!(trade_page.items.len(), 1);
         assert_eq!(trade_page.items[0].trade_id, "sim-1");
@@ -10438,18 +10147,7 @@ mod tests {
             trade_page.items[0].status.known,
             Some(contracts::SimulatedTradeKnownStatusV2::MatchedNotBroadcasted)
         );
-        let root_resource_sum = state
-            .session
-            .as_ref()
-            .expect("双过滤根后会话存在")
-            .query_state
-            .order_roots
-            .values()
-            .fold(ResourceQuantityV1::default(), |mut total, root| {
-                total.records += root.resources.records;
-                total.bytes += root.resources.bytes;
-                total
-            });
+
         let query_state = &state
             .session
             .as_ref()
@@ -10463,26 +10161,7 @@ mod tests {
                 .trade_roots
                 .contains_key(&(102, TradesQueryKeyV2::from(&trade_filter)))
         );
-        assert_eq!(
-            query_state
-                .order_roots
-                .get(&(102, OrdersQueryKeyV2::from(&OrdersFilterV1::default())))
-                .expect("全量订单根存在")
-                .resources
-                .records,
-            103
-        );
-        assert_eq!(
-            query_state
-                .order_roots
-                .get(&(102, OrdersQueryKeyV2::from(&first_token_filter)))
-                .expect("资产过滤订单根存在")
-                .resources
-                .records,
-            102
-        );
 
-        let resources_before_repeated_all = state.business_resources;
         let repeated_all_request = BusinessRequestV2::Orders(OrdersRequestV2 {
             context: RequestContextV2 {
                 global_request_id: "query-root-all-repeat".to_owned(),
@@ -10503,11 +10182,7 @@ mod tests {
             actor._finality_policy.as_ref(),
         );
         state = next;
-        assert_eq!(
-            state.business_resources.records,
-            resources_before_repeated_all.records + 102,
-            "复用既有 102 行根时只能新增请求、结果和 100 行页面记录"
-        );
+
         let QueryActionResultV2::Orders(OrdersQueryResultV2::Page(repeated_all_page)) =
             &repeated_all_effect.result
         else {
@@ -10535,17 +10210,6 @@ mod tests {
                 .all(|o| o.get("quantities").is_some())
         );
 
-        assert_eq!(
-            state.business_resources.bytes,
-            resources_before_repeated_all.bytes
-                + "query-root-all-repeat".len() as u64
-                + repeated_all_page
-                    .items
-                    .iter()
-                    .map(order_projection_owned_bytes_for_query_test)
-                    .sum::<u64>(),
-            "复用根时只能计入新请求和本次冻结页面，不得重复计根"
-        );
         assert_eq!(repeated_all_page, all_page);
         let query_state = &state
             .session
@@ -10554,18 +10218,6 @@ mod tests {
             .query_state;
         assert_eq!(query_state.current_revision, 102);
         assert_eq!(query_state.order_roots.len(), 2);
-        assert_eq!(
-            query_state.order_roots.values().fold(
-                ResourceQuantityV1::default(),
-                |mut total, root| {
-                    total.records += root.resources.records;
-                    total.bytes += root.resources.bytes;
-                    total
-                }
-            ),
-            root_resource_sum,
-            "复用精确根不得重复增加根资源"
-        );
 
         let cancel_request = BusinessRequestV2::CancelOrder(CancelOrderRequestV2 {
             context: RequestContextV2 {
@@ -11618,7 +11270,7 @@ mod tests {
             ],
         });
         let cutoff = request_cutoff(1_200);
-        let resources_before_registration = state.business_resources;
+
         let (mut state, receipt) = register_request_candidate(
             &actor.opened,
             actor.scenario.initial_market_directory(),
@@ -11630,22 +11282,7 @@ mod tests {
             actor._rule_snapshot.snapshot(),
         );
         assert_eq!(receipt.scheduled_action_count, 3);
-        assert_eq!(
-            state.business_resources.records,
-            resources_before_registration.records + 4
-        );
-        let expected_registration_bytes = global_request_id.len()
-            + caller_correlation_id.len()
-            + 3 * global_request_id.len()
-            + "duplicate-item".len()
-            + "fok-item".len()
-            + "duplicate-item".len()
-            + 3 * condition_id.0.len()
-            + 3 * token_id.0.len();
-        assert_eq!(
-            state.business_resources.bytes,
-            resources_before_registration.bytes + expected_registration_bytes as u64
-        );
+
         let delayed_at = receipt
             .platform_arrived_at_utc_ms
             .checked_add(150)
@@ -11680,7 +11317,6 @@ mod tests {
             ]
         );
 
-        let resources_before_gtc_action = state.business_resources;
         let (next, first_transition) = advance_mutation_candidate_with_outputs(
             &actor.opened,
             actor.scenario.initial_market_directory(),
@@ -11760,14 +11396,7 @@ mod tests {
         assert_eq!(venue_dust_released_quote_amount_pusd.0, "0");
         assert_eq!(released_price_improvement_quote_amount_pusd.0, "0");
         assert_eq!(immediate_taker_fee_encumbered_pusd.0, "0");
-        assert_eq!(
-            state.business_resources,
-            ResourceQuantityV1::new(
-                resources_before_gtc_action.records + 5,
-                resources_before_gtc_action.bytes + 54 + condition_id.0.len() as u64,
-            ),
-            "普通 GTC 必须只计执行状态和直接响应引用，生命周期正文不复制进请求结果"
-        );
+
         let frozen_gtc = Arc::clone(&gtc_effect);
 
         let (next, second_effect) = advance_mutation_candidate(
@@ -11801,7 +11430,6 @@ mod tests {
             "请求完成前不为尚不可交付的结果反复排序"
         );
 
-        let resources_before_fak_action = state.business_resources;
         let (next, third_transition) = advance_mutation_candidate_with_outputs(
             &actor.opened,
             actor.scenario.initial_market_directory(),
@@ -11894,14 +11522,7 @@ mod tests {
         assert_eq!(actual_matched_base_quantity_shares.0, "5");
         assert_eq!(sdk_taker_amount_audit_base_quantity_shares.0, "6");
         assert_eq!(immediate_taker_fee_encumbered_pusd.0, "0.084");
-        assert_eq!(
-            state.business_resources,
-            ResourceQuantityV1::new(
-                resources_before_fak_action.records + 7,
-                resources_before_fak_action.bytes + 71 + condition_id.0.len() as u64,
-            ),
-            "FAK 必须只计执行状态、直接响应成交行和账户序号引用"
-        );
+
         let request_record = &state
             .session
             .as_ref()
@@ -11941,7 +11562,7 @@ mod tests {
             },
             items: Vec::new(),
         });
-        let resources_before_retry = state.business_resources;
+
         assert_eq!(
             existing_mutation_request_receipt_v2(
                 &state,
@@ -11950,7 +11571,6 @@ mod tests {
             Some(receipt),
             "物理重投必须在验证后来正文前返回首次回执"
         );
-        assert_eq!(state.business_resources, resources_before_retry);
 
         let cancel_request_id = "cancel-batch-v2";
         let cancel_request = BusinessRequestV2::CancelOrders(CancelOrdersRequestV2 {
@@ -11982,7 +11602,7 @@ mod tests {
                 },
             ],
         });
-        let resources_before_cancel_registration = state.business_resources;
+
         let (next, cancel_receipt) = register_request_candidate(
             &actor.opened,
             actor.scenario.initial_market_directory(),
@@ -11995,20 +11615,7 @@ mod tests {
         );
         state = next;
         assert_eq!(cancel_receipt.scheduled_action_count, 2);
-        assert_eq!(
-            state.business_resources.records,
-            resources_before_cancel_registration.records + 6,
-            "请求、两个唯一目标动作和三个输入引用必须分别计数"
-        );
-        let expected_cancel_registration_bytes = cancel_request_id.len()
-            + (cancel_request_id.len() + "sim-1".len() + "ref-a".len() + "ref-c".len())
-            + (cancel_request_id.len() + "sim-999".len() + "ref-b".len());
-        assert_eq!(
-            state.business_resources.bytes,
-            resources_before_cancel_registration.bytes + expected_cancel_registration_bytes as u64
-        );
 
-        let resources_before_cancel_first = state.business_resources;
         let (next, cancel_first) = advance_mutation_candidate_with_outputs(
             &actor.opened,
             actor.scenario.initial_market_directory(),
@@ -12068,16 +11675,7 @@ mod tests {
         assert_eq!(canceled.canceled_base_quantity_shares.0, "5");
         assert_eq!(canceled.released_quote_amount_pusd.0, "1.5");
         assert_eq!(canceled.account_transition_seq, Some(4));
-        assert_eq!(
-            state.business_resources,
-            ResourceQuantityV1::new(
-                resources_before_cancel_first.records - 3,
-                resources_before_cancel_first.bytes - cancel_request_id.len() as u64 - 1,
-            ),
-            "成功撤单只删除执行容器，并把动作外层等量转移为直接响应外层"
-        );
 
-        let bytes_before_not_found = state.business_resources.bytes;
         let (next, cancel_second) = advance_mutation_candidate_with_outputs(
             &actor.opened,
             actor.scenario.initial_market_directory(),
@@ -12108,11 +11706,7 @@ mod tests {
                 contracts::CancelNotCanceledReasonV3::NotFoundOrNotOwned
             )
         ));
-        assert_eq!(
-            state.business_resources.bytes,
-            bytes_before_not_found - cancel_request_id.len() as u64,
-            "未找到目标只把动作持有的请求身份移出最终结果"
-        );
+
         let cancel_record = &state
             .session
             .as_ref()
@@ -12519,7 +12113,7 @@ mod tests {
                 caller_correlation_id: None,
             },
         });
-        let resources_before_cancel_all_registration = state.business_resources;
+
         let (next, cancel_all_receipt) = register_request_candidate(
             &actor.opened,
             actor.scenario.initial_market_directory(),
@@ -12622,16 +12216,6 @@ mod tests {
             1,
             "全撤不得删除真实档位减量留下的外部队尾段"
         );
-        assert_eq!(
-            state.business_resources,
-            ResourceQuantityV1::new(
-                resources_before_cancel_all_registration.records,
-                resources_before_cancel_all_registration.bytes
-                    + cancel_all_request_id.len() as u64
-                    + 8,
-            ),
-            "全撤必须一次冻结目标，账户正文只属于生命周期效果"
-        );
 
         let later_request = BusinessRequestV2::PostOrder(PostOrderRequestV2 {
             context: RequestContextV2 {
@@ -12703,7 +12287,7 @@ mod tests {
                 .expect("全撤完成后必须保存首次直接响应"),
             &cancel_all_response,
         ));
-        let resources_before_retry = state.business_resources;
+
         let altered_retry = BusinessRequestV2::CancelAllOrders(CancelAllOrdersRequestV2 {
             context: RequestContextV2 {
                 global_request_id: cancel_all_request_id.to_owned(),
@@ -12717,7 +12301,6 @@ mod tests {
             ),
             Some(cancel_all_receipt)
         );
-        assert_eq!(state.business_resources, resources_before_retry);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -12823,7 +12406,7 @@ mod tests {
             },
             condition_id: target_condition_id.clone(),
         });
-        let resources_before_registration = state.business_resources;
+
         let (next, receipt) = register_request_candidate(
             &actor.opened,
             actor.scenario.initial_market_directory(),
@@ -12836,15 +12419,6 @@ mod tests {
         );
         state = next;
         assert_eq!(receipt.scheduled_action_count, 1);
-        assert_eq!(
-            state.business_resources,
-            ResourceQuantityV1::new(
-                resources_before_registration.records + 2,
-                resources_before_registration.bytes
-                    + (request_id.len() * 2 + target_condition_id.0.len()) as u64,
-            ),
-            "市场身份必须随单个市场撤单动作进入资源计量"
-        );
 
         let (next, effect) = advance_mutation_candidate_with_outputs(
             &actor.opened,
@@ -13001,7 +12575,7 @@ mod tests {
                     .market_enrollment
                     .business_input_started
             );
-            let resources_before_rejection = state.business_resources;
+
             let later_enrollment = MarketEnrollmentRequestV1 {
                 enrollment_request_id: format!("enroll-after-{suffix}-request"),
                 market: market('d', "890", "102", "103"),
@@ -13023,7 +12597,7 @@ mod tests {
                     panic!("训练或离线请求候选形成后必须冻结市场登记")
                 }
             };
-            assert_eq!(state.business_resources, resources_before_rejection);
+
             assert_eq!(
                 state
                     .session
@@ -13063,7 +12637,7 @@ mod tests {
             ),
         });
         let state = actor.state.take().expect("Paper 围栏测试初始状态");
-        let resources_before_unknown_condition = state.business_resources;
+
         let outbound_delay_ms = actor._latency_profile.sample_delay_ms(
             state
                 .session
@@ -13088,18 +12662,7 @@ mod tests {
             actor._rule_snapshot.snapshot(),
         );
         assert_eq!(unknown_condition_receipt.platform_arrived_at_utc_ms, 1_500);
-        let expected_registration_bytes = 2 * unknown_condition_request_id.len()
-            + "unknown-condition-item".len()
-            + 2 * fenced_condition_id.0.len()
-            + future_token_id.0.len();
-        assert_eq!(
-            next.business_resources,
-            ResourceQuantityV1::new(
-                resources_before_unknown_condition.records + 3,
-                resources_before_unknown_condition.bytes + expected_registration_bytes as u64,
-            ),
-            "Paper 未知 condition 请求必须精确计入请求、动作和唯一 condition 围栏"
-        );
+
         let session = next.session.as_ref().expect("未知市场请求登记后唯一会话");
         assert!(
             session
@@ -13281,7 +12844,7 @@ mod tests {
             cursor: None,
         });
         let state = actor.state.take().expect("Paper 查询围栏初始状态");
-        let resources_before_condition_query = state.business_resources;
+
         let outbound_delay_ms = actor._latency_profile.sample_delay_ms(
             state
                 .session
@@ -13313,17 +12876,7 @@ mod tests {
             panic!("未知 condition 的 Paper 订单查询必须形成合法空页")
         };
         assert!(condition_page.items.is_empty());
-        assert_eq!(
-            state.business_resources,
-            ResourceQuantityV1::new(
-                resources_before_condition_query.records + 4,
-                resources_before_condition_query.bytes
-                    + (condition_query_id.len()
-                        + 2 * condition_filter_id.0.len()
-                        + condition_filter_token.0.len()) as u64,
-            ),
-            "请求、围栏、空根和首次结果必须各保留一条，动作完成后必须移除"
-        );
+
         let session = state
             .session
             .as_ref()
@@ -13364,7 +12917,7 @@ mod tests {
             },
             cursor: None,
         });
-        let resources_before_retry = state.business_resources;
+
         let session_before_retry = state.session.as_ref().expect("物理重投前会话存在");
         let request_count_before_retry =
             session_before_retry.mutation_requests.requests_by_id.len();
@@ -13379,7 +12932,7 @@ mod tests {
             "同一全局请求身份跨方法重投必须在后来正文前返回首次回执"
         );
         let session_after_retry = state.session.as_ref().expect("物理重投后会话存在");
-        assert_eq!(state.business_resources, resources_before_retry);
+
         assert_eq!(
             session_after_retry.mutation_requests.requests_by_id.len(),
             request_count_before_retry
@@ -13440,7 +12993,7 @@ mod tests {
             },
             cursor: None,
         });
-        let resources_before_token_query = state.business_resources;
+
         let outbound_delay_ms = actor._latency_profile.sample_delay_ms(
             state
                 .session
@@ -13472,15 +13025,7 @@ mod tests {
             panic!("未知 token-only Paper 成交查询必须形成合法空页")
         };
         assert!(token_page.items.is_empty());
-        assert_eq!(
-            state.business_resources,
-            ResourceQuantityV1::new(
-                resources_before_token_query.records + 4,
-                resources_before_token_query.bytes
-                    + (token_only_id.len() + 2 * token_only.0.len()) as u64,
-            ),
-            "token-only 查询必须只计请求、token 围栏、空根和首次结果"
-        );
+
         let session = state.session.as_ref().expect("Paper token 查询后会话存在");
         assert!(
             session
@@ -13623,10 +13168,10 @@ mod tests {
         let scenario = sealed_scenario();
         let latency_profile = load_embedded_proxy_latency_profile().expect("代理时延配置档");
 
-        for (index, role, expected_hidden_markets, expected_resource_bytes) in [
-            (0, SimCallerRoleV1::ModelTrain, 1, 830),
-            (1, SimCallerRoleV1::OfflineEvaluation, 1, 830),
-            (2, SimCallerRoleV1::Paper, 0, 762),
+        for (index, role, expected_hidden_markets) in [
+            (0, SimCallerRoleV1::ModelTrain, 1),
+            (1, SimCallerRoleV1::OfflineEvaluation, 1),
+            (2, SimCallerRoleV1::Paper, 0),
         ] {
             let run_id = format!("run-complete-state-{index}");
             let path = directory
@@ -13679,14 +13224,6 @@ mod tests {
                 session.execution_state.account_instance_key(),
                 &created.opening_fact.account_instance_key
             );
-            assert_eq!(
-                reducer_state.business_resources.records,
-                if expected_hidden_markets == 1 { 10 } else { 9 }
-            );
-            assert_eq!(
-                reducer_state.business_resources.bytes,
-                expected_resource_bytes
-            );
         }
     }
 
@@ -13705,11 +13242,7 @@ mod tests {
         {
             let (_directory, mut actor) =
                 active_market_actor(role, &format!("run-market-role-{index}")).await;
-            let resources_before = actor
-                .state
-                .as_ref()
-                .expect("活动根持有业务归约状态")
-                .business_resources;
+
             let state = actor.state.take().expect("活动根持有候选前状态");
             let (state, hidden_effects) = reduce_market_event_slice_v2(
                 state,
@@ -13728,14 +13261,7 @@ mod tests {
                 .and_then(|state| state.session.as_ref())
                 .expect("隐藏路径后唯一会话存在");
             assert_eq!(hidden_effects.execution.len(), 2);
-            assert_eq!(
-                actor
-                    .state
-                    .as_ref()
-                    .expect("隐藏路径后业务归约状态存在")
-                    .business_resources,
-                ResourceQuantityV1::new(resources_before.records + 12, resources_before.bytes)
-            );
+
             assert_eq!(
                 session
                     .hidden_platform_markets
@@ -13780,14 +13306,7 @@ mod tests {
                 .and_then(|state| state.session.as_ref())
                 .expect("公开路径后唯一会话存在");
             assert!(public_effects.execution.is_empty());
-            assert_eq!(
-                actor
-                    .state
-                    .as_ref()
-                    .expect("公开路径后业务归约状态存在")
-                    .business_resources,
-                ResourceQuantityV1::new(resources_before.records + 16, resources_before.bytes)
-            );
+
             assert_eq!(
                 session.public_markets.external_quantity_for_tests(
                     condition_id,
@@ -13811,11 +13330,7 @@ mod tests {
 
         let (_directory, mut paper) =
             active_market_actor(SimCallerRoleV1::Paper, "run-market-role-paper").await;
-        let before_resources = paper
-            .state
-            .as_ref()
-            .expect("Paper 根持有状态")
-            .business_resources;
+
         let state = paper.state.take().expect("Paper 隐藏候选前状态");
         let state = match reduce_market_event_slice_v2(
             state,
@@ -13836,7 +13351,7 @@ mod tests {
         paper.state = Some(state);
         let paper_state = paper.state.as_ref().expect("Paper 拒绝后状态仍可用");
         let paper_session = paper_state.session.as_ref().expect("Paper 唯一会话存在");
-        assert_eq!(paper_state.business_resources, before_resources);
+
         assert!(!paper_session.market_enrollment.business_input_started);
         assert_eq!(
             paper_session.public_markets.external_quantity_for_tests(
@@ -13865,14 +13380,7 @@ mod tests {
             .and_then(|state| state.session.as_ref())
             .expect("Paper 公开路径后唯一会话存在");
         assert_eq!(effects.execution.len(), 2);
-        assert_eq!(
-            paper
-                .state
-                .as_ref()
-                .expect("Paper 公开路径后业务归约状态存在")
-                .business_resources,
-            ResourceQuantityV1::new(before_resources.records + 12, before_resources.bytes)
-        );
+
         assert_eq!(
             session.public_markets.external_quantity_for_tests(
                 condition_id,
@@ -13948,11 +13456,7 @@ mod tests {
 
         let update: Arc<[ExecutionMarketEventV3]> =
             Arc::from(vec![decoded_level_market_event(1_200, 2_000, 3, "2", "1")]);
-        let paper_resources_before_hidden = paper
-            .state
-            .as_ref()
-            .expect("Paper 隐藏拒绝前状态存在")
-            .business_resources;
+
         let paper_input_before_hidden = paper.next_input_sequence_for_tests();
         let paper_public_before_hidden = public_replay_witness(&paper, &condition_id);
         let paper_log_before_hidden = fs::metadata(&paper.log_path)
@@ -13973,14 +13477,7 @@ mod tests {
                 .expect_err("Paper 隐藏路径必须拒绝"),
             SimRunActorErrorV2::HiddenPlatformReplayForbidden
         );
-        assert_eq!(
-            paper
-                .state
-                .as_ref()
-                .expect("Paper 隐藏拒绝后状态存在")
-                .business_resources,
-            paper_resources_before_hidden
-        );
+
         assert_eq!(
             paper.next_input_sequence_for_tests(),
             paper_input_before_hidden
@@ -14179,11 +13676,6 @@ mod tests {
         )
         .unwrap_or_else(|_| panic!("end_at 测试初始盘口必须成功"));
         actor.state = Some(state);
-        let resources_after_initial = actor
-            .state
-            .as_ref()
-            .expect("初始盘口后状态存在")
-            .business_resources;
 
         let at_end = [decoded_level_market_event(2_000, 2_100, 3, "2", "1")];
         let state = actor.state.take().expect("end_at 候选前状态");
@@ -14225,13 +13717,6 @@ mod tests {
                 0
             );
         }
-        assert_eq!(
-            reducer_state.business_resources,
-            ResourceQuantityV1::new(
-                resources_after_initial.records - 12,
-                resources_after_initial.bytes,
-            )
-        );
 
         let after_end = [decoded_level_market_event(2_001, 2_101, 4, "1", "0.5")];
         let state = actor.state.take().expect("盘后候选前状态");
@@ -14255,13 +13740,6 @@ mod tests {
                 .expect("训练会话拥有隐藏市场状态")
                 .external_level_count_for_tests(&condition_id),
             0
-        );
-        assert_eq!(
-            reducer_state.business_resources,
-            ResourceQuantityV1::new(
-                resources_after_initial.records - 12,
-                resources_after_initial.bytes,
-            )
         );
     }
 
@@ -14384,7 +13862,6 @@ mod tests {
             Some(crate::market::MarketLifecyclePhaseV1::ResolutionTerminal)
         );
         assert_eq!(session.execution_state.next_account_transition_seq(), 1);
-        let resources_after_both_roles = reducer_state.business_resources;
 
         let state = actor.state.take().expect("公开判定重到候选前状态");
         let (state, repeated) = reduce_market_event_slice_v2(
@@ -14398,14 +13875,6 @@ mod tests {
         .unwrap_or_else(|_| panic!("公开判定重到必须是规范无效果"));
         actor.state = Some(state);
         assert!(repeated.execution.is_empty());
-        assert_eq!(
-            actor
-                .state
-                .as_ref()
-                .expect("判定重到后状态存在")
-                .business_resources,
-            resources_after_both_roles
-        );
 
         let scenario = crate::scenario::scenario_for_sim_tests();
         let member = &scenario.market_set().markets()[0];
@@ -14442,7 +13911,7 @@ mod tests {
 
         let reducer_state = actor.state.as_ref().expect("终态盘口后状态存在");
         let session = reducer_state.session.as_ref().expect("终态盘口后会话存在");
-        assert_eq!(reducer_state.business_resources, resources_after_both_roles);
+
         assert_eq!(
             session
                 .hidden_platform_markets
@@ -14487,7 +13956,6 @@ mod tests {
             actor._finality_policy.as_ref(),
         )
         .unwrap_or_else(|_| panic!("maker 初始盘口必须成功"));
-        assert_eq!(state.business_resources.records, 22);
 
         let (state, accepted) = apply_buy_to_candidate(
             state,
@@ -14511,16 +13979,9 @@ mod tests {
         assert_eq!(accepted.platform_order_id, "sim-1");
         assert_eq!(accepted.initial_finality_count_for_tests(), 1);
         assert_eq!(accepted.account_delta_count_for_tests(), 1);
-        assert_eq!(accepted.resources.added_records, 8);
-        assert_eq!(accepted.resources.removed_records, 1);
+
         actor.state = Some(state);
 
-        let resources_before_maker = actor
-            .state
-            .as_ref()
-            .expect("BUY 后状态存在")
-            .business_resources;
-        assert_eq!(resources_before_maker.records, 29);
         let session = actor
             .state
             .as_ref()
@@ -14629,13 +14090,7 @@ mod tests {
         assert!(maker_trade.account_delta.is_none());
 
         let reducer_state = actor.state.as_ref().expect("maker 切片后状态存在");
-        assert_eq!(
-            reducer_state.business_resources,
-            ResourceQuantityV1::new(
-                resources_before_maker.records + 6,
-                resources_before_maker.bytes + 10,
-            )
-        );
+
         let session = reducer_state
             .session
             .as_ref()
@@ -14761,23 +14216,9 @@ mod tests {
         );
         assert_eq!(accepted.platform_order_id, "sim-1");
         assert_eq!(accepted.account_delta_count_for_tests(), 1);
-        assert_eq!(accepted.resources.added_records, 8);
-        assert_eq!(accepted.resources.removed_records, 1);
-        assert_eq!(
-            accepted.resources.added_bytes,
-            30 + global_request_id.len() as u64
-                + item_id.len() as u64
-                + condition_id.0.len() as u64
-                + token_id.0.len() as u64
-        );
-        assert_eq!(accepted.resources.removed_bytes, 0);
+
         actor.state = Some(state);
 
-        let resources_before_dust = actor
-            .state
-            .as_ref()
-            .expect("maker 小额余量 BUY 后状态存在")
-            .business_resources;
         let session = actor
             .state
             .as_ref()
@@ -14859,13 +14300,7 @@ mod tests {
         assert!(account_delta.is_some());
 
         let reducer_state = actor.state.as_ref().expect("maker 小额余量关闭后状态存在");
-        assert_eq!(
-            reducer_state.business_resources,
-            ResourceQuantityV1::new(
-                resources_before_dust.records - 6,
-                resources_before_dust.bytes - 10,
-            )
-        );
+
         let session = reducer_state
             .session
             .as_ref()
@@ -14944,11 +14379,7 @@ mod tests {
         let initial_condition_id = events[0].market.condition_id.0.clone();
         let added_condition_id = added_market.market().condition_id.0.clone();
         let price = "0.4".parse().expect("测试价格");
-        let before_resources = actor
-            .state
-            .as_ref()
-            .expect("活动根持有状态")
-            .business_resources;
+
         let before_sequence = actor.next_input_sequence_for_tests();
 
         let state = actor.state.take().expect("未登记候选前状态");
@@ -14976,7 +14407,7 @@ mod tests {
         actor.state = Some(state);
         let reducer_state = actor.state.as_ref().expect("未登记失败后状态仍可用");
         let session = reducer_state.session.as_ref().expect("唯一会话存在");
-        assert_eq!(reducer_state.business_resources, before_resources);
+
         assert!(!session.market_enrollment.business_input_started);
         assert_eq!(actor.next_input_sequence_for_tests(), before_sequence);
         assert_eq!(
@@ -15065,11 +14496,7 @@ mod tests {
             .expect("创建市场登记会话");
         let added_market = market('2', "456", "3", "4");
         let enrollment_request_id = "r".repeat(257);
-        let resources_before_activation = actor
-            .state
-            .as_ref()
-            .expect("准备态根持有业务状态")
-            .business_resources;
+
         assert_eq!(
             actor.enroll_market(MarketEnrollmentRequestV1 {
                 enrollment_request_id: enrollment_request_id.clone(),
@@ -15078,23 +14505,11 @@ mod tests {
             Err(SimRunActorErrorV2::SessionNotActive)
         );
         assert_eq!(actor.next_input_sequence_for_tests(), Some(2));
-        assert_eq!(
-            actor
-                .state
-                .as_ref()
-                .expect("未激活失败后仍持有业务状态")
-                .business_resources,
-            resources_before_activation
-        );
+
         actor
             .activate_session("activate-enrollment".to_owned())
             .expect("激活市场登记会话");
 
-        let resources_before = actor
-            .state
-            .as_ref()
-            .expect("活动根持有业务状态")
-            .business_resources;
         reset_reducer_call_count_for_tests();
         let enrolled = actor
             .enroll_market(MarketEnrollmentRequestV1 {
@@ -15130,11 +14545,6 @@ mod tests {
         assert_eq!(session.execution_state.next_account_transition_seq(), 1);
         assert_eq!(session.market_enrollment.records.len(), 1);
         assert_eq!(session.market_enrollment.records_by_request_id.len(), 1);
-        assert_eq!(reducer_state.business_resources.records, 21);
-        assert_eq!(
-            reducer_state.business_resources.bytes - resources_before.bytes,
-            1_138
-        );
 
         let retried = actor
             .enroll_market(MarketEnrollmentRequestV1 {
@@ -15189,11 +14599,6 @@ mod tests {
         actor
             .activate_session("activate-paper-enrollment".to_owned())
             .expect("激活 Paper 唯一会话");
-        let resources_before = actor
-            .state
-            .as_ref()
-            .expect("活动 Paper 根持有业务状态")
-            .business_resources;
 
         let added_market = market('2', "456", "3", "4");
         actor
@@ -15214,11 +14619,6 @@ mod tests {
         );
         assert_eq!(session.market_enrollment.records.len(), 1);
         assert_eq!(session.market_enrollment.records_by_request_id.len(), 1);
-        assert_eq!(reducer_state.business_resources.records, 19);
-        assert_eq!(
-            reducer_state.business_resources.bytes - resources_before.bytes,
-            598
-        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -15256,11 +14656,6 @@ mod tests {
             .activate_session("activate-enrollment-rejection".to_owned())
             .expect("激活登记失败测试会话");
 
-        let before_counts = actor
-            .state
-            .as_ref()
-            .expect("活动业务状态")
-            .business_resources;
         let before_sequence = actor.next_input_sequence_for_tests();
         assert!(matches!(
             actor.enroll_market(MarketEnrollmentRequestV1 {
@@ -15275,7 +14670,7 @@ mod tests {
             .session
             .as_ref()
             .expect("失败后唯一会话仍存在");
-        assert_eq!(reducer_state.business_resources, before_counts);
+
         assert_eq!(session.market_directory.markets().len(), 1);
         assert_eq!(session.public_markets.market_count(), 1);
         assert_eq!(
@@ -16037,10 +15432,6 @@ mod tests {
         assert_eq!(actor.pending_projections.len(), 2);
         assert!(actor.pending_projections[0].accepted);
         assert!(!actor.pending_projections[1].accepted);
-        assert_ne!(
-            actor.pending_projection_resources,
-            ResourceQuantityV1::default()
-        );
 
         assert_eq!(
             public_consumption_tests::finite_feeding::feed(
@@ -16070,10 +15461,7 @@ mod tests {
         port_state.borrow_mut().durable_through = 3;
         actor.deliver_pending_projections();
         assert!(actor.pending_projections.is_empty());
-        assert_eq!(
-            actor.pending_projection_resources,
-            ResourceQuantityV1::default()
-        );
+
         assert_eq!(group_commit_counts_for_tests(), (2, 2, 1));
 
         let input_sequence_before_prefix = actor.next_input_sequence_for_tests().expect("活动日志");
@@ -17615,20 +17003,14 @@ mod tests {
             })
             .expect("真实正文桶接纳订单并推进查询修订");
 
-        let (revision, root_resources, resources_before) = {
-            let state = actor.state.as_ref().expect("保留推进前状态存在");
-            let session = state.session.as_ref().expect("保留推进前会话存在");
-            let root = session
+        let session = actor.state.as_ref().unwrap().session.as_ref().unwrap();
+        assert!(
+            session
                 .query_state
                 .order_roots
-                .get(&(0, OrdersQueryKeyV2::from(&OrdersFilterV1::default())))
-                .expect("真实查询入口形成修订零查询根");
-            (
-                session.query_state.current_revision,
-                root.resources,
-                state.business_resources,
-            )
-        };
+                .contains_key(&(0, OrdersQueryKeyV2::from(&OrdersFilterV1::default())))
+        );
+        let revision = session.query_state.current_revision;
         assert_eq!(revision, 1);
         actor
             .advance_retention(RetentionAdvanceV2 {
@@ -17640,13 +17022,7 @@ mod tests {
         let state = actor.state.as_ref().expect("保留推进后状态存在");
         let session = state.session.as_ref().expect("保留推进后会话存在");
         assert!(session.query_state.order_roots.is_empty());
-        assert_eq!(
-            state.business_resources,
-            ResourceQuantityV1::new(
-                resources_before.records - root_resources.records,
-                resources_before.bytes - root_resources.bytes,
-            )
-        );
+
         let rule_snapshot = Arc::clone(&actor._rule_snapshot);
         let finality_policy = Arc::clone(&actor._finality_policy);
         let scenario = Arc::clone(&actor.scenario);
@@ -19442,10 +18818,7 @@ mod tests {
                 }
             }
             assert!(execution.actor.pending_projections.is_empty());
-            assert_eq!(
-                execution.actor.pending_projection_resources,
-                ResourceQuantityV1::default()
-            );
+
             let mut feedback = Vec::new();
             let mut new_feedback = Vec::new();
             for (index, payload) in accepted.borrow().iter().enumerate() {

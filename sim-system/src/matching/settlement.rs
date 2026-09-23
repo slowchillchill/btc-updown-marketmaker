@@ -96,6 +96,7 @@ pub struct SettlementSimulationReadV1 {
     pub final_success: bool,
 }
 impl ExecutionStateV2 {
+    #[cfg(feature = "measurement")]
     pub(crate) fn requested_settlement_resources(&self) -> crate::resource::ResourceQuantityV1 {
         let mut count = crate::resource::ResourceQuantityV1::default();
         if let Some(s) = &self.requested_settlement.scenario {

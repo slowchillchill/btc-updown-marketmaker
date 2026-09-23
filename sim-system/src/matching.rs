@@ -39,7 +39,6 @@ use crate::rebate::{
     RebateKindV1, RebateStateErrorV1, finalized_day_state, maker_rebate_contribution_v1,
     rebate_maturity_at, utc_day_start,
 };
-use crate::resource::BusinessResourceDeltaV2;
 use crate::scenario::PlatformMarketV1;
 
 const MICRO_SCALE: u32 = 6;
@@ -186,7 +185,6 @@ struct AssetVenueDustCandidateV2 {
 struct AssetQueueEffectsV2 {
     maker_depletions: Vec<MakerQueueDepletionV2>,
     venue_dust_candidate: Option<AssetVenueDustCandidateV2>,
-    resources: BusinessResourceDeltaV2,
 }
 
 #[allow(dead_code)]
@@ -284,9 +282,7 @@ impl AssetQueueV2 {
         price: Decimal,
         platform_order_id: String,
         base_units: u128,
-    ) -> BusinessResourceDeltaV2 {
-        let price_exists = self.bids.contains_key(&price);
-        let platform_order_id_bytes = platform_order_id.len() as u64;
+    ) {
         self.bids
             .entry(price)
             .or_default()
@@ -295,12 +291,6 @@ impl AssetQueueV2 {
                 platform_order_id,
                 remaining_base_units: base_units,
             });
-        let mut resources = BusinessResourceDeltaV2::default();
-        resources.add_record(platform_order_id_bytes);
-        if !price_exists {
-            resources.add_record(0);
-        }
-        resources
     }
 
     fn venue_dust_candidate(
@@ -328,33 +318,25 @@ impl AssetQueueV2 {
         }
     }
 
-    fn remove_account_order(&mut self, platform_order_id: &str) -> BusinessResourceDeltaV2 {
-        let mut resources = BusinessResourceDeltaV2::default();
+    fn remove_account_order(&mut self, platform_order_id: &str) {
         self.bids.retain(|_, queue| {
             queue.segments.retain(|segment| {
                 let remove = matches!(segment, QueueSegmentV2::Account {
                     platform_order_id: existing,
                     ..
                 } if existing == platform_order_id);
-                if remove {
-                    resources.remove_record(platform_order_id.len() as u64);
-                }
                 !remove
             });
             let keep = !queue.segments.is_empty() || queue.account_taker_depletion_debt_units > 0;
-            if !keep {
-                resources.remove_record(0);
-            }
             keep
         });
-        resources
     }
 
     fn remove_account_order_at_price(
         &mut self,
         price: Decimal,
         platform_order_id: &str,
-    ) -> Option<BusinessResourceDeltaV2> {
+    ) -> Option<()> {
         let queue = self.bids.get_mut(&price)?;
         let index = queue.segments.iter().position(|segment| {
             matches!(segment, QueueSegmentV2::Account {
@@ -363,13 +345,11 @@ impl AssetQueueV2 {
             } if existing == platform_order_id)
         })?;
         queue.segments.remove(index);
-        let mut resources = BusinessResourceDeltaV2::default();
-        resources.remove_record(platform_order_id.len() as u64);
+
         if queue.segments.is_empty() && queue.account_taker_depletion_debt_units == 0 {
             self.bids.remove(&price);
-            resources.remove_record(0);
         }
-        Some(resources)
+        Some(())
     }
 
     fn calculate_taker_buy(
@@ -473,14 +453,14 @@ impl AssetQueueV2 {
     fn apply_taker_consumption(
         &mut self,
         calculated: CalculatedTakerConsumptionV2,
-    ) -> (QueueMatchPlanV2, BusinessResourceDeltaV2) {
+    ) -> QueueMatchPlanV2 {
         let CalculatedTakerConsumptionV2 {
             fills: calculated_fills,
             matched_base_units,
             used_quote_units,
         } = calculated;
         let mut fills = Vec::with_capacity(calculated_fills.len());
-        let mut resources = BusinessResourceDeltaV2::default();
+
         let mut calculated_fills = calculated_fills.into_iter().peekable();
         while let Some(calculated) = calculated_fills.next() {
             let is_last_at_price = calculated_fills.peek().map_or(true, |next| {
@@ -505,27 +485,18 @@ impl AssetQueueV2 {
                 calculated.account_taker_depletion_debt_units_after;
             fills.push(calculated.fill);
             if is_last_at_price {
-                let segment_count_before = queue.segments.len();
                 queue.segments.retain(|segment| {
                     segment
                         .remaining_base_units()
                         .is_ok_and(|remaining| remaining > 0)
                 });
-                resources.remove_records(
-                    segment_count_before
-                        .checked_sub(queue.segments.len())
-                        .expect("V2 taker 消耗只能移除队列段") as u64,
-                );
             }
         }
-        (
-            QueueMatchPlanV2 {
-                fills,
-                matched_base_units,
-                used_quote_units,
-            },
-            resources,
-        )
+        QueueMatchPlanV2 {
+            fills,
+            matched_base_units,
+            used_quote_units,
+        }
     }
 
     fn apply_level_transition(
@@ -536,19 +507,12 @@ impl AssetQueueV2 {
         quantity_after_base_units: u128,
     ) -> Result<AssetQueueEffectsV2, MatchingStateErrorV1> {
         if quantity_after_base_units > quantity_before_base_units {
-            let price_exists = self.levels_mut(side).contains_key(&price);
             self.append_external_delta(
                 side,
                 price,
                 quantity_after_base_units - quantity_before_base_units,
             )?;
-            let mut resources = BusinessResourceDeltaV2::default();
-            resources.add_record(0);
-            if !price_exists {
-                resources.add_record(0);
-            }
             return Ok(AssetQueueEffectsV2 {
-                resources,
                 ..AssetQueueEffectsV2::default()
             });
         }
@@ -565,19 +529,16 @@ impl AssetQueueV2 {
         queue.account_taker_depletion_debt_units -= debt_offset;
         remaining -= debt_offset;
         if remaining == 0 {
-            let mut resources = BusinessResourceDeltaV2::default();
             if queue.segments.is_empty() && queue.account_taker_depletion_debt_units == 0 {
                 levels.remove(&price);
-                resources.remove_record(0);
             }
             return Ok(AssetQueueEffectsV2 {
-                resources,
                 ..AssetQueueEffectsV2::default()
             });
         }
 
         let mut maker_depletions = Vec::new();
-        let mut resources = BusinessResourceDeltaV2::default();
+
         while remaining > 0 {
             let segment = queue
                 .segments
@@ -610,15 +571,7 @@ impl AssetQueueV2 {
             }
             remaining -= consumed;
             if segment.remaining_base_units()? == 0 {
-                if let Some(removed) = queue.segments.pop_front() {
-                    let owned_bytes = match removed {
-                        QueueSegmentV2::Account {
-                            platform_order_id, ..
-                        } => platform_order_id.len() as u64,
-                        QueueSegmentV2::External { .. } => 0,
-                    };
-                    resources.remove_record(owned_bytes);
-                }
+                queue.segments.pop_front();
             }
         }
 
@@ -641,57 +594,29 @@ impl AssetQueueV2 {
             };
         if queue.segments.is_empty() && queue.account_taker_depletion_debt_units == 0 {
             levels.remove(&price);
-            resources.remove_record(0);
         }
         Ok(AssetQueueEffectsV2 {
             maker_depletions,
             venue_dust_candidate,
-            resources,
         })
     }
 
-    fn clear_external_segments(&mut self) -> BusinessResourceDeltaV2 {
-        let mut resources = BusinessResourceDeltaV2::default();
+    fn clear_external_segments(&mut self) {
         for levels in [&mut self.bids, &mut self.asks] {
             levels.retain(|_, queue| {
-                let external_segments = queue
-                    .segments
-                    .iter()
-                    .filter(|segment| matches!(segment, QueueSegmentV2::External { .. }))
-                    .count() as u64;
-                resources.remove_records(external_segments);
                 queue
                     .segments
                     .retain(|segment| matches!(segment, QueueSegmentV2::Account { .. }));
                 queue.account_taker_depletion_debt_units = 0;
                 let keep = !queue.segments.is_empty();
-                if !keep {
-                    resources.remove_record(0);
-                }
                 keep
             });
         }
-        resources
     }
 
-    fn clear_matching_segments(&mut self) -> BusinessResourceDeltaV2 {
-        let mut resources = BusinessResourceDeltaV2::default();
-        for levels in [&self.bids, &self.asks] {
-            resources.remove_records(levels.len() as u64);
-            for queue in levels.values() {
-                for segment in &queue.segments {
-                    resources.remove_record(match segment {
-                        QueueSegmentV2::Account {
-                            platform_order_id, ..
-                        } => platform_order_id.len() as u64,
-                        QueueSegmentV2::External { .. } => 0,
-                    });
-                }
-            }
-        }
+    fn clear_matching_segments(&mut self) {
         self.bids.clear();
         self.asks.clear();
-        resources
     }
 }
 
@@ -762,7 +687,7 @@ impl ExecutionQueueStateV2 {
         token_id: &str,
         bids: &[(Decimal, u128)],
         asks: &[(Decimal, u128)],
-    ) -> Result<BusinessResourceDeltaV2, MatchingStateErrorV1> {
+    ) -> Result<(), MatchingStateErrorV1> {
         let asset = self
             .markets
             .get_mut(condition_id)
@@ -771,11 +696,8 @@ impl ExecutionQueueStateV2 {
             .get_mut(token_id)
             .ok_or_else(|| MatchingStateErrorV1::UnknownAsset(token_id.to_owned()))?;
         *asset = AssetQueueV2::from_initial_levels(bids, asks)?;
-        let level_count = (bids.iter().filter(|(_, units)| *units > 0).count()
-            + asks.iter().filter(|(_, units)| *units > 0).count()) as u64;
-        let mut resources = BusinessResourceDeltaV2::default();
-        resources.add_records(level_count * 2);
-        Ok(resources)
+
+        Ok(())
     }
 
     fn asset(
@@ -811,23 +733,20 @@ impl ExecutionQueueStateV2 {
             .ok_or_else(|| MatchingStateErrorV1::UnknownMarket(condition_id.to_owned()))
     }
 
-    fn end_matching(
-        &mut self,
-        condition_id: &str,
-    ) -> Result<BusinessResourceDeltaV2, MatchingStateErrorV1> {
+    fn end_matching(&mut self, condition_id: &str) -> Result<(), MatchingStateErrorV1> {
         let market = self
             .markets
             .get_mut(condition_id)
             .ok_or_else(|| MatchingStateErrorV1::UnknownMarket(condition_id.to_owned()))?;
         if market.matching_closed {
-            return Ok(BusinessResourceDeltaV2::default());
+            return Ok(());
         }
         market.matching_closed = true;
-        let mut resources = BusinessResourceDeltaV2::default();
+
         for asset in market.assets.values_mut() {
-            resources.merge(asset.clear_matching_segments());
+            asset.clear_matching_segments();
         }
-        Ok(resources)
+        Ok(())
     }
 }
 
@@ -1063,7 +982,7 @@ impl TakerRebateStateV2 {
     fn register_positive_fee_fill(
         &mut self,
         matched_at_utc_ms: i64,
-    ) -> Result<BusinessResourceDeltaV2, RebateStateErrorV1> {
+    ) -> Result<(), RebateStateErrorV1> {
         let attribution_day_utc_ms = utc_day_start(matched_at_utc_ms)?;
         let maturity_at_utc_ms = rebate_maturity_at(RebateKindV1::Taker, attribution_day_utc_ms)?;
         let creates_day = !self.days.contains_key(&attribution_day_utc_ms);
@@ -1076,11 +995,7 @@ impl TakerRebateStateV2 {
             self.clocks
                 .insert((maturity_at_utc_ms, attribution_day_utc_ms));
         }
-        let mut resources = BusinessResourceDeltaV2::default();
-        if creates_day {
-            resources.add_records(2);
-        }
-        Ok(resources)
+        Ok(())
     }
 }
 
@@ -1124,7 +1039,7 @@ impl MakerRebateStateV2 {
         &mut self,
         condition_id: &str,
         matched_at_utc_ms: i64,
-    ) -> Result<BusinessResourceDeltaV2, RebateStateErrorV1> {
+    ) -> Result<(), RebateStateErrorV1> {
         let attribution_day_utc_ms = utc_day_start(matched_at_utc_ms)?;
         let maturity_at_utc_ms = rebate_maturity_at(RebateKindV1::Maker, attribution_day_utc_ms)?;
         let creates_day = !self.days.contains_key(&attribution_day_utc_ms);
@@ -1155,14 +1070,7 @@ impl MakerRebateStateV2 {
                 .checked_add(1)
                 .ok_or(RebateStateErrorV1::ArithmeticOverflow)?;
         }
-        let mut resources = BusinessResourceDeltaV2::default();
-        if creates_market_day {
-            resources.add_record(0);
-        }
-        if creates_day {
-            resources.add_records(2);
-        }
-        Ok(resources)
+        Ok(())
     }
 }
 
@@ -1195,7 +1103,6 @@ pub(crate) struct GtdExpirationEffectV2 {
 pub(crate) struct GtdExpirationAdvanceEffectsV2 {
     pub(crate) expiration: Option<GtdExpirationEffectV2>,
     pub(crate) account_deltas: Vec<PlatformAccountDeltaV2>,
-    pub(crate) resources: BusinessResourceDeltaV2,
 }
 
 impl GtdExpirationAdvanceEffectsV2 {
@@ -1243,7 +1150,6 @@ pub(crate) struct CallerCancelEffectV2 {
     pub(crate) open_base_units_before: u128,
     pub(crate) released_open_quote_units: u128,
     pub(crate) account_delta: Option<PlatformAccountDeltaV2>,
-    pub(crate) resources: BusinessResourceDeltaV2,
 }
 
 impl CallerCancelEffectV2 {
@@ -1251,14 +1157,8 @@ impl CallerCancelEffectV2 {
         self,
         platform_order_id: String,
         platform_effective_at_utc_ms: i64,
-    ) -> Result<
-        (
-            CanceledTargetMeasurementV2,
-            LifecycleFeedbackEffectV2,
-            BusinessResourceDeltaV2,
-        ),
-        MatchingStateErrorV1,
-    > {
+    ) -> Result<(CanceledTargetMeasurementV2, LifecycleFeedbackEffectV2), MatchingStateErrorV1>
+    {
         let canceled_base_units = self
             .pending_base_units_before
             .checked_add(self.open_base_units_before)
@@ -1285,7 +1185,7 @@ impl CallerCancelEffectV2 {
                 account_delta: self.account_delta,
             },
         });
-        Ok((measurement, lifecycle, self.resources))
+        Ok((measurement, lifecycle))
     }
 }
 
@@ -1802,7 +1702,6 @@ pub(crate) enum EconomicLifecycleEffectV2 {
 pub(crate) struct ScheduledFinalityAdvanceEffectsV2 {
     pub(crate) transition: Option<TradeFinalityLifecycleEffectsV2>,
     pub(crate) account_deltas: Vec<PlatformAccountDeltaV2>,
-    pub(crate) resources: BusinessResourceDeltaV2,
 }
 
 impl ScheduledFinalityAdvanceEffectsV2 {
@@ -1846,7 +1745,6 @@ pub(crate) struct TradeFinalityLifecycleEffectsV2 {
 pub(crate) struct RebateClockAdvanceEffectsV2 {
     pub(crate) settlement: Vec<EconomicLifecycleEffectV2>,
     pub(crate) account_deltas: Vec<PlatformAccountDeltaV2>,
-    pub(crate) resources: BusinessResourceDeltaV2,
 }
 
 impl RebateClockAdvanceEffectsV2 {
@@ -2116,6 +2014,7 @@ fn trade_projection_v2(
     })
 }
 
+#[cfg(feature = "measurement")]
 pub(crate) fn order_projection_owned_bytes_v2(order: &OrderProjectionV2) -> u64 {
     let quantity_bytes: u64 = match &order.quantities {
         OrderQuantityProjectionV2::Base {
@@ -2182,6 +2081,7 @@ pub(crate) fn order_projection_owned_bytes_v2(order: &OrderProjectionV2) -> u64 
         + quantity_bytes
 }
 
+#[cfg(feature = "measurement")]
 pub(crate) fn trade_projection_owned_bytes_v2(trade: &TradeProjectionV2) -> u64 {
     (trade.trade_id.len()
         + trade.platform_order_id.len()
@@ -2194,6 +2094,7 @@ pub(crate) fn trade_projection_owned_bytes_v2(trade: &TradeProjectionV2) -> u64 
         + trade.immediate_taker_fee_pusd.0.len()) as u64
 }
 
+#[cfg(feature = "measurement")]
 fn market_resolution_obligation_owned_bytes_v2(
     condition_id: &str,
     obligation: &MarketResolutionObligationV2,
@@ -2277,7 +2178,6 @@ pub(crate) struct BuyOrderAcceptedV2 {
     measurement: SubmissionMeasurementV2,
     initial_trade_finality: Vec<TradeFinalityTransitionEffectV2>,
     account_deltas: Vec<PlatformAccountDeltaV2>,
-    pub(crate) resources: BusinessResourceDeltaV2,
 }
 
 impl BuyOrderAcceptedV2 {
@@ -2286,14 +2186,8 @@ impl BuyOrderAcceptedV2 {
         condition_id: ConditionId,
         token_id: TokenId,
         platform_effective_at_utc_ms: i64,
-    ) -> Result<
-        (
-            AcceptedSubmissionItemV2,
-            Vec<LifecycleFeedbackEffectV2>,
-            BusinessResourceDeltaV2,
-        ),
-        MatchingStateErrorV1,
-    > {
+    ) -> Result<(AcceptedSubmissionItemV2, Vec<LifecycleFeedbackEffectV2>), MatchingStateErrorV1>
+    {
         let fills = self
             .initial_trade_finality
             .iter()
@@ -2486,7 +2380,7 @@ impl BuyOrderAcceptedV2 {
             measurement,
             account_transition_sequences,
         };
-        Ok((response, lifecycle, self.resources))
+        Ok((response, lifecycle))
     }
 }
 
@@ -2509,7 +2403,6 @@ pub(crate) struct ExecutionMarketEventEffectsV2 {
     settlement: Vec<EconomicLifecycleEffectV2>,
     venue_dust: Vec<VenueDustEffectV2>,
     query_projection_changed: bool,
-    pub(crate) resources: BusinessResourceDeltaV2,
 }
 
 impl ExecutionMarketEventEffectsV2 {
@@ -2520,7 +2413,6 @@ impl ExecutionMarketEventEffectsV2 {
         self.settlement.extend(other.settlement);
         self.venue_dust.extend(other.venue_dust);
         self.query_projection_changed |= other.query_projection_changed;
-        self.resources.merge(other.resources);
     }
 
     pub(crate) fn query_projection_changed(&self) -> bool {
@@ -2923,9 +2815,7 @@ impl ExecutionStateV2 {
     ) -> Result<ExecutionMarketEventEffectsV2, MatchingStateErrorV1> {
         let mut effects = ExecutionMarketEventEffectsV2::default();
         if platform_effective_at_utc_ms >= end_at_utc_ms {
-            effects
-                .resources
-                .merge(self.queues.end_matching(condition_id)?);
+            self.queues.end_matching(condition_id)?;
         }
         if self.queues.matching_closed(condition_id)? {
             return Ok(effects);
@@ -2956,12 +2846,12 @@ impl ExecutionStateV2 {
                         ))
                     })
                     .collect::<Result<Vec<_>, MatchingStateErrorV1>>()?;
-                effects.resources.merge(self.queues.apply_initial_levels(
+                self.queues.apply_initial_levels(
                     condition_id,
                     &snapshot_asset.token_id.0,
                     &bids,
                     &asks,
-                )?);
+                )?;
             }
             NormalizedMarketEventV2::LevelExecutionTransition {
                 transition,
@@ -2995,11 +2885,9 @@ impl ExecutionStateV2 {
                 let QualityScopeV1::Asset(asset) = &boundary.scope else {
                     unreachable!("刚匹配的 V2 质量边界必须是资产范围")
                 };
-                effects.resources.merge(
-                    self.queues
-                        .asset_mut(condition_id, &asset.token_id.0)?
-                        .clear_external_segments(),
-                );
+                self.queues
+                    .asset_mut(condition_id, &asset.token_id.0)?
+                    .clear_external_segments();
             }
             NormalizedMarketEventV2::MarketLifecycleSnapshot(_)
             | NormalizedMarketEventV2::InitialTick { .. }
@@ -3018,16 +2906,13 @@ impl ExecutionStateV2 {
         &mut self,
         directory: &SessionMarketDirectoryV1,
         platform_effective_at_utc_ms: i64,
-    ) -> Result<ExecutionMarketEventEffectsV2, MatchingStateErrorV1> {
-        let mut effects = ExecutionMarketEventEffectsV2::default();
+    ) -> Result<(), MatchingStateErrorV1> {
         for market in directory.markets() {
             if platform_effective_at_utc_ms >= market.market().window.end_at_utc_ms {
-                effects
-                    .resources
-                    .merge(self.queues.end_matching(&market.market().condition_id.0)?);
+                self.queues.end_matching(&market.market().condition_id.0)?;
             }
         }
-        Ok(effects)
+        Ok(())
     }
 
     pub(crate) fn apply_qualified_resolution(
@@ -3092,7 +2977,6 @@ impl ExecutionStateV2 {
                 &resolution.resolution_event_id,
                 platform_effective_at_utc_ms,
                 &mut effects.account_deltas,
-                &mut effects.resources,
             )?;
             effects
                 .settlement
@@ -3116,15 +3000,7 @@ impl ExecutionStateV2 {
             redeemed_at_utc_ms: None,
             invalidated_by_quality_reason: None,
         };
-        effects
-            .resources
-            .add_record(market_resolution_obligation_owned_bytes_v2(
-                condition_id,
-                &obligation,
-            ));
-        effects
-            .resources
-            .add_records(obligation.pending_fill_sequences.len() as u64);
+
         self.market_resolutions
             .insert(condition_id.to_owned(), obligation);
         if let Some(auto_redeem) = self.try_auto_redeem(
@@ -3148,16 +3024,13 @@ impl ExecutionStateV2 {
         &mut self,
         condition_id: &str,
         reason_code: String,
-    ) -> BusinessResourceDeltaV2 {
-        let mut resources = BusinessResourceDeltaV2::default();
+    ) {
         if let Some(obligation) = self.market_resolutions.get_mut(condition_id)
             && obligation.redeemed_at_utc_ms.is_none()
             && obligation.invalidated_by_quality_reason.is_none()
         {
-            resources.replace_bytes(0, reason_code.len() as u64);
             obligation.invalidated_by_quality_reason = Some(reason_code);
         }
-        resources
     }
 
     fn apply_market_resolution_order(
@@ -3166,7 +3039,6 @@ impl ExecutionStateV2 {
         resolution_event_id: &str,
         platform_effective_at_utc_ms: i64,
         account_deltas: &mut Vec<PlatformAccountDeltaV2>,
-        resources: &mut BusinessResourceDeltaV2,
     ) -> Result<MarketResolutionOrderEffectV2, MatchingStateErrorV1> {
         let mut order = self.orders.remove(platform_order_id).ok_or_else(|| {
             MatchingStateErrorV1::AccountOrderConflict(platform_order_id.to_owned())
@@ -3190,23 +3062,15 @@ impl ExecutionStateV2 {
                 }
             };
         if open_base_units_before > 0 {
-            if !self.queues.matching_closed(&order.condition_id.0)?
-                && let Some(queue_resources) = self
-                    .queues
+            if !self.queues.matching_closed(&order.condition_id.0)? {
+                self.queues
                     .asset_mut(&order.condition_id.0, &order.token_id.0)?
                     .remove_account_order_at_price(
                         order.source_price_pusd_per_share,
                         platform_order_id,
-                    )
-            {
-                resources.merge(queue_resources);
+                    );
             }
-            let overlay_before = self.account_overlay.quantity(
-                &order.condition_id.0,
-                &order.token_id.0,
-                BookSide::Bid,
-                order.source_price_pusd_per_share,
-            );
+
             self.account_overlay
                 .subtract_quantity(
                     &order.condition_id.0,
@@ -3216,26 +3080,10 @@ impl ExecutionStateV2 {
                     decimal_from_micro_units_v1(open_base_units_before)?,
                 )
                 .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
-            if !overlay_before.is_zero()
-                && self
-                    .account_overlay
-                    .quantity(
-                        &order.condition_id.0,
-                        &order.token_id.0,
-                        BookSide::Bid,
-                        order.source_price_pusd_per_share,
-                    )
-                    .is_zero()
-            {
-                resources.remove_record(0);
-            }
         }
-        if let SimOrderKindStateV1::Gtd { expires_at_utc_ms } = order.kind
-            && self
-                .gtd_deadlines
-                .remove(&(expires_at_utc_ms, platform_order_id.to_owned()))
-        {
-            resources.remove_record(platform_order_id.len() as u64);
+        if let SimOrderKindStateV1::Gtd { expires_at_utc_ms } = order.kind {
+            self.gtd_deadlines
+                .remove(&(expires_at_utc_ms, platform_order_id.to_owned()));
         }
         let released_open_quote_pusd = decimal_from_micro_units_v1(released_open_quote_units)?;
         let account_delta = if released_open_quote_units > 0 {
@@ -3308,9 +3156,8 @@ impl ExecutionStateV2 {
         let AssetQueueEffectsV2 {
             maker_depletions,
             venue_dust_candidate,
-            resources,
         } = queue_effects;
-        effects.resources.merge(resources);
+
         for depletion in maker_depletions {
             let mut order = self
                 .orders
@@ -3336,12 +3183,7 @@ impl ExecutionStateV2 {
             *open_base_units = open_base_units
                 .checked_sub(depletion.base_units)
                 .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
-            let overlay_quantity_before = self.account_overlay.quantity(
-                condition_id,
-                token_id,
-                BookSide::Bid,
-                depletion.price_pusd_per_share,
-            );
+
             self.account_overlay
                 .subtract_quantity(
                     condition_id,
@@ -3351,19 +3193,6 @@ impl ExecutionStateV2 {
                     decimal_from_micro_units_v1(depletion.base_units)?,
                 )
                 .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
-            if !overlay_quantity_before.is_zero()
-                && self
-                    .account_overlay
-                    .quantity(
-                        condition_id,
-                        token_id,
-                        BookSide::Bid,
-                        depletion.price_pusd_per_share,
-                    )
-                    .is_zero()
-            {
-                effects.resources.remove_record(0);
-            }
             let fill_base_units = pending_maker_depletion_base_units
                 .checked_add(depletion.base_units)
                 .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
@@ -3402,8 +3231,7 @@ impl ExecutionStateV2 {
             let next_fill_sequence = fill_sequence
                 .checked_add(1)
                 .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
-            let scheduled_before = self.scheduled_finality.len();
-            let outcome_balances_before = self.account.outcome_balance_record_count();
+
             let (initial, account_delta) = self.insert_fill_with_initial_finality(
                 &mut order,
                 fill_sequence,
@@ -3416,26 +3244,8 @@ impl ExecutionStateV2 {
                 finality_policy,
                 rules,
             )?;
-            let fill = self
-                .fills
-                .get(&fill_sequence)
-                .expect("刚插入的 V2 maker 成交必须存在");
-            effects
-                .resources
-                .add_record((fill.trade_id.len() + fill.platform_order_id.len()) as u64);
-            effects.resources.add_records(
-                self.scheduled_finality
-                    .len()
-                    .checked_sub(scheduled_before)
-                    .expect("V2 maker 首态不能删除后续最终性任务") as u64,
-            );
-            if self.account.outcome_balance_record_count() > outcome_balances_before {
-                effects.resources.add_record(token_id.len() as u64);
-            }
-            effects.resources.merge(
-                self.maker_rebate
-                    .register_fill(condition_id, platform_effective_at_utc_ms)?,
-            );
+            self.maker_rebate
+                .register_fill(condition_id, platform_effective_at_utc_ms)?;
             self.next_fill_sequence = next_fill_sequence;
             effects.query_projection_changed = true;
             effects.initial_trade_finality.push(initial);
@@ -3449,14 +3259,8 @@ impl ExecutionStateV2 {
                 },
             ) = (order.kind, &order.quantities)
             {
-                if self
-                    .gtd_deadlines
-                    .remove(&(expires_at_utc_ms, order.platform_order_id.clone()))
-                {
-                    effects
-                        .resources
-                        .remove_record(order.platform_order_id.len() as u64);
-                }
+                self.gtd_deadlines
+                    .remove(&(expires_at_utc_ms, order.platform_order_id.clone()));
             }
             self.orders.insert(order.platform_order_id.clone(), order);
         }
@@ -3519,11 +3323,9 @@ impl ExecutionStateV2 {
             self.orders.insert(order.platform_order_id.clone(), order);
             return Ok(());
         }
-        effects.resources.merge(
-            self.queues
-                .asset_mut(condition_id, token_id)?
-                .remove_account_order(&candidate.platform_order_id),
-        );
+        self.queues
+            .asset_mut(condition_id, token_id)?
+            .remove_account_order(&candidate.platform_order_id);
         self.account_overlay
             .subtract_quantity(
                 condition_id,
@@ -3559,16 +3361,10 @@ impl ExecutionStateV2 {
             account_transition_seq: Some(account_transition_seq),
         });
         effects.query_projection_changed = true;
-        effects.resources.remove_record(0);
+
         if let SimOrderKindStateV1::Gtd { expires_at_utc_ms } = order.kind {
-            if self
-                .gtd_deadlines
-                .remove(&(expires_at_utc_ms, order.platform_order_id.clone()))
-            {
-                effects
-                    .resources
-                    .remove_record(order.platform_order_id.len() as u64);
-            }
+            self.gtd_deadlines
+                .remove(&(expires_at_utc_ms, order.platform_order_id.clone()));
         }
         self.orders.insert(order.platform_order_id.clone(), order);
         Ok(())
@@ -3825,11 +3621,10 @@ impl ExecutionStateV2 {
             account_deltas.push(delta);
         }
 
-        let (plan, queue_resources) = self
+        let plan = self
             .queues
             .asset_mut(&input.condition_id.0, &input.token_id.0)?
             .apply_taker_consumption(calculated);
-        let mut resources = queue_resources;
         let mut order = SimOrderRecordV2 {
             platform_order_id: platform_order_id.clone(),
             global_request_id: input.global_request_id,
@@ -3848,21 +3643,14 @@ impl ExecutionStateV2 {
         let mut initial_trade_finality = Vec::with_capacity(fill_sequences.len());
 
         if open_base_units > 0 {
-            resources.merge(
-                self.queues
-                    .asset_mut(&order.condition_id.0, &order.token_id.0)?
-                    .insert_account_buy_remainder(
-                        order.source_price_pusd_per_share,
-                        platform_order_id.clone(),
-                        open_base_units,
-                    ),
-            );
-            let overlay_quantity_before = self.account_overlay.quantity(
-                &order.condition_id.0,
-                &order.token_id.0,
-                BookSide::Bid,
-                order.source_price_pusd_per_share,
-            );
+            self.queues
+                .asset_mut(&order.condition_id.0, &order.token_id.0)?
+                .insert_account_buy_remainder(
+                    order.source_price_pusd_per_share,
+                    platform_order_id.clone(),
+                    open_base_units,
+                );
+
             self.account_overlay
                 .add_quantity(
                     &order.condition_id.0,
@@ -3872,9 +3660,6 @@ impl ExecutionStateV2 {
                     decimal_from_micro_units_v1(open_base_units)?,
                 )
                 .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
-            if overlay_quantity_before.is_zero() {
-                resources.add_record(0);
-            }
         }
 
         for ((fill_sequence, fill), immediate_taker_fee_units) in fill_sequences
@@ -3884,13 +3669,10 @@ impl ExecutionStateV2 {
             .zip(fee_allocations)
         {
             if immediate_taker_fee_units > 0 {
-                resources.merge(
-                    self.taker_rebate
-                        .register_positive_fee_fill(input.effective_processing_at_utc_ms)?,
-                );
+                self.taker_rebate
+                    .register_positive_fee_fill(input.effective_processing_at_utc_ms)?;
             }
-            let scheduled_before = self.scheduled_finality.len();
-            let outcome_balances_before = self.account.outcome_balance_record_count();
+
             let (initial, account_delta) = self.insert_fill_with_initial_finality(
                 &mut order,
                 fill_sequence,
@@ -3903,20 +3685,6 @@ impl ExecutionStateV2 {
                 finality_policy,
                 rules,
             )?;
-            let fill = self
-                .fills
-                .get(&fill_sequence)
-                .expect("刚插入的 V2 taker 成交必须存在");
-            resources.add_record((fill.trade_id.len() + fill.platform_order_id.len()) as u64);
-            resources.add_records(
-                self.scheduled_finality
-                    .len()
-                    .checked_sub(scheduled_before)
-                    .expect("V2 taker 首态不能删除后续最终性任务") as u64,
-            );
-            if self.account.outcome_balance_record_count() > outcome_balances_before {
-                resources.add_record(order.token_id.0.len() as u64);
-            }
             initial_trade_finality.push(initial);
             if let Some(account_delta) = account_delta {
                 account_deltas.push(account_delta);
@@ -3939,17 +3707,10 @@ impl ExecutionStateV2 {
                     .venue_dust_candidate(order.source_price_pusd_per_share, &platform_order_id)
                     .is_some()
             {
-                resources.merge(
-                    self.queues
-                        .asset_mut(&order.condition_id.0, &order.token_id.0)?
-                        .remove_account_order(&platform_order_id),
-                );
-                let overlay_quantity_before = self.account_overlay.quantity(
-                    &order.condition_id.0,
-                    &order.token_id.0,
-                    BookSide::Bid,
-                    order.source_price_pusd_per_share,
-                );
+                self.queues
+                    .asset_mut(&order.condition_id.0, &order.token_id.0)?
+                    .remove_account_order(&platform_order_id);
+
                 self.account_overlay
                     .subtract_quantity(
                         &order.condition_id.0,
@@ -3959,19 +3720,6 @@ impl ExecutionStateV2 {
                         decimal_from_micro_units_v1(open_base_units)?,
                     )
                     .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
-                if !overlay_quantity_before.is_zero()
-                    && self
-                        .account_overlay
-                        .quantity(
-                            &order.condition_id.0,
-                            &order.token_id.0,
-                            BookSide::Bid,
-                            order.source_price_pusd_per_share,
-                        )
-                        .is_zero()
-                {
-                    resources.remove_record(0);
-                }
                 let delta = self.account.apply_venue_dust_release(
                     &platform_order_id,
                     &order.condition_id,
@@ -4005,12 +3753,8 @@ impl ExecutionStateV2 {
         ) = (order.kind, &order.quantities)
             && *open_base_units > 0
         {
-            if self
-                .gtd_deadlines
-                .insert((expires_at_utc_ms, platform_order_id.clone()))
-            {
-                resources.add_record(platform_order_id.len() as u64);
-            }
+            self.gtd_deadlines
+                .insert((expires_at_utc_ms, platform_order_id.clone()));
         }
 
         let (platform_order_status, measurement) = match &order.quantities {
@@ -4075,14 +3819,6 @@ impl ExecutionStateV2 {
         };
         let terminal_reason = order.terminal_reason;
 
-        resources.add_record(
-            (platform_order_id.len()
-                + order.platform_order_id.len()
-                + order.global_request_id.len()
-                + order.item_id.len()
-                + order.condition_id.0.len()
-                + order.token_id.0.len()) as u64,
-        );
         self.orders.insert(platform_order_id.clone(), order);
         self.next_order_sequence = next_order_sequence;
         self.next_fill_sequence = candidate_next_fill_sequence;
@@ -4096,11 +3832,11 @@ impl ExecutionStateV2 {
                 measurement,
                 initial_trade_finality,
                 account_deltas,
-                resources,
             }),
         ))
     }
 
+    #[cfg(feature = "measurement")]
     pub(crate) fn cancel_scenario_resources(&self) -> crate::resource::ResourceQuantityV1 {
         crate::resource::ResourceQuantityV1::new(
             self.cancel_scenario.len() as u64,
@@ -4178,24 +3914,16 @@ impl ExecutionStateV2 {
             SimOrderKindStateV1::Gtc | SimOrderKindStateV1::Fok | SimOrderKindStateV1::Fak => None,
         };
 
-        let mut resources = BusinessResourceDeltaV2::default();
         if open_base_units_before > 0 {
             if !self.queues.matching_closed(&condition_id.0)? {
-                let queue_resources = self
-                    .queues
+                self.queues
                     .asset_mut(&condition_id.0, &token_id.0)?
                     .remove_account_order_at_price(price_pusd_per_share, platform_order_id)
                     .ok_or_else(|| {
                         MatchingStateErrorV1::AccountOrderConflict(platform_order_id.to_owned())
                     })?;
-                resources.merge(queue_resources);
             }
-            let overlay_before = self.account_overlay.quantity(
-                &condition_id.0,
-                &token_id.0,
-                BookSide::Bid,
-                price_pusd_per_share,
-            );
+
             self.account_overlay
                 .subtract_quantity(
                     &condition_id.0,
@@ -4205,19 +3933,6 @@ impl ExecutionStateV2 {
                     decimal_from_micro_units_v1(open_base_units_before)?,
                 )
                 .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
-            if !overlay_before.is_zero()
-                && self
-                    .account_overlay
-                    .quantity(
-                        &condition_id.0,
-                        &token_id.0,
-                        BookSide::Bid,
-                        price_pusd_per_share,
-                    )
-                    .is_zero()
-            {
-                resources.remove_record(0);
-            }
         }
         if let Some(expires_at_utc_ms) = gtd_expires_at_utc_ms {
             assert!(
@@ -4225,7 +3940,6 @@ impl ExecutionStateV2 {
                     .remove(&(expires_at_utc_ms, platform_order_id.to_owned())),
                 "仍有可撤余量的 V2 GTD 订单必须仍有唯一截止任务"
             );
-            resources.remove_record(platform_order_id.len() as u64);
         }
         let account_delta = self.account.apply_caller_cancel_release(
             platform_order_id,
@@ -4270,7 +3984,6 @@ impl ExecutionStateV2 {
                 open_base_units_before,
                 released_open_quote_units,
                 account_delta,
-                resources,
             }),
         ))
     }
@@ -4377,8 +4090,6 @@ impl ExecutionStateV2 {
             .expect("刚读取的 V2 GTD 截止任务仍是首项");
         self.gtd_deadlines
             .remove(&(expires_at_utc_ms, platform_order_id.clone()));
-        let mut resources = BusinessResourceDeltaV2::default();
-        resources.remove_record(platform_order_id.len() as u64);
 
         let (
             condition_id,
@@ -4412,20 +4123,12 @@ impl ExecutionStateV2 {
         };
 
         if open_base_units_before > 0 {
-            if !self.queues.matching_closed(&condition_id.0)?
-                && let Some(queue_resources) = self
-                    .queues
+            if !self.queues.matching_closed(&condition_id.0)? {
+                self.queues
                     .asset_mut(&condition_id.0, &token_id.0)?
-                    .remove_account_order_at_price(price_pusd_per_share, &platform_order_id)
-            {
-                resources.merge(queue_resources);
+                    .remove_account_order_at_price(price_pusd_per_share, &platform_order_id);
             }
-            let overlay_before = self.account_overlay.quantity(
-                &condition_id.0,
-                &token_id.0,
-                BookSide::Bid,
-                price_pusd_per_share,
-            );
+
             self.account_overlay
                 .subtract_quantity(
                     &condition_id.0,
@@ -4435,19 +4138,6 @@ impl ExecutionStateV2 {
                     decimal_from_micro_units_v1(open_base_units_before)?,
                 )
                 .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
-            if !overlay_before.is_zero()
-                && self
-                    .account_overlay
-                    .quantity(
-                        &condition_id.0,
-                        &token_id.0,
-                        BookSide::Bid,
-                        price_pusd_per_share,
-                    )
-                    .is_zero()
-            {
-                resources.remove_record(0);
-            }
         }
 
         let account_delta = self.account.apply_gtd_expiration_release(
@@ -4505,7 +4195,6 @@ impl ExecutionStateV2 {
                     account_transition_seq,
                 }),
                 account_deltas,
-                resources,
             },
         ))
     }
@@ -4539,13 +4228,12 @@ impl ExecutionStateV2 {
             .expect("刚读取的 V2 最终性排程仍是首项");
         self.scheduled_finality.remove(&key);
         let mut effects = ScheduledFinalityAdvanceEffectsV2::default();
-        effects.resources.remove_record(0);
+
         effects.transition = Some(self.apply_scheduled_finality_transition(
             key,
             finality_policy,
             rules,
             &mut effects.account_deltas,
-            &mut effects.resources,
         )?);
         Ok((self, effects))
     }
@@ -4556,7 +4244,6 @@ impl ExecutionStateV2 {
         finality_policy: &TradeFinalityPolicyV2,
         rules: &PlatformRuleSnapshotV3,
         account_deltas: &mut Vec<PlatformAccountDeltaV2>,
-        resources: &mut BusinessResourceDeltaV2,
     ) -> Result<TradeFinalityLifecycleEffectsV2, MatchingStateErrorV1> {
         let (
             trade_id,
@@ -4610,7 +4297,6 @@ impl ExecutionStateV2 {
             immediate_taker_fee_units,
         };
 
-        let outcome_balances_before = self.account.outcome_balance_record_count();
         let account_delta = if economic_application {
             Some(self.account.apply_fill_finality_economic(
                 &trade_id,
@@ -4648,9 +4334,6 @@ impl ExecutionStateV2 {
             .map(|delta| delta.account_transition_seq);
         if let Some(delta) = account_delta {
             account_deltas.push(delta);
-        }
-        if self.account.outcome_balance_record_count() > outcome_balances_before {
-            resources.add_record(token_id.0.len() as u64);
         }
 
         if releases_fee {
@@ -4692,7 +4375,6 @@ impl ExecutionStateV2 {
                     fill_sequence: key.fill_sequence,
                     path_ordinal: next_path_ordinal,
                 });
-            resources.add_record(0);
         }
 
         let economic_disposition = match finality_state {
@@ -4760,7 +4442,6 @@ impl ExecutionStateV2 {
                     key.platform_event_at_utc_ms,
                     &mut settlement,
                     account_deltas,
-                    resources,
                 )?,
                 SimLiquidityRoleV1::Taker if immediate_taker_fee_units > 0 => self
                     .complete_taker_rebate_fill(
@@ -4779,18 +4460,11 @@ impl ExecutionStateV2 {
                         key.platform_event_at_utc_ms,
                         &mut settlement,
                         account_deltas,
-                        resources,
                     )?,
                 SimLiquidityRoleV1::Taker => {}
             }
-            if self
-                .market_resolutions
-                .get_mut(&condition_id.0)
-                .is_some_and(|obligation| {
-                    obligation.pending_fill_sequences.remove(&key.fill_sequence)
-                })
-            {
-                resources.remove_record(0);
+            if let Some(obligation) = self.market_resolutions.get_mut(&condition_id.0) {
+                obligation.pending_fill_sequences.remove(&key.fill_sequence);
             }
             if let Some(auto_redeem) =
                 self.try_auto_redeem(&condition_id, key.platform_event_at_utc_ms, account_deltas)?
@@ -4821,7 +4495,6 @@ impl ExecutionStateV2 {
         platform_effective_at_utc_ms: i64,
         settlement: &mut Vec<EconomicLifecycleEffectV2>,
         account_deltas: &mut Vec<PlatformAccountDeltaV2>,
-        resources: &mut BusinessResourceDeltaV2,
     ) -> Result<(), MatchingStateErrorV1> {
         let attribution_day_utc_ms = utc_day_start(matched_at_utc_ms)?;
         let accrual_effect = if succeeded {
@@ -4860,7 +4533,6 @@ impl ExecutionStateV2 {
             .get_mut(&attribution_day_utc_ms)
             .expect("正手续费成交终态只引用已登记 taker 日桶");
         if let Some(accrual) = &accrual_effect {
-            resources.add_record(trade_id.len() as u64);
             day.contribution_trade_ids.push(trade_id.to_owned());
             day.accrued_pusd = day
                 .accrued_pusd
@@ -4892,7 +4564,6 @@ impl ExecutionStateV2 {
         platform_effective_at_utc_ms: i64,
         settlement: &mut Vec<EconomicLifecycleEffectV2>,
         account_deltas: &mut Vec<PlatformAccountDeltaV2>,
-        resources: &mut BusinessResourceDeltaV2,
     ) -> Result<(), MatchingStateErrorV1> {
         let attribution_day_utc_ms = utc_day_start(matched_at_utc_ms)?;
         let contribution = succeeded
@@ -4930,7 +4601,6 @@ impl ExecutionStateV2 {
             .checked_sub(1)
             .expect("maker 成交终态只闭合一个市场日成交前驱");
         if let Some(contribution) = contribution {
-            resources.add_record(contribution.trade_id.len() as u64);
             market
                 .successful_contributions
                 .insert(fill_sequence, contribution);
@@ -4939,7 +4609,6 @@ impl ExecutionStateV2 {
             condition_id,
             platform_effective_at_utc_ms,
             account_deltas,
-            resources,
         )? {
             settlement.push(EconomicLifecycleEffectV2::MakerMarketFinalized(effect));
         }
@@ -4951,7 +4620,6 @@ impl ExecutionStateV2 {
         condition_id: &ConditionId,
         platform_effective_at_utc_ms: i64,
         account_deltas: &mut Vec<PlatformAccountDeltaV2>,
-        resources: &mut BusinessResourceDeltaV2,
     ) -> Result<Option<MakerRebateMarketFinalizedEffectV2>, MatchingStateErrorV1> {
         let Some((status, contributions, pending_by_day)) = self
             .maker_rebate
@@ -4980,7 +4648,6 @@ impl ExecutionStateV2 {
         let mut accrual_by_day = BTreeMap::<i64, Decimal>::new();
         let mut accrual_pusd = Decimal::ZERO;
         for contribution in &contributions {
-            resources.remove_record(contribution.trade_id.len() as u64);
             accrual_pusd = accrual_pusd
                 .checked_add(contribution.contribution_pusd)
                 .ok_or(RebateStateErrorV1::ArithmeticOverflow)?
@@ -4994,7 +4661,6 @@ impl ExecutionStateV2 {
                 .normalize();
         }
         for (attribution_day_utc_ms, _) in pending_by_day {
-            resources.remove_record(0);
             let day = self
                 .maker_rebate
                 .days
@@ -5008,7 +4674,6 @@ impl ExecutionStateV2 {
                 .iter()
                 .filter(|c| c.attribution_day_utc_ms == attribution_day_utc_ms)
             {
-                resources.add_record(contribution.trade_id.len() as u64);
                 day.contribution_trade_ids
                     .push(contribution.trade_id.clone());
             }
@@ -5359,7 +5024,7 @@ impl ExecutionStateV2 {
                 self.maker_rebate
                     .market_end_clocks
                     .remove(&(next_at, condition_id.clone()));
-                effects.resources.remove_record(condition_id.len() as u64);
+
                 self.maker_rebate
                     .markets
                     .get_mut(&condition_id)
@@ -5370,7 +5035,6 @@ impl ExecutionStateV2 {
                     &condition,
                     platform_effective_at_utc_ms,
                     &mut effects.account_deltas,
-                    &mut effects.resources,
                 )? {
                     effects
                         .settlement
@@ -5390,7 +5054,7 @@ impl ExecutionStateV2 {
                 self.maker_rebate
                     .day_clocks
                     .remove(&(next_at, attribution_day_utc_ms));
-                effects.resources.remove_record(0);
+
                 self.maker_rebate
                     .days
                     .get_mut(&attribution_day_utc_ms)
@@ -5401,7 +5065,7 @@ impl ExecutionStateV2 {
                 self.taker_rebate
                     .clocks
                     .remove(&(next_at, attribution_day_utc_ms));
-                effects.resources.remove_record(0);
+
                 self.taker_rebate
                     .days
                     .get_mut(&attribution_day_utc_ms)
@@ -6207,6 +5871,80 @@ fn u128_from_u256(value: U256) -> Result<u128, MatchingMathErrorV1> {
     u128::try_from(value).map_err(|_| MatchingMathErrorV1::ArithmeticOverflow)
 }
 
+#[cfg(feature = "measurement")]
+impl ExecutionStateV2 {
+    pub(crate) fn measurement_resources(&self) -> crate::resource::ResourceQuantityV1 {
+        let mut total = self.account.measurement_resources();
+        total.include(self.account_overlay.measurement_resources());
+        total.include(self.cancel_scenario_resources());
+        total.include(self.requested_settlement_resources());
+        for (condition, market) in &self.queues.markets {
+            total.add_record(condition.len() as u64);
+            for (token, asset) in &market.assets {
+                total.add_record(token.len() as u64);
+                for levels in [&asset.bids, &asset.asks] {
+                    total.add_records(levels.len() as u64);
+                    for queue in levels.values() {
+                        for segment in &queue.segments {
+                            total.add_record(match segment {
+                                QueueSegmentV2::External { .. } => 0,
+                                QueueSegmentV2::Account {
+                                    platform_order_id, ..
+                                } => platform_order_id.len() as u64,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        for (key, order) in &self.orders {
+            total.add_record(
+                (key.len()
+                    + order.platform_order_id.len()
+                    + order.global_request_id.len()
+                    + order.item_id.len()
+                    + order.condition_id.0.len()
+                    + order.token_id.0.len()) as u64,
+            );
+        }
+        for fill in self.fills.values() {
+            total.add_record((fill.trade_id.len() + fill.platform_order_id.len()) as u64);
+        }
+        for (_, id) in &self.gtd_deadlines {
+            total.add_record(id.len() as u64);
+        }
+        total.add_records(self.scheduled_finality.len() as u64);
+        for (condition, resolution) in &self.market_resolutions {
+            total.add_record(market_resolution_obligation_owned_bytes_v2(
+                condition, resolution,
+            ));
+            total.add_records(resolution.pending_fill_sequences.len() as u64);
+        }
+        for days in [&self.taker_rebate.days, &self.maker_rebate.days] {
+            for day in days.values() {
+                total.add_record(0);
+                for id in &day.contribution_trade_ids {
+                    total.add_record(id.len() as u64);
+                }
+            }
+        }
+        total.add_records(
+            (self.taker_rebate.clocks.len() + self.maker_rebate.day_clocks.len()) as u64,
+        );
+        for (_, condition) in &self.maker_rebate.market_end_clocks {
+            total.add_record(condition.len() as u64);
+        }
+        for (condition, market) in &self.maker_rebate.markets {
+            total.add_record(condition.len() as u64);
+            total.add_records(market.pending_by_day.len() as u64);
+            for contribution in market.successful_contributions.values() {
+                total.add_record(contribution.trade_id.len() as u64);
+            }
+        }
+        total
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -6301,7 +6039,7 @@ mod tests {
         assert_eq!(discarded.used_quote_units, 6);
         assert_eq!(queue, untouched, "丢弃只读结果不得改变队列");
 
-        let (matched, _) = queue.apply_taker_consumption(discarded);
+        let matched = queue.apply_taker_consumption(discarded);
         assert_eq!(
             matched,
             QueueMatchPlanV2 {
@@ -6611,8 +6349,6 @@ mod tests {
             assert!(added_effects.initial_trade_finality.is_empty());
             assert!(added_effects.account_deltas.is_empty());
             assert!(added_effects.venue_dust.is_empty());
-            assert_eq!(added_effects.resources.added_records, 1);
-            assert_eq!(added_effects.resources.removed_records, 0);
 
             let reduced = decoded_level_event_v2_for_tests(
                 "0.000001",
@@ -6760,8 +6496,7 @@ mod tests {
         assert_eq!(canceled.pending_base_units_before, 1);
         assert_eq!(canceled.open_base_units_before, 4_999_999);
         assert_eq!(canceled.released_open_quote_units, 1_500_000);
-        assert_eq!(canceled.resources.removed_records, 3);
-        assert_eq!(canceled.resources.removed_bytes, 2 * "sim-1".len() as u64);
+
         assert_eq!(
             canceled
                 .account_delta
@@ -6855,16 +6590,13 @@ mod tests {
         assert!(matches!(disposition, BuyOrderDispositionV2::Accepted(_)));
         assert_eq!(state.next_gtd_deadline_at_utc_ms(), Some(expires_at_utc_ms));
 
-        for (index, event) in [
+        for event in [
             decoded_level_event_v2_for_tests("0", "5", 1_300, 1_301, 40),
             decoded_level_event_v2_for_tests("5", "0", 1_310, 1_311, 41),
-        ]
-        .into_iter()
-        .enumerate()
-        {
+        ] {
             let normalized = crate::market::normalize_market_event_v2(&event)
                 .expect("一次规范化 GTD maker 档位事件");
-            let effects = state
+            state
                 .apply_market_event(
                     &condition_id.0,
                     &normalized,
@@ -6874,10 +6606,6 @@ mod tests {
                     &finality_policy,
                 )
                 .expect("GTD maker 档位事件必须成功");
-            if index == 1 {
-                assert_eq!(effects.resources.removed_records, 3);
-                assert_eq!(effects.resources.removed_bytes, 2 * "sim-1".len() as u64);
-            }
         }
 
         assert!(state.gtd_deadlines.is_empty());
@@ -6931,9 +6659,7 @@ mod tests {
         assert!(effects.initial_trade_finality.is_empty());
         assert!(effects.account_deltas.is_empty());
         assert!(effects.venue_dust.is_empty());
-        assert_eq!(effects.resources.added_records, 0);
-        assert_eq!(effects.resources.removed_records, 2);
-        assert_eq!(effects.resources.removed_bytes, "sim-1".len() as u64);
+
         assert!(state.queues.matching_closed(&condition_id.0).unwrap());
         assert!(
             state
@@ -6987,8 +6713,7 @@ mod tests {
         assert_eq!(canceled.pending_base_units_before, 0);
         assert_eq!(canceled.open_base_units_before, 5_000_000);
         assert_eq!(canceled.released_open_quote_units, 1_500_000);
-        assert_eq!(canceled.resources.removed_records, 2);
-        assert_eq!(canceled.resources.removed_bytes, "sim-1".len() as u64);
+
         assert_eq!(state.next_gtd_deadline_at_utc_ms(), None);
         assert_eq!(state.account.available_pusd(), decimal("10"));
         assert_eq!(state.account.principal_encumbrance_pusd(), Decimal::ZERO);
@@ -7031,8 +6756,7 @@ mod tests {
         };
 
         assert_eq!(accepted.platform_order_id, "sim-1");
-        assert_eq!(accepted.resources.added_records, 4);
-        assert_eq!(accepted.resources.removed_records, 0);
+
         assert_eq!(accepted.account_deltas.len(), 1);
         assert_eq!(accepted.account_deltas[0].account_transition_seq, 1);
         assert!(accepted.initial_trade_finality.is_empty());
@@ -7463,16 +7187,7 @@ mod tests {
         assert_eq!(accepted.account_deltas.len(), 2);
         assert_eq!(accepted.account_deltas[0].account_transition_seq, 1);
         assert_eq!(accepted.account_deltas[1].account_transition_seq, 2);
-        assert_eq!(accepted.resources.added_records, 9);
-        assert_eq!(accepted.resources.removed_records, 1);
-        assert_eq!(
-            accepted.resources.added_bytes,
-            26 + "v2-gtc-price-improvement".len() as u64
-                + "v2-gtc-price-improvement-item".len() as u64
-                + condition_id.0.len() as u64
-                + token_id.0.len() as u64
-        );
-        assert_eq!(accepted.resources.removed_bytes, 0);
+
         assert_eq!(
             state.orders["sim-1"].quantities,
             OrderQuantityStateV2::Base {
@@ -7599,10 +7314,10 @@ mod tests {
         );
         assert_eq!(state.account.principal_encumbrance_pusd(), decimal("2.5"));
 
-        let (response, lifecycle, state_resources) = accepted
+        let (response, lifecycle) = accepted
             .into_output_effects(condition_id, token_id, 1_500)
             .expect("GTD 平台小额余量必须形成冻结的直接响应和生命周期效果");
-        assert_eq!(state_resources.added_records, 8);
+
         assert_eq!(response.account_transition_sequences, vec![1, 2]);
         assert_eq!(
             response.platform_order_status.known,
@@ -7720,8 +7435,7 @@ mod tests {
         assert_eq!(expiration.account_transition_seq, Some(2));
         assert_eq!(expired.account_deltas.len(), 1);
         assert_eq!(expired.account_deltas[0].account_transition_seq, 2);
-        assert_eq!(expired.resources.removed_records, 4);
-        assert_eq!(expired.resources.removed_bytes, 2 * "sim-1".len() as u64);
+
         assert_eq!(
             expired.account_deltas[0].reason,
             contracts::PlatformAccountDeltaReasonV2::GtdExpirationEncumbranceReleased {
@@ -8567,8 +8281,7 @@ mod tests {
         outcome_balances: Vec<(String, Decimal)>,
         fill_finality_ordinals: Vec<(u64, u32, bool)>,
         effect_counts: [usize; 6],
-        economic_record_delta: i128,
-        economic_byte_delta: i128,
+
         next_account_transition_seq: u64,
     }
 
@@ -8794,20 +8507,12 @@ mod tests {
             .expect("end_at 必须只结束撮合资格");
 
         let mut effect_counts = [0_usize; 6];
-        let mut economic_resources = BusinessResourceDeltaV2::default();
+
         let (next, maker_end) = state
             .advance_next_rebate_clock_at(2_000)
             .expect("maker 市场结束时钟必须先建立终态屏障");
         state = next;
         assert!(maker_end.settlement.is_empty());
-        assert_eq!(maker_end.resources.added_records, 0);
-        assert_eq!(maker_end.resources.removed_records, 1);
-        assert_eq!(maker_end.resources.added_bytes, 0);
-        assert_eq!(
-            maker_end.resources.removed_bytes,
-            condition_id.0.len() as u64
-        );
-        economic_resources.merge(maker_end.resources);
 
         let scenario = crate::scenario::scenario_for_sim_tests();
         let member = &scenario.market_set().markets()[0];
@@ -8837,25 +8542,6 @@ mod tests {
             terminal: terminal.clone(),
             parsed_payouts: [Decimal::ONE, Decimal::ZERO],
         };
-        let MarketResolutionTerminalV3::Resolved {
-            winning_asset_id,
-            winning_outcome,
-            payout_vector,
-            mapping_rule_version,
-        } = &terminal;
-        let resolution_owned_bytes = (condition_id.0.len()
-            + resolution_event_id.len()
-            + winning_asset_id.len()
-            + winning_outcome.len()
-            + mapping_rule_version.len()
-            + payout_vector
-                .iter()
-                .map(|entry| {
-                    entry.asset.token_id.0.len()
-                        + entry.asset.outcome.label.len()
-                        + entry.payout_pusd_per_share.0.len()
-                })
-                .sum::<usize>()) as u64;
 
         if resolution_first {
             let effects = state
@@ -8879,11 +8565,7 @@ mod tests {
                     EconomicLifecycleEffectV2::ResolvedPosition { .. }
                 ]
             ));
-            assert_eq!(effects.resources.added_records, 3);
-            assert_eq!(effects.resources.removed_records, 1);
-            assert_eq!(effects.resources.added_bytes, resolution_owned_bytes);
-            assert_eq!(effects.resources.removed_bytes, 0);
-            economic_resources.merge(effects.resources);
+
             let lifecycle = effects
                 .into_lifecycle_feedback()
                 .expect("最终性前判定必须冻结订单关闭生命周期效果");
@@ -8944,25 +8626,7 @@ mod tests {
                     _ => unreachable!("判定顺序测试只推进四个固定最终性时点"),
                 }
             }
-            let expected_resources = match platform_event_at_utc_ms {
-                6_310 | 6_500 => (1, 1, 0, 0),
-                // 成功贡献的原 trade_id 从市场迁入日桶；Taker 终局也保留其贡献引用。
-                7_310 if resolution_first => (3, 4, 11, 5),
-                7_310 => (3, 3, 11, 5),
-                7_500 if resolution_first => (1, 2, 5, 0),
-                7_500 => (1, 1, 5, 0),
-                _ => unreachable!("判定顺序测试只推进四个固定最终性时点"),
-            };
-            assert_eq!(
-                (
-                    effects.resources.added_records,
-                    effects.resources.removed_records,
-                    effects.resources.added_bytes,
-                    effects.resources.removed_bytes,
-                ),
-                expected_resources
-            );
-            economic_resources.merge(effects.resources);
+
             let lifecycle = effects
                 .into_lifecycle_feedback()
                 .expect("最终性转换必须形成因果有序的成交与结算效果");
@@ -9035,11 +8699,7 @@ mod tests {
                     EconomicLifecycleEffectV2::AutoRedeem(_)
                 ]
             ));
-            assert_eq!(effects.resources.added_records, 1);
-            assert_eq!(effects.resources.removed_records, 1);
-            assert_eq!(effects.resources.added_bytes, resolution_owned_bytes);
-            assert_eq!(effects.resources.removed_bytes, 0);
-            economic_resources.merge(effects.resources);
+
             let lifecycle = effects
                 .into_lifecycle_feedback()
                 .expect("最终性后判定必须按订单关闭、自动赎回形成效果");
@@ -9084,11 +8744,7 @@ mod tests {
                     EconomicLifecycleEffectV2::Paid(_)
                 ]
             ));
-            assert_eq!(effects.resources.added_records, 0);
-            assert_eq!(effects.resources.removed_records, 1);
-            assert_eq!(effects.resources.added_bytes, 0);
-            assert_eq!(effects.resources.removed_bytes, 0);
-            economic_resources.merge(effects.resources);
+
             let lifecycle = effects
                 .into_lifecycle_feedback()
                 .expect("成熟时钟必须按日结、付款形成效果");
@@ -9198,10 +8854,7 @@ mod tests {
                 })
                 .collect(),
             effect_counts,
-            economic_record_delta: i128::from(economic_resources.added_records)
-                - i128::from(economic_resources.removed_records),
-            economic_byte_delta: i128::from(economic_resources.added_bytes)
-                - i128::from(economic_resources.removed_bytes),
+
             next_account_transition_seq: state.account.next_account_transition_seq(),
         }
     }
@@ -9232,8 +8885,7 @@ mod tests {
                 outcome_balances: vec![("1".to_owned(), Decimal::ZERO)],
                 fill_finality_ordinals: vec![(1, 2, true), (2, 2, true)],
                 effect_counts: [1, 1, 1, 1, 2, 2],
-                economic_record_delta: -3,
-                economic_byte_delta: 71, // 两个日桶保留原 sim-1 / sim-2 贡献引用。
+
                 next_account_transition_seq: 12,
             }
         );
@@ -9256,13 +8908,7 @@ mod tests {
             )]
         ));
         assert!(maker_end.account_deltas.is_empty());
-        assert_eq!(maker_end.resources.added_records, 0);
-        assert_eq!(maker_end.resources.removed_records, 1);
-        assert_eq!(maker_end.resources.added_bytes, 0);
-        assert_eq!(
-            maker_end.resources.removed_bytes,
-            condition_id.0.len() as u64
-        );
+
         let maker_end_lifecycle = maker_end
             .into_lifecycle_feedback()
             .expect("零成交 maker 市场仍必须形成终态生命周期效果");
@@ -9331,29 +8977,7 @@ mod tests {
                 .all(|balance| balance.balance_shares.0 == "0")
         );
         assert!(effects.account_deltas.is_empty());
-        let MarketResolutionTerminalV3::Resolved {
-            winning_asset_id,
-            winning_outcome,
-            payout_vector,
-            mapping_rule_version,
-        } = &terminal;
-        let expected_resolution_bytes = (condition_id.0.len()
-            + resolution.resolution_event_id.len()
-            + winning_asset_id.len()
-            + winning_outcome.len()
-            + mapping_rule_version.len()
-            + payout_vector
-                .iter()
-                .map(|entry| {
-                    entry.asset.token_id.0.len()
-                        + entry.asset.outcome.label.len()
-                        + entry.payout_pusd_per_share.0.len()
-                })
-                .sum::<usize>()) as u64;
-        assert_eq!(effects.resources.added_records, 1);
-        assert_eq!(effects.resources.removed_records, 0);
-        assert_eq!(effects.resources.added_bytes, expected_resolution_bytes);
-        assert_eq!(effects.resources.removed_bytes, 0);
+
         assert_eq!(
             state.account.next_account_transition_seq(),
             account_sequence_before
