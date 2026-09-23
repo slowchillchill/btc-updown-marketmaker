@@ -1,14 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use contracts::Sha256Hex;
 use contracts::execution_normalization::{
     NoeComponentCapabilityReceiptV1, NoePublishedContainerReferenceV1, NoeResultReferenceV1,
     NoeRunConsumptionManifestV1,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::durable::{DurableErrorV1, publish_artifact_no_replace};
 
@@ -54,7 +52,6 @@ struct ArtifactPayloadV1<T> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct ArtifactContainerV1<T> {
     payload: ArtifactPayloadV1<T>,
-    boundary_sha256: Sha256Hex,
 }
 
 pub fn publish_noe_test_evidence_v1(
@@ -122,7 +119,7 @@ pub fn read_noe_run_manifest_v1(
     read(reference, NOE_RUN_MANIFEST_CONTAINER_V1)
 }
 
-fn publish<T: Clone + Serialize>(
+fn publish<T: Serialize>(
     path: &Path,
     container_version: &str,
     value: &T,
@@ -130,22 +127,17 @@ fn publish<T: Clone + Serialize>(
     let payload = ArtifactPayloadV1 {
         container_version: container_version.to_owned(),
         encoding: NOE_ARTIFACT_ENCODING_V1.to_owned(),
-        value: value.clone(),
+        value,
     };
-    let boundary_sha256 = payload_digest(&payload, path)?;
-    let container = ArtifactContainerV1 {
-        payload,
-        boundary_sha256: boundary_sha256.clone(),
-    };
+    let container = ArtifactContainerV1 { payload };
     let bytes = serde_json::to_vec(&container).map_err(|error| container_decode(path, error))?;
     publish_artifact_no_replace(path, &bytes)?;
     Ok(NoePublishedContainerReferenceV1 {
         location: path.to_string_lossy().into_owned(),
-        boundary_sha256,
     })
 }
 
-fn read<T: Serialize + DeserializeOwned>(
+fn read<T: DeserializeOwned>(
     reference: &NoePublishedContainerReferenceV1,
     container_version: &str,
 ) -> Result<T, DurableErrorV1> {
@@ -169,27 +161,7 @@ fn read<T: Serialize + DeserializeOwned>(
             found: container.payload.encoding,
         });
     }
-    let found = payload_digest(&container.payload, &path)?;
-    if found != container.boundary_sha256 {
-        return Err(DurableErrorV1::BoundaryDigestMismatch {
-            path,
-            expected: container.boundary_sha256,
-            found,
-        });
-    }
-    if container.boundary_sha256 != reference.boundary_sha256 {
-        return Err(DurableErrorV1::BoundaryDigestMismatch {
-            path,
-            expected: reference.boundary_sha256.clone(),
-            found: container.boundary_sha256,
-        });
-    }
     Ok(container.payload.value)
-}
-
-fn payload_digest<T: Serialize>(value: &T, path: &Path) -> Result<Sha256Hex, DurableErrorV1> {
-    let bytes = serde_json::to_vec(value).map_err(|error| container_decode(path, error))?;
-    Ok(Sha256Hex(format!("{:x}", Sha256::digest(bytes))))
 }
 
 fn container_decode(path: &Path, error: serde_json::Error) -> DurableErrorV1 {

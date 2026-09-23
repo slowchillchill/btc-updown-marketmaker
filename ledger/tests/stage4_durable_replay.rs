@@ -914,3 +914,54 @@ fn one_corrupted_sealed_byte_is_rejected_by_the_outer_sha() {
         ))
     ));
 }
+
+#[test]
+fn legacy_noe_reference_digest_in_jsonl_reopens_and_deduplicates_by_position() {
+    let durable = TempDir::new().unwrap();
+    let mut noe = NoeFixture::new("legacy-reference");
+    let reference = noe.commit_opening("100");
+    let mut writer = LedgerWriterV1::create_durable(policy("1000"), durable.path()).unwrap();
+    writer.apply_noe_result(&reference).unwrap();
+    let before = writer.projection().unwrap();
+    drop(writer);
+    let active = durable.path().join(ACTIVE_FILE_NAME);
+    let mut inserted = 0;
+    fn add_old_field(value: &mut serde_json::Value, inserted: &mut usize) {
+        match value {
+            serde_json::Value::Object(fields) => {
+                if let Some(container) = fields
+                    .get_mut("commit_container")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    container.insert("boundary_sha256".into(), serde_json::json!("a".repeat(64)));
+                    *inserted += 1;
+                }
+                for value in fields.values_mut() {
+                    add_old_field(value, inserted);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    add_old_field(value, inserted);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut lines = Vec::new();
+    for line in fs::read_to_string(&active).unwrap().lines() {
+        let mut value: serde_json::Value = serde_json::from_str(line).unwrap();
+        add_old_field(&mut value, &mut inserted);
+        serde_json::to_writer(&mut lines, &value).unwrap();
+        lines.push(b'\n');
+    }
+    assert!(inserted > 0);
+    fs::write(active, lines).unwrap();
+    let mut restored = LedgerWriterV1::open_durable(durable.path()).unwrap();
+    assert_eq!(restored.projection().unwrap(), before);
+    assert!(matches!(
+        restored.apply_noe_result(&reference).unwrap(),
+        LedgerApplyOutcomeV1::AlreadyApplied { .. }
+    ));
+    assert_eq!(restored.projection().unwrap(), before);
+}

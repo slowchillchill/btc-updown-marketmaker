@@ -296,10 +296,7 @@ fn recovery_discards_unpublished_suffix_and_rejects_a_corrupt_published_boundary
         &ExecutionNormalizationContextReferenceV1("context-55-durable".to_owned()),
     )
     .unwrap_err();
-    assert!(matches!(
-        error,
-        DurableErrorV1::ContainerDecode { .. } | DurableErrorV1::BoundaryDigestMismatch { .. }
-    ));
+    assert!(matches!(error, DurableErrorV1::ContainerDecode { .. }));
 }
 
 #[test]

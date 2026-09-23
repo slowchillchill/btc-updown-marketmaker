@@ -33,6 +33,19 @@ fn reports_receipt_and_run_manifest_round_trip_through_no_replace_containers() {
         test_report
     );
 
+    let mut legacy: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&test_reference.location).unwrap()).unwrap();
+    legacy["boundary_sha256"] = serde_json::json!("a".repeat(64));
+    std::fs::write(
+        &test_reference.location,
+        serde_json::to_vec(&legacy).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        read_noe_test_evidence_v1(&test_reference).unwrap(),
+        test_report
+    );
+
     let resource_report = NoeResourceReportV1 {
         implementation_identity: "noe-58".to_owned(),
         trajectory_batches: 10_000,
@@ -67,7 +80,6 @@ fn reports_receipt_and_run_manifest_round_trip_through_no_replace_containers() {
 
     let context_container = NoePublishedContainerReferenceV1 {
         location: "/tmp/noe/context.json".to_owned(),
-        boundary_sha256: Sha256Hex("b".repeat(64)),
     };
     let manifest = NoeRunConsumptionManifestV1 {
         context_reference: ExecutionNormalizationContextReferenceV1("context-58".to_owned()),

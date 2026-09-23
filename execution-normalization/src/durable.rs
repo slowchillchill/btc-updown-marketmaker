@@ -6,14 +6,15 @@ use std::fs::{self, File, OpenOptions};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
+use contracts::AccountInstanceKeyV1;
 use contracts::execution_normalization::{
     DurableSourceReferenceV1, EXECUTION_NORMALIZATION_CONTRACT_V1,
     ExecutionNormalizationContextReferenceV1, ExecutionNormalizationContextV1,
     NoePublishedContainerReferenceV1, NoeResultReferenceV1, NoeSourceCommitBoundaryV1,
     SimV2ContextSourceV1, SimV2SourceWatermarkV1, SourceNeutralAccountIdentityV1,
-    SourceNeutralControlResultV1, SourceNeutralControlResultV2,
+    SourceNeutralControlResultV1, SourceNeutralControlResultV2, SourceNeutralControlResultV3,
+    SourceNeutralTradeLifecycleResultV2,
 };
-use contracts::{AccountInstanceKeyV1, Sha256Hex};
 use rustix::fs::{RenameFlags, renameat_with};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -40,7 +41,6 @@ struct ContextPayloadV1 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct ContextContainerV1 {
     payload: ContextPayloadV1,
-    boundary_sha256: Sha256Hex,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,7 +55,6 @@ struct CommitPayload<T, C> {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 struct CommitContainer<T, C> {
     payload: CommitPayload<T, C>,
-    boundary_sha256: Sha256Hex,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -122,6 +121,22 @@ impl<
     }
 }
 
+/// 稳定发布后的批次位置；正文由真实历史读取接口按需读取。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PublishedNoeCommitV1 {
+    pub boundary: NoeSourceCommitBoundaryV1,
+    pub container_reference: NoePublishedContainerReferenceV1,
+    record_count: u64,
+}
+impl PublishedNoeCommitV1 {
+    pub fn result_references(&self) -> impl Iterator<Item = NoeResultReferenceV1> + '_ {
+        (0..self.record_count).map(|record_ordinal| NoeResultReferenceV1 {
+            commit_container: self.container_reference.clone(),
+            record_ordinal,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DurableCommitOutcomeV1 {
     Committed {
@@ -157,11 +172,6 @@ pub enum DurableErrorV1 {
     UnsupportedEncoding {
         path: PathBuf,
         found: String,
-    },
-    BoundaryDigestMismatch {
-        path: PathBuf,
-        expected: Sha256Hex,
-        found: Sha256Hex,
     },
     ContextReferenceMismatch {
         expected: ExecutionNormalizationContextReferenceV1,
@@ -222,9 +232,6 @@ impl fmt::Display for DurableErrorV1 {
                 "NOE 容器编码不受支持：{}：{found}",
                 path.display()
             ),
-            Self::BoundaryDigestMismatch { path, .. } => {
-                write!(formatter, "NOE 容器边界摘要不匹配：{}", path.display())
-            }
             Self::ContextReferenceMismatch { expected, found } => write!(
                 formatter,
                 "NOE 上下文引用不匹配：期望 {}，实际 {}",
@@ -384,11 +391,6 @@ impl<
                 &context_container.payload.encoding
             },
         )?;
-        check_digest(
-            &context_path,
-            &context_container.payload,
-            &context_container.boundary_sha256,
-        )?;
         if context_container.payload.context.context_reference != *context_reference {
             return Err(DurableErrorV1::ContextReferenceMismatch {
                 expected: context_reference.clone(),
@@ -418,7 +420,6 @@ impl<
                 T::COMMIT_VERSION,
                 &container.payload.encoding,
             )?;
-            check_digest(&path, &container.payload, &container.boundary_sha256)?;
             if container.payload.commit_sequence != expected_commit_sequence {
                 return Err(DurableErrorV1::CommitSequenceMismatch {
                     expected: expected_commit_sequence,
@@ -451,14 +452,12 @@ impl<
                 records: container.payload.records,
                 container_reference: NoePublishedContainerReferenceV1 {
                     location: path.to_string_lossy().into_owned(),
-                    boundary_sha256: container.boundary_sha256,
                 },
             });
         }
 
         let context_container_reference = NoePublishedContainerReferenceV1 {
             location: context_path.to_string_lossy().into_owned(),
-            boundary_sha256: context_container.boundary_sha256,
         };
         let parquet = context_container.payload.encoding == parquet::FORMAT;
         let context = context_container.payload.context;
@@ -573,24 +572,20 @@ impl<
             .context_directory
             .join(COMMITS_DIRECTORY_NAME)
             .join(&target_name);
-        let boundary_sha256 = payload_digest(&payload, &target_path)?;
-        let container = CommitContainer {
-            payload,
-            boundary_sha256: boundary_sha256.clone(),
-        };
+        let container = CommitContainer { payload };
         if self.parquet {
             let stage_path = target_path.with_file_name(format!(".{target_name}.tmp"));
             parquet::write_batch(
                 &stage_path,
-                &crate::core::NormalizationBatch {
-                    source_watermark: container.payload.boundary.source_watermark.clone(),
-                    records: container.payload.records.clone(),
-                },
+                &container.payload.boundary.source_watermark,
+                &container.payload.records,
             )?;
             if let Err(error) = parquet::publish(
                 &stage_path,
                 &target_path,
-                &container,
+                &container.payload.container_version,
+                container.payload.commit_sequence,
+                &container.payload.boundary,
                 PublishFaultV1::default(),
             ) {
                 self.poison = Some(PoisonedStoreV1 {
@@ -626,7 +621,6 @@ impl<
 
         let container_reference = NoePublishedContainerReferenceV1 {
             location: target_path.to_string_lossy().into_owned(),
-            boundary_sha256,
         };
         let commit = DurableCommit {
             commit_sequence,
@@ -674,13 +668,9 @@ fn create_context_container<
         encoding: encoding.to_owned(),
         context: context.clone(),
     };
-    let container = ContextContainerV1 {
-        boundary_sha256: payload_digest(&payload, &context_path)?,
-        payload,
-    };
+    let container = ContextContainerV1 { payload };
     let context_container_reference = NoePublishedContainerReferenceV1 {
         location: context_path.to_string_lossy().into_owned(),
-        boundary_sha256: container.boundary_sha256.clone(),
     };
     let bytes = encode_container(&container, &context_path)?;
     publish_no_replace(
@@ -703,7 +693,7 @@ pub struct StagedNormalizationWriter<T, C> {
     context: ExecutionNormalizationContextV1,
     #[cfg(test)]
     publish_fault: PublishFaultV1,
-    staged: u64,
+    staged: std::collections::VecDeque<(SimV2SourceWatermarkV1, u64)>,
     published: u64,
     payload: std::marker::PhantomData<(T, C)>,
 }
@@ -724,7 +714,7 @@ impl<
             context,
             #[cfg(test)]
             publish_fault: PublishFaultV1::default(),
-            staged: 0,
+            staged: std::collections::VecDeque::new(),
             published: 0,
             payload: std::marker::PhantomData,
         })
@@ -734,9 +724,10 @@ impl<
         &mut self,
         batch: &crate::core::NormalizationBatch<MT, MC, I, F>,
     ) -> Result<(), DurableErrorV1> {
-        let path = self.stage_path(self.staged);
-        parquet::write_batch(&path, batch)?;
-        self.staged += 1;
+        let path = self.stage_path(self.published + self.staged.len() as u64);
+        parquet::write_batch(&path, &batch.source_watermark, &batch.records)?;
+        self.staged
+            .push_back((batch.source_watermark.clone(), batch.records.len() as u64));
         Ok(())
     }
 
@@ -747,50 +738,43 @@ impl<
     }
 
     /// 调用方必须先稳定关联的 SIM 输入；时间绑定本次稳定尝试。
-    /// 每次只读取一个已归一化批，成功发布后才交付耐久引用并移除原暂存。
+    /// 使用写入成功时保存的水位和数量；发布稳定后才交付引用，不重读暂存正文。
     pub fn stabilize(
         &mut self,
         mut now: impl FnMut() -> i64,
-        mut published: impl FnMut(&DurableCommit<T, C>),
+        mut published: impl FnMut(&PublishedNoeCommitV1),
     ) -> Result<(), DurableErrorV1> {
-        while self.published < self.staged {
+        while let Some((watermark, record_count)) = self.staged.front() {
             let sequence = self.published;
-            let stage_path = self.stage_path(sequence);
-            let batch: crate::core::NormalizationBatch<T, C> = parquet::read_batch(&stage_path)?;
-            let payload = CommitPayload {
-                container_version: T::COMMIT_VERSION.to_owned(),
-                encoding: NOE_CONTAINER_ENCODING_V1.to_owned(),
-                commit_sequence: sequence,
-                boundary: NoeSourceCommitBoundaryV1 {
-                    context_reference: self.context.context_reference.clone(),
-                    source_watermark: batch.source_watermark,
-                    durable_available_at_utc_ms: now(),
-                },
-                records: batch.records,
+            let boundary = NoeSourceCommitBoundaryV1 {
+                context_reference: self.context.context_reference.clone(),
+                source_watermark: watermark.clone(),
+                durable_available_at_utc_ms: now(),
             };
-            let target_name = format!("{sequence:020}.parquet");
-            let directory = self.context_directory.join(COMMITS_DIRECTORY_NAME);
-            let target_path = directory.join(&target_name);
-            let boundary_sha256 = payload_digest(&payload, &target_path)?;
-            let container = CommitContainer {
-                payload,
-                boundary_sha256: boundary_sha256.clone(),
-            };
+            let target_path = self
+                .context_directory
+                .join(COMMITS_DIRECTORY_NAME)
+                .join(format!("{sequence:020}.parquet"));
             #[cfg(test)]
             let fault = std::mem::take(&mut self.publish_fault);
             #[cfg(not(test))]
             let fault = PublishFaultV1::default();
-            parquet::publish(&stage_path, &target_path, &container, fault)?;
-            let commit = DurableCommit {
-                commit_sequence: sequence,
-                boundary: container.payload.boundary,
-                records: container.payload.records,
+            parquet::publish(
+                &self.stage_path(sequence),
+                &target_path,
+                T::COMMIT_VERSION,
+                sequence,
+                &boundary,
+                fault,
+            )?;
+            published(&PublishedNoeCommitV1 {
+                boundary,
                 container_reference: NoePublishedContainerReferenceV1 {
                     location: target_path.to_string_lossy().into_owned(),
-                    boundary_sha256,
                 },
-            };
-            published(&commit);
+                record_count: *record_count,
+            });
+            self.staged.pop_front();
             self.published += 1;
         }
         Ok(())
@@ -851,7 +835,7 @@ pub fn read_durable_noe_record_position(
 }
 
 /// 仅供一次恢复使用的单槽；已发布容器按不可变提交合同复用，不保留正文或全历史。
-/// 外部违规原地改写在下一次完整读取时检查，命中不承担持续监测职责。
+/// 命中复用边界；未命中时 Parquet 仅打开位置元数据，正文留给实际历史读取。
 #[derive(Default)]
 pub struct NoeRecoveryPositionReader {
     last: Option<(
@@ -899,6 +883,47 @@ fn read_noe_position_material(
     reference: &NoeResultReferenceV1,
 ) -> Result<(NoeSourceCommitBoundaryV1, u64), DurableErrorV1> {
     let context = read_result_context(reference)?;
+    let path = Path::new(&reference.commit_container.location);
+    if path
+        .extension()
+        .is_some_and(|extension| extension == "parquet")
+    {
+        let (commit_version, context_version) =
+            match context.1.payload.context.contract_version.as_str() {
+                "execution_normalization_v3" => (
+                    <SourceNeutralTradeLifecycleResultV2 as NoeTradePayload<
+                        SourceNeutralControlResultV2,
+                    >>::COMMIT_VERSION,
+                    <SourceNeutralTradeLifecycleResultV2 as NoeTradePayload<
+                        SourceNeutralControlResultV2,
+                    >>::CONTEXT_VERSION,
+                ),
+                "execution_normalization_v4" => (
+                    <SourceNeutralTradeLifecycleResultV2 as NoeTradePayload<
+                        SourceNeutralControlResultV3,
+                    >>::COMMIT_VERSION,
+                    <SourceNeutralTradeLifecycleResultV2 as NoeTradePayload<
+                        SourceNeutralControlResultV3,
+                    >>::CONTEXT_VERSION,
+                ),
+                _ => {
+                    return Err(DurableErrorV1::UnsupportedContainerVersion {
+                        path: context.0,
+                        found: context.1.payload.container_version,
+                    });
+                }
+            };
+        let (boundary, count) = parquet::read_position(path, commit_version)?;
+        check_result_context(&context.0, &context.1, &boundary, context_version)?;
+        if reference.record_ordinal >= count {
+            return Err(DurableErrorV1::RecordOrdinalOutOfRange {
+                path: path.to_owned(),
+                record_ordinal: reference.record_ordinal,
+                record_count: count,
+            });
+        }
+        return Ok((boundary, count));
+    }
     match context.1.payload.context.contract_version.as_str() {
         "execution_normalization_v3" => {
             let (resolved, count): (ResolvedNoeResultV3, _) =
@@ -933,14 +958,6 @@ fn read_noe_result_with_context<
         T::COMMIT_VERSION,
         &container.payload.encoding,
     )?;
-    check_digest(&commit_path, &container.payload, &container.boundary_sha256)?;
-    if container.boundary_sha256 != reference.commit_container.boundary_sha256 {
-        return Err(DurableErrorV1::BoundaryDigestMismatch {
-            path: commit_path,
-            expected: reference.commit_container.boundary_sha256.clone(),
-            found: container.boundary_sha256,
-        });
-    }
     if container.payload.commit_sequence != file_sequence {
         return Err(DurableErrorV1::CommitSequenceMismatch {
             expected: file_sequence,
@@ -960,27 +977,43 @@ fn read_noe_result_with_context<
             record_count,
         })?;
 
-    check_container_header(
+    check_result_context(
         &context_path,
-        &context_container.payload.container_version,
+        &context_container,
+        &container.payload.boundary,
         T::CONTEXT_VERSION,
+    )?;
+
+    Ok((
+        ResolvedNoeResult {
+            context: context_container.payload.context,
+            boundary: container.payload.boundary,
+            record,
+        },
+        record_count,
+    ))
+}
+
+fn check_result_context(
+    context_path: &Path,
+    context_container: &ContextContainerV1,
+    boundary: &NoeSourceCommitBoundaryV1,
+    expected_version: &str,
+) -> Result<(), DurableErrorV1> {
+    check_container_header(
+        context_path,
+        &context_container.payload.container_version,
+        expected_version,
         if context_container.payload.encoding == parquet::FORMAT {
             NOE_CONTAINER_ENCODING_V1
         } else {
             &context_container.payload.encoding
         },
     )?;
-    check_digest(
-        &context_path,
-        &context_container.payload,
-        &context_container.boundary_sha256,
-    )?;
-    if context_container.payload.context.context_reference
-        != container.payload.boundary.context_reference
-    {
+    if context_container.payload.context.context_reference != boundary.context_reference {
         return Err(DurableErrorV1::ContextReferenceMismatch {
-            expected: container.payload.boundary.context_reference,
-            found: context_container.payload.context.context_reference,
+            expected: boundary.context_reference.clone(),
+            found: context_container.payload.context.context_reference.clone(),
         });
     }
     let derived_context_reference = derive_sim_v2_context_reference(
@@ -992,18 +1025,11 @@ fn read_noe_result_with_context<
     if context_container.payload.context.context_reference != derived_context_reference {
         return Err(DurableErrorV1::ContextReferenceMismatch {
             expected: derived_context_reference,
-            found: context_container.payload.context.context_reference,
+            found: context_container.payload.context.context_reference.clone(),
         });
     }
 
-    Ok((
-        ResolvedNoeResult {
-            context: context_container.payload.context,
-            boundary: container.payload.boundary,
-            record,
-        },
-        record_count,
-    ))
+    Ok(())
 }
 
 fn derive_sim_v2_context_reference(
@@ -1238,29 +1264,6 @@ fn decode_container<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<T, Dura
         path: path.to_path_buf(),
         message: error.to_string(),
     })
-}
-
-fn payload_digest<T: Serialize>(
-    payload: &T,
-    path: impl AsRef<Path>,
-) -> Result<Sha256Hex, DurableErrorV1> {
-    encode_container(payload, path).map(|bytes| Sha256Hex(sha256_hex(&bytes)))
-}
-
-fn check_digest<T: Serialize>(
-    path: &Path,
-    payload: &T,
-    found: &Sha256Hex,
-) -> Result<(), DurableErrorV1> {
-    let expected = payload_digest(payload, path)?;
-    if expected != *found {
-        return Err(DurableErrorV1::BoundaryDigestMismatch {
-            path: path.to_path_buf(),
-            expected,
-            found: found.clone(),
-        });
-    }
-    Ok(())
 }
 
 fn check_container_header(
@@ -1633,8 +1636,136 @@ mod tests {
         }
     }
 
+    fn legacy_fields_reopen<T, C>(parquet_format: bool)
+    where
+        T: NoeTradePayload<C>,
+        C: Clone + fmt::Debug + Eq + Serialize + serde::de::DeserializeOwned,
+    {
+        #[derive(Serialize)]
+        struct LegacyContainer<'a, P> {
+            payload: &'a P,
+            boundary_sha256: contracts::Sha256Hex,
+        }
+        fn write_old<P: Serialize>(path: &Path, payload: &P) {
+            let boundary_sha256 =
+                contracts::Sha256Hex(sha256_hex(&serde_json::to_vec(payload).unwrap()));
+            fs::write(
+                path,
+                serde_json::to_vec(&LegacyContainer {
+                    payload,
+                    boundary_sha256,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        let root = TempDir::new().unwrap();
+        let old_context = context();
+        let context = sim_v2_context(
+            SimV2ContextSeedV1 {
+                run_id: old_context.account_identity.run_scope,
+                account_instance_key: old_context.source.account_instance_key,
+                run_opened: old_context.source.run_opened,
+                account_opening: old_context.source.account_opening,
+                account_opening_evidence_identity: old_context
+                    .source
+                    .account_opening_evidence_identity,
+                implementation_identity: old_context.implementation_identity,
+            },
+            T::CONTRACT_VERSION,
+        )
+        .unwrap();
+        let source = batch(1);
+        let input = NormalizationBatchInput::<T, C> {
+            source_watermark: source.source_watermark,
+            evidence: source
+                .evidence
+                .into_iter()
+                .map(|e| crate::core::SourceNeutralEvidence {
+                    source_record: e.source_record,
+                    source_ordinal: e.source_ordinal,
+                    logical_key: e.logical_key,
+                    kind: crate::core::SourceNeutralEvidenceKind::Pending {
+                        scope: crate::core::PendingScopeV1::EvidenceGap {
+                            scope_identity: "actual-gap".into(),
+                        },
+                    },
+                })
+                .collect(),
+        };
+        let directory = context_directory(root.path(), &context.context_reference);
+        let reference = if parquet_format {
+            let mut core = NormalizationCore::<T, C>::new(context.clone());
+            let normalized = core.normalize_and_accept(input.clone()).unwrap();
+            let mut writer =
+                StagedNormalizationWriter::<T, C>::create(root.path(), context.clone()).unwrap();
+            writer.stage(&normalized).unwrap();
+            let mut references = Vec::new();
+            writer
+                .stabilize(
+                    || 3000,
+                    |commit| references.extend(commit.result_references()),
+                )
+                .unwrap();
+            references.remove(0)
+        } else {
+            let mut store =
+                DurableContextStore::<T, C>::create(root.path(), context.clone()).unwrap();
+            store.commit_batch(input.clone(), 3000).unwrap();
+            store.commits()[0].result_reference(0).unwrap()
+        };
+        let context_path = directory.join(CONTEXT_FILE_NAME);
+        let context_container: ContextContainerV1 = decode_container(&context_path).unwrap();
+        write_old(&context_path, &context_container.payload);
+        let path = Path::new(&reference.commit_container.location);
+        let container: CommitContainer<T, C> = read_commit_container(path).unwrap();
+        let digest =
+            contracts::Sha256Hex(sha256_hex(&serde_json::to_vec(&container.payload).unwrap()));
+        if parquet_format {
+            let manifest_path = path.with_extension("manifest.json");
+            let mut manifest: serde_json::Value =
+                serde_json::from_slice(&fs::read(&manifest_path).unwrap()).unwrap();
+            manifest["boundary_sha256"] = serde_json::to_value(&digest).unwrap();
+            fs::write(manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        } else {
+            write_old(path, &container.payload);
+        }
+        // 旧引用由实际路径、正文摘要、ordinal 组成；新读者消费位置和 ordinal。
+        let reference: NoeResultReferenceV1 = serde_json::from_value(serde_json::json!({
+            "commit_container": {"location": reference.commit_container.location, "boundary_sha256": digest}, "record_ordinal": 0
+        })).unwrap();
+        let resolved = read_noe_result::<T, C>(&reference).unwrap();
+        assert_eq!(resolved.record, container.payload.records[0]);
+        assert_eq!(
+            read_durable_noe_record_position(&reference).unwrap(),
+            record_position(&reference, &container.payload.boundary)
+        );
+        let mut restored =
+            DurableContextStore::<T, C>::open(root.path(), &context.context_reference).unwrap();
+        assert_eq!(restored.commits()[0].records, container.payload.records);
+        assert!(matches!(
+            restored.commit_batch(input, 4000).unwrap(),
+            DurableCommitOutcomeV1::AlreadyDurable { .. }
+        ));
+    }
+
     #[test]
-    fn memory_normalizes_once_and_parquet_preserves_legacy_payload_and_digest() {
+    fn legacy_digest_fields_are_ignored_by_real_v3_v4_json_and_parquet_readers() {
+        use contracts::execution_normalization::{
+            SourceNeutralControlResultV3, SourceNeutralTradeLifecycleResultV2,
+        };
+        for parquet_format in [false, true] {
+            legacy_fields_reopen::<SourceNeutralTradeLifecycleResultV2, SourceNeutralControlResultV2>(
+                parquet_format,
+            );
+            legacy_fields_reopen::<SourceNeutralTradeLifecycleResultV2, SourceNeutralControlResultV3>(
+                parquet_format,
+            );
+        }
+    }
+
+    #[test]
+    fn memory_normalizes_once_and_parquet_preserves_legacy_records_and_boundary() {
         use crate::identity::{MemoryEconomicFactReferenceV1, MemoryLogicalIdentityV1};
         type Trade = contracts::execution_normalization::SourceNeutralTradeLifecycleResultV1;
         let old = TempDir::new().unwrap();
@@ -1716,7 +1847,7 @@ mod tests {
                 read_commit_container(&old_file).unwrap();
             let new: CommitContainer<Trade, SourceNeutralControlResultV1> =
                 read_commit_container(&new_file).unwrap();
-            assert_eq!(old, new, "原业务记录、边界摘要和身份保持；物理编码改变");
+            assert_eq!(old, new, "原业务记录、边界和身份保持；物理编码改变");
             assert_eq!(&fs::read(new_file).unwrap()[..4], b"PAR1");
         }
         let reopened =
@@ -1786,36 +1917,6 @@ mod tests {
         assert!(
             DurableContextStoreV1::open(root.path(), &context().context_reference).is_err(),
             "已提交损坏不能恢复为空"
-        );
-    }
-
-    #[test]
-    fn incomplete_parquet_candidate_is_not_a_durable_batch() {
-        type Trade = contracts::execution_normalization::SourceNeutralTradeLifecycleResultV1;
-        let root = tempfile::tempdir().unwrap();
-        let mut writer = StagedNormalizationWriter::<Trade, SourceNeutralControlResultV1>::create(
-            root.path(),
-            context(),
-        )
-        .unwrap();
-        let mut core = crate::core::NormalizationCoreV1::new(context());
-        let batch = core.normalize_and_accept(batch(1)).unwrap();
-        writer.stage(&batch).unwrap();
-        let file = OpenOptions::new()
-            .write(true)
-            .open(writer.stage_path(0))
-            .unwrap();
-        file.set_len(8).unwrap();
-        file.sync_all().unwrap();
-        let mut published = false;
-        assert!(writer.stabilize(|| 3000, |_| published = true).is_err());
-        assert!(!published);
-        drop(writer);
-        assert!(
-            DurableContextStoreV1::open(root.path(), &context().context_reference)
-                .unwrap()
-                .commits()
-                .is_empty()
         );
     }
 

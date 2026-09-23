@@ -47,16 +47,7 @@ pub fn visit(
     format: &str,
     mut consume: impl FnMut(Row) -> io::Result<()>,
 ) -> io::Result<String> {
-    let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(path)?).map_err(invalid)?;
-    let found = builder.schema();
-    let boundary = found
-        .metadata()
-        .get("boundary")
-        .ok_or_else(|| invalid("缺少记录边界"))?
-        .clone();
-    if found.as_ref() != &schema(format, &boundary) {
-        return Err(invalid("不支持的记录模式或编码"));
-    }
+    let (builder, boundary) = open_reader(path, format)?;
     for batch in builder.build().map_err(invalid)? {
         let batch = batch.map_err(invalid)?;
         let seq = batch
@@ -86,6 +77,30 @@ pub fn visit(
         }
     }
     Ok(boundary)
+}
+
+fn open_reader(
+    path: &Path,
+    format: &str,
+) -> io::Result<(ParquetRecordBatchReaderBuilder<File>, String)> {
+    let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(path)?).map_err(invalid)?;
+    let found = builder.schema();
+    let boundary = found
+        .metadata()
+        .get("boundary")
+        .ok_or_else(|| invalid("缺少记录边界"))?
+        .clone();
+    if found.as_ref() != &schema(format, &boundary) {
+        return Err(invalid("不支持的记录模式或编码"));
+    }
+    Ok((builder, boundary))
+}
+
+/// 位置恢复只读取 footer 的真实行数与边界，不解码记录正文。
+pub(crate) fn read_metadata(path: &Path, format: &str) -> io::Result<(String, u64)> {
+    let (builder, boundary) = open_reader(path, format)?;
+    let rows = u64::try_from(builder.metadata().file_metadata().num_rows()).map_err(invalid)?;
+    Ok((boundary, rows))
 }
 
 /// 持续后台写入，不保留整市场正文；每个交接批写成独立行组。

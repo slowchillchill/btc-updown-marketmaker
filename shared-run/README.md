@@ -10,13 +10,13 @@
 
 `NoeConsumedRecordRefV1` 在正式接线中由真实来源适配器交付。业务领取位置包含 context、source watermark 与原 ordinal；同一反馈的不同归一化记录共享 delivery。普通 `NoeDurableRecordViewV1` 和序列化引用不能直接传入应用或登记入口。公开生产者接口属于受信进程内宿主协作，宿主负责真实规范化批及驱动时点；手工重建批并自填时间仍可间接取得消费引用，这是 #101 已明确接受的风险，私有字段和直接 compile-fail 不证明来源不可伪造。正式耐久读取与 Ledger 恢复不重建输入以重新应用。开户经真实归约及原 NOE 规范化产生即为 Initialization，不等待后台交接、耐久、激活或公共组。普通内存业务处理不编码身份、不扫描磁盘、不等耐久；明确的市场稳定边界沿下文统一确认。
 
-Ledger 继续使用同一应用核心，V2 材料包含 Genesis、Transaction、ReservationDecision，交给原 SIM 日志后台 worker。来源交易需要真实 NOE 稳定映射时，后台先同步原 SIM 日志，再沿原 NOE stabilize 发布，按原顺序物化 Ledger；本地事件不虚构 NOE 依赖，也不越过未物化前项。没有第二线程、编号器或满队列策略。完成时原 NOE 稳定、Ledger 段封口后才允许原 SIM seal；实际 I/O 错误原样使本轮未完成。V1 同步记录和 V2 后台记录共用当前应用效果表示；V2 恢复还原原应用效果、visibility 和幂等位置，不重放业务领取。恢复读取按原 NOE context 的业务版本分别解析 V3／V4 来源，不新增持久字段，也不把耐久记录转换为可应用领取引用。一次 Ledger 打开仅保留一个已验证批的位置材料，以原始容器位置与预期边界摘要为键；同键复用 boundary 和记录数，每个 ordinal 仍检查范围，换键完整读取，不保留批次正文或全历史。该复用依赖不可变提交合同：违规原地改写在同次恢复的后续命中不再被重复发现，新的恢复和独立公开读取仍完整验证。
+Ledger 继续使用同一应用核心，V2 材料包含 Genesis、Transaction、ReservationDecision，交给原 SIM 日志后台 worker。来源交易需要真实 NOE 稳定映射时，后台先同步原 SIM 日志，再沿原 NOE stabilize 发布，按原顺序物化 Ledger；本地事件不虚构 NOE 依赖，也不越过未物化前项。没有第二线程、编号器或满队列策略。完成时原 NOE 稳定、Ledger 段封口后才允许原 SIM seal；实际 I/O 错误原样使本轮未完成。V1 同步记录和 V2 后台记录共用当前应用效果表示；V2 恢复还原原应用效果、visibility 和幂等位置，不重放业务领取。恢复读取按原 NOE context 的业务版本分别解析 V3／V4 来源，不新增持久字段，也不把耐久记录转换为可应用领取引用。一次 Ledger 打开仅保留一个批次的位置材料，以容器位置为键；同键复用 boundary 和记录数，每个 ordinal 仍检查范围。换键时，Parquet 从清单和 footer 取得版本、边界和数量，旧 JSON 沿原解析入口读取；不保留批次正文或全历史。后续同键命中不重读文件，独立历史读取按实际用途解码正文；这些入口不再重算 NOE 正文摘要。
 
 宿主计划停止时，先结束已开始的同步调用并停止新组、请求及 Ledger 追加，然后消耗 `PublicSimExecutionV1`、`FinitePublicConsumptionV1` 或 `ContinuousPublicConsumptionV1` 调用 `stop_and_drain`。它只沿同一后台移交 pending 组、同步 SIM、稳定 NOE、接收最后一批 Ledger 材料并封口 Ledger 段，等待原后台退出；不调用下一组、CloseTime、EndOfInput 或 `complete`，不撤单、清仓或改变已有订单/持仓事实。成功不生成 `RunSeal`，不返回完整冷产物或可恢复账户。原 `complete` 仍要求真实业务闭合。来源摘要 `market_event_source_identity_sha256` 对离线材料保留真实值，在线创建时传 `None`；新读取器兼容旧字符串字段，其他身份摘要保持原合同。
 
 新内存运行的物理格式为 NOE `noe_arrow_parquet_v1` 和 Ledger `ledger_arrow_parquet_v1`，与原 NOE 业务版本、`ledger_transaction_segment_v2` 分开。Arrow 的原序号、变体与二进制正文三列逐记录编码；正文明确沿 `serde_json_v1` 保存原变体成员。NOE 一个逻辑批对应一个 Parquet 容器，空批也保留来源水位；Ledger 保留 Genesis、Transaction、ReservationDecision 的原 `durable_record_seq`。批/段边界为单份元数据，未将整个 JSON 文件塞入单元格，也不双写暂存 JSON 或活动 JSONL。SIM 原始 JSONL、NOE context 及独立 LedgerProjection 元数据保持原责任。
 
-唯一后台写出完整 Parquet footer 后同步文件、禁止覆盖地原子发布、同步目录，再发布并同步不可变清单；只有清单稳定后 NOE 才提供原耐久引用，Ledger 封存成功后才确认稳定。清单逐批/段追加，不在后台常驻或重写整次运行的历史清单。NOE `boundary_sha256` 仍对原逻辑 CommitPayload 编码计算，原身份、ordinal 和来源水位不变。读取器兼容旧 JSON／JSONL；旧根合法续写仍用旧格式，不迁移或混写。新 NOE context 的物理编码使旧读取器明确拒绝；旧 Ledger 读取器无法取得新格式 Genesis，不能作为空账户恢复成功。损坏的已提交文件报错，未提交尾部不构成已稳定事实。
+唯一后台写出完整 Parquet footer 后同步文件、禁止覆盖地原子发布、同步目录，再发布并同步不可变清单；只有清单稳定后 NOE 才提供原耐久引用，Ledger 封存成功后才确认稳定。清单逐批/段追加，不在后台常驻或重写整次运行的历史清单。NOE 容器引用只携带实际位置，结果引用再携带 ordinal；Ledger 已应用引用按位置和 ordinal 去重，来源水位仍用于业务推进。NOE 暂存写入后只保存未稳定批次的水位和记录数，稳定时完成实际发布并取得当时时刻，不重读正文或常驻整批记录。位置恢复从 Parquet 清单与 footer 读取真实边界和行数，V3/V4 各自分派；独立历史正文读取仍解析完整记录。读取器兼容旧 JSON／JSONL；旧根合法续写仍用旧格式，不迁移或混写。新 NOE context 的物理编码使旧读取器明确拒绝；旧 Ledger 读取器无法取得新格式 Genesis，不能作为空账户恢复成功。实际读取时无法解析的已提交文件报错，未提交尾部不构成已稳定事实。
 
 每个已登记市场的 `end_at` 首次被原角色驱动的已关闭时间前缀覆盖时，自动沿同一 Stabilize 稳定此前已接纳的 SIM／NOE 和已产生的 Ledger。训练/离线取隐藏前缀，PAPER 取公开前缀；同毫秒公共组和请求处理后才真正关闭，单个公共组不是封口。零订单市场也触发，迟登记的过去市场在接纳后的首个合法关闭前缀处理；成功后释放待稳定截止。该边界不提前交付 NOE、不制造经济前驱、不结束账户或结算，迟到事实进入后续原记录流。`real_closed_market_prefix_stabilizes_zero_activity_before_finish` 用真实双市场及原关闭驱动验证 Finish 前自动稳定，后续公共帧才产生的 Ledger 不倒灌。
 
@@ -69,3 +69,7 @@ Ledger 经济更新按 #107 F1b 使用 `EconomicsPatch.day_updates`：追加新�
 正常 End 或 Stopped 后只调用 SIM `stop_and_drain`，不推进未来业务、不生成 RunSeal、不撤单清仓。报告分别保留 DPT 结果/确认/应用/稳定前缀、SIM/NOE/Ledger 记录排空、Ledger 实际已消费投影和脚本步骤；`collector_exit: null` 表示没有外部退出证据。基础设施失败以错误和非零退出报告，既有应用/确认/稳定进度保留，不能以成功排空掩盖失败。记录排空、脚本覆盖、账户完成和采集器退出是不同结论。
 
 `tests/paper.rs` 直接覆盖同一入口的双侧盘口与真实 GTC/取消、关联反馈、半帧期间原 timer、单边盘口 Unknown 未覆盖、正常 End、Stopped/Aborted/断连、原后台 I/O 失败及参数错误。测试只使用本地 Unix 对端。原 DPT reserve/取消和 SIM 同毫秒/返佣/背压机制反例继续复用组件测试。本次不证明真实线上稳定性、长运行资源、收益或整个 PAPER 阶段完成。
+
+NOE 有限报告按借用参数直接编码，Parquet 记录变体按实际结构编码/解码，不经过中间 JSON Value 树。新 NOE context、commit、Parquet 清单及共享引用不再写 `boundary_sha256`；旧额外字段被读取忽略，旧 JSON 和 Parquet 的实际重开/重复入账由有限场景覆盖。旧读取器要求该字段，不能读取缺字段的新产物。记录字段与 variant 语义保持，但直接结构编码的字段顺序和物理字节不承诺与旧 Value 编码相同。
+
+去掉 NOE 正文摘要后，仍可解析的正文改写不再单因字节变化被拒绝；成功 stage 后另行破坏文件也不会在 stabilize 被自读发现，后续实际历史解析承担其读取错误。位置恢复不扫描正文，不负责发现未消费正文的损坏。真实 write/close/sync、禁止覆盖发布和目录同步错误仍返回，未稳定发布不触发回调；不将返回错误等同于所有物理文件均已回滚。实际 context 身份派生及账户/目录关联继续保留。Ledger 自身分片摘要、旧 JSONL 行比较和 projection 内容寻址在本批未改，后续 H4b 另处理已分配余项。

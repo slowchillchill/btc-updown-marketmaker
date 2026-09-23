@@ -234,7 +234,6 @@ pub struct NoeSourceCommitBoundaryV1 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NoePublishedContainerReferenceV1 {
     pub location: String,
-    pub boundary_sha256: Sha256Hex,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -147,7 +147,6 @@ impl From<LedgerDurableErrorV1> for LedgerErrorV1 {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub(crate) struct NoeReferenceKeyV1 {
     location: String,
-    boundary_sha256: String,
     record_ordinal: u64,
 }
 
@@ -155,7 +154,6 @@ impl From<&NoeResultReferenceV1> for NoeReferenceKeyV1 {
     fn from(reference: &NoeResultReferenceV1) -> Self {
         Self {
             location: reference.commit_container.location.clone(),
-            boundary_sha256: reference.commit_container.boundary_sha256.0.clone(),
             record_ordinal: reference.record_ordinal,
         }
     }
@@ -4201,7 +4199,6 @@ mod tests {
             commit_container:
                 contracts::execution_normalization::NoePublishedContainerReferenceV1 {
                     location: "deleted-noe-container.json".to_owned(),
-                    boundary_sha256: contracts::Sha256Hex("b".repeat(64)),
                 },
             record_ordinal: 0,
         };
@@ -4260,7 +4257,6 @@ mod tests {
             commit_container:
                 contracts::execution_normalization::NoePublishedContainerReferenceV1 {
                     location: "capacity-opening.json".to_owned(),
-                    boundary_sha256: contracts::Sha256Hex("c".repeat(64)),
                 },
             record_ordinal: 0,
         };
