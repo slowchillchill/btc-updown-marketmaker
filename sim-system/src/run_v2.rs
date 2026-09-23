@@ -2244,8 +2244,7 @@ pub(crate) fn settlement_event_owned_bytes_v2(
 
 #[derive(Debug)]
 pub struct UnpublishedRunArtifactCandidateV2 {
-    opened: RunOpenedV2,
-    state: BusinessReducerStateV2,
+    run_id: String,
     log_path: PathBuf,
     accepted_input_count: u64,
     #[cfg(feature = "measurement")]
@@ -2254,7 +2253,7 @@ pub struct UnpublishedRunArtifactCandidateV2 {
 
 impl UnpublishedRunArtifactCandidateV2 {
     pub fn run_id(&self) -> &str {
-        &self.opened.run_id
+        &self.run_id
     }
 
     pub fn accepted_input_count(&self) -> u64 {
@@ -2283,7 +2282,6 @@ pub(crate) struct SimRunActorV2 {
     scenario: Arc<SealedPlatformScenarioV1>,
     _latency_profile: Arc<EmpiricalDelayProfile>,
     log_path: PathBuf,
-    max_group_bytes: usize,
     log: Option<SimEventLogV2>,
     // 仅未确认稳定的登记市场截止；成功稳定后删除，不保存历史市场清单。
     unstable_market_ends: BTreeSet<i64>,
@@ -2464,7 +2462,6 @@ struct ReplayedEventLogV2 {
 fn materialize_logged_input_v2<F>(
     input: LoggedBusinessInputV2,
     read_bucket: &mut F,
-    read_public: &mut Option<&mut dyn PublicConsumptionMaterialReaderV1>,
 ) -> Result<BusinessInputV2, SimRunActorErrorV2>
 where
     F: FnMut(
@@ -2476,33 +2473,15 @@ where
             BusinessInputV2::CancelScenario(operation)
         }
         LoggedBusinessInputV2::Settlement(operation) => BusinessInputV2::Settlement(operation),
-        LoggedBusinessInputV2::HiddenStepBucket(bucket) => {
-            let records = read_public
-                .as_mut()
-                .ok_or(SimRunActorErrorV2::CompletionNotReady(
-                    "隐藏桶恢复需要原记录读取器",
-                ))?
-                .hidden_bucket(&bucket.reference)?;
-            BusinessInputV2::HiddenStepBucket(AcceptedHiddenStepBucketV1 {
-                reference: bucket.reference,
-                records,
-            })
+        LoggedBusinessInputV2::HiddenStepBucket(_) => {
+            return Err(SimRunActorErrorV2::CompletionNotReady(
+                "隐藏桶恢复需要原记录读取器",
+            ));
         }
-        LoggedBusinessInputV2::PublicGroup(group) => {
-            let prepared = read_public
-                .as_mut()
-                .ok_or(SimRunActorErrorV2::CompletionNotReady(
-                    "公共组恢复需要原记录读取器",
-                ))?
-                .public_group(&group.reference)?;
-            BusinessInputV2::PublicGroup(AcceptedPublicGroupV1 {
-                reference: group.reference,
-                execution_time: TrustedActorExecutionTimeV1(group.execution_time),
-                prepared,
-                pm_materials: Vec::new(),
-                pm_step_bindings: group.pm_step_bindings,
-                pm_reports: group.pm_reports,
-            })
+        LoggedBusinessInputV2::PublicGroup(_) => {
+            return Err(SimRunActorErrorV2::CompletionNotReady(
+                "公共组恢复需要原记录读取器",
+            ));
         }
         LoggedBusinessInputV2::PublicRequest { cutoff, request } => {
             BusinessInputV2::PublicRequest {
@@ -2550,7 +2529,6 @@ fn replay_event_log_v2<F>(
     max_group_bytes: usize,
     projection_port: Option<&dyn BusinessProjectionPortV2>,
     mut read_bucket: F,
-    mut read_public: Option<&mut dyn PublicConsumptionMaterialReaderV1>,
 ) -> Result<ReplayedEventLogV2, SimRunActorErrorV2>
 where
     F: FnMut(
@@ -2583,7 +2561,7 @@ where
             break;
         };
         for logged in group {
-            let input = materialize_logged_input_v2(logged, &mut read_bucket, &mut read_public)?;
+            let input = materialize_logged_input_v2(logged, &mut read_bucket)?;
             let reduced = reduce_actor_input_v2(
                 &opened,
                 scenario.initial_market_directory(),
@@ -2857,16 +2835,10 @@ impl SimExecution {
         self.actor.advance_retention(advance)
     }
 
-    pub fn complete_clean_run<F>(
+    pub fn complete_clean_run(
         self,
-        read_bucket: F,
-    ) -> Result<UnpublishedRunArtifactCandidateV2, SimRunActorErrorV2>
-    where
-        F: FnMut(
-            &DurableMarketBucketReferenceV2,
-        ) -> Result<Arc<[ExecutionMarketEventV3]>, SimRunActorErrorV2>,
-    {
-        self.actor.complete_clean_run(read_bucket)
+    ) -> Result<UnpublishedRunArtifactCandidateV2, SimRunActorErrorV2> {
+        self.actor.complete_clean_run()
     }
 
     #[cfg(feature = "measurement")]
@@ -2923,7 +2895,6 @@ impl SimRunActorV2 {
             scenario,
             _latency_profile: latency_profile,
             log_path: path.to_path_buf(),
-            max_group_bytes,
             log: Some(log),
             background_log: None,
             unstable_market_ends: BTreeSet::new(),
@@ -2967,7 +2938,6 @@ impl SimRunActorV2 {
             max_group_bytes,
             Some(projection_port.as_ref()),
             read_bucket,
-            None,
         )?;
         if replayed.opened.durability_role != RunDurabilityRoleV2::RecoverablePaper {
             return Err(SimRunActorErrorV2::Log(
@@ -2987,7 +2957,6 @@ impl SimRunActorV2 {
             scenario,
             _latency_profile: latency_profile,
             log_path: path.to_path_buf(),
-            max_group_bytes,
             log: Some(log),
             background_log: None,
             unstable_market_ends: BTreeSet::new(),
@@ -3018,33 +2987,6 @@ impl SimRunActorV2 {
             &DurableMarketBucketReferenceV2,
         ) -> Result<Arc<[ExecutionMarketEventV3]>, SimRunActorErrorV2>,
     {
-        Self::recover_sealed_clean_run_with_materials(
-            path,
-            rule_snapshot,
-            finality_policy,
-            scenario,
-            latency_profile,
-            max_group_bytes,
-            read_bucket,
-            None,
-        )
-    }
-
-    pub(crate) fn recover_sealed_clean_run_with_materials<F>(
-        path: &Path,
-        rule_snapshot: Arc<SealedProcessRuleSnapshotV3>,
-        finality_policy: Arc<TradeFinalityPolicyV2>,
-        scenario: Arc<SealedPlatformScenarioV1>,
-        latency_profile: Arc<EmpiricalDelayProfile>,
-        max_group_bytes: usize,
-        read_bucket: F,
-        read_public: Option<&mut dyn PublicConsumptionMaterialReaderV1>,
-    ) -> Result<UnpublishedRunArtifactCandidateV2, SimRunActorErrorV2>
-    where
-        F: FnMut(
-            &DurableMarketBucketReferenceV2,
-        ) -> Result<Arc<[ExecutionMarketEventV3]>, SimRunActorErrorV2>,
-    {
         #[cfg(feature = "measurement")]
         let recovery_started = Instant::now();
         let replayed = replay_event_log_v2(
@@ -3056,7 +2998,6 @@ impl SimRunActorV2 {
             max_group_bytes,
             None,
             read_bucket,
-            read_public,
         )?;
         if replayed.opened.durability_role != RunDurabilityRoleV2::CleanRun {
             return Err(SimRunActorErrorV2::Log(
@@ -3068,8 +3009,7 @@ impl SimRunActorV2 {
             .finish_sealed_clean_run()
             .map_err(SimRunActorErrorV2::Log)?;
         Ok(UnpublishedRunArtifactCandidateV2 {
-            opened: replayed.opened,
-            state: replayed.state,
+            run_id: replayed.opened.run_id,
             log_path: path.to_path_buf(),
             accepted_input_count: replayed.accepted_input_count,
             #[cfg(feature = "measurement")]
@@ -3081,28 +3021,9 @@ impl SimRunActorV2 {
         })
     }
 
-    pub(crate) fn complete_clean_run<F>(
-        self,
-        read_bucket: F,
-    ) -> Result<UnpublishedRunArtifactCandidateV2, SimRunActorErrorV2>
-    where
-        F: FnMut(
-            &DurableMarketBucketReferenceV2,
-        ) -> Result<Arc<[ExecutionMarketEventV3]>, SimRunActorErrorV2>,
-    {
-        self.complete_clean_run_with_materials(read_bucket, None)
-    }
-
-    pub(crate) fn complete_clean_run_with_materials<F>(
+    pub(crate) fn complete_clean_run(
         mut self,
-        read_bucket: F,
-        read_public: Option<&mut dyn PublicConsumptionMaterialReaderV1>,
-    ) -> Result<UnpublishedRunArtifactCandidateV2, SimRunActorErrorV2>
-    where
-        F: FnMut(
-            &DurableMarketBucketReferenceV2,
-        ) -> Result<Arc<[ExecutionMarketEventV3]>, SimRunActorErrorV2>,
-    {
+    ) -> Result<UnpublishedRunArtifactCandidateV2, SimRunActorErrorV2> {
         if self.opened.durability_role != RunDurabilityRoleV2::CleanRun {
             return Err(SimRunActorErrorV2::CompletionNotReady(
                 "RecoverablePaper 不使用 RunSeal",
@@ -3163,36 +3084,22 @@ impl SimRunActorV2 {
                 "合格市场判定尚未完成既有因果闭合",
             ));
         }
-        if let Some(background) = self.background_log.take() {
+        let accepted_input_count = if let Some(background) = self.background_log.take() {
             background.finish().map_err(SimRunActorErrorV2::Log)?;
+            self.applied_input_sequence - 1
         } else {
-            self.log
-                .take()
-                .ok_or(SimRunActorErrorV2::Closed)?
-                .seal_clean_run()
-                .map_err(SimRunActorErrorV2::Log)?;
-        }
-        #[cfg(feature = "measurement")]
-        let seal_observations = self.measurement_probe.drain();
-        let candidate = Self::recover_sealed_clean_run_with_materials(
-            &self.log_path,
-            self._rule_snapshot,
-            self._finality_policy,
-            self.scenario,
-            self._latency_profile,
-            self.max_group_bytes,
-            read_bucket,
-            read_public,
-        )?;
-        #[cfg(feature = "measurement")]
-        let candidate = {
-            let mut candidate = candidate;
-            let mut combined = seal_observations;
-            combined.append(&mut candidate.measurement_observations);
-            candidate.measurement_observations = combined;
-            candidate
+            let log = self.log.take().ok_or(SimRunActorErrorV2::Closed)?;
+            let accepted_input_count = log.next_input_sequence() - 1;
+            log.seal_clean_run().map_err(SimRunActorErrorV2::Log)?;
+            accepted_input_count
         };
-        Ok(candidate)
+        Ok(UnpublishedRunArtifactCandidateV2 {
+            run_id: self.opened.run_id,
+            log_path: self.log_path,
+            accepted_input_count,
+            #[cfg(feature = "measurement")]
+            measurement_observations: self.measurement_probe.drain(),
+        })
     }
 
     pub(crate) fn create_session(
@@ -15491,17 +15398,11 @@ mod tests {
             .expect("关闭测量封口会话");
         execution.drain_measurement_observations();
 
-        let candidate = execution
-            .complete_clean_run(|_| unreachable!("初始化失败根没有市场桶"))
-            .expect("形成测量冷候选");
+        let candidate = execution.complete_clean_run().expect("形成测量冷候选");
         let observations = candidate.measurement_observations();
         assert!(observations.iter().any(|observation| {
             observation.context == crate::measurement_probe::MeasurementContext::CleanSeal
                 && observation.phase == crate::measurement_probe::MeasurementPhase::LogSync
-        }));
-        assert!(observations.iter().any(|observation| {
-            observation.context == crate::measurement_probe::MeasurementContext::Recovery
-                && observation.phase == crate::measurement_probe::MeasurementPhase::RecoveryReplay
         }));
     }
 
@@ -16555,7 +16456,6 @@ mod tests {
                     assert_eq!(reference.bucket_at_utc_ms, 1_100);
                     Ok(Arc::from(decoded_initial_market_events("10")))
                 },
-                None,
             )
             .unwrap()
         };
@@ -18008,27 +17908,14 @@ mod tests {
             .last()
             .expect("公开 CleanRun 至少交付一个投影批次");
 
-        crate::event_log::reset_event_log_counts_for_tests();
-        let candidate = execution
-            .complete_clean_run(|reference| {
-                buckets
-                    .iter()
-                    .find(|(candidate, _)| candidate == reference)
-                    .map(|(_, events)| Arc::clone(events))
-                    .ok_or(SimRunActorErrorV2::CompletionNotReady(
-                        "冷重放找不到耐久市场桶",
-                    ))
-            })
-            .expect("CleanRun 必须形成未发布冷产物候选");
-        assert_eq!(crate::event_log::event_log_counts_for_tests(), (1, 1));
-        assert_eq!(candidate.opened.run_id, "run-clean-candidate-v2");
-        assert_eq!(candidate.log_path, path);
-        assert_eq!(candidate.accepted_input_count, 8);
-        let session = candidate
+        let session = execution
+            .actor
             .state
+            .as_ref()
+            .unwrap()
             .session
             .as_ref()
-            .expect("冷候选保留唯一会话");
+            .unwrap();
         assert!(session.hidden_platform_frontier.sealed);
         assert!(session.public_visibility_frontier.sealed);
         assert!(session.public_markets.all_qualified_resolutions_terminal());
@@ -18051,6 +17938,32 @@ mod tests {
                 .expect("训练会话保留隐藏市场状态")
                 .all_qualified_resolutions_terminal()
         );
+        let candidate = execution
+            .complete_clean_run()
+            .expect("CleanRun 必须形成未发布冷产物候选");
+        assert_eq!(candidate.run_id(), "run-clean-candidate-v2");
+        assert_eq!(candidate.log_path, path);
+        assert_eq!(candidate.accepted_input_count, 8);
+        let recovered = SimExecution::recover_sealed_clean_run(
+            &path,
+            rule_snapshot,
+            finality_policy,
+            scenario,
+            latency_profile,
+            MAX_GROUP_BYTES,
+            |reference| {
+                buckets
+                    .iter()
+                    .find(|(stored, _)| stored == reference)
+                    .map(|(_, events)| Arc::clone(events))
+                    .ok_or(SimRunActorErrorV2::CompletionNotReady(
+                        "恢复找不到耐久市场桶",
+                    ))
+            },
+        )
+        .expect("显式恢复读取实际封口日志和市场桶");
+        assert_eq!(recovered.run_id(), "run-clean-candidate-v2");
+        assert_eq!(recovered.accepted_input_count(), 8);
         candidate
             .delete_after_retention()
             .unwrap_or_else(|error| panic!("保留期结束后必须删除精确运行文件：{error}"));
@@ -18093,7 +18006,7 @@ mod tests {
             .expect("公开记录稳定初始化失败决定");
 
         let candidate = execution
-            .complete_clean_run(|_| panic!("初始化失败的公开 CleanRun 没有市场桶引用"))
+            .complete_clean_run()
             .expect("公开初始化失败终态必须允许冷封口");
         assert_eq!(candidate.run_id(), "run-public-failed-init-seal-v2");
         assert_eq!(candidate.accepted_input_count(), 2);
@@ -18132,19 +18045,21 @@ mod tests {
             .fail_session_initialization("ledger-rejected".to_owned())
             .expect("记录稳定初始化失败决定");
 
-        let candidate = actor
-            .complete_clean_run(|_| panic!("初始化失败的 CleanRun 没有市场桶引用"))
-            .expect("初始化失败终态必须允许冷封口");
-        assert_eq!(candidate.accepted_input_count, 2);
         assert!(matches!(
-            candidate
+            actor
                 .state
+                .as_ref()
+                .unwrap()
                 .session
                 .as_ref()
-                .expect("冷候选保留失败会话")
+                .unwrap()
                 .initialization,
             SessionInitializationV2::InitializationFailedClosed { .. }
         ));
+        let candidate = actor
+            .complete_clean_run()
+            .expect("初始化失败终态必须允许冷封口");
+        assert_eq!(candidate.accepted_input_count, 2);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -20092,18 +20007,8 @@ impl PublicSimExecutionV1 {
             .stop_and_drain()
             .map_err(SimRunActorErrorV2::Log)
     }
-    pub fn complete(
-        self,
-        materials: &mut dyn PublicConsumptionMaterialReaderV1,
-    ) -> Result<UnpublishedRunArtifactCandidateV2, SimRunActorErrorV2> {
-        self.actor.complete_clean_run_with_materials(
-            |_| {
-                Err(SimRunActorErrorV2::CompletionNotReady(
-                    "新消费运行不引用旧桶正文",
-                ))
-            },
-            Some(materials),
-        )
+    pub fn complete(self) -> Result<UnpublishedRunArtifactCandidateV2, SimRunActorErrorV2> {
+        self.actor.complete_clean_run()
     }
     fn apply_public_group(
         &mut self,
@@ -20560,11 +20465,8 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
     pub fn stop_and_drain(self) -> Result<(), SimRunActorErrorV2> {
         self.state.execution.stop_and_drain()
     }
-    pub fn complete(
-        self,
-        materials: &mut dyn PublicConsumptionMaterialReaderV1,
-    ) -> Result<UnpublishedRunArtifactCandidateV2, SimRunActorErrorV2> {
-        self.state.execution.complete(materials)
+    pub fn complete(self) -> Result<UnpublishedRunArtifactCandidateV2, SimRunActorErrorV2> {
+        self.state.execution.complete()
     }
 }
 

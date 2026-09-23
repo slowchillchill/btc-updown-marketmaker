@@ -49,7 +49,7 @@ async fn memory_ledger_real_source_background_v2_gap_idempotence_and_funds() {
     for r in &remaining {ledger.apply_noe_memory_v1(r).unwrap();}
     assert_eq!(ledger.funds_read_v1().order(&order).unwrap().principal_encumbrance_pusd,contracts::ExecutionReadValueV1::Known(ExactDecimal("0".into())));
     let expected=ledger.projection_v2().unwrap();
-    driver.complete(&mut RecordedMaterials{root,hidden:None}).unwrap();
+    driver.complete().unwrap();
     assert!(opening.durable_reference().is_some());
     let durable=opening.durable_reference().unwrap();
     let view=::execution_normalization::read_durable_noe_record_v1(durable.result()).unwrap();

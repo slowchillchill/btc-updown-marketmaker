@@ -144,7 +144,7 @@ async fn real_group_bridge_registry_ledger_freeze_and_recovery() {
     }
     assert!(shared.apply_closed().unwrap());
     let expected = shared.ledger().projection_v2().unwrap();
-    driver.complete(&mut Materials { root }).unwrap();
+    driver.complete().unwrap();
     let mut recovered = LedgerWriterV1::open_durable(&ledger_root).unwrap();
     assert_eq!(recovered.projection_v2().unwrap(), expected);
     assert!(matches!(
@@ -905,7 +905,7 @@ async fn sealed_group_five_methods_are_once_and_construction_failure_and_no_trad
         shared.action_before(&mut driver).unwrap();
     }
     shared.apply_closed().unwrap();
-    driver.complete(&mut Materials { root }).unwrap();
+    driver.complete().unwrap();
     let text = std::fs::read_to_string(path).unwrap();
     let values: Vec<serde_json::Value> = text
         .lines()
@@ -987,7 +987,7 @@ async fn ledger_background_io_failure_is_original_error_and_never_clean_run() {
     let error = if let Some(error) = failure {
         error
     } else {
-        match driver.complete(&mut Materials { root }) {
+        match driver.complete() {
             Err(e) => e,
             Ok(_) => panic!("I/O失败不能正常完成"),
         }
@@ -2926,7 +2926,7 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
 
         let before_reopen = shared.ledger().projection_v2();
         let cash_before_reopen = shared.ledger().economic_read().unwrap().cash().clone();
-        driver.complete(&mut Materials { root }).unwrap();
+        driver.complete().unwrap();
         let mut restored = LedgerWriterV1::open_durable(temp.path().join("ledger")).unwrap();
         assert_eq!(restored.projection_v2(), before_reopen);
         assert_eq!(

@@ -391,17 +391,6 @@ impl PmStateReadV1<PreparedPmEvidenceV1<SourceEvidenceRefV3>> for SimPmReadV1<'_
     }
 }
 
-pub trait PublicConsumptionMaterialReaderV1 {
-    fn public_group(
-        &mut self,
-        reference: &PublicGroupReferenceV1,
-    ) -> Result<Arc<PreparedPublicGroupV1>, crate::run_v2::SimRunActorErrorV2>;
-    fn hidden_bucket(
-        &mut self,
-        reference: &ClosedHiddenStepBucketV1,
-    ) -> Result<Arc<[HiddenExecutionRecordV1]>, crate::run_v2::SimRunActorErrorV2>;
-}
-
 /// 新运行的投影持有方同时拥有真实反馈交付前缀；整批接纳不等于模型交付。
 pub trait PublicProjectionPortV1: crate::run_v2::BusinessProjectionPortV2 {
     fn delivered_private_feedback(&self, run_id: &str) -> u64;

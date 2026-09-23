@@ -318,8 +318,7 @@ async fn real_memory_noe_delivers_closed_order_feedback_and_cancel_before_finish
     assert!(driver.execution.actor.unstable_market_ends.is_empty(),"已稳定市场截止不常驻历史集合");
     let accepted = observation.accepted_through();
     assert!(observation.durable_through()>0,"市场结束已自动稳定，无需等Finish");
-    let mut materials = RecordedMaterials { root, hidden: None };
-    driver.complete(&mut materials).unwrap();
+    driver.complete().unwrap();
     assert_eq!(observation.durable_through(), accepted);
     let references = observation.result_references();
     assert!(!references.is_empty());
@@ -500,7 +499,7 @@ async fn real_memory_noe_stage_and_publish_failures_preserve_materials_without_s
             match driver.next_group() {Ok(Some(_))=>{},Ok(None)=>break None,Err(error)=>break Some(error)}
         };
         let error=if let Some(error)=driving_error {error} else {
-            match driver.complete(&mut RecordedMaterials {root,hidden:None}) {Err(error)=>error,Ok(_)=>panic!("损坏现场不能完成")}
+            match driver.complete() {Err(error)=>error,Ok(_)=>panic!("损坏现场不能完成")}
         };
         if stable_publish {
             assert!(matches!(
@@ -573,7 +572,7 @@ async fn finite_legacy_order_consumer_keeps_noe_v2_context_and_reader() {
         "无请求的有限例程没有虚构反馈交付"
     );
     driver
-        .complete(&mut RecordedMaterials { root, hidden: None })
+        .complete()
         .unwrap();
     for reference in observation.result_references() {
         let value = ::execution_normalization::read_noe_result_v2(&reference).unwrap();
@@ -752,10 +751,7 @@ async fn training_hidden_prefetch_cannot_advance_public_feedback_visibility_or_o
     assert_eq!(observation.delivered_through(),delivered_before_end,"耐久稳定不前移公共反馈交付");
     while driver.next_group().unwrap().is_some() {}
     driver
-        .complete(&mut RecordedMaterials {
-            root,
-            hidden: Some(hidden),
-        })
+        .complete()
         .unwrap();
     let (_, mut reader) = SimEventLogRecoveryV2::open(&path, MAX_GROUP_BYTES).unwrap();
     let mut saw_request = false;
@@ -898,10 +894,7 @@ async fn empty_initial_markets_open_before_activation_and_do_not_forge_input_com
         );
         if complete {
             assert!(matches!(
-                driver.complete(&mut RecordedMaterials {
-                    root: temp.path().join("unused"),
-                    hidden: None
-                }),
+                driver.complete(),
                 Err(SimRunActorErrorV2::CompletionNotReady(
                     "市场输入路径尚未全部成功结束"
                 ))

@@ -52,31 +52,6 @@ fn source(root: &Path, config: &Config) -> RecordingResult<Source> {
         RecordedReceivedTimes::open(root, rows, bytes)?,
     )?)
 }
-struct Materials(Source);
-impl PublicConsumptionMaterialReaderV1 for Materials {
-    fn public_group(
-        &mut self,
-        reference: &contracts::PublicGroupReferenceV1,
-    ) -> Result<Arc<PreparedPublicGroupV1>, SimRunActorErrorV2> {
-        for item in self.0.by_ref() {
-            let item = item?;
-            if item.prepared.reference.group_position == reference.group_position {
-                return Ok(item.prepared);
-            }
-        }
-        Err(SimRunActorErrorV2::PublicConsumptionSource(
-            "原记录组缺失".into(),
-        ))
-    }
-    fn hidden_bucket(
-        &mut self,
-        _: &contracts::ClosedHiddenStepBucketV1,
-    ) -> Result<Arc<[HiddenExecutionRecordV1]>, SimRunActorErrorV2> {
-        Err(SimRunActorErrorV2::PublicConsumptionSource(
-            "此公开有限入口没有隐藏桶供料".into(),
-        ))
-    }
-}
 pub fn run(
     config_path: &Path,
     out: &Path,
@@ -238,7 +213,7 @@ pub fn run(
         File::create(out.join("input-completion.json"))?,
         &serde_json::json!({"groups": groups, "input_time_path_ended": true}),
     )?;
-    let candidate = driver.complete(&mut Materials(source(recording, &config.data)?))?;
+    let candidate = driver.complete()?;
     serde_json::to_writer_pretty(
         File::create(out.join("completion.json"))?,
         &serde_json::json!({"groups": groups, "clean_sealed_log": candidate.log_path()}),
