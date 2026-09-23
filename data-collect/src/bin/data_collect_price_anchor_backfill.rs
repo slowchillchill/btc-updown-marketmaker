@@ -258,9 +258,9 @@ struct RemainingQueryRunV1 {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct RemainingCompletion {
-    attempt: RemainingQueryAttemptV1,
-    response: Option<HttpResponseEvidenceV1>,
+struct RemainingCompletion<A = RemainingQueryAttemptV1, R = HttpResponseEvidenceV1> {
+    attempt: A,
+    response: Option<R>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -416,12 +416,17 @@ struct SelectedAnchor {
     member: u32,
     value_path: String,
 }
+struct LoadedResponse {
+    evidence: HttpResponseEvidenceV1,
+    bytes: Vec<u8>,
+}
+
 struct Sources {
     identities: BTreeMap<String, Identity>,
     date_sets: BTreeMap<String, SourceDateSet>,
     inventory: Inventory,
     evidence_files: Vec<FileBinding>,
-    responses: BTreeMap<String, HttpResponseEvidenceV1>,
+    responses: BTreeMap<String, LoadedResponse>,
     anchors: BTreeMap<String, SelectedAnchor>,
     website_requests: BTreeMap<String, WebsiteCryptoPriceRequest>,
     outside_history: BTreeSet<String>,
@@ -448,9 +453,16 @@ fn outside_observed_history_window(market_start_ms: i64, limit_observed_at_ms: i
 fn path_text(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
-fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
-    serde_json::from_slice(&fs::read(path)?)
-        .map_err(|e| invalid(format!("{}: {e}", path.display())))
+fn read_bound_json<T: DeserializeOwned>(path: &Path) -> Result<(T, FileBinding)> {
+    let bytes = fs::read(path)?;
+    let value = decode(&bytes, &path_text(path))?;
+    Ok((
+        value,
+        FileBinding {
+            path: path_text(path),
+            sha256: hash_bytes(&bytes),
+        },
+    ))
 }
 fn verified_bytes(path: &Path, expected: &str) -> Result<Vec<u8>> {
     let bytes = fs::read(path)?;
@@ -551,7 +563,37 @@ fn load_sources(config: &Config) -> Result<Sources> {
         return load_remaining_sources(config);
     }
     let root = &config.evidence_root;
-    let diagnostics: Vec<UiStatus> = read_json(&root.join("ui-diagnostic-summary.json"))?;
+    let (local, local_binding): (BTreeMap<String, LocalIdentity>, _) =
+        read_bound_json(&root.join("fixed-market-local-identities.json"))?;
+    let (members, members_binding): (BTreeMap<String, Vec<String>>, _) =
+        read_bound_json(&root.join("fixed-date-market-slugs.json"))?;
+    let (inventory, inventory_binding): (Inventory, _) =
+        read_bound_json(&root.join("fixed-date-inventory.json"))?;
+    let (queries, queries_binding): (Vec<LegacyQuery>, _) =
+        read_bound_json(&root.join("fixed-market-probe-queries.json"))?;
+    let (details, details_binding): (Vec<LegacyQuery>, _) =
+        read_bound_json(&root.join("missing-detail-probe-records.json"))?;
+    let hashes_binding = bind(&root.join("response-file-hashes.json"))?;
+    let (combined, combined_binding): (Combined, _) =
+        read_bound_json(&root.join("combined-anchor-evidence-summary.json"))?;
+    let (bounded, bounded_binding): (Vec<UiStatus>, _) =
+        read_bound_json(&root.join("official-ui-bounded-results.json"))?;
+    let (slow, slow_binding): (Vec<UiStatus>, _) =
+        read_bound_json(&root.join("official-ui-slow-results.json"))?;
+    let (diagnostics, diagnostics_binding): (Vec<UiStatus>, _) =
+        read_bound_json(&root.join("ui-diagnostic-summary.json"))?;
+    let evidence_files = vec![
+        local_binding,
+        members_binding,
+        inventory_binding,
+        queries_binding,
+        details_binding,
+        hashes_binding,
+        combined_binding,
+        bounded_binding,
+        slow_binding,
+        diagnostics_binding,
+    ];
     let history_limit_observed_at = diagnostics
         .iter()
         .find(|row| {
@@ -561,23 +603,6 @@ fn load_sources(config: &Config) -> Result<Sources> {
         })
         .map(|row| time_ms(&row.received_at))
         .transpose()?;
-    let evidence_names = [
-        "fixed-market-local-identities.json",
-        "fixed-date-market-slugs.json",
-        "fixed-date-inventory.json",
-        "fixed-market-probe-queries.json",
-        "missing-detail-probe-records.json",
-        "response-file-hashes.json",
-        "combined-anchor-evidence-summary.json",
-        "official-ui-bounded-results.json",
-        "official-ui-slow-results.json",
-        "ui-diagnostic-summary.json",
-    ];
-    let evidence_files = evidence_names
-        .iter()
-        .map(|name| bind(&root.join(name)))
-        .collect::<Result<Vec<_>>>()?;
-    let local: BTreeMap<String, LocalIdentity> = read_json(&root.join(evidence_names[0]))?;
     let identities = local
         .into_iter()
         .map(|(slug, local)| {
@@ -595,8 +620,6 @@ fn load_sources(config: &Config) -> Result<Sources> {
             ))
         })
         .collect::<Result<BTreeMap<_, _>>>()?;
-    let members: BTreeMap<String, Vec<String>> = read_json(&root.join(evidence_names[1]))?;
-    let inventory: Inventory = read_json(&root.join(evidence_names[2]))?;
     let date_sets = members
         .into_iter()
         .map(|(name, member_slugs)| {
@@ -633,7 +656,6 @@ fn load_sources(config: &Config) -> Result<Sources> {
         network_attempts: Vec::new(),
         remaining_v5: None,
     };
-    let queries: Vec<LegacyQuery> = read_json(&root.join("fixed-market-probe-queries.json"))?;
     for query in queries {
         let bytes = verified_bytes(Path::new(&query.response_file), &query.sha256)?;
         let events: Vec<Event> = decode(&bytes, &query.response_file)?;
@@ -703,9 +725,14 @@ fn load_sources(config: &Config) -> Result<Sources> {
                 );
             }
         }
-        sources.responses.insert(group, response);
+        sources.responses.insert(
+            group,
+            LoadedResponse {
+                evidence: response,
+                bytes,
+            },
+        );
     }
-    let details: Vec<LegacyQuery> = read_json(&root.join("missing-detail-probe-records.json"))?;
     for query in details {
         let bytes = verified_bytes(Path::new(&query.response_file), &query.sha256)?;
         let slug = query
@@ -732,15 +759,16 @@ fn load_sources(config: &Config) -> Result<Sources> {
             .entry(slug.to_owned())
             .or_default()
             .push(group.clone());
-        sources.responses.insert(group, response);
+        sources.responses.insert(
+            group,
+            LoadedResponse {
+                evidence: response,
+                bytes,
+            },
+        );
     }
     let mut statuses = BTreeMap::new();
-    for name in [
-        "official-ui-bounded-results.json",
-        "official-ui-slow-results.json",
-        "ui-diagnostic-summary.json",
-    ] {
-        let rows: Vec<UiStatus> = read_json(&root.join(name))?;
+    for rows in [bounded, slow, diagnostics] {
         for row in rows {
             statuses.insert(
                 (row.response_file, row.sha256, row.received_at),
@@ -748,7 +776,6 @@ fn load_sources(config: &Config) -> Result<Sources> {
             );
         }
     }
-    let combined: Combined = read_json(&root.join("combined-anchor-evidence-summary.json"))?;
     for ui in combined.ui_confirmed_values {
         let bytes = verified_bytes(Path::new(&ui.response_file), &ui.sha256)?;
         let prices: WebsiteCryptoPriceResponse = decode(&bytes, &ui.response_file)?;
@@ -795,7 +822,13 @@ fn load_sources(config: &Config) -> Result<Sources> {
             .entry(ui.slug)
             .or_default()
             .push(group.clone());
-        sources.responses.insert(group, response);
+        sources.responses.insert(
+            group,
+            LoadedResponse {
+                evidence: response,
+                bytes,
+            },
+        );
     }
     if let Some(path) = config.additional_queries.last() {
         import_queries(&mut sources, path)?;
@@ -804,18 +837,25 @@ fn load_sources(config: &Config) -> Result<Sources> {
 }
 
 fn import_queries(sources: &mut Sources, path: &Path) -> Result<()> {
-    let run: QueryRun = read_json(path)?;
-    sources.evidence_files.push(bind(path)?);
+    let (run, binding): (QueryRun, _) = read_bound_json(path)?;
+    sources.evidence_files.push(binding);
     for (group_id, response) in run.response_groups {
-        verified_bytes(
+        let bytes = verified_bytes(
             Path::new(&response.original_response_file),
             &response.response_body_sha256,
         )?;
         if response.id()? != group_id {
             return Err(invalid("新查询的响应组身份与原响应证据不符"));
         }
-        sources.responses.insert(group_id, response);
+        sources.responses.insert(
+            group_id,
+            LoadedResponse {
+                evidence: response,
+                bytes,
+            },
+        );
     }
+    let mut prices_by_group = BTreeMap::new();
     for attempt in run.network_attempts {
         let identity = sources
             .identities
@@ -836,20 +876,23 @@ fn import_queries(sources: &mut Sources, path: &Path) -> Result<()> {
                 .entry(attempt.slug.clone())
                 .or_default()
                 .push(group_id.clone());
-            if attempt.result == "observed" && response.http_status_code == Some(200) {
-                let bytes = verified_bytes(
-                    Path::new(&response.original_response_file),
-                    &response.response_body_sha256,
-                )?;
-                let prices: WebsiteCryptoPriceResponse =
-                    decode(&bytes, &response.original_response_file)?;
-                if let Some(raw) = prices.open_price {
+            if attempt.result == "observed" && response.evidence.http_status_code == Some(200) {
+                let prices = match prices_by_group.entry(group_id.clone()) {
+                    std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(decode::<WebsiteCryptoPriceResponse>(
+                            &response.bytes,
+                            &response.evidence.original_response_file,
+                        )?)
+                    }
+                };
+                if let Some(raw) = &prices.open_price {
                     sources
                         .anchors
                         .entry(attempt.slug.clone())
                         .or_insert(SelectedAnchor {
                             source: "official_crypto_price_open_price".to_owned(),
-                            raw: raw.0,
+                            raw: raw.0.clone(),
                             group: group_id.clone(),
                             member: 0,
                             value_path: "/openPrice".to_owned(),
@@ -869,8 +912,9 @@ fn load_remaining_sources(config: &Config) -> Result<Sources> {
         .evidence_root
         .join("remaining-market-local-identities.json");
     let dates_path = config.evidence_root.join("remaining-date-evidence.json");
-    let local: BTreeMap<String, RemainingLocalIdentity> = read_json(&local_path)?;
-    let dates: RemainingDateEvidence = read_json(&dates_path)?;
+    let (local, local_binding): (BTreeMap<String, RemainingLocalIdentity>, _) =
+        read_bound_json(&local_path)?;
+    let (dates, dates_binding): (RemainingDateEvidence, _) = read_bound_json(&dates_path)?;
     let identities = local
         .into_iter()
         .map(|(slug, local)| {
@@ -905,7 +949,7 @@ fn load_remaining_sources(config: &Config) -> Result<Sources> {
         inventory: Inventory {
             per_day: BTreeMap::new(),
         },
-        evidence_files: vec![bind(&local_path)?, bind(&dates_path)?],
+        evidence_files: vec![local_binding, dates_binding],
         responses: BTreeMap::new(),
         anchors: BTreeMap::new(),
         website_requests: BTreeMap::new(),
@@ -937,17 +981,18 @@ fn load_remaining_sources(config: &Config) -> Result<Sources> {
             .file_name()
             .is_some_and(|name| name == "ui-diagnostic-summary.json")
         {
-            sources.evidence_files.push(bind(input)?);
-            let rows: Vec<UiStatus> = read_json(input)?;
+            let (rows, binding): (Vec<UiStatus>, _) = read_bound_json(input)?;
+            sources.evidence_files.push(binding);
             for row in rows {
                 if row.http_status == "400"
                     && row.body.as_deref()
                         == Some(r#"{"error":"Timestamp too old for Chainlink API (max 30 days)"}"#)
                 {
                     verified_bytes(Path::new(&row.response_file), &row.sha256)?;
-                    sources
-                        .evidence_files
-                        .push(bind(Path::new(&row.response_file))?);
+                    sources.evidence_files.push(FileBinding {
+                        path: row.response_file.clone(),
+                        sha256: row.sha256.clone(),
+                    });
                     sources
                         .remaining_v5
                         .as_mut()
@@ -1175,16 +1220,16 @@ fn import_remaining_attempt(
         if attempt.response_group_id.as_deref() != Some(&id) {
             return Err(invalid("查询的响应组身份与原响应证据不符"));
         }
-        let bytes = verified_bytes(
-            Path::new(&response.original_response_file),
-            &response.response_body_sha256,
-        )?;
         if sources.network_attempts.iter().any(|old| {
             matches!(old, NetworkAttempt::Remaining(old)
             if old.response_group_id.as_ref() == Some(&id))
         }) {
             return Ok(());
         }
+        let bytes = verified_bytes(
+            Path::new(&response.original_response_file),
+            &response.response_body_sha256,
+        )?;
         for member in &attempt.members {
             sources
                 .investigations
@@ -1212,7 +1257,13 @@ fn import_remaining_attempt(
                     });
             }
         }
-        sources.responses.insert(id, response);
+        sources.responses.insert(
+            id,
+            LoadedResponse {
+                evidence: response,
+                bytes,
+            },
+        );
     } else if attempt.response_group_id.is_some() {
         return Err(invalid("新查询缺少原响应组"));
     }
@@ -1261,15 +1312,14 @@ struct ProbeRunEvidence {
 }
 
 fn import_first_markets_probe(sources: &mut Sources, root: &Path) -> Result<()> {
-    let selected: Vec<ProbeIdentity> = read_json(&root.join("selected-identities.json"))?;
+    let (selected, binding): (Vec<ProbeIdentity>, _) =
+        read_bound_json(&root.join("selected-identities.json"))?;
+    sources.evidence_files.push(binding);
     for name in [
-        "selected-identities.json",
         "evidence-index.json",
         "build-provenance.json",
         "compile-evidence.json",
         "compile-controls-evidence.json",
-        "run-evidence.json",
-        "run-closed-true-evidence.json",
     ] {
         sources.evidence_files.push(bind(&root.join(name))?);
     }
@@ -1290,15 +1340,13 @@ fn import_first_markets_probe(sources: &mut Sources, root: &Path) -> Result<()> 
     .enumerate()
     {
         let dir = root.join(directory);
-        let prepared: ProbePrepared = read_json(&dir.join("prepared-request.json"))?;
-        let old: ProbeAttempt = read_json(&dir.join("attempt.json"))?;
-        let run: ProbeRunEvidence = read_json(&root.join(run_name))?;
-        sources
-            .evidence_files
-            .push(bind(&dir.join("prepared-request.json"))?);
-        sources
-            .evidence_files
-            .push(bind(&dir.join("attempt.json"))?);
+        let (prepared, binding): (ProbePrepared, _) =
+            read_bound_json(&dir.join("prepared-request.json"))?;
+        sources.evidence_files.push(binding);
+        let (old, binding): (ProbeAttempt, _) = read_bound_json(&dir.join("attempt.json"))?;
+        sources.evidence_files.push(binding);
+        let (run, binding): (ProbeRunEvidence, _) = read_bound_json(&root.join(run_name))?;
+        sources.evidence_files.push(binding);
         let ns: i128 = old.started_at_unix_ns.parse()?;
         let started = DateTime::<Utc>::from_timestamp(
             (ns / 1_000_000_000).try_into()?,
@@ -1343,12 +1391,18 @@ fn import_first_markets_probe(sources: &mut Sources, root: &Path) -> Result<()> 
     Ok(())
 }
 
-fn read_remaining_run(path: &Path) -> Result<RemainingQueryRunV1> {
-    let mut run: RemainingQueryRunV1 = read_json(path)?;
+fn read_remaining_run(path: &Path) -> Result<(RemainingQueryRunV1, Vec<FileBinding>)> {
+    let (mut run, binding): (RemainingQueryRunV1, _) = read_bound_json(path)?;
+    let mut bindings = vec![binding];
     let journal_path = path.parent().unwrap().join("attempts.jsonl");
     if journal_path.exists() {
-        let records = serde_json::Deserializer::from_reader(File::open(journal_path)?)
-            .into_iter::<RemainingCompletion>();
+        let bytes = fs::read(&journal_path)?;
+        bindings.push(FileBinding {
+            path: path_text(&journal_path),
+            sha256: hash_bytes(&bytes),
+        });
+        let records =
+            serde_json::Deserializer::from_slice(&bytes).into_iter::<RemainingCompletion>();
         for record in records {
             let record = match record {
                 Ok(record) => record,
@@ -1376,7 +1430,7 @@ fn read_remaining_run(path: &Path) -> Result<RemainingQueryRunV1> {
     }) {
         run.in_flight_request = None;
     }
-    Ok(run)
+    Ok((run, bindings))
 }
 
 fn import_remaining_queries(sources: &mut Sources, input: &Path) -> Result<()> {
@@ -1385,20 +1439,16 @@ fn import_remaining_queries(sources: &mut Sources, input: &Path) -> Result<()> {
     } else {
         input.to_owned()
     };
-    let binding = bind(&path)?;
-    if sources
-        .evidence_files
-        .iter()
-        .any(|old| old.path == binding.path && old.sha256 == binding.sha256)
-    {
+    let (run, bindings) = read_remaining_run(&path)?;
+    if bindings.iter().all(|binding| {
+        sources
+            .evidence_files
+            .iter()
+            .any(|old| old.path == binding.path && old.sha256 == binding.sha256)
+    }) {
         return Ok(());
     }
-    let run = read_remaining_run(&path)?;
-    sources.evidence_files.push(binding);
-    let journal = path.parent().unwrap().join("attempts.jsonl");
-    if journal.exists() {
-        sources.evidence_files.push(bind(&journal)?);
-    }
+    sources.evidence_files.extend(bindings);
     for attempt in run
         .network_attempts
         .into_iter()
@@ -1612,15 +1662,22 @@ fn complete_remaining_attempt(
     serde_json::to_writer(
         &mut *journal,
         &RemainingCompletion {
-            attempt: attempt.clone(),
-            response: response.clone(),
+            attempt: &attempt,
+            response: response.as_ref(),
         },
     )?;
     journal.write_all(b"\n")?;
     journal.sync_data()?;
     if let Some(response) = response {
         run.stopped_on_http_429 = response.http_status_code == Some(429);
-        run.response_groups.insert(response.id()?, response);
+        run.response_groups.insert(
+            attempt
+                .response_group_id
+                .as_ref()
+                .expect("response group formed before completion")
+                .clone(),
+            response,
+        );
     }
     run.network_attempts.push(attempt);
     run.in_flight_request = None;
@@ -1704,28 +1761,20 @@ async fn query_remaining_v5(config: &Config, mut sources: Sources) -> Result<()>
                 response = Some(evidence);
             }
         }
-        complete_remaining_attempt(&mut run, &mut journal, attempt.clone(), response.clone())?;
+        complete_remaining_attempt(&mut run, &mut journal, attempt, response)?;
         // 完整结果先持久化；即使身份采用失败，下一次显式导入仍能恢复这次响应。
         write_json_atomic(&state_path, &run)?;
+        let attempt = run
+            .network_attempts
+            .last()
+            .expect("completion was recorded");
         if let Some(value) = decoded {
             adopt_remaining_response(
                 &mut sources,
-                &attempt,
+                attempt,
                 attempt.response_group_id.as_ref().unwrap(),
                 value,
             )?;
-        }
-        // 已由同一 SDK 解析的响应不再重复解码，只登记本次完成事实。
-        if let Some(evidence) = response {
-            let group = evidence.id()?;
-            for member in &attempt.members {
-                sources
-                    .investigations
-                    .entry(member.slug.clone())
-                    .or_default()
-                    .push(group.clone());
-            }
-            sources.responses.insert(group, evidence);
         }
         for member in &attempt.members {
             sources
@@ -1739,9 +1788,6 @@ async fn query_remaining_v5(config: &Config, mut sources: Sources) -> Result<()>
             "{} {} {}",
             attempt.request_ordinal, attempt.origin, attempt.result
         );
-        sources
-            .network_attempts
-            .push(NetworkAttempt::Remaining(attempt));
         run.unattempted_requests = remaining_plan(&sources)?;
         write_json_atomic(&state_path, &run)?;
     }
@@ -1807,8 +1853,14 @@ fn load_identity_inputs(config: &Config, sources: &Sources) -> Result<IdentityIn
         state
             .manifests
             .iter()
-            .cloned()
-            .map(|m| (m, BTreeSet::new()))
+            .map(|m| {
+                (
+                    PathBuf::from(&m.path),
+                    BTreeSet::new(),
+                    Some(m.sha256.clone()),
+                    m.role.clone(),
+                )
+            })
             .collect::<Vec<_>>()
     } else {
         let mut days: BTreeMap<String, BTreeSet<String>> = sources
@@ -1839,20 +1891,13 @@ fn load_identity_inputs(config: &Config, sources: &Sources) -> Result<IdentityIn
                     .join("typed_raw")
                     .join(format!("utc_day={day}"))
                     .join("manifest.json");
-                Ok((
-                    ManifestBinding {
-                        path: path_text(&path),
-                        sha256: sha256_file(&path)?,
-                        utc_day: day,
-                        role: if hours.is_empty() {
-                            "fixed_source_date"
-                        } else {
-                            "historical_identity_context"
-                        }
-                        .to_owned(),
-                    },
-                    hours,
-                ))
+                let role = if hours.is_empty() {
+                    "fixed_source_date"
+                } else {
+                    "historical_identity_context"
+                }
+                .to_owned();
+                Ok((path, hours, None, role))
             })
             .collect::<Result<Vec<_>>>()?
     };
@@ -1863,30 +1908,36 @@ fn load_identity_inputs(config: &Config, sources: &Sources) -> Result<IdentityIn
         evidence_ids: BTreeMap::new(),
     };
     let mut selected: BTreeMap<String, HistoricalIdentityRowEvidenceV1> = BTreeMap::new();
-    for (binding, context_hours) in plans {
-        let manifest_path = PathBuf::from(&binding.path);
-        let manifest_sha256 = binding.sha256;
-        let manifest: DailyManifest =
-            serde_json::from_slice(&verified_bytes(&manifest_path, &manifest_sha256)?)?;
+    for (manifest_path, context_hours, expected_sha256, role) in plans {
+        let (manifest, loaded): (DailyManifest, _) = read_bound_json(&manifest_path)?;
+        let manifest_sha256 = loaded.sha256;
+        if expected_sha256.is_some_and(|expected| expected != manifest_sha256) {
+            return Err(invalid(format!(
+                "{}: 原字节 SHA 不匹配",
+                manifest_path.display()
+            )));
+        }
         output.manifests.push(ManifestBinding {
             path: path_text(&manifest_path),
             sha256: manifest_sha256.clone(),
             utc_day: manifest.utc_day,
-            role: binding.role,
+            role,
         });
         for file in manifest.files.into_iter().filter(|f| {
             f.source_kind == "polymarket_market_metadata"
                 && (context_hours.is_empty() || context_hours.contains(&f.utc_hour))
         }) {
             let parquet_path = manifest_path.parent().unwrap().join(&file.path);
-            let actual_hash = sha256_file(&parquet_path)?;
+            let bytes = fs::read(&parquet_path)?;
+            let actual_hash = hash_bytes(&bytes);
+            let actual_bytes = bytes.len() as u64;
             if actual_hash != file.sha256 {
                 return Err(invalid(format!(
                     "{}: 原每日清单摘要不符",
                     parquet_path.display()
                 )));
             }
-            let builder = ParquetRecordBatchReaderBuilder::try_new(File::open(&parquet_path)?)?;
+            let builder = ParquetRecordBatchReaderBuilder::try_new(bytes::Bytes::from(bytes))?;
             let projection =
                 ProjectionMask::columns(builder.parquet_schema(), IDENTITY_COLUMNS.iter().copied());
             let reader = builder
@@ -1968,7 +2019,7 @@ fn load_identity_inputs(config: &Config, sources: &Sources) -> Result<IdentityIn
                 }
                 offset += batch.num_rows() as u64;
             }
-            if offset != file.rows || fs::metadata(&parquet_path)?.len() != file.bytes {
+            if offset != file.rows || actual_bytes != file.bytes {
                 return Err(invalid("原 Parquet 实际行数/字节与清单不符"));
             }
             output.files.push(MetadataFileBinding {
@@ -2120,19 +2171,15 @@ fn write_parquet(path: &Path, rows: &[RepairRow]) -> Result<()> {
     Ok(())
 }
 
-fn copy_responses(
-    output: &Path,
-    responses: &BTreeMap<String, HttpResponseEvidenceV1>,
-) -> Result<()> {
+fn copy_responses(output: &Path, responses: &BTreeMap<String, LoadedResponse>) -> Result<()> {
     fs::create_dir(output.join("responses"))?;
     let mut copied = BTreeSet::new();
     for response in responses.values() {
-        if copied.insert(response.response_body_sha256.clone()) {
-            let bytes = verified_bytes(
-                Path::new(&response.original_response_file),
-                &response.response_body_sha256,
+        if copied.insert(&response.evidence.response_body_sha256) {
+            write_new(
+                &output.join(&response.evidence.response_body_path),
+                &response.bytes,
             )?;
-            write_new(&output.join(&response.response_body_path), &bytes)?;
         }
     }
     Ok(())
@@ -2146,7 +2193,7 @@ fn build(config: &Config, sources: Sources) -> Result<()> {
             .identities
             .get(slug)
             .ok_or_else(|| invalid("锚点缺少原身份"))?;
-        let response = &sources.responses[&anchor.group];
+        let response = &sources.responses[&anchor.group].evidence;
         let Some(ready) = identity.ready else {
             continue;
         };
@@ -2248,7 +2295,11 @@ fn build(config: &Config, sources: Sources) -> Result<()> {
         input_manifests: identity_inputs.manifests,
         input_metadata_files: identity_inputs.files,
         input_evidence_files: sources.evidence_files,
-        response_groups: sources.responses,
+        response_groups: sources
+            .responses
+            .into_iter()
+            .map(|(id, loaded)| (id, loaded.evidence))
+            .collect(),
         identity_evidence: identity_inputs.evidence,
         outputs: vec![output],
         remaining,
@@ -2653,7 +2704,7 @@ mod tests {
             .unwrap();
         journal.sync_all().unwrap();
         let original = fs::read(dir.path().join("attempts.jsonl")).unwrap();
-        let recovered = read_remaining_run(&state_path).unwrap();
+        let (recovered, _) = read_remaining_run(&state_path).unwrap();
         assert_eq!(recovered.network_attempts.len(), 1);
         assert_eq!(recovered.response_groups.len(), 1);
         assert!(recovered.in_flight_request.is_none());
@@ -2752,6 +2803,14 @@ mod tests {
         attempt.response_group_id = Some(group.clone());
         import_remaining_attempt(&mut sources, attempt.clone(), Some(response.clone()), false)
             .unwrap();
+        fs::remove_file(&response.original_response_file).unwrap();
+        let output = dir.path().join("copied");
+        fs::create_dir(&output).unwrap();
+        copy_responses(&output, &sources.responses).unwrap();
+        assert_eq!(
+            fs::read(output.join(&response.response_body_path)).unwrap(),
+            body.as_bytes()
+        );
         import_remaining_attempt(&mut sources, attempt, Some(response), false).unwrap();
         assert_eq!(
             sources.network_attempts.len(),
@@ -2858,7 +2917,7 @@ mod tests {
             2,
             "显式新段可安排未完成详情，不能重发完成批次"
         );
-        let recovered = read_remaining_run(&second_dir.join("query-results.json")).unwrap();
+        let (recovered, _) = read_remaining_run(&second_dir.join("query-results.json")).unwrap();
         assert!(recovered.network_attempts.is_empty());
         assert!(recovered.in_flight_request.is_some());
         assert_eq!(recovered.unattempted_requests.len(), 1);
@@ -2866,7 +2925,14 @@ mod tests {
         pending.result = "transport_error".to_owned();
         pending.attempt_completed_at_utc = Some("2026-09-08T07:00:03Z".to_owned());
         pending.error = Some("connection closed".to_owned());
-        import_remaining_attempt(&mut sources, pending, None, false).unwrap();
+        let mut completed_journal = File::create(second_dir.join("attempts.jsonl")).unwrap();
+        complete_remaining_attempt(&mut unknown_run, &mut completed_journal, pending, None)
+            .unwrap();
+        // query-results.json 保持原样，只追加完成 journal 后重新导入同一路径。
+        import_remaining_queries(&mut sources, &second_dir).unwrap();
+        let completed_count = sources.network_attempts.len();
+        import_remaining_queries(&mut sources, &second_dir).unwrap();
+        assert_eq!(sources.network_attempts.len(), completed_count);
         let plan = remaining_plan(&sources).unwrap();
         assert_eq!(plan.len(), 1, "已完成错误也不自动重发");
         assert_eq!(plan[0].members[0].slug, SECOND);
