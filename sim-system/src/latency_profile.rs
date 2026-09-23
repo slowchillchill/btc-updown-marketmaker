@@ -30,46 +30,17 @@ impl DelaySampleDomainV1 {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
-pub struct LatencyProfileStatisticsV1 {
-    pub sample_count: u64,
-    pub missing_source_timestamp_count: u64,
-    pub negative_delay_count: u64,
-    pub min_delay_ms: u64,
-    pub p50_delay_ms: u64,
-    pub p85_delay_ms: u64,
-    pub p90_delay_ms: u64,
-    pub p95_delay_ms: u64,
-    pub p99_delay_ms: u64,
-    pub max_delay_ms: u64,
-    pub histogram_bin_count: u64,
-}
-
 #[derive(Clone, Debug)]
 pub struct EmpiricalDelayProfile {
-    profile_id: String,
-    profile_version: u32,
     file_sha256: Sha256Hex,
-    statistics: LatencyProfileStatisticsV1,
+    sample_count: u64,
     histogram: Vec<u64>,
     cumulative_counts: Vec<u64>,
 }
 
 impl EmpiricalDelayProfile {
-    pub fn profile_id(&self) -> &str {
-        &self.profile_id
-    }
-
-    pub fn profile_version(&self) -> u32 {
-        self.profile_version
-    }
-
     pub fn file_sha256(&self) -> &Sha256Hex {
         &self.file_sha256
-    }
-
-    pub fn statistics(&self) -> LatencyProfileStatisticsV1 {
-        self.statistics
     }
 
     pub fn sample_delay_ms(
@@ -87,8 +58,7 @@ impl EmpiricalDelayProfile {
         let digest = hasher.finalize();
         let mut word = [0_u8; 8];
         word.copy_from_slice(&digest[..8]);
-        let rank = ((u64::from_be_bytes(word) as u128 * self.statistics.sample_count as u128) >> 64)
-            as u64;
+        let rank = ((u64::from_be_bytes(word) as u128 * self.sample_count as u128) >> 64) as u64;
         let index = histogram_index_for_rank(&self.cumulative_counts, rank);
         self.histogram[index]
     }
@@ -122,9 +92,6 @@ pub fn load_embedded_proxy_latency_profile()
 
 #[derive(Deserialize)]
 struct ProfileWire {
-    profile_id: String,
-    profile_version: u32,
-    statistics: LatencyProfileStatisticsV1,
     histogram: Vec<HistogramWire>,
 }
 #[derive(Deserialize)]
@@ -147,10 +114,8 @@ fn parse_profile(bytes: &[u8]) -> Result<EmpiricalDelayProfile, LatencyProfileEr
         cumulative_counts.push(cumulative);
     }
     Ok(EmpiricalDelayProfile {
-        profile_id: wire.profile_id,
-        profile_version: wire.profile_version,
         file_sha256: Sha256Hex(PROXY_LATENCY_PROFILE_SHA256_V1.to_owned()),
-        statistics: wire.statistics,
+        sample_count: cumulative,
         histogram,
         cumulative_counts,
     })

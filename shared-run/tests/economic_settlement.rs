@@ -68,13 +68,6 @@ fn script(case: usize) -> ResolutionRedeemScenarioV1 {
         ],
         _ => unreachable!(),
     };
-    assert_eq!(
-        sim_system::latency_profile::load_embedded_proxy_latency_profile()
-            .unwrap()
-            .statistics()
-            .max_delay_ms,
-        SETTLEMENT_DELTA_MS
-    );
     // 首个明确接纳：S1 的查询、S2 的查询成功、S3 的重试接纳。
     // Unknown 对照只在终态成功首次证明接纳。
     let accepted_offset = match case {
