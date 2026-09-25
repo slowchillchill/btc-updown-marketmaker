@@ -1737,6 +1737,64 @@ fn validate_polymarket_market_identity(
 }
 
 impl PolymarketMarketMetadataRow {
+    /// Gamma 原响应的 token 顺序绑定原始标签和价格；固定 asset_ids 顺序定义 outcome.index。
+    /// 旧行未携带 token 顺序证据时保持其既有按 asset_ids 对齐的读取合同。
+    pub fn outcome_evidence(&self) -> Result<Vec<MetadataOutcomeEvidence>, TypedRawError> {
+        let fixed = map_metadata_outcomes(
+            &self.asset_ids,
+            self.outcomes_raw.as_deref(),
+            self.outcome_prices_raw.as_deref(),
+        )?;
+        if self.outcomes_raw.is_none() && self.outcome_prices_raw.is_none() {
+            return Ok(fixed);
+        }
+        let Some(payload) = self.source_evidence_payload_json.as_deref() else {
+            return Ok(fixed);
+        };
+        #[derive(Deserialize)]
+        struct TokenOrder {
+            #[serde(rename = "clobTokenIds")]
+            token_ids: Option<String>,
+        }
+        let source =
+            serde_json::from_str::<TokenOrder>(payload).map_err(|error| TypedRawError::Json {
+                field: "source_evidence_payload_json".to_owned(),
+                message: error.to_string(),
+            })?;
+        let Some(token_ids) = source.token_ids else {
+            return Ok(fixed);
+        };
+        // 官方 SDK 的 U256 在 payload 中序列化为十六进制；持久身份使用十进制。
+        let ids =
+            serde_json::from_str::<Vec<alloy_primitives::U256>>(&token_ids).map_err(|error| {
+                TypedRawError::Json {
+                    field: "source_evidence_payload_json.clobTokenIds".to_owned(),
+                    message: error.to_string(),
+                }
+            })?;
+        let ids = ids.iter().map(ToString::to_string).collect::<Vec<_>>();
+        let source = map_metadata_outcomes(
+            &serde_json::to_string(&ids).expect("token strings serialize"),
+            self.outcomes_raw.as_deref(),
+            self.outcome_prices_raw.as_deref(),
+        )?;
+        fixed
+            .into_iter()
+            .map(|fixed| {
+                source
+                    .iter()
+                    .find(|value| value.asset_id == fixed.asset_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        invalid(
+                            "source_evidence_payload_json.clobTokenIds",
+                            "must match the fixed asset IDs",
+                        )
+                    })
+            })
+            .collect()
+    }
+
     pub fn validate(&self) -> Result<(), TypedRawError> {
         require_schema(&self.schema_version, POLYMARKET_MARKET_METADATA_SCHEMA)?;
         require_positive(self.timestamp_received, "timestamp_received")?;
@@ -1759,11 +1817,7 @@ impl PolymarketMarketMetadataRow {
             self.fixed_identity_verified_at_utc,
             "fixed_identity_verified_at_utc",
         )?;
-        let outcome_evidence = map_metadata_outcomes(
-            &self.asset_ids,
-            self.outcomes_raw.as_deref(),
-            self.outcome_prices_raw.as_deref(),
-        )?;
+        let outcome_evidence = self.outcome_evidence()?;
         match (
             self.source_evidence_payload_json.as_deref(),
             self.source_evidence_raw_sha256.as_deref(),

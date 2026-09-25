@@ -3121,6 +3121,31 @@ mod tests {
     }
 
     #[test]
+    fn reversed_gamma_persisted_recovery_preserves_original_response_and_fixed_tokens() {
+        let tmp = tempdir().unwrap();
+        let recovery_time = T + 60_000;
+        let mut record = base_record(1);
+        let mut payload: Value =
+            serde_json::from_str(record.source_payload_json.as_ref().unwrap()).unwrap();
+        payload["clobTokenIds"] = json!("[\"102\",\"101\"]");
+        payload["outcomes"] = json!("[\"Down\",\"Up\"]");
+        payload["outcomePrices"] = json!("[\"0.4\",\"0.6\"]");
+        let sdk: SdkGammaMarket = serde_json::from_value(payload).unwrap();
+        let payload = serde_json::to_string(&sdk).unwrap();
+        record.source_raw_sha256 = Some(sha256_hex(payload.as_bytes()));
+        record.source_payload_json = Some(payload.clone());
+        write_finalized_fixture(tmp.path(), recovery_time, &[record]);
+        let recovery = restore_polymarket_resolution_recovery(tmp.path(), recovery_time).unwrap();
+        let current = recovery.fixed_identities.current.unwrap();
+        assert_eq!(current.up_asset_id, "101");
+        assert_eq!(current.down_asset_id, "102");
+        let owner = recovery.owners.iter().find(|m| m.slug == SLUG).unwrap();
+        assert_eq!(owner.up_asset_id, "101");
+        assert_eq!(owner.down_asset_id, "102");
+        assert_eq!(owner.raw_json.as_deref(), Some(payload.as_str()));
+    }
+
+    #[test]
     fn restart_recovery_returns_bounded_current_and_next_fixed_identities() {
         let tmp = tempdir().unwrap();
         let recovery_time = T + 60_000;

@@ -2838,7 +2838,7 @@ impl SimExecution {
 
 impl SimRunActorV2 {
     fn next_required_logical_drive(&self) -> Option<NextRequiredLogicalDriveV2> {
-        next_required_logical_drive_v2(self.state.as_ref()?)
+        next_required_logical_drive_v2(self.state.as_ref()?, self._rule_snapshot.snapshot())
     }
 
     pub(crate) fn create_new(
@@ -3034,7 +3034,7 @@ impl SimRunActorV2 {
             ));
         }
         if needs_business_completion
-            && (next_scheduled_obligation_at_v2(state).is_some()
+            && (next_scheduled_obligation_at_v2(state, self._rule_snapshot.snapshot()).is_some()
                 || !session.mutation_requests.pending_actions.is_empty()
                 || session
                     .mutation_requests
@@ -5344,10 +5344,13 @@ fn unaccepted_business_input_v2(
     BusinessReductionErrorV2::Unaccepted { state, error }
 }
 
-fn next_scheduled_obligation_at_v2(state: &BusinessReducerStateV2) -> Option<i64> {
+fn next_scheduled_obligation_at_v2(
+    state: &BusinessReducerStateV2,
+    rules: &PlatformRuleSnapshotV3,
+) -> Option<i64> {
     let session = state.session.as_ref()?;
     [
-        session.execution_state.next_gtd_deadline_at_utc_ms(),
+        session.execution_state.next_gtd_deadline_at_utc_ms(rules),
         session.execution_state.next_scheduled_finality_at_utc_ms(),
         session.execution_state.next_rebate_clock_at_utc_ms(),
         session.execution_state.next_settlement_clock_at_utc_ms(),
@@ -5359,6 +5362,7 @@ fn next_scheduled_obligation_at_v2(state: &BusinessReducerStateV2) -> Option<i64
 
 fn next_required_logical_drive_v2(
     state: &BusinessReducerStateV2,
+    rules: &PlatformRuleSnapshotV3,
 ) -> Option<NextRequiredLogicalDriveV2> {
     let session = state.session.as_ref()?;
     if !matches!(
@@ -5368,7 +5372,7 @@ fn next_required_logical_drive_v2(
         return None;
     }
     let schedule = RequiredLogicalDriveScheduleV2 {
-        gtd_at_utc_ms: session.execution_state.next_gtd_deadline_at_utc_ms(),
+        gtd_at_utc_ms: session.execution_state.next_gtd_deadline_at_utc_ms(rules),
         finality_at_utc_ms: session.execution_state.next_scheduled_finality_at_utc_ms(),
         rebate_at_utc_ms: session.execution_state.next_rebate_clock_at_utc_ms(),
         settlement_at_utc_ms: session.execution_state.next_settlement_clock_at_utc_ms(),
@@ -5446,13 +5450,13 @@ fn drain_scheduled_obligations_at_v2(
     while state
         .session
         .as_ref()
-        .and_then(|session| session.execution_state.next_gtd_deadline_at_utc_ms())
+        .and_then(|session| session.execution_state.next_gtd_deadline_at_utc_ms(rules))
         == Some(logical_at_utc_ms)
     {
         let session = state.session.take().expect("逻辑驱动已确认唯一会话");
         let (session, effects) = session
             .map_execution_state(|execution| {
-                execution.advance_next_gtd_deadline_at(logical_at_utc_ms)
+                execution.advance_next_gtd_deadline_at(logical_at_utc_ms, rules)
             })
             .map_err(|error| {
                 BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(error))
@@ -5460,7 +5464,7 @@ fn drain_scheduled_obligations_at_v2(
 
         output
             .lifecycle
-            .extend(effects.into_lifecycle_feedback().map_err(|error| {
+            .extend(effects.into_lifecycle_feedback(rules).map_err(|error| {
                 BusinessReductionErrorV2::Fatal(SimRunActorErrorV2::Matching(error))
             })?);
         state.session = Some(session);
@@ -5716,8 +5720,8 @@ pub(crate) fn drive_business_input_at_v2(
             MarketEventPathV1::HiddenPlatform => session.hidden_platform_frontier,
             MarketEventPathV1::PublicVisibility => session.public_visibility_frontier,
         };
-        let first_due =
-            next_required_logical_drive_v2(&state).map(|required| required.required_at_utc_ms);
+        let first_due = next_required_logical_drive_v2(&state, rules)
+            .map(|required| required.required_at_utc_ms);
         (
             session.opening_fact.account_instance_key.caller_role,
             frontier,
@@ -5974,7 +5978,7 @@ pub(crate) fn drive_business_input_at_v2(
                 b.reference.closure == contracts::ReplayIndexClosureV1::EndOfInput
             }));
     if successful_execution_eof {
-        while let Some(next_at) = next_scheduled_obligation_at_v2(&state) {
+        while let Some(next_at) = next_scheduled_obligation_at_v2(&state, rules) {
             state = drain_scheduled_obligations_at_v2(
                 state,
                 next_at,
@@ -8740,7 +8744,12 @@ mod tests {
         };
         let session = state.session.as_ref().expect("EOF 后排空会话存在");
         assert!(session.hidden_platform_frontier.sealed);
-        assert_eq!(session.execution_state.next_gtd_deadline_at_utc_ms(), None);
+        assert_eq!(
+            session
+                .execution_state
+                .next_gtd_deadline_at_utc_ms(actor._rule_snapshot.snapshot()),
+            None
+        );
         assert_eq!(
             session.execution_state.next_scheduled_finality_at_utc_ms(),
             None
@@ -16041,7 +16050,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn public_paper_necessary_prefix_logs_and_projects_once_without_market_body() {
-        let (_directory, actor) =
+        let (directory, actor) =
             active_market_actor(SimCallerRoleV1::Paper, "run-empty-prefix-group-v2").await;
         let mut execution = SimExecution { actor };
         let initial_events = decoded_initial_market_events("2");
@@ -16122,8 +16131,17 @@ mod tests {
             .as_ref()
             .and_then(|state| state.session.as_ref())
             .expect("正文桶处理后唯一会话存在");
+        assert_eq!(
+            session
+                .execution_state
+                .next_gtd_deadline_at_utc_ms(execution.actor._rule_snapshot.snapshot()),
+            Some(300_000),
+            "原规则快照保留编码E到期"
+        );
         let first_due_at_utc_ms = [
-            session.execution_state.next_gtd_deadline_at_utc_ms(),
+            session
+                .execution_state
+                .next_gtd_deadline_at_utc_ms(execution.actor._rule_snapshot.snapshot()),
             session.execution_state.next_scheduled_finality_at_utc_ms(),
             session.execution_state.next_rebate_clock_at_utc_ms(),
         ]
@@ -16146,6 +16164,42 @@ mod tests {
         assert_eq!(crate::event_log::group_append_counts_for_tests(), (1, 1));
         assert_eq!(crate::event_log::event_log_counts_for_tests(), (1, 1));
         assert_eq!(crate::event_log::sync_attempt_count_for_tests(), 1);
+        // 旧规则日志仍按已绑定的240秒准入和E截止重建，不自动切换当前版本。
+        let rules = execution.actor._rule_snapshot.clone();
+        let policy = execution.actor._finality_policy.clone();
+        let scenario = execution.actor.scenario.clone();
+        let latency = execution.actor._latency_profile.clone();
+        let expected = execution.actor.state.take().unwrap();
+        drop(execution);
+        let recovered = SimExecution::recover_paper(
+            &directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2),
+            rules,
+            policy,
+            scenario,
+            latency,
+            accepting_projection_port(),
+            MAX_GROUP_BYTES,
+            |reference| {
+                Ok(Arc::from(match reference.bucket_at_utc_ms {
+                    1_100 => decoded_initial_market_events("2"),
+                    1_200 => vec![decoded_level_market_event(1_200, 1_210, 3, "2", "1.5")],
+                    _ => panic!("未录入的市场桶"),
+                }))
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            recovered
+                .actor
+                .state
+                .as_ref()
+                .unwrap()
+                .session
+                .as_ref()
+                .unwrap()
+                .execution_state,
+            expected.session.as_ref().unwrap().execution_state
+        );
     }
 
     #[test]

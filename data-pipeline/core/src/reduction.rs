@@ -3395,12 +3395,10 @@ impl PolymarketMetadataReducer<SourceEvidenceRefV2> {
             return Err(invalid("canonical_rule_version", "must not be empty"));
         }
         validate_identity_snapshot(&input)?;
-        let outcomes = typed_raw::map_metadata_outcomes(
-            &input.row.asset_ids,
-            input.row.outcomes_raw.as_deref(),
-            input.row.outcome_prices_raw.as_deref(),
-        )
-        .map_err(typed_raw_contract_error)?;
+        let outcomes = input
+            .row
+            .outcome_evidence()
+            .map_err(typed_raw_contract_error)?;
         let initial_tick = typed_raw::extract_metadata_initial_tick(
             input
                 .row
@@ -3416,12 +3414,10 @@ impl PolymarketMetadataReducer<SourceEvidenceRefV2> {
         input: PolymarketMetadataInputV1,
     ) -> Result<PolymarketReductionBatch, ContractError> {
         validate_polymarket_metadata_input(&input)?;
-        let outcomes = typed_raw::map_metadata_outcomes(
-            &input.row.asset_ids,
-            input.row.outcomes_raw.as_deref(),
-            input.row.outcome_prices_raw.as_deref(),
-        )
-        .map_err(typed_raw_contract_error)?;
+        let outcomes = input
+            .row
+            .outcome_evidence()
+            .map_err(typed_raw_contract_error)?;
         self.compute_metadata(input, &outcomes, false)
     }
 }
@@ -3498,12 +3494,10 @@ impl PolymarketTerminalMerger<SourceEvidenceRefV2> {
     ) -> Result<PolymarketReductionBatch, ContractError> {
         validate_polymarket_metadata_input(&metadata)?;
         validate_polymarket_orderbook_evidence(&orderbook)?;
-        let outcomes = typed_raw::map_metadata_outcomes(
-            &metadata.row.asset_ids,
-            metadata.row.outcomes_raw.as_deref(),
-            metadata.row.outcome_prices_raw.as_deref(),
-        )
-        .map_err(typed_raw_contract_error)?;
+        let outcomes = metadata
+            .row
+            .outcome_evidence()
+            .map_err(typed_raw_contract_error)?;
         self.compute_ws_terminal(metadata, &outcomes, orderbook)
     }
     pub fn merge_gamma_terminal(
@@ -3511,12 +3505,10 @@ impl PolymarketTerminalMerger<SourceEvidenceRefV2> {
         metadata: PolymarketMetadataInputV1,
     ) -> Result<PolymarketReductionBatch, ContractError> {
         validate_polymarket_metadata_input(&metadata)?;
-        let outcomes = typed_raw::map_metadata_outcomes(
-            &metadata.row.asset_ids,
-            metadata.row.outcomes_raw.as_deref(),
-            metadata.row.outcome_prices_raw.as_deref(),
-        )
-        .map_err(typed_raw_contract_error)?;
+        let outcomes = metadata
+            .row
+            .outcome_evidence()
+            .map_err(typed_raw_contract_error)?;
         self.compute_gamma_terminal(metadata, &outcomes)
     }
 }

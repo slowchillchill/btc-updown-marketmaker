@@ -107,7 +107,7 @@ def _scores(consumer, group, actor):
     return outputs[0][head][0]
 
 
-def validate_python(native_group, history, directory, replay):
+def validate_python(native_group, history, directory, replay, market_probe=True):
     """每端独立递推；定向探针与实际贪心路径分别保留。"""
     torch.set_num_threads(1)
     config = next(c for c in CONFIGURATIONS if c.name == directory.name)
@@ -161,8 +161,11 @@ def validate_python(native_group, history, directory, replay):
             probe.choose(choice)
         assert len(fee_cases) == 3
         assert not any(fee_cases[0][1])
-        assert any(fee_cases[1][1]) and any(fee_cases[2][1])
-        assert fee_cases[1][1] != fee_cases[2][1]
+        if market_probe:
+            assert any(fee_cases[1][1]) and any(fee_cases[2][1])
+            assert fee_cases[1][1] != fee_cases[2][1]
+        else:
+            assert not any(fee_cases[1][1]) and not any(fee_cases[2][1])
         mixed_args = (group.states[0].expand(3, -1), group.rules[0].expand(3, -1),
                       torch.tensor([case[0] for case in fee_cases]), torch.zeros(3, 1, 184),
                       torch.zeros(3, 1, dtype=torch.bool), torch.zeros(3, 3 * config.hidden // 2),
@@ -252,7 +255,7 @@ def main():
         assert set(new)==set(initialized)
         assert all(torch.equal(value,new[name]) for name,value in initialized.items())
         evidence['configurations'][config.name]={'seed':config.seed,
-            'input_contract_version':'native_inputs_v3',
+            'input_contract_version':'native_inputs_v4',
             'feature_schema_sha256':sha(root/'native-inputs/feature_schema.json'),
             'same_seed_initialized_parameters':len(new),'new_weights_sha256':sha(current)}
         if args.old_graphs:

@@ -756,3 +756,58 @@ fn preparation_preserves_v6_existing_transition_and_followup_row_kinds() {
         assert_eq!(metadata.outcomes.len(), 2);
     }
 }
+
+#[test]
+fn source_token_order_projects_onto_fixed_indices_and_later_reordering_keeps_identity() {
+    let mut row = metadata_snapshot_row();
+    row.asset_ids = r#"["101","102"]"#.into();
+    row.outcomes_raw = Some(r#"["Down","Up"]"#.into());
+    row.outcome_prices_raw = Some(r#"["0.4","0.6"]"#.into());
+    let payload = serde_json::json!({"orderPriceMinTickSize":"0.01",
+        "clobTokenIds": "[\"0x66\",\"0x65\"]"})
+    .to_string();
+    row.source_evidence_raw_sha256 = Some(format!("{:x}", Sha256::digest(payload.as_bytes())));
+    row.source_evidence_payload_json = Some(payload);
+    row.validate().unwrap();
+    let outcomes = row.outcome_evidence().unwrap();
+    assert_eq!(outcomes[0].asset_id, "101");
+    assert_eq!(outcomes[0].outcome.as_deref(), Some("Up"));
+    assert_eq!(outcomes[0].price.as_ref().unwrap().exact.0, "0.6");
+    assert_eq!(outcomes[1].price.as_ref().unwrap().exact.0, "0.4");
+    let (mut reducer, context, _) =
+        PolymarketMetadataReducer::from_identity_snapshot(metadata_input(row.clone()), "rule-v1")
+            .unwrap();
+    let up = context
+        .assets
+        .iter()
+        .find(|a| a.asset.token_id.0 == "101")
+        .unwrap();
+    assert_eq!(up.asset.outcome.index, 0);
+    assert_eq!(up.asset.outcome.label, "Up");
+    row.outcomes_raw = Some(r#"["Up","Down"]"#.into());
+    row.outcome_prices_raw = Some(r#"["0.6","0.4"]"#.into());
+    let payload = serde_json::json!({"orderPriceMinTickSize":"0.01",
+        "clobTokenIds": "[\"101\",\"102\"]"})
+    .to_string();
+    row.source_evidence_raw_sha256 = Some(format!("{:x}", Sha256::digest(payload.as_bytes())));
+    row.source_evidence_payload_json = Some(payload);
+    assert_eq!(row.outcome_evidence().unwrap(), outcomes);
+    reducer.reduce_metadata(metadata_input(row)).unwrap();
+}
+
+#[test]
+fn legacy_metadata_without_source_token_order_keeps_its_existing_reading() {
+    let mut row = metadata_snapshot_row();
+    let expected = row.outcome_evidence().unwrap(); // 已有tick-only payload。
+    row.source_evidence_payload_json = None; // 既有摘要引用域不收缩。
+    row.validate().unwrap();
+    assert_eq!(row.outcome_evidence().unwrap(), expected);
+    row.outcomes_raw = None;
+    row.outcome_prices_raw = None;
+    assert!(
+        row.outcome_evidence()
+            .unwrap()
+            .iter()
+            .all(|v| v.outcome.is_none() && v.price.is_none())
+    );
+}

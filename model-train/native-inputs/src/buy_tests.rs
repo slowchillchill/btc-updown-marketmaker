@@ -44,6 +44,16 @@ fn fixture_config_depths(
     followups: &[i64],
     asks: [&str; 2],
 ) -> Harness {
+    fixture_with_minimum(cash, ticks, intermediate_at, followups, asks, "5")
+}
+fn fixture_with_minimum(
+    cash: &str,
+    ticks: [&str; 2],
+    intermediate_at: i64,
+    followups: &[i64],
+    asks: [&str; 2],
+    minimum_shares: &str,
+) -> Harness {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("dpt");
     let mut core = core();
@@ -62,6 +72,32 @@ fn fixture_config_depths(
         m.timestamp_received = at;
         m.collector_admission_sequence = rows.len() as u64 + 1;
         m.collector_admission_time_utc_ms = at + 1;
+        // 同一固定身份的两次真实输入使用不同Gamma源顺序；DPT负责投影，夹具不重排原字段。
+        let source_tokens = if active {
+            [UP_TOKEN_ID, DOWN_TOKEN_ID]
+        } else {
+            [DOWN_TOKEN_ID, UP_TOKEN_ID]
+        };
+        m.outcomes_raw = Some(
+            if active {
+                r#"["UP","DOWN"]"#
+            } else {
+                r#"["DOWN","UP"]"#
+            }
+            .into(),
+        );
+        m.outcome_prices_raw = Some(
+            if active {
+                r#"["0.6","0.4"]"#
+            } else {
+                r#"["0.4","0.6"]"#
+            }
+            .into(),
+        );
+        let payload = serde_json::json!({"clobTokenIds":serde_json::to_string(&source_tokens).unwrap(), "orderPriceMinTickSize":"0.01"}).to_string();
+        use sha2::{Digest, Sha256};
+        m.source_evidence_raw_sha256 = Some(format!("{:x}", Sha256::digest(payload.as_bytes())));
+        m.source_evidence_payload_json = Some(payload);
         m.metadata_fetch_start_utc = Some(at - 10);
         m.source_evidence_received_at_utc = Some(at);
         m.row_evidence_validation_completed_at_utc = Some(at + 1);
@@ -153,19 +189,19 @@ fn fixture_config_depths(
         writer.record(input, applied).unwrap();
     }
     writer.stabilize().unwrap();
-    let (mut execution, observation, rules) = execution_with_rules_v4(
-        &temp.path().join("sim.jsonl"),
-        &core,
-        SUCCESS_POLICY,
-        None,
-        "e".repeat(64),
-        cash,
-    );
+    let (mut execution, observation, rules) =
+        execution_with_minimum_v4(&temp.path().join("sim.jsonl"), &core, cash, minimum_shares);
     let mut ledger =
         LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
     execution
         .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
         .unwrap();
+    let noe_context = observation
+        .opening_record()
+        .unwrap()
+        .context()
+        .context_reference
+        .clone();
     let shared = SharedExecutionV2::from_opening(ledger, observation)
         .unwrap()
         .unwrap();
@@ -182,6 +218,7 @@ fn fixture_config_depths(
         native,
         driver: FinitePublicConsumptionV1::new(execution, source, "buy".into()),
         groups: vec![],
+        noe_context,
     }
 }
 fn ready(h: &mut Harness) -> NativeInputGroup {
@@ -386,6 +423,13 @@ fn actor_complete_support_prices_and_shared_budget_match_independent_enumeration
         family: Some(Family::SubmitPairedBuy),
         ..Default::default()
     };
+    // 未固定属性时，小数量有真实GTC续项；固定市价后每腿仍至少1 pUSD。
+    for n in [1u32, 112, 113, 125, 499] {
+        assert!(actor.fixed_completion(&n.into(), &state).unwrap());
+    }
+    for leg in &mut state.legs {
+        leg.variant = Some(Variant::FokMarket);
+    }
     // 实际两腿tick为.0025/.005；独立枚举原本金，不使用完成性函数作oracle。
     for n in 1u32..500 {
         let mut feasible = false;
@@ -497,7 +541,7 @@ async fn full_actor_retains_exact_pair_and_original_execution_reservations() {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn real_single_repair_has_nonmonotone_small_quantity_holes() {
+async fn fixed_market_repair_has_nonmonotone_quantity_holes_but_limit_does_not() {
     let mut h = fixture_config("2.038", ["0.1", "0.1"]);
     let _ = ready(&mut h);
     let receipt = h
@@ -540,11 +584,15 @@ async fn real_single_repair_has_nonmonotone_small_quantity_holes() {
             .0,
         "1.01"
     );
-    let state = PrefixState {
+    let mut state = PrefixState {
         family: Some(Family::SubmitSingleBuy),
         single_leg: Some(Leg::B),
         ..Default::default()
     };
+    for n in [1u32, 111, 112, 113, 125] {
+        assert!(actor.fixed_completion(&n.into(), &state).unwrap());
+    }
+    state.legs[1].variant = Some(Variant::FokMarket);
     for (n, want) in [(111u32, false), (112, true), (113, false), (125, true)] {
         assert_eq!(
             actor.fixed_completion(&n.into(), &state).unwrap(),
@@ -559,28 +607,65 @@ async fn real_single_repair_has_nonmonotone_small_quantity_holes() {
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "requires explicitly supplied exported graphs and matching Python wheel ORT library"]
 async fn same_process_python_and_rust_ort_share_native_actor_and_final_intent() {
+    for case in 0..3 {
+        three_runtime_buy_case(case).await;
+    }
+}
+
+#[cfg(all(feature = "python", feature = "ort"))]
+async fn three_runtime_buy_case(case: u8) {
     use pyo3::prelude::*;
     let directory = std::env::var("ACTOR_GRAPH_DIRECTORY").unwrap();
     let library = std::env::var("ORT_DYLIB_PATH").unwrap();
     ort::init_from(&library).unwrap().commit();
-    let mut h = fixture();
+    let mut h = match case {
+        0 => fixture(),
+        1 => fixture_with_minimum(
+            "2000",
+            ["0.0025", "0.005"],
+            24_999,
+            &[35_000, 45_000, 55_000],
+            ["100", "100"],
+            "10",
+        ),
+        2 => fixture_config_times(
+            "2000",
+            ["0.0025", "0.005"],
+            24_999,
+            &[202_999, 204_000, 205_000],
+        ),
+        _ => unreachable!(),
+    };
     let history_native = (0..5)
         .map(|_| Arc::new(h.next().unwrap()))
         .collect::<Vec<_>>();
     let g = Arc::new(h.next().unwrap());
     let mut probe = NativeActor::new(g.clone(), 0).unwrap();
     probe.choose(2).unwrap();
+    let quantity = if case == 1 { 1u32 } else { 500u32 };
     while probe.state.stage == Stage::QuantityBranch {
         let interval = probe.state.interval.as_ref().unwrap();
         let mid = (&interval.lo + &interval.hi) / 2u32;
         probe
-            .choose(usize::from(BigUint::from(500u32) > mid))
+            .choose(usize::from(BigUint::from(quantity) > mid))
             .unwrap();
     }
-    probe.choose(2).unwrap();
-    probe.choose(3).unwrap();
-    probe.choose(319).unwrap();
-    probe.choose(159).unwrap();
+    if case == 0 {
+        probe.choose(2).unwrap();
+        probe.choose(3).unwrap();
+        probe.choose(319).unwrap();
+        probe.choose(159).unwrap();
+    } else {
+        for _ in 0..2 {
+            probe.choose(usize::from(case == 2)).unwrap();
+            probe.choose(1).unwrap();
+            if case == 2 {
+                probe.choose(0).unwrap();
+            }
+        }
+        probe.choose(19).unwrap();
+        probe.choose(19).unwrap();
+    }
     let replay = probe.path.clone();
     type Step = (Vec<bool>, String, Vec<f32>, Vec<f32>);
     type Trace = (Vec<f32>, Vec<f32>);
@@ -613,7 +698,7 @@ async fn same_process_python_and_rust_ort_share_native_actor_and_final_intent() 
             module
                 .getattr("validate_python")
                 .unwrap()
-                .call1((group, history, directory, replay.clone()))
+                .call1((group, history, directory, replay.clone(), case == 0))
                 .unwrap()
                 .extract()
                 .unwrap()
@@ -772,9 +857,10 @@ async fn same_process_python_and_rust_ort_share_native_actor_and_final_intent() 
     }
     drop(outputs);
     assert_eq!(hidden_state, frozen_hidden);
-    // 实际三端贪心原意图进入真实执行；NoTrade 不能创造请求。
-    let intent = actor.intent().unwrap();
-    let receipt = actor
+    // 原市场案例执行实际贪心；新增反例执行已逐前缀比对的低量/GTD原意图。
+    let executing = if case == 0 { &actor } else { &probe };
+    let intent = executing.intent().unwrap();
+    let receipt = executing
         .execute(
             &mut h.shared,
             &mut h.driver.decision().unwrap(),
@@ -783,8 +869,66 @@ async fn same_process_python_and_rust_ort_share_native_actor_and_final_intent() 
         .await
         .unwrap();
     assert_eq!(receipt.is_some(), intent.is_some());
+    if case == 1 {
+        let known = selected(Family::SubmitPairedBuy, Variant::GtcLimit, "1000");
+        g.execute_selected(
+            0,
+            SelectedAction::Buy(&known),
+            &mut h.shared,
+            &mut h.driver.decision().unwrap(),
+            context("three-runtime-known-before-unknown"),
+            |_, _, _| -> Result<Vec<CancelScoreBlock>, ()> { panic!() },
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        h.shared
+            .execute(
+                &mut h.driver.decision().unwrap(),
+                context("three-runtime-unknown-cancel"),
+                Some(Arc::new(ModelIntentV1::CancelOrder {
+                    platform_order_id: "sim-999".into(),
+                })),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+    }
+    let mut saw_unknown = false;
+    let mut saw_expired = false;
     for _ in 0..4 {
         let successor = Arc::new(h.next().unwrap());
+        if case == 1
+            && successor
+                .action_before
+                .as_ref()
+                .unwrap()
+                .orders()
+                .any(|o| o.condition_id.is_none())
+        {
+            for offset in [382, 385, 388, 391, 406] {
+                assert_eq!(&successor.rows[0].slow[offset..offset + 3], &[0., 0., 1.]);
+            }
+            saw_unknown = true;
+        }
+        if case == 2 {
+            let time = successor.cutoff.decision_time().logical_time_utc_ms();
+            let reserve = &successor
+                .action_before
+                .as_ref()
+                .unwrap()
+                .economics()
+                .cash
+                .actual_reserved_pusd
+                .0;
+            if time == 203_999 {
+                assert_eq!(reserve, "0.75");
+            }
+            if time >= 205_000 {
+                assert_eq!(reserve, "0");
+                saw_expired = true;
+            }
+        }
         continue_three_runtime(
             successor,
             &continuation,
@@ -808,11 +952,39 @@ async fn same_process_python_and_rust_ort_share_native_actor_and_final_intent() 
             "2000"
         );
     }
+    if case == 1 {
+        assert!(saw_unknown);
+        assert_eq!(
+            h.shared
+                .registry()
+                .orders()
+                .filter(|o| o.condition_id.is_some())
+                .count(),
+            2
+        );
+        // 只有10份已知订单占用本金；0.01份原请求已被SIM拒绝并全额释放。
+        assert_eq!(
+            h.shared
+                .ledger()
+                .economic_read()
+                .unwrap()
+                .cash()
+                .actual_reserved_pusd
+                .0,
+            "1.5"
+        );
+    }
+    if case == 2 {
+        assert!(saw_expired);
+    }
     eprintln!(
-        "actual graph path={path:?}, intent={intent:?}, successor_orders={}",
+        "case={case}, actual graph path={path:?}, executed intent={intent:?}, successor_orders={}",
         h.shared.registry().orders().count()
     );
     h.driver.stop_and_drain().unwrap();
+    if case != 0 {
+        return;
+    }
     // 独立真实前史上的 FOK/FAK 定向探针；不冒充模型选择。
     let mut h = fixture();
     let mut tested = NativeActor::new(Arc::new(ready(&mut h)), 0).unwrap();
@@ -1021,11 +1193,11 @@ fn fixed_prefix_variants_and_common_budget_match_small_full_action_oracle() {
                 } else {
                     (n * 7 * m * (10 - m) + 5) / 10
                 };
-                (n >= 500).then_some(principal + 10 * fee)
+                Some(principal + 10 * fee)
             }
         }
     };
-    for n in [112u64, 125, 499, 500, 501] {
+    for n in [1u64, 100, 112, 113, 125, 499, 500, 501, 1000] {
         for &(a, pa) in &attributes {
             for &(b, pb) in &attributes {
                 for ka in 1u64..=9 {
@@ -1269,4 +1441,254 @@ fn python_features_consumes_real_native_groups_with_the_original_public_shape() 
     }
     assert!(groups >= 6);
     h.driver.stop_and_drain().unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unknown_cancel_clears_known_account_aggregates() {
+    let mut h = fixture();
+    let g = ready(&mut h);
+    let s = selected(Family::SubmitPairedBuy, Variant::GtcLimit, "500");
+    g.execute_selected(
+        0,
+        SelectedAction::Buy(&s),
+        &mut h.shared,
+        &mut h.driver.decision().unwrap(),
+        context("known-buy-before-unknown-cancel"),
+        |_, _, _| -> Result<Vec<CancelScoreBlock>, ()> { panic!() },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    h.shared
+        .execute(
+            &mut h.driver.decision().unwrap(),
+            context("unknown-cancel"),
+            Some(Arc::new(ModelIntentV1::CancelOrder {
+                platform_order_id: "sim-999".into(),
+            })),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let mut found = false;
+    while let Some(g) = h.next() {
+        let read = g.action_before.as_ref().unwrap();
+        let unknown = read.orders().filter(|o| o.condition_id.is_none()).count();
+        let known = read.orders().filter(|o| o.condition_id.is_some()).count();
+        if unknown != 0 && known != 0 {
+            let slow = &g.rows[0].slow;
+            assert_eq!(unknown, 1);
+            assert_eq!(known, 2);
+            for offset in [382, 385, 388, 391, 406] {
+                assert_eq!(&slow[offset..offset + 3], &[0., 0., 1.], "slot {offset}");
+            }
+            found = true;
+            break;
+        }
+    }
+    assert!(
+        found,
+        "formal unknown cancellation must appear in actual frozen account read"
+    );
+    h.driver.stop_and_drain().unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn model_selects_low_limit_quantity_and_platform_refusal_releases_original_reservation() {
+    for minimum in ["5", "10"] {
+        for variant in 0..2 {
+            for n in [1u32, 499, 500, 999, 1000, 1001] {
+                let mut h = fixture_with_minimum(
+                    "2000",
+                    ["0.1", "0.1"],
+                    24_999,
+                    &[35_000, 45_000, 55_000],
+                    ["100", "100"],
+                    minimum,
+                );
+                let group = Arc::new(ready(&mut h));
+                assert_eq!(
+                    group.rows[0].rule[14],
+                    crate::exact::signed_log_f32(&crate::exact::integer(
+                        minimum.parse::<u32>().unwrap()
+                    ))
+                );
+                assert_eq!(group.rows[0].rule[15], 1.);
+                assert_eq!(&group.rows[0].fast[806..836], &group.rows[0].rule);
+                let mut actor = NativeActor::new(group, 0).unwrap();
+                actor.choose(2).unwrap();
+                while actor.state.stage == Stage::QuantityBranch {
+                    let interval = actor.state.interval.as_ref().unwrap();
+                    let midpoint = (&interval.lo + &interval.hi) / 2u32;
+                    actor
+                        .choose(usize::from(BigUint::from(n) > midpoint))
+                        .unwrap();
+                }
+                assert_eq!(actor.state.quantity_hundredths, Some(n.into()));
+                for _ in 0..2 {
+                    actor.choose(variant).unwrap(); // GTC或GTD LIMIT
+                    actor.choose(1).unwrap(); // post-only
+                    if variant == 1 {
+                        actor.choose(2).unwrap();
+                    } // 原编码300秒有效寿命
+                }
+                actor.choose(0).unwrap();
+                actor.choose(0).unwrap();
+                let original = actor.intent().unwrap().unwrap();
+                let ModelIntentV1::SubmitPairedBuy { orders, .. } = &original else {
+                    panic!()
+                };
+                for order in orders {
+                    assert_eq!(leg_values(&order.order).0, Decimal::new(i64::from(n), 2));
+                }
+                actor
+                    .execute(
+                        &mut h.shared,
+                        &mut h.driver.decision().unwrap(),
+                        context("model-low-limit"),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let expected_reserve = Decimal::new(i64::from(n) * 2, 3);
+                assert_eq!(
+                    Decimal::from_str_exact(
+                        &h.shared
+                            .ledger()
+                            .economic_read()
+                            .unwrap()
+                            .cash()
+                            .actual_reserved_pusd
+                            .0
+                    )
+                    .unwrap(),
+                    expected_reserve
+                );
+                let next = h.next().unwrap();
+                let below = n < minimum.parse::<u32>().unwrap() * 100;
+                let cash = next
+                    .action_before
+                    .as_ref()
+                    .unwrap()
+                    .economics()
+                    .cash
+                    .clone();
+                assert_eq!(
+                    Decimal::from_str_exact(&cash.actual_reserved_pusd.0).unwrap(),
+                    if below {
+                        Decimal::ZERO
+                    } else {
+                        expected_reserve
+                    }
+                );
+                assert_eq!(cash.actual_reserved_pusd, cash.maker_reserved_pusd);
+                let registry = h.shared.registry();
+                assert_eq!(registry.orders().count(), if below { 0 } else { 2 });
+                for order in registry.orders() {
+                    assert_eq!(order.origin.as_ref().unwrap().intent.intent(), &original);
+                    assert!(order.accepted.is_some());
+                }
+                h.driver.stop_and_drain().unwrap();
+                let noe = ::execution_normalization::DurableContextStoreV4::open(
+                    h._temp.path().join("noe"),
+                    &h.noe_context,
+                )
+                .unwrap();
+                let rejected = noe.commits().iter().flat_map(|commit| &commit.records).filter(|record| matches!(record,
+                ::execution_normalization::NormalizationRecord::Evidence {
+                    evidence: ::execution_normalization::SourceNeutralEvidenceKind::Control {
+                        result: contracts::execution_normalization::SourceNeutralControlResult::Submission {
+                            outcome: contracts::execution_normalization::SourceNeutralSubmissionOutcomeV2::RejectedNoEffect,
+                        },
+                    }, ..
+                })).count();
+                assert_eq!(
+                    rejected,
+                    if below { 2 } else { 0 },
+                    "minimum={minimum}, n={n}"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn current_gtd_expires_at_effective_deadline_through_noe_ledger_and_native() {
+    for (lifetime, seconds) in [
+        (Lifetime::Seconds180, 180i64),
+        (Lifetime::Seconds240, 240),
+        (Lifetime::Seconds300, 300),
+    ] {
+        let deadline = (24 + seconds) * 1000;
+        let mut h = fixture_config_times(
+            "2000",
+            ["0.0025", "0.005"],
+            24_999,
+            &[deadline - 1001, deadline, deadline + 1000],
+        );
+        let group = ready(&mut h);
+        assert_eq!(group.cutoff.decision_time().logical_time_utc_ms(), 23_900);
+        let mut selection = selected(Family::SubmitPairedBuy, Variant::GtdLimit, "500");
+        for leg in &mut selection.legs {
+            leg.lifetime = Some(lifetime);
+        }
+        group
+            .execute_selected(
+                0,
+                SelectedAction::Buy(&selection),
+                &mut h.shared,
+                &mut h.driver.decision().unwrap(),
+                context("effective-gtd"),
+                |_, _, _| -> Result<Vec<CancelScoreBlock>, ()> { panic!() },
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        let mut before = false;
+        let mut after = false;
+        while let Some(group) = h.next() {
+            let at = group.cutoff.decision_time().logical_time_utc_ms();
+            if at == deadline - 1 {
+                if !group.rows.is_empty() {
+                    assert_eq!(group.cancel.iter().filter(|v| v[0] == 1.).count(), 2);
+                }
+                assert_eq!(
+                    group
+                        .action_before
+                        .as_ref()
+                        .unwrap()
+                        .economics()
+                        .cash
+                        .actual_reserved_pusd
+                        .0,
+                    "0.75"
+                );
+                before = true;
+            }
+            if at >= deadline + 1000 {
+                assert!(group.cancel.iter().all(|v| v[0] != 1.));
+                let cash = &group.action_before.as_ref().unwrap().economics().cash;
+                assert_eq!(cash.actual_reserved_pusd.0, "0");
+                assert_eq!(cash.maker_reserved_pusd.0, "0");
+                for order in h.shared.registry().orders() {
+                    let record = order.latest_lifecycle.unwrap();
+                    let (source, received) = crate::values::times(Some(record)).unwrap();
+                    assert_eq!(source, deadline);
+                    assert!(received > source && received <= at);
+                    let (_, original) = crate::values::leg(order.origin.as_ref().unwrap()).unwrap();
+                    let BuyOrderIntentV1::GtdLimit {
+                        expires_at_utc_sec, ..
+                    } = original.order
+                    else {
+                        panic!()
+                    };
+                    assert_eq!(expires_at_utc_sec, deadline / 1000 + 60);
+                }
+                after = true;
+                break;
+            }
+        }
+        assert!(before && after);
+        h.driver.stop_and_drain().unwrap();
+    }
 }

@@ -15,17 +15,17 @@ version = "CLOB_V2_2026-09-04"
 failure_semantics = "Missing itode means false; invalid wire values reject cold start"
 
 [documented_platform_rules.gtd_timing.value]
-minimum_lead_seconds = 180
+minimum_lead_seconds = 120
 safety_offset_seconds = 60
 
 [documented_platform_rules.gtd_timing.evidence]
-category = "OFFICIAL_SDK_CONTRACT"
-source = "third_party/polymarket_client_sdk_v2-0.7.0-p1/src/clob/types"
-reviewed_on_utc_date = "2026-08-09"
-scope = "GTD expiration admission"
-limitation = "Does not define business wall-clock scheduling"
-version = "polymarket_client_sdk_v2_0.7.0-p1"
-failure_semantics = "Insufficient lead time rejects before state change"
+category = "OFFICIAL_PLATFORM_RULE"
+source = "https://docs.polymarket.com/trading/place-orders#limit-orders"
+reviewed_on_utc_date = "2026-09-26"
+scope = "GTD 声明截止至少提前180秒；实际截止为声明截止减60秒"
+limitation = "minimum_lead_seconds=120 表示有效最低提前量，声明提前量再加 safety_offset_seconds=60。SIM按SDK整秒编码及精确毫秒时长比较，未声称测得服务器内部时钟精度。"
+version = "POLYMARKET_GTD_EFFECTIVE_EXPIRY_V1"
+failure_semantics = "编码秒 < ceil(processing_ms/1000)+120+60 时在状态变化前拒单；等号接受"
 
 [documented_platform_rules.fee_computation.value]
 formula_version = "POLYMARKET_FEE_CURVE_V1"

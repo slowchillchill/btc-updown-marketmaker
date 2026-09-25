@@ -1040,3 +1040,42 @@ fn prepared_ws_and_gamma_terminal_share_one_state_and_materialize_original_resul
         matches!(&durable.reports[0].report.disposition, ReductionDispositionV1::Produced { result_event_id } if *result_event_id == terminal.event_id)
     );
 }
+
+#[test]
+fn reversed_gamma_terminal_keeps_token_winner_and_payout() {
+    let market = market('1', "3195576");
+    let mut row = gamma_terminal_metadata_row(&market);
+    row.outcomes_raw = Some(r#"["DOWN","UP"]"#.into());
+    row.outcome_prices_raw = Some(r#"["0","1"]"#.into());
+    let payload =
+        serde_json::json!({"clobTokenIds": format!("[\"{DOWN_TOKEN_ID}\",\"{UP_TOKEN_ID}\"]")})
+            .to_string();
+    use sha2::{Digest, Sha256};
+    row.source_evidence_raw_sha256 = Some(format!("{:x}", Sha256::digest(payload.as_bytes())));
+    row.source_evidence_payload_json = Some(payload);
+    row.validate().unwrap();
+    let evidence = source_evidence_from_typed_raw(
+        &TypedRawRow::PolymarketMarketMetadata(Box::new(row.clone())),
+        &sha('8'),
+        &sha('9'),
+    )
+    .unwrap();
+    let mut merger = PolymarketTerminalMerger::new(market_context(market), "rule-v1").unwrap();
+    let batch = merger
+        .merge_gamma_terminal(PolymarketMetadataInputV1 { row, evidence })
+        .unwrap();
+    let MarketResolutionTerminalV3::Resolved {
+        winning_asset_id,
+        winning_outcome,
+        payout_vector,
+        ..
+    } = assert_resolved(&batch.events[0]);
+    assert_eq!(winning_asset_id, UP_TOKEN_ID);
+    assert_eq!(winning_outcome, "UP");
+    assert!(payout_vector.iter().all(|p| p.payout_pusd_per_share.0
+        == if p.asset.token_id.0 == UP_TOKEN_ID {
+            "1"
+        } else {
+            "0"
+        }));
+}
