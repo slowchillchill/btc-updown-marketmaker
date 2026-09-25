@@ -251,13 +251,14 @@ impl NativeActor {
         if lower > upper {
             return Ok(false);
         }
-        if state.legs.iter().all(|s| s.variant.is_none()) && upper >= BigUint::from(500u32) {
+        // 数量选择早于属性：上界已满足本金、编码和单腿cap，
+        // 任一正整数均有最低tick、post-only GTC完整续项。
+        if state.legs.iter().all(|s| s.variant.is_none()) {
             return Ok(true);
         }
-        // 数量选择早于全部属性；小域最多499，不能用端点或单调性代替。
+        // 固定属性查询仍逐数量检查，不能把市价支出的取整当作单调。
         let mut n = lower;
-        let small_upper = upper.min(BigUint::from(499u32));
-        while n <= small_upper {
+        while n <= upper {
             if self.fixed_completion(&n, state)? {
                 return Ok(true);
             }
@@ -296,9 +297,6 @@ impl NativeActor {
             .into_iter()
             .filter(|v| s.variant.is_none_or(|selected| selected == *v))
         {
-            if matches!(v, Variant::GtcLimit | Variant::GtdLimit) && n < &BigUint::from(500u32) {
-                continue;
-            }
             let min_k = if matches!(v, Variant::FokMarket | Variant::FakMarket) {
                 let m = floor_positive(
                     &decimal(&self.context().rules.market_buy_min_spend_pusd)

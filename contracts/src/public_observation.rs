@@ -467,6 +467,7 @@ pub struct PublicTradingRuleContextV1 {
     pub query_completed_at_utc_ms: i64,
     pub frozen_at_utc_ms: i64,
     pub queried_minimum_order_size_shares: ExactDecimal,
+    /// 同一快照的真实平台最低份数；模型条件输入与执行规则，不是Actor最低数量掩码。
     pub limit_min_quantity_shares: ExactDecimal,
     pub market_buy_min_spend_pusd: ExactDecimal,
     pub taker_delay_enabled: bool,

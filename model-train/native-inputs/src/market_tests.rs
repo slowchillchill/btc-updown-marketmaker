@@ -427,3 +427,79 @@ fn changing_real_midpoints_feed_exact_increment_rms() {
         assert_eq!(sqrt_log_f32(&ratio(n, d)).to_bits(), bits);
     }
 }
+
+#[test]
+fn collected_sdk_reverse_order_replays_winner_and_native_a_b_without_label_inference() {
+    use data_pipeline_training::{
+        public_recording::PublicRecordingWriterV1, public_replay::PublicReplayV1,
+    };
+    use std::sync::Arc;
+    // data-collect的正式SDK→发现→采集V6→终态测试逐值校验这个共同夹具。
+    let rows: Vec<TypedRawRowV2> = serde_json::from_str(include_str!(
+        "../../../data-pipeline/core/tests/fixtures/gamma-reversed-sdk-metadata-v6.json"
+    ))
+    .unwrap();
+    let mut core = core();
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().join("dpt");
+    let mut writer = PublicRecordingWriterV1::create(&root, core.header(), config()).unwrap();
+    let mut hot = Vec::new();
+    for (i, row) in rows.into_iter().enumerate() {
+        let input = record(i as u64, row);
+        let prepared = prepare_public_ingress_v1(&core, &input, &Default::default(), &[]).unwrap();
+        let applied = core.push(&prepared).unwrap().into_owned();
+        hot.push(applied.applied.closed_groups.last().unwrap().observations[0].clone());
+        writer.record(input, applied).unwrap();
+    }
+    writer.stabilize().unwrap();
+    drop(writer);
+    let mut replay = PublicReplayV1::open(&root, 1, 1 << 20).unwrap();
+    let mut replayed = Vec::new();
+    while let Some((_, applied)) = replay.next_applied().unwrap() {
+        replayed.push(applied.applied.closed_groups.last().unwrap().observations[0].clone());
+    }
+    assert_eq!(hot, replayed);
+    let (execution, _, snapshot) = execution_with_rules_v4(
+        &directory.path().join("sim.jsonl"),
+        &core,
+        SUCCESS_POLICY,
+        None,
+        "e".repeat(64),
+        "2000",
+    );
+    for observation in &replayed {
+        let rules = Arc::new(snapshot.public_rule_context(observation.market.clone()));
+        let context =
+            crate::NativeActionContext::from_observation(observation, rules, snapshot.clone());
+        assert_eq!(
+            context.tokens,
+            [Some(TokenId("101".into())), Some(TokenId("102".into()))]
+        );
+        let up = observation
+            .assets
+            .iter()
+            .find(|a| a.asset.token_id.0 == "101")
+            .unwrap();
+        assert_eq!(up.asset.outcome.label, "Up");
+        assert_eq!(up.asset.outcome.index, 0);
+    }
+    let MarketResolutionTerminalV3::Resolved {
+        winning_asset_id,
+        winning_outcome,
+        payout_vector,
+        ..
+    } = replayed[1].terminal.value.as_ref().unwrap();
+    assert_eq!(winning_asset_id, "101");
+    assert_eq!(winning_outcome, "Up");
+    for payout in payout_vector {
+        assert_eq!(
+            payout.payout_pusd_per_share.0,
+            if payout.asset.token_id.0 == "101" {
+                "1"
+            } else {
+                "0"
+            }
+        );
+    }
+    execution.stop_and_drain().unwrap();
+}

@@ -1108,6 +1108,7 @@ pub(crate) struct GtdExpirationAdvanceEffectsV2 {
 impl GtdExpirationAdvanceEffectsV2 {
     pub(crate) fn into_lifecycle_feedback(
         self,
+        rules: &PlatformRuleSnapshotV3,
     ) -> Result<Vec<LifecycleFeedbackEffectV2>, MatchingStateErrorV1> {
         let Some(expiration) = self.expiration else {
             return Ok(Vec::new());
@@ -1118,7 +1119,8 @@ impl GtdExpirationAdvanceEffectsV2 {
             .checked_add(expiration.open_base_units_before)
             .ok_or(MatchingStateErrorV1::QueuePredecessorConflict)?;
         let lifecycle = LifecycleFeedbackEffectV2::Order(OrderLifecycleEffectV2 {
-            platform_event_at_utc_ms: expiration.expires_at_utc_ms,
+            platform_event_at_utc_ms: rules
+                .effective_gtd_expiration_ms(expiration.expires_at_utc_ms),
             platform_order_id: expiration.platform_order_id,
             condition_id: expiration.condition_id,
             token_id: expiration.token_id,
@@ -4063,17 +4065,21 @@ impl ExecutionStateV2 {
             .collect()
     }
 
-    pub(crate) fn next_gtd_deadline_at_utc_ms(&self) -> Option<i64> {
+    pub(crate) fn next_gtd_deadline_at_utc_ms(
+        &self,
+        rules: &PlatformRuleSnapshotV3,
+    ) -> Option<i64> {
         self.gtd_deadlines
             .first()
-            .map(|(expires_at_utc_ms, _)| *expires_at_utc_ms)
+            .map(|(encoded_at, _)| rules.effective_gtd_expiration_ms(*encoded_at))
     }
 
     pub(crate) fn advance_next_gtd_deadline_at(
         mut self,
         platform_event_at_utc_ms: i64,
+        rules: &PlatformRuleSnapshotV3,
     ) -> Result<(Self, GtdExpirationAdvanceEffectsV2), MatchingStateErrorV1> {
-        let Some(next_at) = self.next_gtd_deadline_at_utc_ms() else {
+        let Some(next_at) = self.next_gtd_deadline_at_utc_ms(rules) else {
             return Ok((self, GtdExpirationAdvanceEffectsV2::default()));
         };
         if next_at > platform_event_at_utc_ms {
@@ -6524,7 +6530,7 @@ mod tests {
             ),
             Decimal::ZERO
         );
-        assert_eq!(state.next_gtd_deadline_at_utc_ms(), None);
+        assert_eq!(state.next_gtd_deadline_at_utc_ms(rules.snapshot()), None);
         assert!(state.fills.is_empty());
         assert_eq!(state.account.available_pusd(), decimal("10"));
         assert_eq!(state.account.principal_encumbrance_pusd(), Decimal::ZERO);
@@ -6588,7 +6594,10 @@ mod tests {
             )
             .expect("建立真实可达的 V2 GTD maker 挂单");
         assert!(matches!(disposition, BuyOrderDispositionV2::Accepted(_)));
-        assert_eq!(state.next_gtd_deadline_at_utc_ms(), Some(expires_at_utc_ms));
+        assert_eq!(
+            state.next_gtd_deadline_at_utc_ms(rules.snapshot()),
+            Some(expires_at_utc_ms)
+        );
 
         for event in [
             decoded_level_event_v2_for_tests("0", "5", 1_300, 1_301, 40),
@@ -6609,7 +6618,7 @@ mod tests {
         }
 
         assert!(state.gtd_deadlines.is_empty());
-        assert_eq!(state.next_gtd_deadline_at_utc_ms(), None);
+        assert_eq!(state.next_gtd_deadline_at_utc_ms(rules.snapshot()), None);
         assert_eq!(state.orders["sim-1"].terminal_reason, None);
     }
 
@@ -6702,7 +6711,10 @@ mod tests {
             ),
             decimal("5")
         );
-        assert_eq!(state.next_gtd_deadline_at_utc_ms(), Some(expires_at_utc_ms));
+        assert_eq!(
+            state.next_gtd_deadline_at_utc_ms(rules.snapshot()),
+            Some(expires_at_utc_ms)
+        );
 
         let (state, disposition) = state
             .apply_caller_cancel("sim-1", 2_001)
@@ -6714,7 +6726,7 @@ mod tests {
         assert_eq!(canceled.open_base_units_before, 5_000_000);
         assert_eq!(canceled.released_open_quote_units, 1_500_000);
 
-        assert_eq!(state.next_gtd_deadline_at_utc_ms(), None);
+        assert_eq!(state.next_gtd_deadline_at_utc_ms(rules.snapshot()), None);
         assert_eq!(state.account.available_pusd(), decimal("10"));
         assert_eq!(state.account.principal_encumbrance_pusd(), Decimal::ZERO);
         assert_eq!(
@@ -7366,6 +7378,12 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn execution_state_v2_gtd_expiration_releases_only_open_quote_before_same_time_finality()
     {
+        for current in [false, true] {
+            assert_gtd_partial_expiration(current).await;
+        }
+    }
+
+    async fn assert_gtd_partial_expiration(current: bool) {
         let (mut state, condition_id, token_id) = execution_state_v2_for_resting_limit_tests("10");
         state
             .apply_initial_levels(
@@ -7375,12 +7393,20 @@ mod tests {
                 &[(decimal("0.4"), 5_000_000)],
             )
             .expect("GTD 到期测试 ask");
-        let rules = crate::platform_rules::tests::successful_snapshot_v3_for_sim_tests().await;
-        let finality_policy = TradeFinalityPolicyV2::decode_and_seal(
-            br#"{"schema_version":"trade_finality_policy_v2","normal_path":{"steps":[{"state":"MATCHED","offset_ms":0},{"state":"MINED","offset_ms":298500},{"state":"CONFIRMED","offset_ms":298510}],"economic_application_ordinal":1},"failure_overrides":[]}"#,
-        )
-        .expect("GTD 同刻最终性测试策略必须合法");
+        let rules = if current {
+            crate::platform_rules::tests::current_gtd_snapshot_v3_for_sim_tests().await
+        } else {
+            crate::platform_rules::tests::successful_snapshot_v3_for_sim_tests().await
+        };
         let expires_at_utc_ms = 300_000;
+        let deadline = if current { 240_000 } else { 300_000 };
+        let policy = format!(
+            r#"{{"schema_version":"trade_finality_policy_v2","normal_path":{{"steps":[{{"state":"MATCHED","offset_ms":0}},{{"state":"MINED","offset_ms":{}}},{{"state":"CONFIRMED","offset_ms":{}}}],"economic_application_ordinal":1}},"failure_overrides":[]}}"#,
+            deadline - 1500,
+            deadline - 1490
+        );
+        let finality_policy = TradeFinalityPolicyV2::decode_and_seal(policy.as_bytes())
+            .expect("GTD 同刻最终性测试策略必须合法");
         let (state, disposition) = state
             .apply_buy_order(
                 BuyOrderActionV2 {
@@ -7406,11 +7432,11 @@ mod tests {
             panic!("部分成交 GTD 必须形成订单");
         };
         assert_eq!(accepted.account_deltas[0].account_transition_seq, 1);
-        assert_eq!(state.next_gtd_deadline_at_utc_ms(), Some(expires_at_utc_ms));
         assert_eq!(
-            state.next_scheduled_finality_at_utc_ms(),
-            Some(expires_at_utc_ms)
+            state.next_gtd_deadline_at_utc_ms(rules.snapshot()),
+            Some(deadline)
         );
+        assert_eq!(state.next_scheduled_finality_at_utc_ms(), Some(deadline));
         assert_eq!(state.account.principal_encumbrance_pusd(), decimal("4.5"));
         assert_eq!(
             state.account.immediate_taker_fee_encumbrance_pusd(),
@@ -7418,15 +7444,18 @@ mod tests {
         );
 
         let (state, early) = state
-            .advance_next_gtd_deadline_at(expires_at_utc_ms - 1)
+            .advance_next_gtd_deadline_at(deadline - 1, rules.snapshot())
             .expect("到期前推进必须无效果");
         assert!(early.expiration.is_none());
         assert!(early.account_deltas.is_empty());
-        assert_eq!(state.next_gtd_deadline_at_utc_ms(), Some(expires_at_utc_ms));
+        assert_eq!(
+            state.next_gtd_deadline_at_utc_ms(rules.snapshot()),
+            Some(deadline)
+        );
 
         let (state, expired) = state
-            .advance_next_gtd_deadline_at(expires_at_utc_ms)
-            .expect("GTD 必须在编码截止时点到期");
+            .advance_next_gtd_deadline_at(deadline, rules.snapshot())
+            .expect("GTD 必须在该版本的有效截止时点到期");
         let expiration = expired.expiration.as_ref().expect("必须形成 GTD 到期效果");
         assert_eq!(expiration.platform_order_id, "sim-1");
         assert_eq!(expiration.pending_base_units_before, 0);
@@ -7464,7 +7493,7 @@ mod tests {
                 market_resolved_released_quote_units: 0,
             }
         );
-        assert_eq!(state.next_gtd_deadline_at_utc_ms(), None);
+        assert_eq!(state.next_gtd_deadline_at_utc_ms(rules.snapshot()), None);
         assert!(
             state
                 .queues
@@ -7490,7 +7519,7 @@ mod tests {
         );
 
         let expiration_lifecycle = expired
-            .into_lifecycle_feedback()
+            .into_lifecycle_feedback(rules.snapshot())
             .expect("GTD 到期必须形成自包含订单生命周期效果");
         let [LifecycleFeedbackEffectV2::Order(expiration_lifecycle)] =
             expiration_lifecycle.as_slice()
@@ -7507,6 +7536,7 @@ mod tests {
             panic!("GTD 到期必须保持自身方法特定效果")
         };
         assert_eq!(*encoded_expires_at_utc_ms, expires_at_utc_ms);
+        assert_eq!(expiration_lifecycle.platform_event_at_utc_ms, deadline);
         assert_eq!(expired_base_quantity_shares.0, "5");
         assert_eq!(released_quote_amount_pusd.0, "2.5");
         assert_eq!(
@@ -7518,7 +7548,7 @@ mod tests {
 
         let account_sequence_before_cancel = state.account.next_account_transition_seq();
         let (state, cancel_after_expiration) = state
-            .apply_caller_cancel("sim-1", expires_at_utc_ms)
+            .apply_caller_cancel("sim-1", deadline)
             .expect("同刻 GTD 已先到期时撤单必须规范无效果");
         assert_eq!(
             cancel_after_expiration,
@@ -7531,11 +7561,7 @@ mod tests {
         );
 
         let (state, mined) = state
-            .advance_next_scheduled_finality_at(
-                expires_at_utc_ms,
-                &finality_policy,
-                rules.snapshot(),
-            )
+            .advance_next_scheduled_finality_at(deadline, &finality_policy, rules.snapshot())
             .expect("同刻最终性必须在 GTD 后应用成交经济变化");
         assert_eq!(
             mined
@@ -7556,6 +7582,12 @@ mod tests {
             state.orders["sim-1"].immediate_taker_fee_encumbered_units,
             0
         );
+        let sequence = state.account.next_account_transition_seq();
+        let (state, duplicate) = state
+            .advance_next_gtd_deadline_at(deadline + 1, rules.snapshot())
+            .unwrap();
+        assert!(duplicate.expiration.is_none());
+        assert_eq!(state.account.next_account_transition_seq(), sequence);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -7604,10 +7636,13 @@ mod tests {
             )
             .expect("第二个同刻 GTD 必须接受");
         assert!(matches!(second, BuyOrderDispositionV2::Accepted(_)));
-        assert_eq!(state.next_gtd_deadline_at_utc_ms(), Some(expires_at_utc_ms));
+        assert_eq!(
+            state.next_gtd_deadline_at_utc_ms(rules.snapshot()),
+            Some(expires_at_utc_ms)
+        );
 
         let (state, first_expired) = state
-            .advance_next_gtd_deadline_at(expires_at_utc_ms)
+            .advance_next_gtd_deadline_at(expires_at_utc_ms, rules.snapshot())
             .expect("首个同刻 GTD 必须先到期");
         assert_eq!(
             first_expired
@@ -7616,11 +7651,14 @@ mod tests {
                 .map(|effect| effect.platform_order_id.as_str()),
             Some("sim-1")
         );
-        assert_eq!(state.next_gtd_deadline_at_utc_ms(), Some(expires_at_utc_ms));
+        assert_eq!(
+            state.next_gtd_deadline_at_utc_ms(rules.snapshot()),
+            Some(expires_at_utc_ms)
+        );
         assert_eq!(state.orders["sim-2"].last_updated_at_utc_ms, 1_500);
 
         let (state, second_expired) = state
-            .advance_next_gtd_deadline_at(expires_at_utc_ms)
+            .advance_next_gtd_deadline_at(expires_at_utc_ms, rules.snapshot())
             .expect("第二个同刻 GTD 必须随后到期");
         assert_eq!(
             second_expired
@@ -7629,7 +7667,7 @@ mod tests {
                 .map(|effect| effect.platform_order_id.as_str()),
             Some("sim-2")
         );
-        assert_eq!(state.next_gtd_deadline_at_utc_ms(), None);
+        assert_eq!(state.next_gtd_deadline_at_utc_ms(rules.snapshot()), None);
         assert_eq!(first_expired.account_deltas[0].account_transition_seq, 3);
         assert_eq!(second_expired.account_deltas[0].account_transition_seq, 4);
     }

@@ -53,6 +53,7 @@ pub(super) struct Harness {
     pub(super) native: NativeInputRoot,
     pub(super) driver: FinitePublicConsumptionV1<RecordedPublicGroupSourceV1<TradingTimes>>,
     groups: Vec<serde_json::Value>,
+    noe_context: contracts::execution_normalization::ExecutionNormalizationContextReferenceV1,
 }
 
 #[test]
@@ -122,6 +123,12 @@ impl Harness {
         execution
             .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
             .unwrap();
+        let noe_context = observation
+            .opening_record()
+            .unwrap()
+            .context()
+            .context_reference
+            .clone();
         let shared = SharedExecutionV2::from_opening(ledger, observation)
             .unwrap()
             .unwrap();
@@ -144,6 +151,7 @@ impl Harness {
             native,
             driver,
             groups: vec![],
+            noe_context,
         }
     }
     fn next(&mut self) -> Option<NativeInputGroup> {
@@ -659,7 +667,15 @@ async fn actual_graph_pair_intent_execution_and_frozen_cancel_race() {
                     .orders()
                     .all(|o| o.cancellable == ExecutionReadValueV1::Known(false))
             );
-            assert!(g.cancel.is_empty());
+            // #6正式续篇3§5：无订单的当前condition仍保留一个真实Market候选。
+            assert_eq!(g.cancel.len(), 1);
+            assert_eq!(g.cancel[0][2], 1.);
+            assert_eq!(
+                g.cancel_index_intent(0).unwrap(),
+                ModelIntentV1::CancelMarketOrders {
+                    condition_id: ConditionId(CONDITION_ID.into()),
+                }
+            );
             verified = true;
             break;
         }

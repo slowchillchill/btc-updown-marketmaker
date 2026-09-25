@@ -159,7 +159,7 @@ impl SealedProcessRuleSnapshotV3 {
             query_completed_at_utc_ms: snapshot.provenance.query_completed_at_utc_ms,
             frozen_at_utc_ms: snapshot.provenance.rules_observed_at_utc_ms,
             queried_minimum_order_size_shares: decimal(&synchronized.minimum_order_size_shares),
-            limit_min_quantity_shares: contracts::ExactDecimal("5".into()),
+            limit_min_quantity_shares: decimal(&synchronized.minimum_order_size_shares),
             market_buy_min_spend_pusd: contracts::ExactDecimal(
                 MARKET_BUY_MINIMUM_PRINCIPAL_PUSD.to_string(),
             ),
@@ -343,6 +343,7 @@ pub struct TakerDelayRuleV1 {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GtdTimingRuleV1 {
+    /// 新GTD证据版本为有效最低提前量；声明准入仍取本字段与safety之和，旧快照值保持原义。
     pub minimum_lead_seconds: u64,
     pub safety_offset_seconds: u64,
 }
@@ -545,6 +546,24 @@ pub(crate) struct PlatformRuleSnapshotV3 {
     pub(crate) documented_platform_rules: DocumentedPlatformRulesV1,
     pub(crate) project_account_rules: ProjectAccountRulesV1,
     pub(crate) provenance: PlatformRuleProvenanceV3,
+}
+
+/// 已冻结规则的版本区分；未知/历史标记保持原读取语义，不新增装载拒绝门。
+pub(crate) const GTD_EFFECTIVE_EXPIRY_VERSION: &str = "POLYMARKET_GTD_EFFECTIVE_EXPIRY_V1";
+impl PlatformRuleSnapshotV3 {
+    pub(crate) fn effective_gtd_expiration_ms(&self, encoded_at_ms: i64) -> i64 {
+        let rule = &self.documented_platform_rules.gtd_timing;
+        if rule.evidence.version != GTD_EFFECTIVE_EXPIRY_VERSION {
+            return encoded_at_ms;
+        }
+        let offset = i64::try_from(rule.value.safety_offset_seconds)
+            .ok()
+            .and_then(|seconds| seconds.checked_mul(1_000))
+            .expect("已接纳GTD的提前量可表示为毫秒");
+        encoded_at_ms
+            .checked_sub(offset)
+            .expect("已接纳GTD有效截止可表示")
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -2207,7 +2226,34 @@ pub(crate) mod tests {
         .expect("当前查询必须密封 V3 进程规则快照")
     }
 
+    /// 既有撮合/恢复用例继续验证其原GTD规则，不把旧期望静默切换到新版本。
     pub(crate) async fn successful_snapshot_v3_for_sim_tests() -> Arc<SealedProcessRuleSnapshotV3> {
+        let config = std::str::from_utf8(PLATFORM_RULE_CONFIG_BYTES).unwrap();
+        let start = config
+            .find("[documented_platform_rules.gtd_timing.value]")
+            .unwrap();
+        let end = config
+            .find("[documented_platform_rules.fee_computation.value]")
+            .unwrap();
+        let mut bytes = config.to_owned();
+        bytes.replace_range(
+            start..end,
+            include_str!("../tests/fixtures/gtd-timing-legacy.toml"),
+        );
+        let server = ScriptedServer::start(successful_responses()).await;
+        let directory = tempfile::tempdir().unwrap();
+        query_and_seal_current_process_snapshot_v3_with(
+            current_request(directory.path().join("legacy-gtd-rules.json")),
+            test_loader_options(&server),
+            bytes.as_bytes(),
+            fixed_now_utc_ms,
+        )
+        .await
+        .unwrap()
+    }
+
+    pub(crate) async fn current_gtd_snapshot_v3_for_sim_tests() -> Arc<SealedProcessRuleSnapshotV3>
+    {
         let server = ScriptedServer::start(successful_responses()).await;
         let directory = tempfile::tempdir().expect("创建 V3 规则测试目录");
         create_successful_snapshot_v3(

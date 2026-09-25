@@ -505,6 +505,7 @@ pub fn execution_with_identity(
         cash,
         run_id,
         BusinessProjectionVersionV1::V3,
+        None,
     )
 }
 pub fn execution_with_identity_v4(
@@ -529,6 +530,7 @@ pub fn execution_with_identity_v4(
         cash,
         run_id,
         BusinessProjectionVersionV1::V4,
+        None,
     )
 }
 pub fn execution_with_rules_v4(
@@ -545,6 +547,28 @@ pub fn execution_with_rules_v4(
 ) {
     execution_with_identity_v4(path, core, policy, delay, seed, cash, "shared-combination")
 }
+pub fn execution_with_minimum_v4(
+    path: &Path,
+    core: &PublicObservationCoreV1,
+    cash: &str,
+    minimum_shares: &str,
+) -> (
+    PublicSimExecutionV1,
+    MemoryNoeObservationV4,
+    Arc<SealedProcessRuleSnapshotV3>,
+) {
+    execution_with_evidence::<MeasuredCancellationEvidence>(
+        path,
+        core,
+        SUCCESS_POLICY,
+        None,
+        "e".repeat(64),
+        cash,
+        "shared-combination",
+        BusinessProjectionVersionV1::V4,
+        Some(minimum_shares),
+    )
+}
 // 同一真实夹具仅显式区分源投影版本；不再包装一份运行配置。
 #[allow(clippy::too_many_arguments)]
 fn execution_with_evidence<P: MemoryOrderEvidence + 'static>(
@@ -556,6 +580,7 @@ fn execution_with_evidence<P: MemoryOrderEvidence + 'static>(
     cash: &str,
     run_id: &str,
     projection_version: BusinessProjectionVersionV1,
+    minimum_shares: Option<&str>,
 ) -> (
     PublicSimExecutionV1,
     MemoryNoeObservation<P>,
@@ -573,11 +598,33 @@ fn execution_with_evidence<P: MemoryOrderEvidence + 'static>(
         .parent()
         .unwrap()
         .join("../../../sim-system/tests/fixtures/platform-rule-snapshot-v3-gate-b.json");
-    let (rule_path, rule_sha) = if let Some(delay) = delay {
+    let (rule_path, rule_sha) = if delay.is_some() || minimum_shares.is_some() {
         let mut value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&original).unwrap()).unwrap();
-        value["documented_platform_rules"]["taker_delay"]["value"]["delay_ms"] =
-            serde_json::json!(delay);
+        if let Some(delay) = delay {
+            value["documented_platform_rules"]["taker_delay"]["value"]["delay_ms"] =
+                serde_json::json!(delay);
+        }
+        if let Some(minimum) = minimum_shares {
+            value["synchronized_platform_rules"]["minimum_order_size_shares"] =
+                serde_json::json!(minimum);
+        }
+        if minimum_shares.is_some() {
+            // 新实验显式建立新规则产物，保留原历史快照字节。
+            let timing = &mut value["documented_platform_rules"]["gtd_timing"];
+            timing["value"]["minimum_lead_seconds"] = serde_json::json!(120);
+            timing["evidence"]["category"] = serde_json::json!("OFFICIAL_PLATFORM_RULE");
+            timing["evidence"]["source"] =
+                serde_json::json!("https://docs.polymarket.com/trading/place-orders#limit-orders");
+            timing["evidence"]["version"] = serde_json::json!("POLYMARKET_GTD_EFFECTIVE_EXPIRY_V1");
+            timing["evidence"]["reviewed_on_utc_date"] = serde_json::json!("2026-09-26");
+            timing["evidence"]["scope"] =
+                serde_json::json!("声明截止至少提前180秒，实际截止提前60秒");
+            timing["evidence"]["limitation"] =
+                serde_json::json!("SIM保留整秒编码、毫秒精确时长比较，不断言服务器时钟精度");
+            timing["evidence"]["failure_semantics"] =
+                serde_json::json!("编码截止小于ceil(P_ms/1000)+120+60时拒单，等号接受");
+        }
         let bytes = serde_json::to_vec(&value).unwrap();
         let output = path.parent().unwrap().join("rules-contract-150.json");
         std::fs::write(&output, &bytes).unwrap();

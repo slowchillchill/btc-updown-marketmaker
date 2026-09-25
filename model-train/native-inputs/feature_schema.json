@@ -320,7 +320,8 @@
     "applicability": "current FOK/FAK Price(leg); illegal platform coordinate, other stage, LIMIT => 0",
     "decoder": "price_logits + bias-free signed Linear(H/2,1)(decoder) * price_fee_features"
   },
-  "input_contract_version": "native_inputs_v3",
+  "input_contract_version": "native_inputs_v4",
+  "behavior_revision": "#162：原响应token关联、三态槽完整覆写、rule[14:16]使用真实冻结mos；模型支持正整数数量意图，不以平台最低份数设mask。FOK/FAK每腿原本金仍须至少1 pUSD；旧策略路径的概率重算保留原实现语义。",
   "pending_noe_record_count": {
     "indices": [
       412,

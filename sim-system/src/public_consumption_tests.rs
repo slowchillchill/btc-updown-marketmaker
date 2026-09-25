@@ -2117,7 +2117,7 @@ async fn continuous_actual_clock_splits_old_source_times_and_drains_earlier_due_
         execution_state.next_rebate_clock_at_utc_ms(),
         Some(MARKET_END_AT)
     );
-    assert_eq!(execution_state.next_gtd_deadline_at_utc_ms(), None);
+    assert_eq!(execution_state.next_gtd_deadline_at_utc_ms(driver.execution.actor._rule_snapshot.snapshot()), None);
     assert_eq!(execution_state.next_scheduled_finality_at_utc_ms(), None);
     assert_eq!(
         driver.next_wake_after(),
@@ -2395,7 +2395,7 @@ async fn continuous_equal_time_finality_gtd_and_rebate_keep_original_pre_market_
         .as_ref()
         .unwrap()
         .execution_state;
-    assert_eq!(state.next_gtd_deadline_at_utc_ms(), Some(deadline));
+    assert_eq!(state.next_gtd_deadline_at_utc_ms(driver.execution.actor._rule_snapshot.snapshot()), Some(deadline));
     let finality_at = state.next_scheduled_finality_at_utc_ms().unwrap();
     for (at, class) in [
         (finality_at, "finality"),
@@ -2428,7 +2428,7 @@ async fn continuous_equal_time_finality_gtd_and_rebate_keep_original_pre_market_
                 session.execution_state.next_scheduled_finality_at_utc_ms(),
                 Some(at)
             ),
-            "gtd" => assert_eq!(session.execution_state.next_gtd_deadline_at_utc_ms(), None),
+            "gtd" => assert_eq!(session.execution_state.next_gtd_deadline_at_utc_ms(driver.execution.actor._rule_snapshot.snapshot()), None),
             _ => assert_ne!(
                 session.execution_state.next_rebate_clock_at_utc_ms(),
                 Some(at)

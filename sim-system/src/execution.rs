@@ -150,3 +150,31 @@ pub(crate) fn normalize_gtd_expiration(
     }
     encoded_expires_sec.checked_mul(1_000).map(Some).ok_or(())
 }
+
+#[cfg(test)]
+mod gtd_tests {
+    use super::normalize_gtd_expiration;
+
+    #[test]
+    fn encoded_admission_preserves_seconds_floor_processing_ceiling_and_equality() {
+        // 新规则按声明提前180秒比较，旧规则仍240秒；非整秒P不冒充整秒。
+        for (effective_minimum, total) in [(120, 180), (180, 240)] {
+            for processing in [1_000i64, 1_001, 1_999] {
+                let second = processing.div_euclid(1000) + i64::from(processing % 1000 != 0);
+                let threshold = (second + total) * 1000;
+                assert_eq!(
+                    normalize_gtd_expiration(threshold - 1, processing, effective_minimum, 60),
+                    Ok(None)
+                );
+                assert_eq!(
+                    normalize_gtd_expiration(threshold, processing, effective_minimum, 60),
+                    Ok(Some(threshold))
+                );
+                assert_eq!(
+                    normalize_gtd_expiration(threshold + 999, processing, effective_minimum, 60),
+                    Ok(Some(threshold))
+                );
+            }
+        }
+    }
+}

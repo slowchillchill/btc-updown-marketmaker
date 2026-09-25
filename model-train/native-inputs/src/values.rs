@@ -29,8 +29,8 @@ pub(crate) fn sum(values: impl IntoIterator<Item = Value>) -> Value {
 pub(crate) fn slot(out: &mut [f32], at: usize, value: Value) {
     match value {
         Known(v) => out[at..at + 3].copy_from_slice(&[signed_log_f32(&v), 1., 1.]),
-        Unavailable => out[at + 2] = 1.,
-        NotApplicable => {}
+        Unavailable => out[at..at + 3].copy_from_slice(&[0., 0., 1.]),
+        NotApplicable => out[at..at + 3].fill(0.),
     }
 }
 pub(crate) fn linear_slot(out: &mut [f32], at: usize, v: &R) {
@@ -133,4 +133,22 @@ pub(crate) fn request_block(
         );
     }
     time_slot(out, at + 12, requests.latest_response, now);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slot_replaces_all_three_coordinates() {
+        let mut out = [9.; 3];
+        slot(&mut out, 0, Known(integer(5)));
+        assert_eq!(out, [signed_log_f32(&integer(5)), 1., 1.]);
+        slot(&mut out, 0, Unavailable);
+        assert_eq!(out, [0., 0., 1.]);
+        slot(&mut out, 0, NotApplicable);
+        assert_eq!(out, [0., 0., 0.]);
+        slot(&mut out, 0, Known(integer(0)));
+        assert_eq!(out, [0., 1., 1.]);
+    }
 }

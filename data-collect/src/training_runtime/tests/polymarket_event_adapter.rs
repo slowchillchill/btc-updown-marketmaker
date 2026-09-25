@@ -687,3 +687,244 @@ fn metadata_v5_writer_and_routed_entries_keep_error_precedence() {
         event.collector_admission = None;
     }
 }
+
+#[test]
+fn reversed_gamma_preserves_fixed_identity_and_raw_evidence() {
+    use crate::market_discovery::{BtcUpdownMarketCandidate, select_btc_updown_markets};
+    let seed = test_btc_discovery().current;
+    let mut raw: serde_json::Value = serde_json::from_str(seed.raw_json.as_ref().unwrap()).unwrap();
+    raw["id"] = serde_json::json!("3195576");
+    raw["orderPriceMinTickSize"] = serde_json::json!("0.01");
+    raw["outcomes"] = serde_json::json!("[\"Down\",\"Up\"]");
+    raw["outcomePrices"] = serde_json::json!("[\"0.4\",\"0.6\"]");
+    raw["clobTokenIds"] = serde_json::json!("[\"102\",\"101\"]");
+    let sdk: SdkGammaMarket = serde_json::from_value(raw).unwrap();
+    let mut candidate = BtcUpdownMarketCandidate::from_sdk_market(&sdk);
+    candidate.metadata_fetch_start_utc_ms = Some(seed.start_ts_s * 1000 + 1);
+    candidate.metadata_received_utc_ms = Some(seed.start_ts_s * 1000 + 2);
+    let discovered =
+        select_btc_updown_markets(seed.start_ts_s * 1000 + 3, &[candidate], &[]).unwrap();
+    assert_eq!(discovered.current.up_asset_id, "101");
+    assert_eq!(discovered.current.down_asset_id, "102");
+    let row = polymarket_metadata_snapshot_row(
+        &discovered.current,
+        MarketRuntimeRole::Current,
+        &CollectorIdentity {
+            host_id: "semantic-collector".into(),
+            region: "local".into(),
+        },
+    )
+    .unwrap();
+    use data_pipeline_core::public_input::*;
+    use data_pipeline_core::public_observation_core::PublicObservationCoreV1;
+    let admission_time = row.fixed_identity_verified_at_utc + 1;
+    let wrapped =
+        crate::polymarket_market_metadata_v6_layout::PolymarketMarketMetadataV6Row::Existing(
+            PolymarketMarketMetadataV5Row::from_common(row, None, None),
+        );
+    let mut event = polymarket_metadata_v6_raw_event(wrapped).unwrap();
+    event.collector_admission = Some(RawEventAdmission {
+        sequence: 1,
+        time_utc_ms: admission_time,
+    });
+    use crate::polymarket_market_metadata_v6_layout::{
+        polymarket_market_metadata_v6_row_from_batch, polymarket_market_metadata_v6_rows_to_batch,
+        polymarket_market_metadata_v6_schema,
+    };
+    let persisted = polymarket_metadata_v6_row_for_event(&event).unwrap();
+    let source_payload = persisted
+        .existing()
+        .unwrap()
+        .common()
+        .source_evidence_payload_json
+        .clone();
+    let batch = polymarket_market_metadata_v6_rows_to_batch(
+        polymarket_market_metadata_v6_schema(),
+        &[persisted],
+    )
+    .unwrap();
+    let recovered = polymarket_market_metadata_v6_row_from_batch(&batch, 0).unwrap();
+    assert_eq!(
+        recovered
+            .existing()
+            .unwrap()
+            .common()
+            .source_evidence_payload_json,
+        source_payload
+    );
+    assert_eq!(
+        recovered
+            .existing()
+            .unwrap()
+            .common()
+            .outcomes_raw
+            .as_deref(),
+        Some(r#"["Down","Up"]"#)
+    );
+    assert_eq!(
+        recovered
+            .existing()
+            .unwrap()
+            .common()
+            .outcome_prices_raw
+            .as_deref(),
+        Some(r#"["0.4","0.6"]"#)
+    );
+    let admission = event.collector_admission.clone();
+    event = polymarket_metadata_v6_raw_event(recovered).unwrap();
+    event.collector_admission = admission;
+    let row = raw_event_to_public_input(&event).unwrap().unwrap();
+    let TypedRawRowV2::PolymarketMarketMetadataV6(metadata) = &row else {
+        panic!("snapshot must retain its V6 envelope")
+    };
+    let PolymarketMarketMetadataV6Input::Existing(metadata) = metadata.as_ref() else {
+        panic!("snapshot must retain the metadata row")
+    };
+    let outcomes = metadata.outcome_evidence().unwrap();
+    assert_eq!(outcomes[0].asset_id, "101");
+    assert_eq!(outcomes[0].outcome.as_deref(), Some("Up"));
+    assert_eq!(outcomes[0].price.as_ref().unwrap().exact.0, "0.6");
+    let old_evidence = data_pipeline_core::source_evidence_from_typed_raw(
+        &data_pipeline_core::typed_raw::TypedRawRow::PolymarketMarketMetadata(Box::new(
+            metadata.clone(),
+        )),
+        &serde_json::from_value(serde_json::json!("a".repeat(64))).unwrap(),
+        &serde_json::from_value(serde_json::json!("b".repeat(64))).unwrap(),
+    )
+    .unwrap();
+    let (_, context, _) =
+        data_pipeline_core::reduction::PolymarketMetadataReducer::from_identity_snapshot(
+            data_pipeline_core::reduction::PolymarketMetadataInputV1 {
+                row: metadata.clone(),
+                evidence: old_evidence,
+            },
+            "rule-v1",
+        )
+        .unwrap();
+    assert_eq!(
+        context
+            .assets
+            .iter()
+            .find(|a| a.asset.token_id.0 == "101")
+            .unwrap()
+            .asset
+            .outcome
+            .label,
+        "Up"
+    );
+    let source_evidence =
+        data_pipeline_core::public_reference::source_evidence_v3_from_typed_raw_v2(&row).unwrap();
+    let mut core = PublicObservationCoreV1::new(
+        serde_json::from_value(serde_json::json!({
+            "input_stream_id":"semantic-collector", "canonical_rule_version":"rule-v1",
+            "observation_version":"public-observation-v1", "ordering_version":"original-input-v1",
+            "input_scope":"constructed-finite", "max_pending_ws_terminals":2,
+            "initial_state":"Empty"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let discovery_row = row.clone();
+    let input = RecordedIngressV1 {
+        input_stream_id: "semantic-collector".into(),
+        input_position: 0,
+        ingress: DptIngressV1::Message {
+            row,
+            source_evidence,
+        },
+        dependency_record_refs: vec![],
+    };
+    let prepared = prepare_public_ingress_v1(&core, &input, &Default::default(), &[]).unwrap();
+    let applied = core.push(&prepared).unwrap();
+    let obs = &applied.applied.closed_groups.last().unwrap().observations[0];
+    let up = obs
+        .assets
+        .iter()
+        .find(|a| a.asset.token_id.0 == "101")
+        .unwrap();
+    assert_eq!(up.asset.outcome.label, "Up");
+    assert_eq!(up.asset.outcome.index, 0);
+    // 后续终态仍从同一SDK响应的token顺序推导winner，不能在DPT之后手工修正标签。
+    let identity = PendingPolymarketIdentity::from_discovered(&discovered.current).unwrap();
+    let mut pending = PendingPolymarketResolution::new(identity.clone(), None);
+    pending.in_flight_ordinal = Some(1);
+    let scheduled = pending.slot_utc_ms(1);
+    let mut terminal_payload = serde_json::to_value(&sdk).unwrap();
+    terminal_payload["closed"] = serde_json::json!(true);
+    terminal_payload["acceptingOrders"] = serde_json::json!(false);
+    terminal_payload["automaticallyResolved"] = serde_json::json!(true);
+    terminal_payload["umaResolutionStatus"] = serde_json::json!("resolved");
+    terminal_payload["closedTime"] = serde_json::json!(
+        ({
+            let value =
+                OffsetDateTime::from_unix_timestamp(identity.market_end_utc_ms / 1000).unwrap();
+            format!(
+                "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+                value.year(),
+                value.month() as u8,
+                value.day(),
+                value.hour(),
+                value.minute(),
+                value.second()
+            )
+        })
+    );
+    terminal_payload["outcomePrices"] = serde_json::json!("[\"0\",\"1\"]");
+    let mut terminal = polymarket_resolution_attempt_row(
+        &pending,
+        &GammaResolutionPollCompletion {
+            slug: identity.slug.clone(),
+            ordinal: 1,
+            scheduled_at_utc_ms: scheduled,
+            fetch_start_utc_ms: scheduled,
+            completed_at_utc_ms: scheduled + 10,
+            result: Ok(serde_json::from_value(terminal_payload).unwrap()),
+            raw_day_ticket: RawDayTicketAcceptance::Accepted(
+                accepted_raw_day_ticket_for_sync_test(scheduled + 10),
+            ),
+        },
+        &|| scheduled + 11,
+        false,
+        &CollectorIdentity {
+            host_id: "semantic-collector".into(),
+            region: "local".into(),
+        },
+    )
+    .unwrap();
+    assert_eq!(terminal.winning_asset_id.as_deref(), Some("101"));
+    complete_polymarket_terminal_transition(&mut terminal, scheduled + 12);
+    let terminal =
+        crate::polymarket_market_metadata_v6_layout::PolymarketMarketMetadataV6Row::Existing(
+            PolymarketMarketMetadataV5Row::from_common(terminal, None, None),
+        );
+    let mut terminal_event = polymarket_metadata_v6_raw_event(terminal).unwrap();
+    terminal_event.collector_admission = Some(RawEventAdmission {
+        sequence: 2,
+        time_utc_ms: scheduled + 13,
+    });
+    let terminal_row = raw_event_to_public_input(&terminal_event).unwrap().unwrap();
+    let source_evidence =
+        data_pipeline_core::public_reference::source_evidence_v3_from_typed_raw_v2(&terminal_row)
+            .unwrap();
+    let input = RecordedIngressV1 {
+        input_stream_id: "semantic-collector".into(),
+        input_position: 1,
+        ingress: DptIngressV1::Message {
+            row: terminal_row.clone(),
+            source_evidence,
+        },
+        dependency_record_refs: vec![],
+    };
+    let prepared = prepare_public_ingress_v1(&core, &input, &Default::default(), &[]).unwrap();
+    let applied = core.push(&prepared).unwrap();
+    let obs = &applied.applied.closed_groups.last().unwrap().observations[0];
+    let encoded = serde_json::to_value(obs.terminal.value.as_ref().unwrap()).unwrap();
+    assert_eq!(encoded["winning_asset_id"], "101");
+    assert_eq!(encoded["winning_outcome"], "Up");
+    // 同一正式SDK入口的采集产物同时供原生A/B及DPT持久回放使用，不另拼正确的后端值。
+    let fixture: Vec<TypedRawRowV2> = serde_json::from_str(include_str!(
+        "../../../../data-pipeline/core/tests/fixtures/gamma-reversed-sdk-metadata-v6.json"
+    ))
+    .unwrap();
+    assert_eq!(vec![discovery_row, terminal_row], fixture);
+}
