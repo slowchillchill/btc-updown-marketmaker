@@ -37,6 +37,7 @@ pub struct AccountInputRow {
     pub role: InputRole,
     pub slow: Vec<f32>,
     pub fast: Vec<f32>,
+    pub book_levels: crate::market::BookLevels,
     pub rule: [f32; 30],
     #[serde(skip)]
     pub action_context: Option<NativeActionContext>,
@@ -290,6 +291,7 @@ impl NativeInputRoot {
                     hidden_state_key: self.key(&id.0),
                     role,
                     fast: Vec::new(),
+                    book_levels: std::array::from_fn(|_| Vec::new()),
                     rule,
                     action_context: (role == InputRole::DecisionRequired).then(|| {
                         NativeActionContext::from_observation(
@@ -308,13 +310,14 @@ impl NativeInputRoot {
                 .iter()
                 .find(|f| &f.observation.market.condition_id == id)
                 .unwrap();
-            row.fast = crate::market::encode(
+            let (fast, book) = crate::market::encode(
                 frame.observation,
                 &row.rule,
                 now,
                 self.histories.entry(id.0.clone()).or_default(),
-            )
-            .to_vec();
+            );
+            row.fast = fast.to_vec();
+            row.book_levels = book;
         }
         self.reset = true;
         for op in &pre {

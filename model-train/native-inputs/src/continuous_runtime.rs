@@ -592,12 +592,16 @@ impl ThreeRuntime {
                     );
                 }
             }
+            let (depth, book, book_mask) =
+                crate::pad_books(active.iter().map(|(_, r)| &r.book_levels));
             let state_started = std::time::Instant::now();
             let output = self
                 .state
                 .run(ort::inputs![
-                    "fast_features" => Tensor::from_array(([batch,836],fast)).unwrap(),
+                    "fast_features" => Tensor::from_array(([batch,596],fast)).unwrap(),
                     "slow_features" => Tensor::from_array(([batch,433],slow)).unwrap(),
+                    "book_levels" => Tensor::from_array(([batch,6,depth,9],book)).unwrap(),
+                    "book_mask" => Tensor::from_array(([batch,6,depth],book_mask)).unwrap(),
                     "h_prev" => Tensor::from_array(([self.layers,batch,self.width],h)).unwrap()
                 ])
                 .unwrap();

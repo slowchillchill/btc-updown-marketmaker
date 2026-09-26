@@ -106,43 +106,37 @@ def cancel_slices(pair_count=0, removed_a=False):
 
 def market_slice(step=0):
     """抽象数值探针：手填锚点、中价历史与静态盘口，用于图数值比较，不代表原生市场事实。"""
-    r=Row(836,"#6 市场/规则完整布局及37维参考表")
+    r=Row(596,"#6 市场/规则完整布局及37维参考表")
     age=log_value(step)
     r.put(0,1,"适用Chainlink现货参考");r.put(5,1,"OfficialAnchor")
     for i in (7,14):r.put(i,log_value(60000),"同价正式锚点/现货USD/BTC",60000)
     for i in (11,12,15,19,20,36):r.put(i,1,"参考/现货/判定距离存在")
     for i in (8,9,16,17):r.put(i,age,"直接原事实年龄",step)
-    for base,pm in ((37,True),(155,True),(273,False)):
+    for base,pm in ((37,True),(75,True),(113,False)):
         r.put(base,1,"Fresh公共盘口")
         for side in (0,1):
-            o=base+6+56*side
+            o=base+6+16*side
             r.put(o,1,"侧数量已知");r.put(o+1,log_value(1),"正数量价位1")
             r.put(o+2,log_value(100),"全侧量100")
             for j in (5,6,7,8):r.put(o+j,age,"同一直接价位事实年龄",step)
             for j in (11,12,13):r.put(o+j,1,"直接时间已知比例")
-            price=Decimal('0.4') if side==0 else Decimal('0.6')
-            value=2*float(price)-1 if pm else log_value(59999 if side==0 else 60001)
-            r.put(o+14,value,"唯一已知价位",price if pm else (59999 if side==0 else 60001))
-            r.put(o+15,log_value(100),"该价位量",100);r.put(o+16,1,"档位存在")
-            for j in (17,18):r.put(o+j,age,"该价位原锚点年龄",step)
-            for j in (20,21):r.put(o+j,1,"原时间存在")
-    for base in (391,419):
+    for base in (151,179):
         for j in (0,6):r.put(base+j,1,"Fresh直接BBA存在")
         for o,p in ((7,Decimal('.4')),(14,Decimal('.6')),(21,Decimal('.2'))):
             r.put(base+o,log_value(p) if o==21 else 2*float(p)-1,"直接BBA买/卖/价差",p)
             for j in (1,5,6):r.put(base+o+j,1,"值/原时间存在")
             for j in (2,3):r.put(base+o+j,age,"BBA原事实年龄",step)
-    for base in (447,465,483):r.put(base+3,1,"最近完整成交UnknownNotObserved")
+    for base in (207,225,243):r.put(base+3,1,"最近完整成交UnknownNotObserved")
     # 本组恰一条Chainlink现货；无成交，其他组统计全零。
-    r.put(575+12,log_value(1),"本组Chainlink现货事实1条")
-    for i in (575+23+2*9+6,575+23+2*9+7,575+23+2*9+8):r.put(i,1,"该原事实直接时间比例")
-    r.put(679,log_value(60+step),"市场开始后秒数",60+step)
-    r.put(680,log_value(240-step),"距市场结束秒数",240-step)
-    for i in (681,687,690,702,708,709,710,721,731,732):r.put(i,1,"Fresh/Active/交易状态真实值与存在")
-    r.put(742+3,1,"判定UnknownNotObserved")
+    r.put(335+12,log_value(1),"本组Chainlink现货事实1条")
+    for i in (335+23+2*9+6,335+23+2*9+7,335+23+2*9+8):r.put(i,1,"该原事实直接时间比例")
+    r.put(439,log_value(60+step),"市场开始后秒数",60+step)
+    r.put(440,log_value(240-step),"距市场结束秒数",240-step)
+    for i in (441,447,450,462,468,469,470,481,491,492):r.put(i,1,"Fresh/Active/交易状态真实值与存在")
+    r.put(502+3,1,"判定UnknownNotObserved")
     for block in range(6):
         # 三中价和Chainlink各仅一个实际消费样本；未观测TWAP无样本。
-        if block<4:r.put(782+4*block,1/16,"已消费1个价格样本")
+        if block<4:r.put(542+4*block,1/16,"已消费1个价格样本")
     q=Row(30,"#6 H规则：两腿tick .01、LIMIT 5、BUY最低1、delay启用1秒、费率.07指数1仅Taker")
     for o in (0,7):
         q.put(o,log_value('.01'),"当前tick",'.01');q.put(o+1,1,"tick存在")
@@ -151,7 +145,7 @@ def market_slice(step=0):
     for o,v in ((14,5),(16,1),(20,1),(24,'.07'),(26,1)):
         q.put(o,log_value(v),"有效分类下限/延迟秒/费率/指数",v);q.put(o+1,1,"原值存在")
     for o in (18,19,22,23,28,29):q.put(o,1,"delay/fees/takerOnly真实true及存在")
-    for i in range(30):r.put(806+i,q.values[i],q.trace[i]['meaning'],q.trace[i].get('raw'))
+    for i in range(30):r.put(566+i,q.values[i],q.trace[i]['meaning'],q.trace[i].get('raw'))
     return r,q
 
 
@@ -193,3 +187,20 @@ def paired_gtc_prefixes(batch=1):
     p[:, 39] = -.6; p[:, 41] = 1
     snapshot(5, 1)  # Price B评分前；A原报价0.2
     return result
+
+
+def book_fixture(batch=1, depth=1, step=0):
+    """有限图数值探针；精确距离先算再投影，BN无逐档时间。"""
+    rows = []
+    for side in range(6):
+        levels = []
+        for index in range(depth):
+            distance = Decimal('0.0001' if side < 4 else '0.01') * index
+            best = Decimal('.4' if side % 2 == 0 else '.6') if side < 4 else Decimal(59999 if side % 2 == 0 else 60001)
+            price = best + (-distance if side % 2 == 0 else distance)
+            time = [log_value(step), log_value(step), 0, 1, 1] if side < 4 else [0] * 5
+            levels.append([float(2 * price - 1) if side < 4 else log_value(price),
+                           log_value(100), 1, *time, log_value(distance)])
+        rows.append(levels)
+    from .book import pad_books
+    return pad_books([rows for _ in range(batch)], like=torch.empty(0))

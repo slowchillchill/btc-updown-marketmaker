@@ -7,7 +7,7 @@ import statistics
 import time
 import torch
 from .graphs import CONFIGURATIONS, TwoGraphs, encode_all, score_all, reduce_objects
-from .graph_fixtures import fixture
+from .graph_fixtures import fixture, book_fixture
 from .validate_graphs import session, call_ort, ACTION_INPUTS, sha
 
 
@@ -29,7 +29,7 @@ def main():
     with torch.no_grad():
         for pairs,removed in ((0,False),(1,True),(85,False),(86,True),(86,False)):
             fast,slow,rule,prefix,objects,mask=fixture(1,pairs,removed)
-            z,_=model.state(fast,slow,torch.zeros(config.layers,1,config.hidden))
+            z,_=model.state(fast,slow,*book_fixture(fast.shape[0]),torch.zeros(config.layers,1,config.hidden))
             n=objects.shape[1]; lengths=[256]*(n//256)+([n%256] if n%256 else [])
             cp=torch.zeros_like(prefix);cp[:,3]=cp[:,6]=cp[:,13]=1
             selected=mask & (objects[:,:,0]==1)

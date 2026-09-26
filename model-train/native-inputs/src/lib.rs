@@ -7,6 +7,7 @@ pub use action::{ActionError, CancelFamily, CancelScoreBlock, SelectedAction};
 mod cancel;
 pub mod exact;
 mod market;
+pub use market::{BookLevels, pad_books};
 pub mod prefix;
 mod root;
 mod values;
@@ -33,6 +34,9 @@ mod public_input_tests;
 
 #[cfg(test)]
 mod market_tests;
+
+#[cfg(test)]
+mod book_tests;
 
 #[cfg(test)]
 mod action_tests;

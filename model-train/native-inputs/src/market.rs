@@ -1,4 +1,4 @@
-//! #6 的 836/30 槽；只消费公共所选事实。有限历史不保存第二份盘口。
+//! #166 的 596/30 槽与六侧全量盘口；只消费公共所选事实。有限历史不保存第二份盘口。
 use crate::exact::{decimal, integer, ratio, round_f32, signed_log_f32 as log};
 use contracts::{economics::EconomicRational as R, *};
 use std::collections::VecDeque;
@@ -185,6 +185,8 @@ pub(crate) fn side(
     paths: Vec<String>,
     pm: bool,
     previous: &mut SidePrevious,
+    book: &mut Vec<[f32; 9]>,
+    bid: bool,
 ) -> Option<(R, Vec<DirectObservationAnchorV1>)> {
     out[5..14].copy_from_slice(&envelope(now, &a));
     let mut next = SidePrevious::default();
@@ -200,22 +202,25 @@ pub(crate) fn side(
             out[4] = 1.;
         }
         next.total = Some(total);
-        for (i, (p, q)) in levels.iter().take(5).enumerate() {
-            let offset = 14 + 8 * i;
-            out[offset] = price(p, pm);
-            out[offset + 1] = log(q);
-            out[offset + 2] = 1.;
+        for (i, (p, q)) in levels.iter().enumerate() {
+            let mut row = [0.; 9];
+            row[0] = price(p, pm);
+            row[1] = log(q);
+            row[2] = 1.;
             let aa: Vec<_> = a
                 .iter()
                 .copied()
                 .filter(|a| paths.get(i).is_some_and(|p| p == &a.field_path))
                 .collect();
-            out[offset + 3..offset + 8].copy_from_slice(&t5(now, one(&aa)));
+            row[3..8].copy_from_slice(&t5(now, one(&aa)));
+            let best = &levels[0].0;
+            row[8] = log(&if bid { best.sub(p) } else { p.sub(best) });
+            book.push(row);
             if i == 0 {
                 next.best = Some(p.clone());
                 if let Some(old) = &previous.best {
-                    out[54] = log(&p.sub(old));
-                    out[55] = 1.;
+                    out[14] = log(&p.sub(old));
+                    out[15] = 1.;
                 }
                 if !aa.is_empty() {
                     best_identity = Some((p.clone(), aa.into_iter().cloned().collect()));
@@ -680,8 +685,9 @@ pub(crate) fn encode(
     rule: &[f32; 30],
     now: i64,
     h: &mut MarketHistory,
-) -> [f32; 836] {
-    let mut out = [0.; 836];
+) -> ([f32; 596], BookLevels) {
+    let mut out = [0.; 596];
+    let mut book: BookLevels = std::array::from_fn(|_| Vec::new());
     reference(&mut out[..37], o, now);
     let mut samples: [Option<(R, Vec<DirectObservationAnchorV1>)>; 6] =
         std::array::from_fn(|_| None);
@@ -691,7 +697,7 @@ pub(crate) fn encode(
             .iter()
             .find(|a| a.asset.outcome.index as usize == i)
         {
-            let base = 37 + 118 * i;
+            let base = 37 + 38 * i;
             out[base..base + 6].copy_from_slice(&quality(a.bids.quality));
             for (j, f) in [&a.bids, &a.asks].into_iter().enumerate() {
                 let prefix = format!(
@@ -714,7 +720,7 @@ pub(crate) fn encode(
                     })
                     .unwrap_or_default();
                 side(
-                    &mut out[base + 6 + j * 56..base + 62 + j * 56],
+                    &mut out[base + 6 + j * 16..base + 22 + j * 16],
                     now,
                     levels.map(|v| {
                         v.iter()
@@ -730,19 +736,21 @@ pub(crate) fn encode(
                     paths,
                     true,
                     &mut h.sides[2 * i + j],
+                    &mut book[2 * i + j],
+                    j == 0,
                 );
             }
-            samples[i] = bba(&mut out[391 + 28 * i..419 + 28 * i], &a.best_bid_ask, now);
-            pm_trade(&mut out[447 + 18 * i..465 + 18 * i], &a.public_trade, now);
+            samples[i] = bba(&mut out[151 + 28 * i..179 + 28 * i], &a.best_bid_ask, now);
+            pm_trade(&mut out[207 + 18 * i..225 + 18 * i], &a.public_trade, now);
         }
     }
-    out[273..279].copy_from_slice(&quality(o.binance_depth.quality));
+    out[113..119].copy_from_slice(&quality(o.binance_depth.quality));
     // 当前公共 Binance 输出只有整本锚点，没有侧/档位关联；合法价量仍输入。
     // 不把整本时间复制给各档，也不为中价历史制造双侧样本身份。
     for j in 0..2 {
         let levels = visible(&o.binance_depth).map(|d| if j == 0 { &d.bids } else { &d.asks });
         side(
-            &mut out[279 + j * 56..335 + j * 56],
+            &mut out[119 + j * 16..135 + j * 16],
             now,
             levels.map(|v| {
                 v.iter()
@@ -753,6 +761,8 @@ pub(crate) fn encode(
             vec![],
             false,
             &mut h.sides[4 + j],
+            &mut book[4 + j],
+            j == 0,
         );
     }
     samples[3] = visible(&o.chainlink_spot).map(|v| {
@@ -782,12 +792,40 @@ pub(crate) fn encode(
                 .collect(),
         )
     });
-    binance_trade(&mut out[483..498], &o.binance_trade, now);
-    events(&mut out[498..679], o, now);
-    lifecycle(&mut out[679..782], o, now);
+    binance_trade(&mut out[243..258], &o.binance_trade, now);
+    events(&mut out[258..439], o, now);
+    lifecycle(&mut out[439..542], o, now);
     for (i, s) in samples.into_iter().enumerate() {
-        history(&mut out[782 + 4 * i..786 + 4 * i], &mut h.series[i], s, now);
+        history(&mut out[542 + 4 * i..546 + 4 * i], &mut h.series[i], s, now);
     }
-    out[806..].copy_from_slice(rule);
-    out
+    out[566..].copy_from_slice(rule);
+    (out, book)
+}
+
+/// 六侧唯一原生表示；长度由数组实际人口派生，不持久化补齐或长度副本。
+pub type BookLevels = [Vec<[f32; 9]>; 6];
+
+/// 独立根合批边界；全空使用物理 N=1，全部 mask=false。
+pub fn pad_books<'a>(
+    books: impl IntoIterator<Item = &'a BookLevels>,
+) -> (usize, Vec<f32>, Vec<bool>) {
+    let books: Vec<_> = books.into_iter().collect();
+    let depth = books
+        .iter()
+        .flat_map(|b| b.iter().map(Vec::len))
+        .max()
+        .unwrap_or(0)
+        .max(1);
+    let mut values = vec![0.; books.len() * 6 * depth * 9];
+    let mut mask = vec![false; books.len() * 6 * depth];
+    for (batch, book) in books.iter().enumerate() {
+        for (side, levels) in book.iter().enumerate() {
+            for (index, row) in levels.iter().enumerate() {
+                let slot = (batch * 6 + side) * depth + index;
+                values[slot * 9..(slot + 1) * 9].copy_from_slice(row);
+                mask[slot] = true;
+            }
+        }
+    }
+    (depth, values, mask)
 }

@@ -11,7 +11,8 @@ import onnx
 import onnxruntime as ort
 import torch
 from .graphs import CONFIGURATIONS, TwoGraphs, STATE_INPUTS, STATE_OUTPUTS, ACTION_INPUTS, ACTION_OUTPUTS, encode_all, score_all
-from .graph_fixtures import fixture, account_slice, cancel_slices, market_slice, paired_gtc_prefixes
+from .book import lower_pairwise_sum
+from .graph_fixtures import fixture, account_slice, cancel_slices, market_slice, paired_gtc_prefixes, book_fixture
 
 
 def sha(path):
@@ -82,20 +83,30 @@ def identities_for(pairs, removed):
 def export(model, config, directory):
     fast, slow, rule, prefix, objects, mask = fixture(2, 1, True)
     h = torch.zeros(config.layers, 2, config.hidden)
-    z = model.state(fast, slow, h)[0]
+    z = model.state(fast, slow, *book_fixture(fast.shape[0]), h)[0]
     B = torch.export.Dim('B', min=1)
     K = torch.export.Dim('K', min=1, max=256)
+    N = torch.export.Dim('N', min=1)
+    book, book_mask = book_fixture(2, depth=7)
     examples = (
-        (model.state, (fast, slow, h), STATE_INPUTS, STATE_OUTPUTS, ({0:B}, {0:B}, {1:B}), 'state_encoder'),
+        (model.state, (fast, slow, book, book_mask, h), STATE_INPUTS, STATE_OUTPUTS, ({0:B}, {0:B}, {0:B,2:N}, {0:B,2:N}, {1:B}), 'state_encoder'),
         (model.action, (z, rule, prefix, objects, mask, torch.zeros(2, 3*config.hidden//2), torch.zeros(2, dtype=torch.bool), torch.zeros(2, 9999)),
          ACTION_INPUTS, ACTION_OUTPUTS, ({0:B}, {0:B}, {0:B}, {0:B,1:K}, {0:B,1:K}, {0:B}, {0:B}, {0:B}), 'action_decoder'))
     metadata = {}
     for module, args, inputs, outputs, dynamic, name in examples:
         program = torch.onnx.export(module, args, dynamo=True, opset_version=18, optimize=True,
-            verify=True, report=True, artifacts_dir=str(directory), input_names=list(inputs),
+            verify=name != 'state_encoder', report=True, artifacts_dir=str(directory), input_names=list(inputs),
             output_names=list(outputs), dynamic_shapes=dynamic)
         path = directory/(name+'.onnx')
-        program.save(path, include_initializers=True, keep_initializers_as_inputs=False, external_data=True)
+        if name == 'state_encoder':
+            # 最终生产图为标准 Loop；verify 和后续三端比较只针对 lower 后的图。
+            graph = lower_pairwise_sum(program.model_proto)
+            onnx.save_model(graph, path, save_as_external_data=True, all_tensors_to_one_file=True,
+                            location=name + '.onnx.data', size_threshold=1024)
+            compare(module(*args), call_ort(session(path, 1), inputs)(*args),
+                    {'config': config.name, 'stage': 'exported_standard_loop'}, {})
+        else:
+            program.save(path, include_initializers=True, keep_initializers_as_inputs=False, external_data=True)
         graph = onnx.load(path, load_external_data=False)
         def spec(x):
             return {'name':x.name, 'type':x.type.tensor_type.elem_type,
@@ -118,8 +129,8 @@ def verify(model, config, graph_directory, threads):
             ho = hp.clone()
             # 固定张量独立递推，不代表70分钟连续公共业务帧。
             for step in range(12):
-                zp, hp = model.state(fast, slow, hp)
-                zo, ho = state(fast, slow, ho)
+                zp, hp = model.state(fast, slow, *book_fixture(fast.shape[0]), hp)
+                zo, ho = state(fast, slow, *book_fixture(fast.shape[0]), ho)
                 label = {'config':config.name, 'B':batch, 'N':2, 'step':step}
                 compare((zp, hp), (zo, ho), label, stats)
                 args = (rule, prefix, objects, mask, torch.zeros(batch, 3*config.hidden//2), torch.zeros(batch, dtype=torch.bool))
@@ -128,8 +139,8 @@ def verify(model, config, graph_directory, threads):
         for pairs, removed, mixed, empty_probe in ((0,False,False,True), (0,False,False,False), (1,True,False,False), (85,False,False,False), (86,True,False,False), (86,False,False,False), (86,True,True,False), (86,True,"market",False)):
             batch = 2 if mixed else 1
             fast, slow, rule, prefix, objects, mask = fixture(batch, pairs, removed, mixed=mixed, empty_probe=empty_probe)
-            zp, hp = model.state(fast, slow, torch.zeros(config.layers, batch, config.hidden))
-            zo, ho = state(fast, slow, torch.zeros_like(hp))
+            zp, hp = model.state(fast, slow, *book_fixture(fast.shape[0]), torch.zeros(config.layers, batch, config.hidden))
+            zo, ho = state(fast, slow, *book_fixture(fast.shape[0]), torch.zeros_like(hp))
             n = objects.shape[1]
             lengths = [256]*(n//256) + ([n%256] if n%256 else [])
             empty = empty_probe
@@ -168,11 +179,11 @@ def verify(model, config, graph_directory, threads):
         # 图接口的动态K不随宿主补齐消失；直接调用原图各合法K。
         for k in (1, 2, 128, 129, 255, 256):
             fast, slow, rule, prefix, objects, mask = fixture(2, 85)
-            z, _ = model.state(fast, slow, torch.zeros(config.layers, 2, config.hidden))
+            z, _ = model.state(fast, slow, *book_fixture(fast.shape[0]), torch.zeros(config.layers, 2, config.hidden))
             args = (z, rule, prefix, objects[:,:k], mask[:,:k], torch.zeros(2,3*config.hidden//2), torch.zeros(2,dtype=torch.bool))
             compare(model.action(*args), action(*args), {'config':config.name,'dynamic_K':k}, stats)
         fast, slow, rule, _, objects, mask = fixture(2)
-        z, _ = model.state(fast, slow, torch.zeros(config.layers, 2, config.hidden))
+        z, _ = model.state(fast, slow, *book_fixture(fast.shape[0]), torch.zeros(config.layers, 2, config.hidden))
         for step, prefix in enumerate(paired_gtc_prefixes(2)):
             args = (z, rule, prefix, objects, mask, torch.zeros(2,3*config.hidden//2), torch.zeros(2,dtype=torch.bool))
             compare(model.action(*args), action(*args), {'config':config.name,'paired_gtc_prefix':step}, stats)
@@ -200,7 +211,7 @@ def main():
         torch.save(model.state_dict(), weights)
     model.load_state_dict(torch.load(weights, weights_only=True, map_location='cpu'))
     schema = Path(__file__).resolve().parents[1] / 'native-inputs' / 'feature_schema.json'
-    result = {'input_contract_version': 'native_inputs_v4', 'feature_schema_sha256': sha(schema),
+    result = {'input_contract_version': 'native_inputs_v5', 'feature_schema_sha256': sha(schema),
         'configuration':c.__dict__, 'python':platform.python_version(),
         'versions':{n:importlib.metadata.version(n) for n in ('torch','onnx','onnxruntime','onnxscript','numpy')},
         'torch_backend':torch.__config__.show(), 'ort_build':ort.get_build_info(),

@@ -61,7 +61,7 @@ fn distant_depth_and_previous_unknown_are_not_trade_or_cross_gap_changes() {
     }
     // 同一个生产侧编码器的缺源读取，既有合法档位引用保持，前一帧未知不跨洞。
     let mut previous = super::market::SidePrevious::default();
-    let mut out = [0.; 56];
+    let mut out = [0.; 16];
     super::market::side(
         &mut out,
         0,
@@ -70,9 +70,21 @@ fn distant_depth_and_previous_unknown_are_not_trade_or_cross_gap_changes() {
         vec![],
         false,
         &mut previous,
+        &mut Vec::new(),
+        true,
     );
-    super::market::side(&mut [0.; 56], 1, None, vec![], vec![], false, &mut previous);
-    let mut restored = [0.; 56];
+    super::market::side(
+        &mut [0.; 16],
+        1,
+        None,
+        vec![],
+        vec![],
+        false,
+        &mut previous,
+        &mut Vec::new(),
+        true,
+    );
+    let mut restored = [0.; 16];
     super::market::side(
         &mut restored,
         2,
@@ -81,9 +93,11 @@ fn distant_depth_and_previous_unknown_are_not_trade_or_cross_gap_changes() {
         vec![],
         false,
         &mut previous,
+        &mut Vec::new(),
+        true,
     );
     assert_eq!(restored[4], 0.);
-    assert_eq!(restored[55], 0.);
+    assert_eq!(restored[15], 0.);
 }
 #[test]
 fn same_value_new_fact_appends_but_unrelated_group_does_not_and_history_is_sixteen() {
@@ -502,4 +516,29 @@ fn collected_sdk_reverse_order_replays_winner_and_native_a_b_without_label_infer
         );
     }
     execution.stop_and_drain().unwrap();
+}
+
+// 保留原 v4 的独立预期坐标，验证 v5 前五档可恢复旧240槽及其余596槽。
+// 仅测试使用；生产不能把 v4 向量补成 v5 全盘口。
+fn encode(
+    o: &MarketBusinessObservationV1,
+    rule: &[f32; 30],
+    now: i64,
+    h: &mut MarketHistory,
+) -> [f32; 836] {
+    let (fast, books) = super::market::encode(o, rule, now, h);
+    let starts = [57, 113, 175, 231, 293, 349];
+    let mut out = [0.; 836];
+    let mut target = 0;
+    let mut source = 0;
+    for (side, start) in starts.into_iter().enumerate() {
+        out[target..start].copy_from_slice(&fast[source..source + start - target]);
+        source += start - target;
+        for (index, row) in books[side].iter().take(5).enumerate() {
+            out[start + index * 8..start + (index + 1) * 8].copy_from_slice(&row[..8]);
+        }
+        target = start + 40;
+    }
+    out[target..].copy_from_slice(&fast[source..]);
+    out
 }

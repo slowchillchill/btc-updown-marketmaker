@@ -8,7 +8,7 @@ import time
 import torch
 import onnxruntime as ort
 from .graphs import CONFIGURATIONS, TwoGraphs, STATE_INPUTS, ACTION_INPUTS, object_blocks, reduce_objects, score_all
-from .graph_fixtures import fixture, paired_gtc_prefixes
+from .graph_fixtures import fixture, paired_gtc_prefixes, book_fixture
 from .validate_graphs import call_ort, session, sha, identities_for
 
 
@@ -25,10 +25,19 @@ def suite(config):
                  identities=identities_for(pairs, removed), mixed_market=mixed == 'market')
         for key, value in zip(('fast','slow','rule','prefix','objects','mask'), values):
             c[key] = value.flatten().tolist()
+        book, book_mask = book_fixture(batch)
+        c.update(book_levels=book.flatten().tolist(), book_mask=book_mask.flatten().tolist(), depth=book.shape[2])
         cases.append(c)
         return c
     for b in (1,2,3):
         add(f'recurrent-B{b}', 'recurrent', b, steps=12)
+    for depth in (0,7,8,257,1001):
+        c = add(f'book-depth{depth}', 'recurrent', 2, steps=3)
+        book, mask = book_fixture(2, depth)
+        if depth > 7:
+            mask[0,:,7:] = False
+            book[0,:,7:] = 0
+        c.update(book_levels=book.flatten().tolist(), book_mask=mask.flatten().tolist(), depth=book.shape[2])
     for pairs, removed, mixed in ((0,False,False),(1,True,False),(85,False,False),(86,True,False),(86,False,False),(86,True,True)):
         add(f'objects-P{pairs}-removed{int(removed)}-mixed{int(mixed)}','objects',2 if mixed else 1,pairs,removed,mixed)
     add("empty-graph-probe", "objects", 1, 0, False, empty_probe=True)
@@ -46,11 +55,13 @@ def trace(state, action, config, data):
     for c in data['cases']:
         b, n, d = c['batch'], c['slots'], config.hidden // 2
         f,s,r,p,x,m = [torch.tensor(c[k],dtype=torch.bool if k=='mask' else torch.float32).reshape(shape)
-            for k,shape in zip(('fast','slow','rule','prefix','objects','mask'),((b,836),(b,433),(b,30),(b,60),(b,n,184),(b,n)))]
+            for k,shape in zip(('fast','slow','rule','prefix','objects','mask'),((b,596),(b,433),(b,30),(b,60),(b,n,184),(b,n)))]
+        book = torch.tensor(c["book_levels"]).reshape(b,6,c["depth"],9)
+        book_mask = torch.tensor(c["book_mask"],dtype=torch.bool).reshape(b,6,c["depth"])
         h = torch.zeros(config.layers,b,config.hidden)
         zero, absent = torch.zeros(b,3*d), torch.zeros(b,dtype=torch.bool)
         for step in range(c['steps']):
-            z,h = state(f,s,h)
+            z,h = state(f,s,book,book_mask,h)
             yield f"{c['name']}/state{step}",(z,h)
             if c['mode'] == 'objects':
                 for split,lengths in enumerate(c['splits']):
@@ -113,7 +124,9 @@ def main():
     model=TwoGraphs(config).eval();model.load_state_dict(torch.load(args.graphs/'initial_weights.pt',weights_only=True,map_location='cpu'))
     state=call_ort(session(args.graphs/'state_encoder.onnx',args.threads),STATE_INPUTS)
     action=call_ort(session(args.graphs/'action_decoder.onnx',args.threads),ACTION_INPUTS)
-    stats=dict(config=config.name,threads=args.threads,comparisons=0,max_absolute_error=0.,cases=len(data['cases']))
+    stats=dict(input_contract_version='native_inputs_v5',
+        feature_schema_sha256=sha(Path(__file__).resolve().parents[1]/'native-inputs/feature_schema.json'),
+        config=config.name,threads=args.threads,comparisons=0,max_absolute_error=0.,cases=len(data['cases']))
     split_records={}
     with raw.open() as stream,torch.no_grad():
         metadata=json.loads(next(stream))

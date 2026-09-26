@@ -728,9 +728,12 @@ async fn three_runtime_buy_case(case: u8) {
                 row.hidden_state_key.condition_id,
                 g.rows[0].hidden_state_key.condition_id
             );
+            let (depth, book, book_mask) = crate::pad_books([&row.book_levels]);
             let outputs=state_graph.run(ort::inputs![
-                "fast_features"=>ort::value::Tensor::from_array(([1,836],row.fast.clone())).unwrap(),
+                "fast_features"=>ort::value::Tensor::from_array(([1,596],row.fast.clone())).unwrap(),
                 "slow_features"=>ort::value::Tensor::from_array(([1,433],row.slow.clone())).unwrap(),
+                "book_levels" => ort::value::Tensor::from_array(([1,6,depth,9],book)).unwrap(),
+                "book_mask" => ort::value::Tensor::from_array(([1,6,depth],book_mask)).unwrap(),
                 "h_prev"=>ort::value::Tensor::from_array(([layers,1,hidden],hidden_state)).unwrap()
             ]).unwrap();
             z = outputs["z_t"]
@@ -1431,7 +1434,7 @@ fn python_features_consumes_real_native_groups_with_the_original_public_shape() 
                 let row = row.unwrap();
                 assert!(!row.contains("action_context").unwrap());
                 assert_eq!(row.get_item("slow").unwrap().len().unwrap(), 433);
-                assert_eq!(row.get_item("fast").unwrap().len().unwrap(), 836);
+                assert_eq!(row.get_item("fast").unwrap().len().unwrap(), 596);
             }
         });
         groups += 1;
@@ -1514,7 +1517,7 @@ async fn model_selects_low_limit_quantity_and_platform_refusal_releases_original
                     ))
                 );
                 assert_eq!(group.rows[0].rule[15], 1.);
-                assert_eq!(&group.rows[0].fast[806..836], &group.rows[0].rule);
+                assert_eq!(&group.rows[0].fast[566..596], &group.rows[0].rule);
                 let mut actor = NativeActor::new(group, 0).unwrap();
                 actor.choose(2).unwrap();
                 while actor.state.stage == Stage::QuantityBranch {

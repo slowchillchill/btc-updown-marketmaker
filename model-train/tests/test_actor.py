@@ -2,7 +2,7 @@ import unittest
 import torch
 from model_train.actor import conditional_choice
 from model_train.graphs import CONFIGURATIONS, TwoGraphs
-from model_train.graph_fixtures import fixture
+from model_train.graph_fixtures import fixture, book_fixture
 
 
 class ActorTests(unittest.TestCase):
@@ -35,7 +35,7 @@ class ActorTests(unittest.TestCase):
         torch.set_num_threads(1)
         model=TwoGraphs(CONFIGURATIONS[2])
         fast,slow,rule,prefix,objects,mask=fixture(2,1,True)
-        z,_=model.state(fast,slow,torch.zeros(1,2,256))
+        z,_=model.state(fast,slow,*book_fixture(fast.shape[0]),torch.zeros(1,2,256))
         args=(z,rule,prefix,objects,mask,torch.zeros(2,384),torch.zeros(2,dtype=torch.bool))
         zero=model.action(*args,torch.zeros(2,9999))
         fee=torch.zeros(2,9999);fee[0,0]=.75;fee[0,1]=1.25
