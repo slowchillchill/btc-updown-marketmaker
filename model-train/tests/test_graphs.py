@@ -4,7 +4,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from model_train.graphs import CONFIGURATIONS, TwoGraphs, reduce_objects, encode_all, score_all, active_rows
-from model_train.graph_fixtures import fixture, cancel_slices, account_slice
+from model_train.graph_fixtures import fixture, cancel_slices, account_slice, book_fixture
 
 
 def norm(x, p, name):
@@ -24,7 +24,7 @@ class GraphTests(unittest.TestCase):
     def test_action_against_independent_primitives_and_no_gru(self):
         model=TwoGraphs(CONFIGURATIONS[2]).eval();p=dict(model.action.named_parameters())
         fast,slow,rule,prefix,objects,mask=fixture(2,1,True)
-        z,h=model.state(fast,slow,torch.zeros(1,2,256));saved=h.clone()
+        z,h=model.state(fast,slow,*book_fixture(fast.shape[0]),torch.zeros(1,2,256));saved=h.clone()
         calls=[]
         handles=[m.register_forward_hook(lambda *args:calls.append(1)) for m in model.modules() if isinstance(m,nn.GRU)]
         reduced,exists=encode_all(model.action,z,rule,objects,mask,[1,1],empty=False)
@@ -57,7 +57,7 @@ class GraphTests(unittest.TestCase):
     def test_two_paths_to_shared_object_encoder_and_split_gradients(self):
         model=TwoGraphs(CONFIGURATIONS[2]).eval()
         fast,slow,rule,prefix,objects,mask=fixture(1,1,False)
-        with torch.no_grad():z,_=model.state(fast,slow,torch.zeros(1,1,256))
+        with torch.no_grad():z,_=model.state(fast,slow,*book_fixture(fast.shape[0]),torch.zeros(1,1,256))
         grads=[]
         for lengths in ([4],[1,3]):
             model.zero_grad()
@@ -70,7 +70,7 @@ class GraphTests(unittest.TestCase):
         # 真实N259、合法Single A/B两类；隔离直接路径并比较三种块划分。
         fast,slow,rule,prefix,objects,mask=fixture(1,86,False)
         with torch.no_grad():
-            z,_=model.state(fast,slow,torch.zeros(1,1,256))
+            z,_=model.state(fast,slow,*book_fixture(fast.shape[0]),torch.zeros(1,1,256))
         prefix = torch.zeros_like(prefix)
         prefix[:,3] = 1; prefix[:,6] = 1; prefix[:,13] = 1
         singles = mask & (objects[:,:,0] == 1)
@@ -90,7 +90,7 @@ class GraphTests(unittest.TestCase):
 
     def test_empty_summary_mask_and_active_rows(self):
         model=TwoGraphs(CONFIGURATIONS[2]).eval();fast,slow,rule,prefix,objects,mask=fixture(2,empty_probe=True)
-        z,h=model.state(fast,slow,torch.zeros(1,2,256))
+        z,h=model.state(fast,slow,*book_fixture(fast.shape[0]),torch.zeros(1,2,256))
         reduced,exists=encode_all(model.action,z,rule,objects,mask,[1],empty=True)
         self.assertFalse(exists.any());self.assertEqual(reduced.count_nonzero(),0)
         with torch.no_grad():model.action.summary[-1].bias.fill_(99)
@@ -128,6 +128,6 @@ class GraphTests(unittest.TestCase):
         self.assertEqual(slow[382:388],[0]*6) # 空订单年龄不适用
         self.assertEqual(slow[394:400],[0]*6)
         fast,slow,rule,*_=fixture()
-        torch.testing.assert_close(fast[:,806:],rule,atol=0,rtol=0)
+        torch.testing.assert_close(fast[:,566:],rule,atol=0,rtol=0)
 
 if __name__=='__main__':unittest.main()

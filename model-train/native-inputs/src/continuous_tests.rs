@@ -864,7 +864,7 @@ impl ContinuousRoot {
                 );
                 assert_eq!(row.rule[0], signed_log_f32(&ratio(1, 100)));
                 assert_eq!(row.rule[7], signed_log_f32(&ratio(1, 1000)));
-                assert_eq!(&row.fast[806..], row.rule.as_slice());
+                assert_eq!(&row.fast[566..], row.rule.as_slice());
                 self.checks
                     .insert("same-value-official-and-real-different-ticks");
             }

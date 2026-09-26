@@ -1,9 +1,10 @@
-"""原生836/433状态输入与30/60/184参数组件消费；不推导动作支持集。"""
+"""原生596/433与六侧全量盘口状态输入与30/60/184参数组件消费；不推导动作支持集。"""
 from dataclasses import dataclass
 
 import torch
 from torch import Tensor
 from .graphs import TwoGraphs, object_blocks, reduce_objects
+from .book import pad_books
 
 
 def hidden_key(value: dict) -> tuple:
@@ -37,8 +38,7 @@ class NativeComponentConsumer:
             elif kind == "InitializeZero":
                 key = hidden_key(value["hidden_state_key"])
                 state = self.graphs.state
-                layers = len(state.grus) if hasattr(state, "grus") else state.gru.num_layers
-                hidden = state.grus[0].hidden_size if hasattr(state, "grus") else state.gru.hidden_size
+                layers, hidden = state.layers, state.hidden_size
                 self.hidden[key] = parameter.new_zeros((layers, 1, hidden))
             elif kind == "Retire":
                 del self.hidden[hidden_key(value["hidden_state_key"])]
@@ -60,7 +60,8 @@ class NativeComponentConsumer:
             keys = [hidden_key(row["hidden_state_key"]) for _, row in active]
             fast = parameter.new_tensor([row["fast"] for _, row in active])
             slow = parameter.new_tensor([row["slow"] for _, row in active])
-            z, next_hidden = self.graphs.state(fast, slow, torch.cat([self.hidden[k] for k in keys], dim=1))
+            book, mask = pad_books([row["book_levels"] for _, row in active], like=parameter)
+            z, next_hidden = self.graphs.state(fast, slow, book, mask, torch.cat([self.hidden[k] for k in keys], dim=1))
             for batch, ((index, _), key) in enumerate(zip(active, keys)):
                 # 独立存储避免小的活跃行通过view保留整个历史批次。
                 self.hidden[key] = next_hidden[:, batch:batch + 1].clone()

@@ -168,6 +168,7 @@ impl PythonGroup {
             )?;
             item.set_item("slow", &row.slow)?;
             item.set_item("fast", &row.fast)?;
+            item.set_item("book_levels", &row.book_levels)?;
             item.set_item("rule", row.rule.as_slice())?;
             rows.append(item)?;
         }

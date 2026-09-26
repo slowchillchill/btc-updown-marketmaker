@@ -901,9 +901,12 @@ async fn same_process_cancel_actor_all_objects_and_original_identities() {
     let mut frame = 0;
     for group in history.iter().chain(std::iter::once(&g)) {
         for row in &group.rows {
+            let (depth, book, book_mask) = crate::pad_books([&row.book_levels]);
             let output = state.run(ort::inputs![
-                "fast_features" => ort::value::Tensor::from_array(([1,836], row.fast.clone())).unwrap(),
+                "fast_features" => ort::value::Tensor::from_array(([1,596], row.fast.clone())).unwrap(),
                 "slow_features" => ort::value::Tensor::from_array(([1,433], row.slow.clone())).unwrap(),
+                "book_levels" => ort::value::Tensor::from_array(([1,6,depth,9],book)).unwrap(),
+                "book_mask" => ort::value::Tensor::from_array(([1,6,depth],book_mask)).unwrap(),
                 "h_prev" => ort::value::Tensor::from_array(([layers,1,hidden], h_prev)).unwrap()
             ]).unwrap();
             z = output["z_t"]
@@ -1161,9 +1164,12 @@ fn continue_three_runtime(
     assert_eq!(traces.len(), group.rows.len());
     let mut decision_index = 0;
     for (row_index, row) in group.rows.iter().enumerate() {
+        let (depth, book, book_mask) = crate::pad_books([&row.book_levels]);
         let output = state.run(ort::inputs![
-            "fast_features" => ort::value::Tensor::from_array(([1,836],row.fast.clone())).unwrap(),
+            "fast_features" => ort::value::Tensor::from_array(([1,596],row.fast.clone())).unwrap(),
             "slow_features" => ort::value::Tensor::from_array(([1,433],row.slow.clone())).unwrap(),
+            "book_levels" => ort::value::Tensor::from_array(([1,6,depth,9],book)).unwrap(),
+            "book_mask" => ort::value::Tensor::from_array(([1,6,depth],book_mask)).unwrap(),
             "h_prev" => ort::value::Tensor::from_array(([layers,1,hidden],previous_hidden.clone())).unwrap()
         ]).unwrap();
         let z = output["z_t"]

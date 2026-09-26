@@ -1,13 +1,15 @@
 {
-  "contract": "https://github.com/slowchillchill/btc-updown-marketmaker/issues/6",
+  "contract": "https://github.com/slowchillchill/btc-updown-marketmaker/issues/166",
   "implementation": "native-inputs/src/market.rs; native-inputs/src/prefix.rs; native-inputs/src/root.rs",
   "widths": {
-    "fast": 836,
+    "fast": 596,
     "slow": 433,
     "rule": 30,
     "prefix": 60,
     "cancel": 184,
-    "price_fee_features": 9999
+    "price_fee_features": 9999,
+    "book_level": 9,
+    "book_summary": 576
   },
   "authority": "MarketBusinessObservationV1 + same-frame PublicTradingRuleContextV1 + TrustedGroupDecisionCutoffV1 + frozen ActionBeforeReadV2; prefix from Rust PrefixState + same frozen SealedProcessRuleSnapshotV3 Arc",
   "numeric": {
@@ -51,25 +53,6 @@
       "value_present",
       "T5"
     ],
-    "book118": {
-      "source": "PM assets[index 0/1].bids/asks; Binance binance_depth",
-      "layout": [
-        "Q6",
-        "bid_side56",
-        "ask_side56"
-      ],
-      "side56": {
-        "0": "known",
-        "1": "L positive levels",
-        "2": "L full-side quantity",
-        "3-4": "S quantity change from immediately previous frame; present",
-        "5-13": "E9 actual side-associated direct anchors",
-        "14-53": "five positive levels, each [price, L quantity, present,T5]",
-        "54-55": "S best-price change from immediately previous frame; present"
-      },
-      "units": "PM pUSD/share, shares; Binance USDT/BTC, BTC",
-      "Binance_time": "Current source exposes whole-book anchors only: level T5 unknown, side E9 empty, no midpoint history samples. Whole-book direct time remains event evidence."
-    },
     "bba28": [
       "Q6",
       "whole_present",
@@ -210,6 +193,24 @@
       "21-23": "L(n/100),quantity applicable,selected",
       "24-41": "A variant4/applicable/selected; post_only2/applicable/selected; lifetime3/applicable/selected; phi(k*tick)/applicable/selected",
       "42-59": "same fields for actual B leg"
+    },
+    "book38": {
+      "source": "PM assets[index 0/1].bids/asks; Binance binance_depth",
+      "layout": [
+        "Q6",
+        "bid_side16",
+        "ask_side16"
+      ],
+      "units": "PM pUSD/share, shares; Binance USDT/BTC, BTC",
+      "Binance_time": "Current source exposes whole-book anchors only: level T5 unknown, side E9 empty, no midpoint history samples. Whole-book direct time remains event evidence.",
+      "side16": {
+        "0": "known",
+        "1": "L positive levels",
+        "2": "L full-side quantity",
+        "3-4": "S quantity change from immediately previous frame; present",
+        "5-13": "E9 actual side-associated direct anchors",
+        "14-15": "S best-price change from immediately previous frame; present"
+      }
     }
   },
   "fast": [
@@ -221,91 +222,91 @@
     },
     {
       "start": 37,
-      "end": 154,
-      "layout": "book118",
+      "end": 74,
+      "layout": "book38",
       "source": "assets[A]"
     },
     {
-      "start": 155,
-      "end": 272,
-      "layout": "book118",
+      "start": 75,
+      "end": 112,
+      "layout": "book38",
       "source": "assets[B]"
     },
     {
-      "start": 273,
-      "end": 390,
-      "layout": "book118",
+      "start": 113,
+      "end": 150,
+      "layout": "book38",
       "source": "binance_depth"
     },
     {
-      "start": 391,
-      "end": 418,
+      "start": 151,
+      "end": 178,
       "layout": "bba28",
       "source": "assets[A].best_bid_ask"
     },
     {
-      "start": 419,
-      "end": 446,
+      "start": 179,
+      "end": 206,
       "layout": "bba28",
       "source": "assets[B].best_bid_ask"
     },
     {
-      "start": 447,
-      "end": 464,
+      "start": 207,
+      "end": 224,
       "layout": "pm_trade18",
       "source": "assets[A].public_trade"
     },
     {
-      "start": 465,
-      "end": 482,
+      "start": 225,
+      "end": 242,
       "layout": "pm_trade18",
       "source": "assets[B].public_trade"
     },
     {
-      "start": 483,
-      "end": 497,
+      "start": 243,
+      "end": 257,
       "layout": "binance_trade15",
       "source": "binance_trade"
     },
     {
-      "start": 498,
-      "end": 525,
+      "start": 258,
+      "end": 285,
       "layout": "pm_group28",
       "source": "group_events PM A"
     },
     {
-      "start": 526,
-      "end": 553,
+      "start": 286,
+      "end": 313,
       "layout": "pm_group28",
       "source": "group_events PM B"
     },
     {
-      "start": 554,
-      "end": 574,
+      "start": 314,
+      "end": 334,
       "layout": "binance_group21",
       "source": "group_events Binance"
     },
     {
-      "start": 575,
-      "end": 678,
+      "start": 335,
+      "end": 438,
       "layout": "events104",
       "source": "group_events"
     },
     {
-      "start": 679,
-      "end": 781,
+      "start": 439,
+      "end": 541,
       "layout": "lifecycle103",
       "source": "market.window/lifecycle/active/closed/accepting_orders/terminal"
     },
     {
-      "start": 782,
-      "end": 805,
+      "start": 542,
+      "end": 565,
       "layout": "6*history4",
       "source": "PM A/B direct BBA midpoint; Binance L2 midpoint; spot/TWAP30/TWAP60"
     },
     {
-      "start": 806,
-      "end": 835,
+      "start": 566,
+      "end": 595,
       "layout": "rule30",
       "source": "same rule_features array"
     }
@@ -320,7 +321,7 @@
     "applicability": "current FOK/FAK Price(leg); illegal platform coordinate, other stage, LIMIT => 0",
     "decoder": "price_logits + bias-free signed Linear(H/2,1)(decoder) * price_fee_features"
   },
-  "input_contract_version": "native_inputs_v4",
+  "input_contract_version": "native_inputs_v5",
   "behavior_revision": "#162：原响应token关联、三态槽完整覆写、rule[14:16]使用真实冻结mos；模型支持正整数数量意图，不以平台最低份数设mask。FOK/FAK每腿原本金仍须至少1 pUSD；旧策略路径的概率重算保留原实现语义。",
   "pending_noe_record_count": {
     "indices": [
@@ -394,5 +395,37 @@
       17
     ],
     "account_offset": 415
+  },
+  "book_levels": {
+    "native": "每帧六个变长数组，来自同一冻结公共观测的全部可见正数量档；不持久化补齐或长度副本。",
+    "shape": "float32[B,6,N,9]；bool book_mask[B,6,N]，N为活动批次最大侧深度，全空物理N=1且全假。",
+    "sides": [
+      "PM A bid",
+      "PM A ask",
+      "PM B bid",
+      "PM B ask",
+      "Binance bid",
+      "Binance ask"
+    ],
+    "order": "买侧价格降序，卖侧价格升序；沿公共观测顺序，不重采样，不设置top-N。",
+    "coordinates": [
+      "PM phi(price) / Binance L(price)",
+      "L(quantity)",
+      "level_present",
+      "S((C-S)/1000)",
+      "S((C-R)/1000)",
+      "S((R-S)/1000)",
+      "source_present",
+      "received_present",
+      "L(distance_from_same_side_best)"
+    ],
+    "distance": "买侧best−price、卖侧price−best，先在精确有理数域相减，再log1p投影；PM单位1 pUSD/份，Binance单位1 USDT/BTC。此关联坐标不保证任意浮点无碰撞。",
+    "time": "PM使用该价格所选数量事实的唯一直接锚点；BN当前无逐档锚点，T5五槽为零，不复制整本时间。",
+    "known_empty": "真实档位与补齐由mask区分；已知空侧和未知侧由fast中的known及Q6区分。",
+    "encoder": "PM四侧共享9→32→32（SiLU），BN两侧另共享同结构；仿射末轴固定f32加法树。",
+    "reduction": "每侧sum/mean/max顺序拼接96维，六侧576维。sum沿N相邻配对f32加法，奇尾保留，直到一项；导出为标准ONNX Loop。计数int64，mean转f32相除。mask=false不参与；max负值保留、并列梯度只向首项，全空三组有限零。",
+    "fusion": "MAIN原市场编码器输入concat(fast596,book576)=1172，账户433，原门控/残差GRU保持；BASELINE concat(fast596,book576,slow433)=1605经原LN/Linear256/SiLU接裸GRU。",
+    "initialization": "每配置原种子；注册原递推核心（新宽度）、PM编码器、BN编码器、原参数图。复用标准初始化，保存新的v5权重。",
+    "migration": "旧240槽半开区间[57,97)、[113,153)、[175,215)、[231,271)、[293,333)、[349,389)移到前八维；其余596按原序。旧v4向量无深档，须从原公共材料按cutoff重放；旧权重/hidden不重标，按原初始化与预热重建。"
   }
 }

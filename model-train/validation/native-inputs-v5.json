@@ -1,0 +1,1181 @@
+{
+  "issue": "https://github.com/slowchillchill/btc-updown-marketmaker/issues/166",
+  "input_contract_version": "native_inputs_v5",
+  "feature_schema_sha256": "6d1e57d5288879af31b11b92c0353b39d8518d7c10623955c924323b5e60d416",
+  "baseline_commit": "9361a4ee10e94a7cc11d225f0eef1750cecbe855",
+  "scope": "本次新增全量盘口的有限工程验收。纯图数值、实际原生链和资源各自报告，不将原语、构造或旧版本结果代替本次完整覆盖。模型、大输出与日志仅在忽略目录；本文件保存结论、来源和哈希。",
+  "environment": {
+    "python": "3.13.15",
+    "uv": "0.12.9",
+    "torch": "2.11.0+cpu",
+    "onnx": "1.22.0",
+    "onnxruntime": "1.28.0",
+    "onnxscript": "0.7.1",
+    "numpy": "2.5.3",
+    "provider": "CPUExecutionProvider",
+    "onnx_opset": 18,
+    "loop_schema_version": 16,
+    "ort_api": 27
+  },
+  "numeric_criterion": "每元素 abs(actual-PyTorch) <= 1e-5 + 1e-4*abs(PyTorch)，两端都必须有限；原选择/行映射/实际支持与最终意图严格相等。max_absolute_error只是观测，不单独与atol比较。每端独立递推自己的全部层hidden。",
+  "representation_checks": [
+    "tests/test_book.py：受控非线性权重区分两份257档盘口，保持前五档、档数、总量及价序；仅第6/257档的1与1000份互换。六侧第257档数量梯度和PM直接时间梯度非零。",
+    "Binance 100000.00/100000.01具有相同f32价格投影；精确距离后log1p与非线性价量关联产生稳定差异。删掉第九坐标则受控输出完全一致。",
+    "已知空/未知由真实native fast known/Q6区分；BN逐档T5全未知；原market_tests覆盖部分来源时间缺失、负年龄与多锚点。",
+    "负max保留、并列只向首项传播梯度、全空有限零；相同7档单独与补到257档的表示和梯度精确相等。",
+    "动态标准ONNX归约原语 B=1/2/3、N=1/7/8/257/1001/4096，含正负抵消和空侧，PyTorch与PythonORT逐值相等；原语不冒称Rust完整图验收。"
+  ],
+  "layout_comparison": {
+    "method": "在基线提交独立归档中运行原market encoder；只加入同一合法公共夹具的生成/导出测试，不修改旧生产编码。新旧同帧逐f32位比较。market_tests中保留旧坐标的重构帮助函数仅延续原预期断言，不作为此独立基线证据。",
+    "compare_entry": "tests/compare_v4_layout.py",
+    "results": [
+      {
+        "fixture": "groups",
+        "rows": 7,
+        "retained_596_bit_equal": true,
+        "restored_240_bit_equal": true
+      },
+      {
+        "fixture": "overlap",
+        "rows": 5,
+        "retained_596_bit_equal": true,
+        "restored_240_bit_equal": true
+      },
+      {
+        "fixture": "book-groups",
+        "rows": 7,
+        "retained_596_bit_equal": true,
+        "restored_240_bit_equal": true
+      }
+    ],
+    "fixtures": {
+      "v4-groups.json": {
+        "path": "artifacts/issue-166/v4-groups.json",
+        "sha256": "98b352d7d2b6f66897e47b01357c2a21ffc3b5f2587c3e1eb1d9f2c4ae42af8e"
+      },
+      "v5-groups.json": {
+        "path": "artifacts/issue-166/v5-groups.json",
+        "sha256": "156f68f7d59db6e8cd344f58c7b29ac742f042670cd322aff9a11febc4b7330d"
+      },
+      "v4-overlap.json": {
+        "path": "artifacts/issue-166/v4-overlap.json",
+        "sha256": "b2243a4de8cde91b784d36c1ea3fd894eeebb89b88534c5cb2d2e7e6a4bf9233"
+      },
+      "v5-overlap.json": {
+        "path": "artifacts/issue-166/v5-overlap.json",
+        "sha256": "242dbc37aded79cf46f79bedc5eed6092d3496fc8b8f19cfa16b67e6caf33b17"
+      },
+      "v4-book-groups.json": {
+        "path": "artifacts/issue-166/v4-book-groups.json",
+        "sha256": "420f575c1bf809a8b2cce4fa54c4dcdda7177f0fe353fdf7d905ec7e02cb328f"
+      },
+      "book-groups.json": {
+        "path": "artifacts/issue-166/book-groups.json",
+        "sha256": "236a3c7a3e1293288cdf28d59ab380ff66a2709ea22824fbdba6bb20871c949f"
+      }
+    },
+    "reproduce": "在基线归档仅复制book_tests.rs的合法公共录制和root构造、consume导出循环，使exported_group对测试可见；对相同输入生成旧/新JSON，再运行 python tests/compare_v4_layout.py <v4.json> <v5.json>。"
+  },
+  "construction": {
+    "count": 27,
+    "MAIN_layers": [
+      1,
+      2,
+      3,
+      10,
+      20,
+      30
+    ],
+    "MAIN_hidden": [
+      256,
+      512,
+      768,
+      1024
+    ],
+    "BASELINE_layers": [
+      1,
+      2,
+      3
+    ],
+    "BASELINE_hidden": 256,
+    "method": "逐个构造实际BookState权重并核对9→32→32、MAIN1172市场入口/原残差层、BASELINE1605/裸GRU；释放后再构造下一项。仅四个原结构代表导出并运行。"
+  },
+  "graphs": {
+    "BASELINE-1x256": {
+      "configuration": {
+        "name": "BASELINE-1x256",
+        "layers": 1,
+        "hidden": 256,
+        "seed": 741001,
+        "baseline": true
+      },
+      "graphs_count": 2,
+      "state_inputs": [
+        {
+          "name": "fast_features",
+          "type": 1,
+          "shape": [
+            "B",
+            596
+          ]
+        },
+        {
+          "name": "slow_features",
+          "type": 1,
+          "shape": [
+            "B",
+            433
+          ]
+        },
+        {
+          "name": "book_levels",
+          "type": 1,
+          "shape": [
+            "B",
+            6,
+            "N",
+            9
+          ]
+        },
+        {
+          "name": "book_mask",
+          "type": 9,
+          "shape": [
+            "B",
+            6,
+            "N"
+          ]
+        },
+        {
+          "name": "h_prev",
+          "type": 1,
+          "shape": [
+            1,
+            "B",
+            256
+          ]
+        }
+      ],
+      "pure_graph_comparisons": 585,
+      "max_absolute_error": 1.52587890625e-05,
+      "files": {
+        "state_encoder.onnx": {
+          "bytes": 511524,
+          "sha256": "5046f2c17d85c3e24514643ab83d44e03127bc226220bd4fd8eb4bbf06ada947"
+        },
+        "action_decoder.onnx.data": {
+          "bytes": 6495744,
+          "sha256": "28d218cf729ac791384a868ecb5620342d5f2753d02be56a775faa0b6b61f0dc"
+        },
+        "initial_weights.pt": {
+          "bytes": 9715554,
+          "sha256": "5df7912c8b7f5a272b8f18dd1cf978d739dbb4ed0c3aae9fad20e6b59a50e4b4"
+        },
+        "action_decoder.onnx": {
+          "bytes": 2545972,
+          "sha256": "89c9604803835b086633242cd044d2a85c5b2fad3cb462c58ffb5c720540784c"
+        },
+        "state_encoder.onnx.data": {
+          "bytes": 3244584,
+          "sha256": "29de569501de0d3cb676b76b476ac664be8ed3150924822f94e1931bdbacdb60"
+        }
+      },
+      "validation": {
+        "path": "artifacts/issue-166/graphs/BASELINE-1x256/validation_threads_1.json",
+        "sha256": "4ecfd8239f182eaac6e826c6e11c3995311eef77bb9c74068c9ce9132a9911bf"
+      }
+    },
+    "BASELINE-2x256": {
+      "configuration": {
+        "name": "BASELINE-2x256",
+        "layers": 2,
+        "hidden": 256,
+        "seed": 741002,
+        "baseline": true
+      },
+      "graphs_count": 2,
+      "state_inputs": [
+        {
+          "name": "fast_features",
+          "type": 1,
+          "shape": [
+            "B",
+            596
+          ]
+        },
+        {
+          "name": "slow_features",
+          "type": 1,
+          "shape": [
+            "B",
+            433
+          ]
+        },
+        {
+          "name": "book_levels",
+          "type": 1,
+          "shape": [
+            "B",
+            6,
+            "N",
+            9
+          ]
+        },
+        {
+          "name": "book_mask",
+          "type": 9,
+          "shape": [
+            "B",
+            6,
+            "N"
+          ]
+        },
+        {
+          "name": "h_prev",
+          "type": 1,
+          "shape": [
+            2,
+            "B",
+            256
+          ]
+        }
+      ],
+      "pure_graph_comparisons": 585,
+      "max_absolute_error": 1.52587890625e-05,
+      "files": {
+        "state_encoder.onnx": {
+          "bytes": 549359,
+          "sha256": "0f817cfcfbada66382dfcbda56419dcd42cf9819483b08bf4449bbf8aad51c6a"
+        },
+        "action_decoder.onnx.data": {
+          "bytes": 6495744,
+          "sha256": "2ca7d52733339542e72f756df459816d6e8d48a6cdbc762ff728e8d59d169255"
+        },
+        "initial_weights.pt": {
+          "bytes": 11295798,
+          "sha256": "255265c0f8de293b4b40d029836166a507f921edcbc9b05eb1b620ebf3104eb3"
+        },
+        "action_decoder.onnx": {
+          "bytes": 2545972,
+          "sha256": "e39cad9d7148ac9f6225d65daf1c93515255308c0e21261345930df633e711f8"
+        },
+        "state_encoder.onnx.data": {
+          "bytes": 4823592,
+          "sha256": "247e355ccec89fa43c2943b76ac165c11f8c69cf76e6de4b0e37c3014d426421"
+        }
+      },
+      "validation": {
+        "path": "artifacts/issue-166/graphs/BASELINE-2x256/validation_threads_1.json",
+        "sha256": "8a045ee8d147740b7b4d390b7bad4e4f10452008b4e04dde21c38d3b6274796c"
+      }
+    },
+    "MAIN-1x256": {
+      "configuration": {
+        "name": "MAIN-1x256",
+        "layers": 1,
+        "hidden": 256,
+        "seed": 741003,
+        "baseline": false
+      },
+      "graphs_count": 2,
+      "state_inputs": [
+        {
+          "name": "fast_features",
+          "type": 1,
+          "shape": [
+            "B",
+            596
+          ]
+        },
+        {
+          "name": "slow_features",
+          "type": 1,
+          "shape": [
+            "B",
+            433
+          ]
+        },
+        {
+          "name": "book_levels",
+          "type": 1,
+          "shape": [
+            "B",
+            6,
+            "N",
+            9
+          ]
+        },
+        {
+          "name": "book_mask",
+          "type": 9,
+          "shape": [
+            "B",
+            6,
+            "N"
+          ]
+        },
+        {
+          "name": "h_prev",
+          "type": 1,
+          "shape": [
+            1,
+            "B",
+            256
+          ]
+        }
+      ],
+      "pure_graph_comparisons": 585,
+      "max_absolute_error": 9.5367431640625e-06,
+      "files": {
+        "state_encoder.onnx": {
+          "bytes": 832123,
+          "sha256": "5fbf61af3d392b2f7bbf4aed85526b06252765c0f73d5f78307bd8bd86d4fbb8"
+        },
+        "action_decoder.onnx.data": {
+          "bytes": 6495744,
+          "sha256": "6228b8157d4acbe42f7ea1cb70f430063be410e49c2296130bd4b97a5e1fe2b5"
+        },
+        "initial_weights.pt": {
+          "bytes": 9561906,
+          "sha256": "8f01681f75825f597999a9e09ba422e68f3e3938d2f4c9fb7a86149105616344"
+        },
+        "action_decoder.onnx": {
+          "bytes": 2545912,
+          "sha256": "05f372d6e14c5c300308a873d300d75a29a5fb772b9fb09edfea2131ceb0d432"
+        },
+        "state_encoder.onnx.data": {
+          "bytes": 6162512,
+          "sha256": "3947109b99e1f052c5c50a1ffa2b0f24ce8302344492276760414ee6b4991e8f"
+        }
+      },
+      "validation": {
+        "path": "artifacts/issue-166/graphs/MAIN-1x256/validation_threads_1.json",
+        "sha256": "fabd5997e8b49062fe6f2e7c915027c75dacedb57afc4476813cfa4deb9e8b1c"
+      }
+    },
+    "MAIN-30x1024": {
+      "configuration": {
+        "name": "MAIN-30x1024",
+        "layers": 30,
+        "hidden": 1024,
+        "seed": 741004,
+        "baseline": false
+      },
+      "graphs_count": 2,
+      "state_inputs": [
+        {
+          "name": "fast_features",
+          "type": 1,
+          "shape": [
+            "B",
+            596
+          ]
+        },
+        {
+          "name": "slow_features",
+          "type": 1,
+          "shape": [
+            "B",
+            433
+          ]
+        },
+        {
+          "name": "book_levels",
+          "type": 1,
+          "shape": [
+            "B",
+            6,
+            "N",
+            9
+          ]
+        },
+        {
+          "name": "book_mask",
+          "type": 9,
+          "shape": [
+            "B",
+            6,
+            "N"
+          ]
+        },
+        {
+          "name": "h_prev",
+          "type": 1,
+          "shape": [
+            30,
+            "B",
+            1024
+          ]
+        }
+      ],
+      "pure_graph_comparisons": 585,
+      "max_absolute_error": 3.814697265625e-05,
+      "files": {
+        "state_encoder.onnx": {
+          "bytes": 4662321,
+          "sha256": "acad33197f2216d70aecdb4e847d0de94f032726a5d043592f27a889e3ac1920"
+        },
+        "action_decoder.onnx.data": {
+          "bytes": 39024640,
+          "sha256": "406658174f2eb6afd2a2d4f4b6fec0aab6c7db3b9f031377cb5539d6e2b22bf9"
+        },
+        "initial_weights.pt": {
+          "bytes": 808887157,
+          "sha256": "68a90d8d8aeb36268f181e1da15bacebf4ec3954a6d78c479c974fda2d090d9b"
+        },
+        "action_decoder.onnx": {
+          "bytes": 9252379,
+          "sha256": "5437f78f4334a2918d839b0dc1c4c6b56bf528dcd3d98c70b65d1e194b64c120"
+        },
+        "state_encoder.onnx.data": {
+          "bytes": 769530408,
+          "sha256": "50a3bd47a61044ddf3046dcafcfffbcd130afc019bbaf896aed10e9064681d7d"
+        }
+      },
+      "validation": {
+        "path": "artifacts/issue-166/graphs/MAIN-30x1024/validation_threads_1.json",
+        "sha256": "8a41d1b782538598b6c74827e38f0a5d0cd4af1acc7da36922ba3564c70653a1"
+      }
+    }
+  },
+  "three_runtime_matrix": [
+    {
+      "config": "BASELINE-1x256",
+      "threads": 1,
+      "comparisons": 1970,
+      "cases": 25,
+      "max_absolute_error": 1.52587890625e-05,
+      "elapsed_seconds": 6.981190681000953,
+      "inputs_sha256": "6a6fd66ca637796aef35f2a9b720b4efa2bd2a01456c2cde28d2ad50281cdfcf",
+      "rust_output_sha256": "a38a3835e687447fc49f9b49f03c4514fff2690ab7baa5fd82736e26cbd27e37",
+      "result": {
+        "path": "artifacts/issue-166/three-baseline1/result.json",
+        "sha256": "f3556c76bf27893af013d2cd1aa07331197be2886a5938160e272e1e739c8c00"
+      }
+    },
+    {
+      "config": "BASELINE-1x256",
+      "threads": 4,
+      "comparisons": 1970,
+      "cases": 25,
+      "max_absolute_error": 1.52587890625e-05,
+      "elapsed_seconds": 7.6520733069992275,
+      "inputs_sha256": "6a6fd66ca637796aef35f2a9b720b4efa2bd2a01456c2cde28d2ad50281cdfcf",
+      "rust_output_sha256": "e90f9fa36a6c25c4b9203565737116e95ab8994d30483eaa2d004ccbae26bfc4",
+      "result": {
+        "path": "artifacts/issue-166/matrix/BASELINE-1x256/4/result.json",
+        "sha256": "5d57b06952489a5b7118dd7b456b292734efabbf8697a829426644c108878f43"
+      }
+    },
+    {
+      "config": "BASELINE-2x256",
+      "threads": 1,
+      "comparisons": 1970,
+      "cases": 25,
+      "max_absolute_error": 1.52587890625e-05,
+      "elapsed_seconds": 7.663515295999787,
+      "inputs_sha256": "5fa8bc57eb87f7f8eb90ebef653f19fff55b1e22673020f5e2a973d81e4dedf1",
+      "rust_output_sha256": "47a169331ae8ff5f303013e50b49656ebc3a76502c01e47dd53ff0e5589f73b5",
+      "result": {
+        "path": "artifacts/issue-166/three-baseline2/result.json",
+        "sha256": "96612892acfb00ac308a76fbc0f550b9136f1b5c826c275531407be9eafb95f0"
+      }
+    },
+    {
+      "config": "BASELINE-2x256",
+      "threads": 4,
+      "comparisons": 1970,
+      "cases": 25,
+      "max_absolute_error": 1.52587890625e-05,
+      "elapsed_seconds": 8.34530559400082,
+      "inputs_sha256": "5fa8bc57eb87f7f8eb90ebef653f19fff55b1e22673020f5e2a973d81e4dedf1",
+      "rust_output_sha256": "12d228b7cacd5173868469ce50a476d2c7d09a6de4af3e0340448fc2033ce98c",
+      "result": {
+        "path": "artifacts/issue-166/matrix/BASELINE-2x256/4/result.json",
+        "sha256": "1218d5d0ab4f7e532576e621be436416022fa74fa22756ce57228ac6cd973ab0"
+      }
+    },
+    {
+      "config": "MAIN-1x256",
+      "threads": 1,
+      "comparisons": 1970,
+      "cases": 25,
+      "max_absolute_error": 9.5367431640625e-06,
+      "elapsed_seconds": 7.240257503999601,
+      "inputs_sha256": "6a6fd66ca637796aef35f2a9b720b4efa2bd2a01456c2cde28d2ad50281cdfcf",
+      "rust_output_sha256": "3e182f72e5bae99d22c5953cb4de230af2229999be0567ae763f7999cbe8704a",
+      "result": {
+        "path": "artifacts/issue-166/matrix/MAIN-1x256/1/result.json",
+        "sha256": "5a6046c26ce8fe2eca0cd60c6aa63961ff0683d73f7be039ec430222b94e61c9"
+      }
+    },
+    {
+      "config": "MAIN-1x256",
+      "threads": 4,
+      "comparisons": 1970,
+      "cases": 25,
+      "max_absolute_error": 9.5367431640625e-06,
+      "elapsed_seconds": 7.754125636998651,
+      "inputs_sha256": "6a6fd66ca637796aef35f2a9b720b4efa2bd2a01456c2cde28d2ad50281cdfcf",
+      "rust_output_sha256": "c127009bb0bbafde2412f3e777a490540e19cd6d7bb306270dff0fd51b471c27",
+      "result": {
+        "path": "artifacts/issue-166/matrix/MAIN-1x256/4/result.json",
+        "sha256": "62e062ad1b735d14a90e98090e95fb95c18a11558e7975af6f3ad4ea29739d6c"
+      }
+    },
+    {
+      "config": "MAIN-30x1024",
+      "threads": 1,
+      "comparisons": 1970,
+      "cases": 25,
+      "max_absolute_error": 3.814697265625e-05,
+      "elapsed_seconds": 80.42302430900054,
+      "inputs_sha256": "10e7ee843c8119b03d283b7d069d9cdddd799829fb52bd303c237d9f33a0e983",
+      "rust_output_sha256": "fea51505be7cacc5873d81c9dc8fd91558681f5b26d9fda05100de981e1e0dcf",
+      "result": {
+        "path": "artifacts/issue-166/matrix/MAIN-30x1024/1/result.json",
+        "sha256": "f31aa59ddd5a3139236142380b9be0011f0de98039b0d1f3ea0d38c4292639e4"
+      }
+    },
+    {
+      "config": "MAIN-30x1024",
+      "threads": 4,
+      "comparisons": 1970,
+      "cases": 25,
+      "max_absolute_error": 3.814697265625e-05,
+      "elapsed_seconds": 71.87948143600079,
+      "inputs_sha256": "10e7ee843c8119b03d283b7d069d9cdddd799829fb52bd303c237d9f33a0e983",
+      "rust_output_sha256": "281040f9b172efb73fdaa648e47e16f60c2ad709ef59527c4d8c59cd1ed1eaf1",
+      "result": {
+        "path": "artifacts/issue-166/matrix/MAIN-30x1024/4/result.json",
+        "sha256": "5ed050247654ef9ef8d210b58198808ca6c670ed9ffb1ab29747e978debdfd04"
+      }
+    }
+  ],
+  "three_runtime_scope": "保留原20场景与对象K1/2/128/129/255/256、完整人口0/1/2/256/257/259、256+1对128+129及严格首项选择；增加5个book N0/7/8/257/1001，B2混深度、各3步递推。N0物理N1全假。B1/2/3原各12步保持。",
+  "actual_chain": {
+    "native_python": "最终30项Python套件中的4项原生输入测试实际启用MAIN1及BASELINE2图；19条真实状态行包含重叠预热、不同独立根混深度、ContextOnly/DecisionRequired/Retire，三端各自递推。",
+    "four_configuration_actor": {
+      "cases_per_configuration": 2,
+      "tests": [
+        "same_process_python_and_rust_ort_share_native_actor_and_final_intent",
+        "same_process_cancel_actor_all_objects_and_original_identities"
+      ],
+      "coverage": "实际BUY三情形（含最低本金、费用、GTD）及259对象的三撤单族，原身份、真实后续组与严格最终意图；不是随机张量替代。",
+      "report": {
+        "path": "artifacts/issue-166/actor/report.json",
+        "sha256": "e0f10812657b634dff6e5107144f718f91315f0b78b075af164749112d5db2e5"
+      },
+      "results": {
+        "BASELINE-1x256": {
+          "seed": 741001,
+          "input_contract_version": "native_inputs_v5",
+          "feature_schema_sha256": "6d1e57d5288879af31b11b92c0353b39d8518d7c10623955c924323b5e60d416",
+          "same_seed_initialized_parameters": 67,
+          "new_weights_sha256": "5df7912c8b7f5a272b8f18dd1cf978d739dbb4ed0c3aae9fad20e6b59a50e4b4",
+          "exit_code": 0,
+          "log_sha256": "67b27f645d7e35f76456beb5cacf0e6500f58d4985a68ccbc45229bbfbd29924"
+        },
+        "BASELINE-2x256": {
+          "seed": 741002,
+          "input_contract_version": "native_inputs_v5",
+          "feature_schema_sha256": "6d1e57d5288879af31b11b92c0353b39d8518d7c10623955c924323b5e60d416",
+          "same_seed_initialized_parameters": 71,
+          "new_weights_sha256": "255265c0f8de293b4b40d029836166a507f921edcbc9b05eb1b620ebf3104eb3",
+          "exit_code": 0,
+          "log_sha256": "221a62150d53ea5916ef436cb2adb5669989f78181c0f6e75f682763bc145735"
+        },
+        "MAIN-1x256": {
+          "seed": 741003,
+          "input_contract_version": "native_inputs_v5",
+          "feature_schema_sha256": "6d1e57d5288879af31b11b92c0353b39d8518d7c10623955c924323b5e60d416",
+          "same_seed_initialized_parameters": 83,
+          "new_weights_sha256": "8f01681f75825f597999a9e09ba422e68f3e3938d2f4c9fb7a86149105616344",
+          "exit_code": 0,
+          "log_sha256": "71b134254525e8d9cb029c8031f94cc0046adee1a5b6f1b593ef2a668b9fab94"
+        },
+        "MAIN-30x1024": {
+          "seed": 741004,
+          "input_contract_version": "native_inputs_v5",
+          "feature_schema_sha256": "6d1e57d5288879af31b11b92c0353b39d8518d7c10623955c924323b5e60d416",
+          "same_seed_initialized_parameters": 257,
+          "new_weights_sha256": "68a90d8d8aeb36268f181e1da15bacebf4ec3954a6d78c479c974fda2d090d9b",
+          "exit_code": 0,
+          "log_sha256": "1a7349c015491ad33d8922bd9308619382f66369904c8c9efac292f484942d61"
+        }
+      }
+    },
+    "deep_execution": {
+      "MAIN-1x256": {
+        "frames": 7,
+        "context_frames": 1,
+        "decisions_executed": 6,
+        "retire_operations": 1,
+        "side_lengths": [
+          [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            257,
+            7,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            257,
+            7,
+            9,
+            6,
+            0,
+            0
+          ],
+          [
+            257,
+            7,
+            9,
+            6,
+            8,
+            7
+          ],
+          [
+            257,
+            7,
+            9,
+            6,
+            8,
+            7
+          ],
+          [
+            7,
+            1,
+            9,
+            6,
+            8,
+            7
+          ],
+          [
+            0,
+            0,
+            9,
+            6,
+            8,
+            7
+          ]
+        ],
+        "final_hidden_rows": [
+          0,
+          0,
+          0
+        ],
+        "test": "full_book_three_runtime_and_original_execution",
+        "result": "通过",
+        "evidence": {
+          "path": "artifacts/issue-166/deep-execution-MAIN-1x256.json",
+          "sha256": "05a8c83832f4d4e4af45b5883ab8eb465b199f8c7d1b9eef8bba8fccce72737e"
+        },
+        "log": {
+          "path": "artifacts/issue-166/deep-execution-MAIN-1x256.log",
+          "sha256": "667361bc612a972655b14883c3af70be7d4bd0e9e90704e583a2cc658bb0d27f"
+        }
+      },
+      "BASELINE-2x256": {
+        "frames": 7,
+        "context_frames": 1,
+        "decisions_executed": 6,
+        "retire_operations": 1,
+        "side_lengths": [
+          [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            257,
+            7,
+            0,
+            0,
+            0,
+            0
+          ],
+          [
+            257,
+            7,
+            9,
+            6,
+            0,
+            0
+          ],
+          [
+            257,
+            7,
+            9,
+            6,
+            8,
+            7
+          ],
+          [
+            257,
+            7,
+            9,
+            6,
+            8,
+            7
+          ],
+          [
+            7,
+            1,
+            9,
+            6,
+            8,
+            7
+          ],
+          [
+            0,
+            0,
+            9,
+            6,
+            8,
+            7
+          ]
+        ],
+        "final_hidden_rows": [
+          0,
+          0,
+          0
+        ],
+        "test": "full_book_three_runtime_and_original_execution",
+        "result": "通过",
+        "evidence": {
+          "path": "artifacts/issue-166/deep-execution-BASELINE-2x256.json",
+          "sha256": "b47a56f24facf4a8e73c1b7c057c0da02f1d550594e85f66e43f63828e9aa3a8"
+        },
+        "log": {
+          "path": "artifacts/issue-166/deep-execution-BASELINE-2x256.log",
+          "sha256": "797844e39f4d704c8ef517dc775043942f109508d88b274b0a69478f94b92eb2"
+        }
+      }
+    },
+    "continuous_runtime_warmup": {
+      "config": "MAIN-1x256",
+      "independent_roots": 2,
+      "frames": 256,
+      "decisions": 186,
+      "seconds": 430.627267148,
+      "test": "continuous_three_runtime_warmup_cost",
+      "result": "通过",
+      "log": {
+        "path": "artifacts/issue-166/continuous-warmup.log",
+        "sha256": "750e3b53519418ba1625a52af163fbb9c3e62eadc3a4988a669b3b00ec9bb3a7"
+      },
+      "scope": "实际双根128帧预热及原执行入口；不是70分钟完整C/P验收。"
+    }
+  },
+  "resources": {
+    "scope": "每组新进程、CPU一线程、3次预热和10次计时；仅新增BookEncoder，非完整模型、目标机或实盘容量。RSS包含解释器/运行库/分配器；有限高水位增量不是严格张量峰值或长期无泄漏证明。",
+    "torch": "2.11.0+cpu",
+    "cases": [
+      {
+        "batch": 1,
+        "depth": 7,
+        "valid_per_side": [
+          [
+            7,
+            7,
+            7,
+            7,
+            7,
+            7
+          ]
+        ],
+        "median_ms": 0.241911,
+        "min_ms": 0.237658,
+        "max_ms": 0.264498,
+        "rss_before_bytes": 230125568,
+        "rss_after_bytes": 237490176,
+        "peak_increment_bytes": 7204864,
+        "levels_bytes": 1512,
+        "mask_bytes": 42,
+        "encoded_bytes": 5376,
+        "summary_bytes": 2304
+      },
+      {
+        "batch": 1,
+        "depth": 257,
+        "valid_per_side": [
+          [
+            257,
+            257,
+            257,
+            257,
+            257,
+            257
+          ]
+        ],
+        "median_ms": 1.4122345,
+        "min_ms": 1.386101,
+        "max_ms": 1.679323,
+        "rss_before_bytes": 230866944,
+        "rss_after_bytes": 241229824,
+        "peak_increment_bytes": 10248192,
+        "levels_bytes": 55512,
+        "mask_bytes": 1542,
+        "encoded_bytes": 197376,
+        "summary_bytes": 2304
+      },
+      {
+        "batch": 1,
+        "depth": 1001,
+        "valid_per_side": [
+          [
+            1001,
+            1001,
+            1001,
+            1001,
+            1001,
+            1001
+          ]
+        ],
+        "median_ms": 4.7170435,
+        "min_ms": 4.642713,
+        "max_ms": 4.842881,
+        "rss_before_bytes": 232427520,
+        "rss_after_bytes": 252620800,
+        "peak_increment_bytes": 20213760,
+        "levels_bytes": 216216,
+        "mask_bytes": 6006,
+        "encoded_bytes": 768768,
+        "summary_bytes": 2304
+      },
+      {
+        "batch": 1,
+        "depth": 4096,
+        "valid_per_side": [
+          [
+            4096,
+            4096,
+            4096,
+            4096,
+            4096,
+            4096
+          ]
+        ],
+        "median_ms": 31.402001,
+        "min_ms": 30.767025,
+        "max_ms": 31.855255,
+        "rss_before_bytes": 234569728,
+        "rss_after_bytes": 275832832,
+        "peak_increment_bytes": 69988352,
+        "levels_bytes": 884736,
+        "mask_bytes": 24576,
+        "encoded_bytes": 3145728,
+        "summary_bytes": 2304
+      },
+      {
+        "batch": 3,
+        "depth": 257,
+        "valid_per_side": [
+          [
+            7,
+            7,
+            7,
+            7,
+            7,
+            7
+          ],
+          [
+            257,
+            257,
+            257,
+            257,
+            257,
+            257
+          ],
+          [
+            257,
+            257,
+            257,
+            257,
+            257,
+            257
+          ]
+        ],
+        "median_ms": 3.667407,
+        "min_ms": 3.638553,
+        "max_ms": 3.820004,
+        "rss_before_bytes": 231333888,
+        "rss_after_bytes": 248455168,
+        "peak_increment_bytes": 17252352,
+        "levels_bytes": 166536,
+        "mask_bytes": 4626,
+        "encoded_bytes": 592128,
+        "summary_bytes": 6912
+      },
+      {
+        "batch": 3,
+        "depth": 4096,
+        "valid_per_side": [
+          [
+            7,
+            7,
+            7,
+            7,
+            7,
+            7
+          ],
+          [
+            4096,
+            4096,
+            4096,
+            4096,
+            4096,
+            4096
+          ],
+          [
+            4096,
+            4096,
+            4096,
+            4096,
+            4096,
+            4096
+          ]
+        ],
+        "median_ms": 153.172217,
+        "min_ms": 152.328227,
+        "max_ms": 154.42172,
+        "rss_before_bytes": 236732416,
+        "rss_after_bytes": 311173120,
+        "peak_increment_bytes": 207986688,
+        "levels_bytes": 2654208,
+        "mask_bytes": 73728,
+        "encoded_bytes": 9437184,
+        "summary_bytes": 6912
+      }
+    ],
+    "raw": {
+      "path": "artifacts/issue-166/book-resources.json",
+      "sha256": "58c6e9ec37d128ee4242f13cdff2ed928ecf7187247ac1c031b27c0db75c0b76"
+    },
+    "native_debug_projection": {
+      "scope": "同一合法公共链每组单次计时，debug NativeInputRoot::consume的完整原生投影，包含已有账户/历史等成本；不能从中推导盘口分支增量或目标延迟。",
+      "samples": [
+        {
+          "consume_ms": 8.140160999999999,
+          "rows": [
+            [
+              0,
+              0,
+              0,
+              0,
+              0,
+              0
+            ]
+          ]
+        },
+        {
+          "consume_ms": 599.637346,
+          "rows": [
+            [
+              257,
+              7,
+              0,
+              0,
+              0,
+              0
+            ]
+          ]
+        },
+        {
+          "consume_ms": 640.253219,
+          "rows": [
+            [
+              257,
+              7,
+              9,
+              6,
+              0,
+              0
+            ]
+          ]
+        },
+        {
+          "consume_ms": 668.371506,
+          "rows": [
+            [
+              257,
+              7,
+              9,
+              6,
+              8,
+              7
+            ]
+          ]
+        },
+        {
+          "consume_ms": 658.41278,
+          "rows": [
+            [
+              257,
+              7,
+              9,
+              6,
+              8,
+              7
+            ]
+          ]
+        },
+        {
+          "consume_ms": 111.05053600000001,
+          "rows": [
+            [
+              7,
+              1,
+              9,
+              6,
+              8,
+              7
+            ]
+          ]
+        },
+        {
+          "consume_ms": 95.532651,
+          "rows": [
+            [
+              0,
+              0,
+              9,
+              6,
+              8,
+              7
+            ]
+          ]
+        },
+        {
+          "consume_ms": 0.345821,
+          "rows": []
+        },
+        {
+          "consume_ms": 0.23198700000000003,
+          "rows": []
+        }
+      ],
+      "raw": {
+        "path": "artifacts/issue-166/native-book-timings.json",
+        "sha256": "3f3bf8efbbc5baaf728e6643217be4a703a40e4436a818117b7d36641c23993c"
+      }
+    }
+  },
+  "manual_sample": {
+    "file": "validation/native-inputs-v5-sample.json",
+    "sha256": "d968f4e005d103b3fb759cd39e9d81eec3701f1a3707a911cc57cfe6a9e3914c",
+    "source": "合法typed_raw公共录制→归约→SIM/NOE/Ledger→NativeInputRoot::consume；非真实市场回放。",
+    "sides": [
+      7,
+      1,
+      9,
+      6,
+      8,
+      7
+    ],
+    "valid": 38,
+    "physical_slots": 54,
+    "padding": 16,
+    "coordinates": 9,
+    "cutoff_and_raw_prices_quantities": "见样本；全部有效档及六侧mask逐项展示。"
+  },
+  "regression": {
+    "workspace": {
+      "command": "cargo test --workspace --lib --bins --tests --examples --locked --offline -- --skip four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second",
+      "exit_code": 0,
+      "passed": 1196,
+      "failed": 0,
+      "ignored": 18,
+      "UTC_clock_test": "four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second：跳过",
+      "log": {
+        "path": "artifacts/issue-166/workspace.log",
+        "sha256": "de8c5c62b975fb28693fb6c398f4677d30d0ba6cc238f5b8f6d87aaaaf73fa1f"
+      }
+    },
+    "python": {
+      "command": "OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 python -m unittest discover -s tests -p test_*.py；实际提供NATIVE_MAIN_GRAPH及NATIVE_BASELINE_GRAPH",
+      "passed": 30,
+      "failed": 0,
+      "skipped": 0,
+      "log": {
+        "path": "artifacts/issue-166/python-final.log",
+        "sha256": "96d99e4b1770d5e4fef8f06c3a3a5ba7b40b96d9efb513b8adfc738d16a92494"
+      }
+    },
+    "native_default": {
+      "command": "cargo test --manifest-path native-inputs/Cargo.toml --locked --offline --lib",
+      "passed": 35,
+      "failed": 0,
+      "ignored": 1,
+      "note": "在Python实际原生夹具生成过程中执行，结果见python-final.log。"
+    },
+    "native_all_features": {
+      "command": "cargo test --manifest-path native-inputs/Cargo.toml --all-features --locked --offline --lib",
+      "passed": 36,
+      "failed": 0,
+      "ignored": 16,
+      "log": {
+        "path": "artifacts/issue-166/native-all-features-final.log",
+        "sha256": "c2813d9557c65479889b53e9d6f5554a745fafea31442d96b7294697b8845c1c"
+      }
+    },
+    "static_checks": [
+      {
+        "command": "cargo check --manifest-path native-inputs/Cargo.toml --all-features --all-targets --locked --offline",
+        "exit_code": 0,
+        "log": {
+          "path": "artifacts/issue-166/native-check-final.log",
+          "sha256": "be9f758f8abb324eb39600df2986754c1fdf99045c663cc9849e6c262f5e312d"
+        }
+      },
+      {
+        "command": "cargo check --manifest-path rust-ort-validation/Cargo.toml --all-targets --locked --offline",
+        "exit_code": 0,
+        "log": {
+          "path": "artifacts/issue-166/validator-check-final.log",
+          "sha256": "c4d451707873c3248566affd418e40f284d592985b0a7ebfe0be1a676307a396"
+        }
+      }
+    ],
+    "ignored_handling": "普通套件ignored不计通过；本次另以--ignored执行四配置same_process两项、MAIN1双根预热、MAIN1/BASELINE2深盘口执行。其余12项没有执行，包括70分钟完整C/P和其他历史场景。",
+    "fixed_failures": [
+      {
+        "log": {
+          "path": "artifacts/issue-166/python-graphs.log",
+          "sha256": "92dfea1adb5c169382aee42292efcd06ad569f92cdf9e798775786db91b1fdfd"
+        },
+        "failure": "首轮测试仍断言旧806规则偏移，修为566后python-graphs-final.log的6项通过，最终Python全套30项通过。"
+      },
+      {
+        "log": {
+          "path": "artifacts/issue-166/deep-execution-MAIN-1x256-first.log",
+          "sha256": "74bf24aedf6901c3109a98828fc8a990f470b74ec7a357e22155b3b9507a969a"
+        },
+        "failure": "夹具实际仅1个ContextOnly，末尾误断言>1；修为必须存在后两配置分别通过7帧/6决策/1退役。"
+      },
+      {
+        "failure": "首次all-features启动缺CPython动态库，按本项目解释器设置局部LD_LIBRARY_PATH后执行通过；首次lib测试的旧规则偏移断言一并修复。"
+      }
+    ]
+  },
+  "limits": [
+    "未执行训练、部署或资金操作；没有修改模型选择种子或批准精度。",
+    "未执行70分钟完整C/P矩阵、GPU、目标CPU或密集实盘容量验收；有限本机资源观测不是业务上限。",
+    "27配置仅构造与布局；实际两图/三端为原四个结构代表。",
+    "旧v4特征缺少深档，须从原公共材料按cutoff重放；旧权重/hidden/概率不重标v5。",
+    "最大动态深度的有限测试不能证明所有有限精度输入绝无碰撞；9维方案仅解决本Issue列明的关联反例。"
+  ]
+}

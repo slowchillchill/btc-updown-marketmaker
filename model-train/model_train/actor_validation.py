@@ -239,7 +239,7 @@ def main():
     import onnxruntime
     parser=argparse.ArgumentParser()
     parser.add_argument('--graphs',type=Path,required=True)
-    parser.add_argument('--old-graphs',type=Path,help='可选历史权重，仅记录SHA；v2重初始化不要求跨版本逐值一致')
+    parser.add_argument('--old-graphs',type=Path,help='可选历史权重，仅记录SHA；v5重初始化不要求跨版本逐值一致')
     parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--configs',nargs='+',default=[c.name for c in CONFIGURATIONS])
     args=parser.parse_args();args.output.mkdir(parents=True,exist_ok=True)
@@ -255,14 +255,14 @@ def main():
         assert set(new)==set(initialized)
         assert all(torch.equal(value,new[name]) for name,value in initialized.items())
         evidence['configurations'][config.name]={'seed':config.seed,
-            'input_contract_version':'native_inputs_v4',
+            'input_contract_version':'native_inputs_v5',
             'feature_schema_sha256':sha(root/'native-inputs/feature_schema.json'),
             'same_seed_initialized_parameters':len(new),'new_weights_sha256':sha(current)}
         if args.old_graphs:
             previous=args.old_graphs/config.name/'initial_weights.pt'
             if not previous.exists():previous=args.old_graphs/'resumed'/config.name/'initial_weights.pt'
             evidence['configurations'][config.name]['historical_weights_sha256']=sha(previous)
-            evidence['configurations'][config.name]['cross_version_equality']='不适用：433/184输入改变同种子初始化消耗'
+            evidence['configurations'][config.name]['cross_version_equality']='不适用：v5盘口前端与市场宽度改变同种子初始化消耗'
         del initialized,new
     for name in args.configs:
         env=os.environ.copy()

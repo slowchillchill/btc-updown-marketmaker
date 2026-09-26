@@ -991,7 +991,7 @@ async fn old_pairing_is_market_local_before_sum() {
     driver.stop_and_drain().unwrap();
 }
 
-fn exported_group(group: &NativeInputGroup) -> serde_json::Value {
+pub(crate) fn exported_group(group: &NativeInputGroup) -> serde_json::Value {
     use crate::prefix::*;
     use num_bigint::BigUint;
     let mut output = serde_json::to_value(group).unwrap();
@@ -1000,8 +1000,8 @@ fn exported_group(group: &NativeInputGroup) -> serde_json::Value {
         .iter()
         .zip(output["rows"].as_array_mut().unwrap())
     {
-        assert_eq!(row.fast.len(), 836);
-        assert_eq!(&row.fast[806..], &row.rule);
+        assert_eq!(row.fast.len(), 596);
+        assert_eq!(&row.fast[566..], &row.rule);
         let Some(action_context) = row.action_context.as_ref() else {
             assert_eq!(row.role, InputRole::ContextOnly);
             continue;

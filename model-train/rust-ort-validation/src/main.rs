@@ -26,6 +26,9 @@ struct Case {
     slots: usize,
     empty: bool,
     fast: Vec<f32>,
+    book_levels: Vec<f32>,
+    book_mask: Vec<bool>,
+    depth: usize,
     slow: Vec<f32>,
     rule: Vec<f32>,
     prefix: Vec<f32>,
@@ -68,8 +71,10 @@ fn state(
     h: &[f32],
 ) -> Result<Vec<Vec<f32>>> {
     let outputs = session.run(ort::inputs![
-        "fast_features" => tensor(&[case.batch,836], &case.fast)?,
+        "fast_features" => tensor(&[case.batch,596], &case.fast)?,
         "slow_features" => tensor(&[case.batch,433], &case.slow)?,
+        "book_levels" => tensor(&[case.batch,6,case.depth,9], &case.book_levels)?,
+        "book_mask" => Tensor::from_array(([case.batch,6,case.depth], case.book_mask.clone()))?,
         "h_prev" => tensor(&[layers,case.batch,hidden], h)?
     ])?;
     Ok(["z_t", "h_next"]
@@ -313,6 +318,7 @@ struct NativeGroup {
 struct NativeRow {
     hidden_state_key: serde_json::Value,
     fast: Vec<f32>,
+    book_levels: [Vec<[f32; 9]>; 6],
     slow: Vec<f32>,
     role: String,
     rule: Vec<f32>,
@@ -366,7 +372,25 @@ fn native_state(
             let previous = hidden
                 .get(&key)
                 .ok_or("native hidden key not initialized")?;
-            let outputs=session.run(ort::inputs!["fast_features"=>tensor(&[1,836],&row.fast)?,"slow_features"=>tensor(&[1,433],&row.slow)?,"h_prev"=>tensor(&[suite.layers,1,suite.hidden],previous)?])?;
+            let depth = row
+                .book_levels
+                .iter()
+                .map(Vec::len)
+                .max()
+                .unwrap_or(0)
+                .max(1);
+            let mut book = vec![0.; 6 * depth * 9];
+            let mut mask = vec![false; 6 * depth];
+            for (side, levels) in row.book_levels.iter().enumerate() {
+                for (index, level) in levels.iter().enumerate() {
+                    let slot = side * depth + index;
+                    book[slot * 9..(slot + 1) * 9].copy_from_slice(level);
+                    mask[slot] = true;
+                }
+            }
+            let outputs=session.run(ort::inputs!["fast_features"=>tensor(&[1,596],&row.fast)?,"slow_features"=>tensor(&[1,433],&row.slow)?,
+                "book_levels"=>tensor(&[1,6,depth,9],&book)?, "book_mask"=>Tensor::from_array(([1,6,depth],mask))?,
+                "h_prev"=>tensor(&[suite.layers,1,suite.hidden],previous)?])?;
             let values = ["z_t", "h_next"]
                 .iter()
                 .map(|name| {
@@ -404,6 +428,10 @@ fn native_state(
                 slots: count,
                 empty,
                 fast: row.fast.clone(),
+                // 本Case仅复用参数评分路径；状态已由上面的完整原生行推进。
+                book_levels: vec![],
+                book_mask: vec![],
+                depth: 0,
                 slow: row.slow.clone(),
                 rule: row.rule.clone(),
                 prefix: row.fixture_prefixes[0].clone(),

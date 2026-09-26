@@ -9,6 +9,7 @@ import unittest
 import torch
 from model_train.graphs import CONFIGURATIONS, TwoGraphs, reduce_objects
 from model_train.native_inputs import NativeComponentConsumer
+from model_train.book import pad_books
 
 
 class NativeInputTests(unittest.TestCase):
@@ -20,11 +21,15 @@ class NativeInputTests(unittest.TestCase):
         groups = Path(cls.temp.name) / "groups.json"
         populations = Path(cls.temp.name) / "populations.json"
         overlap = Path(cls.temp.name) / "overlap.json"
+        books = Path(cls.temp.name) / "book-groups.json"
         env = dict(os.environ, NATIVE_INPUT_FIXTURE_OUTPUT=str(groups),
-                   NATIVE_OBJECT_FIXTURE_OUTPUT=str(populations), NATIVE_OVERLAP_FIXTURE_OUTPUT=str(overlap))
+                   NATIVE_OBJECT_FIXTURE_OUTPUT=str(populations), NATIVE_OVERLAP_FIXTURE_OUTPUT=str(overlap),
+                   NATIVE_BOOK_FIXTURE_OUTPUT=str(books))
         subprocess.run(["cargo", "test", "--manifest-path", str(root / "native-inputs/Cargo.toml"),
                         "--locked", "--offline", "--lib"], env=env, check=True)
-        cls.groups = json.loads(groups.read_text()) + json.loads(overlap.read_text())
+        cls.small_groups = json.loads(groups.read_text())
+        cls.book_groups = json.loads(books.read_text())
+        cls.groups = cls.small_groups + json.loads(overlap.read_text()) + cls.book_groups
         cls.populations = json.loads(populations.read_text())
         cls.evidence = Path(os.environ["NATIVE_VALIDATION_OUTPUT"]) if os.environ.get("NATIVE_VALIDATION_OUTPUT") else None
         if cls.evidence:
@@ -55,10 +60,11 @@ class NativeInputTests(unittest.TestCase):
                     key = hidden_key(row["hidden_state_key"])
                     with torch.no_grad():
                         z, h = graphs.state(torch.tensor([row["fast"]]),
-                                            torch.tensor([row["slow"]]), oracle.hidden[key])
+                                            torch.tensor([row["slow"]]),
+                                            *pad_books([row["book_levels"]], like=torch.empty(0)), oracle.hidden[key])
                     oracle.hidden[key] = h
                     expected.append(z)
-                    self.assertEqual(row["fast"][806:], row["rule"])
+                    self.assertEqual(row["fast"][566:], row["rule"])
                     if row["role"] == "DecisionRequired":
                         cash = row["slow"][110]
                         root_key=key[:2]
@@ -88,6 +94,31 @@ class NativeInputTests(unittest.TestCase):
                     torch.testing.assert_close(consumer.hidden[key], h, rtol=0, atol=0)
             handle.remove()
             self.assertEqual(len(consumer.hidden), 1)  # 下一市场继续，开市不重置。
+
+    def test_real_different_depth_roots_batch_without_reordering_or_extra_state_updates(self):
+        graph = self.graphs
+        independent = [NativeComponentConsumer(graph), NativeComponentConsumer(graph)]
+        batched = NativeComponentConsumer(graph)
+        streams = [self.small_groups, self.book_groups]
+        absent = dict(rows=[], pre_frame_hidden_ops=[], post_frame_hidden_ops=[], cancel=[])
+        frame_counts = [0,0]
+        for step in range(max(map(len, streams))):
+            groups = [stream[step] if step < len(stream) else absent for stream in streams]
+            with torch.no_grad():
+                expected = [consumer.consume(group) for consumer,group in zip(independent,groups)]
+                actual = batched.consume_batch(groups)
+            for index,(reference,value) in enumerate(zip(expected,actual)):
+                self.assertEqual(reference.roles,value.roles)
+                self.assertEqual(len(value.states),len(groups[index]['rows']))
+                frame_counts[index] += len(value.states)
+                for z,want in zip(value.states,reference.states):
+                    torch.testing.assert_close(z,want,atol=1e-5,rtol=1e-4)
+            wanted = {k:v for consumer in independent for k,v in consumer.hidden.items()}
+            self.assertEqual(set(batched.hidden),set(wanted))
+            for key,state in wanted.items():
+                torch.testing.assert_close(batched.hidden[key],state,atol=1e-5,rtol=1e-4)
+        self.assertTrue(all(frame_counts))
+        self.assertEqual(independent[1].hidden,{})  # 深盘口根经过ContextOnly、DecisionRequired到原Retire。
 
     @unittest.skipUnless(os.environ.get("NATIVE_MAIN_GRAPH") and os.environ.get("NATIVE_BASELINE_GRAPH"), "requires original frozen graph archive")
     def test_real_native_sequence_in_original_three_runtimes(self):
@@ -158,9 +189,11 @@ class NativeInputTests(unittest.TestCase):
                 states = []
                 for r, row in enumerate(group["rows"]):
                     key = hidden_key(row["hidden_state_key"])
+                    book, book_mask = pad_books([row["book_levels"]], like=torch.empty(0))
                     z, h = state_session.run(None, {
                         "fast_features":np.asarray([row["fast"]], dtype=np.float32),
                         "slow_features":np.asarray([row["slow"]], dtype=np.float32),
+                        "book_levels":book.numpy(), "book_mask":book_mask.numpy(),
                         "h_prev":operations.hidden[key].numpy()})
                     operations.hidden[key] = torch.from_numpy(h)
                     states.append(torch.from_numpy(z))

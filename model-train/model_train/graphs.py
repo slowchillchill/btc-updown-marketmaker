@@ -5,6 +5,7 @@ from collections.abc import Callable, Sequence
 import torch
 from torch import Tensor, nn
 from .components import ActorScores, BareGRU, FeatureEncoder, ResidualGRU
+from .book import BookEncoder, BOOK_SUMMARY
 
 
 @dataclass(frozen=True)
@@ -22,7 +23,7 @@ CONFIGURATIONS = (
     Configuration("MAIN-1x256", 1, 256, 741003),
     Configuration("MAIN-30x1024", 30, 1024, 741004),
 )
-STATE_INPUTS = ("fast_features", "slow_features", "h_prev")
+STATE_INPUTS = ("fast_features", "slow_features", "book_levels", "book_mask", "h_prev")
 STATE_OUTPUTS = ("z_t", "h_next")
 ACTION_INPUTS = ("z_t", "rule_features", "prefix_features", "cancel_features",
                  "cancel_mask", "cancel_reduced", "cancel_exists", "price_fee_features")
@@ -63,13 +64,27 @@ class ActionDecoder(nn.Module):
                 torch.where(cancel_mask, scores["cancel"].squeeze(-1), 0.0))
 
 
+class BookState(nn.Module):
+    """一帧完整六侧编码后仅推进一次原 GRU，参数图继续复用 z_t。"""
+    def __init__(self, config: Configuration):
+        super().__init__()
+        self.layers, self.hidden_size = config.layers, config.hidden
+        # v5 注册顺序：原递推核心（扩展市场宽度）、PM/BN盘口编码器、原参数图。
+        self.core = (BareGRU(596 + BOOK_SUMMARY, 433, config.layers) if config.baseline
+                     else ResidualGRU(596 + BOOK_SUMMARY, 433, config.hidden, config.layers))
+        self.book = BookEncoder()
+
+    def forward(self, fast: Tensor, slow: Tensor, book_levels: Tensor,
+                book_mask: Tensor, h_prev: Tensor) -> tuple[Tensor, Tensor]:
+        return self.core(torch.cat((fast, self.book(book_levels, book_mask)), dim=-1), slow, h_prev)
+
+
 class TwoGraphs(nn.Module):
     def __init__(self, config: Configuration):
         super().__init__()
         with torch.random.fork_rng(devices=[]):
             torch.manual_seed(config.seed)
-            self.state = (BareGRU(836, 433, config.layers) if config.baseline
-                          else ResidualGRU(836, 433, config.hidden, config.layers))
+            self.state = BookState(config)
             self.action = ActionDecoder(config.hidden)
 
 
