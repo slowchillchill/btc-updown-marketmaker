@@ -28,6 +28,7 @@ num-traits = "=0.2.19"
 rust_decimal = { version = "=1.42.1", default-features = false, features = ["std"] }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.150"
+rayon = "=1.12.0"
 
 [dev-dependencies]
 data-pipeline-core = { path = "../../data-pipeline/core" }

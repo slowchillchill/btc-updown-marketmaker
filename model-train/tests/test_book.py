@@ -5,6 +5,7 @@ import torch
 from model_train.book import BookEncoder, pairwise_sum, reduce_levels
 from model_train.graphs import BookState, Configuration, CONFIGURATIONS, TwoGraphs
 from model_train.graph_fixtures import book_fixture, fixture
+from model_train.components import AlignedLinear
 
 
 class BookTests(unittest.TestCase):
@@ -22,6 +23,65 @@ class BookTests(unittest.TestCase):
                 encoder[0].weight[0,3] = 1
                 encoder[2].weight[0,0] = 1
         return model
+
+    def test_compact_values_and_gradients_match_original_dense_coordinates(self):
+        class OriginalDense(BookEncoder):
+            def forward(self, levels, mask):
+                values = torch.cat((self.pm(levels[:, :4]), self.binance(levels[:, 4:])), dim=1)
+                return reduce_levels(values, mask).flatten(1)
+        torch.manual_seed(168)
+        compact = BookEncoder()
+        dense = OriginalDense()
+        for name in ('pm', 'binance'):
+            setattr(dense, name, torch.nn.Sequential(AlignedLinear(9, 32), torch.nn.SiLU(), AlignedLinear(32, 32)))
+        dense.load_state_dict(compact.state_dict())
+        for depth, empty in ((1, False), (257, False), (4096, False), (1, True)):
+            # 故意保留内部空洞、不同侧/批次深度，压紧后不能改归约坐标。
+            x = torch.randn(2, 6, depth, 9)
+            mask = torch.rand(2, 6, depth) > .3
+            mask[0, :4] = False
+            mask[1, 4:] = False
+            if empty:
+                mask[:] = False
+            a = x.clone().requires_grad_()
+            b = x.clone().requires_grad_()
+            compact.zero_grad(); dense.zero_grad()
+            actual, expected = compact(a, mask), dense(b, mask)
+            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+            upstream = torch.randn_like(actual) / depth
+            (actual * upstream).sum().backward()
+            (expected * upstream).sum().backward()
+            torch.testing.assert_close(a.grad, b.grad, atol=1e-5, rtol=1e-4)
+            self.assertEqual(int(a.grad[~mask].count_nonzero()), 0)
+            for p, q in zip(compact.parameters(), dense.parameters()):
+                torch.testing.assert_close(p.grad, q.grad, atol=1e-5, rtol=1e-4)
+
+    def test_compact_standard_onnx_dynamic_and_empty_groups(self):
+        import tempfile
+        from pathlib import Path
+        import onnx
+        from model_train.book import lower_pairwise_sum
+        from model_train.validate_graphs import session, compare
+        model = BookEncoder().eval()
+        B = torch.export.Dim('B', min=1); N = torch.export.Dim('N', min=1)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'book.onnx'
+            program = torch.onnx.export(model, book_fixture(2, 7), dynamo=True, opset_version=18,
+                input_names=['levels', 'mask'], output_names=['summary'],
+                dynamic_shapes=({0:B, 2:N}, {0:B, 2:N}))
+            graph = lower_pairwise_sum(program.model_proto)
+            self.assertFalse(any(node.domain not in ('', 'ai.onnx') for node in graph.graph.node))
+            onnx.save(graph, path)
+            runtime = session(path, 1)
+            with torch.no_grad():
+                for batch, depth in ((1, 1), (3, 257), (1, 4096)):
+                    for empty in ('none', 'pm', 'binance', 'all'):
+                        levels, mask = book_fixture(batch, depth)
+                        if empty in ('pm', 'all'): mask[:, :4] = False
+                        if empty in ('binance', 'all'): mask[:, 4:] = False
+                        expected = model(levels, mask)
+                        actual = torch.from_numpy(runtime.run(None, {'levels': levels.numpy(), 'mask': mask.numpy()})[0])
+                        compare((expected,), (actual,), {'batch': batch, 'depth': depth, 'empty': empty}, {})
 
     def test_price_collision_quantity_swap_keeps_association(self):
         # 两个价格投影相同；新增精确距离坐标仍独立，非归约舍入偶然差。

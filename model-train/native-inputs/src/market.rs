@@ -1,7 +1,8 @@
 //! #166 的 596/30 槽与六侧全量盘口；只消费公共所选事实。有限历史不保存第二份盘口。
 use crate::exact::{decimal, integer, ratio, round_f32, signed_log_f32 as log};
 use contracts::{economics::EconomicRational as R, *};
-use std::collections::VecDeque;
+use rayon::prelude::*;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 
 fn visible<T>(f: &ObservedFactV1<T>) -> Option<&T> {
     matches!(
@@ -164,6 +165,8 @@ pub(crate) fn rules(
 pub(crate) struct SidePrevious {
     total: Option<R>,
     best: Option<R>,
+    // 可丢弃的精确表达式投影，仅含上一帧本侧实际用过的输入；不是盘口事实。
+    logs: BTreeMap<R, f32>,
 }
 #[derive(Clone)]
 pub(crate) struct Sample {
@@ -175,6 +178,107 @@ pub(crate) struct Sample {
 pub(crate) struct MarketHistory {
     sides: [SidePrevious; 6],
     pub(crate) series: [VecDeque<Sample>; 6],
+}
+
+#[cfg(test)]
+mod projection_cache_tests {
+    use super::*;
+
+    #[test]
+    fn only_current_exact_inputs_survive_quantity_best_insert_delete_and_missing_changes() {
+        for pm in [false, true] {
+            for bid in [false, true] {
+                let mut previous = SidePrevious::default();
+                // 先数量改变，再插入新最优价，删除旧档，最后经历已知空／未知／恢复。
+                let mut snapshots = vec![
+                    Some(vec![(ratio(5, 10), integer(2)), (ratio(4, 10), integer(3))]),
+                    Some(vec![(ratio(5, 10), integer(7)), (ratio(4, 10), integer(3))]),
+                    Some(vec![
+                        (ratio(6, 10), integer(11)),
+                        (ratio(5, 10), integer(7)),
+                        (ratio(4, 10), integer(3)),
+                    ]),
+                    Some(vec![
+                        (ratio(6, 10), integer(11)),
+                        (ratio(4, 10), integer(3)),
+                    ]),
+                    Some(vec![]),
+                    None,
+                    Some(vec![(ratio(5, 10), integer(2))]),
+                ];
+                if !bid {
+                    for values in snapshots.iter_mut().flatten() {
+                        values.reverse();
+                    }
+                }
+                for (now, levels) in snapshots.into_iter().enumerate() {
+                    let mut fresh = previous.clone();
+                    fresh.logs.clear();
+                    let (mut actual, mut reference) = (Vec::new(), Vec::new());
+                    let (mut out, mut cold_out) = ([0.; 16], [0.; 16]);
+                    side(
+                        &mut out,
+                        now as i64,
+                        levels.clone(),
+                        vec![],
+                        vec![],
+                        pm,
+                        &mut previous,
+                        &mut actual,
+                        bid,
+                    );
+                    side(
+                        &mut cold_out,
+                        now as i64,
+                        levels.clone(),
+                        vec![],
+                        vec![],
+                        pm,
+                        &mut fresh,
+                        &mut reference,
+                        bid,
+                    );
+                    assert_eq!(out.map(f32::to_bits), cold_out.map(f32::to_bits));
+                    assert_eq!(
+                        actual
+                            .iter()
+                            .map(|r| r.map(f32::to_bits))
+                            .collect::<Vec<_>>(),
+                        reference
+                            .iter()
+                            .map(|r| r.map(f32::to_bits))
+                            .collect::<Vec<_>>()
+                    );
+                    let mut inputs = std::collections::BTreeSet::new();
+                    if let Some(levels) = levels {
+                        for (index, (p, q)) in levels.iter().enumerate() {
+                            let distance = if bid {
+                                levels[0].0.sub(p)
+                            } else {
+                                p.sub(&levels[0].0)
+                            };
+                            assert_eq!(actual[index][0].to_bits(), price(p, pm).to_bits());
+                            assert_eq!(actual[index][1].to_bits(), log(q).to_bits());
+                            assert_eq!(actual[index][8].to_bits(), log(&distance).to_bits());
+                            if !pm {
+                                inputs.insert(p.clone());
+                            }
+                            inputs.insert(q.clone());
+                            inputs.insert(distance);
+                        }
+                    }
+                    assert_eq!(
+                        previous
+                            .logs
+                            .keys()
+                            .cloned()
+                            .collect::<std::collections::BTreeSet<_>>(),
+                        inputs
+                    );
+                }
+            }
+        }
+    }
 }
 
 pub(crate) fn side(
@@ -202,30 +306,71 @@ pub(crate) fn side(
             out[4] = 1.;
         }
         next.total = Some(total);
-        for (i, (p, q)) in levels.iter().enumerate() {
-            let mut row = [0.; 9];
-            row[0] = price(p, pm);
-            row[1] = log(q);
-            row[2] = 1.;
-            let aa: Vec<_> = a
-                .iter()
-                .copied()
-                .filter(|a| paths.get(i).is_some_and(|p| p == &a.field_path))
-                .collect();
-            row[3..8].copy_from_slice(&t5(now, one(&aa)));
-            let best = &levels[0].0;
-            row[8] = log(&if bid { best.sub(p) } else { p.sub(best) });
-            book.push(row);
+        // 每侧冻结输入内建索引；保留同一路径的全部锚点，重复仍表示时间不唯一。
+        let mut by_path: HashMap<&str, Vec<&DirectObservationAnchorV1>> = HashMap::new();
+        for anchor in &a {
+            by_path.entry(&anchor.field_path).or_default().push(anchor);
+        }
+        let mut times = HashMap::new();
+        let mut row_times = Vec::with_capacity(levels.len());
+        for i in 0..levels.len() {
+            let aa = paths
+                .get(i)
+                .and_then(|p| by_path.get(p.as_str()))
+                .map_or(&[][..], Vec::as_slice);
+            let time = one(aa).map_or([0.; 5], |anchor| {
+                *times
+                    .entry((anchor.source_event_at_utc_ms, anchor.received_at_utc_ms))
+                    .or_insert_with(|| t5(now, Some(anchor)))
+            });
+            row_times.push(time);
             if i == 0 {
+                let p = &levels[0].0;
                 next.best = Some(p.clone());
                 if let Some(old) = &previous.best {
                     out[14] = log(&p.sub(old));
                     out[15] = 1.;
                 }
                 if !aa.is_empty() {
-                    best_identity = Some((p.clone(), aa.into_iter().cloned().collect()));
+                    best_identity = Some((p.clone(), aa.iter().copied().cloned().collect()));
                 }
             }
+        }
+        let start = book.len();
+        book.resize(start + levels.len(), [0.; 9]);
+        // 全部侧级事实/历史仍顺序推进；持久 Rayon 池仅处理不相交的纯输出块。
+        // RAYON_NUM_THREADS 单独控制原生投影，与 ORT 的线程参数无关。
+        book[start..]
+            .par_chunks_mut(64)
+            .enumerate()
+            .for_each(|(chunk, rows)| {
+                for (within, row) in rows.iter_mut().enumerate() {
+                    let i = chunk * 64 + within;
+                    let (p, q) = &levels[i];
+                    let projected = |value: &R| {
+                        previous
+                            .logs
+                            .get(value)
+                            .copied()
+                            .unwrap_or_else(|| log(value))
+                    };
+                    row[0] = if pm { price(p, true) } else { projected(p) };
+                    row[1] = projected(q);
+                    row[2] = 1.;
+                    row[3..8].copy_from_slice(&row_times[i]);
+                    let best = &levels[0].0;
+                    row[8] = projected(&if bid { best.sub(p) } else { p.sub(best) });
+                }
+            });
+        // 重建而非累加历史键，空间随当前可见档位数有界；消失的输入不继续驻留。
+        for ((p, q), row) in levels.iter().zip(&book[start..]) {
+            if !pm {
+                next.logs.insert(p.clone(), row[0]);
+            }
+            next.logs.insert(q.clone(), row[1]);
+            let best = &levels[0].0;
+            next.logs
+                .insert(if bid { best.sub(p) } else { p.sub(best) }, row[8]);
         }
     }
     *previous = next;
@@ -742,6 +887,10 @@ pub(crate) fn encode(
             }
             samples[i] = bba(&mut out[151 + 28 * i..179 + 28 * i], &a.best_bid_ask, now);
             pm_trade(&mut out[207 + 18 * i..225 + 18 * i], &a.public_trade, now);
+        } else {
+            // 缺资产时原业务历史语义保持；可丢弃投影不留存不再使用的输入。
+            h.sides[2 * i].logs.clear();
+            h.sides[2 * i + 1].logs.clear();
         }
     }
     out[113..119].copy_from_slice(&quality(o.binance_depth.quality));

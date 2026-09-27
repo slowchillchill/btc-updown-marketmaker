@@ -1,12 +1,25 @@
 """v5 六侧全量盘口：逐档关联编码与图内 float32 动态配对归约。"""
 import torch
 from torch import Tensor, nn
-from .components import AlignedLinear
 
 BOOK_SIDES = 6
 BOOK_WIDTH = 9
 BOOK_EMBEDDING = 32
 BOOK_SUMMARY = BOOK_SIDES * 3 * BOOK_EMBEDDING
+
+
+class BookLinear(nn.Linear):
+    """相同仿射及配对树；输出通道连续，使每次切片复制完整连续块。"""
+    def forward(self, features: Tensor) -> Tensor:
+        values = features.unsqueeze(-1) * self.weight.transpose(0, 1)
+        width = self.in_features
+        while width > 1:
+            paired = width // 2 * 2
+            summed = values[..., :paired:2, :] + values[..., 1:paired:2, :]
+            values = torch.cat((summed, values[..., paired:, :]), dim=-2) if width % 2 else summed
+            width = (width + 1) // 2
+        output = values.squeeze(-2)
+        return output if self.bias is None else output + self.bias
 
 
 def pairwise_sum(values: Tensor) -> Tensor:
@@ -35,12 +48,22 @@ def reduce_levels(values: Tensor, mask: Tensor) -> Tensor:
 class BookEncoder(nn.Module):
     def __init__(self):
         super().__init__()
-        self.pm = nn.Sequential(AlignedLinear(9, 32), nn.SiLU(), AlignedLinear(32, 32))
-        self.binance = nn.Sequential(AlignedLinear(9, 32), nn.SiLU(), AlignedLinear(32, 32))
+        self.pm = nn.Sequential(BookLinear(9, 32), nn.SiLU(), BookLinear(32, 32))
+        self.binance = nn.Sequential(BookLinear(9, 32), nn.SiLU(), BookLinear(32, 32))
 
     def forward(self, levels: Tensor, mask: Tensor) -> Tensor:
-        values = torch.cat((self.pm(levels[:, :4]), self.binance(levels[:, 4:])), dim=1)
+        values = torch.cat((self.encode_valid(self.pm, levels[:, :4], mask[:, :4]),
+                            self.encode_valid(self.binance, levels[:, 4:], mask[:, 4:])), dim=1)
         return reduce_levels(values, mask).flatten(1)
+
+    @staticmethod
+    def encode_valid(encoder: nn.Module, levels: Tensor, mask: Tensor) -> Tensor:
+        """仅编码有效行；原位恢复后归约，保持六侧顺序及固定配对加法树。"""
+        flat = levels.flatten(0, 2)
+        indices = mask.flatten().nonzero().squeeze(1)
+        encoded = encoder(flat.index_select(0, indices))
+        restored = encoded.new_zeros((flat.shape[0], BOOK_EMBEDDING)).index_copy(0, indices, encoded)
+        return restored.reshape(*levels.shape[:3], BOOK_EMBEDDING)
 
 
 def pad_books(rows, *, like: Tensor) -> tuple[Tensor, Tensor]:

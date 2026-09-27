@@ -1,5 +1,76 @@
 # model-train 纯计算组件与两图
 
+## 全档盘口执行与性能复跑
+
+`native_inputs_v5` 五输入、六侧顺序和全部有效档位保持。盘口图先按 PM 四侧／Binance 两侧的
+布尔掩码收集有效行，分别经过原两组 `9→32→32` 权重，再散回原位置。
+sum／mean／max 仍沿原坐标计算；内部空洞、补齐和空侧不改变相邻配对树及并列 max 的首项梯度。
+`BookLinear` 将中间张量的输出通道放在连续末轴，以减少切片复制成本；逐输出的 float32 乘法、
+相邻配对加法及偏置保持，未改用普通 GEMM 或任意并行归约。最终状态图只含标准 ONNX 算子。
+
+原生投影的路径索引和重复直接时间计算只在当前冻结侧内复用，重复锚点仍按原规则表示时间不唯一。
+精确对数的 `ln(2)` 初始有理区间为不可变常量；需要精度加倍时继续使用原区间算法与舍入判据。
+每个根／市场／侧还保留上一帧实际使用的精确对数输入及其 f32 结果；当前价格、数量和距离先形成
+准确有理表达式，再按完整数值查表。每帧重建当前输入集合，消失的键立即退出，未知／空侧清空，
+市场退役随原历史删除；没有固定容量、截断或时间行缓存。表是可丢弃的纯计算结果，不是盘口事实。
+逐档纯输出使用 Rayon 持久池，每块 64 行，按原坐标写入不重叠区域；侧级统计、历史、GRU 和同根帧
+仍顺序推进。`RAYON_NUM_THREADS` 是原生池的线程设置，与 ORT 算子内线程分别控制；未设置时沿 Rayon
+的可用逻辑 CPU 默认值。增加线程是否有利须用实际工作量测量，线程数不改变盘口档位数。
+
+下列测量入口读取固定真实帧包（`metadata.json`、`frames.json`、`inputs.f32`）及已归档的配置／权重。
+每配置 `benchmark_configuration.json` 保存 `Configuration` 字段及来源；只重导出状态图，动作图保持
+原文件。输出位置应在任务工作树之外，以便审查和工作树清理后仍保留原始性能数据。
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python -m model_train.benchmark_state export \
+  --graphs "$BASELINE_GRAPHS" --output "$CANDIDATE_GRAPHS"
+.venv/bin/python -m model_train.benchmark_state matrix \
+  --baseline "$BASELINE_GRAPHS" --candidate "$CANDIDATE_GRAPHS" \
+  --packed "$SAMPLED_INPUTS" --output "$STATE_MEASUREMENTS"
+.venv/bin/python -m model_train.report_state_benchmarks \
+  --measurements "$STATE_MEASUREMENTS" --output "$STATE_REPORT"
+```
+
+矩阵为 MAIN 层数 `1/2/3/10/20/30`、宽度 `256/512/768/1024`、ORT 线程 `1/4/8/16`；
+每版 96 组。各组合基线／候选配对，前后次序在每种线程及配置内平衡，全部串行执行。
+每组 16 次预热，每个真实帧正式调用一次；16 个均匀位置另做 PyTorch／ORT 容限检查。
+结果保留逐次纳秒、P50/P90/P95/P99/最大值、最大值帧身份、模型／输入哈希和线程／环境记录。
+正式计时仅覆盖 `session.run`（包括 Python 调用边界）；读取、补齐和零 hidden 准备另列。
+每帧 hidden 为零，权重未训练；这是固定真实帧抽测，**不属于五分钟完整连续回放**，也不包含原生投影、
+动作图或完整交易链。样本最大值不保证最坏情况，不能把分开实验的分位数相加。
+
+原生完整输出路径的有界真实录制复跑入口为 `native-inputs/examples/replay_projection.rs`：
+
+```bash
+RAYON_NUM_THREADS=4 cargo run --release --locked --offline \
+  --manifest-path native-inputs/Cargo.toml --example replay_projection -- \
+  "$REPLAY_CONFIGURATION" "$PUBLIC_RECORDING_ROOT" "$NATIVE_MEASUREMENTS" decisions 32
+```
+
+公共录制根包含既有 `recording/`、`scenario.json`、`record-completion.json`。
+配置沿录制准备产物提供公共解码参数、规则快照及哈希、终局策略、原生根开始时间、目标 condition、
+初始模拟现金、来源身份与输出容量参数。例程完整恢复公共前史，调用原 `NativeInputRoot::consume`，
+到目标累计 `contexts` 或 `decisions` 行数后停止并排空持久输出；不省略未入选帧的特征投影。
+`groups.jsonl` 可用于独立逐帧递推验证，`completion.json` 的原生计时包括完整 `consume`，不等于仅盘口
+投影或端到端延迟。原生代表成本样本、真实连续段及合成生命周期测试须分别报告覆盖范围。
+另设 `PROJECTION_CACHE_DIAGNOSTICS=1` 可从同批原始精确观测重建查键序列，记录前帧命中率、
+最大键数及键值载荷字节；载荷不包含树节点、分配器容量和双表临时重叠，不等于堆峰值。
+诊断会改变机器缓存状态，应独立运行，不能混入正式计时结果。进程 RSS 包含整个回放宿主。
+
+长时间测试按 30 分钟间隔查看进度。正式性能期间不并发其他竞争 CPU 的测试或构建。
+
+`benchmark_state profile` 可在独立会话诊断算子时间；其 Loop 容器与子事件分列，避免重复归因。
+不得将分析器会话的数据重标为正式延迟。真实连续段可使用既有 Rust ORT 窄验证入口复跑：
+
+```bash
+OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python -m model_train.validate_replay_state \
+  --groups "$NATIVE_MEASUREMENTS/groups.jsonl" --graphs "$CANDIDATE_GRAPHS/MAIN-1x256" \
+  --binary "$RUST_ORT_VALIDATION" --output "$REPLAY_VALIDATION"
+```
+
+三端分别维护 hidden，按原生 InitializeZero／ResetRootHidden／Retire 与原次序消费。
+该入口报告实际出现的角色和操作，不把段外退役计作覆盖；它不替代实际 BUY／撤单执行链验收。
+
 
 撤单完整响应在公共V4链形成独立非经济完成事实，零目标Market响应也完成真实请求。
 逐目标失败、明确撤成及结果未知分别保留；登记减完成推导在途，多请求互不代替完成。
@@ -50,7 +121,7 @@ PM单位为1 pUSD/份，Binance为1 USDT/BTC。这样能区分100000.00／100000
 已知空侧和未知侧由原 fast 的 known/Q6 区分。PM T5只取该价位所选数量事实的直接锚点；
 Binance无逐档时间时五槽继续为零，不能复制整本时间。
 
-PM四侧共享一套、Binance两侧另共享一套 `9→32→32` 编码器，中间SiLU；仿射末轴使用既有固定float32加法树。
+PM四侧共享一套、Binance两侧另共享一套 `9→32→32` 编码器，中间SiLU；仿射按原输入坐标使用既有固定float32加法树。
 每侧拼接sum/mean/max共96维，六侧576维。sum沿动态N反复相邻配对相加、奇数尾项保留；
 训练路径可微，导出边界把标记展开成标准ONNX Loop，生产仍只有原两图且不需要自定义运行内核。
 计数为整数，mean用float32除以计数；max忽略补齐，保留负值，并列梯度只向最早项传播。
