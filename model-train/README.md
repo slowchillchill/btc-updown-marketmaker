@@ -5,7 +5,8 @@
 `native_inputs_v5` 五输入、六侧顺序和全部有效档位保持。盘口图先按 PM 四侧／Binance 两侧的
 布尔掩码收集有效行，分别经过原两组 `9→32→32` 权重，再散回原位置。
 sum／mean／max 仍沿原坐标计算；内部空洞、补齐和空侧不改变相邻配对树及并列 max 的首项梯度。
-`BookLinear` 将中间张量的输出通道放在连续末轴，以减少切片复制成本；逐输出的 float32 乘法、
+`BookLinear` 将乘积的逻辑布局改为 `[行, 输入, 输出]`，使 ONNX／ORT 的连续末轴承载输出通道，
+减少切片复制成本；这不承诺 PyTorch eager 中间张量的实际 stride。逐输出的 float32 乘法、
 相邻配对加法及偏置保持，未改用普通 GEMM 或任意并行归约。最终状态图只含标准 ONNX 算子。
 
 原生投影的路径索引和重复直接时间计算只在当前冻结侧内复用，重复锚点仍按原规则表示时间不唯一。
@@ -58,6 +59,9 @@ RAYON_NUM_THREADS=4 cargo run --release --locked --offline \
 诊断会改变机器缓存状态，应独立运行，不能混入正式计时结果。进程 RSS 包含整个回放宿主。
 
 长时间测试按 30 分钟间隔查看进度。正式性能期间不并发其他竞争 CPU 的测试或构建。
+
+本轮完整结果、内存取舍和验证边界见[全档编码实测报告](validation/full-depth-encoding-168.md)，
+192 行分位数与最大样本身份见[配对结果 CSV](validation/full-depth-encoding-168.csv)。
 
 `benchmark_state profile` 可在独立会话诊断算子时间；其 Loop 容器与子事件分列，避免重复归因。
 不得将分析器会话的数据重标为正式延迟。真实连续段可使用既有 Rust ORT 窄验证入口复跑：
