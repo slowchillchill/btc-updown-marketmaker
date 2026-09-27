@@ -60,7 +60,9 @@ def measure(args):
     config = Configuration(**provenance['configuration'])
     samples = SampledInputs(args.packed)
     frames = samples.frames[:args.limit] if args.limit else samples.frames
-    torch.set_num_threads(args.threads)
+    # 参照固定为单线程，避免验证阶段另建的 Torch 工作池干扰随后 ORT 正式计时。
+    # 被测 ORT 仍按请求的 1/4/8/16 线程运行；多线程三端验收另由原验证入口完成。
+    torch.set_num_threads(1)
     torch.set_num_interop_threads(1)
     graph = session(directory / 'state_encoder.onnx', args.threads)
     selected = sorted(set(np.linspace(0, len(frames) - 1, min(16, len(frames)), dtype=int).tolist()))
@@ -98,6 +100,7 @@ def measure(args):
                         for p in directory.glob('state_encoder.onnx*')},
         'input_files_sha256': samples.hashes, 'sample_count': len(frames), 'warmup_calls': 16,
         'validation_sample_indices': selected, 'validation': stats,
+        'validation_pytorch_intra_threads': 1,
         'samples_ns': durations, 'preparation_ns': preparation,
         'statistics_ms': {name: float(value) for name, value in zip(
             ('p50', 'p90', 'p95', 'p99', 'max'), np.percentile(np.array(durations) / 1e6, (50, 90, 95, 99, 100), method='linear'))},
