@@ -90,7 +90,11 @@ impl TimeStats {
         for i in 0..3 {
             if let Some((lo, hi)) = self.bounds[i] {
                 out[2 * i] = log(&ratio(lo, 1000));
-                out[2 * i + 1] = log(&ratio(hi, 1000));
+                out[2 * i + 1] = if hi == lo {
+                    out[2 * i]
+                } else {
+                    log(&ratio(hi, 1000))
+                };
             }
             out[6 + i] = fraction(self.known[i], self.count);
         }
@@ -178,6 +182,8 @@ pub(crate) struct Sample {
 pub(crate) struct MarketHistory {
     sides: [SidePrevious; 6],
     pub(crate) series: [VecDeque<Sample>; 6],
+    // 仅派生于对应 series；空队列默认零，追加/淘汰时同步重算，随市场历史释放。
+    history_features: [[f32; 4]; 6],
 }
 
 pub(crate) fn side(
@@ -235,9 +241,20 @@ pub(crate) fn side(
                 }
             }
         }
+        // 距离只构造一次，随后将精确键移动到下一帧缓存。
+        let distances: Vec<_> = levels
+            .iter()
+            .map(|(p, _)| {
+                if bid {
+                    levels[0].0.sub(p)
+                } else {
+                    p.sub(&levels[0].0)
+                }
+            })
+            .collect();
         let start = book.len();
         book.resize(start + levels.len(), [0.; 9]);
-        // 全部侧级事实/历史仍顺序推进；持久 Rayon 池仅处理不相交的纯输出块。
+        // 本侧准备已完成；同一持久 Rayon 池仅处理不相交的纯输出块。
         // RAYON_NUM_THREADS 单独控制原生投影，与 ORT 的线程参数无关。
         book[start..]
             .par_chunks_mut(64)
@@ -257,20 +274,22 @@ pub(crate) fn side(
                     row[1] = projected(q);
                     row[2] = 1.;
                     row[3..8].copy_from_slice(&row_times[i]);
-                    let best = &levels[0].0;
-                    row[8] = projected(&if bid { best.sub(p) } else { p.sub(best) });
+                    row[8] = projected(&distances[i]);
                 }
             });
         // 重建而非累加历史键，空间随当前可见档位数有界；消失的输入不继续驻留。
-        for ((p, q), row) in levels.iter().zip(&book[start..]) {
-            if !pm {
-                next.logs.insert(p.clone(), row[0]);
-            }
-            next.logs.insert(q.clone(), row[1]);
-            let best = &levels[0].0;
-            next.logs
-                .insert(if bid { best.sub(p) } else { p.sub(best) }, row[8]);
-        }
+        next.logs = levels
+            .into_iter()
+            .zip(distances)
+            .zip(&book[start..])
+            .flat_map(|(((p, q), distance), row)| {
+                // FromIterator 排序后批量建树，避免逐键沿树路径插入与克隆。
+                (!pm)
+                    .then_some((p, row[0]))
+                    .into_iter()
+                    .chain([(q, row[1]), (distance, row[8])])
+            })
+            .collect();
     }
     *previous = next;
     best_identity
@@ -333,6 +352,7 @@ fn reference(out: &mut [f32], o: &MarketBusinessObservationV1, now: i64) {
 fn history(
     out: &mut [f32],
     q: &mut VecDeque<Sample>,
+    cached: &mut [f32; 4],
     value: Option<(R, Vec<DirectObservationAnchorV1>)>,
     now: i64,
 ) {
@@ -348,9 +368,13 @@ fn history(
         if q.len() > 16 {
             q.pop_front();
         }
+    } else {
+        out.copy_from_slice(cached);
+        return;
     }
     out[0] = fraction(q.len(), 16);
     if q.len() < 2 {
+        cached.copy_from_slice(out);
         return;
     }
     let last = &q[q.len() - 1];
@@ -365,6 +389,7 @@ fn history(
         .fold(R::zero(), |a, b| a.add(&b));
     out[2] = crate::exact::sqrt_log_f32(&squares.divided_by(&integer(q.len() - 1)));
     out[3] = seconds(last.at, q[0].at);
+    cached.copy_from_slice(out);
 }
 fn lifecycle(out: &mut [f32], o: &MarketBusinessObservationV1, now: i64) {
     out[0] = seconds(now, o.market.window.start_at_utc_ms);
@@ -735,6 +760,81 @@ pub(crate) fn encode(
     reference(&mut out[..37], o, now);
     let mut samples: [Option<(R, Vec<DirectObservationAnchorV1>)>; 6] =
         std::array::from_fn(|_| None);
+    // 六侧输入互不依赖；同一 Rayon 池按侧批量准备，结果仍按规范顺序写回。
+    let mut side_features = [[0.; 16]; 6];
+    h.sides
+        .par_iter_mut()
+        .zip(book.par_iter_mut())
+        .zip(side_features.par_iter_mut())
+        .enumerate()
+        .for_each(|(index, ((previous, book), features))| {
+            let bid = index % 2 == 0;
+            if index < 4 {
+                if let Some(asset) = o
+                    .assets
+                    .iter()
+                    .find(|a| a.asset.outcome.index as usize == index / 2)
+                {
+                    let fact = if bid { &asset.bids } else { &asset.asks };
+                    let prefix = format!(
+                        "assets[{}].{}[",
+                        asset.asset.token_id.0,
+                        if bid { "bids" } else { "asks" }
+                    );
+                    let levels = visible(fact);
+                    let paths = levels
+                        .map(|v| {
+                            v.iter()
+                                .filter(|p| decimal(&p.quantity_shares) > R::zero())
+                                .map(|p| format!("{}{}]", prefix, p.price_pusd_per_share.0))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    side(
+                        features,
+                        now,
+                        levels.map(|v| {
+                            v.iter()
+                                .map(|p| {
+                                    (
+                                        decimal(&p.price_pusd_per_share),
+                                        decimal(&p.quantity_shares),
+                                    )
+                                })
+                                .collect()
+                        }),
+                        fact.direct_anchors
+                            .iter()
+                            .filter(|a| a.field_path.starts_with(&prefix))
+                            .collect(),
+                        paths,
+                        true,
+                        previous,
+                        book,
+                        bid,
+                    );
+                } else {
+                    previous.logs.clear();
+                }
+            } else {
+                let levels = visible(&o.binance_depth).map(|d| if bid { &d.bids } else { &d.asks });
+                side(
+                    features,
+                    now,
+                    levels.map(|v| {
+                        v.iter()
+                            .map(|p| (decimal(&p.price_usdt_per_btc), decimal(&p.quantity_btc)))
+                            .collect()
+                    }),
+                    vec![],
+                    vec![],
+                    false,
+                    previous,
+                    book,
+                    bid,
+                );
+            }
+        });
     for i in 0..2 {
         if let Some(a) = o
             .assets
@@ -743,75 +843,17 @@ pub(crate) fn encode(
         {
             let base = 37 + 38 * i;
             out[base..base + 6].copy_from_slice(&quality(a.bids.quality));
-            for (j, f) in [&a.bids, &a.asks].into_iter().enumerate() {
-                let prefix = format!(
-                    "assets[{}].{}[",
-                    a.asset.token_id.0,
-                    if j == 0 { "bids" } else { "asks" }
-                );
-                let aa = f
-                    .direct_anchors
-                    .iter()
-                    .filter(|a| a.field_path.starts_with(&prefix))
-                    .collect();
-                let levels = visible(f);
-                let paths = levels
-                    .map(|v| {
-                        v.iter()
-                            .filter(|p| decimal(&p.quantity_shares) > R::zero())
-                            .map(|p| format!("{}{}]", prefix, p.price_pusd_per_share.0))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                side(
-                    &mut out[base + 6 + j * 16..base + 22 + j * 16],
-                    now,
-                    levels.map(|v| {
-                        v.iter()
-                            .map(|p| {
-                                (
-                                    decimal(&p.price_pusd_per_share),
-                                    decimal(&p.quantity_shares),
-                                )
-                            })
-                            .collect()
-                    }),
-                    aa,
-                    paths,
-                    true,
-                    &mut h.sides[2 * i + j],
-                    &mut book[2 * i + j],
-                    j == 0,
-                );
+            for j in 0..2 {
+                out[base + 6 + j * 16..base + 22 + j * 16]
+                    .copy_from_slice(&side_features[2 * i + j]);
             }
             samples[i] = bba(&mut out[151 + 28 * i..179 + 28 * i], &a.best_bid_ask, now);
             pm_trade(&mut out[207 + 18 * i..225 + 18 * i], &a.public_trade, now);
-        } else {
-            // 缺资产时原业务历史语义保持；可丢弃投影不留存不再使用的输入。
-            h.sides[2 * i].logs.clear();
-            h.sides[2 * i + 1].logs.clear();
         }
     }
     out[113..119].copy_from_slice(&quality(o.binance_depth.quality));
-    // 当前公共 Binance 输出只有整本锚点，没有侧/档位关联；合法价量仍输入。
-    // 不把整本时间复制给各档，也不为中价历史制造双侧样本身份。
     for j in 0..2 {
-        let levels = visible(&o.binance_depth).map(|d| if j == 0 { &d.bids } else { &d.asks });
-        side(
-            &mut out[119 + j * 16..135 + j * 16],
-            now,
-            levels.map(|v| {
-                v.iter()
-                    .map(|p| (decimal(&p.price_usdt_per_btc), decimal(&p.quantity_btc)))
-                    .collect()
-            }),
-            vec![],
-            vec![],
-            false,
-            &mut h.sides[4 + j],
-            &mut book[4 + j],
-            j == 0,
-        );
+        out[119 + j * 16..135 + j * 16].copy_from_slice(&side_features[4 + j]);
     }
     samples[3] = visible(&o.chainlink_spot).map(|v| {
         (
@@ -844,7 +886,13 @@ pub(crate) fn encode(
     events(&mut out[258..439], o, now);
     lifecycle(&mut out[439..542], o, now);
     for (i, s) in samples.into_iter().enumerate() {
-        history(&mut out[542 + 4 * i..546 + 4 * i], &mut h.series[i], s, now);
+        history(
+            &mut out[542 + 4 * i..546 + 4 * i],
+            &mut h.series[i],
+            &mut h.history_features[i],
+            s,
+            now,
+        );
     }
     out[566..].copy_from_slice(rule);
     (out, book)

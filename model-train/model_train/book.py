@@ -11,8 +11,14 @@ BOOK_SUMMARY = BOOK_SIDES * 3 * BOOK_EMBEDDING
 class BookLinear(nn.Linear):
     """相同仿射及配对树；输出通道连续，使每次切片复制完整连续块。"""
     def forward(self, features: Tensor) -> Tensor:
-        values = features.unsqueeze(-1) * self.weight.transpose(0, 1)
-        width = self.in_features
+        # 首层直接计算相邻输入对，省掉完整广播乘积后的两次大切片。
+        paired = self.in_features // 2 * 2
+        values = (features[..., :paired:2].unsqueeze(-1) * self.weight[:, :paired:2].transpose(0, 1)
+                  + features[..., 1:paired:2].unsqueeze(-1) * self.weight[:, 1:paired:2].transpose(0, 1))
+        if self.in_features % 2:
+            tail = features[..., paired:].unsqueeze(-1) * self.weight[:, paired:].transpose(0, 1)
+            values = torch.cat((values, tail), dim=-2)
+        width = (self.in_features + 1) // 2
         while width > 1:
             paired = width // 2 * 2
             summed = values[..., :paired:2, :] + values[..., 1:paired:2, :]

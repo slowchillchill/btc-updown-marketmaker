@@ -550,6 +550,60 @@ fn changing_real_midpoints_feed_exact_increment_rms() {
     // 独立 Decimal(precision=120) sqrt/ln：sqrt((.2²+.1²)/2)=sqrt(.025)。
     assert_eq!(result[784], sqrt_log_f32(&ratio(25, 1000)));
     assert_eq!(result[785], signed_log_f32(&ratio(2, 1000)));
+    // S1：已有非零波动后，非历史事件保持结果；同值新身份仍追加并淘汰。
+    let previous_history = result[782..806].to_vec();
+    let unchanged = push(&mut c, pm(4, 4, 21003, book("6")));
+    let unchanged = encode(&unchanged, &[0.; 30], 23003, &mut h);
+    assert_eq!(&unchanged[782..806], previous_history.as_slice());
+    let mut expected_values = std::collections::VecDeque::from([
+        (ratio(2, 10), 23000),
+        (ratio(4, 10), 23001),
+        (ratio(3, 10), 23002),
+    ]);
+    for i in 5..25 {
+        let now = 23000 + i as i64;
+        let o = push(
+            &mut c,
+            pm(
+                i,
+                i,
+                21000 + i as i64,
+                PolymarketOrderbookEvent::BestBidAsk {
+                    asset_id: UP_TOKEN_ID.into(),
+                    best_bid: Some("0.2".into()),
+                    best_ask: Some("0.4".into()),
+                    spread: Some("0.2".into()),
+                },
+            ),
+        );
+        let actual = encode(&o, &[0.; 30], now, &mut h);
+        expected_values.push_back((ratio(3, 10), now));
+        if expected_values.len() > 16 {
+            expected_values.pop_front();
+        }
+        let squares = expected_values
+            .iter()
+            .zip(expected_values.iter().skip(1))
+            .map(|(a, b)| {
+                let difference = b.0.sub(&a.0);
+                difference.mul(&difference)
+            })
+            .fold(integer(0), |a, b| a.add(&b));
+        let expected = [
+            (expected_values.len() as f32) / 16.,
+            0.,
+            sqrt_log_f32(&squares.divided_by(&integer(expected_values.len() - 1))),
+            signed_log_f32(&ratio(now - expected_values.front().unwrap().1, 1000)),
+        ];
+        assert_eq!(
+            actual[782..786]
+                .iter()
+                .map(|v| v.to_bits())
+                .collect::<Vec<_>>(),
+            expected.map(f32::to_bits)
+        );
+        assert!(actual[786..806].iter().all(|v| v.to_bits() == 0));
+    }
     for (n, d, bits) in [
         (5, 100, 0x3e4ea56b),
         (1, 100, 0x3dc331fc),

@@ -1,0 +1,264 @@
+--- replay_projection.rs
++++ benchmark_projection.rs
+@@ -4,7 +4,8 @@
+ use data_pipeline_core::public_input::*;
+ use data_pipeline_training::{canonical_run::CanonicalRunConfig, public_recording::*};
+ use ledger::{AccountAdmissionPolicyV2, LedgerWriterV1};
+-use model_native_inputs::{HiddenOp, InputRole, NativeInputRoot};
++use model_native_inputs::{HiddenOp, InputRole};
++use model_native_inputs::root_baseline::NativeInputRoot;
+ use serde::{Deserialize, Serialize};
+ use sha2::{Digest, Sha256};
+ use shared_run::SharedExecutionV2;
+@@ -32,6 +33,13 @@
+     peak_key_value_payload_bytes: usize,
+     #[serde(skip)]
+     previous: BTreeMap<(String, usize), BTreeSet<contracts::economics::EconomicRational>>,
++    #[serde(skip)]
++    rows: BTreeMap<(String, usize), BTreeMap<contracts::economics::EconomicRational,contracts::economics::EconomicRational>>,
++    #[serde(skip)]
++    fingerprints: BTreeMap<(String, usize), String>,
++    changes: usize,
++    misses: usize,
++
+ }
+ impl ProjectionInputs {
+     fn observe(&mut self, observation: &MarketBusinessObservationV1) {
+@@ -41,11 +49,17 @@
+         };
+         let visible =
+             |quality| matches!(quality, MarketDataQuality::Fresh | MarketDataQuality::Stale);
++        self.changes=0; self.misses=0;
++        let mut changed=[false;6];
+         let mut sides: [Vec<(R, R)>; 6] = std::array::from_fn(|_| Vec::new());
+         for asset in &observation.assets {
+             let index = asset.asset.outcome.index as usize;
+             if index < 2 {
+                 for (side, fact) in [&asset.bids, &asset.asks].into_iter().enumerate() {
++                    let key=(observation.market.condition_id.0.clone(),index*2+side);
++                    let fingerprint=serde_json::to_string(&(fact.quality,&fact.direct_anchors)).unwrap();
++                    if self.fingerprints.get(&key)==Some(&fingerprint) { continue; }
++                    self.fingerprints.insert(key,fingerprint); changed[index*2+side]=true;
+                     if visible(fact.quality)
+                         && let Some(levels) = &fact.value
+                     {
+@@ -62,7 +76,12 @@
+                 }
+             }
+         }
+-        if visible(observation.binance_depth.quality)
++        let key=(observation.market.condition_id.0.clone(),6);
++        let fingerprint=serde_json::to_string(&(observation.binance_depth.quality,&observation.binance_depth.direct_anchors)).unwrap();
++        let bn_changed=self.fingerprints.get(&key)!=Some(&fingerprint);
++        self.fingerprints.insert(key,fingerprint);
++        changed[4]=bn_changed; changed[5]=bn_changed;
++        if bn_changed && visible(observation.binance_depth.quality)
+             && let Some(depth) = &observation.binance_depth.value
+         {
+             for (side, levels) in [&depth.bids, &depth.asks].into_iter().enumerate() {
+@@ -73,8 +92,14 @@
+             }
+         }
+         for (side, levels) in sides.into_iter().enumerate() {
++            if !changed[side] { continue; }
+             let levels: Vec<_> = levels.into_iter().filter(|(_, q)| q > &R::zero()).collect();
+             let key = (observation.market.condition_id.0.clone(), side);
++            let prior_rows=self.rows.entry(key.clone()).or_default();
++            let next_rows:BTreeMap<_,_>=levels.iter().cloned().collect();
++            self.changes += next_rows.iter().filter(|(p,q)| prior_rows.get(*p)!=Some(*q)).count()
++                + prior_rows.keys().filter(|p| !next_rows.contains_key(*p)).count();
++            *prior_rows=next_rows;
+             let old = self.previous.entry(key).or_default();
+             let mut next = BTreeSet::new();
+             for (p, q) in &levels {
+@@ -94,6 +119,7 @@
+                     next.insert(input);
+                 }
+             }
++            self.misses+=next.difference(old).count();
+             *old = next;
+         }
+         let keys = self.previous.values().map(BTreeSet::len).sum();
+@@ -338,6 +364,17 @@
+     let mut selected_consume_ns = Vec::new();
+     let mut projection_inputs =
+         std::env::var_os("PROJECTION_CACHE_DIAGNOSTICS").map(|_| ProjectionInputs::default());
++    let selecting=std::env::var_os("NATIVE_SELECT").is_some();
++    let selection:BTreeMap<u64,Vec<String>>=std::env::var("NATIVE_SELECTION").ok().map(|p|
++        serde_json::from_reader(File::open(p).unwrap()).unwrap()).unwrap_or_default();
++    let resource_diagnostic=std::env::var_os("NATIVE_RESOURCE").is_some();
++    let continuous=std::env::var_os("NATIVE_CONTINUOUS").is_some();
++    assert!(!continuous || (!selecting && (selection.is_empty() || resource_diagnostic)));
++    let mut continuous_root=None;
++    let mut continuous_groups=0u64;
++    let mut attributes=ProjectionInputs::default();
++    let mut benchmark=BufWriter::new(File::create(out.join("measurements.jsonl"))?);
++    model_native_inputs::bench_pool::set(2);
+     let start = Instant::now();
+     loop {
+         let next = retry(
+@@ -353,11 +390,106 @@
+             shared.action_before(&mut driver)?;
+             continue;
+         }
++        let position=cutoff.receipt().group().group_position;
++        let now=cutoff.decision_time().logical_time_utc_ms();
++        if selecting {
++            shared.action_before(&mut driver)?;
++            if let Some(decision)=driver.decision() {
++                for frame in decision.frames() {
++                    if frame.observation.market.condition_id.0==cfg.condition && now<1789517400000 {
++                        attributes.observe(frame.observation);
++                        line(&mut benchmark,&serde_json::json!({"position":position,"now":now,"changes":attributes.changes,"misses":attributes.misses}))?;
++                    }
++                }
++            }
++            if now>=1789517400000 {break;}
++            continue;
++        }
++        let selected=selection.get(&position);
++        let snapshot_start=Instant::now();
++        let replaying=continuous && now>=1789517070000;
++        let before=(selected.is_some() || replaying).then(||native.clone());
++        let shared_counts=(shared_run::bench_closed_count(),shared_run::bench_market_count());
++        let shared_before=(selected.is_some() || replaying).then(||shared.bench_snapshot());
++
++        let snapshot_ns=snapshot_start.elapsed().as_nanos();
+         let consume_start = Instant::now();
+-        let group = native
+-            .consume(&mut shared, &mut driver)
++        model_native_inputs::bench_pool::set(2);
++        let group = native.consume(&mut shared, &mut driver)
+             .map_err(|e| format!("NativeInputRoot::consume: {e:?}"))?;
+         let native_consume_ns = consume_start.elapsed().as_nanos();
++        if replaying {
++            // 只在连续段入口转换一次，此后候选独立持有缓存和六条历史，不逐帧预填。
++            let candidate=continuous_root.get_or_insert_with(||model_native_inputs::root_history::NativeInputRoot::from_baseline(before.as_ref().unwrap()));
++            let closed=shared_run::bench_closed_count()-shared_counts.0;
++            let registered=shared_run::bench_market_count()-shared_counts.1;
++            let ledger_after=serde_json::to_value(shared.ledger().projection_v2())?;
++            shared.bench_restore(shared_before.as_ref().unwrap());
++            let counts=(shared_run::bench_closed_count(),shared_run::bench_market_count());
++            let actual=candidate.consume(&mut shared,&mut driver).unwrap();
++            candidate.assert_matches(&native);
++            assert_eq!(shared_run::bench_closed_count()-counts.0,closed);
++            assert_eq!(shared_run::bench_market_count()-counts.1,registered);
++            assert_eq!(serde_json::to_value(shared.ledger().projection_v2())?,ledger_after);
++            assert_eq!(serde_json::to_vec(&actual)?,serde_json::to_vec(&group)?,"连续原生输出不一致: {}",position);
++            continuous_groups+=1;
++            line(&mut benchmark,&serde_json::json!({"position":position,"now":now,"continuous_state_exact":true,"shared_closed_records":closed,"shared_registrations":registered}))?;
++        }
++        if continuous {
++            if let Some(ref value)=group {
++                if !value.rows.is_empty() || !value.pre_frame_hidden_ops.is_empty() || !value.post_frame_hidden_ops.is_empty() {
++                    line(&mut writer,&serde_json::json!({"decision_time_utc_ms":now,"group":value}))?;
++                }
++            }
++        }
++        if let (Some(tags),Some(before),Some(expected))=(selected,before,group.as_ref()) {
++            // baseline 的真实首调用与恢复调用完整输出逐位比较；整个 consume 仍在计时内。
++            // 该无交易夹具仍有市场接纳 NOE；全部消费前内存状态恢复在计时外，领取/应用/登记在计时内。
++            let shared_after=(shared_run::bench_closed_count(),shared_run::bench_market_count());
++            let closed_records=shared_after.0-shared_counts.0;
++            let ledger_after=serde_json::to_value(shared.ledger().projection_v2())?;
++            let registrations=shared_after.1-shared_counts.1;
++            let (history_updates,cache_inputs,cache_retained)=native.bench_changes(&before);
++            assert_eq!(expected.action_before.as_ref().unwrap().pending_noe_record_count(),0);
++            let expected=serde_json::to_value(expected)?;
++            if !continuous { line(&mut writer,&serde_json::json!({"position":position,"tags":tags,"group":expected}))?; }
++            for round in 0..2 {
++                let mut settings=vec![("baseline",0),("history",0),("baseline",1),("history",1),("baseline",2),("history",2),("baseline",3),("history",3),("cache",2),("projection",2),("combined",2)];
++                if resource_diagnostic { settings=vec![("baseline",0),("history",0),("baseline",1),("history",1),("baseline",2),("history",2),("baseline",3),("history",3)]; }
++                if tags.iter().all(|tag| tag.starts_with("stress")) { settings=vec![("baseline",2),("history",2)]; }
++                if round==1 {settings.reverse();}
++                for (version,pool) in settings {
++                    macro_rules! measure { ($root:expr) => {{
++                        let restore_start=Instant::now();
++                        let mut root=$root;
++                        shared.bench_restore(shared_before.as_ref().unwrap());
++                        let counts=(shared_run::bench_closed_count(),shared_run::bench_market_count());
++                        model_native_inputs::bench_pool::set(pool);
++                        let restore_ns=restore_start.elapsed().as_nanos();
++                        let cpu_before=resource_diagnostic.then(process_cpu_ns);
++                        let start=Instant::now();
++                        let actual=root.consume(&mut shared,&mut driver).unwrap().unwrap();
++                        let ns=start.elapsed().as_nanos();
++                        let cpu_after=resource_diagnostic.then(process_cpu_ns);
++                        root.assert_matches(&native);
++                        assert_eq!(shared_run::bench_closed_count()-counts.0,closed_records);
++                        assert_eq!(serde_json::to_value(shared.ledger().projection_v2())?,ledger_after);
++                        assert_eq!(shared_run::bench_market_count()-counts.1,registrations);
++                        let actual=serde_json::to_value(actual)?;
++                        assert_eq!(serde_json::to_vec(&actual)?,serde_json::to_vec(&expected)?,"完整原生输出不一致: {} {}",position,version);
++                        line(&mut benchmark,&serde_json::json!({"position":position,"tags":tags,"now":now,"version":version,"resource_diagnostic":resource_diagnostic,"cpu_before_ns":cpu_before,"cpu_after_ns":cpu_after,"cpu_delta_ns":cpu_before.zip(cpu_after).map(|(before,after)|after-before),"threads":([1,4,8,16][pool]),"round":round,"ns":ns,"original_ns":native_consume_ns,"shared_registrations":registrations,"shared_closed_records":closed_records,"pending_noe":0,"next_state_exact":true,"history_updates":history_updates,"cache_unique_inputs":cache_inputs,"cache_unique_retained":cache_retained,"snapshot_ns":snapshot_ns,"restore_ns":restore_ns}))?;
++                    }}; }
++                    match version {
++                        "baseline"=>measure!(before.clone()),
++                        "cache"=>measure!(model_native_inputs::root_cache::NativeInputRoot::from_baseline(&before)),
++                        "projection"=>measure!(model_native_inputs::root_projection::NativeInputRoot::from_baseline(&before)),
++                        "combined"=>measure!(model_native_inputs::root_combined::NativeInputRoot::from_baseline(&before)),
++                        "history"=>measure!(model_native_inputs::root_history::NativeInputRoot::from_baseline(&before)),
++                        _=>unreachable!(),
++                    }
++                }
++            }
++        }
+         if let Some(group) = group {
+             if let Some(diagnostic) = &mut projection_inputs {
+                 for operation in &group.pre_frame_hidden_ops {
+@@ -404,23 +536,14 @@
+                     }
+                 }
+                 let depths: Vec<_> = row.book_levels.iter().map(Vec::len).collect();
+-                line(
++                if selected.is_some() { line(
+                     &mut meta,
+                     &serde_json::json!({"native_group":groups,"row_index":row_index,"condition_id":row.hidden_state_key.condition_id,"role":row.role,"cutoff":group.cutoff,"depths":depths,"fast_len":row.fast.len(),"slow_len":row.slow.len()}),
+-                )?;
+-            }
+-            if !group.rows.is_empty()
+-                || !group.pre_frame_hidden_ops.is_empty()
+-                || !group.post_frame_hidden_ops.is_empty()
+-            {
+-                line(
+-                    &mut writer,
+-                    &serde_json::json!({"decision_time_utc_ms":group.cutoff.decision_time().logical_time_utc_ms(),"native_consume_ns":native_consume_ns,"group":group}),
+-                )?;
++                )?; }
+             }
+             groups += 1;
+
+-            if (if stop_role == "contexts" {
++            if (!continuous && selection.last_key_value().is_some_and(|(last,_)| position >= *last)) || now >= 1789517400000 || (if stop_role == "contexts" {
+                 context
+             } else {
+                 decisions
+@@ -430,6 +553,7 @@
+             }
+         }
+     }
++    benchmark.flush()?;
+     writer.flush()?;
+     meta.flush()?;
+     time_audit.borrow_mut().flush()?;
+@@ -437,7 +561,7 @@
+     json(
+         out.join("completion.json"),
+         &serde_json::json!({
+-            "complete": true, "bounded_only": true, "stop_role": stop_role, "limit": limit,
++            "complete": true, "bounded_only": true, "continuous_state_groups":continuous_groups, "stop_role": stop_role, "limit": limit,
+             "native_groups": groups, "target_context_rows": context, "target_decision_rows": decisions,
+             "all_context_rows": all_context, "all_decision_rows": all_decisions,
+             "target_consume_samples_ns": selected_consume_ns, "elapsed_seconds": start.elapsed().as_secs_f64(),
+@@ -464,3 +588,11 @@
+         args[5].parse()?,
+     )
+ }
++
++// 单列诊断在 wall 计时外读取全进程累计 CPU，包含本进程全部线程。
++fn process_cpu_ns()->u128 {
++    let mut value=libc::timespec {tv_sec:0,tv_nsec:0};
++    // 仅基准使用系统 CPU 时钟；指针指向本地完整 timespec，返回状态必须成功。
++    assert_eq!(unsafe {libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID,&mut value)},0);
++    value.tv_sec as u128*1_000_000_000+value.tv_nsec as u128
++}
