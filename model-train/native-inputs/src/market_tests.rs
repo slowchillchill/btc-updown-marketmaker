@@ -171,6 +171,123 @@ fn direct_time_missing_source_negative_age_and_multiple_anchors_use_independent_
         ]
     );
 }
+
+#[test]
+fn block_parallel_projection_keeps_coordinates_and_unique_direct_times() {
+    let mut c = core();
+    push(&mut c, meta(0));
+    let observation = push(
+        &mut c,
+        pm(
+            1,
+            1,
+            23_000,
+            PolymarketOrderbookEvent::Book {
+                asset_id: UP_TOKEN_ID.into(),
+                bids: (0..129)
+                    .map(|i| PolymarketPriceLevel {
+                        price: rust_decimal::Decimal::new(5000 - i, 4).to_string(),
+                        size: (i + 1).to_string(),
+                    })
+                    .collect(),
+                asks: vec![],
+                last_trade_price: None,
+            },
+        ),
+    );
+    let fact = &observation
+        .assets
+        .iter()
+        .find(|a| a.asset.token_id.0 == UP_TOKEN_ID)
+        .unwrap()
+        .bids;
+    let values = fact.value.as_ref().unwrap();
+    let levels: Vec<_> = values
+        .iter()
+        .map(|p| {
+            (
+                decimal(&p.price_pusd_per_share),
+                decimal(&p.quantity_shares),
+            )
+        })
+        .collect();
+    let paths: Vec<_> = values
+        .iter()
+        .map(|p| format!("assets[{}].bids[{}]", UP_TOKEN_ID, p.price_pusd_per_share.0))
+        .collect();
+    let mut anchors = fact.direct_anchors.clone();
+    // 已有合同允许缺少源时间；重复选中锚点不能被路径索引默默取第一条。
+    anchors
+        .iter_mut()
+        .find(|a| a.field_path == paths[64])
+        .unwrap()
+        .source_event_at_utc_ms = None;
+    anchors.push(
+        anchors
+            .iter()
+            .find(|a| a.field_path == paths[0])
+            .unwrap()
+            .clone(),
+    );
+    for threads in [1, 4, 16] {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        for now in [24_000, 25_000] {
+            let mut out = [0.; 16];
+            let mut rows = Vec::new();
+            let mut previous = super::market::SidePrevious::default();
+            pool.install(|| {
+                super::market::side(
+                    &mut out,
+                    now,
+                    Some(levels.clone()),
+                    anchors.iter().collect(),
+                    paths.clone(),
+                    true,
+                    &mut previous,
+                    &mut rows,
+                    true,
+                )
+            });
+            assert_eq!(rows.len(), levels.len());
+            for (i, (p, q)) in levels.iter().enumerate() {
+                let selected: Vec<_> = anchors
+                    .iter()
+                    .filter(|a| a.field_path == paths[i])
+                    .collect();
+                let expected_time = super::market::t5(
+                    now,
+                    if selected.len() == 1 {
+                        Some(selected[0])
+                    } else {
+                        None
+                    },
+                );
+                let expected = [
+                    round_f32(&p.mul(&integer(2)).sub(&integer(1))),
+                    signed_log_f32(q),
+                    1.,
+                    expected_time[0],
+                    expected_time[1],
+                    expected_time[2],
+                    expected_time[3],
+                    expected_time[4],
+                    signed_log_f32(&levels[0].0.sub(p)),
+                ];
+                assert_eq!(
+                    rows[i].map(f32::to_bits),
+                    expected.map(f32::to_bits),
+                    "threads={threads} index={i}"
+                );
+            }
+            assert_eq!(&rows[0][3..8], &[0.; 5]);
+            assert_eq!(rows[64][6], 0.);
+            assert_eq!(rows[64][7], 1.);
+        }
+    }
+}
 #[test]
 fn binance_partial_update_retains_prices_without_inventing_level_time_or_history() {
     let mut c = core();

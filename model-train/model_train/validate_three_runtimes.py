@@ -31,7 +31,7 @@ def suite(config):
         return c
     for b in (1,2,3):
         add(f'recurrent-B{b}', 'recurrent', b, steps=12)
-    for depth in (0,7,8,257,1001):
+    for depth in (0,1,7,8,257,1001,4096):
         c = add(f'book-depth{depth}', 'recurrent', 2, steps=3)
         book, mask = book_fixture(2, depth)
         if depth > 7:
@@ -108,7 +108,7 @@ def compare(ref, actual, label, stats, exact=False):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--config',required=True);parser.add_argument('--threads',type=int,choices=(1,4),required=True)
+    parser.add_argument('--config',required=True);parser.add_argument('--threads',type=int,choices=(1,4,8,16),required=True)
     parser.add_argument('--graphs',type=Path,required=True);parser.add_argument('--output',type=Path,required=True)
     parser.add_argument('--binary',type=Path,default=Path('rust-ort-validation/target/debug/model-graph-ort-validation'))
     args=parser.parse_args();config=next(c for c in CONFIGURATIONS if c.name==args.config)

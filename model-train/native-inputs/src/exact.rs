@@ -4,6 +4,7 @@ use num_bigint::{BigInt, BigUint};
 use num_integer::Integer;
 use num_traits::{One, Signed, ToPrimitive, Zero};
 use rust_decimal::Decimal;
+use std::sync::OnceLock;
 
 pub(crate) fn ratio(n: impl Into<BigInt>, d: impl Into<BigInt>) -> R {
     R::ratio(n.into(), d.into())
@@ -98,13 +99,23 @@ pub fn signed_log_f32(value: &R) -> f32 {
     }
     let scaled = b << usize::try_from(k).unwrap();
     let t = ratio(&a - &scaled, &a + &scaled);
-    let ln2t = ratio(1, 3);
     let mut terms = BigInt::from(8);
     loop {
         let (ml, mh) = log_interval(&t, &terms);
-        let (ll, lh) = log_interval(&ln2t, &terms);
-        let low = ml.add(&ll.mul(&integer(k)));
-        let high = mh.add(&lh.mul(&integer(k)));
+        // 相同有理区间只初始化一次；精度加倍仍走原算法，不改近似或舍入规则。
+        static LN2_INITIAL: OnceLock<(R, R)> = OnceLock::new();
+        let (low, high) = if k == 0 {
+            (ml, mh)
+        } else {
+            let refined;
+            let (ll, lh) = if terms == BigInt::from(8) {
+                LN2_INITIAL.get_or_init(|| log_interval(&ratio(1, 3), &BigInt::from(8)))
+            } else {
+                refined = log_interval(&ratio(1, 3), &terms);
+                &refined
+            };
+            (ml.add(&ll.mul(&integer(k))), mh.add(&lh.mul(&integer(k))))
+        };
         let (low, high) = (round_f32(&low), round_f32(&high));
         if low.to_bits() == high.to_bits() {
             return if n.is_negative() { -low } else { low };
