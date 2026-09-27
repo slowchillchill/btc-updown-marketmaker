@@ -3,7 +3,9 @@ import argparse
 from collections import Counter
 import copy
 import json
+from itertools import zip_longest
 from pathlib import Path
+import struct
 import subprocess
 import time
 
@@ -20,15 +22,41 @@ def groups(path):
             yield json.loads(line)
 
 
+def compare_native(reference, actual, path=()):
+    """所有原生字段一致；浮点按 f32 位比较，包括带符号零。"""
+    assert type(reference) is type(actual), path
+    if isinstance(reference, dict):
+        assert reference.keys() == actual.keys(), path
+        for key in reference:
+            compare_native(reference[key], actual[key], (*path, key))
+    elif isinstance(reference, list):
+        assert len(reference) == len(actual), path
+        for index, (a, b) in enumerate(zip(reference, actual, strict=True)):
+            compare_native(a, b, (*path, index))
+    elif isinstance(reference, float):
+        assert struct.pack('<f', reference) == struct.pack('<f', actual), path
+    else:
+        assert reference == actual, path
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--groups', type=Path, required=True)
+    parser.add_argument('--reference-groups', type=Path)
     parser.add_argument('--graphs', type=Path, required=True)
     parser.add_argument('--binary', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--threads', type=int, default=1)
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
+    native_comparison = None
+    if args.reference_groups:
+        count = 0
+        for count, (reference, actual) in enumerate(zip_longest(groups(args.reference_groups), groups(args.groups)), 1):
+            assert reference is not None and actual is not None, ('group_count', count)
+            compare_native(reference['group'], actual['group'], (count - 1,))
+        native_comparison = {'groups': count, 'all_fields_equal_float32_bits': True,
+                             'reference_groups_sha256': sha(args.reference_groups)}
     configuration = Configuration(**json.loads((args.graphs / 'benchmark_configuration.json').read_text())['configuration'])
     torch.set_num_threads(args.threads)
     torch.set_num_interop_threads(1)
@@ -96,6 +124,7 @@ def main():
         'rows': rows, 'groups': group_count, 'roles': dict(roles), 'operations': dict(operations),
         'first_state_time_utc_ms': first, 'last_state_time_utc_ms': last,
         'remaining_hidden_keys': len(consumers[0].hidden), 'comparison': stats,
+        'native_comparison': native_comparison,
         'groups_sha256': sha(args.groups), 'rust_trace_sha256': sha(raw),
         'weights_sha256': sha(args.graphs / 'initial_weights.pt'),
         'state_graph_sha256': sha(args.graphs / 'state_encoder.onnx'),
