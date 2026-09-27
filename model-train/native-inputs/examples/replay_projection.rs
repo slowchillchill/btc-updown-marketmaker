@@ -156,15 +156,15 @@ impl PublicConsumptionTimeSourceV1 for ReceivedTimes {
         group: &PublicGroupReferenceV1,
     ) -> Result<i64, SimRunActorErrorV2> {
         loop {
-            if let Some((position, at)) = self.current {
-                if position == group.closed_at_input_position {
-                    // 离线测量宿主的显式交付规则；不冒称恢复了原生产策略时钟。
-                    let delivered = self.last.max(at);
-                    line(&mut *self.audit.borrow_mut(), &serde_json::json!({"group_position":group.group_position,"closed_at_input_position":position,"source_closing_received_at_utc_ms":at,"assigned_delivery_at_utc_ms":delivered,"delay_ms":delivered-at}))
+            if let Some((position, at)) = self.current
+                && position == group.closed_at_input_position
+            {
+                // 离线测量宿主的显式交付规则；不冒称恢复了原生产策略时钟。
+                let delivered = self.last.max(at);
+                line(&mut *self.audit.borrow_mut(), &serde_json::json!({"group_position":group.group_position,"closed_at_input_position":position,"source_closing_received_at_utc_ms":at,"assigned_delivery_at_utc_ms":delivered,"delay_ms":delivered-at}))
                         .map_err(|e| SimRunActorErrorV2::PublicConsumptionSource(e.to_string()))?;
-                    self.last = delivered;
-                    return Ok(delivered);
-                }
+                self.last = delivered;
+                return Ok(delivered);
             }
             let row = self
                 .reader
