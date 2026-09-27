@@ -1,0 +1,49 @@
+--- market.rs
++++ market.rs
+@@ -178,6 +178,7 @@
+ pub(crate) struct MarketHistory {
+     sides: [SidePrevious; 6],
+     pub(crate) series: [VecDeque<Sample>; 6],
++    history_features: [[f32; 4]; 6],
+ }
+
+ pub(crate) fn side(
+@@ -333,6 +334,7 @@
+ fn history(
+     out: &mut [f32],
+     q: &mut VecDeque<Sample>,
++    cached: &mut [f32; 4],
+     value: Option<(R, Vec<DirectObservationAnchorV1>)>,
+     now: i64,
+ ) {
+@@ -349,8 +351,13 @@
+             q.pop_front();
+         }
+     }
++    else {
++        out.copy_from_slice(cached);
++        return;
++    }
+     out[0] = fraction(q.len(), 16);
+     if q.len() < 2 {
++        cached.copy_from_slice(out);
+         return;
+     }
+     let last = &q[q.len() - 1];
+@@ -365,6 +372,7 @@
+         .fold(R::zero(), |a, b| a.add(&b));
+     out[2] = crate::exact::sqrt_log_f32(&squares.divided_by(&integer(q.len() - 1)));
+     out[3] = seconds(last.at, q[0].at);
++    cached.copy_from_slice(out);
+ }
+ fn lifecycle(out: &mut [f32], o: &MarketBusinessObservationV1, now: i64) {
+     out[0] = seconds(now, o.market.window.start_at_utc_ms);
+@@ -808,7 +816,7 @@
+     events(&mut out[258..439], o, now);
+     lifecycle(&mut out[439..542], o, now);
+     for (i, s) in samples.into_iter().enumerate() {
+-        history(&mut out[542 + 4 * i..546 + 4 * i], &mut h.series[i], s, now);
++        history(&mut out[542 + 4 * i..546 + 4 * i], &mut h.series[i], &mut h.history_features[i], s, now);
+     }
+     out[566..].copy_from_slice(rule);
+     (out, book)
