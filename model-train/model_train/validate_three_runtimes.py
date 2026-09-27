@@ -31,7 +31,7 @@ def suite(config):
         return c
     for b in (1,2,3):
         add(f'recurrent-B{b}', 'recurrent', b, steps=12)
-    for depth in (0,7,8,257,1001):
+    for depth in (0,1,7,8,257,1001,4096):
         c = add(f'book-depth{depth}', 'recurrent', 2, steps=3)
         book, mask = book_fixture(2, depth)
         if depth > 7:
