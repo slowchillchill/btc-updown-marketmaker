@@ -180,107 +180,6 @@ pub(crate) struct MarketHistory {
     pub(crate) series: [VecDeque<Sample>; 6],
 }
 
-#[cfg(test)]
-mod projection_cache_tests {
-    use super::*;
-
-    #[test]
-    fn only_current_exact_inputs_survive_quantity_best_insert_delete_and_missing_changes() {
-        for pm in [false, true] {
-            for bid in [false, true] {
-                let mut previous = SidePrevious::default();
-                // 先数量改变，再插入新最优价，删除旧档，最后经历已知空／未知／恢复。
-                let mut snapshots = vec![
-                    Some(vec![(ratio(5, 10), integer(2)), (ratio(4, 10), integer(3))]),
-                    Some(vec![(ratio(5, 10), integer(7)), (ratio(4, 10), integer(3))]),
-                    Some(vec![
-                        (ratio(6, 10), integer(11)),
-                        (ratio(5, 10), integer(7)),
-                        (ratio(4, 10), integer(3)),
-                    ]),
-                    Some(vec![
-                        (ratio(6, 10), integer(11)),
-                        (ratio(4, 10), integer(3)),
-                    ]),
-                    Some(vec![]),
-                    None,
-                    Some(vec![(ratio(5, 10), integer(2))]),
-                ];
-                if !bid {
-                    for values in snapshots.iter_mut().flatten() {
-                        values.reverse();
-                    }
-                }
-                for (now, levels) in snapshots.into_iter().enumerate() {
-                    let mut fresh = previous.clone();
-                    fresh.logs.clear();
-                    let (mut actual, mut reference) = (Vec::new(), Vec::new());
-                    let (mut out, mut cold_out) = ([0.; 16], [0.; 16]);
-                    side(
-                        &mut out,
-                        now as i64,
-                        levels.clone(),
-                        vec![],
-                        vec![],
-                        pm,
-                        &mut previous,
-                        &mut actual,
-                        bid,
-                    );
-                    side(
-                        &mut cold_out,
-                        now as i64,
-                        levels.clone(),
-                        vec![],
-                        vec![],
-                        pm,
-                        &mut fresh,
-                        &mut reference,
-                        bid,
-                    );
-                    assert_eq!(out.map(f32::to_bits), cold_out.map(f32::to_bits));
-                    assert_eq!(
-                        actual
-                            .iter()
-                            .map(|r| r.map(f32::to_bits))
-                            .collect::<Vec<_>>(),
-                        reference
-                            .iter()
-                            .map(|r| r.map(f32::to_bits))
-                            .collect::<Vec<_>>()
-                    );
-                    let mut inputs = std::collections::BTreeSet::new();
-                    if let Some(levels) = levels {
-                        for (index, (p, q)) in levels.iter().enumerate() {
-                            let distance = if bid {
-                                levels[0].0.sub(p)
-                            } else {
-                                p.sub(&levels[0].0)
-                            };
-                            assert_eq!(actual[index][0].to_bits(), price(p, pm).to_bits());
-                            assert_eq!(actual[index][1].to_bits(), log(q).to_bits());
-                            assert_eq!(actual[index][8].to_bits(), log(&distance).to_bits());
-                            if !pm {
-                                inputs.insert(p.clone());
-                            }
-                            inputs.insert(q.clone());
-                            inputs.insert(distance);
-                        }
-                    }
-                    assert_eq!(
-                        previous
-                            .logs
-                            .keys()
-                            .cloned()
-                            .collect::<std::collections::BTreeSet<_>>(),
-                        inputs
-                    );
-                }
-            }
-        }
-    }
-}
-
 pub(crate) fn side(
     out: &mut [f32],
     now: i64,
@@ -977,4 +876,105 @@ pub fn pad_books<'a>(
         }
     }
     (depth, values, mask)
+}
+
+#[cfg(test)]
+mod projection_cache_tests {
+    use super::*;
+
+    #[test]
+    fn only_current_exact_inputs_survive_quantity_best_insert_delete_and_missing_changes() {
+        for pm in [false, true] {
+            for bid in [false, true] {
+                let mut previous = SidePrevious::default();
+                // 先数量改变，再插入新最优价，删除旧档，最后经历已知空／未知／恢复。
+                let mut snapshots = vec![
+                    Some(vec![(ratio(5, 10), integer(2)), (ratio(4, 10), integer(3))]),
+                    Some(vec![(ratio(5, 10), integer(7)), (ratio(4, 10), integer(3))]),
+                    Some(vec![
+                        (ratio(6, 10), integer(11)),
+                        (ratio(5, 10), integer(7)),
+                        (ratio(4, 10), integer(3)),
+                    ]),
+                    Some(vec![
+                        (ratio(6, 10), integer(11)),
+                        (ratio(4, 10), integer(3)),
+                    ]),
+                    Some(vec![]),
+                    None,
+                    Some(vec![(ratio(5, 10), integer(2))]),
+                ];
+                if !bid {
+                    for values in snapshots.iter_mut().flatten() {
+                        values.reverse();
+                    }
+                }
+                for (now, levels) in snapshots.into_iter().enumerate() {
+                    let mut fresh = previous.clone();
+                    fresh.logs.clear();
+                    let (mut actual, mut reference) = (Vec::new(), Vec::new());
+                    let (mut out, mut cold_out) = ([0.; 16], [0.; 16]);
+                    side(
+                        &mut out,
+                        now as i64,
+                        levels.clone(),
+                        vec![],
+                        vec![],
+                        pm,
+                        &mut previous,
+                        &mut actual,
+                        bid,
+                    );
+                    side(
+                        &mut cold_out,
+                        now as i64,
+                        levels.clone(),
+                        vec![],
+                        vec![],
+                        pm,
+                        &mut fresh,
+                        &mut reference,
+                        bid,
+                    );
+                    assert_eq!(out.map(f32::to_bits), cold_out.map(f32::to_bits));
+                    assert_eq!(
+                        actual
+                            .iter()
+                            .map(|r| r.map(f32::to_bits))
+                            .collect::<Vec<_>>(),
+                        reference
+                            .iter()
+                            .map(|r| r.map(f32::to_bits))
+                            .collect::<Vec<_>>()
+                    );
+                    let mut inputs = std::collections::BTreeSet::new();
+                    if let Some(levels) = levels {
+                        for (index, (p, q)) in levels.iter().enumerate() {
+                            let distance = if bid {
+                                levels[0].0.sub(p)
+                            } else {
+                                p.sub(&levels[0].0)
+                            };
+                            assert_eq!(actual[index][0].to_bits(), price(p, pm).to_bits());
+                            assert_eq!(actual[index][1].to_bits(), log(q).to_bits());
+                            assert_eq!(actual[index][8].to_bits(), log(&distance).to_bits());
+                            if !pm {
+                                inputs.insert(p.clone());
+                            }
+                            inputs.insert(q.clone());
+                            inputs.insert(distance);
+                        }
+                    }
+                    assert_eq!(
+                        previous
+                            .logs
+                            .keys()
+                            .cloned()
+                            .collect::<std::collections::BTreeSet<_>>(),
+                        inputs
+                    );
+                }
+            }
+        }
+    }
 }
