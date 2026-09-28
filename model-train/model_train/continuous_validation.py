@@ -4,7 +4,7 @@ from pathlib import Path
 import torch
 from .graphs import TwoGraphs, CONFIGURATIONS, STATE_INPUTS, ACTION_INPUTS
 from .native_inputs import NativeComponentConsumer
-from .validate_graphs import session, call_ort, compare
+from .validate_graphs import session, call_ort, compare, reference_ort_action
 from .actor import conditional_choice
 from .actor_validation import compare_actor_steps
 
@@ -22,9 +22,8 @@ class ContinuousPython:
         self.action_forward = self.model.action.forward
         self.object_forward = self.model.action.object_encoder.forward
         self.state_session = session(directory / 'state_encoder.onnx', threads)
-        self.action_session = session(directory / 'action_decoder.onnx', threads)
         self.ort_state = call_ort(self.state_session, STATE_INPUTS)
-        self.ort_action = call_ort(self.action_session, ACTION_INPUTS)
+        self.ort_action = reference_ort_action(directory, threads)
         self.consumers = [NativeComponentConsumer(self.model), NativeComponentConsumer(self.model)]
         self.hidden_operations = [0, 0]
         self.parameter_gru_calls = [0, 0]
@@ -44,14 +43,15 @@ class ContinuousPython:
         self.population_groups = []
         self.provenance = self._provenance()
         from .validate_graphs import sha
-        self.provenance['graphs'] = {str(directory / name): sha(directory / name) for name in ('initial_weights.pt', 'state_encoder.onnx', 'state_encoder.onnx.data', 'action_decoder.onnx', 'action_decoder.onnx.data')}
+        self.provenance['graphs'] = {str(directory / name): sha(directory / name) for name in ('initial_weights.pt', 'state_encoder.onnx', 'state_encoder.onnx.data', *[p.name for p in sorted(directory.glob('action_*.onnx*'))])}
         self.provenance['sources'] = {str(path): sha(path) for path in sorted(Path(__file__).parent.glob('*.py'))}
         self.provenance['native_extension_sha256'] = sha(self.provenance['native_module'])
-        self.provenance['input_contract_version'] = 'native_inputs_v5'
+        self.provenance['input_contract_version'] = 'native_inputs_v6'
+        self.provenance['action_contract_version'] = 'native_actions_v2'
         self.provenance['feature_schema_sha256'] = sha(Path(__file__).resolve().parents[1] / 'native-inputs' / 'feature_schema.json')
         self.provenance['threads'] = threads
         self.provenance['ort_sessions'] = {
-            'providers': [self.state_session.get_providers(), self.action_session.get_providers()],
+            'providers': [self.state_session.get_providers(), ['CPUExecutionProvider']],
             'optimization': 'ALL', 'execution': 'SEQUENTIAL', 'intra_threads': threads,
             'inter_threads': 1, 'memory_pattern': False, 'spinning': False, 'cpu_arena': True,
             'native_settings': 'same explicit builder settings; CPU only',
@@ -59,14 +59,7 @@ class ContinuousPython:
         self.provenance['input_parameters'] = {'generator': 'random.Random', 'seed': '742000+j', 'field': 'initial public book bid/ask depth', 'inclusive_range': [100, 200], 'order': 'Trade, Orphan, Rebate; then independent root index; repeat/config/thread reuse'}
 
     def _objects_ort(self, features):
-        batch, slots, _ = features.shape
-        hidden = self.config.hidden
-        if self.population_auditing:
-            self.population_report['calls'].append({'runtime': 1, 'phase': 'object_encoding', 'batch': batch,
-                'slots': slots, 'valid_rows': [slots] * batch})
-        return self.ort_action(torch.zeros(batch, hidden), torch.zeros(batch, 30), torch.zeros(batch, 60),
-            features, torch.ones(batch, slots, dtype=torch.bool), torch.zeros(batch, 3 * hidden // 2),
-            torch.zeros(batch, dtype=torch.bool), torch.zeros(batch, 9999))[6]
+        return self.ort_action.stages['action_objects'](features,torch.ones(features.shape[:2],dtype=torch.bool))[0]
 
     def advance(self, native_groups, autonomous):
         selected = [autonomous] * len(native_groups) if isinstance(autonomous, bool) else autonomous
@@ -80,7 +73,7 @@ class ContinuousPython:
         self.population_groups.clear()
         for runtime, consumer in enumerate(self.consumers):
             label = 'torch' if runtime == 0 else 'ort'
-            def state(*args):
+            def state(*args, runtime=runtime, label=label):
                 state_inputs[runtime].append(tuple(value.detach() for value in args))
                 started = time.perf_counter()
                 output = (self.state_forward if runtime == 0 else self.ort_state)(*args)
@@ -89,21 +82,24 @@ class ContinuousPython:
                 self.state_batches[batch] = self.state_batches.get(batch, 0) + 1
                 traces[runtime].append(tuple(value.detach().clone() for value in output))
                 return output
-            def action(*args):
-                started = time.perf_counter()
-                output = (self.action_forward if runtime == 0 else self.ort_action)(*args)
-                self.durations['action_' + label].append(time.perf_counter() - started)
-                batch = args[0].shape[0]
-                self.action_batches[batch] = self.action_batches.get(batch, 0) + 1
-                return output
-            def objects(*args):
-                started = time.perf_counter()
-                output = (self.object_forward if runtime == 0 else self._objects_ort)(*args)
-                self.durations['objects_' + label].append(time.perf_counter() - started)
-                return output
             self.model.state.forward = state
-            self.model.action.forward = action
-            self.model.action.object_encoder.forward = objects
+            from .graphs import action_stages
+            raw = action_stages(self.model.action) if runtime == 0 else self.ort_action.stages
+            def measured(name, call, runtime=runtime, label=label):
+                def invoke(*args):
+                    started=time.perf_counter()
+                    out=call(*args)
+                    self.durations[('objects_' if name=='action_objects' else 'action_')+label].append(time.perf_counter()-started)
+                    self.action_batches[args[0].shape[0]]=self.action_batches.get(args[0].shape[0],0)+1
+                    return out if runtime==0 or name=='action_family' else out[0]
+                return invoke
+            consumer.stages={name:measured(name,call) for name,call in raw.items()}
+            if runtime==1:
+                def rule(g,r,consumer=consumer):
+                    if r not in g.rule_contexts:
+                        _,g.rule_contexts[r]=consumer.stages['action_family'](g.states[r],g.rules[r],g.cancel_reduced,g.cancel_exists)
+                    return g.rule_contexts[r]
+                consumer._rule=rule
             with torch.no_grad():
                 action_calls_before = len(self.durations['action_' + label])
                 object_calls_before = len(self.durations['objects_' + label])
@@ -131,7 +127,7 @@ class ContinuousPython:
                     for i, blocks, support in zip(active, outputs, supports):
                         actor = actors[i][2]
                         head = actor.head_index()
-                        scores = torch.cat([block[head][0] for block in blocks])[:len(support)] if head == 7 else blocks[0][head][0]
+                        scores = torch.cat([block[head][0] for block in blocks])[:len(support)] if head == 5 else blocks[0][head][0]
                         choice, _, _ = conditional_choice(scores, support, deterministic=True)
                         heads[i].append(head)
                         records[i].append((support, actor.validation_state(), actor.prefix_features(), scores.tolist()))
@@ -244,12 +240,20 @@ class ContinuousPython:
         self.population_auditing = True
         runtime_records = []
         for runtime, consumer in enumerate(self.consumers):
-            def measured_action(*args):
-                self.population_report['calls'].append({'runtime': runtime, 'batch': args[0].shape[0],
-                    'slots': args[3].shape[1], 'valid_rows': args[4].sum(dim=1).tolist()})
-                return (self.action_forward if runtime == 0 else self.ort_action)(*args)
-            self.model.action.forward = measured_action
-            self.model.action.object_encoder.forward = self.object_forward if runtime == 0 else self._objects_ort
+            from .graphs import action_stages
+            consumer.stages = action_stages(self.model.action) if runtime==0 else {
+                name:(call if name=='action_family' else (lambda *args,call=call:call(*args)[0]))
+                for name,call in self.ort_action.stages.items()}
+            def measured_stage(name,call,runtime=runtime):
+                def invoke(*args):
+                    record={'runtime':runtime,'graph':name,'batch':args[0].shape[0]}
+                    if name in ('action_objects','action_cancel'):
+                        record.update(slots=args[-1].shape[1],valid_rows=args[-1].sum(dim=1).tolist())
+                    self.population_report['calls'].append(record)
+                    return call(*args)
+                return invoke
+            consumer.stages={name:measured_stage(name,call) for name,call in consumer.stages.items()}
+
             local = []
             groups = self.population_groups[runtime]
             entries = [(g, next(i for i, role in enumerate(g.roles) if role == 'DecisionRequired'), n)
@@ -271,10 +275,10 @@ class ContinuousPython:
                     for lengths in layouts:
                         self.population_report['layouts'].append({'runtime': runtime, 'root': root, 'row': row, 'family': family, 'valid_lengths': lengths})
                         with torch.no_grad():
-                            features, reduced, exists = consumer.objects(native.features()['cancel'], lengths=lengths)
-                            frozen = replace(g, cancel_features=features, cancel_reduced=reduced, cancel_exists=exists)
+                            features, reduced, exists, embeddings = consumer.objects(native.features()['cancel'], lengths=lengths)
+                            frozen = replace(g, cancel_features=features, cancel_reduced=reduced, cancel_exists=exists, cancel_embeddings=embeddings, rule_contexts={})
                             blocks = consumer.parameters(frozen, row, actor.prefix_features(), lengths=lengths)
-                            scores = torch.cat([b[7][0, :length] for b, length in zip(blocks, lengths)])
+                            scores = torch.cat([b[5][0, :length] for b, length in zip(blocks, lengths)])
                             variants.append(scores)
                     support = actor.support()
                     legal = torch.tensor(support, dtype=torch.bool)
@@ -304,7 +308,7 @@ class ContinuousPython:
                 with torch.no_grad():
                     outputs = consumer.parameters_batch([mixed[i] for i in active])
                     actor = mixed[1][2]
-                    scores = torch.cat([block[7][0] for block in outputs[0]])[:len(actor.support())]
+                    scores = torch.cat([block[5][0] for block in outputs[0]])[:len(actor.support())]
                     expected = next(record for record in local if record[0] == 1 and record[1] == 4)
                     legal = torch.tensor(actor.support(), dtype=torch.bool)
                     assert_close(scores[legal], scores.new_tensor(expected[2])[legal], rtol=1e-4, atol=1e-5)
@@ -329,8 +333,8 @@ class ContinuousPython:
             row = next(i for i, role in enumerate(g.roles) if role == 'DecisionRequired')
             trained = []
             for lengths in ([256, 1], [128, 129]):
-                features, reduced, exists = self.consumers[0].objects(native.features()['cancel'], lengths=lengths)
-                trained.append(replace(g, cancel_features=features, cancel_reduced=reduced, cancel_exists=exists))
+                features, reduced, exists, embeddings = self.consumers[0].objects(native.features()['cancel'], lengths=lengths)
+                trained.append(replace(g, cancel_features=features, cancel_reduced=reduced, cancel_exists=exists, cancel_embeddings=embeddings, rule_contexts={}))
             a = native.actor(row); a.choose(4)
             sampled = consume_actor(self.consumers[0], trained[0], row, a)
             b = native.actor(row); b.choose(4)

@@ -88,7 +88,15 @@ impl NativeActionContext {
             tokens,
         }
     }
-    pub fn prefix_features(&self, state: &crate::prefix::PrefixState) -> [f32; 60] {
+    pub(crate) fn validate_ticks(&self) -> Result<(), crate::InputError> {
+        for tick in self.ticks.iter().flatten() {
+            if tick != &crate::exact::ratio(1, 100) && tick != &crate::exact::ratio(1, 1000) {
+                return Err(crate::InputError::UnsupportedTick(tick.clone()));
+            }
+        }
+        Ok(())
+    }
+    pub fn prefix_features(&self, state: &crate::prefix::PrefixState) -> [f32; 36] {
         state.encode(&self.ticks)
     }
 }
@@ -289,6 +297,12 @@ impl NativeInputRoot {
                     .iter()
                     .find(|f| f.observation.market.condition_id == id)
                     .unwrap();
+                NativeActionContext::from_observation(
+                    frame.observation,
+                    frame.rule_context.clone(),
+                    self.snapshot.clone(),
+                )
+                .validate_ticks()?;
                 let tail = self
                     .rule_tail
                     .get_or_insert_with(|| crate::market::static_rules(&frame.rule_context));

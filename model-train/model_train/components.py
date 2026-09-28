@@ -131,11 +131,9 @@ class ActorScores(nn.Module):
             AlignedLinear(2 * hidden_size, hidden_size // 2),
             nn.SiLU(),
         )
-        self.quantity = nn.Linear(hidden_size // 2, 2)
-        self.variant = nn.Linear(hidden_size // 2, 4)
-        self.price = nn.Linear(hidden_size // 2, 9999)
-        self.post_only = nn.Linear(hidden_size // 2, 2)
-        self.expiry = nn.Linear(hidden_size // 2, 3)
+        self.quantity = nn.Linear(hidden_size // 2, 16)
+        self.variant = nn.Linear(hidden_size // 2, 2)
+        self.price = nn.Linear(hidden_size // 2, 999)
         self.cancel = nn.Sequential(
             AlignedLayerNorm(hidden_size),
             AlignedLinear(hidden_size, hidden_size // 2),
@@ -163,7 +161,5 @@ class ActorScores(nn.Module):
             "variant": self.variant(decoder),
             "price": self.price(decoder) + (self.fee_weight(decoder) * price_fee_features
                                              if price_fee_features is not None else 0.0),
-            "post_only": self.post_only(decoder),
-            "expiry": self.expiry(decoder),
             "cancel": self.cancel(torch.cat((object_decoder, objects), dim=-1)),
         }

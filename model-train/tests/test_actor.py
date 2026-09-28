@@ -37,11 +37,11 @@ class ActorTests(unittest.TestCase):
         fast,slow,rule,prefix,objects,mask=fixture(2,1,True)
         z,_=model.state(fast,slow,*book_fixture(fast.shape[0]),torch.zeros(1,2,256))
         args=(z,rule,prefix,objects,mask,torch.zeros(2,384),torch.zeros(2,dtype=torch.bool))
-        zero=model.action(*args,torch.zeros(2,9999))
-        fee=torch.zeros(2,9999);fee[0,0]=.75;fee[0,1]=1.25
+        zero=model.action(*args,torch.zeros(2,999))
+        fee=torch.zeros(2,999);fee[0,0]=.75;fee[0,1]=1.25
         with torch.no_grad():model.action.actor.fee_weight.weight.fill_(-.5)
         output=model.action(*args,fee)
-        for i in [0,1,2,4,5,6,7]:self.assertTrue(torch.equal(output[i],zero[i]))
+        for i in [0,1,2,4,5]:self.assertTrue(torch.equal(output[i],zero[i]))
         self.assertTrue(torch.equal(output[3][1],zero[3][1]))
         delta=output[3][0]-zero[3][0]
         self.assertAlmostEqual(float(delta[0].detach()/delta[1].detach()),.6,places=5)

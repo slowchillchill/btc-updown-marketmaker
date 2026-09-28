@@ -1,7 +1,7 @@
 //! model-train 所属原生输入组合；不实现公共归约、账本或动作支持集。
 mod account;
 mod support;
-pub use support::{NativeActor, encoding_limit};
+pub use support::{NativeActor, encoding_limit, quantity_segment};
 mod action;
 pub use action::{ActionError, CancelFamily, CancelScoreBlock, SelectedAction};
 mod cancel;
@@ -23,6 +23,7 @@ pub enum InputError {
     MissingAssociation,
     IncompleteBuyPrefix,
     UnsupportedChoice,
+    UnsupportedTick(contracts::economics::EconomicRational),
     Fee(sim_system::buy_cost::MatchingMathErrorV1),
 }
 impl From<ledger::LedgerErrorV1> for InputError {

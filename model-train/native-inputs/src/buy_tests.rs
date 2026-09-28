@@ -3,16 +3,23 @@ use crate::prefix::*;
 use data_pipeline_core::{public_input::*, typed_raw::*};
 use data_pipeline_training::public_recording::*;
 use num_bigint::BigUint;
+fn segment_for(interval: &QuantityInterval, n: &BigUint) -> usize {
+    (0..16)
+        .find(|&j| {
+            crate::quantity_segment(interval, j).is_some_and(|(lo, hi)| &lo <= n && n <= &hi)
+        })
+        .unwrap()
+}
 fn selected(family: Family, variant: Variant, n: &str) -> PrefixState {
     PrefixState {
         family: Some(family),
         single_leg: Some(Leg::B),
         quantity_hundredths: Some(n.parse().unwrap()),
-        legs: std::array::from_fn(|_| LegSelection {
+        legs: std::array::from_fn(|i| LegSelection {
             variant: Some(variant),
             post_only: Some(true),
             lifetime: Some(Lifetime::Seconds300),
-            price_index: Some(BigUint::from(20u32)),
+            price_index: Some(BigUint::from(if i == 0 { 5u32 } else { 10u32 })),
         }),
         ..Default::default()
     }
@@ -21,7 +28,7 @@ fn fixture() -> Harness {
     fixture_cash("2000")
 }
 fn fixture_cash(cash: &str) -> Harness {
-    fixture_config(cash, ["0.0025", "0.005"])
+    fixture_config(cash, ["0.01", "0.01"])
 }
 fn fixture_config(cash: &str, ticks: [&str; 2]) -> Harness {
     fixture_config_at(cash, ticks, 24_999)
@@ -94,7 +101,12 @@ fn fixture_with_minimum(
             }
             .into(),
         );
-        let payload = serde_json::json!({"clobTokenIds":serde_json::to_string(&source_tokens).unwrap(), "orderPriceMinTickSize":"0.01"}).to_string();
+        let initial_tick = if ticks == ["0.001", "0.001"] {
+            "0.001"
+        } else {
+            "0.01"
+        };
+        let payload = serde_json::json!({"clobTokenIds":serde_json::to_string(&source_tokens).unwrap(), "orderPriceMinTickSize":initial_tick}).to_string();
         use sha2::{Digest, Sha256};
         m.source_evidence_raw_sha256 = Some(format!("{:x}", Sha256::digest(payload.as_bytes())));
         m.source_evidence_payload_json = Some(payload);
@@ -137,8 +149,8 @@ fn fixture_with_minimum(
             intermediate_at,
             DOWN_TOKEN_ID,
             ticks[1],
-            if ticks[1] == "0.005" {
-                "0.01"
+            if ticks[1] == "0.01" {
+                "0.001"
             } else {
                 ticks[1]
             },
@@ -310,7 +322,7 @@ fn four_variants_keep_big_integers_ticks_and_frozen_identity() {
         panic!()
     };
     assert_eq!(order.token_id.0, DOWN_TOKEN_ID);
-    assert_eq!(leg_values(&order.order).1, Decimal::new(2, 1));
+    assert_eq!(leg_values(&order.order).1, Decimal::new(1, 2));
     assert_eq!(g.buy_intent(0, &state).unwrap(), original);
     state.quantity_hundredths = None;
     assert!(matches!(
@@ -360,7 +372,7 @@ async fn exact_buy_assembly_reaches_original_requests_and_receipts() {
     }
     for (id, variant) in [("fok", Variant::FokMarket), ("fak", Variant::FakMarket)] {
         let mut state = selected(Family::SubmitSingleBuy, variant, "500");
-        state.legs[1].price_index = Some(BigUint::from(120u32));
+        state.legs[1].price_index = Some(BigUint::from(60u32));
         g.execute_selected(
             0,
             SelectedAction::Buy(&state),
@@ -430,16 +442,16 @@ fn actor_complete_support_prices_and_shared_budget_match_independent_enumeration
     for leg in &mut state.legs {
         leg.variant = Some(Variant::FokMarket);
     }
-    // 实际两腿tick为.0025/.005；独立枚举原本金，不使用完成性函数作oracle。
+    // 两腿 0.01；独立枚举原本金，不使用完成性函数作 oracle。
     for n in 1u32..500 {
         let mut feasible = false;
-        for ka in 1u32..400 {
-            let a = n * ka * 25;
+        for ka in 1u32..100 {
+            let a = n * ka * 100;
             if a < 1_000_000 {
                 continue;
             }
-            for kb in 1u32..200 {
-                let b = n * kb * 50;
+            for kb in 1u32..100 {
+                let b = n * kb * 100;
                 if b >= 1_000_000 && a + b <= 2_020_000 {
                     feasible = true;
                     break;
@@ -467,7 +479,7 @@ fn actor_complete_support_prices_and_shared_budget_match_independent_enumeration
         let k = at as u32 + 1;
         assert_eq!(
             valid,
-            k < 400 && 500 * k * 25 >= 1_000_000 && 500 * k * 25 + 500 * 50 <= 2_020_000
+            k < 100 && 500 * k * 100 >= 1_000_000 && 500 * k * 100 + 500 * 100 <= 2_020_000
         );
     }
     let fee = actor.price_fee_features().unwrap();
@@ -477,16 +489,16 @@ fn actor_complete_support_prices_and_shared_budget_match_independent_enumeration
         .unwrap()
         .snapshot;
     let expected = snapshot
-        .market_buy_fee_estimate_v1(&500u32.into(), 80, &ExactDecimal("0.0025".into()))
+        .market_buy_fee_estimate_v1(&500u32.into(), 20, &ExactDecimal("0.01".into()))
         .unwrap();
     assert_eq!(
-        fee[79],
+        fee[0],
         crate::exact::signed_log_f32(&crate::exact::ratio(
             num_bigint::BigInt::from(expected.fee_1e5_units),
             100_000
         ))
     );
-    assert!(fee[399..].iter().all(|x| *x == 0.));
+    assert_eq!(fee.len(), actor.price_indices().unwrap().len());
     actor.state.stage = Stage::Price(Leg::B);
     assert!(actor.price_fee_features().unwrap().iter().all(|x| *x == 0.));
 }
@@ -501,19 +513,15 @@ async fn full_actor_retains_exact_pair_and_original_execution_reservations() {
     let n = BigUint::from(500u32);
     while actor.state.stage == Stage::QuantityBranch {
         let interval = actor.state.interval.as_ref().unwrap();
-        let mid = (&interval.lo + &interval.hi) / 2u32;
-        actor.choose(usize::from(n > mid)).unwrap();
+        let mid = interval;
+        actor.choose(segment_for(mid, &n)).unwrap();
     }
-    // A全部属性、B全部属性，随后才是A/B价格。
     actor.choose(0).unwrap();
-    actor.choose(1).unwrap();
     assert_eq!(actor.state.stage, Stage::Variant(Leg::B));
-    actor.choose(1).unwrap();
-    actor.choose(1).unwrap();
     actor.choose(0).unwrap();
     assert_eq!(actor.state.stage, Stage::Price(Leg::A));
-    actor.choose(19).unwrap();
-    actor.choose(19).unwrap();
+    actor.choose(4).unwrap();
+    actor.choose(9).unwrap();
     let intent = actor.intent().unwrap().unwrap();
     let ModelIntentV1::SubmitPairedBuy { orders, .. } = &intent else {
         panic!()
@@ -542,7 +550,7 @@ async fn full_actor_retains_exact_pair_and_original_execution_reservations() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn fixed_market_repair_has_nonmonotone_quantity_holes_but_limit_does_not() {
-    let mut h = fixture_config("2.038", ["0.1", "0.1"]);
+    let mut h = fixture_config("2.038", ["0.01", "0.01"]);
     let _ = ready(&mut h);
     let receipt = h
         .shared
@@ -593,7 +601,8 @@ async fn fixed_market_repair_has_nonmonotone_quantity_holes_but_limit_does_not()
         assert!(actor.fixed_completion(&n.into(), &state).unwrap());
     }
     state.legs[1].variant = Some(Variant::FokMarket);
-    for (n, want) in [(111u32, false), (112, true), (113, false), (125, true)] {
+    for n in [111u32, 112, 113, 125] {
+        let want = (1..1000).any(|k| n * k * 10 >= 1_000_000 && n * k * 10 <= 1_010_000);
         assert_eq!(
             actor.fixed_completion(&n.into(), &state).unwrap(),
             want,
@@ -622,7 +631,7 @@ async fn three_runtime_buy_case(case: u8) {
         0 => fixture(),
         1 => fixture_with_minimum(
             "2000",
-            ["0.0025", "0.005"],
+            ["0.01", "0.01"],
             24_999,
             &[35_000, 45_000, 55_000],
             ["100", "100"],
@@ -630,7 +639,7 @@ async fn three_runtime_buy_case(case: u8) {
         ),
         2 => fixture_config_times(
             "2000",
-            ["0.0025", "0.005"],
+            ["0.01", "0.01"],
             24_999,
             &[202_999, 204_000, 205_000],
         ),
@@ -645,26 +654,21 @@ async fn three_runtime_buy_case(case: u8) {
     let quantity = if case == 1 { 1u32 } else { 500u32 };
     while probe.state.stage == Stage::QuantityBranch {
         let interval = probe.state.interval.as_ref().unwrap();
-        let mid = (&interval.lo + &interval.hi) / 2u32;
+        let mid = interval;
         probe
-            .choose(usize::from(BigUint::from(quantity) > mid))
+            .choose(segment_for(mid, &BigUint::from(quantity)))
             .unwrap();
     }
     if case == 0 {
-        probe.choose(2).unwrap();
-        probe.choose(3).unwrap();
-        probe.choose(319).unwrap();
-        probe.choose(159).unwrap();
+        probe.choose(1).unwrap();
+        probe.choose(1).unwrap();
+        probe.choose(79).unwrap();
+        probe.choose(79).unwrap();
     } else {
-        for _ in 0..2 {
-            probe.choose(usize::from(case == 2)).unwrap();
-            probe.choose(1).unwrap();
-            if case == 2 {
-                probe.choose(0).unwrap();
-            }
-        }
-        probe.choose(19).unwrap();
-        probe.choose(19).unwrap();
+        probe.choose(0).unwrap();
+        probe.choose(0).unwrap();
+        probe.choose(4).unwrap();
+        probe.choose(9).unwrap();
     }
     let replay = probe.path.clone();
     type Step = (Vec<bool>, String, Vec<f32>, Vec<f32>);
@@ -756,28 +760,8 @@ async fn three_runtime_buy_case(case: u8) {
         }
     }
     assert_eq!(frame, traces.len());
-    let session = ort::session::Session::builder()
-        .unwrap()
-        .with_intra_threads(1)
-        .unwrap()
-        .with_inter_threads(1)
-        .unwrap()
-        .with_parallel_execution(false)
-        .unwrap()
-        .with_memory_pattern(false)
-        .unwrap()
-        .with_intra_op_spinning(false)
-        .unwrap()
-        .with_inter_op_spinning(false)
-        .unwrap()
-        .commit_from_file(std::path::Path::new(&directory).join("action_decoder.onnx"))
-        .unwrap();
-    let mut scorer = crate::ort_actor::OrtActorScorer {
-        #[cfg(feature = "continuous-validation")]
-        measurement: (0, None),
-        session,
-        hidden,
-    };
+    let mut scorer =
+        crate::ort_actor::OrtActorScorer::new(std::path::Path::new(&directory), hidden, 1).unwrap();
     let mut actor = NativeActor::new(g.clone(), 0).unwrap();
     scorer.greedy(&mut actor, &z).unwrap();
     assert_eq!(actor.path, path);
@@ -806,59 +790,31 @@ async fn three_runtime_buy_case(case: u8) {
             }
         );
     }
-    // 同一真实候选轴混合为一个批次，Rust ORT不能只验证逐行独立调用。
+    // 不同阶段/合法区间在同一活动批次分组，原坐标稳定回填。
     let mut mixture = NativeActor::new(g.clone(), 0).unwrap();
-    let mut prefixes = Vec::new();
-    let mut fees = Vec::new();
-    let mut supports = Vec::new();
+    let mut actors = Vec::new();
     for &choice in &replay {
-        if prefixes.is_empty() || mixture.head_index() == 3 {
-            prefixes.extend(mixture.prefix_features());
-            fees.extend(mixture.price_fee_features().unwrap());
-            supports.push(mixture.support().unwrap());
+        if actors.is_empty() || mixture.head_index() == 3 {
+            let mut copy = NativeActor::new(g.clone(), 0).unwrap();
+            for &picked in &mixture.path {
+                copy.choose(picked).unwrap();
+            }
+            actors.push(copy);
         }
         mixture.choose(choice).unwrap();
     }
-    assert_eq!(supports.len(), 3);
-    let outputs = scorer.session.run(ort::inputs![
-        "z_t" => ort::value::Tensor::from_array(([3, hidden], z.repeat(3))).unwrap(),
-        "rule_features" => ort::value::Tensor::from_array(([3,30], g.rows[0].rule.repeat(3))).unwrap(),
-        "prefix_features" => ort::value::Tensor::from_array(([3,60], prefixes)).unwrap(),
-        "cancel_features" => ort::value::Tensor::from_array(([3,1,184], vec![0f32;3*184])).unwrap(),
-        "cancel_mask" => ort::value::Tensor::from_array(([3,1], vec![false;3])).unwrap(),
-        "cancel_reduced" => ort::value::Tensor::from_array(([3,3*hidden/2], vec![0f32;9*hidden/2])).unwrap(),
-        "cancel_exists" => ort::value::Tensor::from_array(([3], vec![false;3])).unwrap(),
-        "price_fee_features" => ort::value::Tensor::from_array(([3,9999], fees)).unwrap()
-    ]).unwrap();
-    let values = outputs["price_logits"]
-        .try_extract_tensor::<f32>()
-        .unwrap()
-        .1;
-    for (i, (actual, expected)) in values.chunks_exact(9999).zip(&mixed_scores).enumerate() {
-        for (&a, &b) in actual.iter().zip(expected) {
+    let prepared = scorer.reduced(&actors[0], &z).unwrap();
+    let entries = actors
+        .iter()
+        .map(|a| (a, z.as_slice(), &prepared))
+        .collect::<Vec<_>>();
+    let actual = scorer.scores_batch(&entries).unwrap();
+    for (values, expected) in actual.iter().zip(&mixed_scores) {
+        assert_eq!(values.len(), expected.len());
+        for (&a, &b) in values.iter().zip(expected) {
             assert!(finite_close(a, b));
         }
-        if i > 0 {
-            let best = |values: &[f32]| {
-                supports[i]
-                    .iter()
-                    .zip(values)
-                    .enumerate()
-                    .filter(|(_, (legal, _))| **legal)
-                    .fold(None, |best: Option<(usize, f32)>, (index, (_, score))| {
-                        if best.is_none_or(|(_, old)| *score > old) {
-                            Some((index, *score))
-                        } else {
-                            best
-                        }
-                    })
-                    .unwrap()
-                    .0
-            };
-            assert_eq!(best(actual), best(expected));
-        }
     }
-    drop(outputs);
     assert_eq!(hidden_state, frozen_hidden);
     // 原市场案例执行实际贪心；新增反例执行已逐前缀比对的低量/GTD原意图。
     let executing = if case == 0 { &actor } else { &probe };
@@ -898,7 +854,7 @@ async fn three_runtime_buy_case(case: u8) {
             .unwrap();
     }
     let mut saw_unknown = false;
-    let mut saw_expired = false;
+
     for _ in 0..4 {
         let successor = Arc::new(h.next().unwrap());
         if case == 1
@@ -913,24 +869,6 @@ async fn three_runtime_buy_case(case: u8) {
                 assert_eq!(&successor.rows[0].slow[offset..offset + 3], &[0., 0., 1.]);
             }
             saw_unknown = true;
-        }
-        if case == 2 {
-            let time = successor.cutoff.decision_time().logical_time_utc_ms();
-            let reserve = &successor
-                .action_before
-                .as_ref()
-                .unwrap()
-                .economics()
-                .cash
-                .actual_reserved_pusd
-                .0;
-            if time == 203_999 {
-                assert_eq!(reserve, "0.75");
-            }
-            if time >= 205_000 {
-                assert_eq!(reserve, "0");
-                saw_expired = true;
-            }
         }
         continue_three_runtime(
             successor,
@@ -976,9 +914,6 @@ async fn three_runtime_buy_case(case: u8) {
                 .0,
             "1.5"
         );
-    }
-    if case == 2 {
-        assert!(saw_expired);
     }
     eprintln!(
         "case={case}, actual graph path={path:?}, executed intent={intent:?}, successor_orders={}",
@@ -1057,21 +992,21 @@ async fn actor_pair_reserves_once_and_rejected_leg_releases_without_erasing_othe
     // 原源事件 24000，Matched received=24171，首成交 received=24173，
     // Accepted received=24250。24172 截点只闭合到 24171。
     // 在真实两者之间读取，不能依赖旧驱动把已接收关联拖到下一组。
-    let mut h = fixture_config_at("2000", ["0.0025", "0.005"], 24_172);
+    let mut h = fixture_config_at("2000", ["0.01", "0.01"], 24_172);
     let g = Arc::new(ready(&mut h));
     let mut actor = NativeActor::new(g, 0).unwrap();
     actor.choose(2).unwrap();
     while actor.state.stage == Stage::QuantityBranch {
         let interval = actor.state.interval.as_ref().unwrap();
-        let mid = (&interval.lo + &interval.hi) / 2u32;
+        let mid = interval;
         actor
-            .choose(usize::from(BigUint::from(500u32) > mid))
+            .choose(segment_for(mid, &BigUint::from(500u32)))
             .unwrap();
     }
-    actor.choose(2).unwrap();
-    actor.choose(3).unwrap();
-    actor.choose(319).unwrap();
-    actor.choose(39).unwrap();
+    actor.choose(1).unwrap();
+    actor.choose(1).unwrap();
+    actor.choose(79).unwrap();
+    actor.choose(19).unwrap();
     for _ in 0..2 {
         actor
             .execute(
@@ -1147,14 +1082,13 @@ async fn actor_pair_reserves_once_and_rejected_leg_releases_without_erasing_othe
     );
     while follow.state.stage == Stage::QuantityBranch {
         let interval = follow.state.interval.as_ref().unwrap();
-        let mid = (&interval.lo + &interval.hi) / 2u32;
+        let mid = interval;
         follow
-            .choose(usize::from(BigUint::from(500u32) > mid))
+            .choose(segment_for(mid, &BigUint::from(500u32)))
             .unwrap();
     }
     follow.choose(0).unwrap();
-    follow.choose(1).unwrap();
-    follow.choose(9).unwrap();
+    follow.choose(99).unwrap();
     follow
         .execute(
             &mut h.shared,
@@ -1173,28 +1107,21 @@ async fn actor_pair_reserves_once_and_rejected_leg_releases_without_erasing_othe
 
 #[test]
 fn fixed_prefix_variants_and_common_budget_match_small_full_action_oracle() {
-    let mut h = fixture_config("2.02", ["0.1", "0.1"]);
+    let mut h = fixture_config("2.02", ["0.01", "0.01"]);
     let actor = NativeActor::new(Arc::new(ready(&mut h)), 0).unwrap();
-    let attributes = [
-        (Variant::GtcLimit, false),
-        (Variant::GtcLimit, true),
-        (Variant::GtdLimit, false),
-        (Variant::GtdLimit, true),
-        (Variant::FokMarket, false),
-        (Variant::FakMarket, false),
-    ];
+    let attributes = [(Variant::GtcLimit, false), (Variant::FokMarket, false)];
     let oracle = |n: u64, k: u64, variant: Variant, post: bool| -> Option<u64> {
-        let principal = n * k * 1000;
+        let principal = n * k * 100;
         match variant {
             Variant::FokMarket | Variant::FakMarket => {
                 (principal >= 1_000_000).then_some(principal)
             }
             _ => {
-                let m = k.min(5);
+                let m = k.min(50);
                 let fee = if post || principal < 1_000_000 {
                     0
                 } else {
-                    (n * 7 * m * (10 - m) + 5) / 10
+                    (n * 7 * m * (100 - m) + 500) / 1000
                 };
                 Some(principal + 10 * fee)
             }
@@ -1203,8 +1130,8 @@ fn fixed_prefix_variants_and_common_budget_match_small_full_action_oracle() {
     for n in [1u64, 100, 112, 113, 125, 499, 500, 501, 1000] {
         for &(a, pa) in &attributes {
             for &(b, pb) in &attributes {
-                for ka in 1u64..=9 {
-                    for kb in 1u64..=9 {
+                for ka in [1u64, 10, 20, 30, 49, 50, 51, 80, 99] {
+                    for kb in [1u64, 10, 20, 30, 49, 50, 51, 80, 99] {
                         let want = oracle(n, ka, a, pa)
                             .zip(oracle(n, kb, b, pb))
                             .is_some_and(|(ca, cb)| ca + cb <= 2_020_000);
@@ -1245,7 +1172,7 @@ async fn actual_single_repair_cap_counts_visible_success_and_nonterminal_commitm
         .into_iter()
         .chain((24_001..28_002).step_by(100))
         .collect::<Vec<_>>();
-    let mut h = fixture_config_times("2000", ["0.1", "0.1"], 24_999, &times);
+    let mut h = fixture_config_times("2000", ["0.01", "0.01"], 24_999, &times);
     ready(&mut h);
     async fn buy(h: &mut Harness, id: &str, token: &str, spend: &str) {
         h.driver.wait_for_recording_capacity().unwrap();
@@ -1406,7 +1333,7 @@ fn python_features_consumes_real_native_groups_with_the_original_public_shape() 
     use pyo3::prelude::*;
     let mut h = fixture_config_times(
         "2000",
-        ["0.0025", "0.005"],
+        ["0.01", "0.01"],
         24_999,
         &[35_000, 319_000, 320_000],
     );
@@ -1499,105 +1426,100 @@ async fn unknown_cancel_clears_known_account_aggregates() {
 #[tokio::test(flavor = "current_thread")]
 async fn model_selects_low_limit_quantity_and_platform_refusal_releases_original_reservation() {
     for minimum in ["5", "10"] {
-        for variant in 0..2 {
-            for n in [1u32, 499, 500, 999, 1000, 1001] {
-                let mut h = fixture_with_minimum(
-                    "2000",
-                    ["0.1", "0.1"],
-                    24_999,
-                    &[35_000, 45_000, 55_000],
-                    ["100", "100"],
-                    minimum,
-                );
-                let group = Arc::new(ready(&mut h));
-                assert_eq!(
-                    group.rows[0].rule[14],
-                    crate::exact::signed_log_f32(&crate::exact::integer(
-                        minimum.parse::<u32>().unwrap()
-                    ))
-                );
-                assert_eq!(group.rows[0].rule[15], 1.);
-                assert_eq!(&group.rows[0].fast[566..596], &group.rows[0].rule);
-                let mut actor = NativeActor::new(group, 0).unwrap();
-                actor.choose(2).unwrap();
-                while actor.state.stage == Stage::QuantityBranch {
-                    let interval = actor.state.interval.as_ref().unwrap();
-                    let midpoint = (&interval.lo + &interval.hi) / 2u32;
-                    actor
-                        .choose(usize::from(BigUint::from(n) > midpoint))
-                        .unwrap();
-                }
-                assert_eq!(actor.state.quantity_hundredths, Some(n.into()));
-                for _ in 0..2 {
-                    actor.choose(variant).unwrap(); // GTC或GTD LIMIT
-                    actor.choose(1).unwrap(); // post-only
-                    if variant == 1 {
-                        actor.choose(2).unwrap();
-                    } // 原编码300秒有效寿命
-                }
-                actor.choose(0).unwrap();
-                actor.choose(0).unwrap();
-                let original = actor.intent().unwrap().unwrap();
-                let ModelIntentV1::SubmitPairedBuy { orders, .. } = &original else {
-                    panic!()
-                };
-                for order in orders {
-                    assert_eq!(leg_values(&order.order).0, Decimal::new(i64::from(n), 2));
-                }
+        for n in [1u32, 499, 500, 999, 1000, 1001] {
+            let mut h = fixture_with_minimum(
+                "2000",
+                ["0.01", "0.01"],
+                24_999,
+                &[35_000, 45_000, 55_000],
+                ["100", "100"],
+                minimum,
+            );
+            let group = Arc::new(ready(&mut h));
+            assert_eq!(
+                group.rows[0].rule[14],
+                crate::exact::signed_log_f32(&crate::exact::integer(
+                    minimum.parse::<u32>().unwrap()
+                ))
+            );
+            assert_eq!(group.rows[0].rule[15], 1.);
+            assert_eq!(&group.rows[0].fast[566..596], &group.rows[0].rule);
+            let mut actor = NativeActor::new(group, 0).unwrap();
+            actor.choose(2).unwrap();
+            while actor.state.stage == Stage::QuantityBranch {
+                let interval = actor.state.interval.as_ref().unwrap();
+                let midpoint = interval;
                 actor
-                    .execute(
-                        &mut h.shared,
-                        &mut h.driver.decision().unwrap(),
-                        context("model-low-limit"),
-                    )
-                    .await
-                    .unwrap()
+                    .choose(segment_for(midpoint, &BigUint::from(n)))
                     .unwrap();
-                let expected_reserve = Decimal::new(i64::from(n) * 2, 3);
-                assert_eq!(
-                    Decimal::from_str_exact(
-                        &h.shared
-                            .ledger()
-                            .economic_read()
-                            .unwrap()
-                            .cash()
-                            .actual_reserved_pusd
-                            .0
-                    )
-                    .unwrap(),
-                    expected_reserve
-                );
-                let next = h.next().unwrap();
-                let below = n < minimum.parse::<u32>().unwrap() * 100;
-                let cash = next
-                    .action_before
-                    .as_ref()
-                    .unwrap()
-                    .economics()
-                    .cash
-                    .clone();
-                assert_eq!(
-                    Decimal::from_str_exact(&cash.actual_reserved_pusd.0).unwrap(),
-                    if below {
-                        Decimal::ZERO
-                    } else {
-                        expected_reserve
-                    }
-                );
-                assert_eq!(cash.actual_reserved_pusd, cash.maker_reserved_pusd);
-                let registry = h.shared.registry();
-                assert_eq!(registry.orders().count(), if below { 0 } else { 2 });
-                for order in registry.orders() {
-                    assert_eq!(order.origin.as_ref().unwrap().intent.intent(), &original);
-                    assert!(order.accepted.is_some());
-                }
-                h.driver.stop_and_drain().unwrap();
-                let noe = ::execution_normalization::DurableContextStoreV4::open(
-                    h._temp.path().join("noe"),
-                    &h.noe_context,
+            }
+            assert_eq!(actor.state.quantity_hundredths, Some(n.into()));
+            for _ in 0..2 {
+                actor.choose(0).unwrap(); // 普通 GTC；不增加 PostOnly 选择。
+            }
+            actor.choose(0).unwrap();
+            actor.choose(0).unwrap();
+            let original = actor.intent().unwrap().unwrap();
+            let ModelIntentV1::SubmitPairedBuy { orders, .. } = &original else {
+                panic!()
+            };
+            for order in orders {
+                assert_eq!(leg_values(&order.order).0, Decimal::new(i64::from(n), 2));
+            }
+            actor
+                .execute(
+                    &mut h.shared,
+                    &mut h.driver.decision().unwrap(),
+                    context("model-low-limit"),
                 )
+                .await
+                .unwrap()
                 .unwrap();
-                let rejected = noe.commits().iter().flat_map(|commit| &commit.records).filter(|record| matches!(record,
+            let expected_reserve = Decimal::new(i64::from(n) * 2, 4);
+            assert_eq!(
+                Decimal::from_str_exact(
+                    &h.shared
+                        .ledger()
+                        .economic_read()
+                        .unwrap()
+                        .cash()
+                        .actual_reserved_pusd
+                        .0
+                )
+                .unwrap(),
+                expected_reserve
+            );
+            let next = h.next().unwrap();
+            let below = n < minimum.parse::<u32>().unwrap() * 100;
+            let cash = next
+                .action_before
+                .as_ref()
+                .unwrap()
+                .economics()
+                .cash
+                .clone();
+            assert_eq!(
+                Decimal::from_str_exact(&cash.actual_reserved_pusd.0).unwrap(),
+                if below {
+                    Decimal::ZERO
+                } else {
+                    expected_reserve
+                }
+            );
+            assert_eq!(cash.actual_reserved_pusd, cash.maker_reserved_pusd);
+            let registry = h.shared.registry();
+            assert_eq!(registry.orders().count(), if below { 0 } else { 2 });
+            for order in registry.orders() {
+                assert_eq!(order.origin.as_ref().unwrap().intent.intent(), &original);
+                assert!(order.accepted.is_some());
+            }
+            h.driver.stop_and_drain().unwrap();
+            let noe = ::execution_normalization::DurableContextStoreV4::open(
+                h._temp.path().join("noe"),
+                &h.noe_context,
+            )
+            .unwrap();
+            let rejected = noe.commits().iter().flat_map(|commit| &commit.records).filter(|record| matches!(record,
                 ::execution_normalization::NormalizationRecord::Evidence {
                     evidence: ::execution_normalization::SourceNeutralEvidenceKind::Control {
                         result: contracts::execution_normalization::SourceNeutralControlResult::Submission {
@@ -1605,12 +1527,11 @@ async fn model_selects_low_limit_quantity_and_platform_refusal_releases_original
                         },
                     }, ..
                 })).count();
-                assert_eq!(
-                    rejected,
-                    if below { 2 } else { 0 },
-                    "minimum={minimum}, n={n}"
-                );
-            }
+            assert_eq!(
+                rejected,
+                if below { 2 } else { 0 },
+                "minimum={minimum}, n={n}"
+            );
         }
     }
 }
@@ -1625,7 +1546,7 @@ async fn current_gtd_expires_at_effective_deadline_through_noe_ledger_and_native
         let deadline = (24 + seconds) * 1000;
         let mut h = fixture_config_times(
             "2000",
-            ["0.0025", "0.005"],
+            ["0.01", "0.01"],
             24_999,
             &[deadline - 1001, deadline, deadline + 1000],
         );
@@ -1694,4 +1615,236 @@ async fn current_gtd_expires_at_effective_deadline_through_noe_ledger_and_native
         assert!(before && after);
         h.driver.stop_and_drain().unwrap();
     }
+}
+
+#[test]
+fn radix_sixteen_partitions_cover_adjacent_exact_integers_without_renumbering() {
+    let base = BigUint::from(1u8) << 200usize;
+    for size in [1u32, 2, 15, 16, 17, 255, 256, 257, 5_000_000] {
+        let q = QuantityInterval {
+            upper: &base + size,
+            lo: base.clone(),
+            hi: &base + size - 1u32,
+        };
+        let mut next = q.lo.clone();
+        let mut count = 0;
+        for j in 0..16 {
+            if let Some((lo, hi)) = crate::quantity_segment(&q, j) {
+                assert_eq!(lo, next);
+                assert!(hi >= lo);
+                next = hi + 1u32;
+                count += 1;
+            }
+        }
+        assert_eq!(next, &q.hi + 1u32);
+        assert_eq!(count, size.min(16));
+    }
+    let q = QuantityInterval {
+        upper: 2u32.into(),
+        lo: 1u32.into(),
+        hi: 2u32.into(),
+    };
+    assert_eq!(
+        (0..16)
+            .filter(|&j| crate::quantity_segment(&q, j).is_some())
+            .collect::<Vec<_>>(),
+        [7, 15]
+    );
+}
+
+#[test]
+fn unsupported_tick_stops_native_run_and_preserves_original_public_fact() {
+    let mut h = fixture_config("2000", ["0.0001", "0.01"]);
+    loop {
+        h.driver.next_group().unwrap().unwrap();
+        match h.native.consume(&mut h.shared, &mut h.driver) {
+            Err(InputError::UnsupportedTick(tick)) => {
+                assert_eq!(tick, crate::exact::ratio(1, 10000));
+                assert!(h.driver.frames().iter().any(|f| {
+                    f.observation
+                        .assets
+                        .iter()
+                        .any(|a| a.tick.value.as_ref().is_some_and(|v| v.0 == "0.0001"))
+                }));
+                break;
+            }
+            Ok(_) => {}
+            other => panic!("unexpected native result {:?}", other.err()),
+        }
+    }
+    h.driver.stop_and_drain().unwrap();
+}
+
+#[test]
+fn ordinary_gtc_price_support_reserves_fee_and_keeps_mixed_fok_completion() {
+    let mut h = fixture_config("2", ["0.01", "0.01"]);
+    let group = Arc::new(ready(&mut h));
+    let mut actor = NativeActor::new(group, 0).unwrap();
+    actor.choose(2).unwrap();
+    while actor.state.stage == Stage::QuantityBranch {
+        let choice = segment_for(actor.state.interval.as_ref().unwrap(), &500u32.into());
+        actor.choose(choice).unwrap();
+    }
+    actor.choose(0).unwrap();
+    actor.choose(1).unwrap();
+    // B 的 FOK 最小本金为1；A@.20 的本金为1，但即时费用使总额超过2。
+    assert!(actor.support().unwrap()[18]);
+    assert!(!actor.support().unwrap()[19]);
+    assert!(actor.intent().is_err(), "未完成两腿不形成任何提交意图");
+    actor.choose(18).unwrap();
+    let first = actor.price_indices().unwrap()[0];
+    assert_eq!(first, 19);
+    actor.choose(first as usize).unwrap();
+    let ModelIntentV1::SubmitPairedBuy { orders, .. } = actor.intent().unwrap().unwrap() else {
+        panic!()
+    };
+    assert!(matches!(
+        orders[0].order,
+        BuyOrderIntentV1::GtcLimit {
+            post_only: false,
+            ..
+        }
+    ));
+    assert!(matches!(
+        orders[1].order,
+        BuyOrderIntentV1::FokMarket { .. }
+    ));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn paired_new_types_submit_together_gtc_fills_then_posts_remainder_and_fok_fails() {
+    let mut h = fixture();
+    let group = Arc::new(ready(&mut h));
+    let mut actor = NativeActor::new(group, 0).unwrap();
+    actor.choose(2).unwrap();
+    while actor.state.stage == Stage::QuantityBranch {
+        let choice = segment_for(actor.state.interval.as_ref().unwrap(), &15000u32.into());
+        actor.choose(choice).unwrap();
+    }
+    actor.choose(0).unwrap();
+    actor.choose(1).unwrap();
+    actor.choose(79).unwrap();
+    assert!(actor.intent().is_err());
+    assert_eq!(h.shared.registry().all_commitments().count(), 0);
+    actor.choose(19).unwrap();
+    let original = actor.intent().unwrap().unwrap();
+    let ModelIntentV1::SubmitPairedBuy { orders, .. } = &original else {
+        panic!()
+    };
+    assert!(matches!(
+        orders[0].order,
+        BuyOrderIntentV1::GtcLimit {
+            post_only: false,
+            ..
+        }
+    ));
+    assert!(
+        matches!(orders[1].order,BuyOrderIntentV1::FokMarket {spend_pusd,..} if spend_pusd==Decimal::from(30))
+    );
+    actor
+        .execute(
+            &mut h.shared,
+            &mut h.driver.decision().unwrap(),
+            context("paired-ordinary-and-fok"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let commits = h.shared.registry().all_commitments().collect::<Vec<_>>();
+    assert_eq!(commits.len(), 2);
+    assert_eq!(
+        commits[0].origin.intent.global_request_id(),
+        commits[1].origin.intent.global_request_id()
+    );
+    for _ in 0..4 {
+        h.next().unwrap();
+    }
+    let orders = h.shared.registry().orders().collect::<Vec<_>>();
+    assert_eq!(orders.len(), 1);
+    assert_eq!(
+        orders[0].active_unfilled_shares,
+        ExecutionReadValueV1::Known(ExactDecimal("50".into()))
+    );
+    let cash = h.shared.ledger().economic_read().unwrap();
+    assert_eq!(cash.cash().actual_available_pusd.0, "1898.32");
+    h.driver.stop_and_drain().unwrap();
+}
+
+#[test]
+fn preopen_initial_milli_tick_and_old_actor_keep_their_own_exact_grid() {
+    let mut initial = fixture_config("2000", ["0.001", "0.001"]);
+    initial.next().unwrap();
+    let first = Arc::new(initial.next().unwrap());
+    let actor = NativeActor::new(first, 0).unwrap();
+    assert_eq!(
+        actor.root_upper(Family::SubmitPairedBuy).unwrap(),
+        BigUint::from(100_000_000u32)
+    );
+    initial.driver.stop_and_drain().unwrap();
+    let mut h = fixture();
+    let old = Arc::new(ready(&mut h));
+    let later = Arc::new(h.next().unwrap());
+    let state = selected(Family::SubmitSingleBuy, Variant::GtcLimit, "500");
+    let price = |g: &NativeInputGroup| {
+        let ModelIntentV1::SubmitSingleBuy { order, .. } = g.buy_intent(0, &state).unwrap() else {
+            panic!()
+        };
+        leg_values(&order.order).1
+    };
+    assert_eq!(price(&old), Decimal::new(1, 1));
+    assert_eq!(price(&later), Decimal::new(1, 2));
+    assert_eq!(price(&old), Decimal::new(1, 1));
+    h.driver.stop_and_drain().unwrap();
+}
+
+#[test]
+#[ignore = "#176 单进程 release 首次网格/真实tick切换定向计时；非闭环性能矩阵"]
+fn tick_grid_transition_support_measurement() {
+    use std::time::Instant;
+    fn price_actor(group: Arc<NativeInputGroup>) -> NativeActor {
+        let mut actor = NativeActor::new(group, 0).unwrap();
+        actor.choose(2).unwrap();
+        while actor.state.stage == Stage::QuantityBranch {
+            let choice = segment_for(
+                actor.state.interval.as_ref().unwrap(),
+                &BigUint::from(500u32),
+            );
+            actor.choose(choice).unwrap();
+        }
+        actor.choose(0).unwrap();
+        actor.choose(0).unwrap();
+        actor.choose(0).unwrap();
+        actor
+    }
+    let mut h = fixture();
+    let old = price_actor(Arc::new(ready(&mut h)));
+    let later = price_actor(Arc::new(h.next().unwrap()));
+    let mut results = Vec::new();
+    for (name, actor, expected) in [("cent", &old, 99), ("milli_after_tick_event", &later, 999)] {
+        let start = Instant::now();
+        let indices = actor.price_indices().unwrap();
+        let first_indices_ns = start.elapsed().as_nanos();
+        assert_eq!(indices.len(), expected);
+        let mut samples = Vec::new();
+        for i in 0..40 {
+            let start = Instant::now();
+            let support = actor.support().unwrap();
+            let support_ns = start.elapsed().as_nanos();
+            let start = Instant::now();
+            let indices = actor.price_indices().unwrap();
+            let indices_ns = start.elapsed().as_nanos();
+            let start = Instant::now();
+            let fees = actor.price_fee_features().unwrap();
+            let fee_features_ns = start.elapsed().as_nanos();
+            assert_eq!(support.iter().filter(|v| **v).count(), expected);
+            assert_eq!(indices.len(), fees.len());
+            if i >= 8 {
+                samples.push(serde_json::json!({"support_ns":support_ns,"indices_ns":indices_ns,"fee_features_ns":fee_features_ns}));
+            }
+        }
+        results.push(serde_json::json!({"case":name,"valid_prices":expected,"first_indices_ns":first_indices_ns,"samples":samples}));
+    }
+    assert_eq!(old.price_indices().unwrap().len(), 99);
+    eprintln!("tick_support_measurement={}", serde_json::json!(results));
+    h.driver.stop_and_drain().unwrap();
 }

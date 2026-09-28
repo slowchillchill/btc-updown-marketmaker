@@ -120,11 +120,11 @@ class NativeInputTests(unittest.TestCase):
         self.assertTrue(all(frame_counts))
         self.assertEqual(independent[1].hidden,{})  # 深盘口根经过ContextOnly、DecisionRequired到原Retire。
 
-    @unittest.skipUnless(os.environ.get("NATIVE_MAIN_GRAPH") and os.environ.get("NATIVE_BASELINE_GRAPH"), "requires original frozen graph archive")
+    @unittest.skipUnless(os.environ.get("NATIVE_MAIN_GRAPH") or os.environ.get("NATIVE_BASELINE_GRAPH"), "requires at least one explicitly supplied current-schema graph archive")
     def test_real_native_sequence_in_original_three_runtimes(self):
         import onnxruntime
         import numpy as np
-        from model_train.validate_graphs import session, call_ort
+        from model_train.validate_graphs import session, call_ort, reference_ort_action
         from model_train.graphs import ACTION_INPUTS, encode_all, object_blocks
         from model_train.native_inputs import hidden_key
         root = Path(__file__).resolve().parents[1]
@@ -135,7 +135,7 @@ class NativeInputTests(unittest.TestCase):
                               else np.asarray(v).reshape(-1) for v in values]
 
         def head(prefix):
-            return (0, 1, 2, 4, 5, 3, 7)[prefix[7:14].index(1.)]
+            return (0, 1, 2, 3, 5)[prefix[7:12].index(1.)]
 
         def compare(actual, expected):
             self.assertEqual(actual.keys(), expected.keys())
@@ -147,7 +147,10 @@ class NativeInputTests(unittest.TestCase):
                     np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-5, err_msg=label)
 
         for config in (CONFIGURATIONS[1], CONFIGURATIONS[2]):
-            archive = Path(os.environ["NATIVE_BASELINE_GRAPH" if config.baseline else "NATIVE_MAIN_GRAPH"])
+            configured = os.environ.get("NATIVE_BASELINE_GRAPH" if config.baseline else "NATIVE_MAIN_GRAPH")
+            if configured is None:
+                continue
+            archive = Path(configured)
             graphs = TwoGraphs(config).eval()
             graphs.load_state_dict(torch.load(archive / "initial_weights.pt", map_location="cpu", weights_only=True))
             consumer = NativeComponentConsumer(graphs)
@@ -181,7 +184,7 @@ class NativeInputTests(unittest.TestCase):
 
             # Python ORT 的状态、z、对象和全局归约全部在本端产生。
             state_session = session(archive / "state_encoder.onnx", 1)
-            action = call_ort(session(archive / "action_decoder.onnx", 1), ACTION_INPUTS)
+            action = reference_ort_action(archive, 1)
             operations = NativeComponentConsumer(graphs)
             ort_values = {}
             for g, group in enumerate(self.groups):
@@ -210,7 +213,7 @@ class NativeInputTests(unittest.TestCase):
                     embeddings = []
                     def first_pass(*args):
                         outputs = action(*args)
-                        embeddings.append(outputs[6])
+                        embeddings.append(outputs[4])
                         return outputs
                     reduced, exists = encode_all(first_pass, z, rule, features, mask, lengths, empty=count == 0)
                     for part, (values, length) in enumerate(zip(embeddings, lengths)):
@@ -218,11 +221,12 @@ class NativeInputTests(unittest.TestCase):
                     put(ort_values, label + "/reduced", [reduced, exists.float()])
                     before = operations.hidden[hidden_key(row["hidden_state_key"])].clone()
                     for p, prefix in enumerate(row["fixture_prefixes"]):
-                        for part, (f, m, _) in enumerate(object_blocks(features, mask, lengths, empty=count == 0)):
-                            if part and head(prefix) != 7:
+                        for part, (f, m, length) in enumerate(object_blocks(features, mask, lengths, empty=count == 0)):
+                            if part and head(prefix) != 5:
                                 break
                             outputs = action(z, rule, torch.tensor([prefix]), f, m, reduced, exists)
-                            put(ort_values, f"{label}/prefix{p}/part{part}", [outputs[head(prefix)]])
+                            score = outputs[head(prefix)]
+                            put(ort_values, f"{label}/prefix{p}/part{part}", [score[:, :length] if head(prefix) == 5 else score])
                     torch.testing.assert_close(operations.hidden[hidden_key(row["hidden_state_key"])], before, rtol=0, atol=0)
                     put(ort_values, label + "/hidden_after_parameters", [before])
                 operations._operations(group["post_frame_hidden_ops"])
@@ -249,7 +253,7 @@ class NativeInputTests(unittest.TestCase):
         for group in [empty, *self.populations]:
             count = len(group["cancel"])
             self.assertIn(count, (0, 2, 256, 257, 259))
-            _, actual_reduced, actual_exists = NativeComponentConsumer(self.graphs).objects(group["cancel"])
+            _, actual_reduced, actual_exists, _ = NativeComponentConsumer(self.graphs).objects(group["cancel"])
             features = torch.tensor(group["cancel"], dtype=torch.float32).reshape(1, count, 184)
             expected = self.graphs.action.object_encoder(features)
             mask = torch.ones((1, count), dtype=torch.bool)
@@ -257,7 +261,7 @@ class NativeInputTests(unittest.TestCase):
             torch.testing.assert_close(actual_reduced, reduced, rtol=2e-5, atol=2e-6)
             self.assertEqual(actual_exists.item(), exists.item())
             if count == 257:
-                _, other_reduced, _ = NativeComponentConsumer(self.graphs).objects(group["cancel"], lengths=[128, 129])
+                _, other_reduced, _, _ = NativeComponentConsumer(self.graphs).objects(group["cancel"], lengths=[128, 129])
                 torch.testing.assert_close(actual_reduced, other_reduced,
                                            rtol=2e-5, atol=2e-6)
 

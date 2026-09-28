@@ -182,14 +182,14 @@ class ComponentTests(unittest.TestCase):
         fixture_weights(model)
         inputs = [leaf(torch.randn(2, width, dtype=torch.double)) for width in (8, 4, 4, 4)]
         inputs.append(leaf(torch.randn(2, 3, 4, dtype=torch.double)))
-        inputs.append(leaf(torch.randn(2, 9999, dtype=torch.double)))
+        inputs.append(leaf(torch.randn(2, 999, dtype=torch.double)))
         z, rule, prefix, summary, objects, fees = [leaf(x) for x in inputs]
         parameters = {name: leaf(p) for name, p in model.named_parameters()}
         family = encode(torch.cat((z, rule, summary), -1), parameters, "family")
         decoder = F.silu(linear(norm(torch.cat((z, rule, prefix), -1), parameters,
                                     "decoder.0"), parameters, "decoder.1"))
         expected = {"family": family}
-        for name in ("quantity", "variant", "price", "post_only", "expiry"):
+        for name in ("quantity", "variant", "price"):
             expected[name] = linear(decoder, parameters, name)
         expected["price"] = expected["price"] + F.linear(decoder, parameters["fee_weight.weight"]) * fees
         # 按对象分别求值，独立于实现中的扩展和批量拼接路径。
@@ -217,15 +217,14 @@ class ComponentTests(unittest.TestCase):
         summary_scores = model(*changed_summary)
         self.assert_close(prefix_scores["family"], base["family"])
         self.assertFalse(torch.allclose(summary_scores["family"], base["family"]))
-        for name, width in [("quantity", 2), ("variant", 4), ("price", 9999),
-                            ("post_only", 2), ("expiry", 3)]:
+        for name, width in [("quantity", 16), ("variant", 2), ("price", 999)]:
             self.assertEqual(base[name].shape, (2, width))
             self.assert_close(summary_scores[name], base[name])
             self.assertFalse(torch.allclose(prefix_scores[name], base[name]))
         self.assertEqual(
             {name for name, module in model.named_modules() if isinstance(module, nn.Linear)},
             {"family.1", "family.3", "decoder.1", "quantity", "variant", "price",
-             "post_only", "expiry", "cancel.1", "cancel.3", "fee_weight"},
+             "cancel.1", "cancel.3", "fee_weight"},
         )
         self.assertEqual(base["family"].shape, (2, 6))
         self.assertEqual(base["cancel"].shape, (2, 3, 1))
@@ -264,8 +263,7 @@ class ComponentTests(unittest.TestCase):
                         self.assertEqual(gru.weight_hh_l0.shape, (3 * hidden, hidden))
                         self.assertEqual(gru.num_layers, 1)
                         self.assertEqual(gru.dropout, 0)
-                    for name, width in (("quantity", 2), ("variant", 4), ("price", 9999),
-                                        ("post_only", 2), ("expiry", 3)):
+                    for name, width in (("quantity", 16), ("variant", 2), ("price", 999)):
                         self.assertEqual(getattr(actor, name).weight.shape, (width, hidden // 2))
                     self.assertEqual(actor.family[1].weight.shape, (hidden // 2, 2 * hidden))
                     self.assertEqual(actor.family[3].weight.shape, (6, hidden // 2))

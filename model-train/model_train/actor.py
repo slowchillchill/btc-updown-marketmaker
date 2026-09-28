@@ -41,17 +41,22 @@ def consume_actor(consumer, group, row, actor, *, deterministic=False, replay=No
     step = 0
     while not actor.complete():
         support = actor.support()
-        outputs = consumer.parameters(group, row, actor.prefix_features(),
-                                      price_fee_features=actor.price_fee_features())
-        head = actor.head_index()
-        if head == 7:
-            count = len(support)
-            logits = torch.cat([block[head][0] for block in outputs])[:count]
-        else:
-            logits = outputs[0][head][0]
         selected = replay[step] if replay is not None else None
-        choice, conditional_log_prob, conditional_entropy = conditional_choice(
-            logits, support, deterministic=deterministic, selected=selected)
+        legal = [i for i, value in enumerate(support) if value]
+        if len(legal) == 1:
+            choice = legal[0]
+            if selected is not None and selected != choice:
+                raise ValueError("replayed index is outside Rust support")
+            conditional_log_prob = log_prob * 0
+            conditional_entropy = conditional_log_prob
+        else:
+            outputs = consumer.parameters(group, row, actor.prefix_features(),
+                price_fee_features=actor.price_fee_features(), price_indices=actor.price_indices())
+            head = actor.head_index()
+            logits = (torch.cat([block[head][0] for block in outputs])[:len(support)]
+                      if head == 5 else outputs[0][head][0])
+            choice, conditional_log_prob, conditional_entropy = conditional_choice(
+                logits, support, deterministic=deterministic, selected=selected)
         actor.choose(choice)
         log_prob = log_prob + conditional_log_prob
         entropy = entropy + conditional_entropy
@@ -59,3 +64,10 @@ def consume_actor(consumer, group, row, actor, *, deterministic=False, replay=No
     if replay is not None and step != len(replay):
         raise ValueError("replay has extra indices")
     return ActorResult(actor, log_prob, entropy)
+
+
+def joint_entropy_sample(consumer, group, row, actor):
+    """§9.4 的独立完整动作样本；返回报告值和具有指定梯度的替代项。"""
+    result = consume_actor(consumer, group, row, actor, deterministic=False)
+    ell = result.log_prob
+    return -0.5 * ell.detach(), 0.5 * (ell.detach() + 1) * ell, result

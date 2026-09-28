@@ -160,7 +160,7 @@ def export_state(args):
             dynamic_shapes=({0:B}, {0:B}, {0:B,2:N}, {0:B,2:N}, {1:B}))
         onnx.save_model(lower_pairwise_sum(program.model_proto), destination / 'state_encoder.onnx',
             save_as_external_data=True, all_tensors_to_one_file=True, location='state_encoder.onnx.data', size_threshold=1024)
-        for pattern in ('initial_weights.pt', 'action_decoder.onnx*'):
+        for pattern in ('initial_weights.pt', 'action_*.onnx*'):
             for path in directory.glob(pattern):
                 shutil.copyfile(path, destination / path.name)
         provenance['source_commit'] = subprocess.check_output(['git', 'rev-parse', 'HEAD'], text=True).strip()

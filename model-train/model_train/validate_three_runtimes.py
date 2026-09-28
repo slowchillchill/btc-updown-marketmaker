@@ -9,7 +9,7 @@ import torch
 import onnxruntime as ort
 from .graphs import CONFIGURATIONS, TwoGraphs, STATE_INPUTS, ACTION_INPUTS, object_blocks, reduce_objects, score_all
 from .graph_fixtures import fixture, paired_gtc_prefixes, book_fixture
-from .validate_graphs import call_ort, session, sha, identities_for
+from .validate_graphs import call_ort, session, sha, identities_for, reference_ort_action
 
 
 def suite(config):
@@ -55,7 +55,7 @@ def trace(state, action, config, data):
     for c in data['cases']:
         b, n, d = c['batch'], c['slots'], config.hidden // 2
         f,s,r,p,x,m = [torch.tensor(c[k],dtype=torch.bool if k=='mask' else torch.float32).reshape(shape)
-            for k,shape in zip(('fast','slow','rule','prefix','objects','mask'),((b,596),(b,433),(b,30),(b,60),(b,n,184),(b,n)))]
+            for k,shape in zip(('fast','slow','rule','prefix','objects','mask'),((b,596),(b,433),(b,30),(b,36),(b,n,184),(b,n)))]
         book = torch.tensor(c["book_levels"]).reshape(b,6,c["depth"],9)
         book_mask = torch.tensor(c["book_mask"],dtype=torch.bool).reshape(b,6,c["depth"])
         h = torch.zeros(config.layers,b,config.hidden)
@@ -68,7 +68,7 @@ def trace(state, action, config, data):
                     base = f"{c['name']}/split{split}"
                     blocks = []
                     for part,(bx,bm,length) in enumerate(object_blocks(x,m,lengths,empty=c['empty'])):
-                        embedding = action(z,r,p,bx,bm,zero,absent)[6][:,:length]
+                        embedding = action(z,r,p,bx,bm,zero,absent)[4][:,:length]
                         blocks.append((embedding,bm[:,:length]))
                         yield f'{base}/embedding{part}',(embedding,)
                     reduced,exists = reduce_objects(blocks)
@@ -76,7 +76,7 @@ def trace(state, action, config, data):
                     yield f'{base}/family',action(z,r,p,x[:,:1],m[:,:1],reduced,exists)
                     for kind in range(3):
                         selected = m & (x[:,:,kind] == 1)
-                        prefix = torch.zeros_like(p); prefix[:,[kind+3,6,13]]=1
+                        prefix = torch.zeros_like(p); prefix[:,[kind+3,6,11]]=1
                         scores = score_all(action,z,r,prefix,x,selected,lengths,reduced,exists,empty=c['empty'])
                         for row,values in enumerate(scores):
                             label = f'{base}/family{kind}/row{row}'
@@ -84,7 +84,7 @@ def trace(state, action, config, data):
                             index = int(selected[row].nonzero().flatten()[values.argmax()]) if values.numel() else -1
                             yield label+'/selected',(torch.tensor([index],dtype=torch.float32),)
             else:
-                prefixes = [torch.tensor(v).reshape(b,60) for v in c['prefixes']] or [p]
+                prefixes = [torch.tensor(v).reshape(b,36) for v in c['prefixes']] or [p]
                 for i,prefix in enumerate(prefixes):
                     indices = c['active'] if c['mode']=='active' else list(range(b))
                     base = f"{c['name']}/step{step}/prefix{i}"
@@ -123,8 +123,8 @@ def main():
         subprocess.run([str(args.binary.resolve()),str(native),str(args.graphs.resolve()),str(args.threads),str(input_path.resolve())],stdout=stdout,stderr=stderr,check=True)
     model=TwoGraphs(config).eval();model.load_state_dict(torch.load(args.graphs/'initial_weights.pt',weights_only=True,map_location='cpu'))
     state=call_ort(session(args.graphs/'state_encoder.onnx',args.threads),STATE_INPUTS)
-    action=call_ort(session(args.graphs/'action_decoder.onnx',args.threads),ACTION_INPUTS)
-    stats=dict(input_contract_version='native_inputs_v5',
+    action=reference_ort_action(args.graphs,args.threads)
+    stats=dict(input_contract_version='native_inputs_v6', action_contract_version='native_actions_v2',
         feature_schema_sha256=sha(Path(__file__).resolve().parents[1]/'native-inputs/feature_schema.json'),
         config=config.name,threads=args.threads,comparisons=0,max_absolute_error=0.,cases=len(data['cases']))
     split_records={}

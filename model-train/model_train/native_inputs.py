@@ -1,9 +1,9 @@
-"""原生596/433与六侧全量盘口状态输入与30/60/184参数组件消费；不推导动作支持集。"""
-from dataclasses import dataclass
+"""原生596/433与六侧全量盘口状态输入与30/36/184参数组件消费；不推导动作支持集。"""
+from dataclasses import dataclass, field
 
 import torch
 from torch import Tensor
-from .graphs import TwoGraphs, object_blocks, reduce_objects
+from .graphs import TwoGraphs, object_blocks, reduce_objects, action_stages
 from .book import PackedBookInputs
 
 
@@ -20,6 +20,8 @@ class ComponentGroup:
     cancel_features: Tensor
     cancel_reduced: Tensor | None
     cancel_exists: Tensor | None
+    cancel_embeddings: Tensor | None = None
+    rule_contexts: dict = field(default_factory=dict)
 
 
 class NativeComponentConsumer:
@@ -28,6 +30,7 @@ class NativeComponentConsumer:
         self.graphs = graphs
         self.hidden: dict[tuple, Tensor] = {}
         self.book_inputs = []
+        self.stages = action_stages(graphs.action)
 
     def _operations(self, operations: list[dict]):
         parameter = next(self.graphs.parameters())
@@ -76,53 +79,68 @@ class NativeComponentConsumer:
         for i, group in enumerate(groups):
             has_decision = any(row["role"] == "DecisionRequired" for row in group["rows"])
             if has_decision and (prepare_parameters is None or prepare_parameters[i]):
-                features, reduced, exists = self.objects(group["cancel"], lengths=None if lengths is None else lengths[i])
+                features, reduced, exists, embeddings = self.objects(group["cancel"], lengths=None if lengths is None else lengths[i])
             else:
                 # 无参数消费时只保留原特征；不执行对象编码或伪造一个参数行。
                 features = parameter.new_tensor(group["cancel"]).reshape(1, -1, 184)
-                reduced = exists = None
+                reduced = exists = embeddings = None
             self._operations(group["post_frame_hidden_ops"])
             results.append(ComponentGroup(states[i],
                 [parameter.new_tensor(row["rule"]).reshape(1, 30) for row in group["rows"]],
-                [row["role"] for row in group["rows"]], features, reduced, exists))
+                [row["role"] for row in group["rows"]], features, reduced, exists, embeddings))
         return results
 
     def parameters_batch(self, entries):
-        """活动Actor参数步真实B批次；完成行由调用者压缩，输出按原行回填。"""
+        """按真实阶段及相同合法价格区间分组，稳定回填原活动行。"""
         if not entries:
             return []
-        features = entries[0][0].cancel_features
-        counts = [group.cancel_features.shape[1] for group, _, _ in entries]
-        results = [[] for _ in entries]
-        for group, row, _ in entries:
-            if group.roles[row] != "DecisionRequired":
-                raise ValueError("ContextOnly has no parameter invocation")
-        heads = [actor.head_index() for _, _, actor in entries]
-        states = torch.cat([group.states[row] for group, row, _ in entries])
-        rules = torch.cat([group.rules[row] for group, row, _ in entries])
-        prefixes = features.new_tensor([actor.prefix_features() for _, _, actor in entries])
-        fees = features.new_tensor([actor.price_fee_features() for _, _, actor in entries])
-        reduced = torch.cat([group.cancel_reduced for group, _, _ in entries])
-        exists = torch.cat([group.cancel_exists for group, _, _ in entries])
-        for offset in range(0, max(max(counts), 1), 256):
-            active = [i for i in range(len(entries))
-                      if offset == 0 or heads[i] == 7 and counts[i] > offset]
-            if not active:
-                break
-            # 首块包括空人口的非撤单头；续块只计算仍有撤单对象的原行。
-            slots = min(256, max(max(counts[i] for i in active) - offset, 1))
-            objects = features.new_zeros((len(active), slots, 184))
-            mask = torch.zeros((len(active), slots), dtype=torch.bool, device=features.device)
-            for batch, i in enumerate(active):
-                group = entries[i][0]
-                valid = max(0, min(slots, counts[i] - offset))
-                objects[batch, :valid] = group.cancel_features[0, offset:offset + valid]
-                mask[batch, :valid] = True
-            outputs = self.graphs.action(states[active], rules[active], prefixes[active],
-                                        objects, mask, reduced[active], exists[active], fees[active])
-            for batch, i in enumerate(active):
-                results[i].append(tuple(output[batch:batch + 1] for output in outputs))
+        buckets = {}
+        results = [None] * len(entries)
+        for i, (group, row, actor) in enumerate(entries):
+            support = actor.support()
+            if sum(support) == 1:
+                values = [group.states[row].new_empty((1,0)) for _ in range(6)]
+                values[actor.head_index()] = group.states[row].new_zeros((1,len(support)))
+                results[i] = [tuple(values)]
+                continue
+            indices = tuple(actor.price_indices()) if actor.head_index() == 3 else ()
+            buckets.setdefault((actor.head_index(), indices), []).append(i)
+        for (head, indices), positions in buckets.items():
+            selected = [entries[i] for i in positions]
+            if head == 5:
+                for i, (group, row, actor) in zip(positions, selected):
+                    results[i] = self.parameters(group, row, actor.prefix_features())
+                continue
+            groups = [entry[0] for entry in selected]
+            states = torch.cat([g.states[r] for g, r, _ in selected])
+            if head == 0:
+                output, contexts = self.stages["action_family"](states,
+                    torch.cat([g.rules[r] for g, r, _ in selected]),
+                    torch.cat([g.cancel_reduced for g in groups]),
+                    torch.cat([g.cancel_exists for g in groups]))
+                for b, (g, r, _) in enumerate(selected):
+                    g.rule_contexts[r] = contexts[b:b+1]
+            else:
+                contexts = torch.cat([self._rule(g, r) for g, r, _ in selected])
+                prefix = states.new_tensor([a.prefix_features() for _, _, a in selected])
+                if head == 3:
+                    axis = torch.tensor(indices, dtype=torch.int64, device=states.device)
+                    fees = states.new_tensor([a.price_fee_features() for _, _, a in selected])
+                    local = self.stages["action_price"](states, contexts, prefix, axis, fees)
+                    output = local.new_zeros((len(selected), 999)).index_copy(1, axis, local)
+                else:
+                    output = self.stages["action_quantity" if head == 1 else "action_variant"](states, contexts, prefix)
+            for b, i in enumerate(positions):
+                values = [output.new_empty((1, 0)) for _ in range(6)]
+                values[head] = output[b:b+1]
+                results[i] = [tuple(values)]
         return results
+
+    def _rule(self, group, row):
+        if row not in group.rule_contexts:
+            # 单项族跳过评分时没有任何后续参数；定向前缀验证可直接编码规则。
+            group.rule_contexts[row] = self.graphs.action.rule(group.rules[row])
+        return group.rule_contexts[row]
 
     def objects(self, values: list[list[float]], *, lengths: list[int] | None = None):
         """完整对象人口组件可独立消费，不把缺少前序hidden的截点冒称连续帧。"""
@@ -134,34 +152,53 @@ class NativeComponentConsumer:
             lengths = [min(256, count - offset) for offset in range(0, count, 256)] or [0]
         elif sum(lengths) != count or any(length < 0 or length > 256 for length in lengths):
             raise ValueError("blocks must partition the complete native object population")
-        blocks = [(self.graphs.action.object_encoder(f)[:, :length], m[:, :length])
+        blocks = [(self.stages["action_objects"](f, m)[:, :length], m[:, :length])
                   for f, m, length in object_blocks(features, mask, lengths, empty=count == 0)]
         reduced, exists = reduce_objects(blocks)
-        return features, reduced, exists
+        return features, reduced, exists, torch.cat([v for v, _ in blocks], dim=1)
 
     def parameters(self, group: ComponentGroup, row: int, prefix: list[float],
-                   *, lengths: list[int] | None = None, price_fee_features=None) -> list[tuple[Tensor, ...]]:
-        """实际参数图消费 Rust 精确状态投影；复用该帧 z/rule 和全局对象归约。"""
+                   *, lengths: list[int] | None = None, price_fee_features=None,
+                   price_indices=None) -> list[tuple[Tensor, ...]]:
+        """评分当前阶段；价格局部位置在此映回原 k−1 轴。"""
         if group.roles[row] != "DecisionRequired":
             raise ValueError("ContextOnly has no parameter invocation")
-        features = group.cancel_features
-        count = features.shape[1]
-        cancel = prefix[13] == 1
-        if not cancel:
-            # 自定义分块仅决定撤单候选轴；其他头消费完整归约与一个实际首块。
-            lengths = [min(256, count)]
-        elif lengths is None:
-            lengths = [min(256, count - i) for i in range(0, count, 256)] or [0]
-        elif not lengths or sum(lengths) != count or any(length < 0 or length > 256 for length in lengths):
-            raise ValueError("blocks must partition the complete native object population")
-        mask = torch.ones((1, count), dtype=torch.bool, device=features.device)
-        prefix = features.new_tensor(prefix).reshape(1, 60)
-        fees = (features.new_tensor(price_fee_features).reshape(1, 9999)
-                if price_fee_features is not None else features.new_zeros((1, 9999)))
-        return [self.graphs.action(group.states[row], group.rules[row], prefix, f, m,
-                                  group.cancel_reduced, group.cancel_exists,
-                                  fees)
-                for f, m, _ in object_blocks(features, mask, lengths, empty=count == 0)]
+        z = group.states[row]
+        encoded = z.new_tensor(prefix).reshape(1, 36)
+        stage = prefix[7:12].index(1)
+        head = (0, 1, 2, 3, 5)[stage]
+        if head == 0:
+            score, rule = self.stages["action_family"](z, group.rules[row], group.cancel_reduced, group.cancel_exists)
+            group.rule_contexts[row] = rule
+            outputs = [score]
+        else:
+            rule = self._rule(group, row)
+            if head == 5:
+                count = group.cancel_features.shape[1]
+                lengths = lengths or [min(256, count-i) for i in range(0, count, 256)] or [0]
+                if sum(lengths) != count or any(n < 0 or n > 256 for n in lengths):
+                    raise ValueError("blocks must partition the complete native object population")
+                context = self.stages["action_cancel_context"](z, rule, encoded)
+                outputs, offset = [], 0
+                for length in lengths:
+                    values = group.cancel_embeddings[:, offset:offset+length]
+                    mask = torch.ones((1, length), dtype=torch.bool, device=z.device)
+                    outputs.append(self.stages["action_cancel"](context, values, mask))
+                    offset += length
+            elif head == 3:
+                indices = torch.tensor(price_indices if price_indices is not None else range(999), dtype=torch.int64, device=z.device)
+                fees = (z.new_tensor(price_fee_features).reshape(1, len(indices))
+                        if price_fee_features is not None else z.new_zeros((1,len(indices))))
+                local = self.stages["action_price"](z, rule, encoded, indices, fees)
+                outputs = [local.new_zeros((1,999)).index_copy(1, indices, local)]
+            else:
+                outputs = [self.stages["action_quantity" if head == 1 else "action_variant"](z, rule, encoded)]
+        result = []
+        for score in outputs:
+            values = [score.new_empty((1, 0)) for _ in range(6)]
+            values[head] = score
+            result.append(tuple(values))
+        return result
 
     def cancel_scores(self, group: ComponentGroup, row: int, prefix: list[float],
                       *, lengths: list[int] | None = None) -> list[dict]:
@@ -170,5 +207,5 @@ class NativeComponentConsumer:
         count = group.cancel_features.shape[1]
         lengths = lengths if lengths is not None else [min(256, count - i)
                    for i in range(0, count, 256)] or [0]
-        return [{"scores": value[7][0].detach().cpu().tolist(), "valid_len": length}
+        return [{"scores": value[5][0].detach().cpu().tolist(), "valid_len": length}
                 for value, length in zip(outputs, lengths)]

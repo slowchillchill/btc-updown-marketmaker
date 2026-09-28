@@ -24,7 +24,7 @@ class ThreeRuntimeComparisonTests(unittest.TestCase):
 
     def test_actor_reports_supported_score_before_choice_and_ignores_masked_slots(self):
         from model_train.actor_validation import compare_actor_steps
-        prefix = [0.] * 60
+        prefix = [0.] * 36
         reference = ([True, False, True], 'CancelObject', prefix, [.1807526946, 0., .1807527840])
         actual = ([True, False, True], 'CancelObject', prefix, [.1807528138, float('nan'), .1807527840])
         # 原事故：有效分数在数值门内，但严格赢家反转仍必须失败。
