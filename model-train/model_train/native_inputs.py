@@ -4,7 +4,7 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 from .graphs import TwoGraphs, object_blocks, reduce_objects
-from .book import pad_books
+from .book import PackedBookInputs
 
 
 def hidden_key(value: dict) -> tuple:
@@ -27,12 +27,14 @@ class NativeComponentConsumer:
     def __init__(self, graphs: TwoGraphs):
         self.graphs = graphs
         self.hidden: dict[tuple, Tensor] = {}
+        self.book_inputs = []
 
     def _operations(self, operations: list[dict]):
         parameter = next(self.graphs.parameters())
         for operation in operations:
             kind, value = next(iter(operation.items()))
             if kind == "ResetRootHidden":
+                self.book_inputs.clear()
                 root = (value["trajectory_id"], tuple(sorted(value["account_id"].items())))
                 self.hidden = {key: state for key, state in self.hidden.items() if key[:2] != root}
             elif kind == "InitializeZero":
@@ -41,6 +43,7 @@ class NativeComponentConsumer:
                 layers, hidden = state.layers, state.hidden_size
                 self.hidden[key] = parameter.new_zeros((layers, 1, hidden))
             elif kind == "Retire":
+                self.book_inputs.clear()
                 del self.hidden[hidden_key(value["hidden_state_key"])]
             else:
                 raise ValueError(f"unknown native hidden operation: {kind}")
@@ -55,12 +58,15 @@ class NativeComponentConsumer:
         states = [[] for _ in groups]
         for group in groups:
             self._operations(group["pre_frame_hidden_ops"])
-        for frame in range(max((len(g["rows"]) for g in groups), default=0)):
+        frames = max((len(g["rows"]) for g in groups), default=0)
+        self.book_inputs = self.book_inputs[:frames]
+        self.book_inputs.extend(PackedBookInputs() for _ in range(frames - len(self.book_inputs)))
+        for frame in range(frames):
             active = [(i, g["rows"][frame]) for i, g in enumerate(groups) if frame < len(g["rows"])]
             keys = [hidden_key(row["hidden_state_key"]) for _, row in active]
             fast = parameter.new_tensor([row["fast"] for _, row in active])
             slow = parameter.new_tensor([row["slow"] for _, row in active])
-            book, mask = pad_books([row["book_levels"] for _, row in active], like=parameter)
+            book, mask = self.book_inputs[frame].pack([row["book_levels"] for _, row in active], keys, like=parameter)
             z, next_hidden = self.graphs.state(fast, slow, book, mask, torch.cat([self.hidden[k] for k in keys], dim=1))
             for batch, ((index, _), key) in enumerate(zip(active, keys)):
                 # 独立存储避免小的活跃行通过view保留整个历史批次。

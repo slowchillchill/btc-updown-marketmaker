@@ -59,18 +59,23 @@ fn distant_depth_and_previous_unknown_are_not_trade_or_cross_gap_changes() {
     for i in 0..5 {
         assert_eq!(&a[57 + 8 * i..60 + 8 * i], &b[57 + 8 * i..60 + 8 * i]);
     }
+    let unchanged = encode(&o, &[0.; 30], 25000, &mut h);
+    assert_eq!(unchanged[46], 0.);
+    assert_eq!(unchanged[47], 1.);
     // 同一个生产侧编码器的缺源读取，既有合法档位引用保持，前一帧未知不跨洞。
     let mut previous = super::market::SidePrevious::default();
+    let first = (ExactDecimal("1".into()), ExactDecimal("2".into()));
+    let last = (ExactDecimal("1".into()), ExactDecimal("3".into()));
     let mut out = [0.; 16];
     super::market::side(
         &mut out,
         0,
-        Some(vec![(integer(1), integer(2))]),
+        Some(vec![(&first.0, &first.1)]),
         vec![],
-        vec![],
+        "",
         false,
         &mut previous,
-        &mut Vec::new(),
+        &mut std::sync::Arc::default(),
         true,
     );
     super::market::side(
@@ -78,22 +83,22 @@ fn distant_depth_and_previous_unknown_are_not_trade_or_cross_gap_changes() {
         1,
         None,
         vec![],
-        vec![],
+        "",
         false,
         &mut previous,
-        &mut Vec::new(),
+        &mut std::sync::Arc::default(),
         true,
     );
     let mut restored = [0.; 16];
     super::market::side(
         &mut restored,
         2,
-        Some(vec![(integer(1), integer(3))]),
+        Some(vec![(&last.0, &last.1)]),
         vec![],
-        vec![],
+        "",
         false,
         &mut previous,
-        &mut Vec::new(),
+        &mut std::sync::Arc::default(),
         true,
     );
     assert_eq!(restored[4], 0.);
@@ -236,15 +241,20 @@ fn block_parallel_projection_keeps_coordinates_and_unique_direct_times() {
             .unwrap();
         for now in [24_000, 25_000] {
             let mut out = [0.; 16];
-            let mut rows = Vec::new();
+            let mut rows = std::sync::Arc::default();
             let mut previous = super::market::SidePrevious::default();
             pool.install(|| {
                 super::market::side(
                     &mut out,
                     now,
-                    Some(levels.clone()),
+                    Some(
+                        values
+                            .iter()
+                            .map(|p| (&p.price_pusd_per_share, &p.quantity_shares))
+                            .collect(),
+                    ),
                     anchors.iter().collect(),
-                    paths.clone(),
+                    &format!("assets[{}].bids[", UP_TOKEN_ID),
                     true,
                     &mut previous,
                     &mut rows,
@@ -717,4 +727,142 @@ fn encode(
     }
     out[target..].copy_from_slice(&fast[source..]);
     out
+}
+
+fn incremental_dependency_observations() -> Vec<MarketBusinessObservationV1> {
+    let mut c = core();
+    push(&mut c, meta(0));
+    let mut output = vec![
+        push(&mut c, pm(1, 1, 21000, book("6"))),
+        push(&mut c, pm(2, 2, 22000, book("16"))),
+        push(&mut c, pm(3, 3, 23000, bba())),
+    ];
+    for (index, prices) in [
+        vec!["99999", "99998", "99997"],
+        vec!["99999.01", "99999", "99998"],
+        vec!["99999", "99998", "99997"],
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let sequence = index as u64 + 1;
+        let at = 24000 + index as i64 * 1000;
+        let snapshot = BinanceDepthSnapshotRow {
+            timestamp_received: at,
+            snapshot_fetch_start_utc: at - 10,
+            last_update_id: 99 + sequence,
+            bids: prices
+                .into_iter()
+                .map(|price| DepthLevel {
+                    price: price.into(),
+                    quantity: "2".into(),
+                })
+                .collect(),
+            asks: vec![DepthLevel {
+                price: "100000".into(),
+                quantity: "3".into(),
+            }],
+            symbol: "BTCUSDT".into(),
+            source_endpoint: "https://api.binance.com/api/v3/depth?symbol=BTCUSDT&limit=1000"
+                .into(),
+            snapshot_status: "complete".into(),
+            source_sequence_epoch_id: "depth".into(),
+            connection_generation: 1,
+            depth_ingress_sequence: sequence,
+            collector_admission_sequence: sequence,
+            collector_admission_time_utc_ms: at + 1,
+            collector_host_id: "collector-1".into(),
+            collector_region: "eu-west-1".into(),
+            schema_version: "binance_depth_snapshot_v3".into(),
+        };
+        output.push(push(
+            &mut c,
+            record(
+                4 + index as u64,
+                TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(snapshot)),
+            ),
+        ));
+    }
+    for (input, changes) in [
+        (7, vec![("0.52", "4")]),
+        (8, vec![("0.5", "0"), ("0.52", "0")]),
+    ] {
+        output.push(push(
+            &mut c,
+            pm(
+                input,
+                input - 3,
+                20000 + input as i64 * 1000,
+                PolymarketOrderbookEvent::PriceChange {
+                    price_changes: changes
+                        .into_iter()
+                        .map(|(price, size)| PolymarketPriceChangeEntry {
+                            asset_id: UP_TOKEN_ID.into(),
+                            price: price.into(),
+                            size: Some(size.into()),
+                            side: PolymarketSide::Buy,
+                            best_bid: None,
+                            best_ask: None,
+                        })
+                        .collect(),
+                },
+            ),
+        ));
+    }
+    output.push(push(
+        &mut c,
+        pm(
+            9,
+            6,
+            30000,
+            PolymarketOrderbookEvent::Book {
+                asset_id: UP_TOKEN_ID.into(),
+                bids: vec![],
+                asks: vec![],
+                last_trade_price: None,
+            },
+        ),
+    ));
+    output.push(push(&mut c, pm(10, 7, 31000, book("6"))));
+    output
+}
+
+#[test]
+fn incremental_inputs_keep_exact_best_dependencies_time_and_published_versions() {
+    let mut history = MarketHistory::default();
+    let observations = incremental_dependency_observations();
+    let values = observations
+        .iter()
+        .enumerate()
+        .map(|(i, o)| super::market::encode(o, &[0.; 30], 33000 + i as i64, &mut history))
+        .collect::<Vec<_>>();
+    assert_eq!(values[0].0[45], signed_log_f32(&integer(21)));
+    assert_eq!(values[1].0[46], signed_log_f32(&integer(10)));
+    assert_eq!(values[2].0[46], 0.);
+    assert_ne!(&values[1].1[0][0][3..8], &values[2].1[0][0][3..8]);
+    // 最优精确价变化，但价格投影碰撞：原99999档距离必须从0变成精确0.01。
+    assert_eq!(
+        values[3].1[4][0][0].to_bits(),
+        values[4].1[4][0][0].to_bits()
+    );
+    assert_eq!(values[3].1[4][0][8], 0.);
+    assert_eq!(
+        values[4].1[4][1][8].to_bits(),
+        signed_log_f32(&ratio(1, 100)).to_bits()
+    );
+    assert_eq!(values[5].1[4][0][8], 0.);
+    assert_eq!(values[6].1[0].len(), 7);
+    assert_eq!(values[7].1[0].len(), 5);
+    assert!(values[8].1[0].is_empty());
+    assert_eq!(values[9].1[0].len(), 6);
+    // 早期结果仍由上面的values持有，后续重排/删除不能改写它们。
+    assert_eq!(
+        values[0].1[0][5][1].to_bits(),
+        signed_log_f32(&integer(6)).to_bits()
+    );
+    assert_eq!(
+        values[1].1[0][5][1].to_bits(),
+        signed_log_f32(&integer(16)).to_bits()
+    );
+    assert!(std::sync::Arc::ptr_eq(&values[5].1[4], &values[6].1[4]));
 }

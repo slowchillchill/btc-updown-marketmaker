@@ -1,8 +1,9 @@
-//! #166 的 596/30 槽与六侧全量盘口；只消费公共所选事实。有限历史不保存第二份盘口。
+//! 596/30 槽与六侧全量盘口；只消费公共所选事实，派生缓存和有限历史随市场退役。
 use crate::exact::{decimal, integer, ratio, round_f32, signed_log_f32 as log};
 use contracts::{economics::EconomicRational as R, *};
 use rayon::prelude::*;
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
 fn visible<T>(f: &ObservedFactV1<T>) -> Option<&T> {
     matches!(
@@ -174,8 +175,53 @@ pub(crate) fn static_rules(r: &PublicTradingRuleContextV1) -> [f32; 16] {
 pub(crate) struct SidePrevious {
     total: Option<R>,
     best: Option<R>,
-    // 可丢弃的精确表达式投影，仅含上一帧本侧实际用过的输入；不是盘口事实。
-    logs: BTreeMap<R, f32>,
+    // 只保留当前冻结侧的可重建解析／投影；前帧业务统计独立保留。
+    inputs: Option<SideInputs>,
+}
+#[derive(Clone)]
+struct ParsedLevel {
+    price_text: String,
+    quantity_text: String,
+    price: R,
+    quantity: R,
+    path: String,
+    row: Option<usize>,
+    time: Option<(i64, Option<i64>, i64)>,
+}
+impl ParsedLevel {
+    fn new(p: &ExactDecimal, q: &ExactDecimal, prefix: &str) -> Self {
+        Self {
+            price_text: p.0.clone(),
+            quantity_text: q.0.clone(),
+            price: decimal(p),
+            quantity: decimal(q),
+            path: if prefix.is_empty() {
+                String::new()
+            } else {
+                format!("{prefix}{}]", p.0)
+            },
+            row: None,
+            time: None,
+        }
+    }
+    fn quantity(&mut self, q: &ExactDecimal) -> bool {
+        if self.quantity_text == q.0 {
+            return false;
+        }
+        let value = decimal(q);
+        let changed = value != self.quantity;
+        self.quantity = value;
+        self.quantity_text.clone_from(&q.0);
+        changed
+    }
+}
+#[derive(Clone, Default)]
+struct SideInputs {
+    prefix: String,
+    levels: Vec<ParsedLevel>,
+    // 已发布的侧从不原地修改；旧组继续持有它实际消费的版本。
+    book: Arc<Vec<[f32; 9]>>,
+    summary: [f32; 2],
 }
 #[derive(Clone)]
 pub(crate) struct Sample {
@@ -194,111 +240,161 @@ pub(crate) struct MarketHistory {
 pub(crate) fn side(
     out: &mut [f32],
     now: i64,
-    levels: Option<Vec<(R, R)>>,
+    levels: Option<Vec<(&ExactDecimal, &ExactDecimal)>>,
     a: Vec<&DirectObservationAnchorV1>,
-    paths: Vec<String>,
+    prefix: &str,
     pm: bool,
     previous: &mut SidePrevious,
-    book: &mut Vec<[f32; 9]>,
+    book: &mut Arc<Vec<[f32; 9]>>,
     bid: bool,
 ) -> Option<(R, Vec<DirectObservationAnchorV1>)> {
     out[5..14].copy_from_slice(&envelope(now, &a));
-    let mut next = SidePrevious::default();
-    let mut best_identity = None;
-    if let Some(levels) = levels {
-        let levels: Vec<_> = levels.into_iter().filter(|(_, q)| q > &R::zero()).collect();
-        out[0] = 1.;
-        out[1] = log(&integer(levels.len()));
-        let total = sum(levels.iter().map(|(_, q)| q));
-        out[2] = log(&total);
-        if let Some(old) = &previous.total {
-            out[3] = log(&total.sub(old));
-            out[4] = 1.;
-        }
-        next.total = Some(total);
-        // 每侧冻结输入内建索引；保留同一路径的全部锚点，重复仍表示时间不唯一。
-        let mut by_path: HashMap<&str, Vec<&DirectObservationAnchorV1>> = HashMap::new();
-        for anchor in &a {
-            by_path.entry(&anchor.field_path).or_default().push(anchor);
-        }
-        let mut times = HashMap::new();
-        let mut row_times = Vec::with_capacity(levels.len());
-        for i in 0..levels.len() {
-            let aa = paths
-                .get(i)
-                .and_then(|p| by_path.get(p.as_str()))
-                .map_or(&[][..], Vec::as_slice);
-            let time = one(aa).map_or([0.; 5], |anchor| {
-                *times
-                    .entry((anchor.source_event_at_utc_ms, anchor.received_at_utc_ms))
-                    .or_insert_with(|| t5(now, Some(anchor)))
-            });
-            row_times.push(time);
-            if i == 0 {
-                let p = &levels[0].0;
-                next.best = Some(p.clone());
-                if let Some(old) = &previous.best {
-                    out[14] = log(&p.sub(old));
-                    out[15] = 1.;
-                }
-                if !aa.is_empty() {
-                    best_identity = Some((p.clone(), aa.iter().copied().cloned().collect()));
-                }
-            }
-        }
-        // 距离只构造一次，随后将精确键移动到下一帧缓存。
-        let distances: Vec<_> = levels
+    let Some(levels) = levels else {
+        *previous = SidePrevious::default();
+        *book = Arc::default();
+        return None;
+    };
+    let cached = previous
+        .inputs
+        .take()
+        .filter(|value| value.prefix == prefix);
+    let warm = cached.is_some();
+    let mut cached = cached.unwrap_or_default();
+    cached.prefix.clear();
+    cached.prefix.push_str(prefix);
+    let same_prices = levels.len() == cached.levels.len()
+        && levels
             .iter()
-            .map(|(p, _)| {
-                if bid {
-                    levels[0].0.sub(p)
-                } else {
-                    p.sub(&levels[0].0)
-                }
-            })
+            .zip(&cached.levels)
+            .all(|((p, _), old)| p.0 == old.price_text);
+    let mut quantity_changed = Vec::with_capacity(levels.len());
+    if same_prices {
+        for ((_, q), old) in levels.iter().zip(&mut cached.levels) {
+            quantity_changed.push(old.quantity(q));
+        }
+    } else {
+        // 结构改变才建立迁移索引。原十进制文本只用于复用解析结果，不作为经济价格。
+        let mut old: HashMap<_, _> = std::mem::take(&mut cached.levels)
+            .into_iter()
+            .map(|entry| (entry.price_text.clone(), entry))
             .collect();
-        let start = book.len();
-        book.resize(start + levels.len(), [0.; 9]);
-        // 本侧准备已完成；同一持久 Rayon 池仅处理不相交的纯输出块。
-        // RAYON_NUM_THREADS 单独控制原生投影，与 ORT 的线程参数无关。
-        book[start..]
+        for (p, q) in &levels {
+            let mut entry = old
+                .remove(&p.0)
+                .unwrap_or_else(|| ParsedLevel::new(p, q, prefix));
+            quantity_changed.push(entry.quantity(q));
+            cached.levels.push(entry);
+        }
+    }
+    let valid: Vec<_> = cached
+        .levels
+        .iter()
+        .enumerate()
+        .filter_map(|(i, level)| (level.quantity > R::zero()).then_some(i))
+        .collect();
+    let total = if warm && same_prices && !quantity_changed.iter().any(|v| *v) {
+        previous.total.clone().unwrap()
+    } else {
+        cached.summary[0] = log(&integer(valid.len()));
+        let total = sum(valid.iter().map(|i| &cached.levels[*i].quantity));
+        cached.summary[1] = log(&total);
+        total
+    };
+    out[0] = 1.;
+    out[1..3].copy_from_slice(&cached.summary);
+    if let Some(old) = &previous.total {
+        out[3] = log(&total.sub(old));
+        out[4] = 1.;
+    }
+    let best = valid.first().map(|i| cached.levels[*i].price.clone());
+    let best_changed = best != previous.best;
+    if let Some((best, old)) = best.as_ref().zip(previous.best.as_ref()) {
+        out[14] = log(&best.sub(old));
+        out[15] = 1.;
+    }
+    let mut by_path: HashMap<&str, Vec<&DirectObservationAnchorV1>> = HashMap::new();
+    for anchor in &a {
+        by_path.entry(&anchor.field_path).or_default().push(anchor);
+    }
+    let mut times = HashMap::new();
+    let mut updates = Vec::with_capacity(valid.len());
+    let mut changed = valid.len() != cached.book.len();
+    let mut best_identity = None;
+    for (row, &index) in valid.iter().enumerate() {
+        let level = &cached.levels[index];
+        let aa = by_path
+            .get(level.path.as_str())
+            .map_or(&[][..], Vec::as_slice);
+        let anchor = one(aa);
+        let time_key = anchor.map(|a| (now, a.source_event_at_utc_ms, a.received_at_utc_ms));
+        let time = anchor.map_or([0.; 5], |a| {
+            *times
+                .entry((a.source_event_at_utc_ms, a.received_at_utc_ms))
+                .or_insert_with(|| {
+                    if level.time == time_key
+                        && let Some(old) = level.row
+                    {
+                        cached.book[old][3..8].try_into().unwrap()
+                    } else {
+                        t5(now, Some(a))
+                    }
+                })
+        });
+        changed |= level.row != Some(row)
+            || quantity_changed[index]
+            || best_changed
+            || level.time != time_key;
+        updates.push((index, time, time_key));
+        if row == 0 && !aa.is_empty() {
+            best_identity = Some((level.price.clone(), aa.iter().copied().cloned().collect()));
+        }
+    }
+    if changed {
+        let mut values = vec![[0.; 9]; valid.len()];
+        values
             .par_chunks_mut(64)
             .enumerate()
             .for_each(|(chunk, rows)| {
-                for (within, row) in rows.iter_mut().enumerate() {
-                    let i = chunk * 64 + within;
-                    let (p, q) = &levels[i];
-                    let projected = |value: &R| {
-                        previous
-                            .logs
-                            .get(value)
-                            .copied()
-                            .unwrap_or_else(|| log(value))
-                    };
-                    row[0] = if pm { price(p, true) } else { projected(p) };
-                    row[1] = projected(q);
-                    row[2] = 1.;
-                    row[3..8].copy_from_slice(&row_times[i]);
-                    row[8] = projected(&distances[i]);
+                for (within, output) in rows.iter_mut().enumerate() {
+                    let (index, time, _) = &updates[chunk * 64 + within];
+                    let level = &cached.levels[*index];
+                    if let Some(old) = level.row {
+                        *output = cached.book[old];
+                    } else {
+                        output[0] = price(&level.price, pm);
+                        output[2] = 1.;
+                    }
+                    if level.row.is_none() || quantity_changed[*index] {
+                        output[1] = log(&level.quantity);
+                    }
+                    output[3..8].copy_from_slice(time);
+                    if level.row.is_none() || best_changed {
+                        let distance = if bid {
+                            best.as_ref().unwrap().sub(&level.price)
+                        } else {
+                            level.price.sub(best.as_ref().unwrap())
+                        };
+                        output[8] = log(&distance);
+                    }
                 }
             });
-        // 重建而非累加历史键，空间随当前可见档位数有界；消失的输入不继续驻留。
-        next.logs = levels
-            .into_iter()
-            .zip(distances)
-            .zip(&book[start..])
-            .flat_map(|(((p, q), distance), row)| {
-                // FromIterator 排序后批量建树，避免逐键沿树路径插入与克隆。
-                (!pm)
-                    .then_some((p, row[0]))
-                    .into_iter()
-                    .chain([(q, row[1]), (distance, row[8])])
-            })
-            .collect();
+        cached.book = Arc::new(values);
     }
-    *previous = next;
+    for level in &mut cached.levels {
+        level.row = None;
+        level.time = None;
+    }
+    for (row, (index, _, time)) in updates.into_iter().enumerate() {
+        cached.levels[index].row = Some(row);
+        cached.levels[index].time = time;
+    }
+    *book = cached.book.clone();
+    previous.total = Some(total);
+    previous.best = best;
+    previous.inputs = Some(cached);
     best_identity
 }
+
 fn reference(out: &mut [f32], o: &MarketBusinessObservationV1, now: i64) {
     let selected = visible(&o.settlement_reference).map(|r| match r {
         BtcSettlementReferenceV1::ChainlinkSpot => 0,
@@ -762,7 +858,7 @@ pub(crate) fn encode(
     h: &mut MarketHistory,
 ) -> ([f32; 596], BookLevels) {
     let mut out = [0.; 596];
-    let mut book: BookLevels = std::array::from_fn(|_| Vec::new());
+    let mut book: BookLevels = std::array::from_fn(|_| Arc::default());
     reference(&mut out[..37], o, now);
     let mut samples: [Option<(R, Vec<DirectObservationAnchorV1>)>; 6] =
         std::array::from_fn(|_| None);
@@ -788,39 +884,26 @@ pub(crate) fn encode(
                         if bid { "bids" } else { "asks" }
                     );
                     let levels = visible(fact);
-                    let paths = levels
-                        .map(|v| {
-                            v.iter()
-                                .filter(|p| decimal(&p.quantity_shares) > R::zero())
-                                .map(|p| format!("{}{}]", prefix, p.price_pusd_per_share.0))
-                                .collect()
-                        })
-                        .unwrap_or_default();
                     side(
                         features,
                         now,
                         levels.map(|v| {
                             v.iter()
-                                .map(|p| {
-                                    (
-                                        decimal(&p.price_pusd_per_share),
-                                        decimal(&p.quantity_shares),
-                                    )
-                                })
+                                .map(|p| (&p.price_pusd_per_share, &p.quantity_shares))
                                 .collect()
                         }),
                         fact.direct_anchors
                             .iter()
                             .filter(|a| a.field_path.starts_with(&prefix))
                             .collect(),
-                        paths,
+                        &prefix,
                         true,
                         previous,
                         book,
                         bid,
                     );
                 } else {
-                    previous.logs.clear();
+                    previous.inputs = None;
                 }
             } else {
                 let levels = visible(&o.binance_depth).map(|d| if bid { &d.bids } else { &d.asks });
@@ -829,11 +912,11 @@ pub(crate) fn encode(
                     now,
                     levels.map(|v| {
                         v.iter()
-                            .map(|p| (decimal(&p.price_usdt_per_btc), decimal(&p.quantity_btc)))
+                            .map(|p| (&p.price_usdt_per_btc, &p.quantity_btc))
                             .collect()
                     }),
                     vec![],
-                    vec![],
+                    "",
                     false,
                     previous,
                     book,
@@ -905,7 +988,7 @@ pub(crate) fn encode(
 }
 
 /// 六侧唯一原生表示；长度由数组实际人口派生，不持久化补齐或长度副本。
-pub type BookLevels = [Vec<[f32; 9]>; 6];
+pub type BookLevels = [Arc<Vec<[f32; 9]>>; 6];
 
 /// 独立根合批边界；全空使用物理 N=1，全部 mask=false。
 pub fn pad_books<'a>(
@@ -914,7 +997,7 @@ pub fn pad_books<'a>(
     let books: Vec<_> = books.into_iter().collect();
     let depth = books
         .iter()
-        .flat_map(|b| b.iter().map(Vec::len))
+        .flat_map(|b| b.iter().map(|side| side.len()))
         .max()
         .unwrap_or(0)
         .max(1);
@@ -930,105 +1013,4 @@ pub fn pad_books<'a>(
         }
     }
     (depth, values, mask)
-}
-
-#[cfg(test)]
-mod projection_cache_tests {
-    use super::*;
-
-    #[test]
-    fn only_current_exact_inputs_survive_quantity_best_insert_delete_and_missing_changes() {
-        for pm in [false, true] {
-            for bid in [false, true] {
-                let mut previous = SidePrevious::default();
-                // 先数量改变，再插入新最优价，删除旧档，最后经历已知空／未知／恢复。
-                let mut snapshots = vec![
-                    Some(vec![(ratio(5, 10), integer(2)), (ratio(4, 10), integer(3))]),
-                    Some(vec![(ratio(5, 10), integer(7)), (ratio(4, 10), integer(3))]),
-                    Some(vec![
-                        (ratio(6, 10), integer(11)),
-                        (ratio(5, 10), integer(7)),
-                        (ratio(4, 10), integer(3)),
-                    ]),
-                    Some(vec![
-                        (ratio(6, 10), integer(11)),
-                        (ratio(4, 10), integer(3)),
-                    ]),
-                    Some(vec![]),
-                    None,
-                    Some(vec![(ratio(5, 10), integer(2))]),
-                ];
-                if !bid {
-                    for values in snapshots.iter_mut().flatten() {
-                        values.reverse();
-                    }
-                }
-                for (now, levels) in snapshots.into_iter().enumerate() {
-                    let mut fresh = previous.clone();
-                    fresh.logs.clear();
-                    let (mut actual, mut reference) = (Vec::new(), Vec::new());
-                    let (mut out, mut cold_out) = ([0.; 16], [0.; 16]);
-                    side(
-                        &mut out,
-                        now as i64,
-                        levels.clone(),
-                        vec![],
-                        vec![],
-                        pm,
-                        &mut previous,
-                        &mut actual,
-                        bid,
-                    );
-                    side(
-                        &mut cold_out,
-                        now as i64,
-                        levels.clone(),
-                        vec![],
-                        vec![],
-                        pm,
-                        &mut fresh,
-                        &mut reference,
-                        bid,
-                    );
-                    assert_eq!(out.map(f32::to_bits), cold_out.map(f32::to_bits));
-                    assert_eq!(
-                        actual
-                            .iter()
-                            .map(|r| r.map(f32::to_bits))
-                            .collect::<Vec<_>>(),
-                        reference
-                            .iter()
-                            .map(|r| r.map(f32::to_bits))
-                            .collect::<Vec<_>>()
-                    );
-                    let mut inputs = std::collections::BTreeSet::new();
-                    if let Some(levels) = levels {
-                        for (index, (p, q)) in levels.iter().enumerate() {
-                            let distance = if bid {
-                                levels[0].0.sub(p)
-                            } else {
-                                p.sub(&levels[0].0)
-                            };
-                            assert_eq!(actual[index][0].to_bits(), price(p, pm).to_bits());
-                            assert_eq!(actual[index][1].to_bits(), log(q).to_bits());
-                            assert_eq!(actual[index][8].to_bits(), log(&distance).to_bits());
-                            if !pm {
-                                inputs.insert(p.clone());
-                            }
-                            inputs.insert(q.clone());
-                            inputs.insert(distance);
-                        }
-                    }
-                    assert_eq!(
-                        previous
-                            .logs
-                            .keys()
-                            .cloned()
-                            .collect::<std::collections::BTreeSet<_>>(),
-                        inputs
-                    );
-                }
-            }
-        }
-    }
 }

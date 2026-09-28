@@ -85,6 +85,49 @@ def pad_books(rows, *, like: Tensor) -> tuple[Tensor, Tensor]:
     return levels, mask
 
 
+class PackedBookInputs:
+    """只保留不可变原生侧与已发布张量；更新时复制，支持较早前向延后反传。"""
+    def __init__(self):
+        self.keys = None
+        self.sides = None
+        self.levels = None
+        self.mask = None
+
+    def pack(self, rows, keys, *, like: Tensor) -> tuple[Tensor, Tensor]:
+        if not all(hasattr(side, "same_storage") for row in rows for side in row):
+            # JSON／普通数组仍走完整打包；不以可变对象地址推断其内容。
+            self.__init__()
+            return pad_books(rows, like=like)
+        depth = max((len(side) for row in rows for side in row), default=0)
+        shape = (len(rows), 6, max(depth, 1), 9)
+        rebuild = (self.keys != keys or self.levels is None or tuple(self.levels.shape) != shape
+                   or self.levels.dtype != like.dtype or self.levels.device != like.device)
+        changes = [(b, s) for b, row in enumerate(rows) for s, side in enumerate(row)
+                   if rebuild or not side.same_storage(self.sides[b][s])]
+        if not changes and not rebuild:
+            return self.levels, self.mask
+        if rebuild:
+            levels = like.new_zeros(shape)
+            mask = torch.zeros(shape[:3], dtype=torch.bool, device=like.device)
+        else:
+            # no_grad 也可能有 detach 别名；从不写入已发布版本。
+            levels = self.levels.clone()
+            mask = (self.mask.clone() if any(len(rows[b][s]) != len(self.sides[b][s]) for b, s in changes)
+                    else self.mask)
+        for batch, side in changes:
+            source = rows[batch][side]
+            levels[batch, side].zero_()
+            if rebuild or len(source) != len(self.sides[batch][side]):
+                mask[batch, side].fill_(False)
+                mask[batch, side, :len(source)] = True
+            if source:
+                levels[batch, side, :len(source)] = like.new_tensor(source.values())
+        self.keys = list(keys)
+        self.sides = [tuple(row) for row in rows]
+        self.levels, self.mask = levels, mask
+        return levels, mask
+
+
 def lower_pairwise_sum(model):
     """将导出标记展开为 opset18 的标准 Loop/Slice/Add/Concat，保留动态 B/N。"""
     import onnx

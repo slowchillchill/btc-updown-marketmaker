@@ -35,7 +35,9 @@ fn pm_book(token: &str, bids: usize, asks: usize) -> PolymarketOrderbookEvent {
     }
 }
 
-fn full_book_root() -> (
+fn full_book_root(
+    trajectory: &str,
+) -> (
     tempfile::TempDir,
     SharedExecutionV2,
     NativeInputRoot,
@@ -151,7 +153,7 @@ fn full_book_root() -> (
         .projection_v2()
         .unwrap()
         .account_instance_key;
-    let native = NativeInputRoot::new("full-book".into(), account, -10_000, snapshot);
+    let native = NativeInputRoot::new(trajectory.into(), account, -10_000, snapshot);
     let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, MemoryRecordedTimes).unwrap();
     let driver = FinitePublicConsumptionV1::new(execution, source, "full-book".into());
     (temp, shared, native, driver)
@@ -159,14 +161,14 @@ fn full_book_root() -> (
 
 #[test]
 fn full_book_public_sequence_retains_all_levels_and_hidden_lifecycle() {
-    let (_temp, mut shared, mut native, mut driver) = full_book_root();
+    let (_temp, mut shared, mut native, mut driver) = full_book_root("full-book");
     let mut exported = Vec::new();
     let mut timings = Vec::new();
     while driver.next_group().unwrap().is_some() {
         let before = std::time::Instant::now();
         let group = native.consume(&mut shared, &mut driver).unwrap().unwrap();
         let elapsed = before.elapsed().as_secs_f64() * 1000.;
-        timings.push(serde_json::json!({"consume_ms":elapsed,"rows":group.rows.iter().map(|r|r.book_levels.each_ref().map(Vec::len)).collect::<Vec<_>>()}));
+        timings.push(serde_json::json!({"consume_ms":elapsed,"rows":group.rows.iter().map(|r|r.book_levels.each_ref().map(|side| side.len())).collect::<Vec<_>>()}));
         exported.push(exported_group(&group));
     }
     // 原生导出用于Python三端/混批验证和人工审查；同一原公共材料可由v4基线独立重放。
@@ -195,7 +197,10 @@ fn full_book_public_sequence_retains_all_levels_and_hidden_lifecycle() {
         })
         .unwrap();
     let books: BookLevels = serde_json::from_value(complete["book_levels"].clone()).unwrap();
-    assert_eq!(books.each_ref().map(Vec::len), [257, 7, 9, 6, 8, 7]);
+    assert_eq!(
+        books.each_ref().map(|side| side.len()),
+        [257, 7, 9, 6, 8, 7]
+    );
     let (depth, values, mask) = pad_books([&books]);
     assert_eq!(depth, 257);
     assert_eq!(mask.iter().filter(|v| **v).count(), 294);
@@ -225,7 +230,7 @@ fn full_book_public_sequence_retains_all_levels_and_hidden_lifecycle() {
 async fn full_book_three_runtime_and_original_execution() {
     let directory = std::env::var("ACTOR_GRAPH_DIRECTORY").unwrap();
     let mut runtime = crate::continuous_runtime::ThreeRuntime::new(&directory, 1);
-    let (_temp, mut shared, mut native, mut driver) = full_book_root();
+    let (_temp, mut shared, mut native, mut driver) = full_book_root("full-book");
     let mut lengths = Vec::new();
     let mut contexts = 0;
     let mut retired = 0;
@@ -233,7 +238,7 @@ async fn full_book_three_runtime_and_original_execution() {
     while driver.next_group().unwrap().is_some() {
         let group = native.consume(&mut shared, &mut driver).unwrap().unwrap();
         for row in &group.rows {
-            lengths.push(row.book_levels.each_ref().map(Vec::len));
+            lengths.push(row.book_levels.each_ref().map(|side| side.len()));
             contexts += usize::from(row.role == InputRole::ContextOnly);
         }
         retired += group.post_frame_hidden_ops.len();
@@ -279,4 +284,138 @@ async fn full_book_three_runtime_and_original_execution() {
         "full_book_three_runtime frames={} decisions={} retired={}",
         runtime.frames, executed, retired
     );
+}
+
+#[test]
+fn retained_groups_actors_and_packing_survive_remap_depth_changes_and_retirement() {
+    use std::sync::Arc;
+    let (_temp, mut shared, mut native, mut driver) = full_book_root("retained-a");
+    let (_other_temp, mut other_shared, mut other_native, mut other_driver) =
+        full_book_root("retained-b");
+    let mut packed = PackedBooks::default();
+    let mut saved = Vec::new();
+    let mut actors = Vec::new();
+    let mut weak = Vec::new();
+    let mut retired = 0;
+    while driver.next_group().unwrap().is_some() {
+        other_driver.next_group().unwrap().unwrap();
+        let a = Arc::new(native.consume(&mut shared, &mut driver).unwrap().unwrap());
+        let b = Arc::new(
+            other_native
+                .consume(&mut other_shared, &mut other_driver)
+                .unwrap()
+                .unwrap(),
+        );
+        for group in [&a, &b] {
+            retired += group.post_frame_hidden_ops.len();
+            for (i, row) in group.rows.iter().enumerate() {
+                weak.extend(
+                    row.book_levels
+                        .iter()
+                        .filter(|v| !v.is_empty())
+                        .map(Arc::downgrade),
+                );
+                if row.role == InputRole::DecisionRequired {
+                    let actor = NativeActor::new(group.clone(), i).unwrap();
+                    actors.push((actor.support().unwrap(), actor.prefix_features(), actor));
+                }
+            }
+        }
+        // 从两根的有效行中选取不同活动人口，并反转打包根映射。
+        let rows = a
+            .rows
+            .iter()
+            .chain(b.rows.iter().skip(usize::from(saved.len() % 2 == 0)))
+            .collect::<Vec<_>>();
+        for active in [rows.clone(), rows.into_iter().rev().collect()] {
+            packed.update(
+                active
+                    .iter()
+                    .map(|row| (&row.hidden_state_key, &row.book_levels)),
+            );
+            let (depth, values, mask) = pad_books(active.iter().map(|row| &row.book_levels));
+            assert_eq!(packed.depth(), depth);
+            assert_eq!(
+                packed
+                    .values()
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
+                values.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+            );
+            assert_eq!(packed.mask(), mask);
+        }
+        saved.push((exported_group(&a), a));
+        saved.push((exported_group(&b), b));
+    }
+    assert!(retired > 0 && !actors.is_empty());
+    for (expected, group) in &saved {
+        assert_eq!(&exported_group(group), expected);
+    }
+    for (support, prefix, actor) in &actors {
+        assert_eq!(&actor.support().unwrap(), support);
+        assert_eq!(&actor.prefix_features(), prefix);
+    }
+    let held = saved
+        .iter()
+        .flat_map(|(_, group)| &group.rows)
+        .flat_map(|row| &row.book_levels)
+        .map(|side| {
+            (
+                Arc::as_ptr(side),
+                side.capacity() * std::mem::size_of::<[f32; 9]>(),
+            )
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    eprintln!(
+        "retained_ownership groups={} actors={} projected_versions={} projected_capacity_bytes={}",
+        saved.len(),
+        actors.len(),
+        held.len(),
+        held.values().sum::<usize>()
+    );
+    packed.clear();
+    drop(saved);
+    drop(actors);
+    assert!(weak.iter().all(|side| side.upgrade().is_none()));
+}
+
+#[cfg(feature = "python")]
+#[test]
+#[ignore = "需锁定 Python 环境及 model-train 导入路径；真实共享输入与延后反传"]
+fn native_shared_inputs_preserve_delayed_backward_and_detached_aliases() {
+    use pyo3::prelude::*;
+    use std::sync::Arc;
+    let mut streams = Vec::new();
+    for trajectory in ["backward-a", "backward-b"] {
+        let (_temp, mut shared, mut native, mut driver) = full_book_root(trajectory);
+        let mut groups = Vec::new();
+        while driver.next_group().unwrap().is_some() {
+            let group = Arc::new(native.consume(&mut shared, &mut driver).unwrap().unwrap());
+            groups.push(Python::attach(|py| {
+                Py::new(py, crate::python::PythonGroup { group }).unwrap()
+            }));
+        }
+        streams.push(groups);
+    }
+    Python::attach(|py| {
+        let results = py
+            .import("model_train.input_validation")
+            .unwrap()
+            .getattr("retained_inputs")
+            .unwrap()
+            .call1((streams,))
+            .unwrap();
+        let result = py
+            .import("json")
+            .unwrap()
+            .call_method1("dumps", (results,))
+            .unwrap()
+            .extract::<String>()
+            .unwrap();
+        if let Some(path) = std::env::var_os("NATIVE_INPUT_OWNERSHIP_OUTPUT") {
+            std::fs::write(path, result.as_bytes()).unwrap();
+        }
+        eprintln!("{result}");
+    });
 }

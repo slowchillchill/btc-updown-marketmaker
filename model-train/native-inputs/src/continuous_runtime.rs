@@ -1,7 +1,7 @@
 //! 测量宿主：长寿命ORT会话、独立隐藏历史、真实活动行压缩回填。
 use crate::ort_actor::OrtActorScorer;
 use crate::*;
-use ort::{session::Session, value::Tensor};
+use ort::{session::Session, value::TensorRef};
 use pyo3::prelude::*;
 use std::{collections::BTreeMap, path::Path, sync::Arc};
 
@@ -42,6 +42,7 @@ fn key(key: &HiddenKey) -> String {
 pub(super) struct ThreeRuntime {
     python: Py<PyAny>,
     state: Session,
+    packed_books: Vec<crate::PackedBooks>,
     scorer: OrtActorScorer,
     hidden: BTreeMap<String, (HiddenKey, Vec<f32>)>,
     layers: usize,
@@ -101,6 +102,7 @@ impl ThreeRuntime {
         Self {
             python,
             state: session("state_encoder.onnx"),
+            packed_books: Vec::new(),
             scorer: OrtActorScorer {
                 measurement: (0, None),
                 session: session("action_decoder.onnx"),
@@ -482,6 +484,7 @@ impl ThreeRuntime {
             self.python.call_method0(py, "release_observation").unwrap();
         });
         self.hidden.clear();
+        self.packed_books.clear();
         self.last_states.clear();
         assert_eq!(self.sample()["hidden_rows"], serde_json::json!([0, 0]));
     }
@@ -514,9 +517,12 @@ impl ThreeRuntime {
                 HiddenOp::ResetRootHidden {
                     trajectory_id,
                     account_id,
-                } => self.hidden.retain(|_, (k, _)| {
-                    &k.trajectory_id != trajectory_id || &k.account_id != account_id
-                }),
+                } => {
+                    self.packed_books.clear();
+                    self.hidden.retain(|_, (k, _)| {
+                        &k.trajectory_id != trajectory_id || &k.account_id != account_id
+                    });
+                }
                 HiddenOp::InitializeZero { hidden_state_key } => {
                     self.hidden.insert(
                         key(hidden_state_key),
@@ -524,6 +530,7 @@ impl ThreeRuntime {
                     );
                 }
                 HiddenOp::Retire { hidden_state_key } => {
+                    self.packed_books.clear();
                     assert!(self.hidden.remove(&key(hidden_state_key)).is_some());
                 }
             }
@@ -568,6 +575,8 @@ impl ThreeRuntime {
             .iter()
             .map(|g| vec![Vec::new(); g.rows.len()])
             .collect::<Vec<_>>();
+        self.packed_books
+            .resize_with(traces.len(), Default::default);
         for (frame, (want_z, want_h)) in traces.iter().enumerate() {
             let active = groups
                 .iter()
@@ -592,17 +601,22 @@ impl ThreeRuntime {
                     );
                 }
             }
-            let (depth, book, book_mask) =
-                crate::pad_books(active.iter().map(|(_, r)| &r.book_levels));
+            let books = &mut self.packed_books[frame];
+            books.update(
+                active
+                    .iter()
+                    .map(|(_, r)| (&r.hidden_state_key, &r.book_levels)),
+            );
+            let depth = books.depth();
             let state_started = std::time::Instant::now();
             let output = self
                 .state
                 .run(ort::inputs![
-                    "fast_features" => Tensor::from_array(([batch,596],fast)).unwrap(),
-                    "slow_features" => Tensor::from_array(([batch,433],slow)).unwrap(),
-                    "book_levels" => Tensor::from_array(([batch,6,depth,9],book)).unwrap(),
-                    "book_mask" => Tensor::from_array(([batch,6,depth],book_mask)).unwrap(),
-                    "h_prev" => Tensor::from_array(([self.layers,batch,self.width],h)).unwrap()
+                    "fast_features" => TensorRef::from_array_view(([batch,596],fast.as_slice())).unwrap(),
+                    "slow_features" => TensorRef::from_array_view(([batch,433],slow.as_slice())).unwrap(),
+                    "book_levels" => TensorRef::from_array_view(([batch,6,depth,9],books.values())).unwrap(),
+                    "book_mask" => TensorRef::from_array_view(([batch,6,depth],books.mask())).unwrap(),
+                    "h_prev" => TensorRef::from_array_view(([self.layers,batch,self.width],h.as_slice())).unwrap()
                 ])
                 .unwrap();
             self.timings

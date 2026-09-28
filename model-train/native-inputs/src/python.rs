@@ -120,7 +120,8 @@ fn hidden_ops<'py>(py: Python<'py>, ops: &[crate::HiddenOp]) -> PyResult<Bound<'
 }
 #[pymethods]
 impl PythonGroup {
-    fn features(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    #[pyo3(signature = (*, shared_books=false))]
+    fn features(&self, py: Python<'_>, shared_books: bool) -> PyResult<Py<PyAny>> {
         let group = self.group.as_ref();
         let out = PyDict::new(py);
         let cutoff = PyDict::new(py);
@@ -168,7 +169,22 @@ impl PythonGroup {
             )?;
             item.set_item("slow", &row.slow)?;
             item.set_item("fast", &row.fast)?;
-            item.set_item("book_levels", &row.book_levels)?;
+            if shared_books {
+                let sides = PyList::empty(py);
+                for rows in &row.book_levels {
+                    sides.append(Py::new(py, SharedBookSide { rows: rows.clone() })?)?;
+                }
+                item.set_item("book_levels", sides)?;
+            } else {
+                // 默认序列化形状不变；实际消费者可保留不可变原生侧以避免重复装箱。
+                item.set_item(
+                    "book_levels",
+                    row.book_levels
+                        .iter()
+                        .map(|s| s.as_slice())
+                        .collect::<Vec<_>>(),
+                )?;
+            }
             item.set_item("rule", row.rule.as_slice())?;
             rows.append(item)?;
         }
@@ -198,6 +214,22 @@ impl PythonGroup {
         Ok(PythonActor {
             actor: NativeActor::new(self.group.clone(), row).map_err(error)?,
         })
+    }
+}
+#[pyclass(frozen)]
+struct SharedBookSide {
+    rows: Arc<Vec<[f32; 9]>>,
+}
+#[pymethods]
+impl SharedBookSide {
+    fn __len__(&self) -> usize {
+        self.rows.len()
+    }
+    fn same_storage(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.rows, &other.rows)
+    }
+    fn values(&self) -> Vec<[f32; 9]> {
+        self.rows.as_ref().clone()
     }
 }
 #[pymethods]

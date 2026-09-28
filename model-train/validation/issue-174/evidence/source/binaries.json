@@ -1,0 +1,20 @@
+[
+  {
+    "variant": "candidate",
+    "example": "frame_latency",
+    "binary": "candidate-frame",
+    "sha256": "e2878dee057ff87f32ba432ab4e12879c0bf8359a8f754d2edad024aaca6d54c"
+  },
+  {
+    "variant": "candidate",
+    "example": "native_incremental",
+    "binary": "native_incremental",
+    "sha256": "812251fb6bedc01c1e80390656624fbd0a24cd3af4c42d8f43b62f73a29a77c0"
+  },
+  {
+    "variant": "baseline",
+    "example": "frame_latency",
+    "binary": "baseline-frame",
+    "sha256": "7317931ee369ec66a000ec581d247cbfed78a8aef8a2b7a897e09233ca633337"
+  }
+]

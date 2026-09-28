@@ -71,7 +71,7 @@ class ContinuousPython:
     def advance(self, native_groups, autonomous):
         selected = [autonomous] * len(native_groups) if isinstance(autonomous, bool) else autonomous
         assert len(selected) == len(native_groups)
-        features = [group.features() for group in native_groups]
+        features = [group.features(shared_books=True) for group in native_groups]
         traces = [[], []]
         state_inputs = [[], []]
         finished_actors = []
@@ -161,7 +161,7 @@ class ContinuousPython:
             import json, os
             destination = Path(os.environ['CONTINUOUS_OUTPUT']) / 'failed-comparison'
             destination.mkdir(parents=True, exist_ok=True)
-            detail = {'error': str(error), 'features': features, 'results': results,
+            detail = {'error': str(error), 'features': [group.features() for group in native_groups], 'results': results,
                 'step_heads': step_heads,
                 'cancel_candidates': [group.validation_cancel_objects() for group in native_groups],
                 'intents': [[actor.validation_intent() for _, _, actor in actors] for actors in finished_actors],
@@ -192,6 +192,7 @@ class ContinuousPython:
         before = [len(c.hidden) for c in self.consumers]
         for consumer in self.consumers:
             consumer.hidden.clear()
+            consumer.book_inputs.clear()
         return before
 
     def sample(self):
