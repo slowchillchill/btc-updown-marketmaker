@@ -1,0 +1,50 @@
+[
+  {
+    "segment": "ordinary",
+    "entry_position": 201582,
+    "ledger_equal": true,
+    "native_threads": 8,
+    "new_input_cache": "empty; first consume timed",
+    "preparation_cpu_ns": 241920754356,
+    "preparation_seconds": 226.211198738,
+    "completion": {
+      "cache_cleared_comparisons": 64,
+      "complete": true,
+      "drain_seconds": 0.020405426,
+      "elapsed_seconds": 278.400179576,
+      "groups": 64,
+      "loop_elapsed_seconds": 278.37977363,
+      "timed_calls": 256
+    },
+    "resources": {
+      "user_seconds": 323.72,
+      "system_seconds": 10.24,
+      "maximum_rss_kib": 112540.0,
+      "exit_status": 0.0
+    }
+  },
+  {
+    "segment": "high",
+    "entry_position": 418584,
+    "ledger_equal": true,
+    "native_threads": 8,
+    "new_input_cache": "empty; first consume timed",
+    "preparation_cpu_ns": 693169457157,
+    "preparation_seconds": 663.568392004,
+    "completion": {
+      "cache_cleared_comparisons": 64,
+      "complete": true,
+      "drain_seconds": 0.042115427,
+      "elapsed_seconds": 683.350653682,
+      "groups": 64,
+      "loop_elapsed_seconds": 683.308537564,
+      "timed_calls": 256
+    },
+    "resources": {
+      "user_seconds": 791.81,
+      "system_seconds": 20.71,
+      "maximum_rss_kib": 209700.0,
+      "exit_status": 0.0
+    }
+  }
+]

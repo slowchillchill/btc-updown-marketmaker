@@ -297,7 +297,7 @@ impl NativeInputRoot {
                     hidden_state_key: self.key(&id.0),
                     role,
                     fast: Vec::new(),
-                    book_levels: std::array::from_fn(|_| Vec::new()),
+                    book_levels: std::array::from_fn(|_| std::sync::Arc::default()),
                     rule,
                     action_context: (role == InputRole::DecisionRequired).then(|| {
                         NativeActionContext::from_observation(

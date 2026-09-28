@@ -1,0 +1,13 @@
+{
+  "maximum_observed": {
+    "parsed_rows": 6236,
+    "parsed_capacity": 8704,
+    "parsed_struct_bytes": 2158592,
+    "text_capacity_bytes": 159280,
+    "rational_value_bytes": 46642,
+    "projected_capacity": 6236,
+    "projected_storage_bytes": 224496,
+    "current_side_strong_refs_max": 3
+  },
+  "scope": "各容量字段独立最大值，不相加成同时峰值；BigInt 仅记录值位宽字节，非分配容量。整进程峰值 RSS 包含真实前史和证据，不能当成新增缓存独占堆。"
+}

@@ -403,7 +403,7 @@ fn trace(
                         InputRole::DecisionRequired => decisions += 1,
                     }
                 }
-                let depths: Vec<_> = row.book_levels.iter().map(Vec::len).collect();
+                let depths: Vec<_> = row.book_levels.iter().map(|side| side.len()).collect();
                 line(
                     &mut meta,
                     &serde_json::json!({"native_group":groups,"row_index":row_index,"condition_id":row.hidden_state_key.condition_id,"role":row.role,"cutoff":group.cutoff,"depths":depths,"fast_len":row.fast.len(),"slow_len":row.slow.len()}),

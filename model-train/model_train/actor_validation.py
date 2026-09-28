@@ -60,7 +60,7 @@ def _continuation(model, consumer, ort_consumer, state_forward, action_forward,
                 model.state.forward = state_call(state_forward if index == 0 else ort_state, index)
                 model.action.forward = action_forward if index == 0 else ort_action
                 model.action.object_encoder.forward = object_forward if index == 0 else ort_objects
-                group = current.consume(native_group.features())
+                group = current.consume(native_group.features(shared_books=True))
                 frozen = {key: value.clone() for key, value in current.hidden.items()}
                 state_calls = len(traces[index])
                 decisions = []
@@ -126,7 +126,7 @@ def validate_python(native_group, history, directory, replay, market_probe=True)
     with torch.no_grad():
         for prior in history:
             consumer.consume(prior)
-        group = consumer.consume(native_group.features())
+        group = consumer.consume(native_group.features(shared_books=True))
         frozen = {key: value.clone() for key, value in consumer.hidden.items()}
         state_calls = len(traces)
         actor = native_group.actor(0)
@@ -195,7 +195,7 @@ def validate_python(native_group, history, directory, replay, market_probe=True)
         ort_consumer = NativeComponentConsumer(model)
         for prior in history:
             ort_consumer.consume(prior)
-        ort_group = ort_consumer.consume(native_group.features())
+        ort_group = ort_consumer.consume(native_group.features(shared_books=True))
         assert len(traces) == len(ort_traces)
         for expected, actual in zip(traces, ort_traces):
             for a, b in zip(expected, actual):
@@ -328,7 +328,7 @@ def validate_cancel(native_group, history, directory):
     with torch.no_grad():
         for prior in history:
             consumer.consume(prior)
-        group = consumer.consume(native_group.features())
+        group = consumer.consume(native_group.features(shared_books=True))
         mixed_blocks(consumer, group)
         result = consume_actor(consumer, group, 0, native_group.actor(0), deterministic=True)
         paths = [result.actor.path()]
@@ -365,7 +365,7 @@ def validate_cancel(native_group, history, directory):
         ort_consumer = NativeComponentConsumer(model)
         for prior in history:
             ort_consumer.consume(prior)
-        ort_group = ort_consumer.consume(native_group.features())
+        ort_group = ort_consumer.consume(native_group.features(shared_books=True))
         mixed_blocks(ort_consumer, ort_group)
         for left, right in zip(traces, ort_traces):
             for a, b in zip(left, right):
@@ -393,7 +393,7 @@ def validate_cancel(native_group, history, directory):
     training = NativeComponentConsumer(model)
     for prior in history:
         training.consume(prior)
-    current = training.consume(native_group.features())
+    current = training.consume(native_group.features(shared_books=True))
     mixed_blocks(training, current, gradients=True)
     # 真实Market对象头只有一项，完整consume_actor路径不耗随机数。
     singleton = native_group.actor(0)

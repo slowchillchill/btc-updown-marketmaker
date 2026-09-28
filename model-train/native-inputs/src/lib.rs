@@ -8,6 +8,8 @@ mod cancel;
 pub mod exact;
 mod market;
 pub use market::{BookLevels, pad_books};
+mod packing;
+pub use packing::PackedBooks;
 pub mod prefix;
 mod root;
 mod values;
