@@ -1,0 +1,360 @@
+{
+  "baseline": "e57503821391a9943ce694eabab00ec0fdff1141",
+  "input_contract_version": "native_inputs_v5",
+  "feature_schema_sha256": "6d1e57d5288879af31b11b92c0353b39d8518d7c10623955c924323b5e60d416",
+  "models": {
+    "MAIN-1x256": {
+      "metadata": {
+        "configuration": {
+          "name": "MAIN-1x256",
+          "layers": 1,
+          "hidden": 256,
+          "seed": 741003,
+          "baseline": false
+        },
+        "input_contract_version": "native_inputs_v5",
+        "weights_sha256": "8f01681f75825f597999a9e09ba422e68f3e3938d2f4c9fb7a86149105616344",
+        "parameter_count": 2383247,
+        "state_parameter_count": 772042,
+        "action_parameter_count": 1611205,
+        "source_commit": "040c7cb00b98b4897f077f8f9dc4ad6156bcc4b6",
+        "feature_schema_sha256": "6d1e57d5288879af31b11b92c0353b39d8518d7c10623955c924323b5e60d416",
+        "configuration_seed_scope": "四代表沿既有种子；其余固定742000+MAIN矩阵索引、743000+BASELINE层数，未按结果换种子。",
+        "source_files_sha256": {
+          "book.py": "92ae49d1be9722df55e58587534d411393a522c1bb1204158a6a50d4944efbd3",
+          "components.py": "1960c357d7dc9bac2790f51ed7647f6aaaad579fe3230582e42aa8710aef060f"
+        },
+        "export_scope": "沿用同一初始化权重，仅重新导出状态图；动作图字节保持原产物"
+      },
+      "source_matches_current_baseline": {
+        "model-train/model_train/book.py": "92ae49d1be9722df55e58587534d411393a522c1bb1204158a6a50d4944efbd3",
+        "model-train/model_train/components.py": "1960c357d7dc9bac2790f51ed7647f6aaaad579fe3230582e42aa8710aef060f"
+      },
+      "files": {
+        "action_decoder.onnx": {
+          "sha256": "512cf342c042a807b5e1d48fca6ac983435f9a20672100ce82d97b8ace8a5d11",
+          "bytes": 2345572
+        },
+        "action_decoder.onnx.data": {
+          "sha256": "6228b8157d4acbe42f7ea1cb70f430063be410e49c2296130bd4b97a5e1fe2b5",
+          "bytes": 6495744
+        },
+        "initial_weights.pt": {
+          "sha256": "8f01681f75825f597999a9e09ba422e68f3e3938d2f4c9fb7a86149105616344",
+          "bytes": 9561906
+        },
+        "state_encoder.onnx": {
+          "sha256": "282493976e3ec286f22c45c3d497083fb5898fece5720956bdcee0c1f5f2ecc6",
+          "bytes": 773029
+        },
+        "state_encoder.onnx.data": {
+          "sha256": "bf59313a513efbf11b2132a0ca1a44f20e4f0ce35ade13c738cc2b74bd3516c0",
+          "bytes": 3081256
+        }
+      }
+    },
+    "MAIN-30x1024": {
+      "metadata": {
+        "configuration": {
+          "name": "MAIN-30x1024",
+          "layers": 30,
+          "hidden": 1024,
+          "seed": 741004,
+          "baseline": false
+        },
+        "input_contract_version": "native_inputs_v5",
+        "weights_sha256": "68a90d8d8aeb36268f181e1da15bacebf4ec3954a6d78c479c974fda2d090d9b",
+        "parameter_count": 202200207,
+        "state_parameter_count": 192444746,
+        "action_parameter_count": 9755461,
+        "source_commit": "040c7cb00b98b4897f077f8f9dc4ad6156bcc4b6",
+        "feature_schema_sha256": "6d1e57d5288879af31b11b92c0353b39d8518d7c10623955c924323b5e60d416",
+        "configuration_seed_scope": "四代表沿既有种子；其余固定742000+MAIN矩阵索引、743000+BASELINE层数，未按结果换种子。",
+        "source_files_sha256": {
+          "book.py": "92ae49d1be9722df55e58587534d411393a522c1bb1204158a6a50d4944efbd3",
+          "components.py": "1960c357d7dc9bac2790f51ed7647f6aaaad579fe3230582e42aa8710aef060f"
+        },
+        "export_scope": "沿用同一初始化权重，仅重新导出状态图；动作图字节保持原产物"
+      },
+      "source_matches_current_baseline": {
+        "model-train/model_train/book.py": "92ae49d1be9722df55e58587534d411393a522c1bb1204158a6a50d4944efbd3",
+        "model-train/model_train/components.py": "1960c357d7dc9bac2790f51ed7647f6aaaad579fe3230582e42aa8710aef060f"
+      },
+      "files": {
+        "action_decoder.onnx": {
+          "sha256": "0f30a5154bab488c442981da59d1d46f03410af4811d1e28dcbe44dc76b603dd",
+          "bytes": 8528299
+        },
+        "action_decoder.onnx.data": {
+          "sha256": "406658174f2eb6afd2a2d4f4b6fec0aab6c7db3b9f031377cb5539d6e2b22bf9",
+          "bytes": 39024640
+        },
+        "initial_weights.pt": {
+          "sha256": "68a90d8d8aeb36268f181e1da15bacebf4ec3954a6d78c479c974fda2d090d9b",
+          "bytes": 808887157
+        },
+        "state_encoder.onnx": {
+          "sha256": "dc1ba5aebe31242a76391dbaf6d41beda4d3bbae0cf28ad97400bf89ec199f39",
+          "bytes": 4677518
+        },
+        "state_encoder.onnx.data": {
+          "sha256": "e53ec40fea43fe316b20d8d01caaa4a3864fd015c7d6d3ca8d9b27a19a21b39a",
+          "bytes": 769530408
+        }
+      }
+    }
+  },
+  "native_source_files_sha256": {
+    "model-train/native-inputs/src/account.rs": "edd25b6234c62b937853f7596a57b416da234d73eb98feda7a3c815590b5db1a",
+    "model-train/native-inputs/src/action.rs": "dfc90baf9fd13948b3af4d391567e328a3fe8d47a69989af94bf90a48af37a04",
+    "model-train/native-inputs/src/action_tests.rs": "eb1ac0124521846d46d2396b90ec9407f92f8f9be9c8a4733de6d00373003c7a",
+    "model-train/native-inputs/src/book_tests.rs": "42ade2dad9d268d883371349135ce2bc929e0b332c72f7086aa6a9bbb7cd2e61",
+    "model-train/native-inputs/src/buy_tests.rs": "a08855784ffe75472f0e828545a764b20a502be14bdbf80cdfa10139c9ae5c34",
+    "model-train/native-inputs/src/cancel.rs": "a87101ff7f1e062553cec9e4377b21511bc7e504abd47228ad9302e65b39483f",
+    "model-train/native-inputs/src/continuous_runtime.rs": "7594e98791a364c6cfd2350c2ab8fcbd2a7897fc97b90561bb59b3df8c01b2ce",
+    "model-train/native-inputs/src/continuous_tests.rs": "b86cb3c0bc920515ff96c8f1de0529c8f8b735c091de935479be3a2e4b0b9b8a",
+    "model-train/native-inputs/src/exact.rs": "7712533ed89391e18c9606162905da8d7108d4fedb8e758a87b45fa87b1bef12",
+    "model-train/native-inputs/src/lib.rs": "876276d0a64ec9ec0015333df7a332723f15d924cdd99c0d8ae035835e812161",
+    "model-train/native-inputs/src/market.rs": "b3f7a74384ff77c3936e6991aed01d041375839b633e111e8e30873f76c5a5e0",
+    "model-train/native-inputs/src/market_tests.rs": "8549213f26cf2af262e6fe187815b1f77c001d6277f904c0e2989731d553c733",
+    "model-train/native-inputs/src/ort_actor.rs": "35e7bfd1f191d0b4a1615f32a5aa31c5e9c324215fa578f4c40914d3424e105f",
+    "model-train/native-inputs/src/prefix.rs": "ac703f778a2fd72c0fcf86326ff012588f4b45603915b0f6643a2243959a97ea",
+    "model-train/native-inputs/src/public_input_tests.rs": "6f55e6cc04c0a3d66e8486c8517c906e6da0949b76b4e7ed696fe21f7ad2bf66",
+    "model-train/native-inputs/src/python.rs": "8bdfe7cc15c5dabd3d9db412650e5620a45abf1c36a7660731708d614a19e0a1",
+    "model-train/native-inputs/src/root.rs": "e5b887af579d16b94f276b9ee27b60245362e34dc8e788f05bcd63c16079fd43",
+    "model-train/native-inputs/src/support.rs": "f02cf4add5eb8c3c1ec8abec184294c76c98dbaa5f75f11b9d030ec75ea8f438",
+    "model-train/native-inputs/src/values.rs": "64996aaf1c666a60ce4582c922f47bb3df2696419640a27821bdaf78c714d02b"
+  },
+  "configuration_without_local_paths": {
+    "files": [
+      {
+        "path": "utc_day=2026-09-15/source_kind=polymarket_market_metadata/polymarket_market_metadata_23.parquet",
+        "source_kind": "polymarket_market_metadata",
+        "schema_version": "polymarket_market_metadata_v6",
+        "bytes": 98611,
+        "rows": 792,
+        "sha256": "cabcee5deebae7504d407c4491e7b2492855fb518a4b5d3573b8d23701bf5d0b"
+      },
+      {
+        "path": "utc_day=2026-09-15/source_kind=polymarket_market/polymarket_market_23.parquet",
+        "source_kind": "polymarket_market",
+        "schema_version": "polymarket_orderbook_v3",
+        "bytes": 96617349,
+        "rows": 1663333,
+        "sha256": "6d32f819660173a9d94d22f8d0bff893be700d6df45e1bdc2db70ee0eeb0f4a0"
+      },
+      {
+        "path": "utc_day=2026-09-16/source_kind=binance_aggtrade/binance_aggtrade_00.parquet",
+        "source_kind": "binance_aggtrade",
+        "schema_version": "binance_aggtrade_v7",
+        "bytes": 1214679,
+        "rows": 26147,
+        "sha256": "bf5ba2ce039483024de2a81fa9dd7a82e5d363d0aa0278f40dc3b20c3ef4dbb0"
+      },
+      {
+        "path": "utc_day=2026-09-16/source_kind=binance_depth_snapshot/binance_depth_snapshot_00.parquet",
+        "source_kind": "binance_depth_snapshot",
+        "schema_version": "binance_depth_snapshot_v3",
+        "bytes": 19288,
+        "rows": 1,
+        "sha256": "f023dfd5521a50213f3d6b37d25eb772cd726301cae608a6aea8bd8646527307"
+      },
+      {
+        "path": "utc_day=2026-09-16/source_kind=binance_depth_update/binance_depth_update_00.parquet",
+        "source_kind": "binance_depth_update",
+        "schema_version": "binance_depth_update_v4",
+        "bytes": 5677185,
+        "rows": 35982,
+        "sha256": "f377ffe3d651ccdb2adbd0b0e517bccc8ca761782cfa4f13bf3b28e8431432be"
+      },
+      {
+        "path": "utc_day=2026-09-16/source_kind=polymarket_market/polymarket_market_00.parquet",
+        "source_kind": "polymarket_market",
+        "schema_version": "polymarket_orderbook_v3",
+        "bytes": 118075823,
+        "rows": 2040037,
+        "sha256": "e2575a2dacd9cc29ff4d7444c71cb72240b8770ed6bef1059c0781f58c9a934c"
+      },
+      {
+        "path": "utc_day=2026-09-16/source_kind=polymarket_market_metadata/polymarket_market_metadata_00.parquet",
+        "source_kind": "polymarket_market_metadata",
+        "schema_version": "polymarket_market_metadata_v6",
+        "bytes": 101896,
+        "rows": 797,
+        "sha256": "8884515f4839d5d2b2a3f0b506f5d48e8070926f9683688f1b312998ce05d527"
+      },
+      {
+        "path": "utc_day=2026-09-16/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_00.parquet",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "bytes": 173971,
+        "rows": 3546,
+        "sha256": "dec9a5e7afa3ac7a9c05bb772ae6de9f1bb5479d60ad0278d83b6c37682891da"
+      },
+      {
+        "path": "utc_day=2026-09-16/source_kind=polymarket_rtds_chainlink_twap/polymarket_rtds_chainlink_twap_00.parquet",
+        "source_kind": "polymarket_rtds_chainlink_twap",
+        "schema_version": "polymarket_rtds_chainlink_twap_v1",
+        "bytes": 235325,
+        "rows": 3545,
+        "sha256": "cc4287e5097be1299ae8247f6e4bb6b91485fcec287ee984bdd0ffcea85e25c7"
+      }
+    ],
+    "source_root": "utc_day=2026-09-16",
+    "manifest_sha256": "0e3234a16b227d8479aa2fbc714d1f2cd508366f082e7f5a9ff14c99ab6fe12f",
+    "source_overrides": {
+      "utc_day=2026-09-15/source_kind=polymarket_market/polymarket_market_23.parquet": {
+        "source_root": "utc_day=2026-09-15",
+        "manifest_sha256": "dbb7f677ec17f8c58643a79b6027ea1a88ab145fbe617f83e3fd974d78819bcd",
+        "received_start": 1789516797192,
+        "received_end": 1789516800000,
+        "metadata_conditions": [],
+        "pm_min_sequences": {
+          "0xc8f37cfd70903796ff69919719b99b69fab30937012ceb5f644e29a044d6bd03": 5921819,
+          "0xca2660efa0869608c3eee57380447ac964733cedf1991c214b4d31fe470f316d": 5921373
+        },
+        "pm_epoch": "784c9c94e3fdd8cc01a8cef81af21d7b0a6583c45433f931b6d9515852960c17"
+      },
+      "utc_day=2026-09-15/source_kind=polymarket_market_metadata/polymarket_market_metadata_23.parquet": {
+        "source_root": "utc_day=2026-09-15",
+        "manifest_sha256": "dbb7f677ec17f8c58643a79b6027ea1a88ab145fbe617f83e3fd974d78819bcd",
+        "received_start": 1789516200061,
+        "received_end": 1789516800000,
+        "metadata_conditions": [
+          "0xc8f37cfd70903796ff69919719b99b69fab30937012ceb5f644e29a044d6bd03",
+          "0xca2660efa0869608c3eee57380447ac964733cedf1991c214b4d31fe470f316d"
+        ],
+        "pm_min_sequences": {},
+        "pm_epoch": null
+      }
+    },
+    "received_start": 1789516200061,
+    "received_end": 1789517401000,
+    "condition": "0xf1559c8fa5c52b44eaf64881b181f952b2ca5619a9274df7c30c6399609c8604",
+    "market_start": 1789517100000,
+    "market_end": 1789517400000,
+    "root_started_at": 1789516800000,
+    "canonical": {
+      "decode_batch_rows": 256,
+      "max_decode_batch_bytes": 268435456,
+      "max_temporary_row_bytes": 33554432,
+      "max_epoch_count_per_source": 32,
+      "max_pending_ws_terminals": 4096,
+      "max_retained_reducer_entries": 1000000,
+      "canonical_rule_version": "rule-v1",
+      "sort": {
+        "max_run_rows": 4096,
+        "max_run_bytes": 268435456,
+        "max_temp_run_files": 4096,
+        "merge_fan_in": 16,
+        "max_open_files": 64,
+        "batch_rows": 128,
+        "max_temp_bytes": 274877906944
+      }
+    },
+    "output": {
+      "max_artifact_payload_bytes": 33554432,
+      "max_capture_output_bytes": 274877906944,
+      "max_candidate_directory_bytes": 549755813888,
+      "max_observation_l2_levels": 1000000,
+      "sort": {
+        "max_run_rows": 4096,
+        "max_run_bytes": 268435456,
+        "max_temp_run_files": 4096,
+        "merge_fan_in": 16,
+        "max_open_files": 64,
+        "batch_rows": 1024,
+        "max_temp_bytes": 274877906944
+      }
+    },
+    "header": {
+      "input_stream_id": "realmarket-20260916-0005-no-trading",
+      "canonical_rule_version": "rule-v1",
+      "observation_version": "public-observation-v1",
+      "ordering_version": "original-input-v1",
+      "input_scope": "revision-2-full-midnight-stream-with-original-metadata-and-287-PM-initialization-dependencies",
+      "max_pending_ws_terminals": 4096,
+      "initial_state": "Empty"
+    },
+    "rule_snapshot": {
+      "artifact_role": "rule_snapshot",
+      "sha256": "f87da96b72704c1a92895a7157f9b91ad9c2a1f8a6bfbaaf39a3ec62c833ab8e"
+    },
+    "rule_snapshot_sha256": "f87da96b72704c1a92895a7157f9b91ad9c2a1f8a6bfbaaf39a3ec62c833ab8e",
+    "finality_path": {
+      "artifact_role": "finality_path",
+      "sha256": "80a63dd631d35f960562209b6808ae0e3528d14cb0d39b72a8a3e32362b5f20a"
+    },
+    "implementation_identity": {
+      "git_commit": "4e3cdaf1e0a54279f4a2e3b9c3c7791462f3236e",
+      "source_identity_sha256": "03d8cdb990cbe711ab36ad992ef1c31fc98540c1e29f8f1857f7172b8fd4a1f6",
+      "cargo_lock_sha256": "6437a30e81e666d58260fadbbc2008fdb0be8d7c7bbb9e104910dd7ec7c50fa2"
+    },
+    "initial_cash": "1000",
+    "max_group_bytes": 67108864,
+    "finite_in_flight_groups": 128,
+    "record_checkpoint_inputs": 10000
+  },
+  "record_completion": {
+    "committed": {
+      "input_stream_id": "realmarket-20260916-0005-no-trading",
+      "next_canonical_position": 421642,
+      "next_group_position": 421621,
+      "next_input_position": 421715,
+      "next_observation_position": 1481506,
+      "next_public_index_position": 421621,
+      "normal_end": true,
+      "stable_storage_ref": "stable-00000000000000000042"
+    },
+    "complete": true,
+    "elapsed_seconds": 617.971960271,
+    "eligible_depth_max": [
+      99,
+      53,
+      53,
+      99,
+      1716,
+      1350
+    ],
+    "eligible_depth_min": [
+      44,
+      0,
+      0,
+      44,
+      1452,
+      999
+    ],
+    "eligible_ragged_levels": 680999569,
+    "end_groups": 0,
+    "estimated_padded_float32_bytes_excluding_masks": 79509109836,
+    "estimated_target_context_rows": 7752,
+    "estimated_target_decision_rows": 219511,
+    "groups": 421621,
+    "inputs": 421714,
+    "received_time_regressions": 46,
+    "scope": "真实行情公共输入准备；尚未运行状态图或构造账户特征"
+  },
+  "record_completion_sha256": "cc3120cf4348b06dda62b77c4d101396b9a336e6f96b063eaccd31c3ee932347",
+  "packed": {
+    "inputs.f32": "9b40c87a5a667724c4c5b8d626ce38e4330dcc1bf4650407ea9304840a6144d0",
+    "frames.json": "d14a08fc3ae3c197d18b08891cd16686ea927cd18e01a645c3fda3f86b21dc50",
+    "metadata.json": "5f7f9d4175c1fc7ddc6e4d5656b99fd6da089ab3c8e516fce63727006e33ecd4"
+  },
+  "selection_sha256": "82c2ab684027fe444557b490502847080f4cc7dac23d04289cba83986c9bf264",
+  "ort_library": {
+    "filename": "libonnxruntime.so.1.28.0",
+    "sha256": "aa4079d18f4ea7a5f3a94d80cd4bbe0f2740436626622d64d793803a20381083"
+  },
+  "locks": {
+    "Cargo.lock": "f99b065d21bb8165f0f4b83251574c7ed1bb1419a378cb1d5068d271ac8d2069",
+    "model-train/uv.lock": "74fa0e41318f2093e18df3b842eec6d7afc93540ff7c8062a5f5a901348da2b7",
+    "model-train/native-inputs/Cargo.lock": "4f4b2f69db9d46e243c65c9983a8780833e35378a5a4cd6ea3eee7278bf73f0e",
+    "model-train/rust-ort-validation/Cargo.lock": "fffe1bb906db1be99f8fbfbd2803e800fd7da5a34cfaa38e0923a403a6527dc8"
+  },
+  "host": {
+    "kernel": "7.0.0-34-generic",
+    "system": "Linux",
+    "architecture": "x86_64"
+  },
+  "graph_metadata_note": "历史 source_commit 单独保留；当前源码身份由固定基线下的源文件摘要、原权重及实际图文件共同核对，未把历史字段改称当前导出提交。"
+}

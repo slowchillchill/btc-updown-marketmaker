@@ -1,0 +1,915 @@
+{
+  "scope": "最终生产源码；格式、Clippy、原生、Python 与固定工作区检查按命令记录顺序串行。参数中的路径映射为仓库相对产物标识。",
+  "commands": [
+    {
+      "label": "native-clippy",
+      "args": [
+        "cargo",
+        "clippy",
+        "--manifest-path",
+        "model-train/native-inputs/Cargo.toml",
+        "--features",
+        "continuous-validation",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "--",
+        "-D",
+        "warnings",
+        "-A",
+        "clippy::needless_borrow",
+        "-A",
+        "clippy::too_many_arguments"
+      ],
+      "cwd": ".",
+      "started_utc": "2026-09-28T10:24:06.317517+00:00",
+      "python_library_directory_from_sysconfig": true,
+      "completed_utc": "2026-09-28T10:24:08.402445+00:00",
+      "exit_code": 0,
+      "raw_log_sha256": "7abc4d6a29d513485a7cf07c6b1e53723c13107c600d46de9588f97ed301784f"
+    },
+    {
+      "label": "native-wheel",
+      "args": [
+        "model-train/.venv/bin/maturin",
+        "build",
+        "--release",
+        "--features",
+        "python",
+        "--locked",
+        "--offline",
+        "--interpreter",
+        ".venv/bin/python",
+        "--out",
+        "target/issue-172-performance/validation-final/wheels"
+      ],
+      "cwd": "model-train",
+      "started_utc": "2026-09-28T10:24:08.402943+00:00",
+      "python_library_directory_from_sysconfig": true,
+      "completed_utc": "2026-09-28T10:24:09.859742+00:00",
+      "exit_code": 0,
+      "raw_log_sha256": "a8dfdabcf0188ad9fa8167bee420eec1a330e5318b3216ec8881f462a9f3d596"
+    },
+    {
+      "label": "native-wheel-install",
+      "args": [
+        "uv",
+        "pip",
+        "install",
+        "--python",
+        "model-train/.venv/bin/python",
+        "--offline",
+        "--no-deps",
+        "--reinstall",
+        "target/issue-172-performance/validation-final/wheels/model_train-0.1.0-cp313-cp313-manylinux_2_38_x86_64.whl"
+      ],
+      "cwd": ".",
+      "started_utc": "2026-09-28T10:24:09.861711+00:00",
+      "python_library_directory_from_sysconfig": true,
+      "completed_utc": "2026-09-28T10:24:09.907418+00:00",
+      "exit_code": 0,
+      "raw_log_sha256": "cbe696f3090c09319e293d4370a01d5399f94bda8ae45194dcff78a7317a9f28"
+    },
+    {
+      "label": "python-full",
+      "args": [
+        "model-train/.venv/bin/python",
+        "-m",
+        "unittest",
+        "discover",
+        "-s",
+        "tests",
+        "-v"
+      ],
+      "cwd": "model-train",
+      "started_utc": "2026-09-28T10:24:09.907588+00:00",
+      "python_library_directory_from_sysconfig": true,
+      "completed_utc": "2026-09-28T10:24:49.990547+00:00",
+      "exit_code": 0,
+      "raw_log_sha256": "9e9388477ccb79b2e576be9423e8c925bcd83bf74985866cabba06e2454e038a"
+    },
+    {
+      "label": "native-tests",
+      "args": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "model-train/native-inputs/Cargo.toml",
+        "--features",
+        "continuous-validation",
+        "--lib",
+        "--tests",
+        "--locked",
+        "--offline"
+      ],
+      "cwd": ".",
+      "started_utc": "2026-09-28T10:24:49.990781+00:00",
+      "python_library_directory_from_sysconfig": true,
+      "completed_utc": "2026-09-28T10:25:07.623856+00:00",
+      "exit_code": 0,
+      "raw_log_sha256": "c711c50160a7376d527cc0658a918bb5426147e970fb385e0a4ea364b671c891"
+    },
+    {
+      "label": "rust-ort-tests",
+      "args": [
+        "cargo",
+        "test",
+        "--manifest-path",
+        "model-train/rust-ort-validation/Cargo.toml",
+        "--locked",
+        "--offline"
+      ],
+      "cwd": ".",
+      "started_utc": "2026-09-28T10:25:07.624191+00:00",
+      "python_library_directory_from_sysconfig": true,
+      "completed_utc": "2026-09-28T10:25:07.826940+00:00",
+      "exit_code": 0,
+      "raw_log_sha256": "7bc52b02059d05d619bc17af01d36ea3e77a6aac542bfd1ace8f231ef3f85a1f"
+    },
+    {
+      "label": "rust-ort-clippy",
+      "args": [
+        "cargo",
+        "clippy",
+        "--manifest-path",
+        "model-train/rust-ort-validation/Cargo.toml",
+        "--all-targets",
+        "--locked",
+        "--offline",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "cwd": ".",
+      "started_utc": "2026-09-28T10:25:07.827134+00:00",
+      "python_library_directory_from_sysconfig": true,
+      "completed_utc": "2026-09-28T10:25:08.942599+00:00",
+      "exit_code": 0,
+      "raw_log_sha256": "735d675f37726bafb989196f17d9f2cc9baab8a0272713502b725a166ac6f206"
+    },
+    {
+      "label": "workspace-fmt",
+      "args": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "cwd": ".",
+      "started_utc": "2026-09-28T10:25:08.942917+00:00",
+      "python_library_directory_from_sysconfig": true,
+      "completed_utc": "2026-09-28T10:25:10.204165+00:00",
+      "exit_code": 0,
+      "raw_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "native-fmt",
+      "args": [
+        "cargo",
+        "fmt",
+        "--manifest-path",
+        "model-train/native-inputs/Cargo.toml",
+        "--",
+        "--check"
+      ],
+      "cwd": ".",
+      "started_utc": "2026-09-28T10:25:10.204588+00:00",
+      "python_library_directory_from_sysconfig": true,
+      "completed_utc": "2026-09-28T10:25:10.341871+00:00",
+      "exit_code": 0,
+      "raw_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "label": "workspace-tests",
+      "args": [
+        "cargo",
+        "test",
+        "--workspace",
+        "--lib",
+        "--bins",
+        "--tests",
+        "--examples",
+        "--locked",
+        "--offline",
+        "--",
+        "--skip",
+        "four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second"
+      ],
+      "cwd": ".",
+      "started_utc": "2026-09-28T10:25:10.342217+00:00",
+      "python_library_directory_from_sysconfig": true,
+      "completed_utc": "2026-09-28T10:26:31.059515+00:00",
+      "exit_code": 0,
+      "raw_log_sha256": "1c956d691050473dfce85b55aeca8f7e1f6943e4bfc0cfce5b145b000690bf79"
+    }
+  ],
+  "python": {
+    "passed": 32,
+    "embedded_native_fixture_test": {
+      "passed": 37,
+      "ignored": 1
+    },
+    "log_sha256": "9e9388477ccb79b2e576be9423e8c925bcd83bf74985866cabba06e2454e038a"
+  },
+  "native": [
+    {
+      "status": "ok",
+      "passed": 38,
+      "failed": 0,
+      "ignored": 16,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "status": "ok",
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    }
+  ],
+  "rust_ort_unit_tests": 0,
+  "workspace": {
+    "top_level_targets": 68,
+    "totals": {
+      "passed": 1190,
+      "failed": 0,
+      "ignored": 18,
+      "measured": 0,
+      "filtered": 1
+    },
+    "targets": [
+      {
+        "target": "unittests src/lib.rs",
+        "status": "ok",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "unittests src/lib.rs",
+        "status": "ok",
+        "passed": 431,
+        "failed": 0,
+        "ignored": 1,
+        "measured": 0,
+        "filtered": 1
+      },
+      {
+        "target": "unittests src/bin/data_collect_live_hot.rs",
+        "status": "ok",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "unittests src/bin/data_collect_paper_hot.rs",
+        "status": "ok",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "unittests src/bin/data_collect_price_anchor_backfill.rs",
+        "status": "ok",
+        "passed": 14,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "unittests src/bin/data_collect_training_collector.rs",
+        "status": "ok",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "unittests src/bin/real_source_alignment_probe.rs",
+        "status": "ok",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/binance_aggtrade_continuity_contract.rs",
+        "status": "ok",
+        "passed": 5,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/binance_contract.rs",
+        "status": "ok",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/bounded_queue_contract.rs",
+        "status": "ok",
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/collector_identity_contract.rs",
+        "status": "ok",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/dedupe_contract.rs",
+        "status": "ok",
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/deployment_binary_contract.rs",
+        "status": "ok",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/event_envelope_contract.rs",
+        "status": "ok",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/hot_path_handoff_contract.rs",
+        "status": "ok",
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/hourly_partition_contract.rs",
+        "status": "ok",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/market_discovery_contract.rs",
+        "status": "ok",
+        "passed": 9,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/parquet_writer_contract.rs",
+        "status": "ok",
+        "passed": 24,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/polymarket_contract.rs",
+        "status": "ok",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/polymarket_metadata_layout_contract.rs",
+        "status": "ok",
+        "passed": 15,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/polymarket_orderbook_v3_contract.rs",
+        "status": "ok",
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/polymarket_sdk_patch_contract.rs",
+        "status": "ok",
+        "passed": 21,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/polymarket_sdk_runtime_contract.rs",
+        "status": "ok",
+        "passed": 21,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/real_source_latency_contract.rs",
+        "status": "ok",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/source_format_contract.rs",
+        "status": "ok",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/source_hourly_layout_contract.rs",
+        "status": "ok",
+        "passed": 14,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/stale_temporary_cleanup_contract.rs",
+        "status": "ok",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/training_collector_runtime_contract.rs",
+        "status": "ok",
+        "passed": 6,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "unittests src/lib.rs",
+        "status": "ok",
+        "passed": 34,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/phase0_contract.rs",
+        "status": "ok",
+        "passed": 37,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/phase0_dual_time_contract.rs",
+        "status": "ok",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/phase2_binance_reducer_contract.rs",
+        "status": "ok",
+        "passed": 21,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/phase2_canonical_contract.rs",
+        "status": "ok",
+        "passed": 11,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/phase2_metadata_reducer_contract.rs",
+        "status": "ok",
+        "passed": 12,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/phase2_polymarket_reducer_contract.rs",
+        "status": "ok",
+        "passed": 23,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/phase2_terminal_merger_contract.rs",
+        "status": "ok",
+        "passed": 10,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/public_pm_reduction_contract.rs",
+        "status": "ok",
+        "passed": 17,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/public_reference_contract.rs",
+        "status": "ok",
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "unittests src/lib.rs",
+        "status": "ok",
+        "passed": 109,
+        "failed": 0,
+        "ignored": 1,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "unittests src/bin/dpt-gate-a.rs",
+        "status": "ok",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "unittests src/bin/dpt-public-online.rs",
+        "status": "ok",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/phase1_admission_contract.rs",
+        "status": "ok",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 3,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/phase2_binance_reducer_real_contract.rs",
+        "status": "ok",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 1,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/phase2_canonical_run_contract.rs",
+        "status": "ok",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 1,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/phase2_gate_a_real_contract.rs",
+        "status": "ok",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 2,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/phase2_typed_raw_adapter_contract.rs",
+        "status": "ok",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 6,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "unittests src/lib.rs",
+        "status": "ok",
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/artifact_publication.rs",
+        "status": "ok",
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/core_normalization.rs",
+        "status": "ok",
+        "passed": 9,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/durable_replay.rs",
+        "status": "ok",
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/noe_result_reference.rs",
+        "status": "ok",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "unittests src/lib.rs",
+        "status": "ok",
+        "passed": 16,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "unittests src/lib.rs",
+        "status": "ok",
+        "passed": 9,
+        "failed": 0,
+        "ignored": 1,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/memory_v2.rs",
+        "status": "ok",
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/stage1_vertical_slice.rs",
+        "status": "ok",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/stage2_local_reservation.rs",
+        "status": "ok",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/stage3_economic_lifecycle.rs",
+        "status": "ok",
+        "passed": 11,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/stage4_durable_replay.rs",
+        "status": "ok",
+        "passed": 6,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "unittests src/lib.rs",
+        "status": "ok",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "unittests src/bin/paper.rs",
+        "status": "ok",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/continuous.rs",
+        "status": "ok",
+        "passed": 25,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/economic_settlement.rs",
+        "status": "ok",
+        "passed": 9,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/market_fee_estimate.rs",
+        "status": "ok",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/paper.rs",
+        "status": "ok",
+        "passed": 6,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "unittests src/lib.rs",
+        "status": "ok",
+        "passed": 169,
+        "failed": 0,
+        "ignored": 2,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "unittests src/bin/sim_measurement.rs",
+        "status": "ok",
+        "passed": 8,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/task12_latency_profile.rs",
+        "status": "ok",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      },
+      {
+        "target": "tests/task13_execution_api.rs",
+        "status": "ok",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered": 0
+      }
+    ],
+    "counting_rule": "每个顶层 Running 标记后的最后一条 test result；排除该测试内子进程重复输出。",
+    "explicitly_skipped": "four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second"
+  },
+  "wheel": {
+    "filename": "model_train-0.1.0-cp313-cp313-manylinux_2_38_x86_64.whl",
+    "sha256": "0c66a4d27823bbca1bce79187790767c2e398ecfc951a9629a2476907623b539"
+  },
+  "native_source_sha256": {
+    "model-train/native-inputs/src/account.rs": "edd25b6234c62b937853f7596a57b416da234d73eb98feda7a3c815590b5db1a",
+    "model-train/native-inputs/src/action.rs": "dfc90baf9fd13948b3af4d391567e328a3fe8d47a69989af94bf90a48af37a04",
+    "model-train/native-inputs/src/action_tests.rs": "eb1ac0124521846d46d2396b90ec9407f92f8f9be9c8a4733de6d00373003c7a",
+    "model-train/native-inputs/src/book_tests.rs": "42ade2dad9d268d883371349135ce2bc929e0b332c72f7086aa6a9bbb7cd2e61",
+    "model-train/native-inputs/src/buy_tests.rs": "a08855784ffe75472f0e828545a764b20a502be14bdbf80cdfa10139c9ae5c34",
+    "model-train/native-inputs/src/cancel.rs": "a87101ff7f1e062553cec9e4377b21511bc7e504abd47228ad9302e65b39483f",
+    "model-train/native-inputs/src/continuous_runtime.rs": "7594e98791a364c6cfd2350c2ab8fcbd2a7897fc97b90561bb59b3df8c01b2ce",
+    "model-train/native-inputs/src/continuous_tests.rs": "b86cb3c0bc920515ff96c8f1de0529c8f8b735c091de935479be3a2e4b0b9b8a",
+    "model-train/native-inputs/src/exact.rs": "7712533ed89391e18c9606162905da8d7108d4fedb8e758a87b45fa87b1bef12",
+    "model-train/native-inputs/src/lib.rs": "876276d0a64ec9ec0015333df7a332723f15d924cdd99c0d8ae035835e812161",
+    "model-train/native-inputs/src/market.rs": "b3f7a74384ff77c3936e6991aed01d041375839b633e111e8e30873f76c5a5e0",
+    "model-train/native-inputs/src/market_tests.rs": "8549213f26cf2af262e6fe187815b1f77c001d6277f904c0e2989731d553c733",
+    "model-train/native-inputs/src/ort_actor.rs": "35e7bfd1f191d0b4a1615f32a5aa31c5e9c324215fa578f4c40914d3424e105f",
+    "model-train/native-inputs/src/prefix.rs": "ac703f778a2fd72c0fcf86326ff012588f4b45603915b0f6643a2243959a97ea",
+    "model-train/native-inputs/src/public_input_tests.rs": "6f55e6cc04c0a3d66e8486c8517c906e6da0949b76b4e7ed696fe21f7ad2bf66",
+    "model-train/native-inputs/src/python.rs": "8bdfe7cc15c5dabd3d9db412650e5620a45abf1c36a7660731708d614a19e0a1",
+    "model-train/native-inputs/src/root.rs": "e5b887af579d16b94f276b9ee27b60245362e34dc8e788f05bcd63c16079fd43",
+    "model-train/native-inputs/src/support.rs": "f02cf4add5eb8c3c1ec8abec184294c76c98dbaa5f75f11b9d030ec75ea8f438",
+    "model-train/native-inputs/src/values.rs": "64996aaf1c666a60ce4582c922f47bb3df2696419640a27821bdaf78c714d02b"
+  },
+  "known_baseline_clippy_exclusions": [
+    "clippy::needless_borrow",
+    "clippy::too_many_arguments"
+  ],
+  "prior_failures": [
+    {
+      "stage": "directed fixture compile",
+      "reason": "离线诊断插桩误匹配 cfg(test) 的 assert_eq!；限制到实际调用的首次匹配。",
+      "exit_code": 101,
+      "raw_log_sha256": "a815aa7765857fe0c90dd46c93e475b9f3c746759299c14a93f9ea6858f42309"
+    },
+    {
+      "stage": "implicit Python discovery",
+      "reason": "maturin 未发现指定解释器；显式 --interpreter 指定锁定解释器后构建通过。",
+      "exit_code": 1,
+      "raw_log_sha256": "0e57b93a50fe8b0567ba0fc4a37f9fa591459d7642216b465bfa34061988cffd"
+    },
+    {
+      "stage": "embedded Python test startup",
+      "reason": "动态加载器缺少锁定 libpython 所在目录；从该解释器 sysconfig 获取 LIBDIR，只加入任务进程环境。",
+      "exit_code": 127,
+      "raw_log_sha256": "38e91f5ff5f83adce5383014e4152777001ca27d82196bc85404abe13fcdffc4"
+    },
+    {
+      "stage": "new BBA loop Clippy lint",
+      "reason": "将固定三项索引循环改为等序 enumerate；没有新增排除项。最终源码重新运行上述所有检查。",
+      "exit_code": 101,
+      "raw_log_sha256": "9f27da8a12e32b66ea4b76591a8b0e834f08f420be8fcc1a2898a2d00de21e95"
+    }
+  ]
+}

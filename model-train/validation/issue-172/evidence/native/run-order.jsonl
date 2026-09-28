@@ -1,0 +1,1 @@
+{"run": "native-formal", "started_utc": "2026-09-28T06:15:56.232694+00:00", "binary_sha256": "442f0a24f30ea1353b0de59f543594bc4bdfdb073cc4b2b345b51396ecc9a981", "model": null, "native_threads": 8, "ort_threads": null, "completed_utc": "2026-09-28T07:14:42.207358+00:00", "exit_code": 0}

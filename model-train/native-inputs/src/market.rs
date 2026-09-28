@@ -125,10 +125,10 @@ fn v7(now: i64, value: Option<R>, a: Option<&DirectObservationAnchorV1>, pm: boo
     o
 }
 
-pub(crate) fn rules(
+pub(crate) fn rules_with_static(
     o: &MarketBusinessObservationV1,
-    r: &PublicTradingRuleContextV1,
     now: i64,
+    tail: &[f32; 16],
 ) -> [f32; 30] {
     let mut out = [0.; 30];
     for i in 0..2 {
@@ -145,6 +145,11 @@ pub(crate) fn rules(
             ));
         }
     }
+    out[14..].copy_from_slice(tail);
+    out
+}
+pub(crate) fn static_rules(r: &PublicTradingRuleContextV1) -> [f32; 16] {
+    let mut out = [0.; 30];
     for (slot, value) in [
         (14, decimal(&r.limit_min_quantity_shares)),
         (16, decimal(&r.market_buy_min_spend_pusd)),
@@ -163,7 +168,7 @@ pub(crate) fn rules(
         out[slot] = if v { 1. } else { 0. };
         out[slot + 1] = 1.;
     }
-    out
+    out[14..].try_into().unwrap()
 }
 #[derive(Clone, Default)]
 pub(crate) struct SidePrevious {
@@ -478,13 +483,14 @@ fn bba(
             ]
         })
         .unwrap_or([None; 3]);
-    for i in 0..3 {
-        out[7 + 7 * i..14 + 7 * i].copy_from_slice(&v7(
-            now,
-            fields[i].map(decimal),
-            one(&a),
-            i < 2,
-        ));
+    let time = t5(now, one(&a));
+    for (i, field) in fields.iter().enumerate() {
+        let start = 7 + 7 * i;
+        if let Some(value) = field.map(decimal) {
+            out[start] = price(&value, i < 2);
+            out[start + 1] = 1.;
+        }
+        out[start + 2..start + 7].copy_from_slice(&time);
     }
     fields[0]
         .zip(fields[1])

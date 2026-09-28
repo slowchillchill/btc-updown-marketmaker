@@ -117,6 +117,8 @@ pub struct NativeInputRoot {
     account: AccountInstanceKeyV1,
     started_at: i64,
     reset: bool,
+    // 只从本根不可变规则快照派生；动态tick/时间仍逐帧读取。
+    rule_tail: Option<[f32; 16]>,
     markets: BTreeMap<String, MarketBinding>,
     hidden: BTreeSet<String>,
     histories: BTreeMap<String, crate::market::MarketHistory>,
@@ -134,6 +136,7 @@ impl NativeInputRoot {
             account: account_id,
             started_at: root_started_at_utc_ms,
             reset: false,
+            rule_tail: None,
             markets: BTreeMap::new(),
             hidden: BTreeSet::new(),
             histories: BTreeMap::new(),
@@ -286,7 +289,10 @@ impl NativeInputRoot {
                     .iter()
                     .find(|f| f.observation.market.condition_id == id)
                     .unwrap();
-                let rule = crate::market::rules(frame.observation, &frame.rule_context, now);
+                let tail = self
+                    .rule_tail
+                    .get_or_insert_with(|| crate::market::static_rules(&frame.rule_context));
+                let rule = crate::market::rules_with_static(frame.observation, now, tail);
                 rows.push(AccountInputRow {
                     hidden_state_key: self.key(&id.0),
                     role,
