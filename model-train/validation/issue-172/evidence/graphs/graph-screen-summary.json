@@ -1,0 +1,154 @@
+[
+  {
+    "model": "MAIN-1x256",
+    "threads": 4,
+    "round": 0,
+    "version": "baseline",
+    "state_ms": {
+      "count": 133,
+      "mean": 2.7597644962406016,
+      "p50": 2.668442,
+      "p90": 3.1386674,
+      "p95": 3.5356123999999998,
+      "p99": 3.7759719200000004,
+      "max": 4.482837
+    },
+    "process_cpu_ms": 599.065569,
+    "preparation_seconds": 0.008922403008909896,
+    "load_seconds": 0.03085792899946682,
+    "f32_bits_exact": true
+  },
+  {
+    "model": "MAIN-1x256",
+    "threads": 4,
+    "round": 0,
+    "version": "loop_shape",
+    "state_ms": {
+      "count": 133,
+      "mean": 3.1989168045112786,
+      "p50": 3.246832,
+      "p90": 3.7612832,
+      "p95": 3.8875848,
+      "p99": 4.369627200000003,
+      "max": 5.218772
+    },
+    "process_cpu_ms": 713.393994,
+    "preparation_seconds": 0.008922403008909896,
+    "load_seconds": 0.023637689009774476,
+    "f32_bits_exact": true
+  },
+  {
+    "model": "MAIN-1x256",
+    "threads": 4,
+    "round": 1,
+    "version": "loop_shape",
+    "state_ms": {
+      "count": 133,
+      "mean": 2.8266875563909775,
+      "p50": 2.758602,
+      "p90": 3.371936,
+      "p95": 3.4421511999999996,
+      "p99": 3.8312748000000023,
+      "max": 4.708311
+    },
+    "process_cpu_ms": 611.198473,
+    "preparation_seconds": 0.008922403008909896,
+    "load_seconds": 0.02253704800386913,
+    "f32_bits_exact": true
+  },
+  {
+    "model": "MAIN-1x256",
+    "threads": 4,
+    "round": 1,
+    "version": "baseline",
+    "state_ms": {
+      "count": 133,
+      "mean": 2.69519077443609,
+      "p50": 2.641541,
+      "p90": 3.091446,
+      "p95": 3.4536419999999994,
+      "p99": 3.785729,
+      "max": 4.841182
+    },
+    "process_cpu_ms": 578.193091,
+    "preparation_seconds": 0.008922403008909896,
+    "load_seconds": 0.023070953000569716,
+    "f32_bits_exact": true
+  },
+  {
+    "model": "MAIN-30x1024",
+    "threads": 16,
+    "round": 0,
+    "version": "baseline",
+    "state_ms": {
+      "count": 133,
+      "mean": 15.342497834586466,
+      "p50": 14.542772,
+      "p90": 17.0885304,
+      "p95": 18.85532079999999,
+      "p99": 25.71095768000002,
+      "max": 33.476037
+    },
+    "process_cpu_ms": 18251.050246,
+    "preparation_seconds": 0.005844780011102557,
+    "load_seconds": 0.9095044920104556,
+    "f32_bits_exact": true
+  },
+  {
+    "model": "MAIN-30x1024",
+    "threads": 16,
+    "round": 0,
+    "version": "loop_shape",
+    "state_ms": {
+      "count": 133,
+      "mean": 14.78503495488722,
+      "p50": 14.615769,
+      "p90": 16.1452416,
+      "p95": 16.788352,
+      "p99": 17.220817720000003,
+      "max": 17.38971
+    },
+    "process_cpu_ms": 17342.094324,
+    "preparation_seconds": 0.005844780011102557,
+    "load_seconds": 0.6150870370038319,
+    "f32_bits_exact": true
+  },
+  {
+    "model": "MAIN-30x1024",
+    "threads": 16,
+    "round": 1,
+    "version": "loop_shape",
+    "state_ms": {
+      "count": 133,
+      "mean": 14.565391684210526,
+      "p50": 14.445197,
+      "p90": 15.369199,
+      "p95": 15.774945999999998,
+      "p99": 17.077521760000003,
+      "max": 17.467336
+    },
+    "process_cpu_ms": 17009.235867,
+    "preparation_seconds": 0.005844780011102557,
+    "load_seconds": 0.614795248984592,
+    "f32_bits_exact": true
+  },
+  {
+    "model": "MAIN-30x1024",
+    "threads": 16,
+    "round": 1,
+    "version": "baseline",
+    "state_ms": {
+      "count": 133,
+      "mean": 15.72086982706767,
+      "p50": 15.197704,
+      "p90": 17.635769,
+      "p95": 18.1906172,
+      "p99": 21.70928732000001,
+      "max": 27.641656
+    },
+    "process_cpu_ms": 19076.535571,
+    "preparation_seconds": 0.005844780011102557,
+    "load_seconds": 0.585472850012593,
+    "f32_bits_exact": true
+  }
+]

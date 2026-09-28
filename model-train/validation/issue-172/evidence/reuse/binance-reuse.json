@@ -1,0 +1,175 @@
+{
+  "scope": "仅相邻实际组、同市场同侧按精确有理价格关联；九个 f32 全位相等。候选收益上限证据，未实现缓存。",
+  "embedding_width": 32,
+  "maximum_observed_group_embedding_payload_bytes": 747776,
+  "payload_excludes": [
+    "键",
+    "索引",
+    "容器节点",
+    "容量",
+    "暂态双份",
+    "归约树"
+  ],
+  "summary": {
+    "old20": {
+      "consecutive_side_pairs": 38,
+      "valid_rows": 48659,
+      "common_prices": 48650,
+      "equal_nine_f32_rows": 48648,
+      "changed_nine_f32_rows": 2,
+      "inserted": 9,
+      "deleted": 6,
+      "whole_side_equal": 36,
+      "best_price_changed": 0,
+      "embedding_payload_bytes": {
+        "count": 38,
+        "mean": 163904.0,
+        "p50": 163904.0,
+        "p90": 188928.0,
+        "p95": 188928.0,
+        "p99": 188928.0,
+        "max": 188928.0
+      }
+    },
+    "minute0": {
+      "consecutive_side_pairs": 126,
+      "valid_rows": 165021,
+      "common_prices": 165004,
+      "equal_nine_f32_rows": 164999,
+      "changed_nine_f32_rows": 5,
+      "inserted": 17,
+      "deleted": 14,
+      "whole_side_equal": 124,
+      "best_price_changed": 0,
+      "embedding_payload_bytes": {
+        "count": 126,
+        "mean": 167640.38095238095,
+        "p50": 167744.0,
+        "p90": 191488.0,
+        "p95": 191616.0,
+        "p99": 191616.0,
+        "max": 191616.0
+      }
+    },
+    "minute1": {
+      "consecutive_side_pairs": 126,
+      "valid_rows": 169692,
+      "common_prices": 169670,
+      "equal_nine_f32_rows": 169657,
+      "changed_nine_f32_rows": 13,
+      "inserted": 22,
+      "deleted": 10,
+      "whole_side_equal": 122,
+      "best_price_changed": 0,
+      "embedding_payload_bytes": {
+        "count": 126,
+        "mean": 172385.52380952382,
+        "p50": 172800.0,
+        "p90": 197760.0,
+        "p95": 198144.0,
+        "p99": 198144.0,
+        "max": 198144.0
+      }
+    },
+    "stress-changes": {
+      "consecutive_side_pairs": 126,
+      "valid_rows": 165060,
+      "common_prices": 165060,
+      "equal_nine_f32_rows": 165060,
+      "changed_nine_f32_rows": 0,
+      "inserted": 0,
+      "deleted": 0,
+      "whole_side_equal": 126,
+      "best_price_changed": 0,
+      "embedding_payload_bytes": {
+        "count": 126,
+        "mean": 167680.0,
+        "p50": 167680.0,
+        "p90": 200320.0,
+        "p95": 200320.0,
+        "p99": 200320.0,
+        "max": 200320.0
+      }
+    },
+    "minute2": {
+      "consecutive_side_pairs": 126,
+      "valid_rows": 171864,
+      "common_prices": 171864,
+      "equal_nine_f32_rows": 171864,
+      "changed_nine_f32_rows": 0,
+      "inserted": 0,
+      "deleted": 0,
+      "whole_side_equal": 126,
+      "best_price_changed": 0,
+      "embedding_payload_bytes": {
+        "count": 126,
+        "mean": 174592.0,
+        "p50": 174592.0,
+        "p90": 206208.0,
+        "p95": 206208.0,
+        "p99": 206208.0,
+        "max": 206208.0
+      }
+    },
+    "minute3": {
+      "consecutive_side_pairs": 126,
+      "valid_rows": 179301,
+      "common_prices": 179293,
+      "equal_nine_f32_rows": 179286,
+      "changed_nine_f32_rows": 7,
+      "inserted": 8,
+      "deleted": 14,
+      "whole_side_equal": 124,
+      "best_price_changed": 0,
+      "embedding_payload_bytes": {
+        "count": 126,
+        "mean": 182147.04761904763,
+        "p50": 182144.0,
+        "p90": 207872.0,
+        "p95": 208512.0,
+        "p99": 208512.0,
+        "max": 208512.0
+      }
+    },
+    "minute4": {
+      "consecutive_side_pairs": 126,
+      "valid_rows": 184464,
+      "common_prices": 184464,
+      "equal_nine_f32_rows": 184464,
+      "changed_nine_f32_rows": 0,
+      "inserted": 0,
+      "deleted": 0,
+      "whole_side_equal": 126,
+      "best_price_changed": 0,
+      "embedding_payload_bytes": {
+        "count": 126,
+        "mean": 187392.0,
+        "p50": 187392.0,
+        "p90": 214912.0,
+        "p95": 214912.0,
+        "p99": 214912.0,
+        "max": 214912.0
+      }
+    },
+    "stress-misses": {
+      "consecutive_side_pairs": 252,
+      "valid_rows": 368046,
+      "common_prices": 368046,
+      "equal_nine_f32_rows": 368046,
+      "changed_nine_f32_rows": 0,
+      "inserted": 0,
+      "deleted": 0,
+      "whole_side_equal": 252,
+      "best_price_changed": 0,
+      "embedding_payload_bytes": {
+        "count": 252,
+        "mean": 186944.0,
+        "p50": 186944.0,
+        "p90": 203136.0,
+        "p95": 203136.0,
+        "p99": 203136.0,
+        "max": 203136.0
+      }
+    }
+  }
+}

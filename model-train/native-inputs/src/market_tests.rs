@@ -471,7 +471,12 @@ fn same_frame_independent_ticks_and_exact_prefix_keep_unrounded_selection() {
             },
         ),
     );
-    let r = rules(&o, &snapshot.public_rule_context(o.market.clone()), 23000);
+    let context = snapshot.public_rule_context(o.market.clone());
+    let tail = static_rules(&context);
+    let r = rules_with_static(&o, 23000, &tail);
+    let later = rules_with_static(&o, 25000, &tail);
+    assert_eq!(&r[14..], &later[14..]);
+    assert_ne!(&r[..14], &later[..14]);
     assert_eq!(r[0], signed_log_f32(&ratio(1, 100)));
     assert_eq!(r[7], signed_log_f32(&ratio(1, 1000)));
     assert_eq!(r[1], 1.);

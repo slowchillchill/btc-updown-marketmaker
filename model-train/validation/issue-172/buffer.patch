@@ -1,0 +1,58 @@
+--- buffer
++++ buffer
+@@ -171,6 +171,8 @@
+     best: Option<R>,
+     // 可丢弃的精确表达式投影，仅含上一帧本侧实际用过的输入；不是盘口事实。
+     logs: BTreeMap<R, f32>,
++    scratch_distances: Vec<R>,
++    scratch_times: Vec<[f32;5]>,
+ }
+ #[derive(Clone)]
+ pub(crate) struct Sample {
+@@ -217,7 +219,8 @@
+             by_path.entry(&anchor.field_path).or_default().push(anchor);
+         }
+         let mut times = HashMap::new();
+-        let mut row_times = Vec::with_capacity(levels.len());
++        let mut row_times=std::mem::take(&mut previous.scratch_times);
++        row_times.reserve(levels.len());
+         for i in 0..levels.len() {
+             let aa = paths
+                 .get(i)
+@@ -242,7 +245,8 @@
+             }
+         }
+         // 距离只构造一次，随后将精确键移动到下一帧缓存。
+-        let distances: Vec<_> = levels
++        let mut distances=std::mem::take(&mut previous.scratch_distances);
++        distances.extend(levels
+             .iter()
+             .map(|(p, _)| {
+                 if bid {
+@@ -251,7 +255,7 @@
+                     p.sub(&levels[0].0)
+                 }
+             })
+-            .collect();
++            );
+         let start = book.len();
+         book.resize(start + levels.len(), [0.; 9]);
+         // 本侧准备已完成；同一持久 Rayon 池仅处理不相交的纯输出块。
+@@ -280,7 +284,7 @@
+         // 重建而非累加历史键，空间随当前可见档位数有界；消失的输入不继续驻留。
+         next.logs = levels
+             .into_iter()
+-            .zip(distances)
++            .zip(distances.drain(..))
+             .zip(&book[start..])
+             .flat_map(|(((p, q), distance), row)| {
+                 // FromIterator 排序后批量建树，避免逐键沿树路径插入与克隆。
+@@ -290,6 +294,8 @@
+                     .chain([(q, row[1]), (distance, row[8])])
+             })
+             .collect();
++        row_times.clear();
++        next.scratch_distances=distances;next.scratch_times=row_times;
+     }
+     *previous = next;
+     best_identity
