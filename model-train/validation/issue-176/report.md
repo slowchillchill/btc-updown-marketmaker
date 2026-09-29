@@ -11,7 +11,7 @@
 
 这些闭环降幅包含新旧策略的动作、账户与后续负载差异，不能全部归因于计算优化。同新模型、同权重、同前缀的有限计算探针也在全部切片和两轮中变快，见后文；该探针不包含完整输入、GRU 或执行。
 
-测量基线为包含 #174 的 `a39f2cc2bb160c49fd53dba1a106364b0666f7c3`；冻结实现为 `73c328fe359165b426fe394111d21dd3ea09bdd9`。最终 PR 在该实现之后只增加本报告、证据和报告链接；测量没有使用后来的文档提交。候选实际二进制 SHA-256 为 `0f8229f687ad7924f8694a9bc0df4af81dec57593e89be411167202deca6c2eb`，完整源码覆盖、模型八图、外部权重、二进制和输入摘要见 [provenance.json](evidence/source/provenance.json)。
+测量基线为包含 #174 的 `a39f2cc2bb160c49fd53dba1a106364b0666f7c3`；冻结实现为 `73c328fe359165b426fe394111d21dd3ea09bdd9`。随后 `488bb5e` 增加报告和证据，首轮审查后的修复补充验收测试、验证脚本与报告；生产计算、模型图及测量二进制未变，未重跑性能矩阵。候选实际二进制 SHA-256 为 `0f8229f687ad7924f8694a9bc0df4af81dec57593e89be411167202deca6c2eb`，完整源码覆盖、模型八图、外部权重、二进制和输入摘要见 [provenance.json](evidence/source/provenance.json)。
 
 新版本采用 `native_inputs_v6/native_actions_v2`。新策略使用初始化权重，本文不评价学习和经济收益，也不代表正式训练、GPU、在线容量或整个 #5/#127 已通过。
 
@@ -29,20 +29,28 @@
 
 ## 正确性证据
 
-固定工作区回归实际为 **1190 通过、0 失败、18 ignored、1 项具名跳过**。完整目标计数、跳过名称及原因保存在 `evidence/validation/workspace-results.json`；依赖实际 UTC 时钟的 `four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second` 未运行，不能计作通过。
+固定工作区回归在首轮及审查补证后均为 **1190 通过、0 失败、18 ignored、1 项具名跳过**。首轮结果保存在 `evidence/validation/workspace-results.json`，补证后准确命令与目标计数见 [commands.json](evidence/validation/review/commands.json) 和 [results.json](evidence/validation/review/results.json)；依赖实际 UTC 时钟的 `four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second` 未运行，不能计作通过。
 
 ```bash
 cargo test --workspace --lib --bins --tests --examples --locked --offline -- --skip four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second
 ```
 
 
-原生模型包为 **44 个库测试及 3 个 rounding 集成测试通过、18 ignored**；完整 Python 套件为 33 通过、1 跳过，该可选三端用新 MAIN-1x256 图定向补跑后 4 项均通过。两个 MAIN 的导出各有 461 次数值比较，纯图三端各有 27 个场景、1750 次比较；实际线程数和容限见 [three-runtime.json](evidence/validation/three-runtime.json)。真实 BUY、全人口撤单、完整盘口、延后反传、P3—P7 人口和梯度检查分别保留实际通过证据。工作区和原生 ignored 的全部名称、原因及定向覆盖见 [跳过清单](skipped-tests.md)，未运行的长矩阵不计作通过。
+原生模型包首轮为 **44 个库测试及 3 个 rounding 集成测试通过、18 ignored**；审查补证后仍为 47 通过，新增定向数学验收使默认 ignored 变为 19，该入口已另行显式通过。完整 Python 套件首轮为 33 通过、1 跳过，该可选三端用新 MAIN-1x256 图定向补跑后 4 项均通过。两个 MAIN 的导出各有 461 次数值比较，纯图三端各有 27 个场景、1750 次比较；实际线程数和容限见 [three-runtime.json](evidence/validation/three-runtime.json)。真实 BUY、全人口撤单、完整盘口、延后反传、P3—P7 人口和梯度检查分别保留实际通过证据。工作区和原生 ignored 的全部名称、原因及定向覆盖见 [跳过清单](skipped-tests.md)，未运行的长矩阵不计作通过。
 
 P3 人口诊断首次实际失败：新合同的唯一市场撤单项在 Rust 中已跳过评分，而 Python 诊断仍计算原分数 `0.36799273`，与零贡献不一致。`73c328f` 只把诊断参考改为同合同的评分前跳过，未修改生产策略或数值容限；两个 MAIN 随后的 P3—P7 均通过。[失败与修正证据](evidence/validation/resolved-population-failure.json)保留修正前日志摘要和通过入口。
 
 模型定向证据覆盖普通 GTC 即时成交和余量挂单、费用现金边界、FOK 最低本金与无法全成反馈、混合双腿、低于 mos 原样拒单、初始 0.001、0.01→0.001、旧 Actor 保留旧价及不支持 tick 原值。16 路小域穷举和相邻整数/f32 边界检查完整可达性。两种 MAIN 的 PyTorch、Python ORT、Rust ORT 使用同一新图，数值容限仍为原 `atol=1e−5, rtol=1e−4`，完整业务意图精确相等。
 
-共享和重复计算对照保留参数梯度值、`.grad` 为 None/零的区别，并核对有限一步 AdamW 更新后的参数，覆盖跳过计算对权重衰减结果的影响。真实旧输入持有 8 个版本后延后反传，输入未变化；训练场景有 772042 个梯度标量、1344 个非零盘口梯度。完整盘口三端场景每种 MAIN 推进 7 帧、执行 6 次决定和一次市场退出，最终 hidden 与 held-z 全部释放；包含 257 档真实构造盘口，不截断为 256。
+[首轮正式审查](https://github.com/slowchillchill/btc-updown-marketmaker/pull/177#pullrequestreview-5347178984)指出两项实际遗漏：原完整动作样本检查只核对单次公式；原所有头同时参与的梯度/AdamW 对照不能证明单选跳过的优化器行为。本段曾将后者误写成已覆盖，现由下述真实入口验证补齐；保留首轮审查事实。
+
+新增 [probability_validation.py](../../model_train/probability_validation.py) 从真实构造和原生消费入口取得现金 `0.0006 pUSD`、tick `0.01/0.01` 的合法域，平台 mos 仍为 5，未增加模型掩码。独立整数本金算术枚举出 **21 个完整动作、20 个前缀节点、11 个单选节点**，逐节点核对原生支持集；价格 A 同时影响价格 B 的支持和分数。独立 `exp/sum` 条件概率乘积与实际 `consume_actor` 路径概率在既定容限内一致，独立分布归一为 1；精确枚举的 `H_budget=0.5×H_joint` 与全部完整动作样本按联合概率加权的报告值相符。全部样本的加权 surrogate 梯度与精确 `−H_budget` 梯度对照通过，最大绝对差 `1.1175871e−7`。这里“精确”指完整合法叶子枚举，神经参数仍为 float32、独立概率运算为 float64，数值和梯度比较沿 `atol=1e−5, rtol=1e−4`，没有将采样频率估计当作精确熵。
+
+同一实际入口还覆盖部分价格多选、价格和变体单选、仅剩市场撤单单选三条路径，分别从空 AdamW 状态和已有动量状态执行一次更新，共 **6 个子场景**。共享与独立重复参考均先跳过单选评分，精确核对 `.grad` 的 None/零分类、未调用头、None 参数及既有状态不变；对零梯度参数独立核对 AdamW 动量和权重衰减公式，对全部参数及 `step/exp_avg/exp_avg_sq` 沿原容限比较。单选撤单后缀没有调用任何动作评分头，32 个状态参数张量为零梯度，47 个动作参数张量为 None；零梯度仍产生衰减，None 不更新。两项 Python 测试及其单个 Rust 入口通过，完整动作概率表、熵值、梯度计数和优化器分类见 [补证结果](evidence/validation/review/probability-and-optimizer.json)。这项有限验证使用 MAIN-1x256，不代表正式训练或全部模型训练配置。
+
+补证首跑保留一个真实失败：新参考直接对 1 行撤单对象编码，而原路径和候选均补到 256 行，另引入了物理 GEMM 差异。`state.core.gate.weight` 某个约 `1e−9` 的非零梯度差经首次 AdamW 放大，更新参数差 `1.5773e−5` 超过原阈值。参考修正为同样 256 行布局、有效 mask 和真实人口切片后，原输入、权重、float32、优化器超参与容限均保持，6 个子场景全部通过；未修改生产代码或改用 float64 回避失败。[失败、数值诊断与修正证据](evidence/validation/review/reference-layout-failure.json)保留两次失败及后续通过入口。
+
+真实旧输入持有 8 个版本后延后反传，输入未变化；该训练场景有 772042 个梯度标量、1344 个非零盘口梯度。完整盘口三端场景每种 MAIN 推进 7 帧、执行 6 次决定和一次市场退出，最终 hidden 与 held-z 全部释放；包含 257 档真实构造盘口，不截断为 256。
 
 扩大检查的 `cargo clippy --workspace --all-targets --locked --offline -- -D warnings` 实际失败于三个既有 `clippy::large_enum_variant`：`contracts/src/public_observation.rs:205`、`contracts/src/lib.rs:221`、`contracts/src/lib.rs:438`。这些文件及工作区锁文件与 a39 基线逐字节相同，证据在 `evidence/validation/workspace-clippy.json`。本轮模型原生和 Rust ORT 静态检查、格式检查结果单独记录，不把扩大检查写成通过，也不在本任务改变公共枚举布局。
 
@@ -183,6 +191,6 @@ P3 人口诊断首次实际失败：新合同的唯一市场撤单项在 Rust �
 
 ## 证据范围
 
-本次服务统计的1024组全部超过4ms，也全部超过1ms，不能记作延迟目标达成。正确性与有限性能比较已经完成；未执行正式PPO训练、GPU验证、256路容量、旧70分钟完整C矩阵或部署。最终策略是否学到有效交易、训练后的动作分布和更大撤单人口下的时延仍未由本报告回答。
+本次服务统计的1024组全部超过4ms，也全部超过1ms，不能记作延迟目标达成。正确性检查与有限性能比较的范围如上；未执行正式PPO训练、GPU验证、256路容量、旧70分钟完整C矩阵或部署。最终策略是否学到有效交易、训练后的动作分布和更大撤单人口下的时延仍未由本报告回答。
 
 公开证据仅包含仓库相对路径、结构化结果、源码覆盖归档与摘要。原始日志、录制和模型保留于任务专用产物目录；[日志索引](evidence/validation/raw-log-index.json)只发布名称、长度与SHA-256。既有工作树和历史产物没有覆盖。

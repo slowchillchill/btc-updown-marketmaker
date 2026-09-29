@@ -4,7 +4,7 @@
 
 ## 固定工作区回归
 
-实际1190通过、18 ignored；另显式跳过依赖实际UTC时钟的 `four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second`。下列18项本轮未另行运行，保持其既有外部数据/长时现场原因。
+首轮及审查补证后的固定回归均为1190通过、18 ignored；另显式跳过依赖实际UTC时钟的 `four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second`。下列18项本轮未另行运行，保持其既有外部数据/长时现场原因。补证后的逐目标和跳过名单见 [review/results.json](evidence/validation/review/results.json)。
 
 | 实际名称 | ignored 原因 |
 | --- | --- |
@@ -29,12 +29,13 @@
 
 ## 原生模型包
 
-实际44个库测试及3个rounding集成测试通过、18 ignored。其中7个测试函数随后以本轮指定入口显式通过；11个旧归档/长矩阵函数未运行，不记为通过。全部结构化依据见 [native-ignored-coverage.json](evidence/validation/native-ignored-coverage.json)。
+首轮44个库测试及3个rounding集成测试通过、18 ignored，其中7个测试函数以本轮指定入口显式通过；原记录见 [native-ignored-coverage.json](evidence/validation/native-ignored-coverage.json)。审查补证后的默认回归仍为47通过，新增小域验收使 ignored 为19；新增入口也已显式通过，合计8个定向测试函数。11个旧归档/长矩阵函数未运行，不记为通过。最新命令与全部19个名称见 [review/results.json](evidence/validation/review/results.json)。
 
 | 实际名称 | 默认 ignored 原因 | 本轮实际覆盖 |
 | --- | --- | --- |
 | `action_tests::actual_graph_pair_intent_execution_and_frozen_cancel_race` | requires original graph archive and locked project Python | 定向显式运行通过；未计入默认回归通过数；MAIN-1x256；validation/commands.json: cancel-race |
 | `action_tests::buy_tests::same_process_python_and_rust_ort_share_native_actor_and_final_intent` | requires explicitly supplied exported graphs and matching Python wheel ORT library | 定向显式运行通过；未计入默认回归通过数；MAIN-1x256、MAIN-30x1024；validation/same-process.json |
+| `action_tests::buy_tests::small_domain_joint_probability_entropy_and_singleton_optimizer` | requires locked project Python; finite real joint probability and singleton AdamW validation | 审查补证时显式运行通过，Rust入口1项/Python测试2项/AdamW子场景6项；未计入默认回归通过数；MAIN-1x256；validation/review/probability-and-optimizer.json |
 | `action_tests::buy_tests::tick_grid_transition_support_measurement` | #176 单进程 release 首次网格/真实tick切换定向计时；非闭环性能矩阵 | 定向显式运行通过；未计入默认回归通过数；独立原生release进程，不含NN；probe/tick-support.json |
 | `action_tests::same_process_cancel_actor_all_objects_and_original_identities` | requires explicitly supplied exported graphs and matching Python wheel ORT library | 定向显式运行通过；未计入默认回归通过数；MAIN-1x256、MAIN-30x1024；validation/latest-cancel-commands.json |
 | `book_tests::full_book_three_runtime_and_original_execution` | 有限深盘口三端和原执行入口；需新版本八图 | 定向显式运行通过；未计入默认回归通过数；MAIN-1x256、MAIN-30x1024；validation/MAIN-1x256-full-book.json、MAIN-30x1024-full-book.json |

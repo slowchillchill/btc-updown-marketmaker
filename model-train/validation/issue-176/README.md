@@ -53,3 +53,18 @@ python3 model-train/validation/issue-176/summarize.py --source "$OUTPUT/continuo
 `freeze.py` 逐张量证明两策略状态权重相等，才复用同一无交易前史 hidden；动作权重与路径属于
 各自策略。新旧策略完整业务摘要可不同，同一版本两轮的完整输入、hidden、动作和回执仍须一致。
 全部16次都保留图加载、预热、公共前史、首组、后63组、CPU和峰值RSS；首组不得移出总体分布。
+
+## 首轮审查补证
+
+锁定项目 Python 环境就绪后，从仓库根执行以下入口。它依次运行真实小域联合概率/熵和单选
+AdamW 验证、原生默认回归、规定工作区回归及原生静态/格式检查；不重导出模型或启动性能矩阵。
+输出目录必须是本次新的专用目录。命令、源码文件摘要、退出码和私有日志摘要写入该目录。
+
+```bash
+python3 model-train/validation/issue-176/review_checks.py \
+  --source "$SOURCE" --build "$OUTPUT/build" --output "$OUTPUT/review"
+```
+
+小域由真实现金约束形成，直接消费原生 Actor；测试独立枚举全部合法动作，不向生产添加限制。
+共享与重复参考使用同一单选跳过规则和256行对象编码布局，并分别核对空状态及已有状态的一步
+AdamW。完整结果和首跑参考布局失配的失败记录见报告中的审查补证链接。

@@ -239,6 +239,46 @@ fn ready(h: &mut Harness) -> NativeInputGroup {
     }
     h.next().unwrap()
 }
+
+#[cfg(feature = "python")]
+#[test]
+#[ignore = "requires locked project Python; finite real joint probability and singleton AdamW validation"]
+fn small_domain_joint_probability_entropy_and_singleton_optimizer() {
+    use pyo3::prelude::*;
+    // 真实现金约束自然产生三个数量与19个双腿GTC动作，不能用测试掩码裁剪生产支持。
+    let mut h = fixture_cash("0.0006");
+    let group = Arc::new(ready(&mut h));
+    let actor = NativeActor::new(group.clone(), 0).unwrap();
+    assert_eq!(
+        actor.root_upper(Family::SubmitPairedBuy).unwrap(),
+        3u32.into()
+    );
+    assert_eq!(
+        actor.support().unwrap(),
+        [true, false, true, false, false, true]
+    );
+    let report: String = Python::attach(|py| {
+        let module = py.import("model_train.probability_validation").unwrap();
+        let native = Py::new(py, crate::python::PythonGroup { group }).unwrap();
+        let history = crate::python::value(
+            py,
+            serde_json::Value::Array(h.groups[..h.groups.len() - 1].to_vec()),
+        )
+        .unwrap();
+        module
+            .getattr("run")
+            .unwrap()
+            .call1((native, history))
+            .unwrap()
+            .extract()
+            .unwrap()
+    });
+    if let Ok(path) = std::env::var("NATIVE_ACTION_PROBABILITY_OUTPUT") {
+        std::fs::write(path, &report).unwrap();
+    }
+    eprintln!("{report}");
+    h.driver.stop_and_drain().unwrap();
+}
 fn leg_values(order: &BuyOrderIntentV1) -> (Decimal, Decimal, Decimal) {
     match order {
         BuyOrderIntentV1::GtcLimit {
