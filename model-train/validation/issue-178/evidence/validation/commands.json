@@ -1,0 +1,241 @@
+[
+  {
+    "label": "wheel-build",
+    "command": [
+      "./model-train/.venv/bin/maturin",
+      "build",
+      "--release",
+      "--features",
+      "python",
+      "--locked",
+      "--offline",
+      "--interpreter",
+      "./model-train/.venv/bin/python",
+      "--out",
+      "target/issue-178-validation/wheels"
+    ],
+    "cwd": "./model-train",
+    "started_utc": "2026-09-29T15:29:16.116902+00:00",
+    "exit_code": 0,
+    "raw_log_sha256": "41baaab737694dde30fd6b9272e1bc9113a1cdb1de0e4096edc98b854f84045c",
+    "completed_utc": "2026-09-29T15:29:55.000266+00:00"
+  },
+  {
+    "label": "wheel-install",
+    "command": [
+      "uv",
+      "tool",
+      "run",
+      "--from",
+      "uv==0.12.9",
+      "uv",
+      "pip",
+      "install",
+      "--python",
+      "./model-train/.venv/bin/python",
+      "--offline",
+      "--no-deps",
+      "--reinstall",
+      "target/issue-178-validation/wheels/model_train-0.1.0-cp313-cp313-manylinux_2_38_x86_64.whl"
+    ],
+    "cwd": "target/issue-178-validation",
+    "started_utc": "2026-09-29T15:29:55.001048+00:00",
+    "exit_code": 0,
+    "raw_log_sha256": "188dc45016d2cea2ad53bd2861d747f4dafd239f2670f25bdab23a052fd858e7",
+    "completed_utc": "2026-09-29T15:29:56.259712+00:00"
+  },
+  {
+    "label": "native-continuous-tests",
+    "command": [
+      "cargo",
+      "test",
+      "--manifest-path",
+      "model-train/native-inputs/Cargo.toml",
+      "--features",
+      "continuous-validation",
+      "--lib",
+      "--tests",
+      "--locked",
+      "--offline"
+    ],
+    "cwd": ".",
+    "started_utc": "2026-09-29T15:29:56.260151+00:00",
+    "exit_code": 0,
+    "raw_log_sha256": "483005e837e9031785d913fd0838a36f4af8645da1e05f46b5bb024c064e103f",
+    "completed_utc": "2026-09-29T15:30:22.760199+00:00"
+  },
+  {
+    "label": "ownership",
+    "command": [
+      "cargo",
+      "test",
+      "--manifest-path",
+      "model-train/native-inputs/Cargo.toml",
+      "--features",
+      "continuous-validation",
+      "--lib",
+      "--locked",
+      "--offline",
+      "native_shared_inputs_preserve_delayed_backward_and_detached_aliases",
+      "--",
+      "--ignored",
+      "--nocapture"
+    ],
+    "cwd": ".",
+    "started_utc": "2026-09-29T15:30:22.760944+00:00",
+    "exit_code": 0,
+    "raw_log_sha256": "434f8dcb25cb89d62aa8b4d710fa7a60841fdf3b72c9a4055d92fa74f406efc9",
+    "completed_utc": "2026-09-29T15:30:24.708663+00:00"
+  },
+  {
+    "label": "frozen-cancel-race",
+    "command": [
+      "cargo",
+      "test",
+      "--manifest-path",
+      "model-train/native-inputs/Cargo.toml",
+      "--features",
+      "continuous-validation",
+      "--lib",
+      "--locked",
+      "--offline",
+      "actual_graph_pair_intent_execution_and_frozen_cancel_race",
+      "--",
+      "--ignored",
+      "--nocapture"
+    ],
+    "cwd": ".",
+    "started_utc": "2026-09-29T15:30:24.709247+00:00",
+    "exit_code": 0,
+    "raw_log_sha256": "f42398897d55c5be1e1bdbaec4107d32602c000cdcbaf2fe6d4116a24fc74483",
+    "completed_utc": "2026-09-29T15:30:25.715648+00:00"
+  },
+  {
+    "label": "full-book-MAIN-1x256",
+    "command": [
+      "cargo",
+      "test",
+      "--manifest-path",
+      "model-train/native-inputs/Cargo.toml",
+      "--features",
+      "continuous-validation",
+      "--lib",
+      "--locked",
+      "--offline",
+      "full_book_three_runtime_and_original_execution",
+      "--",
+      "--ignored",
+      "--nocapture"
+    ],
+    "cwd": ".",
+    "started_utc": "2026-09-29T15:30:25.716232+00:00",
+    "exit_code": 0,
+    "raw_log_sha256": "cd97ff38393f6b98282bcaab9ab3d3266684ceb3e61aba8662f1a508efeea5ee",
+    "completed_utc": "2026-09-29T15:30:27.838245+00:00"
+  },
+  {
+    "label": "full-book-MAIN-30x1024",
+    "command": [
+      "cargo",
+      "test",
+      "--manifest-path",
+      "model-train/native-inputs/Cargo.toml",
+      "--features",
+      "continuous-validation",
+      "--lib",
+      "--locked",
+      "--offline",
+      "full_book_three_runtime_and_original_execution",
+      "--",
+      "--ignored",
+      "--nocapture"
+    ],
+    "cwd": ".",
+    "started_utc": "2026-09-29T15:30:27.838829+00:00",
+    "exit_code": 0,
+    "raw_log_sha256": "d0b99ccb4b28ad3cd4a118c8decd6b85274b5608d2aa84f0ae6e900f1deaa405",
+    "completed_utc": "2026-09-29T15:30:34.591539+00:00"
+  },
+  {
+    "label": "workspace-tests",
+    "command": [
+      "cargo",
+      "test",
+      "--workspace",
+      "--lib",
+      "--bins",
+      "--tests",
+      "--examples",
+      "--locked",
+      "--offline",
+      "--",
+      "--skip",
+      "four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second"
+    ],
+    "cwd": ".",
+    "started_utc": "2026-09-29T15:30:34.592114+00:00",
+    "exit_code": 0,
+    "raw_log_sha256": "1ea3b65af33e4361e92d7924cb013f059e01b3cecc9ff1f5d5141d9d443ff867",
+    "completed_utc": "2026-09-29T15:32:10.808251+00:00",
+    "explicitly_skipped": [
+      "four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second"
+    ]
+  },
+  {
+    "label": "native-clippy",
+    "command": [
+      "cargo",
+      "clippy",
+      "--manifest-path",
+      "model-train/native-inputs/Cargo.toml",
+      "--all-targets",
+      "--features",
+      "continuous-validation",
+      "--locked",
+      "--offline",
+      "--",
+      "-D",
+      "warnings",
+      "-A",
+      "clippy::needless_borrow",
+      "-A",
+      "clippy::too_many_arguments"
+    ],
+    "cwd": ".",
+    "started_utc": "2026-09-29T15:32:10.808926+00:00",
+    "exit_code": 0,
+    "raw_log_sha256": "b028dd26ddc8543d56fa646c9ea9567c704febc7341f3360bf74862f8fd8e312",
+    "completed_utc": "2026-09-29T15:32:43.152855+00:00"
+  },
+  {
+    "label": "native-fmt",
+    "command": [
+      "cargo",
+      "fmt",
+      "--manifest-path",
+      "model-train/native-inputs/Cargo.toml",
+      "--",
+      "--check"
+    ],
+    "cwd": ".",
+    "started_utc": "2026-09-29T15:32:43.153292+00:00",
+    "exit_code": 0,
+    "raw_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "completed_utc": "2026-09-29T15:32:43.279548+00:00"
+  },
+  {
+    "label": "workspace-fmt",
+    "command": [
+      "cargo",
+      "fmt",
+      "--all",
+      "--",
+      "--check"
+    ],
+    "cwd": ".",
+    "started_utc": "2026-09-29T15:32:43.279992+00:00",
+    "exit_code": 0,
+    "raw_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "completed_utc": "2026-09-29T15:32:44.550092+00:00"
+  }
+]

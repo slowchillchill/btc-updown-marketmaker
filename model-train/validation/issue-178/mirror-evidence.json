@@ -1,0 +1,38 @@
+{
+  "scope": "1024个既有真实决策的模型f32输入层面对比；不是全训练期精确有理数恒等证明",
+  "sample_artifact_roles": ["sampled-inputs/frames.json", "sampled-inputs/inputs.f32", "input-trace-r2-projection/native-sampled/groups.jsonl"],
+  "samples": 1024,
+  "price_quantity_mirror_equal_frames": 1023,
+  "quantity_difference_frames": 1,
+  "frames_with_corresponding_T5_difference": 254,
+  "aligned_level_pairs": 101033,
+  "level_pairs_with_T5_difference": 18260,
+  "asset_Q6_equal_in_sample": true,
+  "counterexample": {
+    "market": "btc-updown-5m-1789517100",
+    "frame_index": 196,
+    "group_position": 247609,
+    "group_id": "bd1147008e789074f789d141be991877ef74bd5871853e77b96a952c3f01c66d",
+    "cutoff_utc_ms": 1789517156432,
+    "metadata": {
+      "source_kind": "polymarket_market_metadata",
+      "sequence": 2866,
+      "snapshot_record_utc": "2026-09-16T00:00:03.997Z",
+      "A_Up_token": "62506330061585612700114080575397991523826219434748885268098831661551509899529",
+      "B_Down_token": "21877459962968401634088832500667806752127221609995717009746458747433951971884"
+    },
+    "A_bid": {"price": "0.37", "quantity": "338.6", "encoded_price_f32": -0.25999999046325684, "quantity_log_f32": 5.827768325805664, "T5": [0.011928570456802845, 0.0, 0.011928570456802845, 1.0, 1.0]},
+    "B_ask": {"price": "0.63", "quantity": "358.6", "encoded_price_f32": 0.25999999046325684, "quantity_log_f32": 5.8849921226501465, "T5": [0.055434707552194595, 0.04592893272638321, 0.00995033048093319, 1.0, 1.0]},
+    "raw_file": "polymarket_market_00.parquet",
+    "raw_file_sha256": "e2575a2dacd9cc29ff4d7444c71cb72240b8770ed6bef1059c0781f58c9a934c",
+    "row_group": 746,
+    "raw_members": [
+      {"row": 27, "sequence": 6160574, "type": "price_change", "source_utc_ms": 1789517156375, "received_utc_ms": 1789517156385, "changes": ["A BID 0.37=358.6", "B ASK 0.63=358.6"]},
+      {"row": 73, "sequence": 6160620, "type": "Book", "source_utc_ms": 1789517156420, "received_utc_ms": 1789517156432, "change": "A BID 0.37=338.6", "recorded_input_position": 247687, "closed_group": 247609},
+      {"row": 74, "sequence": 6160621, "type": "Book", "source_utc_ms": 1789517156420, "received_utc_ms": 1789517156432, "change": "B ASK 0.63=338.6", "recorded_input_position": 247688, "closed_group": 247610}
+    ],
+    "recorded_segment": "recording/stable-00000000000000000024/captured.parquet",
+    "pm_report": {"quantity_before": "358.6", "quantity_after": "338.6", "reduction": "20", "reason": "POLYMARKET_BOOK_RESYNC_DELTA"},
+    "conclusion": "当前决定已看见A Book但尚未看见随后B Book；即使source与received毫秒相同，也不能提前未来B或延迟当前决定来制造无损镜像。"
+  }
+}

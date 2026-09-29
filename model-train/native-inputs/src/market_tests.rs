@@ -68,6 +68,7 @@ fn distant_depth_and_previous_unknown_are_not_trade_or_cross_gap_changes() {
     let last = (ExactDecimal("1".into()), ExactDecimal("3".into()));
     let mut out = [0.; 16];
     super::market::side(
+        &crate::exact::InputProjection::default(),
         &mut out,
         0,
         Some(vec![(&first.0, &first.1)]),
@@ -79,6 +80,7 @@ fn distant_depth_and_previous_unknown_are_not_trade_or_cross_gap_changes() {
         true,
     );
     super::market::side(
+        &crate::exact::InputProjection::default(),
         &mut [0.; 16],
         1,
         None,
@@ -91,6 +93,7 @@ fn distant_depth_and_previous_unknown_are_not_trade_or_cross_gap_changes() {
     );
     let mut restored = [0.; 16];
     super::market::side(
+        &crate::exact::InputProjection::default(),
         &mut restored,
         2,
         Some(vec![(&last.0, &last.1)]),
@@ -142,7 +145,11 @@ fn direct_time_missing_source_negative_age_and_multiple_anchors_use_independent_
         .best_bid_ask
         .direct_anchors[0];
     assert_eq!(
-        super::market::t5(21000, Some(actual)),
+        super::market::t5(
+            &crate::exact::InputProjection::default(),
+            21000,
+            Some(actual)
+        ),
         [
             signed_log_f32(&integer(-2)),
             signed_log_f32(&integer(-1)),
@@ -154,13 +161,21 @@ fn direct_time_missing_source_negative_age_and_multiple_anchors_use_independent_
     let mut missing = actual.clone();
     missing.source_event_at_utc_ms = None;
     assert_eq!(
-        super::market::t5(22000, Some(&missing)),
+        super::market::t5(
+            &crate::exact::InputProjection::default(),
+            22000,
+            Some(&missing)
+        ),
         [0., 0., 0., 0., 1.]
     );
     let mut other = actual.clone();
     other.source_event_at_utc_ms = Some(20000);
     other.received_at_utc_ms = 24000;
-    let e = super::market::envelope(21000, &[actual, &missing, &other]);
+    let e = super::market::envelope(
+        &crate::exact::InputProjection::default(),
+        21000,
+        &[actual, &missing, &other],
+    );
     assert_eq!(
         e,
         [
@@ -245,6 +260,7 @@ fn block_parallel_projection_keeps_coordinates_and_unique_direct_times() {
             let mut previous = super::market::SidePrevious::default();
             pool.install(|| {
                 super::market::side(
+                    &crate::exact::InputProjection::default(),
                     &mut out,
                     now,
                     Some(
@@ -268,6 +284,7 @@ fn block_parallel_projection_keeps_coordinates_and_unique_direct_times() {
                     .filter(|a| a.field_path == paths[i])
                     .collect();
                 let expected_time = super::market::t5(
+                    &crate::exact::InputProjection::default(),
                     now,
                     if selected.len() == 1 {
                         Some(selected[0])
@@ -438,7 +455,13 @@ fn full_group_statistics_keep_incomplete_members_and_original_order() {
         }
     }
     let mut out = [0.; 28];
-    super::market::trades(&mut out, rows.into_iter(), 23000, true);
+    super::market::trades(
+        &crate::exact::InputProjection::default(),
+        &mut out,
+        rows.into_iter(),
+        23000,
+        true,
+    );
     assert_eq!(out[0], signed_log_f32(&integer(3)));
     assert_eq!(out[1], -0.6);
     assert_eq!(out[2], -0.2);
@@ -483,8 +506,9 @@ fn same_frame_independent_ticks_and_exact_prefix_keep_unrounded_selection() {
     );
     let context = snapshot.public_rule_context(o.market.clone());
     let tail = static_rules(&context);
-    let r = rules_with_static(&o, 23000, &tail);
-    let later = rules_with_static(&o, 25000, &tail);
+    let projection = InputProjection::default();
+    let r = rules_with_static(&projection, &o, 23000, &tail);
+    let later = rules_with_static(&projection, &o, 25000, &tail);
     assert_eq!(&r[14..], &later[14..]);
     assert_ne!(&r[..14], &later[..14]);
     assert_eq!(r[0], signed_log_f32(&ratio(1, 100)));
@@ -712,7 +736,8 @@ fn encode(
     now: i64,
     h: &mut MarketHistory,
 ) -> [f32; 836] {
-    let (fast, books) = super::market::encode(o, rule, now, h);
+    let (fast, books) =
+        super::market::encode(&crate::exact::InputProjection::default(), o, rule, now, h);
     let starts = [57, 113, 175, 231, 293, 349];
     let mut out = [0.; 836];
     let mut target = 0;
@@ -834,7 +859,15 @@ fn incremental_inputs_keep_exact_best_dependencies_time_and_published_versions()
     let values = observations
         .iter()
         .enumerate()
-        .map(|(i, o)| super::market::encode(o, &[0.; 30], 33000 + i as i64, &mut history))
+        .map(|(i, o)| {
+            super::market::encode(
+                &crate::exact::InputProjection::default(),
+                o,
+                &[0.; 30],
+                33000 + i as i64,
+                &mut history,
+            )
+        })
         .collect::<Vec<_>>();
     assert_eq!(values[0].0[45], signed_log_f32(&integer(21)));
     assert_eq!(values[1].0[46], signed_log_f32(&integer(10)));

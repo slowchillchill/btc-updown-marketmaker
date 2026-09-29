@@ -11,6 +11,7 @@ fn template(
     read: &ActionBeforeReadV2,
     markets: &BTreeMap<String, MarketBinding>,
     now: i64,
+    projection: &InputProjection,
 ) -> Result<(), InputError> {
     if let (Some(condition), Some(token)) = (order.condition_id, order.token_id)
         && let Some(s) = markets
@@ -83,9 +84,10 @@ fn template(
             out[base + 13] = 1.;
         }
         linear_slot(out, base + 14, &price.mul(&integer(2)).sub(&integer(1)));
-        slot(out, base + 17, Known(target));
-        slot(out, base + 20, spend);
+        slot(projection, out, base + 17, Known(target));
+        slot(projection, out, base + 20, spend);
         slot(
+            projection,
             out,
             base + 47,
             expiry
@@ -102,23 +104,29 @@ fn template(
         }
     } else {
         out[base + 9] = 1.;
-        slot(out, base + 14, Unavailable);
-        slot(out, base + 17, Unavailable);
+        slot(projection, out, base + 14, Unavailable);
+        slot(projection, out, base + 17, Unavailable);
         if let Some(base_quantity) = order.base_quantity_applicability {
             out[base + 50] = 1.;
             out[base + 51] = 1.;
             if base_quantity {
                 out[base + 13] = 1.;
             } else {
-                slot(out, base + 20, Unavailable);
+                slot(projection, out, base + 20, Unavailable);
                 out[base + 53] = 1.;
             }
         }
         // 未知 GTD 子型仍不可判断到期适用性。
     }
     out[base + 52] = f32::from(order.base_quantity_applicability.is_some());
-    slot(out, base + 23, crate::values::read(&order.matched_shares));
     slot(
+        projection,
+        out,
+        base + 23,
+        crate::values::read(&order.matched_shares),
+    );
+    slot(
+        projection,
         out,
         base + 26,
         crate::values::read(&order.active_unfilled_shares),
@@ -130,6 +138,7 @@ fn template(
         .order_funds()
         .find(|f| f.order_identity == order.order_identity);
     slot(
+        projection,
         out,
         base + 29,
         funds
@@ -138,6 +147,7 @@ fn template(
             .unwrap_or(Unavailable),
     );
     slot(
+        projection,
         out,
         base + 32,
         funds
@@ -151,10 +161,9 @@ fn template(
     ] {
         out[index + 5] = 1.;
         if let Some((source, received)) = times(record) {
-            out[index] = signed_log_f32(&ratio(i128::from(now) - i128::from(source), 1000));
-            out[index + 1] = signed_log_f32(&ratio(i128::from(now) - i128::from(received), 1000));
-            out[index + 2] =
-                signed_log_f32(&ratio(i128::from(received) - i128::from(source), 1000));
+            out[index] = projection.project(i128::from(now) - i128::from(source));
+            out[index + 1] = projection.project(i128::from(now) - i128::from(received));
+            out[index + 2] = projection.project(i128::from(received) - i128::from(source));
             out[index + 3] = 1.;
             out[index + 4] = 1.;
         }
@@ -187,7 +196,13 @@ fn template(
             out[base + 60] = 1.;
         }
     }
-    time_slot(out, base + 62, Known(order.latest_cancel_feedback), now);
+    time_slot(
+        out,
+        base + 62,
+        Known(order.latest_cancel_feedback),
+        now,
+        projection,
+    );
     Ok(())
 }
 pub(crate) fn encode(
@@ -197,6 +212,7 @@ pub(crate) fn encode(
     old: &[ConditionId],
     markets: &BTreeMap<String, MarketBinding>,
     now: i64,
+    projection: &InputProjection,
 ) -> Result<Vec<Vec<f32>>, InputError> {
     let mut output = Vec::with_capacity(objects.len());
     for object in objects {
@@ -218,11 +234,12 @@ pub(crate) fn encode(
             166,
             read.cancellation_requests(Some(&object.request_scope())),
             now,
+            projection,
         );
         match object {
             CancelObjectReadV2::Single { order } => {
                 out[0] = 1.;
-                template(&mut out, 6, &order, read, markets, now)?;
+                template(&mut out, 6, &order, read, markets, now, projection)?;
             }
             CancelObjectReadV2::Paired { orders, .. } => {
                 out[1] = 1.;
@@ -239,6 +256,7 @@ pub(crate) fn encode(
                         read,
                         markets,
                         now,
+                        projection,
                     )?;
                 }
             }
@@ -265,12 +283,18 @@ pub(crate) fn encode(
                     }
                     if unknown_side {
                         for offset in [142, 148, 154, 160] {
-                            slot(&mut out, offset + s * 3, Unavailable);
+                            slot(projection, &mut out, offset + s * 3, Unavailable);
                         }
                         continue;
                     }
-                    slot(&mut out, 142 + s * 3, Known(integer(members.len())));
                     slot(
+                        projection,
+                        &mut out,
+                        142 + s * 3,
+                        Known(integer(members.len())),
+                    );
+                    slot(
+                        projection,
                         &mut out,
                         148 + s * 3,
                         sum(members
@@ -290,7 +314,12 @@ pub(crate) fn encode(
                                 })
                                 .unwrap_or(Unavailable)
                         }));
-                        slot(&mut out, 154 + usize::from(fee) * 6 + s * 3, total);
+                        slot(
+                            projection,
+                            &mut out,
+                            154 + usize::from(fee) * 6 + s * 3,
+                            total,
+                        );
                     }
                 }
             }

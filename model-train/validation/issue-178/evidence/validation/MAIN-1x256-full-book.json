@@ -1,0 +1,211 @@
+{
+  "context_frames": 1,
+  "decisions_executed": 6,
+  "final_sample": {
+    "action_batches_since_statistics": {
+      "1": 96
+    },
+    "action_block_calls_since_statistics": {
+      "action_ort": 42,
+      "action_torch": 42
+    },
+    "actual_frames_total": 7,
+    "allocator_mallinfo2": {
+      "arena": 203390976,
+      "fordblks": 6230304,
+      "fsmblks": 0,
+      "hblkhd": 8359936,
+      "hblks": 8,
+      "keepcost": 109200,
+      "ordblks": 1519,
+      "smblks": 0,
+      "uordblks": 197160672,
+      "usmblks": 0
+    },
+    "hidden_elements": [
+      0,
+      0
+    ],
+    "hidden_operations_since_statistics": [
+      3,
+      3
+    ],
+    "hidden_rows": [
+      0,
+      0
+    ],
+    "native_action_graph_calls_including_object_encoding": 48,
+    "native_action_steps_since_statistics": 51,
+    "native_held_z_elements": 0,
+    "native_hidden_elements": 0,
+    "native_hidden_operations_since_statistics": 3,
+    "native_hidden_rows": 0,
+    "native_state_calls_since_statistics": 7,
+    "object_encoding_calls_since_statistics": {
+      "objects_ort": 6,
+      "objects_torch": 6
+    },
+    "parameter_gru_calls": [
+      0,
+      0
+    ],
+    "rss_bytes": 434790400,
+    "state_batches_since_statistics": {
+      "1": 14
+    },
+    "state_calls_since_statistics": {
+      "state_ort": 7,
+      "state_torch": 7
+    }
+  },
+  "frames": 7,
+  "input_contract_version": "native_inputs_v6",
+  "provenance": {
+    "action_contract_version": "native_actions_v2",
+    "feature_schema_sha256": "93f8169e2ce558043d027dacbdfd61786262a6625280f6755d6a79b74b30c803",
+    "graphs": {
+      "target/current-graphs/MAIN-1x256/action_cancel.onnx": "ebb61cd864b3e7e2b56d356dab8196675b5d675dd5c6b734dee9713aec8aeb80",
+      "target/current-graphs/MAIN-1x256/action_cancel.onnx.data": "5486a8f2c76b0a75a4176910b3cfaa1f506775c3d9fb4028d2d88be1944cef49",
+      "target/current-graphs/MAIN-1x256/action_cancel_context.onnx": "c08feeaf6dcb75e810658fd0f6587ff91580bbf86424487bd66228d408409109",
+      "target/current-graphs/MAIN-1x256/action_cancel_context.onnx.data": "e62aa4ef168d37bdc2ecc47df45135eea3ed8533bbf894e444a91c4e94139e4d",
+      "target/current-graphs/MAIN-1x256/action_family.onnx": "229d5bee72a8a4fef59b347a2260bb2aa14375920359c5b69fd9baa7e760831b",
+      "target/current-graphs/MAIN-1x256/action_family.onnx.data": "a95e42ce9de963e89cf3885b7c778b79310b86679d597c01893d549b1034ed01",
+      "target/current-graphs/MAIN-1x256/action_objects.onnx": "006fb6c8c391bbb145bfd4768f6e87991cd805b6af7af6aebd7498be856b7cf8",
+      "target/current-graphs/MAIN-1x256/action_objects.onnx.data": "5b596731b596c6c050e021e6a0ce248776fbeec3f0f6a989ea90181bfa459b52",
+      "target/current-graphs/MAIN-1x256/action_price.onnx": "0f1715c5d66517479276d81149671166df77537c4435e86611d4a697a1780746",
+      "target/current-graphs/MAIN-1x256/action_price.onnx.data": "0d56b57b86e35ac6b4014e73df67da42759cfa8b30b3e7ab8e9402e8754c94b2",
+      "target/current-graphs/MAIN-1x256/action_quantity.onnx": "abdee0aa0ae126b42c5820857436c20d88078cc8aa25181a8540e59edd7399e5",
+      "target/current-graphs/MAIN-1x256/action_quantity.onnx.data": "b48781fe51a700d4d48613b8c11a5f97d8ccae0f9c14328d2ef2736095f536c0",
+      "target/current-graphs/MAIN-1x256/action_variant.onnx": "22a52f18cf3bb38d1a13fddc60e23f93168756282e0e6c03127ec5ff415705b0",
+      "target/current-graphs/MAIN-1x256/action_variant.onnx.data": "59c5304262b124adf319b78a16b645f3f208530b599f87d3dc85175eb221e39d",
+      "target/current-graphs/MAIN-1x256/initial_weights.pt": "57815c6606756e45ff6f432b07abdb34d41ba991db1e821a5098b30cb92e52f4",
+      "target/current-graphs/MAIN-1x256/state_encoder.onnx": "aaf1fc0abc1f7acc9c164d6de77d201c578b6c4139a3099f42d2f9b0296fa8b7",
+      "target/current-graphs/MAIN-1x256/state_encoder.onnx.data": "bf59313a513efbf11b2132a0ca1a44f20e4f0ce35ade13c738cc2b74bd3516c0"
+    },
+    "input_contract_version": "native_inputs_v6",
+    "input_parameters": {
+      "field": "initial public book bid/ask depth",
+      "generator": "random.Random",
+      "inclusive_range": [
+        100,
+        200
+      ],
+      "order": "Trade, Orphan, Rebate; then independent root index; repeat/config/thread reuse",
+      "seed": "742000+j"
+    },
+    "mapped_ort": {
+      "target/issue-176-performance/runtime/libonnxruntime.so.1.28.0": "aa4079d18f4ea7a5f3a94d80cd4bbe0f2740436626622d64d793803a20381083"
+    },
+    "native_extension_sha256": "deca638f62965c7b5ad8d1c023f000d5cf5e547a391a3e15f250e29c6a1c276f",
+    "native_module": "./model-train/.venv/lib/python3.13/site-packages/model_native_inputs/__init__.py",
+    "ort_sessions": {
+      "cpu_arena": true,
+      "execution": "SEQUENTIAL",
+      "inter_threads": 1,
+      "intra_threads": 1,
+      "memory_pattern": false,
+      "native_settings": "same explicit builder settings; CPU only",
+      "optimization": "ALL",
+      "providers": [
+        [
+          "CPUExecutionProvider"
+        ],
+        [
+          "CPUExecutionProvider"
+        ]
+      ],
+      "spinning": false
+    },
+    "pid": 1562393,
+    "python": "3.13.15 (main, Sep  1 2026, 14:18:08) [Clang 22.1.3 ]",
+    "python_module": "./model-train/model_train/continuous_validation.py",
+    "sources": {
+      "./model-train/model_train/__init__.py": "0f4e318e381b78f795298d4798c9d0c81e5131ecfb75aedd2ae977f19f3579f0",
+      "./model-train/model_train/actor.py": "c41ed1aa255ddd4a936073025857f994e70c28ae7dcafc5937471db58515b4e8",
+      "./model-train/model_train/actor_validation.py": "27c1d9c62e7b330710e3469e4a4f989b72121de8ea0a4bd918a3915030951be9",
+      "./model-train/model_train/benchmark_optimization.py": "f3f7c8df37fecb0fa035893966917bbaf605eb7cc0f5aadd48f0f9976988cc28",
+      "./model-train/model_train/benchmark_state.py": "44e7aab8db32439438b0abe5f83d3a4473a2808eba42f03316763b47c8448bf8",
+      "./model-train/model_train/book.py": "d4181144a17e102ce9fd604ce7c2e8ad9619cf1bd93d2b7c0ff795a74e7fb85c",
+      "./model-train/model_train/components.py": "548d4e6bcd58c221827ff63cd9d3156028c045078d74a71f6af329a76eb5c801",
+      "./model-train/model_train/continuous_validation.py": "b56bb870637d22d5b228026c632bb3a951dc8c39300e620845aa6703e00d4814",
+      "./model-train/model_train/graph_fixtures.py": "a91152e96a4b679c34e9ceb8f05fff53dd11439904deb0b1be815719ffe6e616",
+      "./model-train/model_train/graphs.py": "70ceba2b1618d93892c0958198a717082240887ddb3052bff735900731e45994",
+      "./model-train/model_train/input_validation.py": "3e78e73e67025db66496ec5291f2c607535c00bd26022dae67b3b1d974219f65",
+      "./model-train/model_train/measure_books.py": "4708a2748b2849838d68d33d5b8558a8e604da380aa1c9480d631b1d7dc9fe7e",
+      "./model-train/model_train/measure_padding.py": "38f08a515a70f88dd9cee1bdaa75d1b3f08b967c11769d363289a44450887111",
+      "./model-train/model_train/native_inputs.py": "a0126ede12599c7ead4cb158f0aa2877f0cd7a65df5f9f229d2449722926a507",
+      "./model-train/model_train/prepare_native_benchmark.py": "d6729a6b2c3bb544a9bfc2508bc3744ad3800218458357c3e0bb02767816f615",
+      "./model-train/model_train/probability_validation.py": "7dd5ce0b5bebd0f9de6ed8dbe9152abd393209a6ea1d2f61e0aba7ec1db461ff",
+      "./model-train/model_train/report_state_benchmarks.py": "c30d14f9526ee7aabc9d5eb7338b7a71dc965ee81cd8fd24f02eb861eff4defb",
+      "./model-train/model_train/select_native_benchmark.py": "c4fca2505effc9295e1d7383fe9ae81b67289a415f4916ef4ae2daa91a98b0b7",
+      "./model-train/model_train/validate_graphs.py": "00d5bf5990eb3576dc40ad2e045b196e011ded1b384651cc2c4401431e06dd38",
+      "./model-train/model_train/validate_replay_state.py": "1a78275b4d46fc74e06feb7881dbdc0ee45ccd1f62faf5710d142dc9ed0c7398",
+      "./model-train/model_train/validate_three_runtimes.py": "bb263e1d4e0aae0b2db0e922544a31e94c41cc2cd6caf001247033612dc5a7d5"
+    },
+    "threads": 1,
+    "versions": {
+      "numpy": "2.5.3",
+      "onnxruntime": "1.28.0",
+      "torch": "2.11.0+cpu"
+    }
+  },
+  "retire_operations": 1,
+  "side_lengths": [
+    [
+      0,
+      0,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      257,
+      7,
+      0,
+      0,
+      0,
+      0
+    ],
+    [
+      257,
+      7,
+      9,
+      6,
+      0,
+      0
+    ],
+    [
+      257,
+      7,
+      9,
+      6,
+      8,
+      7
+    ],
+    [
+      257,
+      7,
+      9,
+      6,
+      8,
+      7
+    ],
+    [
+      7,
+      1,
+      9,
+      6,
+      8,
+      7
+    ],
+    [
+      0,
+      0,
+      9,
+      6,
+      8,
+      7
+    ]
+  ]
+}

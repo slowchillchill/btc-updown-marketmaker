@@ -26,9 +26,9 @@ pub(crate) fn sum(values: impl IntoIterator<Item = Value>) -> Value {
     }
     Known(sum)
 }
-pub(crate) fn slot(out: &mut [f32], at: usize, value: Value) {
+pub(crate) fn slot(projection: &InputProjection, out: &mut [f32], at: usize, value: Value) {
     match value {
-        Known(v) => out[at..at + 3].copy_from_slice(&[signed_log_f32(&v), 1., 1.]),
+        Known(v) => out[at..at + 3].copy_from_slice(&[projection.log(&v), 1., 1.]),
         Unavailable => out[at..at + 3].copy_from_slice(&[0., 0., 1.]),
         NotApplicable => out[at..at + 3].fill(0.),
     }
@@ -95,15 +95,15 @@ pub(crate) fn time_slot(
     at: usize,
     record: ExecutionReadValueV1<Option<&::execution_normalization::NoeConsumedRecordRefV2>>,
     now: i64,
+    projection: &InputProjection,
 ) {
     match record {
         Known(Some(record)) => {
             out[at + 5] = 1.;
             if let Some((source, received)) = times(Some(record)) {
-                out[at] = signed_log_f32(&ratio(i128::from(now) - i128::from(source), 1000));
-                out[at + 1] = signed_log_f32(&ratio(i128::from(now) - i128::from(received), 1000));
-                out[at + 2] =
-                    signed_log_f32(&ratio(i128::from(received) - i128::from(source), 1000));
+                out[at] = projection.project(i128::from(now) - i128::from(source));
+                out[at + 1] = projection.project(i128::from(now) - i128::from(received));
+                out[at + 2] = projection.project(i128::from(received) - i128::from(source));
                 out[at + 3] = 1.;
                 out[at + 4] = 1.;
             }
@@ -117,12 +117,14 @@ pub(crate) fn request_block(
     at: usize,
     requests: shared_run::CancellationRequestsReadV1<'_>,
     now: i64,
+    projection: &InputProjection,
 ) {
     for (i, value) in std::iter::once(requests.pending_count)
         .chain(requests.response_counts)
         .enumerate()
     {
         slot(
+            projection,
             out,
             at + i * 3,
             match value {
@@ -132,7 +134,7 @@ pub(crate) fn request_block(
             },
         );
     }
-    time_slot(out, at + 12, requests.latest_response, now);
+    time_slot(out, at + 12, requests.latest_response, now, projection);
 }
 
 #[cfg(test)]
@@ -142,13 +144,13 @@ mod tests {
     #[test]
     fn slot_replaces_all_three_coordinates() {
         let mut out = [9.; 3];
-        slot(&mut out, 0, Known(integer(5)));
+        slot(&InputProjection::default(), &mut out, 0, Known(integer(5)));
         assert_eq!(out, [signed_log_f32(&integer(5)), 1., 1.]);
-        slot(&mut out, 0, Unavailable);
+        slot(&InputProjection::default(), &mut out, 0, Unavailable);
         assert_eq!(out, [0., 0., 1.]);
-        slot(&mut out, 0, NotApplicable);
+        slot(&InputProjection::default(), &mut out, 0, NotApplicable);
         assert_eq!(out, [0., 0., 0.]);
-        slot(&mut out, 0, Known(integer(0)));
+        slot(&InputProjection::default(), &mut out, 0, Known(integer(0)));
         assert_eq!(out, [0., 1., 1.]);
     }
 }

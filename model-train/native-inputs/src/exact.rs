@@ -6,6 +6,37 @@ use num_traits::{One, Signed, ToPrimitive, Zero};
 use rust_decimal::Decimal;
 use std::sync::OnceLock;
 
+type SharedProjection = std::sync::Arc<OnceLock<f32>>;
+
+/// 一次原生组构造内共享纯投影；精确毫秒差和规范有理数分别作为键。
+/// 不保存账户/市场业务状态；字段的单位、缺失位和来源时点仍由调用方保留。
+#[derive(Default)]
+pub(crate) struct InputProjection {
+    times: std::sync::Mutex<std::collections::HashMap<i128, SharedProjection>>,
+    values: std::sync::Mutex<std::collections::HashMap<(BigInt, BigInt), SharedProjection>>,
+}
+impl InputProjection {
+    pub(crate) fn project(&self, milliseconds: i128) -> f32 {
+        let value = self
+            .times
+            .lock()
+            .unwrap()
+            .entry(milliseconds)
+            .or_default()
+            .clone();
+        // 只同步同键的首次计算；不同精确值仍可并行，不持有整张表的锁计算。
+        *value.get_or_init(|| signed_log_f32(&ratio(milliseconds, 1000)))
+    }
+    pub(crate) fn log(&self, exact: &R) -> f32 {
+        if exact.is_zero() {
+            return 0.;
+        }
+        let key = (exact.numerator().clone(), exact.denominator().clone());
+        let value = self.values.lock().unwrap().entry(key).or_default().clone();
+        *value.get_or_init(|| signed_log_f32(exact))
+    }
+}
+
 pub(crate) fn ratio(n: impl Into<BigInt>, d: impl Into<BigInt>) -> R {
     R::ratio(n.into(), d.into())
 }
@@ -142,5 +173,63 @@ pub(crate) fn sqrt_log_f32(value: &R) -> f32 {
             return a;
         }
         bits *= 2;
+    }
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+    use rayon::prelude::*;
+
+    #[test]
+    fn shared_time_projection_preserves_signed_wide_differences_and_original_bits() {
+        let projection = InputProjection::default();
+        // 同低64位但不同精确差值不能串用；负来源年龄不能截为零。
+        let differences = [
+            0,
+            1,
+            -1,
+            17,
+            -17,
+            999,
+            1000,
+            1001,
+            i128::from(u64::MAX),
+            i128::from(u64::MAX) + 2,
+            -i128::from(u64::MAX),
+        ];
+        let expected: Vec<_> = differences
+            .iter()
+            .map(|&d| signed_log_f32(&ratio(d, 1000)).to_bits())
+            .collect();
+        for _ in 0..3 {
+            let actual: Vec<_> = differences
+                .par_iter()
+                .map(|&d| projection.project(d).to_bits())
+                .collect();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn shared_value_projection_keeps_denominators_signs_and_nonterminating_values() {
+        let projection = InputProjection::default();
+        let values = [
+            ratio(0, 1),
+            ratio(1, 2),
+            ratio(2, 4),
+            ratio(-1, 2),
+            ratio(1, 3),
+            ratio(25001, 50003),
+            ratio(1000, 1),
+        ];
+        let expected: Vec<_> = values.iter().map(|v| signed_log_f32(v).to_bits()).collect();
+        for _ in 0..3 {
+            let actual: Vec<_> = values
+                .par_iter()
+                .map(|v| projection.log(v).to_bits())
+                .collect();
+            assert_eq!(actual, expected);
+        }
     }
 }
