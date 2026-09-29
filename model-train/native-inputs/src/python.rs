@@ -243,6 +243,12 @@ impl PythonActor {
     fn prefix_features(&self) -> Vec<f32> {
         self.actor.prefix_features().to_vec()
     }
+    fn price_indices(&self) -> PyResult<Vec<i64>> {
+        self.actor.price_indices().map_err(error)
+    }
+    fn action_contract_version(&self) -> &'static str {
+        "native_actions_v2"
+    }
     fn price_fee_features(&self) -> PyResult<Vec<f32>> {
         self.actor.price_fee_features().map_err(error)
     }

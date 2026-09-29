@@ -1,0 +1,46 @@
+[
+  {
+    "config": "MAIN-1x256",
+    "command": [
+      "cargo",
+      "test",
+      "--manifest-path",
+      "model-train/native-inputs/Cargo.toml",
+      "--features",
+      "continuous-validation",
+      "--lib",
+      "--locked",
+      "--offline",
+      "continuous_real_population_probes",
+      "--",
+      "--ignored",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "started_utc": "2026-09-29T00:04:40.607237+00:00",
+    "exit_code": 0,
+    "log_sha256": "41ef5dc2e54ef0ba1a27dd5ef79cef31964bce3b927c7eb99f57ccd427372b73"
+  },
+  {
+    "config": "MAIN-30x1024",
+    "command": [
+      "cargo",
+      "test",
+      "--manifest-path",
+      "model-train/native-inputs/Cargo.toml",
+      "--features",
+      "continuous-validation",
+      "--lib",
+      "--locked",
+      "--offline",
+      "continuous_real_population_probes",
+      "--",
+      "--ignored",
+      "--nocapture",
+      "--test-threads=1"
+    ],
+    "started_utc": "2026-09-29T00:05:31.961023+00:00",
+    "exit_code": 0,
+    "log_sha256": "4ea7b65eaf855f2e02981d972a4dd133f76165eb6a45ae2cf6c8a7918864640c"
+  }
+]

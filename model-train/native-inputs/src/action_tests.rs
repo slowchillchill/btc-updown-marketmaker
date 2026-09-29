@@ -929,12 +929,8 @@ async fn same_process_cancel_actor_all_objects_and_original_identities() {
         }
     }
     assert_eq!(frame, traces.len());
-    let mut scorer = crate::ort_actor::OrtActorScorer {
-        #[cfg(feature = "continuous-validation")]
-        measurement: (0, None),
-        session: session("action_decoder.onnx"),
-        hidden,
-    };
+    let mut scorer =
+        crate::ort_actor::OrtActorScorer::new(std::path::Path::new(&directory), hidden, 1).unwrap();
     let mut single = NativeActor::new(g.clone(), 0).unwrap();
     single.choose(3).unwrap();
     let family = NativeActor::new(g.clone(), 0).unwrap();
@@ -942,9 +938,9 @@ async fn same_process_cancel_actor_all_objects_and_original_identities() {
     paired.choose(4).unwrap();
     let reduced = scorer.reduced(&family, &z).unwrap();
     let rows = [
-        (&single, z.as_slice(), reduced.as_slice()),
-        (&family, z.as_slice(), reduced.as_slice()),
-        (&paired, z.as_slice(), reduced.as_slice()),
+        (&single, z.as_slice(), &reduced),
+        (&family, z.as_slice(), &reduced),
+        (&paired, z.as_slice(), &reduced),
     ];
     #[cfg(feature = "continuous-validation")]
     {
@@ -952,10 +948,11 @@ async fn same_process_cancel_actor_all_objects_and_original_identities() {
     }
     let batch = scorer.scores_batch(&rows).unwrap();
     #[cfg(feature = "continuous-validation")]
-    assert_eq!(
-        scorer.measurement,
-        (2, Some(vec![vec![256, 256, 256], vec![3, 3]]))
-    );
+    {
+        assert_eq!(scorer.calls.get("objects"), Some(&2)); // 决定准备后的混合头不重编码。
+        assert_eq!(scorer.calls.get("cancel_context"), Some(&1));
+        assert_eq!(scorer.calls.get("cancel"), Some(&4)); // 两个完整259人口各两块。
+    }
     for (row, actual) in rows.iter().zip(batch) {
         let expected = scorer.scores(row.0, row.1, row.2).unwrap();
         assert_eq!(actual.len(), expected.len());
@@ -982,7 +979,7 @@ async fn same_process_cancel_actor_all_objects_and_original_identities() {
             for (&a, &b) in got.iter().zip(&want) {
                 assert!(finite_close(a, b));
             }
-            if actor.head_index() == 7 {
+            if actor.head_index() == 5 {
                 assert_eq!(got.len(), 259);
                 let mut best = None;
                 for (i, (&legal, &value)) in support.iter().zip(&got).enumerate() {

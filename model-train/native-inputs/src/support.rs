@@ -21,13 +21,18 @@ fn index(leg: Leg) -> usize {
 fn leg(i: usize) -> Leg {
     if i == 0 { Leg::A } else { Leg::B }
 }
-fn variants() -> [Variant; 4] {
-    [
-        Variant::GtcLimit,
-        Variant::GtdLimit,
-        Variant::FokMarket,
-        Variant::FakMarket,
-    ]
+fn variants() -> [Variant; 2] {
+    [Variant::GtcLimit, Variant::FokMarket]
+}
+/// 固定分段号，不对非空段重新编号。
+pub fn quantity_segment(q: &QuantityInterval, j: usize) -> Option<(BigUint, BigUint)> {
+    if j >= 16 {
+        return None;
+    }
+    let m = &q.hi - &q.lo + 1u32;
+    let lo = &q.lo + &m * j / 16usize;
+    let end = &q.lo + &m * (j + 1) / 16usize;
+    (lo < end).then(|| (lo, end - 1u32))
 }
 fn families() -> [Family; 6] {
     [
@@ -39,14 +44,6 @@ fn families() -> [Family; 6] {
         Family::CancelMarketOrders,
     ]
 }
-fn lifetimes() -> [Lifetime; 3] {
-    [
-        Lifetime::Seconds180,
-        Lifetime::Seconds240,
-        Lifetime::Seconds300,
-    ]
-}
-
 /// 只持有原组，金额和身份不传给 Python 重建；选择路径用于原条件概率重算。
 pub struct NativeActor {
     pub group: Arc<NativeInputGroup>,
@@ -58,10 +55,11 @@ pub struct NativeActor {
 }
 impl NativeActor {
     pub fn new(group: Arc<NativeInputGroup>, row: usize) -> Result<Self, InputError> {
-        group.rows[row]
+        let context = group.rows[row]
             .action_context
             .as_ref()
             .ok_or(InputError::MissingAssociation)?;
+        context.validate_ticks()?;
         Ok(Self {
             group,
             row,
@@ -118,16 +116,14 @@ impl NativeActor {
             Stage::Family => 0,
             Stage::QuantityBranch => 1,
             Stage::Variant(_) => 2,
-            Stage::PostOnly(_) => 4,
-            Stage::Expiry(_) => 5,
             Stage::Price(_) => 3,
-            Stage::CancelObject => 7,
+            Stage::CancelObject => 5,
         }
     }
     pub fn is_complete(&self) -> bool {
         self.done
     }
-    pub fn prefix_features(&self) -> [f32; 60] {
+    pub fn prefix_features(&self) -> [f32; 36] {
         self.context().prefix_features(&self.state)
     }
     fn context(&self) -> &NativeActionContext {
@@ -200,7 +196,7 @@ impl NativeActor {
             .ok_or(InputError::MissingAssociation)?;
         Ok(floor_positive(&t.mul(&integer(10_000)))
             .to_u32()
-            .expect("六档合法tick"))
+            .expect("两档合法 tick"))
     }
     fn tick(&self, i: usize) -> Result<ExactDecimal, InputError> {
         Ok(ExactDecimal(
@@ -210,7 +206,7 @@ impl NativeActor {
         ))
     }
     fn max_price(&self, i: usize) -> Result<u16, InputError> {
-        Ok((10_000 / self.tick_units(i)? - 1).min(9999) as u16)
+        Ok((10_000 / self.tick_units(i)? - 1).min(999) as u16)
     }
     fn buy_enabled(&self) -> bool {
         self.context().buy_enabled
@@ -252,7 +248,8 @@ impl NativeActor {
             return Ok(false);
         }
         // 数量选择早于属性：上界已满足本金、编码和单腿cap，
-        // 任一正整数均有最低tick、post-only GTC完整续项。
+        // 逐腿最低 tick 本金小于 1 pUSD 时普通 GTC 无即时费用；
+        // 达门槛时 FOK 提供本金续项，两腿允许混合类型。
         if state.legs.iter().all(|s| s.variant.is_none()) {
             return Ok(true);
         }
@@ -310,8 +307,7 @@ impl NativeActor {
             if k < &min_k || k > &BigUint::from(self.max_price(i)?) {
                 continue;
             }
-            // 尚未选择post-only时true是该属性集合的零费最小成本见证。
-            let (p, f) = self.cost(n, i, k.to_u16().unwrap(), v, s.post_only.unwrap_or(true))?;
+            let (p, f) = self.cost(n, i, k.to_u16().unwrap(), v, false)?;
             let cost = p + f * 10u32;
             best = Some(best.map_or(cost.clone(), |old: BigUint| old.min(cost)));
         }
@@ -347,10 +343,9 @@ impl NativeActor {
         }
         match self.state.stage {
             Stage::Family => 6,
-            Stage::QuantityBranch | Stage::PostOnly(_) => 2,
-            Stage::Variant(_) => 4,
-            Stage::Expiry(_) => 3,
-            Stage::Price(_) => 9999,
+            Stage::QuantityBranch => 16,
+            Stage::Variant(_) => 2,
+            Stage::Price(_) => 999,
             Stage::CancelObject => self.group.cancel_intents.len(),
         }
     }
@@ -380,13 +375,14 @@ impl NativeActor {
             }
             Stage::QuantityBranch => {
                 let q = self.state.interval.as_ref().unwrap();
-                let mid = (&q.lo + &q.hi) / 2u32;
-                if choice == 0 {
-                    self.has_completion(&q.lo, &mid, &self.state)
-                } else {
-                    self.has_completion(&(mid + 1u32), &q.hi, &self.state)
+                match quantity_segment(q, choice) {
+                    Some((lo, hi)) => self.has_completion(&lo, &hi, &self.state),
+                    None => Ok(false),
                 }
             }
+            Stage::Price(_) => Ok(self
+                .price_range()?
+                .is_some_and(|(lo, hi)| usize::from(lo - 1) <= choice && choice < usize::from(hi))),
             Stage::CancelObject => Ok(Self::cancel_matches(
                 self.state.family.unwrap(),
                 &self.group.cancel_intents[choice],
@@ -399,6 +395,13 @@ impl NativeActor {
         }
     }
     pub fn support(&self) -> Result<Vec<bool>, InputError> {
+        if !self.done && matches!(self.state.stage, Stage::Price(_)) {
+            let mut mask = vec![false; 999];
+            if let Some((lo, hi)) = self.price_range()? {
+                mask[usize::from(lo - 1)..usize::from(hi)].fill(true);
+            }
+            return Ok(mask);
+        }
         if !self.done && self.state.stage == Stage::Family {
             let mut mask = vec![
                 true,
@@ -425,9 +428,10 @@ impl NativeActor {
     }
     fn set_parameter(s: &mut PrefixState, k: usize) {
         match s.stage {
-            Stage::Variant(l) => s.legs[index(l)].variant = Some(variants()[k]),
-            Stage::PostOnly(l) => s.legs[index(l)].post_only = Some(k == 1),
-            Stage::Expiry(l) => s.legs[index(l)].lifetime = Some(lifetimes()[k]),
+            Stage::Variant(l) => {
+                s.legs[index(l)].variant = Some(variants()[k]);
+                s.legs[index(l)].post_only = Some(false);
+            }
             Stage::Price(l) => s.legs[index(l)].price_index = Some(BigUint::from(k + 1)),
             _ => unreachable!(),
         }
@@ -471,34 +475,12 @@ impl NativeActor {
             }
             Stage::QuantityBranch => {
                 let q = self.state.interval.as_mut().unwrap();
-                let mid = (&q.lo + &q.hi) / 2u32;
-                if choice == 0 {
-                    q.hi = mid;
-                } else {
-                    q.lo = mid + 1u32;
-                }
+                let (lo, hi) = quantity_segment(q, choice).unwrap();
+                q.lo = lo;
+                q.hi = hi;
                 self.close_quantity();
             }
             Stage::Variant(l) => {
-                Self::set_parameter(&mut self.state, choice);
-                if matches!(
-                    self.state.legs[index(l)].variant,
-                    Some(Variant::GtcLimit | Variant::GtdLimit)
-                ) {
-                    self.state.stage = Stage::PostOnly(l)
-                } else {
-                    self.next_attributes(index(l))
-                }
-            }
-            Stage::PostOnly(l) => {
-                Self::set_parameter(&mut self.state, choice);
-                if self.state.legs[index(l)].variant == Some(Variant::GtdLimit) {
-                    self.state.stage = Stage::Expiry(l)
-                } else {
-                    self.next_attributes(index(l))
-                }
-            }
-            Stage::Expiry(l) => {
                 Self::set_parameter(&mut self.state, choice);
                 self.next_attributes(index(l));
             }
@@ -524,33 +506,85 @@ impl NativeActor {
             self.state.stage = Stage::Variant(leg(self.sides(&self.state)[0]));
         }
     }
+    /// 当前腿的连续合法价格区间；精确费用二分，不逐档重跑完成性。
+    pub fn price_range(&self) -> Result<Option<(u16, u16)>, InputError> {
+        let Stage::Price(l) = self.state.stage else {
+            return Ok(None);
+        };
+        let i = index(l);
+        let n = self.state.quantity_hundredths.as_ref().unwrap();
+        let mut remaining = self.cash_micro();
+        for other in self.sides(&self.state).into_iter().filter(|&j| j != i) {
+            let Some(cost) = self.min_cost(n, other, &self.state.legs[other])? else {
+                return Ok(None);
+            };
+            if cost > remaining {
+                return Ok(None);
+            }
+            remaining -= cost;
+        }
+        let variant = self.state.legs[i].variant.unwrap();
+        let unit = n * self.tick_units(i)?;
+        let max = BigUint::from(self.max_price(i)?)
+            .min(&remaining / &unit)
+            .to_u16()
+            .unwrap();
+        if variant == Variant::FokMarket {
+            let minimum = floor_positive(
+                &decimal(&self.context().rules.market_buy_min_spend_pusd).mul(&integer(1_000_000)),
+            );
+            let min = minimum.div_ceil(&unit).max(BigUint::one());
+            return Ok((min <= BigUint::from(max)).then(|| (min.to_u16().unwrap(), max)));
+        }
+        let mut lo = 0u16;
+        let mut hi = max;
+        while lo < hi {
+            let k = lo + (hi - lo).div_ceil(2);
+            let (p, fee) = self.cost(n, i, k, Variant::GtcLimit, false)?;
+            if p + fee * 10u32 <= remaining {
+                lo = k;
+            } else {
+                hi = k - 1;
+            }
+        }
+        Ok((lo > 0).then_some((1, lo)))
+    }
+    pub fn price_indices(&self) -> Result<Vec<i64>, InputError> {
+        use std::sync::OnceLock;
+        static CENT: OnceLock<Vec<i64>> = OnceLock::new();
+        static MILLI: OnceLock<Vec<i64>> = OnceLock::new();
+        let Some((lo, hi)) = self.price_range()? else {
+            return Ok(Vec::new());
+        };
+        let Stage::Price(l) = self.state.stage else {
+            unreachable!()
+        };
+        let grid = if self.tick_units(index(l))? == 100 {
+            CENT.get_or_init(|| (0..99).collect())
+        } else {
+            MILLI.get_or_init(|| (0..999).collect())
+        };
+        Ok(grid[usize::from(lo - 1)..usize::from(hi)].to_vec())
+    }
     pub fn price_fee_features(&self) -> Result<Vec<f32>, InputError> {
-        let mut out = vec![0.; 9999];
+        let indices = self.price_indices()?;
+        let mut out = vec![0.; indices.len()];
         let Stage::Price(l) = self.state.stage else {
             return Ok(out);
         };
         let i = index(l);
-        if !matches!(
-            self.state.legs[i].variant,
-            Some(Variant::FokMarket | Variant::FakMarket)
-        ) {
+        if self.state.legs[i].variant != Some(Variant::FokMarket) {
             return Ok(out);
         }
         let n = self.state.quantity_hundredths.as_ref().unwrap();
-        let minimum = floor_positive(
-            &decimal(&self.context().rules.market_buy_min_spend_pusd).mul(&integer(1_000_000)),
-        );
-        for k in 1..=self.max_price(i)? {
-            if n * (u32::from(k) * self.tick_units(i)?) < minimum {
-                continue;
-            }
+        for (&coordinate, value) in indices.iter().zip(&mut out) {
             let fee = self
                 .context()
                 .snapshot
-                .market_buy_fee_estimate_v1(n, k, &self.tick(i)?)
+                .market_buy_fee_estimate_v1(n, (coordinate + 1) as u16, &self.tick(i)?)
                 .map_err(InputError::Fee)?
                 .fee_1e5_units;
-            out[usize::from(k) - 1] = signed_log_f32(&ratio(BigInt::from(fee), 100_000));
+            *value = signed_log_f32(&ratio(BigInt::from(fee), 100_000));
         }
         Ok(out)
     }

@@ -86,10 +86,33 @@ fn state(
         })
         .collect::<ort::Result<_>>()?)
 }
-// 参数调用只收到本进程计算的 z/reduced，永远不接收或更新隐藏状态。
+struct Actions {
+    objects: Session,
+    family: Session,
+    quantity: Session,
+    variant: Session,
+    price: Session,
+    context: Session,
+    cancel: Session,
+}
+impl Actions {
+    fn load(directory: &Path, threads: usize) -> Result<Self> {
+        let open = |name| session(&directory.join(format!("action_{name}.onnx")), threads);
+        Ok(Self {
+            objects: open("objects")?,
+            family: open("family")?,
+            quantity: open("quantity")?,
+            variant: open("variant")?,
+            price: open("price")?,
+            context: open("cancel_context")?,
+            cancel: open("cancel")?,
+        })
+    }
+}
+// 纯图验证参考：显式调用全部新策略分图，生产 Actor 只调用当前阶段。
 #[allow(clippy::too_many_arguments)]
 fn action(
-    session: &mut Session,
+    session: &mut Actions,
     batch: usize,
     hidden: usize,
     slots: usize,
@@ -101,31 +124,30 @@ fn action(
     reduced: &[f32],
     exists: &[bool],
 ) -> Result<Vec<Vec<f32>>> {
-    let outputs = session.run(ort::inputs![
-        "z_t" => tensor(&[batch,hidden], z)?, "rule_features" => tensor(&[batch,30],rule)?,
-        "prefix_features" => tensor(&[batch,60],prefix)?, "cancel_features" => tensor(&[batch,slots,184],objects)?,
-        "cancel_mask" => Tensor::from_array(([batch,slots],mask.to_vec()))?,
-        "cancel_reduced" => tensor(&[batch,3*hidden/2],reduced)?,
-        "cancel_exists" => Tensor::from_array(([batch],exists.to_vec()))?,
-        "price_fee_features" => tensor(&[batch,9999], &vec![0.;batch*9999])?
-    ])?;
-    Ok([
-        "family_logits",
-        "quantity_branch_logits",
-        "buy_variant_logits",
-        "price_logits",
-        "post_only_logits",
-        "expiry_logits",
-        "cancel_embeddings",
-        "cancel_logits",
-    ]
-    .iter()
-    .map(|name| {
-        outputs[*name]
-            .try_extract_tensor::<f32>()
-            .map(|(_, v)| v.to_vec())
-    })
-    .collect::<ort::Result<_>>()?)
+    let encoded=session.objects.run(ort::inputs!["cancel_features"=>tensor(&[batch,slots,184],objects)?,"cancel_mask"=>Tensor::from_array(([batch,slots],mask.to_vec()))?])?["cancel_embeddings"].try_extract_tensor::<f32>()?.1.to_vec();
+    let output=session.family.run(ort::inputs!["z_t"=>tensor(&[batch,hidden],z)?,"rule_features"=>tensor(&[batch,30],rule)?,"cancel_reduced"=>tensor(&[batch,3*hidden/2],reduced)?,"cancel_exists"=>Tensor::from_array(([batch],exists.to_vec()))?])?;
+    let family = output["family_logits"]
+        .try_extract_tensor::<f32>()?
+        .1
+        .to_vec();
+    let context = output["rule_context"]
+        .try_extract_tensor::<f32>()?
+        .1
+        .to_vec();
+    drop(output);
+    let mut result = vec![family];
+    for (graph, name) in [
+        (&mut session.quantity, "quantity_branch_logits"),
+        (&mut session.variant, "buy_variant_logits"),
+    ] {
+        result.push(graph.run(ort::inputs!["z_t"=>tensor(&[batch,hidden],z)?,"rule_context"=>tensor(&[batch,hidden/2],&context)?,"prefix_features"=>tensor(&[batch,36],prefix)?])?[name].try_extract_tensor::<f32>()?.1.to_vec());
+    }
+    result.push(session.price.run(ort::inputs!["z_t"=>tensor(&[batch,hidden],z)?,"rule_context"=>tensor(&[batch,hidden/2],&context)?,"prefix_features"=>tensor(&[batch,36],prefix)?,"price_indices"=>Tensor::from_array(([999],(0..999i64).collect::<Vec<_>>()))?,"price_fee_features"=>tensor(&[batch,999],&vec![0.;batch*999])?])?["price_logits"].try_extract_tensor::<f32>()?.1.to_vec());
+    let decoder=session.context.run(ort::inputs!["z_t"=>tensor(&[batch,hidden],z)?,"rule_context"=>tensor(&[batch,hidden/2],&context)?,"prefix_features"=>tensor(&[batch,36],prefix)?])?["decoder_context"].try_extract_tensor::<f32>()?.1.to_vec();
+    let cancel=session.cancel.run(ort::inputs!["decoder_context"=>tensor(&[batch,hidden/2],&decoder)?,"cancel_embeddings"=>tensor(&[batch,slots,hidden/2],&encoded)?,"cancel_mask"=>Tensor::from_array(([batch,slots],mask.to_vec()))?])?["cancel_logits"].try_extract_tensor::<f32>()?.1.to_vec();
+    result.push(encoded);
+    result.push(cancel);
+    Ok(result)
 }
 fn rows<T: Clone>(data: &[T], width: usize, selected: &[usize]) -> Vec<T> {
     selected
@@ -166,7 +188,7 @@ fn selected(scores: &[f32], indices: &[usize]) -> Vec<f32> {
     vec![indices[best] as f32]
 }
 fn encode_reduce(
-    session: &mut Session,
+    session: &mut Actions,
     c: &Case,
     hidden: usize,
     z: &[f32],
@@ -198,7 +220,7 @@ fn encode_reduce(
         let mut embeddings = Vec::new();
         for row in 0..c.batch {
             for j in 0..length {
-                let embedding = &result[6][(row * k + j) * d..(row * k + j + 1) * d];
+                let embedding = &result[4][(row * k + j) * d..(row * k + j + 1) * d];
                 embeddings.extend_from_slice(embedding);
                 if mask[row * k + j] {
                     counts[row] += 1;
@@ -237,7 +259,7 @@ fn encode_reduce(
     Ok((reduced, exists))
 }
 fn object_case(
-    session: &mut Session,
+    session: &mut Actions,
     c: &Case,
     hidden: usize,
     z: &[f32],
@@ -262,10 +284,10 @@ fn object_case(
             )?,
         )?;
         for family in 0..3 {
-            let mut prefix = vec![0.; c.batch * 60];
+            let mut prefix = vec![0.; c.batch * 36];
             for row in 0..c.batch {
-                for j in [family + 3, 6, 13] {
-                    prefix[row * 60 + j] = 1.;
+                for j in [family + 3, 6, 11] {
+                    prefix[row * 36 + j] = 1.;
                 }
             }
             let mut scores = vec![Vec::new(); c.batch];
@@ -280,7 +302,7 @@ fn object_case(
                 for row in 0..c.batch {
                     for j in 0..length {
                         if mask[row * k + j] {
-                            scores[row].push(result[7][row * k + j]);
+                            scores[row].push(result[5][row * k + j]);
                             indices[row].push(offset + j);
                         }
                     }
@@ -353,7 +375,7 @@ fn native_operations(
 }
 fn native_state(
     session: &mut Session,
-    actions: &mut Session,
+    actions: &mut Actions,
     path: &Path,
     out: &mut impl Write,
 ) -> Result<()> {
@@ -447,7 +469,7 @@ fn native_state(
             for (p, prefix) in row.fixture_prefixes.iter().enumerate() {
                 let mut offset = 0;
                 for (part, &length) in lengths.iter().enumerate() {
-                    if part > 0 && prefix[13] != 1. {
+                    if part > 0 && prefix[11] != 1. {
                         break;
                     }
                     let k = if empty { 1 } else { 256 };
@@ -465,15 +487,20 @@ fn native_state(
                         &reduced,
                         &exists,
                     )?;
-                    let stage = prefix[7..14]
+                    let stage = prefix[7..12]
                         .iter()
                         .position(|v| *v == 1.)
                         .expect("fixture stage");
-                    let head = [0, 1, 2, 4, 5, 3, 7][stage];
+                    let head = [0, 1, 2, 3, 5][stage];
+                    let selected = if head == 5 {
+                        values[head][..length].to_vec()
+                    } else {
+                        values[head].clone()
+                    };
                     emit(
                         out,
                         &format!("{}/prefix{p}/part{part}", c.name),
-                        &[values[head].clone()],
+                        &[selected],
                     )?;
                     offset += length;
                 }
@@ -499,7 +526,7 @@ fn main() -> Result<()> {
     ort::init_from(&library)?.commit();
     let threads: usize = args[3].parse()?;
     let mut state_session = session(&Path::new(&args[2]).join("state_encoder.onnx"), threads)?;
-    let mut action_session = session(&Path::new(&args[2]).join("action_decoder.onnx"), threads)?;
+    let mut action_session = Actions::load(Path::new(&args[2]), threads)?;
 
     let mut out = BufWriter::new(std::io::stdout().lock());
     writeln!(
@@ -557,7 +584,7 @@ fn main() -> Result<()> {
                         c.slots,
                         &rows(z, suite.hidden, &selected_rows),
                         &rows(&c.rule, 30, &selected_rows),
-                        &rows(prefix, 60, &selected_rows),
+                        &rows(prefix, 36, &selected_rows),
                         &rows(&c.objects, c.slots * 184, &selected_rows),
                         &rows(&c.mask, c.slots, &selected_rows),
                         &rows(&zero, 3 * suite.hidden / 2, &selected_rows),

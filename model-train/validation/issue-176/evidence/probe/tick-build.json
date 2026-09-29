@@ -1,0 +1,21 @@
+{
+  "command": [
+    "cargo",
+    "test",
+    "--manifest-path",
+    "model-train/native-inputs/Cargo.toml",
+    "--release",
+    "--lib",
+    "--locked",
+    "--offline",
+    "--no-run",
+    "--message-format=json",
+    "tick_grid_transition_support_measurement"
+  ],
+  "source_commit": "73c328fe359165b426fe394111d21dd3ea09bdd9",
+  "started_utc": "2026-09-29T00:07:23.577002+00:00",
+  "exit_code": 0,
+  "binary": "target/issue-176-build/release/deps/model_native_inputs-349efcab0e7f74d9",
+  "binary_sha256": "c142748e7d41752eae40b0f2678864a474299e21ec0ea4a522f7885a8cf9f462",
+  "completed_utc": "2026-09-29T00:07:51.839815+00:00"
+}

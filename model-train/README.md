@@ -1,8 +1,8 @@
-# model-train 纯计算组件与两图
+# model-train 状态与动作组件
 
-## 全档盘口执行与性能复跑
+## 全档盘口执行与历史性能复跑
 
-`native_inputs_v5` 五输入、六侧顺序和全部有效档位保持。盘口图先按 PM 四侧／Binance 两侧的
+当前状态数学沿用 `native_inputs_v5` 的五输入、六侧顺序和全部有效档位；接口版本为下文 `native_inputs_v6`。盘口图先按 PM 四侧／Binance 两侧的
 布尔掩码收集有效行，分别经过原两组 `9→32→32` 权重，再散回原位置。
 sum／mean／max 仍沿原坐标计算；内部空洞、补齐和空侧不改变相邻配对树及并列 max 的首项梯度。
 `BookLinear` 将乘积的逻辑布局改为 `[行, 输入, 输出]`，使 ONNX／ORT 的连续末轴承载输出通道，
@@ -91,14 +91,14 @@ OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python -m model_train.validate_rep
 SIM的有限显式暂失败场景经原输入日志配置，在订单仍有余量且未产生效果时命中；命中记录同原输入组，
 重放仍执行原输入与场景条件。没有故障概率、固定冷却、最短挂单时间或自动补撤。
 
-当前输入合同为 `native_inputs_v5`，具体布局与SHA来源为 `native-inputs/feature_schema.json`。
+当前输入合同为 `native_inputs_v6`、动作合同为 `native_actions_v2`，具体布局与SHA来源为 `native-inputs/feature_schema.json`。
 `export_metadata.json` 与连续验收来源信息同时记录该版本和 schema SHA。412—414新增
 `ActionBeforeReadV2::pending_noe_record_count()` 的原三态计数编码：已领取且因依赖未满足而尚待
 Ledger应用的适用原记录数。零不证明未来事实已齐；它不是金额、缺序号数量或禁单条件。
 实到NOE引用先进入共享观察，经济应用仍保留原引用和真实前驱条件；正常经济等待不会隐去合法模型组。
 已知现金只描述本地已提交经济前缀与原身份预留，不重复扣待应用差额。
 新增账户415—432为全局请求块；撤单184含两个68槽订单模板、24槽Market及18槽候选请求块。
-四态适用性、可撤性、最新逐目标结果与T6独立编码；原账户0—414及30/60参数布局保持；v5市场布局见下文。
+四态适用性、可撤性、最新逐目标结果与T6独立编码；原账户0—414及规则30保持；前缀36及动作范围见下文，状态数学沿用v5。
 当前可BUY未结算市场的修复缺口按唯一成交事实中已公开FinalSuccess实际份额求差，再扣原非终态承诺；
 164—175与Actor复用同一冻结投影。122—163的成功经济池、本金、配对和NAV仍要求经济应用完成。
 新版短验证和完整C/P使用独立433/184图；旧412或415图结果不作为新版验收通过证据。
@@ -111,12 +111,34 @@ Ledger应用的适用原记录数。零不证明未来事实已齐；它不是�
 最终特征索引见 [#6](https://github.com/slowchillchill/btc-updown-marketmaker/issues/6) 正文及[正式续篇3](https://github.com/slowchillchill/btc-updown-marketmaker/issues/6#issuecomment-5747531067)。
 
 状态图输入为 `fast[B,596]`、`slow[B,433]`、`book_levels[B,6,N,9]`、`book_mask[B,6,N]`、`h_prev[L,B,H]`，返回 `z_t` 与全部层 `h_next`。
-参数图输入规则30维、前缀60维、对象184维、布尔掩码、全局归约及 `price_fee_features[B,9999]`，返回六个固定头和逐对象表示/分数。
-参数图无 GRU，不改变隐藏状态；价格轴9999，数量分支2，变体4，post_only 2，有效期3，动作族6。
+当前动作域由 [#176](https://github.com/slowchillchill/btc-updown-marketmaker/issues/176) 修订。新 BUY 每腿仅普通 GTC/FOK，GTC 显式 `post_only=false`；公共订单类型与历史订单撤销仍完整保留。初始/动态 tick 唯一来自原事件链，仅支持0.01、0.001；范围外真实值返回明确错误并停止受影响模型运行，原始事实不改写。旧动作权重、轨迹和两图产物不重标。
+
+双腿价格在同一冻结决定中依次解码，只用于联合资金约束；中间不推进环境、GRU或账户，也不提交任何一腿。两腿全部确定后一次形成 `SubmitPairedBuy`，交原批量提交入口。
+
+前缀36的唯一布局见 `native-inputs/feature_schema.json`。顺序为族→16路数量→各腿类型→各腿价格；动作路径保存实际全局选择：族0—5、数量固定分段号0—15、类型0=GTC/1=FOK、价格k−1、撤单原人口索引。唯一合法项仍记录并推进，评分前跳过神经调用且不消耗随机数，日志概率/熵贡献为零。
+
+| 物理图 | 输入 → 输出 |
+| --- | --- |
+| state_encoder.onnx | 原五输入 → z_t、h_next |
+| action_objects.onnx | cancel_features[B,K,184]、cancel_mask[B,K] → cancel_embeddings[B,K,H/2] |
+| action_family.onnx | z_t、rule_features[B,30]、cancel_reduced[B,3H/2]、cancel_exists[B] → family_logits[B,6]、rule_context[B,H/2] |
+| action_quantity.onnx | z_t、rule_context、prefix_features[B,36] → quantity_branch_logits[B,16] |
+| action_variant.onnx | 同上 → buy_variant_logits[B,2] |
+| action_price.onnx | 同上、price_indices[P]、price_fee_features[B,P] → price_logits[B,P] |
+| action_cancel_context.onnx | z_t、rule_context、prefix_features → decoder_context[B,H/2] |
+| action_cancel.onnx | decoder_context、cancel_embeddings、cancel_mask → cancel_logits[B,K] |
+
+八图来自同一套参数，opset18、float32；每决定编码全部对象并按原顺序 f64 sum/mean/max 归约，family 编码规则一次，其他阶段复用 rule_context。撤单 decoder 只计算一次，缓存对象参与完整人口评分。共享张量保留 autograd，不跨决定或参数更新复用，不覆盖旧帧存储。
+
+价格静态网格按实际两档 tick 懒初始化复用；合法动态区间由原生精确本金/费用/其他腿预算决定。`price_indices` 是严格递增 int64 原坐标k−1，P≤999；先取权重行再矩阵乘法。只把同合法区间合批并保持原行映射，不评分非法填充。局部选择映回原坐标后才能提交 NativeActor，费用与概率重算使用相同映射。
+
+数量闭区间长度m，以j=0..15划分为 `[lo+floor(j*m/16),lo+floor((j+1)*m/16)-1]`。空段及无合法续项段掩码，保留全部合法整数及精确编码域；不加平台mos模型门。普通GTC预留本金与精确最大即时费用，FOK沿原本金准入/预留。未选类型的完成性可逐腿取最低tick：本金小于1 pUSD时普通GTC无即时费用，达到门槛时FOK提供本金续项；允许混合类型。
+
+训练重算沿实际条件路径累加日志概率。`conditional_entropy_sum` 只是访问路径节点熵和；完整联合熵预算按独立完整动作样本 ell，报告 `-0.5*ell`，替代梯度 `0.5*stop_gradient(ell+1)*ell`。本次只验证概率、梯度和接口，不实现正式 PPO 训练器。
 
 四配置及初始化种子固定为 `BASELINE-1x256:741001`、`BASELINE-2x256:741002`、
 `MAIN-1x256:741003`、`MAIN-30x1024:741004`。v5构造顺序为扩宽后的原递推核心、PM盘口编码器、Binance盘口编码器、规则、前缀、对象、汇总编码器、Actor；
-各支路独立权重，两遍对象计算共享一个编码器。首次运行保存一份 `initial_weights.pt`，后续加载它，
+各支路独立权重，对象只编码一次并供归约与撤单评分共享。首次运行保存一份 `initial_weights.pt`，后续加载它，
 不根据验证结果更换种子。模型文件与环境仅保留在被忽略的目录，不提交 Git。
 
 ## v5 全量盘口（#166）
@@ -136,7 +158,7 @@ Binance无逐档时间时五槽继续为零，不能复制整本时间。
 
 PM四侧共享一套、Binance两侧另共享一套 `9→32→32` 编码器，中间SiLU；仿射按原输入坐标使用既有固定float32加法树。
 每侧拼接sum/mean/max共96维，六侧576维。sum沿动态N反复相邻配对相加、奇数尾项保留；
-训练路径可微，导出边界把标记展开成标准ONNX Loop，生产仍只有原两图且不需要自定义运行内核。
+训练路径可微，导出边界把标记展开成标准ONNX Loop，状态图仍独立且不需要自定义运行内核。
 计数为整数，mean用float32除以计数；max忽略补齐，保留负值，并列梯度只向最早项传播。
 全空三组都为有限零。最终标准图再做数值比较、记录和哈希；导出标记本身不算可运行图验收。
 
@@ -155,7 +177,9 @@ BASELINE将 `concat(fast596,book576,slow433)` 的1605维经原LayerNorm/Linear25
 有限新增前端成本可运行 `python -m model_train.measure_books --output <输出.json>`，
 测量仅说明对应本机深度与混批，未设业务上限或硬性延迟门。人工输入样本与本次验证摘要见 `validation/native-inputs-v5.json`。
 
-## 输入与数量语义修订（#162）
+## 历史输入与数量语义修订（#162）
+
+本节及后续旧交付记录保留当时版本的范围和结果。当前动作合同、36槽前缀与八个物理图以上文 #176 定义为准；旧四类型、PostOnly、到期选择和60槽不构成当前模型接口。复跑命令使用对应程序要求的当前产物，不能把旧结果重标为新版本通过。
 
 `native_inputs_v4` 保持836/433/30/60/184宽度。规则14—15及fast对应槽投影同一冻结快照的真实
 平台最低份数mos；它供模型感知并由SIM执行，不屏蔽低于mos的模型数量。正整数n仍表示q=0.01n，
@@ -267,7 +291,7 @@ CPU结果不代表目标CPU容量或GPU模式验收。
 不从系统自动选择另一 ORT。Python扩展和独立原生库是 wheel 中两个不同文件，分别记录哈希。
 会话显式 CPU、arena开启、顺序执行、全优化、intra1或4、inter1、关闭空转及memory pattern。
 
-从本目录运行；`GRAPHS` 指向已有对应配置的归档目录（必须同时含两图、外部参数与原 `initial_weights.pt`），
+从本目录运行；`GRAPHS` 指向已有对应配置的归档目录（必须同时含当前八图、外部参数与原 `initial_weights.pt`），
 不同运行使用不同 `OUTPUT`。该命令只加载原产物，不导出或保存新权重。
 
 ```bash
@@ -314,7 +338,7 @@ Market范围借用同组冻结的当前c及完整账户经济旧集合O，空Mar
 30 槽规则只生成一次，逐值复用于 `fast[566..596]` 和参数图。动态 tick 来自真实 A/B
 资产字段；公共冷规则保留精确来源，参数价格用同帧 tick 乘原整数，不用神经投影反解。
 `PrefixState` 持有原 BigUint 数量区间/叶子及真实腿、变体、post_only、寿命、价格整数，
-编码 60 槽；`NativeActor` 在同一 Rust 精确状态上生成完整支持并推进选择路径。Python 只消费支持与模型分数。
+编码当前36槽（旧版本60槽已废止）；`NativeActor` 在同一 Rust 精确状态上生成完整支持并推进选择路径。Python 只消费支持与模型分数。
 实际布局、来源、单位、变换与缺失规则见 `native-inputs/feature_schema.json`；全量盘口增量合同为 #166，其余继续引用 #6。
 
 市场编码只读公共参考/TWAP、盘口、直接 BBA、完整最近成交及本组全部原成交。
@@ -356,7 +380,7 @@ OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python -m unittest discover -s tes
 ```
 
 `NATIVE_BASELINE_GRAPH` 和 `NATIVE_MAIN_GRAPH` 分别指向已归档 BASELINE-2x256 与
-MAIN-1x256 的两图/权重目录，可同时执行真实原生序列的 PyTorch/Python ORT/Rust ORT 对照（未提供时明确跳过）。
+MAIN-1x256 的当前八图/权重目录，可同时执行真实原生序列的 PyTorch/Python ORT/Rust ORT 对照（未提供时明确跳过）。
 `NATIVE_COMPONENT_WEIGHTS` 可指向原已验证的 MAIN-1x256 `initial_weights.pt`，避免重新
 导出或训练。测试从 Rust 正式公共入口生成临时组件输入；不手造 Ledger 投影或模型帧。
 覆盖冷启动、重叠预热及切换、同组 100/后组 80、仅本地预留旧市场、平均成本与精确返佣、

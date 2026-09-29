@@ -1024,31 +1024,29 @@ pub(crate) fn exported_group(group: &NativeInputGroup) -> serde_json::Value {
             ..Default::default()
         };
         let interval = action_context.prefix_features(&state);
-        assert_eq!(interval[16], 0.);
-        assert_eq!(interval[18], 0.5);
+        assert_eq!(interval[14], 0.);
+        assert_eq!(interval[16], 0.5);
         prefixes.push(interval.to_vec());
         state.select_quantity(BigUint::from(500u32));
         state.stage = Stage::Variant(Leg::B);
         let leaf = action_context.prefix_features(&state);
-        assert_eq!(&leaf[17..21], &[0.; 4]);
-        assert_eq!(leaf[23], 1.);
-        assert_eq!(&leaf[24..42], &[0.; 18]);
+        assert_eq!(&leaf[15..19], &[0.; 4]);
+        assert_eq!(leaf[21], 1.);
+        assert_eq!(&leaf[22..29], &[0.; 7]);
         prefixes.push(leaf.to_vec());
         state.legs[1].variant = Some(Variant::GtcLimit);
-        state.stage = Stage::PostOnly(Leg::B);
-        prefixes.push(action_context.prefix_features(&state).to_vec());
         state.legs[1].post_only = Some(false);
         state.stage = Stage::Price(Leg::B);
         let selected = action_context.prefix_features(&state);
-        assert_eq!(selected[42], 1.);
-        assert_eq!(selected[48], 1.);
-        assert_eq!(selected[51], 1.);
+        assert_eq!(selected[29], 1.);
+        assert_eq!(selected[31], 1.);
+        assert_eq!(selected[32], 1.);
         prefixes.push(selected.to_vec());
         // 精确已选0.5由同帧tick确定；仅用于投影核对，不制造完成后图调用。
         state.legs[1].price_index = Some(BigUint::from(50u32));
         let completed = action_context.prefix_features(&state);
-        assert_eq!(completed[57], 0.);
-        assert_eq!(completed[59], 1.);
+        assert_eq!(completed[33], 0.);
+        assert_eq!(completed[35], 1.);
         json["fixture_prefixes"] = serde_json::to_value(prefixes).unwrap();
     }
     output

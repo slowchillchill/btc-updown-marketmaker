@@ -33,7 +33,7 @@ class GraphTests(unittest.TestCase):
         summary=encode(reduced,p,'summary')
         family=encode(torch.cat((z,r,summary),-1),p,'actor.family')
         dec=F.silu(linear(norm(torch.cat((z,r,pre),-1),p,'actor.decoder.0'),p,'actor.decoder.1'))
-        expected=[family]+[linear(dec,p,'actor.'+head) for head in ('quantity','variant','price','post_only','expiry')]
+        expected=[family]+[linear(dec,p,'actor.'+head) for head in ('quantity','variant','price')]
         expected += [obj,torch.stack([encode(torch.cat((dec,obj[:,i]),-1),p,'actor.cancel').squeeze(-1) for i in range(2)],1)]
         for a,b in zip(output,expected):torch.testing.assert_close(a,b,atol=1e-5,rtol=1e-4)
         self.assertEqual(calls,[]);torch.testing.assert_close(h,saved,atol=0,rtol=0)
@@ -72,7 +72,7 @@ class GraphTests(unittest.TestCase):
         with torch.no_grad():
             z,_=model.state(fast,slow,*book_fixture(fast.shape[0]),torch.zeros(1,1,256))
         prefix = torch.zeros_like(prefix)
-        prefix[:,3] = 1; prefix[:,6] = 1; prefix[:,13] = 1
+        prefix[:,3] = 1; prefix[:,6] = 1; prefix[:,11] = 1
         singles = mask & (objects[:,:,0] == 1)
         direct_grads=[]
         for lengths in ([256,3],[128,128,3],[86,86,86,1]):

@@ -67,7 +67,7 @@ def main():
         for index, record in enumerate(groups(args.groups)):
             group = record['group']
             for row in group['rows']:
-                prefix = [0.] * 60
+                prefix = [0.] * 36
                 prefix[7] = 1.
                 row['fixture_prefixes'] = [prefix]
             if index:

@@ -1,4 +1,4 @@
-"""阶段 #6 两图；张量合同见 #5 §14.2.1，特征布局见 #6。"""
+"""native_inputs_v6 / native_actions_v2：状态与动作职责，八张物理图。"""
 from dataclasses import dataclass
 from collections.abc import Callable, Sequence
 
@@ -28,8 +28,7 @@ STATE_OUTPUTS = ("z_t", "h_next")
 ACTION_INPUTS = ("z_t", "rule_features", "prefix_features", "cancel_features",
                  "cancel_mask", "cancel_reduced", "cancel_exists", "price_fee_features")
 ACTION_OUTPUTS = ("family_logits", "quantity_branch_logits", "buy_variant_logits",
-                  "price_logits", "post_only_logits", "expiry_logits",
-                  "cancel_embeddings", "cancel_logits")
+                  "price_logits", "cancel_embeddings", "cancel_logits")
 
 
 class ObjectFeatureEncoder(FeatureEncoder):
@@ -46,7 +45,7 @@ class ActionDecoder(nn.Module):
         super().__init__()
         # 构造次序属于初始化合同；各支路独立权重，对象两遍共享同一编码器。
         self.rule = FeatureEncoder(30, hidden, aligned_linear=True)
-        self.prefix = FeatureEncoder(60, hidden, aligned_linear=True)
+        self.prefix = FeatureEncoder(36, hidden, aligned_linear=True)
         self.object_encoder = ObjectFeatureEncoder(184, hidden)
         self.summary = FeatureEncoder(3 * hidden // 2, hidden)
         self.actor = ActorScores(hidden)
@@ -59,9 +58,89 @@ class ActionDecoder(nn.Module):
         objects = torch.where(cancel_mask.unsqueeze(-1), objects, 0.0)
         summary = torch.where(cancel_exists.unsqueeze(-1), self.summary(cancel_reduced), 0.0)
         scores = self.actor(z_t, self.rule(rule_features), self.prefix(prefix_features), summary, objects, price_fee_features)
-        return (scores["family"], scores["quantity"], scores["variant"], scores["price"],
-                scores["post_only"], scores["expiry"], objects,
+        return (scores["family"], scores["quantity"], scores["variant"], scores["price"], objects,
                 torch.where(cancel_mask, scores["cancel"].squeeze(-1), 0.0))
+
+
+STAGE_INTERFACES = {
+    "action_objects": (("cancel_features", "cancel_mask"), ("cancel_embeddings",)),
+    "action_family": (("z_t", "rule_features", "cancel_reduced", "cancel_exists"), ("family_logits", "rule_context")),
+    "action_quantity": (("z_t", "rule_context", "prefix_features"), ("quantity_branch_logits",)),
+    "action_variant": (("z_t", "rule_context", "prefix_features"), ("buy_variant_logits",)),
+    "action_price": (("z_t", "rule_context", "prefix_features", "price_indices", "price_fee_features"), ("price_logits",)),
+    "action_cancel_context": (("z_t", "rule_context", "prefix_features"), ("decoder_context",)),
+    "action_cancel": (("decoder_context", "cancel_embeddings", "cancel_mask"), ("cancel_logits",)),
+}
+
+
+class ObjectGraph(nn.Module):
+    def __init__(self, action):
+        super().__init__()
+        self.encoder = action.object_encoder
+
+    def forward(self, cancel_features, cancel_mask):
+        return torch.where(cancel_mask.unsqueeze(-1), self.encoder(cancel_features), 0.0)
+
+
+class FamilyGraph(nn.Module):
+    def __init__(self, action):
+        super().__init__()
+        self.rule, self.summary, self.head = action.rule, action.summary, action.actor.family
+
+    def forward(self, z_t, rule_features, cancel_reduced, cancel_exists):
+        rule = self.rule(rule_features)
+        summary = torch.where(cancel_exists.unsqueeze(-1), self.summary(cancel_reduced), 0.0)
+        return self.head(torch.cat((z_t, rule, summary), dim=-1)), rule
+
+
+class ContextGraph(nn.Module):
+    def __init__(self, action):
+        super().__init__()
+        self.prefix, self.decoder = action.prefix, action.actor.decoder
+
+    def forward(self, z_t, rule_context, prefix_features):
+        return self.decoder(torch.cat((z_t, rule_context, self.prefix(prefix_features)), dim=-1))
+
+
+class ParameterGraph(ContextGraph):
+    def __init__(self, action, head):
+        super().__init__(action)
+        self.head = getattr(action.actor, head)
+
+    def forward(self, z_t, rule_context, prefix_features):
+        return self.head(super().forward(z_t, rule_context, prefix_features))
+
+
+class PriceGraph(ContextGraph):
+    def __init__(self, action):
+        super().__init__(action)
+        self.head, self.fee = action.actor.price, action.actor.fee_weight
+
+    def forward(self, z_t, rule_context, prefix_features, price_indices, price_fee_features):
+        context = super().forward(z_t, rule_context, prefix_features)
+        # 必须在乘法前取行；P 是当前精确合法区间长度。
+        weights = self.head.weight.index_select(0, price_indices)
+        bias = self.head.bias.index_select(0, price_indices)
+        return torch.nn.functional.linear(context, weights, bias) + self.fee(context) * price_fee_features
+
+
+class CancelGraph(nn.Module):
+    def __init__(self, action):
+        super().__init__()
+        self.head = action.actor.cancel
+
+    def forward(self, decoder_context, cancel_embeddings, cancel_mask):
+        context = decoder_context.unsqueeze(1).expand(-1, cancel_embeddings.shape[1], -1)
+        return torch.where(cancel_mask, self.head(torch.cat((context, cancel_embeddings), dim=-1)).squeeze(-1), 0.0)
+
+
+def action_stages(action):
+    """包装共享实际参数，不初始化新的头；包装只按调用持有。"""
+    return {"action_objects": ObjectGraph(action), "action_family": FamilyGraph(action),
+            "action_quantity": ParameterGraph(action, "quantity"),
+            "action_variant": ParameterGraph(action, "variant"),
+            "action_price": PriceGraph(action), "action_cancel_context": ContextGraph(action),
+            "action_cancel": CancelGraph(action)}
 
 
 class BookState(nn.Module):
@@ -122,11 +201,11 @@ def object_blocks(features: Tensor, mask: Tensor, lengths: Sequence[int], *, emp
 
 def encode_all(call: Callable, z: Tensor, rule: Tensor, features: Tensor,
                mask: Tensor, lengths: Sequence[int], *, empty: bool) -> tuple[Tensor, Tensor]:
-    prefix = z.new_zeros((z.shape[0], 60))
+    prefix = z.new_zeros((z.shape[0], 36))
     prefix[:, 7] = 1  # Family，其他尚未选择。
     reduced = z.new_zeros((z.shape[0], 3 * z.shape[1] // 2))
     exists = torch.zeros(z.shape[0], dtype=torch.bool, device=z.device)
-    blocks = [(call(z, rule, prefix, f, m, reduced, exists)[6][:, :length], m[:, :length])
+    blocks = [(call(z, rule, prefix, f, m, reduced, exists)[4][:, :length], m[:, :length])
               for f, m, length in object_blocks(features, mask, lengths, empty=empty)]
     return reduce_objects(blocks)
 
@@ -135,7 +214,7 @@ def score_all(call: Callable, z: Tensor, rule: Tensor, prefix: Tensor,
               features: Tensor, mask: Tensor, lengths: Sequence[int],
               reduced: Tensor, exists: Tensor, *, empty: bool) -> list[Tensor]:
     """选族后的完整对象切片；返回各行全部真实分数供一次全局选择/归一化。"""
-    outputs = [(call(z, rule, prefix, f, m, reduced, exists)[7][:, :length], m[:, :length])
+    outputs = [(call(z, rule, prefix, f, m, reduced, exists)[5][:, :length], m[:, :length])
                for f, m, length in object_blocks(features, mask, lengths, empty=empty)]
     return [torch.cat([v[row][m[row]] for v, m in outputs]) for row in range(z.shape[0])]
 

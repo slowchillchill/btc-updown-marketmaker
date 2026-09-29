@@ -1,0 +1,268 @@
+[
+  {
+    "label": "wheel-build",
+    "args": [
+      "./model-train/.venv/bin/maturin",
+      "build",
+      "--release",
+      "--features",
+      "python",
+      "--locked",
+      "--offline",
+      "--interpreter",
+      "./model-train/.venv/bin/python",
+      "--out",
+      "target/issue-176-performance/validation/wheels"
+    ],
+    "cwd": "./model-train",
+    "started_utc": "2026-09-28T23:30:49.066753+00:00",
+    "exit_code": 0,
+    "completed_utc": "2026-09-28T23:31:46.765635+00:00",
+    "raw_log_sha256": "f6fcf3d077a1f0f4f0b6621067af5443b22e0ae8d2e9e93db0de478d09692ea4"
+  },
+  {
+    "label": "wheel-install",
+    "args": [
+      "uv",
+      "tool",
+      "run",
+      "--from",
+      "uv==0.12.9",
+      "uv",
+      "pip",
+      "install",
+      "--python",
+      "./model-train/.venv/bin/python",
+      "--offline",
+      "--no-deps",
+      "--reinstall",
+      "target/issue-176-performance/validation/wheels/model_train-0.1.0-cp313-cp313-manylinux_2_38_x86_64.whl"
+    ],
+    "cwd": "target/issue-176-performance/validation",
+    "started_utc": "2026-09-28T23:31:46.766464+00:00",
+    "exit_code": 0,
+    "completed_utc": "2026-09-28T23:31:47.449819+00:00",
+    "raw_log_sha256": "1d06317af453257f7a86d3a7f4e9734a6a565c774629dd5935ef635bea2fe05d"
+  },
+  {
+    "label": "ownership",
+    "args": [
+      "cargo",
+      "test",
+      "--manifest-path",
+      "model-train/native-inputs/Cargo.toml",
+      "--features",
+      "continuous-validation",
+      "--lib",
+      "--locked",
+      "--offline",
+      "native_shared_inputs_preserve_delayed_backward_and_detached_aliases",
+      "--",
+      "--ignored",
+      "--nocapture"
+    ],
+    "cwd": ".",
+    "started_utc": "2026-09-28T23:31:47.450034+00:00",
+    "exit_code": 0,
+    "completed_utc": "2026-09-28T23:31:51.896220+00:00",
+    "raw_log_sha256": "bcfb040b22b3c4e99111d8a5da0ef174a40e6937f3c0f0f946089508d324ff36"
+  },
+  {
+    "label": "full-book-MAIN-1x256",
+    "args": [
+      "cargo",
+      "test",
+      "--manifest-path",
+      "model-train/native-inputs/Cargo.toml",
+      "--features",
+      "continuous-validation",
+      "--lib",
+      "--locked",
+      "--offline",
+      "full_book_three_runtime_and_original_execution",
+      "--",
+      "--ignored",
+      "--nocapture"
+    ],
+    "cwd": ".",
+    "started_utc": "2026-09-28T23:31:51.896656+00:00",
+    "exit_code": 0,
+    "completed_utc": "2026-09-28T23:31:54.287916+00:00",
+    "raw_log_sha256": "5d471a2fe2937a7103410ebb18e8b32d27794fadb30ff30b2ff3058c0f9641c5"
+  },
+  {
+    "label": "full-book-MAIN-30x1024",
+    "args": [
+      "cargo",
+      "test",
+      "--manifest-path",
+      "model-train/native-inputs/Cargo.toml",
+      "--features",
+      "continuous-validation",
+      "--lib",
+      "--locked",
+      "--offline",
+      "full_book_three_runtime_and_original_execution",
+      "--",
+      "--ignored",
+      "--nocapture"
+    ],
+    "cwd": ".",
+    "started_utc": "2026-09-28T23:31:54.288220+00:00",
+    "exit_code": 0,
+    "completed_utc": "2026-09-28T23:32:01.432645+00:00",
+    "raw_log_sha256": "e01ced2227d780d30b7c5a7ecb77199bd273d8ba46ee9a19ea74a125815a274d"
+  },
+  {
+    "label": "cancel-race",
+    "args": [
+      "cargo",
+      "test",
+      "--manifest-path",
+      "model-train/native-inputs/Cargo.toml",
+      "--features",
+      "continuous-validation",
+      "--lib",
+      "--locked",
+      "--offline",
+      "actual_graph_pair_intent_execution_and_frozen_cancel_race",
+      "--",
+      "--ignored",
+      "--nocapture"
+    ],
+    "cwd": ".",
+    "started_utc": "2026-09-28T23:32:01.432936+00:00",
+    "exit_code": 0,
+    "completed_utc": "2026-09-28T23:32:02.572738+00:00",
+    "raw_log_sha256": "6c6bf2b35e3cb4367ef868a9b1d3eff0cbe912006d92d0f0d742b9cb620a699c"
+  },
+  {
+    "label": "native-tests",
+    "args": [
+      "cargo",
+      "test",
+      "--manifest-path",
+      "model-train/native-inputs/Cargo.toml",
+      "--features",
+      "continuous-validation",
+      "--lib",
+      "--tests",
+      "--locked",
+      "--offline"
+    ],
+    "cwd": ".",
+    "started_utc": "2026-09-28T23:32:02.573028+00:00",
+    "exit_code": 0,
+    "completed_utc": "2026-09-28T23:32:23.185134+00:00",
+    "raw_log_sha256": "2399ab7d0160d1dbe15cf3a8fd458b86d02ffe8f68a289b50e70f127966cb00f"
+  },
+  {
+    "label": "native-clippy",
+    "args": [
+      "cargo",
+      "clippy",
+      "--manifest-path",
+      "model-train/native-inputs/Cargo.toml",
+      "--all-targets",
+      "--features",
+      "continuous-validation",
+      "--locked",
+      "--offline",
+      "--",
+      "-D",
+      "warnings",
+      "-A",
+      "clippy::needless_borrow",
+      "-A",
+      "clippy::too_many_arguments"
+    ],
+    "cwd": ".",
+    "started_utc": "2026-09-28T23:32:23.185436+00:00",
+    "exit_code": 0,
+    "completed_utc": "2026-09-28T23:32:24.388735+00:00",
+    "raw_log_sha256": "9c8fd0713c1bd48576947b6bcdfa5ce8b9719621b7757e71b449f158ebeb3010"
+  },
+  {
+    "label": "rust-ort-tests",
+    "args": [
+      "cargo",
+      "test",
+      "--manifest-path",
+      "model-train/rust-ort-validation/Cargo.toml",
+      "--locked",
+      "--offline"
+    ],
+    "cwd": ".",
+    "started_utc": "2026-09-28T23:32:24.389179+00:00",
+    "exit_code": 0,
+    "completed_utc": "2026-09-28T23:32:24.638346+00:00",
+    "raw_log_sha256": "1b724bdf15135c20c81a7232cf81861a92665b6d5c7d4f8d39b42fb6000ad4e6"
+  },
+  {
+    "label": "rust-ort-clippy",
+    "args": [
+      "cargo",
+      "clippy",
+      "--manifest-path",
+      "model-train/rust-ort-validation/Cargo.toml",
+      "--all-targets",
+      "--locked",
+      "--offline",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "cwd": ".",
+    "started_utc": "2026-09-28T23:32:24.638601+00:00",
+    "exit_code": 0,
+    "completed_utc": "2026-09-28T23:32:25.905519+00:00",
+    "raw_log_sha256": "78161fe61d6ecd2538f2adb6d4075145d1be14b3b41ca4de73f66e6946831da0"
+  },
+  {
+    "label": "workspace-fmt",
+    "args": [
+      "cargo",
+      "fmt",
+      "--all",
+      "--",
+      "--check"
+    ],
+    "cwd": ".",
+    "started_utc": "2026-09-28T23:32:25.905781+00:00",
+    "exit_code": 0,
+    "completed_utc": "2026-09-28T23:32:27.220387+00:00",
+    "raw_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "label": "native-fmt",
+    "args": [
+      "cargo",
+      "fmt",
+      "--manifest-path",
+      "model-train/native-inputs/Cargo.toml",
+      "--",
+      "--check"
+    ],
+    "cwd": ".",
+    "started_utc": "2026-09-28T23:32:27.220703+00:00",
+    "exit_code": 0,
+    "completed_utc": "2026-09-28T23:32:27.359237+00:00",
+    "raw_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  {
+    "label": "rust-ort-fmt",
+    "args": [
+      "cargo",
+      "fmt",
+      "--manifest-path",
+      "model-train/rust-ort-validation/Cargo.toml",
+      "--",
+      "--check"
+    ],
+    "cwd": ".",
+    "started_utc": "2026-09-28T23:32:27.359544+00:00",
+    "exit_code": 0,
+    "completed_utc": "2026-09-28T23:32:27.392258+00:00",
+    "raw_log_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  }
+]

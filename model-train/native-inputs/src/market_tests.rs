@@ -509,12 +509,12 @@ fn same_frame_independent_ticks_and_exact_prefix_keep_unrounded_selection() {
         ..Default::default()
     };
     let v = p.encode(&[Some(ratio(1, 100)), Some(ratio(1, 1000))]);
-    assert_eq!(&v[24..42], &[0.; 18]);
-    assert_eq!(v[57], 0.);
-    assert_eq!(v[59], 1.);
-    assert_eq!(v[48], 1.);
-    assert_eq!(v[51], 1.);
-    assert_eq!(&v[17..21], &[0.; 4]);
+    assert_eq!(&v[22..29], &[0.; 7]);
+    assert_eq!(v[33], 0.);
+    assert_eq!(v[35], 1.);
+    assert_eq!(v[29], 1.);
+    assert_eq!(v[32], 1.);
+    assert_eq!(&v[15..19], &[0.; 4]);
     let upper = (BigUint::from(1u8) << 200usize) + BigUint::from(1u8);
     p = PrefixState {
         family: Some(Family::SubmitSingleBuy),
@@ -528,7 +528,7 @@ fn same_frame_independent_ticks_and_exact_prefix_keep_unrounded_selection() {
         hi: upper.clone(),
     });
     let v = p.encode(&[None, None]);
-    assert_eq!(v[18], v[19]);
+    assert_eq!(v[16], v[17]);
     assert_ne!(
         p.interval.as_ref().unwrap().lo,
         p.interval.as_ref().unwrap().hi

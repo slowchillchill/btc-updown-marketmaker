@@ -226,7 +226,7 @@ fn full_book_public_sequence_retains_all_levels_and_hidden_lifecycle() {
 
 #[cfg(feature = "continuous-validation")]
 #[tokio::test(flavor = "current_thread")]
-#[ignore = "有限深盘口三端和原执行入口；需新版本两图"]
+#[ignore = "有限深盘口三端和原执行入口；需新版本八图"]
 async fn full_book_three_runtime_and_original_execution() {
     let directory = std::env::var("ACTOR_GRAPH_DIRECTORY").unwrap();
     let mut runtime = crate::continuous_runtime::ThreeRuntime::new(&directory, 1);
@@ -272,7 +272,7 @@ async fn full_book_three_runtime_and_original_execution() {
     assert_eq!(sample["native_hidden_rows"], 0);
     assert_eq!(sample["hidden_rows"], serde_json::json!([0, 0]));
     let evidence = serde_json::json!({
-        "input_contract_version": "native_inputs_v5", "frames": runtime.frames,
+        "input_contract_version": "native_inputs_v6", "frames": runtime.frames,
         "context_frames": contexts, "decisions_executed": executed,
         "retire_operations": retired, "side_lengths": lengths,
         "provenance": runtime.provenance(), "final_sample": sample,

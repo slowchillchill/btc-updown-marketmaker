@@ -1,13 +1,13 @@
 {
-  "contract": "https://github.com/slowchillchill/btc-updown-marketmaker/issues/166",
+  "contract": "https://github.com/slowchillchill/btc-updown-marketmaker/issues/176",
   "implementation": "native-inputs/src/market.rs; native-inputs/src/prefix.rs; native-inputs/src/root.rs",
   "widths": {
     "fast": 596,
     "slow": 433,
     "rule": 30,
-    "prefix": 60,
+    "prefix": 36,
     "cancel": 184,
-    "price_fee_features": 9999,
+    "price_fee_features": "P (1..999, valid global indices)",
     "book_level": 9,
     "book_summary": 576
   },
@@ -185,15 +185,6 @@
       "14-34": "spot/TWAP30/TWAP60 each V7 S price",
       "35-36": "S selected market price minus effective anchor; present"
     },
-    "prefix60": {
-      "0-6": "NoTrade,SingleBuy,PairedBuy,CancelOrder,CancelOrders,CancelMarketOrders,selected",
-      "7-13": "Family,QuantityBranch,Variant,PostOnly,Expiry,Price,CancelObject",
-      "14-16": "current A/B,applicable",
-      "17-20": "L U,lo/U,hi/U,interval applicable",
-      "21-23": "L(n/100),quantity applicable,selected",
-      "24-41": "A variant4/applicable/selected; post_only2/applicable/selected; lifetime3/applicable/selected; phi(k*tick)/applicable/selected",
-      "42-59": "same fields for actual B leg"
-    },
     "book38": {
       "source": "PM assets[index 0/1].bids/asks; Binance binance_depth",
       "layout": [
@@ -211,6 +202,15 @@
         "5-13": "E9 actual side-associated direct anchors",
         "14-15": "S best-price change from immediately previous frame; present"
       }
+    },
+    "prefix36": {
+      "0-6": "六动作族 one-hot，族已选",
+      "7-11": "Family,QuantityBranch,Variant,Price,CancelObject",
+      "12-14": "当前 A/B 腿，腿适用",
+      "15-18": "L U,lo/U,hi/U,区间适用",
+      "19-21": "L(n/100),数量适用,数量已选",
+      "22-28": "A: GTC/FOK,类型适用,类型已选,phi(k*tick),价格适用,价格已选",
+      "29-35": "B: 同 A"
     }
   },
   "fast": [
@@ -313,16 +313,17 @@
   ],
   "history_policy": "Six per-hidden-key sequences at most16 samples; source identity changes only; missing/unrelated group adds nothing; previous-frame side stats separately; released at original Retire.",
   "account_and_cancel": "#6正式续篇3 §4/8；账户433、撤单184；原账户0—414保持，完整请求块与条件适用性由同组原证据投影。",
-  "scope": "Input and actual state/parameter components; not complete Actor support, general nonzero fees, training or phase acceptance.",
+  "scope": "当前状态组件、native_actions_v2 精确动作支持与八张物理图；不包含正式训练",
   "price_fee_features": {
-    "shape": "float32[B,9999]",
-    "source": "NativeActor::price_fee_features -> same-frame snapshot.market_buy_fee_estimate_v1(n,k,tick)",
-    "projection": "log1p(fee_pUSD / 1 pUSD), exact rational to nearest-even f32",
-    "applicability": "current FOK/FAK Price(leg); illegal platform coordinate, other stage, LIMIT => 0",
+    "shape": "float32[B,P]",
+    "indices": "严格递增 int64[P]，原价格坐标 k−1；同合法区间合批",
+    "source": "NativeActor::price_fee_features -> 冻结规则 market_buy_fee_estimate_v1(n,k,tick)",
+    "projection": "log1p(fee_pUSD / 1 pUSD)，精确有理数至最近偶数 f32",
+    "applicability": "仅当前 FOK 合法价格；普通 GTC 为零参考估费",
     "decoder": "price_logits + bias-free signed Linear(H/2,1)(decoder) * price_fee_features"
   },
-  "input_contract_version": "native_inputs_v5",
-  "behavior_revision": "#162：原响应token关联、三态槽完整覆写、rule[14:16]使用真实冻结mos；模型支持正整数数量意图，不以平台最低份数设mask。FOK/FAK每腿原本金仍须至少1 pUSD；旧策略路径的概率重算保留原实现语义。",
+  "input_contract_version": "native_inputs_v6",
+  "behavior_revision": "#176：普通 GTC/FOK、post_only=false、0.01/0.001、16路完整整数区间；不按 mos 屏蔽数量。旧权重与轨迹不重标。",
   "pending_noe_record_count": {
     "indices": [
       412,
@@ -427,5 +428,6 @@
     "fusion": "MAIN原市场编码器输入concat(fast596,book576)=1172，账户433，原门控/残差GRU保持；BASELINE concat(fast596,book576,slow433)=1605经原LN/Linear256/SiLU接裸GRU。",
     "initialization": "每配置原种子；注册原递推核心（新宽度）、PM编码器、BN编码器、原参数图。复用标准初始化，保存新的v5权重。",
     "migration": "旧240槽半开区间[57,97)、[113,153)、[175,215)、[231,271)、[293,333)、[349,389)移到前八维；其余596按原序。旧v4向量无深档，须从原公共材料按cutoff重放；旧权重/hidden不重标，按原初始化与预热重建。"
-  }
+  },
+  "action_contract_version": "native_actions_v2"
 }

@@ -8,7 +8,7 @@ import time
 import torch
 from .graphs import CONFIGURATIONS, TwoGraphs, encode_all, score_all, reduce_objects
 from .graph_fixtures import fixture, book_fixture
-from .validate_graphs import session, call_ort, ACTION_INPUTS, sha
+from .validate_graphs import session, call_ort, ACTION_INPUTS, sha, reference_ort_action
 
 
 def main():
@@ -24,14 +24,14 @@ def main():
     model=TwoGraphs(config).eval()
     weights=directory/'initial_weights.pt'
     model.load_state_dict(torch.load(weights,weights_only=True))
-    ort_call=call_ort(session(directory/'action_decoder.onnx',args.threads),ACTION_INPUTS)
+    ort_call=reference_ort_action(directory,args.threads)
     results=[]
     with torch.no_grad():
         for pairs,removed in ((0,False),(1,True),(85,False),(86,True),(86,False)):
             fast,slow,rule,prefix,objects,mask=fixture(1,pairs,removed)
             z,_=model.state(fast,slow,*book_fixture(fast.shape[0]),torch.zeros(config.layers,1,config.hidden))
             n=objects.shape[1]; lengths=[256]*(n//256)+([n%256] if n%256 else [])
-            cp=torch.zeros_like(prefix);cp[:,3]=cp[:,6]=cp[:,13]=1
+            cp=torch.zeros_like(prefix);cp[:,3]=cp[:,6]=cp[:,11]=1
             selected=mask & (objects[:,:,0]==1)
             for runtime,call in (('PyTorch',model.action),('ORT',ort_call)):
                 def before():
@@ -39,12 +39,12 @@ def main():
                     blocks=[];offset=0
                     for k in lengths:
                         x,m=objects[:,offset:offset+k],mask[:,offset:offset+k]
-                        blocks.append((call(z,rule,prefix,x,m,reduced,exists)[6],m));offset+=k
+                        blocks.append((call(z,rule,prefix,x,m,reduced,exists)[4],m));offset+=k
                     reduced,exists=reduce_objects(blocks);offset=0
                     scores=[]
                     for k in lengths:
                         x,m=objects[:,offset:offset+k],selected[:,offset:offset+k]
-                        scores.append(call(z,rule,cp,x,m,reduced,exists)[7]);offset+=k
+                        scores.append(call(z,rule,cp,x,m,reduced,exists)[5]);offset+=k
                     return scores
                 def after():
                     reduced,exists=encode_all(call,z,rule,objects,mask,lengths,empty=pairs==0)

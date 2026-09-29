@@ -1,0 +1,19 @@
+{
+  "command": "cargo clippy --workspace --all-targets --locked --offline -- -D warnings",
+  "exit_code": 101,
+  "rule": "clippy::large_enum_variant",
+  "locations": [
+    "contracts/src/public_observation.rs:205",
+    "contracts/src/lib.rs:221",
+    "contracts/src/lib.rs:438"
+  ],
+  "baseline_equal_files": {
+    "contracts/src/public_observation.rs": "d89e87885e459a2f65dc869748308da812d6fbfaefa4a4470f6a54fa7b7019fc",
+    "contracts/src/lib.rs": "1773c1a7fdaf647994c492ef0edd4eafea6c29a98d8390b2fa2b87c7b5764101",
+    "Cargo.toml": "28f90b73165ead20d2aa1e554b00c0eb909b3fb9c5cd421389c2eac39fb30710",
+    "Cargo.lock": "f99b065d21bb8165f0f4b83251574c7ed1bb1419a378cb1d5068d271ac8d2069"
+  },
+  "baseline": "a39f2cc2bb160c49fd53dba1a106364b0666f7c3",
+  "raw_log_sha256": "d0045f8ac12b3d3bc5e7a53603aaad0f689ebaedf9f6ae396ad42017bd824a57",
+  "scope": "额外扩大检查的既有合同布局诊断；未修改公共合同或放宽本轮模型静态检查。"
+}

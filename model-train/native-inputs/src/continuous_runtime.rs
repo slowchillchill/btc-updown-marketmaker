@@ -103,11 +103,7 @@ impl ThreeRuntime {
             python,
             state: session("state_encoder.onnx"),
             packed_books: Vec::new(),
-            scorer: OrtActorScorer {
-                measurement: (0, None),
-                session: session("action_decoder.onnx"),
-                hidden: width,
-            },
+            scorer: OrtActorScorer::new(Path::new(directory), width, threads).unwrap(),
             hidden: BTreeMap::new(),
             layers,
             width,
@@ -176,13 +172,7 @@ impl ThreeRuntime {
             let entries = actors
                 .iter()
                 .enumerate()
-                .map(|(i, a)| {
-                    (
-                        a,
-                        self.last_states[i][rows[i]].as_slice(),
-                        reduced[i].as_slice(),
-                    )
-                })
+                .map(|(i, a)| (a, self.last_states[i][rows[i]].as_slice(), &reduced[i]))
                 .collect::<Vec<_>>();
             assert_eq!(self.scorer.scores_batch(&entries).unwrap().len(), 2);
             actors[0].choose(0).unwrap();
@@ -200,7 +190,7 @@ impl ThreeRuntime {
                     (
                         &actors[i],
                         self.last_states[i][rows[i]].as_slice(),
-                        reduced[i].as_slice(),
+                        &reduced[i],
                     )
                 })
                 .collect::<Vec<_>>();
@@ -237,10 +227,11 @@ impl ThreeRuntime {
                     .collect::<Vec<_>>();
                 let width = self.width / 2;
                 let zero = vec![0.; 3 * width];
-                let fees = vec![0.; 9999];
+                let fees = vec![0.; 999];
                 let mut layouts = Vec::new();
                 for lengths in [[256usize, 1], [128, 129]] {
                     let before = self.scorer.measurement.0;
+                    let objects_before = self.scorer.calls.get("objects").copied().unwrap_or(0);
                     let mut sums = vec![vec![0f64; width]; groups.len()];
                     let mut maxima = vec![vec![f32::NEG_INFINITY; width]; groups.len()];
                     let mut offset = 0;
@@ -263,7 +254,7 @@ impl ThreeRuntime {
                         let output = self.scorer.blocks(&rows).unwrap();
                         for (i, values) in output.iter().enumerate() {
                             for embedding in
-                                values[6][..rows[i].2.len() * width].chunks_exact(width)
+                                values[4][..rows[i].2.len() * width].chunks_exact(width)
                             {
                                 for k in 0..width {
                                     sums[i][k] += f64::from(embedding[k]);
@@ -321,11 +312,11 @@ impl ThreeRuntime {
                             .collect::<Vec<_>>();
                         let output = self.scorer.blocks(&rows).unwrap();
                         for ((&i, row), values) in active.iter().zip(&rows).zip(&output) {
-                            scores[i].extend_from_slice(&values[7][..row.2.len()]);
+                            scores[i].extend_from_slice(&values[5][..row.2.len()]);
                         }
                         offset += length;
                     }
-                    assert_eq!(self.scorer.measurement.0 - before, 4);
+                    assert_eq!(self.scorer.calls["objects"] - objects_before, 4);
                     let mut choices = Vec::new();
                     for (i, g) in groups.iter().enumerate() {
                         if g.cancel.is_empty() {
@@ -690,11 +681,7 @@ impl ThreeRuntime {
                 .iter()
                 .map(|&i| {
                     let (root, row, _, _) = &decisions[i];
-                    (
-                        &actors[i],
-                        states[*root][*row].as_slice(),
-                        reduced[i].as_slice(),
-                    )
+                    (&actors[i], states[*root][*row].as_slice(), &reduced[i])
                 })
                 .collect::<Vec<_>>();
             let action_started = std::time::Instant::now();

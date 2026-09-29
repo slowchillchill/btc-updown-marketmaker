@@ -10,7 +10,7 @@ import time
 import onnx
 import onnxruntime as ort
 import torch
-from .graphs import CONFIGURATIONS, TwoGraphs, STATE_INPUTS, STATE_OUTPUTS, ACTION_INPUTS, ACTION_OUTPUTS, encode_all, score_all
+from .graphs import CONFIGURATIONS, TwoGraphs, STATE_INPUTS, STATE_OUTPUTS, ACTION_INPUTS, ACTION_OUTPUTS, STAGE_INTERFACES, action_stages, encode_all, score_all
 from .book import lower_pairwise_sum
 from .graph_fixtures import fixture, account_slice, cancel_slices, market_slice, paired_gtc_prefixes, book_fixture
 
@@ -38,9 +38,32 @@ def session(path, threads):
 def call_ort(sess, names):
     def call(*args):
         if names == ACTION_INPUTS and len(args) == 7:
-            args = (*args, torch.zeros((args[0].shape[0], 9999), dtype=torch.float32))
+            args = (*args, torch.zeros((args[0].shape[0], 999), dtype=torch.float32))
         return tuple(torch.from_numpy(x) for x in sess.run(None, {
             n: v.detach().numpy() for n, v in zip(names, args)}))
+    return call
+
+
+def ort_stages(directory, threads):
+    return {name: call_ort(session(directory/(name+'.onnx'), threads), names)
+            for name, (names, _) in STAGE_INTERFACES.items()}
+
+
+def reference_ort_action(directory, threads):
+    """验证参考：重新准备并执行所有新策略头；生产按阶段调用，不加载旧两图。"""
+    stages = ort_stages(directory, threads)
+    def call(z, rule, prefix, features, mask, reduced, exists, fees=None):
+        objects = stages['action_objects'](features, mask)[0]
+        family, context = stages['action_family'](z, rule, reduced, exists)
+        args = (z,context,prefix)
+        quantity = stages['action_quantity'](*args)[0]
+        variant = stages['action_variant'](*args)[0]
+        fees = z.new_zeros((z.shape[0],999)) if fees is None else fees
+        price = stages['action_price'](*args,torch.arange(999),fees)[0]
+        decoder = stages['action_cancel_context'](*args)[0]
+        cancel = stages['action_cancel'](decoder,objects,mask)[0]
+        return family,quantity,variant,price,objects,cancel
+    call.stages = stages
     return call
 
 
@@ -88,10 +111,25 @@ def export(model, config, directory):
     K = torch.export.Dim('K', min=1, max=256)
     N = torch.export.Dim('N', min=1)
     book, book_mask = book_fixture(2, depth=7)
-    examples = (
-        (model.state, (fast, slow, book, book_mask, h), STATE_INPUTS, STATE_OUTPUTS, ({0:B}, {0:B}, {0:B,2:N}, {0:B,2:N}, {1:B}), 'state_encoder'),
-        (model.action, (z, rule, prefix, objects, mask, torch.zeros(2, 3*config.hidden//2), torch.zeros(2, dtype=torch.bool), torch.zeros(2, 9999)),
-         ACTION_INPUTS, ACTION_OUTPUTS, ({0:B}, {0:B}, {0:B}, {0:B,1:K}, {0:B,1:K}, {0:B}, {0:B}, {0:B}), 'action_decoder'))
+    context = torch.zeros(2, config.hidden//2)
+    prefix = torch.zeros(2,36); prefix[:,7] = 1
+    objects = torch.zeros(2,3,184); mask = torch.ones(2,3,dtype=torch.bool)
+    examples = [(model.state, (fast, slow, book, book_mask, h), STATE_INPUTS, STATE_OUTPUTS,
+                 ({0:B}, {0:B}, {0:B,2:N}, {0:B,2:N}, {1:B}), 'state_encoder')]
+    stages = action_stages(model.action)
+    P = torch.export.Dim('P', min=1, max=999)
+    definitions = {
+        'action_objects': ((objects, mask), ({0:B,1:K},{0:B,1:K})),
+        'action_family': ((z,rule,torch.zeros(2,3*config.hidden//2),torch.ones(2,dtype=torch.bool)), ({0:B},{0:B},{0:B},{0:B})),
+        'action_quantity': ((z,context,prefix), ({0:B},{0:B},{0:B})),
+        'action_variant': ((z,context,prefix), ({0:B},{0:B},{0:B})),
+        'action_price': ((z,context,prefix,torch.arange(19,30),torch.zeros(2,11)), ({0:B},{0:B},{0:B},{0:P},{0:B,1:P})),
+        'action_cancel_context': ((z,context,prefix), ({0:B},{0:B},{0:B})),
+        'action_cancel': ((context,torch.zeros(2,3,config.hidden//2),mask), ({0:B},{0:B,1:K},{0:B,1:K})),
+    }
+    for name, (args, dynamic) in definitions.items():
+        inputs, outputs = STAGE_INTERFACES[name]
+        examples.append((stages[name],args,inputs,outputs,dynamic,name))
     metadata = {}
     for module, args, inputs, outputs, dynamic, name in examples:
         program = torch.onnx.export(module, args, dynamo=True, opset_version=18, optimize=True,
@@ -119,7 +157,7 @@ def export(model, config, directory):
 
 def verify(model, config, graph_directory, threads):
     state = call_ort(session(graph_directory/'state_encoder.onnx', threads), STATE_INPUTS)
-    action = call_ort(session(graph_directory/'action_decoder.onnx', threads), ACTION_INPUTS)
+    action = reference_ort_action(graph_directory, threads)
     stats = {'threads':threads, 'cases':[], 'pure_graph_cpu_ms':{}}
     start = time.perf_counter()
     with torch.no_grad():
@@ -155,7 +193,7 @@ def verify(model, config, graph_directory, threads):
             for family, kind in ((3,0), (4,1), (5,2)):
                 selected = mask & (objects[:,:,kind] == 1)
                 cp = torch.zeros_like(prefix)
-                cp[:,family] = 1; cp[:,6] = 1; cp[:,13] = 1
+                cp[:,family] = 1; cp[:,6] = 1; cp[:,11] = 1
                 ps = score_all(model.action, zp, rule, cp, objects, selected, lengths, rp, ep, empty=empty)
                 oscores = score_all(action, zo, rule, cp, objects, selected, lengths, ro, eo, empty=empty)
                 for row, (p, o) in enumerate(zip(ps, oscores)):
@@ -211,7 +249,7 @@ def main():
         torch.save(model.state_dict(), weights)
     model.load_state_dict(torch.load(weights, weights_only=True, map_location='cpu'))
     schema = Path(__file__).resolve().parents[1] / 'native-inputs' / 'feature_schema.json'
-    result = {'input_contract_version': 'native_inputs_v5', 'feature_schema_sha256': sha(schema),
+    result = {'input_contract_version': 'native_inputs_v6', 'action_contract_version': 'native_actions_v2', 'feature_schema_sha256': sha(schema),
         'configuration':c.__dict__, 'python':platform.python_version(),
         'versions':{n:importlib.metadata.version(n) for n in ('torch','onnx','onnxruntime','onnxscript','numpy')},
         'torch_backend':torch.__config__.show(), 'ort_build':ort.get_build_info(),

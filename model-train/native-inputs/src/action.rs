@@ -164,7 +164,7 @@ impl NativeInputGroup {
         shared: &mut SharedExecutionV2,
         decision: &mut PublicGroupDecisionV1<'_>,
         context: RequestContextV2,
-        score: impl FnOnce(&Self, usize, &[f32; 60]) -> Result<Vec<CancelScoreBlock>, E>,
+        score: impl FnOnce(&Self, usize, &[f32; 36]) -> Result<Vec<CancelScoreBlock>, E>,
     ) -> Result<Option<MutationRequestReceiptV2>, ActionError<E>> {
         let intent = match selected {
             SelectedAction::NoTrade => None,
@@ -243,7 +243,7 @@ impl NativeInputGroup {
                         n,
                         k,
                         &contracts::ExactDecimal(tick),
-                        selected.post_only.unwrap_or(true),
+                        selected.post_only.unwrap_or(false),
                     )
                     .map_err(|e| ActionError::Input(crate::InputError::Fee(e)))?;
                 let fee = if matches!(

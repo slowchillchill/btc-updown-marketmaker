@@ -162,30 +162,28 @@ def fixture(batch=1, pair_count=0, removed_a=False, step=0, mixed=False, empty_p
             features[b]=torch.stack([row.tensor() for row in rows]);mask[b]=True
         elif mixed == "market" and b == 0:
             features[b,0]=cancel_slices()[0].tensor();mask[b,0]=True
-    prefix=torch.zeros(batch,60);prefix[:,7]=1
+    prefix=torch.zeros(batch,36);prefix[:,7]=1
     return (fast.tensor().repeat(batch,1),torch.stack(slow),rule.tensor().repeat(batch,1),
             prefix,features,mask)
 
 
 def paired_gtc_prefixes(batch=1):
-    """合法q=5双腿post-only GTC路径的评分前切片；不求完整支持集。"""
-    p = torch.zeros(batch, 60)
+    """普通 GTC 双腿 q=5 的精确语义切片，不求完整支持集。"""
+    p = torch.zeros(batch, 36)
     p[:, 2] = 1; p[:, 6] = 1
-    p[:, 21] = log_value(5); p[:, 22:24] = 1
-    p[:, 28] = 1; p[:, 40] = 1; p[:, 46] = 1; p[:, 58] = 1
+    p[:, 19] = log_value(5); p[:, 20:22] = 1
+    p[:, 24] = 1; p[:, 27] = 1; p[:, 31] = 1; p[:, 34] = 1
     result = []
     def snapshot(stage, leg):
-        p[:, 7:14] = 0; p[:, 7+stage] = 1
-        p[:, 14:16] = 0; p[:, 14+leg] = 1; p[:, 16] = 1
+        p[:, 7:12] = 0; p[:, 7+stage] = 1
+        p[:, 12:14] = 0; p[:, 12+leg] = 1; p[:, 14] = 1
         result.append(p.clone())
-    for leg, offset in ((0, 24), (1, 42)):
-        snapshot(2, leg)  # Variant评分前
-        p[:, offset] = 1; p[:, offset+5] = 1; p[:, offset+8] = 1
-        snapshot(3, leg)  # PostOnly评分前
-        p[:, offset+7] = 1; p[:, offset+9] = 1
-    snapshot(5, 0)  # Price A评分前；两腿属性均已选
-    p[:, 39] = -.6; p[:, 41] = 1
-    snapshot(5, 1)  # Price B评分前；A原报价0.2
+    for leg, offset in ((0, 22), (1, 29)):
+        snapshot(2, leg)
+        p[:, offset] = 1; p[:, offset+3] = 1
+    snapshot(3, 0)
+    p[:, 26] = -.6; p[:, 28] = 1
+    snapshot(3, 1)
     return result
 
 
