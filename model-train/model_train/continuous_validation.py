@@ -271,16 +271,19 @@ class ContinuousPython:
                     if actor.complete():
                         assert family == 0
                         continue
+                    support = actor.support()
                     variants = []
                     for lengths in layouts:
                         self.population_report['layouts'].append({'runtime': runtime, 'root': root, 'row': row, 'family': family, 'valid_lengths': lengths})
                         with torch.no_grad():
                             features, reduced, exists, embeddings = consumer.objects(native.features()['cancel'], lengths=lengths)
                             frozen = replace(g, cancel_features=features, cancel_reduced=reduced, cancel_exists=exists, cancel_embeddings=embeddings, rule_contexts={})
-                            blocks = consumer.parameters(frozen, row, actor.prefix_features(), lengths=lengths)
-                            scores = torch.cat([b[5][0, :length] for b, length in zip(blocks, lengths)])
+                            if sum(support) == 1:
+                                scores = features.new_zeros(count)
+                            else:
+                                blocks = consumer.parameters(frozen, row, actor.prefix_features(), lengths=lengths)
+                                scores = torch.cat([b[5][0, :length] for b, length in zip(blocks, lengths)])
                             variants.append(scores)
-                    support = actor.support()
                     legal = torch.tensor(support, dtype=torch.bool)
                     for actual in variants[1:]: assert_close(variants[0][legal], actual[legal], rtol=1e-4, atol=1e-5)
                     tied, _, _ = conditional_choice(torch.zeros_like(variants[0]), support, deterministic=True)
