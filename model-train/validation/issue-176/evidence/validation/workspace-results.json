@@ -1,0 +1,635 @@
+{
+  "targets": [
+    {
+      "target": "unittests src/lib.rs",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "unittests src/lib.rs",
+      "passed": 431,
+      "failed": 0,
+      "ignored": 1,
+      "measured": 0,
+      "filtered": 1
+    },
+    {
+      "target": "unittests src/bin/data_collect_live_hot.rs",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "unittests src/bin/data_collect_paper_hot.rs",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "unittests src/bin/data_collect_price_anchor_backfill.rs",
+      "passed": 14,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "unittests src/bin/data_collect_training_collector.rs",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "unittests src/bin/real_source_alignment_probe.rs",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/binance_aggtrade_continuity_contract.rs",
+      "passed": 5,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/binance_contract.rs",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/bounded_queue_contract.rs",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/collector_identity_contract.rs",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/dedupe_contract.rs",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/deployment_binary_contract.rs",
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/event_envelope_contract.rs",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/hot_path_handoff_contract.rs",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/hourly_partition_contract.rs",
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/market_discovery_contract.rs",
+      "passed": 9,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/parquet_writer_contract.rs",
+      "passed": 24,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/polymarket_contract.rs",
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/polymarket_metadata_layout_contract.rs",
+      "passed": 15,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/polymarket_orderbook_v3_contract.rs",
+      "passed": 7,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/polymarket_sdk_patch_contract.rs",
+      "passed": 21,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/polymarket_sdk_runtime_contract.rs",
+      "passed": 21,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/real_source_latency_contract.rs",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/source_format_contract.rs",
+      "passed": 3,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/source_hourly_layout_contract.rs",
+      "passed": 14,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/stale_temporary_cleanup_contract.rs",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/training_collector_runtime_contract.rs",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "unittests src/lib.rs",
+      "passed": 34,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/phase0_contract.rs",
+      "passed": 37,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/phase0_dual_time_contract.rs",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/phase2_binance_reducer_contract.rs",
+      "passed": 21,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/phase2_canonical_contract.rs",
+      "passed": 11,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/phase2_metadata_reducer_contract.rs",
+      "passed": 12,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/phase2_polymarket_reducer_contract.rs",
+      "passed": 23,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/phase2_terminal_merger_contract.rs",
+      "passed": 10,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/public_pm_reduction_contract.rs",
+      "passed": 17,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/public_reference_contract.rs",
+      "passed": 7,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "unittests src/lib.rs",
+      "passed": 109,
+      "failed": 0,
+      "ignored": 1,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "unittests src/bin/dpt-gate-a.rs",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "unittests src/bin/dpt-public-online.rs",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/phase1_admission_contract.rs",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 3,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/phase2_binance_reducer_real_contract.rs",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 1,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/phase2_canonical_run_contract.rs",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 1,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/phase2_gate_a_real_contract.rs",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 2,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/phase2_typed_raw_adapter_contract.rs",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 6,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "unittests src/lib.rs",
+      "passed": 7,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/artifact_publication.rs",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/core_normalization.rs",
+      "passed": 9,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/durable_replay.rs",
+      "passed": 7,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/noe_result_reference.rs",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "unittests src/lib.rs",
+      "passed": 16,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "unittests src/lib.rs",
+      "passed": 9,
+      "failed": 0,
+      "ignored": 1,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/memory_v2.rs",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/stage1_vertical_slice.rs",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/stage2_local_reservation.rs",
+      "passed": 4,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/stage3_economic_lifecycle.rs",
+      "passed": 11,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/stage4_durable_replay.rs",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "unittests src/lib.rs",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "unittests src/bin/paper.rs",
+      "passed": 0,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/continuous.rs",
+      "passed": 25,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/economic_settlement.rs",
+      "passed": 9,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/market_fee_estimate.rs",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/paper.rs",
+      "passed": 6,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "unittests src/lib.rs",
+      "passed": 169,
+      "failed": 0,
+      "ignored": 2,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "unittests src/bin/sim_measurement.rs",
+      "passed": 8,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/task12_latency_profile.rs",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    },
+    {
+      "target": "tests/task13_execution_api.rs",
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered": 0
+    }
+  ],
+  "total": {
+    "passed": 1190,
+    "failed": 0,
+    "ignored": 18,
+    "measured": 0,
+    "filtered": 1
+  },
+  "ignored_tests": [
+    {
+      "name": "training_runtime::tests::rtds_source::rtds_hong_kong_vpn_eight_hour_probe",
+      "reason": "requires an eight-hour public RTDS run through the local Hong Kong route"
+    },
+    {
+      "name": "dpt_observation_real_tests::ms_real_001_publication_reads_missing_components",
+      "reason": "需要本地 MS-REAL-001 原始输入；普通回归不运行外部数据场景"
+    },
+    {
+      "name": "real_2026_07_30_daily_manifest_header_is_validated",
+      "reason": "requires the local finalized 2026-07-30 dataset"
+    },
+    {
+      "name": "real_daily_manifest_quality_facts_keep_closed_separate_from_gaps_and_reactivation",
+      "reason": "requires the local finalized 2026-07-30 and 2026-07-31 datasets"
+    },
+    {
+      "name": "real_four_day_daily_manifests_pass_complete_admission",
+      "reason": "requires the local finalized 2026-07-30 through 2026-08-02 datasets"
+    },
+    {
+      "name": "real_snapshot_pending_updates_stitch_deterministically_across_read_batches",
+      "reason": "需要完整准入本地已最终化的 2026-08-04 六类 typed_raw 数据"
+    },
+    {
+      "name": "real_scoped_six_source_run_uses_one_deterministic_production_path",
+      "reason": "requires complete admission of the local finalized 2026-08-04 dataset"
+    },
+    {
+      "name": "frozen_gate_a_v2_final_opens_with_current_reader_and_both_replays",
+      "reason": "requires the frozen published Gate A V2 final at its approved absolute path"
+    },
+    {
+      "name": "real_complete_single_market_gate_a_candidate_is_closed_and_replayable",
+      "reason": "requires complete admission of the local finalized 2026-08-03 dataset"
+    },
+    {
+      "name": "real_gamma_terminal_is_visible_but_has_no_event_time_projection",
+      "reason": "requires complete admission of the local finalized 2026-08-04 dataset"
+    },
+    {
+      "name": "real_same_source_millisecond_orderbook_messages_preserve_captured_order",
+      "reason": "requires complete admission of the local finalized 2026-08-04 dataset"
+    },
+    {
+      "name": "real_same_source_millisecond_reducer_is_invariant_to_read_batching",
+      "reason": "requires complete admission of the local finalized 2026-08-04 dataset"
+    },
+    {
+      "name": "real_six_current_schemas_decode_through_the_validated_parquet_boundary",
+      "reason": "requires complete admission of the local finalized 2026-08-04 dataset"
+    },
+    {
+      "name": "real_waiting_exhaustion_summary_remains_audit_only",
+      "reason": "requires complete admission of the local finalized 2026-08-05 dataset"
+    },
+    {
+      "name": "real_ws_terminal_metadata_pair_merges_once",
+      "reason": "requires complete admission of the local finalized 2026-08-03 and 2026-08-04 datasets"
+    },
+    {
+      "name": "stage4_baseline::durable_replay_resource_baseline",
+      "reason": "阶段 4 资源与重放原始基线按需显式运行"
+    },
+    {
+      "name": "legacy_reader::tests::reads_real_5676e37_component_golden_report",
+      "reason": "需要通过 SIM_SYSTEM_LEGACY_COMPONENT_GOLDEN_REPORT 显式提供真实历史报告"
+    },
+    {
+      "name": "run_v2::tests::frozen_gate_a_representative_market_matches_golden_dual_time_execution_vertical",
+      "reason": "requires frozen Gate A V2 final and official CURRENT_QUERY endpoints"
+    }
+  ],
+  "explicitly_skipped": [
+    "four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second"
+  ],
+  "command": "cargo test --workspace --lib --bins --tests --examples --locked --offline -- --skip four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second",
+  "exit_code": 0,
+  "raw_log_sha256": "a65de761876f1ae43dd3554c1740f58eeafded4ea1fa265a63341f276adfbbb6"
+}

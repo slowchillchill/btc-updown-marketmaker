@@ -1,0 +1,10 @@
+{
+  "machine": "x86_64",
+  "system": "Linux",
+  "kernel": "7.0.0-34-generic",
+  "logical_cpus": 32,
+  "affinity_cpus": 32,
+  "cpu_model": "AMD RYZEN AI MAX+ 395 w/ Radeon 8060S",
+  "memory_total_kib": 120909948,
+  "scope": "既有本地 CPU；没有 GPU 测量。"
+}
