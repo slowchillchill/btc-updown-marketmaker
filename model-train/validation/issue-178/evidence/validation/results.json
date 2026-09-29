@@ -1,0 +1,701 @@
+[
+  {
+    "label": "wheel-build",
+    "exit_code": 0,
+    "targets": []
+  },
+  {
+    "label": "wheel-install",
+    "exit_code": 0,
+    "targets": []
+  },
+  {
+    "label": "native-continuous-tests",
+    "exit_code": 0,
+    "targets": [
+      {
+        "target": "unittests src/lib.rs",
+        "passed": 46,
+        "failed": 0,
+        "ignored": 19,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/rounding.rs",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      }
+    ],
+    "total": {
+      "passed": 49,
+      "failed": 0,
+      "ignored": 19,
+      "measured": 0,
+      "filtered_out": 0
+    }
+  },
+  {
+    "label": "ownership",
+    "exit_code": 0,
+    "targets": [
+      {
+        "target": "unittests src/lib.rs",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 64
+      }
+    ],
+    "total": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered_out": 64
+    }
+  },
+  {
+    "label": "frozen-cancel-race",
+    "exit_code": 0,
+    "targets": [
+      {
+        "target": "unittests src/lib.rs",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 64
+      }
+    ],
+    "total": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered_out": 64
+    }
+  },
+  {
+    "label": "full-book-MAIN-1x256",
+    "exit_code": 0,
+    "targets": [
+      {
+        "target": "unittests src/lib.rs",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 64
+      }
+    ],
+    "total": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered_out": 64
+    }
+  },
+  {
+    "label": "full-book-MAIN-30x1024",
+    "exit_code": 0,
+    "targets": [
+      {
+        "target": "unittests src/lib.rs",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 64
+      }
+    ],
+    "total": {
+      "passed": 1,
+      "failed": 0,
+      "ignored": 0,
+      "measured": 0,
+      "filtered_out": 64
+    }
+  },
+  {
+    "label": "workspace-tests",
+    "exit_code": 0,
+    "targets": [
+      {
+        "target": "unittests src/lib.rs",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "unittests src/lib.rs",
+        "passed": 431,
+        "failed": 0,
+        "ignored": 1,
+        "measured": 0,
+        "filtered_out": 1
+      },
+      {
+        "target": "unittests src/bin/data_collect_live_hot.rs",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "unittests src/bin/data_collect_paper_hot.rs",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "unittests src/bin/data_collect_price_anchor_backfill.rs",
+        "passed": 14,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "unittests src/bin/data_collect_training_collector.rs",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "unittests src/bin/real_source_alignment_probe.rs",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/binance_aggtrade_continuity_contract.rs",
+        "passed": 5,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/binance_contract.rs",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/bounded_queue_contract.rs",
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/collector_identity_contract.rs",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/dedupe_contract.rs",
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/deployment_binary_contract.rs",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/event_envelope_contract.rs",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/hot_path_handoff_contract.rs",
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/hourly_partition_contract.rs",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/market_discovery_contract.rs",
+        "passed": 9,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/parquet_writer_contract.rs",
+        "passed": 24,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/polymarket_contract.rs",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/polymarket_metadata_layout_contract.rs",
+        "passed": 15,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/polymarket_orderbook_v3_contract.rs",
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/polymarket_sdk_patch_contract.rs",
+        "passed": 21,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/polymarket_sdk_runtime_contract.rs",
+        "passed": 21,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/real_source_latency_contract.rs",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/source_format_contract.rs",
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/source_hourly_layout_contract.rs",
+        "passed": 14,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/stale_temporary_cleanup_contract.rs",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/training_collector_runtime_contract.rs",
+        "passed": 6,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "unittests src/lib.rs",
+        "passed": 34,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/phase0_contract.rs",
+        "passed": 37,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/phase0_dual_time_contract.rs",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/phase2_binance_reducer_contract.rs",
+        "passed": 21,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/phase2_canonical_contract.rs",
+        "passed": 11,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/phase2_metadata_reducer_contract.rs",
+        "passed": 12,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/phase2_polymarket_reducer_contract.rs",
+        "passed": 23,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/phase2_terminal_merger_contract.rs",
+        "passed": 10,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/public_pm_reduction_contract.rs",
+        "passed": 17,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/public_reference_contract.rs",
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "unittests src/lib.rs",
+        "passed": 109,
+        "failed": 0,
+        "ignored": 1,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "unittests src/bin/dpt-gate-a.rs",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "unittests src/bin/dpt-public-online.rs",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/phase1_admission_contract.rs",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 3,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/phase2_binance_reducer_real_contract.rs",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 1,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/phase2_canonical_run_contract.rs",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 1,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/phase2_gate_a_real_contract.rs",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 2,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/phase2_typed_raw_adapter_contract.rs",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 6,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "unittests src/lib.rs",
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/artifact_publication.rs",
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/core_normalization.rs",
+        "passed": 9,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/durable_replay.rs",
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/noe_result_reference.rs",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "unittests src/lib.rs",
+        "passed": 16,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "unittests src/lib.rs",
+        "passed": 9,
+        "failed": 0,
+        "ignored": 1,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/memory_v2.rs",
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/stage1_vertical_slice.rs",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/stage2_local_reservation.rs",
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/stage3_economic_lifecycle.rs",
+        "passed": 11,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/stage4_durable_replay.rs",
+        "passed": 6,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "unittests src/lib.rs",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "unittests src/bin/paper.rs",
+        "passed": 0,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/continuous.rs",
+        "passed": 25,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/economic_settlement.rs",
+        "passed": 9,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/market_fee_estimate.rs",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/paper.rs",
+        "passed": 6,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "unittests src/lib.rs",
+        "passed": 169,
+        "failed": 0,
+        "ignored": 2,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "unittests src/bin/sim_measurement.rs",
+        "passed": 8,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/task12_latency_profile.rs",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      },
+      {
+        "target": "tests/task13_execution_api.rs",
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "measured": 0,
+        "filtered_out": 0
+      }
+    ],
+    "total": {
+      "passed": 1190,
+      "failed": 0,
+      "ignored": 18,
+      "measured": 0,
+      "filtered_out": 1
+    },
+    "explicitly_skipped": [
+      "four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second"
+    ],
+    "counting": "每个cargo目标取最后一条结果，避免把其内部子进程复测再次计入总数"
+  },
+  {
+    "label": "native-clippy",
+    "exit_code": 0,
+    "targets": []
+  },
+  {
+    "label": "native-fmt",
+    "exit_code": 0,
+    "targets": []
+  },
+  {
+    "label": "workspace-fmt",
+    "exit_code": 0,
+    "targets": []
+  }
+]

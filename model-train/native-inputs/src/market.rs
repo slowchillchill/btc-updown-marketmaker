@@ -1,5 +1,5 @@
 //! 596/30 槽与六侧全量盘口；只消费公共所选事实，派生缓存和有限历史随市场退役。
-use crate::exact::{decimal, integer, ratio, round_f32, signed_log_f32 as log};
+use crate::exact::{InputProjection, decimal, integer, ratio, round_f32, signed_log_f32 as log};
 use contracts::{economics::EconomicRational as R, *};
 use rayon::prelude::*;
 use std::collections::{HashMap, VecDeque};
@@ -25,14 +25,14 @@ fn quality(q: MarketDataQuality) -> [f32; 6] {
     }] = 1.;
     v
 }
-fn seconds(a: i64, b: i64) -> f32 {
-    log(&ratio(i128::from(a) - i128::from(b), 1000))
+fn seconds(projection: &InputProjection, a: i64, b: i64) -> f32 {
+    projection.project(i128::from(a) - i128::from(b))
 }
-fn price(p: &R, pm: bool) -> f32 {
+fn price(projection: &InputProjection, p: &R, pm: bool) -> f32 {
     if pm {
         round_f32(&p.mul(&integer(2)).sub(&integer(1)))
     } else {
-        log(p)
+        projection.log(p)
     }
 }
 fn fraction(n: usize, d: usize) -> f32 {
@@ -48,14 +48,18 @@ fn anchors<'a, T>(f: &'a ObservedFactV1<T>, path: &str) -> Vec<&'a DirectObserva
         .collect()
 }
 /// T5 只用于已选单项直接锚点；不取多来源的最大时间冒充字段时间。
-pub(crate) fn t5(now: i64, a: Option<&DirectObservationAnchorV1>) -> [f32; 5] {
+pub(crate) fn t5(
+    projection: &InputProjection,
+    now: i64,
+    a: Option<&DirectObservationAnchorV1>,
+) -> [f32; 5] {
     let mut out = [0.; 5];
     if let Some(a) = a {
-        out[1] = seconds(now, a.received_at_utc_ms);
+        out[1] = seconds(projection, now, a.received_at_utc_ms);
         out[4] = 1.;
         if let Some(s) = a.source_event_at_utc_ms {
-            out[0] = seconds(now, s);
-            out[2] = seconds(a.received_at_utc_ms, s);
+            out[0] = seconds(projection, now, s);
+            out[2] = seconds(projection, a.received_at_utc_ms, s);
             out[3] = 1.;
         }
     }
@@ -86,15 +90,15 @@ impl TimeStats {
             }
         }
     }
-    fn features(&self) -> [f32; 9] {
+    fn features(&self, projection: &InputProjection) -> [f32; 9] {
         let mut out = [0.; 9];
         for i in 0..3 {
             if let Some((lo, hi)) = self.bounds[i] {
-                out[2 * i] = log(&ratio(lo, 1000));
+                out[2 * i] = projection.project(lo);
                 out[2 * i + 1] = if hi == lo {
                     out[2 * i]
                 } else {
-                    log(&ratio(hi, 1000))
+                    projection.project(hi)
                 };
             }
             out[6 + i] = fraction(self.known[i], self.count);
@@ -102,31 +106,47 @@ impl TimeStats {
         out
     }
 }
-fn e9(now: i64, times: impl IntoIterator<Item = (Option<i64>, Option<i64>)>) -> [f32; 9] {
+fn e9(
+    projection: &InputProjection,
+    now: i64,
+    times: impl IntoIterator<Item = (Option<i64>, Option<i64>)>,
+) -> [f32; 9] {
     let mut stats = TimeStats::default();
     for time in times {
         stats.push(now, time);
     }
-    stats.features()
+    stats.features(projection)
 }
-pub(crate) fn envelope(now: i64, a: &[&DirectObservationAnchorV1]) -> [f32; 9] {
+pub(crate) fn envelope(
+    projection: &InputProjection,
+    now: i64,
+    a: &[&DirectObservationAnchorV1],
+) -> [f32; 9] {
     e9(
+        projection,
         now,
         a.iter()
             .map(|a| (a.source_event_at_utc_ms, Some(a.received_at_utc_ms))),
     )
 }
-fn v7(now: i64, value: Option<R>, a: Option<&DirectObservationAnchorV1>, pm: bool) -> [f32; 7] {
+fn v7(
+    projection: &InputProjection,
+    now: i64,
+    value: Option<R>,
+    a: Option<&DirectObservationAnchorV1>,
+    pm: bool,
+) -> [f32; 7] {
     let mut o = [0.; 7];
     if let Some(v) = value {
-        o[0] = price(&v, pm);
+        o[0] = price(projection, &v, pm);
         o[1] = 1.;
     }
-    o[2..].copy_from_slice(&t5(now, a));
+    o[2..].copy_from_slice(&t5(projection, now, a));
     o
 }
 
 pub(crate) fn rules_with_static(
+    projection: &InputProjection,
     o: &MarketBusinessObservationV1,
     now: i64,
     tail: &[f32; 16],
@@ -139,6 +159,7 @@ pub(crate) fn rules_with_static(
             .find(|a| a.asset.outcome.index as usize == i)
         {
             out[i * 7..i * 7 + 7].copy_from_slice(&v7(
+                projection,
                 now,
                 visible(&a.tick).map(decimal),
                 one(&anchors(&a.tick, "tick")),
@@ -238,6 +259,7 @@ pub(crate) struct MarketHistory {
 }
 
 pub(crate) fn side(
+    projection: &InputProjection,
     out: &mut [f32],
     now: i64,
     levels: Option<Vec<(&ExactDecimal, &ExactDecimal)>>,
@@ -248,7 +270,7 @@ pub(crate) fn side(
     book: &mut Arc<Vec<[f32; 9]>>,
     bid: bool,
 ) -> Option<(R, Vec<DirectObservationAnchorV1>)> {
-    out[5..14].copy_from_slice(&envelope(now, &a));
+    out[5..14].copy_from_slice(&envelope(projection, now, &a));
     let Some(levels) = levels else {
         *previous = SidePrevious::default();
         *book = Arc::default();
@@ -295,21 +317,21 @@ pub(crate) fn side(
     let total = if warm && same_prices && !quantity_changed.iter().any(|v| *v) {
         previous.total.clone().unwrap()
     } else {
-        cached.summary[0] = log(&integer(valid.len()));
+        cached.summary[0] = projection.log(&integer(valid.len()));
         let total = sum(valid.iter().map(|i| &cached.levels[*i].quantity));
-        cached.summary[1] = log(&total);
+        cached.summary[1] = projection.log(&total);
         total
     };
     out[0] = 1.;
     out[1..3].copy_from_slice(&cached.summary);
     if let Some(old) = &previous.total {
-        out[3] = log(&total.sub(old));
+        out[3] = projection.log(&total.sub(old));
         out[4] = 1.;
     }
     let best = valid.first().map(|i| cached.levels[*i].price.clone());
     let best_changed = best != previous.best;
     if let Some((best, old)) = best.as_ref().zip(previous.best.as_ref()) {
-        out[14] = log(&best.sub(old));
+        out[14] = projection.log(&best.sub(old));
         out[15] = 1.;
     }
     let mut by_path: HashMap<&str, Vec<&DirectObservationAnchorV1>> = HashMap::new();
@@ -336,7 +358,7 @@ pub(crate) fn side(
                     {
                         cached.book[old][3..8].try_into().unwrap()
                     } else {
-                        t5(now, Some(a))
+                        t5(projection, now, Some(a))
                     }
                 })
         });
@@ -361,11 +383,11 @@ pub(crate) fn side(
                     if let Some(old) = level.row {
                         *output = cached.book[old];
                     } else {
-                        output[0] = price(&level.price, pm);
+                        output[0] = price(projection, &level.price, pm);
                         output[2] = 1.;
                     }
                     if level.row.is_none() || quantity_changed[*index] {
-                        output[1] = log(&level.quantity);
+                        output[1] = projection.log(&level.quantity);
                     }
                     output[3..8].copy_from_slice(time);
                     if level.row.is_none() || best_changed {
@@ -374,7 +396,7 @@ pub(crate) fn side(
                         } else {
                             level.price.sub(best.as_ref().unwrap())
                         };
-                        output[8] = log(&distance);
+                        output[8] = projection.log(&distance);
                     }
                 }
             });
@@ -395,7 +417,12 @@ pub(crate) fn side(
     best_identity
 }
 
-fn reference(out: &mut [f32], o: &MarketBusinessObservationV1, now: i64) {
+fn reference(
+    projection: &InputProjection,
+    out: &mut [f32],
+    o: &MarketBusinessObservationV1,
+    now: i64,
+) {
     let selected = visible(&o.settlement_reference).map(|r| match r {
         BtcSettlementReferenceV1::ChainlinkSpot => 0,
         BtcSettlementReferenceV1::ChainlinkTwapThirtySeconds => 1,
@@ -416,18 +443,18 @@ fn reference(out: &mut [f32], o: &MarketBusinessObservationV1, now: i64) {
         }
         EffectiveMarketReferenceV1::TemporaryTwap(t) => {
             out[4] = 1.;
-            out[8..13].copy_from_slice(&t5(now, Some(&t.direct_anchor)));
-            out[13] = log(&integer(t.value.window_s));
+            out[8..13].copy_from_slice(&t5(projection, now, Some(&t.direct_anchor)));
+            out[13] = projection.log(&integer(t.value.window_s));
             Some(decimal(&t.value.price_usd_per_btc))
         }
         EffectiveMarketReferenceV1::OfficialAnchor(f) => {
             out[5] = 1.;
-            out[8..13].copy_from_slice(&t5(now, one(&anchors(f, "official_anchor"))));
+            out[8..13].copy_from_slice(&t5(projection, now, one(&anchors(f, "official_anchor"))));
             visible(f).map(|v| decimal(&v.price_usd_per_btc))
         }
     };
     if let Some(p) = &effective {
-        out[7] = log(p);
+        out[7] = projection.log(p);
     }
     let vals = [
         visible(&o.chainlink_spot).map(|v| decimal(&v.price_usd_per_btc)),
@@ -440,17 +467,24 @@ fn reference(out: &mut [f32], o: &MarketBusinessObservationV1, now: i64) {
         anchors(&o.chainlink_twap_sixty, "chainlink_twap_sixty"),
     ];
     for i in 0..3 {
-        out[14 + 7 * i..21 + 7 * i].copy_from_slice(&v7(now, vals[i].clone(), one(&aa[i]), false));
+        out[14 + 7 * i..21 + 7 * i].copy_from_slice(&v7(
+            projection,
+            now,
+            vals[i].clone(),
+            one(&aa[i]),
+            false,
+        ));
     }
     if let Some((p, e)) = selected
         .and_then(|i| vals[i].as_ref())
         .zip(effective.as_ref())
     {
-        out[35] = log(&p.sub(e));
+        out[35] = projection.log(&p.sub(e));
         out[36] = 1.;
     }
 }
 fn history(
+    projection: &InputProjection,
     out: &mut [f32],
     q: &mut VecDeque<Sample>,
     cached: &mut [f32; 4],
@@ -479,7 +513,7 @@ fn history(
         return;
     }
     let last = &q[q.len() - 1];
-    out[1] = log(&last.value.sub(&q[q.len() - 2].value));
+    out[1] = projection.log(&last.value.sub(&q[q.len() - 2].value));
     let squares = q
         .iter()
         .zip(q.iter().skip(1))
@@ -489,12 +523,17 @@ fn history(
         })
         .fold(R::zero(), |a, b| a.add(&b));
     out[2] = crate::exact::sqrt_log_f32(&squares.divided_by(&integer(q.len() - 1)));
-    out[3] = seconds(last.at, q[0].at);
+    out[3] = seconds(projection, last.at, q[0].at);
     cached.copy_from_slice(out);
 }
-fn lifecycle(out: &mut [f32], o: &MarketBusinessObservationV1, now: i64) {
-    out[0] = seconds(now, o.market.window.start_at_utc_ms);
-    out[1] = seconds(o.market.window.end_at_utc_ms, now);
+fn lifecycle(
+    projection: &InputProjection,
+    out: &mut [f32],
+    o: &MarketBusinessObservationV1,
+    now: i64,
+) {
+    out[0] = seconds(projection, now, o.market.window.start_at_utc_ms);
+    out[1] = seconds(projection, o.market.window.end_at_utc_ms, now);
     out[2..8].copy_from_slice(&quality(o.lifecycle.quality));
     if let Some(s) = visible(&o.lifecycle) {
         out[8] = 1.;
@@ -515,7 +554,11 @@ fn lifecycle(out: &mut [f32], o: &MarketBusinessObservationV1, now: i64) {
         };
         out[9 + i] = 1.;
     }
-    out[14..23].copy_from_slice(&envelope(now, &anchors(&o.lifecycle, "lifecycle")));
+    out[14..23].copy_from_slice(&envelope(
+        projection,
+        now,
+        &anchors(&o.lifecycle, "lifecycle"),
+    ));
     // 原 producer 只在至少一字段存在时输出 TradingState，三字段同次替换、同质量。
     let fields = [
         (&o.active, "active", 30),
@@ -532,11 +575,11 @@ fn lifecycle(out: &mut [f32], o: &MarketBusinessObservationV1, now: i64) {
             out[i] = if *v { 1. } else { 0. };
             out[i + 1] = 1.;
         }
-        out[i + 2..i + 11].copy_from_slice(&envelope(now, &anchors(f, name)));
+        out[i + 2..i + 11].copy_from_slice(&envelope(projection, now, &anchors(f, name)));
     }
     out[63..69].copy_from_slice(&quality(o.terminal.quality));
     let a = anchors(&o.terminal, "terminal");
-    let terminal_envelope = envelope(now, &a);
+    let terminal_envelope = envelope(projection, now, &a);
     out[72..81].copy_from_slice(&terminal_envelope);
     out[83..92].copy_from_slice(&terminal_envelope);
     out[94..103].copy_from_slice(&terminal_envelope);
@@ -554,7 +597,7 @@ fn lifecycle(out: &mut [f32], o: &MarketBusinessObservationV1, now: i64) {
                     out[70 + i] = 1.;
                 }
                 if let Some(p) = payout_vector.iter().find(|p| p.asset == asset.asset) {
-                    out[81 + 11 * i] = price(&decimal(&p.payout_pusd_per_share), true);
+                    out[81 + 11 * i] = price(projection, &decimal(&p.payout_pusd_per_share), true);
                     out[82 + 11 * i] = 1.;
                 }
             }
@@ -562,6 +605,7 @@ fn lifecycle(out: &mut [f32], o: &MarketBusinessObservationV1, now: i64) {
     }
 }
 fn bba(
+    projection: &InputProjection,
     out: &mut [f32],
     f: &ObservedFactV1<CanonicalBbaFactV1>,
     now: i64,
@@ -579,11 +623,11 @@ fn bba(
             ]
         })
         .unwrap_or([None; 3]);
-    let time = t5(now, one(&a));
+    let time = t5(projection, now, one(&a));
     for (i, field) in fields.iter().enumerate() {
         let start = 7 + 7 * i;
         if let Some(value) = field.map(decimal) {
-            out[start] = price(&value, i < 2);
+            out[start] = price(projection, &value, i < 2);
             out[start + 1] = 1.;
         }
         out[start + 2..start + 7].copy_from_slice(&time);
@@ -598,33 +642,43 @@ fn bba(
             )
         })
 }
-fn pm_trade(out: &mut [f32], f: &ObservedFactV1<PublicTradeV2>, now: i64) {
+fn pm_trade(
+    projection: &InputProjection,
+    out: &mut [f32],
+    f: &ObservedFactV1<PublicTradeV2>,
+    now: i64,
+) {
     out[..6].copy_from_slice(&quality(f.quality));
     if let Some(t) = visible(f) {
         out[6] = 1.;
-        out[7] = price(&decimal(&t.price_pusd_per_share), true);
-        out[8] = log(&decimal(&t.quantity_shares));
+        out[7] = price(projection, &decimal(&t.price_pusd_per_share), true);
+        out[8] = projection.log(&decimal(&t.quantity_shares));
         out[if t.aggressor_side == TradeSide::Buy {
             9
         } else {
             10
         }] = 1.;
         if let Some(fee) = &t.fee_rate_bps {
-            out[11] = log(&decimal(fee));
+            out[11] = projection.log(&decimal(fee));
             out[12] = 1.;
         }
     }
-    out[13..].copy_from_slice(&t5(now, one(&anchors(f, "public_trade"))));
+    out[13..].copy_from_slice(&t5(projection, now, one(&anchors(f, "public_trade"))));
 }
-fn binance_trade(out: &mut [f32], f: &ObservedFactV1<BinanceAggregateTradeReferenceV1>, now: i64) {
+fn binance_trade(
+    projection: &InputProjection,
+    out: &mut [f32],
+    f: &ObservedFactV1<BinanceAggregateTradeReferenceV1>,
+    now: i64,
+) {
     out[..6].copy_from_slice(&quality(f.quality));
     if let Some(t) = visible(f) {
         out[6] = 1.;
-        out[7] = log(&decimal(&t.price_usdt_per_btc));
-        out[8] = log(&decimal(&t.quantity_btc));
+        out[7] = projection.log(&decimal(&t.price_usdt_per_btc));
+        out[8] = projection.log(&decimal(&t.quantity_btc));
         out[9] = if t.buyer_is_maker { 1. } else { 0. };
     }
-    out[10..].copy_from_slice(&t5(now, one(&anchors(f, "binance_trade"))));
+    out[10..].copy_from_slice(&t5(projection, now, one(&anchors(f, "binance_trade"))));
 }
 pub(crate) struct Trade {
     pub(crate) p: R,
@@ -633,7 +687,13 @@ pub(crate) struct Trade {
     pub(crate) fee: Option<R>,
     pub(crate) time: (Option<i64>, Option<i64>),
 }
-pub(crate) fn trades(out: &mut [f32], rows: impl Iterator<Item = Trade>, now: i64, pm: bool) {
+pub(crate) fn trades(
+    projection: &InputProjection,
+    out: &mut [f32],
+    rows: impl Iterator<Item = Trade>,
+    now: i64,
+    pm: bool,
+) {
     let mut n = 0usize;
     let mut first = None;
     let mut last = R::zero();
@@ -683,7 +743,7 @@ pub(crate) fn trades(out: &mut [f32], rows: impl Iterator<Item = Trade>, now: i6
     if n == 0 {
         return;
     }
-    out[0] = log(&integer(n));
+    out[0] = projection.log(&integer(n));
     for (i, p) in [
         first.unwrap(),
         last,
@@ -694,31 +754,31 @@ pub(crate) fn trades(out: &mut [f32], rows: impl Iterator<Item = Trade>, now: i6
     .iter()
     .enumerate()
     {
-        out[1 + i] = price(p, pm);
+        out[1 + i] = price(projection, p, pm);
     }
-    out[6] = log(&qty);
+    out[6] = projection.log(&qty);
     if pm {
         out[7] = fraction(known_qty, n);
-        out[8] = log(&amount);
+        out[8] = projection.log(&amount);
         for (i, c) in counts.into_iter().enumerate() {
-            out[9 + i] = log(&integer(c));
+            out[9 + i] = projection.log(&integer(c));
         }
         for i in 0..2 {
-            out[13 + i] = log(&side_qty[i]);
+            out[13 + i] = projection.log(&side_qty[i]);
             out[15 + i] = fraction(side_known[i], counts[i]);
         }
         if known_fees > 0 {
-            out[17] = log(&fees.divided_by(&integer(known_fees)));
+            out[17] = projection.log(&fees.divided_by(&integer(known_fees)));
         }
         out[18] = fraction(known_fees, n);
-        out[19..].copy_from_slice(&times.features());
+        out[19..].copy_from_slice(&times.features(projection));
     } else {
-        out[7] = log(&amount);
+        out[7] = projection.log(&amount);
         for i in 0..2 {
-            out[8 + i] = log(&integer(counts[i]));
-            out[10 + i] = log(&side_qty[i]);
+            out[8 + i] = projection.log(&integer(counts[i]));
+            out[10 + i] = projection.log(&side_qty[i]);
         }
-        out[12..].copy_from_slice(&times.features());
+        out[12..].copy_from_slice(&times.features(projection));
     }
 }
 fn event_class(p: &PublicBusinessPayloadV1) -> (usize, usize) {
@@ -773,7 +833,12 @@ fn event_class(p: &PublicBusinessPayloadV1) -> (usize, usize) {
         },
     }
 }
-fn events(out: &mut [f32], o: &MarketBusinessObservationV1, now: i64) {
+fn events(
+    projection: &InputProjection,
+    out: &mut [f32],
+    o: &MarketBusinessObservationV1,
+    now: i64,
+) {
     let mut counts = [0usize; 23];
     let mut times: [TimeStats; 9] = std::array::from_fn(|_| TimeStats::default());
     for event in o.group_events.iter() {
@@ -841,17 +906,18 @@ fn events(out: &mut [f32], o: &MarketBusinessObservationV1, now: i64) {
         } else {
             (56, 77)
         };
-        trades(&mut out[start..end], rows, now, i < 2);
+        trades(projection, &mut out[start..end], rows, now, i < 2);
     }
     for (i, c) in counts.into_iter().enumerate() {
-        out[77 + i] = log(&integer(c));
+        out[77 + i] = projection.log(&integer(c));
     }
     for (i, t) in times.into_iter().enumerate() {
-        out[100 + 9 * i..109 + 9 * i].copy_from_slice(&t.features());
+        out[100 + 9 * i..109 + 9 * i].copy_from_slice(&t.features(projection));
     }
 }
 
 pub(crate) fn encode(
+    projection: &InputProjection,
     o: &MarketBusinessObservationV1,
     rule: &[f32; 30],
     now: i64,
@@ -859,7 +925,7 @@ pub(crate) fn encode(
 ) -> ([f32; 596], BookLevels) {
     let mut out = [0.; 596];
     let mut book: BookLevels = std::array::from_fn(|_| Arc::default());
-    reference(&mut out[..37], o, now);
+    reference(projection, &mut out[..37], o, now);
     let mut samples: [Option<(R, Vec<DirectObservationAnchorV1>)>; 6] =
         std::array::from_fn(|_| None);
     // 六侧输入互不依赖；同一 Rayon 池按侧批量准备，结果仍按规范顺序写回。
@@ -885,6 +951,7 @@ pub(crate) fn encode(
                     );
                     let levels = visible(fact);
                     side(
+                        projection,
                         features,
                         now,
                         levels.map(|v| {
@@ -908,6 +975,7 @@ pub(crate) fn encode(
             } else {
                 let levels = visible(&o.binance_depth).map(|d| if bid { &d.bids } else { &d.asks });
                 side(
+                    projection,
                     features,
                     now,
                     levels.map(|v| {
@@ -936,8 +1004,18 @@ pub(crate) fn encode(
                 out[base + 6 + j * 16..base + 22 + j * 16]
                     .copy_from_slice(&side_features[2 * i + j]);
             }
-            samples[i] = bba(&mut out[151 + 28 * i..179 + 28 * i], &a.best_bid_ask, now);
-            pm_trade(&mut out[207 + 18 * i..225 + 18 * i], &a.public_trade, now);
+            samples[i] = bba(
+                projection,
+                &mut out[151 + 28 * i..179 + 28 * i],
+                &a.best_bid_ask,
+                now,
+            );
+            pm_trade(
+                projection,
+                &mut out[207 + 18 * i..225 + 18 * i],
+                &a.public_trade,
+                now,
+            );
         }
     }
     out[113..119].copy_from_slice(&quality(o.binance_depth.quality));
@@ -971,11 +1049,12 @@ pub(crate) fn encode(
                 .collect(),
         )
     });
-    binance_trade(&mut out[243..258], &o.binance_trade, now);
-    events(&mut out[258..439], o, now);
-    lifecycle(&mut out[439..542], o, now);
+    binance_trade(projection, &mut out[243..258], &o.binance_trade, now);
+    events(projection, &mut out[258..439], o, now);
+    lifecycle(projection, &mut out[439..542], o, now);
     for (i, s) in samples.into_iter().enumerate() {
         history(
+            projection,
             &mut out[542 + 4 * i..546 + 4 * i],
             &mut h.series[i],
             &mut h.history_features[i],

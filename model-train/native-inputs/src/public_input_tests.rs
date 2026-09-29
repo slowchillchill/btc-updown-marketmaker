@@ -784,7 +784,15 @@ async fn native_rebates_project_exact_contribution_ratios_and_old_sum() {
         assert_eq!(market.rebates[0].paid_pusd, expected);
         let economics = AccountEconomicsReadV1::from_ledger(&read);
         let mut slots = [0.; 18];
-        crate::account::encode_rebates(&mut slots, 0, &economics, &[&market.condition_id], 0, true);
+        crate::account::encode_rebates(
+            &mut slots,
+            0,
+            &economics,
+            &[&market.condition_id],
+            0,
+            true,
+            &crate::exact::InputProjection::default(),
+        );
         assert_eq!(
             slots[12].to_bits(),
             if market.condition_id.0 == CONDITION_ID {
@@ -811,6 +819,7 @@ async fn native_rebates_project_exact_contribution_ratios_and_old_sum() {
             .collect::<Vec<_>>(),
         0,
         true,
+        &crate::exact::InputProjection::default(),
     );
     assert_eq!(
         slots[12].to_bits(),
@@ -986,7 +995,12 @@ async fn old_pairing_is_market_local_before_sum() {
         .map(|m| &m.condition_id)
         .collect::<Vec<_>>();
     let mut slots = [0.; 3];
-    crate::values::slot(&mut slots, 0, crate::account::paired_shares(&read, &ids));
+    crate::values::slot(
+        &crate::exact::InputProjection::default(),
+        &mut slots,
+        0,
+        crate::account::paired_shares(&read, &ids),
+    );
     assert_eq!(slots, [0., 1., 1.], "跨市场A5/B5不能变成pair5");
     driver.stop_and_drain().unwrap();
 }

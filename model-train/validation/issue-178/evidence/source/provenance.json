@@ -1,0 +1,362 @@
+{
+  "baseline": "bdb54b4e46adf29a8b607171338a6efce701d301",
+  "prior_evidence": {
+    "path": "model-train/validation/issue-176/evidence/source/provenance.json",
+    "sha256": "17a341bf053d0bfda8b4fa25dd5b90d9b759adb0f609ed7721abe28dadba53c4"
+  },
+  "models": {
+    "MAIN-1x256": {
+      "files": {
+        "action_cancel.onnx": {
+          "sha256": "ebb61cd864b3e7e2b56d356dab8196675b5d675dd5c6b734dee9713aec8aeb80",
+          "bytes": 417806
+        },
+        "action_cancel.onnx.data": {
+          "sha256": "5486a8f2c76b0a75a4176910b3cfaa1f506775c3d9fb4028d2d88be1944cef49",
+          "bytes": 134144
+        },
+        "action_cancel_context.onnx": {
+          "sha256": "c08feeaf6dcb75e810658fd0f6587ff91580bbf86424487bd66228d408409109",
+          "bytes": 1052622
+        },
+        "action_cancel_context.onnx.data": {
+          "sha256": "e62aa4ef168d37bdc2ecc47df45135eea3ed8533bbf894e444a91c4e94139e4d",
+          "bytes": 351744
+        },
+        "action_family.onnx": {
+          "sha256": "229d5bee72a8a4fef59b347a2260bb2aa14375920359c5b69fd9baa7e760831b",
+          "bytes": 700963
+        },
+        "action_family.onnx.data": {
+          "sha256": "a95e42ce9de963e89cf3885b7c778b79310b86679d597c01893d549b1034ed01",
+          "bytes": 617984
+        },
+        "action_objects.onnx": {
+          "sha256": "006fb6c8c391bbb145bfd4768f6e87991cd805b6af7af6aebd7498be856b7cf8",
+          "bytes": 115291
+        },
+        "action_objects.onnx.data": {
+          "sha256": "5b596731b596c6c050e021e6a0ce248776fbeec3f0f6a989ea90181bfa459b52",
+          "bytes": 162240
+        },
+        "action_price.onnx": {
+          "sha256": "0f1715c5d66517479276d81149671166df77537c4435e86611d4a697a1780746",
+          "bytes": 1209408
+        },
+        "action_price.onnx.data": {
+          "sha256": "0d56b57b86e35ac6b4014e73df67da42759cfa8b30b3e7ab8e9402e8754c94b2",
+          "bytes": 867740
+        },
+        "action_quantity.onnx": {
+          "sha256": "abdee0aa0ae126b42c5820857436c20d88078cc8aa25181a8540e59edd7399e5",
+          "bytes": 1216486
+        },
+        "action_quantity.onnx.data": {
+          "sha256": "b48781fe51a700d4d48613b8c11a5f97d8ccae0f9c14328d2ef2736095f536c0",
+          "bytes": 359936
+        },
+        "action_variant.onnx": {
+          "sha256": "22a52f18cf3bb38d1a13fddc60e23f93168756282e0e6c03127ec5ff415705b0",
+          "bytes": 1216405
+        },
+        "action_variant.onnx.data": {
+          "sha256": "59c5304262b124adf319b78a16b645f3f208530b599f87d3dc85175eb221e39d",
+          "bytes": 352768
+        },
+        "benchmark_configuration.json": {
+          "sha256": "2c2e372ac24d91bc6d5d5f94f064fa48888d09f46a510f2fb7898df0fea23cb5",
+          "bytes": 422
+        },
+        "export_metadata.json": {
+          "sha256": "edac2eda58f681b2a2c322cb10158d5f08edd68762ba4ad2691c2485422e20c9",
+          "bytes": 11849
+        },
+        "initial_weights.pt": {
+          "sha256": "57815c6606756e45ff6f432b07abdb34d41ba991db1e821a5098b30cb92e52f4",
+          "bytes": 4907742
+        },
+        "state_encoder.onnx": {
+          "sha256": "aaf1fc0abc1f7acc9c164d6de77d201c578b6c4139a3099f42d2f9b0296fa8b7",
+          "bytes": 756472
+        },
+        "state_encoder.onnx.data": {
+          "sha256": "bf59313a513efbf11b2132a0ca1a44f20e4f0ce35ade13c738cc2b74bd3516c0",
+          "bytes": 3081256
+        }
+      },
+      "state_parameter_tensors_equal_to_original_history": 32,
+      "baseline_and_candidate_use_identical_graphs": true
+    },
+    "MAIN-30x1024": {
+      "files": {
+        "action_cancel.onnx": {
+          "sha256": "3cc964196b4e4dc067dffc6a83df4b9bbd638c423a691bc62da1776a0e64eb43",
+          "bytes": 1593410
+        },
+        "action_cancel.onnx.data": {
+          "sha256": "3f2aee0730ba218df48ec2f876cc3c86a2bfb793391c9f0541018d7cb6c17edc",
+          "bytes": 2162688
+        },
+        "action_cancel_context.onnx": {
+          "sha256": "585122fb0a68b30d4eb3f6929f7bb8da08a99bfb355a860e59087df63d8d0814",
+          "bytes": 4243521
+        },
+        "action_cancel_context.onnx.data": {
+          "sha256": "af4ae6d991389b81d40b9d7a1f55fa88a05c6397aaf4cd0b4eafc50d2ad268e4",
+          "bytes": 5373952
+        },
+        "action_family.onnx": {
+          "sha256": "fa7b1d73be2945895b1658eb5eda9a2e3b5e69a168e2ffac51807a6000d7b448",
+          "bytes": 2346074
+        },
+        "action_family.onnx.data": {
+          "sha256": "e122003f43a1f4b793070c0059ce120401b25991de0f8fa4cb15a544cf9478ca",
+          "bytes": 9568256
+        },
+        "action_objects.onnx": {
+          "sha256": "c9d519e2c3c3240f7a95185f2cefa9e705103f38cae2a8777b9144129e4e8a3b",
+          "bytes": 115297
+        },
+        "action_objects.onnx.data": {
+          "sha256": "0c76e555b393d2f7f78631e397e356d17fce2a2f6e319e0143cce4565a06adf0",
+          "bytes": 1430976
+        },
+        "action_price.onnx": {
+          "sha256": "0a029b1205c72f6bbe0288f4a695e6804734d1a8ccead84cad0b43749ad9eee9",
+          "bytes": 4853717
+        },
+        "action_price.onnx.data": {
+          "sha256": "ff8603497b1a0f71eb410dfde2f81fb93bbf153a60567bb54f687fb493b6b496",
+          "bytes": 7471104
+        },
+        "action_quantity.onnx": {
+          "sha256": "9dfea61588ef7c82a2fb8772ee85e4e1a14c81dbfb0b3cdeb3097d2f91036876",
+          "bytes": 4898161
+        },
+        "action_quantity.onnx.data": {
+          "sha256": "1493d6450d6d419900af685570dd1874b2d4f8fe25fad2b7be7521e8726a1307",
+          "bytes": 5373952
+        },
+        "action_variant.onnx": {
+          "sha256": "742036e5738439538ddde11cf8965e229cfaac04b140d7c3d0bf7cc2e29d4313",
+          "bytes": 4898087
+        },
+        "action_variant.onnx.data": {
+          "sha256": "0e85d98f609b2aed22eb9afbe0ad8062bd9ae3c98bb3b9de8a8f9da04976fcf7",
+          "bytes": 5373952
+        },
+        "benchmark_configuration.json": {
+          "sha256": "94fc2fd3c196489a70e0ab60e123e914f4d83a1e942c8b2f0646594f89625947",
+          "bytes": 426
+        },
+        "export_metadata.json": {
+          "sha256": "505330fc4a23eee12b42ed28bcefdb9eebacae869babbe321c9005fed5c0236f",
+          "bytes": 11871
+        },
+        "initial_weights.pt": {
+          "sha256": "1ca30ff16c914e7011962ec2de2da88b52cb573d0a054f03e0d870487bd6b4e7",
+          "bytes": 790382941
+        },
+        "state_encoder.onnx": {
+          "sha256": "01cc7839560ceb82d7018b6f6f33c4f7ba4066aea0a184fe9a9194b390328eaa",
+          "bytes": 4580651
+        },
+        "state_encoder.onnx.data": {
+          "sha256": "e53ec40fea43fe316b20d8d01caaa4a3864fd015c7d6d3ca8d9b27a19a21b39a",
+          "bytes": 769530408
+        }
+      },
+      "state_parameter_tensors_equal_to_original_history": 206,
+      "baseline_and_candidate_use_identical_graphs": true
+    }
+  },
+  "checkpoints": {
+    "201582": {
+      "model_history_sha256": "866d58b1c865bb8ca729861476e689d04bac2275ee687d1cb6827e80cb6e4539",
+      "actual_native_warm_caches": {
+        "baseline": {
+          "sha256": "e12862388885459691b37f25b2d54a6c502ea0a4a09259ad0a2e273e8e354222",
+          "bytes": 3005997,
+          "native_preparation_groups": 201241,
+          "native_preparation_ns": 50605797294,
+          "historical_model_inference_rerun": false
+        },
+        "candidate": {
+          "sha256": "d89791276aa6509a09bbc46af01f5194bc507b500cea67c0b256de4b03368c78",
+          "bytes": 3005997,
+          "native_preparation_groups": 201241,
+          "native_preparation_ns": 35451942879,
+          "historical_model_inference_rerun": false
+        }
+      }
+    },
+    "418584": {
+      "model_history_sha256": "f64329d7b30c31f46468071feecd5f853dc85c2a447a7e9c53e8cd755fb16644",
+      "actual_native_warm_caches": {
+        "baseline": {
+          "sha256": "f715a14ba8bcdd5e8ad6e8f91c687a99a2eace154591cdd48d3c982d40da30dc",
+          "bytes": 6745374,
+          "native_preparation_groups": 418243,
+          "native_preparation_ns": 1441301638686,
+          "historical_model_inference_rerun": false
+        },
+        "candidate": {
+          "sha256": "39ed045b804b096a0864b57210adced2c69ad5ad8caff17bf41f526345134a26",
+          "bytes": 6745373,
+          "native_preparation_groups": 418243,
+          "native_preparation_ns": 971802545250,
+          "historical_model_inference_rerun": false
+        }
+      }
+    }
+  },
+  "config_sha256": "ef2e712a6cf44ce31e3a3253d84d7938c2991ec74937bd02f853aed604b1c008",
+  "record_completion_sha256": "cc3120cf4348b06dda62b77c4d101396b9a336e6f96b063eaccd31c3ee932347",
+  "packed": {
+    "inputs.f32": "9b40c87a5a667724c4c5b8d626ce38e4330dcc1bf4650407ea9304840a6144d0",
+    "frames.json": "d14a08fc3ae3c197d18b08891cd16686ea927cd18e01a645c3fda3f86b21dc50",
+    "metadata.json": "5f7f9d4175c1fc7ddc6e4d5656b99fd6da089ab3c8e516fce63727006e33ecd4"
+  },
+  "ort_library": {
+    "filename": "libonnxruntime.so.1.28.0",
+    "sha256": "aa4079d18f4ea7a5f3a94d80cd4bbe0f2740436626622d64d793803a20381083"
+  },
+  "actual_native_warm_builds": {
+    "baseline": {
+      "binary_sha256": "ec740f4f840154651a572dbe4f1b79eae848cd43f193e7733742b2db01b2ee4f",
+      "source_identities": {
+        "baseline": "bdb54b4e46adf29a8b607171338a6efce701d301",
+        "variant": "baseline",
+        "files": {
+          "model-train/native-inputs/Cargo.lock": "ddd86696aa9ec46630f2fd709351f1e3c1dc3c023d453c9829131f38251ff757",
+          "model-train/native-inputs/Cargo.toml": "c9d226c26b5c8d8926df4349061190d34e6c82435960fe76c0f123debca6043c",
+          "model-train/native-inputs/tests/rounding.rs": "ab86564209338b0457491625be593851c469f4c5c3490e28cddaedf39742e095",
+          "model-train/native-inputs/examples/frame_latency.rs": "ef7f73cfd56fb710b9500e47e65e9ff7ef14af599584b13e2df63039becce65d",
+          "model-train/native-inputs/examples/replay_projection.rs": "b3faedaaee8b22e1529e8e8763f5f67028b9df80b65555ab3a09f15adf1c4cc3",
+          "model-train/native-inputs/src/buy_tests.rs": "11fd2595e2fecae76fe34f254621fe648950cfeb8392f89d13775b9c518c2e5c",
+          "model-train/native-inputs/src/market.rs": "41f51072aa44778f86e14a9109c7d8f4d40655af1bde0c7e2a68c52f46970228",
+          "model-train/native-inputs/src/ort_actor.rs": "76826d17c75a9404d9159468562bcf6b8fcf907941230a8d2fbb38d25e104f61",
+          "model-train/native-inputs/src/packing.rs": "46b9aeaef341acd7b4f9bee512480a1e39f544b1e0e4479983a43d286954eaa2",
+          "model-train/native-inputs/src/lib.rs": "6dee0c0ebf7cadc4a1e17f5fb2e0bb0c9e5151e05a47660ba132f5ab89d3be0e",
+          "model-train/native-inputs/src/public_input_tests.rs": "80fa633d486043f64d74a9c4531d242955f4bc59e7c1af3005a497555c408d31",
+          "model-train/native-inputs/src/market_tests.rs": "14d7aff9f6e540aca6e4b5b43716615541b5863a17cf7dff2d9f3fecdef7ab5a",
+          "model-train/native-inputs/src/cancel.rs": "a87101ff7f1e062553cec9e4377b21511bc7e504abd47228ad9302e65b39483f",
+          "model-train/native-inputs/src/continuous_tests.rs": "b86cb3c0bc920515ff96c8f1de0529c8f8b735c091de935479be3a2e4b0b9b8a",
+          "model-train/native-inputs/src/values.rs": "64996aaf1c666a60ce4582c922f47bb3df2696419640a27821bdaf78c714d02b",
+          "model-train/native-inputs/src/exact.rs": "7712533ed89391e18c9606162905da8d7108d4fedb8e758a87b45fa87b1bef12",
+          "model-train/native-inputs/src/book_tests.rs": "ed05651f905502b328d56c21a1e102154a79ad359595676a45b75eba1b926f90",
+          "model-train/native-inputs/src/support.rs": "49449a8bad347635c7ed736e96e5428c89b8edc73bf30bfeacee350873fb2cd0",
+          "model-train/native-inputs/src/prefix.rs": "23785ff87d0009671c32547e22947e373af4762fd90a30809eb16d1d5ab67a7a",
+          "model-train/native-inputs/src/bench_profile.rs": "b11fb9b2e38db1701993b24a3b4c983c7cd6403659916dd23e240869ee56cb39",
+          "model-train/native-inputs/src/root.rs": "1a61faed25049b229e6c89e24afb90aead98ac615c643636f6649e0acf43c437",
+          "model-train/native-inputs/src/action_tests.rs": "7990f1ae5cd82cd96749e1734afc284984cafd7372ac71d91fb2c90feb26a0ae",
+          "model-train/native-inputs/src/action.rs": "ad49f33f1b5e05b35c8b4b2a6cba0ba965164efcc839f161976aad458f706b93",
+          "model-train/native-inputs/src/python.rs": "b8275423e0e9ebd11fc5c33fbd48809c3f30f059df409a45d580221e4346187e",
+          "model-train/native-inputs/src/account.rs": "edd25b6234c62b937853f7596a57b416da234d73eb98feda7a3c815590b5db1a",
+          "model-train/native-inputs/src/continuous_runtime.rs": "bced56f0ca2ed70981140f24bc4739cd2324607c144e9e96179597ca6fbd4562",
+          "model-train/native-inputs/examples/common/frame_runtime.rs": "d29929604067f049cff7d9139c5d7a042683a49ce03a9331fe780e2e70377646",
+          "shared-run/Cargo.toml": "0dfcbe6a8f012f0a906a0aa1fa08650bd1e8f8fafdfb5b51b94848490a9aa3b6",
+          "shared-run/tests/continuous.rs": "c98c1d71b5f32eb54bc0a358895f699c18be39d15aaa59faf371a03e2b23b8e2",
+          "shared-run/tests/paper.rs": "95f7900a661144465e3d2ac8dbc7679380d14ee2c7d7295854d495d0e37ff503",
+          "shared-run/tests/economic_settlement.rs": "56ba4c680453992dd2dd91c6b5b07241d2fbf65e703a3ca652e0feaf82cdb814",
+          "shared-run/tests/market_fee_estimate.rs": "f9a84aaa1cf1e2f835ea9b1a4691441beba3182675ec7b8f22d67e391d45d798",
+          "shared-run/src/lib.rs": "ca47b8852962b81deecbeaa3c5e02bc0def4b4ae0095e9cb34e66338c556ff71",
+          "shared-run/src/paper.rs": "1a5c61cf2ca1bf722d7a03c30a5b3b1a4b403bf076c4abd21d30c4689a1f4b17",
+          "shared-run/src/economics.rs": "79b4f76d41dd1fdb0a7eaecdb73ed7fafd009a354a9b78eec5d8950c1da3ac4a",
+          "shared-run/src/registry.rs": "5b3b05734b00e788e7e5d2253fa726790f82b58d7ad459594ffd572bf0ea0272",
+          "shared-run/src/quantity.rs": "b24f6474da578729c790738a01376e6ed71ee5f658313bb296940746b9b237c5",
+          "shared-run/src/group.rs": "6fc0d87d1672a9241e493691d0abb183fac12ccf7f70cb839790f15121f74489",
+          "shared-run/src/bin/paper.rs": "2d2f17dd9d99a748b98f6fd8fdcc0f3062f625858500e4d0e9169b48f1e5f526",
+          "shared-run/tests/common/mod.rs": "c33b4a454753836a315bdbf7915e4f733670f3f4e7d3db1df07cbf337cbf8017",
+          "ledger/Cargo.toml": "0420b114e97360565135824ff18a577fb2bf50865337144d7ddfa48efa93c2d2",
+          "ledger/tests/stage1_vertical_slice.rs": "f2b63ed46fda3c02752bd999bd59ebf3b0c7eb5c1bbff9990319211334e29e24",
+          "ledger/tests/memory_v2.rs": "2c25f7674e64f7e9108f79e4aa179318ab25773511aade083a37507dc769f88b",
+          "ledger/tests/stage4_durable_replay.rs": "71877cee2700cb50124f7ac790c86392052e9f6f98eb0556bf8a64285bee157e",
+          "ledger/tests/stage2_local_reservation.rs": "dc722af3497a9934bd23be195994250dbd995e49ce6754f9cc8d91487b65603e",
+          "ledger/tests/stage3_economic_lifecycle.rs": "5ed54174c1c527da2dc6671de9a374e8e1aff8ff007adfb4cd250ffea43c9d9e",
+          "ledger/src/memory.rs": "0ca9efa479ea2979ab7f3b80f12c557102bbf84d54e107b297a1d52b5afb7c60",
+          "ledger/src/projection.rs": "7a7454772872a9112cbb6efec39c1d40c952e4af22f0b9da6d80c40ec4506a5b",
+          "ledger/src/funds.rs": "fecde046df98d6824fd6e501de5de34ef7031b8c774463d7f16fa67f1edc1fad",
+          "ledger/src/lib.rs": "a094691498f5f30eed3425b6e96a01bdac0e2df6c5082c1ecd63f96c1e3aeef0",
+          "ledger/src/economics.rs": "44def1f72d7b23f08aa0b4683dc696c1e74c99910e3d30177d6fcfd4c911a9b2",
+          "ledger/src/durable.rs": "d27681e339f1c9dbde496bbc0654510d006803830f30b57e0fdb120db9f6275a",
+          "ledger/src/stage4_baseline.rs": "0ce4005be228e9a6fc4a5e8c3e209cfa8c782a73253700b1694b38ab5f7044d8",
+          "ledger/src/reservation.rs": "ad7810605be622b722fe1ab92d7c5b0a1e92aba995063f7e207f6d01e41fc69d",
+          "ledger/src/identity.rs": "6dc5d2b6d91ab90192d98603b5752e9c3e87cffb913eda2f2030ce0b55371707",
+          "ledger/src/core.rs": "a84e2704ce662aebf263d861c7efc2e90a53eff0838d04e85cd75b505cf2404a",
+          "ledger/src/lifecycle.rs": "99147c30454c5e812d5e4bbb3c240669b8311f6e13a5b6d3fd3827f0e5f34cb8",
+          "ledger/src/durable/parquet.rs": "9b68d41c17f51c98f003a33f3ccd4ebfddcdb1647b6a1c7cff3d7e33ba249615"
+        }
+      }
+    },
+    "candidate": {
+      "binary_sha256": "fba5c548b4a1fe406c83b968c64c56dd66ef5a7e4024ac19fa1cf9b2bcd07105",
+      "source_identities": {
+        "baseline": "bdb54b4e46adf29a8b607171338a6efce701d301",
+        "variant": "candidate",
+        "files": {
+          "model-train/native-inputs/Cargo.lock": "ddd86696aa9ec46630f2fd709351f1e3c1dc3c023d453c9829131f38251ff757",
+          "model-train/native-inputs/Cargo.toml": "f73e764a779b7094b1768f9e9791309d2475c59de2d1d0fd9cb7d6fe06727701",
+          "model-train/native-inputs/tests/rounding.rs": "ab86564209338b0457491625be593851c469f4c5c3490e28cddaedf39742e095",
+          "model-train/native-inputs/examples/frame_latency.rs": "cdbe5339438216b36c1c3ef6f5747190d1cbb04c2d2fd5f8d93e684afd56ad50",
+          "model-train/native-inputs/examples/replay_projection.rs": "b3faedaaee8b22e1529e8e8763f5f67028b9df80b65555ab3a09f15adf1c4cc3",
+          "model-train/native-inputs/src/buy_tests.rs": "11fd2595e2fecae76fe34f254621fe648950cfeb8392f89d13775b9c518c2e5c",
+          "model-train/native-inputs/src/market.rs": "ee180b1aba6f42d8362f28022528bdf4b1b2eb1a91c5e041e7a8f99e744246b0",
+          "model-train/native-inputs/src/ort_actor.rs": "17c3eff570c98655b4368fc873e0574d19389a1fe1469ebd3d4521150f7fa2f1",
+          "model-train/native-inputs/src/packing.rs": "46b9aeaef341acd7b4f9bee512480a1e39f544b1e0e4479983a43d286954eaa2",
+          "model-train/native-inputs/src/lib.rs": "6dee0c0ebf7cadc4a1e17f5fb2e0bb0c9e5151e05a47660ba132f5ab89d3be0e",
+          "model-train/native-inputs/src/public_input_tests.rs": "4bac2c84f56df0460189def0e8e937b88cce755e4c46363dcc3b108ccdbcf2e1",
+          "model-train/native-inputs/src/market_tests.rs": "b5e516662ae4d576d5691e493befaa7afba61c6eb4dee0ffb1a0a4b5a03e5798",
+          "model-train/native-inputs/src/cancel.rs": "4307917570a79cbd34bdc426fdf4d7fae6f7d49254c96b8d16ba253fe489bc58",
+          "model-train/native-inputs/src/continuous_tests.rs": "b86cb3c0bc920515ff96c8f1de0529c8f8b735c091de935479be3a2e4b0b9b8a",
+          "model-train/native-inputs/src/values.rs": "aad920eca99d08088a20507b404128cadd1114553316472612ca6936ac8642e9",
+          "model-train/native-inputs/src/exact.rs": "c0aeee0a27fcb154645e9e6f700bca96129abc50c94c0152bd9e47ee2c3aaf77",
+          "model-train/native-inputs/src/book_tests.rs": "ed05651f905502b328d56c21a1e102154a79ad359595676a45b75eba1b926f90",
+          "model-train/native-inputs/src/support.rs": "49449a8bad347635c7ed736e96e5428c89b8edc73bf30bfeacee350873fb2cd0",
+          "model-train/native-inputs/src/prefix.rs": "23785ff87d0009671c32547e22947e373af4762fd90a30809eb16d1d5ab67a7a",
+          "model-train/native-inputs/src/bench_profile.rs": "8fde91466af41c8982e8bf51a57aa622446baf126b5a1dd022dda75c94af2d90",
+          "model-train/native-inputs/src/root.rs": "992533bd16a4fd7d030187b0e75b0ba750d82f078f982298397bfde07f18f1bd",
+          "model-train/native-inputs/src/action_tests.rs": "7990f1ae5cd82cd96749e1734afc284984cafd7372ac71d91fb2c90feb26a0ae",
+          "model-train/native-inputs/src/action.rs": "ad49f33f1b5e05b35c8b4b2a6cba0ba965164efcc839f161976aad458f706b93",
+          "model-train/native-inputs/src/python.rs": "b8275423e0e9ebd11fc5c33fbd48809c3f30f059df409a45d580221e4346187e",
+          "model-train/native-inputs/src/account.rs": "f5d1d4761882766dc496bf167922fd5281c302cd2c5ad00c5f5e5bb9cbc0a2e2",
+          "model-train/native-inputs/src/continuous_runtime.rs": "bced56f0ca2ed70981140f24bc4739cd2324607c144e9e96179597ca6fbd4562",
+          "model-train/native-inputs/examples/common/frame_runtime.rs": "15978c61dff5af341a7ea42e8f3de121e5d1d133f203f5724ef02db3f6eb1c39",
+          "shared-run/Cargo.toml": "6a22b3b252d8e21e0324c5839c1f6ef5949722f20d44be9748b8d239e94f59a8",
+          "shared-run/tests/continuous.rs": "c98c1d71b5f32eb54bc0a358895f699c18be39d15aaa59faf371a03e2b23b8e2",
+          "shared-run/tests/paper.rs": "95f7900a661144465e3d2ac8dbc7679380d14ee2c7d7295854d495d0e37ff503",
+          "shared-run/tests/economic_settlement.rs": "56ba4c680453992dd2dd91c6b5b07241d2fbf65e703a3ca652e0feaf82cdb814",
+          "shared-run/tests/market_fee_estimate.rs": "f9a84aaa1cf1e2f835ea9b1a4691441beba3182675ec7b8f22d67e391d45d798",
+          "shared-run/src/lib.rs": "60947e78297b17824a334ba93f299d43655814e75884d3dd110dac0386969ca7",
+          "shared-run/src/paper.rs": "1a5c61cf2ca1bf722d7a03c30a5b3b1a4b403bf076c4abd21d30c4689a1f4b17",
+          "shared-run/src/economics.rs": "79b4f76d41dd1fdb0a7eaecdb73ed7fafd009a354a9b78eec5d8950c1da3ac4a",
+          "shared-run/src/registry.rs": "5b3b05734b00e788e7e5d2253fa726790f82b58d7ad459594ffd572bf0ea0272",
+          "shared-run/src/quantity.rs": "b24f6474da578729c790738a01376e6ed71ee5f658313bb296940746b9b237c5",
+          "shared-run/src/bench_profile.rs": "8fde91466af41c8982e8bf51a57aa622446baf126b5a1dd022dda75c94af2d90",
+          "shared-run/src/group.rs": "4db50a138240a5deeb27593a04ffa166fb903f9c11a17c141049f5f2e52f0699",
+          "shared-run/src/bin/paper.rs": "2d2f17dd9d99a748b98f6fd8fdcc0f3062f625858500e4d0e9169b48f1e5f526",
+          "shared-run/tests/common/mod.rs": "c33b4a454753836a315bdbf7915e4f733670f3f4e7d3db1df07cbf337cbf8017",
+          "ledger/Cargo.toml": "0420b114e97360565135824ff18a577fb2bf50865337144d7ddfa48efa93c2d2",
+          "ledger/tests/stage1_vertical_slice.rs": "f2b63ed46fda3c02752bd999bd59ebf3b0c7eb5c1bbff9990319211334e29e24",
+          "ledger/tests/memory_v2.rs": "2c25f7674e64f7e9108f79e4aa179318ab25773511aade083a37507dc769f88b",
+          "ledger/tests/stage4_durable_replay.rs": "71877cee2700cb50124f7ac790c86392052e9f6f98eb0556bf8a64285bee157e",
+          "ledger/tests/stage2_local_reservation.rs": "dc722af3497a9934bd23be195994250dbd995e49ce6754f9cc8d91487b65603e",
+          "ledger/tests/stage3_economic_lifecycle.rs": "5ed54174c1c527da2dc6671de9a374e8e1aff8ff007adfb4cd250ffea43c9d9e",
+          "ledger/src/memory.rs": "0ca9efa479ea2979ab7f3b80f12c557102bbf84d54e107b297a1d52b5afb7c60",
+          "ledger/src/projection.rs": "7a7454772872a9112cbb6efec39c1d40c952e4af22f0b9da6d80c40ec4506a5b",
+          "ledger/src/funds.rs": "fecde046df98d6824fd6e501de5de34ef7031b8c774463d7f16fa67f1edc1fad",
+          "ledger/src/lib.rs": "a094691498f5f30eed3425b6e96a01bdac0e2df6c5082c1ecd63f96c1e3aeef0",
+          "ledger/src/economics.rs": "44def1f72d7b23f08aa0b4683dc696c1e74c99910e3d30177d6fcfd4c911a9b2",
+          "ledger/src/durable.rs": "d27681e339f1c9dbde496bbc0654510d006803830f30b57e0fdb120db9f6275a",
+          "ledger/src/stage4_baseline.rs": "0ce4005be228e9a6fc4a5e8c3e209cfa8c782a73253700b1694b38ab5f7044d8",
+          "ledger/src/reservation.rs": "ad7810605be622b722fe1ab92d7c5b0a1e92aba995063f7e207f6d01e41fc69d",
+          "ledger/src/identity.rs": "6dc5d2b6d91ab90192d98603b5752e9c3e87cffb913eda2f2030ce0b55371707",
+          "ledger/src/core.rs": "a84e2704ce662aebf263d861c7efc2e90a53eff0838d04e85cd75b505cf2404a",
+          "ledger/src/lifecycle.rs": "99147c30454c5e812d5e4bbb3c240669b8311f6e13a5b6d3fd3827f0e5f34cb8",
+          "ledger/src/durable/parquet.rs": "9b68d41c17f51c98f003a33f3ccd4ebfddcdb1647b6a1c7cff3d7e33ba249615"
+        }
+      }
+    }
+  },
+  "scope": "当前v6八图及权重与已归档证据逐文件相同。沿用已验证真实历史hidden；本轮重放native历史与缓存，不宣称重新执行了历史模型推理。"
+}

@@ -164,6 +164,7 @@ impl NativeInputRoot {
     ) -> Result<Option<NativeInputGroup>, crate::InputError> {
         // 由原共享组合完成唯一应用；随后重取真实 decision 和公共帧。
         let before = shared.action_before(driver)?;
+        let projection = crate::exact::InputProjection::default();
         let Some(decision) = driver.decision() else {
             return Ok(None);
         };
@@ -263,7 +264,14 @@ impl NativeInputRoot {
         if let Some(read) = &before
             && !roles.is_empty()
         {
-            let slow = crate::account::encode(read, current.as_ref(), &old, &self.markets, now)?;
+            let slow = crate::account::encode(
+                read,
+                current.as_ref(),
+                &old,
+                &self.markets,
+                now,
+                &projection,
+            )?;
             if roles
                 .iter()
                 .any(|(role, _)| *role == InputRole::DecisionRequired)
@@ -280,6 +288,7 @@ impl NativeInputRoot {
                     &old,
                     &self.markets,
                     now,
+                    &projection,
                 )?;
                 cancel_intents = objects
                     .into_iter()
@@ -297,29 +306,24 @@ impl NativeInputRoot {
                     .iter()
                     .find(|f| f.observation.market.condition_id == id)
                     .unwrap();
-                NativeActionContext::from_observation(
+                let action_context = NativeActionContext::from_observation(
                     frame.observation,
                     frame.rule_context.clone(),
                     self.snapshot.clone(),
-                )
-                .validate_ticks()?;
+                );
+                action_context.validate_ticks()?;
                 let tail = self
                     .rule_tail
                     .get_or_insert_with(|| crate::market::static_rules(&frame.rule_context));
-                let rule = crate::market::rules_with_static(frame.observation, now, tail);
+                let rule =
+                    crate::market::rules_with_static(&projection, frame.observation, now, tail);
                 rows.push(AccountInputRow {
                     hidden_state_key: self.key(&id.0),
                     role,
                     fast: Vec::new(),
                     book_levels: std::array::from_fn(|_| std::sync::Arc::default()),
                     rule,
-                    action_context: (role == InputRole::DecisionRequired).then(|| {
-                        NativeActionContext::from_observation(
-                            frame.observation,
-                            frame.rule_context.clone(),
-                            self.snapshot.clone(),
-                        )
-                    }),
+                    action_context: (role == InputRole::DecisionRequired).then_some(action_context),
                     slow: slow.to_vec(),
                 });
             }
@@ -331,6 +335,7 @@ impl NativeInputRoot {
                 .find(|f| &f.observation.market.condition_id == id)
                 .unwrap();
             let (fast, book) = crate::market::encode(
+                &projection,
                 frame.observation,
                 &row.rule,
                 now,

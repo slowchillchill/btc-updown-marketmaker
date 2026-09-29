@@ -1,0 +1,222 @@
+[
+  {
+    "variant": "baseline",
+    "window": "ordinary",
+    "scheduled_start_utc_ms": 1789517070000,
+    "scheduled_end_utc_ms": 1789517100000,
+    "formal_entry_position": 201582,
+    "before_formal_entry": {
+      "groups": 7752,
+      "native_rows": 7752,
+      "native_sum_seconds": 43.759389334,
+      "native_cpu_sum_seconds": 80.243830687,
+      "first_observed_utc_ms": 1789517070011,
+      "last_observed_utc_ms": 1789517099984
+    },
+    "overlapping_formal_window_native_replay": {
+      "groups": 0,
+      "native_rows": 0,
+      "native_sum_seconds": 0.0,
+      "native_cpu_sum_seconds": 0.0,
+      "first_observed_utc_ms": null,
+      "last_observed_utc_ms": null
+    },
+    "first_observed_utc_ms": 1789517070011,
+    "last_observed_utc_ms": 1789517099984,
+    "first_position": 193830,
+    "last_position": 201581,
+    "groups": 7752,
+    "native_rows": 7752,
+    "row_populations": [
+      1
+    ],
+    "native_elapsed_ms": {
+      "count": 7752,
+      "mean": 5.644916064757482,
+      "p50": 5.3873135,
+      "p90": 7.4687619000000005,
+      "p95": 7.97453,
+      "p99": 9.22101299,
+      "max": 105.660222
+    },
+    "native_cpu_ms": {
+      "count": 7752,
+      "mean": 10.351371347652218,
+      "p50": 9.364115,
+      "p90": 14.768926000000006,
+      "p95": 17.72212405,
+      "p99": 23.20302707999999,
+      "max": 735.823964
+    },
+    "native_sum_seconds": 43.759389334,
+    "native_cpu_sum_seconds": 80.243830687,
+    "first_group_native_ms": 105.660222,
+    "historical_model_inference_rerun": false,
+    "scope": "真实因果前缀的native构造；保留首次缓存成本。高窗口只覆盖09:30至09:55.454的已观察前缀，并含活跃市场行竞争；入口前与入口所在64组的native重放另拆分，后者不是额外预先准备成本。这里不是完整模型30秒服务成本，也未模拟实时到达队列。"
+  },
+  {
+    "variant": "baseline",
+    "window": "next_market_overlap",
+    "scheduled_start_utc_ms": 1789517370000,
+    "scheduled_end_utc_ms": 1789517400000,
+    "formal_entry_position": 418584,
+    "before_formal_entry": {
+      "groups": 18418,
+      "native_rows": 36836,
+      "native_sum_seconds": 197.879632429,
+      "native_cpu_sum_seconds": 336.503166203,
+      "first_observed_utc_ms": 1789517370000,
+      "last_observed_utc_ms": 1789517395413
+    },
+    "overlapping_formal_window_native_replay": {
+      "groups": 64,
+      "native_rows": 128,
+      "native_sum_seconds": 0.63679131,
+      "native_cpu_sum_seconds": 1.402552758,
+      "first_observed_utc_ms": 1789517395414,
+      "last_observed_utc_ms": 1789517395454
+    },
+    "first_observed_utc_ms": 1789517370000,
+    "last_observed_utc_ms": 1789517395454,
+    "first_position": 400166,
+    "last_position": 418647,
+    "groups": 18482,
+    "native_rows": 36964,
+    "row_populations": [
+      2
+    ],
+    "native_elapsed_ms": {
+      "count": 18482,
+      "mean": 10.741068268531544,
+      "p50": 10.312849,
+      "p90": 13.851256900000003,
+      "p95": 14.855004400000004,
+      "p99": 16.809371839999997,
+      "max": 117.712245
+    },
+    "native_cpu_ms": {
+      "count": 18482,
+      "mean": 18.28296282658803,
+      "p50": 15.7797155,
+      "p90": 26.600890500000002,
+      "p95": 28.953989200000002,
+      "p99": 34.117792409999964,
+      "max": 825.674357
+    },
+    "native_sum_seconds": 198.516423739,
+    "native_cpu_sum_seconds": 337.905718961,
+    "first_group_native_ms": 117.712245,
+    "historical_model_inference_rerun": false,
+    "scope": "真实因果前缀的native构造；保留首次缓存成本。高窗口只覆盖09:30至09:55.454的已观察前缀，并含活跃市场行竞争；入口前与入口所在64组的native重放另拆分，后者不是额外预先准备成本。这里不是完整模型30秒服务成本，也未模拟实时到达队列。"
+  },
+  {
+    "variant": "candidate",
+    "window": "ordinary",
+    "scheduled_start_utc_ms": 1789517070000,
+    "scheduled_end_utc_ms": 1789517100000,
+    "formal_entry_position": 201582,
+    "before_formal_entry": {
+      "groups": 7752,
+      "native_rows": 7752,
+      "native_sum_seconds": 28.916344278,
+      "native_cpu_sum_seconds": 41.709457708,
+      "first_observed_utc_ms": 1789517070011,
+      "last_observed_utc_ms": 1789517099984
+    },
+    "overlapping_formal_window_native_replay": {
+      "groups": 0,
+      "native_rows": 0,
+      "native_sum_seconds": 0.0,
+      "native_cpu_sum_seconds": 0.0,
+      "first_observed_utc_ms": null,
+      "last_observed_utc_ms": null
+    },
+    "first_observed_utc_ms": 1789517070011,
+    "last_observed_utc_ms": 1789517099984,
+    "first_position": 193830,
+    "last_position": 201581,
+    "groups": 7752,
+    "native_rows": 7752,
+    "row_populations": [
+      1
+    ],
+    "native_elapsed_ms": {
+      "count": 7752,
+      "mean": 3.7301785704334365,
+      "p50": 3.433812,
+      "p90": 5.293880700000001,
+      "p95": 5.831962399999999,
+      "p99": 6.717421009999998,
+      "max": 89.926672
+    },
+    "native_cpu_ms": {
+      "count": 7752,
+      "mean": 5.380477000515995,
+      "p50": 4.5214605,
+      "p90": 7.1896432,
+      "p95": 7.914287099999998,
+      "p99": 12.580678109999983,
+      "max": 597.782905
+    },
+    "native_sum_seconds": 28.916344278,
+    "native_cpu_sum_seconds": 41.709457708,
+    "first_group_native_ms": 89.926672,
+    "historical_model_inference_rerun": false,
+    "scope": "真实因果前缀的native构造；保留首次缓存成本。高窗口只覆盖09:30至09:55.454的已观察前缀，并含活跃市场行竞争；入口前与入口所在64组的native重放另拆分，后者不是额外预先准备成本。这里不是完整模型30秒服务成本，也未模拟实时到达队列。"
+  },
+  {
+    "variant": "candidate",
+    "window": "next_market_overlap",
+    "scheduled_start_utc_ms": 1789517370000,
+    "scheduled_end_utc_ms": 1789517400000,
+    "formal_entry_position": 418584,
+    "before_formal_entry": {
+      "groups": 18418,
+      "native_rows": 36836,
+      "native_sum_seconds": 105.327090646,
+      "native_cpu_sum_seconds": 142.681720692,
+      "first_observed_utc_ms": 1789517370000,
+      "last_observed_utc_ms": 1789517395413
+    },
+    "overlapping_formal_window_native_replay": {
+      "groups": 64,
+      "native_rows": 128,
+      "native_sum_seconds": 0.347236529,
+      "native_cpu_sum_seconds": 0.700264225,
+      "first_observed_utc_ms": 1789517395414,
+      "last_observed_utc_ms": 1789517395454
+    },
+    "first_observed_utc_ms": 1789517370000,
+    "last_observed_utc_ms": 1789517395454,
+    "first_position": 400166,
+    "last_position": 418647,
+    "groups": 18482,
+    "native_rows": 36964,
+    "row_populations": [
+      2
+    ],
+    "native_elapsed_ms": {
+      "count": 18482,
+      "mean": 5.717688950059517,
+      "p50": 5.44629,
+      "p90": 7.642692700000002,
+      "p95": 8.30320745,
+      "p99": 9.498708849999996,
+      "max": 101.180892
+    },
+    "native_cpu_ms": {
+      "count": 18482,
+      "mean": 7.757925815225624,
+      "p50": 7.2761215,
+      "p90": 10.2160743,
+      "p95": 11.12742805,
+      "p99": 15.001231779999994,
+      "max": 685.804784
+    },
+    "native_sum_seconds": 105.674327175,
+    "native_cpu_sum_seconds": 143.381984917,
+    "first_group_native_ms": 101.180892,
+    "historical_model_inference_rerun": false,
+    "scope": "真实因果前缀的native构造；保留首次缓存成本。高窗口只覆盖09:30至09:55.454的已观察前缀，并含活跃市场行竞争；入口前与入口所在64组的native重放另拆分，后者不是额外预先准备成本。这里不是完整模型30秒服务成本，也未模拟实时到达队列。"
+  }
+]

@@ -1,0 +1,74 @@
+[
+  {
+    "binary": "baseline-profile",
+    "command": [
+      "cargo",
+      "build",
+      "--manifest-path",
+      "model-train/native-inputs/Cargo.toml",
+      "--release",
+      "--locked",
+      "--offline",
+      "--example",
+      "frame_latency",
+      "--features",
+      "ort,bench-profile"
+    ],
+    "exit_code": 0,
+    "sha256": "ffd4e1b685cdc1e480d7aca8032fc13db1f88ef52645c8551fc7a9bbb4cbb8ce"
+  },
+  {
+    "binary": "baseline-formal",
+    "command": [
+      "cargo",
+      "build",
+      "--manifest-path",
+      "model-train/native-inputs/Cargo.toml",
+      "--release",
+      "--locked",
+      "--offline",
+      "--example",
+      "frame_latency",
+      "--features",
+      "ort"
+    ],
+    "exit_code": 0,
+    "sha256": "4525ee5390b6b60409b2e5b80210d8ebc6d64275c98b7e8498d380a830502049"
+  },
+  {
+    "binary": "candidate-profile",
+    "command": [
+      "cargo",
+      "build",
+      "--manifest-path",
+      "model-train/native-inputs/Cargo.toml",
+      "--release",
+      "--locked",
+      "--offline",
+      "--example",
+      "frame_latency",
+      "--features",
+      "ort,bench-profile"
+    ],
+    "exit_code": 0,
+    "sha256": "fba5c548b4a1fe406c83b968c64c56dd66ef5a7e4024ac19fa1cf9b2bcd07105"
+  },
+  {
+    "binary": "candidate-formal",
+    "command": [
+      "cargo",
+      "build",
+      "--manifest-path",
+      "model-train/native-inputs/Cargo.toml",
+      "--release",
+      "--locked",
+      "--offline",
+      "--example",
+      "frame_latency",
+      "--features",
+      "ort"
+    ],
+    "exit_code": 0,
+    "sha256": "92a7e87b8b34628242f63bfc4eb54eb1d63b4130667f64aacb4c12446bec3785"
+  }
+]
