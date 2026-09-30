@@ -20,7 +20,7 @@
 
 表中准备秒来自首条 measurements 的 preparation_seconds：宿主在创建 Runtime 前启动 preparation 标尺，到首个窗口组返回且入口账本断言完成时取值。window_anchor_ns 则使用在线控制的另一 Instant 标尺，记录供料门开放时刻；起点和取点都不同，不能混作同一测点或直接相减。大模型两读数分别为806.317766858秒与806.313884220秒。窗口内墙钟只用同一在线控制标尺作差，不需为这几毫秒差补测。
 
-service_ns 是 native.consume 到 Runtime／Actor 原 execute 完成，排除此前 DPT应用、交接及随后证据输出。DPT完成墙钟取最后输入 complete_end−window_anchor；SIM排空、整进程时间和准备分别列。attempt_to_dequeue 含供料入队等待，不能写成纯驻留；enqueue完成到出队另计，微小负数可能来自接收者先于 Sender返回。source_delivery_lag 是原逻辑接收时刻至模型结束的墙钟落后，不等于每个 SDK 行情价位网络年龄。原逻辑发送时刻和真实 execute耗时保留，本步没有实现步骤9发送时钟语义。
+service_ns 是 native.consume 到 Runtime／Actor 原 execute 完成，排除此前 DPT应用、交接及随后证据输出。DPT完成墙钟取最后输入 complete_end−window_anchor；SIM排空、整进程时间和准备分别列。attempt_to_dequeue 含供料入队等待，不能写成纯驻留；enqueue完成到出队另计，微小负数可能来自接收者先于 Sender返回。source_delivery_lag_ns 在 acknowledge_if_empty 之后采样，是本组消费／确认后采样相对源逻辑接收时刻的墙钟落后；采样点不严格等同于模型结束，不等于每个 SDK 行情价位网络年龄。原逻辑发送时刻和真实 execute耗时保留，本步没有实现步骤9发送时钟语义。
 
 ## 结果
 
@@ -34,7 +34,7 @@ service_ns 是 native.consume 到 Runtime／Actor 原 execute 完成，排除此
 
 新大模型连续组位置418584..421620完整，原失败组419346已正常处理；全部3042输入已应用及完成，3041条消息确认，End控制单独应用。尾部到5.577495588秒全部接纳；完成时supplied/enqueued/dequeued/applied=421715、confirmed=421714，无pending输入／组，DPT真实正常End稳定，SIM显式排空和completion成功，未到观察上限。原两场也逐输入核验全部派生组结束后才调用complete及确认，原第二场的SIM退出失败事实仍保留。
 
-| 实际条件 | service合计秒／P50／P95毫秒 | Native P95毫秒 | 源逻辑→模型结束落后P95／最大秒 | 入队尝试→出队P95秒 | 窗口DPT在途观测峰／含准备session峰 |
+| 实际条件 | service合计秒／P50／P95毫秒 | Native P95毫秒 | 源逻辑→消费／确认后采样落后P95／最大秒 | 入队尝试→出队P95秒 | 窗口DPT在途观测峰／含准备session峰 |
 | --- | --- | ---: | --- | ---: | --- |
 | 原小模型普通 | 399.638／7.845／9.865 | 5.953 | 551.005／578.146 | 307.789 | 3／32 |
 | 原小模型高段 | 39.817／13.084／17.186 | 9.223 | 165.892／168.246 | 165.860 | 2／38 |

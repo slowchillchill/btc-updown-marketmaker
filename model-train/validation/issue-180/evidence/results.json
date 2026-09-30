@@ -631,5 +631,6 @@
       "source_tool_sha": "818349e1e039bf399a185f14d23fb6b807378da2",
       "status": "一次错误定位重现同组/输入/时刻，exit101，非容量完成场"
     }
-  ]
+  ],
+  "source_delivery_lag_ns_sampling": "acknowledge_if_empty 之后采样的消费／确认后墙钟相对源逻辑时刻落后，不严格等同 model_end；保留原字段和值。"
 }
