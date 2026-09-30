@@ -58,6 +58,7 @@ def main():
     for name in ('source', 'diagnostic', 'binary', 'recording', 'graphs', 'checkpoints', 'warm', 'packed', 'ort-library', 'output'):
         p.add_argument('--'+name, type=Path, required=True)
     p.add_argument('--execute', action='store_true')
+    p.add_argument('--case', choices=('small-ordinary','small-high','large-high'), help='仅执行明确仍需测量的条件；冻结材料不变')
     a = p.parse_args()
     config = a.recording/'configuration.json'
     identities = json.loads((a.diagnostic/'source-identities.json').read_text())
@@ -110,6 +111,8 @@ def main():
                FRAME_CONFIG_SHA=freeze['files']['configuration'], FRAME_BINARY_SHA=freeze['files']['binary'])
     cases = [('small-ordinary','MAIN-1x256',201582,'ordinary'), ('small-high','MAIN-1x256',418584,'high'), ('large-high','MAIN-30x1024',418584,'high')]
     for name, model, first, window in cases:
+        if a.case and name != a.case:
+            continue
         case = a.output/name
         assert not case.exists(), '禁止覆盖或自动重复正式测量'
         command = ['/usr/bin/time','-v','-o',str(a.output/(name+'.resources.txt')),str((a.output/'binary').resolve()),str(config.resolve()),str(a.recording.resolve()),str(case.resolve()),'decisions','9999999']
@@ -134,6 +137,8 @@ def main():
                     break
         write(a.output/(name+'-run.json'), {'run':name,'model':model,'ort_threads':4 if model=='MAIN-1x256' else 16,'revision':revision,'exit_code':process.wait(),'observation_limit_reached':exceeded,'total_wall_seconds_including_preparation':time.monotonic()-began,'completed_utc':datetime.now(timezone.utc).isoformat()})
         print(name, 'completed', flush=True)
+        if process.returncode != 0 and not exceeded:
+            raise RuntimeError('正式测量非容量限时失败，停止后续调度：'+name)
 
 
 if __name__ == '__main__':

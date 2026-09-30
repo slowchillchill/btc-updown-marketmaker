@@ -446,6 +446,6 @@ impl State {
                 return Err(error(e));
             }
         }
-        Ok(self.done && !self.shared.window.natural_end)
+        Ok(self.done)
     }
 }
