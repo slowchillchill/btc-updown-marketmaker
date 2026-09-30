@@ -398,6 +398,8 @@ impl<
             });
         }
 
+        confirm_context_directories(root.as_ref(), &context_directory)?;
+
         let commits_directory = context_directory.join(COMMITS_DIRECTORY_NAME);
         discard_unpublished_suffixes(&commits_directory)?;
         let mut paths = published_commit_paths(&commits_directory)?;
@@ -647,21 +649,17 @@ fn create_context_container<
 ) -> Result<(PathBuf, NoePublishedContainerReferenceV1), DurableErrorV1> {
     fs::create_dir_all(root).map_err(|error| io_error("创建耐久根", root, error))?;
     let context_directory = context_directory(root, &context.context_reference);
-    match fs::create_dir(&context_directory) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            return Err(DurableErrorV1::ContextAlreadyExists {
-                path: context_directory,
-            });
+    // 候选目录只属于本次创建；最终名仅在完整初始化后原子发布。
+    static NEXT_CANDIDATE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let candidate_directory = loop {
+        let ordinal = NEXT_CANDIDATE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = root.join(format!(".context-{}-{ordinal}.tmp", std::process::id()));
+        match fs::create_dir(&path) {
+            Ok(()) => break path,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(io_error("创建上下文候选目录", &path, error)),
         }
-        Err(error) => {
-            return Err(io_error("创建上下文目录", &context_directory, error));
-        }
-    }
-    let commits_directory = context_directory.join(COMMITS_DIRECTORY_NAME);
-    fs::create_dir(&commits_directory)
-        .map_err(|error| io_error("创建提交目录", &commits_directory, error))?;
-
+    };
     let context_path = context_directory.join(CONTEXT_FILE_NAME);
     let payload = ContextPayloadV1 {
         container_version: T::CONTEXT_VERSION.to_owned(),
@@ -672,18 +670,98 @@ fn create_context_container<
     let context_container_reference = NoePublishedContainerReferenceV1 {
         location: context_path.to_string_lossy().into_owned(),
     };
-    let bytes = encode_container(&container, &context_path)?;
-    publish_no_replace(
-        &context_directory,
-        ".context.json.tmp",
-        CONTEXT_FILE_NAME,
-        &bytes,
-        None,
-        PublishFaultV1::default(),
-    )?;
-    sync_directory(root, "同步耐久根")?;
+    let initialized = (|| {
+        let commits_directory = candidate_directory.join(COMMITS_DIRECTORY_NAME);
+        fs::create_dir(&commits_directory)
+            .map_err(|error| io_error("创建提交目录", &commits_directory, error))?;
+        let bytes = encode_container(&container, &context_path)?;
+        #[cfg(test)]
+        if CONTEXT_FAULT.with(|fault| std::mem::take(&mut fault.borrow_mut().fail_before_publish)) {
+            return Err(io_error(
+                "创建上下文候选文件",
+                &candidate_directory.join(CONTEXT_FILE_NAME),
+                injected_io_error("context.json 发布前失败"),
+            ));
+        }
+        publish_no_replace(
+            &candidate_directory,
+            ".context.json.tmp",
+            CONTEXT_FILE_NAME,
+            &bytes,
+            None,
+            PublishFaultV1::default(),
+        )?;
+        renameat_with(
+            rustix::fs::CWD,
+            &candidate_directory,
+            rustix::fs::CWD,
+            &context_directory,
+            RenameFlags::NOREPLACE,
+        )
+        .map_err(|error| {
+            if error == rustix::io::Errno::EXIST {
+                DurableErrorV1::ContextAlreadyExists {
+                    path: context_directory.clone(),
+                }
+            } else {
+                DurableErrorV1::Io {
+                    operation: "禁止覆盖地发布上下文目录",
+                    path: context_directory.clone(),
+                    message: error.to_string(),
+                }
+            }
+        })?;
+        Ok(())
+    })();
+    if let Err(error) = initialized {
+        // 从未触碰最终名；即使清理失败也不阻断同 root、seed 重试。
+        let _ = fs::remove_dir_all(&candidate_directory);
+        return Err(match error {
+            DurableErrorV1::DurabilityUncertain { message, .. } => DurableErrorV1::Io {
+                operation: "初始化未发布的上下文候选",
+                path: candidate_directory,
+                message,
+            },
+            error => error,
+        });
+    }
+    confirm_context_directories(root, &context_directory)?;
 
     Ok((context_directory, context_container_reference))
+}
+
+// 最终目录项可见不代表初始化耐久；创建和重开共同确认这两个父目录。
+fn confirm_context_directories(
+    root: &Path,
+    context_directory: &Path,
+) -> Result<(), DurableErrorV1> {
+    let result = sync_directory(context_directory, "同步初始化上下文目录").and_then(|()| {
+        #[cfg(test)]
+        if CONTEXT_FAULT.with(|fault| fault.borrow().fail_root_sync) {
+            return Err(io_error(
+                "同步耐久根",
+                root,
+                injected_io_error("根目录同步失败"),
+            ));
+        }
+        sync_directory(root, "同步耐久根")
+    });
+    result.map_err(|error| DurableErrorV1::DurabilityUncertain {
+        path: context_directory.to_path_buf(),
+        message: error.to_string(),
+    })
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct ContextFaultV1 {
+    fail_before_publish: bool,
+    fail_root_sync: bool,
+}
+#[cfg(test)]
+thread_local! {
+    static CONTEXT_FAULT: std::cell::RefCell<ContextFaultV1> =
+        std::cell::RefCell::new(ContextFaultV1::default());
 }
 
 /// 新内存运行的唯一后台写入器：不持有核心，不重做归一化。
@@ -1514,6 +1592,117 @@ mod tests {
         )
         .join(COMMITS_DIRECTORY_NAME)
         .join(commit_file_name(0))
+    }
+
+    fn seed() -> SimV2ContextSeedV1 {
+        let context = context();
+        SimV2ContextSeedV1 {
+            run_id: context.account_identity.run_scope,
+            account_instance_key: context.source.account_instance_key,
+            run_opened: context.source.run_opened,
+            account_opening: context.source.account_opening,
+            account_opening_evidence_identity: context.source.account_opening_evidence_identity,
+            implementation_identity: context.implementation_identity,
+        }
+    }
+
+    fn fail_next_context_publish() {
+        CONTEXT_FAULT.with(|fault| fault.borrow_mut().fail_before_publish = true);
+    }
+
+    #[test]
+    fn context_initialization_failure_retries_through_store_and_writer() {
+        let root = TempDir::new().unwrap();
+        let expected = sim_v2_context(seed(), EXECUTION_NORMALIZATION_CONTRACT_V1).unwrap();
+        fail_next_context_publish();
+        assert!(matches!(
+            DurableContextStoreV1::open_or_create_sim_v2(root.path(), seed()),
+            Err(DurableErrorV1::Io { .. })
+        ));
+        assert!(!context_directory(root.path(), &expected.context_reference).exists());
+        let mut store = DurableContextStoreV1::open_or_create_sim_v2(root.path(), seed()).unwrap();
+        store.commit_batch(batch(1), 3000).unwrap();
+        let reference = store.commits()[0].result_reference(0).unwrap();
+        drop(store);
+        let mut reopened =
+            DurableContextStoreV1::open_or_create_sim_v2(root.path(), seed()).unwrap();
+        assert!(matches!(
+            reopened.commit_batch(batch(1), 3001).unwrap(),
+            DurableCommitOutcomeV1::AlreadyDurable { .. }
+        ));
+        assert_eq!(
+            reopened.commits()[0].result_reference(0).unwrap(),
+            reference
+        );
+        assert!(matches!(
+            DurableContextStoreV1::create(root.path(), expected),
+            Err(DurableErrorV1::ContextAlreadyExists { .. })
+        ));
+        assert_eq!(
+            DurableContextStoreV1::open_or_create_sim_v2(root.path(), seed())
+                .unwrap()
+                .commits()[0]
+                .result_reference(0)
+                .unwrap(),
+            reference
+        );
+
+        type Trade = contracts::execution_normalization::SourceNeutralTradeLifecycleResultV1;
+        let root = TempDir::new().unwrap();
+        fail_next_context_publish();
+        assert!(matches!(
+            StagedNormalizationWriter::<Trade, SourceNeutralControlResultV1>::create(
+                root.path(),
+                context()
+            ),
+            Err(DurableErrorV1::Io { .. })
+        ));
+        let mut writer = StagedNormalizationWriter::<Trade, SourceNeutralControlResultV1>::create(
+            root.path(),
+            context(),
+        )
+        .unwrap();
+        let mut core = NormalizationCore::new(context());
+        let normalized = core.normalize_and_accept(batch(1)).unwrap();
+        writer.stage(&normalized).unwrap();
+        let mut references = Vec::new();
+        writer
+            .stabilize(
+                || 3000,
+                |commit| references.extend(commit.result_references()),
+            )
+            .unwrap();
+        assert_eq!(references.len(), 1);
+        let reopened =
+            DurableContextStoreV1::open(root.path(), &context().context_reference).unwrap();
+        assert_eq!(
+            reopened.commits()[0].result_reference(0).unwrap(),
+            references[0]
+        );
+    }
+
+    #[test]
+    fn context_root_sync_unknown_requires_confirmation_on_reopen() {
+        let root = TempDir::new().unwrap();
+        CONTEXT_FAULT.with(|fault| fault.borrow_mut().fail_root_sync = true);
+        assert!(matches!(
+            DurableContextStoreV1::open_or_create_sim_v2(root.path(), seed()),
+            Err(DurableErrorV1::DurabilityUncertain { .. })
+        ));
+        let expected = sim_v2_context(seed(), EXECUTION_NORMALIZATION_CONTRACT_V1).unwrap();
+        assert!(
+            context_directory(root.path(), &expected.context_reference)
+                .join(CONTEXT_FILE_NAME)
+                .exists()
+        );
+        assert!(matches!(
+            DurableContextStoreV1::open_or_create_sim_v2(root.path(), seed()),
+            Err(DurableErrorV1::DurabilityUncertain { .. })
+        ));
+        CONTEXT_FAULT.with(|fault| fault.borrow_mut().fail_root_sync = false);
+        let mut store = DurableContextStoreV1::open_or_create_sim_v2(root.path(), seed()).unwrap();
+        store.commit_batch(batch(1), 3000).unwrap();
+        assert_eq!(store.commits().len(), 1);
     }
 
     #[test]
