@@ -971,6 +971,11 @@ pub(crate) enum BusinessReducerInputV2<'a> {
         rules: &'a PlatformRuleSnapshotV3,
         finality_policy: &'a TradeFinalityPolicyV2,
     },
+    PublicObserveTime {
+        time: &'a TrustedActorExecutionTimeV1,
+        rules: &'a PlatformRuleSnapshotV3,
+        finality_policy: &'a TradeFinalityPolicyV2,
+    },
     PublicCloseTime {
         closure: &'a TrustedPublicTimeClosureV1,
         rules: &'a PlatformRuleSnapshotV3,
@@ -1492,9 +1497,24 @@ fn reduce_actor_input_v2(
                 finality_policy,
             },
         ),
-        BusinessInputV2::PublicRequest { cutoff, request } => {
+        BusinessInputV2::PublicObserveTime(time) => drive_business_input_at_v2(
+            state,
+            BusinessReducerInputV2::PublicObserveTime {
+                time,
+                rules,
+                finality_policy,
+            },
+        ),
+        BusinessInputV2::PublicRequest {
+            cutoff,
+            send_time,
+            request,
+        } => {
             let legacy = TrustedDecisionCutoffV2 {
-                logical_time_utc_ms: cutoff.decision_time.logical_time_utc_ms(),
+                logical_time_utc_ms: send_time
+                    .as_ref()
+                    .unwrap_or(&cutoff.decision_time)
+                    .logical_time_utc_ms(),
                 public_visibility: PublicVisibilityCursorV1::default(),
                 private_feedback_sequence: cutoff.private_feedback_sequence,
             };
@@ -2460,12 +2480,18 @@ where
                 "公共组恢复需要原记录读取器",
             ));
         }
-        LoggedBusinessInputV2::PublicRequest { cutoff, request } => {
-            BusinessInputV2::PublicRequest {
-                cutoff: cutoff.into_trusted(),
-                request,
-            }
+        LoggedBusinessInputV2::PublicObserveTime(time) => {
+            BusinessInputV2::PublicObserveTime(TrustedActorExecutionTimeV1(time))
         }
+        LoggedBusinessInputV2::PublicRequest {
+            cutoff,
+            send_time,
+            request,
+        } => BusinessInputV2::PublicRequest {
+            cutoff: cutoff.into_trusted(),
+            send_time: send_time.map(TrustedActorExecutionTimeV1),
+            request,
+        },
         LoggedBusinessInputV2::PublicCloseTime(closure) => {
             BusinessInputV2::PublicCloseTime(closure.into_trusted())
         }
@@ -5608,6 +5634,7 @@ pub(crate) fn drive_business_input_at_v2(
         public_group,
         public_closure,
         hidden_bucket,
+        public_observation,
     ) = match input {
         BusinessReducerInputV2::PlatformPrefixAdvance {
             advance,
@@ -5621,6 +5648,7 @@ pub(crate) fn drive_business_input_at_v2(
             None,
             rules,
             finality_policy,
+            None,
             None,
             None,
             None,
@@ -5642,6 +5670,7 @@ pub(crate) fn drive_business_input_at_v2(
                 None,
                 None,
                 None,
+                None,
             )
         }
         BusinessReducerInputV2::HiddenStepBucket {
@@ -5659,6 +5688,7 @@ pub(crate) fn drive_business_input_at_v2(
             None,
             None,
             Some(bucket),
+            None,
         ),
         BusinessReducerInputV2::PublicGroup {
             group,
@@ -5675,6 +5705,26 @@ pub(crate) fn drive_business_input_at_v2(
             Some(group),
             None,
             None,
+            None,
+        ),
+        BusinessReducerInputV2::PublicObserveTime {
+            time,
+            rules,
+            finality_policy,
+        } => (
+            MarketEventPathV1::PublicVisibility,
+            time.logical_time_utc_ms(),
+            state.session.as_ref().map_or(0, |session| {
+                session.public_visibility_frontier.next_index_position
+            }),
+            None,
+            None,
+            rules,
+            finality_policy,
+            None,
+            None,
+            None,
+            Some(time),
         ),
         BusinessReducerInputV2::PublicCloseTime {
             closure,
@@ -5690,6 +5740,7 @@ pub(crate) fn drive_business_input_at_v2(
             finality_policy,
             None,
             Some(closure),
+            None,
             None,
         ),
         _ => {
@@ -5740,7 +5791,7 @@ pub(crate) fn drive_business_input_at_v2(
             .closed_through_utc_ms
             .is_some_and(|closed| logical_at_utc_ms <= closed)
         || next_index_position < frontier.next_index_position;
-    let closes_time = public_group.is_none();
+    let closes_time = public_group.is_none() && public_observation.is_none();
     let payload_invalid = if public_group.is_some() {
         start_index_position.is_some_and(|start| start < frontier.next_index_position)
     } else if let Some(hidden) = hidden_bucket {
@@ -5750,7 +5801,7 @@ pub(crate) fn drive_business_input_at_v2(
                 .next_event_at_utc_ms
                 .is_some_and(|expected| logical_at_utc_ms != expected)
             || matches!(hidden.reference.closure, contracts::ReplayIndexClosureV1::NextGlobalEventAt(next_at) if next_at <= logical_at_utc_ms)
-    } else if public_closure.is_some() {
+    } else if public_closure.is_some() || public_observation.is_some() {
         false
     } else if let Some(bucket) = &bucket {
         start_index_position.is_some_and(|start| start < frontier.next_index_position)
@@ -5855,7 +5906,7 @@ pub(crate) fn drive_business_input_at_v2(
         }
         output.late_rebate_feedback = Some((output.lifecycle.len(), processed_at));
     }
-    if drives_execution {
+    if drives_execution && public_observation.is_none() {
         state = drain_scheduled_obligations_at_v2(
             state,
             logical_at_utc_ms,
@@ -6240,7 +6291,8 @@ fn reduce_business_input_v2(
         | BusinessReducerInputV2::ClosedMarketBucket { .. }
         | BusinessReducerInputV2::HiddenStepBucket { .. }
         | BusinessReducerInputV2::PublicGroup { .. }
-        | BusinessReducerInputV2::PublicCloseTime { .. }) => {
+        | BusinessReducerInputV2::PublicCloseTime { .. }
+        | BusinessReducerInputV2::PublicObserveTime { .. }) => {
             return drive_business_input_at_v2(state, logical);
         }
     };
@@ -19494,6 +19546,7 @@ impl PublicSimExecutionV1 {
     fn request(
         &mut self,
         cutoff: TrustedGroupDecisionCutoffV1,
+        send_time: Option<TrustedActorExecutionTimeV1>,
         request: BusinessRequestV2,
     ) -> Result<MutationRequestReceiptV2, SimRunActorErrorV2> {
         if let Some(existing) = existing_mutation_request_receipt_v2(
@@ -19507,7 +19560,11 @@ impl PublicSimExecutionV1 {
         }
         let mut committed = self
             .actor
-            .commit_group(vec![BusinessInputV2::PublicRequest { cutoff, request }])?;
+            .commit_group(vec![BusinessInputV2::PublicRequest {
+                cutoff,
+                send_time,
+                request,
+            }])?;
         if let Some(error) = committed.unaccepted {
             return Err(error);
         }
@@ -19547,6 +19604,19 @@ impl PublicSimExecutionV1 {
         if let Some(error) = committed.unaccepted {
             return Err(error);
         }
+        Ok(())
+    }
+    fn observe_time(
+        &mut self,
+        time: TrustedActorExecutionTimeV1,
+    ) -> Result<(), SimRunActorErrorV2> {
+        let committed = self
+            .actor
+            .commit_group(vec![BusinessInputV2::PublicObserveTime(time.clone())])?;
+        if let Some(error) = committed.unaccepted {
+            return Err(error);
+        }
+        self.actor.projection_port.observe_public_time(&time);
         Ok(())
     }
     fn close_public_time(
@@ -19688,6 +19758,120 @@ impl PublicConsumptionStateV1 {
         }
         Ok(())
     }
+    /// 原义务的下一逻辑时点，宿主与事实、观察和完成事件比较。
+    pub fn next_required_logical_drive(&self) -> Option<NextRequiredLogicalDriveV2> {
+        self.execution.actor.next_required_logical_drive()
+    }
+    fn advance_before(
+        &mut self,
+        at: i64,
+        reason: PublicTimeClosureReasonV1,
+    ) -> Result<(), SimRunActorErrorV2> {
+        while let Some(required) = self
+            .next_required_logical_drive()
+            .filter(|required| required.required_at_utc_ms < at)
+        {
+            match required.path {
+                MarketEventPathV1::PublicVisibility => {
+                    let frontier = self
+                        .execution
+                        .actor
+                        .state
+                        .as_ref()
+                        .and_then(|state| state.session.as_ref())
+                        .and_then(|session| {
+                            session.public_visibility_frontier.closed_through_utc_ms
+                        });
+                    let close = std::iter::once(required.required_at_utc_ms)
+                        .chain(frontier.map(|closed| closed + 1))
+                        .chain(
+                            self.last_receipt
+                                .as_ref()
+                                .map(|receipt| receipt.execution_time.logical_time_utc_ms()),
+                        )
+                        .max()
+                        .unwrap();
+                    if close >= at {
+                        break;
+                    }
+                    self.close_at(close, reason.clone())?
+                }
+                MarketEventPathV1::HiddenPlatform => {
+                    let position = self
+                        .execution
+                        .actor
+                        .state
+                        .as_ref()
+                        .and_then(|state| state.session.as_ref())
+                        .unwrap()
+                        .hidden_platform_frontier
+                        .next_index_position;
+                    self.execution
+                        .actor
+                        .drive_platform_prefix(PlatformPrefixAdvanceV2 {
+                            path: required.path,
+                            closed_through_utc_ms: required.required_at_utc_ms,
+                            next_index_position: position,
+                        })?;
+                }
+            }
+        }
+        if let Some(before) = at.checked_sub(1) {
+            let needs_close = self
+                .execution
+                .actor
+                .state
+                .as_ref()
+                .and_then(|state| state.session.as_ref())
+                .is_some_and(|session| {
+                    session
+                        .public_visibility_frontier
+                        .closed_through_utc_ms
+                        .is_none_or(|closed| closed < before)
+                });
+            if needs_close {
+                self.close_at(before, reason)?;
+            }
+        }
+        Ok(())
+    }
+    fn observe_at(
+        &mut self,
+        at: i64,
+    ) -> Result<Option<TrustedGroupDecisionCutoffV1>, SimRunActorErrorV2> {
+        let time = self.time(at);
+        self.execution.observe_time(time.clone())?;
+        self.drive_position += 1;
+        if let Some(receipt) = self.last_receipt.clone() {
+            let mut cutoff = self.execution.decision_cutoff(receipt);
+            cutoff.decision_time = time;
+            self.last_cutoff = Some(cutoff);
+        }
+        Ok(self.observation_cutoff())
+    }
+    /// 当前受信观察时间与实际领取反馈前缀，不应用事实或执行请求。
+    pub fn observation_cutoff(&self) -> Option<TrustedGroupDecisionCutoffV1> {
+        let mut cutoff = self.execution.decision_cutoff(self.last_receipt.clone()?);
+        cutoff.decision_time = self.last_cutoff.as_ref()?.decision_time.clone();
+        Some(cutoff)
+    }
+    fn validate_observation(
+        &self,
+        cutoff: &TrustedGroupDecisionCutoffV1,
+    ) -> Result<(), SimRunActorErrorV2> {
+        let valid = cutoff.decision_time.run_id() == self.execution.actor.opened.run_id
+            && self.last_receipt.as_ref().is_some_and(|receipt| {
+                receipt.session_id == cutoff.receipt.session_id
+                    && cutoff.receipt.group.group_position <= receipt.group.group_position
+            });
+        if valid {
+            Ok(())
+        } else {
+            Err(SimRunActorErrorV2::InvalidBusinessRequest(
+                "观察截止不属于本消费运行已交付前缀",
+            ))
+        }
+    }
     #[cfg(feature = "measurement")]
     pub fn measurement_resources(&self) -> PublicConsumptionResourceSnapshotV1 {
         let resources = self.execution.actor.measurement_resource_snapshot();
@@ -19715,10 +19899,17 @@ impl PublicConsumptionStateV1 {
         self.execution.actor.measurement_probe.drain()
     }
     pub fn frames(&self) -> Vec<PublicObservationFrameV1<'_>> {
-        let Some(cutoff) = &self.last_cutoff else {
+        let Some(cutoff) = self.last_cutoff.as_ref() else {
             return Vec::new();
         };
         self.frames_with_cutoff(cutoff)
+    }
+    /// 观察宿主领取反馈后，读取最新实际交付截止；旧 frames 保留组快照语义。
+    pub fn frames_at_observation(&self) -> Vec<PublicObservationFrameV1<'_>> {
+        let Some(cutoff) = self.observation_cutoff() else {
+            return Vec::new();
+        };
+        self.frames_with_cutoff(&cutoff)
     }
     fn frames_with_cutoff(
         &self,
@@ -19748,6 +19939,8 @@ impl PublicConsumptionStateV1 {
         Some(PublicGroupDecisionV1 {
             driver: self,
             cutoff,
+            send_time: None,
+            paper_clock: None,
         })
     }
     pub fn hidden_bucket(
@@ -19797,12 +19990,8 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
     pub fn wait_for_recording_capacity(&mut self) -> Result<(), SimRunActorErrorV2> {
         self.state.wait_for_recording_capacity()
     }
-    pub fn next_group(
-        &mut self,
-    ) -> Result<
-        Option<(PublicGroupAppliedReceiptV1, TrustedGroupDecisionCutoffV1)>,
-        SimRunActorErrorV2,
-    > {
+    /// 只查看下一真实供料时刻，不应用或关闭组。
+    pub fn next_group_at(&mut self) -> Result<Option<i64>, SimRunActorErrorV2> {
         if let Some(message) = &self.source_failure {
             return Err(SimRunActorErrorV2::PublicConsumptionSource(message.clone()));
         }
@@ -19815,6 +20004,59 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
             }
             None => None,
         };
+        Ok(next_time)
+    }
+    pub fn advance_before(&mut self, at: i64) -> Result<(), SimRunActorErrorV2> {
+        if self.next_group_at()?.is_some_and(|next| next < at) {
+            return Err(SimRunActorErrorV2::InvalidBusinessRequest(
+                "推进前必须处理严格更早的公共输入",
+            ));
+        }
+        self.state
+            .advance_before(at, PublicTimeClosureReasonV1::NextGlobalEventAt(at))
+    }
+    /// 静默观察复用已有合法材料，严格更早的义务先推进，at仍开放。
+    pub fn observe_at(
+        &mut self,
+        at: i64,
+    ) -> Result<Option<TrustedGroupDecisionCutoffV1>, SimRunActorErrorV2> {
+        self.advance_before(at)?;
+        self.state.observe_at(at)
+    }
+    /// 从原冻结观察取得当前发送能力，不重新选择意图。
+    pub fn send_decision_at(
+        &mut self,
+        cutoff: TrustedGroupDecisionCutoffV1,
+        at: i64,
+    ) -> Result<PublicGroupDecisionV1<'_>, SimRunActorErrorV2> {
+        self.state.validate_observation(&cutoff)?;
+        if at < cutoff.decision_time.logical_time_utc_ms() {
+            return Err(SimRunActorErrorV2::InvalidBusinessRequest(
+                "发送不能早于原观察",
+            ));
+        }
+        self.observe_at(at)?;
+        let send_time = self
+            .state
+            .last_cutoff
+            .as_ref()
+            .unwrap()
+            .decision_time
+            .clone();
+        Ok(PublicGroupDecisionV1 {
+            driver: &mut self.state,
+            cutoff,
+            send_time: Some(send_time),
+            paper_clock: None,
+        })
+    }
+    pub fn next_group(
+        &mut self,
+    ) -> Result<
+        Option<(PublicGroupAppliedReceiptV1, TrustedGroupDecisionCutoffV1)>,
+        SimRunActorErrorV2,
+    > {
+        let next_time = self.next_group_at()?;
         if self.close_pending {
             let at = self
                 .last_receipt
@@ -20044,6 +20286,38 @@ impl ContinuousPublicConsumptionV1 {
         }
         Ok(())
     }
+    /// 静默观察使用本运行UTC锚和单调时钟，不合成公共来源。
+    pub fn observe(&mut self) -> Result<Option<TrustedGroupDecisionCutoffV1>, SimRunActorErrorV2> {
+        loop {
+            self.state.wait_for_recording_capacity()?;
+            let now = self.clock.now_ms();
+            match self.state.advance_before(
+                now,
+                PublicTimeClosureReasonV1::ExecutionClockAdvancedTo(now),
+            ) {
+                Err(SimRunActorErrorV2::RecordingBackpressured) => continue,
+                Err(error) => return Err(error),
+                Ok(()) => {}
+            }
+            match self.state.observe_at(now) {
+                Err(SimRunActorErrorV2::RecordingBackpressured) => continue,
+                result => return result,
+            }
+        }
+    }
+    /// 只借用串行发送边界，真正Bridge请求点重新读取单调时钟。
+    pub fn send_decision(
+        &mut self,
+        cutoff: TrustedGroupDecisionCutoffV1,
+    ) -> Result<PublicGroupDecisionV1<'_>, SimRunActorErrorV2> {
+        self.state.validate_observation(&cutoff)?;
+        Ok(PublicGroupDecisionV1 {
+            driver: &mut self.state,
+            cutoff,
+            send_time: None,
+            paper_clock: Some(&self.clock),
+        })
+    }
     /// 原下一义务所在毫秒严格结束后的唤醒；无义务时不要求定时唤醒。
     pub fn next_wake_after(&self) -> Option<std::time::Duration> {
         self.required_close_at().map(|at| {
@@ -20120,6 +20394,8 @@ fn reduce_hidden_step_bucket_v1(
 pub struct PublicGroupDecisionV1<'a> {
     driver: &'a mut PublicConsumptionStateV1,
     cutoff: TrustedGroupDecisionCutoffV1,
+    send_time: Option<TrustedActorExecutionTimeV1>,
+    paper_clock: Option<&'a PaperExecutionClockV1>,
 }
 impl PublicGroupDecisionV1<'_> {
     pub fn cutoff(&self) -> &TrustedGroupDecisionCutoffV1 {
@@ -20191,7 +20467,36 @@ impl PublicGroupDecisionV1<'_> {
         &mut self,
         request: BusinessRequestV2,
     ) -> Result<MutationRequestReceiptV2, SimRunActorErrorV2> {
-        self.driver.execution.request(self.cutoff.clone(), request)
+        if let Some(clock) = self.paper_clock {
+            if let Some(existing) = existing_mutation_request_receipt_v2(
+                self.driver
+                    .execution
+                    .actor
+                    .state
+                    .as_ref()
+                    .ok_or(SimRunActorErrorV2::Closed)?,
+                &request.context().global_request_id,
+            ) {
+                return Ok(existing);
+            }
+            let now = clock.now_ms();
+            self.driver.advance_before(
+                now,
+                PublicTimeClosureReasonV1::ExecutionClockAdvancedTo(now),
+            )?;
+            self.driver.observe_at(now)?;
+            self.send_time = Some(
+                self.driver
+                    .last_cutoff
+                    .as_ref()
+                    .unwrap()
+                    .decision_time
+                    .clone(),
+            );
+        }
+        self.driver
+            .execution
+            .request(self.cutoff.clone(), self.send_time.clone(), request)
     }
 }
 

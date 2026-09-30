@@ -2437,3 +2437,275 @@ async fn continuous_equal_time_finality_gtd_and_rebate_keep_original_pre_market_
     }
     driver.stop_and_drain().unwrap();
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn trusted_observation_keeps_source_prefix_and_sends_at_independent_time() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let core = recorded_books(&root);
+    let path = temp.path().join("sim.jsonl");
+    let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, RecordedTimes).unwrap();
+    let (execution, _) = public_execution(&path, &core, SimCallerRoleV1::Paper).await;
+    let mut driver = FinitePublicConsumptionV1::new(execution, source, "time-test".into());
+    for _ in 0..3 {
+        driver.next_group().unwrap().unwrap();
+    }
+    driver
+        .decision()
+        .unwrap()
+        .request(BusinessRequestV2::CancelAllOrders(
+            CancelAllOrdersRequestV2 {
+                context: RequestContextV2 {
+                    global_request_id: "legacy-send".into(),
+                    caller_correlation_id: None,
+                },
+            },
+        ))
+        .unwrap();
+    let frozen = driver.observe_at(22_000).unwrap().unwrap();
+    let prepared = Arc::clone(driver.last_prepared.as_ref().unwrap());
+    driver.observe_at(22_020).unwrap().unwrap();
+    assert!(Arc::ptr_eq(
+        &prepared,
+        driver.last_prepared.as_ref().unwrap()
+    ));
+    assert_eq!(frozen.decision_time().logical_time_utc_ms(), 22_000);
+    assert_eq!(
+        driver.frames()[0]
+            .decision_cutoff
+            .decision_time()
+            .logical_time_utc_ms(),
+        22_020
+    );
+    assert_eq!(
+        driver
+            .execution
+            .actor
+            .state
+            .as_ref()
+            .unwrap()
+            .session
+            .as_ref()
+            .unwrap()
+            .public_visibility_frontier
+            .closed_through_utc_ms,
+        Some(22_019)
+    );
+    let request = BusinessRequestV2::CancelAllOrders(CancelAllOrdersRequestV2 {
+        context: RequestContextV2 {
+            global_request_id: "delayed-send".into(),
+            caller_correlation_id: None,
+        },
+    });
+    let legacy = BusinessInputV2::PublicRequest {
+        cutoff: frozen.clone(),
+        send_time: None,
+        request: request.clone(),
+    };
+    let legacy_json = serde_json::to_value(&legacy).unwrap();
+    assert!(legacy_json["body"].get("send_time").is_none());
+    let legacy_logged: LoggedBusinessInputV2 = serde_json::from_value(legacy_json.clone()).unwrap();
+    let old_replayed =
+        materialize_logged_input_v2(legacy_logged, &mut |_| unreachable!("请求不读取行情桶"))
+            .unwrap();
+    assert_eq!(serde_json::to_value(old_replayed).unwrap(), legacy_json);
+    let receipt = driver
+        .send_decision_at(frozen.clone(), 22_050)
+        .unwrap()
+        .request(request.clone())
+        .unwrap();
+    let state = driver
+        .execution
+        .actor
+        .state
+        .as_ref()
+        .unwrap()
+        .session
+        .as_ref()
+        .unwrap();
+    let registered = &state.mutation_requests.requests_by_id["delayed-send"];
+    assert_eq!(registered.request_sent_at_utc_ms, 22_050);
+    assert_eq!(
+        registered.platform_arrived_at_utc_ms,
+        receipt.platform_arrived_at_utc_ms
+    );
+    let delay = driver.execution.actor._latency_profile.sample_delay_ms(
+        state.session_seed.0.as_bytes(),
+        "delayed-send",
+        DelaySampleDomainV1::RequestOutbound,
+    );
+    assert_eq!(receipt.platform_arrived_at_utc_ms, 22_050 + delay as i64);
+    assert_eq!(
+        state.public_visibility_frontier.closed_through_utc_ms,
+        Some(22_049)
+    );
+    let send_time = driver.last_cutoff.as_ref().unwrap().decision_time.clone();
+    let current = BusinessInputV2::PublicRequest {
+        cutoff: frozen,
+        send_time: Some(send_time),
+        request,
+    };
+    let current_json = serde_json::to_value(current).unwrap();
+    let current_logged = serde_json::from_value(current_json.clone()).unwrap();
+    assert_eq!(
+        serde_json::to_value(
+            materialize_logged_input_v2(current_logged, &mut |_| unreachable!("请求不读取行情桶"))
+                .unwrap()
+        )
+        .unwrap(),
+        current_json
+    );
+    let rules = Arc::clone(&driver.execution.actor._rule_snapshot);
+    let finality = Arc::clone(&driver.execution.actor._finality_policy);
+    let scenario = Arc::clone(&driver.execution.actor.scenario);
+    let latency = Arc::clone(&driver.execution.actor._latency_profile);
+    let expected = driver
+        .execution
+        .actor
+        .state
+        .as_ref()
+        .unwrap()
+        .session
+        .as_ref()
+        .unwrap()
+        .mutation_requests
+        .requests_by_id
+        .iter()
+        .map(|(id, request)| {
+            (
+                id.clone(),
+                request.request_sent_at_utc_ms,
+                request.platform_arrived_at_utc_ms,
+            )
+        })
+        .collect::<Vec<_>>();
+    driver.stop_and_drain().unwrap();
+    // 原录制读取器恢复公共材料，规范日志恢复观察、关闭和请求，重用生产归约与投影。
+    let mut source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, RecordedTimes).unwrap();
+    let (opened, mut recovery) = SimEventLogRecoveryV2::open(&path, MAX_GROUP_BYTES).unwrap();
+    let mut replay = BusinessReducerStateV2 {
+        session: None,
+        public_pm_evidence: BTreeMap::new(),
+        pm_materials: Vec::new(),
+    };
+    let mut sequence = 1;
+    loop {
+        let (next, inputs) = recovery.next_group().unwrap();
+        recovery = next;
+        let Some(inputs) = inputs else { break };
+        for logged in inputs {
+            let input = match logged {
+                LoggedBusinessInputV2::PublicGroup(group) => {
+                    let prepared = source.next().unwrap().unwrap().prepared;
+                    assert_eq!(prepared.reference, group.reference);
+                    BusinessInputV2::PublicGroup(AcceptedPublicGroupV1 {
+                        reference: group.reference,
+                        execution_time: TrustedActorExecutionTimeV1(group.execution_time),
+                        prepared,
+                        pm_materials: Vec::new(),
+                        pm_step_bindings: group.pm_step_bindings,
+                        pm_reports: group.pm_reports,
+                    })
+                }
+                other => materialize_logged_input_v2(other, &mut |_| {
+                    unreachable!("公共录制无需历史行情桶")
+                })
+                .unwrap(),
+            };
+            let (state, output) = reduce_actor_input_v2(
+                &opened,
+                scenario.initial_market_directory(),
+                replay,
+                &input,
+                sequence,
+                &latency,
+                rules.snapshot(),
+                &finality,
+            )
+            .unwrap();
+            let (state, _, _) =
+                finalize_projection_batch_v2(&opened.run_id, state, output, &latency).unwrap();
+            replay = state;
+            replay.pm_materials.clear();
+            sequence += 1;
+        }
+    }
+    let actual = replay
+        .session
+        .unwrap()
+        .mutation_requests
+        .requests_by_id
+        .into_iter()
+        .map(|(id, request)| {
+            (
+                id,
+                request.request_sent_at_utc_ms,
+                request.platform_arrived_at_utc_ms,
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(actual, expected);
+    let log = std::fs::read_to_string(path).unwrap();
+    assert!(log.contains("PUBLIC_OBSERVE_TIME"));
+    assert!(!log.contains("EndOfInput"));
+    assert!(!log.contains("RUN_SEAL"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn paper_send_samples_clock_at_request_instead_of_capability_acquisition() {
+    use std::sync::atomic::Ordering;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let core = recorded_books(&root);
+    let (execution, _) = public_execution(
+        &temp.path().join("paper.jsonl"),
+        &core,
+        SimCallerRoleV1::Paper,
+    )
+    .await;
+    let (mut driver, clock) = controlled_continuous(execution, 10_000);
+    let mut source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, RecordedTimes).unwrap();
+    driver
+        .apply_group(source.next().unwrap().unwrap().prepared)
+        .unwrap();
+    clock.store(22_000, Ordering::SeqCst);
+    driver
+        .apply_group(source.next().unwrap().unwrap().prepared)
+        .unwrap();
+    let observed = driver.observe().unwrap().unwrap();
+    let mut send = driver.send_decision(observed.clone()).unwrap();
+    clock.store(22_050, Ordering::SeqCst);
+    let receipt = send
+        .request(BusinessRequestV2::PostOrder(PostOrderRequestV2 {
+            context: RequestContextV2 { global_request_id: "paper-time".into(), caller_correlation_id: None },
+            item: post_item("buy", &ConditionId(CONDITION_ID.into()), &TokenId(UP_TOKEN_ID.into()),
+                SimBuyOrderKindV1::FokMarket { spend_pusd: Decimal::from(3), worst_price_pusd_per_share: Decimal::new(6, 1) }),
+        }))
+        .unwrap();
+    assert_eq!(send.cutoff(), &observed);
+    assert!(receipt.platform_arrived_at_utc_ms >= 22_050);
+    drop(send);
+    assert_eq!(
+        driver
+            .execution
+            .actor
+            .state
+            .as_ref()
+            .unwrap()
+            .session
+            .as_ref()
+            .unwrap()
+            .mutation_requests
+            .requests_by_id["paper-time"]
+            .request_sent_at_utc_ms,
+        22_050
+    );
+    let due = driver.required_at().unwrap();
+    clock.store(due, Ordering::SeqCst);
+    driver.observe().unwrap();
+    assert!(completed_post_response(&driver.execution.actor, "paper-time").is_none(), "观察不关闭当前毫秒的 BUY");
+    clock.store(due + 1, Ordering::SeqCst);
+    driver.observe().unwrap();
+    assert!(completed_post_response(&driver.execution.actor, "paper-time").is_some());
+    driver.stop_and_drain().unwrap();
+}
