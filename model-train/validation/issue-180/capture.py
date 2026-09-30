@@ -44,7 +44,7 @@ impl NativeActor {
 '''
     support.write_text(text)
     runtime=out/'model-train/native-inputs/examples/common/frame_runtime.rs'
-    text=runtime.read_text();needle='let support = actor.support().unwrap();';assert text.count(needle)==1
+    text=runtime.read_text();needle='let support = actor.support().unwrap();';assert text.count(needle)==2
     text=text.replace(needle, r'''let support = match actor.support() {
                         Ok(value)=>value,
                         Err(error)=> {
@@ -54,7 +54,7 @@ impl NativeActor {
                             serde_json::to_writer_pretty(file,&fields).unwrap();
                             panic!("captured first support failure: {error:?}");
                         }
-                    };''');runtime.write_text(text)
+                    };''',1);runtime.write_text(text)
     host=out/'model-train/native-inputs/examples/frame_latency.rs';text=host.read_text()
     needle='let mut count = 0u64;';assert text.count(needle)==1
     text=text.replace(needle,'let stop_after=std::env::var("FRAME_STOP_AFTER_GROUP").ok().map(|v|v.parse::<u64>().unwrap());\n    '+needle)
