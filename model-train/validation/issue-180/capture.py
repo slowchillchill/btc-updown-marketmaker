@@ -26,7 +26,7 @@ impl NativeActor {
             if m!=condition {return None;}
             let order=c.order_identity.and_then(|id| read.orders().find(|o|o.order_identity==id));
             Some(serde_json::json!({"request_id":c.origin.intent.global_request_id(),"ordinal":c.origin.batch_item_ordinal,
-                "intent":c.origin.intent.intent(),"token":leg.token_id,"order_identity":c.order_identity,
+                "intent_debug":format!("{:?}",c.origin.intent.intent()),"token":leg.token_id,"order_identity":c.order_identity,
                 "remaining_target_shares":c.remaining_target_shares,
                 "accepted_ref":order.as_ref().and_then(|o|o.accepted).map(|r|format!("{:?}",r.record().source_reference())),
                 "formed_ref":order.as_ref().and_then(|o|o.formed).map(|r|format!("{:?}",r.record().source_reference())),
@@ -59,5 +59,5 @@ impl NativeActor {
     needle='let mut count = 0u64;';assert text.count(needle)==1
     text=text.replace(needle,'let stop_after=std::env::var("FRAME_STOP_AFTER_GROUP").ok().map(|v|v.parse::<u64>().unwrap());\n    '+needle)
     text=text.replace('count += 1;', 'count += 1;\n        if stop_after==Some(position) {break;}')
-    text=text.replace('"complete":true,"variant":variant', '"complete":true,"support_capture_only":true,"reproduced":false,"stop_after_group":stop_after,"variant":variant')
+    text=text.replace('"complete":true,"variant":variant', '"complete":true,"support_capture_only":true,"scope":"first_failure_prefix_not_full_window","reproduced":false,"stop_after_group":stop_after,"variant":variant')
     host.write_text(text)
