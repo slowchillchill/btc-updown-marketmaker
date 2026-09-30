@@ -691,26 +691,6 @@ fn create_context_container<
             None,
             PublishFaultV1::default(),
         )?;
-        renameat_with(
-            rustix::fs::CWD,
-            &candidate_directory,
-            rustix::fs::CWD,
-            &context_directory,
-            RenameFlags::NOREPLACE,
-        )
-        .map_err(|error| {
-            if error == rustix::io::Errno::EXIST {
-                DurableErrorV1::ContextAlreadyExists {
-                    path: context_directory.clone(),
-                }
-            } else {
-                DurableErrorV1::Io {
-                    operation: "禁止覆盖地发布上下文目录",
-                    path: context_directory.clone(),
-                    message: error.to_string(),
-                }
-            }
-        })?;
         Ok(())
     })();
     if let Err(error) = initialized {
@@ -723,6 +703,43 @@ fn create_context_container<
                 message,
             },
             error => error,
+        });
+    }
+    #[cfg(test)]
+    let fail_rename_eio =
+        CONTEXT_FAULT.with(|fault| std::mem::take(&mut fault.borrow_mut().fail_rename_eio));
+    #[cfg(not(test))]
+    let fail_rename_eio = false;
+    let published = if fail_rename_eio {
+        Err(rustix::io::Errno::IO)
+    } else {
+        renameat_with(
+            rustix::fs::CWD,
+            &candidate_directory,
+            rustix::fs::CWD,
+            &context_directory,
+            RenameFlags::NOREPLACE,
+        )
+    };
+    if let Err(error) = published {
+        // EIO 不保证最终名未改变，保留现场，不能按确定未发布清理。
+        if error == rustix::io::Errno::IO {
+            return Err(DurableErrorV1::DurabilityUncertain {
+                path: context_directory,
+                message: error.to_string(),
+            });
+        }
+        let _ = fs::remove_dir_all(&candidate_directory);
+        return Err(if error == rustix::io::Errno::EXIST {
+            DurableErrorV1::ContextAlreadyExists {
+                path: context_directory,
+            }
+        } else {
+            DurableErrorV1::Io {
+                operation: "禁止覆盖地发布上下文目录",
+                path: context_directory,
+                message: error.to_string(),
+            }
         });
     }
     confirm_context_directories(root, &context_directory)?;
@@ -756,6 +773,7 @@ fn confirm_context_directories(
 #[derive(Default)]
 struct ContextFaultV1 {
     fail_before_publish: bool,
+    fail_rename_eio: bool,
     fail_root_sync: bool,
 }
 #[cfg(test)]
@@ -1679,6 +1697,43 @@ mod tests {
             reopened.commits()[0].result_reference(0).unwrap(),
             references[0]
         );
+    }
+
+    #[test]
+    fn context_rename_eio_preserves_candidate_and_allows_same_root_followup() {
+        let root = TempDir::new().unwrap();
+        CONTEXT_FAULT.with(|fault| fault.borrow_mut().fail_rename_eio = true);
+        // 只模拟 rename 返回 EIO 的处理分支，不宣称复现真实内核事故。
+        assert!(matches!(
+            DurableContextStoreV1::open_or_create_sim_v2(root.path(), seed()),
+            Err(DurableErrorV1::DurabilityUncertain { .. })
+        ));
+        let entries: Vec<_> = fs::read_dir(root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(entries.len(), 1);
+        let candidate = &entries[0];
+        assert!(
+            candidate
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .starts_with(".context-")
+        );
+        let bytes = fs::read(candidate.join(CONTEXT_FILE_NAME)).unwrap();
+        assert!(candidate.join(COMMITS_DIRECTORY_NAME).is_dir());
+        let mut store = DurableContextStoreV1::open_or_create_sim_v2(root.path(), seed()).unwrap();
+        store.commit_batch(batch(1), 3000).unwrap();
+        let reference = store.commits()[0].result_reference(0).unwrap();
+        drop(store);
+        let reopened = DurableContextStoreV1::open_or_create_sim_v2(root.path(), seed()).unwrap();
+        assert_eq!(
+            reopened.commits()[0].result_reference(0).unwrap(),
+            reference
+        );
+        assert_eq!(fs::read(candidate.join(CONTEXT_FILE_NAME)).unwrap(), bytes);
     }
 
     #[test]
