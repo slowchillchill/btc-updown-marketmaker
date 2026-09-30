@@ -369,6 +369,12 @@ async fn issue180_time_host() {
     }
     drop(jobs);
     let frames = worker.join().unwrap();
+    crate::continuous_runtime::issue180_trace(serde_json::json!({
+        "kind":"accepted-work-stop-state",
+        "requests":root.shared.registry().issue180_request_results(),
+        "next_required":root.driver.next_required_logical_drive().map(|required|serde_json::json!({"path":format!("{:?}",required.path),"at":required.required_at_utc_ms})),
+        "local_pending":root.shared.ledger().projection_v2().unwrap().local_pending_reservation_projection,
+    }));
     root.driver.stop_and_drain().unwrap();
     std::fs::copy(
         temp.path().join("root/sim.jsonl"),

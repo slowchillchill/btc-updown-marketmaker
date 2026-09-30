@@ -31,12 +31,24 @@ def main():
     static TRACE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _guard = TRACE_LOCK.lock().unwrap();''')
     runtime_path.write_text(runtime)
+    registry_path = output / 'shared-run/src/registry.rs'
+    registry_path.write_text(registry_path.read_text() + """
+// 本次诊断副本只在结束时读取原请求引用，不改变登记或投影规则。
+impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
+    pub fn issue180_request_results(&self) -> Vec<(String, String, Option<String>)> {
+        self.intents.iter().map(|(id, request)| (
+            id.clone(), format!("{:?}", request.receipt),
+            request.completed.as_ref().map(|reference| format!("{:?}", reference.record())),
+        )).collect()
+    }
+}
+""")
     manifest_path = output.parent / (output.name + '-freeze.json')
     manifest = json.loads(manifest_path.read_text())
     manifest['purpose'] = '有限100ms真实模型消费者；不运行容量窗口'
     manifest['diagnostic_files'] = {
         str(path.relative_to(output)): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in [fixture_path, runtime_path, output / 'model-train/native-inputs/src/root.rs']
+        for path in [fixture_path, runtime_path, output / 'model-train/native-inputs/src/root.rs', registry_path]
     }
     manifest['time_host_tool_sha256'] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     manifest['time_host_fixture_sha256'] = hashlib.sha256(Path(__file__).with_suffix('.rs').read_bytes()).hexdigest()
@@ -44,7 +56,7 @@ def main():
     # 更新原诊断补丁，实际附加消费者和锁必须包含在摘要内。
     import difflib
     patch = ''
-    for path in [fixture_path, runtime_path, output / 'model-train/native-inputs/src/root.rs']:
+    for path in [fixture_path, runtime_path, output / 'model-train/native-inputs/src/root.rs', registry_path]:
         relative = str(path.relative_to(output))
         original = subprocess.check_output(['git', 'show', manifest['revision'] + ':' + relative], cwd=source, text=True)
         patch += ''.join(difflib.unified_diff(original.splitlines(True), path.read_text().splitlines(True), fromfile='a/' + relative, tofile='b/' + relative))
