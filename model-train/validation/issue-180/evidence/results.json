@@ -1,0 +1,636 @@
+{
+  "runs": [
+    {
+      "run_path": "formal-20261001/runs/small-ordinary",
+      "freeze": "evidence/freeze.json",
+      "source_tool_sha": "5816e51b5333c44796fb61035196d2c6f66a439b",
+      "run": {
+        "run": "small-ordinary",
+        "model": "MAIN-1x256",
+        "ort_threads": 4,
+        "revision": "5816e51b5333c44796fb61035196d2c6f66a439b",
+        "exit_code": 0,
+        "observation_limit_reached": false,
+        "total_wall_seconds_including_preparation": 900.28239295003,
+        "completed_utc": "2026-09-30T18:12:37.477220+00:00"
+      },
+      "preparation_seconds": 261.928512297,
+      "source_window_seconds": 60.0,
+      "window_anchor_ns": 261895753873,
+      "groups": 49524,
+      "first_group": 201582,
+      "last_group": 251105,
+      "continuous_group_positions": true,
+      "model_rows": 49524,
+      "actors": 49524,
+      "input_applied_count": 49530,
+      "input_complete_count": 49530,
+      "handoff_message_ack_count": 49530,
+      "supplied_window_count": 49530,
+      "DPT_complete_seconds_after_window_open": 638.114528476,
+      "supply_tail_enqueued_seconds_after_window_open": 342.992454668,
+      "initial_queue_depth": 0,
+      "window_peak_queue": 25000,
+      "window_dpt_recording_inflight_observed_max": 3,
+      "whole_session_dpt_recording_peak_including_preparation": 32,
+      "DPT_ending": {
+        "applied": 251184,
+        "confirmed": 251184,
+        "enqueued": 251184,
+        "dequeued": 251184,
+        "supplied": 251184,
+        "complete": true,
+        "pending_groups": 0,
+        "pending_input": null,
+        "window_supply_complete": true,
+        "failure": null
+      },
+      "SIM_completion_present": true,
+      "model_before_input_complete": true,
+      "input_complete_invoked_before_message_received": true,
+      "service_ns": {
+        "n": 49524,
+        "sum": 399637991008,
+        "p50": 7845275,
+        "p95": 9865278,
+        "maximum": 44237989
+      },
+      "native_ns": {
+        "n": 49524,
+        "sum": 215653258562,
+        "p50": 4144170,
+        "p95": 5953335,
+        "maximum": 40290610
+      },
+      "model_process_cpu_ns": {
+        "n": 49524,
+        "sum": 569404999671,
+        "p50": 10892094,
+        "p95": 14880663,
+        "maximum": 264109691
+      },
+      "source_delivery_lag_ns": {
+        "n": 49524,
+        "sum": 15594457773566606,
+        "p50": 318813775172,
+        "p95": 551004616704,
+        "maximum": 578145568493
+      },
+      "enqueue_wait_ns": {
+        "n": 49530,
+        "sum": 309587205562,
+        "p50": 3486,
+        "p95": 13104263,
+        "maximum": 8185259152
+      },
+      "attempt_to_dequeue_ns": {
+        "n": 49530,
+        "sum": 11909634406579278,
+        "p50": 295892522187,
+        "p95": 307788605861,
+        "maximum": 322100567755
+      },
+      "enqueue_complete_to_dequeue_ns": {
+        "n": 49530,
+        "sum": 11909324819373716,
+        "p50": 295881827858,
+        "p95": 307776107188,
+        "maximum": 322089484415
+      },
+      "DPT_reserve_wait_ns": {
+        "n": 49530,
+        "sum": 30801150,
+        "p50": 601,
+        "p95": 1002,
+        "maximum": 21340
+      },
+      "SIM_execute_recording_wait_ns": {
+        "n": 49524,
+        "sum": 54503888,
+        "p50": 1062,
+        "p95": 1623,
+        "maximum": 33123
+      },
+      "components": {
+        "account_economics_projection_ns": {
+          "n": 49524,
+          "sum": 2060141591,
+          "p50": 40746,
+          "p95": 46838,
+          "maximum": 236134
+        },
+        "feedback_apply_ns": {
+          "n": 49524,
+          "sum": 144198221,
+          "p50": 2675,
+          "p95": 3496,
+          "maximum": 89709
+        },
+        "ledger_economic_read_ns": {
+          "n": 49524,
+          "sum": 276923810,
+          "p50": 5411,
+          "p95": 7143,
+          "maximum": 64381
+        },
+        "ledger_projection_ns": {
+          "n": 49524,
+          "sum": 495272086,
+          "p50": 9959,
+          "p95": 11392,
+          "maximum": 55796
+        },
+        "registry_snapshot_ns": {
+          "n": 49524,
+          "sum": 3633128781,
+          "p50": 85200,
+          "p95": 100870,
+          "maximum": 551308
+        },
+        "request_funds_entries": {
+          "n": 49524,
+          "sum": 80602,
+          "p50": 0,
+          "p95": 4,
+          "maximum": 12
+        }
+      },
+      "SIM_resources_last": {
+        "applied_input_sequence": 401914,
+        "business": {
+          "bytes": 75366,
+          "records": 6936
+        },
+        "pending_projection": {
+          "bytes": 0,
+          "records": 0
+        },
+        "public_pm_evidence": {
+          "absences": 242,
+          "assets": 8,
+          "levels": 792,
+          "markets": 4,
+          "selected": 1034
+        }
+      },
+      "RSS_scope": "whole process including preparation",
+      "raw_file_sha256": {
+        "formal-20261001/runs/small-ordinary/measurements.jsonl": "c492365f7744c75961ef074993e6fd1ec78b2d2d43ddec7c58b691b49a6fcd0e",
+        "formal-20261001/runs/small-ordinary/dpt-inputs.jsonl": "e799c2db9f91e7c2dfb472134e6d3ecc331ff71ef0896bcf2238d758481adc49",
+        "formal-20261001/runs/small-ordinary/supply.jsonl": "991ecec107c9d664fd788126be791d4592dfa6be52905bed18f9244c20c1aa68",
+        "formal-20261001/runs/small-ordinary/handoff.jsonl": "d8f57cdb82adb6547f8638f0ad05fe33751d1e6a1999bae44e44272c0d9e9bc6",
+        "formal-20261001/runs/small-ordinary/online-progress.json": "220e489f5b968a0041dc4634ee9425a9811b89487f511719e35da55f39961ace",
+        "formal-20261001/runs/small-ordinary-run.json": "c89570e8dfd931b3299943ac15339875eb4d2a4f6ebb36af1addc856481e568d",
+        "formal-20261001/runs/small-ordinary.resources.txt": "009fd4532218001004bb2ed64080598d852ba0336e0e749618c3f7f566c45002",
+        "formal-20261001/runs/small-ordinary/completion.json": "5a8e44907fcabd40f65e11c973078b456a0372d721e7587c26a12de43c7cc723"
+      },
+      "SIM_drain_seconds": 0.023698081,
+      "group_evidence_output_ns": 5741084129,
+      "input_evidence_output_ns": 290759674,
+      "whole_process_resources": {
+        "user_seconds": 1126.1,
+        "system_seconds": 84.16,
+        "max_RSS_kib": 430308.0
+      },
+      "hidden_sha256": "a4fb2e1f631bbc631b5eb6586321527a966a2d7d259fdf28807fbc332a576d46",
+      "SIM_completion_complete": true
+    },
+    {
+      "run_path": "formal-20261001/runs/small-high",
+      "freeze": "evidence/freeze.json",
+      "source_tool_sha": "5816e51b5333c44796fb61035196d2c6f66a439b",
+      "run": {
+        "run": "small-high",
+        "model": "MAIN-1x256",
+        "ort_threads": 4,
+        "revision": "5816e51b5333c44796fb61035196d2c6f66a439b",
+        "exit_code": 1,
+        "observation_limit_reached": false,
+        "total_wall_seconds_including_preparation": 963.3096943430137,
+        "completed_utc": "2026-09-30T18:28:40.787364+00:00"
+      },
+      "preparation_seconds": 789.251228307,
+      "source_window_seconds": 5.586,
+      "window_anchor_ns": 789242607883,
+      "groups": 3037,
+      "first_group": 418584,
+      "last_group": 421620,
+      "continuous_group_positions": true,
+      "model_rows": 5546,
+      "actors": 3037,
+      "input_applied_count": 3042,
+      "input_complete_count": 3042,
+      "handoff_message_ack_count": 3041,
+      "supplied_window_count": 3042,
+      "DPT_complete_seconds_after_window_open": 173.853682809,
+      "supply_tail_enqueued_seconds_after_window_open": 5.577749573,
+      "initial_queue_depth": 0,
+      "window_peak_queue": 2777,
+      "window_dpt_recording_inflight_observed_max": 2,
+      "whole_session_dpt_recording_peak_including_preparation": 38,
+      "DPT_ending": {
+        "applied": 421715,
+        "confirmed": 421714,
+        "enqueued": 421715,
+        "dequeued": 421715,
+        "supplied": 421715,
+        "complete": true,
+        "pending_groups": 0,
+        "pending_input": null,
+        "window_supply_complete": true,
+        "failure": null
+      },
+      "SIM_completion_present": false,
+      "model_before_input_complete": true,
+      "input_complete_invoked_before_message_received": true,
+      "service_ns": {
+        "n": 3037,
+        "sum": 39817300125,
+        "p50": 13084476,
+        "p95": 17185515,
+        "maximum": 56907203
+      },
+      "native_ns": {
+        "n": 3037,
+        "sum": 18531376320,
+        "p50": 5742108,
+        "p95": 9223138,
+        "maximum": 46335356
+      },
+      "model_process_cpu_ns": {
+        "n": 3037,
+        "sum": 59368071763,
+        "p50": 19446982,
+        "p95": 25975537,
+        "maximum": 322535073
+      },
+      "source_delivery_lag_ns": {
+        "n": 3037,
+        "sum": 137076790854558,
+        "p50": 28402699691,
+        "p95": 165891821685,
+        "maximum": 168246251914
+      },
+      "enqueue_wait_ns": {
+        "n": 3042,
+        "sum": 3437912,
+        "p50": 601,
+        "p95": 3557,
+        "maximum": 45566
+      },
+      "attempt_to_dequeue_ns": {
+        "n": 3041,
+        "sum": 137339778446724,
+        "p50": 28406287401,
+        "p95": 165859723046,
+        "maximum": 168228491097
+      },
+      "enqueue_complete_to_dequeue_ns": {
+        "n": 3041,
+        "sum": 137339775009443,
+        "p50": 28406285697,
+        "p95": 165859722615,
+        "maximum": 168228486007
+      },
+      "DPT_reserve_wait_ns": {
+        "n": 3042,
+        "sum": 2524633,
+        "p50": 792,
+        "p95": 1072,
+        "maximum": 2945
+      },
+      "SIM_execute_recording_wait_ns": {
+        "n": 3037,
+        "sum": 4804991,
+        "p50": 1593,
+        "p95": 2074,
+        "maximum": 6121
+      },
+      "components": {
+        "account_economics_projection_ns": {
+          "n": 3037,
+          "sum": 130332929,
+          "p50": 41759,
+          "p95": 48432,
+          "maximum": 117210
+        },
+        "feedback_apply_ns": {
+          "n": 3037,
+          "sum": 14950493,
+          "p50": 3337,
+          "p95": 4629,
+          "maximum": 146976
+        },
+        "ledger_economic_read_ns": {
+          "n": 3037,
+          "sum": 20259232,
+          "p50": 6512,
+          "p95": 8106,
+          "maximum": 42760
+        },
+        "ledger_projection_ns": {
+          "n": 3037,
+          "sum": 33520386,
+          "p50": 10830,
+          "p95": 14146,
+          "maximum": 25969
+        },
+        "order_funds_entries": {
+          "n": 3037,
+          "sum": 728,
+          "p50": 0,
+          "p95": 2,
+          "maximum": 4
+        },
+        "registry_order_entries": {
+          "n": 3037,
+          "sum": 728,
+          "p50": 0,
+          "p95": 2,
+          "maximum": 4
+        },
+        "registry_snapshot_ns": {
+          "n": 3037,
+          "sum": 116608856,
+          "p50": 31379,
+          "p95": 95269,
+          "maximum": 167345
+        },
+        "request_funds_entries": {
+          "n": 3037,
+          "sum": 14921,
+          "p50": 4,
+          "p95": 12,
+          "maximum": 14
+        }
+      },
+      "SIM_resources_last": {
+        "applied_input_sequence": 680903,
+        "business": {
+          "bytes": 32489,
+          "records": 4916
+        },
+        "pending_projection": {
+          "bytes": 0,
+          "records": 0
+        },
+        "public_pm_evidence": {
+          "absences": 338,
+          "assets": 10,
+          "levels": 980,
+          "markets": 5,
+          "selected": 1318
+        }
+      },
+      "RSS_scope": "whole process including preparation",
+      "raw_file_sha256": {
+        "formal-20261001/runs/small-high/measurements.jsonl": "73b05486aaaafbd242a24d7c7cbe36cc9e79559f0e8b9f46578e6e0fddeb393b",
+        "formal-20261001/runs/small-high/dpt-inputs.jsonl": "b231e1a03d951ccc639a61b48350bab91f1548626b091c01ebc9d94a49fe65b7",
+        "formal-20261001/runs/small-high/supply.jsonl": "b92927fbe36db9c01240b5ec2b51499cf97d0086af1f052205c77a12bbc737df",
+        "formal-20261001/runs/small-high/handoff.jsonl": "f36065e4872e0d8cf6154ca4efa51362a4c14ad5eeb426d6320d48bba1259bd4",
+        "formal-20261001/runs/small-high/online-progress.json": "8dda56348703728e6b67a6efb20465bbfe7e9956308c547f8d70c5a7de49e6f7",
+        "formal-20261001/runs/small-high-run.json": "24b0c027b4c957eb4a1cd3b785f00a1cab4994e6a97a972828159d0ed5a5c590",
+        "formal-20261001/runs/small-high.resources.txt": "c66ffdddff86bb0c3fc7a5ed9fe814493801a7c1a8e1eade4401abd9783ed401"
+      },
+      "whole_process_resources": {
+        "user_seconds": 1119.4,
+        "system_seconds": 172.97,
+        "max_RSS_kib": 551944.0
+      }
+    },
+    {
+      "run_path": "snapshot-fixed-20261001/runs/large-high",
+      "freeze": "evidence/freeze-snapshot-fixed.json",
+      "source_tool_sha": "ecb4b22042432ba9cf9559dd5df5749b85592f00",
+      "run": {
+        "run": "large-high",
+        "model": "MAIN-30x1024",
+        "ort_threads": 16,
+        "revision": "ecb4b22042432ba9cf9559dd5df5749b85592f00",
+        "exit_code": 0,
+        "observation_limit_reached": false,
+        "total_wall_seconds_including_preparation": 1095.3625606779824,
+        "completed_utc": "2026-09-30T20:59:27.479548+00:00"
+      },
+      "preparation_seconds": 806.317766858,
+      "source_window_seconds": 5.586,
+      "window_anchor_ns": 806313884220,
+      "groups": 3037,
+      "first_group": 418584,
+      "last_group": 421620,
+      "continuous_group_positions": true,
+      "model_rows": 5546,
+      "actors": 3037,
+      "input_applied_count": 3042,
+      "input_complete_count": 3042,
+      "handoff_message_ack_count": 3041,
+      "supplied_window_count": 3042,
+      "DPT_complete_seconds_after_window_open": 288.427144023,
+      "supply_tail_enqueued_seconds_after_window_open": 5.577495588,
+      "initial_queue_depth": 0,
+      "window_peak_queue": 2941,
+      "window_dpt_recording_inflight_observed_max": 2,
+      "whole_session_dpt_recording_peak_including_preparation": 36,
+      "DPT_ending": {
+        "applied": 421715,
+        "confirmed": 421714,
+        "enqueued": 421715,
+        "dequeued": 421715,
+        "supplied": 421715,
+        "complete": true,
+        "pending_groups": 0,
+        "pending_input": null,
+        "window_supply_complete": true,
+        "failure": null
+      },
+      "SIM_completion_present": true,
+      "model_before_input_complete": true,
+      "input_complete_invoked_before_message_received": true,
+      "service_ns": {
+        "n": 3037,
+        "sum": 165261443065,
+        "p50": 45686336,
+        "p95": 90299483,
+        "maximum": 283692757
+      },
+      "native_ns": {
+        "n": 3037,
+        "sum": 45939091436,
+        "p50": 9322195,
+        "p95": 53207151,
+        "maximum": 218438884
+      },
+      "model_process_cpu_ns": {
+        "n": 3037,
+        "sum": 814903349143,
+        "p50": 268207802,
+        "p95": 337858914,
+        "maximum": 772248620
+      },
+      "source_delivery_lag_ns": {
+        "n": 3037,
+        "sum": 297884649997133,
+        "p50": 83188103193,
+        "p95": 260196460831,
+        "maximum": 282817087856
+      },
+      "enqueue_wait_ns": {
+        "n": 3042,
+        "sum": 4497344,
+        "p50": 601,
+        "p95": 5991,
+        "maximum": 25849
+      },
+      "attempt_to_dequeue_ns": {
+        "n": 3041,
+        "sum": 298365284272018,
+        "p50": 83219817899,
+        "p95": 260016097415,
+        "maximum": 282558174483
+      },
+      "enqueue_complete_to_dequeue_ns": {
+        "n": 3041,
+        "sum": 298365279775666,
+        "p50": 83219817058,
+        "p95": 260016096924,
+        "maximum": 282558167510
+      },
+      "DPT_reserve_wait_ns": {
+        "n": 3042,
+        "sum": 3141753,
+        "p50": 1012,
+        "p95": 1373,
+        "maximum": 6463
+      },
+      "SIM_execute_recording_wait_ns": {
+        "n": 3037,
+        "sum": 5409609,
+        "p50": 1774,
+        "p95": 2174,
+        "maximum": 13235
+      },
+      "components": {
+        "account_economics_projection_ns": {
+          "n": 3037,
+          "sum": 185314545,
+          "p50": 63760,
+          "p95": 77546,
+          "maximum": 225044
+        },
+        "feedback_apply_ns": {
+          "n": 3037,
+          "sum": 108570870,
+          "p50": 14928,
+          "p95": 122671,
+          "maximum": 795768
+        },
+        "ledger_economic_read_ns": {
+          "n": 3037,
+          "sum": 22534310,
+          "p50": 7143,
+          "p95": 12152,
+          "maximum": 34274
+        },
+        "ledger_projection_ns": {
+          "n": 3037,
+          "sum": 39027027,
+          "p50": 12984,
+          "p95": 19086,
+          "maximum": 69310
+        },
+        "order_funds_entries": {
+          "n": 3037,
+          "sum": 15138,
+          "p50": 0,
+          "p95": 31,
+          "maximum": 99
+        },
+        "registry_order_entries": {
+          "n": 3037,
+          "sum": 15138,
+          "p50": 0,
+          "p95": 31,
+          "maximum": 99
+        },
+        "registry_snapshot_ns": {
+          "n": 3037,
+          "sum": 20448030622,
+          "p50": 1252558,
+          "p95": 41937170,
+          "maximum": 199607460
+        },
+        "request_funds_entries": {
+          "n": 3037,
+          "sum": 170386,
+          "p50": 38,
+          "p95": 172,
+          "maximum": 227
+        }
+      },
+      "SIM_resources_last": {
+        "applied_input_sequence": 684847,
+        "business": {
+          "bytes": 534531,
+          "records": 11324
+        },
+        "pending_projection": {
+          "bytes": 0,
+          "records": 0
+        },
+        "public_pm_evidence": {
+          "absences": 338,
+          "assets": 10,
+          "levels": 980,
+          "markets": 5,
+          "selected": 1318
+        }
+      },
+      "RSS_scope": "whole process including preparation",
+      "raw_file_sha256": {
+        "snapshot-fixed-20261001/runs/large-high/measurements.jsonl": "b7ebddadc403f3a2d536c46aa0ec8fa23c59642553908c5f43e3ed09da3fa7ba",
+        "snapshot-fixed-20261001/runs/large-high/dpt-inputs.jsonl": "6c90b596f17ee8b6e308df3f24d5b56a18f171b5bef484fc9d7ae8a3bf4ebbbe",
+        "snapshot-fixed-20261001/runs/large-high/supply.jsonl": "9d965ca16a773abad9fd562afd7ecdda593259a9e01dab407552d25ed486b87a",
+        "snapshot-fixed-20261001/runs/large-high/handoff.jsonl": "9b0149b1742169271f9b67c89a758995b27905b9b33d32bd91fe847d35f9fed5",
+        "snapshot-fixed-20261001/runs/large-high/online-progress.json": "febda637d607c64ef845bc30689842f69ce02e14424075cb807645a14feb1ffd",
+        "snapshot-fixed-20261001/runs/large-high-run.json": "5912b0c8b44459154d7cec0deb43d2378ce3fc2845a61e3d4c667acc51a9854d",
+        "snapshot-fixed-20261001/runs/large-high.resources.txt": "c264a8cf2e20d364436442017e871504128fffd9756fc90d38ad48c900256b73",
+        "snapshot-fixed-20261001/runs/large-high/completion.json": "943ea215e5d8fd52123f3dac1540b801ded9bfe1d827712929ceac7b0751026a"
+      },
+      "SIM_drain_seconds": 0.046959783,
+      "group_evidence_output_ns": 893318540,
+      "input_evidence_output_ns": 20850222,
+      "whole_process_resources": {
+        "user_seconds": 1870.15,
+        "system_seconds": 211.13,
+        "max_RSS_kib": 2919664.0
+      },
+      "hidden_sha256": "0c52c53e2d8f7b970f0ab1e130c98dc8e253bc2df159ad8d381849a1423672ea",
+      "SIM_completion_complete": true
+    }
+  ],
+  "percentiles": "nearest rank, raw nanoseconds",
+  "SIM_inflight_occupancy_measured": false,
+  "F6_funds_entries": "资金过滤后的入选投影访问，非全历史扫描或容器大小",
+  "raw_evidence_base": "target/issue-180-public-baseline-validation",
+  "aggregation_script": "snapshot-fixed-20261001/summarize.py",
+  "aggregation_script_sha256": "e952227cd660be017e92fec128fcf052a2c70fd2fb16354a72b887ae6b37264c",
+  "registry_order_entries_scope": "unfinished_orders()筛选后的输出访问，未计剔除闭合依赖或完整registry扫描",
+  "evidence_output_scope": "有completion的场列实测组/输入证据输出时间，未把文件系统全部工作计为此项",
+  "prior_incomplete_runs": [
+    {
+      "path": "formal-20261001/runs/large-high",
+      "status": "准备中断，window_started=false，未计容量完成场"
+    },
+    {
+      "path": "end-corrected-20261001/runs/large-high",
+      "source_tool_sha": "c30f40b18dd846bcd17b7b733a00c5e3ea62448e",
+      "status": "762组后group419346支持错误，exit101，未完成"
+    },
+    {
+      "path": "support-failure-20261001/runs/large-high",
+      "source_tool_sha": "818349e1e039bf399a185f14d23fb6b807378da2",
+      "status": "一次错误定位重现同组/输入/时刻，exit101，非容量完成场"
+    }
+  ],
+  "source_delivery_lag_ns_sampling": "acknowledge_if_empty 之后采样的消费／确认后墙钟相对源逻辑时刻落后，不严格等同 model_end；保留原字段和值。"
+}

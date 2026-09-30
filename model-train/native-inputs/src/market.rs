@@ -254,8 +254,8 @@ pub(crate) struct Sample {
 pub(crate) struct MarketHistory {
     sides: [SidePrevious; 6],
     pub(crate) series: [VecDeque<Sample>; 6],
-    // 仅派生于对应 series；空队列默认零，追加/淘汰时同步重算，随市场历史释放。
-    history_features: [[f32; 4]; 6],
+    // 仅派生于对应 series；接纳来源后失效，完整编码时重算，随市场历史释放。
+    history_features: [Option<[f32; 4]>; 6],
 }
 
 pub(crate) fn side(
@@ -483,48 +483,92 @@ fn reference(
         out[36] = 1.;
     }
 }
+impl MarketHistory {
+    /// 只接纳六路真实来源样本；身份去重、原组时间与16条截断保持。
+    pub(crate) fn observe_sources(&mut self, o: &MarketBusinessObservationV1, now: i64) {
+        let mut samples: [Option<(R, Vec<DirectObservationAnchorV1>)>; 6] =
+            std::array::from_fn(|_| None);
+        for (i, sample) in samples.iter_mut().enumerate().take(2) {
+            if let Some(asset) = o
+                .assets
+                .iter()
+                .find(|a| a.asset.outcome.index as usize == i)
+            {
+                *sample = bba_sample(&asset.best_bid_ask);
+            }
+        }
+        samples[3] = visible(&o.chainlink_spot).map(|v| {
+            (
+                decimal(&v.price_usd_per_btc),
+                anchors(&o.chainlink_spot, "chainlink_spot")
+                    .into_iter()
+                    .cloned()
+                    .collect(),
+            )
+        });
+        samples[4] = visible(&o.chainlink_twap_thirty).map(|v| {
+            (
+                decimal(&v.price_usd_per_btc),
+                anchors(&o.chainlink_twap_thirty, "chainlink_twap_thirty")
+                    .into_iter()
+                    .cloned()
+                    .collect(),
+            )
+        });
+        samples[5] = visible(&o.chainlink_twap_sixty).map(|v| {
+            (
+                decimal(&v.price_usd_per_btc),
+                anchors(&o.chainlink_twap_sixty, "chainlink_twap_sixty")
+                    .into_iter()
+                    .cloned()
+                    .collect(),
+            )
+        });
+        for (i, sample) in samples.into_iter().enumerate() {
+            let q = &mut self.series[i];
+            if let Some((value, identity)) = sample
+                && !identity.is_empty()
+                && q.back().is_none_or(|s| s.identity != identity)
+            {
+                q.push_back(Sample {
+                    value,
+                    identity,
+                    at: now,
+                });
+                if q.len() > 16 {
+                    q.pop_front();
+                }
+                self.history_features[i] = None;
+            }
+        }
+    }
+}
 fn history(
     projection: &InputProjection,
     out: &mut [f32],
-    q: &mut VecDeque<Sample>,
-    cached: &mut [f32; 4],
-    value: Option<(R, Vec<DirectObservationAnchorV1>)>,
-    now: i64,
+    q: &VecDeque<Sample>,
+    cached: &mut Option<[f32; 4]>,
 ) {
-    if let Some((value, identity)) = value
-        && !identity.is_empty()
-        && q.back().is_none_or(|s| s.identity != identity)
-    {
-        q.push_back(Sample {
-            value,
-            identity,
-            at: now,
-        });
-        if q.len() > 16 {
-            q.pop_front();
-        }
-    } else {
-        out.copy_from_slice(cached);
+    if let Some(value) = cached {
+        out.copy_from_slice(value);
         return;
     }
     out[0] = fraction(q.len(), 16);
-    if q.len() < 2 {
-        cached.copy_from_slice(out);
-        return;
+    if q.len() >= 2 {
+        let last = &q[q.len() - 1];
+        out[1] = projection.log(&last.value.sub(&q[q.len() - 2].value));
+        let squares = q
+            .iter()
+            .zip(q.iter().skip(1))
+            .map(|(a, b)| {
+                let d = b.value.sub(&a.value);
+                d.mul(&d)
+            })
+            .fold(R::zero(), |a, b| a.add(&b));
+        out[2] = crate::exact::sqrt_log_f32(&squares.divided_by(&integer(q.len() - 1)));
+        out[3] = seconds(projection, last.at, q[0].at);
     }
-    let last = &q[q.len() - 1];
-    out[1] = projection.log(&last.value.sub(&q[q.len() - 2].value));
-    let squares = q
-        .iter()
-        .zip(q.iter().skip(1))
-        .map(|(a, b)| {
-            let d = b.value.sub(&a.value);
-            d.mul(&d)
-        })
-        .fold(R::zero(), |a, b| a.add(&b));
-    out[2] = crate::exact::sqrt_log_f32(&squares.divided_by(&integer(q.len() - 1)));
-    out[3] = seconds(projection, last.at, q[0].at);
-    cached.copy_from_slice(out);
+    *cached = Some(out.try_into().expect("固定四项历史特征"));
 }
 fn lifecycle(
     projection: &InputProjection,
@@ -609,7 +653,7 @@ fn bba(
     out: &mut [f32],
     f: &ObservedFactV1<CanonicalBbaFactV1>,
     now: i64,
-) -> Option<(R, Vec<DirectObservationAnchorV1>)> {
+) {
     out[..6].copy_from_slice(&quality(f.quality));
     let a = anchors(f, "best_bid_ask");
     let value = visible(f);
@@ -632,8 +676,16 @@ fn bba(
         }
         out[start + 2..start + 7].copy_from_slice(&time);
     }
-    fields[0]
-        .zip(fields[1])
+}
+fn bba_sample(
+    f: &ObservedFactV1<CanonicalBbaFactV1>,
+) -> Option<(R, Vec<DirectObservationAnchorV1>)> {
+    let value = visible(f)?;
+    let a = anchors(f, "best_bid_ask");
+    value
+        .best_bid_pusd_per_share
+        .as_ref()
+        .zip(value.best_ask_pusd_per_share.as_ref())
         .filter(|_| !a.is_empty())
         .map(|(b, s)| {
             (
@@ -642,6 +694,7 @@ fn bba(
             )
         })
 }
+
 fn pm_trade(
     projection: &InputProjection,
     out: &mut [f32],
@@ -923,11 +976,20 @@ pub(crate) fn encode(
     now: i64,
     h: &mut MarketHistory,
 ) -> ([f32; 596], BookLevels) {
+    h.observe_sources(o, now);
+    encode_features(projection, o, rule, now, h)
+}
+/// 编码已接纳来源的模型特征，不再接纳样本。
+pub(crate) fn encode_features(
+    projection: &InputProjection,
+    o: &MarketBusinessObservationV1,
+    rule: &[f32; 30],
+    now: i64,
+    h: &mut MarketHistory,
+) -> ([f32; 596], BookLevels) {
     let mut out = [0.; 596];
     let mut book: BookLevels = std::array::from_fn(|_| Arc::default());
     reference(projection, &mut out[..37], o, now);
-    let mut samples: [Option<(R, Vec<DirectObservationAnchorV1>)>; 6] =
-        std::array::from_fn(|_| None);
     // 六侧输入互不依赖；同一 Rayon 池按侧批量准备，结果仍按规范顺序写回。
     let mut side_features = [[0.; 16]; 6];
     h.sides
@@ -1004,7 +1066,7 @@ pub(crate) fn encode(
                 out[base + 6 + j * 16..base + 22 + j * 16]
                     .copy_from_slice(&side_features[2 * i + j]);
             }
-            samples[i] = bba(
+            bba(
                 projection,
                 &mut out[151 + 28 * i..179 + 28 * i],
                 &a.best_bid_ask,
@@ -1022,44 +1084,15 @@ pub(crate) fn encode(
     for j in 0..2 {
         out[119 + j * 16..135 + j * 16].copy_from_slice(&side_features[4 + j]);
     }
-    samples[3] = visible(&o.chainlink_spot).map(|v| {
-        (
-            decimal(&v.price_usd_per_btc),
-            anchors(&o.chainlink_spot, "chainlink_spot")
-                .into_iter()
-                .cloned()
-                .collect(),
-        )
-    });
-    samples[4] = visible(&o.chainlink_twap_thirty).map(|v| {
-        (
-            decimal(&v.price_usd_per_btc),
-            anchors(&o.chainlink_twap_thirty, "chainlink_twap_thirty")
-                .into_iter()
-                .cloned()
-                .collect(),
-        )
-    });
-    samples[5] = visible(&o.chainlink_twap_sixty).map(|v| {
-        (
-            decimal(&v.price_usd_per_btc),
-            anchors(&o.chainlink_twap_sixty, "chainlink_twap_sixty")
-                .into_iter()
-                .cloned()
-                .collect(),
-        )
-    });
     binance_trade(projection, &mut out[243..258], &o.binance_trade, now);
     events(projection, &mut out[258..439], o, now);
     lifecycle(projection, &mut out[439..542], o, now);
-    for (i, s) in samples.into_iter().enumerate() {
+    for i in 0..6 {
         history(
             projection,
             &mut out[542 + 4 * i..546 + 4 * i],
-            &mut h.series[i],
+            &h.series[i],
             &mut h.history_features[i],
-            s,
-            now,
         );
     }
     out[566..].copy_from_slice(rule);

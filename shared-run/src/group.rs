@@ -2,7 +2,10 @@ use crate::*;
 use contracts::{ConditionId, ExactDecimal, ExecutionReadValueV1, ModelIntentV1};
 use execution_normalization::{MemoryLogicalIdentityV1, NoeConsumedRecordRef};
 use ledger::*;
-use sim_system::{execution::*, public_consumption::TrustedGroupDecisionCutoffV1};
+use sim_system::{
+    execution::*,
+    public_consumption::{PublicObservationFrameV1, TrustedGroupDecisionCutoffV1},
+};
 use std::sync::Arc;
 
 struct RequestFunds {
@@ -44,7 +47,7 @@ impl<R: Clone + std::fmt::Debug + Eq> ActionBeforeRead<R> {
         &self.ledger
     }
     pub fn orders(&self) -> impl Iterator<Item = ExecutionOrderRead<'_, R>> {
-        self.registry.orders()
+        self.registry.unfinished_orders()
     }
     pub fn commitments(&self) -> impl Iterator<Item = IntentCommitmentReadV1<'_>> {
         self.registry.all_commitments()
@@ -199,10 +202,14 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
             return Ok(None);
         }
         let cutoff = frames[0].decision_cutoff.clone();
-        for frame in &frames {
+        self.observe_group(&frames);
+        Ok(Some(cutoff))
+    }
+    /// 接纳本组已受信的公共规则；不应用反馈，不构造模型输入或发出请求。
+    pub fn observe_group(&mut self, frames: &[PublicObservationFrameV1<'_>]) {
+        for frame in frames {
             self.registry.observe_market(&frame.rule_context);
         }
-        Ok(Some(cutoff))
     }
     pub fn action_before(
         &mut self,
@@ -211,13 +218,18 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
         let Some(cutoff) = self.prepare_action_group(driver)? else {
             return Ok(None);
         };
+        Ok(self.freeze_action_before(cutoff))
+    }
+    /// 从当前已应用前缀冻结读取；调用方先显式推进事实及接纳公共组。
+    pub fn freeze_action_before(
+        &self,
+        cutoff: TrustedGroupDecisionCutoffV1,
+    ) -> Option<ActionBeforeRead<P::Completion>> {
         let registry = self.registry.action_snapshot();
         let funds = self.ledger.funds_read_v1();
-        let Some(ledger) = funds.projection() else {
-            return Ok(None);
-        };
+        let ledger = funds.projection()?;
         let required_requests: std::collections::BTreeSet<_> = registry
-            .orders()
+            .unfinished_orders()
             .filter_map(|o| o.origin)
             .filter_map(|origin| {
                 funds.submission_request(&LedgerSubmissionItemIdentityV1 {
@@ -245,7 +257,7 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
             .collect();
         let orders = funds
             .orders()
-            .filter(|r| registry.contains_order(r.order_identity))
+            .filter(|r| registry.contains_unfinished_order(r.order_identity))
             .map(|r| OrderFunds {
                 id: r.order_identity.clone(),
                 principal: r.principal_encumbrance_pusd,
@@ -253,7 +265,7 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
                 seq: r.last_ledger_entry_seq,
             })
             .collect();
-        Ok(Some(ActionBeforeRead {
+        Some(ActionBeforeRead {
             pending_noe_record_count: self.pending.len(),
             economics: AccountEconomicsReadV1::from_ledger(
                 &self.ledger.economic_read().expect("同组 Ledger 已开户"),
@@ -263,7 +275,42 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
             registry,
             requests,
             orders,
-        }))
+        })
+    }
+    /// 模型已选原值和已有预留意图；整动作预留、提交开始与原执行只发生一次。
+    /// 非模型消费者仍可调用原 execute，不强制增加预留策略。
+    pub async fn execute_reserved(
+        &mut self,
+        decision: &mut PublicGroupDecisionV1<'_>,
+        context: RequestContextV2,
+        intent: Option<Arc<ModelIntentV1>>,
+        reserves: &[ReserveIntentV1],
+    ) -> Result<Option<MutationRequestReceiptV2>, SharedActionErrorV1> {
+        if !reserves.is_empty() {
+            let outcomes = self
+                .reserve_action_v2(reserves)
+                .map_err(SharedActionErrorV1::Ledger)?;
+            if outcomes
+                .iter()
+                .any(|v| !matches!(v, LedgerReservationOutcomeV1::Reserved { .. }))
+            {
+                return Err(SharedActionErrorV1::Reservation(outcomes));
+            }
+            for (ordinal, reserve) in reserves.iter().enumerate() {
+                let item = LedgerSubmissionItemIdentityV1 {
+                    global_request_id: context.global_request_id.clone(),
+                    batch_item_ordinal: ordinal as u16,
+                };
+                let event = LedgerLocalEventIdentityV1(
+                    serde_json::to_string(&("submission-started", &item)).expect("身份序列化"),
+                );
+                self.record_submission_started(&event, &reserve.request_identity, &item)
+                    .map_err(SharedActionErrorV1::Ledger)?;
+            }
+        }
+        self.execute(decision, context, intent)
+            .await
+            .map_err(SharedActionErrorV1::Sim)
     }
     /// None为宿主已作出的NoTrade；不制造意图，不调用Bridge。
     pub async fn execute(
@@ -284,6 +331,13 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
         self.registry.record_sim_receipt(&frozen, &receipt);
         Ok(Some(receipt))
     }
+}
+
+#[derive(Debug)]
+pub enum SharedActionErrorV1 {
+    Ledger(LedgerErrorV1),
+    Reservation(Vec<LedgerReservationOutcomeV1>),
+    Sim(SimRunActorErrorV2),
 }
 
 #[derive(Debug)]

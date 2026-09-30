@@ -740,6 +740,31 @@ fn order_fill_release_fee_and_compensation_form_balanced_transactions() {
         0
     );
 
+    let late_pending = fixture.commit_trade(
+        "trade-partial",
+        "order-economic",
+        SourceNeutralTradeEconomicDispositionV1::PendingApplied,
+    );
+    let before_late = writer.projection().unwrap();
+    writer.apply_noe_result(&late_pending).unwrap();
+    let after_late = writer.projection().unwrap();
+    assert_eq!(
+        after_late.platform_confirmed_projection,
+        before_late.platform_confirmed_projection
+    );
+    assert_eq!(
+        after_late.market_projections,
+        before_late.market_projections
+    );
+    assert_eq!(
+        after_late.ledger_entry_seq,
+        before_late.ledger_entry_seq + 1
+    );
+    assert!(matches!(
+        writer.apply_noe_result(&late_pending).unwrap(),
+        LedgerApplyOutcomeV1::AlreadyApplied { .. }
+    ));
+
     let failed_pending = fixture.commit_trade(
         "trade-failed",
         "order-economic",
@@ -872,6 +897,90 @@ fn order_fill_release_fee_and_compensation_form_balanced_transactions() {
             .platform_confirmed_projection
             .pending_fill_count,
         0
+    );
+}
+
+#[test]
+fn durable_terminal_trade_keeps_late_pending_closed_and_applies_late_economics() {
+    let root = TempDir::new().unwrap();
+    let mut fixture = NoeFixture::new("terminal-recovery");
+    let mut writer = LedgerWriterV1::create_durable(policy(), root.path()).unwrap();
+    writer
+        .apply_noe_result(&fixture.commit_opening("50"))
+        .unwrap();
+    let accepted = fixture.commit_transition(
+        1,
+        None,
+        SourceNeutralAccountTransitionKindV1::OrderAcceptedEncumbranceApplied {
+            order_identity: identity("order-recovery"),
+        },
+        money_delta("0", "-32", "30", "2", None),
+    );
+    writer.apply_noe_result(&accepted).unwrap();
+    let terminal = fixture.commit_trade(
+        "trade-recovery",
+        "order-recovery",
+        SourceNeutralTradeEconomicDispositionV1::FinalSuccess,
+    );
+    writer.apply_noe_result(&terminal).unwrap();
+    let before = writer.projection().unwrap();
+    drop(writer);
+    let mut writer = LedgerWriterV1::open_durable(root.path()).unwrap();
+    assert_eq!(writer.projection().unwrap(), before);
+    let pending = fixture.commit_trade(
+        "trade-recovery",
+        "order-recovery",
+        SourceNeutralTradeEconomicDispositionV1::PendingApplied,
+    );
+    writer.apply_noe_result(&pending).unwrap();
+    let after = writer.projection().unwrap();
+    assert_eq!(
+        after.platform_confirmed_projection,
+        before.platform_confirmed_projection
+    );
+    assert_eq!(after.market_projections, before.market_projections);
+    assert_eq!(after.ledger_entry_seq, before.ledger_entry_seq + 1);
+    let economic = fixture.commit_transition(
+        2,
+        None,
+        SourceNeutralAccountTransitionKindV1::FillFinalityEconomicApplied {
+            trade_identity: identity("trade-recovery"),
+            path_ordinal: 0,
+        },
+        money_delta("-10.5", "0", "-10", "-0.5", Some("20")),
+    );
+    writer.apply_noe_result(&economic).unwrap();
+    let after = writer.projection().unwrap();
+    assert_eq!(after.platform_confirmed_projection.pending_fill_count, 0);
+    assert_eq!(after.market_projections[0].pending_fill_count, 0);
+    assert_eq!(
+        after.platform_confirmed_projection.position_cost_basis_pusd,
+        decimal("10")
+    );
+    assert_eq!(
+        after.platform_confirmed_projection.fees_pusd,
+        decimal("0.5")
+    );
+    assert_eq!(
+        after.platform_confirmed_projection.cash_pusd,
+        decimal("39.5")
+    );
+    assert!(matches!(
+        writer.apply_noe_result(&pending).unwrap(),
+        LedgerApplyOutcomeV1::AlreadyApplied { .. }
+    ));
+    assert!(matches!(
+        writer.apply_noe_result(&economic).unwrap(),
+        LedgerApplyOutcomeV1::AlreadyApplied { .. }
+    ));
+    assert_eq!(writer.projection().unwrap(), after);
+    drop(writer);
+    assert_eq!(
+        LedgerWriterV1::open_durable(root.path())
+            .unwrap()
+            .projection()
+            .unwrap(),
+        after
     );
 }
 

@@ -253,7 +253,10 @@ pub(crate) enum BusinessInputV2 {
     ClosedMarketBucket(AcceptedClosedMarketBucketV2),
     PublicGroup(crate::public_consumption::AcceptedPublicGroupV1),
     HiddenStepBucket(crate::public_consumption::AcceptedHiddenStepBucketV1),
+    PublicObserveTime(crate::public_consumption::TrustedActorExecutionTimeV1),
     PublicRequest {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        send_time: Option<crate::public_consumption::TrustedActorExecutionTimeV1>,
         cutoff: crate::public_consumption::TrustedGroupDecisionCutoffV1,
         request: BusinessRequestV2,
     },
@@ -282,7 +285,10 @@ pub(crate) enum LoggedBusinessInputV2 {
     ClosedMarketBucket(LoggedClosedMarketBucketV2),
     PublicGroup(crate::public_consumption::LoggedPublicGroupV1),
     HiddenStepBucket(crate::public_consumption::LoggedHiddenStepBucketV1),
+    PublicObserveTime(crate::public_consumption::ActorTimeRecordV1),
     PublicRequest {
+        #[serde(default)]
+        send_time: Option<crate::public_consumption::ActorTimeRecordV1>,
         cutoff: crate::public_consumption::LoggedGroupCutoffV1,
         request: BusinessRequestV2,
     },

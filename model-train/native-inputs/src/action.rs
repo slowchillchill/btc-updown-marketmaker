@@ -166,6 +166,24 @@ impl NativeInputGroup {
         context: RequestContextV2,
         score: impl FnOnce(&Self, usize, &[f32; 36]) -> Result<Vec<CancelScoreBlock>, E>,
     ) -> Result<Option<MutationRequestReceiptV2>, ActionError<E>> {
+        let (intent, reserves) = self.select_action(row, selected, &context, score)?;
+        shared
+            .execute_reserved(decision, context, intent, &reserves)
+            .await
+            .map_err(|error| match error {
+                shared_run::SharedActionErrorV1::Ledger(e) => ActionError::Ledger(e),
+                shared_run::SharedActionErrorV1::Reservation(e) => ActionError::Reservation(e),
+                shared_run::SharedActionErrorV1::Sim(e) => ActionError::Execution(e),
+            })
+    }
+    /// 只装配已选原值与现有 ReserveIntentV1；不预留、应用事实或调用执行器。
+    pub fn select_action<E>(
+        &self,
+        row: usize,
+        selected: SelectedAction<'_>,
+        context: &RequestContextV2,
+        score: impl FnOnce(&Self, usize, &[f32; 36]) -> Result<Vec<CancelScoreBlock>, E>,
+    ) -> Result<(Option<Arc<ModelIntentV1>>, Vec<ledger::ReserveIntentV1>), ActionError<E>> {
         let intent = match selected {
             SelectedAction::NoTrade => None,
             SelectedAction::CancelIndex(index) => Some(Arc::new(
@@ -197,10 +215,10 @@ impl NativeInputGroup {
                 Some(Arc::new(intent))
             }
         };
+        let mut reserves = Vec::new();
         if let (SelectedAction::Buy(state), Some(_)) = (selected, &intent) {
             use ledger::{
-                LedgerLocalEventIdentityV1, LedgerRequestIdentityV1, LedgerReservationOutcomeV1,
-                LedgerSubmissionItemIdentityV1, ReserveIntentV1,
+                LedgerRequestIdentityV1, LedgerSubmissionItemIdentityV1, ReserveIntentV1,
             };
             let action = self.rows[row].action_context.as_ref().unwrap();
             let sides: Vec<usize> = if state.family == Some(Family::SubmitPairedBuy) {
@@ -209,8 +227,7 @@ impl NativeInputGroup {
                 vec![usize::from(state.single_leg.unwrap() == Leg::B)]
             };
             let n = state.quantity_hundredths.as_ref().unwrap();
-            let mut reserves = Vec::new();
-            let mut items = Vec::new();
+
             for (ordinal, i) in sides.into_iter().enumerate() {
                 let item = LedgerSubmissionItemIdentityV1 {
                     global_request_id: context.global_request_id.clone(),
@@ -270,30 +287,9 @@ impl NativeInputGroup {
                     requested_principal_pusd: money(cost.principal_micro, 6),
                     immediate_fee_reserve_pusd: money(fee, 5),
                 });
-                items.push(item);
-            }
-            let outcomes = shared
-                .reserve_action_v2(&reserves)
-                .map_err(ActionError::Ledger)?;
-            if outcomes
-                .iter()
-                .any(|v| !matches!(v, LedgerReservationOutcomeV1::Reserved { .. }))
-            {
-                return Err(ActionError::Reservation(outcomes));
-            }
-            for (reserve, item) in reserves.iter().zip(&items) {
-                let event = LedgerLocalEventIdentityV1(
-                    serde_json::to_string(&("submission-started", item)).expect("身份序列化"),
-                );
-                shared
-                    .record_submission_started(&event, &reserve.request_identity, item)
-                    .map_err(ActionError::Ledger)?;
             }
         }
-        shared
-            .execute(decision, context, intent)
-            .await
-            .map_err(ActionError::Execution)
+        Ok((intent, reserves))
     }
 }
 

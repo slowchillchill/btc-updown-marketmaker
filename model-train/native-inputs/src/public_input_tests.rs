@@ -31,6 +31,112 @@ fn projection(n: &str) -> f32 {
     ))
 }
 #[tokio::test(flavor = "current_thread")]
+async fn restored_terminal_trade_keeps_late_pending_zero_in_real_model_input() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let (core, times) = recorded_trading(&root, "4", false);
+    let (mut execution, observation, rules) =
+        native_execution(&temp.path().join("sim.jsonl"), &core, SUCCESS_POLICY);
+    let mut ledger =
+        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+    let ledger_root = temp.path().join("ledger");
+    execution
+        .bind_ledger_recording_v2(&mut ledger, &ledger_root)
+        .unwrap();
+    let mut shared = SharedExecutionV2::from_opening(ledger, observation.clone())
+        .unwrap()
+        .unwrap();
+    let account = shared
+        .ledger()
+        .projection_v2()
+        .unwrap()
+        .account_instance_key;
+    let mut native = NativeInputRoot::new(
+        "pending-recovery".into(),
+        account.clone(),
+        -10_000,
+        rules.clone(),
+    );
+    let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times).unwrap();
+    let mut driver = FinitePublicConsumptionV1::new(execution, source, "restored-pending".into());
+    for _ in 0..4 {
+        driver.next_group().unwrap().unwrap();
+        native.consume(&mut shared, &mut driver).unwrap().unwrap();
+    }
+    shared
+        .execute(
+            &mut driver.decision().unwrap(),
+            context("restored-fill"),
+            Some(Arc::new(ModelIntentV1::SubmitSingleBuy {
+                condition_id: ConditionId(CONDITION_ID.into()),
+                order: BuyLegIntentV1 {
+                    token_id: TokenId(UP_TOKEN_ID.into()),
+                    order: BuyOrderIntentV1::GtcLimit {
+                        limit_price_pusd_per_share: Decimal::new(6, 1),
+                        size_shares: Decimal::from(10),
+                        post_only: false,
+                    },
+                },
+            })),
+        )
+        .await
+        .unwrap();
+    // 真实 MATCHED、CONFIRMED、迟到 MINED 已在此公开组前收到并应用。
+    loop {
+        driver.next_group().unwrap().unwrap();
+        let group = native.consume(&mut shared, &mut driver).unwrap().unwrap();
+        let read = group.action_before.as_ref().unwrap();
+        if read.cutoff().decision_time().logical_time_utc_ms() == 36_000 {
+            assert_eq!(
+                read.ledger()
+                    .platform_confirmed_projection
+                    .pending_fill_count,
+                0
+            );
+            assert_eq!(
+                read.ledger()
+                    .market_projections
+                    .iter()
+                    .find(|m| m.condition_id.0 == CONDITION_ID)
+                    .unwrap()
+                    .pending_fill_count,
+                0
+            );
+            assert_eq!(&group.rows[0].slow[84..87], &[0., 1., 1.]);
+            break;
+        }
+    }
+    driver.stabilize_recording().unwrap();
+    let expected = shared.ledger().projection_v2().unwrap();
+    drop(shared);
+    let ledger = LedgerWriterV1::open_durable(&ledger_root).unwrap();
+    assert_eq!(ledger.projection_v2().unwrap(), expected);
+    assert_eq!(
+        ledger.economic_read().unwrap().successful_trades().count(),
+        1
+    );
+    assert_eq!(
+        ledger
+            .projection_v2()
+            .unwrap()
+            .platform_confirmed_projection
+            .cash_pusd
+            .0,
+        "97.5328"
+    );
+    let mut shared = SharedExecutionV2::from_opening(ledger, observation)
+        .unwrap()
+        .unwrap();
+    let mut native = NativeInputRoot::new("restored".into(), account, -10_000, rules);
+    let group = native.consume(&mut shared, &mut driver).unwrap().unwrap();
+    assert_eq!(group.action_before.as_ref().unwrap().ledger(), &expected);
+    assert!(!group.rows.is_empty());
+    assert_eq!(&group.rows[0].slow[84..87], &[0., 1., 1.]);
+    // 恢复实例这里只读及重交已应用开户，不把 MemoryV2 当旧同步耐久写入口。
+    driver.stop_and_drain().unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn real_public_chain_freezes_cash_encodes_original_legs_and_cold_root() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("dpt");

@@ -760,7 +760,7 @@ async fn training_hidden_prefetch_cannot_advance_public_feedback_visibility_or_o
         reader = next;
         let Some(group) = group else { break };
         for input in group {
-            if let LoggedBusinessInputV2::PublicRequest { cutoff, request } = input {
+            if let LoggedBusinessInputV2::PublicRequest { cutoff, request, .. } = input {
                 if request.context().global_request_id == "training-visible-cancel" {
                     assert_eq!(cutoff.into_trusted(), new_cutoff);
                     saw_request = true;

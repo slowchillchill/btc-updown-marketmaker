@@ -2844,6 +2844,8 @@ fn set_trade_pending(
     ledger_entry_seq: u64,
 ) -> Result<(), LedgerErrorV1> {
     let previous = lifecycle.trades.remove(trade_identity);
+    // 已有非 pending 成交就是终态；较早观察仍消费，但不得回开计数。
+    let pending = pending && previous.as_ref().is_none_or(|previous| previous.pending);
     if let Some(previous) = &previous
         && previous.pending
         && (!pending || previous.condition_id != *condition_id)

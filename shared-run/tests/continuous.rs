@@ -1424,11 +1424,20 @@ async fn actual_trade_association_late_only_attributes_existing_entries() {
     // 真实接收顺序是 MATCHED、CONFIRMED、MINED；原 Ledger 生命周期随这三条输入更新。
     // 此处验证资金归属不重复经济入账，不把生命周期计数误当经济金额。
     assert_eq!(association.len(), 3);
-    for (record, pending_count) in association.iter().zip([1, 0, 1]) {
+    for (record, pending_count) in association.iter().zip([1, 0, 0]) {
         ledger.apply_noe_memory_v1(record).unwrap();
         let current = ledger.projection_v2().unwrap();
         assert_eq!(
             current.platform_confirmed_projection.pending_fill_count,
+            pending_count
+        );
+        assert_eq!(
+            current
+                .market_projections
+                .iter()
+                .find(|market| market.condition_id.0 == CONDITION_ID)
+                .unwrap()
+                .pending_fill_count,
             pending_count
         );
         assert_eq!(
@@ -2605,6 +2614,19 @@ async fn actual_partial_fak_final_success_before_economics_drives_gap_without_su
         registry.observe(record);
     }
     let assert_visible = |ledger: &LedgerWriterV1, registry: &SharedExecutionRegistryV1| {
+        let projection = ledger.projection_v2().unwrap();
+        assert_eq!(
+            projection.platform_confirmed_projection.pending_fill_count,
+            0
+        );
+        assert_eq!(
+            projection
+                .market_projections
+                .iter()
+                .find(|market| market.condition_id.0 == CONDITION_ID)
+                .map_or(0, |market| market.pending_fill_count),
+            0
+        );
         let read = ledger.economic_read().unwrap();
         let totals = read
             .market_totals()

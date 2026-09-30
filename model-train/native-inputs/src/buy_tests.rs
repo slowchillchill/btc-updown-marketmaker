@@ -1888,3 +1888,231 @@ fn tick_grid_transition_support_measurement() {
     eprintln!("tick_support_measurement={}", serde_json::json!(results));
     h.driver.stop_and_drain().unwrap();
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn paired_commitment_snapshot_retains_closed_leg_without_reopening_order_observations() {
+    let times = [22_942]
+        .into_iter()
+        .chain(23_001..23_401)
+        .collect::<Vec<_>>();
+    let mut h = fixture_config_times("2000", ["0.01", "0.01"], 24_999, &times);
+    ready(&mut h);
+    h.shared
+        .execute(
+            &mut h.driver.decision().unwrap(),
+            context("snapshot-success"),
+            Some(Arc::new(ModelIntentV1::SubmitSingleBuy {
+                condition_id: ConditionId(CONDITION_ID.into()),
+                order: BuyLegIntentV1 {
+                    token_id: TokenId(DOWN_TOKEN_ID.into()),
+                    order: BuyOrderIntentV1::GtcLimit {
+                        size_shares: Decimal::from(5),
+                        limit_price_pusd_per_share: Decimal::new(6, 1),
+                        post_only: false,
+                    },
+                },
+            })),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+    let mut submitted = false;
+    let mut canceled_up = false;
+    let mut frozen = None;
+    let mut closed_pair = false;
+    while let Some(group) = h.next() {
+        let group = Arc::new(group);
+        let read = group.action_before.as_ref().unwrap();
+        let at = read.cutoff().decision_time().logical_time_utc_ms();
+        let market = read
+            .economics()
+            .markets
+            .iter()
+            .find(|m| m.condition_id.0 == CONDITION_ID)
+            .unwrap();
+        let assets = market.assets.as_ref().unwrap();
+        let down = assets
+            .iter()
+            .position(|a| a.token_id.0 == DOWN_TOKEN_ID)
+            .unwrap();
+        if !submitted
+            && market.success_shares[down].0.parse::<Decimal>().unwrap() == Decimal::from(5)
+        {
+            h.shared
+                .execute(
+                    &mut h.driver.decision().unwrap(),
+                    context("snapshot-pair"),
+                    Some(Arc::new(ModelIntentV1::SubmitPairedBuy {
+                        condition_id: ConditionId(CONDITION_ID.into()),
+                        orders: [
+                            leg(UP_TOKEN_ID, Decimal::new(1, 2)),
+                            leg(DOWN_TOKEN_ID, Decimal::new(1, 2)),
+                        ],
+                    })),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+            submitted = true;
+        } else if submitted && !canceled_up {
+            let pair = h
+                .shared
+                .registry()
+                .orders()
+                .filter(|o| {
+                    o.origin
+                        .as_ref()
+                        .is_some_and(|v| v.intent.global_request_id() == "snapshot-pair")
+                })
+                .collect::<Vec<_>>();
+            if pair.len() == 2
+                && pair.iter().all(|o| {
+                    o.accepted.is_some()
+                        && o.matched_shares == ExecutionReadValueV1::Known(ExactDecimal("0".into()))
+                })
+            {
+                let up = pair
+                    .iter()
+                    .find(|o| o.token_id.is_some_and(|v| v.0 == UP_TOKEN_ID))
+                    .unwrap();
+                let id = platform(up);
+                h.shared
+                    .execute(
+                        &mut h.driver.decision().unwrap(), // 原时延采样给此请求 35ms 响应回程；观察真实 CallerCanceled 先于直接响应。
+                        context("snapshot-cancel-up-0"),
+                        Some(Arc::new(ModelIntentV1::CancelOrder {
+                            platform_order_id: id,
+                        })),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                canceled_up = true;
+            }
+        } else if canceled_up && frozen.is_none() {
+            let pair = h
+                .shared
+                .registry()
+                .orders()
+                .filter(|o| {
+                    o.origin
+                        .as_ref()
+                        .is_some_and(|v| v.intent.global_request_id() == "snapshot-pair")
+                })
+                .collect::<Vec<_>>();
+            let up = pair
+                .iter()
+                .find(|o| o.token_id.is_some_and(|v| v.0 == UP_TOKEN_ID))
+                .unwrap();
+            if up.cancellable == ExecutionReadValueV1::Known(false)
+                && up.latest_cancel_feedback.is_none()
+            {
+                let full = h
+                    .shared
+                    .registry()
+                    .all_commitments()
+                    .filter(|c| c.origin.intent.global_request_id() == "snapshot-pair")
+                    .map(|c| (c.origin.batch_item_ordinal, c.remaining_target_shares))
+                    .collect::<Vec<_>>();
+                let projected = read
+                    .commitments()
+                    .filter(|c| c.origin.intent.global_request_id() == "snapshot-pair")
+                    .map(|c| (c.origin.batch_item_ordinal, c.remaining_target_shares))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    full,
+                    vec![(1, ExecutionReadValueV1::Known(ExactDecimal("5".into())))]
+                );
+                assert_eq!(
+                    projected, full,
+                    "closed leg still referenced by the paired request must retain its original zero evidence"
+                );
+                assert_eq!(market.repair_gap_shares[1 - down].0, "5");
+                NativeActor::new(group.clone(), 0)
+                    .unwrap()
+                    .support()
+                    .unwrap();
+                let observed = read.orders().collect::<Vec<_>>();
+                assert_eq!(observed.len(), 1);
+                assert_eq!(observed[0].token_id.unwrap().0, DOWN_TOKEN_ID);
+                assert_eq!(
+                    read.order_funds()
+                        .map(|f| f.order_identity)
+                        .collect::<Vec<_>>(),
+                    vec![observed[0].order_identity]
+                );
+                assert_eq!(
+                    read.request_funds().count(),
+                    0,
+                    "this paper account has no live reservations"
+                );
+                assert_eq!(&group.rows[0].slow[406..409], &[1_f32.ln_1p(), 1., 1.]);
+                assert_eq!(
+                    &group.rows[0].slow[382..385],
+                    &group.rows[0].slow[385..388],
+                    "one open order supplies both age extrema"
+                );
+                let ExecutionReadValueV1::Known(objects) = read.cancel_objects() else {
+                    panic!("known accepted open leg")
+                };
+                assert_eq!(
+                    objects
+                        .iter()
+                        .filter(|o| matches!(o, CancelObjectRead::Single { .. }))
+                        .count(),
+                    1
+                );
+                assert!(
+                    !objects
+                        .iter()
+                        .any(|o| matches!(o, CancelObjectRead::Paired { .. }))
+                );
+                let id = platform(&observed[0]);
+                frozen = Some(group.clone());
+                h.shared
+                    .execute(
+                        &mut h.driver.decision().unwrap(),
+                        context("snapshot-cancel-down"),
+                        Some(Arc::new(ModelIntentV1::CancelOrder {
+                            platform_order_id: id,
+                        })),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+        } else if frozen.is_some() && read.orders().count() == 0 {
+            assert!(
+                !read
+                    .commitments()
+                    .any(|c| c.origin.intent.global_request_id() == "snapshot-pair")
+            );
+            assert_eq!(read.order_funds().count(), 0);
+            let old = frozen.as_ref().unwrap().action_before.as_ref().unwrap();
+            assert_eq!(old.orders().count(), 1);
+            assert_eq!(old.order_funds().count(), 1);
+            assert_eq!(
+                h.shared.registry().orders().count(),
+                3,
+                "the full registry still retains original history"
+            );
+            assert_eq!(
+                old.commitments()
+                    .filter(|c| c.origin.intent.global_request_id() == "snapshot-pair")
+                    .map(|c| (c.origin.batch_item_ordinal, c.remaining_target_shares))
+                    .collect::<Vec<_>>(),
+                vec![(1, ExecutionReadValueV1::Known(ExactDecimal("5".into())))]
+            );
+            closed_pair = true;
+            break;
+        }
+        if at == 24_400 {
+            break;
+        }
+    }
+    assert!(
+        submitted && canceled_up && frozen.is_some() && closed_pair,
+        "real cancellation lifecycle before direct response must be observed"
+    );
+    h.driver.stop_and_drain().unwrap();
+}

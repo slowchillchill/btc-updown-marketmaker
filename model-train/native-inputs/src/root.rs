@@ -3,7 +3,8 @@ use contracts::*;
 use serde::Serialize;
 use shared_run::{ActionBeforeReadV2, SharedExecutionV2};
 use sim_system::{
-    execution::PublicConsumptionStateV1, public_consumption::TrustedGroupDecisionCutoffV1,
+    execution::PublicConsumptionStateV1,
+    public_consumption::{PublicObservationFrameV1, TrustedGroupDecisionCutoffV1},
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -164,7 +165,6 @@ impl NativeInputRoot {
     ) -> Result<Option<NativeInputGroup>, crate::InputError> {
         // 由原共享组合完成唯一应用；随后重取真实 decision 和公共帧。
         let before = shared.action_before(driver)?;
-        let projection = crate::exact::InputProjection::default();
         let Some(decision) = driver.decision() else {
             return Ok(None);
         };
@@ -173,8 +173,18 @@ impl NativeInputRoot {
         if !frames.is_empty() && before.is_none() {
             return Ok(None);
         }
-        let now = cutoff.decision_time().logical_time_utc_ms();
-        for f in &frames {
+        let without_frame = before.is_none();
+        let before = before
+            .or_else(|| shared.freeze_action_before(cutoff))
+            .ok_or(crate::InputError::MissingAssociation)?;
+        let mut group = self.encode_group(&frames, before, true)?;
+        if without_frame {
+            group.action_before = None;
+        }
+        Ok(Some(group))
+    }
+    fn bind_markets(&mut self, frames: &[PublicObservationFrameV1<'_>]) {
+        for f in frames {
             self.markets
                 .entry(f.observation.market.condition_id.0.clone())
                 .or_insert_with(|| MarketBinding {
@@ -187,6 +197,42 @@ impl NativeInputRoot {
                         .collect(),
                 });
         }
+    }
+    /// 只接纳本方案有资格的真实来源历史；不编码完整特征或推进隐藏状态。
+    pub fn observe_sources(&mut self, frames: &[PublicObservationFrameV1<'_>]) {
+        self.bind_markets(frames);
+        for frame in frames {
+            let market = &self.markets[&frame.observation.market.condition_id.0].market;
+            let now = frame.decision_cutoff.decision_time().logical_time_utc_ms();
+            if i128::from(self.started_at) <= i128::from(market.window.start_at_utc_ms) - 30_000
+                && i128::from(now) >= i128::from(market.window.start_at_utc_ms) - 30_000
+                && now < market.window.end_at_utc_ms
+            {
+                self.histories
+                    .entry(market.condition_id.0.clone())
+                    .or_default()
+                    .observe_sources(frame.observation, now);
+            }
+        }
+    }
+    /// 编码已接纳公共来源与同一截止点的冻结账户材料；不依赖可变Shared或SIM。
+    pub fn encode(
+        &mut self,
+        frames: &[PublicObservationFrameV1<'_>],
+        before: ActionBeforeReadV2,
+    ) -> Result<NativeInputGroup, crate::InputError> {
+        self.encode_group(frames, before, false)
+    }
+    fn encode_group(
+        &mut self,
+        frames: &[PublicObservationFrameV1<'_>],
+        before: ActionBeforeReadV2,
+        observe_sources: bool,
+    ) -> Result<NativeInputGroup, crate::InputError> {
+        let cutoff = before.cutoff().clone();
+        let projection = crate::exact::InputProjection::default();
+        let now = cutoff.decision_time().logical_time_utc_ms();
+        self.bind_markets(frames);
         let eligible = |m: &MarketBinding| {
             i128::from(self.started_at) <= i128::from(m.market.window.start_at_utc_ms) - 30_000
         };
@@ -200,16 +246,7 @@ impl NativeInputRoot {
             })
             .map(|m| m.market.condition_id.clone());
         // 完整账户投影包括仅本地预留的市场；经济成交表不是市场人口权威。
-        let without_frame;
-        let ledger = if let Some(read) = &before {
-            read.ledger()
-        } else {
-            without_frame = shared
-                .ledger()
-                .projection_v2()
-                .ok_or(crate::InputError::MissingAssociation)?;
-            &without_frame
-        };
+        let ledger = before.ledger();
         let old: Vec<_> = ledger
             .market_projections
             .iter()
@@ -261,9 +298,8 @@ impl NativeInputRoot {
         let mut rows = Vec::new();
         let mut cancel = Vec::new();
         let mut cancel_intents = Vec::new();
-        if let Some(read) = &before
-            && !roles.is_empty()
-        {
+        if !roles.is_empty() {
+            let read = &before;
             let slow = crate::account::encode(
                 read,
                 current.as_ref(),
@@ -334,7 +370,12 @@ impl NativeInputRoot {
                 .iter()
                 .find(|f| &f.observation.market.condition_id == id)
                 .unwrap();
-            let (fast, book) = crate::market::encode(
+            let encode = if observe_sources {
+                crate::market::encode
+            } else {
+                crate::market::encode_features
+            };
+            let (fast, book) = encode(
                 &projection,
                 frame.observation,
                 &row.rule,
@@ -364,7 +405,7 @@ impl NativeInputRoot {
                 hidden_state_key: self.key(&id),
             });
         }
-        Ok(Some(NativeInputGroup {
+        Ok(NativeInputGroup {
             cutoff,
             pre_frame_hidden_ops: pre,
             rows,
@@ -372,8 +413,8 @@ impl NativeInputRoot {
             current,
             old,
             cancel,
-            action_before: before,
+            action_before: Some(before),
             cancel_intents,
-        }))
+        })
     }
 }
