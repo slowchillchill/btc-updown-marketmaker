@@ -18,6 +18,8 @@
 
 小段19组原路径与在线路径的 reference／payload、同毫秒多组及最终逻辑 Ledger 对照一致；20ms真实慢消费者证明队列等待与 Actor 后确认。原输入0..2的代表截断覆盖零派生尾输入及合法排空，见 [protocol.json](evidence/protocol.json)。正式测量不附带全历史双路比较或每帧完整特征、账本、哈希转储。
 
+表中准备秒来自首条 measurements 的 preparation_seconds：宿主在创建 Runtime 前启动 preparation 标尺，到首个窗口组返回且入口账本断言完成时取值。window_anchor_ns 则使用在线控制的另一 Instant 标尺，记录供料门开放时刻；起点和取点都不同，不能混作同一测点或直接相减。大模型两读数分别为806.317766858秒与806.313884220秒。窗口内墙钟只用同一在线控制标尺作差，不需为这几毫秒差补测。
+
 service_ns 是 native.consume 到 Runtime／Actor 原 execute 完成，排除此前 DPT应用、交接及随后证据输出。DPT完成墙钟取最后输入 complete_end−window_anchor；SIM排空、整进程时间和准备分别列。attempt_to_dequeue 含供料入队等待，不能写成纯驻留；enqueue完成到出队另计，微小负数可能来自接收者先于 Sender返回。source_delivery_lag 是原逻辑接收时刻至模型结束的墙钟落后，不等于每个 SDK 行情价位网络年龄。原逻辑发送时刻和真实 execute耗时保留，本步没有实现步骤9发送时钟语义。
 
 ## 结果
