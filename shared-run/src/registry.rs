@@ -116,17 +116,12 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             .or_insert_with(|| rules.clone());
     }
     pub(crate) fn action_snapshot(&self) -> Self {
-        let orders: BTreeMap<_, _> = self.orders.iter().filter(|(id, state)| {
-            let cancellable = self.order_from(id, state).cancellable;
-            !matches!(cancellable, Known(false))
-                || state.trades.values().filter_map(trade)
-                    .any(|t| !final_disposition(&t.economic_disposition))
-                // 不可撤不代表原关联、累计成交覆盖和承诺已经闭合。
-                || state.origin.as_ref()
-                    .and_then(|(request, ordinal)| self.intents.get(request)
-                        .and_then(|s| leg(s.origin.intent(), *ordinal)))
-                    .is_none_or(|(_, leg)| !matches!(self.remaining(id, &leg.order), Known(v) if decimal(&v).is_zero()))
-        }).map(|(id, state)| (id.clone(), state.clone())).collect();
+        let mut orders: BTreeMap<_, _> = self
+            .orders
+            .iter()
+            .filter(|(id, state)| self.unfinished(id, state))
+            .map(|(id, state)| (id.clone(), state.clone()))
+            .collect();
         let mut needed: BTreeSet<_> = self
             .all_commitments()
             .map(|r| r.origin.intent.global_request_id())
@@ -156,6 +151,16 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
                     self.latest_cancel_request(Some(&object.request_scope()))
                 {
                     needed.insert(request.origin.global_request_id().to_owned());
+                }
+            }
+        }
+        // 保留请求的 outcomes 仍读取这些原订单；闭合腿的零承诺证据不能随观察人口裁掉。
+        for id in &needed {
+            for identity in self.intents[id].outcomes.values().flatten() {
+                if let Some(state) = self.orders.get(identity) {
+                    orders
+                        .entry(identity.clone())
+                        .or_insert_with(|| state.clone());
                 }
             }
         }
@@ -352,8 +357,26 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             _ => {}
         }
     }
-    pub(crate) fn contains_order(&self, id: &Identity) -> bool {
-        self.orders.contains_key(id)
+    fn unfinished(&self, id: &Identity, state: &Order<R>) -> bool {
+        !matches!(self.order_from(id, state).cancellable, Known(false))
+            || state.trades.values().filter_map(trade)
+                .any(|t| !final_disposition(&t.economic_disposition))
+            // 不可撤不代表原关联、累计成交覆盖和承诺已经闭合。
+            || state.origin.as_ref()
+                .and_then(|(request, ordinal)| self.intents.get(request)
+                    .and_then(|s| leg(s.origin.intent(), *ordinal)))
+                .is_none_or(|(_, leg)| !matches!(self.remaining(id, &leg.order), Known(v) if decimal(&v).is_zero()))
+    }
+    pub(crate) fn unfinished_orders(&self) -> impl Iterator<Item = ExecutionOrderRead<'_, R>> {
+        self.orders
+            .iter()
+            .filter(|(id, state)| self.unfinished(id, state))
+            .map(|(id, state)| self.order_from(id, state))
+    }
+    pub(crate) fn contains_unfinished_order(&self, id: &Identity) -> bool {
+        self.orders
+            .get(id)
+            .is_some_and(|state| self.unfinished(id, state))
     }
     pub fn order(&self, id: &Identity) -> Option<ExecutionOrderRead<'_, R>> {
         let (id, state) = self.orders.get_key_value(id)?;

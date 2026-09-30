@@ -44,7 +44,7 @@ impl<R: Clone + std::fmt::Debug + Eq> ActionBeforeRead<R> {
         &self.ledger
     }
     pub fn orders(&self) -> impl Iterator<Item = ExecutionOrderRead<'_, R>> {
-        self.registry.orders()
+        self.registry.unfinished_orders()
     }
     pub fn commitments(&self) -> impl Iterator<Item = IntentCommitmentReadV1<'_>> {
         self.registry.all_commitments()
@@ -217,7 +217,7 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
             return Ok(None);
         };
         let required_requests: std::collections::BTreeSet<_> = registry
-            .orders()
+            .unfinished_orders()
             .filter_map(|o| o.origin)
             .filter_map(|origin| {
                 funds.submission_request(&LedgerSubmissionItemIdentityV1 {
@@ -245,7 +245,7 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
             .collect();
         let orders = funds
             .orders()
-            .filter(|r| registry.contains_order(r.order_identity))
+            .filter(|r| registry.contains_unfinished_order(r.order_identity))
             .map(|r| OrderFunds {
                 id: r.order_identity.clone(),
                 principal: r.principal_encumbrance_pusd,
