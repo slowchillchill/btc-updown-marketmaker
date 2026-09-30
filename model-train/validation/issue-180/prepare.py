@@ -25,6 +25,7 @@ def main():
     parser.add_argument('--source', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--revision', required=True)
+    parser.add_argument('--support-failure', action='store_true')
     parser.set_defaults(variant='candidate')
     args = parser.parse_args()
     source, out = args.source.resolve(), args.output.resolve()
@@ -141,6 +142,8 @@ impl Runtime {
     t=t.replace('            materials: PublicOnlineMaterialsV1 {','            bench_reserve_ns,\n            materials: PublicOnlineMaterialsV1 {',1)
     t=t.replace('impl<\'a, S: AsyncRead + AsyncWrite + Unpin> PublicOnlinePendingV1<\'a, S> {','impl<\'a, S: AsyncRead + AsyncWrite + Unpin> PublicOnlinePendingV1<\'a, S> {\n    pub fn bench_resources(&self)->serde_json::Value {serde_json::json!({"reserve_wait_ns":self.bench_reserve_ns,"recording_inflight":self.session.config.recording_in_flight_inputs.get()-self.session.background.capacity.available_permits()})}',1)
     online.write_text(t)
+    if args.support_failure:
+        module('capture180',out/'model-train/validation/issue-180/capture.py').instrument(out)
     # 每个变化都是诊断副本差异；冻结精确原文件及补丁。
     pristine=out.parent/(out.name+'-pristine')
     pristine.mkdir()
