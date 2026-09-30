@@ -94,6 +94,14 @@ impl NativeInputRoot {
     text=(shared/'Cargo.toml').read_text()
     text=text.replace('[features]\n','[features]\nbench-profile = []\n') if '[features]\n' in text else text+'\n[features]\nbench-profile = []\n'
     (shared/'Cargo.toml').write_text(text)
+    # #180 只适配已批准的未闭合读取名称，沿 #178 原迭代位置计数。
+    original_replace = probe.replace
+    def shared_replace(text, old, new):
+        if old == '.orders()\n            .filter_map(|o| o.origin)':
+            old = old.replace('.orders()', '.unfinished_orders()')
+            new = new.replace('.orders()', '.unfinished_orders()')
+        return original_replace(text, old, new)
+    probe.replace = shared_replace
     probe.shared(shared/'src')
     (shared/'src/bench_profile.rs').write_text((project/'profile.rs').read_text())
     with (shared/'src/lib.rs').open('a') as stream:stream.write('\npub mod bench_profile;\n')
