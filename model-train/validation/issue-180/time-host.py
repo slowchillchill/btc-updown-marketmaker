@@ -32,7 +32,22 @@ def main():
     let _guard = TRACE_LOCK.lock().unwrap();''')
     runtime_path.write_text(runtime)
     registry_path = output / 'shared-run/src/registry.rs'
-    registry_path.write_text(registry_path.read_text() + """
+    registry_text = registry_path.read_text()
+    observe_marker = '    pub fn observe(&mut self, record: &Ref<R>) {\n'
+    registry_text = behavior.replace_once(registry_text, observe_marker, observe_marker + """
+        // 只保存本场实际领取的提交控制与原引用，不读取未可见后台状态。
+        if let NormalizationRecord::Evidence { evidence: SourceNeutralEvidenceKind::Control { result: SourceNeutralControlResult::Submission { outcome } }, .. } = record.record()
+            && let SimV2SourceRecordReferenceV1::DirectResponse { association: SimV2DirectResponseAssociationV1::SubmissionItem { global_request_id, batch_item_ordinal }, .. } = &record.record().source_reference().record
+            && global_request_id.starts_with("time-")
+        {
+            use std::io::Write;
+            let directory = std::env::var("BEHAVIOR_OUTPUT").unwrap();
+            let mut file = std::fs::OpenOptions::new().create(true).append(true).open(std::path::Path::new(&directory).join("consumed-feedback.jsonl")).unwrap();
+            serde_json::to_writer(&mut file, &serde_json::json!({"request_id":global_request_id,"ordinal":batch_item_ordinal,"source_reference":format!("{:?}",record.record().source_reference()),"outcome":format!("{outcome:?}")})).unwrap();
+            writeln!(file).unwrap();
+        }
+""")
+    registry_path.write_text(registry_text + """
 // 本次诊断副本只在结束时读取原请求引用，不改变登记或投影规则。
 impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
     pub fn issue180_request_results(&self) -> Vec<(String, String, Option<String>)> {
