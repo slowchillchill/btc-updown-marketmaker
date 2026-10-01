@@ -124,7 +124,7 @@
 
 记缺少侧需修复目标为 `d`，拟修复份额 `q≤d`，限价 `p*`，提交本金 `S`。`S=q p*` 只是当前金额目标的候选编码，成交价格改善可以令实际份额 `q_fill>q`。本金、手续费和实际份额三者分别表达，不把手续费算进提交本金或把 `S/p*` 当实际份额硬上限。
 
-过补候选输入为允许反向余量的份额／本金边界及两级孤腿剩余空间，数值待研究审定。若公共执行只保证价格 `p≤p*`，则对所有适用合法成交价格与份额路径求 `q_max(S,p*)`、反向孤腿含费本金边界，并核对 `max(0,q_max-d)` 不超过候选过补限制。合法最低成交价为 `p_floor>0` 且本金语义可靠时，`S/p_floor` 可作粗份额上界；只用当前盘口最低价不构成跨发送期间的保证。费用和舍入仍需公共核算。
+过补候选输入为允许反向余量的份额／本金边界及两级孤腿剩余空间，数值待研究审定。若公共执行只保证价格 `p≤p*`，则对所有适用合法成交价格与份额路径求 `q_max(S,p*)`、反向孤腿含费本金边界，并核对 `max(0,q_max-d)` 不超过候选过补限制。原撮合按段本金和累计部分消费向下取整，`S/p_floor` 即使使用真实最低价格也不是自动可靠的份额上界；只用当前盘口最低价更不构成跨发送期间的保证。SIM 公共纯计算 `sim_market_buy_bounds_v1` 使用原 Decimal 全价格域及原总额费用舍入，返回 BigUint 微份额与费用上界，推导见[SIM 买入成本](../../../sim-system/buy-cost.md)。该全域份额界很宽，可能使本次 FAK 候选不可执行；不能据此添加最低成交价或份额上限。LIVE 保证仍须在所属公共工程核实，不把 SIM 结论移植为真实平台保证。
 
 如果保守边界使金额低于平台最小合法本金，该候选不可执行；允许部分修复或保留孤腿，不恢复无限追价。研究可比较保守金额、可证明的份额限制适配及不同过补容忍；SDK 存在份额构造能力不单独证明平台实际份额硬上限。跨 SIM/LIVE 的可靠落实待公共任务核对，不能先声称保证零过补或擅改模型金额语义。
 
@@ -205,16 +205,18 @@ Binance 特征候选为因果收益、滚动波动、聚合成交方向、深度
 
 后续验证选择能击穿错误的代表性场景：第 3 节部分配平／迟到费守恒；第 4 节两个并发未闭合请求只占同一利润一次及未知权益恢复；第 5—6 节超价档、费用取整、价格改善过补、撤单竞速；第 8 节来源早可见晚、计算期间更新、市场切换与立即退出。通过真实公共入口构造有效平台状态；历史价格触及挂单价不等于本账户成交，自然运行未触发分支不能宣称通过。文档先独立审查，后续实现按合同完成对应验证，不为本文运行 Rust 回归。
 
+一次回调可返回多个原 `ModelIntentV1`，按 [D-0271](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5933940873)先整体预留全批新增资金，再按原序逐项提交；每意图使用独立 `global_request_id`，每笔预留保留原腿序号。预留不足零发送。发送错误停止本批，返回原错误及真实已发送回执；仅释放本批新建且明确未发送的占用，已尝试发送／结果未知及旧经济义务保留，不重试、缩量、改价或替换 NoTrade。这不是平台原子提交，也不新增整程序终止。主动 FAK 的先撤、观察反馈、重新计算仍须跨回调，不在旧快照一批发送撤单与原缺口补单。
+
 ## 10. 公共交接需求与源码入口
 
-本表给 [#186 任务 1](https://github.com/slowchillchill/btc-updown-marketmaker/issues/186)核定最小公共类型／调用入口的输入，不宣称接口已实现。后续完整历史宿主和 CLI 仍归 #186 后续任务，PAPER 在线装配归 #108／#109，LIVE 真实反馈链在所属任务交付。
+本表沿 [#186 任务 1](https://github.com/slowchillchill/btc-updown-marketmaker/issues/186)列明公共接口与后续装配边界。`StrategyV1`、冻结读取、SIM 成本纯计算与整批执行接口见[公共策略调用](../../../shared-run/README.md#公共策略调用与整批执行)。后续完整历史宿主和 CLI 仍归 #186 后续任务，PAPER 在线装配归 #108／#109，LIVE 真实反馈链在所属任务交付。
 
 | 需求与真实缺口 | 已有入口及最小交接方向 |
 | --- | --- |
-| 同截止观察与账户、必要触发和冻结结果、完成／发送／退出 | [公共观察](../../../contracts/src/public_observation.rs)、[公共意图](../../../contracts/src/model_intent.rs)、[组读取与唯一执行](../../../shared-run/src/group.rs)；公共层定义足以让策略构造、适配、验证的最小调用边界，不依赖 baseline 具体策略 |
-| 成交费用、公共剩余成本池与费用修正归属 | [Ledger 经济读取](../../../ledger/src/economics.rs)有成功成交、执行汇总及公共池处理；`ActionBeforeReadV2` 市场汇总不足以提供逐成交／配平费用归属。核定同截止只读明细／贡献读取，不把全局可变 Ledger 暴露给策略 |
-| 含费 FAK 上界与整动作预留 | [买入成本](../../../sim-system/src/buy_cost.rs)、[Ledger 预留](../../../ledger/src/core.rs)、[共享执行](../../../shared-run/src/group.rs)；已有 `ReserveIntentV1` 支持本金与即时费用，不是 Ledger 完全没有费用预留。补可靠费用上界及市场总投入装配，保持模型原批准预留语义 |
-| 金额目标与可证明过补 | [数量恢复](../../../shared-run/src/quantity.rs)的 `original_target` 依 `q=n/100` 与 `spend=q×price` 的模型假设；在原共享读取／适配边界核对人工策略合法金额表达，SIM/LIVE 对实际份额约束分别验证 |
+| 同截止观察与账户、必要触发和冻结结果、完成／发送／退出 | [公共观察](../../../contracts/src/public_observation.rs)、[公共意图](../../../contracts/src/model_intent.rs)、[组读取与唯一执行](../../../shared-run/src/group.rs)；`StrategyInputV1` 冻结原观察、规则、账户及经济明细，`StrategyCalculationV1`／完成对象与 dispatch 分离，`Exit` 不排空；不依赖 baseline 具体策略 |
+| 成交费用、公共剩余成本池与费用修正归属 | [Ledger 经济读取](../../../ledger/src/economics.rs)有成功成交、执行汇总及公共池处理；`ActionBeforeReadV2` 市场汇总不足以提供逐成交／配平费用归属。`StrategyInputV1::trade_economics` 提供原事实、成功／经济应用状态、实际净费及公共平均成本池的剩余贡献；旧持久状态无贡献时保留未知，不把全局可变 Ledger 暴露给策略 |
+| 含费 FAK 上界与整动作预留 | [买入成本](../../../sim-system/src/buy_cost.rs)、[Ledger 预留](../../../ledger/src/core.rs)、[共享执行](../../../shared-run/src/group.rs)；已有 `ReserveIntentV1` 支持本金与即时费用，不是 Ledger 完全没有费用预留。`sim_market_buy_bounds_v1` 提供 SIM 全域上界；`execute_batch_reserved` 先整批预留再按原序发送，保持模型原批准预留语义 |
+| 金额目标与可证明过补 | [数量恢复](../../../shared-run/src/quantity.rs)的 `original_target` 依 `q=n/100` 与 `spend=q×price` 的模型假设；公共冻结登记的 `origin.intent` 保留原金额，人工策略直接读取原意图；旧模型 `original_target` 不改。SIM 上界与 LIVE 保证分别验证 |
 | 当前公共经济口径及策略派生 | [经济读取](../../../shared-run/src/economics.rs)的 `AccountEconomicsReadV2`／`account_economics_v2` 已交付；策略只减两类 `confirmed_unpaid_pusd`、保留公共未知表达，不重写 NAV／WCM 或返佣政策 |
 | 历史可见与隐藏执行、有限时间推进 | [公开回放](../../../data-pipeline/training/src/public_replay.rs)、[隐藏准备](../../../data-pipeline/training/src/hidden_preparation.rs)、[公开／隐藏来源](../../../sim-system/src/public_consumption.rs)、[运行驱动](../../../sim-system/src/run_v2.rs)；核对历史适用执行角色，隐藏材料仅给 SIM，不把有限 PAPER 驱动直接改名为回测 |
 | 可接策略在线宿主和立即退出 | [旧 PAPER 脚本](../../../shared-run/src/paper.rs)含固定 `script_group`，不是任意策略宿主；所属公共工程复用同一调用边界，对齐 V4、SharedExecutionV2、预留与经济链，立即退出不得调用旧排空等待 |

@@ -28,7 +28,7 @@ pub use reservation::ReservationStatusV1;
 pub use core::economics::{
     DualCashReadV1, ExecutedEconomicsReadV1, LedgerEconomicReadV1, MarketEconomicTotalsReadV1,
     RebateAmountsReadV1, RebateDayReadV1, ResidualCashReadV1, ResolutionAccountReadV1,
-    SettlementCostReadV1, SuccessfulTradeReadV1,
+    SettlementCostReadV1, SuccessfulTradeReadV1, TradeEconomicReadV1,
 };
 
 pub use projection::AccountAdmissionPolicyV2;

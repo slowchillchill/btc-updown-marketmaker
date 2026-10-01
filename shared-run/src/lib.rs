@@ -10,3 +10,6 @@ mod economics;
 pub use economics::*;
 
 pub mod paper;
+
+mod strategy;
+pub use strategy::*;

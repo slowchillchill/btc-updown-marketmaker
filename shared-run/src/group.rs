@@ -122,6 +122,13 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
     ) -> Result<LedgerApplyOutcomeV1, LedgerErrorV1> {
         self.ledger.record_submission_started(event, request, item)
     }
+    pub(crate) fn release_known_unsent(
+        &mut self,
+        event: &LedgerLocalEventIdentityV1,
+        request: &LedgerRequestIdentityV1,
+    ) -> Result<LedgerApplyOutcomeV1, LedgerErrorV1> {
+        self.ledger.release_known_unsent(event, request)
+    }
     pub fn ledger(&self) -> &LedgerWriterV1 {
         &self.ledger
     }
@@ -323,6 +330,16 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
         context: RequestContextV2,
         intent: Option<Arc<ModelIntentV1>>,
     ) -> Result<Option<MutationRequestReceiptV2>, SimRunActorErrorV2> {
+        self.execute_with_request_effect(decision, context, intent)
+            .await
+            .map_err(|failure| failure.error)
+    }
+    pub(crate) async fn execute_with_request_effect(
+        &mut self,
+        decision: &mut PublicGroupDecisionV1<'_>,
+        context: RequestContextV2,
+        intent: Option<Arc<ModelIntentV1>>,
+    ) -> Result<Option<MutationRequestReceiptV2>, RequestFailureV1> {
         let Some(intent) = intent else {
             return Ok(None);
         };
@@ -330,7 +347,7 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
             .registry
             .freeze(context.global_request_id.clone(), intent);
         let receipt = intent_bridge::IntentBridge::bind_sim_group(decision)
-            .execute(context, frozen.intent())
+            .execute_with_request_effect(context, frozen.intent())
             .await?;
         self.registry.record_sim_receipt(&frozen, &receipt);
         Ok(Some(receipt))

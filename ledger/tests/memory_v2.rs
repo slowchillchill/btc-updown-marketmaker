@@ -69,6 +69,12 @@ impl Source {
         };
         let record = if n == 0 {
             SimV2SourceRecordReferenceV1::AccountOpening
+        } else if matches!(kinds.first(), Some(Kind::TradeLifecycle { .. })) {
+            SimV2SourceRecordReferenceV1::TradeLifecycle {
+                private_feedback_sequence: n,
+                platform_event_at_utc_ms: 100 + n as i64,
+                feedback_received_at_utc_ms: 200 + n as i64,
+            }
         } else if matches!(kinds.first(), Some(Kind::Control { .. })) {
             SimV2SourceRecordReferenceV1::DirectResponse {
                 private_feedback_sequence: n,
@@ -492,4 +498,71 @@ fn query_pages_keep_their_committed_sequence_and_recovery() {
             })
         );
     }
+}
+
+#[test]
+fn terminal_success_read_is_not_economic_application() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut source = Source::new(&temp.path().join("noe"), "success-before-economic");
+    source.accept(Kind::Economic {
+        evidence: SourceNeutralEconomicEvidenceV1::AccountOpening {
+            opening_evidence_identity: "opening".into(),
+            available_pusd: number("100"),
+        },
+    });
+    let mut writer =
+        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+    writer
+        .apply_noe_memory_v1(&source.source.opening_record().unwrap())
+        .unwrap();
+    let account = Arc::new(source.context.account_identity.clone());
+    let trade = Identity::entity(
+        &account,
+        &SourceNeutralEntityKeyV1::Trade {
+            source_trade_id: "trade".into(),
+        },
+    )
+    .unwrap();
+    let order = Identity::entity(
+        &account,
+        &SourceNeutralEntityKeyV1::Order {
+            source_order_id: "order".into(),
+        },
+    )
+    .unwrap();
+    source.accept(Kind::TradeLifecycle {
+        result: Trade {
+            trade_identity: trade,
+            order_identity: order,
+            condition_id: ConditionId("condition".into()),
+            token_id: TokenId("up".into()),
+            state: SourceNeutralTradeStateV1::Matched,
+            economic_disposition: SourceNeutralTradeEconomicDispositionV1::FinalSuccess,
+            fill_sequence: 1,
+            matched_at_utc_ms: 100,
+            liquidity_role: TradeLiquidityRoleV2::Taker,
+            source_price_pusd_per_share: number("0.5"),
+            base_quantity_shares: number("2"),
+            quote_amount_pusd: number("1"),
+            immediate_taker_fee_pusd: number("0.01"),
+            economic_application_account_transition_seq: Some(1),
+        },
+    });
+    source.stable();
+    for record in source.source.take_closed(500, 700) {
+        writer.apply_noe_memory_v1(&record).unwrap();
+    }
+    let read = writer.economic_read().unwrap();
+    let trade = read.trades().next().unwrap();
+    assert_eq!(
+        trade.fact.economic_disposition,
+        SourceNeutralTradeEconomicDispositionV1::FinalSuccess
+    );
+    assert!(!trade.economic_applied && !trade.success_applied);
+    assert_eq!(trade.actual_net_fee_pusd, number("0"));
+    assert_eq!(
+        trade.unpaired_contribution_shares,
+        ExecutionReadValueV1::NotApplicable
+    );
+    assert_eq!(read.cash().actual_available_pusd, number("100"));
 }

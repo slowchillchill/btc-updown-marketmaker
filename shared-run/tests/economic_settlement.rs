@@ -672,6 +672,23 @@ async fn real_partial_makers_fix_average_cost_and_nonterminating_fraction() {
             .iter()
             .position(|a| a.token_id.0 == UP_TOKEN_ID)
             .unwrap();
+        // 由原Maker成交与公共池配平产生贡献，不在测试重建配平器。
+        let mut unpaired = EconomicRational::zero();
+        for trade in read.trades().filter(|t| t.fact.token_id.0 == UP_TOKEN_ID) {
+            assert!(trade.economic_applied && trade.success_applied);
+            let ExecutionReadValueV1::Known(shares) = trade.unpaired_contribution_shares else {
+                panic!("新事务归属应已可读")
+            };
+            let shares = EconomicRational::try_from(&shares).unwrap();
+            unpaired = unpaired.add(&shares);
+            let original =
+                EconomicRational::from_decimal(trade.fact.base_quantity_shares.0.parse().unwrap());
+            assert!(shares < original, "两个Up原成交都沿同一池比例配平");
+        }
+        assert_eq!(
+            unpaired.public(),
+            r(if fractional { "2" } else { "1" }, "1")
+        );
         assert_eq!(m.paired_shares.0, "1");
         assert_eq!(m.success_principal_cost_pusd[up], r("1", "1"));
         assert_eq!(m.success_principal_cost_pusd[1 - up], r("1", "5"));

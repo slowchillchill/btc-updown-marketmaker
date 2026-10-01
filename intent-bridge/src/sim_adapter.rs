@@ -4,8 +4,8 @@ use contracts::{BuyLegIntentV1, BuyOrderIntentV1, ConditionId, ModelIntentV1};
 use sim_system::execution::{
     CancelMarketOrdersRequestV2, CancelOrderBatchItemV2, CancelOrderItemV1, CancelOrderRequestV2,
     CancelOrdersRequestV2, MutationRequestReceiptV2, PostOrderBatchItemV2, PostOrderItemV1,
-    PostOrderRequestV2, PostOrdersRequestV2, RequestContextV2, SimBuyOrderKindV1, SimBuyOrderV1,
-    SimRunActorErrorV2,
+    PostOrderRequestV2, PostOrdersRequestV2, RequestContextV2, RequestFailureV1, SimBuyOrderKindV1,
+    SimBuyOrderV1, SimRunActorErrorV2,
 };
 
 use crate::{BridgeBackendV1, private};
@@ -178,6 +178,19 @@ impl private::Sealed for SimGroupAdapterV1<'_, '_> {
         Self: 'a,
         K: private::DispatchKey,
     {
+        ready(
+            self.dispatch_with_effect(context, intent)
+                .map_err(|failure| failure.error),
+        )
+    }
+}
+
+impl SimGroupAdapterV1<'_, '_> {
+    fn dispatch_with_effect(
+        &mut self,
+        context: RequestContextV2,
+        intent: &ModelIntentV1,
+    ) -> Result<MutationRequestReceiptV2, RequestFailureV1> {
         use sim_system::execution::BusinessRequestV2;
         let request = (|| {
             Ok(match intent {
@@ -212,7 +225,19 @@ impl private::Sealed for SimGroupAdapterV1<'_, '_> {
                 }
             })
         })();
-        ready(request.and_then(|request| self.decision.request(request)))
+        request
+            .map_err(RequestFailureV1::before_request_effect)
+            .and_then(|request| self.decision.request_with_effect(request))
+    }
+}
+impl crate::IntentBridge<SimGroupAdapterV1<'_, '_>> {
+    /// SIM 原构造／注册／提交错误的效果表达；不改泛型及 LIVE 入口。
+    pub async fn execute_with_request_effect(
+        &mut self,
+        context: RequestContextV2,
+        intent: &ModelIntentV1,
+    ) -> Result<MutationRequestReceiptV2, RequestFailureV1> {
+        self.backend.dispatch_with_effect(context, intent)
     }
 }
 
