@@ -94,7 +94,7 @@
 
 待研究成本容忍函数输出两个分别可解释的量：配平净亏损容忍 `ℓ`（pUSD/份）及当前修复溢价容忍 `v`（pUSD/份），输入含第 7 节紧迫状态、库存、现金和可分配利润。若方案允许利润支持，要把本请求支持金额 `B` 与独立小亏容忍分别传入函数；不能把全部利润当作所有请求共享的免费阈值。函数形式和数值尚未批准。
 
-对原孤腿池 `Q,C,F` 和某个候选补入片段 `x`，历史归属成本为 `x(C+F)/Q`。设补腿公平价值 `f`（pUSD/份），候选价格 `p`，公共规则给出的该片段费用边界为 `FeeBound(x,p)`，需要同时满足：
+对原孤腿池 `Q,C,F` 和某个候选补入片段 `x`，历史归属成本为 `x(C+F)/Q`。设补腿公平价值 `f`（pUSD/份），候选价格 `p`，公共规则给出的该片段费用边界为 `FeeBound(x,p)`，以下是拟研究的双约束候选条件，是否采用及如何使用尚待研究与相应决定：
 
 - 整组返佣前净结果 `x - x(C+F)/Q - xp - FeeBound(x,p) ≥ -xℓ`。
 - 新增溢价 `xp + FeeBound(x,p) - xf ≤ xv`。
@@ -212,7 +212,7 @@ Binance 特征候选为因果收益、滚动波动、聚合成交方向、深度
 | 需求与真实缺口 | 已有入口及最小交接方向 |
 | --- | --- |
 | 同截止观察与账户、必要触发和冻结结果、完成／发送／退出 | [公共观察](../../../contracts/src/public_observation.rs)、[公共意图](../../../contracts/src/model_intent.rs)、[组读取与唯一执行](../../../shared-run/src/group.rs)；公共层定义足以让策略构造、适配、验证的最小调用边界，不依赖 baseline 具体策略 |
-| 成交费用、公共剩余成本池与费用修正归属 | [Ledger 经济读取](../../../ledger/src/economics.rs)有成功成交、执行汇总及公共池处理；`ActionBeforeReadV2` 市场汇总不足以提供逐成交／配平费用归属。核定同截止只读明细／贡献读取，不把全局 mutable Ledger 暴露给策略 |
+| 成交费用、公共剩余成本池与费用修正归属 | [Ledger 经济读取](../../../ledger/src/economics.rs)有成功成交、执行汇总及公共池处理；`ActionBeforeReadV2` 市场汇总不足以提供逐成交／配平费用归属。核定同截止只读明细／贡献读取，不把全局可变 Ledger 暴露给策略 |
 | 含费 FAK 上界与整动作预留 | [买入成本](../../../sim-system/src/buy_cost.rs)、[Ledger 预留](../../../ledger/src/core.rs)、[共享执行](../../../shared-run/src/group.rs)；已有 `ReserveIntentV1` 支持本金与即时费用，不是 Ledger 完全没有费用预留。补可靠费用上界及市场总投入装配，保持模型原批准预留语义 |
 | 金额目标与可证明过补 | [数量恢复](../../../shared-run/src/quantity.rs)的 `original_target` 依 `q=n/100` 与 `spend=q×price` 的模型假设；在原共享读取／适配边界核对人工策略合法金额表达，SIM/LIVE 对实际份额约束分别验证 |
 | 当前公共经济口径及策略派生 | [经济读取](../../../shared-run/src/economics.rs)的 `AccountEconomicsReadV2`／`account_economics_v2` 已交付；策略只减两类 `confirmed_unpaid_pusd`、保留公共未知表达，不重写 NAV／WCM 或返佣政策 |
