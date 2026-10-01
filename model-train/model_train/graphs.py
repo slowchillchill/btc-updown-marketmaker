@@ -1,4 +1,4 @@
-"""native_inputs_v6 / native_actions_v2：状态与动作职责，八张物理图。"""
+"""native_inputs_v7 / native_actions_v2：状态与动作职责，八张物理图。"""
 from dataclasses import dataclass
 from collections.abc import Callable, Sequence
 

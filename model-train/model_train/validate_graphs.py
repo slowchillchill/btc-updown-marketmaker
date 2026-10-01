@@ -249,7 +249,7 @@ def main():
         torch.save(model.state_dict(), weights)
     model.load_state_dict(torch.load(weights, weights_only=True, map_location='cpu'))
     schema = Path(__file__).resolve().parents[1] / 'native-inputs' / 'feature_schema.json'
-    result = {'input_contract_version': 'native_inputs_v6', 'action_contract_version': 'native_actions_v2', 'feature_schema_sha256': sha(schema),
+    result = {'input_contract_version': 'native_inputs_v7', 'account_economics_version': 'account_economics_v2', 'action_contract_version': 'native_actions_v2', 'feature_schema_sha256': sha(schema),
         'configuration':c.__dict__, 'python':platform.python_version(),
         'versions':{n:importlib.metadata.version(n) for n in ('torch','onnx','onnxruntime','onnxscript','numpy')},
         'torch_backend':torch.__config__.show(), 'ort_build':ort.get_build_info(),

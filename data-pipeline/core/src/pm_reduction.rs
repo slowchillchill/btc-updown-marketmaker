@@ -129,7 +129,7 @@ pub struct PmL2SelectionVersionV1 {
 }
 
 impl PmL2SelectionVersionV1 {
-    fn is_at_least(&self, previous: &Self) -> bool {
+    pub(crate) fn is_at_least(&self, previous: &Self) -> bool {
         self.source_sequence_epoch_id == previous.source_sequence_epoch_id
             && (
                 self.source_at_utc_ms,

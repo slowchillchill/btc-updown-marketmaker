@@ -175,7 +175,7 @@ impl NativeInputRoot {
         }
         let without_frame = before.is_none();
         let before = before
-            .or_else(|| shared.freeze_action_before(cutoff))
+            .or_else(|| shared.freeze_action_before(cutoff, &frames))
             .ok_or(crate::InputError::MissingAssociation)?;
         let mut group = self.encode_group(&frames, before, true)?;
         if without_frame {

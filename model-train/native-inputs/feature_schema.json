@@ -312,7 +312,7 @@
     }
   ],
   "history_policy": "Six per-hidden-key sequences at most16 samples; source identity changes only; missing/unrelated group adds nothing; previous-frame side stats separately; released at original Retire.",
-  "account_and_cancel": "#6正式续篇3 §4/8；账户433、撤单184；原账户0—414保持，完整请求块与条件适用性由同组原证据投影。",
+  "account_and_cancel": "#6正式续篇3 §4/8；账户433、撤单184；账户0—414沿原布局，314—316/320—322采用account_economics_v2三态，完整请求块与条件适用性由同组原证据投影。",
   "scope": "当前状态组件、native_actions_v2 精确动作支持与八张物理图；不包含正式训练",
   "price_fee_features": {
     "shape": "float32[B,P]",
@@ -322,8 +322,10 @@
     "applicability": "仅当前 FOK 合法价格；普通 GTC 为零参考估费",
     "decoder": "price_logits + bias-free signed Linear(H/2,1)(decoder) * price_fee_features"
   },
-  "input_contract_version": "native_inputs_v6",
-  "behavior_revision": "#176：普通 GTC/FOK、post_only=false、0.01/0.001、16路完整整数区间；不按 mos 屏蔽数量。旧权重与轨迹不重标。",
+  "input_contract_version": "native_inputs_v7",
+  "account_economics_version": "account_economics_v2",
+  "orphan_mark": "同截止有效最佳买价乘未判定剩余孤腿；有效空买盘Known(0)，必要报价不可用则Conservative314-316/Directional320-322编码[0,0,1]；闭市未判定继续有效报价，宽度433不变",
+  "behavior_revision": "#183：公共经济v2孤腿best bid及未知传播；#176：普通 GTC/FOK、post_only=false、0.01/0.001、16路完整整数区间；不按 mos 屏蔽数量。旧权重与轨迹不重标。",
   "pending_noe_record_count": {
     "indices": [
       412,

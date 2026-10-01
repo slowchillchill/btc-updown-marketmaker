@@ -442,7 +442,7 @@ fn trace(
             "all_context_rows": all_context, "all_decision_rows": all_decisions,
             "target_consume_samples_ns": selected_consume_ns, "elapsed_seconds": start.elapsed().as_secs_f64(),
             "groups_sha256": sha(&out.join("groups.jsonl"))?, "groups_bytes": fs::metadata(out.join("groups.jsonl"))?.len(),
-            "rayon_threads": rayon::current_num_threads(), "input_contract_version": "native_inputs_v6",
+            "rayon_threads": rayon::current_num_threads(), "input_contract_version": "native_inputs_v7", "account_economics_version": shared_run::ACCOUNT_ECONOMICS_VERSION,
             "projection_cache_diagnostic": projection_inputs,
             "process_peak_rss": fs::read_to_string("/proc/self/status")?.lines().find(|line| line.starts_with("VmHWM:")).map(str::to_owned),
             "scope": "从录制起点完整恢复公共事实、按原根开始时间消费历史及全部原生输出；显式有界、无交易账户，不是五分钟完整回放或全交易链计时"

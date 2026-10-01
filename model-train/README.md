@@ -2,7 +2,7 @@
 
 ## 全档盘口执行与历史性能复跑
 
-当前状态数学沿用 `native_inputs_v5` 的五输入、六侧顺序和全部有效档位；接口版本为下文 `native_inputs_v6`。盘口图先按 PM 四侧／Binance 两侧的
+当前状态数学沿用 `native_inputs_v5` 的五输入、六侧顺序和全部有效档位；接口版本为下文 `native_inputs_v7`。盘口图先按 PM 四侧／Binance 两侧的
 布尔掩码收集有效行，分别经过原两组 `9→32→32` 权重，再散回原位置。
 sum／mean／max 仍沿原坐标计算；内部空洞、补齐和空侧不改变相邻配对树及并列 max 的首项梯度。
 `BookLinear` 将乘积的逻辑布局改为 `[行, 输入, 输出]`，使 ONNX／ORT 的连续末轴承载输出通道，
@@ -91,7 +91,7 @@ OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 .venv/bin/python -m model_train.validate_rep
 SIM的有限显式暂失败场景经原输入日志配置，在订单仍有余量且未产生效果时命中；命中记录同原输入组，
 重放仍执行原输入与场景条件。没有故障概率、固定冷却、最短挂单时间或自动补撤。
 
-当前输入合同为 `native_inputs_v6`、动作合同为 `native_actions_v2`，具体布局与SHA来源为 `native-inputs/feature_schema.json`。
+当前输入合同为 `native_inputs_v7`、动作合同为 `native_actions_v2`，具体布局与SHA来源为 `native-inputs/feature_schema.json`。
 `export_metadata.json` 与连续验收来源信息同时记录该版本和 schema SHA。412—414新增
 `ActionBeforeReadV2::pending_noe_record_count()` 的原三态计数编码：已领取且因依赖未满足而尚待
 Ledger应用的适用原记录数。零不证明未来事实已齐；它不是金额、缺序号数量或禁单条件。
@@ -574,3 +574,11 @@ cargo test --release --manifest-path model-train/native-inputs/Cargo.toml \
 目标 m7i.2xlarge／c8a.2xlarge CPU 测量未执行，已按[用户决定](https://github.com/slowchillchill/btc-updown-marketmaker/issues/6#issuecomment-5754843215)延期，
 不再阻塞本次任务1.5、PR #125及阶段1审查、合并与关闭；仍须完成整体独立审查、适用收尾及准确合并版本的阶段组合审查。
 延期不等于已测或永久取消，不指定后续时间；本地结果不替代目标容量，不新增云主机，不进入训练、部署或下一阶段。
+
+## 当前账户输入语义 v7
+
+`native_inputs_v7` 消费公共 `account_economics_v2`，保持账户433维及现有网络拓扑。
+Conservative 的314—316与 Directional 的320—322沿原值／存在／适用编码：已知零为 `[0,1,1]`，未知为 `[0,0,1]`。
+未判定剩余孤腿采用同截止有效最佳买价乘份额；有效空买盘按零，闭市未判定继续有效价格，无暴露时无关缺价不传播。
+正式判定及真实赎回沿原经济合同替换旧价值。输入版本、公共经济版本和特征schema由当前生产入口输出，
+历史模型、轨迹及 `validation/` 冻结材料保持原版本，不重标为新结果。

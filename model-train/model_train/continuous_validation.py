@@ -46,7 +46,8 @@ class ContinuousPython:
         self.provenance['graphs'] = {str(directory / name): sha(directory / name) for name in ('initial_weights.pt', 'state_encoder.onnx', 'state_encoder.onnx.data', *[p.name for p in sorted(directory.glob('action_*.onnx*'))])}
         self.provenance['sources'] = {str(path): sha(path) for path in sorted(Path(__file__).parent.glob('*.py'))}
         self.provenance['native_extension_sha256'] = sha(self.provenance['native_module'])
-        self.provenance['input_contract_version'] = 'native_inputs_v6'
+        self.provenance['input_contract_version'] = 'native_inputs_v7'
+        self.provenance['account_economics_version'] = 'account_economics_v2'
         self.provenance['action_contract_version'] = 'native_actions_v2'
         self.provenance['feature_schema_sha256'] = sha(Path(__file__).resolve().parents[1] / 'native-inputs' / 'feature_schema.json')
         self.provenance['threads'] = threads

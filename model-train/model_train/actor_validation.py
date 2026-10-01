@@ -224,7 +224,7 @@ def main():
         assert set(new)==set(initialized)
         assert all(torch.equal(value,new[name]) for name,value in initialized.items())
         evidence['configurations'][config.name]={'seed':config.seed,
-            'input_contract_version':'native_inputs_v6','action_contract_version':'native_actions_v2',
+            'input_contract_version':'native_inputs_v7','account_economics_version':'account_economics_v2','action_contract_version':'native_actions_v2',
             'feature_schema_sha256':sha(root/'native-inputs/feature_schema.json'),
             'same_seed_initialized_parameters':len(new),'new_weights_sha256':sha(current)}
         if args.old_graphs:
