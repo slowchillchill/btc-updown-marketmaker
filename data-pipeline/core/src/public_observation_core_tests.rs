@@ -2320,3 +2320,79 @@ fn unrelated_high_delete_cannot_promote_old_l2_over_new_direct_bid() {
         );
     }
 }
+
+#[test]
+fn lower_quantity_update_cannot_refresh_direct_bid_over_new_high_bid() {
+    for changes in [
+        vec![
+            (3, 24_000, "0.5", "2", "0.5"),
+            (4, 25_000, "0.4", "1", "0.5"), // 正式Review原序列。
+        ],
+        vec![
+            (3, 24_000, "0.4", "0", "0.3"), // 本价位删除不让被BBA排除的旧0.5复活。
+            (4, 25_000, "0.5", "2", "0.5"), // 新的高价本档证据胜过旧直接BBA。
+            (5, 26_000, "0.4", "1", "0.5"), // 低档数量不能刷新整体最优结论。
+        ],
+    ] {
+        let mut core = core();
+        push(&mut core, &meta(0));
+        let mut full = book("1");
+        if let PolymarketOrderbookEvent::Book { bids, .. } = &mut full {
+            bids.push(PolymarketPriceLevel {
+                price: "0.3".into(),
+                size: "1".into(),
+            });
+        }
+        push(&mut core, &pm(1, 1, 21_000, full));
+        push(
+            &mut core,
+            &pm(
+                2,
+                2,
+                23_000,
+                PolymarketOrderbookEvent::BestBidAsk {
+                    asset_id: UP_TOKEN_ID.into(),
+                    best_bid: Some("0.4".into()),
+                    best_ask: Some("0.6".into()),
+                    spread: None,
+                },
+            ),
+        );
+        for (position, source, price, size, expected) in changes {
+            let result = push(
+                &mut core,
+                &pm(
+                    position,
+                    position,
+                    source,
+                    PolymarketOrderbookEvent::PriceChange {
+                        price_changes: vec![PolymarketPriceChangeEntry {
+                            asset_id: UP_TOKEN_ID.into(),
+                            price: price.into(),
+                            size: Some(size.into()),
+                            side: PolymarketSide::Buy,
+                            best_bid: None,
+                            best_ask: None,
+                        }],
+                    },
+                ),
+            );
+            let asset = up(&result.closed_groups[0].observations[0]);
+            assert_eq!(
+                asset.valuation_best_bid.value,
+                Some(Some(ExactDecimal(expected.into()))),
+                "source {source}"
+            );
+            assert_eq!(
+                asset
+                    .best_bid_ask
+                    .value
+                    .as_ref()
+                    .unwrap()
+                    .best_bid_pusd_per_share,
+                Some(ExactDecimal("0.4".into())),
+                "不改直接BBA字段"
+            );
+        }
+    }
+}

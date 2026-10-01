@@ -1372,57 +1372,54 @@ impl MarketState {
         if bids.quality != MarketDataQuality::Fresh || bids.value.is_none() {
             return state.valuation_bba.clone();
         }
+        let baseline = self.pm.assets[token].selection_baseline.as_ref();
+        let selected_at = |price: &ExactDecimal| {
+            self.pm
+                .selected
+                .get(&key(token, BookSide::Bid, d(&price.0)))
+                .into_iter()
+                .chain(baseline)
+                .max_by_key(|s| {
+                    (
+                        s.version.source_at_utc_ms,
+                        s.version.collector_admission_sequence,
+                        s.version.member_index,
+                    )
+                })
+        };
+        let direct = state
+            .valuation_bba_version
+            .as_ref()
+            .filter(|v| self.pm.epoch.as_ref() == Some(&v.source_sequence_epoch_id));
+        let bid = state.valuation_bba.value.as_ref().and_then(|p| p.as_ref());
+        // 点位删除只撤销该直接买价，不能抹除BBA排除了旧更高价的证据。
+        let quote_removed = direct.is_some_and(|v| {
+            bid.is_some_and(|p| {
+                selected_at(p).is_some_and(|s| s.version != *v && s.version.is_at_least(v))
+                    && self.pm.quantity(token, BookSide::Bid, d(&p.0)).is_zero()
+            })
+        });
         let best = bids
             .value
             .as_ref()
             .unwrap()
             .iter()
-            .find(|l| d(&l.quantity_shares.0) > Decimal::ZERO)
-            .map(|l| l.price_pusd_per_share.clone());
-        // 本档或完整快照才证明该首档的新版本；任意其他高价删除不刷新首档。
-        let baseline = self.pm.assets[token].selection_baseline.as_ref();
-        let version_key = |s: &crate::pm_reduction::PmSelectedLevelV1<E>| {
-            (
-                s.version.source_at_utc_ms,
-                s.version.collector_admission_sequence,
-                s.version.member_index,
-            )
-        };
-        let selected = best
-            .as_ref()
-            .and_then(|p| self.pm.selected.get(&key(token, BookSide::Bid, d(&p.0))))
-            .into_iter()
-            .chain(baseline)
-            .max_by_key(|s| version_key(s));
-        if let Some(direct) = state.valuation_bba_version.as_ref() {
-            let same_epoch = self.pm.epoch.as_ref() == Some(&direct.source_sequence_epoch_id);
-            if same_epoch {
-                let bid = state.valuation_bba.value.as_ref().and_then(|p| p.as_ref());
-                let at_quote = bid
-                    .and_then(|p| self.pm.selected.get(&key(token, BookSide::Bid, d(&p.0))))
-                    .into_iter()
-                    .chain(baseline)
-                    .max_by_key(|s| version_key(s));
-                // 新的本价位/全簿明确缺价才撤销该直接买价；同成员直接BBA仍优先。
-                let quote_removed = bid.is_some_and(|p| {
-                    at_quote.is_some_and(|s| s.version != *direct && s.version.is_at_least(direct))
-                        && self.pm.quantity(token, BookSide::Bid, d(&p.0)).is_zero()
-                });
-                if !quote_removed {
-                    // 更新较低L2首档或删除其他旧首档，都没有撤销有效直接买价。
-                    let below_quote =
-                        bid.is_some_and(|p| best.as_ref().is_none_or(|b| d(&b.0) < d(&p.0)));
-                    let effective_direct = at_quote
-                        .filter(|s| bid.is_some() && s.version.is_at_least(direct))
-                        .map(|s| &s.version)
-                        .unwrap_or(direct);
-                    if below_quote
-                        || selected.is_none_or(|s| effective_direct.is_at_least(&s.version))
-                    {
-                        return state.valuation_bba.clone();
+            .filter(|l| d(&l.quantity_shares.0) > Decimal::ZERO)
+            .find(|l| {
+                direct.is_none_or(|v| {
+                    let newer = selected_at(&l.price_pusd_per_share)
+                        .is_some_and(|s| !v.is_at_least(&s.version));
+                    match bid {
+                        Some(p) if d(&l.price_pusd_per_share.0) <= d(&p.0) => {
+                            quote_removed || (d(&l.price_pusd_per_share.0) == d(&p.0) && newer)
+                        }
+                        _ => newer,
                     }
-                }
-            }
+                })
+            })
+            .map(|l| l.price_pusd_per_share.clone());
+        if direct.is_some() && best.is_none() && !quote_removed {
+            return state.valuation_bba.clone();
         }
         ObservedFactV1 {
             value: Some(best),
