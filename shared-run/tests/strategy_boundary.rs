@@ -90,13 +90,35 @@ async fn batch_insufficiency_sends_nothing_and_never_releases_prior_unknown() {
         .collect();
     assert_eq!(requests, [ReservationStatusV1::SubmittedUnknown]);
     let replay = shared
-        .execute_batch_reserved(&mut driver.decision().unwrap(), &[old])
+        .execute_batch_reserved(&mut driver.decision().unwrap(), &[old.clone()])
         .await
         .unwrap();
     assert_eq!(replay[0].receipt, old_receipt[0].receipt);
     assert!(
         shared.registry().frozen_intent("large").is_none(),
         "不足批次零Bridge请求"
+    );
+    let mut converted = false;
+    while driver.next_group().unwrap().is_some() {
+        shared.strategy_input(&mut driver).unwrap();
+        if shared.ledger().funds_read_v1().requests().any(|r| {
+            r.request_identity.0 == "old-reserve"
+                && r.reservation_state == ReservationStatusV1::Converted
+        }) {
+            converted = true;
+            break;
+        }
+    }
+    assert!(converted, "原NOE将真实已发送请求转换为平台义务");
+    let before = shared.ledger().projection_v2().unwrap().ledger_entry_seq;
+    let replay = shared
+        .execute_batch_reserved(&mut driver.decision().unwrap(), &[old])
+        .await
+        .unwrap();
+    assert_eq!(replay[0].receipt, old_receipt[0].receipt);
+    assert_eq!(
+        shared.ledger().projection_v2().unwrap().ledger_entry_seq,
+        before
     );
 }
 #[tokio::test(flavor = "current_thread")]
@@ -193,6 +215,68 @@ async fn bridge_construction_error_releases_current_and_unsent_tail() {
     );
     assert_eq!(requests["last-reserve"], ReservationStatusV1::Released);
     assert!(shared.registry().frozen_intent("last").is_none());
+}
+#[tokio::test(flavor = "current_thread")]
+async fn released_unsent_cache_is_not_current_batch_funding() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut shared, mut driver) = setup(temp.path());
+    let mut a = buy("a", 60);
+    a.context.caller_correlation_id = Some(" invalid ".into());
+    let failed = shared
+        .execute_batch_reserved(&mut driver.decision().unwrap(), &[a.clone()])
+        .await
+        .unwrap_err();
+    assert_eq!(
+        failed.failed_request_effect,
+        Some(RequestEffectV1::NoRequestEffect)
+    );
+    assert!(failed.sent.is_empty());
+    assert_eq!(
+        shared
+            .ledger()
+            .funds_read_v1()
+            .requests()
+            .find(|r| r.request_identity.0 == "a-reserve")
+            .unwrap()
+            .reservation_state,
+        ReservationStatusV1::Released
+    );
+    assert_eq!(
+        shared
+            .ledger()
+            .economic_read()
+            .unwrap()
+            .cash()
+            .actual_available_pusd,
+        ExactDecimal("100".into())
+    );
+    a.context.caller_correlation_id = None;
+    // 无覆盖项位于后面，证明必须在本批任何发送前发现，而不是先发新B。
+    let error = shared
+        .execute_batch_reserved(&mut driver.decision().unwrap(), &[buy("b", 60), a])
+        .await
+        .expect_err("历史Reserved不是现存预留，120本金不能在100现金上发送");
+    assert!(error.sent.is_empty());
+    assert_eq!(error.attempted_intent_index, None);
+    assert!(error.release_errors.is_empty());
+    assert!(shared.registry().frozen_intent("b").is_none());
+    assert_eq!(
+        shared
+            .ledger()
+            .funds_read_v1()
+            .requests()
+            .find(|r| r.request_identity.0 == "a-reserve")
+            .unwrap()
+            .reservation_state,
+        ReservationStatusV1::Released
+    );
+    assert!(
+        !shared
+            .ledger()
+            .funds_read_v1()
+            .requests()
+            .any(|r| r.request_identity.0 == "b-reserve")
+    );
 }
 #[tokio::test(flavor = "current_thread")]
 async fn duplicate_global_id_cannot_substitute_old_intent_or_release_old_obligations() {

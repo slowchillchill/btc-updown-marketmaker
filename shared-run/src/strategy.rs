@@ -4,7 +4,10 @@ use ::execution_normalization::MemoryLogicalIdentityV1;
 use contracts::{execution_normalization::SourceNeutralTradeLifecycleResultV2, *};
 use ledger::*;
 use sim_system::{execution::*, public_consumption::*};
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    sync::Arc,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FrozenTradeEconomicsV1 {
@@ -172,17 +175,47 @@ impl SharedExecutionV2 {
         decision: &mut PublicGroupDecisionV1<'_>,
         intents: &[ReservedIntentV1],
     ) -> Result<Vec<SentIntentReceiptV1>, BatchExecutionErrorV1> {
-        let existing: BTreeSet<_> = self
+        let current: BTreeMap<_, _> = self
             .ledger()
             .funds_read_v1()
             .requests()
-            .map(|r| r.request_identity.clone())
+            .map(|r| (r.request_identity.clone(), r.reservation_state))
             .collect();
+        // 原Reserved结果是粘滞决定，不是当前资金承诺。全批检查先于任何新预留或发送。
+        // 已发请求可凭原接收回执／NOE响应重读幂等结果，不要求其已转换的预留仍活动。
+        for item in intents {
+            for reserve in &item.reserves {
+                if current
+                    .get(&reserve.reserve.request_identity)
+                    .is_some_and(|state| {
+                        matches!(
+                            state,
+                            ReservationStatusV1::Released | ReservationStatusV1::Converted
+                        )
+                    })
+                    && !self
+                        .registry()
+                        .has_sim_submission_evidence(&item.context.global_request_id)
+                {
+                    return Err(BatchExecutionErrorV1 {
+                        error: SharedActionErrorV1::Sim(
+                            SimRunActorErrorV2::InvalidBusinessRequest(
+                                "当前预留已结束且原请求没有实际提交证据",
+                            ),
+                        ),
+                        sent: vec![],
+                        attempted_intent_index: None,
+                        failed_request_effect: None,
+                        release_errors: vec![],
+                    });
+                }
+            }
+        }
         let mut owned: BTreeSet<_> = intents
             .iter()
             .flat_map(|i| i.reserves.iter())
             .map(|r| r.reserve.request_identity.clone())
-            .filter(|id| !existing.contains(id))
+            .filter(|id| !current.contains_key(id))
             .collect();
         let reserves: Vec<_> = intents
             .iter()
@@ -246,7 +279,8 @@ impl SharedExecutionV2 {
                 let id = &reserve.reserve.request_identity;
                 let funds = self.ledger().funds_read_v1();
                 if !batch_reserve_ids.insert(id.clone())
-                    || (existing.contains(id) && funds.submission_request(&submission) != Some(id))
+                    || (current.contains_key(id)
+                        && funds.submission_request(&submission) != Some(id))
                 {
                     return Err(BatchExecutionErrorV1 {
                         error: SharedActionErrorV1::Sim(

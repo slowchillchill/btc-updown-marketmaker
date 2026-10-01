@@ -204,6 +204,12 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
     pub fn frozen_intent(&self, id: &str) -> Option<&FrozenIntentRefV1> {
         self.intents.get(id).map(|s| &s.origin)
     }
+    /// 原SIM接收回执或原NOE提交响应证明该全局请求已经接纳；不复制回执状态。
+    pub(crate) fn has_sim_submission_evidence(&self, id: &str) -> bool {
+        self.intents
+            .get(id)
+            .is_some_and(|s| s.receipt.is_some() || !s.outcomes.is_empty())
+    }
     pub fn freeze(&mut self, id: String, intent: Arc<ModelIntentV1>) -> FrozenIntentRefV1 {
         self.intents
             .entry(id.clone())
