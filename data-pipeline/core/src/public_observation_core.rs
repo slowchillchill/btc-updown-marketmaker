@@ -1379,43 +1379,49 @@ impl MarketState {
             .iter()
             .find(|l| d(&l.quantity_shares.0) > Decimal::ZERO)
             .map(|l| l.price_pusd_per_share.clone());
-        // 要替换直接报价，L2必须至少证明其价格及以上的缺价/首档；
-        // 空L2上的更低价删除也不能以新时间复活旧空盘。
-        let relevant_from = best
-            .as_ref()
-            .map(|p| d(&p.0))
-            .into_iter()
-            .chain(
-                state
-                    .valuation_bba
-                    .value
-                    .as_ref()
-                    .and_then(|p| p.as_ref())
-                    .map(|p| d(&p.0)),
+        // 本档或完整快照才证明该首档的新版本；任意其他高价删除不刷新首档。
+        let baseline = self.pm.assets[token].selection_baseline.as_ref();
+        let version_key = |s: &crate::pm_reduction::PmSelectedLevelV1<E>| {
+            (
+                s.version.source_at_utc_ms,
+                s.version.collector_admission_sequence,
+                s.version.member_index,
             )
-            .max();
-        // 最佳档及其上方明确缺价共同证明首档，复用原归约器实际选择版本。
-        let selected = self
-            .pm
-            .selected
-            .iter()
-            .filter(|((id, ask, price), _)| {
-                id == token && !*ask && relevant_from.is_none_or(|from| *price >= from)
-            })
-            .map(|(_, selected)| selected)
-            .chain(self.pm.assets[token].selection_baseline.iter())
-            .max_by_key(|s| {
-                (
-                    s.version.source_at_utc_ms,
-                    s.version.collector_admission_sequence,
-                    s.version.member_index,
-                )
-            });
-        if let (Some(selected), Some(direct)) = (selected, state.valuation_bba_version.as_ref()) {
-            if selected.version.source_sequence_epoch_id == direct.source_sequence_epoch_id
-                && direct.is_at_least(&selected.version)
-            {
-                return state.valuation_bba.clone();
+        };
+        let selected = best
+            .as_ref()
+            .and_then(|p| self.pm.selected.get(&key(token, BookSide::Bid, d(&p.0))))
+            .into_iter()
+            .chain(baseline)
+            .max_by_key(|s| version_key(s));
+        if let Some(direct) = state.valuation_bba_version.as_ref() {
+            let same_epoch = self.pm.epoch.as_ref() == Some(&direct.source_sequence_epoch_id);
+            if same_epoch {
+                let bid = state.valuation_bba.value.as_ref().and_then(|p| p.as_ref());
+                let at_quote = bid
+                    .and_then(|p| self.pm.selected.get(&key(token, BookSide::Bid, d(&p.0))))
+                    .into_iter()
+                    .chain(baseline)
+                    .max_by_key(|s| version_key(s));
+                // 新的本价位/全簿明确缺价才撤销该直接买价；同成员直接BBA仍优先。
+                let quote_removed = bid.is_some_and(|p| {
+                    at_quote.is_some_and(|s| s.version != *direct && s.version.is_at_least(direct))
+                        && self.pm.quantity(token, BookSide::Bid, d(&p.0)).is_zero()
+                });
+                if !quote_removed {
+                    // 更新较低L2首档或删除其他旧首档，都没有撤销有效直接买价。
+                    let below_quote =
+                        bid.is_some_and(|p| best.as_ref().is_none_or(|b| d(&b.0) < d(&p.0)));
+                    let effective_direct = at_quote
+                        .filter(|s| bid.is_some() && s.version.is_at_least(direct))
+                        .map(|s| &s.version)
+                        .unwrap_or(direct);
+                    if below_quote
+                        || selected.is_none_or(|s| effective_direct.is_at_least(&s.version))
+                    {
+                        return state.valuation_bba.clone();
+                    }
+                }
             }
         }
         ObservedFactV1 {

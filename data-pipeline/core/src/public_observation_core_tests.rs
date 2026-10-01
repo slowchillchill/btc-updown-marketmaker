@@ -2250,3 +2250,73 @@ fn valuation_bid_selects_public_versions_without_rewriting_direct_bba() {
         "L2换代不否决正式保留的独立BBA"
     );
 }
+
+#[test]
+fn unrelated_high_delete_cannot_promote_old_l2_over_new_direct_bid() {
+    let mut core = core();
+    push(&mut core, &meta(0));
+    let mut full = book("1");
+    if let PolymarketOrderbookEvent::Book { bids, .. } = &mut full {
+        bids.push(PolymarketPriceLevel {
+            price: "0.3".into(),
+            size: "1".into(),
+        });
+    }
+    push(&mut core, &pm(1, 1, 21_000, full));
+    push(
+        &mut core,
+        &pm(
+            2,
+            2,
+            23_000,
+            PolymarketOrderbookEvent::BestBidAsk {
+                asset_id: UP_TOKEN_ID.into(),
+                best_bid: Some("0.4".into()),
+                best_ask: Some("0.6".into()),
+                spread: None,
+            },
+        ),
+    );
+    for (position, source, price, size, expected) in [
+        (3, 24_000, "0.9", "0", "0.4"), // 正式Review反例：删除未曾存在的高档不证明首档更新。
+        (4, 25_000, "0.5", "0", "0.4"), // 原L2首档变化，也未撤销独立0.4。
+        (5, 26_000, "0.4", "2", "0.4"), // 本价位有效数量确认保留直接价格。
+        (6, 27_000, "0.4", "0", "0.3"), // 本价位真实删除后采用原L2实际剩余首档。
+        (7, 28_000, "0.55", "1", "0.55"), // 新首档自身的来源版本能支持更新价格。
+    ] {
+        let result = push(
+            &mut core,
+            &pm(
+                position,
+                position,
+                source,
+                PolymarketOrderbookEvent::PriceChange {
+                    price_changes: vec![PolymarketPriceChangeEntry {
+                        asset_id: UP_TOKEN_ID.into(),
+                        price: price.into(),
+                        size: Some(size.into()),
+                        side: PolymarketSide::Buy,
+                        best_bid: None,
+                        best_ask: None,
+                    }],
+                },
+            ),
+        );
+        let asset = up(&result.closed_groups[0].observations[0]);
+        assert_eq!(
+            asset.valuation_best_bid.value,
+            Some(Some(ExactDecimal(expected.into()))),
+            "source {source}"
+        );
+        assert_eq!(
+            asset
+                .best_bid_ask
+                .value
+                .as_ref()
+                .unwrap()
+                .best_bid_pusd_per_share,
+            Some(ExactDecimal("0.4".into())),
+            "不改直接BBA字段"
+        );
+    }
+}

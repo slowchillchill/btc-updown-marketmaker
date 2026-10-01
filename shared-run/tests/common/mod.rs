@@ -1468,7 +1468,7 @@ pub fn recorded_nav_marks(root: &Path) -> (PublicObservationCoreV1, TradingTimes
         let mut event = book("1");
         if let PolymarketOrderbookEvent::Book { asset_id, bids, .. } = &mut event {
             *asset_id = (*token).into();
-            bids[0].price = "0.4".into();
+            bids[0].price = if *token == UP_TOKEN_ID { "0.5" } else { "0.4" }.into();
         }
         let mut r = row("epoch-a", i as u64 + 1, 21_000, 21_001, event);
         if i >= 2 {
@@ -1486,7 +1486,7 @@ pub fn recorded_nav_marks(root: &Path) -> (PublicObservationCoreV1, TradingTimes
         rows.push(TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(
             row(
                 "epoch-a",
-                i,
+                if i == 5 { i } else { i + 1 },
                 at,
                 at + 1,
                 PolymarketOrderbookEvent::BestBidAsk {
@@ -1498,6 +1498,28 @@ pub fn recorded_nav_marks(root: &Path) -> (PublicObservationCoreV1, TradingTimes
             ),
         )));
         times.push(at + 1000);
+        if i == 5 {
+            // Review真实失败：此时10孤腿；删除无关高档不应把旧0.5提升覆盖直接0.4。
+            rows.push(TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(
+                row(
+                    "epoch-a",
+                    6,
+                    36_500,
+                    36_501,
+                    PolymarketOrderbookEvent::PriceChange {
+                        price_changes: vec![PolymarketPriceChangeEntry {
+                            asset_id: UP_TOKEN_ID.into(),
+                            price: "0.9".into(),
+                            size: Some("0".into()),
+                            side: PolymarketSide::Buy,
+                            best_bid: None,
+                            best_ask: None,
+                        }],
+                    },
+                ),
+            )));
+            times.push(37_000);
+        }
     }
     // 关闭已可见，正式判定尚不可见；有效报价仍用于旧市场持仓。
     let mut closed = metadata_snapshot_row();

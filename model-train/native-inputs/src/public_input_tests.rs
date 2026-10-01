@@ -1280,7 +1280,7 @@ async fn same_cutoff_orphan_marks_freeze_all_markets_and_encode_true_zero_unknow
             );
             old = Some(shared.action_before(&mut driver).unwrap().unwrap());
             seen.insert(at);
-        } else if [38_000, 40_000, 42_000, 66_000, 71_000].contains(&at) {
+        } else if [37_000, 38_000, 40_000, 42_000, 66_000, 71_000].contains(&at) {
             if at == 66_000 {
                 assert_eq!(
                     driver
@@ -1318,8 +1318,13 @@ async fn same_cutoff_orphan_marks_freeze_all_markets_and_encode_true_zero_unknow
                     assert_eq!(&row.slow[320..323], &[0., 0., 1.]);
                 }
             } else {
-                let mark =
-                    EconomicRational::from_decimal(Decimal::from(if at == 40_000 { 4 } else { 9 }));
+                let mark = EconomicRational::from_decimal(Decimal::from(if at == 40_000 {
+                    4
+                } else if at == 37_000 {
+                    8
+                } else {
+                    9
+                }));
                 assert_eq!(
                     known(&a.conservative_nav_pusd)
                         .sub(&EconomicRational::try_from(&legacy.conservative_nav_pusd).unwrap()),
@@ -1350,7 +1355,7 @@ async fn same_cutoff_orphan_marks_freeze_all_markets_and_encode_true_zero_unknow
     }
     assert_eq!(
         seen,
-        [36_000, 38_000, 40_000, 42_000, 66_000, 71_000]
+        [36_000, 37_000, 38_000, 40_000, 42_000, 66_000, 71_000]
             .into_iter()
             .collect()
     );

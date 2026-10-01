@@ -98,7 +98,7 @@ SIM 的 CleanRun 完成入口在业务义务闭合、投影排空后执行真实
 
 当前动作前读取使用 `AccountEconomicsReadV2`（`account_economics_v2`），组合同截止 Ledger 与所有公开市场观察。
 未判定剩余孤腿按对应结果侧有效最佳买价乘份额标记；最优档数量不足不折扣。
-DPT 的 `valuation_best_bid` 在原来源选择投影内组合直接 BBA 与完整 L2：最佳档及其上方明确缺价的来源版本决定 L2 首档，低档更新不刷新旧首档；直接 `best_bid_ask` 字段保持独立。
+DPT 的 `valuation_best_bid` 在原来源选择投影内组合直接 BBA 与完整 L2：首档本价位及完整快照的实际来源版本决定 L2 候选；其他价位删除不刷新首档，较低候选不能覆盖仍有效的直接买价；直接买价自身的新数量／缺价沿原选择事实处理；直接 `best_bid_ask` 字段保持独立。
 有效空买盘为已知零；必要报价未观测或不可用时 Conservative 与 Directional 为 `Unavailable`。
 无相关孤腿暴露不受缺价影响；窗口结束、关闭或模型角色退役本身不使有效价格失效，也没有新增静默 TTL。
 同一 mark 同时进入 Conservative 与 Directional；WCM、四现金、费用、返佣与已确认 PnL 沿原 Ledger。
