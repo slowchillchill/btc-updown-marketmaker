@@ -93,8 +93,9 @@ pub struct SentIntentReceiptV1 {
 pub struct BatchExecutionErrorV1 {
     pub error: SharedActionErrorV1,
     pub sent: Vec<SentIntentReceiptV1>,
-    /// 已调用发送而返回错误的项；其效果未知，相关预留保留。
+    /// 已进入原Bridge而返回错误的项；是否可能有效果另由原路径表达。
     pub attempted_intent_index: Option<usize>,
+    pub failed_request_effect: Option<RequestEffectV1>,
     pub release_errors: Vec<LedgerErrorV1>,
 }
 pub enum StrategyDispatchV1 {
@@ -206,6 +207,7 @@ impl SharedExecutionV2 {
                 error,
                 sent: vec![],
                 attempted_intent_index: None,
+                failed_request_effect: None,
                 release_errors: self.release_unsent_intents(intents, &owned),
             });
         }
@@ -232,6 +234,7 @@ impl SharedExecutionV2 {
                     )),
                     sent,
                     attempted_intent_index: None,
+                    failed_request_effect: None,
                     release_errors: self.release_unsent_intents(&intents[index..], &owned),
                 });
             }
@@ -253,6 +256,7 @@ impl SharedExecutionV2 {
                         ),
                         sent,
                         attempted_intent_index: None,
+                        failed_request_effect: None,
                         release_errors: self.release_unsent_intents(&intents[index..], &owned),
                     });
                 }
@@ -268,30 +272,46 @@ impl SharedExecutionV2 {
                         error: SharedActionErrorV1::Ledger(error),
                         sent,
                         attempted_intent_index: None,
+                        failed_request_effect: None,
                         release_errors: self.release_unsent_intents(&intents[index..], &owned),
                     });
                 }
             }
-            // 调用发送后，即使无回执也不再属于本批可证明未发送的占用。
-            // 后项重复身份同样不能释放先前已尝试发送的义务。
-            for reserve in &item.reserves {
-                owned.remove(&reserve.reserve.request_identity);
-            }
             match self
-                .execute(decision, item.context.clone(), Some(item.intent.clone()))
+                .execute_with_request_effect(
+                    decision,
+                    item.context.clone(),
+                    Some(item.intent.clone()),
+                )
                 .await
             {
-                Ok(Some(receipt)) => sent.push(SentIntentReceiptV1 {
-                    context: item.context.clone(),
-                    receipt,
-                }),
+                Ok(Some(receipt)) => {
+                    // 已登记／提交成功，不再属于本批明确未发占用。
+                    for reserve in &item.reserves {
+                        owned.remove(&reserve.reserve.request_identity);
+                    }
+                    sent.push(SentIntentReceiptV1 {
+                        context: item.context.clone(),
+                        receipt,
+                    });
+                }
                 Ok(None) => unreachable!("批次每项有明确原意图"),
-                Err(error) => {
+                Err(failure) => {
+                    let unsent_start = if failure.effect == RequestEffectV1::NoRequestEffect {
+                        index
+                    } else {
+                        for reserve in &item.reserves {
+                            owned.remove(&reserve.reserve.request_identity);
+                        }
+                        index + 1
+                    };
                     return Err(BatchExecutionErrorV1 {
-                        error: SharedActionErrorV1::Sim(error),
+                        error: SharedActionErrorV1::Sim(failure.error),
                         sent,
                         attempted_intent_index: Some(index),
-                        release_errors: self.release_unsent_intents(&intents[index + 1..], &owned),
+                        failed_request_effect: Some(failure.effect),
+                        release_errors: self
+                            .release_unsent_intents(&intents[unsent_start..], &owned),
                     });
                 }
             }

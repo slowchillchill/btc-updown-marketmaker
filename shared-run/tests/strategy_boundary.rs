@@ -100,7 +100,7 @@ async fn batch_insufficiency_sends_nothing_and_never_releases_prior_unknown() {
     );
 }
 #[tokio::test(flavor = "current_thread")]
-async fn real_send_error_preserves_attempted_prefix_and_releases_only_unsent() {
+async fn pre_registration_error_releases_current_and_unsent_tail() {
     let temp = tempfile::tempdir().unwrap();
     let (mut shared, mut driver) = setup(temp.path());
     let first = buy("first", 1);
@@ -115,6 +115,10 @@ async fn real_send_error_preserves_attempted_prefix_and_releases_only_unsent() {
     assert_eq!(error.sent.len(), 1);
     assert_eq!(error.sent[0].context.global_request_id, "first");
     assert_eq!(error.attempted_intent_index, Some(1));
+    assert_eq!(
+        error.failed_request_effect,
+        Some(RequestEffectV1::NoRequestEffect)
+    );
     assert!(matches!(
         error.error,
         SharedActionErrorV1::Sim(SimRunActorErrorV2::InvalidBusinessRequest(
@@ -132,9 +136,60 @@ async fn real_send_error_preserves_attempted_prefix_and_releases_only_unsent() {
         requests["first-reserve"],
         ReservationStatusV1::SubmittedUnknown
     );
+    assert_eq!(requests["second-reserve"], ReservationStatusV1::Released);
+    assert_eq!(requests["last-reserve"], ReservationStatusV1::Released);
+    assert!(shared.registry().frozen_intent("last").is_none());
+}
+#[tokio::test(flavor = "current_thread")]
+async fn bridge_construction_error_releases_current_and_unsent_tail() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut shared, mut driver) = setup(temp.path());
+    let first = buy("first", 1);
+    let mut bad = buy("gtd-overflow", 2);
+    bad.intent = Arc::new(ModelIntentV1::SubmitSingleBuy {
+        condition_id: ConditionId(CONDITION_ID.into()),
+        order: BuyLegIntentV1 {
+            token_id: TokenId(UP_TOKEN_ID.into()),
+            order: BuyOrderIntentV1::GtdLimit {
+                limit_price_pusd_per_share: Decimal::new(2, 1),
+                size_shares: Decimal::from(10),
+                post_only: true,
+                expires_at_utc_sec: i64::MAX,
+            },
+        },
+    });
+    let error = shared
+        .execute_batch_reserved(
+            &mut driver.decision().unwrap(),
+            &[first, bad, buy("last", 3)],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.sent.len(), 1);
+    assert_eq!(error.sent[0].context.global_request_id, "first");
+    assert_eq!(error.attempted_intent_index, Some(1));
     assert_eq!(
-        requests["second-reserve"],
+        error.failed_request_effect,
+        Some(RequestEffectV1::NoRequestEffect)
+    );
+    assert!(matches!(
+        error.error,
+        SharedActionErrorV1::Sim(SimRunActorErrorV2::RequestTimeOverflow)
+    ));
+    assert!(error.release_errors.is_empty());
+    let requests: std::collections::BTreeMap<_, _> = shared
+        .ledger()
+        .funds_read_v1()
+        .requests()
+        .map(|r| (r.request_identity.0.clone(), r.reservation_state))
+        .collect();
+    assert_eq!(
+        requests["first-reserve"],
         ReservationStatusV1::SubmittedUnknown
+    );
+    assert_eq!(
+        requests["gtd-overflow-reserve"],
+        ReservationStatusV1::Released
     );
     assert_eq!(requests["last-reserve"], ReservationStatusV1::Released);
     assert!(shared.registry().frozen_intent("last").is_none());

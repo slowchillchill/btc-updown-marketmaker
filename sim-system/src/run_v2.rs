@@ -2239,6 +2239,28 @@ pub(crate) fn settlement_event_owned_bytes_v2(
     }
 }
 
+/// 当前请求在原事务路径的效果；不描述此前请求或公开时间推进的效果。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RequestEffectV1 {
+    /// 请求构造／注册未成功；此调用没有登记或调度当前请求。
+    NoRequestEffect,
+    /// 原注册归约已接纳，后续提交失败不能保证没有请求效果。
+    MayHaveRequestEffect,
+}
+#[derive(Debug)]
+pub struct RequestFailureV1 {
+    pub error: SimRunActorErrorV2,
+    pub effect: RequestEffectV1,
+}
+impl RequestFailureV1 {
+    pub fn before_request_effect(error: SimRunActorErrorV2) -> Self {
+        Self {
+            error,
+            effect: RequestEffectV1::NoRequestEffect,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct UnpublishedRunArtifactCandidateV2 {
     run_id: String,
@@ -3295,7 +3317,28 @@ impl SimRunActorV2 {
 
     pub(crate) fn commit_group(
         &mut self,
+        inputs: Vec<BusinessInputV2>,
+    ) -> Result<BusinessGroupCommitV2, SimRunActorErrorV2> {
+        self.commit_group_with_request_effect(inputs)
+            .map_err(|failure| failure.error)
+    }
+
+    fn commit_group_with_request_effect(
+        &mut self,
+        inputs: Vec<BusinessInputV2>,
+    ) -> Result<BusinessGroupCommitV2, RequestFailureV1> {
+        let mut request_effect = RequestEffectV1::NoRequestEffect;
+        self.commit_group_inner(inputs, &mut request_effect)
+            .map_err(|error| RequestFailureV1 {
+                error,
+                effect: request_effect,
+            })
+    }
+
+    fn commit_group_inner(
+        &mut self,
         mut inputs: Vec<BusinessInputV2>,
+        request_effect: &mut RequestEffectV1,
     ) -> Result<BusinessGroupCommitV2, SimRunActorErrorV2> {
         self.deliver_pending_projections();
         if self
@@ -3359,6 +3402,12 @@ impl SimRunActorV2 {
                 }
                 Err(BusinessReductionErrorV2::Fatal(error)) => return Err(error),
             };
+            if matches!(
+                input,
+                BusinessInputV2::PublicRequest { .. } | BusinessInputV2::Request { .. }
+            ) {
+                *request_effect = RequestEffectV1::MayHaveRequestEffect;
+            }
             if let BusinessInputV2::PublicGroup(group) = input {
                 group.pm_materials = std::mem::take(&mut next_state.pm_materials);
             }
@@ -19548,25 +19597,24 @@ impl PublicSimExecutionV1 {
         cutoff: TrustedGroupDecisionCutoffV1,
         send_time: Option<TrustedActorExecutionTimeV1>,
         request: BusinessRequestV2,
-    ) -> Result<MutationRequestReceiptV2, SimRunActorErrorV2> {
+    ) -> Result<MutationRequestReceiptV2, RequestFailureV1> {
         if let Some(existing) = existing_mutation_request_receipt_v2(
-            self.actor
-                .state
-                .as_ref()
-                .ok_or(SimRunActorErrorV2::Closed)?,
+            self.actor.state.as_ref().ok_or_else(|| {
+                RequestFailureV1::before_request_effect(SimRunActorErrorV2::Closed)
+            })?,
             &request.context().global_request_id,
         ) {
             return Ok(existing);
         }
-        let mut committed = self
-            .actor
-            .commit_group(vec![BusinessInputV2::PublicRequest {
-                cutoff,
-                send_time,
-                request,
-            }])?;
+        let mut committed =
+            self.actor
+                .commit_group_with_request_effect(vec![BusinessInputV2::PublicRequest {
+                    cutoff,
+                    send_time,
+                    request,
+                }])?;
         if let Some(error) = committed.unaccepted {
-            return Err(error);
+            return Err(RequestFailureV1::before_request_effect(error));
         }
         let Some(CommittedBusinessOutputV2::RequestRegistration(result)) = committed.outputs.pop()
         else {
@@ -20467,24 +20515,33 @@ impl PublicGroupDecisionV1<'_> {
         &mut self,
         request: BusinessRequestV2,
     ) -> Result<MutationRequestReceiptV2, SimRunActorErrorV2> {
+        self.request_with_effect(request)
+            .map_err(|failure| failure.error)
+    }
+    /// 沿原注册事务返回当前请求效果；时间推进失败不代表当前请求已登记。
+    pub fn request_with_effect(
+        &mut self,
+        request: BusinessRequestV2,
+    ) -> Result<MutationRequestReceiptV2, RequestFailureV1> {
         if let Some(clock) = self.paper_clock {
             if let Some(existing) = existing_mutation_request_receipt_v2(
-                self.driver
-                    .execution
-                    .actor
-                    .state
-                    .as_ref()
-                    .ok_or(SimRunActorErrorV2::Closed)?,
+                self.driver.execution.actor.state.as_ref().ok_or_else(|| {
+                    RequestFailureV1::before_request_effect(SimRunActorErrorV2::Closed)
+                })?,
                 &request.context().global_request_id,
             ) {
                 return Ok(existing);
             }
             let now = clock.now_ms();
-            self.driver.advance_before(
-                now,
-                PublicTimeClosureReasonV1::ExecutionClockAdvancedTo(now),
-            )?;
-            self.driver.observe_at(now)?;
+            self.driver
+                .advance_before(
+                    now,
+                    PublicTimeClosureReasonV1::ExecutionClockAdvancedTo(now),
+                )
+                .map_err(RequestFailureV1::before_request_effect)?;
+            self.driver
+                .observe_at(now)
+                .map_err(RequestFailureV1::before_request_effect)?;
             self.send_time = Some(
                 self.driver
                     .last_cutoff

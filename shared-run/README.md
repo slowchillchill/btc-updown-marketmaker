@@ -117,6 +117,6 @@ DPT 的 `valuation_best_bid` 在原来源选择投影内组合直接 BBA 与完�
 
 `ReservedIntentV1` 保留原 `ModelIntentV1`、独立请求上下文和逐资金项 `IntentReserveV1`；消费者须按其获批成本口径列全新增本金／即时费用，并保留原腿 ordinal。`execute_batch_reserved` 复用原 Ledger 整动作预留及 Bridge：整体预留失败零发送，成功后原序提交。取消意图没有新增资金预留。它不修改价格、数量、订单方法、资金政策或模型旧单意图入口。
 
-依据 [D-0271](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5933940873)，同批每意图全局请求 ID 独立；不同意图不能借旧冻结 ID 或已发送预留请求身份冒称正确发送。发送错误返回 `BatchExecutionErrorV1` 的原错误、真实已发送前缀、实际已尝试项和本地释放错误。只有本批新建且明确未发送的预留可释放，当前尝试／未知和旧义务保留；局部本地登记成功但尚未进入 Bridge 的项可按原 Ledger 本地释放事务解除。无自动重试、缩量、改价、NoTrade、平台原子保证或整程序终止。主动 FAK 的先撤／反馈／重算跨观察执行，不能用一批旧快照动作跳过。
+依据 [D-0271](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5933940873)，同批每意图全局请求 ID 独立；不同意图不能借旧冻结 ID 或已发送预留请求身份冒称正确发送。发送错误返回 `BatchExecutionErrorV1` 的原错误、真实已发送前缀、进入 Bridge 的错误项、`failed_request_effect` 和本地释放错误。进入公共函数不等于已产生平台效果：Bridge 构造失败与原注册归约明确未接纳时，返回 `NoRequestEffect`，当前项及后项本批新建占用按原 Ledger 本地释放事务解除；原注册归约已接纳而后续提交返回错误时，返回 `MayHaveRequestEffect`，当前项占用保留。效果信息在原事务接纳点产生，不增加预判校验或错误黑名单；旧单意图和原请求入口只剥离新增错误信息，复用同一实现路径。任何旧义务和已发送／未知义务继续保留，不按传入身份列表无条件释放。无自动重试、缩量、改价、NoTrade、平台原子保证或整程序终止。主动 FAK 的先撤／反馈／重算跨观察执行，不能用一批旧快照动作跳过。
 
 逐成交剩余贡献只是成本解释：原成功 BUY 进入原平均成本池，配平按该侧剩余比例扣减贡献，实际净费仍读原事实；策略若研究费用归属可据此计算，公共接口不批准或强加某种分摊。旧持久市场状态没有该可选索引时读 `Unavailable`，未成功应用读 `NotApplicable`，已全部配平读已知零；贡献不等于赎回后可售持仓。本金配平、净损益、费用返佣政策不变。SIM 全域成本界的单位、证明和限制见 [SIM 买入成本](../sim-system/buy-cost.md)。

@@ -330,6 +330,16 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
         context: RequestContextV2,
         intent: Option<Arc<ModelIntentV1>>,
     ) -> Result<Option<MutationRequestReceiptV2>, SimRunActorErrorV2> {
+        self.execute_with_request_effect(decision, context, intent)
+            .await
+            .map_err(|failure| failure.error)
+    }
+    pub(crate) async fn execute_with_request_effect(
+        &mut self,
+        decision: &mut PublicGroupDecisionV1<'_>,
+        context: RequestContextV2,
+        intent: Option<Arc<ModelIntentV1>>,
+    ) -> Result<Option<MutationRequestReceiptV2>, RequestFailureV1> {
         let Some(intent) = intent else {
             return Ok(None);
         };
@@ -337,7 +347,7 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
             .registry
             .freeze(context.global_request_id.clone(), intent);
         let receipt = intent_bridge::IntentBridge::bind_sim_group(decision)
-            .execute(context, frozen.intent())
+            .execute_with_request_effect(context, frozen.intent())
             .await?;
         self.registry.record_sim_receipt(&frozen, &receipt);
         Ok(Some(receipt))
