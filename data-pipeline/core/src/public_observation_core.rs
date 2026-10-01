@@ -329,6 +329,8 @@ impl std::error::Error for DptCoreErrorV1 {}
 struct AssetProjection {
     tick: ObservedFactV1<ExactDecimal>,
     bba: ObservedFactV1<CanonicalBbaFactV1>,
+    valuation_bba: ObservedFactV1<Option<ExactDecimal>>,
+    valuation_bba_version: Option<crate::pm_reduction::PmL2SelectionVersionV1>,
     trade: ObservedFactV1<PublicTradeV2>,
     book: ObservedFactV1<()>,
 }
@@ -1324,6 +1326,106 @@ impl MarketState {
                 }
                 _ => {}
             }
+            // 直接BBA的最新来源投影只服务派生读取；原模型BBA字段仍保留到达语义。
+            let asset = match &step.change {
+                PmStepChangeV1::BestBidAsk { quote, .. } => Some(&quote.asset),
+                PmStepChangeV1::PublicConfirmation {
+                    asset,
+                    kind: PmConfirmationComponentV1::BestBidAsk,
+                } => Some(asset),
+                _ => None,
+            };
+            if let Some(asset) = asset {
+                let source = &fact.direct_sources[0];
+                let admission = source.collector_admission.as_ref().expect("PM 准入坐标");
+                let version = crate::pm_reduction::PmL2SelectionVersionV1 {
+                    source_sequence_epoch_id: admission.source_sequence_epoch_id.clone(),
+                    source_at_utc_ms: source
+                        .source_event_at_utc_ms
+                        .expect("PM 准备已取得来源时间"),
+                    collector_admission_sequence: admission.collector_admission_sequence,
+                    member_index: step.member_index,
+                };
+                let state = self.assets.get_mut(&asset.token_id.0).unwrap();
+                if state.valuation_bba_version.as_ref().is_none_or(|old| {
+                    old.source_sequence_epoch_id != version.source_sequence_epoch_id
+                        || version.is_at_least(old)
+                }) {
+                    let bid = state
+                        .bba
+                        .value
+                        .as_ref()
+                        .and_then(|q| q.best_bid_pusd_per_share.clone());
+                    state.valuation_bba = observed_pm(bid, step, fact, group, "valuation_best_bid");
+                    state.valuation_bba_version = Some(version);
+                }
+            }
+        }
+    }
+    /// 同截止只读派生；下方数量更新不刷新首档版本，L2缺失不使独立BBA失效。
+    fn valuation_bid(
+        &self,
+        token: &str,
+        bids: &ObservedFactV1<Vec<PriceLevelV1>>,
+    ) -> ObservedFactV1<Option<ExactDecimal>> {
+        let state = &self.assets[token];
+        if bids.quality != MarketDataQuality::Fresh || bids.value.is_none() {
+            return state.valuation_bba.clone();
+        }
+        let baseline = self.pm.assets[token].selection_baseline.as_ref();
+        let selected_at = |price: &ExactDecimal| {
+            self.pm
+                .selected
+                .get(&key(token, BookSide::Bid, d(&price.0)))
+                .into_iter()
+                .chain(baseline)
+                .max_by_key(|s| {
+                    (
+                        s.version.source_at_utc_ms,
+                        s.version.collector_admission_sequence,
+                        s.version.member_index,
+                    )
+                })
+        };
+        let direct = state
+            .valuation_bba_version
+            .as_ref()
+            .filter(|v| self.pm.epoch.as_ref() == Some(&v.source_sequence_epoch_id));
+        let bid = state.valuation_bba.value.as_ref().and_then(|p| p.as_ref());
+        // 点位删除只撤销该直接买价，不能抹除BBA排除了旧更高价的证据。
+        let quote_removed = direct.is_some_and(|v| {
+            bid.is_some_and(|p| {
+                selected_at(p).is_some_and(|s| s.version != *v && s.version.is_at_least(v))
+                    && self.pm.quantity(token, BookSide::Bid, d(&p.0)).is_zero()
+            })
+        });
+        let best = bids
+            .value
+            .as_ref()
+            .unwrap()
+            .iter()
+            .filter(|l| d(&l.quantity_shares.0) > Decimal::ZERO)
+            .find(|l| {
+                direct.is_none_or(|v| {
+                    let newer = selected_at(&l.price_pusd_per_share)
+                        .is_some_and(|s| !v.is_at_least(&s.version));
+                    match bid {
+                        Some(p) if d(&l.price_pusd_per_share.0) <= d(&p.0) => {
+                            quote_removed || (d(&l.price_pusd_per_share.0) == d(&p.0) && newer)
+                        }
+                        _ => newer,
+                    }
+                })
+            })
+            .map(|l| l.price_pusd_per_share.clone());
+        if direct.is_some() && best.is_none() && !quote_removed {
+            return state.valuation_bba.clone();
+        }
+        ObservedFactV1 {
+            value: Some(best),
+            quality: bids.quality,
+            direct_anchors: bids.direct_anchors.clone(),
+            dependency_frontier: bids.dependency_frontier.clone(),
         }
     }
     fn observation(
@@ -1396,11 +1498,14 @@ impl MarketState {
                         dependency_frontier: frontier,
                     }
                 };
+                let bids = side(BookSide::Bid);
+                let valuation_best_bid = self.valuation_bid(token, &bids);
                 AssetBusinessObservationV1 {
                     asset: context.asset.clone(),
-                    bids: side(BookSide::Bid),
+                    bids,
                     asks: side(BookSide::Ask),
                     best_bid_ask: state.bba.clone(),
+                    valuation_best_bid,
                     tick: state.tick.clone(),
                     public_trade: state.trade.clone(),
                 }

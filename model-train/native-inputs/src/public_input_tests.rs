@@ -888,7 +888,8 @@ async fn native_rebates_project_exact_contribution_ratios_and_old_sum() {
             r("25002", "50003")
         };
         assert_eq!(market.rebates[0].paid_pusd, expected);
-        let economics = AccountEconomicsReadV1::from_ledger(&read);
+        let economics =
+            AccountEconomicsReadV2::from_ledger_and_observations(&read, std::iter::empty());
         let mut slots = [0.; 18];
         crate::account::encode_rebates(
             &mut slots,
@@ -912,7 +913,7 @@ async fn native_rebates_project_exact_contribution_ratios_and_old_sum() {
         assert_eq!(market.confirmed_net_pnl_pusd, expected);
         assert_eq!(market.rebates[0].confirmed_unpaid_pusd, r("0", "1"));
     }
-    let economics = AccountEconomicsReadV1::from_ledger(&read);
+    let economics = AccountEconomicsReadV2::from_ledger_and_observations(&read, std::iter::empty());
     let mut slots = [0.; 18];
     crate::account::encode_rebates(
         &mut slots,
@@ -1077,7 +1078,10 @@ async fn old_pairing_is_market_local_before_sum() {
         }
     }
     assert!(shared.apply_closed().unwrap());
-    let read = AccountEconomicsReadV1::from_ledger(&shared.ledger().economic_read().unwrap());
+    let read = AccountEconomicsReadV2::from_ledger_and_observations(
+        &shared.ledger().economic_read().unwrap(),
+        std::iter::empty(),
+    );
     assert_eq!(read.markets.len(), 2);
     for m in &read.markets {
         let side = if m.condition_id.0 == CONDITION_ID {
@@ -1182,4 +1186,252 @@ fn native_execution(
     std::sync::Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>,
 ) {
     execution_with_rules_v4(path, core, policy, None, "e".repeat(64), "100")
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn same_cutoff_orphan_marks_freeze_all_markets_and_encode_true_zero_unknown() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let (core, times) = recorded_nav_marks(&root);
+    let (mut execution, observation, rules) =
+        native_execution(&temp.path().join("sim.jsonl"), &core, SUCCESS_POLICY);
+    let mut ledger =
+        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+    execution
+        .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
+        .unwrap();
+    let mut shared = SharedExecutionV2::from_opening(ledger, observation)
+        .unwrap()
+        .unwrap();
+    let mut native = NativeInputRoot::new(
+        "nav-v2".into(),
+        shared
+            .ledger()
+            .projection_v2()
+            .unwrap()
+            .account_instance_key,
+        -10_000,
+        rules,
+    );
+    let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times).unwrap();
+    let mut driver = FinitePublicConsumptionV1::new(execution, source, "nav-v2".into());
+    for i in 0..8 {
+        driver.next_group().unwrap().unwrap();
+        let group = native.consume(&mut shared, &mut driver).unwrap().unwrap();
+        if i == 0 {
+            for row in &group.rows {
+                assert_eq!(&row.slow[320..323], &[0., 1., 1.]);
+            }
+        }
+    }
+    let no_exposure = shared.action_before(&mut driver).unwrap().unwrap();
+    assert!(matches!(
+        no_exposure.economics().conservative_nav_pusd,
+        ExecutionReadValueV1::Known(_)
+    ));
+    for (id, condition, token) in [
+        ("first", CONDITION_ID, UP_TOKEN_ID),
+        ("second", OTHER_CONDITION_ID, "21"),
+    ] {
+        shared
+            .execute(
+                &mut driver.decision().unwrap(),
+                context(id),
+                Some(Arc::new(ModelIntentV1::SubmitSingleBuy {
+                    condition_id: ConditionId(condition.into()),
+                    order: BuyLegIntentV1 {
+                        token_id: TokenId(token.into()),
+                        order: BuyOrderIntentV1::GtcLimit {
+                            limit_price_pusd_per_share: Decimal::new(6, 1),
+                            size_shares: Decimal::from(10),
+                            post_only: false,
+                        },
+                    },
+                })),
+            )
+            .await
+            .unwrap();
+    }
+    let mut old = None;
+    let mut seen = std::collections::BTreeSet::new();
+    while driver.next_group().unwrap().is_some() {
+        let group = native.consume(&mut shared, &mut driver).unwrap().unwrap();
+        let Some(before) = group.action_before.as_ref() else {
+            continue;
+        };
+        let at = before.cutoff().decision_time().logical_time_utc_ms();
+        let a = before.economics();
+        let known = |v: &ExecutionReadValueV1<ExactRationalV1>| match v {
+            ExecutionReadValueV1::Known(v) => EconomicRational::try_from(v).unwrap(),
+            _ => panic!("{at}: 预期已知"),
+        };
+        if at == 36_000 {
+            assert_eq!(
+                a.markets
+                    .iter()
+                    .filter(|m| m.orphan_shares.iter().any(|s| s.0 == "10"))
+                    .count(),
+                2
+            );
+            assert_eq!(
+                known(&a.conservative_nav_pusd)
+                    .sub(&EconomicRational::try_from(&a.worst_case_maker_nav_pusd).unwrap()),
+                EconomicRational::from_decimal(Decimal::from(8))
+            );
+            old = Some(shared.action_before(&mut driver).unwrap().unwrap());
+            seen.insert(at);
+        } else if [37_000, 38_000, 40_000, 42_000, 66_000, 71_000].contains(&at) {
+            if at == 66_000 {
+                assert_eq!(
+                    driver
+                        .frames()
+                        .iter()
+                        .find(|f| f.observation.market.condition_id.0 == CONDITION_ID)
+                        .unwrap()
+                        .observation
+                        .closed
+                        .value,
+                    Some(true)
+                );
+            }
+            let frozen = old.as_ref().unwrap();
+            let initial = frozen.economics();
+            let legacy =
+                AccountEconomicsReadV1::from_ledger(&shared.ledger().economic_read().unwrap());
+            assert_eq!(
+                a.worst_case_maker_nav_pusd,
+                legacy.worst_case_maker_nav_pusd
+            );
+            assert_eq!(a.cash, initial.cash);
+            if at < 60_000 {
+                assert_eq!(before.ledger(), frozen.ledger(), "报价变化不生成Ledger分录");
+                assert_eq!(a.markets, initial.markets, "持仓/成本/PnL不随报价变动");
+            } // 窗口关闭后的真实返佣成熟仍正常计入，不能被本测试当作报价收益。
+            if at == 71_000 {
+                assert_eq!(a.conservative_nav_pusd, ExecutionReadValueV1::Unavailable);
+                assert_eq!(
+                    a.directional_residual_pusd,
+                    ExecutionReadValueV1::Unavailable
+                );
+                for row in &group.rows {
+                    assert_eq!(&row.slow[314..317], &[0., 0., 1.]);
+                    assert_eq!(&row.slow[320..323], &[0., 0., 1.]);
+                }
+            } else {
+                let mark = EconomicRational::from_decimal(Decimal::from(if at == 40_000 {
+                    4
+                } else if at == 37_000 {
+                    8
+                } else {
+                    9
+                }));
+                assert_eq!(
+                    known(&a.conservative_nav_pusd)
+                        .sub(&EconomicRational::try_from(&legacy.conservative_nav_pusd).unwrap()),
+                    mark
+                );
+                assert_eq!(
+                    known(&a.directional_residual_pusd).sub(
+                        &EconomicRational::try_from(&legacy.directional_residual_pusd).unwrap()
+                    ),
+                    mark
+                );
+                for row in &group.rows {
+                    assert_eq!(&row.slow[315..317], &[1., 1.]);
+                    assert_eq!(&row.slow[321..323], &[1., 1.]);
+                }
+            }
+            // 新报价/缺价不改写最早冻结的8元孤腿标记。
+            assert_eq!(
+                known(&initial.conservative_nav_pusd)
+                    .sub(&EconomicRational::try_from(&initial.worst_case_maker_nav_pusd).unwrap()),
+                EconomicRational::from_decimal(Decimal::from(8))
+            );
+            seen.insert(at);
+            if at == 71_000 {
+                break;
+            } // 本场景验证未判定读取，真实EOF缺终态不冒称CleanRun。
+        }
+    }
+    assert_eq!(
+        seen,
+        [36_000, 37_000, 38_000, 40_000, 42_000, 66_000, 71_000]
+            .into_iter()
+            .collect()
+    );
+    driver.stop_and_drain().unwrap();
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn missing_quote_without_that_market_exposure_does_not_poison_nav() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let (core, times) = recorded_nav_marks(&root);
+    let (mut execution, observation, _) =
+        native_execution(&temp.path().join("sim.jsonl"), &core, SUCCESS_POLICY);
+    let mut ledger =
+        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+    execution
+        .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
+        .unwrap();
+    let mut shared = SharedExecutionV2::from_opening(ledger, observation)
+        .unwrap()
+        .unwrap();
+    let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times).unwrap();
+    let mut driver =
+        FinitePublicConsumptionV1::new(execution, source, "no-unrelated-exposure".into());
+    for _ in 0..8 {
+        driver.next_group().unwrap().unwrap();
+    }
+    shared
+        .execute(
+            &mut driver.decision().unwrap(),
+            context("only-first"),
+            Some(Arc::new(ModelIntentV1::SubmitSingleBuy {
+                condition_id: ConditionId(CONDITION_ID.into()),
+                order: BuyLegIntentV1 {
+                    token_id: TokenId(UP_TOKEN_ID.into()),
+                    order: BuyOrderIntentV1::GtcLimit {
+                        limit_price_pusd_per_share: Decimal::new(6, 1),
+                        size_shares: Decimal::from(10),
+                        post_only: false,
+                    },
+                },
+            })),
+        )
+        .await
+        .unwrap();
+    loop {
+        driver.next_group().unwrap().unwrap();
+        let before = shared.action_before(&mut driver).unwrap().unwrap();
+        let at = before.cutoff().decision_time().logical_time_utc_ms();
+        if at == 40_000 || at == 71_000 {
+            let read = shared.ledger().economic_read().unwrap();
+            let old = AccountEconomicsReadV1::from_ledger(&read);
+            let mark =
+                EconomicRational::from_decimal(Decimal::from(if at == 40_000 { 0 } else { 5 }));
+            assert_eq!(
+                before.economics().conservative_nav_pusd,
+                ExecutionReadValueV1::Known(
+                    EconomicRational::try_from(&old.conservative_nav_pusd)
+                        .unwrap()
+                        .add(&mark)
+                        .public()
+                )
+            );
+            assert_eq!(
+                before.economics().directional_residual_pusd,
+                ExecutionReadValueV1::Known(
+                    EconomicRational::try_from(&old.directional_residual_pusd)
+                        .unwrap()
+                        .add(&mark)
+                        .public()
+                )
+            );
+            if at == 71_000 {
+                break;
+            }
+        }
+    }
+    driver.stop_and_drain().unwrap();
 }

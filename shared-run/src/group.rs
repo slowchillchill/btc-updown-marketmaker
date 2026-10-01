@@ -24,7 +24,7 @@ struct OrderFunds {
 }
 /// 持有同一组必要标量和原Arc引用；后续动作不能改写本组读取。
 pub struct ActionBeforeRead<R> {
-    economics: AccountEconomicsReadV1,
+    economics: AccountEconomicsReadV2,
     pending_noe_record_count: usize,
     cutoff: TrustedGroupDecisionCutoffV1,
     ledger: LedgerProjectionV2,
@@ -37,7 +37,7 @@ impl<R: Clone + std::fmt::Debug + Eq> ActionBeforeRead<R> {
     pub fn pending_noe_record_count(&self) -> usize {
         self.pending_noe_record_count
     }
-    pub fn economics(&self) -> &AccountEconomicsReadV1 {
+    pub fn economics(&self) -> &AccountEconomicsReadV2 {
         &self.economics
     }
     pub fn cutoff(&self) -> &TrustedGroupDecisionCutoffV1 {
@@ -218,12 +218,15 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
         let Some(cutoff) = self.prepare_action_group(driver)? else {
             return Ok(None);
         };
-        Ok(self.freeze_action_before(cutoff))
+        let decision = driver.decision().expect("当前组");
+        let frames = decision.frames();
+        Ok(self.freeze_action_before(cutoff, &frames))
     }
     /// 从当前已应用前缀冻结读取；调用方先显式推进事实及接纳公共组。
     pub fn freeze_action_before(
         &self,
         cutoff: TrustedGroupDecisionCutoffV1,
+        frames: &[PublicObservationFrameV1<'_>],
     ) -> Option<ActionBeforeRead<P::Completion>> {
         let registry = self.registry.action_snapshot();
         let funds = self.ledger.funds_read_v1();
@@ -267,8 +270,9 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
             .collect();
         Some(ActionBeforeRead {
             pending_noe_record_count: self.pending.len(),
-            economics: AccountEconomicsReadV1::from_ledger(
+            economics: AccountEconomicsReadV2::from_ledger_and_observations(
                 &self.ledger.economic_read().expect("同组 Ledger 已开户"),
+                frames.iter().map(|f| f.observation),
             ),
             cutoff,
             ledger,

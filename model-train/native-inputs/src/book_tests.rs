@@ -272,7 +272,7 @@ async fn full_book_three_runtime_and_original_execution() {
     assert_eq!(sample["native_hidden_rows"], 0);
     assert_eq!(sample["hidden_rows"], serde_json::json!([0, 0]));
     let evidence = serde_json::json!({
-        "input_contract_version": "native_inputs_v6", "frames": runtime.frames,
+        "input_contract_version": "native_inputs_v7", "account_economics_version": shared_run::ACCOUNT_ECONOMICS_VERSION, "frames": runtime.frames,
         "context_frames": contexts, "decisions_executed": executed,
         "retire_operations": retired, "side_lengths": lengths,
         "provenance": runtime.provenance(), "final_sample": sample,

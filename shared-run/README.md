@@ -93,3 +93,17 @@ SIM 冷启动材料不再生成场景/市场集合对象摘要，场景文件仅
 SIM 的 CleanRun 完成入口在业务义务闭合、投影排空后执行真实封口，返回运行标识、日志路径和已接纳数量，不再为生成候选而重读日志、市场桶及公共记录或重建整份会话。同步日志数量来自其下一输入序号，后台执行数量来自实际接纳序号。封口过程的实际 I/O 错误仍传播；先前靠这次事后重放发现的日志或来源文件改变，现在只会在后续实际读取时按解析与恢复规则处理。显式 `recover_paper` 与 `recover_sealed_clean_run` 保留旧市场桶恢复能力；它们原本就没有公共组或隐藏桶材料读取入口，本次不增加该能力。完成 API 因此不再接受专供事后重放的材料读取器，持久日志格式不变。
 
 有限测量输出将 `recovery_elapsed_ns` 改为 `finish_or_recovery_elapsed_ns`：CleanRun 分支记录实际完成和封口，RecoverablePaper 分支记录显式恢复。两种运行仍分别汇总，不把封口时间冒称恢复时间；历史测量数值不改写。仅含旧字段的摘要不再作为当前对照输入读取，需要按当前口径重新采集。
+
+## 公共账户估值 v2
+
+当前动作前读取使用 `AccountEconomicsReadV2`（`account_economics_v2`），组合同截止 Ledger 与所有公开市场观察。
+未判定剩余孤腿按对应结果侧有效最佳买价乘份额标记；最优档数量不足不折扣。
+DPT 的 `valuation_best_bid` 在原来源选择投影内组合直接 BBA 与完整 L2：首档本价位及完整快照的实际来源版本决定 L2 候选；其他价位删除不刷新首档，较低候选不能覆盖仍有效的直接买价；直接买价自身的新数量只证明该价位存在，不刷新整项 BBA 的来源版本；本价位缺失只撤销该直接价，不抹除其对旧更高价的排除证据；直接 `best_bid_ask` 字段保持独立。
+有效空买盘为已知零；必要报价未观测或不可用时 Conservative 与 Directional 为 `Unavailable`。
+无相关孤腿暴露不受缺价影响；窗口结束、关闭或模型角色退役本身不使有效价格失效，也没有新增静默 TTL。
+同一 mark 同时进入 Conservative 与 Directional；WCM、四现金、费用、返佣与已确认 PnL 沿原 Ledger。
+配对、正式判定与真实赎回替换原价值；行情重估不产生账本分录。
+
+`action_before`、`freeze_action_before(cutoff, frames)` 及模型直接冻结都使用同截止原组观察；冻结结果后续不可变。
+`AccountEconomicsReadV1::from_ledger` 保留历史判定前零估值版本供历史验收，当前动作读取使用 v2。
+规则及边界依据 [#183](https://github.com/slowchillchill/btc-updown-marketmaker/issues/183)。

@@ -292,6 +292,20 @@ fn assert_settlement_cut(
         if success { "0" } else { "5" }
     );
     let nav = AccountEconomicsReadV1::from_ledger(read);
+    // 正式判定/赎回的当前V2不叠加旧孤腿标记，费用和返佣沿同一原账本。
+    let current = AccountEconomicsReadV2::from_ledger_and_observations(read, std::iter::empty());
+    assert_eq!(
+        current.conservative_nav_pusd,
+        ExecutionReadValueV1::Known(nav.conservative_nav_pusd.clone())
+    );
+    assert_eq!(
+        current.directional_residual_pusd,
+        ExecutionReadValueV1::Known(nav.directional_residual_pusd.clone())
+    );
+    assert_eq!(
+        current.worst_case_maker_nav_pusd,
+        nav.worst_case_maker_nav_pusd
+    );
     assert_eq!(nav.worst_case_maker_nav_pusd, r("24229", "250"));
     assert_eq!(
         nav.directional_residual_pusd,

@@ -9,6 +9,13 @@ pub(crate) fn d(v: &ExactDecimal) -> Value {
 pub(crate) fn q(v: &ExactRationalV1) -> Value {
     Known(rational(v))
 }
+pub(crate) fn qr(v: &ExecutionReadValueV1<ExactRationalV1>) -> Value {
+    match v {
+        Known(v) => q(v),
+        Unavailable => Unavailable,
+        NotApplicable => NotApplicable,
+    }
+}
 pub(crate) fn read(v: &ExecutionReadValueV1<ExactDecimal>) -> Value {
     match v {
         Known(v) => d(v),

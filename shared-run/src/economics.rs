@@ -16,6 +16,82 @@ pub struct AccountEconomicsReadV1 {
     pub other_receivable_pusd: ExactRationalV1,
     pub other_liability_pusd: ExactRationalV1,
 }
+/// best bid 标记语义；V1 保留历史判定前零估值，不用于当前动作读取。
+pub const ACCOUNT_ECONOMICS_VERSION: &str = "account_economics_v2";
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AccountEconomicsReadV2 {
+    pub cash: DualCashReadV1,
+    pub markets: Vec<MarketEconomicsReadV1>,
+    pub conservative_nav_pusd: ExecutionReadValueV1<ExactRationalV1>,
+    pub worst_case_maker_nav_pusd: ExactRationalV1,
+    pub directional_residual_pusd: ExecutionReadValueV1<ExactRationalV1>,
+    pub other_account_residual_pusd: ExactRationalV1,
+    pub other_receivable_pusd: ExactRationalV1,
+    pub other_liability_pusd: ExactRationalV1,
+}
+impl AccountEconomicsReadV2 {
+    pub fn from_ledger_and_observations<'a>(
+        read: &LedgerEconomicReadV1<'_>,
+        observations: impl IntoIterator<Item = &'a contracts::MarketBusinessObservationV1>,
+    ) -> Self {
+        use contracts::ExecutionReadValueV1::{Known, Unavailable};
+        let observations: std::collections::BTreeMap<_, _> = observations
+            .into_iter()
+            .map(|o| (&o.market.condition_id.0, o))
+            .collect();
+        let base = AccountEconomicsReadV1::from_ledger(read);
+        let mut mark = Some(R::zero());
+        for market in &base.markets {
+            if market.settlement_state != ledger::EconomicSettlementStateV1::Unresolved {
+                continue;
+            }
+            for (side, shares) in market.orphan_shares.iter().enumerate() {
+                let shares = amount(shares);
+                if !shares.is_positive() {
+                    continue;
+                }
+                let quote = market
+                    .assets
+                    .as_ref()
+                    .and_then(|assets| assets.get(side))
+                    .and_then(|asset| {
+                        observations
+                            .get(&market.condition_id.0)
+                            .and_then(|o| o.assets.iter().find(|a| a.asset == *asset))
+                    })
+                    .map(|a| &a.valuation_best_bid);
+                let price = quote
+                    .filter(|q| q.quality == contracts::MarketDataQuality::Fresh)
+                    .and_then(|q| q.value.as_ref());
+                match (mark.as_mut(), price) {
+                    (Some(total), Some(price)) => {
+                        *total = total
+                            .add(&shares.mul(&price.as_ref().map(amount).unwrap_or_else(R::zero)))
+                    }
+                    _ => mark = None,
+                }
+            }
+        }
+        let conservative_nav_pusd = mark
+            .as_ref()
+            .map(|m| Known(rational(&base.conservative_nav_pusd).add(m).public()))
+            .unwrap_or(Unavailable);
+        let directional_residual_pusd = mark
+            .as_ref()
+            .map(|m| Known(rational(&base.directional_residual_pusd).add(m).public()))
+            .unwrap_or(Unavailable);
+        Self {
+            cash: base.cash,
+            markets: base.markets,
+            conservative_nav_pusd,
+            worst_case_maker_nav_pusd: base.worst_case_maker_nav_pusd,
+            directional_residual_pusd,
+            other_account_residual_pusd: base.other_account_residual_pusd,
+            other_receivable_pusd: base.other_receivable_pusd,
+            other_liability_pusd: base.other_liability_pusd,
+        }
+    }
+}
 fn amount(value: &ExactDecimal) -> R {
     R::from_decimal(Decimal::from_str_exact(&value.0).expect("Ledger 原精确金额"))
 }

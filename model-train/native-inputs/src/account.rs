@@ -18,7 +18,7 @@ fn status(s: S) -> usize {
     }
 }
 fn esum(
-    read: &shared_run::AccountEconomicsReadV1,
+    read: &shared_run::AccountEconomicsReadV2,
     scope: &[&ConditionId],
     f: impl Fn(&M) -> Value,
 ) -> Value {
@@ -368,17 +368,17 @@ pub(crate) fn encode(
     }
     let a = read.economics();
     for (i, v) in [
-        &a.conservative_nav_pusd,
-        &a.worst_case_maker_nav_pusd,
-        &a.directional_residual_pusd,
-        &a.other_account_residual_pusd,
-        &a.other_receivable_pusd,
-        &a.other_liability_pusd,
+        qr(&a.conservative_nav_pusd),
+        q(&a.worst_case_maker_nav_pusd),
+        qr(&a.directional_residual_pusd),
+        q(&a.other_account_residual_pusd),
+        q(&a.other_receivable_pusd),
+        q(&a.other_liability_pusd),
     ]
     .iter()
     .enumerate()
     {
-        slot(projection, &mut out, 314 + i * 3, q(v));
+        slot(projection, &mut out, 314 + i * 3, v.clone());
     }
     for i in 0..6 {
         slot(
@@ -419,7 +419,7 @@ pub(crate) fn encode(
 pub(crate) fn encode_rebates(
     out: &mut [f32],
     base: usize,
-    read: &shared_run::AccountEconomicsReadV1,
+    read: &shared_run::AccountEconomicsReadV2,
     scope: &[&ConditionId],
     role: usize,
     applicable: bool,
@@ -470,7 +470,7 @@ pub(crate) fn order_ages(orders: &[shared_run::ExecutionOrderReadV2<'_>], now: i
 }
 
 pub(crate) fn paired_shares(
-    read: &shared_run::AccountEconomicsReadV1,
+    read: &shared_run::AccountEconomicsReadV2,
     scope: &[&ConditionId],
 ) -> Value {
     esum(read, scope, |m| d(&m.paired_shares))

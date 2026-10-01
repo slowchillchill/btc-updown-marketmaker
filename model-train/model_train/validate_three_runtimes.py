@@ -124,7 +124,7 @@ def main():
     model=TwoGraphs(config).eval();model.load_state_dict(torch.load(args.graphs/'initial_weights.pt',weights_only=True,map_location='cpu'))
     state=call_ort(session(args.graphs/'state_encoder.onnx',args.threads),STATE_INPUTS)
     action=reference_ort_action(args.graphs,args.threads)
-    stats=dict(input_contract_version='native_inputs_v6', action_contract_version='native_actions_v2',
+    stats=dict(input_contract_version='native_inputs_v7', account_economics_version='account_economics_v2', action_contract_version='native_actions_v2',
         feature_schema_sha256=sha(Path(__file__).resolve().parents[1]/'native-inputs/feature_schema.json'),
         config=config.name,threads=args.threads,comparisons=0,max_absolute_error=0.,cases=len(data['cases']))
     split_records={}

@@ -2052,3 +2052,347 @@ fn old_public_header_ignores_removed_capacity_field_and_new_header_omits_it() {
         header
     );
 }
+
+#[test]
+fn valuation_bid_selects_public_versions_without_rewriting_direct_bba() {
+    let mut core = core();
+    let first = push(&mut core, &meta(0));
+    assert_eq!(
+        up(&first.closed_groups[0].observations[0])
+            .valuation_best_bid
+            .value,
+        None
+    );
+    let full = push(&mut core, &pm(1, 1, 21_000, book("1")));
+    let asset = up(&full.closed_groups[0].observations[0]);
+    assert_eq!(
+        asset.valuation_best_bid.value,
+        Some(Some(ExactDecimal("0.5".into())))
+    );
+    assert!(asset.best_bid_ask.value.is_none(), "FullBook不重写直接BBA");
+    let quote = |bid: Option<&str>| PolymarketOrderbookEvent::BestBidAsk {
+        asset_id: UP_TOKEN_ID.into(),
+        best_bid: bid.map(str::to_owned),
+        best_ask: Some("0.6".into()),
+        spread: None,
+    };
+    let direct = push(&mut core, &pm(2, 2, 23_000, quote(Some("0.4"))));
+    assert_eq!(
+        up(&direct.closed_groups[0].observations[0])
+            .valuation_best_bid
+            .value,
+        Some(Some(ExactDecimal("0.4".into())))
+    );
+    // 旧全簿会改变部分合法L2事实，但不能覆盖更新的报价。
+    let old = push(&mut core, &pm(3, 3, 22_000, book("2")));
+    assert_eq!(
+        up(&old.closed_groups[0].observations[0])
+            .valuation_best_bid
+            .value,
+        Some(Some(ExactDecimal("0.4".into())))
+    );
+    let lower = push(
+        &mut core,
+        &pm(
+            4,
+            4,
+            24_000,
+            PolymarketOrderbookEvent::PriceChange {
+                price_changes: vec![PolymarketPriceChangeEntry {
+                    asset_id: UP_TOKEN_ID.into(),
+                    side: PolymarketSide::Buy,
+                    price: "0.1".into(),
+                    size: Some("3".into()),
+                    best_bid: None,
+                    best_ask: None,
+                }],
+            },
+        ),
+    );
+    assert_eq!(
+        up(&lower.closed_groups[0].observations[0])
+            .valuation_best_bid
+            .value,
+        Some(Some(ExactDecimal("0.4".into())))
+    );
+    let empty = push(&mut core, &pm(5, 5, 25_000, quote(None)));
+    assert_eq!(
+        up(&empty.closed_groups[0].observations[0])
+            .valuation_best_bid
+            .value,
+        Some(None)
+    );
+    let stale = push(&mut core, &pm(6, 6, 24_500, quote(Some("0.5"))));
+    assert_eq!(
+        up(&stale.closed_groups[0].observations[0])
+            .valuation_best_bid
+            .value,
+        Some(None)
+    );
+    // 新代际独立BBA合法，即使完整L2仍Missing。
+    let reset = push(
+        &mut core,
+        &record(
+            7,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row(
+                "epoch-b",
+                1,
+                20_000,
+                25_000,
+                quote(Some("0.4")),
+            ))),
+        ),
+    );
+    let asset = up(&reset.closed_groups[0].observations[0]);
+    assert_eq!(asset.bids.quality, MarketDataQuality::Missing);
+    assert_eq!(asset.valuation_best_bid.quality, MarketDataQuality::Fresh);
+    assert_eq!(
+        asset.valuation_best_bid.value,
+        Some(Some(ExactDecimal("0.4".into())))
+    );
+    // 更新FullBook-only的空买盘替换旧BBA标记，但BBA原字段保持。
+    let mut empty_book = book("1");
+    if let PolymarketOrderbookEvent::Book { bids, .. } = &mut empty_book {
+        bids.clear();
+    }
+    let full_empty = push(
+        &mut core,
+        &record(
+            8,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row(
+                "epoch-b", 2, 26_000, 26_001, empty_book,
+            ))),
+        ),
+    );
+    let asset = up(&full_empty.closed_groups[0].observations[0]);
+    assert_eq!(asset.valuation_best_bid.value, Some(None));
+    assert_eq!(
+        asset
+            .best_bid_ask
+            .value
+            .as_ref()
+            .unwrap()
+            .best_bid_pusd_per_share,
+        Some(ExactDecimal("0.4".into()))
+    );
+    let direct_after_empty = push(
+        &mut core,
+        &record(
+            9,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row(
+                "epoch-b",
+                3,
+                27_000,
+                27_001,
+                quote(Some("0.4")),
+            ))),
+        ),
+    );
+    assert_eq!(
+        up(&direct_after_empty.closed_groups[0].observations[0])
+            .valuation_best_bid
+            .value,
+        Some(Some(ExactDecimal("0.4".into())))
+    );
+    let low_delete = push(
+        &mut core,
+        &record(
+            10,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row(
+                "epoch-b",
+                4,
+                28_000,
+                28_001,
+                PolymarketOrderbookEvent::PriceChange {
+                    price_changes: vec![PolymarketPriceChangeEntry {
+                        asset_id: UP_TOKEN_ID.into(),
+                        side: PolymarketSide::Buy,
+                        price: "0.1".into(),
+                        size: Some("0".into()),
+                        best_bid: None,
+                        best_ask: None,
+                    }],
+                },
+            ))),
+        ),
+    );
+    assert_eq!(
+        up(&low_delete.closed_groups[0].observations[0])
+            .valuation_best_bid
+            .value,
+        Some(Some(ExactDecimal("0.4".into()))),
+        "低价删除不能把旧空盘当成更新的全局无bid证明"
+    );
+    let missing_book = push(
+        &mut core,
+        &record(
+            11,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row(
+                "epoch-c",
+                1,
+                29_000,
+                29_001,
+                PolymarketOrderbookEvent::LastTradePrice {
+                    asset_id: UP_TOKEN_ID.into(),
+                    price: "0.5".into(),
+                    size: None,
+                    side: None,
+                    fee_rate_bps: None,
+                },
+            ))),
+        ),
+    );
+    let asset = up(&missing_book.closed_groups[0].observations[0]);
+    assert_eq!(asset.bids.quality, MarketDataQuality::Missing);
+    assert_eq!(
+        asset.valuation_best_bid.value,
+        Some(Some(ExactDecimal("0.4".into()))),
+        "L2换代不否决正式保留的独立BBA"
+    );
+}
+
+#[test]
+fn unrelated_high_delete_cannot_promote_old_l2_over_new_direct_bid() {
+    let mut core = core();
+    push(&mut core, &meta(0));
+    let mut full = book("1");
+    if let PolymarketOrderbookEvent::Book { bids, .. } = &mut full {
+        bids.push(PolymarketPriceLevel {
+            price: "0.3".into(),
+            size: "1".into(),
+        });
+    }
+    push(&mut core, &pm(1, 1, 21_000, full));
+    push(
+        &mut core,
+        &pm(
+            2,
+            2,
+            23_000,
+            PolymarketOrderbookEvent::BestBidAsk {
+                asset_id: UP_TOKEN_ID.into(),
+                best_bid: Some("0.4".into()),
+                best_ask: Some("0.6".into()),
+                spread: None,
+            },
+        ),
+    );
+    for (position, source, price, size, expected) in [
+        (3, 24_000, "0.9", "0", "0.4"), // 正式Review反例：删除未曾存在的高档不证明首档更新。
+        (4, 25_000, "0.5", "0", "0.4"), // 原L2首档变化，也未撤销独立0.4。
+        (5, 26_000, "0.4", "2", "0.4"), // 本价位有效数量确认保留直接价格。
+        (6, 27_000, "0.4", "0", "0.3"), // 本价位真实删除后采用原L2实际剩余首档。
+        (7, 28_000, "0.55", "1", "0.55"), // 新首档自身的来源版本能支持更新价格。
+    ] {
+        let result = push(
+            &mut core,
+            &pm(
+                position,
+                position,
+                source,
+                PolymarketOrderbookEvent::PriceChange {
+                    price_changes: vec![PolymarketPriceChangeEntry {
+                        asset_id: UP_TOKEN_ID.into(),
+                        price: price.into(),
+                        size: Some(size.into()),
+                        side: PolymarketSide::Buy,
+                        best_bid: None,
+                        best_ask: None,
+                    }],
+                },
+            ),
+        );
+        let asset = up(&result.closed_groups[0].observations[0]);
+        assert_eq!(
+            asset.valuation_best_bid.value,
+            Some(Some(ExactDecimal(expected.into()))),
+            "source {source}"
+        );
+        assert_eq!(
+            asset
+                .best_bid_ask
+                .value
+                .as_ref()
+                .unwrap()
+                .best_bid_pusd_per_share,
+            Some(ExactDecimal("0.4".into())),
+            "不改直接BBA字段"
+        );
+    }
+}
+
+#[test]
+fn lower_quantity_update_cannot_refresh_direct_bid_over_new_high_bid() {
+    for changes in [
+        vec![
+            (3, 24_000, "0.5", "2", "0.5"),
+            (4, 25_000, "0.4", "1", "0.5"), // 正式Review原序列。
+        ],
+        vec![
+            (3, 24_000, "0.4", "0", "0.3"), // 本价位删除不让被BBA排除的旧0.5复活。
+            (4, 25_000, "0.5", "2", "0.5"), // 新的高价本档证据胜过旧直接BBA。
+            (5, 26_000, "0.4", "1", "0.5"), // 低档数量不能刷新整体最优结论。
+        ],
+    ] {
+        let mut core = core();
+        push(&mut core, &meta(0));
+        let mut full = book("1");
+        if let PolymarketOrderbookEvent::Book { bids, .. } = &mut full {
+            bids.push(PolymarketPriceLevel {
+                price: "0.3".into(),
+                size: "1".into(),
+            });
+        }
+        push(&mut core, &pm(1, 1, 21_000, full));
+        push(
+            &mut core,
+            &pm(
+                2,
+                2,
+                23_000,
+                PolymarketOrderbookEvent::BestBidAsk {
+                    asset_id: UP_TOKEN_ID.into(),
+                    best_bid: Some("0.4".into()),
+                    best_ask: Some("0.6".into()),
+                    spread: None,
+                },
+            ),
+        );
+        for (position, source, price, size, expected) in changes {
+            let result = push(
+                &mut core,
+                &pm(
+                    position,
+                    position,
+                    source,
+                    PolymarketOrderbookEvent::PriceChange {
+                        price_changes: vec![PolymarketPriceChangeEntry {
+                            asset_id: UP_TOKEN_ID.into(),
+                            price: price.into(),
+                            size: Some(size.into()),
+                            side: PolymarketSide::Buy,
+                            best_bid: None,
+                            best_ask: None,
+                        }],
+                    },
+                ),
+            );
+            let asset = up(&result.closed_groups[0].observations[0]);
+            assert_eq!(
+                asset.valuation_best_bid.value,
+                Some(Some(ExactDecimal(expected.into()))),
+                "source {source}"
+            );
+            assert_eq!(
+                asset
+                    .best_bid_ask
+                    .value
+                    .as_ref()
+                    .unwrap()
+                    .best_bid_pusd_per_share,
+                Some(ExactDecimal("0.4".into())),
+                "不改直接BBA字段"
+            );
+        }
+    }
+}
