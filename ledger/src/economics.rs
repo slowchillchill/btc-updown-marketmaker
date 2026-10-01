@@ -39,6 +39,9 @@ pub(crate) struct Market {
     pub pools: [Pool; 2],
     pub paired: Decimal,
     pub paired_cost: [R; 2],
+    // 只读成本解释的原成交贡献；旧持久补丁无此索引时保留未知，不猜测历史次序。
+    #[serde(default)]
+    pub pool_contribution_shares: Option<[BTreeMap<Identity, R>; 2]>,
     pub success_quantity: [Decimal; 2],
     pub success_cost: [R; 2],
     pub executed_quantity: [Decimal; 2],
@@ -183,6 +186,14 @@ impl Market {
             .ok_or(LedgerErrorV1::NonEconomicRecord)?;
         let q = decimal(&trade.fact.base_quantity_shares)?;
         let c = R::from_decimal(decimal(&trade.fact.quote_amount_pusd)?);
+        if self.pool_contribution_shares.is_none()
+            && self.success_quantity.iter().all(Decimal::is_zero)
+        {
+            self.pool_contribution_shares = Some(std::array::from_fn(|_| BTreeMap::new()));
+        }
+        if let Some(contributions) = &mut self.pool_contribution_shares {
+            contributions[leg].insert(trade.fact.trade_identity.clone(), R::from_decimal(q));
+        }
         self.success_quantity[leg] = add(self.success_quantity[leg], q)?;
         self.success_cost[leg] = self.success_cost[leg].add(&c);
         let pool = &mut self.pools[leg];
@@ -197,6 +208,14 @@ impl Market {
             });
             self.paired = add(self.paired, quantity)?;
             for (i, cost) in costs.into_iter().enumerate() {
+                if let Some(contributions) = &mut self.pool_contribution_shares {
+                    let remaining_fraction = R::from_decimal(self.pools[i].quantity - quantity)
+                        .divided_by(&R::from_decimal(self.pools[i].quantity));
+                    contributions[i].retain(|_, shares| {
+                        *shares = shares.mul(&remaining_fraction);
+                        !shares.is_zero()
+                    });
+                }
                 self.paired_cost[i] = self.paired_cost[i].add(&cost);
                 self.pools[i].quantity -= quantity;
                 self.pools[i].cost = self.pools[i].cost.sub(&cost);
@@ -816,6 +835,16 @@ pub struct ResidualCashReadV1 {
     pub directional_cash_pusd: ExactDecimal,
     pub other_cash_pusd: ExactDecimal,
 }
+/// 原成交、应用状态和可选成本解释贡献；不将成功观察等同于经济已应用。
+pub struct TradeEconomicReadV1<'a> {
+    pub trade_identity: &'a Identity,
+    pub fact: &'a SourceNeutralTradeLifecycleResultV2<Identity>,
+    pub economic_applied: bool,
+    pub success_applied: bool,
+    pub actual_net_fee_pusd: ExactDecimal,
+    /// 公共平均成本配平后的原成交残余贡献，不是可卖持仓或费用分录。
+    pub unpaired_contribution_shares: ExecutionReadValueV1<ExactRationalV1>,
+}
 pub struct SuccessfulTradeReadV1<'a> {
     pub trade_identity: &'a Identity,
     pub terminal: &'a SourceNeutralTradeLifecycleResultV2<Identity>,
@@ -946,6 +975,35 @@ impl LedgerEconomicReadV1<'_> {
         self.state.costs.values().map(|cost| SettlementCostReadV1 {
             fact: &cost.fact,
             attribution: cost.category,
+        })
+    }
+    pub fn trades(&self) -> impl Iterator<Item = TradeEconomicReadV1<'_>> {
+        self.state.trades.iter().map(|(identity, trade)| {
+            let contribution = if !trade.success_applied {
+                ExecutionReadValueV1::NotApplicable
+            } else {
+                self.state
+                    .markets
+                    .get(&trade.fact.condition_id.0)
+                    .and_then(|m| m.pool_contribution_shares.as_ref())
+                    .map(|pools| {
+                        pools
+                            .iter()
+                            .find_map(|pool| pool.get(identity))
+                            .cloned()
+                            .unwrap_or_else(R::zero)
+                    })
+                    .map(|q| ExecutionReadValueV1::Known(q.public()))
+                    .unwrap_or(ExecutionReadValueV1::Unavailable)
+            };
+            TradeEconomicReadV1 {
+                trade_identity: identity,
+                fact: &trade.fact,
+                economic_applied: trade.economic_applied,
+                success_applied: trade.success_applied,
+                actual_net_fee_pusd: exact(trade.net_fee),
+                unpaired_contribution_shares: contribution,
+            }
         })
     }
     pub fn successful_trades(&self) -> impl Iterator<Item = SuccessfulTradeReadV1<'_>> {

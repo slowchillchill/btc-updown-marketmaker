@@ -1029,6 +1029,25 @@ impl LedgerWriterV1 {
         local_event_identity: &LedgerLocalEventIdentityV1,
         request_identity: &LedgerRequestIdentityV1,
     ) -> Result<LedgerApplyOutcomeV1, LedgerErrorV1> {
+        self.release_local_unsent(local_event_identity, request_identity, false)
+    }
+
+    /// 调用方已确定尚未调用发送；允许释放仅完成本地发送登记的预留。
+    /// 不能用于发送错误或平台结果未知的请求，后者继续沿真实反馈闭合。
+    pub fn release_known_unsent(
+        &mut self,
+        local_event_identity: &LedgerLocalEventIdentityV1,
+        request_identity: &LedgerRequestIdentityV1,
+    ) -> Result<LedgerApplyOutcomeV1, LedgerErrorV1> {
+        self.release_local_unsent(local_event_identity, request_identity, true)
+    }
+
+    fn release_local_unsent(
+        &mut self,
+        local_event_identity: &LedgerLocalEventIdentityV1,
+        request_identity: &LedgerRequestIdentityV1,
+        registered_but_unsent: bool,
+    ) -> Result<LedgerApplyOutcomeV1, LedgerErrorV1> {
         self.account
             .as_ref()
             .ok_or(LedgerErrorV1::AccountNotOpened)?;
@@ -1042,7 +1061,10 @@ impl LedgerWriterV1 {
             });
         }
         let reservation = self.reservation_for_event(request_identity)?.clone();
-        if reservation.status != ReservationStatusV1::ReservedBeforeSend {
+        if reservation.status != ReservationStatusV1::ReservedBeforeSend
+            && !(registered_but_unsent
+                && reservation.status == ReservationStatusV1::SubmittedUnknown)
+        {
             return Ok(LedgerApplyOutcomeV1::AlreadyApplied {
                 ledger_entry_seq: reservation.last_applied_ledger_entry_seq,
             });

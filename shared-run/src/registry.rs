@@ -200,6 +200,10 @@ impl<R: Clone + std::fmt::Debug + Eq> SharedExecutionRegistry<R> {
             cancel_locations,
         }
     }
+    /// 原请求身份已经绑定的不可变意图；供批次边界保持身份与原值一致。
+    pub fn frozen_intent(&self, id: &str) -> Option<&FrozenIntentRefV1> {
+        self.intents.get(id).map(|s| &s.origin)
+    }
     pub fn freeze(&mut self, id: String, intent: Arc<ModelIntentV1>) -> FrozenIntentRefV1 {
         self.intents
             .entry(id.clone())

@@ -1,0 +1,296 @@
+mod common;
+use common::*;
+use contracts::*;
+use ledger::*;
+use rust_decimal::Decimal;
+use shared_run::*;
+use sim_system::{execution::*, public_consumption::*};
+use std::{path::Path, sync::Arc};
+
+type Driver = FinitePublicConsumptionV1<RecordedPublicGroupSourceV1<MemoryRecordedTimes>>;
+fn setup(root: &Path) -> (SharedExecutionV2, Driver) {
+    let dpt = root.join("dpt");
+    let core = recorded_memory_complete(&dpt);
+    let (mut execution, observation, _) = execution_with_rules_v4(
+        &root.join("sim.jsonl"),
+        &core,
+        SUCCESS_POLICY,
+        None,
+        "e".repeat(64),
+        "100",
+    );
+    let mut ledger =
+        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+    execution
+        .bind_ledger_recording_v2(&mut ledger, &root.join("ledger"))
+        .unwrap();
+    let shared = SharedExecutionV2::from_opening(ledger, observation)
+        .unwrap()
+        .unwrap();
+    let source = RecordedPublicGroupSourceV1::open(&dpt, 1, 1 << 20, MemoryRecordedTimes).unwrap();
+    let mut driver = FinitePublicConsumptionV1::new(execution, source, "strategy-test".into());
+    for _ in 0..2 {
+        driver.next_group().unwrap().unwrap();
+    }
+    (shared, driver)
+}
+fn buy(id: &str, principal: u32) -> ReservedIntentV1 {
+    ReservedIntentV1 {
+        context: RequestContextV2 {
+            global_request_id: id.into(),
+            caller_correlation_id: None,
+        },
+        intent: Arc::new(ModelIntentV1::SubmitSingleBuy {
+            condition_id: ConditionId(CONDITION_ID.into()),
+            order: BuyLegIntentV1 {
+                token_id: TokenId(UP_TOKEN_ID.into()),
+                order: BuyOrderIntentV1::GtcLimit {
+                    limit_price_pusd_per_share: Decimal::new(2, 1),
+                    size_shares: Decimal::from(principal * 5),
+                    post_only: true,
+                },
+            },
+        }),
+        reserves: vec![IntentReserveV1 {
+            batch_item_ordinal: 0,
+            reserve: ReserveIntentV1 {
+                request_identity: LedgerRequestIdentityV1(format!("{id}-reserve")),
+                condition_id: ConditionId(CONDITION_ID.into()),
+                requested_principal_pusd: ExactDecimal(principal.to_string()),
+                immediate_fee_reserve_pusd: ExactDecimal("0".into()),
+            },
+        }],
+    }
+}
+#[tokio::test(flavor = "current_thread")]
+async fn batch_insufficiency_sends_nothing_and_never_releases_prior_unknown() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut shared, mut driver) = setup(temp.path());
+    let old = buy("old", 1);
+    let old_receipt = shared
+        .execute_batch_reserved(&mut driver.decision().unwrap(), &[old.clone()])
+        .await
+        .unwrap();
+    let error = shared
+        .execute_batch_reserved(
+            &mut driver.decision().unwrap(),
+            &[old.clone(), buy("large", 100)],
+        )
+        .await
+        .unwrap_err();
+    assert!(matches!(error.error, SharedActionErrorV1::Reservation(_)));
+    assert!(error.sent.is_empty());
+    assert!(error.release_errors.is_empty());
+    let requests: Vec<_> = shared
+        .ledger()
+        .funds_read_v1()
+        .requests()
+        .filter(|r| r.request_identity.0 == "old-reserve")
+        .map(|r| r.reservation_state)
+        .collect();
+    assert_eq!(requests, [ReservationStatusV1::SubmittedUnknown]);
+    let replay = shared
+        .execute_batch_reserved(&mut driver.decision().unwrap(), &[old])
+        .await
+        .unwrap();
+    assert_eq!(replay[0].receipt, old_receipt[0].receipt);
+    assert!(
+        shared.registry().frozen_intent("large").is_none(),
+        "不足批次零Bridge请求"
+    );
+}
+#[tokio::test(flavor = "current_thread")]
+async fn real_send_error_preserves_attempted_prefix_and_releases_only_unsent() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut shared, mut driver) = setup(temp.path());
+    let first = buy("first", 1);
+    let mut bad = buy("second", 2);
+    // 真实请求边界错误，不伪造内部Ledger或订单状态。
+    bad.context.caller_correlation_id = Some(" invalid ".into());
+    let last = buy("last", 3);
+    let error = shared
+        .execute_batch_reserved(&mut driver.decision().unwrap(), &[first, bad, last])
+        .await
+        .unwrap_err();
+    assert_eq!(error.sent.len(), 1);
+    assert_eq!(error.sent[0].context.global_request_id, "first");
+    assert_eq!(error.attempted_intent_index, Some(1));
+    assert!(matches!(
+        error.error,
+        SharedActionErrorV1::Sim(SimRunActorErrorV2::InvalidBusinessRequest(
+            "caller_correlation_id 为空或含首尾空白"
+        ))
+    ));
+    assert!(error.release_errors.is_empty());
+    let requests: std::collections::BTreeMap<_, _> = shared
+        .ledger()
+        .funds_read_v1()
+        .requests()
+        .map(|r| (r.request_identity.0.clone(), r.reservation_state))
+        .collect();
+    assert_eq!(
+        requests["first-reserve"],
+        ReservationStatusV1::SubmittedUnknown
+    );
+    assert_eq!(
+        requests["second-reserve"],
+        ReservationStatusV1::SubmittedUnknown
+    );
+    assert_eq!(requests["last-reserve"], ReservationStatusV1::Released);
+    assert!(shared.registry().frozen_intent("last").is_none());
+}
+#[tokio::test(flavor = "current_thread")]
+async fn duplicate_global_id_cannot_substitute_old_intent_or_release_old_obligations() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut shared, mut driver) = setup(temp.path());
+    let first = buy("same", 1);
+    let mut collision = buy("same", 2);
+    // 第二项不同原意图、但复用第一项预留身份：后项尚未发送不能释放第一项。
+    collision.reserves[0].reserve.request_identity =
+        first.reserves[0].reserve.request_identity.clone();
+    let error = shared
+        .execute_batch_reserved(
+            &mut driver.decision().unwrap(),
+            &[first.clone(), collision.clone(), buy("tail", 3)],
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.sent.len(), 1);
+    assert!(matches!(
+        error.error,
+        SharedActionErrorV1::Sim(SimRunActorErrorV2::InvalidBusinessRequest(_))
+    ));
+    assert_eq!(
+        shared.registry().frozen_intent("same").unwrap().intent(),
+        first.intent.as_ref()
+    );
+    assert_eq!(
+        shared
+            .ledger()
+            .funds_read_v1()
+            .requests()
+            .find(|r| r.request_identity.0 == "same-reserve")
+            .unwrap()
+            .reservation_state,
+        ReservationStatusV1::SubmittedUnknown
+    );
+    // 跨批不同意图同ID，同样不能报告原回执为新意图已发。
+    let error = shared
+        .execute_batch_reserved(&mut driver.decision().unwrap(), &[collision])
+        .await
+        .unwrap_err();
+    assert!(error.sent.is_empty());
+    assert!(error.release_errors.is_empty());
+    // 新global ID同样不能借用已经发送的旧Ledger请求占用。
+    let mut alias = buy("different", 2);
+    alias.reserves[0].reserve.request_identity = first.reserves[0].reserve.request_identity.clone();
+    let error = shared
+        .execute_batch_reserved(&mut driver.decision().unwrap(), &[alias])
+        .await
+        .unwrap_err();
+    assert!(error.sent.is_empty());
+    assert!(error.release_errors.is_empty());
+    assert!(shared.registry().frozen_intent("different").is_none());
+}
+struct Controlled {
+    output: Option<Result<StrategyOutputV1, &'static str>>,
+}
+impl StrategyV1 for Controlled {
+    type Error = &'static str;
+    fn decide(&mut self, _: &StrategyInputV1, _: i64) -> Result<StrategyOutputV1, Self::Error> {
+        self.output.take().unwrap()
+    }
+}
+#[tokio::test(flavor = "current_thread")]
+async fn frozen_strategy_input_explicit_time_empty_error_exit_and_original_amount() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut shared, mut driver) = setup(temp.path());
+    let input = shared.strategy_input(&mut driver).unwrap().unwrap();
+    let old_market = input.markets[0].observation.clone();
+    let old_economics = input.action_before.economics().clone();
+    driver.next_group().unwrap().unwrap();
+    shared.strategy_input(&mut driver).unwrap().unwrap();
+    while driver
+        .decision()
+        .unwrap()
+        .cutoff()
+        .decision_time()
+        .logical_time_utc_ms()
+        < 26_000
+    {
+        driver.next_group().unwrap().unwrap();
+        shared.strategy_input(&mut driver).unwrap();
+    }
+    assert_eq!(input.markets[0].observation, old_market);
+    assert_eq!(input.action_before.economics(), &old_economics);
+    let mut controlled = Controlled {
+        output: Some(Err("calculation-error")),
+    };
+    assert!(matches!(
+        input.calculate(&mut controlled, 22_000),
+        Err("calculation-error")
+    ));
+    controlled.output = Some(Ok(StrategyOutputV1::Continue {
+        intents: vec![],
+        next_evaluation_at_utc_ms: Some(25_000),
+    }));
+    let result = shared
+        .dispatch_strategy(
+            &mut driver.decision().unwrap(),
+            input
+                .calculate(&mut controlled, 22_000)
+                .unwrap()
+                .complete(23_000),
+        )
+        .await
+        .unwrap();
+    assert!(matches!(result,StrategyDispatchV1::Continue {receipts,..} if receipts.is_empty()));
+    assert_eq!(shared.registry().all_commitments().count(), 0);
+    controlled.output = Some(Ok(StrategyOutputV1::Exit));
+    assert!(matches!(
+        shared
+            .dispatch_strategy(
+                &mut driver.decision().unwrap(),
+                input
+                    .calculate(&mut controlled, 22_000)
+                    .unwrap()
+                    .complete(23_000)
+            )
+            .await
+            .unwrap(),
+        StrategyDispatchV1::Exit { .. }
+    ));
+    assert_eq!(input.action_before.cutoff().private_feedback_sequence(), 0);
+    let mut item = buy("amount", 1);
+    item.intent = Arc::new(ModelIntentV1::SubmitSingleBuy {
+        condition_id: ConditionId(CONDITION_ID.into()),
+        order: BuyLegIntentV1 {
+            token_id: TokenId(UP_TOKEN_ID.into()),
+            order: BuyOrderIntentV1::FakMarket {
+                spend_pusd: Decimal::new(1_000_001, 6),
+                worst_price_pusd_per_share: Decimal::new(6, 1),
+            },
+        },
+    });
+    item.reserves[0].reserve.requested_principal_pusd = ExactDecimal("1.000001".into());
+    shared
+        .execute_batch_reserved(&mut driver.decision().unwrap(), &[item.clone()])
+        .await
+        .unwrap();
+    assert_eq!(
+        shared.registry().frozen_intent("amount").unwrap().intent(),
+        item.intent.as_ref(),
+        "非q=n/100金额保持原值"
+    );
+    let mut saw_new_trade = false;
+    while driver.next_group().unwrap().is_some() {
+        let fresh = shared.strategy_input(&mut driver).unwrap().unwrap();
+        if !fresh.trade_economics.is_empty() {
+            saw_new_trade = true;
+            break;
+        }
+    }
+    assert!(saw_new_trade, "真实后续成交进入新策略冻结明细");
+    assert!(input.trade_economics.is_empty(), "旧明细不倒填后续事实");
+    assert_eq!(input.action_before.economics(), &old_economics);
+}

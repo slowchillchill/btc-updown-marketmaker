@@ -77,6 +77,8 @@ async fn market_estimate_does_not_cap_arrival_fee_and_original_cash_recovers_onc
                 &ExactDecimal("0.01".into()),
             )
             .unwrap();
+        let bounds = rules.sim_market_buy_bounds_v1(Decimal::from(90)).unwrap();
+        assert_eq!(bounds.maximum_fee_1e5_units, BigUint::from(2_520_000_u32));
         // 100*.07*.9*.1=.63；到达后90/.1=900，900*.07*.1*.9=5.67。
         assert_eq!(estimate.fee_1e5_units, BigUint::from(63_000_u32));
         let context_reference = observation
@@ -200,6 +202,24 @@ async fn market_estimate_does_not_cap_arrival_fee_and_original_cash_recovers_onc
             "旧模型读取不倒填实际成交"
         );
         let read = shared.ledger().economic_read().unwrap();
+        for trade in read.trades() {
+            let fee: Decimal = trade.actual_net_fee_pusd.0.parse().unwrap();
+            assert!(
+                fee * Decimal::from(100_000)
+                    <= bounds
+                        .maximum_fee_1e5_units
+                        .to_string()
+                        .parse::<Decimal>()
+                        .unwrap()
+            );
+            if trade.success_applied {
+                assert!(trade.economic_applied);
+                assert!(matches!(
+                    trade.unpaired_contribution_shares,
+                    ExecutionReadValueV1::Known(_)
+                ));
+            }
+        }
         let market = read
             .market_totals()
             .find(|m| m.condition_id.0 == CONDITION_ID);

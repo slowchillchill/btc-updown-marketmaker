@@ -122,6 +122,13 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
     ) -> Result<LedgerApplyOutcomeV1, LedgerErrorV1> {
         self.ledger.record_submission_started(event, request, item)
     }
+    pub(crate) fn release_known_unsent(
+        &mut self,
+        event: &LedgerLocalEventIdentityV1,
+        request: &LedgerRequestIdentityV1,
+    ) -> Result<LedgerApplyOutcomeV1, LedgerErrorV1> {
+        self.ledger.release_known_unsent(event, request)
+    }
     pub fn ledger(&self) -> &LedgerWriterV1 {
         &self.ledger
     }

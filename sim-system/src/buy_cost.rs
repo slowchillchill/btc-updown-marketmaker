@@ -25,7 +25,42 @@ pub struct MarketFeeEstimateV1 {
     pub fee_1e5_units: BigUint,
 }
 
+/// 原 SIM 金额撮合域的保守界；份额以微份整数表示，费用以五位金额单位表示。
+/// 不使用当前盘口或 tick 作最低价格，不承诺 LIVE 或具体风险参数下存在可行金额。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SimMarketBuyBoundsV1 {
+    pub principal_micro: BigUint,
+    pub maximum_base_micro: BigUint,
+    pub maximum_fee_1e5_units: BigUint,
+}
+
 impl SealedProcessRuleSnapshotV3 {
+    /// 所有原核接纳价格 0<p<1、金额目标和合法部分段；证明见买入成本文档。
+    /// 每段正本金及两次 floor 误差给出 delta_base < 4*delta_quote/p。
+    /// Decimal 最小正价格为 10^-28；指数>=1时费用可直接以 4*spend*rate 约束。
+    pub fn sim_market_buy_bounds_v1(
+        &self,
+        spend_pusd: Decimal,
+    ) -> Result<SimMarketBuyBoundsV1, MatchingMathErrorV1> {
+        let spend = nonnegative_decimal_ratio(spend_pusd)?;
+        let principal_micro = &spend.numerator * BigUint::from(1_000_000_u32) / &spend.denominator;
+        let maximum_base_micro =
+            &principal_micro * BigUint::from(4_u8) * BigUint::from(10_u8).pow(28);
+        let schedule = &self.snapshot().synchronized_platform_rules.fee_schedule;
+        let rate = nonnegative_decimal_ratio(schedule.rate.value())?;
+        // 原封存规则已保证 exponent>=1（平台加载与历史校验的既有条件）。
+        let fee_base = &principal_micro * BigUint::from(4_u8);
+        let total = crate::matching::ExactRatioV1 {
+            numerator: fee_base * rate.numerator,
+            denominator: BigUint::from(1_000_000_u32) * rate.denominator,
+        };
+        Ok(SimMarketBuyBoundsV1 {
+            principal_micro,
+            maximum_base_micro,
+            maximum_fee_1e5_units: rounded_fee_units_v1(&total),
+        })
+    }
+
     /// 按同一冻结费表计算 H5(q*r*[p*(1-p)]^e)，只供模型参考。
     /// 调用方沿原数量、价格和 SDK 编码域；本方法不判断支持集或改变本金。
     pub fn market_buy_fee_estimate_v1(
@@ -118,6 +153,22 @@ mod tests {
     use crate::platform_rules::tests::{
         snapshot_v3_with_fee_for_cost_tests, successful_snapshot_v3_for_sim_tests,
     };
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn amount_bounds_keep_large_valid_rule_and_decimal_domain_exact() {
+        let rules =
+            snapshot_v3_with_fee_for_cost_tests("79228162514264337593543950335", u32::MAX).await;
+        let bounds = rules.sim_market_buy_bounds_v1(Decimal::MAX).unwrap();
+        assert!(bounds.maximum_base_micro > BigUint::from(u128::MAX));
+        assert!(bounds.maximum_fee_1e5_units > BigUint::from(u128::MAX));
+        assert_eq!(
+            rules
+                .sim_market_buy_bounds_v1(Decimal::ZERO)
+                .unwrap()
+                .maximum_base_micro,
+            BigUint::zero()
+        );
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn limit_cost_branches_round_each_order_and_preserve_snapshot() {
