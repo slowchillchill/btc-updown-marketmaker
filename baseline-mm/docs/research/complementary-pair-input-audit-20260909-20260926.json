@@ -1,0 +1,3339 @@
+{
+  "admission_entry": "validate_public_source_daily_manifest_admission_v1",
+  "audit_source_sha256": "315f3e128010e49eec4357bd1bc68b596574e5156b427be24b5f798b38d61436",
+  "days": [
+    {
+      "admission": {
+        "manifest_sha256": "93a70f4775bdb3d52bf7de73d58caaa5ccbf2f2d7f6a8e2f00e09c092e1f1918",
+        "status": "admitted",
+        "utc_day": "2026-09-09",
+        "verified_bytes": 2169975828,
+        "verified_files": 145,
+        "verified_rows": 34766440
+      },
+      "declared": {
+        "bytes": 2169975828,
+        "closure_reason": "utc_day_barrier",
+        "coverage": {
+          "ended_utc_ms": 1788998400000,
+          "first_started_utc_ms": 1788912000000,
+          "last_started_utc_ms": 1788912000000,
+          "reactivated_within_day": false,
+          "schema_version": "data_collect_collection_day_coverage_v1",
+          "state": "ended_known"
+        },
+        "files": 145,
+        "gaps_count": 0,
+        "manifest_sha256": "93a70f4775bdb3d52bf7de73d58caaa5ccbf2f2d7f6a8e2f00e09c092e1f1918",
+        "rows": 34766440,
+        "schemas": [
+          [
+            "binance_aggtrade",
+            "binance_aggtrade_v7"
+          ],
+          [
+            "binance_depth_snapshot",
+            "binance_depth_snapshot_v3"
+          ],
+          [
+            "binance_depth_update",
+            "binance_depth_update_v4"
+          ],
+          [
+            "polymarket_market",
+            "polymarket_orderbook_v3"
+          ],
+          [
+            "polymarket_market_metadata",
+            "polymarket_market_metadata_v6"
+          ],
+          [
+            "polymarket_rtds_chainlink_btc_usd",
+            "polymarket_rtds_chainlink_btc_usd_v4"
+          ],
+          [
+            "polymarket_rtds_chainlink_twap",
+            "polymarket_rtds_chainlink_twap_v1"
+          ]
+        ],
+        "source_counters": {
+          "binance_aggtrade": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "aggTrade": 861174
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1788912002229,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1788998399749,
+            "reconnect_events": 0,
+            "rows": 861174,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 861174
+          },
+          "binance_depth_snapshot": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_snapshot": 1
+            },
+            "files": 1,
+            "first_recv_time_utc_ms": 1788912002459,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1788912002459,
+            "reconnect_events": 0,
+            "rows": 1,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 1
+          },
+          "binance_depth_update": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_update": 863670
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1788912002231,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1788998399914,
+            "reconnect_events": 0,
+            "rows": 863670,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 863670
+          },
+          "polymarket_market": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "best_bid_ask": 1216063,
+              "book": 941786,
+              "last_trade_price": 447977,
+              "market_resolved": 238,
+              "price_change": 30262937,
+              "tick_size_change": 260
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1788912000023,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1788998399997,
+            "reconnect_events": 0,
+            "rows": 32869261,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 32869261
+          },
+          "polymarket_market_metadata": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "market_anchor_rule_update": 17856,
+              "market_state_transition": 576,
+              "metadata_snapshot": 288,
+              "resolution_followup_summary": 50,
+              "resolution_poll_attempt": 318,
+              "resolution_terminal_ws": 238
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1788912000008,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1788998390766,
+            "reconnect_events": 0,
+            "rows": 19326,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 19326
+          },
+          "polymarket_rtds_chainlink_btc_usd": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 76905
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1788912002228,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1788998399737,
+            "reconnect_events": 11,
+            "rows": 76905,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 76905
+          },
+          "polymarket_rtds_chainlink_twap": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 76103
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1788912002228,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1788998399938,
+            "reconnect_events": 11,
+            "rows": 76103,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 76103
+          }
+        }
+      },
+      "io": {
+        "rchar": 2749104543,
+        "read_bytes": 2170249216,
+        "syscr": 34011
+      },
+      "manifest_logical_path": "2026-09-09/typed_raw/utc_day=2026-09-09/manifest.json",
+      "peak_rss_kib": 165252,
+      "purpose": "research",
+      "utc_day": "2026-09-09",
+      "wall_seconds": 2.540590415
+    },
+    {
+      "admission": {
+        "manifest_sha256": "a940cc15d039efd2a2555f8da30958ea6b381cc24574477dbd8c93d33a240a60",
+        "status": "admitted",
+        "utc_day": "2026-09-10",
+        "verified_bytes": 2102161414,
+        "verified_files": 166,
+        "verified_rows": 33880107
+      },
+      "declared": {
+        "bytes": 2102161414,
+        "closure_reason": "utc_day_barrier",
+        "coverage": {
+          "ended_utc_ms": 1789084800000,
+          "first_started_utc_ms": 1788998400000,
+          "last_started_utc_ms": 1789002405436,
+          "reactivated_within_day": true,
+          "schema_version": "data_collect_collection_day_coverage_v1",
+          "state": "ended_known"
+        },
+        "files": 166,
+        "gaps_count": 17,
+        "manifest_sha256": "a940cc15d039efd2a2555f8da30958ea6b381cc24574477dbd8c93d33a240a60",
+        "rows": 33880107,
+        "schemas": [
+          [
+            "binance_aggtrade",
+            "binance_aggtrade_v7"
+          ],
+          [
+            "binance_depth_snapshot",
+            "binance_depth_snapshot_v3"
+          ],
+          [
+            "binance_depth_update",
+            "binance_depth_update_v4"
+          ],
+          [
+            "polymarket_market",
+            "polymarket_orderbook_v3"
+          ],
+          [
+            "polymarket_market_metadata",
+            "polymarket_market_metadata_v6"
+          ],
+          [
+            "polymarket_rtds_chainlink_btc_usd",
+            "polymarket_rtds_chainlink_btc_usd_v4"
+          ],
+          [
+            "polymarket_rtds_chainlink_twap",
+            "polymarket_rtds_chainlink_twap_v1"
+          ]
+        ],
+        "source_counters": {
+          "binance_aggtrade": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "aggTrade": 813863
+            },
+            "files": 27,
+            "first_recv_time_utc_ms": 1788998403377,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789084799650,
+            "reconnect_events": 0,
+            "rows": 813863,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 813863
+          },
+          "binance_depth_snapshot": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_snapshot": 4
+            },
+            "files": 4,
+            "first_recv_time_utc_ms": 1788998403609,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789002407253,
+            "reconnect_events": 0,
+            "rows": 4,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 4
+          },
+          "binance_depth_update": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_update": 853502
+            },
+            "files": 27,
+            "first_recv_time_utc_ms": 1788998400015,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789084799913,
+            "reconnect_events": 0,
+            "rows": 853502,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 853502
+          },
+          "polymarket_market": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "best_bid_ask": 1129552,
+              "book": 865540,
+              "last_trade_price": 408009,
+              "market_resolved": 281,
+              "price_change": 29629743,
+              "tick_size_change": 268
+            },
+            "files": 27,
+            "first_recv_time_utc_ms": 1788998400019,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789084799995,
+            "reconnect_events": 2,
+            "rows": 32033393,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 32033393
+          },
+          "polymarket_market_metadata": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "market_anchor_rule_update": 17656,
+              "market_state_transition": 570,
+              "metadata_snapshot": 291,
+              "resolution_followup_summary": 4,
+              "resolution_poll_attempt": 56,
+              "resolution_terminal_ws": 281
+            },
+            "files": 27,
+            "first_recv_time_utc_ms": 1788998400016,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789084790818,
+            "reconnect_events": 0,
+            "rows": 18858,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 18858
+          },
+          "polymarket_rtds_chainlink_btc_usd": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 80242
+            },
+            "files": 27,
+            "first_recv_time_utc_ms": 1788998403377,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789084799271,
+            "reconnect_events": 10,
+            "rows": 80242,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 80242
+          },
+          "polymarket_rtds_chainlink_twap": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 80245
+            },
+            "files": 27,
+            "first_recv_time_utc_ms": 1788998403377,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789084799326,
+            "reconnect_events": 10,
+            "rows": 80245,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 80245
+          }
+        }
+      },
+      "io": {
+        "rchar": 2666507944,
+        "read_bytes": 2044600320,
+        "syscr": 33079
+      },
+      "manifest_logical_path": "2026-09-10/typed_raw/utc_day=2026-09-10/manifest.json",
+      "peak_rss_kib": 199116,
+      "purpose": "research",
+      "utc_day": "2026-09-10",
+      "wall_seconds": 2.393912641
+    },
+    {
+      "admission": {
+        "manifest_sha256": "4cb535f1baa9a15d4bb1115020309c5c09edec119e49ef35a0b0400a28c2c975",
+        "status": "admitted",
+        "utc_day": "2026-09-11",
+        "verified_bytes": 2205427289,
+        "verified_files": 166,
+        "verified_rows": 35628921
+      },
+      "declared": {
+        "bytes": 2205427289,
+        "closure_reason": "utc_day_barrier",
+        "coverage": {
+          "ended_utc_ms": 1789171200000,
+          "first_started_utc_ms": 1789084800000,
+          "last_started_utc_ms": 1789109554379,
+          "reactivated_within_day": true,
+          "schema_version": "data_collect_collection_day_coverage_v1",
+          "state": "ended_known"
+        },
+        "files": 166,
+        "gaps_count": 15,
+        "manifest_sha256": "4cb535f1baa9a15d4bb1115020309c5c09edec119e49ef35a0b0400a28c2c975",
+        "rows": 35628921,
+        "schemas": [
+          [
+            "binance_aggtrade",
+            "binance_aggtrade_v7"
+          ],
+          [
+            "binance_depth_snapshot",
+            "binance_depth_snapshot_v3"
+          ],
+          [
+            "binance_depth_update",
+            "binance_depth_update_v4"
+          ],
+          [
+            "polymarket_market",
+            "polymarket_orderbook_v3"
+          ],
+          [
+            "polymarket_market_metadata",
+            "polymarket_market_metadata_v6"
+          ],
+          [
+            "polymarket_rtds_chainlink_btc_usd",
+            "polymarket_rtds_chainlink_btc_usd_v4"
+          ],
+          [
+            "polymarket_rtds_chainlink_twap",
+            "polymarket_rtds_chainlink_twap_v1"
+          ]
+        ],
+        "source_counters": {
+          "binance_aggtrade": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "aggTrade": 1080105
+            },
+            "files": 27,
+            "first_recv_time_utc_ms": 1789084804410,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789171199603,
+            "reconnect_events": 0,
+            "rows": 1080105,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 1080105
+          },
+          "binance_depth_snapshot": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_snapshot": 4
+            },
+            "files": 4,
+            "first_recv_time_utc_ms": 1789084804648,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789109555802,
+            "reconnect_events": 0,
+            "rows": 4,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 4
+          },
+          "binance_depth_update": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_update": 853396
+            },
+            "files": 27,
+            "first_recv_time_utc_ms": 1789084804415,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789171199913,
+            "reconnect_events": 0,
+            "rows": 853396,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 853396
+          },
+          "polymarket_market": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "best_bid_ask": 1145392,
+              "book": 879450,
+              "last_trade_price": 413360,
+              "market_resolved": 282,
+              "price_change": 31073012,
+              "tick_size_change": 224
+            },
+            "files": 27,
+            "first_recv_time_utc_ms": 1789084800021,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789171199998,
+            "reconnect_events": 1,
+            "rows": 33511720,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 33511720
+          },
+          "polymarket_market_metadata": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "market_anchor_rule_update": 17652,
+              "market_state_transition": 570,
+              "metadata_snapshot": 291,
+              "resolution_poll_attempt": 23,
+              "resolution_terminal_ws": 282
+            },
+            "files": 27,
+            "first_recv_time_utc_ms": 1789084800009,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789171190672,
+            "reconnect_events": 0,
+            "rows": 18818,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 18818
+          },
+          "polymarket_rtds_chainlink_btc_usd": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 82444
+            },
+            "files": 27,
+            "first_recv_time_utc_ms": 1789084804409,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789171198526,
+            "reconnect_events": 11,
+            "rows": 82444,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 82444
+          },
+          "polymarket_rtds_chainlink_twap": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 82434
+            },
+            "files": 27,
+            "first_recv_time_utc_ms": 1789084804408,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789171198787,
+            "reconnect_events": 11,
+            "rows": 82434,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 82434
+          }
+        }
+      },
+      "io": {
+        "rchar": 2795632149,
+        "read_bytes": 2205872128,
+        "syscr": 34661
+      },
+      "manifest_logical_path": "2026-09-11/typed_raw/utc_day=2026-09-11/manifest.json",
+      "peak_rss_kib": 204620,
+      "purpose": "research",
+      "utc_day": "2026-09-11",
+      "wall_seconds": 2.482812815
+    },
+    {
+      "admission": {
+        "manifest_sha256": "e204a795061341ffae961795307892bfdc785d186a99d56de75cfafad64385af",
+        "status": "admitted",
+        "utc_day": "2026-09-12",
+        "verified_bytes": 1544553889,
+        "verified_files": 194,
+        "verified_rows": 25744186
+      },
+      "declared": {
+        "bytes": 1544553889,
+        "closure_reason": "utc_day_barrier",
+        "coverage": {
+          "ended_utc_ms": 1789257600000,
+          "first_started_utc_ms": 1789171200000,
+          "last_started_utc_ms": 1789246774096,
+          "reactivated_within_day": true,
+          "schema_version": "data_collect_collection_day_coverage_v1",
+          "state": "ended_known"
+        },
+        "files": 194,
+        "gaps_count": 36,
+        "manifest_sha256": "e204a795061341ffae961795307892bfdc785d186a99d56de75cfafad64385af",
+        "rows": 25744186,
+        "schemas": [
+          [
+            "binance_aggtrade",
+            "binance_aggtrade_v7"
+          ],
+          [
+            "binance_depth_snapshot",
+            "binance_depth_snapshot_v3"
+          ],
+          [
+            "binance_depth_update",
+            "binance_depth_update_v4"
+          ],
+          [
+            "polymarket_market",
+            "polymarket_orderbook_v3"
+          ],
+          [
+            "polymarket_market_metadata",
+            "polymarket_market_metadata_v6"
+          ],
+          [
+            "polymarket_rtds_chainlink_btc_usd",
+            "polymarket_rtds_chainlink_btc_usd_v4"
+          ],
+          [
+            "polymarket_rtds_chainlink_twap",
+            "polymarket_rtds_chainlink_twap_v1"
+          ]
+        ],
+        "source_counters": {
+          "binance_aggtrade": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "aggTrade": 266698
+            },
+            "files": 31,
+            "first_recv_time_utc_ms": 1789171202327,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789257599626,
+            "reconnect_events": 0,
+            "rows": 266698,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 266698
+          },
+          "binance_depth_snapshot": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_snapshot": 8
+            },
+            "files": 8,
+            "first_recv_time_utc_ms": 1789171202561,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789246775532,
+            "reconnect_events": 0,
+            "rows": 8,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 8
+          },
+          "binance_depth_update": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_update": 836471
+            },
+            "files": 31,
+            "first_recv_time_utc_ms": 1789171202329,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789257599917,
+            "reconnect_events": 0,
+            "rows": 836471,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 836471
+          },
+          "polymarket_market": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "best_bid_ask": 1016400,
+              "book": 776682,
+              "last_trade_price": 363401,
+              "market_resolved": 279,
+              "price_change": 22302585,
+              "tick_size_change": 200
+            },
+            "files": 31,
+            "first_recv_time_utc_ms": 1789171200012,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789257599984,
+            "reconnect_events": 2,
+            "rows": 24459547,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 24459547
+          },
+          "polymarket_market_metadata": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "market_anchor_rule_update": 17322,
+              "market_state_transition": 561,
+              "metadata_snapshot": 293,
+              "resolution_poll_attempt": 31,
+              "resolution_terminal_ws": 279
+            },
+            "files": 31,
+            "first_recv_time_utc_ms": 1789171200012,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789257590904,
+            "reconnect_events": 0,
+            "rows": 18486,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 18486
+          },
+          "polymarket_rtds_chainlink_btc_usd": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 81497
+            },
+            "files": 31,
+            "first_recv_time_utc_ms": 1789171202327,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789257599434,
+            "reconnect_events": 10,
+            "rows": 81497,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 81497
+          },
+          "polymarket_rtds_chainlink_twap": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 81479
+            },
+            "files": 31,
+            "first_recv_time_utc_ms": 1789171202327,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789257599706,
+            "reconnect_events": 10,
+            "rows": 81479,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 81479
+          }
+        }
+      },
+      "io": {
+        "rchar": 1976221033,
+        "read_bytes": 1544957952,
+        "syscr": 24687
+      },
+      "manifest_logical_path": "2026-09-12/typed_raw/utc_day=2026-09-12/manifest.json",
+      "peak_rss_kib": 204620,
+      "purpose": "research",
+      "utc_day": "2026-09-12",
+      "wall_seconds": 1.783398299
+    },
+    {
+      "admission": {
+        "manifest_sha256": "c9b6a352a7856419b73fbb1c53be9762ef88d9994779fe4e81b544637472a131",
+        "status": "admitted",
+        "utc_day": "2026-09-13",
+        "verified_bytes": 1609521911,
+        "verified_files": 215,
+        "verified_rows": 26519877
+      },
+      "declared": {
+        "bytes": 1609521911,
+        "closure_reason": "utc_day_barrier",
+        "coverage": {
+          "ended_utc_ms": 1789344000000,
+          "first_started_utc_ms": 1789257600000,
+          "last_started_utc_ms": 1789342530620,
+          "reactivated_within_day": true,
+          "schema_version": "data_collect_collection_day_coverage_v1",
+          "state": "ended_known"
+        },
+        "files": 215,
+        "gaps_count": 57,
+        "manifest_sha256": "c9b6a352a7856419b73fbb1c53be9762ef88d9994779fe4e81b544637472a131",
+        "rows": 26519877,
+        "schemas": [
+          [
+            "binance_aggtrade",
+            "binance_aggtrade_v7"
+          ],
+          [
+            "binance_depth_snapshot",
+            "binance_depth_snapshot_v3"
+          ],
+          [
+            "binance_depth_update",
+            "binance_depth_update_v4"
+          ],
+          [
+            "polymarket_market",
+            "polymarket_orderbook_v3"
+          ],
+          [
+            "polymarket_market_metadata",
+            "polymarket_market_metadata_v6"
+          ],
+          [
+            "polymarket_rtds_chainlink_btc_usd",
+            "polymarket_rtds_chainlink_btc_usd_v4"
+          ],
+          [
+            "polymarket_rtds_chainlink_twap",
+            "polymarket_rtds_chainlink_twap_v1"
+          ]
+        ],
+        "source_counters": {
+          "binance_aggtrade": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "aggTrade": 371385
+            },
+            "files": 34,
+            "first_recv_time_utc_ms": 1789257602949,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789343996150,
+            "reconnect_events": 0,
+            "rows": 371385,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 371385
+          },
+          "binance_depth_snapshot": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_snapshot": 11
+            },
+            "files": 11,
+            "first_recv_time_utc_ms": 1789257603222,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789342532050,
+            "reconnect_events": 0,
+            "rows": 11,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 11
+          },
+          "binance_depth_update": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_update": 827713
+            },
+            "files": 34,
+            "first_recv_time_utc_ms": 1789257602961,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789343999914,
+            "reconnect_events": 0,
+            "rows": 827713,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 827713
+          },
+          "polymarket_market": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "best_bid_ask": 955150,
+              "book": 678431,
+              "last_trade_price": 321208,
+              "market_resolved": 273,
+              "price_change": 23187706,
+              "tick_size_change": 252
+            },
+            "files": 34,
+            "first_recv_time_utc_ms": 1789257600030,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789343999986,
+            "reconnect_events": 0,
+            "rows": 25143020,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 25143020
+          },
+          "polymarket_market_metadata": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "market_anchor_rule_update": 17156,
+              "market_state_transition": 554,
+              "metadata_snapshot": 294,
+              "resolution_poll_attempt": 55,
+              "resolution_terminal_ws": 273
+            },
+            "files": 34,
+            "first_recv_time_utc_ms": 1789257600030,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789343990820,
+            "reconnect_events": 0,
+            "rows": 18332,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 18332
+          },
+          "polymarket_rtds_chainlink_btc_usd": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 79705
+            },
+            "files": 34,
+            "first_recv_time_utc_ms": 1789257602961,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789343999695,
+            "reconnect_events": 7,
+            "rows": 79705,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 79705
+          },
+          "polymarket_rtds_chainlink_twap": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 79711
+            },
+            "files": 34,
+            "first_recv_time_utc_ms": 1789257602961,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789343999766,
+            "reconnect_events": 7,
+            "rows": 79711,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 79711
+          }
+        }
+      },
+      "io": {
+        "rchar": 2053382837,
+        "read_bytes": 1609986048,
+        "syscr": 25794
+      },
+      "manifest_logical_path": "2026-09-13/typed_raw/utc_day=2026-09-13/manifest.json",
+      "peak_rss_kib": 204620,
+      "purpose": "research",
+      "utc_day": "2026-09-13",
+      "wall_seconds": 1.8757613709999998
+    },
+    {
+      "admission": {
+        "manifest_sha256": "8a516eb39bcd37d2ff993265b1513b0b2b530e1f098628c63b9fe3591c306dd9",
+        "status": "admitted",
+        "utc_day": "2026-09-14",
+        "verified_bytes": 2439106910,
+        "verified_files": 154,
+        "verified_rows": 40021910
+      },
+      "declared": {
+        "bytes": 2439106910,
+        "closure_reason": "utc_day_barrier",
+        "coverage": {
+          "ended_utc_ms": 1789430400000,
+          "first_started_utc_ms": 1789344000000,
+          "last_started_utc_ms": 1789388904068,
+          "reactivated_within_day": true,
+          "schema_version": "data_collect_collection_day_coverage_v1",
+          "state": "ended_known"
+        },
+        "files": 154,
+        "gaps_count": 5,
+        "manifest_sha256": "8a516eb39bcd37d2ff993265b1513b0b2b530e1f098628c63b9fe3591c306dd9",
+        "rows": 40021910,
+        "schemas": [
+          [
+            "binance_aggtrade",
+            "binance_aggtrade_v7"
+          ],
+          [
+            "binance_depth_snapshot",
+            "binance_depth_snapshot_v3"
+          ],
+          [
+            "binance_depth_update",
+            "binance_depth_update_v4"
+          ],
+          [
+            "polymarket_market",
+            "polymarket_orderbook_v3"
+          ],
+          [
+            "polymarket_market_metadata",
+            "polymarket_market_metadata_v6"
+          ],
+          [
+            "polymarket_rtds_chainlink_btc_usd",
+            "polymarket_rtds_chainlink_btc_usd_v4"
+          ],
+          [
+            "polymarket_rtds_chainlink_twap",
+            "polymarket_rtds_chainlink_twap_v1"
+          ]
+        ],
+        "source_counters": {
+          "binance_aggtrade": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "aggTrade": 876567
+            },
+            "files": 25,
+            "first_recv_time_utc_ms": 1789344002063,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789430399739,
+            "reconnect_events": 2,
+            "rows": 876567,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 876567
+          },
+          "binance_depth_snapshot": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_snapshot": 4
+            },
+            "files": 4,
+            "first_recv_time_utc_ms": 1789344002340,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789423981972,
+            "reconnect_events": 0,
+            "rows": 4,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 4
+          },
+          "binance_depth_update": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_update": 859913
+            },
+            "files": 25,
+            "first_recv_time_utc_ms": 1789344002065,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789430399916,
+            "reconnect_events": 2,
+            "rows": 859913,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 859913
+          },
+          "polymarket_market": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "best_bid_ask": 1380064,
+              "book": 836833,
+              "last_trade_price": 396290,
+              "market_resolved": 286,
+              "price_change": 35486077,
+              "tick_size_change": 364
+            },
+            "files": 25,
+            "first_recv_time_utc_ms": 1789344000014,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789430399997,
+            "reconnect_events": 0,
+            "rows": 38099914,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 38099914
+          },
+          "polymarket_market_metadata": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "market_anchor_rule_update": 17784,
+              "market_state_transition": 574,
+              "metadata_snapshot": 289,
+              "resolution_poll_attempt": 11,
+              "resolution_terminal_ws": 286
+            },
+            "files": 25,
+            "first_recv_time_utc_ms": 1789344000014,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789430390902,
+            "reconnect_events": 0,
+            "rows": 18944,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 18944
+          },
+          "polymarket_rtds_chainlink_btc_usd": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 83283
+            },
+            "files": 25,
+            "first_recv_time_utc_ms": 1789344002062,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789430399895,
+            "reconnect_events": 16,
+            "rows": 83283,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 83283
+          },
+          "polymarket_rtds_chainlink_twap": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 83285
+            },
+            "files": 25,
+            "first_recv_time_utc_ms": 1789344002063,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789430399904,
+            "reconnect_events": 16,
+            "rows": 83285,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 83285
+          }
+        }
+      },
+      "io": {
+        "rchar": 3108855973,
+        "read_bytes": 2439442432,
+        "syscr": 38162
+      },
+      "manifest_logical_path": "2026-09-14/typed_raw/utc_day=2026-09-14/manifest.json",
+      "peak_rss_kib": 204620,
+      "purpose": "research",
+      "utc_day": "2026-09-14",
+      "wall_seconds": 2.731286027
+    },
+    {
+      "admission": {
+        "manifest_sha256": "dbb7f677ec17f8c58643a79b6027ea1a88ab145fbe617f83e3fd974d78819bcd",
+        "status": "admitted",
+        "utc_day": "2026-09-15",
+        "verified_bytes": 2673707368,
+        "verified_files": 195,
+        "verified_rows": 43933902
+      },
+      "declared": {
+        "bytes": 2673707368,
+        "closure_reason": "utc_day_barrier",
+        "coverage": {
+          "ended_utc_ms": 1789516800000,
+          "first_started_utc_ms": 1789430400000,
+          "last_started_utc_ms": 1789503826060,
+          "reactivated_within_day": true,
+          "schema_version": "data_collect_collection_day_coverage_v1",
+          "state": "ended_known"
+        },
+        "files": 195,
+        "gaps_count": 44,
+        "manifest_sha256": "dbb7f677ec17f8c58643a79b6027ea1a88ab145fbe617f83e3fd974d78819bcd",
+        "rows": 43933902,
+        "schemas": [
+          [
+            "binance_aggtrade",
+            "binance_aggtrade_v7"
+          ],
+          [
+            "binance_depth_snapshot",
+            "binance_depth_snapshot_v3"
+          ],
+          [
+            "binance_depth_update",
+            "binance_depth_update_v4"
+          ],
+          [
+            "polymarket_market",
+            "polymarket_orderbook_v3"
+          ],
+          [
+            "polymarket_market_metadata",
+            "polymarket_market_metadata_v6"
+          ],
+          [
+            "polymarket_rtds_chainlink_btc_usd",
+            "polymarket_rtds_chainlink_btc_usd_v4"
+          ],
+          [
+            "polymarket_rtds_chainlink_twap",
+            "polymarket_rtds_chainlink_twap_v1"
+          ]
+        ],
+        "source_counters": {
+          "binance_aggtrade": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "aggTrade": 1085103
+            },
+            "files": 31,
+            "first_recv_time_utc_ms": 1789430403567,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789516799664,
+            "reconnect_events": 0,
+            "rows": 1085103,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 1085103
+          },
+          "binance_depth_snapshot": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_snapshot": 10
+            },
+            "files": 9,
+            "first_recv_time_utc_ms": 1789430403825,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789503827577,
+            "reconnect_events": 0,
+            "rows": 10,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 10
+          },
+          "binance_depth_update": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_update": 832004
+            },
+            "files": 31,
+            "first_recv_time_utc_ms": 1789430403569,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789516799914,
+            "reconnect_events": 1,
+            "rows": 832004,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 832004
+          },
+          "polymarket_market": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "best_bid_ask": 1376134,
+              "book": 903178,
+              "last_trade_price": 426483,
+              "market_resolved": 274,
+              "price_change": 39130132,
+              "tick_size_change": 276
+            },
+            "files": 31,
+            "first_recv_time_utc_ms": 1789430400000,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789516799991,
+            "reconnect_events": 1,
+            "rows": 41836477,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 41836477
+          },
+          "polymarket_market_metadata": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "market_anchor_rule_update": 17236,
+              "market_state_transition": 559,
+              "metadata_snapshot": 294,
+              "resolution_poll_attempt": 48,
+              "resolution_terminal_ws": 274
+            },
+            "files": 31,
+            "first_recv_time_utc_ms": 1789430400000,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789516790998,
+            "reconnect_events": 0,
+            "rows": 18411,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 18411
+          },
+          "polymarket_rtds_chainlink_btc_usd": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 80959
+            },
+            "files": 31,
+            "first_recv_time_utc_ms": 1789430403567,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789516799285,
+            "reconnect_events": 13,
+            "rows": 80959,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 80959
+          },
+          "polymarket_rtds_chainlink_twap": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 80938
+            },
+            "files": 31,
+            "first_recv_time_utc_ms": 1789430403567,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789516799523,
+            "reconnect_events": 13,
+            "rows": 80938,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 80938
+          }
+        }
+      },
+      "io": {
+        "rchar": 3409272404,
+        "read_bytes": 2674171904,
+        "syscr": 41940
+      },
+      "manifest_logical_path": "2026-09-15/typed_raw/utc_day=2026-09-15/manifest.json",
+      "peak_rss_kib": 233932,
+      "purpose": "research",
+      "utc_day": "2026-09-15",
+      "wall_seconds": 3.101093422
+    },
+    {
+      "admission": {
+        "manifest_sha256": "0e3234a16b227d8479aa2fbc714d1f2cd508366f082e7f5a9ff14c99ab6fe12f",
+        "status": "admitted",
+        "utc_day": "2026-09-16",
+        "verified_bytes": 2901537812,
+        "verified_files": 145,
+        "verified_rows": 48108530
+      },
+      "declared": {
+        "bytes": 2901537812,
+        "closure_reason": "utc_day_barrier",
+        "coverage": {
+          "ended_utc_ms": 1789603200000,
+          "first_started_utc_ms": 1789516800000,
+          "last_started_utc_ms": 1789516800000,
+          "reactivated_within_day": false,
+          "schema_version": "data_collect_collection_day_coverage_v1",
+          "state": "ended_known"
+        },
+        "files": 145,
+        "gaps_count": 0,
+        "manifest_sha256": "0e3234a16b227d8479aa2fbc714d1f2cd508366f082e7f5a9ff14c99ab6fe12f",
+        "rows": 48108530,
+        "schemas": [
+          [
+            "binance_aggtrade",
+            "binance_aggtrade_v7"
+          ],
+          [
+            "binance_depth_snapshot",
+            "binance_depth_snapshot_v3"
+          ],
+          [
+            "binance_depth_update",
+            "binance_depth_update_v4"
+          ],
+          [
+            "polymarket_market",
+            "polymarket_orderbook_v3"
+          ],
+          [
+            "polymarket_market_metadata",
+            "polymarket_market_metadata_v6"
+          ],
+          [
+            "polymarket_rtds_chainlink_btc_usd",
+            "polymarket_rtds_chainlink_btc_usd_v4"
+          ],
+          [
+            "polymarket_rtds_chainlink_twap",
+            "polymarket_rtds_chainlink_twap_v1"
+          ]
+        ],
+        "source_counters": {
+          "binance_aggtrade": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "aggTrade": 945839
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1789516803818,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789603198634,
+            "reconnect_events": 0,
+            "rows": 945839,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 945839
+          },
+          "binance_depth_snapshot": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_snapshot": 1
+            },
+            "files": 1,
+            "first_recv_time_utc_ms": 1789516804476,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789516804476,
+            "reconnect_events": 0,
+            "rows": 1,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 1
+          },
+          "binance_depth_update": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_update": 863756
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1789516803815,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789603199913,
+            "reconnect_events": 0,
+            "rows": 863756,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 863756
+          },
+          "polymarket_market": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "best_bid_ask": 1504992,
+              "book": 931662,
+              "last_trade_price": 439541,
+              "market_resolved": 285,
+              "price_change": 43234887,
+              "tick_size_change": 324
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1789516800016,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789603199993,
+            "reconnect_events": 3,
+            "rows": 46111691,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 46111691
+          },
+          "polymarket_market_metadata": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "market_anchor_rule_update": 17856,
+              "market_state_transition": 576,
+              "metadata_snapshot": 288,
+              "resolution_poll_attempt": 12,
+              "resolution_terminal_ws": 285
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1789516800004,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789603190637,
+            "reconnect_events": 0,
+            "rows": 19017,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 19017
+          },
+          "polymarket_rtds_chainlink_btc_usd": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 84108
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1789516803824,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789603199326,
+            "reconnect_events": 12,
+            "rows": 84108,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 84108
+          },
+          "polymarket_rtds_chainlink_twap": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 84118
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1789516803824,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789603199236,
+            "reconnect_events": 12,
+            "rows": 84118,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 84118
+          }
+        }
+      },
+      "io": {
+        "rchar": 3710749664,
+        "read_bytes": 2901921792,
+        "syscr": 45180
+      },
+      "manifest_logical_path": "2026-09-16/typed_raw/utc_day=2026-09-16/manifest.json",
+      "peak_rss_kib": 265296,
+      "purpose": "research",
+      "utc_day": "2026-09-16",
+      "wall_seconds": 3.366986635
+    },
+    {
+      "admission": {
+        "manifest_sha256": "d217c4d56a6900678374306e406ac93f53e394d48cb84d9b0624c4a3c421ab82",
+        "status": "admitted",
+        "utc_day": "2026-09-17",
+        "verified_bytes": 2690346664,
+        "verified_files": 146,
+        "verified_rows": 45251483
+      },
+      "declared": {
+        "bytes": 2690346664,
+        "closure_reason": "utc_day_barrier",
+        "coverage": {
+          "ended_utc_ms": 1789689600000,
+          "first_started_utc_ms": 1789603200000,
+          "last_started_utc_ms": 1789603200000,
+          "reactivated_within_day": false,
+          "schema_version": "data_collect_collection_day_coverage_v1",
+          "state": "ended_known"
+        },
+        "files": 146,
+        "gaps_count": 0,
+        "manifest_sha256": "d217c4d56a6900678374306e406ac93f53e394d48cb84d9b0624c4a3c421ab82",
+        "rows": 45251483,
+        "schemas": [
+          [
+            "binance_aggtrade",
+            "binance_aggtrade_v7"
+          ],
+          [
+            "binance_depth_snapshot",
+            "binance_depth_snapshot_v3"
+          ],
+          [
+            "binance_depth_update",
+            "binance_depth_update_v4"
+          ],
+          [
+            "polymarket_market",
+            "polymarket_orderbook_v3"
+          ],
+          [
+            "polymarket_market_metadata",
+            "polymarket_market_metadata_v6"
+          ],
+          [
+            "polymarket_rtds_chainlink_btc_usd",
+            "polymarket_rtds_chainlink_btc_usd_v4"
+          ],
+          [
+            "polymarket_rtds_chainlink_twap",
+            "polymarket_rtds_chainlink_twap_v1"
+          ]
+        ],
+        "source_counters": {
+          "binance_aggtrade": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "aggTrade": 627454
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1789603203707,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789689599972,
+            "reconnect_events": 1,
+            "rows": 627454,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 627454
+          },
+          "binance_depth_snapshot": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_snapshot": 2
+            },
+            "files": 2,
+            "first_recv_time_utc_ms": 1789603204550,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789678503401,
+            "reconnect_events": 0,
+            "rows": 2,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 2
+          },
+          "binance_depth_update": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_update": 863510
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1789603203711,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789689599913,
+            "reconnect_events": 1,
+            "rows": 863510,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 863510
+          },
+          "polymarket_market": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "best_bid_ask": 1142899,
+              "book": 824300,
+              "last_trade_price": 389701,
+              "market_resolved": 270,
+              "price_change": 41214942,
+              "tick_size_change": 324
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1789603200005,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789689599997,
+            "reconnect_events": 2,
+            "rows": 43572436,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 43572436
+          },
+          "polymarket_market_metadata": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "market_anchor_rule_update": 17856,
+              "market_state_transition": 576,
+              "metadata_snapshot": 288,
+              "resolution_poll_attempt": 69,
+              "resolution_terminal_ws": 270
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1789603200007,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789689591026,
+            "reconnect_events": 0,
+            "rows": 19059,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 19059
+          },
+          "polymarket_rtds_chainlink_btc_usd": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 84515
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1789603203707,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789689599868,
+            "reconnect_events": 14,
+            "rows": 84515,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 84515
+          },
+          "polymarket_rtds_chainlink_twap": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 84507
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1789603203706,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789689598228,
+            "reconnect_events": 14,
+            "rows": 84507,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 84507
+          }
+        }
+      },
+      "io": {
+        "rchar": 3454434922,
+        "read_bytes": 2690707456,
+        "syscr": 41946
+      },
+      "manifest_logical_path": "2026-09-17/typed_raw/utc_day=2026-09-17/manifest.json",
+      "peak_rss_kib": 265296,
+      "purpose": "research",
+      "utc_day": "2026-09-17",
+      "wall_seconds": 3.102821249
+    },
+    {
+      "admission": {
+        "manifest_sha256": "a710cf0ab237bf708e3690ad6b95fbe4a006dbad53d784906d8588ff78c375c2",
+        "status": "admitted",
+        "utc_day": "2026-09-18",
+        "verified_bytes": 2987044116,
+        "verified_files": 167,
+        "verified_rows": 50107256
+      },
+      "declared": {
+        "bytes": 2987044116,
+        "closure_reason": "utc_day_barrier",
+        "coverage": {
+          "ended_utc_ms": 1789776000000,
+          "first_started_utc_ms": 1789689600000,
+          "last_started_utc_ms": 1789698289381,
+          "reactivated_within_day": true,
+          "schema_version": "data_collect_collection_day_coverage_v1",
+          "state": "ended_known"
+        },
+        "files": 167,
+        "gaps_count": 21,
+        "manifest_sha256": "a710cf0ab237bf708e3690ad6b95fbe4a006dbad53d784906d8588ff78c375c2",
+        "rows": 50107256,
+        "schemas": [
+          [
+            "binance_aggtrade",
+            "binance_aggtrade_v7"
+          ],
+          [
+            "binance_depth_snapshot",
+            "binance_depth_snapshot_v3"
+          ],
+          [
+            "binance_depth_update",
+            "binance_depth_update_v4"
+          ],
+          [
+            "polymarket_market",
+            "polymarket_orderbook_v3"
+          ],
+          [
+            "polymarket_market_metadata",
+            "polymarket_market_metadata_v6"
+          ],
+          [
+            "polymarket_rtds_chainlink_btc_usd",
+            "polymarket_rtds_chainlink_btc_usd_v4"
+          ],
+          [
+            "polymarket_rtds_chainlink_twap",
+            "polymarket_rtds_chainlink_twap_v1"
+          ]
+        ],
+        "source_counters": {
+          "binance_aggtrade": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "aggTrade": 1030001
+            },
+            "files": 27,
+            "first_recv_time_utc_ms": 1789689603833,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789775999374,
+            "reconnect_events": 0,
+            "rows": 1030001,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 1030001
+          },
+          "binance_depth_snapshot": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_snapshot": 5
+            },
+            "files": 5,
+            "first_recv_time_utc_ms": 1789689604089,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789698290722,
+            "reconnect_events": 0,
+            "rows": 5,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 5
+          },
+          "binance_depth_update": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_update": 848481
+            },
+            "files": 27,
+            "first_recv_time_utc_ms": 1789689600022,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789775999917,
+            "reconnect_events": 0,
+            "rows": 848481,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 848481
+          },
+          "polymarket_market": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "best_bid_ask": 1197486,
+              "book": 922610,
+              "last_trade_price": 434006,
+              "market_resolved": 280,
+              "price_change": 45490675,
+              "tick_size_change": 308
+            },
+            "files": 27,
+            "first_recv_time_utc_ms": 1789689600033,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789775999986,
+            "reconnect_events": 2,
+            "rows": 48045365,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 48045365
+          },
+          "polymarket_market_metadata": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "market_anchor_rule_update": 17554,
+              "market_state_transition": 568,
+              "metadata_snapshot": 292,
+              "resolution_poll_attempt": 29,
+              "resolution_terminal_ws": 280
+            },
+            "files": 27,
+            "first_recv_time_utc_ms": 1789689600028,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789775990575,
+            "reconnect_events": 0,
+            "rows": 18723,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 18723
+          },
+          "polymarket_rtds_chainlink_btc_usd": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 82343
+            },
+            "files": 27,
+            "first_recv_time_utc_ms": 1789689607518,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789775999387,
+            "reconnect_events": 10,
+            "rows": 82343,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 82343
+          },
+          "polymarket_rtds_chainlink_twap": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 82338
+            },
+            "files": 27,
+            "first_recv_time_utc_ms": 1789689603835,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789775999531,
+            "reconnect_events": 10,
+            "rows": 82338,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 82338
+          }
+        }
+      },
+      "io": {
+        "rchar": 3829343233,
+        "read_bytes": 2987487232,
+        "syscr": 46608
+      },
+      "manifest_logical_path": "2026-09-18/typed_raw/utc_day=2026-09-18/manifest.json",
+      "peak_rss_kib": 265296,
+      "purpose": "research",
+      "utc_day": "2026-09-18",
+      "wall_seconds": 3.6057344000000002
+    },
+    {
+      "admission": {
+        "manifest_sha256": "b4b8920adedef134a7030acd3a6dfc370bc5b6449bc9e8af763c0bbfc6787ab7",
+        "status": "admitted",
+        "utc_day": "2026-09-19",
+        "verified_bytes": 2142483114,
+        "verified_files": 145,
+        "verified_rows": 36465224
+      },
+      "declared": {
+        "bytes": 2142483114,
+        "closure_reason": "utc_day_barrier",
+        "coverage": {
+          "ended_utc_ms": 1789862400000,
+          "first_started_utc_ms": 1789776000000,
+          "last_started_utc_ms": 1789776000000,
+          "reactivated_within_day": false,
+          "schema_version": "data_collect_collection_day_coverage_v1",
+          "state": "ended_known"
+        },
+        "files": 145,
+        "gaps_count": 0,
+        "manifest_sha256": "b4b8920adedef134a7030acd3a6dfc370bc5b6449bc9e8af763c0bbfc6787ab7",
+        "rows": 36465224,
+        "schemas": [
+          [
+            "binance_aggtrade",
+            "binance_aggtrade_v7"
+          ],
+          [
+            "binance_depth_snapshot",
+            "binance_depth_snapshot_v3"
+          ],
+          [
+            "binance_depth_update",
+            "binance_depth_update_v4"
+          ],
+          [
+            "polymarket_market",
+            "polymarket_orderbook_v3"
+          ],
+          [
+            "polymarket_market_metadata",
+            "polymarket_market_metadata_v6"
+          ],
+          [
+            "polymarket_rtds_chainlink_btc_usd",
+            "polymarket_rtds_chainlink_btc_usd_v4"
+          ],
+          [
+            "polymarket_rtds_chainlink_twap",
+            "polymarket_rtds_chainlink_twap_v1"
+          ]
+        ],
+        "source_counters": {
+          "binance_aggtrade": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "aggTrade": 522752
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1789776003108,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789862399696,
+            "reconnect_events": 0,
+            "rows": 522752,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 522752
+          },
+          "binance_depth_snapshot": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_snapshot": 1
+            },
+            "files": 1,
+            "first_recv_time_utc_ms": 1789776003751,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789776003751,
+            "reconnect_events": 0,
+            "rows": 1,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 1
+          },
+          "binance_depth_update": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_update": 863807
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1789776003120,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789862399917,
+            "reconnect_events": 0,
+            "rows": 863807,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 863807
+          },
+          "polymarket_market": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "best_bid_ask": 918978,
+              "book": 692305,
+              "last_trade_price": 326533,
+              "market_resolved": 282,
+              "price_change": 32951464,
+              "tick_size_change": 256
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1789776000003,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789862399980,
+            "reconnect_events": 2,
+            "rows": 34889818,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 34889818
+          },
+          "polymarket_market_metadata": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "market_anchor_rule_update": 17812,
+              "market_state_transition": 576,
+              "metadata_snapshot": 288,
+              "resolution_followup_summary": 3,
+              "resolution_poll_attempt": 41,
+              "resolution_terminal_ws": 282
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1789776000003,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789862391430,
+            "reconnect_events": 0,
+            "rows": 19002,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 19002
+          },
+          "polymarket_rtds_chainlink_btc_usd": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 84934
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1789776003111,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789862399520,
+            "reconnect_events": 13,
+            "rows": 84934,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 84934
+          },
+          "polymarket_rtds_chainlink_twap": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 84910
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1789776003113,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789862399615,
+            "reconnect_events": 13,
+            "rows": 84910,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 84910
+          }
+        }
+      },
+      "io": {
+        "rchar": 2754080955,
+        "read_bytes": 2142801920,
+        "syscr": 33566
+      },
+      "manifest_logical_path": "2026-09-19/typed_raw/utc_day=2026-09-19/manifest.json",
+      "peak_rss_kib": 265296,
+      "purpose": "research",
+      "utc_day": "2026-09-19",
+      "wall_seconds": 2.5050510299999997
+    },
+    {
+      "admission": {
+        "manifest_sha256": "b7e20320a29c46f6c9a819cb4d06dab44783aba519036fce4c8e120b39a1ff5b",
+        "status": "admitted",
+        "utc_day": "2026-09-20",
+        "verified_bytes": 2709403192,
+        "verified_files": 153,
+        "verified_rows": 46293004
+      },
+      "declared": {
+        "bytes": 2709403192,
+        "closure_reason": "utc_day_barrier",
+        "coverage": {
+          "ended_utc_ms": 1789948800000,
+          "first_started_utc_ms": 1789862400000,
+          "last_started_utc_ms": 1789872701919,
+          "reactivated_within_day": true,
+          "schema_version": "data_collect_collection_day_coverage_v1",
+          "state": "ended_known"
+        },
+        "files": 153,
+        "gaps_count": 6,
+        "manifest_sha256": "b7e20320a29c46f6c9a819cb4d06dab44783aba519036fce4c8e120b39a1ff5b",
+        "rows": 46293004,
+        "schemas": [
+          [
+            "binance_aggtrade",
+            "binance_aggtrade_v7"
+          ],
+          [
+            "binance_depth_snapshot",
+            "binance_depth_snapshot_v3"
+          ],
+          [
+            "binance_depth_update",
+            "binance_depth_update_v4"
+          ],
+          [
+            "polymarket_market",
+            "polymarket_orderbook_v3"
+          ],
+          [
+            "polymarket_market_metadata",
+            "polymarket_market_metadata_v6"
+          ],
+          [
+            "polymarket_rtds_chainlink_btc_usd",
+            "polymarket_rtds_chainlink_btc_usd_v4"
+          ],
+          [
+            "polymarket_rtds_chainlink_twap",
+            "polymarket_rtds_chainlink_twap_v1"
+          ]
+        ],
+        "source_counters": {
+          "binance_aggtrade": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "aggTrade": 613525
+            },
+            "files": 25,
+            "first_recv_time_utc_ms": 1789862403994,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789948796284,
+            "reconnect_events": 1,
+            "rows": 613525,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 613525
+          },
+          "binance_depth_snapshot": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_snapshot": 3
+            },
+            "files": 3,
+            "first_recv_time_utc_ms": 1789862404225,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789872703336,
+            "reconnect_events": 0,
+            "rows": 3,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 3
+          },
+          "binance_depth_update": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_update": 859943
+            },
+            "files": 25,
+            "first_recv_time_utc_ms": 1789862403998,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789948799913,
+            "reconnect_events": 1,
+            "rows": 859943,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 859943
+          },
+          "polymarket_market": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "best_bid_ask": 1105918,
+              "book": 831284,
+              "last_trade_price": 415025,
+              "market_resolved": 286,
+              "price_change": 42278687,
+              "tick_size_change": 236
+            },
+            "files": 25,
+            "first_recv_time_utc_ms": 1789862400027,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789948799972,
+            "reconnect_events": 0,
+            "rows": 44631436,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 44631436
+          },
+          "polymarket_market_metadata": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "market_anchor_rule_update": 17780,
+              "market_state_transition": 574,
+              "metadata_snapshot": 289,
+              "resolution_poll_attempt": 9,
+              "resolution_terminal_ws": 286
+            },
+            "files": 25,
+            "first_recv_time_utc_ms": 1789862400027,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789948790701,
+            "reconnect_events": 0,
+            "rows": 18938,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 18938
+          },
+          "polymarket_rtds_chainlink_btc_usd": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 84577
+            },
+            "files": 25,
+            "first_recv_time_utc_ms": 1789862403996,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789948799776,
+            "reconnect_events": 11,
+            "rows": 84577,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 84577
+          },
+          "polymarket_rtds_chainlink_twap": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 84582
+            },
+            "files": 25,
+            "first_recv_time_utc_ms": 1789862403996,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789948799905,
+            "reconnect_events": 11,
+            "rows": 84582,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 84582
+          }
+        }
+      },
+      "io": {
+        "rchar": 3491138417,
+        "read_bytes": 2709762048,
+        "syscr": 42281
+      },
+      "manifest_logical_path": "2026-09-20/typed_raw/utc_day=2026-09-20/manifest.json",
+      "peak_rss_kib": 265296,
+      "purpose": "research",
+      "utc_day": "2026-09-20",
+      "wall_seconds": 3.204422364
+    },
+    {
+      "admission": {
+        "manifest_sha256": "1aaaf115459e91ed4a5c60bb63c4e0af370cb0eabc4c42bf47a2169528f01d61",
+        "status": "admitted",
+        "utc_day": "2026-09-21",
+        "verified_bytes": 3549168715,
+        "verified_files": 145,
+        "verified_rows": 59948134
+      },
+      "declared": {
+        "bytes": 3549168715,
+        "closure_reason": "utc_day_barrier",
+        "coverage": {
+          "ended_utc_ms": 1790035200000,
+          "first_started_utc_ms": 1789948800000,
+          "last_started_utc_ms": 1789948800000,
+          "reactivated_within_day": false,
+          "schema_version": "data_collect_collection_day_coverage_v1",
+          "state": "ended_known"
+        },
+        "files": 145,
+        "gaps_count": 0,
+        "manifest_sha256": "1aaaf115459e91ed4a5c60bb63c4e0af370cb0eabc4c42bf47a2169528f01d61",
+        "rows": 59948134,
+        "schemas": [
+          [
+            "binance_aggtrade",
+            "binance_aggtrade_v7"
+          ],
+          [
+            "binance_depth_snapshot",
+            "binance_depth_snapshot_v3"
+          ],
+          [
+            "binance_depth_update",
+            "binance_depth_update_v4"
+          ],
+          [
+            "polymarket_market",
+            "polymarket_orderbook_v3"
+          ],
+          [
+            "polymarket_market_metadata",
+            "polymarket_market_metadata_v6"
+          ],
+          [
+            "polymarket_rtds_chainlink_btc_usd",
+            "polymarket_rtds_chainlink_btc_usd_v4"
+          ],
+          [
+            "polymarket_rtds_chainlink_twap",
+            "polymarket_rtds_chainlink_twap_v1"
+          ]
+        ],
+        "source_counters": {
+          "binance_aggtrade": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "aggTrade": 1523610
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1789948804089,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790035199744,
+            "reconnect_events": 0,
+            "rows": 1523610,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 1523610
+          },
+          "binance_depth_snapshot": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_snapshot": 1
+            },
+            "files": 1,
+            "first_recv_time_utc_ms": 1789948804716,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789948804716,
+            "reconnect_events": 0,
+            "rows": 1,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 1
+          },
+          "binance_depth_update": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_update": 863939
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1789948804095,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790035199925,
+            "reconnect_events": 0,
+            "rows": 863939,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 863939
+          },
+          "polymarket_market": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "best_bid_ask": 1327061,
+              "book": 999339,
+              "last_trade_price": 498695,
+              "market_resolved": 283,
+              "price_change": 54546257,
+              "tick_size_change": 316
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1789948800023,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790035199997,
+            "reconnect_events": 4,
+            "rows": 57371951,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 57371951
+          },
+          "polymarket_market_metadata": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "market_anchor_rule_update": 17853,
+              "market_state_transition": 576,
+              "metadata_snapshot": 288,
+              "resolution_followup_summary": 2,
+              "resolution_poll_attempt": 33,
+              "resolution_terminal_ws": 283
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1789948800032,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790035190909,
+            "reconnect_events": 0,
+            "rows": 19035,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 19035
+          },
+          "polymarket_rtds_chainlink_btc_usd": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 84797
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1789948804087,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790035122184,
+            "reconnect_events": 15,
+            "rows": 84797,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 84797
+          },
+          "polymarket_rtds_chainlink_twap": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 84801
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1789948804087,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790035122400,
+            "reconnect_events": 15,
+            "rows": 84801,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 84801
+          }
+        }
+      },
+      "io": {
+        "rchar": 4553152825,
+        "read_bytes": 3549519872,
+        "syscr": 55087
+      },
+      "manifest_logical_path": "2026-09-21/typed_raw/utc_day=2026-09-21/manifest.json",
+      "peak_rss_kib": 287592,
+      "purpose": "research",
+      "utc_day": "2026-09-21",
+      "wall_seconds": 4.203745183
+    },
+    {
+      "admission": {
+        "manifest_sha256": "573ba690a17d9b35874ed97b48434ef53868230ad6f1760c87cd1f908eb0d3dc",
+        "status": "admitted",
+        "utc_day": "2026-09-22",
+        "verified_bytes": 3224120881,
+        "verified_files": 146,
+        "verified_rows": 54176454
+      },
+      "declared": {
+        "bytes": 3224120881,
+        "closure_reason": "utc_day_barrier",
+        "coverage": {
+          "ended_utc_ms": 1790121600000,
+          "first_started_utc_ms": 1790035200000,
+          "last_started_utc_ms": 1790035200000,
+          "reactivated_within_day": false,
+          "schema_version": "data_collect_collection_day_coverage_v1",
+          "state": "ended_known"
+        },
+        "files": 146,
+        "gaps_count": 0,
+        "manifest_sha256": "573ba690a17d9b35874ed97b48434ef53868230ad6f1760c87cd1f908eb0d3dc",
+        "rows": 54176454,
+        "schemas": [
+          [
+            "binance_aggtrade",
+            "binance_aggtrade_v7"
+          ],
+          [
+            "binance_depth_snapshot",
+            "binance_depth_snapshot_v3"
+          ],
+          [
+            "binance_depth_update",
+            "binance_depth_update_v4"
+          ],
+          [
+            "polymarket_market",
+            "polymarket_orderbook_v3"
+          ],
+          [
+            "polymarket_market_metadata",
+            "polymarket_market_metadata_v6"
+          ],
+          [
+            "polymarket_rtds_chainlink_btc_usd",
+            "polymarket_rtds_chainlink_btc_usd_v4"
+          ],
+          [
+            "polymarket_rtds_chainlink_twap",
+            "polymarket_rtds_chainlink_twap_v1"
+          ]
+        ],
+        "source_counters": {
+          "binance_aggtrade": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "aggTrade": 1108492
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790035204075,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790121599688,
+            "reconnect_events": 1,
+            "rows": 1108492,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 1108492
+          },
+          "binance_depth_snapshot": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_snapshot": 2
+            },
+            "files": 2,
+            "first_recv_time_utc_ms": 1790035204762,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790048343370,
+            "reconnect_events": 0,
+            "rows": 2,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 2
+          },
+          "binance_depth_update": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_update": 863714
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790035204078,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790121599916,
+            "reconnect_events": 1,
+            "rows": 863714,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 863714
+          },
+          "polymarket_market": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "best_bid_ask": 1300106,
+              "book": 985366,
+              "last_trade_price": 491785,
+              "market_resolved": 286,
+              "price_change": 49241593,
+              "tick_size_change": 300
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790035200032,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790121599996,
+            "reconnect_events": 3,
+            "rows": 52019436,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 52019436
+          },
+          "polymarket_market_metadata": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "market_anchor_rule_update": 17856,
+              "market_state_transition": 576,
+              "metadata_snapshot": 288,
+              "resolution_poll_attempt": 7,
+              "resolution_terminal_ws": 286
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790035200028,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790121590972,
+            "reconnect_events": 0,
+            "rows": 19013,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 19013
+          },
+          "polymarket_rtds_chainlink_btc_usd": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 82894
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790035423404,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790121599096,
+            "reconnect_events": 10,
+            "rows": 82894,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 82894
+          },
+          "polymarket_rtds_chainlink_twap": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 82903
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790035423750,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790121599074,
+            "reconnect_events": 10,
+            "rows": 82903,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 82903
+          }
+        }
+      },
+      "io": {
+        "rchar": 4135740689,
+        "read_bytes": 3224489984,
+        "syscr": 50126
+      },
+      "manifest_logical_path": "2026-09-22/typed_raw/utc_day=2026-09-22/manifest.json",
+      "peak_rss_kib": 287592,
+      "purpose": "research",
+      "utc_day": "2026-09-22",
+      "wall_seconds": 3.774704802
+    },
+    {
+      "admission": {
+        "manifest_sha256": "fd2958a10e8a36947d3377c5fbd9ff9d5d26d11c221853179cb25aec0e247465",
+        "status": "admitted",
+        "utc_day": "2026-09-23",
+        "verified_bytes": 3183086744,
+        "verified_files": 145,
+        "verified_rows": 53959264
+      },
+      "declared": {
+        "bytes": 3183086744,
+        "closure_reason": "utc_day_barrier",
+        "coverage": {
+          "ended_utc_ms": 1790208000000,
+          "first_started_utc_ms": 1790121600000,
+          "last_started_utc_ms": 1790121600000,
+          "reactivated_within_day": false,
+          "schema_version": "data_collect_collection_day_coverage_v1",
+          "state": "ended_known"
+        },
+        "files": 145,
+        "gaps_count": 0,
+        "manifest_sha256": "fd2958a10e8a36947d3377c5fbd9ff9d5d26d11c221853179cb25aec0e247465",
+        "rows": 53959264,
+        "schemas": [
+          [
+            "binance_aggtrade",
+            "binance_aggtrade_v7"
+          ],
+          [
+            "binance_depth_snapshot",
+            "binance_depth_snapshot_v3"
+          ],
+          [
+            "binance_depth_update",
+            "binance_depth_update_v4"
+          ],
+          [
+            "polymarket_market",
+            "polymarket_orderbook_v3"
+          ],
+          [
+            "polymarket_market_metadata",
+            "polymarket_market_metadata_v6"
+          ],
+          [
+            "polymarket_rtds_chainlink_btc_usd",
+            "polymarket_rtds_chainlink_btc_usd_v4"
+          ],
+          [
+            "polymarket_rtds_chainlink_twap",
+            "polymarket_rtds_chainlink_twap_v1"
+          ]
+        ],
+        "source_counters": {
+          "binance_aggtrade": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "aggTrade": 1063008
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790121604841,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790207999339,
+            "reconnect_events": 0,
+            "rows": 1063008,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 1063008
+          },
+          "binance_depth_snapshot": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_snapshot": 1
+            },
+            "files": 1,
+            "first_recv_time_utc_ms": 1790121605139,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790121605139,
+            "reconnect_events": 0,
+            "rows": 1,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 1
+          },
+          "binance_depth_update": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_update": 863703
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790121604839,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790207999913,
+            "reconnect_events": 0,
+            "rows": 863703,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 863703
+          },
+          "polymarket_market": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "best_bid_ask": 1230605,
+              "book": 917549,
+              "last_trade_price": 457903,
+              "market_resolved": 288,
+              "price_change": 49237905,
+              "tick_size_change": 300
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790121600029,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790207999999,
+            "reconnect_events": 2,
+            "rows": 51844550,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 51844550
+          },
+          "polymarket_market_metadata": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "market_anchor_rule_update": 17856,
+              "market_state_transition": 576,
+              "metadata_snapshot": 288,
+              "resolution_poll_attempt": 5,
+              "resolution_terminal_ws": 288
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790121600030,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790207990498,
+            "reconnect_events": 0,
+            "rows": 19013,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 19013
+          },
+          "polymarket_rtds_chainlink_btc_usd": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 84501
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790121604846,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790207999179,
+            "reconnect_events": 13,
+            "rows": 84501,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 84501
+          },
+          "polymarket_rtds_chainlink_twap": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 84488
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790121604846,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790207999354,
+            "reconnect_events": 13,
+            "rows": 84488,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 84488
+          }
+        }
+      },
+      "io": {
+        "rchar": 4090675973,
+        "read_bytes": 3183456256,
+        "syscr": 49484
+      },
+      "manifest_logical_path": "2026-09-23/typed_raw/utc_day=2026-09-23/manifest.json",
+      "peak_rss_kib": 287592,
+      "purpose": "research",
+      "utc_day": "2026-09-23",
+      "wall_seconds": 3.739320829
+    },
+    {
+      "admission": {
+        "manifest_sha256": "4a7bf6e3fc0255ca583719f197ade087819a0f0718d84e0b7655217befca7caf",
+        "status": "admitted",
+        "utc_day": "2026-09-24",
+        "verified_bytes": 3025521344,
+        "verified_files": 146,
+        "verified_rows": 50907435
+      },
+      "declared": {
+        "bytes": 3025521344,
+        "closure_reason": "utc_day_barrier",
+        "coverage": {
+          "ended_utc_ms": 1790294400000,
+          "first_started_utc_ms": 1790208000000,
+          "last_started_utc_ms": 1790208000000,
+          "reactivated_within_day": false,
+          "schema_version": "data_collect_collection_day_coverage_v1",
+          "state": "ended_known"
+        },
+        "files": 146,
+        "gaps_count": 0,
+        "manifest_sha256": "4a7bf6e3fc0255ca583719f197ade087819a0f0718d84e0b7655217befca7caf",
+        "rows": 50907435,
+        "schemas": [
+          [
+            "binance_aggtrade",
+            "binance_aggtrade_v7"
+          ],
+          [
+            "binance_depth_snapshot",
+            "binance_depth_snapshot_v3"
+          ],
+          [
+            "binance_depth_update",
+            "binance_depth_update_v4"
+          ],
+          [
+            "polymarket_market",
+            "polymarket_orderbook_v3"
+          ],
+          [
+            "polymarket_market_metadata",
+            "polymarket_market_metadata_v6"
+          ],
+          [
+            "polymarket_rtds_chainlink_btc_usd",
+            "polymarket_rtds_chainlink_btc_usd_v4"
+          ],
+          [
+            "polymarket_rtds_chainlink_twap",
+            "polymarket_rtds_chainlink_twap_v1"
+          ]
+        ],
+        "source_counters": {
+          "binance_aggtrade": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "aggTrade": 988456
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790208003825,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790294399235,
+            "reconnect_events": 1,
+            "rows": 988456,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 988456
+          },
+          "binance_depth_snapshot": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_snapshot": 2
+            },
+            "files": 2,
+            "first_recv_time_utc_ms": 1790208004085,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790221923472,
+            "reconnect_events": 0,
+            "rows": 2,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 2
+          },
+          "binance_depth_update": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_update": 863695
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790208003842,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790294399916,
+            "reconnect_events": 1,
+            "rows": 863695,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 863695
+          },
+          "polymarket_market": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "best_bid_ask": 1232333,
+              "book": 904873,
+              "last_trade_price": 451550,
+              "market_resolved": 287,
+              "price_change": 46277512,
+              "tick_size_change": 308
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790208000013,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790294399998,
+            "reconnect_events": 0,
+            "rows": 48866863,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 48866863
+          },
+          "polymarket_market_metadata": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "market_anchor_rule_update": 17855,
+              "market_state_transition": 576,
+              "metadata_snapshot": 288,
+              "resolution_poll_attempt": 3,
+              "resolution_terminal_ws": 287
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790208000012,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790294390561,
+            "reconnect_events": 0,
+            "rows": 19009,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 19009
+          },
+          "polymarket_rtds_chainlink_btc_usd": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 84710
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790208003824,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790294399202,
+            "reconnect_events": 14,
+            "rows": 84710,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 84710
+          },
+          "polymarket_rtds_chainlink_twap": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 84700
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790208003825,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790294399299,
+            "reconnect_events": 14,
+            "rows": 84700,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 84700
+          }
+        }
+      },
+      "io": {
+        "rchar": 3881366909,
+        "read_bytes": 3025797120,
+        "syscr": 47081
+      },
+      "manifest_logical_path": "2026-09-24/typed_raw/utc_day=2026-09-24/manifest.json",
+      "peak_rss_kib": 287592,
+      "purpose": "development",
+      "utc_day": "2026-09-24",
+      "wall_seconds": 3.387160772
+    },
+    {
+      "admission": {
+        "manifest_sha256": "6676470736c0b2e0616ff4f69722740fb2f1c7a04f0bd47b5cbff44a12500bd9",
+        "status": "admitted",
+        "utc_day": "2026-09-25",
+        "verified_bytes": 2780847809,
+        "verified_files": 145,
+        "verified_rows": 47200607
+      },
+      "declared": {
+        "bytes": 2780847809,
+        "closure_reason": "utc_day_barrier",
+        "coverage": {
+          "ended_utc_ms": 1790380800000,
+          "first_started_utc_ms": 1790294400000,
+          "last_started_utc_ms": 1790294400000,
+          "reactivated_within_day": false,
+          "schema_version": "data_collect_collection_day_coverage_v1",
+          "state": "ended_known"
+        },
+        "files": 145,
+        "gaps_count": 0,
+        "manifest_sha256": "6676470736c0b2e0616ff4f69722740fb2f1c7a04f0bd47b5cbff44a12500bd9",
+        "rows": 47200607,
+        "schemas": [
+          [
+            "binance_aggtrade",
+            "binance_aggtrade_v7"
+          ],
+          [
+            "binance_depth_snapshot",
+            "binance_depth_snapshot_v3"
+          ],
+          [
+            "binance_depth_update",
+            "binance_depth_update_v4"
+          ],
+          [
+            "polymarket_market",
+            "polymarket_orderbook_v3"
+          ],
+          [
+            "polymarket_market_metadata",
+            "polymarket_market_metadata_v6"
+          ],
+          [
+            "polymarket_rtds_chainlink_btc_usd",
+            "polymarket_rtds_chainlink_btc_usd_v4"
+          ],
+          [
+            "polymarket_rtds_chainlink_twap",
+            "polymarket_rtds_chainlink_twap_v1"
+          ]
+        ],
+        "source_counters": {
+          "binance_aggtrade": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "aggTrade": 888686
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790294403294,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790380799842,
+            "reconnect_events": 0,
+            "rows": 888686,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 888686
+          },
+          "binance_depth_snapshot": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_snapshot": 1
+            },
+            "files": 1,
+            "first_recv_time_utc_ms": 1790294403925,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790294403925,
+            "reconnect_events": 0,
+            "rows": 1,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 1
+          },
+          "binance_depth_update": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_update": 863590
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790294403302,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790380799913,
+            "reconnect_events": 0,
+            "rows": 863590,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 863590
+          },
+          "polymarket_market": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "best_bid_ask": 1098700,
+              "book": 776562,
+              "last_trade_price": 387520,
+              "market_resolved": 288,
+              "price_change": 42995922,
+              "tick_size_change": 296
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790294400034,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790380799997,
+            "reconnect_events": 2,
+            "rows": 45259288,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 45259288
+          },
+          "polymarket_market_metadata": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "market_anchor_rule_update": 17856,
+              "market_state_transition": 576,
+              "metadata_snapshot": 288,
+              "resolution_poll_attempt": 6,
+              "resolution_terminal_ws": 288
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790294400001,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790380790519,
+            "reconnect_events": 0,
+            "rows": 19014,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 19014
+          },
+          "polymarket_rtds_chainlink_btc_usd": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 85029
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790294403292,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790380799903,
+            "reconnect_events": 15,
+            "rows": 85029,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 85029
+          },
+          "polymarket_rtds_chainlink_twap": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 84999
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790294403294,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790380799776,
+            "reconnect_events": 15,
+            "rows": 84999,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 84999
+          }
+        }
+      },
+      "io": {
+        "rchar": 3573081677,
+        "read_bytes": 2781200384,
+        "syscr": 43338
+      },
+      "manifest_logical_path": "2026-09-25/typed_raw/utc_day=2026-09-25/manifest.json",
+      "peak_rss_kib": 287592,
+      "purpose": "development",
+      "utc_day": "2026-09-25",
+      "wall_seconds": 3.238356712
+    },
+    {
+      "admission": {
+        "manifest_sha256": "408e18a4288eeffaf8137094d70ca489c604542b9e7f36e8eadfdac37dbb69b8",
+        "status": "admitted",
+        "utc_day": "2026-09-26",
+        "verified_bytes": 1714553053,
+        "verified_files": 146,
+        "verified_rows": 29328226
+      },
+      "declared": {
+        "bytes": 1714553053,
+        "closure_reason": "utc_day_barrier",
+        "coverage": {
+          "ended_utc_ms": 1790467200000,
+          "first_started_utc_ms": 1790380800000,
+          "last_started_utc_ms": 1790380800000,
+          "reactivated_within_day": false,
+          "schema_version": "data_collect_collection_day_coverage_v1",
+          "state": "ended_known"
+        },
+        "files": 146,
+        "gaps_count": 0,
+        "manifest_sha256": "408e18a4288eeffaf8137094d70ca489c604542b9e7f36e8eadfdac37dbb69b8",
+        "rows": 29328226,
+        "schemas": [
+          [
+            "binance_aggtrade",
+            "binance_aggtrade_v7"
+          ],
+          [
+            "binance_depth_snapshot",
+            "binance_depth_snapshot_v3"
+          ],
+          [
+            "binance_depth_update",
+            "binance_depth_update_v4"
+          ],
+          [
+            "polymarket_market",
+            "polymarket_orderbook_v3"
+          ],
+          [
+            "polymarket_market_metadata",
+            "polymarket_market_metadata_v6"
+          ],
+          [
+            "polymarket_rtds_chainlink_btc_usd",
+            "polymarket_rtds_chainlink_btc_usd_v4"
+          ],
+          [
+            "polymarket_rtds_chainlink_twap",
+            "polymarket_rtds_chainlink_twap_v1"
+          ]
+        ],
+        "source_counters": {
+          "binance_aggtrade": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "aggTrade": 413812
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790380803939,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790467198992,
+            "reconnect_events": 1,
+            "rows": 413812,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 413812
+          },
+          "binance_depth_snapshot": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_snapshot": 2
+            },
+            "files": 2,
+            "first_recv_time_utc_ms": 1790380804592,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790395203546,
+            "reconnect_events": 0,
+            "rows": 2,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 2
+          },
+          "binance_depth_update": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "depth_update": 862889
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790380803953,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790467199914,
+            "reconnect_events": 1,
+            "rows": 862889,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 862889
+          },
+          "polymarket_market": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "best_bid_ask": 847041,
+              "book": 596513,
+              "last_trade_price": 296663,
+              "market_resolved": 263,
+              "price_change": 26122430,
+              "tick_size_change": 244
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790380800009,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790467199995,
+            "reconnect_events": 1,
+            "rows": 27863154,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 27863154
+          },
+          "polymarket_market_metadata": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "market_anchor_rule_update": 17856,
+              "market_state_transition": 576,
+              "metadata_snapshot": 288,
+              "resolution_poll_attempt": 75,
+              "resolution_terminal_ws": 263
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790380800009,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790467191168,
+            "reconnect_events": 0,
+            "rows": 19058,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 19058
+          },
+          "polymarket_rtds_chainlink_btc_usd": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 84661
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790380803938,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790467199446,
+            "reconnect_events": 13,
+            "rows": 84661,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 84661
+          },
+          "polymarket_rtds_chainlink_twap": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 84650
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1790380803938,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1790467199635,
+            "reconnect_events": 13,
+            "rows": 84650,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 84650
+          }
+        }
+      },
+      "io": {
+        "rchar": 2203629241,
+        "read_bytes": 1714982912,
+        "syscr": 27045
+      },
+      "manifest_logical_path": "2026-09-26/typed_raw/utc_day=2026-09-26/manifest.json",
+      "peak_rss_kib": 287592,
+      "purpose": "development",
+      "utc_day": "2026-09-26",
+      "wall_seconds": 2.056561586
+    }
+  ],
+  "finality": {
+    "policy_id": "b98102f86cbd2e0d635bdc5074dcb1d7c1fb1a84de61d419d07a475c2e8533ef",
+    "source_bound_material": {
+      "failure_overrides": [],
+      "normal_path": {
+        "economic_application_ordinal": 1,
+        "steps": [
+          {
+            "offset_ms": 0,
+            "state": "MATCHED"
+          },
+          {
+            "offset_ms": 10,
+            "state": "MINED"
+          },
+          {
+            "offset_ms": 20,
+            "state": "CONFIRMED"
+          }
+        ]
+      },
+      "schema_version": "trade_finality_policy_v2"
+    },
+    "status": "sealed"
+  },
+  "input_set_identity_sha256": null,
+  "input_set_note": "逐日复用原准入的清单摘要；完整集合身份由后续公共freeze入口生成，本审计不哈希失败子集冒充完整输入。",
+  "io": {
+    "rchar": 58436432414,
+    "read_bytes": 45601406976,
+    "syscr": 714312
+  },
+  "peak_rss_kib": 287592,
+  "rules": [
+    {
+      "causal_start_utc_ms": 1788912000000,
+      "purpose": "research",
+      "result": {
+        "file_sha256": "4397d7b3a102616c93484892a1cdb5bfa1a6de23c9383e52a04bbb1d480ae422",
+        "status": "loaded"
+      }
+    },
+    {
+      "causal_start_utc_ms": 1790208000000,
+      "purpose": "development",
+      "result": {
+        "file_sha256": "4397d7b3a102616c93484892a1cdb5bfa1a6de23c9383e52a04bbb1d480ae422",
+        "status": "loaded"
+      }
+    }
+  ],
+  "schema": "baseline_research_input_audit_v1",
+  "wall_seconds": 53.094722488
+}
