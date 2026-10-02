@@ -36,7 +36,9 @@ pub(crate) fn market_path_drives_execution_for(
     matches!(
         (caller_role, path),
         (
-            SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation,
+            SimCallerRoleV1::ModelTrain
+                | SimCallerRoleV1::OfflineEvaluation
+                | SimCallerRoleV1::HistoricalBacktest,
             MarketEventPathV1::HiddenPlatform
         ) | (SimCallerRoleV1::Paper, MarketEventPathV1::PublicVisibility)
     )

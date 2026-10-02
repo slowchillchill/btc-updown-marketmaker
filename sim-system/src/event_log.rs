@@ -1287,7 +1287,14 @@ impl BackgroundEventLogV1 {
                         Ok(BackgroundLogCommandV1::FailNextWrite) => {
                             log.inject_write_failure_for_tests()
                         }
-                        Err(_) => return Err(SimEventLogErrorV2::UnsealedCleanRun),
+                        Err(_) => {
+                            return if log.durability_role == RunDurabilityRoleV2::FiniteHistorical {
+                                // 退出仅丢弃通道，不稳定尾部、不补 RunSeal。
+                                Ok(())
+                            } else {
+                                Err(SimEventLogErrorV2::UnsealedCleanRun)
+                            };
+                        }
                     }
                 }
             })();

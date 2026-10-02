@@ -635,6 +635,16 @@ pub fn prepare_historical_files_v1(
     config: &crate::canonical_run::CanonicalRunConfig,
     stream: String,
 ) -> RecordingResult<HistoricalMergeV1> {
+    prepare_historical_files_in_range_v1(root, files, config, stream, None)
+}
+/// 与完整文件入口共用解码与准备；范围仅筛选原接收事实，不改变来源排序。
+pub fn prepare_historical_files_in_range_v1(
+    root: &Path,
+    files: &[&crate::ValidatedDirectSourceParquetFileV3],
+    config: &crate::canonical_run::CanonicalRunConfig,
+    stream: String,
+    received_range: Option<std::ops::Range<i64>>,
+) -> RecordingResult<HistoricalMergeV1> {
     prepare_historical_rows_v1(root, config, stream, || {
         Ok(TypedFileRowsV1 {
             files: files.iter(),
@@ -642,7 +652,13 @@ pub fn prepare_historical_files_v1(
             pending: Vec::new().into_iter(),
             rows: config.decode_batch_rows,
             bytes: config.max_decode_batch_bytes,
-        })
+        }
+        .filter(|row| match (row, &received_range) {
+            (Ok(row), Some(range)) => source_evidence_v3_from_typed_raw_v2(row)
+                .map(|source| range.contains(&source.received_at_utc_ms))
+                .unwrap_or(true),
+            _ => true,
+        }))
     })
 }
 struct TypedFileRowsV1<'a> {

@@ -475,6 +475,15 @@ pub trait PublicConsumptionTimeSourceV1 {
         &mut self,
         group: &PublicGroupReferenceV1,
     ) -> Result<i64, crate::run_v2::SimRunActorErrorV2>;
+    /// 原完整组的来源可见时间；默认适配保留已有精确时序消费者。
+    fn execution_time_for_visible_group(
+        &mut self,
+        group: &PublicGroupReferenceV1,
+        visible_at_utc_ms: i64,
+    ) -> Result<i64, crate::run_v2::SimRunActorErrorV2> {
+        let _ = visible_at_utc_ms;
+        self.execution_time_for_group(group)
+    }
 }
 
 #[cfg(any(test, feature = "public-consumption"))]
@@ -539,7 +548,30 @@ impl<T: PublicConsumptionTimeSourceV1> Iterator for RecordedPublicGroupSourceV1<
                 &mut prepared_pm,
                 |condition| self.replay.core.prepared_pm_context(condition),
             ) {
-                let at = match self.times.execution_time_for_group(&prepared.reference) {
+                let input_available = match &input.ingress {
+                    data_pipeline_core::public_input::DptIngressV1::Message {
+                        source_evidence,
+                        ..
+                    } => source_evidence
+                        .collector_admission
+                        .as_ref()
+                        .map_or(source_evidence.received_at_utc_ms, |c| {
+                            c.admitted_at_utc_ms.max(source_evidence.received_at_utc_ms)
+                        }),
+                    _ => i64::MIN,
+                };
+                let visible_at = prepared
+                    .group
+                    .records
+                    .iter()
+                    .map(|fact| fact.dependency_time.received_at_utc_ms)
+                    .chain(std::iter::once(input_available))
+                    .max()
+                    .unwrap();
+                let at = match self
+                    .times
+                    .execution_time_for_visible_group(&prepared.reference, visible_at)
+                {
                     Ok(at) => at,
                     Err(error) => return Some(Err(error)),
                 };

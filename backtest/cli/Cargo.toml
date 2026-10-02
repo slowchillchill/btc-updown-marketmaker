@@ -1,0 +1,22 @@
+[package]
+name = "backtest-cli"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+contracts = { path = "../../contracts" }
+backtest = { path = ".." }
+baseline-mm = { path = "../../baseline-mm" }
+sim-system = { path = "../../sim-system", features = ["shared-execution"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = "=1.0.150"
+tokio = { version = "=1.52.3", features = ["macros", "rt"] }
+toml = { version = "=1.1.4", default-features = false, features = ["parse", "serde", "std"] }
+
+[dev-dependencies]
+data-collect = { path = "../../data-collect" }
+data-pipeline-training = { path = "../../data-pipeline/training" }
+ledger = { path = "../../ledger" }
+sha2 = "=0.10.9"
+tempfile = "=3.27.0"

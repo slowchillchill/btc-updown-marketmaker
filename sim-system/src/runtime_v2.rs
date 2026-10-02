@@ -16,6 +16,8 @@ use crate::session::{MarketEnrollmentRequestV1, PublicVisibilityCursorV1};
 pub enum RunDurabilityRoleV2 {
     CleanRun,
     RecoverablePaper,
+    /// 有限历史记录前缀，不声称经济终局，也不提供事故账户续写。
+    FiniteHistorical,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

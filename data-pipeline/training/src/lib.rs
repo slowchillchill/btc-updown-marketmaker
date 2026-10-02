@@ -586,15 +586,26 @@ pub fn validate_public_source_daily_manifest_admission_v1(
 pub fn freeze_direct_source_input_set(
     manifest_paths: &[PathBuf],
 ) -> Result<FrozenDirectSourceInputSetV1, InputSetSnapshotError> {
+    freeze_source_input_set(manifest_paths, false)
+}
+/// 新公共来源与旧直接源共用冻结摘要；允许原 V6/TWAP 清单准入。
+pub fn freeze_public_source_input_set_v1(
+    manifest_paths: &[PathBuf],
+) -> Result<FrozenDirectSourceInputSetV1, InputSetSnapshotError> {
+    freeze_source_input_set(manifest_paths, true)
+}
+fn freeze_source_input_set(
+    manifest_paths: &[PathBuf],
+    public_inputs: bool,
+) -> Result<FrozenDirectSourceInputSetV1, InputSetSnapshotError> {
     let mut admitted_daily_inputs = Vec::with_capacity(manifest_paths.len());
     for manifest_path in manifest_paths {
         admitted_daily_inputs.push(
-            validate_direct_source_daily_manifest_admission(manifest_path).map_err(|source| {
-                InputSetSnapshotError::Admission {
+            validate_daily_manifest_admission_with_public_inputs(manifest_path, public_inputs)
+                .map_err(|source| InputSetSnapshotError::Admission {
                     manifest_path: manifest_path.clone(),
                     source,
-                }
-            })?,
+                })?,
         );
     }
     admitted_daily_inputs.sort_by(|left, right| {

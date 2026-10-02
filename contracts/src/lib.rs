@@ -25,6 +25,8 @@ pub const SIM_EXECUTION_CONTRACT_V2: &str = "sim_execution_contract_v2";
 pub enum SimCallerRoleV1 {
     ModelTrain,
     OfflineEvaluation,
+    /// 有限公共历史运行；隐藏执行，不扩展为独立留出评价用途。
+    HistoricalBacktest,
     Paper,
 }
 
