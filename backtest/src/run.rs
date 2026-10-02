@@ -306,6 +306,7 @@ pub async fn run_historical_v1<S: StrategyV1>(
     let mut calculation_index = 0;
     let mut timing = None;
     let mut evaluation_at = None;
+    let mut unconsumed_required_trigger_at = None;
     let mut coordinator = SettlementCoordinatorV1::default();
     let end = config.preparation.scope.received_end_utc_ms;
     let running = async {
@@ -361,7 +362,13 @@ pub async fn run_historical_v1<S: StrategyV1>(
                 evaluation_at = None;
                 dirty = true;
             }
-            if required == Some(at) {
+            // 当前未消费的原驱动只通知一次；实际隐藏/义务驱动之后重新接纳触发。
+            // 即时计算/发送不是消费原义务，不能在每轮分派后重新制造同一通知。
+            if required != unconsumed_required_trigger_at {
+                unconsumed_required_trigger_at = None;
+            }
+            if required == Some(at) && unconsumed_required_trigger_at.is_none() {
+                unconsumed_required_trigger_at = Some(at);
                 dirty = true;
             }
             // 更早原义务先推进；本毫秒仍开放，全部真实公开组保持原序。
@@ -466,6 +473,7 @@ pub async fn run_historical_v1<S: StrategyV1>(
                 driver
                     .hidden_bucket(bucket)
                     .map_err(HistoricalFailureCauseV1::Sim)?;
+                unconsumed_required_trigger_at = None;
                 next_hidden = hidden
                     .next_bucket()
                     .map_err(HistoricalFailureCauseV1::Material)?;
@@ -557,6 +565,7 @@ pub async fn run_historical_v1<S: StrategyV1>(
                         ))
                     })?)
                     .map_err(HistoricalFailureCauseV1::Sim)?;
+                unconsumed_required_trigger_at = None;
             }
         }
         driver

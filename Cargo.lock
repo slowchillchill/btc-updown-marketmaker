@@ -1101,6 +1101,7 @@ dependencies = [
  "data-collect",
  "data-pipeline-training",
  "ledger",
+ "rust_decimal",
  "serde",
  "serde_json",
  "sha2",

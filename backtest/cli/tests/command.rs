@@ -21,7 +21,17 @@ fn actual_baseline_command_applies_explicit_values_and_false_then_records_effect
     let rule_path = root.join("sim-system/tests/fixtures/platform-rule-snapshot-v3-gate-b.json");
     let mut run = serde_json::to_value(&config).unwrap();
     run.as_object_mut().unwrap().remove("strategy");
-    let command_config = json!({"run": run, "rules": {"snapshot_path":rule_path,"expected_file_sha256":format!("{:x}",Sha256::digest(std::fs::read(&rule_path).unwrap())),"replay_causal_start_utc_ms":common::BASE}, "strategy": strategy,"request_namespace":"actual-baseline-command"});
+    let mut command_config = json!({"run": run, "rules": {"snapshot_path":rule_path,"expected_file_sha256":format!("{:x}",Sha256::digest(std::fs::read(&rule_path).unwrap())),"replay_causal_start_utc_ms":common::BASE}, "strategy": strategy,"request_namespace":"actual-baseline-command"});
+    // CLI 必填值不要求文件冗余占位；同时补齐一个字段和整个缺失区段。
+    command_config["strategy"]["quote"]
+        .as_object_mut()
+        .unwrap()
+        .remove("base_pair_shares");
+    let risk = command_config["strategy"]
+        .as_object_mut()
+        .unwrap()
+        .remove("risk")
+        .unwrap();
     let path = temp.path().join("command.json");
     std::fs::write(&path, serde_json::to_vec(&command_config).unwrap()).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_backtest-cli"))
@@ -34,6 +44,12 @@ fn actual_baseline_command_applies_explicit_values_and_false_then_records_effect
             "12",
             "--strategy.probability.initial_sigma_usd_per_sqrt_second",
             "3.5",
+        ])
+        .args([
+            "--strategy.risk.per_market_orphan_limit_pusd",
+            risk["per_market_orphan_limit_pusd"].as_str().unwrap(),
+            "--strategy.risk.account_orphan_limit_pusd",
+            risk["account_orphan_limit_pusd"].as_str().unwrap(),
         ])
         .output()
         .unwrap();
@@ -61,6 +77,7 @@ fn actual_baseline_command_applies_explicit_values_and_false_then_records_effect
         descriptor["effective_parameters"]["probability"]["initial_sigma_usd_per_sqrt_second"],
         3.5
     );
+    assert_eq!(descriptor["effective_parameters"]["risk"], risk);
     assert_eq!(
         descriptor["effective_parameters"]["repair"]["maker_fill_weight"],
         command_config["strategy"]["repair"]["maker_fill_weight"]

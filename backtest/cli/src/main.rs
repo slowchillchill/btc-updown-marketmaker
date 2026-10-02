@@ -19,34 +19,86 @@ struct HistoricalProcessSnapshotRequestConfig {
     expected_file_sha256: contracts::Sha256Hex,
     replay_causal_start_utc_ms: i64,
 }
-const PARAMETERS: &[&str] = &[
-    "probability.volatility_window_ms",
-    "probability.initial_sigma_usd_per_sqrt_second",
-    "probability.estimation_error_usd",
-    "probability.binance_innovation_weight",
-    "probability.binance_pressure_weight_usd",
-    "probability.binance_trade_pressure_weight_usd",
-    "quote.base_pair_shares",
-    "quote.base_half_spread",
-    "quote.inventory_shift_per_pusd",
-    "quote.uncertainty_spread_weight",
-    "quote.signal_spread_weight",
-    "quote.joint_fill_scenario_weights",
-    "quote.minimum_business_result_per_share",
-    "quote.execution_path_ms",
-    "repair.base_loss_allowance_per_share",
-    "repair.time_loss_allowance_per_share",
-    "repair.inventory_loss_allowance_per_share",
-    "repair.maximum_overfill_shares",
-    "repair.maximum_overfill_pusd",
-    "repair.maker_fill_weight",
-    "repair.wait_price_improvement_per_share",
-    "repair.residual_risk_weight",
-    "repair.maker_path_ms",
-    "repair.active_path_ms",
-    "repair.enable_active_repair",
-    "risk.per_market_orphan_limit_pusd",
-    "risk.account_orphan_limit_pusd",
+type CommandError = Box<dyn std::error::Error + Send + Sync>;
+#[derive(Clone, Copy)]
+enum ParameterType {
+    Decimal,
+    U64,
+    F64,
+    Weights,
+    Bool,
+}
+impl ParameterType {
+    fn parse(self, raw: &str) -> Result<serde_json::Value, CommandError> {
+        fn json<T: serde::de::DeserializeOwned + Serialize>(
+            raw: &str,
+        ) -> Result<serde_json::Value, CommandError> {
+            Ok(serde_json::to_value(serde_json::from_str::<T>(raw)?)?)
+        }
+        match self {
+            Self::Decimal => Ok(serde_json::Value::String(
+                raw.parse::<rust_decimal::Decimal>()?.to_string(),
+            )),
+            Self::U64 => json::<u64>(raw),
+            Self::F64 => json::<f64>(raw),
+            Self::Weights => json::<[f64; 4]>(raw),
+            Self::Bool => json::<bool>(raw),
+        }
+    }
+}
+// 原策略字段类型决定覆盖解析，不依赖文件中的占位值或复制策略默认。
+const PARAMETERS: &[(&str, ParameterType)] = &[
+    ("probability.volatility_window_ms", ParameterType::U64),
+    (
+        "probability.initial_sigma_usd_per_sqrt_second",
+        ParameterType::F64,
+    ),
+    ("probability.estimation_error_usd", ParameterType::F64),
+    ("probability.binance_innovation_weight", ParameterType::F64),
+    (
+        "probability.binance_pressure_weight_usd",
+        ParameterType::F64,
+    ),
+    (
+        "probability.binance_trade_pressure_weight_usd",
+        ParameterType::F64,
+    ),
+    ("quote.base_pair_shares", ParameterType::Decimal),
+    ("quote.base_half_spread", ParameterType::Decimal),
+    ("quote.inventory_shift_per_pusd", ParameterType::Decimal),
+    ("quote.uncertainty_spread_weight", ParameterType::Decimal),
+    ("quote.signal_spread_weight", ParameterType::Decimal),
+    ("quote.joint_fill_scenario_weights", ParameterType::Weights),
+    (
+        "quote.minimum_business_result_per_share",
+        ParameterType::Decimal,
+    ),
+    ("quote.execution_path_ms", ParameterType::U64),
+    (
+        "repair.base_loss_allowance_per_share",
+        ParameterType::Decimal,
+    ),
+    (
+        "repair.time_loss_allowance_per_share",
+        ParameterType::Decimal,
+    ),
+    (
+        "repair.inventory_loss_allowance_per_share",
+        ParameterType::Decimal,
+    ),
+    ("repair.maximum_overfill_shares", ParameterType::Decimal),
+    ("repair.maximum_overfill_pusd", ParameterType::Decimal),
+    ("repair.maker_fill_weight", ParameterType::F64),
+    (
+        "repair.wait_price_improvement_per_share",
+        ParameterType::Decimal,
+    ),
+    ("repair.residual_risk_weight", ParameterType::Decimal),
+    ("repair.maker_path_ms", ParameterType::U64),
+    ("repair.active_path_ms", ParameterType::U64),
+    ("repair.enable_active_repair", ParameterType::Bool),
+    ("risk.per_market_orphan_limit_pusd", ParameterType::Decimal),
+    ("risk.account_orphan_limit_pusd", ParameterType::Decimal),
 ];
 fn load_config(
     args: impl IntoIterator<Item = String>,
@@ -62,10 +114,15 @@ fn load_config(
         let name = option
             .strip_prefix("--strategy.")
             .ok_or("未知命令参数；使用 --config 和 --strategy.<字段> <值>")?;
-        if !PARAMETERS.contains(&name) {
-            return Err(format!("未知策略参数 {name}").into());
-        }
-        overrides.insert(name.to_owned(), args.next().ok_or("策略覆盖缺少显式值")?);
+        let kind = PARAMETERS
+            .iter()
+            .find(|(field, _)| *field == name)
+            .map(|(_, kind)| *kind)
+            .ok_or_else(|| format!("未知策略参数 {name}"))?;
+        overrides.insert(
+            name.to_owned(),
+            (kind, args.next().ok_or("策略覆盖缺少显式值")?),
+        );
     }
     let content =
         std::fs::read_to_string(config_file.ok_or("必须通过 --config 显式指定启动配置")?)?;
@@ -74,21 +131,21 @@ fn load_config(
     } else {
         serde_json::to_value(toml::from_str::<toml::Value>(&content)?)?
     };
-    for (name, raw) in overrides {
+    for (name, (kind, raw)) in overrides {
         let (section, field) = name.split_once('.').expect("固定参数路径");
-        let section = value
-            .get_mut("strategy")
-            .and_then(|v| v.get_mut(section))
-            .and_then(serde_json::Value::as_object_mut)
-            .ok_or("配置缺少策略区段")?;
-        let current = section.get(field);
-        // Decimal 按原 serde 字符串解析；显式 false 与未提供保持区别。
-        let replacement = if current.is_some_and(serde_json::Value::is_string) {
-            serde_json::Value::String(raw)
-        } else {
-            serde_json::from_str(&raw)?
-        };
-        section.insert(field.into(), replacement);
+        let strategy = value
+            .as_object_mut()
+            .ok_or("启动配置不是对象")?
+            .entry("strategy")
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .ok_or("策略配置不是对象")?;
+        let section = strategy
+            .entry(section)
+            .or_insert_with(|| serde_json::json!({}))
+            .as_object_mut()
+            .ok_or("策略区段不是对象")?;
+        section.insert(field.into(), kind.parse(&raw)?);
     }
     let strategy: ComplementaryPairConfigV1 =
         serde_json::from_value(value.get("strategy").cloned().ok_or("配置缺少策略参数")?)?;
@@ -110,7 +167,11 @@ async fn main() {
     if std::env::args().any(|arg| arg == "--help") {
         println!(
             "单次公共历史回测：backtest-cli --config <启动 JSON/TOML> [--strategy.<字段> <显式值>]\n无热重载。全部策略字段可覆盖：\n{}",
-            PARAMETERS.join("\n")
+            PARAMETERS
+                .iter()
+                .map(|(field, _)| *field)
+                .collect::<Vec<_>>()
+                .join("\n")
         );
         return;
     }
@@ -171,8 +232,21 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         let supported = PARAMETERS
             .iter()
-            .map(|field| (*field).to_owned())
+            .map(|(field, _)| (*field).to_owned())
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(actual, supported);
+        for (name, kind) in PARAMETERS {
+            let (section, field) = name.split_once('.').unwrap();
+            let original = &value[section][field];
+            let raw = original
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| original.to_string());
+            assert_eq!(
+                kind.parse(&raw).unwrap(),
+                *original,
+                "{name} 类型应沿原策略序列化"
+            );
+        }
     }
 }

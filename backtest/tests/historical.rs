@@ -23,6 +23,7 @@ struct Probe {
     observed: Vec<(i64, usize, Option<String>, usize)>,
     dispatched: usize,
     failed_callback_sent: Option<usize>,
+    calculation_budget: Option<usize>,
 }
 impl StrategyV1 for Probe {
     type Error = &'static str;
@@ -32,6 +33,13 @@ impl StrategyV1 for Probe {
         input: &StrategyInputV1,
         at: i64,
     ) -> Result<StrategyOutputV1, Self::Error> {
+        // 仅测试的有界失败探针：旧实现重复即时计算时直接失败，避免挂住回归。
+        if self
+            .calculation_budget
+            .is_some_and(|limit| self.observed.len() >= limit)
+        {
+            return Err("test-repeated-calculation-without-progress");
+        }
         let first = input
             .markets
             .iter()
@@ -384,5 +392,42 @@ async fn strategy_and_batch_failures_preserve_original_errors_and_stop_without_r
             HistoricalEndReasonV1::Failure
         );
         assert!(!config.result_path.exists());
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn explicit_zero_compute_and_dispatch_delays_consume_original_obligations() {
+    for public_delay in [0, 100] {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut config, rules) = setup(temp.path());
+        config.timing.public_delivery_delay_ms = DelayScheduleV1::Fixed(public_delay);
+        config.timing.calculation_duration_ms = DelayScheduleV1::Fixed(0);
+        config.timing.dispatch_delay_ms = DelayScheduleV1::Fixed(0);
+        let mut probe = Probe {
+            rules: Some(rules.clone()),
+            calculation_budget: Some(40),
+            cancel_first: true,
+            ..Default::default()
+        };
+        let report = run_historical_v1(&config, rules, &mut probe).await.unwrap();
+        assert_eq!(report.end_reason, HistoricalEndReasonV1::RangeEnd);
+        assert!(probe.bought_first && probe.bought_second);
+        assert!(probe.canceled, "原反馈驱动后继续提交新请求及消费新义务");
+        assert!(probe.observed.iter().any(|(_, _, _, trades)| *trades > 0));
+        let timing = report.last_dispatched_calculation_timing.unwrap();
+        assert_eq!(
+            timing.calculation_started_at_utc_ms,
+            timing.calculation_completed_at_utc_ms
+        );
+        assert_eq!(
+            timing.calculation_completed_at_utc_ms,
+            timing.actual_sent_at_utc_ms.unwrap()
+        );
+        assert!(
+            probe
+                .observed
+                .iter()
+                .any(|(at, markets, _, _)| *at >= BASE + 10100 && *markets == 2)
+        );
     }
 }
