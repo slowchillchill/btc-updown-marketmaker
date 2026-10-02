@@ -38,7 +38,8 @@ pub struct PreparedHistoricalRunV1 {
     pub input_set_identity_sha256: Sha256Hex,
 }
 impl HistoricalPreparationConfigV1 {
-    pub(crate) fn effective_header(&self) -> PublicInputStreamHeaderV1 {
+    /// 新历史准备及其调用方报告共用的实际流头；不改写旧记录。
+    pub fn effective_header(&self) -> PublicInputStreamHeaderV1 {
         let mut header = self.header.clone();
         header.ordering_version = HISTORICAL_SOURCE_HEAD_ORDERING_VERSION.into();
         header

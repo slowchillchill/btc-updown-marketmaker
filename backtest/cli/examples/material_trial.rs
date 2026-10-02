@@ -6,6 +6,11 @@ use serde_json::{Value, json};
 use sim_system::public_consumption::{PublicConsumptionTimeSourceV1, RecordedPublicGroupSourceV1};
 use std::{collections::BTreeMap, path::Path, time::Instant};
 
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../tests/common/mod.rs"]
+mod common;
+
 #[derive(Default)]
 struct OriginalVisibility(Option<i64>);
 impl PublicConsumptionTimeSourceV1 for OriginalVisibility {
@@ -257,6 +262,14 @@ fn main() -> Result<(), MaterialError> {
     }
     let config: HistoricalPreparationConfigV1 = serde_json::from_slice(&std::fs::read(&args[0])?)?;
     let report_path = Path::new(&args[1]);
+    run_trial(config, report_path)
+}
+fn run_trial(
+    mut config: HistoricalPreparationConfigV1,
+    report_path: &Path,
+) -> Result<(), MaterialError> {
+    // 与原准备入口共用实际版本来源；成功及原失败报告均记录同一有效配置。
+    config.header = config.effective_header();
     let hz: f64 = String::from_utf8(
         std::process::Command::new("getconf")
             .arg("CLK_TCK")
@@ -346,5 +359,48 @@ mod tests {
         bid.value = None;
         bid.quality = MarketDataQuality::UnknownNotObserved;
         assert_eq!(best_bid(&bid), "unavailable:UnknownNotObserved");
+    }
+
+    #[test]
+    fn legacy_ordering_label_records_actual_version_on_success_and_prepare_failure() {
+        for fail in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let (config, _) = common::setup(temp.path());
+            let mut preparation = config.preparation;
+            assert_eq!(
+                preparation.header.ordering_version,
+                "historical-source-head-v1"
+            );
+            if fail {
+                preparation.recording.max_capture_output_bytes = 1;
+            }
+            let expected = preparation.effective_header();
+            let report_path = temp.path().join("trial.json");
+            let result = run_trial(preparation.clone(), &report_path);
+            let report: Value =
+                serde_json::from_slice(&std::fs::read(report_path).unwrap()).unwrap();
+            let stream: PublicInputStreamHeaderV1 = serde_json::from_slice(
+                &std::fs::read(preparation.work_root.join("public/stream.json")).unwrap(),
+            )
+            .unwrap();
+            let effective: HistoricalPreparationConfigV1 =
+                serde_json::from_value(report["effective_preparation"].clone()).unwrap();
+            assert_eq!(stream, expected);
+            assert_eq!(effective.header, stream);
+            assert_eq!(
+                preparation.header.ordering_version,
+                "historical-source-head-v1"
+            );
+            if fail {
+                let error = result.unwrap_err();
+                assert_eq!(report["status"], "prepare_failed");
+                assert_eq!(report["original_error"], error.to_string());
+                assert_eq!(report["statistics"], Value::Null);
+            } else {
+                result.unwrap();
+                assert_eq!(report["status"], "success");
+                assert_eq!(report["statistics"]["public_groups"], 8);
+            }
+        }
     }
 }
