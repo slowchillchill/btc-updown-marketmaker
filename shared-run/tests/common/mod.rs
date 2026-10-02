@@ -506,6 +506,7 @@ pub fn execution_with_identity(
         run_id,
         BusinessProjectionVersionV1::V3,
         None,
+        None,
     )
 }
 pub fn execution_with_identity_v4(
@@ -530,6 +531,7 @@ pub fn execution_with_identity_v4(
         cash,
         run_id,
         BusinessProjectionVersionV1::V4,
+        None,
         None,
     )
 }
@@ -567,6 +569,30 @@ pub fn execution_with_minimum_v4(
         "shared-combination",
         BusinessProjectionVersionV1::V4,
         Some(minimum_shares),
+        None,
+    )
+}
+pub fn execution_with_fee_v4(
+    path: &Path,
+    core: &PublicObservationCoreV1,
+    cash: &str,
+    fee_rate: &str,
+) -> (
+    PublicSimExecutionV1,
+    MemoryNoeObservationV4,
+    Arc<SealedProcessRuleSnapshotV3>,
+) {
+    execution_with_evidence::<MeasuredCancellationEvidence>(
+        path,
+        core,
+        SUCCESS_POLICY,
+        None,
+        "e".repeat(64),
+        cash,
+        "shared-combination",
+        BusinessProjectionVersionV1::V4,
+        None,
+        Some(fee_rate),
     )
 }
 // 同一真实夹具仅显式区分源投影版本；不再包装一份运行配置。
@@ -581,6 +607,7 @@ fn execution_with_evidence<P: MemoryOrderEvidence + 'static>(
     run_id: &str,
     projection_version: BusinessProjectionVersionV1,
     minimum_shares: Option<&str>,
+    fee_rate: Option<&str>,
 ) -> (
     PublicSimExecutionV1,
     MemoryNoeObservation<P>,
@@ -598,9 +625,13 @@ fn execution_with_evidence<P: MemoryOrderEvidence + 'static>(
         .parent()
         .unwrap()
         .join("../../../sim-system/tests/fixtures/platform-rule-snapshot-v3-gate-b.json");
-    let (rule_path, rule_sha) = if delay.is_some() || minimum_shares.is_some() {
+    let (rule_path, rule_sha) = if delay.is_some() || minimum_shares.is_some() || fee_rate.is_some()
+    {
         let mut value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&original).unwrap()).unwrap();
+        if let Some(rate) = fee_rate {
+            value["synchronized_platform_rules"]["fee_schedule"]["rate"] = serde_json::json!(rate);
+        }
         if let Some(delay) = delay {
             value["documented_platform_rules"]["taker_delay"]["value"]["delay_ms"] =
                 serde_json::json!(delay);
@@ -1209,6 +1240,13 @@ pub fn recorded_average_pool(
     root: &Path,
     fractional: bool,
 ) -> (PublicObservationCoreV1, TradingTimes) {
+    recorded_scaled_average_pool(root, fractional, 1)
+}
+pub fn recorded_scaled_average_pool(
+    root: &Path,
+    fractional: bool,
+    scale: u32,
+) -> (PublicObservationCoreV1, TradingTimes) {
     let mut core = core();
     let mut writer = PublicRecordingWriterV1::create(root, core.header(), config()).unwrap();
     let mut metadata = metadata_snapshot_row();
@@ -1285,7 +1323,7 @@ pub fn recorded_average_pool(
                     price_changes: vec![PolymarketPriceChangeEntry {
                         asset_id: token.into(),
                         price: price.into(),
-                        size: Some(size.into()),
+                        size: Some((size.parse::<u32>().unwrap() * scale).to_string()),
                         side: PolymarketSide::Buy,
                         best_bid: None,
                         best_ask: None,
@@ -1435,6 +1473,12 @@ pub fn recorded_market_fee_change(root: &Path) -> (PublicObservationCoreV1, Trad
 
 /// #183：两个持仓市场、独立报价/空盘、闭市后未判定及真实换代缺盘。
 pub fn recorded_nav_marks(root: &Path) -> (PublicObservationCoreV1, TradingTimes) {
+    recorded_nav_marks_with_book_quantity(root, "1")
+}
+pub fn recorded_nav_marks_with_book_quantity(
+    root: &Path,
+    quantity: &str,
+) -> (PublicObservationCoreV1, TradingTimes) {
     let mut core = core();
     let mut writer = PublicRecordingWriterV1::create(root, core.header(), config()).unwrap();
     let mut rows = vec![];
@@ -1465,7 +1509,7 @@ pub fn recorded_nav_marks(root: &Path) -> (PublicObservationCoreV1, TradingTimes
         }
     }
     for (i, token) in [UP_TOKEN_ID, DOWN_TOKEN_ID, "21", "4"].iter().enumerate() {
-        let mut event = book("1");
+        let mut event = book(quantity);
         if let PolymarketOrderbookEvent::Book { asset_id, bids, .. } = &mut event {
             *asset_id = (*token).into();
             bids[0].price = if *token == UP_TOKEN_ID { "0.5" } else { "0.4" }.into();

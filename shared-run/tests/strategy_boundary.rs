@@ -336,6 +336,7 @@ struct Controlled {
 }
 impl StrategyV1 for Controlled {
     type Error = &'static str;
+    type Diagnostics = ();
     fn decide(&mut self, _: &StrategyInputV1, _: i64) -> Result<StrategyOutputV1, Self::Error> {
         self.output.take().unwrap()
     }
@@ -372,28 +373,33 @@ async fn frozen_strategy_input_explicit_time_empty_error_exit_and_original_amoun
     controlled.output = Some(Ok(StrategyOutputV1::Continue {
         intents: vec![],
         next_evaluation_at_utc_ms: Some(25_000),
+        diagnostics: (),
     }));
+    let calculation = input
+        .calculate(&mut controlled, 22_000)
+        .unwrap()
+        .complete(23_000);
     let result = shared
         .dispatch_strategy(
             &mut driver.decision().unwrap(),
-            input
-                .calculate(&mut controlled, 22_000)
-                .unwrap()
-                .complete(23_000),
+            &mut controlled,
+            calculation,
         )
         .await
         .unwrap();
     assert!(matches!(result,StrategyDispatchV1::Continue {receipts,..} if receipts.is_empty()));
     assert_eq!(shared.registry().all_commitments().count(), 0);
-    controlled.output = Some(Ok(StrategyOutputV1::Exit));
+    controlled.output = Some(Ok(StrategyOutputV1::Exit { diagnostics: () }));
+    let calculation = input
+        .calculate(&mut controlled, 22_000)
+        .unwrap()
+        .complete(23_000);
     assert!(matches!(
         shared
             .dispatch_strategy(
                 &mut driver.decision().unwrap(),
-                input
-                    .calculate(&mut controlled, 22_000)
-                    .unwrap()
-                    .complete(23_000)
+                &mut controlled,
+                calculation
             )
             .await
             .unwrap(),

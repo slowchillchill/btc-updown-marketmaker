@@ -41,33 +41,47 @@ pub struct ReservedIntentV1 {
     pub intent: Arc<ModelIntentV1>,
     pub reserves: Vec<IntentReserveV1>,
 }
-pub enum StrategyOutputV1 {
+pub enum StrategyOutputV1<D = ()> {
     Continue {
         intents: Vec<ReservedIntentV1>,
         next_evaluation_at_utc_ms: Option<i64>,
+        diagnostics: D,
     },
-    Exit,
+    Exit {
+        diagnostics: D,
+    },
 }
 pub trait StrategyV1 {
     type Error;
+    type Diagnostics;
     fn decide(
         &mut self,
         input: &StrategyInputV1,
         calculation_started_at_utc_ms: i64,
-    ) -> Result<StrategyOutputV1, Self::Error>;
+    ) -> Result<StrategyOutputV1<Self::Diagnostics>, Self::Error>;
+    /// 原分派结果通知；业务资源记忆由策略维护，公共层不解释诊断。
+    fn dispatched(
+        &mut self,
+        _calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        _result: &Result<Vec<SentIntentReceiptV1>, BatchExecutionErrorV1>,
+    ) {
+    }
 }
-pub struct StrategyCalculationV1 {
+pub struct StrategyCalculationV1<D = ()> {
     pub input_cutoff: TrustedGroupDecisionCutoffV1,
     pub calculation_started_at_utc_ms: i64,
-    pub output: StrategyOutputV1,
+    pub output: StrategyOutputV1<D>,
 }
-pub struct CompletedStrategyCalculationV1 {
-    pub calculation: StrategyCalculationV1,
+pub struct CompletedStrategyCalculationV1<D = ()> {
+    pub calculation: StrategyCalculationV1<D>,
     pub calculation_completed_at_utc_ms: i64,
 }
-impl StrategyCalculationV1 {
+impl<D> StrategyCalculationV1<D> {
     /// 完成时间由在线实际测量或已批准离线时序提供，没有默认计算延迟。
-    pub fn complete(self, calculation_completed_at_utc_ms: i64) -> CompletedStrategyCalculationV1 {
+    pub fn complete(
+        self,
+        calculation_completed_at_utc_ms: i64,
+    ) -> CompletedStrategyCalculationV1<D> {
         CompletedStrategyCalculationV1 {
             calculation: self,
             calculation_completed_at_utc_ms,
@@ -79,7 +93,7 @@ impl StrategyInputV1 {
         &self,
         strategy: &mut S,
         calculation_started_at_utc_ms: i64,
-    ) -> Result<StrategyCalculationV1, S::Error> {
+    ) -> Result<StrategyCalculationV1<S::Diagnostics>, S::Error> {
         Ok(StrategyCalculationV1 {
             input_cutoff: self.action_before.cutoff().clone(),
             calculation_started_at_utc_ms,
@@ -101,15 +115,15 @@ pub struct BatchExecutionErrorV1 {
     pub failed_request_effect: Option<RequestEffectV1>,
     pub release_errors: Vec<LedgerErrorV1>,
 }
-pub enum StrategyDispatchV1 {
+pub enum StrategyDispatchV1<D = ()> {
     Continue {
-        calculation: CompletedStrategyCalculationV1,
+        calculation: CompletedStrategyCalculationV1<D>,
         sent_at_utc_ms: i64,
         receipts: Vec<SentIntentReceiptV1>,
     },
     /// 仅返回退出决定；此路径不推进、发送、排空或等待任何业务对象。
     Exit {
-        calculation: CompletedStrategyCalculationV1,
+        calculation: CompletedStrategyCalculationV1<D>,
     },
 }
 
@@ -151,16 +165,19 @@ impl SharedExecutionV2 {
                 .collect(),
         }))
     }
-    pub async fn dispatch_strategy(
+    pub async fn dispatch_strategy<S: StrategyV1>(
         &mut self,
         decision: &mut PublicGroupDecisionV1<'_>,
-        calculation: CompletedStrategyCalculationV1,
-    ) -> Result<StrategyDispatchV1, BatchExecutionErrorV1> {
+        strategy: &mut S,
+        calculation: CompletedStrategyCalculationV1<S::Diagnostics>,
+    ) -> Result<StrategyDispatchV1<S::Diagnostics>, BatchExecutionErrorV1> {
         match &calculation.calculation.output {
-            StrategyOutputV1::Exit => Ok(StrategyDispatchV1::Exit { calculation }),
+            StrategyOutputV1::Exit { .. } => Ok(StrategyDispatchV1::Exit { calculation }),
             StrategyOutputV1::Continue { intents, .. } => {
                 let sent_at_utc_ms = decision.cutoff().decision_time().logical_time_utc_ms();
-                let receipts = self.execute_batch_reserved(decision, intents).await?;
+                let result = self.execute_batch_reserved(decision, intents).await;
+                strategy.dispatched(&calculation.calculation, &result);
+                let receipts = result?;
                 Ok(StrategyDispatchV1::Continue {
                     calculation,
                     sent_at_utc_ms,

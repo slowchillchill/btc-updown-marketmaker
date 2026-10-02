@@ -1,0 +1,165 @@
+use super::*;
+
+impl ComplementaryPairV1 {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_pair(
+        &mut self,
+        input: &StrategyInputV1,
+        f: &FrozenMarketReadV1,
+        now: i64,
+        s: &MarketState,
+        p: &ProbabilityEstimateV1,
+        cash: &mut Decimal,
+        account_exposure: &mut R,
+        intents: &mut Vec<ReservedIntentV1>,
+        diag: &mut MarketDecisionDiagnosticV1,
+    ) -> Result<(), StrategyErrorV1> {
+        let o = &f.observation;
+        let Some(mut prices) = self.quotes(o, p, s)? else {
+            diag.unavailable.push(if p.up().is_none() {
+                ActionUnavailableV1::EstimateRequired
+            } else {
+                ActionUnavailableV1::NoLegalMakerPrice
+            });
+            return Ok(());
+        };
+        if s.unknown {
+            diag.unavailable
+                .push(ActionUnavailableV1::UnknownCostOrCommitment);
+            return Ok(());
+        }
+        let remaining = o.market.window.end_at_utc_ms - now;
+        if remaining <= i64::try_from(self.config.quote.execution_path_ms).unwrap_or(i64::MAX) {
+            diag.unavailable
+                .push(ActionUnavailableV1::ActionPathEndsAfterWindow);
+            return Ok(());
+        }
+        // 同侧已合格的低价目标可复用；添补另一侧时不再造第二个常驻价位。
+        for (side, target) in prices.iter_mut().enumerate() {
+            if let Some(old) = s
+                .pending
+                .iter()
+                .filter(|leg| leg.token == o.assets[side].asset.token_id && leg.price <= *target)
+                .map(|leg| leg.price)
+                .min()
+            {
+                *target = old;
+            }
+        }
+        let unit = prices[0] + prices[1];
+        let fair = [p.up().unwrap(), 1.0 - p.up().unwrap()];
+        let weights = self.config.quote.joint_fill_scenario_weights;
+        let sum = weights.iter().sum::<f64>();
+        let both = 1.0 - float(&unit)?;
+        let mut single = [0.0; 2];
+        let mut future_cash = Decimal::ZERO;
+        for held in 0..2 {
+            let other = 1 - held;
+            let retain = fair[held] - float(&prices[held])?;
+            // 可见卖价作为未来Maker修复价格情景；不保证成交，post_only费用为零。
+            // FAK不在该乐观情景中获准，实际主动修复另用公共全域费/份额界。
+            let ask = value(&o.assets[other].asks)
+                .and_then(|ls| {
+                    ls.iter()
+                        .map(|p| decimal(&p.price_pusd_per_share))
+                        .collect::<Result<Vec<_>, _>>()
+                        .ok()
+                })
+                .and_then(|ls| ls.into_iter().min());
+            let repair =
+                ask.map(|a| 1.0 - float(&prices[held]).unwrap_or(0.0) - float(&a).unwrap_or(0.0));
+            single[held] = repair
+                .map(|repair| {
+                    self.config.repair.maker_fill_weight * repair
+                        + (1.0 - self.config.repair.maker_fill_weight) * retain
+                })
+                .unwrap_or(retain);
+            if let Some(ask) = ask {
+                future_cash = future_cash.max(ask);
+            }
+        }
+        let business = (weights[0] * both + weights[1] * single[0] + weights[2] * single[1]) / sum;
+        if business < float(&self.config.quote.minimum_business_result_per_share)? {
+            diag.choice = MarketChoiceV1::Wait;
+            return Ok(());
+        }
+        let exposure_max = s.exposure[0].clone().max(s.exposure[1].clone());
+        let account_space = r(self.config.risk.account_orphan_limit_pusd)
+            .sub(account_exposure)
+            .max(R::zero());
+        let market_space = r(self.config.risk.per_market_orphan_limit_pusd)
+            .sub(&exposure_max)
+            .max(R::zero());
+        let risk_space = account_space.min(market_space);
+        let max_leg = prices[0].max(prices[1]);
+        let investment_space = r(Decimal::from(1000)).sub(&s.investment).max(R::zero());
+        let mut q = self.config.quote.base_pair_shares;
+        q = q.min(floor_decimal(
+            &r(*cash).min(investment_space).divided_by(&r(unit)),
+            2,
+        )?);
+        q = q.min(floor_decimal(&risk_space.divided_by(&r(max_leg)), 2)?);
+        // 异步修复情景只取互斥两侧最大需要，不重复冻结两份未来修复现金。
+        if future_cash > Decimal::ZERO {
+            q = q.min(floor_decimal(
+                &r(*cash)
+                    .min(r(Decimal::from(1000)).sub(&s.investment).max(R::zero()))
+                    .divided_by(&r(unit + future_cash)),
+                2,
+            )?);
+        }
+        let min = decimal(&f.rule_context.limit_min_quantity_shares)?;
+        let invalid: Vec<_> = s
+            .pending
+            .iter()
+            .filter(|leg| {
+                o.assets
+                    .iter()
+                    .position(|a| a.asset.token_id == leg.token)
+                    .is_none_or(|side| leg.price > prices[side])
+            })
+            .filter_map(|leg| leg.order_id.clone())
+            .collect();
+        let valid_targets = [0, 1].map(|side| {
+            s.pending
+                .iter()
+                .any(|leg| leg.token == o.assets[side].asset.token_id && leg.price <= prices[side])
+        });
+        let no_new_needed = valid_targets.iter().all(|v| *v);
+        if !no_new_needed && q >= min {
+            let costs = [
+                self.limit_cost(q, prices[0], o, &o.assets[0].asset.token_id, true)?,
+                self.limit_cost(q, prices[1], o, &o.assets[1].asset.token_id, true)?,
+            ];
+            let cost = costs[0].add(&costs[1]);
+            if self.limit_budget(*cash, s, &cost) {
+                let legs = vec![
+                    (
+                        self.maker_leg(&o.assets[0], q, prices[0]),
+                        costs[0].clone(),
+                        R::zero(),
+                    ),
+                    (
+                        self.maker_leg(&o.assets[1], q, prices[1]),
+                        costs[1].clone(),
+                        R::zero(),
+                    ),
+                ];
+                intents.push(self.order_item(&o.market.condition_id, legs)?);
+                *cash -= floor_decimal(&cost, 6)?;
+                *account_exposure = account_exposure.add(&r(q * max_leg));
+                diag.choice = MarketChoiceV1::NewPair;
+            }
+        } else if no_new_needed {
+            diag.choice = MarketChoiceV1::Maintain;
+        } else {
+            diag.unavailable
+                .push(ActionUnavailableV1::InventoryCapacity);
+        }
+        let ids = self.cancel_available(input, invalid);
+        if !ids.is_empty() {
+            intents.push(self.cancel(ids)?);
+        }
+        Ok(())
+    }
+}
