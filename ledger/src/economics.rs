@@ -823,7 +823,7 @@ impl EconomicsState {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct DualCashReadV1 {
     pub actual_available_pusd: ExactDecimal,
     pub actual_reserved_pusd: ExactDecimal,
@@ -851,13 +851,13 @@ pub struct SuccessfulTradeReadV1<'a> {
     pub remaining_success_shares: ExactDecimal,
     pub remaining_principal_cost_pusd: ExactRationalV1,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct ExecutedEconomicsReadV1 {
     pub shares: ExactDecimal,
     pub principal_pusd: ExactDecimal,
     pub actual_fee_pusd: ExactDecimal,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct RebateAmountsReadV1 {
     pub estimated_pusd: ExecutionReadValueV1<ExactRationalV1>,
     pub accrued_unmatured_pusd: ExactRationalV1,
@@ -884,7 +884,7 @@ pub struct SettlementCostReadV1<'a> {
     pub fact: &'a SettlementCostFactV1<Identity>,
     pub attribution: SettlementCostAttributionV1,
 }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub enum EconomicSettlementStateV1 {
     Unresolved,
     ResolvedNoCurrentPayout,
@@ -893,7 +893,7 @@ pub enum EconomicSettlementStateV1 {
     Redeemed,
     RequestFailedNoEffect,
 }
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct MarketEconomicTotalsReadV1 {
     pub condition_id: ConditionId,
     pub assets: Option<[AssetIdentityV1; 2]>,

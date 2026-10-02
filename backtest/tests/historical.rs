@@ -21,6 +21,7 @@ struct Probe {
     fail: bool,
     bad_batch: bool,
     observed: Vec<(i64, usize, Option<String>, usize)>,
+    last_economics: Option<AccountEconomicsReadV2>,
     dispatched: usize,
     failed_callback_sent: Option<usize>,
     calculation_budget: Option<usize>,
@@ -60,6 +61,7 @@ impl StrategyV1 for Probe {
             ask.clone(),
             input.trade_economics.len(),
         ));
+        self.last_economics = Some(input.action_before.economics().clone());
         if ask.is_some() {
             if self.fail {
                 return Err("original-strategy-failure");
@@ -340,6 +342,100 @@ async fn range_tail_does_not_complete_or_advance_a_pending_calculation() {
     assert_eq!(report.end_reason, HistoricalEndReasonV1::RangeEnd);
 }
 #[tokio::test(flavor = "current_thread")]
+async fn range_tail_reports_final_public_economics_after_the_last_strategy_callback() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut config, rules) = setup(temp.path());
+    config.preparation.scope.received_end_utc_ms = BASE + 1900;
+    let mut probe = Probe {
+        rules: Some(rules.clone()),
+        ..Default::default()
+    };
+    let report = run_historical_v1(&config, rules, &mut probe).await.unwrap();
+    let (last_at, _, _, last_trades) = probe.observed.last().unwrap();
+    assert_eq!(*last_at, BASE + 1601);
+    assert_eq!(*last_trades, 0);
+    assert!(probe.last_economics.unwrap().markets.iter().all(|market| {
+        market.executed.iter().all(|role| {
+            role.shares == ExactDecimal("0".into())
+                && role.actual_fee_pusd == ExactDecimal("0".into())
+        })
+    }));
+
+    assert_eq!(report.end_reason, HistoricalEndReasonV1::RangeEnd);
+    assert!(report.recording_drained);
+    let cutoff = report.observation_cutoff.as_ref().unwrap();
+    assert_eq!(cutoff.decision_time().logical_time_utc_ms(), BASE + 1899);
+    assert_eq!(report.last_observed_at_utc_ms, Some(BASE + 1899));
+    let economics = report.account_economics_memory.as_ref().unwrap();
+    let market = economics
+        .markets
+        .iter()
+        .find(|market| market.condition_id.0 == FIRST)
+        .unwrap();
+    let side = market
+        .assets
+        .as_ref()
+        .unwrap()
+        .iter()
+        .position(|asset| asset.token_id.0 == "20")
+        .unwrap();
+    assert_eq!(market.orphan_shares[side], ExactDecimal("10".into()));
+    assert_eq!(market.executed[1].shares, ExactDecimal("10".into()));
+    assert_eq!(
+        market.executed[1].actual_fee_pusd,
+        ExactDecimal("0.168".into())
+    );
+    let ledger = report.ledger_consumed_memory.as_ref().unwrap();
+    let projection = ledger
+        .market_projections
+        .iter()
+        .find(|market| market.condition_id.0 == FIRST)
+        .unwrap();
+    assert_eq!(projection.fees_pusd, market.executed[1].actual_fee_pusd);
+    assert_eq!(
+        projection
+            .outcome_balances
+            .iter()
+            .find(|balance| balance.token_id.0 == "20")
+            .unwrap()
+            .balance_shares,
+        market.orphan_shares[side]
+    );
+    assert_eq!(
+        projection.taker_rebate_receivable_pusd,
+        ExactDecimal("0.01344".into())
+    );
+    assert_eq!(
+        market.rebates[1].accrued_unmatured_pusd,
+        contracts::economics::EconomicRational::from_decimal(Decimal::new(1344, 5)).public()
+    );
+    assert_eq!(
+        report.conservative_nav_pusd.as_ref(),
+        Some(&economics.conservative_nav_pusd)
+    );
+    assert_eq!(
+        report.worst_case_maker_nav_pusd.as_ref(),
+        Some(&economics.worst_case_maker_nav_pusd)
+    );
+    // 沿既有正常结束产物保留同一快照和原截止，不把精确金额变成JSON浮点。
+    let saved: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&config.result_path).unwrap()).unwrap();
+    assert_eq!(saved, serde_json::to_value(&report).unwrap());
+    let saved_market = saved["account_economics_memory"]["markets"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|market| market["condition_id"] == FIRST)
+        .unwrap();
+    assert_eq!(saved_market["executed"][1]["actual_fee_pusd"], "0.168");
+    assert_eq!(saved_market["assets"][side]["token_id"], "20");
+    assert_eq!(saved_market["orphan_shares"][side], "10");
+    assert_eq!(
+        saved["ledger_consumed_memory"]["ledger_entry_seq"],
+        ledger.ledger_entry_seq
+    );
+}
+#[tokio::test(flavor = "current_thread")]
 async fn exit_returns_without_drain_result_write_or_future_public_observation() {
     let temp = tempfile::tempdir().unwrap();
     let (config, rules) = setup(temp.path());
@@ -351,6 +447,16 @@ async fn exit_returns_without_drain_result_write_or_future_public_observation() 
     assert_eq!(report.end_reason, HistoricalEndReasonV1::StrategyExit);
     assert!(!report.recording_drained);
     assert!(!config.result_path.exists());
+    assert!(report.account_economics_memory.is_some());
+    assert!(
+        report
+            .observation_cutoff
+            .as_ref()
+            .unwrap()
+            .decision_time()
+            .logical_time_utc_ms()
+            < BASE + 1700
+    );
     assert!(probe.observed.iter().all(|(at, _, _, _)| *at < BASE + 1700));
     assert_eq!(probe.dispatched, 1);
 }
@@ -387,10 +493,11 @@ async fn strategy_and_batch_failures_preserve_original_errors_and_stop_without_r
                 HistoricalFailureCauseV1::Strategy("original-strategy-failure")
             ));
         }
-        assert_eq!(
-            failure.report.unwrap().end_reason,
-            HistoricalEndReasonV1::Failure
-        );
+        let report = failure.report.unwrap();
+        assert_eq!(report.end_reason, HistoricalEndReasonV1::Failure);
+        assert!(!report.recording_drained);
+        assert!(report.account_economics_memory.is_some());
+        assert!(report.observation_cutoff.is_some());
         assert!(!config.result_path.exists());
     }
 }

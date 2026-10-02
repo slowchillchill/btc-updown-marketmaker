@@ -18,7 +18,7 @@ pub struct AccountEconomicsReadV1 {
 }
 /// best bid 标记语义；V1 保留历史判定前零估值，不用于当前动作读取。
 pub const ACCOUNT_ECONOMICS_VERSION: &str = "account_economics_v2";
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct AccountEconomicsReadV2 {
     pub cash: DualCashReadV1,
     pub markets: Vec<MarketEconomicsReadV1>,

@@ -81,9 +81,13 @@ pub struct CalculationTimingRecordV1 {
 pub struct HistoricalRunReportV1 {
     pub end_reason: HistoricalEndReasonV1,
     pub last_observed_at_utc_ms: Option<i64>,
+    pub observation_cutoff: Option<TrustedGroupDecisionCutoffV1>,
     pub recording_drained: bool,
     pub durable_noe_prefix: u64,
     pub ledger_consumed_memory: Option<LedgerProjectionV2>,
+    /// 与 ledger_consumed_memory 同次读取，按 observation_cutoff 的公开观察估值。
+    /// 不表示所有已观察反馈均已被 Ledger 消费或已经持久化。
+    pub account_economics_memory: Option<AccountEconomicsReadV2>,
     pub conservative_nav_pusd: Option<ExecutionReadValueV1<ExactRationalV1>>,
     pub worst_case_maker_nav_pusd: Option<ExactRationalV1>,
     pub unclosed_commitments: usize,
@@ -222,6 +226,7 @@ fn report<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
     pending_timing: Option<CalculationTimingRecordV1>,
     count: usize,
 ) -> HistoricalRunReportV1 {
+    let observation_cutoff = driver.observation_cutoff();
     let frames = driver.frames_at_observation();
     let economics = shared.ledger().economic_read().map(|read| {
         AccountEconomicsReadV2::from_ledger_and_observations(
@@ -231,16 +236,20 @@ fn report<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
     });
     HistoricalRunReportV1 {
         end_reason: reason,
-        last_observed_at_utc_ms: driver
-            .observation_cutoff()
+        last_observed_at_utc_ms: observation_cutoff
+            .as_ref()
             .map(|cutoff| cutoff.decision_time().logical_time_utc_ms()),
+        observation_cutoff,
         recording_drained: false,
         durable_noe_prefix: durable,
         ledger_consumed_memory: shared.ledger().projection_v2(),
         conservative_nav_pusd: economics
             .as_ref()
             .map(|read| read.conservative_nav_pusd.clone()),
-        worst_case_maker_nav_pusd: economics.map(|read| read.worst_case_maker_nav_pusd),
+        worst_case_maker_nav_pusd: economics
+            .as_ref()
+            .map(|read| read.worst_case_maker_nav_pusd.clone()),
+        account_economics_memory: economics,
         unclosed_commitments: shared.registry().all_commitments().count(),
         pending_noe_records: shared.pending_noe_record_count(),
         pending_calculation: pending_timing.is_some(),
