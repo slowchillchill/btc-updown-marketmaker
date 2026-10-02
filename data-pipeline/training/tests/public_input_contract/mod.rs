@@ -785,3 +785,170 @@ fn a_new_day_without_parquet_still_requires_all_seven_writer_acks() {
     crate::validate_public_source_daily_manifest_admission_v1(&path).unwrap();
     crate::validate_direct_source_daily_manifest_admission(&path).unwrap();
 }
+
+#[test]
+fn real_metadata_admission_order_survives_file_and_batch_permutations() {
+    use crate::public_replay::prepare_historical_rows_v1;
+    use contracts::*;
+    use data_pipeline_core::{public_observation_core::*, public_reference::*};
+    use parquet::arrow::{ArrowWriter, arrow_reader::ParquetRecordBatchReaderBuilder};
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/metadata-20260909-6730-6732.parquet");
+    let batch = ParquetRecordBatchReaderBuilder::try_new(File::open(fixture).unwrap())
+        .unwrap()
+        .with_batch_size(3)
+        .build()
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+    // 与生产文件读取相同，按合同列投影，不把采集侧附加审计列交给业务解码。
+    let expected_schema =
+        expected_public_schema(METADATA_SOURCE, POLYMARKET_MARKET_METADATA_SCHEMA_V6).unwrap();
+    let columns = expected_schema
+        .fields()
+        .iter()
+        .map(|field| batch.schema().index_of(field.name()).unwrap())
+        .collect::<Vec<_>>();
+    let batch = batch.project(&columns).unwrap();
+    let original = decode_public_batch(
+        METADATA_SOURCE,
+        POLYMARKET_MARKET_METADATA_SCHEMA_V6,
+        &batch,
+        0,
+        None,
+    )
+    .unwrap();
+    // 原摘要并列规则会把真实 6731 排在 6730 前，不能用它替代采集前序。
+    let evidence = original
+        .iter()
+        .map(|r| source_evidence_v3_from_typed_raw_v2(r).unwrap())
+        .collect::<Vec<_>>();
+    assert!(evidence[1].source_message_id < evidence[0].source_message_id);
+    assert_eq!(evidence[0].received_at_utc_ms, 1_788_912_000_008);
+    assert_eq!(
+        evidence[0].received_at_utc_ms,
+        evidence[1].received_at_utc_ms
+    );
+    assert!(evidence[0].collector_admission.is_none());
+    assert!(evidence[1].collector_admission.is_none());
+    let anchor = evidence[2].collector_admission.as_ref().unwrap();
+    assert_eq!(anchor.collector_admission_sequence, 6732);
+    let old_schema = typed_raw::expected_schema(METADATA_SOURCE, METADATA_V5).unwrap();
+    for legacy in [false, true] {
+        // V5 兼容表示仅改变外层物理模式；旧行全部业务字段来自同一真实材料。
+        let mut columns = batch.columns()[..old_schema.fields().len()].to_vec();
+        columns[old_schema.index_of("schema_version").unwrap()] =
+            Arc::new(StringArray::from(vec![METADATA_V5; 3]));
+        let legacy_batch = RecordBatch::try_new(old_schema.clone(), columns).unwrap();
+        let mut expected_rows = original.clone();
+        if legacy {
+            expected_rows[..2].clone_from_slice(
+                &decode_public_batch(
+                    METADATA_SOURCE,
+                    METADATA_V5,
+                    &legacy_batch.slice(0, 2),
+                    0,
+                    None,
+                )
+                .unwrap(),
+            );
+        }
+        let expected = expected_rows
+            .iter()
+            .map(|row| DptIngressV1::Message {
+                row: row.clone(),
+                source_evidence: source_evidence_v3_from_typed_raw_v2(row).unwrap(),
+            })
+            .collect::<Vec<_>>();
+        for (permutation, page_rows) in [([0, 1, 2], 3), ([2, 1, 0], 1), ([1, 2, 0], 2)] {
+            let temp = tempfile::tempdir().unwrap();
+            let mut files = Vec::new();
+            let groups = if permutation == [0, 1, 2] {
+                vec![vec![0, 1], vec![2]]
+            } else {
+                permutation.into_iter().map(|i| vec![i]).collect()
+            };
+            for group in groups {
+                let index = group[0];
+                let old = legacy && index < 2;
+                let selected = if old { &legacy_batch } else { &batch }.slice(index, group.len());
+                let path = temp.path().join(format!("source-{index}.parquet"));
+                let mut writer =
+                    ArrowWriter::try_new(File::create(&path).unwrap(), selected.schema(), None)
+                        .unwrap();
+                writer.write(&selected).unwrap();
+                writer.close().unwrap();
+                files.push((
+                    path,
+                    if old {
+                        METADATA_V5
+                    } else {
+                        POLYMARKET_MARKET_METADATA_SCHEMA_V6
+                    },
+                ));
+            }
+            let mut limits = crate::gate_a_formal_canonical_config();
+            limits.sort.max_run_rows = 1;
+            limits.sort.batch_rows = page_rows;
+            let mut merge = prepare_historical_rows_v1(
+                &temp.path().join("sort"),
+                &limits,
+                "real-metadata".into(),
+                || {
+                    let mut rows = Vec::new();
+                    for (path, version) in &files {
+                        let reader =
+                            ParquetRecordBatchReaderBuilder::try_new(File::open(path).unwrap())
+                                .unwrap()
+                                .with_batch_size(page_rows)
+                                .build()
+                                .unwrap();
+                        for batch in reader {
+                            rows.extend(
+                                decode_public_batch(
+                                    METADATA_SOURCE,
+                                    version,
+                                    &batch.unwrap(),
+                                    0,
+                                    None,
+                                )
+                                .unwrap(),
+                            );
+                        }
+                    }
+                    Ok(rows.into_iter().map(Ok))
+                },
+            )
+            .unwrap();
+            let mut actual = Vec::new();
+            while let Some(input) = merge.next_input().unwrap() {
+                actual.push(input);
+            }
+            assert_eq!(
+                actual.iter().map(|i| i.ingress.clone()).collect::<Vec<_>>(),
+                expected
+            );
+            assert_eq!(
+                actual.iter().map(|i| i.input_position).collect::<Vec<_>>(),
+                [0, 1, 2]
+            );
+            let mut core = PublicObservationCoreV1::new(PublicInputStreamHeaderV1 {
+                input_stream_id: "real-metadata".into(),
+                canonical_rule_version: "canonical-reduction-v1".into(),
+                observation_version: "market_business_observation_v1".into(),
+                ordering_version: crate::public_replay::HISTORICAL_SOURCE_HEAD_ORDERING_VERSION
+                    .into(),
+                input_scope: "UTC [2026-09-09 00:00,00:05)".into(),
+                max_pending_ws_terminals: 1,
+                initial_state: PublicInitialStateV1::Empty,
+            })
+            .unwrap();
+            let prepared = merge.prepare_input(&core, &mut actual[0]).unwrap();
+            assert!(matches!(
+                core.push(&prepared),
+                Err(DptCoreErrorV1::MetadataBeforeIdentitySnapshot)
+            ));
+        }
+    }
+}

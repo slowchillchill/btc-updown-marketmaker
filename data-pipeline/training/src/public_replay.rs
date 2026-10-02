@@ -12,6 +12,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// 新历史准备的实际排序版本；旧记录仍按其流头和已记录原序重放。
+pub const HISTORICAL_SOURCE_HEAD_ORDERING_VERSION: &str = "historical-source-head-v2";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum HistoricalSourceV1 {
     Metadata,
@@ -609,6 +612,23 @@ where
             };
             key.extend(ranks[&c.source_sequence_epoch_id].to_be_bytes());
             key.extend(c.collector_admission_sequence.to_be_bytes());
+        } else if let Some((admitted_at, sequence)) = match &row {
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(row)) => Some((
+                row.collector_admission_time_utc_ms,
+                row.collector_admission_sequence,
+            )),
+            TypedRawRowV2::PolymarketMarketMetadataV6(input) => match input.as_ref() {
+                PolymarketMarketMetadataV6Input::Existing(row) => Some((
+                    row.collector_admission_time_utc_ms,
+                    row.collector_admission_sequence,
+                )),
+                PolymarketMarketMetadataV6Input::AnchorRule(_) => None,
+            },
+            _ => None,
+        } {
+            // 旧元数据有真实准入坐标但无 epoch；仅作排序，不补造 V3 来源证据。
+            key.extend(((admitted_at as u64) ^ (1 << 63)).to_be_bytes());
+            key.extend(sequence.to_be_bytes());
         } else if let Some(c) = &evidence.collector_admission {
             key.extend(((c.admitted_at_utc_ms as u64) ^ (1 << 63)).to_be_bytes());
             key.extend(c.collector_admission_sequence.to_be_bytes());
