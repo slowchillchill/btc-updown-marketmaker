@@ -1,0 +1,437 @@
+mod account;
+mod construction;
+mod mechanics;
+mod quoting;
+mod repair;
+mod types;
+pub use types::*;
+mod config;
+mod probability;
+pub use config::*;
+pub use probability::*;
+
+use ::execution_normalization::MemoryIdentityKeyV1;
+use ::execution_normalization::SourceNeutralEntityKeyV1;
+use contracts::{economics::EconomicRational as R, *};
+use ledger::*;
+use num_bigint::{BigInt, BigUint};
+use num_traits::ToPrimitive;
+use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
+use shared_run::*;
+use sim_system::{
+    execution::{RequestContextV2, RequestEffectV1},
+    platform_rules::SealedProcessRuleSnapshotV3,
+};
+use std::{collections::BTreeMap, fmt, sync::Arc};
+
+pub const STRATEGY_ID: &str = "complementary_pair";
+pub const RULE_VERSION: &str = "candidate_v1";
+
+#[derive(Debug)]
+pub enum StrategyErrorV1 {
+    Configuration(String),
+    Arithmetic(&'static str),
+    Cost(String),
+}
+impl fmt::Display for StrategyErrorV1 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Configuration(s) => write!(f, "策略配置：{s}"),
+            Self::Arithmetic(s) => write!(f, "策略计算：{s}"),
+            Self::Cost(s) => write!(f, "公共成本：{s}"),
+        }
+    }
+}
+impl std::error::Error for StrategyErrorV1 {}
+fn decimal(v: &ExactDecimal) -> Result<Decimal, StrategyErrorV1> {
+    Decimal::from_str_exact(&v.0).map_err(|_| StrategyErrorV1::Arithmetic("非规范公共金额"))
+}
+fn r(v: Decimal) -> R {
+    R::from_decimal(v)
+}
+fn rational(v: &ExactRationalV1) -> Result<R, StrategyErrorV1> {
+    R::try_from(v).map_err(|_| StrategyErrorV1::Arithmetic("非规范公共分数"))
+}
+fn float(v: &Decimal) -> Result<f64, StrategyErrorV1> {
+    v.to_f64()
+        .ok_or(StrategyErrorV1::Arithmetic("浮点映射溢出"))
+}
+fn fd(v: f64) -> Result<Decimal, StrategyErrorV1> {
+    Decimal::from_f64_retain(v).ok_or(StrategyErrorV1::Arithmetic("统计值无法映射合法报价"))
+}
+fn exact(v: Decimal) -> ExactDecimal {
+    ExactDecimal(v.normalize().to_string())
+}
+fn value<T>(f: &ObservedFactV1<T>) -> Option<&T> {
+    matches!(
+        f.quality,
+        MarketDataQuality::Fresh | MarketDataQuality::Stale
+    )
+    .then_some(f.value.as_ref())
+    .flatten()
+}
+fn known<T>(v: &ExecutionReadValueV1<T>) -> Option<&T> {
+    match v {
+        ExecutionReadValueV1::Known(v) => Some(v),
+        _ => None,
+    }
+}
+fn fraction_units(n: &BigUint, places: u32) -> R {
+    R::ratio(BigInt::from(n.clone()), BigInt::from(10_u32).pow(places))
+}
+fn floor_decimal(v: &R, places: u32) -> Result<Decimal, StrategyErrorV1> {
+    let n = v.numerator() * BigInt::from(10_u32).pow(places) / v.denominator();
+    let n = n
+        .to_i128()
+        .ok_or(StrategyErrorV1::Arithmetic("精确金额不能编码为Decimal"))?;
+    Decimal::try_from_i128_with_scale(n, places)
+        .map_err(|_| StrategyErrorV1::Arithmetic("编码金额溢出"))
+}
+fn limit_leg(i: &ModelIntentV1, ordinal: u16) -> Option<(&ConditionId, &BuyLegIntentV1)> {
+    match i {
+        ModelIntentV1::SubmitSingleBuy {
+            condition_id,
+            order,
+        } if ordinal == 0 => Some((condition_id, order)),
+        ModelIntentV1::SubmitPairedBuy {
+            condition_id,
+            orders,
+        } => orders.get(usize::from(ordinal)).map(|l| (condition_id, l)),
+        _ => None,
+    }
+}
+fn ord_fee(
+    input: &StrategyInputV1,
+    id: Option<&::execution_normalization::MemoryLogicalIdentityV1>,
+) -> Result<Option<R>, StrategyErrorV1> {
+    let Some(id) = id else {
+        return Ok(None);
+    };
+    input
+        .action_before
+        .order_funds()
+        .find(|f| f.order_identity == id)
+        .and_then(|f| known(&f.immediate_fee_encumbrance_pusd).cloned())
+        .map(|v| decimal(&v).map(r))
+        .transpose()
+}
+fn platform_id<C>(o: &ExecutionOrderRead<'_, C>) -> String {
+    match &o.order_identity.key {
+        MemoryIdentityKeyV1::Entity(SourceNeutralEntityKeyV1::Order { source_order_id }) => {
+            source_order_id.clone()
+        }
+        _ => unreachable!("公共订单身份"),
+    }
+}
+
+/// 只保存信号、高水位、终止与未决增量占用；库存/费用/订单每轮重新读取公共事实。
+pub struct ComplementaryPairV1 {
+    config: ComplementaryPairConfigV1,
+    rules: Arc<SealedProcessRuleSnapshotV3>,
+    namespace: String,
+    next_request: u64,
+    continuity: StrategyContinuityV1,
+    signals: BTreeMap<String, SignalMemory>,
+    profit_pending: BTreeMap<String, ProfitAllocationV1>,
+}
+
+#[derive(Clone)]
+struct PendingLeg {
+    token: TokenId,
+    quantity: R,
+    cost: R,
+    price: Decimal,
+    order_id: Option<String>,
+    unknown: bool,
+}
+struct MarketState {
+    pending: Vec<PendingLeg>,
+    orphan: [Decimal; 2],
+    orphan_principal: R,
+    orphan_fee: R,
+    investment: R,
+    exposure: [R; 2],
+    unknown: bool,
+}
+impl StrategyV1 for ComplementaryPairV1 {
+    type Error = StrategyErrorV1;
+    type Diagnostics = ComplementaryPairDiagnosticV1;
+    fn decide(
+        &mut self,
+        input: &StrategyInputV1,
+        now: i64,
+    ) -> Result<StrategyOutputV1<Self::Diagnostics>, Self::Error> {
+        let (pnl, equity) = Self::profit_and_equity(input)?;
+        let occupied = self.reconcile_profit(input)?;
+        let mut profit = pnl.clone().max(R::zero()).sub(&occupied).max(R::zero());
+        let mut high =
+            rational(&self.continuity.confirmed_high_water_pusd)?.max(r(Decimal::from(2000)));
+        if let ExecutionReadValueV1::Known(e) = &equity {
+            let e = rational(e)?;
+            high = high.max(e.clone());
+            if e <= high.mul(&r(Decimal::new(7, 1))) {
+                self.continuity.terminating = true;
+            }
+        }
+        self.continuity.confirmed_high_water_pusd = high.public();
+        // 公共观察按token排列，经济池按登记资产排列；业务Up/Down必须按身份连接。
+        let mut frames = input.markets.clone();
+        for f in &mut frames {
+            f.observation.assets.sort_by_key(|a| {
+                if a.asset.outcome.label.eq_ignore_ascii_case("Up") {
+                    0
+                } else {
+                    1
+                }
+            });
+            if f.observation.assets.len() != 2
+                || !f.observation.assets[0]
+                    .asset
+                    .outcome
+                    .label
+                    .eq_ignore_ascii_case("Up")
+                || !f.observation.assets[1]
+                    .asset
+                    .outcome
+                    .label
+                    .eq_ignore_ascii_case("Down")
+            {
+                return Err(StrategyErrorV1::Arithmetic("策略要求Up/Down互补资产身份"));
+            }
+        }
+        let states = frames
+            .iter()
+            .map(|f| self.state(input, f))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut account_exposure = states.iter().fold(R::zero(), |a, s| {
+            a.add(&s.exposure[0].clone().max(s.exposure[1].clone()))
+        });
+        let mut risk_exists = false;
+        for (f, s) in frames.iter().zip(&states) {
+            let has =
+                s.orphan.iter().any(|q| *q > Decimal::ZERO) || !s.pending.is_empty() || s.unknown;
+            risk_exists |= has;
+            if self.continuity.terminating && has {
+                self.continuity
+                    .repair_market_ends
+                    .entry(f.observation.market.condition_id.0.clone())
+                    .or_insert(f.observation.market.window.end_at_utc_ms);
+            }
+        }
+        let economics = input.action_before.economics();
+        let mut cash = decimal(&economics.cash.actual_available_pusd)?
+            .min(decimal(&economics.cash.maker_available_pusd)?)
+            .max(Decimal::ZERO);
+        let mut diagnostic = ComplementaryPairDiagnosticV1 {
+            strategy_id: STRATEGY_ID.into(),
+            rule_version: RULE_VERSION.into(),
+            risk_equity_pusd: equity.clone(),
+            high_water_pusd: high.public(),
+            terminating: self.continuity.terminating,
+            qualified_net_pnl_pusd: pnl.public(),
+            available_profit_pusd: profit.public(),
+            markets: vec![],
+            profit_allocations: vec![],
+        };
+        if self.continuity.terminating
+            && ((!risk_exists && input.action_before.pending_noe_record_count() == 0)
+                || (!self.continuity.repair_market_ends.is_empty()
+                    && self
+                        .continuity
+                        .repair_market_ends
+                        .values()
+                        .all(|end| *end <= now)))
+        {
+            return Ok(StrategyOutputV1::Exit {
+                diagnostics: diagnostic,
+            });
+        }
+        let mut intents = Vec::new();
+        let mut next = None;
+        for (f, s) in frames.iter().zip(&states) {
+            let o = &f.observation;
+            let p = self
+                .signals
+                .entry(o.market.condition_id.0.clone())
+                .or_default()
+                .estimate(o, now, &self.config.probability)?;
+            let missing = s
+                .orphan
+                .iter()
+                .position(|q| *q > Decimal::ZERO)
+                .map(|held| 1 - held);
+            let urgency = self.urgency(o, now, &p, s, cash, missing)?;
+            let mut d = MarketDecisionDiagnosticV1 {
+                condition_id: o.market.condition_id.clone(),
+                probability: p.clone(),
+                urgency,
+                choice: MarketChoiceV1::Wait,
+                unavailable: vec![],
+                comparison: None,
+                maximum_repair_price: None,
+            };
+            let trading = now >= o.market.window.start_at_utc_ms
+                && now < o.market.window.end_at_utc_ms
+                && value(&o.accepting_orders) == Some(&true)
+                && value(&o.closed) != Some(&true);
+            let initial = intents.len();
+            if trading {
+                self.repair(
+                    input,
+                    f,
+                    now,
+                    s,
+                    &p,
+                    &mut cash,
+                    &mut account_exposure,
+                    &mut profit,
+                    &mut intents,
+                    &mut d,
+                    &mut diagnostic.profit_allocations,
+                )?;
+                // 单次目标结构优先维护/修复；保留孤腿时仍可在容量与经营条件下新配对。
+                if !self.continuity.terminating
+                    && matches!(equity, ExecutionReadValueV1::Known(_))
+                    && intents.len() == initial
+                    && !matches!(
+                        d.choice,
+                        MarketChoiceV1::Maintain | MarketChoiceV1::CancelBeforeActiveRepair
+                    )
+                {
+                    self.new_pair(
+                        input,
+                        f,
+                        now,
+                        s,
+                        &p,
+                        &mut cash,
+                        &mut account_exposure,
+                        &mut intents,
+                        &mut d,
+                    )?;
+                }
+                next = Some(next.map_or(o.market.window.end_at_utc_ms, |t: i64| {
+                    t.min(o.market.window.end_at_utc_ms)
+                }));
+                if let Some(rule) = value(&o.settlement_reference) {
+                    let at = o.market.window.end_at_utc_ms - probability::window(*rule);
+                    if at > now {
+                        next = Some(next.unwrap().min(at));
+                    }
+                }
+                // 路径余量与窗口边界触发时间评估，不增加固定频率或最长等待。
+                for path in [
+                    self.config.quote.execution_path_ms,
+                    self.config.repair.maker_path_ms,
+                    self.config.repair.active_path_ms,
+                ] {
+                    let at = o
+                        .market
+                        .window
+                        .end_at_utc_ms
+                        .saturating_sub(i64::try_from(path).unwrap_or(i64::MAX));
+                    if at > now {
+                        next = Some(next.unwrap().min(at));
+                    }
+                }
+            }
+            let restricted = s.unknown
+                || s.investment > r(Decimal::from(1000))
+                || s.exposure[0].clone().max(s.exposure[1].clone())
+                    > r(self.config.risk.per_market_orphan_limit_pusd)
+                || account_exposure > r(self.config.risk.account_orphan_limit_pusd)
+                || self.continuity.terminating
+                || !matches!(equity, ExecutionReadValueV1::Known(_))
+                || p.up().is_none()
+                || !trading;
+            let mut repair_remaining = missing
+                .map(|held_side| r(s.orphan[1 - held_side]))
+                .unwrap_or_else(R::zero);
+            let cap = d.maximum_repair_price.as_ref().map(decimal).transpose()?;
+            let targets = self.quotes(o, &p, s)?;
+            let mut cancel = Vec::new();
+            for pending in &s.pending {
+                let qualified = missing.is_some_and(|side| {
+                    o.assets
+                        .get(side)
+                        .is_some_and(|a| a.asset.token_id == pending.token)
+                }) && cap.is_some_and(|cap| pending.price <= cap)
+                    && !s.unknown
+                    && pending.quantity <= repair_remaining;
+                if qualified {
+                    repair_remaining = repair_remaining.sub(&pending.quantity);
+                }
+                let price_invalid = targets.is_some_and(|targets| {
+                    o.assets
+                        .iter()
+                        .position(|a| a.asset.token_id == pending.token)
+                        .is_none_or(|side| pending.price > targets[side])
+                });
+                if (restricted || price_invalid)
+                    && !qualified
+                    && let Some(id) = &pending.order_id
+                {
+                    cancel.push(id.clone());
+                }
+            }
+            let cancel = self.cancel_available(input, cancel);
+            if !cancel.is_empty() {
+                intents.push(self.cancel(cancel)?);
+            }
+            diagnostic.markets.push(d);
+        }
+        let mut canceled = std::collections::BTreeSet::new();
+        intents.retain_mut(|item| {
+            if let ModelIntentV1::CancelOrders { platform_order_ids } =
+                Arc::make_mut(&mut item.intent)
+            {
+                platform_order_ids.retain(|id| canceled.insert(id.clone()));
+                !platform_order_ids.is_empty()
+            } else {
+                true
+            }
+        });
+        Ok(StrategyOutputV1::Continue {
+            intents,
+            next_evaluation_at_utc_ms: next,
+            diagnostics: diagnostic,
+        })
+    }
+    fn dispatched(
+        &mut self,
+        calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        result: &Result<Vec<SentIntentReceiptV1>, BatchExecutionErrorV1>,
+    ) {
+        let StrategyOutputV1::Continue {
+            diagnostics,
+            intents,
+            ..
+        } = &calculation.output
+        else {
+            return;
+        };
+        for a in &diagnostics.profit_allocations {
+            let sent = match result {
+                Ok(receipts) => receipts
+                    .iter()
+                    .any(|r| r.context.global_request_id == a.global_request_id),
+                Err(e) => {
+                    e.sent
+                        .iter()
+                        .any(|r| r.context.global_request_id == a.global_request_id)
+                        || (e.failed_request_effect == Some(RequestEffectV1::MayHaveRequestEffect)
+                            && e.attempted_intent_index
+                                .and_then(|i| intents.get(i))
+                                .is_some_and(|i| {
+                                    i.context.global_request_id == a.global_request_id
+                                }))
+                }
+            };
+            if sent {
+                self.profit_pending
+                    .insert(a.global_request_id.clone(), a.clone());
+            }
+        }
+    }
+}

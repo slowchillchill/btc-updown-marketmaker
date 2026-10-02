@@ -113,7 +113,7 @@ DPT 的 `valuation_best_bid` 在原来源选择投影内组合直接 BBA 与完�
 
 `SharedExecutionV2::strategy_input` 经原公共组准备／经济消费与冻结入口，产生 `StrategyInputV1`：同一截止的 `ActionBeforeReadV2`、逐市场原观察和不可变规则。冻结明细 `StrategyInputV1::trade_economics` 包含原成交事实、成功与经济应用标志、实际净费用和公共平均成本池的剩余贡献份额；后续消费不改旧快照。原模型读取及 `original_target` 的数量编码不变，其他策略从原登记 `origin.intent` 读取金额，不套用模型 `q=n/100` 假设。
 
-`StrategyV1::decide` 返回计算错误或 `StrategyOutputV1::{Continue, Exit}`。`calculate` 接收显式开始时间，`complete` 接收显式完成时间，`dispatch_strategy` 在当前真实决策截止发送，回传发送时间及实际回执。公共边界不提供计算延迟默认值、不用墙钟填历史时间、不将完成结果重新注入过去；宿主负责按已批准时序推进到可发送点、触发下一次计算及消费 `next_evaluation_at_utc_ms`。`Exit` 立即返回，没有发送、推进、排空或等待；该接口不等于完整历史／PAPER／LIVE 宿主，历史调用角色映射仍待所属宿主决定。
+`StrategyV1::decide` 返回计算错误或 `StrategyOutputV1<D>::{Continue, Exit}`，`D` 是策略自己的关联诊断类型。诊断随 `StrategyCalculationV1<D>` 冻结；公共层不解释业务含义。`calculate` 接收显式开始时间，`complete` 接收显式完成时间，`dispatch_strategy` 在当前真实决策截止发送，回传发送时间及实际回执，并在返回前把原成功／失败结果通知同一策略实例的 `dispatched`，供策略更新未决资源记忆；通知不自动重试或改变原错误。公共边界不提供计算延迟默认值、不用墙钟填历史时间、不将完成结果重新注入过去；宿主负责按已批准时序推进到可发送点、触发下一次计算及消费 `next_evaluation_at_utc_ms`。`Exit` 立即返回，没有发送、推进、排空或等待；该接口不等于完整历史／PAPER／LIVE 宿主，历史调用角色映射仍待所属宿主决定。
 
 `ReservedIntentV1` 保留原 `ModelIntentV1`、独立请求上下文和逐资金项 `IntentReserveV1`；消费者须按其获批成本口径列全新增本金／即时费用，并保留原腿 ordinal。`execute_batch_reserved` 复用原 Ledger 整动作预留及 Bridge：整体预留失败零发送，成功后原序提交。发送前先核对全批当前资金状态：历史 `Reserved` 是原粘滞决定，不能替代当前有效预留；预留已释放／转换且原请求没有真实接收回执或 NOE 提交响应证据时，整批返回原请求错误，零新增预留、零发送。该接口不重开已结束的预留身份；真实已发请求仍凭原证据幂等读取，即使本地预留已转换也不另占资金。旧 Ledger 粘滞接口和模型入口不变。取消意图没有新增资金预留。它不修改价格、数量、订单方法、资金政策或模型旧单意图入口。
 
