@@ -86,7 +86,7 @@ cargo build -p baseline-mm --example research_input_audit --release --locked --o
 
 原实现 `52bb966…` 的 `sim-system/src/bin/sim_measurement.rs::successful_finality_bytes` 提供正常路径 `MATCHED@0 → MINED@10 → CONFIRMED@20 ms`、`economic_application_ordinal=1`、`failure_overrides=[]`。真实 Gate-B working 日志的 `RUN_OPENED` 绑定该 finality 摘要 `b98102f86cbd2e0d635bdc5074dcb1d7c1fb1a84de61d419d07a475c2e8533ef`，同时绑定上述真实规则与实现。日志仅证明启动绑定，不宣称该 working 产物是完整 CleanRun。
 
-审计从该固定源构造字节，摘要与真实启动绑定完全一致，并经原 `TradeFinalityPolicyV2::decode_and_seal` 成功封定；机器报告保留完整213字节对象的内容与 policy ID。原产物未保留独立 finality 文件不构成新业务缺口。此正常路径是明确的项目机制假设，非9月实际私有成交终态或实测网络延迟；空失败覆盖也不证明真实失败率为零。后续失败敏感性沿原四模板和原补偿，不捏造历史私有真值。
+审计从该固定源构造字节，摘要与真实启动绑定完全一致，并经原 `TradeFinalityPolicyV2::decode_and_seal` 成功封定；机器报告保留完整231字节对象的内容与 policy ID。原产物未保留独立 finality 文件不构成新业务缺口。此正常路径是明确的项目机制假设，非9月实际私有成交终态或实测网络延迟；空失败覆盖也不证明真实失败率为零。后续失败敏感性沿原四模板和原补偿，不捏造历史私有真值。
 
 ## 6. 资格结论与下一步边界
 
