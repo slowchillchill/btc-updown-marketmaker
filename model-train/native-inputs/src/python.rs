@@ -70,6 +70,7 @@ fn account<'py>(
         match a.caller_role {
             contracts::SimCallerRoleV1::ModelTrain => "MODEL_TRAIN",
             contracts::SimCallerRoleV1::OfflineEvaluation => "OFFLINE_EVALUATION",
+            contracts::SimCallerRoleV1::HistoricalBacktest => "HISTORICAL_BACKTEST",
             contracts::SimCallerRoleV1::Paper => "PAPER",
         },
     )?;

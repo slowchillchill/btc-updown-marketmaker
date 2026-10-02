@@ -1072,6 +1072,46 @@ dependencies = [
 ]
 
 [[package]]
+name = "backtest"
+version = "0.1.0"
+dependencies = [
+ "contracts",
+ "data-collect",
+ "data-pipeline-core",
+ "data-pipeline-training",
+ "ledger",
+ "num-bigint",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "sha2",
+ "shared-run",
+ "sim-system",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "backtest-cli"
+version = "0.1.0"
+dependencies = [
+ "backtest",
+ "baseline-mm",
+ "contracts",
+ "data-collect",
+ "data-pipeline-training",
+ "ledger",
+ "rust_decimal",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sim-system",
+ "tempfile",
+ "tokio",
+ "toml",
+]
+
+[[package]]
 name = "base16ct"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

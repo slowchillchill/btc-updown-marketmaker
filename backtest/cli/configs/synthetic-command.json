@@ -1,0 +1,151 @@
+{
+  "run": {
+    "preparation": {
+      "scope": {
+        "manifest_paths": [
+          "./synthetic-inputs/manifest.json"
+        ],
+        "received_start_utc_ms": 1787529600000,
+        "received_end_utc_ms": 1787529612000,
+        "purpose": "合成工程配置；无正式风险或宿主时延研究结论"
+      },
+      "work_root": "./run-artifacts",
+      "header": {
+        "input_stream_id": "synthetic-history",
+        "canonical_rule_version": "canonical-reduction-v1",
+        "observation_version": "market_business_observation_v1",
+        "ordering_version": "historical-source-head-v1",
+        "input_scope": "explicit-manifests/synthetic",
+        "max_pending_ws_terminals": 10,
+        "initial_state": "Empty"
+      },
+      "canonical": {
+        "decode_batch_rows": 10,
+        "max_decode_batch_bytes": 1048576,
+        "max_temporary_row_bytes": 1048576,
+        "max_epoch_count_per_source": 10,
+        "max_pending_ws_terminals": 10,
+        "max_retained_reducer_entries": 100,
+        "canonical_rule_version": "canonical-reduction-v1",
+        "sort": {
+          "max_run_rows": 100,
+          "max_run_bytes": 1048576,
+          "max_temp_run_files": 20,
+          "merge_fan_in": 4,
+          "max_open_files": 8,
+          "batch_rows": 10,
+          "max_temp_bytes": 67108864
+        }
+      },
+      "recording": {
+        "max_artifact_payload_bytes": 1048576,
+        "max_capture_output_bytes": 33554432,
+        "max_candidate_directory_bytes": 67108864,
+        "max_observation_l2_levels": 100,
+        "sort": {
+          "max_run_rows": 100,
+          "max_run_bytes": 1048576,
+          "max_temp_run_files": 20,
+          "merge_fan_in": 4,
+          "max_open_files": 8,
+          "batch_rows": 10,
+          "max_temp_bytes": 67108864
+        }
+      },
+      "read_page_rows": 10,
+      "max_read_batch_bytes": 1048576,
+      "hidden_stream_id": "synthetic-hidden"
+    },
+    "timing": {
+      "public_delivery_delay_ms": {
+        "Fixed": 100
+      },
+      "calculation_start_delay_ms": {
+        "Fixed": 0
+      },
+      "calculation_duration_ms": {
+        "Fixed": 200
+      },
+      "dispatch_delay_ms": {
+        "Fixed": 200
+      }
+    },
+    "session": {
+      "run_id": "synthetic-history",
+      "session_id": "one-session",
+      "account_id": "one-account",
+      "caller_instance_id": "synthetic-host",
+      "creation_request_id": "opening",
+      "response_bridge_binding_id": "bridge",
+      "initial_account_state": {
+        "available_pusd": "2000"
+      },
+      "session_seed": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    },
+    "implementation_identity": {
+      "git_commit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "source_identity_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "cargo_lock_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    "finality_policy_path": "./synthetic-inputs/finality.json",
+    "sim_log": "./run-artifacts/sim.jsonl",
+    "noe_root": "./run-artifacts/noe",
+    "ledger_root": "./run-artifacts/ledger",
+    "metadata_path": "./run-artifacts/run.json",
+    "result_path": "./run-artifacts/result.json",
+    "activation_id": "activate",
+    "consumption_sequence_ref": "historical-host",
+    "noe_implementation_identity": "public-v4",
+    "admission_policy": "DualCashNoMarketLimit",
+    "max_group_bytes": 16777216,
+    "finite_in_flight_groups": 128
+  },
+  "rules": {
+    "snapshot_path": "sim-system/tests/fixtures/platform-rule-snapshot-v3-gate-b.json",
+    "expected_file_sha256": "d63c0e7b09edc4b2c4c3f0295f806b25f6f5fd03663cdf60ff062117e53e4e54",
+    "replay_causal_start_utc_ms": 1787529600000
+  },
+  "strategy": {
+    "probability": {
+      "volatility_window_ms": 60000,
+      "initial_sigma_usd_per_sqrt_second": 10.0,
+      "estimation_error_usd": 1.0,
+      "binance_innovation_weight": 1.0,
+      "binance_pressure_weight_usd": 0.0,
+      "binance_trade_pressure_weight_usd": 0.0
+    },
+    "quote": {
+      "base_pair_shares": "10",
+      "base_half_spread": "0.02",
+      "inventory_shift_per_pusd": "0.001",
+      "uncertainty_spread_weight": "0.01",
+      "signal_spread_weight": "0.1",
+      "joint_fill_scenario_weights": [
+        0.5,
+        0.2,
+        0.2,
+        0.1
+      ],
+      "minimum_business_result_per_share": "0",
+      "execution_path_ms": 200
+    },
+    "repair": {
+      "base_loss_allowance_per_share": "0.03",
+      "time_loss_allowance_per_share": "0.02",
+      "inventory_loss_allowance_per_share": "0.02",
+      "maximum_overfill_shares": "10",
+      "maximum_overfill_pusd": "10",
+      "maker_fill_weight": 0.5,
+      "wait_price_improvement_per_share": "0",
+      "residual_risk_weight": "1",
+      "maker_path_ms": 50,
+      "active_path_ms": 150,
+      "enable_active_repair": true
+    },
+    "risk": {
+      "per_market_orphan_limit_pusd": "100",
+      "account_orphan_limit_pusd": "500"
+    }
+  },
+  "request_namespace": "synthetic-baseline"
+}

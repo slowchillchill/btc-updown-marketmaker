@@ -174,7 +174,7 @@ impl SharedExecutionV2 {
         match &calculation.calculation.output {
             StrategyOutputV1::Exit { .. } => Ok(StrategyDispatchV1::Exit { calculation }),
             StrategyOutputV1::Continue { intents, .. } => {
-                let sent_at_utc_ms = decision.cutoff().decision_time().logical_time_utc_ms();
+                let sent_at_utc_ms = decision.sent_at_utc_ms();
                 let result = self.execute_batch_reserved(decision, intents).await;
                 strategy.dispatched(&calculation.calculation, &result);
                 let receipts = result?;

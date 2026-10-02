@@ -129,6 +129,10 @@ impl<P: SharedOrderEvidence> SharedExecution<P> {
     ) -> Result<LedgerApplyOutcomeV1, LedgerErrorV1> {
         self.ledger.release_known_unsent(event, request)
     }
+    /// 已领取但仍缺经济前驱的原 NOE 引用数量。
+    pub fn pending_noe_record_count(&self) -> usize {
+        self.pending.len()
+    }
     pub fn ledger(&self) -> &LedgerWriterV1 {
         &self.ledger
     }

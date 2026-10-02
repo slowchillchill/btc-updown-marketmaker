@@ -784,7 +784,9 @@ impl UniqueSessionStateV2 {
     fn recording_closed_through(&self) -> Option<i64> {
         match self.opening_fact.account_instance_key.caller_role {
             SimCallerRoleV1::Paper => self.public_visibility_frontier.closed_through_utc_ms,
-            SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation => {
+            SimCallerRoleV1::ModelTrain
+            | SimCallerRoleV1::OfflineEvaluation
+            | SimCallerRoleV1::HistoricalBacktest => {
                 self.hidden_platform_frontier.closed_through_utc_ms
             }
         }
@@ -3072,7 +3074,9 @@ impl SimRunActorV2 {
         };
         let input_exhausted = match session.opening_fact.account_instance_key.caller_role {
             SimCallerRoleV1::Paper => session.public_visibility_frontier.sealed,
-            SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation => {
+            SimCallerRoleV1::ModelTrain
+            | SimCallerRoleV1::OfflineEvaluation
+            | SimCallerRoleV1::HistoricalBacktest => {
                 session.hidden_platform_frontier.sealed && session.public_visibility_frontier.sealed
             }
         };
@@ -3491,9 +3495,9 @@ impl SimRunActorV2 {
             if let Some(session) = self.state.as_ref().and_then(|state| state.session.as_ref()) {
                 let frontier = match session.opening_fact.account_instance_key.caller_role {
                     SimCallerRoleV1::Paper => &session.public_visibility_frontier,
-                    SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation => {
-                        &session.hidden_platform_frontier
-                    }
+                    SimCallerRoleV1::ModelTrain
+                    | SimCallerRoleV1::OfflineEvaluation
+                    | SimCallerRoleV1::HistoricalBacktest => &session.hidden_platform_frontier,
                 };
                 if let Some(at) = frontier.closed_through_utc_ms {
                     self.projection_port.close_receive_prefix(at);
@@ -4574,7 +4578,9 @@ fn apply_post_action_v2(
         Some(member) => {
             let caller_role = session.opening_fact.account_instance_key.caller_role;
             let role_markets = match caller_role {
-                SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation => session
+                SimCallerRoleV1::ModelTrain
+                | SimCallerRoleV1::OfflineEvaluation
+                | SimCallerRoleV1::HistoricalBacktest => session
                     .hidden_platform_markets
                     .as_ref()
                     .expect("训练和离线评估会话必须持有隐藏平台状态"),
@@ -5461,9 +5467,9 @@ fn next_required_logical_drive_v2(
         .earliest_at_utc_ms()
         .map(|required_at_utc_ms| NextRequiredLogicalDriveV2 {
             path: match session.opening_fact.account_instance_key.caller_role {
-                SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation => {
-                    MarketEventPathV1::HiddenPlatform
-                }
+                SimCallerRoleV1::ModelTrain
+                | SimCallerRoleV1::OfflineEvaluation
+                | SimCallerRoleV1::HistoricalBacktest => MarketEventPathV1::HiddenPlatform,
                 SimCallerRoleV1::Paper => MarketEventPathV1::PublicVisibility,
             },
             required_at_utc_ms,
@@ -5835,12 +5841,25 @@ pub(crate) fn drive_business_input_at_v2(
         ));
     }
     let drives_execution = market_path_drives_execution_for(caller_role, path);
-    let common_invalid = frontier.sealed
+    let finite_obligation = caller_role == SimCallerRoleV1::HistoricalBacktest
+        && hidden_bucket.is_none()
+        && bucket.is_none()
+        && public_group.is_none()
+        && public_observation.is_none()
+        && public_closure.is_none();
+    let common_invalid = (frontier.sealed && !finite_obligation)
         || frontier
             .closed_through_utc_ms
             .is_some_and(|closed| logical_at_utc_ms <= closed)
         || next_index_position < frontier.next_index_position;
     let closes_time = public_group.is_none() && public_observation.is_none();
+    // 有限历史源已封口或已给出下一完整桶：宿主可在已证明空档中闭合明确范围尾部。
+    let finite_closed_gap = finite_obligation
+        && path == MarketEventPathV1::HiddenPlatform
+        && (frontier.sealed
+            || frontier
+                .next_event_at_utc_ms
+                .is_some_and(|next| next > logical_at_utc_ms));
     let payload_invalid = if public_group.is_some() {
         start_index_position.is_some_and(|start| start < frontier.next_index_position)
     } else if let Some(hidden) = hidden_bucket {
@@ -5861,7 +5880,7 @@ pub(crate) fn drive_business_input_at_v2(
             || matches!(bucket.reference.closure, crate::market::MillisecondBucketClosureV1::NextEventAt(next_at) if next_at <= logical_at_utc_ms)
     } else {
         !drives_execution
-            || first_due != Some(logical_at_utc_ms)
+            || (!finite_closed_gap && first_due != Some(logical_at_utc_ms))
             || frontier
                 .next_event_at_utc_ms
                 .is_some_and(|next_at| logical_at_utc_ms >= next_at)
@@ -6014,7 +6033,9 @@ pub(crate) fn drive_business_input_at_v2(
                 })?,
             );
         }
-        if hidden.reference.closure == contracts::ReplayIndexClosureV1::EndOfInput {
+        if hidden.reference.closure == contracts::ReplayIndexClosureV1::EndOfInput
+            && caller_role != SimCallerRoleV1::HistoricalBacktest
+        {
             state
                 .session
                 .as_ref()
@@ -6037,7 +6058,9 @@ pub(crate) fn drive_business_input_at_v2(
             );
         }
     }
-    if public_closure.is_some_and(|c| c.closure == PublicTimeClosureReasonV1::EndOfInput) {
+    if public_closure.is_some_and(|c| c.closure == PublicTimeClosureReasonV1::EndOfInput)
+        && caller_role != SimCallerRoleV1::HistoricalBacktest
+    {
         state
             .session
             .as_ref()
@@ -6077,7 +6100,7 @@ pub(crate) fn drive_business_input_at_v2(
             && hidden_bucket.is_some_and(|b| {
                 b.reference.closure == contracts::ReplayIndexClosureV1::EndOfInput
             }));
-    if successful_execution_eof {
+    if successful_execution_eof && caller_role != SimCallerRoleV1::HistoricalBacktest {
         while let Some(next_at) = next_scheduled_obligation_at_v2(&state, rules) {
             state = drain_scheduled_obligations_at_v2(
                 state,
@@ -6183,7 +6206,9 @@ fn reduce_business_input_v2(
             let market_directory = initial_market_directory.clone();
             let public_markets = MarketStateStoreV2::new(&market_directory);
             let hidden_platform_markets = match spec.caller_role {
-                SimCallerRoleV1::ModelTrain | SimCallerRoleV1::OfflineEvaluation => {
+                SimCallerRoleV1::ModelTrain
+                | SimCallerRoleV1::OfflineEvaluation
+                | SimCallerRoleV1::HistoricalBacktest => {
                     Some(MarketStateStoreV2::new(&market_directory))
                 }
                 SimCallerRoleV1::Paper => None,
@@ -19433,9 +19458,63 @@ impl PublicSimExecutionV1 {
         max_group_bytes: usize,
         finite_in_flight_groups: usize,
     ) -> Result<Self, SimRunActorErrorV2> {
+        Self::create_new_with_role(
+            path,
+            opened,
+            rules,
+            finality,
+            scenario,
+            latency,
+            projection,
+            max_group_bytes,
+            finite_in_flight_groups,
+            RunDurabilityRoleV2::CleanRun,
+        )
+    }
+    /// 真实有限历史运行记录；不能调用 complete 冒充完整经济终局。
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_new_historical(
+        path: &Path,
+        opened: PublicRunOpenedV1,
+        rules: Arc<SealedProcessRuleSnapshotV3>,
+        finality: Arc<TradeFinalityPolicyV2>,
+        scenario: Arc<SealedPlatformScenarioV1>,
+        latency: Arc<EmpiricalDelayProfile>,
+        projection: Box<dyn PublicProjectionPortV1>,
+        max_group_bytes: usize,
+        finite_in_flight_groups: usize,
+    ) -> Result<Self, SimRunActorErrorV2> {
+        Self::create_new_with_role(
+            path,
+            opened,
+            rules,
+            finality,
+            scenario,
+            latency,
+            projection,
+            max_group_bytes,
+            finite_in_flight_groups,
+            RunDurabilityRoleV2::FiniteHistorical,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn create_new_with_role(
+        path: &Path,
+        opened: PublicRunOpenedV1,
+        rules: Arc<SealedProcessRuleSnapshotV3>,
+        finality: Arc<TradeFinalityPolicyV2>,
+        scenario: Arc<SealedPlatformScenarioV1>,
+        latency: Arc<EmpiricalDelayProfile>,
+        projection: Box<dyn PublicProjectionPortV1>,
+        max_group_bytes: usize,
+        finite_in_flight_groups: usize,
+        role: RunDurabilityRoleV2,
+    ) -> Result<Self, SimRunActorErrorV2> {
+        let mut record = opened.into_record();
+        record.durability_role = role;
         let mut actor = SimRunActorV2::create_new(
             path,
-            opened.into_record(),
+            record,
             rules,
             finality,
             scenario,
@@ -20061,7 +20140,35 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
             ));
         }
         self.state
-            .advance_before(at, PublicTimeClosureReasonV1::NextGlobalEventAt(at))
+            .advance_before(at, PublicTimeClosureReasonV1::NextGlobalEventAt(at))?;
+        // 完整隐藏桶证明其下一桶之前没有其他隐藏行情；有限历史宿主据此关闭空档。
+        if let Some(before) = at.checked_sub(1) {
+            let session = self
+                .execution
+                .actor
+                .state
+                .as_ref()
+                .and_then(|state| state.session.as_ref())
+                .ok_or(SimRunActorErrorV2::SessionNotCreated)?;
+            let frontier = &session.hidden_platform_frontier;
+            if session.opening_fact.account_instance_key.caller_role
+                == SimCallerRoleV1::HistoricalBacktest
+                && frontier
+                    .closed_through_utc_ms
+                    .is_some_and(|closed| closed < before)
+                && (frontier.sealed || frontier.next_event_at_utc_ms.is_some_and(|next| next >= at))
+            {
+                let next_index_position = frontier.next_index_position;
+                self.execution
+                    .actor
+                    .drive_platform_prefix(PlatformPrefixAdvanceV2 {
+                        path: MarketEventPathV1::HiddenPlatform,
+                        closed_through_utc_ms: before,
+                        next_index_position,
+                    })?;
+            }
+        }
+        Ok(())
     }
     /// 静默观察复用已有合法材料，严格更早的义务先推进，at仍开放。
     pub fn observe_at(
@@ -20112,7 +20219,15 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
                 .expect("待关闭组已有回执")
                 .execution_time
                 .logical_time_utc_ms();
-            if next_time != Some(at) {
+            let already_closed = self
+                .execution
+                .actor
+                .state
+                .as_ref()
+                .and_then(|s| s.session.as_ref())
+                .and_then(|s| s.public_visibility_frontier.closed_through_utc_ms)
+                .is_some_and(|closed| closed >= at);
+            if next_time != Some(at) && !already_closed {
                 self.state.close_at(
                     at,
                     next_time.map_or(
@@ -20169,6 +20284,46 @@ impl<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
         let result = self.state.apply_group(prepared, at)?;
         self.source.next();
         Ok(Some(result))
+    }
+    /// 有限宿主在明确范围尾部结束公开供料；不生成市场终态或 CleanRun。
+    pub fn finish_input_at(&mut self, at: i64) -> Result<(), SimRunActorErrorV2> {
+        self.advance_before(at)?;
+        let session = self
+            .execution
+            .actor
+            .state
+            .as_ref()
+            .and_then(|state| state.session.as_ref())
+            .ok_or(SimRunActorErrorV2::SessionNotCreated)?;
+        if session.opening_fact.account_instance_key.caller_role
+            == SimCallerRoleV1::HistoricalBacktest
+            && session
+                .hidden_platform_frontier
+                .closed_through_utc_ms
+                .is_none_or(|closed| closed < at)
+        {
+            let next_index_position = session.hidden_platform_frontier.next_index_position;
+            self.execution
+                .actor
+                .drive_platform_prefix(PlatformPrefixAdvanceV2 {
+                    path: MarketEventPathV1::HiddenPlatform,
+                    closed_through_utc_ms: at,
+                    next_index_position,
+                })?;
+        }
+        self.state.observe_at(at)?;
+        self.state
+            .close_at(at, PublicTimeClosureReasonV1::EndOfInput)
+    }
+    /// 登记下一真实组所需的身份，仍不消费组。
+    pub fn next_prepared_group(
+        &mut self,
+    ) -> Result<Option<Arc<PreparedPublicGroupV1>>, SimRunActorErrorV2> {
+        self.next_group_at()?;
+        Ok(self
+            .source
+            .peek()
+            .map(|item| Arc::clone(&item.as_ref().expect("已核实成功来源").prepared)))
     }
     pub fn settlement_simulation_read(
         &self,
@@ -20448,6 +20603,13 @@ pub struct PublicGroupDecisionV1<'a> {
 impl PublicGroupDecisionV1<'_> {
     pub fn cutoff(&self) -> &TrustedGroupDecisionCutoffV1 {
         &self.cutoff
+    }
+    /// 与原冻结观察分开：实际请求发送采用的执行时刻。
+    pub fn sent_at_utc_ms(&self) -> i64 {
+        self.send_time
+            .as_ref()
+            .unwrap_or(&self.cutoff.decision_time)
+            .logical_time_utc_ms()
     }
     pub fn frames(&self) -> Vec<PublicObservationFrameV1<'_>> {
         self.driver.frames_with_cutoff(&self.cutoff)
