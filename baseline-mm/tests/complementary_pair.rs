@@ -1093,3 +1093,125 @@ async fn maker_overlap_bounds_use_expensive_old_order_price_not_cheap_replacemen
             .any(|i| matches!(i.intent.as_ref(), ModelIntentV1::CancelOrders { .. }))
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn rolling_twap_fallback_cannot_supply_the_terminal_spot_integral() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut shared, mut driver, rules) = setup(temp.path(), "2000");
+    let mut input = estimated(
+        shared.strategy_input(&mut driver).unwrap().unwrap(),
+        "99900",
+    );
+    let o = &mut input.markets[0].observation;
+    o.market.window.end_at_utc_ms = 120_000;
+    o.settlement_reference = fact(BtcSettlementReferenceV1::ChainlinkTwapSixtySeconds);
+    o.chainlink_spot = ObservedFactV1::default();
+    o.chainlink_twap_sixty = fact(ChainlinkBtcUsdTwapReferenceV1 {
+        symbol: "btc/usd".into(),
+        window_s: 60,
+        price_usd_per_btc: ExactDecimal("99900".into()),
+        payload_timestamp_utc_ms: 60_000,
+        message_timestamp_utc_ms: 60_000,
+    });
+    let mut s = strategy(config(), rules);
+    let before = input.calculate(&mut s, 60_000).unwrap();
+    assert!(
+        matches!(
+            diagnostic(&before.output).markets[0].probability,
+            ProbabilityEstimateV1::Known {
+                mean_usd: 99900.0,
+                approximate_window_integral: false,
+                ..
+            }
+        ),
+        "窗前TWAP仍可作为未来水平近似"
+    );
+    input.markets[0].observation.chainlink_twap_sixty = fact(ChainlinkBtcUsdTwapReferenceV1 {
+        symbol: "btc/usd".into(),
+        window_s: 60,
+        price_usd_per_btc: ExactDecimal("100500".into()),
+        payload_timestamp_utc_ms: 110_000,
+        message_timestamp_utc_ms: 110_000,
+    });
+    let inside = input.calculate(&mut s, 110_000).unwrap();
+    assert!(
+        matches!(
+            diagnostic(&inside.output).markets[0].probability,
+            ProbabilityEstimateV1::Unavailable(EstimateUnavailableV1::MissingWindowHistory)
+        ),
+        "rolling均值不是60–110秒真实spot路径"
+    );
+    assert!(
+        !intents(&inside.output).iter().any(|i| matches!(
+            i.intent.as_ref(),
+            ModelIntentV1::SubmitPairedBuy { .. } | ModelIntentV1::SubmitSingleBuy { .. }
+        )),
+        "缺少该概率的真实依赖，不能形成依赖它的新报价"
+    );
+}
+#[tokio::test(flavor = "current_thread")]
+async fn fak_minimum_principal_is_independent_of_maker_minimum_shares() {
+    for target in [5, 3] {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut shared, mut driver, rules, input) = profitable_pool(temp.path()).await;
+        let mut input = estimated(input, "100000");
+        input.markets[0]
+            .observation
+            .assets
+            .iter_mut()
+            .find(|a| a.asset.token_id.0 == DOWN_TOKEN_ID)
+            .unwrap()
+            .asks = fact(vec![PriceLevelV1 {
+            price_pusd_per_share: ExactDecimal("0.4".into()),
+            quantity_shares: ExactDecimal("2.5".into()),
+        }]);
+        let now = input
+            .action_before
+            .cutoff()
+            .decision_time()
+            .logical_time_utc_ms();
+        let mut c = config();
+        c.quote.base_pair_shares = Decimal::from(target);
+        // 与原FAK分支夹具相同的显式合成额度，不是经营配置。
+        c.risk.per_market_orphan_limit_pusd = Decimal::MAX;
+        c.risk.account_orphan_limit_pusd = Decimal::MAX;
+        c.repair.maximum_overfill_pusd = Decimal::MAX;
+        c.repair.maximum_overfill_shares = Decimal::MAX;
+        c.repair.residual_risk_weight = Decimal::from(10);
+        c.repair.base_loss_allowance_per_share = Decimal::new(2, 1);
+        let mut continuity = StrategyContinuityV1::new_account();
+        continuity.terminating = true;
+        let mut s =
+            ComplementaryPairV1::new(c, rules, "amount-minimum".into(), continuity).unwrap();
+        let calculation = input.calculate(&mut s, now).unwrap();
+        assert_eq!(
+            diagnostic(&calculation.output).markets[0].choice,
+            MarketChoiceV1::ActiveRepair,
+            "LIMIT最小5份不能截断金额合格的FAK: target={target}"
+        );
+        assert!(matches!(intents(&calculation.output)[0].intent.as_ref(),
+            ModelIntentV1::SubmitSingleBuy { order: BuyLegIntentV1 { order: BuyOrderIntentV1::FakMarket { spend_pusd, worst_price_pusd_per_share }, .. }, .. }
+            if *spend_pusd == Decimal::ONE && *worst_price_pusd_per_share == Decimal::new(4,1)));
+        if target == 3 {
+            assert!(
+                diagnostic(&calculation.output).markets[0]
+                    .comparison
+                    .as_ref()
+                    .unwrap()
+                    .maker_value_per_share
+                    .is_none()
+            );
+        }
+        let result = shared
+            .dispatch_strategy(
+                &mut driver.decision().unwrap(),
+                &mut s,
+                calculation.complete(now),
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(result, StrategyDispatchV1::Continue { receipts, .. } if receipts.len() == 1)
+        );
+    }
+}

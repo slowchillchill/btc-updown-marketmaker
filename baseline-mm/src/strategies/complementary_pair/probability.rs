@@ -76,7 +76,8 @@ impl SignalMemory {
             _ => None,
         };
         // TWAP 可供未来水平近似；滚动 TWAP 从不被拿作已发生积分。
-        let price = value(&o.chainlink_spot)
+        let spot = value(&o.chainlink_spot);
+        let price = spot
             .map(|p| (&p.price_usd_per_btc, fact_time(&o.chainlink_spot, now)))
             .or_else(|| {
                 twap.map(|p| {
@@ -100,7 +101,8 @@ impl SignalMemory {
             ));
         };
         let s = number(price)?;
-        if time <= now && self.chainlink.back().is_none_or(|(t, _)| time > *t) {
+        // 只有现价样本进入持价路径；rolling TWAP回退只参与未来水平估计。
+        if spot.is_some() && time <= now && self.chainlink.back().is_none_or(|(t, _)| time > *t) {
             self.chainlink.push_back((time, s));
         }
         // 只丢弃已不参与波动或本市场终局窗口积分的样本，保留左端持价。

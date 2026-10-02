@@ -43,8 +43,9 @@ impl ComplementaryPairV1 {
         if tick <= Decimal::ZERO {
             return Err(StrategyErrorV1::Arithmetic("公共tick非正"));
         }
-        let mut q = (qmax * Decimal::from(100)).floor() / Decimal::from(100);
-        if q < min {
+        // FAK使用金额门；LIMIT数量精度与最小份额仅判断Maker候选。
+        let mut q = qmax;
+        if q <= Decimal::ZERO {
             diag.choice = MarketChoiceV1::RetainOrphan;
             return Ok(());
         }
@@ -103,12 +104,26 @@ impl ComplementaryPairV1 {
             })
             .map(|l| decimal(&l.price_pusd_per_share))
             .transpose()?;
-        let maker = self.price(
-            a,
-            own_quote
-                .unwrap_or(visible_bid.map(|b| b + tick).unwrap_or(cap_price))
-                .min(cap_price),
-        )?;
+        let existing_missing: Vec<_> = s
+            .pending
+            .iter()
+            .filter(|p| p.token == a.asset.token_id)
+            .collect();
+        let maker = self
+            .price(
+                a,
+                own_quote
+                    .unwrap_or(visible_bid.map(|b| b + tick).unwrap_or(cap_price))
+                    .min(cap_price),
+            )?
+            .filter(|mp| {
+                (q * Decimal::from(100)).floor() / Decimal::from(100) >= min
+                    || (!existing_missing.is_empty()
+                        && existing_quantity <= r(qold)
+                        && existing_missing
+                            .iter()
+                            .all(|p| p.price <= *mp && p.price <= old_cap_price))
+            });
         let old_mark = value(&o.assets[held].valuation_best_bid)
             .and_then(|p| p.as_ref())
             .map(|p| float(&decimal(p)?))
@@ -225,11 +240,6 @@ impl ComplementaryPairV1 {
         });
         let active_best = active
             .is_some_and(|(_, v)| v >= wait && v >= retain && maker_score.is_none_or(|m| v > m));
-        let existing_missing: Vec<_> = s
-            .pending
-            .iter()
-            .filter(|p| p.token == a.asset.token_id)
-            .collect();
         // 对主动补腿，原侧任意旧单/未决事实均先处理；不在旧快照中撤后立即发。
         if active_best {
             if !existing_missing.is_empty() {
@@ -326,6 +336,8 @@ impl ComplementaryPairV1 {
             diag.choice = MarketChoiceV1::Maintain;
             return Ok(());
         }
+        // 新LIMIT沿其数量轴编码；不会提前截断已独立评估的金额FAK。
+        q = (q * Decimal::from(100)).floor() / Decimal::from(100);
         // 旧请求已有支持只用于维护；新增/重叠订单不能再借同一占用。
         let mp = mp.min(new_cap_price);
         if mp <= Decimal::ZERO {
