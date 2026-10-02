@@ -211,7 +211,7 @@ Binance 特征候选为因果收益、滚动波动、聚合成交方向、深度
 
 ## 10. 公共交接需求与源码入口
 
-本表沿 [#186 任务 1](https://github.com/slowchillchill/btc-updown-marketmaker/issues/186)列明公共接口与后续装配边界。`StrategyV1`、冻结读取、SIM 成本纯计算与整批执行接口见[公共策略调用](../../../shared-run/README.md#公共策略调用与整批执行)。完整历史宿主和 CLI 已由 #186 / PR #190 交付（`5503fcf507aebe60c93f49a8565aca60c26411d3`），见[公共历史入口](../../../backtest/README.md)；研究所需最终详细经济导出前置见研究计划第6节，PAPER 在线装配归 #108／#109，LIVE 真实反馈链在所属任务交付。
+本表沿 [#186 任务 1](https://github.com/slowchillchill/btc-updown-marketmaker/issues/186)列明公共接口与后续装配边界。`StrategyV1`、冻结读取、SIM 成本纯计算与整批执行接口见[公共策略调用](../../../shared-run/README.md#公共策略调用与整批执行)。完整历史宿主和 CLI 已由 #186 / PR #190 交付（`5503fcf507aebe60c93f49a8565aca60c26411d3`），见[公共历史入口](../../../backtest/README.md)；最终经济导出与研究读取边界见研究计划第6节，PAPER 在线装配归 #108／#109，LIVE 真实反馈链在所属任务交付。
 
 | 需求与真实缺口 | 已有入口及最小交接方向 |
 | --- | --- |
