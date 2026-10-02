@@ -273,7 +273,9 @@ pub async fn run_historical_v1<S: StrategyV1>(
             cause: HistoricalFailureCauseV1::Material(cause),
             report: None,
         })?;
-    let metadata = serde_json::json!({"config": config, "source_manifests": prepared.source_manifests, "input_set_identity_sha256": prepared.input_set_identity_sha256, "public_prefix": prepared.hidden.prefix, "rules_file_sha256": rules.file_sha256(), "caller_role": SimCallerRoleV1::HistoricalBacktest, "recording_role": RunDurabilityRoleV2::FiniteHistorical, "economics_version": ACCOUNT_ECONOMICS_VERSION});
+    let mut effective_config = config.clone();
+    effective_config.preparation.header = config.preparation.effective_header();
+    let metadata = serde_json::json!({"config": effective_config, "source_manifests": prepared.source_manifests, "input_set_identity_sha256": prepared.input_set_identity_sha256, "public_prefix": prepared.hidden.prefix, "rules_file_sha256": rules.file_sha256(), "caller_role": SimCallerRoleV1::HistoricalBacktest, "recording_role": RunDurabilityRoleV2::FiniteHistorical, "economics_version": ACCOUNT_ECONOMICS_VERSION});
     let start = || -> Result<_, MaterialError> {
         serde_json::to_writer(std::fs::File::create(&config.metadata_path)?, &metadata)?;
         let (execution, shared, observation) =

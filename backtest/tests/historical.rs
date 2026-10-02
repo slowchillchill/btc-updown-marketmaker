@@ -283,12 +283,30 @@ fn buy(
 async fn physical_entry_freezes_delayed_decisions_uses_hidden_fills_and_keeps_one_account() {
     let temp = tempfile::tempdir().unwrap();
     let (config, rules) = setup(temp.path());
+    // 兼容输入的旧标签不选择算法；新材料和有效配置绑定同一实际排序版本。
+    assert_eq!(
+        config.preparation.header.ordering_version,
+        "historical-source-head-v1"
+    );
     let mut probe = Probe {
         rules: Some(rules.clone()),
         cancel_first: true,
         ..Default::default()
     };
     let report = run_historical_v1(&config, rules, &mut probe).await.unwrap();
+    let stream: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(config.preparation.work_root.join("public/stream.json")).unwrap(),
+    )
+    .unwrap();
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&config.metadata_path).unwrap()).unwrap();
+    let actual_version =
+        data_pipeline_training::public_replay::HISTORICAL_SOURCE_HEAD_ORDERING_VERSION;
+    assert_eq!(stream["ordering_version"], actual_version);
+    assert_eq!(
+        metadata["config"]["preparation"]["header"]["ordering_version"],
+        actual_version
+    );
     assert_eq!(report.end_reason, HistoricalEndReasonV1::RangeEnd);
     assert!(report.recording_drained);
     assert!(probe.bought_first && probe.bought_second);

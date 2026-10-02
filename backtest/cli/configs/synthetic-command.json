@@ -14,7 +14,7 @@
         "input_stream_id": "synthetic-history",
         "canonical_rule_version": "canonical-reduction-v1",
         "observation_version": "market_business_observation_v1",
-        "ordering_version": "historical-source-head-v1",
+        "ordering_version": "historical-source-head-v2",
         "input_scope": "explicit-manifests/synthetic",
         "max_pending_ws_terminals": 10,
         "initial_state": "Empty"
