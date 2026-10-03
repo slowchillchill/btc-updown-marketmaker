@@ -74049,5 +74049,11 @@
     "fmt_exit_code": 0,
     "baseline_mm_all_targets_clippy_exit_code": 0
   },
-  "support_projection_note": "Each segment.support/left_support references spot_updates_original_visible_order by its unique target group_position; full clocks, IDs, price and quality remain in that array. Original measured private report retains full inline supports."
+  "support_projection_note": "Each segment.support/left_support references spot_updates_original_visible_order by its unique target group_position; full clocks, IDs, price and quality remain in that array. Original measured private report retains full inline supports.",
+  "units": {
+    "price": "USD/BTC",
+    "price_times_seconds": "(USD/BTC)*s",
+    "squared_price_change": "(USD/BTC)^2",
+    "squared_change_per_second_description": "(USD/BTC)^2/s"
+  }
 }
