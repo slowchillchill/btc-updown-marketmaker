@@ -326,12 +326,56 @@ pub(crate) struct SequentialCaptureWriter {
     metrics: SortMetrics,
 }
 
+fn capture_writer_properties(batch_rows: usize) -> WriterProperties {
+    WriterProperties::builder()
+        .set_compression(Compression::ZSTD(Default::default()))
+        .set_max_row_group_row_count(Some(batch_rows))
+        .build()
+}
+
+#[cfg(test)]
+fn payload_page_trial_properties(batch_rows: usize) -> WriterProperties {
+    use parquet::{basic::ZstdLevel, schema::types::ColumnPath};
+    capture_writer_properties(batch_rows)
+        .into_builder()
+        .set_column_data_page_size_limit(ColumnPath::from("payload"), 8 << 20)
+        .set_column_compression(
+            ColumnPath::from("payload"),
+            Compression::ZSTD(ZstdLevel::try_new(9).expect("固定试验级别9由锁定Parquet支持")),
+        )
+        .build()
+}
+
 impl SequentialCaptureWriter {
     pub(crate) fn create(
         stream_name: &'static str,
         directory: &Path,
         total_bytes: Arc<Mutex<u64>>,
         output_config: &GateAOutputConfig,
+    ) -> Result<Self, GateAError> {
+        Self::create_with_properties(stream_name, directory, total_bytes, output_config, || {
+            capture_writer_properties(output_config.sort.batch_rows)
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn create_payload_page_trial(
+        stream_name: &'static str,
+        directory: &Path,
+        total_bytes: Arc<Mutex<u64>>,
+        output_config: &GateAOutputConfig,
+    ) -> Result<Self, GateAError> {
+        Self::create_with_properties(stream_name, directory, total_bytes, output_config, || {
+            payload_page_trial_properties(output_config.sort.batch_rows)
+        })
+    }
+
+    fn create_with_properties(
+        stream_name: &'static str,
+        directory: &Path,
+        total_bytes: Arc<Mutex<u64>>,
+        output_config: &GateAOutputConfig,
+        properties: impl FnOnce() -> WriterProperties,
     ) -> Result<Self, GateAError> {
         fs::create_dir(directory)?;
         let path = directory.join(CAPTURE_FILE);
@@ -340,10 +384,7 @@ impl SequentialCaptureWriter {
             arrow_schema::Field::new("sort_key", DataType::Binary, false),
             arrow_schema::Field::new("payload", DataType::Binary, false),
         ]));
-        let properties = WriterProperties::builder()
-            .set_compression(Compression::ZSTD(Default::default()))
-            .set_max_row_group_row_count(Some(output_config.sort.batch_rows))
-            .build();
+        let properties = properties();
         let writer = ArrowWriter::try_new(
             SharedQuotaWriter {
                 file,
@@ -1958,6 +1999,57 @@ fn validate_optional_range(
 pub(crate) mod tests {
     use super::*;
     use crate::scan_logical_output;
+
+    #[test]
+    fn capture_properties_preserve_production_and_override_only_payload_trial_fields() {
+        use parquet::{basic::ZstdLevel, schema::types::ColumnPath};
+        let original = WriterProperties::builder()
+            .set_compression(Compression::ZSTD(Default::default()))
+            .set_max_row_group_row_count(Some(4096))
+            .build();
+        let production = capture_writer_properties(4096);
+        assert_eq!(format!("{production:?}"), format!("{original:?}"));
+        let candidate = payload_page_trial_properties(4096);
+        let key = ColumnPath::from("sort_key");
+        let payload = ColumnPath::from("payload");
+        assert_eq!(production.column_data_page_size_limit(&key), 1 << 20);
+        assert_eq!(production.column_data_page_size_limit(&payload), 1 << 20);
+        assert_eq!(candidate.column_data_page_size_limit(&key), 1 << 20);
+        assert_eq!(candidate.column_data_page_size_limit(&payload), 8 << 20);
+        assert_eq!(candidate.compression(&key), production.compression(&key));
+        assert_eq!(
+            candidate.compression(&payload),
+            Compression::ZSTD(ZstdLevel::try_new(9).unwrap())
+        );
+        for column in [&key, &payload] {
+            assert!(production.dictionary_enabled(column));
+            assert_eq!(
+                candidate.dictionary_enabled(column),
+                production.dictionary_enabled(column)
+            );
+            assert_eq!(candidate.column_dictionary_page_size_limit(column), 1 << 20);
+        }
+        assert_eq!(candidate.writer_version(), production.writer_version());
+        // 除明确两项覆盖外，比较完整属性状态，防止全局setter/其他属性漂移。
+        let restored = candidate
+            .into_builder()
+            .set_column_data_page_size_limit(
+                payload.clone(),
+                production.column_data_page_size_limit(&payload),
+            )
+            .set_column_compression(payload.clone(), production.compression(&payload))
+            .build();
+        let explicit_original = production
+            .into_builder()
+            .set_column_data_page_size_limit(
+                payload.clone(),
+                original.column_data_page_size_limit(&payload),
+            )
+            .set_column_compression(payload.clone(), original.compression(&payload))
+            .build();
+        assert_eq!(format!("{restored:?}"), format!("{explicit_original:?}"));
+    }
+
     use contracts::CanonicalEventId;
     use contracts::{
         AssetIdentityV1, BestBidAskV2, BinanceAggregateTradeReferenceV1,

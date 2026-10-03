@@ -15,6 +15,8 @@ struct LayoutConfig {
     read_page_rows: usize,
     max_read_batch_bytes: usize,
     purpose: String,
+    #[serde(default)]
+    payload_page_8m_zstd9: bool,
 }
 #[derive(Default, Serialize)]
 struct PayloadStats {
@@ -53,8 +55,47 @@ fn kind(row: &PublicStoredRowV1) -> &'static str {
         PublicStoredRowV1::SourceBinding(_) => "SourceBinding",
     }
 }
+fn canonical_subtype(row: &PublicStoredRowV1) -> Option<&'static str> {
+    let PublicStoredRowV1::Canonical { record, .. } = row else {
+        return None;
+    };
+    Some(match record {
+        CanonicalEventRecordV2::PolymarketMessage(_) => "PolymarketMessage",
+        CanonicalEventRecordV2::MarketFact(_) => "MarketFact",
+        CanonicalEventRecordV2::ReferenceEvent(event) => match &event.payload {
+            CanonicalReferenceEventPayloadV2::ChainlinkBtcUsd(_) => {
+                "ReferenceEvent.ChainlinkBtcUsd"
+            }
+            CanonicalReferenceEventPayloadV2::BinanceDepthState(_) => {
+                "ReferenceEvent.BinanceDepthState"
+            }
+            CanonicalReferenceEventPayloadV2::BinanceAggregateTrade(_) => {
+                "ReferenceEvent.BinanceAggregateTrade"
+            }
+            CanonicalReferenceEventPayloadV2::MarketPriceAnchorUpdate(_) => {
+                "ReferenceEvent.MarketPriceAnchorUpdate"
+            }
+            CanonicalReferenceEventPayloadV2::MarketSettlementReferenceUpdate(_) => {
+                "ReferenceEvent.MarketSettlementReferenceUpdate"
+            }
+            CanonicalReferenceEventPayloadV2::ChainlinkBtcUsdTwap(_) => {
+                "ReferenceEvent.ChainlinkBtcUsdTwap"
+            }
+            CanonicalReferenceEventPayloadV2::RtdsObservedAnomaly(_) => {
+                "ReferenceEvent.RtdsObservedAnomaly"
+            }
+        },
+    })
+}
 fn invalid(message: impl Into<String>) -> Box<dyn std::error::Error + Send + Sync> {
     io::Error::new(io::ErrorKind::InvalidData, message.into()).into()
+}
+#[derive(Default, Serialize)]
+struct ColumnLayout {
+    compressed_bytes: i64,
+    uncompressed_bytes: i64,
+    codecs: std::collections::BTreeSet<String>,
+    encodings: std::collections::BTreeSet<String>,
 }
 fn file_layout(path: &Path) -> RecordingResult<Value> {
     // footer/文件元数据读取，不为容量统计遍历正文。
@@ -68,17 +109,32 @@ fn file_layout(path: &Path) -> RecordingResult<Value> {
     let groups = metadata.metadata().row_groups();
     let mut compressed = 0i64;
     let mut uncompressed = 0i64;
+    let mut columns = BTreeMap::<String, ColumnLayout>::new();
     for g in groups {
         for col in g.columns() {
             compressed += col.compressed_size();
             uncompressed += col.uncompressed_size();
+            let entry = columns.entry(col.column_path().string()).or_default();
+            entry.compressed_bytes += col.compressed_size();
+            entry.uncompressed_bytes += col.uncompressed_size();
+            // footer只保存codec，不保存压缩级别；不能将getter恢复的默认级别当实际级别。
+            entry.codecs.insert(
+                format!("{:?}", col.compression())
+                    .split('(')
+                    .next()
+                    .unwrap()
+                    .to_owned(),
+            );
+            entry
+                .encodings
+                .extend(col.encodings().map(|e| format!("{e:?}")));
         }
     }
     Ok(
         json!({"logical_file_bytes":stat.len(),"allocated_file_bytes":stat.blocks()*512,
         "footer_bytes":footer_bytes,"row_groups":groups.len(),
         "rows":metadata.metadata().file_metadata().num_rows(),
-        "compressed_column_bytes":compressed,"uncompressed_column_bytes":uncompressed}),
+        "compressed_column_bytes":compressed,"uncompressed_column_bytes":uncompressed,"columns":columns}),
     )
 }
 fn copy_descriptor(original: &Path, candidate: &Path, name: &str) -> RecordingResult<()> {
@@ -95,6 +151,7 @@ fn recode(c: &LayoutConfig) -> (Value, RecordingResult<()>) {
     let started = Instant::now();
     let mut rows = 0u64;
     let mut kinds = BTreeMap::<&'static str, PayloadStats>::new();
+    let mut canonical_subtypes = BTreeMap::<&'static str, PayloadStats>::new();
     let mut segments = vec![];
     let mut current = Position::default();
     let mut prefix = None;
@@ -115,12 +172,21 @@ fn recode(c: &LayoutConfig) -> (Value, RecordingResult<()>) {
             let stage = c.candidate_root.join(format!("pending-{ordinal:020}"));
             current.segment = Some(name.clone());
             current.row = 0;
-            let mut writer = SequentialCaptureWriter::create(
-                "public_recording_v1",
-                &stage,
-                quota.clone(),
-                &c.recording,
-            )?;
+            let mut writer = if c.payload_page_8m_zstd9 {
+                SequentialCaptureWriter::create_payload_page_trial(
+                    "public_recording_v1",
+                    &stage,
+                    quota.clone(),
+                    &c.recording,
+                )?
+            } else {
+                SequentialCaptureWriter::create(
+                    "public_recording_v1",
+                    &stage,
+                    quota.clone(),
+                    &c.recording,
+                )?
+            };
             writer.defer_batch_sync();
             let mut cursor = RunCursor::open(
                 &path.join("captured.parquet"),
@@ -135,6 +201,12 @@ fn recode(c: &LayoutConfig) -> (Value, RecordingResult<()>) {
                     .entry(kind(&decoded))
                     .or_default()
                     .add(row.payload().len());
+                if let Some(subtype) = canonical_subtype(&decoded) {
+                    canonical_subtypes
+                        .entry(subtype)
+                        .or_default()
+                        .add(row.payload().len());
+                }
                 drop(decoded);
                 writer.push(count, row.sort_key_bytes().to_vec(), row.payload())?;
                 count += 1;
@@ -166,9 +238,9 @@ fn recode(c: &LayoutConfig) -> (Value, RecordingResult<()>) {
     (
         json!({"schema":"public_recording_layout_recode_v1","effective_config":c,
         "status":if result.is_ok(){"success"}else{"error"},"original_error":result.as_ref().err().map(ToString::to_string),
-        "current_position":current,"source_declared_prefix":prefix,"rows_written":rows,"payload_by_kind":kinds,
+        "current_position":current,"source_declared_prefix":prefix,"rows_written":rows,"payload_by_kind":kinds,"canonical_payload_by_subtype":canonical_subtypes,
         "segments":segments,"wall_seconds":started.elapsed().as_secs_f64(),
-        "measurement_note":"classification decodes and releases only the current original row; original key/payload bytes passed to writer without reserialization; footer-only layout metadata; peak is original capacity-counted row buffer, excludes Arrow/compressor/reader/process RSS"}),
+        "measurement_note":"classification decodes and releases only the current original row; Canonical subtype counts whole original stored-row payload length, not reserialized event/lineage; original key/payload bytes passed to writer without reserialization; footer-only layout metadata; peak is original capacity-counted row buffer, excludes Arrow/compressor/reader/process RSS"}),
         result,
     )
 }
@@ -331,16 +403,34 @@ fn fixture_config(root: &Path) -> LayoutConfig {
         read_page_rows: 1,
         max_read_batch_bytes: 1 << 20,
         purpose: "原接口有效小夹具与原字节对照".into(),
+        payload_page_8m_zstd9: false,
     }
 }
 #[test]
 fn valid_original_construction_preserves_bytes_segments_and_complete_prefix() {
     let temp = tempfile::tempdir().unwrap();
-    let c = fixture_config(temp.path());
+    let mut c = fixture_config(temp.path());
+    c.payload_page_8m_zstd9 = true;
     fixture(&c);
     let (report, result) = recode(&c);
     result.unwrap();
     assert_eq!(report["segments"].as_array().unwrap().len(), 2);
+    let canonical = &report["payload_by_kind"]["Canonical"];
+    let parts = report["canonical_payload_by_subtype"].as_object().unwrap();
+    assert_eq!(
+        parts
+            .values()
+            .map(|v| v["rows"].as_u64().unwrap())
+            .sum::<u64>(),
+        canonical["rows"].as_u64().unwrap()
+    );
+    assert_eq!(
+        parts
+            .values()
+            .map(|v| v["payload_bytes"].as_u64().unwrap())
+            .sum::<u64>(),
+        canonical["payload_bytes"].as_u64().unwrap()
+    );
     let (compared, result) = compare(&c);
     result.unwrap();
     assert_eq!(compared["double_eof"], true);
