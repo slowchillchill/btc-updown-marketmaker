@@ -1,4 +1,4 @@
-//! #185 只读已有正常公共材料的因果诊断；不prepare、不运行策略或账户。
+//! #185 一次原公共reader遍历的多市场因果诊断及事后标签连接；不运行策略或账户。
 use contracts::*;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -19,10 +19,15 @@ const WINDOWS_SECONDS: [i64; 5] = [15, 30, 60, 120, 300];
 struct Config {
     public_root: PathBuf,
     trial_report_path: PathBuf,
-    target_condition_id: ConditionId,
+    target_markets: Vec<TargetMarket>,
     read_page_rows: usize,
     max_read_batch_bytes: usize,
     purpose: String,
+}
+#[derive(Clone, Deserialize, Serialize)]
+struct TargetMarket {
+    condition_id: ConditionId,
+    window: MarketWindowV2,
 }
 #[derive(Deserialize)]
 struct Scope {
@@ -129,9 +134,9 @@ struct History {
     repeated_observations: u64,
 }
 impl History {
-    fn observe(&mut self, o: &MarketBusinessObservationV1, at: i64, initial: bool) {
+    fn observe(&mut self, o: &MarketBusinessObservationV1, at: i64, initial: bool, research: bool) {
         if self.last.as_ref() == Some(&o.chainlink_spot) {
-            if !initial {
+            if research {
                 self.repeated_observations += 1;
             }
             return;
@@ -350,7 +355,6 @@ struct Analysis {
     width_counts: BTreeMap<usize, u64>,
     market_counts: BTreeMap<String, u64>,
     catalog: BTreeMap<String, Value>,
-    terminal_by_market: BTreeMap<String, Value>,
     field_counts: BTreeMap<String, BTreeMap<String, u64>>,
     source_ids: BTreeMap<String, BTreeSet<Sha256Hex>>,
     initial_groups: u64,
@@ -358,6 +362,9 @@ struct Analysis {
     initial_observations: u64,
     research_observations: u64,
     target_research_observations: u64,
+    target_initialization_observations: u64,
+    target_pre_window_observations: u64,
+    target_post_window_observations: u64,
     groups_visible_at_or_after_right_boundary: u64,
     cross_trade: CrossSource,
     cross_depth: CrossSource,
@@ -387,12 +394,18 @@ impl Analysis {
             self.catalog
                 .entry(o.market.condition_id.0.clone())
                 .or_insert_with(|| json!(o.market));
-            // 已有材料可能晚闭合；保留规模说明，但不能倒灌右边界诊断或标签。
+            if o.market.condition_id == *target {
+                if initial {
+                    self.target_initialization_observations += 1;
+                } else if at < start {
+                    self.target_pre_window_observations += 1;
+                } else if at >= end {
+                    self.target_post_window_observations += 1;
+                }
+            }
+            // 窗后组只计规模；事后标签由独立投影保存，不倒灌冻结特征。
             if at >= end {
                 continue;
-            }
-            if usable(&o.terminal) {
-                self.terminal_by_market.entry(o.market.condition_id.0.clone()).or_insert_with(||json!({"first_visible_at_utc_ms":at,"group_position":g.group_position,"fact":o.terminal}));
             }
             if !initial && at >= start && at < end {
                 *self
@@ -403,7 +416,8 @@ impl Analysis {
             if o.market.condition_id != *target {
                 continue;
             }
-            self.history.observe(o, at, initial);
+            self.history
+                .observe(o, at, initial, !initial && at >= start);
             self.latest = Some(o.clone());
             self.last_visible = Some(at);
             let r = reference(o);
@@ -487,6 +501,92 @@ impl Sampler {
         Ok(())
     }
 }
+#[derive(Default)]
+struct LabelHistory {
+    last: Option<ObservedFactV1<MarketResolutionTerminalV3>>,
+    changes: Vec<Value>,
+    first_usable: Option<Value>,
+}
+impl LabelHistory {
+    fn observe(&mut self, o: &MarketBusinessObservationV1, at: i64) {
+        if self.last.as_ref() == Some(&o.terminal) {
+            return;
+        }
+        let event = json!({"condition_id":o.market.condition_id,"group_position":o.group_position,
+            "first_visible_at_utc_ms":at,"fact":o.terminal});
+        if self.first_usable.is_none() && usable(&o.terminal) {
+            self.first_usable = Some(event.clone());
+        }
+        self.changes.push(event);
+        self.last = Some(o.terminal.clone());
+    }
+}
+struct TargetRun {
+    target: TargetMarket,
+    analysis: Analysis,
+    sampler: Sampler,
+    labels: LabelHistory,
+}
+impl TargetRun {
+    fn new(target: TargetMarket) -> Self {
+        Self {
+            target,
+            analysis: Analysis::default(),
+            sampler: Sampler::default(),
+            labels: LabelHistory::default(),
+        }
+    }
+    fn consume(&mut self, g: &ClosedBusinessGroupV1, at: i64, initial: bool) -> Result<()> {
+        let start = self.target.window.start_at_utc_ms;
+        let end = self.target.window.end_at_utc_ms;
+        self.sampler.before(at, &self.analysis, end)?;
+        self.analysis
+            .consume(g, at, initial, &self.target.condition_id, start, end);
+        for o in &g.observations {
+            if o.market.condition_id == self.target.condition_id {
+                self.labels.observe(o, at);
+            }
+        }
+        Ok(())
+    }
+    fn finish(mut self) -> Result<Value> {
+        let end = self.target.window.end_at_utc_ms;
+        self.sampler.before(i64::MAX, &self.analysis, end)?;
+        let target = self
+            .analysis
+            .latest
+            .as_ref()
+            .ok_or("原材料中没有指定目标市场")?;
+        if target.market.window != self.target.window {
+            return Err("指定目标市场窗口与实际公共市场不一致".into());
+        }
+        let a = self.analysis;
+        let boundary = a.snapshot(end, end)?;
+        let inside_spot_sources = a.source_ids.get("spot").map_or(0, BTreeSet::len);
+        Ok(
+            json!({"target":self.target,"market_catalog":a.catalog,"research_observations_by_market":a.market_counts,
+            "source_width_and_repetition":{"initialization_groups":a.initial_groups,"research_groups":a.research_groups,
+                "initialization_observations":a.initial_observations,"research_observations":a.research_observations,
+                "groups_visible_at_or_after_right_boundary":a.groups_visible_at_or_after_right_boundary,
+                "observations_per_complete_group":a.width_counts,"target_research_observations":a.target_research_observations,
+                "target_initialization_observations":a.target_initialization_observations,
+                "target_pre_window_observations":a.target_pre_window_observations,"target_post_window_observations":a.target_post_window_observations,
+                "distinct_source_ids_by_field_inside_window":a.source_ids.iter().map(|(k,v)|(k,v.len())).collect::<BTreeMap<_,_>>(),
+                "distinct_spot_sources_visible_before_right_boundary_including_pre_window":a.history.seen.len(),
+                "target_repeated_spot_observations_inside_window":a.history.repeated_observations,
+                "target_observations_per_distinct_spot_source_inside_window":if inside_spot_sources==0 {None}else{Some(a.target_research_observations as f64/inside_spot_sources as f64)}},
+            "spot_updates_original_visible_order":a.history.updates,"reference_changes_original_visible_order":a.reference_changes,
+            "field_quality_counts":a.field_counts,"cross_source_simultaneous_visibility":{"spot_and_trade":a.cross_trade,"spot_and_depth":a.cross_depth,
+                "delta_definition":"other minus spot; repeated-state description, not causal lead or fitted basis"},
+            "sampling_remaining_seconds":REMAINING_SECONDS,"frozen_sampling":self.sampler.frozen,
+            "market_right_boundary_hold_diagnostic":{"not_a_new_public_event_or_terminal_label":true,"cutoff_utc_ms":end,
+                "last_actual_visible_at_utc_ms":a.last_visible,"hold_tail_to_boundary_ms":a.last_visible.map(|last|end-last),"diagnostic":boundary},
+            "posthoc_label_qualification":{"condition_id":self.target.condition_id,"first_usable_terminal":self.labels.first_usable,
+                "latest_terminal_usable":self.labels.last.as_ref().is_some_and(usable),"changes_original_visible_order":self.labels.changes,
+                "labels_not_backfilled_into_frozen_features":true,"brier_or_probability_fit_performed":false}}),
+        )
+    }
+}
 fn analyze(config: &Config) -> Result<Value> {
     let binding: TrialBinding = serde_json::from_slice(&fs::read(&config.trial_report_path)?)?;
     let actual_prefix: CommittedIngressPrefixV1 = serde_json::from_slice(&fs::read(
@@ -495,54 +595,67 @@ fn analyze(config: &Config) -> Result<Value> {
             .join(&binding.hidden_preparation.prefix.stable_storage_ref)
             .join("prefix.json"),
     )?)?;
-    let start = binding.scope.received_start_utc_ms;
-    let end = binding.scope.received_end_utc_ms;
-    if end - start != 300_000 {
-        return Err("本诊断仅使用已分配的完整五分钟材料".into());
-    }
     let source = RecordedPublicGroupSourceV1::open(
         &config.public_root,
         config.read_page_rows,
         config.max_read_batch_bytes,
         OriginalVisibility::default(),
     )?;
-    let mut analysis = Analysis::default();
-    let mut sampler = Sampler::default();
+    let mut targets = config
+        .target_markets
+        .iter()
+        .cloned()
+        .map(TargetRun::new)
+        .collect::<Vec<_>>();
+    let mut group_counts = BTreeMap::<String, u64>::new();
+    let mut observation_counts = BTreeMap::<String, u64>::new();
+    let mut widths = BTreeMap::<usize, u64>::new();
+    let mut catalog = BTreeMap::<String, Value>::new();
+    let feature_end = config
+        .target_markets
+        .iter()
+        .map(|t| t.window.end_at_utc_ms)
+        .max();
     for delivered in source {
         let delivered = delivered.map_err(|e| format!("{e:?}"))?;
         let at = delivered.delivered_at_utc_ms;
-        sampler.before(at, &analysis, end)?;
         let g = &delivered.prepared.group;
         let initial = !g.member_input_positions.is_empty()
             && g.member_input_positions
                 .iter()
                 .all(|p| binding.initialization.input_positions.contains(p));
-        analysis.consume(g, at, initial, &config.target_condition_id, start, end);
+        let section = if initial {
+            "initialization"
+        } else if at < binding.scope.received_start_utc_ms {
+            "before_material_start"
+        } else if at >= binding.scope.received_end_utc_ms {
+            "at_or_after_material_right_boundary"
+        } else if feature_end.is_some_and(|end| at >= end) {
+            "label_tail"
+        } else {
+            "feature_range"
+        };
+        *group_counts.entry(section.into()).or_default() += 1;
+        *observation_counts.entry(section.into()).or_default() += g.observations.len() as u64;
+        *widths.entry(g.observations.len()).or_default() += 1;
+        for o in &g.observations {
+            catalog
+                .entry(o.market.condition_id.0.clone())
+                .or_insert_with(|| json!(o.market));
+        }
+        for target in &mut targets {
+            target.consume(g, at, initial)?;
+        }
     }
-    sampler.before(i64::MAX, &analysis, end)?;
-    let target = analysis.latest.as_ref().ok_or("原材料中没有指定目标市场")?;
-    if target.market.window.start_at_utc_ms != start || target.market.window.end_at_utc_ms != end {
-        return Err("指定目标市场窗口与本段材料不一致".into());
-    }
-    let boundary = analysis.snapshot(end, end)?;
     Ok(
-        json!({"schema":"complementary_pair_causal_input_diagnostic_v1","effective_config":config,"normal_prefix":actual_prefix,
+        json!({"schema":"complementary_pair_causal_labels_diagnostic_v1","effective_config":config,
+        "material_scope":{"received_start_utc_ms":binding.scope.received_start_utc_ms,"received_end_utc_ms":binding.scope.received_end_utc_ms},
+        "normal_prefix":actual_prefix,"prepared_expected_normal_prefix":binding.hidden_preparation.prefix,
         "input_set_identity_sha256":binding.input_set_identity_sha256,"source_identity_sha256":binding.source_identity_sha256,
-        "s5_expected_normal_prefix":binding.hidden_preparation.prefix,"market_catalog":analysis.catalog,"research_observations_by_market":analysis.market_counts,
-        "source_width_and_repetition":{"initialization_groups":analysis.initial_groups,"research_groups":analysis.research_groups,
-            "initialization_observations":analysis.initial_observations,"research_observations":analysis.research_observations,
-            "groups_visible_at_or_after_right_boundary":analysis.groups_visible_at_or_after_right_boundary,
-            "observations_per_complete_group":analysis.width_counts,"target_research_observations":analysis.target_research_observations,
-            "distinct_source_ids_by_field":analysis.source_ids.iter().map(|(k,v)|(k,v.len())).collect::<BTreeMap<_,_>>(),
-            "target_repeated_spot_observations":analysis.history.repeated_observations,
-            "target_observations_per_distinct_spot_source":if analysis.history.seen.is_empty(){None}else{Some(analysis.target_research_observations as f64/analysis.history.seen.len() as f64)}},
-        "spot_updates_original_visible_order":analysis.history.updates,"reference_changes_original_visible_order":analysis.reference_changes,
-        "field_quality_counts":analysis.field_counts,"cross_source_simultaneous_visibility":{"spot_and_trade":analysis.cross_trade,"spot_and_depth":analysis.cross_depth,"delta_definition":"other minus spot; per-observation repeated-state description, not causal lead or fitted basis"},
-        "sampling_remaining_seconds":REMAINING_SECONDS,"frozen_sampling":sampler.frozen,
-        "material_right_boundary_hold_diagnostic":{"not_a_new_public_event_or_terminal_label":true,"cutoff_utc_ms":end,
-            "last_actual_visible_at_utc_ms":analysis.last_visible,"hold_tail_to_boundary_ms":analysis.last_visible.map(|last|end-last),"diagnostic":boundary},
-        "label_qualification":{"target_condition_id":config.target_condition_id,"target_terminal_observed":analysis.terminal_by_market.contains_key(&config.target_condition_id.0),"terminal_by_actual_market":analysis.terminal_by_market,"brier_or_probability_fit_performed":false},
-        "method_note":"八个采样按完整组真实可见时间冻结，同截止全部组消费后冻结。spot来源、接收和首次可见分列；按来源去重且同接收毫秒不同来源保留。Fresh/Stale可用性与当前策略读取一致，无TTL；本研究不复制SignalMemory、不计算概率、不将近似当官方结算。"}),
+        "material_counts":{"groups_by_section":group_counts,"observations_by_section":observation_counts,
+            "observations_per_complete_group":widths,"market_catalog":catalog},
+        "markets":targets.into_iter().map(TargetRun::finish).collect::<Result<Vec<_>>>()?,
+        "method_note":"一次原reader遍历，各市场按自身八截止和右边界冻结；窗前合法历史与窗内分母分列。事后同condition标签质量/来源另存，不回填特征、不计算概率/参数/收益。"}),
     )
 }
 fn main() -> Result<()> {
@@ -616,14 +729,14 @@ mod tests {
     ) {
         o.group_position = id;
         o.chainlink_spot = spot(id, t, p);
-        h.observe(o, visible, false);
+        h.observe(o, visible, false, true);
     }
     #[test]
     fn repeated_observations_and_same_time_sources_are_not_collapsed_into_one_innovation() {
         let mut o = fixture().observations.remove(0);
         let mut h = History::default();
         observe(&mut h, &mut o, 1, 1000, 1100, "100");
-        h.observe(&o, 1200, false);
+        h.observe(&o, 1200, false, true);
         observe(&mut h, &mut o, 2, 1000, 1300, "102");
         assert_eq!(h.updates.len(), 2);
         assert_eq!(h.seen.len(), 2);
@@ -662,7 +775,7 @@ mod tests {
             quality: MarketDataQuality::Fresh,
             ..Default::default()
         };
-        h.observe(&o, 2500, false);
+        h.observe(&o, 2500, false, true);
         let gap = h.integral(2000, 4000, 4000).unwrap();
         assert_eq!(gap["missing_ms"], 1500);
         assert_eq!(gap["known_price_times_seconds"], "55");
@@ -672,7 +785,7 @@ mod tests {
         assert!(only_twap["known_price_times_seconds"].is_null());
         o.chainlink_spot = spot(3, 3000, "120");
         o.chainlink_spot.quality = MarketDataQuality::ConfirmedGap;
-        h.observe(&o, 3000, false);
+        h.observe(&o, 3000, false, true);
         assert_eq!(h.integral(3000, 4000, 4000).unwrap()["missing_ms"], 1000);
     }
     #[test]
@@ -751,7 +864,7 @@ mod tests {
         a.consume(&g, -500, true, &target, 0, 300_000);
         assert_eq!(a.target_research_observations, 0);
         assert_eq!(a.initial_observations, 2);
-        assert!(!a.terminal_by_market.contains_key(&target.0));
+        assert!(a.latest.as_ref().unwrap().terminal.value.is_none());
         a.consume(&g, 1000, false, &target, 0, 300_000);
         assert_eq!(a.target_research_observations, 1);
         assert_eq!(a.research_observations, 2);
@@ -765,8 +878,130 @@ mod tests {
         g.observations[1].chainlink_spot = spot(2, 299_000, "999");
         a.consume(&g, 300_000, false, &target, 0, 300_000);
         assert_eq!(a.snapshot(300_000, 300_000).unwrap(), frozen);
-        assert!(!a.terminal_by_market.contains_key(&target.0));
+        assert!(a.latest.as_ref().unwrap().terminal.value.is_none());
         assert_eq!(a.groups_visible_at_or_after_right_boundary, 1);
+    }
+    #[test]
+    fn two_market_cutoffs_and_posthoc_quality_changes_remain_separate() {
+        let mut g = fixture();
+        let resolved = g.observations[0].terminal.clone();
+        let mut first = g.observations[0].clone();
+        first.market.window = MarketWindowV2 {
+            start_at_utc_ms: 0,
+            end_at_utc_ms: 300_000,
+        };
+        first.terminal = ObservedFactV1::default();
+        first.chainlink_spot = spot(1, 1000, "100");
+        let mut second = first.clone();
+        second.market.condition_id = ConditionId(format!("0x{}", "3".repeat(64)));
+        second.market.clob_market_id = ClobMarketId("3195578".into());
+        second.market.window = MarketWindowV2 {
+            start_at_utc_ms: 300_000,
+            end_at_utc_ms: 600_000,
+        };
+        for (i, asset) in second.assets.iter_mut().enumerate() {
+            asset.asset.token_id = TokenId(format!("{}", 400 + i));
+        }
+        let mut second_resolved = resolved.clone();
+        let MarketResolutionTerminalV3::Resolved {
+            winning_asset_id,
+            payout_vector,
+            ..
+        } = second_resolved.value.as_mut().unwrap();
+        for (entry, asset) in payout_vector.iter_mut().zip(&second.assets) {
+            if entry.asset.token_id.0 == *winning_asset_id {
+                *winning_asset_id = asset.asset.token_id.0.clone();
+            }
+            entry.asset = asset.asset.clone();
+        }
+        let mut a = TargetRun::new(TargetMarket {
+            condition_id: first.market.condition_id.clone(),
+            window: first.market.window.clone(),
+        });
+        let mut b = TargetRun::new(TargetMarket {
+            condition_id: second.market.condition_id.clone(),
+            window: second.market.window.clone(),
+        });
+        g.observations = vec![first, second];
+        a.consume(&g, 1100, false).unwrap();
+        b.consume(&g, 1100, false).unwrap();
+        // 同一个组在第一市场右端，在第二市场左端；前者不能倒灌，后者可读已见前序。
+        g.group_position += 1;
+        for o in &mut g.observations {
+            o.group_position = g.group_position;
+            o.chainlink_spot = spot(2, 299_000, "110");
+        }
+        a.consume(&g, 300_000, false).unwrap();
+        b.consume(&g, 300_000, false).unwrap();
+        assert_eq!(a.sampler.frozen.len(), 8);
+        assert_eq!(b.sampler.frozen.len(), 0);
+        g.group_position += 1;
+        g.observations[0].terminal = resolved;
+        a.consume(&g, 360_000, false).unwrap();
+        b.consume(&g, 360_000, false).unwrap();
+        assert_eq!(b.sampler.frozen.len(), 1);
+        assert_eq!(b.sampler.frozen[0]["remaining_seconds"], 300);
+        assert_eq!(
+            b.sampler.frozen[0]["availability"]["spot"]["direct_anchors"][0]["source_message_id"],
+            format!("{:064x}", 2)
+        );
+        assert!(b.labels.first_usable.is_none());
+        let frozen = a.sampler.frozen.clone();
+        let boundary = a.analysis.snapshot(300_000, 300_000).unwrap();
+        g.group_position += 1;
+        g.observations[0].terminal.quality = MarketDataQuality::Invalid;
+        for o in &mut g.observations {
+            o.group_position = g.group_position;
+            o.chainlink_spot = spot(3, 399_000, "999");
+        }
+        a.consume(&g, 400_000, false).unwrap();
+        b.consume(&g, 400_000, false).unwrap();
+        assert_eq!(a.sampler.frozen, frozen);
+        assert_eq!(a.analysis.snapshot(300_000, 300_000).unwrap(), boundary);
+        assert_eq!(
+            a.labels.first_usable.as_ref().unwrap()["first_visible_at_utc_ms"],
+            360_000
+        );
+        assert_eq!(
+            a.labels.last.as_ref().unwrap().quality,
+            MarketDataQuality::Invalid
+        );
+        assert!(a.labels.changes.last().unwrap()["fact"]["value"].is_object());
+        g.group_position += 1;
+        g.observations[1].terminal = second_resolved;
+        a.consume(&g, 650_000, false).unwrap();
+        b.consume(&g, 650_000, false).unwrap();
+        let a = a.finish().unwrap();
+        let b = b.finish().unwrap();
+        assert_eq!(
+            a["posthoc_label_qualification"]["latest_terminal_usable"],
+            false
+        );
+        assert_eq!(
+            b["posthoc_label_qualification"]["latest_terminal_usable"],
+            true
+        );
+        assert_eq!(
+            b["posthoc_label_qualification"]["first_usable_terminal"]["condition_id"],
+            b["target"]["condition_id"]
+        );
+        assert_eq!(
+            b["source_width_and_repetition"]["target_pre_window_observations"],
+            1
+        );
+        assert_eq!(
+            b["source_width_and_repetition"]["target_repeated_spot_observations_inside_window"],
+            1
+        );
+        assert_eq!(b["frozen_sampling"].as_array().unwrap().len(), 8);
+        assert!(
+            a["frozen_sampling"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|s| s["terminal_for_target"]["value"].is_null())
+        );
+        assert!(b["market_right_boundary_hold_diagnostic"]["diagnostic"]["terminal_for_target"]["value"].is_null());
     }
     #[test]
     fn received_time_regression_is_preserved_and_not_reordered_into_history() {
