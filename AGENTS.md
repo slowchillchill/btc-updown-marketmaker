@@ -20,8 +20,8 @@ intent-bridge/            # 公共交易意图到 SIM/LIVE 后端的提交适配
 execution-normalization/  # 执行与经济反馈规范化，形成 NOE
 ledger/                   # 账户、持仓、预留及费用返佣等经济事实归约
 shared-run/               # 跨环境共用的观察、执行、账户读取与结算协调
-baseline-mm/              # 人工盈利策略、参数与业务研究（当前仅文档）
-backtest/                 # 公共历史回测入口、运行装配与通用结果汇总（规划）
+baseline-mm/              # 人工盈利策略、参数与业务研究
+backtest/                 # 公共历史回测入口、运行装配与通用结果汇总
 model-train/              # 模型训练、开发竞赛与模型产物交付
 offline-evaluation/       # 冻结模型的独立留出评价与晋级（规划）
 paper-trade/              # PAPER 上层运行入口与在线模拟装配（规划）
