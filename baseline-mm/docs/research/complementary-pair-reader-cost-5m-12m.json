@@ -1,0 +1,2815 @@
+{
+  "schema": "complementary_pair_reader_cost_report_v1",
+  "task_issue": 185,
+  "scope": "existing public materials only; no prepare, raw source admission, causal feature/parameter/account/return computation",
+  "base_commit": "fda4f67ed5db01c7168230c5e11a72ec5b47552a",
+  "source_commit": "eed679250d23489a78720f065f8ef8fa375bc240",
+  "source_files": {
+    "baseline-mm/examples/research_reader_cost.rs": "516f20bfc7722d890fe3e8f0824a088a90c9146f408cdcf6521e487f16515a7d",
+    "data-pipeline/training/src/public_recording.rs": "801a9314ba6f1d7bb3a22160f09a09d3e0b44988b2b7b8e9fc22a42f075d7023",
+    "data-pipeline/training/src/public_replay.rs": "835dc4becd86d1c0fadf57dbffd08ba194c5fb6d8f6802178cf100195f0bd575",
+    "data-pipeline/training/src/lib.rs": "2234492af0431411d1987536521fdd1e715468c8038436a6cca4499db785611e",
+    "sim-system/src/public_consumption.rs": "444a43593e4fe04ff4216e7fa4330cca496c8e13d8adf7190a46c6a140c0d891",
+    "Cargo.lock": "4d78694113785b3c6e6776f903be1076414496206a2319ce43d15433674d88e3"
+  },
+  "binary_sha256": "0dee2e644830f8f1f6b3fb02d153a5b7d9fcc1dc5aaffb9e6064f87bb562cf1c",
+  "binary_bytes": 14346440,
+  "rustc": "rustc 1.95.0 (59807616e 2026-04-14)\nbinary: rustc\ncommit-hash: 59807616e1fa2540724bfbac14d7976d7e4a3860\ncommit-date: 2026-04-14\nhost: x86_64-unknown-linux-gnu\nrelease: 1.95.0\nLLVM version: 22.1.2\n",
+  "release_build_command": "cargo build -p baseline-mm --example research_reader_cost --release --locked --offline",
+  "compile_environment": {
+    "cargo_build_jobs": 8,
+    "cargo_test_dev_debug": 0,
+    "debug_assertions": "Cargo default unchanged",
+    "target_cache": "prior causal-labels build cache reused normally; retained delivery binary/source identity preserved"
+  },
+  "cache_allocated_before_measurements_bytes": 13821272064,
+  "measurement_build_verification": {
+    "workspace_suites": 86,
+    "passed": 1252,
+    "failed": 0,
+    "ignored": 18,
+    "skipped_by_name": "four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second",
+    "example_tests": 3,
+    "fmt_exit": 0,
+    "clippy_exit": 0,
+    "release_build_exit": 0
+  },
+  "inputs": {
+    "5m": {
+      "public_root": "S5-initialized/materials/public",
+      "old_trial_sha256": "5916ea0b8fb9adf714660f4a803c8c84ca6f9d85f35ca3ba592999fda643ef3e",
+      "prefix": {
+        "input_stream_id": "complementary-pair-material-trial-initialized-20260909-0000-0005",
+        "next_canonical_position": 76260,
+        "next_group_position": 76247,
+        "next_input_position": 76283,
+        "next_observation_position": 228386,
+        "next_public_index_position": 76247,
+        "normal_end": true,
+        "stable_storage_ref": "stable-00000000000000000000"
+      },
+      "initialization_input_positions": [
+        0,
+        1,
+        2
+      ],
+      "input_set_identity_sha256": "2cbd7229cd785a26c9302be87be07cc890f806462f9bec1b7c43bab44f7a54fa",
+      "source_identity_sha256": "c25fc98df8f671ce295cf9fd49de5d18ee3ba90c36fb2e37466b4cf9e6cf2859",
+      "retained_parquet_metadata": {
+        "stored_rows": 1369081,
+        "footer_bytes": 484539,
+        "row_groups": 1337,
+        "uncompressed_columns_bytes": 3232826721,
+        "origin": "previous bounded metadata inspection; no repeated full-file hashing or source admission"
+      }
+    },
+    "12m": {
+      "public_root": "causal-labels-12m/materials/public",
+      "old_trial_sha256": "58f21852bb69f52df666b2a3f85adf27f51d926a396ad11a1538cc70edb9c800",
+      "prefix": {
+        "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012",
+        "next_canonical_position": 208661,
+        "next_group_position": 208638,
+        "next_input_position": 208688,
+        "next_observation_position": 806966,
+        "next_public_index_position": 208638,
+        "normal_end": true,
+        "stable_storage_ref": "stable-00000000000000000000"
+      },
+      "initialization_input_positions": [
+        0,
+        1,
+        2
+      ],
+      "input_set_identity_sha256": "2cbd7229cd785a26c9302be87be07cc890f806462f9bec1b7c43bab44f7a54fa",
+      "source_identity_sha256": "66892eab3b355e0c05e13b5e8874ff298b898cb62809a89b208a29e82f8ee281",
+      "retained_parquet_metadata": {
+        "stored_rows": 3994880,
+        "footer_bytes": 1423481,
+        "row_groups": 3902,
+        "uncompressed_columns_bytes": 13244383615,
+        "origin": "previous bounded metadata inspection; no repeated full-file hashing or source admission"
+      }
+    }
+  },
+  "run_order": [
+    "run-1-5m-record",
+    "run-2-12m-record",
+    "run-3-5m-replay",
+    "run-4-12m-replay",
+    "run-5-12m-group",
+    "run-6-12m-replay-1024"
+  ],
+  "runs": [
+    {
+      "run": "run-1-5m-record",
+      "effective_config": {
+        "expected_normal_prefix": {
+          "input_stream_id": "complementary-pair-material-trial-initialized-20260909-0000-0005",
+          "next_canonical_position": 76260,
+          "next_group_position": 76247,
+          "next_input_position": 76283,
+          "next_observation_position": 228386,
+          "next_public_index_position": 76247,
+          "normal_end": true,
+          "stable_storage_ref": "stable-00000000000000000000"
+        },
+        "max_read_batch_bytes": 67108864,
+        "mode": "record",
+        "public_root": "S5-initialized/materials/public",
+        "purpose": "#185任务3既有公共材料读取与重放成本定位；5m record，只消费原public，无prepare/账户/收益",
+        "read_page_rows": 256
+      },
+      "outcome": {
+        "result": {
+          "actual_record_reader_prefix": {
+            "input_stream_id": "complementary-pair-material-trial-initialized-20260909-0000-0005",
+            "next_canonical_position": 76260,
+            "next_group_position": 76247,
+            "next_input_position": 76283,
+            "next_observation_position": 228386,
+            "next_public_index_position": 76247,
+            "normal_end": true,
+            "stable_storage_ref": "stable-00000000000000000000"
+          },
+          "measure_wall_seconds": 4.788196422,
+          "measurement_note": "入口调用时间包括内部跳过的稳定记录/依赖候选读取/归约等可达路径；返回Input分类只表相关性，不是Input独占成本。group可含多Input推进或pending出队。consume_summary_ns包括小字段摘要、分类、慢项保留和释放；Instant及外层循环开销未单独隔离。未计量各内部步骤次数/占比。",
+          "open_entry_ns": 211148,
+          "replay_applied_prefix": null,
+          "replay_next_canonical_position": null,
+          "summary": {
+            "canonical_positions": {
+              "count": 76260,
+              "first": 0,
+              "last": 76259,
+              "max": 76259,
+              "min": 0,
+              "non_increasing": 0
+            },
+            "consume_summary_ns": 300038549,
+            "dependencies": {
+              "first_nonempty_inputs": [
+                {
+                  "input_position": 349,
+                  "kind": "anchor_rule",
+                  "omitted_refs": 0,
+                  "refs_first_eight": [
+                    {
+                      "input_position": 339,
+                      "input_stream_id": "complementary-pair-material-trial-initialized-20260909-0000-0005"
+                    }
+                  ],
+                  "total_refs": 1
+                }
+              ],
+              "nonempty_inputs": 1,
+              "omitted_nonempty_inputs": 0,
+              "position_occurrences": {
+                "count": 1,
+                "first": 339,
+                "last": 339,
+                "max": 339,
+                "min": 339,
+                "non_increasing": 0
+              },
+              "refs": 1,
+              "relations": {
+                "earlier_same_stream": 1
+              },
+              "retention": "最早16个非空依赖Input，每项至多前8引用；总数/省略数分开，非完整触发集合。"
+            },
+            "end_of_input_count": 1,
+            "entry_call_timings_by_return_kind": {
+              "anchor_rule": {
+                "calls": 62,
+                "duration_log2_ns": {
+                  "12": 22,
+                  "13": 10,
+                  "14": 30
+                },
+                "max_ns": 24406,
+                "sum_ns": 925302
+              },
+              "binance_agg_trade": {
+                "calls": 1903,
+                "duration_log2_ns": {
+                  "11": 985,
+                  "12": 697,
+                  "13": 212,
+                  "14": 5,
+                  "15": 1,
+                  "18": 1,
+                  "19": 2
+                },
+                "max_ns": 851824,
+                "sum_ns": 11133065
+              },
+              "binance_depth_snapshot": {
+                "calls": 1,
+                "duration_log2_ns": {
+                  "17": 1
+                },
+                "max_ns": 154200,
+                "sum_ns": 154200
+              },
+              "binance_depth_update": {
+                "calls": 2999,
+                "duration_log2_ns": {
+                  "11": 428,
+                  "12": 2246,
+                  "13": 247,
+                  "14": 64,
+                  "15": 9,
+                  "16": 2,
+                  "18": 2,
+                  "19": 1
+                },
+                "max_ns": 567588,
+                "sum_ns": 19569310
+              },
+              "chainlink_spot": {
+                "calls": 281,
+                "duration_log2_ns": {
+                  "11": 27,
+                  "12": 243,
+                  "13": 9,
+                  "17": 1,
+                  "19": 1
+                },
+                "max_ns": 694117,
+                "sum_ns": 2370334
+              },
+              "chainlink_twap": {
+                "calls": 283,
+                "duration_log2_ns": {
+                  "11": 2,
+                  "12": 248,
+                  "13": 32,
+                  "19": 1
+                },
+                "max_ns": 1011724,
+                "sum_ns": 2896193
+              },
+              "end_of_input": {
+                "calls": 1,
+                "duration_log2_ns": {
+                  "9": 1
+                },
+                "max_ns": 611,
+                "sum_ns": 611
+              },
+              "eof": {
+                "calls": 1,
+                "duration_log2_ns": {
+                  "13": 1
+                },
+                "max_ns": 12504,
+                "sum_ns": 12504
+              },
+              "metadata_v6_existing": {
+                "calls": 7,
+                "duration_log2_ns": {
+                  "12": 2,
+                  "13": 2,
+                  "14": 2,
+                  "15": 1
+                },
+                "max_ns": 51577,
+                "sum_ns": 139983
+              },
+              "polymarket_orderbook": {
+                "calls": 70746,
+                "duration_log2_ns": {
+                  "10": 51619,
+                  "11": 16627,
+                  "12": 275,
+                  "13": 1908,
+                  "14": 136,
+                  "15": 37,
+                  "16": 28,
+                  "17": 13,
+                  "18": 68,
+                  "19": 31,
+                  "20": 4
+                },
+                "max_ns": 1255934,
+                "sum_ns": 225636485
+              },
+              "stored_non_input": {
+                "calls": 1292798,
+                "duration_log2_ns": {
+                  "10": 47682,
+                  "11": 163010,
+                  "12": 5649,
+                  "13": 286,
+                  "14": 3877,
+                  "15": 674,
+                  "16": 2161,
+                  "17": 449,
+                  "18": 2165,
+                  "19": 2343,
+                  "20": 98,
+                  "21": 8,
+                  "22": 1,
+                  "7": 336440,
+                  "8": 380820,
+                  "9": 347135
+                },
+                "max_ns": 5982862,
+                "sum_ns": 4158883067
+              }
+            },
+            "entry_call_timings_by_returned_input_dependency_presence": {
+              "empty": {
+                "calls": 76282,
+                "duration_log2_ns": {
+                  "10": 51619,
+                  "11": 18069,
+                  "12": 3733,
+                  "13": 2420,
+                  "14": 236,
+                  "15": 48,
+                  "16": 30,
+                  "17": 15,
+                  "18": 71,
+                  "19": 36,
+                  "20": 4,
+                  "9": 1
+                },
+                "max_ns": 1255934,
+                "sum_ns": 262804273
+              },
+              "nonempty": {
+                "calls": 1,
+                "duration_log2_ns": {
+                  "14": 1
+                },
+                "max_ns": 21210,
+                "sum_ns": 21210
+              }
+            },
+            "entry_calls_including_eof": 1369082,
+            "group_delivery_time_order_sha256": null,
+            "group_fact_identity_time_quality_order_sha256": null,
+            "group_positions": {
+              "count": 76247,
+              "first": 0,
+              "last": 76246,
+              "max": 76246,
+              "min": 0,
+              "non_increasing": 0
+            },
+            "groups_per_replay_return": null,
+            "historical_anchor_repair_inputs": 0,
+            "historical_anchor_repair_members": 0,
+            "input_identity_order_sha256": "bbb0d32d39461cc6631e02f9a94de802cbbd3c01718408f237f95916a3b31fd5",
+            "input_kinds": {
+              "anchor_rule": 62,
+              "binance_agg_trade": 1903,
+              "binance_depth_snapshot": 1,
+              "binance_depth_update": 2999,
+              "chainlink_spot": 281,
+              "chainlink_twap": 283,
+              "end_of_input": 1,
+              "metadata_v6_existing": 7,
+              "polymarket_orderbook": 70746
+            },
+            "input_positions": {
+              "count": 76283,
+              "first": 0,
+              "last": 76282,
+              "max": 76282,
+              "min": 0,
+              "non_increasing": 0
+            },
+            "not_measured_by_this_entry": [
+              "groups_per_replay_return",
+              "group_fact_identity_time_quality_order_sha256",
+              "group_delivery_time_order_sha256"
+            ],
+            "observation_positions": {
+              "count": 228386,
+              "first": 0,
+              "last": 228385,
+              "max": 228385,
+              "min": 0,
+              "non_increasing": 0
+            },
+            "observations": 228386,
+            "observations_per_group": {
+              "1": 2,
+              "2": 351,
+              "3": 75894
+            },
+            "slow_calls_omitted": 1369066,
+            "slowest_calls": [
+              {
+                "call_ordinal": 1025,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 5982862,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 1289217,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 3443422,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 1034241,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 2861296,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 31745,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 2649437,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 44033,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 2542335,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 1147905,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 2475329,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 38913,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 2238914,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 815105,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 2228996,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 804097,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 2125120,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 35841,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 2008301,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 39937,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 1939020,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 1133569,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 1891530,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 1236993,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 1852657,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 1150977,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 1821098,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 1148929,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 1808384,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 1004545,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 1775733,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              }
+            ],
+            "stored_record_kinds": {
+              "canonical": 76260,
+              "group": 76247,
+              "input": 76283,
+              "observation": 228386,
+              "pm_report": 267695,
+              "pm_step_binding": 639293,
+              "report": 4914,
+              "source_binding": 3
+            }
+          }
+        },
+        "status": "success"
+      },
+      "resources": {
+        "process_wall_seconds": 4.79,
+        "user_seconds": 4.42,
+        "system_seconds": 0.15,
+        "maximum_rss_kib": 31448,
+        "filesystem_input_512_byte_blocks": 918872,
+        "filesystem_output_512_byte_blocks": 32,
+        "exit_code": 0,
+        "proc_io_delta": {
+          "rchar": 346488684,
+          "wchar": 0,
+          "syscr": 24150,
+          "syscw": 0,
+          "read_bytes": 470462464,
+          "write_bytes": 0,
+          "cancelled_write_bytes": 0
+        },
+        "result_bytes": 15740,
+        "result_sha256": "d99b364b7e2c741af0bd9bcf99d3c843a34fbea21c6c85948afc7ed8b3f2745d",
+        "source_commit": "eed679250d23489a78720f065f8ef8fa375bc240",
+        "binary_sha256": "0dee2e644830f8f1f6b3fb02d153a5b7d9fcc1dc5aaffb9e6064f87bb562cf1c",
+        "config_sha256": "486e3acfbb064daab09595abe5f42e92b5c2766d7af0822e952243ee2bbc2519"
+      },
+      "evidence": {
+        "raw_result": "run-1-5m-record/result.private.json",
+        "gnu_time": "run-1-5m-record/gnu-time.txt",
+        "stdout": "run-1-5m-record/stdout.log",
+        "stderr": "run-1-5m-record/stderr.log",
+        "stderr_bytes": 0
+      }
+    },
+    {
+      "run": "run-2-12m-record",
+      "effective_config": {
+        "expected_normal_prefix": {
+          "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012",
+          "next_canonical_position": 208661,
+          "next_group_position": 208638,
+          "next_input_position": 208688,
+          "next_observation_position": 806966,
+          "next_public_index_position": 208638,
+          "normal_end": true,
+          "stable_storage_ref": "stable-00000000000000000000"
+        },
+        "max_read_batch_bytes": 67108864,
+        "mode": "record",
+        "public_root": "causal-labels-12m/materials/public",
+        "purpose": "#185任务3既有公共材料读取与重放成本定位；12m record，只消费原public，无prepare/账户/收益",
+        "read_page_rows": 256
+      },
+      "outcome": {
+        "result": {
+          "actual_record_reader_prefix": {
+            "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012",
+            "next_canonical_position": 208661,
+            "next_group_position": 208638,
+            "next_input_position": 208688,
+            "next_observation_position": 806966,
+            "next_public_index_position": 208638,
+            "normal_end": true,
+            "stable_storage_ref": "stable-00000000000000000000"
+          },
+          "measure_wall_seconds": 18.562229426000002,
+          "measurement_note": "入口调用时间包括内部跳过的稳定记录/依赖候选读取/归约等可达路径；返回Input分类只表相关性，不是Input独占成本。group可含多Input推进或pending出队。consume_summary_ns包括小字段摘要、分类、慢项保留和释放；Instant及外层循环开销未单独隔离。未计量各内部步骤次数/占比。",
+          "open_entry_ns": 190819,
+          "replay_applied_prefix": null,
+          "replay_next_canonical_position": null,
+          "summary": {
+            "canonical_positions": {
+              "count": 208661,
+              "first": 0,
+              "last": 208660,
+              "max": 208660,
+              "min": 0,
+              "non_increasing": 0
+            },
+            "consume_summary_ns": 948065041,
+            "dependencies": {
+              "first_nonempty_inputs": [
+                {
+                  "input_position": 349,
+                  "kind": "anchor_rule",
+                  "omitted_refs": 0,
+                  "refs_first_eight": [
+                    {
+                      "input_position": 339,
+                      "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012"
+                    }
+                  ],
+                  "total_refs": 1
+                }
+              ],
+              "nonempty_inputs": 1,
+              "omitted_nonempty_inputs": 0,
+              "position_occurrences": {
+                "count": 1,
+                "first": 339,
+                "last": 339,
+                "max": 339,
+                "min": 339,
+                "non_increasing": 0
+              },
+              "refs": 1,
+              "relations": {
+                "earlier_same_stream": 1
+              },
+              "retention": "最早16个非空依赖Input，每项至多前8引用；总数/省略数分开，非完整触发集合。"
+            },
+            "end_of_input_count": 1,
+            "entry_call_timings_by_return_kind": {
+              "anchor_rule": {
+                "calls": 150,
+                "duration_log2_ns": {
+                  "12": 51,
+                  "13": 26,
+                  "14": 73
+                },
+                "max_ns": 31900,
+                "sum_ns": 2317647
+              },
+              "binance_agg_trade": {
+                "calls": 4405,
+                "duration_log2_ns": {
+                  "11": 2350,
+                  "12": 1404,
+                  "13": 618,
+                  "14": 24,
+                  "15": 1,
+                  "16": 1,
+                  "17": 1,
+                  "18": 2,
+                  "19": 4
+                },
+                "max_ns": 972280,
+                "sum_ns": 26808449
+              },
+              "binance_depth_snapshot": {
+                "calls": 1,
+                "duration_log2_ns": {
+                  "17": 1
+                },
+                "max_ns": 149662,
+                "sum_ns": 149662
+              },
+              "binance_depth_update": {
+                "calls": 7199,
+                "duration_log2_ns": {
+                  "11": 577,
+                  "12": 5608,
+                  "13": 821,
+                  "14": 141,
+                  "15": 32,
+                  "16": 3,
+                  "17": 2,
+                  "18": 1,
+                  "19": 5,
+                  "20": 8,
+                  "22": 1
+                },
+                "max_ns": 7745239,
+                "sum_ns": 69217560
+              },
+              "chainlink_spot": {
+                "calls": 659,
+                "duration_log2_ns": {
+                  "11": 43,
+                  "12": 442,
+                  "13": 172,
+                  "17": 1,
+                  "19": 1
+                },
+                "max_ns": 639314,
+                "sum_ns": 5172026
+              },
+              "chainlink_twap": {
+                "calls": 661,
+                "duration_log2_ns": {
+                  "11": 2,
+                  "12": 419,
+                  "13": 238,
+                  "14": 1,
+                  "20": 1
+                },
+                "max_ns": 1118716,
+                "sum_ns": 6131918
+              },
+              "end_of_input": {
+                "calls": 1,
+                "duration_log2_ns": {
+                  "9": 1
+                },
+                "max_ns": 611,
+                "sum_ns": 611
+              },
+              "eof": {
+                "calls": 1,
+                "duration_log2_ns": {
+                  "14": 1
+                },
+                "max_ns": 29605,
+                "sum_ns": 29605
+              },
+              "metadata_v6_existing": {
+                "calls": 15,
+                "duration_log2_ns": {
+                  "12": 4,
+                  "13": 2,
+                  "14": 8,
+                  "15": 1
+                },
+                "max_ns": 52108,
+                "sum_ns": 297681
+              },
+              "polymarket_orderbook": {
+                "calls": 195597,
+                "duration_log2_ns": {
+                  "10": 138445,
+                  "11": 49654,
+                  "12": 1009,
+                  "13": 5597,
+                  "14": 448,
+                  "15": 52,
+                  "16": 65,
+                  "17": 57,
+                  "18": 99,
+                  "19": 125,
+                  "20": 45,
+                  "21": 1
+                },
+                "max_ns": 2305029,
+                "sum_ns": 680439847
+              },
+              "stored_non_input": {
+                "calls": 3786192,
+                "duration_log2_ns": {
+                  "10": 122883,
+                  "11": 456776,
+                  "12": 18352,
+                  "13": 1033,
+                  "14": 11953,
+                  "15": 918,
+                  "16": 6438,
+                  "17": 1268,
+                  "18": 2761,
+                  "19": 4248,
+                  "20": 4801,
+                  "21": 478,
+                  "22": 4,
+                  "23": 2,
+                  "7": 953091,
+                  "8": 1095277,
+                  "9": 1105909
+                },
+                "max_ns": 16724742,
+                "sum_ns": 16630353900
+              }
+            },
+            "entry_call_timings_by_returned_input_dependency_presence": {
+              "empty": {
+                "calls": 208687,
+                "duration_log2_ns": {
+                  "10": 138445,
+                  "11": 52626,
+                  "12": 8937,
+                  "13": 7474,
+                  "14": 694,
+                  "15": 86,
+                  "16": 69,
+                  "17": 62,
+                  "18": 102,
+                  "19": 135,
+                  "20": 54,
+                  "21": 1,
+                  "22": 1,
+                  "9": 1
+                },
+                "max_ns": 7745239,
+                "sum_ns": 790513119
+              },
+              "nonempty": {
+                "calls": 1,
+                "duration_log2_ns": {
+                  "14": 1
+                },
+                "max_ns": 22282,
+                "sum_ns": 22282
+              }
+            },
+            "entry_calls_including_eof": 3994881,
+            "group_delivery_time_order_sha256": null,
+            "group_fact_identity_time_quality_order_sha256": null,
+            "group_positions": {
+              "count": 208638,
+              "first": 0,
+              "last": 208637,
+              "max": 208637,
+              "min": 0,
+              "non_increasing": 0
+            },
+            "groups_per_replay_return": null,
+            "historical_anchor_repair_inputs": 0,
+            "historical_anchor_repair_members": 0,
+            "input_identity_order_sha256": "e629bdd83a32c391b2e0eb1ee90a0822c77859b5e61c7bf0aa6e109cc7b17b81",
+            "input_kinds": {
+              "anchor_rule": 150,
+              "binance_agg_trade": 4405,
+              "binance_depth_snapshot": 1,
+              "binance_depth_update": 7199,
+              "chainlink_spot": 659,
+              "chainlink_twap": 661,
+              "end_of_input": 1,
+              "metadata_v6_existing": 15,
+              "polymarket_orderbook": 195597
+            },
+            "input_positions": {
+              "count": 208688,
+              "first": 0,
+              "last": 208687,
+              "max": 208687,
+              "min": 0,
+              "non_increasing": 0
+            },
+            "not_measured_by_this_entry": [
+              "groups_per_replay_return",
+              "group_fact_identity_time_quality_order_sha256",
+              "group_delivery_time_order_sha256"
+            ],
+            "observation_positions": {
+              "count": 806966,
+              "first": 0,
+              "last": 806965,
+              "max": 806965,
+              "min": 0,
+              "non_increasing": 0
+            },
+            "observations": 806966,
+            "observations_per_group": {
+              "1": 2,
+              "2": 351,
+              "3": 75907,
+              "4": 83349,
+              "5": 49029
+            },
+            "slow_calls_omitted": 3994865,
+            "slowest_calls": [
+              {
+                "call_ordinal": 2872833,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 16724742,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 1025,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 9705690,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 2192385,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 7745239,
+                "input_or_group_position": 118391,
+                "kind": "binance_depth_update"
+              },
+              {
+                "call_ordinal": 1853441,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 5736899,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 3174913,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 5231508,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 2923009,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 4925552,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 2423041,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 4887190,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 2786305,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 4025718,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 3739393,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 3575470,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 1289217,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 3401153,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 2873345,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 3372388,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 3094529,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 3313036,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 1,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 3216695,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 2628609,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 3191918,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 3964161,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 3023442,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              },
+              {
+                "call_ordinal": 2958337,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 2858892,
+                "input_or_group_position": null,
+                "kind": "stored_non_input"
+              }
+            ],
+            "stored_record_kinds": {
+              "canonical": 208661,
+              "group": 208638,
+              "input": 208688,
+              "observation": 806966,
+              "pm_report": 737740,
+              "pm_step_binding": 1812556,
+              "report": 11628,
+              "source_binding": 3
+            }
+          }
+        },
+        "status": "success"
+      },
+      "resources": {
+        "process_wall_seconds": 18.56,
+        "user_seconds": 17.12,
+        "system_seconds": 0.49,
+        "maximum_rss_kib": 74568,
+        "filesystem_input_512_byte_blocks": 3652608,
+        "filesystem_output_512_byte_blocks": 32,
+        "exit_code": 0,
+        "proc_io_delta": {
+          "rchar": 1431137014,
+          "wchar": 0,
+          "syscr": 72118,
+          "syscw": 0,
+          "read_bytes": 1870135296,
+          "write_bytes": 0,
+          "cancelled_write_bytes": 0
+        },
+        "result_bytes": 16049,
+        "result_sha256": "7d74af7db07dd3c745a247d0805e6af7ef9f786bb3080fb10439eb82bfd00d9a",
+        "source_commit": "eed679250d23489a78720f065f8ef8fa375bc240",
+        "binary_sha256": "0dee2e644830f8f1f6b3fb02d153a5b7d9fcc1dc5aaffb9e6064f87bb562cf1c",
+        "config_sha256": "ce398e58da99a036e5c69babbb8e6b12743b148ec32d7389da1c9f7f7734dd59"
+      },
+      "evidence": {
+        "raw_result": "run-2-12m-record/result.private.json",
+        "gnu_time": "run-2-12m-record/gnu-time.txt",
+        "stdout": "run-2-12m-record/stdout.log",
+        "stderr": "run-2-12m-record/stderr.log",
+        "stderr_bytes": 0
+      }
+    },
+    {
+      "run": "run-3-5m-replay",
+      "effective_config": {
+        "expected_normal_prefix": {
+          "input_stream_id": "complementary-pair-material-trial-initialized-20260909-0000-0005",
+          "next_canonical_position": 76260,
+          "next_group_position": 76247,
+          "next_input_position": 76283,
+          "next_observation_position": 228386,
+          "next_public_index_position": 76247,
+          "normal_end": true,
+          "stable_storage_ref": "stable-00000000000000000000"
+        },
+        "max_read_batch_bytes": 67108864,
+        "mode": "replay",
+        "public_root": "S5-initialized/materials/public",
+        "purpose": "#185任务3既有公共材料读取与重放成本定位；5m replay，只消费原public，无prepare/账户/收益",
+        "read_page_rows": 256
+      },
+      "outcome": {
+        "result": {
+          "actual_record_reader_prefix": null,
+          "measure_wall_seconds": 58.086731216,
+          "measurement_note": "入口调用时间包括内部跳过的稳定记录/依赖候选读取/归约等可达路径；返回Input分类只表相关性，不是Input独占成本。group可含多Input推进或pending出队。consume_summary_ns包括小字段摘要、分类、慢项保留和释放；Instant及外层循环开销未单独隔离。未计量各内部步骤次数/占比。",
+          "open_entry_ns": 201259,
+          "replay_applied_prefix": {
+            "input_stream_id": "complementary-pair-material-trial-initialized-20260909-0000-0005",
+            "next_input_position": 76283
+          },
+          "replay_next_canonical_position": 76260,
+          "summary": {
+            "canonical_positions": null,
+            "consume_summary_ns": 10245399540,
+            "dependencies": {
+              "first_nonempty_inputs": [
+                {
+                  "input_position": 349,
+                  "kind": "anchor_rule",
+                  "omitted_refs": 0,
+                  "refs_first_eight": [
+                    {
+                      "input_position": 339,
+                      "input_stream_id": "complementary-pair-material-trial-initialized-20260909-0000-0005"
+                    }
+                  ],
+                  "total_refs": 1
+                }
+              ],
+              "nonempty_inputs": 1,
+              "omitted_nonempty_inputs": 0,
+              "position_occurrences": {
+                "count": 1,
+                "first": 339,
+                "last": 339,
+                "max": 339,
+                "min": 339,
+                "non_increasing": 0
+              },
+              "refs": 1,
+              "relations": {
+                "earlier_same_stream": 1
+              },
+              "retention": "最早16个非空依赖Input，每项至多前8引用；总数/省略数分开，非完整触发集合。"
+            },
+            "end_of_input_count": 1,
+            "entry_call_timings_by_return_kind": {
+              "anchor_rule": {
+                "calls": 62,
+                "duration_log2_ns": {
+                  "14": 5,
+                  "15": 2,
+                  "18": 32,
+                  "19": 14,
+                  "20": 6,
+                  "23": 2,
+                  "32": 1
+                },
+                "max_ns": 4616336316,
+                "sum_ns": 4671504964
+              },
+              "binance_agg_trade": {
+                "calls": 1903,
+                "duration_log2_ns": {
+                  "16": 13,
+                  "17": 1,
+                  "18": 1576,
+                  "19": 205,
+                  "20": 105,
+                  "21": 3
+                },
+                "max_ns": 3941990,
+                "sum_ns": 1005917670
+              },
+              "binance_depth_snapshot": {
+                "calls": 1,
+                "duration_log2_ns": {
+                  "20": 1
+                },
+                "max_ns": 1291171,
+                "sum_ns": 1291171
+              },
+              "binance_depth_update": {
+                "calls": 2999,
+                "duration_log2_ns": {
+                  "15": 23,
+                  "16": 1,
+                  "18": 4,
+                  "19": 657,
+                  "20": 1949,
+                  "21": 361,
+                  "22": 4
+                },
+                "max_ns": 6809348,
+                "sum_ns": 4573727593
+              },
+              "chainlink_spot": {
+                "calls": 281,
+                "duration_log2_ns": {
+                  "16": 2,
+                  "17": 1,
+                  "18": 194,
+                  "19": 46,
+                  "20": 37,
+                  "21": 1
+                },
+                "max_ns": 2259954,
+                "sum_ns": 178487730
+              },
+              "chainlink_twap": {
+                "calls": 283,
+                "duration_log2_ns": {
+                  "16": 3,
+                  "18": 168,
+                  "19": 79,
+                  "20": 33
+                },
+                "max_ns": 1956002,
+                "sum_ns": 177552303
+              },
+              "end_of_input": {
+                "calls": 1,
+                "duration_log2_ns": {
+                  "14": 1
+                },
+                "max_ns": 19326,
+                "sum_ns": 19326
+              },
+              "eof": {
+                "calls": 1,
+                "duration_log2_ns": {
+                  "14": 1
+                },
+                "max_ns": 26750,
+                "sum_ns": 26750
+              },
+              "metadata_v6_existing": {
+                "calls": 7,
+                "duration_log2_ns": {
+                  "14": 2,
+                  "15": 2,
+                  "16": 1,
+                  "17": 1,
+                  "22": 1
+                },
+                "max_ns": 6447085,
+                "sum_ns": 6863609
+              },
+              "polymarket_orderbook": {
+                "calls": 70746,
+                "duration_log2_ns": {
+                  "13": 1,
+                  "14": 132,
+                  "15": 4,
+                  "16": 161,
+                  "17": 11,
+                  "18": 57514,
+                  "19": 9841,
+                  "20": 2895,
+                  "21": 172,
+                  "22": 13,
+                  "23": 2
+                },
+                "max_ns": 11184364,
+                "sum_ns": 37219002280
+              }
+            },
+            "entry_call_timings_by_returned_input_dependency_presence": {
+              "empty": {
+                "calls": 76282,
+                "duration_log2_ns": {
+                  "13": 1,
+                  "14": 140,
+                  "15": 31,
+                  "16": 181,
+                  "17": 14,
+                  "18": 59488,
+                  "19": 10842,
+                  "20": 5026,
+                  "21": 537,
+                  "22": 18,
+                  "23": 4
+                },
+                "max_ns": 11184364,
+                "sum_ns": 43218030330
+              },
+              "nonempty": {
+                "calls": 1,
+                "duration_log2_ns": {
+                  "32": 1
+                },
+                "max_ns": 4616336316,
+                "sum_ns": 4616336316
+              }
+            },
+            "entry_calls_including_eof": 76284,
+            "group_delivery_time_order_sha256": null,
+            "group_fact_identity_time_quality_order_sha256": "ddf207af0b09502b37f5bd512f5ed24a3273b939e4e20e30ad524d84471089ae",
+            "group_positions": {
+              "count": 76247,
+              "first": 0,
+              "last": 76246,
+              "max": 76246,
+              "min": 0,
+              "non_increasing": 0
+            },
+            "groups_per_replay_return": {
+              "0": 36,
+              "1": 76247
+            },
+            "historical_anchor_repair_inputs": 0,
+            "historical_anchor_repair_members": 0,
+            "input_identity_order_sha256": "bbb0d32d39461cc6631e02f9a94de802cbbd3c01718408f237f95916a3b31fd5",
+            "input_kinds": {
+              "anchor_rule": 62,
+              "binance_agg_trade": 1903,
+              "binance_depth_snapshot": 1,
+              "binance_depth_update": 2999,
+              "chainlink_spot": 281,
+              "chainlink_twap": 283,
+              "end_of_input": 1,
+              "metadata_v6_existing": 7,
+              "polymarket_orderbook": 70746
+            },
+            "input_positions": {
+              "count": 76283,
+              "first": 0,
+              "last": 76282,
+              "max": 76282,
+              "min": 0,
+              "non_increasing": 0
+            },
+            "not_measured_by_this_entry": [
+              "stored_record_kinds",
+              "canonical_positions",
+              "observation_positions",
+              "group_delivery_time_order_sha256"
+            ],
+            "observation_positions": null,
+            "observations": 228386,
+            "observations_per_group": {
+              "1": 2,
+              "2": 351,
+              "3": 75894
+            },
+            "slow_calls_omitted": 76268,
+            "slowest_calls": [
+              {
+                "call_ordinal": 350,
+                "dependency_count": 1,
+                "dependency_positions_first_eight": [
+                  339
+                ],
+                "elapsed_ns": 4616336316,
+                "input_or_group_position": 349,
+                "kind": "anchor_rule"
+              },
+              {
+                "call_ordinal": 34405,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 11184364,
+                "input_or_group_position": 34404,
+                "kind": "polymarket_orderbook"
+              },
+              {
+                "call_ordinal": 364,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 11016247,
+                "input_or_group_position": 363,
+                "kind": "anchor_rule"
+              },
+              {
+                "call_ordinal": 361,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 10818194,
+                "input_or_group_position": 360,
+                "kind": "anchor_rule"
+              },
+              {
+                "call_ordinal": 40532,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 10400698,
+                "input_or_group_position": 40531,
+                "kind": "polymarket_orderbook"
+              },
+              {
+                "call_ordinal": 21540,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 7597872,
+                "input_or_group_position": 21539,
+                "kind": "polymarket_orderbook"
+              },
+              {
+                "call_ordinal": 13239,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 7177300,
+                "input_or_group_position": 13238,
+                "kind": "polymarket_orderbook"
+              },
+              {
+                "call_ordinal": 17192,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 7132886,
+                "input_or_group_position": 17191,
+                "kind": "polymarket_orderbook"
+              },
+              {
+                "call_ordinal": 14728,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 6837220,
+                "input_or_group_position": 14727,
+                "kind": "polymarket_orderbook"
+              },
+              {
+                "call_ordinal": 71402,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 6809348,
+                "input_or_group_position": 71401,
+                "kind": "binance_depth_update"
+              },
+              {
+                "call_ordinal": 37552,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 6558325,
+                "input_or_group_position": 37551,
+                "kind": "polymarket_orderbook"
+              },
+              {
+                "call_ordinal": 1,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 6447085,
+                "input_or_group_position": 0,
+                "kind": "metadata_v6_existing"
+              },
+              {
+                "call_ordinal": 35271,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 6267418,
+                "input_or_group_position": 35270,
+                "kind": "polymarket_orderbook"
+              },
+              {
+                "call_ordinal": 37188,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 6254574,
+                "input_or_group_position": 37187,
+                "kind": "polymarket_orderbook"
+              },
+              {
+                "call_ordinal": 57482,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 6215761,
+                "input_or_group_position": 57481,
+                "kind": "polymarket_orderbook"
+              },
+              {
+                "call_ordinal": 40338,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 6105613,
+                "input_or_group_position": 40337,
+                "kind": "polymarket_orderbook"
+              }
+            ],
+            "stored_record_kinds": null
+          }
+        },
+        "status": "success"
+      },
+      "resources": {
+        "process_wall_seconds": 58.09,
+        "user_seconds": 56.67,
+        "system_seconds": 0.34,
+        "maximum_rss_kib": 48104,
+        "filesystem_input_512_byte_blocks": 1848968,
+        "filesystem_output_512_byte_blocks": 32,
+        "exit_code": 0,
+        "proc_io_delta": {
+          "rchar": 696211023,
+          "wchar": 0,
+          "syscr": 51525,
+          "syscw": 0,
+          "read_bytes": 946671616,
+          "write_bytes": 0,
+          "cancelled_write_bytes": 0
+        },
+        "result_bytes": 14613,
+        "result_sha256": "7399ec995daee4db4162bec310e5b449b8acbb9e5529ab69e8b0b2f878442ab2",
+        "source_commit": "eed679250d23489a78720f065f8ef8fa375bc240",
+        "binary_sha256": "0dee2e644830f8f1f6b3fb02d153a5b7d9fcc1dc5aaffb9e6064f87bb562cf1c",
+        "config_sha256": "5877c5b4e5bcbf6fe9e77f75ded73519150515eea69ac0e167488bdf620994ee"
+      },
+      "evidence": {
+        "raw_result": "run-3-5m-replay/result.private.json",
+        "gnu_time": "run-3-5m-replay/gnu-time.txt",
+        "stdout": "run-3-5m-replay/stdout.log",
+        "stderr": "run-3-5m-replay/stderr.log",
+        "stderr_bytes": 0
+      }
+    },
+    {
+      "run": "run-4-12m-replay",
+      "effective_config": {
+        "expected_normal_prefix": {
+          "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012",
+          "next_canonical_position": 208661,
+          "next_group_position": 208638,
+          "next_input_position": 208688,
+          "next_observation_position": 806966,
+          "next_public_index_position": 208638,
+          "normal_end": true,
+          "stable_storage_ref": "stable-00000000000000000000"
+        },
+        "max_read_batch_bytes": 67108864,
+        "mode": "replay",
+        "public_root": "causal-labels-12m/materials/public",
+        "purpose": "#185任务3既有公共材料读取与重放成本定位；12m replay，只消费原public，无prepare/账户/收益",
+        "read_page_rows": 256
+      },
+      "outcome": {
+        "result": {
+          "actual_record_reader_prefix": null,
+          "measure_wall_seconds": 366.142146085,
+          "measurement_note": "入口调用时间包括内部跳过的稳定记录/依赖候选读取/归约等可达路径；返回Input分类只表相关性，不是Input独占成本。group可含多Input推进或pending出队。consume_summary_ns包括小字段摘要、分类、慢项保留和释放；Instant及外层循环开销未单独隔离。未计量各内部步骤次数/占比。",
+          "open_entry_ns": 195588,
+          "replay_applied_prefix": {
+            "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012",
+            "next_input_position": 208688
+          },
+          "replay_next_canonical_position": 208661,
+          "summary": {
+            "canonical_positions": null,
+            "consume_summary_ns": 44160308007,
+            "dependencies": {
+              "first_nonempty_inputs": [
+                {
+                  "input_position": 349,
+                  "kind": "anchor_rule",
+                  "omitted_refs": 0,
+                  "refs_first_eight": [
+                    {
+                      "input_position": 339,
+                      "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012"
+                    }
+                  ],
+                  "total_refs": 1
+                }
+              ],
+              "nonempty_inputs": 1,
+              "omitted_nonempty_inputs": 0,
+              "position_occurrences": {
+                "count": 1,
+                "first": 339,
+                "last": 339,
+                "max": 339,
+                "min": 339,
+                "non_increasing": 0
+              },
+              "refs": 1,
+              "relations": {
+                "earlier_same_stream": 1
+              },
+              "retention": "最早16个非空依赖Input，每项至多前8引用；总数/省略数分开，非完整触发集合。"
+            },
+            "end_of_input_count": 1,
+            "entry_call_timings_by_return_kind": {
+              "anchor_rule": {
+                "calls": 150,
+                "duration_log2_ns": {
+                  "14": 6,
+                  "15": 6,
+                  "18": 31,
+                  "19": 68,
+                  "20": 24,
+                  "21": 4,
+                  "23": 2,
+                  "32": 4,
+                  "33": 4,
+                  "34": 1
+                },
+                "max_ns": 18133084340,
+                "sum_ns": 94841439691
+              },
+              "binance_agg_trade": {
+                "calls": 4405,
+                "duration_log2_ns": {
+                  "16": 13,
+                  "17": 1,
+                  "18": 1608,
+                  "19": 2014,
+                  "20": 652,
+                  "21": 109,
+                  "22": 8
+                },
+                "max_ns": 5687125,
+                "sum_ns": 3447755407
+              },
+              "binance_depth_snapshot": {
+                "calls": 1,
+                "duration_log2_ns": {
+                  "20": 1
+                },
+                "max_ns": 1294827,
+                "sum_ns": 1294827
+              },
+              "binance_depth_update": {
+                "calls": 7199,
+                "duration_log2_ns": {
+                  "15": 23,
+                  "16": 1,
+                  "18": 4,
+                  "19": 647,
+                  "20": 1894,
+                  "21": 2027,
+                  "22": 2545,
+                  "23": 57,
+                  "24": 1
+                },
+                "max_ns": 18886542,
+                "sum_ns": 24667613559
+              },
+              "chainlink_spot": {
+                "calls": 659,
+                "duration_log2_ns": {
+                  "16": 2,
+                  "17": 1,
+                  "18": 200,
+                  "19": 284,
+                  "20": 125,
+                  "21": 43,
+                  "22": 4
+                },
+                "max_ns": 4999130,
+                "sum_ns": 619939586
+              },
+              "chainlink_twap": {
+                "calls": 661,
+                "duration_log2_ns": {
+                  "16": 3,
+                  "18": 167,
+                  "19": 309,
+                  "20": 138,
+                  "21": 36,
+                  "22": 6,
+                  "32": 1,
+                  "33": 1
+                },
+                "max_ns": 14367436565,
+                "sum_ns": 19844627923
+              },
+              "end_of_input": {
+                "calls": 1,
+                "duration_log2_ns": {
+                  "14": 1
+                },
+                "max_ns": 28053,
+                "sum_ns": 28053
+              },
+              "eof": {
+                "calls": 1,
+                "duration_log2_ns": {
+                  "15": 1
+                },
+                "max_ns": 60584,
+                "sum_ns": 60584
+              },
+              "metadata_v6_existing": {
+                "calls": 15,
+                "duration_log2_ns": {
+                  "14": 2,
+                  "15": 3,
+                  "16": 4,
+                  "17": 1,
+                  "19": 2,
+                  "22": 1,
+                  "32": 1,
+                  "33": 1
+                },
+                "max_ns": 14233533499,
+                "sum_ns": 19088467043
+              },
+              "polymarket_orderbook": {
+                "calls": 195597,
+                "duration_log2_ns": {
+                  "13": 1,
+                  "14": 127,
+                  "15": 9,
+                  "16": 152,
+                  "17": 19,
+                  "18": 59183,
+                  "19": 93862,
+                  "20": 36758,
+                  "21": 5197,
+                  "22": 283,
+                  "23": 4,
+                  "24": 2
+                },
+                "max_ns": 31760115,
+                "sum_ns": 159447580289
+              }
+            },
+            "entry_call_timings_by_returned_input_dependency_presence": {
+              "empty": {
+                "calls": 208687,
+                "duration_log2_ns": {
+                  "13": 1,
+                  "14": 136,
+                  "15": 41,
+                  "16": 175,
+                  "17": 22,
+                  "18": 61193,
+                  "19": 97186,
+                  "20": 39592,
+                  "21": 7416,
+                  "22": 2847,
+                  "23": 63,
+                  "24": 3,
+                  "32": 6,
+                  "33": 6
+                },
+                "max_ns": 14367436565,
+                "sum_ns": 303825662038
+              },
+              "nonempty": {
+                "calls": 1,
+                "duration_log2_ns": {
+                  "34": 1
+                },
+                "max_ns": 18133084340,
+                "sum_ns": 18133084340
+              }
+            },
+            "entry_calls_including_eof": 208689,
+            "group_delivery_time_order_sha256": null,
+            "group_fact_identity_time_quality_order_sha256": "dd4faa573ecbd00346be85d7f9bebca04dc9cf563921744cb180a0855c671846",
+            "group_positions": {
+              "count": 208638,
+              "first": 0,
+              "last": 208637,
+              "max": 208637,
+              "min": 0,
+              "non_increasing": 0
+            },
+            "groups_per_replay_return": {
+              "0": 50,
+              "1": 208638
+            },
+            "historical_anchor_repair_inputs": 0,
+            "historical_anchor_repair_members": 0,
+            "input_identity_order_sha256": "e629bdd83a32c391b2e0eb1ee90a0822c77859b5e61c7bf0aa6e109cc7b17b81",
+            "input_kinds": {
+              "anchor_rule": 150,
+              "binance_agg_trade": 4405,
+              "binance_depth_snapshot": 1,
+              "binance_depth_update": 7199,
+              "chainlink_spot": 659,
+              "chainlink_twap": 661,
+              "end_of_input": 1,
+              "metadata_v6_existing": 15,
+              "polymarket_orderbook": 195597
+            },
+            "input_positions": {
+              "count": 208688,
+              "first": 0,
+              "last": 208687,
+              "max": 208687,
+              "min": 0,
+              "non_increasing": 0
+            },
+            "not_measured_by_this_entry": [
+              "stored_record_kinds",
+              "canonical_positions",
+              "observation_positions",
+              "group_delivery_time_order_sha256"
+            ],
+            "observation_positions": null,
+            "observations": 806966,
+            "observations_per_group": {
+              "1": 2,
+              "2": 351,
+              "3": 75907,
+              "4": 83349,
+              "5": 49029
+            },
+            "slow_calls_omitted": 208673,
+            "slowest_calls": [
+              {
+                "call_ordinal": 350,
+                "dependency_count": 1,
+                "dependency_positions_first_eight": [
+                  339
+                ],
+                "elapsed_ns": 18133084340,
+                "input_or_group_position": 349,
+                "kind": "anchor_rule"
+              },
+              {
+                "call_ordinal": 160404,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 14367436565,
+                "input_or_group_position": 160403,
+                "kind": "chainlink_twap"
+              },
+              {
+                "call_ordinal": 159661,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 14351444873,
+                "input_or_group_position": 159660,
+                "kind": "anchor_rule"
+              },
+              {
+                "call_ordinal": 159675,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 14351038007,
+                "input_or_group_position": 159674,
+                "kind": "anchor_rule"
+              },
+              {
+                "call_ordinal": 159687,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 14306997185,
+                "input_or_group_position": 159686,
+                "kind": "anchor_rule"
+              },
+              {
+                "call_ordinal": 159629,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 14233533499,
+                "input_or_group_position": 159628,
+                "kind": "metadata_v6_existing"
+              },
+              {
+                "call_ordinal": 159637,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 14218908390,
+                "input_or_group_position": 159636,
+                "kind": "anchor_rule"
+              },
+              {
+                "call_ordinal": 76306,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 4864905037,
+                "input_or_group_position": 76305,
+                "kind": "anchor_rule"
+              },
+              {
+                "call_ordinal": 76290,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 4863008256,
+                "input_or_group_position": 76289,
+                "kind": "anchor_rule"
+              },
+              {
+                "call_ordinal": 76897,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 4858539244,
+                "input_or_group_position": 76896,
+                "kind": "chainlink_twap"
+              },
+              {
+                "call_ordinal": 76284,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 4847797650,
+                "input_or_group_position": 76283,
+                "kind": "metadata_v6_existing"
+              },
+              {
+                "call_ordinal": 76311,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 4834826157,
+                "input_or_group_position": 76310,
+                "kind": "anchor_rule"
+              },
+              {
+                "call_ordinal": 76343,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 4784213654,
+                "input_or_group_position": 76342,
+                "kind": "anchor_rule"
+              },
+              {
+                "call_ordinal": 166487,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 31760115,
+                "input_or_group_position": 166486,
+                "kind": "polymarket_orderbook"
+              },
+              {
+                "call_ordinal": 16718,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 23613350,
+                "input_or_group_position": 16717,
+                "kind": "polymarket_orderbook"
+              },
+              {
+                "call_ordinal": 154068,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 18886542,
+                "input_or_group_position": 154067,
+                "kind": "binance_depth_update"
+              }
+            ],
+            "stored_record_kinds": null
+          }
+        },
+        "status": "success"
+      },
+      "resources": {
+        "process_wall_seconds": 366.15,
+        "user_seconds": 354.43,
+        "system_seconds": 3.58,
+        "maximum_rss_kib": 111016,
+        "filesystem_input_512_byte_blocks": 28799216,
+        "filesystem_output_512_byte_blocks": 32,
+        "exit_code": 0,
+        "proc_io_delta": {
+          "rchar": 11203870661,
+          "wchar": 0,
+          "syscr": 623101,
+          "syscw": 0,
+          "read_bytes": 14745198592,
+          "write_bytes": 0,
+          "cancelled_write_bytes": 0
+        },
+        "result_bytes": 15107,
+        "result_sha256": "c1b1f83cbcbf96abcec29f4532478ec363eab43f202ab27b071d4082dfa98b2f",
+        "source_commit": "eed679250d23489a78720f065f8ef8fa375bc240",
+        "binary_sha256": "0dee2e644830f8f1f6b3fb02d153a5b7d9fcc1dc5aaffb9e6064f87bb562cf1c",
+        "config_sha256": "15799d6f58ec8de91c1cc3bc2a97e0cc8c1cb112468c0cc793c99c62fb3ea745"
+      },
+      "evidence": {
+        "raw_result": "run-4-12m-replay/result.private.json",
+        "gnu_time": "run-4-12m-replay/gnu-time.txt",
+        "stdout": "run-4-12m-replay/stdout.log",
+        "stderr": "run-4-12m-replay/stderr.log",
+        "stderr_bytes": 0
+      }
+    },
+    {
+      "run": "run-5-12m-group",
+      "effective_config": {
+        "expected_normal_prefix": {
+          "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012",
+          "next_canonical_position": 208661,
+          "next_group_position": 208638,
+          "next_input_position": 208688,
+          "next_observation_position": 806966,
+          "next_public_index_position": 208638,
+          "normal_end": true,
+          "stable_storage_ref": "stable-00000000000000000000"
+        },
+        "max_read_batch_bytes": 67108864,
+        "mode": "group",
+        "public_root": "causal-labels-12m/materials/public",
+        "purpose": "#185任务3既有公共材料读取与重放成本定位；12m group，只消费原public，无prepare/账户/收益",
+        "read_page_rows": 256
+      },
+      "outcome": {
+        "result": {
+          "actual_record_reader_prefix": null,
+          "measure_wall_seconds": 373.501696123,
+          "measurement_note": "入口调用时间包括内部跳过的稳定记录/依赖候选读取/归约等可达路径；返回Input分类只表相关性，不是Input独占成本。group可含多Input推进或pending出队。consume_summary_ns包括小字段摘要、分类、慢项保留和释放；Instant及外层循环开销未单独隔离。未计量各内部步骤次数/占比。",
+          "open_entry_ns": 189076,
+          "replay_applied_prefix": null,
+          "replay_next_canonical_position": null,
+          "summary": {
+            "canonical_positions": null,
+            "consume_summary_ns": 44685980649,
+            "dependencies": null,
+            "end_of_input_count": null,
+            "entry_call_timings_by_return_kind": {
+              "eof": {
+                "calls": 1,
+                "duration_log2_ns": {
+                  "16": 1
+                },
+                "max_ns": 79390,
+                "sum_ns": 79390
+              },
+              "group": {
+                "calls": 208638,
+                "duration_log2_ns": {
+                  "13": 3,
+                  "14": 129,
+                  "15": 9,
+                  "16": 177,
+                  "17": 14,
+                  "18": 60595,
+                  "19": 85358,
+                  "20": 50943,
+                  "21": 8231,
+                  "22": 3013,
+                  "23": 150,
+                  "24": 2,
+                  "25": 1,
+                  "32": 6,
+                  "33": 6,
+                  "34": 1
+                },
+                "max_ns": 18199149211,
+                "sum_ns": 328791540677
+              }
+            },
+            "entry_call_timings_by_returned_input_dependency_presence": null,
+            "entry_calls_including_eof": 208639,
+            "group_delivery_time_order_sha256": "4037385817d945cf872b95d39cc12f2bef7117b7baf26bdbfd7a7042286a0be6",
+            "group_fact_identity_time_quality_order_sha256": "dd4faa573ecbd00346be85d7f9bebca04dc9cf563921744cb180a0855c671846",
+            "group_positions": {
+              "count": 208638,
+              "first": 0,
+              "last": 208637,
+              "max": 208637,
+              "min": 0,
+              "non_increasing": 0
+            },
+            "groups_per_replay_return": null,
+            "historical_anchor_repair_inputs": null,
+            "historical_anchor_repair_members": null,
+            "input_identity_order_sha256": null,
+            "input_kinds": null,
+            "input_positions": null,
+            "not_measured_by_this_entry": [
+              "stored_record_kinds",
+              "input_kinds",
+              "input_positions",
+              "canonical_positions",
+              "observation_positions",
+              "dependencies",
+              "historical_anchor_repair_inputs",
+              "historical_anchor_repair_members",
+              "end_of_input_count",
+              "groups_per_replay_return",
+              "entry_call_timings_by_returned_input_dependency_presence",
+              "input_identity_order_sha256"
+            ],
+            "observation_positions": null,
+            "observations": 806966,
+            "observations_per_group": {
+              "1": 2,
+              "2": 351,
+              "3": 75907,
+              "4": 83349,
+              "5": 49029
+            },
+            "slow_calls_omitted": 208623,
+            "slowest_calls": [
+              {
+                "call_ordinal": 349,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 18199149211,
+                "input_or_group_position": 348,
+                "kind": "group"
+              },
+              {
+                "call_ordinal": 160356,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 14863905178,
+                "input_or_group_position": 160355,
+                "kind": "group"
+              },
+              {
+                "call_ordinal": 159615,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 14264190938,
+                "input_or_group_position": 159614,
+                "kind": "group"
+              },
+              {
+                "call_ordinal": 159640,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 14194171705,
+                "input_or_group_position": 159639,
+                "kind": "group"
+              },
+              {
+                "call_ordinal": 159628,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 14161652421,
+                "input_or_group_position": 159627,
+                "kind": "group"
+              },
+              {
+                "call_ordinal": 159591,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 13970513803,
+                "input_or_group_position": 159590,
+                "kind": "group"
+              },
+              {
+                "call_ordinal": 159583,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 13924544924,
+                "input_or_group_position": 159582,
+                "kind": "group"
+              },
+              {
+                "call_ordinal": 76859,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 4869650399,
+                "input_or_group_position": 76858,
+                "kind": "group"
+              },
+              {
+                "call_ordinal": 76270,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 4852310680,
+                "input_or_group_position": 76269,
+                "kind": "group"
+              },
+              {
+                "call_ordinal": 76248,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 4851306329,
+                "input_or_group_position": 76247,
+                "kind": "group"
+              },
+              {
+                "call_ordinal": 76254,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 4843238452,
+                "input_or_group_position": 76253,
+                "kind": "group"
+              },
+              {
+                "call_ordinal": 76274,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 4812800165,
+                "input_or_group_position": 76273,
+                "kind": "group"
+              },
+              {
+                "call_ordinal": 76306,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 4803169016,
+                "input_or_group_position": 76305,
+                "kind": "group"
+              },
+              {
+                "call_ordinal": 173390,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 45591922,
+                "input_or_group_position": 173389,
+                "kind": "group"
+              },
+              {
+                "call_ordinal": 191217,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 24903288,
+                "input_or_group_position": 191216,
+                "kind": "group"
+              },
+              {
+                "call_ordinal": 154026,
+                "dependency_count": null,
+                "dependency_positions_first_eight": null,
+                "elapsed_ns": 19758082,
+                "input_or_group_position": 154025,
+                "kind": "group"
+              }
+            ],
+            "stored_record_kinds": null
+          }
+        },
+        "status": "success"
+      },
+      "resources": {
+        "process_wall_seconds": 373.51,
+        "user_seconds": 361.79,
+        "system_seconds": 3.69,
+        "maximum_rss_kib": 134316,
+        "filesystem_input_512_byte_blocks": 28799472,
+        "filesystem_output_512_byte_blocks": 24,
+        "exit_code": 0,
+        "proc_io_delta": {
+          "rchar": 11203870661,
+          "wchar": 0,
+          "syscr": 623101,
+          "syscw": 0,
+          "read_bytes": 14745329664,
+          "write_bytes": 0,
+          "cancelled_write_bytes": 0
+        },
+        "result_bytes": 10305,
+        "result_sha256": "bf6d7ef2eb9067898195f19aa54ce1239e56284bab07f0670be3ba51d92d0b68",
+        "source_commit": "eed679250d23489a78720f065f8ef8fa375bc240",
+        "binary_sha256": "0dee2e644830f8f1f6b3fb02d153a5b7d9fcc1dc5aaffb9e6064f87bb562cf1c",
+        "config_sha256": "83c614b4a85c3c86a376c49a32a886a5537ed56e6fd962e6a1ce9a53ea28edd8"
+      },
+      "evidence": {
+        "raw_result": "run-5-12m-group/result.private.json",
+        "gnu_time": "run-5-12m-group/gnu-time.txt",
+        "stdout": "run-5-12m-group/stdout.log",
+        "stderr": "run-5-12m-group/stderr.log",
+        "stderr_bytes": 0
+      }
+    },
+    {
+      "run": "run-6-12m-replay-1024",
+      "effective_config": {
+        "expected_normal_prefix": {
+          "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012",
+          "next_canonical_position": 208661,
+          "next_group_position": 208638,
+          "next_input_position": 208688,
+          "next_observation_position": 806966,
+          "next_public_index_position": 208638,
+          "normal_end": true,
+          "stable_storage_ref": "stable-00000000000000000000"
+        },
+        "max_read_batch_bytes": 67108864,
+        "mode": "replay",
+        "public_root": "causal-labels-12m/materials/public",
+        "purpose": "#185任务3既有公共材料读取与重放成本定位；唯一12m replay1024对照，只改变页行数，不prepare/账户/收益",
+        "read_page_rows": 1024
+      },
+      "outcome": {
+        "result": {
+          "actual_record_reader_prefix": null,
+          "measure_wall_seconds": 381.933198624,
+          "measurement_note": "入口调用时间包括内部跳过的稳定记录/依赖候选读取/归约等可达路径；返回Input分类只表相关性，不是Input独占成本。group可含多Input推进或pending出队。consume_summary_ns包括小字段摘要、分类、慢项保留和释放；Instant及外层循环开销未单独隔离。未计量各内部步骤次数/占比。",
+          "open_entry_ns": 193684,
+          "replay_applied_prefix": {
+            "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012",
+            "next_input_position": 208688
+          },
+          "replay_next_canonical_position": 208661,
+          "summary": {
+            "canonical_positions": null,
+            "consume_summary_ns": 45749388498,
+            "dependencies": {
+              "first_nonempty_inputs": [
+                {
+                  "input_position": 349,
+                  "kind": "anchor_rule",
+                  "omitted_refs": 0,
+                  "refs_first_eight": [
+                    {
+                      "input_position": 339,
+                      "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012"
+                    }
+                  ],
+                  "total_refs": 1
+                }
+              ],
+              "nonempty_inputs": 1,
+              "omitted_nonempty_inputs": 0,
+              "position_occurrences": {
+                "count": 1,
+                "first": 339,
+                "last": 339,
+                "max": 339,
+                "min": 339,
+                "non_increasing": 0
+              },
+              "refs": 1,
+              "relations": {
+                "earlier_same_stream": 1
+              },
+              "retention": "最早16个非空依赖Input，每项至多前8引用；总数/省略数分开，非完整触发集合。"
+            },
+            "end_of_input_count": 1,
+            "entry_call_timings_by_return_kind": {
+              "anchor_rule": {
+                "calls": 150,
+                "duration_log2_ns": {
+                  "14": 4,
+                  "15": 8,
+                  "18": 10,
+                  "19": 89,
+                  "20": 24,
+                  "21": 1,
+                  "22": 3,
+                  "23": 2,
+                  "32": 4,
+                  "33": 4,
+                  "34": 1
+                },
+                "max_ns": 19479281007,
+                "sum_ns": 100127410941
+              },
+              "binance_agg_trade": {
+                "calls": 4405,
+                "duration_log2_ns": {
+                  "16": 12,
+                  "17": 2,
+                  "18": 921,
+                  "19": 2842,
+                  "20": 501,
+                  "21": 119,
+                  "22": 7,
+                  "23": 1
+                },
+                "max_ns": 8840270,
+                "sum_ns": 3587373987
+              },
+              "binance_depth_snapshot": {
+                "calls": 1,
+                "duration_log2_ns": {
+                  "20": 1
+                },
+                "max_ns": 1363337,
+                "sum_ns": 1363337
+              },
+              "binance_depth_update": {
+                "calls": 7199,
+                "duration_log2_ns": {
+                  "15": 24,
+                  "18": 1,
+                  "19": 355,
+                  "20": 1366,
+                  "21": 2974,
+                  "22": 2436,
+                  "23": 41,
+                  "24": 2
+                },
+                "max_ns": 17179388,
+                "sum_ns": 25429857006
+              },
+              "chainlink_spot": {
+                "calls": 659,
+                "duration_log2_ns": {
+                  "16": 2,
+                  "17": 1,
+                  "18": 65,
+                  "19": 433,
+                  "20": 106,
+                  "21": 44,
+                  "22": 6,
+                  "23": 2
+                },
+                "max_ns": 10977654,
+                "sum_ns": 661426830
+              },
+              "chainlink_twap": {
+                "calls": 661,
+                "duration_log2_ns": {
+                  "16": 3,
+                  "18": 54,
+                  "19": 446,
+                  "20": 113,
+                  "21": 37,
+                  "22": 4,
+                  "23": 2,
+                  "32": 1,
+                  "33": 1
+                },
+                "max_ns": 14715694430,
+                "sum_ns": 20416127927
+              },
+              "end_of_input": {
+                "calls": 1,
+                "duration_log2_ns": {
+                  "14": 1
+                },
+                "max_ns": 26901,
+                "sum_ns": 26901
+              },
+              "eof": {
+                "calls": 1,
+                "duration_log2_ns": {
+                  "15": 1
+                },
+                "max_ns": 54994,
+                "sum_ns": 54994
+              },
+              "metadata_v6_existing": {
+                "calls": 15,
+                "duration_log2_ns": {
+                  "14": 2,
+                  "15": 2,
+                  "16": 5,
+                  "17": 1,
+                  "19": 2,
+                  "23": 1,
+                  "32": 1,
+                  "33": 1
+                },
+                "max_ns": 14805957649,
+                "sum_ns": 20268113727
+              },
+              "polymarket_orderbook": {
+                "calls": 195597,
+                "duration_log2_ns": {
+                  "13": 5,
+                  "14": 122,
+                  "15": 12,
+                  "16": 156,
+                  "17": 17,
+                  "18": 37655,
+                  "19": 125043,
+                  "20": 26596,
+                  "21": 5205,
+                  "22": 686,
+                  "23": 96,
+                  "24": 3,
+                  "25": 1
+                },
+                "max_ns": 55894205,
+                "sum_ns": 165669899905
+              }
+            },
+            "entry_call_timings_by_returned_input_dependency_presence": {
+              "empty": {
+                "calls": 208687,
+                "duration_log2_ns": {
+                  "13": 5,
+                  "14": 129,
+                  "15": 46,
+                  "16": 178,
+                  "17": 21,
+                  "18": 38706,
+                  "19": 129210,
+                  "20": 28707,
+                  "21": 8380,
+                  "22": 3142,
+                  "23": 145,
+                  "24": 5,
+                  "25": 1,
+                  "32": 6,
+                  "33": 6
+                },
+                "max_ns": 15441154843,
+                "sum_ns": 316682319554
+              },
+              "nonempty": {
+                "calls": 1,
+                "duration_log2_ns": {
+                  "34": 1
+                },
+                "max_ns": 19479281007,
+                "sum_ns": 19479281007
+              }
+            },
+            "entry_calls_including_eof": 208689,
+            "group_delivery_time_order_sha256": null,
+            "group_fact_identity_time_quality_order_sha256": "dd4faa573ecbd00346be85d7f9bebca04dc9cf563921744cb180a0855c671846",
+            "group_positions": {
+              "count": 208638,
+              "first": 0,
+              "last": 208637,
+              "max": 208637,
+              "min": 0,
+              "non_increasing": 0
+            },
+            "groups_per_replay_return": {
+              "0": 50,
+              "1": 208638
+            },
+            "historical_anchor_repair_inputs": 0,
+            "historical_anchor_repair_members": 0,
+            "input_identity_order_sha256": "e629bdd83a32c391b2e0eb1ee90a0822c77859b5e61c7bf0aa6e109cc7b17b81",
+            "input_kinds": {
+              "anchor_rule": 150,
+              "binance_agg_trade": 4405,
+              "binance_depth_snapshot": 1,
+              "binance_depth_update": 7199,
+              "chainlink_spot": 659,
+              "chainlink_twap": 661,
+              "end_of_input": 1,
+              "metadata_v6_existing": 15,
+              "polymarket_orderbook": 195597
+            },
+            "input_positions": {
+              "count": 208688,
+              "first": 0,
+              "last": 208687,
+              "max": 208687,
+              "min": 0,
+              "non_increasing": 0
+            },
+            "not_measured_by_this_entry": [
+              "stored_record_kinds",
+              "canonical_positions",
+              "observation_positions",
+              "group_delivery_time_order_sha256"
+            ],
+            "observation_positions": null,
+            "observations": 806966,
+            "observations_per_group": {
+              "1": 2,
+              "2": 351,
+              "3": 75907,
+              "4": 83349,
+              "5": 49029
+            },
+            "slow_calls_omitted": 208673,
+            "slowest_calls": [
+              {
+                "call_ordinal": 350,
+                "dependency_count": 1,
+                "dependency_positions_first_eight": [
+                  339
+                ],
+                "elapsed_ns": 19479281007,
+                "input_or_group_position": 349,
+                "kind": "anchor_rule"
+              },
+              {
+                "call_ordinal": 159675,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 15441154843,
+                "input_or_group_position": 159674,
+                "kind": "anchor_rule"
+              },
+              {
+                "call_ordinal": 159687,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 15163215405,
+                "input_or_group_position": 159686,
+                "kind": "anchor_rule"
+              },
+              {
+                "call_ordinal": 159637,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 14873196830,
+                "input_or_group_position": 159636,
+                "kind": "anchor_rule"
+              },
+              {
+                "call_ordinal": 159629,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 14805957649,
+                "input_or_group_position": 159628,
+                "kind": "metadata_v6_existing"
+              },
+              {
+                "call_ordinal": 160404,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 14715694430,
+                "input_or_group_position": 160403,
+                "kind": "chainlink_twap"
+              },
+              {
+                "call_ordinal": 159661,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 14712287523,
+                "input_or_group_position": 159660,
+                "kind": "anchor_rule"
+              },
+              {
+                "call_ordinal": 76284,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 5450913308,
+                "input_or_group_position": 76283,
+                "kind": "metadata_v6_existing"
+              },
+              {
+                "call_ordinal": 76306,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 5158455060,
+                "input_or_group_position": 76305,
+                "kind": "anchor_rule"
+              },
+              {
+                "call_ordinal": 76290,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 5134457428,
+                "input_or_group_position": 76289,
+                "kind": "anchor_rule"
+              },
+              {
+                "call_ordinal": 76897,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 5060818513,
+                "input_or_group_position": 76896,
+                "kind": "chainlink_twap"
+              },
+              {
+                "call_ordinal": 76311,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 5049637584,
+                "input_or_group_position": 76310,
+                "kind": "anchor_rule"
+              },
+              {
+                "call_ordinal": 76343,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 4969565910,
+                "input_or_group_position": 76342,
+                "kind": "anchor_rule"
+              },
+              {
+                "call_ordinal": 140081,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 55894205,
+                "input_or_group_position": 140080,
+                "kind": "polymarket_orderbook"
+              },
+              {
+                "call_ordinal": 154035,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 32207597,
+                "input_or_group_position": 154034,
+                "kind": "polymarket_orderbook"
+              },
+              {
+                "call_ordinal": 169450,
+                "dependency_count": 0,
+                "dependency_positions_first_eight": [],
+                "elapsed_ns": 20057717,
+                "input_or_group_position": 169449,
+                "kind": "polymarket_orderbook"
+              }
+            ],
+            "stored_record_kinds": null
+          }
+        },
+        "status": "success"
+      },
+      "resources": {
+        "process_wall_seconds": 381.94,
+        "user_seconds": 369.37,
+        "system_seconds": 4.1,
+        "maximum_rss_kib": 173556,
+        "filesystem_input_512_byte_blocks": 28801296,
+        "filesystem_output_512_byte_blocks": 32,
+        "exit_code": 0,
+        "proc_io_delta": {
+          "rchar": 11204527737,
+          "wchar": 0,
+          "syscr": 623127,
+          "syscw": 0,
+          "read_bytes": 14746263552,
+          "write_bytes": 0,
+          "cancelled_write_bytes": 0
+        },
+        "result_bytes": 15246,
+        "result_sha256": "52945b1d36f60bc26eabcf79d01438bebdec872ea34485ed071df98b12b5dcbc",
+        "source_commit": "eed679250d23489a78720f065f8ef8fa375bc240",
+        "binary_sha256": "0dee2e644830f8f1f6b3fb02d153a5b7d9fcc1dc5aaffb9e6064f87bb562cf1c",
+        "config_sha256": "e8a631b86519fee46a0fdd2318169bfd0339f2160c43a1b52c8b58f82ced0223"
+      },
+      "evidence": {
+        "raw_result": "run-6-12m-replay-1024/result.private.json",
+        "gnu_time": "run-6-12m-replay-1024/gnu-time.txt",
+        "stdout": "run-6-12m-replay-1024/stdout.log",
+        "stderr": "run-6-12m-replay-1024/stderr.log",
+        "stderr_bytes": 0
+      }
+    }
+  ],
+  "checks": {
+    "record_replay_5m_input_identity_order_equal": true,
+    "record_replay_12m_input_identity_order_equal": true,
+    "replay_group_12m_group_fact_identity_time_quality_order_equal": true,
+    "record_replay_group_width_counts_equal_12m": true,
+    "replay_256_1024_selected_count_identity_clock_quality_fields_equal": true
+  },
+  "pagination_comparison": {
+    "performed": true,
+    "chosen_mode": "12m replay",
+    "read_page_rows_baseline": 256,
+    "read_page_rows_comparison": 1024,
+    "max_read_batch_bytes": 67108864,
+    "reason": "Five original runs completed. Record reader is much faster; replay has long metadata/anchor/TWAP return spans despite empty persisted dependencies and extra reads. Group produces the same rchar/syscr as replay with another assembly layer. Replay preserves returned Input positions for the single informative page-size comparison. Page rows affects both Arrow batching and reference candidate pages; internal cause/fraction remains unmeasured, and a single serial run does not control cache/variance.",
+    "source_commit": "eed679250d23489a78720f065f8ef8fa375bc240",
+    "binary_sha256": "0dee2e644830f8f1f6b3fb02d153a5b7d9fcc1dc5aaffb9e6064f87bb562cf1c",
+    "config_sha256": "e8a631b86519fee46a0fdd2318169bfd0339f2160c43a1b52c8b58f82ced0223",
+    "selected_before_run_utc": "2026-10-03T08:12:52.815892+00:00"
+  },
+  "measurement_semantics": {
+    "api_call_span": "entire original entry call, including skipped stored records, candidate/dependency reading and reduction when reachable; returned Input kind is correlation, not exclusive attribution",
+    "classification_overlap": "return-kind and returned-input dependency-presence timing aggregations classify the same entry spans; do not add them",
+    "consumer_span": "classification, small-field digests, slow-call retention and returned object destruction; not pure measurement overhead",
+    "unisolated": "Instant, outer-loop overhead and internal component counts/timing are not independently measured",
+    "not_measured_fields": "null with original per-mode not_measured_by_this_entry list; group/stored_non_input/eof slow-call dependency placeholders are projected to null because these returns do not expose Input dependencies; expected_normal_prefix records prior evidence and is not an admission gate",
+    "io": "proc rchar is bytes returned by read-family calls, read_bytes is kernel attributed storage reads and may include read-ahead; neither equals unique Parquet bytes; process deltas stop before writing result JSON; GNU whole-process input/output counts are 512-byte blocks",
+    "retention": "16 slowest entry calls, total and omitted counts per run; earliest 16 nonempty dependency Inputs, at most first 8 refs each, totals and omission counts retained",
+    "digest_coverage": {
+      "input": [
+        "stream and input position",
+        "kind",
+        "dependency refs",
+        "source_message_id",
+        "source_event_at_utc_ms",
+        "received_at_utc_ms"
+      ],
+      "group_fact": [
+        "group id/position/member input positions/close input position",
+        "fact position/source refs/direct time/dependency time/quality/direct source ids",
+        "observation condition/group/visible prefix",
+        "12 market field qualities",
+        "token identity and six asset field qualities"
+      ],
+      "group_delivery": [
+        "group_position",
+        "delivered_at_utc_ms"
+      ],
+      "excluded": [
+        "full ingress or business payload",
+        "L2 values",
+        "observation business values and all lineage",
+        "full source bodies"
+      ],
+      "claim": "selected summary equality only; not complete payload equality or equivalence of an unimplemented optimization"
+    }
+  },
+  "limitations": [
+    "single run per configured entry, serial order, no independent cache or variance control",
+    "entry classification cannot establish exclusive internal cost fractions",
+    "read page rows changes both Arrow batching and reference candidate page size; does not rewrite Parquet row groups",
+    "no production interface or semantic change; full research storage and continuous-run resources remain unresolved",
+    "no probability validation, Brier, formal parameters or profitability acceptance"
+  ],
+  "delivery_output_correction": {
+    "source_commit": "8a4db70b2a53ecdbd3e8a05befcf362e0a8ebec5",
+    "example_source_sha256": "7fa0d9fc746681dee93a619069cab8c35a8872ca5eaa22927e95ae6ba910824b",
+    "change": "Summary::finish only: group/stored_non_input/eof slow-call dependency fields are null with explicit unmeasured/not-applicable note. Original entry, measurement loops, timing and algorithm unchanged.",
+    "measurement_identity_unchanged": {
+      "source_commit": "eed679250d23489a78720f065f8ef8fa375bc240",
+      "binary_sha256": "0dee2e644830f8f1f6b3fb02d153a5b7d9fcc1dc5aaffb9e6064f87bb562cf1c"
+    },
+    "raw_results_retained": true,
+    "real_data_runs_after_correction": 0,
+    "verification": {
+      "workspace_suites": 86,
+      "passed": 1253,
+      "failed": 0,
+      "ignored": 18,
+      "example_tests": 4,
+      "skipped_by_name": "four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second",
+      "fmt_exit": 0,
+      "clippy_exit": 0
+    }
+  },
+  "artifact_sizes": {
+    "root_snapshot_excluding_this_size_index": {
+      "files": 54,
+      "logical_bytes": 15091656,
+      "allocated_bytes": 15204352
+    },
+    "run_directories": {
+      "run-1-5m-record": {
+        "files": 5,
+        "logical_bytes": 17519,
+        "allocated_bytes": 24576
+      },
+      "run-2-12m-record": {
+        "files": 5,
+        "logical_bytes": 17840,
+        "allocated_bytes": 24576
+      },
+      "run-3-5m-replay": {
+        "files": 5,
+        "logical_bytes": 16400,
+        "allocated_bytes": 24576
+      },
+      "run-4-12m-replay": {
+        "files": 5,
+        "logical_bytes": 16910,
+        "allocated_bytes": 24576
+      },
+      "run-5-12m-group": {
+        "files": 5,
+        "logical_bytes": 12106,
+        "allocated_bytes": 20480
+      },
+      "run-6-12m-replay-1024": {
+        "files": 5,
+        "logical_bytes": 17058,
+        "allocated_bytes": 24576
+      }
+    },
+    "raw_result_json_total_bytes": 87060,
+    "cache_allocated_before_measurements_bytes": 13821272064,
+    "cache_allocated_after_final_validation_bytes": 13842698240,
+    "cache_allocated_change_bytes": 21426176,
+    "cache_scope": "normally reused prior causal-labels build cache, separate from this artifact root; no copy or deletion; old retained delivery binaries/source identity unchanged",
+    "directory_peak": "not sampled; these are exact final file metadata snapshots, not a temporary-space peak"
+  }
+}
