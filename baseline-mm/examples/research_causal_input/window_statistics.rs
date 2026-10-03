@@ -45,6 +45,29 @@ fn compact_hold(hold: &Value, updates: &[SpotUpdate]) -> Value {
         "regression_update_indices":hold["received_time_regressions_not_backfilled"].as_array().unwrap()
             .iter().filter_map(index_of).collect::<Vec<_>>()})
 }
+// PR200公开结果在这三处用组位置引用SpotUpdate；数值、时钟和其他字段不归一化。
+fn retained_window_projection(window: &Value) -> Value {
+    fn support_ref(v: &Value) -> Value {
+        if v.is_null() {
+            Value::Null
+        } else {
+            json!({"spot_update_group_position":v["group_position"]})
+        }
+    }
+    let mut projected = window.clone();
+    let hold = &mut projected["hold_coverage"];
+    hold["left_support"] = support_ref(&hold["left_support"]);
+    for segment in hold["segments"].as_array_mut().unwrap() {
+        segment["support"] = support_ref(&segment["support"]);
+    }
+    for regression in hold["received_time_regressions_not_backfilled"]
+        .as_array_mut()
+        .unwrap()
+    {
+        *regression = support_ref(regression);
+    }
+    projected
+}
 fn summarize_rows(rows: &[Value], seconds: i64) -> Result<Value> {
     let selected = rows
         .iter()
@@ -118,15 +141,16 @@ fn calculate(input: &RetainedInput) -> Result<Value> {
             let h = frozen_history(updates, cutoff);
             for &seconds in &WINDOWS_SECONDS {
                 let (original, refs) = h.window_with_pairs(cutoff, seconds)?;
+                let projected = retained_window_projection(&original);
                 let old = sample["descriptive_windows"]
                     .as_array()
                     .ok_or("旧描述窗缺失")?
                     .iter()
                     .find(|v| v["window_seconds"] == seconds);
-                if old != Some(&original) {
+                if old != Some(&projected) {
                     differences.push(
                         json!({"condition_id":m.target.condition_id,"sample_index":sample_index,
-                        "window_seconds":seconds,"original_retained":old,"recalculated":original}),
+                        "window_seconds":seconds,"original_retained":old,"recalculated":original,"recalculated_reference_projection":projected}),
                     );
                 }
                 let from = cutoff - seconds * 1000;
@@ -211,7 +235,7 @@ fn calculate(input: &RetainedInput) -> Result<Value> {
                 );
                 row.insert(
                     "original_values_equal".into(),
-                    json!(old == Some(&original)),
+                    json!(old == Some(&projected)),
                 );
                 rows.push(Value::Object(row));
             }
@@ -313,6 +337,34 @@ mod tests {
         assert_eq!(zero["squared_change_per_second_description"], "0");
     }
     #[test]
+    fn retained_support_projection_preserves_group_identity_and_all_numeric_fields() {
+        let h = History {
+            updates: vec![
+                update(0, -1000, -1000, Some("100")),
+                update(1, 1000, 1000, Some("101")),
+                update(2, 500, 1800, Some("102")),
+            ],
+            ..Default::default()
+        };
+        let raw = h.window(2000, 2).unwrap();
+        let mut expected = raw.clone();
+        expected["hold_coverage"]["left_support"] = json!({"spot_update_group_position":0});
+        expected["hold_coverage"]["segments"][0]["support"] =
+            json!({"spot_update_group_position":0});
+        expected["hold_coverage"]["segments"][1]["support"] =
+            json!({"spot_update_group_position":1});
+        expected["hold_coverage"]["received_time_regressions_not_backfilled"] =
+            json!([{"spot_update_group_position":2}]);
+        let projected = retained_window_projection(&raw);
+        assert_eq!(projected, expected);
+        expected["hold_coverage"]["segments"][0]["support"]["spot_update_group_position"] =
+            json!(999);
+        assert_ne!(projected, expected);
+        expected = projected.clone();
+        expected["positive_pair_elapsed_ms"] = json!(999);
+        assert_ne!(projected, expected);
+    }
+    #[test]
     fn visible_prefix_excludes_late_same_receive_time_and_future_unknown_reset() {
         let mut updates = vec![
             update(0, 1000, 1000, Some("100")),
@@ -350,7 +402,7 @@ mod tests {
             update(1, 2000, 2000, Some("102")),
         ];
         let h = frozen_history(&updates, 2000);
-        let sample = json!({"frozen_visible_cutoff_utc_ms":2000,"remaining_seconds":298,"reference":{"kind":"missing"},"descriptive_windows":WINDOWS_SECONDS.iter().map(|&s|h.window(2000,s).unwrap()).collect::<Vec<_>>()});
+        let sample = json!({"frozen_visible_cutoff_utc_ms":2000,"remaining_seconds":298,"reference":{"kind":"missing"},"descriptive_windows":WINDOWS_SECONDS.iter().map(|&s|retained_window_projection(&h.window(2000,s).unwrap())).collect::<Vec<_>>()});
         let mut input = RetainedInput {
             markets: vec![RetainedMarket {
                 target: target.clone(),
