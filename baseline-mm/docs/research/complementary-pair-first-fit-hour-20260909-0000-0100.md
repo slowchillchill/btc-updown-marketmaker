@@ -1,6 +1,6 @@
 # 首个拟合折第一小时真实输入累计：原捕获配额失败
 
-本次 [#185任务3](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)仅尝试UTC2026年9月9日 `[00:00,01:00)`，毫秒 `[1788912000000,1788915600000)`。唯一一次原 `prepare_historical_run_v1` 返回 **prepare_failed**：命中原16GiB捕获写入配额。一般统计未执行，研究读取为0次，首小时输入累计目标仍未完成。没有正常前缀、隐藏材料或本小时市场／窗口／标签结果，不从部分产物补出这些结论。[机器结果](complementary-pair-first-fit-hour-20260909-0000-0100.json)保存必要公开投影；完整原错误、配置、资源采样及部分文件在私有证据中保持。
+本次实现与失败证据提交于[PR #213](https://github.com/slowchillchill/btc-updown-marketmaker/pull/213)，交付 [#185任务3](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)仅尝试UTC2026年9月9日 `[00:00,01:00)`，毫秒 `[1788912000000,1788915600000)`。唯一一次原 `prepare_historical_run_v1` 返回 **prepare_failed**：命中原16GiB捕获写入配额。一般统计未执行，研究读取为0次，首小时输入累计目标仍未完成。没有正常前缀、隐藏材料或本小时市场／窗口／标签结果，不从部分产物补出这些结论。[机器结果](complementary-pair-first-fit-hour-20260909-0000-0100.json)保存必要公开投影；完整原错误、配置、资源采样及部分文件在私有证据中保持。
 
 ## 1. 范围与真实失败边界
 

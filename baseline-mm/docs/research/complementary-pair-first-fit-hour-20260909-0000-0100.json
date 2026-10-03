@@ -1,5 +1,6 @@
 {
   "schema": "complementary_pair_first_fit_hour_attempt_v1",
+  "delivery_pr": "https://github.com/slowchillchill/btc-updown-marketmaker/pull/213",
   "status": "prepare_failed",
   "hour_input_accumulation_goal_completed": false,
   "execution_counts": {
