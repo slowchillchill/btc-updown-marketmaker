@@ -12,6 +12,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[cfg(test)]
+#[path = "public_replay_cost.rs"]
+pub(crate) mod cost;
+
 /// 新历史准备的实际排序版本；旧记录仍按其流头和已记录原序重放。
 pub const HISTORICAL_SOURCE_HEAD_ORDERING_VERSION: &str = "historical-source-head-v2";
 
@@ -276,25 +280,45 @@ impl PublicReplayV1 {
             Option<data_pipeline_core::pm_reduction::PreparedPmMessageV1>,
         )>,
     > {
+        #[cfg(test)]
+        let entry = cost::EntryGuard::new(self.core.applied_prefix().next_input_position);
+        #[cfg(test)]
+        let mut drain = cost::Span::new("main_drain");
         while let Some(row) = self.reader.next_row()? {
+            #[cfg(test)]
+            drain.row(&row);
             if let PublicStoredRowV1::Input(mut input) = row {
+                #[cfg(test)]
+                drain.complete();
                 let root = self.reader.root().to_path_buf();
                 let cutoff = input.input_position;
                 let target = reference_market_for_input(&self.core, &input);
+                #[cfg(test)]
+                entry.bind(&input, target.as_ref());
+                #[cfg(test)]
+                let identity_span = cost::Span::new("identity");
                 let identity_sources = read_historical_identity_sources(
                     &root,
                     &input,
                     self.page_rows,
                     self.page_bytes,
                 )?;
+                #[cfg(test)]
+                identity_span.complete();
+                #[cfg(test)]
+                let dependency_span = cost::Span::new("dependencies");
                 let deps = read_dependencies(
                     &root,
                     &input.dependency_record_refs,
                     self.page_rows,
                     self.page_bytes,
                 )?;
+                #[cfg(test)]
+                dependency_span.complete();
                 let result = if let Some(market) = target {
                     let mut page_reader = None;
+                    #[cfg(test)]
+                    let prepare_span = cost::Span::new("prepare");
                     let prepared = prepare_public_ingress_with_reference_v1(
                         &self.core,
                         &mut input,
@@ -321,25 +345,55 @@ impl PublicReplayV1 {
                             })
                         },
                     )?;
-                    let applied = self.core.push(&prepared)?.into_owned();
+                    #[cfg(test)]
+                    prepare_span.complete();
+                    #[cfg(test)]
+                    let push_span = cost::Span::new("core_push");
+                    let borrowed = self.core.push(&prepared)?;
+                    #[cfg(test)]
+                    push_span.complete();
+                    #[cfg(test)]
+                    let owned_span = cost::Span::new("into_owned");
+                    let applied = borrowed.into_owned();
+                    #[cfg(test)]
+                    owned_span.complete();
                     let pm = match prepared.current {
                         PreparedCanonicalInputV1::PolymarketMessage(pm) => Some(pm),
                         _ => None,
                     };
                     (applied, pm)
                 } else {
+                    #[cfg(test)]
+                    let prepare_span = cost::Span::new("prepare");
                     let prepared =
                         prepare_public_ingress_v1(&self.core, &input, &identity_sources, &deps)?;
-                    let applied = self.core.push(&prepared)?.into_owned();
+                    #[cfg(test)]
+                    prepare_span.complete();
+                    #[cfg(test)]
+                    let push_span = cost::Span::new("core_push");
+                    let borrowed = self.core.push(&prepared)?;
+                    #[cfg(test)]
+                    push_span.complete();
+                    #[cfg(test)]
+                    let owned_span = cost::Span::new("into_owned");
+                    let applied = borrowed.into_owned();
+                    #[cfg(test)]
+                    owned_span.complete();
                     let pm = match prepared.current {
                         PreparedCanonicalInputV1::PolymarketMessage(pm) => Some(pm),
                         _ => None,
                     };
                     (applied, pm)
                 };
+                #[cfg(test)]
+                entry.returned(false);
                 return Ok(Some((input, result.0, result.1)));
             }
         }
+        #[cfg(test)]
+        drain.complete();
+        #[cfg(test)]
+        entry.returned(true);
         Ok(None)
     }
     pub fn into_core(self) -> PublicObservationCoreV1 {
@@ -362,8 +416,14 @@ fn read_historical_identity_sources(
         return Ok(sources);
     };
     let mut members = batch.rows.iter();
+    #[cfg(test)]
+    let mut scan = cost::ScanGuard::new("identity_scan", None, None, true);
     let mut reader = PublicRecordingReaderV1::recover(root, rows, bytes)?;
+    #[cfg(test)]
+    scan.opened();
     while let Some(row) = reader.next_row()? {
+        #[cfg(test)]
+        scan.row(&row);
         if let PublicStoredRowV1::Canonical {
             binding,
             record: CanonicalEventRecordV2::ReferenceEvent(event),
@@ -385,12 +445,16 @@ fn read_historical_identity_sources(
                     if let Some(member) = members.next() {
                         let ids: Vec<String> =
                             serde_json::from_str(&member.historical_identity_evidence_ids_json)?;
+                        #[cfg(test)]
+                        scan.matched();
                         sources.extend(ids.into_iter().zip(historical_identity_evidence));
                     }
                 }
             }
         }
     }
+    #[cfg(test)]
+    scan.complete(sources.len(), None, Some(true));
     Ok(sources)
 }
 fn metadata_reference_market(
@@ -446,9 +510,15 @@ pub fn read_dependencies(
     if refs.is_empty() {
         return Ok(vec![]);
     }
+    #[cfg(test)]
+    let mut scan = cost::ScanGuard::new("dependency_scan", None, None, true);
     let mut reader = PublicRecordingReaderV1::recover(root, rows, bytes)?;
+    #[cfg(test)]
+    scan.opened();
     let mut output = Vec::new();
     while let Some(row) = reader.next_row()? {
+        #[cfg(test)]
+        scan.row(&row);
         if let PublicStoredRowV1::Canonical {
             binding,
             record: CanonicalEventRecordV2::ReferenceEvent(event),
@@ -459,10 +529,14 @@ pub fn read_dependencies(
                 r.input_position == binding.position.closed_at_input_position
                     && r.input_stream_id == binding.position.input_stream_id
             }) {
+                #[cfg(test)]
+                scan.matched();
                 output.push(event)
             }
         }
     }
+    #[cfg(test)]
+    scan.complete(output.len(), None, Some(true));
     Ok(output)
 }
 /// 顺序页只供料，不预选首条或缓存全部历史 TWAP。
@@ -473,11 +547,19 @@ pub struct ReferenceCandidateReaderV1 {
 }
 impl ReferenceCandidateReaderV1 {
     pub fn open(root: &Path, rows: usize, bytes: usize, cutoff: u64) -> RecordingResult<Self> {
-        Ok(Self {
+        #[cfg(test)]
+        let mut scan = cost::ScanGuard::new("candidate_open", None, Some(cutoff), true);
+        let result = Self {
             reader: PublicRecordingReaderV1::recover(root, rows, bytes)?,
             limit: rows,
             cutoff,
-        })
+        };
+        #[cfg(test)]
+        {
+            scan.opened();
+            scan.complete(0, None, None);
+        }
+        Ok(result)
     }
     /// 在线来源准备绑定写入方实际交付的稳定凭据，不扫描活跃尾部。
     pub fn open_committed(
@@ -501,12 +583,23 @@ impl ReferenceCandidateReaderV1 {
         TemporaryReferenceCursorV1,
         bool,
     )> {
+        #[cfg(test)]
+        let mut scan = cost::ScanGuard::new(
+            "candidate_page",
+            Some(cursor.next_input_position),
+            Some(self.cutoff),
+            false,
+        );
         let mut values = Vec::new();
         let mut next = cursor;
         while values.len() < self.limit {
             let Some(row) = self.reader.next_row()? else {
+                #[cfg(test)]
+                scan.complete(values.len(), Some(next.next_input_position), Some(true));
                 return Ok((values, next, true));
             };
+            #[cfg(test)]
+            scan.row(&row);
             if let PublicStoredRowV1::Canonical {
                 binding,
                 record: CanonicalEventRecordV2::ReferenceEvent(event),
@@ -515,6 +608,8 @@ impl ReferenceCandidateReaderV1 {
             {
                 let pos = binding.position;
                 if pos.closed_at_input_position > self.cutoff {
+                    #[cfg(test)]
+                    scan.complete(values.len(), Some(next.next_input_position), Some(true));
                     return Ok((values, next, true));
                 }
                 if pos.closed_at_input_position < cursor.next_input_position {
@@ -527,9 +622,13 @@ impl ReferenceCandidateReaderV1 {
                     continue;
                 }
                 next.next_input_position = pos.closed_at_input_position + 1;
+                #[cfg(test)]
+                scan.matched();
                 values.push(reference_candidate(pos, event));
             }
         }
+        #[cfg(test)]
+        scan.complete(values.len(), Some(next.next_input_position), Some(false));
         Ok((values, next, false))
     }
 }
