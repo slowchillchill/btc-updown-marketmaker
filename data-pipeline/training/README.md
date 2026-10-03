@@ -55,3 +55,5 @@ Arrow 排序只构造实际排序键列，按返回的置换移动已有行；�
 先以`cargo test -p data-pipeline-training --release --lib --no-run --locked --offline`取得并固定准确优化库测试二进制及源码/锁文件身份，再对该二进制显式运行`--ignored --exact public_recording::tests::replay_cost_tests::existing_twelve_minute_replay_internal_cost --test-threads=1 --nocapture`。配置路径由`DPT_REPLAY_COST_CONFIG`、报告路径由`DPT_REPLAY_COST_REPORT`提供；配置字段见[机器结果的effective_config](docs/public-replay-internal-cost-12m.json)，其中public_root在实际本地运行时填写真实材料路径。`expected_normal_prefix`和`initialization_input_positions`仅记录本次选用身份与分母，不增加原reader以外的准入/拒绝门。
 
 报告区分原入口、候选嵌套、返回后摘要、返回对象释放、reader随`into_core`释放与末尾core释放；原业务错误先保留，诊断写入错误不能覆盖它。此诊断不更改选择、因果时间、稳定前缀或EOF，不是生产优化/收益验收。实际运行范围由准确任务合同指定，不能用此显式入口替代范围授权。
+
+所属[#206深度组内共享对照](docs/binance-depth-shared-owner-12m.md)复用同一原测试驱动，在同配置既有十二分钟public上串行基线/修改后各一次。只有公共观察深度的组内Arc所有权改变，计量/扫描/EOF不改；完整JSON兼容及原值由独立改动前夹具验证。一次对照不是稳定比例，也不解决完整研究持久规模。

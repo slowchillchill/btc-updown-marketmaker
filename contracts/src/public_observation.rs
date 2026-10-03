@@ -360,7 +360,8 @@ pub struct MarketBusinessObservationV1 {
     pub chainlink_spot: ObservedFactV1<ChainlinkBtcUsdReferenceV1>,
     pub chainlink_twap_thirty: ObservedFactV1<ChainlinkBtcUsdTwapReferenceV1>,
     pub chainlink_twap_sixty: ObservedFactV1<ChainlinkBtcUsdTwapReferenceV1>,
-    pub binance_depth: ObservedFactV1<BinanceDepthStateReferenceV1>,
+    /// 同一关闭组的市场共享一次完整投影；后续组独立生成快照。
+    pub binance_depth: std::sync::Arc<ObservedFactV1<BinanceDepthStateReferenceV1>>,
     pub binance_trade: ObservedFactV1<BinanceAggregateTradeReferenceV1>,
     /// 与关闭组共享全部事实；跨市场事件仍参与组统计与时序。
     pub group_events: std::sync::Arc<[PublicBusinessFactV1]>,

@@ -1076,7 +1076,7 @@ impl PublicObservationCoreV1 {
         records: Arc<[PublicBusinessFactV1]>,
         groups: &mut Vec<Arc<ClosedBusinessGroupV1>>,
     ) {
-        let depth = ObservedFactV1 {
+        let depth = Arc::new(ObservedFactV1 {
             value: if self.global.depth.value.is_some() {
                 self.binance_depth.current_depth_value()
             } else {
@@ -1085,7 +1085,7 @@ impl PublicObservationCoreV1 {
             quality: self.global.depth.quality,
             direct_anchors: self.global.depth.direct_anchors.clone(),
             dependency_frontier: self.global.depth.dependency_frontier.clone(),
-        };
+        });
         let observations = self
             .markets
             .iter()
@@ -1436,7 +1436,7 @@ impl MarketState {
         events: &Arc<[PublicBusinessFactV1]>,
         reference: Option<&PublicMarketReferenceStateV1>,
         global: &GlobalReferences,
-        depth: &ObservedFactV1<BinanceDepthStateReferenceV1>,
+        depth: &Arc<ObservedFactV1<BinanceDepthStateReferenceV1>>,
         version: &str,
     ) -> MarketBusinessObservationV1 {
         let unknown = PublicMarketReferenceStateV1::default();
@@ -1537,7 +1537,7 @@ impl MarketState {
             chainlink_spot: global.spot.clone(),
             chainlink_twap_thirty: global.thirty.clone(),
             chainlink_twap_sixty: global.sixty.clone(),
-            binance_depth: depth.clone(),
+            binance_depth: Arc::clone(depth),
             binance_trade: global.trade.clone(),
             group_events: Arc::clone(events),
         }
