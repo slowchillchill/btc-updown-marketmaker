@@ -47,3 +47,11 @@ Arrow 排序只构造实际排序键列，按返回的置换移动已有行；�
 输入集合保存首次清单和文件摘要，供来源身份、排序和 lineage 使用；不锁定或复制输入文件。每次实际打开选中的文件仍检查字节数、SHA、schema/footer，读取前同长度损坏仍失败。归约结束不再重新读取全部清单和文件：原清单删除/变化、未选文件变化、最后读取后变化不会据此否决结果；也少了一次发现“打开摘要检查后、解码期间原地修改并持续到结束”的机会。旧末尾扫描同样不保证文件连续不变。
 
 公共 V6/TWAP 的显式 admission 入口采用相同路径处理，保留其实际公共格式读取能力；旧 `freeze_direct_source_input_set`/GateA canonical reducer 的支持来源没有增加，不因此获得 TWAP 构建能力。本次不改变 Parquet 或 manifest 字段格式，删除的是目录资格 API、日期资格类型和末尾重验 API。
+
+## 仅测试构建的既有重放成本诊断
+
+[#202十二分钟诊断](docs/public-replay-internal-cost-12m.md)沿原`PublicReplayV1::next_prepared_applied`计量一级阶段及候选嵌套读取，计量模块、状态、时钟/计数、环境参数与报告代码全部`cfg(test)`；普通生产构建不包含这些代码，普通测试默认不激活。专用真实材料测试显式ignored，不在固定回归中自动消费研究材料。
+
+先以`cargo test -p data-pipeline-training --release --lib --no-run --locked --offline`取得并固定准确优化库测试二进制及源码/锁文件身份，再对该二进制显式运行`--ignored --exact public_recording::tests::replay_cost_tests::existing_twelve_minute_replay_internal_cost --test-threads=1 --nocapture`。配置路径由`DPT_REPLAY_COST_CONFIG`、报告路径由`DPT_REPLAY_COST_REPORT`提供；配置字段见[机器结果的effective_config](docs/public-replay-internal-cost-12m.json)，其中public_root在实际本地运行时填写真实材料路径。`expected_normal_prefix`和`initialization_input_positions`仅记录本次选用身份与分母，不增加原reader以外的准入/拒绝门。
+
+报告区分原入口、候选嵌套、返回后摘要、返回对象释放、reader随`into_core`释放与末尾core释放；原业务错误先保留，诊断写入错误不能覆盖它。此诊断不更改选择、因果时间、稳定前缀或EOF，不是生产优化/收益验收。实际运行范围由准确任务合同指定，不能用此显式入口替代范围授权。

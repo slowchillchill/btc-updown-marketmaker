@@ -1207,12 +1207,30 @@ fn replay_historical_original_identity_keys_preserve_all_members() {
     writer.record(input, result).unwrap();
     writer.stabilize().unwrap();
     for page in [1, 4] {
+        let session = (page == 4).then(crate::public_replay::cost::Session::enable);
         let mut replay = PublicReplayV1::open(&root, page, 1 << 20).unwrap();
         let mut actual = Vec::new();
         while let Some((input, result)) = replay.next_applied().unwrap() {
             actual.push((input, fingerprint(&result)));
         }
         assert_eq!(actual, expected);
+        if let Some(session) = session {
+            let measured = crate::public_replay::cost::report_value(session.finish());
+            assert_eq!(measured["scan_totals"]["identity_scan"]["invocations"], 1);
+            assert_eq!(
+                measured["scan_totals"]["identity_scan"]["matched_records"],
+                2
+            );
+            assert_eq!(measured["scan_totals"]["identity_scan"]["returned"], 2);
+            assert_eq!(
+                measured["scan_by_input"]["2"]["context"]["historical_member_conditions"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                2
+            );
+            assert_eq!(measured["negative_residual_entries"], 0);
+        }
     }
 }
 
@@ -1575,3 +1593,6 @@ fn stored_pm_reports_keep_original_schema_bytes_and_positions_for_all_dispositio
     }
     assert_eq!(bytes, expected, "底层正文逐字节保持原格式");
 }
+
+#[path = "public_replay_cost_tests.rs"]
+mod replay_cost_tests;
