@@ -76,6 +76,33 @@ pub struct CalculationTimingRecordV1 {
     pub scheduled_send_at_utc_ms: i64,
     pub actual_sent_at_utc_ms: Option<i64>,
 }
+/// 只汇总实际公开交付，不复制逐决策账本；来源与经营阶段分别记录。
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct HistoricalDeliveryPhaseSummaryV1 {
+    pub groups: u64,
+    pub initialization_source_groups: u64,
+    pub research_groups_with_initialization_dependencies: u64,
+    pub first_group_position: Option<u64>,
+    pub last_group_position: Option<u64>,
+    pub first_delivered_at_utc_ms: Option<i64>,
+    pub last_delivered_at_utc_ms: Option<i64>,
+}
+impl HistoricalDeliveryPhaseSummaryV1 {
+    fn add(&mut self, position: u64, at: i64, initial: bool, dependency: bool) {
+        self.groups += 1;
+        self.initialization_source_groups += u64::from(initial);
+        self.research_groups_with_initialization_dependencies += u64::from(!initial && dependency);
+        self.first_group_position.get_or_insert(position);
+        self.first_delivered_at_utc_ms.get_or_insert(at);
+        self.last_group_position = Some(position);
+        self.last_delivered_at_utc_ms = Some(at);
+    }
+}
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct HistoricalDeliverySummaryV1 {
+    pub before_operating_start: HistoricalDeliveryPhaseSummaryV1,
+    pub within_operating_range: HistoricalDeliveryPhaseSummaryV1,
+}
 /// 经济读取与未闭合对象来自同一公共状态。Exit/失败的内存读取不声称已经落盘。
 #[derive(Debug, Serialize)]
 pub struct HistoricalRunReportV1 {
@@ -98,6 +125,8 @@ pub struct HistoricalRunReportV1 {
     pub last_dispatched_calculation_timing: Option<CalculationTimingRecordV1>,
     pub pending_calculation_timing: Option<CalculationTimingRecordV1>,
     pub calculation_count: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delivery_summary: Option<HistoricalDeliverySummaryV1>,
 }
 #[derive(Debug)]
 pub enum HistoricalFailureCauseV1<E> {
@@ -260,6 +289,7 @@ fn report<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
         last_dispatched_calculation_timing: timing,
         pending_calculation_timing: pending_timing,
         calculation_count: count,
+        delivery_summary: None,
     }
 }
 /// 一个账户、一个共享执行与一个策略贯穿整个显式历史范围。策略错误与原分派错误原样交回。
@@ -275,11 +305,11 @@ pub async fn run_historical_v1<S: StrategyV1>(
         })?;
     let mut effective_config = config.clone();
     effective_config.preparation.header = config.preparation.effective_header();
-    let metadata = serde_json::json!({"config": effective_config, "source_manifests": prepared.source_manifests, "input_set_identity_sha256": prepared.input_set_identity_sha256, "public_prefix": prepared.hidden.prefix, "rules_file_sha256": rules.file_sha256(), "caller_role": SimCallerRoleV1::HistoricalBacktest, "recording_role": RunDurabilityRoleV2::FiniteHistorical, "economics_version": ACCOUNT_ECONOMICS_VERSION});
+    let metadata = serde_json::json!({"config": effective_config, "source_manifests": prepared.source_manifests, "input_set_identity_sha256": prepared.input_set_identity_sha256, "source_identity_sha256": prepared.source_identity_sha256, "initialization": prepared.initialization, "public_prefix": prepared.hidden.prefix, "rules_file_sha256": rules.file_sha256(), "caller_role": SimCallerRoleV1::HistoricalBacktest, "recording_role": RunDurabilityRoleV2::FiniteHistorical, "economics_version": ACCOUNT_ECONOMICS_VERSION});
     let start = || -> Result<_, MaterialError> {
         serde_json::to_writer(std::fs::File::create(&config.metadata_path)?, &metadata)?;
         let (execution, shared, observation) =
-            assemble(config, rules, prepared.input_set_identity_sha256.clone())?;
+            assemble(config, rules, prepared.source_identity_sha256.clone())?;
         let source = RecordedPublicGroupSourceV1::open(
             &prepared.public_root,
             config.preparation.read_page_rows,
@@ -319,7 +349,14 @@ pub async fn run_historical_v1<S: StrategyV1>(
     let mut evaluation_at = None;
     let mut unconsumed_required_trigger_at = None;
     let mut coordinator = SettlementCoordinatorV1::default();
+    let mut delivery_summary = HistoricalDeliverySummaryV1::default();
     let end = config.preparation.scope.received_end_utc_ms;
+    // 无初始化的旧调用保持原触发行为；新调用严格以经营区间控制回调。
+    let operating_start = config
+        .preparation
+        .metadata_initialization
+        .as_ref()
+        .map(|_| config.preparation.scope.received_start_utc_ms);
     let running = async {
         let mut next_hidden = hidden
             .next_bucket()
@@ -359,6 +396,7 @@ pub async fn run_historical_v1<S: StrategyV1>(
             let Some(at) = at else {
                 break;
             };
+            let operating = operating_start.is_none_or(|start| at >= start);
             if pending_at == Some(at)
                 && pending.as_ref().is_some_and(|p| {
                     matches!(
@@ -378,7 +416,7 @@ pub async fn run_historical_v1<S: StrategyV1>(
             if required != unconsumed_required_trigger_at {
                 unconsumed_required_trigger_at = None;
             }
-            if required == Some(at) && unconsumed_required_trigger_at.is_none() {
+            if operating && required == Some(at) && unconsumed_required_trigger_at.is_none() {
                 unconsumed_required_trigger_at = Some(at);
                 dirty = true;
             }
@@ -394,10 +432,26 @@ pub async fn run_historical_v1<S: StrategyV1>(
                 .map_err(HistoricalFailureCauseV1::Sim)?
                 == Some(at)
             {
+                let mut delivered_group = None;
                 if let Some(group) = driver
                     .next_prepared_group()
                     .map_err(HistoricalFailureCauseV1::Sim)?
                 {
+                    if operating_start.is_some() {
+                        let initial = prepared
+                            .initialization
+                            .group_is_initialization(&group.group.member_input_positions);
+                        let dependency =
+                            prepared.initialization.group_has_initialization_dependency(
+                                &group.group.member_input_positions,
+                                group.group.closed_at_input_position,
+                            ) || group.group.observations.iter().any(|o| {
+                                prepared
+                                    .initialization
+                                    .observation_has_initialization_dependency(o)
+                            });
+                        delivered_group = Some((group.group.group_position, initial, dependency));
+                    }
                     for context in &group.pm_contexts {
                         if !driver.has_enrolled_market(&context.market.condition_id) {
                             driver
@@ -417,7 +471,15 @@ pub async fn run_historical_v1<S: StrategyV1>(
                     .wait_for_recording_capacity()
                     .map_err(HistoricalFailureCauseV1::Sim)?;
                 driver.next_group().map_err(HistoricalFailureCauseV1::Sim)?;
-                dirty = true;
+                if let Some((position, initial, dependency)) = delivered_group {
+                    let phase = if operating {
+                        &mut delivery_summary.within_operating_range
+                    } else {
+                        &mut delivery_summary.before_operating_start
+                    };
+                    phase.add(position, at, initial, dependency);
+                }
+                dirty |= operating;
             }
             // 已冻结发送先于本毫秒完整隐藏桶闭合，允许原 SIM 请求/行情竞速。
             if pending_at == Some(at) {
@@ -495,9 +557,11 @@ pub async fn run_historical_v1<S: StrategyV1>(
             driver
                 .observe_at(at)
                 .map_err(HistoricalFailureCauseV1::Sim)?;
-            shared
-                .advance_settlement(&mut coordinator, &mut driver)
-                .map_err(HistoricalFailureCauseV1::Settlement)?;
+            if operating {
+                shared
+                    .advance_settlement(&mut coordinator, &mut driver)
+                    .map_err(HistoricalFailureCauseV1::Settlement)?;
+            }
             if pending.is_none() && dirty && start_at.is_none() {
                 start_at = Some(
                     crate::timing::after(
@@ -604,6 +668,7 @@ pub async fn run_historical_v1<S: StrategyV1>(
                 pending.as_ref().map(|p| p.record.clone()),
                 calculation_index,
             );
+            result.delivery_summary = operating_start.map(|_| delivery_summary.clone());
             if normal {
                 driver
                     .stop_and_drain()
@@ -629,9 +694,8 @@ pub async fn run_historical_v1<S: StrategyV1>(
             }
             Ok(result)
         }
-        Err(cause) => Err(HistoricalRunFailureV1 {
-            cause,
-            report: Some(report(
+        Err(cause) => {
+            let mut failure_report = report(
                 &driver,
                 &shared,
                 observation.durable_through(),
@@ -639,7 +703,12 @@ pub async fn run_historical_v1<S: StrategyV1>(
                 timing,
                 pending.as_ref().map(|p| p.record.clone()),
                 calculation_index,
-            )),
-        }),
+            );
+            failure_report.delivery_summary = operating_start.map(|_| delivery_summary.clone());
+            Err(HistoricalRunFailureV1 {
+                cause,
+                report: Some(failure_report),
+            })
+        }
     }
 }

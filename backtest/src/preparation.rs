@@ -3,7 +3,7 @@ use contracts::*;
 use data_pipeline_core::{public_input::*, public_observation_core::PublicObservationCoreV1};
 use data_pipeline_training::{
     canonical_run::CanonicalRunConfig, gate_a::GateAOutputConfig, hidden_preparation::*,
-    public_recording::*, public_replay::*,
+    historical_initialization::*, public_recording::*, public_replay::*,
 };
 use serde::{Deserialize, Serialize};
 use sim_system::scenario::PlatformMarketV1;
@@ -20,6 +20,8 @@ pub struct HistoricalScopeV1 {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HistoricalPreparationConfigV1 {
     pub scope: HistoricalScopeV1,
+    #[serde(default)]
+    pub metadata_initialization: Option<MetadataInitializationConfigV1>,
     pub work_root: PathBuf,
     /// 调用方提供流身份与业务配置；ordering_version 由实际历史排序实现确定，
     /// 此处的兼容输入值不选择排序算法，也不作为新产物版本。
@@ -30,12 +32,68 @@ pub struct HistoricalPreparationConfigV1 {
     pub max_read_batch_bytes: usize,
     pub hidden_stream_id: String,
 }
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct HistoricalInitializationProvenanceV1 {
+    pub source_identity_version: Option<String>,
+    pub input_positions: std::collections::BTreeSet<u64>,
+    pub source_message_ids: std::collections::BTreeSet<String>,
+    pub files: Vec<MetadataInitializationFileFactsV1>,
+}
+impl HistoricalInitializationProvenanceV1 {
+    pub fn group_is_initialization(&self, members: &[u64]) -> bool {
+        !members.is_empty()
+            && members
+                .iter()
+                .all(|position| self.input_positions.contains(position))
+    }
+    pub fn group_has_initialization_dependency(&self, members: &[u64], closed_at: u64) -> bool {
+        members
+            .iter()
+            .any(|position| self.input_positions.contains(position))
+            || self.input_positions.contains(&closed_at)
+    }
+    pub fn observation_has_initialization_dependency(
+        &self,
+        observation: &MarketBusinessObservationV1,
+    ) -> bool {
+        let depends = |anchors: &[DirectObservationAnchorV1]| {
+            anchors.iter().any(|anchor| {
+                self.source_message_ids
+                    .contains(&anchor.source_message_id.0)
+            })
+        };
+        macro_rules! fields { ($($field:ident),*) => { false $(|| depends(&observation.$field.direct_anchors))* }; }
+        fields!(
+            lifecycle,
+            active,
+            closed,
+            accepting_orders,
+            terminal,
+            official_anchor,
+            settlement_reference,
+            chainlink_spot,
+            chainlink_twap_thirty,
+            chainlink_twap_sixty,
+            binance_depth,
+            binance_trade
+        ) || observation.assets.iter().any(|asset| {
+            depends(&asset.bids.direct_anchors)
+                || depends(&asset.asks.direct_anchors)
+                || depends(&asset.tick.direct_anchors)
+                || depends(&asset.public_trade.direct_anchors)
+                || depends(&asset.best_bid_ask.direct_anchors)
+                || depends(&asset.valuation_best_bid.direct_anchors)
+        })
+    }
+}
 pub struct PreparedHistoricalRunV1 {
     pub public_root: PathBuf,
     pub hidden: HiddenPreparationV1,
     pub markets: BTreeMap<String, PlatformMarketV1>,
     pub source_manifests: Vec<(String, String)>,
     pub input_set_identity_sha256: Sha256Hex,
+    pub source_identity_sha256: Sha256Hex,
+    pub initialization: HistoricalInitializationProvenanceV1,
 }
 impl HistoricalPreparationConfigV1 {
     /// 新历史准备及其调用方报告共用的实际流头；不改写旧记录。
@@ -52,24 +110,66 @@ pub fn prepare_historical_run_v1(
     let header = config.effective_header();
     let input_set =
         data_pipeline_training::freeze_public_source_input_set_v1(&config.scope.manifest_paths)?;
+    let initialization_selection = config
+        .metadata_initialization
+        .as_ref()
+        .map(|initial| {
+            if initial.received_start_utc_ms != config.scope.received_start_utc_ms
+                || initial.received_end_utc_ms != config.scope.received_end_utc_ms
+            {
+                return Err::<_, MaterialError>("初始化用途的研究范围与准备范围不一致".into());
+            }
+            MetadataInitializationSelectionV1::open(
+                initial,
+                config.canonical.decode_batch_rows,
+                config.canonical.max_decode_batch_bytes,
+            )
+        })
+        .transpose()?;
+    let source_identity_sha256 = match (&initialization_selection, &config.metadata_initialization)
+    {
+        (Some(selection), Some(initial)) => {
+            selection.source_identity(input_set.input_set_identity_sha256(), initial)?
+        }
+        _ => Sha256Hex(input_set.input_set_identity_sha256().into()),
+    };
+    let mut initialization = HistoricalInitializationProvenanceV1 {
+        source_identity_version: initialization_selection
+            .as_ref()
+            .map(|_| HISTORICAL_INITIALIZATION_SOURCE_IDENTITY_VERSION.into()),
+        input_positions: Default::default(),
+        source_message_ids: Default::default(),
+        files: initialization_selection
+            .as_ref()
+            .map(|selection| selection.files.clone())
+            .unwrap_or_default(),
+    };
     let admitted = input_set.admitted_daily_inputs();
     let files = admitted
         .iter()
         .flat_map(|day| day.files())
         .collect::<Vec<_>>();
     std::fs::create_dir(&config.work_root)?;
-    let mut merge = prepare_historical_files_in_range_v1(
+    let mut merge = prepare_historical_files_with_initialization_v1(
         &config.work_root.join("merge"),
         &files,
         &config.canonical,
         config.header.input_stream_id.clone(),
         Some(config.scope.received_start_utc_ms..config.scope.received_end_utc_ms),
+        initialization_selection.as_ref(),
     )?;
     let public_root = config.work_root.join("public");
     let mut core = PublicObservationCoreV1::new(header.clone())?;
     let mut writer =
         PublicRecordingWriterV1::create(&public_root, &header, config.recording.clone())?;
     while let Some(mut input) = merge.next_input()? {
+        if let Some(binding) = merge.initialization_binding() {
+            initialization.input_positions.insert(input.input_position);
+            initialization
+                .source_message_ids
+                .insert(binding.source_message_id.0.clone());
+            writer.record_source_binding(binding.clone())?;
+        }
         let prepared = merge.prepare_input(&core, &mut input)?;
         let applied = core.push(&prepared)?.into_owned();
         writer.record(input, applied)?;
@@ -85,6 +185,12 @@ pub fn prepare_historical_run_v1(
     writer.record(end, applied)?;
     writer.stabilize()?;
     drop(writer);
+    if config.metadata_initialization.is_some() {
+        serde_json::to_writer(
+            std::fs::File::create(public_root.join("historical-initialization.json"))?,
+            &initialization,
+        )?;
+    }
     drop(core);
     // 隐藏准备消费真实正常前缀对应的重放核心，不直接借用制备时的内存状态。
     let mut replay = PublicReplayV1::open(
@@ -128,6 +234,8 @@ pub fn prepare_historical_run_v1(
     Ok(PreparedHistoricalRunV1 {
         public_root,
         hidden,
+        source_identity_sha256,
+        initialization,
         markets,
         input_set_identity_sha256: Sha256Hex(input_set.input_set_identity_sha256().into()),
         source_manifests: admitted
