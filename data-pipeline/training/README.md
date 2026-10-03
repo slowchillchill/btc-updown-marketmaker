@@ -59,3 +59,5 @@ Arrow 排序只构造实际排序键列，按返回的置换移动已有行；�
 所属[#206深度组内共享对照](docs/binance-depth-shared-owner-12m.md)复用同一原测试驱动，在同配置既有十二分钟public上串行基线/修改后各一次。只有公共观察深度的组内Arc所有权改变，计量/扫描/EOF不改；完整JSON兼容及原值由独立改动前夹具验证。一次对照不是稳定比例，也不解决完整研究持久规模。
 
 所属[#208记录布局与容量分解](docs/public-recording-layout-12m.md)只在测试构建用原RunCursor/SequentialCaptureWriter执行有限4096候选；原key/payload不重序列化，稳定分片/header/prefix/初始化保持。两个布局ignored测试通过`DPT_RECORDING_LAYOUT_CONFIG` / `DPT_RECORDING_LAYOUT_REPORT`显式提供本次原根、新根、recording和读取参数，配置字段见[机器结果](docs/public-recording-layout-12m.json)。唯一实际顺序为重编码、原新字节/前缀比较、原#202新布局重放；第二段同遍历复用原observe/EOF前缀闭合，不声称完整走next_row的I/O/错误路径。结果仅支持本次内容等价可行，文件减0.732%且未见明确重放改善，不修改生产默认或作为长期预算。普通回归不运行真实材料；实际范围仍由准确任务合同指定。
+
+所属[#210 payload页/压缩候选](docs/public-payload-page-compression-12m.md)复用以上三个原测试入口，测试配置`payload_page_8m_zstd9=true`仅选择固定payload列8MiB软页目标／ZSTD9，缺省仍走原属性；生产属性不变。4096、容量计数、字典和WriterVersion保持，Canonical子类只计完整原存储payload长度。新候选captured减54.997%，原字节及业务保持，但本次重放288.75秒／RSS174,452KiB高于#208历史参照，非受控稳定变化；保留为后续容量优先场景的候选，不自动改生产默认或闭合长期预算。完整构建缓存增量因首次编译前未采而未知，准确已测阶段和三段GNU资源见报告。

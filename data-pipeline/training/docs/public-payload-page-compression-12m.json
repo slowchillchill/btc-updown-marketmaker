@@ -1,0 +1,3828 @@
+{
+  "schema": "public_payload_page_compression_12m_v1",
+  "issue": 210,
+  "base_commit": "09ba7b9094feb51f260284cc68dccce2dac0d59b",
+  "measurement_source_commit": "55e65e4cffb3a6143c23ef3922814de1060c1a72",
+  "source_files": {
+    "Cargo.lock": "4d78694113785b3c6e6776f903be1076414496206a2319ce43d15433674d88e3",
+    "Cargo.toml": "ee5a81dd3177edc4a90b7df4c9a943b804c5525555d95809237890723de47b81",
+    "data-pipeline/training/Cargo.toml": "ee13eaba3c3d0bd4a8bd58f03f083eee0e40eedf1657de39cfe4de3491db7c68",
+    "data-pipeline/training/src/lib.rs": "2234492af0431411d1987536521fdd1e715468c8038436a6cca4499db785611e",
+    "data-pipeline/training/src/gate_a.rs": "6f4d89544959bd8176c37850766b7a2229cae9d60a74067d17020b6d6f5d9e90",
+    "data-pipeline/training/src/public_recording.rs": "801a9314ba6f1d7bb3a22160f09a09d3e0b44988b2b7b8e9fc22a42f075d7023",
+    "data-pipeline/training/src/public_recording_tests.rs": "1ffc096a79fe09599dac7269e42576959dda31e80b8365ef10c7d0885637a58a",
+    "data-pipeline/training/src/public_recording_layout_tests.rs": "6af569fe388e221362ca5264ce5465106de879b3232cbffe07761f3eafdb842a",
+    "data-pipeline/training/src/public_replay.rs": "83a7b49368c239c1ad893794d87d0a530ee99f4346f3222881f5c946432ece2b",
+    "data-pipeline/training/src/public_replay_cost.rs": "b994f79dbb4d9aa06a7e62167fd2721dd86d7f48c7ee79af251ac0d125017871",
+    "data-pipeline/training/src/public_replay_cost_tests.rs": "a5e79f942c0abf68246cbcd435068f51edc0d9069bad8b8a2c0fb3f2df6956e6",
+    "data-pipeline/core/src/public_observation_core.rs": "b7d12e73c670d936097983b40245a4c18b835c732dae88a572bf2d4a61f2e3ad",
+    "contracts/src/public_observation.rs": "4231c87c4a4d8415a1c79a2efd795620054a0ca6249d879c1598d976206b56a5"
+  },
+  "binary_sha256": "d5a10d9c6a40cc636500b66db9abd8bd0fddf65655a892554c0524ad26b0fbbf",
+  "binary_bytes": 27539544,
+  "profile": {
+    "opt_level": "3",
+    "debuginfo": 0,
+    "debug_assertions": false,
+    "overflow_checks": false,
+    "test": true
+  },
+  "build_command": "cargo test -p data-pipeline-training --release --lib --no-run --locked --offline --message-format=json",
+  "rustc": "rustc 1.95.0 (59807616e 2026-04-14)\nbinary: rustc\ncommit-hash: 59807616e1fa2540724bfbac14d7976d7e4a3860\ncommit-date: 2026-04-14\nhost: x86_64-unknown-linux-gnu\nrelease: 1.95.0\nLLVM version: 22.1.2\n",
+  "configuration_hashes": {
+    "layout-config.private.json": "46530261d98d3cc8f5bfd2b8f2b92f1dd3d8a0662f57741bd7905bd45b15de26",
+    "replay-config.private.json": "8fb5270921188eaa15918002b97e992d52b1493301fa1de4a23880b50061078b"
+  },
+  "unchanged_source_checks": {
+    "Cargo.lock": true,
+    "Cargo.toml": true,
+    "data-pipeline/training/Cargo.toml": true,
+    "data-pipeline/training/src/lib.rs": true,
+    "data-pipeline/training/src/public_recording.rs": true,
+    "data-pipeline/training/src/public_recording_tests.rs": true,
+    "data-pipeline/training/src/public_replay.rs": true,
+    "data-pipeline/training/src/public_replay_cost.rs": true,
+    "data-pipeline/training/src/public_replay_cost_tests.rs": true,
+    "data-pipeline/core/src/public_observation_core.rs": true,
+    "contracts/src/public_observation.rs": true
+  },
+  "compile_environment": {
+    "CARGO_TARGET_DIR": "shared prior-experiment-12m/build",
+    "CARGO_BUILD_JOBS": 8,
+    "CARGO_PROFILE_TEST_DEBUG": 0,
+    "CARGO_PROFILE_DEV_DEBUG": 0
+  },
+  "input_identity": {
+    "public_root": "layout-trial-4096/materials/public",
+    "old_trial_sha256": "58f21852bb69f52df666b2a3f85adf27f51d926a396ad11a1538cc70edb9c800",
+    "prefix": {
+      "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012",
+      "next_canonical_position": 208661,
+      "next_group_position": 208638,
+      "next_input_position": 208688,
+      "next_observation_position": 806966,
+      "next_public_index_position": 208638,
+      "normal_end": true,
+      "stable_storage_ref": "stable-00000000000000000000"
+    },
+    "initialization_input_positions": [
+      0,
+      1,
+      2
+    ],
+    "input_set_identity_sha256": "2cbd7229cd785a26c9302be87be07cc890f806462f9bec1b7c43bab44f7a54fa",
+    "source_identity_sha256": "66892eab3b355e0c05e13b5e8874ff298b898cb62809a89b208a29e82f8ee281",
+    "source_provenance_note": "original prepare source/input hashes retained; selected physical material is #208 4096 layout, whose metadata is in capacity.fixed_4096_captured"
+  },
+  "fixed_comparison_root": "layout-trial-4096/materials/public",
+  "writer_properties": {
+    "row_group_batch_rows": 4096,
+    "counted_row_buffer_limit_bytes": 67108864,
+    "capture_output_limit_bytes": 17179869184,
+    "single_payload_limit_bytes": 16777216,
+    "read_page_rows": 256,
+    "max_read_batch_bytes": 67108864,
+    "writer_version": "PARQUET_1_0 (original default retained)",
+    "sort_key": {
+      "data_page_size_target_bytes": 1048576,
+      "compression": "ZSTD",
+      "compression_level": 1,
+      "dictionary_enabled": true,
+      "dictionary_page_size_target_bytes": 1048576
+    },
+    "payload": {
+      "data_page_size_target_bytes": 8388608,
+      "compression": "ZSTD",
+      "compression_level": 9,
+      "dictionary_enabled": true,
+      "dictionary_page_size_target_bytes": 1048576
+    },
+    "notes": [
+      "data page size soft target and counted row buffer are not process RSS limits",
+      "footer stores compression codec/encodings but not ZSTD level or actual effective window; level verified by fixed writer properties and representative test",
+      "actual data-page count/maximum or effective zstd window not measured; no additional scan for them"
+    ]
+  },
+  "verification": {
+    "workspace_suites": 86,
+    "passed": 1260,
+    "failed": 0,
+    "ignored": 21,
+    "utc_fixture_skipped": "four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second",
+    "representative_tests": {
+      "property": 1,
+      "layout": 2
+    },
+    "initial_workspace_compile": "exit101 E0599 encodings() already Iterator; .iter() removed; log retained",
+    "fmt": "exit0",
+    "clippy": "exit0; existing warnings retained",
+    "non_test_training_lib_check": "exit0"
+  },
+  "run_order": [
+    "run-1-recode",
+    "run-2-compare",
+    "run-3-replay"
+  ],
+  "run_starts_utc": {
+    "run-1-recode": "2026-10-03T11:40:26Z",
+    "run-2-compare": "2026-10-03T11:42:25Z",
+    "run-3-replay": "2026-10-03T11:43:07Z"
+  },
+  "runs": {
+    "recode": {
+      "canonical_payload_by_subtype": {
+        "MarketFact": {
+          "length_buckets": {
+            "1025..4096": 35
+          },
+          "max_payload_bytes": 3134,
+          "payload_bytes": 72458,
+          "rows": 35
+        },
+        "PolymarketMessage": {
+          "length_buckets": {
+            "1025..4096": 189946,
+            "4097..16384": 5648
+          },
+          "max_payload_bytes": 7460,
+          "payload_bytes": 439436200,
+          "rows": 195594
+        },
+        "ReferenceEvent.BinanceAggregateTrade": {
+          "length_buckets": {
+            "1025..4096": 4405
+          },
+          "max_payload_bytes": 1417,
+          "payload_bytes": 6232452,
+          "rows": 4405
+        },
+        "ReferenceEvent.BinanceDepthState": {
+          "length_buckets": {
+            "262145..1048576": 2218,
+            "65537..262144": 315,
+            ">1048576": 4642
+          },
+          "max_payload_bytes": 2527881,
+          "payload_bytes": 9782572759,
+          "rows": 7175
+        },
+        "ReferenceEvent.ChainlinkBtcUsd": {
+          "length_buckets": {
+            "1025..4096": 659
+          },
+          "max_payload_bytes": 1189,
+          "payload_bytes": 782512,
+          "rows": 659
+        },
+        "ReferenceEvent.ChainlinkBtcUsdTwap": {
+          "length_buckets": {
+            "1025..4096": 661
+          },
+          "max_payload_bytes": 1416,
+          "payload_bytes": 935119,
+          "rows": 661
+        },
+        "ReferenceEvent.MarketPriceAnchorUpdate": {
+          "length_buckets": {
+            "1025..4096": 57
+          },
+          "max_payload_bytes": 1559,
+          "payload_bytes": 88783,
+          "rows": 57
+        },
+        "ReferenceEvent.MarketSettlementReferenceUpdate": {
+          "length_buckets": {
+            "1025..4096": 75
+          },
+          "max_payload_bytes": 1481,
+          "payload_bytes": 110991,
+          "rows": 75
+        }
+      },
+      "current_position": {
+        "row": 3994879,
+        "segment": "stable-00000000000000000000"
+      },
+      "effective_config": {
+        "candidate_root": "payload-page-trial/materials/public",
+        "max_read_batch_bytes": 67108864,
+        "original_root": "layout-trial-4096/materials/public",
+        "payload_page_8m_zstd9": true,
+        "purpose": "#210唯一既有4096对照：仅payload列8MiB软页目标与ZSTD9，原key/payload重编码/双EOF前缀/原重放三段，无prepare/新数据/账户",
+        "read_page_rows": 256,
+        "recording": {
+          "max_artifact_payload_bytes": 16777216,
+          "max_candidate_directory_bytes": 34359738368,
+          "max_capture_output_bytes": 17179869184,
+          "max_observation_l2_levels": 10000,
+          "sort": {
+            "batch_rows": 4096,
+            "max_open_files": 16,
+            "max_run_bytes": 67108864,
+            "max_run_rows": 32768,
+            "max_temp_bytes": 8589934592,
+            "max_temp_run_files": 128,
+            "merge_fan_in": 8
+          }
+        }
+      },
+      "measurement_note": "classification decodes and releases only the current original row; Canonical subtype counts whole original stored-row payload length, not reserialized event/lineage; original key/payload bytes passed to writer without reserialization; footer-only layout metadata; peak is original capacity-counted row buffer, excludes Arrow/compressor/reader/process RSS",
+      "original_error": null,
+      "payload_by_kind": {
+        "Canonical": {
+          "length_buckets": {
+            "1025..4096": 195838,
+            "262145..1048576": 2218,
+            "4097..16384": 5648,
+            "65537..262144": 315,
+            ">1048576": 4642
+          },
+          "max_payload_bytes": 2527881,
+          "payload_bytes": 10230231274,
+          "rows": 208661
+        },
+        "Group": {
+          "length_buckets": {
+            "0..1024": 208638
+          },
+          "max_payload_bytes": 879,
+          "payload_bytes": 76867810,
+          "rows": 208638
+        },
+        "Input": {
+          "length_buckets": {
+            "0..1024": 1,
+            "1025..4096": 202520,
+            "16385..65536": 33,
+            "4097..16384": 6133,
+            "65537..262144": 1
+          },
+          "max_payload_bytes": 103297,
+          "payload_bytes": 353051553,
+          "rows": 208688
+        },
+        "Observation": {
+          "length_buckets": {
+            "0..1024": 806961,
+            "1025..4096": 5
+          },
+          "max_payload_bytes": 1028,
+          "payload_bytes": 424908812,
+          "rows": 806966
+        },
+        "PmReport": {
+          "length_buckets": {
+            "0..1024": 364544,
+            "1025..4096": 367868,
+            "65537..262144": 5328
+          },
+          "max_payload_bytes": 92123,
+          "payload_bytes": 1617307074,
+          "rows": 737740
+        },
+        "PmStepBinding": {
+          "length_buckets": {
+            "0..1024": 1812556
+          },
+          "max_payload_bytes": 259,
+          "payload_bytes": 462455921,
+          "rows": 1812556
+        },
+        "Report": {
+          "length_buckets": {
+            "0..1024": 11600,
+            "1025..4096": 28
+          },
+          "max_payload_bytes": 1613,
+          "payload_bytes": 7562946,
+          "rows": 11628
+        },
+        "SourceBinding": {
+          "length_buckets": {
+            "0..1024": 3
+          },
+          "max_payload_bytes": 367,
+          "payload_bytes": 1101,
+          "rows": 3
+        }
+      },
+      "rows_written": 3994880,
+      "schema": "public_recording_layout_recode_v1",
+      "segments": [
+        {
+          "layout": {
+            "allocated_file_bytes": 562548736,
+            "columns": {
+              "payload": {
+                "codecs": [
+                  "ZSTD"
+                ],
+                "compressed_bytes": 551621468,
+                "encodings": [
+                  "PLAIN",
+                  "RLE",
+                  "RLE_DICTIONARY"
+                ],
+                "uncompressed_bytes": 13189162446
+              },
+              "sort_key": {
+                "codecs": [
+                  "ZSTD"
+                ],
+                "compressed_bytes": 10134299,
+                "encodings": [
+                  "PLAIN",
+                  "RLE",
+                  "RLE_DICTIONARY"
+                ],
+                "uncompressed_bytes": 53977562
+              }
+            },
+            "compressed_column_bytes": 561755767,
+            "footer_bytes": 358596,
+            "logical_file_bytes": 562544217,
+            "row_groups": 976,
+            "rows": 3994880,
+            "uncompressed_column_bytes": 13243140008
+          },
+          "rows": 3994880,
+          "stable_storage_ref": "stable-00000000000000000000",
+          "writer_peak_write_buffer_bytes": 55980313,
+          "writer_peak_write_buffer_rows": 4096
+        }
+      ],
+      "source_declared_prefix": {
+        "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012",
+        "next_canonical_position": 208661,
+        "next_group_position": 208638,
+        "next_input_position": 208688,
+        "next_observation_position": 806966,
+        "next_public_index_position": 208638,
+        "normal_end": true,
+        "stable_storage_ref": "stable-00000000000000000000"
+      },
+      "status": "success",
+      "wall_seconds": 57.698355693
+    },
+    "compare": {
+      "candidate_prefix": {
+        "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012",
+        "next_canonical_position": 208661,
+        "next_group_position": 208638,
+        "next_input_position": 208688,
+        "next_observation_position": 806966,
+        "next_public_index_position": 208638,
+        "normal_end": true,
+        "stable_storage_ref": "stable-00000000000000000000"
+      },
+      "current_position": {
+        "row": 3994880,
+        "segment": "stable-00000000000000000000"
+      },
+      "double_eof": true,
+      "effective_config": {
+        "candidate_root": "payload-page-trial/materials/public",
+        "max_read_batch_bytes": 67108864,
+        "original_root": "layout-trial-4096/materials/public",
+        "payload_page_8m_zstd9": true,
+        "purpose": "#210唯一既有4096对照：仅payload列8MiB软页目标与ZSTD9，原key/payload重编码/双EOF前缀/原重放三段，无prepare/新数据/账户",
+        "read_page_rows": 256,
+        "recording": {
+          "max_artifact_payload_bytes": 16777216,
+          "max_candidate_directory_bytes": 34359738368,
+          "max_capture_output_bytes": 17179869184,
+          "max_observation_l2_levels": 10000,
+          "sort": {
+            "batch_rows": 4096,
+            "max_open_files": 16,
+            "max_run_bytes": 67108864,
+            "max_run_rows": 32768,
+            "max_temp_bytes": 8589934592,
+            "max_temp_run_files": 128,
+            "merge_fan_in": 8
+          }
+        }
+      },
+      "measurement_note": "RunCursor original/new raw key+payload comparison to each double EOF; same traversal calls original PublicRecordingReader::observe and original EOF prefix closure. Does not traverse PublicRecordingReader::next_row I/O/error path; subsequent original replay tests actual reader consumption. No whole-row stream retained.",
+      "original_error": null,
+      "original_prefix": {
+        "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012",
+        "next_canonical_position": 208661,
+        "next_group_position": 208638,
+        "next_input_position": 208688,
+        "next_observation_position": 806966,
+        "next_public_index_position": 208638,
+        "normal_end": true,
+        "stable_storage_ref": "stable-00000000000000000000"
+      },
+      "rows_compared": 3994880,
+      "schema": "public_recording_layout_compare_v1",
+      "segments": [
+        {
+          "complete_prefix_equal": true,
+          "double_eof": true,
+          "rows": 3994880,
+          "stable_storage_ref": "stable-00000000000000000000"
+        }
+      ],
+      "status": "success",
+      "wall_seconds": 23.101772602
+    },
+    "replay": {
+      "actual_reader_prefix": {
+        "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012",
+        "next_canonical_position": 208661,
+        "next_group_position": 208638,
+        "next_input_position": 208688,
+        "next_observation_position": 806966,
+        "next_public_index_position": 208638,
+        "normal_end": true,
+        "stable_storage_ref": "stable-00000000000000000000"
+      },
+      "applied_prefix": {
+        "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012",
+        "next_input_position": 208688
+      },
+      "digest_coverage": "input stream/position/dependency refs and source id/source/received times; group id/position/member/close coordinates; fact position/source refs/direct and dependency time/quality; excludes full payload, source bodies and observation business fields",
+      "driver": {
+        "boundary": "returned-object explicit drop is separate from summary; replay.into_core includes reader release and move; final core drop separate; report serialization/write and diagnostic-state finalization excluded from driver wall, included in outer GNU process",
+        "last_successful_returned_input": 208687,
+        "proc_io_after": {
+          "rchar": 4344127704,
+          "wchar": 113,
+          "syscr": 186978,
+          "syscw": 2,
+          "read_bytes": 5486391296,
+          "write_bytes": 4096,
+          "cancelled_write_bytes": 0
+        },
+        "proc_io_before": {
+          "rchar": 10509,
+          "wchar": 113,
+          "syscr": 17,
+          "syscw": 2,
+          "read_bytes": 0,
+          "write_bytes": 4096,
+          "cancelled_write_bytes": 0
+        },
+        "times": {
+          "core_drop_ns": 10425855,
+          "into_core_and_reader_release_ns": 99327,
+          "open_ns": 204014,
+          "returned_objects_drop_ns": 30103104587,
+          "summary_ns": 264270896
+        },
+        "wall_seconds": 288.748495342
+      },
+      "effective_config": {
+        "expected_normal_prefix": {
+          "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012",
+          "next_canonical_position": 208661,
+          "next_group_position": 208638,
+          "next_input_position": 208688,
+          "next_observation_position": 806966,
+          "next_public_index_position": 208638,
+          "normal_end": true,
+          "stable_storage_ref": "stable-00000000000000000000"
+        },
+        "initialization_input_positions": [
+          0,
+          1,
+          2
+        ],
+        "max_read_batch_bytes": 67108864,
+        "public_root": "payload-page-trial/materials/public",
+        "purpose": "#210唯一payload8MiB/ZSTD9候选原十二分钟重放至End/EOF",
+        "read_page_rows": 256
+      },
+      "fixed_identity_time_quality_sha256": "dea4e61e13e448890b4564a6ff06fc8a551e6a9ae157247b58b20dea25ca458c",
+      "internal": {
+        "by_return_kind": {
+          "anchor_rule": {
+            "calls": 150,
+            "completed": 150,
+            "max_ns": 18912182551,
+            "ns": 94294100102,
+            "rows": {}
+          },
+          "binance_agg_trade": {
+            "calls": 4405,
+            "completed": 4405,
+            "max_ns": 13003197,
+            "ns": 2114383968,
+            "rows": {}
+          },
+          "binance_depth_snapshot": {
+            "calls": 1,
+            "completed": 1,
+            "max_ns": 1222962,
+            "ns": 1222962,
+            "rows": {}
+          },
+          "binance_depth_update": {
+            "calls": 7199,
+            "completed": 7199,
+            "max_ns": 42600711,
+            "ns": 22856377854,
+            "rows": {}
+          },
+          "chainlink_spot": {
+            "calls": 659,
+            "completed": 659,
+            "max_ns": 9584121,
+            "ns": 415528149,
+            "rows": {}
+          },
+          "chainlink_twap": {
+            "calls": 661,
+            "completed": 661,
+            "max_ns": 14376766488,
+            "ns": 19464759428,
+            "rows": {}
+          },
+          "end_of_input": {
+            "calls": 1,
+            "completed": 1,
+            "max_ns": 32642,
+            "ns": 32642,
+            "rows": {}
+          },
+          "eof": {
+            "calls": 1,
+            "completed": 1,
+            "max_ns": 63239,
+            "ns": 63239,
+            "rows": {}
+          },
+          "metadata_v6_existing": {
+            "calls": 15,
+            "completed": 15,
+            "max_ns": 14260171862,
+            "ns": 18963161464,
+            "rows": {}
+          },
+          "polymarket_orderbook": {
+            "calls": 195597,
+            "completed": 195597,
+            "max_ns": 113263134,
+            "ns": 100191879146,
+            "rows": {}
+          }
+        },
+        "entry_calls": 208689,
+        "entry_total_ns": 258301508954,
+        "eof_returns": 1,
+        "failed_entries": 0,
+        "last_entry": {
+          "context": {
+            "dependency_refs": [],
+            "expected_input_position": 208688,
+            "historical_member_conditions": [],
+            "input_position": null,
+            "kind": "unresolved",
+            "source_message_id": null,
+            "target_condition": null
+          },
+          "failed_spans": [],
+          "nested_ns": {},
+          "outcome": "eof",
+          "primary_ns": {
+            "main_drain": 62908
+          },
+          "residual_ns": 331,
+          "total_ns": 63239
+        },
+        "negative_residual_entries": 0,
+        "nested": {
+          "candidate_open": {
+            "calls": 15,
+            "completed": 15,
+            "max_ns": 224482,
+            "ns": 3017951,
+            "rows": {}
+          },
+          "candidate_page": {
+            "calls": 33,
+            "completed": 33,
+            "max_ns": 8595620816,
+            "ns": 113274300967,
+            "rows": {}
+          }
+        },
+        "prepare_remaining_ns": 1764309755,
+        "primary": {
+          "core_push": {
+            "calls": 208688,
+            "completed": 208688,
+            "max_ns": 8034514,
+            "ns": 99090862666,
+            "rows": {}
+          },
+          "dependencies": {
+            "calls": 208688,
+            "completed": 208688,
+            "max_ns": 18900737247,
+            "ns": 18906500530,
+            "rows": {}
+          },
+          "identity": {
+            "calls": 208688,
+            "completed": 208688,
+            "max_ns": 5390,
+            "ns": 5812775,
+            "rows": {}
+          },
+          "into_owned": {
+            "calls": 208688,
+            "completed": 208688,
+            "max_ns": 18795,
+            "ns": 90589737,
+            "rows": {}
+          },
+          "main_drain": {
+            "calls": 208689,
+            "completed": 208689,
+            "max_ns": 111411709,
+            "ns": 24956419828,
+            "rows": {
+              "canonical": 208661,
+              "group": 208638,
+              "input": 208688,
+              "observation": 806966,
+              "pm_report": 737740,
+              "pm_step_binding": 1812556,
+              "report": 11628,
+              "source_binding": 3
+            }
+          },
+          "prepare": {
+            "calls": 208688,
+            "completed": 208688,
+            "max_ns": 14373407555,
+            "ns": 115041628673,
+            "rows": {}
+          }
+        },
+        "residual_total_ns": 209694745,
+        "retention": {
+          "scan_by_input": "all actually scanning Input positions with per-kind counts/rows/time; no per-row payload",
+          "scan_descriptors": "first 128 actual scan/open/page invocations; total by kind and omitted count retained",
+          "slow_entries": "16 slowest whole entry calls; total and omitted count retained"
+        },
+        "returned_inputs": 208688,
+        "scan_by_input": {
+          "159628": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159628,
+              "historical_member_conditions": [],
+              "input_position": 159628,
+              "kind": "metadata_v6_existing",
+              "source_message_id": "998b978f63a3cb0c7756b0b085d08e28918073098d7f3c908f753f633a5a968b",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "kinds": {
+              "candidate_open": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 0,
+                "ns": 210376,
+                "open_attempts": 1,
+                "open_successes": 1,
+                "returned": 0,
+                "row_kinds": {},
+                "rows": 0,
+                "twap_encountered": 0
+              },
+              "candidate_page": {
+                "completed": 3,
+                "invocations": 3,
+                "matched_records": 545,
+                "ns": 14255370503,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 545,
+                "row_kinds": {
+                  "canonical": 159602,
+                  "group": 159583,
+                  "input": 159630,
+                  "observation": 561717,
+                  "pm_report": 563032,
+                  "pm_step_binding": 1360273,
+                  "report": 9423,
+                  "source_binding": 3
+                },
+                "rows": 2973263,
+                "twap_encountered": 545
+              }
+            }
+          },
+          "159636": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159636,
+              "historical_member_conditions": [],
+              "input_position": 159636,
+              "kind": "anchor_rule",
+              "source_message_id": "e6a2eb1adf9eb40de17807bd03670abe838026a4cbc3f69a70dbd1fc7749b5aa",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "kinds": {
+              "candidate_open": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 0,
+                "ns": 205126,
+                "open_attempts": 1,
+                "open_successes": 1,
+                "returned": 0,
+                "row_kinds": {},
+                "rows": 0,
+                "twap_encountered": 0
+              },
+              "candidate_page": {
+                "completed": 3,
+                "invocations": 3,
+                "matched_records": 545,
+                "ns": 14102126932,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 545,
+                "row_kinds": {
+                  "canonical": 159650,
+                  "group": 159627,
+                  "input": 159675,
+                  "observation": 561911,
+                  "pm_report": 563177,
+                  "pm_step_binding": 1360683,
+                  "report": 9426,
+                  "source_binding": 3
+                },
+                "rows": 2974152,
+                "twap_encountered": 545
+              }
+            }
+          },
+          "159660": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159660,
+              "historical_member_conditions": [],
+              "input_position": 159660,
+              "kind": "anchor_rule",
+              "source_message_id": "1a4b6bed1725403c8a043e6cd5ee1731d58c256fcd1b2118566f365729ae4540",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "kinds": {
+              "candidate_open": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 0,
+                "ns": 190178,
+                "open_attempts": 1,
+                "open_successes": 1,
+                "returned": 0,
+                "row_kinds": {},
+                "rows": 0,
+                "twap_encountered": 0
+              },
+              "candidate_page": {
+                "completed": 3,
+                "invocations": 3,
+                "matched_records": 545,
+                "ns": 14169550527,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 545,
+                "row_kinds": {
+                  "canonical": 159650,
+                  "group": 159627,
+                  "input": 159675,
+                  "observation": 561911,
+                  "pm_report": 563177,
+                  "pm_step_binding": 1360683,
+                  "report": 9426,
+                  "source_binding": 3
+                },
+                "rows": 2974152,
+                "twap_encountered": 545
+              }
+            }
+          },
+          "159674": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159674,
+              "historical_member_conditions": [],
+              "input_position": 159674,
+              "kind": "anchor_rule",
+              "source_message_id": "eb319d808359c3139276624e66b60977b795e7d889076992bb28b299b60009f6",
+              "target_condition": "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92"
+            },
+            "kinds": {
+              "candidate_open": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 0,
+                "ns": 192683,
+                "open_attempts": 1,
+                "open_successes": 1,
+                "returned": 0,
+                "row_kinds": {},
+                "rows": 0,
+                "twap_encountered": 0
+              },
+              "candidate_page": {
+                "completed": 3,
+                "invocations": 3,
+                "matched_records": 545,
+                "ns": 14177100009,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 545,
+                "row_kinds": {
+                  "canonical": 159661,
+                  "group": 159638,
+                  "input": 159686,
+                  "observation": 561966,
+                  "pm_report": 563205,
+                  "pm_step_binding": 1360723,
+                  "report": 9427,
+                  "source_binding": 3
+                },
+                "rows": 2974309,
+                "twap_encountered": 545
+              }
+            }
+          },
+          "159686": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159686,
+              "historical_member_conditions": [],
+              "input_position": 159686,
+              "kind": "anchor_rule",
+              "source_message_id": "46833ff23db459ef421dfb3f24b8d7f1d4426be1476474dbf91bc4133faefb37",
+              "target_condition": "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92"
+            },
+            "kinds": {
+              "candidate_open": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 0,
+                "ns": 203292,
+                "open_attempts": 1,
+                "open_successes": 1,
+                "returned": 0,
+                "row_kinds": {},
+                "rows": 0,
+                "twap_encountered": 0
+              },
+              "candidate_page": {
+                "completed": 3,
+                "invocations": 3,
+                "matched_records": 545,
+                "ns": 14214257194,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 545,
+                "row_kinds": {
+                  "canonical": 159684,
+                  "group": 159661,
+                  "input": 159710,
+                  "observation": 562081,
+                  "pm_report": 563293,
+                  "pm_step_binding": 1360855,
+                  "report": 9428,
+                  "source_binding": 3
+                },
+                "rows": 2974715,
+                "twap_encountered": 545
+              }
+            }
+          },
+          "160403": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 160403,
+              "historical_member_conditions": [],
+              "input_position": 160403,
+              "kind": "chainlink_twap",
+              "source_message_id": "76008cbf27a17dcab68d8fda336a2be6d252b8115d7d9d64ce0b0c60cb941e1b",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "kinds": {
+              "candidate_open": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 0,
+                "ns": 205396,
+                "open_attempts": 1,
+                "open_successes": 1,
+                "returned": 0,
+                "row_kinds": {},
+                "rows": 0,
+                "twap_encountered": 0
+              },
+              "candidate_page": {
+                "completed": 3,
+                "invocations": 3,
+                "matched_records": 547,
+                "ns": 14372479659,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 547,
+                "row_kinds": {
+                  "canonical": 160395,
+                  "group": 160372,
+                  "input": 160421,
+                  "observation": 565636,
+                  "pm_report": 565737,
+                  "pm_step_binding": 1368333,
+                  "report": 9452,
+                  "source_binding": 3
+                },
+                "rows": 2990349,
+                "twap_encountered": 547
+              }
+            }
+          },
+          "349": {
+            "context": {
+              "dependency_refs": [
+                {
+                  "input_position": 339,
+                  "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012"
+                }
+              ],
+              "expected_input_position": 349,
+              "historical_member_conditions": [],
+              "input_position": 349,
+              "kind": "anchor_rule",
+              "source_message_id": "2b3e6413a2a238d7ebab7b1115d66fa0dd622faada0e49e2bcb366ce1e50fc32",
+              "target_condition": "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20"
+            },
+            "kinds": {
+              "candidate_open": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 0,
+                "ns": 204555,
+                "open_attempts": 1,
+                "open_successes": 1,
+                "returned": 0,
+                "row_kinds": {},
+                "rows": 0,
+                "twap_encountered": 0
+              },
+              "candidate_page": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 3,
+                "ns": 10820989,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 3,
+                "row_kinds": {
+                  "canonical": 358,
+                  "group": 349,
+                  "input": 351,
+                  "observation": 696,
+                  "pm_report": 1144,
+                  "pm_step_binding": 3141,
+                  "report": 17,
+                  "source_binding": 3
+                },
+                "rows": 6059,
+                "twap_encountered": 3
+              },
+              "dependency_scan": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 1,
+                "ns": 18900730354,
+                "open_attempts": 1,
+                "open_successes": 1,
+                "returned": 1,
+                "row_kinds": {
+                  "canonical": 208661,
+                  "group": 208638,
+                  "input": 208688,
+                  "observation": 806966,
+                  "pm_report": 737740,
+                  "pm_step_binding": 1812556,
+                  "report": 11628,
+                  "source_binding": 3
+                },
+                "rows": 3994880,
+                "twap_encountered": 661
+              }
+            }
+          },
+          "360": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 360,
+              "historical_member_conditions": [],
+              "input_position": 360,
+              "kind": "anchor_rule",
+              "source_message_id": "19c42506548e3d86492360c2d37c8df018777485c048c7f7777a982358ffc550",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "kinds": {
+              "candidate_open": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 0,
+                "ns": 183255,
+                "open_attempts": 1,
+                "open_successes": 1,
+                "returned": 0,
+                "row_kinds": {},
+                "rows": 0,
+                "twap_encountered": 0
+              },
+              "candidate_page": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 3,
+                "ns": 10395468,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 3,
+                "row_kinds": {
+                  "canonical": 374,
+                  "group": 361,
+                  "input": 365,
+                  "observation": 728,
+                  "pm_report": 1156,
+                  "pm_step_binding": 3360,
+                  "report": 22,
+                  "source_binding": 3
+                },
+                "rows": 6369,
+                "twap_encountered": 3
+              }
+            }
+          },
+          "363": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 363,
+              "historical_member_conditions": [],
+              "input_position": 363,
+              "kind": "anchor_rule",
+              "source_message_id": "3020dab7079138678648a4d36128e1a1aefd55b581dad46e0d3b6eab2f61994d",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "kinds": {
+              "candidate_open": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 0,
+                "ns": 176152,
+                "open_attempts": 1,
+                "open_successes": 1,
+                "returned": 0,
+                "row_kinds": {},
+                "rows": 0,
+                "twap_encountered": 0
+              },
+              "candidate_page": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 3,
+                "ns": 10182748,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 3,
+                "row_kinds": {
+                  "canonical": 374,
+                  "group": 361,
+                  "input": 365,
+                  "observation": 728,
+                  "pm_report": 1156,
+                  "pm_step_binding": 3360,
+                  "report": 22,
+                  "source_binding": 3
+                },
+                "rows": 6369,
+                "twap_encountered": 3
+              }
+            }
+          },
+          "76283": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76283,
+              "historical_member_conditions": [],
+              "input_position": 76283,
+              "kind": "metadata_v6_existing",
+              "source_message_id": "377b81fab1537f6ab07aca13c16cb0f0ff9c51405c5b67f764d6ed73ebd138fa",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "kinds": {
+              "candidate_open": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 0,
+                "ns": 203122,
+                "open_attempts": 1,
+                "open_successes": 1,
+                "returned": 0,
+                "row_kinds": {},
+                "rows": 0,
+                "twap_encountered": 0
+              },
+              "candidate_page": {
+                "completed": 2,
+                "invocations": 2,
+                "matched_records": 283,
+                "ns": 4696849572,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 283,
+                "row_kinds": {
+                  "canonical": 76262,
+                  "group": 76248,
+                  "input": 76285,
+                  "observation": 228389,
+                  "pm_report": 267695,
+                  "pm_step_binding": 639293,
+                  "report": 4917,
+                  "source_binding": 3
+                },
+                "rows": 1369092,
+                "twap_encountered": 283
+              }
+            }
+          },
+          "76289": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76289,
+              "historical_member_conditions": [],
+              "input_position": 76289,
+              "kind": "anchor_rule",
+              "source_message_id": "922f3bb002041f36d0b58c57c8928be8585eb61a2b10bf518444a6a54899482d",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "kinds": {
+              "candidate_open": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 0,
+                "ns": 201029,
+                "open_attempts": 1,
+                "open_successes": 1,
+                "returned": 0,
+                "row_kinds": {},
+                "rows": 0,
+                "twap_encountered": 0
+              },
+              "candidate_page": {
+                "completed": 2,
+                "invocations": 2,
+                "matched_records": 283,
+                "ns": 4665583979,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 283,
+                "row_kinds": {
+                  "canonical": 76291,
+                  "group": 76273,
+                  "input": 76311,
+                  "observation": 228477,
+                  "pm_report": 267783,
+                  "pm_step_binding": 639417,
+                  "report": 4919,
+                  "source_binding": 3
+                },
+                "rows": 1369474,
+                "twap_encountered": 283
+              }
+            }
+          },
+          "76305": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76305,
+              "historical_member_conditions": [],
+              "input_position": 76305,
+              "kind": "anchor_rule",
+              "source_message_id": "8938d2183ac3316d20737b1b27a075381491e302d940bf24d28fc1b100153723",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "kinds": {
+              "candidate_open": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 0,
+                "ns": 214404,
+                "open_attempts": 1,
+                "open_successes": 1,
+                "returned": 0,
+                "row_kinds": {},
+                "rows": 0,
+                "twap_encountered": 0
+              },
+              "candidate_page": {
+                "completed": 2,
+                "invocations": 2,
+                "matched_records": 283,
+                "ns": 4648919250,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 283,
+                "row_kinds": {
+                  "canonical": 76291,
+                  "group": 76273,
+                  "input": 76311,
+                  "observation": 228477,
+                  "pm_report": 267783,
+                  "pm_step_binding": 639417,
+                  "report": 4919,
+                  "source_binding": 3
+                },
+                "rows": 1369474,
+                "twap_encountered": 283
+              }
+            }
+          },
+          "76310": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76310,
+              "historical_member_conditions": [],
+              "input_position": 76310,
+              "kind": "anchor_rule",
+              "source_message_id": "9c605f79b3c8ae6230852e81e45e1d987bef621b85ee4cb3bba87921d0b62309",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "kinds": {
+              "candidate_open": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 0,
+                "ns": 224482,
+                "open_attempts": 1,
+                "open_successes": 1,
+                "returned": 0,
+                "row_kinds": {},
+                "rows": 0,
+                "twap_encountered": 0
+              },
+              "candidate_page": {
+                "completed": 2,
+                "invocations": 2,
+                "matched_records": 283,
+                "ns": 4671043877,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 283,
+                "row_kinds": {
+                  "canonical": 76341,
+                  "group": 76323,
+                  "input": 76362,
+                  "observation": 228677,
+                  "pm_report": 267961,
+                  "pm_step_binding": 639884,
+                  "report": 4920,
+                  "source_binding": 3
+                },
+                "rows": 1370471,
+                "twap_encountered": 283
+              }
+            }
+          },
+          "76342": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76342,
+              "historical_member_conditions": [],
+              "input_position": 76342,
+              "kind": "anchor_rule",
+              "source_message_id": "56696111a772e24578a1108261fab3bfac8f3d0ed58be65921b49403c82a280d",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "kinds": {
+              "candidate_open": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 0,
+                "ns": 204315,
+                "open_attempts": 1,
+                "open_successes": 1,
+                "returned": 0,
+                "row_kinds": {},
+                "rows": 0,
+                "twap_encountered": 0
+              },
+              "candidate_page": {
+                "completed": 2,
+                "invocations": 2,
+                "matched_records": 283,
+                "ns": 4607841425,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 283,
+                "row_kinds": {
+                  "canonical": 76341,
+                  "group": 76323,
+                  "input": 76362,
+                  "observation": 228677,
+                  "pm_report": 267961,
+                  "pm_step_binding": 639884,
+                  "report": 4920,
+                  "source_binding": 3
+                },
+                "rows": 1370471,
+                "twap_encountered": 283
+              }
+            }
+          },
+          "76896": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76896,
+              "historical_member_conditions": [],
+              "input_position": 76896,
+              "kind": "chainlink_twap",
+              "source_message_id": "d4a642ed31311616eb6ec74e6983a5621a5555fe8f7dc7a9764262071bcd6f6a",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "kinds": {
+              "candidate_open": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 0,
+                "ns": 199586,
+                "open_attempts": 1,
+                "open_successes": 1,
+                "returned": 0,
+                "row_kinds": {},
+                "rows": 0,
+                "twap_encountered": 0
+              },
+              "candidate_page": {
+                "completed": 2,
+                "invocations": 2,
+                "matched_records": 285,
+                "ns": 4661778835,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 285,
+                "row_kinds": {
+                  "canonical": 76893,
+                  "group": 76875,
+                  "input": 76914,
+                  "observation": 230885,
+                  "pm_report": 269898,
+                  "pm_step_binding": 644661,
+                  "report": 4943,
+                  "source_binding": 3
+                },
+                "rows": 1381072,
+                "twap_encountered": 285
+              }
+            }
+          }
+        },
+        "scan_totals": {
+          "candidate_open": {
+            "completed": 15,
+            "invocations": 15,
+            "matched_records": 0,
+            "ns": 3017951,
+            "open_attempts": 15,
+            "open_successes": 15,
+            "returned": 0,
+            "row_kinds": {},
+            "rows": 0,
+            "twap_encountered": 0
+          },
+          "candidate_page": {
+            "completed": 33,
+            "invocations": 33,
+            "matched_records": 4981,
+            "ns": 113274300967,
+            "open_attempts": 0,
+            "open_successes": 0,
+            "returned": 4981,
+            "row_kinds": {
+              "canonical": 1418167,
+              "group": 1417894,
+              "input": 1418423,
+              "observation": 4750956,
+              "pm_report": 4994158,
+              "pm_step_binding": 12023967,
+              "report": 86181,
+              "source_binding": 45
+            },
+            "rows": 26109791,
+            "twap_encountered": 4981
+          },
+          "dependency_scan": {
+            "completed": 1,
+            "invocations": 1,
+            "matched_records": 1,
+            "ns": 18900730354,
+            "open_attempts": 1,
+            "open_successes": 1,
+            "returned": 1,
+            "row_kinds": {
+              "canonical": 208661,
+              "group": 208638,
+              "input": 208688,
+              "observation": 806966,
+              "pm_report": 737740,
+              "pm_step_binding": 1812556,
+              "report": 11628,
+              "source_binding": 3
+            },
+            "rows": 3994880,
+            "twap_encountered": 661
+          }
+        },
+        "scans": [
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [
+                {
+                  "input_position": 339,
+                  "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012"
+                }
+              ],
+              "expected_input_position": 349,
+              "historical_member_conditions": [],
+              "input_position": 349,
+              "kind": "anchor_rule",
+              "source_message_id": "2b3e6413a2a238d7ebab7b1115d66fa0dd622faada0e49e2bcb366ce1e50fc32",
+              "target_condition": "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20"
+            },
+            "cursor_after": null,
+            "cursor_before": null,
+            "cutoff": null,
+            "exhausted": true,
+            "first_twap_input": 337,
+            "kind": "dependency_scan",
+            "last_twap_input": 208678,
+            "matched_records": 1,
+            "ns": 18900730354,
+            "open_attempted": true,
+            "open_succeeded": true,
+            "returned": 1,
+            "rows": {
+              "canonical": 208661,
+              "group": 208638,
+              "input": 208688,
+              "observation": 806966,
+              "pm_report": 737740,
+              "pm_step_binding": 1812556,
+              "report": 11628,
+              "source_binding": 3
+            },
+            "twap_encountered": 661
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [
+                {
+                  "input_position": 339,
+                  "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012"
+                }
+              ],
+              "expected_input_position": 349,
+              "historical_member_conditions": [],
+              "input_position": 349,
+              "kind": "anchor_rule",
+              "source_message_id": "2b3e6413a2a238d7ebab7b1115d66fa0dd622faada0e49e2bcb366ce1e50fc32",
+              "target_condition": "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20"
+            },
+            "cursor_after": null,
+            "cursor_before": null,
+            "cutoff": 349,
+            "exhausted": null,
+            "first_twap_input": null,
+            "kind": "candidate_open",
+            "last_twap_input": null,
+            "matched_records": 0,
+            "ns": 204555,
+            "open_attempted": true,
+            "open_succeeded": true,
+            "returned": 0,
+            "rows": {},
+            "twap_encountered": 0
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [
+                {
+                  "input_position": 339,
+                  "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012"
+                }
+              ],
+              "expected_input_position": 349,
+              "historical_member_conditions": [],
+              "input_position": 349,
+              "kind": "anchor_rule",
+              "source_message_id": "2b3e6413a2a238d7ebab7b1115d66fa0dd622faada0e49e2bcb366ce1e50fc32",
+              "target_condition": "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20"
+            },
+            "cursor_after": 340,
+            "cursor_before": 0,
+            "cutoff": 349,
+            "exhausted": true,
+            "first_twap_input": 337,
+            "kind": "candidate_page",
+            "last_twap_input": 339,
+            "matched_records": 3,
+            "ns": 10820989,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 3,
+            "rows": {
+              "canonical": 358,
+              "group": 349,
+              "input": 351,
+              "observation": 696,
+              "pm_report": 1144,
+              "pm_step_binding": 3141,
+              "report": 17,
+              "source_binding": 3
+            },
+            "twap_encountered": 3
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 360,
+              "historical_member_conditions": [],
+              "input_position": 360,
+              "kind": "anchor_rule",
+              "source_message_id": "19c42506548e3d86492360c2d37c8df018777485c048c7f7777a982358ffc550",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "cursor_after": null,
+            "cursor_before": null,
+            "cutoff": 360,
+            "exhausted": null,
+            "first_twap_input": null,
+            "kind": "candidate_open",
+            "last_twap_input": null,
+            "matched_records": 0,
+            "ns": 183255,
+            "open_attempted": true,
+            "open_succeeded": true,
+            "returned": 0,
+            "rows": {},
+            "twap_encountered": 0
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 360,
+              "historical_member_conditions": [],
+              "input_position": 360,
+              "kind": "anchor_rule",
+              "source_message_id": "19c42506548e3d86492360c2d37c8df018777485c048c7f7777a982358ffc550",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "cursor_after": 340,
+            "cursor_before": 0,
+            "cutoff": 360,
+            "exhausted": true,
+            "first_twap_input": 337,
+            "kind": "candidate_page",
+            "last_twap_input": 339,
+            "matched_records": 3,
+            "ns": 10395468,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 3,
+            "rows": {
+              "canonical": 374,
+              "group": 361,
+              "input": 365,
+              "observation": 728,
+              "pm_report": 1156,
+              "pm_step_binding": 3360,
+              "report": 22,
+              "source_binding": 3
+            },
+            "twap_encountered": 3
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 363,
+              "historical_member_conditions": [],
+              "input_position": 363,
+              "kind": "anchor_rule",
+              "source_message_id": "3020dab7079138678648a4d36128e1a1aefd55b581dad46e0d3b6eab2f61994d",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "cursor_after": null,
+            "cursor_before": null,
+            "cutoff": 363,
+            "exhausted": null,
+            "first_twap_input": null,
+            "kind": "candidate_open",
+            "last_twap_input": null,
+            "matched_records": 0,
+            "ns": 176152,
+            "open_attempted": true,
+            "open_succeeded": true,
+            "returned": 0,
+            "rows": {},
+            "twap_encountered": 0
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 363,
+              "historical_member_conditions": [],
+              "input_position": 363,
+              "kind": "anchor_rule",
+              "source_message_id": "3020dab7079138678648a4d36128e1a1aefd55b581dad46e0d3b6eab2f61994d",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "cursor_after": 340,
+            "cursor_before": 0,
+            "cutoff": 363,
+            "exhausted": true,
+            "first_twap_input": 337,
+            "kind": "candidate_page",
+            "last_twap_input": 339,
+            "matched_records": 3,
+            "ns": 10182748,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 3,
+            "rows": {
+              "canonical": 374,
+              "group": 361,
+              "input": 365,
+              "observation": 728,
+              "pm_report": 1156,
+              "pm_step_binding": 3360,
+              "report": 22,
+              "source_binding": 3
+            },
+            "twap_encountered": 3
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76283,
+              "historical_member_conditions": [],
+              "input_position": 76283,
+              "kind": "metadata_v6_existing",
+              "source_message_id": "377b81fab1537f6ab07aca13c16cb0f0ff9c51405c5b67f764d6ed73ebd138fa",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "cursor_after": null,
+            "cursor_before": null,
+            "cutoff": 76283,
+            "exhausted": null,
+            "first_twap_input": null,
+            "kind": "candidate_open",
+            "last_twap_input": null,
+            "matched_records": 0,
+            "ns": 203122,
+            "open_attempted": true,
+            "open_succeeded": true,
+            "returned": 0,
+            "rows": {},
+            "twap_encountered": 0
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76283,
+              "historical_member_conditions": [],
+              "input_position": 76283,
+              "kind": "metadata_v6_existing",
+              "source_message_id": "377b81fab1537f6ab07aca13c16cb0f0ff9c51405c5b67f764d6ed73ebd138fa",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "cursor_after": 72355,
+            "cursor_before": 0,
+            "cutoff": 76283,
+            "exhausted": false,
+            "first_twap_input": 337,
+            "kind": "candidate_page",
+            "last_twap_input": 72354,
+            "matched_records": 256,
+            "ns": 4184741850,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 256,
+            "rows": {
+              "canonical": 72333,
+              "group": 72319,
+              "input": 72355,
+              "observation": 216602,
+              "pm_report": 254321,
+              "pm_step_binding": 611673,
+              "report": 4561,
+              "source_binding": 3
+            },
+            "twap_encountered": 256
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76283,
+              "historical_member_conditions": [],
+              "input_position": 76283,
+              "kind": "metadata_v6_existing",
+              "source_message_id": "377b81fab1537f6ab07aca13c16cb0f0ff9c51405c5b67f764d6ed73ebd138fa",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "cursor_after": 76276,
+            "cursor_before": 72355,
+            "cutoff": 76283,
+            "exhausted": true,
+            "first_twap_input": 72512,
+            "kind": "candidate_page",
+            "last_twap_input": 76275,
+            "matched_records": 27,
+            "ns": 512107722,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 27,
+            "rows": {
+              "canonical": 3929,
+              "group": 3929,
+              "input": 3930,
+              "observation": 11787,
+              "pm_report": 13374,
+              "pm_step_binding": 27620,
+              "report": 356
+            },
+            "twap_encountered": 27
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76289,
+              "historical_member_conditions": [],
+              "input_position": 76289,
+              "kind": "anchor_rule",
+              "source_message_id": "922f3bb002041f36d0b58c57c8928be8585eb61a2b10bf518444a6a54899482d",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "cursor_after": null,
+            "cursor_before": null,
+            "cutoff": 76289,
+            "exhausted": null,
+            "first_twap_input": null,
+            "kind": "candidate_open",
+            "last_twap_input": null,
+            "matched_records": 0,
+            "ns": 201029,
+            "open_attempted": true,
+            "open_succeeded": true,
+            "returned": 0,
+            "rows": {},
+            "twap_encountered": 0
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76289,
+              "historical_member_conditions": [],
+              "input_position": 76289,
+              "kind": "anchor_rule",
+              "source_message_id": "922f3bb002041f36d0b58c57c8928be8585eb61a2b10bf518444a6a54899482d",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "cursor_after": 72355,
+            "cursor_before": 0,
+            "cutoff": 76289,
+            "exhausted": false,
+            "first_twap_input": 337,
+            "kind": "candidate_page",
+            "last_twap_input": 72354,
+            "matched_records": 256,
+            "ns": 4151587231,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 256,
+            "rows": {
+              "canonical": 72333,
+              "group": 72319,
+              "input": 72355,
+              "observation": 216602,
+              "pm_report": 254321,
+              "pm_step_binding": 611673,
+              "report": 4561,
+              "source_binding": 3
+            },
+            "twap_encountered": 256
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76289,
+              "historical_member_conditions": [],
+              "input_position": 76289,
+              "kind": "anchor_rule",
+              "source_message_id": "922f3bb002041f36d0b58c57c8928be8585eb61a2b10bf518444a6a54899482d",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "cursor_after": 76276,
+            "cursor_before": 72355,
+            "cutoff": 76289,
+            "exhausted": true,
+            "first_twap_input": 72512,
+            "kind": "candidate_page",
+            "last_twap_input": 76275,
+            "matched_records": 27,
+            "ns": 513996748,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 27,
+            "rows": {
+              "canonical": 3958,
+              "group": 3954,
+              "input": 3956,
+              "observation": 11875,
+              "pm_report": 13462,
+              "pm_step_binding": 27744,
+              "report": 358
+            },
+            "twap_encountered": 27
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76305,
+              "historical_member_conditions": [],
+              "input_position": 76305,
+              "kind": "anchor_rule",
+              "source_message_id": "8938d2183ac3316d20737b1b27a075381491e302d940bf24d28fc1b100153723",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "cursor_after": null,
+            "cursor_before": null,
+            "cutoff": 76305,
+            "exhausted": null,
+            "first_twap_input": null,
+            "kind": "candidate_open",
+            "last_twap_input": null,
+            "matched_records": 0,
+            "ns": 214404,
+            "open_attempted": true,
+            "open_succeeded": true,
+            "returned": 0,
+            "rows": {},
+            "twap_encountered": 0
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76305,
+              "historical_member_conditions": [],
+              "input_position": 76305,
+              "kind": "anchor_rule",
+              "source_message_id": "8938d2183ac3316d20737b1b27a075381491e302d940bf24d28fc1b100153723",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "cursor_after": 72355,
+            "cursor_before": 0,
+            "cutoff": 76305,
+            "exhausted": false,
+            "first_twap_input": 337,
+            "kind": "candidate_page",
+            "last_twap_input": 72354,
+            "matched_records": 256,
+            "ns": 4141542533,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 256,
+            "rows": {
+              "canonical": 72333,
+              "group": 72319,
+              "input": 72355,
+              "observation": 216602,
+              "pm_report": 254321,
+              "pm_step_binding": 611673,
+              "report": 4561,
+              "source_binding": 3
+            },
+            "twap_encountered": 256
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76305,
+              "historical_member_conditions": [],
+              "input_position": 76305,
+              "kind": "anchor_rule",
+              "source_message_id": "8938d2183ac3316d20737b1b27a075381491e302d940bf24d28fc1b100153723",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "cursor_after": 76276,
+            "cursor_before": 72355,
+            "cutoff": 76305,
+            "exhausted": true,
+            "first_twap_input": 72512,
+            "kind": "candidate_page",
+            "last_twap_input": 76275,
+            "matched_records": 27,
+            "ns": 507376717,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 27,
+            "rows": {
+              "canonical": 3958,
+              "group": 3954,
+              "input": 3956,
+              "observation": 11875,
+              "pm_report": 13462,
+              "pm_step_binding": 27744,
+              "report": 358
+            },
+            "twap_encountered": 27
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76310,
+              "historical_member_conditions": [],
+              "input_position": 76310,
+              "kind": "anchor_rule",
+              "source_message_id": "9c605f79b3c8ae6230852e81e45e1d987bef621b85ee4cb3bba87921d0b62309",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "cursor_after": null,
+            "cursor_before": null,
+            "cutoff": 76310,
+            "exhausted": null,
+            "first_twap_input": null,
+            "kind": "candidate_open",
+            "last_twap_input": null,
+            "matched_records": 0,
+            "ns": 224482,
+            "open_attempted": true,
+            "open_succeeded": true,
+            "returned": 0,
+            "rows": {},
+            "twap_encountered": 0
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76310,
+              "historical_member_conditions": [],
+              "input_position": 76310,
+              "kind": "anchor_rule",
+              "source_message_id": "9c605f79b3c8ae6230852e81e45e1d987bef621b85ee4cb3bba87921d0b62309",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "cursor_after": 72355,
+            "cursor_before": 0,
+            "cutoff": 76310,
+            "exhausted": false,
+            "first_twap_input": 337,
+            "kind": "candidate_page",
+            "last_twap_input": 72354,
+            "matched_records": 256,
+            "ns": 4159878809,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 256,
+            "rows": {
+              "canonical": 72333,
+              "group": 72319,
+              "input": 72355,
+              "observation": 216602,
+              "pm_report": 254321,
+              "pm_step_binding": 611673,
+              "report": 4561,
+              "source_binding": 3
+            },
+            "twap_encountered": 256
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76310,
+              "historical_member_conditions": [],
+              "input_position": 76310,
+              "kind": "anchor_rule",
+              "source_message_id": "9c605f79b3c8ae6230852e81e45e1d987bef621b85ee4cb3bba87921d0b62309",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "cursor_after": 76276,
+            "cursor_before": 72355,
+            "cutoff": 76310,
+            "exhausted": true,
+            "first_twap_input": 72512,
+            "kind": "candidate_page",
+            "last_twap_input": 76275,
+            "matched_records": 27,
+            "ns": 511165068,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 27,
+            "rows": {
+              "canonical": 4008,
+              "group": 4004,
+              "input": 4007,
+              "observation": 12075,
+              "pm_report": 13640,
+              "pm_step_binding": 28211,
+              "report": 359
+            },
+            "twap_encountered": 27
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76342,
+              "historical_member_conditions": [],
+              "input_position": 76342,
+              "kind": "anchor_rule",
+              "source_message_id": "56696111a772e24578a1108261fab3bfac8f3d0ed58be65921b49403c82a280d",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "cursor_after": null,
+            "cursor_before": null,
+            "cutoff": 76342,
+            "exhausted": null,
+            "first_twap_input": null,
+            "kind": "candidate_open",
+            "last_twap_input": null,
+            "matched_records": 0,
+            "ns": 204315,
+            "open_attempted": true,
+            "open_succeeded": true,
+            "returned": 0,
+            "rows": {},
+            "twap_encountered": 0
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76342,
+              "historical_member_conditions": [],
+              "input_position": 76342,
+              "kind": "anchor_rule",
+              "source_message_id": "56696111a772e24578a1108261fab3bfac8f3d0ed58be65921b49403c82a280d",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "cursor_after": 72355,
+            "cursor_before": 0,
+            "cutoff": 76342,
+            "exhausted": false,
+            "first_twap_input": 337,
+            "kind": "candidate_page",
+            "last_twap_input": 72354,
+            "matched_records": 256,
+            "ns": 4095776994,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 256,
+            "rows": {
+              "canonical": 72333,
+              "group": 72319,
+              "input": 72355,
+              "observation": 216602,
+              "pm_report": 254321,
+              "pm_step_binding": 611673,
+              "report": 4561,
+              "source_binding": 3
+            },
+            "twap_encountered": 256
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76342,
+              "historical_member_conditions": [],
+              "input_position": 76342,
+              "kind": "anchor_rule",
+              "source_message_id": "56696111a772e24578a1108261fab3bfac8f3d0ed58be65921b49403c82a280d",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "cursor_after": 76276,
+            "cursor_before": 72355,
+            "cutoff": 76342,
+            "exhausted": true,
+            "first_twap_input": 72512,
+            "kind": "candidate_page",
+            "last_twap_input": 76275,
+            "matched_records": 27,
+            "ns": 512064431,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 27,
+            "rows": {
+              "canonical": 4008,
+              "group": 4004,
+              "input": 4007,
+              "observation": 12075,
+              "pm_report": 13640,
+              "pm_step_binding": 28211,
+              "report": 359
+            },
+            "twap_encountered": 27
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76896,
+              "historical_member_conditions": [],
+              "input_position": 76896,
+              "kind": "chainlink_twap",
+              "source_message_id": "d4a642ed31311616eb6ec74e6983a5621a5555fe8f7dc7a9764262071bcd6f6a",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "cursor_after": null,
+            "cursor_before": null,
+            "cutoff": 76896,
+            "exhausted": null,
+            "first_twap_input": null,
+            "kind": "candidate_open",
+            "last_twap_input": null,
+            "matched_records": 0,
+            "ns": 199586,
+            "open_attempted": true,
+            "open_succeeded": true,
+            "returned": 0,
+            "rows": {},
+            "twap_encountered": 0
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76896,
+              "historical_member_conditions": [],
+              "input_position": 76896,
+              "kind": "chainlink_twap",
+              "source_message_id": "d4a642ed31311616eb6ec74e6983a5621a5555fe8f7dc7a9764262071bcd6f6a",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "cursor_after": 72355,
+            "cursor_before": 0,
+            "cutoff": 76896,
+            "exhausted": false,
+            "first_twap_input": 337,
+            "kind": "candidate_page",
+            "last_twap_input": 72354,
+            "matched_records": 256,
+            "ns": 4119579119,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 256,
+            "rows": {
+              "canonical": 72333,
+              "group": 72319,
+              "input": 72355,
+              "observation": 216602,
+              "pm_report": 254321,
+              "pm_step_binding": 611673,
+              "report": 4561,
+              "source_binding": 3
+            },
+            "twap_encountered": 256
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76896,
+              "historical_member_conditions": [],
+              "input_position": 76896,
+              "kind": "chainlink_twap",
+              "source_message_id": "d4a642ed31311616eb6ec74e6983a5621a5555fe8f7dc7a9764262071bcd6f6a",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "cursor_after": 76897,
+            "cursor_before": 72355,
+            "cutoff": 76896,
+            "exhausted": true,
+            "first_twap_input": 72512,
+            "kind": "candidate_page",
+            "last_twap_input": 76896,
+            "matched_records": 29,
+            "ns": 542199716,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 29,
+            "rows": {
+              "canonical": 4560,
+              "group": 4556,
+              "input": 4559,
+              "observation": 14283,
+              "pm_report": 15577,
+              "pm_step_binding": 32988,
+              "report": 382
+            },
+            "twap_encountered": 29
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159628,
+              "historical_member_conditions": [],
+              "input_position": 159628,
+              "kind": "metadata_v6_existing",
+              "source_message_id": "998b978f63a3cb0c7756b0b085d08e28918073098d7f3c908f753f633a5a968b",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "cursor_after": null,
+            "cursor_before": null,
+            "cutoff": 159628,
+            "exhausted": null,
+            "first_twap_input": null,
+            "kind": "candidate_open",
+            "last_twap_input": null,
+            "matched_records": 0,
+            "ns": 210376,
+            "open_attempted": true,
+            "open_succeeded": true,
+            "returned": 0,
+            "rows": {},
+            "twap_encountered": 0
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159628,
+              "historical_member_conditions": [],
+              "input_position": 159628,
+              "kind": "metadata_v6_existing",
+              "source_message_id": "998b978f63a3cb0c7756b0b085d08e28918073098d7f3c908f753f633a5a968b",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "cursor_after": 72355,
+            "cursor_before": 0,
+            "cutoff": 159628,
+            "exhausted": false,
+            "first_twap_input": 337,
+            "kind": "candidate_page",
+            "last_twap_input": 72354,
+            "matched_records": 256,
+            "ns": 4377691585,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 256,
+            "rows": {
+              "canonical": 72333,
+              "group": 72319,
+              "input": 72355,
+              "observation": 216602,
+              "pm_report": 254321,
+              "pm_step_binding": 611673,
+              "report": 4561,
+              "source_binding": 3
+            },
+            "twap_encountered": 256
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159628,
+              "historical_member_conditions": [],
+              "input_position": 159628,
+              "kind": "metadata_v6_existing",
+              "source_message_id": "998b978f63a3cb0c7756b0b085d08e28918073098d7f3c908f753f633a5a968b",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "cursor_after": 154886,
+            "cursor_before": 72355,
+            "cutoff": 159628,
+            "exhausted": false,
+            "first_twap_input": 72512,
+            "kind": "candidate_page",
+            "last_twap_input": 154885,
+            "matched_records": 256,
+            "ns": 8591804122,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 256,
+            "rows": {
+              "canonical": 82528,
+              "group": 82523,
+              "input": 82531,
+              "observation": 326151,
+              "pm_report": 292689,
+              "pm_step_binding": 712514,
+              "report": 4420
+            },
+            "twap_encountered": 256
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159628,
+              "historical_member_conditions": [],
+              "input_position": 159628,
+              "kind": "metadata_v6_existing",
+              "source_message_id": "998b978f63a3cb0c7756b0b085d08e28918073098d7f3c908f753f633a5a968b",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "cursor_after": 159564,
+            "cursor_before": 154886,
+            "cutoff": 159628,
+            "exhausted": true,
+            "first_twap_input": 155023,
+            "kind": "candidate_page",
+            "last_twap_input": 159563,
+            "matched_records": 33,
+            "ns": 1285874796,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 33,
+            "rows": {
+              "canonical": 4741,
+              "group": 4741,
+              "input": 4744,
+              "observation": 18964,
+              "pm_report": 16022,
+              "pm_step_binding": 36086,
+              "report": 442
+            },
+            "twap_encountered": 33
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159636,
+              "historical_member_conditions": [],
+              "input_position": 159636,
+              "kind": "anchor_rule",
+              "source_message_id": "e6a2eb1adf9eb40de17807bd03670abe838026a4cbc3f69a70dbd1fc7749b5aa",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "cursor_after": null,
+            "cursor_before": null,
+            "cutoff": 159636,
+            "exhausted": null,
+            "first_twap_input": null,
+            "kind": "candidate_open",
+            "last_twap_input": null,
+            "matched_records": 0,
+            "ns": 205126,
+            "open_attempted": true,
+            "open_succeeded": true,
+            "returned": 0,
+            "rows": {},
+            "twap_encountered": 0
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159636,
+              "historical_member_conditions": [],
+              "input_position": 159636,
+              "kind": "anchor_rule",
+              "source_message_id": "e6a2eb1adf9eb40de17807bd03670abe838026a4cbc3f69a70dbd1fc7749b5aa",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "cursor_after": 72355,
+            "cursor_before": 0,
+            "cutoff": 159636,
+            "exhausted": false,
+            "first_twap_input": 337,
+            "kind": "candidate_page",
+            "last_twap_input": 72354,
+            "matched_records": 256,
+            "ns": 4293983795,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 256,
+            "rows": {
+              "canonical": 72333,
+              "group": 72319,
+              "input": 72355,
+              "observation": 216602,
+              "pm_report": 254321,
+              "pm_step_binding": 611673,
+              "report": 4561,
+              "source_binding": 3
+            },
+            "twap_encountered": 256
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159636,
+              "historical_member_conditions": [],
+              "input_position": 159636,
+              "kind": "anchor_rule",
+              "source_message_id": "e6a2eb1adf9eb40de17807bd03670abe838026a4cbc3f69a70dbd1fc7749b5aa",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "cursor_after": 154886,
+            "cursor_before": 72355,
+            "cutoff": 159636,
+            "exhausted": false,
+            "first_twap_input": 72512,
+            "kind": "candidate_page",
+            "last_twap_input": 154885,
+            "matched_records": 256,
+            "ns": 8560082381,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 256,
+            "rows": {
+              "canonical": 82528,
+              "group": 82523,
+              "input": 82531,
+              "observation": 326151,
+              "pm_report": 292689,
+              "pm_step_binding": 712514,
+              "report": 4420
+            },
+            "twap_encountered": 256
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159636,
+              "historical_member_conditions": [],
+              "input_position": 159636,
+              "kind": "anchor_rule",
+              "source_message_id": "e6a2eb1adf9eb40de17807bd03670abe838026a4cbc3f69a70dbd1fc7749b5aa",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "cursor_after": 159564,
+            "cursor_before": 154886,
+            "cutoff": 159636,
+            "exhausted": true,
+            "first_twap_input": 155023,
+            "kind": "candidate_page",
+            "last_twap_input": 159563,
+            "matched_records": 33,
+            "ns": 1248060756,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 33,
+            "rows": {
+              "canonical": 4789,
+              "group": 4785,
+              "input": 4789,
+              "observation": 19158,
+              "pm_report": 16167,
+              "pm_step_binding": 36496,
+              "report": 445
+            },
+            "twap_encountered": 33
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159660,
+              "historical_member_conditions": [],
+              "input_position": 159660,
+              "kind": "anchor_rule",
+              "source_message_id": "1a4b6bed1725403c8a043e6cd5ee1731d58c256fcd1b2118566f365729ae4540",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "cursor_after": null,
+            "cursor_before": null,
+            "cutoff": 159660,
+            "exhausted": null,
+            "first_twap_input": null,
+            "kind": "candidate_open",
+            "last_twap_input": null,
+            "matched_records": 0,
+            "ns": 190178,
+            "open_attempted": true,
+            "open_succeeded": true,
+            "returned": 0,
+            "rows": {},
+            "twap_encountered": 0
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159660,
+              "historical_member_conditions": [],
+              "input_position": 159660,
+              "kind": "anchor_rule",
+              "source_message_id": "1a4b6bed1725403c8a043e6cd5ee1731d58c256fcd1b2118566f365729ae4540",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "cursor_after": 72355,
+            "cursor_before": 0,
+            "cutoff": 159660,
+            "exhausted": false,
+            "first_twap_input": 337,
+            "kind": "candidate_page",
+            "last_twap_input": 72354,
+            "matched_records": 256,
+            "ns": 4286027027,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 256,
+            "rows": {
+              "canonical": 72333,
+              "group": 72319,
+              "input": 72355,
+              "observation": 216602,
+              "pm_report": 254321,
+              "pm_step_binding": 611673,
+              "report": 4561,
+              "source_binding": 3
+            },
+            "twap_encountered": 256
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159660,
+              "historical_member_conditions": [],
+              "input_position": 159660,
+              "kind": "anchor_rule",
+              "source_message_id": "1a4b6bed1725403c8a043e6cd5ee1731d58c256fcd1b2118566f365729ae4540",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "cursor_after": 154886,
+            "cursor_before": 72355,
+            "cutoff": 159660,
+            "exhausted": false,
+            "first_twap_input": 72512,
+            "kind": "candidate_page",
+            "last_twap_input": 154885,
+            "matched_records": 256,
+            "ns": 8595620816,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 256,
+            "rows": {
+              "canonical": 82528,
+              "group": 82523,
+              "input": 82531,
+              "observation": 326151,
+              "pm_report": 292689,
+              "pm_step_binding": 712514,
+              "report": 4420
+            },
+            "twap_encountered": 256
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159660,
+              "historical_member_conditions": [],
+              "input_position": 159660,
+              "kind": "anchor_rule",
+              "source_message_id": "1a4b6bed1725403c8a043e6cd5ee1731d58c256fcd1b2118566f365729ae4540",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "cursor_after": 159564,
+            "cursor_before": 154886,
+            "cutoff": 159660,
+            "exhausted": true,
+            "first_twap_input": 155023,
+            "kind": "candidate_page",
+            "last_twap_input": 159563,
+            "matched_records": 33,
+            "ns": 1287902684,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 33,
+            "rows": {
+              "canonical": 4789,
+              "group": 4785,
+              "input": 4789,
+              "observation": 19158,
+              "pm_report": 16167,
+              "pm_step_binding": 36496,
+              "report": 445
+            },
+            "twap_encountered": 33
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159674,
+              "historical_member_conditions": [],
+              "input_position": 159674,
+              "kind": "anchor_rule",
+              "source_message_id": "eb319d808359c3139276624e66b60977b795e7d889076992bb28b299b60009f6",
+              "target_condition": "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92"
+            },
+            "cursor_after": null,
+            "cursor_before": null,
+            "cutoff": 159674,
+            "exhausted": null,
+            "first_twap_input": null,
+            "kind": "candidate_open",
+            "last_twap_input": null,
+            "matched_records": 0,
+            "ns": 192683,
+            "open_attempted": true,
+            "open_succeeded": true,
+            "returned": 0,
+            "rows": {},
+            "twap_encountered": 0
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159674,
+              "historical_member_conditions": [],
+              "input_position": 159674,
+              "kind": "anchor_rule",
+              "source_message_id": "eb319d808359c3139276624e66b60977b795e7d889076992bb28b299b60009f6",
+              "target_condition": "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92"
+            },
+            "cursor_after": 72355,
+            "cursor_before": 0,
+            "cutoff": 159674,
+            "exhausted": false,
+            "first_twap_input": 337,
+            "kind": "candidate_page",
+            "last_twap_input": 72354,
+            "matched_records": 256,
+            "ns": 4333547940,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 256,
+            "rows": {
+              "canonical": 72333,
+              "group": 72319,
+              "input": 72355,
+              "observation": 216602,
+              "pm_report": 254321,
+              "pm_step_binding": 611673,
+              "report": 4561,
+              "source_binding": 3
+            },
+            "twap_encountered": 256
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159674,
+              "historical_member_conditions": [],
+              "input_position": 159674,
+              "kind": "anchor_rule",
+              "source_message_id": "eb319d808359c3139276624e66b60977b795e7d889076992bb28b299b60009f6",
+              "target_condition": "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92"
+            },
+            "cursor_after": 154886,
+            "cursor_before": 72355,
+            "cutoff": 159674,
+            "exhausted": false,
+            "first_twap_input": 72512,
+            "kind": "candidate_page",
+            "last_twap_input": 154885,
+            "matched_records": 256,
+            "ns": 8515043028,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 256,
+            "rows": {
+              "canonical": 82528,
+              "group": 82523,
+              "input": 82531,
+              "observation": 326151,
+              "pm_report": 292689,
+              "pm_step_binding": 712514,
+              "report": 4420
+            },
+            "twap_encountered": 256
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159674,
+              "historical_member_conditions": [],
+              "input_position": 159674,
+              "kind": "anchor_rule",
+              "source_message_id": "eb319d808359c3139276624e66b60977b795e7d889076992bb28b299b60009f6",
+              "target_condition": "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92"
+            },
+            "cursor_after": 159564,
+            "cursor_before": 154886,
+            "cutoff": 159674,
+            "exhausted": true,
+            "first_twap_input": 155023,
+            "kind": "candidate_page",
+            "last_twap_input": 159563,
+            "matched_records": 33,
+            "ns": 1328509041,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 33,
+            "rows": {
+              "canonical": 4800,
+              "group": 4796,
+              "input": 4800,
+              "observation": 19213,
+              "pm_report": 16195,
+              "pm_step_binding": 36536,
+              "report": 446
+            },
+            "twap_encountered": 33
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159686,
+              "historical_member_conditions": [],
+              "input_position": 159686,
+              "kind": "anchor_rule",
+              "source_message_id": "46833ff23db459ef421dfb3f24b8d7f1d4426be1476474dbf91bc4133faefb37",
+              "target_condition": "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92"
+            },
+            "cursor_after": null,
+            "cursor_before": null,
+            "cutoff": 159686,
+            "exhausted": null,
+            "first_twap_input": null,
+            "kind": "candidate_open",
+            "last_twap_input": null,
+            "matched_records": 0,
+            "ns": 203292,
+            "open_attempted": true,
+            "open_succeeded": true,
+            "returned": 0,
+            "rows": {},
+            "twap_encountered": 0
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159686,
+              "historical_member_conditions": [],
+              "input_position": 159686,
+              "kind": "anchor_rule",
+              "source_message_id": "46833ff23db459ef421dfb3f24b8d7f1d4426be1476474dbf91bc4133faefb37",
+              "target_condition": "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92"
+            },
+            "cursor_after": 72355,
+            "cursor_before": 0,
+            "cutoff": 159686,
+            "exhausted": false,
+            "first_twap_input": 337,
+            "kind": "candidate_page",
+            "last_twap_input": 72354,
+            "matched_records": 256,
+            "ns": 4355043743,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 256,
+            "rows": {
+              "canonical": 72333,
+              "group": 72319,
+              "input": 72355,
+              "observation": 216602,
+              "pm_report": 254321,
+              "pm_step_binding": 611673,
+              "report": 4561,
+              "source_binding": 3
+            },
+            "twap_encountered": 256
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159686,
+              "historical_member_conditions": [],
+              "input_position": 159686,
+              "kind": "anchor_rule",
+              "source_message_id": "46833ff23db459ef421dfb3f24b8d7f1d4426be1476474dbf91bc4133faefb37",
+              "target_condition": "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92"
+            },
+            "cursor_after": 154886,
+            "cursor_before": 72355,
+            "cutoff": 159686,
+            "exhausted": false,
+            "first_twap_input": 72512,
+            "kind": "candidate_page",
+            "last_twap_input": 154885,
+            "matched_records": 256,
+            "ns": 8521667609,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 256,
+            "rows": {
+              "canonical": 82528,
+              "group": 82523,
+              "input": 82531,
+              "observation": 326151,
+              "pm_report": 292689,
+              "pm_step_binding": 712514,
+              "report": 4420
+            },
+            "twap_encountered": 256
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159686,
+              "historical_member_conditions": [],
+              "input_position": 159686,
+              "kind": "anchor_rule",
+              "source_message_id": "46833ff23db459ef421dfb3f24b8d7f1d4426be1476474dbf91bc4133faefb37",
+              "target_condition": "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92"
+            },
+            "cursor_after": 159564,
+            "cursor_before": 154886,
+            "cutoff": 159686,
+            "exhausted": true,
+            "first_twap_input": 155023,
+            "kind": "candidate_page",
+            "last_twap_input": 159563,
+            "matched_records": 33,
+            "ns": 1337545842,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 33,
+            "rows": {
+              "canonical": 4823,
+              "group": 4819,
+              "input": 4824,
+              "observation": 19328,
+              "pm_report": 16283,
+              "pm_step_binding": 36668,
+              "report": 447
+            },
+            "twap_encountered": 33
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 160403,
+              "historical_member_conditions": [],
+              "input_position": 160403,
+              "kind": "chainlink_twap",
+              "source_message_id": "76008cbf27a17dcab68d8fda336a2be6d252b8115d7d9d64ce0b0c60cb941e1b",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "cursor_after": null,
+            "cursor_before": null,
+            "cutoff": 160403,
+            "exhausted": null,
+            "first_twap_input": null,
+            "kind": "candidate_open",
+            "last_twap_input": null,
+            "matched_records": 0,
+            "ns": 205396,
+            "open_attempted": true,
+            "open_succeeded": true,
+            "returned": 0,
+            "rows": {},
+            "twap_encountered": 0
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 160403,
+              "historical_member_conditions": [],
+              "input_position": 160403,
+              "kind": "chainlink_twap",
+              "source_message_id": "76008cbf27a17dcab68d8fda336a2be6d252b8115d7d9d64ce0b0c60cb941e1b",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "cursor_after": 72355,
+            "cursor_before": 0,
+            "cutoff": 160403,
+            "exhausted": false,
+            "first_twap_input": 337,
+            "kind": "candidate_page",
+            "last_twap_input": 72354,
+            "matched_records": 256,
+            "ns": 4342081213,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 256,
+            "rows": {
+              "canonical": 72333,
+              "group": 72319,
+              "input": 72355,
+              "observation": 216602,
+              "pm_report": 254321,
+              "pm_step_binding": 611673,
+              "report": 4561,
+              "source_binding": 3
+            },
+            "twap_encountered": 256
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 160403,
+              "historical_member_conditions": [],
+              "input_position": 160403,
+              "kind": "chainlink_twap",
+              "source_message_id": "76008cbf27a17dcab68d8fda336a2be6d252b8115d7d9d64ce0b0c60cb941e1b",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "cursor_after": 154886,
+            "cursor_before": 72355,
+            "cutoff": 160403,
+            "exhausted": false,
+            "first_twap_input": 72512,
+            "kind": "candidate_page",
+            "last_twap_input": 154885,
+            "matched_records": 256,
+            "ns": 8584055346,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 256,
+            "rows": {
+              "canonical": 82528,
+              "group": 82523,
+              "input": 82531,
+              "observation": 326151,
+              "pm_report": 292689,
+              "pm_step_binding": 712514,
+              "report": 4420
+            },
+            "twap_encountered": 256
+          },
+          {
+            "completed": true,
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 160403,
+              "historical_member_conditions": [],
+              "input_position": 160403,
+              "kind": "chainlink_twap",
+              "source_message_id": "76008cbf27a17dcab68d8fda336a2be6d252b8115d7d9d64ce0b0c60cb941e1b",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "cursor_after": 160404,
+            "cursor_before": 154886,
+            "cutoff": 160403,
+            "exhausted": true,
+            "first_twap_input": 155023,
+            "kind": "candidate_page",
+            "last_twap_input": 160403,
+            "matched_records": 35,
+            "ns": 1446343100,
+            "open_attempted": false,
+            "open_succeeded": false,
+            "returned": 35,
+            "rows": {
+              "canonical": 5534,
+              "group": 5530,
+              "input": 5535,
+              "observation": 22883,
+              "pm_report": 18727,
+              "pm_step_binding": 44146,
+              "report": 471
+            },
+            "twap_encountered": 35
+          }
+        ],
+        "scans_omitted": 0,
+        "scans_without_input_context": 0,
+        "slow_entries_omitted": 208673,
+        "slowest_entries": [
+          {
+            "context": {
+              "dependency_refs": [
+                {
+                  "input_position": 339,
+                  "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012"
+                }
+              ],
+              "expected_input_position": 349,
+              "historical_member_conditions": [],
+              "input_position": 349,
+              "kind": "anchor_rule",
+              "source_message_id": "2b3e6413a2a238d7ebab7b1115d66fa0dd622faada0e49e2bcb366ce1e50fc32",
+              "target_condition": "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20"
+            },
+            "failed_spans": [],
+            "nested_ns": {
+              "candidate_open": 204555,
+              "candidate_page": 10820989
+            },
+            "outcome": "input",
+            "primary_ns": {
+              "core_push": 208021,
+              "dependencies": 18900737247,
+              "identity": 20,
+              "into_owned": 632,
+              "main_drain": 28514,
+              "prepare": 11065910
+            },
+            "residual_ns": 142207,
+            "total_ns": 18912182551
+          },
+          {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 160403,
+              "historical_member_conditions": [],
+              "input_position": 160403,
+              "kind": "chainlink_twap",
+              "source_message_id": "76008cbf27a17dcab68d8fda336a2be6d252b8115d7d9d64ce0b0c60cb941e1b",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "failed_spans": [],
+            "nested_ns": {
+              "candidate_open": 205396,
+              "candidate_page": 14372479659
+            },
+            "outcome": "input",
+            "primary_ns": {
+              "core_push": 1613488,
+              "dependencies": 20,
+              "identity": 30,
+              "into_owned": 501,
+              "main_drain": 34255,
+              "prepare": 14373407555
+            },
+            "residual_ns": 1710639,
+            "total_ns": 14376766488
+          },
+          {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159628,
+              "historical_member_conditions": [],
+              "input_position": 159628,
+              "kind": "metadata_v6_existing",
+              "source_message_id": "998b978f63a3cb0c7756b0b085d08e28918073098d7f3c908f753f633a5a968b",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "failed_spans": [],
+            "nested_ns": {
+              "candidate_open": 210376,
+              "candidate_page": 14255370503
+            },
+            "outcome": "input",
+            "primary_ns": {
+              "core_push": 1329923,
+              "dependencies": 20,
+              "identity": 20,
+              "into_owned": 712,
+              "main_drain": 32221,
+              "prepare": 14256201308
+            },
+            "residual_ns": 2607658,
+            "total_ns": 14260171862
+          },
+          {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159686,
+              "historical_member_conditions": [],
+              "input_position": 159686,
+              "kind": "anchor_rule",
+              "source_message_id": "46833ff23db459ef421dfb3f24b8d7f1d4426be1476474dbf91bc4133faefb37",
+              "target_condition": "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92"
+            },
+            "failed_spans": [],
+            "nested_ns": {
+              "candidate_open": 203292,
+              "candidate_page": 14214257194
+            },
+            "outcome": "input",
+            "primary_ns": {
+              "core_push": 8266,
+              "dependencies": 40,
+              "identity": 40,
+              "into_owned": 721,
+              "main_drain": 2214539,
+              "prepare": 14215141327
+            },
+            "residual_ns": 516141,
+            "total_ns": 14217881074
+          },
+          {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159674,
+              "historical_member_conditions": [],
+              "input_position": 159674,
+              "kind": "anchor_rule",
+              "source_message_id": "eb319d808359c3139276624e66b60977b795e7d889076992bb28b299b60009f6",
+              "target_condition": "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92"
+            },
+            "failed_spans": [],
+            "nested_ns": {
+              "candidate_open": 192683,
+              "candidate_page": 14177100009
+            },
+            "outcome": "input",
+            "primary_ns": {
+              "core_push": 1498611,
+              "dependencies": 20,
+              "identity": 20,
+              "into_owned": 521,
+              "main_drain": 41708,
+              "prepare": 14177971159
+            },
+            "residual_ns": 441592,
+            "total_ns": 14179953631
+          },
+          {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159660,
+              "historical_member_conditions": [],
+              "input_position": 159660,
+              "kind": "anchor_rule",
+              "source_message_id": "1a4b6bed1725403c8a043e6cd5ee1731d58c256fcd1b2118566f365729ae4540",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "failed_spans": [],
+            "nested_ns": {
+              "candidate_open": 190178,
+              "candidate_page": 14169550527
+            },
+            "outcome": "input",
+            "primary_ns": {
+              "core_push": 7684,
+              "dependencies": 20,
+              "identity": 20,
+              "into_owned": 952,
+              "main_drain": 37471,
+              "prepare": 14170391311
+            },
+            "residual_ns": 470375,
+            "total_ns": 14170907833
+          },
+          {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159636,
+              "historical_member_conditions": [],
+              "input_position": 159636,
+              "kind": "anchor_rule",
+              "source_message_id": "e6a2eb1adf9eb40de17807bd03670abe838026a4cbc3f69a70dbd1fc7749b5aa",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "failed_spans": [],
+            "nested_ns": {
+              "candidate_open": 205126,
+              "candidate_page": 14102126932
+            },
+            "outcome": "input",
+            "primary_ns": {
+              "core_push": 1350653,
+              "dependencies": 20,
+              "identity": 20,
+              "into_owned": 812,
+              "main_drain": 57027,
+              "prepare": 14102991609
+            },
+            "residual_ns": 533023,
+            "total_ns": 14104933164
+          },
+          {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76283,
+              "historical_member_conditions": [],
+              "input_position": 76283,
+              "kind": "metadata_v6_existing",
+              "source_message_id": "377b81fab1537f6ab07aca13c16cb0f0ff9c51405c5b67f764d6ed73ebd138fa",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "failed_spans": [],
+            "nested_ns": {
+              "candidate_open": 203122,
+              "candidate_page": 4696849572
+            },
+            "outcome": "input",
+            "primary_ns": {
+              "core_push": 1064363,
+              "dependencies": 20,
+              "identity": 20,
+              "into_owned": 541,
+              "main_drain": 20218,
+              "prepare": 4697398446
+            },
+            "residual_ns": 416855,
+            "total_ns": 4698900463
+          },
+          {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76310,
+              "historical_member_conditions": [],
+              "input_position": 76310,
+              "kind": "anchor_rule",
+              "source_message_id": "9c605f79b3c8ae6230852e81e45e1d987bef621b85ee4cb3bba87921d0b62309",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "failed_spans": [],
+            "nested_ns": {
+              "candidate_open": 224482,
+              "candidate_page": 4671043877
+            },
+            "outcome": "input",
+            "primary_ns": {
+              "core_push": 952884,
+              "dependencies": 20,
+              "identity": 171,
+              "into_owned": 561,
+              "main_drain": 44794,
+              "prepare": 4671602107
+            },
+            "residual_ns": 400443,
+            "total_ns": 4673000980
+          },
+          {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76289,
+              "historical_member_conditions": [],
+              "input_position": 76289,
+              "kind": "anchor_rule",
+              "source_message_id": "922f3bb002041f36d0b58c57c8928be8585eb61a2b10bf518444a6a54899482d",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "failed_spans": [],
+            "nested_ns": {
+              "candidate_open": 201029,
+              "candidate_page": 4665583979
+            },
+            "outcome": "input",
+            "primary_ns": {
+              "core_push": 938386,
+              "dependencies": 30,
+              "identity": 20,
+              "into_owned": 551,
+              "main_drain": 50084,
+              "prepare": 4666118044
+            },
+            "residual_ns": 367373,
+            "total_ns": 4667474488
+          },
+          {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76896,
+              "historical_member_conditions": [],
+              "input_position": 76896,
+              "kind": "chainlink_twap",
+              "source_message_id": "d4a642ed31311616eb6ec74e6983a5621a5555fe8f7dc7a9764262071bcd6f6a",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "failed_spans": [],
+            "nested_ns": {
+              "candidate_open": 199586,
+              "candidate_page": 4661778835
+            },
+            "outcome": "input",
+            "primary_ns": {
+              "core_push": 1161747,
+              "dependencies": 30,
+              "identity": 30,
+              "into_owned": 542,
+              "main_drain": 30587,
+              "prepare": 4662323451
+            },
+            "residual_ns": 429487,
+            "total_ns": 4663945874
+          },
+          {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76305,
+              "historical_member_conditions": [],
+              "input_position": 76305,
+              "kind": "anchor_rule",
+              "source_message_id": "8938d2183ac3316d20737b1b27a075381491e302d940bf24d28fc1b100153723",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "failed_spans": [],
+            "nested_ns": {
+              "candidate_open": 214404,
+              "candidate_page": 4648919250
+            },
+            "outcome": "input",
+            "primary_ns": {
+              "core_push": 7725,
+              "dependencies": 30,
+              "identity": 20,
+              "into_owned": 721,
+              "main_drain": 32200,
+              "prepare": 4649466750
+            },
+            "residual_ns": 454896,
+            "total_ns": 4649962342
+          },
+          {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76342,
+              "historical_member_conditions": [],
+              "input_position": 76342,
+              "kind": "anchor_rule",
+              "source_message_id": "56696111a772e24578a1108261fab3bfac8f3d0ed58be65921b49403c82a280d",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "failed_spans": [],
+            "nested_ns": {
+              "candidate_open": 204315,
+              "candidate_page": 4607841425
+            },
+            "outcome": "input",
+            "primary_ns": {
+              "core_push": 7905,
+              "dependencies": 30,
+              "identity": 30,
+              "into_owned": 671,
+              "main_drain": 28373,
+              "prepare": 4608375380
+            },
+            "residual_ns": 419411,
+            "total_ns": 4608831800
+          },
+          {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 101212,
+              "historical_member_conditions": [],
+              "input_position": 101212,
+              "kind": "polymarket_orderbook",
+              "source_message_id": "4483076d486406b9393f9f74fceb0bbc0db41ec564052f3ea5830533e138b26f",
+              "target_condition": null
+            },
+            "failed_spans": [],
+            "nested_ns": {},
+            "outcome": "input",
+            "primary_ns": {
+              "core_push": 1792745,
+              "dependencies": 331,
+              "identity": 160,
+              "into_owned": 1974,
+              "main_drain": 111411709,
+              "prepare": 46838
+            },
+            "residual_ns": 9377,
+            "total_ns": 113263134
+          },
+          {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 100357,
+              "historical_member_conditions": [],
+              "input_position": 100357,
+              "kind": "polymarket_orderbook",
+              "source_message_id": "ec3582c3c6448deaf0631f97e2d32e257ceb2c4c8e0d8228db42cc9a4e753f7a",
+              "target_condition": null
+            },
+            "failed_spans": [],
+            "nested_ns": {},
+            "outcome": "input",
+            "primary_ns": {
+              "core_push": 1791242,
+              "dependencies": 360,
+              "identity": 331,
+              "into_owned": 1954,
+              "main_drain": 102003179,
+              "prepare": 48882
+            },
+            "residual_ns": 9718,
+            "total_ns": 103855666
+          },
+          {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 91132,
+              "historical_member_conditions": [],
+              "input_position": 91132,
+              "kind": "polymarket_orderbook",
+              "source_message_id": "a490e166e527667124c2f5ddf746d0300cbf3a9d6599ba63cc2ea4cda8ac22f6",
+              "target_condition": null
+            },
+            "failed_spans": [],
+            "nested_ns": {},
+            "outcome": "input",
+            "primary_ns": {
+              "core_push": 2001507,
+              "dependencies": 381,
+              "identity": 160,
+              "into_owned": 2485,
+              "main_drain": 86031043,
+              "prepare": 58681
+            },
+            "residual_ns": 12583,
+            "total_ns": 88106840
+          }
+        ],
+        "time_accounting": {
+          "nested": "candidate_open/candidate_page are contained in prepare and must not be added to primary; scan elapsed is a subset, not extra primary time",
+          "overhead": "clock checks and local counting are inside this test diagnosis; bookkeeping at scope destruction falls within enclosing span or residual; overhead not independently isolated",
+          "primary": [
+            "main_drain",
+            "identity",
+            "dependencies",
+            "prepare",
+            "core_push",
+            "into_owned"
+          ],
+          "residual": "signed entry total minus non-overlapping primary spans; no zero clamp",
+          "twap_encountered": "TWAP canonical rows actually decoded before cursor/cutoff filtering; may include the first row beyond cutoff; returned counts are successful page output only"
+        }
+      },
+      "next_canonical_position": 208661,
+      "normal_end_observed": true,
+      "original_error": null,
+      "schema": "public_replay_internal_cost_v1",
+      "status": "success",
+      "summary": {
+        "dependency_examples": [
+          {
+            "first_eight_refs": [
+              {
+                "input_position": 339,
+                "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012"
+              }
+            ],
+            "input_position": 349,
+            "kind": "anchor_rule",
+            "omitted_refs": 0,
+            "total_refs": 1
+          }
+        ],
+        "dependency_examples_omitted": 0,
+        "dependency_refs": 1,
+        "end_inputs": 1,
+        "eof": true,
+        "first_input": 0,
+        "first_three_inputs": [
+          {
+            "kind": "metadata_v6_existing",
+            "position": 0
+          },
+          {
+            "kind": "metadata_v6_existing",
+            "position": 1
+          },
+          {
+            "kind": "metadata_v6_existing",
+            "position": 2
+          }
+        ],
+        "group_non_increasing": 0,
+        "groups": 208638,
+        "historical_repair_inputs": 0,
+        "historical_repair_members": 0,
+        "initialization_inputs_seen": [
+          0,
+          1,
+          2
+        ],
+        "input_kinds": {
+          "anchor_rule": 150,
+          "binance_agg_trade": 4405,
+          "binance_depth_snapshot": 1,
+          "binance_depth_update": 7199,
+          "chainlink_spot": 659,
+          "chainlink_twap": 661,
+          "end_of_input": 1,
+          "metadata_v6_existing": 15,
+          "polymarket_orderbook": 195597
+        },
+        "input_non_increasing": 0,
+        "inputs": 208688,
+        "last_group": 208637,
+        "last_input": 208687,
+        "nonempty_dependencies": 1,
+        "observations": 806966,
+        "widths": {
+          "1": 2,
+          "2": 351,
+          "3": 75907,
+          "4": 83349,
+          "5": 49029
+        }
+      }
+    }
+  },
+  "gnu_resources": {
+    "run-1-recode": {
+      "wall_seconds": 57.7,
+      "user_cpu_seconds": 51.85,
+      "system_cpu_seconds": 5.25,
+      "max_rss_kib": 261180,
+      "file_system_input_blocks": 2807384,
+      "file_system_output_blocks": 1098784,
+      "minor_faults": 5296461,
+      "major_faults": 0,
+      "swaps": 0,
+      "exit_code": 0,
+      "io_unit": "Linux ru_inblock/ru_oublock 512-byte blocks; not logical bytes or rchar"
+    },
+    "run-2-compare": {
+      "wall_seconds": 23.11,
+      "user_cpu_seconds": 20.69,
+      "system_cpu_seconds": 1.63,
+      "max_rss_kib": 109692,
+      "file_system_input_blocks": 4259600,
+      "file_system_output_blocks": 16,
+      "minor_faults": 1300128,
+      "major_faults": 0,
+      "swaps": 0,
+      "exit_code": 0,
+      "io_unit": "Linux ru_inblock/ru_oublock 512-byte blocks; not logical bytes or rchar"
+    },
+    "run-3-replay": {
+      "wall_seconds": 288.75,
+      "user_cpu_seconds": 276.44,
+      "system_cpu_seconds": 6.35,
+      "max_rss_kib": 174452,
+      "file_system_input_blocks": 10715608,
+      "file_system_output_blocks": 216,
+      "minor_faults": 5365497,
+      "major_faults": 0,
+      "swaps": 0,
+      "exit_code": 0,
+      "io_unit": "Linux ru_inblock/ru_oublock 512-byte blocks; not logical bytes or rchar"
+    }
+  },
+  "checks": {
+    "all_stored_key_payload_bytes_equal": true,
+    "full_prefix_equals": true,
+    "all_kind_payload_stats_equal_208": true,
+    "canonical_rows_conserved": true,
+    "canonical_payload_bytes_conserved": true,
+    "all_replay_summary_equal_208": true,
+    "actual_and_applied_prefix_equal_208": true,
+    "limited_digest_equal_208": true,
+    "all_scan_totals_non_time_equal_208": true,
+    "all_scan_details_non_time_equal_208": true,
+    "all_scan_positions_non_time_equal_208": true,
+    "normal_end_eof": true,
+    "primary_ns_closed": true,
+    "nested_prepare_ns_closed": true
+  },
+  "capacity": {
+    "payload_total_bytes": 13172386491,
+    "fixed_4096_captured": {
+      "allocated_file_bytes": 1250025472,
+      "compressed_column_bytes": 1248498472,
+      "footer_bytes": 360808,
+      "logical_file_bytes": 1250021066,
+      "row_groups": 976,
+      "rows": 3994880,
+      "uncompressed_column_bytes": 13243251329
+    },
+    "candidate_captured": {
+      "allocated_file_bytes": 562548736,
+      "columns": {
+        "payload": {
+          "codecs": [
+            "ZSTD"
+          ],
+          "compressed_bytes": 551621468,
+          "encodings": [
+            "PLAIN",
+            "RLE",
+            "RLE_DICTIONARY"
+          ],
+          "uncompressed_bytes": 13189162446
+        },
+        "sort_key": {
+          "codecs": [
+            "ZSTD"
+          ],
+          "compressed_bytes": 10134299,
+          "encodings": [
+            "PLAIN",
+            "RLE",
+            "RLE_DICTIONARY"
+          ],
+          "uncompressed_bytes": 53977562
+        }
+      },
+      "compressed_column_bytes": 561755767,
+      "footer_bytes": 358596,
+      "logical_file_bytes": 562544217,
+      "row_groups": 976,
+      "rows": 3994880,
+      "uncompressed_column_bytes": 13243140008
+    },
+    "captured_saved_bytes": 687476849,
+    "captured_saved_percent": 54.99722106283287,
+    "fixed_4096_public": {
+      "files": 4,
+      "logical_bytes": 1250022612,
+      "allocated_bytes": 1250037760
+    },
+    "candidate_public": {
+      "files": 4,
+      "logical_bytes": 562545763,
+      "allocated_bytes": 562561024
+    },
+    "equivalent_candidate_plus_unchanged_hidden_merge_bytes": 761364188,
+    "equivalent_note": "arithmetic only, old hidden/merge retained in place, no prepare or copying",
+    "startup_free_disk_bytes": 235504812032,
+    "artifact_sizes": {
+      "fixed_4096_public_final_metadata": {
+        "files": 4,
+        "logical_bytes": 1250022612,
+        "allocated_bytes": 1250037760
+      },
+      "candidate_public_final": {
+        "files": 4,
+        "logical_bytes": 562545763,
+        "allocated_bytes": 562561024
+      },
+      "evidence_snapshot_excluding_candidate_and_this_index": {
+        "files": 45,
+        "logical_bytes": 28877928,
+        "allocated_bytes": 28995584
+      },
+      "cache_first_build_before": null,
+      "cache_missing_baseline_note": "first property-test build cache baseline not collected; complete task build net growth cannot be exactly confirmed; historical #208 final is not startup baseline",
+      "cache_during_validation": {
+        "files": 42193,
+        "logical_bytes": 22878169517,
+        "allocated_bytes": 22941999104
+      },
+      "cache_before_release": {
+        "files": 42513,
+        "logical_bytes": 23492349341,
+        "allocated_bytes": 23557316608
+      },
+      "cache_before_and_after_runs": {
+        "files": 42513,
+        "logical_bytes": 23492424080,
+        "allocated_bytes": 23557390336
+      },
+      "known_validation_to_pre_run_net_change": {
+        "files": 320,
+        "logical_bytes": 614254563,
+        "allocated_bytes": 615391232
+      },
+      "release_build_net_change": {
+        "files": 0,
+        "logical_bytes": 74739,
+        "allocated_bytes": 73728
+      },
+      "actual_runs_cache_change": {
+        "files": 0,
+        "logical_bytes": 0,
+        "allocated_bytes": 0
+      },
+      "historical_208_cache_final_reference": {
+        "files": 42493,
+        "logical_bytes": 23286000087,
+        "allocated_bytes": 23350972416
+      },
+      "temporary_output_note": "new pending segment published through original rename after successful close; no remaining pending segments; no transient-directory peak sampled; final snapshot not peak upper bound"
+    }
+  },
+  "historical_208_reference": {
+    "source_commit": "585f31e3ef5437e82c90329310523dc7fcd43866",
+    "binary_sha256": "22b75de1331e07807d018978d6610d7547244f59b544b93385066642cd47d666",
+    "gnu": {
+      "wall_seconds": 276.02,
+      "user_cpu_seconds": 269.27,
+      "system_cpu_seconds": 2.71,
+      "max_rss_kib": 153428,
+      "file_system_input_blocks": 21892176,
+      "file_system_output_blocks": 216,
+      "major_faults": 0,
+      "minor_faults": 452784,
+      "swaps": 0,
+      "exit_code": 0,
+      "io_unit": "Linux ru_inblock/ru_oublock 512-byte blocks; process lifetime; not rchar or logical payload bytes"
+    },
+    "primary": {
+      "core_push": {
+        "calls": 208688,
+        "completed": 208688,
+        "max_ns": 7503915,
+        "ns": 94404580072,
+        "rows": {}
+      },
+      "dependencies": {
+        "calls": 208688,
+        "completed": 208688,
+        "max_ns": 18055715553,
+        "ns": 18061011478,
+        "rows": {}
+      },
+      "identity": {
+        "calls": 208688,
+        "completed": 208688,
+        "max_ns": 3426,
+        "ns": 5479075,
+        "rows": {}
+      },
+      "into_owned": {
+        "calls": 208688,
+        "completed": 208688,
+        "max_ns": 24616,
+        "ns": 85366671,
+        "rows": {}
+      },
+      "main_drain": {
+        "calls": 208689,
+        "completed": 208689,
+        "max_ns": 38168157,
+        "ns": 21623181282,
+        "rows": {
+          "canonical": 208661,
+          "group": 208638,
+          "input": 208688,
+          "observation": 806966,
+          "pm_report": 737740,
+          "pm_step_binding": 1812556,
+          "report": 11628,
+          "source_binding": 3
+        }
+      },
+      "prepare": {
+        "calls": 208688,
+        "completed": 208688,
+        "max_ns": 13638481455,
+        "ns": 111829517192,
+        "rows": {}
+      }
+    },
+    "nested": {
+      "candidate_open": {
+        "calls": 15,
+        "completed": 15,
+        "max_ns": 213271,
+        "ns": 2871546,
+        "rows": {}
+      },
+      "candidate_page": {
+        "calls": 33,
+        "completed": 33,
+        "max_ns": 8168043756,
+        "ns": 110146650555,
+        "rows": {}
+      }
+    },
+    "driver_times": {
+      "core_drop_ns": 8337184,
+      "into_core_and_reader_release_ns": 124334,
+      "open_ns": 250652,
+      "returned_objects_drop_ns": 29478485475,
+      "summary_ns": 256927349
+    },
+    "note": "historical conditional reference only; no old baseline replay rerun or controlled paired comparison"
+  },
+  "recommendation": "容量下降约55%，可保留为后续明确容量优先且接受写入/消费取舍的候选；本次重放288.75秒/RSS174452KiB较历史276.02秒/153428KiB更高，不采用为自动生产默认，不称稳定提速或完整研究预算。",
+  "limitations": [
+    "Canonical subtypes measure whole original stored payload bytes including wrapping/lineage, not field or lineage-only bytes or compressed disk shares.",
+    "Only a joint 8MiB payload page/ZSTD9 candidate; individual effects and effective compression window not isolated. The known cross-row-group examples only prove repeated lineage exists, not that this candidate used their repetition.",
+    "Only three actual serial runs, no old baseline rerun/matrix/prepare/extra material scan. Historical time comparisons not controlled or stable ratios.",
+    "Same-pass byte comparison uses original observe/minimal EOF closure, not full next_row I/O/error path; phase3 original replay covers actual consumption.",
+    "New physical corruption need not fail at same business row; production parsing/error/EOF unchanged, PR151 self-read proof not restored.",
+    "First build cache baseline missing; complete cache growth cannot be exactly confirmed; known-stage net changes and actual-run cache stability separately recorded, no rerun to repair evidence.",
+    "No transient directory peak or actual data-page size/effective window measured; final candidate size and GNU process resources exact within stated units.",
+    "Known-market observation width grows, twelve-minute compression does not close 15day/continuous3day/multi-candidate resource budget, no account/profit/risk acceptance."
+  ]
+}
