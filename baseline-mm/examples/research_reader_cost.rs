@@ -365,6 +365,20 @@ impl Summary {
         "historical_anchor_repair_inputs":self.repair_inputs,"historical_anchor_repair_members":self.repair_members,"end_of_input_count":self.end_inputs,"observations":self.observations,"observations_per_group":self.group_widths,"groups_per_replay_return":self.groups_per_return,
         "entry_call_timings_by_return_kind":self.timings,"entry_call_timings_by_returned_input_dependency_presence":self.dependency_return_timings,"entry_calls_including_eof":self.call_ordinal,"slowest_calls":self.slow,"slow_calls_omitted":self.call_ordinal.saturating_sub(RETAIN as u64),"consume_summary_ns":self.consume_summary_ns,
         "input_identity_order_sha256":format!("{:x}",self.input_digest.0.finalize()),"group_fact_identity_time_quality_order_sha256":format!("{:x}",self.group_digest.0.finalize()),"group_delivery_time_order_sha256":format!("{:x}",self.delivery_digest.0.finalize())});
+        // group未暴露Input依赖；非Input/EOF也没有对应的输入引用计数。
+        // 统一计时调用传入的空数组不能在最终输出中冒充实际零依赖。
+        for call in value["slowest_calls"].as_array_mut().unwrap() {
+            if matches!(
+                call["kind"].as_str(),
+                Some("group" | "stored_non_input" | "eof")
+            ) {
+                call["dependency_count"] = Value::Null;
+                call["dependency_positions_first_eight"] = Value::Null;
+            }
+        }
+        value["slow_call_dependency_fields_note"] = json!(
+            "依赖字段只对record/replay返回Input计量；group未暴露、非Input/EOF不适用，均为null，不表示零依赖。"
+        );
         // 未由此公开入口暴露的计数不能用零冒充实际观察。
         let unmeasured = match mode {
             Mode::Record => vec![
@@ -590,6 +604,34 @@ mod tests {
             b["replay_applied_prefix"]["next_input_position"]
         );
         assert_eq!(a["summary"]["end_of_input_count"], 1);
+        for call in g["summary"]["slowest_calls"].as_array().unwrap() {
+            assert!(call["dependency_count"].is_null());
+            assert!(call["dependency_positions_first_eight"].is_null());
+        }
+    }
+    #[test]
+    fn slow_input_dependency_counts_remain_known_zero_and_one() {
+        // 只验证研究汇总的编码，不伪造归约输入或业务状态。
+        let dependency = CanonicalInputRecordRefV1 {
+            input_stream_id: "summary-reference".into(),
+            input_position: 0,
+        };
+        for mode in [Mode::Record, Mode::Replay] {
+            let mut summary = Summary::default();
+            summary.call("chainlink_spot", Some(1), 1, &[]);
+            summary.call("anchor_rule", Some(2), 2, std::slice::from_ref(&dependency));
+            summary.call("eof", None, 3, &[]);
+            let value = summary.finish(mode);
+            let calls = value["slowest_calls"].as_array().unwrap();
+            let by_kind = |kind| calls.iter().find(|v| v["kind"] == kind).unwrap();
+            assert_eq!(by_kind("chainlink_spot")["dependency_count"], 0);
+            assert_eq!(by_kind("anchor_rule")["dependency_count"], 1);
+            assert_eq!(
+                by_kind("anchor_rule")["dependency_positions_first_eight"],
+                json!([0])
+            );
+            assert!(by_kind("eof")["dependency_count"].is_null());
+        }
     }
     #[test]
     fn finite_prefix_without_end_keeps_each_original_entry_eof_contract() {
