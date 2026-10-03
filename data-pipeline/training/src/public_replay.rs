@@ -35,6 +35,8 @@ struct HistoricalIngressV1 {
     pub source: HistoricalSourceV1,
     pub source_order_key: Vec<u8>,
     pub ingress: DptIngressV1,
+    #[serde(default)]
+    pub initialization_binding: Option<SourceArtifactBindingV1>,
 }
 /// 分来源外排后归并只比较六个首项；深度快照/更新必须使用同一个 BinanceDepth 来源。
 pub struct HistoricalMergeV1 {
@@ -48,6 +50,7 @@ pub struct HistoricalMergeV1 {
     twap_positions: Vec<u64>,
     page_rows: usize,
     page_bytes: usize,
+    last_initialization_binding: Option<SourceArtifactBindingV1>,
 }
 impl HistoricalMergeV1 {
     fn prepare(
@@ -99,7 +102,11 @@ impl HistoricalMergeV1 {
             twap_positions: Vec::new(),
             page_rows: config.batch_rows,
             page_bytes: config.max_run_bytes,
+            last_initialization_binding: None,
         })
+    }
+    pub fn initialization_binding(&self) -> Option<&SourceArtifactBindingV1> {
+        self.last_initialization_binding.as_ref()
     }
     pub fn sort_metrics(&self) -> &[crate::SortMetrics] {
         &self.sort_metrics
@@ -123,6 +130,7 @@ impl HistoricalMergeV1 {
             .map(|(i, _)| i);
         let Some(i) = chosen else { return Ok(None) };
         let entry = self.heads[i].take().unwrap();
+        self.last_initialization_binding = entry.initialization_binding;
         self.heads[i] = self.cursors[i]
             .next_row()?
             .map(|r| serde_json::from_slice(r.payload()))
@@ -536,11 +544,24 @@ pub fn prepare_historical_rows_v1<I>(
 where
     I: Iterator<Item = RecordingResult<TypedRawRowV2>>,
 {
+    prepare_historical_tagged_rows_v1(root, config, stream, || {
+        Ok(read()?.map(|row| row.map(|row| (row, None))))
+    })
+}
+fn prepare_historical_tagged_rows_v1<I>(
+    root: &Path,
+    config: &crate::canonical_run::CanonicalRunConfig,
+    stream: String,
+    mut read: impl FnMut() -> RecordingResult<I>,
+) -> RecordingResult<HistoricalMergeV1>
+where
+    I: Iterator<Item = RecordingResult<(TypedRawRowV2, Option<SourceArtifactBindingV1>)>>,
+{
     use crate::canonical_run::{CaptureCoordinate, rank_epochs, update_epoch_start};
     let mut pm = BTreeMap::new();
     let mut depth = BTreeMap::new();
     for row in read()? {
-        let row = row?;
+        let (row, _) = row?;
         use data_pipeline_core::typed_raw::TypedRawRow;
         let (starts, kind, epoch, coordinate) = match &row {
             TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row)) => (
@@ -586,7 +607,7 @@ where
     let pm = rank_epochs(pm, "polymarket_market")?;
     let depth = rank_epochs(depth, "binance_depth")?;
     let entries = read()?.map(|row| -> RecordingResult<HistoricalIngressV1> {
-        let row = row?;
+        let (row, initialization_binding) = row?;
         let evidence = source_evidence_v3_from_typed_raw_v2(&row)?;
         let source = match evidence.source_kind {
             CanonicalSourceKindV2::PolymarketMarketMetadata => HistoricalSourceV1::Metadata,
@@ -640,6 +661,7 @@ where
         Ok(HistoricalIngressV1 {
             source,
             source_order_key: key,
+            initialization_binding,
             ingress: DptIngressV1::Message {
                 row,
                 source_evidence: evidence,
@@ -665,20 +687,43 @@ pub fn prepare_historical_files_in_range_v1(
     stream: String,
     received_range: Option<std::ops::Range<i64>>,
 ) -> RecordingResult<HistoricalMergeV1> {
-    prepare_historical_rows_v1(root, config, stream, || {
-        Ok(TypedFileRowsV1 {
-            files: files.iter(),
-            stream: None,
-            pending: Vec::new().into_iter(),
-            rows: config.decode_batch_rows,
-            bytes: config.max_decode_batch_bytes,
-        }
-        .filter(|row| match (row, &received_range) {
-            (Ok(row), Some(range)) => source_evidence_v3_from_typed_raw_v2(row)
-                .map(|source| range.contains(&source.received_at_utc_ms))
-                .unwrap_or(true),
-            _ => true,
-        }))
+    prepare_historical_files_with_initialization_v1(
+        root,
+        files,
+        config,
+        stream,
+        received_range,
+        None,
+    )
+}
+pub fn prepare_historical_files_with_initialization_v1(
+    root: &Path,
+    files: &[&crate::ValidatedDirectSourceParquetFileV3],
+    config: &crate::canonical_run::CanonicalRunConfig,
+    stream: String,
+    received_range: Option<std::ops::Range<i64>>,
+    initialization: Option<&crate::historical_initialization::MetadataInitializationSelectionV1>,
+) -> RecordingResult<HistoricalMergeV1> {
+    prepare_historical_tagged_rows_v1(root, config, stream, || {
+        let initial = initialization.into_iter().flat_map(|selection| {
+            selection.read(config.decode_batch_rows, config.max_decode_batch_bytes)
+        });
+        Ok(initial.chain(
+            TypedFileRowsV1 {
+                files: files.iter(),
+                stream: None,
+                pending: Vec::new().into_iter(),
+                rows: config.decode_batch_rows,
+                bytes: config.max_decode_batch_bytes,
+            }
+            .filter(|row| match (row, &received_range) {
+                (Ok(row), Some(range)) => source_evidence_v3_from_typed_raw_v2(row)
+                    .map(|source| range.contains(&source.received_at_utc_ms))
+                    .unwrap_or(true),
+                _ => true,
+            })
+            .map(|row| row.map(|row| (row, None))),
+        ))
     })
 }
 struct TypedFileRowsV1<'a> {

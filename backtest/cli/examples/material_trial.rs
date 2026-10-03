@@ -299,6 +299,8 @@ fn run_trial(
         }
     };
     report["input_set_identity_sha256"] = json!(prepared.input_set_identity_sha256);
+    report["source_identity_sha256"] = json!(prepared.source_identity_sha256);
+    report["initialization"] = json!(prepared.initialization);
     report["source_manifests"] = json!(prepared.source_manifests);
     report["prepared_markets"] = json!(prepared.markets.keys().collect::<Vec<_>>());
     report["hidden_preparation"] = json!(prepared.hidden);
@@ -315,17 +317,44 @@ fn run_trial(
         )?;
         let mut markets = BTreeMap::<String, MarketStats>::new();
         let mut groups = 0u64;
+        let mut initialization_groups = 0u64;
+        let mut research_groups_with_initialization_dependencies = 0u64;
+        let mut initialization_markets = BTreeMap::<String, MarketStats>::new();
         for delivered in source {
             let delivered = delivered.map_err(|e| format!("{e:?}"))?;
-            groups += 1;
+            let group = &delivered.prepared.group;
+            let initial = prepared
+                .initialization
+                .group_is_initialization(&group.member_input_positions);
+            if initial {
+                initialization_groups += 1;
+            } else {
+                groups += 1;
+                if prepared.initialization.group_has_initialization_dependency(
+                    &group.member_input_positions,
+                    group.closed_at_input_position,
+                ) || group.observations.iter().any(|o| {
+                    prepared
+                        .initialization
+                        .observation_has_initialization_dependency(o)
+                }) {
+                    research_groups_with_initialization_dependencies += 1;
+                }
+            }
             for o in &delivered.prepared.group.observations {
-                markets
-                    .entry(o.market.condition_id.0.clone())
-                    .or_default()
-                    .observe(o, delivered.delivered_at_utc_ms);
+                (if initial {
+                    &mut initialization_markets
+                } else {
+                    &mut markets
+                })
+                .entry(o.market.condition_id.0.clone())
+                .or_default()
+                .observe(o, delivered.delivered_at_utc_ms);
             }
         }
-        Ok(json!({"public_groups":groups,"markets":markets}))
+        Ok(
+            json!({"public_groups":groups,"markets":markets,"initialization_public_groups":initialization_groups,"initialization_markets":initialization_markets,"research_groups_with_initialization_dependencies":research_groups_with_initialization_dependencies}),
+        )
     })();
     report["statistics_measurement"] =
         ProcessCounters::read()?.since(before, hz, began.elapsed().as_secs_f64());
@@ -359,6 +388,39 @@ mod tests {
         bid.value = None;
         bid.quality = MarketDataQuality::UnknownNotObserved;
         assert_eq!(best_bid(&bid), "unavailable:UnknownNotObserved");
+    }
+
+    #[test]
+    fn initialization_sources_do_not_enter_research_observation_denominators() {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut config, _) = common::setup(temp.path());
+        common::initialize_at(&mut config, common::BASE + 1000, &[common::FIRST]);
+        let report_path = temp.path().join("trial.json");
+        run_trial(config.preparation, &report_path).unwrap();
+        let report: Value = serde_json::from_slice(&std::fs::read(report_path).unwrap()).unwrap();
+        let stats = &report["statistics"];
+        assert_eq!(stats["initialization_public_groups"], 1);
+        assert_eq!(stats["public_groups"], 7);
+        assert_eq!(
+            stats["initialization_markets"][common::FIRST]["observations"],
+            1
+        );
+        assert!(
+            stats["markets"][common::FIRST]["first_visible_at"]
+                .as_i64()
+                .unwrap()
+                >= common::BASE + 1000
+        );
+        assert!(
+            stats["research_groups_with_initialization_dependencies"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert_ne!(
+            report["source_identity_sha256"],
+            report["input_set_identity_sha256"]
+        );
     }
 
     #[test]

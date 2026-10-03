@@ -72,3 +72,25 @@ cargo run -p backtest-cli --locked --offline -- \
 `tests/historical.rs` 用实际采集 Parquet 写入器、每日清单准入和完整生产入口检验：同毫秒双完整组、迟到公开盘口与隐藏成交隔离、计算期间更新报价后冻结发送保持原值、两个市场连续账户、一侧成交后撤单仍在途、范围尾部未完成计算、最后策略回调之后的真实成交/费用/返佣进入最终返回和result.json、立即 Exit 和原错误停止。
 
 `cli/tests/command.rs` 实际启动 `backtest-cli` 子进程，组合 `ComplementaryPairV1`，核对文件参数、Decimal/统计参数及显式 `false` 覆盖，并读取真实启动元数据中的完整有效参数。工作区回归遵守根 `AGENTS.md` 的固定命令和具名 UTC 测试跳过规则。
+
+## 显式市场元数据初始化与经营起点
+
+`HistoricalPreparationConfigV1::metadata_initialization` 为可选配置，省略时沿原准备、来源身份与宿主触发。启用时提供 `MetadataInitializationConfigV1`：
+
+- `files` 指定原清单及其中的元数据相对文件路径；只提取选中文件事实，沿 `open_finite_public_input_v1` 验证身份、Footer、模式和有界解码，不准入前一日其他文件。
+- `markets` 指定目标 `condition_id` 及起始真实 Snapshot 的 `snapshot_source_message_id`；消息身份沿原 DPT 计算，物理行号不代替身份。
+- `received_start_utc_ms`、`received_end_utc_ms` 对应同一准备范围，`purpose` 保留调用方的已批准初始化用途。
+
+DPT先在所选文件定位指定Snapshot，再分页读取每个目标市场从该Snapshot的原来源排序位置开始、接收时间严格早于研究起点的完整Existing片段。Snapshot、StateTransition以及原轮询/终态/汇总记录均交原归约；中间记录不跳过。同市场多个合法Snapshot选择取片段并集，以最早指定Snapshot为起点，每个指定Snapshot仍分别核验。重复文件/目标配置不重复注入同一物理记录，原文件本身重复事实仍保留。起始消息错误、文件身份错误或原业务依赖缺失在对应原边界失败，不替换Snapshot。此选择排除AnchorRule，范围外盘口、价格和TWAP仍未开放。
+
+选中元数据与研究输入共用原历史排序及归约，完整输入、无输出输入和来源绑定由原公共记录保存。`historical-initialization.json` 只保存来源文件事实、初始化输入位置和消息身份，不保存第二份市场状态。正常封口后仍丢弃准备core，沿原 `PublicReplayV1` 从空状态重放，再从同一稳定前缀准备隐藏材料。Existing元数据缺失的collector epoch保持缺失，公开可见规则不改变，初始化不制造隐藏时间。
+
+`input_set_identity_sha256` 继续只描述原每日准入集合。启用初始化时，实际 `source_identity_sha256` 使用 `historical-metadata-initialization-source-v1` 组合原每日集合、初始化原清单及文件事实、目标Snapshot选择和所属范围/用途；组合不包含本机物理根路径。SIM来源身份使用此实际组合摘要，无初始化时与旧集合摘要一致。排序版本仍来自原DPT实现，不能用来源组合版本替代排序版本。
+
+宿主沿同一driver、会话、Ledger及策略对象运行：严格早于经营起点的真实公开交付和隐藏桶仍登记、推进市场及消费原自动义务，但不产生经营dirty、不消耗计算序列、不调用策略或分派、不进行显式结算协调。起点处不封口或重新开户；下一真实公开组或原合法义务进入区间后按原规则经营，hidden-only消费不新增策略触发。同毫秒原义务闭合继续保留。原零金额自动 `MakerMarketFinalized` 事实仍保存在NOE/账户状态，账户读取不能被当作收益样本分母。
+
+公开 `Sequence` 延迟按包含初始化的完整公共流 `group_position` 读取；调用方必须显式提供所有项，不补零或平移。计算三项序列仅按实际研究计算从零读取。初始化来源如果经原可见规则及显式延迟到达起点之后，届时才更新状态并按原合法事件触发，不能倒灌或永久忽略。新运行报告的 `delivery_summary` 分别汇总起点前与区间内实际交付的组位置、时间和来源类别，不存逐决策账本；旧调用省略该报告字段。
+
+`material_trial` 始终只准备与观察，不创建账户。统计以组 `member_input_positions` 判断来源；全部成员来自初始化的组计入 `initialization_public_groups/initialization_markets`，研究成员组计入原 `public_groups/markets`，跨来源成员/闭合位置及观测中的初始化直接来源另计 `research_groups_with_initialization_dependencies`。初始化观测不进入研究首见时间或字段缺失分母；`prepared_markets` 是身份目录，不能据其出现推断完整研究窗口已覆盖。
+
+`tests/initialization.rs` 使用真实元数据边界和标明用途的工程账户夹具，覆盖完整片段、单文件选择、重复配置、来源错误、删除原依赖、分页重放、显式非恒定延迟、经营起点、晚到初始化、早于接收起点的隐藏源时间、原同毫秒闭合和零金额生命周期。材料试制工具另验证初始化与研究观测分母。完整真实五分钟材料及资源测量在工程交付后的研究步骤执行，工程样例通过不表示材料或盈利验收。

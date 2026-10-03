@@ -9,6 +9,7 @@ pub mod gate_a;
 mod gate_a_publication;
 mod gate_a_sim_adapter;
 pub mod hidden_preparation;
+pub mod historical_initialization;
 pub mod observation;
 pub mod public_input;
 pub mod public_online;
