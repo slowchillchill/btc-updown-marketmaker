@@ -92,7 +92,7 @@ fn fact_summary<T>(fact: &ObservedFactV1<T>, at: i64) -> Value {
     json!({"value_present":fact.value.is_some(),"quality":fact.quality,"usable_fresh_or_stale":usable(fact),
         "received_at_utc_ms":received(fact,at),"direct_anchors":fact.direct_anchors})
 }
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 struct SpotUpdate {
     group_position: u64,
     first_visible_at_utc_ms: i64,
@@ -239,17 +239,22 @@ impl History {
         )
     }
     fn window(&self, cutoff: i64, seconds: i64) -> Result<Value> {
+        Ok(self.window_with_pairs(cutoff, seconds)?.0)
+    }
+    fn window_with_pairs(&self, cutoff: i64, seconds: i64) -> Result<(Value, Vec<Value>)> {
         let from = cutoff - seconds * 1000;
         let mut pairs = 0u64;
         let mut zero_time = 0u64;
         let mut backward = 0u64;
         let mut squared = Decimal::ZERO;
         let mut elapsed = 0i64;
-        let mut prior: Option<(i64, Decimal)> = None;
-        for u in self
+        let mut prior: Option<(usize, i64, Decimal)> = None;
+        let mut pair_refs = Vec::new();
+        for (index, u) in self
             .updates
             .iter()
-            .filter(|u| u.first_visible_at_utc_ms <= cutoff)
+            .enumerate()
+            .filter(|(_, u)| u.first_visible_at_utc_ms <= cutoff)
         {
             let Some(p) = u.price()? else {
                 prior = None;
@@ -262,12 +267,19 @@ impl History {
             if t < from || t > cutoff {
                 continue;
             }
-            if let Some((t0, p0)) = prior {
+            if let Some((i0, t0, p0)) = prior {
+                let change_squared = (t >= t0).then(|| (p - p0) * (p - p0));
+                pair_refs.push(json!({"left_update_index":i0,"right_update_index":index,
+                    "left_group_position":self.updates[i0].group_position,"right_group_position":u.group_position,
+                    "elapsed_ms":t-t0,"classification":if t<t0 {"backward"}else if t==t0 {"same_time"}else {"positive_time"},
+                    "included_in_squared_sum":t>=t0,
+                    "squared_price_change":change_squared.map(|v|v.normalize().to_string()),
+                    "positive_elapsed_ms":(t-t0).max(0)}));
                 if t < t0 {
                     backward += 1;
                 } else {
                     pairs += 1;
-                    squared += (p - p0) * (p - p0);
+                    squared += change_squared.unwrap();
                     if t == t0 {
                         zero_time += 1;
                     } else {
@@ -275,15 +287,16 @@ impl History {
                     }
                 }
             }
-            prior = Some((t, p));
+            prior = Some((index, t, p));
         }
-        Ok(
+        Ok((
             json!({"window_seconds":seconds,"both_price_endpoints_received_inside_window":true,
             "price_pairs":pairs,"same_received_time_pairs":zero_time,"received_time_backward_pairs":backward,
             "squared_price_change_sum":squared.normalize().to_string(),"positive_pair_elapsed_ms":elapsed,
             "squared_change_per_second_description":if elapsed>0 && zero_time==0 && backward==0 {Some((squared*Decimal::from(1000)/Decimal::from(elapsed)).normalize().to_string())}else{None},
             "hold_coverage":self.integral(from,cutoff,cutoff)?,"note":"同毫秒不同来源保留为零时长价格对；不据此产生sigma或initial_sigma，描述量不是拟合参数。"}),
-        )
+            pair_refs,
+        ))
     }
 }
 fn reference(o: &MarketBusinessObservationV1) -> Value {
@@ -658,10 +671,16 @@ fn analyze(config: &Config) -> Result<Value> {
         "method_note":"一次原reader遍历，各市场按自身八截止和右边界冻结；窗前合法历史与窗内分母分列。事后同condition标签质量/来源另存，不回填特征、不计算概率/参数/收益。"}),
     )
 }
+#[path = "research_causal_input/window_statistics.rs"]
+mod window_statistics;
+
 fn main() -> Result<()> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
+    if args.len() == 3 && args[0] == "--retained-windows" {
+        return window_statistics::run(&args[1], &args[2]);
+    }
     if args.len() != 2 {
-        return Err("用法 research_causal_input <CONFIG_JSON> <REPORT_JSON>".into());
+        return Err("用法 research_causal_input <CONFIG_JSON> <REPORT_JSON> 或 --retained-windows <INPUT_JSON> <REPORT_JSON>".into());
     }
     let config: Config = serde_json::from_slice(&fs::read(&args[0])?)?;
     let before = fs::read_to_string("/proc/self/io")?;
