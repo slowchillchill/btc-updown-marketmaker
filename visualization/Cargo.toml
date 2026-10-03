@@ -1,0 +1,27 @@
+[package]
+name = "visualization"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+axum = "=0.8.9"
+bytes = "=1.12.0"
+contracts = { path = "../contracts" }
+data-pipeline-training = { path = "../data-pipeline/training" }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = { version = "=1.0.150", features = ["arbitrary_precision"] }
+tokio = { version = "=1.52.3", features = ["macros", "rt-multi-thread", "net", "signal"] }
+tower-http = { version = "=0.6.11", features = ["fs"] }
+
+[dev-dependencies]
+backtest = { path = "../backtest" }
+data-collect = { path = "../data-collect" }
+data-pipeline-core = { path = "../data-pipeline/core" }
+ledger = { path = "../ledger" }
+shared-run = { path = "../shared-run" }
+sim-system = { path = "../sim-system", features = ["shared-execution"] }
+rust_decimal = { version = "=1.42.1", default-features = false, features = ["std"] }
+sha2 = "=0.10.9"
+tempfile = "=3.27.0"
+tower = { version = "=0.5.3", features = ["util"] }
