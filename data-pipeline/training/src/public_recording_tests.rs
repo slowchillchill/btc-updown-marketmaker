@@ -1596,3 +1596,6 @@ fn stored_pm_reports_keep_original_schema_bytes_and_positions_for_all_dispositio
 
 #[path = "public_replay_cost_tests.rs"]
 mod replay_cost_tests;
+
+#[path = "public_recording_layout_tests.rs"]
+mod layout_tests;

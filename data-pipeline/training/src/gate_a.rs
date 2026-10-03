@@ -462,6 +462,14 @@ impl SequentialCaptureWriter {
         self.sync_batches = false;
         self.logical_digest = None;
     }
+    /// 测试试验只读取原 push 已维护的行缓冲峰值，不改变关闭责任。
+    #[cfg(test)]
+    pub(crate) fn write_buffer_peaks(&self) -> (usize, usize) {
+        (
+            self.metrics.peak_write_buffer_rows,
+            self.metrics.peak_write_buffer_bytes,
+        )
+    }
     pub(crate) fn close_segment(mut self) -> Result<PathBuf, GateAError> {
         self.write_batch(false)?;
         self.writer
