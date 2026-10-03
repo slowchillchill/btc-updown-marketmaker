@@ -1,0 +1,4758 @@
+[
+  [
+    {
+      "schema_version": "public-observation-v1",
+      "market": {
+        "condition_id": "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "clob_market_id": "3195576",
+        "window": {
+          "start_at_utc_ms": 20000,
+          "end_at_utc_ms": 30000
+        }
+      },
+      "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+      "group_position": 1,
+      "visible_prefix": {
+        "input_stream_id": "core-test",
+        "next_input_position": 2
+      },
+      "assets": [
+        {
+          "asset": {
+            "token_id": "3",
+            "outcome": {
+              "index": 1,
+              "label": "DOWN"
+            }
+          },
+          "bids": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "asks": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "best_bid_ask": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "valuation_best_bid": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "tick": {
+            "value": "0.01",
+            "quality": "fresh",
+            "direct_anchors": [
+              {
+                "field_path": "tick",
+                "position": {
+                  "input_stream_id": "core-test",
+                  "closed_at_input_position": 0,
+                  "fact_ordinal": 1
+                },
+                "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000
+              }
+            ],
+            "dependency_frontier": {
+              "input_stream_id": "core-test",
+              "next_input_position": 1
+            }
+          },
+          "public_trade": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          }
+        },
+        {
+          "asset": {
+            "token_id": "20",
+            "outcome": {
+              "index": 0,
+              "label": "UP"
+            }
+          },
+          "bids": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "asks": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "best_bid_ask": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "valuation_best_bid": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "tick": {
+            "value": "0.01",
+            "quality": "fresh",
+            "direct_anchors": [
+              {
+                "field_path": "tick",
+                "position": {
+                  "input_stream_id": "core-test",
+                  "closed_at_input_position": 0,
+                  "fact_ordinal": 2
+                },
+                "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000
+              }
+            ],
+            "dependency_frontier": {
+              "input_stream_id": "core-test",
+              "next_input_position": 1
+            }
+          },
+          "public_trade": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          }
+        }
+      ],
+      "lifecycle": {
+        "value": {
+          "mapping": "KNOWN",
+          "value": "prefetched"
+        },
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "lifecycle",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 0,
+              "fact_ordinal": 3
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 1
+        }
+      },
+      "active": {
+        "value": true,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "active",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 0,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 1
+        }
+      },
+      "closed": {
+        "value": false,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "closed",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 0,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 1
+        }
+      },
+      "accepting_orders": {
+        "value": true,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "accepting_orders",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 0,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 1
+        }
+      },
+      "terminal": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "official_anchor": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "settlement_reference": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "temporary_reference": null,
+      "effective_reference": "Missing",
+      "chainlink_spot": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "chainlink_twap_thirty": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "chainlink_twap_sixty": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "binance_depth": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "binance_trade": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "group_events": [
+        {
+          "position": {
+            "input_stream_id": "core-test",
+            "closed_at_input_position": 1,
+            "fact_ordinal": 0
+          },
+          "payload": {
+            "MarketFact": {
+              "market": {
+                "condition_id": "0x2222222222222222222222222222222222222222222222222222222222222222",
+                "clob_market_id": "3195577",
+                "window": {
+                  "start_at_utc_ms": 20000,
+                  "end_at_utc_ms": 30000
+                }
+              },
+              "payload": {
+                "FixedIdentity": {
+                  "assets": [
+                    {
+                      "token_id": "3",
+                      "outcome": {
+                        "index": 1,
+                        "label": "DOWN"
+                      }
+                    },
+                    {
+                      "token_id": "20",
+                      "outcome": {
+                        "index": 0,
+                        "label": "UP"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "source_refs": [
+            {
+              "input_stream_id": "core-test",
+              "input_position": 1
+            }
+          ],
+          "lineage": {
+            "canonical_rule_version": "rule-v1",
+            "source_evidence": [
+              {
+                "source_kind": "polymarket_market_metadata",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_native_identity": {
+                  "kind": "SEMANTIC_EVIDENCE_SHA256",
+                  "sha256": "b272d474636284ddc0f22936b623d31a65b9cd5c30a8f8c81b690bfd0cfb6295"
+                },
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000,
+                "collector_admission": null
+              }
+            ]
+          },
+          "direct_time": {
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          },
+          "dependency_time": {
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          },
+          "quality": {
+            "availability": "fresh",
+            "resync": "NOT_REQUIRED"
+          },
+          "direct_sources": [
+            {
+              "source_kind": "polymarket_market_metadata",
+              "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+              "source_native_identity": {
+                "kind": "SEMANTIC_EVIDENCE_SHA256",
+                "sha256": "b272d474636284ddc0f22936b623d31a65b9cd5c30a8f8c81b690bfd0cfb6295"
+              },
+              "source_event_at_utc_ms": null,
+              "received_at_utc_ms": 10000,
+              "collector_admission": null
+            }
+          ]
+        },
+        {
+          "position": {
+            "input_stream_id": "core-test",
+            "closed_at_input_position": 1,
+            "fact_ordinal": 1
+          },
+          "payload": {
+            "MarketFact": {
+              "market": {
+                "condition_id": "0x2222222222222222222222222222222222222222222222222222222222222222",
+                "clob_market_id": "3195577",
+                "window": {
+                  "start_at_utc_ms": 20000,
+                  "end_at_utc_ms": 30000
+                }
+              },
+              "payload": {
+                "InitialTick": {
+                  "asset": {
+                    "token_id": "3",
+                    "outcome": {
+                      "index": 1,
+                      "label": "DOWN"
+                    }
+                  },
+                  "tick_size_pusd_per_share": "0.01"
+                }
+              }
+            }
+          },
+          "source_refs": [
+            {
+              "input_stream_id": "core-test",
+              "input_position": 1
+            }
+          ],
+          "lineage": {
+            "canonical_rule_version": "rule-v1",
+            "source_evidence": [
+              {
+                "source_kind": "polymarket_market_metadata",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_native_identity": {
+                  "kind": "SEMANTIC_EVIDENCE_SHA256",
+                  "sha256": "b272d474636284ddc0f22936b623d31a65b9cd5c30a8f8c81b690bfd0cfb6295"
+                },
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000,
+                "collector_admission": null
+              }
+            ]
+          },
+          "direct_time": {
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          },
+          "dependency_time": {
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          },
+          "quality": {
+            "availability": "fresh",
+            "resync": "NOT_REQUIRED"
+          },
+          "direct_sources": [
+            {
+              "source_kind": "polymarket_market_metadata",
+              "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+              "source_native_identity": {
+                "kind": "SEMANTIC_EVIDENCE_SHA256",
+                "sha256": "b272d474636284ddc0f22936b623d31a65b9cd5c30a8f8c81b690bfd0cfb6295"
+              },
+              "source_event_at_utc_ms": null,
+              "received_at_utc_ms": 10000,
+              "collector_admission": null
+            }
+          ]
+        },
+        {
+          "position": {
+            "input_stream_id": "core-test",
+            "closed_at_input_position": 1,
+            "fact_ordinal": 2
+          },
+          "payload": {
+            "MarketFact": {
+              "market": {
+                "condition_id": "0x2222222222222222222222222222222222222222222222222222222222222222",
+                "clob_market_id": "3195577",
+                "window": {
+                  "start_at_utc_ms": 20000,
+                  "end_at_utc_ms": 30000
+                }
+              },
+              "payload": {
+                "InitialTick": {
+                  "asset": {
+                    "token_id": "20",
+                    "outcome": {
+                      "index": 0,
+                      "label": "UP"
+                    }
+                  },
+                  "tick_size_pusd_per_share": "0.01"
+                }
+              }
+            }
+          },
+          "source_refs": [
+            {
+              "input_stream_id": "core-test",
+              "input_position": 1
+            }
+          ],
+          "lineage": {
+            "canonical_rule_version": "rule-v1",
+            "source_evidence": [
+              {
+                "source_kind": "polymarket_market_metadata",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_native_identity": {
+                  "kind": "SEMANTIC_EVIDENCE_SHA256",
+                  "sha256": "b272d474636284ddc0f22936b623d31a65b9cd5c30a8f8c81b690bfd0cfb6295"
+                },
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000,
+                "collector_admission": null
+              }
+            ]
+          },
+          "direct_time": {
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          },
+          "dependency_time": {
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          },
+          "quality": {
+            "availability": "fresh",
+            "resync": "NOT_REQUIRED"
+          },
+          "direct_sources": [
+            {
+              "source_kind": "polymarket_market_metadata",
+              "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+              "source_native_identity": {
+                "kind": "SEMANTIC_EVIDENCE_SHA256",
+                "sha256": "b272d474636284ddc0f22936b623d31a65b9cd5c30a8f8c81b690bfd0cfb6295"
+              },
+              "source_event_at_utc_ms": null,
+              "received_at_utc_ms": 10000,
+              "collector_admission": null
+            }
+          ]
+        },
+        {
+          "position": {
+            "input_stream_id": "core-test",
+            "closed_at_input_position": 1,
+            "fact_ordinal": 3
+          },
+          "payload": {
+            "MarketFact": {
+              "market": {
+                "condition_id": "0x2222222222222222222222222222222222222222222222222222222222222222",
+                "clob_market_id": "3195577",
+                "window": {
+                  "start_at_utc_ms": 20000,
+                  "end_at_utc_ms": 30000
+                }
+              },
+              "payload": {
+                "LifecycleTransition": {
+                  "previous_state": null,
+                  "current_state": {
+                    "mapping": "KNOWN",
+                    "value": "prefetched"
+                  },
+                  "assets": [
+                    {
+                      "token_id": "3",
+                      "outcome": {
+                        "index": 1,
+                        "label": "DOWN"
+                      }
+                    },
+                    {
+                      "token_id": "20",
+                      "outcome": {
+                        "index": 0,
+                        "label": "UP"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "source_refs": [
+            {
+              "input_stream_id": "core-test",
+              "input_position": 1
+            }
+          ],
+          "lineage": {
+            "canonical_rule_version": "rule-v1",
+            "source_evidence": [
+              {
+                "source_kind": "polymarket_market_metadata",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_native_identity": {
+                  "kind": "SEMANTIC_EVIDENCE_SHA256",
+                  "sha256": "b272d474636284ddc0f22936b623d31a65b9cd5c30a8f8c81b690bfd0cfb6295"
+                },
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000,
+                "collector_admission": null
+              }
+            ]
+          },
+          "direct_time": {
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          },
+          "dependency_time": {
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          },
+          "quality": {
+            "availability": "fresh",
+            "resync": "NOT_REQUIRED"
+          },
+          "direct_sources": [
+            {
+              "source_kind": "polymarket_market_metadata",
+              "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+              "source_native_identity": {
+                "kind": "SEMANTIC_EVIDENCE_SHA256",
+                "sha256": "b272d474636284ddc0f22936b623d31a65b9cd5c30a8f8c81b690bfd0cfb6295"
+              },
+              "source_event_at_utc_ms": null,
+              "received_at_utc_ms": 10000,
+              "collector_admission": null
+            }
+          ]
+        },
+        {
+          "position": {
+            "input_stream_id": "core-test",
+            "closed_at_input_position": 1,
+            "fact_ordinal": 4
+          },
+          "payload": {
+            "MarketFact": {
+              "market": {
+                "condition_id": "0x2222222222222222222222222222222222222222222222222222222222222222",
+                "clob_market_id": "3195577",
+                "window": {
+                  "start_at_utc_ms": 20000,
+                  "end_at_utc_ms": 30000
+                }
+              },
+              "payload": {
+                "TradingState": {
+                  "active": true,
+                  "closed": false,
+                  "accepting_orders": true
+                }
+              }
+            }
+          },
+          "source_refs": [
+            {
+              "input_stream_id": "core-test",
+              "input_position": 1
+            }
+          ],
+          "lineage": {
+            "canonical_rule_version": "rule-v1",
+            "source_evidence": [
+              {
+                "source_kind": "polymarket_market_metadata",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_native_identity": {
+                  "kind": "SEMANTIC_EVIDENCE_SHA256",
+                  "sha256": "b272d474636284ddc0f22936b623d31a65b9cd5c30a8f8c81b690bfd0cfb6295"
+                },
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000,
+                "collector_admission": null
+              }
+            ]
+          },
+          "direct_time": {
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          },
+          "dependency_time": {
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          },
+          "quality": {
+            "availability": "fresh",
+            "resync": "NOT_REQUIRED"
+          },
+          "direct_sources": [
+            {
+              "source_kind": "polymarket_market_metadata",
+              "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+              "source_native_identity": {
+                "kind": "SEMANTIC_EVIDENCE_SHA256",
+                "sha256": "b272d474636284ddc0f22936b623d31a65b9cd5c30a8f8c81b690bfd0cfb6295"
+              },
+              "source_event_at_utc_ms": null,
+              "received_at_utc_ms": 10000,
+              "collector_admission": null
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "schema_version": "public-observation-v1",
+      "market": {
+        "condition_id": "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "clob_market_id": "3195577",
+        "window": {
+          "start_at_utc_ms": 20000,
+          "end_at_utc_ms": 30000
+        }
+      },
+      "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+      "group_position": 1,
+      "visible_prefix": {
+        "input_stream_id": "core-test",
+        "next_input_position": 2
+      },
+      "assets": [
+        {
+          "asset": {
+            "token_id": "3",
+            "outcome": {
+              "index": 1,
+              "label": "DOWN"
+            }
+          },
+          "bids": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "asks": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "best_bid_ask": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "valuation_best_bid": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "tick": {
+            "value": "0.01",
+            "quality": "fresh",
+            "direct_anchors": [
+              {
+                "field_path": "tick",
+                "position": {
+                  "input_stream_id": "core-test",
+                  "closed_at_input_position": 1,
+                  "fact_ordinal": 1
+                },
+                "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000
+              }
+            ],
+            "dependency_frontier": {
+              "input_stream_id": "core-test",
+              "next_input_position": 2
+            }
+          },
+          "public_trade": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          }
+        },
+        {
+          "asset": {
+            "token_id": "20",
+            "outcome": {
+              "index": 0,
+              "label": "UP"
+            }
+          },
+          "bids": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "asks": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "best_bid_ask": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "valuation_best_bid": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "tick": {
+            "value": "0.01",
+            "quality": "fresh",
+            "direct_anchors": [
+              {
+                "field_path": "tick",
+                "position": {
+                  "input_stream_id": "core-test",
+                  "closed_at_input_position": 1,
+                  "fact_ordinal": 2
+                },
+                "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000
+              }
+            ],
+            "dependency_frontier": {
+              "input_stream_id": "core-test",
+              "next_input_position": 2
+            }
+          },
+          "public_trade": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          }
+        }
+      ],
+      "lifecycle": {
+        "value": {
+          "mapping": "KNOWN",
+          "value": "prefetched"
+        },
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "lifecycle",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 1,
+              "fact_ordinal": 3
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 2
+        }
+      },
+      "active": {
+        "value": true,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "active",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 1,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 2
+        }
+      },
+      "closed": {
+        "value": false,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "closed",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 1,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 2
+        }
+      },
+      "accepting_orders": {
+        "value": true,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "accepting_orders",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 1,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 2
+        }
+      },
+      "terminal": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "official_anchor": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "settlement_reference": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "temporary_reference": null,
+      "effective_reference": "Missing",
+      "chainlink_spot": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "chainlink_twap_thirty": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "chainlink_twap_sixty": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "binance_depth": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "binance_trade": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "group_events": [
+        {
+          "position": {
+            "input_stream_id": "core-test",
+            "closed_at_input_position": 1,
+            "fact_ordinal": 0
+          },
+          "payload": {
+            "MarketFact": {
+              "market": {
+                "condition_id": "0x2222222222222222222222222222222222222222222222222222222222222222",
+                "clob_market_id": "3195577",
+                "window": {
+                  "start_at_utc_ms": 20000,
+                  "end_at_utc_ms": 30000
+                }
+              },
+              "payload": {
+                "FixedIdentity": {
+                  "assets": [
+                    {
+                      "token_id": "3",
+                      "outcome": {
+                        "index": 1,
+                        "label": "DOWN"
+                      }
+                    },
+                    {
+                      "token_id": "20",
+                      "outcome": {
+                        "index": 0,
+                        "label": "UP"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "source_refs": [
+            {
+              "input_stream_id": "core-test",
+              "input_position": 1
+            }
+          ],
+          "lineage": {
+            "canonical_rule_version": "rule-v1",
+            "source_evidence": [
+              {
+                "source_kind": "polymarket_market_metadata",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_native_identity": {
+                  "kind": "SEMANTIC_EVIDENCE_SHA256",
+                  "sha256": "b272d474636284ddc0f22936b623d31a65b9cd5c30a8f8c81b690bfd0cfb6295"
+                },
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000,
+                "collector_admission": null
+              }
+            ]
+          },
+          "direct_time": {
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          },
+          "dependency_time": {
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          },
+          "quality": {
+            "availability": "fresh",
+            "resync": "NOT_REQUIRED"
+          },
+          "direct_sources": [
+            {
+              "source_kind": "polymarket_market_metadata",
+              "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+              "source_native_identity": {
+                "kind": "SEMANTIC_EVIDENCE_SHA256",
+                "sha256": "b272d474636284ddc0f22936b623d31a65b9cd5c30a8f8c81b690bfd0cfb6295"
+              },
+              "source_event_at_utc_ms": null,
+              "received_at_utc_ms": 10000,
+              "collector_admission": null
+            }
+          ]
+        },
+        {
+          "position": {
+            "input_stream_id": "core-test",
+            "closed_at_input_position": 1,
+            "fact_ordinal": 1
+          },
+          "payload": {
+            "MarketFact": {
+              "market": {
+                "condition_id": "0x2222222222222222222222222222222222222222222222222222222222222222",
+                "clob_market_id": "3195577",
+                "window": {
+                  "start_at_utc_ms": 20000,
+                  "end_at_utc_ms": 30000
+                }
+              },
+              "payload": {
+                "InitialTick": {
+                  "asset": {
+                    "token_id": "3",
+                    "outcome": {
+                      "index": 1,
+                      "label": "DOWN"
+                    }
+                  },
+                  "tick_size_pusd_per_share": "0.01"
+                }
+              }
+            }
+          },
+          "source_refs": [
+            {
+              "input_stream_id": "core-test",
+              "input_position": 1
+            }
+          ],
+          "lineage": {
+            "canonical_rule_version": "rule-v1",
+            "source_evidence": [
+              {
+                "source_kind": "polymarket_market_metadata",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_native_identity": {
+                  "kind": "SEMANTIC_EVIDENCE_SHA256",
+                  "sha256": "b272d474636284ddc0f22936b623d31a65b9cd5c30a8f8c81b690bfd0cfb6295"
+                },
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000,
+                "collector_admission": null
+              }
+            ]
+          },
+          "direct_time": {
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          },
+          "dependency_time": {
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          },
+          "quality": {
+            "availability": "fresh",
+            "resync": "NOT_REQUIRED"
+          },
+          "direct_sources": [
+            {
+              "source_kind": "polymarket_market_metadata",
+              "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+              "source_native_identity": {
+                "kind": "SEMANTIC_EVIDENCE_SHA256",
+                "sha256": "b272d474636284ddc0f22936b623d31a65b9cd5c30a8f8c81b690bfd0cfb6295"
+              },
+              "source_event_at_utc_ms": null,
+              "received_at_utc_ms": 10000,
+              "collector_admission": null
+            }
+          ]
+        },
+        {
+          "position": {
+            "input_stream_id": "core-test",
+            "closed_at_input_position": 1,
+            "fact_ordinal": 2
+          },
+          "payload": {
+            "MarketFact": {
+              "market": {
+                "condition_id": "0x2222222222222222222222222222222222222222222222222222222222222222",
+                "clob_market_id": "3195577",
+                "window": {
+                  "start_at_utc_ms": 20000,
+                  "end_at_utc_ms": 30000
+                }
+              },
+              "payload": {
+                "InitialTick": {
+                  "asset": {
+                    "token_id": "20",
+                    "outcome": {
+                      "index": 0,
+                      "label": "UP"
+                    }
+                  },
+                  "tick_size_pusd_per_share": "0.01"
+                }
+              }
+            }
+          },
+          "source_refs": [
+            {
+              "input_stream_id": "core-test",
+              "input_position": 1
+            }
+          ],
+          "lineage": {
+            "canonical_rule_version": "rule-v1",
+            "source_evidence": [
+              {
+                "source_kind": "polymarket_market_metadata",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_native_identity": {
+                  "kind": "SEMANTIC_EVIDENCE_SHA256",
+                  "sha256": "b272d474636284ddc0f22936b623d31a65b9cd5c30a8f8c81b690bfd0cfb6295"
+                },
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000,
+                "collector_admission": null
+              }
+            ]
+          },
+          "direct_time": {
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          },
+          "dependency_time": {
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          },
+          "quality": {
+            "availability": "fresh",
+            "resync": "NOT_REQUIRED"
+          },
+          "direct_sources": [
+            {
+              "source_kind": "polymarket_market_metadata",
+              "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+              "source_native_identity": {
+                "kind": "SEMANTIC_EVIDENCE_SHA256",
+                "sha256": "b272d474636284ddc0f22936b623d31a65b9cd5c30a8f8c81b690bfd0cfb6295"
+              },
+              "source_event_at_utc_ms": null,
+              "received_at_utc_ms": 10000,
+              "collector_admission": null
+            }
+          ]
+        },
+        {
+          "position": {
+            "input_stream_id": "core-test",
+            "closed_at_input_position": 1,
+            "fact_ordinal": 3
+          },
+          "payload": {
+            "MarketFact": {
+              "market": {
+                "condition_id": "0x2222222222222222222222222222222222222222222222222222222222222222",
+                "clob_market_id": "3195577",
+                "window": {
+                  "start_at_utc_ms": 20000,
+                  "end_at_utc_ms": 30000
+                }
+              },
+              "payload": {
+                "LifecycleTransition": {
+                  "previous_state": null,
+                  "current_state": {
+                    "mapping": "KNOWN",
+                    "value": "prefetched"
+                  },
+                  "assets": [
+                    {
+                      "token_id": "3",
+                      "outcome": {
+                        "index": 1,
+                        "label": "DOWN"
+                      }
+                    },
+                    {
+                      "token_id": "20",
+                      "outcome": {
+                        "index": 0,
+                        "label": "UP"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "source_refs": [
+            {
+              "input_stream_id": "core-test",
+              "input_position": 1
+            }
+          ],
+          "lineage": {
+            "canonical_rule_version": "rule-v1",
+            "source_evidence": [
+              {
+                "source_kind": "polymarket_market_metadata",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_native_identity": {
+                  "kind": "SEMANTIC_EVIDENCE_SHA256",
+                  "sha256": "b272d474636284ddc0f22936b623d31a65b9cd5c30a8f8c81b690bfd0cfb6295"
+                },
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000,
+                "collector_admission": null
+              }
+            ]
+          },
+          "direct_time": {
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          },
+          "dependency_time": {
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          },
+          "quality": {
+            "availability": "fresh",
+            "resync": "NOT_REQUIRED"
+          },
+          "direct_sources": [
+            {
+              "source_kind": "polymarket_market_metadata",
+              "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+              "source_native_identity": {
+                "kind": "SEMANTIC_EVIDENCE_SHA256",
+                "sha256": "b272d474636284ddc0f22936b623d31a65b9cd5c30a8f8c81b690bfd0cfb6295"
+              },
+              "source_event_at_utc_ms": null,
+              "received_at_utc_ms": 10000,
+              "collector_admission": null
+            }
+          ]
+        },
+        {
+          "position": {
+            "input_stream_id": "core-test",
+            "closed_at_input_position": 1,
+            "fact_ordinal": 4
+          },
+          "payload": {
+            "MarketFact": {
+              "market": {
+                "condition_id": "0x2222222222222222222222222222222222222222222222222222222222222222",
+                "clob_market_id": "3195577",
+                "window": {
+                  "start_at_utc_ms": 20000,
+                  "end_at_utc_ms": 30000
+                }
+              },
+              "payload": {
+                "TradingState": {
+                  "active": true,
+                  "closed": false,
+                  "accepting_orders": true
+                }
+              }
+            }
+          },
+          "source_refs": [
+            {
+              "input_stream_id": "core-test",
+              "input_position": 1
+            }
+          ],
+          "lineage": {
+            "canonical_rule_version": "rule-v1",
+            "source_evidence": [
+              {
+                "source_kind": "polymarket_market_metadata",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_native_identity": {
+                  "kind": "SEMANTIC_EVIDENCE_SHA256",
+                  "sha256": "b272d474636284ddc0f22936b623d31a65b9cd5c30a8f8c81b690bfd0cfb6295"
+                },
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000,
+                "collector_admission": null
+              }
+            ]
+          },
+          "direct_time": {
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          },
+          "dependency_time": {
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          },
+          "quality": {
+            "availability": "fresh",
+            "resync": "NOT_REQUIRED"
+          },
+          "direct_sources": [
+            {
+              "source_kind": "polymarket_market_metadata",
+              "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+              "source_native_identity": {
+                "kind": "SEMANTIC_EVIDENCE_SHA256",
+                "sha256": "b272d474636284ddc0f22936b623d31a65b9cd5c30a8f8c81b690bfd0cfb6295"
+              },
+              "source_event_at_utc_ms": null,
+              "received_at_utc_ms": 10000,
+              "collector_admission": null
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "schema_version": "public-observation-v1",
+      "market": {
+        "condition_id": "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "clob_market_id": "3195576",
+        "window": {
+          "start_at_utc_ms": 20000,
+          "end_at_utc_ms": 30000
+        }
+      },
+      "group_id": "6004b0af9913ff5aa5e9bd79e4814ff84c7db1720cbc623c4315f1bf98217174",
+      "group_position": 2,
+      "visible_prefix": {
+        "input_stream_id": "core-test",
+        "next_input_position": 3
+      },
+      "assets": [
+        {
+          "asset": {
+            "token_id": "3",
+            "outcome": {
+              "index": 1,
+              "label": "DOWN"
+            }
+          },
+          "bids": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "asks": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "best_bid_ask": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "valuation_best_bid": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "tick": {
+            "value": "0.01",
+            "quality": "fresh",
+            "direct_anchors": [
+              {
+                "field_path": "tick",
+                "position": {
+                  "input_stream_id": "core-test",
+                  "closed_at_input_position": 0,
+                  "fact_ordinal": 1
+                },
+                "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000
+              }
+            ],
+            "dependency_frontier": {
+              "input_stream_id": "core-test",
+              "next_input_position": 1
+            }
+          },
+          "public_trade": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          }
+        },
+        {
+          "asset": {
+            "token_id": "20",
+            "outcome": {
+              "index": 0,
+              "label": "UP"
+            }
+          },
+          "bids": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "asks": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "best_bid_ask": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "valuation_best_bid": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "tick": {
+            "value": "0.01",
+            "quality": "fresh",
+            "direct_anchors": [
+              {
+                "field_path": "tick",
+                "position": {
+                  "input_stream_id": "core-test",
+                  "closed_at_input_position": 0,
+                  "fact_ordinal": 2
+                },
+                "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000
+              }
+            ],
+            "dependency_frontier": {
+              "input_stream_id": "core-test",
+              "next_input_position": 1
+            }
+          },
+          "public_trade": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          }
+        }
+      ],
+      "lifecycle": {
+        "value": {
+          "mapping": "KNOWN",
+          "value": "prefetched"
+        },
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "lifecycle",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 0,
+              "fact_ordinal": 3
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 1
+        }
+      },
+      "active": {
+        "value": true,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "active",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 0,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 1
+        }
+      },
+      "closed": {
+        "value": false,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "closed",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 0,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 1
+        }
+      },
+      "accepting_orders": {
+        "value": true,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "accepting_orders",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 0,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 1
+        }
+      },
+      "terminal": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "official_anchor": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "settlement_reference": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "temporary_reference": null,
+      "effective_reference": "Missing",
+      "chainlink_spot": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "chainlink_twap_thirty": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "chainlink_twap_sixty": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "binance_depth": {
+        "value": {
+          "symbol": "BTCUSDT",
+          "last_update_id": 100,
+          "bids": [
+            {
+              "price_usdt_per_btc": "64100",
+              "quantity_btc": "0.7"
+            },
+            {
+              "price_usdt_per_btc": "64000",
+              "quantity_btc": "0.5"
+            }
+          ],
+          "asks": [
+            {
+              "price_usdt_per_btc": "64200",
+              "quantity_btc": "0.4"
+            },
+            {
+              "price_usdt_per_btc": "64300",
+              "quantity_btc": "0.3"
+            }
+          ]
+        },
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "binance_depth",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 2,
+              "fact_ordinal": 0
+            },
+            "group_id": "6004b0af9913ff5aa5e9bd79e4814ff84c7db1720cbc623c4315f1bf98217174",
+            "source_message_id": "6004b0af9913ff5aa5e9bd79e4814ff84c7db1720cbc623c4315f1bf98217174",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 2001
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 3
+        }
+      },
+      "binance_trade": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "group_events": [
+        {
+          "position": {
+            "input_stream_id": "core-test",
+            "closed_at_input_position": 2,
+            "fact_ordinal": 0
+          },
+          "payload": {
+            "ReferenceFact": {
+              "reference_type": "binance_depth_state",
+              "reference": {
+                "symbol": "BTCUSDT",
+                "last_update_id": 100,
+                "bids": [
+                  {
+                    "price_usdt_per_btc": "64100",
+                    "quantity_btc": "0.7"
+                  },
+                  {
+                    "price_usdt_per_btc": "64000",
+                    "quantity_btc": "0.5"
+                  }
+                ],
+                "asks": [
+                  {
+                    "price_usdt_per_btc": "64200",
+                    "quantity_btc": "0.4"
+                  },
+                  {
+                    "price_usdt_per_btc": "64300",
+                    "quantity_btc": "0.3"
+                  }
+                ]
+              }
+            }
+          },
+          "source_refs": [
+            {
+              "input_stream_id": "core-test",
+              "input_position": 2
+            }
+          ],
+          "lineage": {
+            "canonical_rule_version": "rule-v1",
+            "source_evidence": [
+              {
+                "source_kind": "binance_depth_snapshot",
+                "source_message_id": "6004b0af9913ff5aa5e9bd79e4814ff84c7db1720cbc623c4315f1bf98217174",
+                "source_native_identity": {
+                  "kind": "BINANCE_DEPTH_SNAPSHOT",
+                  "last_update_id": 100
+                },
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 2001,
+                "collector_admission": {
+                  "source_sequence_epoch_id": "depth-a",
+                  "collector_admission_sequence": 1,
+                  "admitted_at_utc_ms": 2101
+                }
+              }
+            ]
+          },
+          "direct_time": {
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 2001
+          },
+          "dependency_time": {
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 2001
+          },
+          "quality": {
+            "availability": "fresh",
+            "resync": "NOT_REQUIRED"
+          },
+          "direct_sources": [
+            {
+              "source_kind": "binance_depth_snapshot",
+              "source_message_id": "6004b0af9913ff5aa5e9bd79e4814ff84c7db1720cbc623c4315f1bf98217174",
+              "source_native_identity": {
+                "kind": "BINANCE_DEPTH_SNAPSHOT",
+                "last_update_id": 100
+              },
+              "source_event_at_utc_ms": null,
+              "received_at_utc_ms": 2001,
+              "collector_admission": {
+                "source_sequence_epoch_id": "depth-a",
+                "collector_admission_sequence": 1,
+                "admitted_at_utc_ms": 2101
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "schema_version": "public-observation-v1",
+      "market": {
+        "condition_id": "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "clob_market_id": "3195577",
+        "window": {
+          "start_at_utc_ms": 20000,
+          "end_at_utc_ms": 30000
+        }
+      },
+      "group_id": "6004b0af9913ff5aa5e9bd79e4814ff84c7db1720cbc623c4315f1bf98217174",
+      "group_position": 2,
+      "visible_prefix": {
+        "input_stream_id": "core-test",
+        "next_input_position": 3
+      },
+      "assets": [
+        {
+          "asset": {
+            "token_id": "3",
+            "outcome": {
+              "index": 1,
+              "label": "DOWN"
+            }
+          },
+          "bids": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "asks": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "best_bid_ask": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "valuation_best_bid": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "tick": {
+            "value": "0.01",
+            "quality": "fresh",
+            "direct_anchors": [
+              {
+                "field_path": "tick",
+                "position": {
+                  "input_stream_id": "core-test",
+                  "closed_at_input_position": 1,
+                  "fact_ordinal": 1
+                },
+                "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000
+              }
+            ],
+            "dependency_frontier": {
+              "input_stream_id": "core-test",
+              "next_input_position": 2
+            }
+          },
+          "public_trade": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          }
+        },
+        {
+          "asset": {
+            "token_id": "20",
+            "outcome": {
+              "index": 0,
+              "label": "UP"
+            }
+          },
+          "bids": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "asks": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "best_bid_ask": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "valuation_best_bid": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "tick": {
+            "value": "0.01",
+            "quality": "fresh",
+            "direct_anchors": [
+              {
+                "field_path": "tick",
+                "position": {
+                  "input_stream_id": "core-test",
+                  "closed_at_input_position": 1,
+                  "fact_ordinal": 2
+                },
+                "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000
+              }
+            ],
+            "dependency_frontier": {
+              "input_stream_id": "core-test",
+              "next_input_position": 2
+            }
+          },
+          "public_trade": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          }
+        }
+      ],
+      "lifecycle": {
+        "value": {
+          "mapping": "KNOWN",
+          "value": "prefetched"
+        },
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "lifecycle",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 1,
+              "fact_ordinal": 3
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 2
+        }
+      },
+      "active": {
+        "value": true,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "active",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 1,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 2
+        }
+      },
+      "closed": {
+        "value": false,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "closed",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 1,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 2
+        }
+      },
+      "accepting_orders": {
+        "value": true,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "accepting_orders",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 1,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 2
+        }
+      },
+      "terminal": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "official_anchor": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "settlement_reference": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "temporary_reference": null,
+      "effective_reference": "Missing",
+      "chainlink_spot": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "chainlink_twap_thirty": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "chainlink_twap_sixty": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "binance_depth": {
+        "value": {
+          "symbol": "BTCUSDT",
+          "last_update_id": 100,
+          "bids": [
+            {
+              "price_usdt_per_btc": "64100",
+              "quantity_btc": "0.7"
+            },
+            {
+              "price_usdt_per_btc": "64000",
+              "quantity_btc": "0.5"
+            }
+          ],
+          "asks": [
+            {
+              "price_usdt_per_btc": "64200",
+              "quantity_btc": "0.4"
+            },
+            {
+              "price_usdt_per_btc": "64300",
+              "quantity_btc": "0.3"
+            }
+          ]
+        },
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "binance_depth",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 2,
+              "fact_ordinal": 0
+            },
+            "group_id": "6004b0af9913ff5aa5e9bd79e4814ff84c7db1720cbc623c4315f1bf98217174",
+            "source_message_id": "6004b0af9913ff5aa5e9bd79e4814ff84c7db1720cbc623c4315f1bf98217174",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 2001
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 3
+        }
+      },
+      "binance_trade": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "group_events": [
+        {
+          "position": {
+            "input_stream_id": "core-test",
+            "closed_at_input_position": 2,
+            "fact_ordinal": 0
+          },
+          "payload": {
+            "ReferenceFact": {
+              "reference_type": "binance_depth_state",
+              "reference": {
+                "symbol": "BTCUSDT",
+                "last_update_id": 100,
+                "bids": [
+                  {
+                    "price_usdt_per_btc": "64100",
+                    "quantity_btc": "0.7"
+                  },
+                  {
+                    "price_usdt_per_btc": "64000",
+                    "quantity_btc": "0.5"
+                  }
+                ],
+                "asks": [
+                  {
+                    "price_usdt_per_btc": "64200",
+                    "quantity_btc": "0.4"
+                  },
+                  {
+                    "price_usdt_per_btc": "64300",
+                    "quantity_btc": "0.3"
+                  }
+                ]
+              }
+            }
+          },
+          "source_refs": [
+            {
+              "input_stream_id": "core-test",
+              "input_position": 2
+            }
+          ],
+          "lineage": {
+            "canonical_rule_version": "rule-v1",
+            "source_evidence": [
+              {
+                "source_kind": "binance_depth_snapshot",
+                "source_message_id": "6004b0af9913ff5aa5e9bd79e4814ff84c7db1720cbc623c4315f1bf98217174",
+                "source_native_identity": {
+                  "kind": "BINANCE_DEPTH_SNAPSHOT",
+                  "last_update_id": 100
+                },
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 2001,
+                "collector_admission": {
+                  "source_sequence_epoch_id": "depth-a",
+                  "collector_admission_sequence": 1,
+                  "admitted_at_utc_ms": 2101
+                }
+              }
+            ]
+          },
+          "direct_time": {
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 2001
+          },
+          "dependency_time": {
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 2001
+          },
+          "quality": {
+            "availability": "fresh",
+            "resync": "NOT_REQUIRED"
+          },
+          "direct_sources": [
+            {
+              "source_kind": "binance_depth_snapshot",
+              "source_message_id": "6004b0af9913ff5aa5e9bd79e4814ff84c7db1720cbc623c4315f1bf98217174",
+              "source_native_identity": {
+                "kind": "BINANCE_DEPTH_SNAPSHOT",
+                "last_update_id": 100
+              },
+              "source_event_at_utc_ms": null,
+              "received_at_utc_ms": 2001,
+              "collector_admission": {
+                "source_sequence_epoch_id": "depth-a",
+                "collector_admission_sequence": 1,
+                "admitted_at_utc_ms": 2101
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "schema_version": "public-observation-v1",
+      "market": {
+        "condition_id": "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "clob_market_id": "3195576",
+        "window": {
+          "start_at_utc_ms": 20000,
+          "end_at_utc_ms": 30000
+        }
+      },
+      "group_id": "5e70132f70a25bc5624984395fb15423cd0877d625a9bb36b8788c144e643e17",
+      "group_position": 3,
+      "visible_prefix": {
+        "input_stream_id": "core-test",
+        "next_input_position": 4
+      },
+      "assets": [
+        {
+          "asset": {
+            "token_id": "3",
+            "outcome": {
+              "index": 1,
+              "label": "DOWN"
+            }
+          },
+          "bids": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "asks": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "best_bid_ask": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "valuation_best_bid": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "tick": {
+            "value": "0.01",
+            "quality": "fresh",
+            "direct_anchors": [
+              {
+                "field_path": "tick",
+                "position": {
+                  "input_stream_id": "core-test",
+                  "closed_at_input_position": 0,
+                  "fact_ordinal": 1
+                },
+                "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000
+              }
+            ],
+            "dependency_frontier": {
+              "input_stream_id": "core-test",
+              "next_input_position": 1
+            }
+          },
+          "public_trade": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          }
+        },
+        {
+          "asset": {
+            "token_id": "20",
+            "outcome": {
+              "index": 0,
+              "label": "UP"
+            }
+          },
+          "bids": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "asks": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "best_bid_ask": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "valuation_best_bid": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "tick": {
+            "value": "0.01",
+            "quality": "fresh",
+            "direct_anchors": [
+              {
+                "field_path": "tick",
+                "position": {
+                  "input_stream_id": "core-test",
+                  "closed_at_input_position": 0,
+                  "fact_ordinal": 2
+                },
+                "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000
+              }
+            ],
+            "dependency_frontier": {
+              "input_stream_id": "core-test",
+              "next_input_position": 1
+            }
+          },
+          "public_trade": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          }
+        }
+      ],
+      "lifecycle": {
+        "value": {
+          "mapping": "KNOWN",
+          "value": "prefetched"
+        },
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "lifecycle",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 0,
+              "fact_ordinal": 3
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 1
+        }
+      },
+      "active": {
+        "value": true,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "active",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 0,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 1
+        }
+      },
+      "closed": {
+        "value": false,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "closed",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 0,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 1
+        }
+      },
+      "accepting_orders": {
+        "value": true,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "accepting_orders",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 0,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 1
+        }
+      },
+      "terminal": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "official_anchor": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "settlement_reference": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "temporary_reference": null,
+      "effective_reference": "Missing",
+      "chainlink_spot": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "chainlink_twap_thirty": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "chainlink_twap_sixty": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "binance_depth": {
+        "value": {
+          "symbol": "BTCUSDT",
+          "last_update_id": 101,
+          "bids": [
+            {
+              "price_usdt_per_btc": "64100",
+              "quantity_btc": "0.2"
+            },
+            {
+              "price_usdt_per_btc": "64000",
+              "quantity_btc": "0.5"
+            }
+          ],
+          "asks": [
+            {
+              "price_usdt_per_btc": "64200",
+              "quantity_btc": "0.4"
+            },
+            {
+              "price_usdt_per_btc": "64300",
+              "quantity_btc": "0.3"
+            }
+          ]
+        },
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "binance_depth",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 3,
+              "fact_ordinal": 0
+            },
+            "group_id": "5e70132f70a25bc5624984395fb15423cd0877d625a9bb36b8788c144e643e17",
+            "source_message_id": "5e70132f70a25bc5624984395fb15423cd0877d625a9bb36b8788c144e643e17",
+            "source_event_at_utc_ms": 1502,
+            "received_at_utc_ms": 2002
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 4
+        }
+      },
+      "binance_trade": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "group_events": [
+        {
+          "position": {
+            "input_stream_id": "core-test",
+            "closed_at_input_position": 3,
+            "fact_ordinal": 0
+          },
+          "payload": {
+            "ReferenceFact": {
+              "reference_type": "binance_depth_state",
+              "reference": {
+                "symbol": "BTCUSDT",
+                "last_update_id": 101,
+                "bids": [
+                  {
+                    "price_usdt_per_btc": "64100",
+                    "quantity_btc": "0.2"
+                  },
+                  {
+                    "price_usdt_per_btc": "64000",
+                    "quantity_btc": "0.5"
+                  }
+                ],
+                "asks": [
+                  {
+                    "price_usdt_per_btc": "64200",
+                    "quantity_btc": "0.4"
+                  },
+                  {
+                    "price_usdt_per_btc": "64300",
+                    "quantity_btc": "0.3"
+                  }
+                ]
+              }
+            }
+          },
+          "source_refs": [
+            {
+              "input_stream_id": "core-test",
+              "input_position": 3
+            }
+          ],
+          "lineage": {
+            "canonical_rule_version": "rule-v1",
+            "source_evidence": [
+              {
+                "source_kind": "binance_depth_snapshot",
+                "source_message_id": "6004b0af9913ff5aa5e9bd79e4814ff84c7db1720cbc623c4315f1bf98217174",
+                "source_native_identity": {
+                  "kind": "BINANCE_DEPTH_SNAPSHOT",
+                  "last_update_id": 100
+                },
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 2001,
+                "collector_admission": {
+                  "source_sequence_epoch_id": "depth-a",
+                  "collector_admission_sequence": 1,
+                  "admitted_at_utc_ms": 2101
+                }
+              },
+              {
+                "source_kind": "binance_depth_update",
+                "source_message_id": "5e70132f70a25bc5624984395fb15423cd0877d625a9bb36b8788c144e643e17",
+                "source_native_identity": {
+                  "kind": "BINANCE_DEPTH_UPDATE",
+                  "first_update_id": 101,
+                  "final_update_id": 101
+                },
+                "source_event_at_utc_ms": 1502,
+                "received_at_utc_ms": 2002,
+                "collector_admission": {
+                  "source_sequence_epoch_id": "depth-a",
+                  "collector_admission_sequence": 2,
+                  "admitted_at_utc_ms": 2102
+                }
+              }
+            ]
+          },
+          "direct_time": {
+            "source_event_at_utc_ms": 1502,
+            "received_at_utc_ms": 2002
+          },
+          "dependency_time": {
+            "source_event_at_utc_ms": 1502,
+            "received_at_utc_ms": 2002
+          },
+          "quality": {
+            "availability": "fresh",
+            "resync": "NOT_REQUIRED"
+          },
+          "direct_sources": [
+            {
+              "source_kind": "binance_depth_update",
+              "source_message_id": "5e70132f70a25bc5624984395fb15423cd0877d625a9bb36b8788c144e643e17",
+              "source_native_identity": {
+                "kind": "BINANCE_DEPTH_UPDATE",
+                "first_update_id": 101,
+                "final_update_id": 101
+              },
+              "source_event_at_utc_ms": 1502,
+              "received_at_utc_ms": 2002,
+              "collector_admission": {
+                "source_sequence_epoch_id": "depth-a",
+                "collector_admission_sequence": 2,
+                "admitted_at_utc_ms": 2102
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "schema_version": "public-observation-v1",
+      "market": {
+        "condition_id": "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "clob_market_id": "3195577",
+        "window": {
+          "start_at_utc_ms": 20000,
+          "end_at_utc_ms": 30000
+        }
+      },
+      "group_id": "5e70132f70a25bc5624984395fb15423cd0877d625a9bb36b8788c144e643e17",
+      "group_position": 3,
+      "visible_prefix": {
+        "input_stream_id": "core-test",
+        "next_input_position": 4
+      },
+      "assets": [
+        {
+          "asset": {
+            "token_id": "3",
+            "outcome": {
+              "index": 1,
+              "label": "DOWN"
+            }
+          },
+          "bids": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "asks": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "best_bid_ask": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "valuation_best_bid": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "tick": {
+            "value": "0.01",
+            "quality": "fresh",
+            "direct_anchors": [
+              {
+                "field_path": "tick",
+                "position": {
+                  "input_stream_id": "core-test",
+                  "closed_at_input_position": 1,
+                  "fact_ordinal": 1
+                },
+                "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000
+              }
+            ],
+            "dependency_frontier": {
+              "input_stream_id": "core-test",
+              "next_input_position": 2
+            }
+          },
+          "public_trade": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          }
+        },
+        {
+          "asset": {
+            "token_id": "20",
+            "outcome": {
+              "index": 0,
+              "label": "UP"
+            }
+          },
+          "bids": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "asks": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "best_bid_ask": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "valuation_best_bid": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "tick": {
+            "value": "0.01",
+            "quality": "fresh",
+            "direct_anchors": [
+              {
+                "field_path": "tick",
+                "position": {
+                  "input_stream_id": "core-test",
+                  "closed_at_input_position": 1,
+                  "fact_ordinal": 2
+                },
+                "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000
+              }
+            ],
+            "dependency_frontier": {
+              "input_stream_id": "core-test",
+              "next_input_position": 2
+            }
+          },
+          "public_trade": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          }
+        }
+      ],
+      "lifecycle": {
+        "value": {
+          "mapping": "KNOWN",
+          "value": "prefetched"
+        },
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "lifecycle",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 1,
+              "fact_ordinal": 3
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 2
+        }
+      },
+      "active": {
+        "value": true,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "active",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 1,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 2
+        }
+      },
+      "closed": {
+        "value": false,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "closed",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 1,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 2
+        }
+      },
+      "accepting_orders": {
+        "value": true,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "accepting_orders",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 1,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 2
+        }
+      },
+      "terminal": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "official_anchor": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "settlement_reference": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "temporary_reference": null,
+      "effective_reference": "Missing",
+      "chainlink_spot": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "chainlink_twap_thirty": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "chainlink_twap_sixty": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "binance_depth": {
+        "value": {
+          "symbol": "BTCUSDT",
+          "last_update_id": 101,
+          "bids": [
+            {
+              "price_usdt_per_btc": "64100",
+              "quantity_btc": "0.2"
+            },
+            {
+              "price_usdt_per_btc": "64000",
+              "quantity_btc": "0.5"
+            }
+          ],
+          "asks": [
+            {
+              "price_usdt_per_btc": "64200",
+              "quantity_btc": "0.4"
+            },
+            {
+              "price_usdt_per_btc": "64300",
+              "quantity_btc": "0.3"
+            }
+          ]
+        },
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "binance_depth",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 3,
+              "fact_ordinal": 0
+            },
+            "group_id": "5e70132f70a25bc5624984395fb15423cd0877d625a9bb36b8788c144e643e17",
+            "source_message_id": "5e70132f70a25bc5624984395fb15423cd0877d625a9bb36b8788c144e643e17",
+            "source_event_at_utc_ms": 1502,
+            "received_at_utc_ms": 2002
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 4
+        }
+      },
+      "binance_trade": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "group_events": [
+        {
+          "position": {
+            "input_stream_id": "core-test",
+            "closed_at_input_position": 3,
+            "fact_ordinal": 0
+          },
+          "payload": {
+            "ReferenceFact": {
+              "reference_type": "binance_depth_state",
+              "reference": {
+                "symbol": "BTCUSDT",
+                "last_update_id": 101,
+                "bids": [
+                  {
+                    "price_usdt_per_btc": "64100",
+                    "quantity_btc": "0.2"
+                  },
+                  {
+                    "price_usdt_per_btc": "64000",
+                    "quantity_btc": "0.5"
+                  }
+                ],
+                "asks": [
+                  {
+                    "price_usdt_per_btc": "64200",
+                    "quantity_btc": "0.4"
+                  },
+                  {
+                    "price_usdt_per_btc": "64300",
+                    "quantity_btc": "0.3"
+                  }
+                ]
+              }
+            }
+          },
+          "source_refs": [
+            {
+              "input_stream_id": "core-test",
+              "input_position": 3
+            }
+          ],
+          "lineage": {
+            "canonical_rule_version": "rule-v1",
+            "source_evidence": [
+              {
+                "source_kind": "binance_depth_snapshot",
+                "source_message_id": "6004b0af9913ff5aa5e9bd79e4814ff84c7db1720cbc623c4315f1bf98217174",
+                "source_native_identity": {
+                  "kind": "BINANCE_DEPTH_SNAPSHOT",
+                  "last_update_id": 100
+                },
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 2001,
+                "collector_admission": {
+                  "source_sequence_epoch_id": "depth-a",
+                  "collector_admission_sequence": 1,
+                  "admitted_at_utc_ms": 2101
+                }
+              },
+              {
+                "source_kind": "binance_depth_update",
+                "source_message_id": "5e70132f70a25bc5624984395fb15423cd0877d625a9bb36b8788c144e643e17",
+                "source_native_identity": {
+                  "kind": "BINANCE_DEPTH_UPDATE",
+                  "first_update_id": 101,
+                  "final_update_id": 101
+                },
+                "source_event_at_utc_ms": 1502,
+                "received_at_utc_ms": 2002,
+                "collector_admission": {
+                  "source_sequence_epoch_id": "depth-a",
+                  "collector_admission_sequence": 2,
+                  "admitted_at_utc_ms": 2102
+                }
+              }
+            ]
+          },
+          "direct_time": {
+            "source_event_at_utc_ms": 1502,
+            "received_at_utc_ms": 2002
+          },
+          "dependency_time": {
+            "source_event_at_utc_ms": 1502,
+            "received_at_utc_ms": 2002
+          },
+          "quality": {
+            "availability": "fresh",
+            "resync": "NOT_REQUIRED"
+          },
+          "direct_sources": [
+            {
+              "source_kind": "binance_depth_update",
+              "source_message_id": "5e70132f70a25bc5624984395fb15423cd0877d625a9bb36b8788c144e643e17",
+              "source_native_identity": {
+                "kind": "BINANCE_DEPTH_UPDATE",
+                "first_update_id": 101,
+                "final_update_id": 101
+              },
+              "source_event_at_utc_ms": 1502,
+              "received_at_utc_ms": 2002,
+              "collector_admission": {
+                "source_sequence_epoch_id": "depth-a",
+                "collector_admission_sequence": 2,
+                "admitted_at_utc_ms": 2102
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "schema_version": "public-observation-v1",
+      "market": {
+        "condition_id": "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "clob_market_id": "3195576",
+        "window": {
+          "start_at_utc_ms": 20000,
+          "end_at_utc_ms": 30000
+        }
+      },
+      "group_id": "f6d600b568739a663a0010b31cbffde6f97d8b5759e6aa9319fcdb1ebd778f4b",
+      "group_position": 4,
+      "visible_prefix": {
+        "input_stream_id": "core-test",
+        "next_input_position": 5
+      },
+      "assets": [
+        {
+          "asset": {
+            "token_id": "3",
+            "outcome": {
+              "index": 1,
+              "label": "DOWN"
+            }
+          },
+          "bids": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "asks": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "best_bid_ask": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "valuation_best_bid": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "tick": {
+            "value": "0.01",
+            "quality": "fresh",
+            "direct_anchors": [
+              {
+                "field_path": "tick",
+                "position": {
+                  "input_stream_id": "core-test",
+                  "closed_at_input_position": 0,
+                  "fact_ordinal": 1
+                },
+                "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000
+              }
+            ],
+            "dependency_frontier": {
+              "input_stream_id": "core-test",
+              "next_input_position": 1
+            }
+          },
+          "public_trade": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          }
+        },
+        {
+          "asset": {
+            "token_id": "20",
+            "outcome": {
+              "index": 0,
+              "label": "UP"
+            }
+          },
+          "bids": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "asks": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "best_bid_ask": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "valuation_best_bid": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "tick": {
+            "value": "0.01",
+            "quality": "fresh",
+            "direct_anchors": [
+              {
+                "field_path": "tick",
+                "position": {
+                  "input_stream_id": "core-test",
+                  "closed_at_input_position": 0,
+                  "fact_ordinal": 2
+                },
+                "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000
+              }
+            ],
+            "dependency_frontier": {
+              "input_stream_id": "core-test",
+              "next_input_position": 1
+            }
+          },
+          "public_trade": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          }
+        }
+      ],
+      "lifecycle": {
+        "value": {
+          "mapping": "KNOWN",
+          "value": "prefetched"
+        },
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "lifecycle",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 0,
+              "fact_ordinal": 3
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 1
+        }
+      },
+      "active": {
+        "value": true,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "active",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 0,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 1
+        }
+      },
+      "closed": {
+        "value": false,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "closed",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 0,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 1
+        }
+      },
+      "accepting_orders": {
+        "value": true,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "accepting_orders",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 0,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 1
+        }
+      },
+      "terminal": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "official_anchor": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "settlement_reference": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "temporary_reference": null,
+      "effective_reference": "Missing",
+      "chainlink_spot": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "chainlink_twap_thirty": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "chainlink_twap_sixty": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "binance_depth": {
+        "value": null,
+        "quality": "confirmed_gap",
+        "direct_anchors": [
+          {
+            "field_path": "binance_depth",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 4,
+              "fact_ordinal": 0
+            },
+            "group_id": "f6d600b568739a663a0010b31cbffde6f97d8b5759e6aa9319fcdb1ebd778f4b",
+            "source_message_id": "f6d600b568739a663a0010b31cbffde6f97d8b5759e6aa9319fcdb1ebd778f4b",
+            "source_event_at_utc_ms": 1503,
+            "received_at_utc_ms": 2003
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 5
+        }
+      },
+      "binance_trade": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "group_events": [
+        {
+          "position": {
+            "input_stream_id": "core-test",
+            "closed_at_input_position": 4,
+            "fact_ordinal": 0
+          },
+          "payload": {
+            "ReferenceFact": {
+              "reference_type": "binance_depth_state",
+              "reference": {
+                "symbol": "BTCUSDT",
+                "last_update_id": 101,
+                "bids": [
+                  {
+                    "price_usdt_per_btc": "64100",
+                    "quantity_btc": "0.2"
+                  },
+                  {
+                    "price_usdt_per_btc": "64000",
+                    "quantity_btc": "0.5"
+                  }
+                ],
+                "asks": [
+                  {
+                    "price_usdt_per_btc": "64200",
+                    "quantity_btc": "0.4"
+                  },
+                  {
+                    "price_usdt_per_btc": "64300",
+                    "quantity_btc": "0.3"
+                  }
+                ]
+              }
+            }
+          },
+          "source_refs": [
+            {
+              "input_stream_id": "core-test",
+              "input_position": 4
+            }
+          ],
+          "lineage": {
+            "canonical_rule_version": "rule-v1",
+            "source_evidence": [
+              {
+                "source_kind": "binance_depth_snapshot",
+                "source_message_id": "6004b0af9913ff5aa5e9bd79e4814ff84c7db1720cbc623c4315f1bf98217174",
+                "source_native_identity": {
+                  "kind": "BINANCE_DEPTH_SNAPSHOT",
+                  "last_update_id": 100
+                },
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 2001,
+                "collector_admission": {
+                  "source_sequence_epoch_id": "depth-a",
+                  "collector_admission_sequence": 1,
+                  "admitted_at_utc_ms": 2101
+                }
+              },
+              {
+                "source_kind": "binance_depth_update",
+                "source_message_id": "5e70132f70a25bc5624984395fb15423cd0877d625a9bb36b8788c144e643e17",
+                "source_native_identity": {
+                  "kind": "BINANCE_DEPTH_UPDATE",
+                  "first_update_id": 101,
+                  "final_update_id": 101
+                },
+                "source_event_at_utc_ms": 1502,
+                "received_at_utc_ms": 2002,
+                "collector_admission": {
+                  "source_sequence_epoch_id": "depth-a",
+                  "collector_admission_sequence": 2,
+                  "admitted_at_utc_ms": 2102
+                }
+              },
+              {
+                "source_kind": "binance_depth_update",
+                "source_message_id": "f6d600b568739a663a0010b31cbffde6f97d8b5759e6aa9319fcdb1ebd778f4b",
+                "source_native_identity": {
+                  "kind": "BINANCE_DEPTH_UPDATE",
+                  "first_update_id": 104,
+                  "final_update_id": 104
+                },
+                "source_event_at_utc_ms": 1503,
+                "received_at_utc_ms": 2003,
+                "collector_admission": {
+                  "source_sequence_epoch_id": "depth-a",
+                  "collector_admission_sequence": 3,
+                  "admitted_at_utc_ms": 2103
+                }
+              }
+            ]
+          },
+          "direct_time": {
+            "source_event_at_utc_ms": 1503,
+            "received_at_utc_ms": 2003
+          },
+          "dependency_time": {
+            "source_event_at_utc_ms": 1503,
+            "received_at_utc_ms": 2003
+          },
+          "quality": {
+            "availability": "confirmed_gap",
+            "resync": "REQUIRED"
+          },
+          "direct_sources": [
+            {
+              "source_kind": "binance_depth_update",
+              "source_message_id": "f6d600b568739a663a0010b31cbffde6f97d8b5759e6aa9319fcdb1ebd778f4b",
+              "source_native_identity": {
+                "kind": "BINANCE_DEPTH_UPDATE",
+                "first_update_id": 104,
+                "final_update_id": 104
+              },
+              "source_event_at_utc_ms": 1503,
+              "received_at_utc_ms": 2003,
+              "collector_admission": {
+                "source_sequence_epoch_id": "depth-a",
+                "collector_admission_sequence": 3,
+                "admitted_at_utc_ms": 2103
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "schema_version": "public-observation-v1",
+      "market": {
+        "condition_id": "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "clob_market_id": "3195577",
+        "window": {
+          "start_at_utc_ms": 20000,
+          "end_at_utc_ms": 30000
+        }
+      },
+      "group_id": "f6d600b568739a663a0010b31cbffde6f97d8b5759e6aa9319fcdb1ebd778f4b",
+      "group_position": 4,
+      "visible_prefix": {
+        "input_stream_id": "core-test",
+        "next_input_position": 5
+      },
+      "assets": [
+        {
+          "asset": {
+            "token_id": "3",
+            "outcome": {
+              "index": 1,
+              "label": "DOWN"
+            }
+          },
+          "bids": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "asks": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "best_bid_ask": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "valuation_best_bid": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "tick": {
+            "value": "0.01",
+            "quality": "fresh",
+            "direct_anchors": [
+              {
+                "field_path": "tick",
+                "position": {
+                  "input_stream_id": "core-test",
+                  "closed_at_input_position": 1,
+                  "fact_ordinal": 1
+                },
+                "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000
+              }
+            ],
+            "dependency_frontier": {
+              "input_stream_id": "core-test",
+              "next_input_position": 2
+            }
+          },
+          "public_trade": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          }
+        },
+        {
+          "asset": {
+            "token_id": "20",
+            "outcome": {
+              "index": 0,
+              "label": "UP"
+            }
+          },
+          "bids": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "asks": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "best_bid_ask": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "valuation_best_bid": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "tick": {
+            "value": "0.01",
+            "quality": "fresh",
+            "direct_anchors": [
+              {
+                "field_path": "tick",
+                "position": {
+                  "input_stream_id": "core-test",
+                  "closed_at_input_position": 1,
+                  "fact_ordinal": 2
+                },
+                "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000
+              }
+            ],
+            "dependency_frontier": {
+              "input_stream_id": "core-test",
+              "next_input_position": 2
+            }
+          },
+          "public_trade": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          }
+        }
+      ],
+      "lifecycle": {
+        "value": {
+          "mapping": "KNOWN",
+          "value": "prefetched"
+        },
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "lifecycle",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 1,
+              "fact_ordinal": 3
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 2
+        }
+      },
+      "active": {
+        "value": true,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "active",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 1,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 2
+        }
+      },
+      "closed": {
+        "value": false,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "closed",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 1,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 2
+        }
+      },
+      "accepting_orders": {
+        "value": true,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "accepting_orders",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 1,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 2
+        }
+      },
+      "terminal": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "official_anchor": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "settlement_reference": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "temporary_reference": null,
+      "effective_reference": "Missing",
+      "chainlink_spot": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "chainlink_twap_thirty": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "chainlink_twap_sixty": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "binance_depth": {
+        "value": null,
+        "quality": "confirmed_gap",
+        "direct_anchors": [
+          {
+            "field_path": "binance_depth",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 4,
+              "fact_ordinal": 0
+            },
+            "group_id": "f6d600b568739a663a0010b31cbffde6f97d8b5759e6aa9319fcdb1ebd778f4b",
+            "source_message_id": "f6d600b568739a663a0010b31cbffde6f97d8b5759e6aa9319fcdb1ebd778f4b",
+            "source_event_at_utc_ms": 1503,
+            "received_at_utc_ms": 2003
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 5
+        }
+      },
+      "binance_trade": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "group_events": [
+        {
+          "position": {
+            "input_stream_id": "core-test",
+            "closed_at_input_position": 4,
+            "fact_ordinal": 0
+          },
+          "payload": {
+            "ReferenceFact": {
+              "reference_type": "binance_depth_state",
+              "reference": {
+                "symbol": "BTCUSDT",
+                "last_update_id": 101,
+                "bids": [
+                  {
+                    "price_usdt_per_btc": "64100",
+                    "quantity_btc": "0.2"
+                  },
+                  {
+                    "price_usdt_per_btc": "64000",
+                    "quantity_btc": "0.5"
+                  }
+                ],
+                "asks": [
+                  {
+                    "price_usdt_per_btc": "64200",
+                    "quantity_btc": "0.4"
+                  },
+                  {
+                    "price_usdt_per_btc": "64300",
+                    "quantity_btc": "0.3"
+                  }
+                ]
+              }
+            }
+          },
+          "source_refs": [
+            {
+              "input_stream_id": "core-test",
+              "input_position": 4
+            }
+          ],
+          "lineage": {
+            "canonical_rule_version": "rule-v1",
+            "source_evidence": [
+              {
+                "source_kind": "binance_depth_snapshot",
+                "source_message_id": "6004b0af9913ff5aa5e9bd79e4814ff84c7db1720cbc623c4315f1bf98217174",
+                "source_native_identity": {
+                  "kind": "BINANCE_DEPTH_SNAPSHOT",
+                  "last_update_id": 100
+                },
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 2001,
+                "collector_admission": {
+                  "source_sequence_epoch_id": "depth-a",
+                  "collector_admission_sequence": 1,
+                  "admitted_at_utc_ms": 2101
+                }
+              },
+              {
+                "source_kind": "binance_depth_update",
+                "source_message_id": "5e70132f70a25bc5624984395fb15423cd0877d625a9bb36b8788c144e643e17",
+                "source_native_identity": {
+                  "kind": "BINANCE_DEPTH_UPDATE",
+                  "first_update_id": 101,
+                  "final_update_id": 101
+                },
+                "source_event_at_utc_ms": 1502,
+                "received_at_utc_ms": 2002,
+                "collector_admission": {
+                  "source_sequence_epoch_id": "depth-a",
+                  "collector_admission_sequence": 2,
+                  "admitted_at_utc_ms": 2102
+                }
+              },
+              {
+                "source_kind": "binance_depth_update",
+                "source_message_id": "f6d600b568739a663a0010b31cbffde6f97d8b5759e6aa9319fcdb1ebd778f4b",
+                "source_native_identity": {
+                  "kind": "BINANCE_DEPTH_UPDATE",
+                  "first_update_id": 104,
+                  "final_update_id": 104
+                },
+                "source_event_at_utc_ms": 1503,
+                "received_at_utc_ms": 2003,
+                "collector_admission": {
+                  "source_sequence_epoch_id": "depth-a",
+                  "collector_admission_sequence": 3,
+                  "admitted_at_utc_ms": 2103
+                }
+              }
+            ]
+          },
+          "direct_time": {
+            "source_event_at_utc_ms": 1503,
+            "received_at_utc_ms": 2003
+          },
+          "dependency_time": {
+            "source_event_at_utc_ms": 1503,
+            "received_at_utc_ms": 2003
+          },
+          "quality": {
+            "availability": "confirmed_gap",
+            "resync": "REQUIRED"
+          },
+          "direct_sources": [
+            {
+              "source_kind": "binance_depth_update",
+              "source_message_id": "f6d600b568739a663a0010b31cbffde6f97d8b5759e6aa9319fcdb1ebd778f4b",
+              "source_native_identity": {
+                "kind": "BINANCE_DEPTH_UPDATE",
+                "first_update_id": 104,
+                "final_update_id": 104
+              },
+              "source_event_at_utc_ms": 1503,
+              "received_at_utc_ms": 2003,
+              "collector_admission": {
+                "source_sequence_epoch_id": "depth-a",
+                "collector_admission_sequence": 3,
+                "admitted_at_utc_ms": 2103
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  [
+    {
+      "schema_version": "public-observation-v1",
+      "market": {
+        "condition_id": "0x1111111111111111111111111111111111111111111111111111111111111111",
+        "clob_market_id": "3195576",
+        "window": {
+          "start_at_utc_ms": 20000,
+          "end_at_utc_ms": 30000
+        }
+      },
+      "group_id": "4571fe2fc933efaad5d34a81efd5e1e0fd40d2181dd83a5b03beea29536471f4",
+      "group_position": 5,
+      "visible_prefix": {
+        "input_stream_id": "core-test",
+        "next_input_position": 6
+      },
+      "assets": [
+        {
+          "asset": {
+            "token_id": "3",
+            "outcome": {
+              "index": 1,
+              "label": "DOWN"
+            }
+          },
+          "bids": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "asks": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "best_bid_ask": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "valuation_best_bid": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "tick": {
+            "value": "0.01",
+            "quality": "fresh",
+            "direct_anchors": [
+              {
+                "field_path": "tick",
+                "position": {
+                  "input_stream_id": "core-test",
+                  "closed_at_input_position": 0,
+                  "fact_ordinal": 1
+                },
+                "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000
+              }
+            ],
+            "dependency_frontier": {
+              "input_stream_id": "core-test",
+              "next_input_position": 1
+            }
+          },
+          "public_trade": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          }
+        },
+        {
+          "asset": {
+            "token_id": "20",
+            "outcome": {
+              "index": 0,
+              "label": "UP"
+            }
+          },
+          "bids": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "asks": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "best_bid_ask": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "valuation_best_bid": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "tick": {
+            "value": "0.01",
+            "quality": "fresh",
+            "direct_anchors": [
+              {
+                "field_path": "tick",
+                "position": {
+                  "input_stream_id": "core-test",
+                  "closed_at_input_position": 0,
+                  "fact_ordinal": 2
+                },
+                "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000
+              }
+            ],
+            "dependency_frontier": {
+              "input_stream_id": "core-test",
+              "next_input_position": 1
+            }
+          },
+          "public_trade": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          }
+        }
+      ],
+      "lifecycle": {
+        "value": {
+          "mapping": "KNOWN",
+          "value": "prefetched"
+        },
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "lifecycle",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 0,
+              "fact_ordinal": 3
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 1
+        }
+      },
+      "active": {
+        "value": true,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "active",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 0,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 1
+        }
+      },
+      "closed": {
+        "value": false,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "closed",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 0,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 1
+        }
+      },
+      "accepting_orders": {
+        "value": true,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "accepting_orders",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 0,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 1
+        }
+      },
+      "terminal": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "official_anchor": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "settlement_reference": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "temporary_reference": null,
+      "effective_reference": "Missing",
+      "chainlink_spot": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "chainlink_twap_thirty": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "chainlink_twap_sixty": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "binance_depth": {
+        "value": {
+          "symbol": "BTCUSDT",
+          "last_update_id": 200,
+          "bids": [
+            {
+              "price_usdt_per_btc": "64100",
+              "quantity_btc": "0.7"
+            },
+            {
+              "price_usdt_per_btc": "64000",
+              "quantity_btc": "0.5"
+            }
+          ],
+          "asks": [
+            {
+              "price_usdt_per_btc": "64200",
+              "quantity_btc": "0.4"
+            },
+            {
+              "price_usdt_per_btc": "64300",
+              "quantity_btc": "0.3"
+            }
+          ]
+        },
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "binance_depth",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 5,
+              "fact_ordinal": 0
+            },
+            "group_id": "4571fe2fc933efaad5d34a81efd5e1e0fd40d2181dd83a5b03beea29536471f4",
+            "source_message_id": "4571fe2fc933efaad5d34a81efd5e1e0fd40d2181dd83a5b03beea29536471f4",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 2001
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 6
+        }
+      },
+      "binance_trade": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "group_events": [
+        {
+          "position": {
+            "input_stream_id": "core-test",
+            "closed_at_input_position": 5,
+            "fact_ordinal": 0
+          },
+          "payload": {
+            "ReferenceFact": {
+              "reference_type": "binance_depth_state",
+              "reference": {
+                "symbol": "BTCUSDT",
+                "last_update_id": 200,
+                "bids": [
+                  {
+                    "price_usdt_per_btc": "64100",
+                    "quantity_btc": "0.7"
+                  },
+                  {
+                    "price_usdt_per_btc": "64000",
+                    "quantity_btc": "0.5"
+                  }
+                ],
+                "asks": [
+                  {
+                    "price_usdt_per_btc": "64200",
+                    "quantity_btc": "0.4"
+                  },
+                  {
+                    "price_usdt_per_btc": "64300",
+                    "quantity_btc": "0.3"
+                  }
+                ]
+              }
+            }
+          },
+          "source_refs": [
+            {
+              "input_stream_id": "core-test",
+              "input_position": 5
+            }
+          ],
+          "lineage": {
+            "canonical_rule_version": "rule-v1",
+            "source_evidence": [
+              {
+                "source_kind": "binance_depth_snapshot",
+                "source_message_id": "4571fe2fc933efaad5d34a81efd5e1e0fd40d2181dd83a5b03beea29536471f4",
+                "source_native_identity": {
+                  "kind": "BINANCE_DEPTH_SNAPSHOT",
+                  "last_update_id": 200
+                },
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 2001,
+                "collector_admission": {
+                  "source_sequence_epoch_id": "depth-b",
+                  "collector_admission_sequence": 1,
+                  "admitted_at_utc_ms": 2101
+                }
+              }
+            ]
+          },
+          "direct_time": {
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 2001
+          },
+          "dependency_time": {
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 2001
+          },
+          "quality": {
+            "availability": "fresh",
+            "resync": "RESYNC_BOUNDARY"
+          },
+          "direct_sources": [
+            {
+              "source_kind": "binance_depth_snapshot",
+              "source_message_id": "4571fe2fc933efaad5d34a81efd5e1e0fd40d2181dd83a5b03beea29536471f4",
+              "source_native_identity": {
+                "kind": "BINANCE_DEPTH_SNAPSHOT",
+                "last_update_id": 200
+              },
+              "source_event_at_utc_ms": null,
+              "received_at_utc_ms": 2001,
+              "collector_admission": {
+                "source_sequence_epoch_id": "depth-b",
+                "collector_admission_sequence": 1,
+                "admitted_at_utc_ms": 2101
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "schema_version": "public-observation-v1",
+      "market": {
+        "condition_id": "0x2222222222222222222222222222222222222222222222222222222222222222",
+        "clob_market_id": "3195577",
+        "window": {
+          "start_at_utc_ms": 20000,
+          "end_at_utc_ms": 30000
+        }
+      },
+      "group_id": "4571fe2fc933efaad5d34a81efd5e1e0fd40d2181dd83a5b03beea29536471f4",
+      "group_position": 5,
+      "visible_prefix": {
+        "input_stream_id": "core-test",
+        "next_input_position": 6
+      },
+      "assets": [
+        {
+          "asset": {
+            "token_id": "3",
+            "outcome": {
+              "index": 1,
+              "label": "DOWN"
+            }
+          },
+          "bids": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "asks": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "best_bid_ask": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "valuation_best_bid": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "tick": {
+            "value": "0.01",
+            "quality": "fresh",
+            "direct_anchors": [
+              {
+                "field_path": "tick",
+                "position": {
+                  "input_stream_id": "core-test",
+                  "closed_at_input_position": 1,
+                  "fact_ordinal": 1
+                },
+                "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000
+              }
+            ],
+            "dependency_frontier": {
+              "input_stream_id": "core-test",
+              "next_input_position": 2
+            }
+          },
+          "public_trade": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          }
+        },
+        {
+          "asset": {
+            "token_id": "20",
+            "outcome": {
+              "index": 0,
+              "label": "UP"
+            }
+          },
+          "bids": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "asks": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "best_bid_ask": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "valuation_best_bid": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          },
+          "tick": {
+            "value": "0.01",
+            "quality": "fresh",
+            "direct_anchors": [
+              {
+                "field_path": "tick",
+                "position": {
+                  "input_stream_id": "core-test",
+                  "closed_at_input_position": 1,
+                  "fact_ordinal": 2
+                },
+                "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 10000
+              }
+            ],
+            "dependency_frontier": {
+              "input_stream_id": "core-test",
+              "next_input_position": 2
+            }
+          },
+          "public_trade": {
+            "value": null,
+            "quality": "unknown_not_observed",
+            "direct_anchors": [],
+            "dependency_frontier": null
+          }
+        }
+      ],
+      "lifecycle": {
+        "value": {
+          "mapping": "KNOWN",
+          "value": "prefetched"
+        },
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "lifecycle",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 1,
+              "fact_ordinal": 3
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 2
+        }
+      },
+      "active": {
+        "value": true,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "active",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 1,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 2
+        }
+      },
+      "closed": {
+        "value": false,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "closed",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 1,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 2
+        }
+      },
+      "accepting_orders": {
+        "value": true,
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "accepting_orders",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 1,
+              "fact_ordinal": 4
+            },
+            "group_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_message_id": "740577bb995115a83d410c1deb3a4dda2c4192bc6ca214b62da05a094272934f",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 10000
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 2
+        }
+      },
+      "terminal": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "official_anchor": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "settlement_reference": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "temporary_reference": null,
+      "effective_reference": "Missing",
+      "chainlink_spot": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "chainlink_twap_thirty": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "chainlink_twap_sixty": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "binance_depth": {
+        "value": {
+          "symbol": "BTCUSDT",
+          "last_update_id": 200,
+          "bids": [
+            {
+              "price_usdt_per_btc": "64100",
+              "quantity_btc": "0.7"
+            },
+            {
+              "price_usdt_per_btc": "64000",
+              "quantity_btc": "0.5"
+            }
+          ],
+          "asks": [
+            {
+              "price_usdt_per_btc": "64200",
+              "quantity_btc": "0.4"
+            },
+            {
+              "price_usdt_per_btc": "64300",
+              "quantity_btc": "0.3"
+            }
+          ]
+        },
+        "quality": "fresh",
+        "direct_anchors": [
+          {
+            "field_path": "binance_depth",
+            "position": {
+              "input_stream_id": "core-test",
+              "closed_at_input_position": 5,
+              "fact_ordinal": 0
+            },
+            "group_id": "4571fe2fc933efaad5d34a81efd5e1e0fd40d2181dd83a5b03beea29536471f4",
+            "source_message_id": "4571fe2fc933efaad5d34a81efd5e1e0fd40d2181dd83a5b03beea29536471f4",
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 2001
+          }
+        ],
+        "dependency_frontier": {
+          "input_stream_id": "core-test",
+          "next_input_position": 6
+        }
+      },
+      "binance_trade": {
+        "value": null,
+        "quality": "unknown_not_observed",
+        "direct_anchors": [],
+        "dependency_frontier": null
+      },
+      "group_events": [
+        {
+          "position": {
+            "input_stream_id": "core-test",
+            "closed_at_input_position": 5,
+            "fact_ordinal": 0
+          },
+          "payload": {
+            "ReferenceFact": {
+              "reference_type": "binance_depth_state",
+              "reference": {
+                "symbol": "BTCUSDT",
+                "last_update_id": 200,
+                "bids": [
+                  {
+                    "price_usdt_per_btc": "64100",
+                    "quantity_btc": "0.7"
+                  },
+                  {
+                    "price_usdt_per_btc": "64000",
+                    "quantity_btc": "0.5"
+                  }
+                ],
+                "asks": [
+                  {
+                    "price_usdt_per_btc": "64200",
+                    "quantity_btc": "0.4"
+                  },
+                  {
+                    "price_usdt_per_btc": "64300",
+                    "quantity_btc": "0.3"
+                  }
+                ]
+              }
+            }
+          },
+          "source_refs": [
+            {
+              "input_stream_id": "core-test",
+              "input_position": 5
+            }
+          ],
+          "lineage": {
+            "canonical_rule_version": "rule-v1",
+            "source_evidence": [
+              {
+                "source_kind": "binance_depth_snapshot",
+                "source_message_id": "4571fe2fc933efaad5d34a81efd5e1e0fd40d2181dd83a5b03beea29536471f4",
+                "source_native_identity": {
+                  "kind": "BINANCE_DEPTH_SNAPSHOT",
+                  "last_update_id": 200
+                },
+                "source_event_at_utc_ms": null,
+                "received_at_utc_ms": 2001,
+                "collector_admission": {
+                  "source_sequence_epoch_id": "depth-b",
+                  "collector_admission_sequence": 1,
+                  "admitted_at_utc_ms": 2101
+                }
+              }
+            ]
+          },
+          "direct_time": {
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 2001
+          },
+          "dependency_time": {
+            "source_event_at_utc_ms": null,
+            "received_at_utc_ms": 2001
+          },
+          "quality": {
+            "availability": "fresh",
+            "resync": "RESYNC_BOUNDARY"
+          },
+          "direct_sources": [
+            {
+              "source_kind": "binance_depth_snapshot",
+              "source_message_id": "4571fe2fc933efaad5d34a81efd5e1e0fd40d2181dd83a5b03beea29536471f4",
+              "source_native_identity": {
+                "kind": "BINANCE_DEPTH_SNAPSHOT",
+                "last_update_id": 200
+              },
+              "source_event_at_utc_ms": null,
+              "received_at_utc_ms": 2001,
+              "collector_admission": {
+                "source_sequence_epoch_id": "depth-b",
+                "collector_admission_sequence": 1,
+                "admitted_at_utc_ms": 2101
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+]

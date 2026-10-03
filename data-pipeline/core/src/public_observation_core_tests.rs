@@ -1,6 +1,8 @@
 use super::*;
 use crate::public_reference::*;
 use sha2::{Digest, Sha256};
+#[path = "public_observation_depth_tests.rs"]
+mod depth_tests;
 const CONDITION_ID: &str = "0x1111111111111111111111111111111111111111111111111111111111111111";
 const CLOB_MARKET_ID: &str = "3195576";
 const UP_TOKEN_ID: &str = "20";
