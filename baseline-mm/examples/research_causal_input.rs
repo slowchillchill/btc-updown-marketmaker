@@ -503,12 +503,20 @@ struct Sampler {
 }
 impl Sampler {
     fn before(&mut self, next_group_at: i64, analysis: &Analysis, end: i64) -> Result<()> {
+        self.before_with(next_group_at, end, |cutoff| analysis.snapshot(cutoff, end))
+    }
+    fn before_with(
+        &mut self,
+        next_group_at: i64,
+        end: i64,
+        mut snapshot: impl FnMut(i64) -> Result<Value>,
+    ) -> Result<()> {
         // 严格小于下一组：相同可见毫秒的所有完整组先消费，再冻结。
         while self.next < REMAINING_SECONDS.len()
             && end - REMAINING_SECONDS[self.next] * 1000 < next_group_at
         {
             self.frozen
-                .push(analysis.snapshot(end - REMAINING_SECONDS[self.next] * 1000, end)?);
+                .push(snapshot(end - REMAINING_SECONDS[self.next] * 1000)?);
             self.next += 1;
         }
         Ok(())
@@ -671,6 +679,8 @@ fn analyze(config: &Config) -> Result<Value> {
         "method_note":"一次原reader遍历，各市场按自身八截止和右边界冻结；窗前合法历史与窗内分母分列。事后同condition标签质量/来源另存，不回填特征、不计算概率/参数/收益。"}),
     )
 }
+#[path = "research_causal_input/first_fit_hour.rs"]
+mod first_fit_hour;
 #[path = "research_causal_input/window_statistics.rs"]
 mod window_statistics;
 
@@ -678,6 +688,9 @@ fn main() -> Result<()> {
     let args = std::env::args().skip(1).collect::<Vec<_>>();
     if args.len() == 3 && args[0] == "--retained-windows" {
         return window_statistics::run(&args[1], &args[2]);
+    }
+    if args.len() == 3 && args[0] == "--first-fit-hour" {
+        return first_fit_hour::run(&args[1], &args[2]);
     }
     if args.len() != 2 {
         return Err("用法 research_causal_input <CONFIG_JSON> <REPORT_JSON> 或 --retained-windows <INPUT_JSON> <REPORT_JSON>".into());
@@ -699,7 +712,7 @@ mod common;
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn fixture() -> ClosedBusinessGroupV1 {
+    pub(super) fn fixture() -> ClosedBusinessGroupV1 {
         let temp = tempfile::tempdir().unwrap();
         let public = temp.path().join("public");
         common::recorded_memory_complete(&public);
@@ -715,7 +728,7 @@ mod tests {
             .as_ref()
             .clone()
     }
-    fn spot(id: u64, t: i64, price: &str) -> ObservedFactV1<ChainlinkBtcUsdReferenceV1> {
+    pub(super) fn spot(id: u64, t: i64, price: &str) -> ObservedFactV1<ChainlinkBtcUsdReferenceV1> {
         ObservedFactV1 {
             value: Some(ChainlinkBtcUsdReferenceV1 {
                 symbol: "btc/usd".into(),

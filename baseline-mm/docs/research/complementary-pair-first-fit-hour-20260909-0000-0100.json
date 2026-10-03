@@ -1,0 +1,336 @@
+{
+  "schema": "complementary_pair_first_fit_hour_attempt_v1",
+  "delivery_pr": "https://github.com/slowchillchill/btc-updown-marketmaker/pull/213",
+  "status": "prepare_failed",
+  "hour_input_accumulation_goal_completed": false,
+  "execution_counts": {
+    "original_prepare": 1,
+    "generic_statistics": 0,
+    "research_group_reader": 0,
+    "retries": 0
+  },
+  "scope": {
+    "manifest_paths": [
+      "<INPUT_ROOT>/2026-09-09/typed_raw/utc_day=2026-09-09/manifest.json"
+    ],
+    "purpose": "D-0270/D-0277 #185 task3 first fit fold first hour input accumulation; no accounts or parameter fitting",
+    "received_end_utc_ms": 1788915600000,
+    "received_start_utc_ms": 1788912000000
+  },
+  "effective_preparation_logical_paths": {
+    "canonical": {
+      "canonical_rule_version": "canonical-reduction-v1",
+      "decode_batch_rows": 1024,
+      "max_decode_batch_bytes": 67108864,
+      "max_epoch_count_per_source": 1024,
+      "max_pending_ws_terminals": 1024,
+      "max_retained_reducer_entries": 1000000,
+      "max_temporary_row_bytes": 16777216,
+      "sort": {
+        "batch_rows": 1024,
+        "max_open_files": 16,
+        "max_run_bytes": 67108864,
+        "max_run_rows": 32768,
+        "max_temp_bytes": 8589934592,
+        "max_temp_run_files": 128,
+        "merge_fan_in": 8
+      }
+    },
+    "header": {
+      "canonical_rule_version": "canonical-reduction-v1",
+      "initial_state": "Empty",
+      "input_scope": "explicit-manifest/2026-09-09/research-first-fit-hour",
+      "input_stream_id": "complementary-pair-first-fit-hour-20260909-0000-0100",
+      "max_pending_ws_terminals": 1024,
+      "observation_version": "market_business_observation_v1",
+      "ordering_version": "historical-source-head-v2"
+    },
+    "hidden_stream_id": "complementary-pair-first-fit-hour-hidden-20260909-0000-0100",
+    "max_read_batch_bytes": 67108864,
+    "metadata_initialization": {
+      "files": [
+        {
+          "manifest_path": "<INPUT_ROOT>/2026-09-08/typed_raw/utc_day=2026-09-08/manifest.json",
+          "relative_paths": [
+            "source_kind=polymarket_market_metadata/polymarket_market_metadata_23.parquet"
+          ]
+        }
+      ],
+      "markets": [
+        {
+          "condition_id": "0x1fc54206bf570dbdf843a88d608aee9df9eac980a9ab47e400d787d732f7b748",
+          "snapshot_source_message_id": "d3842b75d06c65d26d38c87e9520c14a0c11d0bf5d210c70dc62ae883b9097e5"
+        },
+        {
+          "condition_id": "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20",
+          "snapshot_source_message_id": "c11b6b3d60cb590a314f6de3a748de5923b4376d3fee8f4a7583fe7bd36ede42"
+        }
+      ],
+      "purpose": "D-0276 initialization semantics reused under D-0270/D-0277 #185 first fit hour; complete same-market Existing metadata, no prior prices",
+      "received_end_utc_ms": 1788915600000,
+      "received_start_utc_ms": 1788912000000
+    },
+    "read_page_rows": 256,
+    "recording": {
+      "max_artifact_payload_bytes": 16777216,
+      "max_candidate_directory_bytes": 34359738368,
+      "max_capture_output_bytes": 17179869184,
+      "max_observation_l2_levels": 10000,
+      "sort": {
+        "batch_rows": 1024,
+        "max_open_files": 16,
+        "max_run_bytes": 67108864,
+        "max_run_rows": 32768,
+        "max_temp_bytes": 8589934592,
+        "max_temp_run_files": 128,
+        "merge_fan_in": 8
+      }
+    },
+    "scope": {
+      "manifest_paths": [
+        "<INPUT_ROOT>/2026-09-09/typed_raw/utc_day=2026-09-09/manifest.json"
+      ],
+      "purpose": "D-0270/D-0277 #185 task3 first fit fold first hour input accumulation; no accounts or parameter fitting",
+      "received_end_utc_ms": 1788915600000,
+      "received_start_utc_ms": 1788912000000
+    },
+    "work_root": "<THIS_TRIAL>/materials"
+  },
+  "previous_admission_evidence": {
+    "report": "complementary-pair-input-audit-20260909-20260926.json",
+    "first_day": {
+      "manifest_sha256": "93a70f4775bdb3d52bf7de73d58caaa5ccbf2f2d7f6a8e2f00e09c092e1f1918",
+      "status": "admitted",
+      "utc_day": "2026-09-09",
+      "verified_bytes": 2169975828,
+      "verified_files": 145,
+      "verified_rows": 34766440
+    },
+    "metadata_23_file": {
+      "utc_day": "2026-09-08",
+      "relative_path": "source_kind=polymarket_market_metadata/polymarket_market_metadata_23.parquet",
+      "bytes": 97043,
+      "rows": 792,
+      "sha256": "c3bd000a74909abc1725b7bbe0fe3a72ebf7416b772c0ca28af859568c2f9154"
+    },
+    "note": "既有准入及同一配置选定源；不把前日选定单文件准入扩大为前日全日准入，本次失败未返回新完整组合身份。"
+  },
+  "failure": {
+    "source": "data-pipeline/training/src/gate_a.rs::SharedQuotaWriter::write",
+    "reported_prepare_error": "External: 捕获产物超过冻结的总字节上限",
+    "io_kind": "StorageFull",
+    "meaning": "原显式捕获字节配额，非系统磁盘耗尽、非元数据初始化回退",
+    "max_capture_output_bytes": 17179869184,
+    "comparison": "成功写入累计字节 + 本次请求写入字节 > 配置上限时，在写入前返回原错误"
+  },
+  "preparation_measurement": {
+    "proc_io": {
+      "cancelled_write_bytes": 0,
+      "rchar": 163200256677,
+      "read_bytes": 3437809664,
+      "syscr": 37239509,
+      "syscw": 2214984,
+      "wchar": 17877419212,
+      "write_bytes": 17892081664
+    },
+    "system_seconds": 26.05,
+    "user_seconds": 2606.83,
+    "wall_seconds": 2646.719391811
+  },
+  "gnu_process_resources": {
+    "wall_seconds": 2646.74,
+    "user_seconds": 2606.83,
+    "system_seconds": 26.07,
+    "maximum_rss_kib": 527460,
+    "file_system_input_blocks_512_bytes": 6714472,
+    "file_system_output_blocks_512_bytes": 34945504,
+    "exit_code": 1
+  },
+  "resource_monitor": {
+    "monitor_wall_seconds": 2655.9199582059955,
+    "sample_interval_seconds": 1,
+    "peak_note": "采样峰值仅为观测下界；遍历不是原子快照",
+    "sampled_peak_logical_bytes_lower_bound": 17418830178,
+    "sampled_peak_allocated_bytes_lower_bound": 17418862592,
+    "final_exact": {
+      "files": 8,
+      "logical_bytes": 17418830178,
+      "allocated_bytes": 17418862592
+    },
+    "final_subdirectories": {
+      "merge": {
+        "files": 6,
+        "logical_bytes": 238962262,
+        "allocated_bytes": 238985216
+      },
+      "public": {
+        "files": 2,
+        "logical_bytes": 17179867916,
+        "allocated_bytes": 17179877376
+      },
+      "hidden": {
+        "files": 0,
+        "logical_bytes": 0,
+        "allocated_bytes": 0
+      }
+    },
+    "final_files": [
+      {
+        "path": "merge/5/dpt-external-sort/sorted.parquet",
+        "logical_bytes": 893388,
+        "allocated_bytes": 897024,
+        "sha256": "1ed8fe55a0d0c5779313058b0ba3b1310659dbc9dd3448030b1e2e1fabd3541a"
+      },
+      {
+        "path": "merge/0/dpt-external-sort/sorted.parquet",
+        "logical_bytes": 269240,
+        "allocated_bytes": 270336,
+        "sha256": "2cf4014a14d23ec07f3344a5e6625c73f0c258ac6eeeaa4938ecf7c908afb149"
+      },
+      {
+        "path": "merge/4/dpt-external-sort/sorted.parquet",
+        "logical_bytes": 798037,
+        "allocated_bytes": 798720,
+        "sha256": "22e5ed09116694965eeaa8936c1561f992c0093bd71d123f069d611359ec05a0"
+      },
+      {
+        "path": "merge/3/dpt-external-sort/sorted.parquet",
+        "logical_bytes": 4406401,
+        "allocated_bytes": 4411392,
+        "sha256": "6c0758da51fd7e73965256a2554d8ef3f48b6e6ba14c7a2f8aedc651096f1d45"
+      },
+      {
+        "path": "merge/1/dpt-external-sort/sorted.parquet",
+        "logical_bytes": 221648941,
+        "allocated_bytes": 221655040,
+        "sha256": "22b1dd37f93d87cb5c6aedb5e3bf9e8c2ededb47a8bd62da90ed8bd3626e1dd5"
+      },
+      {
+        "path": "merge/2/dpt-external-sort/sorted.parquet",
+        "logical_bytes": 10946255,
+        "allocated_bytes": 10952704,
+        "sha256": "cb8698389c239140410f3aa856e38d3c5500500e7c121f164792c9e29dcfaebb"
+      },
+      {
+        "path": "public/stream.json",
+        "logical_bytes": 351,
+        "allocated_bytes": 4096,
+        "sha256": "f53f4c31c46051be86850570ae15025bb99f0b02fb628df34f9cb2a235a834d2"
+      },
+      {
+        "path": "public/pending-00000000000000000000/captured.parquet",
+        "logical_bytes": 17179867565,
+        "allocated_bytes": 17179873280,
+        "sha256": "79d9e7c6e4ac6f55bcef2702aa1f8b2c6197365599af3cd243484a234dae3d08"
+      }
+    ]
+  },
+  "disk_available_bytes_before_monitor": 234404724736,
+  "cache_sampling": {
+    "cache-before-build.private.json": {
+      "at_utc": "2026-10-03T12:55:13.833838+00:00",
+      "files": 42544,
+      "logical_bytes": 23507140629,
+      "allocated_bytes": 23572221952,
+      "disk_free_bytes": 234479849472
+    },
+    "cache-before-real-run.private.json": {
+      "utc": "2026-10-03T13:06:12.895312+00:00",
+      "logical_bytes": 23520449656,
+      "allocated_bytes": 23585583104,
+      "files": 42559,
+      "disk_free_bytes": 234404855808
+    },
+    "cache-after-real-run.private.json": {
+      "utc": "2026-10-03T13:51:24.271078+00:00",
+      "files": 42559,
+      "logical_bytes": 23520449656,
+      "allocated_bytes": 23585583104,
+      "disk_free_bytes": 216966422528
+    }
+  },
+  "cache_sampling_note": "逐文件路径st_size/st_blocks汇总，未去重硬链接，不是独占物理耗盘量；运行阶段同口径变化0。",
+  "unexecuted_results": {
+    "generic_statistics": null,
+    "research": null,
+    "normal_committed_prefix": null,
+    "hidden_preparation": null,
+    "actual_market_catalog": null,
+    "labels": null,
+    "frozen_windows": null,
+    "first_two_market_business_comparison": null,
+    "note": "null表示未执行/未形成，不表示测得零；没有解析partial补出正常End/EOF、市场或窗口结果。"
+  },
+  "research_tool": {
+    "actual_run_count": 0,
+    "representative_tests_passed": 13,
+    "workspace_tests": {
+      "passed": 1267,
+      "failed": 0,
+      "ignored": 21,
+      "explicitly_skipped": "four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second"
+    },
+    "fmt": "passed",
+    "default_applicable_clippy": "passed with existing dependency warnings",
+    "design": "每完整组有观察时最多选一份完整chainlink_spot喂唯一History；原records一次计真实ReferenceFact位置；保留quality/anchors，不由价事实重建quality。",
+    "cross_source_projection": "按spot完整状态更新及冻结采样保存；最新接收锚/锚总数/省略数明确，不复制L2/谱系，不覆盖所有独立Binance创新。无锚时received字段沿原received()使用可见/采样时刻回退，不是实际接收证据。"
+  },
+  "implementation_identity": {
+    "base_commit": "ab040f08d5a59c1e64138ff4d8081e5fba3098f9",
+    "measurement_source_commit": "152fff94386b60d46b7fb6b5613ac7d5606af1c2",
+    "cargo_lock_sha256": "4d78694113785b3c6e6776f903be1076414496206a2319ce43d15433674d88e3",
+    "material_trial_binary": {
+      "sha256": "7c73fcfdb1d52e5af063094e98dcf0a26ad3dd85577c5a13b92a1324412e9b2e",
+      "bytes": 20861608
+    },
+    "research_binary_not_executed": {
+      "sha256": "6f3d220199fb88bea64a74773c417e82fd23553adb66949606ef0ac38076e2f8",
+      "bytes": 14933344
+    },
+    "source_files": {
+      "Cargo.lock": {
+        "sha256": "4d78694113785b3c6e6776f903be1076414496206a2319ce43d15433674d88e3",
+        "bytes": 131147
+      },
+      "baseline-mm/examples/research_causal_input.rs": {
+        "sha256": "522938d6a5bd45740409b4f50db3a658371242d84d1234859bdd143edc4c742b",
+        "bytes": 45007
+      },
+      "baseline-mm/examples/research_causal_input/first_fit_hour.rs": {
+        "sha256": "082e3d6f6930fabe054935843a4d8037218bdd69990ec8313a2d98953fc10338",
+        "bytes": 18505
+      },
+      "baseline-mm/examples/research_causal_input/window_statistics.rs": {
+        "sha256": "a0241161a00bdd43612070d535cec715b50b6658428c00a7f94d3b395b563108",
+        "bytes": 22308
+      },
+      "backtest/cli/examples/material_trial.rs": {
+        "sha256": "06b0e080b1fb613373aaf59bf7df0ad4c61b044bc69e3d9deaddfc40a548aa83",
+        "bytes": 18477
+      },
+      "backtest/cli/examples/material_trial_measure.py": {
+        "sha256": "f01cc44ec6d7353d642f472b02e0a8911dc895658f4d188b100cf121defa605a",
+        "bytes": 3371
+      }
+    },
+    "build_command": "cargo build -p backtest-cli --example material_trial -p baseline-mm --example research_causal_input --release --locked --offline",
+    "cargo_build_jobs": 8,
+    "test_env": {
+      "CARGO_PROFILE_TEST_DEBUG": "0",
+      "CARGO_PROFILE_DEV_DEBUG": "0"
+    }
+  },
+  "private_result_sha256": {
+    "trial": "74566a3e240e178dbbd18c3a4a46ecb9f59eb67262ead9d756e6337edb2c3003",
+    "resources": "c89a0eda465578b7675455f9d2bf6cc668e5a3d90cddf9d4a7f2f78d3d53f1fc"
+  },
+  "limits": {
+    "old_12_minute_material_bytes": 1458053463,
+    "conditional_linear_hour_example_bytes": 7290267315,
+    "actual_incomplete_final_directory_bytes": 17418830178,
+    "linear_example_is_upper_bound": false,
+    "full_three_day_or_fifteen_day_budget_closed": false,
+    "production_compression_defaults_changed": false,
+    "strategy_probability_sigma_risk_or_profit_validation_performed": false
+  }
+}

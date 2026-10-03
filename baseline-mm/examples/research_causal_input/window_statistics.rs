@@ -26,7 +26,7 @@ fn frozen_history(updates: &[SpotUpdate], cutoff: i64) -> History {
         ..Default::default()
     }
 }
-fn compact_hold(hold: &Value, updates: &[SpotUpdate]) -> Value {
+pub(super) fn compact_hold(hold: &Value, updates: &[SpotUpdate]) -> Value {
     let index_of = |support: &Value| {
         support["group_position"]
             .as_u64()
