@@ -1687,3 +1687,59 @@ fn range_received_other_v2_variants_keep_full_source_fallback() {
         );
     }
 }
+
+#[test]
+fn opted_replay_recovers_identical_business_confirmation_from_original_recording() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("recording");
+    let mut core = core();
+    let mut writer = PublicRecordingWriterV1::create(&root, core.header(), config()).unwrap();
+    for input in [
+        meta(0),
+        record(
+            1,
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(snapshot("e", 100, 1))),
+        ),
+        record(
+            2,
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(snapshot("e", 100, 2))),
+        ),
+    ] {
+        let result = apply(&mut core, &input);
+        writer.record(input, result).unwrap();
+    }
+    let terminal = end(3);
+    let result = apply(&mut core, &terminal);
+    writer.record(terminal, result).unwrap();
+    writer.stabilize().unwrap();
+    let mut replay = crate::public_replay::PublicReplayV1::open(&root, 1, 1 << 20).unwrap();
+    replay.core.enable_source_progress();
+    let mut same = None;
+    while let Some((input, result)) = replay.next_applied().unwrap() {
+        if input.input_position == 2 {
+            same = Some(result.applied);
+        }
+    }
+    let same = same.unwrap();
+    assert_eq!(same.closed_groups.len(), 1);
+    assert!(same.closed_groups[0].records.is_empty());
+    let observation = &same.closed_groups[0].observations[0];
+    assert_eq!(
+        observation.source_progress[0]
+            .last_valid_business_message
+            .as_ref()
+            .unwrap()
+            .received_at_utc_ms,
+        2002
+    );
+    assert_eq!(
+        observation.binance_depth.direct_anchors[0].received_at_utc_ms,
+        2001
+    );
+    let mut legacy = crate::public_replay::PublicReplayV1::open(&root, 1, 1 << 20).unwrap();
+    while let Some((input, result)) = legacy.next_applied().unwrap() {
+        if input.input_position == 2 {
+            assert!(result.applied.closed_groups.is_empty());
+        }
+    }
+}

@@ -340,6 +340,58 @@ pub struct AssetBusinessObservationV1 {
     pub tick: ObservedFactV1<ExactDecimal>,
     pub public_trade: ObservedFactV1<crate::PublicTradeV2>,
 }
+/// 持续业务流的进展；固定市场锚点与已判定结果不属于此类型。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceStreamScopeV1 {
+    pub source: SourceStreamKindV1,
+    pub condition_id: Option<crate::ConditionId>,
+    pub asset_or_symbol: String,
+}
+impl PartialOrd for SourceStreamScopeV1 {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for SourceStreamScopeV1 {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (
+            &self.source,
+            self.condition_id.as_ref().map(|v| &v.0),
+            &self.asset_or_symbol,
+        )
+            .cmp(&(
+                &other.source,
+                other.condition_id.as_ref().map(|v| &v.0),
+                &other.asset_or_symbol,
+            ))
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum SourceStreamKindV1 {
+    BinanceDepth,
+    BinanceAggregateTrade,
+    PolymarketBook,
+    ChainlinkSpot,
+    ChainlinkTwapThirty,
+    ChainlinkTwapSixty,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceSynchronizationV1 {
+    Unknown,
+    SnapshotRequired,
+    SnapshotObserved { source_message_id: Sha256Hex },
+}
+/// 唯一归约输入产生的流投影。连接代次存在并不证明当前连接存活。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceStreamProgressV1 {
+    pub scope: SourceStreamScopeV1,
+    pub last_valid_business_message: Option<SourceEvidenceRefV3>,
+    pub last_observed_message: SourceEvidenceRefV3,
+    pub connection_generation: Option<u64>,
+    pub synchronization: SourceSynchronizationV1,
+    pub quality: EventQualityV2,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarketBusinessObservationV1 {
     pub schema_version: String,
@@ -365,6 +417,9 @@ pub struct MarketBusinessObservationV1 {
     pub binance_trade: ObservedFactV1<BinanceAggregateTradeReferenceV1>,
     /// 与关闭组共享全部事实；跨市场事件仍参与组统计与时序。
     pub group_events: std::sync::Arc<[PublicBusinessFactV1]>,
+    /// 显式选用的来源进展投影；空集合表示没有此证据，不能从字段锚点补造。
+    #[serde(default, skip_serializing_if = "source_progress_is_empty")]
+    pub source_progress: std::sync::Arc<[SourceStreamProgressV1]>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClosedBusinessGroupV1 {
@@ -507,4 +562,8 @@ pub enum PublicRuleSourceCategoryV1 {
 pub struct PublicRuleSourceV1 {
     pub category: PublicRuleSourceCategoryV1,
     pub reference: String,
+}
+
+fn source_progress_is_empty(v: &std::sync::Arc<[SourceStreamProgressV1]>) -> bool {
+    v.is_empty()
 }
