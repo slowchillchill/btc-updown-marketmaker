@@ -190,6 +190,38 @@ async fn committed_pages_keep_original_identity_exclude_later_and_pending_segmen
     assert_eq!(snapshot["metadata"]["status"], "read_error");
     assert_eq!(snapshot["public_recording"]["status"], "ready");
     assert_eq!(query(&app, "/api/runs/1/public").await.0, StatusCode::OK);
+    let (_, unknown) = query(
+        &app,
+        "/api/runs/0/public-query?page=1&kind=SourceBinding&condition=unread-market",
+    )
+    .await;
+    assert_eq!(unknown["query"]["page"], "1");
+    assert_eq!(unknown["matching"]["scanned_rows"], "1");
+    assert_eq!(unknown["matching"]["unknown_rows"], "1");
+    assert_eq!(
+        unknown["matching"]["matched_offsets"],
+        serde_json::json!([])
+    );
+    assert_eq!(unknown["batch"]["row_start"], "1");
+    let (_, retry) = query(&app, "/api/runs/0/public-query?page=1&kind=SourceBinding&position_domain=storage_row&position_start=1&position_end=9999999999999999999999999999999999999999").await;
+    assert_eq!(
+        retry["matching"]["matched_offsets"],
+        serde_json::json!(["0"])
+    );
+    assert_eq!(retry["matching_reused"], false);
+    let (_, repeated) = query(&app, "/api/runs/0/public-query?page=1&kind=SourceBinding&position_domain=storage_row&position_start=1&position_end=9999999999999999999999999999999999999999").await;
+    assert_eq!(repeated["matching_reused"], true);
+    assert_eq!(repeated["matching"], retry["matching"]);
+    assert_eq!(repeated["batch"], retry["batch"]);
+    assert_eq!(retry["batch"], unknown["batch"]);
+    assert_eq!(retry["batch"]["cost"]["next_page_calls"], "2");
+    let (status, changed) = query(&app, "/api/runs/0/public-query?page=0").await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(changed["cursor"]["current_page"], "1");
+    assert_eq!(changed["cursor"]["next_page"], "2");
+    let (status, invalid) = query(&app, "/api/runs/0/public-query?page=2&time_start=0").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(invalid["cursor"]["next_page"], "2");
     assert_eq!(before, files(&root));
     let (mut reader, status) = PublicPages::open(&PublicSourceConfig {
         root: root.clone(),

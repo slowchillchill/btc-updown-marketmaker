@@ -65,6 +65,20 @@ try {
     if (r.url().match(/\/api\/runs\/0\/public/))
       responses.push({ status: r.status(), bytes: (await r.body()).length });
   });
+  async function visibleRow(index, start = "0") {
+    const target = page.locator(
+      `tr[data-row-path="/public/${start}/${index}"]`,
+    );
+    const scroll = page.locator(".table-scroll").first();
+    await scroll.evaluate((e) => (e.scrollTop = 0));
+    await page.waitForTimeout(40);
+    for (let n = 0; n < 100; n++) {
+      if (await target.count()) return target;
+      await scroll.evaluate((e) => (e.scrollTop += 400));
+      await page.waitForTimeout(20);
+    }
+    throw new Error(`未渲染原偏移 ${start}/${index}`);
+  }
   await page.goto("http://127.0.0.1:4319");
   await page.locator(".module-card").nth(7).waitFor();
   if (!process.env.SKIP_REAL_PUBLIC) {
@@ -101,15 +115,9 @@ try {
       ).includes(market),
     );
     assert.ok(
-      (
-        await page.locator("table tbody tr").nth(initialV6).textContent()
-      ).includes(market),
+      (await (await visibleRow(initialV6)).textContent()).includes(market),
     );
-    await page
-      .locator("table tbody tr")
-      .nth(initialV6)
-      .getByRole("button")
-      .click();
+    await (await visibleRow(initialV6)).getByRole("button").click();
     const retained = await page.locator(".evidence-panel pre").textContent();
     await page.getByRole("button", { name: "下一页", exact: true }).click();
     await page.getByText(/页 1 · 本页/).waitFor();
@@ -160,14 +168,24 @@ try {
   assert.equal(finite.at_end, true);
   assert.equal(finite.prefix.next_input_position, "8");
   assert.equal(finite.prefix.next_canonical_position, "17");
+  const domRows = await page.locator("table tbody tr").count();
+  assert.ok(
+    domRows > 0 && domRows < finite.rows.length,
+    "虚拟DOM与当前保留集合分开",
+  );
   assert.equal(
-    await page.locator("table tbody tr").count(),
-    finite.rows.length,
+    await page.locator(".table-scroll").getAttribute("data-retained-count"),
+    String(finite.rows.length),
   );
-  assert.deepEqual(
-    await page.locator("table tbody tr td:first-child").allTextContents(),
-    finite.rows.map((r) => Object.keys(r)[0]),
-  );
+  for (const row of await page.locator("table tbody tr").all()) {
+    const index = Number(
+      (await row.getAttribute("data-row-path")).split("/").at(-1),
+    );
+    assert.equal(
+      await row.locator("td").first().textContent(),
+      Object.keys(finite.rows[index])[0],
+    );
+  }
   const refs = finite.rows
     .filter((r) => r.Canonical?.record?.ReferenceEvent)
     .map((r) => r.Canonical.record.ReferenceEvent);
@@ -325,6 +343,34 @@ try {
     new Set(range.flatMap((e) => e.args.native_identities.map((i) => i.key)))
       .size > 1,
   );
+  // 原字段独立期望：同毫秒不同组的 Canonical 仍须出现在证据表格，引用保持原偏移。
+  const received22000 = finite.rows.flatMap((row, i) => {
+    const native = row.Canonical?.record?.PolymarketMessage;
+    return native?.time?.received_at_utc_ms === "22000" ? [i] : [];
+  });
+  assert.deepEqual(received22000, [45, 51]);
+  await page.getByRole("button", { name: "证据重放", exact: true }).click();
+  assert.ok(
+    Number(
+      await page.locator(".table-scroll").getAttribute("data-retained-count"),
+    ) >= received22000.length,
+  );
+  for (const i of received22000) {
+    const row = await visibleRow(i);
+    assert.match(await row.textContent(), /22000/);
+    await row.getByRole("button").click();
+    assert.deepEqual(
+      JSON.parse(await page.locator(".evidence-panel pre").textContent()),
+      finite.rows[i],
+    );
+    assert.equal(await row.getAttribute("data-row-path"), `/public/0/${i}`);
+  }
+  if (output)
+    await page.screenshot({
+      path: path.join(output, "range-22000-evidence.png"),
+      fullPage: false,
+    });
+  await page.getByRole("button", { name: "多时钟时间线", exact: true }).click();
   await page.getByRole("button", { name: "清除时间范围", exact: true }).click();
   await page
     .getByLabel("市场选择")
@@ -359,7 +405,7 @@ try {
     });
   await page.getByRole("button", { name: "证据重放", exact: true }).click();
   const obs = finite.rows.findIndex((r) => r.Observation);
-  await page.locator("table tbody tr").nth(obs).getByRole("button").click();
+  await (await visibleRow(obs)).getByRole("button").click();
   assert.ok((await page.locator(".native-links button").count()) > 0);
   await page.locator(".native-links button").first().click();
   assert.match(
@@ -368,7 +414,7 @@ try {
   );
   const pm = finite.rows.findIndex((r) => r.PmStepBinding);
   assert.ok(pm >= 0);
-  await page.locator("table tbody tr").nth(pm).getByRole("button").click();
+  await (await visibleRow(pm)).getByRole("button").click();
   assert.match(
     await page.locator(".evidence-panel").textContent(),
     /consumer_stream_id/,
@@ -379,7 +425,7 @@ try {
     /Canonical/,
   );
   const binding = finite.rows.findIndex((r) => r.SourceBinding);
-  await page.locator("table tbody tr").nth(binding).getByRole("button").click();
+  await (await visibleRow(binding)).getByRole("button").click();
   await page.locator(".native-links button").first().click();
   assert.match(
     await page.locator(".evidence-panel pre").textContent(),
@@ -395,7 +441,7 @@ try {
   const small = await api("/api/runs/2/public");
   const group = small.rows.findIndex((r) => r.Input?.ingress?.Message);
   assert.ok(group >= 0);
-  await page.locator("table tbody tr").nth(group).getByRole("button").click();
+  await (await visibleRow(group)).getByRole("button").click();
   const selected = await page.locator(".evidence-panel pre").textContent();
   await page.getByRole("button", { name: "下一页", exact: true }).click();
   await page.getByText(/页 1 · 本页/).waitFor();

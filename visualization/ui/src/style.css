@@ -757,3 +757,20 @@ input {
   font-size: 11px;
   margin: 4px 5px 4px 0;
 }
+
+/* 虚拟列表仅改变 DOM，保留既有表格四列及原引用。 */
+.table-scroll { height: 520px; }
+.virtual-table, .virtual-table thead, .virtual-table tbody { display: grid; }
+.virtual-table thead { position: sticky; top: 0; z-index: 1; }
+.virtual-table tr { display: flex; }
+.virtual-table th, .virtual-table td { box-sizing: border-box; min-width: 0; }
+.virtual-table th:nth-child(1), .virtual-table td:nth-child(1) { width: 13%; }
+.virtual-table th:nth-child(2), .virtual-table td:nth-child(2) { width: 26%; }
+.virtual-table th:nth-child(3), .virtual-table td:nth-child(3) { width: 43%; max-width: none; }
+.virtual-table th:nth-child(4), .virtual-table td:nth-child(4) { width: 18%; }
+.virtual-table .selected-row { background: #142f3d; }
+.virtual-table .playback-row { background: #163c3d; }
+.public-browse .range-controls input { max-width: 150px; }
+.public-browse .range-controls select { max-width: 230px; }
+.public-browse .query-progress { color: #9bbbc9; }
+.history-playback { border-top: 1px solid #253949; padding-top: 12px; }

@@ -11,7 +11,7 @@ import {
   type Edge,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { cashTotal } from "./browse";
+import { cashTotal, relatedTargets, type Row } from "./browse";
 import { at, fact, type Json } from "./facts";
 import type { Evidence } from "./browse";
 const modules = [
@@ -192,16 +192,28 @@ export function Topology({
   metadata,
   selection,
   onSelect,
+  playback = null,
+  publicRows = [],
 }: {
   report: Json | undefined;
   metadata: Json | undefined;
   selection: Evidence | null;
   onSelect: (e: Evidence) => void;
+  playback?: Evidence | null;
+  publicRows?: Row[];
 }) {
   const [relation, setRelation] = useState<(typeof relations)[number] | null>(
     null,
   );
   const strategy = fact(at(metadata, "config", "strategy", "strategy_id"));
+  const sourceAssociation =
+    !!playback &&
+    at(playback.value, "Input") !== undefined &&
+    !!playback.references?.some((ref) =>
+      relatedTargets(ref, publicRows, playback).some(
+        (target) => at(target.value, "SourceBinding") !== undefined,
+      ),
+    );
   const evidence = (
     source: Evidence["source"],
     path: string,
@@ -292,9 +304,11 @@ export function Topology({
         id === "strategy" ? "baseline-mm / model-train 公共位置" : subtitle,
       ...facts[id],
       selected:
-        !!selection &&
-        facts[id].evidence?.source === selection.source &&
-        facts[id].evidence?.path === selection.path,
+        (id === "data-pipeline" && playback?.source === "public") ||
+        (id === "data-collect" && sourceAssociation) ||
+        (!!selection &&
+          facts[id].evidence?.source === selection.source &&
+          facts[id].evidence?.path === selection.path),
       onSelect,
     },
     draggable: false,
@@ -310,17 +324,24 @@ export function Topology({
         targetHandle: r[5],
         type: "smoothstep",
         animated: false,
+        className:
+          i === 0 && sourceAssociation ? "historical-association" : undefined,
         markerEnd: { type: MarkerType.ArrowClosed },
         style: {
-          stroke: r[2].includes("隐藏") ? "#897eb8" : "#527f9b",
-          strokeWidth: 1.2,
+          stroke:
+            i === 0 && sourceAssociation
+              ? "#68d8c3"
+              : r[2].includes("隐藏")
+                ? "#897eb8"
+                : "#527f9b",
+          strokeWidth: i === 0 && sourceAssociation ? 2.5 : 1.2,
           strokeDasharray: r[2].includes("隐藏") ? "5 5" : undefined,
         },
         labelStyle: { fill: "#abc1d3", fontSize: 10 },
         labelBgStyle: { fill: "#0e1724" },
         labelBgPadding: [5, 4],
       })),
-    [],
+    [sourceAssociation],
   );
   return (
     <div>
@@ -333,6 +354,12 @@ export function Topology({
         所有边静态。卡片显示本次可读快照；累计数不代表当前流量。策略位置复用公共合同，本次策略：
         <b>{strategy}</b>。
       </p>
+      {playback && (
+        <p className="history-path">
+          历史浏览原引用 {playback.path} ·
+          仅突出原身份支持的公共关联，静态架构方向不代表实时消费或业务执行。
+        </p>
+      )}
       <div className="topology">
         <ReactFlow
           nodes={nodes}
