@@ -152,7 +152,7 @@ async fn committed_pages_keep_original_identity_exclude_later_and_pending_segmen
         source_message_id: Sha256Hex(character.to_string().repeat(64)),
         manifest_sha256: Sha256Hex("a".repeat(64)),
         file_sha256: Sha256Hex("b".repeat(64)),
-        relative_path: "source.parquet".into(),
+        relative_path: "源 \"订单\".parquet".into(),
     };
     writer.record_source_binding(binding('1')).unwrap();
     writer.record_source_binding(binding('2')).unwrap();
@@ -205,17 +205,45 @@ async fn committed_pages_keep_original_identity_exclude_later_and_pending_segmen
         first_json["rows"][0]["SourceBinding"]["source_message_id"],
         "1".repeat(64)
     );
+    assert_eq!(
+        first_json["cost"]["rows_json_bytes"],
+        serde_json::to_vec(&first_json["rows"])
+            .unwrap()
+            .len()
+            .to_string()
+    );
+    assert_eq!(
+        reader.last_encoding_cost().unwrap().response_bytes,
+        first.len()
+    );
     let second = reader.page(1).unwrap();
     let second_json: Value = serde_json::from_slice(&second).unwrap();
     assert_eq!(
         second_json["rows"][0]["SourceBinding"]["source_message_id"],
         "2".repeat(64)
     );
+    let second_cost = reader.last_encoding_cost().unwrap();
+    assert_eq!(
+        second_json["cost"]["rows_json_bytes"],
+        serde_json::to_vec(&second_json["rows"])
+            .unwrap()
+            .len()
+            .to_string()
+    );
     assert_eq!(second, reader.current().unwrap());
     assert_eq!(second, reader.page(1).unwrap());
+    assert_eq!(
+        reader.last_encoding_cost().unwrap().response_encoding_us,
+        second_cost.response_encoding_us
+    );
+    assert_eq!(
+        reader.last_encoding_cost().unwrap().response_bytes,
+        second.len()
+    );
     assert!(reader.page(0).is_err());
     let end: Value = serde_json::from_slice(&reader.page(2).unwrap()).unwrap();
     assert_eq!(end["at_end"], true);
+    assert_eq!(end["cost"]["rows_json_bytes"], "2");
     assert_eq!(end["total_returned_rows"], "2");
     assert_eq!(
         end["prefix"]["stable_storage_ref"],

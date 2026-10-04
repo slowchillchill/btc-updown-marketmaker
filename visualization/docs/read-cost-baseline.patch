@@ -1,0 +1,63 @@
+--- a/visualization/src/sources/public_recording.rs
++++ b/visualization/src/sources/public_recording.rs
+@@ -6,12 +6,19 @@
+ use serde_json::{Value, json};
+ use std::time::Instant;
+ 
++/// 已完成编码的测量；置于响应之外，避免为自身长度/计时重复编码。
++#[derive(Clone, Copy, Debug, serde::Serialize)]
++pub struct PageEncodingCost {
++    pub response_encoding_us: u128,
++    pub response_bytes: usize,
++}
++
+ pub struct PublicPages {
+     reader: PublicRecordingReaderV1,
+     page_rows: usize,
+     next_page: u64,
+     returned_rows: u64,
+-    last: Option<(u64, Bytes)>,
++    last: Option<(u64, Bytes, PageEncodingCost)>,
+     failure: Option<String>,
+     exhausted: bool,
+ }
+@@ -51,14 +58,17 @@
+             status,
+         ))
+     }
++    pub fn last_encoding_cost(&self) -> Option<PageEncodingCost> {
++        self.last.as_ref().map(|(_, _, cost)| *cost)
++    }
+     pub fn current(&mut self) -> Result<Bytes, String> {
+-        if let Some((_, response)) = &self.last {
++        if let Some((_, response, _)) = &self.last {
+             return Ok(response.clone());
+         }
+         self.page(0)
+     }
+     pub fn page(&mut self, requested: u64) -> Result<Bytes, String> {
+-        if let Some((page, response)) = &self.last
++        if let Some((page, response, _)) = &self.last
+             && *page == requested
+         {
+             return Ok(response.clone());
+@@ -95,13 +105,18 @@
+         let exact = exact_json(serde_json::to_value(&rows).map_err(|e| e.to_string())?);
+         let rows_json = serde_json::to_string(&exact).map_err(|e| e.to_string())?;
+         let encoding_us = started.elapsed().as_micros().to_string();
++        let started = Instant::now();
+         let response: Bytes = serde_json::to_vec(&json!({"page":requested.to_string(), "row_start":row_start.to_string(),
+             "returned_rows":rows.len().to_string(), "total_returned_rows":self.returned_rows.to_string(), "at_end":self.exhausted,
+             "prefix":exact_json(serde_json::to_value(&self.reader.prefix).map_err(|e|e.to_string())?),
+             "rows":exact,"cost":{"reader_open_count":"1","next_page_calls":(requested+1).to_string(),"read_elapsed_us":read_elapsed_us,
+                 "row_encoding_us":encoding_us,"rows_json_bytes":rows_json.len().to_string(),"allocation_bytes":null,"underlying_read_bytes":null}})).map_err(|e|e.to_string())?.into();
++        let encoding_cost = PageEncodingCost {
++            response_encoding_us: started.elapsed().as_micros(),
++            response_bytes: response.len(),
++        };
+         self.next_page += 1;
+-        self.last = Some((requested, response.clone()));
++        self.last = Some((requested, response.clone(), encoding_cost));
+         Ok(response)
+     }
+ }
