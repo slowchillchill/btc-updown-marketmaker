@@ -1322,3 +1322,96 @@ fn byte_window_outside_scope_bad_later_page_keeps_original_batch_error() {
     assert_eq!(old_error.to_string(), new_error.to_string());
     assert!(old.next().is_none() && new.next().is_none());
 }
+
+#[test]
+fn range_received_outside_missing_pm_timestamp_keeps_second_pass_source_error() {
+    use crate::historical_preparation_progress::{
+        HistoricalPreparationNoticeV1 as Notice, HistoricalPreparationNotifierV1,
+        HistoricalPreparationStageV1 as Stage,
+    };
+    use crate::public_replay::*;
+    use data_pipeline_core::public_reference::*;
+    let mut bad = bba(START);
+    bad["timestamp"] = Value::Null;
+    let mut fixture = Fixture::new();
+    fixture.day(
+        DAY,
+        DAY_START,
+        vec![(
+            POLYMARKET_ORDERBOOK_SOURCE,
+            POLYMARKET_ORDERBOOK_SCHEMA,
+            vec![bad],
+        )],
+    );
+    let input = fixture.freeze();
+    let files: Vec<_> = input
+        .admitted_daily_inputs()
+        .iter()
+        .flat_map(|d| d.files())
+        .collect();
+    let config = gate_a_formal_canonical_config();
+    let range = (START + 1)..(START + 2); // 真正窗口外；不是用 Err 提前返回。
+    let rows: Vec<_> = crate::public_input::open_public_input_bounded_v1(files[0], 1, 1 << 20)
+        .unwrap()
+        .flat_map(|b| b.unwrap())
+        .collect();
+    assert_eq!(rows.len(), 1);
+    let original_error = source_evidence_v3_from_typed_raw_v2(&rows[0]).unwrap_err();
+    assert!(
+        matches!(&original_error, data_pipeline_core::ContractError::InvalidField { field, .. } if field == "lineage.source_evidence[0].source_event_at_utc_ms")
+    );
+    // 原完整来源筛选在实际两遍准备中保留错误行，第二遍才正式构造失败。
+    let mut passes = 0;
+    let old = prepare_historical_rows_v1(
+        &fixture.root.path().join("old"),
+        &config,
+        "old".into(),
+        || {
+            passes += 1;
+            Ok(rows
+                .clone()
+                .into_iter()
+                .filter(|row| {
+                    source_evidence_v3_from_typed_raw_v2(row)
+                        .map(|s| range.contains(&s.received_at_utc_ms))
+                        .unwrap_or(true)
+                })
+                .map(Ok))
+        },
+    )
+    .err()
+    .unwrap();
+    assert_eq!(passes, 2);
+    assert_eq!(
+        old.downcast_ref::<data_pipeline_core::ContractError>(),
+        Some(&original_error)
+    );
+    let mut stages = Vec::new();
+    let mut callback = |notice| {
+        if let Notice::Stage(stage) = notice {
+            stages.push(stage)
+        }
+    };
+    let new = {
+        let notifier = HistoricalPreparationNotifierV1::new(&mut callback);
+        prepare_historical_files_with_initialization_and_progress_v1(
+            &fixture.root.path().join("new"),
+            &files,
+            &config,
+            "new".into(),
+            Some(range),
+            None,
+            Some(&notifier),
+        )
+        .err()
+        .unwrap()
+    };
+    assert_eq!(
+        stages,
+        vec![Stage::EpochPass, Stage::SecondSupplyAndInitialSort]
+    );
+    assert_eq!(
+        new.downcast_ref::<data_pipeline_core::ContractError>(),
+        Some(&original_error)
+    );
+}

@@ -36,6 +36,11 @@ TypedRaw Parquet 仍先以原打开的 `File` 完成长度与 SHA 校验，然�
 
 所属[十二分钟材料验收](docs/typed-raw-byte-window-12m.md)仅运行一次原材料试制：完整trial业务比较与两遍物理工作量保持，合并475.669秒对历史495.617秒；读请求量／次数明显降低但整体仅约4%时点差异，不外推稳定加速或全研究预算。
 
+历史范围筛选对六类 Existing 和 Metadata V6 Existing 复用 core 的原来源 parts 提取与同一个语义校验，只返回原接收时间，省去筛选中不用的最终消息身份 JSON／SHA 和 RefV3 装配。parts 的拥有型字段、metadata 定位摘要和 RTDS 原载荷摘要仍保留；AnchorRule、TWAP、历史修复走原完整来源构造。校验 Err 仍按 `unwrap_or(true)` 保留原行，后遍正式来源构造继续承担原错误，不能按裸时间丢弃窗口外的缺源事件时间 PM 行。文件准入、两遍完整解码和入选行的正式身份／排序不变。
+
+所属[范围筛选十二分钟验收](docs/received-time-filter-12m.md)只运行一次原材料试制：完整trial业务差异0，两遍完整物理量保持；合并445.432秒对历史475.669秒，仅跨版本／共享缓存时点约6.357%差异，不是稳定倍率或全研究预算。
+
+
 ## 离线产物构建、发布与读取
 
 `dpt-gate-a build --manifest <清单> --condition-id <市场> --received-start-utc-ms <开始> --received-end-utc-ms <结束> --candidate-dir <新目录>` 构建显式市场/时间范围；`--manifest` 可重复。`dpt-gate-a publish --candidate-dir <已有候选> --output-dir <目标目录>` 同步文件并以 `NOREPLACE` 重命名发布。输入只取调用者明确列出的 manifest：读取一次，以头部 `utc_day` 和文件条目的来源/schema/hour/part 为事实，从清单父目录定位列出文件。目录和文件可改名、改变层级；不要求个人数据根、日期下限或目录闭集，未列出的旁文件不参与输入。合法历史日期不会自动被选中，市场和时间范围仍由调用者给出，日历/小时换算与实际文件解码仍按真实消费执行。

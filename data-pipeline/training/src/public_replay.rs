@@ -1013,8 +1013,8 @@ pub fn prepare_historical_files_with_initialization_and_progress_v1(
                     file_active: false,
                 }
                 .filter(|row| match (row, &received_range) {
-                    (Ok(row), Some(range)) => source_evidence_v3_from_typed_raw_v2(row)
-                        .map(|source| range.contains(&source.received_at_utc_ms))
+                    (Ok(row), Some(range)) => validated_received_at_from_typed_raw_v2(row)
+                        .map(|received| range.contains(&received))
                         .unwrap_or(true),
                     _ => true,
                 })

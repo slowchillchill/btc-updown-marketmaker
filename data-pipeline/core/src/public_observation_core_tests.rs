@@ -2398,3 +2398,83 @@ fn lower_quantity_update_cannot_refresh_direct_bid_over_new_high_bid() {
         }
     }
 }
+
+#[test]
+fn range_received_fast_path_matches_full_source_and_original_identity() {
+    let mut spot = twap_input(60).common;
+    spot.schema_version = POLYMARKET_RTDS_CHAINLINK_BTC_USD_SCHEMA.into();
+    spot.topic = "crypto_prices_chainlink".into();
+    let rows = vec![
+        TypedRawRow::PolymarketOrderbook(row("epoch", 1, 1000, 2000, book("1"))),
+        TypedRawRow::PolymarketMarketMetadata(Box::new(metadata_snapshot_row())),
+        TypedRawRow::PolymarketRtdsChainlinkBtcUsd(spot),
+        TypedRawRow::BinanceDepthSnapshot(snapshot("epoch", 100, 1)),
+        TypedRawRow::BinanceDepthUpdate(update(
+            "epoch",
+            101,
+            101,
+            2,
+            Some(100),
+            Some(100),
+            BinanceDepthStitchVerdict::Applied,
+            vec![level("64000", "1")],
+        )),
+        TypedRawRow::BinanceAggTrade(trade(100, 1, "64000")),
+    ];
+    let digest = Sha256Hex("a".repeat(64));
+    for row in rows {
+        row.validate().unwrap();
+        // 独立旧 V2 构造与原 V3 编码入口保留全部正式字段/身份，不只比接收时间。
+        let old = crate::source_evidence_from_typed_raw(&row, &digest, &digest).unwrap();
+        let input = TypedRawRowV2::Existing(row);
+        let full = source_evidence_v3_from_typed_raw_v2(&input).unwrap();
+        assert_eq!(full, source_evidence_v3_from_existing(&old).unwrap());
+        assert_eq!(
+            validated_received_at_from_typed_raw_v2(&input).unwrap(),
+            full.received_at_utc_ms
+        );
+    }
+    let v6 = TypedRawRowV2::PolymarketMarketMetadataV6(Box::new(
+        crate::public_input::PolymarketMarketMetadataV6Input::Existing(metadata_snapshot_row()),
+    ));
+    assert_eq!(
+        source_evidence_v3_from_typed_raw_v2(&v6).unwrap(),
+        source_evidence_v3_from_typed_raw_v2(&TypedRawRowV2::Existing(
+            TypedRawRow::PolymarketMarketMetadata(Box::new(metadata_snapshot_row()))
+        ))
+        .unwrap()
+    );
+    assert_eq!(
+        validated_received_at_from_typed_raw_v2(&v6).unwrap(),
+        source_evidence_v3_from_typed_raw_v2(&v6)
+            .unwrap()
+            .received_at_utc_ms
+    );
+}
+
+#[test]
+fn range_received_fast_path_avoids_final_encoding_but_retains_semantic_errors() {
+    let input = TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row(
+        "epoch",
+        1,
+        1000,
+        2000,
+        book("1"),
+    )));
+    let received =
+        crate::without_identity_encoding(|| validated_received_at_from_typed_raw_v2(&input))
+            .unwrap();
+    assert_eq!(received, 2000);
+    assert!((2000..3000).contains(&received));
+    assert!(!(1000..2000).contains(&received));
+    let TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(mut bad)) = input else {
+        unreachable!()
+    };
+    bad.timestamp = None;
+    bad.validate().unwrap();
+    let bad = TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(bad));
+    assert_eq!(
+        validated_received_at_from_typed_raw_v2(&bad),
+        source_evidence_v3_from_typed_raw_v2(&bad).map(|s| s.received_at_utc_ms)
+    );
+}
