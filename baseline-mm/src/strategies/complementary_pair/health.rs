@@ -13,7 +13,7 @@ impl From<&SourceStreamProgressV1> for SourceHealthFactsV1 {
             synchronization_required: p.synchronization
                 == SourceSynchronizationV1::SnapshotRequired
                 || p.quality.resync == ResyncQuality::Required,
-            availability: p.quality.availability.clone(),
+            availability: p.quality.availability,
             last_valid_message_times: p
                 .last_valid_business_message
                 .as_ref()

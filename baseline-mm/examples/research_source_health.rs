@@ -370,7 +370,7 @@ fn replay(c: &Config, output: &Path) -> Result<Value> {
                         }
                         if gap >= 0 {
                             longest.push((gap as u64, pair));
-                            longest.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+                            longest.sort_unstable_by_key(|b| std::cmp::Reverse(b.0));
                             longest.truncate(10);
                         }
                     }
