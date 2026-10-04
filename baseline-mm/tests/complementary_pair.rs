@@ -14,10 +14,22 @@ use std::{path::Path, sync::Arc};
 
 type Driver = FinitePublicConsumptionV1<RecordedPublicGroupSourceV1<MemoryRecordedTimes>>;
 fn config() -> ComplementaryPairConfigV1 {
-    ComplementaryPairConfigV1::parse_toml(include_str!(
+    let mut c = ComplementaryPairConfigV1::parse_toml(include_str!(
         "../configs/strategies/complementary_pair/synthetic-engineering.toml"
     ))
-    .unwrap()
+    .unwrap();
+    // 旧经营反例使用长窗口显式工程阈值；健康到期另由专项反例验证。
+    c.health = SourceHealthConfigV1 {
+        polymarket_silence_ms: 1_000_000,
+        polymarket_event_delay_ms: 1_000_000,
+        chainlink_silence_ms: 1_000_000,
+        chainlink_event_delay_ms: 1_000_000,
+        binance_trade_silence_ms: 1_000_000,
+        binance_trade_event_delay_ms: 1_000_000,
+        binance_depth_silence_ms: 1_000_000,
+        binance_depth_event_delay_ms: 1_000_000,
+    };
+    c
 }
 fn setup(root: &Path, cash: &str) -> (SharedExecutionV2, Driver, Arc<SealedProcessRuleSnapshotV3>) {
     let dpt = root.join("dpt");
@@ -38,7 +50,9 @@ fn setup(root: &Path, cash: &str) -> (SharedExecutionV2, Driver, Arc<SealedProce
     let shared = SharedExecutionV2::from_opening(ledger, observation)
         .unwrap()
         .unwrap();
-    let source = RecordedPublicGroupSourceV1::open(&dpt, 1, 1 << 20, MemoryRecordedTimes).unwrap();
+    let mut source =
+        RecordedPublicGroupSourceV1::open(&dpt, 1, 1 << 20, MemoryRecordedTimes).unwrap();
+    source.enable_source_progress();
     let mut driver = FinitePublicConsumptionV1::new(execution, source, "candidate-test".into());
     for _ in 0..2 {
         driver.next_group().unwrap().unwrap();
@@ -80,6 +94,90 @@ fn estimated(mut input: StrategyInputV1, price: &str) -> StrategyInputV1 {
             price_usd_per_btc: ExactDecimal(price.into()),
             message_timestamp_utc_ms: 21_000,
         });
+        // 与本函数的显式合成估值叶子同时建立有效来源证据。
+        let mut progress = m.observation.source_progress.to_vec();
+        for (source, kind, symbol) in [
+            (
+                SourceStreamKindV1::ChainlinkTwapThirty,
+                CanonicalSourceKindV2::PolymarketRtdsChainlinkTwap,
+                "btc/usd",
+            ),
+            (
+                SourceStreamKindV1::ChainlinkTwapSixty,
+                CanonicalSourceKindV2::PolymarketRtdsChainlinkTwap,
+                "btc/usd",
+            ),
+            (
+                SourceStreamKindV1::ChainlinkSpot,
+                CanonicalSourceKindV2::PolymarketRtdsChainlinkBtcUsd,
+                "btc/usd",
+            ),
+            (
+                SourceStreamKindV1::BinanceAggregateTrade,
+                CanonicalSourceKindV2::BinanceAggtrade,
+                "BTCUSDT",
+            ),
+            (
+                SourceStreamKindV1::BinanceDepth,
+                CanonicalSourceKindV2::BinanceDepthSnapshot,
+                "BTCUSDT",
+            ),
+        ] {
+            let evidence = SourceEvidenceRefV3 {
+                source_kind: kind,
+                source_message_id: Sha256Hex("a".repeat(64)),
+                source_native_identity: None,
+                source_event_at_utc_ms: Some(21_000),
+                received_at_utc_ms: 21_000,
+                collector_admission: None,
+            };
+            progress.push(SourceStreamProgressV1 {
+                scope: SourceStreamScopeV1 {
+                    source,
+                    condition_id: None,
+                    asset_or_symbol: symbol.into(),
+                },
+                last_valid_business_message: Some(evidence.clone()),
+                last_observed_message: evidence,
+                connection_generation: None,
+                synchronization: SourceSynchronizationV1::Unknown,
+                quality: EventQualityV2 {
+                    availability: MarketDataQuality::Fresh,
+                    resync: ResyncQuality::NotRequired,
+                },
+            });
+        }
+        for asset in &m.observation.assets {
+            if !progress.iter().any(|p| {
+                p.scope.source == SourceStreamKindV1::PolymarketBook
+                    && p.scope.asset_or_symbol == asset.asset.token_id.0
+            }) {
+                let evidence = SourceEvidenceRefV3 {
+                    source_kind: CanonicalSourceKindV2::PolymarketOrderbook,
+                    source_message_id: Sha256Hex("b".repeat(64)),
+                    source_native_identity: None,
+                    source_event_at_utc_ms: Some(21_000),
+                    received_at_utc_ms: 21_000,
+                    collector_admission: None,
+                };
+                progress.push(SourceStreamProgressV1 {
+                    scope: SourceStreamScopeV1 {
+                        source: SourceStreamKindV1::PolymarketBook,
+                        condition_id: Some(m.observation.market.condition_id.clone()),
+                        asset_or_symbol: asset.asset.token_id.0.clone(),
+                    },
+                    last_valid_business_message: Some(evidence.clone()),
+                    last_observed_message: evidence,
+                    connection_generation: None,
+                    synchronization: SourceSynchronizationV1::Unknown,
+                    quality: EventQualityV2 {
+                        availability: MarketDataQuality::Fresh,
+                        resync: ResyncQuality::NotRequired,
+                    },
+                });
+            }
+        }
+        m.observation.source_progress = progress.into();
     }
     input
 }
@@ -562,6 +660,17 @@ async fn positive_premium_is_compared_and_profit_occupation_tracks_real_dispatch
     assert!(
         s.continuity().unresolved_profit_allocations.is_empty(),
         "候选计算尚未占用跨轮资源"
+    );
+    let current_action = shared
+        .strategy_input(&mut driver)
+        .unwrap()
+        .unwrap()
+        .action_before;
+    assert_eq!(
+        s.qualify_intent(&health_read(&input, current_action), &calculation, 0, now)
+            .unwrap(),
+        IntentQualificationV1::Qualified,
+        "原正利润池支持通过真实当前读取复核"
     );
     shared
         .dispatch_strategy(
@@ -1202,6 +1311,17 @@ async fn fak_minimum_principal_is_independent_of_maker_minimum_shares() {
                     .is_none()
             );
         }
+        let action = shared
+            .strategy_input(&mut driver)
+            .unwrap()
+            .unwrap()
+            .action_before;
+        assert_eq!(
+            s.qualify_intent(&health_read(&input, action), &calculation, 0, now)
+                .unwrap(),
+            IntentQualificationV1::Qualified,
+            "原金额FAK当前成本资格通过"
+        );
         let result = shared
             .dispatch_strategy(
                 &mut driver.decision().unwrap(),
@@ -1214,4 +1334,433 @@ async fn fak_minimum_principal_is_independent_of_maker_minimum_shares() {
             matches!(result, StrategyDispatchV1::Continue { receipts, .. } if receipts.len() == 1)
         );
     }
+}
+
+fn health_read<'a>(
+    input: &'a StrategyInputV1,
+    action_before: ActionBeforeReadV2,
+) -> StrategyCurrentReadV1<'a> {
+    let cutoff = action_before.cutoff().clone();
+    StrategyCurrentReadV1 {
+        trade_economics: input.trade_economics.clone(),
+        markets: input
+            .markets
+            .iter()
+            .map(|f| PublicObservationFrameV1 {
+                observation: &f.observation,
+                rule_context: f.rule_context.clone(),
+                receipt: cutoff.receipt().clone(),
+                decision_cutoff: cutoff.clone(),
+            })
+            .collect(),
+        action_before,
+    }
+}
+#[tokio::test(flavor = "current_thread")]
+async fn health_dependencies_follow_enabled_algorithm_and_asset_scope() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut shared, mut driver, rules) = setup(temp.path(), "2000");
+    let mut input = estimated(
+        shared.strategy_input(&mut driver).unwrap().unwrap(),
+        "100000",
+    );
+    let mut c = config();
+    c.probability.binance_innovation_weight = 0.0;
+    c.probability.binance_pressure_weight_usd = 0.0;
+    c.probability.binance_trade_pressure_weight_usd = 1.0;
+    input.markets[0].observation.source_progress = input.markets[0]
+        .observation
+        .source_progress
+        .iter()
+        .filter(|p| p.scope.source != SourceStreamKindV1::BinanceDepth)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into();
+    let mut s = strategy(c.clone(), rules.clone());
+    let output = s.decide(&input, 22_000).unwrap();
+    assert!(
+        diagnostic(&output).markets[0]
+            .source_health
+            .iter()
+            .any(|p| p.scope.source == SourceStreamKindV1::BinanceDepth)
+    );
+    assert!(
+        intents(&output).is_empty(),
+        "成交压力的深度分母未启用独立深度系数仍是必要依赖"
+    );
+    c.probability.binance_trade_pressure_weight_usd = 0.0;
+    let mut disabled = strategy(c, rules);
+    let output = disabled.decide(&input, 22_000).unwrap();
+    assert!(diagnostic(&output).markets[0].source_health.is_empty());
+    assert!(!intents(&output).is_empty());
+    let mut progress = input.markets[0].observation.source_progress.to_vec();
+    let own = progress
+        .iter_mut()
+        .find(|p| p.scope.source == SourceStreamKindV1::PolymarketBook)
+        .unwrap();
+    own.scope.asset_or_symbol = "unrelated-token".into();
+    input.markets[0].observation.source_progress = progress.into();
+    let output = disabled.decide(&input, 22_000).unwrap();
+    assert!(
+        diagnostic(&output).markets[0]
+            .source_health
+            .iter()
+            .any(|i| i.failure == SourceHealthFailureV1::UnknownBusinessProgress)
+    );
+    assert!(
+        intents(&output)
+            .iter()
+            .all(|i| matches!(i.intent.as_ref(), ModelIntentV1::CancelOrders { .. }))
+    );
+}
+#[tokio::test(flavor = "current_thread")]
+async fn frozen_action_invalidates_when_real_commitment_changes_without_rewriting_diagnostics() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut shared, mut driver, rules) = setup(temp.path(), "2000");
+    let input = estimated(
+        shared.strategy_input(&mut driver).unwrap().unwrap(),
+        "100000",
+    );
+    let mut s = strategy(config(), rules.clone());
+    let calculation = input.calculate(&mut s, 22_000).unwrap();
+    let frozen = diagnostic(&calculation.output).clone();
+    let action = shared
+        .strategy_input(&mut driver)
+        .unwrap()
+        .unwrap()
+        .action_before;
+    assert_eq!(
+        s.qualify_intent(&health_read(&input, action), &calculation, 0, 22_000)
+            .unwrap(),
+        IntentQualificationV1::Qualified
+    );
+    shared
+        .execute_batch_reserved(
+            &mut driver.decision().unwrap(),
+            &[buy(
+                &rules,
+                "competing-real-request",
+                UP_TOKEN_ID,
+                Decimal::from(5),
+                Decimal::new(4, 1),
+                true,
+            )],
+        )
+        .await
+        .unwrap();
+    let current = estimated(
+        shared.strategy_input(&mut driver).unwrap().unwrap(),
+        "100000",
+    );
+    let action = shared
+        .strategy_input(&mut driver)
+        .unwrap()
+        .unwrap()
+        .action_before;
+    assert!(
+        matches!(s.qualify_intent(&health_read(&current, action), &calculation, 0, 22_000).unwrap(), IntentQualificationV1::Invalidated(reason) if reason.reason_code == "action_business_facts_changed")
+    );
+    assert_eq!(diagnostic(&calculation.output), &frozen);
+}
+#[tokio::test(flavor = "current_thread")]
+async fn independent_repair_qualifies_healthy_held_mark_and_rejects_missing_mark() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut shared, mut driver, rules) = setup(temp.path(), "2000");
+    let raw = fill_up(&mut shared, &mut driver, &rules).await;
+    let at = raw
+        .action_before
+        .cutoff()
+        .decision_time()
+        .logical_time_utc_ms();
+    let mut input = estimated(raw, "100000");
+    input.markets[0].observation.source_progress = input.markets[0]
+        .observation
+        .source_progress
+        .iter()
+        .filter(|p| p.scope.source != SourceStreamKindV1::ChainlinkSpot)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into();
+    let mut c = config();
+    c.repair.enable_active_repair = false;
+    c.repair.residual_risk_weight = Decimal::from(10);
+    c.repair.base_loss_allowance_per_share = Decimal::new(2, 1);
+    let mut s = strategy(c, rules);
+    let calculation = input.calculate(&mut s, at).unwrap();
+    let index = intents(&calculation.output)
+        .iter()
+        .position(|i| matches!(i.intent.as_ref(), ModelIntentV1::SubmitSingleBuy { .. }))
+        .expect("失效辅助源不阻塞独立Maker修复");
+    let action = shared
+        .strategy_input(&mut driver)
+        .unwrap()
+        .unwrap()
+        .action_before;
+    assert_eq!(
+        s.qualify_intent(&health_read(&input, action), &calculation, index, at)
+            .unwrap(),
+        IntentQualificationV1::Qualified
+    );
+    let held = diagnostic(&calculation.output)
+        .action_health_dependencies
+        .iter()
+        .find_map(|d| d.independent_held_token.as_ref())
+        .unwrap()
+        .clone();
+    input.markets[0]
+        .observation
+        .assets
+        .iter_mut()
+        .find(|a| a.asset.token_id == held)
+        .unwrap()
+        .valuation_best_bid = Default::default();
+    let action = shared
+        .strategy_input(&mut driver)
+        .unwrap()
+        .unwrap()
+        .action_before;
+    assert!(
+        matches!(s.qualify_intent(&health_read(&input, action), &calculation, index, at).unwrap(), IntentQualificationV1::Invalidated(r) if r.reason_code == "repair_held_mark_unavailable")
+    );
+}
+#[tokio::test(flavor = "current_thread")]
+async fn invalidated_batch_registers_profit_only_for_actual_sent_prefix() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut shared, mut driver, rules, input) = profitable_pool(temp.path()).await;
+    let at = input
+        .action_before
+        .cutoff()
+        .decision_time()
+        .logical_time_utc_ms();
+    let mut c = config();
+    c.quote.inventory_shift_per_pusd = Decimal::new(6, 2);
+    c.repair.residual_risk_weight = Decimal::from(100);
+    c.repair.enable_active_repair = false;
+    let mut s = strategy(c, rules);
+    let input = estimated(input, "100000");
+    let mut calculation = input.calculate(&mut s, at).unwrap();
+    let StrategyOutputV1::Continue {
+        diagnostics,
+        intents,
+        ..
+    } = &mut calculation.output
+    else {
+        panic!()
+    };
+    let mut unattempted = diagnostics.profit_allocations[0].clone();
+    unattempted.global_request_id = "unattempted-suffix".into();
+    unattempted.reserve_identity = LedgerRequestIdentityV1("unattempted-funds".into());
+    diagnostics.profit_allocations.push(unattempted);
+    let sent = shared
+        .execute_batch_reserved(&mut driver.decision().unwrap(), &intents[..1])
+        .await
+        .unwrap();
+    let result = InvalidatedBatchV1 {
+        sent,
+        invalidated_intent_index: 1,
+        reason: IntentInvalidationReasonV1 {
+            reason_code: "test-health-expired".into(),
+            scopes: vec![],
+        },
+        observed_cutoff: input.action_before.cutoff().clone(),
+        detected_at_utc_ms: at,
+        release_errors: vec![],
+    };
+    s.invalidated(&calculation, &result);
+    let allocations = s.continuity().unresolved_profit_allocations;
+    assert_eq!(allocations.len(), 1);
+    assert!(!allocations.contains_key("unattempted-suffix"));
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn real_pairing_changes_orphan_fee_contribution_and_invalidates_frozen_repair() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut shared, mut driver, rules) = setup(temp.path(), "2000");
+    let raw = fill_up(&mut shared, &mut driver, &rules).await;
+    let at = raw
+        .action_before
+        .cutoff()
+        .decision_time()
+        .logical_time_utc_ms();
+    let input = estimated(raw, "100000");
+    let old_trades = input.trade_economics.clone();
+    let mut c = config();
+    c.repair.enable_active_repair = false;
+    c.repair.residual_risk_weight = Decimal::from(10);
+    c.repair.base_loss_allowance_per_share = Decimal::new(2, 1);
+    let mut s = strategy(c, rules.clone());
+    let calculation = input.calculate(&mut s, at).unwrap();
+    let index = intents(&calculation.output)
+        .iter()
+        .position(|i| matches!(i.intent.as_ref(), ModelIntentV1::SubmitSingleBuy { .. }))
+        .unwrap();
+    let original_fee = diagnostic(&calculation.output).action_health_dependencies[0]
+        .business
+        .orphan_fee
+        .clone()
+        .unwrap();
+    let frozen = diagnostic(&calculation.output).clone();
+    shared
+        .execute_batch_reserved(
+            &mut driver.decision().unwrap(),
+            &[buy(
+                &rules,
+                "real-pairing-feedback",
+                DOWN_TOKEN_ID,
+                Decimal::from(5),
+                Decimal::new(9, 1),
+                false,
+            )],
+        )
+        .await
+        .unwrap();
+    let mut verified = false;
+    while driver.next_group().unwrap().is_some() {
+        let fresh = estimated(
+            shared.strategy_input(&mut driver).unwrap().unwrap(),
+            "100000",
+        );
+        let changed = old_trades.iter().any(|old| {
+            fresh.trade_economics.iter().any(|new| {
+                new.trade_identity == old.trade_identity
+                    && new.unpaired_contribution_shares != old.unpaired_contribution_shares
+            })
+        });
+        if !changed {
+            continue;
+        }
+        let current = shared.strategy_current_read(&driver).unwrap().unwrap();
+        assert_eq!(current.trade_economics, fresh.trade_economics);
+        let action = shared
+            .strategy_input(&mut driver)
+            .unwrap()
+            .unwrap()
+            .action_before;
+        assert!(
+            matches!(s.qualify_intent(&health_read(&fresh, action), &calculation,index,at).unwrap(),IntentQualificationV1::Invalidated(r) if r.reason_code == "action_business_facts_changed")
+        );
+        assert!(
+            contracts::economics::EconomicRational::try_from(&original_fee)
+                .unwrap()
+                .is_positive(),
+            "原真实Taker孤腿具有正费用贡献"
+        );
+        println!(
+            "real contribution changed; frozen_orphan_fee={original_fee:?}; current costs remain original Ledger facts"
+        );
+        verified = true;
+        break;
+    }
+    assert!(verified, "原执行/NOE/Ledger产生可达配平贡献变化");
+    assert_eq!(input.trade_economics, old_trades);
+    assert_eq!(diagnostic(&calculation.output), &frozen);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn unrelated_market_commitment_does_not_invalidate_frozen_repair() {
+    let temp = tempfile::tempdir().unwrap();
+    let dpt = temp.path().join("dpt");
+    let (core, times) = recorded_equal_start_markets(&dpt);
+    let (mut execution, observation, rules) = execution_with_rules_v4(
+        &temp.path().join("sim.jsonl"),
+        &core,
+        SUCCESS_POLICY,
+        None,
+        "e".repeat(64),
+        "2000",
+    );
+    let mut ledger =
+        LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+    execution
+        .bind_ledger_recording_v2(&mut ledger, &temp.path().join("ledger"))
+        .unwrap();
+    let mut shared = SharedExecutionV2::from_opening(ledger, observation)
+        .unwrap()
+        .unwrap();
+    let source = RecordedPublicGroupSourceV1::open(&dpt, 1, 1 << 20, times).unwrap();
+    let mut driver = FinitePublicConsumptionV1::new(execution, source, "two-market-health".into());
+    for _ in 0..8 {
+        driver.next_group().unwrap().unwrap();
+    }
+    shared
+        .execute_batch_reserved(
+            &mut driver.decision().unwrap(),
+            &[buy(
+                &rules,
+                "real-first-market-orphan",
+                UP_TOKEN_ID,
+                Decimal::from(10),
+                Decimal::new(6, 1),
+                false,
+            )],
+        )
+        .await
+        .unwrap();
+    let input = loop {
+        assert!(driver.next_group().unwrap().is_some());
+        let input = shared.strategy_input(&mut driver).unwrap().unwrap();
+        if input
+            .trade_economics
+            .iter()
+            .any(|t| t.economic_applied && t.success_applied)
+        {
+            break input;
+        }
+    };
+    let at = input
+        .action_before
+        .cutoff()
+        .decision_time()
+        .logical_time_utc_ms();
+    let mut c = config();
+    c.repair.base_loss_allowance_per_share = Decimal::new(2, 1);
+    c.repair.residual_risk_weight = Decimal::from(100);
+    c.repair.enable_active_repair = false;
+    let mut s = strategy(c, rules.clone());
+    let input = estimated(input, "100000");
+    let calculation = input.calculate(&mut s, at).unwrap();
+    let dependency = &diagnostic(&calculation.output).action_health_dependencies[0];
+    let other = input
+        .markets
+        .iter()
+        .find(|f| f.observation.market.condition_id != dependency.condition_id)
+        .expect("原双市场费用池夹具");
+    let mut item = buy(
+        &rules,
+        "unrelated-market-request",
+        UP_TOKEN_ID,
+        Decimal::from(5),
+        Decimal::new(2, 1),
+        true,
+    );
+    item.intent = Arc::new(ModelIntentV1::SubmitSingleBuy {
+        condition_id: other.observation.market.condition_id.clone(),
+        order: BuyLegIntentV1 {
+            token_id: other.observation.assets[0].asset.token_id.clone(),
+            order: BuyOrderIntentV1::GtcLimit {
+                limit_price_pusd_per_share: Decimal::new(2, 1),
+                size_shares: Decimal::from(5),
+                post_only: true,
+            },
+        },
+    });
+    item.reserves[0].reserve.condition_id = other.observation.market.condition_id.clone();
+    shared
+        .execute_batch_reserved(&mut driver.decision().unwrap(), &[item])
+        .await
+        .unwrap();
+    let current = estimated(
+        shared.strategy_input(&mut driver).unwrap().unwrap(),
+        "100000",
+    );
+    let action = shared
+        .strategy_input(&mut driver)
+        .unwrap()
+        .unwrap()
+        .action_before;
+    assert_eq!(
+        s.qualify_intent(&health_read(&current, action), &calculation, 0, at)
+            .unwrap(),
+        IntentQualificationV1::Qualified
+    );
 }

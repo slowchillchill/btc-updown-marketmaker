@@ -31,6 +31,7 @@ pub struct StrategyInputV1 {
 /// 健康读取借用原公开观察，避免重复克隆盘口；账户来自同一真实 Ledger/Registry。
 pub struct StrategyCurrentReadV1<'a> {
     pub action_before: ActionBeforeReadV2,
+    pub trade_economics: Vec<FrozenTradeEconomicsV1>,
     pub markets: Vec<PublicObservationFrameV1<'a>>,
 }
 /// 每笔新增资金的原腿序号与预留；取消意图没有新增资金项。
@@ -257,7 +258,23 @@ impl SharedExecutionV2 {
         Some(StrategyCurrentReadV1 {
             action_before: self.freeze_action_before(cutoff, &frames)?,
             markets: frames,
+            trade_economics: self.freeze_trade_economics(),
         })
+    }
+    fn freeze_trade_economics(&self) -> Vec<FrozenTradeEconomicsV1> {
+        self.ledger()
+            .economic_read()
+            .expect("同截止已开户")
+            .trades()
+            .map(|t| FrozenTradeEconomicsV1 {
+                trade_identity: t.trade_identity.clone(),
+                fact: t.fact.clone(),
+                economic_applied: t.economic_applied,
+                success_applied: t.success_applied,
+                actual_net_fee_pusd: t.actual_net_fee_pusd,
+                unpaired_contribution_shares: t.unpaired_contribution_shares,
+            })
+            .collect()
     }
     fn input_from_frames(
         &self,
@@ -267,20 +284,7 @@ impl SharedExecutionV2 {
         let action_before = self.freeze_action_before(cutoff, frames)?;
         Some(StrategyInputV1 {
             action_before,
-            trade_economics: self
-                .ledger()
-                .economic_read()
-                .expect("同截止已开户")
-                .trades()
-                .map(|t| FrozenTradeEconomicsV1 {
-                    trade_identity: t.trade_identity.clone(),
-                    fact: t.fact.clone(),
-                    economic_applied: t.economic_applied,
-                    success_applied: t.success_applied,
-                    actual_net_fee_pusd: t.actual_net_fee_pusd,
-                    unpaired_contribution_shares: t.unpaired_contribution_shares,
-                })
-                .collect(),
+            trade_economics: self.freeze_trade_economics(),
             markets: frames
                 .iter()
                 .map(|f| FrozenMarketReadV1 {

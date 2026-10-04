@@ -430,7 +430,23 @@ async fn frozen_strategy_input_explicit_time_empty_error_exit_and_original_amoun
     let mut saw_new_trade = false;
     while driver.next_group().unwrap().is_some() {
         let fresh = shared.strategy_input(&mut driver).unwrap().unwrap();
-        if !fresh.trade_economics.is_empty() {
+        if fresh
+            .trade_economics
+            .iter()
+            .any(|t| t.economic_applied && t.success_applied)
+        {
+            let current = shared.strategy_current_read(&driver).unwrap().unwrap();
+            assert_eq!(current.action_before.cutoff(), fresh.action_before.cutoff());
+            assert_eq!(
+                current.trade_economics, fresh.trade_economics,
+                "资格与决定共用同截止原交易费用/贡献映射"
+            );
+            assert!(
+                current
+                    .trade_economics
+                    .iter()
+                    .any(|t| t.actual_net_fee_pusd.0 != "0")
+            );
             saw_new_trade = true;
             break;
         }

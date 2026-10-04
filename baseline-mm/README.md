@@ -18,12 +18,35 @@ let mut strategy = ComplementaryPairV1::new(config, sealed_rules, namespace, con
 let input = shared.strategy_input(&mut driver)?.expect("原公共可决策组");
 let calculation = input.calculate(&mut strategy, measured_start)?;
 let completed = calculation.complete(measured_finish);
-let dispatch = shared.dispatch_strategy(&mut decision, &mut strategy, completed).await?;
+let dispatch = shared.dispatch_strategy_qualified(&mut decision, &mut strategy, completed).await?;
 ```
 
-宿主依获批时序推进到发送点；`dispatch_strategy` 把实际整批结果通知原策略实例，策略仅对真实已发或结果未知请求保留利润占用。低层 `execute_batch_reserved` 的直接消费者需自行调用同一 `StrategyV1::dispatched` 通知，不能把形成候选当已发请求。泛型诊断随冻结计算保存在内存，后来的账户／行情归约不能改变旧诊断；本库不落盘 JSON 或数据库。
+宿主依获批时序推进到发送点；本策略选用来源健康，宿主用 `dispatch_strategy_qualified` 逐项复核，并将真实批次结果或明确失效通知原实例。策略仅对真实已发或结果未知请求保留利润占用。低层 `execute_batch_reserved` 的直接消费者需自行调用同一 `StrategyV1::dispatched` 通知，不能把形成候选当已发请求。泛型诊断随冻结计算保存在内存，后来的账户／行情归约不能改变旧诊断；本库不落盘 JSON 或数据库。
 
 [合成配置](configs/strategies/complementary_pair/synthetic-engineering.toml) 全部参数显式且无校准资格。规则、公式、公共成本界与限制见规格第 11 节；集成测试经原 DPT／SIM／NOE／Ledger 构造费用、平均成本池、预留和撤单反馈，不建策略影子账本。
+
+### 来源健康与冻结动作
+
+[策略合同 #185 任务3§3.5](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)规定健康策略归本库。公共来源进展、同步状态、合法观察/发送截止、整批预留及停批释放沿原公共类型，健康判断不会改写公共质量或 NAV。历史缺少连接证据时保持未知；不从没有消息推定断连，不增加固定恢复帧数或冷却。
+
+`health` 区段的八个必填字段均为非负整数毫秒，没有正式默认值。`*_silence_ms` 比较当前合法评估/发送时刻与最后有效业务消息的接收时刻；`*_event_delay_ms` 比较同一时刻与消息原事件时刻。差值 **大于或等于** 阈值即不健康，零意味着立即到期。缺少有效业务消息或事件时间、时间不一致、来源不可用或明确要求重新同步也独立表达为不健康；任何无效帧、PONG、重复接收或其他资产消息均不能凭接收活动覆盖对应流事实。
+
+| 流 | 接收静默阈值 | 原事件滞后阈值 | 范围 |
+|---|---|---|---|
+| Polymarket 盘口 | `polymarket_silence_ms` | `polymarket_event_delay_ms` | 每个 condition/token |
+| Chainlink 现价或本次估计实际采用的 TWAP | `chainlink_silence_ms` | `chainlink_event_delay_ms` | `btc/usd`，具体来源独立 |
+| Binance 成交 | `binance_trade_silence_ms` | `binance_trade_event_delay_ms` | `BTCUSDT` |
+| Binance 深度 | `binance_depth_silence_ms` | `binance_depth_event_delay_ms` | `BTCUSDT` |
+
+Chainlink 与两个资产盘口是新增配对的依赖。Binance 只按实际非零算法系数启用；成交压力使用深度分母，所以 `binance_trade_pressure_weight_usd != 0` 时成交与深度都参与，即使独立深度系数为零。被禁用的修正不读取其来源。固定市场锚点不是持续行情流，不使用这些静默期限。
+
+辅助来源退化时停止新增风险并撤掉不再合格的风险挂单；真实缺口仍可按原成本、已有承诺和资金边界独立修复。概率不可用时，独立比较依赖持有腿的公共标记及必要盘口；有效空买盘 `Some(None)` 按公共零标记语义处理，标记不可用不会伪装为零。Maker/FAK 的原含费成本与过补边界保持，不能以当前盘口收紧 FAK 的全域数量界。
+
+`uses_source_health` 显式选择事实投影；`next_health_evaluation_at` 返回必要流的下一到期时刻，全部静默仍能唤醒重评。计算期间、待发期间以及每项提交前均通过 `qualify_intent` 复核冻结的动作依赖。诊断保存请求关联的来源范围、独立修复持有腿及支撑价量/成本/容量的市场标量与已有承诺；不保存另一份盘口或复制账本。孤腿含费成本在决定与资格中共用原逐交易费用及未配平贡献计算；当前读取由 `shared-run` 沿同一已应用 Ledger/受信截止复用原 `FrozenTradeEconomicsV1` 映射，不在策略构造第二事实来源。正利润支持复核复用原利润池与未决占用读取。相关事实发生变化时明确失效、停下未尝试后缀并重新计算，不改冻结价格、数量或原诊断；本批已发请求不会被误当作外部新增承诺。现金准入仍由原整批预留及请求身份校验承担。
+
+`invalidated` 只登记实际已发前缀的利润占用，未尝试项没有占用；原结果未知、撤单竞速、反馈等待、高水位与 Exit 继续沿原合同。撤单来自策略已知的原目标；之后目标进入终态不会阻止同批其他目标的撤单。直接低层消费者需选用等价的公共资格路径并通知原实例，不能省略这些回调。
+
+配置在启动时完整解析与 CLI 覆盖并记录生效值，不支持热加载。合成配置的健康数值只验证工程机制，不代表已校准运行参数。`cli/tests/source_health.rs` 经真实 typed Parquet、原准入与原历史入口组合本策略验证静默撤单、事件滞后/同值恢复、代次同步、计算/待发失效、真实部分成交后的独立补腿与必要行情失效、连续高水位和 Exit；策略测试覆盖启用依赖、持有标记复核、真实承诺变化及已发前缀利润通知。公共输入损坏、竞速和未知请求边界复用原所属测试。
 
 ### 首折 Chainlink 来源统计
 

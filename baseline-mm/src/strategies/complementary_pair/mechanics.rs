@@ -4,7 +4,12 @@ impl ComplementaryPairV1 {
     pub(super) fn profit_and_equity(
         input: &StrategyInputV1,
     ) -> Result<(R, ExecutionReadValueV1<ExactRationalV1>), StrategyErrorV1> {
-        let economics = input.action_before.economics();
+        Self::profit_and_equity_read(&input.action_before)
+    }
+    pub(super) fn profit_and_equity_read(
+        read: &ActionBeforeReadV2,
+    ) -> Result<(R, ExecutionReadValueV1<ExactRationalV1>), StrategyErrorV1> {
+        let economics = read.economics();
         let mut unpaid = R::zero();
         let mut pnl = R::zero();
         for m in &economics.markets {
@@ -25,11 +30,16 @@ impl ComplementaryPairV1 {
         input: &StrategyInputV1,
         a: &ProfitAllocationV1,
     ) -> Result<Option<R>, StrategyErrorV1> {
+        Self::profit_bound_read(&input.action_before, a)
+    }
+    pub(super) fn profit_bound_read(
+        read: &ActionBeforeReadV2,
+        a: &ProfitAllocationV1,
+    ) -> Result<Option<R>, StrategyErrorV1> {
         let mut remaining = R::zero();
         let mut has_commitment = false;
         let mut unknown = false;
-        for c in input
-            .action_before
+        for c in read
             .commitments()
             .filter(|c| c.origin.intent.global_request_id() == a.global_request_id)
         {
@@ -44,27 +54,25 @@ impl ComplementaryPairV1 {
                 unknown = true;
             }
         }
-        let active_request = input.action_before.request_funds().any(|r| {
+        let active_request = read.request_funds().any(|r| {
             r.request_identity == &a.reserve_identity
                 && !matches!(
                     r.reservation_state,
                     ReservationStatusV1::Converted | ReservationStatusV1::Released
                 )
         });
-        if !has_commitment && !active_request && input.action_before.pending_noe_record_count() == 0
-        {
+        if !has_commitment && !active_request && read.pending_noe_record_count() == 0 {
             return Ok(None);
         }
         let original = rational(&a.allocated_profit_pusd)?;
-        let bound =
-            if unknown || active_request || input.action_before.pending_noe_record_count() > 0 {
-                original.clone()
-            } else {
-                // 已应用本金配平亏损已在公共P中；只保留剩余份额的未决增量。
-                remaining
-                    .mul(&rational(&a.incremental_loss_per_share)?)
-                    .add(&rational(&a.fee_bound_pusd)?)
-            };
+        let bound = if unknown || active_request || read.pending_noe_record_count() > 0 {
+            original.clone()
+        } else {
+            // 已应用本金配平亏损已在公共P中；只保留剩余份额的未决增量。
+            remaining
+                .mul(&rational(&a.incremental_loss_per_share)?)
+                .add(&rational(&a.fee_bound_pusd)?)
+        };
         Ok(Some(original.min(bound)))
     }
     pub(super) fn reconcile_profit(

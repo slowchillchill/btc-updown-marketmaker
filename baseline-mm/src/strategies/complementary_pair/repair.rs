@@ -125,8 +125,11 @@ impl ComplementaryPairV1 {
                             .all(|p| p.price <= *mp && p.price <= old_cap_price))
             });
         let old_mark = value(&o.assets[held].valuation_best_bid)
-            .and_then(|p| p.as_ref())
-            .map(|p| float(&decimal(p)?))
+            .map(|p| {
+                p.as_ref()
+                    .map(|p| decimal(p).and_then(|p| float(&p)))
+                    .unwrap_or(Ok(0.0))
+            })
             .transpose()?;
         // 估计缺失时，这个比较可独立使用持有腿公开标记价；诊断仍不伪造公平价值。
         let basis = if let Some(f) = fair {

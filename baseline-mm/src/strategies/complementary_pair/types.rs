@@ -76,6 +76,50 @@ pub struct MarketDecisionDiagnosticV1 {
     pub unavailable: Vec<ActionUnavailableV1>,
     pub comparison: Option<RepairComparisonV1>,
     pub maximum_repair_price: Option<ExactDecimal>,
+    pub source_health: Vec<SourceHealthIssueV1>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceHealthFailureV1 {
+    UnknownBusinessProgress,
+    ReceiveSilence,
+    EventDelay,
+    UnknownEventTime,
+    TimeInconsistent,
+    SynchronizationRequired,
+    Unavailable,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceHealthIssueV1 {
+    pub scope: SourceStreamScopeV1,
+    pub failure: SourceHealthFailureV1,
+}
+/// 与冻结请求关联的最小来源依赖；不保存另一份行情。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionHealthDependencyV1 {
+    pub global_request_id: String,
+    pub condition_id: ConditionId,
+    pub sources: Vec<SourceStreamScopeV1>,
+    pub repair_token: Option<TokenId>,
+    pub independent_held_token: Option<TokenId>,
+    pub business: ActionBusinessDependencyV1,
+}
+/// 只冻结本市场支撑价量/成本/容量的标量；变化时重算，不存第二份账本。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionBusinessDependencyV1 {
+    pub orphan_shares: [ExactDecimal; 2],
+    pub orphan_principal: ExactRationalV1,
+    pub orphan_fee: Option<ExactRationalV1>,
+    pub success_shares: [ExactDecimal; 2],
+    pub success_principal: [ExactRationalV1; 2],
+    pub actual_fees: [ExactDecimal; 2],
+    pub commitments: Vec<ActionCommitmentDependencyV1>,
+    pub unknown_order_ids: Vec<String>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActionCommitmentDependencyV1 {
+    pub request_id: String,
+    pub leg_ordinal: u16,
+    pub remaining_shares: ExecutionReadValueV1<ExactDecimal>,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProfitAllocationV1 {
@@ -100,4 +144,5 @@ pub struct ComplementaryPairDiagnosticV1 {
     pub available_profit_pusd: ExactRationalV1,
     pub markets: Vec<MarketDecisionDiagnosticV1>,
     pub profit_allocations: Vec<ProfitAllocationV1>,
+    pub action_health_dependencies: Vec<ActionHealthDependencyV1>,
 }
