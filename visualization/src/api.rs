@@ -1,7 +1,11 @@
 use crate::query::{BatchMatcher, BrowseQuery};
 use crate::{
-    dto::{Snapshot, SourcesConfig, exact_json},
-    sources::{backtest::load_document, noe::NoeResults, public_recording::PublicPages},
+    dto::{ReportSourceKind, Snapshot, SourcesConfig, exact_json},
+    sources::{
+        backtest::{load_document, load_engineering_projection},
+        noe::NoeResults,
+        public_recording::PublicPages,
+    },
 };
 use axum::{
     Router,
@@ -28,7 +32,12 @@ pub fn load_sources(config: SourcesConfig) -> Result<AppState, serde_json::Error
     let mut runs = Vec::new();
     for (index, config) in config.runs.into_iter().enumerate() {
         eprintln!("读取来源 {index}：报告/元数据/显式公共前缀");
-        let report = load_document(config.report.as_deref(), true);
+        let report = match config.report_kind {
+            ReportSourceKind::HistoricalBacktest => load_document(config.report.as_deref(), true),
+            ReportSourceKind::EngineeringLedgerProjection => {
+                load_engineering_projection(config.report.as_deref())
+            }
+        };
         let metadata = load_document(config.metadata.as_deref(), false);
         let (public, public_status) = match config.public_recording.as_ref() {
             None => (
@@ -47,6 +56,7 @@ pub fn load_sources(config: SourcesConfig) -> Result<AppState, serde_json::Error
         let snapshot = Snapshot {
             label: config.label.clone(),
             report,
+            report_kind: config.report_kind,
             metadata,
             public_recording: public_status.clone(),
             noe_results: noe.index(),

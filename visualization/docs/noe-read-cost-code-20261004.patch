@@ -1,0 +1,217 @@
+diff --git a/visualization/examples/read_cost.rs b/visualization/examples/read_cost.rs
+index e9a9fcb..5206d9e 100644
+--- a/visualization/examples/read_cost.rs
++++ b/visualization/examples/read_cost.rs
+@@ -66,7 +66,7 @@ fn proc_number(path: &str, field: &str) -> u64 {
+         })
+         .unwrap()
+ }
+-fn measure<T>(phase: &str, action: impl FnOnce() -> T) -> (T, Value) {
++pub fn measure<T>(phase: &str, action: impl FnOnce() -> T) -> (T, Value) {
+     // /proc 和日志在计数窗口外；strace marker 用于独立统计来源文件 syscall。
+     let read_bytes_before = proc_number("/proc/self/io", "read_bytes:");
+     std::io::stderr()
+diff --git a/visualization/src/api.rs b/visualization/src/api.rs
+index 29a3687..73eb23b 100644
+--- a/visualization/src/api.rs
++++ b/visualization/src/api.rs
+@@ -1,7 +1,11 @@
+ use crate::query::{BatchMatcher, BrowseQuery};
+ use crate::{
+-    dto::{Snapshot, SourcesConfig, exact_json},
+-    sources::{backtest::load_document, noe::NoeResults, public_recording::PublicPages},
++    dto::{ReportSourceKind, Snapshot, SourcesConfig, exact_json},
++    sources::{
++        backtest::{load_document, load_engineering_projection},
++        noe::NoeResults,
++        public_recording::PublicPages,
++    },
+ };
+ use axum::{
+     Router,
+@@ -28,7 +32,12 @@ pub fn load_sources(config: SourcesConfig) -> Result<AppState, serde_json::Error
+     let mut runs = Vec::new();
+     for (index, config) in config.runs.into_iter().enumerate() {
+         eprintln!("读取来源 {index}：报告/元数据/显式公共前缀");
+-        let report = load_document(config.report.as_deref(), true);
++        let report = match config.report_kind {
++            ReportSourceKind::HistoricalBacktest => load_document(config.report.as_deref(), true),
++            ReportSourceKind::EngineeringLedgerProjection => {
++                load_engineering_projection(config.report.as_deref())
++            }
++        };
+         let metadata = load_document(config.metadata.as_deref(), false);
+         let (public, public_status) = match config.public_recording.as_ref() {
+             None => (
+@@ -47,6 +56,7 @@ pub fn load_sources(config: SourcesConfig) -> Result<AppState, serde_json::Error
+         let snapshot = Snapshot {
+             label: config.label.clone(),
+             report,
++            report_kind: config.report_kind,
+             metadata,
+             public_recording: public_status.clone(),
+             noe_results: noe.index(),
+diff --git a/visualization/src/dto.rs b/visualization/src/dto.rs
+index abe0d0e..48164a8 100644
+--- a/visualization/src/dto.rs
++++ b/visualization/src/dto.rs
+@@ -11,11 +11,21 @@ pub struct SourcesConfig {
+ pub struct RunSourceConfig {
+     pub label: String,
+     pub report: Option<PathBuf>,
++    #[serde(default)]
++    pub report_kind: ReportSourceKind,
+     pub metadata: Option<PathBuf>,
+     pub public_recording: Option<PublicSourceConfig>,
+     #[serde(default)]
+     pub noe_results: Vec<NoeSourceConfig>,
+ }
++/// 可视化来源类别；不修改生产报告或 Ledger 合同。
++#[derive(Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
++#[serde(rename_all = "snake_case")]
++pub enum ReportSourceKind {
++    #[default]
++    HistoricalBacktest,
++    EngineeringLedgerProjection,
++}
+ #[derive(Debug, Deserialize, Serialize)]
+ pub struct NoeSourceConfig {
+     pub label: String,
+@@ -47,6 +57,7 @@ pub struct Document {
+ pub struct Snapshot {
+     pub label: String,
+     pub report: Document,
++    pub report_kind: ReportSourceKind,
+     pub metadata: Document,
+     pub public_recording: Value,
+     pub noe_results: Vec<Value>,
+diff --git a/visualization/src/sources/backtest.rs b/visualization/src/sources/backtest.rs
+index ef90ba9..903589a 100644
+--- a/visualization/src/sources/backtest.rs
++++ b/visualization/src/sources/backtest.rs
+@@ -3,6 +3,13 @@ use crate::dto::{Document, exact_json};
+ use std::{path::Path, time::Instant};
+ 
+ pub fn load_document(path: Option<&Path>, report: bool) -> Document {
++    load_json(path, Some(report))
++}
++/// 工程原 Ledger 投影没有宿主终止原因/经济版本；只读取精确 JSON，不冒充报告。
++pub fn load_engineering_projection(path: Option<&Path>) -> Document {
++    load_json(path, None)
++}
++fn load_json(path: Option<&Path>, report: Option<bool>) -> Document {
+     let started = Instant::now();
+     let mut doc = Document {
+         source: path.map(|p| p.display().to_string()),
+@@ -35,13 +42,14 @@ pub fn load_document(path: Option<&Path>, report: bool) -> Document {
+                     doc.raw_json = String::from_utf8(bytes).ok();
+                     doc.status = "ready";
+                     // economics_version 是报告/启动元数据目前明确发布的版本标识。
+-                    if value.get("economics_version").and_then(|v| v.as_str())
+-                        != Some("account_economics_v2")
++                    if report.is_some()
++                        && value.get("economics_version").and_then(|v| v.as_str())
++                            != Some("account_economics_v2")
+                     {
+                         doc.status = "unknown_version";
+                         doc.detail =
+                             Some("经济版本缺失或不支持；仅保留原 JSON，不作语义解释".into());
+-                    } else if report
++                    } else if report == Some(true)
+                         && !matches!(
+                             value.get("end_reason").and_then(|v| v.as_str()),
+                             Some("RangeEnd" | "StrategyExit" | "Failure")
+diff --git a/visualization/src/sources/noe.rs b/visualization/src/sources/noe.rs
+index 9291fa9..fea5368 100644
+--- a/visualization/src/sources/noe.rs
++++ b/visualization/src/sources/noe.rs
+@@ -10,11 +10,17 @@ use serde::Serialize;
+ use serde_json::{Value, json};
+ use std::time::Instant;
+ 
++#[derive(Debug, Clone, Copy, Serialize, Default)]
++pub struct NoeEncodingCost {
++    pub response_encoding_us: u128,
++    pub response_bytes: usize,
++}
+ pub struct NoeResults {
+     configured: Vec<NoeSourceConfig>,
+     // 最近单引用响应用于重试；不建立逐条/全历史缓存或自动批读。
+     last: Option<(usize, Bytes)>,
+     native_calls: u64,
++    encoding_cost: NoeEncodingCost,
+ }
+ impl NoeResults {
+     pub fn new(configured: Vec<NoeSourceConfig>) -> Self {
+@@ -22,8 +28,13 @@ impl NoeResults {
+             configured,
+             last: None,
+             native_calls: 0,
++            encoding_cost: NoeEncodingCost::default(),
+         }
+     }
++    /// 最近完整响应的一次编码成本；重试沿用旧值，不代表新增编码。
++    pub fn last_encoding_cost(&self) -> NoeEncodingCost {
++        self.encoding_cost
++    }
+     pub fn index(&self) -> Vec<Value> {
+         self.configured.iter().enumerate().map(|(index,c)|json!({"index":index.to_string(),"label":c.label,"version":c.version,"reference_file":c.reference_file,
+             "status":if supported(&c.version){"configured"}else{"unknown_version"},"detail":"显式原引用；按需读取，未枚举历史"})).collect()
+@@ -102,7 +113,12 @@ impl NoeResults {
+             "cost":{"reference_json_bytes_read":reference_bytes.to_string(),"native_read_attempts":native_attempts.to_string(),"native_read_calls_total":self.native_calls.to_string(),
+                 "container_file_bytes":container_file_bytes,"native_read_and_dto_us":native_elapsed.to_string(),"load_elapsed_us":started.elapsed().as_micros().to_string(),
+                 "allocation_bytes":null,"underlying_io_bytes":null,"note":"单引用原接口解码整个提交容器和上下文，再选 ordinal；未测底层实际 I/O/分配；不自动逐条批读"}});
++        let encoding_started = Instant::now();
+         let body: Bytes = serde_json::to_vec(&body).map_err(|e| e.to_string())?.into();
++        self.encoding_cost = NoeEncodingCost {
++            response_encoding_us: encoding_started.elapsed().as_micros(),
++            response_bytes: body.len(),
++        };
+         self.last = Some((index, body.clone()));
+         Ok(body)
+     }
+diff --git a/visualization/examples/noe_read_cost.rs b/visualization/examples/noe_read_cost.rs
+new file mode 100644
+index 0000000..3ca3a68
+--- /dev/null
++++ b/visualization/examples/noe_read_cost.rs
+@@ -0,0 +1,39 @@
++//! 单个原 writer 引用首读/最近重试；allocator 仅沿用示例探针，不替换服务 allocator。
++#[allow(dead_code)]
++#[path = "read_cost.rs"]
++mod probe;
++use serde_json::{Value, json};
++use visualization::{dto::SourcesConfig, sources::noe::NoeResults};
++fn main() -> Result<(), Box<dyn std::error::Error>> {
++    let config: SourcesConfig = serde_json::from_slice(&std::fs::read(
++        std::env::args().nth(1).ok_or("缺 NOE sources.json")?,
++    )?)?;
++    let source = config
++        .runs
++        .into_iter()
++        .next()
++        .ok_or("缺首来源")?
++        .noe_results
++        .into_iter()
++        .nth(2)
++        .ok_or("需要 v4 Evidence 原引用 index 2")?;
++    if source.version != "v4" {
++        return Err("本探针只测工程 v4 单引用".into());
++    }
++    let mut reader = NoeResults::new(vec![source]);
++    let (first, mut cost) = probe::measure("first_read", || reader.load(0).unwrap());
++    let body: Value = serde_json::from_slice(&first)?;
++    assert_eq!(body["status"], "ready");
++    cost["encoding"] = serde_json::to_value(reader.last_encoding_cost())?;
++    cost["native_cost"] = body["cost"].clone();
++    println!("{cost}");
++    let (retry, mut cost) = probe::measure("retry_latest", || reader.load(0).unwrap());
++    assert_eq!(first, retry);
++    assert_eq!(first.as_ptr(), retry.as_ptr());
++    cost["response_bytes"] = json!(retry.len());
++    cost["new_native_read_calls"] = json!(0);
++    cost["new_complete_encodings"] = json!(0);
++    cost["same_bytes_allocation"] = json!(true);
++    println!("{cost}");
++    Ok(())
++}

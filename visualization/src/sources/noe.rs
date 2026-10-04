@@ -10,11 +10,17 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use std::time::Instant;
 
+#[derive(Debug, Clone, Copy, Serialize, Default)]
+pub struct NoeEncodingCost {
+    pub response_encoding_us: u128,
+    pub response_bytes: usize,
+}
 pub struct NoeResults {
     configured: Vec<NoeSourceConfig>,
     // 最近单引用响应用于重试；不建立逐条/全历史缓存或自动批读。
     last: Option<(usize, Bytes)>,
     native_calls: u64,
+    encoding_cost: NoeEncodingCost,
 }
 impl NoeResults {
     pub fn new(configured: Vec<NoeSourceConfig>) -> Self {
@@ -22,7 +28,12 @@ impl NoeResults {
             configured,
             last: None,
             native_calls: 0,
+            encoding_cost: NoeEncodingCost::default(),
         }
+    }
+    /// 最近完整响应的一次编码成本；重试沿用旧值，不代表新增编码。
+    pub fn last_encoding_cost(&self) -> NoeEncodingCost {
+        self.encoding_cost
     }
     pub fn index(&self) -> Vec<Value> {
         self.configured.iter().enumerate().map(|(index,c)|json!({"index":index.to_string(),"label":c.label,"version":c.version,"reference_file":c.reference_file,
@@ -102,7 +113,12 @@ impl NoeResults {
             "cost":{"reference_json_bytes_read":reference_bytes.to_string(),"native_read_attempts":native_attempts.to_string(),"native_read_calls_total":self.native_calls.to_string(),
                 "container_file_bytes":container_file_bytes,"native_read_and_dto_us":native_elapsed.to_string(),"load_elapsed_us":started.elapsed().as_micros().to_string(),
                 "allocation_bytes":null,"underlying_io_bytes":null,"note":"单引用原接口解码整个提交容器和上下文，再选 ordinal；未测底层实际 I/O/分配；不自动逐条批读"}});
+        let encoding_started = Instant::now();
         let body: Bytes = serde_json::to_vec(&body).map_err(|e| e.to_string())?.into();
+        self.encoding_cost = NoeEncodingCost {
+            response_encoding_us: encoding_started.elapsed().as_micros(),
+            response_bytes: body.len(),
+        };
         self.last = Some((index, body.clone()));
         Ok(body)
     }

@@ -66,7 +66,7 @@ fn proc_number(path: &str, field: &str) -> u64 {
         })
         .unwrap()
 }
-fn measure<T>(phase: &str, action: impl FnOnce() -> T) -> (T, Value) {
+pub fn measure<T>(phase: &str, action: impl FnOnce() -> T) -> (T, Value) {
     // /proc 和日志在计数窗口外；strace marker 用于独立统计来源文件 syscall。
     let read_bytes_before = proc_number("/proc/self/io", "read_bytes:");
     std::io::stderr()

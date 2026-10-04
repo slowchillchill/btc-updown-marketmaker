@@ -15,6 +15,7 @@ export type Doc = {
 export type Snapshot = {
   label: string;
   report: Doc;
+  report_kind: "historical_backtest" | "engineering_ledger_projection";
   metadata: Doc;
   public_recording: Record<string, Json>;
   gaps: string[];

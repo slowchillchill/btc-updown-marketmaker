@@ -153,6 +153,6 @@ fn main() {
     let p = projection(&root);
     // 仅为已存在 JSON 展示入口的边界夹具；不声称这个包装是 backtest 生产报告。
     let report = root.join("display-boundary.json");
-    std::fs::write(&report,serde_json::to_vec_pretty(&serde_json::json!({"engineering_display_boundary":"原 Ledger 投影；外层非宿主报告/策略研究","economics_version":"account_economics_v2","end_reason":"RangeEnd","ledger_consumed_memory":p})).unwrap()).unwrap();
-    std::fs::write(root.join("sources.json"),serde_json::to_vec_pretty(&serde_json::json!({"runs":[{"label":"Ledger 原投影展示边界 · 外层非宿主报告/策略研究","report":report}]})).unwrap()).unwrap();
+    std::fs::write(&report,serde_json::to_vec_pretty(&serde_json::json!({"engineering_display_boundary":"原 Ledger 投影；外层非宿主报告/策略研究","ledger_consumed_memory":p})).unwrap()).unwrap();
+    std::fs::write(root.join("sources.json"),serde_json::to_vec_pretty(&serde_json::json!({"runs":[{"label":"Ledger 原投影展示边界 · 外层非宿主报告/策略研究","report":report,"report_kind":"engineering_ledger_projection"}]})).unwrap()).unwrap();
 }

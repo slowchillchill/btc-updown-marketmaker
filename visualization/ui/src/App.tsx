@@ -26,6 +26,7 @@ import { EventTable } from "./EventTable";
 import { Timeline } from "./Timeline";
 import { ExecutionProjection } from "./ExecutionProjection";
 import { NoePanel, useNoe } from "./Noe";
+import { noePoints } from "./noePoints";
 import { SourceIdentity } from "./SourceIdentity";
 import { usePublicBrowse } from "./PublicBrowse";
 const views = [
@@ -105,6 +106,8 @@ export default function App() {
     snapshot?.metadata.status === "ready"
       ? (snapshot.metadata.exact ?? undefined)
       : undefined;
+  const engineeringProjection =
+    snapshot?.report_kind === "engineering_ledger_projection";
   const reportMarkets = list(at(report, "account_economics_memory", "markets"));
   const account = at(report, "ledger_consumed_memory", "account_instance_key");
   const allRows = useMemo(() => publicRows(page), [page]);
@@ -118,6 +121,23 @@ export default function App() {
     onSelect: select,
   });
   const noe = useNoe(run);
+  const loadedNoePoints = useMemo(() => noePoints(noe.loaded), [noe.loaded]);
+  useEffect(() => {
+    setSelection((previous) =>
+      previous?.source === "noe" &&
+      (noe.loaded?.status !== "ready" ||
+        !previous.path.startsWith(`/noe/${noe.loaded.index}/`))
+        ? null
+        : previous,
+    );
+  }, [noe.loaded]);
+  const selectNoe = (e: Evidence) =>
+    select({
+      ...e,
+      points: loadedNoePoints.filter(
+        (p) => p.path === e.path || p.path.startsWith(e.path + "/"),
+      ),
+    });
   const stream = text(at(snapshot?.public_recording.header, "input_stream_id"));
   const publicOnly =
     !report && !text(at(metadata, "config", "session", "run_id"));
@@ -136,6 +156,7 @@ export default function App() {
         text(at(m, "condition_id")) ? [text(at(m, "condition_id"))!] : [],
       ),
       ...allRows.flatMap((r) => r.markets?.map((m) => m.condition) ?? []),
+      ...loadedNoePoints.flatMap((p) => (p.condition ? [p.condition] : [])),
       ...(selection?.markets?.map((m) => m.condition) ?? []),
     ]),
   ];
@@ -144,6 +165,7 @@ export default function App() {
     const current = [
       ...reportPoints(report),
       ...allRows.flatMap((r) => r.points),
+      ...loadedNoePoints,
     ];
     const selectedPoint = selection as Partial<Point> | null;
     const retained =
@@ -155,10 +177,12 @@ export default function App() {
     return [
       ...current,
       ...retained.filter(
-        (p) => !current.some((c) => c.source === p.source && c.path === p.path),
+        (p) =>
+          p.source !== "noe" &&
+          !current.some((c) => c.source === p.source && c.path === p.path),
       ),
     ];
-  }, [report, allRows, selection]);
+  }, [report, allRows, selection, loadedNoePoints]);
   const rangeValid =
     (!start || /^-?\d+$/.test(start)) &&
     (!end || /^-?\d+$/.test(end)) &&
@@ -190,7 +214,9 @@ export default function App() {
       : points;
   const sourceName = (source: Evidence["source"]) =>
     source === "report"
-      ? "历史报告"
+      ? engineeringProjection
+        ? "Ledger 工程投影"
+        : "历史报告"
       : source === "metadata"
         ? "启动元数据"
         : source === "noe"
@@ -272,7 +298,11 @@ export default function App() {
             account_identity: account ?? null,
           }
         : {}),
-      report_source: snapshot.report.source,
+      report_source: engineeringProjection ? null : snapshot.report.source,
+      engineering_projection_source: engineeringProjection
+        ? snapshot.report.source
+        : null,
+      report_kind: snapshot.report_kind,
       metadata_source: snapshot.metadata.source,
       public_source: snapshot.public_recording,
       public_page_range: page
@@ -458,7 +488,9 @@ export default function App() {
                   ? noeOnly
                     ? "NOE 来源总览"
                     : "公共流总览"
-                  : "运行总览"
+                  : engineeringProjection
+                    ? "Ledger 工程投影总览"
+                    : "运行总览"
                 : views.find(([id]) => id === view)?.[1]}{" "}
               <span>原事实 · 可回查</span>
             </h1>
@@ -485,13 +517,17 @@ export default function App() {
             <div className="run-strip">
               <b>
                 {report
-                  ? "backtest"
+                  ? engineeringProjection
+                    ? "Ledger 工程投影"
+                    : "backtest"
                   : noeOnly
                     ? "显式 NOE 引用"
                     : "公共历史材料"}
               </b>
               <span>{snapshot.label}</span>
-              {publicOnly ? (
+              {engineeringProjection ? (
+                <span>原 Ledger 投影 · 非宿主报告 / 策略研究</span>
+              ) : publicOnly ? (
                 <span>
                   {noeOnly
                     ? "NOE 单引用 · 报告/公共流未接入"
@@ -614,15 +650,20 @@ export default function App() {
               onSelect={select}
             />
             <div className="notice">
-              {noeOnly
-                ? "显式 NOE 单引用；报告和公共流未接入"
-                : publicOnly
-                  ? "固定公共前缀与有限已读范围"
-                  : "终态快照与有限时序"}{" "}
+              {engineeringProjection
+                ? "原 Ledger 工程投影；非宿主报告 / 策略研究"
+                : noeOnly
+                  ? "显式 NOE 单引用；报告和公共流未接入"
+                  : publicOnly
+                    ? "固定公共前缀与有限已读范围"
+                    : "终态快照与有限时序"}{" "}
               ·
               公共输入按固定前缀和已读范围浏览；报告不代表完整逐次诊断、执行或经济历史。查看市场是浏览选择，不代表策略当前活跃市场。
             </div>
-            {snapshot.report.status !== "ready" && (
+            {engineeringProjection && (
+              <Source title="Ledger 工程投影来源" doc={snapshot.report} />
+            )}
+            {!engineeringProjection && snapshot.report.status !== "ready" && (
               <Source title="报告状态" doc={snapshot.report} />
             )}
             {view === "overview" && (
@@ -631,6 +672,7 @@ export default function App() {
                   <section>
                     <Topology
                       report={report}
+                      engineering={engineeringProjection}
                       metadata={metadata}
                       selection={selection}
                       playback={
@@ -645,6 +687,11 @@ export default function App() {
                               source: "noe",
                               path: `/noe/${noe.loaded.index}/exact/record`,
                               value: at(noe.loaded.exact, "record")!,
+                              points: loadedNoePoints.filter((p) =>
+                                p.path.startsWith(
+                                  `/noe/${noe.loaded!.index}/exact/record/`,
+                                ),
+                              ),
                             }
                           : undefined
                       }
@@ -700,8 +747,8 @@ export default function App() {
                   <Timeline points={points} onSelect={select} />
                   {condition && (
                     <p className="gap">
-                      仅包含有明确 condition
-                      关联的时间点；报告账户级时间点不能凭时间猜测市场。
+                      仅包含有明确 condition 关联的时间点；账户 /
+                      容器级时间点不能凭时间猜测市场。
                     </p>
                   )}
                   <EventTable
@@ -760,6 +807,7 @@ export default function App() {
               <>
                 <section>
                   <ExecutionProjection
+                    engineering={engineeringProjection}
                     report={report}
                     condition={condition}
                     onSelect={select}
@@ -768,7 +816,7 @@ export default function App() {
                 <NoePanel
                   index={snapshot.noe_results}
                   state={noe}
-                  onSelect={select}
+                  onSelect={selectNoe}
                 />
                 {evidencePanel}
               </>
@@ -852,11 +900,18 @@ export default function App() {
                 </section>
                 {evidencePanel}
                 <div className="columns">
-                  <Source title="历史报告" doc={snapshot.report} />
+                  <Source
+                    title={
+                      engineeringProjection ? "Ledger 工程投影" : "历史报告"
+                    }
+                    doc={snapshot.report}
+                  />
                   <Source title="启动元数据" doc={snapshot.metadata} />
                 </div>
                 <section>
-                  <h2>完整原报告</h2>
+                  <h2>
+                    {engineeringProjection ? "完整原工程投影" : "完整原报告"}
+                  </h2>
                   {snapshot.report.exact !== null && (
                     <Tree
                       name="result.json"
@@ -866,7 +921,10 @@ export default function App() {
                       }
                     />
                   )}
-                  <Raw title="报告" doc={snapshot.report} />
+                  <Raw
+                    title={engineeringProjection ? "工程投影" : "报告"}
+                    doc={snapshot.report}
+                  />
                   <h2>启动元数据</h2>
                   {snapshot.metadata.exact !== null && (
                     <Tree
@@ -888,7 +946,8 @@ export default function App() {
               </>
             )}
             <footer>
-              来源状态：报告 {statusLabel[snapshot.report.status]} · 元数据{" "}
+              来源状态：{engineeringProjection ? "工程投影" : "报告"}{" "}
+              {statusLabel[snapshot.report.status]} · 元数据{" "}
               {statusLabel[snapshot.metadata.status]} · 公共记录{" "}
               {statusLabel[String(snapshot.public_recording.status)]} /
               派生追踪可重建，不参加恢复或归约。

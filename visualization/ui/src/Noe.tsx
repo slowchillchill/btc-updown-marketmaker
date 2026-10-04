@@ -10,7 +10,7 @@ export type NoeIndex = {
   status: string;
   detail: string;
 };
-type Loaded = {
+export type LoadedNoe = {
   index: string;
   label: string;
   version: string;
@@ -23,30 +23,60 @@ type Loaded = {
   association: string;
 };
 export function useNoe(run: string) {
-  const [loaded, setLoaded] = useState<Loaded | null>(null),
-    [busy, setBusy] = useState(false),
+  const [entry, setEntry] = useState<{
+      run: string;
+      epoch: number;
+      data: LoadedNoe;
+    } | null>(null),
+    [busyEntry, setBusyEntry] = useState<{
+      run: string;
+      epoch: number;
+      token: number;
+    } | null>(null),
     [error, setError] = useState("");
-  const active = useRef(run),
-    flight = useRef(false);
-  active.current = run;
+  const active = useRef({ run, epoch: 0 }),
+    flight = useRef<{ run: string; epoch: number; token: number } | null>(null),
+    sequence = useRef(0);
+  if (active.current.run !== run)
+    active.current = { run, epoch: active.current.epoch + 1 };
+  const loaded =
+    entry?.run === run && entry.epoch === active.current.epoch
+      ? entry.data
+      : null;
+  const busy =
+    busyEntry?.run === run && busyEntry.epoch === active.current.epoch;
   useEffect(() => {
-    setLoaded(null);
+    setEntry(null);
     setError("");
   }, [run]);
   async function load(index: string) {
-    if (flight.current || loaded?.index === index) return;
-    flight.current = true;
-    setBusy(true);
+    const requested = { ...active.current, token: ++sequence.current };
+    if (
+      (flight.current?.run === run &&
+        flight.current.epoch === requested.epoch) ||
+      loaded?.index === index
+    )
+      return;
+    flight.current = requested;
+    setBusyEntry(requested);
     setError("");
-    const requested = run;
+    const current = () =>
+      active.current.run === requested.run &&
+      active.current.epoch === requested.epoch &&
+      flight.current?.token === requested.token;
     try {
-      const result = await get<Loaded>(`/api/runs/${run}/noe/${index}`);
-      if (active.current === requested) setLoaded(result);
+      const data = await get<LoadedNoe>(`/api/runs/${run}/noe/${index}`);
+      if (current()) setEntry({ ...requested, data });
     } catch (e) {
-      if (active.current === requested) setError(String(e));
+      if (current()) {
+        setEntry(null);
+        setError(String(e));
+      }
     } finally {
-      flight.current = false;
-      setBusy(false);
+      if (flight.current?.token === requested.token) {
+        flight.current = null;
+        setBusyEntry(null);
+      }
     }
   }
   return { loaded, busy, error, load };

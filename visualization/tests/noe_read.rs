@@ -100,7 +100,14 @@ fn explicit_versions_preserve_variants_exact_identity_and_retry_without_consumin
             "1788840000002"
         );
         assert!(data["exact"].to_string().contains("9007199254740993"));
-        assert_eq!(data, load(&mut reader, i));
+        let encoded = reader.last_encoding_cost();
+        let cached = reader.load(i).unwrap();
+        assert_eq!(encoded.response_bytes, cached.len());
+        assert_eq!(
+            reader.last_encoding_cost().response_encoding_us,
+            encoded.response_encoding_us
+        );
+        assert_eq!(data, serde_json::from_slice::<Value>(&cached).unwrap());
         assert_eq!(data["cost"]["native_read_calls_total"], (i + 1).to_string());
     }
 }
@@ -232,6 +239,7 @@ async fn noe_only_source_starts_with_unknown_version_and_no_eager_file_read() {
         load_sources(SourcesConfig {
             runs: vec![RunSourceConfig {
                 label: "独立 NOE 工程来源".into(),
+                report_kind: Default::default(),
                 report: None,
                 metadata: None,
                 public_recording: None,

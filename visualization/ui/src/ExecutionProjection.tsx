@@ -3,10 +3,12 @@ import { list, type Evidence } from "./browse";
 import { Field } from "./Economics";
 export function ExecutionProjection({
   report,
+  engineering = false,
   condition,
   onSelect,
 }: {
   report: Json | undefined;
+  engineering?: boolean;
   condition: string;
   onSelect: (e: Evidence) => void;
 }) {
@@ -58,9 +60,14 @@ export function ExecutionProjection({
   ];
   return (
     <>
-      <h2>执行与预留 · 报告内存投影</h2>
+      <h2>
+        执行与预留 · {engineering ? "工程原 Ledger 投影" : "报告内存投影"}
+      </h2>
       <p className="muted">
-        同一报告保存边界，账户汇总覆盖其全部市场；市场明细按完整
+        {engineering
+          ? "原 Ledger 入口生成的工程快照，非宿主运行报告"
+          : "同一报告保存边界"}
+        ，账户汇总覆盖其全部市场；市场明细按完整
         condition_id。占用包含确认待经济应用部分，不能再相加，也不是有效挂单价值。待定成交含
         PendingUnapplied / PendingApplied，不等于尚未入账数。
       </p>
@@ -132,12 +139,14 @@ export function ExecutionProjection({
       ))}
       {!selected.length && (
         <p className="gap">
-          报告没有所选市场的执行投影；不补零，不借用经济仓位或其他市场。
+          {engineering ? "工程原投影" : "报告"}
+          没有所选市场的执行投影；不补零，不借用经济仓位或其他市场。
         </p>
       )}
       <p className="gap">
-        逐批意图/即时回执/完整订单与成交历史仍未交接。报告投影不是这些历史，也不重新计算账户经济或
-        NAV。
+        逐批意图/即时回执/完整订单与成交历史仍未交接。
+        {engineering ? "工程投影" : "报告投影"}
+        不是这些历史，也不重新计算账户经济或 NAV。
       </p>
     </>
   );

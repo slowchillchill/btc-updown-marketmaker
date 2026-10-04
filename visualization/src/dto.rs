@@ -11,10 +11,20 @@ pub struct SourcesConfig {
 pub struct RunSourceConfig {
     pub label: String,
     pub report: Option<PathBuf>,
+    #[serde(default)]
+    pub report_kind: ReportSourceKind,
     pub metadata: Option<PathBuf>,
     pub public_recording: Option<PublicSourceConfig>,
     #[serde(default)]
     pub noe_results: Vec<NoeSourceConfig>,
+}
+/// 可视化来源类别；不修改生产报告或 Ledger 合同。
+#[derive(Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ReportSourceKind {
+    #[default]
+    HistoricalBacktest,
+    EngineeringLedgerProjection,
 }
 #[derive(Debug, Deserialize, Serialize)]
 pub struct NoeSourceConfig {
@@ -47,6 +57,7 @@ pub struct Document {
 pub struct Snapshot {
     pub label: String,
     pub report: Document,
+    pub report_kind: ReportSourceKind,
     pub metadata: Document,
     pub public_recording: Value,
     pub noe_results: Vec<Value>,

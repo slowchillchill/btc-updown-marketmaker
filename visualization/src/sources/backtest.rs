@@ -3,6 +3,13 @@ use crate::dto::{Document, exact_json};
 use std::{path::Path, time::Instant};
 
 pub fn load_document(path: Option<&Path>, report: bool) -> Document {
+    load_json(path, Some(report))
+}
+/// 工程原 Ledger 投影没有宿主终止原因/经济版本；只读取精确 JSON，不冒充报告。
+pub fn load_engineering_projection(path: Option<&Path>) -> Document {
+    load_json(path, None)
+}
+fn load_json(path: Option<&Path>, report: Option<bool>) -> Document {
     let started = Instant::now();
     let mut doc = Document {
         source: path.map(|p| p.display().to_string()),
@@ -35,13 +42,14 @@ pub fn load_document(path: Option<&Path>, report: bool) -> Document {
                     doc.raw_json = String::from_utf8(bytes).ok();
                     doc.status = "ready";
                     // economics_version 是报告/启动元数据目前明确发布的版本标识。
-                    if value.get("economics_version").and_then(|v| v.as_str())
-                        != Some("account_economics_v2")
+                    if report.is_some()
+                        && value.get("economics_version").and_then(|v| v.as_str())
+                            != Some("account_economics_v2")
                     {
                         doc.status = "unknown_version";
                         doc.detail =
                             Some("经济版本缺失或不支持；仅保留原 JSON，不作语义解释".into());
-                    } else if report
+                    } else if report == Some(true)
                         && !matches!(
                             value.get("end_reason").and_then(|v| v.as_str()),
                             Some("RangeEnd" | "StrategyExit" | "Failure")

@@ -189,6 +189,7 @@ function ModuleCard({ data }: NodeProps<ModuleNode>) {
 const nodeTypes = { module: ModuleCard };
 export function Topology({
   report,
+  engineering = false,
   metadata,
   selection,
   onSelect,
@@ -199,6 +200,7 @@ export function Topology({
   publicReady = false,
 }: {
   report: Json | undefined;
+  engineering?: boolean;
   metadata: Json | undefined;
   selection: Evidence | null;
   onSelect: (e: Evidence) => void;
@@ -236,36 +238,41 @@ export function Topology({
       summary: publicReady ? "指定公共稳定前缀 · 顺序读取" : "公共记录未接入",
     },
     ledger: {
-      summary: !report
-        ? "账户经济未接入"
-        : "实际总现金 " +
-          (cashTotal(
-            at(
-              report,
-              "account_economics_memory",
-              "cash",
-              "actual_available_pusd",
-            ),
-            at(
-              report,
-              "account_economics_memory",
-              "cash",
-              "actual_reserved_pusd",
-            ),
-          ) ?? "未接入") +
-          " pUSD · 终态；成本 / 应收见市场详情",
+      summary: engineering
+        ? "原 Ledger 工程投影 · 非宿主 / 经济报告"
+        : !report
+          ? "账户经济未接入"
+          : "实际总现金 " +
+            (cashTotal(
+              at(
+                report,
+                "account_economics_memory",
+                "cash",
+                "actual_available_pusd",
+              ),
+              at(
+                report,
+                "account_economics_memory",
+                "cash",
+                "actual_reserved_pusd",
+              ),
+            ) ?? "未接入") +
+            " pUSD · 终态；成本 / 应收见市场详情",
       evidence: evidence(
         "report",
-        "/account_economics_memory",
-        at(report, "account_economics_memory"),
+        engineering ? "/ledger_consumed_memory" : "/account_economics_memory",
+        engineering
+          ? at(report, "ledger_consumed_memory")
+          : at(report, "account_economics_memory"),
       ),
     },
     "shared-run": {
-      summary:
-        "待 NOE " +
-        fact(at(report, "pending_noe_records")) +
-        " · 待计算 " +
-        fact(at(report, "pending_calculation")),
+      summary: engineering
+        ? "宿主运行证据未接入"
+        : "待 NOE " +
+          fact(at(report, "pending_noe_records")) +
+          " · 待计算 " +
+          fact(at(report, "pending_calculation")),
       evidence: evidence(
         "report",
         "/observation_cutoff",
@@ -275,7 +282,7 @@ export function Topology({
     "intent-bridge": { summary: "逐次分派回执未接入" },
     "execution-normalization": {
       summary:
-        "报告耐久前缀 " +
+        (engineering ? "宿主耐久 NOE 前缀 " : "报告耐久前缀 ") +
         fact(at(report, "durable_noe_prefix")) +
         `；显式引用 ${noeCount} 条${noeSelection ? " · 单引用已加载" : " · 尚未读取"}；无消费关联`,
       evidence:
@@ -295,7 +302,7 @@ export function Topology({
   };
   facts.strategy = {
     summary:
-      !metadata && !report
+      !metadata && (!report || engineering)
         ? "策略 / 运行计算证据未接入"
         : strategy +
           " · 计算累计 " +
