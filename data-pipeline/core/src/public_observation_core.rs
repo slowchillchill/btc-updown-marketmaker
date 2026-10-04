@@ -410,6 +410,8 @@ pub struct PublicObservationCoreV1 {
     references: BTreeMap<String, PublicMarketReferenceStateV1>,
     global: GlobalReferences,
     binance_depth: BinanceDepthReducer<E>,
+    // 只读派生的当前值；唯一数量归约器及事实仍是权威。旧组自行持有旧 Arc。
+    current_depth_projection: Option<Arc<ObservedFactV1<BinanceDepthStateReferenceV1>>>,
     binance_trade: BinanceAggTradeReducer<E>,
     pending: BTreeMap<(String, u64), PendingTerminal>,
 }
@@ -458,6 +460,7 @@ impl PublicObservationCoreV1 {
     pub fn new(header: PublicInputStreamHeaderV1) -> Result<Self, DptCoreErrorV1> {
         Ok(Self {
             binance_depth: BinanceDepthReducer::new(&header.canonical_rule_version)?,
+            current_depth_projection: None,
             binance_trade: BinanceAggTradeReducer::new(&header.canonical_rule_version)?,
             header,
             next_input_position: 0,
@@ -646,6 +649,8 @@ impl PublicObservationCoreV1 {
                 });
             }
             PreparedCanonicalInputV1::BinanceDepthSnapshot { row, source } => {
+                // compute 可改状态后返回无事件或错误，不能仅按 Produced 失效。
+                self.current_depth_projection = None;
                 let batch = bind_reference_reduction_v1(
                     self.binance_depth.compute_snapshot(row, source.clone())?,
                     context.unwrap(),
@@ -653,6 +658,8 @@ impl PublicObservationCoreV1 {
                 self.close_batch(batch, vec![self.next_input_position], input, &mut result);
             }
             PreparedCanonicalInputV1::BinanceDepthUpdate { row, source } => {
+                // compute 可改状态后返回无事件或错误，不能仅按 Produced 失效。
+                self.current_depth_projection = None;
                 let batch = bind_reference_reduction_v1(
                     self.binance_depth.compute_update(row, source.clone())?,
                     context.unwrap(),
@@ -1076,16 +1083,18 @@ impl PublicObservationCoreV1 {
         records: Arc<[PublicBusinessFactV1]>,
         groups: &mut Vec<Arc<ClosedBusinessGroupV1>>,
     ) {
-        let depth = Arc::new(ObservedFactV1 {
-            value: if self.global.depth.value.is_some() {
-                self.binance_depth.current_depth_value()
-            } else {
-                None
-            },
-            quality: self.global.depth.quality,
-            direct_anchors: self.global.depth.direct_anchors.clone(),
-            dependency_frontier: self.global.depth.dependency_frontier.clone(),
-        });
+        let depth = Arc::clone(self.current_depth_projection.get_or_insert_with(|| {
+            Arc::new(ObservedFactV1 {
+                value: if self.global.depth.value.is_some() {
+                    self.binance_depth.current_depth_value()
+                } else {
+                    None
+                },
+                quality: self.global.depth.quality,
+                direct_anchors: self.global.depth.direct_anchors.clone(),
+                dependency_frontier: self.global.depth.dependency_frontier.clone(),
+            })
+        }));
         let observations = self
             .markets
             .iter()
@@ -1137,6 +1146,7 @@ impl PublicObservationCoreV1 {
                     }
                 }
                 CanonicalReferenceEventPayloadV2::BinanceDepthState(_) => {
+                    self.current_depth_projection = None;
                     self.global.depth = observed((), fact, group, "binance_depth")
                 }
                 CanonicalReferenceEventPayloadV2::BinanceAggregateTrade(value) => {

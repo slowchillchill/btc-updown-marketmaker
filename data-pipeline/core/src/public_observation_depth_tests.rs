@@ -71,7 +71,7 @@ fn one_depth_owner_per_group_keeps_complete_values_quality_and_old_snapshots() {
         let a = &group.observations[0].binance_depth;
         let b = &group.observations[1].binance_depth;
         assert!(Arc::ptr_eq(a, b));
-        assert_eq!(Arc::strong_count(a), 2);
+        assert_eq!(Arc::strong_count(a), if i == 4 { 3 } else { 2 });
         assert_eq!(a.quality, expected_quality[i]);
         if i == 0 {
             assert!(a.value.is_none());
@@ -169,4 +169,279 @@ fn complete_pre_arc_observation_json_remains_readable_and_identical() {
         // Reading old JSON need not reconstruct in-memory ownership sharing.
         assert!(!Arc::ptr_eq(&old[0].binance_depth, &old[1].binance_depth));
     }
+}
+
+// 独立沿改动前完整公式投影，核对所有字段而非只看价格/指针。
+fn original_projection(
+    core: &PublicObservationCoreV1,
+) -> ObservedFactV1<BinanceDepthStateReferenceV1> {
+    ObservedFactV1 {
+        value: if core.global.depth.value.is_some() {
+            core.binance_depth.current_depth_value()
+        } else {
+            None
+        },
+        quality: core.global.depth.quality,
+        direct_anchors: core.global.depth.direct_anchors.clone(),
+        dependency_frontier: core.global.depth.dependency_frontier.clone(),
+    }
+}
+fn assert_original_projection(core: &PublicObservationCoreV1, result: &AppliedIngressV1) {
+    let expected = original_projection(core);
+    for group in &result.closed_groups {
+        for observation in &group.observations {
+            assert_eq!(*observation.binance_depth, expected);
+            assert_eq!(
+                serde_json::to_value(&observation.binance_depth).unwrap(),
+                serde_json::to_value(&expected).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn unchanged_depth_is_shared_without_refreshing_anchors_and_old_targets_are_released() {
+    let mut core = core();
+    push(&mut core, &meta(0));
+    let first = push(
+        &mut core,
+        &record(
+            1,
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(snapshot("a", 100, 1))),
+        ),
+    );
+    assert_original_projection(&core, &first);
+    let old = &first.closed_groups[0].observations[0];
+    let weak = Arc::downgrade(&old.binance_depth);
+    let old_json = serde_json::to_value(old).unwrap();
+    let second = push(
+        &mut core,
+        &record(
+            2,
+            TypedRawRowV2::Existing(TypedRawRow::BinanceAggTrade(trade(1, 1, "64000"))),
+        ),
+    );
+    let new = &second.closed_groups[0].observations[0];
+    assert!(Arc::ptr_eq(&old.binance_depth, &new.binance_depth));
+    assert_ne!(old.group_id, new.group_id);
+    assert_ne!(old.visible_prefix, new.visible_prefix);
+    assert_original_projection(&core, &second);
+    // 相同接收毫秒、相同数量也要失效；更新ID、来源、依赖必须前移。
+    let mut row = update(
+        "a",
+        101,
+        101,
+        2,
+        Some(100),
+        None,
+        BinanceDepthStitchVerdict::Applied,
+        vec![level("64100", "0.7")],
+    );
+    row.timestamp_received = 2001;
+    let third = push(
+        &mut core,
+        &record(
+            3,
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthUpdate(row)),
+        ),
+    );
+    assert_original_projection(&core, &third);
+    let depth = &third.closed_groups[0].observations[0].binance_depth;
+    assert!(!Arc::ptr_eq(&old.binance_depth, depth));
+    assert_eq!(depth.value.as_ref().unwrap().last_update_id, 101);
+    assert_ne!(old.binance_depth.direct_anchors, depth.direct_anchors);
+    assert_ne!(
+        old.binance_depth.dependency_frontier,
+        depth.dependency_frontier
+    );
+    assert_eq!(serde_json::to_value(old).unwrap(), old_json);
+    let value = depth.value.as_ref().unwrap();
+    let strings: usize = value
+        .bids
+        .iter()
+        .chain(&value.asks)
+        .map(|l| l.price_usdt_per_btc.0.capacity() + l.quantity_btc.0.capacity())
+        .sum();
+    println!(
+        "representative_depth_capacity target_inline={} levels={} bids_capacity={} asks_capacity={} vec_allocated={} payload_string_capacity={}",
+        std::mem::size_of_val(depth.as_ref()),
+        value.bids.len() + value.asks.len(),
+        value.bids.capacity(),
+        value.asks.capacity(),
+        (value.bids.capacity() + value.asks.capacity())
+            * std::mem::size_of::<ReferencePriceLevelV1>(),
+        strings + value.symbol.capacity()
+    );
+    let missing = push(
+        &mut core,
+        &record(
+            4,
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthUpdate(update(
+                "b",
+                201,
+                201,
+                1,
+                None,
+                None,
+                BinanceDepthStitchVerdict::NotAppliedSnapshotUnavailable,
+                vec![],
+            ))),
+        ),
+    );
+    assert_original_projection(&core, &missing);
+    assert_eq!(
+        missing.closed_groups[0].observations[0]
+            .binance_depth
+            .quality,
+        MarketDataQuality::Missing
+    );
+    assert!(
+        missing.closed_groups[0].observations[0]
+            .binance_depth
+            .value
+            .is_none()
+    );
+    drop(core);
+    assert!(weak.upgrade().is_some());
+    drop(first);
+    assert!(weak.upgrade().is_some());
+    drop(second);
+    assert!(weak.upgrade().is_none());
+}
+
+#[test]
+fn no_output_gap_epoch_recovery_and_failed_compute_invalidate_before_reuse() {
+    let mut core = core();
+    push(&mut core, &meta(0));
+    let first = push(
+        &mut core,
+        &record(
+            1,
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(snapshot("a", 100, 1))),
+        ),
+    );
+    let old = &first.closed_groups[0].observations[0].binance_depth;
+    let identical = push(
+        &mut core,
+        &record(
+            2,
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(snapshot("a", 100, 2))),
+        ),
+    );
+    assert!(identical.closed_groups.is_empty());
+    assert!(core.current_depth_projection.is_none());
+    let trade_result = push(
+        &mut core,
+        &record(
+            3,
+            TypedRawRowV2::Existing(TypedRawRow::BinanceAggTrade(trade(1, 1, "64000"))),
+        ),
+    );
+    let rebuilt = &trade_result.closed_groups[0].observations[0].binance_depth;
+    assert!(!Arc::ptr_eq(old, rebuilt));
+    assert_eq!(old, rebuilt);
+    let rows = [
+        update(
+            "a",
+            100,
+            100,
+            3,
+            Some(100),
+            None,
+            BinanceDepthStitchVerdict::NotAppliedStaleDuplicate,
+            vec![],
+        ),
+        update(
+            "a",
+            102,
+            102,
+            4,
+            Some(100),
+            None,
+            BinanceDepthStitchVerdict::NotAppliedConfirmedHole,
+            vec![],
+        ),
+        update(
+            "b",
+            201,
+            201,
+            1,
+            None,
+            None,
+            BinanceDepthStitchVerdict::NotAppliedSnapshotUnavailable,
+            vec![],
+        ),
+        update(
+            "b",
+            202,
+            202,
+            2,
+            None,
+            None,
+            BinanceDepthStitchVerdict::NotAppliedSnapshotUnavailable,
+            vec![],
+        ),
+    ];
+    for (i, row) in rows.into_iter().enumerate() {
+        let result = push(
+            &mut core,
+            &record(
+                4 + i as u64,
+                TypedRawRowV2::Existing(TypedRawRow::BinanceDepthUpdate(row)),
+            ),
+        );
+        assert_original_projection(&core, &result);
+        if result.closed_groups.is_empty() {
+            assert!(core.current_depth_projection.is_none());
+        }
+    }
+    let recovered = push(
+        &mut core,
+        &record(
+            8,
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(snapshot("b", 200, 3))),
+        ),
+    );
+    assert_original_projection(&core, &recovered);
+    assert_eq!(
+        recovered.closed_groups[0].observations[0]
+            .binance_depth
+            .quality,
+        MarketDataQuality::Fresh
+    );
+    // 换代发生在错误前；不能沿用旧投影，不能假装归约器已回滚。
+    let invalid = record(
+        9,
+        TypedRawRowV2::Existing(TypedRawRow::BinanceDepthUpdate(update(
+            "c",
+            301,
+            301,
+            1,
+            None,
+            None,
+            BinanceDepthStitchVerdict::Applied,
+            vec![],
+        ))),
+    );
+    let ids = BTreeMap::new();
+    let prepared = prepare_public_ingress_v1(&core, &invalid, &ids, &[]).unwrap();
+    let error = core.push(&prepared).err().unwrap();
+    assert!(
+        matches!(error, DptCoreErrorV1::Contract(ContractError::InvalidField { field, .. }) if field == "binance_depth_update.stitch_verdict")
+    );
+    assert!(core.current_depth_projection.is_none());
+    let after_error = push(
+        &mut core,
+        &record(
+            9,
+            TypedRawRowV2::Existing(TypedRawRow::BinanceAggTrade(trade(2, 2, "64001"))),
+        ),
+    );
+    assert_original_projection(&core, &after_error);
+    assert!(
+        after_error.closed_groups[0].observations[0]
+            .binance_depth
+            .value
+            .is_none()
+    );
 }

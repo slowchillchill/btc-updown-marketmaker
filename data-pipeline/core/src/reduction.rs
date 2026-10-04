@@ -507,7 +507,7 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
         })
     }
 
-    /// 只投影唯一现有数量表；公共核心不常驻第二份完整深度值。
+    /// 只投影唯一现有数量表；公共核心可持有当前不可变派生值，不反向更新数量。
     pub(crate) fn current_depth_value(&self) -> Option<BinanceDepthStateReferenceV1> {
         self.current_epoch
             .as_ref()
