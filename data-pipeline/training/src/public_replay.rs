@@ -19,6 +19,9 @@ pub(crate) mod cost;
 #[path = "finite_reference_candidates.rs"]
 mod finite_reference_candidates;
 use finite_reference_candidates::{CandidateQuery, FiniteReferenceCandidates};
+#[path = "public_replay_progress.rs"]
+mod replay_progress;
+use replay_progress::{ReplayProgress, Stage};
 
 /// 新历史准备的实际排序版本；旧记录仍按其流头和已记录原序重放。
 pub const HISTORICAL_SOURCE_HEAD_ORDERING_VERSION: &str = "historical-source-head-v2";
@@ -256,6 +259,7 @@ pub struct PublicReplayV1 {
     page_rows: usize,
     page_bytes: usize,
     candidates: Option<FiniteReferenceCandidates>,
+    progress: Option<ReplayProgress>,
 }
 impl PublicReplayV1 {
     pub fn open(root: &Path, page_rows: usize, page_bytes: usize) -> RecordingResult<Self> {
@@ -267,7 +271,29 @@ impl PublicReplayV1 {
             page_rows,
             page_bytes,
             candidates: None,
+            progress: None,
         })
+    }
+    /// 显式可选进度；零间隔关闭，旧open调用默认不创建进度状态。
+    /// 输出故障只关闭输出，不改变业务错误、结束或重试责任。
+    pub fn set_progress(
+        &mut self,
+        interval: std::time::Duration,
+        output: impl std::io::Write + Send + 'static,
+    ) {
+        self.progress = if interval.is_zero() {
+            None
+        } else {
+            Some(ReplayProgress::new(
+                interval,
+                output,
+                self.reader
+                    .prefix
+                    .as_ref()
+                    .filter(|p| p.normal_end)
+                    .map(|p| p.next_input_position),
+            ))
+        };
     }
     pub fn next_applied(
         &mut self,
@@ -286,19 +312,46 @@ impl PublicReplayV1 {
             Option<data_pipeline_core::pm_reduction::PreparedPmMessageV1>,
         )>,
     > {
+        let result = self.next_prepared_applied_inner();
+        if result.is_err()
+            && let Some(p) = self.progress.as_mut()
+        {
+            p.error();
+        }
+        result
+    }
+    fn next_prepared_applied_inner(
+        &mut self,
+    ) -> RecordingResult<
+        Option<(
+            RecordedIngressV1,
+            PublicAppliedIngressV1<'static>,
+            Option<data_pipeline_core::pm_reduction::PreparedPmMessageV1>,
+        )>,
+    > {
         #[cfg(test)]
         let entry = cost::EntryGuard::new(self.core.applied_prefix().next_input_position);
         #[cfg(test)]
         let mut drain = cost::Span::new("main_drain");
         #[cfg(test)]
         let _decode = cost::DecodeScope::new("main_drain");
+        if let Some(p) = self.progress.as_mut() {
+            p.checkpoint(Stage::MainReading, false);
+        }
         while let Some(row) = self.reader.next_row()? {
+            if let Some(p) = self.progress.as_mut() {
+                p.work.main_records_read += 1;
+                p.checkpoint(Stage::MainReading, false);
+            }
             #[cfg(test)]
             drain.row(&row);
             if let PublicStoredRowV1::Input(mut input) = row {
                 #[cfg(test)]
                 drain.complete();
                 let root = self.reader.root().to_path_buf();
+                if let Some(p) = self.progress.as_mut() {
+                    p.work.current_input_position = Some(input.input_position);
+                }
                 let cutoff = input.input_position;
                 let target = reference_market_for_input(&self.core, &input);
                 #[cfg(test)]
@@ -330,6 +383,9 @@ impl PublicReplayV1 {
                             self.page_bytes,
                         )?
                     } else {
+                        if let Some(p) = self.progress.as_mut() {
+                            p.checkpoint(Stage::DependencyValidation, false);
+                        }
                         if self.candidates.is_none() {
                             self.candidates =
                                 Some(FiniteReferenceCandidates::open_for_dependencies(
@@ -342,7 +398,7 @@ impl PublicReplayV1 {
                         self.candidates
                             .as_mut()
                             .unwrap()
-                            .dependencies(&input.dependency_record_refs)?
+                            .dependencies(&input.dependency_record_refs, &mut self.progress)?
                     }
                 };
                 #[cfg(test)]
@@ -354,6 +410,7 @@ impl PublicReplayV1 {
                     let mut page_reader = None;
                     let mut query = CandidateQuery::default();
                     let candidates = &mut self.candidates;
+                    let progress = &mut self.progress;
                     let prefix = self.reader.prefix.clone();
                     let rows = self.page_rows;
                     let bytes = self.page_bytes;
@@ -377,6 +434,9 @@ impl PublicReplayV1 {
                                     return page_reader.as_mut().unwrap().page(cursor);
                                 }
                                 if candidates.is_none() {
+                                    if let Some(p) = progress.as_mut() {
+                                        p.checkpoint(Stage::CandidateValidation, false);
+                                    }
                                     *candidates = Some(FiniteReferenceCandidates::open(
                                         &root,
                                         prefix.clone(),
@@ -387,7 +447,7 @@ impl PublicReplayV1 {
                                 candidates
                                     .as_mut()
                                     .unwrap()
-                                    .page(&mut query, cursor, cutoff)
+                                    .page(&mut query, cursor, cutoff, progress)
                             })()
                             .inspect(|(values, next, exhausted)| {
                                 #[cfg(test)]
@@ -409,6 +469,9 @@ impl PublicReplayV1 {
                     prepare_span.complete();
                     #[cfg(test)]
                     let push_span = cost::Span::new("core_push");
+                    if let Some(p) = self.progress.as_mut() {
+                        p.checkpoint(Stage::CoreApplication, false);
+                    }
                     let borrowed = self.core.push(&prepared)?;
                     #[cfg(test)]
                     push_span.complete();
@@ -431,6 +494,9 @@ impl PublicReplayV1 {
                     prepare_span.complete();
                     #[cfg(test)]
                     let push_span = cost::Span::new("core_push");
+                    if let Some(p) = self.progress.as_mut() {
+                        p.checkpoint(Stage::CoreApplication, false);
+                    }
                     let borrowed = self.core.push(&prepared)?;
                     #[cfg(test)]
                     push_span.complete();
@@ -445,6 +511,12 @@ impl PublicReplayV1 {
                     };
                     (applied, pm)
                 };
+                if let Some(p) = self.progress.as_mut() {
+                    p.work.applied_inputs = self.core.applied_prefix().next_input_position;
+                    p.work.generated_groups += result.0.applied.closed_groups.len() as u64;
+                    p.work.end_input_applied |= matches!(input.ingress, DptIngressV1::EndOfInput);
+                    p.checkpoint(Stage::CoreApplication, false);
+                }
                 #[cfg(test)]
                 entry.returned(false);
                 return Ok(Some((input, result.0, result.1)));
@@ -454,6 +526,9 @@ impl PublicReplayV1 {
         drain.complete();
         #[cfg(test)]
         entry.returned(true);
+        if let Some(p) = self.progress.as_mut() {
+            p.checkpoint(Stage::Eof, true);
+        }
         Ok(None)
     }
     pub fn into_core(self) -> PublicObservationCoreV1 {

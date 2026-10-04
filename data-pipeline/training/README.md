@@ -65,3 +65,7 @@ Arrow 排序只构造实际排序键列，按返回的置换移动已有行；�
 前段[#214有限参考候选读取复用](docs/public-reference-candidate-reuse-12m.md)在一次有限 `PublicReplayV1` 中按实际页请求推进原校验 reader，只保存已验证参考规范记录的定宽物理位置与TWAP类型；正文按原文件有界定位读取，同查询复用行组，页满、非TWAP越界、当前Input及原错误/EOF前沿保持。该段在线候选、保存依赖和历史身份扫描沿原入口，不新增生产诊断接口。既有成本测试增加仅 `cfg(test)` 的 `original_candidate_reader`基线开关（缺省false）及 `progress_interval_seconds`（缺省30秒；普通计量会话默认关闭）；阶段进度对未知量不造比例/ETA。本次固定串行各一次315.32→197.04秒、完整33页相等，仅为该单对照，不外推小时吞吐或研究存储预算；全部成本和覆盖边界见[机器结果](docs/public-reference-candidate-reuse-12m.json)。
 
 后续[#214保存依赖与候选共用验证前沿](docs/public-shared-reference-frontier-12m.md)将单次有限重放的非空保存依赖接入原私有前沿，首次仍完整校验原稳定视图至EOF后才按原流/位置返回所有匹配Reference；空、重复、缺失、多事件和候选未来边界保持，独立`read_dependencies`/历史身份/在线入口不变。仅cfg(test)的`original_dependency_reader`选择本次旧依赖基线，生产没有开关。固定串行各一次192.48→179.86秒、完整依赖返回及33页候选相等，消除额外候选验证而保留约19秒首次EOF责任；索引40B、完整13,032项、实际容量655,360B及新正文定位成本见[机器结果](docs/public-shared-reference-frontier-12m.json)，不外推长期预算或稳定加速比例。
+
+## 正式有限重放进度
+
+`PublicReplayV1::set_progress` 提供单次可选 JSON 行进度，旧库调用默认关闭；`RecordedPublicGroupSourceV1` 只转交。公共统计和原两市场／首小时研究工具默认30秒，前置 `--progress-interval-seconds 0` 可关闭。验证行、定位行、已应用输入及已生成组分别计量，未知总量／ETA不推算，输出故障只停止日志。准确字段、合作式频率及未覆盖prepare阶段见[中文说明](docs/finite-public-replay-progress.md)。本段只有小夹具与工程检查，不含新的真实材料运行。

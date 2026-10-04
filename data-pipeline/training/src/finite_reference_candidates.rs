@@ -31,7 +31,12 @@ impl CandidateQuery {
         location: RecordingRowLocation,
         rows: usize,
         bytes: usize,
+        progress: &mut Option<ReplayProgress>,
+        stage: Stage,
     ) -> RecordingResult<PublicStoredRowV1> {
+        if let Some(p) = progress.as_mut() {
+            p.checkpoint(stage, false);
+        }
         if self
             .located
             .as_ref()
@@ -47,10 +52,24 @@ impl CandidateQuery {
             *group = location.row_group;
         }
         while let Some((row, position)) = cursor.next_row_with_position()? {
+            if let Some(p) = progress.as_mut() {
+                match stage {
+                    Stage::DependencyLocation => p.work.dependency_location_rows_visited += 1,
+                    _ => p.work.candidate_location_rows_visited += 1,
+                }
+                p.checkpoint(stage, false);
+            }
             if position.row_group == location.row_group
                 && position.row_in_group == location.row_in_group
             {
-                return Ok(serde_json::from_slice(row.payload())?);
+                let result = serde_json::from_slice(row.payload())?;
+                if let Some(p) = progress.as_mut() {
+                    match stage {
+                        Stage::DependencyLocation => p.work.dependency_target_records_parsed += 1,
+                        _ => p.work.candidate_target_records_parsed += 1,
+                    }
+                }
+                return Ok(result);
             }
             if position.row_group != location.row_group
                 || position.row_in_group > location.row_in_group
@@ -147,9 +166,14 @@ impl FiniteReferenceCandidates {
     pub(super) fn dependencies(
         &mut self,
         refs: &[CanonicalInputRecordRefV1],
+        progress: &mut Option<ReplayProgress>,
     ) -> RecordingResult<Vec<CanonicalReferenceEventV2>> {
         if refs.is_empty() {
             return Ok(vec![]);
+        }
+        let needs_validation = !self.eof;
+        if needs_validation && let Some(p) = progress.as_mut() {
+            p.checkpoint(Stage::DependencyValidation, false);
         }
         // 早处命中/异流/缺失均不能豁免首次非空请求的完整EOF责任。
         {
@@ -160,6 +184,10 @@ impl FiniteReferenceCandidates {
                 #[cfg(test)]
                 let _decode = cost::DecodeScope::new("dependency_index_validation");
                 if let Some(row) = self.advance()? {
+                    if let Some(p) = progress.as_mut() {
+                        p.work.dependency_records_validated += 1;
+                        p.checkpoint(Stage::DependencyValidation, false);
+                    }
                     #[cfg(test)]
                     validation.row(&row);
                     #[cfg(not(test))]
@@ -168,6 +196,9 @@ impl FiniteReferenceCandidates {
             }
             #[cfg(test)]
             validation.complete(0, None, Some(true));
+        }
+        if needs_validation && let Some(p) = progress.as_mut() {
+            p.checkpoint(Stage::DependencyValidation, true);
         }
         let mut query = CandidateQuery::default();
         let mut output = vec![];
@@ -184,7 +215,14 @@ impl FiniteReferenceCandidates {
             }
             #[cfg(test)]
             let _decode = cost::DecodeScope::new("dependency_location");
-            let row = query.load(&self.paths, entry.location, self.rows, self.bytes)?;
+            let row = query.load(
+                &self.paths,
+                entry.location,
+                self.rows,
+                self.bytes,
+                progress,
+                Stage::DependencyLocation,
+            )?;
             #[cfg(test)]
             locate.row(&row);
             let PublicStoredRowV1::Canonical {
@@ -208,6 +246,7 @@ impl FiniteReferenceCandidates {
         query: &mut CandidateQuery,
         cursor: TemporaryReferenceCursorV1,
         cutoff: u64,
+        progress: &mut Option<ReplayProgress>,
     ) -> RecordingResult<(
         Vec<TemporaryReferenceCandidateV1>,
         TemporaryReferenceCursorV1,
@@ -228,6 +267,9 @@ impl FiniteReferenceCandidates {
             }
             // 必须先验证原页会读取的全部记录，包括非参考行和EOF计数。
             if query.ordinal == self.index.len() && !self.eof {
+                if let Some(p) = progress.as_mut() {
+                    p.checkpoint(Stage::CandidateValidation, false);
+                }
                 #[cfg(test)]
                 let mut validation = cost::ScanGuard::new(
                     "candidate_index_validation",
@@ -239,6 +281,10 @@ impl FiniteReferenceCandidates {
                     #[cfg(test)]
                     let _decode = cost::DecodeScope::new("candidate_index_validation");
                     if let Some(row) = self.advance()? {
+                        if let Some(p) = progress.as_mut() {
+                            p.work.candidate_records_validated += 1;
+                            p.checkpoint(Stage::CandidateValidation, false);
+                        }
                         #[cfg(test)]
                         validation.row(&row);
                         #[cfg(not(test))]
@@ -261,7 +307,14 @@ impl FiniteReferenceCandidates {
             }
             #[cfg(test)]
             let _decode = cost::DecodeScope::new("candidate_location");
-            let row = query.load(&self.paths, entry.location, self.rows, self.bytes)?;
+            let row = query.load(
+                &self.paths,
+                entry.location,
+                self.rows,
+                self.bytes,
+                progress,
+                Stage::CandidateLocation,
+            )?;
             #[cfg(test)]
             page.row(&row);
             let PublicStoredRowV1::Canonical {
@@ -387,7 +440,7 @@ mod tests {
             let mut c = cursor(0);
             loop {
                 let a = old.page(c).unwrap();
-                let b = indexed.page(&mut query, c, cutoff).unwrap();
+                let b = indexed.page(&mut query, c, cutoff, &mut None).unwrap();
                 assert_eq!(projected((a.0.clone(), a.1, a.2)), projected(b));
                 if a.2 {
                     break;
@@ -408,12 +461,16 @@ mod tests {
         let mut old = ReferenceCandidateReaderV1::open(&root, 1, 1 << 20, 3).unwrap();
         let mut query = CandidateQuery::default();
         let a = old.page(cursor(0)).unwrap();
-        let b = state.page(&mut query, cursor(0), 3).unwrap();
+        let b = state.page(&mut query, cursor(0), 3, &mut None).unwrap();
         assert!(!a.2);
         assert_eq!(projected((a.0.clone(), a.1, a.2)), projected(b));
         let original = old.page(a.1).err().unwrap().to_string();
         assert_eq!(
-            state.page(&mut query, a.1, 3).err().unwrap().to_string(),
+            state
+                .page(&mut query, a.1, 3, &mut None)
+                .err()
+                .unwrap()
+                .to_string(),
             original
         );
         // 新状态只扩大到原Reference越界，不能为了EOF提前读后面的坏JSON。
@@ -425,13 +482,13 @@ mod tests {
         assert_eq!(a.0.len(), 1);
         assert_eq!(
             projected(a),
-            projected(state.page(&mut query, cursor(0), 0).unwrap())
+            projected(state.page(&mut query, cursor(0), 0, &mut None).unwrap())
         );
         assert!(!state.eof);
         let mut query = CandidateQuery::default();
         assert_eq!(
             state
-                .page(&mut query, cursor(0), 3)
+                .page(&mut query, cursor(0), 3, &mut None)
                 .err()
                 .unwrap()
                 .to_string(),
@@ -459,12 +516,16 @@ mod tests {
         assert!(!a.2);
         assert_eq!(
             projected((a.0.clone(), a.1, a.2)),
-            projected(state.page(&mut query, cursor(0), 3).unwrap())
+            projected(state.page(&mut query, cursor(0), 3, &mut None).unwrap())
         );
         let error = old.page(a.1).err().unwrap().to_string();
         assert_eq!(error, "稳定分片内容与前缀计数不符");
         assert_eq!(
-            state.page(&mut query, a.1, 3).err().unwrap().to_string(),
+            state
+                .page(&mut query, a.1, 3, &mut None)
+                .err()
+                .unwrap()
+                .to_string(),
             error
         );
     }
@@ -480,7 +541,7 @@ mod tests {
         let root = temp.path().join("public");
         fixture(&root);
         let mut state = indexed(&root, 1);
-        assert!(state.dependencies(&[]).unwrap().is_empty());
+        assert!(state.dependencies(&[], &mut None).unwrap().is_empty());
         assert!(state.index.is_empty());
         assert!(!state.eof);
         let mut foreign = dependency_ref(0);
@@ -494,7 +555,7 @@ mod tests {
             dependency_ref(99),
         ];
         let old = read_dependencies(&root, &refs, 1, 1 << 20).unwrap();
-        let new = state.dependencies(&refs).unwrap();
+        let new = state.dependencies(&refs, &mut None).unwrap();
         assert_eq!(
             serde_json::to_value(&old).unwrap(),
             serde_json::to_value(&new).unwrap()
@@ -514,7 +575,7 @@ mod tests {
                 let a = old.page(c).unwrap();
                 assert_eq!(
                     projected((a.0.clone(), a.1, a.2)),
-                    projected(state.page(&mut query, c, cutoff).unwrap())
+                    projected(state.page(&mut query, c, cutoff, &mut None).unwrap())
                 );
                 if a.2 {
                     break;
@@ -523,7 +584,7 @@ mod tests {
             }
         }
         let missing = [dependency_ref(99)];
-        assert!(state.dependencies(&missing).unwrap().is_empty());
+        assert!(state.dependencies(&missing, &mut None).unwrap().is_empty());
     }
     #[test]
     fn candidate_success_then_early_dependency_match_still_exposes_bad_tail() {
@@ -533,7 +594,7 @@ mod tests {
         corrupt_input_two(&root, &temp.path().join("rewrite"));
         let mut state = indexed(&root, 1);
         let page = state
-            .page(&mut CandidateQuery::default(), cursor(0), 0)
+            .page(&mut CandidateQuery::default(), cursor(0), 0, &mut None)
             .unwrap();
         assert_eq!(page.0.len(), 1);
         assert!(!state.eof);
@@ -541,7 +602,13 @@ mod tests {
         let old = read_dependencies(&root, &refs, 1, 1 << 20)
             .unwrap_err()
             .to_string();
-        assert_eq!(state.dependencies(&refs).unwrap_err().to_string(), old);
+        assert_eq!(
+            state
+                .dependencies(&refs, &mut None)
+                .unwrap_err()
+                .to_string(),
+            old
+        );
     }
     #[test]
     fn early_dependency_match_does_not_hide_eof_count_error() {
@@ -564,7 +631,13 @@ mod tests {
             .to_string();
         assert_eq!(old, "稳定分片内容与前缀计数不符");
         let mut state = indexed(&root, 1);
-        assert_eq!(state.dependencies(&refs).unwrap_err().to_string(), old);
+        assert_eq!(
+            state
+                .dependencies(&refs, &mut None)
+                .unwrap_err()
+                .to_string(),
+            old
+        );
         assert!(!state.eof);
     }
 
@@ -576,7 +649,7 @@ mod tests {
         let refs = [dependency_ref(2), dependency_ref(2), dependency_ref(90)];
         let old = read_dependencies(&root, &refs, 1, 1 << 20).unwrap();
         let mut state = indexed(&root, 1);
-        let new = state.dependencies(&refs).unwrap();
+        let new = state.dependencies(&refs, &mut None).unwrap();
         assert_eq!(new.len(), 2);
         assert_eq!(
             serde_json::to_value(old).unwrap(),

@@ -256,17 +256,31 @@ fn save(path: &Path, v: &Value) -> Result<(), MaterialError> {
     Ok(())
 }
 fn main() -> Result<(), MaterialError> {
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    let mut args = std::env::args().skip(1).collect::<Vec<_>>();
+    let progress_seconds = if args
+        .first()
+        .is_some_and(|s| s == "--progress-interval-seconds")
+    {
+        if args.len() < 2 {
+            return Err("--progress-interval-seconds 缺少秒数".into());
+        }
+        let seconds = args[1].parse::<u64>()?;
+        args.drain(..2);
+        seconds
+    } else {
+        30
+    };
     if args.len() != 2 {
-        return Err("用法 material_trial <PREPARATION_JSON> <REPORT_JSON>".into());
+        return Err("用法 material_trial [--progress-interval-seconds <SECONDS>] <PREPARATION_JSON> <REPORT_JSON>".into());
     }
     let config: HistoricalPreparationConfigV1 = serde_json::from_slice(&std::fs::read(&args[0])?)?;
     let report_path = Path::new(&args[1]);
-    run_trial(config, report_path)
+    run_trial(config, report_path, progress_seconds)
 }
 fn run_trial(
     mut config: HistoricalPreparationConfigV1,
     report_path: &Path,
+    progress_seconds: u64,
 ) -> Result<(), MaterialError> {
     // 与原准备入口共用实际版本来源；成功及原失败报告均记录同一有效配置。
     config.header = config.effective_header();
@@ -279,7 +293,7 @@ fn run_trial(
     .trim()
     .parse()?;
     let mut report = json!({"schema":"complementary_pair_material_trial_v1", "clock_ticks_per_second":hz,
-        "scope":config.scope,"status":"started", "statistics":null});
+        "scope":config.scope,"status":"started", "statistics":null,"progress_interval_seconds":progress_seconds});
     // 私有报告保留完整有效配置及原错误；发布版由交付文档移除物理定位。
     report["effective_preparation"] = serde_json::to_value(&config)?;
     save(report_path, &report)?;
@@ -309,13 +323,17 @@ fn run_trial(
     let before = ProcessCounters::read()?;
     let began = Instant::now();
     let stats = (|| -> Result<Value, MaterialError> {
-        let source = RecordedPublicGroupSourceV1::open(
+        let mut source = RecordedPublicGroupSourceV1::open(
             &prepared.public_root,
             config.read_page_rows,
             config.max_read_batch_bytes,
             OriginalVisibility::default(),
         )?;
         let mut markets = BTreeMap::<String, MarketStats>::new();
+        source.set_progress(
+            std::time::Duration::from_secs(progress_seconds),
+            std::io::stderr(),
+        );
         let mut groups = 0u64;
         let mut initialization_groups = 0u64;
         let mut research_groups_with_initialization_dependencies = 0u64;
@@ -396,7 +414,7 @@ mod tests {
         let (mut config, _) = common::setup(temp.path());
         common::initialize_at(&mut config, common::BASE + 1000, &[common::FIRST]);
         let report_path = temp.path().join("trial.json");
-        run_trial(config.preparation, &report_path).unwrap();
+        run_trial(config.preparation, &report_path, 0).unwrap();
         let report: Value = serde_json::from_slice(&std::fs::read(report_path).unwrap()).unwrap();
         let stats = &report["statistics"];
         assert_eq!(stats["initialization_public_groups"], 1);
@@ -438,7 +456,7 @@ mod tests {
             }
             let expected = preparation.effective_header();
             let report_path = temp.path().join("trial.json");
-            let result = run_trial(preparation.clone(), &report_path);
+            let result = run_trial(preparation.clone(), &report_path, 0);
             let report: Value =
                 serde_json::from_slice(&std::fs::read(report_path).unwrap()).unwrap();
             let stream: PublicInputStreamHeaderV1 = serde_json::from_slice(
