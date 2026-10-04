@@ -1,6 +1,6 @@
 # 首个三日拟合折 Chainlink 来源健康统计与候选覆盖分析
 
-本报告完成 [#185任务3 R1—R5](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185) 的一次有界来源分析。固定 UTC `[2026-09-09,2026-09-12)`，仅复用 PR240 已发布的 Chainlink 公共录制，不重 prepare、不重跑 sigma，不运行市场、账户、策略收益或其他来源。所有候选均为同折描述性结果，未采纳正式参数。
+本报告给出 [#185任务3 R1—R5](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185) 本次有界来源分析结果。固定 UTC `[2026-09-09,2026-09-12)`，仅复用 PR240 已发布的 Chainlink 公共录制，不重 prepare、不重跑 sigma，不运行市场、账户、策略收益或其他来源。所有候选均为同折描述性结果，未采纳正式参数。
 
 ## 来源与执行身份
 
