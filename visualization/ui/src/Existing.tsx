@@ -46,7 +46,11 @@ export const existingLabel = (kind?: string) =>
       ? "原生输入优化 · 有限连续调用成本证据"
       : kind === "collection_manifest"
         ? "历史采集摘要"
-        : "工程 / 历史来源";
+        : kind === "model_timing"
+          ? "有限模型宿主工程诊断"
+          : kind === "remeasurement_12m"
+            ? "十二分钟完整流程测量报告"
+            : "工程 / 历史来源";
 export function useExisting(run: string) {
   const [loaded, setLoaded] = useState<Fragment | null>(null),
     [error, setError] = useState(""),
@@ -86,6 +90,39 @@ export function useExisting(run: string) {
 }
 const pointer = (document: string, path: string) =>
   document === "completion" ? path : `/existing/${document}${path}`;
+// 原工程冻结/报告身份随导出；不以当前C提交或SIM夹具身份替代。
+export function existingSourceIdentity(
+  status: ExistingStatus | undefined,
+): Json {
+  const document =
+    status?.kind === "model_timing"
+      ? "time_results"
+      : status?.kind === "remeasurement_12m"
+        ? "measurement"
+        : undefined;
+  if (!document) return null;
+  const original = status?.documents?.find(
+    (d) => d.document === document && d.status === "ready",
+  );
+  if (!original) return null;
+  const fields =
+    document === "time_results"
+      ? ["production_revision", "diagnostic_revision", "artifact_sha256"]
+      : [
+          "schema",
+          "measurement_source_commit",
+          "historical_baseline_source_commit",
+        ];
+  return {
+    document,
+    source: original.source ?? null,
+    fields: Object.fromEntries(
+      fields
+        .filter((k) => at(original.summary, k) !== undefined)
+        .map((k) => [k, at(original.summary, k)!]),
+    ),
+  };
+}
 export function existingPoints(
   status: ExistingStatus | undefined,
   loaded: Fragment | null,
@@ -105,11 +142,65 @@ export function existingPoints(
       .at(-1)
       ?.replaceAll("~1", "/")
       .replaceAll("~0", "~");
-    const clock = field?.endsWith("_utc_ms")
-      ? "原 UTC ms"
-      : document === "calls" && field === "now"
-        ? "宿主逻辑 UTC ms"
-        : undefined;
+    const logical = status.kind === "model_timing";
+    const traceField =
+      [
+        "at",
+        "observation",
+        "compute_start",
+        "completion_at",
+        "send",
+        "arrival",
+        "planned_completion",
+        "send_attempt",
+        "drain_until",
+      ].includes(field ?? "") &&
+      (document === "trace" || document === "time_results");
+    const isoClock =
+      status.kind === "remeasurement_12m" &&
+      document === "measurement" &&
+      /^\/execution\/timeline\/(material|research)_(launcher_utc|final_gnu_record_modified_utc)$/.test(
+        path,
+      );
+    if (isoClock && typeof value === "string") {
+      // 此原报告明确为 +00:00、六位微秒；不泛化解析未知来源时间文本。
+      const match =
+        /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})\.(\d{6})\+00:00$/.exec(value);
+      if (!match) return;
+      const ms = Date.parse(match[1] + "Z");
+      if (!Number.isSafeInteger(ms)) return;
+      const us = BigInt(ms) * 1000n + BigInt(match[2]);
+      out.push({
+        source: "existing",
+        path: pointer(document, path),
+        value,
+        name: field!,
+        clock: field!.includes("launcher")
+          ? "启动器原记录 UTC · 微秒"
+          : "完成计量文件 mtime UTC · 微秒",
+        utcMs: (us / 1000n).toString(),
+        utcUs: us.toString(),
+        originalUtcText: value,
+        existing: {
+          kind: status.kind ?? null,
+          document,
+          source: source ?? null,
+          reference: path,
+          original_identity: identity,
+        },
+      });
+      return;
+    }
+    const clock =
+      logical && (traceField || field?.endsWith("_utc_ms"))
+        ? path.includes("/next_required/")
+          ? "未来必需工程逻辑 ms · 非已发生"
+          : "工程运行逻辑 ms · 非真实日期"
+        : field?.endsWith("_utc_ms")
+          ? "原 UTC ms"
+          : document === "calls" && field === "now"
+            ? "宿主逻辑 UTC ms"
+            : undefined;
     if (!clock || typeof value !== "string" || !/^-?\d+$/.test(value)) return;
     out.push({
       source: "existing",
@@ -215,6 +306,15 @@ export function ExistingPanel({
   )?.summary;
   const manifest = status.documents?.find(
     (d) => d.document === "manifest" && d.status === "ready",
+  )?.summary;
+  const measurement = status.documents?.find(
+    (d) => d.document === "measurement" && d.status === "ready",
+  )?.summary;
+  const timing = status.documents?.find(
+    (d) => d.document === "time_results" && d.status === "ready",
+  )?.summary;
+  const rawRun = status.documents?.find(
+    (d) => d.document === "run" && d.status === "ready",
   )?.summary;
   const counters = at(manifest, "source_counters");
   const counterEntries =
@@ -324,6 +424,20 @@ export function ExistingPanel({
           动作保留原文，不是权威 ModelDecision / NoTrade
           历史。工程图与初始权重不表示训练完成，源端成本不是 C 服务成本。
         </p>
+      ) : status.kind === "model_timing" ? (
+        <p className="gap">
+          工程逻辑毫秒不绑定研究日期；50/250
+          ms为预声明经济计算延迟，compute_wall_ns为实测时长。原Debug反馈、intent、receipt不解析为NOE或权威决定。exit0
+          / CLEAN_RUN /
+          stopped_without_future不证明经济闭合；下一必需PublicVisibility
+          86401011仍未知。SIM内aaaa/bbbb身份与冻结生产修订分别保留。
+        </p>
+      ) : status.kind === "remeasurement_12m" ? (
+        <p className="gap">
+          一次跨版本历史观察，未控制共享主机/缓存，不归因单项优化或保证稳定加速。阶段秒/CPU/proc_io与GNU整进程RSS
+          KiB、512B计数分开；研究独占CPU/RSS
+          null不填整进程值。材料范围与启动器/完成文件mtime不同；原微秒文本与导出精确保留，页面范围输入为毫秒。内部phase没有UTC端点，不用wall拼区间；公开省略数组不补算，不拼接首小时或账户收益。
+        </p>
       ) : (
         <p className="gap">
           只读原 manifest，不打开所列 Parquet 或复验文件哈希。空 gaps
@@ -331,6 +445,332 @@ export function ExistingPanel({
           没有统一单位，不猜
           UTC。历史摘要不代表实时在线、稳定公共前缀或账户经营。
         </p>
+      )}
+      {status.kind === "model_timing" && (
+        <>
+          <div className="fact-grid">
+            {[
+              ["生产修订", "/production_revision"],
+              ["工程诊断修订", "/diagnostic_revision"],
+              ["下一必需工程逻辑 ms · 未知未来", "/stop/next_required/at"],
+              ["下一必需位置", "/stop/next_required/path"],
+            ].map(([label, p]) => (
+              <Field
+                key={p}
+                label={label}
+                path={p}
+                source="existing"
+                report={timing}
+                onSelect={(e) => select("time_results", e.path, e.value)}
+              />
+            ))}
+            {[
+              ["原进程退出码", "/exit_code"],
+              ["原进程墙钟 ns", "/wall_ns"],
+            ].map(([label, p]) => (
+              <Field
+                key={p}
+                label={label}
+                path={p}
+                source="existing"
+                report={rawRun}
+                onSelect={(e) => select("run", e.path, e.value)}
+              />
+            ))}
+          </div>
+          <div className="research-controls">
+            {["trace", "time_sim", "feedback"].map((role) => (
+              <button
+                key={role}
+                onClick={() => {
+                  setDocument(role);
+                  setPath("");
+                  setStart("0");
+                  void state.load(role, "", "0", count);
+                }}
+              >
+                浏览{role}原序记录
+              </button>
+            ))}
+          </div>
+        </>
+      )}
+      {status.kind === "remeasurement_12m" && (
+        <>
+          <div className="fact-grid">
+            {[
+              ["原报告版本", "/schema"],
+              ["原状态", "/status"],
+              ["实际测量源码", "/measurement_source_commit"],
+              ["历史基准源码", "/historical_baseline_source_commit"],
+              ["旧阶段合计 · 秒", "/execution/phase_wall_seconds_sum/old"],
+              ["新阶段合计 · 秒", "/execution/phase_wall_seconds_sum/new"],
+            ].map(([label, p]) => (
+              <Field
+                key={p}
+                label={label}
+                path={p}
+                source="existing"
+                report={measurement}
+                onSelect={(e) => select("measurement", e.path, e.value)}
+              />
+            ))}
+          </div>
+          <h3>原阶段对照 · 秒 / proc_io原计数（非GNU整进程）</h3>
+          <div className="source-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>原阶段</th>
+                  <th>旧/新</th>
+                  {[
+                    "wall_seconds",
+                    "user_seconds",
+                    "system_seconds",
+                    "exclusive_cpu_seconds",
+                    "exclusive_max_rss_kib",
+                  ].map((k) => (
+                    <th key={k}>{k}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {[
+                  "prepare",
+                  "general_statistics",
+                  "two_market_research",
+                ].flatMap((phase) =>
+                  ["old", "new"].map((side) => (
+                    <tr key={phase + side}>
+                      <td>{phase}</td>
+                      <td>{side}</td>
+                      {[
+                        "wall_seconds",
+                        "user_seconds",
+                        "system_seconds",
+                        "exclusive_cpu_seconds",
+                        "exclusive_max_rss_kib",
+                      ].map((k) => (
+                        <td key={k}>
+                          <button
+                            onClick={() =>
+                              select(
+                                "measurement",
+                                `/execution/phases/${phase}/${side}/${k}`,
+                                at(
+                                  measurement,
+                                  "execution",
+                                  "phases",
+                                  phase,
+                                  side,
+                                  k,
+                                ) ?? null,
+                              )
+                            }
+                          >
+                            {fact(
+                              at(
+                                measurement,
+                                "execution",
+                                "phases",
+                                phase,
+                                side,
+                                k,
+                              ),
+                            )}
+                          </button>
+                        </td>
+                      ))}
+                    </tr>
+                  )),
+                )}
+              </tbody>
+            </table>
+          </div>
+          <h3>原阶段 proc_io · 原字节 / 系统调用次数（不互相加总）</h3>
+          <div className="source-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>原阶段</th>
+                  <th>旧/新</th>
+                  {[
+                    "rchar",
+                    "wchar",
+                    "read_bytes",
+                    "write_bytes",
+                    "syscr",
+                    "syscw",
+                    "cancelled_write_bytes",
+                  ].map((k) => (
+                    <th key={k}>{k}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {[
+                  "prepare",
+                  "general_statistics",
+                  "two_market_research",
+                ].flatMap((phase) =>
+                  ["old", "new"].map((side) => (
+                    <tr key={phase + side}>
+                      <td>{phase}</td>
+                      <td>{side}</td>
+                      {[
+                        "rchar",
+                        "wchar",
+                        "read_bytes",
+                        "write_bytes",
+                        "syscr",
+                        "syscw",
+                        "cancelled_write_bytes",
+                      ].map((k) => (
+                        <td key={k}>
+                          <button
+                            onClick={() =>
+                              select(
+                                "measurement",
+                                `/execution/phases/${phase}/${side}/proc_io/${k}`,
+                                at(
+                                  measurement,
+                                  "execution",
+                                  "phases",
+                                  phase,
+                                  side,
+                                  "proc_io",
+                                  k,
+                                ) ?? null,
+                              )
+                            }
+                          >
+                            {fact(
+                              at(
+                                measurement,
+                                "execution",
+                                "phases",
+                                phase,
+                                side,
+                                "proc_io",
+                                k,
+                              ),
+                            )}
+                          </button>
+                        </td>
+                      ))}
+                    </tr>
+                  )),
+                )}
+              </tbody>
+            </table>
+          </div>
+          <h3>GNU原整进程统计 · 秒 / RSS KiB / 512B输入输出计数</h3>
+          <div className="source-table">
+            <table>
+              <thead>
+                <tr>
+                  <th>原进程</th>
+                  <th>旧/新</th>
+                  {[
+                    "wall_seconds",
+                    "user_seconds",
+                    "system_seconds",
+                    "max_rss_kib",
+                    "file_system_inputs_512b",
+                    "file_system_outputs_512b",
+                    "exit_code",
+                  ].map((k) => (
+                    <th key={k}>{k}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {["material_trial", "two_market_research"].flatMap((proc) =>
+                  ["old", "new"].map((side) => (
+                    <tr key={proc + side}>
+                      <td>{proc}</td>
+                      <td>{side}</td>
+                      {[
+                        "wall_seconds",
+                        "user_seconds",
+                        "system_seconds",
+                        "max_rss_kib",
+                        "file_system_inputs_512b",
+                        "file_system_outputs_512b",
+                        "exit_code",
+                      ].map((k) => (
+                        <td key={k}>
+                          <button
+                            onClick={() =>
+                              select(
+                                "measurement",
+                                `/execution/gnu_processes/${proc}/${side}/${k}`,
+                                at(
+                                  measurement,
+                                  "execution",
+                                  "gnu_processes",
+                                  proc,
+                                  side,
+                                  k,
+                                ) ?? null,
+                              )
+                            }
+                          >
+                            {fact(
+                              at(
+                                measurement,
+                                "execution",
+                                "gnu_processes",
+                                proc,
+                                side,
+                                k,
+                              ),
+                            )}
+                          </button>
+                        </td>
+                      ))}
+                    </tr>
+                  )),
+                )}
+              </tbody>
+            </table>
+          </div>
+          <div className="research-controls">
+            {[
+              "/execution/timeline",
+              "/input_identity",
+              "/configuration",
+              "/business",
+              "/comparison_contract",
+              "/public_projection_omissions",
+            ].map((p) => (
+              <button
+                key={p}
+                onClick={() => {
+                  setDocument("measurement");
+                  setPath(p);
+                  void state.load("measurement", p, "0", count);
+                }}
+              >
+                读取{p}
+              </button>
+            ))}
+            <button
+              onClick={() => {
+                setDocument("measurement");
+                setPath("/complete_result_comparison");
+                void state.load(
+                  "measurement",
+                  "/complete_result_comparison",
+                  "0",
+                  count,
+                );
+              }}
+            >
+              浏览完整比较与排除规则
+            </button>
+          </div>
+        </>
       )}
       {status.kind === "collection_manifest" && (
         <>

@@ -18,7 +18,15 @@ export type Evidence = {
   research?: Json;
   existing?: Json;
 };
-export type Point = Evidence & { name: string; clock: string; utcMs: string };
+export type Point = Evidence & {
+  name: string;
+  clock: string;
+  utcMs: string;
+  utcUs?: string;
+  originalUtcText?: string;
+};
+export const pointUs = (p: Point): bigint =>
+  p.utcUs !== undefined ? BigInt(p.utcUs) : BigInt(p.utcMs) * 1000n;
 export type Row = Evidence & {
   kind: string;
   identity: string;
@@ -592,8 +600,8 @@ export function rangePoints(
   return points.filter(
     (p) =>
       (!condition || p.condition === condition) &&
-      (!start || BigInt(p.utcMs) >= BigInt(start)) &&
-      (!end || BigInt(p.utcMs) <= BigInt(end)),
+      (!start || pointUs(p) >= BigInt(start) * 1000n) &&
+      (!end || pointUs(p) <= BigInt(end) * 1000n),
   );
 }
 export function traceJson(
@@ -623,11 +631,13 @@ export function traceJson(
           s: "t",
           pid: 1,
           tid: clocks.indexOf(p.clock) + 1,
-          ts: BigInt(p.utcMs) * 1000n,
+          ts: pointUs(p),
           name: p.name,
           cat: p.clock,
           args: {
-            original_utc_ms: p.utcMs,
+            original_utc_ms: p.originalUtcText ? null : p.utcMs,
+            original_utc_text: p.originalUtcText ?? null,
+            original_utc_us: p.utcUs ?? null,
             clock_kind: p.clock,
             source: p.source,
             reference: p.path,

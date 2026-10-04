@@ -25,8 +25,9 @@ export function EventTable({
         id: "clock",
         header: "时钟 / 原 UTC ms",
         accessorFn: (r) =>
-          r.points.map((p) => p.clock + " · " + p.utcMs).join("；") ||
-          "未接入时间映射",
+          r.points
+            .map((p) => p.clock + " · " + (p.originalUtcText ?? p.utcMs))
+            .join("；") || "未接入时间映射",
       },
       {
         id: "identity",

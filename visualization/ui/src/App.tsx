@@ -34,6 +34,7 @@ import {
   useExisting,
   existingPoints,
   existingLabel,
+  existingSourceIdentity,
 } from "./Existing";
 import { SourceIdentity } from "./SourceIdentity";
 import { usePublicBrowse } from "./PublicBrowse";
@@ -391,6 +392,7 @@ export default function App() {
         : null,
       report_kind: report ? snapshot.report_kind : null,
       research_source: snapshot.research,
+      existing_source_identity: existingSourceIdentity(existingStatus),
       metadata_source: snapshot.metadata.source,
       public_source: snapshot.public_recording,
       public_page_range: page
@@ -844,7 +846,12 @@ export default function App() {
                                     : existingStatus.kind ===
                                         "collection_manifest"
                                       ? "/existing/manifest/collection_day_coverage"
-                                      : "/existing/provenance/baseline",
+                                      : existingStatus.kind === "model_timing"
+                                        ? "/existing/time_results/production_revision"
+                                        : existingStatus.kind ===
+                                            "remeasurement_12m"
+                                          ? "/existing/measurement/measurement_source_commit"
+                                          : "/existing/provenance/baseline",
                                 value:
                                   existingStatus.kind === "completion"
                                     ? at(completionDocument, "final_ledger")!
@@ -856,12 +863,31 @@ export default function App() {
                                           )?.summary,
                                           "collection_day_coverage",
                                         ) ?? null)
-                                      : (at(
-                                          existingStatus.documents?.find(
-                                            (d) => d.document === "provenance",
-                                          )?.summary,
-                                          "baseline",
-                                        ) ?? null),
+                                      : existingStatus.kind ===
+                                            "model_timing" ||
+                                          existingStatus.kind ===
+                                            "remeasurement_12m"
+                                        ? (at(
+                                            existingStatus.documents?.find(
+                                              (d) =>
+                                                d.document ===
+                                                (existingStatus.kind ===
+                                                "model_timing"
+                                                  ? "time_results"
+                                                  : "measurement"),
+                                            )?.summary,
+                                            existingStatus.kind ===
+                                              "model_timing"
+                                              ? "production_revision"
+                                              : "measurement_source_commit",
+                                          ) ?? null)
+                                        : (at(
+                                            existingStatus.documents?.find(
+                                              (d) =>
+                                                d.document === "provenance",
+                                            )?.summary,
+                                            "baseline",
+                                          ) ?? null),
                               },
                             }
                           : undefined

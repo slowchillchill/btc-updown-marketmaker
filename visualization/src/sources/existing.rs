@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use std::{collections::BTreeMap, path::PathBuf, time::Instant};
 #[derive(Debug, Deserialize)]
 pub struct ExistingSourceConfig {
-    /// completion / continuous / collection_manifest；未知类别只使此来源失败。
+    /// completion / continuous / collection_manifest / model_timing / remeasurement_12m；未知类别只使此来源失败。
     pub kind: String,
     /// 明确文件角色。manifest 是 day_dir，所属原 loader 固定读取 manifest.json。
     pub paths: BTreeMap<String, PathBuf>,
@@ -43,6 +43,8 @@ impl ExistingDocument {
                 "report",
             ],
             "collection_manifest" => &["manifest"],
+            "model_timing" => &["time_results", "trace", "time_sim", "feedback", "run"],
+            "remeasurement_12m" => &["measurement"],
             _ => {
                 result.status = json!({"status":"unsupported_version","kind":config.kind,"detail":"未知显式来源类别"});
                 return result;
@@ -110,14 +112,18 @@ impl ExistingDocument {
                                 }
                                 Ok(json!(rows))
                             }
-                            "run_order" => std::str::from_utf8(&b)
-                                .map_err(|e| e.to_string())
-                                .and_then(|s| {
-                                    s.lines()
-                                        .map(|l| serde_json::from_str(l).map_err(|e| e.to_string()))
-                                        .collect::<Result<Vec<Value>, _>>()
-                                })
-                                .map(Value::Array),
+                            "run_order" | "trace" | "time_sim" | "feedback" => {
+                                std::str::from_utf8(&b)
+                                    .map_err(|e| e.to_string())
+                                    .and_then(|s| {
+                                        s.lines()
+                                            .map(|l| {
+                                                serde_json::from_str(l).map_err(|e| e.to_string())
+                                            })
+                                            .collect::<Result<Vec<Value>, _>>()
+                                    })
+                                    .map(Value::Array)
+                            }
                             "report" => String::from_utf8(b)
                                 .map(Value::String)
                                 .map_err(|e| e.to_string()),
@@ -151,6 +157,19 @@ impl ExistingDocument {
                                     .map(|_| ())
                                     .map_err(|e| e.to_string())
                             }),
+                        "measurement"
+                            if v["schema"]
+                                != "complementary_pair_end_to_end_12m_remeasurement_v1" =>
+                        {
+                            Err("未知十二分钟测量报告版本".into())
+                        }
+                        "time_results"
+                            if v.get("production_revision").is_none()
+                                || v.get("diagnostic_revision").is_none()
+                                || v.get("artifact_sha256").is_none() =>
+                        {
+                            Err("缺冻结工程诊断版本与原产物身份".into())
+                        }
                         "summary" | "pooled" if !v.is_array() => Err("原摘要不是数组".into()),
                         _ => Ok(()),
                     };
