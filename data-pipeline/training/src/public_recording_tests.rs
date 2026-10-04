@@ -1605,3 +1605,24 @@ mod replay_cost_tests;
 
 #[path = "public_recording_layout_tests.rs"]
 mod layout_tests;
+
+#[test]
+fn range_received_other_v2_variants_keep_full_source_fallback() {
+    let root = tempfile::tempdir().unwrap();
+    let repaired = historical_identity_fixture(&root.path().join("recording"));
+    let DptIngressV1::Message { row: repair, .. } = repaired[2].0.ingress.clone() else {
+        unreachable!()
+    };
+    for input in [
+        TypedRawRowV2::PolymarketMarketMetadataV6(Box::new(
+            PolymarketMarketMetadataV6Input::AnchorRule(anchor_input()),
+        )),
+        TypedRawRowV2::PolymarketRtdsChainlinkTwap(twap_input(60)),
+        repair,
+    ] {
+        assert_eq!(
+            validated_received_at_from_typed_raw_v2(&input),
+            source_evidence_v3_from_typed_raw_v2(&input).map(|source| source.received_at_utc_ms)
+        );
+    }
+}

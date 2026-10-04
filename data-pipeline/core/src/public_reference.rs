@@ -411,18 +411,49 @@ fn existing_row_source_evidence_v3(
     source_evidence_v3_from_parts(crate::source_evidence_parts_from_typed_raw(row)?)
 }
 
-fn source_evidence_v3_from_parts(
-    (source_kind, native, source_time, received, admission): crate::TypedSourceEvidenceParts,
-) -> Result<SourceEvidenceRefV3, ContractError> {
+/// 范围筛选复用完整来源的语义校验，但不构造筛选后未使用的最终消息身份。
+/// 校验失败仍由调用方保留原行；本入口不代替正式来源证据生成。
+pub fn validated_received_at_from_typed_raw_v2(
+    input: &TypedRawRowV2,
+) -> Result<i64, ContractError> {
+    let parts = match input {
+        TypedRawRowV2::Existing(row) => crate::source_evidence_parts_from_typed_raw(row)?,
+        TypedRawRowV2::PolymarketMarketMetadataV6(row) => match row.as_ref() {
+            PolymarketMarketMetadataV6Input::Existing(row) => {
+                crate::metadata_source_evidence_parts(row)?
+            }
+            _ => {
+                return source_evidence_v3_from_typed_raw_v2(input)
+                    .map(|source| source.received_at_utc_ms);
+            }
+        },
+        _ => {
+            return source_evidence_v3_from_typed_raw_v2(input)
+                .map(|source| source.received_at_utc_ms);
+        }
+    };
+    Ok(validated_semantic_source_evidence_from_parts(&parts)?.received_at_utc_ms)
+}
+
+fn validated_semantic_source_evidence_from_parts(
+    parts: &crate::TypedSourceEvidenceParts,
+) -> Result<crate::SemanticSourceEvidence<'_>, ContractError> {
+    let (source_kind, native, source_time, received, admission) = parts;
     let semantic = crate::SemanticSourceEvidence {
-        source_kind,
-        source_native_identity: &native,
-        source_event_at_utc_ms: source_time,
-        received_at_utc_ms: received,
-        collector_admission: &admission,
+        source_kind: *source_kind,
+        source_native_identity: native,
+        source_event_at_utc_ms: *source_time,
+        received_at_utc_ms: *received,
+        collector_admission: admission,
     };
     crate::validate_semantic_source_evidence(&semantic, 0)?;
-    source_evidence_v3_from_semantic(semantic)
+    Ok(semantic)
+}
+
+fn source_evidence_v3_from_parts(
+    parts: crate::TypedSourceEvidenceParts,
+) -> Result<SourceEvidenceRefV3, ContractError> {
+    source_evidence_v3_from_semantic(validated_semantic_source_evidence_from_parts(&parts)?)
 }
 
 pub fn historical_response_source_evidence_v3(
