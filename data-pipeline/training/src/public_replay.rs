@@ -1023,7 +1023,7 @@ pub fn prepare_historical_files_with_initialization_and_progress_v1(
             });
             Ok(initial.chain(
                 TypedFileRowsV1 {
-                    files: files.iter(),
+                    files: FileRowsSelectionV1::Validated(files.iter()),
                     stream: None,
                     pending: Vec::new().into_iter(),
                     rows: config.decode_batch_rows,
@@ -1055,8 +1055,58 @@ pub fn prepare_historical_files_with_initialization_and_progress_v1(
         progress,
     )
 }
+enum FileRowsSelectionV1<'a> {
+    Validated(std::slice::Iter<'a, &'a crate::ValidatedDirectSourceParquetFileV3>),
+    Finite(std::slice::Iter<'a, crate::public_input::PublicFiniteFileV1>),
+}
+/// 显式选定文件沿原两遍供料/筛选/排序，不签发全日准入。
+pub fn prepare_historical_finite_files_v1(
+    root: &Path,
+    files: &[crate::public_input::PublicFiniteFileV1],
+    config: &crate::canonical_run::CanonicalRunConfig,
+    stream: String,
+    received_range: std::ops::Range<i64>,
+    progress: Option<&HistoricalPreparationNotifierV1<'_>>,
+) -> RecordingResult<HistoricalMergeV1> {
+    prepare_historical_tagged_rows_v1(
+        root,
+        config,
+        stream,
+        |pass| {
+            Ok(TypedFileRowsV1 {
+                files: FileRowsSelectionV1::Finite(files.iter()),
+                stream: None,
+                pending: Vec::new().into_iter(),
+                rows: config.decode_batch_rows,
+                bytes: config.max_decode_batch_bytes,
+                progress,
+                pass,
+                file_active: false,
+            }
+            .filter(|row| match row {
+                Ok(row) => validated_received_at_from_typed_raw_v2(row)
+                    .map(|t| received_range.contains(&t))
+                    .unwrap_or(true),
+                Err(_) => true,
+            })
+            .map(move |row| {
+                row.map(|row| {
+                    notify(
+                        progress,
+                        Notice::SelectedRow {
+                            pass,
+                            initialization: false,
+                        },
+                    );
+                    (row, None)
+                })
+            }))
+        },
+        progress,
+    )
+}
 struct TypedFileRowsV1<'a, 'b, 'c> {
-    files: std::slice::Iter<'a, &'a crate::ValidatedDirectSourceParquetFileV3>,
+    files: FileRowsSelectionV1<'a>,
     stream: Option<crate::typed_raw::TypedRawParquetStream<TypedRawRowV2>>,
     pending: std::vec::IntoIter<TypedRawRowV2>,
     rows: usize,
@@ -1100,8 +1150,23 @@ impl Iterator for TypedFileRowsV1<'_, '_, '_> {
                 );
                 self.file_active = false;
             }
-            let file = self.files.next()?;
-            match crate::public_input::open_public_input_bounded_v1(file, self.rows, self.bytes) {
+            let opened = match &mut self.files {
+                FileRowsSelectionV1::Validated(files) => {
+                    crate::public_input::open_public_input_bounded_v1(
+                        files.next()?,
+                        self.rows,
+                        self.bytes,
+                    )
+                }
+                FileRowsSelectionV1::Finite(files) => {
+                    crate::public_input::open_finite_public_input_v1(
+                        files.next()?,
+                        self.rows,
+                        self.bytes,
+                    )
+                }
+            };
+            match opened {
                 Ok(stream) => {
                     self.stream = Some(stream);
                     self.file_active = true;

@@ -24,3 +24,9 @@ let dispatch = shared.dispatch_strategy(&mut decision, &mut strategy, completed)
 宿主依获批时序推进到发送点；`dispatch_strategy` 把实际整批结果通知原策略实例，策略仅对真实已发或结果未知请求保留利润占用。低层 `execute_batch_reserved` 的直接消费者需自行调用同一 `StrategyV1::dispatched` 通知，不能把形成候选当已发请求。泛型诊断随冻结计算保存在内存，后来的账户／行情归约不能改变旧诊断；本库不落盘 JSON 或数据库。
 
 [合成配置](configs/strategies/complementary_pair/synthetic-engineering.toml) 全部参数显式且无校准资格。规则、公式、公共成本界与限制见规格第 11 节；集成测试经原 DPT／SIM／NOE／Ledger 构造费用、平均成本池、预留和撤单反馈，不建策略影子账本。
+
+### 首折 Chainlink 来源统计
+
+`research_initial_sigma` 示例的 `prepare CONFIG OUTPUT` 与 `replay CONFIG PREPARED OUTPUT` 分别复用公共有限录制和原稳定前缀重放。显式所选文件、范围、原资源字段及选源身份全部保存在配置；此方式保留完整公共 record，不把零市场来源组伪造成市场观察。
+
+生产 `SignalMemory` 与来源统计共用现价质量/接收时点接纳及逐对方差原语。生产仍按 condition 保存记忆、执行原概率前提和无有效价对时的配置回退；来源统计不采用回退，不把全局三日候选当作每市场 sigma 或完整六源可见历史。每次原重放应用后即时借用 core 当前完整现价，再推进下一输入；该投影不是任意历史组的快照。统计只保存前一个接纳点及日/全程标量，完整来源仍留在原公共材料。

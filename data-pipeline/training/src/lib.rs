@@ -5,6 +5,7 @@
 
 pub mod canonical_run;
 mod dpt_gate_a_cli;
+pub mod finite_recording;
 pub mod gate_a;
 mod gate_a_publication;
 mod gate_a_sim_adapter;

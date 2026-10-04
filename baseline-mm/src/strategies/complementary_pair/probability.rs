@@ -37,16 +37,6 @@ pub(super) struct SignalMemory {
     chainlink: VecDeque<(i64, f64)>,
     binance_baseline: Option<(f64, f64, i64)>,
 }
-fn number(v: &ExactDecimal) -> Result<f64, StrategyErrorV1> {
-    float(&decimal(v)?)
-}
-fn fact_time<T>(f: &ObservedFactV1<T>, fallback: i64) -> i64 {
-    f.direct_anchors
-        .iter()
-        .map(|a| a.received_at_utc_ms)
-        .max()
-        .unwrap_or(fallback)
-}
 pub(super) fn window(rule: BtcSettlementReferenceV1) -> i64 {
     match rule {
         BtcSettlementReferenceV1::ChainlinkSpot => 0,
@@ -76,19 +66,24 @@ impl SignalMemory {
             _ => None,
         };
         // TWAP 可供未来水平近似；滚动 TWAP 从不被拿作已发生积分。
-        let spot = value(&o.chainlink_spot);
+        let spot = eligible_chainlink_spot_v1(&o.chainlink_spot);
         let price = spot
-            .map(|p| (&p.price_usd_per_btc, fact_time(&o.chainlink_spot, now)))
+            .map(|p| {
+                (
+                    &p.price_usd_per_btc,
+                    direct_received_time_v1(&o.chainlink_spot, now),
+                )
+            })
             .or_else(|| {
                 twap.map(|p| {
                     (
                         &p.price_usd_per_btc,
                         match rule {
                             BtcSettlementReferenceV1::ChainlinkTwapThirtySeconds => {
-                                fact_time(&o.chainlink_twap_thirty, now)
+                                direct_received_time_v1(&o.chainlink_twap_thirty, now)
                             }
                             BtcSettlementReferenceV1::ChainlinkTwapSixtySeconds => {
-                                fact_time(&o.chainlink_twap_sixty, now)
+                                direct_received_time_v1(&o.chainlink_twap_sixty, now)
                             }
                             BtcSettlementReferenceV1::ChainlinkSpot => now,
                         },
@@ -100,9 +95,12 @@ impl SignalMemory {
                 U::MissingSettlementPrice,
             ));
         };
-        let s = number(price)?;
+        let s = spot_price_number_v1(price)?;
         // 只有现价样本进入持价路径；rolling TWAP回退只参与未来水平估计。
-        if spot.is_some() && time <= now && self.chainlink.back().is_none_or(|(t, _)| time > *t) {
+        if spot.is_some()
+            && spot_sample_acceptance_v1(time, now, self.chainlink.back().map(|(t, _)| *t))
+                == SpotSampleAcceptanceV1::Accepted
+        {
             self.chainlink.push_back((time, s));
         }
         // 只丢弃已不参与波动或本市场终局窗口积分的样本，保留左端持价。
@@ -125,24 +123,15 @@ impl SignalMemory {
         let Some((k, temp)) = reference else {
             return Ok(ProbabilityEstimateV1::Unavailable(U::MissingReference));
         };
-        let k = number(k)?;
-        let mut variance = 0.0;
-        let mut elapsed = 0.0;
+        let k = spot_price_number_v1(k)?;
         let from = now.saturating_sub(i64::try_from(c.volatility_window_ms).unwrap_or(i64::MAX));
-        for ((t0, p0), (t1, p1)) in self.chainlink.iter().zip(self.chainlink.iter().skip(1)) {
-            if *t1 >= from && t1 > t0 {
-                variance += (p1 - p0).powi(2);
-                elapsed += (*t1 - *t0) as f64 / 1000.0;
-            }
-        }
-        let sigma = if elapsed > 0.0 {
-            (variance / elapsed).sqrt()
-        } else {
-            c.initial_sigma_usd_per_sqrt_second
-        };
+        let variance = spot_variance_statistics_v1(self.chainlink.iter().copied(), from);
+        let sigma = variance
+            .sigma_usd_per_sqrt_second()
+            .unwrap_or(c.initial_sigma_usd_per_sqrt_second);
         let mut innovation = 0.0;
         if let Some(b) = value(&o.binance_trade) {
-            let b = number(&b.price_usdt_per_btc)?;
+            let b = spot_price_number_v1(&b.price_usdt_per_btc)?;
             let baseline = self.binance_baseline.get_or_insert((b, s, time));
             // 同时刻配对建立因果基差；只融合后续变化，不直接减BTCUSDT与BTCUSD。
             innovation = ((b - baseline.0) - (s - baseline.1)) * c.binance_innovation_weight;
@@ -151,7 +140,7 @@ impl SignalMemory {
             }
         }
         if let Some(trade) = value(&o.binance_trade) {
-            let q = number(&trade.quantity_btc)?;
+            let q = spot_price_number_v1(&trade.quantity_btc)?;
             let depth = value(&o.binance_depth)
                 .map(|depth| {
                     depth
@@ -159,7 +148,7 @@ impl SignalMemory {
                         .iter()
                         .chain(&depth.asks)
                         .try_fold(0.0, |sum, l| {
-                            Ok::<_, StrategyErrorV1>(sum + number(&l.quantity_btc)?)
+                            Ok::<_, StrategyErrorV1>(sum + spot_price_number_v1(&l.quantity_btc)?)
                         })
                 })
                 .transpose()?
@@ -175,10 +164,10 @@ impl SignalMemory {
         }
         if let Some(b) = value(&o.binance_depth) {
             let bid = b.bids.iter().try_fold(0.0, |a, p| {
-                Ok::<_, StrategyErrorV1>(a + number(&p.quantity_btc)?)
+                Ok::<_, StrategyErrorV1>(a + spot_price_number_v1(&p.quantity_btc)?)
             })?;
             let ask = b.asks.iter().try_fold(0.0, |a, p| {
-                Ok::<_, StrategyErrorV1>(a + number(&p.quantity_btc)?)
+                Ok::<_, StrategyErrorV1>(a + spot_price_number_v1(&p.quantity_btc)?)
             })?;
             if bid + ask > 0.0 {
                 innovation += c.binance_pressure_weight_usd * (bid - ask) / (bid + ask);

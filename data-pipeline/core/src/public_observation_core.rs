@@ -475,6 +475,10 @@ impl PublicObservationCoreV1 {
     pub fn header(&self) -> &PublicInputStreamHeaderV1 {
         &self.header
     }
+    /// 已应用输入后的当前完整现价；不是任意历史组的快照。
+    pub fn current_chainlink_spot(&self) -> &ObservedFactV1<ChainlinkBtcUsdReferenceV1> {
+        &self.global.spot
+    }
     pub fn applied_prefix(&self) -> AppliedIngressPrefixV1 {
         AppliedIngressPrefixV1 {
             input_stream_id: self.header.input_stream_id.clone(),

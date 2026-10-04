@@ -82,3 +82,9 @@ TypedRaw Parquet 仍先以原打开的 `File` 完成长度与 SHA 校验，然�
 ## 正式有限重放进度
 
 `PublicReplayV1::set_progress` 提供单次可选 JSON 行进度，旧库调用默认关闭；`RecordedPublicGroupSourceV1` 只转交。公共统计和原两市场／首小时研究工具默认30秒，前置 `--progress-interval-seconds 0` 可关闭。验证行、定位行、已应用输入及已生成组分别计量，未知总量／ETA不推算，输出故障只停止日志。准确字段、合作式频率及未覆盖prepare阶段见[中文说明](docs/finite-public-replay-progress.md)。本段只有小夹具与工程检查，不含新的真实材料运行。
+
+### 显式有限选源的公共录制
+
+`prepare_historical_finite_files_v1` 接受原 `PublicFiniteFileV1` 固定文件事实，复用原单文件 SHA、页脚、模式、有界解码以及两遍来源排序；它不签发整日准入对象。范围筛选仍在完整物理解码之后，来源适配失败仍保留给原归约路径，不能把范围外坏行当作可跳过数据。
+
+`finite_recording::record_historical_merge_v1` 是正常历史准备与选源研究共用的原录制循环：初始化绑定、当次来源准备、core 应用、借用统计、完整 record、正常 End、writer 稳定的顺序保持。回调仅借用当次应用结果或写入前的初始化绑定；不保存另一份事件流水。`prepare_finite_public_recording_v1` 只形成正常公共材料，不生成隐藏数量、账户描述或策略参数。独立消费者仍通过原 `PublicReplayV1::open_committed` 完整读取指定稳定前缀。
