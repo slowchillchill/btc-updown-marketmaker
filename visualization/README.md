@@ -357,3 +357,12 @@ CARGO_TARGET_DIR=<实际target> node visualization/ui/tests/existing-browser.mjs
 最终固定根回归命令退出0，101组结果行合计1297 passed/0 failed（含父测试启动的子进程结果，非去重根用例数），具名 `four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second` **跳过**。未新增其他skip。此前记录的采集器实际UTC跨窗metadata authority失败边界仍未修复；本轮两次整库回归均无失败，不能据此宣布源端偶发已修好。旧 report/public/research/NOE 适用边界仍由本次根回归覆盖；新增来源不填补其业务历史、模型训练/MLflow或PAPER/LIVE宿主缺口。
 
 额外静态检查：`cargo clippy -p visualization --lib --bins --locked --offline -- -D warnings` 在既有 contracts 的三个 large_enum_variant 警告处退出101，未改源端；`--no-deps` 聚焦 visualization 后通过。共享研究 fragment 的可见性复用及同文件最近缓存条件作等价折叠，受影响 visualization lib/tests/examples 复验退出0；固定根回归在最终计量修正后已通过，不因后续纯前端与等价条件整理机械重复整库。
+
+工程/历史时间字段按原文档角色与 JSON Pointer 的末段识别；整记录中的时间字段和直接读取的标量叶复用同一规则。标量详情仅保留该次实际返回的原值/来源/路径，不为补身份另读父记录。真实 `calls /0/now=1789517395414` 保持宿主逻辑 UTC ms，`manifest /files/0/first_recv_time_utc_ms=1788912002229` 保持原 UTC ms；两者的整记录字段与叶选择均生成相同引用的 1 个点并可下载所选 Perfetto。`cpu_ns`、Debug `actions` 和无单位 `source_timestamp_start` 叶不生成点。
+
+```bash
+# 参数为上述四来源配置，脚本只取 continuous / manifest 两个显式实例。
+CARGO_TARGET_DIR=<实际target> node visualization/ui/tests/existing-leaf-browser.mjs <sources.json> <ignored-output>
+```
+
+本次叶路径修复的 Chrome 无 pageerror、自有服务/浏览器结束；官方 Trace Processor 各读取 1 点，分别为 `now / 1789517395414000000 ns / 原1789517395414 ms` 与 `first_recv_time_utc_ms / 1788912002229000000 ns / 原1788912002229 ms`。前端 build 通过，JS 1052.64 kB/gzip344.89 kB、CSS26.41 kB/gzip5.60 kB，原 Vite 大 chunk 提示保留。仅前端映射与定向脚本改变，复用既有 Rust 回归与成本证据；未重新测量成本，历史摘要中的计量源码 SHA 与读数不变。

@@ -92,14 +92,54 @@ export function existingPoints(
 ): Point[] {
   if (status?.status !== "ready") return [];
   const out: Point[] = [];
+  const push = (
+    value: Json,
+    path: string,
+    document: string,
+    source: string | undefined,
+    condition: string | undefined,
+    identity: Json,
+  ) => {
+    const field = path
+      .split("/")
+      .at(-1)
+      ?.replaceAll("~1", "/")
+      .replaceAll("~0", "~");
+    const clock = field?.endsWith("_utc_ms")
+      ? "原 UTC ms"
+      : document === "calls" && field === "now"
+        ? "宿主逻辑 UTC ms"
+        : undefined;
+    if (!clock || typeof value !== "string" || !/^-?\d+$/.test(value)) return;
+    out.push({
+      source: "existing",
+      path: pointer(document, path),
+      value,
+      utcMs: value,
+      name: field!,
+      clock,
+      condition,
+      existing: {
+        kind: status.kind ?? null,
+        document,
+        source: source ?? null,
+        reference: path,
+        original_identity: identity,
+      },
+    });
+  };
   const walk = (
     value: Json,
     path: string,
     document: string,
     source?: string,
     condition?: string,
+    identity: Json = value,
   ) => {
-    if (value === null || typeof value !== "object") return;
+    if (value === null || typeof value !== "object") {
+      push(value, path, document, source, condition, identity);
+      return;
+    }
     if (Array.isArray(value)) {
       value.forEach((v, i) =>
         walk(v, `${path}/${i}`, document, source, condition),
@@ -109,29 +149,7 @@ export function existingPoints(
     const own = text(at(value, "condition_id")) ?? condition;
     for (const [k, v] of Object.entries(value)) {
       const p = `${path}/${k.replaceAll("~", "~0").replaceAll("/", "~1")}`;
-      const clock = k.endsWith("_utc_ms")
-        ? "原 UTC ms"
-        : document === "calls" && k === "now"
-          ? "宿主逻辑 UTC ms"
-          : undefined;
-      if (clock && typeof v === "string" && /^-?\d+$/.test(v))
-        out.push({
-          source: "existing",
-          path: pointer(document, p),
-          value: v,
-          utcMs: v,
-          name: k,
-          clock,
-          condition: own,
-          existing: {
-            kind: status.kind ?? null,
-            document,
-            source: source ?? null,
-            reference: p,
-            original_identity: value,
-          },
-        });
-      else walk(v, p, document, source, own);
+      walk(v, p, document, source, own, value);
     }
   };
   for (const d of status.documents ?? [])
