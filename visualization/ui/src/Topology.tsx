@@ -189,18 +189,26 @@ function ModuleCard({ data }: NodeProps<ModuleNode>) {
 const nodeTypes = { module: ModuleCard };
 export function Topology({
   report,
+  engineering = false,
   metadata,
   selection,
   onSelect,
   playback = null,
   publicRows = [],
+  noeSelection,
+  noeCount = 0,
+  publicReady = false,
 }: {
   report: Json | undefined;
+  engineering?: boolean;
   metadata: Json | undefined;
   selection: Evidence | null;
   onSelect: (e: Evidence) => void;
   playback?: Evidence | null;
   publicRows?: Row[];
+  noeSelection?: Evidence;
+  noeCount?: number;
+  publicReady?: boolean;
 }) {
   const [relation, setRelation] = useState<(typeof relations)[number] | null>(
     null,
@@ -221,38 +229,50 @@ export function Topology({
   ): Evidence | undefined =>
     value === undefined ? undefined : { source, path, value };
   const facts: Record<string, { summary: string; evidence?: Evidence }> = {
-    "data-collect": { summary: "原消息在公共记录按需浏览；采集运行历史未接入" },
-    "data-pipeline": { summary: "指定公共稳定前缀 · 顺序读取" },
+    "data-collect": {
+      summary: publicReady
+        ? "原消息在公共记录按需浏览；采集运行历史未接入"
+        : "采集 / 原消息来源未接入",
+    },
+    "data-pipeline": {
+      summary: publicReady ? "指定公共稳定前缀 · 顺序读取" : "公共记录未接入",
+    },
     ledger: {
-      summary:
-        "实际总现金 " +
-        (cashTotal(
-          at(
-            report,
-            "account_economics_memory",
-            "cash",
-            "actual_available_pusd",
-          ),
-          at(
-            report,
-            "account_economics_memory",
-            "cash",
-            "actual_reserved_pusd",
-          ),
-        ) ?? "未接入") +
-        " pUSD · 终态；成本 / 应收见市场详情",
+      summary: engineering
+        ? "原 Ledger 工程投影 · 非宿主 / 经济报告"
+        : !report
+          ? "账户经济未接入"
+          : "实际总现金 " +
+            (cashTotal(
+              at(
+                report,
+                "account_economics_memory",
+                "cash",
+                "actual_available_pusd",
+              ),
+              at(
+                report,
+                "account_economics_memory",
+                "cash",
+                "actual_reserved_pusd",
+              ),
+            ) ?? "未接入") +
+            " pUSD · 终态；成本 / 应收见市场详情",
       evidence: evidence(
         "report",
-        "/account_economics_memory",
-        at(report, "account_economics_memory"),
+        engineering ? "/ledger_consumed_memory" : "/account_economics_memory",
+        engineering
+          ? at(report, "ledger_consumed_memory")
+          : at(report, "account_economics_memory"),
       ),
     },
     "shared-run": {
-      summary:
-        "待 NOE " +
-        fact(at(report, "pending_noe_records")) +
-        " · 待计算 " +
-        fact(at(report, "pending_calculation")),
+      summary: engineering
+        ? "宿主运行证据未接入"
+        : "待 NOE " +
+          fact(at(report, "pending_noe_records")) +
+          " · 待计算 " +
+          fact(at(report, "pending_calculation")),
       evidence: evidence(
         "report",
         "/observation_cutoff",
@@ -262,26 +282,32 @@ export function Topology({
     "intent-bridge": { summary: "逐次分派回执未接入" },
     "execution-normalization": {
       summary:
-        "报告耐久前缀 " +
+        (engineering ? "宿主耐久 NOE 前缀 " : "报告耐久前缀 ") +
         fact(at(report, "durable_noe_prefix")) +
-        "；逐条 NOE 未接入",
-      evidence: evidence(
-        "report",
-        "/durable_noe_prefix",
-        at(report, "durable_noe_prefix"),
-      ),
+        `；显式引用 ${noeCount} 条${noeSelection ? " · 单引用已加载" : " · 尚未读取"}；无消费关联`,
+      evidence:
+        noeSelection ??
+        evidence(
+          "report",
+          "/durable_noe_prefix",
+          at(report, "durable_noe_prefix"),
+        ),
     },
     "sim-system": {
-      summary: "装配参数可查；隐藏状态不作策略输入",
+      summary: metadata
+        ? "装配参数可查；隐藏状态不作策略输入"
+        : "SIM 装配 / 运行证据未接入",
       evidence: evidence("metadata", "/config", at(metadata, "config")),
     },
   };
   facts.strategy = {
     summary:
-      strategy +
-      " · 计算累计 " +
-      fact(at(report, "calculation_count")) +
-      "（本运行）",
+      !metadata && (!report || engineering)
+        ? "策略 / 运行计算证据未接入"
+        : strategy +
+          " · 计算累计 " +
+          fact(at(report, "calculation_count")) +
+          "（本运行）",
     evidence: evidence(
       "metadata",
       "/config/strategy",

@@ -4,7 +4,7 @@ import { at, type Json } from "./facts";
 import type { Page } from "./evidence";
 // 展示引用与泳道标签；原领域记录仍是完整 rows，不建立事件归约或领域主键。
 export type Evidence = {
-  source: "report" | "metadata" | "public";
+  source: "report" | "metadata" | "public" | "noe";
   path: string;
   value: Json;
   condition?: string;
@@ -13,6 +13,8 @@ export type Evidence = {
   identities?: PublicIdentity[];
   markets?: PublicMarket[];
   points?: Point[];
+  // NOE 原引用/上下文/身份；不混为公共关联键。
+  noe?: Json;
 };
 export type Point = Evidence & { name: string; clock: string; utcMs: string };
 export type Row = Evidence & {
@@ -632,6 +634,7 @@ export function traceJson(
             input_stream_id: p.inputStreamId ?? null,
             native_identities: p.identities ?? [],
             native_references: p.references ?? [],
+            noe_provenance: p.noe ?? null,
             ...context,
           },
         })),

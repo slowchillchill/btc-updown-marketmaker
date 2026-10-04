@@ -68,9 +68,11 @@ async fn production_range_end_report_and_missing_metadata_are_independent_read_o
         load_sources(SourcesConfig {
             runs: vec![RunSourceConfig {
                 label: "合成工程验证".into(),
+                report_kind: Default::default(),
                 report: Some(config.result_path.clone()),
                 metadata: Some(temp.path().join("missing.json")),
                 public_recording: None,
+                noe_results: vec![],
             }],
         })
         .unwrap(),
@@ -310,4 +312,24 @@ async fn committed_pages_keep_original_identity_exclude_later_and_pending_segmen
     assert!(error.contains("读取页 0 失败"));
     assert_eq!(error, broken.current().unwrap_err());
     assert_eq!(damaged_before, files(&damaged));
+}
+
+#[test]
+fn engineering_projection_is_explicit_and_has_no_fabricated_host_end_or_economics_version() {
+    use visualization::sources::backtest::load_engineering_projection;
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("display.json");
+    std::fs::write(
+        &path,
+        r#"{"engineering_display_boundary":"Ledger 原投影","ledger_consumed_memory":{}}"#,
+    )
+    .unwrap();
+    let raw = std::fs::read(&path).unwrap();
+    let engineering = load_engineering_projection(Some(&path));
+    assert_eq!(engineering.status, "ready");
+    let exact = engineering.exact.unwrap();
+    assert!(exact.get("end_reason").is_none());
+    assert!(exact.get("economics_version").is_none());
+    assert_eq!(load_document(Some(&path), true).status, "unknown_version");
+    assert_eq!(raw, std::fs::read(&path).unwrap());
 }

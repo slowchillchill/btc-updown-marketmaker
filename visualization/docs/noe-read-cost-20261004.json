@@ -1,0 +1,254 @@
+{
+  "kind": "有限工程单引用，非策略研究/生产容量",
+  "source": "NormalizationCore + StagedNormalizationWriter v4 returned reference ordinal 2",
+  "container_records": 6,
+  "build_mode": "debug unoptimized + debuginfo",
+  "measured_code": {
+    "committed_head": "28b07c051db3b3c1737c49fb09ce519a8eacf7c2",
+    "working_changes": true,
+    "task_branch": "issue-215-execution-evidence",
+    "worktree_ownership": "本轮专用隔离任务树；源码路径 visualization/**",
+    "reproducible_patch": "visualization/docs/noe-read-cost-code-20261004.patch",
+    "patch_sha256": "eecfac36d6934601532a70225439d0a141ba3c83ff011868beee4ef02f91f3f8",
+    "binary_sha256": "e184e3d3010e53924f400e4e0e56e6afd882d7e3f008dd161b34865f9185b781",
+    "rustc": "rustc 1.95.0 (59807616e 2026-04-14)"
+  },
+  "probe": [
+    {
+      "allocation_calls": "820",
+      "cumulative_requested_bytes": "265614",
+      "elapsed_us": "1977",
+      "encoding": {
+        "response_bytes": 3580,
+        "response_encoding_us": 74
+      },
+      "live_requested_after": "4915",
+      "live_requested_before": "795",
+      "native_cost": {
+        "allocation_bytes": null,
+        "container_file_bytes": "11528",
+        "load_elapsed_us": "1884",
+        "native_read_and_dto_us": "1712",
+        "native_read_attempts": "1",
+        "native_read_calls_total": "1",
+        "note": "单引用原接口解码整个提交容器和上下文，再选 ordinal；未测底层实际 I/O/分配；不自动逐条批读",
+        "reference_json_bytes_read": "300",
+        "underlying_io_bytes": null
+      },
+      "peak_above_start_bytes": "60387",
+      "peak_live_requested_bytes": "61182",
+      "phase": "first_read",
+      "process_read_bytes_delta": "0",
+      "process_rss_high_water_bytes": "16236544",
+      "rss_bytes": "16236544"
+    },
+    {
+      "allocation_calls": "0",
+      "cumulative_requested_bytes": "0",
+      "elapsed_us": "0",
+      "live_requested_after": "31828",
+      "live_requested_before": "31828",
+      "new_complete_encodings": 0,
+      "new_native_read_calls": 0,
+      "peak_above_start_bytes": "0",
+      "peak_live_requested_bytes": "31828",
+      "phase": "retry_latest",
+      "process_read_bytes_delta": "0",
+      "process_rss_high_water_bytes": "16236544",
+      "response_bytes": 3580,
+      "rss_bytes": "16236544",
+      "same_bytes_allocation": true
+    }
+  ],
+  "source_syscall_io": {
+    "file_lengths": {
+      "writer-reference.json": 300,
+      "commit-container.parquet": 11528,
+      "context.json": 1050,
+      "commit-container.manifest.json": 254
+    },
+    "phases": {
+      "first_read": {
+        "calls": 21,
+        "returned_bytes": 55265,
+        "by_file": {
+          "writer-reference.json": {
+            "calls": 2,
+            "returned_bytes": 300,
+            "syscalls": {
+              "read": 2
+            }
+          },
+          "context.json": {
+            "calls": 2,
+            "returned_bytes": 1050,
+            "syscalls": {
+              "read": 2
+            }
+          },
+          "commit-container.manifest.json": {
+            "calls": 2,
+            "returned_bytes": 254,
+            "syscalls": {
+              "read": 2
+            }
+          },
+          "commit-container.parquet": {
+            "calls": 15,
+            "returned_bytes": 53661,
+            "syscalls": {
+              "read": 15
+            }
+          }
+        }
+      },
+      "retry_latest": {
+        "calls": 0,
+        "returned_bytes": 0,
+        "by_file": {}
+      }
+    }
+  },
+  "browser": {
+    "viewport": {
+      "width": 1600,
+      "height": 1150
+    },
+    "loaded_points": 3,
+    "response_bytes": 3580,
+    "detail_interaction": {
+      "click_to_detail_two_frames_ms": 93,
+      "http_resource": {
+        "name": "/api/runs/1/noe/2",
+        "entryType": "resource",
+        "startTime": 821.6000000089407,
+        "duration": 2.5999999940395355,
+        "navigationId": 3430,
+        "initiatorType": "fetch",
+        "deliveryType": "",
+        "nextHopProtocol": "http/1.1",
+        "renderBlockingStatus": "non-blocking",
+        "contentType": "application/json",
+        "contentEncoding": "",
+        "workerStart": 0,
+        "workerRouterEvaluationStart": 0,
+        "workerCacheLookupStart": 0,
+        "workerMatchedSourceType": "",
+        "workerFinalSourceType": "",
+        "redirectStart": 0,
+        "redirectEnd": 0,
+        "fetchStart": 821.6000000089407,
+        "domainLookupStart": 821.6000000089407,
+        "domainLookupEnd": 821.6000000089407,
+        "connectStart": 821.6000000089407,
+        "secureConnectionStart": 0,
+        "connectEnd": 821.6000000089407,
+        "requestStart": 821.9000000059605,
+        "responseStart": 824.1000000089407,
+        "firstInterimResponseStart": 0,
+        "finalResponseHeadersStart": 824.1000000089407,
+        "responseEnd": 824.2000000029802,
+        "transferSize": 3880,
+        "encodedBodySize": 3580,
+        "decodedBodySize": 3580,
+        "responseStatus": 200,
+        "serverTiming": []
+      },
+      "note": "自动化点击/HTTP/解析/React/调度/两帧综合耗时，非CPU"
+    },
+    "timeline_interaction": {
+      "timeline_switch_to_dom_two_frames_ms": 59.80000001192093,
+      "http_resource": {
+        "name": "/api/runs/1/noe/2",
+        "entryType": "resource",
+        "startTime": 821.6000000089407,
+        "duration": 2.5999999940395355,
+        "navigationId": 3430,
+        "initiatorType": "fetch",
+        "deliveryType": "",
+        "nextHopProtocol": "http/1.1",
+        "renderBlockingStatus": "non-blocking",
+        "contentType": "application/json",
+        "contentEncoding": "",
+        "workerStart": 0,
+        "workerRouterEvaluationStart": 0,
+        "workerCacheLookupStart": 0,
+        "workerMatchedSourceType": "",
+        "workerFinalSourceType": "",
+        "redirectStart": 0,
+        "redirectEnd": 0,
+        "fetchStart": 821.6000000089407,
+        "domainLookupStart": 821.6000000089407,
+        "domainLookupEnd": 821.6000000089407,
+        "connectStart": 821.6000000089407,
+        "secureConnectionStart": 0,
+        "connectEnd": 821.6000000089407,
+        "requestStart": 821.9000000059605,
+        "responseStart": 824.1000000089407,
+        "firstInterimResponseStart": 0,
+        "finalResponseHeadersStart": 824.1000000089407,
+        "responseEnd": 824.2000000029802,
+        "transferSize": 3880,
+        "encodedBodySize": 3580,
+        "decodedBodySize": 3580,
+        "responseStatus": 200,
+        "serverTiming": []
+      },
+      "points": 3,
+      "note": "已加载事实导航/React/调度与两帧综合耗时；原Resource Timing单列，非CPU"
+    },
+    "exports": {
+      "noe-boundary": {
+        "points": 1,
+        "original_times": [
+          "1788840000002"
+        ],
+        "official_result": "\"count\",\"min_ns\",\"max_ns\"\n1,1788840000002000000,1788840000002000000",
+        "original_args": "\"original_utc_ms\",\"reference\"\n\"1788840000002\",\"/noe/2/exact/boundary/durable_available_at_utc_ms\""
+      },
+      "noe-record": {
+        "points": 2,
+        "original_times": [
+          "1788840000000",
+          "1788840000001"
+        ],
+        "official_result": "\"count\",\"min_ns\",\"max_ns\"\n2,1788840000000000000,1788840000001000000",
+        "original_args": "\"original_utc_ms\",\"reference\"\n\"1788840000000\",\"/noe/2/exact/record/Evidence/source_reference/record/DirectResponse/platform_responded_at_utc_ms\"\n\"1788840000001\",\"/noe/2/exact/record/Evidence/source_reference/record/DirectResponse/response_received_at_utc_ms\""
+      },
+      "noe-leaf": {
+        "points": 1,
+        "original_times": [
+          "1788840000000"
+        ],
+        "official_result": "\"count\",\"min_ns\",\"max_ns\"\n1,1788840000000000000,1788840000000000000",
+        "original_args": "\"original_utc_ms\",\"reference\"\n\"1788840000000\",\"/noe/2/exact/record/Evidence/source_reference/record/DirectResponse/platform_responded_at_utc_ms\""
+      },
+      "cross_view_export_native_requests": 0
+    },
+    "lifecycle": {
+      "non_noe_selection_preserved": true,
+      "failure_clears_points": true,
+      "run_aba_stale_result_ignored": true
+    }
+  },
+  "limitations": [
+    "单次工程样例；未清OS缓存，read_bytes=0不等于无逻辑I/O或解码",
+    "probe elapsed包括strace、allocator原子计数及调度；不能当生产速度",
+    "native_read_and_dto_us未拆纯I/O与解码；body.load_elapsed_us不含最终完整编码",
+    "成功分配次数/累计请求字节/live请求峰值均为Layout请求，非RSS/System内部开销",
+    "retry缓存内native_cost是首读原值，不是本次新增；响应编码getter亦保留最近原值",
+    "Chrome综合交互含网络/解析/React/调度与两帧，非CPU测量",
+    "线上I/O/alloc仍为null；未测冷盘/大容器/所有版本容量"
+  ],
+  "frontend_build": {
+    "modules": 787,
+    "js_kb_printed": 1026.47,
+    "js_gzip_kb_printed": 337.07,
+    "css_kb_printed": 26.06,
+    "css_gzip_kb_printed": 5.52,
+    "actual_file_bytes": {
+      ".css": 26062,
+      ".js": 1026479
+    }
+  }
+}

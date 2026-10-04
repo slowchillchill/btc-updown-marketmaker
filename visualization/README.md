@@ -1,6 +1,6 @@
 # 公共业务事实浏览器
 
-本包提供单 Rust 只读 HTTP 服务和 React 浏览界面，消费显式指定的可选历史报告、可选启动元数据及可选公共稳定记录。合同入口为 [C 路线 #215](https://github.com/slowchillchill/btc-updown-marketmaker/issues/215)。公共模块不依赖本包。
+本包提供单 Rust 只读 HTTP 服务和 React 浏览界面，消费显式指定的可选历史报告、可选启动元数据、可选公共稳定记录及显式 NOE 原返回引用。合同入口为 [C 路线 #215](https://github.com/slowchillchill/btc-updown-marketmaker/issues/215)。公共模块不依赖本包。
 
 报告通过 JSON 浏览：`backtest::HistoricalRunReportV1` 当前只有 `Serialize`，本包不另建完整领域模式，也不修改生产报告类型。已知 `account_economics_v2` 与原结束原因可以显示已有终态和有限时序；未知版本保留原 JSON 并停止对应语义解释。JSON 语法读取成功不代表领域完整性或研究验收。
 
@@ -92,7 +92,7 @@ TRACE_PROCESSOR=/path/to/trace_processor npm --prefix visualization/ui run test:
 
 ## 支持范围与来源缺口
 
-当前接入历史 `result.json`、启动元数据、显式公共稳定记录原字段及其顺序页。NOE 逐引用读会解码完整容器，且本切片尚无稳定引用来源与安全历史枚举；Ledger 恢复/打开会改变耐久尾部，没有适用独立历史纯读入口。本包均不调用这些恢复器，也不复制账本归约或策略计算。策略逐次诊断、经济历史、真实训练/MLflow、PAPER/LIVE 和私有独立评价按所属模块的实际交付接入。
+当前接入历史 `result.json`、启动元数据、显式公共稳定记录原字段及其顺序页，以及写入方显式返回的版本化 NOE 单引用。NOE 逐引用读会解码完整容器；当前仅有原 writer 工程接线验证，没有真实策略研究返回引用或安全历史枚举；Ledger 恢复/打开会改变耐久尾部，没有适用独立历史纯读入口。本包均不调用这些恢复器，也不复制账本归约或策略计算。策略逐次诊断、经济历史、真实训练/MLflow、PAPER/LIVE 和私有独立评价按所属模块的实际交付接入。
 
 每份来源属于调用者明确指定的访问上下文；独立留出不向训练侧来源、缓存、目录、实验或界面汇集。共用展示代码不授予读取其他产物的权限。
 
@@ -203,3 +203,72 @@ CARGO_TARGET_DIR="$TARGET" node visualization/ui/tests/read-cost-browser.mjs "$R
 脚本分别使用受控 4321 / 4319 / 4320 端口，结束时关闭自身浏览器/服务及临时配置。合法有限材料的市场/原时间独立期望取原字段，不重放归约；取消/网络失败使用浏览器路由保留服务端真实已完成结果。报告/经济、公共关联与窄屏旧行为通过原浏览器脚本继续核对。固定根回归退出 0，`four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second` 按仓库规则明确跳过。
 
 审查返工补充：当前批查询、播放、表格与范围筛选共用 App 一次 `publicRows(page)` 映射的同一组 Row/Point，不再分别构造后比较对象身份。原合法材料的 `PolymarketMessage.time.received_at_utc_ms=22000` 独立确定原偏移 45、51；新增 Chrome 断言先在旧实现上因范围表格清空失败，修复后证明两条原引用和完整原值仍显示，范围导出 15 点及原查询/虚拟/取消/播放语义保持。修复构建 JS 1009.73 kB（gzip 332.00），CSS 不变；此次仅前端变化，复用既有 Rust 根回归，未重复无变化测试。
+
+
+## 报告执行投影与显式 NOE 单引用
+
+页首折叠来源条直接显示原运行 `metadata.config.implementation_identity.git_commit`，不以可视化服务提交替代；源码 / Cargo 锁哈希、策略规则版本、公共规范 / 观察 / 排序版本均可点击原字段。报告与元数据经济版本分别保留，不覆盖差异；未知经济版本的原版本文本仍显示，停止相应语义解释。`caller_role` / `recording_role` 是角色；四项 `Fixed` / `Sequence` timing 是历史宿主延迟配置，非 CPU 实测或策略周期。当前没有独立业务触发模式字段，明确未保存 / 未交接，不猜逐帧或 100ms。
+
+执行页读取报告 `ledger_consumed_memory` 的账户与完整 condition_id 市场投影；市场选择包含只有预留 / 生命周期投影的市场。提交前、发送后未知、平台确认但经济待应用的数量、本金及即时费用独立显示；平台本金 / 即时费用占用已包含确认待应用部分，不再相加，不当有效挂单价值。开放订单单位为单，待定成交单位为笔，后者包含 PendingUnapplied / PendingApplied，不是尚未入账数。未展示混合口径 `current_all_in_commitment`，不重新归约经济或 NAV。账户身份、Ledger 条目序号、平台来源前缀、本地前缀、available_through 与报告 cutoff / durable_noe / pending_count 分列；不同位置域不能相减或证明任意 NOE 被消费。
+
+来源配置可只包含 NOE，报告 / 元数据 / 公共记录继续各自可选：
+
+```json
+{"runs":[{"label":"写入方明确交接的 NOE","noe_results":[{"label":"原返回引用","version":"v4","reference_file":"artifacts/noe-returned-reference.json"}]}]}
+```
+
+引用文件必须是原写入方 `PublishedNoeCommitV1::result_references()` 返回的 `NoeResultReferenceV1`，含 commit_container / record_ordinal；引用没有载荷版本，配置明确选择 `v1` / `v2` / `v3` / `v4`。浏览器仅请求配置索引 `GET /api/runs/{key}/noe/{index}`，不能指定任意路径。启动只列配置项，不读取引用或容器；未知版本不阻止其他来源启动。按需调用对应 `read_noe_result_v1` 至 `v4`，不 fallthrough、不扫描或按 prefix / 目录猜引用，不调用恢复器。未知版本、版本不匹配、损坏、缺上下文和 ordinal 越界由该项独立失败；原 reader 的失败信息保留，不修复原文件。
+
+响应薄包装直接序列化原 `context` / `boundary` / `record`，JSON 数字按现有精确边界转文本；这是原读取器解码记录，不是容器原字节。账户、合同、实现、发布 UTC、水位、源位置及请求 / 子项 / 订单 / 成交身份沿原字段下钻。真实记录变体原样保留，不把 Evidence / EconomicFact / EconomicFactV2 / Duplicate / EconomicAlias / Pending / Conflict 统一叫成交或经济应用。与报告同账户、同配置、时间相邻，甚至报告 pending_count=0，都不证明该条已被该报告 Ledger 消费。没有报告时界面标明 NOE 独立来源，不伪造公共流、策略参与或账户运行。
+
+服务只保留最近一份单引用响应，包括失败响应供最近项重试；不缓存全历史或第二份完整 JSON。界面保持当前已加载引用跨视图，组件重渲染不重读，读取其他项属于新的显式读取。同容器不同 ordinal 仍分别调用原接口、解码整容器，没有自动逐条批读。`reference_json_bytes_read` 是实际 reference JSON 读取长度；`container_file_bytes` 仅文件 metadata 长度，非 syscall / 物理 I/O。`native_read_attempts` 与累计 `native_read_calls_total` 是原接口调用次数；`native_read_and_dto_us` 包括原读取 / 解码和薄 DTO 转换，`load_elapsed_us` 截止完整响应编码之前。底层 I/O / 分配字节未测为 null，不把每条记录大小冒充读取成本。
+
+复现有限工程验证（均要求新生成目录）：
+
+```bash
+cargo run -p visualization --example noe_evidence --locked --offline -- .local-artifacts/visualization/noe-example
+cargo run -p visualization --example execution_projection --locked --offline -- .local-artifacts/visualization/ledger-display-example
+cargo test -p visualization --test noe_read --locked --offline
+TRACE_PROCESSOR="$TP" node visualization/ui/tests/execution-browser.mjs .local-artifacts/visualization/noe-example/sources.json .local-artifacts/visualization/ledger-display-example/sources.json .local-artifacts/visualization/synthetic-example/sources.json .local-artifacts/visualization/execution-check
+```
+
+NOE example 用原 NormalizationCore 与 StagedNormalizationWriter::create / stage / stabilize 保存发布回调的原引用：v4 主例加 v1–v3 共四个小容器、24 条真实返回引用，每版本 6 条原序记录；全部是工程接线，非策略研究。Ledger example 从真实开账 NOE、预留、发送、平台确认和待定成交入口产生投影；外层 JSON 只是独立展示边界，明确非 backtest 生产报告，不能当研究运行或真实消费历史。
+
+初版 Chrome 实测：24 配置无自动 NOE 请求，显式验证 v4 六变体及 v1–v3 共 9 项；跨视图已加载项零重读，服务端最近项重试原调用数不变。v4 工程容器 11528 字节（仅编码文件规模），本次九项解码+DTO读数 1205–1503μs，原引用 JSON 300 字节；成功完整 HTTP 响应约 3.5–4.7KB，数字随工程目录文本和实测时长而变，非速度 / 容量门。初版未测单引用原接口分配或物理 I/O；本次补齐的有限首读/最近重试见下节，仍不从小容器推断大规模成本。前端构建 JS 1020.18KB / gzip335.26KB、CSS26.06KB / gzip5.52KB；原大 bundle 提示保留。
+
+Chrome 也验证 typed 投影的提交前账户 2项/5.5 pUSD、未知1项/2.2、确认待应用1项/3.3本金与0.03费用，占用仍3.3/0.03；开放订单和待定成交各1，投影-only第二市场原本金4.4且原路径不变。旧63行范围 / 9 DOM / 选择 / 取消恢复 / 多窗 / 播放零网络，以及非对称Maker/Taker / 资产置换、精确金额、官方Perfetto 4点均继续通过。页首增加折叠事实格后，旧浏览器金额断言按实际可见事实格定位，避免误抓折叠的来源条。固定根回归退出0，具名 UTC 依赖测试 four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second 明确跳过。
+
+
+### 来源一致性与已加载 NOE 原时钟
+
+Ledger 工程生成器不运行 backtest，因此删除原展示包装伪造的 `RangeEnd` 与 `economics_version`。配置显式使用 `report_kind: "engineering_ledger_projection"`，只读精确 JSON，界面标明 Ledger 工程投影 / 非宿主报告，导出也分别记录 engineering_projection_source。省略 report_kind 的真实历史宿主报告仍默认 historical_backtest，沿原经济版本 / end_reason 校验和 backtest 展示；不修改生产报告类型。
+
+只映射当前已加载 NOE 的原 v1–v4 DTO 明确路径：发布可用边界、DirectResponse 响应/本地接收、生命周期平台事件/反馈接收；Evidence/Pending 的原载荷、Conflict.conflicting_evidence、EconomicFact/V2 的 fact.source_reference 和经济生效；Duplicate 本次与 original_source_reference 分开，Alias 只保留本次不追读。载荷中 TradeV2/V3 原 matched、Accepted 原有效处理、Economic/V2 原转移生效、AutoRedeem 原判定源事件进入有限时间线。SettlementV2.Resolved 本身没有活动 UTC；归属日、编码到期、保留边界留在原详情，不补事件。容器边界没有市场；其他点仅沿自身原载荷明确 condition。
+
+所有点保留 `/noe/{index}/exact/...`、原整数文本、版本、原 NoeResultReference、context_reference、水位及原身份，不塞公共关联键、不推断被报告 Ledger 消费。边界卡选择只导出边界点，记录卡只选 record 子树，叶字段只选对应点。切换成功引用替换旧点并清旧 NOE 选择，非 NOE 选择保留；失败清旧点，切来源立即隐藏旧引用并拒绝旧异步结果（包括 A→B→A）。浏览跨导航、选点和导出不新增 NOE 请求。时间以 BigInt 精确映射微秒，只有 instant，不补 span/flow；图的近似位移与原精确时间分开。
+
+实际 Chrome / 官方 Trace Processor：工程 Evidence 原发布 `1788840000002`、响应 `1788840000000`、接收 `1788840000001` 为三个点。边界/记录/叶下载分别 1/2/1 条 slice，官方纳秒分别为 `1788840000002000000`、`1788840000000000000–1788840000001000000`、`1788840000000000000`，原 args 和字段路径独立核对。Duplicate 5 点、Pending/Conflict 3 点；无 UTC 的开户/别名载荷仅保留 1 个发布边界点。失败/未知、引用替换、跨来源旧异步回填与非 NOE 选择保持经 Chrome 检查。
+
+`noe_clock_evidence` 另用原 typed 核心/writer生成 6 条合法有限时钟工程记录，再从原版本化 reader 取得 DTO。纯展示适配验证 Control 有效处理、TradeV2/TradeV3 matched、EconomicFact/V2 生效、Settlement 判定源事件；相同毫秒不同字段不合并，负 `-3`、逆序与 `9007199254740993` ms 精确转换。超大时间只验证原文本/微秒序列化，未声称官方纳秒存储能容纳所有 i64 毫秒。
+
+```bash
+cargo run -p visualization --example noe_clock_evidence --locked --offline -- "$NEW_CLOCK_DIR"
+node visualization/ui/tests/noe-points.mjs "$NEW_CLOCK_DIR/decoded.json" "$BROWSER_OUT/execution-browser-results.json"
+```
+
+### NOE 单引用有限成本
+
+[完整有限读数](docs/noe-read-cost-20261004.json) 和 [测量代码补丁](docs/noe-read-cost-code-20261004.patch) 对应原 v4 工程容器（6 条记录）的单个原返回引用。新进程 NoeResults 首读一次，再同实例 load 同 index 重试一次；没有提前读取该引用内容、自动逐 ordinal 读或全容器历史扫描。production NoeResults 仅添加旁路 getter 记录完整编码一次的耗时/Bytes 长度，数字不回填响应造成重复编码；最近重试 getter 保留首读值，不能当新增成本。线上 allocator / 底层 I/O 仍为 null。
+
+本次 debug + strace/allocator 探针首读：原引用 300 B、context 1050 B、容器 11528 B、同名 manifest 254 B；来源 read 21 次返回 55265 B（引用2/300、context2/1050、Parquet15/53661、manifest2/254，含 EOF，pread/readv 无调用），属于 syscall 返回累计而非唯一文件/物理字节。成功分配820次、累计请求265614 B，live请求795→4915 B、绝对峰值61182 B、相对开始峰值60387 B；口径沿上文示例 allocator，非RSS。/proc物理read_bytes增量0，未清OS缓存，不能说没有读/解码。首读 probe完整load1977µs、native读取/解码/DTO合并1712µs、一次完整响应编码74µs/3580 B；含strace与allocator原子计数，不能作为生产速度。
+
+最近重试返回同 Bytes 内容与地址，成功分配/累计请求/峰值增量均0，来源 syscall / native reader /完整编码新增均0；缓存响应内 native_cost 是首读原值。Chrome 单次点击→详情DOMready→两帧，以及已加载时间线DOMready→两帧和HTTP Resource Timing/响应bytes/3点记录在摘要；包含网络、解析、React、调度与自动化动作，非CPU处理耗时。前端构建 JS1026.47 kB（gzip337.07），CSS26.06 kB（gzip5.52），既有bundle提示保留；不设新性能门或扩大实验。
+
+```bash
+cargo build -p visualization --bin visualization --example noe_read_cost --locked --offline
+# BIN为本构建debug/examples/noe_read_cost；SOURCES为原noe_evidence配置，v4 Evidence在index2。
+strace -yy -e trace=read,pread64,readv,write -o "$OUT/noe.strace" "$BIN" "$SOURCES" > "$OUT/noe.jsonl"
+python3 visualization/examples/noe_read_cost_io.py "$OUT/noe.strace" "$SOURCES" > "$OUT/noe-io.json"
+```
+
+解析器只统计该原引用及其明确 context/container/同名 manifest 四个文件；manifest 路径沿 v4 read_commit 的 with_extension("manifest.json") 固定规则，不扫描目录，不套用公共材料文件范围。原始strace/原工程配置在忽略目录中，不公开私有路径；公开摘要保留逻辑来源、基准头+准确可复现测量补丁及binary哈希；该补丁包含本次Rust读取层变化与最小探针，从记录的旧头应用可复现测量代码，当前树可直接运行。单次缓存条件/小容器结果不代表冷盘、真实研究、大容器或所有版本性能。本次统计纠正使用同一已保存 strace 重算，补齐原路径必读 manifest 的2次 read/254 B；未重新运行负载、清缓存或重复根回归。既有固定根回归在实际纳入372bd168基准的本轮组合退出0，具名UTC依赖测试明确跳过；独立Rust/Python工作区不由此推断覆盖。

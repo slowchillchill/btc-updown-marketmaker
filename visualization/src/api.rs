@@ -1,7 +1,11 @@
 use crate::query::{BatchMatcher, BrowseQuery};
 use crate::{
-    dto::{Snapshot, SourcesConfig, exact_json},
-    sources::{backtest::load_document, public_recording::PublicPages},
+    dto::{ReportSourceKind, Snapshot, SourcesConfig, exact_json},
+    sources::{
+        backtest::{load_document, load_engineering_projection},
+        noe::NoeResults,
+        public_recording::PublicPages,
+    },
 };
 use axum::{
     Router,
@@ -21,13 +25,19 @@ pub struct Run {
     snapshot: Bytes,
     public: Option<Mutex<PublicPages>>,
     public_status: Value,
+    noe: Mutex<NoeResults>,
 }
 pub type AppState = Arc<Vec<Run>>;
 pub fn load_sources(config: SourcesConfig) -> Result<AppState, serde_json::Error> {
     let mut runs = Vec::new();
     for (index, config) in config.runs.into_iter().enumerate() {
         eprintln!("读取来源 {index}：报告/元数据/显式公共前缀");
-        let report = load_document(config.report.as_deref(), true);
+        let report = match config.report_kind {
+            ReportSourceKind::HistoricalBacktest => load_document(config.report.as_deref(), true),
+            ReportSourceKind::EngineeringLedgerProjection => {
+                load_engineering_projection(config.report.as_deref())
+            }
+        };
         let metadata = load_document(config.metadata.as_deref(), false);
         let (public, public_status) = match config.public_recording.as_ref() {
             None => (
@@ -42,13 +52,16 @@ pub fn load_sources(config: SourcesConfig) -> Result<AppState, serde_json::Error
                 ),
             },
         };
+        let noe = NoeResults::new(config.noe_results);
         let snapshot = Snapshot {
             label: config.label.clone(),
             report,
+            report_kind: config.report_kind,
             metadata,
             public_recording: public_status.clone(),
+            noe_results: noe.index(),
             gaps: vec![
-                "NOE 历史：尚无稳定引用来源与安全枚举，未接入",
+                "NOE 历史：无安全枚举/批读；显式原引用可按需独立读取",
                 "Ledger 历史：尚无独立耐久纯读接口，未接入",
                 "策略逐次诊断与经济历史：原报告未保存，未接入",
                 "训练/MLflow、PAPER/LIVE、独立评价：未接入",
@@ -59,6 +72,7 @@ pub fn load_sources(config: SourcesConfig) -> Result<AppState, serde_json::Error
             snapshot: serde_json::to_vec(&snapshot)?.into(),
             public,
             public_status,
+            noe: Mutex::new(noe),
         });
     }
     Ok(Arc::new(runs))
@@ -69,7 +83,27 @@ pub fn router(state: AppState) -> Router {
         .route("/api/runs/{run}/snapshot", get(snapshot))
         .route("/api/runs/{run}/public", get(public))
         .route("/api/runs/{run}/public-query", get(public_query))
+        .route("/api/runs/{run}/noe/{index}", get(noe))
         .with_state(state)
+}
+
+async fn noe(State(state): State<AppState>, Path((run, index)): Path<(usize, usize)>) -> Response {
+    if state.get(run).is_none() {
+        return error(StatusCode::NOT_FOUND, "来源未在显式配置中");
+    }
+    match tokio::task::spawn_blocking(move || {
+        state[run]
+            .noe
+            .lock()
+            .map_err(|e| e.to_string())?
+            .load(index)
+    })
+    .await
+    {
+        Ok(Ok(body)) => json_response(StatusCode::OK, body),
+        Ok(Err(detail)) => error(StatusCode::NOT_FOUND, detail),
+        Err(error_message) => error(StatusCode::INTERNAL_SERVER_ERROR, error_message.to_string()),
+    }
 }
 
 async fn public_query(
