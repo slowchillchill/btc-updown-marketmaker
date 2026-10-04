@@ -313,6 +313,13 @@ pub struct PublicRecordingReaderV1 {
     cursor: Option<RunCursor>,
     batch_rows: usize,
     max_batch_bytes: usize,
+    next_segment_index: usize,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RecordingRowLocation {
+    pub segment_index: usize,
+    pub row_group: usize,
+    pub row_in_group: u64,
 }
 impl PublicRecordingReaderV1 {
     /// 冷恢复入口；调用方先结束原写入方，不能用于并发发现尚未返回的发布。
@@ -416,18 +423,39 @@ impl PublicRecordingReaderV1 {
             cursor: None,
             batch_rows,
             max_batch_bytes,
+            next_segment_index: 0,
         })
     }
     pub fn root(&self) -> &Path {
         &self.root
     }
     pub fn next_row(&mut self) -> RecordingResult<Option<PublicStoredRowV1>> {
+        Ok(self.next_row_with_location()?.map(|(row, _)| row))
+    }
+    // 候选状态在首次页请求打开原reader时取一次；没有新稳定视图或全文件扫描。
+    pub(crate) fn segment_paths(&self) -> Vec<PathBuf> {
+        self.segments
+            .as_slice()
+            .iter()
+            .map(|(path, _)| path.join("captured.parquet"))
+            .collect()
+    }
+    pub(crate) fn next_row_with_location(
+        &mut self,
+    ) -> RecordingResult<Option<(PublicStoredRowV1, RecordingRowLocation)>> {
         loop {
             if let Some(cursor) = &mut self.cursor {
-                if let Some(row) = cursor.next_row()? {
+                if let Some((row, position)) = cursor.next_row_with_position()? {
                     let row: PublicStoredRowV1 = serde_json::from_slice(row.payload())?;
                     self.observe(&row)?;
-                    return Ok(Some(row));
+                    return Ok(Some((
+                        row,
+                        RecordingRowLocation {
+                            segment_index: self.next_segment_index - 1,
+                            row_group: position.row_group,
+                            row_in_group: position.row_in_group,
+                        },
+                    )));
                 }
             }
             if let Some(expected) = self.segment_prefix.take() {
@@ -449,6 +477,7 @@ impl PublicRecordingReaderV1 {
                 self.batch_rows,
                 self.max_batch_bytes,
             )?);
+            self.next_segment_index += 1;
         }
     }
     fn observe(&mut self, row: &PublicStoredRowV1) -> RecordingResult<()> {

@@ -292,7 +292,7 @@ pub(crate) fn config() -> GateAOutputConfig {
     config.max_artifact_payload_bytes = 1 << 19;
     config
 }
-fn end(position: u64) -> RecordedIngressV1 {
+pub(crate) fn end(position: u64) -> RecordedIngressV1 {
     RecordedIngressV1 {
         input_stream_id: "core-test".into(),
         input_position: position,
@@ -300,7 +300,7 @@ fn end(position: u64) -> RecordedIngressV1 {
         dependency_record_refs: vec![],
     }
 }
-fn apply(
+pub(crate) fn apply(
     core: &mut PublicObservationCoreV1,
     input: &RecordedIngressV1,
 ) -> PublicAppliedIngressV1<'static> {

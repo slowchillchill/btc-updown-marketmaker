@@ -16,6 +16,10 @@ use std::{
 #[path = "public_replay_cost.rs"]
 pub(crate) mod cost;
 
+#[path = "finite_reference_candidates.rs"]
+mod finite_reference_candidates;
+use finite_reference_candidates::{CandidateQuery, FiniteReferenceCandidates};
+
 /// 新历史准备的实际排序版本；旧记录仍按其流头和已记录原序重放。
 pub const HISTORICAL_SOURCE_HEAD_ORDERING_VERSION: &str = "historical-source-head-v2";
 
@@ -251,6 +255,7 @@ pub struct PublicReplayV1 {
     pub core: PublicObservationCoreV1,
     page_rows: usize,
     page_bytes: usize,
+    candidates: Option<FiniteReferenceCandidates>,
 }
 impl PublicReplayV1 {
     pub fn open(root: &Path, page_rows: usize, page_bytes: usize) -> RecordingResult<Self> {
@@ -261,6 +266,7 @@ impl PublicReplayV1 {
             core,
             page_rows,
             page_bytes,
+            candidates: None,
         })
     }
     pub fn next_applied(
@@ -284,6 +290,8 @@ impl PublicReplayV1 {
         let entry = cost::EntryGuard::new(self.core.applied_prefix().next_input_position);
         #[cfg(test)]
         let mut drain = cost::Span::new("main_drain");
+        #[cfg(test)]
+        let _decode = cost::DecodeScope::new("main_drain");
         while let Some(row) = self.reader.next_row()? {
             #[cfg(test)]
             drain.row(&row);
@@ -316,7 +324,13 @@ impl PublicReplayV1 {
                 #[cfg(test)]
                 dependency_span.complete();
                 let result = if let Some(market) = target {
+                    #[cfg(test)]
                     let mut page_reader = None;
+                    let mut query = CandidateQuery::default();
+                    let candidates = &mut self.candidates;
+                    let prefix = self.reader.prefix.clone();
+                    let rows = self.page_rows;
+                    let bytes = self.page_bytes;
                     #[cfg(test)]
                     let prepare_span = cost::Span::new("prepare");
                     let prepared = prepare_public_ingress_with_reference_v1(
@@ -327,16 +341,36 @@ impl PublicReplayV1 {
                         &market,
                         |cursor| {
                             (|| -> RecordingResult<_> {
-                                if page_reader.is_none() {
-                                    page_reader = Some(ReferenceCandidateReaderV1::open(
+                                #[cfg(test)]
+                                if cost::original_candidates() {
+                                    if page_reader.is_none() {
+                                        page_reader = Some(ReferenceCandidateReaderV1::open(
+                                            &root, rows, bytes, cutoff,
+                                        )?);
+                                    }
+                                    return page_reader.as_mut().unwrap().page(cursor);
+                                }
+                                if candidates.is_none() {
+                                    *candidates = Some(FiniteReferenceCandidates::open(
                                         &root,
-                                        self.page_rows,
-                                        self.page_bytes,
-                                        cutoff,
+                                        prefix.clone(),
+                                        rows,
+                                        bytes,
                                     )?);
                                 }
-                                page_reader.as_mut().unwrap().page(cursor)
+                                candidates
+                                    .as_mut()
+                                    .unwrap()
+                                    .page(&mut query, cursor, cutoff)
                             })()
+                            .inspect(|(values, next, exhausted)| {
+                                #[cfg(test)]
+                                cost::candidate_page_evidence(
+                                    values, cursor, *next, cutoff, *exhausted,
+                                );
+                                #[cfg(not(test))]
+                                let _ = (values, next, exhausted);
+                            })
                             .map_err(|e| {
                                 data_pipeline_core::ContractError::InvalidField {
                                     field: "reference_page".into(),
@@ -418,6 +452,8 @@ fn read_historical_identity_sources(
     let mut members = batch.rows.iter();
     #[cfg(test)]
     let mut scan = cost::ScanGuard::new("identity_scan", None, None, true);
+    #[cfg(test)]
+    let _decode = cost::DecodeScope::new("identity_scan");
     let mut reader = PublicRecordingReaderV1::recover(root, rows, bytes)?;
     #[cfg(test)]
     scan.opened();
@@ -512,6 +548,8 @@ pub fn read_dependencies(
     }
     #[cfg(test)]
     let mut scan = cost::ScanGuard::new("dependency_scan", None, None, true);
+    #[cfg(test)]
+    let _decode = cost::DecodeScope::new("dependency_scan");
     let mut reader = PublicRecordingReaderV1::recover(root, rows, bytes)?;
     #[cfg(test)]
     scan.opened();
@@ -583,6 +621,8 @@ impl ReferenceCandidateReaderV1 {
         TemporaryReferenceCursorV1,
         bool,
     )> {
+        #[cfg(test)]
+        let _decode = cost::DecodeScope::new("original_candidate");
         #[cfg(test)]
         let mut scan = cost::ScanGuard::new(
             "candidate_page",

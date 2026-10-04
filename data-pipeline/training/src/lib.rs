@@ -2004,6 +2004,12 @@ impl<W: Write> Write for QuotaWriter<W> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RunRowPosition {
+    pub row_group: usize,
+    pub row_in_group: u64,
+}
+
 pub(crate) struct RunCursor {
     path: PathBuf,
     metadata: ArrowReaderMetadata,
@@ -2012,6 +2018,7 @@ pub(crate) struct RunCursor {
     batch: std::vec::IntoIter<SortRow>,
     batch_rows: usize,
     max_batch_bytes: usize,
+    row_in_group: u64,
 }
 
 impl RunCursor {
@@ -2021,7 +2028,16 @@ impl RunCursor {
         max_batch_bytes: usize,
     ) -> Result<Self, SortError> {
         let file = File::open(path)?;
+        #[cfg(test)]
+        let metadata_started = public_replay::cost::decode_clock();
         let metadata = ArrowReaderMetadata::load(&file, Default::default())?;
+        #[cfg(test)]
+        if public_replay::cost::decode_enabled() {
+            public_replay::cost::decoded_metadata(
+                metadata.metadata().memory_size(),
+                metadata_started.unwrap().elapsed().as_nanos(),
+            );
+        }
         Ok(Self {
             path: path.to_path_buf(),
             metadata,
@@ -2030,6 +2046,7 @@ impl RunCursor {
             batch: Vec::new().into_iter(),
             batch_rows,
             max_batch_bytes,
+            row_in_group: 0,
         })
     }
 
@@ -2040,6 +2057,9 @@ impl RunCursor {
         }
         let row_group_index = self.next_row_group;
         self.next_row_group += 1;
+        self.row_in_group = 0;
+        #[cfg(test)]
+        let group_started = public_replay::cost::decode_clock();
         self.reader = Some(
             ParquetRecordBatchReaderBuilder::new_with_metadata(
                 File::open(&self.path)?,
@@ -2049,13 +2069,34 @@ impl RunCursor {
             .with_batch_size(self.batch_rows)
             .build()?,
         );
+        #[cfg(test)]
+        public_replay::cost::decoded_row_group(group_started.map_or(0, |s| s.elapsed().as_nanos()));
         Ok(true)
     }
 
     pub(crate) fn next_row(&mut self) -> Result<Option<SortRow>, SortError> {
+        Ok(self.next_row_with_position()?.map(|(row, _)| row))
+    }
+
+    // 仅改变本游标的物理起点；位置来自原reader已验证的同一稳定记录。
+    pub(crate) fn start_row_group(&mut self, row_group: usize) {
+        self.next_row_group = row_group;
+        self.reader = None;
+        self.batch = Vec::new().into_iter();
+        self.row_in_group = 0;
+    }
+
+    pub(crate) fn next_row_with_position(
+        &mut self,
+    ) -> Result<Option<(SortRow, RunRowPosition)>, SortError> {
         loop {
             if let Some(row) = self.batch.next() {
-                return Ok(Some(row));
+                let position = RunRowPosition {
+                    row_group: self.next_row_group - 1,
+                    row_in_group: self.row_in_group,
+                };
+                self.row_in_group += 1;
+                return Ok(Some((row, position)));
             }
             let Some(reader) = self.reader.as_mut() else {
                 if self.open_next_row_group()? {
@@ -2063,9 +2104,12 @@ impl RunCursor {
                 }
                 return Ok(None);
             };
+            #[cfg(test)]
+            let batch_started = public_replay::cost::decode_clock();
             match reader.next() {
                 Some(batch) => {
-                    let rows = rows_from_batch(&batch?)?;
+                    let batch = batch?;
+                    let rows = rows_from_batch(&batch)?;
                     let observed = rows
                         .iter()
                         .try_fold(0usize, |total, row| total.checked_add(row.resident_bytes()));
@@ -2074,6 +2118,15 @@ impl RunCursor {
                             observed: observed.unwrap_or(usize::MAX),
                             limit: self.max_batch_bytes,
                         });
+                    }
+                    #[cfg(test)]
+                    if public_replay::cost::decode_enabled() {
+                        public_replay::cost::decoded_batch(
+                            rows.len(),
+                            observed.unwrap(),
+                            batch.get_array_memory_size(),
+                            batch_started.unwrap().elapsed().as_nanos(),
+                        );
                     }
                     self.batch = rows.into_iter();
                 }
