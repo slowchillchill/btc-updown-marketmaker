@@ -315,12 +315,38 @@ impl PublicReplayV1 {
                 identity_span.complete();
                 #[cfg(test)]
                 let dependency_span = cost::Span::new("dependencies");
-                let deps = read_dependencies(
-                    &root,
-                    &input.dependency_record_refs,
-                    self.page_rows,
-                    self.page_bytes,
-                )?;
+                let deps = if input.dependency_record_refs.is_empty() {
+                    vec![]
+                } else {
+                    #[cfg(test)]
+                    let original = cost::original_dependencies();
+                    #[cfg(not(test))]
+                    let original = false;
+                    if original {
+                        read_dependencies(
+                            &root,
+                            &input.dependency_record_refs,
+                            self.page_rows,
+                            self.page_bytes,
+                        )?
+                    } else {
+                        if self.candidates.is_none() {
+                            self.candidates =
+                                Some(FiniteReferenceCandidates::open_for_dependencies(
+                                    &root,
+                                    self.reader.prefix.clone(),
+                                    self.page_rows,
+                                    self.page_bytes,
+                                )?);
+                        }
+                        self.candidates
+                            .as_mut()
+                            .unwrap()
+                            .dependencies(&input.dependency_record_refs)?
+                    }
+                };
+                #[cfg(test)]
+                cost::dependency_evidence(&input.dependency_record_refs, &deps);
                 #[cfg(test)]
                 dependency_span.complete();
                 let result = if let Some(market) = target {

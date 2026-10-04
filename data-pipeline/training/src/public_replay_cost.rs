@@ -158,6 +158,10 @@ pub(crate) struct Report {
     progress: ProgressCounts,
     candidate_pages: Vec<serde_json::Value>,
     candidate_page_evidence_ns: u128,
+    dependency_outputs: Vec<serde_json::Value>,
+    dependency_evidence_ns: u128,
+    #[serde(skip)]
+    original_dependencies: bool,
     #[serde(skip)]
     original_candidates: bool,
     #[serde(skip)]
@@ -192,12 +196,33 @@ impl Session {
             r.last_progress = r.began;
         });
     }
+    pub(crate) fn dependency_mode(&self, original: bool) {
+        STATE.with(|s| s.borrow_mut().as_mut().unwrap().original_dependencies = original);
+    }
     pub(crate) fn finish(self) -> Report {
         STATE.with(|s| s.borrow_mut().take().unwrap())
     }
 }
 pub(crate) fn original_candidates() -> bool {
     STATE.with(|s| s.borrow().as_ref().is_some_and(|r| r.original_candidates))
+}
+pub(crate) fn original_dependencies() -> bool {
+    STATE.with(|s| s.borrow().as_ref().is_some_and(|r| r.original_dependencies))
+}
+pub(crate) fn dependency_evidence(
+    refs: &[CanonicalInputRecordRefV1],
+    values: &[CanonicalReferenceEventV2],
+) {
+    if refs.is_empty() {
+        return;
+    }
+    STATE.with(|s| {
+        if let Some(r) = s.borrow_mut().as_mut().filter(|r| r.capture_pages) {
+            let at = Instant::now();
+            r.dependency_outputs.push(serde_json::json!({"context":r.current.as_ref().map(|e|&e.context),"requested_refs":refs,"values":values}));
+            r.dependency_evidence_ns += at.elapsed().as_nanos();
+        }
+    });
 }
 pub(crate) fn known_total(prefix: Option<&CommittedIngressPrefixV1>) {
     STATE.with(|s| {
@@ -568,7 +593,9 @@ impl ScanGuard {
                         "candidate_page" if r.original_candidates => {
                             r.progress.original_candidate_validated_rows += 1
                         }
-                        "dependency_scan" => r.progress.dependency_validated_rows += 1,
+                        "dependency_scan" | "dependency_index_validation" => {
+                            r.progress.dependency_validated_rows += 1
+                        }
                         _ => {}
                     }
                 }
@@ -660,7 +687,7 @@ pub(crate) fn report_value(report: Report) -> serde_json::Value {
     let mut value = serde_json::to_value(report).unwrap();
     value["prepare_remaining_ns"] = serde_json::json!(prepare_ns as i128 - candidate_ns as i128);
     value["retention"] = serde_json::json!({"scan_descriptors":"first 128 actual scan/open/page invocations; total by kind and omitted count retained","scan_by_input":"all actually scanning Input positions with per-kind counts/rows/time; no per-row payload","slow_entries":"16 slowest whole entry calls; total and omitted count retained"});
-    value["time_accounting"] = serde_json::json!({"primary":PRIMARY,"residual":"signed entry total minus non-overlapping primary spans; no zero clamp","nested":"candidate_open/candidate_page are contained in prepare and must not be added to primary; scan elapsed is a subset, not extra primary time","overhead":"clock checks and local counting are inside this test diagnosis; bookkeeping at scope destruction falls within enclosing span or residual; overhead not independently isolated","twap_encountered":"original candidate_page counts decoded TWAP before filtering; indexed candidate_index_validation counts validated TWAP and indexed candidate_page counts selected body rows only; cached index visits have no full body decode","decode_cost":"metadata/row-group/successful batch spans are contained in candidate page or validation/open calls, not additional primary time; batch includes Arrow decode and SortRow materialization plus test size accounting; failed loads/batches stay in enclosing original-error spans","size_accounting":"Parquet memory_size is its estimated allocation including shared-pointer double counts, not RSS; Arrow and SortRow maximum refer to one successful batch, not process or all-reader sum","candidate_evidence":"all successful pages retain complete canonical fact/anchor/ref and cursor/cutoff; projection time is inside prepare_remaining, not independent production latency; progress emission cost is inside its caller and separately reported, never added again"});
+    value["time_accounting"] = serde_json::json!({"primary":PRIMARY,"residual":"signed entry total minus non-overlapping primary spans; no zero clamp","nested":"candidate_open/candidate_page are contained in prepare and must not be added to primary; scan elapsed is a subset, not extra primary time","overhead":"clock checks and local counting are inside this test diagnosis; bookkeeping at scope destruction falls within enclosing span or residual; overhead not independently isolated","twap_encountered":"original candidate_page counts decoded TWAP before filtering; indexed candidate_index_validation counts validated TWAP and indexed candidate_page counts selected body rows only; cached index visits have no full body decode","decode_cost":"metadata/row-group/successful batch spans are contained in candidate page or validation/open calls, not additional primary time; batch includes Arrow decode and SortRow materialization plus test size accounting; failed loads/batches stay in enclosing original-error spans","size_accounting":"Parquet memory_size is its estimated allocation including shared-pointer double counts, not RSS; Arrow and SortRow maximum refer to one successful batch, not process or all-reader sum","dependency_evidence":"nonempty saved-ref requests retain all complete returned Reference events, including empty result; projection time is inside dependencies; validation/locating scan spans are nested there, not additive primary time", "candidate_evidence":"all successful pages retain complete canonical fact/anchor/ref and cursor/cutoff; projection time is inside prepare_remaining, not independent production latency; progress emission cost is inside its caller and separately reported, never added again"});
     value
 }
 pub(crate) fn reader_prefix(replay: &PublicReplayV1) -> Option<CommittedIngressPrefixV1> {

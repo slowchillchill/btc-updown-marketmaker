@@ -13,6 +13,8 @@ struct DiagnosticConfig {
     purpose: String,
     #[serde(default)]
     original_candidate_reader: bool,
+    #[serde(default)]
+    original_dependency_reader: bool,
     #[serde(default = "progress_interval")]
     progress_interval_seconds: u64,
 }
@@ -167,6 +169,7 @@ fn diagnose(c: &DiagnosticConfig) -> (Value, RecordingResult<()>) {
         c.progress_interval_seconds,
         true,
     );
+    session.dependency_mode(c.original_dependency_reader);
     cost::progress("open", true);
     let mut summary = Summary::default();
     let mut hash = HashWriter::default();
@@ -267,6 +270,7 @@ fn configured(root: &Path) -> DiagnosticConfig {
         initialization_input_positions: vec![],
         purpose: "有效小夹具计量一致及原错验证".into(),
         original_candidate_reader: false,
+        original_dependency_reader: false,
         progress_interval_seconds: 0,
     }
 }
@@ -323,8 +327,13 @@ fn enabled_and_disabled_complete_results_match_and_empty_refs_still_scan_candida
         assert_eq!(d["negative_residual_entries"], 0);
         assert_eq!(d["primary"]["identity"]["calls"], 4);
         assert!(d["scan_totals"]["identity_scan"].is_null());
+        let open_kind = if window == 60 {
+            "dependency_index_open"
+        } else {
+            "candidate_open"
+        };
         assert!(
-            d["scan_totals"]["candidate_open"]["open_successes"]
+            d["scan_totals"][open_kind]["open_successes"]
                 .as_u64()
                 .unwrap()
                 > 0
@@ -344,8 +353,14 @@ fn enabled_and_disabled_complete_results_match_and_empty_refs_still_scan_candida
             assert!(d["scan_totals"]["dependency_scan"].is_null());
         } else {
             assert_eq!(refs, 1);
-            assert_eq!(d["scan_totals"]["dependency_scan"]["open_successes"], 1);
-            assert_eq!(d["scan_totals"]["dependency_scan"]["matched_records"], 1);
+            assert_eq!(
+                d["scan_totals"]["dependency_index_open"]["open_successes"],
+                1
+            );
+            assert_eq!(
+                d["scan_totals"]["dependency_location"]["matched_records"],
+                1
+            );
         }
     }
 }
@@ -378,11 +393,11 @@ fn original_reader_error_keeps_partial_spans_and_report_error_cannot_replace_it(
         2
     );
     assert_eq!(
-        report["internal"]["scan_totals"]["dependency_scan"]["completed"],
+        report["internal"]["scan_totals"]["dependency_index_validation"]["completed"],
         0
     );
     assert!(
-        report["internal"]["scan_totals"]["dependency_scan"]["rows"]
+        report["internal"]["scan_totals"]["dependency_index_validation"]["rows"]
             .as_u64()
             .unwrap()
             > 0
@@ -441,5 +456,97 @@ fn original_and_indexed_complete_results_and_full_candidate_pages_match() {
         }
         session.finish();
         assert_eq!(original, complete_returns(&root, false).0);
+    }
+}
+
+#[test]
+fn original_and_shared_dependencies_keep_complete_returns_pages_and_output() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("public");
+    reference_fixture(&root, 60);
+    let mut c = configured(&root);
+    c.original_dependency_reader = true;
+    let (old, result) = diagnose(&c);
+    result.unwrap();
+    c.original_dependency_reader = false;
+    let (new, result) = diagnose(&c);
+    result.unwrap();
+    for field in [
+        "summary",
+        "actual_reader_prefix",
+        "applied_prefix",
+        "fixed_identity_time_quality_sha256",
+    ] {
+        assert_eq!(old[field], new[field]);
+    }
+    for field in ["candidate_pages", "dependency_outputs"] {
+        assert_eq!(old["internal"][field], new["internal"][field]);
+    }
+    assert_eq!(
+        new["internal"]["dependency_outputs"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        new["internal"]["dependency_outputs"][0]["values"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        new["candidate_state_before_release"]["validation_eof"],
+        true
+    );
+    assert!(new["internal"]["scan_totals"]["candidate_index_validation"].is_null());
+    let session = cost::Session::enable();
+    session.dependency_mode(true);
+    let mut replay = PublicReplayV1::open(&root, 1, 1 << 20).unwrap();
+    let mut old_full = vec![];
+    while let Some((i, a, pm)) = replay.next_prepared_applied().unwrap() {
+        old_full.push(json!({"input":i,"complete_applied":fingerprint(&a),"prepared_pm_message":pm.as_ref().map(|p|p.message())}));
+    }
+    session.finish();
+    assert_eq!(old_full, complete_returns(&root, false).0);
+}
+
+#[test]
+fn saved_ref_early_match_bad_eof_fails_before_apply_in_both_modes() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("public");
+    reference_fixture(&root, 60);
+    let mut c = configured(&root);
+    let mut prefix = c.expected_normal_prefix.clone();
+    prefix.next_canonical_position += 1;
+    fs::write(
+        root.join(&prefix.stable_storage_ref).join("prefix.json"),
+        serde_json::to_vec(&prefix).unwrap(),
+    )
+    .unwrap();
+    let mut original_error = None;
+    for original in [true, false] {
+        c.original_dependency_reader = original;
+        let (report, result) = diagnose(&c);
+        let error = result.unwrap_err().to_string();
+        assert_eq!(error, "稳定分片内容与前缀计数不符");
+        if let Some(previous) = &original_error {
+            assert_eq!(&error, previous);
+        }
+        original_error = Some(error);
+        assert_eq!(report["summary"]["inputs"], 2);
+        assert_eq!(report["applied_prefix"]["next_input_position"], 2);
+        assert_eq!(report["normal_end_observed"], false);
+        assert!(
+            report["internal"]["dependency_outputs"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            report["internal"]["last_entry"]["context"]["input_position"],
+            2
+        );
     }
 }

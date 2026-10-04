@@ -32,8 +32,6 @@ impl CandidateQuery {
         rows: usize,
         bytes: usize,
     ) -> RecordingResult<PublicStoredRowV1> {
-        #[cfg(test)]
-        let _decode = cost::DecodeScope::new("candidate_location");
         if self
             .located
             .as_ref()
@@ -72,13 +70,40 @@ impl FiniteReferenceCandidates {
     ) -> RecordingResult<Self> {
         #[cfg(test)]
         let mut scan = cost::ScanGuard::new("candidate_open", None, None, true);
-        let frontier = PublicRecordingReaderV1::open_committed(root, prefix, rows, bytes)?;
-        let paths = frontier.segment_paths();
+        let result = Self::open_inner(root, prefix, rows, bytes)?;
         #[cfg(test)]
         {
             scan.opened();
             scan.complete(0, None, None);
         }
+        Ok(result)
+    }
+
+    pub(super) fn open_for_dependencies(
+        root: &Path,
+        prefix: Option<CommittedIngressPrefixV1>,
+        rows: usize,
+        bytes: usize,
+    ) -> RecordingResult<Self> {
+        #[cfg(test)]
+        let mut scan = cost::ScanGuard::new("dependency_index_open", None, None, true);
+        let result = Self::open_inner(root, prefix, rows, bytes)?;
+        #[cfg(test)]
+        {
+            scan.opened();
+            scan.complete(0, None, None);
+        }
+        Ok(result)
+    }
+
+    fn open_inner(
+        root: &Path,
+        prefix: Option<CommittedIngressPrefixV1>,
+        rows: usize,
+        bytes: usize,
+    ) -> RecordingResult<Self> {
+        let frontier = PublicRecordingReaderV1::open_committed(root, prefix, rows, bytes)?;
+        let paths = frontier.segment_paths();
         Ok(Self {
             frontier,
             paths,
@@ -87,6 +112,92 @@ impl FiniteReferenceCandidates {
             rows,
             bytes,
         })
+    }
+
+    // 所有用途都由原reader解析/observe并验证原稳定EOF；只将已验证位置纳入索引。
+    fn advance(&mut self) -> RecordingResult<Option<PublicStoredRowV1>> {
+        let Some((row, location)) = self.frontier.next_row_with_location()? else {
+            self.eof = true;
+            return Ok(None);
+        };
+        if let PublicStoredRowV1::Canonical {
+            binding,
+            record: CanonicalEventRecordV2::ReferenceEvent(event),
+            ..
+        } = &row
+        {
+            self.index.push(IndexedReference {
+                input_position: binding.position.closed_at_input_position,
+                location,
+                twap: matches!(
+                    event.payload,
+                    CanonicalReferenceEventPayloadV2::ChainlinkBtcUsdTwap(_)
+                ),
+            });
+            #[cfg(test)]
+            cost::index_size(
+                self.index.len(),
+                self.index.capacity(),
+                std::mem::size_of::<IndexedReference>(),
+            );
+        }
+        Ok(Some(row))
+    }
+
+    pub(super) fn dependencies(
+        &mut self,
+        refs: &[CanonicalInputRecordRefV1],
+    ) -> RecordingResult<Vec<CanonicalReferenceEventV2>> {
+        if refs.is_empty() {
+            return Ok(vec![]);
+        }
+        // 早处命中/异流/缺失均不能豁免首次非空请求的完整EOF责任。
+        #[cfg(test)]
+        let mut validation = cost::ScanGuard::new("dependency_index_validation", None, None, false);
+        while !self.eof {
+            #[cfg(test)]
+            let _decode = cost::DecodeScope::new("dependency_index_validation");
+            if let Some(row) = self.advance()? {
+                #[cfg(test)]
+                validation.row(&row);
+                #[cfg(not(test))]
+                let _ = row;
+            }
+        }
+        #[cfg(test)]
+        validation.complete(0, None, Some(true));
+        let mut query = CandidateQuery::default();
+        let mut output = vec![];
+        #[cfg(test)]
+        let mut locate = cost::ScanGuard::new("dependency_location", None, None, false);
+        // observe已逐条保证binding流身份等于header流身份；不重复存储字符串。
+        let stream = &self.frontier.header.input_stream_id;
+        for entry in &self.index {
+            if !refs
+                .iter()
+                .any(|r| r.input_stream_id == *stream && r.input_position == entry.input_position)
+            {
+                continue;
+            }
+            #[cfg(test)]
+            let _decode = cost::DecodeScope::new("dependency_location");
+            let row = query.load(&self.paths, entry.location, self.rows, self.bytes)?;
+            #[cfg(test)]
+            locate.row(&row);
+            let PublicStoredRowV1::Canonical {
+                record: CanonicalEventRecordV2::ReferenceEvent(event),
+                ..
+            } = row
+            else {
+                return Err("已验证参考位置的规范记录类型不符".into());
+            };
+            output.push(event);
+            #[cfg(test)]
+            locate.matched();
+        }
+        #[cfg(test)]
+        locate.complete(output.len(), None, Some(true));
+        Ok(output)
     }
 
     pub(super) fn page(
@@ -124,33 +235,11 @@ impl FiniteReferenceCandidates {
                 while query.ordinal == self.index.len() && !self.eof {
                     #[cfg(test)]
                     let _decode = cost::DecodeScope::new("candidate_index_validation");
-                    match self.frontier.next_row_with_location()? {
-                        None => self.eof = true,
-                        Some((row, location)) => {
-                            #[cfg(test)]
-                            validation.row(&row);
-                            if let PublicStoredRowV1::Canonical {
-                                binding,
-                                record: CanonicalEventRecordV2::ReferenceEvent(event),
-                                ..
-                            } = row
-                            {
-                                self.index.push(IndexedReference {
-                                    input_position: binding.position.closed_at_input_position,
-                                    location,
-                                    twap: matches!(
-                                        event.payload,
-                                        CanonicalReferenceEventPayloadV2::ChainlinkBtcUsdTwap(_)
-                                    ),
-                                });
-                                #[cfg(test)]
-                                cost::index_size(
-                                    self.index.len(),
-                                    self.index.capacity(),
-                                    std::mem::size_of::<IndexedReference>(),
-                                );
-                            }
-                        }
+                    if let Some(row) = self.advance()? {
+                        #[cfg(test)]
+                        validation.row(&row);
+                        #[cfg(not(test))]
+                        let _ = row;
                     }
                 }
                 #[cfg(test)]
@@ -167,6 +256,8 @@ impl FiniteReferenceCandidates {
             if entry.input_position < cursor.next_input_position || !entry.twap {
                 continue;
             }
+            #[cfg(test)]
+            let _decode = cost::DecodeScope::new("candidate_location");
             let row = query.load(&self.paths, entry.location, self.rows, self.bytes)?;
             #[cfg(test)]
             page.row(&row);
@@ -372,6 +463,121 @@ mod tests {
         assert_eq!(
             state.page(&mut query, a.1, 3).err().unwrap().to_string(),
             error
+        );
+    }
+    fn dependency_ref(position: u64) -> CanonicalInputRecordRefV1 {
+        CanonicalInputRecordRefV1 {
+            input_stream_id: "core-test".into(),
+            input_position: position,
+        }
+    }
+    #[test]
+    fn saved_dependencies_keep_all_types_order_duplicates_missing_and_future_cutoff() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("public");
+        fixture(&root);
+        let mut state = indexed(&root, 1);
+        assert!(state.dependencies(&[]).unwrap().is_empty());
+        assert!(state.index.is_empty());
+        assert!(!state.eof);
+        let mut foreign = dependency_ref(0);
+        foreign.input_stream_id = "another-stream".into();
+        let refs = vec![
+            dependency_ref(2),
+            dependency_ref(0),
+            dependency_ref(1),
+            dependency_ref(0),
+            foreign,
+            dependency_ref(99),
+        ];
+        let old = read_dependencies(&root, &refs, 1, 1 << 20).unwrap();
+        let new = state.dependencies(&refs).unwrap();
+        assert_eq!(
+            serde_json::to_value(&old).unwrap(),
+            serde_json::to_value(&new).unwrap()
+        );
+        assert_eq!(new.len(), 4);
+        assert!(!matches!(
+            new[1].payload,
+            CanonicalReferenceEventPayloadV2::ChainlinkBtcUsdTwap(_)
+        ));
+        assert!(state.eof);
+        // 已验证未来事实仍不能穿越候选cutoff，包括非TWAP越界和恰满页。
+        for cutoff in [0, 1, 2, 3] {
+            let mut query = CandidateQuery::default();
+            let mut old = ReferenceCandidateReaderV1::open(&root, 1, 1 << 20, cutoff).unwrap();
+            let mut c = cursor(0);
+            loop {
+                let a = old.page(c).unwrap();
+                assert_eq!(
+                    projected((a.0.clone(), a.1, a.2)),
+                    projected(state.page(&mut query, c, cutoff).unwrap())
+                );
+                if a.2 {
+                    break;
+                }
+                c = a.1;
+            }
+        }
+        let missing = [dependency_ref(99)];
+        assert!(state.dependencies(&missing).unwrap().is_empty());
+    }
+    #[test]
+    fn candidate_success_then_early_dependency_match_still_exposes_bad_tail() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("public");
+        fixture(&root);
+        corrupt_input_two(&root, &temp.path().join("rewrite"));
+        let mut state = indexed(&root, 1);
+        let page = state
+            .page(&mut CandidateQuery::default(), cursor(0), 0)
+            .unwrap();
+        assert_eq!(page.0.len(), 1);
+        assert!(!state.eof);
+        let refs = [dependency_ref(0)];
+        let old = read_dependencies(&root, &refs, 1, 1 << 20)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(state.dependencies(&refs).unwrap_err().to_string(), old);
+    }
+    #[test]
+    fn early_dependency_match_does_not_hide_eof_count_error() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("public");
+        fixture(&root);
+        let mut prefix = PublicRecordingReaderV1::recover(&root, 1, 1 << 20)
+            .unwrap()
+            .prefix
+            .unwrap();
+        prefix.next_canonical_position += 1;
+        fs::write(
+            root.join(&prefix.stable_storage_ref).join("prefix.json"),
+            serde_json::to_vec(&prefix).unwrap(),
+        )
+        .unwrap();
+        let refs = [dependency_ref(0)];
+        let old = read_dependencies(&root, &refs, 1, 1 << 20)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(old, "稳定分片内容与前缀计数不符");
+        let mut state = indexed(&root, 1);
+        assert_eq!(state.dependencies(&refs).unwrap_err().to_string(), old);
+        assert!(!state.eof);
+    }
+
+    #[test]
+    fn same_input_multiple_reference_members_are_not_collapsed() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("public");
+        crate::public_recording::tests::historical_identity_fixture(&root);
+        let refs = [dependency_ref(2), dependency_ref(2), dependency_ref(90)];
+        let old = read_dependencies(&root, &refs, 1, 1 << 20).unwrap();
+        let mut state = indexed(&root, 1);
+        let new = state.dependencies(&refs).unwrap();
+        assert_eq!(new.len(), 2);
+        assert_eq!(
+            serde_json::to_value(old).unwrap(),
+            serde_json::to_value(new).unwrap()
         );
     }
 }

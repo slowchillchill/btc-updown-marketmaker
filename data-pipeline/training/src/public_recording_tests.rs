@@ -1114,12 +1114,11 @@ fn source_without_admission_uses_original_reception_not_payload_time_or_file_ord
     assert_eq!(times, vec![(21000, 22100), (22000, 21900)]);
 }
 
-#[test]
-fn replay_historical_original_identity_keys_preserve_all_members() {
-    let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("recording");
+pub(crate) fn historical_identity_fixture(
+    root: &Path,
+) -> Vec<(RecordedIngressV1, serde_json::Value)> {
     let mut core = core();
-    let mut writer = PublicRecordingWriterV1::create(&root, core.header(), config()).unwrap();
+    let mut writer = PublicRecordingWriterV1::create(root, core.header(), config()).unwrap();
     let mut expected = Vec::new();
     let mut other = metadata_snapshot_row();
     other.condition_id = format!("0x{}", "2".repeat(64));
@@ -1206,6 +1205,13 @@ fn replay_historical_original_identity_keys_preserve_all_members() {
     expected.push((input.clone(), fingerprint(&result)));
     writer.record(input, result).unwrap();
     writer.stabilize().unwrap();
+    expected
+}
+#[test]
+fn replay_historical_original_identity_keys_preserve_all_members() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("recording");
+    let expected = historical_identity_fixture(&root);
     for page in [1, 4] {
         let session = (page == 4).then(crate::public_replay::cost::Session::enable);
         let mut replay = PublicReplayV1::open(&root, page, 1 << 20).unwrap();
