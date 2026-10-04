@@ -36,6 +36,9 @@ use sha2::{Digest, Sha256};
 
 use crate::ValidatedDirectSourceParquetFileV3;
 
+#[path = "typed_raw_byte_window.rs"]
+mod byte_window;
+
 #[cfg(test)]
 #[path = "zero_source_tests.rs"]
 mod zero_source_tests;
@@ -2553,7 +2556,28 @@ pub(crate) fn open_parquet_with_decoder<Row>(
             source,
         })?;
 
-    let builder = ParquetRecordBatchReaderBuilder::try_new(opened).map_err(|error| {
+    stream_with_chunk_reader(
+        file,
+        batch_size,
+        scope,
+        max_physical_batch_bytes,
+        schema,
+        decode,
+        byte_window::WindowedFile::new(opened),
+    )
+}
+
+fn stream_with_chunk_reader<Row, R: parquet::file::reader::ChunkReader + 'static>(
+    file: ParquetInputFacts<'_>,
+    batch_size: usize,
+    scope: Option<TypedRawReadScope>,
+    max_physical_batch_bytes: Option<usize>,
+    schema: fn(&str, &str) -> Result<SchemaRef, TypedRawReadError>,
+    decode: DecodeBatch<Row>,
+    reader: R,
+) -> Result<TypedRawParquetStream<Row>, TypedRawReadError> {
+    let path = file.path.to_path_buf();
+    let builder = ParquetRecordBatchReaderBuilder::try_new(reader).map_err(|error| {
         TypedRawReadError::Parquet {
             path: path.clone(),
             batch_index: None,

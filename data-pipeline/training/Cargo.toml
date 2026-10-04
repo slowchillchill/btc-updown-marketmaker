@@ -5,6 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
+bytes = "=1.12.0"
 arrow-array = { version = "=59.0.0", default-features = false }
 arrow-ord = { version = "=59.0.0", default-features = false }
 arrow-schema = { version = "=59.0.0", default-features = false }

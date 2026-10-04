@@ -30,6 +30,12 @@ Arrow 排序只构造实际排序键列，按返回的置换移动已有行；�
 
 离线 sequential capture 在成功写入批次后累计逻辑摘要和输出行数；后台 public recording 沿现有 `defer_batch_sync`/`close_segment` 流程，不维护无消费者的离线摘要。实际写入、关闭和稳定边界同步错误仍传播；`fadvise` 及仅为该建议打开文件的失败不再拒绝产出。该建议不构成缓存释放或内存上界保证。本轮不改持久格式，也不以取消自产重读代替真实读取入口的解析职责。
 
+TypedRaw Parquet 仍先以原打开的 `File` 完成长度与 SHA 校验，然后在 Arrow 供数侧为该文件共用一个 64KiB 字节窗口。`get_read` 保留独立逻辑位置及原默认 8KiB `BufReader`；`get_bytes` 返回自持有的字节，超窗请求直接读同一文件。短预取不要求填满窗口，真实请求不足沿原 EOF/错误传播。文件 reader 销毁后释放窗口，不跨文件或两遍共享，不改变 schema/footer、物理批次、逐行解码与范围筛选。
+
+切换文件时可能短暂同时存在两个窗口，128KiB 仅指窗口增量；各返回 Read 的 8KiB 缓冲、原 SHA 缓冲、Arrow 页、返回 Bytes 与批次分别占用内存，不构成进程 RSS 上界。仅测试内计量实际文件读取次数/返回字节，生产不增加逐页诊断或新的准入门。
+
+所属[十二分钟材料验收](docs/typed-raw-byte-window-12m.md)仅运行一次原材料试制：完整trial业务比较与两遍物理工作量保持，合并475.669秒对历史495.617秒；读请求量／次数明显降低但整体仅约4%时点差异，不外推稳定加速或全研究预算。
+
 ## 离线产物构建、发布与读取
 
 `dpt-gate-a build --manifest <清单> --condition-id <市场> --received-start-utc-ms <开始> --received-end-utc-ms <结束> --candidate-dir <新目录>` 构建显式市场/时间范围；`--manifest` 可重复。`dpt-gate-a publish --candidate-dir <已有候选> --output-dir <目标目录>` 同步文件并以 `NOREPLACE` 重命名发布。输入只取调用者明确列出的 manifest：读取一次，以头部 `utc_day` 和文件条目的来源/schema/hour/part 为事实，从清单父目录定位列出文件。目录和文件可改名、改变层级；不要求个人数据根、日期下限或目录闭集，未列出的旁文件不参与输入。合法历史日期不会自动被选中，市场和时间范围仍由调用者给出，日历/小时换算与实际文件解码仍按真实消费执行。
