@@ -38,6 +38,8 @@ TypedRaw Parquet 仍先以原打开的 `File` 完成长度与 SHA 校验，然�
 
 历史范围筛选对六类 Existing 和 Metadata V6 Existing 复用 core 的原来源 parts 提取与同一个语义校验，只返回原接收时间，省去筛选中不用的最终消息身份 JSON／SHA 和 RefV3 装配。parts 的拥有型字段、metadata 定位摘要和 RTDS 原载荷摘要仍保留；AnchorRule、TWAP、历史修复走原完整来源构造。校验 Err 仍按 `unwrap_or(true)` 保留原行，后遍正式来源构造继续承担原错误，不能按裸时间丢弃窗口外的缺源事件时间 PM 行。文件准入、两遍完整解码和入选行的正式身份／排序不变。
 
+所属[范围筛选十二分钟验收](docs/received-time-filter-12m.md)只运行一次原材料试制：完整trial业务差异0，两遍完整物理量保持；合并445.432秒对历史475.669秒，仅跨版本／共享缓存时点约6.357%差异，不是稳定倍率或全研究预算。
+
 
 ## 离线产物构建、发布与读取
 
