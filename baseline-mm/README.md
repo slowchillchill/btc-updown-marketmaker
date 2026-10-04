@@ -73,3 +73,5 @@ Chainlink 与两个资产盘口是新增配对的依赖。Binance 只按实际�
 候选只使用各scope窗内合法消息：接收间隔的接收/可见端点均在窗内，可见event年龄也按该窗采样；窗前末次事实只支撑连续时钟分类，跨窗间隔不进拟合，尾段单独披露。每scope独立沿原ceil秩生成最多16对，不混合PM资产或采用共用正式阈值；没有合法样本明确不能形成候选。初始化、非目标市场、目标窗前/窗后观察分母分别保存，不以所有市场观察数替代来源样本。
 
 本轮十二分钟投入和准确九scope由[#185当前M1—M5](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)固定；只读原record至正常End/EOF，单次真实运行，30分钟/2GiB RSS/512MiB研究输出为本段监控界，非生产默认。公共writer合成夹具使用本地目录；构建、回归、真实测量串行，失败或超界留证交主会话，不自动扩额度或复跑。
+
+既有十二分钟材料的两目标市场、四PM资产及五个辅助scope结果见[中文市场来源健康报告](docs/research/complementary-pair-market-source-health-20260909-0000-0012.md)和[完整分源JSON](docs/research/complementary-pair-market-source-health-20260909-0000-0012.json)。该报告独立列各scope窗口/未知证据、116对描述性候选及一次运行的版本与资源；TWAP30无样本保持未知，候选未采纳为正式健康参数。
