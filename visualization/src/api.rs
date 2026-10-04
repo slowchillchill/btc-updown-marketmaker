@@ -26,7 +26,7 @@ pub fn load_sources(config: SourcesConfig) -> Result<AppState, serde_json::Error
     let mut runs = Vec::new();
     for (index, config) in config.runs.into_iter().enumerate() {
         eprintln!("读取来源 {index}：报告/元数据/显式公共前缀");
-        let report = load_document(Some(&config.report), true);
+        let report = load_document(config.report.as_deref(), true);
         let metadata = load_document(config.metadata.as_deref(), false);
         let (public, public_status) = match config.public_recording.as_ref() {
             None => (

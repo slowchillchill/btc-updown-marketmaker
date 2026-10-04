@@ -1,6 +1,6 @@
 # 公共业务事实浏览器
 
-本包提供单 Rust 只读 HTTP 服务和 React 浏览界面，消费显式指定的历史报告、可选启动元数据及可选公共稳定记录。合同入口为 [C 路线 #215](https://github.com/slowchillchill/btc-updown-marketmaker/issues/215)。公共模块不依赖本包。
+本包提供单 Rust 只读 HTTP 服务和 React 浏览界面，消费显式指定的可选历史报告、可选启动元数据及可选公共稳定记录。合同入口为 [C 路线 #215](https://github.com/slowchillchill/btc-updown-marketmaker/issues/215)。公共模块不依赖本包。
 
 报告通过 JSON 浏览：`backtest::HistoricalRunReportV1` 当前只有 `Serialize`，本包不另建完整领域模式，也不修改生产报告类型。已知 `account_economics_v2` 与原结束原因可以显示已有终态和有限时序；未知版本保留原 JSON 并停止对应语义解释。JSON 语法读取成功不代表领域完整性或研究验收。
 
@@ -42,7 +42,13 @@ cargo run -p visualization --locked --offline -- sources.json 127.0.0.1:4317 vis
 }
 ```
 
-`metadata`、`public_recording` 均可省略。报告、元数据、公共记录独立显示读取结果；缺元数据不阻断报告浏览。`committed_prefix` 文件须包含写入方已经返回的一个 `CommittedIngressPrefixV1` 对象。它是已有凭据的显式交接，不是新记录合同。不能由浏览器扫描目录寻找最新前缀；不能把存在的后续分片自动提升为可读范围。
+`report`、`metadata`、`public_recording` 均可省略。报告、元数据、公共记录独立显示读取结果；缺报告/元数据不阻断公共页，损坏的文档也不影响合法公共来源。只配置公共流时保留相同布局位置，宿主条显示公共历史材料、原 `input_stream_id`、固定前缀与已读范围，不断言存在 backtest 运行、策略或账户：
+
+```json
+{"runs":[{"label":"显式公共历史材料","public_recording":{"root":"artifacts/public","committed_prefix":"artifacts/prefix.json","page_rows":100,"max_batch_bytes":1048576}}]}
+```
+
+`committed_prefix` 文件须包含写入方已经返回的一个 `CommittedIngressPrefixV1` 对象。它是已有凭据的显式交接，不是新记录合同。不能由浏览器扫描目录寻找最新前缀；不能把存在的后续分片自动提升为可读范围。
 
 `page_rows` 与 `max_batch_bytes` 是直接传给所属读取接口的批次参数，上例仅为用法示例，不是业务容量或性能门槛。非零参数才能使读取推进。
 
@@ -60,9 +66,15 @@ cargo run -p visualization --locked --offline -- sources.json 127.0.0.1:4317 vis
 
 ## 总览、经济与有限范围
 
-七类导航共用运行、账户、查看市场及字段选择。切换视图保留原证据；换运行清除旧运行选择。查看市场属于浏览选择，没有策略当前活跃市场来源时不猜首项。八卡及箭头说明架构职责；卡内另标本次可读证据，架构边全静态。真实策略身份来自启动元数据，同位人工策略/模型位置不代表样例使用 `baseline-mm` 或训练模型。NOE 通过 `shared-run::apply_closed` 协调执行登记和尝试 Ledger 应用；即时分派回程与完整成交分开。
+七类导航共用原来源身份、已提供的运行/账户、查看市场及字段选择。切换视图保留原证据；换运行清除旧运行选择。查看市场属于浏览选择，没有策略当前活跃市场来源时不猜首项。八卡及箭头说明架构职责；卡内另标本次可读证据，架构边全静态。真实策略身份来自启动元数据，同位人工策略/模型位置不代表样例使用 `baseline-mm` 或训练模型。NOE 通过 `shared-run::apply_closed` 协调执行登记和尝试 Ledger 应用；即时分派回程与完整成交分开。
 
 经济页读取原报告的现金、各市场/资产剩余成功份额和本金成本、配对/孤腿、结算应收、费用、各返佣阶段、NAV/WCM 和生命周期。已执行份额/本金/实际费用的 `executed[0/1]` 是 Maker/Taker 角色累计，独立展示并保留原引用；它不提供按 UP/DOWN 的执行分解。资产按原 `assets.outcome.label` 关联 UP/DOWN，映射缺失或不唯一时不猜数组顺序。`success_principal_cost_pusd` 保持所属 Ledger 的剩余成功本金口径；已判定市场的剩余成本与结算应收分别展示。Maker 归属现金不再加到实际总现金；预计/未付返佣不当到账现金。未判定剩余成本仅显示原两项成本的带标签加法表达，不重新归约、估值或计算 NAV。每个事实字段可点击原路径；来源更新时间和账户范围来自报告的观察截止 / 账本可读截止与身份，不假定全部已观察 NOE 都已入账。
+
+公共市场选项来自报告的明确市场、当前公共页的原市场字段与明确保留选择；不从全局参考或时间邻近推断市场，不声称覆盖未读范围。原流、输入位置、规范位置、事件/消息身份、组与观察位置、消费流步骤身份均保留。关联按钮仅按原流与原位置/事件/消息身份寻找当前页或用户保留的记录；越出该范围则显示目标未读缺口，不替换邻居或重开游标。选择一个新对象后只保留该对象，不维护隐式全历史缓存。
+
+公共映射按现有类型分支读取：Input 的 Existing、V6 Existing/AnchorRule 与历史补查批次；Canonical 的 PolymarketMessage、MarketFact、ReferenceEvent。`time`、`direct_time`、`dependency_time` 分开显示，ReferenceEvent 的市场仅取市场参考 payload 的真实 `market`，全局 TWAP/行情参考保持无市场。AnchorRule 的请求开始、HTTP 接收与源计算字段按原口径显示；历史补查的响应接收、身份证据就绪、生效时间保持分开，原响应 UTC 文本与全部原字段仍可回查。历史 HTTP 实体没有查询起点时不补起点或查询耗时。Group/Observation、PmStepBinding、SourceBinding 及两类归约报告提供原引用下钻；没有自身时间字段的索引记录不借邻近记录制造时间点。
+
+当前页与明确保留事实的可证时间进入有限时间线。原存储顺序不按时间重排，同毫秒不同组及倒退时间不合并；点的原身份和引用也写入 Perfetto args。保留的旧页事实可单独导出其自身时间；完整记录仍取原 rows，不在浏览器重放公共归约。
 
 公共表格消费当前已读顺序页原 `rows`，没有第二套权威事件模式。已知 `Input` 来源接收/原事件时间、`Canonical` 直接时间和报告的观察、计算、调度、提交及账本截止用于有限时间点展示；未适配的记录仍可查原值，不推定没有时间或市场。选择时间范围只筛当前可读页及已保存报告点，不读取未定位历史。没有明确 condition 的账户级点不能凭时间猜市场；没有端点不补持续时间。宿主计算区间差值注明派生调度时序，负值保留，不能当 CPU/网络实测。
 
@@ -107,3 +119,17 @@ npm --prefix visualization/ui run test:browser -- .local-artifacts/visualization
 快照响应报告各来源读取/解码次数、字节量和启动读取时间；报告仅读取/解析一次并缓存编码响应。公共页报告读取器打开次数、`next_page` 调用次数、返回量、原行 JSON 编码时间和大小。打开阶段由所属接口枚举显式公共目录并读取前缀元数据，后续页沿同一游标解码；最近页重试直接复用编码响应。底层 I/O 字节、分配和完整响应序列化时间未由公共读取接口提供，响应明确保留未测量；不能以返回条数替代这些成本或宣称通过生产性能验收。浏览器测试另打印小型合成负载的实际公共页 HTTP 响应次数/字节和整个联调耗时；联调耗时包括截图和官方解析，不等于单帧渲染或接口性能。
 
 HTTP 使用 [Axum](https://docs.rs/axum/0.8.9/axum/) 与 [tower-http ServeDir](https://docs.rs/tower-http/0.6.11/tower_http/services/struct.ServeDir.html)，前端使用 [React](https://react.dev/learn) 与 [Vite](https://vite.dev/guide/)。本切片按实际功能使用 [React Flow 自定义节点](https://reactflow.dev/learn/customization/custom-nodes)、[ECharts 散点图](https://echarts.apache.org/handbook/en/how-to/chart-types/scatter/basic-scatter/) 和 [TanStack Table v8](https://tanstack.com/table/v8/docs/guide/column-defs)。经济终态没有历史曲线；有限多时钟只画已知点。Rust 依赖锁在根 `Cargo.lock`，前端使用一份 `package-lock.json`；构建和依赖目录被忽略。
+
+## 公共独立入口验证
+
+`cargo run -p visualization --example public_evidence --locked --offline -- /new/engineering-public` 通过所属 `PublicObservationCoreV1` 与 `PublicRecordingWriterV1` 生成有限合法材料及已返回前缀，覆盖 V6、市场/全局参考、同毫秒不同组、源时间倒退和两市场历史补查。它仅验证展示，不是策略运行或研究结果。
+
+构建服务与前端后可执行：
+
+```bash
+TRACE_PROCESSOR=/path/to/trace_processor node visualization/ui/tests/public-browser.mjs /authorized/real-sources.json /new/engineering-public/sources.json /ignored/screenshots
+```
+
+真实来源由调用者准确交接，不扫描目录寻找材料。真实五分钟初始化公共材料的公开来源证明见 [研究材料交接说明](../baseline-mm/docs/research/complementary-pair-material-trial-initialized-20260909-0000-0005.md) 与同名 JSON；它提供公共输入，不提供策略账户结果。当前实测每页 100 行、只推进两页：同一 reader 打开 1 次 / next_page 2 次，rows JSON 为 137999 B 与 114449 B；重试返回最近响应，旧页请求不推进。Chrome 验证公共独立身份、实际 V6 市场及原引用，底层 I/O 和分配未测。
+
+合法有限材料为 8 输入、17 规范记录、7 组、63 存储行，导出 80 个点；官方 Trace Processor 读取得到 80 slice，纳秒范围 9990000000 至 1788840000123000000，两条历史生效 args 的原 UTC ms 为 20000。浏览器检查每个点与引用都能回查原字段，覆盖区间/市场过滤、未读目标缺口、保留选择的 3 个原时间点导出。`SKIP_REAL_PUBLIC=1` 仅供重复检查合法变体时跳过已经验证的真实读页；默认仍验证真实来源。已有报告/经济 Chrome 回归继续适用。数值均为有限工程验证实测，不设性能门槛，也不表示全部历史或源端依赖已经交付。

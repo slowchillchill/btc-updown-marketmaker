@@ -12,11 +12,13 @@ import {
 import {
   list,
   publicRows,
+  relatedTargets,
   reportPoints,
   rangePoints,
   traceJson,
   text,
   type Evidence,
+  type Point,
 } from "./browse";
 import { Topology } from "./Topology";
 import { Economics, Field, MarketSummary } from "./Economics";
@@ -117,13 +119,41 @@ export default function App() {
     snapshot?.metadata.status === "ready"
       ? (snapshot.metadata.exact ?? undefined)
       : undefined;
-  const markets = list(at(report, "account_economics_memory", "markets"));
+  const reportMarkets = list(at(report, "account_economics_memory", "markets"));
   const account = at(report, "ledger_consumed_memory", "account_instance_key");
   const allRows = useMemo(() => publicRows(page), [page]);
-  const allPoints = useMemo(
-    () => [...reportPoints(report), ...allRows.flatMap((r) => r.points)],
-    [report, allRows],
-  );
+  const stream = text(at(snapshot?.public_recording.header, "input_stream_id"));
+  const publicOnly =
+    !report && !text(at(metadata, "config", "session", "run_id"));
+  const marketIds = [
+    ...new Set([
+      ...reportMarkets.flatMap((m) =>
+        text(at(m, "condition_id")) ? [text(at(m, "condition_id"))!] : [],
+      ),
+      ...allRows.flatMap((r) => r.markets?.map((m) => m.condition) ?? []),
+      ...(selection?.markets?.map((m) => m.condition) ?? []),
+    ]),
+  ];
+  const selectedOutsidePage = condition && !marketIds.includes(condition);
+  const allPoints = useMemo(() => {
+    const current = [
+      ...reportPoints(report),
+      ...allRows.flatMap((r) => r.points),
+    ];
+    const selectedPoint = selection as Partial<Point> | null;
+    const retained =
+      selection?.points ??
+      (typeof selectedPoint?.utcMs === "string" &&
+      typeof selectedPoint.clock === "string"
+        ? [selection as Point]
+        : []);
+    return [
+      ...current,
+      ...retained.filter(
+        (p) => !current.some((c) => c.source === p.source && c.path === p.path),
+      ),
+    ];
+  }, [report, allRows, selection]);
   const rangeValid =
     (!start || /^-?\d+$/.test(start)) &&
     (!end || /^-?\d+$/.test(end)) &&
@@ -137,8 +167,8 @@ export default function App() {
       allRows.filter(
         (r) =>
           (!condition ||
-            r.condition === condition ||
-            r.condition === undefined) &&
+            r.markets?.some((m) => m.condition === condition) ||
+            (!r.markets?.length && r.condition === undefined)) &&
           ((!start && !end) || r.points.some((p) => points.includes(p))),
       ),
     [allRows, points, start, end, condition],
@@ -165,13 +195,50 @@ export default function App() {
       {selection ? (
         <>
           <p>
-            {sourceName(selection.source)} · 运行来源 {run}
+            {sourceName(selection.source)} · 配置来源 {run}
           </p>
           <code>{selection.path || "/"}</code>
-          {condition && selection.condition !== condition && (
-            <p className="gap">
-              无法将此事实直接关联所选市场。保留原证据，不替换身份。
+          {condition &&
+            selection.condition !== condition &&
+            !selection.markets?.some((m) => m.condition === condition) && (
+              <p className="gap">
+                无法将此事实直接关联所选市场。保留原证据，不替换身份。
+              </p>
+            )}
+          {selection.inputStreamId && (
+            <p>
+              公共流 <code>{selection.inputStreamId}</code>
             </p>
+          )}
+          {!!selection.references?.length && (
+            <div className="native-links">
+              <h3>原引用关联 · 当前页 / 保留选择</h3>
+              {selection.references.map((ref, i) => {
+                const targets = relatedTargets(ref, allRows, selection);
+                return (
+                  <div key={i}>
+                    <small>
+                      {ref.label} · {ref.path}
+                    </small>
+                    <code>{JSON.stringify(ref.value)}</code>
+                    {targets.length ? (
+                      targets.map((target) => (
+                        <button
+                          key={target.path}
+                          onClick={() => select(target)}
+                        >
+                          {target.path}
+                        </button>
+                      ))
+                    ) : (
+                      <p className="gap">
+                        目标未在当前页或保留选择中读取；未跳转或替换邻近记录。
+                      </p>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           )}
           <pre>{JSON.stringify(selection.value, null, 2)}</pre>
         </>
@@ -179,7 +246,7 @@ export default function App() {
         <p className="empty">点击卡片、字段或事件引用查原值。</p>
       )}
       <small>
-        查看市场：{condition || "全部报告市场"}
+        查看市场：{condition || "全部已读市场"}
         ；字段选择跨视图保留。公共证据绑定原稳定前缀。
       </small>
     </section>
@@ -187,12 +254,17 @@ export default function App() {
   function download() {
     if (!snapshot || !exportPoints.length) return;
     const payload = traceJson(exportPoints, {
-      run_source_key: run,
-      run_id:
-        at(account, "run_id") ??
-        at(metadata, "config", "session", "run_id") ??
-        null,
-      account_identity: account ?? null,
+      source_key: run,
+      ...(stream ? { input_stream_id: stream } : {}),
+      ...(report || metadata
+        ? {
+            run_id:
+              at(account, "run_id") ??
+              at(metadata, "config", "session", "run_id") ??
+              null,
+            account_identity: account ?? null,
+          }
+        : {}),
       report_source: snapshot.report.source,
       metadata_source: snapshot.metadata.source,
       public_source: snapshot.public_recording,
@@ -401,7 +473,9 @@ export default function App() {
             <p className="eyebrow">公共业务事实浏览器</p>
             <h1>
               {view === "overview"
-                ? "运行总览"
+                ? publicOnly
+                  ? "公共流总览"
+                  : "运行总览"
                 : views.find(([id]) => id === view)?.[1]}{" "}
               <span>原事实 · 可回查</span>
             </h1>
@@ -426,13 +500,19 @@ export default function App() {
         {snapshot && (
           <>
             <div className="run-strip">
-              <b>backtest</b>
+              <b>{report ? "backtest" : "公共历史材料"}</b>
               <span>{snapshot.label}</span>
-              <span>历史入口 · {fact(at(report, "end_reason"))}</span>
-              <span>{fact(at(report, "economics_version"))}</span>
-              <span>计算累计 {fact(at(report, "calculation_count"))}</span>
-              <span>未闭合 {fact(at(report, "unclosed_commitments"))}</span>
-              <span>待 NOE {fact(at(report, "pending_noe_records"))}</span>
+              {publicOnly ? (
+                <span>公共流 · {stream ?? "未交接 input_stream_id"}</span>
+              ) : (
+                <>
+                  <span>历史入口 · {fact(at(report, "end_reason"))}</span>
+                  <span>{fact(at(report, "economics_version"))}</span>
+                  <span>计算累计 {fact(at(report, "calculation_count"))}</span>
+                  <span>未闭合 {fact(at(report, "unclosed_commitments"))}</span>
+                  <span>待 NOE {fact(at(report, "pending_noe_records"))}</span>
+                </>
+              )}
               <span>
                 稳定公共组边界{" "}
                 {fact(
@@ -441,34 +521,56 @@ export default function App() {
               </span>
             </div>
             <div className="identity">
-              <span>
-                运行{" "}
-                <code>
-                  {fact(
-                    at(account, "run_id") ??
-                      at(metadata, "config", "session", "run_id"),
-                  )}
-                </code>
-              </span>
-              <span>
-                账户{" "}
-                <code>
-                  {fact(
-                    at(account, "account_id") ??
-                      at(metadata, "config", "session", "account_id"),
-                  )}
-                </code>
-              </span>
-              <span>
-                策略{" "}
-                <code>
-                  {fact(at(metadata, "config", "strategy", "strategy_id"))}
-                </code>
-              </span>
-              <span>
-                观察截止 UTC ms{" "}
-                <code>{fact(at(report, "last_observed_at_utc_ms"))}</code>
-              </span>
+              {publicOnly ? (
+                <>
+                  <span>
+                    公共流 <code>{stream ?? "未交接"}</code>
+                  </span>
+                  <span>
+                    已读范围{" "}
+                    <code>
+                      {page
+                        ? `[${page.row_start}, ${page.total_returned_rows})`
+                        : "尚未读页"}
+                    </code>
+                  </span>
+                  <span>
+                    报告 / 元数据 {statusLabel[snapshot.report.status]} /{" "}
+                    {statusLabel[snapshot.metadata.status]}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <span>
+                    运行{" "}
+                    <code>
+                      {fact(
+                        at(account, "run_id") ??
+                          at(metadata, "config", "session", "run_id"),
+                      )}
+                    </code>
+                  </span>
+                  <span>
+                    账户{" "}
+                    <code>
+                      {fact(
+                        at(account, "account_id") ??
+                          at(metadata, "config", "session", "account_id"),
+                      )}
+                    </code>
+                  </span>
+                  <span>
+                    策略{" "}
+                    <code>
+                      {fact(at(metadata, "config", "strategy", "strategy_id"))}
+                    </code>
+                  </span>
+                  <span>
+                    观察截止 UTC ms{" "}
+                    <code>{fact(at(report, "last_observed_at_utc_ms"))}</code>
+                  </span>
+                </>
+              )}
               <label>
                 查看市场
                 <select
@@ -476,18 +578,24 @@ export default function App() {
                   value={condition}
                   onChange={(e) => setCondition(e.target.value)}
                 >
-                  <option value="">全部报告市场</option>
-                  {markets.map((m, i) => (
-                    <option key={i} value={text(at(m, "condition_id")) ?? ""}>
-                      {fact(at(m, "condition_id"))}
+                  <option value="">全部已读市场</option>
+                  {marketIds.map((id) => (
+                    <option key={id} value={id}>
+                      {id}
                     </option>
                   ))}
+                  {selectedOutsidePage && (
+                    <option value={condition}>
+                      {condition} · 当前页无来源
+                    </option>
+                  )}
                 </select>
               </label>
             </div>
             <div className="notice">
-              终态快照与有限时序 ·
-              当前来源未保存完整逐次输入、诊断、执行或经济历史。查看市场是浏览选择，不代表策略当前活跃市场。
+              {publicOnly ? "固定公共前缀与有限已读范围" : "终态快照与有限时序"}{" "}
+              ·
+              公共输入按固定前缀和已读范围浏览；报告不代表完整逐次诊断、执行或经济历史。查看市场是浏览选择，不代表策略当前活跃市场。
             </div>
             {snapshot.report.status !== "ready" && (
               <Source title="报告状态" doc={snapshot.report} />
