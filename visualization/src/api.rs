@@ -5,6 +5,7 @@ use crate::{
         backtest::{load_document, load_engineering_projection},
         noe::NoeResults,
         public_recording::PublicPages,
+        research::{ResearchDocument, ResearchQuery},
     },
 };
 use axum::{
@@ -26,6 +27,7 @@ pub struct Run {
     public: Option<Mutex<PublicPages>>,
     public_status: Value,
     noe: Mutex<NoeResults>,
+    research: Mutex<ResearchDocument>,
 }
 pub type AppState = Arc<Vec<Run>>;
 pub fn load_sources(config: SourcesConfig) -> Result<AppState, serde_json::Error> {
@@ -53,9 +55,11 @@ pub fn load_sources(config: SourcesConfig) -> Result<AppState, serde_json::Error
             },
         };
         let noe = NoeResults::new(config.noe_results);
+        let research = ResearchDocument::open(config.research.as_deref());
         let snapshot = Snapshot {
             label: config.label.clone(),
             report,
+            research: research.status(),
             report_kind: config.report_kind,
             metadata,
             public_recording: public_status.clone(),
@@ -73,6 +77,7 @@ pub fn load_sources(config: SourcesConfig) -> Result<AppState, serde_json::Error
             public,
             public_status,
             noe: Mutex::new(noe),
+            research: Mutex::new(research),
         });
     }
     Ok(Arc::new(runs))
@@ -84,6 +89,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/runs/{run}/public", get(public))
         .route("/api/runs/{run}/public-query", get(public_query))
         .route("/api/runs/{run}/noe/{index}", get(noe))
+        .route("/api/runs/{run}/research", get(research))
         .with_state(state)
 }
 
@@ -238,6 +244,29 @@ async fn public(
     {
         Ok(Ok(response)) => json_response(StatusCode::OK, response),
         Ok(Err(detail)) => error(StatusCode::CONFLICT, detail),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+async fn research(
+    State(state): State<AppState>,
+    Path(run): Path<usize>,
+    Query(query): Query<ResearchQuery>,
+) -> Response {
+    if state.get(run).is_none() {
+        return error(StatusCode::NOT_FOUND, "来源未在显式配置中");
+    }
+    match tokio::task::spawn_blocking(move || {
+        state[run]
+            .research
+            .lock()
+            .map_err(|e| e.to_string())?
+            .select(query)
+    })
+    .await
+    {
+        Ok(Ok(body)) => json_response(StatusCode::OK, body),
+        Ok(Err(detail)) => error(StatusCode::UNPROCESSABLE_ENTITY, detail),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
     }
 }

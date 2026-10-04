@@ -67,6 +67,7 @@ async fn production_range_end_report_and_missing_metadata_are_independent_read_o
     let app = router(
         load_sources(SourcesConfig {
             runs: vec![RunSourceConfig {
+                research: None,
                 label: "合成工程验证".into(),
                 report_kind: Default::default(),
                 report: Some(config.result_path.clone()),

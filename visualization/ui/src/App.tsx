@@ -27,6 +27,8 @@ import { Timeline } from "./Timeline";
 import { ExecutionProjection } from "./ExecutionProjection";
 import { NoePanel, useNoe } from "./Noe";
 import { noePoints } from "./noePoints";
+import { ResearchPanel, useResearch } from "./Research";
+import { researchPoints } from "./researchPoints";
 import { SourceIdentity } from "./SourceIdentity";
 import { usePublicBrowse } from "./PublicBrowse";
 const views = [
@@ -120,6 +122,28 @@ export default function App() {
     ready: snapshot?.public_recording.status === "ready",
     onSelect: select,
   });
+  const research = useResearch(run);
+  const researchReady = snapshot?.research?.status === "ready";
+  const loadedResearchPoints = useMemo(
+    () => researchPoints(snapshot?.research, research.loaded),
+    [snapshot?.research, research.loaded],
+  );
+  const selectResearch = (e: Evidence) =>
+    select({
+      ...e,
+      points: loadedResearchPoints.filter(
+        (p) => p.path === e.path || p.path.startsWith(e.path + "/"),
+      ),
+    });
+  const researchPanel =
+    snapshot?.research && snapshot.research.status !== "not_configured" ? (
+      <ResearchPanel
+        key={run}
+        status={snapshot.research}
+        state={research}
+        onSelect={selectResearch}
+      />
+    ) : null;
   const noe = useNoe(run);
   const loadedNoePoints = useMemo(() => noePoints(noe.loaded), [noe.loaded]);
   useEffect(() => {
@@ -156,6 +180,9 @@ export default function App() {
         text(at(m, "condition_id")) ? [text(at(m, "condition_id"))!] : [],
       ),
       ...allRows.flatMap((r) => r.markets?.map((m) => m.condition) ?? []),
+      ...(snapshot?.research?.catalog ?? []).flatMap((m) =>
+        text(at(m, "condition_id")) ? [text(at(m, "condition_id"))!] : [],
+      ),
       ...loadedNoePoints.flatMap((p) => (p.condition ? [p.condition] : [])),
       ...(selection?.markets?.map((m) => m.condition) ?? []),
     ]),
@@ -166,6 +193,7 @@ export default function App() {
       ...reportPoints(report),
       ...allRows.flatMap((r) => r.points),
       ...loadedNoePoints,
+      ...loadedResearchPoints,
     ];
     const selectedPoint = selection as Partial<Point> | null;
     const retained =
@@ -182,7 +210,7 @@ export default function App() {
           !current.some((c) => c.source === p.source && c.path === p.path),
       ),
     ];
-  }, [report, allRows, selection, loadedNoePoints]);
+  }, [report, allRows, selection, loadedNoePoints, loadedResearchPoints]);
   const rangeValid =
     (!start || /^-?\d+$/.test(start)) &&
     (!end || /^-?\d+$/.test(end)) &&
@@ -219,9 +247,11 @@ export default function App() {
         : "历史报告"
       : source === "metadata"
         ? "启动元数据"
-        : source === "noe"
-          ? "NOE 解码记录"
-          : "公共稳定记录";
+        : source === "research"
+          ? "真实历史描述研究"
+          : source === "noe"
+            ? "NOE 解码记录"
+            : "公共稳定记录";
   const evidencePanel = (
     <section className="evidence-panel">
       <h2>所选事实</h2>
@@ -302,7 +332,8 @@ export default function App() {
       engineering_projection_source: engineeringProjection
         ? snapshot.report.source
         : null,
-      report_kind: snapshot.report_kind,
+      report_kind: report ? snapshot.report_kind : null,
+      research_source: snapshot.research,
       metadata_source: snapshot.metadata.source,
       public_source: snapshot.public_recording,
       public_page_range: page
@@ -484,13 +515,15 @@ export default function App() {
             <p className="eyebrow">公共业务事实浏览器</p>
             <h1>
               {view === "overview"
-                ? publicOnly
-                  ? noeOnly
-                    ? "NOE 来源总览"
-                    : "公共流总览"
-                  : engineeringProjection
-                    ? "Ledger 工程投影总览"
-                    : "运行总览"
+                ? researchReady
+                  ? "描述研究总览"
+                  : publicOnly
+                    ? noeOnly
+                      ? "NOE 来源总览"
+                      : "公共流总览"
+                    : engineeringProjection
+                      ? "Ledger 工程投影总览"
+                      : "运行总览"
                 : views.find(([id]) => id === view)?.[1]}{" "}
               <span>原事实 · 可回查</span>
             </h1>
@@ -520,12 +553,16 @@ export default function App() {
                   ? engineeringProjection
                     ? "Ledger 工程投影"
                     : "backtest"
-                  : noeOnly
-                    ? "显式 NOE 引用"
-                    : "公共历史材料"}
+                  : researchReady
+                    ? "真实历史描述研究"
+                    : noeOnly
+                      ? "显式 NOE 引用"
+                      : "公共历史材料"}
               </b>
               <span>{snapshot.label}</span>
-              {engineeringProjection ? (
+              {researchReady ? (
+                <span>原研究范围 · 未运行账户 / 策略决定</span>
+              ) : engineeringProjection ? (
                 <span>原 Ledger 投影 · 非宿主报告 / 策略研究</span>
               ) : publicOnly ? (
                 <span>
@@ -543,19 +580,52 @@ export default function App() {
                 </>
               )}
               <span>
-                {noeOnly ? "显式引用数" : "稳定公共组边界"}{" "}
+                {researchReady
+                  ? "研究目标数"
+                  : noeOnly
+                    ? "显式引用数"
+                    : "稳定公共组边界"}{" "}
                 {fact(
-                  noeOnly
-                    ? snapshot.noe_results.length.toString()
-                    : at(
-                        snapshot.public_recording.prefix,
-                        "next_group_position",
-                      ),
+                  researchReady
+                    ? snapshot.research.targets?.length.toString()
+                    : noeOnly
+                      ? snapshot.noe_results.length.toString()
+                      : at(
+                          snapshot.public_recording.prefix,
+                          "next_group_position",
+                        ),
                 )}
               </span>
             </div>
             <div className="identity">
-              {publicOnly ? (
+              {researchReady ? (
+                <>
+                  <span>
+                    研究原代码{" "}
+                    <code>
+                      {fact(
+                        snapshot.research.summary?.find(
+                          (f) => f.path === "/build_identity/source_commit",
+                        )?.exact,
+                      )}
+                    </code>
+                  </span>
+                  <span>
+                    研究账户运行{" "}
+                    <code>
+                      {fact(
+                        at(
+                          snapshot.research.summary?.find(
+                            (f) => f.path === "/execution",
+                          )?.exact,
+                          "accounts_run",
+                        ),
+                      )}
+                      （原 /execution/accounts_run）
+                    </code>
+                  </span>
+                </>
+              ) : publicOnly ? (
                 <>
                   <span>
                     {noeOnly ? "NOE 来源" : "公共流"}{" "}
@@ -650,13 +720,15 @@ export default function App() {
               onSelect={select}
             />
             <div className="notice">
-              {engineeringProjection
-                ? "原 Ledger 工程投影；非宿主报告 / 策略研究"
-                : noeOnly
-                  ? "显式 NOE 单引用；报告和公共流未接入"
-                  : publicOnly
-                    ? "固定公共前缀与有限已读范围"
-                    : "终态快照与有限时序"}{" "}
+              {researchReady
+                ? "真实首小时描述研究 · 事后标签不回填冻结输入"
+                : engineeringProjection
+                  ? "原 Ledger 工程投影；非宿主报告 / 策略研究"
+                  : noeOnly
+                    ? "显式 NOE 单引用；报告和公共流未接入"
+                    : publicOnly
+                      ? "固定公共前缀与有限已读范围"
+                      : "终态快照与有限时序"}{" "}
               ·
               公共输入按固定前缀和已读范围浏览；报告不代表完整逐次诊断、执行或经济历史。查看市场是浏览选择，不代表策略当前活跃市场。
             </div>
@@ -664,8 +736,16 @@ export default function App() {
               <Source title="Ledger 工程投影来源" doc={snapshot.report} />
             )}
             {!engineeringProjection && snapshot.report.status !== "ready" && (
-              <Source title="报告状态" doc={snapshot.report} />
+              <Source
+                title={
+                  researchReady
+                    ? "账户回测报告状态（独立可选来源）"
+                    : "报告状态"
+                }
+                doc={snapshot.report}
+              />
             )}
+            {view === "overview" && researchPanel}
             {view === "overview" && (
               <>
                 <div className="overview-grid">
@@ -673,6 +753,18 @@ export default function App() {
                     <Topology
                       report={report}
                       engineering={engineeringProjection}
+                      research={
+                        researchReady
+                          ? {
+                              source: "research",
+                              path: "/execution",
+                              value:
+                                snapshot.research.summary?.find(
+                                  (f) => f.path === "/execution",
+                                )?.exact ?? null,
+                            }
+                          : undefined
+                      }
                       metadata={metadata}
                       selection={selection}
                       playback={
@@ -705,7 +797,11 @@ export default function App() {
                       onSelect={select}
                     />
                     <section>
-                      <h2>运行事实 · 终态</h2>
+                      <h2>
+                        {researchReady
+                          ? "账户事实 · 未产生"
+                          : "运行事实 · 终态"}
+                      </h2>
                       {[
                         ["保守 NAV", "conservative_nav_pusd"],
                         ["Maker 最坏情形 NAV", "worst_case_maker_nav_pusd"],
@@ -833,6 +929,7 @@ export default function App() {
                 {evidencePanel}
               </>
             )}
+            {view === "training" && researchPanel}
             {view === "training" && (
               <>
                 <section>
@@ -854,6 +951,7 @@ export default function App() {
                 {evidencePanel}
               </>
             )}
+            {view === "evidence" && researchPanel}
             {view === "evidence" && (
               <>
                 {rangeControls}

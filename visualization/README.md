@@ -1,6 +1,6 @@
 # 公共业务事实浏览器
 
-本包提供单 Rust 只读 HTTP 服务和 React 浏览界面，消费显式指定的可选历史报告、可选启动元数据、可选公共稳定记录及显式 NOE 原返回引用。合同入口为 [C 路线 #215](https://github.com/slowchillchill/btc-updown-marketmaker/issues/215)。公共模块不依赖本包。
+本包提供单 Rust 只读 HTTP 服务和 React 浏览界面，消费显式指定的可选历史报告、可选启动元数据、可选公共稳定记录、显式 NOE 原返回引用及真实历史描述研究 JSON。合同入口为 [C 路线 #215](https://github.com/slowchillchill/btc-updown-marketmaker/issues/215)。公共模块不依赖本包。
 
 报告通过 JSON 浏览：`backtest::HistoricalRunReportV1` 当前只有 `Serialize`，本包不另建完整领域模式，也不修改生产报告类型。已知 `account_economics_v2` 与原结束原因可以显示已有终态和有限时序；未知版本保留原 JSON 并停止对应语义解释。JSON 语法读取成功不代表领域完整性或研究验收。
 
@@ -20,7 +20,7 @@ cargo run -p visualization --locked --offline -- sources.json
 cargo run -p visualization --locked --offline -- sources.json 127.0.0.1:4317 visualization/ui/dist
 ```
 
-本地服务只展示配置文件中本次有权读取的来源，没有目录发现、路径选择 API 或评价目录搜索。报告、元数据和公共根目录分别显式填写；元数据内的生产路径不会被自动打开。相对路径相对于服务进程工作目录解析，配置文件本身应保存在仓库外或被忽略的本地产物目录。前端开发可用 `npm --prefix visualization/ui run dev`，Vite 将 `/api` 代理到本地 Rust 服务。
+本地服务只展示配置文件中本次有权读取的来源，没有目录发现、路径选择 API 或评价目录搜索。报告、元数据、研究 JSON 和公共根目录分别显式填写；元数据内的生产路径不会被自动打开。相对路径相对于服务进程工作目录解析，配置文件本身应保存在仓库外或被忽略的本地产物目录。前端开发可用 `npm --prefix visualization/ui run dev`，Vite 将 `/api` 代理到本地 Rust 服务。
 
 最小来源配置：
 
@@ -42,7 +42,7 @@ cargo run -p visualization --locked --offline -- sources.json 127.0.0.1:4317 vis
 }
 ```
 
-`report`、`metadata`、`public_recording` 均可省略。报告、元数据、公共记录独立显示读取结果；缺报告/元数据不阻断公共页，损坏的文档也不影响合法公共来源。只配置公共流时保留相同布局位置，宿主条显示公共历史材料、原 `input_stream_id`、固定前缀与已读范围，不断言存在 backtest 运行、策略或账户：
+`report`、`metadata`、`public_recording`、`research` 均可省略。报告、元数据、公共记录独立显示读取结果；缺报告/元数据不阻断公共页，损坏的文档也不影响合法公共来源。只配置公共流时保留相同布局位置，宿主条显示公共历史材料、原 `input_stream_id`、固定前缀与已读范围，不断言存在 backtest 运行、策略或账户：
 
 ```json
 {"runs":[{"label":"显式公共历史材料","public_recording":{"root":"artifacts/public","committed_prefix":"artifacts/prefix.json","page_rows":100,"max_batch_bytes":1048576}}]}
@@ -92,7 +92,7 @@ TRACE_PROCESSOR=/path/to/trace_processor npm --prefix visualization/ui run test:
 
 ## 支持范围与来源缺口
 
-当前接入历史 `result.json`、启动元数据、显式公共稳定记录原字段及其顺序页，以及写入方显式返回的版本化 NOE 单引用。NOE 逐引用读会解码完整容器；当前仅有原 writer 工程接线验证，没有真实策略研究返回引用或安全历史枚举；Ledger 恢复/打开会改变耐久尾部，没有适用独立历史纯读入口。本包均不调用这些恢复器，也不复制账本归约或策略计算。策略逐次诊断、经济历史、真实训练/MLflow、PAPER/LIVE 和私有独立评价按所属模块的实际交付接入。
+当前接入历史 `result.json`、启动元数据、显式公共稳定记录原字段及其顺序页、写入方显式返回的版本化 NOE 单引用，以及已公开首小时真实描述研究 JSON。NOE 逐引用读会解码完整容器；当前仅有原 writer 工程接线验证，没有真实策略研究返回引用或安全历史枚举；Ledger 恢复/打开会改变耐久尾部，没有适用独立历史纯读入口。本包均不调用这些恢复器，也不复制账本归约或策略计算。策略逐次诊断、经济历史、真实训练/MLflow、PAPER/LIVE 和私有独立评价按所属模块的实际交付接入。
 
 每份来源属于调用者明确指定的访问上下文；独立留出不向训练侧来源、缓存、目录、实验或界面汇集。共用展示代码不授予读取其他产物的权限。
 
@@ -272,3 +272,40 @@ python3 visualization/examples/noe_read_cost_io.py "$OUT/noe.strace" "$SOURCES" 
 ```
 
 解析器只统计该原引用及其明确 context/container/同名 manifest 四个文件；manifest 路径沿 v4 read_commit 的 with_extension("manifest.json") 固定规则，不扫描目录，不套用公共材料文件范围。原始strace/原工程配置在忽略目录中，不公开私有路径；公开摘要保留逻辑来源、基准头+准确可复现测量补丁及binary哈希；该补丁包含本次Rust读取层变化与最小探针，从记录的旧头应用可复现测量代码，当前树可直接运行。单次缓存条件/小容器结果不代表冷盘、真实研究、大容器或所有版本性能。本次统计纠正使用同一已保存 strace 重算，补齐原路径必读 manifest 的2次 read/254 B；未重新运行负载、清缓存或重复根回归。既有固定根回归在实际纳入372bd168基准的本轮组合退出0，具名UTC依赖测试明确跳过；独立Rust/Python工作区不由此推断覆盖。
+
+
+## 首小时真实历史描述研究
+
+显式配置 `research` 为已交接 JSON；可与同一首小时的显式公共前缀并列，也可独立使用，不要求报告或元数据。当前支持顶层 `complementary_pair_first_fit_hour_budget_trial_v1` 与内层 `complementary_pair_first_fit_hour_v1`，未知或损坏独立失败，不改原产物。来源为 [首小时公开研究 JSON](../baseline-mm/docs/research/complementary-pair-first-fit-hour-budget-20260909-0000-0100.json) 及 [原说明](../baseline-mm/docs/research/complementary-pair-first-fit-hour-budget-20260909-0000-0100.md)，15,253,473 B、SHA-256 `1f71bdac7110a9af13eabaf363fd0831ca95c53ef4b77cfb44de78e118643836`。原运行代码 `22b7738cc5f44c5f4b18bb358a91ac23f81a7a15` 与本包代码分开；`accounts_run=0`，不套 Backtest/Ledger、补结束原因或声称策略/账户结果。
+
+```json
+{"runs":[{"label":"真实首小时描述研究 · UTC 2026-09-09 00:00—01:00","research":"baseline-mm/docs/research/complementary-pair-first-fit-hour-budget-20260909-0000-0100.json"}]}
+```
+
+每来源一个启动时读取的原 JSON Value，临时读入字节释放；没有原文本/exact两份全文、数据库、领域索引或研究计算器。snapshot 仅返回原来源/范围/身份/正常前缀、初始化与研究分母、原结果摘要、14目录成员及12完整目标的小目录。96冻结采样、480描述窗与12独立右边界各保留原单位。研究详情在总览、训练与实验、证据重放中共用同一状态，导航保留目标/冻结/窗/数组区段和旧所选事实，不发新请求。
+
+`GET /api/runs/{key}/research?path=<原JSONPointer>` 选择显式文档内的原市场、冻结、窗口、事后标签或来源分支；不是文件路径接口，不能读取其他文件或整根文档。对象响应 `exact` 保留原非数组字段及小型原标量数组，尚未请求的对象/矩阵数组从 `exact` 省略，由 `omitted_arrays` 交接原路径/长度。数组须明确 `start`、`count`，响应 `rows[].path` 始终使用原索引，回显实际 `[start,end)` 与原总量；越界/缺字段失败，不找邻居、不补空值。明确请求可以读更长区段，不设置业务容量阈值。服务只缓存最近一份该请求的完整 Bytes，同查询重试复用内容与地址，不再次读/解析文件或编码；不保存所有详情响应。
+
+原 `projection.price_pair_update_indices_columns` 与 `hold_segment_rows_columns` 直接展示；价格对保留 left/right_update_index，持价行保留原接收轴 from/to、duration、support_update_index、price_present。引用按钮只按原全局 `updates_original_visible_order` 索引下钻，它不等于 group_position。未公开 classification/elapsed/included 等逐对字段明确缺失，不重算；源端有限对照/资源测量/存储快照按原字段读取，和 C 成本分开。
+
+只把当前已读详情与明确保留选择中的原源事件、接收、首次公开可见、冻结、范围/持价端点及事后标签转换为有限 Point；原路径、schema、原代码/输入流/正常前缀和原记录身份随导出保留。市场只按原市场数组索引/自身 condition，不把全局更新归给 UI 所选市场，不建立 PublicLink 或假因果。原 direct_anchor_count/latest_received_anchor 或全局 source_ids 为空时，接收轴标 fallback、非实测；冻结不是业务触发，事后标签不能回填冻结特征。USD/BTC 与 USDT/BTC 原字段分开。BigInt 精确转微秒，只导出 instant，不补持续区间/flow、概率、sigma、官方TWAP或账户收益。
+
+真实验证：第二目标原冻结0/300s窗4为280价格对、1同接收时刻对、平方和 `510.3332819460326887224024`、描述速率null；原持价首行 `[1788912000000,1788912002228,2228,0,false]` 没有补价格。原spot更新1有源事件1788911999000、接收1788912002228、首次公开可见1788912002251/group334三个不同点；原更新0初始化Unknown的接收fallback有先失败/修复后通过的独立断言。最后4352956原first_usable_terminal为null、质量unknown_not_observed；事后标签仍按原路径可查。Chrome同时验证精确DOM、原数组区段/引用、跨导航零新增研究请求、独立研究入口与未知/损坏来源隔离。官方 Trace Processor 读取所选spot导出3条slice，纳秒 `1788911999000000000`、`1788912002228000000`、`1788912002251000000`，逐条原args.original_utc_ms匹配；大整数/负值/同毫秒字段另验证精确序列化，不宣称所有i64毫秒均能容纳在Perfetto纳秒存储。
+
+有限成本与限制见 [研究读取测量摘要](docs/research-read-cost-20261004.json)。生产分配器不变，示例单独复用C5 allocator；首读指应用实例尚未加载，不清OS缓存。统计成功alloc/alloc_zeroed/realloc次数、请求尺寸累计、前后live与绝对/相对live请求峰值，不是RSS或真实物理分配。probe墙钟包含strace/原子计数，选窗/编码计时也是该受控观察，均不是生产CPU速度。完整响应只编码一次，编码时间/长度由旁路getter取回，不为自身数字重复编码；重试getter是首读原值，不算本次新增。HTTP Resource Timing和点击→详情DOM→两帧含网络/JSON/React/调度及自动化展开，不是纯渲染CPU；没有性能门槛，也没有把15MB文档加载说成21GB公共材料已全扫。
+
+```bash
+# RESEARCH 是上面仓库相对 JSON；SOURCES 为显式配置，OUT 为被忽略的本轮证据目录。
+cargo build -p visualization --bin visualization --example research_read_cost --locked --offline
+strace -yy -e trace=read,pread64,readv,write -s 128 -o "$OUT/research.strace" "$TARGET/debug/examples/research_read_cost" "$RESEARCH" > "$OUT/research.jsonl"
+python3 -B visualization/examples/research_read_cost_io.py "$OUT/research.strace" "$RESEARCH"
+node visualization/ui/tests/research-points.mjs "$RESEARCH"
+CARGO_TARGET_DIR="$TARGET" node visualization/ui/tests/research-browser.mjs "$SOURCES" "$OUT"
+"$TP" query "$OUT/research-spot.trace.json" 'SELECT COUNT(*),MIN(ts),MAX(ts) FROM slice;'
+```
+
+浏览器脚本使用自身4323端口，结束关闭服务/Chrome/临时损坏副本。原 JSON SHA复核不变。源码定位直接回读本任务树，没有借主树图索引；当前片不强建代码图。原C已交接来源保持，研究有真实描述输入/产物但没有该次策略决定、执行、NOE或账户经营；其他模型/宿主读取仍按准确来源交接，不以此片宣称整个C完成。
+
+本次C有限实测：初始化逻辑读取/解码各1次，source read 2次（含EOF）返回15,253,473 B；成功分配1,675,644次、累计请求125,589,559 B，live请求638→89,129,768 B，绝对峰值104,306,063 B／相对104,305,425 B。/proc read_bytes增量0受OS缓存影响；没有pread/readv来源调用。选择代表窗一次完整编码994 B，实际分配/计时见摘要；最近重试来源IO、完整编码、成功分配新增0，同Bytes内容及地址。首屏约14KB，不传15MB全文；浏览器实际响应与综合耗时逐项列在摘要。最终JS约1037.86kB/gzip340.54kB、CSS26.06kB/gzip5.52kB；大包提示保留。
+
+固定根回归四段证据：初次完整命令退出0；随后完整复验在 data-collect 既有 full_runtime_cross_platform_degradation_converges_at_run_deadline_and_finalizes_rows 失败，unwrap错误为 `missing metadata source authority for btc-updown-5m-1791087900`。该Gamma loopback按实际now_ms()生成当前窗口，失败日志覆盖04:30UTC换窗，保留为相关线索而非独占根因结论。准确全限定单项实际1条通过（1.11s、432 filtered）；最后固定完整命令退出0。未新增skip或改A；唯一具名UTC测试按仓库规定跳过。之后仅缺失数组统计不填0的读边界映射与前端文案，研究针对边界2条、前端build/Chrome/Point均通过。额外 `cargo clippy -p visualization --lib --bins --tests --locked --offline -- -D warnings` 被 contracts 既有三项large_enum_variant阻断，未以通过掩盖。此前短名配 --exact 的0条调用不计单项通过证据。

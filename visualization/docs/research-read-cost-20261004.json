@@ -1,0 +1,268 @@
+{
+  "schema": "visualization_research_read_cost_observation_v1",
+  "source": "baseline-mm/docs/research/complementary-pair-first-fit-hour-budget-20260909-0000-0100.json",
+  "source_bytes": 15253473,
+  "source_sha256": "1f71bdac7110a9af13eabaf363fd0831ca95c53ef4b77cfb44de78e118643836",
+  "source_original_commit": "22b7738cc5f44c5f4b18bb358a91ac23f81a7a15",
+  "implementation_base_head": "10a8ce588f2b2d6e192253ef90e4205733a54160",
+  "implementation_state": "基准提交加本次未提交实现；以下源码SHA与产物SHA绑定实际采样版本。最终PR头可按相同文件SHA复核。",
+  "source_files_sha256": {
+    "visualization/src/sources/research.rs": "3a94e3a6342dcd735f27fe353621d2d3a6746ace296f670068ad4583976a1240",
+    "visualization/src/api.rs": "4680637507f1bb7af3a7476c7c6e3d99110f5b89a15489f96bdf453c698bcbb2",
+    "visualization/src/dto.rs": "5deb285d9174911e3e222e8cce0c214cb913dfeabd6fde3f87cd7201a5892316",
+    "visualization/examples/research_read_cost.rs": "eb6726fc0978cefe805b8e334149a0f24cda6040d7068d2d602c1ae3b5580edf",
+    "visualization/examples/research_read_cost_io.py": "7933c26f6e4856aca0a2ca680d8007010fe278034cfbc914003a358afa3d99f0",
+    "visualization/examples/read_cost.rs": "ae0eeb104aaa75a4e643f2579766111bf6871d13b058951268b3adb497ebbcb1",
+    "visualization/ui/src/Research.tsx": "e420b436bd9e86c72a2df906cb44ec4667b5e27f6498f978dd7c472cc6071a69",
+    "visualization/ui/src/researchPoints.ts": "c447923b7a91ea9e6adf147c522f965b6517cbae840f41c0b3e7a6bab676cc19",
+    "visualization/ui/src/App.tsx": "3c08eb626aa05100afd0d91798b502ce7ea5e0747d8931d806e0220ce122a656",
+    "visualization/ui/src/Topology.tsx": "03911df99ba78fa6196082d60e7e7e02887b717fbf4ee8bc1a59b1ebe10151fc",
+    "visualization/ui/src/browse.ts": "2b53827c8875cd06e02fdbda2e5d223f42c365394fe7159c865295560112b1f5",
+    "visualization/ui/src/facts.ts": "6f5cf94665b7f9b62e7826bf80572cadbeb3821faf9c48f53819d6d4c0860c8c"
+  },
+  "probe_binary_sha256": "2586fe589618c2d00e5d0f2a709c3db42199dc238a99bc2ece9a6f01f10dbaa7",
+  "build_mode": "dev unoptimized + debuginfo；示例System allocator原子计数 + strace；生产allocator不变",
+  "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+  "measurement_time_utc": "2026-10-04T04:35:32.805549+00:00",
+  "scope": "单个公开JSON初始化、第二目标freeze0/window4、同一最近请求重试；不读公共21GB、不重新研究、不清OS缓存。",
+  "syscall_io": {
+    "source": "baseline-mm/docs/research/complementary-pair-first-fit-hour-budget-20260909-0000-0100.json",
+    "file_bytes": 15253473,
+    "phases": {
+      "initialize": {
+        "calls": 2,
+        "returned_bytes": 15253473,
+        "syscalls": {
+          "read": 2
+        }
+      },
+      "select_window": {
+        "calls": 0,
+        "returned_bytes": 0,
+        "syscalls": {}
+      },
+      "retry_latest": {
+        "calls": 0,
+        "returned_bytes": 0,
+        "syscalls": {}
+      }
+    }
+  },
+  "allocation_and_instrumented_cost": [
+    {
+      "allocation_calls": "1675644",
+      "cumulative_requested_bytes": "125589559",
+      "elapsed_us": "428637",
+      "live_requested_after": "89129768",
+      "live_requested_before": "638",
+      "peak_above_start_bytes": "104305425",
+      "peak_live_requested_bytes": "104306063",
+      "phase": "initialize",
+      "process_read_bytes_delta": "0",
+      "process_rss_high_water_bytes": "129576960",
+      "rss_bytes": "114884608"
+    },
+    {
+      "allocation_calls": "214",
+      "cumulative_requested_bytes": "19388",
+      "elapsed_us": "88",
+      "encoding": {
+        "complete_encoding_us": "27",
+        "response_bytes": "994",
+        "selection_and_dto_us": "44"
+      },
+      "live_requested_after": "89133569",
+      "live_requested_before": "89131769",
+      "peak_above_start_bytes": "7455",
+      "peak_live_requested_bytes": "89139224",
+      "phase": "select_window",
+      "process_read_bytes_delta": "0",
+      "process_rss_high_water_bytes": "129576960",
+      "rss_bytes": "114909184"
+    },
+    {
+      "allocation_calls": "0",
+      "cumulative_requested_bytes": "0",
+      "elapsed_us": "0",
+      "live_requested_after": "89136479",
+      "live_requested_before": "89136538",
+      "new_complete_encodings": 0,
+      "new_source_reads": 0,
+      "peak_above_start_bytes": "0",
+      "peak_live_requested_bytes": "89136538",
+      "phase": "retry_latest",
+      "process_read_bytes_delta": "0",
+      "process_rss_high_water_bytes": "129576960",
+      "response_bytes": 994,
+      "rss_bytes": "114909184",
+      "same_bytes_allocation": true
+    }
+  ],
+  "browser": {
+    "errors": [],
+    "window": {
+      "path": "/research/markets/1/frozen_sampling/0/descriptive_windows/4",
+      "price_pairs": "280",
+      "same_received_time_pairs": "1",
+      "squared_sum": "510.3332819460326887224024",
+      "descriptive_rate": null
+    },
+    "spot": {
+      "group_position": "334",
+      "source_ms": "1788911999000",
+      "received_ms": "1788912002228",
+      "public_visible_ms": "1788912002251",
+      "trace_points": 3
+    },
+    "hold": {
+      "path": "/research/markets/1/frozen_sampling/0/descriptive_windows/4/hold_coverage/segment_rows",
+      "first_original_row": [
+        "1788912000000",
+        "1788912002228",
+        "2228",
+        "0",
+        false
+      ]
+    },
+    "terminal": {
+      "market": "4352956",
+      "first_usable_terminal": null,
+      "last_quality": "unknown_not_observed"
+    },
+    "failure": {
+      "2": "unsupported_version",
+      "3": "read_error"
+    },
+    "cost": {
+      "click_to_details_dom_and_two_frames_ms": 308,
+      "snapshot_bytes": 13975,
+      "resource_timing": [
+        {
+          "path": "/api/runs/0/research?path=%2Fresearch%2Fmarkets%2F1%2Ffrozen_sampling%2F0%2Fdescriptive_windows%2F4",
+          "duration_ms": 1.6000000089406967,
+          "transfer_bytes": 1294,
+          "encoded_body_bytes": 994,
+          "decoded_body_bytes": 994
+        },
+        {
+          "path": "/api/runs/0/research?path=%2Fresearch%2Fmarkets%2F1%2Ffrozen_sampling%2F0%2Fdescriptive_windows%2F4%2Fprice_pair_update_indices&start=0&count=2",
+          "duration_ms": 1.7000000029802322,
+          "transfer_bytes": 695,
+          "encoded_body_bytes": 395,
+          "decoded_body_bytes": 395
+        },
+        {
+          "path": "/api/runs/0/research?path=%2Fresearch%2Fmarkets%2F1%2Ffrozen_sampling%2F0%2Fdescriptive_windows%2F4%2Fhold_coverage%2Fsegment_rows&start=0&count=2",
+          "duration_ms": 1.3999999910593033,
+          "transfer_bytes": 778,
+          "encoded_body_bytes": 478,
+          "decoded_body_bytes": 478
+        },
+        {
+          "path": "/api/runs/0/research?path=%2Fresearch%2Fglobal_spot%2Fupdates_original_visible_order&start=1&count=1",
+          "duration_ms": 1.5,
+          "transfer_bytes": 911,
+          "encoded_body_bytes": 611,
+          "decoded_body_bytes": 611
+        },
+        {
+          "path": "/api/runs/0/research?path=%2Fresearch%2Fmarkets%2F11",
+          "duration_ms": 2.4000000059604645,
+          "transfer_bytes": 5102,
+          "encoded_body_bytes": 4802,
+          "decoded_body_bytes": 4802
+        },
+        {
+          "path": "/api/runs/0/research?path=%2Fresearch%2Fmarkets%2F11%2Fposthoc_label_qualification%2Fchanges_original_visible_order&start=0&count=1",
+          "duration_ms": 1.7000000029802322,
+          "transfer_bytes": 810,
+          "encoded_body_bytes": 510,
+          "decoded_body_bytes": 510
+        }
+      ]
+    },
+    "research_responses": [
+      {
+        "url": "/api/runs/0/research?path=%2Fresearch%2Fmarkets%2F1%2Ffrozen_sampling%2F0%2Fdescriptive_windows%2F4",
+        "bytes": 994,
+        "status": 200
+      },
+      {
+        "url": "/api/runs/0/research?path=%2Fresearch%2Fmarkets%2F1%2Ffrozen_sampling%2F0%2Fdescriptive_windows%2F4%2Fprice_pair_update_indices&start=0&count=2",
+        "bytes": 395,
+        "status": 200
+      },
+      {
+        "url": "/api/runs/0/research?path=%2Fresearch%2Fmarkets%2F1%2Ffrozen_sampling%2F0%2Fdescriptive_windows%2F4%2Fhold_coverage%2Fsegment_rows&start=0&count=2",
+        "bytes": 478,
+        "status": 200
+      },
+      {
+        "url": "/api/runs/0/research?path=%2Fresearch%2Fglobal_spot%2Fupdates_original_visible_order&start=1&count=1",
+        "bytes": 611,
+        "status": 200
+      },
+      {
+        "url": "/api/runs/0/research?path=%2Fresearch%2Fmarkets%2F11",
+        "bytes": 4802,
+        "status": 200
+      },
+      {
+        "url": "/api/runs/0/research?path=%2Fresearch%2Fmarkets%2F11%2Fposthoc_label_qualification%2Fchanges_original_visible_order&start=0&count=1",
+        "bytes": 510,
+        "status": 200
+      }
+    ],
+    "environment": "实际本机现有 Chrome headless，1600×1150；两完整研究配置仅用于独立入口比较，原schema未知/损坏副本仅测试。"
+  },
+  "frontend_build": {
+    "javascript_bytes": 1037868,
+    "css_bytes": 26062,
+    "javascript_gzip_kb": 340.54,
+    "css_gzip_kb": 5.52,
+    "note": "Vite已有500kB提示保留；没有性能门。"
+  },
+  "official_perfetto": {
+    "instant_slice_count": 3,
+    "ts_ns": [
+      "1788911999000000000",
+      "1788912002228000000",
+      "1788912002251000000"
+    ],
+    "original_utc_ms": [
+      "1788911999000",
+      "1788912002228",
+      "1788912002251"
+    ],
+    "reference_prefix": "/research/global_spot/updates_original_visible_order/1/"
+  },
+  "verification": {
+    "fixed_workspace_command": "cargo test --workspace --lib --bins --tests --examples --locked --offline -- --skip four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second",
+    "initial_exit": 0,
+    "followup_exit": 101,
+    "followup_failure": "data-collect training_runtime::tests::full_runtime_cross_platform_degradation_converges_at_run_deadline_and_finalizes_rows；training_runtime.rs:3563 missing metadata source authority for btc-updown-5m-1791087900",
+    "followup_time_note": "结果组23.82s、日志结束04:30:23UTC；原Gamma夹具两分支用实际now_ms()决定current窗口。覆盖04:30换窗是线索，未作独占根因结论。",
+    "exact_recheck": {
+      "tested": 1,
+      "passed": 1,
+      "filtered": 432,
+      "seconds": 1.11,
+      "exit": 0
+    },
+    "final_workspace_exit": 0,
+    "final_research_boundary_tests": {
+      "passed": 2,
+      "exit": 0
+    },
+    "named_utc_test": "跳过",
+    "additional_clippy": "-D warnings阻于contracts既有large_enum_variant三项；未修改A/contracts。"
+  },
+  "limits": [
+    "成功alloc/alloc_zeroed/realloc次数；累计Layout/new_size请求量，live/峰值是请求字节不是RSS。",
+    "/proc read_bytes增量0受OS缓存影响；来源syscall返回字节仍为15,253,473，不代表零读取/零解码。",
+    "probe.elapsed_us含strace与原子计数，不是生产速度；旁路完整编码getter只记录一次。",
+    "最近重试同Bytes地址/内容，来源IO/完整编码/分配新增0；live下降59B是本次传入query路径释放。",
+    "浏览器点击→DOM→两帧含网络、JSON、React、调度与测试展开；ResourceTiming另列，非CPU独占。",
+    "公开原A measurement/storage_snapshot/finitecomparison未在此重新测量，也不混为C成本。"
+  ]
+}

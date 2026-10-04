@@ -190,6 +190,7 @@ const nodeTypes = { module: ModuleCard };
 export function Topology({
   report,
   engineering = false,
+  research,
   metadata,
   selection,
   onSelect,
@@ -201,6 +202,7 @@ export function Topology({
 }: {
   report: Json | undefined;
   engineering?: boolean;
+  research?: Evidence;
   metadata: Json | undefined;
   selection: Evidence | null;
   onSelect: (e: Evidence) => void;
@@ -267,12 +269,13 @@ export function Topology({
       ),
     },
     "shared-run": {
-      summary: engineering
-        ? "宿主运行证据未接入"
-        : "待 NOE " +
-          fact(at(report, "pending_noe_records")) +
-          " · 待计算 " +
-          fact(at(report, "pending_calculation")),
+      summary:
+        !report || engineering
+          ? "宿主运行证据未接入"
+          : "待 NOE " +
+            fact(at(report, "pending_noe_records")) +
+            " · 待计算 " +
+            fact(at(report, "pending_calculation")),
       evidence: evidence(
         "report",
         "/observation_cutoff",
@@ -282,7 +285,11 @@ export function Topology({
     "intent-bridge": { summary: "逐次分派回执未接入" },
     "execution-normalization": {
       summary:
-        (engineering ? "宿主耐久 NOE 前缀 " : "报告耐久前缀 ") +
+        (!report
+          ? "报告耐久 NOE 前缀未接入 · "
+          : engineering
+            ? "宿主耐久 NOE 前缀 "
+            : "报告耐久前缀 ") +
         fact(at(report, "durable_noe_prefix")) +
         `；显式引用 ${noeCount} 条${noeSelection ? " · 单引用已加载" : " · 尚未读取"}；无消费关联`,
       evidence:
@@ -301,18 +308,21 @@ export function Topology({
     },
   };
   facts.strategy = {
-    summary:
-      !metadata && (!report || engineering)
+    summary: research
+      ? "baseline-mm 描述研究已交接 · 非策略决定 / 账户运行"
+      : !metadata && (!report || engineering)
         ? "策略 / 运行计算证据未接入"
         : strategy +
           " · 计算累计 " +
           fact(at(report, "calculation_count")) +
           "（本运行）",
-    evidence: evidence(
-      "metadata",
-      "/config/strategy",
-      at(metadata, "config", "strategy"),
-    ),
+    evidence:
+      research ??
+      evidence(
+        "metadata",
+        "/config/strategy",
+        at(metadata, "config", "strategy"),
+      ),
   };
   const nodes: ModuleNode[] = modules.map(([id, subtitle, x, y]) => ({
     id,

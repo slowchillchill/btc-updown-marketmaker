@@ -1,3 +1,4 @@
+import type { ResearchStatus } from "./Research";
 import type { NoeIndex } from "./Noe";
 import { useState } from "react";
 import { fact, statusLabel, type Json } from "./facts";
@@ -15,6 +16,7 @@ export type Doc = {
 export type Snapshot = {
   label: string;
   report: Doc;
+  research: ResearchStatus;
   report_kind: "historical_backtest" | "engineering_ledger_projection";
   metadata: Doc;
   public_recording: Record<string, Json>;
