@@ -34,6 +34,8 @@ TypedRaw Parquet 仍先以原打开的 `File` 完成长度与 SHA 校验，然�
 
 切换文件时可能短暂同时存在两个窗口，128KiB 仅指窗口增量；各返回 Read 的 8KiB 缓冲、原 SHA 缓冲、Arrow 页、返回 Bytes 与批次分别占用内存，不构成进程 RSS 上界。仅测试内计量实际文件读取次数/返回字节，生产不增加逐页诊断或新的准入门。
 
+所属[十二分钟材料验收](docs/typed-raw-byte-window-12m.md)仅运行一次原材料试制：完整trial业务比较与两遍物理工作量保持，合并475.669秒对历史495.617秒；读请求量／次数明显降低但整体仅约4%时点差异，不外推稳定加速或全研究预算。
+
 ## 离线产物构建、发布与读取
 
 `dpt-gate-a build --manifest <清单> --condition-id <市场> --received-start-utc-ms <开始> --received-end-utc-ms <结束> --candidate-dir <新目录>` 构建显式市场/时间范围；`--manifest` 可重复。`dpt-gate-a publish --candidate-dir <已有候选> --output-dir <目标目录>` 同步文件并以 `NOREPLACE` 重命名发布。输入只取调用者明确列出的 manifest：读取一次，以头部 `utc_day` 和文件条目的来源/schema/hour/part 为事实，从清单父目录定位列出文件。目录和文件可改名、改变层级；不要求个人数据根、日期下限或目录闭集，未列出的旁文件不参与输入。合法历史日期不会自动被选中，市场和时间范围仍由调用者给出，日历/小时换算与实际文件解码仍按真实消费执行。
