@@ -116,7 +116,7 @@ npm --prefix visualization/ui run test:browser -- .local-artifacts/visualization
 
 浏览器验证使用已有 Chrome，默认可执行文件 `/usr/bin/google-chrome`，可通过 `CHROME_EXECUTABLE` 指定。它启动临时本地 Rust 服务、关闭服务/浏览器并清理所建临时测试输入；可在命令最后提供截图目录。脚本验证实际合成 RangeEnd 报告、八模块/七导航与静态关系、跨视图及跨页身份、UP/DOWN 非对称映射、精确现金加法、零与 Unavailable、负调度差与缺端点、成功范围下载、未知/损坏证据、切换/刷新及窄屏。非对称数据是脚本临时创建的独立展示边界夹具，明确标为“非生产研究”，不冒充原生产报告。截图和工程检查不代替用户人工视觉验收。
 
-快照响应报告各来源读取/解码次数、字节量和启动读取时间；报告仅读取/解析一次并缓存编码响应。公共页报告读取器打开次数、`next_page` 调用次数、返回量、原行 JSON 编码时间和大小。打开阶段由所属接口枚举显式公共目录并读取前缀元数据，后续页沿同一游标解码；最近页重试直接复用编码响应。底层 I/O 字节、分配和完整响应序列化时间未由公共读取接口提供，响应明确保留未测量；不能以返回条数替代这些成本或宣称通过生产性能验收。浏览器测试另打印小型合成负载的实际公共页 HTTP 响应次数/字节和整个联调耗时；联调耗时包括截图和官方解析，不等于单帧渲染或接口性能。
+快照响应报告各来源读取/解码次数、字节量和启动读取时间；报告仅读取/解析一次并缓存编码响应。公共页报告读取器打开次数、`next_page` 调用次数、返回量、精确 JSON 转换时间 `exact_json_us` 和 rows 编码字节量。打开阶段由所属接口枚举显式公共目录并读取前缀元数据，后续页沿同一游标解码；最近页重试直接复用编码响应。底层 I/O 字节与分配不由公共读取接口提供，每次服务响应仍保留未测量；完整响应编码时间/长度在完成编码后由 `last_encoding_cost()` 读取，保留在最近响应缓存中，不为自身数字重编码。不能以返回条数替代这些成本或宣称通过生产性能验收。浏览器测试另打印小型合成负载的实际公共页 HTTP 响应次数/字节和整个联调耗时；联调耗时包括截图和官方解析，不等于单帧渲染或接口性能。
 
 HTTP 使用 [Axum](https://docs.rs/axum/0.8.9/axum/) 与 [tower-http ServeDir](https://docs.rs/tower-http/0.6.11/tower_http/services/struct.ServeDir.html)，前端使用 [React](https://react.dev/learn) 与 [Vite](https://vite.dev/guide/)。本切片按实际功能使用 [React Flow 自定义节点](https://reactflow.dev/learn/customization/custom-nodes)、[ECharts 散点图](https://echarts.apache.org/handbook/en/how-to/chart-types/scatter/basic-scatter/) 和 [TanStack Table v8](https://tanstack.com/table/v8/docs/guide/column-defs)。经济终态没有历史曲线；有限多时钟只画已知点。Rust 依赖锁在根 `Cargo.lock`，前端使用一份 `package-lock.json`；构建和依赖目录被忽略。
 
@@ -130,6 +130,44 @@ HTTP 使用 [Axum](https://docs.rs/axum/0.8.9/axum/) 与 [tower-http ServeDir](h
 TRACE_PROCESSOR=/path/to/trace_processor node visualization/ui/tests/public-browser.mjs /authorized/real-sources.json /new/engineering-public/sources.json /ignored/screenshots
 ```
 
-真实来源由调用者准确交接，不扫描目录寻找材料。真实五分钟初始化公共材料的公开来源证明见 [研究材料交接说明](../baseline-mm/docs/research/complementary-pair-material-trial-initialized-20260909-0000-0005.md) 与同名 JSON；它提供公共输入，不提供策略账户结果。当前实测每页 100 行、只推进两页：同一 reader 打开 1 次 / next_page 2 次，rows JSON 为 137999 B 与 114449 B；重试返回最近响应，旧页请求不推进。Chrome 验证公共独立身份、实际 V6 市场及原引用，底层 I/O 和分配未测。
+真实来源由调用者准确交接，不扫描目录寻找材料。真实五分钟初始化公共材料的公开来源证明见 [研究材料交接说明](../baseline-mm/docs/research/complementary-pair-material-trial-initialized-20260909-0000-0005.md) 与同名 JSON；它提供公共输入，不提供策略账户结果。当前实测每页 100 行、只推进两页：同一 reader 打开 1 次 / next_page 2 次，rows JSON 为 137999 B 与 114449 B；重试返回最近响应，旧页请求不推进。Chrome 验证公共独立身份、实际 V6 市场及原引用；该轮没有测量底层 I/O 和分配，后续有限成本证据见下节。
 
 合法有限材料为 8 输入、17 规范记录、7 组、63 存储行，导出 80 个点；官方 Trace Processor 读取得到 80 slice，纳秒范围 9990000000 至 1788840000123000000，两条历史生效 args 的原 UTC ms 为 20000。浏览器检查每个点与引用都能回查原字段，覆盖区间/市场过滤、未读目标缺口、保留选择的 3 个原时间点导出。`SKIP_REAL_PUBLIC=1` 仅供重复检查合法变体时跳过已经验证的真实读页；默认仍验证真实来源。已有报告/经济 Chrome 回归继续适用。数值均为有限工程验证实测，不设性能门槛，也不表示全部历史或源端依赖已经交付。
+
+
+## 有限公共读取成本
+
+[前后完整读数](docs/read-cost-20261004.json) 使用上文同一已停止五分钟材料的固定前缀，仅读取前两页（每页 100 行）并重试最近页。读数是本机 debug 构建的有限观察；不代表生产速度、所有历史或容量验收。服务的 allocator 没有替换，分配探针只在 `read_cost` 示例中使用；该示例直接调用实际 `PublicPages::open/page` 路径，初始化包括原接口打开、元数据读取/解析及来源状态构造，分页读取时间包括底层顺序读取与解码，未拆成纯 I/O 与纯解码时间。
+
+原路径仅为 `rows_json_bytes` 额外编码整页字符串；现在完整响应编码时，沿同一个 writer 记录 rows 起止位置，后置 cost 读取其实际 UTF-8 字节量，不保留第二份 rows 字符串。返回原事实没有变化，两页 rows SHA-256 前后分别一致：`bcca1a3b6b7f957a10136d62241e21e037b628dd7ea73710844007aead07203f`、`770ffabf10a8a473485219d0c8c7653c186bc99748362a061b343edfbee9c3e5`。`row_encoding_us` 原来混合转换与额外编码，改名为 `exact_json_us` 明确只计 rows/前缀的精确 JSON 转换；完整响应编码结束后另取测量，避免在响应内计算自身编码长度/时间的循环。JSON 对象字段顺序不是原存储行序，rows 数组顺序仍保持。
+
+| 阶段 | 成功分配次数 前→后 | 累计请求字节 前→后 | live 请求字节绝对峰值 前→后 |
+| --- | ---: | ---: | ---: |
+| 初始化 | 131→131 | 10049→10049 | 6354→6354 |
+| 页 0 | 23801→17406 | 9616762→8309637 | 4770932→3726638 |
+| 页 1 | 16717→10467 | 3712256→2716741 | 4662403→3798649 |
+| 最近页重试 | 0→0 | 0→0 | 无新增 live 请求字节 |
+
+成功次数计实际经过 [GlobalAlloc](https://doc.rust-lang.org/std/alloc/trait.GlobalAlloc.html) 的成功 `alloc/alloc_zeroed/realloc`，累计请求字节在成功 realloc 时计完整新大小；不把它叫净分配或 RSS。live 请求字节为仍活跃的 Layout 请求大小，绝对峰值含开始时已有对象，`peak_above_start_bytes` 另报告相对峰值；没有计 System 内部开销、realloc 内部旧/新块短暂重叠及外部分配器。编译器可能消除/合并分配，数字仅对应此构建。阶段计数窗口不包含 `/proc` 读取、标记打印、结果 JSON 解析和校验哈希编码。
+
+[strace](https://strace.io/) 按标记独立统计显式来源文件 `read/pread64/readv`，包含返回 0 的 EOF 调用，前后相同：初始化 684 次/993 B（stream 368 次/367 B、两次前缀读取合计 316 次/626 B）；页 0 的 Parquet 17 次/559476 B；页 1 和最近页重试 0 次/0 B。它们是 syscall 返回字节，重复读取会重复计，不是唯一文件覆盖字节、业务 payload 字节或物理盘读取。页 1 继续解码 reader 已保留的批数据，不能称零解码。[`/proc/self/io` 的 `read_bytes`](https://docs.kernel.org/filesystems/proc.html) 各阶段增量均为 0：这次缓存条件下没有归于该进程的存储层读字节，并不等于没有逻辑读取；未清理缓存、未证明冷盘成本。`VmRSS` 为采样时进程驻留量，`VmHWM` 为进程生命周期高水位，均与 allocator 请求峰值分开保存，包含映射/运行库等成本。
+
+测量工具也有成本。前后 strace 初始化耗时分别 8855/9127 µs，而不带 strace 的 allocator 示例为 300/319 µs；不能用带 strace 耗时推断服务性能。优化后另做一次关闭原子计数的相同负载对照：初始化/页 0/页 1 为 285/18516/6280 µs，启用计数为 357/19633/6519 µs；关闭计数仍有 relaxed 判断，单次差异含调度/缓存波动，不分解出精确纯探针开销。服务/Chrome 测量本身不使用该 allocator 探针。
+
+完整响应字节为页 0 的 138619→138617 B、页 1 的 115070→115068 B（计时文本位数可能改变长度），rows 始终 137999/114449 B。完整编码观察为 4257→2861、3609→2294 µs；基线计时还包括原 JSON 信封构造，优化后为实际完整序列化，两者口径差异不能当作纯编码速度提升。整个页路径由示例另计 22454→19590、10028→6060 µs，仍含 allocator 开销。
+
+实际 Chrome 1600×1150 验证两页各渲染 100 个表格行，无页面异常；`requestStart→responseEnd` 为 24.9→22.5、14.0→7.9 ms，点击至 DOM 就绪加两次 animation frame 为 117.9→112.3、94.6→95.4 ms，后者包含 HTTP、解码、React 和帧调度，不能称纯绘制/CPU 时间。启动至首 HTTP 成功含 25 ms 轮询调度，为 8.06→9.14 ms；最近页重试直到 body 接收为 1.8→2.3 ms，浏览器 JSON 解析为 0.1→0.3 ms。这些单次有限结果不设阈值。前端产物 JS 973.59 kB（gzip 320.99）、CSS 25.19 kB（gzip 5.32），已有大包提示保留；本片没有扩大到虚拟表格、范围随机定位或播放实现。
+
+基线精确代码为 `14ccd51c473b42df0e10481cd55165cff47f1bce` 加 [仅测量补丁](docs/read-cost-baseline.patch)，该补丁只在原路径加完成响应计时/长度与读取方法，保留原额外 rows 编码。对照工作树应用该补丁并复制本轮 `examples/read_cost.rs` 后，可用同一示例/命令重复基线；当前树直接运行即为优化路径。补丁不用于当前源码，也不改变领域读取。复现时由调用者提供同一授权 `sources.json`，首项须为公共来源；输出/trace 放在忽略目录，原始 strace 含文件路径与部分内容，不作为公开附件。下列变量仅为命令输入，不写入公共配置：
+
+```bash
+cargo build -p visualization --bin visualization --example read_cost --locked --offline
+# BIN 指向该构建目录的 debug/examples/read_cost，SOURCES 为显式交接配置。
+"$BIN" "$SOURCES" > "$OUT/read-cost.jsonl"
+"$BIN" "$SOURCES" --without-counters > "$OUT/without-counters.jsonl"
+strace -yy -s 256 -e trace=read,pread64,readv,write -o "$OUT/read-cost.strace" "$BIN" "$SOURCES" > "$OUT/traced.jsonl"
+python3 visualization/examples/read_cost_io.py "$OUT/read-cost.strace" "$SOURCES" > "$OUT/source-io.json"
+node visualization/ui/tests/read-cost-browser.mjs "$SOURCES" "$OUT/browser"
+```
+
+浏览器脚本使用受控 4320 端口，测量真实 HTTP 响应和 DOM 行数，检查 rows 字节计数、原范围/调用次数及最近页复用，保存截图与 JSON，结束后关闭自己启动的 Chrome 和服务。构建缓存复用时按前述 `CARGO_TARGET_DIR` 查找二进制。本轮还保留合法 63 行/80 时间点的原浏览/官方 Perfetto 回归；缺口与后续范围查询、虚拟列表、播放、经济投影及显式 NOE 仍按所属合同接续。
