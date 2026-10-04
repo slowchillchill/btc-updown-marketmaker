@@ -3,6 +3,7 @@
 extern crate self as backtest;
 mod preparation;
 mod preparation_progress;
+mod prepared_material;
 mod process_measurement;
 mod run;
 mod statistics;
@@ -15,6 +16,7 @@ pub use preparation::*;
 pub use preparation_progress::{
     HistoricalPreparationMeasurementsV1, HistoricalPreparationProgressV1,
 };
+pub use prepared_material::*;
 pub use process_measurement::{
     ProcessCountersV1, process_clock_ticks_per_second_v1, process_measurement_v1,
 };

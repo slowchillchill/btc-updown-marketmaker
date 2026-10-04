@@ -544,6 +544,28 @@ impl<T: PublicConsumptionTimeSourceV1> RecordedPublicGroupSourceV1<T> {
             normal_end: false,
         })
     }
+    /// 原replay实际流头；用于已发布描述的结构绑定，不复制状态。
+    pub fn header(&self) -> &contracts::PublicInputStreamHeaderV1 {
+        self.replay.core.header()
+    }
+
+    /// 已发布材料按同一固定凭据消费，沿原有限replay和组交付。
+    pub fn open_committed(
+        root: &std::path::Path,
+        prefix: contracts::CommittedIngressPrefixV1,
+        page_rows: usize,
+        page_bytes: usize,
+        times: T,
+    ) -> data_pipeline_training::public_recording::RecordingResult<Self> {
+        Ok(Self {
+            replay: data_pipeline_training::public_replay::PublicReplayV1::open_committed(
+                root, prefix, page_rows, page_bytes,
+            )?,
+            times,
+            pending: std::collections::VecDeque::new(),
+            normal_end: false,
+        })
+    }
 }
 #[cfg(any(test, feature = "public-consumption"))]
 impl<T: PublicConsumptionTimeSourceV1> Iterator for RecordedPublicGroupSourceV1<T> {

@@ -552,6 +552,49 @@ fn hidden_buckets_cross_pages_and_reference_only_buckets_close_globally() {
     let completed = material.metrics().clone();
     assert!(material.next_page().unwrap().is_empty());
     assert_eq!(material.metrics(), &completed);
+    // derivation_position相同不足以配对：实际索引与派生步骤的完整引用必须一致。
+    let candidate = temp.path().join("mixed-index");
+    let mut writer = crate::gate_a::SequentialCaptureWriter::create(
+        "mixed-index",
+        &candidate,
+        std::sync::Arc::new(std::sync::Mutex::new(0)),
+        &config(),
+    )
+    .unwrap();
+    let mut original_index = crate::RunCursor::open(&prepared.index_path, 2, 1 << 20).unwrap();
+    let mut changed = false;
+    let mut sequence = 0;
+    while let Some(row) = original_index.next_row().unwrap() {
+        let mut entry: HiddenIndexEntryV1 = serde_json::from_slice(row.payload()).unwrap();
+        if !changed && let HiddenIndexEntryV1::Step(reference) = &mut entry {
+            reference.step_index += 1;
+            changed = true;
+        }
+        writer
+            .push(
+                sequence,
+                row.sort_key_bytes().to_vec(),
+                &serde_json::to_vec(&entry).unwrap(),
+            )
+            .unwrap();
+        sequence += 1;
+    }
+    assert!(changed);
+    let mut mixed = prepared.clone();
+    mixed.index_path = writer.close_segment().unwrap();
+    let mut reader = HiddenMaterialReaderV1::open(&mixed, &root, 2, 1 << 20).unwrap();
+    let error = match reader.next_page() {
+        Err(error) => error,
+        Ok(_) => panic!("完整隐藏引用不同不能消费成功"),
+    };
+    assert_eq!(
+        error.downcast_ref::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::InvalidData
+    );
+    assert_eq!(
+        error.to_string(),
+        "隐藏步骤完整引用或consumer身份与索引不符"
+    );
 }
 #[test]
 fn source_heads_preserve_real_within_source_order_before_receive_ties() {
@@ -1238,6 +1281,24 @@ fn replay_historical_original_identity_keys_preserve_all_members() {
             assert_eq!(measured["negative_residual_entries"], 0);
         }
     }
+    // 同一真实身份修复沿固定凭据全读；更晚损坏目录不能替换已绑定边界。
+    let prefix = PublicRecordingReaderV1::recover(&root, 1, 1 << 20)
+        .unwrap()
+        .prefix
+        .unwrap();
+    let later = root.join("stable-99999999999999999999");
+    std::fs::create_dir(&later).unwrap();
+    std::fs::write(later.join("prefix.json"), b"broken-later-prefix").unwrap();
+    let mut replay = PublicReplayV1::open_committed(&root, prefix.clone(), 1, 1 << 20).unwrap();
+    let mut actual = Vec::new();
+    while let Some((input, result)) = replay.next_applied().unwrap() {
+        actual.push((input, fingerprint(&result)));
+    }
+    assert_eq!(actual, expected);
+    assert_eq!(
+        replay.core.applied_prefix().next_input_position,
+        prefix.next_input_position
+    );
 }
 
 #[test]

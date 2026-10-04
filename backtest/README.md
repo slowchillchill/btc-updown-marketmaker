@@ -129,3 +129,41 @@ training的通知只承载本次历史准备的阶段和已完成工作的标量
 `material_trial`新增`preparation_phase_measurements`，包含固定阶段、阶段成功／失败、工作量及相对合并总计的residual。阶段端点复用同一次进程计数快照形成连续差值，residual如实保留，不硬凑到某个热点；未访问阶段为空。/proc的rchar是进程读请求量，read_bytes是进程设备读取计数，均包含计量和少量输出开销，不能进一步归给区间内部函数。阶段端点RSS不是阶段峰值，也不将RSS相加；进程峰值仍由外层GNU及资源测量器记录。
 
 准备失败后，即使结束端点计量不可用，材料示例也优先保存并返回原prepare错误，成功statistics仍为空。输入、End、writer稳定、hidden完整EOF和原write／flush／close／sync责任不变。代表小夹具核开启／关闭的完整材料字节与统计、阶段顺序及物理／入选分母、关闭不采样／输出、计量及日志故障、原准入／初始化／写入错误和既有hidden坏EOF。此工程段真实材料运行0次；旧712.611410194秒仅为后续原合并阶段的比较口径，不据代码接线虚报新的时长或端到端结果。
+
+## 正式已准备材料的复用
+
+`prepare_and_publish_historical_run_v1(&preparation, progress)` 是跨进程复用的正式发布入口。它调用同一原准备实现，只有公共正常 End、writer 稳定、初始化来源写入和 hidden 准备全部成功后，才将 `prepared-run-v1.json.pending` 写完并发布为材料根下的 `prepared-run-v1.json`。失败不由 trial 报告或部分目录补出描述。新准备仍要求新的工作根，不覆盖已发布材料。
+
+描述版本为 `prepared_historical_material_v1`，保存实际有效准备配置（材料工作根以 `.` 表示，解析时取描述所在目录）、范围及用途、原来源清单、日集合 `input_set_identity_sha256`、含初始化的 `source_identity_sha256`、初始化来源、固定市场目录、完整公共 committed prefix、hidden consumer 身份及根内相对文件位置。它没有策略、账户、订单、盘口或观察历史，也没有 hidden 内容摘要；来源路径用于溯源，复用时不读取原 raw 文件。调用方应将成功描述和所属材料作为不可变产物保存，不重新编辑其中的配置。
+
+```rust,ignore
+let description = backtest::prepare_and_publish_historical_run_v1(&preparation, None)?;
+// 每次提供新的策略实例、新运行输出位置及明确的会话/账户配置。
+let report = backtest::run_prepared_historical_v1(
+    &description, &prepared_run_config, sealed_rules, &mut fresh_strategy,
+).await?;
+```
+
+`HistoricalPreparedRunConfigV1` 只包含本次时序、会话/账户初态、策略描述、代码身份、最终性规则位置、SIM/NOE/Ledger/元数据/结果输出、消费及激活身份、原账户接纳策略和原运行资源参数。它不接受第二份 `preparation`；范围、初始化、材料来源、市场目录和读取资源配置均由描述唯一提供。`From<&HistoricalRunConfigV1>` 仅提取原运行字段，便于库调用迁移，不重新准备材料。调用方仍显式加载原规则快照并传入；每次运行都会重新装配 SIM、共享执行、NOE、Ledger 和账户，创建独立 public core、候选/依赖索引和 hidden reader。库不会自动重置任意传入的 `&mut StrategyV1`，调用方必须提供新策略实例。
+
+旧 `run_historical_v1` 保持完整配置和原 prepare 后运行方式，与新入口共用同一装配及经营循环。新入口按描述的固定凭据使用原 `open_committed`，更晚的稳定目录不进入本次视图；候选、保存依赖及历史身份修复扫描也沿同一前缀，保留原完整 EOF/计数责任。描述只做必要版本、相对定位和固定市场/流绑定结构校验，实际公共载荷仍在原读取位置校验。市场目录缺项返回材料错误，避免下标 panic。hidden 在实际索引页引用的 Step 被消费时，核对完整 `HiddenDerivedStepRefV1` 与 consumer 身份；不预扫未消费的尾部，不重hash，不声称这种绑定是不存在的 hidden 内容摘要。正常结束、策略 Exit、原材料/策略错误及不自动重试规则保持。
+
+CLI 使用三个明确模式：
+
+```bash
+# 原方式兼容；省略 --mode 时仍为 run。
+backtest-cli --mode run --config path/to/original-command.json
+
+# 配置文件直接是 HistoricalPreparationConfigV1，不要求策略或账户字段。
+backtest-cli --mode prepare --config path/to/preparation.json
+
+# 配置文件仍含 run/rules/strategy/request_namespace，run改为HistoricalPreparedRunConfigV1。
+backtest-cli --mode reuse --prepared path/to/materials/prepared-run-v1.json \
+  --config path/to/independent-command.json \
+  --strategy.repair.enable_active_repair false \
+  --progress-interval-seconds 30
+```
+
+JSON/TOML 解析、完整策略参数覆盖和显式 `false` 沿原命令层复用；每次 reuse 子进程新建 `ComplementaryPairV1` 及 `StrategyContinuityV1::new_account()`。准备模式不加载经营策略或创建账户。prepare/reuse 工具进度默认30秒、0关闭；reuse 打印打开和结束阶段，经营重放转接原可选 replay 进度，读到记录、应用输入、生成组的含义分别保持，未知工作量和 ETA 不编造。库新运行配置的进度默认关闭，输出故障不替代业务错误。
+
+本段只用原有效工程夹具验证：一次成功发布、原 raw 移走后两次独立复用、完整旧新报告与初始化交付相等、每次原2000初始现金与空策略状态、两个市场连续账户及 hidden 成交、输出与材料字节隔离；另核失败不发布、版本/固定 prefix/缺失市场/实际 hidden 混接。原身份修复夹具证明固定前缀不会读取更晚损坏目录，原隐藏夹具证明同 derivation_position 下其他引用字段不符也失败。既有 Exit、已消费损坏、初始化和正常结束代表继续运行。没有真实十二分钟、首小时、研究或收益运行，没有新速度比例；PR235 的材料与统计445.431763861秒、PR228完整959.236639304秒保留各自旧实测身份，不能当作本段复用性能。旧大材料/失败现场不迁移、不回填描述、不重制；完整研究容量、风险参数和盈利验收仍未完成。

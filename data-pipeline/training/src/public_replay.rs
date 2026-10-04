@@ -279,6 +279,24 @@ pub struct PublicReplayV1 {
 impl PublicReplayV1 {
     pub fn open(root: &Path, page_rows: usize, page_bytes: usize) -> RecordingResult<Self> {
         let reader = PublicRecordingReaderV1::recover(root, page_rows, page_bytes)?;
+        Self::from_reader(reader, page_rows, page_bytes)
+    }
+    /// 固定调用方已发布的稳定前缀，后续目录不进入本次有限视图。
+    pub fn open_committed(
+        root: &Path,
+        prefix: CommittedIngressPrefixV1,
+        page_rows: usize,
+        page_bytes: usize,
+    ) -> RecordingResult<Self> {
+        let reader =
+            PublicRecordingReaderV1::open_committed(root, Some(prefix), page_rows, page_bytes)?;
+        Self::from_reader(reader, page_rows, page_bytes)
+    }
+    fn from_reader(
+        reader: PublicRecordingReaderV1,
+        page_rows: usize,
+        page_bytes: usize,
+    ) -> RecordingResult<Self> {
         let core = PublicObservationCoreV1::new(reader.header.clone())?;
         Ok(Self {
             reader,
@@ -375,6 +393,7 @@ impl PublicReplayV1 {
                 let identity_span = cost::Span::new("identity");
                 let identity_sources = read_historical_identity_sources(
                     &root,
+                    self.reader.prefix.clone(),
                     &input,
                     self.page_rows,
                     self.page_bytes,
@@ -553,6 +572,7 @@ impl PublicReplayV1 {
 /// 原修复成员与唯一规范事实同序；恢复原证据键，不以市场条件替代身份键域。
 fn read_historical_identity_sources(
     root: &Path,
+    prefix: Option<CommittedIngressPrefixV1>,
     input: &RecordedIngressV1,
     rows: usize,
     bytes: usize,
@@ -570,7 +590,7 @@ fn read_historical_identity_sources(
     let mut scan = cost::ScanGuard::new("identity_scan", None, None, true);
     #[cfg(test)]
     let _decode = cost::DecodeScope::new("identity_scan");
-    let mut reader = PublicRecordingReaderV1::recover(root, rows, bytes)?;
+    let mut reader = PublicRecordingReaderV1::open_committed(root, prefix, rows, bytes)?;
     #[cfg(test)]
     scan.opened();
     while let Some(row) = reader.next_row()? {
