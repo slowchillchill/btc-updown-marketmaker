@@ -1,0 +1,1074 @@
+{
+  "schema": "complementary_pair_end_to_end_12m_remeasurement_v1",
+  "status": "success",
+  "delivery_issue": 214,
+  "research_dependency_issue": 185,
+  "measurement_source_commit": "10a8ce588f2b2d6e192253ef90e4205733a54160",
+  "historical_baseline_source_commit": "53fddddc1f9631e2351cb0c1db378826a1c2e842",
+  "configuration": {
+    "scope": {
+      "manifest_paths": [
+        "typed_raw/utc_day=2026-09-09/manifest.json"
+      ],
+      "received_start_utc_ms": 1788912000000,
+      "received_end_utc_ms": 1788912720000,
+      "purpose": "D-0277 #185任务3两市场公共材料、冻结特征与事后标签连接；00:10—00:12仅标签尾段/资源，无账户或收益研究"
+    },
+    "work_root": "current-run/materials",
+    "header": {
+      "input_stream_id": "complementary-pair-e2e-remeasure-20260909-0000-0012",
+      "canonical_rule_version": "canonical-reduction-v1",
+      "observation_version": "market_business_observation_v1",
+      "ordering_version": "historical-source-head-v1",
+      "input_scope": "explicit-manifest/2026-09-09/research-first-two-markets-and-label-tail",
+      "max_pending_ws_terminals": 1024,
+      "initial_state": "Empty"
+    },
+    "canonical": {
+      "decode_batch_rows": 1024,
+      "max_decode_batch_bytes": 67108864,
+      "max_temporary_row_bytes": 16777216,
+      "max_epoch_count_per_source": 1024,
+      "max_pending_ws_terminals": 1024,
+      "max_retained_reducer_entries": 1000000,
+      "canonical_rule_version": "canonical-reduction-v1",
+      "sort": {
+        "max_run_rows": 32768,
+        "max_run_bytes": 67108864,
+        "max_temp_run_files": 128,
+        "merge_fan_in": 8,
+        "max_open_files": 16,
+        "batch_rows": 1024,
+        "max_temp_bytes": 8589934592
+      }
+    },
+    "recording": {
+      "max_artifact_payload_bytes": 16777216,
+      "max_capture_output_bytes": 17179869184,
+      "max_candidate_directory_bytes": 34359738368,
+      "max_observation_l2_levels": 10000,
+      "sort": {
+        "max_run_rows": 32768,
+        "max_run_bytes": 67108864,
+        "max_temp_run_files": 128,
+        "merge_fan_in": 8,
+        "max_open_files": 16,
+        "batch_rows": 1024,
+        "max_temp_bytes": 8589934592
+      }
+    },
+    "read_page_rows": 256,
+    "max_read_batch_bytes": 67108864,
+    "hidden_stream_id": "complementary-pair-e2e-remeasure-hidden-20260909-0000-0012",
+    "metadata_initialization": {
+      "files": [
+        {
+          "manifest_path": "typed_raw/utc_day=2026-09-08/manifest.json",
+          "relative_paths": [
+            "source_kind=polymarket_market_metadata/polymarket_market_metadata_23.parquet"
+          ]
+        }
+      ],
+      "markets": [
+        {
+          "condition_id": "0x1fc54206bf570dbdf843a88d608aee9df9eac980a9ab47e400d787d732f7b748",
+          "snapshot_source_message_id": "d3842b75d06c65d26d38c87e9520c14a0c11d0bf5d210c70dc62ae883b9097e5"
+        },
+        {
+          "condition_id": "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20",
+          "snapshot_source_message_id": "c11b6b3d60cb590a314f6de3a748de5923b4376d3fee8f4a7583fe7bd36ede42"
+        }
+      ],
+      "received_start_utc_ms": 1788912000000,
+      "received_end_utc_ms": 1788912720000,
+      "purpose": "D-0276原选定来源/市场及00:00起点，仅建立市场状态；D-0277后#185当前分段材料右端延至00:12"
+    }
+  },
+  "research_targets": [
+    {
+      "condition_id": "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20",
+      "window": {
+        "start_at_utc_ms": 1788912000000,
+        "end_at_utc_ms": 1788912300000
+      }
+    },
+    {
+      "condition_id": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe",
+      "window": {
+        "start_at_utc_ms": 1788912300000,
+        "end_at_utc_ms": 1788912600000
+      }
+    }
+  ],
+  "progress_interval_seconds": 30,
+  "configuration_changes_from_baseline": [
+    "only experiment output paths and exact execution public/hidden stream IDs; all original business and engineering values preserved",
+    "progress at current tools default 30 seconds, absent in historical tool"
+  ],
+  "build": {
+    "profile": "release, default optimization; production progress enabled at tool default 30s",
+    "commands": [
+      "CARGO_TARGET_DIR=<shared-cache> cargo build -p backtest-cli --example material_trial --release --locked --offline",
+      "CARGO_TARGET_DIR=<shared-cache> cargo build -p baseline-mm --example research_causal_input --release --locked --offline"
+    ],
+    "cargo_lock_sha256": "5fb163db7616f118da41be7732e60963e1c221cd041044d44897c30048d3d5a9",
+    "source_files_sha256": {
+      "backtest/src/preparation.rs": "01028c709db67dd02b85c8a536e148c930831b7aa2d2fd02ee7c197958b18431",
+      "backtest/cli/examples/material_trial.rs": "9a88ccbbe563f3d2a561d2f72ad45f6a77001611d6726c1dd936e0681a1e6f3f",
+      "backtest/cli/examples/material_trial_measure.py": "f01cc44ec6d7353d642f472b02e0a8911dc895658f4d188b100cf121defa605a",
+      "baseline-mm/examples/research_causal_input.rs": "a0f43161812c367ca24a922c762e545e5d26a5ebe92fbb2baa9dded259fde9d8",
+      "baseline-mm/examples/research_causal_input/window_statistics.rs": "a0241161a00bdd43612070d535cec715b50b6658428c00a7f94d3b395b563108",
+      "data-pipeline/training/src/public_replay.rs": "4c48102766e084f19e37ebf766c28f448473543396d70f6a939bd4baff07e4c6",
+      "data-pipeline/training/src/public_replay_progress.rs": "4c213f761b7cfd82ba63c0cb8283f3405b67d89473072558fc8e451816984b79",
+      "data-pipeline/training/src/finite_reference_candidates.rs": "9871d91405efbd131b41516d3b4402284fe3b17203cee9f8161af93e6e5c7ed0",
+      "data-pipeline/training/src/hidden_preparation.rs": "0a6eae9d8cf908e9db6f81fe04be2576e6f58b3c5fb077b6131f3ec1149c0bb2",
+      "sim-system/src/public_consumption.rs": "caa8b3223f968399125477d48a00d87af1463dd9c97771d19e020c9fc5902d2b"
+    },
+    "binaries": {
+      "material_trial": {
+        "path": "material_trial.binary",
+        "bytes": 20827808,
+        "sha256": "d6a113d4c403a6ddf55c01341e038dd21246f16652a637fb5ddfba74f2afe84c"
+      },
+      "research_causal_input": {
+        "path": "research_causal_input.binary",
+        "bytes": 14984864,
+        "sha256": "28f7c2be0fd6e3c166cc541cf7a4ad80ccecc54414071a8c942dca6d5b91560d"
+      }
+    },
+    "private_config_sha256": {
+      "preparation.private.json": "ce920acaa69690970364d1d40e2936fa156d8c609cc06cf98bd97dfdd3508988",
+      "config.private.json": "48e113e1404a4910539bc69aab38900a6b42861267b457ff2686f51cdf507237"
+    },
+    "rustc_version": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "environment_flags": "No RUSTFLAGS/CARGO_BUILD_RUSTFLAGS/RUSTC_WRAPPER/CARGO_BUILD_TARGET/CARGO_PROFILE_RELEASE_DEBUG/CARGO_PROFILE_RELEASE_OPT_LEVEL override recorded"
+  },
+  "input_identity": {
+    "source_identity_sha256": "66892eab3b355e0c05e13b5e8874ff298b898cb62809a89b208a29e82f8ee281",
+    "input_set_identity_sha256": "2cbd7229cd785a26c9302be87be07cc890f806462f9bec1b7c43bab44f7a54fa",
+    "source_manifests": [
+      [
+        "2026-09-09",
+        "93a70f4775bdb3d52bf7de73d58caaa5ccbf2f2d7f6a8e2f00e09c092e1f1918"
+      ]
+    ],
+    "initialization": {
+      "files": [
+        {
+          "file": {
+            "bytes": 97043,
+            "path": "typed_raw/utc_day=2026-09-08/source_kind=polymarket_market_metadata/polymarket_market_metadata_23.parquet",
+            "rows": 792,
+            "schema_version": "polymarket_market_metadata_v6",
+            "sha256": "c3bd000a74909abc1725b7bbe0fe3a72ebf7416b772c0ca28af859568c2f9154",
+            "source_kind": "polymarket_market_metadata"
+          },
+          "manifest_sha256": "c057186754e3690592cf467d85f980af35f9259a4463a0e1e90192ea7192458f",
+          "relative_path": "source_kind=polymarket_market_metadata/polymarket_market_metadata_23.parquet"
+        }
+      ],
+      "input_positions": [
+        0,
+        1,
+        2
+      ],
+      "source_identity_version": "historical-metadata-initialization-source-v1",
+      "source_message_ids": [
+        "6604f5b1ffd2d119547f253c1a06e871d8a792c0c5df54da6c107da0e28cfdc3",
+        "c11b6b3d60cb590a314f6de3a748de5923b4376d3fee8f4a7583fe7bd36ede42",
+        "d3842b75d06c65d26d38c87e9520c14a0c11d0bf5d210c70dc62ae883b9097e5"
+      ]
+    }
+  },
+  "execution": {
+    "real_material_trial_runs": 1,
+    "real_two_market_research_runs": 1,
+    "other_real_runs": 0,
+    "phases": {
+      "prepare": {
+        "old": {
+          "proc_io": {
+            "cancelled_write_bytes": 0,
+            "rchar": 175252867011,
+            "read_bytes": 19167793152,
+            "syscr": 37894652,
+            "syscw": 201156,
+            "wchar": 1577055034,
+            "write_bytes": 1585065984
+          },
+          "system_seconds": 18.27,
+          "user_seconds": 887.93,
+          "wall_seconds": 922.278901907
+        },
+        "new": {
+          "proc_io": {
+            "cancelled_write_bytes": 0,
+            "rchar": 164048982158,
+            "read_bytes": 5302063104,
+            "syscr": 37271555,
+            "syscw": 201156,
+            "wchar": 1577037882,
+            "write_bytes": 1585057792
+          },
+          "system_seconds": 15.79,
+          "user_seconds": 500.19,
+          "wall_seconds": 525.219863807
+        }
+      },
+      "general_statistics": {
+        "old": {
+          "proc_io": {
+            "cancelled_write_bytes": 0,
+            "rchar": 11203871048,
+            "read_bytes": 14745329664,
+            "syscr": 623108,
+            "syscw": 0,
+            "wchar": 0,
+            "write_bytes": 0
+          },
+          "system_seconds": 3.5,
+          "user_seconds": 357.26,
+          "wall_seconds": 368.361340506
+        },
+        "new": {
+          "proc_io": {
+            "cancelled_write_bytes": 0,
+            "rchar": 5034507564,
+            "read_bytes": 5272317952,
+            "syscr": 244792,
+            "syscw": 1584,
+            "wchar": 7385,
+            "write_bytes": 24576
+          },
+          "system_seconds": 1.68,
+          "user_seconds": 182.92,
+          "wall_seconds": 187.391546387
+        }
+      },
+      "two_market_research": {
+        "old": {
+          "wall_seconds": 553.177945898,
+          "proc_io": {
+            "rchar": 11203984421,
+            "wchar": 0,
+            "syscr": 623105,
+            "syscw": 0,
+            "read_bytes": 14743703552,
+            "write_bytes": 0,
+            "cancelled_write_bytes": 0
+          },
+          "exclusive_cpu_seconds": null,
+          "exclusive_max_rss_kib": null
+        },
+        "new": {
+          "wall_seconds": 246.62522911,
+          "proc_io": {
+            "rchar": 5034620979,
+            "wchar": 8642,
+            "syscr": 244789,
+            "syscw": 1848,
+            "read_bytes": 5270691840,
+            "write_bytes": 32768,
+            "cancelled_write_bytes": 0
+          },
+          "exclusive_cpu_seconds": null,
+          "exclusive_max_rss_kib": null
+        }
+      }
+    },
+    "phase_wall_seconds_sum": {
+      "old": 1843.8181883109999,
+      "new": 959.236639304,
+      "difference_seconds": -884.5815490069998,
+      "single_observation_decrease_percent": 47.97553005035201
+    },
+    "gnu_processes": {
+      "material_trial": {
+        "old": {
+          "wall_seconds": 1290.66,
+          "user_seconds": 1245.19,
+          "system_seconds": 21.79,
+          "max_rss_kib": 422884,
+          "file_system_inputs_512b": 66236568,
+          "file_system_outputs_512b": 3096080,
+          "exit_code": 0
+        },
+        "new": {
+          "wall_seconds": 712.63,
+          "user_seconds": 683.11,
+          "system_seconds": 17.49,
+          "max_rss_kib": 421324,
+          "file_system_inputs_512b": 20653088,
+          "file_system_outputs_512b": 3096112,
+          "exit_code": 0
+        }
+      },
+      "two_market_research": {
+        "old": {
+          "wall_seconds": 553.22,
+          "user_seconds": 539.7,
+          "system_seconds": 3.99,
+          "max_rss_kib": 180828,
+          "file_system_inputs_512b": 28796296,
+          "file_system_outputs_512b": 27344,
+          "exit_code": 0
+        },
+        "new": {
+          "wall_seconds": 246.67,
+          "user_seconds": 240.87,
+          "system_seconds": 1.82,
+          "max_rss_kib": 199112,
+          "file_system_inputs_512b": 10294320,
+          "file_system_outputs_512b": 27408,
+          "exit_code": 0
+        }
+      }
+    },
+    "timeline": {
+      "material_launcher_utc": "2026-10-04T04:16:05.737613+00:00",
+      "material_final_gnu_record_modified_utc": "2026-10-04T04:27:58.403984+00:00",
+      "research_launcher_utc": "2026-10-04T04:28:18.151603+00:00",
+      "research_final_gnu_record_modified_utc": "2026-10-04T04:32:24.832810+00:00",
+      "individual_internal_phase_utc_start_end": "not independently persisted; original phase wall/process counters retained; file times identify completed records, not exact internal event clocks"
+    },
+    "monitor_wall_seconds_including_final_inventory_hash": 714.3901513500023,
+    "stdout_stderr": {
+      "attempt-1/stdout.log": {
+        "bytes": 0,
+        "lines": 0,
+        "schemas": {},
+        "non_json_lines": 0
+      },
+      "attempt-1/stderr.log": {
+        "bytes": 7385,
+        "lines": 12,
+        "schemas": {
+          "finite_public_replay_progress_v1": 12
+        },
+        "non_json_lines": 0
+      },
+      "diagnostic-1/stdout.log": {
+        "bytes": 0,
+        "lines": 0,
+        "schemas": {},
+        "non_json_lines": 0
+      },
+      "diagnostic-1/stderr.log": {
+        "bytes": 8642,
+        "lines": 14,
+        "schemas": {
+          "finite_public_replay_progress_v1": 14
+        },
+        "non_json_lines": 0
+      }
+    },
+    "independent_progress_print_cost_measured": false
+  },
+  "business": {
+    "prepared_markets": [
+      "0x1fc54206bf570dbdf843a88d608aee9df9eac980a9ab47e400d787d732f7b748",
+      "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe",
+      "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e",
+      "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20",
+      "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92"
+    ],
+    "normal_public_prefix": {
+      "input_stream_id": "complementary-pair-e2e-remeasure-20260909-0000-0012",
+      "next_canonical_position": 208661,
+      "next_group_position": 208638,
+      "next_input_position": 208688,
+      "next_observation_position": 806966,
+      "next_public_index_position": 208638,
+      "normal_end": true,
+      "stable_storage_ref": "stable-00000000000000000000"
+    },
+    "hidden_preparation_completed": true,
+    "hidden_preparation_source_prefix": {
+      "input_stream_id": "complementary-pair-e2e-remeasure-20260909-0000-0012",
+      "next_canonical_position": 208661,
+      "next_group_position": 208638,
+      "next_input_position": 208688,
+      "next_observation_position": 806966,
+      "next_public_index_position": 208638,
+      "normal_end": true,
+      "stable_storage_ref": "stable-00000000000000000000"
+    },
+    "research_groups_excluding_initialization": 208635,
+    "initialization_group_count": 3,
+    "material_counts": {
+      "groups_by_section": {
+        "feature_range": 159579,
+        "initialization": 3,
+        "label_tail": 49056
+      },
+      "market_catalog": {
+        "0x1fc54206bf570dbdf843a88d608aee9df9eac980a9ab47e400d787d732f7b748": {
+          "clob_market_id": "4352293",
+          "condition_id": "0x1fc54206bf570dbdf843a88d608aee9df9eac980a9ab47e400d787d732f7b748",
+          "window": {
+            "end_at_utc_ms": 1788912000000,
+            "start_at_utc_ms": 1788911700000
+          }
+        },
+        "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe": {
+          "clob_market_id": "4352362",
+          "condition_id": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe",
+          "window": {
+            "end_at_utc_ms": 1788912600000,
+            "start_at_utc_ms": 1788912300000
+          }
+        },
+        "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e": {
+          "clob_market_id": "4352365",
+          "condition_id": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e",
+          "window": {
+            "end_at_utc_ms": 1788912900000,
+            "start_at_utc_ms": 1788912600000
+          }
+        },
+        "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20": {
+          "clob_market_id": "4352318",
+          "condition_id": "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20",
+          "window": {
+            "end_at_utc_ms": 1788912300000,
+            "start_at_utc_ms": 1788912000000
+          }
+        },
+        "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92": {
+          "clob_market_id": "4352438",
+          "condition_id": "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92",
+          "window": {
+            "end_at_utc_ms": 1788913200000,
+            "start_at_utc_ms": 1788912900000
+          }
+        }
+      },
+      "observations_by_section": {
+        "feature_range": 561709,
+        "initialization": 4,
+        "label_tail": 245253
+      },
+      "observations_per_complete_group": {
+        "1": 2,
+        "2": 351,
+        "3": 75907,
+        "4": 83349,
+        "5": 49029
+      }
+    },
+    "markets": [
+      {
+        "target": {
+          "condition_id": "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20",
+          "window": {
+            "end_at_utc_ms": 1788912300000,
+            "start_at_utc_ms": 1788912000000
+          }
+        },
+        "clob_market_id": "4352318",
+        "source_width_and_repetition": {
+          "distinct_source_ids_by_field_inside_window": {
+            "asset/Down/asks": 45611,
+            "asset/Down/bids": 17495,
+            "asset/Down/tick": 3,
+            "asset/Up/asks": 17495,
+            "asset/Up/bids": 45611,
+            "asset/Up/tick": 3,
+            "binance_depth": 2975,
+            "binance_trade": 1903,
+            "spot": 281,
+            "twap_60": 283
+          },
+          "distinct_spot_sources_visible_before_right_boundary_including_pre_window": 281,
+          "groups_visible_at_or_after_right_boundary": 132391,
+          "initialization_groups": 3,
+          "initialization_observations": 4,
+          "observations_per_complete_group": {
+            "1": 2,
+            "2": 351,
+            "3": 75907,
+            "4": 83349,
+            "5": 49029
+          },
+          "research_groups": 76244,
+          "research_observations": 228382,
+          "target_initialization_observations": 1,
+          "target_observations_per_distinct_spot_source_inside_window": 271.33096085409255,
+          "target_post_window_observations": 132391,
+          "target_pre_window_observations": 0,
+          "target_repeated_spot_observations_inside_window": 75963,
+          "target_research_observations": 76244
+        },
+        "spot_state_updates_including_legal_context": 282,
+        "frozen_sampling_count": 8,
+        "descriptive_window_count": 40,
+        "all_frozen_and_right_boundary_terminal_quality": "unknown_not_observed",
+        "right_boundary_hold": {
+          "from_utc_ms": 1788912240000,
+          "to_utc_ms": 1788912300000,
+          "frozen_visible_cutoff_utc_ms": 1788912300000,
+          "covered_ms": 60000,
+          "missing_ms": 0,
+          "complete_hold_approximation": true,
+          "known_price_times_seconds": "4712773.59752634817231",
+          "mean_price_if_complete": "78546.226625439136205166666667"
+        },
+        "last_hold_segment_duration_ms": 309,
+        "posthoc_first_usable_terminal": {
+          "condition_id": "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20",
+          "fact": {
+            "dependency_frontier": {
+              "input_stream_id": "complementary-pair-e2e-remeasure-20260909-0000-0012",
+              "next_input_position": 127384
+            },
+            "direct_anchors": [
+              {
+                "field_path": "terminal",
+                "group_id": "ba415fb6ca2f319c3f474efbfa338c6b9e36fc054612edbba4c3afe39243b1a5",
+                "position": {
+                  "closed_at_input_position": 127383,
+                  "fact_ordinal": 0,
+                  "input_stream_id": "complementary-pair-e2e-remeasure-20260909-0000-0012"
+                },
+                "received_at_utc_ms": 1788912418265,
+                "source_event_at_utc_ms": 1788912418253,
+                "source_message_id": "ac687412d394d6b13de86e4d7172a85770afc728b4ab427e87fae6ed5a8de21d"
+              },
+              {
+                "field_path": "terminal",
+                "group_id": "ba415fb6ca2f319c3f474efbfa338c6b9e36fc054612edbba4c3afe39243b1a5",
+                "position": {
+                  "closed_at_input_position": 127383,
+                  "fact_ordinal": 0,
+                  "input_stream_id": "complementary-pair-e2e-remeasure-20260909-0000-0012"
+                },
+                "received_at_utc_ms": 1788912418265,
+                "source_event_at_utc_ms": 1788912418253,
+                "source_message_id": "d91da0cc18abee80b02c6915a47277338b21a7c80c2d1e7e9f49e14d7456b0f4"
+              }
+            ],
+            "quality": "fresh",
+            "value": {
+              "mapping_rule_version": "polymarket-binary-winning-asset-one-hot-v1",
+              "payout_vector": [
+                {
+                  "asset": {
+                    "outcome": {
+                      "index": 1,
+                      "label": "Down"
+                    },
+                    "token_id": "75902788286939706379430622188372065513567695002626149478929368630888442189116"
+                  },
+                  "payout_pusd_per_share": "0"
+                },
+                {
+                  "asset": {
+                    "outcome": {
+                      "index": 0,
+                      "label": "Up"
+                    },
+                    "token_id": "102849750551531882592626838681952450548049709627821897076456675572108598447456"
+                  },
+                  "payout_pusd_per_share": "1"
+                }
+              ],
+              "status": "RESOLVED",
+              "winning_asset_id": "102849750551531882592626838681952450548049709627821897076456675572108598447456",
+              "winning_outcome": "Up"
+            }
+          },
+          "first_visible_at_utc_ms": 1788912418265,
+          "group_position": 127344
+        },
+        "labels_not_backfilled_into_frozen_features": true
+      },
+      {
+        "target": {
+          "condition_id": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe",
+          "window": {
+            "end_at_utc_ms": 1788912600000,
+            "start_at_utc_ms": 1788912300000
+          }
+        },
+        "clob_market_id": "4352362",
+        "source_width_and_repetition": {
+          "distinct_source_ids_by_field_inside_window": {
+            "asset/Down/asks": 48164,
+            "asset/Down/bids": 21272,
+            "asset/Down/tick": 1,
+            "asset/Up/asks": 21272,
+            "asset/Up/bids": 48164,
+            "asset/Up/tick": 1,
+            "binance_depth": 3001,
+            "binance_trade": 1501,
+            "spot": 263,
+            "twap_60": 263
+          },
+          "distinct_spot_sources_visible_before_right_boundary_including_pre_window": 542,
+          "groups_visible_at_or_after_right_boundary": 49056,
+          "initialization_groups": 3,
+          "initialization_observations": 4,
+          "observations_per_complete_group": {
+            "1": 2,
+            "2": 351,
+            "3": 75907,
+            "4": 83349,
+            "5": 49029
+          },
+          "research_groups": 83335,
+          "research_observations": 333327,
+          "target_initialization_observations": 0,
+          "target_observations_per_distinct_spot_source_inside_window": 316.8631178707224,
+          "target_post_window_observations": 49056,
+          "target_pre_window_observations": 75894,
+          "target_repeated_spot_observations_inside_window": 83073,
+          "target_research_observations": 83335
+        },
+        "spot_state_updates_including_legal_context": 542,
+        "frozen_sampling_count": 8,
+        "descriptive_window_count": 40,
+        "all_frozen_and_right_boundary_terminal_quality": "unknown_not_observed",
+        "right_boundary_hold": {
+          "from_utc_ms": 1788912540000,
+          "to_utc_ms": 1788912600000,
+          "frozen_visible_cutoff_utc_ms": 1788912600000,
+          "covered_ms": 60000,
+          "missing_ms": 0,
+          "complete_hold_approximation": true,
+          "known_price_times_seconds": "4716604.26754848855181",
+          "mean_price_if_complete": "78610.071125808142530166666667"
+        },
+        "last_hold_segment_duration_ms": 682,
+        "posthoc_first_usable_terminal": {
+          "condition_id": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe",
+          "fact": {
+            "dependency_frontier": {
+              "input_stream_id": "complementary-pair-e2e-remeasure-20260909-0000-0012",
+              "next_input_position": 208477
+            },
+            "direct_anchors": [
+              {
+                "field_path": "terminal",
+                "group_id": "71cba22e9e3e8aca34d75c7fe6173bdebe46139b0ee736583ec1a73290c507dd",
+                "position": {
+                  "closed_at_input_position": 208476,
+                  "fact_ordinal": 0,
+                  "input_stream_id": "complementary-pair-e2e-remeasure-20260909-0000-0012"
+                },
+                "received_at_utc_ms": 1788912718592,
+                "source_event_at_utc_ms": 1788912718583,
+                "source_message_id": "82692d472c462a3851ced3bea6934e28562cbdcb6a8ea7bd4c1fd334967ff7e9"
+              },
+              {
+                "field_path": "terminal",
+                "group_id": "71cba22e9e3e8aca34d75c7fe6173bdebe46139b0ee736583ec1a73290c507dd",
+                "position": {
+                  "closed_at_input_position": 208476,
+                  "fact_ordinal": 0,
+                  "input_stream_id": "complementary-pair-e2e-remeasure-20260909-0000-0012"
+                },
+                "received_at_utc_ms": 1788912718592,
+                "source_event_at_utc_ms": 1788912718583,
+                "source_message_id": "dd7ec4059fc6877e69682fc4d9295af7bbae43b1e195a04611e6a22da73b9c49"
+              }
+            ],
+            "quality": "fresh",
+            "value": {
+              "mapping_rule_version": "polymarket-binary-winning-asset-one-hot-v1",
+              "payout_vector": [
+                {
+                  "asset": {
+                    "outcome": {
+                      "index": 0,
+                      "label": "Up"
+                    },
+                    "token_id": "32873955818661995964832066100538906828570131847504044153189153470372430981428"
+                  },
+                  "payout_pusd_per_share": "1"
+                },
+                {
+                  "asset": {
+                    "outcome": {
+                      "index": 1,
+                      "label": "Down"
+                    },
+                    "token_id": "79296106124034057884863934885073554921845356166439766327235136060874535070646"
+                  },
+                  "payout_pusd_per_share": "0"
+                }
+              ],
+              "status": "RESOLVED",
+              "winning_asset_id": "32873955818661995964832066100538906828570131847504044153189153470372430981428",
+              "winning_outcome": "Up"
+            }
+          },
+          "first_visible_at_utc_ms": 1788912718592,
+          "group_position": 208427
+        },
+        "labels_not_backfilled_into_frozen_features": true
+      }
+    ],
+    "effective_public_stream_header": {
+      "input_stream_id": "complementary-pair-e2e-remeasure-20260909-0000-0012",
+      "canonical_rule_version": "canonical-reduction-v1",
+      "observation_version": "market_business_observation_v1",
+      "ordering_version": "historical-source-head-v2",
+      "input_scope": "explicit-manifest/2026-09-09/research-first-two-markets-and-label-tail",
+      "max_pending_ws_terminals": 1024,
+      "initial_state": "Empty"
+    },
+    "stream_header_equal_except_exact_execution_id": true
+  },
+  "complete_result_comparison": [
+    {
+      "name": "complete_material_trial",
+      "input_reports": [
+        {
+          "side": "old",
+          "logical_path": "attempt-1/trial.private.json",
+          "bytes": 113456,
+          "sha256": "58f21852bb69f52df666b2a3f85adf27f51d926a396ad11a1538cc70edb9c800"
+        },
+        {
+          "side": "new",
+          "logical_path": "attempt-1/trial.private.json",
+          "bytes": 113502,
+          "sha256": "1909f004e5a3337b1e5a98aaea1529841d65df04d0abfc1fdf8a4f679c74cbbc"
+        }
+      ],
+      "excluded_top_level_fields": [
+        "/prepare_measurement",
+        "/progress_interval_seconds",
+        "/statistics_measurement"
+      ],
+      "normalized_leaf_counts": {
+        "old": {
+          "exact_execution_stream_id": 4,
+          "experiment_output_path": 3
+        },
+        "new": {
+          "exact_execution_stream_id": 4,
+          "experiment_output_path": 3
+        }
+      },
+      "difference_count": 0,
+      "differences": [],
+      "equal_after_explicit_execution_only_projection": true
+    },
+    {
+      "name": "complete_two_market_research",
+      "input_reports": [
+        {
+          "side": "old",
+          "logical_path": "diagnostic-1/result.private.json",
+          "bytes": 13996356,
+          "sha256": "283d037649c6ba39644551c272c32751b4a1bc6cea509b14cb03817c05e49c9f"
+        },
+        {
+          "side": "new",
+          "logical_path": "diagnostic-1/result.private.json",
+          "bytes": 13996406,
+          "sha256": "5e5d6623b67666a4a6a4cea913ed0a463850dc0a123740d8e34ffb6df1a26a8c"
+        }
+      ],
+      "excluded_top_level_fields": [
+        "/measurement",
+        "/progress_interval_seconds"
+      ],
+      "normalized_leaf_counts": {
+        "old": {
+          "experiment_output_path": 2,
+          "exact_execution_stream_id": 5288
+        },
+        "new": {
+          "experiment_output_path": 2,
+          "exact_execution_stream_id": 5288
+        }
+      },
+      "difference_count": 0,
+      "differences": [],
+      "equal_after_explicit_execution_only_projection": true
+    }
+  ],
+  "comparison_contract": {
+    "exact_execution_stream_values": {
+      "old_public": "complementary-pair-causal-labels-20260909-0000-0012",
+      "new_public": "complementary-pair-e2e-remeasure-20260909-0000-0012",
+      "old_hidden": "complementary-pair-causal-labels-hidden-20260909-0000-0012",
+      "new_hidden": "complementary-pair-e2e-remeasure-hidden-20260909-0000-0012"
+    },
+    "path_normalization": "Only each experiment output root and descendants; original typed_raw source paths retained and compared unchanged",
+    "coverage": "Entire parsed trial and both full market results, including every spot state, direct source/dependency position, quality, visible clock, frozen sample, reference change, descriptive window, hold segment and posthoc label; only listed top-level measurement/progress and exact execution identity/path fields excluded/normalized",
+    "not_proved": "No separate raw recorded key/payload byte equivalence pass or re-prepare/replay added. Result equality does not prove every stored field or strategy profitability."
+  },
+  "materials": {
+    "old": {
+      "final_exact": {
+        "files": 13,
+        "logical_bytes": 1458053463,
+        "allocated_bytes": 1458102272
+      },
+      "final_subdirectories": {
+        "merge": {
+          "files": 6,
+          "logical_bytes": 41632600,
+          "allocated_bytes": 41648128
+        },
+        "public": {
+          "files": 4,
+          "logical_bytes": 1259235038,
+          "allocated_bytes": 1259253760
+        },
+        "hidden": {
+          "files": 3,
+          "logical_bytes": 157185825,
+          "allocated_bytes": 157200384
+        }
+      },
+      "sampled_peak_logical_bytes_lower_bound": 1470573002,
+      "sampled_peak_allocated_bytes_lower_bound": 1470640128
+    },
+    "new": {
+      "final_exact": {
+        "files": 13,
+        "logical_bytes": 1458037982,
+        "allocated_bytes": 1458089984
+      },
+      "final_subdirectories": {
+        "merge": {
+          "files": 6,
+          "logical_bytes": 41632600,
+          "allocated_bytes": 41648128
+        },
+        "public": {
+          "files": 4,
+          "logical_bytes": 1259222735,
+          "allocated_bytes": 1259241472
+        },
+        "hidden": {
+          "files": 3,
+          "logical_bytes": 157182647,
+          "allocated_bytes": 157200384
+        }
+      },
+      "sampled_peak_logical_bytes_lower_bound": 1467210474,
+      "sampled_peak_allocated_bytes_lower_bound": 1467277312
+    },
+    "new_final_files": [
+      {
+        "path": "merge/5/dpt-external-sort/sorted.parquet",
+        "logical_bytes": 178893,
+        "allocated_bytes": 180224,
+        "sha256": "dd76978d2ccb6abc954b15deb49e79b7a3862b39d41433a890a5bed6b877eead"
+      },
+      {
+        "path": "merge/0/dpt-external-sort/sorted.parquet",
+        "logical_bytes": 61373,
+        "allocated_bytes": 61440,
+        "sha256": "eec9a8a87c774b70a7ecbc33d57673a6a5b0d4a44e0ac2de33317710dbfe4aeb"
+      },
+      {
+        "path": "merge/4/dpt-external-sort/sorted.parquet",
+        "logical_bytes": 160536,
+        "allocated_bytes": 163840,
+        "sha256": "18cdde4ae21940ebdf68bb0e1550e67d980205893d4222c6b839a6fdf0e6fdac"
+      },
+      {
+        "path": "merge/3/dpt-external-sort/sorted.parquet",
+        "logical_bytes": 979925,
+        "allocated_bytes": 983040,
+        "sha256": "78ec958c66706ea301bd76fb2ebd2aaf41705e7acbdc3f49e1ff618fe3b198e4"
+      },
+      {
+        "path": "merge/1/dpt-external-sort/sorted.parquet",
+        "logical_bytes": 38094725,
+        "allocated_bytes": 38100992,
+        "sha256": "941fafbf018f92ecfc5bbc1527360758bd84185dd5dc1dc03c898e85a64c5874"
+      },
+      {
+        "path": "merge/2/dpt-external-sort/sorted.parquet",
+        "logical_bytes": 2157148,
+        "allocated_bytes": 2158592,
+        "sha256": "38c5ec612d23b5175026ef53ce64003f04d83d33f319339092d690487837dd1a"
+      },
+      {
+        "path": "public/historical-initialization.json",
+        "logical_bytes": 874,
+        "allocated_bytes": 4096,
+        "sha256": "1603e910e91d53f18f753f156fa4d8647ff74e4c9b089f42604260a77d459602"
+      },
+      {
+        "path": "public/stream.json",
+        "logical_bytes": 368,
+        "allocated_bytes": 4096,
+        "sha256": "480defa7af1c39584f04e2f595bba4a357a639b00700eab24693004793413c58"
+      },
+      {
+        "path": "public/stable-00000000000000000000/prefix.json",
+        "logical_bytes": 304,
+        "allocated_bytes": 4096,
+        "sha256": "c1d62d98edef8fc64dcfbb760030fb710514a8d55ec40d9bc76500b2e5ce9e67"
+      },
+      {
+        "path": "public/stable-00000000000000000000/captured.parquet",
+        "logical_bytes": 1259221189,
+        "allocated_bytes": 1259229184,
+        "sha256": "28a31aab67f1abda8dc57ef03fadd91130cfc9ff81f53198dce0d9c337a3b40d"
+      },
+      {
+        "path": "hidden/derived/captured.parquet",
+        "logical_bytes": 101620703,
+        "allocated_bytes": 101625856,
+        "sha256": "0fdc0e305b0524e45c3124da22c3ef2b058631cfba41be82772799fcab3cf630"
+      },
+      {
+        "path": "hidden/messages/dpt-external-sort/sorted.parquet",
+        "logical_bytes": 30000158,
+        "allocated_bytes": 30007296,
+        "sha256": "d08ede56efb7360c4a4e68fae287078fa62dc3eb738b0f1217250e5d5013da25"
+      },
+      {
+        "path": "hidden/index/dpt-external-sort/sorted.parquet",
+        "logical_bytes": 25561786,
+        "allocated_bytes": 25567232,
+        "sha256": "14bc86a0198dda8883784f4a47f41ec6c9c6814ab312ee77c7c9eaa43ce674bf"
+      }
+    ],
+    "sample_interval_seconds": 1,
+    "peak_note": "采样峰值仅为观测下界；遍历不是原子快照"
+  },
+  "disk_and_shared_build_cache": {
+    "before_build": {
+      "utc": "2026-10-04T04:14:10.831827+00:00",
+      "disk_free_bytes": 284022095872,
+      "cache_logical_bytes": 43065027159,
+      "cache_allocated_bytes": 43207766016
+    },
+    "after_build": {
+      "utc": "2026-10-04T04:15:52.201389+00:00",
+      "disk_free_bytes": 283918905344,
+      "cache_logical_bytes": 43065441338,
+      "cache_allocated_bytes": 43208192000
+    },
+    "after_runs": {
+      "utc": "2026-10-04T04:33:02.767332+00:00",
+      "disk_free_bytes": 313093697536,
+      "cache_logical_bytes": 43065441338,
+      "cache_allocated_bytes": 43208192000
+    },
+    "attribution": "shared host/cache; between-time deltas not exclusive task attribution"
+  },
+  "evidence_files": [
+    {
+      "path": "build-identity.private.json",
+      "bytes": 2746,
+      "sha256": "ac484f22eb817a0cad32200735856f243f9745d1848585aafd21365f2b1611f4"
+    },
+    {
+      "path": "preparation.private.json",
+      "bytes": 3019,
+      "sha256": "ce920acaa69690970364d1d40e2936fa156d8c609cc06cf98bd97dfdd3508988"
+    },
+    {
+      "path": "config.private.json",
+      "bytes": 872,
+      "sha256": "48e113e1404a4910539bc69aab38900a6b42861267b457ff2686f51cdf507237"
+    },
+    {
+      "path": "attempt-1/trial.private.json",
+      "bytes": 113502,
+      "sha256": "1909f004e5a3337b1e5a98aaea1529841d65df04d0abfc1fdf8a4f679c74cbbc"
+    },
+    {
+      "path": "attempt-1/resources.private.json",
+      "bytes": 106357,
+      "sha256": "07b74f303797f4c5f16dc8c46523f21ddb78f586fd659c7da3fdf2d14b5d93b1"
+    },
+    {
+      "path": "attempt-1/gnu-time.txt",
+      "bytes": 1029,
+      "sha256": "9d506f6cc17bc7a19a2ff0555bc59182f603ff75e12ce0a33de3f470bded8d77"
+    },
+    {
+      "path": "attempt-1/stdout.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "attempt-1/stderr.log",
+      "bytes": 7385,
+      "sha256": "9fa810746369c42767153ed138c68408bf3406d973f3cdc76175a6c4369d2291"
+    },
+    {
+      "path": "diagnostic-1/result.private.json",
+      "bytes": 13996406,
+      "sha256": "5e5d6623b67666a4a6a4cea913ed0a463850dc0a123740d8e34ffb6df1a26a8c"
+    },
+    {
+      "path": "diagnostic-1/gnu-time.txt",
+      "bytes": 1029,
+      "sha256": "d2b598cb9f7b8e823022af156d8f6a162d9d634d012a0b75d3614e8bc1cad538"
+    },
+    {
+      "path": "diagnostic-1/stdout.log",
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "diagnostic-1/stderr.log",
+      "bytes": 8642,
+      "sha256": "ee50a6b42f14c5662213a24d57d23589c615cc022a05c2638eea94b9bc8861b6"
+    },
+    {
+      "path": "comparison.private.json",
+      "bytes": 3640309,
+      "sha256": "29c656389b7dcb8ee08e43a97d7e85f06cc1e90cd30420a3a63049763af1ff3b"
+    },
+    {
+      "path": "compare_results.py",
+      "bytes": 3362,
+      "sha256": "9ff75ee2b615f4d00beae7bb1057324105fcac49fb09b8f5be1b9d9ad1e0b9a5"
+    },
+    {
+      "path": "project_report.py",
+      "bytes": 13236,
+      "sha256": "448d8859d7dd2dc482ee27321444bff412056f170f91353f7b40790793175363"
+    },
+    {
+      "path": "completion-observation.private.json",
+      "bytes": 1362,
+      "sha256": "32cf09c064b590a21db2766943648a12d8cbee0dffce8a67707d22ed775dae3c"
+    }
+  ],
+  "public_projection_omissions": [
+    "private absolute execution and typed_raw paths replaced with logical paths; machine-specific full proc status/meminfo omitted",
+    "resource per-second samples omitted, retaining exact final inventory and sampled peak lower bounds",
+    "complete trial statistics and market frozen_samples/spot_updates/reference_changes/cross_source/hold-segment arrays not duplicated; original full reports compared and immutable raw report identities retained",
+    "complete per-leaf execution normalization list omitted; counts and exact replacement values retained; original full comparison retained privately"
+  ],
+  "validation": {
+    "code_changed": false,
+    "fresh_release_builds": 2,
+    "reused_engineering_pr": 226,
+    "workspace_passed": 1292,
+    "workspace_failed": 0,
+    "workspace_ignored": 21,
+    "explicitly_skipped": "four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second",
+    "checks": "PR226 fixed workspace/check/fmt/default clippy reused; documentation/json/diff/evidence checks apply to this report"
+  },
+  "limits": [
+    "single historical cross-version observation, shared host and uncontrolled cache order; not an isolated same-binary performance pair or stable speed ratio",
+    "current History.window constructs then discards window_with_pairs provenance; same reported formula not identical operations",
+    "prepare includes original daily source admission/decoding and merge; no separately measured internal phase attribution or progress percentage",
+    "research phase exclusive CPU/RSS not independently measured; GNU total process values include result serialization; material_trial phase CPU/I/O do not supply exclusive RSS",
+    "progress logging cost not independently separated",
+    "production compression/resource defaults unchanged; one twelve-minute success does not close full three-day/fifteen-day storage budget or validate sigma/probability/risk/profit"
+  ],
+  "evidence_non_material_non_cache": {
+    "measurement_utc": "2026-10-04T04:38:12.722683+00:00",
+    "files": 27,
+    "logical_bytes": 53852172,
+    "allocated_bytes": 53911552,
+    "note": "includes saved binaries, Cargo files, configs, build logs, raw results and comparison/projection helpers; excludes materials/shared Cargo cache; before final handoff verification files"
+  }
+}
