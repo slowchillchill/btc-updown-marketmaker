@@ -47,7 +47,7 @@ impl Shared {
         // 每次缓冲补充只锁一次；页头的逐字节读取由返回 Read 的 BufReader 吸收。
         let mut window = self.window.lock().unwrap();
         let offset = start.checked_sub(window.start);
-        if !offset.is_some_and(|offset| offset < window.valid as u64) {
+        if offset.is_none_or(|offset| offset >= window.valid as u64) {
             let read = self.file_read(window.bytes.as_mut_slice(), start)?;
             window.start = start;
             window.valid = read;
