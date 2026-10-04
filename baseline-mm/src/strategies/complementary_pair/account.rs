@@ -1,6 +1,31 @@
 use super::*;
 
 impl ComplementaryPairV1 {
+    pub(super) fn orphan_fee(
+        trades: &[FrozenTradeEconomicsV1],
+        condition: &ConditionId,
+    ) -> Result<(R, bool), StrategyErrorV1> {
+        let mut fee = R::zero();
+        let mut unknown = false;
+        for trade in trades.iter().filter(|t| {
+            &t.fact.condition_id == condition && t.success_applied && t.economic_applied
+        }) {
+            if let Some(quantity) = known(&trade.unpaired_contribution_shares) {
+                let quantity = rational(quantity)?;
+                let original = r(decimal(&trade.fact.base_quantity_shares)?);
+                if !original.is_zero() {
+                    fee = fee.add(
+                        &r(decimal(&trade.actual_net_fee_pusd)?)
+                            .mul(&quantity)
+                            .divided_by(&original),
+                    );
+                }
+            } else {
+                unknown = true;
+            }
+        }
+        Ok((fee, unknown))
+    }
     pub(super) fn state(
         &self,
         input: &StrategyInputV1,
@@ -33,23 +58,9 @@ impl ComplementaryPairV1 {
                 orphan[side] = decimal(&m.orphan_shares[i])?;
             }
             principal = rational(&m.unresolved_orphan_principal_cost_pusd)?;
-            for t in input.trade_economics.iter().filter(|t| {
-                &t.fact.condition_id == condition && t.success_applied && t.economic_applied
-            }) {
-                if let Some(q) = known(&t.unpaired_contribution_shares) {
-                    let q = rational(q)?;
-                    let original = r(decimal(&t.fact.base_quantity_shares)?);
-                    if !original.is_zero() {
-                        fee = fee.add(
-                            &r(decimal(&t.actual_net_fee_pusd)?)
-                                .mul(&q)
-                                .divided_by(&original),
-                        );
-                    }
-                } else if orphan.iter().any(|q| *q > Decimal::ZERO) {
-                    unknown = true;
-                }
-            }
+            let (orphan_fee, fee_unknown) = Self::orphan_fee(&input.trade_economics, condition)?;
+            fee = orphan_fee;
+            unknown |= fee_unknown && orphan.iter().any(|q| *q > Decimal::ZERO);
         }
         let mut pending = Vec::new();
         let orders: Vec<_> = input.action_before.orders().collect();

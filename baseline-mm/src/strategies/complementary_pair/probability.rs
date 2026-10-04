@@ -8,6 +8,7 @@ pub enum EstimateUnavailableV1 {
     MissingSettlementPrice,
     MissingWindowHistory,
     MarketEnded,
+    UnhealthySource,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ProbabilityEstimateV1 {
@@ -130,7 +131,9 @@ impl SignalMemory {
             .sigma_usd_per_sqrt_second()
             .unwrap_or(c.initial_sigma_usd_per_sqrt_second);
         let mut innovation = 0.0;
-        if let Some(b) = value(&o.binance_trade) {
+        if c.binance_innovation_weight != 0.0
+            && let Some(b) = value(&o.binance_trade)
+        {
             let b = spot_price_number_v1(&b.price_usdt_per_btc)?;
             let baseline = self.binance_baseline.get_or_insert((b, s, time));
             // 同时刻配对建立因果基差；只融合后续变化，不直接减BTCUSDT与BTCUSD。
@@ -139,7 +142,9 @@ impl SignalMemory {
                 *baseline = (b, s, time);
             }
         }
-        if let Some(trade) = value(&o.binance_trade) {
+        if c.binance_trade_pressure_weight_usd != 0.0
+            && let Some(trade) = value(&o.binance_trade)
+        {
             let q = spot_price_number_v1(&trade.quantity_btc)?;
             let depth = value(&o.binance_depth)
                 .map(|depth| {
@@ -162,7 +167,9 @@ impl SignalMemory {
                 * pressure
                 * if trade.buyer_is_maker { -1.0 } else { 1.0 };
         }
-        if let Some(b) = value(&o.binance_depth) {
+        if c.binance_pressure_weight_usd != 0.0
+            && let Some(b) = value(&o.binance_depth)
+        {
             let bid = b.bids.iter().try_fold(0.0, |a, p| {
                 Ok::<_, StrategyErrorV1>(a + spot_price_number_v1(&p.quantity_btc)?)
             })?;

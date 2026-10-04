@@ -145,6 +145,16 @@
     "risk": {
       "per_market_orphan_limit_pusd": "100",
       "account_orphan_limit_pusd": "500"
+    },
+    "health": {
+      "polymarket_silence_ms": 60000,
+      "polymarket_event_delay_ms": 60000,
+      "chainlink_silence_ms": 60000,
+      "chainlink_event_delay_ms": 60000,
+      "binance_trade_silence_ms": 60000,
+      "binance_trade_event_delay_ms": 60000,
+      "binance_depth_silence_ms": 60000,
+      "binance_depth_event_delay_ms": 60000
     }
   },
   "request_namespace": "synthetic-baseline"

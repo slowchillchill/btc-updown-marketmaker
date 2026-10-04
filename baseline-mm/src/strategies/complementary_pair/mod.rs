@@ -1,5 +1,6 @@
 mod account;
 mod construction;
+mod health;
 mod mechanics;
 mod quoting;
 mod repair;
@@ -159,6 +160,34 @@ struct MarketState {
 impl StrategyV1 for ComplementaryPairV1 {
     type Error = StrategyErrorV1;
     type Diagnostics = ComplementaryPairDiagnosticV1;
+    fn uses_source_health(&self) -> bool {
+        true
+    }
+    fn next_health_evaluation_at(
+        &self,
+        input: &StrategyCurrentReadV1<'_>,
+        calculation: Option<&StrategyCalculationV1<Self::Diagnostics>>,
+        at: i64,
+    ) -> Option<i64> {
+        self.health_deadline(input, calculation, at)
+    }
+    fn qualify_intent(
+        &mut self,
+        input: &StrategyCurrentReadV1<'_>,
+        calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        index: usize,
+        at: i64,
+    ) -> Result<IntentQualificationV1, Self::Error> {
+        Ok(self.qualify_health(input, calculation, index, at))
+    }
+    fn invalidated(
+        &mut self,
+        calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        result: &InvalidatedBatchV1,
+    ) {
+        // 只登记真实已发前缀；尚未尝试的利润支持不形成策略占用。
+        self.record_profit_allocations(calculation, &result.sent, None);
+    }
     fn decide(
         &mut self,
         input: &StrategyInputV1,
@@ -235,6 +264,7 @@ impl StrategyV1 for ComplementaryPairV1 {
             available_profit_pusd: profit.public(),
             markets: vec![],
             profit_allocations: vec![],
+            action_health_dependencies: vec![],
         };
         if self.continuity.terminating
             && ((!risk_exists && input.action_before.pending_noe_record_count() == 0)
@@ -253,11 +283,18 @@ impl StrategyV1 for ComplementaryPairV1 {
         let mut next = None;
         for (f, s) in frames.iter().zip(&states) {
             let o = &f.observation;
-            let p = self
-                .signals
-                .entry(o.market.condition_id.0.clone())
-                .or_default()
-                .estimate(o, now, &self.config.probability)?;
+            let probability_sources = self.probability_sources(o);
+            let probability_healthy = self.health_issues(o, &probability_sources, now).is_empty();
+            let pair_sources = self.pair_sources(o);
+            let source_health = self.health_issues(o, &pair_sources, now);
+            let p = if probability_healthy {
+                self.signals
+                    .entry(o.market.condition_id.0.clone())
+                    .or_default()
+                    .estimate(o, now, &self.config.probability)?
+            } else {
+                ProbabilityEstimateV1::Unavailable(EstimateUnavailableV1::UnhealthySource)
+            };
             let missing = s
                 .orphan
                 .iter()
@@ -272,28 +309,41 @@ impl StrategyV1 for ComplementaryPairV1 {
                 unavailable: vec![],
                 comparison: None,
                 maximum_repair_price: None,
+                source_health,
             };
             let trading = now >= o.market.window.start_at_utc_ms
                 && now < o.market.window.end_at_utc_ms
                 && value(&o.accepting_orders) == Some(&true)
                 && value(&o.closed) != Some(&true);
             let initial = intents.len();
+            let mut repair_sources = o
+                .assets
+                .iter()
+                .map(|a| Self::book_scope(o, &a.asset.token_id))
+                .collect::<Vec<_>>();
+            if p.up().is_some() {
+                repair_sources.extend(probability_sources);
+            }
+            let repair_healthy = self.health_issues(o, &repair_sources, now).is_empty();
             if trading {
-                self.repair(
-                    input,
-                    f,
-                    now,
-                    s,
-                    &p,
-                    &mut cash,
-                    &mut account_exposure,
-                    &mut profit,
-                    &mut intents,
-                    &mut d,
-                    &mut diagnostic.profit_allocations,
-                )?;
+                if repair_healthy {
+                    self.repair(
+                        input,
+                        f,
+                        now,
+                        s,
+                        &p,
+                        &mut cash,
+                        &mut account_exposure,
+                        &mut profit,
+                        &mut intents,
+                        &mut d,
+                        &mut diagnostic.profit_allocations,
+                    )?;
+                }
                 // 单次目标结构优先维护/修复；保留孤腿时仍可在容量与经营条件下新配对。
                 if !self.continuity.terminating
+                    && d.source_health.is_empty()
                     && matches!(equity, ExecutionReadValueV1::Known(_))
                     && intents.len() == initial
                     && !matches!(
@@ -339,6 +389,7 @@ impl StrategyV1 for ComplementaryPairV1 {
                 }
             }
             let restricted = s.unknown
+                || !d.source_health.is_empty()
                 || s.investment > r(Decimal::from(1000))
                 || s.exposure[0].clone().max(s.exposure[1].clone())
                     > r(self.config.risk.per_market_orphan_limit_pusd)
@@ -381,6 +432,38 @@ impl StrategyV1 for ComplementaryPairV1 {
             if !cancel.is_empty() {
                 intents.push(self.cancel(cancel)?);
             }
+            for item in &intents[initial..] {
+                let (sources, repair_token) = match item.intent.as_ref() {
+                    ModelIntentV1::SubmitSingleBuy { order, .. } => {
+                        (repair_sources.clone(), Some(order.token_id.clone()))
+                    }
+                    ModelIntentV1::SubmitPairedBuy { .. } => (pair_sources.clone(), None),
+                    _ => continue,
+                };
+                diagnostic
+                    .action_health_dependencies
+                    .push(ActionHealthDependencyV1 {
+                        global_request_id: item.context.global_request_id.clone(),
+                        condition_id: o.market.condition_id.clone(),
+                        sources,
+                        independent_held_token: repair_token.as_ref().and_then(|_| {
+                            p.up()
+                                .is_none()
+                                .then(|| {
+                                    missing.map(|side| o.assets[1 - side].asset.token_id.clone())
+                                })
+                                .flatten()
+                        }),
+                        repair_token,
+                        business: Self::business_dependency(
+                            &input.action_before,
+                            &input.trade_economics,
+                            &o.market.condition_id,
+                            &[],
+                        )
+                        .ok_or(StrategyErrorV1::Arithmetic("动作缺公共市场经济事实"))?,
+                    });
+            }
             diagnostic.markets.push(d);
         }
         let mut canceled = std::collections::BTreeSet::new();
@@ -405,6 +488,26 @@ impl StrategyV1 for ComplementaryPairV1 {
         calculation: &StrategyCalculationV1<Self::Diagnostics>,
         result: &Result<Vec<SentIntentReceiptV1>, BatchExecutionErrorV1>,
     ) {
+        let (sent, uncertain) = match result {
+            Ok(receipts) => (receipts.as_slice(), None),
+            Err(e) => (
+                e.sent.as_slice(),
+                (e.failed_request_effect == Some(RequestEffectV1::MayHaveRequestEffect))
+                    .then_some(e.attempted_intent_index)
+                    .flatten(),
+            ),
+        };
+        self.record_profit_allocations(calculation, sent, uncertain);
+    }
+}
+
+impl ComplementaryPairV1 {
+    fn record_profit_allocations(
+        &mut self,
+        calculation: &StrategyCalculationV1<ComplementaryPairDiagnosticV1>,
+        sent: &[SentIntentReceiptV1],
+        uncertain: Option<usize>,
+    ) {
         let StrategyOutputV1::Continue {
             diagnostics,
             intents,
@@ -413,26 +516,16 @@ impl StrategyV1 for ComplementaryPairV1 {
         else {
             return;
         };
-        for a in &diagnostics.profit_allocations {
-            let sent = match result {
-                Ok(receipts) => receipts
-                    .iter()
-                    .any(|r| r.context.global_request_id == a.global_request_id),
-                Err(e) => {
-                    e.sent
-                        .iter()
-                        .any(|r| r.context.global_request_id == a.global_request_id)
-                        || (e.failed_request_effect == Some(RequestEffectV1::MayHaveRequestEffect)
-                            && e.attempted_intent_index
-                                .and_then(|i| intents.get(i))
-                                .is_some_and(|i| {
-                                    i.context.global_request_id == a.global_request_id
-                                }))
-                }
-            };
-            if sent {
+        for allocation in &diagnostics.profit_allocations {
+            if sent
+                .iter()
+                .any(|receipt| receipt.context.global_request_id == allocation.global_request_id)
+                || uncertain
+                    .and_then(|i| intents.get(i))
+                    .is_some_and(|i| i.context.global_request_id == allocation.global_request_id)
+            {
                 self.profit_pending
-                    .insert(a.global_request_id.clone(), a.clone());
+                    .insert(allocation.global_request_id.clone(), allocation.clone());
             }
         }
     }

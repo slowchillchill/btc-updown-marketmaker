@@ -1,0 +1,407 @@
+use super::*;
+
+impl ComplementaryPairV1 {
+    pub(super) fn book_scope(
+        o: &MarketBusinessObservationV1,
+        token: &TokenId,
+    ) -> SourceStreamScopeV1 {
+        SourceStreamScopeV1 {
+            source: SourceStreamKindV1::PolymarketBook,
+            condition_id: Some(o.market.condition_id.clone()),
+            asset_or_symbol: token.0.clone(),
+        }
+    }
+    pub(super) fn probability_sources(
+        &self,
+        o: &MarketBusinessObservationV1,
+    ) -> Vec<SourceStreamScopeV1> {
+        let chainlink = if eligible_chainlink_spot_v1(&o.chainlink_spot).is_some() {
+            SourceStreamKindV1::ChainlinkSpot
+        } else {
+            match value(&o.settlement_reference) {
+                Some(BtcSettlementReferenceV1::ChainlinkTwapThirtySeconds) => {
+                    SourceStreamKindV1::ChainlinkTwapThirty
+                }
+                Some(BtcSettlementReferenceV1::ChainlinkTwapSixtySeconds) => {
+                    SourceStreamKindV1::ChainlinkTwapSixty
+                }
+                _ => SourceStreamKindV1::ChainlinkSpot,
+            }
+        };
+        let mut sources = vec![SourceStreamScopeV1 {
+            source: chainlink,
+            condition_id: None,
+            asset_or_symbol: "btc/usd".into(),
+        }];
+        let p = &self.config.probability;
+        if p.binance_innovation_weight != 0.0 || p.binance_trade_pressure_weight_usd != 0.0 {
+            sources.push(SourceStreamScopeV1 {
+                source: SourceStreamKindV1::BinanceAggregateTrade,
+                condition_id: None,
+                asset_or_symbol: "BTCUSDT".into(),
+            });
+        }
+        // 成交压力读取深度分母，即使独立深度系数为零仍参与。
+        if p.binance_pressure_weight_usd != 0.0 || p.binance_trade_pressure_weight_usd != 0.0 {
+            sources.push(SourceStreamScopeV1 {
+                source: SourceStreamKindV1::BinanceDepth,
+                condition_id: None,
+                asset_or_symbol: "BTCUSDT".into(),
+            });
+        }
+        sources
+    }
+    pub(super) fn pair_sources(&self, o: &MarketBusinessObservationV1) -> Vec<SourceStreamScopeV1> {
+        let mut sources = self.probability_sources(o);
+        sources.extend(
+            o.assets
+                .iter()
+                .map(|a| Self::book_scope(o, &a.asset.token_id)),
+        );
+        sources
+    }
+    fn health_limits(&self, source: SourceStreamKindV1) -> (i64, i64) {
+        let h = &self.config.health;
+        let (silence, delay) = match source {
+            SourceStreamKindV1::PolymarketBook => {
+                (h.polymarket_silence_ms, h.polymarket_event_delay_ms)
+            }
+            SourceStreamKindV1::BinanceAggregateTrade => {
+                (h.binance_trade_silence_ms, h.binance_trade_event_delay_ms)
+            }
+            SourceStreamKindV1::BinanceDepth => {
+                (h.binance_depth_silence_ms, h.binance_depth_event_delay_ms)
+            }
+            _ => (h.chainlink_silence_ms, h.chainlink_event_delay_ms),
+        };
+        (
+            i64::try_from(silence).unwrap_or(i64::MAX),
+            i64::try_from(delay).unwrap_or(i64::MAX),
+        )
+    }
+    pub(super) fn health_issues(
+        &self,
+        o: &MarketBusinessObservationV1,
+        sources: &[SourceStreamScopeV1],
+        at: i64,
+    ) -> Vec<SourceHealthIssueV1> {
+        sources
+            .iter()
+            .filter_map(|scope| {
+                use SourceHealthFailureV1 as F;
+                let failure =
+                    if let Some(progress) = o.source_progress.iter().find(|p| &p.scope == scope) {
+                        if progress.synchronization == SourceSynchronizationV1::SnapshotRequired
+                            || progress.quality.resync == ResyncQuality::Required
+                        {
+                            Some(F::SynchronizationRequired)
+                        } else if !matches!(
+                            progress.quality.availability,
+                            MarketDataQuality::Fresh | MarketDataQuality::Stale
+                        ) {
+                            Some(F::Unavailable)
+                        } else if let Some(evidence) = &progress.last_valid_business_message {
+                            let (silence, delay) = self.health_limits(scope.source);
+                            if evidence.received_at_utc_ms > at
+                                || evidence
+                                    .source_event_at_utc_ms
+                                    .is_some_and(|event| event > evidence.received_at_utc_ms)
+                            {
+                                Some(F::TimeInconsistent)
+                            } else if at >= evidence.received_at_utc_ms.saturating_add(silence) {
+                                Some(F::ReceiveSilence)
+                            } else if let Some(event) = evidence.source_event_at_utc_ms {
+                                (at >= event.saturating_add(delay)).then_some(F::EventDelay)
+                            } else {
+                                Some(F::UnknownEventTime)
+                            }
+                        } else {
+                            Some(F::UnknownBusinessProgress)
+                        }
+                    } else {
+                        Some(F::UnknownBusinessProgress)
+                    };
+                failure.map(|failure| SourceHealthIssueV1 {
+                    scope: scope.clone(),
+                    failure,
+                })
+            })
+            .collect()
+    }
+    pub(super) fn health_deadline(
+        &self,
+        input: &StrategyCurrentReadV1<'_>,
+        calculation: Option<&StrategyCalculationV1<ComplementaryPairDiagnosticV1>>,
+        at: i64,
+    ) -> Option<i64> {
+        let frozen_dependencies = calculation
+            .and_then(|c| match &c.output {
+                StrategyOutputV1::Continue { diagnostics, .. } => {
+                    Some(diagnostics.action_health_dependencies.as_slice())
+                }
+                _ => None,
+            })
+            .unwrap_or(&[]);
+        input
+            .markets
+            .iter()
+            .filter(|f| f.observation.market.window.end_at_utc_ms > at)
+            .flat_map(|f| {
+                let mut sources = self.pair_sources(f.observation);
+                // 新现价可改变当前估计选源，但不能遮蔽待发决定的原TWAP期限。
+                for dependency in frozen_dependencies
+                    .iter()
+                    .filter(|d| d.condition_id == f.observation.market.condition_id)
+                {
+                    for scope in &dependency.sources {
+                        if !sources.contains(scope) {
+                            sources.push(scope.clone());
+                        }
+                    }
+                }
+                sources.into_iter().flat_map(|scope| {
+                    let (silence, delay) = self.health_limits(scope.source);
+                    f.observation
+                        .source_progress
+                        .iter()
+                        .find(|p| p.scope == scope)
+                        .and_then(|p| p.last_valid_business_message.as_ref())
+                        .map(|e| {
+                            [
+                                Some(e.received_at_utc_ms.saturating_add(silence)),
+                                e.source_event_at_utc_ms.map(|t| t.saturating_add(delay)),
+                            ]
+                        })
+                        .unwrap_or([None, None])
+                        .into_iter()
+                        .flatten()
+                })
+            })
+            .filter(|deadline| *deadline > at)
+            .min()
+    }
+    pub(super) fn business_dependency(
+        read: &ActionBeforeReadV2,
+        trades: &[FrozenTradeEconomicsV1],
+        condition: &ConditionId,
+        batch_ids: &[&str],
+    ) -> Option<ActionBusinessDependencyV1> {
+        let market = read
+            .economics()
+            .markets
+            .iter()
+            .find(|m| &m.condition_id == condition)?;
+        let commitments = read
+            .commitments()
+            .filter_map(|c| {
+                let (market, _) = limit_leg(c.origin.intent.intent(), c.origin.batch_item_ordinal)?;
+                let request_id = c.origin.intent.global_request_id();
+                (market == condition && !batch_ids.contains(&request_id)).then(|| {
+                    ActionCommitmentDependencyV1 {
+                        request_id: request_id.into(),
+                        leg_ordinal: c.origin.batch_item_ordinal,
+                        remaining_shares: c.remaining_target_shares,
+                    }
+                })
+            })
+            .collect();
+        let unknown_order_ids = read
+            .orders()
+            .filter(|o| o.condition_id == Some(condition) && o.origin.is_none())
+            .map(|o| platform_id(&o))
+            .collect();
+        Some(ActionBusinessDependencyV1 {
+            orphan_shares: market.orphan_shares.clone(),
+            orphan_principal: market.unresolved_orphan_principal_cost_pusd.clone(),
+            orphan_fee: Self::orphan_fee(trades, condition)
+                .ok()
+                .and_then(|(fee, unknown)| (!unknown).then(|| fee.public())),
+            success_shares: market.success_shares.clone(),
+            success_principal: market.success_principal_cost_pusd.clone(),
+            actual_fees: std::array::from_fn(|i| market.executed[i].actual_fee_pusd.clone()),
+            commitments,
+            unknown_order_ids,
+        })
+    }
+    pub(super) fn qualify_health(
+        &self,
+        input: &StrategyCurrentReadV1<'_>,
+        calculation: &StrategyCalculationV1<ComplementaryPairDiagnosticV1>,
+        index: usize,
+        at: i64,
+    ) -> IntentQualificationV1 {
+        let reject = |code: &str, scopes| {
+            IntentQualificationV1::Invalidated(IntentInvalidationReasonV1 {
+                reason_code: code.into(),
+                scopes,
+            })
+        };
+        let StrategyOutputV1::Continue {
+            intents,
+            diagnostics,
+            ..
+        } = &calculation.output
+        else {
+            return IntentQualificationV1::Qualified;
+        };
+        let item = &intents[index];
+        if matches!(item.intent.as_ref(), ModelIntentV1::CancelOrders { .. }) {
+            // 本策略只从原已知订单形成撤单；后来终态可令目标退出unfinished读取，
+            // 不能因此吞掉同批仍需撤的其他目标。原Bridge/平台负责原目标结果。
+            return IntentQualificationV1::Qualified;
+        }
+        let Some(dependency) = diagnostics
+            .action_health_dependencies
+            .iter()
+            .find(|d| d.global_request_id == item.context.global_request_id)
+        else {
+            return reject("action_dependency_unavailable", vec![]);
+        };
+        let Some(frame) = input
+            .markets
+            .iter()
+            .find(|f| f.observation.market.condition_id == dependency.condition_id)
+        else {
+            return reject("market_unavailable", dependency.sources.clone());
+        };
+        let o = frame.observation;
+        let batch_ids: Vec<_> = intents
+            .iter()
+            .map(|i| i.context.global_request_id.as_str())
+            .collect();
+        if Self::business_dependency(
+            &input.action_before,
+            &input.trade_economics,
+            &dependency.condition_id,
+            &batch_ids,
+        )
+        .as_ref()
+            != Some(&dependency.business)
+        {
+            return reject("action_business_facts_changed", vec![]);
+        }
+
+        if at >= o.market.window.end_at_utc_ms
+            || value(&o.accepting_orders) != Some(&true)
+            || value(&o.closed) == Some(&true)
+        {
+            return reject("market_not_trading", dependency.sources.clone());
+        }
+        let issues = self.health_issues(o, &dependency.sources, at);
+        if !issues.is_empty() {
+            return reject(
+                "source_health",
+                issues.into_iter().map(|i| i.scope).collect(),
+            );
+        }
+        if let Some(token) = &dependency.independent_held_token
+            && o.assets
+                .iter()
+                .find(|a| &a.asset.token_id == token)
+                .and_then(|a| value(&a.valuation_best_bid))
+                .is_none()
+        {
+            return reject("repair_held_mark_unavailable", dependency.sources.clone());
+        }
+        let legs: Vec<_> = match item.intent.as_ref() {
+            ModelIntentV1::SubmitSingleBuy { order, .. } => vec![order],
+            ModelIntentV1::SubmitPairedBuy { orders, .. } => orders.iter().collect(),
+            _ => return reject("unsupported_buy_action", vec![]),
+        };
+        for leg in legs {
+            if o.assets
+                .iter()
+                .find(|a| a.asset.token_id == leg.token_id)
+                .is_none_or(|a| {
+                    value(&a.tick).is_none()
+                        || (matches!(leg.order, BuyOrderIntentV1::FakMarket { .. })
+                            && value(&a.asks).is_none())
+                })
+            {
+                return reject(
+                    "action_book_or_tick_unavailable",
+                    dependency.sources.clone(),
+                );
+            }
+        }
+        if diagnostics.profit_allocations.iter().any(|a| {
+            a.global_request_id == item.context.global_request_id
+                && rational(&a.allocated_profit_pusd).is_ok_and(|p| p.is_positive())
+        }) {
+            let qualified = (|| -> Result<bool, StrategyErrorV1> {
+                let (profit, _) = Self::profit_and_equity_read(&input.action_before)?;
+                let mut occupied = R::zero();
+                for allocation in self.profit_pending.values() {
+                    occupied = occupied.add(
+                        &Self::profit_bound_read(&input.action_before, allocation)?
+                            .unwrap_or_else(R::zero),
+                    );
+                }
+                for allocation in &diagnostics.profit_allocations {
+                    if self
+                        .profit_pending
+                        .contains_key(&allocation.global_request_id)
+                    {
+                        continue;
+                    }
+                    let bound = Self::profit_bound_read(&input.action_before, allocation)?;
+                    let known_completed = input.action_before.request_funds().any(|f| {
+                        f.request_identity == &allocation.reserve_identity
+                            && matches!(
+                                f.reservation_state,
+                                ReservationStatusV1::Converted | ReservationStatusV1::Released
+                            )
+                    });
+                    occupied = occupied.add(&bound.unwrap_or(if known_completed {
+                        R::zero()
+                    } else {
+                        rational(&allocation.allocated_profit_pusd)?
+                    }));
+                }
+                Ok(profit.max(R::zero()) >= occupied)
+            })();
+            if !matches!(qualified, Ok(true)) {
+                return reject("repair_profit_support_unavailable", vec![]);
+            }
+        }
+        if let Some(token) = &dependency.repair_token {
+            // 已到达的真实反馈可能消除原缺口；不能凭冻结的修复标签重复买入。
+            let Some(m) = input
+                .action_before
+                .economics()
+                .markets
+                .iter()
+                .find(|m| m.condition_id == dependency.condition_id)
+            else {
+                return reject("repair_position_unavailable", vec![]);
+            };
+            let Some(assets) = &m.assets else {
+                return reject("repair_position_unavailable", vec![]);
+            };
+            let Some(side) = assets.iter().position(|a| &a.token_id == token) else {
+                return reject("repair_asset_unavailable", vec![]);
+            };
+            let held = 1 - side;
+            if m.settlement_state != EconomicSettlementStateV1::Unresolved
+                || decimal(&m.orphan_shares[held]).is_err()
+                || decimal(&m.orphan_shares[held]).is_ok_and(|q| q <= Decimal::ZERO)
+            {
+                return reject("repair_gap_unavailable", vec![]);
+            }
+            if matches!(
+                item.intent.as_ref(),
+                ModelIntentV1::SubmitSingleBuy {
+                    order: BuyLegIntentV1 {
+                        order: BuyOrderIntentV1::FakMarket { .. },
+                        ..
+                    },
+                    ..
+                }
+            ) && input.action_before.pending_noe_record_count() > 0
+            {
+                return reject("repair_feedback_pending", vec![]);
+            }
+        }
+        IntentQualificationV1::Qualified
+    }
+}

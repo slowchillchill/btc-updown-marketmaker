@@ -5,10 +5,24 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ComplementaryPairConfigV1 {
+    pub health: SourceHealthConfigV1,
     pub probability: ProbabilityConfigV1,
     pub quote: QuoteConfigV1,
     pub repair: RepairConfigV1,
     pub risk: InventoryRiskConfigV1,
+}
+/// 毫秒阈值全部显式指定；工程示例不是正式交易默认。
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SourceHealthConfigV1 {
+    pub polymarket_silence_ms: u64,
+    pub polymarket_event_delay_ms: u64,
+    pub chainlink_silence_ms: u64,
+    pub chainlink_event_delay_ms: u64,
+    pub binance_trade_silence_ms: u64,
+    pub binance_trade_event_delay_ms: u64,
+    pub binance_depth_silence_ms: u64,
+    pub binance_depth_event_delay_ms: u64,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
