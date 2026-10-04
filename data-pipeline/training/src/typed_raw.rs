@@ -931,8 +931,24 @@ fn decode_polymarket_event(
         "book" => (
             PolymarketOrderbookEvent::Book {
                 asset_id: required_string_column(batch, 12, row, "asset_id", context)?,
-                bids: required_price_levels(batch, 13, row, "bids", context)?,
-                asks: required_price_levels(batch, 14, row, "asks", context)?,
+                bids: required_price_levels(
+                    batch,
+                    13,
+                    row,
+                    "bids",
+                    "bids.price",
+                    "bids.size",
+                    context,
+                )?,
+                asks: required_price_levels(
+                    batch,
+                    14,
+                    row,
+                    "asks",
+                    "asks.price",
+                    "asks.size",
+                    context,
+                )?,
                 last_trade_price: optional_string_column(
                     batch,
                     15,
@@ -1145,6 +1161,8 @@ fn required_price_levels(
     index: usize,
     row: usize,
     name: &str,
+    price_name: &str,
+    size_name: &str,
     context: DecodeContext<'_>,
 ) -> Result<Vec<PolymarketPriceLevel>, TypedRawReadError> {
     let list = typed_column::<ListArray>(batch, index, name, context)?;
@@ -1170,14 +1188,8 @@ fn required_price_levels(
                 return Err(context.error(row, Some(name), format!("第 {item} 个元素为 null")));
             }
             Ok(PolymarketPriceLevel {
-                price: required_nested_string(
-                    prices,
-                    item,
-                    row,
-                    &format!("{name}.price"),
-                    context,
-                )?,
-                size: required_nested_string(sizes, item, row, &format!("{name}.size"), context)?,
+                price: required_nested_string(prices, item, row, price_name, context)?,
+                size: required_nested_string(sizes, item, row, size_name, context)?,
             })
         })
         .collect()
