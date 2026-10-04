@@ -1017,6 +1017,76 @@ async fn fresh_arrival_with_lagged_event_invalidates_own_dependency_but_independ
     assert_eq!(report.source_health.unwrap().invalidated_batches, 1);
 }
 
+struct QuietDeadlineProbe {
+    deadline: i64,
+    observed: Vec<i64>,
+}
+impl StrategyV1 for QuietDeadlineProbe {
+    type Error = &'static str;
+    type Diagnostics = ();
+    fn uses_source_health(&self) -> bool {
+        true
+    }
+    fn next_health_evaluation_at(
+        &self,
+        _: &StrategyCurrentReadV1<'_>,
+        _: Option<&StrategyCalculationV1>,
+        at: i64,
+    ) -> Option<i64> {
+        (at < self.deadline).then_some(self.deadline)
+    }
+    fn decide(
+        &mut self,
+        input: &StrategyInputV1,
+        at: i64,
+    ) -> Result<StrategyOutputV1, Self::Error> {
+        assert_eq!(
+            input
+                .action_before
+                .cutoff()
+                .decision_time()
+                .logical_time_utc_ms(),
+            at
+        );
+        self.observed.push(at);
+        Ok(StrategyOutputV1::Continue {
+            intents: vec![],
+            next_evaluation_at_utc_ms: None,
+            diagnostics: (),
+        })
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn no_trade_pending_health_deadline_retains_followup_with_original_calculation_delays() {
+    for (deadline, start_delay, followup) in [(2400, 0, 2701), (2500, 0, 2701), (2500, 50, 2801)] {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut config, rules) = setup(temp.path());
+        config.timing.calculation_start_delay_ms = DelayScheduleV1::Fixed(start_delay);
+        let mut probe = QuietDeadlineProbe {
+            deadline: BASE + deadline,
+            observed: vec![],
+        };
+        let report = run_historical_v1(&config, rules, &mut probe).await.unwrap();
+        let preceding = BASE + 2301 + start_delay as i64;
+        let next = probe
+            .observed
+            .iter()
+            .copied()
+            .find(|at| *at > preceding)
+            .unwrap();
+        assert_eq!(
+            next,
+            BASE + followup,
+            "空批不失效也须在原发送结束并支付启动延迟后重算，不等新行情"
+        );
+        let health = report.source_health.unwrap();
+        assert_eq!(health.deadline_wakeups, 1);
+        assert_eq!(health.invalidated_batches, 0);
+        assert_eq!(health.qualification_calls, 0);
+    }
+}
+
 struct MeasurementProbe {
     enabled: bool,
     decisions: usize,

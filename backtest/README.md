@@ -174,6 +174,8 @@ JSON/TOML 解析、完整策略参数覆盖和显式 `false` 沿原命令层复�
 
 选用路径使用当前受信观察读取，仍保持同刻公开组先于发送、发送先于当前隐藏桶闭合及既有因果截止。计算期发现失效先通知策略，保留原计算完成边界；完成后等待发送时失效可在发现时刻重新计算。新计算继续支付配置中的计算开始延迟、计算耗时和发送等待，不等待新行情，不复用旧后缀或覆盖原冻结诊断。发出第一项后，第二项提交前失效也停止全部后缀；实际效果、未知义务及预留释放由原共享执行处理。
 
+到期的健康期限同时保留下一次重评需求。当前待发决定为正常 NoTrade 或所有意图仍合格时，原批次继续完成；完成后按原计算开始延迟重新计算，不等下一条行情，也不把正常批次记成失效。
+
 只在选用时返回 `HistoricalRunReportV1::source_health`，包含实际资格调用次数、期限唤醒次数、失效批数及最近失效计算的原时序。它不保存逐决策账本；未发送失效的 `actual_sent_at_utc_ms` 为 `None`。旧消费者保留原公开组、回调和 `next_evaluation_at_utc_ms` 语义。
 
 工程反例在 `tests/historical.rs`、`shared-run/tests/strategy_boundary.rs` 与 DPT 原测试入口覆盖静默期限、接收持续但事件滞后、已发前缀/未发后缀和无新行情重算。`source_health_finite_overhead_measurement` 是显式忽略的合成测量入口，以 `SOURCE_HEALTH_MEASUREMENT_ENABLED=0/1` 和已有 `SOURCE_HEALTH_MEASUREMENT_ROOT` 运行同一有限夹具；可用 `/usr/bin/time -v` 分进程记录 CPU 与峰值内存。其参数、输入和结果不构成正式健康阈值、历史断网证明或在线性能承诺。

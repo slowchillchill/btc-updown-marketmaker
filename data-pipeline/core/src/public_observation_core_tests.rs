@@ -2662,15 +2662,38 @@ fn source_epoch_resync_requires_each_asset_once_without_resetting_already_rebuil
                 ),
             );
             let scopes = &output.closed_groups[0].observations[0].source_progress;
+            let current = scopes
+                .iter()
+                .find(|p| p.scope.asset_or_symbol == token)
+                .unwrap();
+            assert_eq!(
+                current.last_valid_business_message.as_ref().unwrap(),
+                &current.last_observed_message,
+                "当前有效快照推进业务证据，不能被代际观察提前标成已处理"
+            );
+            assert_eq!(
+                current.last_observed_message.received_at_utc_ms,
+                2000 + position as i64
+            );
             if epoch == "epoch-b" && i == 0 {
+                let other = scopes
+                    .iter()
+                    .find(|p| p.scope.asset_or_symbol == DOWN_TOKEN_ID)
+                    .unwrap();
                 assert_eq!(
-                    scopes
-                        .iter()
-                        .find(|p| p.scope.asset_or_symbol == DOWN_TOKEN_ID)
-                        .unwrap()
-                        .synchronization,
+                    other.synchronization,
                     SourceSynchronizationV1::SnapshotRequired
                 );
+                assert_eq!(
+                    other
+                        .last_valid_business_message
+                        .as_ref()
+                        .unwrap()
+                        .received_at_utc_ms,
+                    2002,
+                    "代际变化不能替其他资产续期"
+                );
+                assert_eq!(other.last_observed_message, current.last_observed_message);
             }
             if i == 1 {
                 assert!(scopes.iter().all(|p| matches!(

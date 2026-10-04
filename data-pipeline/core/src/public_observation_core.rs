@@ -1223,16 +1223,6 @@ impl PublicObservationCoreV1 {
         let PublicBusinessPayloadV1::PolymarketMessage(message) = &fact.payload else {
             return;
         };
-        if epoch_changed {
-            // 与原归约器的本市场代际变化一致；每次代际只重置一次。
-            for progress in self.source_progress.values_mut().filter(|p| {
-                p.scope.source == SourceStreamKindV1::PolymarketBook
-                    && p.scope.condition_id.as_ref() == Some(&message.market.condition_id)
-            }) {
-                progress.synchronization = SourceSynchronizationV1::SnapshotRequired;
-                progress.last_observed_message = fact.direct_sources[0].clone();
-            }
-        }
         let (assets, snapshot): (Vec<_>, bool) = match &message.payload {
             CanonicalPmPayloadV1::Book {
                 fact: CanonicalBookFactV1::FullBook { asset, .. },
@@ -1243,8 +1233,24 @@ impl PublicObservationCoreV1 {
             CanonicalPmPayloadV1::BestBidAsk { asset, .. }
             | CanonicalPmPayloadV1::TickSizeChange { asset, .. }
             | CanonicalPmPayloadV1::PublicTrade { asset, .. } => (vec![asset], false),
-            _ => return,
+            _ => (vec![], false),
         };
+        if epoch_changed {
+            // 与原归约器的本市场代际变化一致；每次代际只重置一次。
+            for progress in self.source_progress.values_mut().filter(|p| {
+                p.scope.source == SourceStreamKindV1::PolymarketBook
+                    && p.scope.condition_id.as_ref() == Some(&message.market.condition_id)
+            }) {
+                progress.synchronization = SourceSynchronizationV1::SnapshotRequired;
+                // 当前消息涉及的资产随后更新有效进展，不能提前触发重复抑制。
+                if !assets
+                    .iter()
+                    .any(|asset| asset.token_id.0 == progress.scope.asset_or_symbol)
+                {
+                    progress.last_observed_message = fact.direct_sources[0].clone();
+                }
+            }
+        }
         for asset in assets {
             let scope = SourceStreamScopeV1 {
                 source: SourceStreamKindV1::PolymarketBook,

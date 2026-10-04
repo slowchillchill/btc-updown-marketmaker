@@ -547,9 +547,8 @@ async fn run_material<S: StrategyV1>(
             if health_due {
                 health_at = None;
                 health_summary.deadline_wakeups += 1;
-                if pending.is_none() {
-                    dirty = true;
-                }
+                // 到期期限要求重评；空批或仍合格的待发批完成后也须承接。
+                dirty = true;
             }
             if evaluation_at == Some(at) && pending.is_none() {
                 evaluation_at = None;
