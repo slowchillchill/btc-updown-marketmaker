@@ -1698,6 +1698,7 @@ dependencies = [
  "arrow-array",
  "arrow-ord",
  "arrow-schema",
+ "bytes",
  "contracts",
  "data-collect",
  "data-pipeline-core",

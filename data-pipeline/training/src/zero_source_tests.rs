@@ -1115,3 +1115,210 @@ fn explicit_input_paths_and_pre_floor_date_build_publish_and_read() {
         ))
     ));
 }
+
+#[test]
+fn byte_window_complete_multi_page_stream_and_actual_file_reads() {
+    use super::byte_window::{WindowedFile, tests::CountedFile};
+    use parquet::file::reader::ChunkReader;
+    let root = TempDir::new().unwrap();
+    let path = root.path().join("multi-page.parquet");
+    let schema = expected_schema(POLYMARKET_ORDERBOOK_SOURCE, POLYMARKET_ORDERBOOK_SCHEMA).unwrap();
+    let rows: Vec<_> = (0..1024)
+        .map(|i| {
+            let mut row = bba(START + i);
+            // 有效独特来源字符串形成跨 64KiB 的列和大页请求，不使用损坏负载。
+            row["source_endpoint"] = json!(format!(
+                "wss://ws-subscriptions-clob.polymarket.com/ws/market/{i}/{}",
+                "x".repeat(256)
+            ));
+            row
+        })
+        .collect();
+    let properties = WriterProperties::builder()
+        .set_dictionary_enabled(false)
+        .set_data_page_size_limit(128 * 1024)
+        .set_write_batch_size(32)
+        .build();
+    let mut writer = ArrowWriter::try_new(
+        File::create(&path).unwrap(),
+        schema.clone(),
+        Some(properties),
+    )
+    .unwrap();
+    for part in rows.chunks(512) {
+        let arrays = schema.fields().iter().map(|f| column(f, part)).collect();
+        writer
+            .write(&RecordBatch::try_new(schema.clone(), arrays).unwrap())
+            .unwrap();
+        writer.flush().unwrap();
+    }
+    let metadata = writer.close().unwrap();
+    assert!(
+        metadata
+            .row_groups()
+            .iter()
+            .any(|g| g.columns().iter().any(|c| c.compressed_size() > 64 * 1024))
+    );
+    let raw = fs::read(&path).unwrap();
+    let digest = format!("{:x}", Sha256::digest(&raw));
+    let facts = || ParquetInputFacts {
+        path: &path,
+        source_kind: POLYMARKET_ORDERBOOK_SOURCE,
+        schema_version: POLYMARKET_ORDERBOOK_SCHEMA,
+        bytes: raw.len() as u64,
+        rows: rows.len() as u64,
+        sha256: &digest,
+    };
+    let original = CountedFile::new(File::open(&path).unwrap());
+    let window = WindowedFile::new(File::open(&path).unwrap());
+    let mut old = stream_with_chunk_reader(
+        facts(),
+        37,
+        None,
+        None,
+        expected_schema,
+        decode_typed_raw_record_batch,
+        original.clone(),
+    )
+    .unwrap();
+    let mut new = stream_with_chunk_reader(
+        facts(),
+        37,
+        None,
+        None,
+        expected_schema,
+        decode_typed_raw_record_batch,
+        window.clone(),
+    )
+    .unwrap();
+    let mut plain = stream_with_chunk_reader(
+        facts(),
+        37,
+        None,
+        None,
+        expected_schema,
+        decode_typed_raw_record_batch,
+        File::open(&path).unwrap(),
+    )
+    .unwrap();
+    let mut total = 0;
+    loop {
+        let a = old.next();
+        let b = new.next();
+        let c = plain.next();
+        assert_eq!(
+            a.as_ref().map(|r| r.as_ref().unwrap()),
+            c.as_ref().map(|r| r.as_ref().unwrap())
+        );
+        assert_eq!(
+            a.as_ref().map(|r| r.as_ref().unwrap()),
+            b.as_ref().map(|r| r.as_ref().unwrap())
+        );
+        assert_eq!(
+            (
+                old.next_row_index,
+                old.next_batch_index,
+                old.last_physical_batch_rows
+            ),
+            (
+                new.next_row_index,
+                new.next_batch_index,
+                new.last_physical_batch_rows
+            )
+        );
+        match a {
+            Some(Ok(batch)) => total += batch.len(),
+            None => break,
+            Some(Err(error)) => panic!("{error}"),
+        }
+    }
+    assert_eq!(total, rows.len());
+    assert!(old.next().is_none() && new.next().is_none());
+    let old_counts = original.counts();
+    let new_counts = window.read_counts();
+    eprintln!(
+        "byte-window fixture actual File read calls/bytes: old={old_counts:?}, new={new_counts:?}"
+    );
+    assert!(
+        new_counts.0 < old_counts.0 && new_counts.1 < old_counts.1,
+        "{old_counts:?} vs {new_counts:?}"
+    );
+    // 原生产 File 路径完整值也与同一计数包装相等；Bytes 返回自持有。
+    assert_eq!(
+        File::open(&path)
+            .unwrap()
+            .get_bytes(0, raw.len())
+            .unwrap()
+            .as_ref(),
+        raw
+    );
+}
+
+#[test]
+fn byte_window_outside_scope_bad_later_page_keeps_original_batch_error() {
+    let root = TempDir::new().unwrap();
+    let path = root.path().join("bad-later-page.parquet");
+    let schema = expected_schema(POLYMARKET_ORDERBOOK_SOURCE, POLYMARKET_ORDERBOOK_SCHEMA).unwrap();
+    let mut writer = ArrowWriter::try_new(
+        File::create(&path).unwrap(),
+        schema.clone(),
+        Some(
+            WriterProperties::builder()
+                .set_dictionary_enabled(false)
+                .build(),
+        ),
+    )
+    .unwrap();
+    for at in [START, START + 1000] {
+        let rows = [bba(at)];
+        let arrays = schema.fields().iter().map(|f| column(f, &rows)).collect();
+        writer
+            .write(&RecordBatch::try_new(schema.clone(), arrays).unwrap())
+            .unwrap();
+        writer.flush().unwrap();
+    }
+    let metadata = writer.close().unwrap();
+    let offset = metadata.row_group(1).column(0).data_page_offset() as usize;
+    let mut raw = fs::read(&path).unwrap();
+    // 原第二行组页头损坏；其真实接收时间原在研究范围外。
+    raw[offset..offset + 16].fill(0xff);
+    fs::write(&path, &raw).unwrap();
+    let digest = format!("{:x}", Sha256::digest(&raw));
+    let facts = || ParquetInputFacts {
+        path: &path,
+        source_kind: POLYMARKET_ORDERBOOK_SOURCE,
+        schema_version: POLYMARKET_ORDERBOOK_SCHEMA,
+        bytes: raw.len() as u64,
+        rows: 2,
+        sha256: &digest,
+    };
+    let scope = Some(TypedRawReadScope::new(START, START + 100, CONDITION));
+    let mut old = stream_with_chunk_reader(
+        facts(),
+        1,
+        scope.clone(),
+        None,
+        expected_schema,
+        decode_typed_raw_record_batch,
+        File::open(&path).unwrap(),
+    )
+    .unwrap();
+    let mut new = open_parquet_with_decoder(
+        facts(),
+        1,
+        scope,
+        None,
+        expected_schema,
+        decode_typed_raw_record_batch,
+    )
+    .unwrap();
+    // 生产入口包裹同一打开 File；明确有效前批先交付。
+    assert_eq!(old.next().unwrap().unwrap(), new.next().unwrap().unwrap());
+    let old_error = old.next().unwrap().unwrap_err();
+    let new_error = new.next().unwrap().unwrap_err();
+    assert!(
+        matches!(&old_error, TypedRawReadError::Parquet { path: p, batch_index: Some(1), .. } if p == &path)
+    );
+    assert_eq!(old_error.to_string(), new_error.to_string());
+    assert!(old.next().is_none() && new.next().is_none());
+}
