@@ -20,7 +20,7 @@ pub struct ResearchDocument {
 }
 // 单个对象只返回非数组字段；原数组以精确路径/长度显式交接，由下一请求选择区段。
 // omitted_arrays 是 DTO，不写回原产物，也不以空数组/零代替尚未请求的内容。
-fn fragment(v: &Value, path: &str, arrays: &mut Vec<Value>) -> Value {
+pub(crate) fn fragment(v: &Value, path: &str, arrays: &mut Vec<Value>) -> Value {
     match v {
         Value::Array(v) if v.iter().all(|item| !item.is_object() && !item.is_array()) => {
             Value::Array(v.clone())
@@ -128,10 +128,10 @@ impl ResearchDocument {
         &self.encoding
     }
     pub fn select(&mut self, query: ResearchQuery) -> Result<Bytes, String> {
-        if let Some((q, body)) = &self.latest {
-            if *q == query {
-                return Ok(body.clone());
-            }
+        if let Some((q, body)) = &self.latest
+            && *q == query
+        {
+            return Ok(body.clone());
         }
         let v = self.document.as_ref().ok_or("研究来源不可读取")?;
         // 浏览器只访问这个显式文档。首屏不允许请求整个根；允许的分支均来自公开产物。

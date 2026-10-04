@@ -29,6 +29,12 @@ import { NoePanel, useNoe } from "./Noe";
 import { noePoints } from "./noePoints";
 import { ResearchPanel, useResearch } from "./Research";
 import { researchPoints } from "./researchPoints";
+import {
+  ExistingPanel,
+  useExisting,
+  existingPoints,
+  existingLabel,
+} from "./Existing";
 import { SourceIdentity } from "./SourceIdentity";
 import { usePublicBrowse } from "./PublicBrowse";
 const views = [
@@ -144,6 +150,35 @@ export default function App() {
         onSelect={selectResearch}
       />
     ) : null;
+  const existing = useExisting(run);
+  const existingReady =
+    !!snapshot?.existing_source &&
+    snapshot.existing_source.status !== "not_configured";
+  const existingStatus = snapshot?.existing_source;
+  const completionDocument = existingStatus?.documents?.find(
+    (d) => d.document === "completion" && d.status === "ready",
+  )?.summary;
+  const loadedExistingPoints = useMemo(
+    () => existingPoints(existingStatus, existing.loaded),
+    [existingStatus, existing.loaded],
+  );
+  const selectExisting = (e: Evidence) =>
+    select({
+      ...e,
+      points: loadedExistingPoints.filter(
+        (p) => p.path === e.path || p.path.startsWith(e.path + "/"),
+      ),
+    });
+  const existingPanel =
+    existingStatus && existingStatus.status !== "not_configured" ? (
+      <ExistingPanel
+        key={run}
+        status={existingStatus}
+        state={existing}
+        condition={condition}
+        onSelect={selectExisting}
+      />
+    ) : null;
   const noe = useNoe(run);
   const loadedNoePoints = useMemo(() => noePoints(noe.loaded), [noe.loaded]);
   useEffect(() => {
@@ -179,6 +214,11 @@ export default function App() {
       ).flatMap((m) =>
         text(at(m, "condition_id")) ? [text(at(m, "condition_id"))!] : [],
       ),
+      ...list(
+        at(completionDocument, "final_ledger", "market_projections"),
+      ).flatMap((m) =>
+        text(at(m, "condition_id")) ? [text(at(m, "condition_id"))!] : [],
+      ),
       ...allRows.flatMap((r) => r.markets?.map((m) => m.condition) ?? []),
       ...(snapshot?.research?.catalog ?? []).flatMap((m) =>
         text(at(m, "condition_id")) ? [text(at(m, "condition_id"))!] : [],
@@ -194,6 +234,7 @@ export default function App() {
       ...allRows.flatMap((r) => r.points),
       ...loadedNoePoints,
       ...loadedResearchPoints,
+      ...loadedExistingPoints,
     ];
     const selectedPoint = selection as Partial<Point> | null;
     const retained =
@@ -210,7 +251,14 @@ export default function App() {
           !current.some((c) => c.source === p.source && c.path === p.path),
       ),
     ];
-  }, [report, allRows, selection, loadedNoePoints, loadedResearchPoints]);
+  }, [
+    report,
+    allRows,
+    selection,
+    loadedNoePoints,
+    loadedResearchPoints,
+    loadedExistingPoints,
+  ]);
   const rangeValid =
     (!start || /^-?\d+$/.test(start)) &&
     (!end || /^-?\d+$/.test(end)) &&
@@ -241,17 +289,19 @@ export default function App() {
         )
       : points;
   const sourceName = (source: Evidence["source"]) =>
-    source === "report"
-      ? engineeringProjection
-        ? "Ledger 工程投影"
-        : "历史报告"
-      : source === "metadata"
-        ? "启动元数据"
-        : source === "research"
-          ? "真实历史描述研究"
-          : source === "noe"
-            ? "NOE 解码记录"
-            : "公共稳定记录";
+    source === "existing"
+      ? existingLabel(existingStatus?.kind)
+      : source === "report"
+        ? engineeringProjection
+          ? "Ledger 工程投影"
+          : "历史报告"
+        : source === "metadata"
+          ? "启动元数据"
+          : source === "research"
+            ? "真实历史描述研究"
+            : source === "noe"
+              ? "NOE 解码记录"
+              : "公共稳定记录";
   const evidencePanel = (
     <section className="evidence-panel">
       <h2>所选事实</h2>
@@ -268,6 +318,13 @@ export default function App() {
                 无法将此事实直接关联所选市场。保留原证据，不替换身份。
               </p>
             )}
+          {selection.existing && (
+            <p>
+              原文档 <code>{fact(at(selection.existing, "document"))}</code> ·
+              文件 <code>{fact(at(selection.existing, "source"))}</code> ·
+              原引用 <code>{fact(at(selection.existing, "reference"))}</code>
+            </p>
+          )}
           {selection.inputStreamId && (
             <p>
               公共流 <code>{selection.inputStreamId}</code>
@@ -515,15 +572,17 @@ export default function App() {
             <p className="eyebrow">公共业务事实浏览器</p>
             <h1>
               {view === "overview"
-                ? researchReady
-                  ? "描述研究总览"
-                  : publicOnly
-                    ? noeOnly
-                      ? "NOE 来源总览"
-                      : "公共流总览"
-                    : engineeringProjection
-                      ? "Ledger 工程投影总览"
-                      : "运行总览"
+                ? existingReady
+                  ? existingLabel(existingStatus?.kind)
+                  : researchReady
+                    ? "描述研究总览"
+                    : publicOnly
+                      ? noeOnly
+                        ? "NOE 来源总览"
+                        : "公共流总览"
+                      : engineeringProjection
+                        ? "Ledger 工程投影总览"
+                        : "运行总览"
                 : views.find(([id]) => id === view)?.[1]}{" "}
               <span>原事实 · 可回查</span>
             </h1>
@@ -549,18 +608,22 @@ export default function App() {
           <>
             <div className="run-strip">
               <b>
-                {report
-                  ? engineeringProjection
-                    ? "Ledger 工程投影"
-                    : "backtest"
-                  : researchReady
-                    ? "真实历史描述研究"
-                    : noeOnly
-                      ? "显式 NOE 引用"
-                      : "公共历史材料"}
+                {existingReady
+                  ? existingLabel(existingStatus?.kind)
+                  : report
+                    ? engineeringProjection
+                      ? "Ledger 工程投影"
+                      : "backtest"
+                    : researchReady
+                      ? "真实历史描述研究"
+                      : noeOnly
+                        ? "显式 NOE 引用"
+                        : "公共历史材料"}
               </b>
               <span>{snapshot.label}</span>
-              {researchReady ? (
+              {existingReady ? (
+                <span>原工程 / 历史摘要 · 非回测宿主 / 正式训练</span>
+              ) : researchReady ? (
                 <span>原研究范围 · 未运行账户 / 策略决定</span>
               ) : engineeringProjection ? (
                 <span>原 Ledger 投影 · 非宿主报告 / 策略研究</span>
@@ -598,7 +661,14 @@ export default function App() {
               </span>
             </div>
             <div className="identity">
-              {researchReady ? (
+              {existingReady ? (
+                <>
+                  <span>
+                    来源类别 <code>{existingStatus?.kind}</code>
+                  </span>
+                  <span>已交接摘要 / 明确原文件实例</span>
+                </>
+              ) : researchReady ? (
                 <>
                   <span>
                     研究原代码{" "}
@@ -720,15 +790,17 @@ export default function App() {
               onSelect={select}
             />
             <div className="notice">
-              {researchReady
-                ? "真实首小时描述研究 · 事后标签不回填冻结输入"
-                : engineeringProjection
-                  ? "原 Ledger 工程投影；非宿主报告 / 策略研究"
-                  : noeOnly
-                    ? "显式 NOE 单引用；报告和公共流未接入"
-                    : publicOnly
-                      ? "固定公共前缀与有限已读范围"
-                      : "终态快照与有限时序"}{" "}
+              {existingReady
+                ? "独立工程 / 历史来源；原字段与口径保留"
+                : researchReady
+                  ? "真实首小时描述研究 · 事后标签不回填冻结输入"
+                  : engineeringProjection
+                    ? "原 Ledger 工程投影；非宿主报告 / 策略研究"
+                    : noeOnly
+                      ? "显式 NOE 单引用；报告和公共流未接入"
+                      : publicOnly
+                        ? "固定公共前缀与有限已读范围"
+                        : "终态快照与有限时序"}{" "}
               ·
               公共输入按固定前缀和已读范围浏览；报告不代表完整逐次诊断、执行或经济历史。查看市场是浏览选择，不代表策略当前活跃市场。
             </div>
@@ -738,7 +810,7 @@ export default function App() {
             {!engineeringProjection && snapshot.report.status !== "ready" && (
               <Source
                 title={
-                  researchReady
+                  researchReady || existingReady
                     ? "账户回测报告状态（独立可选来源）"
                     : "报告状态"
                 }
@@ -746,6 +818,13 @@ export default function App() {
               />
             )}
             {view === "overview" && researchPanel}
+            {[
+              "overview",
+              "execution",
+              "economics",
+              "training",
+              "evidence",
+            ].includes(view) && existingPanel}
             {view === "overview" && (
               <>
                 <div className="overview-grid">
@@ -753,6 +832,40 @@ export default function App() {
                     <Topology
                       report={report}
                       engineering={engineeringProjection}
+                      existing={
+                        existingStatus?.status === "ready"
+                          ? {
+                              kind: existingStatus.kind!,
+                              evidence: {
+                                source: "existing",
+                                path:
+                                  existingStatus.kind === "completion"
+                                    ? "/final_ledger"
+                                    : existingStatus.kind ===
+                                        "collection_manifest"
+                                      ? "/existing/manifest/collection_day_coverage"
+                                      : "/existing/provenance/baseline",
+                                value:
+                                  existingStatus.kind === "completion"
+                                    ? at(completionDocument, "final_ledger")!
+                                    : existingStatus.kind ===
+                                        "collection_manifest"
+                                      ? (at(
+                                          existingStatus.documents?.find(
+                                            (d) => d.document === "manifest",
+                                          )?.summary,
+                                          "collection_day_coverage",
+                                        ) ?? null)
+                                      : (at(
+                                          existingStatus.documents?.find(
+                                            (d) => d.document === "provenance",
+                                          )?.summary,
+                                          "baseline",
+                                        ) ?? null),
+                              },
+                            }
+                          : undefined
+                      }
                       research={
                         researchReady
                           ? {
@@ -933,7 +1046,7 @@ export default function App() {
             {view === "training" && (
               <>
                 <section>
-                  <h2>公共模型位置 · 来源未接入</h2>
+                  <h2>业务模型训练 · 来源未接入</h2>
                   <p>
                     人工策略与模型复用观察、执行和账户读取位置；本次策略身份：
                     {fact(at(metadata, "config", "strategy", "strategy_id"))}。

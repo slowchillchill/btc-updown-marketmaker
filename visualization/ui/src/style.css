@@ -774,3 +774,28 @@ input {
 .public-browse .range-controls select { max-width: 230px; }
 .public-browse .query-progress { color: #9bbbc9; }
 .history-playback { border-top: 1px solid #253949; padding-top: 12px; }
+
+.source-table {
+  overflow-x: auto;
+  margin: 16px 0;
+}
+.source-table table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.source-table th,
+.source-table td {
+  padding: 9px;
+  text-align: left;
+  border-bottom: 1px solid #233449;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.source-table th {
+  color: #93b7ca;
+  background: #172538;
+}
+.existing-panel > label > select {
+  max-width: 100%;
+}

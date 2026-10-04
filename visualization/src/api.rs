@@ -3,6 +3,7 @@ use crate::{
     dto::{ReportSourceKind, Snapshot, SourcesConfig, exact_json},
     sources::{
         backtest::{load_document, load_engineering_projection},
+        existing::{ExistingDocument, ExistingQuery},
         noe::NoeResults,
         public_recording::PublicPages,
         research::{ResearchDocument, ResearchQuery},
@@ -24,10 +25,12 @@ use std::sync::{Arc, Mutex};
 pub struct Run {
     label: String,
     snapshot: Bytes,
+    snapshot_encoding: Value,
     public: Option<Mutex<PublicPages>>,
     public_status: Value,
     noe: Mutex<NoeResults>,
     research: Mutex<ResearchDocument>,
+    existing: Mutex<ExistingDocument>,
 }
 pub type AppState = Arc<Vec<Run>>;
 pub fn load_sources(config: SourcesConfig) -> Result<AppState, serde_json::Error> {
@@ -56,10 +59,12 @@ pub fn load_sources(config: SourcesConfig) -> Result<AppState, serde_json::Error
         };
         let noe = NoeResults::new(config.noe_results);
         let research = ResearchDocument::open(config.research.as_deref());
+        let existing = ExistingDocument::open(config.existing_source.as_ref());
         let snapshot = Snapshot {
             label: config.label.clone(),
             report,
             research: research.status(),
+            existing_source: existing.status(),
             report_kind: config.report_kind,
             metadata,
             public_recording: public_status.clone(),
@@ -71,13 +76,18 @@ pub fn load_sources(config: SourcesConfig) -> Result<AppState, serde_json::Error
                 "训练/MLflow、PAPER/LIVE、独立评价：未接入",
             ],
         };
+        let encoding_start = std::time::Instant::now();
+        let snapshot: Bytes = serde_json::to_vec(&snapshot)?.into();
+        let snapshot_encoding = json!({"complete_encoding_us":encoding_start.elapsed().as_micros().to_string(),"response_bytes":snapshot.len().to_string()});
         runs.push(Run {
             label: config.label,
-            snapshot: serde_json::to_vec(&snapshot)?.into(),
+            snapshot,
+            snapshot_encoding,
             public,
             public_status,
             noe: Mutex::new(noe),
             research: Mutex::new(research),
+            existing: Mutex::new(existing),
         });
     }
     Ok(Arc::new(runs))
@@ -90,6 +100,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/runs/{run}/public-query", get(public_query))
         .route("/api/runs/{run}/noe/{index}", get(noe))
         .route("/api/runs/{run}/research", get(research))
+        .route("/api/runs/{run}/existing", get(existing))
         .with_state(state)
 }
 
@@ -265,6 +276,48 @@ async fn research(
     })
     .await
     {
+        Ok(Ok(body)) => json_response(StatusCode::OK, body),
+        Ok(Err(detail)) => error(StatusCode::UNPROCESSABLE_ENTITY, detail),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
+}
+
+/// 测量示例与 HTTP 复用同一次完整 snapshot 编码事实；不再次编码计量。
+pub fn snapshot_encoding_cost(state: &AppState, run: usize) -> Option<&Value> {
+    state.get(run).map(|r| &r.snapshot_encoding)
+}
+pub fn select_existing(
+    state: &AppState,
+    run: usize,
+    query: ExistingQuery,
+) -> Result<Bytes, String> {
+    state
+        .get(run)
+        .ok_or("来源未在配置中")?
+        .existing
+        .lock()
+        .map_err(|e| e.to_string())?
+        .select(query)
+}
+pub fn existing_encoding_cost(state: &AppState, run: usize) -> Result<Value, String> {
+    Ok(state
+        .get(run)
+        .ok_or("来源未在配置中")?
+        .existing
+        .lock()
+        .map_err(|e| e.to_string())?
+        .last_encoding_cost()
+        .clone())
+}
+async fn existing(
+    State(state): State<AppState>,
+    Path(run): Path<usize>,
+    Query(query): Query<ExistingQuery>,
+) -> Response {
+    if state.get(run).is_none() {
+        return error(StatusCode::NOT_FOUND, "来源未在显式配置中");
+    }
+    match tokio::task::spawn_blocking(move || select_existing(&state, run, query)).await {
         Ok(Ok(body)) => json_response(StatusCode::OK, body),
         Ok(Err(detail)) => error(StatusCode::UNPROCESSABLE_ENTITY, detail),
         Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),

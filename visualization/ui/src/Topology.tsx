@@ -191,6 +191,7 @@ export function Topology({
   report,
   engineering = false,
   research,
+  existing,
   metadata,
   selection,
   onSelect,
@@ -203,6 +204,7 @@ export function Topology({
   report: Json | undefined;
   engineering?: boolean;
   research?: Evidence;
+  existing?: { kind: string; evidence: Evidence };
   metadata: Json | undefined;
   selection: Evidence | null;
   onSelect: (e: Evidence) => void;
@@ -324,6 +326,21 @@ export function Topology({
         at(metadata, "config", "strategy"),
       ),
   };
+  if (existing?.kind === "completion")
+    facts.ledger = {
+      summary: "已停止工程最终 Ledger 投影 · 非 NAV / 经营验收",
+      evidence: existing.evidence,
+    };
+  if (existing?.kind === "collection_manifest")
+    facts["data-collect"] = {
+      summary: "历史采集清单已交接 · 非实时 / 公共前缀",
+      evidence: existing.evidence,
+    };
+  if (existing?.kind === "continuous")
+    facts.strategy = {
+      summary: "原生调用工程成本已交接 · 非训练 / 策略决定",
+      evidence: existing.evidence,
+    };
   const nodes: ModuleNode[] = modules.map(([id, subtitle, x, y]) => ({
     id,
     type: "module",

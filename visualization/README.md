@@ -309,3 +309,60 @@ CARGO_TARGET_DIR="$TARGET" node visualization/ui/tests/research-browser.mjs "$SO
 本次C有限实测：初始化逻辑读取/解码各1次，source read 2次（含EOF）返回15,253,473 B；成功分配1,675,644次、累计请求125,589,559 B，live请求638→89,129,768 B，绝对峰值104,306,063 B／相对104,305,425 B。/proc read_bytes增量0受OS缓存影响；没有pread/readv来源调用。选择代表窗一次完整编码994 B，实际分配/计时见摘要；最近重试来源IO、完整编码、成功分配新增0，同Bytes内容及地址。首屏约14KB，不传15MB全文；浏览器实际响应与综合耗时逐项列在摘要。最终JS约1037.86kB/gzip340.54kB、CSS26.06kB/gzip5.52kB；大包提示保留。
 
 固定根回归四段证据：初次完整命令退出0；随后完整复验在 data-collect 既有 full_runtime_cross_platform_degradation_converges_at_run_deadline_and_finalizes_rows 失败，unwrap错误为 `missing metadata source authority for btc-updown-5m-1791087900`。该Gamma loopback按实际now_ms()生成当前窗口，失败日志覆盖04:30UTC换窗，保留为相关线索而非独占根因结论。准确全限定单项实际1条通过（1.11s、432 filtered）；最后固定完整命令退出0。未新增skip或改A；唯一具名UTC测试按仓库规定跳过。之后仅缺失数组统计不填0的读边界映射与前端文案，研究针对边界2条、前端build/Chrome/Point均通过。额外 `cargo clippy -p visualization --lib --bins --tests --locked --offline -- -D warnings` 被 contracts 既有三项large_enum_variant阻断，未以通过掩盖。此前短名配 --exact 的0条调用不计单项通过证据。
+
+### 已有工程证据与历史采集摘要
+
+`runs[].existing_source` 是独立的显式来源实例；三个类别各有自己的标签与原身份，可与报告、研究、公共前缀或 NOE 各自并存。它们不包装为 backtest、不生成 RangeEnd、账户经济版本、策略决定或正式训练事实。`kind` 支持：
+
+```json
+{
+  "runs": [
+    {"label":"已停止工程容量诊断", "existing_source":{"kind":"completion", "paths":{"completion":"<completion.json>"}}},
+    {"label":"原生输入优化成本", "existing_source":{"kind":"continuous", "paths":{
+      "summary":"model-train/validation/issue-178/evidence/continuous/continuous-summary.json",
+      "pooled":"model-train/validation/issue-178/evidence/continuous/pooled-summary.json",
+      "calls":"model-train/validation/issue-178/evidence/continuous/continuous-calls.csv.gz",
+      "provenance":"model-train/validation/issue-178/evidence/source/provenance.json",
+      "run_order":"model-train/validation/issue-178/evidence/continuous/run-order.jsonl",
+      "report":"model-train/validation/issue-178/evidence/continuous/comparison.md"
+    }}},
+    {"label":"历史采集摘要", "existing_source":{"kind":"collection_manifest", "paths":{"manifest":"<明确交接的 day_dir>"}}}
+  ]
+}
+```
+
+`paths.manifest` **是日期目录**，复用 `data_collect::daily_manifest::load_day_manifest` 固定只读取该目录的 `manifest.json`，再用 `manifest_collection_day_coverage` 校验原覆盖结构/状态。配置、UI文件名与计量目标是同一实际清单。不会寻找其他日期、读取声明的 Parquet、重做文件哈希或归约。在线 `file_bytes` 是文件长度，原 loader 未返回实际 payload 字节数，`bytes_read` 保留 null；实际系统调用读量由有限测量单独给出。缺覆盖不补完整，原空 gaps 不保证无遗漏；无统一单位的 `source_timestamp` 仅保留详情，明确 `*_utc_ms` 可进入有限时钟。
+
+completion 以所属类型 `LedgerProjectionV2` 解释原 `/final_ledger`，执行投影保留此根及完整市场身份。平台确认现金/可用额、费用及已实现 PnL 读取原字段，不当统一策略资金、NAV 或收益验收。发送后效果未知、确认待经济应用与开放订单是不同人口；本金/即时费用占用的包含关系沿既有执行组件。外层 complete/groups/drain/耗时/online 是工程窗口与排空诊断，caller PAPER 不代表联网 PAPER。两个容量运行相互独立，缺 outcome 映射不猜 UP/DOWN。
+
+continuous 首屏给原文件角色、身份/数组长度，明确按钮选择有限单轮或 pooled 摘要；原记录选择器保留 run/model/segment/window/variant/round/phase，表格直接显示原 count/mean/分位/max。all/entry/continuation 重叠，不能相加；pooled 分位数不平均。CSV 用 [csv Reader](https://docs.rs/csv/1.4.0/csv/struct.Reader.html) 和 [flate2 GzDecoder](https://docs.rs/flate2/1.1.9/flate2/read/struct.GzDecoder.html) 实际解析，每个 cell 保留原字符串，按原记录区段分页；原 `run`/`position`、零起点 record index 和一基 CSV 行号均可查。Debug/JSON动作文本不解释成 ModelDecision 或 NoTrade 历史。`now` 是原宿主逻辑 UTC ms；`*_ns` 保留时长，不造 CPU/网络分解或训练曲线。进程 RSS/user/system 包含图加载/前史，嵌套探针不相加当总墙钟。原 provenance、run-order 与中文 comparison 可按需查看，工程初始权重不冒称训练完成。
+
+`GET /api/runs/{run}/existing?document=<已配置角色>&path=<原JSON Pointer>&start=<原数组起点>&count=<区段长度>` 只选择已载入文档，不接受文件路径。除根数组或文本外，根对象不可整份重传。嵌套数组以原路径/长度显式交接，下一次选择区段；缺字段/损坏/未知类别或清单版本/越界各自可见。每个显式文件一次初读，实例保留一份原解析文档；snapshot 编码一次，最近同一选择复用相同 Bytes，不重读或重编码。原文件来源与路径保留在详情/Perfetto 的 existing_provenance，原序/精确整数不变；只有原可证时间点，没有持续区间或因果消费推断。
+
+本次真实 Chrome 覆盖大/小工程快照、48原单轮摘要（独立64/1/63期待）、8 pooled（128及原mean）、1024 CSV原字符串/行号与历史清单145文件/7来源/两RTDS各11重连；窄指标卡仅显示标量，来源原统计使用有限表格。缺失/损坏/未知与不打开声明数据文件的边界由代表性测试核对。源码定位直接回读当前任务树 `existing.rs → api.rs → Existing.tsx/ExecutionProjection.tsx/browse.ts` 及原读取接口；本轮没有使用代码图，也不宣称索引已刷新。
+
+有限 C5 数据与限制见 [实际测量摘要](docs/existing-source-read-cost-20261004.json)。示例只测一个来源实例，配置解析在阶段之外；初始化阶段包括来源读取/解码/校验、summary DTO 和一次完整 snapshot 编码。select 阶段为一个原区段的 DTO/单次完整编码，最近 retry 使用同一 Bytes；`elapsed_us` 包含原子分配探针和 strace 开销，不能当生产速度。分配成功次数/累计请求字节/live峰值与 RSS 分开；文件长度、read/pread64/readv 返回字节、受 OS 缓存影响的 `/proc read_bytes` 分开，不清缓存。C 消费成本与源端 #178/#180 工程测量不混合。
+
+```bash
+cargo build -p visualization --example existing_read_cost --bin visualization --locked --offline
+strace -qq -yy -e trace=read,pread64,readv,write -s 256 -o <private-trace> \
+  target/debug/examples/existing_read_cost <sources.json> 0 completion /final_ledger 1
+python3 visualization/examples/existing_read_cost_io.py <private-trace> <sources.json> 0
+# 对 continuous 用其显式实例索引、calls、空 path、5；对清单用 manifest、/files、5。
+CARGO_TARGET_DIR=<实际target> node visualization/ui/tests/existing-browser.mjs <sources.json> <ignored-output>
+```
+
+该有限实物首读：completion 2次read/7795B；连续实例的6文件12次read/483109B；清单2次read/400713B（含EOF零返回调用）。区段与最近 retry 来源I/O均0，三类 retry 分配和新完整编码均0。缓存未命中指应用实例首读，不代表冷盘；先前一次连续实例物理read_bytes=4096B、最终复测为0，保留系统缓存影响。Chrome 综合完成耗时含网络/JSON/React/浏览器调度/两帧，非 CPU。官方 Trace Processor 将最终Ledger截止导出读为1点、原1789517400990ms与1789517400990000000ns一致。JS构建仍有超过500kB的原 Vite体积提示，实际产物大小保存于摘要，不新增容量/性能门槛。
+
+最终固定根回归命令退出0，101组结果行合计1297 passed/0 failed（含父测试启动的子进程结果，非去重根用例数），具名 `four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second` **跳过**。未新增其他skip。此前记录的采集器实际UTC跨窗metadata authority失败边界仍未修复；本轮两次整库回归均无失败，不能据此宣布源端偶发已修好。旧 report/public/research/NOE 适用边界仍由本次根回归覆盖；新增来源不填补其业务历史、模型训练/MLflow或PAPER/LIVE宿主缺口。
+
+额外静态检查：`cargo clippy -p visualization --lib --bins --locked --offline -- -D warnings` 在既有 contracts 的三个 large_enum_variant 警告处退出101，未改源端；`--no-deps` 聚焦 visualization 后通过。共享研究 fragment 的可见性复用及同文件最近缓存条件作等价折叠，受影响 visualization lib/tests/examples 复验退出0；固定根回归在最终计量修正后已通过，不因后续纯前端与等价条件整理机械重复整库。
+
+工程/历史时间字段按原文档角色与 JSON Pointer 的末段识别；整记录中的时间字段和直接读取的标量叶复用同一规则。标量详情仅保留该次实际返回的原值/来源/路径，不为补身份另读父记录。真实 `calls /0/now=1789517395414` 保持宿主逻辑 UTC ms，`manifest /files/0/first_recv_time_utc_ms=1788912002229` 保持原 UTC ms；两者的整记录字段与叶选择均生成相同引用的 1 个点并可下载所选 Perfetto。`cpu_ns`、Debug `actions` 和无单位 `source_timestamp_start` 叶不生成点。
+
+```bash
+# 参数为上述四来源配置，脚本只取 continuous / manifest 两个显式实例。
+CARGO_TARGET_DIR=<实际target> node visualization/ui/tests/existing-leaf-browser.mjs <sources.json> <ignored-output>
+```
+
+本次叶路径修复的 Chrome 无 pageerror、自有服务/浏览器结束；官方 Trace Processor 各读取 1 点，分别为 `now / 1789517395414000000 ns / 原1789517395414 ms` 与 `first_recv_time_utc_ms / 1788912002229000000 ns / 原1788912002229 ms`。前端 build 通过，JS 1052.64 kB/gzip344.89 kB、CSS26.41 kB/gzip5.60 kB，原 Vite 大 chunk 提示保留。仅前端映射与定向脚本改变，复用既有 Rust 回归与成本证据；未重新测量成本，历史摘要中的计量源码 SHA 与读数不变。
