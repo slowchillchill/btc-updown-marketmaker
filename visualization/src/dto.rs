@@ -10,7 +10,7 @@ pub struct SourcesConfig {
 #[derive(Debug, Deserialize)]
 pub struct RunSourceConfig {
     pub label: String,
-    pub report: PathBuf,
+    pub report: Option<PathBuf>,
     pub metadata: Option<PathBuf>,
     pub public_recording: Option<PublicSourceConfig>,
 }

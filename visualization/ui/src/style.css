@@ -742,3 +742,18 @@ input {
   border-color: #47666b;
   min-height: 182px;
 }
+
+.native-links > div {
+  border-top: 1px solid #233449;
+  padding: 10px 0;
+}
+.native-links small,
+.native-links code {
+  display: block;
+  margin: 5px 0;
+  overflow-wrap: anywhere;
+}
+.native-links button {
+  font-size: 11px;
+  margin: 4px 5px 4px 0;
+}

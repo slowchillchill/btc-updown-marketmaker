@@ -28,7 +28,11 @@ export function EventTable({
         header: "原身份 / 市场",
         accessorFn: (r) =>
           r.identity +
-          (r.condition ? " · " + r.condition : " · 无明确市场关联"),
+          (r.markets?.length
+            ? " · " + [...new Set(r.markets.map((m) => m.condition))].join("；")
+            : r.condition
+              ? " · " + r.condition
+              : " · 无明确市场关联"),
       },
       {
         id: "reference",

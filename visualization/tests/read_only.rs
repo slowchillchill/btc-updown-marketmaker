@@ -68,7 +68,7 @@ async fn production_range_end_report_and_missing_metadata_are_independent_read_o
         load_sources(SourcesConfig {
             runs: vec![RunSourceConfig {
                 label: "合成工程验证".into(),
-                report: config.result_path.clone(),
+                report: Some(config.result_path.clone()),
                 metadata: Some(temp.path().join("missing.json")),
                 public_recording: None,
             }],
@@ -136,8 +136,9 @@ fn corrupt_and_unknown_report_versions_fail_without_repairing_originals() {
     }
     assert_eq!(load_document(None, false).status, "not_configured");
 }
-#[test]
-fn committed_pages_keep_original_identity_exclude_later_and_pending_segments_and_do_not_restart() {
+#[tokio::test]
+async fn committed_pages_keep_original_identity_exclude_later_and_pending_segments_and_do_not_restart()
+ {
     let temp = tempfile::tempdir().unwrap();
     let (config, _) = common::setup(temp.path());
     let root = temp.path().join("public");
@@ -169,6 +170,27 @@ fn committed_pages_keep_original_identity_exclude_later_and_pending_segments_and
         })
         .unwrap();
     let before = files(&root);
+    // report 可省略；公共流独立于损坏报告/缺失元数据，不建立运行或账户身份。
+    let broken_report = temp.path().join("invalid-report.json");
+    std::fs::write(&broken_report, "{broken").unwrap();
+    let source = serde_json::json!({"root":root,"committed_prefix":prefix_path,"page_rows":1,"max_batch_bytes":1048576});
+    let config:SourcesConfig=serde_json::from_value(serde_json::json!({"runs":[
+        {"label":"public-only","public_recording":source},
+        {"label":"independent-errors","report":broken_report,"metadata":temp.path().join("missing-meta"),"public_recording":source}
+    ]})).unwrap();
+    let app = router(load_sources(config).unwrap());
+    let (_, snapshot) = query(&app, "/api/runs/0/snapshot").await;
+    assert_eq!(snapshot["report"]["status"], "not_configured");
+    assert_eq!(snapshot["report"]["read_attempts"], "0");
+    assert_eq!(snapshot["metadata"]["status"], "not_configured");
+    assert_eq!(snapshot["public_recording"]["status"], "ready");
+    assert_eq!(query(&app, "/api/runs/0/public").await.0, StatusCode::OK);
+    let (_, snapshot) = query(&app, "/api/runs/1/snapshot").await;
+    assert_eq!(snapshot["report"]["status"], "invalid_json");
+    assert_eq!(snapshot["metadata"]["status"], "read_error");
+    assert_eq!(snapshot["public_recording"]["status"], "ready");
+    assert_eq!(query(&app, "/api/runs/1/public").await.0, StatusCode::OK);
+    assert_eq!(before, files(&root));
     let (mut reader, status) = PublicPages::open(&PublicSourceConfig {
         root: root.clone(),
         committed_prefix: prefix_path,
