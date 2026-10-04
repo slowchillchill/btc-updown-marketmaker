@@ -2531,3 +2531,154 @@ fn marketless_rtds_input_exposes_only_its_current_complete_spot() {
     };
     assert!(push(&mut core, &end).closed_groups.is_empty());
 }
+
+#[test]
+fn opted_progress_is_asset_scoped_ignores_retry_and_keeps_unknown_connection() {
+    let mut core = core();
+    core.enable_source_progress();
+    push(&mut core, &meta(0));
+    let first = row("epoch-a", 1, 1000, 2000, book("100"));
+    let a = push(
+        &mut core,
+        &record(
+            1,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(first.clone())),
+        ),
+    );
+    let progress = a.closed_groups[0].observations[0].source_progress[0].clone();
+    assert_eq!(progress.connection_generation, None);
+    assert_eq!(progress.scope.asset_or_symbol, UP_TOKEN_ID);
+    let duplicate = push(
+        &mut core,
+        &record(
+            2,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(first)),
+        ),
+    );
+    assert!(duplicate.closed_groups.is_empty());
+    let mut other = row("epoch-a", 2, 900, 3000, book("100"));
+    if let PolymarketOrderbookEvent::Book { asset_id, .. } = &mut other.event {
+        *asset_id = DOWN_TOKEN_ID.into();
+    }
+    let b = push(
+        &mut core,
+        &record(
+            3,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(other)),
+        ),
+    );
+    let scopes = &b.closed_groups[0].observations[0].source_progress;
+    assert_eq!(scopes.len(), 2);
+    assert_eq!(
+        scopes
+            .iter()
+            .find(|s| s.scope.asset_or_symbol == UP_TOKEN_ID)
+            .unwrap(),
+        &progress
+    );
+    let lagged = scopes
+        .iter()
+        .find(|s| s.scope.asset_or_symbol == DOWN_TOKEN_ID)
+        .unwrap()
+        .last_valid_business_message
+        .as_ref()
+        .unwrap();
+    assert_eq!(lagged.source_event_at_utc_ms, Some(900));
+    assert_eq!(lagged.received_at_utc_ms, 3000);
+}
+
+#[test]
+fn invalid_rtds_and_pong_never_refresh_valid_stream_progress() {
+    let mut core = core();
+    core.enable_source_progress();
+    push(&mut core, &meta(0));
+    let mut row = twap_input(60).common;
+    row.schema_version = POLYMARKET_RTDS_CHAINLINK_BTC_USD_SCHEMA.into();
+    row.topic = "crypto_prices_chainlink".into();
+    let first = push(
+        &mut core,
+        &record(
+            1,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketRtdsChainlinkBtcUsd(row.clone())),
+        ),
+    );
+    let progress = first.closed_groups[0].observations[0]
+        .source_progress
+        .clone();
+    row.timestamp_received += 1000;
+    row.message_type = "PONG".into();
+    row.freshness_status = RtdsFreshnessStatus::InvalidType;
+    let pong = push(
+        &mut core,
+        &record(
+            2,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketRtdsChainlinkBtcUsd(row.clone())),
+        ),
+    );
+    assert_eq!(
+        pong.closed_groups[0].observations[0].source_progress,
+        progress
+    );
+    row.timestamp_received += 1000;
+    row.message_type = "update".into();
+    row.symbol = "eth/usd".into();
+    row.freshness_status = RtdsFreshnessStatus::InvalidSymbol;
+    let other = push(
+        &mut core,
+        &record(
+            3,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketRtdsChainlinkBtcUsd(row)),
+        ),
+    );
+    assert_eq!(
+        other.closed_groups[0].observations[0].source_progress,
+        progress
+    );
+}
+
+#[test]
+fn source_epoch_resync_requires_each_asset_once_without_resetting_already_rebuilt_asset() {
+    let mut core = core();
+    core.enable_source_progress();
+    push(&mut core, &meta(0));
+    let mut position = 1;
+    for epoch in ["epoch-a", "epoch-b"] {
+        for (i, token) in [UP_TOKEN_ID, DOWN_TOKEN_ID].into_iter().enumerate() {
+            let mut message = row(
+                epoch,
+                i as u64 + 1,
+                1000 + position as i64,
+                2000 + position as i64,
+                book("100"),
+            );
+            if let PolymarketOrderbookEvent::Book { asset_id, .. } = &mut message.event {
+                *asset_id = token.into();
+            }
+            let output = push(
+                &mut core,
+                &record(
+                    position,
+                    TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(message)),
+                ),
+            );
+            let scopes = &output.closed_groups[0].observations[0].source_progress;
+            if epoch == "epoch-b" && i == 0 {
+                assert_eq!(
+                    scopes
+                        .iter()
+                        .find(|p| p.scope.asset_or_symbol == DOWN_TOKEN_ID)
+                        .unwrap()
+                        .synchronization,
+                    SourceSynchronizationV1::SnapshotRequired
+                );
+            }
+            if i == 1 {
+                assert!(scopes.iter().all(|p| matches!(
+                    p.synchronization,
+                    SourceSynchronizationV1::SnapshotObserved { .. }
+                )));
+            }
+            position += 1;
+        }
+    }
+}

@@ -152,6 +152,13 @@ pub struct HistoricalDeliverySummaryV1 {
 }
 /// 经济读取与未闭合对象来自同一公共状态。Exit/失败的内存读取不声称已经落盘。
 #[derive(Debug, Serialize)]
+pub struct SourceHealthRunSummaryV1 {
+    pub qualification_calls: u64,
+    pub deadline_wakeups: u64,
+    pub invalidated_batches: u64,
+    pub last_invalidated_calculation_timing: Option<CalculationTimingRecordV1>,
+}
+#[derive(Debug, Serialize)]
 pub struct HistoricalRunReportV1 {
     pub end_reason: HistoricalEndReasonV1,
     pub last_observed_at_utc_ms: Option<i64>,
@@ -173,6 +180,8 @@ pub struct HistoricalRunReportV1 {
     pub pending_calculation_timing: Option<CalculationTimingRecordV1>,
     pub calculation_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_health: Option<SourceHealthRunSummaryV1>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub delivery_summary: Option<HistoricalDeliverySummaryV1>,
 }
 #[derive(Debug)]
@@ -183,6 +192,11 @@ pub enum HistoricalFailureCauseV1<E> {
     Settlement(SharedSettlementErrorV1),
     Strategy(E),
     Dispatch(BatchExecutionErrorV1),
+    Qualification {
+        error: E,
+        sent: Vec<SentIntentReceiptV1>,
+        release_errors: Vec<ledger::LedgerErrorV1>,
+    },
 }
 #[derive(Debug)]
 pub struct HistoricalRunFailureV1<E> {
@@ -194,6 +208,7 @@ struct Pending<D> {
     completed_at: i64,
     send_at: i64,
     record: CalculationTimingRecordV1,
+    health_invalidated: bool,
 }
 fn assemble(
     config: &HistoricalPreparedRunConfigV1,
@@ -336,6 +351,7 @@ fn report<I: Iterator<Item = Result<PublicGroupDeliveryV1, SimRunActorErrorV2>>>
         last_dispatched_calculation_timing: timing,
         pending_calculation_timing: pending_timing,
         calculation_count: count,
+        source_health: None,
         delivery_summary: None,
     }
 }
@@ -405,6 +421,7 @@ async fn run_material<S: StrategyV1>(
     strategy: &mut S,
 ) -> Result<HistoricalRunReportV1, HistoricalRunFailureV1<S::Error>> {
     let metadata = serde_json::json!({"config": metadata_config, "prepared_material": material, "source_manifests": prepared.source_manifests, "input_set_identity_sha256": prepared.input_set_identity_sha256, "source_identity_sha256": prepared.source_identity_sha256, "initialization": prepared.initialization, "public_prefix": prepared.hidden.prefix, "rules_file_sha256": rules.file_sha256(), "caller_role": SimCallerRoleV1::HistoricalBacktest, "recording_role": RunDurabilityRoleV2::FiniteHistorical, "economics_version": ACCOUNT_ECONOMICS_VERSION});
+    let health_enabled = strategy.uses_source_health();
     let start = || -> Result<_, MaterialError> {
         serde_json::to_writer(std::fs::File::create(&config.metadata_path)?, &metadata)?;
         let (execution, shared, observation) =
@@ -421,6 +438,9 @@ async fn run_material<S: StrategyV1>(
         )?;
         if source.header() != &material.preparation.header {
             return Err("描述与公共流头不符".into());
+        }
+        if health_enabled {
+            source.enable_source_progress();
         }
         source.set_progress(
             std::time::Duration::from_secs(config.replay_progress_interval_seconds),
@@ -454,6 +474,13 @@ async fn run_material<S: StrategyV1>(
     let mut calculation_index = 0;
     let mut timing = None;
     let mut evaluation_at = None;
+    let mut health_at = None;
+    let mut health_summary = SourceHealthRunSummaryV1 {
+        qualification_calls: 0,
+        deadline_wakeups: 0,
+        invalidated_batches: 0,
+        last_invalidated_calculation_timing: None,
+    };
     let mut unconsumed_required_trigger_at = None;
     let mut coordinator = SettlementCoordinatorV1::default();
     let mut delivery_summary = HistoricalDeliverySummaryV1::default();
@@ -482,7 +509,8 @@ async fn run_material<S: StrategyV1>(
                 if matches!(
                     p.calculation.calculation.output,
                     StrategyOutputV1::Exit { .. }
-                ) {
+                ) || p.health_invalidated
+                {
                     p.completed_at
                 } else {
                     p.send_at
@@ -495,6 +523,7 @@ async fn run_material<S: StrategyV1>(
                 start_at.filter(|_| pending.is_none()),
                 evaluation_at.filter(|_| pending.is_none()),
                 pending_at,
+                health_at,
             ]
             .into_iter()
             .flatten()
@@ -513,6 +542,14 @@ async fn run_material<S: StrategyV1>(
                 })
             {
                 return Ok(HistoricalEndReasonV1::StrategyExit);
+            }
+            let health_due = health_at == Some(at);
+            if health_due {
+                health_at = None;
+                health_summary.deadline_wakeups += 1;
+                if pending.is_none() {
+                    dirty = true;
+                }
             }
             if evaluation_at == Some(at) && pending.is_none() {
                 evaluation_at = None;
@@ -595,6 +632,46 @@ async fn run_material<S: StrategyV1>(
                 }
                 dirty |= operating;
             }
+            // 启用时以同一真实驱动器签发当前观察；不提前闭合本毫秒隐藏桶。
+            let current_input = if health_enabled {
+                driver
+                    .observe_at(at)
+                    .map_err(HistoricalFailureCauseV1::Sim)?;
+                shared
+                    .strategy_current_read(&driver)
+                    .map_err(HistoricalFailureCauseV1::Ledger)?
+            } else {
+                None
+            };
+            if health_enabled && let Some(input) = &current_input {
+                if let Some(p) = pending.as_mut()
+                    && !p.health_invalidated
+                    && pending_at != Some(at)
+                {
+                    let (invalidated, calls) = shared
+                        .revalidate_calculation(strategy, &p.calculation.calculation, input, at)
+                        .map_err(HistoricalFailureCauseV1::Strategy)?;
+                    health_summary.qualification_calls += calls;
+                    if invalidated.is_some() {
+                        p.health_invalidated = true;
+                        p.completed_at = p.completed_at.max(at);
+                        health_summary.invalidated_batches += 1;
+                        health_summary.last_invalidated_calculation_timing = Some(p.record.clone());
+                        dirty = true;
+                    }
+                }
+                health_at = strategy
+                    .next_health_evaluation_at(
+                        input,
+                        pending
+                            .as_ref()
+                            .filter(|p| !p.health_invalidated)
+                            .map(|p| &p.calculation.calculation),
+                        at,
+                    )
+                    .filter(|next| *next > at);
+            }
+            drop(current_input);
             // 已冻结发送先于本毫秒完整隐藏桶闭合，允许原 SIM 请求/行情竞速。
             if pending_at == Some(at) {
                 let p = pending.take().expect("待完成计算");
@@ -604,31 +681,83 @@ async fn run_material<S: StrategyV1>(
                 ) {
                     return Ok(HistoricalEndReasonV1::StrategyExit);
                 }
-                driver
-                    .wait_for_recording_capacity()
-                    .map_err(HistoricalFailureCauseV1::Sim)?;
-                let mut decision = driver
-                    .send_decision_at(p.calculation.calculation.input_cutoff.clone(), at)
-                    .map_err(HistoricalFailureCauseV1::Sim)?;
-                let dispatched = shared
-                    .dispatch_strategy(&mut decision, strategy, p.calculation)
-                    .await
-                    .map_err(HistoricalFailureCauseV1::Dispatch)?;
-                if let StrategyDispatchV1::Continue {
-                    calculation,
-                    sent_at_utc_ms,
-                    ..
-                } = dispatched
-                {
-                    let mut record = p.record;
-                    record.actual_sent_at_utc_ms = Some(sent_at_utc_ms);
-                    timing = Some(record);
-                    if let StrategyOutputV1::Continue {
-                        next_evaluation_at_utc_ms,
+                if p.health_invalidated {
+                    dirty = true;
+                } else {
+                    driver
+                        .wait_for_recording_capacity()
+                        .map_err(HistoricalFailureCauseV1::Sim)?;
+                    let mut decision = driver
+                        .send_decision_at(p.calculation.calculation.input_cutoff.clone(), at)
+                        .map_err(HistoricalFailureCauseV1::Sim)?;
+                    let dispatched = if health_enabled {
+                        let result = shared
+                            .dispatch_strategy_qualified(&mut decision, strategy, p.calculation)
+                            .await;
+                        match result {
+                            Ok(QualifiedStrategyDispatchV1::Dispatched {
+                                dispatch,
+                                qualification_calls,
+                            }) => {
+                                health_summary.qualification_calls += qualification_calls;
+                                Some(dispatch)
+                            }
+                            Ok(QualifiedStrategyDispatchV1::Invalidated {
+                                result,
+                                qualification_calls,
+                                ..
+                            }) => {
+                                health_summary.qualification_calls += qualification_calls;
+                                health_summary.invalidated_batches += 1;
+                                health_summary.last_invalidated_calculation_timing =
+                                    Some(p.record.clone());
+                                dirty = true;
+                                if !result.release_errors.is_empty() {
+                                    return Err(HistoricalFailureCauseV1::Ledger(
+                                        result.release_errors.into_iter().next().unwrap(),
+                                    ));
+                                }
+                                None
+                            }
+                            Err(QualifiedBatchErrorV1::Execution(error)) => {
+                                return Err(HistoricalFailureCauseV1::Dispatch(error));
+                            }
+                            Err(QualifiedBatchErrorV1::Qualification {
+                                error,
+                                sent,
+                                release_errors,
+                            }) => {
+                                return Err(HistoricalFailureCauseV1::Qualification {
+                                    error,
+                                    sent,
+                                    release_errors,
+                                });
+                            }
+                        }
+                    } else {
+                        Some(
+                            shared
+                                .dispatch_strategy(&mut decision, strategy, p.calculation)
+                                .await
+                                .map_err(HistoricalFailureCauseV1::Dispatch)?,
+                        )
+                    };
+                    if let Some(StrategyDispatchV1::Continue {
+                        calculation,
+                        sent_at_utc_ms,
                         ..
-                    } = calculation.calculation.output
+                    }) = dispatched
                     {
-                        evaluation_at = next_evaluation_at_utc_ms.map(|next| next.max(at));
+                        let mut record = p.record;
+                        record.actual_sent_at_utc_ms = Some(sent_at_utc_ms);
+                        timing = Some(record);
+                        if let StrategyOutputV1::Continue {
+                            next_evaluation_at_utc_ms,
+                            ..
+                        } = calculation.calculation.output
+                        {
+                            evaluation_at = next_evaluation_at_utc_ms.map(|next| next.max(at));
+                        }
                     }
                 }
             }
@@ -699,10 +828,13 @@ async fn run_material<S: StrategyV1>(
             }
             if pending.is_none() && start_at == Some(at) {
                 start_at = None;
-                if let Some(input) = shared
-                    .strategy_input(&mut driver)
-                    .map_err(HistoricalFailureCauseV1::Ledger)?
-                {
+                let input = if health_enabled {
+                    shared.strategy_observation_input(&mut driver)
+                } else {
+                    shared.strategy_input(&mut driver)
+                }
+                .map_err(HistoricalFailureCauseV1::Ledger)?;
+                if let Some(input) = input {
                     let calculation = input
                         .calculate(strategy, at)
                         .map_err(HistoricalFailureCauseV1::Strategy)?;
@@ -728,8 +860,18 @@ async fn run_material<S: StrategyV1>(
                             .map_err(HistoricalFailureCauseV1::Sim)?,
                     )
                     .map_err(HistoricalFailureCauseV1::Sim)?;
+                    if health_enabled
+                        && let Some(current) = shared
+                            .strategy_current_read(&driver)
+                            .map_err(HistoricalFailureCauseV1::Ledger)?
+                    {
+                        health_at = strategy
+                            .next_health_evaluation_at(&current, Some(&calculation), at)
+                            .filter(|next| *next > at);
+                    }
                     pending = Some(Pending {
                         calculation: calculation.complete(completed_at),
+                        health_invalidated: false,
                         completed_at,
                         send_at,
                         record: CalculationTimingRecordV1 {
@@ -747,6 +889,7 @@ async fn run_material<S: StrategyV1>(
             // 严格更早的原义务由下一事件证明；在本毫秒无剩余事件时推进闭合。
             let immediate_pending = pending.as_ref().is_some_and(|p| {
                 p.send_at == at
+                    || (p.health_invalidated && p.completed_at == at)
                     || (matches!(
                         p.calculation.calculation.output,
                         StrategyOutputV1::Exit { .. }
@@ -791,6 +934,7 @@ async fn run_material<S: StrategyV1>(
                 calculation_index,
             );
             result.delivery_summary = operating_start.map(|_| delivery_summary.clone());
+            result.source_health = health_enabled.then_some(health_summary);
             if normal {
                 driver
                     .stop_and_drain()
@@ -827,6 +971,7 @@ async fn run_material<S: StrategyV1>(
                 calculation_index,
             );
             failure_report.delivery_summary = operating_start.map(|_| delivery_summary.clone());
+            failure_report.source_health = health_enabled.then_some(health_summary);
             Err(HistoricalRunFailureV1 {
                 cause,
                 report: Some(failure_report),

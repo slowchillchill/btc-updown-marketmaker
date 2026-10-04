@@ -414,6 +414,8 @@ pub struct PublicObservationCoreV1 {
     current_depth_projection: Option<Arc<ObservedFactV1<BinanceDepthStateReferenceV1>>>,
     binance_trade: BinanceAggTradeReducer<E>,
     pending: BTreeMap<(String, u64), PendingTerminal>,
+    source_progress_enabled: bool,
+    source_progress: BTreeMap<SourceStreamScopeV1, SourceStreamProgressV1>,
 }
 
 fn observed<T>(
@@ -470,7 +472,13 @@ impl PublicObservationCoreV1 {
             references: BTreeMap::new(),
             global: GlobalReferences::default(),
             pending: BTreeMap::new(),
+            source_progress_enabled: false,
+            source_progress: BTreeMap::new(),
         })
+    }
+    /// 在消费开始前显式选用；原关闭组与旧消费者默认行为保持。
+    pub fn enable_source_progress(&mut self) {
+        self.source_progress_enabled = true;
     }
     pub fn header(&self) -> &PublicInputStreamHeaderV1 {
         &self.header
@@ -892,6 +900,8 @@ impl PublicObservationCoreV1 {
                             resync: ResyncQuality::NotRequired,
                         },
                     };
+                    let source_epoch_changed =
+                        market.pm.epoch.as_deref() != Some(&admission.source_sequence_epoch_id);
                     market.pm.apply(&reduction);
                     market.apply_pm_projection(&reduction, &fact, &msg.group_id, &msg.payload);
                     market
@@ -909,6 +919,7 @@ impl PublicObservationCoreV1 {
                         .pm_reductions
                         .push((fact.position.clone(), reduction));
                     self.commit_selection(input);
+                    self.update_pm_source_progress(&fact, source_epoch_changed);
                     self.close_group(
                         msg.group_id.clone(),
                         vec![self.next_input_position],
@@ -1035,6 +1046,229 @@ impl PublicObservationCoreV1 {
             output,
         );
     }
+    fn put_source_progress(
+        &mut self,
+        scope: SourceStreamScopeV1,
+        evidence: &SourceEvidenceRefV3,
+        generation: Option<u64>,
+        valid: bool,
+        snapshot: bool,
+        quality: EventQualityV2,
+    ) -> bool {
+        if !self.source_progress_enabled {
+            return false;
+        }
+        let prior = self.source_progress.get(&scope);
+        if prior.is_some_and(|old| {
+            old.last_observed_message.source_message_id == evidence.source_message_id
+        }) {
+            return false;
+        }
+        let generation_changed = prior.is_some_and(|old| old.connection_generation != generation);
+        let mut synchronization = prior.map_or(SourceSynchronizationV1::Unknown, |old| {
+            old.synchronization.clone()
+        });
+        if scope.source == SourceStreamKindV1::BinanceDepth {
+            if generation_changed || quality.resync == ResyncQuality::Required {
+                synchronization = SourceSynchronizationV1::SnapshotRequired;
+            }
+            if snapshot {
+                synchronization = SourceSynchronizationV1::SnapshotObserved {
+                    source_message_id: evidence.source_message_id.clone(),
+                };
+            }
+        }
+        // 被抑制的重放不刷新有效业务时间，但真实代次变化仍是可见事实。
+        if !valid && !generation_changed && prior.is_some_and(|old| old.quality == quality) {
+            return false;
+        }
+        let last_valid_business_message = if valid {
+            Some(evidence.clone())
+        } else {
+            prior.and_then(|old| old.last_valid_business_message.clone())
+        };
+        self.source_progress.insert(
+            scope.clone(),
+            SourceStreamProgressV1 {
+                scope,
+                last_valid_business_message,
+                last_observed_message: evidence.clone(),
+                connection_generation: generation,
+                synchronization,
+                quality,
+            },
+        );
+        true
+    }
+    fn update_source_progress(
+        &mut self,
+        input: &PreparedIngressV1<'_>,
+        batch: &PublicReductionBatchV1,
+    ) -> bool {
+        if !self.source_progress_enabled {
+            return false;
+        }
+        let produced_or_confirmed = !batch.facts.is_empty()
+            || batch
+                .reports
+                .iter()
+                .any(|r| r.report.operation == ReductionOperationKindV1::Confirm);
+        let fresh = EventQualityV2 {
+            availability: MarketDataQuality::Fresh,
+            resync: ResyncQuality::NotRequired,
+        };
+        let quality = batch.facts.last().map_or(fresh, |f| f.quality.clone());
+        let (kind, symbol, evidence, generation, valid, snapshot) = match &input.current {
+            PreparedCanonicalInputV1::BinanceDepthSnapshot { row, source } => (
+                SourceStreamKindV1::BinanceDepth,
+                row.symbol.clone(),
+                source.source(),
+                Some(row.connection_generation),
+                produced_or_confirmed,
+                true,
+            ),
+            PreparedCanonicalInputV1::BinanceDepthUpdate { row, source } => {
+                let quality = if row.stitch_verdict
+                    == BinanceDepthStitchVerdict::NotAppliedSnapshotUnavailable
+                {
+                    EventQualityV2 {
+                        availability: MarketDataQuality::Missing,
+                        resync: ResyncQuality::Required,
+                    }
+                } else {
+                    quality
+                };
+                return self.put_source_progress(
+                    SourceStreamScopeV1 {
+                        source: SourceStreamKindV1::BinanceDepth,
+                        condition_id: None,
+                        asset_or_symbol: row.symbol.clone(),
+                    },
+                    source.source(),
+                    Some(row.connection_generation),
+                    row.stitch_verdict == BinanceDepthStitchVerdict::Applied,
+                    false,
+                    quality,
+                );
+            }
+            PreparedCanonicalInputV1::BinanceAggregateTrade {
+                row,
+                source,
+                payload,
+            } => {
+                let Some(payload) = payload else {
+                    return false;
+                };
+                (
+                    SourceStreamKindV1::BinanceAggregateTrade,
+                    payload.symbol.clone(),
+                    source.source(),
+                    Some(row.connection_generation),
+                    produced_or_confirmed,
+                    false,
+                )
+            }
+            PreparedCanonicalInputV1::ChainlinkSpot(event) => {
+                let CanonicalReferenceEventPayloadV2::ChainlinkBtcUsd(value) = &event.payload
+                else {
+                    return false;
+                };
+                (
+                    SourceStreamKindV1::ChainlinkSpot,
+                    value.symbol.clone(),
+                    &event.lineage.source_evidence[0],
+                    None,
+                    true,
+                    false,
+                )
+            }
+            PreparedCanonicalInputV1::ChainlinkTwap(event) => {
+                let CanonicalReferenceEventPayloadV2::ChainlinkBtcUsdTwap(value) = &event.payload
+                else {
+                    return false;
+                };
+                let kind = if value.window_s == 30 {
+                    SourceStreamKindV1::ChainlinkTwapThirty
+                } else {
+                    SourceStreamKindV1::ChainlinkTwapSixty
+                };
+                (
+                    kind,
+                    value.symbol.clone(),
+                    &event.lineage.source_evidence[0],
+                    None,
+                    true,
+                    false,
+                )
+            }
+            _ => return false,
+        };
+        self.put_source_progress(
+            SourceStreamScopeV1 {
+                source: kind,
+                condition_id: None,
+                asset_or_symbol: symbol,
+            },
+            evidence,
+            generation,
+            valid,
+            snapshot,
+            quality,
+        )
+    }
+    fn update_pm_source_progress(&mut self, fact: &PublicBusinessFactV1, epoch_changed: bool) {
+        if !self.source_progress_enabled {
+            return;
+        }
+        let PublicBusinessPayloadV1::PolymarketMessage(message) = &fact.payload else {
+            return;
+        };
+        if epoch_changed {
+            // 与原归约器的本市场代际变化一致；每次代际只重置一次。
+            for progress in self.source_progress.values_mut().filter(|p| {
+                p.scope.source == SourceStreamKindV1::PolymarketBook
+                    && p.scope.condition_id.as_ref() == Some(&message.market.condition_id)
+            }) {
+                progress.synchronization = SourceSynchronizationV1::SnapshotRequired;
+                progress.last_observed_message = fact.direct_sources[0].clone();
+            }
+        }
+        let (assets, snapshot): (Vec<_>, bool) = match &message.payload {
+            CanonicalPmPayloadV1::Book {
+                fact: CanonicalBookFactV1::FullBook { asset, .. },
+            } => (vec![asset], true),
+            CanonicalPmPayloadV1::Book {
+                fact: CanonicalBookFactV1::AbsoluteLevelChanges { changes },
+            } => (changes.iter().map(|c| &c.asset).collect(), false),
+            CanonicalPmPayloadV1::BestBidAsk { asset, .. }
+            | CanonicalPmPayloadV1::TickSizeChange { asset, .. }
+            | CanonicalPmPayloadV1::PublicTrade { asset, .. } => (vec![asset], false),
+            _ => return,
+        };
+        for asset in assets {
+            let scope = SourceStreamScopeV1 {
+                source: SourceStreamKindV1::PolymarketBook,
+                condition_id: Some(message.market.condition_id.clone()),
+                asset_or_symbol: asset.token_id.0.clone(),
+            };
+            self.put_source_progress(
+                scope.clone(),
+                &fact.direct_sources[0],
+                None,
+                true,
+                false,
+                fact.quality.clone(),
+            );
+            if snapshot {
+                self.source_progress
+                    .get_mut(&scope)
+                    .unwrap()
+                    .synchronization = SourceSynchronizationV1::SnapshotObserved {
+                    source_message_id: fact.direct_sources[0].source_message_id.clone(),
+                };
+            }
+        }
+    }
     fn close_batch_with_group(
         &mut self,
         batch: PublicReductionBatchV1,
@@ -1043,11 +1277,12 @@ impl PublicObservationCoreV1 {
         input: &PreparedIngressV1<'_>,
         output: &mut PublicAppliedIngressV1<'_>,
     ) {
+        let progress_changed = self.update_source_progress(input, &batch);
         for fact in batch.facts.iter() {
             self.apply_fact(fact, &group);
         }
         self.commit_selection(input);
-        if !batch.facts.is_empty() {
+        if !batch.facts.is_empty() || progress_changed {
             self.close_group(
                 group,
                 members,
@@ -1099,11 +1334,13 @@ impl PublicObservationCoreV1 {
                 dependency_frontier: self.global.depth.dependency_frontier.clone(),
             })
         }));
+        let progress: Arc<[SourceStreamProgressV1]> =
+            self.source_progress.values().cloned().collect();
         let observations = self
             .markets
             .iter()
             .map(|(id, state)| {
-                state.observation(
+                let mut observation = state.observation(
                     &group_id,
                     self.next_group_position,
                     AppliedIngressPrefixV1 {
@@ -1115,7 +1352,9 @@ impl PublicObservationCoreV1 {
                     &self.global,
                     &depth,
                     &self.header.observation_version,
-                )
+                );
+                observation.source_progress = Arc::clone(&progress);
+                observation
             })
             .collect();
         self.next_canonical_position += records.len() as u64;
@@ -1554,6 +1793,7 @@ impl MarketState {
             binance_depth: Arc::clone(depth),
             binance_trade: global.trade.clone(),
             group_events: Arc::clone(events),
+            source_progress: Arc::from([]),
         }
     }
 }

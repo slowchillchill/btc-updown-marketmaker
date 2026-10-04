@@ -28,6 +28,11 @@ pub struct StrategyInputV1 {
     pub markets: Vec<FrozenMarketReadV1>,
     pub trade_economics: Vec<FrozenTradeEconomicsV1>,
 }
+/// 健康读取借用原公开观察，避免重复克隆盘口；账户来自同一真实 Ledger/Registry。
+pub struct StrategyCurrentReadV1<'a> {
+    pub action_before: ActionBeforeReadV2,
+    pub markets: Vec<PublicObservationFrameV1<'a>>,
+}
 /// 每笔新增资金的原腿序号与预留；取消意图没有新增资金项。
 #[derive(Clone, Debug)]
 pub struct IntentReserveV1 {
@@ -51,9 +56,78 @@ pub enum StrategyOutputV1<D = ()> {
         diagnostics: D,
     },
 }
+/// 策略定义原因及作用范围，公共层仅携带并执行判定。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct IntentInvalidationReasonV1 {
+    pub reason_code: String,
+    pub scopes: Vec<SourceStreamScopeV1>,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum IntentQualificationV1 {
+    Qualified,
+    Invalidated(IntentInvalidationReasonV1),
+}
+#[derive(Debug)]
+pub struct InvalidatedBatchV1 {
+    pub sent: Vec<SentIntentReceiptV1>,
+    /// 此项失效；其后的所有项只因停批而未尝试。
+    pub invalidated_intent_index: usize,
+    pub reason: IntentInvalidationReasonV1,
+    pub observed_cutoff: TrustedGroupDecisionCutoffV1,
+    pub detected_at_utc_ms: i64,
+    pub release_errors: Vec<LedgerErrorV1>,
+}
+#[derive(Debug)]
+pub enum QualifiedBatchErrorV1<E> {
+    Execution(BatchExecutionErrorV1),
+    Qualification {
+        error: E,
+        sent: Vec<SentIntentReceiptV1>,
+        release_errors: Vec<LedgerErrorV1>,
+    },
+}
+impl<E> From<BatchExecutionErrorV1> for QualifiedBatchErrorV1<E> {
+    fn from(error: BatchExecutionErrorV1) -> Self {
+        Self::Execution(error)
+    }
+}
+#[derive(Debug)]
+pub enum QualifiedBatchResultV1 {
+    Sent(Vec<SentIntentReceiptV1>),
+    Invalidated(Box<InvalidatedBatchV1>),
+}
 pub trait StrategyV1 {
     type Error;
     type Diagnostics;
+    /// 默认不选用；旧调用方继续使用原回调、时序与组节奏。
+    fn uses_source_health(&self) -> bool {
+        false
+    }
+    /// 返回严格晚于当前时刻的必要期限；没有固定节拍或公共阈值。
+    fn next_health_evaluation_at(
+        &self,
+        _input: &StrategyCurrentReadV1<'_>,
+        _calculation: Option<&StrategyCalculationV1<Self::Diagnostics>>,
+        _at: i64,
+    ) -> Option<i64> {
+        None
+    }
+    /// 当前合法事实与原冻结决定分别提供，不能以新事实改写原业务值。
+    fn qualify_intent(
+        &mut self,
+        _input: &StrategyCurrentReadV1<'_>,
+        _calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        _intent_index: usize,
+        _at: i64,
+    ) -> Result<IntentQualificationV1, Self::Error> {
+        Ok(IntentQualificationV1::Qualified)
+    }
+    fn invalidated(
+        &mut self,
+        _calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        _result: &InvalidatedBatchV1,
+    ) {
+    }
     fn decide(
         &mut self,
         input: &StrategyInputV1,
@@ -127,6 +201,17 @@ pub enum StrategyDispatchV1<D = ()> {
     },
 }
 
+pub enum QualifiedStrategyDispatchV1<D> {
+    Dispatched {
+        dispatch: StrategyDispatchV1<D>,
+        qualification_calls: u64,
+    },
+    Invalidated {
+        calculation: CompletedStrategyCalculationV1<D>,
+        result: Box<InvalidatedBatchV1>,
+        qualification_calls: u64,
+    },
+}
 impl SharedExecutionV2 {
     pub fn strategy_input(
         &mut self,
@@ -137,10 +222,50 @@ impl SharedExecutionV2 {
         };
         let decision = driver.decision().expect("原公共组");
         let frames = decision.frames();
-        let Some(action_before) = self.freeze_action_before(cutoff, &frames) else {
+        Ok(self.input_from_frames(cutoff, &frames))
+    }
+    /// 静默时刻及待发复核使用当前受信观察，旧 strategy_input 保留组快照语义。
+    pub fn strategy_observation_input(
+        &mut self,
+        driver: &mut PublicConsumptionStateV1,
+    ) -> Result<Option<StrategyInputV1>, LedgerErrorV1> {
+        self.apply_closed()?;
+        let Some(cutoff) = driver.observation_cutoff() else {
             return Ok(None);
         };
-        Ok(Some(StrategyInputV1 {
+        let frames = driver.frames_at_observation();
+        self.observe_group(&frames);
+        Ok(self.input_from_frames(cutoff, &frames))
+    }
+    pub fn strategy_current_read<'a>(
+        &mut self,
+        driver: &'a PublicConsumptionStateV1,
+    ) -> Result<Option<StrategyCurrentReadV1<'a>>, LedgerErrorV1> {
+        self.apply_closed()?;
+        let Some(cutoff) = driver.observation_cutoff() else {
+            return Ok(None);
+        };
+        let frames = driver.frames_at_observation();
+        self.observe_group(&frames);
+        Ok(self.current_read_from_frames(cutoff, frames))
+    }
+    fn current_read_from_frames<'a>(
+        &self,
+        cutoff: TrustedGroupDecisionCutoffV1,
+        frames: Vec<PublicObservationFrameV1<'a>>,
+    ) -> Option<StrategyCurrentReadV1<'a>> {
+        Some(StrategyCurrentReadV1 {
+            action_before: self.freeze_action_before(cutoff, &frames)?,
+            markets: frames,
+        })
+    }
+    fn input_from_frames(
+        &self,
+        cutoff: TrustedGroupDecisionCutoffV1,
+        frames: &[PublicObservationFrameV1<'_>],
+    ) -> Option<StrategyInputV1> {
+        let action_before = self.freeze_action_before(cutoff, frames)?;
+        Some(StrategyInputV1 {
             action_before,
             trade_economics: self
                 .ledger()
@@ -163,7 +288,7 @@ impl SharedExecutionV2 {
                     rule_context: f.rule_context.clone(),
                 })
                 .collect(),
-        }))
+        })
     }
     pub async fn dispatch_strategy<S: StrategyV1>(
         &mut self,
@@ -186,12 +311,138 @@ impl SharedExecutionV2 {
             }
         }
     }
+    /// 计算或等待期间复核尚未尝试项；尚未预留，因此此处没有资金释放。
+    pub fn revalidate_calculation<S: StrategyV1>(
+        &self,
+        strategy: &mut S,
+        calculation: &StrategyCalculationV1<S::Diagnostics>,
+        input: &StrategyCurrentReadV1<'_>,
+        at: i64,
+    ) -> Result<(Option<InvalidatedBatchV1>, u64), S::Error> {
+        let mut calls = 0;
+        if let StrategyOutputV1::Continue { intents, .. } = &calculation.output {
+            for (index, intent) in intents.iter().enumerate() {
+                if self
+                    .registry()
+                    .has_sim_submission_evidence(&intent.context.global_request_id)
+                {
+                    continue;
+                }
+                calls += 1;
+                if let IntentQualificationV1::Invalidated(reason) =
+                    strategy.qualify_intent(input, calculation, index, at)?
+                {
+                    let result = InvalidatedBatchV1 {
+                        sent: vec![],
+                        invalidated_intent_index: index,
+                        reason,
+                        observed_cutoff: input.action_before.cutoff().clone(),
+                        detected_at_utc_ms: at,
+                        release_errors: vec![],
+                    };
+                    strategy.invalidated(calculation, &result);
+                    return Ok((Some(result), calls));
+                }
+            }
+        }
+        Ok((None, calls))
+    }
+    pub async fn dispatch_strategy_qualified<S: StrategyV1>(
+        &mut self,
+        decision: &mut PublicGroupDecisionV1<'_>,
+        strategy: &mut S,
+        calculation: CompletedStrategyCalculationV1<S::Diagnostics>,
+    ) -> Result<QualifiedStrategyDispatchV1<S::Diagnostics>, QualifiedBatchErrorV1<S::Error>> {
+        let StrategyOutputV1::Continue { intents, .. } = &calculation.calculation.output else {
+            return Ok(QualifiedStrategyDispatchV1::Dispatched {
+                dispatch: StrategyDispatchV1::Exit { calculation },
+                qualification_calls: 0,
+            });
+        };
+        let sent_at_utc_ms = decision.sent_at_utc_ms();
+        let cutoff = decision.frames_at_observation()[0].decision_cutoff.clone();
+        let mut qualification_calls = 0;
+        let result = self
+            .execute_batch_qualified(
+                decision,
+                intents,
+                Some(&cutoff),
+                |execution, current_decision, index, at| {
+                    let frames = current_decision.frames_at_observation();
+                    let input = execution
+                        .current_read_from_frames(frames[0].decision_cutoff.clone(), frames)
+                        .expect("合法观察与已开户账本");
+                    qualification_calls += 1;
+                    strategy.qualify_intent(&input, &calculation.calculation, index, at)
+                },
+            )
+            .await;
+        match result {
+            Ok(QualifiedBatchResultV1::Sent(sent)) => {
+                let original = Ok(sent);
+                strategy.dispatched(&calculation.calculation, &original);
+                Ok(QualifiedStrategyDispatchV1::Dispatched {
+                    dispatch: StrategyDispatchV1::Continue {
+                        calculation,
+                        sent_at_utc_ms,
+                        receipts: original.map_err(QualifiedBatchErrorV1::Execution)?,
+                    },
+                    qualification_calls,
+                })
+            }
+            Ok(QualifiedBatchResultV1::Invalidated(result)) => {
+                strategy.invalidated(&calculation.calculation, &result);
+                Ok(QualifiedStrategyDispatchV1::Invalidated {
+                    calculation,
+                    result,
+                    qualification_calls,
+                })
+            }
+            Err(QualifiedBatchErrorV1::Execution(error)) => {
+                let original = Err(error);
+                strategy.dispatched(&calculation.calculation, &original);
+                match original {
+                    Err(error) => Err(QualifiedBatchErrorV1::Execution(error)),
+                    Ok(_) => unreachable!("原发送错误"),
+                }
+            }
+            Err(other) => Err(other),
+        }
+    }
     /// 全批先按原 Ledger 检查预留，再按原序通过 Bridge；不保证平台原子效果。
     pub async fn execute_batch_reserved(
         &mut self,
         decision: &mut PublicGroupDecisionV1<'_>,
         intents: &[ReservedIntentV1],
     ) -> Result<Vec<SentIntentReceiptV1>, BatchExecutionErrorV1> {
+        let result = self
+            .execute_batch_qualified::<std::convert::Infallible>(
+                decision,
+                intents,
+                None,
+                |_, _, _, _| Ok(IntentQualificationV1::Qualified),
+            )
+            .await;
+        match result {
+            Ok(QualifiedBatchResultV1::Sent(sent)) => Ok(sent),
+            Ok(QualifiedBatchResultV1::Invalidated(_)) => unreachable!("旧消费者无资格失效"),
+            Err(QualifiedBatchErrorV1::Execution(error)) => Err(error),
+            Err(QualifiedBatchErrorV1::Qualification { error, .. }) => match error {},
+        }
+    }
+    /// 每项在原提交记录之前复核，整批预留与原请求效果链继续复用。
+    async fn execute_batch_qualified<E>(
+        &mut self,
+        decision: &mut PublicGroupDecisionV1<'_>,
+        intents: &[ReservedIntentV1],
+        observed_cutoff: Option<&TrustedGroupDecisionCutoffV1>,
+        mut qualify: impl FnMut(
+            &Self,
+            &PublicGroupDecisionV1<'_>,
+            usize,
+            i64,
+        ) -> Result<IntentQualificationV1, E>,
+    ) -> Result<QualifiedBatchResultV1, QualifiedBatchErrorV1<E>> {
         let current: BTreeMap<_, _> = self
             .ledger()
             .funds_read_v1()
@@ -224,7 +475,8 @@ impl SharedExecutionV2 {
                         attempted_intent_index: None,
                         failed_request_effect: None,
                         release_errors: vec![],
-                    });
+                    }
+                    .into());
                 }
             }
         }
@@ -259,7 +511,8 @@ impl SharedExecutionV2 {
                 attempted_intent_index: None,
                 failed_request_effect: None,
                 release_errors: self.release_unsent_intents(intents, &owned),
-            });
+            }
+            .into());
         }
         let mut sent = Vec::new();
         let mut batch_ids = BTreeSet::new();
@@ -286,7 +539,40 @@ impl SharedExecutionV2 {
                     attempted_intent_index: None,
                     failed_request_effect: None,
                     release_errors: self.release_unsent_intents(&intents[index..], &owned),
-                });
+                }
+                .into());
+            }
+            let qualification = if self
+                .registry()
+                .has_sim_submission_evidence(&item.context.global_request_id)
+            {
+                Ok(IntentQualificationV1::Qualified)
+            } else {
+                qualify(self, decision, index, decision.sent_at_utc_ms())
+            };
+            match qualification {
+                Ok(IntentQualificationV1::Qualified) => {}
+                Ok(IntentQualificationV1::Invalidated(reason)) => {
+                    return Ok(QualifiedBatchResultV1::Invalidated(Box::new(
+                        InvalidatedBatchV1 {
+                            sent,
+                            invalidated_intent_index: index,
+                            reason,
+                            observed_cutoff: observed_cutoff
+                                .expect("启用资格复核提供当前合法截止")
+                                .clone(),
+                            detected_at_utc_ms: decision.sent_at_utc_ms(),
+                            release_errors: self.release_unsent_intents(&intents[index..], &owned),
+                        },
+                    )));
+                }
+                Err(error) => {
+                    return Err(QualifiedBatchErrorV1::Qualification {
+                        error,
+                        sent,
+                        release_errors: self.release_unsent_intents(&intents[index..], &owned),
+                    });
+                }
             }
             for reserve in &item.reserves {
                 let submission = LedgerSubmissionItemIdentityV1 {
@@ -309,7 +595,8 @@ impl SharedExecutionV2 {
                         attempted_intent_index: None,
                         failed_request_effect: None,
                         release_errors: self.release_unsent_intents(&intents[index..], &owned),
-                    });
+                    }
+                    .into());
                 }
                 let event = LedgerLocalEventIdentityV1(
                     serde_json::to_string(&("submission-started", &submission)).expect("原身份"),
@@ -325,7 +612,8 @@ impl SharedExecutionV2 {
                         attempted_intent_index: None,
                         failed_request_effect: None,
                         release_errors: self.release_unsent_intents(&intents[index..], &owned),
-                    });
+                    }
+                    .into());
                 }
             }
             match self
@@ -363,11 +651,12 @@ impl SharedExecutionV2 {
                         failed_request_effect: Some(failure.effect),
                         release_errors: self
                             .release_unsent_intents(&intents[unsent_start..], &owned),
-                    });
+                    }
+                    .into());
                 }
             }
         }
-        Ok(sent)
+        Ok(QualifiedBatchResultV1::Sent(sent))
     }
     fn release_unsent_intents(
         &mut self,

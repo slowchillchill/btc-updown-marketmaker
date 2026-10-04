@@ -520,6 +520,10 @@ pub struct RecordedPublicGroupSourceV1<T> {
 }
 #[cfg(any(test, feature = "public-consumption"))]
 impl<T: PublicConsumptionTimeSourceV1> RecordedPublicGroupSourceV1<T> {
+    /// 选用流进展投影；同值业务确认沿唯一已记录输入重建，不使用字段锚点猜补。
+    pub fn enable_source_progress(&mut self) {
+        self.replay.core.enable_source_progress();
+    }
     /// 只转交同一有限replay的可选进度，不建立第二份计数或运行状态。
     pub fn set_progress(
         &mut self,

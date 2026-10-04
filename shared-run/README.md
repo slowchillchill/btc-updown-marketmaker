@@ -120,3 +120,15 @@ DPT 的 `valuation_best_bid` 在原来源选择投影内组合直接 BBA 与完�
 依据 [D-0271](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5933940873)，同批每意图全局请求 ID 独立；不同意图不能借旧冻结 ID 或已发送预留请求身份冒称正确发送。发送错误返回 `BatchExecutionErrorV1` 的原错误、真实已发送前缀、进入 Bridge 的错误项、`failed_request_effect` 和本地释放错误。进入公共函数不等于已产生平台效果：Bridge 构造失败与原注册归约明确未接纳时，返回 `NoRequestEffect`，当前项及后项本批新建占用按原 Ledger 本地释放事务解除；原注册归约已接纳而后续提交返回错误时，返回 `MayHaveRequestEffect`，当前项占用保留。效果信息在原事务接纳点产生，不增加预判校验或错误黑名单；旧单意图和原请求入口只剥离新增错误信息，复用同一实现路径。任何旧义务和已发送／未知义务继续保留，不按传入身份列表无条件释放。无自动重试、缩量、改价、NoTrade、平台原子保证或整程序终止。主动 FAK 的先撤／反馈／重算跨观察执行，不能用一批旧快照动作跳过。
 
 逐成交剩余贡献只是成本解释：原成功 BUY 进入原平均成本池，配平按该侧剩余比例扣减贡献，实际净费仍读原事实；策略若研究费用归属可据此计算，公共接口不批准或强加某种分摊。旧持久市场状态没有该可选索引时读 `Unavailable`，未成功应用读 `NotApplicable`，已全部配平读已知零；贡献不等于赎回后可售持仓。本金配平、净损益、费用返佣政策不变。SIM 全域成本界的单位、证明和限制见 [SIM 买入成本](../sim-system/buy-cost.md)。
+
+## 可选来源健康复核
+
+依据 [公共增量 #241](https://github.com/slowchillchill/btc-updown-marketmaker/issues/241) 与 [D-0284](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5981603350)，`StrategyV1::uses_source_health` 默认返回 `false`。选用者通过 `next_health_evaluation_at` 提供严格晚于当前观察的必要期限，通过 `qualify_intent` 独立判断指定原意图的动作依赖。公共层没有来源健康阈值、风险新增/补腿分类或撤单选择政策。
+
+`strategy_current_read` 先消费实际可见的 NOE/Ledger，再以 `observation_cutoff` 和 `frames_at_observation` 构造 `StrategyCurrentReadV1`。它借用原公开观察，复用原账户投影，不复制 L2 数量或改写 `Fresh/Stale`、NAV。`strategy_observation_input` 仅在实际计算时冻结当前观察；旧 `strategy_input` 保留原组快照语义。原 `StrategyCalculationV1` 的输入截止、意图和诊断继续冻结，复核的当前观察截止由结果单独关联。
+
+宿主在计算或等待期间调用 `revalidate_calculation`，发现第一项尚未尝试的资格失效时通过 `invalidated` 通知策略。历史宿主尚未进入整批预留，因此此处没有预留释放。最终发送走 `dispatch_strategy_qualified`，与旧 `execute_batch_reserved` 复用同一整批资金预留及逐项 Bridge 路径。每个尚未尝试项在记录 `submission-started` 之前复核；同批后项重新读取当时的本地资金与承诺，公共观察保持当前合法截止。已有真实提交证据的项只读原幂等结果，不按尚未发送处理。
+
+`QualifiedStrategyDispatchV1::Invalidated` 保留原完成计算及 `InvalidatedBatchV1`：已发回执前缀、第一失效序号、策略给定原因与来源作用域、当前观察截止、发现时刻和原 Ledger 释放错误。该序号之后的全部后缀只因停批未尝试；其中撤单不被冒称自身健康不合格。只释放本批拥有且明确无请求效果的未发送预留；已发或结果未知沿原义务保留。正常 NoTrade 仍为零请求；资格程序错误经 `QualifiedBatchErrorV1::Qualification` 返回，原提交错误经 `Execution` 返回，二者都不被改成资格失效或平台事实。
+
+无自动重排、重试、改价或逐次诊断落盘。收到失效通知的策略负责在下一次实际计算中按当前条件产生合格动作；本公共交付不证明 `baseline-mm` 健康政策、盈利或 PAPER/LIVE 在线接线已完成。

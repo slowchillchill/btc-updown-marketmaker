@@ -445,3 +445,162 @@ fn no_output_gap_epoch_recovery_and_failed_compute_invalidate_before_reuse() {
             .is_none()
     );
 }
+
+#[test]
+fn opted_source_progress_tracks_same_value_and_requires_snapshot_after_generation_change() {
+    let mut core = core();
+    core.enable_source_progress();
+    push(&mut core, &meta(0));
+    let first = push(
+        &mut core,
+        &record(
+            1,
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(snapshot(
+                "same-epoch",
+                100,
+                1,
+            ))),
+        ),
+    );
+    let anchor = first.closed_groups[0].observations[0]
+        .binance_depth
+        .direct_anchors
+        .clone();
+    let same = push(
+        &mut core,
+        &record(
+            2,
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(snapshot(
+                "same-epoch",
+                100,
+                2,
+            ))),
+        ),
+    );
+    assert!(
+        same.closed_groups[0].records.is_empty(),
+        "仅流进展，旧字段事实不改"
+    );
+    let observation = &same.closed_groups[0].observations[0];
+    assert_eq!(observation.binance_depth.direct_anchors, anchor);
+    let progress = &observation.source_progress[0];
+    assert_eq!(
+        progress
+            .last_valid_business_message
+            .as_ref()
+            .unwrap()
+            .received_at_utc_ms,
+        2002
+    );
+    assert_eq!(progress.connection_generation, Some(1));
+
+    let mut reconnect = update(
+        "same-epoch",
+        101,
+        101,
+        3,
+        Some(100),
+        None,
+        BinanceDepthStitchVerdict::Applied,
+        vec![],
+    );
+    reconnect.connection_generation = 2;
+    let switched = push(
+        &mut core,
+        &record(
+            3,
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthUpdate(reconnect)),
+        ),
+    );
+    let changed = &switched.closed_groups[0].observations[0].source_progress[0];
+    assert_eq!(changed.connection_generation, Some(2));
+    assert_eq!(
+        changed.synchronization,
+        SourceSynchronizationV1::SnapshotRequired
+    );
+    assert_eq!(
+        switched.closed_groups[0].observations[0]
+            .binance_depth
+            .quality,
+        MarketDataQuality::Fresh,
+        "健康投影不反写旧质量"
+    );
+
+    let duplicate = update(
+        "same-epoch",
+        101,
+        101,
+        4,
+        Some(100),
+        Some(101),
+        BinanceDepthStitchVerdict::NotAppliedStaleDuplicate,
+        vec![],
+    );
+    // 真实代次必须一致，不能凭重复消息伪造新连接。
+    let mut duplicate = duplicate;
+    duplicate.connection_generation = 2;
+    let replayed = push(
+        &mut core,
+        &record(
+            4,
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthUpdate(duplicate)),
+        ),
+    );
+    assert!(replayed.closed_groups.is_empty());
+    let mut rebuilt = snapshot("same-epoch", 102, 5);
+    rebuilt.connection_generation = 2;
+    let rebuilt = push(
+        &mut core,
+        &record(
+            5,
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(rebuilt)),
+        ),
+    );
+    let restored = &rebuilt.closed_groups[0].observations[0].source_progress[0];
+    assert!(matches!(
+        restored.synchronization,
+        SourceSynchronizationV1::SnapshotObserved { .. }
+    ));
+    assert_eq!(
+        restored
+            .last_valid_business_message
+            .as_ref()
+            .unwrap()
+            .received_at_utc_ms,
+        2005
+    );
+}
+
+#[test]
+fn source_progress_disabled_keeps_identical_confirmation_without_group() {
+    let mut core = core();
+    push(&mut core, &meta(0));
+    let first = push(
+        &mut core,
+        &record(
+            1,
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(snapshot(
+                "same-epoch",
+                100,
+                1,
+            ))),
+        ),
+    );
+    assert!(
+        first.closed_groups[0].observations[0]
+            .source_progress
+            .is_empty()
+    );
+    let same = push(
+        &mut core,
+        &record(
+            2,
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(snapshot(
+                "same-epoch",
+                100,
+                2,
+            ))),
+        ),
+    );
+    assert!(same.closed_groups.is_empty());
+}

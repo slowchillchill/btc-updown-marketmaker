@@ -88,3 +88,13 @@ TypedRaw Parquet 仍先以原打开的 `File` 完成长度与 SHA 校验，然�
 `prepare_historical_finite_files_v1` 接受原 `PublicFiniteFileV1` 固定文件事实，复用原单文件 SHA、页脚、模式、有界解码以及两遍来源排序；它不签发整日准入对象。范围筛选仍在完整物理解码之后，来源适配失败仍保留给原归约路径，不能把范围外坏行当作可跳过数据。
 
 `finite_recording::record_historical_merge_v1` 是正常历史准备与选源研究共用的原录制循环：初始化绑定、当次来源准备、core 应用、借用统计、完整 record、正常 End、writer 稳定的顺序保持。回调仅借用当次应用结果或写入前的初始化绑定；不保存另一份事件流水。`prepare_finite_public_recording_v1` 只形成正常公共材料，不生成隐藏数量、账户描述或策略参数。独立消费者仍通过原 `PublicReplayV1::open_committed` 完整读取指定稳定前缀。
+
+## 可选流进展投影
+
+`PublicObservationCoreV1::enable_source_progress` 在消费开始前显式开启来源健康事实，`RecordedPublicGroupSourceV1::enable_source_progress` 将该选择转交给其唯一原回放核心。默认关闭保持原封组节奏，已有策略及模型不自动选用此能力。
+
+`MarketBusinessObservationV1::source_progress` 使用公共 `SourceStreamProgressV1`，按 `SourceStreamScopeV1` 区分 Binance 深度/成交、Chainlink 现货/30秒/60秒流与 Polymarket 市场资产。字段记录最后有效业务来源证据、最后观察证据、实际已知连接代次与快照同步关联。它与字段值的 `direct_anchors` 分离：同值的新有效确认可以推进流时间，字段旧值锚点继续保留；重复、无效、PONG 或异资产消息不能续期其他流。来源事件时间和接收时间直接复用 `SourceEvidenceRefV3`，不把其他锚点最大值给所有源续期。
+
+选用回放从已记录的原 `RecordedIngressV1` 重建该投影，不要求重制历史材料、不回写旧文件或迁移历史记录。同值 Binance 快照原先只生成 `Confirm`；开启后额外产生一个只含进展的关闭观察组，其业务 `records` 为空，字段值/锚点不改。该组按真实输入接纳/可见时间交付，空业务事实不占规范事实序号。新组序号属于本次选用消费序列；没有选用的回放保持原序号。新/旧路径都由原输入和同一归约器生成，没有第二份来源或健康账本。
+
+Binance 原输入带真实 `connection_generation`，代次变化或已知连续性丢失使健康同步投影要求快照；同一代次后续有效快照建立 `SnapshotObserved`，仅网络或一条无关消息不恢复同步。Polymarket 来源 epoch 变化按原归约器范围要求重新同步本市场资产。未记录连接代次的流保持 `None`，没有快照同步证据保持 `Unknown`；它们不证明当前连接存活、断开或完整采集覆盖。固定市场锚点与已判定结果不作为持续行情流维护，公共原质量和 NAV 定义不受此投影改变。

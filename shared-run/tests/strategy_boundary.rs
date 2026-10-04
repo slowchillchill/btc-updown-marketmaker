@@ -439,3 +439,164 @@ async fn frozen_strategy_input_explicit_time_empty_error_exit_and_original_amoun
     assert!(input.trade_economics.is_empty(), "旧明细不倒填后续事实");
     assert_eq!(input.action_before.economics(), &old_economics);
 }
+
+struct QualificationProbe {
+    intents: Vec<ReservedIntentV1>,
+    invalidate_at: Option<usize>,
+    checked: Vec<usize>,
+    invalidated: Option<(usize, usize, Vec<SourceStreamScopeV1>)>,
+}
+impl StrategyV1 for QualificationProbe {
+    type Error = &'static str;
+    type Diagnostics = &'static str;
+    fn uses_source_health(&self) -> bool {
+        true
+    }
+    fn decide(
+        &mut self,
+        _: &StrategyInputV1,
+        _: i64,
+    ) -> Result<StrategyOutputV1<Self::Diagnostics>, Self::Error> {
+        Ok(StrategyOutputV1::Continue {
+            intents: self.intents.clone(),
+            next_evaluation_at_utc_ms: None,
+            diagnostics: "original-frozen-diagnostics",
+        })
+    }
+    fn qualify_intent(
+        &mut self,
+        _: &StrategyCurrentReadV1<'_>,
+        calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        index: usize,
+        _: i64,
+    ) -> Result<IntentQualificationV1, Self::Error> {
+        let StrategyOutputV1::Continue { diagnostics, .. } = &calculation.output else {
+            panic!()
+        };
+        assert_eq!(*diagnostics, "original-frozen-diagnostics");
+        self.checked.push(index);
+        Ok(if self.invalidate_at == Some(index) {
+            IntentQualificationV1::Invalidated(IntentInvalidationReasonV1 {
+                reason_code: "synthetic-own-dependency-expired".into(),
+                scopes: vec![SourceStreamScopeV1 {
+                    source: SourceStreamKindV1::ChainlinkSpot,
+                    condition_id: None,
+                    asset_or_symbol: "BTC/USD".into(),
+                }],
+            })
+        } else {
+            IntentQualificationV1::Qualified
+        })
+    }
+    fn invalidated(
+        &mut self,
+        _: &StrategyCalculationV1<Self::Diagnostics>,
+        result: &InvalidatedBatchV1,
+    ) {
+        self.invalidated = Some((
+            result.sent.len(),
+            result.invalidated_intent_index,
+            result.reason.scopes.clone(),
+        ));
+    }
+}
+#[tokio::test(flavor = "current_thread")]
+async fn qualification_stops_suffix_preserves_sent_unknown_and_releases_only_unsent() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut shared, mut driver) = setup(temp.path());
+    let cancel = ReservedIntentV1 {
+        context: RequestContextV2 {
+            global_request_id: "old-batch-cancel".into(),
+            caller_correlation_id: None,
+        },
+        intent: Arc::new(ModelIntentV1::CancelMarketOrders {
+            condition_id: ConditionId(CONDITION_ID.into()),
+        }),
+        reserves: vec![],
+    };
+    let mut strategy = QualificationProbe {
+        intents: vec![buy("prefix", 1), buy("invalid", 2), cancel],
+        invalidate_at: Some(1),
+        checked: vec![],
+        invalidated: None,
+    };
+    let input = shared.strategy_input(&mut driver).unwrap().unwrap();
+    let at = input
+        .action_before
+        .cutoff()
+        .decision_time()
+        .logical_time_utc_ms();
+    let calculation = input.calculate(&mut strategy, at).unwrap().complete(at);
+    let result = shared
+        .dispatch_strategy_qualified(&mut driver.decision().unwrap(), &mut strategy, calculation)
+        .await
+        .unwrap();
+    let QualifiedStrategyDispatchV1::Invalidated {
+        calculation,
+        result,
+        ..
+    } = result
+    else {
+        panic!("失效必须独立表达")
+    };
+    assert_eq!(strategy.checked, [0, 1]);
+    assert_eq!(result.sent.len(), 1);
+    assert_eq!(result.invalidated_intent_index, 1);
+    assert!(result.release_errors.is_empty());
+    assert_eq!(result.observed_cutoff, input.action_before.cutoff().clone());
+    assert!(shared.registry().frozen_intent("invalid").is_none());
+    assert!(
+        shared
+            .registry()
+            .frozen_intent("old-batch-cancel")
+            .is_none()
+    );
+    let requests: std::collections::BTreeMap<_, _> = shared
+        .ledger()
+        .funds_read_v1()
+        .requests()
+        .map(|r| (r.request_identity.0.clone(), r.reservation_state))
+        .collect();
+    assert_eq!(
+        requests["prefix-reserve"],
+        ReservationStatusV1::SubmittedUnknown
+    );
+    assert_eq!(requests["invalid-reserve"], ReservationStatusV1::Released);
+    let StrategyOutputV1::Continue {
+        intents,
+        diagnostics,
+        ..
+    } = calculation.calculation.output
+    else {
+        panic!()
+    };
+    assert_eq!(intents.len(), 3);
+    assert_eq!(diagnostics, "original-frozen-diagnostics");
+    // 已尝试未知的原请求复读不再被健康资格当作尚未发送，也不释放原承诺。
+    let mut retry = QualificationProbe {
+        intents: vec![buy("prefix", 1)],
+        invalidate_at: Some(0),
+        checked: vec![],
+        invalidated: None,
+    };
+    let calculation = input.calculate(&mut retry, at).unwrap().complete(at);
+    let result = shared
+        .dispatch_strategy_qualified(&mut driver.decision().unwrap(), &mut retry, calculation)
+        .await
+        .unwrap();
+    assert!(matches!(
+        result,
+        QualifiedStrategyDispatchV1::Dispatched { .. }
+    ));
+    assert!(retry.checked.is_empty());
+    assert_eq!(
+        shared
+            .ledger()
+            .funds_read_v1()
+            .requests()
+            .find(|r| r.request_identity.0 == "prefix-reserve")
+            .unwrap()
+            .reservation_state,
+        ReservationStatusV1::SubmittedUnknown
+    );
+}

@@ -167,3 +167,13 @@ backtest-cli --mode reuse --prepared path/to/materials/prepared-run-v1.json \
 JSON/TOML 解析、完整策略参数覆盖和显式 `false` 沿原命令层复用；每次 reuse 子进程新建 `ComplementaryPairV1` 及 `StrategyContinuityV1::new_account()`。准备模式不加载经营策略或创建账户。prepare/reuse 工具进度默认30秒、0关闭；reuse 打印打开和结束阶段，经营重放转接原可选 replay 进度，读到记录、应用输入、生成组的含义分别保持，未知工作量和 ETA 不编造。库新运行配置的进度默认关闭，输出故障不替代业务错误。
 
 本段只用原有效工程夹具验证：一次成功发布、原 raw 移走后两次独立复用、完整旧新报告与初始化交付相等、每次原2000初始现金与空策略状态、两个市场连续账户及 hidden 成交、输出与材料字节隔离；另核失败不发布、版本/固定 prefix/缺失市场/实际 hidden 混接。原身份修复夹具证明固定前缀不会读取更晚损坏目录，原隐藏夹具证明同 derivation_position 下其他引用字段不符也失败。既有 Exit、已消费损坏、初始化和正常结束代表继续运行。没有真实十二分钟、首小时、研究或收益运行，没有新速度比例；PR235 的材料与统计445.431763861秒、PR228完整959.236639304秒保留各自旧实测身份，不能当作本段复用性能。旧大材料/失败现场不迁移、不回填描述、不重制；完整研究容量、风险参数和盈利验收仍未完成。
+
+## 来源健康期限与未尝试失效
+
+`run_historical_v1` 和 `run_prepared_historical_v1` 在传入策略显式选用 `uses_source_health` 时，开启原 DPT 回放的流进展投影，并将策略提供的健康期限加入同一事件调度器。期限独立于待发计算，即使无新公开组、计算未完成或完成后仍等待发送，也会按原逻辑时钟到期观察。没有固定节拍、自动重试或公共健康阈值；期限须严格晚于调用时刻，已到期条件应在当前资格判定中处理。
+
+选用路径使用当前受信观察读取，仍保持同刻公开组先于发送、发送先于当前隐藏桶闭合及既有因果截止。计算期发现失效先通知策略，保留原计算完成边界；完成后等待发送时失效可在发现时刻重新计算。新计算继续支付配置中的计算开始延迟、计算耗时和发送等待，不等待新行情，不复用旧后缀或覆盖原冻结诊断。发出第一项后，第二项提交前失效也停止全部后缀；实际效果、未知义务及预留释放由原共享执行处理。
+
+只在选用时返回 `HistoricalRunReportV1::source_health`，包含实际资格调用次数、期限唤醒次数、失效批数及最近失效计算的原时序。它不保存逐决策账本；未发送失效的 `actual_sent_at_utc_ms` 为 `None`。旧消费者保留原公开组、回调和 `next_evaluation_at_utc_ms` 语义。
+
+工程反例在 `tests/historical.rs`、`shared-run/tests/strategy_boundary.rs` 与 DPT 原测试入口覆盖静默期限、接收持续但事件滞后、已发前缀/未发后缀和无新行情重算。`source_health_finite_overhead_measurement` 是显式忽略的合成测量入口，以 `SOURCE_HEALTH_MEASUREMENT_ENABLED=0/1` 和已有 `SOURCE_HEALTH_MEASUREMENT_ROOT` 运行同一有限夹具；可用 `/usr/bin/time -v` 分进程记录 CPU 与峰值内存。其参数、输入和结果不构成正式健康阈值、历史断网证明或在线性能承诺。

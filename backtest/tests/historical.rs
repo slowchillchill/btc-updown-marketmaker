@@ -753,3 +753,338 @@ fn failed_prepare_never_publishes_success_description() {
             .exists()
     );
 }
+
+#[derive(Clone, Debug)]
+struct HealthDiagnostics {
+    expiry: Option<i64>,
+    frozen_quote: Option<String>,
+}
+struct HealthProbe {
+    enabled: bool,
+    expiry_delay: i64,
+    rules: Arc<SealedProcessRuleSnapshotV3>,
+    proposed: bool,
+    detected: Vec<(i64, i64, i64, String)>,
+    recalculated: Vec<i64>,
+    sent_repairs: Vec<(i64, i64)>,
+    checks: usize,
+    last_qualification_at: i64,
+    event_lag_limit: Option<i64>,
+}
+impl StrategyV1 for HealthProbe {
+    type Error = &'static str;
+    type Diagnostics = HealthDiagnostics;
+    fn uses_source_health(&self) -> bool {
+        self.enabled
+    }
+    fn next_health_evaluation_at(
+        &self,
+        _: &StrategyCurrentReadV1<'_>,
+        calculation: Option<&StrategyCalculationV1<Self::Diagnostics>>,
+        at: i64,
+    ) -> Option<i64> {
+        let StrategyOutputV1::Continue { diagnostics, .. } = &calculation?.output else {
+            return None;
+        };
+        diagnostics.expiry.filter(|expiry| *expiry > at)
+    }
+    fn decide(
+        &mut self,
+        input: &StrategyInputV1,
+        at: i64,
+    ) -> Result<StrategyOutputV1<Self::Diagnostics>, Self::Error> {
+        let up = input
+            .markets
+            .iter()
+            .find(|m| m.observation.market.condition_id.0 == FIRST)
+            .and_then(|m| {
+                m.observation
+                    .assets
+                    .iter()
+                    .find(|a| a.asset.token_id.0 == "20")
+            });
+        let quote = up
+            .and_then(|a| a.asks.value.as_ref())
+            .and_then(|l| l.first())
+            .map(|l| l.price_pusd_per_share.0.clone());
+        let mut intents = vec![];
+        let mut expiry = None;
+        if quote.is_some() && !self.proposed {
+            self.proposed = true;
+            intents.push(buy(
+                &self.rules,
+                FIRST,
+                "20",
+                "health-original-buy",
+                "0.4",
+                true,
+            ));
+            expiry = Some(at + self.expiry_delay);
+        } else if !self.detected.is_empty() && self.sent_repairs.is_empty() {
+            self.recalculated.push(at);
+            intents.push(ReservedIntentV1 {
+                context: RequestContextV2 {
+                    global_request_id: format!("new-repair-{at}"),
+                    caller_correlation_id: None,
+                },
+                intent: Arc::new(ModelIntentV1::CancelMarketOrders {
+                    condition_id: ConditionId(FIRST.into()),
+                }),
+                reserves: vec![],
+            });
+        }
+        Ok(StrategyOutputV1::Continue {
+            intents,
+            next_evaluation_at_utc_ms: None,
+            diagnostics: HealthDiagnostics {
+                expiry,
+                frozen_quote: quote,
+            },
+        })
+    }
+    fn qualify_intent(
+        &mut self,
+        input: &StrategyCurrentReadV1<'_>,
+        calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        _: usize,
+        at: i64,
+    ) -> Result<IntentQualificationV1, Self::Error> {
+        self.checks += 1;
+        self.last_qualification_at = at;
+        assert_eq!(
+            input
+                .action_before
+                .cutoff()
+                .decision_time()
+                .logical_time_utc_ms(),
+            at,
+            "新值必须配当前合法截止"
+        );
+        let StrategyOutputV1::Continue { diagnostics, .. } = &calculation.output else {
+            panic!()
+        };
+        let event_lagged = diagnostics.expiry.is_some()
+            && self.event_lag_limit.is_some_and(|limit| {
+                input
+                    .markets
+                    .iter()
+                    .find(|m| m.observation.market.condition_id.0 == FIRST)
+                    .and_then(|m| {
+                        m.observation.source_progress.iter().find(|p| {
+                            p.scope.source == SourceStreamKindV1::PolymarketBook
+                                && p.scope.asset_or_symbol == "20"
+                        })
+                    })
+                    .and_then(|p| p.last_valid_business_message.as_ref())
+                    .is_some_and(|m| {
+                        m.source_event_at_utc_ms
+                            .is_some_and(|event| m.received_at_utc_ms - event > limit)
+                    })
+            });
+        Ok(
+            if diagnostics.expiry.is_some_and(|expiry| at >= expiry) || event_lagged {
+                IntentQualificationV1::Invalidated(IntentInvalidationReasonV1 {
+                    reason_code: "synthetic-up-stream-silence".into(),
+                    scopes: vec![SourceStreamScopeV1 {
+                        source: SourceStreamKindV1::PolymarketBook,
+                        condition_id: Some(ConditionId(FIRST.into())),
+                        asset_or_symbol: "20".into(),
+                    }],
+                })
+            } else {
+                IntentQualificationV1::Qualified
+            },
+        )
+    }
+    fn invalidated(
+        &mut self,
+        calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        result: &InvalidatedBatchV1,
+    ) {
+        let StrategyOutputV1::Continue { diagnostics, .. } = &calculation.output else {
+            panic!()
+        };
+        assert!(result.sent.is_empty());
+        assert_eq!(result.invalidated_intent_index, 0);
+        self.detected.push((
+            result.detected_at_utc_ms,
+            calculation.calculation_started_at_utc_ms,
+            result.observed_cutoff.decision_time().logical_time_utc_ms(),
+            diagnostics.frozen_quote.clone().unwrap(),
+        ));
+    }
+    fn dispatched(
+        &mut self,
+        calculation: &StrategyCalculationV1<Self::Diagnostics>,
+        result: &Result<Vec<SentIntentReceiptV1>, BatchExecutionErrorV1>,
+    ) {
+        let StrategyOutputV1::Continue { intents, .. } = &calculation.output else {
+            return;
+        };
+        if intents
+            .first()
+            .is_some_and(|i| matches!(i.intent.as_ref(), ModelIntentV1::CancelMarketOrders { .. }))
+        {
+            assert_eq!(result.as_ref().unwrap().len(), 1);
+            self.sent_repairs.push((
+                calculation.calculation_started_at_utc_ms,
+                self.last_qualification_at,
+            ));
+        }
+    }
+}
+#[tokio::test(flavor = "current_thread")]
+async fn health_deadline_during_compute_or_wait_invalidates_and_recomputes_without_new_up_message()
+{
+    for expiry_delay in [100, 300] {
+        let temp = tempfile::tempdir().unwrap();
+        let (config, rules) = setup(temp.path());
+        let mut probe = HealthProbe {
+            enabled: true,
+            expiry_delay,
+            rules: rules.clone(),
+            proposed: false,
+            detected: vec![],
+            recalculated: vec![],
+            sent_repairs: vec![],
+            checks: 0,
+            last_qualification_at: 0,
+            event_lag_limit: None,
+        };
+        let report = run_historical_v1(&config, rules, &mut probe).await.unwrap();
+        assert_eq!(probe.detected.len(), 1);
+        let (detected, started, cutoff, quote) = &probe.detected[0];
+        assert_eq!(*detected, *started + expiry_delay);
+        assert_eq!(cutoff, detected);
+        assert_eq!(quote, "0.6", "原诊断冻结");
+        assert_eq!(
+            probe.recalculated[0],
+            (*started + 200).max(*detected),
+            "保留原计算完成边界，等待发送可立刻重算"
+        );
+        assert_eq!(
+            probe.sent_repairs[0].1,
+            probe.sent_repairs[0].0 + 400,
+            "新决定仍支付配置的计算和发送等待"
+        );
+        let health = report.source_health.unwrap();
+        assert_eq!(health.invalidated_batches, 1);
+        assert!(health.deadline_wakeups >= 1);
+        let invalidated = health.last_invalidated_calculation_timing.unwrap();
+        assert_eq!(
+            invalidated.calculation_completed_at_utc_ms - invalidated.calculation_started_at_utc_ms,
+            200
+        );
+        assert!(invalidated.actual_sent_at_utc_ms.is_none());
+        let wire = std::fs::read_to_string(&config.sim_log).unwrap();
+        assert!(
+            !wire.contains("health-original-buy"),
+            "尚未尝试时没有请求效果"
+        );
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn fresh_arrival_with_lagged_event_invalidates_own_dependency_but_independent_cancel_executes()
+ {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut config, rules) = setup(temp.path());
+    config.timing.calculation_duration_ms = DelayScheduleV1::Fixed(800);
+    config.timing.dispatch_delay_ms = DelayScheduleV1::Fixed(800);
+    let mut probe = HealthProbe {
+        enabled: true,
+        expiry_delay: 20000,
+        rules: rules.clone(),
+        proposed: false,
+        detected: vec![],
+        recalculated: vec![],
+        sent_repairs: vec![],
+        checks: 0,
+        last_qualification_at: 0,
+        event_lag_limit: Some(200),
+    };
+    let report = run_historical_v1(&config, rules, &mut probe).await.unwrap();
+    assert_eq!(probe.detected.len(), 1);
+    assert_eq!(
+        probe.detected[0].0,
+        BASE + 2301,
+        "收到本源新消息但其来源事件已滞后"
+    );
+    assert!(
+        probe.sent_repairs[0].1 > probe.detected[0].0,
+        "不依赖滞后估计的显式取消仍能发送"
+    );
+    assert_eq!(report.source_health.unwrap().invalidated_batches, 1);
+}
+
+struct MeasurementProbe {
+    enabled: bool,
+    decisions: usize,
+    dispatches: usize,
+}
+impl StrategyV1 for MeasurementProbe {
+    type Error = &'static str;
+    type Diagnostics = ();
+    fn uses_source_health(&self) -> bool {
+        self.enabled
+    }
+    fn next_health_evaluation_at(
+        &self,
+        _: &StrategyCurrentReadV1<'_>,
+        _: Option<&StrategyCalculationV1>,
+        at: i64,
+    ) -> Option<i64> {
+        [BASE + 2500, BASE + 3500]
+            .into_iter()
+            .find(|deadline| *deadline > at)
+    }
+    fn decide(&mut self, _: &StrategyInputV1, _: i64) -> Result<StrategyOutputV1, Self::Error> {
+        self.decisions += 1;
+        Ok(StrategyOutputV1::Continue {
+            intents: vec![],
+            next_evaluation_at_utc_ms: None,
+            diagnostics: (),
+        })
+    }
+    fn dispatched(
+        &mut self,
+        _: &StrategyCalculationV1,
+        result: &Result<Vec<SentIntentReceiptV1>, BatchExecutionErrorV1>,
+    ) {
+        assert!(result.as_ref().unwrap().is_empty());
+        self.dispatches += 1;
+    }
+}
+/// 有限合成机制开销测量；每个选项以独立进程运行，外部 GNU time 记录 CPU 与峰值内存。
+#[tokio::test(flavor = "current_thread")]
+#[ignore]
+async fn source_health_finite_overhead_measurement() {
+    let enabled = std::env::var("SOURCE_HEALTH_MEASUREMENT_ENABLED").unwrap() == "1";
+    let evidence_root =
+        std::path::PathBuf::from(std::env::var("SOURCE_HEALTH_MEASUREMENT_ROOT").unwrap());
+    let root = evidence_root.join(if enabled { "selected" } else { "unselected" });
+    std::fs::create_dir(&root).unwrap();
+    let (config, rules) = setup(&root);
+    let manifest = &config.preparation.scope.manifest_paths[0];
+    let input_identity = {
+        use sha2::{Digest, Sha256};
+        format!("{:x}", Sha256::digest(std::fs::read(manifest).unwrap()))
+    };
+    let mut probe = MeasurementProbe {
+        enabled,
+        decisions: 0,
+        dispatches: 0,
+    };
+    let started = std::time::Instant::now();
+    let report = run_historical_v1(&config, rules, &mut probe).await.unwrap();
+    let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
+    let timing = report.last_dispatched_calculation_timing.as_ref().unwrap();
+    println!(
+        "{}",
+        serde_json::json!({ "selected": enabled, "input_manifest_sha256": input_identity, "elapsed_ms": elapsed_ms,
+        "decision_count": probe.decisions, "dispatch_count": probe.dispatches, "qualification_calls": report.source_health.as_ref().map_or(0, |s| s.qualification_calls),
+        "health_deadline_wakeups": report.source_health.as_ref().map_or(0, |s| s.deadline_wakeups),
+        "last_decision_to_dispatch_ms": timing.actual_sent_at_utc_ms.unwrap() - timing.calculation_started_at_utc_ms,
+        "purpose": "合成工程开销；不是盈利、历史静默事故或实际在线性能证据" })
+    );
+}

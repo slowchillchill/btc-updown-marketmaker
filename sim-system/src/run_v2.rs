@@ -20614,6 +20614,10 @@ impl PublicGroupDecisionV1<'_> {
     pub fn frames(&self) -> Vec<PublicObservationFrameV1<'_>> {
         self.driver.frames_with_cutoff(&self.cutoff)
     }
+    /// 资格检查借用当前实际观察；原 frames 继续绑定冻结决定。
+    pub fn frames_at_observation(&self) -> Vec<PublicObservationFrameV1<'_>> {
+        self.driver.frames_at_observation()
+    }
     /// 显式已批准的模拟外部现金事实，不是模型动作。
     pub fn apply_external_cash_fact_v1(
         &mut self,
