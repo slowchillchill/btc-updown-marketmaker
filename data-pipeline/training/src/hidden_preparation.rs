@@ -533,6 +533,19 @@ impl HiddenMaterialReaderV1 {
                 if let HiddenStoredRowV1::Step(step) = row {
                     self.last_derivation_position = Some(step.reference.derivation_position);
                     if let Some(slot) = step_slots.remove(&step.reference.derivation_position) {
+                        let HiddenIndexEntryV1::Step(expected) = &entries[slot].1 else {
+                            unreachable!()
+                        };
+                        if step.reference != *expected
+                            || step.reference.position.consumer_stream_id
+                                != self.prepared.consumer_stream_id
+                        {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "隐藏步骤完整引用或consumer身份与索引不符",
+                            )
+                            .into());
+                        }
                         stored_steps[slot] = Some(step);
                     }
                     if step_slots.is_empty() {

@@ -83,3 +83,108 @@ fn actual_baseline_command_applies_explicit_values_and_false_then_records_effect
         command_config["strategy"]["repair"]["maker_fill_weight"]
     );
 }
+
+#[test]
+fn prepare_mode_publishes_without_strategy_or_account_and_reuse_mode_uses_only_the_descriptor() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, _) = common::setup(temp.path());
+    let prepare_path = temp.path().join("preparation.json");
+    std::fs::write(
+        &prepare_path,
+        serde_json::to_vec(&config.preparation).unwrap(),
+    )
+    .unwrap();
+    let binary = env!("CARGO_BIN_EXE_backtest-cli");
+    let prepare = Command::new(binary)
+        .args([
+            "--mode",
+            "prepare",
+            "--config",
+            prepare_path.to_str().unwrap(),
+            "--progress-interval-seconds",
+            "0",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        prepare.status.success(),
+        "{}",
+        String::from_utf8_lossy(&prepare.stderr)
+    );
+    assert!(prepare.stderr.is_empty());
+    assert!(!config.sim_log.exists() && !config.noe_root.exists() && !config.ledger_root.exists());
+    let receipt: serde_json::Value = serde_json::from_slice(&prepare.stdout).unwrap();
+    let description = receipt["prepared_description"].as_str().unwrap();
+    let material = backtest::PreparedHistoricalMaterialV1::read(Path::new(description)).unwrap();
+    let material_before = std::fs::read(description).unwrap();
+    std::fs::rename(temp.path().join("inputs"), temp.path().join("moved-raw")).unwrap();
+    let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .find(|p| p.join("sim-system").is_dir())
+        .unwrap();
+    let rule_path =
+        workspace.join("sim-system/tests/fixtures/platform-rule-snapshot-v3-gate-b.json");
+    let strategy = ComplementaryPairConfigV1::parse_toml(include_str!(
+        "../../../baseline-mm/configs/strategies/complementary_pair/synthetic-engineering.toml"
+    ))
+    .unwrap();
+    let mut results = Vec::new();
+    for name in ["first-reuse", "second-reuse"] {
+        let output_root = temp.path().join(name);
+        std::fs::create_dir(&output_root).unwrap();
+        let mut run = backtest::HistoricalPreparedRunConfigV1::from(&config);
+        run.sim_log = output_root.join("sim.jsonl");
+        run.noe_root = output_root.join("noe");
+        run.ledger_root = output_root.join("ledger");
+        run.metadata_path = output_root.join("run.json");
+        run.result_path = output_root.join("result.json");
+        let mut value = serde_json::to_value(&run).unwrap();
+        value.as_object_mut().unwrap().remove("strategy");
+        let command_path = output_root.join("command.json");
+        std::fs::write(&command_path, serde_json::to_vec(&json!({"run":value, "strategy":strategy, "rules":{"snapshot_path":rule_path,"expected_file_sha256":format!("{:x}",Sha256::digest(std::fs::read(&rule_path).unwrap())), "replay_causal_start_utc_ms":common::BASE}, "request_namespace":"reused-cli-engineering"})).unwrap()).unwrap();
+        let mut command = Command::new(binary);
+        command.args([
+            "--mode",
+            "reuse",
+            "--prepared",
+            description,
+            "--config",
+            command_path.to_str().unwrap(),
+            "--strategy.repair.enable_active_repair",
+            "false",
+        ]);
+        if name == "first-reuse" {
+            command.args(["--progress-interval-seconds", "0"]);
+        } else {
+            command.stderr(
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open("/dev/full")
+                    .unwrap(),
+            );
+        }
+        let result = command.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(result.stderr.is_empty());
+        let report: serde_json::Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert_eq!(report["end_reason"], "RangeEnd");
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&run.metadata_path).unwrap()).unwrap();
+        assert!(metadata["config"].get("preparation").is_none());
+        assert_eq!(
+            metadata["prepared_material"],
+            serde_json::to_value(&material).unwrap()
+        );
+        assert_eq!(
+            metadata["config"]["strategy"]["effective_parameters"]["repair"]["enable_active_repair"],
+            false
+        );
+        results.push(report);
+    }
+    assert_eq!(results[0], results[1]);
+    assert_eq!(std::fs::read(description).unwrap(), material_before);
+}

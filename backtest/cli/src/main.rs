@@ -6,8 +6,8 @@ use std::{collections::BTreeMap, path::PathBuf};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct CommandConfig {
-    run: HistoricalRunConfigV1,
+struct CommandConfig<R = HistoricalRunConfigV1> {
+    run: R,
     rules: HistoricalProcessSnapshotRequestConfig,
     strategy: ComplementaryPairConfigV1,
     request_namespace: String,
@@ -100,9 +100,7 @@ const PARAMETERS: &[(&str, ParameterType)] = &[
     ("risk.per_market_orphan_limit_pusd", ParameterType::Decimal),
     ("risk.account_orphan_limit_pusd", ParameterType::Decimal),
 ];
-fn load_config(
-    args: impl IntoIterator<Item = String>,
-) -> Result<CommandConfig, Box<dyn std::error::Error + Send + Sync>> {
+fn load_value(args: impl IntoIterator<Item = String>) -> Result<serde_json::Value, CommandError> {
     let mut args = args.into_iter();
     let mut config_file = None;
     let mut overrides = BTreeMap::new();
@@ -147,6 +145,12 @@ fn load_config(
             .ok_or("策略区段不是对象")?;
         section.insert(field.into(), kind.parse(&raw)?);
     }
+    Ok(value)
+}
+fn load_config<R: serde::de::DeserializeOwned>(
+    args: impl IntoIterator<Item = String>,
+) -> Result<CommandConfig<R>, CommandError> {
+    let mut value = load_value(args)?;
     let strategy: ComplementaryPairConfigV1 =
         serde_json::from_value(value.get("strategy").cloned().ok_or("配置缺少策略参数")?)?;
     let descriptor = StrategyDescriptorV1 {
@@ -162,11 +166,46 @@ fn load_config(
     // 策略自身没有正式数值默认：不复制默认值，缺失必填字段沿原类型报错。
     Ok(serde_json::from_value(value)?)
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Run,
+    Prepare,
+    Reuse,
+}
+fn mode_args(
+    args: impl IntoIterator<Item = String>,
+) -> Result<(Mode, u64, Option<PathBuf>, Vec<String>), CommandError> {
+    let mut args = args.into_iter();
+    let mut mode = Mode::Run;
+    let mut interval = 30;
+    let mut description = None;
+    let mut remaining = Vec::new();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--mode" => {
+                mode = match args.next().as_deref() {
+                    Some("run") => Mode::Run,
+                    Some("prepare") => Mode::Prepare,
+                    Some("reuse") => Mode::Reuse,
+                    _ => return Err("--mode 必须为run、prepare或reuse".into()),
+                }
+            }
+            "--prepared" => {
+                description = Some(args.next().ok_or("--prepared 缺少描述路径")?.into())
+            }
+            "--progress-interval-seconds" => {
+                interval = args.next().ok_or("进度间隔缺值")?.parse()?
+            }
+            _ => remaining.push(arg),
+        }
+    }
+    Ok((mode, interval, description, remaining))
+}
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     if std::env::args().any(|arg| arg == "--help") {
         println!(
-            "单次公共历史回测：backtest-cli --config <启动 JSON/TOML> [--strategy.<字段> <显式值>]\n无热重载。全部策略字段可覆盖：\n{}",
+            "公共历史回测：--mode run（默认兼容原prepare+run）|prepare|reuse\nprepare: --config <HistoricalPreparationConfigV1 JSON/TOML>\nreuse: --prepared <prepared-run-v1.json> --config <独立运行 JSON/TOML>\n--progress-interval-seconds <秒>（prepare/reuse默认30，0关闭）\n全部策略字段可覆盖：\n{}",
             PARAMETERS
                 .iter()
                 .map(|(field, _)| *field)
@@ -176,35 +215,62 @@ async fn main() {
         return;
     }
     let outcome = async {
-        let mut config = load_config(std::env::args().skip(1))?;
-        let rules = load_historical_process_snapshot_v3(HistoricalProcessSnapshotRequestV1 {
-            snapshot_path: config.rules.snapshot_path,
-            expected_file_sha256: config.rules.expected_file_sha256,
-            replay_causal_start_utc_ms: config.rules.replay_causal_start_utc_ms,
-        })?;
-        config.run.strategy = StrategyDescriptorV1 {
-            strategy_id: STRATEGY_ID.into(),
-            strategy_rule_version: RULE_VERSION.into(),
-            effective_parameters: serde_json::to_value(&config.strategy)?,
-        };
-        let mut strategy = ComplementaryPairV1::new(
-            config.strategy,
-            rules.clone(),
-            config.request_namespace,
-            StrategyContinuityV1::new_account(),
-        )?;
-        match run_historical_v1(&config.run, rules, &mut strategy).await {
-            Ok(report) => {
-                println!("{}", serde_json::to_string(&report)?);
-                Ok(())
-            }
-            Err(failure) => Err(format!("历史运行失败：{:?}", failure).into()),
+        let (mode, interval, description, args) = mode_args(std::env::args().skip(1))?;
+        if mode == Mode::Prepare {
+            let config: HistoricalPreparationConfigV1 = serde_json::from_value(load_value(args)?)?;
+            let path = prepare_and_publish_historical_run_v1(&config,
+                Some(HistoricalPreparationProgressV1::new(std::time::Duration::from_secs(interval), std::io::stderr())))?;
+            println!("{}", serde_json::json!({"prepared_description": path}));
+            return Ok(());
         }
-    }
-    .await;
-    if let Err(error) = outcome as Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if mode == Mode::Reuse {
+            let mut config: CommandConfig<HistoricalPreparedRunConfigV1> = load_config(args)?;
+            config.run.replay_progress_interval_seconds = interval;
+            let rules = load_rules(config.rules)?;
+            let mut strategy = ComplementaryPairV1::new(config.strategy, rules.clone(), config.request_namespace, StrategyContinuityV1::new_account())?;
+            let path = description.ok_or("reuse模式必须提供--prepared描述路径")?;
+            let started = std::time::Instant::now();
+            let output_ok = interval != 0 && emit_stage(&serde_json::json!({"stage":"opening_prepared_run", "processed_groups":null, "elapsed_seconds":started.elapsed().as_secs_f64(), "total":null, "eta":null}));
+            let result = run_prepared_historical_v1(&path, &config.run, rules, &mut strategy).await;
+            if output_ok { emit_stage(&serde_json::json!({"stage":"prepared_run_ended", "success":result.is_ok(), "elapsed_seconds":started.elapsed().as_secs_f64(), "eta":null})); }
+            return print_result(result);
+        }
+        let config: CommandConfig = load_config(args)?;
+        let rules = load_rules(config.rules)?;
+        let mut strategy = ComplementaryPairV1::new(config.strategy, rules.clone(), config.request_namespace, StrategyContinuityV1::new_account())?;
+        print_result(run_historical_v1(&config.run, rules, &mut strategy).await)
+    }.await;
+    if let Err(error) = outcome as Result<(), CommandError> {
         eprintln!("{error}");
         std::process::exit(1);
+    }
+}
+// 阶段输出仅诊断，故障停该输出，不替代业务结果。
+fn emit_stage(value: &serde_json::Value) -> bool {
+    use std::io::Write;
+    let mut output = std::io::stderr().lock();
+    serde_json::to_writer(&mut output, value).is_ok() && writeln!(output).is_ok()
+}
+fn load_rules(
+    config: HistoricalProcessSnapshotRequestConfig,
+) -> Result<std::sync::Arc<SealedProcessRuleSnapshotV3>, CommandError> {
+    Ok(load_historical_process_snapshot_v3(
+        HistoricalProcessSnapshotRequestV1 {
+            snapshot_path: config.snapshot_path,
+            expected_file_sha256: config.expected_file_sha256,
+            replay_causal_start_utc_ms: config.replay_causal_start_utc_ms,
+        },
+    )?)
+}
+fn print_result<E: std::fmt::Debug>(
+    result: Result<HistoricalRunReportV1, HistoricalRunFailureV1<E>>,
+) -> Result<(), CommandError> {
+    match result {
+        Ok(report) => {
+            println!("{}", serde_json::to_string(&report)?);
+            Ok(())
+        }
+        Err(failure) => Err(format!("历史运行失败：{:?}", failure).into()),
     }
 }
 

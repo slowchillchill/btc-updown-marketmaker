@@ -62,6 +62,53 @@ pub struct HistoricalRunConfigV1 {
     pub max_group_bytes: usize,
     pub finite_in_flight_groups: usize,
 }
+/// 材料范围/来源只由已发布描述提供；每次运行另给独立账户、策略及输出。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HistoricalPreparedRunConfigV1 {
+    pub timing: HistoricalTimingV1,
+    pub session: HistoricalSessionV1,
+    pub strategy: StrategyDescriptorV1,
+    pub implementation_identity: ImplementationIdentityV1,
+    pub finality_policy_path: PathBuf,
+    pub sim_log: PathBuf,
+    pub noe_root: PathBuf,
+    pub ledger_root: PathBuf,
+    pub metadata_path: PathBuf,
+    pub result_path: PathBuf,
+    pub activation_id: String,
+    pub consumption_sequence_ref: String,
+    pub noe_implementation_identity: String,
+    pub admission_policy: AccountAdmissionPolicyV2,
+    pub max_group_bytes: usize,
+    pub finite_in_flight_groups: usize,
+    /// 库默认关闭；CLI默认30秒，0关闭。输出失败不替代业务错误。
+    #[serde(default)]
+    pub replay_progress_interval_seconds: u64,
+}
+impl From<&HistoricalRunConfigV1> for HistoricalPreparedRunConfigV1 {
+    fn from(c: &HistoricalRunConfigV1) -> Self {
+        Self {
+            timing: c.timing.clone(),
+            session: c.session.clone(),
+            strategy: c.strategy.clone(),
+            implementation_identity: c.implementation_identity.clone(),
+            finality_policy_path: c.finality_policy_path.clone(),
+            sim_log: c.sim_log.clone(),
+            noe_root: c.noe_root.clone(),
+            ledger_root: c.ledger_root.clone(),
+            metadata_path: c.metadata_path.clone(),
+            result_path: c.result_path.clone(),
+            activation_id: c.activation_id.clone(),
+            consumption_sequence_ref: c.consumption_sequence_ref.clone(),
+            noe_implementation_identity: c.noe_implementation_identity.clone(),
+            admission_policy: c.admission_policy,
+            max_group_bytes: c.max_group_bytes,
+            finite_in_flight_groups: c.finite_in_flight_groups,
+            replay_progress_interval_seconds: 0,
+        }
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum HistoricalEndReasonV1 {
     RangeEnd,
@@ -149,7 +196,7 @@ struct Pending<D> {
     record: CalculationTimingRecordV1,
 }
 fn assemble(
-    config: &HistoricalRunConfigV1,
+    config: &HistoricalPreparedRunConfigV1,
     rules: Arc<SealedProcessRuleSnapshotV3>,
     input_identity: Sha256Hex,
 ) -> Result<
@@ -303,27 +350,87 @@ pub async fn run_historical_v1<S: StrategyV1>(
             cause: HistoricalFailureCauseV1::Material(cause),
             report: None,
         })?;
+    let material = PreparedHistoricalMaterialV1::from_prepared(&config.preparation, &prepared)
+        .map_err(material_failure)?;
     let mut effective_config = config.clone();
     effective_config.preparation.header = config.preparation.effective_header();
-    let metadata = serde_json::json!({"config": effective_config, "source_manifests": prepared.source_manifests, "input_set_identity_sha256": prepared.input_set_identity_sha256, "source_identity_sha256": prepared.source_identity_sha256, "initialization": prepared.initialization, "public_prefix": prepared.hidden.prefix, "rules_file_sha256": rules.file_sha256(), "caller_role": SimCallerRoleV1::HistoricalBacktest, "recording_role": RunDurabilityRoleV2::FiniteHistorical, "economics_version": ACCOUNT_ECONOMICS_VERSION});
+    let metadata_config =
+        serde_json::to_value(effective_config).map_err(|e| material_failure(e.into()))?;
+    run_material(
+        &HistoricalPreparedRunConfigV1::from(config),
+        &material,
+        prepared,
+        metadata_config,
+        rules,
+        strategy,
+    )
+    .await
+}
+fn material_failure<E>(cause: MaterialError) -> HistoricalRunFailureV1<E> {
+    HistoricalRunFailureV1 {
+        cause: HistoricalFailureCauseV1::Material(cause),
+        report: None,
+    }
+}
+/// 每次独立装配SIM/共享执行/NOE/Ledger。调用者必须传入新的策略实例；不重置任意&mut Strategy。
+pub async fn run_prepared_historical_v1<S: StrategyV1>(
+    description_path: &std::path::Path,
+    config: &HistoricalPreparedRunConfigV1,
+    rules: Arc<SealedProcessRuleSnapshotV3>,
+    strategy: &mut S,
+) -> Result<HistoricalRunReportV1, HistoricalRunFailureV1<S::Error>> {
+    let material =
+        PreparedHistoricalMaterialV1::read(description_path).map_err(material_failure)?;
+    let root = description_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let prepared = material.resolve(root).map_err(material_failure)?;
+    let metadata_config = serde_json::to_value(config).map_err(|e| material_failure(e.into()))?;
+    run_material(
+        config,
+        &material,
+        prepared,
+        metadata_config,
+        rules,
+        strategy,
+    )
+    .await
+}
+async fn run_material<S: StrategyV1>(
+    config: &HistoricalPreparedRunConfigV1,
+    material: &PreparedHistoricalMaterialV1,
+    prepared: PreparedHistoricalRunV1,
+    metadata_config: serde_json::Value,
+    rules: Arc<SealedProcessRuleSnapshotV3>,
+    strategy: &mut S,
+) -> Result<HistoricalRunReportV1, HistoricalRunFailureV1<S::Error>> {
+    let metadata = serde_json::json!({"config": metadata_config, "prepared_material": material, "source_manifests": prepared.source_manifests, "input_set_identity_sha256": prepared.input_set_identity_sha256, "source_identity_sha256": prepared.source_identity_sha256, "initialization": prepared.initialization, "public_prefix": prepared.hidden.prefix, "rules_file_sha256": rules.file_sha256(), "caller_role": SimCallerRoleV1::HistoricalBacktest, "recording_role": RunDurabilityRoleV2::FiniteHistorical, "economics_version": ACCOUNT_ECONOMICS_VERSION});
     let start = || -> Result<_, MaterialError> {
         serde_json::to_writer(std::fs::File::create(&config.metadata_path)?, &metadata)?;
         let (execution, shared, observation) =
             assemble(config, rules, prepared.source_identity_sha256.clone())?;
-        let source = RecordedPublicGroupSourceV1::open(
+        let mut source = RecordedPublicGroupSourceV1::open_committed(
             &prepared.public_root,
-            config.preparation.read_page_rows,
-            config.preparation.max_read_batch_bytes,
+            prepared.hidden.prefix.clone(),
+            material.preparation.read_page_rows,
+            material.preparation.max_read_batch_bytes,
             crate::timing::DeliveryTimes {
                 delays: config.timing.public_delivery_delay_ms.clone(),
                 last: None,
             },
         )?;
+        if source.header() != &material.preparation.header {
+            return Err("描述与公共流头不符".into());
+        }
+        source.set_progress(
+            std::time::Duration::from_secs(config.replay_progress_interval_seconds),
+            std::io::stderr(),
+        );
         let hidden = RecordedHiddenBucketSourceV1::open(
             &prepared.hidden,
             &prepared.public_root,
-            config.preparation.read_page_rows,
-            config.preparation.max_read_batch_bytes,
+            material.preparation.read_page_rows,
+            material.preparation.max_read_batch_bytes,
         )?;
         Ok((
             FinitePublicConsumptionV1::new(
@@ -350,13 +457,13 @@ pub async fn run_historical_v1<S: StrategyV1>(
     let mut unconsumed_required_trigger_at = None;
     let mut coordinator = SettlementCoordinatorV1::default();
     let mut delivery_summary = HistoricalDeliverySummaryV1::default();
-    let end = config.preparation.scope.received_end_utc_ms;
+    let end = material.preparation.scope.received_end_utc_ms;
     // 无初始化的旧调用保持原触发行为；新调用严格以经营区间控制回调。
-    let operating_start = config
+    let operating_start = material
         .preparation
         .metadata_initialization
         .as_ref()
-        .map(|_| config.preparation.scope.received_start_utc_ms);
+        .map(|_| material.preparation.scope.received_start_utc_ms);
     let running = async {
         let mut next_hidden = hidden
             .next_bucket()
@@ -460,7 +567,14 @@ pub async fn run_historical_v1<S: StrategyV1>(
                             driver
                                 .enroll_market(MarketEnrollmentRequestV1 {
                                     enrollment_request_id: context.market.condition_id.0.clone(),
-                                    market: prepared.markets[&context.market.condition_id.0]
+                                    market: prepared
+                                        .markets
+                                        .get(&context.market.condition_id.0)
+                                        .ok_or_else(|| {
+                                            HistoricalFailureCauseV1::Material(
+                                                "已准备材料缺少公开市场目录项".into(),
+                                            )
+                                        })?
                                         .clone(),
                                 })
                                 .map_err(HistoricalFailureCauseV1::Sim)?;
@@ -535,7 +649,15 @@ pub async fn run_historical_v1<S: StrategyV1>(
                         driver
                             .enroll_market(MarketEnrollmentRequestV1 {
                                 enrollment_request_id: market.condition_id.0.clone(),
-                                market: prepared.markets[&market.condition_id.0].clone(),
+                                market: prepared
+                                    .markets
+                                    .get(&market.condition_id.0)
+                                    .ok_or_else(|| {
+                                        HistoricalFailureCauseV1::Material(
+                                            "已准备材料缺少隐藏市场目录项".into(),
+                                        )
+                                    })?
+                                    .clone(),
                             })
                             .map_err(HistoricalFailureCauseV1::Sim)?;
                     }

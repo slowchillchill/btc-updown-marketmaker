@@ -113,6 +113,15 @@ pub fn prepare_historical_run_v1(
 ) -> Result<PreparedHistoricalRunV1, MaterialError> {
     prepare_internal(config, None, None).map(|(prepared, _)| prepared)
 }
+/// 唯一正式发布入口；准备完整成功才原子发布固定描述，不创建策略或账户。
+pub fn prepare_and_publish_historical_run_v1(
+    config: &HistoricalPreparationConfigV1,
+    progress: Option<HistoricalPreparationProgressV1>,
+) -> Result<PathBuf, MaterialError> {
+    let (prepared, _) = prepare_internal(config, None, progress)?;
+    crate::PreparedHistoricalMaterialV1::from_prepared(config, &prepared)?
+        .publish(&config.work_root)
+}
 /// 同一次生产准备借用原完整组累计统计；全部持久与hidden责任成功后交付。
 pub struct PreparedHistoricalRunWithStatisticsV1 {
     pub prepared: PreparedHistoricalRunV1,

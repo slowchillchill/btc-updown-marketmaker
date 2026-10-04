@@ -22,6 +22,7 @@ struct Probe {
     bad_batch: bool,
     observed: Vec<(i64, usize, Option<String>, usize)>,
     last_economics: Option<AccountEconomicsReadV2>,
+    first_economics: Option<AccountEconomicsReadV2>,
     dispatched: usize,
     failed_callback_sent: Option<usize>,
     calculation_budget: Option<usize>,
@@ -61,6 +62,8 @@ impl StrategyV1 for Probe {
             ask.clone(),
             input.trade_economics.len(),
         ));
+        self.first_economics
+            .get_or_insert_with(|| input.action_before.economics().clone());
         self.last_economics = Some(input.action_before.economics().clone());
         if ask.is_some() {
             if self.fail {
@@ -555,4 +558,198 @@ async fn explicit_zero_compute_and_dispatch_delays_consume_original_obligations(
                 .any(|(at, markets, _, _)| *at >= BASE + 10100 && *markets == 2)
         );
     }
+}
+
+fn material_bytes(
+    root: &std::path::Path,
+) -> std::collections::BTreeMap<std::path::PathBuf, Vec<u8>> {
+    fn visit(
+        root: &std::path::Path,
+        current: &std::path::Path,
+        output: &mut std::collections::BTreeMap<std::path::PathBuf, Vec<u8>>,
+    ) {
+        for item in std::fs::read_dir(current).unwrap() {
+            let path = item.unwrap().path();
+            if path.is_dir() {
+                visit(root, &path, output);
+            } else {
+                output.insert(
+                    path.strip_prefix(root).unwrap().into(),
+                    std::fs::read(path).unwrap(),
+                );
+            }
+        }
+    }
+    let mut output = Default::default();
+    visit(root, root, &mut output);
+    output
+}
+fn reuse_outputs(
+    c: &HistoricalRunConfigV1,
+    root: &std::path::Path,
+) -> HistoricalPreparedRunConfigV1 {
+    std::fs::create_dir(root).unwrap();
+    let mut config = HistoricalPreparedRunConfigV1::from(c);
+    config.sim_log = root.join("sim.jsonl");
+    config.noe_root = root.join("noe");
+    config.ledger_root = root.join("ledger");
+    config.metadata_path = root.join("run.json");
+    config.result_path = root.join("result.json");
+    config
+}
+// 只归一明列的运行输出根；不删除业务字段或改来源/组/账户身份。
+fn normalize_output_paths(value: &mut serde_json::Value, root: &std::path::Path) {
+    match value {
+        serde_json::Value::String(s) => {
+            if let Some(rest) = s.strip_prefix(root.to_str().unwrap()) {
+                *s = format!("RUN_OUTPUT{rest}");
+            }
+        }
+        serde_json::Value::Array(a) => {
+            for v in a {
+                normalize_output_paths(v, root);
+            }
+        }
+        serde_json::Value::Object(o) => {
+            for v in o.values_mut() {
+                normalize_output_paths(v, root);
+            }
+        }
+        _ => {}
+    }
+}
+#[tokio::test(flavor = "current_thread")]
+async fn published_material_reuses_twice_without_raw_and_preserves_complete_run_and_fresh_state() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut legacy, rules) = setup(temp.path());
+    initialize_at(&mut legacy, BASE + 1000, &[FIRST]);
+    let mut old_probe = Probe {
+        rules: Some(rules.clone()),
+        cancel_first: true,
+        ..Default::default()
+    };
+    let old_report = run_historical_v1(&legacy, rules.clone(), &mut old_probe)
+        .await
+        .unwrap();
+    assert!(old_probe.bought_first && old_probe.bought_second && old_probe.canceled);
+    let mut config = legacy.preparation.clone();
+    config.work_root = temp.path().join("published");
+    let description = prepare_and_publish_historical_run_v1(&config, None).unwrap();
+    let material = PreparedHistoricalMaterialV1::read(&description).unwrap();
+    assert!(material.public_prefix.normal_end);
+    assert!(!material.initialization.input_positions.is_empty());
+    let original = material_bytes(&config.work_root);
+    std::fs::rename(
+        temp.path().join("inputs"),
+        temp.path().join("raw-moved-away"),
+    )
+    .unwrap();
+    // 损坏的更新目录不属于已发布凭据，复用不得recover到“最新”目录。
+    let later = config.work_root.join("public/stable-99999999999999999999");
+    std::fs::create_dir(&later).unwrap();
+    std::fs::write(later.join("prefix.json"), b"broken-later-prefix").unwrap();
+    let before = material_bytes(&config.work_root);
+    let mut expected = serde_json::to_value(&old_report).unwrap();
+    normalize_output_paths(&mut expected, temp.path());
+    for suffix in ["reuse-a", "reuse-b"] {
+        let root = temp.path().join(suffix);
+        let run = reuse_outputs(&legacy, &root);
+        let mut probe = Probe {
+            rules: Some(rules.clone()),
+            cancel_first: true,
+            ..Default::default()
+        };
+        assert!(!probe.bought_first && probe.dispatched == 0);
+        let report = run_prepared_historical_v1(&description, &run, rules.clone(), &mut probe)
+            .await
+            .unwrap();
+        let first = probe.first_economics.as_ref().unwrap();
+        assert_eq!(
+            serde_json::to_value(first).unwrap(),
+            serde_json::to_value(old_probe.first_economics.as_ref().unwrap()).unwrap()
+        );
+        assert_eq!(first.cash.actual_available_pusd.0, "2000");
+        assert!(probe.bought_first && probe.bought_second && probe.canceled);
+        assert_eq!(probe.observed, old_probe.observed);
+        let mut actual = serde_json::to_value(report).unwrap();
+        normalize_output_paths(&mut actual, &root);
+        assert_eq!(actual, expected, "完整报告仅归一各自输出根");
+        let metadata: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&run.metadata_path).unwrap()).unwrap();
+        assert!(metadata["config"].get("preparation").is_none());
+        assert_eq!(
+            metadata["prepared_material"],
+            serde_json::to_value(&material).unwrap()
+        );
+        assert!(run.result_path.exists());
+    }
+    assert_eq!(material_bytes(&config.work_root), before);
+    // 发布产生的每个原文件仍逐字保持，不计测试额外添加的更新目录。
+    for (path, bytes) in original {
+        assert_eq!(std::fs::read(config.work_root.join(path)).unwrap(), bytes);
+    }
+}
+#[tokio::test(flavor = "current_thread")]
+async fn prepared_description_rejects_version_prefix_missing_market_and_hidden_mix_at_real_boundaries()
+ {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, rules) = setup(temp.path());
+    let path = prepare_and_publish_historical_run_v1(&config.preparation, None).unwrap();
+    let original = PreparedHistoricalMaterialV1::read(&path).unwrap();
+    for (name, mut material) in [
+        ("version", original.clone()),
+        ("prefix", original.clone()),
+        ("market", original.clone()),
+        ("hidden", original.clone()),
+    ] {
+        match name {
+            "version" => material.schema_version = "unsupported".into(),
+            "prefix" => material.public_prefix.next_input_position += 1,
+            "market" => {
+                material.markets.remove(FIRST);
+            }
+            "hidden" => {
+                material.hidden_consumer_stream_id = "foreign-consumer".into();
+                material.preparation.hidden_stream_id = "foreign-consumer".into();
+            }
+            _ => unreachable!(),
+        }
+        // 不改正式描述：另一个不可信描述指向同样的原材料。
+        let bad = path.parent().unwrap().join(format!("{name}.json"));
+        std::fs::write(&bad, serde_json::to_vec(&material).unwrap()).unwrap();
+        let run = reuse_outputs(&config, &temp.path().join(name));
+        let failure = run_prepared_historical_v1(&bad, &run, rules.clone(), &mut Probe::default())
+            .await
+            .unwrap_err();
+        let HistoricalFailureCauseV1::Material(error) = failure.cause else {
+            panic!("应返回材料错误：{failure:?}");
+        };
+        let expected = match name {
+            "version" => "不支持",
+            "prefix" => "凭据",
+            "market" => "缺少公开市场",
+            "hidden" => "完整引用或consumer",
+            _ => unreachable!(),
+        };
+        assert!(error.to_string().contains(expected), "{name}: {error}");
+        assert!(!run.result_path.exists());
+    }
+}
+#[test]
+fn failed_prepare_never_publishes_success_description() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut config, _) = setup(temp.path());
+    config.preparation.recording.max_capture_output_bytes = 1;
+    let error = prepare_and_publish_historical_run_v1(&config.preparation, None).unwrap_err();
+    assert!(
+        error.to_string().contains("捕获产物超过冻结的总字节上限"),
+        "{error}"
+    );
+    assert!(
+        !config
+            .preparation
+            .work_root
+            .join(PREPARED_HISTORICAL_MATERIAL_FILE_V1)
+            .exists()
+    );
 }
