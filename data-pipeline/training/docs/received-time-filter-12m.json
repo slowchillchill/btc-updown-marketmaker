@@ -5770,7 +5770,7 @@
       "cache_logical_bytes": 62628926205,
       "cache_allocated_bytes": 62780997632
     },
-    "before_run": {
+    "early_observation_after_process_start": {
       "utc": "2026-10-04T07:19:50.502403+00:00",
       "free_bytes": 240965935104,
       "cache_logical_bytes": 66869431174,
@@ -5782,11 +5782,12 @@
       "cache_logical_bytes": 66869431174,
       "cache_allocated_bytes": 67036569600
     },
-    "observed_build_interval_logical_delta": 4240504969,
-    "observed_build_interval_allocated_delta": 4255571968,
-    "observed_run_interval_logical_delta": 0,
-    "observed_run_interval_allocated_delta": 0,
-    "note": "共享缓存各时点差值，不作本任务独占归因；没有清缓存。"
+    "observed_before_build_to_early_after_start_logical_delta": 4240504969,
+    "observed_before_build_to_early_after_start_allocated_delta": 4255571968,
+    "observed_early_after_start_to_after_run_logical_delta": 0,
+    "observed_early_after_start_to_after_run_allocated_delta": 0,
+    "note": "ps记录进程启动07:19:49 UTC，早期样本记录UTC为07:19:50.502403，因此不能作启动前快照。本轮没有真正紧邻启动前的盘/缓存快照。两组delta仅覆盖before_build→early_observation_after_process_start和early_observation_after_process_start→after_run的实际采样时点，不是完整构建/运行阶段增量。脚本先遍历缓存，再记录UTC和读取可用盘，三者非原子，不能认定所有字段同一瞬间或缓存遍历全在启动后。共享缓存变化不作本任务独占归因，原值保留，没有清缓存、补造或重跑。",
+    "immediately_before_process_start_snapshot": null
   },
   "engineering_validation": {
     "workspace_passed": 1316,
