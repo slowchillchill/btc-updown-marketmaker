@@ -1,53 +1,19 @@
 //! #185 最早小范围材料试制：原准备入口、公开可见观察统计，无策略或账户。
 use backtest::{
     HistoricalPreparationConfigV1, HistoricalPreparationProgressV1, MaterialError,
-    prepare_historical_run_with_statistics_v1,
+    ProcessCountersV1, prepare_historical_run_with_statistics_v1,
+    process_clock_ticks_per_second_v1, process_measurement_v1,
 };
 #[cfg(test)]
 use contracts::*;
-use serde::Serialize;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, path::Path, time::Instant};
+use std::{path::Path, time::Instant};
 
 #[cfg(test)]
 #[allow(dead_code)]
 #[path = "../../tests/common/mod.rs"]
 mod common;
 
-#[derive(Serialize)]
-struct ProcessCounters {
-    io: BTreeMap<String, u64>,
-    user_ticks: u64,
-    system_ticks: u64,
-}
-impl ProcessCounters {
-    fn read() -> Result<Self, MaterialError> {
-        let io = std::fs::read_to_string("/proc/self/io")?
-            .lines()
-            .map(|line| {
-                let (k, v) = line.split_once(':').ok_or("I/O字段缺失")?;
-                Ok((k.to_owned(), v.trim().parse()?))
-            })
-            .collect::<Result<_, MaterialError>>()?;
-        let stat = std::fs::read_to_string("/proc/self/stat")?;
-        let fields = stat
-            .rsplit_once(") ")
-            .ok_or("stat字段缺失")?
-            .1
-            .split_whitespace()
-            .collect::<Vec<_>>();
-        Ok(Self {
-            io,
-            user_ticks: fields[11].parse()?,
-            system_ticks: fields[12].parse()?,
-        })
-    }
-    fn since(self, before: Self, hz: f64, wall: f64) -> Value {
-        json!({"wall_seconds":wall, "user_seconds":(self.user_ticks-before.user_ticks) as f64/hz,
-            "system_seconds":(self.system_ticks-before.system_ticks) as f64/hz,
-            "proc_io":self.io.into_iter().map(|(k,v)| { let delta=v-before.io[&k]; (k,delta) }).collect::<BTreeMap<_,_>>()})
-    }
-}
 fn save(path: &Path, v: &Value) -> Result<(), MaterialError> {
     std::fs::write(path, serde_json::to_vec_pretty(v)?)?;
     Ok(())
@@ -75,43 +41,56 @@ fn main() -> Result<(), MaterialError> {
     run_trial(config, report_path, progress_seconds)
 }
 fn run_trial(
-    mut config: HistoricalPreparationConfigV1,
+    config: HistoricalPreparationConfigV1,
     report_path: &Path,
     progress_seconds: u64,
 ) -> Result<(), MaterialError> {
-    // 与原准备入口共用实际版本来源；成功及原失败报告均记录同一有效配置。
+    run_trial_with_counter_reader(
+        config,
+        report_path,
+        progress_seconds,
+        ProcessCountersV1::read,
+    )
+}
+fn run_trial_with_counter_reader(
+    mut config: HistoricalPreparationConfigV1,
+    report_path: &Path,
+    progress_seconds: u64,
+    counter_reader: fn() -> Result<ProcessCountersV1, MaterialError>,
+) -> Result<(), MaterialError> {
+    // 有效配置保持；诊断源不可用不能阻止或遮蔽原业务。
     config.header = config.effective_header();
-    let hz: f64 = String::from_utf8(
-        std::process::Command::new("getconf")
-            .arg("CLK_TCK")
-            .output()?
-            .stdout,
-    )?
-    .trim()
-    .parse()?;
+    let hz = process_clock_ticks_per_second_v1();
     let mut report = json!({"schema":"complementary_pair_material_trial_v1", "clock_ticks_per_second":hz,
         "scope":config.scope,"status":"started", "statistics":null,"statistics_measurement":null,"statistics_measurement_applicability":"not_applicable_separate_replay_removed; included_in_prepare_and_statistics_measurement","progress_interval_seconds":progress_seconds});
     // 私有报告保留完整有效配置及原错误；发布版由交付文档移除物理定位。
     report["effective_preparation"] = serde_json::to_value(&config)?;
     save(report_path, &report)?;
-    let before = ProcessCounters::read()?;
+    let before = counter_reader().ok();
     let began = Instant::now();
-    let prepared = prepare_historical_run_with_statistics_v1(
-        &config,
-        Some(HistoricalPreparationProgressV1::new(
-            std::time::Duration::from_secs(progress_seconds),
-            std::io::stderr(),
-        )),
+    let progress = HistoricalPreparationProgressV1::new(
+        std::time::Duration::from_secs(progress_seconds),
+        std::io::stderr(),
     );
-    report["prepare_and_statistics_measurement"] =
-        ProcessCounters::read()?.since(before, hz, began.elapsed().as_secs_f64());
+    let phases = progress.measurements();
+    let prepared = prepare_historical_run_with_statistics_v1(&config, Some(progress));
+    let after = counter_reader().ok();
+    report["prepare_and_statistics_measurement"] = process_measurement_v1(
+        before.as_ref(),
+        after.as_ref(),
+        hz,
+        began.elapsed().as_secs_f64(),
+    );
+    report["preparation_phase_measurements"] =
+        phases.snapshot(&report["prepare_and_statistics_measurement"]);
     let prepared = match prepared {
         Ok(value) => value,
         Err(error) => {
             report["status"] = json!("prepare_failed");
             report["original_error"] = json!(error.to_string());
             report["original_error_debug"] = json!(format!("{error:?}"));
-            save(report_path, &report)?;
+            // 报告写入故障同样不能覆盖已经得到的原prepare错误。
+            let _ = save(report_path, &report);
             return Err(error);
         }
     };
@@ -213,5 +192,28 @@ mod tests {
                 assert_eq!(report["statistics"]["public_groups"], 8);
             }
         }
+    }
+    #[test]
+    fn unavailable_endpoint_metrics_do_not_mask_original_prepare_failure() {
+        fn unavailable() -> Result<ProcessCountersV1, MaterialError> {
+            Err("计量源不可用".into())
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let (config, _) = common::setup(temp.path());
+        let mut prep = config.preparation;
+        prep.recording.max_capture_output_bytes = 1;
+        let path = temp.path().join("trial.json");
+        let error = run_trial_with_counter_reader(prep, &path, 0, unavailable).unwrap_err();
+        assert_eq!(error.to_string(), "External: 捕获产物超过冻结的总字节上限");
+        let report: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(report["status"], "prepare_failed");
+        assert_eq!(report["original_error"], error.to_string());
+        assert!(report["statistics"].is_null());
+        assert_eq!(
+            report["prepare_and_statistics_measurement"]["available"],
+            false
+        );
+        assert!(report["prepare_and_statistics_measurement"]["user_seconds"].is_null());
+        assert!(report["prepare_and_statistics_measurement"]["wall_seconds"].is_number());
     }
 }

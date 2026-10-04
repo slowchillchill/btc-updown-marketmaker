@@ -114,6 +114,18 @@ DPT先在所选文件定位指定Snapshot，再分页读取每个目标市场从
 
 `material_trial`改用新入口，不再独立打开统计reader，仍交付原完整`statistics`供原两市场／首小时研究消费。合并阶段计量名为`prepare_and_statistics_measurement`；独立`statistics_measurement`为null并明确标记不适用，不能把它写成0秒或声称统计没有计算。旧实测报告保持。
 
-库进度默认为None关闭；材料示例沿原`--progress-interval-seconds`参数，默认30秒、0关闭。可选`HistoricalPreparationProgressV1`在原应用检查点报告输入／组／观察计数和耗时；稳定及hidden完成之前`published=false`，总量、比例、ETA为未知。阶段起止覆盖准入／外排整体、公共应用、稳定、hidden整体及最终结果，不包含准入／外排／hidden内部的独立进度或百分比。输出失败只关闭日志，既不改变业务错误也不重试。
+库进度默认为None关闭；材料示例沿原`--progress-interval-seconds`参数，默认30秒、0关闭。可选`HistoricalPreparationProgressV1`在原应用检查点报告输入／组／观察计数和耗时；稳定及hidden完成之前`published=false`；可信总量和未知项的具体口径见下节。阶段覆盖下述11个连续区间，阻塞调用内部没有心跳或独占函数耗时分解。输出失败只关闭日志，既不改变业务错误也不重试。
 
 此工程段通过小型真实prepare与同记录独立空重放的完整统计对照及必要回归验证；没有新的真实十二分钟／小时材料运行。后续如准确签发测量，应将新合并阶段与旧525.219863807＋187.391546387＝712.611410194秒对照，研究另列；不能直接声称节省全部187.39秒，因为原统计计算仍保留。
+
+## 原准备路径的阶段计量与进度
+
+启用材料示例的进度时，`HistoricalPreparationProgressV1`同时保存固定的11个连续调用区间：文件准入；初始化选择及来源装配；epoch前遍；后遍供料与初始外排；各来源外排finish；公共应用与就地统计／录制（含End）；公共稳定及目录装配；hidden公共扫描与供料；hidden消息外排finish；hidden归约与派生写入；hidden最终化（derived关闭、index.finish、原sync及结果）。父级`prepare_and_statistics_measurement`不与这些子区间再次相加。后遍的惰性解码、来源构造、序列化与sorter.push交织，区间名称保留这种合并关系，不当作独占排序时间。
+
+training的通知只承载本次历史准备的阶段和已完成工作的标量，不读取/proc，也不依赖backtest。旧入口与带通知入口共用原私有实现。文件准入仍完整验证SHA及footer，两遍原始供料各自沿原文件校验和有界解码；epoch前遍和后遍的职责未删除，解码后才按原接收范围筛选。初始化文件的读取计数与日文件分列。物理解码批次／行、区间入选行、文件完成、六来源SortMetrics、公共应用输入／生成组／观察、hidden已读取记录／成功供料消息／归约消息／实际写入步骤和报告／成功索引数分别报告，不能相加冒充独立行情样本。
+
+检查点采用真实批次、文件、阶段边界和循环内的可控间隔；0关闭内部阶段采样及输出，普通prepare不启用通知。单次阻塞的整文件SHA、解码、外排finish或sync未返回时，没有后台心跳或可靠百分比。准入和初始化选择完成后，原footer及已读取初始化文件提供每遍的可信物理文件／行总量；各来源外排finish成功后，六路原SortMetrics的实际输入行数加原End提供公共应用输入总量。`applied_input_fraction`只表示这一阶段的已应用输入比例，不是整个prepare的完成百分比；未确定的总量和所有ETA继续为null。输出损坏后停日志，阶段计量仍可继续；计量源不可用时保留墙钟与可用性，CPU／I/O缺失为null，不改变业务控制流或重试。
+
+`material_trial`新增`preparation_phase_measurements`，包含固定阶段、阶段成功／失败、工作量及相对合并总计的residual。阶段端点复用同一次进程计数快照形成连续差值，residual如实保留，不硬凑到某个热点；未访问阶段为空。/proc的rchar是进程读请求量，read_bytes是进程设备读取计数，均包含计量和少量输出开销，不能进一步归给区间内部函数。阶段端点RSS不是阶段峰值，也不将RSS相加；进程峰值仍由外层GNU及资源测量器记录。
+
+准备失败后，即使结束端点计量不可用，材料示例也优先保存并返回原prepare错误，成功statistics仍为空。输入、End、writer稳定、hidden完整EOF和原write／flush／close／sync责任不变。代表小夹具核开启／关闭的完整材料字节与统计、阶段顺序及物理／入选分母、关闭不采样／输出、计量及日志故障、原准入／初始化／写入错误和既有hidden坏EOF。此工程段真实材料运行0次；旧712.611410194秒仅为后续原合并阶段的比较口径，不据代码接线虚报新的时长或端到端结果。

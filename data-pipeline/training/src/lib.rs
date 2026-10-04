@@ -10,6 +10,7 @@ mod gate_a_publication;
 mod gate_a_sim_adapter;
 pub mod hidden_preparation;
 pub mod historical_initialization;
+pub mod historical_preparation_progress;
 pub mod observation;
 pub mod public_input;
 pub mod public_online;
@@ -573,40 +574,51 @@ pub fn validate_direct_source_daily_manifest_header(
 pub fn validate_direct_source_daily_manifest_admission(
     manifest_path: &Path,
 ) -> Result<ValidatedDirectSourceDailyInputV3, ManifestAdmissionValidationError> {
-    validate_daily_manifest_admission_with_public_inputs(manifest_path, false)
+    validate_daily_manifest_admission_with_public_inputs(manifest_path, false, None)
 }
 
 /// 新版公共输入显式接受原六来源材料及 V6/TWAP 材料，沿用每日清单 V3 的完整准入。
 pub fn validate_public_source_daily_manifest_admission_v1(
     manifest_path: &Path,
 ) -> Result<ValidatedDirectSourceDailyInputV3, ManifestAdmissionValidationError> {
-    validate_daily_manifest_admission_with_public_inputs(manifest_path, true)
+    validate_daily_manifest_admission_with_public_inputs(manifest_path, true, None)
 }
 
 /// 完整准入显式选择的每日清单，并冻结 DPT 自有的不可变输入集合摘要。
 pub fn freeze_direct_source_input_set(
     manifest_paths: &[PathBuf],
 ) -> Result<FrozenDirectSourceInputSetV1, InputSetSnapshotError> {
-    freeze_source_input_set(manifest_paths, false)
+    freeze_source_input_set(manifest_paths, false, None)
 }
 /// 新公共来源与旧直接源共用冻结摘要；允许原 V6/TWAP 清单准入。
 pub fn freeze_public_source_input_set_v1(
     manifest_paths: &[PathBuf],
 ) -> Result<FrozenDirectSourceInputSetV1, InputSetSnapshotError> {
-    freeze_source_input_set(manifest_paths, true)
+    freeze_source_input_set(manifest_paths, true, None)
+}
+pub fn freeze_public_source_input_set_with_progress_v1(
+    manifest_paths: &[PathBuf],
+    progress: Option<&historical_preparation_progress::HistoricalPreparationNotifierV1<'_>>,
+) -> Result<FrozenDirectSourceInputSetV1, InputSetSnapshotError> {
+    freeze_source_input_set(manifest_paths, true, progress)
 }
 fn freeze_source_input_set(
     manifest_paths: &[PathBuf],
     public_inputs: bool,
+    progress: Option<&historical_preparation_progress::HistoricalPreparationNotifierV1<'_>>,
 ) -> Result<FrozenDirectSourceInputSetV1, InputSetSnapshotError> {
     let mut admitted_daily_inputs = Vec::with_capacity(manifest_paths.len());
     for manifest_path in manifest_paths {
         admitted_daily_inputs.push(
-            validate_daily_manifest_admission_with_public_inputs(manifest_path, public_inputs)
-                .map_err(|source| InputSetSnapshotError::Admission {
-                    manifest_path: manifest_path.clone(),
-                    source,
-                })?,
+            validate_daily_manifest_admission_with_public_inputs(
+                manifest_path,
+                public_inputs,
+                progress,
+            )
+            .map_err(|source| InputSetSnapshotError::Admission {
+                manifest_path: manifest_path.clone(),
+                source,
+            })?,
         );
     }
     admitted_daily_inputs.sort_by(|left, right| {
@@ -689,6 +701,7 @@ fn update_digest_string(hasher: &mut Sha256, value: &str) {
 fn validate_daily_manifest_admission_with_public_inputs(
     manifest_path: &Path,
     public_inputs: bool,
+    progress: Option<&historical_preparation_progress::HistoricalPreparationNotifierV1<'_>>,
 ) -> Result<ValidatedDirectSourceDailyInputV3, ManifestAdmissionValidationError> {
     let bytes =
         read_daily_manifest(manifest_path).map_err(ManifestAdmissionValidationError::Header)?;
@@ -796,6 +809,13 @@ fn validate_daily_manifest_admission_with_public_inputs(
             &inspection.footer_metadata,
             &manifest_file,
         )?;
+        historical_preparation_progress::notify(
+            progress,
+            historical_preparation_progress::HistoricalPreparationNoticeV1::AdmissionFile {
+                bytes: manifest_file.bytes,
+                rows: manifest_file.rows,
+            },
+        );
         files.push(ValidatedDirectSourceParquetFileV3 {
             manifest_relative_path: relative_path.clone(),
             file_path: path,

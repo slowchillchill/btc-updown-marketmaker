@@ -2,6 +2,9 @@ use crate::statistics::HistoricalStatisticsCollectorV1;
 use crate::{HistoricalPreparationProgressV1, HistoricalStatisticsV1, MaterialError};
 use contracts::*;
 use data_pipeline_core::{public_input::*, public_observation_core::PublicObservationCoreV1};
+use data_pipeline_training::historical_preparation_progress::{
+    HistoricalPreparationNotifierV1, HistoricalPreparationStageV1 as Stage,
+};
 use data_pipeline_training::{
     canonical_run::CanonicalRunConfig, gate_a::GateAOutputConfig, hidden_preparation::*,
     historical_initialization::*, public_recording::*, public_replay::*,
@@ -137,13 +140,19 @@ fn prepare_internal(
     mut progress: Option<HistoricalPreparationProgressV1>,
 ) -> Result<(PreparedHistoricalRunV1, Option<HistoricalStatisticsV1>), MaterialError> {
     if let Some(p) = &mut progress {
-        p.stage("admission_and_sort");
+        p.stage(Stage::Admission);
     }
     let result = (|| {
         let header = config.effective_header();
-        let input_set = data_pipeline_training::freeze_public_source_input_set_v1(
-            &config.scope.manifest_paths,
-        )?;
+        let input_set = with_training_notifications(&mut progress, |notifications| {
+            data_pipeline_training::freeze_public_source_input_set_with_progress_v1(
+                &config.scope.manifest_paths,
+                notifications,
+            )
+        })?;
+        if let Some(p) = &mut progress {
+            p.stage(Stage::InitializationSelection);
+        }
         let initialization_selection = config
             .metadata_initialization
             .as_ref()
@@ -153,11 +162,14 @@ fn prepare_internal(
                 {
                     return Err::<_, MaterialError>("初始化用途的研究范围与准备范围不一致".into());
                 }
-                MetadataInitializationSelectionV1::open(
-                    initial,
-                    config.canonical.decode_batch_rows,
-                    config.canonical.max_decode_batch_bytes,
-                )
+                with_training_notifications(&mut progress, |notifications| {
+                    MetadataInitializationSelectionV1::open_with_progress(
+                        initial,
+                        config.canonical.decode_batch_rows,
+                        config.canonical.max_decode_batch_bytes,
+                        notifications,
+                    )
+                })
             })
             .transpose()?;
         let source_identity_sha256 =
@@ -184,21 +196,24 @@ fn prepare_internal(
             .flat_map(|day| day.files())
             .collect::<Vec<_>>();
         std::fs::create_dir(&config.work_root)?;
-        let mut merge = prepare_historical_files_with_initialization_v1(
-            &config.work_root.join("merge"),
-            &files,
-            &config.canonical,
-            config.header.input_stream_id.clone(),
-            Some(config.scope.received_start_utc_ms..config.scope.received_end_utc_ms),
-            initialization_selection.as_ref(),
-        )?;
+        let mut merge = with_training_notifications(&mut progress, |notifications| {
+            prepare_historical_files_with_initialization_and_progress_v1(
+                &config.work_root.join("merge"),
+                &files,
+                &config.canonical,
+                config.header.input_stream_id.clone(),
+                Some(config.scope.received_start_utc_ms..config.scope.received_end_utc_ms),
+                initialization_selection.as_ref(),
+                notifications,
+            )
+        })?;
+        if let Some(p) = &mut progress {
+            p.stage(Stage::PublicApplicationStatisticsRecording);
+        }
         let public_root = config.work_root.join("public");
         let mut core = PublicObservationCoreV1::new(header.clone())?;
         let mut writer =
             PublicRecordingWriterV1::create(&public_root, &header, config.recording.clone())?;
-        if let Some(p) = &mut progress {
-            p.stage("public_application_unstable");
-        }
         while let Some(mut input) = merge.next_input()? {
             if let Some(binding) = merge.initialization_binding() {
                 initialization.input_positions.insert(input.input_position);
@@ -234,9 +249,11 @@ fn prepare_internal(
         }
         if let Some(p) = &mut progress {
             p.applied(&applied.applied);
-            p.stage("stabilize");
         }
         writer.record(end, applied)?;
+        if let Some(p) = &mut progress {
+            p.stage(Stage::PublicStabilizeAndCatalog);
+        }
         writer.stabilize()?;
         drop(writer);
         if config.metadata_initialization.is_some() {
@@ -267,20 +284,23 @@ fn prepare_internal(
             })
             .collect::<Result<_, MaterialError>>()?;
         if let Some(p) = &mut progress {
-            p.stage("hidden_preparation");
+            p.stage(Stage::HiddenScanAndSupply);
         }
         let reader = PublicRecordingReaderV1::recover(
             &public_root,
             config.read_page_rows,
             config.max_read_batch_bytes,
         )?;
-        let hidden = prepare_hidden_v1(
-            core,
-            reader,
-            &config.work_root.join("hidden"),
-            &config.recording,
-            config.hidden_stream_id.clone(),
-        )?;
+        let hidden = with_training_notifications(&mut progress, |notifications| {
+            prepare_hidden_with_progress_v1(
+                core,
+                reader,
+                &config.work_root.join("hidden"),
+                &config.recording,
+                config.hidden_stream_id.clone(),
+                notifications,
+            )
+        })?;
         Ok((
             PreparedHistoricalRunV1 {
                 public_root,
@@ -300,7 +320,21 @@ fn prepare_internal(
         ))
     })();
     if let Some(p) = &mut progress {
-        p.stage(if result.is_ok() { "complete" } else { "error" });
+        p.finish(result.is_ok());
     }
     result
+}
+
+// 只桥接本次历史准备的专用通知；未启用时不给training通知，也不采进程。
+fn with_training_notifications<T>(
+    progress: &mut Option<HistoricalPreparationProgressV1>,
+    run: impl FnOnce(Option<&HistoricalPreparationNotifierV1<'_>>) -> T,
+) -> T {
+    if let Some(progress) = progress.as_mut().filter(|p| p.enabled()) {
+        let mut callback = |notice| progress.notice(notice);
+        let notifications = HistoricalPreparationNotifierV1::new(&mut callback);
+        run(Some(&notifications))
+    } else {
+        run(None)
+    }
 }
