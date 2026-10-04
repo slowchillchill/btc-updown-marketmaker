@@ -24,6 +24,7 @@ import { Topology } from "./Topology";
 import { Economics, Field, MarketSummary } from "./Economics";
 import { EventTable } from "./EventTable";
 import { Timeline } from "./Timeline";
+import { usePublicBrowse } from "./PublicBrowse";
 const views = [
   ["overview", "模块总览"],
   ["timeline", "多时钟时间线"],
@@ -41,9 +42,7 @@ export default function App() {
     [view, setView] = useState<View>("overview");
   const [loading, setLoading] = useState(false),
     [error, setError] = useState(""),
-    [page, setPage] = useState<Page | null>(null),
-    [pageBusy, setPageBusy] = useState(false),
-    [pageError, setPageError] = useState("");
+    [page, setPage] = useState<Page | null>(null);
   const [selection, setSelection] = useState<Evidence | null>(null),
     [condition, setCondition] = useState(""),
     [start, setStart] = useState(""),
@@ -78,8 +77,7 @@ export default function App() {
     setCondition("");
     setStart("");
     setEnd("");
-    setPageError("");
-    setPageBusy(false);
+
     fetch(`/api/runs/${run}/snapshot`, { signal: abort.signal })
       .then(async (r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -96,21 +94,6 @@ export default function App() {
       });
     return () => abort.abort();
   }, [run]);
-  async function loadPage(next?: string) {
-    const requested = run;
-    setPageBusy(true);
-    setPageError("");
-    try {
-      const d = await get<Page>(
-        `/api/runs/${run}/public${next === undefined ? "" : `?page=${next}`}`,
-      );
-      if (currentRun.current === requested) setPage(d);
-    } catch (e) {
-      if (currentRun.current === requested) setPageError(String(e));
-    } finally {
-      if (currentRun.current === requested) setPageBusy(false);
-    }
-  }
   const report =
     snapshot?.report.status === "ready"
       ? (snapshot.report.exact ?? undefined)
@@ -122,6 +105,14 @@ export default function App() {
   const reportMarkets = list(at(report, "account_economics_memory", "markets"));
   const account = at(report, "ledger_consumed_memory", "account_instance_key");
   const allRows = useMemo(() => publicRows(page), [page]);
+  const publicBrowse = usePublicBrowse({
+    run,
+    page,
+    onPage: setPage,
+    condition,
+    ready: snapshot?.public_recording.status === "ready",
+    onSelect: select,
+  });
   const stream = text(at(snapshot?.public_recording.header, "input_stream_id"));
   const publicOnly =
     !report && !text(at(metadata, "config", "session", "run_id"));
@@ -164,14 +155,14 @@ export default function App() {
   );
   const rows = useMemo(
     () =>
-      allRows.filter(
+      publicBrowse.rows.filter(
         (r) =>
           (!condition ||
             r.markets?.some((m) => m.condition === condition) ||
             (!r.markets?.length && r.condition === undefined)) &&
           ((!start && !end) || r.points.some((p) => points.includes(p))),
       ),
-    [allRows, points, start, end, condition],
+    [publicBrowse.rows, points, start, end, condition],
   );
   const exportPoints =
     exportScope === "selection"
@@ -295,33 +286,7 @@ export default function App() {
     link.click();
     link.remove();
   }
-  const controls = (
-    <div className="page-controls">
-      <button
-        disabled={
-          pageBusy ||
-          snapshot?.public_recording.status !== "ready" ||
-          !!page?.at_end
-        }
-        onClick={() =>
-          loadPage(page ? (BigInt(page.page) + 1n).toString() : undefined)
-        }
-      >
-        {pageBusy ? "读取中…" : page ? "下一页" : "读取当前页"}
-      </button>
-      <button
-        disabled={pageBusy || snapshot?.public_recording.status !== "ready"}
-        onClick={() => loadPage()}
-      >
-        取回服务端当前页
-      </button>
-      <span>
-        {page
-          ? `页 ${page.page} · 本页 ${page.returned_rows} 条 · 已顺序读至 ${page.total_returned_rows}${page.at_end ? " · 稳定前缀末端" : ""}`
-          : "公共记录尚未读取"}
-      </span>
-    </div>
-  );
+  const controls = publicBrowse.controls;
   const rangeControls = (
     <div className="range-controls">
       <label>
@@ -608,6 +573,10 @@ export default function App() {
                       report={report}
                       metadata={metadata}
                       selection={selection}
+                      playback={
+                        publicBrowse.playing ? publicBrowse.playFact : null
+                      }
+                      publicRows={allRows}
                       onSelect={select}
                     />
                   </section>
@@ -643,8 +612,12 @@ export default function App() {
                 <section>
                   <h2>公共记录 · 当前已读页</h2>
                   {controls}
-                  {pageError && <p role="alert">{pageError}</p>}
-                  <EventTable rows={allRows} onSelect={select} />
+                  <EventTable
+                    rows={publicBrowse.rows}
+                    onSelect={select}
+                    selectedPath={selection?.path}
+                    playbackPath={publicBrowse.playFact?.path}
+                  />
                 </section>
               </>
             )}
@@ -786,7 +759,6 @@ export default function App() {
                     原顺序游标只保留最近一页。刷新、切回运行或其他窗口推进后取回服务端当前页，不从头扫描。只在当前页按明确字段筛选；本页外历史未定位，不冒充全历史查询。无时间记录不会进入时间范围导出。
                   </p>
                   {controls}
-                  {pageError && <p role="alert">{pageError}</p>}
                   {page && (
                     <p>
                       当前可浏览行 [{page.row_start},{" "}
@@ -802,7 +774,12 @@ export default function App() {
                       )}
                     </p>
                   )}
-                  <EventTable rows={rows} onSelect={select} />
+                  <EventTable
+                    rows={rows}
+                    onSelect={select}
+                    selectedPath={selection?.path}
+                    playbackPath={publicBrowse.playFact?.path}
+                  />
                   {page && (
                     <details>
                       <summary>本页读取成本</summary>

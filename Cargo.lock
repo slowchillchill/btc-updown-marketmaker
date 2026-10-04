@@ -5139,6 +5139,7 @@ dependencies = [
  "data-pipeline-core",
  "data-pipeline-training",
  "ledger",
+ "num-bigint",
  "rust_decimal",
  "serde",
  "serde_json",

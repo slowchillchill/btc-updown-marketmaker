@@ -7,6 +7,7 @@ publish = false
 [dependencies]
 axum = "=0.8.9"
 bytes = "=1.12.0"
+num-bigint = "=0.4.8"
 contracts = { path = "../contracts" }
 data-pipeline-training = { path = "../data-pipeline/training" }
 serde = { version = "=1.0.228", features = ["derive"] }

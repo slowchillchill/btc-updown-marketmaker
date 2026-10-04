@@ -1,5 +1,6 @@
 //! 一个显式稳定前缀、一个顺序游标；只缓存最近响应以便网络重试。
 use crate::dto::{PublicSourceConfig, exact_json};
+use crate::query::BatchMatcher;
 use bytes::Bytes;
 use contracts::CommittedIngressPrefixV1;
 use data_pipeline_training::public_recording::PublicRecordingReaderV1;
@@ -80,6 +81,7 @@ pub struct PublicPages {
     next_page: u64,
     returned_rows: u64,
     last: Option<(u64, Bytes, PageEncodingCost)>,
+    last_match: Option<(String, Value)>,
     failure: Option<String>,
     exhausted: bool,
 }
@@ -113,14 +115,35 @@ impl PublicPages {
                 next_page: 0,
                 returned_rows: 0,
                 last: None,
+                last_match: None,
                 failure: None,
                 exhausted: false,
             },
             status,
         ))
     }
+    /// 只保留最近原批的一份小匹配结果；原批推进即失效。
+    pub fn match_current(&mut self, matcher: &BatchMatcher<'_>) -> Result<(Value, bool), String> {
+        let key = matcher.cache_key()?;
+        if let Some((last_key, result)) = &self.last_match
+            && *last_key == key
+        {
+            return Ok((result.clone(), true));
+        }
+        let batch = &self.last.as_ref().ok_or("尚无原批")?.1;
+        let result = matcher.inspect(batch)?;
+        self.last_match = Some((key, result.clone()));
+        Ok((result, false))
+    }
     pub fn last_encoding_cost(&self) -> Option<PageEncodingCost> {
         self.last.as_ref().map(|(_, _, cost)| *cost)
+    }
+    /// 从已有游标/最近批推导恢复信息，不建立第二个查询会话或缓存。
+    pub fn cursor_status(&self) -> Value {
+        json!({"current_page":self.last.as_ref().map(|(page,_,_)|page.to_string()),
+            "next_page":self.next_page.to_string(),"total_returned_rows":self.returned_rows.to_string(),
+            "at_end":self.exhausted,"failed":self.failure.is_some(),
+            "prefix":exact_json(serde_json::to_value(&self.reader.prefix).expect("现有可序列化前缀"))})
     }
     pub fn current(&mut self) -> Result<Bytes, String> {
         if let Some((_, response, _)) = &self.last {
@@ -203,6 +226,7 @@ impl PublicPages {
             response_bytes: response.len(),
         };
         self.next_page += 1;
+        self.last_match = None;
         self.last = Some((requested, response.clone(), encoding_cost));
         Ok(response)
     }

@@ -56,6 +56,7 @@ cargo run -p visualization --locked --offline -- sources.json 127.0.0.1:4317 vis
 
 - `GET /api/runs` 仅列显式配置的来源。响应 `key` 是配置列表位置，供路由选择，不替代 `run_id`、账户或领域身份。
 - `GET /api/runs/{key}/snapshot` 返回启动时读取并序列化的报告/元数据快照、公共前缀、来源状态和缺口。浏览刷新不重读报告文件；换一份原产物需重启服务。
+- `GET /api/runs/{key}/public-query` 在相同游标上执行下述单批查询，回显实际条件、固定前缀、游标与命中原偏移；原批完整返回以供当前批条件切换和恢复。
 - `GET /api/runs/{key}/public` 取回最近已读页，尚未读过时读取第一页。`?page=n` 只推进到下一页或重试最近页。每个来源只有一个公共顺序游标，刷新、切换运行或另一个浏览窗口推进后，通过“取回服务端当前页”同步当前页；旧页不会触发重开或从头扫描。该切片不提供随机历史定位。选择证据保留原对象及来源，不自动换为邻近记录。
 
 公共页复用 `PublicRecordingReaderV1::open_committed` / `next_page`，固定绑定显式前缀。原记录身份、字段与前缀完整保留，展示行序只是本前缀中的定位信息。达到完整页边界时，再读取一页才能由所属接口确认末端；该末页可以为空。读取失败停止当前游标并报告页和已返回量，最近成功页仍可取回；不恢复、截断、补尾或删除原文件。
@@ -156,7 +157,7 @@ TRACE_PROCESSOR=/path/to/trace_processor node visualization/ui/tests/public-brow
 
 完整响应字节为页 0 的 138619→138617 B、页 1 的 115070→115068 B（计时文本位数可能改变长度），rows 始终 137999/114449 B。完整编码观察为 4257→2861、3609→2294 µs；基线计时还包括原 JSON 信封构造，优化后为实际完整序列化，两者口径差异不能当作纯编码速度提升。整个页路径由示例另计 22454→19590、10028→6060 µs，仍含 allocator 开销。
 
-实际 Chrome 1600×1150 验证两页各渲染 100 个表格行，无页面异常；`requestStart→responseEnd` 为 24.9→22.5、14.0→7.9 ms，点击至 DOM 就绪加两次 animation frame 为 117.9→112.3、94.6→95.4 ms，后者包含 HTTP、解码、React 和帧调度，不能称纯绘制/CPU 时间。启动至首 HTTP 成功含 25 ms 轮询调度，为 8.06→9.14 ms；最近页重试直到 body 接收为 1.8→2.3 ms，浏览器 JSON 解析为 0.1→0.3 ms。这些单次有限结果不设阈值。前端产物 JS 973.59 kB（gzip 320.99）、CSS 25.19 kB（gzip 5.32），已有大包提示保留；本片没有扩大到虚拟表格、范围随机定位或播放实现。
+C5 当时的实际 Chrome 1600×1150 验证两页各渲染 100 个表格行，无页面异常；`requestStart→responseEnd` 为 24.9→22.5、14.0→7.9 ms，点击至 DOM 就绪加两次 animation frame 为 117.9→112.3、94.6→95.4 ms，后者包含 HTTP、解码、React 和帧调度，不能称纯绘制/CPU 时间。启动至首 HTTP 成功含 25 ms 轮询调度，为 8.06→9.14 ms；最近页重试直到 body 接收为 1.8→2.3 ms，浏览器 JSON 解析为 0.1→0.3 ms。这些单次有限结果不设阈值。前端产物 JS 973.59 kB（gzip 320.99）、CSS 25.19 kB（gzip 5.32），已有大包提示保留；本片没有扩大到虚拟表格、范围随机定位或播放实现。
 
 基线精确代码为 `14ccd51c473b42df0e10481cd55165cff47f1bce` 加 [仅测量补丁](docs/read-cost-baseline.patch)，该补丁只在原路径加完成响应计时/长度与读取方法，保留原额外 rows 编码。对照工作树应用该补丁并复制本轮 `examples/read_cost.rs` 后，可用同一示例/命令重复基线；当前树直接运行即为优化路径。补丁不用于当前源码，也不改变领域读取。复现时由调用者提供同一授权 `sources.json`，首项须为公共来源；输出/trace 放在忽略目录，原始 strace 含文件路径与部分内容，不作为公开附件。下列变量仅为命令输入，不写入公共配置：
 
@@ -171,3 +172,32 @@ node visualization/ui/tests/read-cost-browser.mjs "$SOURCES" "$OUT/browser"
 ```
 
 浏览器脚本使用受控 4320 端口，测量真实 HTTP 响应和 DOM 行数，检查 rows 字节计数、原范围/调用次数及最近页复用，保存截图与 JSON，结束后关闭自己启动的 Chrome 和服务。构建缓存复用时按前述 `CARGO_TARGET_DIR` 查找二进制。本轮还保留合法 63 行/80 时间点的原浏览/官方 Perfetto 回归；缺口与后续范围查询、虚拟列表、播放、经济投影及显式 NOE 仍按所属合同接续。
+
+
+## 顺序范围查询、虚拟列表与历史浏览
+
+当前批筛选只查看浏览器保留的这一原批；“从当前游标查找下一批匹配”才显式开始下一批服务端查询。条件取原存储记录类型、明确 `condition_id`、指定位置域、指定原时钟及包含两端的整数范围。位置域包含固定前缀存储行偏移及原 `input_position` / `canonical_position` / `group_position` / `observation_position`；`PmStepBinding.position.canonical_record_position` 仅对应规范记录位置。时钟选择列出已适配的明确字段，即使当前页没有该字段也可选来查下一批。未限定端点不等于把缺字段当匹配；已有条件确定不满足时计“不匹配”，否则所需字段缺失计“无法判断”。同时选择市场和时钟时，时间须有原字段支持的同一市场关联，不能借同批其他市场的时间。
+
+服务器一次 HTTP 最多调用所属读取器 `next_page` 一次。它从最近原批的精确 JSON 读取已有字段，返回 `matching.matched_offsets`（原批内偏移）、扫描/无法判断/不匹配量、匹配解析和判断耗时，并回显查询/前缀。响应的 `batch` 仍是完整原批；服务端筛选没有减少其 wire 字节量。浏览器依据服务端命中结果，在空匹配批后串行发下一请求，遇到非空批或稳定前缀末端停止；期间展示扫描/匹配/无法判断/已耗时，查找总量未知。原时间可能回退，任何时间超过上界都不会使扫描早停。修改条件、打开页面或切换视图不自动扫描，不提供随机历史定位或全部匹配集合。
+
+每来源只保留最近一份原批编码，以及绑定该原批的一份最近查询条件/命中偏移/统计。相同最近批与相同条件重试复用该小结果，`matching_reused=true`；回显的 `query_elapsed_us` 是原匹配工作耗时，不是重试耗时。下一原批成功推进时清除小结果；没有第二份全量 JSON 缓存。新条件仍需临时解析当前原批作匹配；原批 HTTP 编码直接嵌入，保留 C5 一次 rows 编码计量路径。当前批客户端条件变化重新筛这一完整原批，行对象与 `/public/{row_start}/{原 i}` 不重新编号。
+
+取消只停止后续请求，同步原读取不能因 HTTP 断开而被宣称取消；在途批完成后先保存再停。网络失败保留最近期望页/条件，可重试或显式取回服务端最近批。刷新/切回来源时初次“读取当前页”取回服务端当前批，不固定成页 0。另一窗口推进使本窗预期页过旧时返回冲突，显示服务端最近/下一页；显式取回跨过本窗未保留的中间页时提示覆盖改变。真实读取失败保留所属游标停止状态，仍可取回最近成功批，不能继续推进。旧选中事实独立于当前批及虚拟 DOM 保留。
+
+[React TanStack Virtual](https://tanstack.com/virtual/latest/docs/framework/react/react-virtual) 按稳定原引用作为 key、测量实际行高，只挂载当前可视 DOM。页面分别显示当前保留/条件匹配/DOM 数量，不把虚拟化称底层少读或少解码。“历史浏览”按原序遍历当前保留的匹配事实，以记录/秒调整浏览速度，暂停并在末尾停下；不读下一页、不计算策略或归约经济事实。只在原引用解析到已读目标时突出公共来源关联；架构方向仍静态，策略、Bridge、NOE、Ledger 无证据不得模拟执行脉冲。
+
+[本轮有限证据](docs/public-query-20261004.json) 记录合法 63 行材料：页 1–4 空匹配，页 3 已有 21997/21998，页 5 仍能命中倒退的 21996；客户端过滤后第一条 Input 保留原偏移 1。63 条保留事实只挂载 9 个 DOM 行，移出 DOM 的旧选择保留。取消仅 1 请求且在途页保存；服务端完成后模拟浏览器网络失败，重试同原批、`next_page_calls=1` 且小匹配结果复用。第二窗口推进至页 2，本窗冲突后显式取回，`reader_open_count=1` / `next_page_calls=3`。8 条已读 Input 播放/暂停/末尾没有额外公共 HTTP 请求。
+
+同一真实已停止五分钟来源仅读前两页（各 100 条），每页 DOM 为 9；原批 138617 / 115068 B，带查询元数据响应 139914 / 116365 B，原 rows 仍为 137999 / 114449 B。新增匹配解析/判断观察为 2250 / 1889 µs；HTTP `requestStart→responseEnd` 为 26.2 / 13.7 ms，点击至 DOM 就绪加两帧为 113.8 / 90.3 ms。后者含 HTTP、浏览器解码、React 与帧调度，不是纯 CPU 渲染。最近原批重试未推进，返回 115068 B。此片未重新测 allocator/底层 syscall/物理 I/O；C5 历史证据和读数保持原样，不把虚拟 DOM 或下一批已有缓存当零解码。上述单次 debug/Chrome 观察不设容量或频率门。
+
+现有公共关联/时间导出浏览器回归仍通过，下载 80 个时间点经官方 Trace Processor 读取为 80 条 slice；首尾为 9990000000 / 1788840000123000000 ns，原 `args.original_utc_ms=20000` 两条。前端产物 JS 1009.74 kB（gzip 331.96）、CSS 26.06 kB（gzip 5.52），已有大包提示保留。后续报告执行投影及显式 NOE 单引用沿 #215 接续，本片不表示整条 C 已完成。
+
+```bash
+# FINITE 是所属核心/写入器生成的 public_evidence 合法 sources.json。
+# REAL 是原显式固定前缀配置；OUT 为被忽略的本轮截图/证据目录。
+CARGO_TARGET_DIR="$TARGET" node visualization/ui/tests/query-browser.mjs "$FINITE" "$OUT/query"
+CARGO_TARGET_DIR="$TARGET" TRACE_PROCESSOR="$TP" node visualization/ui/tests/public-browser.mjs "$REAL" "$FINITE" "$OUT/public"
+CARGO_TARGET_DIR="$TARGET" node visualization/ui/tests/read-cost-browser.mjs "$REAL" "$OUT/real"
+```
+
+脚本分别使用受控 4321 / 4319 / 4320 端口，结束时关闭自身浏览器/服务及临时配置。合法有限材料的市场/原时间独立期望取原字段，不重放归约；取消/网络失败使用浏览器路由保留服务端真实已完成结果。报告/经济、公共关联与窄屏旧行为通过原浏览器脚本继续核对。固定根回归退出 0，`four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second` 按仓库规则明确跳过。

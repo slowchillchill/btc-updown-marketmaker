@@ -1,5 +1,6 @@
+use crate::query::{BatchMatcher, BrowseQuery};
 use crate::{
-    dto::{Snapshot, SourcesConfig},
+    dto::{Snapshot, SourcesConfig, exact_json},
     sources::{backtest::load_document, public_recording::PublicPages},
 };
 use axum::{
@@ -67,7 +68,78 @@ pub fn router(state: AppState) -> Router {
         .route("/api/runs", get(list))
         .route("/api/runs/{run}/snapshot", get(snapshot))
         .route("/api/runs/{run}/public", get(public))
+        .route("/api/runs/{run}/public-query", get(public_query))
         .with_state(state)
+}
+
+async fn public_query(
+    State(state): State<AppState>,
+    Path(run): Path<usize>,
+    Query(query): Query<BrowseQuery>,
+) -> Response {
+    let Some(source) = state.get(run) else {
+        return error(StatusCode::NOT_FOUND, "运行未在显式来源配置中");
+    };
+    if source.public.is_none() {
+        return error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            source.public_status.to_string(),
+        );
+    }
+    match tokio::task::spawn_blocking(move || {
+        let mut pages = state[run]
+            .public
+            .as_ref()
+            .unwrap()
+            .lock()
+            .map_err(|e| e.to_string())?;
+        let matcher = match BatchMatcher::new(&query) {
+            Ok(matcher) => matcher,
+            Err(detail) => {
+                return Ok((
+                    StatusCode::BAD_REQUEST,
+                    Bytes::from(
+                        serde_json::to_vec(
+                            &json!({"detail":detail,"cursor":pages.cursor_status()}),
+                        )
+                        .map_err(|e| e.to_string())?,
+                    ),
+                ));
+            }
+        };
+        // 一个 HTTP 只调用一次 page/current；空匹配是否继续由显式浏览动作控制。
+        let batch = match query.page {
+            Some(page) => pages.page(page),
+            None => pages.current(),
+        };
+        let cursor = pages.cursor_status();
+        let echoed = exact_json(serde_json::to_value(&query).map_err(|e| e.to_string())?);
+        let (status, envelope) = match &batch {
+            Ok(_) => {
+                let (matching, reused) = pages.match_current(&matcher)?;
+                (StatusCode::OK, json!({"query":echoed,"cursor":cursor,"matching":matching,"matching_reused":reused}))
+            },
+            Err(detail) => (
+                StatusCode::CONFLICT,
+                json!({"query":echoed,"cursor":cursor,"detail":detail}),
+            ),
+        };
+        let mut response = serde_json::to_vec(&envelope).map_err(|e| e.to_string())?;
+        if let Ok(batch) = batch {
+            // 原批编码直接嵌入；新条件匹配解析当前批一次，最近相同条件复用小结果；传输不再解析/编码 rows，也不缓存第二份全量 JSON。
+            response.pop();
+            response.extend_from_slice(b",\"batch\":");
+            response.extend_from_slice(&batch);
+            response.push(b'}');
+        }
+        Ok::<_, String>((status, Bytes::from(response)))
+    })
+    .await
+    {
+        Ok(Ok((status, response))) => json_response(status, response),
+        Ok(Err(detail)) => error(StatusCode::INTERNAL_SERVER_ERROR, detail),
+        Err(e) => error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
 }
 fn json_response(status: StatusCode, text: Bytes) -> Response {
     (
