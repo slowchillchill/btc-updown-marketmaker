@@ -53,3 +53,11 @@ Chainlink 与两个资产盘口是新增配对的依赖。Binance 只按实际�
 `research_initial_sigma` 示例的 `prepare CONFIG OUTPUT` 与 `replay CONFIG PREPARED OUTPUT` 分别复用公共有限录制和原稳定前缀重放。显式所选文件、范围、原资源字段及选源身份全部保存在配置；此方式保留完整公共 record，不把零市场来源组伪造成市场观察。
 
 生产 `SignalMemory` 与来源统计共用现价质量/接收时点接纳及逐对方差原语。生产仍按 condition 保存记忆、执行原概率前提和无有效价对时的配置回退；来源统计不采用回退，不把全局三日候选当作每市场 sigma 或完整六源可见历史。每次原重放应用后即时借用 core 当前完整现价，再推进下一输入；该投影不是任意历史组的快照。统计只保存前一个接纳点及日/全程标量，完整来源仍留在原公共材料。
+
+### 首折 Chainlink 来源健康统计
+
+`research_source_health CONFIG OUTPUT_DIRECTORY` 只重放既有公共录制。先核捕获文件长度和 SHA-256，在首输入前启用原来源进展，沿原 `PublicReplayV1::next_prepared_applied` 应用后借用 `ChainlinkSpot / None / btc/usd`，下一输入前完成读取；不依赖市场观察，也不使用 sigma 点接纳计数。公共 core 只提供按范围借用的读取口；策略与研究复用同一个单流健康判断，保持原未知、同步、时间异常、静默、事件年龄的判断顺序与 `>=` 边界。
+
+构建命令为 `cargo build -p baseline-mm --example research_source_health --release --locked --offline -j 8`。配置显式提供 `public_root`、固定 `prefix`、接收窗口 `received_start_utc_ms / received_end_utc_ms`、捕获 `expected_capture_bytes / expected_capture_sha256`、`read_page_rows`、`max_read_batch_bytes`、原 `selected_source_identity_sha256 / selection_evidence` 及 `implementation_identity`。进度 `progress_interval_seconds` 默认30秒，0关闭；页数和字节预算控制原读取批次，不等于进程RSS上界。输出目录必须新建，生成原始 `result.private.json` 及紧凑标量 `segments.jsonl`，私有配置与机器路径不进入公共报告。
+
+方法在回放前固定：有效非负接收间隔及可观测事件年龄分别取 p50/p90/p95/p99，排序后使用秩 `ceil(p*n)`（1起算），去重笛卡尔积最多16对。零阈值保持立即到期，不加1；最大值只作尾部诊断。单次回放的标量区间在内存分析候选，按UTC半开窗口和午夜交集分桶，保留首点前未知及末点后无确认。独立静默/事件条件报告交叠和不重复联合时长；另按生产首个失败原因互斥分类并对账全窗口，缺事件时间不能遮蔽之后的静默到期。缺失与不一致时间不混入数值分位。原连接及同步缺证据保持未知；同折候选只描述来源，正式配置、完整市场与收益验证仍按 [#185任务3](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185) 后续安排。

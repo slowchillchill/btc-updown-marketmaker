@@ -1,6 +1,7 @@
 mod account;
 mod construction;
 mod health;
+pub use health::{SourceHealthFactsV1, source_health_failure_v1};
 mod mechanics;
 mod quoting;
 mod repair;

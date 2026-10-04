@@ -480,6 +480,13 @@ impl PublicObservationCoreV1 {
     pub fn enable_source_progress(&mut self) {
         self.source_progress_enabled = true;
     }
+    /// 已应用输入后的准确流当前进展；零市场也可读取，不是历史组快照。
+    pub fn current_source_progress(
+        &self,
+        scope: &SourceStreamScopeV1,
+    ) -> Option<&SourceStreamProgressV1> {
+        self.source_progress.get(scope)
+    }
     pub fn header(&self) -> &PublicInputStreamHeaderV1 {
         &self.header
     }
