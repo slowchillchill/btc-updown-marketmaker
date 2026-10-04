@@ -437,7 +437,7 @@
         "main_records_read": 29784416
       }
     },
-    "semantic_note": "replay合作式检查点而非后台心跳；fraction仅Input应用；未知验证／定位总量和ETA为null；End/EOF之后仍有排空、冻结、汇总和写出，无独立研究汇总心跳；进度打印成本未独立测量"
+    "semantic_note": "replay合作式检查点而非后台心跳；fraction仅Input应用；未知验证／定位总量和ETA为null；End应用后仍可能交付pending组并读取剩余记录；来源先排空pending，再取得replay EOF并返回None；EOF后研究继续最终冻结、汇总和写出，来源没有pending待排空，无独立研究汇总心跳；进度打印成本未独立测量"
   },
   "disk_and_shared_cache": {
     "before_build": {
