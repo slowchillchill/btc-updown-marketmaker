@@ -1,0 +1,2288 @@
+{
+  "schema_version": "complementary_pair_initial_sigma_source_evidence_v1",
+  "issue": 185,
+  "scope": {
+    "received_start_utc_ms": 1788912000000,
+    "received_end_utc_ms": 1789171200000,
+    "source_kind": "polymarket_rtds_chainlink_btc_usd",
+    "selected_files": 78,
+    "selected_file_bytes": 11801645,
+    "selected_physical_rows": 239591
+  },
+  "identity": {
+    "source_commit": "0a2ed5b1735e0366c30104175ac0df98cc7be2ff",
+    "binary_sha256": "0d6ab3b779ac18b6435f8d509061515eb38ba1e4ed02bb67c54cfa11f14920b2",
+    "source_file_sha256": {
+      "Cargo.lock": "d48d168915e82e2d5a585c3217aa1e180a628770b34a3e4caf1a2a9398aaf5b4",
+      "Cargo.toml": "b095e53779d1705769763e0ccdc90e82b465bcb37b85c0b55b8842803128f53a",
+      "baseline-mm/examples/research_initial_sigma.rs": "9e30d4cc71bba3faca551bf6cf573bc8200ca68552383c9b394089102da2e070",
+      "baseline-mm/src/strategies/complementary_pair/spot_statistics.rs": "ef24fe90e1b590754a706436a6d81b72a22f4cfda06d7dd125cba267c3cb9561",
+      "baseline-mm/src/strategies/complementary_pair/probability.rs": "44101a6592f4b21c4646d51339667e429bf46fa92bd990579b9531ab930e981e",
+      "data-pipeline/training/src/finite_recording.rs": "e0a170d33abf0425a9dd7378c27c36b05fdfc4be481eb6cb8eaf957aaf357254",
+      "data-pipeline/training/src/public_replay.rs": "4b3174cd81215e2518f9b3de1e4784931f60f294f874408055452db683881170",
+      "data-pipeline/core/src/public_observation_core.rs": "8aa5395fc5e069dbc71c9659913c59c39dbb6ce8b3a6855943a8b125e4942264",
+      "backtest/src/preparation.rs": "a2df4d47083a1ad7438e0a9d2807bdbe913915b3fa1764ed12e5f677add465f2"
+    },
+    "config_sha256": "6b937e9d8f0f2db871e402dca8697e5c06a68c3892aae9aa2a45433c76b6cf79",
+    "measurement_script_sha256": "11e08e987052fda45185dbf340f700ab80951ed515254c053f2ae891e2af7860",
+    "selection_script_sha256": "fb46f7d59abdb5df0d4c65bed9f453e818e1d6f04d019e4227ce68f1c6b21984",
+    "profile": "release",
+    "build_jobs": 8,
+    "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "cargo": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)",
+    "build_command": "CARGO_TARGET_DIR=<shared-cache> CARGO_BUILD_JOBS=8 cargo build -p baseline-mm --example research_initial_sigma --release --locked --offline"
+  },
+  "selected_identity_encoding": "SHA256 of selected_identity_material encoded with Python json.dumps(sort_keys=True,separators=(comma,colon),ensure_ascii=True); independent selected-source identity, not whole-day admission",
+  "selected_identity_material": {
+    "domain": "selected-chainlink-finite-source-v1",
+    "files": [
+      {
+        "bytes": 161832,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_00.parquet",
+        "part": 0,
+        "rows": 3307,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "ed52d58de7243b70cb202a753119d306a96875762196856e5687bff47e7e248a",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-09",
+        "utc_hour": "2026-09-09T00"
+      },
+      {
+        "bytes": 163855,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_01.parquet",
+        "part": 0,
+        "rows": 3342,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "cce3bcec60966375080b1c29c48bf962bb4c1940a43fedb49587c87edfc63477",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-09",
+        "utc_hour": "2026-09-09T01"
+      },
+      {
+        "bytes": 160878,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_02.parquet",
+        "part": 0,
+        "rows": 3341,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "ef9ee10d33bccba00fbb3a01d551b0ff3d5cd3162541df9382700c92a51f6747",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-09",
+        "utc_hour": "2026-09-09T02"
+      },
+      {
+        "bytes": 158858,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_03.parquet",
+        "part": 0,
+        "rows": 3288,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "943489e5c07375b7f2ae51ae75efb3f8b75d6885c9e77b4fee40a71aaa8a633a",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-09",
+        "utc_hour": "2026-09-09T03"
+      },
+      {
+        "bytes": 163456,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_04.parquet",
+        "part": 0,
+        "rows": 3324,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "2adc9e52d460c24ed63236e80e7ad29b504c406edba5fa60e389c390912863f0",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-09",
+        "utc_hour": "2026-09-09T04"
+      },
+      {
+        "bytes": 164157,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_05.parquet",
+        "part": 0,
+        "rows": 3346,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "c565ea4523f3bc96c1b5088ff44e556c9600e1c9685894c187927573076612b4",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-09",
+        "utc_hour": "2026-09-09T05"
+      },
+      {
+        "bytes": 150431,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_06.parquet",
+        "part": 0,
+        "rows": 3063,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "90daf64ec4f80fff797e9a87912b887558277d766d10769a6767505d3d315109",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-09",
+        "utc_hour": "2026-09-09T06"
+      },
+      {
+        "bytes": 159259,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_07.parquet",
+        "part": 0,
+        "rows": 3308,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "b1da18fc48bf3b50e874ede0f597fede183f233ae2ee14bce18bfd566e9b1c61",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-09",
+        "utc_hour": "2026-09-09T07"
+      },
+      {
+        "bytes": 161624,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_08.parquet",
+        "part": 0,
+        "rows": 3298,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "22f88769d3a7face9392af95bc08a92e9d07ddfd32eaf3ca9dd1b7539b120bdb",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-09",
+        "utc_hour": "2026-09-09T08"
+      },
+      {
+        "bytes": 160017,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_09.parquet",
+        "part": 0,
+        "rows": 3284,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "fe64c19cfd733560412d0ea21111e9fb414b614098e4d4ae7f3ea66646e4dc39",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-09",
+        "utc_hour": "2026-09-09T09"
+      },
+      {
+        "bytes": 147620,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_10.parquet",
+        "part": 0,
+        "rows": 2983,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "085d9084e06ad25e160c5100f31e5cddb087c1a4a0a89a82b22899eca1e0d59b",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-09",
+        "utc_hour": "2026-09-09T10"
+      },
+      {
+        "bytes": 162667,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_11.parquet",
+        "part": 0,
+        "rows": 3308,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "e59a6ee50dde3c643d9dabb0bc49867ec84087a64592211d2d8e4c8c398c2043",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-09",
+        "utc_hour": "2026-09-09T11"
+      },
+      {
+        "bytes": 160924,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_12.parquet",
+        "part": 0,
+        "rows": 3262,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "5360fc140c19b4b746370eb3e3eabf85797362f4bbf6a52439f04a67b6b556ca",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-09",
+        "utc_hour": "2026-09-09T12"
+      },
+      {
+        "bytes": 148815,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_13.parquet",
+        "part": 0,
+        "rows": 2978,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "57cab42934068aa2588b477f0b09313e19598404f71e41d5ec1b5da0745d0b32",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-09",
+        "utc_hour": "2026-09-09T13"
+      },
+      {
+        "bytes": 165818,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_14.parquet",
+        "part": 0,
+        "rows": 3284,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "b59cc7577f59920d5aa9f8f83dc9c362fd6fbd89d65410a781761f79c775894e",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-09",
+        "utc_hour": "2026-09-09T14"
+      },
+      {
+        "bytes": 148592,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_15.parquet",
+        "part": 0,
+        "rows": 2919,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "0c33bf777cc35c34f59672c7f9a20fb559d765953de1ef29fd769783ca9221ec",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-09",
+        "utc_hour": "2026-09-09T15"
+      },
+      {
+        "bytes": 154938,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_16.parquet",
+        "part": 0,
+        "rows": 3091,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "c85ed981e34704a2e4e8604c625bafadedc37c5404c997a431b36a96b32e1942",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-09",
+        "utc_hour": "2026-09-09T16"
+      },
+      {
+        "bytes": 152798,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_17.parquet",
+        "part": 0,
+        "rows": 3081,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "fa2362f75a0c40030cebb8096d9d14ac3c9b52b3156e67c6c2eec8e473d2eb45",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-09",
+        "utc_hour": "2026-09-09T17"
+      },
+      {
+        "bytes": 152252,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_18.parquet",
+        "part": 0,
+        "rows": 3100,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "d8f98fffcf253cf07c2e2c48c74741fb03c9b147bcd60d348d166073d5dd6579",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-09",
+        "utc_hour": "2026-09-09T18"
+      },
+      {
+        "bytes": 154752,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_19.parquet",
+        "part": 0,
+        "rows": 3108,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "271fb01d3e54d5bc5c9c8f63e096a8bc502dcaa848515470f261c8ade29746da",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-09",
+        "utc_hour": "2026-09-09T19"
+      },
+      {
+        "bytes": 156068,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_20.parquet",
+        "part": 0,
+        "rows": 3155,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "23d2bb0edfb74534e93c40d6284ccd595c7899247ae79f63b938cf18f11354e4",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-09",
+        "utc_hour": "2026-09-09T20"
+      },
+      {
+        "bytes": 159614,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_21.parquet",
+        "part": 0,
+        "rows": 3239,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "cac7c1d039fb6770743cf3980d1f3ec5ad5ea70db1919411d5efe9dcc801d20b",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-09",
+        "utc_hour": "2026-09-09T21"
+      },
+      {
+        "bytes": 160665,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_22.parquet",
+        "part": 0,
+        "rows": 3236,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "6a414f3d62e3379a0c54079b7f7485f07825109969da42f8702a23c51d5c52e1",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-09",
+        "utc_hour": "2026-09-09T22"
+      },
+      {
+        "bytes": 159207,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_23.parquet",
+        "part": 0,
+        "rows": 3260,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "22f129b4bb2a952604a9a5833016e0e2709509d9fcf4a92aa7009a38bf5e5547",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-09",
+        "utc_hour": "2026-09-09T23"
+      },
+      {
+        "bytes": 57546,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_00-part-1.parquet",
+        "part": 1,
+        "rows": 1097,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "334eaa7efbb35f089418ee93421ba4a9b785812339b8f5472267bc9e86417e15",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-10",
+        "utc_hour": "2026-09-10T00"
+      },
+      {
+        "bytes": 12268,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_00-part-2.parquet",
+        "part": 2,
+        "rows": 106,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "81b3a48ad5bf660eefa49dd95d314650b3383713c6026c68d473653e1e26158f",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-10",
+        "utc_hour": "2026-09-10T00"
+      },
+      {
+        "bytes": 74137,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_00.parquet",
+        "part": 0,
+        "rows": 1453,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "92ddc983a4ae28f60480c0c79f9acaa2e6cc6001b90be6c8c443ef50c6a3061c",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-10",
+        "utc_hour": "2026-09-10T00"
+      },
+      {
+        "bytes": 144966,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_01-part-1.parquet",
+        "part": 1,
+        "rows": 2908,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "7f7879c05ffa45e33db971ab4ef518d6e677032eedd66d8496519eee909d9df1",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-10",
+        "utc_hour": "2026-09-10T01"
+      },
+      {
+        "bytes": 10505,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_01.parquet",
+        "part": 0,
+        "rows": 63,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "eb58898a537ffaa2bb263516376be279835bb8aeeb74a6227b5075ab4b9442db",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-10",
+        "utc_hour": "2026-09-10T01"
+      },
+      {
+        "bytes": 148877,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_02.parquet",
+        "part": 0,
+        "rows": 3016,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "a8f123d848b4714df4d9c53aa63a02a73d7547347608860c35cd91cf440e8812",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-10",
+        "utc_hour": "2026-09-10T02"
+      },
+      {
+        "bytes": 160354,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_03.parquet",
+        "part": 0,
+        "rows": 3294,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "72eb135f5baecf540099d564a5258ab6838482c3c5160e4a3440635efa6ab0c4",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-10",
+        "utc_hour": "2026-09-10T03"
+      },
+      {
+        "bytes": 152191,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_04.parquet",
+        "part": 0,
+        "rows": 3171,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "e5bdf8e2563ec71decbeabece155468c3f96a94654bb7e703129a2e0cb5f428f",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-10",
+        "utc_hour": "2026-09-10T04"
+      },
+      {
+        "bytes": 162934,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_05.parquet",
+        "part": 0,
+        "rows": 3386,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "4ec66551da42d575134febd7b49e7fc568db1214732991c2eb3347c8f46c8527",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-10",
+        "utc_hour": "2026-09-10T05"
+      },
+      {
+        "bytes": 167753,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_06.parquet",
+        "part": 0,
+        "rows": 3432,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "065708c8fd802910a2074c8b3f01e4366a47fb495e09a41bc52c930c28cde5b7",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-10",
+        "utc_hour": "2026-09-10T06"
+      },
+      {
+        "bytes": 164007,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_07.parquet",
+        "part": 0,
+        "rows": 3427,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "958482042e157a0d8444849d58389afa402af2df5cf23598d9b162538a92ed34",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-10",
+        "utc_hour": "2026-09-10T07"
+      },
+      {
+        "bytes": 165626,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_08.parquet",
+        "part": 0,
+        "rows": 3449,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "09f59a69a94aeee7796df739ce8cf25682f7b8f543ea567ef443a950680c980f",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-10",
+        "utc_hour": "2026-09-10T08"
+      },
+      {
+        "bytes": 170218,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_09.parquet",
+        "part": 0,
+        "rows": 3481,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "77a156572aebf7c1dc936a34054633b605c7e39dccdfc65be9e3d799f85cdf0b",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-10",
+        "utc_hour": "2026-09-10T09"
+      },
+      {
+        "bytes": 168644,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_10.parquet",
+        "part": 0,
+        "rows": 3465,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "f9be6796fbdc7f52c83a711801a708397fa5882c7050dbaab2466af24f5a88d4",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-10",
+        "utc_hour": "2026-09-10T10"
+      },
+      {
+        "bytes": 168458,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_11.parquet",
+        "part": 0,
+        "rows": 3438,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "fa980630f1a3eecd53f405f3f2586640cf9a2e71150afcf98d1f49699ad68294",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-10",
+        "utc_hour": "2026-09-10T11"
+      },
+      {
+        "bytes": 173585,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_12.parquet",
+        "part": 0,
+        "rows": 3462,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "db6a1d2c7b816046ec62b50961a52426af3e634e04b22764412eae4cb9da9551",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-10",
+        "utc_hour": "2026-09-10T12"
+      },
+      {
+        "bytes": 171908,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_13.parquet",
+        "part": 0,
+        "rows": 3419,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "56bac4b53782ffa30a348dbf86df95de0a7ab21614b5ab75de61a1158698c340",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-10",
+        "utc_hour": "2026-09-10T13"
+      },
+      {
+        "bytes": 172024,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_14.parquet",
+        "part": 0,
+        "rows": 3453,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "b6303525e1946c0c9fd705411e768695c4537895b98c0911746f09a5322e7671",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-10",
+        "utc_hour": "2026-09-10T14"
+      },
+      {
+        "bytes": 171159,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_15.parquet",
+        "part": 0,
+        "rows": 3449,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "6594a95426c1a8e77b009a5db4c3a58c8230818b195dccdaa3670a9db263148c",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-10",
+        "utc_hour": "2026-09-10T15"
+      },
+      {
+        "bytes": 172182,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_16.parquet",
+        "part": 0,
+        "rows": 3451,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "c4c3497b626b25b21cccacdd2dfe195387edf68612a043b2405097b42b27cfcc",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-10",
+        "utc_hour": "2026-09-10T16"
+      },
+      {
+        "bytes": 156649,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_17.parquet",
+        "part": 0,
+        "rows": 3161,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "747867fe160e4ec2910b506c2f3d7c0a25fbec5ed3f4d87e31958cbf5be71d42",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-10",
+        "utc_hour": "2026-09-10T17"
+      },
+      {
+        "bytes": 171053,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_18.parquet",
+        "part": 0,
+        "rows": 3478,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "79418c29994a28557ad48e593dd44a9c3cce1dd09ba5cb0dfe1aa86d74d7a9c5",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-10",
+        "utc_hour": "2026-09-10T18"
+      },
+      {
+        "bytes": 171348,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_19.parquet",
+        "part": 0,
+        "rows": 3486,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "2ef5ebd5fdfcbdee97572317c4b742076d5c2f01d048ae48d89f060f7f5c2563",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-10",
+        "utc_hour": "2026-09-10T19"
+      },
+      {
+        "bytes": 169606,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_20.parquet",
+        "part": 0,
+        "rows": 3489,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "1dd9d9a7e733138f8f1e05b495cfa69d30afb661a0c90ea4ff9e8591668ab35a",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-10",
+        "utc_hour": "2026-09-10T20"
+      },
+      {
+        "bytes": 166868,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_21.parquet",
+        "part": 0,
+        "rows": 3475,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "953ac2bc4047beecdff9c6ea088a58dde9a1de3064dbc82711a3fa16f650864e",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-10",
+        "utc_hour": "2026-09-10T21"
+      },
+      {
+        "bytes": 157295,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_22.parquet",
+        "part": 0,
+        "rows": 3205,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "f43c3dd16bb7211662f3ab367661c6d769751bd0d88e87dbe206bec1f6c43776",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-10",
+        "utc_hour": "2026-09-10T22"
+      },
+      {
+        "bytes": 174364,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_23.parquet",
+        "part": 0,
+        "rows": 3528,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "b8ec49e0f52843b7cf8c3b3802f7e3ff8acb0d440863e6d0e34c6b7d6d293c1b",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-10",
+        "utc_hour": "2026-09-10T23"
+      },
+      {
+        "bytes": 158515,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_00.parquet",
+        "part": 0,
+        "rows": 3213,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "271d8f4065faa00d30366cffc8736998b197e7ef36cc08cae2eebedeca7a8a39",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-11",
+        "utc_hour": "2026-09-11T00"
+      },
+      {
+        "bytes": 172413,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_01.parquet",
+        "part": 0,
+        "rows": 3514,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "3b527fcbb366b7f100534b50a255e5d2cb9583862db182fd888f1d3635da4826",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-11",
+        "utc_hour": "2026-09-11T01"
+      },
+      {
+        "bytes": 82409,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_02-part-1.parquet",
+        "part": 1,
+        "rows": 1633,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "f1be23ff75f3d239cbd692aa1a0a75450ddf6835e3df054a86a7be0ea09d689f",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-11",
+        "utc_hour": "2026-09-11T02"
+      },
+      {
+        "bytes": 25684,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_02-part-2.parquet",
+        "part": 2,
+        "rows": 410,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "4d648bbc9232bc9b259758b6f299c881034ee406c7bbca68d305d4bb42fa0a29",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-11",
+        "utc_hour": "2026-09-11T02"
+      },
+      {
+        "bytes": 44734,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_02.parquet",
+        "part": 0,
+        "rows": 798,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "6e3b58ded320dc91f8b4db62ebd097ceebe4607165076330723c19ed2b33f689",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-11",
+        "utc_hour": "2026-09-11T02"
+      },
+      {
+        "bytes": 169577,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_03.parquet",
+        "part": 0,
+        "rows": 3508,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "651f2d39d251c2d11b15a7cb48712d48f7add3729c088d02da09e0da28b6be90",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-11",
+        "utc_hour": "2026-09-11T03"
+      },
+      {
+        "bytes": 166403,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_04.parquet",
+        "part": 0,
+        "rows": 3515,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "ef942815f2dadac0a87092ff7383d6de5064535134ea72e76eb37ac7debe7057",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-11",
+        "utc_hour": "2026-09-11T04"
+      },
+      {
+        "bytes": 165906,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_05.parquet",
+        "part": 0,
+        "rows": 3511,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "93f451e175a82051871b647793986a2d9abf3dd176d923e2a5680fa44f1d29fe",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-11",
+        "utc_hour": "2026-09-11T05"
+      },
+      {
+        "bytes": 26450,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_06-part-1.parquet",
+        "part": 1,
+        "rows": 439,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "78ee9992692f2841d1d9c038be8e0836777e798340a58909e0bcb80776572807",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-11",
+        "utc_hour": "2026-09-11T06"
+      },
+      {
+        "bytes": 132247,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_06.parquet",
+        "part": 0,
+        "rows": 2723,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "ba9d84689a4761e4abef7f6fcaec09fda551ad25272e11f331644af0e5c0c72c",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-11",
+        "utc_hour": "2026-09-11T06"
+      },
+      {
+        "bytes": 169580,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_07.parquet",
+        "part": 0,
+        "rows": 3525,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "205eeb756ba3244cc813bc5254ff80a17797abfb7485726887cf512c07f3d0f7",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-11",
+        "utc_hour": "2026-09-11T07"
+      },
+      {
+        "bytes": 169218,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_08.parquet",
+        "part": 0,
+        "rows": 3516,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "9b4dde2e54b0b38e0251892feeadfa53e1e172f89033e81b17800ea231a0bbb6",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-11",
+        "utc_hour": "2026-09-11T08"
+      },
+      {
+        "bytes": 169813,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_09.parquet",
+        "part": 0,
+        "rows": 3512,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "8958ab4ac7e0aa0ed4c48711cb68582b5d9279b45d67a0975f13146b4b5c3305",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-11",
+        "utc_hour": "2026-09-11T09"
+      },
+      {
+        "bytes": 170861,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_10.parquet",
+        "part": 0,
+        "rows": 3516,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "4a2886892b8c3ddddfe8daed98085301117b27aeed720ad564171f6d9176385d",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-11",
+        "utc_hour": "2026-09-11T10"
+      },
+      {
+        "bytes": 172071,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_11.parquet",
+        "part": 0,
+        "rows": 3517,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "e3d0439e4be9cd6660f46aa6e15aebd6a8c18724ee71bdba150d3eb77649f77e",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-11",
+        "utc_hour": "2026-09-11T11"
+      },
+      {
+        "bytes": 178021,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_12.parquet",
+        "part": 0,
+        "rows": 3532,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "47f64828a22d70d10237da73e5894bf78c90a605bd780af3642653a2021d9eb2",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-11",
+        "utc_hour": "2026-09-11T12"
+      },
+      {
+        "bytes": 175991,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_13.parquet",
+        "part": 0,
+        "rows": 3484,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "69d67c62e965283df5b0265743702aec0723e8b7fdb80bdbf30117ea03bbbded",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-11",
+        "utc_hour": "2026-09-11T13"
+      },
+      {
+        "bytes": 163206,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_14.parquet",
+        "part": 0,
+        "rows": 3220,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "128773edf546c5b3139c3fdc66658a9919a0dd7811703b2ed472ed87351a4f47",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-11",
+        "utc_hour": "2026-09-11T14"
+      },
+      {
+        "bytes": 176676,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_15.parquet",
+        "part": 0,
+        "rows": 3513,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "91779aa4373b0ef1f537ee58312517739576e247b39aa7c96a4e8c51eb2d37f9",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-11",
+        "utc_hour": "2026-09-11T15"
+      },
+      {
+        "bytes": 175747,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_16.parquet",
+        "part": 0,
+        "rows": 3504,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "b12d14980665791ee689f4798607d007d4663f37462dc72f9f28fffecdd6a97a",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-11",
+        "utc_hour": "2026-09-11T16"
+      },
+      {
+        "bytes": 173118,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_17.parquet",
+        "part": 0,
+        "rows": 3510,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "3b0320d0b2f29b74e1b97d204594ff5d9ebbccaa09038eaa0af4e18c9e4f0917",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-11",
+        "utc_hour": "2026-09-11T17"
+      },
+      {
+        "bytes": 175498,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_18.parquet",
+        "part": 0,
+        "rows": 3531,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "b6ef82f7a21a7255de9787d6d4d7b77690176a501b6464d0ce09982d3b787085",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-11",
+        "utc_hour": "2026-09-11T18"
+      },
+      {
+        "bytes": 172500,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_19.parquet",
+        "part": 0,
+        "rows": 3502,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "df448a63542c3d991600f163e0cf61a2930f712404f16e4efe63b6300d1520e7",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-11",
+        "utc_hour": "2026-09-11T19"
+      },
+      {
+        "bytes": 171767,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_20.parquet",
+        "part": 0,
+        "rows": 3508,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "cb80808d0f0184045d9b6373bed9d04acd5764998c027d019470d6ae59fc4ca2",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-11",
+        "utc_hour": "2026-09-11T20"
+      },
+      {
+        "bytes": 170411,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_21.parquet",
+        "part": 0,
+        "rows": 3525,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "7926da2bf0940fe0aebda98642436dfa8c27a8be507f577c77e73f2854bd6785",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-11",
+        "utc_hour": "2026-09-11T21"
+      },
+      {
+        "bytes": 172870,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_22.parquet",
+        "part": 0,
+        "rows": 3530,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "c3cce62b9f6e10356b9c1d94a21d5178c93dca8348c63ed757ef1b112ef23d72",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-11",
+        "utc_hour": "2026-09-11T22"
+      },
+      {
+        "bytes": 154337,
+        "manifest_relative_path": "source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_23.parquet",
+        "part": 0,
+        "rows": 3235,
+        "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+        "sha256": "f14bd20314dbea83037043ccae465104ea29147716544fa35ae99ceb8f7c2157",
+        "source_kind": "polymarket_rtds_chainlink_btc_usd",
+        "utc_day": "2026-09-11",
+        "utc_hour": "2026-09-11T23"
+      }
+    ],
+    "manifest_sha256": [
+      "93a70f4775bdb3d52bf7de73d58caaa5ccbf2f2d7f6a8e2f00e09c092e1f1918",
+      "a940cc15d039efd2a2555f8da30958ea6b381cc24574477dbd8c93d33a240a60",
+      "4cb535f1baa9a15d4bb1115020309c5c09edec119e49ef35a0b0400a28c2c975"
+    ],
+    "received_end_utc_ms": 1789171200000,
+    "received_start_utc_ms": 1788912000000
+  },
+  "effective_config_logical_paths": {
+    "recording": {
+      "files": [
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 161832,
+          "rows": 3307,
+          "sha256": "ed52d58de7243b70cb202a753119d306a96875762196856e5687bff47e7e248a",
+          "path": "datasets/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_00.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 163855,
+          "rows": 3342,
+          "sha256": "cce3bcec60966375080b1c29c48bf962bb4c1940a43fedb49587c87edfc63477",
+          "path": "datasets/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_01.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 160878,
+          "rows": 3341,
+          "sha256": "ef9ee10d33bccba00fbb3a01d551b0ff3d5cd3162541df9382700c92a51f6747",
+          "path": "datasets/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_02.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 158858,
+          "rows": 3288,
+          "sha256": "943489e5c07375b7f2ae51ae75efb3f8b75d6885c9e77b4fee40a71aaa8a633a",
+          "path": "datasets/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_03.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 163456,
+          "rows": 3324,
+          "sha256": "2adc9e52d460c24ed63236e80e7ad29b504c406edba5fa60e389c390912863f0",
+          "path": "datasets/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_04.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 164157,
+          "rows": 3346,
+          "sha256": "c565ea4523f3bc96c1b5088ff44e556c9600e1c9685894c187927573076612b4",
+          "path": "datasets/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_05.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 150431,
+          "rows": 3063,
+          "sha256": "90daf64ec4f80fff797e9a87912b887558277d766d10769a6767505d3d315109",
+          "path": "datasets/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_06.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 159259,
+          "rows": 3308,
+          "sha256": "b1da18fc48bf3b50e874ede0f597fede183f233ae2ee14bce18bfd566e9b1c61",
+          "path": "datasets/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_07.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 161624,
+          "rows": 3298,
+          "sha256": "22f88769d3a7face9392af95bc08a92e9d07ddfd32eaf3ca9dd1b7539b120bdb",
+          "path": "datasets/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_08.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 160017,
+          "rows": 3284,
+          "sha256": "fe64c19cfd733560412d0ea21111e9fb414b614098e4d4ae7f3ea66646e4dc39",
+          "path": "datasets/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_09.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 147620,
+          "rows": 2983,
+          "sha256": "085d9084e06ad25e160c5100f31e5cddb087c1a4a0a89a82b22899eca1e0d59b",
+          "path": "datasets/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_10.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 162667,
+          "rows": 3308,
+          "sha256": "e59a6ee50dde3c643d9dabb0bc49867ec84087a64592211d2d8e4c8c398c2043",
+          "path": "datasets/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_11.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 160924,
+          "rows": 3262,
+          "sha256": "5360fc140c19b4b746370eb3e3eabf85797362f4bbf6a52439f04a67b6b556ca",
+          "path": "datasets/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_12.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 148815,
+          "rows": 2978,
+          "sha256": "57cab42934068aa2588b477f0b09313e19598404f71e41d5ec1b5da0745d0b32",
+          "path": "datasets/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_13.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 165818,
+          "rows": 3284,
+          "sha256": "b59cc7577f59920d5aa9f8f83dc9c362fd6fbd89d65410a781761f79c775894e",
+          "path": "datasets/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_14.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 148592,
+          "rows": 2919,
+          "sha256": "0c33bf777cc35c34f59672c7f9a20fb559d765953de1ef29fd769783ca9221ec",
+          "path": "datasets/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_15.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 154938,
+          "rows": 3091,
+          "sha256": "c85ed981e34704a2e4e8604c625bafadedc37c5404c997a431b36a96b32e1942",
+          "path": "datasets/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_16.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 152798,
+          "rows": 3081,
+          "sha256": "fa2362f75a0c40030cebb8096d9d14ac3c9b52b3156e67c6c2eec8e473d2eb45",
+          "path": "datasets/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_17.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 152252,
+          "rows": 3100,
+          "sha256": "d8f98fffcf253cf07c2e2c48c74741fb03c9b147bcd60d348d166073d5dd6579",
+          "path": "datasets/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_18.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 154752,
+          "rows": 3108,
+          "sha256": "271fb01d3e54d5bc5c9c8f63e096a8bc502dcaa848515470f261c8ade29746da",
+          "path": "datasets/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_19.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 156068,
+          "rows": 3155,
+          "sha256": "23d2bb0edfb74534e93c40d6284ccd595c7899247ae79f63b938cf18f11354e4",
+          "path": "datasets/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_20.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 159614,
+          "rows": 3239,
+          "sha256": "cac7c1d039fb6770743cf3980d1f3ec5ad5ea70db1919411d5efe9dcc801d20b",
+          "path": "datasets/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_21.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 160665,
+          "rows": 3236,
+          "sha256": "6a414f3d62e3379a0c54079b7f7485f07825109969da42f8702a23c51d5c52e1",
+          "path": "datasets/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_22.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 159207,
+          "rows": 3260,
+          "sha256": "22f129b4bb2a952604a9a5833016e0e2709509d9fcf4a92aa7009a38bf5e5547",
+          "path": "datasets/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_23.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 57546,
+          "rows": 1097,
+          "sha256": "334eaa7efbb35f089418ee93421ba4a9b785812339b8f5472267bc9e86417e15",
+          "path": "datasets/2026-09-10/typed_raw/utc_day=2026-09-10/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_00-part-1.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 12268,
+          "rows": 106,
+          "sha256": "81b3a48ad5bf660eefa49dd95d314650b3383713c6026c68d473653e1e26158f",
+          "path": "datasets/2026-09-10/typed_raw/utc_day=2026-09-10/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_00-part-2.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 74137,
+          "rows": 1453,
+          "sha256": "92ddc983a4ae28f60480c0c79f9acaa2e6cc6001b90be6c8c443ef50c6a3061c",
+          "path": "datasets/2026-09-10/typed_raw/utc_day=2026-09-10/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_00.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 144966,
+          "rows": 2908,
+          "sha256": "7f7879c05ffa45e33db971ab4ef518d6e677032eedd66d8496519eee909d9df1",
+          "path": "datasets/2026-09-10/typed_raw/utc_day=2026-09-10/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_01-part-1.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 10505,
+          "rows": 63,
+          "sha256": "eb58898a537ffaa2bb263516376be279835bb8aeeb74a6227b5075ab4b9442db",
+          "path": "datasets/2026-09-10/typed_raw/utc_day=2026-09-10/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_01.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 148877,
+          "rows": 3016,
+          "sha256": "a8f123d848b4714df4d9c53aa63a02a73d7547347608860c35cd91cf440e8812",
+          "path": "datasets/2026-09-10/typed_raw/utc_day=2026-09-10/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_02.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 160354,
+          "rows": 3294,
+          "sha256": "72eb135f5baecf540099d564a5258ab6838482c3c5160e4a3440635efa6ab0c4",
+          "path": "datasets/2026-09-10/typed_raw/utc_day=2026-09-10/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_03.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 152191,
+          "rows": 3171,
+          "sha256": "e5bdf8e2563ec71decbeabece155468c3f96a94654bb7e703129a2e0cb5f428f",
+          "path": "datasets/2026-09-10/typed_raw/utc_day=2026-09-10/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_04.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 162934,
+          "rows": 3386,
+          "sha256": "4ec66551da42d575134febd7b49e7fc568db1214732991c2eb3347c8f46c8527",
+          "path": "datasets/2026-09-10/typed_raw/utc_day=2026-09-10/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_05.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 167753,
+          "rows": 3432,
+          "sha256": "065708c8fd802910a2074c8b3f01e4366a47fb495e09a41bc52c930c28cde5b7",
+          "path": "datasets/2026-09-10/typed_raw/utc_day=2026-09-10/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_06.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 164007,
+          "rows": 3427,
+          "sha256": "958482042e157a0d8444849d58389afa402af2df5cf23598d9b162538a92ed34",
+          "path": "datasets/2026-09-10/typed_raw/utc_day=2026-09-10/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_07.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 165626,
+          "rows": 3449,
+          "sha256": "09f59a69a94aeee7796df739ce8cf25682f7b8f543ea567ef443a950680c980f",
+          "path": "datasets/2026-09-10/typed_raw/utc_day=2026-09-10/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_08.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 170218,
+          "rows": 3481,
+          "sha256": "77a156572aebf7c1dc936a34054633b605c7e39dccdfc65be9e3d799f85cdf0b",
+          "path": "datasets/2026-09-10/typed_raw/utc_day=2026-09-10/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_09.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 168644,
+          "rows": 3465,
+          "sha256": "f9be6796fbdc7f52c83a711801a708397fa5882c7050dbaab2466af24f5a88d4",
+          "path": "datasets/2026-09-10/typed_raw/utc_day=2026-09-10/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_10.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 168458,
+          "rows": 3438,
+          "sha256": "fa980630f1a3eecd53f405f3f2586640cf9a2e71150afcf98d1f49699ad68294",
+          "path": "datasets/2026-09-10/typed_raw/utc_day=2026-09-10/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_11.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 173585,
+          "rows": 3462,
+          "sha256": "db6a1d2c7b816046ec62b50961a52426af3e634e04b22764412eae4cb9da9551",
+          "path": "datasets/2026-09-10/typed_raw/utc_day=2026-09-10/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_12.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 171908,
+          "rows": 3419,
+          "sha256": "56bac4b53782ffa30a348dbf86df95de0a7ab21614b5ab75de61a1158698c340",
+          "path": "datasets/2026-09-10/typed_raw/utc_day=2026-09-10/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_13.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 172024,
+          "rows": 3453,
+          "sha256": "b6303525e1946c0c9fd705411e768695c4537895b98c0911746f09a5322e7671",
+          "path": "datasets/2026-09-10/typed_raw/utc_day=2026-09-10/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_14.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 171159,
+          "rows": 3449,
+          "sha256": "6594a95426c1a8e77b009a5db4c3a58c8230818b195dccdaa3670a9db263148c",
+          "path": "datasets/2026-09-10/typed_raw/utc_day=2026-09-10/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_15.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 172182,
+          "rows": 3451,
+          "sha256": "c4c3497b626b25b21cccacdd2dfe195387edf68612a043b2405097b42b27cfcc",
+          "path": "datasets/2026-09-10/typed_raw/utc_day=2026-09-10/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_16.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 156649,
+          "rows": 3161,
+          "sha256": "747867fe160e4ec2910b506c2f3d7c0a25fbec5ed3f4d87e31958cbf5be71d42",
+          "path": "datasets/2026-09-10/typed_raw/utc_day=2026-09-10/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_17.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 171053,
+          "rows": 3478,
+          "sha256": "79418c29994a28557ad48e593dd44a9c3cce1dd09ba5cb0dfe1aa86d74d7a9c5",
+          "path": "datasets/2026-09-10/typed_raw/utc_day=2026-09-10/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_18.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 171348,
+          "rows": 3486,
+          "sha256": "2ef5ebd5fdfcbdee97572317c4b742076d5c2f01d048ae48d89f060f7f5c2563",
+          "path": "datasets/2026-09-10/typed_raw/utc_day=2026-09-10/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_19.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 169606,
+          "rows": 3489,
+          "sha256": "1dd9d9a7e733138f8f1e05b495cfa69d30afb661a0c90ea4ff9e8591668ab35a",
+          "path": "datasets/2026-09-10/typed_raw/utc_day=2026-09-10/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_20.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 166868,
+          "rows": 3475,
+          "sha256": "953ac2bc4047beecdff9c6ea088a58dde9a1de3064dbc82711a3fa16f650864e",
+          "path": "datasets/2026-09-10/typed_raw/utc_day=2026-09-10/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_21.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 157295,
+          "rows": 3205,
+          "sha256": "f43c3dd16bb7211662f3ab367661c6d769751bd0d88e87dbe206bec1f6c43776",
+          "path": "datasets/2026-09-10/typed_raw/utc_day=2026-09-10/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_22.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 174364,
+          "rows": 3528,
+          "sha256": "b8ec49e0f52843b7cf8c3b3802f7e3ff8acb0d440863e6d0e34c6b7d6d293c1b",
+          "path": "datasets/2026-09-10/typed_raw/utc_day=2026-09-10/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_23.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 158515,
+          "rows": 3213,
+          "sha256": "271d8f4065faa00d30366cffc8736998b197e7ef36cc08cae2eebedeca7a8a39",
+          "path": "datasets/2026-09-11/typed_raw/utc_day=2026-09-11/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_00.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 172413,
+          "rows": 3514,
+          "sha256": "3b527fcbb366b7f100534b50a255e5d2cb9583862db182fd888f1d3635da4826",
+          "path": "datasets/2026-09-11/typed_raw/utc_day=2026-09-11/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_01.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 82409,
+          "rows": 1633,
+          "sha256": "f1be23ff75f3d239cbd692aa1a0a75450ddf6835e3df054a86a7be0ea09d689f",
+          "path": "datasets/2026-09-11/typed_raw/utc_day=2026-09-11/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_02-part-1.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 25684,
+          "rows": 410,
+          "sha256": "4d648bbc9232bc9b259758b6f299c881034ee406c7bbca68d305d4bb42fa0a29",
+          "path": "datasets/2026-09-11/typed_raw/utc_day=2026-09-11/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_02-part-2.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 44734,
+          "rows": 798,
+          "sha256": "6e3b58ded320dc91f8b4db62ebd097ceebe4607165076330723c19ed2b33f689",
+          "path": "datasets/2026-09-11/typed_raw/utc_day=2026-09-11/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_02.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 169577,
+          "rows": 3508,
+          "sha256": "651f2d39d251c2d11b15a7cb48712d48f7add3729c088d02da09e0da28b6be90",
+          "path": "datasets/2026-09-11/typed_raw/utc_day=2026-09-11/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_03.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 166403,
+          "rows": 3515,
+          "sha256": "ef942815f2dadac0a87092ff7383d6de5064535134ea72e76eb37ac7debe7057",
+          "path": "datasets/2026-09-11/typed_raw/utc_day=2026-09-11/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_04.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 165906,
+          "rows": 3511,
+          "sha256": "93f451e175a82051871b647793986a2d9abf3dd176d923e2a5680fa44f1d29fe",
+          "path": "datasets/2026-09-11/typed_raw/utc_day=2026-09-11/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_05.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 26450,
+          "rows": 439,
+          "sha256": "78ee9992692f2841d1d9c038be8e0836777e798340a58909e0bcb80776572807",
+          "path": "datasets/2026-09-11/typed_raw/utc_day=2026-09-11/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_06-part-1.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 132247,
+          "rows": 2723,
+          "sha256": "ba9d84689a4761e4abef7f6fcaec09fda551ad25272e11f331644af0e5c0c72c",
+          "path": "datasets/2026-09-11/typed_raw/utc_day=2026-09-11/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_06.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 169580,
+          "rows": 3525,
+          "sha256": "205eeb756ba3244cc813bc5254ff80a17797abfb7485726887cf512c07f3d0f7",
+          "path": "datasets/2026-09-11/typed_raw/utc_day=2026-09-11/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_07.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 169218,
+          "rows": 3516,
+          "sha256": "9b4dde2e54b0b38e0251892feeadfa53e1e172f89033e81b17800ea231a0bbb6",
+          "path": "datasets/2026-09-11/typed_raw/utc_day=2026-09-11/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_08.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 169813,
+          "rows": 3512,
+          "sha256": "8958ab4ac7e0aa0ed4c48711cb68582b5d9279b45d67a0975f13146b4b5c3305",
+          "path": "datasets/2026-09-11/typed_raw/utc_day=2026-09-11/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_09.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 170861,
+          "rows": 3516,
+          "sha256": "4a2886892b8c3ddddfe8daed98085301117b27aeed720ad564171f6d9176385d",
+          "path": "datasets/2026-09-11/typed_raw/utc_day=2026-09-11/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_10.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 172071,
+          "rows": 3517,
+          "sha256": "e3d0439e4be9cd6660f46aa6e15aebd6a8c18724ee71bdba150d3eb77649f77e",
+          "path": "datasets/2026-09-11/typed_raw/utc_day=2026-09-11/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_11.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 178021,
+          "rows": 3532,
+          "sha256": "47f64828a22d70d10237da73e5894bf78c90a605bd780af3642653a2021d9eb2",
+          "path": "datasets/2026-09-11/typed_raw/utc_day=2026-09-11/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_12.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 175991,
+          "rows": 3484,
+          "sha256": "69d67c62e965283df5b0265743702aec0723e8b7fdb80bdbf30117ea03bbbded",
+          "path": "datasets/2026-09-11/typed_raw/utc_day=2026-09-11/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_13.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 163206,
+          "rows": 3220,
+          "sha256": "128773edf546c5b3139c3fdc66658a9919a0dd7811703b2ed472ed87351a4f47",
+          "path": "datasets/2026-09-11/typed_raw/utc_day=2026-09-11/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_14.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 176676,
+          "rows": 3513,
+          "sha256": "91779aa4373b0ef1f537ee58312517739576e247b39aa7c96a4e8c51eb2d37f9",
+          "path": "datasets/2026-09-11/typed_raw/utc_day=2026-09-11/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_15.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 175747,
+          "rows": 3504,
+          "sha256": "b12d14980665791ee689f4798607d007d4663f37462dc72f9f28fffecdd6a97a",
+          "path": "datasets/2026-09-11/typed_raw/utc_day=2026-09-11/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_16.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 173118,
+          "rows": 3510,
+          "sha256": "3b0320d0b2f29b74e1b97d204594ff5d9ebbccaa09038eaa0af4e18c9e4f0917",
+          "path": "datasets/2026-09-11/typed_raw/utc_day=2026-09-11/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_17.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 175498,
+          "rows": 3531,
+          "sha256": "b6ef82f7a21a7255de9787d6d4d7b77690176a501b6464d0ce09982d3b787085",
+          "path": "datasets/2026-09-11/typed_raw/utc_day=2026-09-11/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_18.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 172500,
+          "rows": 3502,
+          "sha256": "df448a63542c3d991600f163e0cf61a2930f712404f16e4efe63b6300d1520e7",
+          "path": "datasets/2026-09-11/typed_raw/utc_day=2026-09-11/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_19.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 171767,
+          "rows": 3508,
+          "sha256": "cb80808d0f0184045d9b6373bed9d04acd5764998c027d019470d6ae59fc4ca2",
+          "path": "datasets/2026-09-11/typed_raw/utc_day=2026-09-11/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_20.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 170411,
+          "rows": 3525,
+          "sha256": "7926da2bf0940fe0aebda98642436dfa8c27a8be507f577c77e73f2854bd6785",
+          "path": "datasets/2026-09-11/typed_raw/utc_day=2026-09-11/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_21.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 172870,
+          "rows": 3530,
+          "sha256": "c3cce62b9f6e10356b9c1d94a21d5178c93dca8348c63ed757ef1b112ef23d72",
+          "path": "datasets/2026-09-11/typed_raw/utc_day=2026-09-11/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_22.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 154337,
+          "rows": 3235,
+          "sha256": "f14bd20314dbea83037043ccae465104ea29147716544fa35ae99ceb8f7c2157",
+          "path": "datasets/2026-09-11/typed_raw/utc_day=2026-09-11/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_23.parquet"
+        }
+      ],
+      "received_start_utc_ms": 1788912000000,
+      "received_end_utc_ms": 1789171200000,
+      "work_root": "artifacts/materials",
+      "header": {
+        "input_stream_id": "complementary-pair-chainlink-initial-fit-20260909-20260912",
+        "canonical_rule_version": "canonical-reduction-v1",
+        "observation_version": "market_business_observation_v1",
+        "ordering_version": "historical-source-head-v2",
+        "input_scope": "selected-complete-rtds-chainlink-source/UTC-[2026-09-09,2026-09-12)",
+        "max_pending_ws_terminals": 1024,
+        "initial_state": "Empty"
+      },
+      "canonical": {
+        "decode_batch_rows": 1024,
+        "max_decode_batch_bytes": 67108864,
+        "max_temporary_row_bytes": 16777216,
+        "max_epoch_count_per_source": 1024,
+        "max_pending_ws_terminals": 1024,
+        "max_retained_reducer_entries": 1000000,
+        "canonical_rule_version": "canonical-reduction-v1",
+        "sort": {
+          "max_run_rows": 32768,
+          "max_run_bytes": 67108864,
+          "max_temp_run_files": 128,
+          "merge_fan_in": 8,
+          "max_open_files": 16,
+          "batch_rows": 1024,
+          "max_temp_bytes": 8589934592
+        }
+      },
+      "recording": {
+        "max_artifact_payload_bytes": 16777216,
+        "max_capture_output_bytes": 17179869184,
+        "max_candidate_directory_bytes": 34359738368,
+        "max_observation_l2_levels": 10000,
+        "sort": {
+          "max_run_rows": 32768,
+          "max_run_bytes": 67108864,
+          "max_temp_run_files": 128,
+          "merge_fan_in": 8,
+          "max_open_files": 16,
+          "batch_rows": 1024,
+          "max_temp_bytes": 8589934592
+        }
+      }
+    },
+    "selected_source_identity_sha256": "b9988ac33532477da648dae6ccd71b2d7aef306e69dd261c84b0b3aa84a71162",
+    "selection_evidence": [
+      {
+        "utc_day": "2026-09-09",
+        "manifest_sha256": "93a70f4775bdb3d52bf7de73d58caaa5ccbf2f2d7f6a8e2f00e09c092e1f1918",
+        "selected_files": 24,
+        "selected_bytes": 3789097,
+        "selected_rows": 76905,
+        "gaps": [],
+        "source_counters": {
+          "polymarket_rtds_chainlink_btc_usd": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 76905
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1788912002228,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1788998399737,
+            "reconnect_events": 11,
+            "rows": 76905,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 76905
+          }
+        },
+        "collection_day_coverage": {
+          "ended_utc_ms": 1788998400000,
+          "first_started_utc_ms": 1788912000000,
+          "last_started_utc_ms": 1788912000000,
+          "reactivated_within_day": false,
+          "schema_version": "data_collect_collection_day_coverage_v1",
+          "state": "ended_known"
+        }
+      },
+      {
+        "utc_day": "2026-09-10",
+        "manifest_sha256": "a940cc15d039efd2a2555f8da30958ea6b381cc24574477dbd8c93d33a240a60",
+        "selected_files": 27,
+        "selected_bytes": 3956525,
+        "selected_rows": 80242,
+        "gaps": [
+          "polymarket_raw_day_ticket_failed:raw event arrived after same-day intake close: producer=polymarket event=2026-09-10 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-10\", generation: 1, close_id: 1 }, ended_utc_ms: 1789001546388, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "polymarket_raw_day_ticket_failed:raw event arrived after same-day intake close: producer=polymarket event=2026-09-10 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-10\", generation: 1, close_id: 1 }, ended_utc_ms: 1789002065576, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "polymarket_raw_day_ticket_failed:raw event arrived after same-day intake close: producer=polymarket event=2026-09-10 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-10\", generation: 3, close_id: 3 }, ended_utc_ms: 1789000002980, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "rtds_sdk_stream_fatal:parser error: Internal: RTDS typed message parse failed; rtds_parse_diagnostic=frame_bytes=103 sha256=351a37ce7abb5754a6e68af8c75a5439aabd1ac249aebc1aa979e959d0915507 top_level=object selected={message=\"Too Many Requests\",connectionId=\"gZ9SBs-0PWeIKEjTHA==\",requestId=\"DdTTsFT1LPEECzA=\"} fields=[\"connectionId\",\"message\",\"requestId\"]",
+          "rtds_sdk_stream_fatal:parser error: Internal: RTDS typed message parse failed; rtds_parse_diagnostic=frame_bytes=103 sha256=3528f43ecdcfccc4a608647ae720784f9c4a30f41ae5ef3c5dab62da87210317 top_level=object selected={message=\"Too Many Requests\",connectionId=\"gZ9B2G8CMWeIKEi9uA==\",requestId=\"DdPiiGiGLPEEodQ=\"} fields=[\"connectionId\",\"message\",\"requestId\"]",
+          "rtds_sdk_stream_fatal:parser error: Internal: RTDS typed message parse failed; rtds_parse_diagnostic=frame_bytes=103 sha256=52f18a015e4b8e6dfce1ada927b6cf9db57675d6e94e3234a3c3e3fd4dd7dc6b top_level=object selected={message=\"Too Many Requests\",connectionId=\"gZ9ZhM9pKWeIKEhN5A==\",requestId=\"DdUk0ExorPEEUZQ=\"} fields=[\"connectionId\",\"message\",\"requestId\"]",
+          "source_task_error:binance_aggtrade:raw event arrived after same-day intake close: producer=binance_aggtrade event=2026-09-10 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-10\", generation: 1, close_id: 1 }, ended_utc_ms: 1789002065576, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "source_task_error:binance_aggtrade:raw event arrived after same-day intake close: producer=binance_aggtrade event=2026-09-10 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-10\", generation: 3, close_id: 3 }, ended_utc_ms: 1789000002980, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "source_task_error:binance_depth_update:raw event arrived after same-day intake close: producer=binance_depth event=2026-09-10 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-10\", generation: 1, close_id: 1 }, ended_utc_ms: 1789001546388, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "source_task_error:binance_depth_update:raw event arrived after same-day intake close: producer=binance_depth event=2026-09-10 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-10\", generation: 1, close_id: 1 }, ended_utc_ms: 1789002065576, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "source_task_error:binance_depth_update:raw event arrived after same-day intake close: producer=binance_depth event=2026-09-10 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-10\", generation: 3, close_id: 3 }, ended_utc_ms: 1789000002980, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "source_task_error:polymarket_market:polymarket_raw_day_ticket_failed:raw event arrived after same-day intake close: producer=polymarket event=2026-09-10 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-10\", generation: 1, close_id: 1 }, ended_utc_ms: 1789001546388, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "source_task_error:polymarket_market:polymarket_raw_day_ticket_failed:raw event arrived after same-day intake close: producer=polymarket event=2026-09-10 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-10\", generation: 1, close_id: 1 }, ended_utc_ms: 1789002065576, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "source_task_error:polymarket_market:polymarket_raw_day_ticket_failed:raw event arrived after same-day intake close: producer=polymarket event=2026-09-10 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-10\", generation: 3, close_id: 3 }, ended_utc_ms: 1789000002980, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "source_task_error:polymarket_rtds_chainlink_btc_usd:parser error: Internal: RTDS typed message parse failed; rtds_parse_diagnostic=frame_bytes=103 sha256=351a37ce7abb5754a6e68af8c75a5439aabd1ac249aebc1aa979e959d0915507 top_level=object selected={message=\"Too Many Requests\",connectionId=\"gZ9SBs-0PWeIKEjTHA==\",requestId=\"DdTTsFT1LPEECzA=\"} fields=[\"connectionId\",\"message\",\"requestId\"]",
+          "source_task_error:polymarket_rtds_chainlink_btc_usd:parser error: Internal: RTDS typed message parse failed; rtds_parse_diagnostic=frame_bytes=103 sha256=3528f43ecdcfccc4a608647ae720784f9c4a30f41ae5ef3c5dab62da87210317 top_level=object selected={message=\"Too Many Requests\",connectionId=\"gZ9B2G8CMWeIKEi9uA==\",requestId=\"DdPiiGiGLPEEodQ=\"} fields=[\"connectionId\",\"message\",\"requestId\"]",
+          "source_task_error:polymarket_rtds_chainlink_btc_usd:parser error: Internal: RTDS typed message parse failed; rtds_parse_diagnostic=frame_bytes=103 sha256=52f18a015e4b8e6dfce1ada927b6cf9db57675d6e94e3234a3c3e3fd4dd7dc6b top_level=object selected={message=\"Too Many Requests\",connectionId=\"gZ9ZhM9pKWeIKEhN5A==\",requestId=\"DdUk0ExorPEEUZQ=\"} fields=[\"connectionId\",\"message\",\"requestId\"]"
+        ],
+        "source_counters": {
+          "polymarket_rtds_chainlink_btc_usd": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 80242
+            },
+            "files": 27,
+            "first_recv_time_utc_ms": 1788998403377,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789084799271,
+            "reconnect_events": 10,
+            "rows": 80242,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 80242
+          }
+        },
+        "collection_day_coverage": {
+          "ended_utc_ms": 1789084800000,
+          "first_started_utc_ms": 1788998400000,
+          "last_started_utc_ms": 1789002405436,
+          "reactivated_within_day": true,
+          "schema_version": "data_collect_collection_day_coverage_v1",
+          "state": "ended_known"
+        }
+      },
+      {
+        "utc_day": "2026-09-11",
+        "manifest_sha256": "4cb535f1baa9a15d4bb1115020309c5c09edec119e49ef35a0b0400a28c2c975",
+        "selected_files": 27,
+        "selected_bytes": 4056023,
+        "selected_rows": 82444,
+        "gaps": [
+          "polymarket_raw_day_ticket_failed:raw event arrived after same-day intake close: producer=polymarket event=2026-09-11 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-11\", generation: 1, close_id: 1 }, ended_utc_ms: 1789094841147, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "polymarket_raw_day_ticket_failed:raw event arrived after same-day intake close: producer=polymarket event=2026-09-11 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-11\", generation: 1, close_id: 1 }, ended_utc_ms: 1789109189674, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "polymarket_raw_day_ticket_failed:raw event arrived after same-day intake close: producer=polymarket event=2026-09-11 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-11\", generation: 2, close_id: 2 }, ended_utc_ms: 1789092823829, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "rtds_sdk_stream_fatal:parser error: Internal: RTDS typed message parse failed; rtds_parse_diagnostic=frame_bytes=103 sha256=0d328874a9d6ed134262b0984779781d6fa828e263ea9fbb6c940d10d1ddf4f1 top_level=object selected={message=\"Too Many Requests\",connectionId=\"gaD3TA9fUWeIKEiKXA==\",requestId=\"DgyJzGUdrPEEshw=\"} fields=[\"connectionId\",\"message\",\"requestId\"]",
+          "rtds_sdk_stream_fatal:parser error: Internal: RTDS typed message parse failed; rtds_parse_diagnostic=frame_bytes=103 sha256=98f3db0658a275279af9d25b0b62fbfc7632a3c21851df9e049003e09cc0a14f top_level=object selected={message=\"Too Many Requests\",connectionId=\"gaEXOQ_EYWeIKEiQMA==\",requestId=\"Dg3FAGImLPEEgtw=\"} fields=[\"connectionId\",\"message\",\"requestId\"]",
+          "rtds_sdk_stream_fatal:parser error: Internal: RTDS typed message parse failed; rtds_parse_diagnostic=frame_bytes=112 sha256=ca0c7f83f7b32974571f3247eb146e41efbc3882a9dcfd786fd10a8f242e583a top_level=object selected={message=\"Endpoint request timed out\",connectionId=\"gaFEPs9bAWeIKEhZUA==\",requestId=\"DhaGuH6ELPEESvA=\"} fields=[\"connectionId\",\"message\",\"requestId\"]",
+          "source_task_error:binance_depth_update:raw event arrived after same-day intake close: producer=binance_depth event=2026-09-11 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-11\", generation: 1, close_id: 1 }, ended_utc_ms: 1789094841147, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "source_task_error:binance_depth_update:raw event arrived after same-day intake close: producer=binance_depth event=2026-09-11 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-11\", generation: 1, close_id: 1 }, ended_utc_ms: 1789109189674, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "source_task_error:binance_depth_update:raw event arrived after same-day intake close: producer=binance_depth event=2026-09-11 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-11\", generation: 2, close_id: 2 }, ended_utc_ms: 1789092823829, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "source_task_error:polymarket_market:polymarket_raw_day_ticket_failed:raw event arrived after same-day intake close: producer=polymarket event=2026-09-11 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-11\", generation: 1, close_id: 1 }, ended_utc_ms: 1789094841147, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "source_task_error:polymarket_market:polymarket_raw_day_ticket_failed:raw event arrived after same-day intake close: producer=polymarket event=2026-09-11 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-11\", generation: 1, close_id: 1 }, ended_utc_ms: 1789109189674, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "source_task_error:polymarket_market:polymarket_raw_day_ticket_failed:raw event arrived after same-day intake close: producer=polymarket event=2026-09-11 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-11\", generation: 2, close_id: 2 }, ended_utc_ms: 1789092823829, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "source_task_error:polymarket_rtds_chainlink_btc_usd:parser error: Internal: RTDS typed message parse failed; rtds_parse_diagnostic=frame_bytes=103 sha256=0d328874a9d6ed134262b0984779781d6fa828e263ea9fbb6c940d10d1ddf4f1 top_level=object selected={message=\"Too Many Requests\",connectionId=\"gaD3TA9fUWeIKEiKXA==\",requestId=\"DgyJzGUdrPEEshw=\"} fields=[\"connectionId\",\"message\",\"requestId\"]",
+          "source_task_error:polymarket_rtds_chainlink_btc_usd:parser error: Internal: RTDS typed message parse failed; rtds_parse_diagnostic=frame_bytes=103 sha256=98f3db0658a275279af9d25b0b62fbfc7632a3c21851df9e049003e09cc0a14f top_level=object selected={message=\"Too Many Requests\",connectionId=\"gaEXOQ_EYWeIKEiQMA==\",requestId=\"Dg3FAGImLPEEgtw=\"} fields=[\"connectionId\",\"message\",\"requestId\"]",
+          "source_task_error:polymarket_rtds_chainlink_btc_usd:parser error: Internal: RTDS typed message parse failed; rtds_parse_diagnostic=frame_bytes=112 sha256=ca0c7f83f7b32974571f3247eb146e41efbc3882a9dcfd786fd10a8f242e583a top_level=object selected={message=\"Endpoint request timed out\",connectionId=\"gaFEPs9bAWeIKEhZUA==\",requestId=\"DhaGuH6ELPEESvA=\"} fields=[\"connectionId\",\"message\",\"requestId\"]"
+        ],
+        "source_counters": {
+          "polymarket_rtds_chainlink_btc_usd": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 82444
+            },
+            "files": 27,
+            "first_recv_time_utc_ms": 1789084804409,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789171198526,
+            "reconnect_events": 11,
+            "rows": 82444,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 82444
+          }
+        },
+        "collection_day_coverage": {
+          "ended_utc_ms": 1789171200000,
+          "first_started_utc_ms": 1789084800000,
+          "last_started_utc_ms": 1789109554379,
+          "reactivated_within_day": true,
+          "schema_version": "data_collect_collection_day_coverage_v1",
+          "state": "ended_known"
+        }
+      }
+    ],
+    "read_page_rows": 256,
+    "max_read_batch_bytes": 67108864,
+    "progress_interval_seconds": 30,
+    "purpose": "#185任务3首折完整Chainlink来源统计；独立选源材料，不是完整六源拟合或每市场sigma/正式参数/收益。"
+  },
+  "prepare_result": {
+    "batches_by_pass": [
+      0,
+      284,
+      284
+    ],
+    "closed_groups": 239591,
+    "completed_files_by_pass": [
+      0,
+      78,
+      78
+    ],
+    "inputs": 239592,
+    "observations": 0,
+    "physical_rows_by_pass": [
+      0,
+      239591,
+      239591
+    ],
+    "prefix": {
+      "input_stream_id": "complementary-pair-chainlink-initial-fit-20260909-20260912",
+      "next_canonical_position": 239591,
+      "next_group_position": 239591,
+      "next_input_position": 239592,
+      "next_observation_position": 0,
+      "next_public_index_position": 239591,
+      "normal_end": true,
+      "stable_storage_ref": "stable-00000000000000000000"
+    },
+    "selected_rows_by_pass": [
+      0,
+      239591,
+      239591
+    ],
+    "sort_metrics": {
+      "0": {
+        "initial_runs": 0,
+        "input_rows": 0,
+        "merge_passes": 0,
+        "output_rows": 0,
+        "peak_heap_entries": 0,
+        "peak_open_files": 1,
+        "peak_run_bytes": 1572864,
+        "peak_run_rows": 0,
+        "peak_temp_bytes": 346,
+        "peak_temp_run_files": 1,
+        "peak_write_buffer_bytes": 49152,
+        "peak_write_buffer_rows": 0
+      },
+      "1": {
+        "initial_runs": 0,
+        "input_rows": 0,
+        "merge_passes": 0,
+        "output_rows": 0,
+        "peak_heap_entries": 0,
+        "peak_open_files": 1,
+        "peak_run_bytes": 1572864,
+        "peak_run_rows": 0,
+        "peak_temp_bytes": 346,
+        "peak_temp_run_files": 1,
+        "peak_write_buffer_bytes": 49152,
+        "peak_write_buffer_rows": 0
+      },
+      "2": {
+        "initial_runs": 0,
+        "input_rows": 0,
+        "merge_passes": 0,
+        "output_rows": 0,
+        "peak_heap_entries": 0,
+        "peak_open_files": 1,
+        "peak_run_bytes": 1572864,
+        "peak_run_rows": 0,
+        "peak_temp_bytes": 346,
+        "peak_temp_run_files": 1,
+        "peak_write_buffer_bytes": 49152,
+        "peak_write_buffer_rows": 0
+      },
+      "3": {
+        "initial_runs": 0,
+        "input_rows": 0,
+        "merge_passes": 0,
+        "output_rows": 0,
+        "peak_heap_entries": 0,
+        "peak_open_files": 1,
+        "peak_run_bytes": 1572864,
+        "peak_run_rows": 0,
+        "peak_temp_bytes": 346,
+        "peak_temp_run_files": 1,
+        "peak_write_buffer_bytes": 49152,
+        "peak_write_buffer_rows": 0
+      },
+      "4": {
+        "initial_runs": 8,
+        "input_rows": 239591,
+        "merge_passes": 1,
+        "output_rows": 239591,
+        "peak_heap_entries": 8,
+        "peak_open_files": 9,
+        "peak_run_bytes": 67108424,
+        "peak_run_rows": 30913,
+        "peak_temp_bytes": 115453391,
+        "peak_temp_run_files": 9,
+        "peak_write_buffer_bytes": 1972898,
+        "peak_write_buffer_rows": 1024
+      },
+      "5": {
+        "initial_runs": 0,
+        "input_rows": 0,
+        "merge_passes": 0,
+        "output_rows": 0,
+        "peak_heap_entries": 0,
+        "peak_open_files": 1,
+        "peak_run_bytes": 1572864,
+        "peak_run_rows": 0,
+        "peak_temp_bytes": 346,
+        "peak_temp_run_files": 1,
+        "peak_write_buffer_bytes": 49152,
+        "peak_write_buffer_rows": 0
+      }
+    }
+  },
+  "research_result": {
+    "actual_prefix": {
+      "input_stream_id": "complementary-pair-chainlink-initial-fit-20260909-20260912",
+      "next_input_position": 239592
+    },
+    "cross_midnight_pairs": [
+      {
+        "left_price_usd_per_btc": 78289.0847675857,
+        "left_received_utc_ms": 1788998399737,
+        "pair": {
+          "elapsed_seconds": 3.64,
+          "squared_change_usd": 2.3995153632866986
+        },
+        "right_group_position": 76905,
+        "right_price_usd_per_btc": 78287.53573067093,
+        "right_received_utc_ms": 1788998403377
+      },
+      {
+        "left_price_usd_per_btc": 76537.77780990598,
+        "left_received_utc_ms": 1789084799271,
+        "pair": {
+          "elapsed_seconds": 5.138,
+          "squared_change_usd": 3.884525478129583
+        },
+        "right_group_position": 157147,
+        "right_price_usd_per_btc": 76539.74872986329,
+        "right_received_utc_ms": 1789084804409
+      }
+    ],
+    "daily": {
+      "2026-09-09": {
+        "accepted_points": 76900,
+        "accepted_span_seconds": 86397.509,
+        "admission": {
+          "accepted": 76900,
+          "same_time": 5
+        },
+        "anomalies": {},
+        "closed_groups": 76905,
+        "cross_midnight_pairs": 0,
+        "first_received_utc_ms": 1788912002228,
+        "last_received_utc_ms": 1788998399737,
+        "maximum_positive_gap_seconds": 301.585,
+        "quality": {
+          "Fresh": 76905
+        },
+        "reference_facts": 76905,
+        "sigma_usd_per_btc_per_sqrt_second": 3.7433555846078903,
+        "variance": {
+          "elapsed_seconds": 86397.50899999929,
+          "positive_pair_count": 76899,
+          "squared_change_sum_usd_squared": 1210663.3275720302
+        },
+        "leading_before_first_accepted_seconds": 2.228,
+        "trailing_after_last_accepted_seconds": 0.263
+      },
+      "2026-09-10": {
+        "accepted_points": 80230,
+        "accepted_span_seconds": 86395.894,
+        "admission": {
+          "accepted": 80230,
+          "same_time": 12
+        },
+        "anomalies": {},
+        "closed_groups": 80242,
+        "cross_midnight_pairs": 1,
+        "first_received_utc_ms": 1788998403377,
+        "last_received_utc_ms": 1789084799271,
+        "maximum_positive_gap_seconds": 351.081,
+        "quality": {
+          "Fresh": 80242
+        },
+        "reference_facts": 80242,
+        "sigma_usd_per_btc_per_sqrt_second": 3.269549326567642,
+        "variance": {
+          "elapsed_seconds": 86399.5339999998,
+          "positive_pair_count": 80230,
+          "squared_change_sum_usd_squared": 923606.9403034042
+        },
+        "leading_before_first_accepted_seconds": 3.377,
+        "trailing_after_last_accepted_seconds": 0.729
+      },
+      "2026-09-11": {
+        "accepted_points": 82441,
+        "accepted_span_seconds": 86394.117,
+        "admission": {
+          "accepted": 82441,
+          "same_time": 3
+        },
+        "anomalies": {},
+        "closed_groups": 82444,
+        "cross_midnight_pairs": 1,
+        "first_received_utc_ms": 1789084804409,
+        "last_received_utc_ms": 1789171198526,
+        "maximum_positive_gap_seconds": 367.399,
+        "quality": {
+          "Fresh": 82444
+        },
+        "reference_facts": 82444,
+        "sigma_usd_per_btc_per_sqrt_second": 4.751927215627,
+        "variance": {
+          "elapsed_seconds": 86399.25500000038,
+          "positive_pair_count": 82441,
+          "squared_change_sum_usd_squared": 1950965.356784945
+        },
+        "leading_before_first_accepted_seconds": 4.409,
+        "trailing_after_last_accepted_seconds": 1.474
+      }
+    },
+    "expected_prefix": {
+      "input_stream_id": "complementary-pair-chainlink-initial-fit-20260909-20260912",
+      "next_canonical_position": 239591,
+      "next_group_position": 239591,
+      "next_input_position": 239592,
+      "next_observation_position": 0,
+      "next_public_index_position": 239591,
+      "normal_end": true,
+      "stable_storage_ref": "stable-00000000000000000000"
+    },
+    "first_accepted_state": {
+      "group_position": 0,
+      "input_position": 0,
+      "monotonic_now_utc_ms": 1788912002228,
+      "received_at_utc_ms": 1788912002228,
+      "spot": {
+        "dependency_frontier": {
+          "input_stream_id": "complementary-pair-chainlink-initial-fit-20260909-20260912",
+          "next_input_position": 1
+        },
+        "direct_anchors": [
+          {
+            "field_path": "chainlink_spot",
+            "group_id": "18be95d3330b84769a79e8d595e00b698188291a61549ae9eaf42346c7518217",
+            "position": {
+              "closed_at_input_position": 0,
+              "fact_ordinal": 0,
+              "input_stream_id": "complementary-pair-chainlink-initial-fit-20260909-20260912"
+            },
+            "received_at_utc_ms": 1788912002228,
+            "source_event_at_utc_ms": 1788911999000,
+            "source_message_id": "18be95d3330b84769a79e8d595e00b698188291a61549ae9eaf42346c7518217"
+          }
+        ],
+        "quality": "fresh",
+        "value": {
+          "message_timestamp_utc_ms": 1788912000458,
+          "price_usd_per_btc": "78448.0221941769",
+          "symbol": "btc/usd"
+        }
+      },
+      "visible_at_utc_ms": 1788912002228
+    },
+    "inputs": 239592,
+    "last_accepted_state": {
+      "group_position": 239590,
+      "input_position": 239590,
+      "monotonic_now_utc_ms": 1789171198526,
+      "received_at_utc_ms": 1789171198526,
+      "spot": {
+        "dependency_frontier": {
+          "input_stream_id": "complementary-pair-chainlink-initial-fit-20260909-20260912",
+          "next_input_position": 239591
+        },
+        "direct_anchors": [
+          {
+            "field_path": "chainlink_spot",
+            "group_id": "48c46cf6a297c3d06eac59e5b1e239c141a41f6de1129427115186cb94e6473a",
+            "position": {
+              "closed_at_input_position": 239590,
+              "fact_ordinal": 0,
+              "input_stream_id": "complementary-pair-chainlink-initial-fit-20260909-20260912"
+            },
+            "received_at_utc_ms": 1789171198526,
+            "source_event_at_utc_ms": 1789171197000,
+            "source_message_id": "48c46cf6a297c3d06eac59e5b1e239c141a41f6de1129427115186cb94e6473a"
+          }
+        ],
+        "quality": "fresh",
+        "value": {
+          "message_timestamp_utc_ms": 1789171198356,
+          "price_usd_per_btc": "77207.33911831025",
+          "symbol": "btc/usd"
+        }
+      },
+      "visible_at_utc_ms": 1789171198526
+    },
+    "last_monotonic_now_utc_ms": 1789171198526,
+    "observations": 0,
+    "overall": {
+      "accepted_points": 239571,
+      "accepted_span_seconds": 259196.298,
+      "admission": {
+        "accepted": 239571,
+        "same_time": 20
+      },
+      "anomalies": {},
+      "closed_groups": 239591,
+      "cross_midnight_pairs": 2,
+      "first_received_utc_ms": 1788912002228,
+      "last_received_utc_ms": 1789171198526,
+      "maximum_positive_gap_seconds": 367.399,
+      "quality": {
+        "Fresh": 239591
+      },
+      "reference_facts": 239591,
+      "sigma_usd_per_btc_per_sqrt_second": 3.970033377357779,
+      "variance": {
+        "elapsed_seconds": 259196.29800000004,
+        "positive_pair_count": 239570,
+        "squared_change_sum_usd_squared": 4085235.6246602903
+      }
+    },
+    "semantics": "来源候选；不是每condition的SignalMemory sigma或六源可见前沿。日事实/质量/接纳按组可见UTC日；接纳点与完整价对按右端接收UTC日。全程f64独立原序相加；没有生产fallback。覆盖为实际接纳端点及最大间隔，不宣称连续有效价或交易许可。"
+  },
+  "runs": {
+    "prepare": {
+      "status": "success",
+      "error": null,
+      "before_launch_utc": "2026-10-04T12:24:42.353227+00:00",
+      "exit_observed_utc": "2026-10-04T12:24:49.360520+00:00",
+      "internal_wall_seconds_excluding_report_write": 6.459062675,
+      "gnu": {
+        "user_cpu_seconds": 4.95,
+        "system_cpu_seconds": 0.23,
+        "maximum_rss_kib": 88096,
+        "file_system_input_512b_blocks": 417808,
+        "file_system_output_512b_blocks": 330368,
+        "exit_status": 0,
+        "wall_seconds": 6.46
+      },
+      "proc_io_delta_before_report_write": {
+        "rchar": 190418385,
+        "wchar": 167093669,
+        "syscr": 9999,
+        "syscw": 22156,
+        "read_bytes": 213917696,
+        "write_bytes": 169086976,
+        "cancelled_write_bytes": 0
+      },
+      "monitor_wall_seconds_including_final_hash": 7.076997691008728,
+      "sample_count": 8,
+      "sample_interval_seconds": 1,
+      "peak_lower_bound": {
+        "total": {
+          "logical_bytes": 109360523,
+          "allocated_bytes": 109395968,
+          "files": 13
+        },
+        "public": {
+          "logical_bytes": 51637731,
+          "allocated_bytes": 51646464,
+          "files": 3
+        },
+        "merge": {
+          "logical_bytes": 88952669,
+          "allocated_bytes": 89022464,
+          "files": 13
+        }
+      },
+      "final": {
+        "total": {
+          "logical_bytes": 109360523,
+          "allocated_bytes": 109395968,
+          "files": 9
+        },
+        "public": {
+          "logical_bytes": 51637731,
+          "allocated_bytes": 51646464,
+          "files": 3
+        },
+        "merge": {
+          "logical_bytes": 57722792,
+          "allocated_bytes": 57749504,
+          "files": 6
+        }
+      },
+      "report_bytes": 58991,
+      "report_sha256": "ccb6b673ac97e08ee3de72be8d603318a7d15cd2d7a2338c0f71d251a81b2859",
+      "logs": {
+        "stdout": {
+          "bytes": 0,
+          "lines": 0
+        },
+        "stderr": {
+          "bytes": 817,
+          "lines": 5
+        }
+      },
+      "gnu_log_sha256": "cfd65eeac6bf50f086dce7465d67f03387dee588584d08747730dc2568a4e1db",
+      "resource_report_sha256": "8fd56100e301b08cf8d89fdf6ece3fabaa19a05bec5d87afe36f58363c014783"
+    },
+    "replay": {
+      "status": "success",
+      "error": null,
+      "before_launch_utc": "2026-10-04T12:30:24.512219+00:00",
+      "exit_observed_utc": "2026-10-04T12:30:27.514402+00:00",
+      "internal_wall_seconds_excluding_report_write": 2.224617316,
+      "gnu": {
+        "user_cpu_seconds": 2.09,
+        "system_cpu_seconds": 0.04,
+        "maximum_rss_kib": 14844,
+        "file_system_input_512b_blocks": 239944,
+        "file_system_output_512b_blocks": 136,
+        "exit_status": 0,
+        "wall_seconds": 2.22
+      },
+      "proc_io_delta_before_report_write": {
+        "rchar": 80121940,
+        "wchar": 1742,
+        "syscr": 9816,
+        "syscw": 396,
+        "read_bytes": 122851328,
+        "write_bytes": 4096,
+        "cancelled_write_bytes": 0
+      },
+      "monitor_wall_seconds_including_final_hash": 3.0023097389930626,
+      "sample_count": 4,
+      "sample_interval_seconds": 1,
+      "peak_lower_bound": {
+        "total": {
+          "logical_bytes": 109360523,
+          "allocated_bytes": 109395968,
+          "files": 9
+        },
+        "public": {
+          "logical_bytes": 51637731,
+          "allocated_bytes": 51646464,
+          "files": 3
+        },
+        "merge": {
+          "logical_bytes": 57722792,
+          "allocated_bytes": 57749504,
+          "files": 6
+        }
+      },
+      "final": {
+        "total": {
+          "logical_bytes": 109360523,
+          "allocated_bytes": 109395968,
+          "files": 9
+        },
+        "public": {
+          "logical_bytes": 51637731,
+          "allocated_bytes": 51646464,
+          "files": 3
+        },
+        "merge": {
+          "logical_bytes": 57722792,
+          "allocated_bytes": 57749504,
+          "files": 6
+        }
+      },
+      "report_bytes": 63065,
+      "report_sha256": "848875f643313d69cfdb9893d0c968805af528d5586dd2154e81983a5668416a",
+      "logs": {
+        "stdout": {
+          "bytes": 0,
+          "lines": 0
+        },
+        "stderr": {
+          "bytes": 1742,
+          "lines": 3
+        }
+      },
+      "gnu_log_sha256": "112d37327a30485706cad2c57cda54e34eff6b0843c251ac321d2397a567d37e",
+      "resource_report_sha256": "d859cef192364bedaad0d67d4f84627820d712cacaf4dd485e5545f1c9896446"
+    }
+  },
+  "orchestration_interval_seconds": 335.151699,
+  "orchestration_interval_note": "prepare监测器观察退出至replay启动的会话承接/处理间隔，内部未独立归因；不计入任一程序性能，不是资源终采耗时。",
+  "resource_snapshots": {
+    "before_build": {
+      "sample_started_at_utc": "2026-10-04T12:01:18.329130+00:00",
+      "sample_ended_at_utc": "2026-10-04T12:01:18.884543+00:00",
+      "disk_free_bytes": 233558921216,
+      "cache_logical_bytes": 72884484362,
+      "cache_allocated_bytes": 73064284160,
+      "cache_file_count": 127145,
+      "note": "共享逐路径非原子采样，不独占归因"
+    },
+    "before_run": {
+      "observation_started_utc": "2026-10-04T12:24:22.354107+00:00",
+      "observation_finished_utc": "2026-10-04T12:24:22.652205+00:00",
+      "available_disk_bytes": 230562230272,
+      "shared_cache": {
+        "logical_bytes": 75924268962,
+        "allocated_bytes": 76108652544,
+        "files": 130563
+      },
+      "note": "共享时点快照，非原子；净变化不独占归因本任务。",
+      "counted_budget_bytes": 68719476736,
+      "budget_is_not_process_or_total_directory_limit": true
+    },
+    "after_run": {
+      "observation_started_utc": "2026-10-04T12:33:59.093357+00:00",
+      "observation_finished_utc": "2026-10-04T12:33:59.384620+00:00",
+      "available_disk_bytes": 230447206400,
+      "shared_cache": {
+        "logical_bytes": 75924268962,
+        "allocated_bytes": 76108652544,
+        "files": 130563
+      },
+      "note": "全部运行结束后的共享非原子快照，不独占归因本任务。"
+    }
+  },
+  "projection_note": {
+    "original_prepare_json_sha256": "ccb6b673ac97e08ee3de72be8d603318a7d15cd2d7a2338c0f71d251a81b2859",
+    "original_replay_json_sha256": "848875f643313d69cfdb9893d0c968805af528d5586dd2154e81983a5668416a",
+    "omitted_fields": [
+      "private absolute paths (mapped to logical paths)",
+      "raw /proc/self/io text (retained numeric deltas)",
+      "private launch commands/PIDs",
+      "GNU command line",
+      "per-sample directory history (not retained; independent peak lower bounds and final totals retained)"
+    ],
+    "all_source_business_records": "stored in original public recording; not embedded in this JSON",
+    "no_id_or_business_value_normalization": true,
+    "transformed_fields": [
+      "effective_config_logical_paths: private absolute paths mapped to logical paths",
+      "research_result.daily: epoch-day keys converted to UTC dates; leading/trailing boundary durations added from unchanged endpoints"
+    ]
+  },
+  "verification": {
+    "workspace": {
+      "passed": 1328,
+      "failed": 0,
+      "ignored": 21,
+      "skipped_utc_fixture": "four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second"
+    },
+    "native_library": {
+      "passed": 49,
+      "failed": 0,
+      "ignored": 2
+    },
+    "fmt": true,
+    "diff_check": true,
+    "default_clippy_exit": 0,
+    "clippy_zero_warning_claim": false,
+    "actual_runs": {
+      "prepare": 1,
+      "replay_source_statistics": 1,
+      "six_source_prepare": 0,
+      "hidden": 0,
+      "account_or_strategy": 0
+    }
+  }
+}
