@@ -108,6 +108,7 @@ export default function App() {
   const publicBrowse = usePublicBrowse({
     run,
     page,
+    allRows,
     onPage: setPage,
     condition,
     ready: snapshot?.public_recording.status === "ready",

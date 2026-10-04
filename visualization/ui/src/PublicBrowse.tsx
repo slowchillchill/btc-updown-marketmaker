@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { publicRows, type Evidence, type Row } from "./browse";
+import { type Evidence, type Row } from "./browse";
 import type { Page } from "./evidence";
 import {
   emptyQuery,
@@ -33,6 +33,7 @@ type Expected = { run: string; page?: string; query: PublicQuery };
 export function usePublicBrowse({
   run,
   page,
+  allRows,
   onPage,
   condition,
   ready,
@@ -40,6 +41,7 @@ export function usePublicBrowse({
 }: {
   run: string;
   page: Page | null;
+  allRows: Row[];
   onPage: (page: Page) => void;
   condition: string;
   ready: boolean;
@@ -63,8 +65,7 @@ export function usePublicBrowse({
     [playIndex, setPlayIndex] = useState(-1),
     [playFact, setPlayFact] = useState<Row | null>(null);
   const query = useMemo(() => ({ ...fields, condition }), [fields, condition]);
-  const valid = queryValid(query),
-    allRows = useMemo(() => publicRows(page), [page]);
+  const valid = queryValid(query);
   const filtered = useMemo(() => filterBatch(allRows, query), [allRows, query]);
   const currentRun = useRef(run),
     stopped = useRef(false),

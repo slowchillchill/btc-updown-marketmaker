@@ -343,6 +343,34 @@ try {
     new Set(range.flatMap((e) => e.args.native_identities.map((i) => i.key)))
       .size > 1,
   );
+  // 原字段独立期望：同毫秒不同组的 Canonical 仍须出现在证据表格，引用保持原偏移。
+  const received22000 = finite.rows.flatMap((row, i) => {
+    const native = row.Canonical?.record?.PolymarketMessage;
+    return native?.time?.received_at_utc_ms === "22000" ? [i] : [];
+  });
+  assert.deepEqual(received22000, [45, 51]);
+  await page.getByRole("button", { name: "证据重放", exact: true }).click();
+  assert.ok(
+    Number(
+      await page.locator(".table-scroll").getAttribute("data-retained-count"),
+    ) >= received22000.length,
+  );
+  for (const i of received22000) {
+    const row = await visibleRow(i);
+    assert.match(await row.textContent(), /22000/);
+    await row.getByRole("button").click();
+    assert.deepEqual(
+      JSON.parse(await page.locator(".evidence-panel pre").textContent()),
+      finite.rows[i],
+    );
+    assert.equal(await row.getAttribute("data-row-path"), `/public/0/${i}`);
+  }
+  if (output)
+    await page.screenshot({
+      path: path.join(output, "range-22000-evidence.png"),
+      fullPage: false,
+    });
+  await page.getByRole("button", { name: "多时钟时间线", exact: true }).click();
   await page.getByRole("button", { name: "清除时间范围", exact: true }).click();
   await page
     .getByLabel("市场选择")

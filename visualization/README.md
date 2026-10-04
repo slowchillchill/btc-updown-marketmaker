@@ -201,3 +201,5 @@ CARGO_TARGET_DIR="$TARGET" node visualization/ui/tests/read-cost-browser.mjs "$R
 ```
 
 脚本分别使用受控 4321 / 4319 / 4320 端口，结束时关闭自身浏览器/服务及临时配置。合法有限材料的市场/原时间独立期望取原字段，不重放归约；取消/网络失败使用浏览器路由保留服务端真实已完成结果。报告/经济、公共关联与窄屏旧行为通过原浏览器脚本继续核对。固定根回归退出 0，`four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second` 按仓库规则明确跳过。
+
+审查返工补充：当前批查询、播放、表格与范围筛选共用 App 一次 `publicRows(page)` 映射的同一组 Row/Point，不再分别构造后比较对象身份。原合法材料的 `PolymarketMessage.time.received_at_utc_ms=22000` 独立确定原偏移 45、51；新增 Chrome 断言先在旧实现上因范围表格清空失败，修复后证明两条原引用和完整原值仍显示，范围导出 15 点及原查询/虚拟/取消/播放语义保持。修复构建 JS 1009.73 kB（gzip 332.00），CSS 不变；此次仅前端变化，复用既有 Rust 根回归，未重复无变化测试。
