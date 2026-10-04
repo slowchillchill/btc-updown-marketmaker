@@ -11,6 +11,7 @@ pub struct SourcesConfig {
 pub struct RunSourceConfig {
     pub label: String,
     pub report: Option<PathBuf>,
+    pub research: Option<PathBuf>,
     #[serde(default)]
     pub report_kind: ReportSourceKind,
     pub metadata: Option<PathBuf>,
@@ -57,6 +58,7 @@ pub struct Document {
 pub struct Snapshot {
     pub label: String,
     pub report: Document,
+    pub research: Value,
     pub report_kind: ReportSourceKind,
     pub metadata: Document,
     pub public_recording: Value,

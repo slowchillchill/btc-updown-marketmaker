@@ -238,6 +238,7 @@ async fn noe_only_source_starts_with_unknown_version_and_no_eager_file_read() {
     let app = router(
         load_sources(SourcesConfig {
             runs: vec![RunSourceConfig {
+                research: None,
                 label: "独立 NOE 工程来源".into(),
                 report_kind: Default::default(),
                 report: None,

@@ -28,6 +28,7 @@ export const statusLabel: Record<string, string> = {
   not_configured: "未配置",
   read_error: "读取失败",
   invalid_json: "JSON 损坏",
+  unsupported_version: "未知版本",
   unknown_version: "未知版本",
   unsupported_report: "报告无法解释",
 };
