@@ -1,11 +1,13 @@
 import { at, fact, type Json } from "./facts";
 import { assetsByOutcome, cashTotal, list, type Evidence } from "./browse";
 export function Field({
+  source = "report",
   label,
   path,
   report,
   onSelect,
 }: {
+  source?: Evidence["source"];
   label: string;
   path: string;
   report: Json | undefined;
@@ -15,7 +17,7 @@ export function Field({
   const value = at(report, ...segments);
   const condition =
     (segments[0] === "account_economics_memory" && segments[1] === "markets") ||
-    (segments[0] === "ledger_consumed_memory" &&
+    (["ledger_consumed_memory", "final_ledger"].includes(segments[0]) &&
       segments[1] === "market_projections")
       ? at(report, ...segments.slice(0, 3), "condition_id")
       : undefined;
@@ -26,7 +28,7 @@ export function Field({
       onClick={() =>
         value !== undefined &&
         onSelect({
-          source: "report",
+          source,
           path,
           value,
           condition: typeof condition === "string" ? condition : undefined,

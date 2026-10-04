@@ -15,6 +15,7 @@ export type Doc = {
 };
 export type Snapshot = {
   label: string;
+  existing_source?: import("./Existing").ExistingStatus;
   report: Doc;
   research: ResearchStatus;
   report_kind: "historical_backtest" | "engineering_ledger_projection";

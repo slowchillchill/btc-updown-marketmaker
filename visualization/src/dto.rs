@@ -12,6 +12,7 @@ pub struct RunSourceConfig {
     pub label: String,
     pub report: Option<PathBuf>,
     pub research: Option<PathBuf>,
+    pub existing_source: Option<crate::sources::existing::ExistingSourceConfig>,
     #[serde(default)]
     pub report_kind: ReportSourceKind,
     pub metadata: Option<PathBuf>,
@@ -59,6 +60,7 @@ pub struct Snapshot {
     pub label: String,
     pub report: Document,
     pub research: Value,
+    pub existing_source: Value,
     pub report_kind: ReportSourceKind,
     pub metadata: Document,
     pub public_recording: Value,

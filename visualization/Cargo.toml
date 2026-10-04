@@ -16,11 +16,14 @@ serde_json = { version = "=1.0.150", features = ["arbitrary_precision"] }
 tokio = { version = "=1.52.3", features = ["macros", "rt-multi-thread", "net", "signal"] }
 tower-http = { version = "=0.6.11", features = ["fs"] }
 
+data-collect = { path = "../data-collect" }
+ledger = { path = "../ledger" }
+csv = "=1.4.0"
+flate2 = "=1.1.9"
+
 [dev-dependencies]
 backtest = { path = "../backtest" }
-data-collect = { path = "../data-collect" }
 data-pipeline-core = { path = "../data-pipeline/core" }
-ledger = { path = "../ledger" }
 shared-run = { path = "../shared-run" }
 sim-system = { path = "../sim-system", features = ["shared-execution"] }
 rust_decimal = { version = "=1.42.1", default-features = false, features = ["std"] }

@@ -3,11 +3,15 @@ import { list, type Evidence } from "./browse";
 import { Field } from "./Economics";
 export function ExecutionProjection({
   report,
+  root = "/ledger_consumed_memory",
+  source = "report",
   engineering = false,
   condition,
   onSelect,
 }: {
   report: Json | undefined;
+  root?: string;
+  source?: Evidence["source"];
   engineering?: boolean;
   condition: string;
   onSelect: (e: Evidence) => void;
@@ -22,14 +26,17 @@ export function ExecutionProjection({
         </p>
       </>
     );
-  const base = "/ledger_consumed_memory",
-    markets = list(at(report, "ledger_consumed_memory", "market_projections"));
+  const base = root,
+    markets = list(
+      at(report, ...root.slice(1).split("/"), "market_projections"),
+    );
   const selected = markets
     .map((m, i) => ({ m, i }))
     .filter(({ m }) => !condition || at(m, "condition_id") === condition);
   const fields = (root: string, entries: [string, string][]) =>
     entries.map(([label, key]) => (
       <Field
+        source={source}
         key={root + key}
         label={label}
         path={root + "/" + key}
@@ -79,11 +86,12 @@ export function ExecutionProjection({
           ["账本本地前缀", "ledger_local_prefix"],
           ["可用截止 · 原 UTC ms", "available_through_utc_ms"],
         ])}
-        {fields("", [
-          ["报告观察截止", "observation_cutoff"],
-          ["NOE 耐久前缀", "durable_noe_prefix"],
-          ["待账本应用 NOE · 条", "pending_noe_records"],
-        ])}
+        {source === "report" &&
+          fields("", [
+            ["报告观察截止", "observation_cutoff"],
+            ["NOE 耐久前缀", "durable_noe_prefix"],
+            ["待账本应用 NOE · 条", "pending_noe_records"],
+          ])}
       </div>
       <p className="gap">
         以上是不同位置域与截止，不能相减推导积压。待 NOE

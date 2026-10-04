@@ -1,0 +1,609 @@
+{
+  "implementation_base": "072941a728fbdee338186d5db0eabff3f552a61e",
+  "build_mode": "dev unoptimized + debuginfo; example-only System allocator probe; Chrome headless 1600x1050",
+  "scope": "一个 large-high completion、一个 continuous 显式6文件实例、一个历史manifest；每实例首读+单区段+最近重试各一次，非生产吞吐；未清OS缓存",
+  "allocation_definition": "成功alloc/alloc_zeroed/realloc次数；累计Layout/newsize请求字节；live请求字节与RSS分别；peak_above_start_bytes相对阶段初始live的峰值；elapsed_us包含探针/strace开销，不是CPU或生产速度",
+  "io_definition": "files长度和read/pread64/readv返回字节分开；read_calls含EOF返回0；/proc read_bytes为物理存储观测受OS缓存影响；不打开清单声明的Parquet",
+  "source_files": {
+    "issue-180/large-high/completion.json": {
+      "bytes": 7795,
+      "sha256": "943ea215e5d8fd52123f3dac1540b801ded9bfe1d827712929ceac7b0751026a"
+    },
+    "model-train/validation/issue-178/evidence/continuous/continuous-summary.json": {
+      "bytes": 85117,
+      "sha256": "1713ec2d90034b85053ad1cbcfdebe775244c48c6975d9e61f35a2190ea2e79c"
+    },
+    "model-train/validation/issue-178/evidence/continuous/pooled-summary.json": {
+      "bytes": 19641,
+      "sha256": "949f0b8f8e6c211359f0dcda28526b5b6cd7b984434589492b25d597b651df30"
+    },
+    "model-train/validation/issue-178/evidence/continuous/continuous-calls.csv.gz": {
+      "bytes": 349632,
+      "sha256": "6d92d4ced8b20a2fccea3ef48e9c282731dcf3534b27fe2a9feec441eb8f629b"
+    },
+    "model-train/validation/issue-178/evidence/source/provenance.json": {
+      "bytes": 23275,
+      "sha256": "62eaad845860a01a69a270ae1a006ede0bf19cae5fe4b09f89a0b6bcff2f36bd"
+    },
+    "model-train/validation/issue-178/evidence/continuous/run-order.jsonl": {
+      "bytes": 4976,
+      "sha256": "afe4e78d10210ff0f0858ed4e214810cc06563f744313097577b464e952b9305"
+    },
+    "model-train/validation/issue-178/evidence/continuous/comparison.md": {
+      "bytes": 468,
+      "sha256": "19ea968b25d425d67a27709e3f6c9f75b25b28627931cf7a7e39a1b1574ec621"
+    },
+    "historical-collection/2026-09-09/manifest.json": {
+      "bytes": 400713,
+      "sha256": "93a70f4775bdb3d52bf7de73d58caaa5ccbf2f2d7f6a8e2f00e09c092e1f1918"
+    }
+  },
+  "cases": {
+    "completion": {
+      "kind": "completion",
+      "io": {
+        "kind": "completion",
+        "files": {
+          "completion": {
+            "name": "completion.json",
+            "file_bytes": 7795
+          }
+        },
+        "phases": {
+          "initialize": {
+            "completion": {
+              "calls": 2,
+              "returned_bytes": 7795,
+              "syscalls": {
+                "read": 2
+              }
+            }
+          },
+          "select_fragment": {
+            "completion": {
+              "calls": 0,
+              "returned_bytes": 0,
+              "syscalls": {}
+            }
+          },
+          "retry_latest": {
+            "completion": {
+              "calls": 0,
+              "returned_bytes": 0,
+              "syscalls": {}
+            }
+          }
+        }
+      },
+      "cost": [
+        {
+          "allocation_calls": "1920",
+          "cumulative_requested_bytes": "178279",
+          "elapsed_us": "804",
+          "live_requested_after": "64559",
+          "live_requested_before": "1639",
+          "peak_above_start_bytes": "91457",
+          "peak_live_requested_bytes": "93096",
+          "phase": "initialize",
+          "process_read_bytes_delta": "0",
+          "process_rss_high_water_bytes": "4681728",
+          "rss_bytes": "4681728",
+          "snapshot_encoding": {
+            "complete_encoding_us": "182",
+            "response_bytes": "7421"
+          }
+        },
+        {
+          "allocation_calls": "422",
+          "cumulative_requested_bytes": "38269",
+          "elapsed_us": "133",
+          "encoding": {
+            "complete_encoding_us": "38",
+            "response_bytes": "1696",
+            "selection_and_dto_us": "84"
+          },
+          "live_requested_after": "71340",
+          "live_requested_before": "68551",
+          "peak_above_start_bytes": "13031",
+          "peak_live_requested_bytes": "81582",
+          "phase": "select_fragment",
+          "process_read_bytes_delta": "0",
+          "process_rss_high_water_bytes": "4681728",
+          "rss_bytes": "4681728"
+        },
+        {
+          "allocation_calls": "0",
+          "cumulative_requested_bytes": "0",
+          "elapsed_us": "0",
+          "live_requested_after": "74278",
+          "live_requested_before": "74301",
+          "new_complete_encodings": 0,
+          "new_source_reads": 0,
+          "original_document": "completion",
+          "peak_above_start_bytes": "0",
+          "peak_live_requested_bytes": "74301",
+          "phase": "retry_latest",
+          "process_read_bytes_delta": "0",
+          "process_rss_high_water_bytes": "4681728",
+          "response_bytes": 1696,
+          "rss_bytes": "4681728",
+          "same_bytes_allocation": true
+        }
+      ],
+      "selected": {
+        "document": "completion",
+        "path": "/final_ledger",
+        "start": 0,
+        "count": 1
+      }
+    },
+    "calls": {
+      "kind": "continuous",
+      "io": {
+        "kind": "continuous",
+        "files": {
+          "summary": {
+            "name": "continuous-summary.json",
+            "file_bytes": 85117
+          },
+          "pooled": {
+            "name": "pooled-summary.json",
+            "file_bytes": 19641
+          },
+          "calls": {
+            "name": "continuous-calls.csv.gz",
+            "file_bytes": 349632
+          },
+          "provenance": {
+            "name": "provenance.json",
+            "file_bytes": 23275
+          },
+          "run_order": {
+            "name": "run-order.jsonl",
+            "file_bytes": 4976
+          },
+          "report": {
+            "name": "comparison.md",
+            "file_bytes": 468
+          }
+        },
+        "phases": {
+          "initialize": {
+            "summary": {
+              "calls": 2,
+              "returned_bytes": 85117,
+              "syscalls": {
+                "read": 2
+              }
+            },
+            "pooled": {
+              "calls": 2,
+              "returned_bytes": 19641,
+              "syscalls": {
+                "read": 2
+              }
+            },
+            "calls": {
+              "calls": 2,
+              "returned_bytes": 349632,
+              "syscalls": {
+                "read": 2
+              }
+            },
+            "provenance": {
+              "calls": 2,
+              "returned_bytes": 23275,
+              "syscalls": {
+                "read": 2
+              }
+            },
+            "run_order": {
+              "calls": 2,
+              "returned_bytes": 4976,
+              "syscalls": {
+                "read": 2
+              }
+            },
+            "report": {
+              "calls": 2,
+              "returned_bytes": 468,
+              "syscalls": {
+                "read": 2
+              }
+            }
+          },
+          "select_fragment": {
+            "summary": {
+              "calls": 0,
+              "returned_bytes": 0,
+              "syscalls": {}
+            },
+            "pooled": {
+              "calls": 0,
+              "returned_bytes": 0,
+              "syscalls": {}
+            },
+            "calls": {
+              "calls": 0,
+              "returned_bytes": 0,
+              "syscalls": {}
+            },
+            "provenance": {
+              "calls": 0,
+              "returned_bytes": 0,
+              "syscalls": {}
+            },
+            "run_order": {
+              "calls": 0,
+              "returned_bytes": 0,
+              "syscalls": {}
+            },
+            "report": {
+              "calls": 0,
+              "returned_bytes": 0,
+              "syscalls": {}
+            }
+          },
+          "retry_latest": {
+            "summary": {
+              "calls": 0,
+              "returned_bytes": 0,
+              "syscalls": {}
+            },
+            "pooled": {
+              "calls": 0,
+              "returned_bytes": 0,
+              "syscalls": {}
+            },
+            "calls": {
+              "calls": 0,
+              "returned_bytes": 0,
+              "syscalls": {}
+            },
+            "provenance": {
+              "calls": 0,
+              "returned_bytes": 0,
+              "syscalls": {}
+            },
+            "run_order": {
+              "calls": 0,
+              "returned_bytes": 0,
+              "syscalls": {}
+            },
+            "report": {
+              "calls": 0,
+              "returned_bytes": 0,
+              "syscalls": {}
+            }
+          }
+        }
+      },
+      "cost": [
+        {
+          "allocation_calls": "149158",
+          "cumulative_requested_bytes": "16208261",
+          "elapsed_us": "67422",
+          "live_requested_after": "6270743",
+          "live_requested_before": "2193",
+          "peak_above_start_bytes": "11454892",
+          "peak_live_requested_bytes": "11457085",
+          "phase": "initialize",
+          "process_read_bytes_delta": "0",
+          "process_rss_high_water_bytes": "18567168",
+          "rss_bytes": "18567168",
+          "snapshot_encoding": {
+            "complete_encoding_us": "422",
+            "response_bytes": "22301"
+          }
+        },
+        {
+          "allocation_calls": "1675",
+          "cumulative_requested_bytes": "134470",
+          "elapsed_us": "493",
+          "encoding": {
+            "complete_encoding_us": "168",
+            "response_bytes": "8169",
+            "selection_and_dto_us": "303"
+          },
+          "live_requested_after": "6283651",
+          "live_requested_before": "6274734",
+          "peak_above_start_bytes": "53350",
+          "peak_live_requested_bytes": "6328084",
+          "phase": "select_fragment",
+          "process_read_bytes_delta": "0",
+          "process_rss_high_water_bytes": "18567168",
+          "rss_bytes": "18567168"
+        },
+        {
+          "allocation_calls": "0",
+          "cumulative_requested_bytes": "0",
+          "elapsed_us": "0",
+          "live_requested_after": "6286619",
+          "live_requested_before": "6286624",
+          "new_complete_encodings": 0,
+          "new_source_reads": 0,
+          "original_document": "calls",
+          "peak_above_start_bytes": "0",
+          "peak_live_requested_bytes": "6286624",
+          "phase": "retry_latest",
+          "process_read_bytes_delta": "0",
+          "process_rss_high_water_bytes": "18567168",
+          "response_bytes": 8169,
+          "rss_bytes": "18567168",
+          "same_bytes_allocation": true
+        }
+      ],
+      "selected": {
+        "document": "calls",
+        "path": "",
+        "start": 0,
+        "count": 5
+      }
+    },
+    "manifest": {
+      "kind": "collection_manifest",
+      "io": {
+        "kind": "collection_manifest",
+        "files": {
+          "manifest": {
+            "name": "manifest.json",
+            "file_bytes": 400713
+          }
+        },
+        "phases": {
+          "initialize": {
+            "manifest": {
+              "calls": 2,
+              "returned_bytes": 400713,
+              "syscalls": {
+                "read": 2
+              }
+            }
+          },
+          "select_fragment": {
+            "manifest": {
+              "calls": 0,
+              "returned_bytes": 0,
+              "syscalls": {}
+            }
+          },
+          "retry_latest": {
+            "manifest": {
+              "calls": 0,
+              "returned_bytes": 0,
+              "syscalls": {}
+            }
+          }
+        }
+      },
+      "cost": [
+        {
+          "allocation_calls": "18965",
+          "cumulative_requested_bytes": "1925965",
+          "elapsed_us": "7453",
+          "live_requested_after": "1328453",
+          "live_requested_before": "1565",
+          "peak_above_start_bytes": "1700908",
+          "peak_live_requested_bytes": "1702473",
+          "phase": "initialize",
+          "process_read_bytes_delta": "0",
+          "process_rss_high_water_bytes": "6270976",
+          "rss_bytes": "6135808",
+          "snapshot_encoding": {
+            "complete_encoding_us": "118",
+            "response_bytes": "4766"
+          }
+        },
+        {
+          "allocation_calls": "2529",
+          "cumulative_requested_bytes": "232603",
+          "elapsed_us": "657",
+          "encoding": {
+            "complete_encoding_us": "168",
+            "response_bytes": "7680",
+            "selection_and_dto_us": "462"
+          },
+          "live_requested_after": "1341371",
+          "live_requested_before": "1332445",
+          "peak_above_start_bytes": "84562",
+          "peak_live_requested_bytes": "1417007",
+          "phase": "select_fragment",
+          "process_read_bytes_delta": "0",
+          "process_rss_high_water_bytes": "6270976",
+          "rss_bytes": "6230016"
+        },
+        {
+          "allocation_calls": "0",
+          "cumulative_requested_bytes": "0",
+          "elapsed_us": "0",
+          "live_requested_after": "1344328",
+          "live_requested_before": "1344342",
+          "new_complete_encodings": 0,
+          "new_source_reads": 0,
+          "original_document": "manifest",
+          "peak_above_start_bytes": "0",
+          "peak_live_requested_bytes": "1344342",
+          "phase": "retry_latest",
+          "process_read_bytes_delta": "0",
+          "process_rss_high_water_bytes": "6270976",
+          "response_bytes": 7680,
+          "rss_bytes": "6230016",
+          "same_bytes_allocation": true
+        }
+      ],
+      "selected": {
+        "document": "manifest",
+        "path": "/files",
+        "start": 0,
+        "count": 5
+      }
+    }
+  },
+  "browser": {
+    "errors": [],
+    "sources": [
+      {
+        "index": 0,
+        "kind": "completion",
+        "snapshot_bytes": 7421,
+        "documents": [
+          {
+            "document": "completion",
+            "status": "ready",
+            "bytes_read": "7795"
+          }
+        ]
+      },
+      {
+        "index": 1,
+        "kind": "completion",
+        "snapshot_bytes": 5545,
+        "documents": [
+          {
+            "document": "completion",
+            "status": "ready",
+            "bytes_read": "5426"
+          }
+        ]
+      },
+      {
+        "index": 2,
+        "kind": "continuous",
+        "snapshot_bytes": 22300,
+        "documents": [
+          {
+            "document": "summary",
+            "status": "ready",
+            "bytes_read": "85117"
+          },
+          {
+            "document": "pooled",
+            "status": "ready",
+            "bytes_read": "19641"
+          },
+          {
+            "document": "calls",
+            "status": "ready",
+            "bytes_read": "349632"
+          },
+          {
+            "document": "provenance",
+            "status": "ready",
+            "bytes_read": "23275"
+          },
+          {
+            "document": "run_order",
+            "status": "ready",
+            "bytes_read": "4976"
+          },
+          {
+            "document": "report",
+            "status": "ready",
+            "bytes_read": "468"
+          }
+        ]
+      },
+      {
+        "index": 3,
+        "kind": "collection_manifest",
+        "snapshot_bytes": 4766,
+        "documents": [
+          {
+            "document": "manifest",
+            "status": "ready",
+            "bytes_read": null
+          }
+        ]
+      }
+    ],
+    "cost": {
+      "completion": {
+        "navigation_to_cards_two_frames_ms": 174.83502499999997,
+        "resource": [
+          {
+            "duration_ms": 0.5,
+            "encoded_body_bytes": 7421,
+            "transfer_bytes": 7721
+          }
+        ]
+      },
+      "continuous": {
+        "click_to_dom_two_frames_ms": 75.69999998807907,
+        "response_bytes": 1756,
+        "resource": [
+          {
+            "duration_ms": 1.5999999940395355,
+            "encoded_body_bytes": 1756,
+            "decoded_body_bytes": 1756,
+            "transfer_bytes": 2056
+          }
+        ],
+        "rendered_records": 1
+      },
+      "manifest": {
+        "click_to_dom_two_frames_ms": 83.5,
+        "response_bytes": 7680,
+        "rendered_records": 5,
+        "resource": [
+          {
+            "duration_ms": 2,
+            "encoded_body_bytes": 7680,
+            "transfer_bytes": 7980
+          }
+        ]
+      }
+    },
+    "downloads": [
+      {
+        "source": "completion",
+        "points": 1,
+        "original_utc_ms": "1789517400990"
+      }
+    ],
+    "own_server_stopped": true,
+    "own_browser_closed": true,
+    "scope": "真实四来源；completion导航到卡片DOM+两帧；continuous单CSV记录与manifest五文件记录点击到DOM+两帧；summary选择器验证64/1/63与pooled128原统计"
+  },
+  "measured_source_sha256": {
+    "visualization/src/sources/existing.rs": "ce67cb951e8d0655e71da8850c2d80041681882b8c5362299bbdb5571c3649b8",
+    "visualization/src/api.rs": "83b1bcec37ca9ea4a2f9153358ab6b8589e586bfcb768fe05cf9cad4b93192ce",
+    "visualization/src/dto.rs": "d816d075a1cedf966f56d5d59d9fdf5537e1b2bb4812a49b9bb9587ac33502f7",
+    "visualization/examples/existing_read_cost.rs": "44b06324391557468389d3eabceb7cf002e130d5063fbcaea7a9ca214fcc9489",
+    "visualization/examples/existing_read_cost_io.py": "2064001eec8cb956d80f6d75793f3429c68e4805753fecf416187df7ecaad852",
+    "visualization/Cargo.toml": "5a751980963c2c9693bbe684203c6b537da64f9d028237eeea10eb033e6fedf1",
+    "Cargo.lock": "9eacb8e4b716cc76668d6aee8ab4f7fa5e9bef0945a292255a563a88fbc8fa71"
+  },
+  "probe_binary_sha256": "b43d03af6f753b08f6efdc7a8ee1590b61e8ce5b5d01ca42b948d6a8d42f9e50",
+  "perfetto": {
+    "official_trace_processor": "SELECT slice JOIN args WHERE args.original_utc_ms",
+    "rows": 1,
+    "name": "available_through_utc_ms",
+    "original_utc_ms": "1789517400990",
+    "ts_ns": "1789517400990000000",
+    "reference": "/final_ledger/available_through_utc_ms"
+  },
+  "limits": [
+    "只有当前read工件；不代表21GB公共数据或145Parquet已读取",
+    "载入CSV.gz后保存1024原记录字符串；不生成第二领域主键/动作或成本统计",
+    "浏览器成本含HTTP/JSON/React/调度/测试等待及两帧，非CPU；completion是完整首次导航，其余是点击到明细DOM",
+    "旧成本日志中的continuous物理read_bytes曾4096；当前重复读取为0，说明缓存影响，原私有日志保留",
+    "未测生产规模、持续访问、真实训练和经营，不设阈值"
+  ],
+  "frontend_build": [
+    {
+      "file": "dist/index.html",
+      "bytes": 409,
+      "gzip_bytes": 306
+    },
+    {
+      "file": "dist/assets/index-DANYbT5_.css",
+      "bytes": 26418,
+      "gzip_bytes": 5520
+    },
+    {
+      "file": "dist/assets/index-B9JCsKgu.js",
+      "bytes": 1052528,
+      "gzip_bytes": 339355
+    }
+  ]
+}
