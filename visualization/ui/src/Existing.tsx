@@ -310,6 +310,21 @@ export function ExistingPanel({
   const measurement = status.documents?.find(
     (d) => d.document === "measurement" && d.status === "ready",
   )?.summary;
+  const measurementField = (parts: string[]) => {
+    const value = at(measurement, ...parts);
+    const path = "/" + parts.join("/");
+    return (
+      <button
+        data-original-field={path}
+        disabled={value === undefined}
+        onClick={() =>
+          value !== undefined && select("measurement", path, value)
+        }
+      >
+        {value === undefined ? "未保存" : fact(value)}
+      </button>
+    );
+  };
   const timing = status.documents?.find(
     (d) => d.document === "time_results" && d.status === "ready",
   )?.summary;
@@ -552,33 +567,13 @@ export function ExistingPanel({
                         "exclusive_max_rss_kib",
                       ].map((k) => (
                         <td key={k}>
-                          <button
-                            onClick={() =>
-                              select(
-                                "measurement",
-                                `/execution/phases/${phase}/${side}/${k}`,
-                                at(
-                                  measurement,
-                                  "execution",
-                                  "phases",
-                                  phase,
-                                  side,
-                                  k,
-                                ) ?? null,
-                              )
-                            }
-                          >
-                            {fact(
-                              at(
-                                measurement,
-                                "execution",
-                                "phases",
-                                phase,
-                                side,
-                                k,
-                              ),
-                            )}
-                          </button>
+                          {measurementField([
+                            "execution",
+                            "phases",
+                            phase,
+                            side,
+                            k,
+                          ])}
                         </td>
                       ))}
                     </tr>
@@ -627,35 +622,14 @@ export function ExistingPanel({
                         "cancelled_write_bytes",
                       ].map((k) => (
                         <td key={k}>
-                          <button
-                            onClick={() =>
-                              select(
-                                "measurement",
-                                `/execution/phases/${phase}/${side}/proc_io/${k}`,
-                                at(
-                                  measurement,
-                                  "execution",
-                                  "phases",
-                                  phase,
-                                  side,
-                                  "proc_io",
-                                  k,
-                                ) ?? null,
-                              )
-                            }
-                          >
-                            {fact(
-                              at(
-                                measurement,
-                                "execution",
-                                "phases",
-                                phase,
-                                side,
-                                "proc_io",
-                                k,
-                              ),
-                            )}
-                          </button>
+                          {measurementField([
+                            "execution",
+                            "phases",
+                            phase,
+                            side,
+                            "proc_io",
+                            k,
+                          ])}
                         </td>
                       ))}
                     </tr>
@@ -700,33 +674,13 @@ export function ExistingPanel({
                         "exit_code",
                       ].map((k) => (
                         <td key={k}>
-                          <button
-                            onClick={() =>
-                              select(
-                                "measurement",
-                                `/execution/gnu_processes/${proc}/${side}/${k}`,
-                                at(
-                                  measurement,
-                                  "execution",
-                                  "gnu_processes",
-                                  proc,
-                                  side,
-                                  k,
-                                ) ?? null,
-                              )
-                            }
-                          >
-                            {fact(
-                              at(
-                                measurement,
-                                "execution",
-                                "gnu_processes",
-                                proc,
-                                side,
-                                k,
-                              ),
-                            )}
-                          </button>
+                          {measurementField([
+                            "execution",
+                            "gnu_processes",
+                            proc,
+                            side,
+                            k,
+                          ])}
                         </td>
                       ))}
                     </tr>

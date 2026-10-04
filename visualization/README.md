@@ -404,3 +404,11 @@ CARGO_TARGET_DIR=<实际target> node visualization/ui/tests/timing-browser.mjs <
 [有限测量摘要](docs/timing-source-read-cost-20261004.json)保存实际源/计量源码SHA与binary哈希、分配/live/峰值/RSS、一次完整编码及浏览器耗时。模型5文件10次read/447358B；报告2次read/41713B；区段与最近重试源I/O为0。两个最近重试均Bytes同一分配，成功分配/新增完整编码均0；/proc物理read_bytes各阶段0是本次缓存条件，不清缓存、不称冷盘。allocator/strace耗时不当生产速度，浏览器点击→DOM→两帧不当CPU耗时，源端测量和C成本分开，无生产门槛。工程初始化snapshot约14.6KB、报告约19KB；首屏不重复传完整原JSON。
 
 定向原读取5项、前端build和Chrome通过；原UTC标量叶旧回归也通过。Chrome确认原序/精度、Debug反馈无时间点、原SIM版本与假身份、预声明与实测分离、研究独占null、比较原索引和四微秒点/单叶所选下载，无pageerror，自有资源结束。官方Trace Processor将模型完成读为3点（观察/开始各86100000000000ns、完成86100050000000ns），将原启动器 `2026-10-04T04:16:05.737613+00:00` 读为1791087365737613000ns，保留原文本。最终固定根回归退出0，101组日志结果行合计1304 passed/0 failed（含子进程，不是去重根用例数）；具名UTC测试按仓库规定**跳过**，未新增skip或修A的已知跨窗metadata authority边界。聚焦visualization的no-deps Clippy、fmt通过。代码图未使用，当前任务树源码与生成点直接核验；独立Rust/Python工作区不由根回归推断覆盖。
+
+十二分钟报告新增阶段、proc_io、GNU表共用原值选择边界：字段不存在时显示“未保存”并禁选；显式保存为null的原字段仍可查原引用和值，已有非空值不改变路径或精度。真实 `/execution/phases/prepare/old/exclusive_cpu_seconds` 不存在，与 `/execution/phases/two_market_research/new/exclusive_cpu_seconds` 明确null分别由 Chrome 正反断言；缺失按钮不能替换所选事实。定向复现：
+
+```bash
+CARGO_TARGET_DIR=<实际target> node visualization/ui/tests/measurement-missing-browser.mjs <两来源sources.json> <ignored-output>
+```
+
+该修复前端build与定向Chrome通过，无pageerror，自有资源已结束。仅前端选择边界/脚本/说明变化，未重复根回归或成本负载；历史成本摘要与源码哈希继续对应原测量头 `85cb6fcc58e930fd78089f00f66d5ec35301dc8a`，不把修复后的界面源码重标成曾测量版本。
