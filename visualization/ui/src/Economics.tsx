@@ -155,14 +155,6 @@ export function Economics({
                           report={report}
                           onSelect={onSelect}
                         />
-                        {!compact && (
-                          <Field
-                            label="已执行成交 / 本金 / 费用 · 原累计"
-                            path={`${base}/executed/${index}`}
-                            report={report}
-                            onSelect={onSelect}
-                          />
-                        )}
                       </>
                     )}
                   </article>
@@ -201,6 +193,30 @@ export function Economics({
                       report={report}
                       onSelect={onSelect}
                     />
+                  ))}
+                </div>
+                <h3>已执行累计 · 按流动性角色</h3>
+                <p className="muted">
+                  原 executed 按 Maker / Taker 汇总，不提供 UP / DOWN 执行分解。
+                </p>
+                <div className="columns">
+                  {["Maker", "Taker"].map((role, index) => (
+                    <div key={role} data-liquidity-role={role}>
+                      <h4>{role}</h4>
+                      {[
+                        ["执行份额 · shares", "shares"],
+                        ["执行本金 · pUSD", "principal_pusd"],
+                        ["实际费用 · pUSD", "actual_fee_pusd"],
+                      ].map(([label, key]) => (
+                        <Field
+                          key={key}
+                          label={label}
+                          path={`${base}/executed/${index}/${key}`}
+                          report={report}
+                          onSelect={onSelect}
+                        />
+                      ))}
+                    </div>
                   ))}
                 </div>
                 <h3>返佣 · 原精确状态与金额</h3>

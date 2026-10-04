@@ -38,6 +38,10 @@ m.success_principal_cost_pusd = [
   { numerator: "79", denominator: "10" },
   { numerator: "23", denominator: "10" },
 ];
+m.executed = [
+  { shares: "11", principal_pusd: "5.5", actual_fee_pusd: "0" },
+  { shares: "22", principal_pusd: "12.1", actual_fee_pusd: "0.2" },
+];
 independent.conservative_nav_pusd = "Unavailable";
 independent.worst_case_maker_nav_pusd = {
   numerator: "9007199254740993",
@@ -52,6 +56,20 @@ independent.last_dispatched_calculation_timing = {
 };
 const display = path.join(temp, "display-boundary.json");
 await writeFile(display, JSON.stringify(independent));
+// 仅置换资产身份与同域数组，角色域 executed / rebates 不随资产置换。
+const permuted = structuredClone(independent);
+const permutedMarket = permuted.account_economics_memory.markets[0];
+for (const key of [
+  "assets",
+  "success_shares",
+  "success_principal_cost_pusd",
+  "repair_gap_shares",
+  "orphan_shares",
+])
+  permutedMarket[key].reverse();
+assert.deepEqual(permutedMarket.executed, m.executed);
+const displayPermuted = path.join(temp, "display-boundary-permuted.json");
+await writeFile(displayPermuted, JSON.stringify(permuted));
 const unknown = path.join(temp, "unknown.json");
 await writeFile(
   unknown,
@@ -63,6 +81,7 @@ configured.runs.push(
   { label: "独立展示边界夹具 · 非生产研究", report: display },
   { label: "未来版本验证", report: unknown },
   { label: "截断验证", report: truncated },
+  { label: "资产置换展示夹具 · 非生产研究", report: displayPermuted },
 );
 const config = path.join(temp, "sources.json");
 await writeFile(config, JSON.stringify(configured));
@@ -299,6 +318,93 @@ try {
   assert.match(
     await page.locator("main").textContent(),
     /有效挂单未成交本金：未接入/,
+  );
+  const assertRoleTotals = async () => {
+    for (const [index, role, expected] of [
+      [0, "Maker", ["11", "5.5", "0"]],
+      [1, "Taker", ["22", "12.1", "0.2"]],
+    ]) {
+      const roleCard = page.locator(`[data-liquidity-role="${role}"]`);
+      assert.deepEqual(
+        await roleCard.locator(".fact-field strong").allTextContents(),
+        expected,
+      );
+      assert.deepEqual(
+        await roleCard.locator(".fact-field small").allTextContents(),
+        ["shares", "principal_pusd", "actual_fee_pusd"].map(
+          (field) =>
+            `/account_economics_memory/markets/0/executed/${index}/${field}`,
+        ),
+      );
+    }
+    for (const label of ["UP", "DOWN"])
+      assert.ok(
+        !(
+          await page.locator(`[data-outcome="${label}"]`).textContent()
+        ).includes("/executed/"),
+      );
+  };
+  await assertRoleTotals();
+  if (output) {
+    await page.evaluate(() => window.scrollTo(0, 0));
+    await page.screenshot({
+      path: path.join(output, "economics-role-boundary.png"),
+      fullPage: true,
+    });
+  }
+  await page.getByLabel("运行选择").selectOption("4");
+  await page
+    .locator(".run-strip span")
+    .filter({ hasText: "资产置换展示夹具 · 非生产研究" })
+    .waitFor();
+  await page
+    .locator(".cash-total strong")
+    .filter({ hasText: "9007199254740993.03" })
+    .waitFor();
+  await page.getByLabel("市场选择").selectOption(m.condition_id);
+  await assertRoleTotals();
+  assert.deepEqual(
+    await page
+      .locator('[data-outcome="UP"] .fact-field small')
+      .allTextContents(),
+    ["assets", "success_shares", "success_principal_cost_pusd"].map(
+      (field) => `/account_economics_memory/markets/0/${field}/0`,
+    ),
+  );
+  assert.deepEqual(
+    await page
+      .locator('[data-outcome="DOWN"] .fact-field small')
+      .allTextContents(),
+    ["assets", "success_shares", "success_principal_cost_pusd"].map(
+      (field) => `/account_economics_memory/markets/0/${field}/1`,
+    ),
+  );
+  assert.match(
+    await page.locator('[data-outcome="UP"]').textContent(),
+    /"token_id":"20"/,
+  );
+  assert.match(
+    await page.locator('[data-outcome="UP"]').textContent(),
+    /2.375/,
+  );
+  assert.match(
+    await page.locator('[data-outcome="UP"]').textContent(),
+    /23 \/ 10/,
+  );
+  assert.match(
+    await page.locator('[data-outcome="DOWN"]').textContent(),
+    /"token_id":"3"/,
+  );
+  assert.match(
+    await page.locator('[data-outcome="DOWN"]').textContent(),
+    /7.125/,
+  );
+  assert.match(
+    await page.locator('[data-outcome="DOWN"]').textContent(),
+    /79 \/ 10/,
+  );
+  console.log(
+    "角色 / 资产置换回归通过：Maker 11 / 5.5 / 0，Taker 22 / 12.1 / 0.2；资产置换不改 executed，UP/DOWN 身份份额成本映射不变。",
   );
   await page.getByLabel("市场选择").selectOption("");
   await nav("多时钟时间线");
