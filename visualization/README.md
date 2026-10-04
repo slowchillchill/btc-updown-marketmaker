@@ -260,7 +260,7 @@ node visualization/ui/tests/noe-points.mjs "$NEW_CLOCK_DIR/decoded.json" "$BROWS
 
 [完整有限读数](docs/noe-read-cost-20261004.json) 和 [测量代码补丁](docs/noe-read-cost-code-20261004.patch) 对应原 v4 工程容器（6 条记录）的单个原返回引用。新进程 NoeResults 首读一次，再同实例 load 同 index 重试一次；没有提前读取该引用内容、自动逐 ordinal 读或全容器历史扫描。production NoeResults 仅添加旁路 getter 记录完整编码一次的耗时/Bytes 长度，数字不回填响应造成重复编码；最近重试 getter 保留首读值，不能当新增成本。线上 allocator / 底层 I/O 仍为 null。
 
-本次 debug + strace/allocator 探针首读：原引用 300 B、context 1050 B、容器 11528 B；来源 read 19 次返回 55011 B（引用2/300、context2/1050、Parquet15/53661，含 EOF，pread/readv 无调用），属于 syscall 返回累计而非唯一文件/物理字节。成功分配820次、累计请求265614 B，live请求795→4915 B、绝对峰值61182 B、相对开始峰值60387 B；口径沿上文示例 allocator，非RSS。/proc物理read_bytes增量0，未清OS缓存，不能说没有读/解码。首读 probe完整load1977µs、native读取/解码/DTO合并1712µs、一次完整响应编码74µs/3580 B；含strace与allocator原子计数，不能作为生产速度。
+本次 debug + strace/allocator 探针首读：原引用 300 B、context 1050 B、容器 11528 B、同名 manifest 254 B；来源 read 21 次返回 55265 B（引用2/300、context2/1050、Parquet15/53661、manifest2/254，含 EOF，pread/readv 无调用），属于 syscall 返回累计而非唯一文件/物理字节。成功分配820次、累计请求265614 B，live请求795→4915 B、绝对峰值61182 B、相对开始峰值60387 B；口径沿上文示例 allocator，非RSS。/proc物理read_bytes增量0，未清OS缓存，不能说没有读/解码。首读 probe完整load1977µs、native读取/解码/DTO合并1712µs、一次完整响应编码74µs/3580 B；含strace与allocator原子计数，不能作为生产速度。
 
 最近重试返回同 Bytes 内容与地址，成功分配/累计请求/峰值增量均0，来源 syscall / native reader /完整编码新增均0；缓存响应内 native_cost 是首读原值。Chrome 单次点击→详情DOMready→两帧，以及已加载时间线DOMready→两帧和HTTP Resource Timing/响应bytes/3点记录在摘要；包含网络、解析、React、调度与自动化动作，非CPU处理耗时。前端构建 JS1026.47 kB（gzip337.07），CSS26.06 kB（gzip5.52），既有bundle提示保留；不设新性能门或扩大实验。
 
@@ -271,4 +271,4 @@ strace -yy -e trace=read,pread64,readv,write -o "$OUT/noe.strace" "$BIN" "$SOURC
 python3 visualization/examples/noe_read_cost_io.py "$OUT/noe.strace" "$SOURCES" > "$OUT/noe-io.json"
 ```
 
-解析器只统计该原引用及其明确 context/container 三个文件，不套用公共材料文件范围。原始strace/原工程配置在忽略目录中，不公开私有路径；公开摘要保留逻辑来源、基准头+准确可复现测量补丁及binary哈希；该补丁包含本次Rust读取层变化与最小探针，从记录的旧头应用可复现测量代码，当前树可直接运行。单次缓存条件/小容器结果不代表冷盘、真实研究、大容器或所有版本性能。固定根回归在实际纳入372bd168基准的本轮组合再次退出0，具名UTC依赖测试明确跳过；独立Rust/Python工作区不由此推断覆盖。
+解析器只统计该原引用及其明确 context/container/同名 manifest 四个文件；manifest 路径沿 v4 read_commit 的 with_extension("manifest.json") 固定规则，不扫描目录，不套用公共材料文件范围。原始strace/原工程配置在忽略目录中，不公开私有路径；公开摘要保留逻辑来源、基准头+准确可复现测量补丁及binary哈希；该补丁包含本次Rust读取层变化与最小探针，从记录的旧头应用可复现测量代码，当前树可直接运行。单次缓存条件/小容器结果不代表冷盘、真实研究、大容器或所有版本性能。本次统计纠正使用同一已保存 strace 重算，补齐原路径必读 manifest 的2次 read/254 B；未重新运行负载、清缓存或重复根回归。既有固定根回归在实际纳入372bd168基准的本轮组合退出0，具名UTC依赖测试明确跳过；独立Rust/Python工作区不由此推断覆盖。

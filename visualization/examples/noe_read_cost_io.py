@@ -1,4 +1,4 @@
-"""仅汇总单个 v4 原引用/context/container；metadata 在 traced process 结束后读取。"""
+"""仅汇总单个 v4 原引用/context/container/同名manifest；metadata 在 traced process 结束后读取。"""
 import json
 import pathlib
 import re
@@ -9,7 +9,9 @@ ref_path = pathlib.Path(source["reference_file"]).resolve()
 ref = json.loads(ref_path.read_text())
 container = pathlib.Path(ref["commit_container"]["location"]).resolve()
 context = container.parent.parent / "context.json"
-files = {str(ref_path): "writer-reference.json", str(container): "commit-container.parquet", str(context): "context.json"}
+# 复用原 v4 read_commit 的 path.with_extension("manifest.json")，不枚举目录。
+manifest = container.with_suffix(".manifest.json")
+files = {str(ref_path): "writer-reference.json", str(container): "commit-container.parquet", str(context): "context.json", str(manifest): "commit-container.manifest.json"}
 phase, result = None, {}
 for line in pathlib.Path(trace).read_text().splitlines():
     marker = re.search(r"READ_COST_(BEGIN|END) (\w+)\\n", line)

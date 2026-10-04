@@ -64,12 +64,13 @@
     "file_lengths": {
       "writer-reference.json": 300,
       "commit-container.parquet": 11528,
-      "context.json": 1050
+      "context.json": 1050,
+      "commit-container.manifest.json": 254
     },
     "phases": {
       "first_read": {
-        "calls": 19,
-        "returned_bytes": 55011,
+        "calls": 21,
+        "returned_bytes": 55265,
         "by_file": {
           "writer-reference.json": {
             "calls": 2,
@@ -81,6 +82,13 @@
           "context.json": {
             "calls": 2,
             "returned_bytes": 1050,
+            "syscalls": {
+              "read": 2
+            }
+          },
+          "commit-container.manifest.json": {
+            "calls": 2,
+            "returned_bytes": 254,
             "syscalls": {
               "read": 2
             }
