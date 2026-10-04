@@ -152,20 +152,23 @@ impl FiniteReferenceCandidates {
             return Ok(vec![]);
         }
         // 早处命中/异流/缺失均不能豁免首次非空请求的完整EOF责任。
-        #[cfg(test)]
-        let mut validation = cost::ScanGuard::new("dependency_index_validation", None, None, false);
-        while !self.eof {
+        {
             #[cfg(test)]
-            let _decode = cost::DecodeScope::new("dependency_index_validation");
-            if let Some(row) = self.advance()? {
+            let mut validation =
+                cost::ScanGuard::new("dependency_index_validation", None, None, false);
+            while !self.eof {
                 #[cfg(test)]
-                validation.row(&row);
-                #[cfg(not(test))]
-                let _ = row;
+                let _decode = cost::DecodeScope::new("dependency_index_validation");
+                if let Some(row) = self.advance()? {
+                    #[cfg(test)]
+                    validation.row(&row);
+                    #[cfg(not(test))]
+                    let _ = row;
+                }
             }
+            #[cfg(test)]
+            validation.complete(0, None, Some(true));
         }
-        #[cfg(test)]
-        validation.complete(0, None, Some(true));
         let mut query = CandidateQuery::default();
         let mut output = vec![];
         #[cfg(test)]
