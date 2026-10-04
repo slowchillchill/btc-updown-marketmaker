@@ -8,7 +8,7 @@
 
 材料范围为接收时间 `[1788912000000,1788912720000)`。完整特征目标只有4352318（9月9日00:00—00:05）及4352362（9月9日00:05—00:10）；9月9日00:10—00:12只保留事后标签尾段及资源。原9月9日完整日清单与9月8日唯一选定 `metadata_23` 文件、两个真实Snapshot及完整同市场Existing片段继续复用。初始化输入位置0／1／2、来源集合和00:00起点不变；不新增前史价格、盘口、AnchorRule或TWAP。调用原prepare所需的首日文件准入／读取不是重扫18天准入。
 
-日清单SHA-256为 `93a70f4775bdb3d52bf7de73d58caaa5ccbf2f2d7f6a8e2f00e09c092e1f1918`；初始化选定文件为97,043字节／792行，SHA-256 `c3bd000a74909abc1725b7bbe0fe3a72ebf7416b772c0ca28af859568c2f9154`。原日集合身份 `66892eab3b355e0c05e13b5e8874ff298b898cb62809a89b208a29e82f8ee281` 与含初始化的组合身份 `2cbd7229cd785a26c9302be87be07cc890f806462f9bec1b7c43bab44f7a54fa` 在旧新两份报告均逐值相同，两者不混称同一摘要。
+日清单SHA-256为 `93a70f4775bdb3d52bf7de73d58caaa5ccbf2f2d7f6a8e2f00e09c092e1f1918`；初始化选定文件为97,043字节／792行，SHA-256 `c3bd000a74909abc1725b7bbe0fe3a72ebf7416b772c0ca28af859568c2f9154`。原日输入集合身份 `input_set_identity_sha256=2cbd7229cd785a26c9302be87be07cc890f806462f9bec1b7c43bab44f7a54fa` 与含初始化的组合来源身份 `source_identity_sha256=66892eab3b355e0c05e13b5e8874ff298b898cb62809a89b208a29e82f8ee281` 在旧新两份报告均逐值相同，两者不混称同一摘要。
 
 仅更换独立输出目录及两个等长运行流ID：公共流由 `complementary-pair-causal-labels-20260909-0000-0012` 改为 `complementary-pair-e2e-remeasure-20260909-0000-0012`，隐藏消费者由 `complementary-pair-causal-labels-hidden-20260909-0000-0012` 改为 `complementary-pair-e2e-remeasure-hidden-20260909-0000-0012`。资源保持读页256行／64MiB、原解码及写批1024行、外排32,768行／64MiB／8路／8GiB、capture 16GiB、candidate 32GiB及其余原字段。未启用4096布局、payload页／压缩候选或首小时40GiB配置。header配置中的v1由原 `effective_header` 形成v2，旧12分钟材料本已使用相同有效排序，不是本次升级。
 
