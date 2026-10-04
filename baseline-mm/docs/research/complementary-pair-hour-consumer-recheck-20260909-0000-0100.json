@@ -1,0 +1,575 @@
+{
+  "schema": "complementary_pair_hour_consumer_recheck_v1",
+  "status": "success",
+  "task": {
+    "issue": 185,
+    "allocation": "现存首小时材料的单次研究消费者复核",
+    "prepare_runs": 0,
+    "research_consumer_runs": 1,
+    "account_runs": 0,
+    "workspace_reruns": 0
+  },
+  "runtime": {
+    "source_commit": "05d5ab8d0fa38ad4c62b9ded70420f221a294f8e",
+    "cargo_lock_sha256": "d48d168915e82e2d5a585c3217aa1e180a628770b34a3e4caf1a2a9398aaf5b4",
+    "binary": {
+      "binary_sha256": "14f9f6fae241c8d6854133f426471b3bd19123612499bf53757463b9db010eeb",
+      "binary_bytes": 15034600
+    },
+    "build_command": "CARGO_TARGET_DIR=<共享外置构建缓存> CARGO_BUILD_JOBS=8 cargo build -p baseline-mm --example research_causal_input --release --locked --offline",
+    "profile": "release",
+    "rustc_version": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "source_file_sha256": {
+      "baseline-mm/examples/research_causal_input.rs": "a0f43161812c367ca24a922c762e545e5d26a5ebe92fbb2baa9dded259fde9d8",
+      "baseline-mm/examples/research_causal_input/first_fit_hour.rs": "b7a1a9cbee95ff243c9601ccc53ccc4d25617e760887fd57999667358fcbe3e8",
+      "baseline-mm/examples/research_causal_input/window_statistics.rs": "a0241161a00bdd43612070d535cec715b50b6658428c00a7f94d3b395b563108",
+      "data-pipeline/core/src/public_observation_core.rs": "5403e661605a412be8bab1b277c99b57f651e9960509638eaf38eb8fa4b2b347",
+      "data-pipeline/training/src/public_replay.rs": "8a25893abd79d8f2f6196b735238e4c2dc9770a6c12ef32362051939ab4285f0"
+    },
+    "command": "/usr/bin/time -v -o <新证据>/research-gnu-time.txt <新证据>/research_causal_input.binary --progress-interval-seconds 30 --first-fit-hour <原证据>/research-config.private.json <新证据>/research-result.private.json",
+    "started_at_utc": "2026-10-04T10:04:34.109371+00:00",
+    "ended_at_utc": "2026-10-04T11:03:00.898949+00:00",
+    "exit_code": 0
+  },
+  "input": {
+    "config_identity": {
+      "bytes": 431,
+      "sha256": "841aa509fea23fd94bd0c784724c425032c609f59aeb06024da7df3d9775bb61"
+    },
+    "config_public_projection": {
+      "public_root": "<原首小时证据>/materials/public",
+      "trial_report_path": "<原首小时证据>/attempt-1/trial.private.json",
+      "read_page_rows": 256,
+      "max_read_batch_bytes": 67108864,
+      "purpose": "#185 first fit hour global History and twelve market slots; no strategy, probability fitting or accounts"
+    },
+    "config_reused_byte_for_byte": true,
+    "trial_identity": {
+      "bytes": 270889,
+      "sha256": "2a2d9a3d23479312a08e7905fecd220002426c39cc34abb69fff3b3e0a6ffd46",
+      "status": "success"
+    },
+    "scope": {
+      "received_end_utc_ms": 1788915600000,
+      "received_start_utc_ms": 1788912000000
+    },
+    "input_set_identity_sha256": "2cbd7229cd785a26c9302be87be07cc890f806462f9bec1b7c43bab44f7a54fa",
+    "source_identity_sha256": "0652289ac9408c1b0f5b2a509c3be20d2b32addf566d58906f2b4d19f49b6d66",
+    "normal_prefix": {
+      "input_stream_id": "complementary-pair-first-fit-hour-budget-20260909-0000-0100",
+      "next_canonical_position": 1200986,
+      "next_group_position": 1200918,
+      "next_input_position": 1201039,
+      "next_observation_position": 10706772,
+      "next_public_index_position": 1200918,
+      "normal_end": true,
+      "stable_storage_ref": "stable-00000000000000000000"
+    },
+    "prepared_expected_normal_prefix": {
+      "input_stream_id": "complementary-pair-first-fit-hour-budget-20260909-0000-0100",
+      "next_canonical_position": 1200986,
+      "next_group_position": 1200918,
+      "next_input_position": 1201039,
+      "next_observation_position": 10706772,
+      "next_public_index_position": 1200918,
+      "normal_end": true,
+      "stable_storage_ref": "stable-00000000000000000000"
+    },
+    "initialization_input_positions": [
+      0,
+      1,
+      2
+    ],
+    "public_readonly_metadata": {
+      "scope": "file size and mtime only, no captured rehash",
+      "files": [
+        {
+          "relative_path": "historical-initialization.json",
+          "before_bytes": 874,
+          "after_bytes": 874,
+          "before_mtime_ns": 1791040918479982618,
+          "after_mtime_ns": 1791040918479982618,
+          "unchanged": true
+        },
+        {
+          "relative_path": "stream.json",
+          "before_bytes": 358,
+          "after_bytes": 358,
+          "before_mtime_ns": 1791037861933670881,
+          "after_mtime_ns": 1791037861933670881,
+          "unchanged": true
+        },
+        {
+          "relative_path": "stable-00000000000000000000/prefix.json",
+          "before_bytes": 318,
+          "after_bytes": 318,
+          "before_mtime_ns": 1791040918458982466,
+          "after_mtime_ns": 1791040918458982466,
+          "unchanged": true
+        },
+        {
+          "relative_path": "stable-00000000000000000000/captured.parquet",
+          "before_bytes": 21758026732,
+          "after_bytes": 21758026732,
+          "before_mtime_ns": 1791040918347981660,
+          "after_mtime_ns": 1791040918347981660,
+          "unchanged": true
+        }
+      ]
+    },
+    "captured_full_rehash_performed": false
+  },
+  "results": {
+    "counts": {
+      "initialization/groups": 3,
+      "initialization/observations": 4,
+      "research/groups": 1200915,
+      "research/observations": 10706768
+    },
+    "actual_market_catalog_count": 14,
+    "expected_five_minute_slots_count": 12,
+    "market_count": 12,
+    "markets_summary": [
+      {
+        "identity": {
+          "clob_market_id": "4352318",
+          "condition_id": "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20",
+          "window": {
+            "end_at_utc_ms": 1788912300000,
+            "start_at_utc_ms": 1788912000000
+          }
+        },
+        "frozen_sampling_count": 8,
+        "descriptive_window_count": 40,
+        "first_terminal_visible_at_utc_ms": 1788912418265,
+        "first_terminal_quality": "fresh",
+        "winning_outcome": "Up",
+        "latest_terminal_usable": true,
+        "latest_terminal_quality": "fresh",
+        "labels_not_backfilled_into_features": true
+      },
+      {
+        "identity": {
+          "clob_market_id": "4352362",
+          "condition_id": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe",
+          "window": {
+            "end_at_utc_ms": 1788912600000,
+            "start_at_utc_ms": 1788912300000
+          }
+        },
+        "frozen_sampling_count": 8,
+        "descriptive_window_count": 40,
+        "first_terminal_visible_at_utc_ms": 1788912718592,
+        "first_terminal_quality": "fresh",
+        "winning_outcome": "Up",
+        "latest_terminal_usable": true,
+        "latest_terminal_quality": "fresh",
+        "labels_not_backfilled_into_features": true
+      },
+      {
+        "identity": {
+          "clob_market_id": "4352365",
+          "condition_id": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e",
+          "window": {
+            "end_at_utc_ms": 1788912900000,
+            "start_at_utc_ms": 1788912600000
+          }
+        },
+        "frozen_sampling_count": 8,
+        "descriptive_window_count": 40,
+        "first_terminal_visible_at_utc_ms": 1788913017591,
+        "first_terminal_quality": "fresh",
+        "winning_outcome": "Up",
+        "latest_terminal_usable": true,
+        "latest_terminal_quality": "fresh",
+        "labels_not_backfilled_into_features": true
+      },
+      {
+        "identity": {
+          "clob_market_id": "4352438",
+          "condition_id": "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92",
+          "window": {
+            "end_at_utc_ms": 1788913200000,
+            "start_at_utc_ms": 1788912900000
+          }
+        },
+        "frozen_sampling_count": 8,
+        "descriptive_window_count": 40,
+        "first_terminal_visible_at_utc_ms": 1788913317785,
+        "first_terminal_quality": "fresh",
+        "winning_outcome": "Down",
+        "latest_terminal_usable": true,
+        "latest_terminal_quality": "fresh",
+        "labels_not_backfilled_into_features": true
+      },
+      {
+        "identity": {
+          "clob_market_id": "4352583",
+          "condition_id": "0xb72a5eb555e27c5bbfe0135aa29830322dfab540cffe0bb0245ad128ca69735d",
+          "window": {
+            "end_at_utc_ms": 1788913500000,
+            "start_at_utc_ms": 1788913200000
+          }
+        },
+        "frozen_sampling_count": 8,
+        "descriptive_window_count": 40,
+        "first_terminal_visible_at_utc_ms": 1788913647884,
+        "first_terminal_quality": "fresh",
+        "winning_outcome": "Down",
+        "latest_terminal_usable": true,
+        "latest_terminal_quality": "fresh",
+        "labels_not_backfilled_into_features": true
+      },
+      {
+        "identity": {
+          "clob_market_id": "4352721",
+          "condition_id": "0x6dba589a2337d36e4d5b8f80d9b8fb98b1b2bee47b5115e62591d49a64a2d18f",
+          "window": {
+            "end_at_utc_ms": 1788913800000,
+            "start_at_utc_ms": 1788913500000
+          }
+        },
+        "frozen_sampling_count": 8,
+        "descriptive_window_count": 40,
+        "first_terminal_visible_at_utc_ms": 1788913948747,
+        "first_terminal_quality": "fresh",
+        "winning_outcome": "Down",
+        "latest_terminal_usable": true,
+        "latest_terminal_quality": "fresh",
+        "labels_not_backfilled_into_features": true
+      },
+      {
+        "identity": {
+          "clob_market_id": "4352732",
+          "condition_id": "0x9696075cf9e8c49a72fc118757f5337852edb6074f3b0cb4b68dfe3af820689c",
+          "window": {
+            "end_at_utc_ms": 1788914100000,
+            "start_at_utc_ms": 1788913800000
+          }
+        },
+        "frozen_sampling_count": 8,
+        "descriptive_window_count": 40,
+        "first_terminal_visible_at_utc_ms": 1788914218261,
+        "first_terminal_quality": "fresh",
+        "winning_outcome": "Down",
+        "latest_terminal_usable": true,
+        "latest_terminal_quality": "fresh",
+        "labels_not_backfilled_into_features": true
+      },
+      {
+        "identity": {
+          "clob_market_id": "4352839",
+          "condition_id": "0x0eea839dc79607c350b95a0f8fc7f0aca35002a08840a78d6fd8fb8cf4fe34dc",
+          "window": {
+            "end_at_utc_ms": 1788914400000,
+            "start_at_utc_ms": 1788914100000
+          }
+        },
+        "frozen_sampling_count": 8,
+        "descriptive_window_count": 40,
+        "first_terminal_visible_at_utc_ms": 1788914518609,
+        "first_terminal_quality": "fresh",
+        "winning_outcome": "Up",
+        "latest_terminal_usable": true,
+        "latest_terminal_quality": "fresh",
+        "labels_not_backfilled_into_features": true
+      },
+      {
+        "identity": {
+          "clob_market_id": "4352850",
+          "condition_id": "0x7779605166fd2dca2c252e3beb51cced6d29aced5efc9a80a42ff26f6699b60d",
+          "window": {
+            "end_at_utc_ms": 1788914700000,
+            "start_at_utc_ms": 1788914400000
+          }
+        },
+        "frozen_sampling_count": 8,
+        "descriptive_window_count": 40,
+        "first_terminal_visible_at_utc_ms": 1788914918914,
+        "first_terminal_quality": "fresh",
+        "winning_outcome": "Up",
+        "latest_terminal_usable": true,
+        "latest_terminal_quality": "fresh",
+        "labels_not_backfilled_into_features": true
+      },
+      {
+        "identity": {
+          "clob_market_id": "4352872",
+          "condition_id": "0x243d6996836f7dae69159f5b8b7badc9902979ae069e4fe156116197378e7743",
+          "window": {
+            "end_at_utc_ms": 1788915000000,
+            "start_at_utc_ms": 1788914700000
+          }
+        },
+        "frozen_sampling_count": 8,
+        "descriptive_window_count": 40,
+        "first_terminal_visible_at_utc_ms": 1788915118391,
+        "first_terminal_quality": "fresh",
+        "winning_outcome": "Up",
+        "latest_terminal_usable": true,
+        "latest_terminal_quality": "fresh",
+        "labels_not_backfilled_into_features": true
+      },
+      {
+        "identity": {
+          "clob_market_id": "4352919",
+          "condition_id": "0x48c3a2347cd98487a94f490625e4f10c508fec327f092ffa776515a5194db034",
+          "window": {
+            "end_at_utc_ms": 1788915300000,
+            "start_at_utc_ms": 1788915000000
+          }
+        },
+        "frozen_sampling_count": 8,
+        "descriptive_window_count": 40,
+        "first_terminal_visible_at_utc_ms": 1788915448488,
+        "first_terminal_quality": "fresh",
+        "winning_outcome": "Up",
+        "latest_terminal_usable": true,
+        "latest_terminal_quality": "fresh",
+        "labels_not_backfilled_into_features": true
+      },
+      {
+        "identity": {
+          "clob_market_id": "4352956",
+          "condition_id": "0xb4f119292d1ad42f8bfed0833680647890c9890e2c0f2bfe3148c15857899e60",
+          "window": {
+            "end_at_utc_ms": 1788915600000,
+            "start_at_utc_ms": 1788915300000
+          }
+        },
+        "frozen_sampling_count": 8,
+        "descriptive_window_count": 40,
+        "first_terminal_visible_at_utc_ms": null,
+        "first_terminal_quality": null,
+        "winning_outcome": null,
+        "latest_terminal_usable": false,
+        "latest_terminal_quality": "unknown_not_observed",
+        "labels_not_backfilled_into_features": true
+      }
+    ],
+    "frozen_sampling_count": 96,
+    "descriptive_window_count": 480,
+    "right_boundary_diagnostic_count": 12,
+    "global_spot_state_count": 3308,
+    "unique_public_chainlink_fact_count": 3307,
+    "distinct_source_identity_count": 3307,
+    "repeated_research_group_observations": 1197608,
+    "quality_group_denominators": {
+      "\"fresh\"": 1200584,
+      "\"unknown_not_observed\"": 331
+    },
+    "business_details_link": "complementary-pair-first-fit-hour-budget-20260909-0000-0100.json"
+  },
+  "measurement": {
+    "analyze_wall_seconds": 3506.577672868,
+    "gnu_wall_seconds_display": "58:26.78",
+    "gnu_wall_seconds_display_converted": 3506.78,
+    "gnu_user_cpu_seconds": 3353.15,
+    "gnu_system_cpu_seconds": 37.67,
+    "gnu_peak_rss_kib": 733752,
+    "gnu_filesystem_inputs_512b_blocks": 255666480,
+    "gnu_filesystem_outputs_512b_blocks": 118552,
+    "proc_io_before": {
+      "rchar": 9902,
+      "wchar": 0,
+      "syscr": 16,
+      "syscw": 0,
+      "read_bytes": 0,
+      "write_bytes": 0,
+      "cancelled_write_bytes": 0
+    },
+    "proc_io_after": {
+      "rchar": 144705972730,
+      "wchar": 78390,
+      "syscr": 3366837,
+      "syscw": 16236,
+      "read_bytes": 130901237760,
+      "write_bytes": 327680,
+      "cancelled_write_bytes": 0
+    },
+    "proc_io_delta": {
+      "rchar": 144705962828,
+      "wchar": 78390,
+      "syscr": 3366821,
+      "syscw": 16236,
+      "read_bytes": 130901237760,
+      "write_bytes": 327680,
+      "cancelled_write_bytes": 0
+    },
+    "endpoint_rss_kib": 570736,
+    "endpoint_threads": 1,
+    "analyze_boundary": "config读取之后至analyze返回及结果组装；在最终pretty JSON序列化和文件写出之前",
+    "gnu_boundary": "整个研究进程，含config读取、进度、最终结果序列化与写出",
+    "old_analyze_wall_seconds": 11639.226643777,
+    "old_gnu_peak_rss_kib": 671712,
+    "rss_change_kib": 62040,
+    "rss_change_percent": 9.236101186222667,
+    "analyze_time_change_percent": -69.87276062071686,
+    "comparison_limit": "一次跨版本、共享主机／缓存时点观测；未隔离操作或日志成本，不证明稳定倍率，不与旧prepare拼接"
+  },
+  "progress": {
+    "interval_seconds": 30,
+    "stdout_bytes": 0,
+    "stderr_bytes": 78390,
+    "stderr_json_line_count": 123,
+    "non_progress_stderr_line_count": 0,
+    "last_event": {
+      "applied_input_fraction": 1.0,
+      "elapsed_seconds": 3506.079823177,
+      "eta_seconds": null,
+      "failed_stage": null,
+      "known_total_inputs": 1201039,
+      "location_total": null,
+      "schema": "finite_public_replay_progress_v1",
+      "stage": "eof",
+      "validation_total": null,
+      "work": {
+        "applied_inputs": 1201039,
+        "candidate_location_rows_visited": 55610220,
+        "candidate_records_validated": 0,
+        "candidate_target_records_parsed": 109174,
+        "current_input_position": 1201038,
+        "dependency_location_rows_visited": 874,
+        "dependency_records_validated": 29784416,
+        "dependency_target_records_parsed": 1,
+        "end_input_applied": true,
+        "generated_groups": 1200918,
+        "main_records_read": 29784416
+      }
+    },
+    "semantic_note": "replay合作式检查点而非后台心跳；fraction仅Input应用；未知验证／定位总量和ETA为null；End应用后仍可能交付pending组并读取剩余记录；来源先排空pending，再取得replay EOF并返回None；EOF后研究继续最终冻结、汇总和写出，来源没有pending待排空，无独立研究汇总心跳；进度打印成本未独立测量"
+  },
+  "disk_and_shared_cache": {
+    "before_build": {
+      "sample_started_at_utc": "2026-10-04T10:01:47.894965+00:00",
+      "sample_ended_at_utc": "2026-10-04T10:01:48.356049+00:00",
+      "disk_free_bytes": 233671372800,
+      "shared_cache_logical_bytes": 69909764249,
+      "shared_cache_allocated_bytes": 70117502976,
+      "load_average": [
+        "0.68",
+        "0.54",
+        "0.60"
+      ]
+    },
+    "before_run": {
+      "sample_started_at_utc": "2026-10-04T10:03:57.080958+00:00",
+      "sample_ended_at_utc": "2026-10-04T10:03:57.523246+00:00",
+      "disk_free_bytes": 233638936576,
+      "shared_cache_logical_bytes": 69924803296,
+      "shared_cache_allocated_bytes": 70132559872,
+      "load_average": [
+        "2.33",
+        "1.43",
+        "0.93"
+      ]
+    },
+    "after_run": {
+      "sample_started_at_utc": "2026-10-04T11:03:46.458485+00:00",
+      "sample_ended_at_utc": "2026-10-04T11:03:47.021942+00:00",
+      "disk_free_bytes": 233569185792,
+      "shared_cache_logical_bytes": 72884484362,
+      "shared_cache_allocated_bytes": 73064284160,
+      "load_average": [
+        0.98681640625,
+        1.44091796875,
+        1.62060546875
+      ]
+    },
+    "observed_between_prebuild_and_prerun": {
+      "logical_delta": 15039047,
+      "allocated_delta": 15056896
+    },
+    "observed_between_prerun_and_postrun": {
+      "logical_delta": 2959681066,
+      "allocated_delta": 2931724288,
+      "disk_free_delta": -69750784
+    },
+    "note": "逐路径st_size/st_blocks顺序快照，未去重硬链接、非原子、共享；仅两采样时点净变化，不独占归因本任务，不能称运行期缓存增量为0"
+  },
+  "full_comparison": {
+    "input_identities": [
+      {
+        "bytes": 60370521,
+        "sha256": "6a0f578cd64b40b0ca0989f43649be1d7f08ae99e1b78906104b2a60ba2c4ae9",
+        "logical_path": "<原首小时证据>/research-result.private.json"
+      },
+      {
+        "bytes": 60370573,
+        "sha256": "71b009b5812438d75275bd2177b0f13b291e0aca97caa71a9722b3256a60d8ad",
+        "logical_path": "<新证据>/research-result.private.json"
+      }
+    ],
+    "excluded_top_level_fields": [
+      "measurement",
+      "progress_interval_seconds"
+    ],
+    "excluded_original_presence": {
+      "old": {
+        "measurement": true,
+        "progress_interval_seconds": false
+      },
+      "new": {
+        "measurement": true,
+        "progress_interval_seconds": true
+      }
+    },
+    "excluded_progress_original_values": {
+      "old": null,
+      "new": 30
+    },
+    "normalizations": [],
+    "algorithm": "完整两份私有原JSON递归；严格类型和值，完整对象键集合及数组顺序；仅根层两个具名字段排除。旧公开projection不是比较输入。",
+    "visited": {
+      "objects": 184679,
+      "arrays": 15914,
+      "scalar_values": 1048958
+    },
+    "difference_count": 0,
+    "differences": [],
+    "complete_original_exclusions_and_differences": {
+      "logical_path": "comparison.private.json",
+      "bytes": 5474,
+      "sha256": "cb77800f8443c887c8c83543cbb63ff285b4075294a288d6de02aa8f36c73a79"
+    },
+    "public_exclusion_projection_note": "原measurement完整值包括proc状态，保存在私有comparison；本公开结果只投影所需计量，未复制原proc身份／主机细节"
+  },
+  "validation": {
+    "this_round": [
+      "release构建exit0",
+      "唯一研究进程exit0",
+      "完整原结果递归对照差异0",
+      "公开JSON语法／链接／路径检查及git diff --check"
+    ],
+    "reused_source_evidence": {
+      "workspace_passed": 1322,
+      "workspace_failed": 0,
+      "workspace_ignored": 21,
+      "explicit_utc_test_skipped": "four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second",
+      "native_inputs_passed": 11,
+      "rerun_this_round": false
+    },
+    "code_graph": "任务工作树无适用索引；按实际任务源码核对，不以main索引替代"
+  },
+  "not_embedded": {
+    "full_results": [
+      "actual_market_catalog逐字段",
+      "expected_five_minute_slots逐字段",
+      "global_spot完整来源状态／事实／积分／逐对描述",
+      "markets完整96冻结／480窗／12右边界／事后标签来源锚",
+      "cross_source_at_spot_state_updates",
+      "cross_source_spot_update_descriptions",
+      "observations_per_group",
+      "method_note"
+    ],
+    "raw_evidence": [
+      "原二进制",
+      "完整原配置本机路径",
+      "stdout/stderr逐条原进度",
+      "GNU命令本机路径",
+      "完整proc_status_after",
+      "完整comparison中的原measurement排除值"
+    ],
+    "note": "正式业务字段均参与完整比较；本机器摘要未逐项内嵌，以原业务报告／投影及两份私有原结果定位，不声称摘要等于完整结果。SHA用于身份，不单独证明业务正确。"
+  }
+}
