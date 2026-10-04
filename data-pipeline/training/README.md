@@ -69,7 +69,7 @@ TypedRaw Parquet 仍先以原打开的 `File` 完成长度与 SHA 校验，然�
 
 所属[#206深度组内共享对照](docs/binance-depth-shared-owner-12m.md)复用同一原测试驱动，在同配置既有十二分钟public上串行基线/修改后各一次。只有公共观察深度的组内Arc所有权改变，计量/扫描/EOF不改；完整JSON兼容及原值由独立改动前夹具验证。一次对照不是稳定比例，也不解决完整研究持久规模。
 
-当前 core 在该组内共享基础上保留一个当前不可变的 Binance 完整观测投影。未发生深度处理时，后续组复用该 Arc；每次 Snapshot/Update 进入原归约器前及应用真实深度事实时失效，下一组沿原完整公式懒建。唯一归约器仍拥有数量和证据，投影不参与归约；旧在途组自行保留旧值，释放后不由当前引用永久保留。每个观察自己的组位置与可见前缀继续逐组生成，原质量、锚点、事实、完整 JSON 和持久录制保持。一个当前强引用不是全进程单份值或内存上限。
+当前 core 在该组内共享基础上保留一个当前不可变的 Binance 完整观测投影。未发生深度处理时，后续组复用该 Arc；每次 Snapshot/Update 进入原归约器前及应用真实深度事实时失效，下一组沿原完整公式懒建。唯一归约器仍拥有数量和证据，投影不参与归约；旧在途组自行保留旧值，释放后不由当前引用永久保留。每个观察自己的组位置与可见前缀继续逐组生成，原质量、锚点、事实、完整 JSON 和持久录制保持。一个当前强引用不是全进程单份值或内存上限。原完整值/JSON、生命周期反例及本次单对照174.54→140.28秒的覆盖和限制见[当前投影复用报告](docs/binance-depth-current-projection-12m.md)及[机器投影](docs/binance-depth-current-projection-12m.json)。
 
 所属[#208记录布局与容量分解](docs/public-recording-layout-12m.md)只在测试构建用原RunCursor/SequentialCaptureWriter执行有限4096候选；原key/payload不重序列化，稳定分片/header/prefix/初始化保持。两个布局ignored测试通过`DPT_RECORDING_LAYOUT_CONFIG` / `DPT_RECORDING_LAYOUT_REPORT`显式提供本次原根、新根、recording和读取参数，配置字段见[机器结果](docs/public-recording-layout-12m.json)。唯一实际顺序为重编码、原新字节/前缀比较、原#202新布局重放；第二段同遍历复用原observe/EOF前缀闭合，不声称完整走next_row的I/O/错误路径。结果仅支持本次内容等价可行，文件减0.732%且未见明确重放改善，不修改生产默认或作为长期预算。普通回归不运行真实材料；实际范围仍由准确任务合同指定。
 
