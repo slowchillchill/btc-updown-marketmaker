@@ -24,6 +24,9 @@ import { Topology } from "./Topology";
 import { Economics, Field, MarketSummary } from "./Economics";
 import { EventTable } from "./EventTable";
 import { Timeline } from "./Timeline";
+import { ExecutionProjection } from "./ExecutionProjection";
+import { NoePanel, useNoe } from "./Noe";
+import { SourceIdentity } from "./SourceIdentity";
 import { usePublicBrowse } from "./PublicBrowse";
 const views = [
   ["overview", "模块总览"],
@@ -114,12 +117,22 @@ export default function App() {
     ready: snapshot?.public_recording.status === "ready",
     onSelect: select,
   });
+  const noe = useNoe(run);
   const stream = text(at(snapshot?.public_recording.header, "input_stream_id"));
   const publicOnly =
     !report && !text(at(metadata, "config", "session", "run_id"));
+  const noeOnly =
+    publicOnly &&
+    snapshot?.public_recording.status !== "ready" &&
+    !!snapshot?.noe_results.length;
   const marketIds = [
     ...new Set([
       ...reportMarkets.flatMap((m) =>
+        text(at(m, "condition_id")) ? [text(at(m, "condition_id"))!] : [],
+      ),
+      ...list(
+        at(report, "ledger_consumed_memory", "market_projections"),
+      ).flatMap((m) =>
         text(at(m, "condition_id")) ? [text(at(m, "condition_id"))!] : [],
       ),
       ...allRows.flatMap((r) => r.markets?.map((m) => m.condition) ?? []),
@@ -180,7 +193,9 @@ export default function App() {
       ? "历史报告"
       : source === "metadata"
         ? "启动元数据"
-        : "公共稳定记录";
+        : source === "noe"
+          ? "NOE 解码记录"
+          : "公共稳定记录";
   const evidencePanel = (
     <section className="evidence-panel">
       <h2>所选事实</h2>
@@ -440,7 +455,9 @@ export default function App() {
             <h1>
               {view === "overview"
                 ? publicOnly
-                  ? "公共流总览"
+                  ? noeOnly
+                    ? "NOE 来源总览"
+                    : "公共流总览"
                   : "运行总览"
                 : views.find(([id]) => id === view)?.[1]}{" "}
               <span>原事实 · 可回查</span>
@@ -466,10 +483,20 @@ export default function App() {
         {snapshot && (
           <>
             <div className="run-strip">
-              <b>{report ? "backtest" : "公共历史材料"}</b>
+              <b>
+                {report
+                  ? "backtest"
+                  : noeOnly
+                    ? "显式 NOE 引用"
+                    : "公共历史材料"}
+              </b>
               <span>{snapshot.label}</span>
               {publicOnly ? (
-                <span>公共流 · {stream ?? "未交接 input_stream_id"}</span>
+                <span>
+                  {noeOnly
+                    ? "NOE 单引用 · 报告/公共流未接入"
+                    : `公共流 · ${stream ?? "未交接 input_stream_id"}`}
+                </span>
               ) : (
                 <>
                   <span>历史入口 · {fact(at(report, "end_reason"))}</span>
@@ -480,9 +507,14 @@ export default function App() {
                 </>
               )}
               <span>
-                稳定公共组边界{" "}
+                {noeOnly ? "显式引用数" : "稳定公共组边界"}{" "}
                 {fact(
-                  at(snapshot.public_recording.prefix, "next_group_position"),
+                  noeOnly
+                    ? snapshot.noe_results.length.toString()
+                    : at(
+                        snapshot.public_recording.prefix,
+                        "next_group_position",
+                      ),
                 )}
               </span>
             </div>
@@ -490,14 +522,23 @@ export default function App() {
               {publicOnly ? (
                 <>
                   <span>
-                    公共流 <code>{stream ?? "未交接"}</code>
+                    {noeOnly ? "NOE 来源" : "公共流"}{" "}
+                    <code>
+                      {noeOnly
+                        ? `${snapshot.noe_results.length} 个显式引用`
+                        : (stream ?? "未交接")}
+                    </code>
                   </span>
                   <span>
-                    已读范围{" "}
+                    {noeOnly ? "单引用读取" : "已读范围"}{" "}
                     <code>
-                      {page
-                        ? `[${page.row_start}, ${page.total_returned_rows})`
-                        : "尚未读页"}
+                      {noeOnly
+                        ? noe.loaded
+                          ? `配置索引 ${noe.loaded.index} · ${noe.loaded.status}`
+                          : "尚未加载"
+                        : page
+                          ? `[${page.row_start}, ${page.total_returned_rows})`
+                          : "尚未读页"}
                     </code>
                   </span>
                   <span>
@@ -558,8 +599,26 @@ export default function App() {
                 </select>
               </label>
             </div>
+            <SourceIdentity
+              report={report}
+              metadata={metadata}
+              header={snapshot.public_recording.header ?? undefined}
+              reportVersion={at(
+                snapshot.report.exact ?? undefined,
+                "economics_version",
+              )}
+              metadataVersion={at(
+                snapshot.metadata.exact ?? undefined,
+                "economics_version",
+              )}
+              onSelect={select}
+            />
             <div className="notice">
-              {publicOnly ? "固定公共前缀与有限已读范围" : "终态快照与有限时序"}{" "}
+              {noeOnly
+                ? "显式 NOE 单引用；报告和公共流未接入"
+                : publicOnly
+                  ? "固定公共前缀与有限已读范围"
+                  : "终态快照与有限时序"}{" "}
               ·
               公共输入按固定前缀和已读范围浏览；报告不代表完整逐次诊断、执行或经济历史。查看市场是浏览选择，不代表策略当前活跃市场。
             </div>
@@ -578,6 +637,17 @@ export default function App() {
                         publicBrowse.playing ? publicBrowse.playFact : null
                       }
                       publicRows={allRows}
+                      noeCount={snapshot.noe_results.length}
+                      publicReady={snapshot.public_recording.status === "ready"}
+                      noeSelection={
+                        noe.loaded?.status === "ready"
+                          ? {
+                              source: "noe",
+                              path: `/noe/${noe.loaded.index}/exact/record`,
+                              value: at(noe.loaded.exact, "record")!,
+                            }
+                          : undefined
+                      }
                       onSelect={select}
                     />
                   </section>
@@ -689,32 +759,17 @@ export default function App() {
             {view === "execution" && (
               <>
                 <section>
-                  <h2>意图、预留与执行反馈</h2>
-                  <p className="gap">
-                    逐批意图、即时分派回执、订单 / 成交和逐条 NOE
-                    未接入。没有反馈证据不等于零成交。报告的未闭合项和预留投影只代表保存边界。
-                  </p>
-                  {[
-                    [
-                      "本地预留投影",
-                      "ledger_consumed_memory/local_pending_reservation_projection",
-                    ],
-                    [
-                      "平台确认投影",
-                      "ledger_consumed_memory/platform_confirmed_projection",
-                    ],
-                    ["NOE 耐久位置", "durable_noe_prefix"],
-                    ["待账本应用 NOE", "pending_noe_records"],
-                  ].map(([label, key]) => (
-                    <Field
-                      key={key}
-                      label={label}
-                      path={"/" + key}
-                      report={report}
-                      onSelect={select}
-                    />
-                  ))}
+                  <ExecutionProjection
+                    report={report}
+                    condition={condition}
+                    onSelect={select}
+                  />
                 </section>
+                <NoePanel
+                  index={snapshot.noe_results}
+                  state={noe}
+                  onSelect={select}
+                />
                 {evidencePanel}
               </>
             )}

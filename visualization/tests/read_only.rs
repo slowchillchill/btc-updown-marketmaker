@@ -71,6 +71,7 @@ async fn production_range_end_report_and_missing_metadata_are_independent_read_o
                 report: Some(config.result_path.clone()),
                 metadata: Some(temp.path().join("missing.json")),
                 public_recording: None,
+                noe_results: vec![],
             }],
         })
         .unwrap(),

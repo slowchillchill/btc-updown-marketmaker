@@ -5138,6 +5138,7 @@ dependencies = [
  "data-collect",
  "data-pipeline-core",
  "data-pipeline-training",
+ "execution-normalization",
  "ledger",
  "num-bigint",
  "rust_decimal",

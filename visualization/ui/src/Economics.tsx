@@ -14,7 +14,9 @@ export function Field({
   const segments = path.slice(1).split("/");
   const value = at(report, ...segments);
   const condition =
-    segments[0] === "account_economics_memory" && segments[1] === "markets"
+    (segments[0] === "account_economics_memory" && segments[1] === "markets") ||
+    (segments[0] === "ledger_consumed_memory" &&
+      segments[1] === "market_projections")
       ? at(report, ...segments.slice(0, 3), "condition_id")
       : undefined;
   return (

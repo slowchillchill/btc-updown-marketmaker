@@ -4,7 +4,7 @@ import { at, type Json } from "./facts";
 import type { Page } from "./evidence";
 // 展示引用与泳道标签；原领域记录仍是完整 rows，不建立事件归约或领域主键。
 export type Evidence = {
-  source: "report" | "metadata" | "public";
+  source: "report" | "metadata" | "public" | "noe";
   path: string;
   value: Json;
   condition?: string;

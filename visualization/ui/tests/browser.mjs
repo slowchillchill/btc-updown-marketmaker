@@ -308,11 +308,11 @@ try {
     /79 \/ 10/,
   );
   assert.match(
-    await page.locator(".fact-grid").first().textContent(),
+    await page.locator(".fact-grid:visible").first().textContent(),
     /Unavailable/,
   );
   assert.match(
-    await page.locator(".fact-grid").first().textContent(),
+    await page.locator(".fact-grid:visible").first().textContent(),
     /9007199254740993 \/ 7/,
   );
   assert.match(

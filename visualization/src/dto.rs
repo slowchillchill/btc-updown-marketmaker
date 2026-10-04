@@ -13,6 +13,15 @@ pub struct RunSourceConfig {
     pub report: Option<PathBuf>,
     pub metadata: Option<PathBuf>,
     pub public_recording: Option<PublicSourceConfig>,
+    #[serde(default)]
+    pub noe_results: Vec<NoeSourceConfig>,
+}
+#[derive(Debug, Deserialize, Serialize)]
+pub struct NoeSourceConfig {
+    pub label: String,
+    /// 引用没有载荷版本；调用者明确指定公开 reader，不依次尝试。
+    pub version: String,
+    pub reference_file: PathBuf,
 }
 #[derive(Debug, Deserialize)]
 pub struct PublicSourceConfig {
@@ -40,6 +49,7 @@ pub struct Snapshot {
     pub report: Document,
     pub metadata: Document,
     pub public_recording: Value,
+    pub noe_results: Vec<Value>,
     pub gaps: Vec<&'static str>,
 }
 /// 数字字符串是必要的传输表示，不改变金额、身份、时间或枚举值。

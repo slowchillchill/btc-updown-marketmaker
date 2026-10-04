@@ -1,3 +1,4 @@
+import type { NoeIndex } from "./Noe";
 import { useState } from "react";
 import { fact, statusLabel, type Json } from "./facts";
 export type Doc = {
@@ -17,6 +18,7 @@ export type Snapshot = {
   metadata: Doc;
   public_recording: Record<string, Json>;
   gaps: string[];
+  noe_results: NoeIndex[];
 };
 export type Page = {
   page: string;
