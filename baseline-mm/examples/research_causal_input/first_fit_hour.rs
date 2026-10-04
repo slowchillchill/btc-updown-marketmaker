@@ -122,7 +122,7 @@ fn observe_group(
     }
     history.updates.len() != before
 }
-fn analyze(config: &HourConfig) -> Result<Value> {
+fn analyze(config: &HourConfig, progress_seconds: u64) -> Result<Value> {
     let raw_trial: Value = serde_json::from_slice(&fs::read(&config.trial_report_path)?)?;
     let binding: TrialBinding = serde_json::from_value(raw_trial.clone())?;
     let start = binding.scope.received_start_utc_ms;
@@ -157,12 +157,16 @@ fn analyze(config: &HourConfig) -> Result<Value> {
             .join(&binding.hidden_preparation.prefix.stable_storage_ref)
             .join("prefix.json"),
     )?)?;
-    let source = RecordedPublicGroupSourceV1::open(
+    let mut source = RecordedPublicGroupSourceV1::open(
         &config.public_root,
         config.read_page_rows,
         config.max_read_batch_bytes,
         OriginalVisibility::default(),
     )?;
+    source.set_progress(
+        std::time::Duration::from_secs(progress_seconds),
+        std::io::stderr(),
+    );
     let mut history = History::default();
     let mut latest_global = None;
     let mut counts = BTreeMap::<String, u64>::new();
@@ -263,11 +267,12 @@ fn analyze(config: &HourConfig) -> Result<Value> {
         "method_note":"每完整组最多一份完整spot观察形成唯一History；事实位置另按原records一次计数。交叉来源小投影按spot状态变化及冻结截止保存，最新接收锚/省略数明确，不存完整L2/谱系，不声称覆盖所有Binance独立创新。标签另存不参与特征。"}),
     )
 }
-pub(super) fn run(config_path: &str, output_path: &str) -> Result<()> {
+pub(super) fn run(config_path: &str, output_path: &str, progress_seconds: u64) -> Result<()> {
     let config: HourConfig = serde_json::from_slice(&fs::read(config_path)?)?;
     let before = fs::read_to_string("/proc/self/io")?;
     let began = Instant::now();
-    let mut report = analyze(&config)?;
+    let mut report = analyze(&config, progress_seconds)?;
+    report["progress_interval_seconds"] = json!(progress_seconds);
     report["measurement"] = json!({"wall_seconds":began.elapsed().as_secs_f64(),"proc_io_before":before,
         "proc_io_after":fs::read_to_string("/proc/self/io")?,"proc_status_after":fs::read_to_string("/proc/self/status")?});
     fs::write(output_path, serde_json::to_vec_pretty(&report)?)?;

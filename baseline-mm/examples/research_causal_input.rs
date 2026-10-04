@@ -608,7 +608,7 @@ impl TargetRun {
         )
     }
 }
-fn analyze(config: &Config) -> Result<Value> {
+fn analyze(config: &Config, progress_seconds: u64) -> Result<Value> {
     let binding: TrialBinding = serde_json::from_slice(&fs::read(&config.trial_report_path)?)?;
     let actual_prefix: CommittedIngressPrefixV1 = serde_json::from_slice(&fs::read(
         config
@@ -616,12 +616,16 @@ fn analyze(config: &Config) -> Result<Value> {
             .join(&binding.hidden_preparation.prefix.stable_storage_ref)
             .join("prefix.json"),
     )?)?;
-    let source = RecordedPublicGroupSourceV1::open(
+    let mut source = RecordedPublicGroupSourceV1::open(
         &config.public_root,
         config.read_page_rows,
         config.max_read_batch_bytes,
         OriginalVisibility::default(),
     )?;
+    source.set_progress(
+        std::time::Duration::from_secs(progress_seconds),
+        std::io::stderr(),
+    );
     let mut targets = config
         .target_markets
         .iter()
@@ -685,20 +689,34 @@ mod first_fit_hour;
 mod window_statistics;
 
 fn main() -> Result<()> {
-    let args = std::env::args().skip(1).collect::<Vec<_>>();
+    let mut args = std::env::args().skip(1).collect::<Vec<_>>();
+    let progress_seconds = if args
+        .first()
+        .is_some_and(|s| s == "--progress-interval-seconds")
+    {
+        if args.len() < 2 {
+            return Err("--progress-interval-seconds 缺少秒数".into());
+        }
+        let seconds = args[1].parse::<u64>()?;
+        args.drain(..2);
+        seconds
+    } else {
+        30
+    };
     if args.len() == 3 && args[0] == "--retained-windows" {
         return window_statistics::run(&args[1], &args[2]);
     }
     if args.len() == 3 && args[0] == "--first-fit-hour" {
-        return first_fit_hour::run(&args[1], &args[2]);
+        return first_fit_hour::run(&args[1], &args[2], progress_seconds);
     }
     if args.len() != 2 {
-        return Err("用法 research_causal_input <CONFIG_JSON> <REPORT_JSON> 或 --retained-windows <INPUT_JSON> <REPORT_JSON>".into());
+        return Err("用法 research_causal_input [--progress-interval-seconds <SECONDS>] <CONFIG_JSON> <REPORT_JSON> 或 --retained-windows <INPUT_JSON> <REPORT_JSON>".into());
     }
     let config: Config = serde_json::from_slice(&fs::read(&args[0])?)?;
     let before = fs::read_to_string("/proc/self/io")?;
     let began = Instant::now();
-    let mut report = analyze(&config)?;
+    let mut report = analyze(&config, progress_seconds)?;
+    report["progress_interval_seconds"] = json!(progress_seconds);
     report["measurement"] = json!({"wall_seconds":began.elapsed().as_secs_f64(),"proc_io_before":before,"proc_io_after":fs::read_to_string("/proc/self/io")?,"proc_status_after":fs::read_to_string("/proc/self/status")?});
     fs::write(&args[1], serde_json::to_vec_pretty(&report)?)?;
     Ok(())

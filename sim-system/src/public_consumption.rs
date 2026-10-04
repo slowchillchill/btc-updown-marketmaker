@@ -495,6 +495,15 @@ pub struct RecordedPublicGroupSourceV1<T> {
 }
 #[cfg(any(test, feature = "public-consumption"))]
 impl<T: PublicConsumptionTimeSourceV1> RecordedPublicGroupSourceV1<T> {
+    /// 只转交同一有限replay的可选进度，不建立第二份计数或运行状态。
+    pub fn set_progress(
+        &mut self,
+        interval: std::time::Duration,
+        output: impl std::io::Write + Send + 'static,
+    ) {
+        self.replay.set_progress(interval, output);
+    }
+
     pub fn open(
         root: &std::path::Path,
         page_rows: usize,

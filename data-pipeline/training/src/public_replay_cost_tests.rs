@@ -550,3 +550,175 @@ fn saved_ref_early_match_bad_eof_fails_before_apply_in_both_modes() {
         );
     }
 }
+
+#[derive(Clone, Default)]
+struct ProgressBuffer(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+impl std::io::Write for ProgressBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+impl ProgressBuffer {
+    fn lines(&self) -> Vec<Value> {
+        String::from_utf8(self.0.lock().unwrap().clone())
+            .unwrap()
+            .lines()
+            .map(|s| serde_json::from_str(s).unwrap())
+            .collect()
+    }
+}
+fn progress_returns(
+    root: &Path,
+    interval: std::time::Duration,
+    sink: impl std::io::Write + Send + 'static,
+) -> (Vec<Value>, RecordingResult<()>) {
+    let mut replay = PublicReplayV1::open(root, 1, 1 << 20).unwrap();
+    replay.set_progress(interval, sink);
+    let mut values = vec![];
+    let result = loop {
+        match replay.next_prepared_applied() {
+            Ok(Some((i,a,pm))) => values.push(json!({"input":i,"complete_applied":fingerprint(&a),"prepared_pm_message":pm.as_ref().map(|p|p.message())})),
+            Ok(None) => break Ok(()),
+            Err(e) => break Err(e),
+        }
+    };
+    (values, result)
+}
+#[test]
+fn production_progress_preserves_complete_results_and_real_read_vs_apply_counts() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("public");
+    reference_fixture(&root, 60);
+    let quiet = ProgressBuffer::default();
+    let (off, result) = progress_returns(&root, std::time::Duration::ZERO, quiet.clone());
+    result.unwrap();
+    assert!(quiet.lines().is_empty());
+    assert_eq!(off, complete_returns(&root, false).0);
+    // 原诊断仅在小夹具中保存完整候选页和依赖输出，逐字段核开关不改变供料。
+    for window in [30, 60] {
+        let comparison = temp.path().join(format!("pages-{window}"));
+        reference_fixture(&comparison, window);
+        let mut evidence = Vec::new();
+        for interval in [
+            std::time::Duration::ZERO,
+            std::time::Duration::from_secs(30),
+        ] {
+            let session = cost::Session::enable();
+            session.configure(false, 0, true);
+            let (values, result) =
+                progress_returns(&comparison, interval, ProgressBuffer::default());
+            result.unwrap();
+            let report = cost::report_value(session.finish());
+            evidence.push(json!({"values":values,"candidate_pages":report["candidate_pages"],"dependency_outputs":report["dependency_outputs"]}));
+        }
+        assert_eq!(evidence[0], evidence[1]);
+        assert!(
+            !evidence[0]["candidate_pages"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+    }
+    let output = ProgressBuffer::default();
+    let (on, result) = progress_returns(&root, std::time::Duration::from_nanos(1), output.clone());
+    result.unwrap();
+    assert_eq!(on, off);
+    let snapshots = output.lines();
+    let validating = snapshots
+        .iter()
+        .find(|v| {
+            v["stage"] == "dependency_validation"
+                && v["work"]["dependency_records_validated"].as_u64().unwrap() > 0
+        })
+        .unwrap();
+    assert_eq!(validating["work"]["current_input_position"], 2);
+    assert_eq!(validating["work"]["applied_inputs"], 2);
+    assert_eq!(validating["known_total_inputs"], 4);
+    assert_eq!(validating["applied_input_fraction"], 0.5);
+    assert!(validating["validation_total"].is_null() && validating["eta_seconds"].is_null());
+    let last = snapshots.last().unwrap();
+    assert_eq!(last["stage"], "eof");
+    assert_eq!(last["work"]["applied_inputs"], 4);
+    assert_eq!(last["applied_input_fraction"], 1.0);
+    assert_eq!(last["work"]["end_input_applied"], true);
+    assert!(
+        last["work"]["dependency_location_rows_visited"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
+    assert_eq!(last["work"]["dependency_target_records_parsed"], 1);
+    // 正常prefix的实际总量才能形成比例；无正常End的合法稳定视图总量未知。
+    let unknown = temp.path().join("unknown");
+    historical_identity_fixture(&unknown);
+    let output = ProgressBuffer::default();
+    let (_, result) =
+        progress_returns(&unknown, std::time::Duration::from_secs(30), output.clone());
+    result.unwrap();
+    assert!(
+        output
+            .lines()
+            .iter()
+            .all(|v| v["known_total_inputs"].is_null()
+                && v["applied_input_fraction"].is_null()
+                && v["eta_seconds"].is_null())
+    );
+    assert_eq!(
+        output.lines().last().unwrap()["work"]["end_input_applied"],
+        false
+    );
+}
+#[derive(Clone, Default)]
+struct FailedProgress(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+impl std::io::Write for FailedProgress {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Err(std::io::Error::new(
+            std::io::ErrorKind::BrokenPipe,
+            "progress output closed",
+        ))
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+#[test]
+fn production_progress_failure_cannot_replace_business_error_or_apply_failed_input() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("public");
+    reference_fixture(&root, 60);
+    let failed = FailedProgress::default();
+    let (actual, result) =
+        progress_returns(&root, std::time::Duration::from_nanos(1), failed.clone());
+    result.unwrap();
+    assert_eq!(actual, complete_returns(&root, false).0);
+    assert_eq!(failed.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+    let mut prefix = configured(&root).expected_normal_prefix;
+    prefix.next_canonical_position += 1;
+    fs::write(
+        root.join(&prefix.stable_storage_ref).join("prefix.json"),
+        serde_json::to_vec(&prefix).unwrap(),
+    )
+    .unwrap();
+    let quiet = ProgressBuffer::default();
+    let (off, result) = progress_returns(&root, std::time::Duration::ZERO, quiet);
+    let original = result.unwrap_err().to_string();
+    assert_eq!(original, "稳定分片内容与前缀计数不符");
+    let output = ProgressBuffer::default();
+    let (on, result) = progress_returns(&root, std::time::Duration::from_nanos(1), output.clone());
+    assert_eq!(result.unwrap_err().to_string(), original);
+    assert_eq!(on, off);
+    let last = output.lines().last().unwrap().clone();
+    assert_eq!(last["stage"], "error");
+    assert_eq!(last["failed_stage"], "dependency_validation");
+    assert_eq!(last["work"]["applied_inputs"], 2);
+    assert_eq!(last["work"]["current_input_position"], 2);
+    let failed = FailedProgress::default();
+    let (_, result) = progress_returns(&root, std::time::Duration::from_nanos(1), failed.clone());
+    assert_eq!(result.unwrap_err().to_string(), original);
+    assert_eq!(failed.0.load(std::sync::atomic::Ordering::Relaxed), 1);
+}
