@@ -1,6 +1,9 @@
 //! 仅测试构建的有限重放诊断；默认关闭，不提供生产接口。
 use super::*;
-use std::{cell::RefCell, time::Instant};
+use std::{
+    cell::{Cell, RefCell},
+    time::{Duration, Instant},
+};
 const PRIMARY: [&str; 6] = [
     "main_drain",
     "identity",
@@ -12,6 +15,34 @@ const PRIMARY: [&str; 6] = [
 const RETAIN_SCANS: usize = 128;
 const RETAIN_SLOW: usize = 16;
 thread_local! { static STATE: RefCell<Option<Report>> = const { RefCell::new(None) }; }
+thread_local! { static DECODE_ROLE: Cell<Option<&'static str>> = const { Cell::new(None) }; }
+#[derive(Default, Serialize)]
+struct DecodeCounts {
+    metadata_loads: u64,
+    metadata_load_ns: u128,
+    row_group_open_ns: u128,
+    successful_batch_decode_and_rows_ns: u128,
+    max_parquet_metadata_estimate_bytes: usize,
+    row_groups_opened: u64,
+    batches: u64,
+    rows: u64,
+    max_sort_row_resident_bytes: usize,
+    max_arrow_batch_bytes: usize,
+}
+#[derive(Default, Serialize)]
+struct ProgressCounts {
+    checks: u64,
+    emissions: u64,
+    emission_ns: u128,
+    applied_inputs: u64,
+    applied_groups: u64,
+    index_validated_rows: u64,
+    original_candidate_validated_rows: u64,
+    dependency_validated_rows: u64,
+    index_len: usize,
+    index_capacity: usize,
+    index_item_size_bytes: usize,
+}
 #[derive(Default, Serialize)]
 pub(crate) struct Times {
     calls: u64,
@@ -123,6 +154,22 @@ pub(crate) struct Report {
     last_entry: Option<Entry>,
     #[serde(skip)]
     current: Option<Entry>,
+    decode_by_role: BTreeMap<&'static str, DecodeCounts>,
+    progress: ProgressCounts,
+    candidate_pages: Vec<serde_json::Value>,
+    candidate_page_evidence_ns: u128,
+    #[serde(skip)]
+    original_candidates: bool,
+    #[serde(skip)]
+    capture_pages: bool,
+    #[serde(skip)]
+    progress_every: Duration,
+    #[serde(skip)]
+    began: Option<Instant>,
+    #[serde(skip)]
+    last_progress: Option<Instant>,
+    #[serde(skip)]
+    known_total_inputs: Option<u64>,
 }
 pub(crate) struct Session;
 impl Session {
@@ -134,9 +181,144 @@ impl Session {
         });
         Self
     }
+    pub(crate) fn configure(&self, original: bool, interval: u64, pages: bool) {
+        STATE.with(|s| {
+            let mut s = s.borrow_mut();
+            let r = s.as_mut().unwrap();
+            r.original_candidates = original;
+            r.capture_pages = pages;
+            r.progress_every = Duration::from_secs(interval);
+            r.began = Some(Instant::now());
+            r.last_progress = r.began;
+        });
+    }
     pub(crate) fn finish(self) -> Report {
         STATE.with(|s| s.borrow_mut().take().unwrap())
     }
+}
+pub(crate) fn original_candidates() -> bool {
+    STATE.with(|s| s.borrow().as_ref().is_some_and(|r| r.original_candidates))
+}
+pub(crate) fn known_total(prefix: Option<&CommittedIngressPrefixV1>) {
+    STATE.with(|s| {
+        if let Some(r) = s.borrow_mut().as_mut() {
+            r.known_total_inputs = prefix
+                .filter(|p| p.normal_end)
+                .map(|p| p.next_input_position);
+        }
+    });
+}
+pub(crate) fn applied_work(inputs: u64, groups: u64) {
+    STATE.with(|s| {
+        if let Some(r) = s.borrow_mut().as_mut() {
+            r.progress.applied_inputs = inputs;
+            r.progress.applied_groups = groups;
+        }
+    });
+    progress("applied", false);
+}
+pub(crate) fn progress(stage: &'static str, force: bool) {
+    STATE.with(|s| {
+        let mut s=s.borrow_mut(); let Some(r)=s.as_mut() else{return};
+        let Some(began)=r.began else{return};
+        if r.progress_every.is_zero() {return;}
+        r.progress.checks+=1;
+        let now=Instant::now();
+        if !force && now.duration_since(r.last_progress.unwrap())<r.progress_every {return;}
+        r.last_progress=Some(now);
+        let emission=Instant::now();
+        let row=serde_json::json!({"stage":stage,"elapsed_seconds":began.elapsed().as_secs_f64(),
+            "applied_inputs":r.progress.applied_inputs,"applied_input_total":r.known_total_inputs,
+            "applied_input_ratio_only":r.known_total_inputs.map(|n|r.progress.applied_inputs as f64/n as f64),
+            "applied_groups":r.progress.applied_groups,"index_validated_rows":r.progress.index_validated_rows,
+            "index_items":r.progress.index_len,"index_items_total":null,
+            "original_candidate_validated_rows":r.progress.original_candidate_validated_rows,
+            "dependency_validated_rows":r.progress.dependency_validated_rows,
+            "location_decode":r.decode_by_role.get("candidate_location"),"eta":null,
+            "note":"读取/预索引/应用分别计数；比例仅为已应用Input，不是整任务完成比例；未知总量/ETA不推断"});
+        eprintln!("DPT_REPLAY_PROGRESS {row}");
+        r.progress.emissions+=1;r.progress.emission_ns+=emission.elapsed().as_nanos();
+    });
+}
+pub(crate) fn index_size(len: usize, capacity: usize, size: usize) {
+    STATE.with(|s| {
+        if let Some(r) = s.borrow_mut().as_mut() {
+            r.progress.index_len = len;
+            r.progress.index_capacity = capacity;
+            r.progress.index_item_size_bytes = size;
+        }
+    });
+}
+pub(crate) struct DecodeScope(Option<&'static str>);
+impl DecodeScope {
+    pub(crate) fn new(role: &'static str) -> Self {
+        let enabled = STATE.with(|s| s.borrow().is_some());
+        Self(DECODE_ROLE.replace(enabled.then_some(role)))
+    }
+}
+impl Drop for DecodeScope {
+    fn drop(&mut self) {
+        DECODE_ROLE.set(self.0);
+    }
+}
+pub(crate) fn decode_enabled() -> bool {
+    DECODE_ROLE.get().is_some()
+}
+fn decode_update(update: impl FnOnce(&mut DecodeCounts)) {
+    if let Some(role) = DECODE_ROLE.get() {
+        STATE.with(|s| {
+            if let Some(r) = s.borrow_mut().as_mut() {
+                update(r.decode_by_role.entry(role).or_default());
+            }
+        });
+    }
+}
+pub(crate) fn decode_clock() -> Option<Instant> {
+    decode_enabled().then(Instant::now)
+}
+pub(crate) fn decoded_metadata(bytes: usize, ns: u128) {
+    decode_update(|d| {
+        d.metadata_loads += 1;
+        d.metadata_load_ns += ns;
+        d.max_parquet_metadata_estimate_bytes = d.max_parquet_metadata_estimate_bytes.max(bytes);
+    });
+}
+pub(crate) fn decoded_row_group(ns: u128) {
+    decode_update(|d| {
+        d.row_groups_opened += 1;
+        d.row_group_open_ns += ns;
+    });
+}
+pub(crate) fn decoded_batch(rows: usize, resident: usize, arrow: usize, ns: u128) {
+    decode_update(|d| {
+        d.batches += 1;
+        d.successful_batch_decode_and_rows_ns += ns;
+        d.rows += rows as u64;
+        d.max_sort_row_resident_bytes = d.max_sort_row_resident_bytes.max(resident);
+        d.max_arrow_batch_bytes = d.max_arrow_batch_bytes.max(arrow);
+    });
+    progress(DECODE_ROLE.get().unwrap_or("decode"), false);
+}
+pub(crate) fn candidate_page_evidence(
+    values: &[TemporaryReferenceCandidateV1],
+    before: TemporaryReferenceCursorV1,
+    after: TemporaryReferenceCursorV1,
+    cutoff: u64,
+    exhausted: bool,
+) {
+    STATE.with(|s|{let mut s=s.borrow_mut();let Some(r)=s.as_mut().filter(|r|r.capture_pages) else{return};let at=Instant::now();
+        r.candidate_pages.push(serde_json::json!({"context":r.current.as_ref().map(|e|&e.context),"cursor_before":before.next_input_position,"cursor_after":after.next_input_position,"cutoff":cutoff,"exhausted":exhausted,
+            "candidates":values.iter().map(|v|serde_json::json!({"canonical_fact":v.canonical_fact,"record_ref":v.record_ref,"anchor":v.anchor})).collect::<Vec<_>>() }));r.candidate_page_evidence_ns+=at.elapsed().as_nanos();});
+}
+pub(crate) fn candidate_statistics(replay: &PublicReplayV1) -> serde_json::Value {
+    replay
+        .candidates
+        .as_ref()
+        .map(|c| c.statistics())
+        .unwrap_or(serde_json::Value::Null)
+}
+pub(crate) fn release_candidates(replay: &mut PublicReplayV1) {
+    drop(replay.candidates.take());
 }
 impl Drop for Session {
     fn drop(&mut self) {
@@ -301,6 +483,7 @@ pub(crate) struct Span {
 }
 impl Span {
     pub(crate) fn new(kind: &'static str) -> Self {
+        progress(kind, false);
         Self {
             start: started(),
             kind,
@@ -378,6 +561,18 @@ impl ScanGuard {
     }
     pub(crate) fn row(&mut self, row: &PublicStoredRowV1) {
         if let Some(d) = self.data.as_mut() {
+            STATE.with(|s| {
+                if let Some(r) = s.borrow_mut().as_mut() {
+                    match d.kind {
+                        "candidate_index_validation" => r.progress.index_validated_rows += 1,
+                        "candidate_page" if r.original_candidates => {
+                            r.progress.original_candidate_validated_rows += 1
+                        }
+                        "dependency_scan" => r.progress.dependency_validated_rows += 1,
+                        _ => {}
+                    }
+                }
+            });
             *d.rows.entry(row_kind(row)).or_default() += 1;
             if let PublicStoredRowV1::Canonical {
                 binding,
@@ -395,6 +590,7 @@ impl ScanGuard {
                 d.last_twap_input = Some(binding.position.closed_at_input_position);
             }
         }
+        progress(self.data.as_ref().map_or("scan", |d| d.kind), false);
     }
     pub(crate) fn matched(&mut self) {
         if let Some(d) = self.data.as_mut() {
@@ -464,9 +660,51 @@ pub(crate) fn report_value(report: Report) -> serde_json::Value {
     let mut value = serde_json::to_value(report).unwrap();
     value["prepare_remaining_ns"] = serde_json::json!(prepare_ns as i128 - candidate_ns as i128);
     value["retention"] = serde_json::json!({"scan_descriptors":"first 128 actual scan/open/page invocations; total by kind and omitted count retained","scan_by_input":"all actually scanning Input positions with per-kind counts/rows/time; no per-row payload","slow_entries":"16 slowest whole entry calls; total and omitted count retained"});
-    value["time_accounting"] = serde_json::json!({"primary":PRIMARY,"residual":"signed entry total minus non-overlapping primary spans; no zero clamp","nested":"candidate_open/candidate_page are contained in prepare and must not be added to primary; scan elapsed is a subset, not extra primary time","overhead":"clock checks and local counting are inside this test diagnosis; bookkeeping at scope destruction falls within enclosing span or residual; overhead not independently isolated","twap_encountered":"TWAP canonical rows actually decoded before cursor/cutoff filtering; may include the first row beyond cutoff; returned counts are successful page output only"});
+    value["time_accounting"] = serde_json::json!({"primary":PRIMARY,"residual":"signed entry total minus non-overlapping primary spans; no zero clamp","nested":"candidate_open/candidate_page are contained in prepare and must not be added to primary; scan elapsed is a subset, not extra primary time","overhead":"clock checks and local counting are inside this test diagnosis; bookkeeping at scope destruction falls within enclosing span or residual; overhead not independently isolated","twap_encountered":"original candidate_page counts decoded TWAP before filtering; indexed candidate_index_validation counts validated TWAP and indexed candidate_page counts selected body rows only; cached index visits have no full body decode","decode_cost":"metadata/row-group/successful batch spans are contained in candidate page or validation/open calls, not additional primary time; batch includes Arrow decode and SortRow materialization plus test size accounting; failed loads/batches stay in enclosing original-error spans","size_accounting":"Parquet memory_size is its estimated allocation including shared-pointer double counts, not RSS; Arrow and SortRow maximum refer to one successful batch, not process or all-reader sum","candidate_evidence":"all successful pages retain complete canonical fact/anchor/ref and cursor/cutoff; projection time is inside prepare_remaining, not independent production latency; progress emission cost is inside its caller and separately reported, never added again"});
     value
 }
 pub(crate) fn reader_prefix(replay: &PublicReplayV1) -> Option<CommittedIngressPrefixV1> {
     replay.reader.prefix.clone()
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+    #[test]
+    fn progress_default_is_disabled_and_known_total_only_comes_from_normal_prefix() {
+        let session = Session::enable();
+        progress("disabled", true);
+        STATE.with(|s| assert_eq!(s.borrow().as_ref().unwrap().progress.emissions, 0));
+        session.configure(false, 30, false);
+        known_total(None);
+        applied_work(2, 1);
+        progress("candidate_index_validation", true);
+        STATE.with(|s| {
+            let s = s.borrow();
+            let r = s.as_ref().unwrap();
+            assert_eq!(r.known_total_inputs, None);
+            assert_eq!(r.progress.applied_inputs, 2);
+            assert_eq!(r.progress.emissions, 1);
+        });
+        let prefix = CommittedIngressPrefixV1 {
+            input_stream_id: "test".into(),
+            next_input_position: 10,
+            next_canonical_position: 0,
+            next_group_position: 0,
+            next_observation_position: 0,
+            next_public_index_position: 0,
+            stable_storage_ref: "stable-00000000000000000000".into(),
+            normal_end: false,
+        };
+        known_total(Some(&prefix));
+        STATE.with(|s| assert_eq!(s.borrow().as_ref().unwrap().known_total_inputs, None));
+        let prefix = CommittedIngressPrefixV1 {
+            normal_end: true,
+            ..prefix
+        };
+        known_total(Some(&prefix));
+        STATE.with(|s| assert_eq!(s.borrow().as_ref().unwrap().known_total_inputs, Some(10)));
+        let r = session.finish();
+        assert_eq!(r.progress.applied_groups, 1);
+    }
 }

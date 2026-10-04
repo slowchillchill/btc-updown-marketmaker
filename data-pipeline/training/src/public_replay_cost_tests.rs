@@ -11,6 +11,13 @@ struct DiagnosticConfig {
     expected_normal_prefix: CommittedIngressPrefixV1,
     initialization_input_positions: Vec<u64>,
     purpose: String,
+    #[serde(default)]
+    original_candidate_reader: bool,
+    #[serde(default = "progress_interval")]
+    progress_interval_seconds: u64,
+}
+fn progress_interval() -> u64 {
+    30
 }
 #[derive(Default, Serialize)]
 struct Summary {
@@ -149,17 +156,25 @@ struct DriverTimes {
     returned_objects_drop_ns: u128,
     into_core_and_reader_release_ns: u128,
     core_drop_ns: u128,
+    candidate_state_drop_ns: u128,
 }
 fn diagnose(c: &DiagnosticConfig) -> (Value, RecordingResult<()>) {
     let before = fs::read_to_string("/proc/self/io").ok();
     let started = Instant::now();
     let session = cost::Session::enable();
+    session.configure(
+        c.original_candidate_reader,
+        c.progress_interval_seconds,
+        true,
+    );
+    cost::progress("open", true);
     let mut summary = Summary::default();
     let mut hash = HashWriter::default();
     let mut times = DriverTimes::default();
     let mut prefix = None;
     let mut applied_prefix = None;
     let mut canonical_next = None;
+    let mut candidate_state = Value::Null;
     let open_started = Instant::now();
     let opened = PublicReplayV1::open(&c.public_root, c.read_page_rows, c.max_read_batch_bytes);
     times.open_ns = open_started.elapsed().as_nanos();
@@ -167,6 +182,7 @@ fn diagnose(c: &DiagnosticConfig) -> (Value, RecordingResult<()>) {
         Err(error) => Err(error),
         Ok(mut replay) => {
             prefix = cost::reader_prefix(&replay);
+            cost::known_total(prefix.as_ref());
             let result = loop {
                 match replay.next_prepared_applied() {
                     Err(error) => break Err(error),
@@ -177,6 +193,7 @@ fn diagnose(c: &DiagnosticConfig) -> (Value, RecordingResult<()>) {
                     Ok(Some((input, applied, pm))) => {
                         let at = Instant::now();
                         summary.observe(c, &input, &applied, &mut hash);
+                        cost::applied_work(summary.inputs, summary.groups);
                         times.summary_ns += at.elapsed().as_nanos();
                         let at = Instant::now();
                         drop((input, applied, pm));
@@ -186,15 +203,23 @@ fn diagnose(c: &DiagnosticConfig) -> (Value, RecordingResult<()>) {
             };
             applied_prefix = Some(replay.core.applied_prefix());
             canonical_next = Some(replay.core.next_canonical_position());
+            candidate_state = cost::candidate_statistics(&replay);
+            cost::progress("candidate_state_release", true);
+            let at = Instant::now();
+            cost::release_candidates(&mut replay);
+            times.candidate_state_drop_ns = at.elapsed().as_nanos();
+            cost::progress("reader_release", true);
             let at = Instant::now();
             let core = replay.into_core();
             times.into_core_and_reader_release_ns = at.elapsed().as_nanos();
+            cost::progress("core_release", true);
             let at = Instant::now();
             drop(core);
             times.core_drop_ns = at.elapsed().as_nanos();
             result
         }
     };
+    cost::progress("finished", true);
     let wall = started.elapsed().as_secs_f64();
     let after = fs::read_to_string("/proc/self/io").ok();
     let original_error = result.as_ref().err().map(ToString::to_string);
@@ -203,7 +228,7 @@ fn diagnose(c: &DiagnosticConfig) -> (Value, RecordingResult<()>) {
         && summary.end_inputs == 1
         && prefix.as_ref().is_some_and(|p| p.normal_end);
     let internal = cost::report_value(session.finish());
-    let report = json!({"schema":"public_replay_internal_cost_v1","effective_config":c,"status":if result.is_ok(){"success"}else{"error"},"original_error":original_error,"normal_end_observed":normal_end_observed,"actual_reader_prefix":prefix,"applied_prefix":applied_prefix,"next_canonical_position":canonical_next,"summary":summary,"fixed_identity_time_quality_sha256":format!("{:x}",hash.0.finalize()),"digest_coverage":"input stream/position/dependency refs and source id/source/received times; group id/position/member/close coordinates; fact position/source refs/direct and dependency time/quality; excludes full payload, source bodies and observation business fields","internal":internal,"driver":{"times":times,"wall_seconds":wall,"proc_io_before":before,"proc_io_after":after,"boundary":"returned-object explicit drop is separate from summary; replay.into_core includes reader release and move; final core drop separate; report serialization/write and diagnostic-state finalization excluded from driver wall, included in outer GNU process","last_successful_returned_input":summary.last_input}});
+    let report = json!({"schema":"public_replay_internal_cost_v1","effective_config":c,"status":if result.is_ok(){"success"}else{"error"},"original_error":original_error,"normal_end_observed":normal_end_observed,"actual_reader_prefix":prefix,"applied_prefix":applied_prefix,"next_canonical_position":canonical_next,"summary":summary,"fixed_identity_time_quality_sha256":format!("{:x}",hash.0.finalize()),"digest_coverage":"input stream/position/dependency refs and source id/source/received times; group id/position/member/close coordinates; fact position/source refs/direct and dependency time/quality; excludes full payload, source bodies and observation business fields","internal":internal,"candidate_state_before_release":candidate_state,"driver":{"times":times,"wall_seconds":wall,"proc_io_before":before,"proc_io_after":after,"boundary":"returned-object explicit drop is separate from summary; candidate state release includes index/frontier decoder and paths; replay.into_core includes main reader release and move; final core drop separate; report serialization/write and diagnostic-state finalization excluded from driver wall, included in outer GNU process","last_successful_returned_input":summary.last_input}});
     (report, result)
 }
 fn persist(report: &Value, result: RecordingResult<()>, path: &Path) -> RecordingResult<()> {
@@ -241,6 +266,8 @@ fn configured(root: &Path) -> DiagnosticConfig {
             .unwrap(),
         initialization_input_positions: vec![],
         purpose: "有效小夹具计量一致及原错验证".into(),
+        original_candidate_reader: false,
+        progress_interval_seconds: 0,
     }
 }
 fn reference_fixture(root: &Path, twap_window: u64) {
@@ -381,4 +408,38 @@ fn original_reader_error_keeps_partial_spans_and_report_error_cannot_replace_it(
             .to_string(),
         error
     );
+}
+
+#[test]
+fn original_and_indexed_complete_results_and_full_candidate_pages_match() {
+    let temp = tempfile::tempdir().unwrap();
+    for window in [30, 60] {
+        let root = temp.path().join(window.to_string());
+        reference_fixture(&root, window);
+        let mut c = configured(&root);
+        c.original_candidate_reader = true;
+        let (old, result) = diagnose(&c);
+        result.unwrap();
+        c.original_candidate_reader = false;
+        let (new, result) = diagnose(&c);
+        result.unwrap();
+        assert_eq!(
+            old["internal"]["candidate_pages"],
+            new["internal"]["candidate_pages"]
+        );
+        assert_eq!(old["summary"], new["summary"]);
+        assert_eq!(
+            old["fixed_identity_time_quality_sha256"],
+            new["fixed_identity_time_quality_sha256"]
+        );
+        let session = cost::Session::enable();
+        session.configure(true, 0, false);
+        let mut replay = PublicReplayV1::open(&root, 1, 1 << 20).unwrap();
+        let mut original = vec![];
+        while let Some((i, a, pm)) = replay.next_prepared_applied().unwrap() {
+            original.push(json!({"input":i,"complete_applied":fingerprint(&a),"prepared_pm_message":pm.as_ref().map(|p|p.message())}));
+        }
+        session.finish();
+        assert_eq!(original, complete_returns(&root, false).0);
+    }
 }
