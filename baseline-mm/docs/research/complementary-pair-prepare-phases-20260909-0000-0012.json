@@ -1,0 +1,4765 @@
+{
+  "schema": "complementary_pair_prepare_phases_12m_v1",
+  "status": "success",
+  "delivery_issue": 214,
+  "research_dependency_issue": 185,
+  "measurement_source_commit": "201ebedb165eb1137187ff72a622ccb641eed866",
+  "historical_baseline_source_commit": "10a8ce588f2b2d6e192253ef90e4205733a54160",
+  "run_count": 1,
+  "research_run_count": 0,
+  "build": {
+    "binary_sha256": "379d9d0a4c0c7b4a3b71c718efa897fb33eac63845cd4cf904a19615ffc08477",
+    "binary_bytes": 20726848,
+    "build_command": "CARGO_TARGET_DIR=<shared-build> cargo build -p backtest-cli --example material_trial --release --locked --offline",
+    "profile": "release (optimized; no profile overrides)",
+    "rustc": "rustc 1.95.0 (59807616e 2026-04-14)\nbinary: rustc\ncommit-hash: 59807616e1fa2540724bfbac14d7976d7e4a3860\ncommit-date: 2026-04-14\nhost: x86_64-unknown-linux-gnu\nrelease: 1.95.0\nLLVM version: 22.1.2\n",
+    "source_files_sha256": {
+      "Cargo.lock": "9eacb8e4b716cc76668d6aee8ab4f7fa5e9bef0945a292255a563a88fbc8fa71",
+      "Cargo.toml": "b095e53779d1705769763e0ccdc90e82b465bcb37b85c0b55b8842803128f53a",
+      "backtest/cli/examples/material_trial.rs": "0fe9c5b3dd3a182e106e323d1902003ce968a5e2df65557aa347aa3200aba46b",
+      "backtest/cli/examples/material_trial_measure.py": "f01cc44ec6d7353d642f472b02e0a8911dc895658f4d188b100cf121defa605a",
+      "backtest/src/preparation.rs": "295c755bb712907e632458cd126edd1157f733b142c4bc25f88aa83789ae8b17",
+      "backtest/src/preparation_progress.rs": "4eaecc718e10e5a7fdca7b1dfed3a006661a7bd135dfb1016eb3124ac7edb3f7",
+      "backtest/src/process_measurement.rs": "0dbaa8c363cd404596ecb83ffec64c6a8f90b25a3a97b8d55544453544259746",
+      "backtest/src/statistics.rs": "f36fe30eab1baf2654371078282f2f31b34842f959fa748a8bdfbbf5d128189b",
+      "data-pipeline/training/src/historical_preparation_progress.rs": "e5fb6e321e7d175a8cc303d279b7a723d02ed1a6331601b507bc4ba23004c1ec",
+      "data-pipeline/training/src/historical_initialization.rs": "cf3c74a2df07e2dda117eb2cc537bb5c895437fe80b04d44b77e6a6e54401bd1",
+      "data-pipeline/training/src/public_replay.rs": "9bd07b177e7f4dfb30e12718bd1d1c2bff9b775392bc038e39864c897e12e6c3",
+      "data-pipeline/training/src/hidden_preparation.rs": "2e1521d6cc986045d5a7e106bcd7d2af0e73f6ef4574f5cf9add06a1ba14e9c9",
+      "data-pipeline/training/src/lib.rs": "101db2ffe148ef0a8357d8730d39943dc012a1d2ef25b25c70b016913254cc3b"
+    },
+    "configuration_sha256": "bbc63e2c13b2884b003dff2496fc60ee552e6feffe6f2900f560a674513f75a4",
+    "driver_sha256": "f01cc44ec6d7353d642f472b02e0a8911dc895658f4d188b100cf121defa605a"
+  },
+  "execution": {
+    "launch_utc": "2026-10-04T05:57:02Z",
+    "completion_observed_utc": "2026-10-04T06:05:30.084100+00:00",
+    "completion_note": "结束取证时刻；原驱动未单独保存精确退出UTC。11阶段使用连续相对墙钟区间。",
+    "progress_interval_seconds": 30,
+    "exit_code": 0
+  },
+  "trial_business": {
+    "clock_ticks_per_second": 100.0,
+    "effective_preparation": {
+      "canonical": {
+        "canonical_rule_version": "canonical-reduction-v1",
+        "decode_batch_rows": 1024,
+        "max_decode_batch_bytes": 67108864,
+        "max_epoch_count_per_source": 1024,
+        "max_pending_ws_terminals": 1024,
+        "max_retained_reducer_entries": 1000000,
+        "max_temporary_row_bytes": 16777216,
+        "sort": {
+          "batch_rows": 1024,
+          "max_open_files": 16,
+          "max_run_bytes": 67108864,
+          "max_run_rows": 32768,
+          "max_temp_bytes": 8589934592,
+          "max_temp_run_files": 128,
+          "merge_fan_in": 8
+        }
+      },
+      "header": {
+        "canonical_rule_version": "canonical-reduction-v1",
+        "initial_state": "Empty",
+        "input_scope": "explicit-manifest/2026-09-09/research-first-two-markets-and-label-tail",
+        "input_stream_id": "complementary-pair-phase-metrics-20260909-0000-0012",
+        "max_pending_ws_terminals": 1024,
+        "observation_version": "market_business_observation_v1",
+        "ordering_version": "historical-source-head-v2"
+      },
+      "hidden_stream_id": "complementary-pair-phase-metrics-hidden-20260909-0000-0012",
+      "max_read_batch_bytes": 67108864,
+      "metadata_initialization": {
+        "files": [
+          {
+            "manifest_path": "source-data/2026-09-08/typed_raw/utc_day=2026-09-08/manifest.json",
+            "relative_paths": [
+              "source_kind=polymarket_market_metadata/polymarket_market_metadata_23.parquet"
+            ]
+          }
+        ],
+        "markets": [
+          {
+            "condition_id": "0x1fc54206bf570dbdf843a88d608aee9df9eac980a9ab47e400d787d732f7b748",
+            "snapshot_source_message_id": "d3842b75d06c65d26d38c87e9520c14a0c11d0bf5d210c70dc62ae883b9097e5"
+          },
+          {
+            "condition_id": "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20",
+            "snapshot_source_message_id": "c11b6b3d60cb590a314f6de3a748de5923b4376d3fee8f4a7583fe7bd36ede42"
+          }
+        ],
+        "purpose": "D-0276原选定来源/市场及00:00起点，仅建立市场状态；D-0277后#185当前分段材料右端延至00:12",
+        "received_end_utc_ms": 1788912720000,
+        "received_start_utc_ms": 1788912000000
+      },
+      "read_page_rows": 256,
+      "recording": {
+        "max_artifact_payload_bytes": 16777216,
+        "max_candidate_directory_bytes": 34359738368,
+        "max_capture_output_bytes": 17179869184,
+        "max_observation_l2_levels": 10000,
+        "sort": {
+          "batch_rows": 1024,
+          "max_open_files": 16,
+          "max_run_bytes": 67108864,
+          "max_run_rows": 32768,
+          "max_temp_bytes": 8589934592,
+          "max_temp_run_files": 128,
+          "merge_fan_in": 8
+        }
+      },
+      "scope": {
+        "manifest_paths": [
+          "source-data/2026-09-09/typed_raw/utc_day=2026-09-09/manifest.json"
+        ],
+        "purpose": "D-0277 #185任务3两市场公共材料、冻结特征与事后标签连接；00:10—00:12仅标签尾段/资源，无账户或收益研究",
+        "received_end_utc_ms": 1788912720000,
+        "received_start_utc_ms": 1788912000000
+      },
+      "work_root": "current-run/materials"
+    },
+    "hidden_preparation": {
+      "consumer_stream_id": "complementary-pair-phase-metrics-hidden-20260909-0000-0012",
+      "derived_path": "current-run/materials/hidden/derived/captured.parquet",
+      "index_path": "current-run/materials/hidden/index/dpt-external-sort/sorted.parquet",
+      "prefix": {
+        "input_stream_id": "complementary-pair-phase-metrics-20260909-0000-0012",
+        "next_canonical_position": 208661,
+        "next_group_position": 208638,
+        "next_input_position": 208688,
+        "next_observation_position": 806966,
+        "next_public_index_position": 208638,
+        "normal_end": true,
+        "stable_storage_ref": "stable-00000000000000000000"
+      }
+    },
+    "initialization": {
+      "files": [
+        {
+          "file": {
+            "bytes": 97043,
+            "path": "source-data/2026-09-08/typed_raw/utc_day=2026-09-08/source_kind=polymarket_market_metadata/polymarket_market_metadata_23.parquet",
+            "rows": 792,
+            "schema_version": "polymarket_market_metadata_v6",
+            "sha256": "c3bd000a74909abc1725b7bbe0fe3a72ebf7416b772c0ca28af859568c2f9154",
+            "source_kind": "polymarket_market_metadata"
+          },
+          "manifest_sha256": "c057186754e3690592cf467d85f980af35f9259a4463a0e1e90192ea7192458f",
+          "relative_path": "source_kind=polymarket_market_metadata/polymarket_market_metadata_23.parquet"
+        }
+      ],
+      "input_positions": [
+        0,
+        1,
+        2
+      ],
+      "source_identity_version": "historical-metadata-initialization-source-v1",
+      "source_message_ids": [
+        "6604f5b1ffd2d119547f253c1a06e871d8a792c0c5df54da6c107da0e28cfdc3",
+        "c11b6b3d60cb590a314f6de3a748de5923b4376d3fee8f4a7583fe7bd36ede42",
+        "d3842b75d06c65d26d38c87e9520c14a0c11d0bf5d210c70dc62ae883b9097e5"
+      ]
+    },
+    "input_set_identity_sha256": "2cbd7229cd785a26c9302be87be07cc890f806462f9bec1b7c43bab44f7a54fa",
+    "prepared_markets": [
+      "0x1fc54206bf570dbdf843a88d608aee9df9eac980a9ab47e400d787d732f7b748",
+      "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe",
+      "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e",
+      "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20",
+      "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92"
+    ],
+    "schema": "complementary_pair_material_trial_v1",
+    "scope": {
+      "manifest_paths": [
+        "source-data/2026-09-09/typed_raw/utc_day=2026-09-09/manifest.json"
+      ],
+      "purpose": "D-0277 #185任务3两市场公共材料、冻结特征与事后标签连接；00:10—00:12仅标签尾段/资源，无账户或收益研究",
+      "received_end_utc_ms": 1788912720000,
+      "received_start_utc_ms": 1788912000000
+    },
+    "source_identity_sha256": "66892eab3b355e0c05e13b5e8874ff298b898cb62809a89b208a29e82f8ee281",
+    "source_manifests": [
+      [
+        "2026-09-09",
+        "93a70f4775bdb3d52bf7de73d58caaa5ccbf2f2d7f6a8e2f00e09c092e1f1918"
+      ]
+    ],
+    "statistics": {
+      "initialization_markets": {
+        "0x1fc54206bf570dbdf843a88d608aee9df9eac980a9ab47e400d787d732f7b748": {
+          "distinct_fresh_spot_samples": 0,
+          "fields": {
+            "accepting_orders": {
+              "categories": {
+                "present:Fresh": 3
+              },
+              "denominator": 3,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            },
+            "active": {
+              "categories": {
+                "present:Fresh": 3
+              },
+              "denominator": 3,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/40394056371959012381300308018838505502210886859727060199875423644983465971960/asks": {
+              "categories": {
+                "absent:UnknownNotObserved": 3
+              },
+              "denominator": 3,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/40394056371959012381300308018838505502210886859727060199875423644983465971960/best_bid_ask": {
+              "categories": {
+                "absent:UnknownNotObserved": 3
+              },
+              "denominator": 3,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/40394056371959012381300308018838505502210886859727060199875423644983465971960/bids": {
+              "categories": {
+                "absent:UnknownNotObserved": 3
+              },
+              "denominator": 3,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/40394056371959012381300308018838505502210886859727060199875423644983465971960/public_trade": {
+              "categories": {
+                "absent:UnknownNotObserved": 3
+              },
+              "denominator": 3,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/40394056371959012381300308018838505502210886859727060199875423644983465971960/tick": {
+              "categories": {
+                "present:Fresh": 3
+              },
+              "denominator": 3,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/40394056371959012381300308018838505502210886859727060199875423644983465971960/valuation_best_bid": {
+              "categories": {
+                "unavailable:UnknownNotObserved": 3
+              },
+              "denominator": 3,
+              "first_examples": {
+                "unavailable:UnknownNotObserved": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/115306009340507785392622434263447716687618517190213805998980654605411415669044/asks": {
+              "categories": {
+                "absent:UnknownNotObserved": 3
+              },
+              "denominator": 3,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/115306009340507785392622434263447716687618517190213805998980654605411415669044/best_bid_ask": {
+              "categories": {
+                "absent:UnknownNotObserved": 3
+              },
+              "denominator": 3,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/115306009340507785392622434263447716687618517190213805998980654605411415669044/bids": {
+              "categories": {
+                "absent:UnknownNotObserved": 3
+              },
+              "denominator": 3,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/115306009340507785392622434263447716687618517190213805998980654605411415669044/public_trade": {
+              "categories": {
+                "absent:UnknownNotObserved": 3
+              },
+              "denominator": 3,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/115306009340507785392622434263447716687618517190213805998980654605411415669044/tick": {
+              "categories": {
+                "present:Fresh": 3
+              },
+              "denominator": 3,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/115306009340507785392622434263447716687618517190213805998980654605411415669044/valuation_best_bid": {
+              "categories": {
+                "unavailable:UnknownNotObserved": 3
+              },
+              "denominator": 3,
+              "first_examples": {
+                "unavailable:UnknownNotObserved": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            },
+            "binance_depth": {
+              "categories": {
+                "absent:UnknownNotObserved": 3
+              },
+              "denominator": 3,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            },
+            "binance_trade": {
+              "categories": {
+                "absent:UnknownNotObserved": 3
+              },
+              "denominator": 3,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            },
+            "causal_window_history": {
+              "categories": {
+                "reference_missing": 3
+              },
+              "denominator": 3,
+              "first_examples": {
+                "reference_missing": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            },
+            "chainlink_spot": {
+              "categories": {
+                "absent:UnknownNotObserved": 3
+              },
+              "denominator": 3,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            },
+            "chainlink_twap_sixty": {
+              "categories": {
+                "absent:UnknownNotObserved": 3
+              },
+              "denominator": 3,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            },
+            "chainlink_twap_thirty": {
+              "categories": {
+                "absent:UnknownNotObserved": 3
+              },
+              "denominator": 3,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            },
+            "closed": {
+              "categories": {
+                "present:Fresh": 3
+              },
+              "denominator": 3,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            },
+            "effective_reference": {
+              "categories": {
+                "missing": 3
+              },
+              "denominator": 3,
+              "first_examples": {
+                "missing": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            },
+            "lifecycle": {
+              "categories": {
+                "present:Fresh": 3
+              },
+              "denominator": 3,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            },
+            "lifecycle_value": {
+              "categories": {
+                "Known { value: Active }": 2,
+                "Known { value: Prefetched }": 1
+              },
+              "denominator": 3,
+              "first_examples": {
+                "Known { value: Active }": {
+                  "group_position": 1,
+                  "visible_at_utc_ms": 1788911700002
+                },
+                "Known { value: Prefetched }": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            },
+            "market_window": {
+              "categories": {
+                "before": 1,
+                "inside": 2
+              },
+              "denominator": 3,
+              "first_examples": {
+                "before": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                },
+                "inside": {
+                  "group_position": 1,
+                  "visible_at_utc_ms": 1788911700002
+                }
+              }
+            },
+            "member_count": {
+              "categories": {
+                "2": 3
+              },
+              "denominator": 3,
+              "first_examples": {
+                "2": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            },
+            "official_anchor": {
+              "categories": {
+                "absent:UnknownNotObserved": 3
+              },
+              "denominator": 3,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            },
+            "settlement_reference": {
+              "categories": {
+                "absent:UnknownNotObserved": 3
+              },
+              "denominator": 3,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            },
+            "settlement_reference_value": {
+              "categories": {
+                "missing": 3
+              },
+              "denominator": 3,
+              "first_examples": {
+                "missing": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            },
+            "terminal": {
+              "categories": {
+                "absent:UnknownNotObserved": 3
+              },
+              "denominator": 3,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 0,
+                  "visible_at_utc_ms": 1788911400031
+                }
+              }
+            }
+          },
+          "first_fresh_spot_source_at": null,
+          "first_visible_at": 1788911400031,
+          "identity": {
+            "clob_market_id": "4352293",
+            "condition_id": "0x1fc54206bf570dbdf843a88d608aee9df9eac980a9ab47e400d787d732f7b748",
+            "window": {
+              "end_at_utc_ms": 1788912000000,
+              "start_at_utc_ms": 1788911700000
+            }
+          },
+          "last_fresh_spot_source_at": null,
+          "last_visible_at": 1788911700033,
+          "max_forward_spot_source_gap_ms": 0,
+          "observations": 3,
+          "source_time_regressions": 0
+        },
+        "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20": {
+          "distinct_fresh_spot_samples": 0,
+          "fields": {
+            "accepting_orders": {
+              "categories": {
+                "present:Fresh": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "active": {
+              "categories": {
+                "present:Fresh": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/102849750551531882592626838681952450548049709627821897076456675572108598447456/asks": {
+              "categories": {
+                "absent:UnknownNotObserved": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/102849750551531882592626838681952450548049709627821897076456675572108598447456/best_bid_ask": {
+              "categories": {
+                "absent:UnknownNotObserved": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/102849750551531882592626838681952450548049709627821897076456675572108598447456/bids": {
+              "categories": {
+                "absent:UnknownNotObserved": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/102849750551531882592626838681952450548049709627821897076456675572108598447456/public_trade": {
+              "categories": {
+                "absent:UnknownNotObserved": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/102849750551531882592626838681952450548049709627821897076456675572108598447456/tick": {
+              "categories": {
+                "present:Fresh": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/102849750551531882592626838681952450548049709627821897076456675572108598447456/valuation_best_bid": {
+              "categories": {
+                "unavailable:UnknownNotObserved": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "unavailable:UnknownNotObserved": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/75902788286939706379430622188372065513567695002626149478929368630888442189116/asks": {
+              "categories": {
+                "absent:UnknownNotObserved": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/75902788286939706379430622188372065513567695002626149478929368630888442189116/best_bid_ask": {
+              "categories": {
+                "absent:UnknownNotObserved": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/75902788286939706379430622188372065513567695002626149478929368630888442189116/bids": {
+              "categories": {
+                "absent:UnknownNotObserved": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/75902788286939706379430622188372065513567695002626149478929368630888442189116/public_trade": {
+              "categories": {
+                "absent:UnknownNotObserved": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/75902788286939706379430622188372065513567695002626149478929368630888442189116/tick": {
+              "categories": {
+                "present:Fresh": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/75902788286939706379430622188372065513567695002626149478929368630888442189116/valuation_best_bid": {
+              "categories": {
+                "unavailable:UnknownNotObserved": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "unavailable:UnknownNotObserved": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "binance_depth": {
+              "categories": {
+                "absent:UnknownNotObserved": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "binance_trade": {
+              "categories": {
+                "absent:UnknownNotObserved": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "causal_window_history": {
+              "categories": {
+                "reference_missing": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "reference_missing": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "chainlink_spot": {
+              "categories": {
+                "absent:UnknownNotObserved": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "chainlink_twap_sixty": {
+              "categories": {
+                "absent:UnknownNotObserved": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "chainlink_twap_thirty": {
+              "categories": {
+                "absent:UnknownNotObserved": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "closed": {
+              "categories": {
+                "present:Fresh": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "effective_reference": {
+              "categories": {
+                "missing": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "missing": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "lifecycle": {
+              "categories": {
+                "present:Fresh": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "lifecycle_value": {
+              "categories": {
+                "Known { value: Prefetched }": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "Known { value: Prefetched }": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "market_window": {
+              "categories": {
+                "before": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "before": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "member_count": {
+              "categories": {
+                "2": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "2": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "official_anchor": {
+              "categories": {
+                "absent:UnknownNotObserved": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "settlement_reference": {
+              "categories": {
+                "absent:UnknownNotObserved": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "settlement_reference_value": {
+              "categories": {
+                "missing": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "missing": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            },
+            "terminal": {
+              "categories": {
+                "absent:UnknownNotObserved": 1
+              },
+              "denominator": 1,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 2,
+                  "visible_at_utc_ms": 1788911700033
+                }
+              }
+            }
+          },
+          "first_fresh_spot_source_at": null,
+          "first_visible_at": 1788911700033,
+          "identity": {
+            "clob_market_id": "4352318",
+            "condition_id": "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20",
+            "window": {
+              "end_at_utc_ms": 1788912300000,
+              "start_at_utc_ms": 1788912000000
+            }
+          },
+          "last_fresh_spot_source_at": null,
+          "last_visible_at": 1788911700033,
+          "max_forward_spot_source_gap_ms": 0,
+          "observations": 1,
+          "source_time_regressions": 0
+        }
+      },
+      "initialization_public_groups": 3,
+      "markets": {
+        "0x1fc54206bf570dbdf843a88d608aee9df9eac980a9ab47e400d787d732f7b748": {
+          "distinct_fresh_spot_samples": 659,
+          "fields": {
+            "accepting_orders": {
+              "categories": {
+                "present:Fresh": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "active": {
+              "categories": {
+                "present:Fresh": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/40394056371959012381300308018838505502210886859727060199875423644983465971960/asks": {
+              "categories": {
+                "absent:UnknownNotObserved": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/40394056371959012381300308018838505502210886859727060199875423644983465971960/best_bid_ask": {
+              "categories": {
+                "absent:UnknownNotObserved": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/40394056371959012381300308018838505502210886859727060199875423644983465971960/bids": {
+              "categories": {
+                "absent:UnknownNotObserved": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/40394056371959012381300308018838505502210886859727060199875423644983465971960/public_trade": {
+              "categories": {
+                "absent:UnknownNotObserved": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/40394056371959012381300308018838505502210886859727060199875423644983465971960/tick": {
+              "categories": {
+                "present:Fresh": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/40394056371959012381300308018838505502210886859727060199875423644983465971960/valuation_best_bid": {
+              "categories": {
+                "unavailable:UnknownNotObserved": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "unavailable:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/115306009340507785392622434263447716687618517190213805998980654605411415669044/asks": {
+              "categories": {
+                "absent:UnknownNotObserved": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/115306009340507785392622434263447716687618517190213805998980654605411415669044/best_bid_ask": {
+              "categories": {
+                "absent:UnknownNotObserved": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/115306009340507785392622434263447716687618517190213805998980654605411415669044/bids": {
+              "categories": {
+                "absent:UnknownNotObserved": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/115306009340507785392622434263447716687618517190213805998980654605411415669044/public_trade": {
+              "categories": {
+                "absent:UnknownNotObserved": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/115306009340507785392622434263447716687618517190213805998980654605411415669044/tick": {
+              "categories": {
+                "present:Fresh": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/115306009340507785392622434263447716687618517190213805998980654605411415669044/valuation_best_bid": {
+              "categories": {
+                "unavailable:UnknownNotObserved": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "unavailable:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "binance_depth": {
+              "categories": {
+                "absent:UnknownNotObserved": 360,
+                "present:Fresh": 208275
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                },
+                "present:Fresh": {
+                  "group_position": 363,
+                  "visible_at_utc_ms": 1788912002465
+                }
+              }
+            },
+            "binance_trade": {
+              "categories": {
+                "absent:UnknownNotObserved": 336,
+                "present:Fresh": 208299
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                },
+                "present:Fresh": {
+                  "group_position": 339,
+                  "visible_at_utc_ms": 1788912002251
+                }
+              }
+            },
+            "causal_window_history": {
+              "categories": {
+                "reference_missing": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "reference_missing": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "chainlink_spot": {
+              "categories": {
+                "absent:UnknownNotObserved": 331,
+                "present:Fresh": 208304
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                },
+                "present:Fresh": {
+                  "group_position": 334,
+                  "visible_at_utc_ms": 1788912002251
+                }
+              }
+            },
+            "chainlink_twap_sixty": {
+              "categories": {
+                "absent:UnknownNotObserved": 333,
+                "present:Fresh": 208302
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                },
+                "present:Fresh": {
+                  "group_position": 336,
+                  "visible_at_utc_ms": 1788912002251
+                }
+              }
+            },
+            "chainlink_twap_thirty": {
+              "categories": {
+                "absent:UnknownNotObserved": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "closed": {
+              "categories": {
+                "present:Fresh": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "effective_reference": {
+              "categories": {
+                "missing": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "missing": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "lifecycle": {
+              "categories": {
+                "present:Fresh": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "lifecycle_value": {
+              "categories": {
+                "Known { value: Active }": 48079,
+                "Known { value: Retired }": 160556
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "Known { value: Active }": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                },
+                "Known { value: Retired }": {
+                  "group_position": 48082,
+                  "visible_at_utc_ms": 1788912118411
+                }
+              }
+            },
+            "market_window": {
+              "categories": {
+                "after": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "after": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "member_count": {
+              "categories": {
+                "2": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "2": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "official_anchor": {
+              "categories": {
+                "absent:UnknownNotObserved": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "settlement_reference": {
+              "categories": {
+                "absent:UnknownNotObserved": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "settlement_reference_value": {
+              "categories": {
+                "missing": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "missing": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "terminal": {
+              "categories": {
+                "absent:UnknownNotObserved": 48079,
+                "present:Fresh": 160556
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                },
+                "present:Fresh": {
+                  "group_position": 48082,
+                  "visible_at_utc_ms": 1788912118411
+                }
+              }
+            }
+          },
+          "first_fresh_spot_source_at": 1788911999000,
+          "first_visible_at": 1788912000008,
+          "identity": {
+            "clob_market_id": "4352293",
+            "condition_id": "0x1fc54206bf570dbdf843a88d608aee9df9eac980a9ab47e400d787d732f7b748",
+            "window": {
+              "end_at_utc_ms": 1788912000000,
+              "start_at_utc_ms": 1788911700000
+            }
+          },
+          "last_fresh_spot_source_at": 1788912718000,
+          "last_visible_at": 1788912719994,
+          "max_forward_spot_source_gap_ms": 8000,
+          "observations": 208635,
+          "source_time_regressions": 0
+        },
+        "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe": {
+          "distinct_fresh_spot_samples": 658,
+          "fields": {
+            "accepting_orders": {
+              "categories": {
+                "present:Fresh": 208285
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                }
+              }
+            },
+            "active": {
+              "categories": {
+                "present:Fresh": 208285
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/32873955818661995964832066100538906828570131847504044153189153470372430981428/asks": {
+              "categories": {
+                "absent:UnknownNotObserved": 7,
+                "present:Fresh": 208278
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                },
+                "present:Fresh": {
+                  "group_position": 360,
+                  "visible_at_utc_ms": 1788912002347
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/32873955818661995964832066100538906828570131847504044153189153470372430981428/best_bid_ask": {
+              "categories": {
+                "absent:UnknownNotObserved": 22,
+                "present:Fresh": 208263
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                },
+                "present:Fresh": {
+                  "group_position": 375,
+                  "visible_at_utc_ms": 1788912002774
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/32873955818661995964832066100538906828570131847504044153189153470372430981428/bids": {
+              "categories": {
+                "absent:UnknownNotObserved": 7,
+                "present:Fresh": 208278
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                },
+                "present:Fresh": {
+                  "group_position": 360,
+                  "visible_at_utc_ms": 1788912002347
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/32873955818661995964832066100538906828570131847504044153189153470372430981428/public_trade": {
+              "categories": {
+                "absent:UnknownNotObserved": 100,
+                "present:Fresh": 208185
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                },
+                "present:Fresh": {
+                  "group_position": 453,
+                  "visible_at_utc_ms": 1788912003062
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/32873955818661995964832066100538906828570131847504044153189153470372430981428/tick": {
+              "categories": {
+                "present:Fresh": 208285
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/32873955818661995964832066100538906828570131847504044153189153470372430981428/valuation_best_bid": {
+              "categories": {
+                "known_price:Fresh": 208278,
+                "unavailable:UnknownNotObserved": 7
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "known_price:Fresh": {
+                  "group_position": 360,
+                  "visible_at_utc_ms": 1788912002347
+                },
+                "unavailable:UnknownNotObserved": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/79296106124034057884863934885073554921845356166439766327235136060874535070646/asks": {
+              "categories": {
+                "absent:UnknownNotObserved": 6,
+                "present:Fresh": 208279
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                },
+                "present:Fresh": {
+                  "group_position": 359,
+                  "visible_at_utc_ms": 1788912002347
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/79296106124034057884863934885073554921845356166439766327235136060874535070646/best_bid_ask": {
+              "categories": {
+                "absent:UnknownNotObserved": 22,
+                "present:Fresh": 208263
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                },
+                "present:Fresh": {
+                  "group_position": 375,
+                  "visible_at_utc_ms": 1788912002774
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/79296106124034057884863934885073554921845356166439766327235136060874535070646/bids": {
+              "categories": {
+                "absent:UnknownNotObserved": 6,
+                "present:Fresh": 208279
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                },
+                "present:Fresh": {
+                  "group_position": 359,
+                  "visible_at_utc_ms": 1788912002347
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/79296106124034057884863934885073554921845356166439766327235136060874535070646/public_trade": {
+              "categories": {
+                "absent:UnknownNotObserved": 717,
+                "present:Fresh": 207568
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                },
+                "present:Fresh": {
+                  "group_position": 1070,
+                  "visible_at_utc_ms": 1788912003719
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/79296106124034057884863934885073554921845356166439766327235136060874535070646/tick": {
+              "categories": {
+                "present:Fresh": 208285
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/79296106124034057884863934885073554921845356166439766327235136060874535070646/valuation_best_bid": {
+              "categories": {
+                "known_empty:Fresh": 60397,
+                "known_price:Fresh": 147882,
+                "unavailable:UnknownNotObserved": 6
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "known_empty:Fresh": {
+                  "group_position": 148241,
+                  "visible_at_utc_ms": 1788912519697
+                },
+                "known_price:Fresh": {
+                  "group_position": 359,
+                  "visible_at_utc_ms": 1788912002347
+                },
+                "unavailable:UnknownNotObserved": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                }
+              }
+            },
+            "binance_depth": {
+              "categories": {
+                "absent:UnknownNotObserved": 10,
+                "present:Fresh": 208275
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                },
+                "present:Fresh": {
+                  "group_position": 363,
+                  "visible_at_utc_ms": 1788912002465
+                }
+              }
+            },
+            "binance_trade": {
+              "categories": {
+                "present:Fresh": 208285
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                }
+              }
+            },
+            "causal_window_history": {
+              "categories": {
+                "before_settlement_window": 151249,
+                "endpoints_present_not_integral_validated": 57031,
+                "reference_missing": 5
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "before_settlement_window": {
+                  "group_position": 358,
+                  "visible_at_utc_ms": 1788912002347
+                },
+                "endpoints_present_not_integral_validated": {
+                  "group_position": 151607,
+                  "visible_at_utc_ms": 1788912540005
+                },
+                "reference_missing": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                }
+              }
+            },
+            "chainlink_spot": {
+              "categories": {
+                "present:Fresh": 208285
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                }
+              }
+            },
+            "chainlink_twap_sixty": {
+              "categories": {
+                "present:Fresh": 208285
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                }
+              }
+            },
+            "chainlink_twap_thirty": {
+              "categories": {
+                "absent:UnknownNotObserved": 208285
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                }
+              }
+            },
+            "closed": {
+              "categories": {
+                "present:Fresh": 208285
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                }
+              }
+            },
+            "effective_reference": {
+              "categories": {
+                "missing": 76505,
+                "official:present:Fresh": 128527,
+                "temporary_twap_60s": 3253
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "missing": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                },
+                "official:present:Fresh": {
+                  "group_position": 80111,
+                  "visible_at_utc_ms": 1788912310072
+                },
+                "temporary_twap_60s": {
+                  "group_position": 76858,
+                  "visible_at_utc_ms": 1788912301570
+                }
+              }
+            },
+            "lifecycle": {
+              "categories": {
+                "present:Fresh": 208285
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                }
+              }
+            },
+            "lifecycle_value": {
+              "categories": {
+                "Known { value: Active }": 132180,
+                "Known { value: Prefetched }": 75894,
+                "Known { value: Retired }": 211
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "Known { value: Active }": {
+                  "group_position": 76247,
+                  "visible_at_utc_ms": 1788912300008
+                },
+                "Known { value: Prefetched }": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                },
+                "Known { value: Retired }": {
+                  "group_position": 208427,
+                  "visible_at_utc_ms": 1788912718592
+                }
+              }
+            },
+            "market_window": {
+              "categories": {
+                "after": 49056,
+                "before": 75894,
+                "inside": 83335
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "after": {
+                  "group_position": 159582,
+                  "visible_at_utc_ms": 1788912600004
+                },
+                "before": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                },
+                "inside": {
+                  "group_position": 76247,
+                  "visible_at_utc_ms": 1788912300008
+                }
+              }
+            },
+            "member_count": {
+              "categories": {
+                "2": 208285
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "2": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                }
+              }
+            },
+            "official_anchor": {
+              "categories": {
+                "absent:UnknownNotObserved": 79758,
+                "present:Fresh": 128527
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                },
+                "present:Fresh": {
+                  "group_position": 80111,
+                  "visible_at_utc_ms": 1788912310072
+                }
+              }
+            },
+            "settlement_reference": {
+              "categories": {
+                "absent:UnknownNotObserved": 5,
+                "present:Fresh": 208280
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                },
+                "present:Fresh": {
+                  "group_position": 358,
+                  "visible_at_utc_ms": 1788912002347
+                }
+              }
+            },
+            "settlement_reference_value": {
+              "categories": {
+                "ChainlinkTwapSixtySeconds": 208280,
+                "missing": 5
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "ChainlinkTwapSixtySeconds": {
+                  "group_position": 358,
+                  "visible_at_utc_ms": 1788912002347
+                },
+                "missing": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                }
+              }
+            },
+            "terminal": {
+              "categories": {
+                "absent:UnknownNotObserved": 208074,
+                "present:Fresh": 211
+              },
+              "denominator": 208285,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 353,
+                  "visible_at_utc_ms": 1788912002319
+                },
+                "present:Fresh": {
+                  "group_position": 208427,
+                  "visible_at_utc_ms": 1788912718592
+                }
+              }
+            }
+          },
+          "first_fresh_spot_source_at": 1788912000000,
+          "first_visible_at": 1788912002319,
+          "identity": {
+            "clob_market_id": "4352362",
+            "condition_id": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe",
+            "window": {
+              "end_at_utc_ms": 1788912600000,
+              "start_at_utc_ms": 1788912300000
+            }
+          },
+          "last_fresh_spot_source_at": 1788912718000,
+          "last_visible_at": 1788912719994,
+          "max_forward_spot_source_gap_ms": 8000,
+          "observations": 208285,
+          "source_time_regressions": 0
+        },
+        "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e": {
+          "distinct_fresh_spot_samples": 379,
+          "fields": {
+            "accepting_orders": {
+              "categories": {
+                "present:Fresh": 132378
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                }
+              }
+            },
+            "active": {
+              "categories": {
+                "present:Fresh": 132378
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/60895611540746646210134562587716764512450858012586455621197756705914039654323/asks": {
+              "categories": {
+                "absent:UnknownNotObserved": 22,
+                "present:Fresh": 132356
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                },
+                "present:Fresh": {
+                  "group_position": 76282,
+                  "visible_at_utc_ms": 1788912300069
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/60895611540746646210134562587716764512450858012586455621197756705914039654323/best_bid_ask": {
+              "categories": {
+                "absent:UnknownNotObserved": 35,
+                "present:Fresh": 132343
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                },
+                "present:Fresh": {
+                  "group_position": 76295,
+                  "visible_at_utc_ms": 1788912300074
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/60895611540746646210134562587716764512450858012586455621197756705914039654323/bids": {
+              "categories": {
+                "absent:UnknownNotObserved": 22,
+                "present:Fresh": 132356
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                },
+                "present:Fresh": {
+                  "group_position": 76282,
+                  "visible_at_utc_ms": 1788912300069
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/60895611540746646210134562587716764512450858012586455621197756705914039654323/public_trade": {
+              "categories": {
+                "absent:UnknownNotObserved": 402,
+                "present:Fresh": 131976
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                },
+                "present:Fresh": {
+                  "group_position": 76662,
+                  "visible_at_utc_ms": 1788912301356
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/60895611540746646210134562587716764512450858012586455621197756705914039654323/tick": {
+              "categories": {
+                "present:Fresh": 132378
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/60895611540746646210134562587716764512450858012586455621197756705914039654323/valuation_best_bid": {
+              "categories": {
+                "known_price:Fresh": 132356,
+                "unavailable:UnknownNotObserved": 22
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "known_price:Fresh": {
+                  "group_position": 76282,
+                  "visible_at_utc_ms": 1788912300069
+                },
+                "unavailable:UnknownNotObserved": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/42363345784452904958376528930765132541509012872905911609444246938487536862941/asks": {
+              "categories": {
+                "absent:UnknownNotObserved": 21,
+                "present:Fresh": 132357
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                },
+                "present:Fresh": {
+                  "group_position": 76281,
+                  "visible_at_utc_ms": 1788912300068
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/42363345784452904958376528930765132541509012872905911609444246938487536862941/best_bid_ask": {
+              "categories": {
+                "absent:UnknownNotObserved": 35,
+                "present:Fresh": 132343
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                },
+                "present:Fresh": {
+                  "group_position": 76295,
+                  "visible_at_utc_ms": 1788912300074
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/42363345784452904958376528930765132541509012872905911609444246938487536862941/bids": {
+              "categories": {
+                "absent:UnknownNotObserved": 21,
+                "present:Fresh": 132357
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                },
+                "present:Fresh": {
+                  "group_position": 76281,
+                  "visible_at_utc_ms": 1788912300068
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/42363345784452904958376528930765132541509012872905911609444246938487536862941/public_trade": {
+              "categories": {
+                "absent:UnknownNotObserved": 1280,
+                "present:Fresh": 131098
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                },
+                "present:Fresh": {
+                  "group_position": 77540,
+                  "visible_at_utc_ms": 1788912302945
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/42363345784452904958376528930765132541509012872905911609444246938487536862941/tick": {
+              "categories": {
+                "present:Fresh": 132378
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/42363345784452904958376528930765132541509012872905911609444246938487536862941/valuation_best_bid": {
+              "categories": {
+                "known_price:Fresh": 132357,
+                "unavailable:UnknownNotObserved": 21
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "known_price:Fresh": {
+                  "group_position": 76281,
+                  "visible_at_utc_ms": 1788912300068
+                },
+                "unavailable:UnknownNotObserved": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                }
+              }
+            },
+            "binance_depth": {
+              "categories": {
+                "present:Fresh": 132378
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                }
+              }
+            },
+            "binance_trade": {
+              "categories": {
+                "present:Fresh": 132378
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                }
+              }
+            },
+            "causal_window_history": {
+              "categories": {
+                "before_settlement_window": 132365,
+                "reference_missing": 13
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "before_settlement_window": {
+                  "group_position": 76273,
+                  "visible_at_utc_ms": 1788912300059
+                },
+                "reference_missing": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                }
+              }
+            },
+            "chainlink_spot": {
+              "categories": {
+                "present:Fresh": 132378
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                }
+              }
+            },
+            "chainlink_twap_sixty": {
+              "categories": {
+                "present:Fresh": 132378
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                }
+              }
+            },
+            "chainlink_twap_thirty": {
+              "categories": {
+                "absent:UnknownNotObserved": 132378
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                }
+              }
+            },
+            "closed": {
+              "categories": {
+                "present:Fresh": 132378
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                }
+              }
+            },
+            "effective_reference": {
+              "categories": {
+                "missing": 84095,
+                "official:present:Fresh": 44718,
+                "temporary_twap_60s": 3565
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "missing": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                },
+                "official:present:Fresh": {
+                  "group_position": 163920,
+                  "visible_at_utc_ms": 1788912610107
+                },
+                "temporary_twap_60s": {
+                  "group_position": 160355,
+                  "visible_at_utc_ms": 1788912602172
+                }
+              }
+            },
+            "lifecycle": {
+              "categories": {
+                "present:Fresh": 132378
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                }
+              }
+            },
+            "lifecycle_value": {
+              "categories": {
+                "Known { value: Active }": 49056,
+                "Known { value: Prefetched }": 83322
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "Known { value: Active }": {
+                  "group_position": 159582,
+                  "visible_at_utc_ms": 1788912600004
+                },
+                "Known { value: Prefetched }": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                }
+              }
+            },
+            "market_window": {
+              "categories": {
+                "before": 83322,
+                "inside": 49056
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "before": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                },
+                "inside": {
+                  "group_position": 159582,
+                  "visible_at_utc_ms": 1788912600004
+                }
+              }
+            },
+            "member_count": {
+              "categories": {
+                "2": 132378
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "2": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                }
+              }
+            },
+            "official_anchor": {
+              "categories": {
+                "absent:UnknownNotObserved": 87660,
+                "present:Fresh": 44718
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                },
+                "present:Fresh": {
+                  "group_position": 163920,
+                  "visible_at_utc_ms": 1788912610107
+                }
+              }
+            },
+            "settlement_reference": {
+              "categories": {
+                "absent:UnknownNotObserved": 13,
+                "present:Fresh": 132365
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                },
+                "present:Fresh": {
+                  "group_position": 76273,
+                  "visible_at_utc_ms": 1788912300059
+                }
+              }
+            },
+            "settlement_reference_value": {
+              "categories": {
+                "ChainlinkTwapSixtySeconds": 132365,
+                "missing": 13
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "ChainlinkTwapSixtySeconds": {
+                  "group_position": 76273,
+                  "visible_at_utc_ms": 1788912300059
+                },
+                "missing": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                }
+              }
+            },
+            "terminal": {
+              "categories": {
+                "absent:UnknownNotObserved": 132378
+              },
+              "denominator": 132378,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 76260,
+                  "visible_at_utc_ms": 1788912300042
+                }
+              }
+            }
+          },
+          "first_fresh_spot_source_at": 1788912298000,
+          "first_visible_at": 1788912300042,
+          "identity": {
+            "clob_market_id": "4352365",
+            "condition_id": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e",
+            "window": {
+              "end_at_utc_ms": 1788912900000,
+              "start_at_utc_ms": 1788912600000
+            }
+          },
+          "last_fresh_spot_source_at": 1788912718000,
+          "last_visible_at": 1788912719994,
+          "max_forward_spot_source_gap_ms": 8000,
+          "observations": 132378,
+          "source_time_regressions": 0
+        },
+        "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20": {
+          "distinct_fresh_spot_samples": 659,
+          "fields": {
+            "accepting_orders": {
+              "categories": {
+                "present:Fresh": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "active": {
+              "categories": {
+                "present:Fresh": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/102849750551531882592626838681952450548049709627821897076456675572108598447456/asks": {
+              "categories": {
+                "absent:UnknownNotObserved": 144,
+                "present:Fresh": 208491
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                },
+                "present:Fresh": {
+                  "group_position": 147,
+                  "visible_at_utc_ms": 1788912002244
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/102849750551531882592626838681952450548049709627821897076456675572108598447456/best_bid_ask": {
+              "categories": {
+                "absent:UnknownNotObserved": 1,
+                "present:Fresh": 208634
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                },
+                "present:Fresh": {
+                  "group_position": 4,
+                  "visible_at_utc_ms": 1788912002232
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/102849750551531882592626838681952450548049709627821897076456675572108598447456/bids": {
+              "categories": {
+                "absent:UnknownNotObserved": 144,
+                "present:Fresh": 208491
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                },
+                "present:Fresh": {
+                  "group_position": 147,
+                  "visible_at_utc_ms": 1788912002244
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/102849750551531882592626838681952450548049709627821897076456675572108598447456/public_trade": {
+              "categories": {
+                "absent:UnknownNotObserved": 171,
+                "present:Fresh": 208464
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                },
+                "present:Fresh": {
+                  "group_position": 174,
+                  "visible_at_utc_ms": 1788912002246
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/102849750551531882592626838681952450548049709627821897076456675572108598447456/tick": {
+              "categories": {
+                "present:Fresh": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/102849750551531882592626838681952450548049709627821897076456675572108598447456/valuation_best_bid": {
+              "categories": {
+                "known_price:Fresh": 208634,
+                "unavailable:UnknownNotObserved": 1
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "known_price:Fresh": {
+                  "group_position": 4,
+                  "visible_at_utc_ms": 1788912002232
+                },
+                "unavailable:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/75902788286939706379430622188372065513567695002626149478929368630888442189116/asks": {
+              "categories": {
+                "absent:UnknownNotObserved": 145,
+                "present:Fresh": 208490
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                },
+                "present:Fresh": {
+                  "group_position": 148,
+                  "visible_at_utc_ms": 1788912002245
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/75902788286939706379430622188372065513567695002626149478929368630888442189116/best_bid_ask": {
+              "categories": {
+                "absent:UnknownNotObserved": 1,
+                "present:Fresh": 208634
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                },
+                "present:Fresh": {
+                  "group_position": 4,
+                  "visible_at_utc_ms": 1788912002232
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/75902788286939706379430622188372065513567695002626149478929368630888442189116/bids": {
+              "categories": {
+                "absent:UnknownNotObserved": 145,
+                "present:Fresh": 208490
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                },
+                "present:Fresh": {
+                  "group_position": 148,
+                  "visible_at_utc_ms": 1788912002245
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/75902788286939706379430622188372065513567695002626149478929368630888442189116/public_trade": {
+              "categories": {
+                "absent:UnknownNotObserved": 170,
+                "present:Fresh": 208465
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                },
+                "present:Fresh": {
+                  "group_position": 173,
+                  "visible_at_utc_ms": 1788912002246
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/75902788286939706379430622188372065513567695002626149478929368630888442189116/tick": {
+              "categories": {
+                "present:Fresh": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/75902788286939706379430622188372065513567695002626149478929368630888442189116/valuation_best_bid": {
+              "categories": {
+                "known_empty:Fresh": 148922,
+                "known_price:Fresh": 59712,
+                "unavailable:UnknownNotObserved": 1
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "known_empty:Fresh": {
+                  "group_position": 59716,
+                  "visible_at_utc_ms": 1788912178062
+                },
+                "known_price:Fresh": {
+                  "group_position": 4,
+                  "visible_at_utc_ms": 1788912002232
+                },
+                "unavailable:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "binance_depth": {
+              "categories": {
+                "absent:UnknownNotObserved": 360,
+                "present:Fresh": 208275
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                },
+                "present:Fresh": {
+                  "group_position": 363,
+                  "visible_at_utc_ms": 1788912002465
+                }
+              }
+            },
+            "binance_trade": {
+              "categories": {
+                "absent:UnknownNotObserved": 336,
+                "present:Fresh": 208299
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                },
+                "present:Fresh": {
+                  "group_position": 339,
+                  "visible_at_utc_ms": 1788912002251
+                }
+              }
+            },
+            "causal_window_history": {
+              "categories": {
+                "before_settlement_window": 67793,
+                "endpoints_present_not_integral_validated": 140497,
+                "reference_missing": 345
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "before_settlement_window": {
+                  "group_position": 348,
+                  "visible_at_utc_ms": 1788912002319
+                },
+                "endpoints_present_not_integral_validated": {
+                  "group_position": 68141,
+                  "visible_at_utc_ms": 1788912240009
+                },
+                "reference_missing": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "chainlink_spot": {
+              "categories": {
+                "absent:UnknownNotObserved": 331,
+                "present:Fresh": 208304
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                },
+                "present:Fresh": {
+                  "group_position": 334,
+                  "visible_at_utc_ms": 1788912002251
+                }
+              }
+            },
+            "chainlink_twap_sixty": {
+              "categories": {
+                "absent:UnknownNotObserved": 333,
+                "present:Fresh": 208302
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                },
+                "present:Fresh": {
+                  "group_position": 336,
+                  "visible_at_utc_ms": 1788912002251
+                }
+              }
+            },
+            "chainlink_twap_thirty": {
+              "categories": {
+                "absent:UnknownNotObserved": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "closed": {
+              "categories": {
+                "present:Fresh": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "effective_reference": {
+              "categories": {
+                "missing": 345,
+                "official:present:Fresh": 202680,
+                "temporary_twap_60s": 5610
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "missing": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                },
+                "official:present:Fresh": {
+                  "group_position": 5958,
+                  "visible_at_utc_ms": 1788912012375
+                },
+                "temporary_twap_60s": {
+                  "group_position": 348,
+                  "visible_at_utc_ms": 1788912002319
+                }
+              }
+            },
+            "lifecycle": {
+              "categories": {
+                "present:Fresh": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "lifecycle_value": {
+              "categories": {
+                "Known { value: Active }": 127341,
+                "Known { value: Retired }": 81294
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "Known { value: Active }": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                },
+                "Known { value: Retired }": {
+                  "group_position": 127344,
+                  "visible_at_utc_ms": 1788912418265
+                }
+              }
+            },
+            "market_window": {
+              "categories": {
+                "after": 132391,
+                "inside": 76244
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "after": {
+                  "group_position": 76247,
+                  "visible_at_utc_ms": 1788912300008
+                },
+                "inside": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "member_count": {
+              "categories": {
+                "2": 208635
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "2": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "official_anchor": {
+              "categories": {
+                "absent:UnknownNotObserved": 5955,
+                "present:Fresh": 202680
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                },
+                "present:Fresh": {
+                  "group_position": 5958,
+                  "visible_at_utc_ms": 1788912012375
+                }
+              }
+            },
+            "settlement_reference": {
+              "categories": {
+                "absent:UnknownNotObserved": 345,
+                "present:Fresh": 208290
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                },
+                "present:Fresh": {
+                  "group_position": 348,
+                  "visible_at_utc_ms": 1788912002319
+                }
+              }
+            },
+            "settlement_reference_value": {
+              "categories": {
+                "ChainlinkTwapSixtySeconds": 208290,
+                "missing": 345
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "ChainlinkTwapSixtySeconds": {
+                  "group_position": 348,
+                  "visible_at_utc_ms": 1788912002319
+                },
+                "missing": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                }
+              }
+            },
+            "terminal": {
+              "categories": {
+                "absent:UnknownNotObserved": 127341,
+                "present:Fresh": 81294
+              },
+              "denominator": 208635,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 3,
+                  "visible_at_utc_ms": 1788912000008
+                },
+                "present:Fresh": {
+                  "group_position": 127344,
+                  "visible_at_utc_ms": 1788912418265
+                }
+              }
+            }
+          },
+          "first_fresh_spot_source_at": 1788911999000,
+          "first_visible_at": 1788912000008,
+          "identity": {
+            "clob_market_id": "4352318",
+            "condition_id": "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20",
+            "window": {
+              "end_at_utc_ms": 1788912300000,
+              "start_at_utc_ms": 1788912000000
+            }
+          },
+          "last_fresh_spot_source_at": 1788912718000,
+          "last_visible_at": 1788912719994,
+          "max_forward_spot_source_gap_ms": 8000,
+          "observations": 208635,
+          "source_time_regressions": 0
+        },
+        "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92": {
+          "distinct_fresh_spot_samples": 117,
+          "fields": {
+            "accepting_orders": {
+              "categories": {
+                "present:Fresh": 49029
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                }
+              }
+            },
+            "active": {
+              "categories": {
+                "present:Fresh": 49029
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/73358320795011273563026969773507580412060483443712916151720949283387600431182/asks": {
+              "categories": {
+                "absent:UnknownNotObserved": 11,
+                "present:Fresh": 49018
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                },
+                "present:Fresh": {
+                  "group_position": 159620,
+                  "visible_at_utc_ms": 1788912600086
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/73358320795011273563026969773507580412060483443712916151720949283387600431182/best_bid_ask": {
+              "categories": {
+                "absent:UnknownNotObserved": 19,
+                "present:Fresh": 49010
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                },
+                "present:Fresh": {
+                  "group_position": 159628,
+                  "visible_at_utc_ms": 1788912600101
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/73358320795011273563026969773507580412060483443712916151720949283387600431182/bids": {
+              "categories": {
+                "absent:UnknownNotObserved": 11,
+                "present:Fresh": 49018
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                },
+                "present:Fresh": {
+                  "group_position": 159620,
+                  "visible_at_utc_ms": 1788912600086
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/73358320795011273563026969773507580412060483443712916151720949283387600431182/public_trade": {
+              "categories": {
+                "absent:UnknownNotObserved": 531,
+                "present:Fresh": 48498
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                },
+                "present:Fresh": {
+                  "group_position": 160140,
+                  "visible_at_utc_ms": 1788912601796
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/73358320795011273563026969773507580412060483443712916151720949283387600431182/tick": {
+              "categories": {
+                "present:Fresh": 49029
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 0, label: \"Up\" }/73358320795011273563026969773507580412060483443712916151720949283387600431182/valuation_best_bid": {
+              "categories": {
+                "known_price:Fresh": 49018,
+                "unavailable:UnknownNotObserved": 11
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "known_price:Fresh": {
+                  "group_position": 159620,
+                  "visible_at_utc_ms": 1788912600086
+                },
+                "unavailable:UnknownNotObserved": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/82066467096712061517581429200890580195149475776906380274296444019672509402557/asks": {
+              "categories": {
+                "absent:UnknownNotObserved": 12,
+                "present:Fresh": 49017
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                },
+                "present:Fresh": {
+                  "group_position": 159621,
+                  "visible_at_utc_ms": 1788912600086
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/82066467096712061517581429200890580195149475776906380274296444019672509402557/best_bid_ask": {
+              "categories": {
+                "absent:UnknownNotObserved": 19,
+                "present:Fresh": 49010
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                },
+                "present:Fresh": {
+                  "group_position": 159628,
+                  "visible_at_utc_ms": 1788912600101
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/82066467096712061517581429200890580195149475776906380274296444019672509402557/bids": {
+              "categories": {
+                "absent:UnknownNotObserved": 12,
+                "present:Fresh": 49017
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                },
+                "present:Fresh": {
+                  "group_position": 159621,
+                  "visible_at_utc_ms": 1788912600086
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/82066467096712061517581429200890580195149475776906380274296444019672509402557/public_trade": {
+              "categories": {
+                "absent:UnknownNotObserved": 974,
+                "present:Fresh": 48055
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                },
+                "present:Fresh": {
+                  "group_position": 160583,
+                  "visible_at_utc_ms": 1788912602958
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/82066467096712061517581429200890580195149475776906380274296444019672509402557/tick": {
+              "categories": {
+                "present:Fresh": 49029
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                }
+              }
+            },
+            "asset/OutcomeIdentityV1 { index: 1, label: \"Down\" }/82066467096712061517581429200890580195149475776906380274296444019672509402557/valuation_best_bid": {
+              "categories": {
+                "known_price:Fresh": 49017,
+                "unavailable:UnknownNotObserved": 12
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "known_price:Fresh": {
+                  "group_position": 159621,
+                  "visible_at_utc_ms": 1788912600086
+                },
+                "unavailable:UnknownNotObserved": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                }
+              }
+            },
+            "binance_depth": {
+              "categories": {
+                "present:Fresh": 49029
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                }
+              }
+            },
+            "binance_trade": {
+              "categories": {
+                "present:Fresh": 49029
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                }
+              }
+            },
+            "causal_window_history": {
+              "categories": {
+                "before_settlement_window": 49011,
+                "reference_missing": 18
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "before_settlement_window": {
+                  "group_position": 159627,
+                  "visible_at_utc_ms": 1788912600101
+                },
+                "reference_missing": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                }
+              }
+            },
+            "chainlink_spot": {
+              "categories": {
+                "present:Fresh": 49029
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                }
+              }
+            },
+            "chainlink_twap_sixty": {
+              "categories": {
+                "present:Fresh": 49029
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                }
+              }
+            },
+            "chainlink_twap_thirty": {
+              "categories": {
+                "absent:UnknownNotObserved": 49029
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                }
+              }
+            },
+            "closed": {
+              "categories": {
+                "present:Fresh": 49029
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                }
+              }
+            },
+            "effective_reference": {
+              "categories": {
+                "missing": 49029
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "missing": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                }
+              }
+            },
+            "lifecycle": {
+              "categories": {
+                "present:Fresh": 49029
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "present:Fresh": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                }
+              }
+            },
+            "lifecycle_value": {
+              "categories": {
+                "Known { value: Prefetched }": 49029
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "Known { value: Prefetched }": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                }
+              }
+            },
+            "market_window": {
+              "categories": {
+                "before": 49029
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "before": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                }
+              }
+            },
+            "member_count": {
+              "categories": {
+                "2": 49029
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "2": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                }
+              }
+            },
+            "official_anchor": {
+              "categories": {
+                "absent:UnknownNotObserved": 49029
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                }
+              }
+            },
+            "settlement_reference": {
+              "categories": {
+                "absent:UnknownNotObserved": 18,
+                "present:Fresh": 49011
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                },
+                "present:Fresh": {
+                  "group_position": 159627,
+                  "visible_at_utc_ms": 1788912600101
+                }
+              }
+            },
+            "settlement_reference_value": {
+              "categories": {
+                "ChainlinkTwapSixtySeconds": 49011,
+                "missing": 18
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "ChainlinkTwapSixtySeconds": {
+                  "group_position": 159627,
+                  "visible_at_utc_ms": 1788912600101
+                },
+                "missing": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                }
+              }
+            },
+            "terminal": {
+              "categories": {
+                "absent:UnknownNotObserved": 49029
+              },
+              "denominator": 49029,
+              "first_examples": {
+                "absent:UnknownNotObserved": {
+                  "group_position": 159609,
+                  "visible_at_utc_ms": 1788912600057
+                }
+              }
+            }
+          },
+          "first_fresh_spot_source_at": 1788912598000,
+          "first_visible_at": 1788912600057,
+          "identity": {
+            "clob_market_id": "4352438",
+            "condition_id": "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92",
+            "window": {
+              "end_at_utc_ms": 1788913200000,
+              "start_at_utc_ms": 1788912900000
+            }
+          },
+          "last_fresh_spot_source_at": 1788912718000,
+          "last_visible_at": 1788912719994,
+          "max_forward_spot_source_gap_ms": 2000,
+          "observations": 49029,
+          "source_time_regressions": 0
+        }
+      },
+      "public_groups": 208635,
+      "research_groups_with_initialization_dependencies": 208635
+    },
+    "status": "success"
+  },
+  "measurement_fields": {
+    "prepare_and_statistics_measurement": {
+      "available": true,
+      "proc_io": {
+        "cancelled_write_bytes": 0,
+        "rchar": 164049067446,
+        "read_bytes": 5299822592,
+        "syscr": 37272042,
+        "syscw": 217332,
+        "wchar": 1577140326,
+        "write_bytes": 1585180672
+      },
+      "rss_end_kib": 322972,
+      "rss_start_kib": 4872,
+      "system_seconds": 15.61,
+      "unavailable_reason": null,
+      "user_seconds": 472.75,
+      "wall_seconds": 495.617341329
+    },
+    "preparation_phase_measurements": {
+      "accounted_phase_wall_seconds": 495.61616424299996,
+      "counter_sample_failures": 0,
+      "failed_stage": null,
+      "measurement_note": "consecutive call intervals; parent total is not added; process I/O includes diagnostics; rchar is not device read; endpoint RSS is not peak; cooperative batch/file/loop checkpoints, no blocking-call heartbeat",
+      "phases": [
+        {
+          "completed": true,
+          "measurement": {
+            "available": true,
+            "proc_io": {
+              "cancelled_write_bytes": 0,
+              "rchar": 2748705741,
+              "read_bytes": 877899776,
+              "syscr": 34023,
+              "syscw": 428,
+              "wchar": 1809,
+              "write_bytes": 4096
+            },
+            "rss_end_kib": 170360,
+            "rss_start_kib": 4880,
+            "system_seconds": 0.35,
+            "unavailable_reason": null,
+            "user_seconds": 2.05,
+            "wall_seconds": 2.560244849
+          },
+          "stage": "admission"
+        },
+        {
+          "completed": true,
+          "measurement": {
+            "available": true,
+            "proc_io": {
+              "cancelled_write_bytes": 0,
+              "rchar": 1754510,
+              "read_bytes": 0,
+              "syscr": 385,
+              "syscw": 428,
+              "wchar": 1865,
+              "write_bytes": 0
+            },
+            "rss_end_kib": 172872,
+            "rss_start_kib": 170360,
+            "system_seconds": 0.0,
+            "unavailable_reason": null,
+            "user_seconds": 0.01,
+            "wall_seconds": 0.009112545
+          },
+          "stage": "initialization_selection"
+        },
+        {
+          "completed": true,
+          "measurement": {
+            "available": true,
+            "proc_io": {
+              "cancelled_write_bytes": 0,
+              "rchar": 79808469511,
+              "read_bytes": 2170249216,
+              "syscr": 18571588,
+              "syscw": 2140,
+              "wchar": 9392,
+              "write_bytes": 20480
+            },
+            "rss_end_kib": 309560,
+            "rss_start_kib": 172872,
+            "system_seconds": 6.63,
+            "unavailable_reason": null,
+            "user_seconds": 125.15,
+            "wall_seconds": 132.149591876
+          },
+          "stage": "epoch_pass"
+        },
+        {
+          "completed": true,
+          "measurement": {
+            "available": true,
+            "proc_io": {
+              "cancelled_write_bytes": 0,
+              "rchar": 79808469564,
+              "read_bytes": 712704,
+              "syscr": 18571592,
+              "syscw": 6571,
+              "wchar": 33299886,
+              "write_bytes": 34013184
+            },
+            "rss_end_kib": 322156,
+            "rss_start_kib": 309560,
+            "system_seconds": 6.94,
+            "unavailable_reason": null,
+            "user_seconds": 137.67,
+            "wall_seconds": 145.092222281
+          },
+          "stage": "second_supply_and_initial_sort"
+        },
+        {
+          "completed": true,
+          "measurement": {
+            "available": true,
+            "proc_io": {
+              "cancelled_write_bytes": 0,
+              "rchar": 47467687,
+              "read_bytes": 70389760,
+              "syscr": 3634,
+              "syscw": 6601,
+              "wchar": 46449895,
+              "write_bytes": 47423488
+            },
+            "rss_end_kib": 322260,
+            "rss_start_kib": 322156,
+            "system_seconds": 0.08,
+            "unavailable_reason": null,
+            "user_seconds": 0.69,
+            "wall_seconds": 1.4786734799999999
+          },
+          "stage": "source_sort_finish"
+        },
+        {
+          "completed": true,
+          "measurement": {
+            "available": true,
+            "proc_io": {
+              "cancelled_write_bytes": 0,
+              "rchar": 51847741,
+              "read_bytes": 73359360,
+              "syscr": 4031,
+              "syscw": 163012,
+              "wchar": 1255603478,
+              "write_bytes": 1255632896
+            },
+            "rss_end_kib": 322716,
+            "rss_start_kib": 322260,
+            "system_seconds": 0.71,
+            "unavailable_reason": null,
+            "user_seconds": 176.0,
+            "wall_seconds": 177.493219934
+          },
+          "stage": "public_application_statistics_recording"
+        },
+        {
+          "completed": true,
+          "measurement": {
+            "available": true,
+            "proc_io": {
+              "cancelled_write_bytes": 0,
+              "rchar": 2061,
+              "read_bytes": 8192,
+              "syscr": 19,
+              "syscw": 1476,
+              "wchar": 3668630,
+              "write_bytes": 3682304
+            },
+            "rss_end_kib": 322716,
+            "rss_start_kib": 322716,
+            "system_seconds": 0.02,
+            "unavailable_reason": null,
+            "user_seconds": 0.03,
+            "wall_seconds": 0.070816123
+          },
+          "stage": "public_stabilize_and_catalog"
+        },
+        {
+          "completed": true,
+          "measurement": {
+            "available": true,
+            "proc_io": {
+              "cancelled_write_bytes": 0,
+              "rchar": 1431151246,
+              "read_bytes": 1870696448,
+              "syscr": 72133,
+              "syscw": 4343,
+              "wchar": 26737268,
+              "write_bytes": 27455488
+            },
+            "rss_end_kib": 322972,
+            "rss_start_kib": 322716,
+            "system_seconds": 0.66,
+            "unavailable_reason": null,
+            "user_seconds": 19.63,
+            "wall_seconds": 21.371386594
+          },
+          "stage": "hidden_scan_and_supply"
+        },
+        {
+          "completed": true,
+          "measurement": {
+            "available": true,
+            "proc_io": {
+              "cancelled_write_bytes": 0,
+              "rchar": 37883143,
+              "read_bytes": 54829056,
+              "syscr": 3130,
+              "syscw": 5199,
+              "wchar": 33296079,
+              "write_bytes": 34172928
+            },
+            "rss_end_kib": 322972,
+            "rss_start_kib": 322972,
+            "system_seconds": 0.04,
+            "unavailable_reason": null,
+            "user_seconds": 0.53,
+            "wall_seconds": 1.116370809
+          },
+          "stage": "hidden_messages_finish"
+        },
+        {
+          "completed": true,
+          "measurement": {
+            "available": true,
+            "proc_io": {
+              "cancelled_write_bytes": 0,
+              "rchar": 37761825,
+              "read_bytes": 54824960,
+              "syscr": 3088,
+              "syscw": 17932,
+              "wchar": 124116462,
+              "write_bytes": 125579264
+            },
+            "rss_end_kib": 322972,
+            "rss_start_kib": 322972,
+            "system_seconds": 0.11,
+            "unavailable_reason": null,
+            "user_seconds": 10.14,
+            "wall_seconds": 11.17079456
+          },
+          "stage": "hidden_reduce_and_write"
+        },
+        {
+          "completed": true,
+          "measurement": {
+            "available": true,
+            "proc_io": {
+              "cancelled_write_bytes": 0,
+              "rchar": 75546087,
+              "read_bytes": 126853120,
+              "syscr": 8370,
+              "syscw": 8197,
+              "wchar": 53951462,
+              "write_bytes": 57192448
+            },
+            "rss_end_kib": 322972,
+            "rss_start_kib": 322972,
+            "system_seconds": 0.07,
+            "unavailable_reason": null,
+            "user_seconds": 0.85,
+            "wall_seconds": 3.103731192
+          },
+          "stage": "hidden_finalize"
+        }
+      ],
+      "residual": {
+        "proc_io": {
+          "cancelled_write_bytes": 0,
+          "rchar": 8330,
+          "read_bytes": 0,
+          "syscr": 49,
+          "syscw": 1005,
+          "wchar": 4100,
+          "write_bytes": 4096
+        },
+        "system_seconds": 0.0,
+        "user_seconds": 5.684341886080802e-14,
+        "wall_seconds": 0.0011770860000410721
+      },
+      "schema": "historical_preparation_phase_measurements_v1",
+      "status": "complete",
+      "work": {
+        "admission_file_bytes": 2169975828,
+        "admission_files_completed": 145,
+        "admission_footer_rows": 34766440,
+        "applied_inputs": 208688,
+        "epoch_pass": {
+          "decoded_batches": 34030,
+          "files_completed": 145,
+          "initialization_decoded_batches": 1,
+          "initialization_files_completed": 1,
+          "initialization_physical_rows": 792,
+          "initialization_selected_rows": 3,
+          "physical_rows": 34766440,
+          "selected_rows": 208684
+        },
+        "generated_groups": 208638,
+        "generated_observations": 806966,
+        "hidden_index_sort": {
+          "initial_runs": 12,
+          "input_rows": 388749,
+          "merge_passes": 2,
+          "output_rows": 388749,
+          "peak_heap_entries": 8,
+          "peak_open_files": 9,
+          "peak_run_bytes": 35651584,
+          "peak_run_rows": 32768,
+          "peak_temp_bytes": 51056945,
+          "peak_temp_run_files": 13,
+          "peak_write_buffer_bytes": 608102,
+          "peak_write_buffer_rows": 1024
+        },
+        "hidden_message_sort": {
+          "initial_runs": 7,
+          "input_rows": 195594,
+          "merge_passes": 1,
+          "output_rows": 195594,
+          "peak_heap_entries": 7,
+          "peak_open_files": 8,
+          "peak_run_bytes": 67108096,
+          "peak_run_rows": 29461,
+          "peak_temp_bytes": 60026289,
+          "peak_temp_run_files": 8,
+          "peak_write_buffer_bytes": 2279042,
+          "peak_write_buffer_rows": 1024
+        },
+        "hidden_messages_reduced": 195594,
+        "hidden_messages_supplied": 195594,
+        "hidden_records_read": 3994880,
+        "hidden_references_indexed": 12905,
+        "hidden_reports_written": 737740,
+        "hidden_steps_indexed": 375844,
+        "hidden_steps_written": 375844,
+        "initialization_selection": {
+          "decoded_batches": 0,
+          "files_completed": 0,
+          "initialization_decoded_batches": 1,
+          "initialization_files_completed": 1,
+          "initialization_physical_rows": 792,
+          "initialization_selected_rows": 0,
+          "physical_rows": 0,
+          "selected_rows": 0
+        },
+        "known_daily_raw_files_per_pass": 145,
+        "known_daily_raw_rows_per_pass": 34766440,
+        "known_initialization_raw_rows_per_pass": 792,
+        "known_total_public_inputs": 208688,
+        "second_supply": {
+          "decoded_batches": 34030,
+          "files_completed": 145,
+          "initialization_decoded_batches": 1,
+          "initialization_files_completed": 1,
+          "initialization_physical_rows": 792,
+          "initialization_selected_rows": 3,
+          "physical_rows": 34766440,
+          "selected_rows": 208684
+        },
+        "source_sort_metrics": [
+          {
+            "initial_runs": 1,
+            "input_rows": 165,
+            "merge_passes": 0,
+            "output_rows": 165,
+            "peak_heap_entries": 0,
+            "peak_open_files": 1,
+            "peak_run_bytes": 3257232,
+            "peak_run_rows": 165,
+            "peak_temp_bytes": 61373,
+            "peak_temp_run_files": 1,
+            "peak_write_buffer_bytes": 0,
+            "peak_write_buffer_rows": 0
+          },
+          {
+            "initial_runs": 7,
+            "input_rows": 195597,
+            "merge_passes": 1,
+            "output_rows": 195597,
+            "peak_heap_entries": 7,
+            "peak_open_files": 8,
+            "peak_run_bytes": 67108512,
+            "peak_run_rows": 28931,
+            "peak_temp_bytes": 76200339,
+            "peak_temp_run_files": 8,
+            "peak_write_buffer_bytes": 2101728,
+            "peak_write_buffer_rows": 1024
+          },
+          {
+            "initial_runs": 1,
+            "input_rows": 7200,
+            "merge_passes": 0,
+            "output_rows": 7200,
+            "peak_heap_entries": 0,
+            "peak_open_files": 1,
+            "peak_run_bytes": 31451520,
+            "peak_run_rows": 7200,
+            "peak_temp_bytes": 2157148,
+            "peak_temp_run_files": 1,
+            "peak_write_buffer_bytes": 0,
+            "peak_write_buffer_rows": 0
+          },
+          {
+            "initial_runs": 1,
+            "input_rows": 4405,
+            "merge_passes": 0,
+            "output_rows": 4405,
+            "peak_heap_entries": 0,
+            "peak_open_files": 1,
+            "peak_run_bytes": 19968144,
+            "peak_run_rows": 4405,
+            "peak_temp_bytes": 979925,
+            "peak_temp_run_files": 1,
+            "peak_write_buffer_bytes": 0,
+            "peak_write_buffer_rows": 0
+          },
+          {
+            "initial_runs": 1,
+            "input_rows": 659,
+            "merge_passes": 0,
+            "output_rows": 659,
+            "peak_heap_entries": 0,
+            "peak_open_files": 1,
+            "peak_run_bytes": 2969944,
+            "peak_run_rows": 659,
+            "peak_temp_bytes": 160536,
+            "peak_temp_run_files": 1,
+            "peak_write_buffer_bytes": 0,
+            "peak_write_buffer_rows": 0
+          },
+          {
+            "initial_runs": 1,
+            "input_rows": 661,
+            "merge_passes": 0,
+            "output_rows": 661,
+            "peak_heap_entries": 0,
+            "peak_open_files": 1,
+            "peak_run_bytes": 4333200,
+            "peak_run_rows": 661,
+            "peak_temp_bytes": 178893,
+            "peak_temp_run_files": 1,
+            "peak_write_buffer_bytes": 0,
+            "peak_write_buffer_rows": 0
+          }
+        ]
+      }
+    },
+    "statistics_measurement": null,
+    "statistics_measurement_applicability": "not_applicable_separate_replay_removed; included_in_prepare_and_statistics_measurement"
+  },
+  "verification": {
+    "schema": "prepare_phase_12m_measurement_verification_v1",
+    "phases": 11,
+    "all_completed": true,
+    "all_available": true,
+    "reconciliation": {
+      "wall_seconds": {
+        "phase_sum": 495.616164243,
+        "residual": 0.0011770860000410721,
+        "combined": 495.617341329,
+        "reconstructed": 495.61734132900006,
+        "matches": true
+      },
+      "user_seconds": {
+        "phase_sum": 472.75,
+        "residual": 5.684341886080802e-14,
+        "combined": 472.75,
+        "reconstructed": 472.75000000000006,
+        "matches": true
+      },
+      "system_seconds": {
+        "phase_sum": 15.61,
+        "residual": 0.0,
+        "combined": 15.61,
+        "reconstructed": 15.61,
+        "matches": true
+      },
+      "proc_io": {
+        "cancelled_write_bytes": {
+          "phase_sum": 0,
+          "residual": 0,
+          "combined": 0,
+          "matches": true
+        },
+        "rchar": {
+          "phase_sum": 164049059116,
+          "residual": 8330,
+          "combined": 164049067446,
+          "matches": true
+        },
+        "read_bytes": {
+          "phase_sum": 5299822592,
+          "residual": 0,
+          "combined": 5299822592,
+          "matches": true
+        },
+        "syscr": {
+          "phase_sum": 37271993,
+          "residual": 49,
+          "combined": 37272042,
+          "matches": true
+        },
+        "syscw": {
+          "phase_sum": 216327,
+          "residual": 1005,
+          "combined": 217332,
+          "matches": true
+        },
+        "wchar": {
+          "phase_sum": 1577136226,
+          "residual": 4100,
+          "combined": 1577140326,
+          "matches": true
+        },
+        "write_bytes": {
+          "phase_sum": 1585176576,
+          "residual": 4096,
+          "combined": 1585180672,
+          "matches": true
+        }
+      }
+    },
+    "public_prefix_original": {
+      "old": {
+        "input_stream_id": "complementary-pair-e2e-remeasure-20260909-0000-0012",
+        "next_input_position": 208688,
+        "next_canonical_position": 208661,
+        "next_group_position": 208638,
+        "next_observation_position": 806966,
+        "next_public_index_position": 208638,
+        "stable_storage_ref": "stable-00000000000000000000",
+        "normal_end": true
+      },
+      "new": {
+        "input_stream_id": "complementary-pair-phase-metrics-20260909-0000-0012",
+        "next_input_position": 208688,
+        "next_canonical_position": 208661,
+        "next_group_position": 208638,
+        "next_observation_position": 806966,
+        "next_public_index_position": 208638,
+        "stable_storage_ref": "stable-00000000000000000000",
+        "normal_end": true
+      }
+    },
+    "public_prefix_equal_after_exact_stream_identity": true
+  },
+  "complete_trial_comparison": {
+    "schema": "prepare_phase_12m_complete_trial_comparison_v1",
+    "input_reports": [
+      {
+        "side": "old",
+        "logical_path": "attempt-1/trial.private.json",
+        "bytes": 113502,
+        "sha256": "1909f004e5a3337b1e5a98aaea1529841d65df04d0abfc1fdf8a4f679c74cbbc"
+      },
+      {
+        "side": "new",
+        "logical_path": "attempt-1/trial.private.json",
+        "bytes": 126427,
+        "sha256": "963453d7187405b4636ce8373602657ed0a7b44e1f266cdc82b3c2792df6b67b"
+      }
+    ],
+    "explicit_exclusions": [
+      {
+        "side": "old",
+        "path": "/prepare_measurement",
+        "present": true,
+        "value": {
+          "proc_io": {
+            "cancelled_write_bytes": 0,
+            "rchar": 164048982158,
+            "read_bytes": 5302063104,
+            "syscr": 37271555,
+            "syscw": 201156,
+            "wchar": 1577037882,
+            "write_bytes": 1585057792
+          },
+          "system_seconds": 15.79,
+          "user_seconds": 500.19,
+          "wall_seconds": 525.219863807
+        }
+      },
+      {
+        "side": "old",
+        "path": "/statistics_measurement",
+        "present": true,
+        "value": {
+          "proc_io": {
+            "cancelled_write_bytes": 0,
+            "rchar": 5034507564,
+            "read_bytes": 5272317952,
+            "syscr": 244792,
+            "syscw": 1584,
+            "wchar": 7385,
+            "write_bytes": 24576
+          },
+          "system_seconds": 1.68,
+          "user_seconds": 182.92,
+          "wall_seconds": 187.391546387
+        }
+      },
+      {
+        "side": "old",
+        "path": "/prepare_and_statistics_measurement",
+        "present": false,
+        "value": null
+      },
+      {
+        "side": "old",
+        "path": "/preparation_phase_measurements",
+        "present": false,
+        "value": null
+      },
+      {
+        "side": "old",
+        "path": "/statistics_measurement_applicability",
+        "present": false,
+        "value": null
+      },
+      {
+        "side": "old",
+        "path": "/progress_interval_seconds",
+        "present": true,
+        "value": 30
+      },
+      {
+        "side": "new",
+        "path": "/prepare_measurement",
+        "present": false,
+        "value": null
+      },
+      {
+        "side": "new",
+        "path": "/statistics_measurement",
+        "present": true,
+        "value": null
+      },
+      {
+        "side": "new",
+        "path": "/prepare_and_statistics_measurement",
+        "present": true,
+        "value": {
+          "available": true,
+          "proc_io": {
+            "cancelled_write_bytes": 0,
+            "rchar": 164049067446,
+            "read_bytes": 5299822592,
+            "syscr": 37272042,
+            "syscw": 217332,
+            "wchar": 1577140326,
+            "write_bytes": 1585180672
+          },
+          "rss_end_kib": 322972,
+          "rss_start_kib": 4872,
+          "system_seconds": 15.61,
+          "unavailable_reason": null,
+          "user_seconds": 472.75,
+          "wall_seconds": 495.617341329
+        }
+      },
+      {
+        "side": "new",
+        "path": "/preparation_phase_measurements",
+        "present": true,
+        "value": {
+          "accounted_phase_wall_seconds": 495.61616424299996,
+          "counter_sample_failures": 0,
+          "failed_stage": null,
+          "measurement_note": "consecutive call intervals; parent total is not added; process I/O includes diagnostics; rchar is not device read; endpoint RSS is not peak; cooperative batch/file/loop checkpoints, no blocking-call heartbeat",
+          "phases": [
+            {
+              "completed": true,
+              "measurement": {
+                "available": true,
+                "proc_io": {
+                  "cancelled_write_bytes": 0,
+                  "rchar": 2748705741,
+                  "read_bytes": 877899776,
+                  "syscr": 34023,
+                  "syscw": 428,
+                  "wchar": 1809,
+                  "write_bytes": 4096
+                },
+                "rss_end_kib": 170360,
+                "rss_start_kib": 4880,
+                "system_seconds": 0.35,
+                "unavailable_reason": null,
+                "user_seconds": 2.05,
+                "wall_seconds": 2.560244849
+              },
+              "stage": "admission"
+            },
+            {
+              "completed": true,
+              "measurement": {
+                "available": true,
+                "proc_io": {
+                  "cancelled_write_bytes": 0,
+                  "rchar": 1754510,
+                  "read_bytes": 0,
+                  "syscr": 385,
+                  "syscw": 428,
+                  "wchar": 1865,
+                  "write_bytes": 0
+                },
+                "rss_end_kib": 172872,
+                "rss_start_kib": 170360,
+                "system_seconds": 0.0,
+                "unavailable_reason": null,
+                "user_seconds": 0.01,
+                "wall_seconds": 0.009112545
+              },
+              "stage": "initialization_selection"
+            },
+            {
+              "completed": true,
+              "measurement": {
+                "available": true,
+                "proc_io": {
+                  "cancelled_write_bytes": 0,
+                  "rchar": 79808469511,
+                  "read_bytes": 2170249216,
+                  "syscr": 18571588,
+                  "syscw": 2140,
+                  "wchar": 9392,
+                  "write_bytes": 20480
+                },
+                "rss_end_kib": 309560,
+                "rss_start_kib": 172872,
+                "system_seconds": 6.63,
+                "unavailable_reason": null,
+                "user_seconds": 125.15,
+                "wall_seconds": 132.149591876
+              },
+              "stage": "epoch_pass"
+            },
+            {
+              "completed": true,
+              "measurement": {
+                "available": true,
+                "proc_io": {
+                  "cancelled_write_bytes": 0,
+                  "rchar": 79808469564,
+                  "read_bytes": 712704,
+                  "syscr": 18571592,
+                  "syscw": 6571,
+                  "wchar": 33299886,
+                  "write_bytes": 34013184
+                },
+                "rss_end_kib": 322156,
+                "rss_start_kib": 309560,
+                "system_seconds": 6.94,
+                "unavailable_reason": null,
+                "user_seconds": 137.67,
+                "wall_seconds": 145.092222281
+              },
+              "stage": "second_supply_and_initial_sort"
+            },
+            {
+              "completed": true,
+              "measurement": {
+                "available": true,
+                "proc_io": {
+                  "cancelled_write_bytes": 0,
+                  "rchar": 47467687,
+                  "read_bytes": 70389760,
+                  "syscr": 3634,
+                  "syscw": 6601,
+                  "wchar": 46449895,
+                  "write_bytes": 47423488
+                },
+                "rss_end_kib": 322260,
+                "rss_start_kib": 322156,
+                "system_seconds": 0.08,
+                "unavailable_reason": null,
+                "user_seconds": 0.69,
+                "wall_seconds": 1.4786734799999999
+              },
+              "stage": "source_sort_finish"
+            },
+            {
+              "completed": true,
+              "measurement": {
+                "available": true,
+                "proc_io": {
+                  "cancelled_write_bytes": 0,
+                  "rchar": 51847741,
+                  "read_bytes": 73359360,
+                  "syscr": 4031,
+                  "syscw": 163012,
+                  "wchar": 1255603478,
+                  "write_bytes": 1255632896
+                },
+                "rss_end_kib": 322716,
+                "rss_start_kib": 322260,
+                "system_seconds": 0.71,
+                "unavailable_reason": null,
+                "user_seconds": 176.0,
+                "wall_seconds": 177.493219934
+              },
+              "stage": "public_application_statistics_recording"
+            },
+            {
+              "completed": true,
+              "measurement": {
+                "available": true,
+                "proc_io": {
+                  "cancelled_write_bytes": 0,
+                  "rchar": 2061,
+                  "read_bytes": 8192,
+                  "syscr": 19,
+                  "syscw": 1476,
+                  "wchar": 3668630,
+                  "write_bytes": 3682304
+                },
+                "rss_end_kib": 322716,
+                "rss_start_kib": 322716,
+                "system_seconds": 0.02,
+                "unavailable_reason": null,
+                "user_seconds": 0.03,
+                "wall_seconds": 0.070816123
+              },
+              "stage": "public_stabilize_and_catalog"
+            },
+            {
+              "completed": true,
+              "measurement": {
+                "available": true,
+                "proc_io": {
+                  "cancelled_write_bytes": 0,
+                  "rchar": 1431151246,
+                  "read_bytes": 1870696448,
+                  "syscr": 72133,
+                  "syscw": 4343,
+                  "wchar": 26737268,
+                  "write_bytes": 27455488
+                },
+                "rss_end_kib": 322972,
+                "rss_start_kib": 322716,
+                "system_seconds": 0.66,
+                "unavailable_reason": null,
+                "user_seconds": 19.63,
+                "wall_seconds": 21.371386594
+              },
+              "stage": "hidden_scan_and_supply"
+            },
+            {
+              "completed": true,
+              "measurement": {
+                "available": true,
+                "proc_io": {
+                  "cancelled_write_bytes": 0,
+                  "rchar": 37883143,
+                  "read_bytes": 54829056,
+                  "syscr": 3130,
+                  "syscw": 5199,
+                  "wchar": 33296079,
+                  "write_bytes": 34172928
+                },
+                "rss_end_kib": 322972,
+                "rss_start_kib": 322972,
+                "system_seconds": 0.04,
+                "unavailable_reason": null,
+                "user_seconds": 0.53,
+                "wall_seconds": 1.116370809
+              },
+              "stage": "hidden_messages_finish"
+            },
+            {
+              "completed": true,
+              "measurement": {
+                "available": true,
+                "proc_io": {
+                  "cancelled_write_bytes": 0,
+                  "rchar": 37761825,
+                  "read_bytes": 54824960,
+                  "syscr": 3088,
+                  "syscw": 17932,
+                  "wchar": 124116462,
+                  "write_bytes": 125579264
+                },
+                "rss_end_kib": 322972,
+                "rss_start_kib": 322972,
+                "system_seconds": 0.11,
+                "unavailable_reason": null,
+                "user_seconds": 10.14,
+                "wall_seconds": 11.17079456
+              },
+              "stage": "hidden_reduce_and_write"
+            },
+            {
+              "completed": true,
+              "measurement": {
+                "available": true,
+                "proc_io": {
+                  "cancelled_write_bytes": 0,
+                  "rchar": 75546087,
+                  "read_bytes": 126853120,
+                  "syscr": 8370,
+                  "syscw": 8197,
+                  "wchar": 53951462,
+                  "write_bytes": 57192448
+                },
+                "rss_end_kib": 322972,
+                "rss_start_kib": 322972,
+                "system_seconds": 0.07,
+                "unavailable_reason": null,
+                "user_seconds": 0.85,
+                "wall_seconds": 3.103731192
+              },
+              "stage": "hidden_finalize"
+            }
+          ],
+          "residual": {
+            "proc_io": {
+              "cancelled_write_bytes": 0,
+              "rchar": 8330,
+              "read_bytes": 0,
+              "syscr": 49,
+              "syscw": 1005,
+              "wchar": 4100,
+              "write_bytes": 4096
+            },
+            "system_seconds": 0.0,
+            "user_seconds": 5.684341886080802e-14,
+            "wall_seconds": 0.0011770860000410721
+          },
+          "schema": "historical_preparation_phase_measurements_v1",
+          "status": "complete",
+          "work": {
+            "admission_file_bytes": 2169975828,
+            "admission_files_completed": 145,
+            "admission_footer_rows": 34766440,
+            "applied_inputs": 208688,
+            "epoch_pass": {
+              "decoded_batches": 34030,
+              "files_completed": 145,
+              "initialization_decoded_batches": 1,
+              "initialization_files_completed": 1,
+              "initialization_physical_rows": 792,
+              "initialization_selected_rows": 3,
+              "physical_rows": 34766440,
+              "selected_rows": 208684
+            },
+            "generated_groups": 208638,
+            "generated_observations": 806966,
+            "hidden_index_sort": {
+              "initial_runs": 12,
+              "input_rows": 388749,
+              "merge_passes": 2,
+              "output_rows": 388749,
+              "peak_heap_entries": 8,
+              "peak_open_files": 9,
+              "peak_run_bytes": 35651584,
+              "peak_run_rows": 32768,
+              "peak_temp_bytes": 51056945,
+              "peak_temp_run_files": 13,
+              "peak_write_buffer_bytes": 608102,
+              "peak_write_buffer_rows": 1024
+            },
+            "hidden_message_sort": {
+              "initial_runs": 7,
+              "input_rows": 195594,
+              "merge_passes": 1,
+              "output_rows": 195594,
+              "peak_heap_entries": 7,
+              "peak_open_files": 8,
+              "peak_run_bytes": 67108096,
+              "peak_run_rows": 29461,
+              "peak_temp_bytes": 60026289,
+              "peak_temp_run_files": 8,
+              "peak_write_buffer_bytes": 2279042,
+              "peak_write_buffer_rows": 1024
+            },
+            "hidden_messages_reduced": 195594,
+            "hidden_messages_supplied": 195594,
+            "hidden_records_read": 3994880,
+            "hidden_references_indexed": 12905,
+            "hidden_reports_written": 737740,
+            "hidden_steps_indexed": 375844,
+            "hidden_steps_written": 375844,
+            "initialization_selection": {
+              "decoded_batches": 0,
+              "files_completed": 0,
+              "initialization_decoded_batches": 1,
+              "initialization_files_completed": 1,
+              "initialization_physical_rows": 792,
+              "initialization_selected_rows": 0,
+              "physical_rows": 0,
+              "selected_rows": 0
+            },
+            "known_daily_raw_files_per_pass": 145,
+            "known_daily_raw_rows_per_pass": 34766440,
+            "known_initialization_raw_rows_per_pass": 792,
+            "known_total_public_inputs": 208688,
+            "second_supply": {
+              "decoded_batches": 34030,
+              "files_completed": 145,
+              "initialization_decoded_batches": 1,
+              "initialization_files_completed": 1,
+              "initialization_physical_rows": 792,
+              "initialization_selected_rows": 3,
+              "physical_rows": 34766440,
+              "selected_rows": 208684
+            },
+            "source_sort_metrics": [
+              {
+                "initial_runs": 1,
+                "input_rows": 165,
+                "merge_passes": 0,
+                "output_rows": 165,
+                "peak_heap_entries": 0,
+                "peak_open_files": 1,
+                "peak_run_bytes": 3257232,
+                "peak_run_rows": 165,
+                "peak_temp_bytes": 61373,
+                "peak_temp_run_files": 1,
+                "peak_write_buffer_bytes": 0,
+                "peak_write_buffer_rows": 0
+              },
+              {
+                "initial_runs": 7,
+                "input_rows": 195597,
+                "merge_passes": 1,
+                "output_rows": 195597,
+                "peak_heap_entries": 7,
+                "peak_open_files": 8,
+                "peak_run_bytes": 67108512,
+                "peak_run_rows": 28931,
+                "peak_temp_bytes": 76200339,
+                "peak_temp_run_files": 8,
+                "peak_write_buffer_bytes": 2101728,
+                "peak_write_buffer_rows": 1024
+              },
+              {
+                "initial_runs": 1,
+                "input_rows": 7200,
+                "merge_passes": 0,
+                "output_rows": 7200,
+                "peak_heap_entries": 0,
+                "peak_open_files": 1,
+                "peak_run_bytes": 31451520,
+                "peak_run_rows": 7200,
+                "peak_temp_bytes": 2157148,
+                "peak_temp_run_files": 1,
+                "peak_write_buffer_bytes": 0,
+                "peak_write_buffer_rows": 0
+              },
+              {
+                "initial_runs": 1,
+                "input_rows": 4405,
+                "merge_passes": 0,
+                "output_rows": 4405,
+                "peak_heap_entries": 0,
+                "peak_open_files": 1,
+                "peak_run_bytes": 19968144,
+                "peak_run_rows": 4405,
+                "peak_temp_bytes": 979925,
+                "peak_temp_run_files": 1,
+                "peak_write_buffer_bytes": 0,
+                "peak_write_buffer_rows": 0
+              },
+              {
+                "initial_runs": 1,
+                "input_rows": 659,
+                "merge_passes": 0,
+                "output_rows": 659,
+                "peak_heap_entries": 0,
+                "peak_open_files": 1,
+                "peak_run_bytes": 2969944,
+                "peak_run_rows": 659,
+                "peak_temp_bytes": 160536,
+                "peak_temp_run_files": 1,
+                "peak_write_buffer_bytes": 0,
+                "peak_write_buffer_rows": 0
+              },
+              {
+                "initial_runs": 1,
+                "input_rows": 661,
+                "merge_passes": 0,
+                "output_rows": 661,
+                "peak_heap_entries": 0,
+                "peak_open_files": 1,
+                "peak_run_bytes": 4333200,
+                "peak_run_rows": 661,
+                "peak_temp_bytes": 178893,
+                "peak_temp_run_files": 1,
+                "peak_write_buffer_bytes": 0,
+                "peak_write_buffer_rows": 0
+              }
+            ]
+          }
+        }
+      },
+      {
+        "side": "new",
+        "path": "/statistics_measurement_applicability",
+        "present": true,
+        "value": "not_applicable_separate_replay_removed; included_in_prepare_and_statistics_measurement"
+      },
+      {
+        "side": "new",
+        "path": "/progress_interval_seconds",
+        "present": true,
+        "value": 30
+      }
+    ],
+    "normalization": [
+      {
+        "side": "old",
+        "changes": [
+          {
+            "path": "/effective_preparation/header/input_stream_id",
+            "kind": "exact_execution_stream_id",
+            "original": "complementary-pair-e2e-remeasure-20260909-0000-0012",
+            "normalized": "execution-public-stream"
+          },
+          {
+            "path": "/effective_preparation/hidden_stream_id",
+            "kind": "exact_execution_stream_id",
+            "original": "complementary-pair-e2e-remeasure-hidden-20260909-0000-0012",
+            "normalized": "execution-hidden-stream"
+          },
+          {
+            "path": "/effective_preparation/work_root",
+            "kind": "experiment_output_path",
+            "original": "baseline-run/materials",
+            "normalized": "experiment-root/materials"
+          },
+          {
+            "path": "/hidden_preparation/consumer_stream_id",
+            "kind": "exact_execution_stream_id",
+            "original": "complementary-pair-e2e-remeasure-hidden-20260909-0000-0012",
+            "normalized": "execution-hidden-stream"
+          },
+          {
+            "path": "/hidden_preparation/derived_path",
+            "kind": "experiment_output_path",
+            "original": "baseline-run/materials/hidden/derived/captured.parquet",
+            "normalized": "experiment-root/materials/hidden/derived/captured.parquet"
+          },
+          {
+            "path": "/hidden_preparation/index_path",
+            "kind": "experiment_output_path",
+            "original": "baseline-run/materials/hidden/index/dpt-external-sort/sorted.parquet",
+            "normalized": "experiment-root/materials/hidden/index/dpt-external-sort/sorted.parquet"
+          },
+          {
+            "path": "/hidden_preparation/prefix/input_stream_id",
+            "kind": "exact_execution_stream_id",
+            "original": "complementary-pair-e2e-remeasure-20260909-0000-0012",
+            "normalized": "execution-public-stream"
+          }
+        ]
+      },
+      {
+        "side": "new",
+        "changes": [
+          {
+            "path": "/effective_preparation/header/input_stream_id",
+            "kind": "exact_execution_stream_id",
+            "original": "complementary-pair-phase-metrics-20260909-0000-0012",
+            "normalized": "execution-public-stream"
+          },
+          {
+            "path": "/effective_preparation/hidden_stream_id",
+            "kind": "exact_execution_stream_id",
+            "original": "complementary-pair-phase-metrics-hidden-20260909-0000-0012",
+            "normalized": "execution-hidden-stream"
+          },
+          {
+            "path": "/effective_preparation/work_root",
+            "kind": "experiment_output_path",
+            "original": "current-run/materials",
+            "normalized": "experiment-root/materials"
+          },
+          {
+            "path": "/hidden_preparation/consumer_stream_id",
+            "kind": "exact_execution_stream_id",
+            "original": "complementary-pair-phase-metrics-hidden-20260909-0000-0012",
+            "normalized": "execution-hidden-stream"
+          },
+          {
+            "path": "/hidden_preparation/derived_path",
+            "kind": "experiment_output_path",
+            "original": "current-run/materials/hidden/derived/captured.parquet",
+            "normalized": "experiment-root/materials/hidden/derived/captured.parquet"
+          },
+          {
+            "path": "/hidden_preparation/index_path",
+            "kind": "experiment_output_path",
+            "original": "current-run/materials/hidden/index/dpt-external-sort/sorted.parquet",
+            "normalized": "experiment-root/materials/hidden/index/dpt-external-sort/sorted.parquet"
+          },
+          {
+            "path": "/hidden_preparation/prefix/input_stream_id",
+            "kind": "exact_execution_stream_id",
+            "original": "complementary-pair-phase-metrics-20260909-0000-0012",
+            "normalized": "execution-public-stream"
+          }
+        ]
+      }
+    ],
+    "difference_count": 0,
+    "differences": [],
+    "equal_after_explicit_execution_only_projection": true,
+    "note": "Full trial JSON compared, not material payload byte equality. Only six named top-level measurement fields excluded. All original values retained here."
+  },
+  "historical_comparison": {
+    "baseline_prepare_seconds": 525.219863807,
+    "baseline_separate_statistics_seconds": 187.391546387,
+    "baseline_combined_seconds": 712.611410194,
+    "current_combined_seconds": 495.617341329,
+    "difference_seconds": 216.99406886499997,
+    "observed_reduction_fraction": 0.30450546505552856,
+    "note": "跨版本、共享主机、缓存时点的一次观察；不是同binary净优化或稳定倍率。研究本轮未运行，不拼旧研究时间。"
+  },
+  "gnu_time": {
+    "User time (seconds)": "472.75",
+    "System time (seconds)": "15.63",
+    "Percent of CPU this job got": "98%",
+    "Elapsed (wall clock) time (h:mm:ss or m:ss)": "8:15.64",
+    "Average shared text size (kbytes)": "0",
+    "Average unshared data size (kbytes)": "0",
+    "Average stack size (kbytes)": "0",
+    "Average total size (kbytes)": "0",
+    "Maximum resident set size (kbytes)": "421836",
+    "Average resident set size (kbytes)": "0",
+    "Major (requiring I/O) page faults": "0",
+    "Minor (reclaiming a frame) page faults": "345578",
+    "Voluntary context switches": "43857",
+    "Involuntary context switches": "7582",
+    "Swaps": "0",
+    "File system inputs": "10351216",
+    "File system outputs": "3096312",
+    "Socket messages sent": "0",
+    "Socket messages received": "0",
+    "Signals delivered": "0",
+    "Page size (bytes)": "4096",
+    "Exit status": "0"
+  },
+  "resources": {
+    "monitor_wall_seconds": 497.1343492940068,
+    "sample_interval_seconds": 1,
+    "peak_note": "采样峰值仅为观测下界；遍历不是原子快照",
+    "sampled_peak_logical_bytes_lower_bound": 1477140035,
+    "sampled_peak_allocated_bytes_lower_bound": 1477206016,
+    "final_exact": {
+      "files": 13,
+      "logical_bytes": 1458069467,
+      "allocated_bytes": 1458122752
+    },
+    "final_subdirectories": {
+      "merge": {
+        "files": 6,
+        "logical_bytes": 41632600,
+        "allocated_bytes": 41648128
+      },
+      "public": {
+        "files": 4,
+        "logical_bytes": 1259247304,
+        "allocated_bytes": 1259266048
+      },
+      "hidden": {
+        "files": 3,
+        "logical_bytes": 157189563,
+        "allocated_bytes": 157208576
+      }
+    },
+    "final_files": [
+      {
+        "path": "merge/5/dpt-external-sort/sorted.parquet",
+        "logical_bytes": 178893,
+        "allocated_bytes": 180224,
+        "sha256": "dd76978d2ccb6abc954b15deb49e79b7a3862b39d41433a890a5bed6b877eead"
+      },
+      {
+        "path": "merge/0/dpt-external-sort/sorted.parquet",
+        "logical_bytes": 61373,
+        "allocated_bytes": 61440,
+        "sha256": "eec9a8a87c774b70a7ecbc33d57673a6a5b0d4a44e0ac2de33317710dbfe4aeb"
+      },
+      {
+        "path": "merge/4/dpt-external-sort/sorted.parquet",
+        "logical_bytes": 160536,
+        "allocated_bytes": 163840,
+        "sha256": "18cdde4ae21940ebdf68bb0e1550e67d980205893d4222c6b839a6fdf0e6fdac"
+      },
+      {
+        "path": "merge/3/dpt-external-sort/sorted.parquet",
+        "logical_bytes": 979925,
+        "allocated_bytes": 983040,
+        "sha256": "78ec958c66706ea301bd76fb2ebd2aaf41705e7acbdc3f49e1ff618fe3b198e4"
+      },
+      {
+        "path": "merge/1/dpt-external-sort/sorted.parquet",
+        "logical_bytes": 38094725,
+        "allocated_bytes": 38100992,
+        "sha256": "941fafbf018f92ecfc5bbc1527360758bd84185dd5dc1dc03c898e85a64c5874"
+      },
+      {
+        "path": "merge/2/dpt-external-sort/sorted.parquet",
+        "logical_bytes": 2157148,
+        "allocated_bytes": 2158592,
+        "sha256": "38c5ec612d23b5175026ef53ce64003f04d83d33f319339092d690487837dd1a"
+      },
+      {
+        "path": "public/historical-initialization.json",
+        "logical_bytes": 874,
+        "allocated_bytes": 4096,
+        "sha256": "1603e910e91d53f18f753f156fa4d8647ff74e4c9b089f42604260a77d459602"
+      },
+      {
+        "path": "public/stream.json",
+        "logical_bytes": 368,
+        "allocated_bytes": 4096,
+        "sha256": "39a9b6d48eee7b9a5b4153d4e8e2fcf0e9c9a6039153a3ac0ef5aff98431fedd"
+      },
+      {
+        "path": "public/stable-00000000000000000000/prefix.json",
+        "logical_bytes": 304,
+        "allocated_bytes": 4096,
+        "sha256": "5898faedc5b2285857c28bb4d7269c68083f7010a0db850e661ef4b03728b850"
+      },
+      {
+        "path": "public/stable-00000000000000000000/captured.parquet",
+        "logical_bytes": 1259245758,
+        "allocated_bytes": 1259253760,
+        "sha256": "9e21cc8c3470cf39b9f6d6cb6c84ac36e648e16cab63f2b2f7f8401df9d9e36d"
+      },
+      {
+        "path": "hidden/derived/captured.parquet",
+        "logical_bytes": 101626021,
+        "allocated_bytes": 101634048,
+        "sha256": "9b4d0865485b7af9219b11469ff816a27b9c898231b1896cec96ddf1da378089"
+      },
+      {
+        "path": "hidden/messages/dpt-external-sort/sorted.parquet",
+        "logical_bytes": 30001017,
+        "allocated_bytes": 30007296,
+        "sha256": "8747f6da713e1491d909fd101cce98a67ab8a4d403ceb39c0b197e8855c42f52"
+      },
+      {
+        "path": "hidden/index/dpt-external-sort/sorted.parquet",
+        "logical_bytes": 25562525,
+        "allocated_bytes": 25567232,
+        "sha256": "c3552c5c41b1aab759ca15c7e3319e826fab503aa8423914a9c2898a4109a924"
+      }
+    ]
+  },
+  "progress_output": {
+    "stdout_bytes": 0,
+    "stderr_bytes": 68233,
+    "structured_progress_lines": 25,
+    "first_elapsed_seconds": 0.000433196,
+    "last_elapsed_seconds": 495.61679491,
+    "last_stage": "complete",
+    "printing_cost_independently_measured": false
+  },
+  "disk_and_shared_cache": {
+    "before_build": {
+      "utc": "2026-10-04T05:56:00.442647+00:00",
+      "disk_available_bytes": 260464218112,
+      "cache_root": "shared-build",
+      "cache_allocated_bytes": 47988432896,
+      "cache_logical_bytes": 47836072780,
+      "configuration_changes": [
+        {
+          "path": "/work_root",
+          "old": "baseline-run/materials",
+          "new": "current-run/materials"
+        },
+        {
+          "path": "/header/input_stream_id",
+          "old": "complementary-pair-e2e-remeasure-20260909-0000-0012",
+          "new": "complementary-pair-phase-metrics-20260909-0000-0012"
+        },
+        {
+          "path": "/hidden_stream_id",
+          "old": "complementary-pair-e2e-remeasure-hidden-20260909-0000-0012",
+          "new": "complementary-pair-phase-metrics-hidden-20260909-0000-0012"
+        }
+      ],
+      "old_config_sha256": "ce920acaa69690970364d1d40e2936fa156d8c609cc06cf98bd97dfdd3508988",
+      "new_config_sha256": "bbc63e2c13b2884b003dff2496fc60ee552e6feffe6f2900f560a674513f75a4"
+    },
+    "before_run": {
+      "utc": "2026-10-04T05:56:54.608151+00:00",
+      "disk_available_bytes": 260442062848,
+      "cache_allocated_bytes": 47989153792,
+      "cache_logical_bytes": 47836792087
+    },
+    "after_run": {
+      "utc": "2026-10-04T06:05:30.084100+00:00",
+      "disk_available_bytes": 258982514688,
+      "cache_logical_bytes": 47836792087,
+      "cache_allocated_bytes": 47989153792
+    },
+    "build_cache_logical_delta": 719307,
+    "build_cache_allocated_delta": 720896,
+    "run_cache_logical_delta": 0,
+    "run_cache_allocated_delta": 0,
+    "note": "共享缓存各时点实态差值；不归因为本任务独占变化。"
+  },
+  "evidence": {
+    "preparation.private.json": {
+      "bytes": 3022,
+      "sha256": "bbc63e2c13b2884b003dff2496fc60ee552e6feffe6f2900f560a674513f75a4"
+    },
+    "build-identity.private.json": {
+      "bytes": 2831,
+      "sha256": "1586ba5bed00aec14ade4094b97c9e217db52c5f62409a66cde8a68b3745f344"
+    },
+    "attempt-1/trial.private.json": {
+      "bytes": 126427,
+      "sha256": "963453d7187405b4636ce8373602657ed0a7b44e1f266cdc82b3c2792df6b67b"
+    },
+    "attempt-1/resources.private.json": {
+      "bytes": 74680,
+      "sha256": "f480e33a41f59937bbfc44d7250cbee7c98182b55f100133ac27827abc886173"
+    },
+    "attempt-1/gnu-time.txt": {
+      "bytes": 1035,
+      "sha256": "1bb10034bdf0f257ba1c1c033a23b670a84206cca0e9c867bccddeffa1b92919"
+    },
+    "attempt-1/stderr.log": {
+      "bytes": 68233,
+      "sha256": "4fda63739ac50a9122662231ec3eab88c9f474f62019bedb2c564551cee0decf"
+    },
+    "attempt-1/stdout.log": {
+      "bytes": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "comparison.private.json": {
+      "bytes": 22402,
+      "sha256": "4918960db5c218a4706f6cca71c513a7d2de522fcd7b5880674cb4841358b62d"
+    },
+    "measurement-verification.private.json": {
+      "bytes": 2571,
+      "sha256": "7871c3e7d76ed58588bd1651241ffb68595bd189a303278d5c162bf1fb05cf01"
+    }
+  },
+  "projection_note": {
+    "omitted": [
+      "原resources.machine.meminfo_before",
+      "原resources.samples逐秒目录采样",
+      "stdout/stderr原日志全文",
+      "本机绝对路径与绑定",
+      "原所有Parquet业务payload"
+    ],
+    "retained": "完整新trial业务字段；11阶段全部计量、工作量和residual；完整比较差异及6顶层排除的完整值；所有归一位置及逻辑投影原值。私有比较保留物理原路径。",
+    "proof_limit": "报告身份摘要供定位，不独立证明计算正确；完整trial比较不等于全部物理payload字节相等。"
+  },
+  "engineering_validation_reused": {
+    "pr": 232,
+    "tested_head": "e31f459f7e2026c58f3339b6ace008d6d6e5c3b0",
+    "workspace_passed": 1304,
+    "workspace_failed": 0,
+    "workspace_ignored": 21,
+    "named_utc_test": "four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second",
+    "named_utc_test_status": "skipped",
+    "native_projection_passed": 11,
+    "independent_reviewer_representatives_passed": 7,
+    "new_workspace_run": false
+  }
+}
