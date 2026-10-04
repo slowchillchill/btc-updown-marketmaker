@@ -103,7 +103,7 @@ impl HistoricalPreparationConfigV1 {
         header
     }
 }
-/// 显式清单准入、真实文件外排、公共核心正常有限封口、原序重放和隐藏准备。
+/// 显式清单准入、真实文件外排、公共核心正常有限封口后直接移交原隐藏准备。
 pub fn prepare_historical_run_v1(
     config: &HistoricalPreparationConfigV1,
 ) -> Result<PreparedHistoricalRunV1, MaterialError> {
@@ -191,15 +191,8 @@ pub fn prepare_historical_run_v1(
             &initialization,
         )?;
     }
-    drop(core);
-    // 隐藏准备消费真实正常前缀对应的重放核心，不直接借用制备时的内存状态。
-    let mut replay = PublicReplayV1::open(
-        &public_root,
-        config.read_page_rows,
-        config.max_read_batch_bytes,
-    )?;
-    while replay.next_applied()?.is_some() {}
-    let core = replay.into_core();
+    // 正常End已应用且原writer已成功稳定。隐藏入口只提取固定上下文后释放
+    // 此生产core，再完整读取真实规范记录并独立归约隐藏数量；不重复空重放。
     let markets = core
         .fixed_markets()
         .map(|market| {

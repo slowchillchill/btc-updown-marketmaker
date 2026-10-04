@@ -501,3 +501,207 @@ async fn prestart_hidden_time_and_late_initialization_do_not_backdate_or_add_hid
         assert!(!probe.callbacks.contains(&(BASE + 1701)));
     }
 }
+
+fn complete_hidden_projection(
+    hidden: &data_pipeline_training::hidden_preparation::HiddenPreparationV1,
+) -> Value {
+    use data_pipeline_training::hidden_preparation::*;
+    let mut rows = HiddenStepReaderV1::open(hidden, 1, 1 << 20).unwrap();
+    let mut steps_and_reports = Vec::new();
+    while let Some(row) = rows.next_row().unwrap() {
+        steps_and_reports.push(serde_json::to_value(row).unwrap());
+    }
+    let mut reader = HiddenIndexReaderV1::open(hidden, 1, 1 << 20).unwrap();
+    let mut index = Vec::new();
+    while let Some(row) = reader.next_entry().unwrap() {
+        index.push(serde_json::to_value(row).unwrap());
+    }
+    let mut reader = HiddenBucketReaderV1::open(hidden, 1, 1 << 20).unwrap();
+    let mut buckets = Vec::new();
+    while let Some(bucket) = reader.next_bucket().unwrap() {
+        buckets.push(serde_json::to_value(bucket).unwrap());
+    }
+    json!({"prefix":hidden.prefix,"consumer_stream_id":hidden.consumer_stream_id,
+        "steps_and_reports":steps_and_reports,"index":index,"buckets":buckets})
+}
+
+fn append_tick_change(config: &HistoricalPreparationConfigV1) {
+    use data_collect::{polymarket_orderbook_v3::*, writer::*};
+    let path = &config.scope.manifest_paths[0];
+    let root = path.parent().unwrap();
+    let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
+        root,
+        "tick-change",
+        POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,
+        "polymarket_market",
+    )
+    .unwrap();
+    let row = PolymarketOrderbookV3Message {
+        envelope: PolymarketOrderbookV3Envelope {
+            timestamp_received: BASE + 3000,
+            timestamp: Some(BASE + 3000),
+            market: FIRST.into(),
+            slug: Some("btc-updown-5m-engineering".into()),
+            collector_host_id: "synthetic-collector".into(),
+            collector_region: "test".into(),
+            source_endpoint: "wss://ws-subscriptions-clob.polymarket.com/ws/market".into(),
+            schema_version: POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION.into(),
+            source_sequence_epoch_id: "tick-epoch".into(),
+            collector_admission_sequence: 1,
+            collector_admission_time_utc_ms: BASE + 3001,
+        },
+        event: PolymarketOrderbookV3Event::TickSizeChange(PolymarketTickSizeChangeV3 {
+            asset_id: "20".into(),
+            old_tick_size: Some("0.01".into()),
+            new_tick_size: "0.001".into(),
+        }),
+    };
+    writer
+        .write_polymarket_orderbook_v3_messages(
+            &[row],
+            &mut PolymarketOrderbookV3WriteSequenceState::default(),
+        )
+        .unwrap();
+    writer
+        .append_key_value_metadata(
+            "data_collect_daily_file_fact_v1",
+            json!({
+        "source_kind":"polymarket_market","schema_version":POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,
+        "utc_hour":"2026-08-24T00","part":1,"rows":1})
+            .to_string(),
+        )
+        .unwrap();
+    let file = writer.finalize().unwrap();
+    let mut manifest: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    manifest["files"].as_array_mut().unwrap().push(json!({
+        "path":file.final_path.file_name().unwrap().to_str().unwrap(),
+        "source_kind":"polymarket_market","schema_version":POLYMARKET_ORDERBOOK_V3_SCHEMA_VERSION,
+        "utc_hour":"2026-08-24T00","part":1,"rows":file.row_count,
+        "bytes":std::fs::metadata(&file.final_path).unwrap().len(),"sha256":file.sha256}));
+    std::fs::write(path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+}
+
+#[test]
+fn production_prepare_direct_core_matches_independent_replay_hidden_with_initial_tick() {
+    use data_pipeline_core::pm_reduction::PmStepChangeV1;
+    use data_pipeline_training::hidden_preparation::*;
+    use sim_system::scenario::PlatformMarketV1;
+    for initialized in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut config, _) = setup(temp.path());
+        append_tick_change(&config.preparation);
+        if initialized {
+            initialize_at(&mut config, BASE + 1000, &[FIRST]);
+        }
+        // 第一个分支由原prepare刚完成的生产core直接进入hidden；不是两次replay。
+        let direct = prepare_historical_run_v1(&config.preparation).unwrap();
+        assert_eq!(
+            direct.initialization.input_positions.len(),
+            usize::from(initialized)
+        );
+        let mut replay = PublicReplayV1::open(&direct.public_root, 1, 1 << 20).unwrap();
+        let mut current_tick_changed = false;
+        while let Some((_, applied)) = replay.next_applied().unwrap() {
+            current_tick_changed |= applied
+                .applied
+                .closed_groups
+                .iter()
+                .flat_map(|g| &g.observations)
+                .filter(|o| o.market.condition_id.0 == FIRST)
+                .flat_map(|o| &o.assets)
+                .any(|a| {
+                    a.asset.token_id.0 == "20"
+                        && a.tick.value.as_ref().is_some_and(|t| t.0 == "0.001")
+                });
+        }
+        assert!(current_tick_changed);
+        let core = replay.into_core();
+        let mut expected_markets = std::collections::BTreeMap::new();
+        for market in core.fixed_markets() {
+            let context = core.pm_context(&market.condition_id.0).unwrap();
+            assert!(!context.identity_source_evidence.is_empty());
+            for asset in &context.assets {
+                assert_eq!(asset.initial_tick_size_pusd_per_share.0, "0.01");
+            }
+            let assets = context
+                .assets
+                .into_iter()
+                .map(|a| a.asset)
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap();
+            expected_markets.insert(
+                market.condition_id.0.clone(),
+                PlatformMarketV1::try_new(market, assets).unwrap(),
+            );
+        }
+        assert_eq!(direct.markets, expected_markets);
+        let rebuilt = prepare_hidden_v1(
+            core,
+            PublicRecordingReaderV1::recover(&direct.public_root, 1, 1 << 20).unwrap(),
+            &temp.path().join("hidden-from-independent-replay"),
+            &config.preparation.recording,
+            config.preparation.hidden_stream_id.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            complete_hidden_projection(&direct.hidden),
+            complete_hidden_projection(&rebuilt)
+        );
+        let mut steps = HiddenStepReaderV1::open(&direct.hidden, 1, 1 << 20).unwrap();
+        let mut saw_first_snapshot = false;
+        let mut saw_tick_change = false;
+        while let Some(row) = steps.next_row().unwrap() {
+            if let HiddenStoredRowV1::Step(row) = row {
+                match row.step.change {
+                    PmStepChangeV1::InitialSnapshot {
+                        asset,
+                        initial_tick_size_pusd_per_share,
+                        ..
+                    } if asset.token_id.0 == "20" => {
+                        assert_eq!(initial_tick_size_pusd_per_share.0, "0.01");
+                        saw_first_snapshot = true;
+                    }
+                    PmStepChangeV1::Tick { .. } => saw_tick_change = true,
+                    _ => {}
+                }
+            }
+        }
+        assert!(saw_first_snapshot && saw_tick_change);
+    }
+}
+
+#[test]
+fn direct_hidden_read_still_fails_original_bad_eof_count_before_success() {
+    use data_pipeline_training::hidden_preparation::prepare_hidden_v1;
+    let temp = tempfile::tempdir().unwrap();
+    let (config, _) = setup(temp.path());
+    let prepared = prepare_historical_run_v1(&config.preparation).unwrap();
+    let mut replay = PublicReplayV1::open(&prepared.public_root, 1, 1 << 20).unwrap();
+    while replay.next_applied().unwrap().is_some() {}
+    let core = replay.into_core();
+    let mut prefix = prepared.hidden.prefix.clone();
+    prefix.next_canonical_position += 1;
+    std::fs::write(
+        prepared
+            .public_root
+            .join(&prefix.stable_storage_ref)
+            .join("prefix.json"),
+        serde_json::to_vec(&prefix).unwrap(),
+    )
+    .unwrap();
+    let root = temp.path().join("hidden-bad-eof");
+    let result = prepare_hidden_v1(
+        core,
+        PublicRecordingReaderV1::recover(&prepared.public_root, 1, 1 << 20).unwrap(),
+        &root,
+        &config.preparation.recording,
+        config.preparation.hidden_stream_id.clone(),
+    );
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "稳定分片内容与前缀计数不符"
+    );
+    assert!(root.join("messages").is_dir()); // 已批准的错误阶段允许保留未完成目录。
+    assert!(!root.join("derived").exists());
+}
