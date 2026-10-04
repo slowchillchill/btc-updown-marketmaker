@@ -3,7 +3,7 @@ import * as echarts from "echarts/core";
 import { ScatterChart } from "echarts/charts";
 import { GridComponent, TooltipComponent } from "echarts/components";
 import { CanvasRenderer } from "echarts/renderers";
-import type { Evidence, Point } from "./browse";
+import { pointUs, type Evidence, type Point } from "./browse";
 echarts.use([ScatterChart, GridComponent, TooltipComponent, CanvasRenderer]);
 export function Timeline({
   points,
@@ -17,8 +17,8 @@ export function Timeline({
     if (!ref.current || !points.length) return;
     const chart = echarts.init(ref.current);
     const origin = points.reduce(
-      (a, p) => (BigInt(p.utcMs) < a ? BigInt(p.utcMs) : a),
-      BigInt(points[0].utcMs),
+      (a, p) => (pointUs(p) < a ? pointUs(p) : a),
+      pointUs(points[0]),
     );
     const clocks = [...new Set(points.map((p) => p.clock))];
     chart.setOption({
@@ -30,7 +30,7 @@ export function Timeline({
           const i = (params as { dataIndex: number }).dataIndex;
           const p = points[i];
           // 纯文本显示，避免来源字符串成为 HTML。
-          return p ? `UTC ms ${p.utcMs}` : "";
+          return p ? `${p.clock} · ${p.originalUtcText ?? p.utcMs}` : "";
         },
       },
       xAxis: {
@@ -53,7 +53,10 @@ export function Timeline({
           type: "scatter",
           symbolSize: 10,
           itemStyle: { color: "#72dbc5" },
-          data: points.map((p) => [Number(BigInt(p.utcMs) - origin), p.clock]),
+          data: points.map((p) => [
+            Number(pointUs(p) - origin) / 1000,
+            p.clock,
+          ]),
         },
       ],
     });
@@ -73,7 +76,7 @@ export function Timeline({
       <div className="timeline" ref={ref} aria-label="有限多时钟事实图" />
       <p className="muted">
         仅显示已知点；没有完整诊断历史，不画经济曲线或补造持续时间。图上坐标为近似位移，选点查看原精确
-        UTC ms。
+        时间（毫秒整数或原微秒 UTC 文本）。
       </p>
     </>
   );

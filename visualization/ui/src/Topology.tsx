@@ -336,6 +336,16 @@ export function Topology({
       summary: "历史采集清单已交接 · 非实时 / 公共前缀",
       evidence: existing.evidence,
     };
+  if (existing?.kind === "model_timing")
+    facts.strategy = {
+      summary: "有限模型宿主工程时序 · 非正式训练 / 联网PAPER",
+      evidence: existing.evidence,
+    };
+  if (existing?.kind === "remeasurement_12m")
+    facts.strategy = {
+      summary: "十二分钟历史描述与测量 · 非账户经营",
+      evidence: existing.evidence,
+    };
   if (existing?.kind === "continuous")
     facts.strategy = {
       summary: "原生调用工程成本已交接 · 非训练 / 策略决定",

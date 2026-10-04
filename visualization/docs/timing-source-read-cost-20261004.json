@@ -1,0 +1,517 @@
+{
+  "allocation_definition": "成功alloc/alloc_zeroed/realloc次数；累计Layout/newsize请求字节；live请求字节与RSS分别；peak_above_start_bytes相对阶段初始live的峰值；elapsed_us包含探针/strace开销，不是CPU或生产速度",
+  "io_definition": "files长度和read/pread64/readv返回字节分开；read_calls含EOF返回0；/proc read_bytes为物理存储观测受OS缓存影响；不打开清单声明的Parquet",
+  "implementation_base": "85d366b182a146f3c8c98c813dff548a9ec91e3f",
+  "build_mode": "dev unoptimized + debuginfo; example-only allocator; Chrome headless 1600x1050",
+  "scope": "两个独立实例，每实例首读+原区段+最近重试各一次；model_timing仅5个显式文件，报告仅1个明确JSON；未清OS缓存；不运行模型或研究",
+  "cases": {
+    "timing": {
+      "io": {
+        "kind": "model_timing",
+        "files": {
+          "trace": {
+            "name": "trace.jsonl",
+            "file_bytes": 376581
+          },
+          "time_sim": {
+            "name": "time-sim.jsonl",
+            "file_bytes": 40436
+          },
+          "feedback": {
+            "name": "consumed-feedback.jsonl",
+            "file_bytes": 3972
+          },
+          "run": {
+            "name": "run.json",
+            "file_bytes": 46
+          },
+          "time_results": {
+            "name": "time-results.json",
+            "file_bytes": 26323
+          }
+        },
+        "phases": {
+          "initialize": {
+            "trace": {
+              "calls": 2,
+              "returned_bytes": 376581,
+              "syscalls": {
+                "read": 2
+              }
+            },
+            "time_sim": {
+              "calls": 2,
+              "returned_bytes": 40436,
+              "syscalls": {
+                "read": 2
+              }
+            },
+            "feedback": {
+              "calls": 2,
+              "returned_bytes": 3972,
+              "syscalls": {
+                "read": 2
+              }
+            },
+            "run": {
+              "calls": 2,
+              "returned_bytes": 46,
+              "syscalls": {
+                "read": 2
+              }
+            },
+            "time_results": {
+              "calls": 2,
+              "returned_bytes": 26323,
+              "syscalls": {
+                "read": 2
+              }
+            }
+          },
+          "select_fragment": {
+            "trace": {
+              "calls": 0,
+              "returned_bytes": 0,
+              "syscalls": {}
+            },
+            "time_sim": {
+              "calls": 0,
+              "returned_bytes": 0,
+              "syscalls": {}
+            },
+            "feedback": {
+              "calls": 0,
+              "returned_bytes": 0,
+              "syscalls": {}
+            },
+            "run": {
+              "calls": 0,
+              "returned_bytes": 0,
+              "syscalls": {}
+            },
+            "time_results": {
+              "calls": 0,
+              "returned_bytes": 0,
+              "syscalls": {}
+            }
+          },
+          "retry_latest": {
+            "trace": {
+              "calls": 0,
+              "returned_bytes": 0,
+              "syscalls": {}
+            },
+            "time_sim": {
+              "calls": 0,
+              "returned_bytes": 0,
+              "syscalls": {}
+            },
+            "feedback": {
+              "calls": 0,
+              "returned_bytes": 0,
+              "syscalls": {}
+            },
+            "run": {
+              "calls": 0,
+              "returned_bytes": 0,
+              "syscalls": {}
+            },
+            "time_results": {
+              "calls": 0,
+              "returned_bytes": 0,
+              "syscalls": {}
+            }
+          }
+        }
+      },
+      "cost": [
+        {
+          "allocation_calls": "87153",
+          "cumulative_requested_bytes": "5903993",
+          "elapsed_us": "44122",
+          "live_requested_after": "2791136",
+          "live_requested_before": "2199",
+          "peak_above_start_bytes": "2842096",
+          "peak_live_requested_bytes": "2844295",
+          "phase": "initialize",
+          "process_read_bytes_delta": "0",
+          "process_rss_high_water_bytes": "7962624",
+          "rss_bytes": "7962624",
+          "snapshot_encoding": {
+            "complete_encoding_us": "435",
+            "response_bytes": "14553"
+          }
+        },
+        {
+          "allocation_calls": "5617",
+          "cumulative_requested_bytes": "312064",
+          "elapsed_us": "2048",
+          "encoding": {
+            "complete_encoding_us": "929",
+            "response_bytes": "25195",
+            "selection_and_dto_us": "1067"
+          },
+          "live_requested_after": "2828616",
+          "live_requested_before": "2795121",
+          "peak_above_start_bytes": "140379",
+          "peak_live_requested_bytes": "2935500",
+          "phase": "select_fragment",
+          "process_read_bytes_delta": "0",
+          "process_rss_high_water_bytes": "8097792",
+          "rss_bytes": "8097792"
+        },
+        {
+          "allocation_calls": "0",
+          "cumulative_requested_bytes": "0",
+          "elapsed_us": "3",
+          "live_requested_after": "2831586",
+          "live_requested_before": "2831591",
+          "new_complete_encodings": 0,
+          "new_source_reads": 0,
+          "original_document": "trace",
+          "peak_above_start_bytes": "0",
+          "peak_live_requested_bytes": "2831591",
+          "phase": "retry_latest",
+          "process_read_bytes_delta": "0",
+          "process_rss_high_water_bytes": "8097792",
+          "response_bytes": 25195,
+          "rss_bytes": "8097792",
+          "same_bytes_allocation": true
+        }
+      ]
+    },
+    "measurement": {
+      "io": {
+        "kind": "remeasurement_12m",
+        "files": {
+          "measurement": {
+            "name": "complementary-pair-end-to-end-20260909-0000-0012.json",
+            "file_bytes": 41713
+          }
+        },
+        "phases": {
+          "initialize": {
+            "measurement": {
+              "calls": 2,
+              "returned_bytes": 41713,
+              "syscalls": {
+                "read": 2
+              }
+            }
+          },
+          "select_fragment": {
+            "measurement": {
+              "calls": 0,
+              "returned_bytes": 0,
+              "syscalls": {}
+            }
+          },
+          "retry_latest": {
+            "measurement": {
+              "calls": 0,
+              "returned_bytes": 0,
+              "syscalls": {}
+            }
+          }
+        }
+      },
+      "cost": [
+        {
+          "allocation_calls": "7166",
+          "cumulative_requested_bytes": "715714",
+          "elapsed_us": "7959",
+          "live_requested_after": "271891",
+          "live_requested_before": "1666",
+          "peak_above_start_bytes": "354999",
+          "peak_live_requested_bytes": "356665",
+          "phase": "initialize",
+          "process_read_bytes_delta": "0",
+          "process_rss_high_water_bytes": "5001216",
+          "rss_bytes": "5001216",
+          "snapshot_encoding": {
+            "complete_encoding_us": "4326",
+            "response_bytes": "18998"
+          }
+        },
+        {
+          "allocation_calls": "83",
+          "cumulative_requested_bytes": "8170",
+          "elapsed_us": "148",
+          "encoding": {
+            "complete_encoding_us": "36",
+            "response_bytes": "638",
+            "selection_and_dto_us": "95"
+          },
+          "live_requested_after": "277667",
+          "live_requested_before": "275896",
+          "peak_above_start_bytes": "3610",
+          "peak_live_requested_bytes": "279506",
+          "phase": "select_fragment",
+          "process_read_bytes_delta": "0",
+          "process_rss_high_water_bytes": "5001216",
+          "rss_bytes": "5001216"
+        },
+        {
+          "allocation_calls": "0",
+          "cumulative_requested_bytes": "0",
+          "elapsed_us": "2",
+          "live_requested_after": "280597",
+          "live_requested_before": "280627",
+          "new_complete_encodings": 0,
+          "new_source_reads": 0,
+          "original_document": "measurement",
+          "peak_above_start_bytes": "0",
+          "peak_live_requested_bytes": "280627",
+          "phase": "retry_latest",
+          "process_read_bytes_delta": "0",
+          "process_rss_high_water_bytes": "5001216",
+          "response_bytes": 638,
+          "rss_bytes": "5001216",
+          "same_bytes_allocation": true
+        }
+      ]
+    }
+  },
+  "browser": {
+    "errors": [],
+    "sources": [
+      {
+        "index": 0,
+        "kind": "model_timing",
+        "snapshot_bytes": 14550,
+        "documents": [
+          {
+            "document": "time_results",
+            "status": "ready",
+            "bytes_read": "26323",
+            "arrays": [
+              {
+                "length": "4",
+                "path": "/consumed_submission_controls"
+              },
+              {
+                "length": "13",
+                "path": "/events"
+              },
+              {
+                "length": "1",
+                "path": "/freeze/observation_windows"
+              },
+              {
+                "length": "1",
+                "path": "/legacy_comparison/completion/ledger/market_projections"
+              },
+              {
+                "length": "4",
+                "path": "/stop/requests"
+              }
+            ]
+          },
+          {
+            "document": "trace",
+            "status": "ready",
+            "bytes_read": "376581",
+            "arrays": [
+              {
+                "length": "49",
+                "path": ""
+              }
+            ]
+          },
+          {
+            "document": "time_sim",
+            "status": "ready",
+            "bytes_read": "40436",
+            "arrays": [
+              {
+                "length": "84",
+                "path": ""
+              }
+            ]
+          },
+          {
+            "document": "feedback",
+            "status": "ready",
+            "bytes_read": "3972",
+            "arrays": [
+              {
+                "length": "4",
+                "path": ""
+              }
+            ]
+          },
+          {
+            "document": "run",
+            "status": "ready",
+            "bytes_read": "46",
+            "arrays": []
+          }
+        ]
+      },
+      {
+        "index": 1,
+        "kind": "remeasurement_12m",
+        "snapshot_bytes": 18998,
+        "documents": [
+          {
+            "document": "measurement",
+            "status": "ready",
+            "bytes_read": "41713",
+            "arrays": [
+              {
+                "length": "2",
+                "path": "/business/markets"
+              },
+              {
+                "length": "2",
+                "path": "/complete_result_comparison"
+              },
+              {
+                "length": "1",
+                "path": "/configuration/metadata_initialization/files"
+              },
+              {
+                "length": "2",
+                "path": "/configuration/metadata_initialization/markets"
+              },
+              {
+                "length": "16",
+                "path": "/evidence_files"
+              },
+              {
+                "length": "1",
+                "path": "/input_identity/initialization/files"
+              },
+              {
+                "length": "1",
+                "path": "/input_identity/source_manifests"
+              },
+              {
+                "length": "13",
+                "path": "/materials/new_final_files"
+              },
+              {
+                "length": "2",
+                "path": "/research_targets"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "cost": {
+      "timing": {
+        "click_to_detail_two_frames_ms": 78.5,
+        "resource": {
+          "duration_ms": 1.5,
+          "encoded_body_bytes": 426,
+          "decoded_body_bytes": 426,
+          "transfer_bytes": 726
+        }
+      },
+      "measurement": {
+        "click_to_detail_two_frames_ms": 88.29999999701977,
+        "resource": {
+          "duration_ms": 2.2999999970197678,
+          "encoded_body_bytes": 638,
+          "decoded_body_bytes": 638,
+          "transfer_bytes": 938
+        }
+      }
+    },
+    "downloads": [
+      {
+        "name": "model-completion",
+        "points": 3
+      },
+      {
+        "name": "future-required",
+        "points": 1
+      },
+      {
+        "name": "sim-request",
+        "points": 3
+      },
+      {
+        "name": "remeasurement-timeline",
+        "points": 4
+      },
+      {
+        "name": "remeasurement-time-leaf",
+        "points": 1
+      }
+    ],
+    "own_server_stopped": true,
+    "own_browser_closed": true
+  },
+  "build_artifacts": {
+    "js_kb": "1061.18",
+    "js_gzip_kb": "347.28",
+    "css_kb": "26.41",
+    "css_gzip_kb": "5.60",
+    "existing_large_chunk_warning": true
+  },
+  "source_identity": {
+    "target/issue-180-public-baseline-validation/time-driver-20261001/final-controls-evidence/trace.jsonl": {
+      "bytes": 376581,
+      "sha256": "90ea362f9b60ab9ba3c2fd85130a6f91df8a7d998a5ceb3a816e5e7e5516781a"
+    },
+    "target/issue-180-public-baseline-validation/time-driver-20261001/final-controls-evidence/time-sim.jsonl": {
+      "bytes": 40436,
+      "sha256": "5bed3c9372dc60156a08411a6c268014c5e51ba9fc1eaeb86ac4f6871fdbd501"
+    },
+    "target/issue-180-public-baseline-validation/time-driver-20261001/final-controls-evidence/consumed-feedback.jsonl": {
+      "bytes": 3972,
+      "sha256": "d3cab94e299a50c3830c9796dc31135ea03ae62dbcbf863691da513ac14cb020"
+    },
+    "target/issue-180-public-baseline-validation/time-driver-20261001/final-controls-evidence/run.json": {
+      "bytes": 46,
+      "sha256": "a43e83ed41a7f105e0d7d939c4c5da2eafe6025b88606f32209dfd46d353e2eb"
+    },
+    "model-train/validation/issue-180/evidence/time-results.json": {
+      "bytes": 26323,
+      "sha256": "62a326586237e76a9e66ae6d8bdae8198b376fe806f641dd94733b4a2d8b59ec"
+    },
+    "baseline-mm/docs/research/complementary-pair-end-to-end-20260909-0000-0012.json": {
+      "bytes": 41713,
+      "sha256": "97ced23af6e33066bc8ac1e297d67ca06ee4b9f73d0c65093a0145114572570a"
+    }
+  },
+  "measured_source_files_sha256": {
+    "Cargo.lock": "9eacb8e4b716cc76668d6aee8ab4f7fa5e9bef0945a292255a563a88fbc8fa71",
+    "visualization/Cargo.toml": "5a751980963c2c9693bbe684203c6b537da64f9d028237eeea10eb033e6fedf1",
+    "visualization/src/sources/existing.rs": "6021d7d1de7203aa12b75a4046010d3d6abb45d63e3333b1d72559793062011f",
+    "visualization/src/api.rs": "83b1bcec37ca9ea4a2f9153358ab6b8589e586bfcb768fe05cf9cad4b93192ce",
+    "visualization/examples/existing_read_cost.rs": "44b06324391557468389d3eabceb7cf002e130d5063fbcaea7a9ca214fcc9489",
+    "visualization/examples/read_cost.rs": "ae0eeb104aaa75a4e643f2579766111bf6871d13b058951268b3adb497ebbcb1",
+    "visualization/ui/src/Existing.tsx": "bd7df90eeb09e44ce953a2d890ba9df52efd550bd9686dedd9f794951f878c78",
+    "visualization/ui/src/browse.ts": "80276f19b3a4c868d44620fa7133a20313c94d493f0644a6aa65a266766780f2",
+    "visualization/ui/src/Timeline.tsx": "2dee64a4f1741804a1544f21a072e75fdda0969f723f7bb3d5bf8b32526b33ed",
+    "visualization/ui/tests/timing-browser.mjs": "e3a1b1c79b7f9316670f986e4bea43a0e0956de36c1b92383283f1f80cb4b539"
+  },
+  "binary_sha256": "f96782602ee4b1d9cd29cc099208d4e25a4edaae75a167c2b83d1f1177a88c26",
+  "perfetto": {
+    "model_completion": {
+      "points": 3,
+      "independent_expected_ns": [
+        "86100000000000",
+        "86100000000000",
+        "86100050000000"
+      ]
+    },
+    "material_launcher": {
+      "points": 1,
+      "original_utc_text": "2026-10-04T04:16:05.737613+00:00",
+      "expected_us": "1791087365737613",
+      "trace_processor_ns": "1791087365737613000"
+    }
+  },
+  "limits": [
+    "首读是应用实例未载入，非冷盘；/proc read_bytes均0，只反映本次缓存条件",
+    "read/pread64/readv计返回字节（含EOF零调用），不同于文件长度与物理I/O",
+    "elapsed_us含strace与原子分配探针，不当生产速度或CPU耗时；live请求峰值不等于RSS",
+    "最近重试返回原Bytes同一分配，无新读/分配/编码；getter与响应内首读成本不当本次新增",
+    "浏览器点击到DOM及两帧含网络/解析/React/调度/自动化，非CPU；HTTP与响应字节单列",
+    "源端#180/#228资源结果不冒充C消费成本；有限样例不证明生产规模/稳定加速；无新增阈值"
+  ]
+}

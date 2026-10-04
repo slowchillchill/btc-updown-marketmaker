@@ -122,3 +122,107 @@ fn unknown_kind_and_non_projection_completion_do_not_masquerade_as_reports() {
         "unsupported_version"
     );
 }
+#[test]
+fn twelve_minute_report_preserves_measured_identity_null_and_microsecond_text() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap();
+    let c = ExistingSourceConfig {
+        kind: "remeasurement_12m".into(),
+        paths: BTreeMap::from([(
+            "measurement".into(),
+            root.join(
+                "baseline-mm/docs/research/complementary-pair-end-to-end-20260909-0000-0012.json",
+            ),
+        )]),
+    };
+    let mut d = ExistingDocument::open(Some(&c));
+    assert_eq!(d.status()["status"], "ready");
+    let read = |d: &mut ExistingDocument, path: &str| -> Value {
+        serde_json::from_slice(&d.select(q("measurement", path, None, None)).unwrap()).unwrap()
+    };
+    assert_eq!(
+        read(&mut d, "/measurement_source_commit")["exact"],
+        "10a8ce588f2b2d6e192253ef90e4205733a54160"
+    );
+    assert_eq!(
+        read(
+            &mut d,
+            "/execution/phases/two_market_research/new/exclusive_cpu_seconds"
+        )["exact"],
+        Value::Null
+    );
+    assert_eq!(
+        read(&mut d, "/execution/timeline/material_launcher_utc")["exact"],
+        "2026-10-04T04:16:05.737613+00:00"
+    );
+    assert!(
+        d.select(q(
+            "measurement",
+            "/execution/phases/prepare/new/start_at_utc_ms",
+            None,
+            None
+        ))
+        .is_err()
+    );
+    let b = d
+        .select(q(
+            "measurement",
+            "/complete_result_comparison",
+            Some(1),
+            Some(1),
+        ))
+        .unwrap();
+    let v: Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(v["rows"][0]["path"], "/complete_result_comparison/1");
+    assert_eq!(v["rows"][0]["exact"]["difference_count"], "0");
+    let cost = d.last_encoding_cost().clone();
+    assert_eq!(
+        b.as_ptr(),
+        d.select(q(
+            "measurement",
+            "/complete_result_comparison",
+            Some(1),
+            Some(1)
+        ))
+        .unwrap()
+        .as_ptr()
+    );
+    assert_eq!(&cost, d.last_encoding_cost());
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("future.json");
+    std::fs::write(&path, r#"{"schema":"future"}"#).unwrap();
+    let c = ExistingSourceConfig {
+        kind: "remeasurement_12m".into(),
+        paths: BTreeMap::from([("measurement".into(), path)]),
+    };
+    assert_eq!(
+        ExistingDocument::open(Some(&c)).status()["documents"][0]["status"],
+        "unsupported_version"
+    );
+}
+#[test]
+fn diagnostic_jsonl_preserves_original_order_debug_text_and_rejects_truncation_without_repair() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("trace.jsonl");
+    let original=b"{\"kind\":\"observation\",\"at\":86100000}\n{\"kind\":\"completion-send\",\"observation\":86100000,\"completion_at\":86100050,\"compute_wall_ns\":10084179,\"receipt\":\"Some(Debug)\"}\n";
+    std::fs::write(&p, original).unwrap();
+    let c = ExistingSourceConfig {
+        kind: "model_timing".into(),
+        paths: BTreeMap::from([("trace".into(), p.clone())]),
+    };
+    let mut d = ExistingDocument::open(Some(&c));
+    let b = d.select(q("trace", "", Some(1), Some(1))).unwrap();
+    let v: Value = serde_json::from_slice(&b).unwrap();
+    assert_eq!(v["total"], "2");
+    assert_eq!(v["rows"][0]["path"], "/1");
+    assert_eq!(v["rows"][0]["exact"]["receipt"], "Some(Debug)");
+    assert_eq!(std::fs::read(&p).unwrap(), original);
+    assert!(d.select(q("trace", "", Some(3), Some(1))).is_err());
+    std::fs::write(&p, b"{\"kind\":\"observation\"}\n{").unwrap();
+    assert_eq!(
+        ExistingDocument::open(Some(&c)).status()["documents"][1]["status"],
+        "read_error"
+    );
+    assert_eq!(std::fs::read(&p).unwrap(), b"{\"kind\":\"observation\"}\n{");
+}

@@ -366,3 +366,49 @@ CARGO_TARGET_DIR=<实际target> node visualization/ui/tests/existing-leaf-browse
 ```
 
 本次叶路径修复的 Chrome 无 pageerror、自有服务/浏览器结束；官方 Trace Processor 各读取 1 点，分别为 `now / 1789517395414000000 ns / 原1789517395414 ms` 与 `first_recv_time_utc_ms / 1788912002229000000 ns / 原1788912002229 ms`。前端 build 通过，JS 1052.64 kB/gzip344.89 kB、CSS26.41 kB/gzip5.60 kB，原 Vite 大 chunk 提示保留。仅前端映射与定向脚本改变，复用既有 Rust 回归与成本证据；未重新测量成本，历史摘要中的计量源码 SHA 与读数不变。
+
+### 有限模型时序与十二分钟完整流程测量
+
+沿 #215 读取两个独立已有来源，仍使用 `existing_source` 及原区段接口：
+
+```json
+{"runs":[
+  {"label":"有限模型宿主工程诊断", "existing_source":{"kind":"model_timing","paths":{
+    "time_results":"model-train/validation/issue-180/evidence/time-results.json",
+    "trace":"<明确工程目录>/trace.jsonl", "time_sim":"<明确工程目录>/time-sim.jsonl",
+    "feedback":"<明确工程目录>/consumed-feedback.jsonl", "run":"<明确工程目录>/run.json"}}},
+  {"label":"十二分钟完整流程测量报告", "existing_source":{"kind":"remeasurement_12m","paths":{
+    "measurement":"baseline-mm/docs/research/complementary-pair-end-to-end-20260909-0000-0012.json"}}}
+]}
+```
+
+相对路径仍沿启动目录解析；只读这些显式文件，不发现目录、启动模型或重跑研究。JSONL 用 serde_json 按原行序解析并保存为现有可选择数组；每份文件独立状态，截断/未知报告版本不修复原文件。trace/state 中嵌套张量数组以原路径/长度下钻，首屏不发送全部模型输入。trace、feedback、run 无统一 schema，显式 kind 和原 time-results 的冻结修订/产物SHA定义该批工程证据，不冒充稳定公共业务 API。原说明及生成点在 `model-train/validation/issue-180/time-report.md`、`time-host.rs`、`time-host.py`。
+
+真实49条trace、84条time-sim、4条feedback的原索引/身份可分页选择。工程逻辑毫秒起点86100000与T−30热身、观察/计算开始/冻结完成/发送/未来必需位置分开；不绑定真实研究日期。50/250ms为预声明经济延迟，queue_wait_ms是原排队时长，compute_wall_ns是实测时长，不合成网络或CPU时间点。结构化SIM PUBLIC_OBSERVE_TIME与PUBLIC_REQUEST的send_time/cutoff可映射原逻辑点；RUN_OPENED V4、后续ACCEPTED_INPUTS_V3和工程aaaa/bbbb身份保留，不代替冻结生产修订。反馈原request_id/ordinal可查，Debug outcome/source_reference/receipt/intent不解析、不从文本取时钟、不反造NOE引用。exit0、CLEAN_RUN及stopped_without_future不证明经济闭合，下一必需PublicVisibility86401011仍为未知未来。
+
+十二分钟报告只支持原 `complementary_pair_end_to_end_12m_remeasurement_v1`。实际measurement_source_commit10a8ce588与historical_baseline_source_commit53fdddd原样展示，当前C提交与报告提交均不替代它们。原阶段old/new秒、CPU、proc_io与GNU整进程RSS KiB、512B输入输出计数分表，所有已读标量可回查原路径。研究独占CPU/RSS原null保持；不拿整进程数回填。原1843.8181883109999→959.236639304秒是一次跨版本历史观察，不归因单项优化或承诺稳定加速。原完整比较/排除/归一规则、not_proved、输入配置/公共前缀/两市场摘要及省略项可原路径下钻，不补省略数组，不与首小时连为历史。
+
+原材料received_*utc_ms只表示材料范围；execution.timeline的启动器记录与完成GNU文件mtime独立。该报告明确六位微秒/+00:00格式，原UTC文本与BigInt微秒保留到所选事实和Perfetto；ECharts仅用相对毫秒近似，范围输入仍为整数毫秒并以精确微秒比较，不能把同毫秒但超出端点的点截断纳入。内部phase没有保存UTC端点，不用wall_seconds拼持续区间。导出携带原报告/冻结身份，均为instant，不造flow、消费或经济闭合。
+
+复现本轮有限成本与真实Chrome（使用上述两个明确来源配置）：
+
+```bash
+cargo build -p visualization --example existing_read_cost --bin visualization --locked --offline
+strace -qq -yy -e trace=read,pread64,readv,write -s 256 -o <private-trace> \
+  target/debug/examples/existing_read_cost <sources.json> 0 trace '' 2
+# 另一实例使用索引1、measurement、/execution/timeline、1；每实例只运行一次。
+python3 visualization/examples/existing_read_cost_io.py <private-trace> <sources.json> <run-index>
+CARGO_TARGET_DIR=<实际target> node visualization/ui/tests/timing-browser.mjs <sources.json> <ignored-output>
+```
+
+[有限测量摘要](docs/timing-source-read-cost-20261004.json)保存实际源/计量源码SHA与binary哈希、分配/live/峰值/RSS、一次完整编码及浏览器耗时。模型5文件10次read/447358B；报告2次read/41713B；区段与最近重试源I/O为0。两个最近重试均Bytes同一分配，成功分配/新增完整编码均0；/proc物理read_bytes各阶段0是本次缓存条件，不清缓存、不称冷盘。allocator/strace耗时不当生产速度，浏览器点击→DOM→两帧不当CPU耗时，源端测量和C成本分开，无生产门槛。工程初始化snapshot约14.6KB、报告约19KB；首屏不重复传完整原JSON。
+
+定向原读取5项、前端build和Chrome通过；原UTC标量叶旧回归也通过。Chrome确认原序/精度、Debug反馈无时间点、原SIM版本与假身份、预声明与实测分离、研究独占null、比较原索引和四微秒点/单叶所选下载，无pageerror，自有资源结束。官方Trace Processor将模型完成读为3点（观察/开始各86100000000000ns、完成86100050000000ns），将原启动器 `2026-10-04T04:16:05.737613+00:00` 读为1791087365737613000ns，保留原文本。最终固定根回归退出0，101组日志结果行合计1304 passed/0 failed（含子进程，不是去重根用例数）；具名UTC测试按仓库规定**跳过**，未新增skip或修A的已知跨窗metadata authority边界。聚焦visualization的no-deps Clippy、fmt通过。代码图未使用，当前任务树源码与生成点直接核验；独立Rust/Python工作区不由根回归推断覆盖。
+
+十二分钟报告新增阶段、proc_io、GNU表共用原值选择边界：字段不存在时显示“未保存”并禁选；显式保存为null的原字段仍可查原引用和值，已有非空值不改变路径或精度。真实 `/execution/phases/prepare/old/exclusive_cpu_seconds` 不存在，与 `/execution/phases/two_market_research/new/exclusive_cpu_seconds` 明确null分别由 Chrome 正反断言；缺失按钮不能替换所选事实。定向复现：
+
+```bash
+CARGO_TARGET_DIR=<实际target> node visualization/ui/tests/measurement-missing-browser.mjs <两来源sources.json> <ignored-output>
+```
+
+该修复前端build与定向Chrome通过，无pageerror，自有资源已结束。仅前端选择边界/脚本/说明变化，未重复根回归或成本负载；历史成本摘要与源码哈希继续对应原测量头 `85cb6fcc58e930fd78089f00f66d5ec35301dc8a`，不把修复后的界面源码重标成曾测量版本。
