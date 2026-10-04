@@ -63,3 +63,15 @@ Chainlink 与两个资产盘口是新增配对的依赖。Binance 只按实际�
 方法在回放前固定：有效非负接收间隔及可观测事件年龄分别取 p50/p90/p95/p99，排序后使用秩 `ceil(p*n)`（1起算），去重笛卡尔积最多16对。零阈值保持立即到期，不加1；最大值只作尾部诊断。单次回放的标量区间在内存分析候选，按UTC半开窗口和午夜交集分桶，保留首点前未知及末点后无确认。独立静默/事件条件报告交叠和不重复联合时长；另按生产首个失败原因互斥分类并对账全窗口，缺事件时间不能遮蔽之后的静默到期。缺失与不一致时间不混入数值分位。原连接及同步缺证据保持未知；同折候选只描述来源，正式配置、完整市场与收益验证仍按 [#185任务3](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185) 后续安排。
 
 首折实际统计、16对候选及连续时钟覆盖见[中文报告](docs/research/complementary-pair-source-health-20260909-20260912.md)和[完整机器可读结果](docs/research/complementary-pair-source-health-20260909-20260912.json)。到达样本分位不等于连续时钟健康覆盖，报告保留未知、原质量证据及准确运行版本。
+
+### 既有两目标市场材料的逐scope健康统计
+
+同一`research_source_health CONFIG OUTPUT_DIRECTORY`入口可显式提供`scopes`数组，每项包含`label`、原`SourceStreamScopeV1`的`scope`和半开`window`（`start_at_utc_ms / end_at_utc_ms`）。`target_markets`给目标condition及窗口，`initialization_input_positions`取原初始化证据。未提供scopes的既有单流配置继续走原三日统计，方法和结果口径保持；多scope统计辅助仅在examples内，不增加生产配置或健康政策。
+
+每输入应用后按准确scope读取一次，多个市场的公共投影不重复确认；公共状态改变、last_valid身份改变、本次遍历首次有效身份分别计数。每scope只保留必要标量和来源身份集合用于识别非相邻重现，不篡改原公共last_valid或健康区间。CL/TWAP比较价格字段表示，Binance成交比较价/量/maker三个标量，仍分别保留真实成交身份；PM与Depth完整等值未测，顶价相同不当作整簿不变，原归约Confirm另列。
+
+候选只使用各scope窗内合法消息：接收间隔的接收/可见端点均在窗内，可见event年龄也按该窗采样；窗前末次事实只支撑连续时钟分类，跨窗间隔不进拟合，尾段单独披露。每scope独立沿原ceil秩生成最多16对，不混合PM资产或采用共用正式阈值；没有合法样本明确不能形成候选。初始化、非目标市场、目标窗前/窗后观察分母分别保存，不以所有市场观察数替代来源样本。
+
+本轮十二分钟投入和准确九scope由[#185当前M1—M5](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)固定；只读原record至正常End/EOF，单次真实运行，30分钟/2GiB RSS/512MiB研究输出为本段监控界，非生产默认。公共writer合成夹具使用本地目录；构建、回归、真实测量串行，失败或超界留证交主会话，不自动扩额度或复跑。
+
+既有十二分钟材料的两目标市场、四PM资产及五个辅助scope结果见[中文市场来源健康报告](docs/research/complementary-pair-market-source-health-20260909-0000-0012.md)和[完整分源JSON](docs/research/complementary-pair-market-source-health-20260909-0000-0012.json)。该报告独立列各scope窗口/未知证据、116对描述性候选及一次运行的版本与资源；TWAP30无样本保持未知，候选未采纳为正式健康参数。

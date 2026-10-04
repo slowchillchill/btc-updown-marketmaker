@@ -16,6 +16,8 @@ use std::{
 };
 type Result<T> = std::result::Result<T, Box<dyn Error + Send + Sync>>;
 const DAY: i64 = 86_400_000;
+#[path = "research_source_health/scopes.rs"]
+mod scoped;
 const PERCENTILES: [usize; 4] = [50, 90, 95, 99];
 #[derive(Serialize, Deserialize)]
 struct Config {
@@ -32,6 +34,12 @@ struct Config {
     selected_source_identity_sha256: String,
     selection_evidence: Value,
     implementation_identity: Value,
+    #[serde(default)]
+    scopes: Vec<scoped::ScopeWindow>,
+    #[serde(default)]
+    target_markets: Vec<scoped::TargetMarket>,
+    #[serde(default)]
+    initialization_input_positions: Vec<u64>,
 }
 fn default_progress_interval() -> u64 {
     30
@@ -230,7 +238,7 @@ fn hash(path: &Path) -> Result<String> {
     }
     Ok(format!("{:x}", digest.finalize()))
 }
-fn replay(c: &Config, output: &Path) -> Result<Value> {
+fn open_checked(c: &Config) -> Result<PublicReplayV1> {
     if c.received_start_utc_ms >= c.received_end_utc_ms || !c.prefix.normal_end {
         return Err("研究窗口或发布正常前缀无效".into());
     }
@@ -254,6 +262,10 @@ fn replay(c: &Config, output: &Path) -> Result<Value> {
         Duration::from_secs(c.progress_interval_seconds),
         std::io::stderr(),
     );
+    Ok(replay)
+}
+fn replay(c: &Config, output: &Path) -> Result<Value> {
+    let mut replay = open_checked(c)?;
     let scope = SourceStreamScopeV1 {
         source: SourceStreamKindV1::ChainlinkSpot,
         condition_id: None,
@@ -506,7 +518,11 @@ fn main() -> Result<()> {
     fs::create_dir(&output)?;
     let before = fs::read_to_string("/proc/self/io").ok();
     let began = Instant::now();
-    let result = replay(&c, &output);
+    let result = if c.scopes.is_empty() {
+        replay(&c, &output)
+    } else {
+        scoped::replay(&c, &output)
+    };
     let value = json!({"effective_config":c,"elapsed_seconds":began.elapsed().as_secs_f64(),
         "process_io_before":before,"process_io_after":fs::read_to_string("/proc/self/io").ok(),
         "status":if result.is_ok(){"completed"}else{"failed"},"error":result.as_ref().err().map(ToString::to_string),"result":result.as_ref().ok()});
@@ -730,6 +746,9 @@ mod tests {
             selected_source_identity_sha256: "synthetic".into(),
             selection_evidence: json!([]),
             implementation_identity: json!("synthetic"),
+            scopes: vec![],
+            target_markets: vec![],
+            initialization_input_positions: vec![],
         }
     }
     #[test]
