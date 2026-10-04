@@ -1,0 +1,2068 @@
+{
+  "schema": "current_binance_depth_projection_pair_v1",
+  "issue": "#214 当前未变化的Binance完整观测投影复用",
+  "runs": {
+    "baseline": {
+      "source_commit": "9a9108437c1101ff12fa452e109524ec708d8eb1",
+      "binary_sha256": "68626acb739a7ea0467887110515d0aacbe01227a7e4bb44eb472b88e1bbfb60",
+      "cargo_lock_sha256": "d48d168915e82e2d5a585c3217aa1e180a628770b34a3e4caf1a2a9398aaf5b4",
+      "source_file_sha256": {
+        "data-pipeline/core/src/public_observation_core.rs": "b7d12e73c670d936097983b40245a4c18b835c732dae88a572bf2d4a61f2e3ad",
+        "data-pipeline/core/src/reduction.rs": "f461e6f62723208818af533bbd3e5c14ea9ac0db377cad62e19b4ace7c42d2c7",
+        "data-pipeline/training/src/public_replay_cost.rs": "8bca3e361b15945d43fc25a06c87b81557e05b09e0df3543845d6365644761b6",
+        "data-pipeline/training/src/public_replay_cost_tests.rs": "5fd3f01b467f6ec92e18898c0b62dd4e92c185072d2aba7a152b8991e0ccb545",
+        "data-pipeline/training/src/public_replay.rs": "8a25893abd79d8f2f6196b735238e4c2dc9770a6c12ef32362051939ab4285f0"
+      },
+      "start_at_utc": "2026-10-04T09:14:19.166875+00:00",
+      "end_at_utc": "2026-10-04T09:17:13.812973+00:00",
+      "exit_code": 0,
+      "status": "success",
+      "original_error": null,
+      "normal_end_observed": true,
+      "actual_reader_prefix": {
+        "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012",
+        "next_canonical_position": 208661,
+        "next_group_position": 208638,
+        "next_input_position": 208688,
+        "next_observation_position": 806966,
+        "next_public_index_position": 208638,
+        "normal_end": true,
+        "stable_storage_ref": "stable-00000000000000000000"
+      },
+      "applied_prefix": {
+        "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012",
+        "next_input_position": 208688
+      },
+      "next_canonical_position": 208661,
+      "summary": {
+        "dependency_examples": [
+          {
+            "first_eight_refs": [
+              {
+                "input_position": 339,
+                "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012"
+              }
+            ],
+            "input_position": 349,
+            "kind": "anchor_rule",
+            "omitted_refs": 0,
+            "total_refs": 1
+          }
+        ],
+        "dependency_examples_omitted": 0,
+        "dependency_refs": 1,
+        "end_inputs": 1,
+        "eof": true,
+        "first_input": 0,
+        "first_three_inputs": [
+          {
+            "kind": "metadata_v6_existing",
+            "position": 0
+          },
+          {
+            "kind": "metadata_v6_existing",
+            "position": 1
+          },
+          {
+            "kind": "metadata_v6_existing",
+            "position": 2
+          }
+        ],
+        "group_non_increasing": 0,
+        "groups": 208638,
+        "historical_repair_inputs": 0,
+        "historical_repair_members": 0,
+        "initialization_inputs_seen": [
+          0,
+          1,
+          2
+        ],
+        "input_kinds": {
+          "anchor_rule": 150,
+          "binance_agg_trade": 4405,
+          "binance_depth_snapshot": 1,
+          "binance_depth_update": 7199,
+          "chainlink_spot": 659,
+          "chainlink_twap": 661,
+          "end_of_input": 1,
+          "metadata_v6_existing": 15,
+          "polymarket_orderbook": 195597
+        },
+        "input_non_increasing": 0,
+        "inputs": 208688,
+        "last_group": 208637,
+        "last_input": 208687,
+        "nonempty_dependencies": 1,
+        "observations": 806966,
+        "widths": {
+          "1": 2,
+          "2": 351,
+          "3": 75907,
+          "4": 83349,
+          "5": 49029
+        }
+      },
+      "fixed_identity_time_quality_sha256": "dea4e61e13e448890b4564a6ff06fc8a551e6a9ae157247b58b20dea25ca458c",
+      "digest_coverage": "input stream/position/dependency refs and source id/source/received times; group id/position/member/close coordinates; fact position/source refs/direct and dependency time/quality; excludes full payload, source bodies and observation business fields",
+      "candidate_state_before_release": {
+        "capacity": 16384,
+        "capacity_bytes": 655360,
+        "item_size_bytes": 40,
+        "len": 13032,
+        "note": "只保留已验证Reference物理位置/类型；路径与原reader、Parquet元数据/读批次另列，不包含完整TWAP历史",
+        "stable_path_buffer_capacity_bytes": 226,
+        "stable_paths_capacity": 1,
+        "stable_paths_len": 1,
+        "validation_eof": true
+      },
+      "internal": {
+        "by_return_kind": {
+          "anchor_rule": {
+            "calls": 150,
+            "completed": 150,
+            "max_ns": 18799709037,
+            "ns": 22237386188,
+            "rows": {}
+          },
+          "binance_agg_trade": {
+            "calls": 4405,
+            "completed": 4405,
+            "max_ns": 4835212,
+            "ns": 2074642509,
+            "rows": {}
+          },
+          "binance_depth_snapshot": {
+            "calls": 1,
+            "completed": 1,
+            "max_ns": 1201292,
+            "ns": 1201292,
+            "rows": {}
+          },
+          "binance_depth_update": {
+            "calls": 7199,
+            "completed": 7199,
+            "max_ns": 23049280,
+            "ns": 21293635968,
+            "rows": {}
+          },
+          "chainlink_spot": {
+            "calls": 659,
+            "completed": 659,
+            "max_ns": 4038142,
+            "ns": 408513401,
+            "rows": {}
+          },
+          "chainlink_twap": {
+            "calls": 661,
+            "completed": 661,
+            "max_ns": 748472769,
+            "ns": 1463595682,
+            "rows": {}
+          },
+          "end_of_input": {
+            "calls": 1,
+            "completed": 1,
+            "max_ns": 28574,
+            "ns": 28574,
+            "rows": {}
+          },
+          "eof": {
+            "calls": 1,
+            "completed": 1,
+            "max_ns": 61847,
+            "ns": 61847,
+            "rows": {}
+          },
+          "metadata_v6_existing": {
+            "calls": 15,
+            "completed": 15,
+            "max_ns": 771268442,
+            "ns": 1090819175,
+            "rows": {}
+          },
+          "polymarket_orderbook": {
+            "calls": 195597,
+            "completed": 195597,
+            "max_ns": 22837102,
+            "ns": 96389581350,
+            "rows": {}
+          }
+        },
+        "candidate_page_evidence_ns": 39119205,
+        "decode_by_role": {
+          "candidate_location": {
+            "batches": 12587,
+            "max_arrow_batch_bytes": 13053262,
+            "max_parquet_metadata_estimate_bytes": 4121793,
+            "max_sort_row_resident_bytes": 10698104,
+            "metadata_load_ns": 35918588,
+            "metadata_loads": 15,
+            "row_group_open_ns": 9889920,
+            "row_groups_opened": 4939,
+            "rows": 3222272,
+            "successful_batch_decode_and_rows_ns": 5250803542
+          },
+          "dependency_index_validation": {
+            "batches": 15605,
+            "max_arrow_batch_bytes": 32468554,
+            "max_parquet_metadata_estimate_bytes": 4121793,
+            "max_sort_row_resident_bytes": 16283970,
+            "metadata_load_ns": 3601419,
+            "metadata_loads": 1,
+            "row_group_open_ns": 7450680,
+            "row_groups_opened": 3902,
+            "rows": 3994880,
+            "successful_batch_decode_and_rows_ns": 4671200154
+          },
+          "dependency_location": {
+            "batches": 4,
+            "max_arrow_batch_bytes": 423624,
+            "max_parquet_metadata_estimate_bytes": 4121793,
+            "max_sort_row_resident_bytes": 331228,
+            "metadata_load_ns": 2595616,
+            "metadata_loads": 1,
+            "row_group_open_ns": 5050,
+            "row_groups_opened": 1,
+            "rows": 1024,
+            "successful_batch_decode_and_rows_ns": 533985
+          },
+          "main_drain": {
+            "batches": 15605,
+            "max_arrow_batch_bytes": 32468554,
+            "max_parquet_metadata_estimate_bytes": 4121793,
+            "max_sort_row_resident_bytes": 16283970,
+            "metadata_load_ns": 7917185,
+            "metadata_loads": 1,
+            "row_group_open_ns": 23447714,
+            "row_groups_opened": 3902,
+            "rows": 3994880,
+            "successful_batch_decode_and_rows_ns": 6388447683
+          }
+        },
+        "dependency_evidence_ns": 32632,
+        "entry_calls": 208689,
+        "entry_total_ns": 144959465986,
+        "eof_returns": 1,
+        "failed_entries": 0,
+        "last_entry": {
+          "context": {
+            "dependency_refs": [],
+            "expected_input_position": 208688,
+            "historical_member_conditions": [],
+            "input_position": null,
+            "kind": "unresolved",
+            "source_message_id": null,
+            "target_condition": null
+          },
+          "failed_spans": [],
+          "nested_ns": {},
+          "outcome": "eof",
+          "primary_ns": {
+            "main_drain": 61566
+          },
+          "residual_ns": 281,
+          "total_ns": 61847
+        },
+        "negative_residual_entries": 0,
+        "nested": {
+          "candidate_page": {
+            "calls": 33,
+            "completed": 33,
+            "max_ns": 410744687,
+            "ns": 5439834539,
+            "rows": {}
+          }
+        },
+        "prepare_remaining_ns": 1778585296,
+        "primary": {
+          "core_push": {
+            "calls": 208688,
+            "completed": 208688,
+            "max_ns": 9789850,
+            "ns": 96478461679,
+            "rows": {}
+          },
+          "dependencies": {
+            "calls": 208688,
+            "completed": 208688,
+            "max_ns": 18797275386,
+            "ns": 18805168807,
+            "rows": {}
+          },
+          "identity": {
+            "calls": 208688,
+            "completed": 208688,
+            "max_ns": 18084,
+            "ns": 13177835,
+            "rows": {}
+          },
+          "into_owned": {
+            "calls": 208688,
+            "completed": 208688,
+            "max_ns": 62889,
+            "ns": 79951923,
+            "rows": {}
+          },
+          "main_drain": {
+            "calls": 208689,
+            "completed": 208689,
+            "max_ns": 22177349,
+            "ns": 22122132854,
+            "rows": {
+              "canonical": 208661,
+              "group": 208638,
+              "input": 208688,
+              "observation": 806966,
+              "pm_report": 737740,
+              "pm_step_binding": 1812556,
+              "report": 11628,
+              "source_binding": 3
+            }
+          },
+          "prepare": {
+            "calls": 208688,
+            "completed": 208688,
+            "max_ns": 768849479,
+            "ns": 7218419835,
+            "rows": {}
+          }
+        },
+        "progress": {
+          "applied_groups": 208638,
+          "applied_inputs": 208688,
+          "checks": 5504485,
+          "dependency_validated_rows": 3994880,
+          "emission_ns": 1218346,
+          "emissions": 10,
+          "index_capacity": 16384,
+          "index_item_size_bytes": 40,
+          "index_len": 13032,
+          "index_validated_rows": 0,
+          "original_candidate_validated_rows": 0
+        },
+        "residual_total_ns": 242153053,
+        "retention": {
+          "scan_by_input": "all actually scanning Input positions with per-kind counts/rows/time; no per-row payload",
+          "scan_descriptors": "first 128 actual scan/open/page invocations; total by kind and omitted count retained",
+          "slow_entries": "16 slowest whole entry calls; total and omitted count retained"
+        },
+        "returned_inputs": 208688,
+        "scan_by_input": {
+          "159628": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159628,
+              "historical_member_conditions": [],
+              "input_position": 159628,
+              "kind": "metadata_v6_existing",
+              "source_message_id": "998b978f63a3cb0c7756b0b085d08e28918073098d7f3c908f753f633a5a968b",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 3,
+                "invocations": 3,
+                "matched_records": 545,
+                "ns": 763588515,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 545,
+                "row_kinds": {
+                  "canonical": 545
+                },
+                "rows": 545,
+                "twap_encountered": 545
+              }
+            }
+          },
+          "159636": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159636,
+              "historical_member_conditions": [],
+              "input_position": 159636,
+              "kind": "anchor_rule",
+              "source_message_id": "e6a2eb1adf9eb40de17807bd03670abe838026a4cbc3f69a70dbd1fc7749b5aa",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 3,
+                "invocations": 3,
+                "matched_records": 545,
+                "ns": 515436403,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 545,
+                "row_kinds": {
+                  "canonical": 545
+                },
+                "rows": 545,
+                "twap_encountered": 545
+              }
+            }
+          },
+          "159660": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159660,
+              "historical_member_conditions": [],
+              "input_position": 159660,
+              "kind": "anchor_rule",
+              "source_message_id": "1a4b6bed1725403c8a043e6cd5ee1731d58c256fcd1b2118566f365729ae4540",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 3,
+                "invocations": 3,
+                "matched_records": 545,
+                "ns": 751731394,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 545,
+                "row_kinds": {
+                  "canonical": 545
+                },
+                "rows": 545,
+                "twap_encountered": 545
+              }
+            }
+          },
+          "159674": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159674,
+              "historical_member_conditions": [],
+              "input_position": 159674,
+              "kind": "anchor_rule",
+              "source_message_id": "eb319d808359c3139276624e66b60977b795e7d889076992bb28b299b60009f6",
+              "target_condition": "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 3,
+                "invocations": 3,
+                "matched_records": 545,
+                "ns": 512007408,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 545,
+                "row_kinds": {
+                  "canonical": 545
+                },
+                "rows": 545,
+                "twap_encountered": 545
+              }
+            }
+          },
+          "159686": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159686,
+              "historical_member_conditions": [],
+              "input_position": 159686,
+              "kind": "anchor_rule",
+              "source_message_id": "46833ff23db459ef421dfb3f24b8d7f1d4426be1476474dbf91bc4133faefb37",
+              "target_condition": "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 3,
+                "invocations": 3,
+                "matched_records": 545,
+                "ns": 519120769,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 545,
+                "row_kinds": {
+                  "canonical": 545
+                },
+                "rows": 545,
+                "twap_encountered": 545
+              }
+            }
+          },
+          "160403": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 160403,
+              "historical_member_conditions": [],
+              "input_position": 160403,
+              "kind": "chainlink_twap",
+              "source_message_id": "76008cbf27a17dcab68d8fda336a2be6d252b8115d7d9d64ce0b0c60cb941e1b",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 3,
+                "invocations": 3,
+                "matched_records": 547,
+                "ns": 740525507,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 547,
+                "row_kinds": {
+                  "canonical": 547
+                },
+                "rows": 547,
+                "twap_encountered": 547
+              }
+            }
+          },
+          "349": {
+            "context": {
+              "dependency_refs": [
+                {
+                  "input_position": 339,
+                  "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012"
+                }
+              ],
+              "expected_input_position": 349,
+              "historical_member_conditions": [],
+              "input_position": 349,
+              "kind": "anchor_rule",
+              "source_message_id": "2b3e6413a2a238d7ebab7b1115d66fa0dd622faada0e49e2bcb366ce1e50fc32",
+              "target_condition": "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 3,
+                "ns": 1774991,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 3,
+                "row_kinds": {
+                  "canonical": 3
+                },
+                "rows": 3,
+                "twap_encountered": 3
+              },
+              "dependency_index_open": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 0,
+                "ns": 139763,
+                "open_attempts": 1,
+                "open_successes": 1,
+                "returned": 0,
+                "row_kinds": {},
+                "rows": 0,
+                "twap_encountered": 0
+              },
+              "dependency_index_validation": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 0,
+                "ns": 18793551636,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 0,
+                "row_kinds": {
+                  "canonical": 208661,
+                  "group": 208638,
+                  "input": 208688,
+                  "observation": 806966,
+                  "pm_report": 737740,
+                  "pm_step_binding": 1812556,
+                  "report": 11628,
+                  "source_binding": 3
+                },
+                "rows": 3994880,
+                "twap_encountered": 661
+              },
+              "dependency_location": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 1,
+                "ns": 3195817,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 1,
+                "row_kinds": {
+                  "canonical": 1
+                },
+                "rows": 1,
+                "twap_encountered": 1
+              }
+            }
+          },
+          "360": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 360,
+              "historical_member_conditions": [],
+              "input_position": 360,
+              "kind": "anchor_rule",
+              "source_message_id": "19c42506548e3d86492360c2d37c8df018777485c048c7f7777a982358ffc550",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 3,
+                "ns": 1793235,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 3,
+                "row_kinds": {
+                  "canonical": 3
+                },
+                "rows": 3,
+                "twap_encountered": 3
+              }
+            }
+          },
+          "363": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 363,
+              "historical_member_conditions": [],
+              "input_position": 363,
+              "kind": "anchor_rule",
+              "source_message_id": "3020dab7079138678648a4d36128e1a1aefd55b581dad46e0d3b6eab2f61994d",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 3,
+                "ns": 3046796,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 3,
+                "row_kinds": {
+                  "canonical": 3
+                },
+                "rows": 3,
+                "twap_encountered": 3
+              }
+            }
+          },
+          "76283": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76283,
+              "historical_member_conditions": [],
+              "input_position": 76283,
+              "kind": "metadata_v6_existing",
+              "source_message_id": "377b81fab1537f6ab07aca13c16cb0f0ff9c51405c5b67f764d6ed73ebd138fa",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 2,
+                "invocations": 2,
+                "matched_records": 283,
+                "ns": 304639823,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 283,
+                "row_kinds": {
+                  "canonical": 283
+                },
+                "rows": 283,
+                "twap_encountered": 283
+              }
+            }
+          },
+          "76289": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76289,
+              "historical_member_conditions": [],
+              "input_position": 76289,
+              "kind": "anchor_rule",
+              "source_message_id": "922f3bb002041f36d0b58c57c8928be8585eb61a2b10bf518444a6a54899482d",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 2,
+                "invocations": 2,
+                "matched_records": 283,
+                "ns": 304149699,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 283,
+                "row_kinds": {
+                  "canonical": 283
+                },
+                "rows": 283,
+                "twap_encountered": 283
+              }
+            }
+          },
+          "76305": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76305,
+              "historical_member_conditions": [],
+              "input_position": 76305,
+              "kind": "anchor_rule",
+              "source_message_id": "8938d2183ac3316d20737b1b27a075381491e302d940bf24d28fc1b100153723",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 2,
+                "invocations": 2,
+                "matched_records": 283,
+                "ns": 203993914,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 283,
+                "row_kinds": {
+                  "canonical": 283
+                },
+                "rows": 283,
+                "twap_encountered": 283
+              }
+            }
+          },
+          "76310": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76310,
+              "historical_member_conditions": [],
+              "input_position": 76310,
+              "kind": "anchor_rule",
+              "source_message_id": "9c605f79b3c8ae6230852e81e45e1d987bef621b85ee4cb3bba87921d0b62309",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 2,
+                "invocations": 2,
+                "matched_records": 283,
+                "ns": 205551466,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 283,
+                "row_kinds": {
+                  "canonical": 283
+                },
+                "rows": 283,
+                "twap_encountered": 283
+              }
+            }
+          },
+          "76342": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76342,
+              "historical_member_conditions": [],
+              "input_position": 76342,
+              "kind": "anchor_rule",
+              "source_message_id": "56696111a772e24578a1108261fab3bfac8f3d0ed58be65921b49403c82a280d",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 2,
+                "invocations": 2,
+                "matched_records": 283,
+                "ns": 305933738,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 283,
+                "row_kinds": {
+                  "canonical": 283
+                },
+                "rows": 283,
+                "twap_encountered": 283
+              }
+            }
+          },
+          "76896": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76896,
+              "historical_member_conditions": [],
+              "input_position": 76896,
+              "kind": "chainlink_twap",
+              "source_message_id": "d4a642ed31311616eb6ec74e6983a5621a5555fe8f7dc7a9764262071bcd6f6a",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 2,
+                "invocations": 2,
+                "matched_records": 285,
+                "ns": 306540881,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 285,
+                "row_kinds": {
+                  "canonical": 285
+                },
+                "rows": 285,
+                "twap_encountered": 285
+              }
+            }
+          }
+        },
+        "scan_totals": {
+          "candidate_page": {
+            "completed": 33,
+            "invocations": 33,
+            "matched_records": 4981,
+            "ns": 5439834539,
+            "open_attempts": 0,
+            "open_successes": 0,
+            "returned": 4981,
+            "row_kinds": {
+              "canonical": 4981
+            },
+            "rows": 4981,
+            "twap_encountered": 4981
+          },
+          "dependency_index_open": {
+            "completed": 1,
+            "invocations": 1,
+            "matched_records": 0,
+            "ns": 139763,
+            "open_attempts": 1,
+            "open_successes": 1,
+            "returned": 0,
+            "row_kinds": {},
+            "rows": 0,
+            "twap_encountered": 0
+          },
+          "dependency_index_validation": {
+            "completed": 1,
+            "invocations": 1,
+            "matched_records": 0,
+            "ns": 18793551636,
+            "open_attempts": 0,
+            "open_successes": 0,
+            "returned": 0,
+            "row_kinds": {
+              "canonical": 208661,
+              "group": 208638,
+              "input": 208688,
+              "observation": 806966,
+              "pm_report": 737740,
+              "pm_step_binding": 1812556,
+              "report": 11628,
+              "source_binding": 3
+            },
+            "rows": 3994880,
+            "twap_encountered": 661
+          },
+          "dependency_location": {
+            "completed": 1,
+            "invocations": 1,
+            "matched_records": 1,
+            "ns": 3195817,
+            "open_attempts": 0,
+            "open_successes": 0,
+            "returned": 1,
+            "row_kinds": {
+              "canonical": 1
+            },
+            "rows": 1,
+            "twap_encountered": 1
+          }
+        },
+        "scans_omitted": 0,
+        "scans_without_input_context": 0,
+        "slow_entries_omitted": 208673,
+        "time_accounting": {
+          "candidate_evidence": "all successful pages retain complete canonical fact/anchor/ref and cursor/cutoff; projection time is inside prepare_remaining, not independent production latency; progress emission cost is inside its caller and separately reported, never added again",
+          "decode_cost": "metadata/row-group/successful batch spans are contained in candidate page or validation/open calls, not additional primary time; batch includes Arrow decode and SortRow materialization plus test size accounting; failed loads/batches stay in enclosing original-error spans",
+          "dependency_evidence": "nonempty saved-ref requests retain all complete returned Reference events, including empty result; projection time is inside dependencies; validation/locating scan spans are nested there, not additive primary time",
+          "nested": "candidate_open/candidate_page are contained in prepare and must not be added to primary; scan elapsed is a subset, not extra primary time",
+          "overhead": "clock checks and local counting are inside this test diagnosis; bookkeeping at scope destruction falls within enclosing span or residual; overhead not independently isolated",
+          "primary": [
+            "main_drain",
+            "identity",
+            "dependencies",
+            "prepare",
+            "core_push",
+            "into_owned"
+          ],
+          "residual": "signed entry total minus non-overlapping primary spans; no zero clamp",
+          "size_accounting": "Parquet memory_size is its estimated allocation including shared-pointer double counts, not RSS; Arrow and SortRow maximum refer to one successful batch, not process or all-reader sum",
+          "twap_encountered": "original candidate_page counts decoded TWAP before filtering; indexed candidate_index_validation counts validated TWAP and indexed candidate_page counts selected body rows only; cached index visits have no full body decode"
+        }
+      },
+      "driver": {
+        "boundary": "returned-object explicit drop is separate from summary; candidate state release includes index/frontier decoder and paths; replay.into_core includes main reader release and move; final core drop separate; report serialization/write and diagnostic-state finalization excluded from driver wall, included in outer GNU process",
+        "last_successful_returned_input": 208687,
+        "times": {
+          "candidate_state_drop_ns": 532252,
+          "core_drop_ns": 9884898,
+          "into_core_and_reader_release_ns": 593347,
+          "open_ns": 204395,
+          "returned_objects_drop_ns": 29238053436,
+          "summary_ns": 262190152
+        },
+        "wall_seconds": 174.536874665,
+        "proc_io_delta": {
+          "rchar": 5034553518,
+          "wchar": 7611,
+          "syscr": 244786,
+          "syscw": 1450,
+          "read_bytes": 5260328960,
+          "write_bytes": 20480,
+          "cancelled_write_bytes": 0
+        }
+      },
+      "gnu": {
+        "user_cpu_seconds": 169.19,
+        "system_cpu_seconds": 1.53,
+        "max_rss_kib": 171892,
+        "filesystem_input_blocks": 10274080,
+        "filesystem_output_blocks": 26864,
+        "exit_code": 0,
+        "wall_seconds": 174.64,
+        "total_cpu_seconds": 170.72
+      },
+      "raw_report": {
+        "logical_name": "baseline.result.private.json",
+        "bytes": 13722819,
+        "sha256": "e872d2d2f7139192ff97b2002744fd0256f46db8ad4e2952bbfb275f026bc913"
+      },
+      "logs": {
+        "stdout": {
+          "bytes": 216,
+          "lines": 6,
+          "sha256": "458c52d40beea53e0226a5981d527e980bbd39801783fc5474d24d1523cee66b"
+        },
+        "stderr": {
+          "bytes": 7611,
+          "lines": 10,
+          "sha256": "eebfeaec44389afca21ad9f15d4a5ca0dc6397952403867058ebfd1c699fb5ee"
+        }
+      }
+    },
+    "candidate": {
+      "source_commit": "556ca19e1a5964f08212879b6236fcf0f4bd5e23",
+      "binary_sha256": "71a31992bd9d26e7fa0a5d9e3f649b863a9d9ee8c8bd8127918b1513b3f3249b",
+      "cargo_lock_sha256": "d48d168915e82e2d5a585c3217aa1e180a628770b34a3e4caf1a2a9398aaf5b4",
+      "source_file_sha256": {
+        "data-pipeline/core/src/public_observation_core.rs": "5403e661605a412be8bab1b277c99b57f651e9960509638eaf38eb8fa4b2b347",
+        "data-pipeline/core/src/reduction.rs": "9b9b53597a65318f004de0ac4f5f7de292b17069e5e04b1cd731bb35a0a6220f",
+        "data-pipeline/training/src/public_replay_cost.rs": "8bca3e361b15945d43fc25a06c87b81557e05b09e0df3543845d6365644761b6",
+        "data-pipeline/training/src/public_replay_cost_tests.rs": "5fd3f01b467f6ec92e18898c0b62dd4e92c185072d2aba7a152b8991e0ccb545",
+        "data-pipeline/training/src/public_replay.rs": "8a25893abd79d8f2f6196b735238e4c2dc9770a6c12ef32362051939ab4285f0"
+      },
+      "start_at_utc": "2026-10-04T09:17:33.848089+00:00",
+      "end_at_utc": "2026-10-04T09:19:54.237109+00:00",
+      "exit_code": 0,
+      "status": "success",
+      "original_error": null,
+      "normal_end_observed": true,
+      "actual_reader_prefix": {
+        "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012",
+        "next_canonical_position": 208661,
+        "next_group_position": 208638,
+        "next_input_position": 208688,
+        "next_observation_position": 806966,
+        "next_public_index_position": 208638,
+        "normal_end": true,
+        "stable_storage_ref": "stable-00000000000000000000"
+      },
+      "applied_prefix": {
+        "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012",
+        "next_input_position": 208688
+      },
+      "next_canonical_position": 208661,
+      "summary": {
+        "dependency_examples": [
+          {
+            "first_eight_refs": [
+              {
+                "input_position": 339,
+                "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012"
+              }
+            ],
+            "input_position": 349,
+            "kind": "anchor_rule",
+            "omitted_refs": 0,
+            "total_refs": 1
+          }
+        ],
+        "dependency_examples_omitted": 0,
+        "dependency_refs": 1,
+        "end_inputs": 1,
+        "eof": true,
+        "first_input": 0,
+        "first_three_inputs": [
+          {
+            "kind": "metadata_v6_existing",
+            "position": 0
+          },
+          {
+            "kind": "metadata_v6_existing",
+            "position": 1
+          },
+          {
+            "kind": "metadata_v6_existing",
+            "position": 2
+          }
+        ],
+        "group_non_increasing": 0,
+        "groups": 208638,
+        "historical_repair_inputs": 0,
+        "historical_repair_members": 0,
+        "initialization_inputs_seen": [
+          0,
+          1,
+          2
+        ],
+        "input_kinds": {
+          "anchor_rule": 150,
+          "binance_agg_trade": 4405,
+          "binance_depth_snapshot": 1,
+          "binance_depth_update": 7199,
+          "chainlink_spot": 659,
+          "chainlink_twap": 661,
+          "end_of_input": 1,
+          "metadata_v6_existing": 15,
+          "polymarket_orderbook": 195597
+        },
+        "input_non_increasing": 0,
+        "inputs": 208688,
+        "last_group": 208637,
+        "last_input": 208687,
+        "nonempty_dependencies": 1,
+        "observations": 806966,
+        "widths": {
+          "1": 2,
+          "2": 351,
+          "3": 75907,
+          "4": 83349,
+          "5": 49029
+        }
+      },
+      "fixed_identity_time_quality_sha256": "dea4e61e13e448890b4564a6ff06fc8a551e6a9ae157247b58b20dea25ca458c",
+      "digest_coverage": "input stream/position/dependency refs and source id/source/received times; group id/position/member/close coordinates; fact position/source refs/direct and dependency time/quality; excludes full payload, source bodies and observation business fields",
+      "candidate_state_before_release": {
+        "capacity": 16384,
+        "capacity_bytes": 655360,
+        "item_size_bytes": 40,
+        "len": 13032,
+        "note": "只保留已验证Reference物理位置/类型；路径与原reader、Parquet元数据/读批次另列，不包含完整TWAP历史",
+        "stable_path_buffer_capacity_bytes": 226,
+        "stable_paths_capacity": 1,
+        "stable_paths_len": 1,
+        "validation_eof": true
+      },
+      "internal": {
+        "by_return_kind": {
+          "anchor_rule": {
+            "calls": 150,
+            "completed": 150,
+            "max_ns": 19036093487,
+            "ns": 22437779258,
+            "rows": {}
+          },
+          "binance_agg_trade": {
+            "calls": 4405,
+            "completed": 4405,
+            "max_ns": 3770819,
+            "ns": 1600083879,
+            "rows": {}
+          },
+          "binance_depth_snapshot": {
+            "calls": 1,
+            "completed": 1,
+            "max_ns": 1259010,
+            "ns": 1259010,
+            "rows": {}
+          },
+          "binance_depth_update": {
+            "calls": 7199,
+            "completed": 7199,
+            "max_ns": 24793344,
+            "ns": 23040829953,
+            "rows": {}
+          },
+          "chainlink_spot": {
+            "calls": 659,
+            "completed": 659,
+            "max_ns": 4445318,
+            "ns": 339790482,
+            "rows": {}
+          },
+          "chainlink_twap": {
+            "calls": 661,
+            "completed": 661,
+            "max_ns": 776392469,
+            "ns": 1417940496,
+            "rows": {}
+          },
+          "end_of_input": {
+            "calls": 1,
+            "completed": 1,
+            "max_ns": 25778,
+            "ns": 25778,
+            "rows": {}
+          },
+          "eof": {
+            "calls": 1,
+            "completed": 1,
+            "max_ns": 58360,
+            "ns": 58360,
+            "rows": {}
+          },
+          "metadata_v6_existing": {
+            "calls": 15,
+            "completed": 15,
+            "max_ns": 791961999,
+            "ns": 1109694299,
+            "rows": {}
+          },
+          "polymarket_orderbook": {
+            "calls": 195597,
+            "completed": 195597,
+            "max_ns": 12087245,
+            "ns": 74730716063,
+            "rows": {}
+          }
+        },
+        "candidate_page_evidence_ns": 39511611,
+        "decode_by_role": {
+          "candidate_location": {
+            "batches": 12587,
+            "max_arrow_batch_bytes": 13053262,
+            "max_parquet_metadata_estimate_bytes": 4121793,
+            "max_sort_row_resident_bytes": 10698104,
+            "metadata_load_ns": 35450186,
+            "metadata_loads": 15,
+            "row_group_open_ns": 10321194,
+            "row_groups_opened": 4939,
+            "rows": 3222272,
+            "successful_batch_decode_and_rows_ns": 5278105771
+          },
+          "dependency_index_validation": {
+            "batches": 15605,
+            "max_arrow_batch_bytes": 32468554,
+            "max_parquet_metadata_estimate_bytes": 4121793,
+            "max_sort_row_resident_bytes": 16283970,
+            "metadata_load_ns": 3894251,
+            "metadata_loads": 1,
+            "row_group_open_ns": 6683229,
+            "row_groups_opened": 3902,
+            "rows": 3994880,
+            "successful_batch_decode_and_rows_ns": 4496880329
+          },
+          "dependency_location": {
+            "batches": 4,
+            "max_arrow_batch_bytes": 423624,
+            "max_parquet_metadata_estimate_bytes": 4121793,
+            "max_sort_row_resident_bytes": 331228,
+            "metadata_load_ns": 2617768,
+            "metadata_loads": 1,
+            "row_group_open_ns": 5660,
+            "row_groups_opened": 1,
+            "rows": 1024,
+            "successful_batch_decode_and_rows_ns": 531892
+          },
+          "main_drain": {
+            "batches": 15605,
+            "max_arrow_batch_bytes": 32468554,
+            "max_parquet_metadata_estimate_bytes": 4121793,
+            "max_sort_row_resident_bytes": 16283970,
+            "metadata_load_ns": 7985944,
+            "metadata_loads": 1,
+            "row_group_open_ns": 22839578,
+            "row_groups_opened": 3902,
+            "rows": 3994880,
+            "successful_batch_decode_and_rows_ns": 5577194015
+          }
+        },
+        "dependency_evidence_ns": 25057,
+        "entry_calls": 208689,
+        "entry_total_ns": 124678177578,
+        "eof_returns": 1,
+        "failed_entries": 0,
+        "last_entry": {
+          "context": {
+            "dependency_refs": [],
+            "expected_input_position": 208688,
+            "historical_member_conditions": [],
+            "input_position": null,
+            "kind": "unresolved",
+            "source_message_id": null,
+            "target_condition": null
+          },
+          "failed_spans": [],
+          "nested_ns": {},
+          "outcome": "eof",
+          "primary_ns": {
+            "main_drain": 58059
+          },
+          "residual_ns": 301,
+          "total_ns": 58360
+        },
+        "negative_residual_entries": 0,
+        "nested": {
+          "candidate_page": {
+            "calls": 33,
+            "completed": 33,
+            "max_ns": 420406696,
+            "ns": 5460613524,
+            "rows": {}
+          }
+        },
+        "prepare_remaining_ns": 1653197548,
+        "primary": {
+          "core_push": {
+            "calls": 208688,
+            "completed": 208688,
+            "max_ns": 9780081,
+            "ns": 76505234041,
+            "rows": {}
+          },
+          "dependencies": {
+            "calls": 208688,
+            "completed": 208688,
+            "max_ns": 19033656169,
+            "ns": 19041404275,
+            "rows": {}
+          },
+          "identity": {
+            "calls": 208688,
+            "completed": 208688,
+            "max_ns": 6753,
+            "ns": 12055894,
+            "rows": {}
+          },
+          "into_owned": {
+            "calls": 208688,
+            "completed": 208688,
+            "max_ns": 36729,
+            "ns": 82677056,
+            "rows": {}
+          },
+          "main_drain": {
+            "calls": 208689,
+            "completed": 208689,
+            "max_ns": 19091340,
+            "ns": 21690924153,
+            "rows": {
+              "canonical": 208661,
+              "group": 208638,
+              "input": 208688,
+              "observation": 806966,
+              "pm_report": 737740,
+              "pm_step_binding": 1812556,
+              "report": 11628,
+              "source_binding": 3
+            }
+          },
+          "prepare": {
+            "calls": 208688,
+            "completed": 208688,
+            "max_ns": 789705951,
+            "ns": 7113811072,
+            "rows": {}
+          }
+        },
+        "progress": {
+          "applied_groups": 208638,
+          "applied_inputs": 208688,
+          "checks": 5504485,
+          "dependency_validated_rows": 3994880,
+          "emission_ns": 1041401,
+          "emissions": 9,
+          "index_capacity": 16384,
+          "index_item_size_bytes": 40,
+          "index_len": 13032,
+          "index_validated_rows": 0,
+          "original_candidate_validated_rows": 0
+        },
+        "residual_total_ns": 232071087,
+        "retention": {
+          "scan_by_input": "all actually scanning Input positions with per-kind counts/rows/time; no per-row payload",
+          "scan_descriptors": "first 128 actual scan/open/page invocations; total by kind and omitted count retained",
+          "slow_entries": "16 slowest whole entry calls; total and omitted count retained"
+        },
+        "returned_inputs": 208688,
+        "scan_by_input": {
+          "159628": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159628,
+              "historical_member_conditions": [],
+              "input_position": 159628,
+              "kind": "metadata_v6_existing",
+              "source_message_id": "998b978f63a3cb0c7756b0b085d08e28918073098d7f3c908f753f633a5a968b",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 3,
+                "invocations": 3,
+                "matched_records": 545,
+                "ns": 784430560,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 545,
+                "row_kinds": {
+                  "canonical": 545
+                },
+                "rows": 545,
+                "twap_encountered": 545
+              }
+            }
+          },
+          "159636": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159636,
+              "historical_member_conditions": [],
+              "input_position": 159636,
+              "kind": "anchor_rule",
+              "source_message_id": "e6a2eb1adf9eb40de17807bd03670abe838026a4cbc3f69a70dbd1fc7749b5aa",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 3,
+                "invocations": 3,
+                "matched_records": 545,
+                "ns": 518988560,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 545,
+                "row_kinds": {
+                  "canonical": 545
+                },
+                "rows": 545,
+                "twap_encountered": 545
+              }
+            }
+          },
+          "159660": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159660,
+              "historical_member_conditions": [],
+              "input_position": 159660,
+              "kind": "anchor_rule",
+              "source_message_id": "1a4b6bed1725403c8a043e6cd5ee1731d58c256fcd1b2118566f365729ae4540",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 3,
+                "invocations": 3,
+                "matched_records": 545,
+                "ns": 743089235,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 545,
+                "row_kinds": {
+                  "canonical": 545
+                },
+                "rows": 545,
+                "twap_encountered": 545
+              }
+            }
+          },
+          "159674": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159674,
+              "historical_member_conditions": [],
+              "input_position": 159674,
+              "kind": "anchor_rule",
+              "source_message_id": "eb319d808359c3139276624e66b60977b795e7d889076992bb28b299b60009f6",
+              "target_condition": "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 3,
+                "invocations": 3,
+                "matched_records": 545,
+                "ns": 514792811,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 545,
+                "row_kinds": {
+                  "canonical": 545
+                },
+                "rows": 545,
+                "twap_encountered": 545
+              }
+            }
+          },
+          "159686": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 159686,
+              "historical_member_conditions": [],
+              "input_position": 159686,
+              "kind": "anchor_rule",
+              "source_message_id": "46833ff23db459ef421dfb3f24b8d7f1d4426be1476474dbf91bc4133faefb37",
+              "target_condition": "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 3,
+                "invocations": 3,
+                "matched_records": 545,
+                "ns": 511672908,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 545,
+                "row_kinds": {
+                  "canonical": 545
+                },
+                "rows": 545,
+                "twap_encountered": 545
+              }
+            }
+          },
+          "160403": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 160403,
+              "historical_member_conditions": [],
+              "input_position": 160403,
+              "kind": "chainlink_twap",
+              "source_message_id": "76008cbf27a17dcab68d8fda336a2be6d252b8115d7d9d64ce0b0c60cb941e1b",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 3,
+                "invocations": 3,
+                "matched_records": 547,
+                "ns": 768671685,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 547,
+                "row_kinds": {
+                  "canonical": 547
+                },
+                "rows": 547,
+                "twap_encountered": 547
+              }
+            }
+          },
+          "349": {
+            "context": {
+              "dependency_refs": [
+                {
+                  "input_position": 339,
+                  "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012"
+                }
+              ],
+              "expected_input_position": 349,
+              "historical_member_conditions": [],
+              "input_position": 349,
+              "kind": "anchor_rule",
+              "source_message_id": "2b3e6413a2a238d7ebab7b1115d66fa0dd622faada0e49e2bcb366ce1e50fc32",
+              "target_condition": "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 3,
+                "ns": 1807502,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 3,
+                "row_kinds": {
+                  "canonical": 3
+                },
+                "rows": 3,
+                "twap_encountered": 3
+              },
+              "dependency_index_open": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 0,
+                "ns": 161294,
+                "open_attempts": 1,
+                "open_successes": 1,
+                "returned": 0,
+                "row_kinds": {},
+                "rows": 0,
+                "twap_encountered": 0
+              },
+              "dependency_index_validation": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 0,
+                "ns": 19029907281,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 0,
+                "row_kinds": {
+                  "canonical": 208661,
+                  "group": 208638,
+                  "input": 208688,
+                  "observation": 806966,
+                  "pm_report": 737740,
+                  "pm_step_binding": 1812556,
+                  "report": 11628,
+                  "source_binding": 3
+                },
+                "rows": 3994880,
+                "twap_encountered": 661
+              },
+              "dependency_location": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 1,
+                "ns": 3218740,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 1,
+                "row_kinds": {
+                  "canonical": 1
+                },
+                "rows": 1,
+                "twap_encountered": 1
+              }
+            }
+          },
+          "360": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 360,
+              "historical_member_conditions": [],
+              "input_position": 360,
+              "kind": "anchor_rule",
+              "source_message_id": "19c42506548e3d86492360c2d37c8df018777485c048c7f7777a982358ffc550",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 3,
+                "ns": 1776234,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 3,
+                "row_kinds": {
+                  "canonical": 3
+                },
+                "rows": 3,
+                "twap_encountered": 3
+              }
+            }
+          },
+          "363": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 363,
+              "historical_member_conditions": [],
+              "input_position": 363,
+              "kind": "anchor_rule",
+              "source_message_id": "3020dab7079138678648a4d36128e1a1aefd55b581dad46e0d3b6eab2f61994d",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 1,
+                "invocations": 1,
+                "matched_records": 3,
+                "ns": 3072023,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 3,
+                "row_kinds": {
+                  "canonical": 3
+                },
+                "rows": 3,
+                "twap_encountered": 3
+              }
+            }
+          },
+          "76283": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76283,
+              "historical_member_conditions": [],
+              "input_position": 76283,
+              "kind": "metadata_v6_existing",
+              "source_message_id": "377b81fab1537f6ab07aca13c16cb0f0ff9c51405c5b67f764d6ed73ebd138fa",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 2,
+                "invocations": 2,
+                "matched_records": 283,
+                "ns": 303338753,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 283,
+                "row_kinds": {
+                  "canonical": 283
+                },
+                "rows": 283,
+                "twap_encountered": 283
+              }
+            }
+          },
+          "76289": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76289,
+              "historical_member_conditions": [],
+              "input_position": 76289,
+              "kind": "anchor_rule",
+              "source_message_id": "922f3bb002041f36d0b58c57c8928be8585eb61a2b10bf518444a6a54899482d",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 2,
+                "invocations": 2,
+                "matched_records": 283,
+                "ns": 300165379,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 283,
+                "row_kinds": {
+                  "canonical": 283
+                },
+                "rows": 283,
+                "twap_encountered": 283
+              }
+            }
+          },
+          "76305": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76305,
+              "historical_member_conditions": [],
+              "input_position": 76305,
+              "kind": "anchor_rule",
+              "source_message_id": "8938d2183ac3316d20737b1b27a075381491e302d940bf24d28fc1b100153723",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 2,
+                "invocations": 2,
+                "matched_records": 283,
+                "ns": 201863794,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 283,
+                "row_kinds": {
+                  "canonical": 283
+                },
+                "rows": 283,
+                "twap_encountered": 283
+              }
+            }
+          },
+          "76310": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76310,
+              "historical_member_conditions": [],
+              "input_position": 76310,
+              "kind": "anchor_rule",
+              "source_message_id": "9c605f79b3c8ae6230852e81e45e1d987bef621b85ee4cb3bba87921d0b62309",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 2,
+                "invocations": 2,
+                "matched_records": 283,
+                "ns": 205811795,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 283,
+                "row_kinds": {
+                  "canonical": 283
+                },
+                "rows": 283,
+                "twap_encountered": 283
+              }
+            }
+          },
+          "76342": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76342,
+              "historical_member_conditions": [],
+              "input_position": 76342,
+              "kind": "anchor_rule",
+              "source_message_id": "56696111a772e24578a1108261fab3bfac8f3d0ed58be65921b49403c82a280d",
+              "target_condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 2,
+                "invocations": 2,
+                "matched_records": 283,
+                "ns": 300021888,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 283,
+                "row_kinds": {
+                  "canonical": 283
+                },
+                "rows": 283,
+                "twap_encountered": 283
+              }
+            }
+          },
+          "76896": {
+            "context": {
+              "dependency_refs": [],
+              "expected_input_position": 76896,
+              "historical_member_conditions": [],
+              "input_position": 76896,
+              "kind": "chainlink_twap",
+              "source_message_id": "d4a642ed31311616eb6ec74e6983a5621a5555fe8f7dc7a9764262071bcd6f6a",
+              "target_condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe"
+            },
+            "kinds": {
+              "candidate_page": {
+                "completed": 2,
+                "invocations": 2,
+                "matched_records": 285,
+                "ns": 301110397,
+                "open_attempts": 0,
+                "open_successes": 0,
+                "returned": 285,
+                "row_kinds": {
+                  "canonical": 285
+                },
+                "rows": 285,
+                "twap_encountered": 285
+              }
+            }
+          }
+        },
+        "scan_totals": {
+          "candidate_page": {
+            "completed": 33,
+            "invocations": 33,
+            "matched_records": 4981,
+            "ns": 5460613524,
+            "open_attempts": 0,
+            "open_successes": 0,
+            "returned": 4981,
+            "row_kinds": {
+              "canonical": 4981
+            },
+            "rows": 4981,
+            "twap_encountered": 4981
+          },
+          "dependency_index_open": {
+            "completed": 1,
+            "invocations": 1,
+            "matched_records": 0,
+            "ns": 161294,
+            "open_attempts": 1,
+            "open_successes": 1,
+            "returned": 0,
+            "row_kinds": {},
+            "rows": 0,
+            "twap_encountered": 0
+          },
+          "dependency_index_validation": {
+            "completed": 1,
+            "invocations": 1,
+            "matched_records": 0,
+            "ns": 19029907281,
+            "open_attempts": 0,
+            "open_successes": 0,
+            "returned": 0,
+            "row_kinds": {
+              "canonical": 208661,
+              "group": 208638,
+              "input": 208688,
+              "observation": 806966,
+              "pm_report": 737740,
+              "pm_step_binding": 1812556,
+              "report": 11628,
+              "source_binding": 3
+            },
+            "rows": 3994880,
+            "twap_encountered": 661
+          },
+          "dependency_location": {
+            "completed": 1,
+            "invocations": 1,
+            "matched_records": 1,
+            "ns": 3218740,
+            "open_attempts": 0,
+            "open_successes": 0,
+            "returned": 1,
+            "row_kinds": {
+              "canonical": 1
+            },
+            "rows": 1,
+            "twap_encountered": 1
+          }
+        },
+        "scans_omitted": 0,
+        "scans_without_input_context": 0,
+        "slow_entries_omitted": 208673,
+        "time_accounting": {
+          "candidate_evidence": "all successful pages retain complete canonical fact/anchor/ref and cursor/cutoff; projection time is inside prepare_remaining, not independent production latency; progress emission cost is inside its caller and separately reported, never added again",
+          "decode_cost": "metadata/row-group/successful batch spans are contained in candidate page or validation/open calls, not additional primary time; batch includes Arrow decode and SortRow materialization plus test size accounting; failed loads/batches stay in enclosing original-error spans",
+          "dependency_evidence": "nonempty saved-ref requests retain all complete returned Reference events, including empty result; projection time is inside dependencies; validation/locating scan spans are nested there, not additive primary time",
+          "nested": "candidate_open/candidate_page are contained in prepare and must not be added to primary; scan elapsed is a subset, not extra primary time",
+          "overhead": "clock checks and local counting are inside this test diagnosis; bookkeeping at scope destruction falls within enclosing span or residual; overhead not independently isolated",
+          "primary": [
+            "main_drain",
+            "identity",
+            "dependencies",
+            "prepare",
+            "core_push",
+            "into_owned"
+          ],
+          "residual": "signed entry total minus non-overlapping primary spans; no zero clamp",
+          "size_accounting": "Parquet memory_size is its estimated allocation including shared-pointer double counts, not RSS; Arrow and SortRow maximum refer to one successful batch, not process or all-reader sum",
+          "twap_encountered": "original candidate_page counts decoded TWAP before filtering; indexed candidate_index_validation counts validated TWAP and indexed candidate_page counts selected body rows only; cached index visits have no full body decode"
+        }
+      },
+      "driver": {
+        "boundary": "returned-object explicit drop is separate from summary; candidate state release includes index/frontier decoder and paths; replay.into_core includes main reader release and move; final core drop separate; report serialization/write and diagnostic-state finalization excluded from driver wall, included in outer GNU process",
+        "last_successful_returned_input": 208687,
+        "times": {
+          "candidate_state_drop_ns": 586424,
+          "core_drop_ns": 10105513,
+          "into_core_and_reader_release_ns": 553392,
+          "open_ns": 208974,
+          "returned_objects_drop_ns": 15273695755,
+          "summary_ns": 253936449
+        },
+        "wall_seconds": 140.281364125,
+        "proc_io_delta": {
+          "rchar": 5034553518,
+          "wchar": 6820,
+          "syscr": 244786,
+          "syscw": 1299,
+          "read_bytes": 5260374016,
+          "write_bytes": 16384,
+          "cancelled_write_bytes": 0
+        }
+      },
+      "gnu": {
+        "user_cpu_seconds": 135.95,
+        "system_cpu_seconds": 1.52,
+        "max_rss_kib": 168556,
+        "filesystem_input_blocks": 10274168,
+        "filesystem_output_blocks": 26856,
+        "exit_code": 0,
+        "wall_seconds": 140.38,
+        "total_cpu_seconds": 137.47
+      },
+      "raw_report": {
+        "logical_name": "candidate.result.private.json",
+        "bytes": 13722820,
+        "sha256": "7e518d15c3f7f12fdea56730d3735050d9a6e40d30a37a5b449c63ad0e0f60d8"
+      },
+      "logs": {
+        "stdout": {
+          "bytes": 216,
+          "lines": 6,
+          "sha256": "eb114671e730786f678abf754ada9f2f2af1119b729c9f5a57912452310a0021"
+        },
+        "stderr": {
+          "bytes": 6820,
+          "lines": 9,
+          "sha256": "bae62f944688df36b6007f749d0c925db32fa519de01e330b785aa7127e986dc"
+        }
+      }
+    }
+  },
+  "effective_config": {
+    "public_root": "existing-12m/materials/public",
+    "read_page_rows": 256,
+    "max_read_batch_bytes": 67108864,
+    "expected_normal_prefix": {
+      "input_stream_id": "complementary-pair-causal-labels-20260909-0000-0012",
+      "next_canonical_position": 208661,
+      "next_group_position": 208638,
+      "next_input_position": 208688,
+      "next_observation_position": 806966,
+      "next_public_index_position": 208638,
+      "normal_end": true,
+      "stable_storage_ref": "stable-00000000000000000000"
+    },
+    "purpose": "#214 当前未变化的Binance完整观测投影复用；同配置、基线及新实现串行各一次纯replay；prepare/研究/账户为0",
+    "initialization_input_positions": [
+      0,
+      1,
+      2
+    ],
+    "original_candidate_reader": false,
+    "progress_interval_seconds": 30,
+    "original_dependency_reader": false
+  },
+  "config_sha256": "937afd41d05f67ef28c83dca9654ca8af1d26ffa3cc9b835be24463b1aa81de1",
+  "comparison": {
+    "excluded_patterns": [
+      "driver.wall_seconds",
+      "driver.times",
+      "driver.proc_io_before",
+      "driver.proc_io_after",
+      "internal.entry_total_ns",
+      "internal.residual_total_ns",
+      "internal.prepare_remaining_ns",
+      "internal.candidate_page_evidence_ns",
+      "internal.dependency_evidence_ns",
+      "internal.slowest_entries",
+      "internal.primary.*.ns",
+      "internal.primary.*.max_ns",
+      "internal.nested.*.ns",
+      "internal.nested.*.max_ns",
+      "internal.by_return_kind.*.ns",
+      "internal.by_return_kind.*.max_ns",
+      "internal.last_entry.total_ns",
+      "internal.last_entry.residual_ns",
+      "internal.last_entry.primary_ns",
+      "internal.last_entry.nested_ns",
+      "internal.scan_totals.*.ns",
+      "internal.scan_by_input.*.kinds.*.ns",
+      "internal.scans.*.ns",
+      "internal.decode_by_role.*.metadata_load_ns",
+      "internal.decode_by_role.*.row_group_open_ns",
+      "internal.decode_by_role.*.successful_batch_decode_and_rows_ns",
+      "internal.progress.emission_ns",
+      "internal.progress.emissions"
+    ],
+    "difference_count": 0,
+    "differences": [],
+    "projection_sha256": {
+      "baseline": "c48fa8a32c117a54d4d939c845ef732b446e0fe1d419b42fcb9686e439b81642",
+      "candidate": "c48fa8a32c117a54d4d939c845ef732b446e0fe1d419b42fcb9686e439b81642"
+    },
+    "expected_normal_prefix_matches": {
+      "baseline": true,
+      "candidate": true
+    },
+    "applied_prefix_matches": {
+      "baseline": true,
+      "candidate": true
+    },
+    "next_canonical_matches": {
+      "baseline": true,
+      "candidate": true
+    },
+    "complete_candidate_pages_equal": true,
+    "candidate_page_count": 33,
+    "complete_dependency_outputs_equal": true,
+    "dependency_output_count": 1,
+    "excluded_actual_field_count": 120,
+    "private_full_comparison_sha256": "118101cacd0eb88c78de79fd63923e9b1129a19620612da48ecd318a83c1c86f"
+  },
+  "measurement": {
+    "build_command": "CARGO_BUILD_JOBS=8 cargo test -p data-pipeline-training --release --lib --no-run --locked --offline --message-format=json",
+    "run_command": "DPT_REPLAY_COST_CONFIG=<同一配置> DPT_REPLAY_COST_REPORT=<各自报告> /usr/bin/time -v -o <各自资源日志> <已冻结测试二进制> --ignored --exact public_recording::tests::replay_cost_tests::existing_twelve_minute_replay_internal_cost --test-threads=1 --nocapture",
+    "rustc": "rustc 1.95.0 (59807616e 2026-04-14)\nbinary: rustc\ncommit-hash: 59807616e1fa2540724bfbac14d7976d7e4a3860\ncommit-date: 2026-04-14\nhost: x86_64-unknown-linux-gnu\nrelease: 1.95.0\nLLVM version: 22.1.2\n",
+    "sequence": [
+      "baseline",
+      "candidate"
+    ],
+    "prepare_runs": 0,
+    "research_runs": 0,
+    "account_runs": 0,
+    "pure_replay_runs": 2,
+    "driver_wall_difference_seconds": 34.25551053999999,
+    "driver_wall_reduction_percent_this_pair": 19.62651766610857
+  },
+  "input": {
+    "logical_root": "existing-12m/materials/public",
+    "captured_bytes": 1259233492,
+    "stream_json_bytes": 368,
+    "stream_json_sha256": "272a334cc44b0ec3297fcb6f542e6609b87d285456b958606ec253a2ab2e9313",
+    "historical_initialization_bytes": 874,
+    "historical_initialization_sha256": "1603e910e91d53f18f753f156fa4d8647ff74e4c9b089f42604260a77d459602",
+    "prefix_json_bytes": 304,
+    "whole_captured_file_rehashed": false
+  },
+  "disk_and_shared_cache": {
+    "before_pair": {
+      "sample_started_at_utc": "2026-10-04T09:13:39.925210+00:00",
+      "disk_free_bytes": 233712807936,
+      "loadavg": "2.39 2.57 1.71 2/6262 1684091",
+      "cache_du_bytes": 69912715081,
+      "cache_allocated_bytes": 70120464384,
+      "sample_ended_at_utc": "2026-10-04T09:13:40.356493+00:00",
+      "note": "顺序采样非原子、共享缓存；构建已完成。"
+    },
+    "after_pair": {
+      "sample_started_at_utc": "2026-10-04T09:22:07.433668+00:00",
+      "disk_free_bytes": 233682006016,
+      "loadavg": "0.52 1.20 1.39 1/6250 1686165",
+      "cache_du_bytes": 69912715081,
+      "cache_allocated_bytes": 70120464384,
+      "sample_ended_at_utc": "2026-10-04T09:22:07.866144+00:00",
+      "note": "运行均已结束，顺序采样非原子、共享缓存；非独占任务增量。"
+    },
+    "cache_logical_bytes_observed_difference": 0,
+    "cache_allocated_bytes_observed_difference": 0,
+    "note": "两次顺序采样点，非原子；共享主机/缓存无独占归因，不覆盖构建阶段增量。"
+  },
+  "representative_capacity": {
+    "test": "unchanged_depth_is_shared_without_refreshing_anchors_and_old_targets_are_released",
+    "payload": "BTCUSDT last_update_id=101，四档，两个bid与两个ask",
+    "observed_fact_inline_bytes": 144,
+    "bids_len": 2,
+    "asks_len": 2,
+    "bids_capacity": 2,
+    "asks_capacity": 2,
+    "level_vec_capacity_bytes": 192,
+    "payload_strings_capacity_bytes": 39,
+    "coverage": "仅档位Vec容量乘元素尺寸及symbol/价格/数量String.capacity；不含分配器对齐填充、Arc控制块、anchors/frontier的分配、reducer、Canonical、临时对象及旧在途目标；非完整堆字节或RSS界。"
+  },
+  "validation": {
+    "workspace": {
+      "passed": 1322,
+      "failed": 0,
+      "ignored": 21,
+      "utc_named_fixture": "four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second：跳过"
+    },
+    "depth_representatives": {
+      "passed": 4,
+      "new_tests": 2,
+      "complete_old_json_fixture": "data-pipeline/core/src/fixtures/binance-depth-pre-arc-observations.json"
+    },
+    "fmt": 0,
+    "workspace_all_targets_check": 0,
+    "default_clippy": {
+      "exit_code": 0,
+      "existing_warnings_retained": true
+    },
+    "native_all_targets_check": 0,
+    "native_public_input_tests": {
+      "passed": 11,
+      "failed": 0
+    },
+    "test_environment": {
+      "CARGO_BUILD_JOBS": "8",
+      "CARGO_PROFILE_TEST_DEBUG": "0",
+      "CARGO_PROFILE_DEV_DEBUG": "0"
+    }
+  },
+  "public_projection_omissions": [
+    "完整candidate_pages与dependency_outputs正文（已逐字段私有比较）",
+    "逐扫描scans明细及16最慢slowest_entries（私有原结果保留；scan_by_input与scan_totals完整保留）",
+    "driver原/proc字符串（仅输出完整计数差值）",
+    "本机路径、GNU原命令和绑定",
+    "精确排除字段的旧新完整原值（comparison.private.json保留）"
+  ],
+  "limits": [
+    "这是基线在前、新版本在后的单次纯replay对照；共享主机与缓存顺序未隔离，不代表稳定倍率。",
+    "全部Summary及身份/时间/质量摘要不是806966个观察的完整业务等价证明，完整值来自四项代表与旧完整JSON。",
+    "同一计量驱动仍捕获候选/依赖并合作式打印；计量成本未独立隔离，GNU含报告整理和写出，driver不含但包含最后core Drop。",
+    "未测材料制备、研究或经营，不改445.431763861秒及959.236639304秒历史实测身份，不拼接。",
+    "一个当前强引用不等于全进程物理单份、常量内存、持久材料缩小或三日/15日容量已闭合。"
+  ]
+}
