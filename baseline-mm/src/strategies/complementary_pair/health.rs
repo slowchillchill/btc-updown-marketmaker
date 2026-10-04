@@ -131,32 +131,51 @@ impl ComplementaryPairV1 {
     pub(super) fn health_deadline(
         &self,
         input: &StrategyCurrentReadV1<'_>,
+        calculation: Option<&StrategyCalculationV1<ComplementaryPairDiagnosticV1>>,
         at: i64,
     ) -> Option<i64> {
+        let frozen_dependencies = calculation
+            .and_then(|c| match &c.output {
+                StrategyOutputV1::Continue { diagnostics, .. } => {
+                    Some(diagnostics.action_health_dependencies.as_slice())
+                }
+                _ => None,
+            })
+            .unwrap_or(&[]);
         input
             .markets
             .iter()
             .filter(|f| f.observation.market.window.end_at_utc_ms > at)
             .flat_map(|f| {
-                self.pair_sources(f.observation)
-                    .into_iter()
-                    .flat_map(|scope| {
-                        let (silence, delay) = self.health_limits(scope.source);
-                        f.observation
-                            .source_progress
-                            .iter()
-                            .find(|p| p.scope == scope)
-                            .and_then(|p| p.last_valid_business_message.as_ref())
-                            .map(|e| {
-                                [
-                                    Some(e.received_at_utc_ms.saturating_add(silence)),
-                                    e.source_event_at_utc_ms.map(|t| t.saturating_add(delay)),
-                                ]
-                            })
-                            .unwrap_or([None, None])
-                            .into_iter()
-                            .flatten()
-                    })
+                let mut sources = self.pair_sources(f.observation);
+                // 新现价可改变当前估计选源，但不能遮蔽待发决定的原TWAP期限。
+                for dependency in frozen_dependencies
+                    .iter()
+                    .filter(|d| d.condition_id == f.observation.market.condition_id)
+                {
+                    for scope in &dependency.sources {
+                        if !sources.contains(scope) {
+                            sources.push(scope.clone());
+                        }
+                    }
+                }
+                sources.into_iter().flat_map(|scope| {
+                    let (silence, delay) = self.health_limits(scope.source);
+                    f.observation
+                        .source_progress
+                        .iter()
+                        .find(|p| p.scope == scope)
+                        .and_then(|p| p.last_valid_business_message.as_ref())
+                        .map(|e| {
+                            [
+                                Some(e.received_at_utc_ms.saturating_add(silence)),
+                                e.source_event_at_utc_ms.map(|t| t.saturating_add(delay)),
+                            ]
+                        })
+                        .unwrap_or([None, None])
+                        .into_iter()
+                        .flatten()
+                })
             })
             .filter(|deadline| *deadline > at)
             .min()

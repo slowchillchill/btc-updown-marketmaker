@@ -166,10 +166,10 @@ impl StrategyV1 for ComplementaryPairV1 {
     fn next_health_evaluation_at(
         &self,
         input: &StrategyCurrentReadV1<'_>,
-        _: Option<&StrategyCalculationV1<Self::Diagnostics>>,
+        calculation: Option<&StrategyCalculationV1<Self::Diagnostics>>,
         at: i64,
     ) -> Option<i64> {
-        self.health_deadline(input, at)
+        self.health_deadline(input, calculation, at)
     }
     fn qualify_intent(
         &mut self,

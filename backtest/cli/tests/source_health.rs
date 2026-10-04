@@ -30,6 +30,7 @@ struct Trace {
     qualify_ns: u128,
     deadline_ns: std::cell::Cell<u128>,
     qualified_at: std::collections::BTreeMap<String, i64>,
+    qualification_invalidations: Vec<(i64, i64)>,
 }
 impl StrategyV1 for Trace {
     type Error = StrategyErrorV1;
@@ -59,6 +60,10 @@ impl StrategyV1 for Trace {
         let start = Instant::now();
         let result = self.strategy.qualify_intent(input, c, index, at);
         self.qualify_ns += start.elapsed().as_nanos();
+        if matches!(result, Ok(IntentQualificationV1::Invalidated(_))) {
+            self.qualification_invalidations
+                .push((c.calculation_started_at_utc_ms, at));
+        }
         if matches!(result, Ok(IntentQualificationV1::Qualified))
             && let StrategyOutputV1::Continue { intents, .. } = &c.output
         {
@@ -216,6 +221,17 @@ fn fixture_with_events(
     HistoricalRunConfigV1,
     Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>,
 ) {
+    fixture_with_reference(root, price, spot_times, false)
+}
+fn fixture_with_reference(
+    root: &Path,
+    price: &str,
+    spot_times: &[(i64, i64)],
+    twap_enabled: bool,
+) -> (
+    HistoricalRunConfigV1,
+    Arc<sim_system::platform_rules::SealedProcessRuleSnapshotV3>,
+) {
     let (mut config, rules) = setup(root);
     // 本文件有限组合的完整 SIM 记录不足1024项；容纳完整积压，不依赖writer调度。
     // 原公共夹具与生产回压语义保持；原128预算的实际失败保留在验证证据。
@@ -224,14 +240,25 @@ fn fixture_with_events(
     let day = manifest_path.parent().unwrap();
     let mut manifest: serde_json::Value =
         serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
-    let body = r#"{"eventMetadata":{"priceToBeat":100000},"twapEnabled":false}"#;
+    let body = if twap_enabled {
+        r#"{"eventMetadata":{"priceToBeat":100000},"twapEnabled":true,"twapLookbackSeconds":30}"#
+    } else {
+        r#"{"eventMetadata":{"priceToBeat":100000},"twapEnabled":false}"#
+    };
+    // TWAP反例在终局积分窗口前形成候选，不用滚动TWAP伪造已发生积分。
+    let first_end = if twap_enabled {
+        BASE + 40000
+    } else {
+        BASE + 10000
+    };
     let mut anchor: MarketAnchorRuleUpdateRow = serde_json::from_value(json!({
         "timestamp_received":BASE+50,"metadata_origin":"gamma_event_by_slug","collector_host_id":"synthetic-collector","collector_region":"test",
         "slug":"btc-updown-5m-engineering","condition_id":FIRST,"clob_market_id":"3195576","asset_ids":"[\"20\",\"3\"]",
-        "market_start_utc":BASE+1000,"market_end_utc":BASE+10000,"fixed_identity_verified_at_utc":BASE-1,
+        "market_start_utc":BASE+1000,"market_end_utc":first_end,"fixed_identity_verified_at_utc":BASE-1,
         "market_lifecycle_state":"prefetched","market_runtime_role":"next","metadata_fetch_start_utc":BASE+40,
         "anchor_query_source_epoch_id":"synthetic-query","anchor_query_ordinal":1,"anchor_query_result":"observed",
-        "price_to_beat_decimal":"100000","price_to_beat_source_field":"eventMetadata.priceToBeat","twap_enabled":false,
+        "price_to_beat_decimal":"100000","price_to_beat_source_field":"eventMetadata.priceToBeat","twap_enabled":twap_enabled,
+        "twap_lookback_seconds":twap_enabled.then_some(30),
         "http_received_at_utc":BASE+50,"http_request_url":"https://gamma-api.polymarket.com/events/slug/btc-updown-5m-engineering",
         "http_body_encoding":"utf8","http_body":body,"http_body_sha256":format!("{:x}",Sha256::digest(body.as_bytes()))
     })).unwrap();
@@ -252,7 +279,7 @@ fn fixture_with_events(
                 ["20", "3"],
                 BASE,
                 BASE + 1000,
-                BASE + 10000,
+                first_end,
                 1,
             )),
             PolymarketMarketMetadataV6Row::AnchorRule(anchor),
@@ -328,6 +355,7 @@ async fn run(
         qualify_ns: 0,
         deadline_ns: std::cell::Cell::new(0),
         qualified_at: std::collections::BTreeMap::new(),
+        qualification_invalidations: vec![],
     };
     let report = run_historical_v1(&config, rules, &mut trace).await.unwrap();
     let sim_records = std::fs::read_to_string(&config.sim_log)
@@ -575,6 +603,141 @@ async fn real_strategy_health_expires_during_compute_or_dispatch_wait() {
         assert!(report.source_health.unwrap().invalidated_batches > 0);
         assert!(trace.invalidated > 0);
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn real_strategy_pending_twap_expiry_recalculates_after_spot_arrival() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut config, rules) = fixture_with_reference(temp.path(), "100000", &[(2300, 2300)], true);
+    let mut dispatch_delays = vec![200; 32];
+    dispatch_delays[3] = 1000;
+    config.timing.dispatch_delay_ms = DelayScheduleV1::Sequence(dispatch_delays);
+    replace_books(
+        &config,
+        &[
+            book("20", 1100, 1100, 1, "epoch-a", "0.7"),
+            book("3", 1100, 1100, 2, "epoch-a", "0.4"),
+        ],
+    );
+    let manifest_path = &config.preparation.scope.manifest_paths[0];
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(manifest_path).unwrap()).unwrap();
+    let mut writer = TypedParquetSegmentWriter::create_for_typed_source(
+        manifest_path.parent().unwrap(),
+        "health-twap",
+        RTDS_CHAINLINK_TWAP_SCHEMA_VERSION,
+        "polymarket_rtds_chainlink_twap",
+    )
+    .unwrap();
+    writer
+        .write_rtds_chainlink_twap_rows_with_logical_bytes(
+            &[RtdsChainlinkTwapHourlyRow {
+                common: RtdsChainlinkBtcUsdHourlyRow {
+                    timestamp_received: BASE + 2100,
+                    message_timestamp: BASE + 2100,
+                    payload_timestamp: BASE + 2100,
+                    age_ms: Some(0),
+                    symbol: "btc/usd".into(),
+                    value: "100000".into(),
+                    topic: "crypto_prices_twap_thirty".into(),
+                    message_type: "update".into(),
+                    freshness_status: "fresh".into(),
+                    subscription_filter: "{}".into(),
+                    source_native_payload_json: json!({
+                        "topic":"crypto_prices_twap_thirty","type":"update","timestamp":BASE+2100,
+                        "payload":{"symbol":"btc/usd","timestamp":BASE+2100,"value":"100000",
+                            "full_accuracy_value":"100000000000000000000000","window_s":30}
+                    })
+                    .to_string(),
+                    collector_host_id: "synthetic-collector".into(),
+                    collector_region: "test".into(),
+                    source_endpoint: "wss://ws-live-data.polymarket.com".into(),
+                    schema_version: RTDS_CHAINLINK_TWAP_SCHEMA_VERSION.into(),
+                },
+                full_accuracy_value: "100000000000000000000000".into(),
+                window_s: 30,
+                source_sequence_epoch_id: "synthetic-twap-epoch".into(),
+                collector_admission_sequence: 1,
+                collector_admission_time_utc_ms: BASE + 2101,
+            }],
+            1024,
+        )
+        .unwrap();
+    let twap_file = finish(
+        writer,
+        "polymarket_rtds_chainlink_twap",
+        RTDS_CHAINLINK_TWAP_SCHEMA_VERSION,
+        1,
+    );
+    manifest["files"].as_array_mut().unwrap().push(twap_file);
+    std::fs::write(manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+    let mut c = strategy_config();
+    c.health.chainlink_silence_ms = 500;
+    c.health.chainlink_event_delay_ms = 500;
+    let (report, trace) = run(&config, rules, c).await;
+    let frozen_at = BASE + 2201;
+    let expiry_at = BASE + 2600;
+    println!(
+        "twap_switch_calculations={:?}",
+        trace
+            .decisions
+            .iter()
+            .map(|(at, d, i)| (
+                at - BASE,
+                i,
+                d.action_health_dependencies
+                    .iter()
+                    .flat_map(|a| a.sources.iter().map(|s| s.source))
+                    .collect::<Vec<_>>()
+            ))
+            .collect::<Vec<_>>()
+    );
+    assert!(trace.decisions.iter().any(|(at, d, intents)| {
+        *at == frozen_at
+            && intents.iter().any(|kind| kind == "pair")
+            && d.action_health_dependencies.iter().any(|a| {
+                a.sources
+                    .iter()
+                    .any(|s| s.source == SourceStreamKindV1::ChainlinkTwapThirty)
+            })
+    }));
+    println!(
+        "twap_switch_qualification_invalidations={:?} recalculation_starts={:?}",
+        trace
+            .qualification_invalidations
+            .iter()
+            .map(|(start, at)| (start - BASE, at - BASE))
+            .collect::<Vec<_>>(),
+        trace
+            .decisions
+            .iter()
+            .map(|(at, _, _)| at - BASE)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        trace
+            .qualification_invalidations
+            .contains(&(frozen_at, expiry_at)),
+        "冻结TWAP期限必须在没有新消息时发现，而不是等spot到期或最终提交"
+    );
+    assert!(
+        trace
+            .decisions
+            .iter()
+            .any(|(at, d, intents)| *at == expiry_at
+                && intents.iter().any(|kind| kind == "pair")
+                && d.action_health_dependencies.iter().any(|a| {
+                    a.sources
+                        .iter()
+                        .any(|s| s.source == SourceStreamKindV1::ChainlinkSpot)
+                        && !a
+                            .sources
+                            .iter()
+                            .any(|s| s.source == SourceStreamKindV1::ChainlinkTwapThirty)
+                })),
+        "原宿主在失效发现后最早合法时刻重算，不等新消息"
+    );
+    assert!(report.source_health.unwrap().deadline_wakeups > 0);
 }
 
 /// 真实请求的有限重复测量；分别报告期限/资格回调实耗，不将整轮耗时差称为纯检查开销。

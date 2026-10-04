@@ -1764,3 +1764,84 @@ async fn unrelated_market_commitment_does_not_invalidate_frozen_repair() {
         IntentQualificationV1::Qualified
     );
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn pending_twap_deadline_survives_spot_arrival() {
+    let temp = tempfile::tempdir().unwrap();
+    let (mut shared, mut driver, rules) = setup(temp.path(), "2000");
+    let mut input = estimated(
+        shared.strategy_input(&mut driver).unwrap().unwrap(),
+        "100000",
+    );
+    let o = &mut input.markets[0].observation;
+    o.market.window.end_at_utc_ms = 120_000;
+    o.settlement_reference = fact(BtcSettlementReferenceV1::ChainlinkTwapThirtySeconds);
+    o.chainlink_spot = Default::default();
+    o.chainlink_twap_thirty = fact(ChainlinkBtcUsdTwapReferenceV1 {
+        symbol: "btc/usd".into(),
+        window_s: 30,
+        price_usd_per_btc: ExactDecimal("100000".into()),
+        payload_timestamp_utc_ms: 21000,
+        message_timestamp_utc_ms: 21000,
+    });
+    let mut c = config();
+    c.health.chainlink_silence_ms = 5000;
+    c.health.chainlink_event_delay_ms = 5000;
+    c.probability.binance_innovation_weight = 0.0;
+    let mut s = strategy(c, rules);
+    let calculation = input.calculate(&mut s, 22000).unwrap();
+    let frozen_diagnostic = serde_json::to_value(diagnostic(&calculation.output)).unwrap();
+    let dep = &diagnostic(&calculation.output).action_health_dependencies[0];
+    assert!(
+        dep.sources
+            .iter()
+            .any(|p| p.source == SourceStreamKindV1::ChainlinkTwapThirty)
+    );
+    assert!(!intents(&calculation.output).is_empty());
+    let o = &mut input.markets[0].observation;
+    o.chainlink_spot = fact(ChainlinkBtcUsdReferenceV1 {
+        symbol: "btc/usd".into(),
+        price_usd_per_btc: ExactDecimal("100000".into()),
+        message_timestamp_utc_ms: 23000,
+    });
+    let mut progress = o.source_progress.to_vec();
+    let spot = progress
+        .iter_mut()
+        .find(|p| p.scope.source == SourceStreamKindV1::ChainlinkSpot)
+        .unwrap();
+    let e = spot.last_valid_business_message.as_mut().unwrap();
+    e.received_at_utc_ms = 23000;
+    e.source_event_at_utc_ms = Some(23000);
+    spot.last_observed_message = e.clone();
+    o.source_progress = progress.into();
+    let action = shared
+        .strategy_input(&mut driver)
+        .unwrap()
+        .unwrap()
+        .action_before;
+    let current = health_read(&input, action);
+    assert_eq!(
+        s.qualify_intent(&current, &calculation, 0, 23000).unwrap(),
+        IntentQualificationV1::Qualified
+    );
+    let next = s.next_health_evaluation_at(&current, Some(&calculation), 23000);
+    assert_eq!(
+        s.next_health_evaluation_at(&current, None, 23000),
+        Some(28000),
+        "没有待发决定时仍按当前spot经营依赖排期限"
+    );
+    let at_due = s.qualify_intent(&current, &calculation, 0, 26000).unwrap();
+    println!(
+        "frozen_twap_received=21000 spot_received=23000 frozen_deadline=26000 next={next:?} qualification_at_frozen_deadline={at_due:?}"
+    );
+    assert!(matches!(at_due, IntentQualificationV1::Invalidated(_)));
+    assert_eq!(
+        next,
+        Some(26000),
+        "冻结动作依赖到期必须唤醒，不能被当前新选spot掩盖"
+    );
+    assert_eq!(
+        serde_json::to_value(diagnostic(&calculation.output)).unwrap(),
+        frozen_diagnostic
+    );
+}
