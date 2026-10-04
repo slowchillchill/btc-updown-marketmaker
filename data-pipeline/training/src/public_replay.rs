@@ -1,4 +1,8 @@
 //! 原接纳序重放；历史只在各来源已经证明的前序首项之间选择。
+use crate::historical_preparation_progress::{
+    HistoricalPreparationNoticeV1 as Notice, HistoricalPreparationNotifierV1,
+    HistoricalPreparationStageV1 as PrepareStage, HistoricalRawPassV1 as Pass, notify,
+};
 use crate::public_recording::*;
 use crate::{ExternalSorter, RunCursor, SortConfig, SortRow};
 use contracts::*;
@@ -69,6 +73,7 @@ impl HistoricalMergeV1 {
         config: &SortConfig,
         stream: String,
         input: impl IntoIterator<Item = RecordingResult<HistoricalIngressV1>>,
+        progress: Option<&HistoricalPreparationNotifierV1<'_>>,
     ) -> RecordingResult<Self> {
         fs::create_dir(root)?;
         let mut sorters = Vec::new();
@@ -87,10 +92,20 @@ impl HistoricalMergeV1 {
         let mut heads = Vec::new();
         let mut sort_metrics = Vec::new();
         let mut twap_path = PathBuf::new();
+        notify(progress, Notice::Stage(PrepareStage::SourceSortFinish));
         for (index, sorter) in sorters.into_iter().enumerate() {
             let (output_path, metrics) = sorter.finish(None)?;
             if index == HistoricalSourceV1::Twap.index() {
                 twap_path = output_path.clone();
+            }
+            if progress.is_some() {
+                notify(
+                    progress,
+                    Notice::SourceSortFinished {
+                        index,
+                        metrics: metrics.clone(),
+                    },
+                );
             }
             sort_metrics.push(metrics);
             let mut cursor =
@@ -784,15 +799,20 @@ pub fn prepare_historical_rows_v1<I>(
 where
     I: Iterator<Item = RecordingResult<TypedRawRowV2>>,
 {
-    prepare_historical_tagged_rows_v1(root, config, stream, || {
-        Ok(read()?.map(|row| row.map(|row| (row, None))))
-    })
+    prepare_historical_tagged_rows_v1(
+        root,
+        config,
+        stream,
+        |_| Ok(read()?.map(|row| row.map(|row| (row, None)))),
+        None,
+    )
 }
 fn prepare_historical_tagged_rows_v1<I>(
     root: &Path,
     config: &crate::canonical_run::CanonicalRunConfig,
     stream: String,
-    mut read: impl FnMut() -> RecordingResult<I>,
+    mut read: impl FnMut(Pass) -> RecordingResult<I>,
+    progress: Option<&HistoricalPreparationNotifierV1<'_>>,
 ) -> RecordingResult<HistoricalMergeV1>
 where
     I: Iterator<Item = RecordingResult<(TypedRawRowV2, Option<SourceArtifactBindingV1>)>>,
@@ -800,7 +820,8 @@ where
     use crate::canonical_run::{CaptureCoordinate, rank_epochs, update_epoch_start};
     let mut pm = BTreeMap::new();
     let mut depth = BTreeMap::new();
-    for row in read()? {
+    notify(progress, Notice::Stage(PrepareStage::EpochPass));
+    for row in read(Pass::Epoch)? {
         let (row, _) = row?;
         use data_pipeline_core::typed_raw::TypedRawRow;
         let (starts, kind, epoch, coordinate) = match &row {
@@ -846,7 +867,11 @@ where
     }
     let pm = rank_epochs(pm, "polymarket_market")?;
     let depth = rank_epochs(depth, "binance_depth")?;
-    let entries = read()?.map(|row| -> RecordingResult<HistoricalIngressV1> {
+    notify(
+        progress,
+        Notice::Stage(PrepareStage::SecondSupplyAndInitialSort),
+    );
+    let entries = read(Pass::SecondSupply)?.map(|row| -> RecordingResult<HistoricalIngressV1> {
         let (row, initialization_binding) = row?;
         let evidence = source_evidence_v3_from_typed_raw_v2(&row)?;
         let source = match evidence.source_kind {
@@ -908,7 +933,7 @@ where
             },
         })
     });
-    HistoricalMergeV1::prepare(root, &config.sort, stream, entries)
+    HistoricalMergeV1::prepare(root, &config.sort, stream, entries, progress)
 }
 /// 文件仅作为供料位置；其顺序/路径不进入新历史排序键。
 pub fn prepare_historical_files_v1(
@@ -944,36 +969,83 @@ pub fn prepare_historical_files_with_initialization_v1(
     received_range: Option<std::ops::Range<i64>>,
     initialization: Option<&crate::historical_initialization::MetadataInitializationSelectionV1>,
 ) -> RecordingResult<HistoricalMergeV1> {
-    prepare_historical_tagged_rows_v1(root, config, stream, || {
-        let initial = initialization.into_iter().flat_map(|selection| {
-            selection.read(config.decode_batch_rows, config.max_decode_batch_bytes)
-        });
-        Ok(initial.chain(
-            TypedFileRowsV1 {
-                files: files.iter(),
-                stream: None,
-                pending: Vec::new().into_iter(),
-                rows: config.decode_batch_rows,
-                bytes: config.max_decode_batch_bytes,
-            }
-            .filter(|row| match (row, &received_range) {
-                (Ok(row), Some(range)) => source_evidence_v3_from_typed_raw_v2(row)
-                    .map(|source| range.contains(&source.received_at_utc_ms))
-                    .unwrap_or(true),
-                _ => true,
-            })
-            .map(|row| row.map(|row| (row, None))),
-        ))
-    })
+    prepare_historical_files_with_initialization_and_progress_v1(
+        root,
+        files,
+        config,
+        stream,
+        received_range,
+        initialization,
+        None,
+    )
 }
-struct TypedFileRowsV1<'a> {
+pub fn prepare_historical_files_with_initialization_and_progress_v1(
+    root: &Path,
+    files: &[&crate::ValidatedDirectSourceParquetFileV3],
+    config: &crate::canonical_run::CanonicalRunConfig,
+    stream: String,
+    received_range: Option<std::ops::Range<i64>>,
+    initialization: Option<&crate::historical_initialization::MetadataInitializationSelectionV1>,
+    progress: Option<&HistoricalPreparationNotifierV1<'_>>,
+) -> RecordingResult<HistoricalMergeV1> {
+    prepare_historical_tagged_rows_v1(
+        root,
+        config,
+        stream,
+        |pass| {
+            let initial = initialization.into_iter().flat_map(move |selection| {
+                selection.read_with_progress(
+                    config.decode_batch_rows,
+                    config.max_decode_batch_bytes,
+                    progress,
+                    pass,
+                )
+            });
+            Ok(initial.chain(
+                TypedFileRowsV1 {
+                    files: files.iter(),
+                    stream: None,
+                    pending: Vec::new().into_iter(),
+                    rows: config.decode_batch_rows,
+                    bytes: config.max_decode_batch_bytes,
+                    progress,
+                    pass,
+                    file_active: false,
+                }
+                .filter(|row| match (row, &received_range) {
+                    (Ok(row), Some(range)) => source_evidence_v3_from_typed_raw_v2(row)
+                        .map(|source| range.contains(&source.received_at_utc_ms))
+                        .unwrap_or(true),
+                    _ => true,
+                })
+                .map(move |row| {
+                    row.map(|row| {
+                        notify(
+                            progress,
+                            Notice::SelectedRow {
+                                pass,
+                                initialization: false,
+                            },
+                        );
+                        (row, None)
+                    })
+                }),
+            ))
+        },
+        progress,
+    )
+}
+struct TypedFileRowsV1<'a, 'b, 'c> {
     files: std::slice::Iter<'a, &'a crate::ValidatedDirectSourceParquetFileV3>,
     stream: Option<crate::typed_raw::TypedRawParquetStream<TypedRawRowV2>>,
     pending: std::vec::IntoIter<TypedRawRowV2>,
     rows: usize,
     bytes: usize,
+    progress: Option<&'b HistoricalPreparationNotifierV1<'c>>,
+    pass: Pass,
+    file_active: bool,
 }
-impl Iterator for TypedFileRowsV1<'_> {
+impl Iterator for TypedFileRowsV1<'_, '_, '_> {
     type Item = RecordingResult<TypedRawRowV2>;
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -983,6 +1055,14 @@ impl Iterator for TypedFileRowsV1<'_> {
             if let Some(stream) = &mut self.stream {
                 match stream.next() {
                     Some(Ok(batch)) => {
+                        notify(
+                            self.progress,
+                            Notice::RawBatch {
+                                pass: self.pass,
+                                initialization: false,
+                                rows: batch.len() as u64,
+                            },
+                        );
                         self.pending = batch.into_iter();
                         continue;
                     }
@@ -990,9 +1070,22 @@ impl Iterator for TypedFileRowsV1<'_> {
                     None => {}
                 }
             }
+            if self.file_active {
+                notify(
+                    self.progress,
+                    Notice::RawFileComplete {
+                        pass: self.pass,
+                        initialization: false,
+                    },
+                );
+                self.file_active = false;
+            }
             let file = self.files.next()?;
             match crate::public_input::open_public_input_bounded_v1(file, self.rows, self.bytes) {
-                Ok(stream) => self.stream = Some(stream),
+                Ok(stream) => {
+                    self.stream = Some(stream);
+                    self.file_active = true;
+                }
                 Err(e) => return Some(Err(e.into())),
             }
         }

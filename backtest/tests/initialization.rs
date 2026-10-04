@@ -673,7 +673,13 @@ fn production_prepare_direct_core_matches_independent_replay_hidden_with_initial
 
 #[test]
 fn direct_hidden_read_still_fails_original_bad_eof_count_before_success() {
-    use data_pipeline_training::hidden_preparation::prepare_hidden_v1;
+    use data_pipeline_training::{
+        hidden_preparation::prepare_hidden_with_progress_v1,
+        historical_preparation_progress::{
+            HistoricalPreparationNoticeV1, HistoricalPreparationNotifierV1,
+            HistoricalPreparationStageV1,
+        },
+    };
     let temp = tempfile::tempdir().unwrap();
     let (config, _) = setup(temp.path());
     let prepared = prepare_historical_run_v1(&config.preparation).unwrap();
@@ -691,16 +697,28 @@ fn direct_hidden_read_still_fails_original_bad_eof_count_before_success() {
     )
     .unwrap();
     let root = temp.path().join("hidden-bad-eof");
-    let result = prepare_hidden_v1(
+    let mut stages = Vec::new();
+    let mut callback = |notice| {
+        if let HistoricalPreparationNoticeV1::Stage(stage) = notice {
+            stages.push(stage);
+        }
+    };
+    let notifications = HistoricalPreparationNotifierV1::new(&mut callback);
+    let result = prepare_hidden_with_progress_v1(
         core,
         PublicRecordingReaderV1::recover(&prepared.public_root, 1, 1 << 20).unwrap(),
         &root,
         &config.preparation.recording,
         config.preparation.hidden_stream_id.clone(),
+        Some(&notifications),
     );
     assert_eq!(
         result.unwrap_err().to_string(),
         "稳定分片内容与前缀计数不符"
+    );
+    assert_eq!(
+        stages,
+        vec![HistoricalPreparationStageV1::HiddenScanAndSupply]
     );
     assert!(root.join("messages").is_dir()); // 已批准的错误阶段允许保留未完成目录。
     assert!(!root.join("derived").exists());

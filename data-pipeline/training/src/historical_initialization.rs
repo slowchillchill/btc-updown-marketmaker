@@ -1,4 +1,8 @@
 //! 显式市场元数据前序选择；文件事实来自原清单，不签发全日准入。
+use crate::historical_preparation_progress::{
+    HistoricalPreparationNoticeV1 as Notice, HistoricalPreparationNotifierV1,
+    HistoricalRawPassV1 as Pass, notify,
+};
 use crate::{public_input::*, public_recording::RecordingResult};
 use contracts::*;
 use data_pipeline_core::{
@@ -83,6 +87,14 @@ impl MetadataInitializationSelectionV1 {
         rows: usize,
         bytes: usize,
     ) -> RecordingResult<Self> {
+        Self::open_with_progress(config, rows, bytes, None)
+    }
+    pub fn open_with_progress(
+        config: &MetadataInitializationConfigV1,
+        rows: usize,
+        bytes: usize,
+        progress: Option<&HistoricalPreparationNotifierV1<'_>>,
+    ) -> RecordingResult<Self> {
         let mut files = Vec::new();
         let mut seen = BTreeSet::new();
         for selection in &config.files {
@@ -133,7 +145,16 @@ impl MetadataInitializationSelectionV1 {
         let mut found = BTreeSet::new();
         for file in &files {
             for batch in open_finite_public_input_v1(&file.file, rows, bytes)? {
-                for row in batch? {
+                let batch = batch?;
+                notify(
+                    progress,
+                    Notice::RawBatch {
+                        pass: Pass::InitializationSelection,
+                        initialization: true,
+                        rows: batch.len() as u64,
+                    },
+                );
+                for row in batch {
                     let Some(metadata) = existing(&row) else {
                         continue;
                     };
@@ -165,6 +186,13 @@ impl MetadataInitializationSelectionV1 {
                     }
                 }
             }
+            notify(
+                progress,
+                Notice::RawFileComplete {
+                    pass: Pass::InitializationSelection,
+                    initialization: true,
+                },
+            );
         }
         if config.markets.iter().any(|target| {
             !found.contains(&(
@@ -186,44 +214,85 @@ impl MetadataInitializationSelectionV1 {
         bytes: usize,
     ) -> impl Iterator<Item = RecordingResult<(TypedRawRowV2, Option<SourceArtifactBindingV1>)>> + '_
     {
+        self.read_with_progress(rows, bytes, None, Pass::SecondSupply)
+    }
+    pub fn read_with_progress<'a>(
+        &'a self,
+        rows: usize,
+        bytes: usize,
+        progress: Option<&'a HistoricalPreparationNotifierV1<'_>>,
+        pass: Pass,
+    ) -> impl Iterator<Item = RecordingResult<(TypedRawRowV2, Option<SourceArtifactBindingV1>)>> + 'a
+    {
         self.files.iter().flat_map(move |file| {
             let stream: Box<dyn Iterator<Item = RecordingResult<TypedRawRowV2>>> =
                 match open_finite_public_input_v1(&file.file, rows, bytes) {
-                    Ok(stream) => Box::new(stream.flat_map(|batch| match batch {
-                        Ok(rows) => rows.into_iter().map(Ok).collect::<Vec<_>>(),
+                    Ok(stream) => Box::new(stream.flat_map(move |batch| match batch {
+                        Ok(rows) => {
+                            notify(
+                                progress,
+                                Notice::RawBatch {
+                                    pass,
+                                    initialization: true,
+                                    rows: rows.len() as u64,
+                                },
+                            );
+                            rows.into_iter().map(Ok).collect::<Vec<_>>()
+                        }
                         Err(error) => vec![Err(error.into())],
                     })),
                     Err(error) => Box::new(std::iter::once(Err(error.into()))),
                 };
-            stream.filter_map(move |row| {
-                let selected = (|| -> RecordingResult<Option<_>> {
-                    let row = row?;
-                    let Some(metadata) = existing(&row) else {
-                        return Ok(None);
-                    };
-                    let Some(start) = self.starts.get(&metadata.condition_id) else {
-                        return Ok(None);
-                    };
-                    let source = source_evidence_v3_from_typed_raw_v2(&row)?;
-                    if source.received_at_utc_ms >= self.received_start
-                        || order(metadata, &source.source_message_id) < *start
-                    {
-                        return Ok(None);
+            stream
+                .filter_map(move |row| {
+                    let selected = (|| -> RecordingResult<Option<_>> {
+                        let row = row?;
+                        let Some(metadata) = existing(&row) else {
+                            return Ok(None);
+                        };
+                        let Some(start) = self.starts.get(&metadata.condition_id) else {
+                            return Ok(None);
+                        };
+                        let source = source_evidence_v3_from_typed_raw_v2(&row)?;
+                        if source.received_at_utc_ms >= self.received_start
+                            || order(metadata, &source.source_message_id) < *start
+                        {
+                            return Ok(None);
+                        }
+                        let binding = SourceArtifactBindingV1 {
+                            source_message_id: source.source_message_id,
+                            manifest_sha256: file.manifest_sha256.clone(),
+                            file_sha256: Sha256Hex(file.file.sha256.clone()),
+                            relative_path: file.relative_path.to_string_lossy().into_owned(),
+                        };
+                        notify(
+                            progress,
+                            Notice::SelectedRow {
+                                pass,
+                                initialization: true,
+                            },
+                        );
+                        Ok(Some((row, Some(binding))))
+                    })();
+                    match selected {
+                        Ok(None) => None,
+                        Ok(Some(row)) => Some(Ok(row)),
+                        Err(error) => Some(Err(error)),
                     }
-                    let binding = SourceArtifactBindingV1 {
-                        source_message_id: source.source_message_id,
-                        manifest_sha256: file.manifest_sha256.clone(),
-                        file_sha256: Sha256Hex(file.file.sha256.clone()),
-                        relative_path: file.relative_path.to_string_lossy().into_owned(),
-                    };
-                    Ok(Some((row, Some(binding))))
-                })();
-                match selected {
-                    Ok(None) => None,
-                    Ok(Some(row)) => Some(Ok(row)),
-                    Err(error) => Some(Err(error)),
-                }
-            })
+                })
+                .chain(
+                    std::iter::once_with(move || {
+                        notify(
+                            progress,
+                            Notice::RawFileComplete {
+                                pass,
+                                initialization: true,
+                            },
+                        );
+                        None
+                    })
+                    .flatten(),
+                )
         })
     }
     /// v1组合身份只编码原日集合、真实文件事实和显式选择；物理根路径不参与。

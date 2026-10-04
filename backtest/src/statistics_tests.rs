@@ -1,9 +1,7 @@
 use super::*;
+use crate::test_common as common;
 use crate::*;
 use data_pipeline_core::public_reference::source_evidence_v3_from_typed_raw_v2;
-#[allow(dead_code)]
-#[path = "../tests/common/mod.rs"]
-mod common;
 use data_pipeline_core::{
     public_input::*, public_observation_core::PublicObservationCoreV1, typed_raw::*,
 };
@@ -304,10 +302,7 @@ fn progress_off_on_and_output_fault_preserve_full_business_and_failed_prepare_re
     assert_eq!(rows.last().unwrap()["stage"], "complete");
     assert_eq!(rows.last().unwrap()["work"]["generated_groups"], 8);
     assert_eq!(rows.last().unwrap()["work"]["applied_inputs"], 9);
-    assert!(
-        rows.iter()
-            .all(|r| r["known_total_inputs"].is_null() && r["eta_seconds"].is_null())
-    );
+    assert!(rows.iter().all(|r| r["eta_seconds"].is_null()));
     assert!(
         rows.iter()
             .filter(|r| r["stage"] != "complete")

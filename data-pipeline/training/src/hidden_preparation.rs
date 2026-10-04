@@ -1,4 +1,8 @@
 //! 正常有限前缀的隐藏派生；先释放公开数量状态，再使用同一业务算法。
+use crate::historical_preparation_progress::{
+    HistoricalPreparationNoticeV1 as Notice, HistoricalPreparationNotifierV1,
+    HistoricalPreparationStageV1 as Stage, notify,
+};
 use crate::public_recording::*;
 use crate::{
     ExternalSorter, RunCursor, SortRow,
@@ -76,11 +80,22 @@ pub struct HiddenPreparationV1 {
 /// 参数消费公开核心，不与隐藏数量状态并存；上下文仅保留原固定身份及初始 tick。
 pub fn prepare_hidden_v1(
     public: PublicObservationCoreV1,
-    mut reader: PublicRecordingReaderV1,
+    reader: PublicRecordingReaderV1,
     root: &Path,
     config: &GateAOutputConfig,
     consumer_stream_id: String,
 ) -> RecordingResult<HiddenPreparationV1> {
+    prepare_hidden_with_progress_v1(public, reader, root, config, consumer_stream_id, None)
+}
+pub fn prepare_hidden_with_progress_v1(
+    public: PublicObservationCoreV1,
+    mut reader: PublicRecordingReaderV1,
+    root: &Path,
+    config: &GateAOutputConfig,
+    consumer_stream_id: String,
+    progress: Option<&HistoricalPreparationNotifierV1<'_>>,
+) -> RecordingResult<HiddenPreparationV1> {
+    notify(progress, Notice::Stage(Stage::HiddenScanAndSupply));
     let prefix = reader
         .prefix
         .clone()
@@ -98,7 +113,15 @@ pub fn prepare_hidden_v1(
     let mut index = ExternalSorter::new(&root.join("index"), &config.sort)?;
     let mut epochs = BTreeMap::new();
     let mut reference_order = 0;
+    let mut scan_rows = 0_u64;
     while let Some(row) = reader.next_row()? {
+        notify(progress, Notice::HiddenScanRow);
+        if progress.is_some() {
+            scan_rows += 1;
+            if scan_rows.is_multiple_of(config.sort.batch_rows as u64) {
+                notify(progress, Notice::Checkpoint);
+            }
+        }
         if let PublicStoredRowV1::Canonical {
             canonical_position,
             record,
@@ -121,6 +144,7 @@ pub fn prepare_hidden_v1(
                         key,
                         serde_json::to_vec(&(canonical_position, message))?,
                     ))?;
+                    notify(progress, Notice::HiddenMessageSupplied);
                 }
                 CanonicalEventRecordV2::ReferenceEvent(event) => {
                     if let Some(at) = event.time.source_event_at_utc_ms {
@@ -131,6 +155,7 @@ pub fn prepare_hidden_v1(
                         };
                         index.push(index_row(at, reference_order, &value)?)?;
                         reference_order += 1;
+                        notify(progress, Notice::HiddenReferenceIndexed);
                     }
                 }
                 CanonicalEventRecordV2::MarketFact(event) => {
@@ -142,12 +167,16 @@ pub fn prepare_hidden_v1(
                         };
                         index.push(index_row(at, reference_order, &value)?)?;
                         reference_order += 1;
+                        notify(progress, Notice::HiddenReferenceIndexed);
                     }
                 }
             }
         }
     }
-    let (sorted_path, _) = messages.finish(None)?;
+    notify(progress, Notice::Stage(Stage::HiddenMessagesFinish));
+    let (sorted_path, message_metrics) = messages.finish(None)?;
+    notify(progress, Notice::HiddenMessagesSorted(message_metrics));
+    notify(progress, Notice::Stage(Stage::HiddenReduceAndWrite));
     let mut cursor = RunCursor::open(
         &sorted_path,
         config.sort.batch_rows,
@@ -179,6 +208,7 @@ pub fn prepare_hidden_v1(
     derived.defer_batch_sync();
     let mut row_position = 0;
     let mut derivation_position = reference_order;
+    let mut reduced_messages = 0_u64;
     while let Some(row) = cursor.next_row()? {
         let (canonical_position, message): (u64, CanonicalPmMessageV1) =
             serde_json::from_slice(row.payload())?;
@@ -196,6 +226,7 @@ pub fn prepare_hidden_v1(
         )?;
         state.apply(&result);
         let material = materialize_pm_step_identity_v1(result)?;
+        notify(progress, Notice::HiddenMessageReduced);
         for (step, binding) in material.reduction.steps.into_iter().zip(material.bindings) {
             let reference = HiddenDerivedStepRefV1 {
                 canonical_fact_id: step.canonical_fact_id.clone(),
@@ -213,6 +244,7 @@ pub fn prepare_hidden_v1(
                     derivation_position,
                     &HiddenIndexEntryV1::Step(reference.clone()),
                 )?)?;
+                notify(progress, Notice::HiddenStepIndexed);
             }
             derived.push(
                 row_position,
@@ -222,6 +254,7 @@ pub fn prepare_hidden_v1(
                     step: &step,
                 })?,
             )?;
+            notify(progress, Notice::HiddenStepWritten);
             row_position += 1;
             derivation_position += 1;
         }
@@ -235,12 +268,21 @@ pub fn prepare_hidden_v1(
                     report: &report,
                 })?,
             )?;
+            notify(progress, Notice::HiddenReportWritten);
             row_position += 1;
+        }
+        if progress.is_some() {
+            reduced_messages += 1;
+            if reduced_messages.is_multiple_of(config.sort.batch_rows as u64) {
+                notify(progress, Notice::Checkpoint);
+            }
         }
     }
     drop(states);
+    notify(progress, Notice::Stage(Stage::HiddenFinalize));
     let derived_path = derived.close_segment()?;
-    let (index_path, _) = index.finish(None)?;
+    let (index_path, index_metrics) = index.finish(None)?;
+    notify(progress, Notice::HiddenIndexSorted(index_metrics));
     crate::gate_a_publication::sync_tree(root)?;
     Ok(HiddenPreparationV1 {
         prefix,
