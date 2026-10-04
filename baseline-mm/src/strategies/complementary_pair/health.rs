@@ -1,5 +1,60 @@
 use super::*;
 
+/// 原来源进展的必要标量；不保存载荷，不新增公共质量或健康状态。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceHealthFactsV1 {
+    pub synchronization_required: bool,
+    pub availability: MarketDataQuality,
+    pub last_valid_message_times: Option<(i64, Option<i64>)>,
+}
+impl From<&SourceStreamProgressV1> for SourceHealthFactsV1 {
+    fn from(p: &SourceStreamProgressV1) -> Self {
+        Self {
+            synchronization_required: p.synchronization
+                == SourceSynchronizationV1::SnapshotRequired
+                || p.quality.resync == ResyncQuality::Required,
+            availability: p.quality.availability,
+            last_valid_message_times: p
+                .last_valid_business_message
+                .as_ref()
+                .map(|e| (e.received_at_utc_ms, e.source_event_at_utc_ms)),
+        }
+    }
+}
+/// 参数为原策略已转换的毫秒阈值；顺序、饱和加法及>=边界保持。
+pub fn source_health_failure_v1(
+    facts: Option<&SourceHealthFactsV1>,
+    silence_ms: i64,
+    event_delay_ms: i64,
+    at: i64,
+) -> Option<SourceHealthFailureV1> {
+    use SourceHealthFailureV1 as F;
+    let Some(f) = facts else {
+        return Some(F::UnknownBusinessProgress);
+    };
+    if f.synchronization_required {
+        return Some(F::SynchronizationRequired);
+    }
+    if !matches!(
+        f.availability,
+        MarketDataQuality::Fresh | MarketDataQuality::Stale
+    ) {
+        return Some(F::Unavailable);
+    }
+    let Some((received, event)) = f.last_valid_message_times else {
+        return Some(F::UnknownBusinessProgress);
+    };
+    if received > at || event.is_some_and(|e| e > received) {
+        Some(F::TimeInconsistent)
+    } else if at >= received.saturating_add(silence_ms) {
+        Some(F::ReceiveSilence)
+    } else if let Some(e) = event {
+        (at >= e.saturating_add(event_delay_ms)).then_some(F::EventDelay)
+    } else {
+        Some(F::UnknownEventTime)
+    }
+}
+
 impl ComplementaryPairV1 {
     pub(super) fn book_scope(
         o: &MarketBusinessObservationV1,
@@ -88,39 +143,13 @@ impl ComplementaryPairV1 {
         sources
             .iter()
             .filter_map(|scope| {
-                use SourceHealthFailureV1 as F;
-                let failure =
-                    if let Some(progress) = o.source_progress.iter().find(|p| &p.scope == scope) {
-                        if progress.synchronization == SourceSynchronizationV1::SnapshotRequired
-                            || progress.quality.resync == ResyncQuality::Required
-                        {
-                            Some(F::SynchronizationRequired)
-                        } else if !matches!(
-                            progress.quality.availability,
-                            MarketDataQuality::Fresh | MarketDataQuality::Stale
-                        ) {
-                            Some(F::Unavailable)
-                        } else if let Some(evidence) = &progress.last_valid_business_message {
-                            let (silence, delay) = self.health_limits(scope.source);
-                            if evidence.received_at_utc_ms > at
-                                || evidence
-                                    .source_event_at_utc_ms
-                                    .is_some_and(|event| event > evidence.received_at_utc_ms)
-                            {
-                                Some(F::TimeInconsistent)
-                            } else if at >= evidence.received_at_utc_ms.saturating_add(silence) {
-                                Some(F::ReceiveSilence)
-                            } else if let Some(event) = evidence.source_event_at_utc_ms {
-                                (at >= event.saturating_add(delay)).then_some(F::EventDelay)
-                            } else {
-                                Some(F::UnknownEventTime)
-                            }
-                        } else {
-                            Some(F::UnknownBusinessProgress)
-                        }
-                    } else {
-                        Some(F::UnknownBusinessProgress)
-                    };
+                let facts = o
+                    .source_progress
+                    .iter()
+                    .find(|p| &p.scope == scope)
+                    .map(SourceHealthFactsV1::from);
+                let (silence, delay) = self.health_limits(scope.source);
+                let failure = source_health_failure_v1(facts.as_ref(), silence, delay, at);
                 failure.map(|failure| SourceHealthIssueV1 {
                     scope: scope.clone(),
                     failure,

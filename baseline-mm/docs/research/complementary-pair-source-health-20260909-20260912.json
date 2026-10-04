@@ -1,0 +1,1769 @@
+{
+  "title": "首个三日拟合折 Chainlink 来源健康统计与候选覆盖分析",
+  "issue": "https://github.com/slowchillchill/btc-updown-marketmaker/issues/185",
+  "utc_window": "[2026-09-09,2026-09-12)",
+  "measurement_identity": {
+    "implementation_head": "75e6bccd36c4819d535d7e385085232cb36fd08d",
+    "base": "765844ab809f3a9567a26eedd28e814a1cb05e88",
+    "build_command": "cargo build -p baseline-mm --example research_source_health --release --locked --offline -j 8",
+    "build_log": "release-build-2.log",
+    "build_exit": 0,
+    "binary_sha256": "ff744b983a494befcd4338d998ec3606c36e4c3b7bf86fb34ba9c05d75667057",
+    "binary_bytes": 14484720,
+    "binary_relative_path": "target/release/examples/research_source_health",
+    "cargo_lock_sha256": "80325c8fccddaf04c6b91dd8a21a32d57ea0ed1864ae5eeb8bde1a6167e2e943",
+    "rustc": "rustc 1.95.0 (59807616e 2026-04-14)",
+    "cargo": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)",
+    "config_sha256": "93c942088e48ed8951797af13370c241eaff2a30fa83f219e204d5d66a23580e",
+    "public_metadata_sha256": {
+      "stream.json": "e1f9b3a9a28544da135b188b62f1093050c1185525363a9e93bc9768a954f9ec",
+      "stable-00000000000000000000/prefix.json": "ee767cd782428c3cb6d58d588b6a68dd286f9bf53372de8fbeb9c34b5afc1e2f"
+    },
+    "runtime_command": "target/release/examples/research_source_health CONFIG OUTPUT_DIRECTORY"
+  },
+  "public_effective_configuration": {
+    "expected_capture_bytes": 51637053,
+    "expected_capture_sha256": "4ca8002d7b0b5479a1cb6b208a732ac1ea57ede404d79880b0dfca845bcde8fd",
+    "implementation_identity": {
+      "base": "765844ab809f3a9567a26eedd28e814a1cb05e88",
+      "binary_bytes": 14484720,
+      "binary_relative_path": "target/release/examples/research_source_health",
+      "binary_sha256": "ff744b983a494befcd4338d998ec3606c36e4c3b7bf86fb34ba9c05d75667057",
+      "build_command": "cargo build -p baseline-mm --example research_source_health --release --locked --offline -j 8",
+      "build_exit": 0,
+      "build_log": "release-build-2.log",
+      "cargo": "cargo 1.95.0 (f2d3ce0bd 2026-03-21)",
+      "cargo_lock_sha256": "80325c8fccddaf04c6b91dd8a21a32d57ea0ed1864ae5eeb8bde1a6167e2e943",
+      "implementation_head": "75e6bccd36c4819d535d7e385085232cb36fd08d",
+      "rustc": "rustc 1.95.0 (59807616e 2026-04-14)"
+    },
+    "max_read_batch_bytes": 67108864,
+    "prefix": {
+      "input_stream_id": "complementary-pair-chainlink-initial-fit-20260909-20260912",
+      "next_canonical_position": 239591,
+      "next_group_position": 239591,
+      "next_input_position": 239592,
+      "next_observation_position": 0,
+      "next_public_index_position": 239591,
+      "normal_end": true,
+      "stable_storage_ref": "stable-00000000000000000000"
+    },
+    "progress_interval_seconds": 30,
+    "read_page_rows": 256,
+    "received_end_utc_ms": 1789171200000,
+    "received_start_utc_ms": 1788912000000,
+    "selected_source_identity_sha256": "b9988ac33532477da648dae6ccd71b2d7aef306e69dd261c84b0b3aa84a71162",
+    "selection_evidence": [
+      {
+        "collection_day_coverage": {
+          "ended_utc_ms": 1788998400000,
+          "first_started_utc_ms": 1788912000000,
+          "last_started_utc_ms": 1788912000000,
+          "reactivated_within_day": false,
+          "schema_version": "data_collect_collection_day_coverage_v1",
+          "state": "ended_known"
+        },
+        "gaps": [],
+        "manifest_sha256": "93a70f4775bdb3d52bf7de73d58caaa5ccbf2f2d7f6a8e2f00e09c092e1f1918",
+        "selected_bytes": 3789097,
+        "selected_files": 24,
+        "selected_rows": 76905,
+        "source_counters": {
+          "polymarket_rtds_chainlink_btc_usd": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 76905
+            },
+            "files": 24,
+            "first_recv_time_utc_ms": 1788912002228,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1788998399737,
+            "reconnect_events": 11,
+            "rows": 76905,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 76905
+          }
+        },
+        "utc_day": "2026-09-09"
+      },
+      {
+        "collection_day_coverage": {
+          "ended_utc_ms": 1789084800000,
+          "first_started_utc_ms": 1788998400000,
+          "last_started_utc_ms": 1789002405436,
+          "reactivated_within_day": true,
+          "schema_version": "data_collect_collection_day_coverage_v1",
+          "state": "ended_known"
+        },
+        "gaps": [
+          "polymarket_raw_day_ticket_failed:raw event arrived after same-day intake close: producer=polymarket event=2026-09-10 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-10\", generation: 1, close_id: 1 }, ended_utc_ms: 1789001546388, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "polymarket_raw_day_ticket_failed:raw event arrived after same-day intake close: producer=polymarket event=2026-09-10 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-10\", generation: 1, close_id: 1 }, ended_utc_ms: 1789002065576, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "polymarket_raw_day_ticket_failed:raw event arrived after same-day intake close: producer=polymarket event=2026-09-10 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-10\", generation: 3, close_id: 3 }, ended_utc_ms: 1789000002980, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "rtds_sdk_stream_fatal:parser error: Internal: RTDS typed message parse failed; rtds_parse_diagnostic=frame_bytes=103 sha256=351a37ce7abb5754a6e68af8c75a5439aabd1ac249aebc1aa979e959d0915507 top_level=object selected={message=\"Too Many Requests\",connectionId=\"gZ9SBs-0PWeIKEjTHA==\",requestId=\"DdTTsFT1LPEECzA=\"} fields=[\"connectionId\",\"message\",\"requestId\"]",
+          "rtds_sdk_stream_fatal:parser error: Internal: RTDS typed message parse failed; rtds_parse_diagnostic=frame_bytes=103 sha256=3528f43ecdcfccc4a608647ae720784f9c4a30f41ae5ef3c5dab62da87210317 top_level=object selected={message=\"Too Many Requests\",connectionId=\"gZ9B2G8CMWeIKEi9uA==\",requestId=\"DdPiiGiGLPEEodQ=\"} fields=[\"connectionId\",\"message\",\"requestId\"]",
+          "rtds_sdk_stream_fatal:parser error: Internal: RTDS typed message parse failed; rtds_parse_diagnostic=frame_bytes=103 sha256=52f18a015e4b8e6dfce1ada927b6cf9db57675d6e94e3234a3c3e3fd4dd7dc6b top_level=object selected={message=\"Too Many Requests\",connectionId=\"gZ9ZhM9pKWeIKEhN5A==\",requestId=\"DdUk0ExorPEEUZQ=\"} fields=[\"connectionId\",\"message\",\"requestId\"]",
+          "source_task_error:binance_aggtrade:raw event arrived after same-day intake close: producer=binance_aggtrade event=2026-09-10 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-10\", generation: 1, close_id: 1 }, ended_utc_ms: 1789002065576, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "source_task_error:binance_aggtrade:raw event arrived after same-day intake close: producer=binance_aggtrade event=2026-09-10 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-10\", generation: 3, close_id: 3 }, ended_utc_ms: 1789000002980, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "source_task_error:binance_depth_update:raw event arrived after same-day intake close: producer=binance_depth event=2026-09-10 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-10\", generation: 1, close_id: 1 }, ended_utc_ms: 1789001546388, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "source_task_error:binance_depth_update:raw event arrived after same-day intake close: producer=binance_depth event=2026-09-10 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-10\", generation: 1, close_id: 1 }, ended_utc_ms: 1789002065576, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "source_task_error:binance_depth_update:raw event arrived after same-day intake close: producer=binance_depth event=2026-09-10 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-10\", generation: 3, close_id: 3 }, ended_utc_ms: 1789000002980, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "source_task_error:polymarket_market:polymarket_raw_day_ticket_failed:raw event arrived after same-day intake close: producer=polymarket event=2026-09-10 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-10\", generation: 1, close_id: 1 }, ended_utc_ms: 1789001546388, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "source_task_error:polymarket_market:polymarket_raw_day_ticket_failed:raw event arrived after same-day intake close: producer=polymarket event=2026-09-10 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-10\", generation: 1, close_id: 1 }, ended_utc_ms: 1789002065576, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "source_task_error:polymarket_market:polymarket_raw_day_ticket_failed:raw event arrived after same-day intake close: producer=polymarket event=2026-09-10 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-10\", generation: 3, close_id: 3 }, ended_utc_ms: 1789000002980, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "source_task_error:polymarket_rtds_chainlink_btc_usd:parser error: Internal: RTDS typed message parse failed; rtds_parse_diagnostic=frame_bytes=103 sha256=351a37ce7abb5754a6e68af8c75a5439aabd1ac249aebc1aa979e959d0915507 top_level=object selected={message=\"Too Many Requests\",connectionId=\"gZ9SBs-0PWeIKEjTHA==\",requestId=\"DdTTsFT1LPEECzA=\"} fields=[\"connectionId\",\"message\",\"requestId\"]",
+          "source_task_error:polymarket_rtds_chainlink_btc_usd:parser error: Internal: RTDS typed message parse failed; rtds_parse_diagnostic=frame_bytes=103 sha256=3528f43ecdcfccc4a608647ae720784f9c4a30f41ae5ef3c5dab62da87210317 top_level=object selected={message=\"Too Many Requests\",connectionId=\"gZ9B2G8CMWeIKEi9uA==\",requestId=\"DdPiiGiGLPEEodQ=\"} fields=[\"connectionId\",\"message\",\"requestId\"]",
+          "source_task_error:polymarket_rtds_chainlink_btc_usd:parser error: Internal: RTDS typed message parse failed; rtds_parse_diagnostic=frame_bytes=103 sha256=52f18a015e4b8e6dfce1ada927b6cf9db57675d6e94e3234a3c3e3fd4dd7dc6b top_level=object selected={message=\"Too Many Requests\",connectionId=\"gZ9ZhM9pKWeIKEhN5A==\",requestId=\"DdUk0ExorPEEUZQ=\"} fields=[\"connectionId\",\"message\",\"requestId\"]"
+        ],
+        "manifest_sha256": "a940cc15d039efd2a2555f8da30958ea6b381cc24574477dbd8c93d33a240a60",
+        "selected_bytes": 3956525,
+        "selected_files": 27,
+        "selected_rows": 80242,
+        "source_counters": {
+          "polymarket_rtds_chainlink_btc_usd": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 80242
+            },
+            "files": 27,
+            "first_recv_time_utc_ms": 1788998403377,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789084799271,
+            "reconnect_events": 10,
+            "rows": 80242,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 80242
+          }
+        },
+        "utc_day": "2026-09-10"
+      },
+      {
+        "collection_day_coverage": {
+          "ended_utc_ms": 1789171200000,
+          "first_started_utc_ms": 1789084800000,
+          "last_started_utc_ms": 1789109554379,
+          "reactivated_within_day": true,
+          "schema_version": "data_collect_collection_day_coverage_v1",
+          "state": "ended_known"
+        },
+        "gaps": [
+          "polymarket_raw_day_ticket_failed:raw event arrived after same-day intake close: producer=polymarket event=2026-09-11 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-11\", generation: 1, close_id: 1 }, ended_utc_ms: 1789094841147, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "polymarket_raw_day_ticket_failed:raw event arrived after same-day intake close: producer=polymarket event=2026-09-11 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-11\", generation: 1, close_id: 1 }, ended_utc_ms: 1789109189674, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "polymarket_raw_day_ticket_failed:raw event arrived after same-day intake close: producer=polymarket event=2026-09-11 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-11\", generation: 2, close_id: 2 }, ended_utc_ms: 1789092823829, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "rtds_sdk_stream_fatal:parser error: Internal: RTDS typed message parse failed; rtds_parse_diagnostic=frame_bytes=103 sha256=0d328874a9d6ed134262b0984779781d6fa828e263ea9fbb6c940d10d1ddf4f1 top_level=object selected={message=\"Too Many Requests\",connectionId=\"gaD3TA9fUWeIKEiKXA==\",requestId=\"DgyJzGUdrPEEshw=\"} fields=[\"connectionId\",\"message\",\"requestId\"]",
+          "rtds_sdk_stream_fatal:parser error: Internal: RTDS typed message parse failed; rtds_parse_diagnostic=frame_bytes=103 sha256=98f3db0658a275279af9d25b0b62fbfc7632a3c21851df9e049003e09cc0a14f top_level=object selected={message=\"Too Many Requests\",connectionId=\"gaEXOQ_EYWeIKEiQMA==\",requestId=\"Dg3FAGImLPEEgtw=\"} fields=[\"connectionId\",\"message\",\"requestId\"]",
+          "rtds_sdk_stream_fatal:parser error: Internal: RTDS typed message parse failed; rtds_parse_diagnostic=frame_bytes=112 sha256=ca0c7f83f7b32974571f3247eb146e41efbc3882a9dcfd786fd10a8f242e583a top_level=object selected={message=\"Endpoint request timed out\",connectionId=\"gaFEPs9bAWeIKEhZUA==\",requestId=\"DhaGuH6ELPEESvA=\"} fields=[\"connectionId\",\"message\",\"requestId\"]",
+          "source_task_error:binance_depth_update:raw event arrived after same-day intake close: producer=binance_depth event=2026-09-11 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-11\", generation: 1, close_id: 1 }, ended_utc_ms: 1789094841147, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "source_task_error:binance_depth_update:raw event arrived after same-day intake close: producer=binance_depth event=2026-09-11 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-11\", generation: 1, close_id: 1 }, ended_utc_ms: 1789109189674, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "source_task_error:binance_depth_update:raw event arrived after same-day intake close: producer=binance_depth event=2026-09-11 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-11\", generation: 2, close_id: 2 }, ended_utc_ms: 1789092823829, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "source_task_error:polymarket_market:polymarket_raw_day_ticket_failed:raw event arrived after same-day intake close: producer=polymarket event=2026-09-11 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-11\", generation: 1, close_id: 1 }, ended_utc_ms: 1789094841147, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "source_task_error:polymarket_market:polymarket_raw_day_ticket_failed:raw event arrived after same-day intake close: producer=polymarket event=2026-09-11 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-11\", generation: 1, close_id: 1 }, ended_utc_ms: 1789109189674, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "source_task_error:polymarket_market:polymarket_raw_day_ticket_failed:raw event arrived after same-day intake close: producer=polymarket event=2026-09-11 close=PreparedSameDayClose { identity: RuntimeCloseIdentity { utc_day: \"2026-09-11\", generation: 2, close_id: 2 }, ended_utc_ms: 1789092823829, cause: SourceInnerReturn { source_kind: \"polymarket_rtds_chainlink_btc_usd\" }, unclean: false, unclean_cause: None }",
+          "source_task_error:polymarket_rtds_chainlink_btc_usd:parser error: Internal: RTDS typed message parse failed; rtds_parse_diagnostic=frame_bytes=103 sha256=0d328874a9d6ed134262b0984779781d6fa828e263ea9fbb6c940d10d1ddf4f1 top_level=object selected={message=\"Too Many Requests\",connectionId=\"gaD3TA9fUWeIKEiKXA==\",requestId=\"DgyJzGUdrPEEshw=\"} fields=[\"connectionId\",\"message\",\"requestId\"]",
+          "source_task_error:polymarket_rtds_chainlink_btc_usd:parser error: Internal: RTDS typed message parse failed; rtds_parse_diagnostic=frame_bytes=103 sha256=98f3db0658a275279af9d25b0b62fbfc7632a3c21851df9e049003e09cc0a14f top_level=object selected={message=\"Too Many Requests\",connectionId=\"gaEXOQ_EYWeIKEiQMA==\",requestId=\"Dg3FAGImLPEEgtw=\"} fields=[\"connectionId\",\"message\",\"requestId\"]",
+          "source_task_error:polymarket_rtds_chainlink_btc_usd:parser error: Internal: RTDS typed message parse failed; rtds_parse_diagnostic=frame_bytes=112 sha256=ca0c7f83f7b32974571f3247eb146e41efbc3882a9dcfd786fd10a8f242e583a top_level=object selected={message=\"Endpoint request timed out\",connectionId=\"gaFEPs9bAWeIKEhZUA==\",requestId=\"DhaGuH6ELPEESvA=\"} fields=[\"connectionId\",\"message\",\"requestId\"]"
+        ],
+        "manifest_sha256": "4cb535f1baa9a15d4bb1115020309c5c09edec119e49ef35a0b0400a28c2c975",
+        "selected_bytes": 4056023,
+        "selected_files": 27,
+        "selected_rows": 82444,
+        "source_counters": {
+          "polymarket_rtds_chainlink_btc_usd": {
+            "backfill_rows": 0,
+            "dropped_rows": 0,
+            "event_type_counts": {
+              "update": 82444
+            },
+            "files": 27,
+            "first_recv_time_utc_ms": 1789084804409,
+            "lag_events": 0,
+            "last_recv_time_utc_ms": 1789171198526,
+            "reconnect_events": 11,
+            "rows": 82444,
+            "structural_dedupe_dropped_events": 0,
+            "written_rows": 82444
+          }
+        },
+        "utc_day": "2026-09-11"
+      }
+    ],
+    "public_root_logical": "issue-185-initial-sigma-source-20261004/materials/public"
+  },
+  "configuration_note": "private CONFIG原文件SHA已绑定；public配置只用逻辑来源位置代替本机绝对public_root，其他字段原样。源码/二进制为75e6bcc；后续报告提交未重新运行。",
+  "source_statistics": {
+    "actual_applied_prefix": {
+      "input_stream_id": "complementary-pair-chainlink-initial-fit-20260909-20260912",
+      "next_input_position": 239592
+    },
+    "candidates": [
+      {
+        "daily_by_utc_start_ms": {
+          "1788912000000": {
+            "event_age_condition_ms": 81540604,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 65151128,
+              "ReceiveSilence": 16389476,
+              "UnknownBusinessProgress": 2228
+            },
+            "healthy_ms": 4857168,
+            "receive_silence_condition_ms": 16389476,
+            "timing_condition_overlap_ms": 16389476,
+            "timing_condition_union_ms": 81540604,
+            "window_ms": 86400000
+          },
+          "1788998400000": {
+            "event_age_condition_ms": 76188302,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 59699957,
+              "ReceiveSilence": 16488345
+            },
+            "healthy_ms": 10211698,
+            "receive_silence_condition_ms": 16488345,
+            "timing_condition_overlap_ms": 16488345,
+            "timing_condition_union_ms": 76188302,
+            "window_ms": 86400000
+          },
+          "1789084800000": {
+            "event_age_condition_ms": 72057281,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 56268129,
+              "ReceiveSilence": 15789152
+            },
+            "healthy_ms": 14342719,
+            "receive_silence_condition_ms": 15789152,
+            "timing_condition_overlap_ms": 15789152,
+            "timing_condition_union_ms": 72057281,
+            "window_ms": 86400000
+          }
+        },
+        "event_age_at_or_above": 120063,
+        "event_age_denominator": 239591,
+        "event_age_exceed_fraction": 0.5011164860115781,
+        "event_delay_ms": 1614,
+        "overall": {
+          "event_age_condition_ms": 229786187,
+          "event_time_missing_evidence_ms": 0,
+          "first_failure_ms": {
+            "EventDelay": 181119214,
+            "ReceiveSilence": 48666973,
+            "UnknownBusinessProgress": 2228
+          },
+          "healthy_ms": 29411585,
+          "receive_silence_condition_ms": 48666973,
+          "timing_condition_overlap_ms": 48666973,
+          "timing_condition_union_ms": 229786187,
+          "window_ms": 259200000
+        },
+        "receive_interval_at_or_above": 119826,
+        "receive_interval_denominator": 239590,
+        "receive_interval_exceed_fraction": 0.5001293877039943,
+        "receive_silence_ms": 985
+      },
+      {
+        "daily_by_utc_start_ms": {
+          "1788912000000": {
+            "event_age_condition_ms": 57809348,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 41471469,
+              "ReceiveSilence": 16389476,
+              "UnknownBusinessProgress": 2228
+            },
+            "healthy_ms": 28536827,
+            "receive_silence_condition_ms": 16389476,
+            "timing_condition_overlap_ms": 16337879,
+            "timing_condition_union_ms": 57860945,
+            "window_ms": 86400000
+          },
+          "1788998400000": {
+            "event_age_condition_ms": 44267198,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 28106366,
+              "ReceiveSilence": 16488345
+            },
+            "healthy_ms": 41805289,
+            "receive_silence_condition_ms": 16488345,
+            "timing_condition_overlap_ms": 16160832,
+            "timing_condition_union_ms": 44594711,
+            "window_ms": 86400000
+          },
+          "1789084800000": {
+            "event_age_condition_ms": 36234378,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 21119325,
+              "ReceiveSilence": 15789152
+            },
+            "healthy_ms": 49491523,
+            "receive_silence_condition_ms": 15789152,
+            "timing_condition_overlap_ms": 15115053,
+            "timing_condition_union_ms": 36908477,
+            "window_ms": 86400000
+          }
+        },
+        "event_age_at_or_above": 24037,
+        "event_age_denominator": 239591,
+        "event_age_exceed_fraction": 0.10032513742168946,
+        "event_delay_ms": 2140,
+        "overall": {
+          "event_age_condition_ms": 138310924,
+          "event_time_missing_evidence_ms": 0,
+          "first_failure_ms": {
+            "EventDelay": 90697160,
+            "ReceiveSilence": 48666973,
+            "UnknownBusinessProgress": 2228
+          },
+          "healthy_ms": 119833639,
+          "receive_silence_condition_ms": 48666973,
+          "timing_condition_overlap_ms": 47613764,
+          "timing_condition_union_ms": 139364133,
+          "window_ms": 259200000
+        },
+        "receive_interval_at_or_above": 119826,
+        "receive_interval_denominator": 239590,
+        "receive_interval_exceed_fraction": 0.5001293877039943,
+        "receive_silence_ms": 985
+      },
+      {
+        "daily_by_utc_start_ms": {
+          "1788912000000": {
+            "event_age_condition_ms": 48022636,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 32094510,
+              "ReceiveSilence": 16389476,
+              "UnknownBusinessProgress": 2228
+            },
+            "healthy_ms": 37913786,
+            "receive_silence_condition_ms": 16389476,
+            "timing_condition_overlap_ms": 15928126,
+            "timing_condition_union_ms": 48483986,
+            "window_ms": 86400000
+          },
+          "1788998400000": {
+            "event_age_condition_ms": 34006003,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 19176106,
+              "ReceiveSilence": 16488345
+            },
+            "healthy_ms": 50735549,
+            "receive_silence_condition_ms": 16488345,
+            "timing_condition_overlap_ms": 14829897,
+            "timing_condition_union_ms": 35664451,
+            "window_ms": 86400000
+          },
+          "1789084800000": {
+            "event_age_condition_ms": 26171569,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 13124817,
+              "ReceiveSilence": 15789152
+            },
+            "healthy_ms": 57486031,
+            "receive_silence_condition_ms": 15789152,
+            "timing_condition_overlap_ms": 13046752,
+            "timing_condition_union_ms": 28913969,
+            "window_ms": 86400000
+          }
+        },
+        "event_age_at_or_above": 12001,
+        "event_age_denominator": 239591,
+        "event_age_exceed_fraction": 0.05008952756990037,
+        "event_delay_ms": 2291,
+        "overall": {
+          "event_age_condition_ms": 108200208,
+          "event_time_missing_evidence_ms": 0,
+          "first_failure_ms": {
+            "EventDelay": 64395433,
+            "ReceiveSilence": 48666973,
+            "UnknownBusinessProgress": 2228
+          },
+          "healthy_ms": 146135366,
+          "receive_silence_condition_ms": 48666973,
+          "timing_condition_overlap_ms": 43804775,
+          "timing_condition_union_ms": 113062406,
+          "window_ms": 259200000
+        },
+        "receive_interval_at_or_above": 119826,
+        "receive_interval_denominator": 239590,
+        "receive_interval_exceed_fraction": 0.5001293877039943,
+        "receive_silence_ms": 985
+      },
+      {
+        "daily_by_utc_start_ms": {
+          "1788912000000": {
+            "event_age_condition_ms": 29736491,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 16542477,
+              "ReceiveSilence": 16389476,
+              "UnknownBusinessProgress": 2228
+            },
+            "healthy_ms": 53465819,
+            "receive_silence_condition_ms": 16389476,
+            "timing_condition_overlap_ms": 13194014,
+            "timing_condition_union_ms": 32931953,
+            "window_ms": 86400000
+          },
+          "1788998400000": {
+            "event_age_condition_ms": 17963612,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 8207646,
+              "ReceiveSilence": 16488345
+            },
+            "healthy_ms": 61704009,
+            "receive_silence_condition_ms": 16488345,
+            "timing_condition_overlap_ms": 9755966,
+            "timing_condition_union_ms": 24695991,
+            "window_ms": 86400000
+          },
+          "1789084800000": {
+            "event_age_condition_ms": 12235582,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 5320359,
+              "ReceiveSilence": 15789152
+            },
+            "healthy_ms": 65290489,
+            "receive_silence_condition_ms": 15789152,
+            "timing_condition_overlap_ms": 6915223,
+            "timing_condition_union_ms": 21109511,
+            "window_ms": 86400000
+          }
+        },
+        "event_age_at_or_above": 2398,
+        "event_age_denominator": 239591,
+        "event_age_exceed_fraction": 0.010008723199118498,
+        "event_delay_ms": 2584,
+        "overall": {
+          "event_age_condition_ms": 59935685,
+          "event_time_missing_evidence_ms": 0,
+          "first_failure_ms": {
+            "EventDelay": 30070482,
+            "ReceiveSilence": 48666973,
+            "UnknownBusinessProgress": 2228
+          },
+          "healthy_ms": 180460317,
+          "receive_silence_condition_ms": 48666973,
+          "timing_condition_overlap_ms": 29865203,
+          "timing_condition_union_ms": 78737455,
+          "window_ms": 259200000
+        },
+        "receive_interval_at_or_above": 119826,
+        "receive_interval_denominator": 239590,
+        "receive_interval_exceed_fraction": 0.5001293877039943,
+        "receive_silence_ms": 985
+      },
+      {
+        "daily_by_utc_start_ms": {
+          "1788912000000": {
+            "event_age_condition_ms": 81540604,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 76884210,
+              "ReceiveSilence": 4656394,
+              "UnknownBusinessProgress": 2228
+            },
+            "healthy_ms": 4857168,
+            "receive_silence_condition_ms": 4656394,
+            "timing_condition_overlap_ms": 4656394,
+            "timing_condition_union_ms": 81540604,
+            "window_ms": 86400000
+          },
+          "1788998400000": {
+            "event_age_condition_ms": 76188302,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 71595493,
+              "ReceiveSilence": 4592809
+            },
+            "healthy_ms": 10211698,
+            "receive_silence_condition_ms": 4592809,
+            "timing_condition_overlap_ms": 4592809,
+            "timing_condition_union_ms": 76188302,
+            "window_ms": 86400000
+          },
+          "1789084800000": {
+            "event_age_condition_ms": 72057281,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 68492707,
+              "ReceiveSilence": 3564574
+            },
+            "healthy_ms": 14342719,
+            "receive_silence_condition_ms": 3564574,
+            "timing_condition_overlap_ms": 3564574,
+            "timing_condition_union_ms": 72057281,
+            "window_ms": 86400000
+          }
+        },
+        "event_age_at_or_above": 120063,
+        "event_age_denominator": 239591,
+        "event_age_exceed_fraction": 0.5011164860115781,
+        "event_delay_ms": 1614,
+        "overall": {
+          "event_age_condition_ms": 229786187,
+          "event_time_missing_evidence_ms": 0,
+          "first_failure_ms": {
+            "EventDelay": 216972410,
+            "ReceiveSilence": 12813777,
+            "UnknownBusinessProgress": 2228
+          },
+          "healthy_ms": 29411585,
+          "receive_silence_condition_ms": 12813777,
+          "timing_condition_overlap_ms": 12813777,
+          "timing_condition_union_ms": 229786187,
+          "window_ms": 259200000
+        },
+        "receive_interval_at_or_above": 24068,
+        "receive_interval_denominator": 239590,
+        "receive_interval_exceed_fraction": 0.10045494386243166,
+        "receive_silence_ms": 1516
+      },
+      {
+        "daily_by_utc_start_ms": {
+          "1788912000000": {
+            "event_age_condition_ms": 57809348,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 53152954,
+              "ReceiveSilence": 4656394,
+              "UnknownBusinessProgress": 2228
+            },
+            "healthy_ms": 28588424,
+            "receive_silence_condition_ms": 4656394,
+            "timing_condition_overlap_ms": 4656394,
+            "timing_condition_union_ms": 57809348,
+            "window_ms": 86400000
+          },
+          "1788998400000": {
+            "event_age_condition_ms": 44267198,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 39674389,
+              "ReceiveSilence": 4592809
+            },
+            "healthy_ms": 42132802,
+            "receive_silence_condition_ms": 4592809,
+            "timing_condition_overlap_ms": 4592809,
+            "timing_condition_union_ms": 44267198,
+            "window_ms": 86400000
+          },
+          "1789084800000": {
+            "event_age_condition_ms": 36234378,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 32669804,
+              "ReceiveSilence": 3564574
+            },
+            "healthy_ms": 50165622,
+            "receive_silence_condition_ms": 3564574,
+            "timing_condition_overlap_ms": 3564574,
+            "timing_condition_union_ms": 36234378,
+            "window_ms": 86400000
+          }
+        },
+        "event_age_at_or_above": 24037,
+        "event_age_denominator": 239591,
+        "event_age_exceed_fraction": 0.10032513742168946,
+        "event_delay_ms": 2140,
+        "overall": {
+          "event_age_condition_ms": 138310924,
+          "event_time_missing_evidence_ms": 0,
+          "first_failure_ms": {
+            "EventDelay": 125497147,
+            "ReceiveSilence": 12813777,
+            "UnknownBusinessProgress": 2228
+          },
+          "healthy_ms": 120886848,
+          "receive_silence_condition_ms": 12813777,
+          "timing_condition_overlap_ms": 12813777,
+          "timing_condition_union_ms": 138310924,
+          "window_ms": 259200000
+        },
+        "receive_interval_at_or_above": 24068,
+        "receive_interval_denominator": 239590,
+        "receive_interval_exceed_fraction": 0.10045494386243166,
+        "receive_silence_ms": 1516
+      },
+      {
+        "daily_by_utc_start_ms": {
+          "1788912000000": {
+            "event_age_condition_ms": 48022636,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 43366242,
+              "ReceiveSilence": 4656394,
+              "UnknownBusinessProgress": 2228
+            },
+            "healthy_ms": 38375136,
+            "receive_silence_condition_ms": 4656394,
+            "timing_condition_overlap_ms": 4656394,
+            "timing_condition_union_ms": 48022636,
+            "window_ms": 86400000
+          },
+          "1788998400000": {
+            "event_age_condition_ms": 34006003,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 29413194,
+              "ReceiveSilence": 4592809
+            },
+            "healthy_ms": 52393997,
+            "receive_silence_condition_ms": 4592809,
+            "timing_condition_overlap_ms": 4592809,
+            "timing_condition_union_ms": 34006003,
+            "window_ms": 86400000
+          },
+          "1789084800000": {
+            "event_age_condition_ms": 26171569,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 22606995,
+              "ReceiveSilence": 3564574
+            },
+            "healthy_ms": 60228431,
+            "receive_silence_condition_ms": 3564574,
+            "timing_condition_overlap_ms": 3564574,
+            "timing_condition_union_ms": 26171569,
+            "window_ms": 86400000
+          }
+        },
+        "event_age_at_or_above": 12001,
+        "event_age_denominator": 239591,
+        "event_age_exceed_fraction": 0.05008952756990037,
+        "event_delay_ms": 2291,
+        "overall": {
+          "event_age_condition_ms": 108200208,
+          "event_time_missing_evidence_ms": 0,
+          "first_failure_ms": {
+            "EventDelay": 95386431,
+            "ReceiveSilence": 12813777,
+            "UnknownBusinessProgress": 2228
+          },
+          "healthy_ms": 150997564,
+          "receive_silence_condition_ms": 12813777,
+          "timing_condition_overlap_ms": 12813777,
+          "timing_condition_union_ms": 108200208,
+          "window_ms": 259200000
+        },
+        "receive_interval_at_or_above": 24068,
+        "receive_interval_denominator": 239590,
+        "receive_interval_exceed_fraction": 0.10045494386243166,
+        "receive_silence_ms": 1516
+      },
+      {
+        "daily_by_utc_start_ms": {
+          "1788912000000": {
+            "event_age_condition_ms": 29736491,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 25084397,
+              "ReceiveSilence": 4656394,
+              "UnknownBusinessProgress": 2228
+            },
+            "healthy_ms": 56656981,
+            "receive_silence_condition_ms": 4656394,
+            "timing_condition_overlap_ms": 4652094,
+            "timing_condition_union_ms": 29740791,
+            "window_ms": 86400000
+          },
+          "1788998400000": {
+            "event_age_condition_ms": 17963612,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 13388396,
+              "ReceiveSilence": 4592809
+            },
+            "healthy_ms": 68418795,
+            "receive_silence_condition_ms": 4592809,
+            "timing_condition_overlap_ms": 4575216,
+            "timing_condition_union_ms": 17981205,
+            "window_ms": 86400000
+          },
+          "1789084800000": {
+            "event_age_condition_ms": 12235582,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 8696171,
+              "ReceiveSilence": 3564574
+            },
+            "healthy_ms": 74139255,
+            "receive_silence_condition_ms": 3564574,
+            "timing_condition_overlap_ms": 3539411,
+            "timing_condition_union_ms": 12260745,
+            "window_ms": 86400000
+          }
+        },
+        "event_age_at_or_above": 2398,
+        "event_age_denominator": 239591,
+        "event_age_exceed_fraction": 0.010008723199118498,
+        "event_delay_ms": 2584,
+        "overall": {
+          "event_age_condition_ms": 59935685,
+          "event_time_missing_evidence_ms": 0,
+          "first_failure_ms": {
+            "EventDelay": 47168964,
+            "ReceiveSilence": 12813777,
+            "UnknownBusinessProgress": 2228
+          },
+          "healthy_ms": 199215031,
+          "receive_silence_condition_ms": 12813777,
+          "timing_condition_overlap_ms": 12766721,
+          "timing_condition_union_ms": 59982741,
+          "window_ms": 259200000
+        },
+        "receive_interval_at_or_above": 24068,
+        "receive_interval_denominator": 239590,
+        "receive_interval_exceed_fraction": 0.10045494386243166,
+        "receive_silence_ms": 1516
+      },
+      {
+        "daily_by_utc_start_ms": {
+          "1788912000000": {
+            "event_age_condition_ms": 81540604,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 78206117,
+              "ReceiveSilence": 3334487,
+              "UnknownBusinessProgress": 2228
+            },
+            "healthy_ms": 4857168,
+            "receive_silence_condition_ms": 3334487,
+            "timing_condition_overlap_ms": 3334487,
+            "timing_condition_union_ms": 81540604,
+            "window_ms": 86400000
+          },
+          "1788998400000": {
+            "event_age_condition_ms": 76188302,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 72567096,
+              "ReceiveSilence": 3621206
+            },
+            "healthy_ms": 10211698,
+            "receive_silence_condition_ms": 3621206,
+            "timing_condition_overlap_ms": 3621206,
+            "timing_condition_union_ms": 76188302,
+            "window_ms": 86400000
+          },
+          "1789084800000": {
+            "event_age_condition_ms": 72057281,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 69166113,
+              "ReceiveSilence": 2891168
+            },
+            "healthy_ms": 14342719,
+            "receive_silence_condition_ms": 2891168,
+            "timing_condition_overlap_ms": 2891168,
+            "timing_condition_union_ms": 72057281,
+            "window_ms": 86400000
+          }
+        },
+        "event_age_at_or_above": 120063,
+        "event_age_denominator": 239591,
+        "event_age_exceed_fraction": 0.5011164860115781,
+        "event_delay_ms": 1614,
+        "overall": {
+          "event_age_condition_ms": 229786187,
+          "event_time_missing_evidence_ms": 0,
+          "first_failure_ms": {
+            "EventDelay": 219939326,
+            "ReceiveSilence": 9846861,
+            "UnknownBusinessProgress": 2228
+          },
+          "healthy_ms": 29411585,
+          "receive_silence_condition_ms": 9846861,
+          "timing_condition_overlap_ms": 9846861,
+          "timing_condition_union_ms": 229786187,
+          "window_ms": 259200000
+        },
+        "receive_interval_at_or_above": 11988,
+        "receive_interval_denominator": 239590,
+        "receive_interval_exceed_fraction": 0.05003547727367586,
+        "receive_silence_ms": 1688
+      },
+      {
+        "daily_by_utc_start_ms": {
+          "1788912000000": {
+            "event_age_condition_ms": 57809348,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 54474861,
+              "ReceiveSilence": 3334487,
+              "UnknownBusinessProgress": 2228
+            },
+            "healthy_ms": 28588424,
+            "receive_silence_condition_ms": 3334487,
+            "timing_condition_overlap_ms": 3334487,
+            "timing_condition_union_ms": 57809348,
+            "window_ms": 86400000
+          },
+          "1788998400000": {
+            "event_age_condition_ms": 44267198,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 40645992,
+              "ReceiveSilence": 3621206
+            },
+            "healthy_ms": 42132802,
+            "receive_silence_condition_ms": 3621206,
+            "timing_condition_overlap_ms": 3621206,
+            "timing_condition_union_ms": 44267198,
+            "window_ms": 86400000
+          },
+          "1789084800000": {
+            "event_age_condition_ms": 36234378,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 33343210,
+              "ReceiveSilence": 2891168
+            },
+            "healthy_ms": 50165622,
+            "receive_silence_condition_ms": 2891168,
+            "timing_condition_overlap_ms": 2891168,
+            "timing_condition_union_ms": 36234378,
+            "window_ms": 86400000
+          }
+        },
+        "event_age_at_or_above": 24037,
+        "event_age_denominator": 239591,
+        "event_age_exceed_fraction": 0.10032513742168946,
+        "event_delay_ms": 2140,
+        "overall": {
+          "event_age_condition_ms": 138310924,
+          "event_time_missing_evidence_ms": 0,
+          "first_failure_ms": {
+            "EventDelay": 128464063,
+            "ReceiveSilence": 9846861,
+            "UnknownBusinessProgress": 2228
+          },
+          "healthy_ms": 120886848,
+          "receive_silence_condition_ms": 9846861,
+          "timing_condition_overlap_ms": 9846861,
+          "timing_condition_union_ms": 138310924,
+          "window_ms": 259200000
+        },
+        "receive_interval_at_or_above": 11988,
+        "receive_interval_denominator": 239590,
+        "receive_interval_exceed_fraction": 0.05003547727367586,
+        "receive_silence_ms": 1688
+      },
+      {
+        "daily_by_utc_start_ms": {
+          "1788912000000": {
+            "event_age_condition_ms": 48022636,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 44688149,
+              "ReceiveSilence": 3334487,
+              "UnknownBusinessProgress": 2228
+            },
+            "healthy_ms": 38375136,
+            "receive_silence_condition_ms": 3334487,
+            "timing_condition_overlap_ms": 3334487,
+            "timing_condition_union_ms": 48022636,
+            "window_ms": 86400000
+          },
+          "1788998400000": {
+            "event_age_condition_ms": 34006003,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 30384797,
+              "ReceiveSilence": 3621206
+            },
+            "healthy_ms": 52393997,
+            "receive_silence_condition_ms": 3621206,
+            "timing_condition_overlap_ms": 3621206,
+            "timing_condition_union_ms": 34006003,
+            "window_ms": 86400000
+          },
+          "1789084800000": {
+            "event_age_condition_ms": 26171569,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 23280401,
+              "ReceiveSilence": 2891168
+            },
+            "healthy_ms": 60228431,
+            "receive_silence_condition_ms": 2891168,
+            "timing_condition_overlap_ms": 2891168,
+            "timing_condition_union_ms": 26171569,
+            "window_ms": 86400000
+          }
+        },
+        "event_age_at_or_above": 12001,
+        "event_age_denominator": 239591,
+        "event_age_exceed_fraction": 0.05008952756990037,
+        "event_delay_ms": 2291,
+        "overall": {
+          "event_age_condition_ms": 108200208,
+          "event_time_missing_evidence_ms": 0,
+          "first_failure_ms": {
+            "EventDelay": 98353347,
+            "ReceiveSilence": 9846861,
+            "UnknownBusinessProgress": 2228
+          },
+          "healthy_ms": 150997564,
+          "receive_silence_condition_ms": 9846861,
+          "timing_condition_overlap_ms": 9846861,
+          "timing_condition_union_ms": 108200208,
+          "window_ms": 259200000
+        },
+        "receive_interval_at_or_above": 11988,
+        "receive_interval_denominator": 239590,
+        "receive_interval_exceed_fraction": 0.05003547727367586,
+        "receive_silence_ms": 1688
+      },
+      {
+        "daily_by_utc_start_ms": {
+          "1788912000000": {
+            "event_age_condition_ms": 29736491,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 26402004,
+              "ReceiveSilence": 3334487,
+              "UnknownBusinessProgress": 2228
+            },
+            "healthy_ms": 56661281,
+            "receive_silence_condition_ms": 3334487,
+            "timing_condition_overlap_ms": 3334487,
+            "timing_condition_union_ms": 29736491,
+            "window_ms": 86400000
+          },
+          "1788998400000": {
+            "event_age_condition_ms": 17963612,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 14342433,
+              "ReceiveSilence": 3621206
+            },
+            "healthy_ms": 68436361,
+            "receive_silence_condition_ms": 3621206,
+            "timing_condition_overlap_ms": 3621179,
+            "timing_condition_union_ms": 17963639,
+            "window_ms": 86400000
+          },
+          "1789084800000": {
+            "event_age_condition_ms": 12235582,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 9344453,
+              "ReceiveSilence": 2891168
+            },
+            "healthy_ms": 74164379,
+            "receive_silence_condition_ms": 2891168,
+            "timing_condition_overlap_ms": 2891129,
+            "timing_condition_union_ms": 12235621,
+            "window_ms": 86400000
+          }
+        },
+        "event_age_at_or_above": 2398,
+        "event_age_denominator": 239591,
+        "event_age_exceed_fraction": 0.010008723199118498,
+        "event_delay_ms": 2584,
+        "overall": {
+          "event_age_condition_ms": 59935685,
+          "event_time_missing_evidence_ms": 0,
+          "first_failure_ms": {
+            "EventDelay": 50088890,
+            "ReceiveSilence": 9846861,
+            "UnknownBusinessProgress": 2228
+          },
+          "healthy_ms": 199262021,
+          "receive_silence_condition_ms": 9846861,
+          "timing_condition_overlap_ms": 9846795,
+          "timing_condition_union_ms": 59935751,
+          "window_ms": 259200000
+        },
+        "receive_interval_at_or_above": 11988,
+        "receive_interval_denominator": 239590,
+        "receive_interval_exceed_fraction": 0.05003547727367586,
+        "receive_silence_ms": 1688
+      },
+      {
+        "daily_by_utc_start_ms": {
+          "1788912000000": {
+            "event_age_condition_ms": 81540604,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 79429281,
+              "ReceiveSilence": 2111323,
+              "UnknownBusinessProgress": 2228
+            },
+            "healthy_ms": 4857168,
+            "receive_silence_condition_ms": 2111323,
+            "timing_condition_overlap_ms": 2111323,
+            "timing_condition_union_ms": 81540604,
+            "window_ms": 86400000
+          },
+          "1788998400000": {
+            "event_age_condition_ms": 76188302,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 73406632,
+              "ReceiveSilence": 2781670
+            },
+            "healthy_ms": 10211698,
+            "receive_silence_condition_ms": 2781670,
+            "timing_condition_overlap_ms": 2781670,
+            "timing_condition_union_ms": 76188302,
+            "window_ms": 86400000
+          },
+          "1789084800000": {
+            "event_age_condition_ms": 72057281,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 69726921,
+              "ReceiveSilence": 2330360
+            },
+            "healthy_ms": 14342719,
+            "receive_silence_condition_ms": 2330360,
+            "timing_condition_overlap_ms": 2330360,
+            "timing_condition_union_ms": 72057281,
+            "window_ms": 86400000
+          }
+        },
+        "event_age_at_or_above": 120063,
+        "event_age_denominator": 239591,
+        "event_age_exceed_fraction": 0.5011164860115781,
+        "event_delay_ms": 1614,
+        "overall": {
+          "event_age_condition_ms": 229786187,
+          "event_time_missing_evidence_ms": 0,
+          "first_failure_ms": {
+            "EventDelay": 222562834,
+            "ReceiveSilence": 7223353,
+            "UnknownBusinessProgress": 2228
+          },
+          "healthy_ms": 29411585,
+          "receive_silence_condition_ms": 7223353,
+          "timing_condition_overlap_ms": 7223353,
+          "timing_condition_union_ms": 229786187,
+          "window_ms": 259200000
+        },
+        "receive_interval_at_or_above": 2403,
+        "receive_interval_denominator": 239590,
+        "receive_interval_exceed_fraction": 0.010029633958011604,
+        "receive_silence_ms": 2138
+      },
+      {
+        "daily_by_utc_start_ms": {
+          "1788912000000": {
+            "event_age_condition_ms": 57809348,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 55698025,
+              "ReceiveSilence": 2111323,
+              "UnknownBusinessProgress": 2228
+            },
+            "healthy_ms": 28588424,
+            "receive_silence_condition_ms": 2111323,
+            "timing_condition_overlap_ms": 2111323,
+            "timing_condition_union_ms": 57809348,
+            "window_ms": 86400000
+          },
+          "1788998400000": {
+            "event_age_condition_ms": 44267198,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 41485528,
+              "ReceiveSilence": 2781670
+            },
+            "healthy_ms": 42132802,
+            "receive_silence_condition_ms": 2781670,
+            "timing_condition_overlap_ms": 2781670,
+            "timing_condition_union_ms": 44267198,
+            "window_ms": 86400000
+          },
+          "1789084800000": {
+            "event_age_condition_ms": 36234378,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 33904018,
+              "ReceiveSilence": 2330360
+            },
+            "healthy_ms": 50165622,
+            "receive_silence_condition_ms": 2330360,
+            "timing_condition_overlap_ms": 2330360,
+            "timing_condition_union_ms": 36234378,
+            "window_ms": 86400000
+          }
+        },
+        "event_age_at_or_above": 24037,
+        "event_age_denominator": 239591,
+        "event_age_exceed_fraction": 0.10032513742168946,
+        "event_delay_ms": 2140,
+        "overall": {
+          "event_age_condition_ms": 138310924,
+          "event_time_missing_evidence_ms": 0,
+          "first_failure_ms": {
+            "EventDelay": 131087571,
+            "ReceiveSilence": 7223353,
+            "UnknownBusinessProgress": 2228
+          },
+          "healthy_ms": 120886848,
+          "receive_silence_condition_ms": 7223353,
+          "timing_condition_overlap_ms": 7223353,
+          "timing_condition_union_ms": 138310924,
+          "window_ms": 259200000
+        },
+        "receive_interval_at_or_above": 2403,
+        "receive_interval_denominator": 239590,
+        "receive_interval_exceed_fraction": 0.010029633958011604,
+        "receive_silence_ms": 2138
+      },
+      {
+        "daily_by_utc_start_ms": {
+          "1788912000000": {
+            "event_age_condition_ms": 48022636,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 45911313,
+              "ReceiveSilence": 2111323,
+              "UnknownBusinessProgress": 2228
+            },
+            "healthy_ms": 38375136,
+            "receive_silence_condition_ms": 2111323,
+            "timing_condition_overlap_ms": 2111323,
+            "timing_condition_union_ms": 48022636,
+            "window_ms": 86400000
+          },
+          "1788998400000": {
+            "event_age_condition_ms": 34006003,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 31224333,
+              "ReceiveSilence": 2781670
+            },
+            "healthy_ms": 52393997,
+            "receive_silence_condition_ms": 2781670,
+            "timing_condition_overlap_ms": 2781670,
+            "timing_condition_union_ms": 34006003,
+            "window_ms": 86400000
+          },
+          "1789084800000": {
+            "event_age_condition_ms": 26171569,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 23841209,
+              "ReceiveSilence": 2330360
+            },
+            "healthy_ms": 60228431,
+            "receive_silence_condition_ms": 2330360,
+            "timing_condition_overlap_ms": 2330360,
+            "timing_condition_union_ms": 26171569,
+            "window_ms": 86400000
+          }
+        },
+        "event_age_at_or_above": 12001,
+        "event_age_denominator": 239591,
+        "event_age_exceed_fraction": 0.05008952756990037,
+        "event_delay_ms": 2291,
+        "overall": {
+          "event_age_condition_ms": 108200208,
+          "event_time_missing_evidence_ms": 0,
+          "first_failure_ms": {
+            "EventDelay": 100976855,
+            "ReceiveSilence": 7223353,
+            "UnknownBusinessProgress": 2228
+          },
+          "healthy_ms": 150997564,
+          "receive_silence_condition_ms": 7223353,
+          "timing_condition_overlap_ms": 7223353,
+          "timing_condition_union_ms": 108200208,
+          "window_ms": 259200000
+        },
+        "receive_interval_at_or_above": 2403,
+        "receive_interval_denominator": 239590,
+        "receive_interval_exceed_fraction": 0.010029633958011604,
+        "receive_silence_ms": 2138
+      },
+      {
+        "daily_by_utc_start_ms": {
+          "1788912000000": {
+            "event_age_condition_ms": 29736491,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 27625168,
+              "ReceiveSilence": 2111323,
+              "UnknownBusinessProgress": 2228
+            },
+            "healthy_ms": 56661281,
+            "receive_silence_condition_ms": 2111323,
+            "timing_condition_overlap_ms": 2111323,
+            "timing_condition_union_ms": 29736491,
+            "window_ms": 86400000
+          },
+          "1788998400000": {
+            "event_age_condition_ms": 17963612,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 15181942,
+              "ReceiveSilence": 2781670
+            },
+            "healthy_ms": 68436388,
+            "receive_silence_condition_ms": 2781670,
+            "timing_condition_overlap_ms": 2781670,
+            "timing_condition_union_ms": 17963612,
+            "window_ms": 86400000
+          },
+          "1789084800000": {
+            "event_age_condition_ms": 12235582,
+            "event_time_missing_evidence_ms": 0,
+            "first_failure_ms": {
+              "EventDelay": 9905222,
+              "ReceiveSilence": 2330360
+            },
+            "healthy_ms": 74164418,
+            "receive_silence_condition_ms": 2330360,
+            "timing_condition_overlap_ms": 2330360,
+            "timing_condition_union_ms": 12235582,
+            "window_ms": 86400000
+          }
+        },
+        "event_age_at_or_above": 2398,
+        "event_age_denominator": 239591,
+        "event_age_exceed_fraction": 0.010008723199118498,
+        "event_delay_ms": 2584,
+        "overall": {
+          "event_age_condition_ms": 59935685,
+          "event_time_missing_evidence_ms": 0,
+          "first_failure_ms": {
+            "EventDelay": 52712332,
+            "ReceiveSilence": 7223353,
+            "UnknownBusinessProgress": 2228
+          },
+          "healthy_ms": 199262087,
+          "receive_silence_condition_ms": 7223353,
+          "timing_condition_overlap_ms": 7223353,
+          "timing_condition_union_ms": 59935685,
+          "window_ms": 259200000
+        },
+        "receive_interval_at_or_above": 2403,
+        "receive_interval_denominator": 239590,
+        "receive_interval_exceed_fraction": 0.010029633958011604,
+        "receive_silence_ms": 2138
+      }
+    ],
+    "capture_verified_before_open": {
+      "bytes": 51637053,
+      "sha256": "4ca8002d7b0b5479a1cb6b208a732ac1ea57ede404d79880b0dfca845bcde8fd"
+    },
+    "condition_method": "静默/事件条件仅用已有消息且recv<=frontier、event缺失或event<=recv；缺event年龄不可计算，不当零；独立条件可重叠，union不重复；first_failure沿共享生产优先级互斥对账",
+    "counts": {
+      "applied_inputs": 239592,
+      "closed_groups": 239591,
+      "connection_generation_unknown": 239591,
+      "cross_midnight_received_intervals": 2,
+      "end_inputs": 1,
+      "event_after_receive": 0,
+      "missing_event": 0,
+      "negative_received_intervals": 0,
+      "observations": 0,
+      "progress_unchanged": 0,
+      "progress_updates": 239591,
+      "receive_after_visible_frontier": 0,
+      "reference_anomalies": {},
+      "reference_facts": 239591,
+      "same_millisecond_received": 20,
+      "same_value_valid_updates": 2097,
+      "synchronization_unknown": 239591,
+      "valid_message_updates": 239591
+    },
+    "cross_midnight_intervals": [
+      {
+        "left": {
+          "input_position": 76904,
+          "observed_message_timestamp_utc_ms": 1788998399531,
+          "received_at_utc_ms": 1788998399737,
+          "source_event_at_utc_ms": 1788998397000,
+          "source_message_id": "0c13dc29fd77afbe57685ef8b4450d4f0a000b440c4f1006dc0a7b31d653309e",
+          "visible_frontier_utc_ms": 1788998399737
+        },
+        "received_interval_ms": 3640,
+        "right": {
+          "input_position": 76905,
+          "observed_message_timestamp_utc_ms": 1788998400683,
+          "received_at_utc_ms": 1788998403377,
+          "source_event_at_utc_ms": 1788998399000,
+          "source_message_id": "2aaa2863d22ea65f3ff62c2c7ad89c73f245147066695192769ecf9744884bd2",
+          "visible_frontier_utc_ms": 1788998403377
+        }
+      },
+      {
+        "left": {
+          "input_position": 157146,
+          "observed_message_timestamp_utc_ms": 1789084798960,
+          "received_at_utc_ms": 1789084799271,
+          "source_event_at_utc_ms": 1789084797000,
+          "source_message_id": "9d3db26d2198bacaf348bd26ee433d6a02de38c3d88f685dcb6ffa87cf0db493",
+          "visible_frontier_utc_ms": 1789084799271
+        },
+        "received_interval_ms": 5138,
+        "right": {
+          "input_position": 157147,
+          "observed_message_timestamp_utc_ms": 1789084802053,
+          "received_at_utc_ms": 1789084804409,
+          "source_event_at_utc_ms": 1789084800000,
+          "source_message_id": "7e7ad4f255b9ed1417b9e4674fe2c7a06ce5f8385219b8460aa2c2812cefbb61",
+          "visible_frontier_utc_ms": 1789084804409
+        }
+      }
+    ],
+    "daily_counts_by_visible_utc_start_ms": {
+      "1788912000000": {
+        "applied_inputs": 76905,
+        "closed_groups": 76905,
+        "connection_generation_unknown": 76905,
+        "cross_midnight_received_intervals": 0,
+        "end_inputs": 0,
+        "event_after_receive": 0,
+        "missing_event": 0,
+        "negative_received_intervals": 0,
+        "observations": 0,
+        "progress_unchanged": 0,
+        "progress_updates": 76905,
+        "receive_after_visible_frontier": 0,
+        "reference_anomalies": {},
+        "reference_facts": 76905,
+        "same_millisecond_received": 5,
+        "same_value_valid_updates": 597,
+        "synchronization_unknown": 76905,
+        "valid_message_updates": 76905
+      },
+      "1788998400000": {
+        "applied_inputs": 80242,
+        "closed_groups": 80242,
+        "connection_generation_unknown": 80242,
+        "cross_midnight_received_intervals": 1,
+        "end_inputs": 0,
+        "event_after_receive": 0,
+        "missing_event": 0,
+        "negative_received_intervals": 0,
+        "observations": 0,
+        "progress_unchanged": 0,
+        "progress_updates": 80242,
+        "receive_after_visible_frontier": 0,
+        "reference_anomalies": {},
+        "reference_facts": 80242,
+        "same_millisecond_received": 12,
+        "same_value_valid_updates": 672,
+        "synchronization_unknown": 80242,
+        "valid_message_updates": 80242
+      },
+      "1789084800000": {
+        "applied_inputs": 82445,
+        "closed_groups": 82444,
+        "connection_generation_unknown": 82444,
+        "cross_midnight_received_intervals": 1,
+        "end_inputs": 1,
+        "event_after_receive": 0,
+        "missing_event": 0,
+        "negative_received_intervals": 0,
+        "observations": 0,
+        "progress_unchanged": 0,
+        "progress_updates": 82444,
+        "receive_after_visible_frontier": 0,
+        "reference_anomalies": {},
+        "reference_facts": 82444,
+        "same_millisecond_received": 3,
+        "same_value_valid_updates": 828,
+        "synchronization_unknown": 82444,
+        "valid_message_updates": 82444
+      }
+    },
+    "eof": true,
+    "first_valid_update": {
+      "input_position": 0,
+      "observed_message_timestamp_utc_ms": 1788912000458,
+      "received_at_utc_ms": 1788912002228,
+      "source_event_at_utc_ms": 1788911999000,
+      "source_message_id": "18be95d3330b84769a79e8d595e00b698188291a61549ae9eaf42346c7518217",
+      "visible_frontier_utc_ms": 1788912002228
+    },
+    "last_valid_update": {
+      "input_position": 239590,
+      "observed_message_timestamp_utc_ms": 1789171198356,
+      "received_at_utc_ms": 1789171198526,
+      "source_event_at_utc_ms": 1789171197000,
+      "source_message_id": "48c46cf6a297c3d06eac59e5b1e239c141a41f6de1129427115186cb94e6473a",
+      "visible_frontier_utc_ms": 1789171198526
+    },
+    "last_visible_frontier_utc_ms": 1789171198526,
+    "limitations": "同折Chainlink来源描述；连接/同步缺证据保持未知；未运行市场/策略/账户/收益/六源；文本gaps不推精确断连；末次确认后的延伸是原最后进展的条件分析，不是新确认或交易可用证明",
+    "longest_received_intervals": [
+      [
+        367399,
+        {
+          "left": {
+            "input_position": 179971,
+            "observed_message_timestamp_utc_ms": 1789109188990,
+            "received_at_utc_ms": 1789109189309,
+            "source_event_at_utc_ms": 1789109188000,
+            "source_message_id": "ddad2d960265f4d43c4119d5a703f9357bc4fed7055a238ad7a6ba1c92e820c8",
+            "visible_frontier_utc_ms": 1789109189309
+          },
+          "received_interval_ms": 367399,
+          "right": {
+            "input_position": 179972,
+            "observed_message_timestamp_utc_ms": 1789109556352,
+            "received_at_utc_ms": 1789109556708,
+            "source_event_at_utc_ms": 1789109555000,
+            "source_message_id": "41e58e1b9f741ae39f89543b0fd24cd3314c2450f11561e8ad951e9b988e2a50",
+            "visible_frontier_utc_ms": 1789109556708
+          }
+        }
+      ],
+      [
+        351081,
+        {
+          "left": {
+            "input_position": 78357,
+            "observed_message_timestamp_utc_ms": 1789000001742,
+            "received_at_utc_ms": 1789000002200,
+            "source_event_at_utc_ms": 1789000000000,
+            "source_message_id": "0499d7e441ed4c65f952cdc1bd03d6d354ebd1dc50df0f236d90229c53b913c7",
+            "visible_frontier_utc_ms": 1789000002200
+          },
+          "received_interval_ms": 351081,
+          "right": {
+            "input_position": 78358,
+            "observed_message_timestamp_utc_ms": 1789000352861,
+            "received_at_utc_ms": 1789000353281,
+            "source_event_at_utc_ms": 1789000352000,
+            "source_message_id": "b2d594f50e1ba35d24eede1c4a81439de6539c1f121977a074f7e71c94cb72aa",
+            "visible_frontier_utc_ms": 1789000353281
+          }
+        }
+      ],
+      [
+        347428,
+        {
+          "left": {
+            "input_position": 166304,
+            "observed_message_timestamp_utc_ms": 1789094838778,
+            "received_at_utc_ms": 1789094839148,
+            "source_event_at_utc_ms": 1789094837000,
+            "source_message_id": "c6bccd19a847e28fcdbab28f185e43ea9b9e9809c9722432feab90e0b7529332",
+            "visible_frontier_utc_ms": 1789094839148
+          },
+          "received_interval_ms": 347428,
+          "right": {
+            "input_position": 166305,
+            "observed_message_timestamp_utc_ms": 1789095186215,
+            "received_at_utc_ms": 1789095186576,
+            "source_event_at_utc_ms": 1789095185000,
+            "source_message_id": "0af715972e23e672fd718bf0042246317d9ccd325fa6c25389b5c15eaba89e6d",
+            "visible_frontier_utc_ms": 1789095186576
+          }
+        }
+      ],
+      [
+        344926,
+        {
+          "left": {
+            "input_position": 164671,
+            "observed_message_timestamp_utc_ms": 1789092821988,
+            "received_at_utc_ms": 1789092822391,
+            "source_event_at_utc_ms": 1789092821000,
+            "source_message_id": "e79e1dc4677bcbf51ced31ad45d9310fb5b968917884d0a6a99210545a417cba",
+            "visible_frontier_utc_ms": 1789092822391
+          },
+          "received_interval_ms": 344926,
+          "right": {
+            "input_position": 164672,
+            "observed_message_timestamp_utc_ms": 1789093166973,
+            "received_at_utc_ms": 1789093167317,
+            "source_event_at_utc_ms": 1789093166000,
+            "source_message_id": "44f7993e7fd8f36ed3a9c3bb068371723adb36520de15d4653c1e23e57744f78",
+            "visible_frontier_utc_ms": 1789093167317
+          }
+        }
+      ],
+      [
+        342588,
+        {
+          "left": {
+            "input_position": 79623,
+            "observed_message_timestamp_utc_ms": 1789002064056,
+            "received_at_utc_ms": 1789002064446,
+            "source_event_at_utc_ms": 1789002063000,
+            "source_message_id": "b0159fefa767fbdf3a0810d908c755bf834f0d02a30d22fd32f98ea999345bae",
+            "visible_frontier_utc_ms": 1789002064446
+          },
+          "received_interval_ms": 342588,
+          "right": {
+            "input_position": 79624,
+            "observed_message_timestamp_utc_ms": 1789002406600,
+            "received_at_utc_ms": 1789002407034,
+            "source_event_at_utc_ms": 1789002405000,
+            "source_message_id": "e56c4ccfcf5429157bf4c2ad8ba6643232040360771ce8570d1493a3e0d32ced",
+            "visible_frontier_utc_ms": 1789002407034
+          }
+        }
+      ],
+      [
+        341104,
+        {
+          "left": {
+            "input_position": 79454,
+            "observed_message_timestamp_utc_ms": 1789001545451,
+            "received_at_utc_ms": 1789001545846,
+            "source_event_at_utc_ms": 1789001543000,
+            "source_message_id": "5f9ff9885b8a290984edc93d870a85f0661ddf0db262e9cb1b54cfeaff7f6e5b",
+            "visible_frontier_utc_ms": 1789001545846
+          },
+          "received_interval_ms": 341104,
+          "right": {
+            "input_position": 79455,
+            "observed_message_timestamp_utc_ms": 1789001886635,
+            "received_at_utc_ms": 1789001886950,
+            "source_event_at_utc_ms": 1789001885000,
+            "source_message_id": "34928a40355d0f6c2e148a22110c950b90c25131388abc64a33a9a4a8d7b7c67",
+            "visible_frontier_utc_ms": 1789001886950
+          }
+        }
+      ],
+      [
+        302146,
+        {
+          "left": {
+            "input_position": 92012,
+            "observed_message_timestamp_utc_ms": 1789016158124,
+            "received_at_utc_ms": 1789016158442,
+            "source_event_at_utc_ms": 1789016157000,
+            "source_message_id": "da9e1540f5c18571907f63a79e86de3e023c215b9397dc066369fd9c1bf66cff",
+            "visible_frontier_utc_ms": 1789016158442
+          },
+          "received_interval_ms": 302146,
+          "right": {
+            "input_position": 92013,
+            "observed_message_timestamp_utc_ms": 1789016460407,
+            "received_at_utc_ms": 1789016460588,
+            "source_event_at_utc_ms": 1789016459000,
+            "source_message_id": "ede741b2a0b2d7b90bff5dd25f84c9e7c0e10138dbe1ad55b5a2029897b43d27",
+            "visible_frontier_utc_ms": 1789016460588
+          }
+        }
+      ],
+      [
+        301793,
+        {
+          "left": {
+            "input_position": 83649,
+            "observed_message_timestamp_utc_ms": 1789006829208,
+            "received_at_utc_ms": 1789006829376,
+            "source_event_at_utc_ms": 1789006828000,
+            "source_message_id": "248cc21de6e4374ac14313c4479a742b4ad6a03a53cc3f5765bb82b2a5f536be",
+            "visible_frontier_utc_ms": 1789006829376
+          },
+          "received_interval_ms": 301793,
+          "right": {
+            "input_position": 83650,
+            "observed_message_timestamp_utc_ms": 1789007130840,
+            "received_at_utc_ms": 1789007131169,
+            "source_event_at_utc_ms": 1789007129000,
+            "source_message_id": "e2aca5f6c92e4838a9c4b7d19908eb23a63b7612fb232074f8e308415ee72612",
+            "visible_frontier_utc_ms": 1789007131169
+          }
+        }
+      ],
+      [
+        301585,
+        {
+          "left": {
+            "input_position": 34095,
+            "observed_message_timestamp_utc_ms": 1788949331336,
+            "received_at_utc_ms": 1788949331638,
+            "source_event_at_utc_ms": 1788949330000,
+            "source_message_id": "ca625bd66eeb59c979483e6d035eee459df435da312bb3e8c0d6dc3434ae73fa",
+            "visible_frontier_utc_ms": 1788949331638
+          },
+          "received_interval_ms": 301585,
+          "right": {
+            "input_position": 34096,
+            "observed_message_timestamp_utc_ms": 1788949633032,
+            "received_at_utc_ms": 1788949633223,
+            "source_event_at_utc_ms": 1788949632000,
+            "source_message_id": "75c693e2a92c1c2ad1c21f4ae968a508ae0f85f40f18c5df921b977aec93fd7b",
+            "visible_frontier_utc_ms": 1788949633223
+          }
+        }
+      ],
+      [
+        301486,
+        {
+          "left": {
+            "input_position": 150413,
+            "observed_message_timestamp_utc_ms": 1789077591196,
+            "received_at_utc_ms": 1789077591598,
+            "source_event_at_utc_ms": 1789077590000,
+            "source_message_id": "dca0e4689d9567ed4f3502095c2206802b4b564879f873a158747a65d56ef1c6",
+            "visible_frontier_utc_ms": 1789077591598
+          },
+          "received_interval_ms": 301486,
+          "right": {
+            "input_position": 150414,
+            "observed_message_timestamp_utc_ms": 1789077892722,
+            "received_at_utc_ms": 1789077893084,
+            "source_event_at_utc_ms": 1789077891000,
+            "source_message_id": "35f69198efcf999211ac07333eee4aa460a35be7ad9f9c5211d3b7c4a2b48023",
+            "visible_frontier_utc_ms": 1789077893084
+          }
+        }
+      ]
+    ],
+    "normal_end": true,
+    "prefix": {
+      "input_stream_id": "complementary-pair-chainlink-initial-fit-20260909-20260912",
+      "next_canonical_position": 239591,
+      "next_group_position": 239591,
+      "next_input_position": 239592,
+      "next_observation_position": 0,
+      "next_public_index_position": 239591,
+      "normal_end": true,
+      "stable_storage_ref": "stable-00000000000000000000"
+    },
+    "quantile_method": "排序非负有效样本；秩ceil(p*n)，1起算；p50/p90/p95/p99；去重笛卡尔积最多16对；零不加1；最大值仅尾部诊断",
+    "receive_interval": {
+      "inconsistent_excluded": 0,
+      "maximum_ms": 367399,
+      "missing": 0,
+      "negative": 0,
+      "quantiles_ms": {
+        "p50": 985,
+        "p90": 1516,
+        "p95": 1688,
+        "p99": 2138
+      },
+      "valid_nonnegative_samples": 239590
+    },
+    "receive_to_source_event_lag": {
+      "inconsistent_excluded": 0,
+      "maximum_ms": 16435,
+      "missing": 0,
+      "negative": 0,
+      "quantiles_ms": {
+        "p50": 1614,
+        "p90": 2140,
+        "p95": 2291,
+        "p99": 2584
+      },
+      "valid_nonnegative_samples": 239591
+    },
+    "segments": 239572,
+    "time_method": "固定半开UTC窗口；原group visible的单调max；输入应用后读取，不用sigma接纳点；无消息区间依据最近公共进展，End只封口；UTC交集分桶，跨日不重置",
+    "unconfirmed_tail_after_last_receive_ms": 1474,
+    "visible_frontier_to_event_age": {
+      "inconsistent_excluded": 0,
+      "maximum_ms": 16435,
+      "missing": 0,
+      "negative": 0,
+      "quantiles_ms": {
+        "p50": 1614,
+        "p90": 2140,
+        "p95": 2291,
+        "p99": 2584
+      },
+      "valid_nonnegative_samples": 239591
+    }
+  },
+  "resources": {
+    "gnu_time": {
+      "wall_seconds": 2.84,
+      "user_seconds": 2.53,
+      "system_seconds": 0.15,
+      "cpu_percent": 94,
+      "max_rss_kib": 29392,
+      "major_page_faults": 0,
+      "minor_page_faults": 166181,
+      "filesystem_inputs_raw": 0,
+      "filesystem_outputs_raw": 74547,
+      "exit_status": 0
+    },
+    "program_elapsed_seconds": 2.8397027870000002,
+    "process_io_before": "rchar: 27282\nwchar: 0\nsyscr: 16\nsyscw: 0\nread_bytes: 0\nwrite_bytes: 0\ncancelled_write_bytes: 0\n",
+    "process_io_after_before_result_write": "rchar: 131727284\nwchar: 38093582\nsyscr: 10619\nsyscw: 5048\nread_bytes: 0\nwrite_bytes: 38093582\ncancelled_write_bytes: 0\n",
+    "output_files": [
+      {
+        "path": "one-replay/result.private.json",
+        "logical_bytes": 74660,
+        "allocated_bytes": 77824,
+        "sha256": "e501e952bfd9e782deddacc5a63d2b5ba23d503810d17086497c04058f96f216"
+      },
+      {
+        "path": "one-replay/segments.jsonl",
+        "logical_bytes": 38091838,
+        "allocated_bytes": 38092800,
+        "sha256": "d18a3c849852f88cbbdef9ddadfa006edb84caa0320329c8d544d25567077198"
+      }
+    ],
+    "output_total_logical_bytes": 38166498,
+    "output_total_allocated_bytes": 38170624,
+    "measurement_scope": "整轮包括原捕获摘要核验、原PublicReplay、公共投影、区间/候选分析及输出；不独立归因健康检查成本。I/O受缓存及文件系统影响，0 read_bytes不表示未读输入。/proc after在最终result写出前，GNUtime包含进程全程。"
+  },
+  "verification": {
+    "implementation_head": "75e6bccd36c4819d535d7e385085232cb36fd08d",
+    "base": "765844ab809f3a9567a26eedd28e814a1cb05e88",
+    "source_sha256": {
+      "baseline-mm/README.md": "6681b1644065f5446903e5b08b96697b52f6addba9e7208e56944643c8d5f296",
+      "baseline-mm/examples/research_source_health.rs": "7b0cf931047a706d624baa5cb0dfe67c3b875ad131942fda5d0793b1ac6daf2c",
+      "baseline-mm/src/strategies/complementary_pair/health.rs": "931bc1352445278abd8d9a7b7f0af3796ce0d3378862c85713d86920533b8b3f",
+      "baseline-mm/src/strategies/complementary_pair/mod.rs": "49b90e86557150ac9ddd25ecf1c1d50db2a9a11c4a6d90e72061559737598d3c",
+      "data-pipeline/core/src/public_observation_core.rs": "39f16972861ee25f2fca36f3c02b3042b6c24aad4b66e4406374142e3b0de338"
+    },
+    "cargo_lock_sha256": "80325c8fccddaf04c6b91dd8a21a32d57ea0ed1864ae5eeb8bde1a6167e2e943",
+    "commands": [
+      {
+        "log": "workspace-final-2.log",
+        "command": "cargo test --workspace --lib --bins --tests --examples --locked --offline -- --skip four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second",
+        "exit": 0,
+        "version": "75e6bccd36c4819d535d7e385085232cb36fd08d",
+        "targets": 105,
+        "passed": 1358,
+        "failed": 0,
+        "ignored": 23,
+        "explicit_utc_skip": "four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second"
+      },
+      {
+        "log": "clippy-final-2.log",
+        "command": "cargo clippy --workspace --all-targets --locked --offline",
+        "exit": 0,
+        "version": "75e6bccd36c4819d535d7e385085232cb36fd08d",
+        "warnings": "repository existing warnings retained; two new implementation lint suggestions removed"
+      },
+      {
+        "log": "fmt-final-2.log",
+        "command": "cargo fmt --all -- --check",
+        "exit": 0,
+        "version": "75e6bccd36c4819d535d7e385085232cb36fd08d"
+      },
+      {
+        "log": "diff-final-2.log",
+        "command": "git diff --check",
+        "exit": 0,
+        "version": "75e6bccd36c4819d535d7e385085232cb36fd08d"
+      }
+    ],
+    "method_fixed_before_true_replay": "README and committed research_source_health.rs; ceil(p*n), >=, zero unchanged, <=16 unique Cartesian, original shared policy first failure and independent timing union",
+    "earlier_version_evidence": "verification-implementation.json; not overwritten"
+  },
+  "evidence_relative_root": "issue-185/source-health-research-20261005",
+  "interpretation": {
+    "candidate_status": "同折描述性候选，不采纳任何正式阈值",
+    "p99_pair_health_fraction": 0.7687580516975309,
+    "continuous_clock_note": "到达样本p99不等于连续时钟99%健康覆盖，消息间隙事件年龄继续增长。p99对联合时长不是网络断线率、误报率或交易机会损失。",
+    "unknown_connection": "全239591次公共进展connection_generation缺失、synchronization Unknown；生产判断未将Unknown等同已知重同步，研究也不声明连接健康。",
+    "source_quality": "原selection_evidence的gaps/source_counters/collection_day_coverage完整保留；文本缺口不推断精确断网区间。",
+    "future_work": "其他来源、完整市场、后折概率/成本/风险校准及经营回测仍待准确分配；正式阈值由用户据候选与取舍审定。"
+  }
+}
