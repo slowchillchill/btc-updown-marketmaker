@@ -213,7 +213,7 @@
         "status": 200
       }
     ],
-    "environment": "实际/usr/bin/google-chrome headless，1600×1150；两完整研究配置仅用于独立入口比较，原schema未知/损坏副本仅测试。"
+    "environment": "实际本机现有 Chrome headless，1600×1150；两完整研究配置仅用于独立入口比较，原schema未知/损坏副本仅测试。"
   },
   "frontend_build": {
     "javascript_bytes": 1037868,
