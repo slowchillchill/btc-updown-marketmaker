@@ -1,7 +1,7 @@
 use crate::statistics::HistoricalStatisticsCollectorV1;
 use crate::{HistoricalPreparationProgressV1, HistoricalStatisticsV1, MaterialError};
 use contracts::*;
-use data_pipeline_core::{public_input::*, public_observation_core::PublicObservationCoreV1};
+
 use data_pipeline_training::historical_preparation_progress::{
     HistoricalPreparationNotifierV1, HistoricalPreparationStageV1 as Stage,
 };
@@ -220,51 +220,36 @@ fn prepare_internal(
             p.stage(Stage::PublicApplicationStatisticsRecording);
         }
         let public_root = config.work_root.join("public");
-        let mut core = PublicObservationCoreV1::new(header.clone())?;
-        let mut writer =
-            PublicRecordingWriterV1::create(&public_root, &header, config.recording.clone())?;
-        while let Some(mut input) = merge.next_input()? {
-            if let Some(binding) = merge.initialization_binding() {
-                initialization.input_positions.insert(input.input_position);
-                initialization
-                    .source_message_ids
-                    .insert(binding.source_message_id.0.clone());
-                writer.record_source_binding(binding.clone())?;
-            }
-            let prepared = merge.prepare_input(&core, &mut input)?;
-            let applied = core.push(&prepared)?.into_owned();
-            if let Some(s) = &mut statistics {
-                for group in &applied.applied.closed_groups {
-                    s.observe(&input, group, &initialization);
+        let progress_cell = std::cell::RefCell::new(&mut progress);
+        let (core, _) = data_pipeline_training::finite_recording::record_historical_merge_v1(
+            &mut merge,
+            header,
+            &public_root,
+            config.recording.clone(),
+            |input, applied, binding| {
+                if let Some(binding) = binding {
+                    initialization.input_positions.insert(input.input_position);
+                    initialization
+                        .source_message_ids
+                        .insert(binding.source_message_id.0.clone());
                 }
-            }
-            if let Some(p) = &mut progress {
-                p.applied(&applied.applied);
-            }
-            writer.record(input, applied)?;
-        }
-        let mut end = RecordedIngressV1 {
-            input_stream_id: config.header.input_stream_id.clone(),
-            input_position: core.applied_prefix().next_input_position,
-            ingress: DptIngressV1::EndOfInput,
-            dependency_record_refs: vec![],
-        };
-        let prepared = merge.prepare_input(&core, &mut end)?;
-        let applied = core.push(&prepared)?.into_owned();
-        if let Some(s) = &mut statistics {
-            for group in &applied.applied.closed_groups {
-                s.observe(&end, group, &initialization);
-            }
-        }
-        if let Some(p) = &mut progress {
-            p.applied(&applied.applied);
-        }
-        writer.record(end, applied)?;
-        if let Some(p) = &mut progress {
-            p.stage(Stage::PublicStabilizeAndCatalog);
-        }
-        writer.stabilize()?;
-        drop(writer);
+                if let Some(applied) = applied {
+                    if let Some(s) = &mut statistics {
+                        for group in &applied.applied.closed_groups {
+                            s.observe(input, group, &initialization);
+                        }
+                    }
+                    if let Some(p) = &mut **progress_cell.borrow_mut() {
+                        p.applied(&applied.applied);
+                    }
+                }
+            },
+            || {
+                if let Some(p) = &mut **progress_cell.borrow_mut() {
+                    p.stage(Stage::PublicStabilizeAndCatalog);
+                }
+            },
+        )?;
         if config.metadata_initialization.is_some() {
             serde_json::to_writer(
                 std::fs::File::create(public_root.join("historical-initialization.json"))?,

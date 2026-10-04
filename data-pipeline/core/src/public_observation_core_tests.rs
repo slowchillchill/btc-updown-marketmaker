@@ -992,7 +992,12 @@ fn rtds_anomalies_do_not_replace_legal_price_or_its_signed_time() {
                     TypedRawRowV2::Existing(TypedRawRow::PolymarketRtdsChainlinkBtcUsd(row)),
                 ),
             );
+            assert_eq!(output.closed_groups.len(), 1);
             let group = &output.closed_groups[0];
+            assert_eq!(
+                core.current_chainlink_spot(),
+                &group.observations[0].chainlink_spot
+            );
             assert!(matches!(
                 group.records[0].payload,
                 PublicBusinessPayloadV1::ReferenceFact(
@@ -2477,4 +2482,52 @@ fn range_received_fast_path_avoids_final_encoding_but_retains_semantic_errors() 
         validated_received_at_from_typed_raw_v2(&bad),
         source_evidence_v3_from_typed_raw_v2(&bad).map(|s| s.received_at_utc_ms)
     );
+}
+
+#[test]
+fn marketless_rtds_input_exposes_only_its_current_complete_spot() {
+    let mut core = core();
+    let mut saved = None;
+    for (position, status, price) in [
+        (0, RtdsFreshnessStatus::Fresh, "65000"),
+        (1, RtdsFreshnessStatus::Stale, "65001"),
+    ] {
+        let mut row = twap_input(60).common;
+        row.schema_version = POLYMARKET_RTDS_CHAINLINK_BTC_USD_SCHEMA.into();
+        row.topic = "crypto_prices_chainlink".into();
+        row.value = price.into();
+        row.freshness_status = status;
+        row.timestamp_received += position as i64;
+        row.payload_timestamp = row.timestamp_received - 2;
+        row.age_ms = Some(2);
+        let applied = push(
+            &mut core,
+            &record(
+                position,
+                TypedRawRowV2::Existing(TypedRawRow::PolymarketRtdsChainlinkBtcUsd(row)),
+            ),
+        );
+        assert_eq!(applied.closed_groups.len(), 1);
+        let group = &applied.closed_groups[0];
+        assert!(group.observations.is_empty());
+        let current = core.current_chainlink_spot();
+        assert_eq!(current.value.as_ref().unwrap().price_usd_per_btc.0, price);
+        assert_eq!(
+            current.direct_anchors[0].position,
+            group.records[0].position
+        );
+        if position == 0 {
+            saved = Some(current.clone());
+        } else {
+            assert_ne!(saved.as_ref().unwrap(), current);
+        }
+    }
+    assert_eq!(saved.unwrap().value.unwrap().price_usd_per_btc.0, "65000");
+    let end = RecordedIngressV1 {
+        input_stream_id: "core-test".into(),
+        input_position: 2,
+        ingress: DptIngressV1::EndOfInput,
+        dependency_record_refs: vec![],
+    };
+    assert!(push(&mut core, &end).closed_groups.is_empty());
 }

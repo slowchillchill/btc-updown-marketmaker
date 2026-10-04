@@ -6,6 +6,8 @@ mod repair;
 mod types;
 pub use types::*;
 mod config;
+mod spot_statistics;
+pub use spot_statistics::*;
 mod probability;
 pub use config::*;
 pub use probability::*;
