@@ -468,6 +468,31 @@ pub struct PublicGroupDeliveryV1 {
     pub delivered_at_utc_ms: i64,
 }
 
+/// 原完整组首次来源可见时间；不选择消费宿主的执行时序。
+pub fn original_public_group_visible_at_utc_ms(
+    input: &data_pipeline_core::public_input::RecordedIngressV1,
+    group: &ClosedBusinessGroupV1,
+) -> i64 {
+    let input_available = match &input.ingress {
+        data_pipeline_core::public_input::DptIngressV1::Message {
+            source_evidence, ..
+        } => source_evidence
+            .collector_admission
+            .as_ref()
+            .map_or(source_evidence.received_at_utc_ms, |c| {
+                c.admitted_at_utc_ms.max(source_evidence.received_at_utc_ms)
+            }),
+        _ => i64::MIN,
+    };
+    group
+        .records
+        .iter()
+        .map(|fact| fact.dependency_time.received_at_utc_ms)
+        .chain(std::iter::once(input_available))
+        .max()
+        .unwrap()
+}
+
 /// 运行宿主持有真实消费时序，按原组引用读取已经记录的执行时间。
 /// 普通请求接口不能用此能力构造截止；受信驱动器仅在实际完整应用后签发。
 pub trait PublicConsumptionTimeSourceV1 {
@@ -557,26 +582,7 @@ impl<T: PublicConsumptionTimeSourceV1> Iterator for RecordedPublicGroupSourceV1<
                 &mut prepared_pm,
                 |condition| self.replay.core.prepared_pm_context(condition),
             ) {
-                let input_available = match &input.ingress {
-                    data_pipeline_core::public_input::DptIngressV1::Message {
-                        source_evidence,
-                        ..
-                    } => source_evidence
-                        .collector_admission
-                        .as_ref()
-                        .map_or(source_evidence.received_at_utc_ms, |c| {
-                            c.admitted_at_utc_ms.max(source_evidence.received_at_utc_ms)
-                        }),
-                    _ => i64::MIN,
-                };
-                let visible_at = prepared
-                    .group
-                    .records
-                    .iter()
-                    .map(|fact| fact.dependency_time.received_at_utc_ms)
-                    .chain(std::iter::once(input_available))
-                    .max()
-                    .unwrap();
+                let visible_at = original_public_group_visible_at_utc_ms(&input, &prepared.group);
                 let at = match self
                     .times
                     .execution_time_for_visible_group(&prepared.reference, visible_at)

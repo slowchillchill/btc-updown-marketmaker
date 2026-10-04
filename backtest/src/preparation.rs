@@ -1,4 +1,5 @@
-use crate::MaterialError;
+use crate::statistics::HistoricalStatisticsCollectorV1;
+use crate::{HistoricalPreparationProgressV1, HistoricalStatisticsV1, MaterialError};
 use contracts::*;
 use data_pipeline_core::{public_input::*, public_observation_core::PublicObservationCoreV1};
 use data_pipeline_training::{
@@ -107,133 +108,199 @@ impl HistoricalPreparationConfigV1 {
 pub fn prepare_historical_run_v1(
     config: &HistoricalPreparationConfigV1,
 ) -> Result<PreparedHistoricalRunV1, MaterialError> {
-    let header = config.effective_header();
-    let input_set =
-        data_pipeline_training::freeze_public_source_input_set_v1(&config.scope.manifest_paths)?;
-    let initialization_selection = config
-        .metadata_initialization
-        .as_ref()
-        .map(|initial| {
-            if initial.received_start_utc_ms != config.scope.received_start_utc_ms
-                || initial.received_end_utc_ms != config.scope.received_end_utc_ms
-            {
-                return Err::<_, MaterialError>("初始化用途的研究范围与准备范围不一致".into());
-            }
-            MetadataInitializationSelectionV1::open(
-                initial,
-                config.canonical.decode_batch_rows,
-                config.canonical.max_decode_batch_bytes,
-            )
-        })
-        .transpose()?;
-    let source_identity_sha256 = match (&initialization_selection, &config.metadata_initialization)
-    {
-        (Some(selection), Some(initial)) => {
-            selection.source_identity(input_set.input_set_identity_sha256(), initial)?
-        }
-        _ => Sha256Hex(input_set.input_set_identity_sha256().into()),
-    };
-    let mut initialization = HistoricalInitializationProvenanceV1 {
-        source_identity_version: initialization_selection
-            .as_ref()
-            .map(|_| HISTORICAL_INITIALIZATION_SOURCE_IDENTITY_VERSION.into()),
-        input_positions: Default::default(),
-        source_message_ids: Default::default(),
-        files: initialization_selection
-            .as_ref()
-            .map(|selection| selection.files.clone())
-            .unwrap_or_default(),
-    };
-    let admitted = input_set.admitted_daily_inputs();
-    let files = admitted
-        .iter()
-        .flat_map(|day| day.files())
-        .collect::<Vec<_>>();
-    std::fs::create_dir(&config.work_root)?;
-    let mut merge = prepare_historical_files_with_initialization_v1(
-        &config.work_root.join("merge"),
-        &files,
-        &config.canonical,
-        config.header.input_stream_id.clone(),
-        Some(config.scope.received_start_utc_ms..config.scope.received_end_utc_ms),
-        initialization_selection.as_ref(),
-    )?;
-    let public_root = config.work_root.join("public");
-    let mut core = PublicObservationCoreV1::new(header.clone())?;
-    let mut writer =
-        PublicRecordingWriterV1::create(&public_root, &header, config.recording.clone())?;
-    while let Some(mut input) = merge.next_input()? {
-        if let Some(binding) = merge.initialization_binding() {
-            initialization.input_positions.insert(input.input_position);
-            initialization
-                .source_message_ids
-                .insert(binding.source_message_id.0.clone());
-            writer.record_source_binding(binding.clone())?;
-        }
-        let prepared = merge.prepare_input(&core, &mut input)?;
-        let applied = core.push(&prepared)?.into_owned();
-        writer.record(input, applied)?;
+    prepare_internal(config, None, None).map(|(prepared, _)| prepared)
+}
+/// 同一次生产准备借用原完整组累计统计；全部持久与hidden责任成功后交付。
+pub struct PreparedHistoricalRunWithStatisticsV1 {
+    pub prepared: PreparedHistoricalRunV1,
+    pub statistics: HistoricalStatisticsV1,
+}
+pub fn prepare_historical_run_with_statistics_v1(
+    config: &HistoricalPreparationConfigV1,
+    progress: Option<HistoricalPreparationProgressV1>,
+) -> Result<PreparedHistoricalRunWithStatisticsV1, MaterialError> {
+    prepare_internal(
+        config,
+        Some(HistoricalStatisticsCollectorV1::default()),
+        progress,
+    )
+    .map(
+        |(prepared, statistics)| PreparedHistoricalRunWithStatisticsV1 {
+            prepared,
+            statistics: statistics.expect("本入口创建原统计collector"),
+        },
+    )
+}
+fn prepare_internal(
+    config: &HistoricalPreparationConfigV1,
+    mut statistics: Option<HistoricalStatisticsCollectorV1>,
+    mut progress: Option<HistoricalPreparationProgressV1>,
+) -> Result<(PreparedHistoricalRunV1, Option<HistoricalStatisticsV1>), MaterialError> {
+    if let Some(p) = &mut progress {
+        p.stage("admission_and_sort");
     }
-    let mut end = RecordedIngressV1 {
-        input_stream_id: config.header.input_stream_id.clone(),
-        input_position: core.applied_prefix().next_input_position,
-        ingress: DptIngressV1::EndOfInput,
-        dependency_record_refs: vec![],
-    };
-    let prepared = merge.prepare_input(&core, &mut end)?;
-    let applied = core.push(&prepared)?.into_owned();
-    writer.record(end, applied)?;
-    writer.stabilize()?;
-    drop(writer);
-    if config.metadata_initialization.is_some() {
-        serde_json::to_writer(
-            std::fs::File::create(public_root.join("historical-initialization.json"))?,
-            &initialization,
+    let result = (|| {
+        let header = config.effective_header();
+        let input_set = data_pipeline_training::freeze_public_source_input_set_v1(
+            &config.scope.manifest_paths,
         )?;
-    }
-    // 正常End已应用且原writer已成功稳定。隐藏入口只提取固定上下文后释放
-    // 此生产core，再完整读取真实规范记录并独立归约隐藏数量；不重复空重放。
-    let markets = core
-        .fixed_markets()
-        .map(|market| {
-            let context = core
-                .pm_context(&market.condition_id.0)
-                .expect("原登记市场具有 PM 身份");
-            let assets = context
-                .assets
-                .into_iter()
-                .map(|asset| asset.asset)
-                .collect::<Vec<_>>()
-                .try_into()
-                .map_err(|_| "原登记市场不是二元市场")?;
-            Ok((
-                market.condition_id.0.clone(),
-                PlatformMarketV1::try_new(market.clone(), assets)?,
-            ))
-        })
-        .collect::<Result<_, MaterialError>>()?;
-    let reader = PublicRecordingReaderV1::recover(
-        &public_root,
-        config.read_page_rows,
-        config.max_read_batch_bytes,
-    )?;
-    let hidden = prepare_hidden_v1(
-        core,
-        reader,
-        &config.work_root.join("hidden"),
-        &config.recording,
-        config.hidden_stream_id.clone(),
-    )?;
-    Ok(PreparedHistoricalRunV1 {
-        public_root,
-        hidden,
-        source_identity_sha256,
-        initialization,
-        markets,
-        input_set_identity_sha256: Sha256Hex(input_set.input_set_identity_sha256().into()),
-        source_manifests: admitted
+        let initialization_selection = config
+            .metadata_initialization
+            .as_ref()
+            .map(|initial| {
+                if initial.received_start_utc_ms != config.scope.received_start_utc_ms
+                    || initial.received_end_utc_ms != config.scope.received_end_utc_ms
+                {
+                    return Err::<_, MaterialError>("初始化用途的研究范围与准备范围不一致".into());
+                }
+                MetadataInitializationSelectionV1::open(
+                    initial,
+                    config.canonical.decode_batch_rows,
+                    config.canonical.max_decode_batch_bytes,
+                )
+            })
+            .transpose()?;
+        let source_identity_sha256 =
+            match (&initialization_selection, &config.metadata_initialization) {
+                (Some(selection), Some(initial)) => {
+                    selection.source_identity(input_set.input_set_identity_sha256(), initial)?
+                }
+                _ => Sha256Hex(input_set.input_set_identity_sha256().into()),
+            };
+        let mut initialization = HistoricalInitializationProvenanceV1 {
+            source_identity_version: initialization_selection
+                .as_ref()
+                .map(|_| HISTORICAL_INITIALIZATION_SOURCE_IDENTITY_VERSION.into()),
+            input_positions: Default::default(),
+            source_message_ids: Default::default(),
+            files: initialization_selection
+                .as_ref()
+                .map(|selection| selection.files.clone())
+                .unwrap_or_default(),
+        };
+        let admitted = input_set.admitted_daily_inputs();
+        let files = admitted
             .iter()
-            .map(|day| (day.utc_day().into(), day.manifest_sha256().into()))
-            .collect(),
-    })
+            .flat_map(|day| day.files())
+            .collect::<Vec<_>>();
+        std::fs::create_dir(&config.work_root)?;
+        let mut merge = prepare_historical_files_with_initialization_v1(
+            &config.work_root.join("merge"),
+            &files,
+            &config.canonical,
+            config.header.input_stream_id.clone(),
+            Some(config.scope.received_start_utc_ms..config.scope.received_end_utc_ms),
+            initialization_selection.as_ref(),
+        )?;
+        let public_root = config.work_root.join("public");
+        let mut core = PublicObservationCoreV1::new(header.clone())?;
+        let mut writer =
+            PublicRecordingWriterV1::create(&public_root, &header, config.recording.clone())?;
+        if let Some(p) = &mut progress {
+            p.stage("public_application_unstable");
+        }
+        while let Some(mut input) = merge.next_input()? {
+            if let Some(binding) = merge.initialization_binding() {
+                initialization.input_positions.insert(input.input_position);
+                initialization
+                    .source_message_ids
+                    .insert(binding.source_message_id.0.clone());
+                writer.record_source_binding(binding.clone())?;
+            }
+            let prepared = merge.prepare_input(&core, &mut input)?;
+            let applied = core.push(&prepared)?.into_owned();
+            if let Some(s) = &mut statistics {
+                for group in &applied.applied.closed_groups {
+                    s.observe(&input, group, &initialization);
+                }
+            }
+            if let Some(p) = &mut progress {
+                p.applied(&applied.applied);
+            }
+            writer.record(input, applied)?;
+        }
+        let mut end = RecordedIngressV1 {
+            input_stream_id: config.header.input_stream_id.clone(),
+            input_position: core.applied_prefix().next_input_position,
+            ingress: DptIngressV1::EndOfInput,
+            dependency_record_refs: vec![],
+        };
+        let prepared = merge.prepare_input(&core, &mut end)?;
+        let applied = core.push(&prepared)?.into_owned();
+        if let Some(s) = &mut statistics {
+            for group in &applied.applied.closed_groups {
+                s.observe(&end, group, &initialization);
+            }
+        }
+        if let Some(p) = &mut progress {
+            p.applied(&applied.applied);
+            p.stage("stabilize");
+        }
+        writer.record(end, applied)?;
+        writer.stabilize()?;
+        drop(writer);
+        if config.metadata_initialization.is_some() {
+            serde_json::to_writer(
+                std::fs::File::create(public_root.join("historical-initialization.json"))?,
+                &initialization,
+            )?;
+        }
+        // 正常End已应用且原writer已成功稳定。隐藏入口只提取固定上下文后释放
+        // 此生产core，再完整读取真实规范记录并独立归约隐藏数量；不重复空重放。
+        let markets = core
+            .fixed_markets()
+            .map(|market| {
+                let context = core
+                    .pm_context(&market.condition_id.0)
+                    .expect("原登记市场具有 PM 身份");
+                let assets = context
+                    .assets
+                    .into_iter()
+                    .map(|asset| asset.asset)
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .map_err(|_| "原登记市场不是二元市场")?;
+                Ok((
+                    market.condition_id.0.clone(),
+                    PlatformMarketV1::try_new(market.clone(), assets)?,
+                ))
+            })
+            .collect::<Result<_, MaterialError>>()?;
+        if let Some(p) = &mut progress {
+            p.stage("hidden_preparation");
+        }
+        let reader = PublicRecordingReaderV1::recover(
+            &public_root,
+            config.read_page_rows,
+            config.max_read_batch_bytes,
+        )?;
+        let hidden = prepare_hidden_v1(
+            core,
+            reader,
+            &config.work_root.join("hidden"),
+            &config.recording,
+            config.hidden_stream_id.clone(),
+        )?;
+        Ok((
+            PreparedHistoricalRunV1 {
+                public_root,
+                hidden,
+                source_identity_sha256,
+                initialization,
+                markets,
+                input_set_identity_sha256: Sha256Hex(input_set.input_set_identity_sha256().into()),
+                source_manifests: admitted
+                    .iter()
+                    .map(|day| (day.utc_day().into(), day.manifest_sha256().into()))
+                    .collect(),
+            },
+            statistics
+                .take()
+                .map(HistoricalStatisticsCollectorV1::finish),
+        ))
+    })();
+    if let Some(p) = &mut progress {
+        p.stage(if result.is_ok() { "complete" } else { "error" });
+    }
+    result
 }

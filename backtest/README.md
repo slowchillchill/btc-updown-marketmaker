@@ -102,3 +102,18 @@ DPT先在所选文件定位指定Snapshot，再分页读取每个目标市场从
 原输入准备／归约及 writer 写入／关闭／稳定错误仍在原步骤失败。存储 JSON、顺序、流身份、分片及 EOF 计数继续由原 hidden reader 在完整读取时核对；部分存储错误因取消前置重放而在 hidden 阶段暴露，可能留下未完成 hidden 目录，但不能返回成功材料。没有新增文件改动检测、全量重哈希或每次自产全读证明；独立 replay 的原检查保持。
 
 小型原 prepare 产生的直接移交结果，与同记录独立空重建 core 后的 hidden 结果逐字段比较固定市场、完整隐藏步骤／报告、索引、桶及正常前缀。初始化混合与当前 tick 已变化但初始 tick 不变的代表另有明确断言；既有晚身份／规则、同毫秒桶、跨 epoch 前量冲突和缺源时间回归继续覆盖原行为，另验证隐藏读取的原 EOF 错误不会变成成功。此实现段只运行小夹具和工程检查，没有真实十二分钟／小时材料运行；消除重复调用由实际调用链确认，节省时长待后续准确全流程测量，不套用旧纯 replay 时长。
+
+
+## 准备过程中交付通用统计
+
+`prepare_historical_run_with_statistics_v1(config, progress)`与原`prepare_historical_run_v1`共用同一个准备循环。原入口不创建统计累积器；新入口借用每次原core生成的完整组、本次真实Input及当时已登记的初始化来源，就地累积原材料试制统计。正常End也按原返回的完整组迭代，当前核心的End不产生额外组。`PreparedHistoricalRunWithStatisticsV1`仅在输入归约、writer稳定、初始化来源文件与hidden准备全部成功后返回`prepared`和完整`statistics`；任何原失败不返回局部统计。
+
+原Counts/MarketStats及分类归属backtest，字段与序列化形状不变；研究／初始化分母、跨来源依赖、已知空与Unavailable、spot重复及源时间回退仍按原口径。`statistics.markets`来自完整组实际观察，不能用固定身份目录`prepared_markets`替代。新路径只保留原计数、首例和最近来源；不保留完整组、盘口或观察历史。统计状态与准备及hidden有存活重叠，可能提高峰值RSS，未增加新的市场上限。
+
+两路复用SIM所属`original_public_group_visible_at_utc_ms`纯计算：关闭Input的接收／接纳时间取最大，再与本组事实依赖接收时间取最大；统计沿原单调可见时间记录。`RecordedPublicGroupSourceV1`仍将同一值传给原时序接口，调用方自定义执行时序不改变。
+
+`material_trial`改用新入口，不再独立打开统计reader，仍交付原完整`statistics`供原两市场／首小时研究消费。合并阶段计量名为`prepare_and_statistics_measurement`；独立`statistics_measurement`为null并明确标记不适用，不能把它写成0秒或声称统计没有计算。旧实测报告保持。
+
+库进度默认为None关闭；材料示例沿原`--progress-interval-seconds`参数，默认30秒、0关闭。可选`HistoricalPreparationProgressV1`在原应用检查点报告输入／组／观察计数和耗时；稳定及hidden完成之前`published=false`，总量、比例、ETA为未知。阶段起止覆盖准入／外排整体、公共应用、稳定、hidden整体及最终结果，不包含准入／外排／hidden内部的独立进度或百分比。输出失败只关闭日志，既不改变业务错误也不重试。
+
+此工程段通过小型真实prepare与同记录独立空重放的完整统计对照及必要回归验证；没有新的真实十二分钟／小时材料运行。后续如准确签发测量，应将新合并阶段与旧525.219863807＋187.391546387＝712.611410194秒对照，研究另列；不能直接声称节省全部187.39秒，因为原统计计算仍保留。
