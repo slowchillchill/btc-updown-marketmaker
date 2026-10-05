@@ -337,7 +337,7 @@ fn import_legacy(input: &Path, output: &Path) -> Result<()> {
         let at = v[4].as_i64().ok_or("bad visible time")?;
         if start.is_none() {
             w.row(compact::Row {
-                at,
+                at: at.min(1788912000000),
                 scope: compact::SELECT,
                 received: 0,
                 event: 0,
