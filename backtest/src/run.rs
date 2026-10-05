@@ -210,6 +210,26 @@ pub enum HistoricalFailureCauseV1<E> {
         release_errors: Vec<ledger::LedgerErrorV1>,
     },
 }
+// 失败时补充既有供料上下文；输出失败不替代原 SIM 错误。
+fn sim_call_failure<E>(
+    call: &str,
+    requested_at_utc_ms: Option<i64>,
+    public_group_before_iteration: Option<u64>,
+    hidden_bucket_at_utc_ms: Option<i64>,
+    cause: SimRunActorErrorV2,
+) -> HistoricalFailureCauseV1<E> {
+    use std::io::Write;
+    let context = serde_json::json!({
+        "schema": "historical_sim_call_failure_v1",
+        "call": call,
+        "requested_at_utc_ms": requested_at_utc_ms,
+        "public_group_before_iteration": public_group_before_iteration,
+        "hidden_bucket_at_utc_ms": hidden_bucket_at_utc_ms,
+        "error": format!("{cause:?}"),
+    });
+    let _ = writeln!(std::io::stderr().lock(), "{context}");
+    HistoricalFailureCauseV1::Sim(cause)
+}
 #[derive(Debug)]
 pub struct HistoricalRunFailureV1<E> {
     pub cause: HistoricalFailureCauseV1<E>,
@@ -531,12 +551,21 @@ async fn run_material<S: StrategyV1>(
             .next_bucket()
             .map_err(HistoricalFailureCauseV1::Material)?;
         loop {
-            let public_at = driver
-                .next_group_at()
-                .map_err(HistoricalFailureCauseV1::Sim)?;
+            let public_group_before_iteration = driver
+                .observation_cutoff()
+                .map(|cutoff| cutoff.receipt().group().group_position);
             let hidden_at = next_hidden
                 .as_ref()
                 .map(|bucket| bucket.reference().bucket_time_utc_ms);
+            let public_at = driver.next_group_at().map_err(|cause| {
+                sim_call_failure(
+                    "next_group_at",
+                    None,
+                    public_group_before_iteration,
+                    hidden_at,
+                    cause,
+                )
+            })?;
             let required = driver
                 .next_required_logical_drive()
                 .map(|next| next.required_at_utc_ms);
@@ -566,6 +595,15 @@ async fn run_material<S: StrategyV1>(
             .min();
             let Some(at) = at else {
                 break;
+            };
+            let sim_error = |call, requested_at, cause| {
+                sim_call_failure(
+                    call,
+                    Some(requested_at),
+                    public_group_before_iteration,
+                    hidden_at,
+                    cause,
+                )
             };
             let operating = operating_start.is_none_or(|start| at >= start);
             if pending_at == Some(at)
@@ -601,19 +639,19 @@ async fn run_material<S: StrategyV1>(
             // 更早原义务先推进；本毫秒仍开放，全部真实公开组保持原序。
             driver
                 .wait_for_recording_capacity()
-                .map_err(HistoricalFailureCauseV1::Sim)?;
+                .map_err(|cause| sim_error("wait_for_recording_capacity", at, cause))?;
             driver
                 .advance_before(at)
-                .map_err(HistoricalFailureCauseV1::Sim)?;
+                .map_err(|cause| sim_error("advance_before", at, cause))?;
             while driver
                 .next_group_at()
-                .map_err(HistoricalFailureCauseV1::Sim)?
+                .map_err(|cause| sim_error("next_group_at", at, cause))?
                 == Some(at)
             {
                 let mut delivered_group = None;
                 if let Some(group) = driver
                     .next_prepared_group()
-                    .map_err(HistoricalFailureCauseV1::Sim)?
+                    .map_err(|cause| sim_error("next_prepared_group", at, cause))?
                 {
                     if operating_start.is_some() {
                         let initial = prepared
@@ -632,9 +670,9 @@ async fn run_material<S: StrategyV1>(
                     }
                     for context in &group.pm_contexts {
                         if !driver.has_enrolled_market(&context.market.condition_id) {
-                            driver
-                                .wait_for_recording_capacity()
-                                .map_err(HistoricalFailureCauseV1::Sim)?;
+                            driver.wait_for_recording_capacity().map_err(|cause| {
+                                sim_error("wait_for_recording_capacity", at, cause)
+                            })?;
                             driver
                                 .enroll_market(MarketEnrollmentRequestV1 {
                                     enrollment_request_id: context.market.condition_id.0.clone(),
@@ -648,14 +686,16 @@ async fn run_material<S: StrategyV1>(
                                         })?
                                         .clone(),
                                 })
-                                .map_err(HistoricalFailureCauseV1::Sim)?;
+                                .map_err(|cause| sim_error("enroll_market", at, cause))?;
                         }
                     }
                 }
                 driver
                     .wait_for_recording_capacity()
-                    .map_err(HistoricalFailureCauseV1::Sim)?;
-                driver.next_group().map_err(HistoricalFailureCauseV1::Sim)?;
+                    .map_err(|cause| sim_error("wait_for_recording_capacity", at, cause))?;
+                driver
+                    .next_group()
+                    .map_err(|cause| sim_error("next_group", at, cause))?;
                 if let Some((position, initial, dependency)) = delivered_group {
                     let phase = if operating {
                         &mut delivery_summary.within_operating_range
@@ -675,7 +715,7 @@ async fn run_material<S: StrategyV1>(
             let current_input = if health_enabled {
                 driver
                     .observe_at(at)
-                    .map_err(HistoricalFailureCauseV1::Sim)?;
+                    .map_err(|cause| sim_error("observe_at", at, cause))?;
                 shared
                     .strategy_current_read(&driver)
                     .map_err(HistoricalFailureCauseV1::Ledger)?
@@ -725,10 +765,10 @@ async fn run_material<S: StrategyV1>(
                 } else {
                     driver
                         .wait_for_recording_capacity()
-                        .map_err(HistoricalFailureCauseV1::Sim)?;
+                        .map_err(|cause| sim_error("wait_for_recording_capacity", at, cause))?;
                     let mut decision = driver
                         .send_decision_at(p.calculation.calculation.input_cutoff.clone(), at)
-                        .map_err(HistoricalFailureCauseV1::Sim)?;
+                        .map_err(|cause| sim_error("send_decision_at", at, cause))?;
                     let dispatched = if health_enabled {
                         let result = shared
                             .dispatch_strategy_qualified(&mut decision, strategy, p.calculation)
@@ -813,7 +853,7 @@ async fn run_material<S: StrategyV1>(
                     {
                         driver
                             .wait_for_recording_capacity()
-                            .map_err(HistoricalFailureCauseV1::Sim)?;
+                            .map_err(|cause| sim_error("wait_for_recording_capacity", at, cause))?;
                         driver
                             .enroll_market(MarketEnrollmentRequestV1 {
                                 enrollment_request_id: market.condition_id.0.clone(),
@@ -827,15 +867,15 @@ async fn run_material<S: StrategyV1>(
                                     })?
                                     .clone(),
                             })
-                            .map_err(HistoricalFailureCauseV1::Sim)?;
+                            .map_err(|cause| sim_error("enroll_market", at, cause))?;
                     }
                 }
                 driver
                     .wait_for_recording_capacity()
-                    .map_err(HistoricalFailureCauseV1::Sim)?;
+                    .map_err(|cause| sim_error("wait_for_recording_capacity", at, cause))?;
                 driver
                     .hidden_bucket(bucket)
-                    .map_err(HistoricalFailureCauseV1::Sim)?;
+                    .map_err(|cause| sim_error("hidden_bucket", at, cause))?;
                 unconsumed_required_trigger_at = None;
                 next_hidden = hidden
                     .next_bucket()
@@ -843,10 +883,10 @@ async fn run_material<S: StrategyV1>(
             }
             driver
                 .wait_for_recording_capacity()
-                .map_err(HistoricalFailureCauseV1::Sim)?;
+                .map_err(|cause| sim_error("wait_for_recording_capacity", at, cause))?;
             driver
                 .observe_at(at)
-                .map_err(HistoricalFailureCauseV1::Sim)?;
+                .map_err(|cause| sim_error("observe_at", at, cause))?;
             if operating {
                 shared
                     .advance_settlement(&mut coordinator, &mut driver)
@@ -943,7 +983,7 @@ async fn run_material<S: StrategyV1>(
                             "历史时序溢出",
                         ))
                     })?)
-                    .map_err(HistoricalFailureCauseV1::Sim)?;
+                    .map_err(|cause| sim_error("advance_before_due_close", at + 1, cause))?;
                 unconsumed_required_trigger_at = None;
             }
         }
@@ -953,7 +993,17 @@ async fn run_material<S: StrategyV1>(
                     "历史范围结束时刻溢出",
                 ))
             })?)
-            .map_err(HistoricalFailureCauseV1::Sim)?;
+            .map_err(|cause| {
+                sim_call_failure(
+                    "finish_input_at",
+                    Some(end - 1),
+                    driver
+                        .observation_cutoff()
+                        .map(|cutoff| cutoff.receipt().group().group_position),
+                    None,
+                    cause,
+                )
+            })?;
         shared
             .advance_settlement(&mut coordinator, &mut driver)
             .map_err(HistoricalFailureCauseV1::Settlement)?;
