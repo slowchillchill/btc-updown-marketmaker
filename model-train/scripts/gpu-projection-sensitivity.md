@@ -82,3 +82,88 @@ AutoDL 上的源码、构建、缓存、材料与产物必须全部放在 `/root
 保留准确提交、命令、环境和运行日志。CUDA 报告继续保存编译参数、输入/源码哈希、设备阶段位模式、
 传输与显式设备工作集。替换表带源 CUDA 报告与布局哈希；最终比较带两份组件报告哈希。
 捕获和回填发生在 CPU 组件装配中，GPU只批量计算末端投影，不能据此声称完整热循环已GPU常驻。
+
+## 批准训练内部的真实五分钟诊断
+
+新增 `prepared_component_projection_sensitivity` ignored 测试，复用公共 backtest 的
+`run_prepared_historical_with_observer_v1`。诊断窗口固定为 2026-09-15 12:00—12:05 UTC，
+Native 根从 11:59:30 开始。公共来源范围可以更早，以实际准备描述及其 SHA-256 为准；
+必须处于已授权训练内部、恢复真实盘口前序，不能把统一来源裁切直接设成 T−30。
+观察回调在每个真实公共组后调用 `NativeInputRoot.consume`，不提交意图、不推进时间或消费下一组。
+历史公共/hidden 供料和所有到期驱动继续由 backtest 原循环负责。
+该唯一宿主沿原 `end` 截止过滤事件后才交付 observer；诊断覆盖原宿主实际交付范围，
+不声称逐条消费 prepared 材料中合法可见时刻落在截止点之外的存储尾部。
+
+账户固定为 2000 pUSD、零仓位、零挂单。原策略入口只返回 NoOp，模型生成的意图不提交。
+各政策分别从根重跑，共享相同规则、账户参数、时序、材料和外生历史。真实平台规则必须由
+`load_historical_process_snapshot_v3` 校验文件摘要及历史因果时刻；本诊断不在线查询平台规则。
+finality 材料、时序、账户 admission 和资源参数需有明确交接或本次诊断选择，不能用
+`synthetic-command.json` 的测试规则替代。SIM 时延仍由原 `load_embedded_proxy_latency_profile`
+加载编译内置材料，不新增一个模型诊断时延 profile。
+
+`StreamingSensitivity` 每组只保留当前输入与连续 hidden 数值。默认使用 `no_grad`；前32个
+`DecisionRequired` 组把进入前的 hidden 视作 detach 常量，启用当组状态组件和 Actor 的梯度。
+每组只做一次状态推进，随后重算自身实际采样路径的 log_prob 和参数梯度。结束该组后再次
+detach hidden，保留数值进入下一组。报告分别记录 state/action 已用和非零梯度元素；只有
+一个合法动作时，零梯度按真实结果记录。第32组后仍消费所有公共组并捕获实际末端输入。
+此处不计算穿过更早组的梯度，不证明正式 TBPTT/PPO、盈利或 GPU 常驻性能。
+
+第一轮 exact_cpu 在这32组冻结自身实际采样的原生路径。候选重评分同一冻结路径，并各自
+实际采样与重算；共同路径按组序号、真实 cutoff、row 和 hidden 身份绑定。新路径出现未覆盖的
+末端输入时，沿原规则标为 `discovery_only`，补齐 GPU 表后从根重跑。
+
+逐组完整特征、h_prev/h/z 和32组详细结果写入新建的 gzip JSONL，不在内存积累整窗。
+流包含 header、连续 group 和 end。尾记录绑定组数与此前内容 SHA-256，完成报告再绑定压缩文件
+字节数与 SHA-256。比较器逐组读取，拒绝截断、尾后额外内容、漏组以及发现轮；数值差异按字段
+汇总，保留32组动作详情，不引入统一误差阈值。`status=complete` 只表示测量完成；必须检查
+比较器的 `all_exact_component_invariants_hold`、梯度覆盖和实际差值，不能仅凭 complete 宣称通过。
+
+### 生成私有配置
+
+先取得真实 prepare 已发布的 `prepared-run-v1.json`、已核规则文件、显式运行参数、
+finality 文件以及当前运行的 `ImplementationIdentityV1` JSON。以下命令只生成配置及来源摘要，
+不会创建运行目录、读取行情或执行回放。含私有路径的输出放在仓库外或被忽略的产物目录。
+
+```bash
+python model-train/scripts/gpu_projection_sensitivity.py config \
+  --run-template <已有正式HistoricalRunConfigV1或HistoricalPreparedRunConfigV1_JSON> \
+  --prepared <materials/prepared-run-v1.json> \
+  --rules <rules/platform-rule-snapshot-v3.json> --rules-sha256 <已核SHA256> \
+  --finality <已交接finality_JSON> --implementation-identity <当前源码身份_JSON> \
+  --run-output-dir <本政策全新运行目录> --output <私有诊断配置_JSON>
+```
+
+生成器复用模板的 timing、admission、容量和 session_seed，只把本次技术身份、2000 pUSD、NoOp
+描述与输出定位写成诊断值。每个政策的输出目录不同，账户/会话技术身份保持一致。所有政策须用
+相同模型执行环境与业务参数；替换表可以在 GPU 算出后回传同一本机执行。
+
+若本次明确选用 NoOp 零额外延迟机制对照，可用 `--noop-zero-delay` 代替 `--run-template`。
+它显式将四项宿主延迟设为零，不声称生产延迟为零；容量复用 #172 实际无交易配置的
+67,108,864 bytes / 128 in-flight groups，session_seed 沿已有真实入口取 `SHA256(run_id)`，
+账户 admission 沿 `DualCashNoMarketLimit`。生成器把各字段依据写入来源 sidecar。
+四项时序仍影响 cutoff、来源年龄或观察身份；零的含义是不对原来源合法可见时刻额外添加
+宿主延迟，不删除原 received/admission/依赖时序或 SIM 内置平台及代理时延。各政策使用同一
+时序。输出目录不同导致配置文件 SHA 不同；另以 `runtime_semantics_sha256` 绑定去掉纯输出
+定位、用材料摘要替代材料路径后的完整运行参数，比较时要求该摘要与参数内容同时一致。
+`ImplementationIdentityV1.cargo_lock_sha256` 应绑定实际构建使用的
+`model-train/native-inputs/Cargo.lock`；当前源码身份由本次组合提交提供，不能复用旧产物身份。
+
+```bash
+PROJECTION_SENSITIVITY_PREPARED_CONFIG=<私有诊断配置_JSON> \
+PROJECTION_SENSITIVITY_OUTPUT=<新完成报告_JSON> \
+PROJECTION_SENSITIVITY_SOURCE_COMMIT=<准确运行提交> \
+cargo test --manifest-path model-train/native-inputs/Cargo.toml --lib --features python \
+  --locked --offline \
+  action_tests::buy_tests::projection_sensitivity_tests::prepared_component_projection_sensitivity \
+  -- --exact --ignored --nocapture --test-threads=1
+```
+
+候选另设 `PROJECTION_SENSITIVITY_POLICY`、`PROJECTION_SENSITIVITY_REPLACEMENTS`，以及
+`PROJECTION_SENSITIVITY_COMMON_PATHS=<完成的exact_cpu报告_JSON>`。CUDA `--cpu-reference`
+可以直接读取新的流式完成/发现报告中的 capture；`tables` 和 `compare` 命令保持原样。
+执行前需按已核环境配置嵌入 Python，并创建本政策运行目录。进度每10秒显示模型已消费组数，
+公共回放沿配置打印原有进度；不估算未知剩余组数。
+
+原13组 ignored 测试可增加 `PROJECTION_SENSITIVITY_FIXTURE_STREAM_OUTPUT=<新.gz文件>`，
+用同一真实夹具对比旧完整历史图与流式实现的 features/h/z；仅比较前向数值，不要求两种
+不同梯度范围的梯度相同。此兼容检查仍不读取真实训练材料。

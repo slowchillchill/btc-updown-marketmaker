@@ -20,7 +20,9 @@
 
 新增三项由 Python 标准 `Decimal` 在 128 和 192 位十进制精度分别计算，转为 FP32 后交叉核对。
 报告保存两次高精度结果及位模式。这是有限技术参考，不能当作公共精确 CPU 合同或全域正确舍入证明。
-样本不是实际训练分布，也不能证明生产位宽足够。训练数据和独立第三留出集不参与本入口。
+上述22项默认样本不是实际训练分布，也不能证明生产位宽足够，不读取训练数据或独立第三留出集。
+显式传入 `projection_sensitivity_stream_run_v1` 时，只批量计算已批准真实训练内部工程窗捕获的
+末端有理输入；真实行情恢复与模型消费归[流式组件诊断](gpu-projection-sensitivity.md)，不在此重做。
 
 后续[真实组件敏感性诊断](gpu-projection-sensitivity.md)也复用此入口，传入
 `projection_sensitivity_run_v1` 或 `projection_capture_v1` 报告，批量计算其实际捕获的末端输入。

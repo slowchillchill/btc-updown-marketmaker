@@ -91,7 +91,7 @@ def limb_words(value: int) -> list[int]:
 
 
 def input_material(reference: dict) -> tuple[str, dict]:
-    if reference["schema"] in ("projection_capture_v1", "projection_sensitivity_run_v1"):
+    if reference["schema"] in ("projection_capture_v1", "projection_sensitivity_run_v1", "projection_sensitivity_stream_run_v1"):
         capture = reference.get("capture", reference)
         rows = [{"id": f"captured-{index}", "operation": row["operation"], "input": row["input"],
                  "reference_bits_u32": row["bits_u32"], "reference_source": {
@@ -99,7 +99,7 @@ def input_material(reference: dict) -> tuple[str, dict]:
                 for index, row in enumerate(capture["rows"])]
         if not rows:
             raise ValueError("真实组件捕获为空")
-        return encode_material(rows, "真实公共夹具/Actor捕获的有限末端输入；非训练数据或全域误差证明")
+        return encode_material(rows, "真实公共组件/Actor捕获的有限末端输入；按来源报告区分夹具与批准训练内部工程窗；非正式训练或全域误差证明")
     if reference["schema"] != "gpu_exact_numeric_reference_v1":
         raise ValueError("CPU参考schema不符")
     selected = reference["deferred_gpu_scope"]

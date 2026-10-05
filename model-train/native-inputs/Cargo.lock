@@ -1072,6 +1072,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "backtest"
+version = "0.1.0"
+dependencies = [
+ "contracts",
+ "data-pipeline-core",
+ "data-pipeline-training",
+ "ledger",
+ "serde",
+ "serde_json",
+ "shared-run",
+ "sim-system",
+]
+
+[[package]]
 name = "base16ct"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2920,6 +2934,7 @@ dependencies = [
 name = "model-native-inputs"
 version = "0.1.0"
 dependencies = [
+ "backtest",
  "contracts",
  "data-pipeline-core",
  "data-pipeline-training",
