@@ -1,0 +1,152 @@
+{
+  "task": "#185 task3 source health two layers",
+  "engineering_source_commit": "3779fce58cd1300cddc85c1b5c0adc9be9a873ef",
+  "scope": {
+    "real_raw_eighteen_day_runs": 0,
+    "real_raw_twelve_minute_reruns": 0,
+    "existing_compact_input": "issue-246/compact-source-progress-20261005/one-run",
+    "consumer_mode": "legacy-consumer-validation/all-common-scopes-not-production-selection",
+    "parameter_use": "explicit synthetic engineering; normal=0, max=60000ms, not formally adopted"
+  },
+  "artifact": {
+    "scalar_records": 388931,
+    "fixed_uncompressed_record_bytes": 34,
+    "compressed_scalar_bytes": 1544900,
+    "scope_dictionary_bytes": 3942,
+    "original_journal_bytes": 156083054,
+    "binary_sha256": "cfb367904c697364c65cc5169c22d035201f0716aa3e4fb4297a25b03c2e7f87",
+    "binary_bytes": 19633200
+  },
+  "final_measurement": {
+    "import": {
+      "wall_seconds": 0.36,
+      "user_seconds": 0.32,
+      "system_seconds": 0.03,
+      "peak_rss_kib": 8044,
+      "exit_code": 0
+    },
+    "analyze": {
+      "wall_seconds": 0.12,
+      "user_seconds": 0.11,
+      "system_seconds": 0,
+      "peak_rss_kib": 7564,
+      "exit_code": 0
+    },
+    "limits": "warm finite archived material; GNU time centisecond wall/user resolution; excludes raw decode/sort/core, not an eighteen-day ETA or memory bound"
+  },
+  "first_attempt": {
+    "source_commit": "d77be8059dd630e6e886825d84a3c101f1e13ea3",
+    "result": "comparison_failed",
+    "cause": "diagnostic common selection began at first visible input rather than material left boundary, omitting 2232ms of initial unknown per common scope",
+    "retained": "consumer-12m and original import/analyze time logs; never overwritten"
+  },
+  "comparison": {
+    "input_journal_rows": 388930,
+    "scalar_records": 388931,
+    "selection_mode": "legacy-consumer-validation/all-common-scopes-not-production-selection",
+    "checks": [
+      {
+        "group": "polymarket",
+        "known_ms": 1435536,
+        "arrival_samples": 353888,
+        "exclusions_ms": {
+          "UnknownBusinessProgress": 4464
+        },
+        "state_durations_ms": {
+          "elevated": 1435536,
+          "unavailable/UnknownBusinessProgress": 4464
+        },
+        "comparison": "passed"
+      },
+      {
+        "group": "chainlink",
+        "known_ms": 1435498,
+        "arrival_samples": 1320,
+        "exclusions_ms": {
+          "UnknownBusinessProgress": 4502
+        },
+        "state_durations_ms": {
+          "elevated": 1435498,
+          "unavailable/UnknownBusinessProgress": 4502
+        },
+        "comparison": "passed"
+      },
+      {
+        "group": "binance_trade",
+        "known_ms": 717749,
+        "arrival_samples": 4405,
+        "exclusions_ms": {
+          "UnknownBusinessProgress": 2251
+        },
+        "state_durations_ms": {
+          "elevated": 717749,
+          "unavailable/UnknownBusinessProgress": 2251
+        },
+        "comparison": "passed"
+      },
+      {
+        "group": "binance_depth",
+        "known_ms": 717486,
+        "arrival_samples": 7174,
+        "exclusions_ms": {
+          "UnknownBusinessProgress": 2465,
+          "UnknownEventTime": 49
+        },
+        "state_durations_ms": {
+          "elevated": 717486,
+          "unavailable/UnknownBusinessProgress": 2465,
+          "unavailable/UnknownEventTime": 49
+        },
+        "comparison": "passed"
+      }
+    ],
+    "result": "passed",
+    "comparison": "new two-layer scalar consumer vs independent intervals on existing compact journal; not original raw replay or eighteen-day run"
+  },
+  "validation": {
+    "workspace_command": "cargo test --workspace --lib --bins --tests --examples --locked --offline -j8 -- --skip four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second",
+    "workspace_exit": 0,
+    "workspace_log_parsed_totals": {
+      "passed": 1370,
+      "failed": 0,
+      "ignored": 23
+    },
+    "fixed_utc_test": "skipped",
+    "research_tests": 7,
+    "finite_recording_tests": 3,
+    "actual_cli_tests": 2,
+    "actual_strategy_source_health_tests": 9,
+    "original_measurement_test": "ignored",
+    "fmt": "passed",
+    "clippy": "workspace and changed packages passed with existing repository warnings; extra -D warnings attempt failed on unchanged contracts warnings; new example warnings corrected"
+  },
+  "proposed_eighteen_day_resources": {
+    "physical_files": 2864,
+    "physical_rows": 762240960,
+    "physical_bytes": 45652568053,
+    "pm_rows": 728429320,
+    "manifest_market_ids": 5186,
+    "manifest_asset_ids": 10372,
+    "initial_run_row_limit": 32768,
+    "initial_run_memory_limit_bytes": 67108864,
+    "pm_row_limit_run_lower_bound": 22230,
+    "original_pm_peak_run_rows": 28931,
+    "scale_run_count_using_original_peak_rows": 25179,
+    "max_temp_run_files_per_sorter": 65536,
+    "max_temp_bytes_per_source": 412316860416,
+    "original_pm_temp_peak_bytes": 76200339,
+    "original_pm_rows": 195597,
+    "pm_scale_temp_reference_gib": 264.29093192515,
+    "fd_soft": 524288,
+    "fd_hard": 524288,
+    "application_working_scale": {
+      "original_application_seconds": 21.973,
+      "original_main_inputs": 208684,
+      "row_proxy": 762240960,
+      "scaled_seconds": 80258.76739031263,
+      "scaled_hours": 22.29410205286462,
+      "claim": "conditional workload scale only: physical rows are not actual reduced inputs; not ETA or upper bound; ignores accumulated core, raw prepare/sort, candidate analysis and archive copies"
+    }
+  },
+  "remaining": "No eighteen-day real run, frozen fitted candidates, actual tail/stability tradeoffs, formal threshold adoption or account/economic result. 2/4/8 max multipliers remain research hypotheses."
+}
