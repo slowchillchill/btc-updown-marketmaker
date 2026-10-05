@@ -618,6 +618,47 @@ fn normalize_output_paths(value: &mut serde_json::Value, root: &std::path::Path)
         _ => {}
     }
 }
+#[derive(Default)]
+struct GroupObserver {
+    groups: Vec<(u64, i64, usize)>,
+    fail_at_count: Option<usize>,
+}
+impl HistoricalPublicGroupObserverV1 for GroupObserver {
+    fn observe_public_group(
+        &mut self,
+        shared: &mut SharedExecutionV2,
+        driver: &mut PublicConsumptionStateV1,
+    ) -> Result<(), MaterialError> {
+        // 与模型消费同样领取反馈并冻结当前组；不提交意图或推进时钟。
+        let before = shared.action_before(driver)?;
+        let decision = driver.decision().expect("成功消费的公共组");
+        let cutoff = decision.cutoff();
+        let frames = decision.frames();
+        if let Some(before) = before {
+            assert_eq!(before.cutoff(), cutoff);
+        }
+        let known_first_asks = frames
+            .iter()
+            .find(|frame| frame.observation.market.condition_id.0 == FIRST)
+            .map_or(0, |frame| {
+                frame
+                    .observation
+                    .assets
+                    .iter()
+                    .filter(|asset| asset.asks.value.is_some())
+                    .count()
+            });
+        self.groups.push((
+            cutoff.receipt().group().group_position,
+            cutoff.decision_time().logical_time_utc_ms(),
+            known_first_asks,
+        ));
+        if self.fail_at_count == Some(self.groups.len()) {
+            return Err("original-observer-failure".into());
+        }
+        Ok(())
+    }
+}
 #[tokio::test(flavor = "current_thread")]
 async fn published_material_reuses_twice_without_raw_and_preserves_complete_run_and_fresh_state() {
     let temp = tempfile::tempdir().unwrap();
@@ -660,9 +701,43 @@ async fn published_material_reuses_twice_without_raw_and_preserves_complete_run_
             ..Default::default()
         };
         assert!(!probe.bought_first && probe.dispatched == 0);
-        let report = run_prepared_historical_v1(&description, &run, rules.clone(), &mut probe)
+        let mut observer = GroupObserver::default();
+        let report = if suffix == "reuse-b" {
+            run_prepared_historical_with_observer_v1(
+                &description,
+                &run,
+                rules.clone(),
+                &mut probe,
+                &mut observer,
+            )
             .await
-            .unwrap();
+            .unwrap()
+        } else {
+            run_prepared_historical_v1(&description, &run, rules.clone(), &mut probe)
+                .await
+                .unwrap()
+        };
+        if suffix == "reuse-b" {
+            let summary = report.delivery_summary.as_ref().unwrap();
+            assert_eq!(
+                observer.groups.len() as u64,
+                summary.before_operating_start.groups + summary.within_operating_range.groups
+            );
+            assert!(observer.groups[0].1 < BASE + 1000, "初始化组也逐组观察");
+            assert!(
+                observer
+                    .groups
+                    .windows(2)
+                    .all(|pair| pair[1].0 == pair[0].0 + 1)
+            );
+            assert!(
+                observer
+                    .groups
+                    .windows(2)
+                    .any(|pair| { pair[0].1 == pair[1].1 && pair[0].2 == 1 && pair[1].2 == 2 }),
+                "同毫秒第一组仍只有一腿盘口，不能合并为策略计算后的末组"
+            );
+        }
         let first = probe.first_economics.as_ref().unwrap();
         assert_eq!(
             serde_json::to_value(first).unwrap(),
@@ -688,6 +763,49 @@ async fn published_material_reuses_twice_without_raw_and_preserves_complete_run_
     for (path, bytes) in original {
         assert_eq!(std::fs::read(config.work_root.join(path)).unwrap(), bytes);
     }
+}
+#[tokio::test(flavor = "current_thread")]
+async fn public_group_observer_failure_keeps_the_original_error_and_stops_before_later_groups() {
+    let temp = tempfile::tempdir().unwrap();
+    let (config, rules) = setup(temp.path());
+    let description = prepare_and_publish_historical_run_v1(&config.preparation, None).unwrap();
+    let run = reuse_outputs(&config, &temp.path().join("observer-failure"));
+    let mut observer = GroupObserver {
+        fail_at_count: Some(2),
+        ..Default::default()
+    };
+    let mut strategy = Probe {
+        rules: Some(rules.clone()),
+        ..Default::default()
+    };
+    let failure = run_prepared_historical_with_observer_v1(
+        &description,
+        &run,
+        rules,
+        &mut strategy,
+        &mut observer,
+    )
+    .await
+    .unwrap_err();
+    let HistoricalFailureCauseV1::Material(error) = failure.cause else {
+        panic!("观察错误必须原样交回")
+    };
+    assert_eq!(error.to_string(), "original-observer-failure");
+    let report = failure.report.unwrap();
+    assert_eq!(report.end_reason, HistoricalEndReasonV1::Failure);
+    assert!(!report.recording_drained);
+    assert!(!run.result_path.exists());
+    assert_eq!(observer.groups.len(), 2);
+    assert_eq!(
+        report
+            .observation_cutoff
+            .unwrap()
+            .receipt()
+            .group()
+            .group_position,
+        observer.groups.last().unwrap().0
+    );
+    assert!(!strategy.bought_first, "失败组不能继续进入策略动作");
 }
 #[tokio::test(flavor = "current_thread")]
 async fn prepared_description_rejects_version_prefix_missing_market_and_hidden_mix_at_real_boundaries()

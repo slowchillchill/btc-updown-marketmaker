@@ -109,6 +109,18 @@ impl From<&HistoricalRunConfigV1> for HistoricalPreparedRunConfigV1 {
         }
     }
 }
+/// 受信内部观察消费回调；每个公共组成功应用后、下一公共组或隐藏桶前调用一次。
+///
+/// 可变借用用于复用 Shared 的反馈消费和当前组账户冻结，不能视作类型层只读。
+/// 调用方只能消费当前观察，不得提交意图、改变时钟或主动推进来源/隐藏桶。
+/// 模型暖态范围及诊断输出由调用方维护，不改变历史宿主的策略和时序。
+pub trait HistoricalPublicGroupObserverV1 {
+    fn observe_public_group(
+        &mut self,
+        shared: &mut SharedExecutionV2,
+        driver: &mut PublicConsumptionStateV1,
+    ) -> Result<(), MaterialError>;
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub enum HistoricalEndReasonV1 {
     RangeEnd,
@@ -379,6 +391,7 @@ pub async fn run_historical_v1<S: StrategyV1>(
         metadata_config,
         rules,
         strategy,
+        None,
     )
     .await
 }
@@ -395,6 +408,26 @@ pub async fn run_prepared_historical_v1<S: StrategyV1>(
     rules: Arc<SealedProcessRuleSnapshotV3>,
     strategy: &mut S,
 ) -> Result<HistoricalRunReportV1, HistoricalRunFailureV1<S::Error>> {
+    run_prepared_material(description_path, config, rules, strategy, None).await
+}
+/// 在原历史装配和事件循环中逐组观察，包含经营范围开始前的已准备初始化组。
+/// 观察错误沿原失败报告返回；不把失败封为正常结束，也不继续消费后续组。
+pub async fn run_prepared_historical_with_observer_v1<S: StrategyV1>(
+    description_path: &std::path::Path,
+    config: &HistoricalPreparedRunConfigV1,
+    rules: Arc<SealedProcessRuleSnapshotV3>,
+    strategy: &mut S,
+    observer: &mut dyn HistoricalPublicGroupObserverV1,
+) -> Result<HistoricalRunReportV1, HistoricalRunFailureV1<S::Error>> {
+    run_prepared_material(description_path, config, rules, strategy, Some(observer)).await
+}
+async fn run_prepared_material<S: StrategyV1>(
+    description_path: &std::path::Path,
+    config: &HistoricalPreparedRunConfigV1,
+    rules: Arc<SealedProcessRuleSnapshotV3>,
+    strategy: &mut S,
+    observer: Option<&mut dyn HistoricalPublicGroupObserverV1>,
+) -> Result<HistoricalRunReportV1, HistoricalRunFailureV1<S::Error>> {
     let material =
         PreparedHistoricalMaterialV1::read(description_path).map_err(material_failure)?;
     let root = description_path
@@ -409,6 +442,7 @@ pub async fn run_prepared_historical_v1<S: StrategyV1>(
         metadata_config,
         rules,
         strategy,
+        observer,
     )
     .await
 }
@@ -419,6 +453,7 @@ async fn run_material<S: StrategyV1>(
     metadata_config: serde_json::Value,
     rules: Arc<SealedProcessRuleSnapshotV3>,
     strategy: &mut S,
+    mut observer: Option<&mut dyn HistoricalPublicGroupObserverV1>,
 ) -> Result<HistoricalRunReportV1, HistoricalRunFailureV1<S::Error>> {
     let metadata = serde_json::json!({"config": metadata_config, "prepared_material": material, "source_manifests": prepared.source_manifests, "input_set_identity_sha256": prepared.input_set_identity_sha256, "source_identity_sha256": prepared.source_identity_sha256, "initialization": prepared.initialization, "public_prefix": prepared.hidden.prefix, "rules_file_sha256": rules.file_sha256(), "caller_role": SimCallerRoleV1::HistoricalBacktest, "recording_role": RunDurabilityRoleV2::FiniteHistorical, "economics_version": ACCOUNT_ECONOMICS_VERSION});
     let health_enabled = strategy.uses_source_health();
@@ -628,6 +663,11 @@ async fn run_material<S: StrategyV1>(
                         &mut delivery_summary.before_operating_start
                     };
                     phase.add(position, at, initial, dependency);
+                }
+                if let Some(observer) = observer.as_deref_mut() {
+                    observer
+                        .observe_public_group(&mut shared, &mut driver)
+                        .map_err(HistoricalFailureCauseV1::Material)?;
                 }
                 dirty |= operating;
             }
