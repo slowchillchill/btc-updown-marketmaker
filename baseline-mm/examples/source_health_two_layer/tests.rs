@@ -598,3 +598,116 @@ fn daily_scope_and_market_statistics_keep_denominators_and_censor_only_day_segme
         }
     }
 }
+
+#[test]
+fn midnight_and_clipped_starts_use_actual_visible_prior_state() {
+    let d = stats::DAY;
+    let temp = tempfile::tempdir().unwrap();
+    for case in [
+        "threshold",
+        "delayed-visible",
+        "evaluation-continuation",
+        "window-new-visible",
+    ] {
+        let path = temp.path().join(format!("{case}.zst"));
+        let clipped = matches!(case, "evaluation-continuation" | "window-new-visible");
+        let start = if clipped { d - 20 } else { d - 10 };
+        let evaluation_start = if case == "evaluation-continuation" {
+            d - 10
+        } else {
+            start
+        };
+        let window_start = if case == "window-new-visible" {
+            d - 10
+        } else {
+            start
+        };
+        let rows = match case {
+            "threshold" => vec![(d - 10, d - 10, d - 10)],
+            "delayed-visible" => vec![(d - 5, d - 5, d - 5), (d, d - 1, d - 100)],
+            "evaluation-continuation" => vec![(d - 20, d - 20, d - 100)],
+            _ => vec![(d - 20, d - 20, d - 20), (d - 10, d - 11, d - 100)],
+        };
+        let mut writer = compact::Writer::new(&path).unwrap();
+        for (at, received, event) in rows {
+            writer
+                .row(compact::Row {
+                    at,
+                    scope: 0,
+                    received,
+                    event,
+                    flags: 29,
+                    samples: 1,
+                    selected: 0,
+                })
+                .unwrap();
+        }
+        let material = compact::Material {
+            format: "health-scalars-zstd-v1".into(),
+            start,
+            end: d + 10,
+            selection: "fixture".into(),
+            scopes: vec![compact::Scope {
+                scope: pm(),
+                window: Some(MarketWindowV2 {
+                    start_at_utc_ms: window_start,
+                    end_at_utc_ms: d + 10,
+                }),
+            }],
+            records: writer.records,
+        };
+        writer.finish().unwrap();
+        let report = stats::analyze(
+            &path,
+            &material,
+            evaluation_start,
+            material.end,
+            vec![stats::Candidate {
+                name: "test".into(),
+                health: health(0, 10),
+            }],
+            0,
+        )
+        .unwrap();
+        let whole = &report.candidate_states["test"]["polymarket"];
+        let previous_day = &report.daily_candidate_states[&0]["test"]["polymarket"];
+        let new_day = &report.daily_candidate_states[&d]["test"]["polymarket"];
+        // 恰在D发生的真实变化归D日；旧事实延续跨日不增加变化。
+        let midnight_change = u64::from(matches!(case, "threshold" | "delayed-visible"));
+        assert_eq!(new_day.transitions, midnight_change, "{case}");
+        assert_eq!(
+            whole.transitions,
+            previous_day.transitions + new_day.transitions,
+            "{case}"
+        );
+        assert_eq!(
+            new_day.transitions_per_source_hour,
+            Some(midnight_change as f64 * 360_000.0)
+        );
+        assert_eq!(
+            new_day.left_censored_exceeded_at_start,
+            1 - midnight_change,
+            "{case}"
+        );
+        // 新可见事实即使携带旧接收/事件时间，也不能回写裁剪起点之前的状态。
+        assert_eq!(
+            whole.left_censored_exceeded_at_start,
+            u64::from(case == "evaluation-continuation"),
+            "{case}"
+        );
+        assert_eq!(whole.exceeded_episodes, 1);
+        assert_eq!(
+            whole.duration_ms["exceeded"],
+            if midnight_change == 1 { 10 } else { 20 }
+        );
+        for dimensional in [
+            &report.scopes[&0].daily[&d].candidate_states["test"],
+            &report.markets["condition"].daily[&d].candidate_states["test"],
+        ] {
+            assert_eq!(
+                serde_json::to_value(dimensional).unwrap(),
+                serde_json::to_value(new_day).unwrap()
+            );
+        }
+    }
+}

@@ -147,9 +147,18 @@ pub struct Report {
 #[derive(Default)]
 struct StateRun {
     label: String,
+    // 新片段开始前真正已可见的状态，不使用新事实回推历史。
+    prior_label: String,
     exceeded_ms: u64,
 }
 impl StateRun {
+    fn prior_state(&self) -> &str {
+        if self.label.is_empty() {
+            &self.prior_label
+        } else {
+            &self.label
+        }
+    }
     fn close(&mut self) -> StateTotals {
         let mut delta = StateTotals::default();
         if self.label == "exceeded" {
@@ -229,7 +238,7 @@ fn state_interval(
         let name = label(&source_health_state_v1(f, h, w[0]));
         let dt = (w[1] - w[0]) as u64;
         if name != run.label {
-            if !run.label.is_empty() {
+            if !run.prior_state().is_empty() && name != run.prior_state() {
                 totals.transitions += 1;
             }
             if run.label == "exceeded" {
@@ -241,16 +250,12 @@ fn state_interval(
             }
             if name == "exceeded" {
                 totals.exceeded_episodes += 1;
-                if run.label.is_empty()
-                    && matches!(
-                        source_health_state_v1(f, h, w[0].saturating_sub(1)),
-                        SourceHealthStateV1::Exceeded(_)
-                    )
-                {
+                if run.label.is_empty() && run.prior_label == "exceeded" {
                     totals.left_censored_exceeded_at_start += 1;
                 }
             }
             run.label = name.clone();
+            run.prior_label.clear();
         }
         *totals.duration_ms.entry(name.clone()).or_default() += dt;
         if name == "exceeded" {
@@ -389,6 +394,21 @@ impl Runner<'_> {
             return;
         }
         let w = spec.window.as_ref();
+        let left = self
+            .report
+            .start
+            .max(w.map_or(i64::MIN, |w| w.start_at_utc_ms));
+        if previous < left && to >= left {
+            // 此次区间使用上次可见的事实；窗口/评估起点前态在新行赋值前读取。
+            // 后续同毫秒新事实不能改写这个历史前态。
+            for (i, candidate) in self.report.candidates.iter().enumerate() {
+                self.current[id].runs[i].prior_label = label(&source_health_state_v1(
+                    self.current[id].facts.as_ref(),
+                    candidate.health.limits(k),
+                    left - 1,
+                ));
+            }
+        }
         let mut a = previous
             .max(self.report.start)
             .max(w.map_or(i64::MIN, |w| w.start_at_utc_ms));
@@ -446,7 +466,15 @@ impl Runner<'_> {
                 continue;
             }
             if self.current[id].day != Some(day) {
+                let prior: Vec<_> = self.current[id]
+                    .runs
+                    .iter()
+                    .map(|r| r.prior_state().to_owned())
+                    .collect();
                 self.close_runs(id, true);
+                for (run, prior) in self.current[id].daily_runs.iter_mut().zip(prior) {
+                    run.prior_label = prior;
+                }
                 self.current[id].day = Some(day);
             }
             add_distribution(
