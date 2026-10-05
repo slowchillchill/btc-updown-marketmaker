@@ -1751,6 +1751,130 @@ fn ordinary_gtc_price_support_reserves_fee_and_keeps_mixed_fok_completion() {
     ));
 }
 
+#[test]
+#[ignore = "显式导出公共 CPU 费用与完整价格支持，供 GPU 精确对照"]
+fn export_gpu_exact_buy_reference_v1() {
+    let mut h = fixture_config("2", ["0.01", "0.01"]);
+    let group = Arc::new(ready(&mut h));
+    let context = group.rows[0].action_context.as_ref().unwrap();
+    let snapshot = context.snapshot.clone();
+    let rules = context.rules.clone();
+    assert_eq!(rules.fee_rate.0, "0.07");
+    assert_eq!(rules.fee_exponent, 1);
+    let n = BigUint::from(500u32);
+    let tick = ExactDecimal("0.01".into());
+    let mut costs = Vec::new();
+    // 直接读取公共 LIMIT 成本；不在诊断中重写费用或资金可负担公式。
+    for (index, price, principal, fee) in [
+        (19u16, "0.19", "950000", "0"),
+        (20, "0.20", "1000000", "5600"),
+        (25, "0.25", "1250000", "6563"),
+    ] {
+        let cost = snapshot.limit_buy_cost_v1(&n, index, &tick, false).unwrap();
+        assert_eq!(cost.principal_micro.to_string(), principal);
+        assert_eq!(cost.fee_1e5_units.to_string(), fee);
+        costs.push(serde_json::json!({
+            "price_index": index,
+            "price_pusd_per_share": price,
+            "principal_micro": cost.principal_micro.to_string(),
+            "fee_1e5_units": cost.fee_1e5_units.to_string(),
+        }));
+    }
+    let mut actor = NativeActor::new(group, 0).unwrap();
+    actor.choose(2).unwrap();
+    while actor.state.stage == Stage::QuantityBranch {
+        let choice = segment_for(actor.state.interval.as_ref().unwrap(), &n);
+        actor.choose(choice).unwrap();
+    }
+    assert_eq!(actor.state.quantity_hundredths.as_ref(), Some(&n));
+    actor.choose(0).unwrap(); // A 普通 GTC。
+    actor.choose(1).unwrap(); // B FOK。
+    assert_eq!(actor.state.stage, Stage::Price(Leg::A));
+    let mask = actor.support().unwrap();
+    assert_eq!(mask.len(), 999);
+    assert!(mask[18]);
+    assert!(!mask[19]);
+    let a_price_coordinates = actor.price_indices().unwrap();
+    let a_price_prefix_path = actor.path.clone();
+    actor.choose(18).unwrap();
+    let b_price_coordinate = actor.price_indices().unwrap()[0];
+    assert_eq!(b_price_coordinate, 19);
+    actor.choose(b_price_coordinate as usize).unwrap();
+    let ModelIntentV1::SubmitPairedBuy {
+        condition_id,
+        orders,
+    } = actor.intent().unwrap().unwrap()
+    else {
+        panic!("诊断选择应形成双腿买入意图")
+    };
+    let BuyOrderIntentV1::GtcLimit {
+        limit_price_pusd_per_share,
+        size_shares,
+        post_only: false,
+    } = &orders[0].order
+    else {
+        panic!("A 腿应为普通 GTC")
+    };
+    let BuyOrderIntentV1::FokMarket {
+        spend_pusd,
+        worst_price_pusd_per_share,
+    } = &orders[1].order
+    else {
+        panic!("B 腿应为 FOK")
+    };
+    let report = serde_json::json!({
+        "schema": "gpu_exact_buy_reference_v1",
+        "fixture": {
+            "source": "model-train/native-inputs/src/buy_tests.rs::fixture_config/ready",
+            "reference_test": "ordinary_gtc_price_support_reserves_fee_and_keeps_mixed_fok_completion",
+            "cost_reference_test": "sim-system/src/buy_cost.rs::tests::limit_cost_branches_round_each_order_and_preserve_snapshot",
+            "rule_fixture": "sim-system/tests/fixtures/platform-rule-snapshot-v3-gate-b.json",
+            "rule_loader": "shared-run/tests/common/mod.rs::execution_with_minimum_v4",
+            "rule_snapshot_sha256": snapshot.file_sha256().0,
+        },
+        "input": {
+            "cash_pusd": "2",
+            "quantity_centishares": n.to_string(),
+            "ticks_pusd_per_share": ["0.01", "0.01"],
+            "fee_rate": rules.fee_rate.0,
+            "fee_exponent": rules.fee_exponent,
+            "limit_min_quantity_shares": rules.limit_min_quantity_shares.0,
+            "market_buy_min_spend_pusd": rules.market_buy_min_spend_pusd.0,
+            "post_only": false,
+            "family": "SubmitPairedBuy",
+            "variants": ["GtcLimit", "FokMarket"],
+        },
+        "limit_buy_cost_v1": costs,
+        "a_price_support": {
+            "axis": "zero-based coordinate c; price_index=c+1; price=price_index*tick",
+            "mask": mask,
+            "legal_coordinates": a_price_coordinates,
+            "prefix_path": a_price_prefix_path,
+        },
+        "selected_path": actor.path,
+        "selected_intent": {
+            "condition_id": condition_id.0,
+            "orders": [
+                {
+                    "token_id": orders[0].token_id.0,
+                    "type": "GtcLimit",
+                    "limit_price_pusd_per_share": limit_price_pusd_per_share.to_string(),
+                    "size_shares": size_shares.to_string(),
+                    "post_only": false,
+                },
+                {
+                    "token_id": orders[1].token_id.0,
+                    "type": "FokMarket",
+                    "spend_pusd": spend_pusd.to_string(),
+                    "worst_price_pusd_per_share": worst_price_pusd_per_share.to_string(),
+                },
+            ],
+        },
+    });
+    h.driver.stop_and_drain().unwrap();
+    println!("BTC_GPU_EXACT_REFERENCE_V1={report}");
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn paired_new_types_submit_together_gtc_fills_then_posts_remainder_and_fok_fails() {
     let mut h = fixture();
