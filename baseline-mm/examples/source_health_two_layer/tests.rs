@@ -354,3 +354,247 @@ fn day_long_no_message_age_bins_do_not_report_a_quantile_below_observed_support(
     assert_eq!(h.weight, (stats::DAY + 1000) as u64);
     assert_eq!(h.quantile(100, None), Some(2 * stats::DAY as u64));
 }
+
+#[test]
+fn same_ms_selection_and_facts_do_not_split_positive_duration_exceeded_runs() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut reports = Vec::new();
+    let mut h = health(0, 10);
+    h.chainlink_silence_normal_ms = 0;
+    h.chainlink_event_delay_normal_ms = 0;
+    h.chainlink_silence_ms = 10;
+    h.chainlink_event_delay_ms = 10;
+    for case in ["continuous", "same-ms", "positive-gap"] {
+        let path = temp.path().join(format!("{case}.zst"));
+        let mut writer = compact::Writer::new(&path).unwrap();
+        let selection = |at, mask| compact::Row {
+            at,
+            scope: compact::SELECT,
+            received: 0,
+            event: 0,
+            flags: 0,
+            samples: 0,
+            selected: mask,
+        };
+        let fact = |at, received| compact::Row {
+            at,
+            scope: 0,
+            received,
+            event: received,
+            flags: 29,
+            samples: 1,
+            selected: 0,
+        };
+        writer.row(selection(0, 4)).unwrap();
+        writer.row(fact(0, 0)).unwrap();
+        if case == "same-ms" {
+            writer.row(selection(20, 0)).unwrap();
+            writer.row(fact(20, 20)).unwrap();
+            writer.row(selection(20, 4)).unwrap();
+            writer.row(fact(20, 0)).unwrap();
+        }
+        if case == "positive-gap" {
+            writer.row(selection(20, 0)).unwrap();
+            writer.row(selection(25, 4)).unwrap();
+        }
+        let material = compact::Material {
+            format: "health-scalars-zstd-v1".into(),
+            start: 0,
+            end: 30,
+            selection: "fixture".into(),
+            scopes: vec![compact::Scope {
+                scope: SourceStreamScopeV1 {
+                    source: SourceStreamKindV1::ChainlinkSpot,
+                    condition_id: None,
+                    asset_or_symbol: "btc/usd".into(),
+                },
+                window: None,
+            }],
+            records: writer.records,
+        };
+        writer.finish().unwrap();
+        reports.push(
+            stats::analyze(
+                &path,
+                &material,
+                0,
+                30,
+                vec![stats::Candidate {
+                    name: "test".into(),
+                    health: h.clone(),
+                }],
+                0,
+            )
+            .unwrap(),
+        );
+    }
+    let original = &reports[0].candidate_states["test"]["chainlink"];
+    assert_eq!(original.duration_ms["exceeded"], 20);
+    assert_eq!(original.exceeded_episodes, 1);
+    assert_eq!(original.longest_exceeded_ms, 20);
+    assert_eq!(original.unfinished_exceeded_at_end, 1);
+    assert_eq!(
+        serde_json::to_value(original).unwrap(),
+        serde_json::to_value(&reports[1].candidate_states["test"]["chainlink"]).unwrap()
+    );
+    let gap = &reports[2].candidate_states["test"]["chainlink"];
+    assert_eq!(gap.duration_ms["exceeded"], 15);
+    assert_eq!(gap.exceeded_episodes, 2);
+    assert_eq!(gap.longest_exceeded_ms, 10);
+    assert_eq!(gap.unfinished_exceeded_at_end, 2);
+    // 同毫秒暂态不占时间；三个真实有效确认仍各自进入来源样本。
+    assert_eq!(
+        reports[1].source_distributions["ChainlinkSpot"]
+            .arrival_delay_samples
+            .weight,
+        3
+    );
+}
+
+#[test]
+fn daily_scope_and_market_statistics_keep_denominators_and_censor_only_day_segments() {
+    let d = stats::DAY;
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("s.zst");
+    let mut writer = compact::Writer::new(&path).unwrap();
+    let mut scopes = Vec::new();
+    for (condition, asset) in [("a", "up"), ("a", "down"), ("b", "up")] {
+        scopes.push(compact::Scope {
+            scope: SourceStreamScopeV1 {
+                source: SourceStreamKindV1::PolymarketBook,
+                condition_id: Some(ConditionId(condition.into())),
+                asset_or_symbol: asset.into(),
+            },
+            window: Some(MarketWindowV2 {
+                start_at_utc_ms: d - 20,
+                end_at_utc_ms: d + 20,
+            }),
+        });
+    }
+    let fact = |at, scope| compact::Row {
+        at,
+        scope,
+        received: at,
+        event: at,
+        flags: 29,
+        samples: 1,
+        selected: 0,
+    };
+    // a/up连续静默跨午夜；a/down每5ms确认；b/up直到午夜才有业务事实。
+    writer.row(fact(d - 20, 0)).unwrap();
+    for at in (d - 20..d + 20).step_by(5) {
+        writer.row(fact(at, 1)).unwrap();
+        if at == d {
+            writer.row(fact(at, 2)).unwrap();
+        }
+    }
+    let material = compact::Material {
+        format: "health-scalars-zstd-v1".into(),
+        start: d - 30,
+        end: d + 30,
+        selection: "fixture".into(),
+        scopes,
+        records: writer.records,
+    };
+    writer.finish().unwrap();
+    let report = stats::analyze(
+        &path,
+        &material,
+        material.start,
+        material.end,
+        vec![stats::Candidate {
+            name: "test".into(),
+            health: health(5, 10),
+        }],
+        0,
+    )
+    .unwrap();
+    let up = &report.scopes[&0];
+    let t = &up.totals.candidate_states["test"];
+    assert_eq!(t.duration_ms["exceeded"], 30);
+    assert_eq!(t.exceeded_episodes, 1);
+    assert_eq!(t.longest_exceeded_ms, 30);
+    assert_eq!(t.unfinished_exceeded_at_end, 1);
+    let before = &up.daily[&0].candidate_states["test"];
+    let after = &up.daily[&d].candidate_states["test"];
+    assert_eq!(
+        (
+            before.duration_ms["exceeded"],
+            after.duration_ms["exceeded"]
+        ),
+        (10, 20)
+    );
+    assert_eq!((before.exceeded_episodes, after.exceeded_episodes), (1, 1));
+    assert_eq!(
+        (before.longest_exceeded_ms, after.longest_exceeded_ms),
+        (10, 20)
+    );
+    assert_eq!(after.left_censored_exceeded_at_start, 1);
+    assert_eq!(before.unfinished_exceeded_at_end, 1);
+    assert_eq!(after.transitions, 0); // 午夜截断不是健康切换。
+    assert_eq!(
+        report.scopes[&1].totals.candidate_states["test"].duration_ms["normal"],
+        40
+    );
+    assert_eq!(
+        report.scopes[&1].totals.candidate_states["test"].exceeded_episodes,
+        0
+    );
+    assert_eq!(
+        report.scopes[&2].daily[&0]
+            .source_distribution
+            .exclusions_ms["UnknownBusinessProgress"],
+        20
+    );
+    assert_eq!(
+        report.scopes[&2].daily[&d]
+            .source_distribution
+            .silence_time_ms
+            .weight,
+        20
+    );
+    assert_eq!(report.markets["a"].scope_ids, vec![0, 1]);
+    assert_eq!(
+        report.markets["a"]
+            .totals
+            .source_distribution
+            .silence_time_ms
+            .weight,
+        80
+    );
+    assert_eq!(
+        report.markets["b"]
+            .totals
+            .source_distribution
+            .silence_time_ms
+            .weight,
+        20
+    );
+    assert_eq!(
+        report.markets["b"].totals.source_distribution.exclusions_ms["UnknownBusinessProgress"],
+        20
+    );
+    assert_eq!(report.scopes[&0].identity.scope.asset_or_symbol, "up");
+    let group = &report.candidate_states["test"]["polymarket"];
+    assert_eq!(group.duration_ms.values().sum::<u64>(), 120);
+    assert_eq!(group.duration_ms["exceeded"], 40);
+    assert_eq!(group.exceeded_episodes, 2);
+    for day in [0, d] {
+        for (state, duration) in
+            &report.daily_candidate_states[&day]["test"]["polymarket"].duration_ms
+        {
+            let summed: u64 = report
+                .scopes
+                .values()
+                .map(|s| {
+                    s.daily[&day].candidate_states["test"]
+                        .duration_ms
+                        .get(state)
+                        .copied()
+                        .unwrap_or(0)
+                })
+                .sum();
+            assert_eq!(*duration, summed);
+        }
+    }
+}
