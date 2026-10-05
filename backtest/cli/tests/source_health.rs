@@ -1040,3 +1040,64 @@ async fn real_strategy_enabled_depth_trade_and_all_stream_silence_cancel_actual_
         assert!(report.source_health.unwrap().qualification_calls > 0);
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn real_strategy_normal_boundary_keeps_risk_orders_and_max_boundary_cancels() {
+    for (normal, max) in [(500, 1500), (1500, 1500), (0, 0)] {
+        let temp = tempfile::tempdir().unwrap();
+        let (config, rules) = fixture(temp.path(), "100000", &[800, 5000]);
+        let mut c = strategy_config();
+        c.health.chainlink_silence_normal_ms = normal;
+        c.health.chainlink_silence_ms = max;
+        c.health.chainlink_event_delay_normal_ms = normal;
+        c.health.chainlink_event_delay_ms = max;
+        if max == 0 {
+            c.health.polymarket_silence_ms = 0;
+            c.health.polymarket_event_delay_ms = 0;
+            c.health.binance_trade_silence_ms = 0;
+            c.health.binance_trade_event_delay_ms = 0;
+            c.health.binance_depth_silence_ms = 0;
+            c.health.binance_depth_event_delay_ms = 0;
+        }
+        let (_report, trace) = run(&config, rules, c).await;
+        if normal < max {
+            assert!(
+                trace
+                    .decisions
+                    .iter()
+                    .any(
+                        |(_, d, _)| d.markets.iter().any(|m| m.source_health.is_empty()
+                            && m.source_health_states
+                                .iter()
+                                .any(|s| s.scope.source == SourceStreamKindV1::ChainlinkSpot
+                                    && s.state == SourceHealthStateV1::Elevated))
+                    )
+            );
+            assert!(
+                !trace
+                    .sent
+                    .iter()
+                    .any(|(at, k)| *at < BASE + 2300 && k == "cancel")
+            );
+            assert!(
+                trace
+                    .sent
+                    .iter()
+                    .any(|(at, k)| *at >= BASE + 2300 && k == "cancel")
+            );
+            assert!(trace.sent.iter().any(|(_, k)| k == "pair"));
+        } else {
+            assert!(
+                trace
+                    .decisions
+                    .iter()
+                    .all(|(_, d, _)| d.markets.iter().all(|m| m
+                        .source_health_states
+                        .iter()
+                        .all(|s| s.scope.source != SourceStreamKindV1::ChainlinkSpot
+                            || s.state != SourceHealthStateV1::Elevated)))
+            );
+        }
+        assert!(!trace.decisions.is_empty());
+    }
+}

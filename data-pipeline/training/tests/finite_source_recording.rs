@@ -149,7 +149,9 @@ fn compact_finite_consumption_crosses_midnight_without_recording_and_propagates_
         metadata_initialization: None,
     };
     let mut confirmations = Vec::new();
-    let core = prepare_finite_source_progress_v1(&c, None, |_, applied, _| {
+    let core = prepare_finite_source_progress_v1(&c, None, |_, applied, _, current_core| {
+        assert_eq!(current_core.applied_prefix(), applied.applied_prefix);
+        let _on_demand_counts = current_core.object_counts();
         for g in &applied.closed_groups {
             for p in &g.source_progress_changes {
                 confirmations.push(
@@ -166,9 +168,17 @@ fn compact_finite_consumption_crosses_midnight_without_recording_and_propagates_
     assert_eq!(confirmations, [86_399_500, 86_400_500, 86_401_500]);
     assert_eq!(core.applied_prefix().next_input_position, 4);
     assert!(!c.work_root.join("public").exists());
+    c.work_root = temp.path().join("without-telemetry");
+    let without = prepare_finite_source_progress_v1(&c, None, |_, _, _, _| Ok(())).unwrap();
+    assert_eq!(core.applied_prefix(), without.applied_prefix());
+    assert_eq!(core.object_counts(), without.object_counts());
+    assert_eq!(
+        core.current_chainlink_spot(),
+        without.current_chainlink_spot()
+    );
     c.files = vec![file(temp.path(), "bad", &[row(86_403_000, "not-a-price")])];
     c.work_root = temp.path().join("bad-compact");
-    let error = prepare_finite_source_progress_v1(&c, None, |_, _, _| Ok(()))
+    let error = prepare_finite_source_progress_v1(&c, None, |_, _, _, _| Ok(()))
         .err()
         .unwrap();
     assert!(error.to_string().contains("value"), "{error}");

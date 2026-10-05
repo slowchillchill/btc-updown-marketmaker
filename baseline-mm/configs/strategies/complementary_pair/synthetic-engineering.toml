@@ -1,12 +1,20 @@
 # 合成工程夹具；未经数据校准或正式风险审定，不能作为经营配置或交易默认值。
 [health]
+polymarket_silence_normal_ms = 0
 polymarket_silence_ms = 60000
+polymarket_event_delay_normal_ms = 0
 polymarket_event_delay_ms = 60000
+chainlink_silence_normal_ms = 0
 chainlink_silence_ms = 60000
+chainlink_event_delay_normal_ms = 0
 chainlink_event_delay_ms = 60000
+binance_trade_silence_normal_ms = 0
 binance_trade_silence_ms = 60000
+binance_trade_event_delay_normal_ms = 0
 binance_trade_event_delay_ms = 60000
+binance_depth_silence_normal_ms = 0
 binance_depth_silence_ms = 60000
+binance_depth_event_delay_normal_ms = 0
 binance_depth_event_delay_ms = 60000
 
 [probability]

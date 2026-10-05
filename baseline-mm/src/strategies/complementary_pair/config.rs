@@ -15,13 +15,21 @@ pub struct ComplementaryPairConfigV1 {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceHealthConfigV1 {
+    pub polymarket_silence_normal_ms: u64,
     pub polymarket_silence_ms: u64,
+    pub polymarket_event_delay_normal_ms: u64,
     pub polymarket_event_delay_ms: u64,
+    pub chainlink_silence_normal_ms: u64,
     pub chainlink_silence_ms: u64,
+    pub chainlink_event_delay_normal_ms: u64,
     pub chainlink_event_delay_ms: u64,
+    pub binance_trade_silence_normal_ms: u64,
     pub binance_trade_silence_ms: u64,
+    pub binance_trade_event_delay_normal_ms: u64,
     pub binance_trade_event_delay_ms: u64,
+    pub binance_depth_silence_normal_ms: u64,
     pub binance_depth_silence_ms: u64,
+    pub binance_depth_event_delay_normal_ms: u64,
     pub binance_depth_event_delay_ms: u64,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -76,4 +84,86 @@ impl ComplementaryPairConfigV1 {
     pub fn parse_toml(text: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(text)
     }
+}
+
+impl SourceHealthConfigV1 {
+    /// 原八项仍为 max；normal 与 max 相等或为零均合法。
+    pub fn limits(&self, source: contracts::SourceStreamKindV1) -> SourceHealthLimitsV1 {
+        use contracts::SourceStreamKindV1 as K;
+        let (sn, an, sm, am) = match source {
+            K::PolymarketBook => (
+                self.polymarket_silence_normal_ms,
+                self.polymarket_event_delay_normal_ms,
+                self.polymarket_silence_ms,
+                self.polymarket_event_delay_ms,
+            ),
+            K::BinanceAggregateTrade => (
+                self.binance_trade_silence_normal_ms,
+                self.binance_trade_event_delay_normal_ms,
+                self.binance_trade_silence_ms,
+                self.binance_trade_event_delay_ms,
+            ),
+            K::BinanceDepth => (
+                self.binance_depth_silence_normal_ms,
+                self.binance_depth_event_delay_normal_ms,
+                self.binance_depth_silence_ms,
+                self.binance_depth_event_delay_ms,
+            ),
+            _ => (
+                self.chainlink_silence_normal_ms,
+                self.chainlink_event_delay_normal_ms,
+                self.chainlink_silence_ms,
+                self.chainlink_event_delay_ms,
+            ),
+        };
+        let ms = |v| i64::try_from(v).unwrap_or(i64::MAX);
+        SourceHealthLimitsV1 {
+            silence_normal_ms: ms(sn),
+            event_normal_ms: ms(an),
+            silence_max_ms: ms(sm),
+            event_max_ms: ms(am),
+        }
+    }
+    pub fn normal_exceeds_max(&self) -> bool {
+        [
+            (
+                self.polymarket_silence_normal_ms,
+                self.polymarket_silence_ms,
+            ),
+            (
+                self.polymarket_event_delay_normal_ms,
+                self.polymarket_event_delay_ms,
+            ),
+            (self.chainlink_silence_normal_ms, self.chainlink_silence_ms),
+            (
+                self.chainlink_event_delay_normal_ms,
+                self.chainlink_event_delay_ms,
+            ),
+            (
+                self.binance_trade_silence_normal_ms,
+                self.binance_trade_silence_ms,
+            ),
+            (
+                self.binance_trade_event_delay_normal_ms,
+                self.binance_trade_event_delay_ms,
+            ),
+            (
+                self.binance_depth_silence_normal_ms,
+                self.binance_depth_silence_ms,
+            ),
+            (
+                self.binance_depth_event_delay_normal_ms,
+                self.binance_depth_event_delay_ms,
+            ),
+        ]
+        .iter()
+        .any(|(normal, max)| normal > max)
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceHealthLimitsV1 {
+    pub silence_normal_ms: i64,
+    pub event_normal_ms: i64,
+    pub silence_max_ms: i64,
+    pub event_max_ms: i64,
 }

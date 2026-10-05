@@ -1,7 +1,7 @@
 mod account;
 mod construction;
 mod health;
-pub use health::{SourceHealthFactsV1, source_health_failure_v1};
+pub use health::{SourceHealthFactsV1, source_health_failure_v1, source_health_state_v1};
 mod mechanics;
 mod quoting;
 mod repair;
@@ -311,6 +311,7 @@ impl StrategyV1 for ComplementaryPairV1 {
                 comparison: None,
                 maximum_repair_price: None,
                 source_health,
+                source_health_states: self.health_states(o, &pair_sources, now),
             };
             let trading = now >= o.market.window.start_at_utc_ms
                 && now < o.market.window.end_at_utc_ms

@@ -76,7 +76,9 @@ pub struct MarketDecisionDiagnosticV1 {
     pub unavailable: Vec<ActionUnavailableV1>,
     pub comparison: Option<RepairComparisonV1>,
     pub maximum_repair_price: Option<ExactDecimal>,
+    /// 仅阻断项，保持原动作许可语义。
     pub source_health: Vec<SourceHealthIssueV1>,
+    pub source_health_states: Vec<SourceHealthStatusV1>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SourceHealthFailureV1 {
@@ -145,4 +147,25 @@ pub struct ComplementaryPairDiagnosticV1 {
     pub markets: Vec<MarketDecisionDiagnosticV1>,
     pub profit_allocations: Vec<ProfitAllocationV1>,
     pub action_health_dependencies: Vec<ActionHealthDependencyV1>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SourceHealthStateV1 {
+    Normal,
+    Elevated,
+    Exceeded(SourceHealthFailureV1),
+    Unavailable(SourceHealthFailureV1),
+}
+impl SourceHealthStateV1 {
+    pub fn failure(&self) -> Option<SourceHealthFailureV1> {
+        match self {
+            Self::Exceeded(f) | Self::Unavailable(f) => Some(f.clone()),
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SourceHealthStatusV1 {
+    pub scope: SourceStreamScopeV1,
+    pub state: SourceHealthStateV1,
 }

@@ -149,7 +149,7 @@ fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let core = prepare_finite_source_progress_v1(
         &config.preparation,
         Some(&notifier),
-        |input, applied, binding| {
+        |input, applied, binding, _core| {
             inputs += 1;
             normal_end = matches!(&input.ingress, DptIngressV1::EndOfInput);
             if let Some(binding) = binding {

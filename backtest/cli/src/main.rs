@@ -48,13 +48,30 @@ impl ParameterType {
 }
 // 原策略字段类型决定覆盖解析，不依赖文件中的占位值或复制策略默认。
 const PARAMETERS: &[(&str, ParameterType)] = &[
+    ("health.polymarket_silence_normal_ms", ParameterType::U64),
     ("health.polymarket_silence_ms", ParameterType::U64),
+    (
+        "health.polymarket_event_delay_normal_ms",
+        ParameterType::U64,
+    ),
     ("health.polymarket_event_delay_ms", ParameterType::U64),
+    ("health.chainlink_silence_normal_ms", ParameterType::U64),
     ("health.chainlink_silence_ms", ParameterType::U64),
+    ("health.chainlink_event_delay_normal_ms", ParameterType::U64),
     ("health.chainlink_event_delay_ms", ParameterType::U64),
+    ("health.binance_trade_silence_normal_ms", ParameterType::U64),
     ("health.binance_trade_silence_ms", ParameterType::U64),
+    (
+        "health.binance_trade_event_delay_normal_ms",
+        ParameterType::U64,
+    ),
     ("health.binance_trade_event_delay_ms", ParameterType::U64),
+    ("health.binance_depth_silence_normal_ms", ParameterType::U64),
     ("health.binance_depth_silence_ms", ParameterType::U64),
+    (
+        "health.binance_depth_event_delay_normal_ms",
+        ParameterType::U64,
+    ),
     ("health.binance_depth_event_delay_ms", ParameterType::U64),
     ("probability.volatility_window_ms", ParameterType::U64),
     (

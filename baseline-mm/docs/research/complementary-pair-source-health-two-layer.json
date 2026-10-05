@@ -1,0 +1,571 @@
+{
+  "task": "#185 task3 source health two layers",
+  "engineering_source_commit": "ae6d928774e2ad39049aa4b412b1abfc9fed3548",
+  "report_format": "source-health-two-layer-report-v2",
+  "scope": {
+    "real_raw_eighteen_day_runs": 0,
+    "real_raw_twelve_minute_reruns": 0,
+    "existing_compact_input": "issue-246/compact-source-progress-20261005/one-run",
+    "consumer_mode": "legacy-consumer-validation/all-common-scopes-not-production-selection",
+    "parameter_use": "explicit synthetic engineering; normal=0, max=60000ms, not formally adopted"
+  },
+  "review_rework": {
+    "reviewed_old_head": "a79c739b4f136a771f1d5a61e49c4df3ae624543",
+    "review": 5409616380,
+    "changes": [
+      "positive-duration selection gaps close runs; same-ms transient facts/masks do not split runs",
+      "per-scope condition/asset/window own and selected distributions, candidate states, daily dimensions",
+      "per-condition PM asset-ms/asset-episode aggregate without common-source copies",
+      "daily group candidate states, explicit left/right censor and observed-source-hour transition frequency"
+    ],
+    "same_ms_counterexample": {
+      "result": "passed",
+      "counterexample": "[0,30), fact recv/event=0, normal=0,max=10; add SELECT20ms mask0 then mask4",
+      "checks": {
+        "continuous": {
+          "v1": {
+            "duration_ms": {
+              "elevated": 10,
+              "exceeded": 20
+            },
+            "exceeded_episodes": 1,
+            "longest_exceeded_ms": 20,
+            "unfinished_exceeded_at_end": 1
+          },
+          "v2": {
+            "duration_ms": {
+              "elevated": 10,
+              "exceeded": 20
+            },
+            "exceeded_episodes": 1,
+            "longest_exceeded_ms": 20,
+            "unfinished_exceeded_at_end": 1
+          }
+        },
+        "same-ms-off-on": {
+          "v1": {
+            "duration_ms": {
+              "elevated": 10,
+              "exceeded": 20
+            },
+            "exceeded_episodes": 2,
+            "longest_exceeded_ms": 10,
+            "unfinished_exceeded_at_end": 2
+          },
+          "v2": {
+            "duration_ms": {
+              "elevated": 10,
+              "exceeded": 20
+            },
+            "exceeded_episodes": 1,
+            "longest_exceeded_ms": 20,
+            "unfinished_exceeded_at_end": 1
+          }
+        }
+      }
+    },
+    "dimensions_comparison": {
+      "result": "passed",
+      "input_journal_rows": 388930,
+      "scalar_records": 388931,
+      "selection_mode": "legacy-consumer-validation/all-common-scopes-not-production-selection",
+      "scope_checks": [
+        {
+          "scope_id": 0,
+          "source": "PolymarketBook",
+          "condition_id": "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20",
+          "asset": "102849750551531882592626838681952450548049709627821897076456675572108598447456",
+          "known_ms": 297768,
+          "excluded_ms": {
+            "UnknownBusinessProgress": 2232
+          },
+          "arrival_samples": 63907,
+          "state_ms": {
+            "unavailable/UnknownBusinessProgress": 2232,
+            "elevated": 297768
+          },
+          "comparison": "passed"
+        },
+        {
+          "scope_id": 1,
+          "source": "PolymarketBook",
+          "condition_id": "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20",
+          "asset": "75902788286939706379430622188372065513567695002626149478929368630888442189116",
+          "known_ms": 297768,
+          "excluded_ms": {
+            "UnknownBusinessProgress": 2232
+          },
+          "arrival_samples": 63791,
+          "state_ms": {
+            "unavailable/UnknownBusinessProgress": 2232,
+            "elevated": 297768
+          },
+          "comparison": "passed"
+        },
+        {
+          "scope_id": 2,
+          "source": "ChainlinkSpot",
+          "condition_id": null,
+          "asset": "btc/usd",
+          "known_ms": 717749,
+          "excluded_ms": {
+            "UnknownBusinessProgress": 2251
+          },
+          "arrival_samples": 659,
+          "state_ms": {
+            "unavailable/UnknownBusinessProgress": 2251,
+            "elevated": 717749
+          },
+          "comparison": "passed"
+        },
+        {
+          "scope_id": 3,
+          "source": "ChainlinkTwapSixty",
+          "condition_id": null,
+          "asset": "btc/usd",
+          "known_ms": 717749,
+          "excluded_ms": {
+            "UnknownBusinessProgress": 2251
+          },
+          "arrival_samples": 661,
+          "state_ms": {
+            "unavailable/UnknownBusinessProgress": 2251,
+            "elevated": 717749
+          },
+          "comparison": "passed"
+        },
+        {
+          "scope_id": 4,
+          "source": "BinanceAggregateTrade",
+          "condition_id": null,
+          "asset": "BTCUSDT",
+          "known_ms": 717749,
+          "excluded_ms": {
+            "UnknownBusinessProgress": 2251
+          },
+          "arrival_samples": 4405,
+          "state_ms": {
+            "unavailable/UnknownBusinessProgress": 2251,
+            "elevated": 717749
+          },
+          "comparison": "passed"
+        },
+        {
+          "scope_id": 5,
+          "source": "PolymarketBook",
+          "condition_id": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe",
+          "asset": "79296106124034057884863934885073554921845356166439766327235136060874535070646",
+          "known_ms": 300000,
+          "excluded_ms": {},
+          "arrival_samples": 70040,
+          "state_ms": {
+            "elevated": 300000
+          },
+          "comparison": "passed"
+        },
+        {
+          "scope_id": 6,
+          "source": "PolymarketBook",
+          "condition_id": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe",
+          "asset": "32873955818661995964832066100538906828570131847504044153189153470372430981428",
+          "known_ms": 300000,
+          "excluded_ms": {},
+          "arrival_samples": 70248,
+          "state_ms": {
+            "elevated": 300000
+          },
+          "comparison": "passed"
+        },
+        {
+          "scope_id": 7,
+          "source": "BinanceDepth",
+          "condition_id": null,
+          "asset": "BTCUSDT",
+          "known_ms": 717486,
+          "excluded_ms": {
+            "UnknownBusinessProgress": 2465,
+            "UnknownEventTime": 49
+          },
+          "arrival_samples": 7174,
+          "state_ms": {
+            "unavailable/UnknownBusinessProgress": 2465,
+            "unavailable/UnknownEventTime": 49,
+            "elevated": 717486
+          },
+          "comparison": "passed"
+        },
+        {
+          "scope_id": 8,
+          "source": "PolymarketBook",
+          "condition_id": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e",
+          "asset": "42363345784452904958376528930765132541509012872905911609444246938487536862941",
+          "known_ms": 120000,
+          "excluded_ms": {},
+          "arrival_samples": 42932,
+          "state_ms": {
+            "elevated": 120000
+          },
+          "comparison": "passed"
+        },
+        {
+          "scope_id": 9,
+          "source": "PolymarketBook",
+          "condition_id": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e",
+          "asset": "60895611540746646210134562587716764512450858012586455621197756705914039654323",
+          "known_ms": 120000,
+          "excluded_ms": {},
+          "arrival_samples": 42970,
+          "state_ms": {
+            "elevated": 120000
+          },
+          "comparison": "passed"
+        },
+        {
+          "scope_id": 10,
+          "source": "PolymarketBook",
+          "condition_id": "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92",
+          "asset": "73358320795011273563026969773507580412060483443712916151720949283387600431182",
+          "known_ms": 0,
+          "excluded_ms": {},
+          "arrival_samples": 0,
+          "state_ms": {},
+          "comparison": "passed"
+        },
+        {
+          "scope_id": 11,
+          "source": "PolymarketBook",
+          "condition_id": "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92",
+          "asset": "82066467096712061517581429200890580195149475776906380274296444019672509402557",
+          "known_ms": 0,
+          "excluded_ms": {},
+          "arrival_samples": 0,
+          "state_ms": {},
+          "comparison": "passed"
+        }
+      ],
+      "market_checks": [
+        {
+          "condition": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe",
+          "scope_ids": [
+            5,
+            6
+          ],
+          "known_asset_ms": 600000,
+          "state_asset_ms": {
+            "elevated": 600000
+          },
+          "comparison": "passed"
+        },
+        {
+          "condition": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e",
+          "scope_ids": [
+            8,
+            9
+          ],
+          "known_asset_ms": 240000,
+          "state_asset_ms": {
+            "elevated": 240000
+          },
+          "comparison": "passed"
+        },
+        {
+          "condition": "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20",
+          "scope_ids": [
+            0,
+            1
+          ],
+          "known_asset_ms": 595536,
+          "state_asset_ms": {
+            "unavailable/UnknownBusinessProgress": 4464,
+            "elevated": 595536
+          },
+          "comparison": "passed"
+        },
+        {
+          "condition": "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92",
+          "scope_ids": [
+            10,
+            11
+          ],
+          "known_asset_ms": 0,
+          "state_asset_ms": {},
+          "comparison": "passed"
+        }
+      ],
+      "group_and_daily_checks": 4,
+      "comparison": "independent original compact journal arithmetic vs v2 per-scope/per-market/per-day report; no original Parquet or eighteen-day run"
+    },
+    "artifact": {
+      "binary_sha256": "134eec330853f79f2ed2e899607f0d0a7354043ce51565306b81c5477db6e383",
+      "binary_bytes": 19705216,
+      "report_bytes": 177192,
+      "compressed_material_reused": true,
+      "new_import_runs": 0
+    },
+    "finite_analysis": {
+      "wall_seconds": 0.29,
+      "user_seconds": 0.28,
+      "system_seconds": 0.0,
+      "peak_rss_kib": 7572,
+      "exit_code": 0,
+      "limits": "warm existing compressed material; centisecond GNU time; no raw preparation/core, not eighteen-day resource evidence"
+    },
+    "verification": {
+      "workspace": {
+        "passed": 1372,
+        "failed": 0,
+        "ignored": 23,
+        "exit_code": 0,
+        "explicit_skip": "four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second"
+      },
+      "research_tests": {
+        "passed": 9,
+        "failed": 0
+      },
+      "fmt": "passed",
+      "clippy": "baseline-mm all-targets passed with existing repository warnings",
+      "midnight_counterexample": "continuous 30ms exceeded: global one episode/longest30ms; daily10ms+20ms segments, daily counts not summed as global incidents; next-day left-censored, no fake midnight transition"
+    },
+    "archive_entry": "issue-185/source-health-two-layer-20261005/review-rework-v2",
+    "prior_evidence": "original v1 logs/binaries/failure and passed materials kept, new report does not overwrite them",
+    "engineering_source_commit": "dc0305aff06df5d66f9b79f055c242f64e111eb3"
+  },
+  "original_v1_delivery": {
+    "task": "#185 task3 source health two layers",
+    "engineering_source_commit": "3779fce58cd1300cddc85c1b5c0adc9be9a873ef",
+    "scope": {
+      "real_raw_eighteen_day_runs": 0,
+      "real_raw_twelve_minute_reruns": 0,
+      "existing_compact_input": "issue-246/compact-source-progress-20261005/one-run",
+      "consumer_mode": "legacy-consumer-validation/all-common-scopes-not-production-selection",
+      "parameter_use": "explicit synthetic engineering; normal=0, max=60000ms, not formally adopted"
+    },
+    "artifact": {
+      "scalar_records": 388931,
+      "fixed_uncompressed_record_bytes": 34,
+      "compressed_scalar_bytes": 1544900,
+      "scope_dictionary_bytes": 3942,
+      "original_journal_bytes": 156083054,
+      "binary_sha256": "cfb367904c697364c65cc5169c22d035201f0716aa3e4fb4297a25b03c2e7f87",
+      "binary_bytes": 19633200
+    },
+    "final_measurement": {
+      "import": {
+        "wall_seconds": 0.36,
+        "user_seconds": 0.32,
+        "system_seconds": 0.03,
+        "peak_rss_kib": 8044,
+        "exit_code": 0
+      },
+      "analyze": {
+        "wall_seconds": 0.12,
+        "user_seconds": 0.11,
+        "system_seconds": 0,
+        "peak_rss_kib": 7564,
+        "exit_code": 0
+      },
+      "limits": "warm finite archived material; GNU time centisecond wall/user resolution; excludes raw decode/sort/core, not an eighteen-day ETA or memory bound"
+    },
+    "first_attempt": {
+      "source_commit": "d77be8059dd630e6e886825d84a3c101f1e13ea3",
+      "result": "comparison_failed",
+      "cause": "diagnostic common selection began at first visible input rather than material left boundary, omitting 2232ms of initial unknown per common scope",
+      "retained": "consumer-12m and original import/analyze time logs; never overwritten"
+    },
+    "comparison": {
+      "input_journal_rows": 388930,
+      "scalar_records": 388931,
+      "selection_mode": "legacy-consumer-validation/all-common-scopes-not-production-selection",
+      "checks": [
+        {
+          "group": "polymarket",
+          "known_ms": 1435536,
+          "arrival_samples": 353888,
+          "exclusions_ms": {
+            "UnknownBusinessProgress": 4464
+          },
+          "state_durations_ms": {
+            "elevated": 1435536,
+            "unavailable/UnknownBusinessProgress": 4464
+          },
+          "comparison": "passed"
+        },
+        {
+          "group": "chainlink",
+          "known_ms": 1435498,
+          "arrival_samples": 1320,
+          "exclusions_ms": {
+            "UnknownBusinessProgress": 4502
+          },
+          "state_durations_ms": {
+            "elevated": 1435498,
+            "unavailable/UnknownBusinessProgress": 4502
+          },
+          "comparison": "passed"
+        },
+        {
+          "group": "binance_trade",
+          "known_ms": 717749,
+          "arrival_samples": 4405,
+          "exclusions_ms": {
+            "UnknownBusinessProgress": 2251
+          },
+          "state_durations_ms": {
+            "elevated": 717749,
+            "unavailable/UnknownBusinessProgress": 2251
+          },
+          "comparison": "passed"
+        },
+        {
+          "group": "binance_depth",
+          "known_ms": 717486,
+          "arrival_samples": 7174,
+          "exclusions_ms": {
+            "UnknownBusinessProgress": 2465,
+            "UnknownEventTime": 49
+          },
+          "state_durations_ms": {
+            "elevated": 717486,
+            "unavailable/UnknownBusinessProgress": 2465,
+            "unavailable/UnknownEventTime": 49
+          },
+          "comparison": "passed"
+        }
+      ],
+      "result": "passed",
+      "comparison": "new two-layer scalar consumer vs independent intervals on existing compact journal; not original raw replay or eighteen-day run"
+    },
+    "validation": {
+      "workspace_command": "cargo test --workspace --lib --bins --tests --examples --locked --offline -j8 -- --skip four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second",
+      "workspace_exit": 0,
+      "workspace_log_parsed_totals": {
+        "passed": 1370,
+        "failed": 0,
+        "ignored": 23
+      },
+      "fixed_utc_test": "skipped",
+      "research_tests": 7,
+      "finite_recording_tests": 3,
+      "actual_cli_tests": 2,
+      "actual_strategy_source_health_tests": 9,
+      "original_measurement_test": "ignored",
+      "fmt": "passed",
+      "clippy": "workspace and changed packages passed with existing repository warnings; extra -D warnings attempt failed on unchanged contracts warnings; new example warnings corrected"
+    },
+    "proposed_eighteen_day_resources": {
+      "physical_files": 2864,
+      "physical_rows": 762240960,
+      "physical_bytes": 45652568053,
+      "pm_rows": 728429320,
+      "manifest_market_ids": 5186,
+      "manifest_asset_ids": 10372,
+      "initial_run_row_limit": 32768,
+      "initial_run_memory_limit_bytes": 67108864,
+      "pm_row_limit_run_lower_bound": 22230,
+      "original_pm_peak_run_rows": 28931,
+      "scale_run_count_using_original_peak_rows": 25179,
+      "max_temp_run_files_per_sorter": 65536,
+      "max_temp_bytes_per_source": 412316860416,
+      "original_pm_temp_peak_bytes": 76200339,
+      "original_pm_rows": 195597,
+      "pm_scale_temp_reference_gib": 264.29093192515,
+      "fd_soft": 524288,
+      "fd_hard": 524288,
+      "application_working_scale": {
+        "original_application_seconds": 21.973,
+        "original_main_inputs": 208684,
+        "row_proxy": 762240960,
+        "scaled_seconds": 80258.76739031263,
+        "scaled_hours": 22.29410205286462,
+        "claim": "conditional workload scale only: physical rows are not actual reduced inputs; not ETA or upper bound; ignores accumulated core, raw prepare/sort, candidate analysis and archive copies"
+      }
+    },
+    "remaining": "No eighteen-day real run, frozen fitted candidates, actual tail/stability tradeoffs, formal threshold adoption or account/economic result. 2/4/8 max multipliers remain research hypotheses."
+  },
+  "remaining": "No eighteen-day real run, frozen fitted candidates, actual tail/stability tradeoffs, formal threshold adoption or account/economic result. 2/4/8 max multipliers remain research hypotheses.",
+  "midnight_review_rework": {
+    "review": 5409780336,
+    "reviewed_old_head": "97c4a2aa5a0ebfedce8f19d33b9d9bcf01843cc0",
+    "source_commit": "ae6d928774e2ad39049aa4b412b1abfc9fed3548",
+    "change": "daily segment inherits the actual preceding visible state; clipping prior is captured using old visible facts before the new row assignment; no backward inference from newly visible facts",
+    "binary": {
+      "sha256": "5e1f98b9ef54f24c06f77e5405dfa90c264057247a7c5aebd041f8fc2d6432ac",
+      "bytes": 19707960
+    },
+    "comparison": {
+      "result": "passed",
+      "checks": [
+        {
+          "case": "threshold-at-midnight",
+          "old_day_transitions": 0,
+          "new_day_transitions": 1,
+          "old_day_left_censored": 0,
+          "new_day_left_censored": 0,
+          "new_transitions_per_source_hour": 360000.0,
+          "whole_transitions": 1,
+          "whole_exceeded_ms": 10,
+          "state_durations_and_source_denominators": "unchanged",
+          "result": "passed"
+        },
+        {
+          "case": "message-at-midnight",
+          "old_day_transitions": 0,
+          "new_day_transitions": 1,
+          "old_day_left_censored": 0,
+          "new_day_left_censored": 0,
+          "new_transitions_per_source_hour": 360000.0,
+          "whole_transitions": 2,
+          "whole_exceeded_ms": 10,
+          "state_durations_and_source_denominators": "unchanged",
+          "result": "passed"
+        },
+        {
+          "case": "delayed-visible-at-midnight",
+          "old_day_transitions": 0,
+          "new_day_transitions": 1,
+          "old_day_left_censored": 1,
+          "new_day_left_censored": 0,
+          "new_transitions_per_source_hour": 360000.0,
+          "whole_transitions": 2,
+          "whole_exceeded_ms": 10,
+          "state_durations_and_source_denominators": "unchanged",
+          "result": "passed"
+        },
+        {
+          "case": "message-after-midnight",
+          "old_day_transitions": 1,
+          "new_day_transitions": 1,
+          "old_day_left_censored": 0,
+          "new_day_left_censored": 0,
+          "new_transitions_per_source_hour": 360000.0,
+          "whole_transitions": 2,
+          "whole_exceeded_ms": 9,
+          "state_durations_and_source_denominators": "unchanged",
+          "result": "passed"
+        }
+      ],
+      "comparison": "original archived failed outputs vs corrected binary on exact same copied minimal inputs; no raw material or eighteen-day run"
+    },
+    "representative_test": "midnight_and_clipped_starts_use_actual_visible_prior_state; threshold at midnight, delayed-visible facts, known continuation before evaluation start, newly visible fact at PM window start",
+    "verification": {
+      "workspace": {
+        "passed": 1373,
+        "failed": 0,
+        "ignored": 23,
+        "exit_code": 0,
+        "explicit_skip": "four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second"
+      },
+      "research_tests": {
+        "passed": 10,
+        "failed": 0
+      },
+      "fmt": "passed",
+      "clippy": "baseline-mm all-targets exit0 with existing repository warnings"
+    },
+    "existing_evidence": "prior v1/v2 compact distributions, dimensions and production regressions retained; same-state midnight, same-ms selection/fact changes and positive deselection gap tests pass",
+    "new_raw_twelve_minute_runs": 0,
+    "new_raw_eighteen_day_runs": 0,
+    "new_existing_twelve_minute_compact_runs": 0,
+    "archive_entry": "issue-185/source-health-two-layer-20261005/review-rework-v3"
+  }
+}

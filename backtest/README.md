@@ -67,7 +67,7 @@ cargo run -p backtest-cli --locked --offline -- \
 
 配置支持 JSON 和 TOML。`--help` 列出全部可覆盖字段。所有策略参数使用 `--strategy.<区段>.<字段> <显式值>`；联合成交情景数组使用 JSON 数组文字。优先级为命令行、配置文件、策略原类型的已有默认。当前策略全部数值必填，没有正式数值默认，命令层不复制一套默认值。覆盖按原参数真实类型解析，文件可省略由 CLI 补齐的字段或区段，无需重复占位。未提供布尔覆盖会保留文件值，显式 `false` 会覆盖文件中的 `true`。公共运行的策略描述由命令层从实际构造参数生成，文件不需要再重复一份 `run.strategy`。
 
-人工策略健康参数也全部支持 `--strategy.health.<字段> <毫秒>`，例如 `--strategy.health.chainlink_silence_ms 1500`。八个字段、边界及动作依赖见 [策略库健康说明](../baseline-mm/README.md#来源健康与冻结动作)，当前合成配置没有正式默认。命令启动时解析覆盖并将完整 `health` 区段写入原启动元数据，不提供热加载或跳过健康的运行开关。
+人工策略健康参数也全部支持 `--strategy.health.<字段> <毫秒>`，例如 `--strategy.health.chainlink_silence_ms 1500`。十六个字段、normal/max 边界及动作依赖见 [策略库健康说明](../baseline-mm/README.md#来源健康与冻结动作)，当前合成配置没有正式默认。命令启动时解析覆盖并将完整 `health` 区段写入原启动元数据，不提供热加载或跳过健康的运行开关。
 
 ## 验证
 

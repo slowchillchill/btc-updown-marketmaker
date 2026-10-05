@@ -42,6 +42,8 @@ fn actual_baseline_command_applies_explicit_values_and_false_then_records_effect
             "false",
             "--strategy.health.chainlink_silence_ms",
             "1234",
+            "--strategy.health.chainlink_silence_normal_ms",
+            "123",
             "--strategy.quote.base_pair_shares",
             "12",
             "--strategy.probability.initial_sigma_usd_per_sqrt_second",
@@ -82,6 +84,10 @@ fn actual_baseline_command_applies_explicit_values_and_false_then_records_effect
     assert_eq!(
         descriptor["effective_parameters"]["health"]["chainlink_silence_ms"],
         1234
+    );
+    assert_eq!(
+        descriptor["effective_parameters"]["health"]["chainlink_silence_normal_ms"],
+        123
     );
     assert_eq!(descriptor["effective_parameters"]["risk"], risk);
     assert_eq!(
