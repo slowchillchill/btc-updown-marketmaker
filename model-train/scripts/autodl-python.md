@@ -1,7 +1,7 @@
 # AutoDL 的 Python / cu128 离线环境
 
 本入口服务 #181 的首次目标环境准备，不启动训练。代码通过既定 Git bundle 流程同步。用户已批准本次
-材料准备在目标机直接下载，下载失败或停滞时停止并汇报；也可继续在本机准备后上传。
+材料准备在目标机直接下载；失败或停滞时按获批的有限重试、同制品换源、本机中转顺序恢复，方式耗尽后汇报。
 下载完成后的安装仍完全离线。Rust 材料见 [Rust 离线准备](autodl-rust.md)。
 
 ## 依赖来源
@@ -14,7 +14,7 @@ Python 保持 `3.13.15`，解析工具保持 `uv 0.12.9`，目标为 CPython 3.1
 GPU 所需 CUDA / cuDNN / Triton 依赖由 uv 解析，不用镜像预装版本替代。
 
 源文件哈希仅用于记录。执行时核对实际版本约束；注释变化或脚本修正不使已经校验的安装材料失效。
-同一制品使用另一个已核实的官方地址时，保留版本和 SHA。脚本不自动切换来源或更新依赖。
+同一制品切换已批准的下载来源时，保留版本和 SHA。脚本不更新依赖；只有显式启用下述恢复选项才按批准顺序换源。
 
 ## 本机解析与准备
 
@@ -40,14 +40,28 @@ python3 model-train/scripts/autodl_environment.py prepare \
   --progress-seconds 5
 ```
 
-`prepare --jobs` 默认 1，可用 4 小规模并发下载独立材料。curl 继承调用者代理，`.part` 文件支持续传。
-任何材料失败即停止领取和启动新项，并终止其他活动 curl、保留 `.part`；不自动重试、换版本或来源。
-连接超时为 30 秒；持续 60 秒低于 1 字节/秒也按失败停止。每个完成文件检查 SHA-256；已知大小同时检查。
+`prepare --jobs` 默认 1，本次目标运行用 4。Python、uv 优先排队，其余独立材料并发下载。
+curl 继承调用者代理，`.part` 文件支持续传。连接超时为 30 秒，持续 60 秒低于 1 字节/秒会终止该次请求。
+每个完成文件检查 SHA-256；已知大小同时检查。
 已有正确文件直接复用，损坏文件拒绝覆盖。
 每隔指定秒数打印当前字节数和耗时，未知总量明确显示。完成后写 `manifest.json`，记录实际大小、原始
 `url` 和本次请求地址 `download_url`。
 复用文件保留已有来源记录；没有来源记录的预置文件将 `download_url` 标为 `null`，不冒称本次已下载。
 该清单用于审查和交接，安装材料是否有效仍由当前锁要求的制品 SHA 决定。
+
+默认未启用恢复选项时，任何错误立即停止本批。用户已批准本次运行使用 `--retry-sources`：
+
+- curl 使用 `--retry 3 --retry-connrefused`，对其支持的临时 HTTP、超时和连接拒绝最多重试 3 次。
+- PyPI 按显式当前镜像、清华 `https://mirrors.tuna.tsinghua.edu.cn/pypi/web`、原官方地址的顺序尝试，
+  重复地址去重；未指定当前镜像时从清华开始。Torch / Triton 可从锁内的 `download-r2.pytorch.org`
+  换到已核实的 `download.pytorch.org` 同路径；CPython GitHub 只有原地址。
+- 连接/传输类错误及临时 HTTP 在该次 curl 结束后可换下一个来源；403/404 表示来源不可用，直接换源。
+  文件写入、参数、TLS 证书校验等错误，以及 SHA/大小不符立即停止，不通过换源掩盖。
+- 单项全部批准来源耗尽后，停止新项并终止其他活动 curl、保留 `.part`，写 `download-failure.json`，
+  包含首个失败材料、尝试地址、curl/HTTP 错误和部分文件路径。成功材料记录实际完成来源。
+
+用户另已批准：目标机的获批来源仍失败时，由本机经香港网络下载该失败制品后上传，再按同一 SHA 核对。
+此跨机回退由本机编排执行，脚本只保留失败信息；不包含 SSH、账号或代理绑定，也不自动启动跨机操作。
 
 ## 目标机离线安装
 
@@ -60,15 +74,15 @@ python3 model-train/scripts/autodl_environment.py prepare \
 cd /root/autodl-tmp/btc-updown-marketmaker
 "$AUTODL_BOOTSTRAP_PYTHON" model-train/scripts/autodl_environment.py prepare \
   --bundle /root/autodl-tmp/offline/python-cu128-bundle \
-  --jobs 4 --pypi-mirror https://mirrors.aliyun.com/pypi
+  --jobs 4 --pypi-mirror https://mirrors.aliyun.com/pypi --retry-sources
 "$AUTODL_BOOTSTRAP_PYTHON" model-train/scripts/autodl_environment.py install \
   --bundle /root/autodl-tmp/offline/python-cu128-bundle
 source /root/autodl-tmp/environments/issue-181-cu128.sh
 ```
 
 `--pypi-mirror` 只把官方 `files.pythonhosted.org/packages/...` 地址映射到显式镜像基地址的
-`/packages/...`，不更改版本、文件名或原官方 SHA。Torch / Triton 的官方下载地址和 CPython GitHub
-地址保持。镜像缺失或校验失败时停止；此参数不用于 Cargo、代码同步或其他资源。
+`/packages/...`，不更改版本、文件名或原官方 SHA。该镜像参数本身不映射 Torch / Triton 或 CPython GitHub；
+启用恢复选项后的候选顺序见上文。此参数不用于 Cargo、代码同步或其他资源。
 
 安装使用 `/root/autodl-tmp/tools/python-3.13.15`、`tools/uv-0.12.9` 和项目 `model-train/.venv`。
 先核对上传材料，再由锁生成版本与哈希要求，使用 `--offline --no-index --only-binary --require-hashes` 安装。

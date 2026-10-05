@@ -212,7 +212,7 @@ class DownloadBatch:
         with self.lock:
             if self.error is not None:
                 raise CancelledError("另一材料失败，下载批次已停止")
-            process = subprocess.Popen(command)
+            process = subprocess.Popen(command, stdout=subprocess.PIPE, text=True)
             self.active.add(process)
             return process
 
@@ -220,7 +220,7 @@ class DownloadBatch:
         with self.lock:
             self.active.discard(process)
 
-    def fail(self, error: BaseException) -> None:
+    def fail(self, error: BaseException) -> bool:
         with self.lock:
             if self.error is None:
                 self.error = error
@@ -230,9 +230,12 @@ class DownloadBatch:
                             process.terminate()
                         except ProcessLookupError:
                             pass
+                return True
+            return False
 
 
-def download(item: dict, destination: Path, progress_seconds: float, batch: DownloadBatch | None = None) -> int:
+def download(item: dict, destination: Path, progress_seconds: float, batch: DownloadBatch | None = None,
+             retry_sources: bool = False) -> int:
     destination.parent.mkdir(parents=True, exist_ok=True)
     if destination.exists():
         if not verified(destination, item):
@@ -241,35 +244,58 @@ def download(item: dict, destination: Path, progress_seconds: float, batch: Down
         return destination.stat().st_size
     partial = destination.with_name(destination.name + ".part")
     started = time.monotonic()
-    command = ["curl", "--disable", "--fail", "--location", "--silent", "--show-error",
-               "--connect-timeout", "30", "--speed-limit", "1", "--speed-time", "60",
-               "--continue-at", "-", "--output", str(partial), "--url", item.get("download_url", item["url"])]
-    process = batch.start(command) if batch is not None else subprocess.Popen(command)
-    try:
+    urls = item.get("download_urls", [item.get("download_url", item["url"])])
+    if not retry_sources:
+        urls = urls[:1]
+    item["attempted_urls"] = []
+    for index, url in enumerate(urls):
+        command = ["curl", "--disable", "--fail", "--location", "--silent", "--show-error",
+                   "--connect-timeout", "30", "--speed-limit", "1", "--speed-time", "60",
+                   "--continue-at", "-", "--output", str(partial), "--write-out", "%{http_code}", "--url", url]
+        if retry_sources:
+            command += ["--retry", "3", "--retry-connrefused"]
+        process = batch.start(command) if batch is not None else subprocess.Popen(command, stdout=subprocess.PIPE, text=True)
+        item["attempted_urls"].append(url)
+        item["download_url"] = url
+        log(f"{destination.name}：来源 {index + 1}/{len(urls)}，{url}")
         try:
-            while True:
-                try:
-                    result = process.wait(timeout=progress_seconds)
-                    break
-                except subprocess.TimeoutExpired:
-                    received = partial.stat().st_size if partial.exists() else 0
-                    total = item["size"] if item["size"] is not None else "总量未知"
-                    log(f"{destination.name}: {received}/{total} 字节，已耗时 {time.monotonic() - started:.1f}s")
-        except BaseException:
-            process.terminate()
-            process.wait()
-            raise
-    finally:
-        if batch is not None:
-            batch.finished(process)
-    if result != 0:
-        raise subprocess.CalledProcessError(result, command)
-    if not verified(partial, item):
-        raise ValueError(f"下载材料哈希/大小不符，保留 .part：{partial}")
-    received = partial.stat().st_size
-    partial.replace(destination)
-    log(f"完成 {destination.name}: {received} 字节，{time.monotonic() - started:.1f}s，SHA-256 通过")
-    return received
+            try:
+                while True:
+                    try:
+                        result = process.wait(timeout=progress_seconds)
+                        break
+                    except subprocess.TimeoutExpired:
+                        received = partial.stat().st_size if partial.exists() else 0
+                        total = item["size"] if item["size"] is not None else "总量未知"
+                        log(f"{destination.name}: {received}/{total} 字节，已耗时 {time.monotonic() - started:.1f}s")
+                status = (process.stdout.read() if process.stdout is not None else "").strip()
+            except BaseException:
+                process.terminate()
+                process.wait()
+                raise
+        finally:
+            if process.stdout is not None:
+                process.stdout.close()
+            if batch is not None:
+                batch.finished(process)
+        if result != 0:
+            http_status = int(status) if status.isdigit() else 0
+            item.setdefault("attempt_errors", []).append({"url": url, "curl_code": result, "http_status": http_status})
+            # 不对写盘、参数、TLS 证书校验等本地/安全错误换源。
+            recoverable = result in {5, 6, 7, 16, 18, 28, 35, 52, 55, 56, 92} or (
+                result == 22 and http_status in {403, 404, 408, 429, 500, 502, 503, 504}
+            )
+            if retry_sources and recoverable and index + 1 < len(urls):
+                log(f"该来源无法完成下载（curl={result}, HTTP={http_status}）；保留 .part，尝试下一批准来源")
+                continue
+            raise subprocess.CalledProcessError(result, command)
+        if not verified(partial, item):
+            raise ValueError(f"下载材料哈希/大小不符，保留 .part：{partial}")
+        received = partial.stat().st_size
+        partial.replace(destination)
+        log(f"完成 {destination.name}: {received} 字节，{time.monotonic() - started:.1f}s，SHA-256 通过")
+        return received
+    raise ValueError(f"材料没有下载来源：{destination.name}")
 
 
 def manifest(lock: dict) -> dict:
@@ -303,7 +329,24 @@ def download_url(url: str, pypi_mirror: str | None) -> str:
     return url
 
 
-def prepare(lock: dict, bundle: Path, progress_seconds: float, jobs: int = 1, pypi_mirror: str | None = None) -> None:
+def download_candidates(url: str, pypi_mirror: str | None, retry_sources: bool) -> list[str]:
+    primary = download_url(url, pypi_mirror)
+    if not retry_sources:
+        return [primary]
+    original = urllib.parse.urlsplit(url)
+    if original.hostname == "files.pythonhosted.org" and original.path.startswith("/packages/"):
+        candidates = ([primary] if pypi_mirror else []) + [
+            download_url(url, "https://mirrors.tuna.tsinghua.edu.cn/pypi/web"), url,
+        ]
+    elif original.hostname == "download-r2.pytorch.org":
+        candidates = [url, urllib.parse.urlunsplit(original._replace(netloc="download.pytorch.org"))]
+    else:
+        candidates = [url]
+    return list(dict.fromkeys(candidates))
+
+
+def prepare(lock: dict, bundle: Path, progress_seconds: float, jobs: int = 1,
+            pypi_mirror: str | None = None, retry_sources: bool = False) -> None:
     if jobs < 1:
         raise ValueError("并发下载数须至少为 1")
     target = MODEL_ROOT.is_relative_to(AUTODL_ROOT)
@@ -311,8 +354,10 @@ def prepare(lock: dict, bundle: Path, progress_seconds: float, jobs: int = 1, py
         bundle = on_data_disk(bundle)
     bundle.mkdir(parents=True, exist_ok=True)
     expected = manifest(lock)
+    expected["artifacts"].sort(key=lambda item: item["directory"] != "bootstrap")
     for item in expected["artifacts"]:
-        item["download_url"] = download_url(item["url"], pypi_mirror)
+        item["download_urls"] = download_candidates(item["url"], pypi_mirror, retry_sources)
+        item["download_url"] = item["download_urls"][0]
     previous = bundle / "manifest.json"
     if target:
         previous = on_data_disk(previous)
@@ -324,9 +369,11 @@ def prepare(lock: dict, bundle: Path, progress_seconds: float, jobs: int = 1, py
         except (OSError, ValueError, KeyError, TypeError):
             log("旧来源记录无法读取；已有材料仍按当前锁逐项校验，未知来源不补造")
     plan(lock)
-    log(f"并发下载数：{jobs}；任一失败即停止本批，不自动重试或切换来源")
+    policy = "curl 最多重试 3 次临时错误，再尝试批准来源；校验错误立即停止" if retry_sources else "任一失败即停止本批，不自动重试或切换来源"
+    log(f"并发下载数：{jobs}；{policy}")
     pending = iter(enumerate(expected["artifacts"], 1))
     batch = DownloadBatch()
+    failure_record = {}
 
     def worker() -> None:
         try:
@@ -344,14 +391,15 @@ def prepare(lock: dict, bundle: Path, progress_seconds: float, jobs: int = 1, py
                     on_data_disk(destination.with_name(destination.name + ".part"))
                 reused = destination.exists()
                 log(f"材料 {index}/{len(expected['artifacts'])}：{item['filename']}；请求地址：{item['download_url']}")
-                item["size"] = download(item, destination, progress_seconds, batch)
+                item["size"] = download(item, destination, progress_seconds, batch, retry_sources)
                 item["reused"] = reused
                 if reused:
                     item["download_url"] = previous_sources.get((item["filename"], item["sha256"]))
         except CancelledError:
             pass
         except BaseException as error:
-            batch.fail(error)
+            if batch.fail(error):
+                failure_record.update(material=item, partial_path=str(destination.with_name(destination.name + ".part")))
 
     with ThreadPoolExecutor(max_workers=jobs) as pool:
         futures = [pool.submit(worker) for _ in range(jobs)]
@@ -361,6 +409,15 @@ def prepare(lock: dict, bundle: Path, progress_seconds: float, jobs: int = 1, py
         except BaseException as error:
             batch.fail(error)
     if batch.error is not None:
+        failure_record["error"] = str(batch.error)
+        failure_path = bundle / "download-failure.json"
+        if target:
+            failure_path = on_data_disk(failure_path)
+        try:
+            failure_path.write_text(json.dumps(failure_record, ensure_ascii=False, indent=2) + "\n")
+            log(f"失败材料与来源记录：{failure_path}")
+        except OSError as error:
+            log(f"无法写入失败记录：{error}；原始错误继续上报")
         raise batch.error
     previous.write_text(json.dumps(expected, ensure_ascii=False, indent=2) + "\n")
     log(f"材料准备完成：{bundle}；manifest SHA-256：{digest(previous)}")
@@ -471,6 +528,7 @@ def main() -> None:
             command.add_argument("--progress-seconds", type=float, default=5.0)
             command.add_argument("--jobs", type=int, default=1, help="独立材料并发数，默认 1")
             command.add_argument("--pypi-mirror", help="显式 PyPI 制品镜像基地址，例如 https://mirrors.aliyun.com/pypi")
+            command.add_argument("--retry-sources", action="store_true", help="启用本次批准的 curl 临时重试和同制品候选来源；默认关闭")
     args = parser.parse_args()
     try:
         if args.command == "lock":
@@ -482,7 +540,7 @@ def main() -> None:
             elif args.command == "prepare":
                 if args.progress_seconds <= 0:
                     raise ValueError("进度输出间隔须为正数")
-                prepare(lock, args.bundle.resolve(), args.progress_seconds, args.jobs, args.pypi_mirror)
+                prepare(lock, args.bundle.resolve(), args.progress_seconds, args.jobs, args.pypi_mirror, args.retry_sources)
             else:
                 install(lock, args.bundle.resolve())
     except (OSError, ValueError, KeyError, subprocess.CalledProcessError) as error:
