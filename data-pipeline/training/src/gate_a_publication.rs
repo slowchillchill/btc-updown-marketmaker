@@ -16,6 +16,7 @@ pub fn gate_a_formal_sort_config() -> SortConfig {
         max_run_bytes: 64 * 1024 * 1024,
         max_temp_run_files: 512,
         merge_fan_in: 4,
+        merge_workers: 1,
         max_open_files: 5,
         batch_rows: 1_024,
         max_temp_bytes: 1024 * 1024 * 1024,

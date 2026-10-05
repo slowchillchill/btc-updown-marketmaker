@@ -94,7 +94,9 @@ impl HistoricalMergeV1 {
         let mut twap_run = crate::SortedRun { parts: Vec::new() };
         notify(progress, Notice::Stage(PrepareStage::SourceSortFinish));
         for (index, sorter) in sorters.into_iter().enumerate() {
-            let (output_path, metrics) = sorter.finish(None)?;
+            let (output_path, metrics) = sorter.finish_with_progress(&mut |p| {
+                notify(progress, Notice::SourceMergeProgress { index, progress: p })
+            })?;
             if index == HistoricalSourceV1::Twap.index() {
                 twap_run = output_path.clone();
             }
@@ -139,6 +141,7 @@ impl HistoricalMergeV1 {
             max_run_bytes: self.page_bytes,
             max_temp_run_files: 64,
             merge_fan_in: 2,
+            merge_workers: 1,
             max_open_files: 3,
             batch_rows: self.page_rows,
             max_temp_bytes: 1 << 24,

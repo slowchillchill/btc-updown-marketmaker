@@ -51,6 +51,10 @@ pub enum HistoricalPreparationNoticeV1 {
         pass: HistoricalRawPassV1,
         initialization: bool,
     },
+    SourceMergeProgress {
+        index: usize,
+        progress: crate::MergeProgress,
+    },
     SourceSortFinished {
         index: usize,
         metrics: SortMetrics,

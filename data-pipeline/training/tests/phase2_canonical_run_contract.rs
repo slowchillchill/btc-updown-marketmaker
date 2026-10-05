@@ -35,6 +35,7 @@ fn config(
             max_run_bytes: 32 * 1024 * 1024,
             max_temp_run_files: 8,
             merge_fan_in,
+            merge_workers: 1,
             max_open_files: merge_fan_in + 1,
             batch_rows,
             max_temp_bytes: 4 * 1024 * 1024,

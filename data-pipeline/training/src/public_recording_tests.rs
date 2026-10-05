@@ -1763,8 +1763,12 @@ fn physical_source_parts_preserve_continuous_core_and_prior_twap_reread() {
     .collect();
     let mut limits = crate::gate_a_formal_canonical_config();
     limits.sort = config().sort;
+    limits.sort.max_run_rows = 1;
+    limits.sort.merge_fan_in = 2;
+    limits.sort.max_open_files = 12;
     let mut outputs = Vec::new();
     for split in [false, true] {
+        limits.sort.merge_workers = if split { 4 } else { 1 };
         let mut merge = prepare_historical_rows_v1(
             &temp.path().join(if split { "parts" } else { "single" }),
             &limits,

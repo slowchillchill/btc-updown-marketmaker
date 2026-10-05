@@ -121,6 +121,7 @@ fn prepare(config: &Path, output: &Path) -> Result<()> {
     let interval = Duration::from_secs(c.progress_interval_seconds);
     let mut last = Instant::now();
     let mut stage_last = Instant::now();
+    let mut merge_last = Instant::now();
     let mut raw = 0u64;
     let declared_main_rows: u64 = c.preparation.files.iter().map(|f| f.rows).sum();
     let declared_main_files = c.preparation.files.len();
@@ -134,6 +135,16 @@ fn prepare(config: &Path, output: &Path) -> Result<()> {
             ),
             HistoricalPreparationNoticeV1::RawBatch { rows, .. } => {
                 raw += rows;
+            }
+            HistoricalPreparationNoticeV1::SourceMergeProgress { index, progress }
+                if !interval.is_zero() && merge_last.elapsed() >= interval =>
+            {
+                eprintln!(
+                    "stage=source-merge source={index} elapsed_s={:.1} {}",
+                    begin.elapsed().as_secs_f64(),
+                    serde_json::to_string(&progress).unwrap()
+                );
+                merge_last = Instant::now();
             }
             HistoricalPreparationNoticeV1::SourceSortFinished { index, metrics } => {
                 sort_metrics.push(json!({"index":index,"metrics":metrics}))

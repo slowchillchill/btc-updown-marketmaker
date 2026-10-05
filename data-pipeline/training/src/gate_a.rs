@@ -2096,6 +2096,7 @@ pub(crate) mod tests {
             max_run_bytes: 1024 * 1024,
             max_temp_run_files: 8,
             merge_fan_in: 2,
+            merge_workers: 1,
             max_open_files: 3,
             batch_rows: 4,
             max_temp_bytes: 16 * 1024 * 1024,

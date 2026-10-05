@@ -160,6 +160,7 @@ pub(crate) fn setup(root: &Path) -> (HistoricalRunConfigV1, Arc<SealedProcessRul
         max_run_bytes: 1 << 20,
         max_temp_run_files: 20,
         merge_fan_in: 4,
+        merge_workers: 1,
         max_open_files: 8,
         batch_rows: 10,
         max_temp_bytes: 1 << 26,
