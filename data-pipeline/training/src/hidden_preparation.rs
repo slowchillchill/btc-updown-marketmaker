@@ -177,7 +177,7 @@ pub fn prepare_hidden_with_progress_v1(
     let (sorted_path, message_metrics) = messages.finish(None)?;
     notify(progress, Notice::HiddenMessagesSorted(message_metrics));
     notify(progress, Notice::Stage(Stage::HiddenReduceAndWrite));
-    let mut cursor = RunCursor::open(
+    let mut cursor = crate::PartCursor::open(
         &sorted_path,
         config.sort.batch_rows,
         config.sort.max_run_bytes,
@@ -281,7 +281,7 @@ pub fn prepare_hidden_with_progress_v1(
     drop(states);
     notify(progress, Notice::Stage(Stage::HiddenFinalize));
     let derived_path = derived.close_segment()?;
-    let (index_path, index_metrics) = index.finish(None)?;
+    let (index_path, index_metrics) = index.finish_single_file(None)?;
     notify(progress, Notice::HiddenIndexSorted(index_metrics));
     crate::gate_a_publication::sync_tree(root)?;
     Ok(HiddenPreparationV1 {

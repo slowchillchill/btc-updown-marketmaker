@@ -531,7 +531,7 @@ impl SequentialCaptureWriter {
         digest.update(self.metrics.output_rows.to_be_bytes());
         let logical_sha256 = bytes_to_hex(&digest.finalize());
         Ok(SortOutcome {
-            output_path: self.path,
+            output_run: crate::SortedRun::single(self.path),
             logical_sha256,
             metrics: self.metrics,
         })
@@ -718,7 +718,7 @@ fn build_event_time_index(
         }
     }
     finish_artifact(
-        sorter.finish_with_digest()?,
+        sorter.finish_single_with_digest()?,
         &stage_root,
         candidate_path,
         GateAArtifactKind::EventTimeIndex,
@@ -731,7 +731,7 @@ fn build_visibility_material(
     store_path: &Path,
     work_path: &Path,
     output_config: &GateAOutputConfig,
-) -> Result<PathBuf, GateAError> {
+) -> Result<crate::SortedRun, GateAError> {
     let stage_root = work_path.join("sort-visibility-material");
     fs::create_dir(&stage_root)?;
     let mut sorter = ExternalSorter::new(&stage_root, &output_config.sort)?;
@@ -750,14 +750,12 @@ fn build_visibility_material(
         )?)?;
     }
     let (output_path, _) = sorter.finish(None)?;
-    let destination = work_path.join("visibility-material.parquet");
-    fs::rename(&output_path, &destination)?;
-    fs::remove_dir_all(&stage_root)?;
-    Ok(destination)
+    // 临时有序分片由后续两位消费者共用，保留至候选工作目录统一清理。
+    Ok(output_path)
 }
 
 fn build_visibility_index(
-    material_path: &Path,
+    material_path: &crate::SortedRun,
     candidate_path: &Path,
     staging: &crate::canonical_run::CanonicalRunStaging,
     output_config: &GateAOutputConfig,
@@ -767,7 +765,7 @@ fn build_visibility_index(
         .join("sort-visibility-index");
     fs::create_dir(&stage_root)?;
     let mut sorter = ExternalSorter::new(&stage_root, &output_config.sort)?;
-    let mut material = RunCursor::open(
+    let mut material = crate::PartCursor::open(
         material_path,
         output_config.sort.batch_rows,
         output_config.sort.max_run_bytes,
@@ -782,7 +780,7 @@ fn build_visibility_index(
         )?)?;
     }
     finish_artifact(
-        sorter.finish_with_digest()?,
+        sorter.finish_single_with_digest()?,
         &stage_root,
         candidate_path,
         GateAArtifactKind::VisibilityIndex,
@@ -792,7 +790,7 @@ fn build_visibility_index(
 }
 
 fn build_observations(
-    material_path: &Path,
+    material_path: &crate::SortedRun,
     candidate_path: &Path,
     staging: &crate::canonical_run::CanonicalRunStaging,
     output_config: &GateAOutputConfig,
@@ -804,7 +802,7 @@ fn build_observations(
         .join("sort-observations");
     fs::create_dir(&stage_root)?;
     let mut sorter = ExternalSorter::new(&stage_root, &output_config.sort)?;
-    let mut material = RunCursor::open(
+    let mut material = crate::PartCursor::open(
         material_path,
         output_config.sort.batch_rows,
         output_config.sort.max_run_bytes,
@@ -826,7 +824,7 @@ fn build_observations(
     }
     let peak_retained_l2_levels = projector.peak_retained_l2_levels();
     let descriptor = finish_artifact(
-        sorter.finish_with_digest()?,
+        sorter.finish_single_with_digest()?,
         &stage_root,
         candidate_path,
         GateAArtifactKind::MarketObservations,
@@ -868,7 +866,7 @@ fn finish_artifact(
     fs::create_dir_all(&manifest_directory)?;
     let relative_path = PathBuf::from("data").join(format!("{}.parquet", kind.file_stem()));
     let artifact_path = candidate_path.join(&relative_path);
-    fs::rename(&outcome.output_path, &artifact_path)?;
+    fs::rename(&outcome.output_run.parts[0], &artifact_path)?;
     fs::remove_dir_all(stage_root)?;
     File::open(&artifact_path)?.sync_all()?;
     sync_directory(&data_directory)?;
@@ -2164,12 +2162,13 @@ pub(crate) mod tests {
         assert_eq!(writer.row_inner_bytes, 0);
         let outcome = writer.finish().unwrap();
         assert_eq!(
-            scan_logical_output(&outcome.output_path, 2, 64 * 1024).unwrap(),
+            scan_logical_output(&outcome.output_run, 2, 64 * 1024).unwrap(),
             (outcome.logical_sha256, 9)
         );
-        let builder =
-            ParquetRecordBatchReaderBuilder::try_new(File::open(outcome.output_path).unwrap())
-                .unwrap();
+        let builder = ParquetRecordBatchReaderBuilder::try_new(
+            File::open(&outcome.output_run.parts[0]).unwrap(),
+        )
+        .unwrap();
         let row_groups = builder.metadata().row_groups();
 
         assert!(row_groups.len() > 1);
@@ -2410,7 +2409,9 @@ pub(crate) mod tests {
             .collect::<Vec<_>>();
         let staging = crate::canonical_run::CanonicalRunStaging {
             workspace_path: work_path.join("unused-workspace"),
-            temporary_sorted_input_path: work_path.join("unused-input.parquet"),
+            temporary_sorted_input_run: crate::SortedRun::single(
+                work_path.join("unused-input.parquet"),
+            ),
             input_set_identity_sha256: "c".repeat(64),
             input_manifest_set_sha256: "d".repeat(64),
             scope,
