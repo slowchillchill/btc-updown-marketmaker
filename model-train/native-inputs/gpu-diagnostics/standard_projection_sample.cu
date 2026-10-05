@@ -10,7 +10,6 @@
 #include <vector>
 
 using standard_projection_sample::scaled_ratio;
-constexpr uint32_t sample_count = 22;
 constexpr uint32_t block_threads = 32;
 struct InputRow {
   uint32_t operation, negative, numerator_offset, numerator_count, denominator_offset, denominator_count;
@@ -22,7 +21,7 @@ struct OutputRow {
 struct Timing { float warmup_ms, steady_ms; };
 
 template <bool fp32>
-__global__ void projection_kernel(const InputRow *input, const uint32_t *words, OutputRow *output) {
+__global__ void projection_kernel(const InputRow *input, const uint32_t *words, OutputRow *output, uint32_t sample_count) {
   const uint32_t index = blockIdx.x * blockDim.x + threadIdx.x;
   if (index >= sample_count) return;
   const auto row = input[index];
@@ -69,14 +68,15 @@ uint32_t read_u32(std::istream &source) {
 }
 
 template <bool fp32>
-Timing measure(const InputRow *input, const uint32_t *words, OutputRow *output, int warmups, int iterations) {
+Timing measure(const InputRow *input, const uint32_t *words, OutputRow *output, uint32_t sample_count,
+               int warmups, int iterations) {
   const char *label = fp32 ? "FP32对照" : "FP64转FP32候选";
   cudaEvent_t before, after;
   check(cudaEventCreate(&before), "create before");
   check(cudaEventCreate(&after), "create after");
   auto launches = [&](int count) {
     for (int i = 0; i < count; ++i) {
-      projection_kernel<fp32><<<1, block_threads>>>(input, words, output);
+      projection_kernel<fp32><<<(sample_count + block_threads - 1) / block_threads, block_threads>>>(input, words, output, sample_count);
       check(cudaGetLastError(), "projection kernel launch");
     }
   };
@@ -98,7 +98,7 @@ Timing measure(const InputRow *input, const uint32_t *words, OutputRow *output, 
   return timing;
 }
 
-void print_method(const OutputRow *rows, const Timing &timing, int iterations) {
+void print_method(const OutputRow *rows, uint32_t sample_count, const Timing &timing, int iterations) {
   std::cout << "{\"warmup_gpu_ms\":" << timing.warmup_ms
             << ",\"steady_gpu_ms\":" << timing.steady_ms
             << ",\"steady_iteration_ms\":" << timing.steady_ms / iterations << ",\"rows\":[";
@@ -118,8 +118,9 @@ int main(int argc, char **argv) {
     const int device = std::stoi(argv[2]), warmups = std::stoi(argv[3]), iterations = std::stoi(argv[4]);
     if (device < 0 || warmups < 1 || iterations < 1) throw std::runtime_error("诊断运行参数越界");
     std::ifstream source(argv[1]);
-    if (read_u32(source) != sample_count) throw std::runtime_error("输入不是本轮22项有限材料");
-    InputRow input[sample_count]{};
+    const uint32_t sample_count = read_u32(source);
+    if (sample_count == 0) throw std::runtime_error("有限诊断输入为空");
+    std::vector<InputRow> input(sample_count);
     std::vector<uint32_t> words;
     for (auto &row : input) {
       row.operation = read_u32(source); row.negative = read_u32(source);
@@ -148,18 +149,19 @@ int main(int argc, char **argv) {
     InputRow *gpu_input = nullptr;
     uint32_t *gpu_words = nullptr;
     OutputRow *gpu_fp64 = nullptr, *gpu_fp32 = nullptr;
+    const size_t input_bytes = input.size() * sizeof(InputRow);
     const size_t word_bytes = words.size() * sizeof(uint32_t), result_bytes = sample_count * sizeof(OutputRow);
-    check(cudaMalloc(&gpu_input, sizeof(input)), "allocate metadata");
+    check(cudaMalloc(&gpu_input, input_bytes), "allocate metadata");
     check(cudaMalloc(&gpu_words, word_bytes), "allocate integer words");
     check(cudaMalloc(&gpu_fp64, result_bytes), "allocate fp64 output");
     check(cudaMalloc(&gpu_fp32, result_bytes), "allocate fp32 output");
-    check(cudaMemcpy(gpu_input, input, sizeof(input), cudaMemcpyHostToDevice), "metadata H2D");
+    check(cudaMemcpy(gpu_input, input.data(), input_bytes, cudaMemcpyHostToDevice), "metadata H2D");
     check(cudaMemcpy(gpu_words, words.data(), word_bytes, cudaMemcpyHostToDevice), "integer words H2D");
-    const auto timing64 = measure<false>(gpu_input, gpu_words, gpu_fp64, warmups, iterations);
-    const auto timing32 = measure<true>(gpu_input, gpu_words, gpu_fp32, warmups, iterations);
-    OutputRow output64[sample_count]{}, output32[sample_count]{};
-    check(cudaMemcpy(output64, gpu_fp64, result_bytes, cudaMemcpyDeviceToHost), "fp64 output D2H");
-    check(cudaMemcpy(output32, gpu_fp32, result_bytes, cudaMemcpyDeviceToHost), "fp32 output D2H");
+    const auto timing64 = measure<false>(gpu_input, gpu_words, gpu_fp64, sample_count, warmups, iterations);
+    const auto timing32 = measure<true>(gpu_input, gpu_words, gpu_fp32, sample_count, warmups, iterations);
+    std::vector<OutputRow> output64(sample_count), output32(sample_count);
+    check(cudaMemcpy(output64.data(), gpu_fp64, result_bytes, cudaMemcpyDeviceToHost), "fp64 output D2H");
+    check(cudaMemcpy(output32.data(), gpu_fp32, result_bytes, cudaMemcpyDeviceToHost), "fp32 output D2H");
     const double wall_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
     std::cout << std::setprecision(17)
               << "{\"schema\":\"gpu_standard_projection_sample_v1\",\"device\":" << device
@@ -169,14 +171,14 @@ int main(int argc, char **argv) {
               << ",\"sample_count\":" << sample_count << ",\"block_threads\":" << block_threads
               << ",\"warmups\":" << warmups << ",\"iterations\":" << iterations
               << ",\"kernels_per_method_iteration\":1,\"owned_device_allocation_bytes\":"
-              << sizeof(input) + word_bytes + 2 * result_bytes
-              << ",\"h2d_calls\":2,\"h2d_bytes\":" << sizeof(input) + word_bytes
+              << input_bytes + word_bytes + 2 * result_bytes
+              << ",\"h2d_calls\":2,\"h2d_bytes\":" << input_bytes + word_bytes
               << ",\"d2h_calls\":2,\"d2h_bytes\":" << 2 * result_bytes
               << ",\"device_memset_bytes\":0,\"allocation_transfer_warmup_steady_wall_ms\":" << wall_ms
               << ",\"fp64_then_fp32\":";
-    print_method(output64, timing64, iterations);
+    print_method(output64.data(), sample_count, timing64, iterations);
     std::cout << ",\"fp32_control\":";
-    print_method(output32, timing32, iterations);
+    print_method(output32.data(), sample_count, timing32, iterations);
     std::cout << "}\n";
     check(cudaFree(gpu_input), "free input"); check(cudaFree(gpu_words), "free words");
     check(cudaFree(gpu_fp64), "free fp64 output"); check(cudaFree(gpu_fp32), "free fp32 output");

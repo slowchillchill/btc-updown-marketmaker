@@ -61,6 +61,25 @@ fn fixture_with_minimum(
     asks: [&str; 2],
     minimum_shares: &str,
 ) -> Harness {
+    fixture_with_midpoints(
+        cash,
+        ticks,
+        intermediate_at,
+        followups,
+        asks,
+        minimum_shares,
+        &[],
+    )
+}
+fn fixture_with_midpoints(
+    cash: &str,
+    ticks: [&str; 2],
+    intermediate_at: i64,
+    followups: &[i64],
+    asks: [&str; 2],
+    minimum_shares: &str,
+    midpoints: &[(i64, &str, &str)],
+) -> Harness {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("dpt");
     let mut core = core();
@@ -166,6 +185,18 @@ fn fixture_with_minimum(
             },
         ));
     }
+    for &(at, bid, ask) in midpoints {
+        events.push((
+            at,
+            at + 100,
+            PolymarketOrderbookEvent::BestBidAsk {
+                asset_id: UP_TOKEN_ID.into(),
+                best_bid: Some(bid.into()),
+                best_ask: Some(ask.into()),
+                spread: Some("0.2".into()),
+            },
+        ));
+    }
     for &at in followups {
         events.push((
             at,
@@ -233,6 +264,10 @@ fn fixture_with_minimum(
         noe_context,
     }
 }
+
+#[cfg(feature = "python")]
+#[path = "projection_sensitivity_tests.rs"]
+mod projection_sensitivity_tests;
 fn ready(h: &mut Harness) -> NativeInputGroup {
     for _ in 0..5 {
         h.next().unwrap();

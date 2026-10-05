@@ -118,6 +118,16 @@ fn log_interval(t: &R, terms: &BigInt) -> (R, R) {
     (lower.clone(), lower.add(&remainder))
 }
 pub fn signed_log_f32(value: &R) -> f32 {
+    #[cfg(test)]
+    if let Some(result) =
+        projection_diagnostic::project("signed_log_f32", value, || signed_log_f32_exact(value))
+    {
+        return result;
+    }
+    signed_log_f32_exact(value)
+}
+
+fn signed_log_f32_exact(value: &R) -> f32 {
     if value.is_zero() {
         return 0.0;
     }
@@ -157,6 +167,16 @@ pub fn signed_log_f32(value: &R) -> f32 {
 
 /// 非负精确平方均值的 sqrt/log1p 投影；有理区间端点同舍入才返回。
 pub(crate) fn sqrt_log_f32(value: &R) -> f32 {
+    #[cfg(test)]
+    if let Some(result) =
+        projection_diagnostic::project("sqrt_log_f32", value, || sqrt_log_f32_exact(value))
+    {
+        return result;
+    }
+    sqrt_log_f32_exact(value)
+}
+
+fn sqrt_log_f32_exact(value: &R) -> f32 {
     if value.is_zero() {
         return 0.;
     }
@@ -168,11 +188,146 @@ pub(crate) fn sqrt_log_f32(value: &R) -> f32 {
         let q = ((n << (2 * bits)) / d).sqrt();
         let low = ratio(BigInt::from(q.clone()), BigInt::from(scale.clone()));
         let high = ratio(BigInt::from(q + BigUint::one()), BigInt::from(scale));
-        let (a, b) = (signed_log_f32(&low), signed_log_f32(&high));
+        // 这是原精确sqrt区间内部的端点，不是模型消费的末端log输入。
+        let (a, b) = (signed_log_f32_exact(&low), signed_log_f32_exact(&high));
         if a.to_bits() == b.to_bits() {
             return a;
         }
         bits *= 2;
+    }
+}
+
+/// 只由专用ignored单测试激活。进程级状态覆盖Rayon工作线程；生产构建没有此模块。
+#[cfg(test)]
+pub(crate) mod projection_diagnostic {
+    use super::R;
+    use serde_json::{Value, json};
+    use std::collections::{BTreeMap, BTreeSet};
+    use std::sync::Mutex;
+
+    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    struct Key(String, String, String);
+    struct Entry {
+        reference_bits: u32,
+        contexts: BTreeSet<String>,
+        calls: usize,
+    }
+    struct State {
+        policy: String,
+        context: String,
+        replacements: Option<BTreeMap<Key, u32>>,
+        captured: BTreeMap<Key, Entry>,
+        missing: BTreeSet<Key>,
+    }
+    static STATE: Mutex<Option<State>> = Mutex::new(None);
+
+    pub(crate) struct Session;
+    impl Drop for Session {
+        fn drop(&mut self) {
+            *STATE.lock().unwrap() = None;
+        }
+    }
+    pub(crate) fn begin(policy: &str, table: Option<&Value>) -> Session {
+        let replacements = table.map(|table| {
+            assert_eq!(table["schema"], "projection_replacements_v1");
+            assert_eq!(table["policy"], policy);
+            let mut output = BTreeMap::new();
+            for row in table["rows"].as_array().unwrap() {
+                let operation = row["operation"].as_str().unwrap();
+                assert!(matches!(operation, "signed_log_f32" | "sqrt_log_f32"));
+                let input: contracts::ExactRationalV1 =
+                    serde_json::from_value(row["input"].clone()).unwrap();
+                let normalized = R::try_from(&input).unwrap().public();
+                assert_eq!(normalized, input, "替换表必须保存规范有理数");
+                let key = Key(operation.into(), input.numerator, input.denominator);
+                let bits = u32::try_from(row["bits_u32"].as_u64().unwrap()).unwrap();
+                assert!(
+                    f32::from_bits(bits).is_finite(),
+                    "组件诊断不接受非有限候选输入"
+                );
+                assert!(output.insert(key, bits).is_none(), "重复投影键");
+            }
+            output
+        });
+        let mut state = STATE.lock().unwrap();
+        assert!(state.is_none(), "专用诊断不能嵌套或与另一诊断并发");
+        *state = Some(State {
+            policy: policy.into(),
+            context: "initialization".into(),
+            replacements,
+            captured: BTreeMap::new(),
+            missing: BTreeSet::new(),
+        });
+        Session
+    }
+
+    pub(crate) fn context(value: impl Into<String>) {
+        STATE.lock().unwrap().as_mut().unwrap().context = value.into();
+    }
+
+    pub(super) fn project(operation: &str, value: &R, exact: impl FnOnce() -> f32) -> Option<f32> {
+        let key = {
+            let state = STATE.lock().unwrap();
+            state.as_ref()?;
+            Key(
+                operation.into(),
+                value.numerator().to_string(),
+                value.denominator().to_string(),
+            )
+        };
+        let existing = STATE
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .captured
+            .get(&key)
+            .map(|entry| entry.reference_bits);
+        // 参考求值不持全局锁；不同Rayon任务仍可独立使用原精确实现。
+        let reference_bits = existing.unwrap_or_else(|| exact().to_bits());
+        let mut guard = STATE.lock().unwrap();
+        let state = guard.as_mut().unwrap();
+        let context = state.context.clone();
+        let entry = state.captured.entry(key.clone()).or_insert_with(|| Entry {
+            reference_bits,
+            contexts: BTreeSet::new(),
+            calls: 0,
+        });
+        assert_eq!(entry.reference_bits, reference_bits);
+        entry.calls += 1;
+        entry.contexts.insert(context);
+        let bits = match &state.replacements {
+            None => reference_bits,
+            Some(table) => match table.get(&key) {
+                Some(bits) => *bits,
+                None => {
+                    // 仅用于发现新的Actor路径；finish把整轮标为discovery_only，不能冒充完成比较。
+                    state.missing.insert(key);
+                    reference_bits
+                }
+            },
+        };
+        Some(f32::from_bits(bits))
+    }
+
+    pub(crate) fn snapshot() -> Value {
+        let guard = STATE.lock().unwrap();
+        let state = guard.as_ref().unwrap();
+        let rows: Vec<_> = state
+            .captured
+            .iter()
+            .map(|(key, entry)| {
+                json!({
+                    "operation": key.0, "input": {"numerator":key.1,"denominator":key.2},
+                    "bits_u32":entry.reference_bits, "contexts":entry.contexts, "calls":entry.calls,
+                    "missing_replacement":state.missing.contains(key),
+                })
+            })
+            .collect();
+        json!({"schema":"projection_capture_v1","policy":state.policy,
+            "status":if state.missing.is_empty() {"complete"} else {"discovery_only"},
+            "missing_replacements":state.missing.len(),"rows":rows,
+            "scope":"公共组件实际末端投影；缺项精确值仅供发现路径，整轮不得作为候选比较完成"})
     }
 }
 

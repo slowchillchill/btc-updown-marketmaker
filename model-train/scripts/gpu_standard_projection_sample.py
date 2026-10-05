@@ -91,6 +91,15 @@ def limb_words(value: int) -> list[int]:
 
 
 def input_material(reference: dict) -> tuple[str, dict]:
+    if reference["schema"] in ("projection_capture_v1", "projection_sensitivity_run_v1"):
+        capture = reference.get("capture", reference)
+        rows = [{"id": f"captured-{index}", "operation": row["operation"], "input": row["input"],
+                 "reference_bits_u32": row["bits_u32"], "reference_source": {
+                     "kind": "captured_public_exact_cpu", "contexts": row["contexts"], "calls": row["calls"]}}
+                for index, row in enumerate(capture["rows"])]
+        if not rows:
+            raise ValueError("真实组件捕获为空")
+        return encode_material(rows, "真实公共夹具/Actor捕获的有限末端输入；非训练数据或全域误差证明")
     if reference["schema"] != "gpu_exact_numeric_reference_v1":
         raise ValueError("CPU参考schema不符")
     selected = reference["deferred_gpu_scope"]
@@ -115,9 +124,15 @@ def input_material(reference: dict) -> tuple[str, dict]:
                      "input": {"numerator": str(numerator), "denominator": str(denominator)},
                      "reference_bits_u32": expected_bits,
                      "reference_source": {"kind": "finite_decimal_technical_probe", **provenance}})
+    return encode_material(rows, SCOPE)
+
+
+def encode_material(rows: list[dict], scope: str) -> tuple[str, dict]:
     lines = [str(len(rows))]
     total_words = 0
     for index, row in enumerate(rows):
+        if row["operation"] not in ("signed_log_f32", "sqrt_log_f32"):
+            raise ValueError("未支持的末端投影运算")
         numerator, denominator = (int(row["input"][key]) for key in ("numerator", "denominator"))
         if denominator <= 0 or (row["operation"] == "sqrt_log_f32" and numerator < 0):
             raise ValueError("参考材料不符合选定函数定义域")
@@ -136,13 +151,13 @@ def input_material(reference: dict) -> tuple[str, dict]:
         "encoding": "完整整数的uint32小端limb；主机只编码，不把浮点比值交给GPU",
         "ratio_reference": "CPU Fraction整体转binary64，只供GPU转换误差比较，不写入GPU输入",
         "gpu_conversion": "设备端取各整数最多53个有效高位，截去低位，相除后ldexp指数缩放；不承诺正确舍入",
-        "scope": SCOPE,
+        "scope": scope,
     }
 
 
 def compare(actual: dict, layout: dict) -> dict:
     failures, comparisons, summaries = [], [], {}
-    if (actual.get("schema") != "gpu_standard_projection_sample_v1" or actual.get("sample_count") != 22
+    if (actual.get("schema") != "gpu_standard_projection_sample_v1" or actual.get("sample_count") != len(layout["rows"])
             or actual.get("h2d_calls") != 2 or actual.get("d2h_calls") != 2):
         raise ValueError("GPU输出schema、有限布局或传输次数不符")
     for method in METHODS:
@@ -217,6 +232,7 @@ def main():
     try:
         reference = json.loads(args.cpu_reference.read_text())
         material, layout = input_material(reference)
+        report["scope"] = layout["scope"]
         (output / "input.txt").write_text(material)
         dump(output / "input-layout.json", layout)
         dump(output / "cpu-reference.json", reference)
@@ -259,13 +275,14 @@ def main():
             if comparison["candidate_execution_failures"]:
                 raise RuntimeError(f"GPU {device}有限FP64候选出现非有限、符号或非零值丢失问题")
         report["measurement_scope"] = {
-            "iteration": "每种方法单独测量一个kernel：22个独立样本各由一个线程计算；非100ms帧、训练步或持续饱和吞吐",
+            "iteration": "每种方法单独测量一个kernel：有限输入各由一个线程计算；非100ms帧、训练步或持续饱和吞吐",
             "timing": "两种方法依次测量，包含启动间隔和比值转换；编译/预热/稳态/分配传输区间/进程墙钟分别记录",
             "memory": "4次显式设备分配；不含CUDA上下文/模块/事件，不是整卡峰值显存",
             "transfer": "元数据和完整整数limb各一次H2D；两种方法完成后各一次结果D2H；无主机预算浮点比值输入",
             "fp32_control": "使用相同设备端FP64比值转换后舍入为FP32，再调用真实CUDA sqrtf/log1pf",
-            "reference": "原19项沿用公共精确CPU位模式；3项新增技术探针由标准Decimal高精度交叉核对",
-            "scope": SCOPE,
+            "reference": ("实际公共组件捕获值沿用同一次原精确CPU参考" if reference["schema"] != "gpu_exact_numeric_reference_v1"
+                          else "原19项沿用公共精确CPU位模式；3项新增技术探针由标准Decimal高精度交叉核对"),
+            "scope": layout["scope"],
         }
         report["status"] = "completed_measurement_only"
     except Exception as error:
