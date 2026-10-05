@@ -1,6 +1,6 @@
 {
   "task": "#185 task3 source health two layers",
-  "engineering_source_commit": "dc0305aff06df5d66f9b79f055c242f64e111eb3",
+  "engineering_source_commit": "ae6d928774e2ad39049aa4b412b1abfc9fed3548",
   "report_format": "source-health-two-layer-report-v2",
   "scope": {
     "real_raw_eighteen_day_runs": 0,
@@ -327,7 +327,8 @@
       "midnight_counterexample": "continuous 30ms exceeded: global one episode/longest30ms; daily10ms+20ms segments, daily counts not summed as global incidents; next-day left-censored, no fake midnight transition"
     },
     "archive_entry": "issue-185/source-health-two-layer-20261005/review-rework-v2",
-    "prior_evidence": "original v1 logs/binaries/failure and passed materials kept, new report does not overwrite them"
+    "prior_evidence": "original v1 logs/binaries/failure and passed materials kept, new report does not overwrite them",
+    "engineering_source_commit": "dc0305aff06df5d66f9b79f055c242f64e111eb3"
   },
   "original_v1_delivery": {
     "task": "#185 task3 source health two layers",
@@ -481,5 +482,90 @@
     },
     "remaining": "No eighteen-day real run, frozen fitted candidates, actual tail/stability tradeoffs, formal threshold adoption or account/economic result. 2/4/8 max multipliers remain research hypotheses."
   },
-  "remaining": "No eighteen-day real run, frozen fitted candidates, actual tail/stability tradeoffs, formal threshold adoption or account/economic result. 2/4/8 max multipliers remain research hypotheses."
+  "remaining": "No eighteen-day real run, frozen fitted candidates, actual tail/stability tradeoffs, formal threshold adoption or account/economic result. 2/4/8 max multipliers remain research hypotheses.",
+  "midnight_review_rework": {
+    "review": 5409780336,
+    "reviewed_old_head": "97c4a2aa5a0ebfedce8f19d33b9d9bcf01843cc0",
+    "source_commit": "ae6d928774e2ad39049aa4b412b1abfc9fed3548",
+    "change": "daily segment inherits the actual preceding visible state; clipping prior is captured using old visible facts before the new row assignment; no backward inference from newly visible facts",
+    "binary": {
+      "sha256": "5e1f98b9ef54f24c06f77e5405dfa90c264057247a7c5aebd041f8fc2d6432ac",
+      "bytes": 19707960
+    },
+    "comparison": {
+      "result": "passed",
+      "checks": [
+        {
+          "case": "threshold-at-midnight",
+          "old_day_transitions": 0,
+          "new_day_transitions": 1,
+          "old_day_left_censored": 0,
+          "new_day_left_censored": 0,
+          "new_transitions_per_source_hour": 360000.0,
+          "whole_transitions": 1,
+          "whole_exceeded_ms": 10,
+          "state_durations_and_source_denominators": "unchanged",
+          "result": "passed"
+        },
+        {
+          "case": "message-at-midnight",
+          "old_day_transitions": 0,
+          "new_day_transitions": 1,
+          "old_day_left_censored": 0,
+          "new_day_left_censored": 0,
+          "new_transitions_per_source_hour": 360000.0,
+          "whole_transitions": 2,
+          "whole_exceeded_ms": 10,
+          "state_durations_and_source_denominators": "unchanged",
+          "result": "passed"
+        },
+        {
+          "case": "delayed-visible-at-midnight",
+          "old_day_transitions": 0,
+          "new_day_transitions": 1,
+          "old_day_left_censored": 1,
+          "new_day_left_censored": 0,
+          "new_transitions_per_source_hour": 360000.0,
+          "whole_transitions": 2,
+          "whole_exceeded_ms": 10,
+          "state_durations_and_source_denominators": "unchanged",
+          "result": "passed"
+        },
+        {
+          "case": "message-after-midnight",
+          "old_day_transitions": 1,
+          "new_day_transitions": 1,
+          "old_day_left_censored": 0,
+          "new_day_left_censored": 0,
+          "new_transitions_per_source_hour": 360000.0,
+          "whole_transitions": 2,
+          "whole_exceeded_ms": 9,
+          "state_durations_and_source_denominators": "unchanged",
+          "result": "passed"
+        }
+      ],
+      "comparison": "original archived failed outputs vs corrected binary on exact same copied minimal inputs; no raw material or eighteen-day run"
+    },
+    "representative_test": "midnight_and_clipped_starts_use_actual_visible_prior_state; threshold at midnight, delayed-visible facts, known continuation before evaluation start, newly visible fact at PM window start",
+    "verification": {
+      "workspace": {
+        "passed": 1373,
+        "failed": 0,
+        "ignored": 23,
+        "exit_code": 0,
+        "explicit_skip": "four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second"
+      },
+      "research_tests": {
+        "passed": 10,
+        "failed": 0
+      },
+      "fmt": "passed",
+      "clippy": "baseline-mm all-targets exit0 with existing repository warnings"
+    },
+    "existing_evidence": "prior v1/v2 compact distributions, dimensions and production regressions retained; same-state midnight, same-ms selection/fact changes and positive deselection gap tests pass",
+    "new_raw_twelve_minute_runs": 0,
+    "new_raw_eighteen_day_runs": 0,
+    "new_existing_twelve_minute_compact_runs": 0,
+    "archive_entry": "issue-185/source-health-two-layer-20261005/review-rework-v3"
+  }
 }
