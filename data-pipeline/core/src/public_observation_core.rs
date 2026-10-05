@@ -294,6 +294,62 @@ pub struct PublicAppliedIngressV1<'a> {
     pub pm_reductions: Vec<(PublicFactPositionV1, PublicPmReductionV1<'a>)>,
     pub reductions: Vec<PublicReductionBatchV1>,
 }
+/// 研究专用事实增量；没有完整观察、撮合材料或持久前缀承诺。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct PublicSourceProgressGroupV1 {
+    pub group_id: Sha256Hex,
+    pub group_position: u64,
+    pub member_input_positions: Vec<u64>,
+    pub closed_at_input_position: u64,
+    pub visible_at_utc_ms: i64,
+    /// 仅本组变更的来源；代际导致的其它资产同步变化也在此交付。
+    pub source_progress_changes: Vec<SourceStreamProgressV1>,
+    /// 仅首次建立的固定市场身份与资产绑定，窗口复用原市场类型。
+    pub market_bindings: Vec<PublicSourceProgressMarketBindingV1>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct PublicSourceProgressMarketBindingV1 {
+    pub market: MarketIdentityV2,
+    pub assets: Vec<AssetIdentityV1>,
+}
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct PublicSourceProgressAppliedV1 {
+    pub applied_prefix: AppliedIngressPrefixV1,
+    pub closed_groups: Vec<PublicSourceProgressGroupV1>,
+}
+struct CoreApplicationV1<'a> {
+    applied: AppliedIngressV1,
+    pm_reductions: Vec<(PublicFactPositionV1, PublicPmReductionV1<'a>)>,
+    reductions: Vec<PublicReductionBatchV1>,
+    compact_groups: Option<Vec<PublicSourceProgressGroupV1>>,
+    changed_scopes: BTreeSet<SourceStreamScopeV1>,
+    closed_fact_count: u32,
+}
+
+/// 原公共组来源可见时间；接收/采集准入与事实依赖取最大值。
+/// 此纯原语不选择消费宿主执行时间，也不维护全局单调时钟。
+pub fn public_group_visible_at_utc_ms(
+    ingress: &DptIngressV1,
+    records: &[PublicBusinessFactV1],
+) -> i64 {
+    let input_available = match ingress {
+        DptIngressV1::Message {
+            source_evidence, ..
+        } => source_evidence
+            .collector_admission
+            .as_ref()
+            .map_or(source_evidence.received_at_utc_ms, |c| {
+                c.admitted_at_utc_ms.max(source_evidence.received_at_utc_ms)
+            }),
+        _ => i64::MIN,
+    };
+    records
+        .iter()
+        .map(|fact| fact.dependency_time.received_at_utc_ms)
+        .chain(std::iter::once(input_available))
+        .max()
+        .unwrap()
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DptCoreErrorV1 {
     Contract(ContractError),
@@ -625,6 +681,31 @@ impl PublicObservationCoreV1 {
         &mut self,
         input: &'a PreparedIngressV1<'_>,
     ) -> Result<PublicAppliedIngressV1<'a>, DptCoreErrorV1> {
+        let result = self.push_application(input, false)?;
+        Ok(PublicAppliedIngressV1 {
+            applied: result.applied,
+            pm_reductions: result.pm_reductions,
+            reductions: result.reductions,
+        })
+    }
+    /// 显式研究消费：沿同一归约封组，省去全市场观察及全来源集合复制。
+    /// 此入口自动选用来源进展；返回类型不能交给完整录制或SIM。
+    pub fn push_source_progress(
+        &mut self,
+        input: &PreparedIngressV1<'_>,
+    ) -> Result<PublicSourceProgressAppliedV1, DptCoreErrorV1> {
+        self.enable_source_progress();
+        let result = self.push_application(input, true)?;
+        Ok(PublicSourceProgressAppliedV1 {
+            applied_prefix: result.applied.applied_prefix,
+            closed_groups: result.compact_groups.unwrap(),
+        })
+    }
+    fn push_application<'a>(
+        &mut self,
+        input: &'a PreparedIngressV1<'_>,
+        compact: bool,
+    ) -> Result<CoreApplicationV1<'a>, DptCoreErrorV1> {
         if input.recorded.input_stream_id != self.header.input_stream_id
             || input.recorded.input_position != self.next_input_position
         {
@@ -634,13 +715,16 @@ impl PublicObservationCoreV1 {
             }
             .into());
         }
-        let mut result = PublicAppliedIngressV1 {
+        let mut result = CoreApplicationV1 {
             applied: AppliedIngressV1 {
                 applied_prefix: self.applied_prefix(),
                 closed_groups: vec![],
             },
             pm_reductions: vec![],
             reductions: vec![],
+            compact_groups: compact.then(Vec::new),
+            changed_scopes: BTreeSet::new(),
+            closed_fact_count: 0,
         };
         let context = match input.current {
             PreparedCanonicalInputV1::EndOfInput | PreparedCanonicalInputV1::Aborted { .. } => None,
@@ -926,12 +1010,17 @@ impl PublicObservationCoreV1 {
                         .pm_reductions
                         .push((fact.position.clone(), reduction));
                     self.commit_selection(input);
-                    self.update_pm_source_progress(&fact, source_epoch_changed);
+                    self.update_pm_source_progress(
+                        &fact,
+                        source_epoch_changed,
+                        &mut result.changed_scopes,
+                    );
                     self.close_group(
                         msg.group_id.clone(),
                         vec![self.next_input_position],
                         vec![fact].into(),
-                        &mut result.applied.closed_groups,
+                        input.recorded.ingress,
+                        &mut result,
                     );
                 }
             }
@@ -974,7 +1063,7 @@ impl PublicObservationCoreV1 {
     fn drain_terminals(
         &mut self,
         input: &PreparedIngressV1<'_>,
-        output: &mut PublicAppliedIngressV1<'_>,
+        output: &mut CoreApplicationV1<'_>,
     ) -> Result<(), DptCoreErrorV1> {
         let mut ready: Vec<_> = self
             .pending
@@ -1000,12 +1089,7 @@ impl PublicObservationCoreV1 {
             let context = PublicReductionContextV1 {
                 input_stream_id: self.header.input_stream_id.clone(),
                 closed_at_input_position: self.next_input_position,
-                first_fact_ordinal: output
-                    .applied
-                    .closed_groups
-                    .iter()
-                    .map(|g| g.records.len() as u32)
-                    .sum(),
+                first_fact_ordinal: output.closed_fact_count,
                 first_report_ordinal: output
                     .reductions
                     .iter()
@@ -1043,7 +1127,7 @@ impl PublicObservationCoreV1 {
         batch: PublicReductionBatchV1,
         members: Vec<u64>,
         input: &PreparedIngressV1<'_>,
-        output: &mut PublicAppliedIngressV1<'_>,
+        output: &mut CoreApplicationV1<'_>,
     ) {
         self.close_batch_with_group(
             batch,
@@ -1053,6 +1137,8 @@ impl PublicObservationCoreV1 {
             output,
         );
     }
+    // 原进展事实参数加本次增量出口，不为参数个数另建第二状态对象。
+    #[allow(clippy::too_many_arguments)]
     fn put_source_progress(
         &mut self,
         scope: SourceStreamScopeV1,
@@ -1061,6 +1147,7 @@ impl PublicObservationCoreV1 {
         valid: bool,
         snapshot: bool,
         quality: EventQualityV2,
+        changed: &mut BTreeSet<SourceStreamScopeV1>,
     ) -> bool {
         if !self.source_progress_enabled {
             return false;
@@ -1094,6 +1181,7 @@ impl PublicObservationCoreV1 {
         } else {
             prior.and_then(|old| old.last_valid_business_message.clone())
         };
+        changed.insert(scope.clone());
         self.source_progress.insert(
             scope.clone(),
             SourceStreamProgressV1 {
@@ -1111,6 +1199,7 @@ impl PublicObservationCoreV1 {
         &mut self,
         input: &PreparedIngressV1<'_>,
         batch: &PublicReductionBatchV1,
+        changed: &mut BTreeSet<SourceStreamScopeV1>,
     ) -> bool {
         if !self.source_progress_enabled {
             return false;
@@ -1156,6 +1245,7 @@ impl PublicObservationCoreV1 {
                     row.stitch_verdict == BinanceDepthStitchVerdict::Applied,
                     false,
                     quality,
+                    changed,
                 );
             }
             PreparedCanonicalInputV1::BinanceAggregateTrade {
@@ -1221,9 +1311,15 @@ impl PublicObservationCoreV1 {
             valid,
             snapshot,
             quality,
+            changed,
         )
     }
-    fn update_pm_source_progress(&mut self, fact: &PublicBusinessFactV1, epoch_changed: bool) {
+    fn update_pm_source_progress(
+        &mut self,
+        fact: &PublicBusinessFactV1,
+        epoch_changed: bool,
+        changed: &mut BTreeSet<SourceStreamScopeV1>,
+    ) {
         if !self.source_progress_enabled {
             return;
         }
@@ -1248,6 +1344,7 @@ impl PublicObservationCoreV1 {
                 p.scope.source == SourceStreamKindV1::PolymarketBook
                     && p.scope.condition_id.as_ref() == Some(&message.market.condition_id)
             }) {
+                changed.insert(progress.scope.clone());
                 progress.synchronization = SourceSynchronizationV1::SnapshotRequired;
                 // 当前消息涉及的资产随后更新有效进展，不能提前触发重复抑制。
                 if !assets
@@ -1271,6 +1368,7 @@ impl PublicObservationCoreV1 {
                 true,
                 false,
                 fact.quality.clone(),
+                changed,
             );
             if snapshot {
                 self.source_progress
@@ -1288,9 +1386,10 @@ impl PublicObservationCoreV1 {
         group: Sha256Hex,
         members: Vec<u64>,
         input: &PreparedIngressV1<'_>,
-        output: &mut PublicAppliedIngressV1<'_>,
+        output: &mut CoreApplicationV1<'_>,
     ) {
-        let progress_changed = self.update_source_progress(input, &batch);
+        let progress_changed =
+            self.update_source_progress(input, &batch, &mut output.changed_scopes);
         for fact in batch.facts.iter() {
             self.apply_fact(fact, &group);
         }
@@ -1300,7 +1399,8 @@ impl PublicObservationCoreV1 {
                 group,
                 members,
                 batch.facts.clone(),
-                &mut output.applied.closed_groups,
+                input.recorded.ingress,
+                output,
             );
         }
         output.reductions.push(batch);
@@ -1333,8 +1433,40 @@ impl PublicObservationCoreV1 {
         group_id: Sha256Hex,
         members: Vec<u64>,
         records: Arc<[PublicBusinessFactV1]>,
-        groups: &mut Vec<Arc<ClosedBusinessGroupV1>>,
+        ingress: &DptIngressV1,
+        output: &mut CoreApplicationV1<'_>,
     ) {
+        self.next_canonical_position += records.len() as u64;
+        output.closed_fact_count += records.len() as u32;
+        if let Some(groups) = &mut output.compact_groups {
+            groups.push(PublicSourceProgressGroupV1 {
+                group_id,
+                group_position: self.next_group_position,
+                member_input_positions: members,
+                closed_at_input_position: self.next_input_position,
+                visible_at_utc_ms: public_group_visible_at_utc_ms(ingress, &records),
+                source_progress_changes: std::mem::take(&mut output.changed_scopes)
+                    .into_iter()
+                    .map(|scope| self.source_progress[&scope].clone())
+                    .collect(),
+                market_bindings: records
+                    .iter()
+                    .filter_map(|fact| match &fact.payload {
+                        PublicBusinessPayloadV1::MarketFact {
+                            market,
+                            payload: CanonicalMarketFactPayloadV1::FixedIdentity { assets },
+                        } => Some(PublicSourceProgressMarketBindingV1 {
+                            market: market.clone(),
+                            assets: assets.clone(),
+                        }),
+                        _ => None,
+                    })
+                    .collect(),
+            });
+            self.next_group_position += 1;
+            return;
+        }
+        output.changed_scopes.clear();
         let depth = Arc::clone(self.current_depth_projection.get_or_insert_with(|| {
             Arc::new(ObservedFactV1 {
                 value: if self.global.depth.value.is_some() {
@@ -1370,15 +1502,17 @@ impl PublicObservationCoreV1 {
                 observation
             })
             .collect();
-        self.next_canonical_position += records.len() as u64;
-        groups.push(Arc::new(ClosedBusinessGroupV1 {
-            group_id,
-            group_position: self.next_group_position,
-            member_input_positions: members,
-            closed_at_input_position: self.next_input_position,
-            records,
-            observations,
-        }));
+        output
+            .applied
+            .closed_groups
+            .push(Arc::new(ClosedBusinessGroupV1 {
+                group_id,
+                group_position: self.next_group_position,
+                member_input_positions: members,
+                closed_at_input_position: self.next_input_position,
+                records,
+                observations,
+            }));
         self.next_group_position += 1;
     }
     fn apply_fact(&mut self, fact: &PublicBusinessFactV1, group: &Sha256Hex) {

@@ -17,6 +17,7 @@ pub enum HistoricalPreparationStageV1 {
     HiddenMessagesFinish,
     HiddenReduceAndWrite,
     HiddenFinalize,
+    SourceProgressApplication,
 }
 impl HistoricalPreparationStageV1 {
     pub fn index(self) -> usize {

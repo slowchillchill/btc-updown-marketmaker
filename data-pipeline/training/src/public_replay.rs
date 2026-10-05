@@ -1068,39 +1068,69 @@ pub fn prepare_historical_finite_files_v1(
     received_range: std::ops::Range<i64>,
     progress: Option<&HistoricalPreparationNotifierV1<'_>>,
 ) -> RecordingResult<HistoricalMergeV1> {
+    prepare_historical_finite_files_with_initialization_v1(
+        root,
+        files,
+        config,
+        stream,
+        received_range,
+        None,
+        progress,
+    )
+}
+/// 原有限入口加显式metadata前序；初始化仍由原选择器供料两遍。
+pub fn prepare_historical_finite_files_with_initialization_v1(
+    root: &Path,
+    files: &[crate::public_input::PublicFiniteFileV1],
+    config: &crate::canonical_run::CanonicalRunConfig,
+    stream: String,
+    received_range: std::ops::Range<i64>,
+    initialization: Option<&crate::historical_initialization::MetadataInitializationSelectionV1>,
+    progress: Option<&HistoricalPreparationNotifierV1<'_>>,
+) -> RecordingResult<HistoricalMergeV1> {
     prepare_historical_tagged_rows_v1(
         root,
         config,
         stream,
         |pass| {
-            Ok(TypedFileRowsV1 {
-                files: FileRowsSelectionV1::Finite(files.iter()),
-                stream: None,
-                pending: Vec::new().into_iter(),
-                rows: config.decode_batch_rows,
-                bytes: config.max_decode_batch_bytes,
-                progress,
-                pass,
-                file_active: false,
-            }
-            .filter(|row| match row {
-                Ok(row) => validated_received_at_from_typed_raw_v2(row)
-                    .map(|t| received_range.contains(&t))
-                    .unwrap_or(true),
-                Err(_) => true,
-            })
-            .map(move |row| {
-                row.map(|row| {
-                    notify(
-                        progress,
-                        Notice::SelectedRow {
-                            pass,
-                            initialization: false,
-                        },
-                    );
-                    (row, None)
+            let initial = initialization.into_iter().flat_map(move |selection| {
+                selection.read_with_progress(
+                    config.decode_batch_rows,
+                    config.max_decode_batch_bytes,
+                    progress,
+                    pass,
+                )
+            });
+            Ok(initial.chain(
+                TypedFileRowsV1 {
+                    files: FileRowsSelectionV1::Finite(files.iter()),
+                    stream: None,
+                    pending: Vec::new().into_iter(),
+                    rows: config.decode_batch_rows,
+                    bytes: config.max_decode_batch_bytes,
+                    progress,
+                    pass,
+                    file_active: false,
+                }
+                .filter(|row| match row {
+                    Ok(row) => validated_received_at_from_typed_raw_v2(row)
+                        .map(|t| received_range.contains(&t))
+                        .unwrap_or(true),
+                    Err(_) => true,
                 })
-            }))
+                .map(move |row| {
+                    row.map(|row| {
+                        notify(
+                            progress,
+                            Notice::SelectedRow {
+                                pass,
+                                initialization: false,
+                            },
+                        );
+                        (row, None)
+                    })
+                }),
+            ))
         },
         progress,
     )
