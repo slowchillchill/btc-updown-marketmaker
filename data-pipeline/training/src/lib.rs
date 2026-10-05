@@ -1105,10 +1105,22 @@ pub struct SortMetrics {
     pub peak_temp_bytes: u64,
 }
 
+/// 一个逻辑有序段的物理文件，按顺序读取，不在分片处产生业务结束。
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SortedRun {
+    pub parts: Vec<PathBuf>,
+}
+
+impl SortedRun {
+    pub(crate) fn single(path: PathBuf) -> Self {
+        Self { parts: vec![path] }
+    }
+}
+
 /// 成功的试验输出。摘要覆盖逻辑行，而不是 Parquet 文件字节。
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SortOutcome {
-    pub output_path: PathBuf,
+    pub output_run: SortedRun,
     pub logical_sha256: String,
     pub metrics: SortMetrics,
 }
@@ -1271,7 +1283,7 @@ impl ExternalSorter {
                     limit: self.config.max_run_bytes,
                 });
             }
-            self.flush_pending(None)?;
+            self.flush_pending(None, true)?;
             prospective_bytes = sort_row_buffer_bytes(&self.pending_rows, self.pending_inner_bytes)
                 .and_then(|bytes| bytes.checked_add(sort_row_inner_bytes(&row)?))
                 .filter(|bytes| *bytes <= self.config.max_run_bytes);
@@ -1292,7 +1304,7 @@ impl ExternalSorter {
         Ok(())
     }
 
-    fn flush_pending(&mut self, digest: Option<&mut Sha256>) -> Result<(), SortError> {
+    fn flush_pending(&mut self, digest: Option<&mut Sha256>, split: bool) -> Result<(), SortError> {
         let rows = std::mem::take(&mut self.pending_rows);
         self.pending_inner_bytes = 0;
         let run = flush_initial_run(
@@ -1307,6 +1319,7 @@ impl ExternalSorter {
             &self.config,
             &mut self.metrics,
             digest,
+            split,
         )?;
         self.next_file_id += 1;
         self.current_temp_bytes =
@@ -1315,7 +1328,7 @@ impl ExternalSorter {
                 .ok_or(SortError::TempByteLimit {
                     limit: self.config.max_temp_bytes,
                 })?;
-        self.active_temp_run_files += 1;
+        self.active_temp_run_files += run.run.parts.len();
         self.metrics.peak_temp_run_files = self
             .metrics
             .peak_temp_run_files
@@ -1343,26 +1356,60 @@ impl ExternalSorter {
 
     pub(crate) fn finish_with_digest(self) -> Result<SortOutcome, SortError> {
         let mut digest = logical_hasher();
-        let (output_path, metrics) = self.finish(Some(&mut digest))?;
+        let (output_run, metrics) = self.finish(Some(&mut digest))?;
         digest.update(metrics.output_rows.to_be_bytes());
         Ok(SortOutcome {
-            output_path,
+            output_run,
             logical_sha256: bytes_to_hex(&digest.finalize()),
             metrics,
         })
     }
 
     pub(crate) fn finish(
+        self,
+        digest: Option<&mut Sha256>,
+    ) -> Result<(SortedRun, SortMetrics), SortError> {
+        self.finish_mode(digest, true)
+    }
+
+    // 真实 V1 持久出口保持单文件；使用同一最终合并与 writer，传播原库容量错误。
+    pub(crate) fn finish_single_file(
+        self,
+        digest: Option<&mut Sha256>,
+    ) -> Result<(PathBuf, SortMetrics), SortError> {
+        let (run, metrics) = self.finish_mode(digest, false)?;
+        Ok((
+            run.parts.into_iter().next().expect("单文件发布出口"),
+            metrics,
+        ))
+    }
+
+    pub(crate) fn finish_single_with_digest(self) -> Result<SortOutcome, SortError> {
+        let mut digest = logical_hasher();
+        let (path, metrics) = self.finish_single_file(Some(&mut digest))?;
+        digest.update(metrics.output_rows.to_be_bytes());
+        Ok(SortOutcome {
+            output_run: SortedRun::single(path),
+            logical_sha256: bytes_to_hex(&digest.finalize()),
+            metrics,
+        })
+    }
+
+    fn finish_mode(
         mut self,
         mut digest: Option<&mut Sha256>,
-    ) -> Result<(PathBuf, SortMetrics), SortError> {
+        split: bool,
+    ) -> Result<(SortedRun, SortMetrics), SortError> {
         if !self.pending_rows.is_empty() {
             let final_initial_run = self.runs.is_empty();
-            self.flush_pending(if final_initial_run {
-                digest.as_deref_mut()
-            } else {
-                None
-            })?;
+            self.flush_pending(
+                if final_initial_run {
+                    digest.as_deref_mut()
+                } else {
+                    None
+                },
+                !final_initial_run || split,
+            )?;
         }
 
         self.metrics.initial_runs = self.runs.len();
@@ -1382,7 +1429,7 @@ impl ExternalSorter {
             self.metrics.peak_open_files = 1;
             self.metrics.output_rows = empty_run.rows;
             self.retain_work_directory = true;
-            return Ok((final_path, std::mem::take(&mut self.metrics)));
+            return Ok((empty_run.run, std::mem::take(&mut self.metrics)));
         }
 
         let mut runs = std::mem::take(&mut self.runs);
@@ -1420,6 +1467,7 @@ impl ExternalSorter {
                     } else {
                         None
                     },
+                    !final_merge || split,
                 )?;
                 self.next_file_id += 1;
 
@@ -1428,7 +1476,7 @@ impl ExternalSorter {
                         limit: self.config.max_temp_bytes,
                     },
                 )?;
-                self.active_temp_run_files += 1;
+                self.active_temp_run_files += merged.run.parts.len();
                 self.metrics.peak_temp_run_files = self
                     .metrics
                     .peak_temp_run_files
@@ -1437,14 +1485,16 @@ impl ExternalSorter {
                     self.metrics.peak_temp_bytes.max(self.current_temp_bytes);
 
                 for input in &group {
-                    fs::remove_file(&input.path)?;
+                    for path in &input.run.parts {
+                        fs::remove_file(path)?;
+                    }
                     self.current_temp_bytes = self
                         .current_temp_bytes
                         .checked_sub(input.bytes)
                         .ok_or(SortError::InvalidRun("临时文件字节记账下溢"))?;
                     self.active_temp_run_files = self
                         .active_temp_run_files
-                        .checked_sub(1)
+                        .checked_sub(input.run.parts.len())
                         .ok_or(SortError::InvalidRun("run 文件记账下溢"))?;
                 }
                 next_runs.push(merged);
@@ -1452,13 +1502,41 @@ impl ExternalSorter {
             runs = next_runs;
         }
 
-        let final_run = runs.pop().expect("run 列表非空");
+        let mut final_run = runs.pop().expect("run 列表非空");
         let final_path = self.work_directory.join("sorted.parquet");
-        fs::rename(&final_run.path, &final_path)?;
+        if !split && final_run.run.parts.len() > 1 {
+            let input = [final_run];
+            final_run = merge_group(
+                &input,
+                RunDestination {
+                    work_directory: &self.work_directory,
+                    pass: pass + 1,
+                    file_id: self.next_file_id,
+                    current_temp_bytes: self.current_temp_bytes,
+                    active_temp_run_files: self.active_temp_run_files,
+                },
+                &self.config,
+                &mut self.metrics,
+                digest,
+                false,
+            )?;
+            for path in &input[0].run.parts {
+                fs::remove_file(path)?;
+            }
+        }
+        for (part, path) in final_run.run.parts.iter_mut().enumerate() {
+            let destination = if part == 0 {
+                final_path.clone()
+            } else {
+                part_path(&final_path, part)
+            };
+            fs::rename(&*path, &destination)?;
+            *path = destination;
+        }
         self.metrics.peak_open_files = self.metrics.peak_open_files.max(1);
         self.metrics.output_rows = final_run.rows;
         self.retain_work_directory = true;
-        Ok((final_path, std::mem::take(&mut self.metrics)))
+        Ok((final_run.run, std::mem::take(&mut self.metrics)))
     }
 }
 
@@ -1543,6 +1621,7 @@ fn flush_initial_run(
     config: &SortConfig,
     metrics: &mut SortMetrics,
     mut digest: Option<&mut Sha256>,
+    split: bool,
 ) -> Result<RunInfo, SortError> {
     let sorted = sort_rows_with_arrow(rows)?;
     ensure_unique_keys(&sorted)?;
@@ -1558,6 +1637,7 @@ fn flush_initial_run(
         config,
         metrics,
     )?;
+    writer.split = split;
     for rows in sorted.chunks(config.batch_rows) {
         writer.write_unbuffered(rows)?;
         if let Some(digest) = digest.as_deref_mut() {
@@ -1575,6 +1655,7 @@ fn merge_group(
     config: &SortConfig,
     metrics: &mut SortMetrics,
     mut digest: Option<&mut Sha256>,
+    split: bool,
 ) -> Result<RunInfo, SortError> {
     let open_files = group
         .len()
@@ -1589,8 +1670,8 @@ fn merge_group(
     metrics.peak_open_files = metrics.peak_open_files.max(open_files);
     let mut cursors = Vec::with_capacity(group.len());
     for run in group {
-        cursors.push(RunCursor::open(
-            &run.path,
+        cursors.push(PartCursor::open(
+            &run.run,
             config.batch_rows,
             config.max_run_bytes,
         )?);
@@ -1616,6 +1697,7 @@ fn merge_group(
         config,
         metrics,
     )?;
+    writer.split = split;
     let mut previous_key: Option<Vec<u8>> = None;
 
     while let Some(entry) = heap.pop() {
@@ -1739,7 +1821,7 @@ fn rows_from_batch(batch: &RecordBatch) -> Result<Vec<SortRow>, SortError> {
 
 #[derive(Debug)]
 struct RunInfo {
-    path: PathBuf,
+    run: SortedRun,
     bytes: u64,
     rows: u64,
 }
@@ -1763,6 +1845,23 @@ struct RunWriter {
     max_buffer_rows: usize,
     max_buffer_bytes: usize,
     rows: u64,
+    split: bool,
+    base_path: PathBuf,
+    parts: Vec<PathBuf>,
+    closed_bytes: u64,
+    initial_temp_bytes: u64,
+    initial_temp_files: usize,
+    config: SortConfig,
+}
+
+// parquet 59.0.0 使用 i16 行组序号 0..=32767。
+const PARQUET_ROW_GROUPS_PER_FILE: usize = i16::MAX as usize + 1;
+
+fn part_path(base: &Path, part: usize) -> PathBuf {
+    base.with_file_name(format!(
+        "{}-part-{part:05}.parquet",
+        base.file_stem().unwrap().to_string_lossy()
+    ))
 }
 
 impl RunWriter {
@@ -1854,6 +1953,7 @@ impl RunWriter {
             Err(error) => return Err(error.into()),
         };
         Ok(Self {
+            base_path: final_path.clone(),
             final_path,
             partial_path,
             writer: Some(writer),
@@ -1864,7 +1964,68 @@ impl RunWriter {
             max_buffer_rows: config.batch_rows,
             max_buffer_bytes: config.max_run_bytes,
             rows: 0,
+            split: true,
+            parts: Vec::new(),
+            closed_bytes: 0,
+            initial_temp_bytes: current_temp_bytes,
+            initial_temp_files: active_temp_run_files,
+            config: config.clone(),
         })
+    }
+
+    fn close_part(&mut self) -> Result<(), SortError> {
+        let result = self.writer.take().expect("存在当前物理 writer").close();
+        if let Err(error) = result {
+            if self.quota_exceeded.load(AtomicOrdering::Relaxed) {
+                return Err(SortError::TempByteLimit {
+                    limit: self.max_temp_bytes,
+                });
+            }
+            return Err(error.into());
+        }
+        fs::rename(&self.partial_path, &self.final_path)?;
+        self.closed_bytes += fs::metadata(&self.final_path)?.len();
+        self.parts.push(self.final_path.clone());
+        Ok(())
+    }
+
+    fn rotate_part(&mut self) -> Result<(), SortError> {
+        self.close_part()?;
+        let active = self.initial_temp_files + self.parts.len();
+        if active >= self.config.max_temp_run_files {
+            return Err(SortError::TempRunFileLimit {
+                needed: active + 1,
+                limit: self.config.max_temp_run_files,
+            });
+        }
+        self.final_path = part_path(&self.base_path, self.parts.len());
+        self.partial_path = self.final_path.with_extension("parquet.partial");
+        let remaining = self.max_temp_bytes - self.initial_temp_bytes - self.closed_bytes;
+        let file = File::options()
+            .create_new(true)
+            .write(true)
+            .open(&self.partial_path)?;
+        let properties = WriterProperties::builder()
+            .set_compression(Compression::ZSTD(Default::default()))
+            .set_max_row_group_row_count(Some(self.config.batch_rows))
+            .build();
+        self.writer = Some(
+            ArrowWriter::try_new(
+                QuotaWriter::new(file, remaining, Arc::clone(&self.quota_exceeded)),
+                trial_schema(),
+                Some(properties),
+            )
+            .map_err(|error| {
+                if self.quota_exceeded.load(AtomicOrdering::Relaxed) {
+                    SortError::TempByteLimit {
+                        limit: self.max_temp_bytes,
+                    }
+                } else {
+                    error.into()
+                }
+            })?,
+        );
+        Ok(())
     }
 
     fn push(&mut self, row: SortRow, metrics: &mut SortMetrics) -> Result<(), SortError> {
@@ -1936,6 +2097,17 @@ impl RunWriter {
     }
 
     fn write_batch(&mut self, batch: &RecordBatch, rows: usize) -> Result<(), SortError> {
+        if self.split
+            && self
+                .writer
+                .as_ref()
+                .expect("当前 writer")
+                .flushed_row_groups()
+                .len()
+                == PARQUET_ROW_GROUPS_PER_FILE
+        {
+            self.rotate_part()?;
+        }
         let writer = self.writer.as_mut().expect("完成前 writer 必须存在");
         let result: Result<(), SortError> = (|| {
             writer.write(batch)?;
@@ -1958,20 +2130,16 @@ impl RunWriter {
 
     fn finish(mut self, metrics: &mut SortMetrics) -> Result<RunInfo, SortError> {
         self.flush_buffer(metrics)?;
-        let result = self.writer.take().expect("完成前 writer 必须存在").close();
-        if let Err(error) = result {
-            if self.quota_exceeded.load(AtomicOrdering::Relaxed) {
-                return Err(SortError::TempByteLimit {
-                    limit: self.max_temp_bytes,
-                });
-            }
-            return Err(error.into());
-        }
-        fs::rename(&self.partial_path, &self.final_path)?;
-        let bytes = fs::metadata(&self.final_path)?.len();
+        self.close_part()?;
+        metrics.peak_temp_run_files = metrics
+            .peak_temp_run_files
+            .max(self.initial_temp_files + self.parts.len());
+        metrics.peak_temp_bytes = metrics
+            .peak_temp_bytes
+            .max(self.initial_temp_bytes + self.closed_bytes);
         Ok(RunInfo {
-            path: self.final_path,
-            bytes,
+            run: SortedRun { parts: self.parts },
+            bytes: self.closed_bytes,
             rows: self.rows,
         })
     }
@@ -2023,6 +2191,51 @@ impl<W: Write> Write for QuotaWriter<W> {
 
     fn flush(&mut self) -> io::Result<()> {
         self.inner.flush()
+    }
+}
+
+/// 只打开一个物理片。换片先释放旧读取器，不对消费者暴露片尾。
+pub(crate) struct PartCursor {
+    run: SortedRun,
+    part: usize,
+    current: Option<RunCursor>,
+    batch_rows: usize,
+    max_batch_bytes: usize,
+}
+
+impl PartCursor {
+    pub(crate) fn open(
+        run: &SortedRun,
+        batch_rows: usize,
+        max_batch_bytes: usize,
+    ) -> Result<Self, SortError> {
+        Ok(Self {
+            run: run.clone(),
+            part: 0,
+            current: None,
+            batch_rows,
+            max_batch_bytes,
+        })
+    }
+
+    pub(crate) fn next_row(&mut self) -> Result<Option<SortRow>, SortError> {
+        loop {
+            if self.current.is_none() {
+                let Some(path) = self.run.parts.get(self.part) else {
+                    return Ok(None);
+                };
+                self.current = Some(RunCursor::open(
+                    path,
+                    self.batch_rows,
+                    self.max_batch_bytes,
+                )?);
+            }
+            if let Some(row) = self.current.as_mut().unwrap().next_row()? {
+                return Ok(Some(row));
+            }
+            self.current = None;
+            self.part += 1;
+        }
     }
 }
 
@@ -2082,6 +2295,7 @@ impl RunCursor {
         self.row_in_group = 0;
         #[cfg(test)]
         let group_started = public_replay::cost::decode_clock();
+        self.reader = None;
         self.reader = Some(
             ParquetRecordBatchReaderBuilder::new_with_metadata(
                 File::open(&self.path)?,
@@ -2198,11 +2412,11 @@ fn hash_sort_row(hasher: &mut Sha256, row: &SortRow) -> Result<(), SortError> {
 
 #[cfg(test)]
 fn scan_logical_output(
-    path: &Path,
+    path: &SortedRun,
     batch_rows: usize,
     max_batch_bytes: usize,
 ) -> Result<(String, u64), SortError> {
-    let mut cursor = RunCursor::open(path, batch_rows, max_batch_bytes)?;
+    let mut cursor = PartCursor::open(path, batch_rows, max_batch_bytes)?;
     let mut hasher = Sha256::new();
     hasher.update(DIGEST_DOMAIN);
     let mut previous_key: Option<Vec<u8>> = None;
@@ -2768,8 +2982,8 @@ mod tests {
         }
     }
 
-    fn read_rows(path: &Path, batch_rows: usize) -> Vec<SortRow> {
-        let mut cursor = RunCursor::open(path, batch_rows, 4 * 1024).expect("打开输出");
+    fn read_rows(path: &SortedRun, batch_rows: usize) -> Vec<SortRow> {
+        let mut cursor = PartCursor::open(path, batch_rows, 4 * 1024).expect("打开输出");
         let mut rows = Vec::new();
         while let Some(row) = cursor.next_row().expect("读取输出") {
             rows.push(row);
@@ -2799,7 +3013,7 @@ mod tests {
         assert!(outcome.metrics.peak_write_buffer_bytes <= 4 * 1024);
         assert!(outcome.metrics.peak_temp_bytes <= 4 * 1024 * 1024);
 
-        let keys: Vec<_> = read_rows(&outcome.output_path, 2)
+        let keys: Vec<_> = read_rows(&outcome.output_run, 2)
             .into_iter()
             .map(|row| row.sort_key_bytes().to_vec())
             .collect();
@@ -2812,7 +3026,7 @@ mod tests {
             let temp = TempDir::new().unwrap();
             let outcome =
                 external_sort((0..count).rev().map(row), temp.path(), &config(2, 2)).unwrap();
-            let published = scan_logical_output(&outcome.output_path, 3, 4 * 1024).unwrap();
+            let published = scan_logical_output(&outcome.output_run, 3, 4 * 1024).unwrap();
             assert_eq!(published, (outcome.logical_sha256, count));
         }
     }
@@ -2830,7 +3044,7 @@ mod tests {
 
         let outcome = external_sort(input, temp.path(), &sort_config).expect("执行外部排序");
         let builder = ParquetRecordBatchReaderBuilder::try_new(
-            File::open(&outcome.output_path).expect("打开外排结果"),
+            File::open(&outcome.output_run.parts[0]).expect("打开外排结果"),
         )
         .expect("读取外排结果元数据");
         let row_groups = builder.metadata().row_groups();
@@ -2861,8 +3075,8 @@ mod tests {
 
         assert_eq!(first.logical_sha256, second.logical_sha256);
         assert_eq!(
-            read_rows(&first.output_path, 1),
-            read_rows(&second.output_path, 7)
+            read_rows(&first.output_run, 1),
+            read_rows(&second.output_run, 7)
         );
         assert_ne!(first.metrics.initial_runs, second.metrics.initial_runs);
         assert_ne!(first.metrics.merge_passes, second.metrics.merge_passes);
@@ -2890,8 +3104,8 @@ mod tests {
         assert_eq!(wrapper.logical_sha256, incremental.logical_sha256);
         assert_eq!(wrapper.metrics, incremental.metrics);
         assert_eq!(
-            read_rows(&wrapper.output_path, 1),
-            read_rows(&incremental.output_path, 7)
+            read_rows(&wrapper.output_run, 1),
+            read_rows(&incremental.output_run, 7)
         );
     }
 
@@ -2922,7 +3136,7 @@ mod tests {
         .expect("执行单初始 run 外部排序");
 
         assert_eq!(
-            read_rows(&outcome.output_path, 1),
+            read_rows(&outcome.output_run, 1),
             (0u64..5).map(row).collect::<Vec<_>>()
         );
         assert_eq!(outcome.metrics.input_rows, 5);
@@ -3064,7 +3278,7 @@ mod tests {
         );
         assert_eq!(sorter.metrics.peak_run_bytes, max_run_bytes);
         let outcome = sorter.finish_with_digest().unwrap();
-        assert_eq!(read_rows(&outcome.output_path, 1), vec![row(1), row(2)]);
+        assert_eq!(read_rows(&outcome.output_run, 1), vec![row(1), row(2)]);
 
         assert_eq!(outcome.metrics.initial_runs, 2);
     }
@@ -3133,8 +3347,169 @@ mod tests {
         assert_eq!(metrics.peak_write_buffer_bytes, max_run_bytes);
         assert_eq!(metrics.peak_write_buffer_rows, 1);
         let run = writer.finish(&mut metrics).expect("完成写缓冲");
-        assert_eq!(read_rows(&run.path, 1), vec![row(1), row(2)]);
+        assert_eq!(read_rows(&run.run, 1), vec![row(1), row(2)]);
     }
+    fn row_group_boundary_config(max_run_rows: usize) -> SortConfig {
+        SortConfig {
+            max_run_rows,
+            max_run_bytes: 4 * 1024 * 1024,
+            max_temp_run_files: 16,
+            merge_fan_in: 2,
+            max_open_files: 3,
+            batch_rows: 1,
+            max_temp_bytes: 128 * 1024 * 1024,
+        }
+    }
+
+    fn boundary_rows(n: usize) -> impl Iterator<Item = SortRow> {
+        (0..n as u64)
+            .rev()
+            .map(|i| SortRow::from_sort_key(i.to_be_bytes().to_vec(), vec![(i % 251) as u8]))
+    }
+
+    #[test]
+    fn real_parquet_row_group_boundary_merges_across_parts_and_preserves_v1_error() {
+        let n = PARQUET_ROW_GROUPS_PER_FILE + 1;
+        let cfg = row_group_boundary_config(n.div_ceil(2));
+        let old = TempDir::new().unwrap();
+        let mut sorter = ExternalSorter::new(old.path(), &cfg).unwrap();
+        for row in boundary_rows(n) {
+            sorter.push(row).unwrap();
+        }
+        let error = sorter.finish_single_file(None).unwrap_err();
+        assert!(
+            matches!(&error, SortError::Parquet(ParquetError::General(message)) if message == "Parquet does not support more than 32767 row groups per file (currently: 32768)")
+        );
+        eprintln!("旧 V1 单文件出口真实边界：{error}");
+        let temp = TempDir::new().unwrap();
+        let result = external_sort(boundary_rows(n), temp.path(), &cfg).unwrap();
+        assert_eq!(result.output_run.parts.len(), 2);
+        assert_eq!(result.metrics.initial_runs, 2);
+        assert_eq!(result.metrics.peak_temp_run_files, 4); // 两个输入片加两个输出片。
+        assert_eq!(result.metrics.peak_open_files, 3);
+        for (part, expected) in result
+            .output_run
+            .parts
+            .iter()
+            .zip([PARQUET_ROW_GROUPS_PER_FILE, 1])
+        {
+            let metadata =
+                ParquetRecordBatchReaderBuilder::try_new(File::open(part).unwrap()).unwrap();
+            assert_eq!(metadata.metadata().num_row_groups(), expected);
+        }
+        let mut reader = PartCursor::open(&result.output_run, 1, cfg.max_run_bytes).unwrap();
+        let mut independent = logical_hasher();
+        for i in 0..n as u64 {
+            let row = reader.next_row().unwrap().unwrap();
+            assert_eq!(row.sort_key_bytes(), i.to_be_bytes());
+            assert_eq!(row.payload(), [(i % 251) as u8]);
+            hash_sort_row(&mut independent, &row).unwrap();
+        }
+        assert!(reader.next_row().unwrap().is_none());
+        independent.update((n as u64).to_be_bytes());
+        assert_eq!(result.logical_sha256, bytes_to_hex(&independent.finalize()));
+        eprintln!("新分片合并：{n}行，2片，完整键/载荷/顺序/摘要通过");
+    }
+
+    #[test]
+    fn initial_and_intermediate_runs_share_physical_rotation() {
+        for (n, initial_rows, expected_passes) in [
+            (
+                PARQUET_ROW_GROUPS_PER_FILE + 1,
+                PARQUET_ROW_GROUPS_PER_FILE + 1,
+                0,
+            ),
+            (
+                2 * PARQUET_ROW_GROUPS_PER_FILE + 1,
+                PARQUET_ROW_GROUPS_PER_FILE,
+                2,
+            ),
+        ] {
+            let cfg = row_group_boundary_config(initial_rows);
+            let temp = TempDir::new().unwrap();
+            let result = external_sort(boundary_rows(n), temp.path(), &cfg).unwrap();
+            assert_eq!(result.metrics.merge_passes, expected_passes);
+            assert_eq!(
+                result.output_run.parts.len(),
+                n.div_ceil(PARQUET_ROW_GROUPS_PER_FILE)
+            );
+            let mut cursor = PartCursor::open(&result.output_run, 1, cfg.max_run_bytes).unwrap();
+            for i in 0..n as u64 {
+                let row = cursor.next_row().unwrap().unwrap();
+                assert_eq!(row.sort_key_bytes(), i.to_be_bytes());
+                assert_eq!(row.payload(), [(i % 251) as u8]);
+            }
+            assert!(cursor.next_row().unwrap().is_none());
+        }
+    }
+
+    #[test]
+    fn physical_parts_keep_file_byte_limits_and_cross_part_collision() {
+        let temp = TempDir::new().unwrap();
+        let mut cfg = row_group_boundary_config(4);
+        cfg.max_temp_run_files = 1;
+        let mut metrics = SortMetrics::default();
+        let mut writer =
+            RunWriter::new(temp.path().join("quota.parquet"), 0, 0, &cfg, &mut metrics).unwrap();
+        writer.push(row(1), &mut metrics).unwrap();
+        writer.flush_buffer(&mut metrics).unwrap();
+        // 直接调用相同换片步骤，检验正在打开的下一片也计入旧额度。
+        assert!(matches!(
+            writer.rotate_part(),
+            Err(SortError::TempRunFileLimit {
+                needed: 2,
+                limit: 1
+            })
+        ));
+        assert_eq!(fs::read_dir(temp.path()).unwrap().count(), 1);
+        let bytes = fs::metadata(&writer.parts[0]).unwrap().len();
+        let temp2 = TempDir::new().unwrap();
+        cfg.max_temp_run_files = 4;
+        cfg.max_temp_bytes = bytes + 3; // 第一片连同footer占用后，下一片连PAR1都不能容纳。
+        let mut writer =
+            RunWriter::new(temp2.path().join("bytes.parquet"), 0, 0, &cfg, &mut metrics).unwrap();
+        writer.push(row(1), &mut metrics).unwrap();
+        writer.flush_buffer(&mut metrics).unwrap();
+        writer.rotate_part().unwrap();
+        writer.push(row(2), &mut metrics).unwrap();
+        assert!(matches!(
+            writer.flush_buffer(&mut metrics),
+            Err(SortError::TempByteLimit { .. })
+        ));
+        let temp3 = TempDir::new().unwrap();
+        cfg.max_temp_bytes = 1 << 20;
+        let mut writer = RunWriter::new(
+            temp3.path().join("duplicate.parquet"),
+            0,
+            0,
+            &cfg,
+            &mut metrics,
+        )
+        .unwrap();
+        writer.push(row(1), &mut metrics).unwrap();
+        writer.flush_buffer(&mut metrics).unwrap();
+        writer.rotate_part().unwrap();
+        writer.push(row(1), &mut metrics).unwrap();
+        let run = writer.finish(&mut metrics).unwrap();
+        let error = merge_group(
+            &[run],
+            RunDestination {
+                work_directory: temp3.path(),
+                pass: 1,
+                file_id: 0,
+                current_temp_bytes: bytes * 2,
+                active_temp_run_files: 2,
+            },
+            &cfg,
+            &mut metrics,
+            None,
+            true,
+        )
+        .unwrap_err();
+        assert!(matches!(error, SortError::SortKeyCollision { .. }));
+        assert_eq!(metrics.peak_open_files, 2);
+    }
+
     #[test]
     fn sorter_transferred_rows_are_not_counted_after_failed_run_write() {
         let temp = TempDir::new().unwrap();
@@ -3146,7 +3521,7 @@ mod tests {
             sort_row_buffer_bytes(&sorter.pending_rows, sorter.pending_inner_bytes),
             Some(scanned_buffer_bytes(&sorter.pending_rows))
         );
-        let error = sorter.flush_pending(None).unwrap_err();
+        let error = sorter.flush_pending(None, true).unwrap_err();
         assert!(matches!(error, SortError::TempByteLimit { limit: 3 }));
         assert!(sorter.pending_rows.is_empty());
         assert_eq!(sorter.pending_rows.capacity(), 0);
