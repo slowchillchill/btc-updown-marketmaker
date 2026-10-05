@@ -11,6 +11,8 @@
 可能比12位小数更细，不能截断源事实、添金额上限或为整数实现缩小合法域。
 `ExactRationalV1` 继续精确编码结果值；结果按新有限分摊规则产生，不再宣称等于旧无限精确比例。
 全局 `EconomicRational` 四则和模型 `round_f32`、`signed_log_f32`、`sqrt_log_f32` 不随本候选修改。
+末端log/sqrt的标准浮点验证另按[D-0297](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5994293485)及
+[100ms窗口输入](../../model-train/docs/100ms-window-inputs.md#2-数值单位和缺失)推进，不混同为本有限分摊候选的已验收能力。
 
 ## 二分规则
 
