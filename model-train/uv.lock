@@ -131,7 +131,7 @@ requires-dist = [
     { name = "onnx", specifier = "==1.22.0" },
     { name = "onnxruntime", specifier = "==1.28.0" },
     { name = "onnxscript", specifier = "==0.7.1" },
-    { name = "torch", specifier = "==2.11.0+cpu", index = "https://download.pytorch.org/whl/cpu" },
+    { name = "torch", specifier = "==2.11.0", index = "https://download.pytorch.org/whl/cpu" },
 ]
 
 [[package]]
