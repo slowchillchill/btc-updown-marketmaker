@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod economics;
 pub mod execution_normalization;
+pub mod finite_attribution;
 pub use economics::ExactRationalV1;
 mod public_observation;
 pub use public_observation::*;

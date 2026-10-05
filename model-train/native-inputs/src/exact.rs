@@ -232,4 +232,173 @@ mod projection_tests {
             assert_eq!(actual, expected);
         }
     }
+
+    #[test]
+    #[ignore = "显式导出已有精确归约与投影的 CPU 参考，供有限 GPU 数值诊断"]
+    fn export_gpu_exact_numeric_reference_v1() {
+        use serde_json::{Value, json};
+
+        fn public_input(n: impl ToString, d: impl ToString) -> ExactRationalV1 {
+            ExactRationalV1 {
+                numerator: n.to_string(),
+                denominator: d.to_string(),
+            }
+        }
+        fn projection(kind: &str, value: &R, known_bits: Option<u32>) -> Value {
+            let bits = match kind {
+                "round_f32" => round_f32(value),
+                "signed_log_f32" => signed_log_f32(value),
+                "sqrt_log_f32" => sqrt_log_f32(value),
+                _ => unreachable!(),
+            }
+            .to_bits();
+            if let Some(expected) = known_bits {
+                assert_eq!(bits, expected, "{kind}: {:?}", value.public());
+            }
+            json!({"operation": kind, "input": value.public(), "bits_u32": bits,
+                "bits_hex": format!("0x{bits:08x}"), "existing_reference_bits": known_bits})
+        }
+
+        // ledger 的既有归一化案例；由公共解析入口执行符号归一化和 gcd 约分。
+        let normalized: Vec<_> = [
+            ("2", "4"),
+            ("01", "02"),
+            ("-1", "-2"),
+            ("1", "-2"),
+            ("0", "-7"),
+        ]
+        .into_iter()
+        .map(|(n, d)| {
+            let input = public_input(n, d);
+            let value = R::try_from(&input).unwrap();
+            json!({"input": input, "output": value.public()})
+        })
+        .collect();
+        let half = R::try_from(&public_input(2, 4)).unwrap();
+        let negative = R::try_from(&public_input(1, -2)).unwrap();
+        let cancellation = negative.add(&half);
+        assert_eq!(cancellation, R::zero());
+        let comparisons: Vec<_> = [
+            (&negative, R::zero()),
+            (&half, ratio(1, 2)),
+            (&half, R::zero()),
+        ]
+        .into_iter()
+        .map(|(a, b)| {
+            json!({"left": a.public(), "right": b.public(),
+                "ordering": format!("{:?}", a.cmp(&b))})
+        })
+        .collect();
+
+        // 两个有限技术构造，区别于上面的既有案例；只检验跨 limb 约分和有符号除法。
+        let factor = BigInt::one() << 140usize;
+        let wide_input = public_input(BigInt::from(-7) * &factor, BigInt::from(15) * &factor);
+        let wide_reduced = R::try_from(&wide_input).unwrap();
+        let signed_divisor = R::try_from(&public_input(25001, 50003)).unwrap();
+        let signed_quotient = wide_reduced.divided_by(&signed_divisor);
+        let technical_probes = json!({
+            "source": "two_finite_technical_constructions; not_existing_business_fixtures",
+            "cross_limb_normalization": {"input": wide_input, "output": wide_reduced.public()},
+            "signed_division": {"left": wide_reduced.public(), "right": signed_divisor.public(),
+                "quotient": signed_quotient.public()}
+        });
+
+        // market_tests 的真实中点序列；逐步调用生产四则，不另写分数公式。
+        let midpoints = [ratio(2, 10), ratio(4, 10), ratio(3, 10)];
+        let mut sum = R::zero();
+        let mut rms_steps = Vec::new();
+        for pair in midpoints.windows(2) {
+            let difference = pair[1].sub(&pair[0]);
+            let square = difference.mul(&difference);
+            let previous_sum = sum.clone();
+            sum = sum.add(&square);
+            rms_steps.push(
+                json!({"previous": pair[0].public(), "current": pair[1].public(),
+                "difference": difference.public(), "square": square.public(),
+                "previous_sum": previous_sum.public(), "sum": sum.public()}),
+            );
+        }
+        let count = integer(midpoints.len() - 1);
+        let mean = sum.divided_by(&count);
+        assert_eq!(mean, ratio(25, 1000));
+
+        // tests/rounding.rs 的六个既有最近偶数舍入案例，保留原参考位模式。
+        let rounded: Vec<_> = [
+            (ratio(16777217, 16777216), 1f32.to_bits()),
+            (ratio(16777219, 16777216), 1f32.to_bits() + 2),
+            (ratio(-16777217, 16777216), (-1f32).to_bits()),
+            (ratio(1, BigInt::one() << 150), 0),
+            (ratio(3, BigInt::one() << 150), 2),
+            (integer(16777217), 16777216f32.to_bits()),
+        ]
+        .into_iter()
+        .map(|(value, bits)| projection("round_f32", &value, Some(bits)))
+        .collect();
+
+        // 只保存后续 log/sqrt 的 CPU 参考；不表示本轮 GPU 已实现这些能力。
+        let mut logs = Vec::new();
+        for (n, d, bits) in [
+            (0, 1, 0),
+            (1, 1, 0x3f317218),
+            (100, 1, 0x4093af11),
+            (7, 10, 0x3f07d741),
+            (3, 10, 0x3e86549c),
+            (25001, 50003, 0x3ecf9840),
+            (25002, 50003, 0x3ecf99ff),
+        ] {
+            logs.push(projection("signed_log_f32", &ratio(n, d), Some(bits)));
+            if n != 0 {
+                logs.push(projection(
+                    "signed_log_f32",
+                    &ratio(-n, d),
+                    Some(bits | 0x80000000),
+                ));
+            }
+        }
+        for (n, d, bits) in [
+            (
+                "171828199048127284869960653697337016552858003929760823281171",
+                "100000000000000000000000000000000000000000000000000000000000",
+                0x3f800000,
+            ),
+            (
+                "1718281990481272848699606536973370165528580039297608232811711",
+                "1000000000000000000000000000000000000000000000000000000000000",
+                0x3f800001,
+            ),
+        ] {
+            logs.push(projection(
+                "signed_log_f32",
+                &R::try_from(&public_input(n, d)).unwrap(),
+                Some(bits),
+            ));
+        }
+        let mut roots: Vec<_> = [
+            (5, 100, 0x3e4ea56b),
+            (1, 100, 0x3dc331fc),
+            (7, 3, 0x3f6d5fa5),
+        ]
+        .into_iter()
+        .map(|(n, d, bits)| projection("sqrt_log_f32", &ratio(n, d), Some(bits)))
+        .collect();
+        roots.push(projection("sqrt_log_f32", &mean, None));
+        let report = json!({
+            "schema": "gpu_exact_numeric_reference_v1",
+            "scope": "finite_cpu_reference_cases_and_two_technical_probes; no_gpu_execution_or_production_width_bound",
+            "sources": {
+                "rational": "contracts/src/economics.rs::EconomicRational",
+                "normalization_cases": "ledger/src/economics.rs::rational_tests::integer_ratios_normalize_for_arithmetic_and_persistence",
+                "round_and_log_cases": "model-train/native-inputs/tests/rounding.rs",
+                "rms_and_sqrt_cases": "model-train/native-inputs/src/market_tests.rs::changing_real_midpoints_feed_exact_increment_rms",
+                "producer": "model-train/native-inputs/src/exact.rs::projection_tests::export_gpu_exact_numeric_reference_v1"
+            },
+            "rational_reduction": {"normalization": normalized, "comparisons": comparisons,
+                "technical_probes": technical_probes,
+                "cancellation": {"left": negative.public(), "right": half.public(), "sum": cancellation.public()},
+                "rms": {"steps": rms_steps, "sum": sum.public(), "divisor": count.public(), "mean": mean.public()}},
+            "round_f32": rounded,
+            "deferred_gpu_scope": {"signed_log_f32": logs, "sqrt_log_f32": roots}
+        });
+        println!("BTC_GPU_EXACT_NUMERIC_REFERENCE_V1={report}");
+    }
 }

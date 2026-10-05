@@ -48,6 +48,23 @@ cargo test -p sim-system --lib --locked --offline \
 `gmp.h` 在 `usr/include/x86_64-linux-gnu`，库在 `usr/lib/x86_64-linux-gnu`。入口显式传入
 这些目录和 rpath，不使用带 `/usr` 固定前缀的 pkg-config，也不修改全局 PATH 或环境。
 
+本次可复建材料如下。CGBN 归档来自官方仓库的固定提交；GMP 三包均为 Ubuntu jammy
+amd64 的 `2:6.2.1+dfsg-3ubuntu1`，版本与目标原有运行库一致。解包到项目数据盘前缀，
+不执行系统安装；同时解包运行库，使开发链接在该前缀内指向实际文件。
+
+| 材料 | 字节数 | SHA-256 |
+| --- | ---: | --- |
+| [CGBN 固定提交归档](https://codeload.github.com/NVlabs/CGBN/tar.gz/114601b07ae8c3e4d46b250208ea8d9def7a12f0) | 90428 | `1a8774bea1c4f15e11b75bfc877618260454a07db5c02316b9e2b162bdcdf586` |
+| [libgmp-dev](https://packages.ubuntu.com/jammy/amd64/libgmp-dev/download) | 336684 | `e4ce547c5c5e4efd98854d06559349b3a03272eb343f1bd8e4ccac7b783229a3` |
+| [libgmp10](https://packages.ubuntu.com/jammy/amd64/libgmp10/download) | 250148 | `d199a77e11701d4d620dd4f62e05740e3072dce893856ea3bbaa6ae9fa19fef1` |
+| [libgmpxx4ldbl](https://packages.ubuntu.com/jammy/amd64/libgmpxx4ldbl/download) | 9580 | `73e8145633a86c8f01466bb42c5b0734665268f7b2656e82365c1659525f7874` |
+
+Ubuntu 下载页给出官方来源、版本与 SHA；本次 `.deb` 文件来自
+`https://archive.ubuntu.com/ubuntu/pool/main/g/gmp/`。核对材料后，以
+`dpkg-deb -x <准确材料路径> /root/autodl-tmp/tools/gmp-6.2.1` 分别解包三份材料。
+CGBN 保留原归档中的 `LICENSE`，不修改第三方源码。材料来源记录用于运行报告，
+不包含账号、SSH 或代理绑定。
+
 在项目 Python 环境中，按实际材料路径执行，例如：
 
 ```bash

@@ -5,6 +5,9 @@
 `d255397c102d860cd21b49439b3d13a7b07339db`，包括 `account_economics_v2`、
 `native_inputs_v7` 和 `native_actions_v2`。公共事实、平台规则、执行、NOE 与账户经济继续由
 原模块负责，本文不重新定义这些合同。
+派生经济归属已按[D-0295](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5993533059)
+调整为有限精度方向；上述版本是旧公共参考，新政策先按[有限分摊候选](../../contracts/docs/finite-attribution.md)
+完成第4步验证，生产接入时再绑定新版本，不重标旧产物。
 
 本文成稿不表示生产调度器、GPU 公共后端或正式训练已经实现。正式窗口的字段组语义见
 [输入设计](100ms-window-inputs.md)；精确索引、最终张量布局、GPU 数值表示和训练参数仍有
@@ -149,7 +152,8 @@ Actor 与训练 Critic 所消费的状态，不另造人工紧迫度分数。新
 `BigUint` 和精确有理数；[`support.rs`](../native-inputs/src/support.rs) 的数量编码域超过 64 位，
 [`buy_cost.rs`](../../sim-system/src/buy_cost.rs) 已有费用中间乘积超过 `u128` 的单元反例。GPU 表示不能默认
 统一缩成 `int64` 或 `int128`，也不能因网络使用混合精度而近似资金、费用或合法支持集。
-训练输入、奖励或动作所需的精确归约属于热路径，纯输出格式化可留 CPU；完整数值表示
+真实资金及合法动作所需的精确归约属于热路径；派生成本按D-0295采用有限分摊，模型数值投影
+仍按原适用合同处理。纯输出格式化可留 CPU；完整数值表示
 及其覆盖仍须根据实际调用链设计、对照和测量，本文不预先宣称已经解决。
 
 ## 6. 输入设计与剩余工作
