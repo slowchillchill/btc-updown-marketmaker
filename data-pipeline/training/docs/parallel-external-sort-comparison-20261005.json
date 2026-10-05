@@ -119,5 +119,14 @@
     "code_index": "task tree not indexed; checked current source instead of main graph",
     "public_history_fixture": "8 valid PM snapshots, 8 runs / 4 first-round groups; test-only startup barrier; actual peak_merge_workers > 1; complete public inputs / core / prior-position TWAP match single-worker baseline",
     "measurement_applicability": "No production code or measurement tool changed in fixture rework; original measurements remain bound to a82488a8cb438a8b02b9d818e775848181779b64 and were not repeated."
+  },
+  "consumer_binary": {
+    "source_commit": "568a52c2e090d9744aeb23efad7a9decd270d79f",
+    "sha256": "47f88dd39f242d80b6e79d7dfc5c48ae0d3f9ee932e301a8f1bff27909b90197",
+    "size_bytes": 19841000,
+    "build_command": "cargo build -p baseline-mm --example research_source_health_two_layer --release --locked --offline -j8",
+    "build_exit_code": 0,
+    "artifact": "review-rework-v2/research_source_health_two_layer.release",
+    "execution": "not run; no prepare/study; no 18-day config changed"
   }
 }

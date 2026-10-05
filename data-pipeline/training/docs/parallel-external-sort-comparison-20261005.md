@@ -53,3 +53,13 @@ cargo build -p data-pipeline-training --example measure_parallel_external_sort -
 - 固定 workspace 回归退出 0。`four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second` 明确跳过，其夹具依赖实际 UTC 时钟。fmt 与相关 training/baseline/backtest 全目标 clippy 均退出 0；保留既有依赖告警。
 
 本任务树没有可用代码索引。实现与交付核对读取本任务树当前源码，未使用主树索引代替。有限测量的原日志、time、源补丁、二进制及绑定保存在独立归档，私有位置由任务交接给出。
+
+## 实际研究消费者产物
+
+复用本任务构建缓存，构建 `baseline-mm/examples/research_source_health_two_layer.rs` 的 release 二进制。准确源码为 `568a52c2e090d9744aeb23efad7a9decd270d79f`，SHA-256 为 `47f88dd39f242d80b6e79d7dfc5c48ae0d3f9ee932e301a8f1bff27909b90197`，大小为 19,841,000 B。构建命令如下，退出码为 0。产物独立保存为 `review-rework-v2/research_source_health_two_layer.release`，供后续第二次研究方案审阅。
+
+```bash
+cargo build -p baseline-mm --example research_source_health_two_layer --release --locked --offline -j8
+```
+
+本次只增加测试夹具及测试编译下的同步手段，并更新报告；生产行为和合成测量工具没有变化。此前有限测量继续绑定 `a82488a8cb438a8b02b9d818e775848181779b64`，未重复测量。本次没有执行研究二进制，没有调用 `prepare` 或 `study`，没有修改十八日配置或资源承诺。
