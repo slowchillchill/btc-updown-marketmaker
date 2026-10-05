@@ -157,7 +157,7 @@ async fn actual_component_projection_sensitivity() {
     assert!(error.is_none(), "Python组件诊断失败：{error:?}");
 }
 
-const REAL_START: i64 = 1_789_473_600_000; // 2026-09-15 12:00 UTC
+const REAL_START: i64 = 1_789_445_700_000; // 2026-09-15 04:15 UTC
 const REAL_END: i64 = REAL_START + 300_000;
 const REAL_WARMUP: i64 = REAL_START - 30_000;
 
@@ -236,7 +236,7 @@ impl backtest::HistoricalPublicGroupObserverV1 for ProjectionObserver {
                 .ok_or("缺少实际开户账户")?
                 .account_instance_key;
             self.native = Some(NativeInputRoot::new(
-                "projection-real-20260915".into(),
+                "projection-real-20260915-0415".into(),
                 account,
                 REAL_WARMUP,
                 self.snapshot.clone(),
@@ -445,7 +445,7 @@ async fn prepared_component_projection_sensitivity() {
     };
     let report = serde_json::json!({
         "schema":"projection_sensitivity_stream_run_v1", "policy":policy,"status":status,
-        "scope":"固定2026-09-15 12:00—12:05 UTC训练内部工程诊断；T−30连续数值暖态；前32个决定组局部state+Actor梯度；非正式训练或收益验收",
+        "scope":"固定2026-09-15 04:15—04:20 UTC训练内部工程诊断；T−30连续数值暖态；前32个决定组局部state+Actor梯度；非正式训练或收益验收",
         "external_intent":null,"execution_history":"NoOp","operating_start_utc_ms":REAL_START,
         "operating_end_utc_ms":REAL_END,"native_root_started_at_utc_ms":REAL_WARMUP,
         "configuration":config_evidence,"prepared_material":prepared_evidence,"source_scope":scope,

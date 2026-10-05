@@ -288,7 +288,7 @@ def prepared_config(args) -> dict:
         run = {
             "timing": {name: {"Fixed": 0} for name in ("public_delivery_delay_ms", "calculation_start_delay_ms",
                                                         "calculation_duration_ms", "dispatch_delay_ms")},
-            "session": {"session_seed": hashlib.sha256(b"projection-real-20260915").hexdigest()},
+            "session": {"session_seed": hashlib.sha256(b"projection-real-20260915-0415").hexdigest()},
             "admission_policy": "DualCashNoMarketLimit", "max_group_bytes": 67108864,
             "finite_in_flight_groups": 128, "activation_id": "projection-activate",
             "consumption_sequence_ref": "projection-noop-history-v1",
@@ -305,8 +305,8 @@ def prepared_config(args) -> dict:
     if material["schema_version"] != "prepared_historical_material_v1":
         raise ValueError("需要公共prepare实际发布的材料描述")
     scope = material["preparation"]["scope"]
-    if not 1788912000000 <= scope["received_start_utc_ms"] <= 1789473570000 or scope["received_end_utc_ms"] != 1789473900000:
-        raise ValueError("材料范围须在批准训练内部覆盖T−30并结束于2026-09-15 12:05 UTC")
+    if not 1788912000000 <= scope["received_start_utc_ms"] <= 1789445670000 or scope["received_end_utc_ms"] != 1789446000000:
+        raise ValueError("材料范围须在批准训练内部覆盖T−30并结束于2026-09-15 04:20 UTC")
     if sha(args.rules) != args.rules_sha256:
         raise ValueError("规则文件与已核摘要不符")
     # 不使用synthetic-command或默认训练参数补缺。
@@ -316,7 +316,7 @@ def prepared_config(args) -> dict:
             raise ValueError(f"已有运行参数缺少 {name}，须由root交接来源")
     run["implementation_identity"] = json.loads(args.implementation_identity.read_text())
     run["session"] = dict(run["session"])
-    for field, value in (("run_id", "projection-real-20260915"), ("session_id", "projection-session"),
+    for field, value in (("run_id", "projection-real-20260915-0415"), ("session_id", "projection-session"),
                          ("account_id", "projection-sim-account"), ("caller_instance_id", "projection-diagnostic"),
                          ("creation_request_id", "projection-opening"), ("response_bridge_binding_id", "projection-bridge")):
         run["session"][field] = value
