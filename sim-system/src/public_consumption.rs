@@ -473,24 +473,10 @@ pub fn original_public_group_visible_at_utc_ms(
     input: &data_pipeline_core::public_input::RecordedIngressV1,
     group: &ClosedBusinessGroupV1,
 ) -> i64 {
-    let input_available = match &input.ingress {
-        data_pipeline_core::public_input::DptIngressV1::Message {
-            source_evidence, ..
-        } => source_evidence
-            .collector_admission
-            .as_ref()
-            .map_or(source_evidence.received_at_utc_ms, |c| {
-                c.admitted_at_utc_ms.max(source_evidence.received_at_utc_ms)
-            }),
-        _ => i64::MIN,
-    };
-    group
-        .records
-        .iter()
-        .map(|fact| fact.dependency_time.received_at_utc_ms)
-        .chain(std::iter::once(input_available))
-        .max()
-        .unwrap()
+    data_pipeline_core::public_observation_core::public_group_visible_at_utc_ms(
+        &input.ingress,
+        &group.records,
+    )
 }
 
 /// 运行宿主持有真实消费时序，按原组引用读取已经记录的执行时间。

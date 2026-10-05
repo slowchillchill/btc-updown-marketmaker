@@ -1,0 +1,2117 @@
+{
+  "schema": "finite-source-progress-12m-report-v1",
+  "execution_issue": "https://github.com/slowchillchill/btc-updown-marketmaker/issues/246",
+  "real_runs": 1,
+  "source_head": "6abafc2605361b580f6f5b57309032b96eea8cdc",
+  "binary": {
+    "source_head": "6abafc2605361b580f6f5b57309032b96eea8cdc",
+    "binary_sha256": "8ea10f925ab0d05fdd7529b8eaf4f5862555ba596b236235dcf9a039291333c0",
+    "bytes": 17963464
+  },
+  "private_config_sha256": "dbfcf4929280c9aec84de7ac7506caf5455e9ad1f42eca241696c997150031dc",
+  "input_manifest_sha256": "93a70f4775bdb3d52bf7de73d58caaa5ccbf2f2d7f6a8e2f00e09c092e1f1918",
+  "effective_config_logical_paths": {
+    "preparation": {
+      "header": {
+        "canonical_rule_version": "canonical-reduction-v1",
+        "initial_state": "Empty",
+        "input_scope": "explicit-manifest/2026-09-09/research-first-two-markets-and-label-tail",
+        "input_stream_id": "complementary-pair-e2e-remeasure-20260909-0000-0012",
+        "max_pending_ws_terminals": 1024,
+        "observation_version": "market_business_observation_v1",
+        "ordering_version": "historical-source-head-v2"
+      },
+      "canonical": {
+        "canonical_rule_version": "canonical-reduction-v1",
+        "decode_batch_rows": 1024,
+        "max_decode_batch_bytes": 67108864,
+        "max_epoch_count_per_source": 1024,
+        "max_pending_ws_terminals": 1024,
+        "max_retained_reducer_entries": 1000000,
+        "max_temporary_row_bytes": 16777216,
+        "sort": {
+          "batch_rows": 1024,
+          "max_open_files": 16,
+          "max_run_bytes": 67108864,
+          "max_run_rows": 32768,
+          "max_temp_bytes": 8589934592,
+          "max_temp_run_files": 128,
+          "merge_fan_in": 8
+        }
+      },
+      "metadata_initialization": {
+        "files": [
+          {
+            "manifest_path": "INPUT_ROOT/2026-09-08/typed_raw/utc_day=2026-09-08/manifest.json",
+            "relative_paths": [
+              "source_kind=polymarket_market_metadata/polymarket_market_metadata_23.parquet"
+            ]
+          }
+        ],
+        "markets": [
+          {
+            "condition_id": "0x1fc54206bf570dbdf843a88d608aee9df9eac980a9ab47e400d787d732f7b748",
+            "snapshot_source_message_id": "d3842b75d06c65d26d38c87e9520c14a0c11d0bf5d210c70dc62ae883b9097e5"
+          },
+          {
+            "condition_id": "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20",
+            "snapshot_source_message_id": "c11b6b3d60cb590a314f6de3a748de5923b4376d3fee8f4a7583fe7bd36ede42"
+          }
+        ],
+        "purpose": "D-0276原选定来源/市场及00:00起点，仅建立市场状态；D-0277后#185当前分段材料右端延至00:12",
+        "received_end_utc_ms": 1788912720000,
+        "received_start_utc_ms": 1788912000000
+      },
+      "files": [
+        {
+          "source_kind": "binance_aggtrade",
+          "schema_version": "binance_aggtrade_v7",
+          "bytes": 975111,
+          "rows": 19980,
+          "sha256": "e528335b8c90033b181391642218622a574be9306b0a1021ed1e39ab9de4ef58",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_aggtrade/binance_aggtrade_00.parquet"
+        },
+        {
+          "source_kind": "binance_aggtrade",
+          "schema_version": "binance_aggtrade_v7",
+          "bytes": 1183762,
+          "rows": 25196,
+          "sha256": "149650d49ed81f9b1015ee55def13b5b50c3170e881755f3bbb72517843f310c",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_aggtrade/binance_aggtrade_01.parquet"
+        },
+        {
+          "source_kind": "binance_aggtrade",
+          "schema_version": "binance_aggtrade_v7",
+          "bytes": 892247,
+          "rows": 18563,
+          "sha256": "9f1246709247ee1cbb747ce6a2a6981b826624b04a79c32ebf22c225f21687e6",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_aggtrade/binance_aggtrade_02.parquet"
+        },
+        {
+          "source_kind": "binance_aggtrade",
+          "schema_version": "binance_aggtrade_v7",
+          "bytes": 812178,
+          "rows": 16928,
+          "sha256": "48219d58c424caedfff9d5256562d147145bf4699b158cd344fc29fd450f82b3",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_aggtrade/binance_aggtrade_03.parquet"
+        },
+        {
+          "source_kind": "binance_aggtrade",
+          "schema_version": "binance_aggtrade_v7",
+          "bytes": 1585713,
+          "rows": 34489,
+          "sha256": "f6d6b05c5fd00122d715168ad02434404a8d3427ed2ce935c28acb529c0b5fe9",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_aggtrade/binance_aggtrade_04.parquet"
+        },
+        {
+          "source_kind": "binance_aggtrade",
+          "schema_version": "binance_aggtrade_v7",
+          "bytes": 1493854,
+          "rows": 32191,
+          "sha256": "74dd908b08b4690d7a8354398ce7ea97888df2d7792a674b7a0b41fd8bdaea7b",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_aggtrade/binance_aggtrade_05.parquet"
+        },
+        {
+          "source_kind": "binance_aggtrade",
+          "schema_version": "binance_aggtrade_v7",
+          "bytes": 1082276,
+          "rows": 22667,
+          "sha256": "76816f414dcd8d20119a9cc928b7a844918a1e87870c7e3cb65f30fe4f606760",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_aggtrade/binance_aggtrade_06.parquet"
+        },
+        {
+          "source_kind": "binance_aggtrade",
+          "schema_version": "binance_aggtrade_v7",
+          "bytes": 1209367,
+          "rows": 25219,
+          "sha256": "b706692477fc0aa40298812ca8a0bc5e69f927bb30292958a262417c307688f7",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_aggtrade/binance_aggtrade_07.parquet"
+        },
+        {
+          "source_kind": "binance_aggtrade",
+          "schema_version": "binance_aggtrade_v7",
+          "bytes": 1981500,
+          "rows": 42439,
+          "sha256": "24852f08a53fb32ce1da28e49dcb8cc43ccd3cb9786907e17e8e6ac14e7adb3c",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_aggtrade/binance_aggtrade_08.parquet"
+        },
+        {
+          "source_kind": "binance_aggtrade",
+          "schema_version": "binance_aggtrade_v7",
+          "bytes": 1591828,
+          "rows": 34745,
+          "sha256": "44704676a796d3ceddc32dfd3fcce39c561615b987bfecb1d43ad7fdf97d79c2",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_aggtrade/binance_aggtrade_09.parquet"
+        },
+        {
+          "source_kind": "binance_aggtrade",
+          "schema_version": "binance_aggtrade_v7",
+          "bytes": 1499294,
+          "rows": 32207,
+          "sha256": "7b812d5d0f81dfeec371ab1518844e62cccf20d399dfcd03b3ec9a6f4a045258",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_aggtrade/binance_aggtrade_10.parquet"
+        },
+        {
+          "source_kind": "binance_aggtrade",
+          "schema_version": "binance_aggtrade_v7",
+          "bytes": 1814238,
+          "rows": 39821,
+          "sha256": "b7f6144f9b6e4b1800ce9e81b1b96d66e4586c70bd2e1586be637feb6abed6e2",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_aggtrade/binance_aggtrade_11.parquet"
+        },
+        {
+          "source_kind": "binance_aggtrade",
+          "schema_version": "binance_aggtrade_v7",
+          "bytes": 1800646,
+          "rows": 40571,
+          "sha256": "4bbfab87f175e0f7c335056231c0c4f3881874df9342e91ddf47b27367870aae",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_aggtrade/binance_aggtrade_12.parquet"
+        },
+        {
+          "source_kind": "binance_aggtrade",
+          "schema_version": "binance_aggtrade_v7",
+          "bytes": 2536020,
+          "rows": 57263,
+          "sha256": "4ae7c48169432f14863fa1d18020130865c82a36f01ea0e83c5ecb5d9db94437",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_aggtrade/binance_aggtrade_13.parquet"
+        },
+        {
+          "source_kind": "binance_aggtrade",
+          "schema_version": "binance_aggtrade_v7",
+          "bytes": 3358417,
+          "rows": 76651,
+          "sha256": "6b6689192cb5a7026478981dc8cfc9520bd90388ff7e5d0fd996296b85014582",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_aggtrade/binance_aggtrade_14.parquet"
+        },
+        {
+          "source_kind": "binance_aggtrade",
+          "schema_version": "binance_aggtrade_v7",
+          "bytes": 5015157,
+          "rows": 115207,
+          "sha256": "bb0c45f6697d4ec927fbe8480857ea51a10f9cb4d6a1a504cbedc9db71f533e3",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_aggtrade/binance_aggtrade_15.parquet"
+        },
+        {
+          "source_kind": "binance_aggtrade",
+          "schema_version": "binance_aggtrade_v7",
+          "bytes": 1953189,
+          "rows": 42113,
+          "sha256": "0364f3331209e4888c64d896a760dd605cd660acdeff8607ba0f19da9d309452",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_aggtrade/binance_aggtrade_16.parquet"
+        },
+        {
+          "source_kind": "binance_aggtrade",
+          "schema_version": "binance_aggtrade_v7",
+          "bytes": 1346506,
+          "rows": 28593,
+          "sha256": "fb032697213d2afbaa3bc2dd17aa26f682066103292cb0cae62011b69999f2a7",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_aggtrade/binance_aggtrade_17.parquet"
+        },
+        {
+          "source_kind": "binance_aggtrade",
+          "schema_version": "binance_aggtrade_v7",
+          "bytes": 1010080,
+          "rows": 20681,
+          "sha256": "f35a6f0fe86faa9ada91a07762dd1687a7f65af51c2183d8adc2a45422dcd8bb",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_aggtrade/binance_aggtrade_18.parquet"
+        },
+        {
+          "source_kind": "binance_aggtrade",
+          "schema_version": "binance_aggtrade_v7",
+          "bytes": 1313748,
+          "rows": 27632,
+          "sha256": "7dd575bf12819b47070720145e94f5999b3cfcbf1a557a5654468af48a12c2d2",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_aggtrade/binance_aggtrade_19.parquet"
+        },
+        {
+          "source_kind": "binance_aggtrade",
+          "schema_version": "binance_aggtrade_v7",
+          "bytes": 1377136,
+          "rows": 29477,
+          "sha256": "43d2b8eedaa7f1b641a902592c31af4fbfcca322eb9cb7e2f56afedb71fbd9b3",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_aggtrade/binance_aggtrade_20.parquet"
+        },
+        {
+          "source_kind": "binance_aggtrade",
+          "schema_version": "binance_aggtrade_v7",
+          "bytes": 1103753,
+          "rows": 22456,
+          "sha256": "f0f1ae4c9c2eae9558d620f4b68ae004ba3333fa17eb23108717866036cee763",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_aggtrade/binance_aggtrade_21.parquet"
+        },
+        {
+          "source_kind": "binance_aggtrade",
+          "schema_version": "binance_aggtrade_v7",
+          "bytes": 1785743,
+          "rows": 37551,
+          "sha256": "2b0020bcf10a49576d60f061aa37d95538a5e572075fb9ff438287fe5cbc48ea",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_aggtrade/binance_aggtrade_22.parquet"
+        },
+        {
+          "source_kind": "binance_aggtrade",
+          "schema_version": "binance_aggtrade_v7",
+          "bytes": 883532,
+          "rows": 18534,
+          "sha256": "9ea8818c85afc2f9499ebdcb91c4730a066d6ae5c1e9ae5e4ee6574aed1e5c5c",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_aggtrade/binance_aggtrade_23.parquet"
+        },
+        {
+          "source_kind": "binance_depth_snapshot",
+          "schema_version": "binance_depth_snapshot_v3",
+          "bytes": 18867,
+          "rows": 1,
+          "sha256": "1cbbbec4775ceff01c3b67a4cb36be634f905f5a72964352ed62ac1bc4f75bf0",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_depth_snapshot/binance_depth_snapshot_00.parquet"
+        },
+        {
+          "source_kind": "binance_depth_update",
+          "schema_version": "binance_depth_update_v4",
+          "bytes": 4348874,
+          "rows": 35985,
+          "sha256": "93356c91f532715fb5abb6ce2702f818ae665f0f40098c017c5a1c10da954568",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_depth_update/binance_depth_update_00.parquet"
+        },
+        {
+          "source_kind": "binance_depth_update",
+          "schema_version": "binance_depth_update_v4",
+          "bytes": 4699796,
+          "rows": 35983,
+          "sha256": "827ab14193a6bf284dcb5b972e67dab3de6adfeeef7fc7262a05ee9242742556",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_depth_update/binance_depth_update_01.parquet"
+        },
+        {
+          "source_kind": "binance_depth_update",
+          "schema_version": "binance_depth_update_v4",
+          "bytes": 4134234,
+          "rows": 35972,
+          "sha256": "126d009507089a319cffd53d877a3af4516eef0dc644bbdf3c586eabb99f3c31",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_depth_update/binance_depth_update_02.parquet"
+        },
+        {
+          "source_kind": "binance_depth_update",
+          "schema_version": "binance_depth_update_v4",
+          "bytes": 3986960,
+          "rows": 35973,
+          "sha256": "586d19071eebaf27e333f2f1ebbb71cc1a23cbd839345794d9894a8e9a4c7355",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_depth_update/binance_depth_update_03.parquet"
+        },
+        {
+          "source_kind": "binance_depth_update",
+          "schema_version": "binance_depth_update_v4",
+          "bytes": 5814516,
+          "rows": 35979,
+          "sha256": "537c514b0795d619aa13f2e00f314ae157c58440b91504b714f41b7ea140ca56",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_depth_update/binance_depth_update_04.parquet"
+        },
+        {
+          "source_kind": "binance_depth_update",
+          "schema_version": "binance_depth_update_v4",
+          "bytes": 5794811,
+          "rows": 35989,
+          "sha256": "3fc821a881569958e69d614825ca577d0008bfd6c1f1b32beb34e9d4aa75604a",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_depth_update/binance_depth_update_05.parquet"
+        },
+        {
+          "source_kind": "binance_depth_update",
+          "schema_version": "binance_depth_update_v4",
+          "bytes": 4908512,
+          "rows": 35974,
+          "sha256": "9bf6dbd3067329b46dd528f4418ff8621c5b627a423499bead2020d1b9005fb0",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_depth_update/binance_depth_update_06.parquet"
+        },
+        {
+          "source_kind": "binance_depth_update",
+          "schema_version": "binance_depth_update_v4",
+          "bytes": 4719132,
+          "rows": 35989,
+          "sha256": "cffb42ee8ff74775a8357553d0c0010639a0efc8b55d9fbd24659a4e85da079b",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_depth_update/binance_depth_update_07.parquet"
+        },
+        {
+          "source_kind": "binance_depth_update",
+          "schema_version": "binance_depth_update_v4",
+          "bytes": 5704123,
+          "rows": 35988,
+          "sha256": "74dc45ca47bfd9ba2f7402581d9d026616a93bc054aabdf11ee521e1e8d74039",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_depth_update/binance_depth_update_08.parquet"
+        },
+        {
+          "source_kind": "binance_depth_update",
+          "schema_version": "binance_depth_update_v4",
+          "bytes": 5552677,
+          "rows": 35984,
+          "sha256": "9f6f1686cd0760ab13f9e3789a004ed9978c897cadd26c9880aad332d38a80f6",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_depth_update/binance_depth_update_09.parquet"
+        },
+        {
+          "source_kind": "binance_depth_update",
+          "schema_version": "binance_depth_update_v4",
+          "bytes": 5553735,
+          "rows": 35983,
+          "sha256": "de39e1575ead37b4ba78bd72ef1a452705f77e15586d0960cfe0e6b1e023cb6e",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_depth_update/binance_depth_update_10.parquet"
+        },
+        {
+          "source_kind": "binance_depth_update",
+          "schema_version": "binance_depth_update_v4",
+          "bytes": 5980180,
+          "rows": 35990,
+          "sha256": "8dbef6772f156991c523e7bd933443894861e6eaa2e46008418390bfd7c0c3fe",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_depth_update/binance_depth_update_11.parquet"
+        },
+        {
+          "source_kind": "binance_depth_update",
+          "schema_version": "binance_depth_update_v4",
+          "bytes": 5490458,
+          "rows": 35991,
+          "sha256": "0c818239506956e9378749e024e25f545c4b8dbd5fb2bc4be93e391ce5335caa",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_depth_update/binance_depth_update_12.parquet"
+        },
+        {
+          "source_kind": "binance_depth_update",
+          "schema_version": "binance_depth_update_v4",
+          "bytes": 9361744,
+          "rows": 35997,
+          "sha256": "3887cb006a860ed7e50f5d455d7a396b4f367bf5486a710e348f3f3b60f08e9f",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_depth_update/binance_depth_update_13.parquet"
+        },
+        {
+          "source_kind": "binance_depth_update",
+          "schema_version": "binance_depth_update_v4",
+          "bytes": 10709745,
+          "rows": 35999,
+          "sha256": "56e62066f561f98c30ec926e2f0784e231ef2398678c552b9111aee32bd6a22d",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_depth_update/binance_depth_update_14.parquet"
+        },
+        {
+          "source_kind": "binance_depth_update",
+          "schema_version": "binance_depth_update_v4",
+          "bytes": 13392795,
+          "rows": 35998,
+          "sha256": "4e602b2a415203080f0643a553d774d424318493f2d551634f56393e895536b4",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_depth_update/binance_depth_update_15.parquet"
+        },
+        {
+          "source_kind": "binance_depth_update",
+          "schema_version": "binance_depth_update_v4",
+          "bytes": 6606598,
+          "rows": 35993,
+          "sha256": "7e3f3f804cf6fbb269733ef5ef002870b7dfde0130464ba7d6c759a2e3f4954a",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_depth_update/binance_depth_update_16.parquet"
+        },
+        {
+          "source_kind": "binance_depth_update",
+          "schema_version": "binance_depth_update_v4",
+          "bytes": 5229177,
+          "rows": 35992,
+          "sha256": "f508288725af8f08318cd8dba0eab4d5119793c4d70747bfb00a09feea4628b9",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_depth_update/binance_depth_update_17.parquet"
+        },
+        {
+          "source_kind": "binance_depth_update",
+          "schema_version": "binance_depth_update_v4",
+          "bytes": 4566790,
+          "rows": 35991,
+          "sha256": "5150f1f7e6900cfff565af5bf23f02066b514350e6a946cbe1194950175ee3d8",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_depth_update/binance_depth_update_18.parquet"
+        },
+        {
+          "source_kind": "binance_depth_update",
+          "schema_version": "binance_depth_update_v4",
+          "bytes": 5568964,
+          "rows": 35985,
+          "sha256": "4142af4a1202f343e7e3a70faac44be34dc34f1823427c609832a32595194265",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_depth_update/binance_depth_update_19.parquet"
+        },
+        {
+          "source_kind": "binance_depth_update",
+          "schema_version": "binance_depth_update_v4",
+          "bytes": 5507004,
+          "rows": 35985,
+          "sha256": "70a707dd02d7ad68b173e1e9d93aa7268ede1299f6453ef4c75ca92c5cf5e1b4",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_depth_update/binance_depth_update_20.parquet"
+        },
+        {
+          "source_kind": "binance_depth_update",
+          "schema_version": "binance_depth_update_v4",
+          "bytes": 4373482,
+          "rows": 35981,
+          "sha256": "f92cd72652715aa07379e5ce33e7a4fe4b83855f8d52d6d16e3d180e4c243c28",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_depth_update/binance_depth_update_21.parquet"
+        },
+        {
+          "source_kind": "binance_depth_update",
+          "schema_version": "binance_depth_update_v4",
+          "bytes": 6196841,
+          "rows": 35989,
+          "sha256": "73343ae8a7f8f0e72e5368be90da00589479cb142592e21387d3772a3b51218d",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_depth_update/binance_depth_update_22.parquet"
+        },
+        {
+          "source_kind": "binance_depth_update",
+          "schema_version": "binance_depth_update_v4",
+          "bytes": 4160783,
+          "rows": 35980,
+          "sha256": "103a7958c567488839a3256358164676a49ad6fad474eb8233d9d77c1c115f2f",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=binance_depth_update/binance_depth_update_23.parquet"
+        },
+        {
+          "source_kind": "polymarket_market",
+          "schema_version": "polymarket_orderbook_v3",
+          "bytes": 69190937,
+          "rows": 1137654,
+          "sha256": "cfffb8a73b9fe0d0e3b5993921bd88514ad4bd8fe3d20ba2c7cdfebcef82328a",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market/polymarket_market_00.parquet"
+        },
+        {
+          "source_kind": "polymarket_market",
+          "schema_version": "polymarket_orderbook_v3",
+          "bytes": 82658720,
+          "rows": 1381378,
+          "sha256": "3fa88b6d3f7d3c1e23bf758d04374f1b051a36d37b5f6c2339d5981b4caa79ef",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market/polymarket_market_01.parquet"
+        },
+        {
+          "source_kind": "polymarket_market",
+          "schema_version": "polymarket_orderbook_v3",
+          "bytes": 78161470,
+          "rows": 1318813,
+          "sha256": "db6d55e8ecde0200f883f6914a426708990a586e713da03375f794dd3270f3a1",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market/polymarket_market_02.parquet"
+        },
+        {
+          "source_kind": "polymarket_market",
+          "schema_version": "polymarket_orderbook_v3",
+          "bytes": 80622430,
+          "rows": 1345509,
+          "sha256": "923880ff90672500c6ac10aef0d7fe39ed6b9cc84f794108ba8b406d82dca6fe",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market/polymarket_market_03.parquet"
+        },
+        {
+          "source_kind": "polymarket_market",
+          "schema_version": "polymarket_orderbook_v3",
+          "bytes": 86129289,
+          "rows": 1452753,
+          "sha256": "b4863a1e220a10b8925374070a1cff9922e609b70ff80d465167c4cbffbd2a36",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market/polymarket_market_04.parquet"
+        },
+        {
+          "source_kind": "polymarket_market",
+          "schema_version": "polymarket_orderbook_v3",
+          "bytes": 78835839,
+          "rows": 1331605,
+          "sha256": "5102b34c4470fcac349d67b43456f2b0c1e5c5c46df0ead6b4bec8cc98d4ed6d",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market/polymarket_market_05.parquet"
+        },
+        {
+          "source_kind": "polymarket_market",
+          "schema_version": "polymarket_orderbook_v3",
+          "bytes": 74808055,
+          "rows": 1258000,
+          "sha256": "556b1dfa939c2becef506e6b28a286da27e3bcf0bf3dc32d0b19d54bb8787fab",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market/polymarket_market_06.parquet"
+        },
+        {
+          "source_kind": "polymarket_market",
+          "schema_version": "polymarket_orderbook_v3",
+          "bytes": 90880733,
+          "rows": 1522970,
+          "sha256": "ef3c6beb3c23bbcdd38960987a63dcd6258c72d64392aeeb491af79d1c08d8ef",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market/polymarket_market_07.parquet"
+        },
+        {
+          "source_kind": "polymarket_market",
+          "schema_version": "polymarket_orderbook_v3",
+          "bytes": 88557699,
+          "rows": 1464921,
+          "sha256": "6e3e754bece2a140b6bd8d26e9ece5fe12aa06d6f1f8b4c5f54b3be7bb37def4",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market/polymarket_market_08.parquet"
+        },
+        {
+          "source_kind": "polymarket_market",
+          "schema_version": "polymarket_orderbook_v3",
+          "bytes": 73010314,
+          "rows": 1198537,
+          "sha256": "06c370e339339031fb0b8126a267127b7b79bb0a340769fda03ca10fd34b5d9a",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market/polymarket_market_09.parquet"
+        },
+        {
+          "source_kind": "polymarket_market",
+          "schema_version": "polymarket_orderbook_v3",
+          "bytes": 77183659,
+          "rows": 1267098,
+          "sha256": "5ec843fc3ad1fb6ba29f10cb122a0853d676c8aa0a7fbc88c9526ab43bc57c5e",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market/polymarket_market_10.parquet"
+        },
+        {
+          "source_kind": "polymarket_market",
+          "schema_version": "polymarket_orderbook_v3",
+          "bytes": 78706808,
+          "rows": 1298077,
+          "sha256": "2561d85d3b2b42e5682f1e96b99548cc7319cbbf6330d596e7a473c0e25c0a4f",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market/polymarket_market_11.parquet"
+        },
+        {
+          "source_kind": "polymarket_market",
+          "schema_version": "polymarket_orderbook_v3",
+          "bytes": 86494539,
+          "rows": 1413792,
+          "sha256": "834079e5bef596e78bfce55e75fd7d6af9553cf3a416a2f6345ccefd319d1043",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market/polymarket_market_12.parquet"
+        },
+        {
+          "source_kind": "polymarket_market",
+          "schema_version": "polymarket_orderbook_v3",
+          "bytes": 99125181,
+          "rows": 1641268,
+          "sha256": "5521c9362d77890fb2f22a12d56a6b52dc95b0d5e44ab1b464974ea7b3118404",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market/polymarket_market_13.parquet"
+        },
+        {
+          "source_kind": "polymarket_market",
+          "schema_version": "polymarket_orderbook_v3",
+          "bytes": 111310234,
+          "rows": 1841328,
+          "sha256": "e0fca0a58b0afab9425cb92884ce77026461102f1aff64b66cbbc82e373cdfe5",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market/polymarket_market_14.parquet"
+        },
+        {
+          "source_kind": "polymarket_market",
+          "schema_version": "polymarket_orderbook_v3",
+          "bytes": 110651897,
+          "rows": 1838579,
+          "sha256": "3e46f0ff9f924221cba94e8ef858a285074ceaa5fee2a5a2d63f7d89e15b965d",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market/polymarket_market_15.parquet"
+        },
+        {
+          "source_kind": "polymarket_market",
+          "schema_version": "polymarket_orderbook_v3",
+          "bytes": 79627292,
+          "rows": 1321285,
+          "sha256": "97a1266888350bb0c95bfe80bdbc608e7f29f3fc1874c3cf47351fff9d862e5f",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market/polymarket_market_16.parquet"
+        },
+        {
+          "source_kind": "polymarket_market",
+          "schema_version": "polymarket_orderbook_v3",
+          "bytes": 81704491,
+          "rows": 1354043,
+          "sha256": "eb45124922edaca93a989f9f17c0e48fac019e58627caa805f1a55c5935ee590",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market/polymarket_market_17.parquet"
+        },
+        {
+          "source_kind": "polymarket_market",
+          "schema_version": "polymarket_orderbook_v3",
+          "bytes": 79725585,
+          "rows": 1316520,
+          "sha256": "379d09e12629af180cf8ce33989993182a1d4d581919e31495808621625968df",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market/polymarket_market_18.parquet"
+        },
+        {
+          "source_kind": "polymarket_market",
+          "schema_version": "polymarket_orderbook_v3",
+          "bytes": 85916433,
+          "rows": 1424712,
+          "sha256": "4a81624fbd2a89daca9c37f7c095818b94e4f803894ba6a7aca52ae3de423a70",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market/polymarket_market_19.parquet"
+        },
+        {
+          "source_kind": "polymarket_market",
+          "schema_version": "polymarket_orderbook_v3",
+          "bytes": 69687939,
+          "rows": 1159225,
+          "sha256": "3a1eb9fcb4c275fc25921388552bf9b5aa8b908842ee9bcaf8cf9b8922d60a63",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market/polymarket_market_20.parquet"
+        },
+        {
+          "source_kind": "polymarket_market",
+          "schema_version": "polymarket_orderbook_v3",
+          "bytes": 68391690,
+          "rows": 1131984,
+          "sha256": "a2a45deb17cd9ecd71336492a0d219fab34f56d2425f0601b36cea8233ccfca4",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market/polymarket_market_21.parquet"
+        },
+        {
+          "source_kind": "polymarket_market",
+          "schema_version": "polymarket_orderbook_v3",
+          "bytes": 77755644,
+          "rows": 1307703,
+          "sha256": "b71604c5613ec1a53bdaa9ee416a15c72bf24775ec99f40bbc4c68556248d5a3",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market/polymarket_market_22.parquet"
+        },
+        {
+          "source_kind": "polymarket_market",
+          "schema_version": "polymarket_orderbook_v3",
+          "bytes": 67693570,
+          "rows": 1141507,
+          "sha256": "3109f457c232da4a4e2dbc7d1ddd7657fb044425401e213c99a64e300bd0cb1a",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market/polymarket_market_23.parquet"
+        },
+        {
+          "source_kind": "polymarket_market_metadata",
+          "schema_version": "polymarket_market_metadata_v6",
+          "bytes": 98097,
+          "rows": 793,
+          "sha256": "968508be289147d6a2a5e8eb5325d73a62e3cd8bcfc602558dcd09b8bd6000ec",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market_metadata/polymarket_market_metadata_00.parquet"
+        },
+        {
+          "source_kind": "polymarket_market_metadata",
+          "schema_version": "polymarket_market_metadata_v6",
+          "bytes": 97090,
+          "rows": 792,
+          "sha256": "023564dac0cbc30306b2035d0c4c61ec14da68aa5b5e371b5bb03f1f4a6c07dd",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market_metadata/polymarket_market_metadata_01.parquet"
+        },
+        {
+          "source_kind": "polymarket_market_metadata",
+          "schema_version": "polymarket_market_metadata_v6",
+          "bytes": 97742,
+          "rows": 792,
+          "sha256": "37a2159e37e2c08f4376148a21b3c6e1bc83b132156c147406d150323fe048db",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market_metadata/polymarket_market_metadata_02.parquet"
+        },
+        {
+          "source_kind": "polymarket_market_metadata",
+          "schema_version": "polymarket_market_metadata_v6",
+          "bytes": 97349,
+          "rows": 792,
+          "sha256": "6a0a549ae1c1855e2d2ef4fe93d30dc3c535b8001afbcd8ddaf2ebf3877615b3",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market_metadata/polymarket_market_metadata_03.parquet"
+        },
+        {
+          "source_kind": "polymarket_market_metadata",
+          "schema_version": "polymarket_market_metadata_v6",
+          "bytes": 98379,
+          "rows": 792,
+          "sha256": "d843b1dc59e52445938f8b3305b3a0406efb4f916bcd2c8a11f72d0159d6bd51",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market_metadata/polymarket_market_metadata_04.parquet"
+        },
+        {
+          "source_kind": "polymarket_market_metadata",
+          "schema_version": "polymarket_market_metadata_v6",
+          "bytes": 97484,
+          "rows": 792,
+          "sha256": "c17dabcbd24cab13240411dbca7fc7f04893a4d86cf3ba708d0cd3bce33ec625",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market_metadata/polymarket_market_metadata_05.parquet"
+        },
+        {
+          "source_kind": "polymarket_market_metadata",
+          "schema_version": "polymarket_market_metadata_v6",
+          "bytes": 98530,
+          "rows": 792,
+          "sha256": "569416f0309f426608c49eb71db2da840b9423e9783b4724e6e8b6edc28a8596",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market_metadata/polymarket_market_metadata_06.parquet"
+        },
+        {
+          "source_kind": "polymarket_market_metadata",
+          "schema_version": "polymarket_market_metadata_v6",
+          "bytes": 97907,
+          "rows": 792,
+          "sha256": "aca3624f067992f48a5a36658bfb01804bfd674c781b927df6144eefa78a8ab0",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market_metadata/polymarket_market_metadata_07.parquet"
+        },
+        {
+          "source_kind": "polymarket_market_metadata",
+          "schema_version": "polymarket_market_metadata_v6",
+          "bytes": 97610,
+          "rows": 792,
+          "sha256": "115aa3175f8f8257819d30c72355c93ac0519d4a9582df5e7beadfaa29c8948d",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market_metadata/polymarket_market_metadata_08.parquet"
+        },
+        {
+          "source_kind": "polymarket_market_metadata",
+          "schema_version": "polymarket_market_metadata_v6",
+          "bytes": 99169,
+          "rows": 793,
+          "sha256": "10fe2cef80845e7479ffd6244ccb780fc03b94ac9eef5e5101cfe870f54f5b79",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market_metadata/polymarket_market_metadata_09.parquet"
+        },
+        {
+          "source_kind": "polymarket_market_metadata",
+          "schema_version": "polymarket_market_metadata_v6",
+          "bytes": 98146,
+          "rows": 792,
+          "sha256": "787d46add876f16fee814c02612e8d9d89b92d6c4fc8a3f4f3e143cf8a18a117",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market_metadata/polymarket_market_metadata_10.parquet"
+        },
+        {
+          "source_kind": "polymarket_market_metadata",
+          "schema_version": "polymarket_market_metadata_v6",
+          "bytes": 97910,
+          "rows": 792,
+          "sha256": "04cb55b2e8fd28e5bef12337956b9b9a559e89e17462a152b5001f6655f26196",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market_metadata/polymarket_market_metadata_11.parquet"
+        },
+        {
+          "source_kind": "polymarket_market_metadata",
+          "schema_version": "polymarket_market_metadata_v6",
+          "bytes": 98650,
+          "rows": 792,
+          "sha256": "ba147dd8bd34a2029284b5690ce3cdfad08593368ca053d56e7e3ff2f800fece",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market_metadata/polymarket_market_metadata_12.parquet"
+        },
+        {
+          "source_kind": "polymarket_market_metadata",
+          "schema_version": "polymarket_market_metadata_v6",
+          "bytes": 98810,
+          "rows": 792,
+          "sha256": "745ae0538a9d73d41c757f45f2717788b13ac66a3bcbf30003194bb918edb9b1",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market_metadata/polymarket_market_metadata_13.parquet"
+        },
+        {
+          "source_kind": "polymarket_market_metadata",
+          "schema_version": "polymarket_market_metadata_v6",
+          "bytes": 98511,
+          "rows": 792,
+          "sha256": "3394c86d5421a239c7a4ec64c64bf1bd2e6f46f54b8f229a29fc8287adb961e0",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market_metadata/polymarket_market_metadata_14.parquet"
+        },
+        {
+          "source_kind": "polymarket_market_metadata",
+          "schema_version": "polymarket_market_metadata_v6",
+          "bytes": 97551,
+          "rows": 792,
+          "sha256": "28efc04d5acb2faf6ffe49e98bcdc9d66e79d6b4c91cf8954d26d6c016e64c65",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market_metadata/polymarket_market_metadata_15.parquet"
+        },
+        {
+          "source_kind": "polymarket_market_metadata",
+          "schema_version": "polymarket_market_metadata_v6",
+          "bytes": 97316,
+          "rows": 792,
+          "sha256": "5ce1238ebc1a82e65fc9d6a96827cdf55330e7d2df8f2d6730db274119fcff5a",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market_metadata/polymarket_market_metadata_16.parquet"
+        },
+        {
+          "source_kind": "polymarket_market_metadata",
+          "schema_version": "polymarket_market_metadata_v6",
+          "bytes": 97146,
+          "rows": 792,
+          "sha256": "acaf1a5d1c30fe70b95662cc2967787c0b1b4008a936a285b65cc2831a4744af",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market_metadata/polymarket_market_metadata_17.parquet"
+        },
+        {
+          "source_kind": "polymarket_market_metadata",
+          "schema_version": "polymarket_market_metadata_v6",
+          "bytes": 97241,
+          "rows": 792,
+          "sha256": "990c8e388df486152d1710fa44e3387611d4367415a61219355a89bff606ac5c",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market_metadata/polymarket_market_metadata_18.parquet"
+        },
+        {
+          "source_kind": "polymarket_market_metadata",
+          "schema_version": "polymarket_market_metadata_v6",
+          "bytes": 102298,
+          "rows": 859,
+          "sha256": "07ac4b3ef1d9c10fd868a12da3f7db06caa30378b70eaf6bf7812ae355f71c64",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market_metadata/polymarket_market_metadata_19.parquet"
+        },
+        {
+          "source_kind": "polymarket_market_metadata",
+          "schema_version": "polymarket_market_metadata_v6",
+          "bytes": 106418,
+          "rows": 863,
+          "sha256": "0a6bb7f489a5c81f59c5741cddf181cef125cf0891f860d35756b3e0d0b05ea0",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market_metadata/polymarket_market_metadata_20.parquet"
+        },
+        {
+          "source_kind": "polymarket_market_metadata",
+          "schema_version": "polymarket_market_metadata_v6",
+          "bytes": 105264,
+          "rows": 843,
+          "sha256": "1dc0f18e22a70a2c6b78da652bef99a9e8f6056df0052bbb7e4ad28fac629e54",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market_metadata/polymarket_market_metadata_21.parquet"
+        },
+        {
+          "source_kind": "polymarket_market_metadata",
+          "schema_version": "polymarket_market_metadata_v6",
+          "bytes": 105900,
+          "rows": 850,
+          "sha256": "852aaf96763f4872aeeb69a3dbd41f469d3a8ed42da2ae94d42b42ac2a4f4109",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market_metadata/polymarket_market_metadata_22.parquet"
+        },
+        {
+          "source_kind": "polymarket_market_metadata",
+          "schema_version": "polymarket_market_metadata_v6",
+          "bytes": 105751,
+          "rows": 861,
+          "sha256": "4c46d351abfc3dcf9ef5def070ca9329e14c5cda8d138c7bf3efb5cce4679696",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_market_metadata/polymarket_market_metadata_23.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 161832,
+          "rows": 3307,
+          "sha256": "ed52d58de7243b70cb202a753119d306a96875762196856e5687bff47e7e248a",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_00.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 163855,
+          "rows": 3342,
+          "sha256": "cce3bcec60966375080b1c29c48bf962bb4c1940a43fedb49587c87edfc63477",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_01.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 160878,
+          "rows": 3341,
+          "sha256": "ef9ee10d33bccba00fbb3a01d551b0ff3d5cd3162541df9382700c92a51f6747",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_02.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 158858,
+          "rows": 3288,
+          "sha256": "943489e5c07375b7f2ae51ae75efb3f8b75d6885c9e77b4fee40a71aaa8a633a",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_03.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 163456,
+          "rows": 3324,
+          "sha256": "2adc9e52d460c24ed63236e80e7ad29b504c406edba5fa60e389c390912863f0",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_04.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 164157,
+          "rows": 3346,
+          "sha256": "c565ea4523f3bc96c1b5088ff44e556c9600e1c9685894c187927573076612b4",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_05.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 150431,
+          "rows": 3063,
+          "sha256": "90daf64ec4f80fff797e9a87912b887558277d766d10769a6767505d3d315109",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_06.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 159259,
+          "rows": 3308,
+          "sha256": "b1da18fc48bf3b50e874ede0f597fede183f233ae2ee14bce18bfd566e9b1c61",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_07.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 161624,
+          "rows": 3298,
+          "sha256": "22f88769d3a7face9392af95bc08a92e9d07ddfd32eaf3ca9dd1b7539b120bdb",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_08.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 160017,
+          "rows": 3284,
+          "sha256": "fe64c19cfd733560412d0ea21111e9fb414b614098e4d4ae7f3ea66646e4dc39",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_09.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 147620,
+          "rows": 2983,
+          "sha256": "085d9084e06ad25e160c5100f31e5cddb087c1a4a0a89a82b22899eca1e0d59b",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_10.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 162667,
+          "rows": 3308,
+          "sha256": "e59a6ee50dde3c643d9dabb0bc49867ec84087a64592211d2d8e4c8c398c2043",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_11.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 160924,
+          "rows": 3262,
+          "sha256": "5360fc140c19b4b746370eb3e3eabf85797362f4bbf6a52439f04a67b6b556ca",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_12.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 148815,
+          "rows": 2978,
+          "sha256": "57cab42934068aa2588b477f0b09313e19598404f71e41d5ec1b5da0745d0b32",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_13.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 165818,
+          "rows": 3284,
+          "sha256": "b59cc7577f59920d5aa9f8f83dc9c362fd6fbd89d65410a781761f79c775894e",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_14.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 148592,
+          "rows": 2919,
+          "sha256": "0c33bf777cc35c34f59672c7f9a20fb559d765953de1ef29fd769783ca9221ec",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_15.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 154938,
+          "rows": 3091,
+          "sha256": "c85ed981e34704a2e4e8604c625bafadedc37c5404c997a431b36a96b32e1942",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_16.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 152798,
+          "rows": 3081,
+          "sha256": "fa2362f75a0c40030cebb8096d9d14ac3c9b52b3156e67c6c2eec8e473d2eb45",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_17.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 152252,
+          "rows": 3100,
+          "sha256": "d8f98fffcf253cf07c2e2c48c74741fb03c9b147bcd60d348d166073d5dd6579",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_18.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 154752,
+          "rows": 3108,
+          "sha256": "271fb01d3e54d5bc5c9c8f63e096a8bc502dcaa848515470f261c8ade29746da",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_19.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 156068,
+          "rows": 3155,
+          "sha256": "23d2bb0edfb74534e93c40d6284ccd595c7899247ae79f63b938cf18f11354e4",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_20.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 159614,
+          "rows": 3239,
+          "sha256": "cac7c1d039fb6770743cf3980d1f3ec5ad5ea70db1919411d5efe9dcc801d20b",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_21.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 160665,
+          "rows": 3236,
+          "sha256": "6a414f3d62e3379a0c54079b7f7485f07825109969da42f8702a23c51d5c52e1",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_22.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_btc_usd",
+          "schema_version": "polymarket_rtds_chainlink_btc_usd_v4",
+          "bytes": 159207,
+          "rows": 3260,
+          "sha256": "22f129b4bb2a952604a9a5833016e0e2709509d9fcf4a92aa7009a38bf5e5547",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_btc_usd/polymarket_rtds_chainlink_btc_usd_23.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_twap",
+          "schema_version": "polymarket_rtds_chainlink_twap_v1",
+          "bytes": 213347,
+          "rows": 3315,
+          "sha256": "53c071cbf7836610963e54edf653db4145c93f319a5b360d0bda8b89d3231d32",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_twap/polymarket_rtds_chainlink_twap_00.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_twap",
+          "schema_version": "polymarket_rtds_chainlink_twap_v1",
+          "bytes": 222967,
+          "rows": 3344,
+          "sha256": "9f912192cc95c38038485c5537a37a04171b912ed51020a34337a15d54dd6bf8",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_twap/polymarket_rtds_chainlink_twap_01.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_twap",
+          "schema_version": "polymarket_rtds_chainlink_twap_v1",
+          "bytes": 221251,
+          "rows": 3338,
+          "sha256": "8ae2f2bfc915ff0861739df3778ff70009ea3c549d53fc52fac744c4ffe1adfd",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_twap/polymarket_rtds_chainlink_twap_02.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_twap",
+          "schema_version": "polymarket_rtds_chainlink_twap_v1",
+          "bytes": 216867,
+          "rows": 3288,
+          "sha256": "92e3bc0a642cdf16c53b517a58ee7e5aed0e0a1123a1dba7b9010ad0957fcede",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_twap/polymarket_rtds_chainlink_twap_03.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_twap",
+          "schema_version": "polymarket_rtds_chainlink_twap_v1",
+          "bytes": 220613,
+          "rows": 3320,
+          "sha256": "35fc54506a2cd93fe1d0f38e660ef7ea8139e5e52a131a01dd409547d050cb9f",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_twap/polymarket_rtds_chainlink_twap_04.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_twap",
+          "schema_version": "polymarket_rtds_chainlink_twap_v1",
+          "bytes": 224660,
+          "rows": 3349,
+          "sha256": "b2ffbd833edf0adffe2a8941ea86aabf2e4cad7df6a2f528cd01b7a1e3a03c9e",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_twap/polymarket_rtds_chainlink_twap_05.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_twap",
+          "schema_version": "polymarket_rtds_chainlink_twap_v1",
+          "bytes": 205464,
+          "rows": 3064,
+          "sha256": "44c9fa3a3941de407e7c584fe8ade885cc09a72a71ba7dab418e392c55067a8d",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_twap/polymarket_rtds_chainlink_twap_06.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_twap",
+          "schema_version": "polymarket_rtds_chainlink_twap_v1",
+          "bytes": 217322,
+          "rows": 3297,
+          "sha256": "3be29d46ba7cc77a0da4a373c389db88dcdd836602f39e1f1a6cfdb7a8a89cc7",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_twap/polymarket_rtds_chainlink_twap_07.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_twap",
+          "schema_version": "polymarket_rtds_chainlink_twap_v1",
+          "bytes": 218197,
+          "rows": 3297,
+          "sha256": "a6f63f53e06daad9235b8ca2353ac42cf914dd1d70a2944aa9723647bce866d7",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_twap/polymarket_rtds_chainlink_twap_08.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_twap",
+          "schema_version": "polymarket_rtds_chainlink_twap_v1",
+          "bytes": 217708,
+          "rows": 3278,
+          "sha256": "35053b3d473b1002644b70ae2be6bf922cd57fd84ec0c613711d8225301c0e12",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_twap/polymarket_rtds_chainlink_twap_09.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_twap",
+          "schema_version": "polymarket_rtds_chainlink_twap_v1",
+          "bytes": 198242,
+          "rows": 2977,
+          "sha256": "aa9b2f15039d5268d5ca5edae5dc595c8c32f45c11cc87544887ca0eb9ba35f5",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_twap/polymarket_rtds_chainlink_twap_10.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_twap",
+          "schema_version": "polymarket_rtds_chainlink_twap_v1",
+          "bytes": 219513,
+          "rows": 3301,
+          "sha256": "17c10af3ed1a062fece4d25cf844aea443e5c252b6294d955d4e0d8c5a86ad95",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_twap/polymarket_rtds_chainlink_twap_11.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_twap",
+          "schema_version": "polymarket_rtds_chainlink_twap_v1",
+          "bytes": 216555,
+          "rows": 3267,
+          "sha256": "35511210af5a6ecb718112fbbbf07ee5f4ebda1ac0a2ca2ccb884d3270608513",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_twap/polymarket_rtds_chainlink_twap_12.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_twap",
+          "schema_version": "polymarket_rtds_chainlink_twap_v1",
+          "bytes": 195598,
+          "rows": 2962,
+          "sha256": "7daf65401744ef3cf9ec3c63b7966f229afb487ad60291602da2772e2cbbbe32",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_twap/polymarket_rtds_chainlink_twap_13.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_twap",
+          "schema_version": "polymarket_rtds_chainlink_twap_v1",
+          "bytes": 216836,
+          "rows": 3276,
+          "sha256": "142dd68964d5084a09c5be36ae5cf83676111f1ee82653228bc519fe1150d09f",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_twap/polymarket_rtds_chainlink_twap_14.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_twap",
+          "schema_version": "polymarket_rtds_chainlink_twap_v1",
+          "bytes": 182773,
+          "rows": 2819,
+          "sha256": "b4e3f65429ba3bd7c0f5e3989c8b18e66da8b145e6fef66ebc5196e78ece29a5",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_twap/polymarket_rtds_chainlink_twap_15.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_twap",
+          "schema_version": "polymarket_rtds_chainlink_twap_v1",
+          "bytes": 178601,
+          "rows": 2896,
+          "sha256": "893588349d7f7c0ccff1cc7785714fed3d6f13510457e33400388fd4755e3dd1",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_twap/polymarket_rtds_chainlink_twap_16.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_twap",
+          "schema_version": "polymarket_rtds_chainlink_twap_v1",
+          "bytes": 180163,
+          "rows": 2949,
+          "sha256": "fb9e878516dc3ea038a09969e17329485a577d671319cb89f9fb02e6384be949",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_twap/polymarket_rtds_chainlink_twap_17.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_twap",
+          "schema_version": "polymarket_rtds_chainlink_twap_v1",
+          "bytes": 191099,
+          "rows": 2995,
+          "sha256": "cd6c663a8f4e5aff1b92b11b3aace3c2d0da612c50f2f10365c3e6fd4e22f113",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_twap/polymarket_rtds_chainlink_twap_18.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_twap",
+          "schema_version": "polymarket_rtds_chainlink_twap_v1",
+          "bytes": 189128,
+          "rows": 3042,
+          "sha256": "5ce5eb0f91cba14cf380a0e5f1a97183bb06c931bd894c37e64c8390caa7a664",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_twap/polymarket_rtds_chainlink_twap_19.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_twap",
+          "schema_version": "polymarket_rtds_chainlink_twap_v1",
+          "bytes": 194184,
+          "rows": 3027,
+          "sha256": "11b6d25f7b0902f66d71d31960dd7a338c5435159c7dacab0929953e0f724b46",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_twap/polymarket_rtds_chainlink_twap_20.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_twap",
+          "schema_version": "polymarket_rtds_chainlink_twap_v1",
+          "bytes": 214232,
+          "rows": 3223,
+          "sha256": "5a76b048aa47f71c806b28cf4bc97d448504e99fd8123a8e96d9a298c2ec0975",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_twap/polymarket_rtds_chainlink_twap_21.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_twap",
+          "schema_version": "polymarket_rtds_chainlink_twap_v1",
+          "bytes": 211921,
+          "rows": 3219,
+          "sha256": "70cf2f7bc705149a53fbea6ff7d2df6161ecc6beb1db4e2058a1e8c3cff34090",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_twap/polymarket_rtds_chainlink_twap_22.parquet"
+        },
+        {
+          "source_kind": "polymarket_rtds_chainlink_twap",
+          "schema_version": "polymarket_rtds_chainlink_twap_v1",
+          "bytes": 216680,
+          "rows": 3260,
+          "sha256": "e45b07ab9c5725c0afb06a3ea7ab49665e7e5b26f3e943cd8fab00f07f427a38",
+          "path": "INPUT_ROOT/2026-09-09/typed_raw/utc_day=2026-09-09/source_kind=polymarket_rtds_chainlink_twap/polymarket_rtds_chainlink_twap_23.parquet"
+        }
+      ],
+      "received_start_utc_ms": 1788912000000,
+      "received_end_utc_ms": 1788912720000,
+      "work_root": "WORK_ROOT"
+    },
+    "progress_interval_seconds": 15
+  },
+  "result": {
+    "applied_prefix": {
+      "input_stream_id": "complementary-pair-e2e-remeasure-20260909-0000-0012",
+      "next_input_position": 208688
+    },
+    "closed_groups": 208638,
+    "core_object_counts": {
+      "assets": 10,
+      "binance_depth_retained_entries": 26687,
+      "fixed_temporary_references": 3,
+      "markets": 5,
+      "original_retained_state_entries": 223441,
+      "pending_metadata_sides": 0,
+      "pending_terminal_keys": 0,
+      "pending_ws_sides": 0,
+      "pm_absence_keys": 344,
+      "pm_level_evidence_keys": 804,
+      "pm_quantity_keys": 804,
+      "pm_selection_keys": 1148,
+      "public_level_anchor_keys": 1148,
+      "reference_market_states": 4,
+      "seen_epoch_entries": 4,
+      "seen_message_entries": 195594
+    },
+    "elapsed_seconds": 239.226998262,
+    "initialization_input_positions": [
+      0,
+      1,
+      2
+    ],
+    "initialization_source_message_ids": [
+      "d3842b75d06c65d26d38c87e9520c14a0c11d0bf5d210c70dc62ae883b9097e5",
+      "6604f5b1ffd2d119547f253c1a06e871d8a792c0c5df54da6c107da0e28cfdc3",
+      "c11b6b3d60cb590a314f6de3a748de5923b4376d3fee8f4a7583fe7bd36ede42"
+    ],
+    "inputs": 208688,
+    "normal_end": true,
+    "output_logical_bytes_before_summary": 156085386,
+    "raw_files": {
+      "Epoch/initialization=false": 145,
+      "Epoch/initialization=true": 1,
+      "InitializationSelection/initialization=true": 1,
+      "SecondSupply/initialization=false": 145,
+      "SecondSupply/initialization=true": 1
+    },
+    "raw_rows": {
+      "Epoch/initialization=false": 34766440,
+      "Epoch/initialization=true": 792,
+      "InitializationSelection/initialization=true": 792,
+      "SecondSupply/initialization=false": 34766440,
+      "SecondSupply/initialization=true": 792
+    },
+    "schema": "finite-source-progress-measurement-v1",
+    "selected_rows": {
+      "Epoch/initialization=false": 208684,
+      "Epoch/initialization=true": 3,
+      "SecondSupply/initialization=false": 208684,
+      "SecondSupply/initialization=true": 3
+    },
+    "sort_metrics": [
+      {
+        "index": 0,
+        "metrics": {
+          "initial_runs": 1,
+          "input_rows": 165,
+          "merge_passes": 0,
+          "output_rows": 165,
+          "peak_heap_entries": 0,
+          "peak_open_files": 1,
+          "peak_run_bytes": 3257232,
+          "peak_run_rows": 165,
+          "peak_temp_bytes": 61373,
+          "peak_temp_run_files": 1,
+          "peak_write_buffer_bytes": 0,
+          "peak_write_buffer_rows": 0
+        }
+      },
+      {
+        "index": 1,
+        "metrics": {
+          "initial_runs": 7,
+          "input_rows": 195597,
+          "merge_passes": 1,
+          "output_rows": 195597,
+          "peak_heap_entries": 7,
+          "peak_open_files": 8,
+          "peak_run_bytes": 67108512,
+          "peak_run_rows": 28931,
+          "peak_temp_bytes": 76200339,
+          "peak_temp_run_files": 8,
+          "peak_write_buffer_bytes": 2101728,
+          "peak_write_buffer_rows": 1024
+        }
+      },
+      {
+        "index": 2,
+        "metrics": {
+          "initial_runs": 1,
+          "input_rows": 7200,
+          "merge_passes": 0,
+          "output_rows": 7200,
+          "peak_heap_entries": 0,
+          "peak_open_files": 1,
+          "peak_run_bytes": 31451520,
+          "peak_run_rows": 7200,
+          "peak_temp_bytes": 2157148,
+          "peak_temp_run_files": 1,
+          "peak_write_buffer_bytes": 0,
+          "peak_write_buffer_rows": 0
+        }
+      },
+      {
+        "index": 3,
+        "metrics": {
+          "initial_runs": 1,
+          "input_rows": 4405,
+          "merge_passes": 0,
+          "output_rows": 4405,
+          "peak_heap_entries": 0,
+          "peak_open_files": 1,
+          "peak_run_bytes": 19968144,
+          "peak_run_rows": 4405,
+          "peak_temp_bytes": 979925,
+          "peak_temp_run_files": 1,
+          "peak_write_buffer_bytes": 0,
+          "peak_write_buffer_rows": 0
+        }
+      },
+      {
+        "index": 4,
+        "metrics": {
+          "initial_runs": 1,
+          "input_rows": 659,
+          "merge_passes": 0,
+          "output_rows": 659,
+          "peak_heap_entries": 0,
+          "peak_open_files": 1,
+          "peak_run_bytes": 2969944,
+          "peak_run_rows": 659,
+          "peak_temp_bytes": 160536,
+          "peak_temp_run_files": 1,
+          "peak_write_buffer_bytes": 0,
+          "peak_write_buffer_rows": 0
+        }
+      },
+      {
+        "index": 5,
+        "metrics": {
+          "initial_runs": 1,
+          "input_rows": 661,
+          "merge_passes": 0,
+          "output_rows": 661,
+          "peak_heap_entries": 0,
+          "peak_open_files": 1,
+          "peak_run_bytes": 4333200,
+          "peak_run_rows": 661,
+          "peak_temp_bytes": 178893,
+          "peak_temp_run_files": 1,
+          "peak_write_buffer_bytes": 0,
+          "peak_write_buffer_rows": 0
+        }
+      }
+    ],
+    "source_changes": 388930,
+    "sources": [
+      {
+        "changes": 63907,
+        "first": {
+          "input_position": 5,
+          "received_at_utc_ms": 1788912000023,
+          "source_event_at_utc_ms": 1788912000000,
+          "source_message_id": "71bdcefbb8df643f8a7f0883f53116d11838a800ecad41ebf5484a886bdbc889",
+          "visible_frontier_utc_ms": 1788912002232
+        },
+        "last": {
+          "input_position": 76281,
+          "received_at_utc_ms": 1788912299982,
+          "source_event_at_utc_ms": 1788912299972,
+          "source_message_id": "59d7f562f766719caf65ad37cd145bf2cf79da59c8b62fd28b4b513226a9b12d",
+          "visible_frontier_utc_ms": 1788912299982
+        },
+        "scope": {
+          "asset_or_symbol": "102849750551531882592626838681952450548049709627821897076456675572108598447456",
+          "condition_id": "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20",
+          "source": "PolymarketBook"
+        },
+        "valid_identity_changes": 63907
+      },
+      {
+        "changes": 63791,
+        "first": {
+          "input_position": 5,
+          "received_at_utc_ms": 1788912000023,
+          "source_event_at_utc_ms": 1788912000000,
+          "source_message_id": "71bdcefbb8df643f8a7f0883f53116d11838a800ecad41ebf5484a886bdbc889",
+          "visible_frontier_utc_ms": 1788912002232
+        },
+        "last": {
+          "input_position": 76281,
+          "received_at_utc_ms": 1788912299982,
+          "source_event_at_utc_ms": 1788912299972,
+          "source_message_id": "59d7f562f766719caf65ad37cd145bf2cf79da59c8b62fd28b4b513226a9b12d",
+          "visible_frontier_utc_ms": 1788912299982
+        },
+        "scope": {
+          "asset_or_symbol": "75902788286939706379430622188372065513567695002626149478929368630888442189116",
+          "condition_id": "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20",
+          "source": "PolymarketBook"
+        },
+        "valid_identity_changes": 63791
+      },
+      {
+        "changes": 659,
+        "first": {
+          "input_position": 335,
+          "received_at_utc_ms": 1788912002228,
+          "source_event_at_utc_ms": 1788911999000,
+          "source_message_id": "18be95d3330b84769a79e8d595e00b698188291a61549ae9eaf42346c7518217",
+          "visible_frontier_utc_ms": 1788912002251
+        },
+        "last": {
+          "input_position": 208670,
+          "received_at_utc_ms": 1788912719796,
+          "source_event_at_utc_ms": 1788912718000,
+          "source_message_id": "010b48e28f55f94b4a75b340651c880dcc2a9222af714b19672621e018975e84",
+          "visible_frontier_utc_ms": 1788912719796
+        },
+        "scope": {
+          "asset_or_symbol": "btc/usd",
+          "condition_id": null,
+          "source": "ChainlinkSpot"
+        },
+        "valid_identity_changes": 659
+      },
+      {
+        "changes": 661,
+        "first": {
+          "input_position": 337,
+          "received_at_utc_ms": 1788912002228,
+          "source_event_at_utc_ms": 1788911998000,
+          "source_message_id": "d288b64bbfb380e904d251e8e79044e95fbe1e63f2cccd456b3d0c3de846d6c6",
+          "visible_frontier_utc_ms": 1788912002251
+        },
+        "last": {
+          "input_position": 208678,
+          "received_at_utc_ms": 1788912719907,
+          "source_event_at_utc_ms": 1788912718000,
+          "source_message_id": "b980772690ea734d78bf45b7a2adc1bc59df17dfb484b7cbf3be85365a50db43",
+          "visible_frontier_utc_ms": 1788912719907
+        },
+        "scope": {
+          "asset_or_symbol": "btc/usd",
+          "condition_id": null,
+          "source": "ChainlinkTwapSixty"
+        },
+        "valid_identity_changes": 661
+      },
+      {
+        "changes": 4405,
+        "first": {
+          "input_position": 340,
+          "received_at_utc_ms": 1788912002229,
+          "source_event_at_utc_ms": 1788912000018,
+          "source_message_id": "bb6f88cc4351f62a0bb51ff4559210cc65b40c1f7c5f2b6644d0cdabff406fee",
+          "visible_frontier_utc_ms": 1788912002251
+        },
+        "last": {
+          "input_position": 208597,
+          "received_at_utc_ms": 1788912719270,
+          "source_event_at_utc_ms": 1788912719168,
+          "source_message_id": "30b0bb1180807830dd0bfdb776df309ebcc61ef26b78566fb6b6b7ae6c102a44",
+          "visible_frontier_utc_ms": 1788912719270
+        },
+        "scope": {
+          "asset_or_symbol": "BTCUSDT",
+          "condition_id": null,
+          "source": "BinanceAggregateTrade"
+        },
+        "valid_identity_changes": 4405
+      },
+      {
+        "changes": 74333,
+        "first": {
+          "input_position": 361,
+          "received_at_utc_ms": 1788912002346,
+          "source_event_at_utc_ms": 1788912001327,
+          "source_message_id": "44a187ff0bc66fc26a96b86f05217b492c3ca54c6d352e66d77d4ef8a93937d7",
+          "visible_frontier_utc_ms": 1788912002347
+        },
+        "last": {
+          "input_position": 159626,
+          "received_at_utc_ms": 1788912599990,
+          "source_event_at_utc_ms": 1788912599981,
+          "source_message_id": "f436c211f6cfb9e396bdf87859ec588d6a14baf01968f966e30d9f65eff51d53",
+          "visible_frontier_utc_ms": 1788912599990
+        },
+        "scope": {
+          "asset_or_symbol": "79296106124034057884863934885073554921845356166439766327235136060874535070646",
+          "condition_id": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe",
+          "source": "PolymarketBook"
+        },
+        "valid_identity_changes": 74333
+      },
+      {
+        "changes": 74550,
+        "first": {
+          "input_position": 362,
+          "received_at_utc_ms": 1788912002346,
+          "source_event_at_utc_ms": 1788912001327,
+          "source_message_id": "a5e3ed3f46858cd0dc5e172d3d6e1b708f5cd625338020e6300da5aeea95a946",
+          "visible_frontier_utc_ms": 1788912002347
+        },
+        "last": {
+          "input_position": 159626,
+          "received_at_utc_ms": 1788912599990,
+          "source_event_at_utc_ms": 1788912599981,
+          "source_message_id": "f436c211f6cfb9e396bdf87859ec588d6a14baf01968f966e30d9f65eff51d53",
+          "visible_frontier_utc_ms": 1788912599990
+        },
+        "scope": {
+          "asset_or_symbol": "32873955818661995964832066100538906828570131847504044153189153470372430981428",
+          "condition_id": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe",
+          "source": "PolymarketBook"
+        },
+        "valid_identity_changes": 74550
+      },
+      {
+        "changes": 7175,
+        "first": {
+          "input_position": 366,
+          "received_at_utc_ms": 1788912002459,
+          "source_event_at_utc_ms": null,
+          "source_message_id": "219dd9eff7283680991cb178a93d8dbe8c0275003a77b58fead0481e34835849",
+          "visible_frontier_utc_ms": 1788912002465
+        },
+        "last": {
+          "input_position": 208679,
+          "received_at_utc_ms": 1788912719913,
+          "source_event_at_utc_ms": 1788912719814,
+          "source_message_id": "5ed6b3a455530fefb051cea92697cfc0e3c5cd8e5280efe634a7d248e82bf02b",
+          "visible_frontier_utc_ms": 1788912719913
+        },
+        "scope": {
+          "asset_or_symbol": "BTCUSDT",
+          "condition_id": null,
+          "source": "BinanceDepth"
+        },
+        "valid_identity_changes": 7175
+      },
+      {
+        "changes": 48025,
+        "first": {
+          "input_position": 76318,
+          "received_at_utc_ms": 1788912300065,
+          "source_event_at_utc_ms": 1788912299945,
+          "source_message_id": "29e8cab7bcbd835d8c8e83e1638af4abc816d7444dd2e64ac01a328a76416d00",
+          "visible_frontier_utc_ms": 1788912300068
+        },
+        "last": {
+          "input_position": 208686,
+          "received_at_utc_ms": 1788912719994,
+          "source_event_at_utc_ms": 1788912719985,
+          "source_message_id": "9f9934d6f708acfcf914c0dbefaea04082ef4b04079aefaea2cc87a614d89373",
+          "visible_frontier_utc_ms": 1788912719994
+        },
+        "scope": {
+          "asset_or_symbol": "42363345784452904958376528930765132541509012872905911609444246938487536862941",
+          "condition_id": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e",
+          "source": "PolymarketBook"
+        },
+        "valid_identity_changes": 48025
+      },
+      {
+        "changes": 48084,
+        "first": {
+          "input_position": 76319,
+          "received_at_utc_ms": 1788912300065,
+          "source_event_at_utc_ms": 1788912299945,
+          "source_message_id": "96d9a02e00aa6a87bbc04d119be1f088e3a847e24bc03dd70b7fafbd553d140f",
+          "visible_frontier_utc_ms": 1788912300069
+        },
+        "last": {
+          "input_position": 208686,
+          "received_at_utc_ms": 1788912719994,
+          "source_event_at_utc_ms": 1788912719985,
+          "source_message_id": "9f9934d6f708acfcf914c0dbefaea04082ef4b04079aefaea2cc87a614d89373",
+          "visible_frontier_utc_ms": 1788912719994
+        },
+        "scope": {
+          "asset_or_symbol": "60895611540746646210134562587716764512450858012586455621197756705914039654323",
+          "condition_id": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e",
+          "source": "PolymarketBook"
+        },
+        "valid_identity_changes": 48084
+      },
+      {
+        "changes": 1672,
+        "first": {
+          "input_position": 159667,
+          "received_at_utc_ms": 1788912600086,
+          "source_event_at_utc_ms": 1788912600064,
+          "source_message_id": "4656a8ed9205dc8d8b52234a14a174d1fad50fb72a52ba7de2de94565d83df95",
+          "visible_frontier_utc_ms": 1788912600086
+        },
+        "last": {
+          "input_position": 208684,
+          "received_at_utc_ms": 1788912719977,
+          "source_event_at_utc_ms": 1788912719968,
+          "source_message_id": "f038a61a6998e071ba7b6327a887a7d2a832be97d118308b8f595ba90d6d0bf7",
+          "visible_frontier_utc_ms": 1788912719977
+        },
+        "scope": {
+          "asset_or_symbol": "73358320795011273563026969773507580412060483443712916151720949283387600431182",
+          "condition_id": "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92",
+          "source": "PolymarketBook"
+        },
+        "valid_identity_changes": 1672
+      },
+      {
+        "changes": 1668,
+        "first": {
+          "input_position": 159668,
+          "received_at_utc_ms": 1788912600086,
+          "source_event_at_utc_ms": 1788912600064,
+          "source_message_id": "26555c034bd134c1b1d05f676508db8b1ddebe909e00c11cee4d515cde31bbed",
+          "visible_frontier_utc_ms": 1788912600086
+        },
+        "last": {
+          "input_position": 208684,
+          "received_at_utc_ms": 1788912719977,
+          "source_event_at_utc_ms": 1788912719968,
+          "source_message_id": "f038a61a6998e071ba7b6327a887a7d2a832be97d118308b8f595ba90d6d0bf7",
+          "visible_frontier_utc_ms": 1788912719977
+        },
+        "scope": {
+          "asset_or_symbol": "82066467096712061517581429200890580195149475776906380274296444019672509402557",
+          "condition_id": "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92",
+          "source": "PolymarketBook"
+        },
+        "valid_identity_changes": 1668
+      }
+    ],
+    "stage_boundaries": [
+      {
+        "elapsed_seconds": 0,
+        "process": {
+          "io": {
+            "cancelled_write_bytes": 0,
+            "rchar": 74571,
+            "read_bytes": 0,
+            "syscr": 30,
+            "syscw": 0,
+            "wchar": 0,
+            "write_bytes": 0
+          },
+          "peak_rss_kib": 4500,
+          "rss_kib": 4500,
+          "system_cpu_ticks": 0,
+          "user_cpu_ticks": 0
+        },
+        "stage": "initialization"
+      },
+      {
+        "elapsed_seconds": 0.014786043,
+        "process": {
+          "io": {
+            "cancelled_write_bytes": 0,
+            "rchar": 431721,
+            "read_bytes": 266240,
+            "syscr": 69,
+            "syscw": 0,
+            "wchar": 0,
+            "write_bytes": 0
+          },
+          "peak_rss_kib": 21632,
+          "rss_kib": 18924,
+          "system_cpu_ticks": 0,
+          "user_cpu_ticks": 0
+        },
+        "stage": "EpochPass",
+        "temporary_logical_bytes": 0
+      },
+      {
+        "elapsed_seconds": 102.80359126,
+        "process": {
+          "io": {
+            "cancelled_write_bytes": 0,
+            "rchar": 5947922115,
+            "read_bytes": 2170609664,
+            "syscr": 81580,
+            "syscw": 419,
+            "wchar": 3155,
+            "write_bytes": 3155
+          },
+          "peak_rss_kib": 307860,
+          "rss_kib": 307860,
+          "system_cpu_ticks": 55,
+          "user_cpu_ticks": 10186
+        },
+        "stage": "SecondSupplyAndInitialSort",
+        "temporary_logical_bytes": 0
+      },
+      {
+        "elapsed_seconds": 215.844033086,
+        "process": {
+          "io": {
+            "cancelled_write_bytes": 0,
+            "rchar": 11895412528,
+            "read_bytes": 2171326464,
+            "syscr": 163091,
+            "syscw": 5622,
+            "wchar": 33299159,
+            "write_bytes": 34005716
+          },
+          "peak_rss_kib": 421388,
+          "rss_kib": 318648,
+          "system_cpu_ticks": 107,
+          "user_cpu_ticks": 21393
+        },
+        "stage": "SourceSortFinish",
+        "temporary_logical_bytes": 33290243
+      },
+      {
+        "elapsed_seconds": 217.253716554,
+        "process": {
+          "io": {
+            "cancelled_write_bytes": 0,
+            "rchar": 11942880192,
+            "read_bytes": 2241667072,
+            "syscr": 166725,
+            "syscw": 11896,
+            "wchar": 79747873,
+            "write_bytes": 81421755
+          },
+          "peak_rss_kib": 421388,
+          "rss_kib": 318680,
+          "system_cpu_ticks": 113,
+          "user_cpu_ticks": 21455
+        },
+        "stage": "SourceProgressApplication",
+        "temporary_logical_bytes": 41632600
+      },
+      {
+        "elapsed_seconds": 239.226845544,
+        "process": {
+          "io": {
+            "cancelled_write_bytes": 0,
+            "rchar": 11994717615,
+            "read_bytes": 2315026432,
+            "syscr": 170661,
+            "syscw": 31106,
+            "wchar": 235834238,
+            "write_bytes": 237508120
+          },
+          "peak_rss_kib": 421388,
+          "rss_kib": 318904,
+          "system_cpu_ticks": 128,
+          "user_cpu_ticks": 23549
+        },
+        "stage": "finished",
+        "temporary_logical_bytes": 41632600
+      }
+    ]
+  },
+  "monitor": {
+    "exit_code": 0,
+    "wall_seconds": 240.19771590099845,
+    "samples": 240,
+    "interval_seconds": 1,
+    "temporary_peak_logical_bytes": 44138247,
+    "temporary_final_logical_bytes": 41632600,
+    "output_peak_logical_bytes": 156020101,
+    "output_final_logical_bytes": 156103723
+  },
+  "phase_resources": [
+    {
+      "stage": "initialization",
+      "wall_seconds": 0.014786043,
+      "user_cpu_seconds": 0.0,
+      "system_cpu_seconds": 0.0,
+      "end_rss_kib": 18924,
+      "process_peak_rss_so_far_kib": 21632,
+      "io_delta": {
+        "rchar": 357150,
+        "wchar": 0,
+        "read_bytes": 266240,
+        "write_bytes": 0
+      },
+      "end_temporary_logical_bytes": 0
+    },
+    {
+      "stage": "EpochPass",
+      "wall_seconds": 102.788805217,
+      "user_cpu_seconds": 101.86,
+      "system_cpu_seconds": 0.55,
+      "end_rss_kib": 307860,
+      "process_peak_rss_so_far_kib": 307860,
+      "io_delta": {
+        "rchar": 5947490394,
+        "wchar": 3155,
+        "read_bytes": 2170343424,
+        "write_bytes": 3155
+      },
+      "end_temporary_logical_bytes": 0
+    },
+    {
+      "stage": "SecondSupplyAndInitialSort",
+      "wall_seconds": 113.04044182599999,
+      "user_cpu_seconds": 112.07,
+      "system_cpu_seconds": 0.52,
+      "end_rss_kib": 318648,
+      "process_peak_rss_so_far_kib": 421388,
+      "io_delta": {
+        "rchar": 5947490413,
+        "wchar": 33296004,
+        "read_bytes": 716800,
+        "write_bytes": 34002561
+      },
+      "end_temporary_logical_bytes": 33290243
+    },
+    {
+      "stage": "SourceSortFinish",
+      "wall_seconds": 1.4096834679999972,
+      "user_cpu_seconds": 0.62,
+      "system_cpu_seconds": 0.06,
+      "end_rss_kib": 318680,
+      "process_peak_rss_so_far_kib": 421388,
+      "io_delta": {
+        "rchar": 47467664,
+        "wchar": 46448714,
+        "read_bytes": 70340608,
+        "write_bytes": 47416039
+      },
+      "end_temporary_logical_bytes": 41632600
+    },
+    {
+      "stage": "SourceProgressApplication",
+      "wall_seconds": 21.97312899000002,
+      "user_cpu_seconds": 20.94,
+      "system_cpu_seconds": 0.15,
+      "end_rss_kib": 318904,
+      "process_peak_rss_so_far_kib": 421388,
+      "io_delta": {
+        "rchar": 51837423,
+        "wchar": 156086365,
+        "read_bytes": 73359360,
+        "write_bytes": 156086365
+      },
+      "end_temporary_logical_bytes": 41632600
+    }
+  ],
+  "resource_method": "阶段端点为/proc/self累计计数差，CLK_TCK=100；第二遍供料与初始外排交错，不拆分；RSS为端点及进程累计峰值，不冒称各阶段独立峰值。每秒监控临时逻辑空间的采样峰值；输出逻辑空间包含summary，非分配字节。GNUtime独立报告总进程峰值及CPU。监控器墙钟包含1秒轮询收尾，以GNUtime239.30s作为被测进程墙钟。",
+  "gnu_time": {
+    "wall_seconds": 239.3,
+    "user_seconds": 235.51,
+    "system_seconds": 1.31,
+    "cpu_percent": 98,
+    "peak_rss_kib": 421388,
+    "filesystem_inputs": 4521536,
+    "filesystem_outputs": 463919,
+    "exit_code": 0
+  },
+  "verification": {
+    "workspace_result_targets": 106,
+    "passed": 1361,
+    "failed": 0,
+    "ignored": 23,
+    "skipped": "four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second",
+    "clippy": "workspace与最终相关模块all-targets通过；既有警告保留",
+    "fmt": "通过",
+    "complete_vs_compact_fixture": "通过；资产隔离、同值有效确认、重复/无效/无关资产、持续旧事件、代际同步与深度快照恢复",
+    "finite_fixture": "跨午夜连续归约及窗外坏行传播通过"
+  },
+  "evidence_archive_relative_root": "issue-246/compact-source-progress-20261005",
+  "limitations": [
+    "仅固定十二分钟，未运行18日；没有正式健康数值或三态策略。",
+    "原core历史状态继续增长；对象条目数不是字节、容量或RSS。",
+    "本次从原145文件两遍准备，旧健康报告是既有录制重放；总耗时不构成相同工作量的加速比。",
+    "本次私有journal只保存来源标量；不能冒充完整录制或持久前缀。"
+  ],
+  "output_files": {
+    "market-bindings.jsonl": {
+      "bytes": 2332,
+      "sha256": "3ccbabc6d29ee8e1ba560b1157b85d5ed320e1b3754e07193e009bb5c0731d99"
+    },
+    "source-changes.jsonl": {
+      "bytes": 156083054,
+      "sha256": "56d026c4752235020ea31c5e64c5f018766fa4e9b6c8c4b0b8b6fdf0b6abea9d"
+    },
+    "summary.json": {
+      "bytes": 18337,
+      "sha256": "36c188022f06ab6b2c8acd79db5cc211693c9bad4eb633f561736450ede8a947"
+    }
+  },
+  "reconciliation": {
+    "status": "passed",
+    "applied_inputs": 208688,
+    "closed_groups": 208638,
+    "original_market_and_asset_counts_equal": true,
+    "original_initialization_equal": true,
+    "overlap_scopes": [
+      {
+        "label": "4352318-Up",
+        "valid_identity_changes": 63907,
+        "matched_scalar_segments": 41561,
+        "first_and_last_in_window_equal": true
+      },
+      {
+        "label": "4352318-Down",
+        "valid_identity_changes": 63791,
+        "matched_scalar_segments": 41541,
+        "first_and_last_in_window_equal": true
+      },
+      {
+        "label": "4352362-Up",
+        "valid_identity_changes": 74550,
+        "matched_scalar_segments": 44889,
+        "first_and_last_in_window_equal": true
+      },
+      {
+        "label": "4352362-Down",
+        "valid_identity_changes": 74333,
+        "matched_scalar_segments": 44789,
+        "first_and_last_in_window_equal": true
+      },
+      {
+        "label": "BinanceAggregateTrade",
+        "valid_identity_changes": 4405,
+        "matched_scalar_segments": 2087,
+        "first_and_last_in_window_equal": true
+      },
+      {
+        "label": "BinanceDepth",
+        "valid_identity_changes": 7175,
+        "matched_scalar_segments": 5977,
+        "first_and_last_in_window_equal": true
+      },
+      {
+        "label": "ChainlinkSpot",
+        "valid_identity_changes": 659,
+        "matched_scalar_segments": 544,
+        "first_and_last_in_window_equal": true
+      },
+      {
+        "label": "ChainlinkTwapSixty",
+        "valid_identity_changes": 661,
+        "matched_scalar_segments": 545,
+        "first_and_last_in_window_equal": true
+      }
+    ],
+    "absent_twap30_preserved": true,
+    "market_bindings": [
+      {
+        "market": {
+          "condition_id": "0x1fc54206bf570dbdf843a88d608aee9df9eac980a9ab47e400d787d732f7b748",
+          "clob_market_id": "4352293",
+          "window": {
+            "start_at_utc_ms": 1788911700000,
+            "end_at_utc_ms": 1788912000000
+          }
+        },
+        "assets": [
+          {
+            "token_id": "40394056371959012381300308018838505502210886859727060199875423644983465971960",
+            "outcome": {
+              "index": 0,
+              "label": "Up"
+            }
+          },
+          {
+            "token_id": "115306009340507785392622434263447716687618517190213805998980654605411415669044",
+            "outcome": {
+              "index": 1,
+              "label": "Down"
+            }
+          }
+        ]
+      },
+      {
+        "market": {
+          "condition_id": "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20",
+          "clob_market_id": "4352318",
+          "window": {
+            "start_at_utc_ms": 1788912000000,
+            "end_at_utc_ms": 1788912300000
+          }
+        },
+        "assets": [
+          {
+            "token_id": "75902788286939706379430622188372065513567695002626149478929368630888442189116",
+            "outcome": {
+              "index": 1,
+              "label": "Down"
+            }
+          },
+          {
+            "token_id": "102849750551531882592626838681952450548049709627821897076456675572108598447456",
+            "outcome": {
+              "index": 0,
+              "label": "Up"
+            }
+          }
+        ]
+      },
+      {
+        "market": {
+          "condition_id": "0x740fee4ffafd7a492c113f7c4a4e4fba026d7d2c0233e51d9643f4b2b09fbdfe",
+          "clob_market_id": "4352362",
+          "window": {
+            "start_at_utc_ms": 1788912300000,
+            "end_at_utc_ms": 1788912600000
+          }
+        },
+        "assets": [
+          {
+            "token_id": "32873955818661995964832066100538906828570131847504044153189153470372430981428",
+            "outcome": {
+              "index": 0,
+              "label": "Up"
+            }
+          },
+          {
+            "token_id": "79296106124034057884863934885073554921845356166439766327235136060874535070646",
+            "outcome": {
+              "index": 1,
+              "label": "Down"
+            }
+          }
+        ]
+      },
+      {
+        "market": {
+          "condition_id": "0x8149a019430acdeae9e3f2999468436ff29351df21154eef8aeaf39c9642567e",
+          "clob_market_id": "4352365",
+          "window": {
+            "start_at_utc_ms": 1788912600000,
+            "end_at_utc_ms": 1788912900000
+          }
+        },
+        "assets": [
+          {
+            "token_id": "42363345784452904958376528930765132541509012872905911609444246938487536862941",
+            "outcome": {
+              "index": 1,
+              "label": "Down"
+            }
+          },
+          {
+            "token_id": "60895611540746646210134562587716764512450858012586455621197756705914039654323",
+            "outcome": {
+              "index": 0,
+              "label": "Up"
+            }
+          }
+        ]
+      },
+      {
+        "market": {
+          "condition_id": "0xa88f17b500f9e2a8b1d66fac70e543b3cbac4dbd0ddba82d56502400181b6e92",
+          "clob_market_id": "4352438",
+          "window": {
+            "start_at_utc_ms": 1788912900000,
+            "end_at_utc_ms": 1788913200000
+          }
+        },
+        "assets": [
+          {
+            "token_id": "73358320795011273563026969773507580412060483443712916151720949283387600431182",
+            "outcome": {
+              "index": 0,
+              "label": "Up"
+            }
+          },
+          {
+            "token_id": "82066467096712061517581429200890580195149475776906380274296444019672509402557",
+            "outcome": {
+              "index": 1,
+              "label": "Down"
+            }
+          }
+        ]
+      }
+    ]
+  }
+}

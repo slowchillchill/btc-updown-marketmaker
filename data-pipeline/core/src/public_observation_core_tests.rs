@@ -2705,3 +2705,166 @@ fn source_epoch_resync_requires_each_asset_once_without_resetting_already_rebuil
         }
     }
 }
+
+#[test]
+fn compact_progress_matches_complete_groups_through_isolation_retry_and_resync() {
+    let mut full = core();
+    let mut compact = core();
+    full.enable_source_progress();
+    let mut rows = vec![meta(0)];
+    let mut add = |r| rows.push(record(rows.len() as u64, TypedRawRowV2::Existing(r)));
+    for (epoch, sequence, token, received) in [
+        ("epoch-a", 1, UP_TOKEN_ID, 21_100),
+        ("epoch-a", 1, UP_TOKEN_ID, 21_100), // exact retry
+        ("epoch-a", 2, DOWN_TOKEN_ID, 21_200),
+        ("epoch-a", 3, UP_TOKEN_ID, 21_300), // equal book, new evidence
+        ("epoch-b", 1, UP_TOKEN_ID, 21_400), // other asset needs snapshot
+        ("epoch-b", 2, DOWN_TOKEN_ID, 21_500),
+    ] {
+        let mut r = row(epoch, sequence, 20_000, received, book("100"));
+        if let PolymarketOrderbookEvent::Book { asset_id, .. } = &mut r.event {
+            *asset_id = token.into();
+        }
+        add(TypedRawRow::PolymarketOrderbook(r));
+    }
+    let mut spot = twap_input(60).common;
+    spot.schema_version = POLYMARKET_RTDS_CHAINLINK_BTC_USD_SCHEMA.into();
+    spot.topic = "crypto_prices_chainlink".into();
+    add(TypedRawRow::PolymarketRtdsChainlinkBtcUsd(spot.clone()));
+    spot.timestamp_received += 1;
+    add(TypedRawRow::PolymarketRtdsChainlinkBtcUsd(spot.clone()));
+    spot.message_type = "PONG".into();
+    spot.freshness_status = RtdsFreshnessStatus::InvalidType;
+    add(TypedRawRow::PolymarketRtdsChainlinkBtcUsd(spot.clone()));
+    spot.message_type = "update".into();
+    spot.symbol = "eth/usd".into();
+    spot.freshness_status = RtdsFreshnessStatus::InvalidSymbol;
+    add(TypedRawRow::PolymarketRtdsChainlinkBtcUsd(spot));
+    add(TypedRawRow::BinanceDepthSnapshot(snapshot(
+        "depth-a", 100, 1,
+    )));
+    add(TypedRawRow::BinanceDepthUpdate(update(
+        "depth-a",
+        101,
+        101,
+        2,
+        Some(100),
+        None,
+        BinanceDepthStitchVerdict::Applied,
+        vec![level("64100", "0.2")],
+    )));
+    add(TypedRawRow::BinanceDepthUpdate(update(
+        "depth-a",
+        104,
+        104,
+        3,
+        Some(100),
+        Some(101),
+        BinanceDepthStitchVerdict::NotAppliedConfirmedHole,
+        vec![level("64100", "0.9")],
+    )));
+    add(TypedRawRow::BinanceDepthSnapshot(snapshot(
+        "depth-b", 200, 1,
+    )));
+    add(TypedRawRow::BinanceAggTrade(invalid_trade(1)));
+    rows.push(RecordedIngressV1 {
+        input_stream_id: "core-test".into(),
+        input_position: rows.len() as u64,
+        ingress: DptIngressV1::EndOfInput,
+        dependency_record_refs: vec![],
+    });
+    let mut reconstructed = BTreeMap::new();
+    let mut total_deltas = 0;
+    for input in &rows {
+        let full_prepared = prepare_public_ingress_v1(&full, input, &BTreeMap::new(), &[]).unwrap();
+        let compact_prepared =
+            prepare_public_ingress_v1(&compact, input, &BTreeMap::new(), &[]).unwrap();
+        let full_applied = full.push(&full_prepared).unwrap();
+        let compact_applied = compact.push_source_progress(&compact_prepared).unwrap();
+        assert_eq!(
+            full_applied.applied.applied_prefix,
+            compact_applied.applied_prefix
+        );
+        assert_eq!(
+            full_applied.applied.closed_groups.len(),
+            compact_applied.closed_groups.len()
+        );
+        for (f, c) in full_applied
+            .applied
+            .closed_groups
+            .iter()
+            .zip(&compact_applied.closed_groups)
+        {
+            assert_eq!(f.group_id, c.group_id);
+            assert_eq!(f.group_position, c.group_position);
+            assert_eq!(f.member_input_positions, c.member_input_positions);
+            assert_eq!(f.closed_at_input_position, c.closed_at_input_position);
+            // Independent old formula, including collector admission later than receive.
+            let available = match &input.ingress {
+                DptIngressV1::Message {
+                    source_evidence, ..
+                } => source_evidence
+                    .collector_admission
+                    .as_ref()
+                    .map_or(source_evidence.received_at_utc_ms, |a| {
+                        a.admitted_at_utc_ms.max(source_evidence.received_at_utc_ms)
+                    }),
+                _ => i64::MIN,
+            };
+            assert_eq!(
+                c.visible_at_utc_ms,
+                f.records
+                    .iter()
+                    .map(|v| v.dependency_time.received_at_utc_ms)
+                    .chain([available])
+                    .max()
+                    .unwrap()
+            );
+            for p in &c.source_progress_changes {
+                reconstructed.insert(p.scope.clone(), p.clone());
+            }
+            total_deltas += c.source_progress_changes.len();
+            assert_eq!(
+                reconstructed
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+                &*f.observations[0].source_progress
+            );
+            if input.input_position == 0 {
+                assert_eq!(c.market_bindings[0].market, market());
+                assert_eq!(
+                    c.market_bindings[0].assets,
+                    f.observations[0]
+                        .assets
+                        .iter()
+                        .map(|a| a.asset.clone())
+                        .collect::<Vec<_>>()
+                );
+            } else {
+                assert!(c.market_bindings.is_empty());
+            }
+            if input.input_position == 5 {
+                assert_eq!(
+                    c.source_progress_changes.len(),
+                    2,
+                    "epoch changes include the untouched asset"
+                );
+                assert_eq!(
+                    reconstructed
+                        .values()
+                        .find(|p| p.scope.asset_or_symbol == DOWN_TOKEN_ID)
+                        .unwrap()
+                        .synchronization,
+                    SourceSynchronizationV1::SnapshotRequired
+                );
+            }
+            if matches!(input.input_position, 9 | 10) {
+                assert!(c.source_progress_changes.is_empty());
+            }
+        }
+    }
+    assert_eq!(full.object_counts(), compact.object_counts());
+    assert!(total_deltas < rows.len() * reconstructed.len());
+}

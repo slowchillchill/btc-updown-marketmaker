@@ -125,3 +125,51 @@ fn selected_file_bad_out_of_range_row_cannot_publish_success() {
     assert!(error.to_string().contains("value"), "{error}");
     assert!(!c.work_root.join("public/prefix.json").exists());
 }
+
+#[test]
+fn compact_finite_consumption_crosses_midnight_without_recording_and_propagates_bad_rows() {
+    use data_pipeline_training::finite_source_progress::*;
+    let temp = tempfile::tempdir().unwrap();
+    let files = vec![
+        file(temp.path(), "day-a", &[row(86_399_500, "100")]),
+        file(
+            temp.path(),
+            "day-b",
+            &[row(86_400_500, "100"), row(86_401_500, "103")],
+        ),
+    ];
+    let original = config(&temp.path().join("unused"), files);
+    let mut c = FiniteSourceProgressConfigV1 {
+        files: original.files,
+        received_start_utc_ms: original.received_start_utc_ms,
+        received_end_utc_ms: original.received_end_utc_ms,
+        work_root: temp.path().join("compact"),
+        header: original.header,
+        canonical: original.canonical,
+        metadata_initialization: None,
+    };
+    let mut confirmations = Vec::new();
+    let core = prepare_finite_source_progress_v1(&c, None, |_, applied, _| {
+        for g in &applied.closed_groups {
+            for p in &g.source_progress_changes {
+                confirmations.push(
+                    p.last_valid_business_message
+                        .as_ref()
+                        .unwrap()
+                        .received_at_utc_ms,
+                );
+            }
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert_eq!(confirmations, [86_399_500, 86_400_500, 86_401_500]);
+    assert_eq!(core.applied_prefix().next_input_position, 4);
+    assert!(!c.work_root.join("public").exists());
+    c.files = vec![file(temp.path(), "bad", &[row(86_403_000, "not-a-price")])];
+    c.work_root = temp.path().join("bad-compact");
+    let error = prepare_finite_source_progress_v1(&c, None, |_, _, _| Ok(()))
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("value"), "{error}");
+}
