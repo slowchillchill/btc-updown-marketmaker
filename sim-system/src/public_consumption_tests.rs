@@ -1008,6 +1008,184 @@ async fn decision_cutoff_uses_delivered_feedback_and_frame_borrows_original_obse
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn hidden_trade_and_bba_before_initial_book_have_no_execution_effect() {
+    use data_pipeline_core::pm_reduction::PmStepChangeV1;
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let mut core = core();
+    let mut writer = PublicRecordingWriterV1::create(&root, core.header(), config()).unwrap();
+    let trade = |price: &str, size: &str, side| PolymarketOrderbookEvent::LastTradePrice {
+        asset_id: DOWN_TOKEN_ID.into(),
+        price: price.into(),
+        size: Some(size.into()),
+        side: Some(side),
+        fee_rate_bps: Some("0".into()),
+    };
+    let mut down = book("100");
+    if let PolymarketOrderbookEvent::Book { asset_id, .. } = &mut down {
+        *asset_id = DOWN_TOKEN_ID.into();
+    }
+    // 真实失败顺序：新 epoch 的两笔成交先于初始 book；BBA 也不是 L2 初始化。
+    for input in [
+        meta(0),
+        pm(1, 1, 21_000, trade("0.6", "1", PolymarketSide::Sell)),
+        pm(2, 2, 21_000, trade("0.63", "11", PolymarketSide::Buy)),
+        pm(
+            3,
+            3,
+            21_001,
+            PolymarketOrderbookEvent::BestBidAsk {
+                asset_id: DOWN_TOKEN_ID.into(),
+                best_bid: Some("0.5".into()),
+                best_ask: Some("0.6".into()),
+                spread: Some("0.1".into()),
+            },
+        ),
+        pm(4, 4, 21_002, book("100")),
+        pm(5, 5, 21_002, down),
+        record(
+            6,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(
+                terminal_metadata_row(&market()),
+            ))),
+        ),
+        record(
+            7,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(terminal_orderbook_row(
+                &market(),
+            ))),
+        ),
+        end(8),
+    ] {
+        let result = apply(&mut core, &input);
+        writer.record(input, result).unwrap();
+    }
+    writer.stabilize().unwrap();
+    let (mut execution, _) = public_execution(
+        &temp.path().join("sim.jsonl"),
+        &core,
+        SimCallerRoleV1::ModelTrain,
+    )
+    .await;
+    let reader = PublicRecordingReaderV1::recover(&root, 1, 1 << 20).unwrap();
+    let hidden = prepare_hidden_v1(
+        core,
+        reader,
+        &temp.path().join("hidden"),
+        &config(),
+        "hidden-before-book".into(),
+    )
+    .unwrap();
+    let session = execution
+        .actor
+        .state
+        .as_ref()
+        .unwrap()
+        .session
+        .as_ref()
+        .unwrap();
+    let balances = session.execution_state.account_balances_for_tests();
+    let sequence = session.execution_state.next_account_transition_seq();
+    let fill_shape = session.execution_state.fill_shape_for_tests();
+    let mut source = RecordedHiddenBucketSourceV1::open(&hidden, &root, 1, 1 << 20).unwrap();
+    let mut changes = Vec::new();
+    while let Some(bucket) = source.next_bucket().unwrap() {
+        let at = bucket.reference.bucket_time_utc_ms;
+        if at > 21_002 {
+            break;
+        }
+        for record in bucket.records.iter() {
+            if let HiddenExecutionRecordV1::Step { step, .. } = record {
+                match step.change {
+                    PmStepChangeV1::Epoch { .. } => changes.push("epoch"),
+                    PmStepChangeV1::ResetAsset { .. } => changes.push("reset"),
+                    PmStepChangeV1::PublicTrade { .. } => changes.push("trade"),
+                    PmStepChangeV1::BestBidAsk { .. } => changes.push("bba"),
+                    PmStepChangeV1::InitialSnapshot { .. } => changes.push("book"),
+                    _ => {}
+                }
+            }
+        }
+        execution
+            .hidden_bucket(bucket)
+            .expect("观察消费不能依赖尚未到来的 L2");
+        let session = execution
+            .actor
+            .state
+            .as_ref()
+            .unwrap()
+            .session
+            .as_ref()
+            .unwrap();
+        let markets = session.hidden_platform_markets.as_ref().unwrap();
+        assert_eq!(
+            session.execution_state.account_balances_for_tests(),
+            balances
+        );
+        assert_eq!(
+            session.execution_state.next_account_transition_seq(),
+            sequence
+        );
+        assert_eq!(session.execution_state.fill_shape_for_tests(), fill_shape);
+        if at < 21_002 {
+            assert_eq!(markets.external_level_count_for_tests(CONDITION_ID), 0);
+            assert_eq!(
+                markets.buy_admission(CONDITION_ID, DOWN_TOKEN_ID, at, MARKET_END_AT),
+                crate::market::MarketBuyAdmissionV2::EvidenceUnknownNoEffect(
+                    crate::market::MarketBuyEvidenceUnknownV2::Preloading
+                )
+            );
+            for token in [UP_TOKEN_ID, DOWN_TOKEN_ID] {
+                for (side, price) in [
+                    (BookSide::Bid, Decimal::new(5, 1)),
+                    (BookSide::Ask, Decimal::new(6, 1)),
+                ] {
+                    assert_eq!(
+                        session.execution_state.external_queue_base_units_for_tests(
+                            CONDITION_ID,
+                            token,
+                            side,
+                            price
+                        ),
+                        0
+                    );
+                }
+            }
+        } else {
+            assert_eq!(at, 21_002);
+            assert_eq!(
+                markets.lifecycle_phase_for_tests(CONDITION_ID),
+                Some(crate::market::MarketLifecyclePhaseV1::Active)
+            );
+            assert_eq!(
+                markets.pm_quantity(
+                    CONDITION_ID,
+                    DOWN_TOKEN_ID,
+                    BookSide::Bid,
+                    Decimal::new(5, 1)
+                ),
+                Decimal::from(100)
+            );
+            assert_eq!(
+                session.execution_state.external_queue_base_units_for_tests(
+                    CONDITION_ID,
+                    DOWN_TOKEN_ID,
+                    BookSide::Bid,
+                    Decimal::new(5, 1)
+                ),
+                100_000_000
+            );
+        }
+    }
+    assert_eq!(
+        changes,
+        [
+            "epoch", "reset", "reset", "trade", "trade", "bba", "book", "book"
+        ]
+    );
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn hidden_cross_epoch_index_keeps_the_real_predecessor_failure() {
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("dpt");

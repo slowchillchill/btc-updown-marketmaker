@@ -40,6 +40,10 @@ live-trade/               # LIVE 上层运行入口与真实账户装配（规�
 - 并行任务明确公共能力的交付归属，缺口回到所属模块补齐；审查沿实际调用链核对复用。
   当前 PAPER 验收脚本仍在 `shared-run`，不代表上述完整 PAPER 宿主已交付。
 
+- PublicTrade／BestBidAsk 观察消费不依赖初始 L2，不初始化盘口或产生成交；未知盘口的订单准入保持原规则。
+  公共 SIM 修复依据[裁决 D-0299](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5996763271)，
+  实施与验证见 [#181](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181)。
+
 ## 代码定位与项目上下文
 
 - 使用代码索引时，以当前任务实际开发或审查的工作树及其源码状态为范围；不能以主工作树索引代替

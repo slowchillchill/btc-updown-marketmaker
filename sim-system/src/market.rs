@@ -656,9 +656,7 @@ impl MarketStateV2 {
                     self.lifecycle_phase = MarketLifecyclePhaseV1::Active;
                 }
             }
-            NormalizedMarketEventV2::BestBidAsk { best, .. } => {
-                self.initialized_admitted_asset_mut(&best.asset)?;
-            }
+            NormalizedMarketEventV2::BestBidAsk { .. } => {}
             NormalizedMarketEventV2::TickSizeChange {
                 change,
                 old_tick_size_pusd_per_share,
@@ -674,9 +672,7 @@ impl MarketStateV2 {
                 }
                 asset.current_tick_size_pusd_per_share = Some(*new_tick_size_pusd_per_share);
             }
-            NormalizedMarketEventV2::PublicTrade(trade) => {
-                self.initialized_admitted_asset_mut(&trade.asset)?;
-            }
+            NormalizedMarketEventV2::PublicTrade(_) => {}
             NormalizedMarketEventV2::LevelExecutionTransition {
                 transition,
                 price_pusd_per_share,
