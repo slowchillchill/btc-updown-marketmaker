@@ -3,6 +3,12 @@ use super::*;
 use std::sync::{Mutex, atomic::AtomicU64, mpsc};
 use std::time::Duration;
 
+#[cfg(test)]
+thread_local! {
+    // 仅当前测试线程创建的排序器使用；首轮前两组同时开始，避免夹具依赖调度速度。
+    pub(crate) static TEST_START_BARRIER: std::cell::RefCell<Option<Arc<std::sync::Barrier>>> = const { std::cell::RefCell::new(None) };
+}
+
 #[derive(Default)]
 pub(super) struct ResourceState {
     pub bytes: u64,
@@ -27,6 +33,8 @@ pub(super) struct SortResources {
     failure: Mutex<Option<SortError>>,
     #[cfg(test)]
     pub delays: Mutex<Vec<Duration>>,
+    #[cfg(test)]
+    start_barrier: Option<Arc<std::sync::Barrier>>,
 }
 impl SortResources {
     pub fn new(config: &SortConfig, bytes: u64, files: usize) -> Arc<Self> {
@@ -46,6 +54,8 @@ impl SortResources {
             failure: Mutex::new(None),
             #[cfg(test)]
             delays: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            start_barrier: TEST_START_BARRIER.with(|barrier| barrier.borrow().clone()),
         })
     }
     pub fn create_part(&self) -> Result<(), SortError> {
@@ -195,6 +205,14 @@ pub(super) fn merge_round(
                     let worker = WorkerLease::start(&resources);
                     #[cfg(test)]
                     {
+                        if round == 1
+                            && total >= 2
+                            && cap >= 2
+                            && number < 2
+                            && let Some(barrier) = &resources.start_barrier
+                        {
+                            barrier.wait();
+                        }
                         let delay = resources.delays.lock().unwrap().get(number).copied();
                         if let Some(delay) = delay {
                             std::thread::sleep(delay);

@@ -49,7 +49,7 @@ cargo build -p data-pipeline-training --example measure_parallel_external_sort -
 
 - 强制后组先完成：全部独立预期键、载荷和摘要保持一致。旧 open16 配置实际并发为 1；旧配置反序列化缺省为 1。
 - 两个并发 writer 共用 7 B 额度，各写 4 B：只能一个成功，实际磁盘与计数均为 4 B。真实合并重复键失败后，活动线程与句柄均为 0，原清理完成。
-- 公共历史夹具对照 1/4 workers：连续 core 输出与前序 TWAP 重读结果一致。复用原真实 32768 行组分片、临时配额、V1 持久容量和公共录制回归。
+- 公共历史夹具保留原 Metadata/TWAP 行，使用 8 条合法 PM 快照形成同来源 8 个 run、首轮 4 个合并组。测试局部屏障使首轮前两组同时开始；断言单线程峰值为 1、多线程真实 `peak_merge_workers>1`，再比较完整公共输入、连续 core 输出与前序 TWAP 原位置重读结果。复用原真实 32768 行组分片、临时配额、V1 持久容量和公共录制回归。
 - 固定 workspace 回归退出 0。`four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second` 明确跳过，其夹具依赖实际 UTC 时钟。fmt 与相关 training/baseline/backtest 全目标 clippy 均退出 0；保留既有依赖告警。
 
 本任务树没有可用代码索引。实现与交付核对读取本任务树当前源码，未使用主树索引代替。有限测量的原日志、time、源补丁、二进制及绑定保存在独立归档，私有位置由任务交接给出。

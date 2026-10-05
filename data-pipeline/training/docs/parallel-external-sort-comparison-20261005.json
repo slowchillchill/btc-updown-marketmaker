@@ -116,6 +116,8 @@
     "skipped_test": "four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second",
     "fmt": "passed, exit 0",
     "clippy": "passed, exit 0; existing dependency warnings retained",
-    "code_index": "task tree not indexed; checked current source instead of main graph"
+    "code_index": "task tree not indexed; checked current source instead of main graph",
+    "public_history_fixture": "8 valid PM snapshots, 8 runs / 4 first-round groups; test-only startup barrier; actual peak_merge_workers > 1; complete public inputs / core / prior-position TWAP match single-worker baseline",
+    "measurement_applicability": "No production code or measurement tool changed in fixture rework; original measurements remain bound to a82488a8cb438a8b02b9d818e775848181779b64 and were not repeated."
   }
 }
