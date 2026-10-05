@@ -93,5 +93,11 @@ source /root/autodl-tmp/environments/issue-181-cu128.sh
 `CARGO_HOME=/root/autodl-tmp/cargo`、`CARGO_TARGET_DIR=/root/autodl-tmp/build/issue-181`，
 Rust 工具前缀为 `/root/autodl-tmp/tools/rust-1.95.0`。后续编译和运行前均先加载该环境文件。
 
+本次 CPython standalone 归档的 `sysconfig LIBDIR` 保留构建期 `/install/lib`；它不是目标库目录。
+环境文件将实际安装的 `/root/autodl-tmp/tools/python-3.13.15/python/lib` 前置到 `LIBRARY_PATH`
+和 `LD_LIBRARY_PATH`，分别供 GCC 链接嵌入式 Python 与运行时加载 `libpython3.13.so`。
+已有搜索路径保留；`PYO3_PYTHON` 仍指向项目虚拟环境，不修改解释器版本、sysconfig 或系统库目录。
+执行 Rust `python` feature 测试时，勿再用上述原始 `LIBDIR` 覆盖这些变量。
+
 此入口只完成依赖安装和依赖一致性检查。原生扩展编译、实际模型的 GPU 前向/反向/更新/保存加载、
 显存与端到端耗时仍由后续短验证完成，不能据此声称训练环境或业务验收已经通过。

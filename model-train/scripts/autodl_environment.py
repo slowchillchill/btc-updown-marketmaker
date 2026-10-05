@@ -432,6 +432,12 @@ def on_data_disk(path: Path) -> Path:
 
 
 def target_environment(bundle: Path, venv: Path, uv_dir: Path) -> dict[str, str]:
+    # standalone 的 sysconfig LIBDIR 保留 /install/lib；使用本入口实际安装布局。
+    python_library = on_data_disk(AUTODL_ROOT / f"tools/python-{PYTHON_VERSION}/python/lib")
+    library_paths = {
+        key: str(python_library) + (":" + os.environ[key] if os.environ.get(key) else "")
+        for key in ("LIBRARY_PATH", "LD_LIBRARY_PATH")
+    }
     paths = {
         "UV_CACHE_DIR": AUTODL_ROOT / "cache/uv", "XDG_CACHE_HOME": AUTODL_ROOT / "cache",
         "PIP_CACHE_DIR": AUTODL_ROOT / "cache/pip", "TMPDIR": AUTODL_ROOT / "tmp",
@@ -445,6 +451,7 @@ def target_environment(bundle: Path, venv: Path, uv_dir: Path) -> dict[str, str]
         on_data_disk(path).mkdir(parents=True, exist_ok=True)
     return {
         **{k: str(v) for k, v in paths.items()}, "TEMP": str(paths["TMPDIR"]), "TMP": str(paths["TMPDIR"]),
+        **library_paths,
         "VIRTUAL_ENV": str(venv), "PYO3_PYTHON": str(venv / "bin/python"),
         "UV_PYTHON_DOWNLOADS": "never", "UV_OFFLINE": "1", "PIP_NO_INDEX": "1",
         "PIP_FIND_LINKS": str(bundle / "wheels"), "PYTHONNOUSERSITE": "1", "CARGO_NET_OFFLINE": "true",
