@@ -258,6 +258,38 @@ mod tests {
             .is_ok()
         );
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "显式导出已有超过 u128 的公共费用反例，供有限 GPU 样板对照"]
+    async fn export_gpu_wide_buy_reference_v1() {
+        let n: BigUint = "7922816251426433759354395".parse().unwrap();
+        let rate = "79228162514264337593543950335";
+        // 复用已有本地规则夹具的解析与密封入口，不访问外部平台。
+        let rules = snapshot_v3_with_fee_for_cost_tests(rate, 1).await;
+        let cost = rules
+            .limit_buy_cost_v1(&n, 9999, &ExactDecimal("0.0001".into()), false)
+            .unwrap();
+        assert!(cost.fee_1e5_units > BigUint::from(u128::MAX));
+        let report = serde_json::json!({
+            "schema": "gpu_wide_buy_reference_v1",
+            "source_test": "sim-system/src/buy_cost.rs::tests::limit_cost_keeps_micro_units_and_unaffordable_fee_exact",
+            "scope": "既有极端规则费用反例；不是普通平台费率或完整合法域证明",
+            "rule_snapshot_sha256": rules.file_sha256().0,
+            "input": {
+                "quantity_centishares": n.to_string(),
+                "fee_rate": rate,
+                "fee_exponent": 1,
+                "tick_pusd_per_share": "0.0001",
+                "price_index": 9999,
+                "post_only": false,
+            },
+            "output": {
+                "principal_micro": cost.principal_micro.to_string(),
+                "fee_1e5_units": cost.fee_1e5_units.to_string(),
+            },
+        });
+        println!("BTC_GPU_WIDE_REFERENCE_V1={report}");
+    }
     #[tokio::test(flavor = "current_thread")]
     async fn market_estimate_uses_candidate_price_and_actual_tick_without_mutation() {
         let rules = successful_snapshot_v3_for_sim_tests().await;

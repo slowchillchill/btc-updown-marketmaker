@@ -1,0 +1,81 @@
+# GPU 精确算术有限样板
+
+此入口用于 #181 的精确经济先行验证。它不是正式 100ms 训练入口，也没有接入公共账本、
+订单预留、NOE、撮合或完整 Actor。源码在本地任务工作树编写；审查并提交后，经 Git bundle
+同步同一提交，才在 AutoDL 执行。全部材料和运行输出放在 `/root/autodl-tmp/`。
+
+## 范围
+
+| 项目 | GPU 执行内容 | CPU 比较来源 |
+| --- | --- | --- |
+| 普通 LIMIT 费用 | 数量 500 百分之一份，费率 0.07，指数 1，tick 0.01；价格 0.19／0.20／0.25 | `buy_tests.rs::export_gpu_exact_buy_reference_v1`，直接调用公共 `limit_buy_cost_v1` |
+| 混合双腿价格 | 现金 2 pUSD，5 份 A 普通 GTC／B FOK；GPU 计算完整 999 位 A 价格 mask，再读取该 mask 核对已给定的 A@0.19、B@0.20 并形成意图字段 | 同一 CPU JSON 的完整 mask 和选定双腿意图 |
+| 超过 u128 的公共费用 | 既有极端规则反例：数量 `7922816251426433759354395` 百分之一份，费率 `79228162514264337593543950335`，指数 1，tick 0.0001，价格索引 9999 | `buy_cost.rs::tests::export_gpu_wide_buy_reference_v1`，复用原反例夹具与公共入口 |
+| 独立整数探针 | 256 位全进位；256×256→512 位乘法；512／256 商余数；超过 u128 的半向上舍入 | Python 精确整数仅计算这些整数原语的期望，不计算费用或可负担性 |
+
+family、数量、两腿类型和两个待选价格坐标是已指定样本输入。本样板不运行神经网络、
+16 叉数量选择或遍历其他类型的合法域。数据在进入 GPU 后，费用、价格支持和两腿资金依赖
+均在 GPU 内衔接；CPU 不在它们之间读取结果。账户／资产身份在 GPU 中复制，CPU 结束时
+仅将整数单位格式化为公共意图字段。
+
+公共费用算法位于 [exact_buy_cost.cuh](../../sim-system/gpu-diagnostics/exact_buy_cost.cuh)。
+使用 256 位操作数和 512 位乘积，指数固定为 1。完整乘积高位非零、算术库报错或样本条件
+不符时，本诊断失败并保留日志；这些行为不构成新的生产拒单规则。普通样本和既有极端
+费用反例均不能证明全部合法 Decimal／BigUint 域可由 256 位覆盖。整数探针与费用反例
+分别报告，不将技术构造称为实际平台费率。
+
+## CPU 参考准备
+
+在本地已锁定 Rust 环境下显式运行两个默认忽略的导出测试。原普通样本已在本地及目标
+对照过；已有准确 JSON 可以直接复用，不必为每次 GPU 运行重新导出。
+
+```bash
+cargo test --manifest-path model-train/native-inputs/Cargo.toml --lib --locked --offline \
+  action_tests::buy_tests::export_gpu_exact_buy_reference_v1 -- --exact --ignored --nocapture
+cargo test -p sim-system --lib --locked --offline \
+  buy_cost::tests::export_gpu_wide_buy_reference_v1 -- --exact --ignored --nocapture
+```
+
+分别提取唯一 `BTC_GPU_EXACT_REFERENCE_V1=` 和 `BTC_GPU_WIDE_REFERENCE_V1=` 行的 JSON。
+大整数为十进制字符串；宽费用测试沿既有本地脚本化 HTTP 夹具的规则解析与密封过程，
+不访问外部平台。保留日志、源码提交、JSON 哈希和规则快照哈希，随材料同步。
+
+## 目标构建与运行
+
+使用未修改的 NVlabs/CGBN
+[`114601b07ae8c3e4d46b250208ea8d9def7a12f0`](https://github.com/NVlabs/CGBN/tree/114601b07ae8c3e4d46b250208ea8d9def7a12f0)，
+不使用未合并的 PR 35。CGBN 主机头需要 GMP；GMP 开发包与运行库解包到同一数据盘前缀，
+`gmp.h` 在 `usr/include/x86_64-linux-gnu`，库在 `usr/lib/x86_64-linux-gnu`。入口显式传入
+这些目录和 rpath，不使用带 `/usr` 固定前缀的 pkg-config，也不修改全局 PATH 或环境。
+
+在项目 Python 环境中，按实际材料路径执行，例如：
+
+```bash
+python model-train/scripts/gpu_exact_sample.py \
+  --nvcc /usr/local/cuda/bin/nvcc \
+  --cgbn-root /root/autodl-tmp/dependencies/CGBN-114601b07ae8c3e4d46b250208ea8d9def7a12f0 \
+  --cgbn-record /root/autodl-tmp/offline/cgbn/material-record.json \
+  --gmp-prefix /root/autodl-tmp/tools/gmp-6.2.1 \
+  --cpu-reference /root/autodl-tmp/artifacts/issue-181/environment/gpu-exact-buy-reference-v1.json \
+  --wide-reference /root/autodl-tmp/artifacts/issue-181/environment/gpu-wide-buy-reference-v1.json \
+  --devices 0 1 --warmups 2 --iterations 20 --progress-seconds 10 \
+  --output-dir /root/autodl-tmp/artifacts/issue-181/gpu-exact-sample-001
+```
+
+输出目录须为新目录。入口只在本次子进程环境中设置 TMPDIR、CUDA 缓存目录和 GMP 库目录；
+已有 `LD_LIBRARY_PATH`（含项目 Python 动态库）继续保留。编译使用 C++17、`sm_120` 和
+指定 nvcc；不自动换版本、下载依赖或更改第三方源码。每张卡独立、顺序运行。
+
+## 证据与计时
+
+`report.json` 记录源码提交与文件哈希、CGBN 材料记录和实际头文件哈希、GMP 头／库哈希、
+nvcc 版本与编译命令、二进制哈希、CPU 参考哈希，以及逐卡全部原始结果和比较结论。
+`compile.log`、`device-*.log` 和 `device-*.json` 保留实际输出；失败也保留报告和日志。
+
+编译墙钟、GPU 预热、GPU 稳态和进程墙钟分别计时。每轮是四个 kernel：四笔费用、999 位
+mask、一个固定双腿选择、整数探针。稳态时间含 kernel 启动间隔，不能取倒数声称单操作
+延迟或 RL 环境吞吐。设备选择／上下文初始化主要在进程墙钟中；CUDA 事件用于设备区间。
+
+输入只进行一次显式 H2D 复制；结束时输出与 CGBN 错误报告各进行一次 D2H 复制。错误报告
+使用显式设备分配，不使用托管内存的隐式迁移。报告列出调用数、字节数和设备清零字节数。
+显式设备分配总量不包含 CUDA 上下文、模块和事件，不能当作整卡峰值显存或训练容量。
