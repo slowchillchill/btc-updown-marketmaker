@@ -55,6 +55,34 @@ pub fn source_health_failure_v1(
     }
 }
 
+/// 与研究共用的三态；独立未知/质量异常不混入年龄分布。
+pub fn source_health_state_v1(
+    facts: Option<&SourceHealthFactsV1>,
+    limits: SourceHealthLimitsV1,
+    at: i64,
+) -> SourceHealthStateV1 {
+    // 必要事实未知/独立异常先单列；它们不是已知 S/A 的超限样本。
+    if let Some(failure) = source_health_failure_v1(facts, i64::MAX, i64::MAX, at) {
+        return SourceHealthStateV1::Unavailable(failure);
+    }
+    match source_health_failure_v1(facts, limits.silence_max_ms, limits.event_max_ms, at) {
+        Some(f @ (SourceHealthFailureV1::ReceiveSilence | SourceHealthFailureV1::EventDelay)) => {
+            SourceHealthStateV1::Exceeded(f)
+        }
+        Some(f) => SourceHealthStateV1::Unavailable(f),
+        None => {
+            let (received, event) = facts.unwrap().last_valid_message_times.unwrap();
+            if at >= received.saturating_add(limits.silence_normal_ms)
+                || at >= event.unwrap().saturating_add(limits.event_normal_ms)
+            {
+                SourceHealthStateV1::Elevated
+            } else {
+                SourceHealthStateV1::Normal
+            }
+        }
+    }
+}
+
 impl ComplementaryPairV1 {
     pub(super) fn book_scope(
         o: &MarketBusinessObservationV1,
@@ -115,24 +143,30 @@ impl ComplementaryPairV1 {
         );
         sources
     }
-    fn health_limits(&self, source: SourceStreamKindV1) -> (i64, i64) {
-        let h = &self.config.health;
-        let (silence, delay) = match source {
-            SourceStreamKindV1::PolymarketBook => {
-                (h.polymarket_silence_ms, h.polymarket_event_delay_ms)
-            }
-            SourceStreamKindV1::BinanceAggregateTrade => {
-                (h.binance_trade_silence_ms, h.binance_trade_event_delay_ms)
-            }
-            SourceStreamKindV1::BinanceDepth => {
-                (h.binance_depth_silence_ms, h.binance_depth_event_delay_ms)
-            }
-            _ => (h.chainlink_silence_ms, h.chainlink_event_delay_ms),
-        };
-        (
-            i64::try_from(silence).unwrap_or(i64::MAX),
-            i64::try_from(delay).unwrap_or(i64::MAX),
-        )
+    pub(super) fn health_states(
+        &self,
+        o: &MarketBusinessObservationV1,
+        sources: &[SourceStreamScopeV1],
+        at: i64,
+    ) -> Vec<SourceHealthStatusV1> {
+        sources
+            .iter()
+            .map(|scope| {
+                let facts = o
+                    .source_progress
+                    .iter()
+                    .find(|p| &p.scope == scope)
+                    .map(SourceHealthFactsV1::from);
+                SourceHealthStatusV1 {
+                    scope: scope.clone(),
+                    state: source_health_state_v1(
+                        facts.as_ref(),
+                        self.config.health.limits(scope.source),
+                        at,
+                    ),
+                }
+            })
+            .collect()
     }
     pub(super) fn health_issues(
         &self,
@@ -140,18 +174,11 @@ impl ComplementaryPairV1 {
         sources: &[SourceStreamScopeV1],
         at: i64,
     ) -> Vec<SourceHealthIssueV1> {
-        sources
-            .iter()
-            .filter_map(|scope| {
-                let facts = o
-                    .source_progress
-                    .iter()
-                    .find(|p| &p.scope == scope)
-                    .map(SourceHealthFactsV1::from);
-                let (silence, delay) = self.health_limits(scope.source);
-                let failure = source_health_failure_v1(facts.as_ref(), silence, delay, at);
-                failure.map(|failure| SourceHealthIssueV1 {
-                    scope: scope.clone(),
+        self.health_states(o, sources, at)
+            .into_iter()
+            .filter_map(|p| {
+                p.state.failure().map(|failure| SourceHealthIssueV1 {
+                    scope: p.scope,
                     failure,
                 })
             })
@@ -189,7 +216,7 @@ impl ComplementaryPairV1 {
                     }
                 }
                 sources.into_iter().flat_map(|scope| {
-                    let (silence, delay) = self.health_limits(scope.source);
+                    let h = self.config.health.limits(scope.source);
                     f.observation
                         .source_progress
                         .iter()
@@ -197,11 +224,15 @@ impl ComplementaryPairV1 {
                         .and_then(|p| p.last_valid_business_message.as_ref())
                         .map(|e| {
                             [
-                                Some(e.received_at_utc_ms.saturating_add(silence)),
-                                e.source_event_at_utc_ms.map(|t| t.saturating_add(delay)),
+                                Some(e.received_at_utc_ms.saturating_add(h.silence_normal_ms)),
+                                e.source_event_at_utc_ms
+                                    .map(|t| t.saturating_add(h.event_normal_ms)),
+                                Some(e.received_at_utc_ms.saturating_add(h.silence_max_ms)),
+                                e.source_event_at_utc_ms
+                                    .map(|t| t.saturating_add(h.event_max_ms)),
                             ]
                         })
-                        .unwrap_or([None, None])
+                        .unwrap_or([None, None, None, None])
                         .into_iter()
                         .flatten()
                 })
@@ -432,5 +463,59 @@ impl ComplementaryPairV1 {
             }
         }
         IntentQualificationV1::Qualified
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn normal_equality_is_acceptable_max_equality_blocks_and_zero_equal_limits_terminate() {
+        let f = SourceHealthFactsV1 {
+            synchronization_required: false,
+            availability: MarketDataQuality::Fresh,
+            last_valid_message_times: Some((100, Some(100))),
+        };
+        let h = SourceHealthLimitsV1 {
+            silence_normal_ms: 10,
+            event_normal_ms: 10,
+            silence_max_ms: 20,
+            event_max_ms: 20,
+        };
+        assert_eq!(
+            source_health_state_v1(Some(&f), h, 109),
+            SourceHealthStateV1::Normal
+        );
+        assert_eq!(
+            source_health_state_v1(Some(&f), h, 110),
+            SourceHealthStateV1::Elevated
+        );
+        assert!(source_health_state_v1(Some(&f), h, 119).failure().is_none());
+        assert!(matches!(
+            source_health_state_v1(Some(&f), h, 120),
+            SourceHealthStateV1::Exceeded(_)
+        ));
+        let missing_event = SourceHealthFactsV1 {
+            last_valid_message_times: Some((100, None)),
+            ..f.clone()
+        };
+        assert_eq!(
+            source_health_state_v1(Some(&missing_event), h, 200),
+            SourceHealthStateV1::Unavailable(SourceHealthFailureV1::UnknownEventTime)
+        );
+        let equal = SourceHealthLimitsV1 {
+            silence_normal_ms: 0,
+            event_normal_ms: 0,
+            silence_max_ms: 0,
+            event_max_ms: 0,
+        };
+        assert!(matches!(
+            source_health_state_v1(Some(&f), equal, 100),
+            SourceHealthStateV1::Exceeded(_)
+        ));
+        assert_eq!(
+            source_health_state_v1(None, h, 100),
+            SourceHealthStateV1::Unavailable(SourceHealthFailureV1::UnknownBusinessProgress)
+        );
     }
 }

@@ -20,13 +20,21 @@ fn config() -> ComplementaryPairConfigV1 {
     .unwrap();
     // 旧经营反例使用长窗口显式工程阈值；健康到期另由专项反例验证。
     c.health = SourceHealthConfigV1 {
+        polymarket_silence_normal_ms: 0,
         polymarket_silence_ms: 1_000_000,
+        polymarket_event_delay_normal_ms: 0,
         polymarket_event_delay_ms: 1_000_000,
+        chainlink_silence_normal_ms: 0,
         chainlink_silence_ms: 1_000_000,
+        chainlink_event_delay_normal_ms: 0,
         chainlink_event_delay_ms: 1_000_000,
+        binance_trade_silence_normal_ms: 0,
         binance_trade_silence_ms: 1_000_000,
+        binance_trade_event_delay_normal_ms: 0,
         binance_trade_event_delay_ms: 1_000_000,
+        binance_depth_silence_normal_ms: 0,
         binance_depth_silence_ms: 1_000_000,
+        binance_depth_event_delay_normal_ms: 0,
         binance_depth_event_delay_ms: 1_000_000,
     };
     c

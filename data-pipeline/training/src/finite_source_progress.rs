@@ -32,6 +32,7 @@ pub struct FiniteSourceProgressConfigV1 {
 }
 /// 薄接原merge；一条连续core跨文件/UTC日消费，错误原样传播。
 /// 回调在完整组归约后执行，不签发recording稳定前缀。
+/// 同次只读 core 借用供消费者按需低频取计量；公共层不逐消息统计全部市场。
 pub fn consume_historical_source_progress_v1(
     merge: &mut HistoricalMergeV1,
     header: PublicInputStreamHeaderV1,
@@ -39,13 +40,14 @@ pub fn consume_historical_source_progress_v1(
         &RecordedIngressV1,
         &PublicSourceProgressAppliedV1,
         Option<&SourceArtifactBindingV1>,
+        &PublicObservationCoreV1,
     ) -> RecordingResult<()>,
 ) -> RecordingResult<PublicObservationCoreV1> {
     let mut core = PublicObservationCoreV1::new(header.clone())?;
     while let Some(mut input) = merge.next_input()? {
         let prepared = merge.prepare_input(&core, &mut input)?;
         let applied = core.push_source_progress(&prepared)?;
-        applied_callback(&input, &applied, merge.initialization_binding())?;
+        applied_callback(&input, &applied, merge.initialization_binding(), &core)?;
     }
     let mut end = RecordedIngressV1 {
         input_stream_id: header.input_stream_id,
@@ -55,7 +57,7 @@ pub fn consume_historical_source_progress_v1(
     };
     let prepared = merge.prepare_input(&core, &mut end)?;
     let applied = core.push_source_progress(&prepared)?;
-    applied_callback(&end, &applied, None)?;
+    applied_callback(&end, &applied, None, &core)?;
     Ok(core)
 }
 pub fn prepare_finite_source_progress_v1(
@@ -65,6 +67,7 @@ pub fn prepare_finite_source_progress_v1(
         &RecordedIngressV1,
         &PublicSourceProgressAppliedV1,
         Option<&SourceArtifactBindingV1>,
+        &PublicObservationCoreV1,
     ) -> RecordingResult<()>,
 ) -> RecordingResult<PublicObservationCoreV1> {
     std::fs::create_dir(&config.work_root)?;

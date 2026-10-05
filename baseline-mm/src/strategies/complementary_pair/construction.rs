@@ -13,6 +13,11 @@ impl ComplementaryPairV1 {
                 "请求命名空间为空或含首尾空白".into(),
             ));
         }
+        if config.health.normal_exceeds_max() {
+            return Err(StrategyErrorV1::Configuration(
+                "来源 normal 不能超过对应 max".into(),
+            ));
+        }
         let decimals = [
             config.quote.base_pair_shares,
             config.quote.base_half_spread,
