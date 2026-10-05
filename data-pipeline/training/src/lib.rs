@@ -1067,6 +1067,13 @@ fn sort_row_buffer_bytes(rows: &Vec<SortRow>, inner_bytes: usize) -> Option<usiz
         .and_then(|bytes| bytes.checked_add(inner_bytes))
 }
 
+mod sort_parallel;
+use sort_parallel::{HandleLease, SortResources};
+
+fn one_merge_worker() -> usize {
+    1
+}
+
 /// 单次排序调用的显式硬上限。
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1079,6 +1086,9 @@ pub struct SortConfig {
     pub max_temp_run_files: usize,
     /// 单次合并可参与的读取器上限。
     pub merge_fan_in: usize,
+    /// 同轮独立合并组的线程上限；旧配置缺省为1，实际并发受原句柄额度限制。
+    #[serde(default = "one_merge_worker")]
+    pub merge_workers: usize,
     /// 同时打开的文件句柄上限；一次合并需要 `merge_fan_in + 1` 个句柄。
     pub max_open_files: usize,
     /// 单个 Parquet 读写批次的行数上限。
@@ -1103,6 +1113,12 @@ pub struct SortMetrics {
     pub peak_open_files: usize,
     pub peak_heap_entries: usize,
     pub peak_temp_bytes: u64,
+    #[serde(default)]
+    pub peak_merge_workers: usize,
+    #[serde(default)]
+    pub merge_processed_rows: u64,
+    #[serde(default)]
+    pub merge_elapsed_ns: u64,
 }
 
 /// 一个逻辑有序段的物理文件，按顺序读取，不在分片处产生业务结束。
@@ -1115,6 +1131,20 @@ impl SortedRun {
     pub(crate) fn single(path: PathBuf) -> Self {
         Self { parts: vec![path] }
     }
+}
+
+/// 协调线程报告同轮合并进度；处理行数跨轮累计，资源峰值属于同一sorter。
+#[derive(Clone, Debug, Serialize)]
+pub struct MergeProgress {
+    pub round: usize,
+    pub completed_groups: usize,
+    pub total_groups: usize,
+    pub active_workers: usize,
+    pub processed_rows: u64,
+    pub peak_active_workers: usize,
+    pub peak_temp_bytes: u64,
+    pub peak_temp_files: usize,
+    pub peak_open_files: usize,
 }
 
 /// 成功的试验输出。摘要覆盖逻辑行，而不是 Parquet 文件字节。
@@ -1219,8 +1249,7 @@ pub(crate) struct ExternalSorter {
     runs: Vec<RunInfo>,
     pending_rows: Vec<SortRow>,
     pending_inner_bytes: usize,
-    current_temp_bytes: u64,
-    active_temp_run_files: usize,
+    resources: Arc<SortResources>,
     next_file_id: usize,
     retain_work_directory: bool,
 }
@@ -1245,8 +1274,7 @@ impl ExternalSorter {
             runs: Vec::new(),
             pending_rows: Vec::with_capacity(config.max_run_rows),
             pending_inner_bytes: 0,
-            current_temp_bytes: 0,
-            active_temp_run_files: 0,
+            resources: SortResources::new(config, 0, 0),
             next_file_id: 0,
             retain_work_directory: false,
         };
@@ -1313,8 +1341,7 @@ impl ExternalSorter {
                 work_directory: &self.work_directory,
                 pass: 0,
                 file_id: self.next_file_id,
-                current_temp_bytes: self.current_temp_bytes,
-                active_temp_run_files: self.active_temp_run_files,
+                resources: Arc::clone(&self.resources),
             },
             &self.config,
             &mut self.metrics,
@@ -1322,18 +1349,6 @@ impl ExternalSorter {
             split,
         )?;
         self.next_file_id += 1;
-        self.current_temp_bytes =
-            self.current_temp_bytes
-                .checked_add(run.bytes)
-                .ok_or(SortError::TempByteLimit {
-                    limit: self.config.max_temp_bytes,
-                })?;
-        self.active_temp_run_files += run.run.parts.len();
-        self.metrics.peak_temp_run_files = self
-            .metrics
-            .peak_temp_run_files
-            .max(self.active_temp_run_files);
-        self.metrics.peak_temp_bytes = self.metrics.peak_temp_bytes.max(self.current_temp_bytes);
         self.runs.push(run);
 
         self.pending_rows = Vec::with_capacity(self.config.max_run_rows);
@@ -1369,7 +1384,14 @@ impl ExternalSorter {
         self,
         digest: Option<&mut Sha256>,
     ) -> Result<(SortedRun, SortMetrics), SortError> {
-        self.finish_mode(digest, true)
+        self.finish_mode(digest, true, &mut |_| {})
+    }
+
+    pub(crate) fn finish_with_progress(
+        self,
+        progress: &mut dyn FnMut(MergeProgress),
+    ) -> Result<(SortedRun, SortMetrics), SortError> {
+        self.finish_mode(None, true, progress)
     }
 
     // 真实 V1 持久出口保持单文件；使用同一最终合并与 writer，传播原库容量错误。
@@ -1377,7 +1399,7 @@ impl ExternalSorter {
         self,
         digest: Option<&mut Sha256>,
     ) -> Result<(PathBuf, SortMetrics), SortError> {
-        let (run, metrics) = self.finish_mode(digest, false)?;
+        let (run, metrics) = self.finish_mode(digest, false, &mut |_| {})?;
         Ok((
             run.parts.into_iter().next().expect("单文件发布出口"),
             metrics,
@@ -1399,6 +1421,7 @@ impl ExternalSorter {
         mut self,
         mut digest: Option<&mut Sha256>,
         split: bool,
+        progress: &mut dyn FnMut(MergeProgress),
     ) -> Result<(SortedRun, SortMetrics), SortError> {
         if !self.pending_rows.is_empty() {
             let final_initial_run = self.runs.is_empty();
@@ -1416,10 +1439,9 @@ impl ExternalSorter {
 
         if self.runs.is_empty() {
             let final_path = self.work_directory.join("sorted.parquet");
-            let empty_run = RunWriter::new(
+            let empty_run = RunWriter::new_shared(
                 final_path.clone(),
-                self.current_temp_bytes,
-                self.active_temp_run_files,
+                Arc::clone(&self.resources),
                 &self.config,
                 &mut self.metrics,
             )?
@@ -1437,71 +1459,27 @@ impl ExternalSorter {
         while runs.len() > 1 {
             pass += 1;
             self.metrics.merge_passes += 1;
-            let mut next_runs = Vec::with_capacity(runs.len().div_ceil(self.config.merge_fan_in));
             let final_merge = runs.len() <= self.config.merge_fan_in;
-            let mut remaining = runs.into_iter();
-
-            loop {
-                let group: Vec<_> = remaining.by_ref().take(self.config.merge_fan_in).collect();
-                if group.is_empty() {
-                    break;
-                }
-                if group.len() == 1 {
-                    next_runs.push(group.into_iter().next().expect("恰有一个 run"));
-                    continue;
-                }
-
-                let merged = merge_group(
-                    &group,
-                    RunDestination {
-                        work_directory: &self.work_directory,
-                        pass,
-                        file_id: self.next_file_id,
-                        current_temp_bytes: self.current_temp_bytes,
-                        active_temp_run_files: self.active_temp_run_files,
-                    },
-                    &self.config,
-                    &mut self.metrics,
-                    if final_merge {
-                        digest.as_deref_mut()
-                    } else {
-                        None
-                    },
-                    !final_merge || split,
-                )?;
-                self.next_file_id += 1;
-
-                self.current_temp_bytes = self.current_temp_bytes.checked_add(merged.bytes).ok_or(
-                    SortError::TempByteLimit {
-                        limit: self.config.max_temp_bytes,
-                    },
-                )?;
-                self.active_temp_run_files += merged.run.parts.len();
-                self.metrics.peak_temp_run_files = self
-                    .metrics
-                    .peak_temp_run_files
-                    .max(self.active_temp_run_files);
-                self.metrics.peak_temp_bytes =
-                    self.metrics.peak_temp_bytes.max(self.current_temp_bytes);
-
-                for input in &group {
-                    for path in &input.run.parts {
-                        fs::remove_file(path)?;
-                    }
-                    self.current_temp_bytes = self
-                        .current_temp_bytes
-                        .checked_sub(input.bytes)
-                        .ok_or(SortError::InvalidRun("临时文件字节记账下溢"))?;
-                    self.active_temp_run_files = self
-                        .active_temp_run_files
-                        .checked_sub(input.run.parts.len())
-                        .ok_or(SortError::InvalidRun("run 文件记账下溢"))?;
-                }
-                next_runs.push(merged);
-            }
-            runs = next_runs;
+            let round_start = std::time::Instant::now();
+            runs = sort_parallel::merge_round(
+                runs,
+                &self.work_directory,
+                pass,
+                &mut self.next_file_id,
+                &self.config,
+                &self.resources,
+                &mut self.metrics,
+                if final_merge {
+                    digest.as_deref_mut()
+                } else {
+                    None
+                },
+                !final_merge || split,
+                progress,
+            )?;
+            self.metrics.merge_elapsed_ns +=
+                round_start.elapsed().as_nanos().min(u64::MAX as u128) as u64;
         }
-
         let mut final_run = runs.pop().expect("run 列表非空");
         let final_path = self.work_directory.join("sorted.parquet");
         if !split && final_run.run.parts.len() > 1 {
@@ -1512,17 +1490,14 @@ impl ExternalSorter {
                     work_directory: &self.work_directory,
                     pass: pass + 1,
                     file_id: self.next_file_id,
-                    current_temp_bytes: self.current_temp_bytes,
-                    active_temp_run_files: self.active_temp_run_files,
+                    resources: Arc::clone(&self.resources),
                 },
                 &self.config,
                 &mut self.metrics,
                 digest,
                 false,
             )?;
-            for path in &input[0].run.parts {
-                fs::remove_file(path)?;
-            }
+            self.resources.remove_run(&input[0])?;
         }
         for (part, path) in final_run.run.parts.iter_mut().enumerate() {
             let destination = if part == 0 {
@@ -1534,6 +1509,7 @@ impl ExternalSorter {
             *path = destination;
         }
         self.metrics.peak_open_files = self.metrics.peak_open_files.max(1);
+        self.resources.apply(&mut self.metrics);
         self.metrics.output_rows = final_run.rows;
         self.retain_work_directory = true;
         Ok((final_run.run, std::mem::take(&mut self.metrics)))
@@ -1549,6 +1525,9 @@ impl Drop for ExternalSorter {
 }
 
 fn validate_config(config: &SortConfig) -> Result<(), SortError> {
+    if config.merge_workers == 0 {
+        return Err(SortError::InvalidConfig("merge_workers 必须为正数"));
+    }
     if config.max_run_rows == 0 {
         return Err(SortError::InvalidConfig("max_run_rows 必须为正数"));
     }
@@ -1630,13 +1609,7 @@ fn flush_initial_run(
         destination.pass,
         destination.file_id,
     );
-    let mut writer = RunWriter::new_without_buffer(
-        path,
-        destination.current_temp_bytes,
-        destination.active_temp_run_files,
-        config,
-        metrics,
-    )?;
+    let mut writer = RunWriter::new_shared_buffer(path, destination.resources, config, metrics, 0)?;
     writer.split = split;
     for rows in sorted.chunks(config.batch_rows) {
         writer.write_unbuffered(rows)?;
@@ -1670,10 +1643,11 @@ fn merge_group(
     metrics.peak_open_files = metrics.peak_open_files.max(open_files);
     let mut cursors = Vec::with_capacity(group.len());
     for run in group {
-        cursors.push(PartCursor::open(
+        cursors.push(PartCursor::open_tracked(
             &run.run,
             config.batch_rows,
             config.max_run_bytes,
+            Arc::clone(&destination.resources),
         )?);
     }
 
@@ -1690,17 +1664,26 @@ fn merge_group(
         destination.pass,
         destination.file_id,
     );
-    let mut writer = RunWriter::new(
-        path,
-        destination.current_temp_bytes,
-        destination.active_temp_run_files,
-        config,
-        metrics,
-    )?;
+    let mut writer =
+        RunWriter::new_shared(path, Arc::clone(&destination.resources), config, metrics)?;
     writer.split = split;
     let mut previous_key: Option<Vec<u8>> = None;
 
     while let Some(entry) = heap.pop() {
+        if destination
+            .resources
+            .cancelled
+            .load(AtomicOrdering::Relaxed)
+        {
+            return Err(SortError::Io(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "同轮合并已停止",
+            )));
+        }
+        destination
+            .resources
+            .processed_rows
+            .fetch_add(1, AtomicOrdering::Relaxed);
         if previous_key
             .as_deref()
             .is_some_and(|previous| previous >= entry.row.sort_key.as_slice())
@@ -1830,8 +1813,7 @@ struct RunDestination<'a> {
     work_directory: &'a Path,
     pass: usize,
     file_id: usize,
-    current_temp_bytes: u64,
-    active_temp_run_files: usize,
+    resources: Arc<SortResources>,
 }
 
 struct RunWriter {
@@ -1849,8 +1831,8 @@ struct RunWriter {
     base_path: PathBuf,
     parts: Vec<PathBuf>,
     closed_bytes: u64,
-    initial_temp_bytes: u64,
-    initial_temp_files: usize,
+    resources: Arc<SortResources>,
+    handle: Option<HandleLease>,
     config: SortConfig,
 }
 
@@ -1865,6 +1847,7 @@ fn part_path(base: &Path, part: usize) -> PathBuf {
 }
 
 impl RunWriter {
+    #[cfg(test)]
     fn new(
         final_path: PathBuf,
         current_temp_bytes: u64,
@@ -1872,53 +1855,31 @@ impl RunWriter {
         config: &SortConfig,
         metrics: &mut SortMetrics,
     ) -> Result<Self, SortError> {
-        Self::new_with_buffer(
+        Self::new_shared_buffer(
             final_path,
-            current_temp_bytes,
-            active_temp_run_files,
+            SortResources::new(config, current_temp_bytes, active_temp_run_files),
             config,
             metrics,
             config.batch_rows,
         )
     }
 
-    fn new_without_buffer(
+    fn new_shared(
         final_path: PathBuf,
-        current_temp_bytes: u64,
-        active_temp_run_files: usize,
+        resources: Arc<SortResources>,
         config: &SortConfig,
         metrics: &mut SortMetrics,
     ) -> Result<Self, SortError> {
-        Self::new_with_buffer(
-            final_path,
-            current_temp_bytes,
-            active_temp_run_files,
-            config,
-            metrics,
-            0,
-        )
+        Self::new_shared_buffer(final_path, resources, config, metrics, config.batch_rows)
     }
 
-    fn new_with_buffer(
+    fn new_shared_buffer(
         final_path: PathBuf,
-        current_temp_bytes: u64,
-        active_temp_run_files: usize,
+        resources: Arc<SortResources>,
         config: &SortConfig,
         metrics: &mut SortMetrics,
         buffer_capacity: usize,
     ) -> Result<Self, SortError> {
-        if active_temp_run_files >= config.max_temp_run_files {
-            return Err(SortError::TempRunFileLimit {
-                needed: active_temp_run_files + 1,
-                limit: config.max_temp_run_files,
-            });
-        }
-        let quota = config
-            .max_temp_bytes
-            .checked_sub(current_temp_bytes)
-            .ok_or(SortError::TempByteLimit {
-                limit: config.max_temp_bytes,
-            })?;
         let buffer = Vec::with_capacity(buffer_capacity);
         let buffer_base_bytes =
             sort_row_buffer_bytes(&buffer, 0).ok_or(SortError::RowMemoryLimit {
@@ -1933,12 +1894,15 @@ impl RunWriter {
         }
         metrics.peak_write_buffer_bytes = metrics.peak_write_buffer_bytes.max(buffer_base_bytes);
         let partial_path = final_path.with_extension("parquet.partial");
+        let handle = resources.open_handle()?;
+        resources.create_part()?;
         let file = File::options()
             .create_new(true)
             .write(true)
             .open(&partial_path)?;
         let quota_exceeded = Arc::new(AtomicBool::new(false));
-        let quota_writer = QuotaWriter::new(file, quota, Arc::clone(&quota_exceeded));
+        let quota_writer =
+            QuotaWriter::new(file, Arc::clone(&resources), Arc::clone(&quota_exceeded));
         let properties = WriterProperties::builder()
             .set_compression(Compression::ZSTD(Default::default()))
             .set_max_row_group_row_count(Some(config.batch_rows))
@@ -1967,8 +1931,8 @@ impl RunWriter {
             split: true,
             parts: Vec::new(),
             closed_bytes: 0,
-            initial_temp_bytes: current_temp_bytes,
-            initial_temp_files: active_temp_run_files,
+            resources,
+            handle: Some(handle),
             config: config.clone(),
         })
     }
@@ -1983,6 +1947,7 @@ impl RunWriter {
             }
             return Err(error.into());
         }
+        self.handle = None;
         fs::rename(&self.partial_path, &self.final_path)?;
         self.closed_bytes += fs::metadata(&self.final_path)?.len();
         self.parts.push(self.final_path.clone());
@@ -1991,16 +1956,10 @@ impl RunWriter {
 
     fn rotate_part(&mut self) -> Result<(), SortError> {
         self.close_part()?;
-        let active = self.initial_temp_files + self.parts.len();
-        if active >= self.config.max_temp_run_files {
-            return Err(SortError::TempRunFileLimit {
-                needed: active + 1,
-                limit: self.config.max_temp_run_files,
-            });
-        }
         self.final_path = part_path(&self.base_path, self.parts.len());
         self.partial_path = self.final_path.with_extension("parquet.partial");
-        let remaining = self.max_temp_bytes - self.initial_temp_bytes - self.closed_bytes;
+        self.handle = Some(self.resources.open_handle()?);
+        self.resources.create_part()?;
         let file = File::options()
             .create_new(true)
             .write(true)
@@ -2011,7 +1970,11 @@ impl RunWriter {
             .build();
         self.writer = Some(
             ArrowWriter::try_new(
-                QuotaWriter::new(file, remaining, Arc::clone(&self.quota_exceeded)),
+                QuotaWriter::new(
+                    file,
+                    Arc::clone(&self.resources),
+                    Arc::clone(&self.quota_exceeded),
+                ),
                 trial_schema(),
                 Some(properties),
             )
@@ -2131,12 +2094,7 @@ impl RunWriter {
     fn finish(mut self, metrics: &mut SortMetrics) -> Result<RunInfo, SortError> {
         self.flush_buffer(metrics)?;
         self.close_part()?;
-        metrics.peak_temp_run_files = metrics
-            .peak_temp_run_files
-            .max(self.initial_temp_files + self.parts.len());
-        metrics.peak_temp_bytes = metrics
-            .peak_temp_bytes
-            .max(self.initial_temp_bytes + self.closed_bytes);
+        self.resources.apply(metrics);
         Ok(RunInfo {
             run: SortedRun { parts: self.parts },
             bytes: self.closed_bytes,
@@ -2147,15 +2105,15 @@ impl RunWriter {
 
 struct QuotaWriter<W> {
     inner: W,
-    remaining: u64,
+    resources: Arc<SortResources>,
     exceeded: Arc<AtomicBool>,
 }
 
 impl<W> QuotaWriter<W> {
-    fn new(inner: W, remaining: u64, exceeded: Arc<AtomicBool>) -> Self {
+    fn new(inner: W, resources: Arc<SortResources>, exceeded: Arc<AtomicBool>) -> Self {
         Self {
             inner,
-            remaining,
+            resources,
             exceeded,
         }
     }
@@ -2177,7 +2135,8 @@ fn drop_file_cache(path: &Path) {
 
 impl<W: Write> Write for QuotaWriter<W> {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        if buffer.len() as u64 > self.remaining {
+        let mut state = self.resources.state.lock().unwrap();
+        if buffer.len() as u64 > self.resources.max_bytes.saturating_sub(state.bytes) {
             self.exceeded.store(true, AtomicOrdering::Relaxed);
             return Err(io::Error::new(
                 io::ErrorKind::StorageFull,
@@ -2185,7 +2144,8 @@ impl<W: Write> Write for QuotaWriter<W> {
             ));
         }
         let written = self.inner.write(buffer)?;
-        self.remaining -= written as u64;
+        state.bytes += written as u64;
+        state.peak_bytes = state.peak_bytes.max(state.bytes);
         Ok(written)
     }
 
@@ -2199,6 +2159,7 @@ pub(crate) struct PartCursor {
     run: SortedRun,
     part: usize,
     current: Option<RunCursor>,
+    resources: Option<Arc<SortResources>>,
     batch_rows: usize,
     max_batch_bytes: usize,
 }
@@ -2213,21 +2174,33 @@ impl PartCursor {
             run: run.clone(),
             part: 0,
             current: None,
+            resources: None,
             batch_rows,
             max_batch_bytes,
         })
     }
 
+    fn open_tracked(
+        run: &SortedRun,
+        batch_rows: usize,
+        max_batch_bytes: usize,
+        resources: Arc<SortResources>,
+    ) -> Result<Self, SortError> {
+        let mut cursor = Self::open(run, batch_rows, max_batch_bytes)?;
+        cursor.resources = Some(resources);
+        Ok(cursor)
+    }
     pub(crate) fn next_row(&mut self) -> Result<Option<SortRow>, SortError> {
         loop {
             if self.current.is_none() {
                 let Some(path) = self.run.parts.get(self.part) else {
                     return Ok(None);
                 };
-                self.current = Some(RunCursor::open(
+                self.current = Some(RunCursor::open_resources(
                     path,
                     self.batch_rows,
                     self.max_batch_bytes,
+                    self.resources.clone(),
                 )?);
             }
             if let Some(row) = self.current.as_mut().unwrap().next_row()? {
@@ -2254,6 +2227,8 @@ pub(crate) struct RunCursor {
     batch_rows: usize,
     max_batch_bytes: usize,
     row_in_group: u64,
+    resources: Option<Arc<SortResources>>,
+    handle: Option<HandleLease>,
 }
 
 impl RunCursor {
@@ -2262,6 +2237,15 @@ impl RunCursor {
         batch_rows: usize,
         max_batch_bytes: usize,
     ) -> Result<Self, SortError> {
+        Self::open_resources(path, batch_rows, max_batch_bytes, None)
+    }
+    fn open_resources(
+        path: &Path,
+        batch_rows: usize,
+        max_batch_bytes: usize,
+        resources: Option<Arc<SortResources>>,
+    ) -> Result<Self, SortError> {
+        let _metadata_handle = resources.as_ref().map(|r| r.open_handle()).transpose()?;
         let file = File::open(path)?;
         #[cfg(test)]
         let metadata_started = public_replay::cost::decode_clock();
@@ -2282,10 +2266,14 @@ impl RunCursor {
             batch_rows,
             max_batch_bytes,
             row_in_group: 0,
+            resources,
+            handle: None,
         })
     }
 
     fn open_next_row_group(&mut self) -> Result<bool, SortError> {
+        self.reader = None;
+        self.handle = None;
         let row_group_count = self.metadata.metadata().num_row_groups();
         if self.next_row_group >= row_group_count {
             return Ok(false);
@@ -2296,6 +2284,12 @@ impl RunCursor {
         #[cfg(test)]
         let group_started = public_replay::cost::decode_clock();
         self.reader = None;
+        self.handle = None;
+        self.handle = self
+            .resources
+            .as_ref()
+            .map(|r| r.open_handle())
+            .transpose()?;
         self.reader = Some(
             ParquetRecordBatchReaderBuilder::new_with_metadata(
                 File::open(&self.path)?,
@@ -2318,6 +2312,7 @@ impl RunCursor {
     pub(crate) fn start_row_group(&mut self, row_group: usize) {
         self.next_row_group = row_group;
         self.reader = None;
+        self.handle = None;
         self.batch = Vec::new().into_iter();
         self.row_in_group = 0;
     }
@@ -2976,6 +2971,7 @@ mod tests {
             max_run_bytes: 4 * 1024,
             max_temp_run_files: 64,
             merge_fan_in,
+            merge_workers: 1,
             max_open_files: 8,
             batch_rows: 3,
             max_temp_bytes: 4 * 1024 * 1024,
@@ -3102,7 +3098,12 @@ mod tests {
         let incremental = incremental.finish_with_digest().expect("完成增量排序");
 
         assert_eq!(wrapper.logical_sha256, incremental.logical_sha256);
-        assert_eq!(wrapper.metrics, incremental.metrics);
+        let mut wrapper_metrics = wrapper.metrics.clone();
+        let mut incremental_metrics = incremental.metrics.clone();
+        // 墙钟耗时不属于两个入口应一致的逻辑或资源计数。
+        wrapper_metrics.merge_elapsed_ns = 0;
+        incremental_metrics.merge_elapsed_ns = 0;
+        assert_eq!(wrapper_metrics, incremental_metrics);
         assert_eq!(
             read_rows(&wrapper.output_run, 1),
             read_rows(&incremental.output_run, 7)
@@ -3355,6 +3356,7 @@ mod tests {
             max_run_bytes: 4 * 1024 * 1024,
             max_temp_run_files: 16,
             merge_fan_in: 2,
+            merge_workers: 1,
             max_open_files: 3,
             batch_rows: 1,
             max_temp_bytes: 128 * 1024 * 1024,
@@ -3497,8 +3499,7 @@ mod tests {
                 work_directory: temp3.path(),
                 pass: 1,
                 file_id: 0,
-                current_temp_bytes: bytes * 2,
-                active_temp_run_files: 2,
+                resources: SortResources::new(&cfg, bytes * 2, 2),
             },
             &cfg,
             &mut metrics,
@@ -3508,6 +3509,108 @@ mod tests {
         .unwrap_err();
         assert!(matches!(error, SortError::SortKeyCollision { .. }));
         assert_eq!(metrics.peak_open_files, 2);
+    }
+
+    #[test]
+    fn parallel_groups_are_ordered_by_input_and_old_handles_limit_concurrency() {
+        let mut cfg = config(4, 2);
+        cfg.batch_rows = 2;
+        cfg.max_open_files = 12;
+        let mut outputs = Vec::new();
+        for workers in [1, 4] {
+            cfg.merge_workers = workers;
+            let temp = TempDir::new().unwrap();
+            let mut sorter = ExternalSorter::new(temp.path(), &cfg).unwrap();
+            let resources = Arc::clone(&sorter.resources);
+            if workers == 4 {
+                *resources.delays.lock().unwrap() = vec![std::time::Duration::from_millis(50)];
+            }
+            for i in (0..64).rev() {
+                sorter.push(row(i)).unwrap();
+            }
+            let result = sorter.finish_with_digest().unwrap();
+            let rows = read_rows(&result.output_run, 2);
+            assert_eq!(rows, (0..64).map(row).collect::<Vec<_>>());
+            if workers == 4 {
+                assert_ne!(resources.state.lock().unwrap().completions[0], 0);
+                assert!(result.metrics.peak_merge_workers > 1);
+            }
+            outputs.push((rows, result.logical_sha256));
+        }
+        assert_eq!(outputs[0], outputs[1]);
+        let mut old = config(2, 8);
+        old.max_open_files = 16;
+        old.merge_workers = 4;
+        let temp = TempDir::new().unwrap();
+        let result = external_sort((0..64).rev().map(row), temp.path(), &old).unwrap();
+        assert_eq!(result.metrics.peak_merge_workers, 1);
+        assert!(result.metrics.peak_open_files <= 16);
+        let mut json = serde_json::to_value(&old).unwrap();
+        json.as_object_mut().unwrap().remove("merge_workers");
+        assert_eq!(
+            serde_json::from_value::<SortConfig>(json)
+                .unwrap()
+                .merge_workers,
+            1
+        );
+    }
+
+    #[test]
+    fn parallel_writers_share_bytes_and_failure_joins_all_work() {
+        let temp = TempDir::new().unwrap();
+        let mut cfg = config(2, 2);
+        cfg.max_temp_bytes = 7;
+        let resources = SortResources::new(&cfg, 0, 0);
+        let barrier = Arc::new(std::sync::Barrier::new(2));
+        let outcomes = std::thread::scope(|scope| {
+            let tasks: Vec<_> = (0..2)
+                .map(|i| {
+                    let resources = Arc::clone(&resources);
+                    let barrier = Arc::clone(&barrier);
+                    let file = File::create(temp.path().join(format!("writer-{i}"))).unwrap();
+                    scope.spawn(move || {
+                        let mut writer =
+                            QuotaWriter::new(file, resources, Arc::new(AtomicBool::new(false)));
+                        barrier.wait();
+                        writer.write_all(b"1234")
+                    })
+                })
+                .collect();
+            tasks
+                .into_iter()
+                .map(|task| task.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(outcomes.iter().filter(|r| r.is_ok()).count(), 1);
+        assert_eq!(resources.state.lock().unwrap().bytes, 4);
+        assert_eq!(
+            fs::read_dir(temp.path())
+                .unwrap()
+                .map(|p| p.unwrap().metadata().unwrap().len())
+                .sum::<u64>(),
+            4
+        );
+        cfg.max_temp_bytes = 1 << 20;
+        cfg.merge_workers = 4;
+        cfg.max_open_files = 12;
+        let mut sorter = ExternalSorter::new(temp.path(), &cfg).unwrap();
+        let resources = Arc::clone(&sorter.resources);
+        *resources.delays.lock().unwrap() = vec![
+            std::time::Duration::from_millis(10),
+            std::time::Duration::from_millis(50),
+        ];
+        for i in [0, 1, 0, 2, 3, 4, 5, 6] {
+            sorter.push(row(i)).unwrap();
+        }
+        assert!(matches!(
+            sorter.finish_with_digest(),
+            Err(SortError::SortKeyCollision { .. })
+        ));
+        let state = resources.state.lock().unwrap();
+        assert_eq!(state.workers, 0);
+        assert_eq!(state.handles, 0);
+        assert!(state.peak_workers > 1);
+        assert!(!temp.path().join(WORK_DIRECTORY).exists());
     }
 
     #[test]

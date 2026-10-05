@@ -4,7 +4,7 @@ use crate::{
 };
 use contracts::AppliedIngressV1;
 use data_pipeline_training::{
-    SortMetrics,
+    MergeProgress, SortMetrics,
     historical_preparation_progress::{
         HistoricalPreparationNoticeV1 as Notice, HistoricalPreparationStageV1 as Stage,
         HistoricalRawPassV1 as Pass,
@@ -42,6 +42,7 @@ struct Work {
     epoch_pass: RawWork,
     second_supply: RawWork,
     source_sort_metrics: [Option<SortMetrics>; 6],
+    source_merge_progress: [Option<MergeProgress>; 6],
     applied_inputs: u64,
     generated_groups: u64,
     generated_observations: u64,
@@ -328,6 +329,10 @@ impl HistoricalPreparationProgressV1 {
             }
             Notice::SourceSortFinished { index, metrics } => {
                 self.work.source_sort_metrics[index] = Some(metrics);
+                true
+            }
+            Notice::SourceMergeProgress { index, progress } => {
+                self.work.source_merge_progress[index] = Some(progress);
                 true
             }
             Notice::HiddenScanRow => {
