@@ -6,6 +6,8 @@ import math
 import random
 import struct
 import subprocess
+import importlib.util
+import sys
 import time
 from decimal import Decimal, localcontext
 from fractions import Fraction
@@ -109,6 +111,42 @@ def main():
     assert canonical.denominator.report_values() == [1, 4, 4], 'normalized denominator and zero'
     assert not bool(canonical.fault.any()), 'valid normalized rationals'
     records.extend(['rational_floor', 'rational_fault'])
+    log(f'阶段=原SIM经济成本GPU消费者 耗时={time.monotonic()-started:.3f}s')
+    module_path = Path(__file__).resolve().parents[2] / 'sim-system/gpu/buy_cost.py'
+    spec = importlib.util.spec_from_file_location('sim_gpu_buy_cost', module_path)
+    buy_cost = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = buy_cost
+    spec.loader.exec_module(buy_cost)
+    quantities = [500] * 6 + [((1<<96)-1)//10000]
+    prices = [Fraction(k,100) for k in [25,10,20,25,50,90]] + [Fraction(9999,10000)]
+    rates = [Fraction(7,100)] * 6 + [Fraction((1<<96)-1)]
+    post = [True, False, False, False, False, False, False]
+    nums = ExactInt.from_values(quantities)
+    price_r = ExactRational.from_values([p.numerator for p in prices], [p.denominator for p in prices])
+    rate_r = ExactRational.from_values([r.numerator for r in rates], [r.denominator for r in rates])
+    cost = buy_cost.limit_buy_cost(nums, price_r, rate_r, 1,
+        post_only=torch.tensor(post, dtype=torch.bool, device='cuda'), minimum_principal_micro=nums.constant(1_000_000))
+    principal_expected = [n * int(p*1_000_000)//100 for n,p in zip(quantities,prices)]
+    def half_up(f):
+        q,r = divmod(f.numerator, f.denominator)
+        return q + int(2*r >= f.denominator)
+    fees_expected = [0 if po or principal < 1_000_000 else half_up(n*1000*r*min(p,Fraction(1,2))*(1-min(p,Fraction(1,2))))
+        for n,p,r,po,principal in zip(quantities,prices,rates,post,principal_expected)]
+    assert fees_expected[:6] == [0,0,5600,6563,8750,8750], 'existing Rust production cost evidence'
+    assert fees_expected[-1] > 1<<128, 'valid fee exceeds u128'
+    assert cost.principal_micro.report_values() == principal_expected, 'SIM principal micro'
+    assert cost.fee_1e5_units.report_values() == fees_expected, 'SIM H5 fee'
+    assert not bool((cost.principal_micro.fault | cost.fee_1e5_units.fault).any()), 'SIM cost valid'
+    threshold_rate = ExactRational.from_values([4,39999], [1_000_000,10_000_000_000])
+    threshold_n = ExactInt.from_values([500,500])
+    threshold_p = ExactRational.from_values([1,1], [2,2])
+    threshold_fee = buy_cost.market_fee_estimate(threshold_n, threshold_p, threshold_rate, 1)
+    assert threshold_fee.report_values() == [1,0], 'strict fee half unit'
+    for exponent in [95, 0xffffffff]:
+        tiny_fee = buy_cost.market_fee_estimate(nums, price_r, rate_r, exponent)
+        assert tiny_fee.report_values() == [0]*len(quantities), 'large exponent exact zero'
+        assert not bool(tiny_fee.fault.any())
+    records.extend(['sim_limit_cost', 'sim_fee_half', 'sim_fee_large_exponent'])
     torch.cuda.synchronize();elapsed=time.monotonic()-started
     report={'scope':'实际公共GPU整数/末端投影；不是完整环境/PPO/训练容量','source_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'cases':len(a),'passed':records,'projection_errors':errors,'compile_seconds':compile_seconds,'elapsed_seconds':elapsed,'device':torch.cuda.get_device_name(),'peak_allocated_bytes':torch.cuda.max_memory_allocated()}
     args.output.parent.mkdir(parents=True,exist_ok=True);args.output.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n');log(f'完成 精确检查={records} 投影有限误差={errors} 耗时={elapsed:.3f}s')
