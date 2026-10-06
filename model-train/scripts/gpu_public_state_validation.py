@@ -28,6 +28,7 @@ def main():
     from input_trades import TradeInputs
     from market_state import PublicMarketState
     from input_lifecycle import LifecycleInputs
+    from input_sides import SideInputs
     from input_events import EventInputs, time_envelope
     from model_train.book import BookEncoder
     from prepare import _numbers
@@ -94,6 +95,8 @@ def main():
     native_fields = pm_fields(state,observation,assets,now)
     market_indices = torch.full((3,),target_market,dtype=torch.int64,device='cuda')
     native_lifecycle = LifecycleInputs(market_state).encode(market_frame,market_indices,assets,now)
+    side_inputs = SideInputs(state)
+    native_sides = side_inputs.encode(frame,assets,now)
     assert not native_lifecycle.identity_present[0].cpu().item()
     if columns['markets']:
         assert not native_lifecycle.fault.any().cpu().item()
@@ -186,8 +189,7 @@ def main():
                 if p['kind'] == 'book': return (0 if p['fact']['kind']=='full_book' else 1),0
                 return {'best_bid_ask':2,'tick_size_change':3,'public_trade':4,'new_market':5}[p['kind']],0
             if 'ReferenceFact' in payload:
-                assert payload['ReferenceFact']['reference_type'] == 'chainlink_btc_usd'
-                return 12,2
+                return {'chainlink_btc_usd':(12,2),'binance_aggregate_trade':(18,7)}[payload['ReferenceFact']['reference_type']]
             p = payload['MarketFact']['payload']
             key = next(iter(p))
             return {'FixedIdentity':6,'InitialTick':7,'LifecycleTransition':8,'MarketLifecycleSnapshot':8,
@@ -258,6 +260,30 @@ def main():
                     out[20+2*k] = original_log(Fraction(max(values),1000))
                 out[25+k] = len(values)/len(rows)
             expected_trades[28*leg:28*(leg+1)] = out
+        binance_rows = [event for event in reference['public_events'] if 'ReferenceFact' in event['payload']
+                        and event['payload']['ReferenceFact']['reference_type']=='binance_aggregate_trade']
+        assert len(binance_rows)==2
+        binance = [event['payload']['ReferenceFact']['reference'] for event in binance_rows]
+        ps = [Fraction(t['price_usdt_per_btc']) for t in binance]
+        qty = [Fraction(t['quantity_btc']) for t in binance]
+        out = [0.0]*21
+        out[0] = original_log(len(binance))
+        out[1:6] = [original_log(p) for p in (ps[0],ps[-1],min(ps),max(ps),sum(ps)/len(ps))]
+        out[6:8] = [original_log(sum(qty)),original_log(sum(p*q for p,q in zip(ps,qty)))]
+        for side,maker in enumerate((False,True)):
+            out[8+side] = original_log(sum(t['buyer_is_maker']==maker for t in binance))
+            out[10+side] = original_log(sum(q for q,t in zip(qty,binance) if t['buyer_is_maker']==maker))
+        ages = [[],[],[]]
+        for event in binance_rows:
+            s,r = event['direct_time']['source_event_at_utc_ms'],event['direct_time']['received_at_utc_ms']
+            ages[1].append(reference['observation_ms']-r)
+            if s is not None: ages[0].append(reference['observation_ms']-s); ages[2].append(r-s)
+        for k,age in enumerate(ages):
+            if age:
+                out[12+2*k] = original_log(Fraction(min(age),1000))
+                out[13+2*k] = original_log(Fraction(max(age),1000))
+            out[18+k] = len(age)/len(binance)
+        expected_trades[56:] = out
         assert torch.equal(full_trades.values[0],torch.tensor(expected_trades,device='cuda',dtype=torch.float32)), (full_trades.values,expected_trades)
         assert not full_trades.fault.any().cpu().item()
         quality_names = ['fresh','stale','missing','unknown_not_observed','confirmed_gap','invalid']
@@ -305,6 +331,32 @@ def main():
                     result[2*k+1] = signed_log(Fraction(max(age),1000))
                 result[6+k] = len(age)/len(rows)
             return result
+        first = reference['first_sides']
+        first_frame = state.frame(prefixes.new_tensor([first['prefix']]))
+        first_encoded = side_inputs.encode(first_frame,assets[:1],now[:1].new_tensor([22000]))
+        continued_sides = side_inputs.encode(state.frame(prefixes[-1:]),assets[-1:],now[-1:],first_encoded.memory)
+        assert not continued_sides.fault.any().cpu().item()
+        for outcome,asset_id in enumerate(original_pair):
+            token = columns['assets'][asset_id]['token_id']
+            current = next(a for a in reference['public_assets'] if a['asset']['token_id']==token)
+            before = next(a for a in first['assets'] if a['asset']['token_id']==token)
+            expected_sides = [0.0]*38
+            expected_sides[quality_names.index(current['bids']['quality'])] = 1.0
+            for side,name in enumerate(('bids','asks')):
+                field,old = current[name],before[name]
+                out = [0.0]*16
+                out[5:14] = original_envelope(field)
+                if field['value'] is not None and field['quality'] in ('fresh','stale'):
+                    levels = [row for row in field['value'] if Fraction(row['quantity_shares'])>0]
+                    total = sum(Fraction(row['quantity_shares']) for row in levels)
+                    out[:3] = [1.0,original_log(len(levels)),original_log(total)]
+                    if old['value'] is not None and old['quality'] in ('fresh','stale'):
+                        old_levels = [row for row in old['value'] if Fraction(row['quantity_shares'])>0]
+                        out[3:5] = [original_log(total-sum(Fraction(row['quantity_shares']) for row in old_levels)),1.0]
+                        if levels and old_levels:
+                            out[14:16] = [original_log(Fraction(levels[0]['price_pusd_per_share'])-Fraction(old_levels[0]['price_pusd_per_share'])),1.0]
+                expected_sides[6+16*side:22+16*side] = out
+            assert torch.equal(continued_sides.values[0,outcome],torch.tensor(expected_sides,device='cuda',dtype=torch.float32)), (continued_sides.values[0,outcome],expected_sides)
         f = market['lifecycle']
         lifecycle_expected[2+quality_names.index(f['quality'])] = 1.0
         if f['value'] is not None and f['quality'] in ('fresh','stale'):
@@ -450,7 +502,7 @@ def main():
               'continuous_device_query','out_of_material_prefix_fault',
               'i64_time_coordinate_exact_difference','fault_bit_union','pm_direct_observation_fields',
               'native_events104_legal_prefix_window','empty_and_invalid_window','utc_100ms_window_prefix',
-              'native_window_trades77_exact_aggregation','public_market_identity_prefix','native_lifecycle103']
+              'native_window_trades77_exact_aggregation','public_market_identity_prefix','native_lifecycle103','native_pm_side38_endpoint_memory']
     if columns['slots']:
         passed += ['exact_price_sort_current_positive_compaction','native_pm_nine_fields',
                    'real_book_encoder_forward_backward','tail_padding_pairwise_tree','native_pm_bba28_trade18']

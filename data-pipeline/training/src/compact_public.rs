@@ -620,6 +620,7 @@ mod tests {
         let mut next_book = book("10");
         if let PolymarketOrderbookEvent::Book {bids,..} = &mut next_book {
             bids.push(PolymarketPriceLevel {price:"0.4".into(),size:"0".into()});
+            bids.push(PolymarketPriceLevel {price:"0.51".into(),size:"3".into()});
         }
         // 终态必须经原metadata+WS配对入口；单边WS只能保持pending。
         let terminal_metadata = |sequence:u64,source:i64,received:i64| {
@@ -673,10 +674,29 @@ mod tests {
             row.validate().unwrap();
             TypedRawRowV2::Existing(TypedRawRow::PolymarketRtdsChainlinkBtcUsd(row))
         };
+        let aggregate_trade = |sequence:u64,price:&str,quantity:&str,maker:bool| {
+            use data_pipeline_core::typed_raw::*;
+            let at = 38000+sequence as i64;
+            let native = serde_json::json!({"e":"aggTrade","E":at,"s":"BTCUSDT","a":sequence,
+                "p":price,"q":quantity,"f":sequence,"l":sequence,"T":at,"m":maker,"M":true});
+            let trade = BinanceAggTradeRow {
+                timestamp_received:at+100,rest_backfill_timestamp_received:None,ingest_source:"websocket".into(),
+                rest_was_best_price_match:None,source_native_payload_json:native.to_string(),
+                source_sequence_epoch_id:"agg-epoch".into(),connection_generation:1,websocket_ingress_sequence:sequence,
+                rest_response_ingress_sequence:None,rest_response_item_index:None,collector_admission_sequence:sequence,
+                collector_admission_time_utc_ms:at+101,collector_host_id:"collector-1".into(),collector_region:"eu-west-1".into(),
+                source_endpoint:"wss://stream.binance.com:9443/ws/btcusdt@aggTrade".into(),schema_version:BINANCE_AGGTRADE_SCHEMA.into(),
+                record:BinanceAggTradeRecord::Trade {event_type:"aggTrade".into(),event_time:at,trade_time:at,
+                    symbol:"BTCUSDT".into(),aggregate_trade_id:sequence,price:price.into(),quantity:quantity.into(),
+                    first_trade_id:sequence,last_trade_id:sequence,buyer_is_maker:maker,stream:"btcusdt@aggTrade".into(),ws_ignore:true},
+            };
+            trade.validate().unwrap();
+            TypedRawRowV2::Existing(TypedRawRow::BinanceAggTrade(trade))
+        };
         let sources = vec![
             reference_source(200),reference_source(100),
             TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(metadata_snapshot_row()))),
-            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",1,21000,22000,book("10")))),
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",1,21000,22000,book("12")))),
             TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",2,23000,24000,next_book))),
             TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",3,25000,26000,
                 PolymarketOrderbookEvent::BestBidAsk {asset_id:"20".into(),best_bid:Some("0.45".into()),
@@ -699,6 +719,7 @@ mod tests {
             TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",9,37000,38000,
                 PolymarketOrderbookEvent::LastTradePrice {asset_id:"20".into(),price:"0.53".into(),size:Some("1.25".into()),
                     side:Some(data_pipeline_core::typed_raw::PolymarketSide::Unknown),fee_rate_bps:None}))),
+            aggregate_trade(1,"64000","1",false),aggregate_trade(2,"64001","2",true),
             terminal_metadata(10,39000,40000),
             TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",10,39000,40000,
                 PolymarketOrderbookEvent::MarketResolved {clob_market_id:"3195576".into(),question:None,
@@ -718,6 +739,7 @@ mod tests {
         let mut public_visible_times = Vec::new();
         let mut public_market = serde_json::Value::Null;
         let mut terminal_observations = Vec::new();
+        let mut first_sides = serde_json::Value::Null;
         let mut observed_groups = 0_u64;
         let mut original = None;
         let mut zero_evidence_without_change = false;
@@ -739,6 +761,9 @@ mod tests {
                 public_visible_times.push(data_pipeline_core::public_observation_core::public_group_visible_at_utc_ms(
                     &input.ingress,&group.records));
                 for observation in &group.observations {
+                    if position == 3 {
+                        first_sides = serde_json::json!({"prefix":observed_groups,"assets":observation.assets});
+                    }
                     public_assets = observation.assets.clone();
                     public_market = serde_json::json!({"market":observation.market,"lifecycle":observation.lifecycle,
                         "active":observation.active,"closed":observation.closed,"accepting_orders":observation.accepting_orders,
@@ -783,7 +808,8 @@ mod tests {
             "quantity":original.quantity(&token,BookSide::Bid,price).normalize().to_string(),
             "present":true,"initialized":asset.has_initial_snapshot,"ready":asset.book_ready,
             "public_assets":public_assets,"public_events":public_events,"public_visible_times":public_visible_times,
-            "public_market":public_market,"terminal_observations":terminal_observations,"observation_ms":44000});
+            "public_market":public_market,"terminal_observations":terminal_observations,
+            "first_sides":first_sides,"observation_ms":44000});
         let reference_path = temp.path().join("original-reference.json");
         serde_json::to_writer(File::create(&reference_path).unwrap(),&reference).unwrap();
         eprintln!("original_core_zero_reference={reference}");
