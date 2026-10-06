@@ -21,7 +21,7 @@ fn market() -> MarketIdentityV2 {
     }
 }
 
-fn metadata_snapshot_row() -> PolymarketMarketMetadataRow {
+pub(crate) fn metadata_snapshot_row() -> PolymarketMarketMetadataRow {
     let payload = r#"{"orderPriceMinTickSize":"0.01"}"#.to_owned();
     let payload_sha256 = format!("{:x}", Sha256::digest(payload.as_bytes()));
     PolymarketMarketMetadataRow {
@@ -97,7 +97,7 @@ fn metadata_snapshot_row() -> PolymarketMarketMetadataRow {
     }
 }
 
-fn row(
+pub(crate) fn row(
     epoch: &str,
     sequence: u64,
     source_time: i64,
