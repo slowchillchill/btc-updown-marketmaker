@@ -15,6 +15,7 @@ def main():
     parser.add_argument('--end-ms',type=int,required=True)
     parser.add_argument('--work-root',type=Path,required=True)
     parser.add_argument('--output',type=Path,required=True)
+    parser.add_argument('--approved-initialization-manifest',type=Path)
     args = parser.parse_args()
     raw = args.manifest.read_bytes()
     manifest = json.loads(raw)
@@ -37,6 +38,13 @@ def main():
                            'max_temporary_row_bytes':256*1024**2,'max_epoch_count_per_source':65536,
                            'max_pending_ws_terminals':65536,'max_retained_reducer_entries':2**24,
                            'canonical_rule_version':'issue-181-public-core-engineering-v1','sort':sort}}
+    if args.approved_initialization_manifest is not None:
+        if beginning != 1788912000000:
+            raise ValueError('该显式#181元数据例外仅用于2026-09-09 00:00 UTC根起点')
+        initialization = json.loads((Path(__file__).parent/'metadata_initialization_contract_181.json').read_text())
+        initialization['files'][0]['manifest_path'] = str(args.approved_initialization_manifest)
+        initialization['received_end_utc_ms'] = args.end_ms
+        config['initialization'] = initialization
     args.output.parent.mkdir(parents=True,exist_ok=True)
     with args.output.open('x') as stream:
         json.dump(config,stream,ensure_ascii=False,indent=2)

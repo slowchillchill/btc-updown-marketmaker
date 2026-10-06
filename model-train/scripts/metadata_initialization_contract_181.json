@@ -1,0 +1,10 @@
+{
+  "files": [{"manifest_path": "<METADATA_MANIFEST>", "relative_paths": ["source_kind=polymarket_market_metadata/polymarket_market_metadata_23.parquet"]}],
+  "markets": [
+    {"condition_id": "0x1fc54206bf570dbdf843a88d608aee9df9eac980a9ab47e400d787d732f7b748", "snapshot_source_message_id": "d3842b75d06c65d26d38c87e9520c14a0c11d0bf5d210c70dc62ae883b9097e5"},
+    {"condition_id": "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20", "snapshot_source_message_id": "c11b6b3d60cb590a314f6de3a748de5923b4376d3fee8f4a7583fe7bd36ede42"}
+  ],
+  "received_start_utc_ms": 1788912000000,
+  "received_end_utc_ms": 1788912060000,
+  "purpose": "#181批准的两个缺初始化市场完整Existing元数据片段；仅元数据初始化，完整训练根不变"
+}
