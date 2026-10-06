@@ -625,7 +625,7 @@ mod tests {
             let row: data_pipeline_core::typed_raw::PolymarketRtdsChainlinkBtcUsdRow = serde_json::from_value(serde_json::json!({
                 "timestamp_received":at,"message_timestamp":at-1,"payload_timestamp":at-3,"age_ms":3,
                 "symbol":"btc/usd","value":"64000","topic":"crypto_prices_chainlink","message_type":"update",
-                "freshness_status":"fresh","subscription_filter":"{\"symbol\":\"btc/usd\"}",
+                "freshness_status":"Fresh","subscription_filter":"{\"symbol\":\"btc/usd\"}",
                 "source_native_payload_json":serde_json::json!({"topic":"crypto_prices_chainlink","type":"update",
                     "timestamp":at-1,"payload":{"symbol":"btc/usd","timestamp":at-3,"value":"64000"}}).to_string(),
                 "collector_host_id":"collector-1","collector_region":"eu-west-1",
