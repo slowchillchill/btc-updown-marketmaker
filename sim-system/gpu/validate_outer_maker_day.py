@@ -146,6 +146,8 @@ def main():
     assert len(by_row)==len(expected)==9
     finish_phase('original_NOE_payload_comparison')
     from transport import compact_committed_batches
+    from validate_transport import check_transport_layout
+    layout_checked=run(lambda:check_transport_layout(batches))
     batches,transport_population=run(lambda:compact_committed_batches(batches))
     active=torch.cat([batch.emitted for batch in batches],dim=1)
     received=torch.cat([batch.received_at for batch in batches],dim=1)
@@ -247,7 +249,7 @@ def main():
     assert amounts(admission.rebate_days.condition_locked)==[Fraction('0')]
     assert amounts(admission.success_pools.success_quantity)==[Fraction('300'),0]
     finish_phase('account_public_reads_and_original_comparison')
-    print(json.dumps({'stages':phases,
+    print(json.dumps({'stages':phases,'transport_two_root_layout_and_empty_padding_checked':layout_checked,
         'original_transport_width':transport_population.original_width,'compacted_transport_width':transport_population.allocated_width,
         'physical_record_width':cache.received.size(1),'received_record_population':int(cache.received.sum().cpu()),
         'first_drain_apply_record_calls':drain_attempts*cache.received.size(1)**2,
