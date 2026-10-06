@@ -6,7 +6,7 @@
 from dataclasses import dataclass,replace
 import torch
 from queues import ExactInt,Numbers,_take
-from fields import decode_fields
+from fields import decode_fields,IntegerList,RecordList
 from core import OUT_EVIDENCE,OUT_FACT,OUT_PENDING
 from reservation import grow_integer
 
@@ -31,6 +31,14 @@ class LifecycleColumns:
     contribution_kinds: torch.Tensor
     contribution_days: torch.Tensor
     contribution_amounts: object
+    rebate_kinds: torch.Tensor
+    rebate_days: torch.Tensor
+    rebate_accrued: object
+    rebate_payable: object
+    rebate_locked: object
+    rebate_paid: object
+    rebate_refs: object
+    maker_contributions: object
     emitted: torch.Tensor
     fault: torch.Tensor
 
@@ -42,18 +50,37 @@ class LifecycleColumns:
         active=torch.cat([batch.emitted for batch in columns.projection_batches],dim=1).flatten()
         outcomes=torch.cat([batch.normalized.outcomes for batch in columns.projection_batches],dim=1).flatten()
         material=active & ((outcomes==OUT_EVIDENCE)|(outcomes==OUT_FACT))
-        enabled={tag:material&(schemas==tag) for tag in [3,7,8,9,11]}
+        enabled={tag:material&(schemas==tag) for tag in [3,7,8,9,11,12,13,14]}
         layouts={
             3:['scalar']*4+['integer','scalar','integer','integer','scalar'],
             7:['scalar']*3+['integer','scalar','scalar'],
             8:['scalar']*3+['integer','integer']+['scalar']*4+['rational']+['integer']*3+['scalar','integer','scalar','rational'],
             9:['scalar','scalar','integer','scalar','scalar','rational'],
             11:['scalar']*4+['integer','scalar']+['rational']*8+['scalar','scalar']+['rational']*3,
+            12:['scalar']*3+['rational']*3+['integer_list'],
+            13:['scalar']*7+['rational'],
+            14:['scalar']*3+[('record_list',('integer','scalar','scalar','scalar','rational'))],
         }
         decoded={}
         fault=torch.where(material,bank.fault[rows],0)
         known=torch.zeros_like(active)
+        neutral=ExactInt.from_i64_tensor(torch.zeros_like(schemas))
+        from queues import ExactRational
+        ratio=ExactRational(neutral,neutral.constant(1))
+        absent=ExactInt.from_i64_tensor(torch.empty(0,dtype=torch.int64,device=rows.device))
+        absent_ratio=ExactRational(absent,absent.constant(1))
         for tag,layout in layouts.items():
+            if tag>=12 and bank.declared_schemas is not None and tag not in bank.declared_schemas:
+                if tag==12:
+                    decoded[tag]=[torch.zeros_like(schemas)]*3+[ratio]*3+[
+                        IntegerList(absent,torch.zeros((rows.numel(),0),dtype=torch.bool,device=rows.device))]
+                elif tag==13:
+                    decoded[tag]=[torch.zeros_like(schemas)]*7+[ratio]
+                else:
+                    blank=torch.empty(0,dtype=torch.int64,device=rows.device)
+                    decoded[tag]=[torch.zeros_like(schemas)]*3+[
+                        RecordList((absent,blank,blank,blank,absent_ratio),torch.zeros((rows.numel(),0),dtype=torch.bool,device=rows.device))]
+                continue
             values,error=decode_fields(bank.semantic[rows],layout,enabled[tag])
             decoded[tag]=values
             fault=fault | error
@@ -74,6 +101,10 @@ class LifecycleColumns:
         for tag in [3,7,8,9,11]:
             condition_at=2 if tag==3 else 1
             conditions=torch.where(enabled[tag],decoded[tag][condition_at],conditions)
+        conditions=torch.where(enabled[14],decoded[14][1],conditions)
+        payment=enabled[13]
+        fault=fault | (payment & ((decoded[13][0]!=decoded[13][3]) | (decoded[13][4]!=12) |
+            (decoded[13][1]!=decoded[13][5]) | (decoded[13][2]!=decoded[13][6]))).to(torch.int32)
         open_orders=(enabled[3]&(decoded[3][5]==0))|(enabled[7]&(decoded[7][5]==0))
         pending=enabled[8]&((decoded[8][6]==0)|(decoded[8][6]==1))
         accepted=enabled[3]&(decoded[3][1]==0)
@@ -83,7 +114,11 @@ class LifecycleColumns:
             open_orders.reshape(roots,width),pending.reshape(roots,width),accepted.reshape(roots,width),
             torch.where(economic,decoded[11][3],-1).reshape(roots,width),request,item,
             decoded[8][2].reshape(roots,width),decoded[8][10],decoded[8][11],decoded[8][6].reshape(roots,width),
-            decoded[9][3].reshape(roots,width),decoded[9][4].reshape(roots,width),decoded[9][5],active.reshape(roots,width),
+            decoded[9][3].reshape(roots,width),decoded[9][4].reshape(roots,width),decoded[9][5],
+            torch.where(payment,decoded[13][1],decoded[12][1]).reshape(roots,width),
+            torch.where(payment,decoded[13][2],decoded[12][2]).reshape(roots,width),
+            decoded[12][3],decoded[12][4],decoded[12][5],decoded[13][7],decoded[12][6],decoded[14][3],
+            active.reshape(roots,width),
             torch.where(active,fault,0).reshape(roots,width))
 
 

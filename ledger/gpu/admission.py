@@ -51,6 +51,7 @@ class AdmissionLifecycle:
     success_pools: object
     trade_success: object
     rebate_contributions: object
+    rebate_days: object
     maker_cash: object  # 原Existing经济现金归Maker；结算新kind须按原归属另接。
     reservations: object
     orders: object
@@ -69,14 +70,14 @@ class AdmissionLifecycle:
     fault: torch.Tensor
 
     @classmethod
-    def open(cls,platform,bank,columns,current_entry_sequence,current_local_prefix,success_pools):
+    def open(cls,platform,bank,columns,current_entry_sequence,current_local_prefix,success_pools,*,rebate_days=None):
         roots,width=columns.row_refs.shape
         life=LifecycleColumns.from_projection(bank,columns)
         book=ReservationBook.empty(roots,capacity=max(1,width),device=columns.row_refs.device)
         empty=torch.full_like(book.request_slots,-1)
         opening_cash=take_ratio(platform.balances,torch.arange(roots,device=empty.device)*8)
         return cls(platform,success_pools,TradeSuccess.open(roots,max(1,width),empty.device),
-            RebateContributions.empty(roots,max(1,width),empty.device),opening_cash,book,LifecycleDirectory.empty(roots,max(1,width),device=empty.device),
+            RebateContributions.empty(roots,max(1,width),empty.device),rebate_days,opening_cash,book,LifecycleDirectory.empty(roots,max(1,width),device=empty.device),
             LifecycleDirectory.empty(roots,max(1,width),device=empty.device),columns,life,
             current_entry_sequence,current_local_prefix,empty,empty.clone(),torch.zeros_like(columns.enabled),
             ExactInt.from_i64_tensor(torch.zeros(roots*width,dtype=torch.int64,device=empty.device)),
@@ -98,6 +99,11 @@ class AdmissionLifecycle:
     def resized_contributions(self,capacity):
         """宿主只核人口容量请求后扩目录；原未消费NOE再试，不推进业务或随机数。"""
         return replace(self,rebate_contributions=self.rebate_contributions.resized(capacity))
+
+    def resized_rebate_days(self,capacity):
+        if self.rebate_days is None:
+            raise ValueError('尚未绑定原condition身份序的日目录')
+        return replace(self,rebate_days=self.rebate_days.resized(capacity))
 
     def reserve_action(self,requests,conditions,principal,fee,enabled):
         funds=self.funds()
@@ -151,7 +157,8 @@ class AdmissionLifecycle:
         cash_delta=take_ratio(balances,root*8)
         maker_cash=self.maker_cash+cash_delta
         fault=fault | torch.where(result.applied,maker_cash.fault,0)
-        applicable=((outcome_kind==OUT_EVIDENCE)&((tag==3)|(tag==7)|(tag==8)|(tag==9))) | (outcome_kind==OUT_PENDING)
+        applicable=((outcome_kind==OUT_EVIDENCE)&((tag==3)|(tag==7)|(tag==8)|(tag==9)|
+            (tag==12)|(tag==13)|(tag==14))) | (outcome_kind==OUT_PENDING)
         use=(requested&applicable)|result.applied
         fault=fault | result.fault
         use=use&(fault==0)
@@ -215,8 +222,58 @@ class AdmissionLifecycle:
         # 此候选目录容量等于本已接入NOE块人口，完整跨块宿主须先扩池再消费。
         # 不提交条目/position，容量不足仍保留原待消费记录。
         use=use & (~contribution_event | (required<=contributions.occupied.size(1)))
+        maker_event=lifecycle_use & (tag==14)
+        vector=self.lifecycle.maker_contributions
+        vector_width=vector.present.size(1)
+        vector_index=index[:,None]*vector_width+torch.arange(vector_width,device=index.device)[None,:]
+        member_masks=vector.present[index]
+        maker_ready=torch.ones_like(maker_event)
+        # 先核全部原成功前驱，再准备整条向量；不能按条件/token猜trade关联。
+        for member in range(vector_width):
+            member_index=vector_index[:,member]
+            member_trade=_take(vector.fields[0],member_index)
+            at,present,member_fault=self.trades.lookup(member_trade)
+            real=maker_event & member_masks[:,member]
+            fault=fault | torch.where(real,Numbers.combine_fault_rows(member_fault),0)
+            maker_ready=maker_ready & (~real | (present & self.trade_success.success_applied[root,at]))
+        maker_use=maker_event & maker_ready & (fault==0)
+        maker_capacity=torch.ones_like(maker_use)
+        for member in range(vector_width):
+            member_index=vector_index[:,member]
+            contributions,member_required,_=contributions.add(_take(vector.fields[0],member_index),
+                vector.fields[2][member_index],vector.fields[3][member_index],vector.fields[1][member_index],
+                take_ratio(vector.fields[4],member_index),maker_use & member_masks[:,member])
+            fault=fault | contributions.fault
+            maker_capacity=maker_capacity & (member_required<=contributions.occupied.size(1))
+        use=use & (~maker_event | (maker_ready & maker_capacity))
+        days=self.rebate_days
+        day_event=lifecycle_use & (tag==12)
+        payment_event=lifecycle_use & (tag==13)
+        if days is None:
+            # 配置缺口不能静默消费原日记录；现Base路径尚无日记录时保留兼容。
+            fault=fault | (day_event | payment_event).to(torch.int32)
+        else:
+            refs=self.lifecycle.rebate_refs
+            ref_width=refs.present.size(1)
+            ref_index=index[:,None]*ref_width+torch.arange(ref_width,device=index.device)[None,:]
+            days,ready,_=days.finalize(contributions,self.lifecycle.rebate_kinds[root,local],
+                self.lifecycle.rebate_days[root,local],take_ratio(self.lifecycle.rebate_accrued,index),
+                take_ratio(self.lifecycle.rebate_payable,index),take_ratio(self.lifecycle.rebate_locked,index),
+                _take(refs.values,ref_index.flatten()),refs.present[index],day_event & (fault==0))
+            use=use & (~day_event | ready)
+            days,ready,_=days.payment(self.lifecycle.rebate_kinds[root,local],self.lifecycle.rebate_days[root,local],
+                take_ratio(self.lifecycle.rebate_paid,index),payment_event & (fault==0))
+            fault=fault | days.fault
+            use=use & (~payment_event | ready)
         success=use&(fault==0)
         valid=fault==0
+        # 多成员向量容量不足时保留请求，整个证据不提交任何部分贡献。
+        contribution_commit=valid & (~maker_event | success)
+        contributions=replace(coordinate(contributions,self.rebate_contributions,contribution_commit),
+            capacity_required=contributions.capacity_required)
+        if days is not None:
+            days=replace(coordinate(days,self.rebate_days,valid & (~(day_event | payment_event) | success)),
+                capacity_required=days.capacity_required)
         # 各NOE记录候选共同成功，先前已消费位置/账本条目不回滚。
         platform=replace(platform,balances=ExactRational(
             platform.balances.numerator.select(valid.repeat_interleave(8),self.platform.balances.numerator),
@@ -229,7 +286,7 @@ class AdmissionLifecycle:
         applied=self.applied | (same&success[:,None])
         return replace(self,platform=platform,success_pools=success_pools.coordinated(self.success_pools,valid),
             trade_success=coordinate(trade_success,self.trade_success,valid),
-            rebate_contributions=coordinate(contributions,self.rebate_contributions,valid),maker_cash=ExactRational(
+            rebate_contributions=contributions,rebate_days=days,maker_cash=ExactRational(
             maker_cash.numerator.select(success & economic,self.maker_cash.numerator),
             maker_cash.denominator.select(success & economic,self.maker_cash.denominator)),reservations=coordinate(book,self.reservations,valid),
             orders=coordinate(orders,self.orders,valid),trades=coordinate(trades,self.trades,valid),

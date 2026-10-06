@@ -946,6 +946,97 @@ async fn actual_two_market_maker_day_allocates_exact_contribution_ratios() {
     }
 }
 
+/// V4唯一领取者逐记录保留真实Ledger前缀，供GPU日消费者边界对照。
+/// 复用原PostOnly研究夹具的公共NOE，不将它扩成B Actor的合法动作域。
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "AutoDL原V4 Maker/Day/Payment与GPU Ledger日消费者定向验证"]
+async fn gpu_actual_v4_maker_day_preserves_noe_positions_and_ledger_predecessors() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("dpt");
+    let (core, times) = recorded_rebate_contributions(&root);
+    let (execution, observation, _) = execution_with_rules_v4(
+        &temp.path().join("sim.jsonl"), &core, SUCCESS_POLICY, None, "e".repeat(64), "2000",
+    );
+    let ledger = LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+    let mut sending = SharedExecutionV2::from_opening(ledger, observation.clone()).unwrap().unwrap();
+    let mut applied = LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+    applied.apply_noe_memory_v2(&observation.opening_record().unwrap()).unwrap();
+    let source = RecordedPublicGroupSourceV1::open(&root, 1, 1 << 20, times).unwrap();
+    let mut driver = FinitePublicConsumptionV1::new(execution, source, "gpu-v4-rebate".into());
+    for _ in 0..8 { driver.next_group().unwrap().unwrap(); }
+    for (condition, token, id) in [
+        (CONDITION_ID, UP_TOKEN_ID, "maker-low"), (OTHER_CONDITION_ID, "21", "maker-high"),
+    ] {
+        sending.execute(&mut driver.decision().unwrap(), RequestContextV2 {
+            global_request_id: id.into(), caller_correlation_id: None,
+        }, Some(Arc::new(ModelIntentV1::SubmitSingleBuy {
+            condition_id: ConditionId(condition.into()), order: BuyLegIntentV1 {
+                token_id: TokenId(token.into()), order: BuyOrderIntentV1::GtcLimit {
+                    limit_price_pusd_per_share: Decimal::new(5,1), size_shares: Decimal::from(143), post_only: true,
+                },
+            },
+        }))).await.unwrap();
+    }
+    let mut pending = Vec::new();
+    let mut records = Vec::new();
+    let snapshot = |ledger: &LedgerWriterV1| {
+        let read = ledger.economic_read().unwrap();
+        serde_json::json!({"base":read.base(),"cash":read.cash(),
+            "trades":read.trades().map(|value|serde_json::json!({
+                "trade_identity":value.trade_identity,"fact":value.fact,
+                "economic_applied":value.economic_applied,"success_applied":value.success_applied,
+            })).collect::<Vec<_>>()})
+    };
+    while driver.next_group().unwrap().is_some() {
+        // sending只持有发送registry；不调用它的apply_closed，避免第二领取者。
+        pending.extend(observation.take_closed_records());
+        loop {
+            let previous = pending.len();
+            let mut waiting = Vec::new();
+            for record in pending {
+                let before = snapshot(&applied);
+                let outcome = applied.apply_noe_memory_v2(&record).unwrap();
+                let deferred = matches!(outcome, LedgerMemoryApplyOutcomeV1::MissingEconomicAssociation |
+                    LedgerMemoryApplyOutcomeV1::Applied(LedgerApplyOutcomeV1::MissingPlatformPredecessor {..}));
+                records.push(serde_json::json!({"record":record.record(),"position":record.position(),
+                    "context":record.context(),"visibility":record.visibility(),"deferred":deferred,
+                    "before":before,"after":snapshot(&applied)}));
+                if deferred { waiting.push(record); }
+            }
+            pending = waiting;
+            if pending.is_empty() || pending.len()==previous { break; }
+        }
+        if driver.decision().unwrap().cutoff().decision_time().logical_time_utc_ms() >= 89_111_000 { break; }
+    }
+    assert!(pending.is_empty(), "原V4经济前驱/关联须闭合");
+    let read = applied.economic_read().unwrap();
+    let day = read.rebate_days().find(|value|value.kind==RebateKindV1::Maker).unwrap();
+    assert_eq!(day.amounts.paid_pusd,r("1","1"));
+    assert_eq!(day.amounts.locked_remainder_pusd,r("3","50000"));
+    let mut conditions=day.contributions.iter().map(|value|value.condition_id.0.clone()).collect::<Vec<_>>();
+    conditions.sort(); conditions.dedup();
+    use contracts::economics::EconomicRational as R;
+    let weights=conditions.iter().map(|condition|day.contributions.iter().filter(|value|&value.condition_id.0==condition)
+        .fold(R::zero(),|sum,value|sum.add(&R::from_decimal(Decimal::from_str_exact(&value.contribution_pusd.0).unwrap())))).collect::<Vec<_>>();
+    let expected_pay=contracts::finite_attribution::allocate_capacity_scale12_candidate_v1(&R::from_decimal(Decimal::ONE),&weights).unwrap();
+    let expected_lock=contracts::finite_attribution::allocate_capacity_scale12_candidate_v1(&R::from_decimal(Decimal::new(6,5)),&weights).unwrap();
+    let source=serde_json::json!({"records":records,"conditions":conditions,"contributions":day.contributions,
+        "amounts":day.amounts,"expected_pay":expected_pay.iter().map(R::public).collect::<Vec<_>>(),
+        "expected_lock":expected_lock.iter().map(R::public).collect::<Vec<_>>(),"cash":read.cash(),"base":read.base(),
+        "source_contract":"execution_normalization_v4","unique_memory_consumer":true});
+    driver.stop_and_drain().unwrap();
+    let directory=std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap();
+    std::fs::write(std::path::Path::new(&directory).join("original-v4-rebate-day-reference.json"),
+        serde_json::to_vec_pretty(&source).unwrap()).unwrap();
+    let mut child=std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
+        .arg(std::env::var("B_GPU_REBATE_DAY_VALIDATOR").unwrap()).stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    serde_json::to_writer(child.stdin.take().unwrap(),&source).unwrap();
+    let output=child.wait_with_output().unwrap();
+    assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+    eprintln!("gpu_v4_rebate_day={}",String::from_utf8(output.stdout).unwrap());
+}
+
 // 从本场景真实落盘的交易生成旧 days 完整快照布局，保留实际来源与经济字段。
 // 第一次支付及其后续记录继续使用当前增量布局，验证旧前缀可继续读入新记录。
 fn assert_old_day_snapshots_accept_new_payment(

@@ -23,6 +23,7 @@ class EvidenceBank:
     legacy_order: torch.Tensor  # 同SourceOrder时原完整身份字符串的无损排序rank
     fault: torch.Tensor
     payload_schemas: torch.Tensor | None = None  # 正文类型，不是逻辑身份命名空间。
+    declared_schemas: frozenset | None = None  # 冷映射声明的布局集合；未知来源不省略解码。
 
     def __post_init__(self):
         count = self.kinds.numel()
@@ -53,9 +54,10 @@ class EvidenceBank:
         """追加已按同schema编码的不可变行，旧身份/值引用不改号。"""
         from fields import append_rows
         from dataclasses import fields
+        declaration=None if self.declared_schemas is None or incoming.declared_schemas is None else self.declared_schemas | incoming.declared_schemas
         return EvidenceBank(**{field.name:append_rows(getattr(self,field.name),getattr(incoming,field.name))
             if getattr(self,field.name).ndim==2 else torch.cat([getattr(self,field.name),getattr(incoming,field.name)])
-            for field in fields(self)})
+            for field in fields(self) if field.name!='declared_schemas'},declared_schemas=declaration)
 
 
 @dataclass(frozen=True)

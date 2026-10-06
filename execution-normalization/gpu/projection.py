@@ -80,9 +80,10 @@ class Projection:
         roots=self.account_slots.numel()
         size=roots
         zero=torch.zeros(roots,dtype=torch.int64,device=self.account_slots.device)
+        schema=11 if kind==ECONOMIC else getattr(mapped,'payload_schema',8)
         incoming=EvidenceBank(mapped.logical_keys,mapped.economic_keys if kind==ECONOMIC else zero[:,None],
             mapped.semantic,zero[:,None],torch.full_like(zero,kind),mapped.source_order,zero,mapped.fault,
-            torch.full_like(zero,11 if kind==ECONOMIC else getattr(mapped,'payload_schema',8)))
+            torch.full_like(zero,schema),frozenset([schema]))
         normalizer=Normalizer.empty(incoming,roots) if self.normalizer is None else self.normalizer.append_bank(incoming)
         offset=normalizer.bank.kinds.numel()-size
         rows=(torch.arange(size,device=zero.device)+offset)[:,None]
