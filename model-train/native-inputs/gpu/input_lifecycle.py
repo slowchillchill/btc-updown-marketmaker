@@ -42,6 +42,7 @@ class LifecycleInputs:
             return NativeLifecycle(torch.zeros((roots,103),device=market_indices.device),valid & False,base_fault)
         safe = market_indices.clamp(0,self.state.market_count-1)
         batch = torch.arange(roots,device=safe.device)
+        base_fault = base_fault | (~(asset_indices==self.state.asset_pairs[safe]).all(dim=1)).to(torch.int32)
         admitted = frame.admitted[batch,safe] & valid
         def compute():
             result = torch.zeros((roots,103),device=safe.device)

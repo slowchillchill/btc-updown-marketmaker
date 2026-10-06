@@ -19,6 +19,13 @@ class PublicMarketState:
         device = pm_state.slots.device
         self.market_count = len(columns['markets'])
         self.lifecycle_states = columns['lifecycle_states']
+        # 原Native只编码outcome 0/1；完整其他身份仍留在公共registry，不改变经济合法域。
+        pairs = [[-1,-1] for _ in range(self.market_count)]
+        for market,asset,outcome in columns['market_assets']:
+            if not (0 <= market < self.market_count and 0 <= asset < len(pm_state.assets) and outcome >= 0):
+                raise ValueError('公共市场原资产/outcome坐标错误')
+            if outcome < 2 and pairs[market][outcome] == -1: pairs[market][outcome] = asset
+        self.asset_pairs = torch.tensor(pairs,dtype=torch.int64,device=device).reshape(-1,2)
         self.times = torch.tensor([[m['window']['start_at_utc_ms'],m['window']['end_at_utc_ms']]
                                    for m in columns['markets']],dtype=torch.int64,device=device).reshape(-1,2)
         def load(name,width):
