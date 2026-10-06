@@ -502,8 +502,19 @@ def main():
                         'before_total':endpoints.pm_sides.total.report_values(),'after_total':frozen_market.endpoint_memory.pm_sides.total.report_values()}
                     assert frozen_market.fast[0,37+6+4].cpu().item()==1.0
                     saved = (frozen_market,frozen_market.fast.clone())
+                # 原core样本按实际完整组cutoff划入100ms窗，不按received划窗。
+                for route,samples in enumerate(series):
+                    count_before_grid = sum(at<=grid for _,_,at in samples)
+                    expected_retained = min(16,count_before_grid)/16
+                    assert frozen_market.fast[0,542+4*route].cpu().item()==expected_retained
+                    if route==2: continue
+                    path_route = route if route<2 else route-1
+                    window_samples = sum(grid-100<at<=grid for _,_,at in samples)
+                    expected_count = torch.tensor(signed_log(window_samples),device='cuda',dtype=torch.float32)
+                    assert torch.equal(frozen_market.fast[0,596+6*path_route],expected_count), (grid,route,window_samples)
                 if grid==26100:
-                    assert torch.equal(frozen_market.fast[0,596],torch.tensor(signed_log(20),device='cuda',dtype=torch.float32))
+                    # 首个BBA的关闭cutoff26001与随后20条均在此窗，共21条。
+                    assert sum(26000<at<=26100 for _,_,at in series[0])==21
                     assert frozen_market.fast[0,542].cpu().item()==1.0
                 continuous,endpoints = frozen_market.history_memory,frozen_market.endpoint_memory
                 through=end;native_freezes+=1
