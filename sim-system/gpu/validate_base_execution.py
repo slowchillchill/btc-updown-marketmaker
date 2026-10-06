@@ -42,7 +42,7 @@ def assert_checkpoint(reference, quantity, account):
             assert values(getattr(quantity,field.name)) == [expected[field.name]],(field.name,values(getattr(quantity,field.name)),expected[field.name])
     for name in ('cash','available','principal','fee'):
         assert values(getattr(account,name)) == [units(reference[name])],(name,values(getattr(account,name)),reference[name])
-    assert values(account.next_sequence) == [reference['next_sequence']]
+    assert values(account.next_sequence) == [reference['next_sequence']],('next_sequence',values(account.next_sequence),reference)
     expected_outcomes = dict(reference['outcomes'])
     assert values(account.outcomes) == [units(expected_outcomes.get('1','0')),units(expected_outcomes.get('2','0'))]
     assert values(account.rebates.numerator) == [0,0,0,0]
@@ -102,7 +102,10 @@ def main():
                 assert found.cpu().tolist() == [False,True]
                 quantity,canceled,released,valid = Numbers.run_exact_batch(lambda:quantity.cancel(torch.tensor([True],device='cuda')))
                 account,_ = Numbers.run_exact_batch(lambda:account.release_principal(released,valid))
-            assert_checkpoint(checkpoint['state'],quantity,account)
+            try:
+                assert_checkpoint(checkpoint['state'],quantity,account)
+            except AssertionError as error:
+                raise AssertionError((stage,checkpoint.get('at'),checkpoint.get('ordinal'),error)) from error
     torch.cuda.synchronize()
     elapsed = time.perf_counter()-started
     events = profile.events()
