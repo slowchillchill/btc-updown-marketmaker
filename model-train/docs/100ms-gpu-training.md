@@ -693,3 +693,23 @@ Maker 市场应计是一个汇总经济事实，贡献向量不拆成多条 NOE�
 `projection.py` 保留来源批装配职责。DPT、SIM 和模型均共享
 `contracts/gpu/numbers.py` 的同一模块和资源协调批，不重建 ExactInt 类型或
 覆盖已缓存模块。模型、完整合法 Actor 和账户 slow433 仍须在该接缝继续装配。
+
+### 当前公开 Registry 与物理人口接缝
+
+`shared-run/gpu/registry.py` 在原 NOE 首次公开领取后、Ledger 等待前接纳公开订单/Trade；
+原 intent/receipt 决定提交关联，不从 SIM 真实余量或账户余额推断。原 GTC 承诺
+Known(0) 不输出，Unknown 保留。原接受、形成、最新生命周期、明确撤成及每个 Trade
+最高 private 来源按所属身份保留；压紧前合并所有输入故障。排序相邻键去重替代
+Trade×Trade 历史关系。完整 scoped 取消对象、FOK/查询及 slow433 仍在接入。
+
+该表示只服务向前推进的合法 cutoff。预取不是接纳，旧观察使用已冻结结果，不能用
+压紧后的当前状态重新声称任意较早 cutoff 可重建。原 NOE batch/context/run/record
+ordinal、来源序和共享引用分别保留；全根跨块、历史退役与恢复仍须实际装配。
+
+`execution-normalization/gpu/transport.py` 压紧实际已提交 NOE 批的物理 padding，保留
+原记录位置、source/private、完整精确字段和业务批号。最大保留人口只用于物理分配，
+不以 CPU 逐项决定业务消费。在同一个9记录 Maker 验证中，物理38列→9列、首轮
+1444→81次候选调用，首次 drain 76.357806秒→4.490751秒；含参考的整体阶段
+79.700504秒→6.279176秒，峰值2,585,088B→1,395,712B。这是同源有限人口的
+物理成本变化，不是完整100ms热路径、15天容量或训练吞吐结论。固定物理重试循环
+仍有调度成本，完整共享二进制加载/身份退役尚未交付。

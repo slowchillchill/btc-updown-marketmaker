@@ -24,6 +24,9 @@ def order_events_from_closed(bank,batches,closed,receive_rank):
     device=closed.record_refs.device
     if receive_rank.shape!=(roots,width) or receive_rank.dtype!=torch.int64 or receive_rank.device!=device:
         raise TypeError('Registry物理领取顺序需同设备int64[roots,records]')
+    if width == 0:
+        from dataclasses import replace
+        return replace(PublicRegistryEvents.empty(roots,device),fault=closed.fault)
     original_rows=torch.cat([batch.rows for batch in batches],1)
     original_active=torch.cat([batch.emitted for batch in batches],1)
     matching=(original_rows[:,:,None]==closed.record_refs[:,None,:]) & original_active[:,:,None]

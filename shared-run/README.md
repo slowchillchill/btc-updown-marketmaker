@@ -132,3 +132,15 @@ DPT 的 `valuation_best_bid` 在原来源选择投影内组合直接 BBA 与完�
 `QualifiedStrategyDispatchV1::Invalidated` 保留原完成计算及 `InvalidatedBatchV1`：已发回执前缀、第一失效序号、策略给定原因与来源作用域、当前观察截止、发现时刻和原 Ledger 释放错误。该序号之后的全部后缀只因停批未尝试；其中撤单不被冒称自身健康不合格。只释放本批拥有且明确无请求效果的未发送预留；已发或结果未知沿原义务保留。正常 NoTrade 仍为零请求；资格程序错误经 `QualifiedBatchErrorV1::Qualification` 返回，原提交错误经 `Execution` 返回，二者都不被改成资格失效或平台事实。
 
 无自动重排、重试、改价或逐次诊断落盘。收到失效通知的策略负责在下一次实际计算中按当前条件产生合格动作；本公共交付不证明 `baseline-mm` 健康政策、盈利或 PAPER/LIVE 在线接线已完成。
+
+## B 路线 GPU 公开订单读取
+
+`gpu/registry.py` 接纳已首次公开领取的 NOE 和原冻结意图/回执目录，在 Ledger 缺前驱等待前更新公开 Registry 候选。订单、成交、请求身份绑定所属根；完整 u64 来源序、原 batch/context/run/record ordinal 及共享 NOE 引用分别保留，物理坐标不替代业务身份。GTC 公开 matched/open、最终性覆盖与剩余承诺按原 Registry 规则读取；已知零承诺不进入人口，未知承诺继续保留。
+
+每个订单保留接受、形成、最新生命周期、明确撤成的必要来源，每个 Trade 保留最高 private 来源；同 private 保留首次领取。设备排序和相邻键去重不建立 Trade 历史平方矩阵。压紧前归约全部原输入故障，旧错误不能因被新来源替换而消失。物理压紧只读取块最大保留人口以分配空间，不把逐项业务条件回传 CPU。历史已结束身份的进一步退役/冷存和完整15天容量尚未交付。
+
+该状态服务向前推进的合法公开 cutoff。预取记录不能提前 receive；未来 cutoff 不能反写过去。已冻结观察持有不可变结果，后续接纳不会改写它。当前状态不是任意更早 cutoff 的历史重建接口，也不是活动根恢复。
+
+全局撤单读取分开保存原 receipt 登记与 `CancellationRequestCompleted` 来源。逐目标回应不代表请求完成；零目标完成保留三项已知零，尚无完成时三项为 NotApplicable。完整 scoped 关系、Single/Pair/Market 对象形成序和未知人口仍须继续接入。
+
+`gpu/registry_projection.py` 将实际 NOE 双门领取列批量解码为设备订单/Trade 来源；当前接入 Base Submission、Accepted 生命周期和 TradeLifecycleV3。原18前缀夹具以派生读面作 oracle，不给设备初始化 matched/active/commitment。真实非 post-only Maker 的9条 V4设备链已接首次领取→Registry→Ledger；其冷前缀缺接受引用时公开计量保持 Unknown，不补造历史。该局部不代表完整首次领取流、FOK/查询/取消映射、slow433、全根时钟或恢复已完成。

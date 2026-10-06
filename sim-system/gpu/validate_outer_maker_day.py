@@ -172,6 +172,13 @@ def main():
     receive_rank=torch.arange(delivered.record_refs.size(1),device='cuda')[None,:]
     registry_events=run(lambda:order_events_from_closed(noe.normalizer.bank,batches,delivered,receive_rank))
     registry_state=run(lambda:PublicRegistryState(compact_order_events(registry_events)))
+    # 静默公开时间没有NOE人口，不能制造订单或触发空维gather错误。
+    from queues import _take
+    empty_closed=replace(delivered,record_refs=delivered.record_refs[:,:0],
+        delivered_sequences=_take(delivered.delivered_sequences,torch.empty(0,dtype=torch.int64,device='cuda')),
+        available_at=delivered.available_at[:,:0],emitted=delivered.emitted[:,:0])
+    empty_events=run(lambda:order_events_from_closed(noe.normalizer.bank,batches,empty_closed,receive_rank[:,:0]))
+    assert empty_events.received.shape==(1,0) and empty_events.fault.cpu().tolist()==[0]
     trade_population=registry_state.events.received & (registry_state.events.kinds==TRADE)
     assert int(trade_population.sum().cpu())==1
     trade_values=amounts(registry_state.events.trade_quantity)

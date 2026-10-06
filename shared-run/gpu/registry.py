@@ -41,6 +41,16 @@ class PublicRegistryEvents:
     fault: torch.Tensor
 
 
+    @classmethod
+    def empty(cls,roots,device):
+        columns=torch.empty((roots,0),dtype=torch.int64,device=device)
+        blank=columns.bool()
+        zero=ExactInt.from_i64_tensor(columns.flatten())
+        ratio=ExactRational(zero,zero.constant(1))
+        return cls(blank,columns,zero,zero,zero,zero,zero,zero,columns,columns,columns,columns,columns,
+            ratio,ratio,ratio,columns,columns,blank,blank,blank,blank,torch.zeros(roots,dtype=torch.int32,device=device))
+
+
 @dataclass(frozen=True)
 class FrozenIntentOrders:
     present: torch.Tensor  # [roots,orders]，原已公开订单目录；不可提前暴露未来槽位。
