@@ -224,7 +224,15 @@ async fn gpu_real_failed_fill_reverses_original_applied_cost_and_fee_once() {
         for record in observation.take_closed_records() {
             ledger.apply_noe_memory_v2(&record).unwrap();
         }
-        let initial = decoded_maker_initial_events();
+        let mut initial = decoded_maker_initial_events();
+        let ExecutionMarketEventPayloadV3::InitialL2Snapshot(book) = &mut initial[0].payload else { unreachable!() };
+        book.asks = vec![contracts::PriceLevelV1 {
+            price_pusd_per_share: ExactDecimal("0.5".into()), quantity_shares: ExactDecimal("5".into()),
+        }];
+        initial[0].event_id = data_pipeline_core::derive_execution_market_event_v3_id(&initial[0]).unwrap();
+        initial[0] = data_pipeline_core::decode_execution_market_event_v3(
+            &data_pipeline_core::encode_execution_market_event_v3(&initial[0]).unwrap(),
+        ).unwrap();
         let condition = initial[0].market.condition_id.clone();
         let (state, _) = reduce_market_event_slice_v2(
             actor.state.take().unwrap(), MarketEventPathV1::HiddenPlatform, 1_100, &initial,
@@ -235,8 +243,8 @@ async fn gpu_real_failed_fill_reverses_original_applied_cost_and_fee_once() {
             items: vec![PostOrderBatchItemV2 { batch_item_ordinal: 0, item: post_item(
                 "gpu-ledger-failure-item", &condition, &TokenId("1".into()),
                 SimBuyOrderKindV1::GtcLimit {
-                    limit_price_pusd_per_share: "0.3".parse().unwrap(),
-                    size_shares: "5".parse().unwrap(), post_only: false,
+                    limit_price_pusd_per_share: "0.6".parse().unwrap(),
+                    size_shares: "10".parse().unwrap(), post_only: false,
                 },
             ) }],
         });
