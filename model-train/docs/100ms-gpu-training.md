@@ -560,3 +560,8 @@ cargo run -p data-pipeline-training --bin dpt-public-compact --locked --offline 
 运行仍遵守准确提交 bundle 同步及数据盘环境规则。这里的有限工程范围不能当作
 完整 15 天/3 天根的数据准备或学习验收。设备十进制转换与独立归约已具公共 API；
 把其实际接到共享列块、hidden 材料和连续公共 GPU 状态仍是后续实现责任。
+
+首日必要元数据按[D-0305](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6019802026)
+只选择两个缺初始化市场从#196真实Snapshot至9月9日零点前的完整Existing片段。
+原文件和清单经原选择器核验；不读取前史盘口/价格/TWAP/AnchorRule，不供模型热身、
+策略计算或经营统计。训练根15天、模型T−30及冷启动范围保持。

@@ -346,10 +346,22 @@ pub fn select_prefix_initialization_config_v1(
     target_files: &[PublicFiniteFileV1], preceding_manifest: &std::path::Path,
     received_start: i64, received_end: i64, rows: usize, bytes: usize,
 ) -> RecordingResult<MetadataInitializationConfigV1> {
+    select_prefix_initialization_config_with_progress_v1(
+        target_files, preceding_manifest, received_start, received_end, rows, bytes, None,
+    )
+}
+pub fn select_prefix_initialization_config_with_progress_v1(
+    target_files: &[PublicFiniteFileV1], preceding_manifest: &std::path::Path,
+    received_start: i64, received_end: i64, rows: usize, bytes: usize,
+    progress: Option<&HistoricalPreparationNotifierV1<'_>>,
+) -> RecordingResult<MetadataInitializationConfigV1> {
+    notify(progress, Notice::Stage(crate::historical_preparation_progress::HistoricalPreparationStageV1::InitializationSelection));
     let mut first: BTreeMap<String, (MetadataOrder, PolymarketMetadataRowKind)> = BTreeMap::new();
     for file in target_files.iter().filter(|f| f.source_kind == "polymarket_market_metadata") {
         for batch in open_finite_public_input_v1(file, rows, bytes)? {
-            for row in batch? {
+            let batch = batch?;
+            notify(progress, Notice::RawBatch {pass:Pass::InitializationSelection,initialization:false,rows:batch.len() as u64});
+            for row in batch {
                 let Some(metadata) = existing(&row) else { continue; };
                 if metadata.timestamp_received < received_start || metadata.timestamp_received >= received_end { continue; }
                 let source = source_evidence_v3_from_typed_raw_v2(&row)?;
@@ -374,7 +386,9 @@ pub fn select_prefix_initialization_config_v1(
             schema_version:file.schema_version.clone(), bytes:file.bytes, rows:file.rows, sha256:file.sha256.clone(),
         };
         for batch in open_finite_public_input_v1(&facts, rows, bytes)? {
-            for row in batch? {
+            let batch = batch?;
+            notify(progress, Notice::RawBatch {pass:Pass::InitializationSelection,initialization:true,rows:batch.len() as u64});
+            for row in batch {
                 let Some(metadata) = existing(&row) else { continue; };
                 if metadata.metadata_row_kind != PolymarketMetadataRowKind::MetadataSnapshot
                     || !required.contains(&metadata.condition_id) || metadata.timestamp_received >= received_start { continue; }

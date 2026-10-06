@@ -2,7 +2,7 @@
 use data_pipeline_training::{
     compact_public::{CompactPublicPreparationConfigV1, PublicCompactReaderV1, PublicCompactWriterV1, consume_historical_merge_facts_v1, repack_public_compact_v1},
     gpu_initial_sort::GpuInitialRunOrderV1,
-    historical_initialization::{MetadataInitializationSelectionV1, select_prefix_initialization_config_v1},
+    historical_initialization::{MetadataInitializationSelectionV1, select_prefix_initialization_config_with_progress_v1},
     historical_preparation_progress::{HistoricalPreparationNoticeV1 as Notice, HistoricalPreparationNotifierV1},
     public_replay::{HISTORICAL_SOURCE_HEAD_ORDERING_VERSION, prepare_historical_finite_files_with_initial_order_v1},
 };
@@ -12,7 +12,10 @@ fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     let args: Vec<_> = std::env::args().collect();
     if args.len() == 5 && args[1] == "--repack" {
         let started = Instant::now();
-        let mut reader = PublicCompactReaderV1::open(Path::new(&args[2]),args[4].parse()?)?;
+        let mut reader = PublicCompactReaderV1::open_with_progress(Path::new(&args[2]),args[4].parse()?,
+            std::time::Duration::from_secs(10), |notice| {
+                eprintln!("{}",serde_json::json!({"reader":notice,"elapsed_seconds":started.elapsed().as_secs_f64()}));
+            })?;
         let mut writer = PublicCompactWriterV1::create(Path::new(&args[3]),reader.manifest.header.clone())?;
         let mut last_notice = Instant::now();
         repack_public_compact_v1(&mut reader,&mut writer,|processed| {
@@ -32,18 +35,33 @@ fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         let mut config: CompactPublicPreparationConfigV1 = serde_json::from_reader(File::open(&args[2])?)?;
         let started = Instant::now();
         eprintln!("{}",serde_json::json!({"stage":"select_real_metadata_initialization","preceding_manifest":args[3]}));
-        config.initialization = Some(select_prefix_initialization_config_v1(&config.files,Path::new(&args[3]),
+        let mut decoded = 0_u64;
+        let mut last_notice = Instant::now();
+        let mut notice = |event| {
+            let stage_changed = matches!(&event, Notice::Stage(_));
+            if let Notice::RawBatch { rows, .. } = event { decoded += rows; }
+            if stage_changed || last_notice.elapsed().as_secs() >= 10 {
+                eprintln!("{}",serde_json::json!({"stage":"metadata_initialization_selection","decoded_rows":decoded,
+                    "total_rows":null,"elapsed_seconds":started.elapsed().as_secs_f64()}));
+                last_notice = Instant::now();
+            }
+        };
+        let notifier = HistoricalPreparationNotifierV1::new(&mut notice);
+        config.initialization = Some(select_prefix_initialization_config_with_progress_v1(&config.files,Path::new(&args[3]),
             config.received_start_utc_ms,config.received_end_utc_ms,config.canonical.decode_batch_rows,
-            config.canonical.max_decode_batch_bytes)?);
+            config.canonical.max_decode_batch_bytes,Some(&notifier))?);
         serde_json::to_writer(std::fs::File::create_new(&args[4])?, &config)?;
         eprintln!("{}",serde_json::json!({"stage":"selected_real_metadata_initialization",
             "markets":config.initialization.as_ref().unwrap().markets.len(),"elapsed_seconds":started.elapsed().as_secs_f64()}));
         return Ok(());
     }
     if args.len() == 4 && args[1] == "--inspect" {
-        let mut reader = PublicCompactReaderV1::open(Path::new(&args[2]), args[3].parse()?)?;
-        let mut inputs = 0_u64;
         let started = Instant::now();
+        let mut reader = PublicCompactReaderV1::open_with_progress(Path::new(&args[2]), args[3].parse()?,
+            std::time::Duration::from_secs(10), |notice| {
+                eprintln!("{}",serde_json::json!({"reader":notice,"elapsed_seconds":started.elapsed().as_secs_f64()}));
+            })?;
+        let mut inputs = 0_u64;
         let mut last_notice = Instant::now();
         while reader.next_packet()?.is_some() {
             inputs += 1;

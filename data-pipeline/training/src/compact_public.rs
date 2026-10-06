@@ -408,6 +408,13 @@ pub struct PublicCompactReaderV1 {
 impl PublicCompactReaderV1 {
     /// SHA核对完整文件；上限只限制本次读取分配，不改变业务或签发数据验收。
     pub fn open(root: &Path, max_packet_bytes: usize) -> RecordingResult<Self> {
+        Self::open_with_progress(root, max_packet_bytes, Duration::from_secs(10), |_| {})
+    }
+    pub fn open_with_progress(
+        root: &Path, max_packet_bytes: usize, interval: Duration,
+        mut progress: impl FnMut(CompactPublicationProgressV1<'_>),
+    ) -> RecordingResult<Self> {
+        progress(CompactPublicationProgressV1 {stage:"read_manifest",member:"manifest.json",completed_bytes:0,total_bytes:None});
         let manifest: PublicCompactManifestV1 = serde_json::from_reader(File::open(root.join("manifest.json"))?)?;
         if !matches!(manifest.schema_version.as_str(), SCHEMA | LEGACY_SCHEMA) || !manifest.normal_end || manifest.inputs == 0
             || manifest.applied_prefix.next_input_position != manifest.inputs
@@ -420,7 +427,11 @@ impl PublicCompactReaderV1 {
             if item.name != name { return Err(io::Error::other("材料文件名或顺序错误").into()); }
             let file = File::open(root.join(name))?;
             if file.metadata()?.len() != item.bytes { return Err(io::Error::other("材料大小错误").into()); }
-            if file_sha256(&root.join(name))? != item.sha256 { return Err(io::Error::other("材料SHA错误").into()); }
+            let sha256 = file_sha256_with_progress(&root.join(name), interval, |completed, total| {
+                progress(CompactPublicationProgressV1 {stage:"read_member_sha256",member:name,
+                    completed_bytes:completed,total_bytes:Some(total)});
+            })?;
+            if sha256 != item.sha256 { return Err(io::Error::other("材料SHA错误").into()); }
         }
         if manifest.files[1].bytes != manifest.inputs.checked_add(1).and_then(|n| n.checked_mul(8)).unwrap_or(0)
             || manifest.files[2].bytes != manifest.groups.checked_mul(40).unwrap_or(0) {
@@ -446,7 +457,13 @@ impl PublicCompactReaderV1 {
         self.payload.seek(SeekFrom::Start(start))?;
         self.payload.read_exact(&mut bytes)?;
         let decoded = if self.manifest.schema_version == SCHEMA {
-            zstd::bulk::decompress(&bytes, self.max_packet_bytes)?
+            let frame_bytes = zstd::zstd_safe::get_frame_content_size(&bytes)
+                .map_err(|error| io::Error::other(format!("材料压缩帧头错误: {error:?}")))?
+                .map(usize::try_from).transpose()?.unwrap_or(self.max_packet_bytes);
+            if frame_bytes > self.max_packet_bytes {
+                return Err(io::Error::other("材料解压帧超过本次读取容量").into());
+            }
+            zstd::bulk::decompress(&bytes, frame_bytes)?
         } else { bytes };
         let packet: PublicCompactPacketV1 = serde_json::from_slice(&decoded)?;
         if packet.input.input_stream_id != self.manifest.header.input_stream_id || packet.input.input_position != self.next {
