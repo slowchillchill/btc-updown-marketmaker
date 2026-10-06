@@ -545,6 +545,10 @@ def main():
                    'real_book_encoder_forward_backward','tail_padding_pairwise_tree','native_pm_bba28_trade18']
     else:
         passed += ['legal_missing_book','metadata_identity_preserved_or_unknown_coordinate_fault']
+    if columns['reference_preparation_complete'] and columns['markets']:
+        passed.append('native_reference37_original_preparation')
+    else:
+        passed.append('missing_reference_preparation_retains_fault')
     report = {'source_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
               'identity':('engineering_real_public_pm_book_inputs_only' if columns['slots']
                           else 'engineering_missing_book_boundary'),'device':torch.cuda.get_device_name(),
@@ -553,13 +557,14 @@ def main():
               'decimal_dictionary':len(columns['decimals']),'derived_column_wire_bytes':len(wire),
               'encoded_positive_rows':positive_rows,'raw_trade_facts':len(columns['raw_trades']),'public_facts':len(columns['facts']),
               'direct_sources':len(columns['fact_sources']),
+              'reference_preparation_complete':columns['reference_preparation_complete'],
               'cold_seconds':parsed-started,'total_seconds':time.perf_counter()-started,
               'peak_allocated_bytes':torch.cuda.max_memory_allocated(),
               'normal_window_peak_allocated_bytes':normal_window_peak,
               'window_peak_scope':'驻留共享公共列及累计可见时间、已打包盘口和直接字段、三前缀窗口与末10个100ms窗口；非法窗不扩池',
               'passed':passed,
               'original_core_reference_checked':args.original_reference is not None,
-              'not_delivered':['reference_state','binance_state','hidden','sim_noe_ledger',
+              'not_delivered':(['reference_preparation_for_this_material'] if not columns['reference_preparation_complete'] else [])+['binance_state','hidden','sim_noe_ledger',
                                '100ms_window','full_actor','ppo','active_root_restore']}
     args.output.parent.mkdir(parents=True,exist_ok=True)
     args.output.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n')

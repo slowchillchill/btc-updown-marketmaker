@@ -624,3 +624,10 @@ Conservative 的314—316与 Directional 的320—322沿原值／存在／适用
 保留原质量及全部直接锚点。终态质量改变沿原公共规则清除不可见值，不伪造恢复。
 `LifecycleInputs` 实现原103字段，终态赢家和精确payout仍按原资产身份映射。
 这些字段不替代Actor完整资格与GPU执行/账户状态；冷registry不能独自签发交易。
+
+`PublicReferenceState` 与 `ReferenceInputs` 复用原准备器持久选择，提供设备合法前缀的
+spot/TWAP/结算参考规则、官方和临时参考及原 reference37。compact v4 记录实际选择的
+精确源值、位置和直接锚点；v2/v3 保持原身份和读取兼容，明确缺此能力，不能以 latest
+补选。未携带完整准备结果时接口保留 fault，沿原合法输入重建后才能参与完整观察。
+PM `SideInputs` 保存冻结观察之间的精确端点记忆；侧 E9 仍筛选原侧字段路径，公共保存
+的整簿 `l2`／`l2.absence` 锚点不自动进入侧特征。完整100ms装配与活动根恢复仍待交付。
