@@ -313,14 +313,13 @@ async fn gpu_real_failed_fill_reverses_original_applied_cost_and_fee_once() {
         let platform = &before_repeat.platform_confirmed_projection;
         eprintln!("failure_cost_case={index} application_ordinal={economic_ordinal:?} cost={} fee={}",
             platform.position_cost_basis_pusd.0, platform.fees_pusd.0);
-        assert_eq!(platform.position_cost_basis_pusd, ExactDecimal("0".into()), "失败应撤回此前实际应用成本");
-        assert_eq!(platform.fees_pusd, ExactDecimal("0".into()), "失败应撤回此前实际应用费用");
+        let zero = |value: &ExactDecimal| value.0.parse::<rust_decimal::Decimal>().unwrap().is_zero();
+        assert!(zero(&platform.position_cost_basis_pusd), "失败应撤回此前实际应用成本");
+        assert!(zero(&platform.fees_pusd), "失败应撤回此前实际应用费用");
         assert!(platform.outcome_balances.iter().all(|outcome|
-            outcome.balance_shares == ExactDecimal("0".into())
-                && outcome.position_cost_basis_pusd == ExactDecimal("0".into())));
+            zero(&outcome.balance_shares) && zero(&outcome.position_cost_basis_pusd)));
         assert!(before_repeat.market_projections.iter().all(|market|
-            market.position_cost_basis_pusd == ExactDecimal("0".into())
-                && market.fees_pusd == ExactDecimal("0".into())));
+            zero(&market.position_cost_basis_pusd) && zero(&market.fees_pusd)));
     }
 }
 
