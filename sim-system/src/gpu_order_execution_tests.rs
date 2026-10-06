@@ -168,6 +168,8 @@ async fn gpu_sealed_failure_paths_preserve_original_economic_sequence_and_compen
 async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
     let saved_observation=Rc::new(RefCell::new(None));
     let capture=Rc::clone(&saved_observation);
+    let normalization_reference=Rc::new(RefCell::new(Vec::new()));
+    let normalization_capture=Rc::clone(&normalization_reference);
     let (_directory,mut actor) = active_market_actor_with_projection(
         SimCallerRoleV1::ModelTrain,"run-gpu-multiask",successful_policy_v2_for_tests(),
         move |path,opened| {
@@ -180,7 +182,8 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
             *capture.borrow_mut()=Some(memory.observation());
             let durable=noe_projection::SimV2NoeProjectionPortV4::new(path.parent().unwrap().join("noe-durable"),
                 opened.clone(),reference.clone(),reference,"create-run-gpu-multiask".into(),"gpu-source-reference".into());
-            Box::new(GpuNoeReferencePort { memory,durable })
+            Box::new(GpuNoeReferencePort { memory,durable,
+                normalization_reference:normalization_capture, normalization_core:None })
         }).await;
     let observation=saved_observation.borrow_mut().take().unwrap();
     assert!(observation.opening_record().is_some(),"开户必须先进入实际NOE上下文");
@@ -283,6 +286,7 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
         "finality_path":actor._finality_policy.normal_path(),"fee_rate":rules.fee_schedule.rate.value().to_string(),
         "fee_exponent":rules.fee_schedule.exponent,"taker_rebate_rate":actor._rule_snapshot.snapshot().project_account_rules.rebate_settlement.value.fixed_taker_rebate_rate.value().to_string(),
         "feedback_batches":feedback_batches,"noe_records":records,"initial_noe_records":initial_records.len(),
+        "normalization_reference":normalization_reference.borrow().clone(),
         "ledger_projection":ledger_projection,
         "opening_available_pusd":state.session.as_ref().unwrap().opening_fact.initial_account_state.available_pusd,
         "session_seed":state.session.as_ref().unwrap().session_seed.0});
@@ -317,11 +321,18 @@ fn gpu_accept_projection_reference(actor:&mut SimRunActorV2,state:BusinessReduce
 struct GpuNoeReferencePort {
     memory:noe_projection::MemoryNoeProjectionPortV4,
     durable:noe_projection::SimV2NoeProjectionPortV4,
+    normalization_reference:Rc<RefCell<Vec<serde_json::Value>>>,
+    normalization_core:Option<execution_normalization::NormalizationCoreV4>,
 }
 impl BusinessProjectionPortV2 for GpuNoeReferencePort {
     fn try_accept(&mut self,_:Arc<BusinessProjectionBatchV2>) -> bool { false }
     fn try_accept_payload(&mut self,payload:Arc<BusinessProjectionBatchPayloadV1>) -> bool {
         if !self.durable.try_accept_payload(Arc::clone(&payload)) { return false; }
+        let context=self.durable.store_for_resource_observation().context().clone();
+        let core=self.normalization_core.get_or_insert_with(||
+            execution_normalization::NormalizationCoreV4::new(context.clone()));
+        self.normalization_reference.borrow_mut().extend(
+            noe_projection::gpu_normalization_reference_v4(&context,core,payload.as_ref()));
         self.memory.accept_for_background(payload).expect("原MemoryNOE接纳同一实际批");
         true
     }

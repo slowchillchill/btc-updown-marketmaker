@@ -111,6 +111,11 @@ def main():
     assert not fault.any().cpu().item()
     assert arrived.cpu().tolist()==[row['response_received_at_utc_ms'] for row in direct]
     assert source['initial_noe_records']>0 and source['noe_records']
+    path=Path(__file__).resolve().parents[2]/'execution-normalization/gpu/validate_core.py'
+    spec=importlib.util.spec_from_file_location('gpu_noe_core_validation',path)
+    normalization=importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(normalization)
+    normalization_report=normalization.validate(source['normalization_reference'])
     path=Path(__file__).resolve().parents[2]/'execution-normalization/gpu/consumption.py'
     spec=importlib.util.spec_from_file_location('gpu_noe_consumption',path)
     consumption=importlib.util.module_from_spec(spec)
@@ -205,6 +210,7 @@ def main():
     if artifact:
         Path(artifact,'original-noe-reference.json').write_text(json.dumps({
             'feedback_batches':source['feedback_batches'],'noe_records':source['noe_records'],
+            'normalization_reference':source['normalization_reference'],
             'original_ledger_projection':source['ledger_projection']},ensure_ascii=False))
     print(json.dumps({'original_external_5share_request':True,'taker_fills':3,'checkpoints':len(source['checkpoints']),
         'same_time_consumption_fill_sequences':order,'fill_pool_capacity':pool.capacity,
@@ -215,6 +221,7 @@ def main():
         'actual_NOE_device_delivery_order_checked':True,
         'original_Ledger_reference_checked':source['ledger_projection'] is not None,
         'Ledger_platform_balance_and_predecessor_candidate_checked':platform_checked,
+        'normalization_core_candidate':normalization_report,
         'original_feedback_dual_visibility_gate_checked':True,
         'global_clock_NOE_Ledger_delivered':False}))
 

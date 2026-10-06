@@ -1665,6 +1665,54 @@ pub type SimV2NoeProjectionPortV2 = SimNoeProjectionPort<contracts::TradeLifecyc
 #[cfg(test)]
 type BatchMapperV1<'a> = BatchMapper<'a, contracts::TradeLifecycleFeedbackV2>;
 
+// 设备归约的冷强类型基线；沿实际V4映射与原Core，不进入生产热链。
+#[cfg(test)]
+pub(super) fn gpu_normalization_reference_v4(
+    context:&ExecutionNormalizationContextV1,
+    core:&mut execution_normalization::NormalizationCoreV4,
+    payload:&BusinessProjectionBatchPayloadV1,
+) -> Vec<serde_json::Value> {
+    let BusinessProjectionBatchPayloadV1::V4(batch)=payload else {panic!("工程来源须为实际V4");};
+    let input=BatchMapper::<_,MeasuredCancellationEvidence>::new(context,batch).map().unwrap();
+    let mut cases=Vec::new();
+    let mut record=|name:&str,input:execution_normalization::NormalizationBatchInputV4| {
+        let result=core.normalize_and_accept(input.clone()).unwrap();
+        cases.push(serde_json::json!({"name":name,"input":input,"expected":result}));
+    };
+    record("actual_source",input.clone());
+    record("same_logical_evidence_repeat",input.clone());
+    if let Some(original)=input.evidence.iter().find(|row|matches!(row.kind,SourceNeutralEvidenceKind::Economic {..}|SourceNeutralEvidenceKind::EconomicV2 {..})) {
+        let mut alias=original.clone();
+        alias.logical_key=SourceNeutralLogicalKeyV1::AuditEvidence {evidence_identity:format!("gpu-alias-{}",input.source_watermark.projection_batch_sequence)};
+        let mut candidate=input.clone();
+        candidate.evidence=vec![alias];
+        record("same_economic_fact_other_logical_evidence",candidate);
+    }
+    if let Some(original)=input.evidence.iter().find(|row|matches!(row.kind,SourceNeutralEvidenceKind::Control {..})) {
+        let mut conflict=original.clone();
+        if let SourceNeutralEvidenceKind::Control {result:contracts::execution_normalization::SourceNeutralControlResult::Submission {
+            outcome:contracts::execution_normalization::SourceNeutralSubmissionOutcomeV2::Accepted {effective_processing_at_utc_ms,..},..
+        }}=&mut conflict.kind {
+            *effective_processing_at_utc_ms+=1;
+            let mut candidate=input.clone();
+            candidate.evidence=vec![conflict];
+            record("same_logical_changed_processing_time",candidate);
+        }
+    }
+    if let Some(original)=input.evidence.iter().find(|row|matches!(row.source_record,SimV2SourceRecordReferenceV1::TradeLifecycle {..})) {
+        let mut late=original.clone();
+        late.logical_key=SourceNeutralLogicalKeyV1::AuditEvidence {evidence_identity:format!("gpu-missing-coverage-{}",input.source_watermark.projection_batch_sequence)};
+        late.kind=SourceNeutralEvidenceKind::LateEconomicCoverage {
+            economic_key:execution_normalization::SourceNeutralEconomicKeyV1::AccountTransition {account_transition_seq:u64::MAX},
+        };
+        let mut candidate=input.clone();
+        candidate.evidence=vec![late];
+        record("missing_economic_coverage_pending",candidate.clone());
+        record("same_pending_repeat",candidate);
+    }
+    cases
+}
+
 pub trait CancellationEvidenceProjection {
     type Reason: Clone + std::fmt::Debug + Eq;
     type Completion: Clone + std::fmt::Debug + Eq + serde::Serialize;
