@@ -35,6 +35,7 @@ fn config(
             max_run_bytes: 32 * 1024 * 1024,
             max_temp_run_files: 8,
             merge_fan_in,
+            merge_workers: 1,
             max_open_files: merge_fan_in + 1,
             batch_rows,
             max_temp_bytes: 4 * 1024 * 1024,
@@ -155,8 +156,20 @@ fn real_scoped_six_source_run_uses_one_deterministic_production_path() {
         assert!(run.metrics.sort.peak_write_buffer_rows <= run.config.sort.batch_rows);
         assert!(run.metrics.sort.peak_temp_bytes <= run.config.sort.max_temp_bytes);
     }
-    assert!(first.temporary_sorted_input_path.is_file());
-    assert!(second.temporary_sorted_input_path.is_file());
+    assert!(
+        first
+            .temporary_sorted_input_run
+            .parts
+            .iter()
+            .all(|path| path.is_file())
+    );
+    assert!(
+        second
+            .temporary_sorted_input_run
+            .parts
+            .iter()
+            .all(|path| path.is_file())
+    );
     assert_ne!(
         first.metrics.sort.initial_runs,
         second.metrics.sort.initial_runs

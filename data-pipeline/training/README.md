@@ -28,6 +28,16 @@
 
 Arrow 排序只构造实际排序键列，按返回的置换移动已有行；真正 Parquet 输出仍包含键和载荷。外排保留实际重复键冲突与输入读取错误，取消对同次 Arrow 置换及自产 run 行守恒的重复证明。正式产物所需逻辑摘要在最后一次排序写流中形成，沿用原域、字段长度前缀、行顺序和末尾行数；不再在关闭后为计算摘要全读一次。只消费临时路径和资源计量的内部排序不计算该摘要。
 
+公共外排将一个逻辑有序段表示为 `SortedRun.parts` 中按顺序排列的物理 Parquet 文件。初始段、中间合并及最终结果使用同一写入器。锁定的 `parquet 59.0.0` 每文件允许 32,768 个行组；下一批写入前关闭满片，再打开下一片。每批仍按原 `batch_rows` 和字节上限写入并刷新，不增大行组或缓存。`SortOutcome.output_run` 和 `CanonicalRunStaging.temporary_sorted_input_run` 明确交付全部分片，不把一个目录冒充文件。
+
+共用分片游标依次读取全部文件，同时只保留当前片的读取器。换片先关闭旧读取器，片尾不产生业务结束、闭桶或状态清除。canonical 暂存、六来源历史归并、TWAP 按原位置重读、Gate-A 可见时间临时材料及隐藏消息暂存均复用此游标。原排序键、重复键错误、连续归约与逻辑摘要保持。全部物理分片及正在写入的下一片计入原临时文件数、字节数和句柄额度；`initial_runs`、`merge_passes` 仍统计逻辑段和合并轮次。
+
+同一来源、同一轮的独立合并组可通过 `SortConfig.merge_workers` 请求有界并行；旧配置缺省为1。输入次序决定组号及输出身份，完成先后不改变下一轮分组。每组仍使用原 `merge_group`，最终单组、原始供数、初始排序和公共 core 保持原顺序。全部活动组共享一个排序器的临时字节、物理文件及打开句柄计量；输出封片仍占磁盘额度，只有删除输入后才释放。调度先按句柄额度保留每组的输入加输出位置，不为每线程复制剩余额度。`fan-in=8/max_open_files=16`只能实际执行一组，四组需要至少36句柄；请求更多工作者不自动扩额，也不新增拒绝。
+
+失败时停止派发，收回所有活动工作后沿原失败清理，不交付部分结果。协调线程调用原notifier，工作者只更新有界标量与完成队列；未完成组也可报告处理行数。`MergeProgress` 的行数跨合并轮累计，完成组数属于当前轮；`SortMetrics.merge_elapsed_ns`记录合并协调的墙钟时间，`peak_merge_workers`记录实际活动峰值。每线程读取批次、写缓冲和Parquet元数据会增加总内存，64MiB批次上限不是RSS上界。本工程不设置RSS或墙钟拒绝门。有限合成对照入口为 `measure_parallel_external_sort`，范围与限制见 [#251](https://github.com/slowchillchill/btc-updown-marketmaker/issues/251) 和[固定有限对照报告](docs/parallel-external-sort-comparison-20261005.md)。
+
+Gate-A `manifest.file` 和隐藏准备的持久 `index_path` 保持 V1 单文件格式。它们在原排序流程的最终写流直接使用单文件写入模式；单片直接移交，不新增“多片就拒绝”的条件，也不复制排序器。超过该 V1 单文件的库容量时仍传播原 Parquet 错误。本修复只扩展临时外排表示，不声称扩大这些持久出口或捕获写流的容量。现有捕获产物作为单片逻辑段接入。故障与工程验收见 [#249](https://github.com/slowchillchill/btc-updown-marketmaker/issues/249)；十八日研究须按 #185 的实际运行授权另行推进。
+
 离线 sequential capture 在成功写入批次后累计逻辑摘要和输出行数；后台 public recording 沿现有 `defer_batch_sync`/`close_segment` 流程，不维护无消费者的离线摘要。实际写入、关闭和稳定边界同步错误仍传播；`fadvise` 及仅为该建议打开文件的失败不再拒绝产出。该建议不构成缓存释放或内存上界保证。本轮不改持久格式，也不以取消自产重读代替真实读取入口的解析职责。
 
 TypedRaw Parquet 仍先以原打开的 `File` 完成长度与 SHA 校验，然后在 Arrow 供数侧为该文件共用一个 64KiB 字节窗口。`get_read` 保留独立逻辑位置及原默认 8KiB `BufReader`；`get_bytes` 返回自持有的字节，超窗请求直接读同一文件。短预取不要求填满窗口，真实请求不足沿原 EOF/错误传播。文件 reader 销毁后释放窗口，不跨文件或两遍共享，不改变 schema/footer、物理批次、逐行解码与范围筛选。

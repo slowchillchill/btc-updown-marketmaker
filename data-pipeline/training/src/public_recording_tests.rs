@@ -1743,3 +1743,79 @@ fn opted_replay_recovers_identical_business_confirmation_from_original_recording
         }
     }
 }
+
+#[test]
+fn physical_source_parts_preserve_continuous_core_and_prior_twap_reread() {
+    let temp = tempfile::tempdir().unwrap();
+    let rows: Vec<_> = [
+        meta(0),
+        twap_record(1, 60, 21001, "64000000000000000000000"),
+        twap_record(2, 60, 21002, "65000000000000000000000"),
+        rule_record(3, 60, None),
+        pm(4, 1, 22004, book("100")),
+        pm(5, 2, 22005, book("80")),
+        pm(6, 3, 22006, book("90")),
+        pm(7, 4, 22007, book("70")),
+        pm(8, 5, 22008, book("60")),
+        pm(9, 6, 22009, book("50")),
+        pm(10, 7, 22010, book("40")),
+        pm(11, 8, 22011, book("30")),
+    ]
+    .into_iter()
+    .map(|input| match input.ingress {
+        DptIngressV1::Message { row, .. } => row,
+        _ => unreachable!(),
+    })
+    .collect();
+    let mut limits = crate::gate_a_formal_canonical_config();
+    limits.sort = config().sort;
+    limits.sort.max_run_rows = 1;
+    limits.sort.merge_fan_in = 2;
+    limits.sort.max_open_files = 12;
+    let mut outputs = Vec::new();
+    for split in [false, true] {
+        limits.sort.merge_workers = if split { 4 } else { 1 };
+        crate::sort_parallel::TEST_START_BARRIER.with(|barrier| {
+            *barrier.borrow_mut() = split.then(|| std::sync::Arc::new(std::sync::Barrier::new(2)));
+        });
+        let mut merge = prepare_historical_rows_v1(
+            &temp.path().join(if split { "parts" } else { "single" }),
+            &limits,
+            "core-test".into(),
+            || Ok(rows.clone().into_iter().map(Ok)),
+        )
+        .unwrap();
+        crate::sort_parallel::TEST_START_BARRIER.with(|barrier| *barrier.borrow_mut() = None);
+        let pm_metrics = &merge.sort_metrics()[HistoricalSourceV1::Polymarket as usize];
+        assert_eq!(pm_metrics.input_rows, 8);
+        if split {
+            assert!(pm_metrics.peak_merge_workers > 1);
+        } else {
+            assert_eq!(pm_metrics.peak_merge_workers, 1);
+        }
+        if split {
+            merge.split_runs_for_test(&temp.path().join("physical"));
+        }
+        let mut core = core();
+        let mut output = Vec::new();
+        while let Some(mut input) = merge.next_input().unwrap() {
+            let prepared = merge.prepare_input(&core, &mut input).unwrap();
+            let result = core.push(&prepared).unwrap().into_owned();
+            drop(prepared);
+            output.push((input, fingerprint(&result)));
+        }
+        assert!(
+            core.reference_state(CONDITION_ID)
+                .unwrap()
+                .temporary
+                .is_some()
+        );
+        outputs.push(output);
+    }
+    assert_eq!(outputs[0], outputs[1]);
+    assert!(
+        outputs[1]
+            .iter()
+            .any(|(input, _)| !input.dependency_record_refs.is_empty())
+    );
+}

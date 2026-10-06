@@ -35,8 +35,8 @@ use crate::typed_raw::{
     open_validated_typed_raw_parquet_in_scope,
 };
 use crate::{
-    ExternalSorter, FrozenDirectSourceInputSetV1, RunCursor, SortConfig, SortError, SortMetrics,
-    SortRow, ValidatedDirectSourceParquetFileV3,
+    ExternalSorter, FrozenDirectSourceInputSetV1, SortConfig, SortError, SortMetrics, SortRow,
+    ValidatedDirectSourceParquetFileV3,
 };
 
 const WORK_DIRECTORY: &str = "dpt-canonical-run";
@@ -230,7 +230,7 @@ pub struct CanonicalRunMetrics {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CanonicalRunStaging {
     pub workspace_path: PathBuf,
-    pub temporary_sorted_input_path: PathBuf,
+    pub temporary_sorted_input_run: crate::SortedRun,
     pub input_set_identity_sha256: String,
     pub input_manifest_set_sha256: String,
     pub scope: CanonicalRunScope,
@@ -942,7 +942,7 @@ fn stage_sorted_input(
     ranks: &EpochRanks,
     sort_root: &Path,
     metrics: &mut CanonicalRunMetrics,
-) -> Result<(PathBuf, SortMetrics), CanonicalRunError> {
+) -> Result<(crate::SortedRun, SortMetrics), CanonicalRunError> {
     let mut sorter = ExternalSorter::new(sort_root, &config.sort)?;
     let read_scope = typed_raw_read_scope(scope);
 
@@ -1313,12 +1313,12 @@ impl PolymarketRunState {
 }
 
 fn process_sorted_input(
-    sorted_path: &Path,
+    sorted_path: &crate::SortedRun,
     config: &CanonicalRunConfig,
     metrics: &mut CanonicalRunMetrics,
     capture: Option<&mut dyn CanonicalRunCapture>,
 ) -> Result<(), CanonicalRunError> {
-    let mut cursor = RunCursor::open(
+    let mut cursor = crate::PartCursor::open(
         sorted_path,
         config.sort.batch_rows,
         config.sort.max_run_bytes,
@@ -1470,7 +1470,7 @@ fn reduce_frozen_input(
 
     let staging = CanonicalRunStaging {
         workspace_path: workspace.path.clone(),
-        temporary_sorted_input_path: sorted_path,
+        temporary_sorted_input_run: sorted_path,
         input_set_identity_sha256: input.input_set_identity_sha256().to_owned(),
         input_manifest_set_sha256: input.input_manifest_set_sha256().to_owned(),
         scope: scope.clone(),

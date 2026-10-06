@@ -55,12 +55,12 @@ struct HistoricalIngressV1 {
 }
 /// 分来源外排后归并只比较六个首项；深度快照/更新必须使用同一个 BinanceDepth 来源。
 pub struct HistoricalMergeV1 {
-    cursors: Vec<RunCursor>,
+    cursors: Vec<crate::PartCursor>,
     heads: Vec<Option<HistoricalIngressV1>>,
     stream: String,
     position: u64,
     sort_metrics: Vec<crate::SortMetrics>,
-    twap_path: PathBuf,
+    twap_run: crate::SortedRun,
     // 与 TWAP 外排原序一一对应；不保存载荷或业务选择结果。
     twap_positions: Vec<u64>,
     page_rows: usize,
@@ -91,12 +91,14 @@ impl HistoricalMergeV1 {
         let mut cursors = Vec::new();
         let mut heads = Vec::new();
         let mut sort_metrics = Vec::new();
-        let mut twap_path = PathBuf::new();
+        let mut twap_run = crate::SortedRun { parts: Vec::new() };
         notify(progress, Notice::Stage(PrepareStage::SourceSortFinish));
         for (index, sorter) in sorters.into_iter().enumerate() {
-            let (output_path, metrics) = sorter.finish(None)?;
+            let (output_path, metrics) = sorter.finish_with_progress(&mut |p| {
+                notify(progress, Notice::SourceMergeProgress { index, progress: p })
+            })?;
             if index == HistoricalSourceV1::Twap.index() {
-                twap_path = output_path.clone();
+                twap_run = output_path.clone();
             }
             if progress.is_some() {
                 notify(
@@ -109,7 +111,7 @@ impl HistoricalMergeV1 {
             }
             sort_metrics.push(metrics);
             let mut cursor =
-                RunCursor::open(&output_path, config.batch_rows, config.max_run_bytes)?;
+                crate::PartCursor::open(&output_path, config.batch_rows, config.max_run_bytes)?;
             heads.push(
                 cursor
                     .next_row()?
@@ -124,13 +126,48 @@ impl HistoricalMergeV1 {
             stream,
             position: 0,
             sort_metrics,
-            twap_path,
+            twap_run,
             twap_positions: Vec::new(),
             page_rows: config.batch_rows,
             page_bytes: config.max_run_bytes,
             last_initialization_binding: None,
         })
     }
+    #[cfg(test)]
+    pub(crate) fn split_runs_for_test(&mut self, root: &Path) {
+        fs::create_dir(root).unwrap();
+        let config = SortConfig {
+            max_run_rows: 2,
+            max_run_bytes: self.page_bytes,
+            max_temp_run_files: 64,
+            merge_fan_in: 2,
+            merge_workers: 1,
+            max_open_files: 3,
+            batch_rows: self.page_rows,
+            max_temp_bytes: 1 << 24,
+        };
+        for (source, cursor) in self.cursors.iter_mut().enumerate() {
+            let mut original =
+                crate::PartCursor::open(&cursor.run, self.page_rows, self.page_bytes).unwrap();
+            let mut parts = Vec::new();
+            while let Some(row) = original.next_row().unwrap() {
+                let path = root.join(format!("source-{source}-{}.parquet", parts.len()));
+                let mut metrics = crate::SortMetrics::default();
+                let mut writer = crate::RunWriter::new(path, 0, 0, &config, &mut metrics).unwrap();
+                writer.push(row, &mut metrics).unwrap();
+                parts.extend(writer.finish(&mut metrics).unwrap().run.parts);
+            }
+            let run = crate::SortedRun { parts };
+            if source == HistoricalSourceV1::Twap.index() {
+                self.twap_run = run.clone();
+            }
+            *cursor = crate::PartCursor::open(&run, self.page_rows, self.page_bytes).unwrap();
+            if self.heads[source].is_some() {
+                cursor.next_row().unwrap().unwrap();
+            }
+        }
+    }
+
     pub fn initialization_binding(&self) -> Option<&SourceArtifactBindingV1> {
         self.last_initialization_binding.as_ref()
     }
@@ -199,8 +236,8 @@ impl HistoricalMergeV1 {
             |cursor| {
                 let page = (|| -> RecordingResult<_> {
                     if reader.is_none() {
-                        reader = Some(RunCursor::open(
-                            &self.twap_path,
+                        reader = Some(crate::PartCursor::open(
+                            &self.twap_run,
                             self.page_rows,
                             self.page_bytes,
                         )?);

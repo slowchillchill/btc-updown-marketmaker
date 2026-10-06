@@ -1,0 +1,132 @@
+{
+  "schema": "parallel_external_sort_comparison_v1",
+  "issue": 251,
+  "date_utc": "2026-10-05",
+  "source_commit": "a82488a8cb438a8b02b9d818e775848181779b64",
+  "binary": {
+    "sha256": "1bc61f53d6f906a84bb51cc3cde166480cc20b88c648376e3dbc68ae2bbf70e9",
+    "size_bytes": 14686664,
+    "profile": "release"
+  },
+  "rustc": "1.95.0 (59807616e 2026-04-14)",
+  "cargo": "1.95.0 (f2d3ce0bd 2026-03-21)",
+  "order": [
+    1,
+    4
+  ],
+  "runs_per_mode": 1,
+  "input": "fixed 104729 permutation xor 0x5a5a5 modulo 2^20; deterministic 256-byte payload per key",
+  "runs": [
+    {
+      "config": {
+        "batch_rows": 1024,
+        "max_open_files": 40,
+        "max_run_bytes": 67108864,
+        "max_run_rows": 16384,
+        "max_temp_bytes": 2147483648,
+        "max_temp_run_files": 256,
+        "merge_fan_in": 8,
+        "merge_workers": 1
+      },
+      "independent_full_comparison": "passed",
+      "logical_sha256": "0cd7d89952f9903c3ca1239182be6572e808b59e5a9f83fb92648aeb7020da8c",
+      "metrics": {
+        "initial_runs": 64,
+        "input_rows": 1048576,
+        "merge_elapsed_ns": 7429238932,
+        "merge_passes": 2,
+        "merge_processed_rows": 2097152,
+        "output_rows": 1048576,
+        "peak_heap_entries": 8,
+        "peak_merge_workers": 1,
+        "peak_open_files": 9,
+        "peak_run_bytes": 5111808,
+        "peak_run_rows": 16384,
+        "peak_temp_bytes": 554287310,
+        "peak_temp_run_files": 65,
+        "peak_write_buffer_bytes": 319488,
+        "peak_write_buffer_rows": 1024
+      },
+      "payload_bytes": 256,
+      "program_wall_seconds": 11.157095865,
+      "rows": 1048576,
+      "sort_wall_seconds": 10.841103196,
+      "process": {
+        "time_exit_status": 0,
+        "user_seconds": 2.13,
+        "system_seconds": 1.37,
+        "cpu_percent": 31,
+        "maximum_rss_kib": 31476,
+        "time_wall_seconds": 11.16
+      }
+    },
+    {
+      "config": {
+        "batch_rows": 1024,
+        "max_open_files": 40,
+        "max_run_bytes": 67108864,
+        "max_run_rows": 16384,
+        "max_temp_bytes": 2147483648,
+        "max_temp_run_files": 256,
+        "merge_fan_in": 8,
+        "merge_workers": 4
+      },
+      "independent_full_comparison": "passed",
+      "logical_sha256": "0cd7d89952f9903c3ca1239182be6572e808b59e5a9f83fb92648aeb7020da8c",
+      "metrics": {
+        "initial_runs": 64,
+        "input_rows": 1048576,
+        "merge_elapsed_ns": 5278110287,
+        "merge_passes": 2,
+        "merge_processed_rows": 2097152,
+        "output_rows": 1048576,
+        "peak_heap_entries": 8,
+        "peak_merge_workers": 4,
+        "peak_open_files": 36,
+        "peak_run_bytes": 5111808,
+        "peak_run_rows": 16384,
+        "peak_temp_bytes": 554287310,
+        "peak_temp_run_files": 68,
+        "peak_write_buffer_bytes": 319488,
+        "peak_write_buffer_rows": 1024
+      },
+      "payload_bytes": 256,
+      "program_wall_seconds": 8.968063673,
+      "rows": 1048576,
+      "sort_wall_seconds": 8.658458717,
+      "process": {
+        "time_exit_status": 0,
+        "user_seconds": 2.25,
+        "system_seconds": 1.26,
+        "cpu_percent": 39,
+        "maximum_rss_kib": 52220,
+        "time_wall_seconds": 8.97
+      }
+    }
+  ],
+  "limitations": [
+    "single sequential measurement per mode; no controlled cold-cache baseline",
+    "unrelated concurrent storage activity not isolated",
+    "final merge group, initial runs, other sources and core remain sequential",
+    "per-worker buffers and metadata multiply; 64MiB is not total RSS",
+    "no 18-day rerun and no stable speedup or ETA inferred"
+  ],
+  "validation": {
+    "workspace": "passed, exit 0",
+    "skipped_test": "four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second",
+    "fmt": "passed, exit 0",
+    "clippy": "passed, exit 0; existing dependency warnings retained",
+    "code_index": "task tree not indexed; checked current source instead of main graph",
+    "public_history_fixture": "8 valid PM snapshots, 8 runs / 4 first-round groups; test-only startup barrier; actual peak_merge_workers > 1; complete public inputs / core / prior-position TWAP match single-worker baseline",
+    "measurement_applicability": "No production code or measurement tool changed in fixture rework; original measurements remain bound to a82488a8cb438a8b02b9d818e775848181779b64 and were not repeated."
+  },
+  "consumer_binary": {
+    "source_commit": "568a52c2e090d9744aeb23efad7a9decd270d79f",
+    "sha256": "47f88dd39f242d80b6e79d7dfc5c48ae0d3f9ee932e301a8f1bff27909b90197",
+    "size_bytes": 19841000,
+    "build_command": "cargo build -p baseline-mm --example research_source_health_two_layer --release --locked --offline -j8",
+    "build_exit_code": 0,
+    "artifact": "review-rework-v2/research_source_health_two_layer.release",
+    "execution": "not run; no prepare/study; no 18-day config changed"
+  }
+}
