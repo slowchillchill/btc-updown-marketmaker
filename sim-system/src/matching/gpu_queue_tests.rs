@@ -176,9 +176,21 @@ fn gpu_fifo_preserves_segment_order_taker_debt_and_resync() {
             "matched":matched.to_string(),"used":used.to_string(),"slices":slices,
             "applied":cross_prices.iter().map(|price|describe(&source,BookSide::Ask,*price)).collect::<Vec<_>>() }));
     }
+    let mut taker_fees=Vec::new();
+    for (fills,rate,exponent) in [
+        (vec![(1_u64,1_000_003_u128,cross_prices[0]),(2,1_000_003,cross_prices[1]),(3,1_000_003,cross_prices[2])],"0.25",2_u32),
+        (vec![(1,1_000_040,cross_prices[1]),(2,1_000_040,cross_prices[1])],"0.25",1),
+        (vec![(1,1,cross_prices[0])],"0.25",4_000_000_000),
+    ] {
+        let (total,allocations)=allocate_taker_fee_micro_units_by_key(&fills,rate.parse().unwrap(),exponent).unwrap();
+        taker_fees.push(json!({"base":fills.iter().map(|(_,base,_)|base.to_string()).collect::<Vec<_>>(),
+            "prices":fills.iter().map(|(_,_,price)|price.to_string()).collect::<Vec<_>>(),
+            "rate":rate,"exponent":exponent,"total":total.to_string(),
+            "allocations":allocations.iter().map(|value|value.to_string()).collect::<Vec<_>>() }));
+    }
     let input=json!({"checkpoints":checkpoints,"maker_depletion":"1000000","taker_quote":"2000000",
         "multi_plan":{"initial":multi_initial,"slices":slices,"applied":multi_applied,"echo":multi_echo},
-        "quote_plans":quote_plans,"cross_quote_plans":cross_plans,"floor_sums":floor_sums,"cross_limits":cross_limits,"limit_segments":limit_segments,"empty_quote_plan":{"matched":empty_quote.matched_base_units.to_string(),"used":empty_quote.used_quote_units.to_string()}});
+        "quote_plans":quote_plans,"cross_quote_plans":cross_plans,"floor_sums":floor_sums,"taker_fees":taker_fees,"cross_limits":cross_limits,"limit_segments":limit_segments,"empty_quote_plan":{"matched":empty_quote.matched_base_units.to_string(),"used":empty_quote.used_quote_units.to_string()}});
     let python=std::env::var("B_GPU_PYTHON").unwrap();
     let script=std::env::var("B_GPU_FIFO_VALIDATOR").unwrap();
     let mut child=std::process::Command::new(python).arg(script).stdin(std::process::Stdio::piped())

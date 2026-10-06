@@ -194,6 +194,18 @@ def main():
         result=Numbers.run_exact_batch(lambda:apply_asset_limit(cross,plan,torch.ones(1,dtype=torch.bool,device='cuda')))
         assert describe(result)==original['applied']
     limit_cross_seconds=time.perf_counter()-limit_cross_started
+    from taker_fee import allocate_taker_fee
+    for original in reference['taker_fees']:
+        count=len(original['base'])
+        base=integers([int(value) for value in original['base']])
+        prices=[Fraction(value) for value in original['prices']]
+        rate_value=Fraction(original['rate'])
+        price=Numbers.run_exact_batch(lambda:ExactRational.ratio(integers([value.numerator for value in prices]),integers([value.denominator for value in prices])))
+        rate=Numbers.run_exact_batch(lambda:ExactRational.ratio(integers([rate_value.numerator]),integers([rate_value.denominator])))
+        fee=Numbers.run_exact_batch(lambda:allocate_taker_fee(base,price,rate,original['exponent'],1,count))
+        assert not fee.fault.any().cpu().item(),fee.fault.cpu().tolist()
+        assert values(fee.total_micro)==[int(original['total'])]
+        assert values(fee.per_fill_micro)==[int(value) for value in original['allocations']]
     torch.cuda.synchronize()
     print(json.dumps({'checks':['original_fifo_all_fields','taker_original_quote_difference','debt_echo_no_second_depletion',
         'resync_retains_account_order','cancel_only_target','segment_growth_retains_original_B_Q',
@@ -203,7 +215,8 @@ def main():
         'whole_budget_FOK_gate_before_any_queue_apply','original_Euclid_floor_sum',
         'floor_sum_grows_for_large_exact_result','floor_sum_invalid_not_normal_value','original_empty_asset_quote_no_liquidity','original_nonmonotone_limit_segment',
         'limit_segment_exact_96bit_quantity','original_GTC_cross_price_cumulative_credit',
-        'GTC_partial_target_applies_without_FOK_gate','maximum_price_stops_before_later_ask'],
+        'GTC_partial_target_applies_without_FOK_gate','maximum_price_stops_before_later_ask','original_order_total_taker_fee_H5',
+        'exact_remainder_allocation_original_fill_order','taker_fee_large_exponent_strict_zero'],
         'limit_cross_seconds':limit_cross_seconds,'limit_segment_seconds':limit_seconds,'capacity':queue.capacity,'elapsed_seconds':time.perf_counter()-started,
         'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
         'noe_ledger_execution_delivered':False}))
