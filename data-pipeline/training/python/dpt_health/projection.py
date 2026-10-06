@@ -111,7 +111,8 @@ def deduplicate(db, table, keys, helper, files, directory, business=False):
     db.execute("DROP TABLE duplicate_coordinates")
     if not duplicates:
         return table
-    db.execute(f"CREATE TABLE unique_{table} AS SELECT * FROM {table} QUALIFY row_number() OVER (PARTITION BY {key_sql} ORDER BY file_id,row_id)=1")
+    first_order='source_order' if business else 'file_id,row_id'
+    db.execute(f"CREATE TABLE unique_{table} AS SELECT * FROM {table} QUALIFY row_number() OVER (PARTITION BY {key_sql} ORDER BY {first_order})=1")
     return "unique_" + table
 
 
@@ -156,8 +157,9 @@ def make_pm_events(db, raw):
              WHEN event_type IN ('book','best_bid_ask','tick_size_change','last_trade_price') THEN [asset_id]
              ELSE []::VARCHAR[] END AS assets
         FROM {raw}""")
-    db.execute("""CREATE TABLE pm_epoch AS SELECT condition_id,epoch,min(struct_pack(received:=received,file_id:=file_id,row_id:=row_id)) AS first_order
-        FROM pm_input GROUP BY condition_id,epoch""")
+    db.execute("""CREATE TABLE pm_epoch AS SELECT condition_id,epoch,
+        struct_pack(available:=base,file_id:=file_id,row_id:=row_id) AS first_order
+        FROM pm_input QUALIFY row_number() OVER(PARTITION BY condition_id,epoch ORDER BY sequence,file_id,row_id)=1""")
     db.execute("""CREATE TABLE pm_ordered AS SELECT p.*,dense_rank() OVER (PARTITION BY p.condition_id ORDER BY e.first_order) AS generation,
         max(base) OVER (PARTITION BY p.condition_id ORDER BY e.first_order,p.sequence,p.file_id,p.row_id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS clock,
         row_number() OVER (PARTITION BY p.condition_id ORDER BY e.first_order,p.sequence,p.file_id,p.row_id) AS order_id
@@ -189,6 +191,29 @@ def make_pm_events(db, raw):
 
 
 def make_common_events(db, kinds, helper, files, work, progress):
+    # Establish one source-native order before business filtering or duplicate
+    # suppression. Captured no-ops advance this frontier, never last-valid clocks.
+    native=[]
+    for kind,source in [('binance_depth_snapshot','binance_depth'),('binance_depth_update','binance_depth'),('binance_aggtrade','binance_trade'),('polymarket_rtds_chainlink_twap','chainlink_twap60'),('polymarket_rtds_chainlink_btc_usd','chainlink_spot')]:
+        if kind not in kinds:
+            continue
+        spot=source=='chainlink_spot'
+        epoch="''" if spot else 'source_sequence_epoch_id'
+        sequence='row_id' if spot else 'collector_admission_sequence'
+        base='epoch_ms(timestamp_received)' if spot else 'greatest(epoch_ms(timestamp_received),epoch_ms(collector_admission_time_utc_ms))'
+        extra=' WHERE window_s=60' if source=='chainlink_twap60' else ''
+        native.append(f"SELECT {literal(source)} AS source,{epoch} AS epoch,{sequence} AS sequence,epoch_ms(timestamp_received) AS received,{base} AS base,file_id,row_id FROM raw_{kind}{extra}")
+    if native:
+        db.execute('CREATE TEMP VIEW common_native AS '+' UNION ALL '.join(native))
+        db.execute("""CREATE TABLE common_epochs AS SELECT source,epoch,
+            struct_pack(available:=base,file_id:=file_id,row_id:=row_id) AS first_order FROM common_native
+            QUALIFY row_number() OVER(PARTITION BY source,epoch ORDER BY CASE WHEN source='chainlink_spot' THEN file_id ELSE 0 END,sequence,file_id,row_id)=1""")
+        db.execute("""CREATE TABLE common_native_order AS SELECT n.*,
+            max(base) OVER(PARTITION BY n.source ORDER BY e.first_order,CASE WHEN n.source='chainlink_spot' THEN n.file_id ELSE 0 END,n.sequence,n.file_id,n.row_id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS visible_at,
+            dense_rank() OVER(PARTITION BY n.source ORDER BY e.first_order) AS generation,
+            row_number() OVER(PARTITION BY n.source ORDER BY e.first_order,CASE WHEN n.source='chainlink_spot' THEN n.file_id ELSE 0 END,n.sequence,n.file_id,n.row_id) AS order_id
+            FROM common_native n JOIN common_epochs e USING(source,epoch)""")
+        db.execute('DROP VIEW common_native')
     queries = []
     if "binance_depth_snapshot" in kinds:
         table = deduplicate(db,"raw_binance_depth_snapshot",["source_sequence_epoch_id","collector_admission_sequence"],helper,files,work/"duplicates-depth-snapshot")
@@ -197,20 +222,18 @@ def make_common_events(db, kinds, helper, files, work, progress):
         table = deduplicate(db,"raw_binance_depth_update",["source_sequence_epoch_id","collector_admission_sequence"],helper,files,work/"duplicates-depth-update")
         queries.append(f"SELECT 'binance_depth','','',epoch_ms(timestamp_received),epoch_ms(event_time),greatest(epoch_ms(timestamp_received),epoch_ms(collector_admission_time_utc_ms)),source_sequence_epoch_id,collector_admission_sequence,stitch_verdict='applied',false,stitch_verdict IN ('not_applied_confirmed_hole','not_applied_snapshot_unavailable'),stitch_verdict NOT IN ('not_applied_confirmed_hole','not_applied_snapshot_unavailable'),file_id,row_id FROM {table}")
     if "binance_aggtrade" in kinds:
-        db.execute("CREATE TABLE valid_trades AS SELECT * FROM raw_binance_aggtrade WHERE record_kind='trade'")
+        db.execute("""CREATE TABLE valid_trades AS SELECT t.*,n.order_id AS source_order
+            FROM raw_binance_aggtrade t JOIN common_native_order n USING(file_id,row_id)
+            WHERE n.source='binance_trade' AND record_kind='trade'""")
         # Native IDs remain continuous across collector restarts. Preserve the
         # public reducer's backwards-ID failure before suppressing repeats.
-        db.execute("""CREATE TEMP TABLE trade_epochs AS SELECT source_sequence_epoch_id,
-            min(struct_pack(received:=timestamp_received,file_id:=file_id,row_id:=row_id)) AS first_order
-            FROM valid_trades GROUP BY source_sequence_epoch_id""")
         backwards=db.execute("""SELECT count(*) FROM (
-            SELECT aggregate_trade_id,lag(aggregate_trade_id) OVER(ORDER BY e.first_order,
-                collector_admission_sequence,file_id,row_id) AS previous_id
-            FROM valid_trades JOIN trade_epochs e USING(source_sequence_epoch_id))
+            SELECT aggregate_trade_id,lag(aggregate_trade_id) OVER(ORDER BY n.order_id) AS previous_id
+            FROM valid_trades t JOIN common_native_order n USING(file_id,row_id)
+            WHERE n.source='binance_trade')
             WHERE aggregate_trade_id<previous_id""").fetchone()[0]
         if backwards:
             raise ValueError("grouped aggregate trades must not move backwards")
-        db.execute("DROP TABLE trade_epochs")
         table = deduplicate(db,"valid_trades",["aggregate_trade_id"],helper,files,work/"duplicates-trades",business=True)
         queries.append(f"SELECT 'binance_trade','','',epoch_ms(timestamp_received),epoch_ms(trade_time),greatest(epoch_ms(timestamp_received),epoch_ms(collector_admission_time_utc_ms)),source_sequence_epoch_id,collector_admission_sequence,true,false,false,true,file_id,row_id FROM {table}")
     for kind, source, window in [("polymarket_rtds_chainlink_btc_usd","chainlink_spot",None),("polymarket_rtds_chainlink_twap","chainlink_twap60",60)]:
@@ -233,14 +256,43 @@ def make_common_events(db, kinds, helper, files, work, progress):
         db.execute("CREATE TABLE common_events(source VARCHAR,condition_id VARCHAR,asset VARCHAR,visible_at BIGINT,received BIGINT,event BIGINT,generation BIGINT,valid BOOLEAN,snapshot BOOLEAN,forced_sync BOOLEAN,available BOOLEAN,file_id BIGINT,row_id BIGINT,order_id BIGINT,phase INTEGER)")
         return
     db.execute("CREATE TABLE common_raw AS SELECT * FROM (" + " UNION ALL ".join(queries) + ") t(source,condition_id,asset,received,event,base,epoch,sequence,valid,snapshot,forced_sync,available,file_id,row_id)")
-    db.execute("""CREATE TABLE common_epochs AS SELECT source,epoch,min(struct_pack(received:=received,file_id:=file_id,row_id:=row_id)) AS first_order FROM common_raw GROUP BY source,epoch""")
     db.execute("""CREATE TABLE common_events AS SELECT r.source,condition_id,asset,
-        max(base) OVER(PARTITION BY r.source ORDER BY e.first_order,CASE WHEN r.source='chainlink_spot' THEN r.file_id ELSE 0 END,r.sequence,r.file_id,r.row_id ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS visible_at,
-        received,event,dense_rank() OVER(PARTITION BY r.source ORDER BY e.first_order) AS generation,
+        n.visible_at,r.received,event,n.generation,
         valid,snapshot,forced_sync,available,r.file_id,r.row_id,
-        row_number() OVER(PARTITION BY r.source ORDER BY e.first_order,CASE WHEN r.source='chainlink_spot' THEN r.file_id ELSE 0 END,r.sequence,r.file_id,r.row_id) AS order_id,1 AS phase
-        FROM common_raw r JOIN common_epochs e USING(source,epoch)""")
+        n.order_id,1 AS phase
+        FROM common_raw r JOIN common_native_order n USING(source,file_id,row_id)""")
     progress("common-minimal-state")
+
+
+def epoch_diagnostics(db, output):
+    """Small summaries of projected native rows; no extra raw input read.
+
+    These expose the chosen convention and causal clamps. They are evidence for
+    result review, not proof of physical session order or a new rejection gate.
+    """
+    tables={row[0] for row in db.execute("SELECT table_name FROM duckdb_tables()").fetchall()}
+    pieces=[]
+    if 'pm_ordered' in tables:
+        pieces.append("SELECT 'polymarket' AS source,condition_id,epoch,generation,sequence,received,base,clock AS visible_at,file_id,row_id,order_id FROM pm_ordered")
+    if 'common_native_order' in tables:
+        pieces.append("SELECT source,'' AS condition_id,epoch,generation,sequence,received,base,visible_at,file_id,row_id,order_id FROM common_native_order")
+    if pieces:
+        db.execute("CREATE TEMP VIEW diagnostic_native AS "+' UNION ALL '.join(pieces))
+    else:
+        db.execute("CREATE TEMP VIEW diagnostic_native AS SELECT NULL::VARCHAR AS source,NULL::VARCHAR AS condition_id,NULL::VARCHAR AS epoch,NULL::BIGINT AS generation,NULL::UBIGINT AS sequence,NULL::BIGINT AS received,NULL::BIGINT AS base,NULL::BIGINT AS visible_at,NULL::BIGINT AS file_id,NULL::BIGINT AS row_id,NULL::BIGINT AS order_id WHERE false")
+    db.execute(f"""COPY (SELECT source,condition_id,epoch,generation AS used_order_rank,count(*) AS projected_native_rows,
+        min_by(sequence,order_id) AS first_sequence,max_by(sequence,order_id) AS last_sequence,
+        min_by(received,order_id) AS first_received,max_by(received,order_id) AS last_received,
+        min_by(base,order_id) AS first_available_base,max_by(base,order_id) AS last_available_base,
+        max(base) AS maximum_available_base,min_by(visible_at,order_id) AS first_causal_frontier,
+        max(visible_at) AS maximum_causal_frontier,
+        min_by(file_id,order_id) AS first_file_id,min_by(row_id,order_id) AS first_row_id,
+        max_by(file_id,order_id) AS last_file_id,max_by(row_id,order_id) AS last_row_id,
+        CASE WHEN source='chainlink_spot' THEN 'legacy file/row receive frontier'
+             ELSE 'epoch first native sequence available base; stable file/row ties; native sequence and prefix frontier' END AS ordering_convention
+        FROM diagnostic_native GROUP BY source,condition_id,epoch,generation)
+        TO {literal(output/'epoch-ordering.parquet')} (FORMAT PARQUET,COMPRESSION ZSTD)""")
+    db.execute("DROP VIEW diagnostic_native")
 
 
 def state_changes(db, output):
@@ -272,3 +324,4 @@ def state_changes(db, output):
         TO {literal(output/'changes.parquet')} (FORMAT PARQUET,COMPRESSION ZSTD)""")
     db.execute(f"COPY markets TO {literal(output/'markets.parquet')} (FORMAT PARQUET,COMPRESSION ZSTD)")
     db.execute(f"COPY rules TO {literal(output/'rules.parquet')} (FORMAT PARQUET,COMPRESSION ZSTD)")
+    epoch_diagnostics(db,output)

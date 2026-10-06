@@ -1,5 +1,5 @@
 {
-  "format": "columnar-health-engineering-v1",
+  "format": "columnar-health-engineering-v2",
   "delivery_issue": 185,
   "collector_commit": "8e6e9d8a744ec3ec10b4c0b8d57a251a16159d59",
   "historical_eighteen_day_run": false,
@@ -14,10 +14,12 @@
     },
     "resource_limits_are_process_rss_or_total_disk_bounds": false,
     "full_duration_and_peaks": "unknown",
-    "legacy_global_replay_clock_preserved": false
+    "legacy_global_replay_clock_preserved": false,
+    "epoch_ordering": "first native sequence max(received, admitted), stable file/row tie; native order and causal frontier established before common-source business filtering",
+    "epoch_diagnostics": "epoch-ordering.parquet; common source captured necessary-column records before business filtering, PM native messages after identical coordinate suppression; not proof of physical session order or concurrent-session semantics"
   },
   "validation": {
-    "python_tests": 14,
+    "python_tests": 17,
     "python_exit": 0,
     "syntax": "AST parsed",
     "dependency_check": "passed",
@@ -46,7 +48,8 @@
       "raw_file_bytes": 97043,
       "raw_file_rows": 792,
       "scope": "original single metadata file and exact original selections"
-    }
+    },
+    "rust_evidence_scope": "unchanged Rust inputs since first delivery; subsequent rework changes Python/tests/docs only"
   },
   "bounded_pm_comparison": {
     "input": {
@@ -101,7 +104,7 @@
       "Only one run for each thread setting; no repeated benchmark.",
       "Operator active worker counts were not sampled.",
       "Disk allocated bytes are end occupancy, not the whole-run peak.",
-      "Measured before final source/rule/counter corrections; not all final paths were timed.",
+      "Measured before final source/rule/counter/epoch/frontier/diagnostic corrections; not all final paths were timed.",
       "No inference of eighteen-day speedup, RSS or disk capacity."
     ]
   },
@@ -116,7 +119,11 @@
     "positive-time deselection splits episodes; same-ms temporary selection does not",
     "zero/equal normal and max; finite SQL labels match production policy",
     "future fit contributions cannot alter earlier frozen candidates",
-    "one truncated Parquet boundary"
+    "one truncated Parquet boundary",
+    "real deselection censors both sides using actually visible previous state; a one-ms probe cannot bridge a real gap",
+    "future epoch older received preserves already-visible prefix; later native records do not move epoch first order",
+    "trade duplicate first row cannot reorder A/B/C after suppression; native clocks/frontier retained separately from valid progress",
+    "foreground SIGTERM reaps only own stage, records actual native -15/signal and does not start study"
   ],
   "input_proposal": {
     "files": 2864,
@@ -129,6 +136,7 @@
   "research_remaining": [
     "Exact-head independent review before starting the already-authorized new eighteen-day study.",
     "Actual full-run resource evidence, tail distributions and candidate tradeoffs are still unavailable.",
-    "Candidates are hypotheses; no formal thresholds or economic validation."
+    "Candidates are hypotheses; no formal thresholds or economic validation.",
+    "Review actual epoch diagnostics for clock overlap/competition; unexplained competing sessions require task-level semantic triage, not invented acceptance."
   ]
 }

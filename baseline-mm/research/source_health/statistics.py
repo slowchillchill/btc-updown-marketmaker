@@ -85,18 +85,33 @@ def aggregates(db, table):
 def evaluate(db, candidate, a, b, name, output):
     # Fit and validation are separate SQL domains. Future records cannot update
     # frozen candidates. Read preparation may include later data; fit excludes it.
+    # Merge adjacent positive-demand pieces before applying observation bounds.
+    # A change in active market count is not a source deselection.
+    db.execute("""CREATE TEMP TABLE evaluation_scopes AS
+        SELECT source,condition_id,asset,a AS evaluation_start,b FROM scopes WHERE source='polymarket'
+        UNION ALL SELECT source,'','',min(a),max(b) FROM (
+            SELECT *,sum((previous_end IS DISTINCT FROM a)::INTEGER) OVER(PARTITION BY source ORDER BY a ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS period
+            FROM (SELECT *,lag(b) OVER(PARTITION BY source ORDER BY a) AS previous_end FROM selections))
+        GROUP BY source,period""")
     db.execute(f"""CREATE TEMP TABLE evaluation_domain AS
         SELECT * REPLACE(greatest(a,{a}-1) AS a,least(b,{b}) AS b) FROM selected_intervals WHERE a<{b} AND b>{a}-1
         UNION ALL SELECT f.* REPLACE(f.a AS a,least(f.b,s.a) AS b) FROM boundary_facts f JOIN scopes s USING(source,condition_id,asset)
-        WHERE f.source='polymarket' AND s.a>={a} AND s.a<{b}""")
+        WHERE f.source='polymarket' AND s.a>={a} AND s.a<{b}
+        UNION ALL SELECT i.* REPLACE(s.evaluation_start-1 AS a,s.evaluation_start AS b)
+        FROM causal_intervals i JOIN evaluation_scopes s USING(source,condition_id,asset)
+        WHERE s.source!='polymarket' AND s.evaluation_start>={a} AND s.evaluation_start<{b}
+          AND i.a<=s.evaluation_start-1 AND i.b>s.evaluation_start-1""")
     candidate_intervals(db,candidate["parameters"],"evaluation_domain","candidate_spans")
-    episodes(db,"candidate_spans","uncut_episodes")
+    db.execute("""CREATE TEMP TABLE scoped_candidate_spans AS SELECT c.*,s.evaluation_start
+        FROM candidate_spans c JOIN evaluation_scopes s USING(source,condition_id,asset)
+        WHERE c.b>s.evaluation_start-1 AND c.a<s.b""")
+    episodes(db,"scoped_candidate_spans","uncut_episodes",selection_scopes=True)
     db.execute(f"""CREATE TABLE candidate_episodes AS SELECT e.*
-        REPLACE(greatest(e.a,s.a,{a}) AS a),
-        e.a<greatest(s.a,{a}) AS left_censored,
+        REPLACE(greatest(e.a,s.evaluation_start,{a}) AS a),
+        e.a<greatest(s.evaluation_start,{a}) AS left_censored,
         e.b=least(s.b,{b}) AS right_censored
-        FROM uncut_episodes e JOIN scopes s USING(source,condition_id,asset)
-        WHERE e.b>greatest(s.a,{a})""")
+        FROM uncut_episodes e JOIN evaluation_scopes s USING(source,condition_id,asset,evaluation_start)
+        WHERE e.b>greatest(s.evaluation_start,{a})""")
     daily_intervals(db,"candidate_episodes","episode_daily")
     # Episode counts over a day are intersected fragments. They cannot be summed
     # into whole-window episode counts. A true transition at midnight belongs to
@@ -146,6 +161,6 @@ def evaluate(db, candidate, a, b, name, output):
     result=dict(candidate=candidate,window=[a,b],states=whole,daily_states=daily,
                 groups=list(grouped.values()),markets=list(markets.values()),
                 exceeded_triggers=name+'.exceeded.parquet',duration_unit="PM: asset-ms; common: source-ms")
-    for table in ("episode_daily","candidate_episodes","uncut_episodes","candidate_spans","evaluation_domain"):
+    for table in ("episode_daily","candidate_episodes","uncut_episodes","scoped_candidate_spans","candidate_spans","evaluation_domain","evaluation_scopes"):
         db.execute(f"DROP TABLE {table}")
     return result

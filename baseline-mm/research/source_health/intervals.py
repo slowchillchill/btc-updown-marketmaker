@@ -119,16 +119,18 @@ def candidate_intervals(db, candidate, table, target):
     db.execute("DROP TABLE limits")
 
 
-def episodes(db, table, target):
+def episodes(db, table, target, selection_scopes=False):
+    # A one-ms causal probe must not bridge a real one-ms deselection gap.
+    partition=',evaluation_start' if selection_scopes else ''
     # Positive-time continuity: same-ms temporary selections never split runs.
     db.execute(f"""CREATE TABLE {target} AS WITH prior AS (
         SELECT *,lag(state) OVER w AS previous_state,lag(b) OVER w AS previous_end
-        FROM {table} WINDOW w AS (PARTITION BY source,condition_id,asset ORDER BY a)
+        FROM {table} WINDOW w AS (PARTITION BY source,condition_id,asset{partition} ORDER BY a)
     ), numbered AS (
         SELECT *,sum(CASE WHEN state IS DISTINCT FROM previous_state OR a!=previous_end THEN 1 ELSE 0 END)
-              OVER(PARTITION BY source,condition_id,asset ORDER BY a ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS episode
+              OVER(PARTITION BY source,condition_id,asset{partition} ORDER BY a ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS episode
         FROM prior
-    ) SELECT source,condition_id,asset,state,episode,min(a) AS a,max(b) AS b,
+    ) SELECT source,condition_id,asset{partition},state,episode,min(a) AS a,max(b) AS b,
         min_by(received,a) AS received,min_by(event,a) AS event,
         min_by(previous_state,a) AS previous_state,min_by(previous_end,a) AS previous_end,
-        min_by(original_at,a) AS original_at FROM numbered GROUP BY source,condition_id,asset,state,episode""")
+        min_by(original_at,a) AS original_at FROM numbered GROUP BY source,condition_id,asset{partition},state,episode""")

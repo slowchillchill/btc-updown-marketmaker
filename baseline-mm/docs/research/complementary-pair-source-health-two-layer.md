@@ -28,13 +28,15 @@
 
 ## 时间、选源与区间
 
-健康received/event来自最后有效消息的直接来源。合法可知时间使用 `max(received, admitted)` 和必要身份/源内前沿。窄排序只处理epoch内admission坐标及来源时序。多个来源各自维护时间，不恢复旧六首项回放的全局 `now=max(previous_now,group.visible)`。因此新 `visible_at` 不是逐条旧core的at，不能声称两者逐条等价。这项区别不改变 S=t−last_received、A=t−last_event、未知/同步/时间异常或无消息时长的定义。
+健康received/event来自最后有效消息的直接来源。合法可知时间使用 `max(received, admitted)` 和必要身份/源内前沿。代际排序取每epoch最先native序号那一行的 `max(received,admitted)`，同值用稳定file/row顺序。epoch内按native序号，并保持源内可见前沿。共同来源在去重或业务过滤前形成一次原生顺序和前沿；异常、非Trade或重复仍不刷新最后有效received/event。多个来源各自维护时间，不恢复旧六首项回放的全局 `now=max(previous_now,group.visible)`。因此新 `visible_at` 不是逐条旧core的at，不能声称两者逐条等价。这项区别不改变 S=t−last_received、A=t−last_event、未知/同步/时间异常或无消息时长的定义。
+
+跨epoch首项与稳定file/row是本研究的确定性排序约定。墙钟值不能证明真实采集会话的物理先后，该约定不支持多个并发采集会话的竞争。已选顺序保持代际连续，不引入A→B→A的同步规则。运行结果须核对代际诊断；无法解释的真实竞争须保留结果并返回任务分流。
 
 PM按准确condition/asset及半开市场窗口统计。共同源各自只有一份来源分布。策略依赖分布使用实际启用的Binance和参考选择。有效spot存在时继续选spot；spot缺失时按已观察规则选择TWAP60或spot，TWAP30不参与本轮校准。共同需求由覆盖边界合并，不按活跃市场数量重复计权。
 
 区间使用同毫秒最终事实和选择。零时长暂态不切断连续段；每次真实有效确认仍保留到达样本。正时长未选区间切断段。首端、尾端、无消息和跨午夜时长全部保留。边界探针只读取此前已可见的状态，不用起点新事实回推历史。
 
-逐scope报告标出source/condition/asset。PM市场和组的单位是资产·毫秒，次数是资产段之和；逐scope另报单资产最长段；不能称为市场墙钟健康时长。共同源单位是来源·毫秒。UTC日片段是完整连续段与该日的交集，日片段次数不能相加冒充全窗次数。真实午夜切换归新半开日；同状态跨午夜不伪造切换。左/右删失表示段在评价、市场或日边界被截断。切换每小时以全部已观察时长为分母，PM对应资产小时。
+逐scope报告标出source/condition/asset。PM市场和组的单位是资产·毫秒，次数是资产段之和；逐scope另报单资产最长段；不能称为市场墙钟健康时长。共同源单位是来源·毫秒。UTC日片段是完整连续段与该日的交集，日片段次数不能相加冒充全窗次数。真实午夜切换归新半开日；同状态跨午夜不伪造切换。左/右删失表示段在评价、市场、实际选源或日边界被截断。重新选择起点只用此前已经可见的来源状态判断左截断。恰在该起点新可见的旧时间事实不能回推到未选区间；一毫秒边界探针也不能把真实未选间隔连起来。切换每小时以全部已观察时长为分母，PM对应资产小时。
 
 ## 分布、三态与候选
 
@@ -48,7 +50,7 @@ S/A按连续时间毫秒加权，到达延迟按每次有效消息计数。独�
 
 ## 输出与监督
 
-prepare输出 `changes.parquet / arrivals.parquet / markets.parquet / rules.parquet / initialization.jsonl / material.json`。material.json只在全部成功后写出。study保留两类每日直方图、逐source/asset/day分母、到达样本，以及五折各一份冻结和验证JSON。每个候选另有 `*.exceeded.parquet`，记录真实进入超限的时刻、最后直接received/event、当时S/A、前态、最后事实可见时间及删失；明确标出无新消息期间的阈值跨越，不把延迟阈值当事故真值。
+prepare输出 `changes.parquet / arrivals.parquet / markets.parquet / rules.parquet / epoch-ordering.parquet / initialization.jsonl / material.json`。`epoch-ordering.parquet`保留小型代际首项、末项、原生序号、received/available时间、前沿和实际所用顺序。共同来源诊断包含业务过滤前的必要列记录；PM诊断以原生消息计数，不按展开资产重复计数，已压掉相同坐标的重复。它不证明完整采集会话，也不增加拒绝或丢弃规则。material.json只在全部成功后写出。study保留两类每日直方图、逐source/asset/day分母、到达样本，以及五折各一份冻结和验证JSON。每个候选另有 `*.exceeded.parquet`，记录真实进入超限的时刻、最后直接received/event、当时S/A、前态、最后事实可见时间及删失；明确标出无新消息期间的阈值跨越，不把延迟阈值当事故真值。
 
 进度默认30秒，阶段变化即时输出。日志含阶段、已读原始行/文件、已耗时、引擎查询进度、当前VmRSS、getrusage峰值RSS、CPU、I/O、工作数据库/ spill占用和实际剩余空间。无可靠总量的算子不编造完成比例或ETA。模型监督按用户要求每10分钟一次。成功后只删除本次已无用途的工作数据库；失败现场保留，不自动重跑、扩额、缩窗或跳源。
 
@@ -83,13 +85,13 @@ cargo build -p baseline-mm -p data-pipeline-training \
   "$CONFIG" "$ARCHIVE_ROOT" "$MOUNT_POINT" "$NEW_LOGS"
 ```
 
-使用前核对准确源提交、两个优化工具、依赖、配置、输入身份和实际归档挂载。stdout/stderr/exit和信号单独保留。脚本必须保持前台可追踪，归档不可用时沿绑定规则停止；配置不得作为新的合同或批准账本。
+使用前核对准确源提交、两个优化工具、依赖、配置、输入身份和实际归档挂载。stdout/stderr/exit和信号单独保留。包装器收到SIGTERM/SIGHUP/SIGINT或监督错误时，结束并回收自己创建的活动阶段进程组，记录真实阶段退出码和信号，再退出；不进入study。脚本必须保持前台可追踪，归档不可用时沿绑定规则停止；配置不得作为新的合同或批准账本。
 
 ## 有界验证与适用限制
 
-同一合法collector构造的262144行PM样本，1文件/1个row group，1线程墙钟1.286s、CPU1.216s、峰值RSS278.6MB；24线程1.006s、CPU2.618s、峰值RSS732.8MB。四份窄输出EXCEPT ALL差异0。真实CPU累计表明确有多核参与；没有采到每个算子的活动线程数。小样本行组少，不能外推十八日加速、总耗时或峰值。随后只调整来源时钟/去重、规则连接和必要行数计量；该小型性能对照没有重测，不能称为最终所有路径的耗时。磁盘记录是测量结束占用，不称全程峰值。
+同一合法collector构造的262144行PM样本，1文件/1个row group，1线程墙钟1.286s、CPU1.216s、峰值RSS278.6MB；24线程1.006s、CPU2.618s、峰值RSS732.8MB。四份窄输出EXCEPT ALL差异0。真实CPU累计表明确有多核参与；没有采到每个算子的活动线程数。小样本行组少，不能外推十八日加速、总耗时或峰值。随后调整来源时钟/去重、规则连接、必要行数计量、代际前沿及诊断；该小型性能对照没有重测，不能称为最终所有路径的耗时。磁盘记录是测量结束占用，不称全程峰值。
 
-代表测试覆盖原构造/解析入口、跨文件重复与冲突、资产和代际、缺口/快照恢复、持续旧事件、Chainlink异常保留、同毫秒样本和最终状态、真实断选、未知分母、首尾/午夜/删失、normal=max=0、未来折不泄漏和一个Parquet截断边界。原metadata初始化小文件的精确选择仍得到原3条前序；没有重扫十二分钟或十八日完整core。本次14项Python测试通过；固定workspace退出0，累计1379 passed/0 failed/23 ignored，具名UTC测试明确跳过。fmt和相关all-targets clippy退出0，既有警告保持。17条真实构造原始记录验证prepare命令；另存的19条有限标量确认验证五折10份冻结/验证文件，不能称为18日历史运行。结果见[工程机器摘要](complementary-pair-columnar-health-engineering.json)和PR，不把旧通过记录替代新入口验证。
+代表测试覆盖原构造/解析入口、跨文件重复与冲突、资产和代际、缺口/快照恢复、持续旧事件、Chainlink异常保留、同毫秒样本和最终状态、真实断选、未知分母、首尾/午夜/删失、normal=max=0、未来折不泄漏和一个Parquet截断边界。原metadata初始化小文件的精确选择仍得到原3条前序；没有重扫十二分钟或十八日完整core。本次17项Python测试通过；固定workspace退出0，累计1379 passed/0 failed/23 ignored，具名UTC测试明确跳过。fmt和相关all-targets clippy退出0，既有警告保持。后续返工仅改Python、测试与说明，Rust输入未变，上述Rust结果继续适用。17条真实构造原始记录验证prepare命令；另存的19条有限标量确认验证五折10份冻结/验证文件，不能称为18日历史运行。返工代表例验证：未来epoch旧received不改已可见前缀；B首条重复过滤后，A→B→C仍保持10@100、20@400、30@400；实际5ms断选的两段共15ms，右删失2、左截断1；重新选择时才可见新事实的左截断0。监督SIGTERM代表记录真实阶段−15并回收，无study。结果见[工程机器摘要](complementary-pair-columnar-health-engineering.json)和PR，不把旧通过记录替代新入口验证。
 
 ## 历史紧凑工程证据
 

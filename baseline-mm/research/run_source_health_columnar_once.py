@@ -20,7 +20,16 @@ def archive_ready(root, mount_point):
     return len(filesystems)==1 and filesystems[0]['target']==str(mount_point) and 'rw' in filesystems[0]['options'].split(',')
 
 
+def interruption(signum, _frame):
+    # A foreground supervisor must reap its own active stage before exiting.
+    error=InterruptedError(f"supervisor received signal {signum}")
+    error.signal_number=signum
+    raise error
+
+
 def main():
+    for signum in (signal.SIGTERM,signal.SIGHUP,signal.SIGINT):
+        signal.signal(signum,interruption)
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('config',type=Path);parser.add_argument('archive_root',type=Path)
     parser.add_argument('mount_point',type=Path);parser.add_argument('logs',type=Path)
@@ -38,6 +47,8 @@ def main():
         with (args.logs/(stage+'.stdout')).open('xb') as stdout,(args.logs/(stage+'.stderr')).open('xb') as stderr:
             process=subprocess.Popen(command,stdout=stdout,stderr=stderr,start_new_session=True)
             stopped_for_archive=False
+            interrupted=None
+            interrupt_signal=None
             try:
                 while process.poll() is None:
                     if not archive_ready(args.archive_root,args.mount_point):
@@ -46,17 +57,26 @@ def main():
                         break
                     time.sleep(30)
                 code=process.wait()
-            except BaseException:
+            except BaseException as error:
+                interrupted=type(error).__name__
+                interrupt_signal=getattr(error,'signal_number',None)
                 if process.poll() is None:
-                    os.killpg(process.pid,signal.SIGTERM)
-                process.wait()
-                raise
-        time_text=(args.logs/(stage+'.time')).read_text()
+                    try:
+                        os.killpg(process.pid,signal.SIGTERM)
+                    except ProcessLookupError:
+                        pass  # It exited between poll and the group signal.
+                code=process.wait()
+        time_file=args.logs/(stage+'.time')
+        time_text=time_file.read_text() if time_file.exists() else ''
         signalled=code<0 or 'Command terminated by signal' in time_text
-        result=dict(stage=stage,returncode=code,terminated_by_signal=signalled,stopped_for_archive=stopped_for_archive)
-        (args.logs/(stage+'.exit.json')).write_text(json.dumps(result,indent=2)+'\n')
+        result=dict(stage=stage,returncode=code,terminated_by_signal=signalled,stopped_for_archive=stopped_for_archive,supervisor_interruption=interrupted,supervisor_signal=interrupt_signal)
         print(json.dumps(result),flush=True)
-        if code or signalled or stopped_for_archive:
+        try:
+            (args.logs/(stage+'.exit.json')).write_text(json.dumps(result,indent=2)+'\n')
+        except OSError as error:
+            print(f"cannot persist stage exit: {error}",file=sys.stderr,flush=True)
+            return 1
+        if code or signalled or stopped_for_archive or interrupted:
             return 1
         if stage=='prepare' and not (run_root/'material/material.json').is_file():
             raise RuntimeError('prepare did not publish its complete material descriptor')

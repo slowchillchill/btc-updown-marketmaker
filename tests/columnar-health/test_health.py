@@ -129,17 +129,53 @@ class ProjectionTests(unittest.TestCase):
             self.assertTrue(all(r[3]==START for r in states))
             self.assertTrue(all(not r[4] for r in states))
             self.assertEqual(db.execute(f"SELECT count(*) FROM read_parquet('{output}/arrivals.parquet')").fetchone()[0],16)
+            self.assertEqual(db.execute(f"SELECT sum(projected_native_rows),count(*) FROM read_parquet('{output}/epoch-ordering.parquet')").fetchone(),(16,2))
             db.close()
+
+    def test_future_epoch_and_older_later_receive_preserve_visible_prefix(self):
+        import hashlib
+        import subprocess
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);original=root/'original.parquet'
+            subprocess.run([str(self.generator),str(original),'4'],check=True)
+            table=pq.read_table(original);rows=table.to_pylist()
+            for index,row in enumerate(rows):
+                row['timestamp_received']=START+(100 if index<2 else 50)
+                row['collector_admission_time_utc_ms']=START+(100 if index<2 else 200)
+            later=dict(rows[0],timestamp_received=START+10,collector_admission_time_utc_ms=START+150,collector_admission_sequence=3)
+            results=[]
+            for label,values in [('prefix',rows[:2]),('future',rows),('later-old-receive',rows+[later])]:
+                path=root/(label+'.parquet');pq.write_table(pa.Table.from_pylist(values,schema=table.schema),path,use_compliant_nested_type=False)
+                file=dict(path=str(path),source_kind='polymarket_market',schema_version='polymarket_orderbook_v3',bytes=path.stat().st_size,rows=len(values),sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+                descriptor=root/(label+'.json');descriptor.write_text(json.dumps(file))
+                subprocess.run([str(self.helper),'identities',str(descriptor),str(root/(label+'.identity.jsonl'))],check=True)
+                db=duckdb.connect();projection.read_columns(db,[file],lambda *a,**k:None)
+                db.execute('CREATE TABLE markets(condition_id VARCHAR,assets VARCHAR[],window_start BIGINT,window_end BIGINT,known_at BIGINT,dependency_received BIGINT)')
+                db.execute('INSERT INTO markets VALUES (?,?,?,?,?,?)',[CONDITION,['1','2'],START,START+1000,START-1,START-1])
+                projection.make_pm_events(db,'raw_polymarket_market')
+                diagnostic=root/(label+'-diagnostic');diagnostic.mkdir()
+                projection.epoch_diagnostics(db,diagnostic)
+                expected_bases=[START+100] if label=='prefix' else [START+100,START+200]
+                self.assertEqual([r[0] for r in db.execute(f"SELECT first_available_base FROM read_parquet('{diagnostic}/epoch-ordering.parquet') ORDER BY used_order_rank").fetchall()],expected_bases)
+                results.append(db.execute('SELECT asset,visible_at,received FROM pm_events WHERE valid AND visible_at=? ORDER BY asset',[START+100]).fetchall())
+                if label!='prefix':
+                    self.assertEqual(db.execute('SELECT max(generation) FROM pm_events').fetchone()[0],2)
+                    self.assertEqual(db.execute('SELECT count(*) FROM pm_events WHERE valid AND visible_at=?',[START+200]).fetchone()[0],2)
+                db.close()
+            self.assertEqual(results,[ [('1',START+100,START+100),('2',START+100,START+100)] ]*3)
 
     def test_chainlink_anomalies_keep_old_source_and_selection(self):
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);db=duckdb.connect()
             rows=[dict(timestamp_received=START+i,payload_timestamp=START-1,freshness_status=q,source_native_payload_json=json.dumps({'i':i}),file_id=0 if i<5 else 1,row_id=i if i<5 else 0) for i,q in enumerate(['fresh','invalid_type','invalid_topic','invalid_symbol','invalid_timestamp','stale'])]
+            rows[4]['timestamp_received']=START+10
             schema=pa.schema([('timestamp_received',pa.timestamp('ms')),('payload_timestamp',pa.timestamp('ms')),('freshness_status',pa.string()),('source_native_payload_json',pa.string()),('file_id',pa.int64()),('row_id',pa.int64())])
             arrow=pa.Table.from_pylist(rows,schema=schema);db.register('spot_fixture',arrow)
             db.execute('CREATE TABLE raw_polymarket_rtds_chainlink_btc_usd AS SELECT * FROM spot_fixture')
             projection.make_common_events(db,{'polymarket_rtds_chainlink_btc_usd':True},self.helper,[],root,lambda *a,**k:None)
             self.assertEqual(db.execute('SELECT received,event FROM common_events ORDER BY order_id').fetchall(),[(START,START-1),(START+5,START-1)])
+            self.assertEqual(db.execute('SELECT visible_at FROM common_events ORDER BY order_id').fetchall(),[(START,),(START+10,)])
+            self.assertEqual(db.execute('SELECT count(*) FROM common_native_order').fetchone()[0],6)
             db.close()
 
     def test_conflicting_pm_identity_uses_real_normalization(self):
@@ -200,6 +236,23 @@ class BoundaryTests(unittest.TestCase):
             report=statistics.evaluate(db,candidate(),START,START+30,'gap',root)
             exceeded=[r for r in report['states'] if r['source']=='chainlink_twap60' and r['state']=='exceeded'][0]
             self.assertEqual((exceeded['episodes'],exceeded['duration_ms']),(2,15))
+            self.assertEqual((exceeded['left_censored_episodes'],exceeded['right_censored_episodes']),(1,2))
+            db.close()
+            # A one-ms causal probe must not fill a real one-ms unselected gap.
+            pq.write_table(pa.Table.from_pylist(rules[:2]+[dict(condition_id=CONDITION,visible_at=START+21,sequence=3,reference=8)],schema=pq.read_schema(root/'rules.parquet')),root/'rules.parquet')
+            db=duckdb.connect();intervals.load_intervals(db,root,START,START+30,False,False)
+            report=statistics.evaluate(db,candidate(),START,START+30,'one-ms-gap',root)
+            exceeded=[r for r in report['states'] if r['source']=='chainlink_twap60' and r['state']=='exceeded'][0]
+            self.assertEqual((exceeded['episodes'],exceeded['duration_ms'],exceeded['left_censored_episodes'],exceeded['right_censored_episodes']),(2,19,1,2))
+            db.close()
+            # A newly visible old timestamp cannot label the time before reselect.
+            pq.write_table(pa.Table.from_pylist(rules[:2]+[dict(condition_id=CONDITION,visible_at=START+25,sequence=3,reference=8)],schema=pq.read_schema(root/'rules.parquet')),root/'rules.parquet')
+            source_rows=rows+[change(START+20,START+20,START+20,source='chainlink_twap60'),change(START+25,START+24,START,source='chainlink_twap60')]
+            pq.write_table(pa.Table.from_pylist(source_rows,schema=pq.read_schema(root/'changes.parquet')),root/'changes.parquet')
+            db=duckdb.connect();intervals.load_intervals(db,root,START,START+30,False,False)
+            report=statistics.evaluate(db,candidate(),START,START+30,'new-fact-at-reselect',root)
+            exceeded=[r for r in report['states'] if r['source']=='chainlink_twap60' and r['state']=='exceeded'][0]
+            self.assertEqual((exceeded['episodes'],exceeded['duration_ms'],exceeded['left_censored_episodes'],exceeded['right_censored_episodes']),(2,15,0,2))
             db.close()
 
     def test_captured_depth_gap_snapshot_recovery_and_old_event(self):
@@ -262,6 +315,29 @@ class TradeClockTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError,'backwards' if backwards else 'conflicting'):
                     projection.make_common_events(db,{'binance_aggtrade':True},Path(os.environ['BOUNDARY_HELPER']),files,root,lambda *a,**k:None)
                 db.close()
+
+    def test_duplicate_first_trade_keeps_prefilter_epoch_order_and_frontier(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp);files=self.trade_file(root)
+            table=pq.read_table(files[0]['path']);template=table.to_pylist()[0]
+            rows=[]
+            for epoch,sequence,trade_id,received,event in [('A',1,1,100,10),('B',1,1,200,10),('B',2,2,400,20),('C',1,3,350,30)]:
+                row=dict(template,source_sequence_epoch_id=epoch,collector_admission_sequence=sequence,
+                    websocket_ingress_sequence=sequence,aggregate_trade_id=trade_id,
+                    timestamp_received=START+received,collector_admission_time_utc_ms=START+received,
+                    trade_time=START+event,event_time=START+event)
+                rows.append(row)
+            pq.write_table(pa.Table.from_pylist(rows,schema=table.schema),files[0]['path'])
+            files[0].update(rows=4,bytes=Path(files[0]['path']).stat().st_size)
+            db=duckdb.connect();projection.read_columns(db,files,lambda *a,**k:None)
+            projection.make_common_events(db,{'binance_aggtrade':True},Path(os.environ['BOUNDARY_HELPER']),files,root,lambda *a,**k:None)
+            actual=db.execute('SELECT event,visible_at,received,generation FROM common_events ORDER BY order_id').fetchall()
+            self.assertEqual(actual,[(START+10,START+100,START+100,1),(START+20,START+400,START+400,2),(START+30,START+400,START+350,3)])
+            projection.epoch_diagnostics(db,root)
+            diagnostics=pq.read_table(root/'epoch-ordering.parquet').to_pylist()
+            self.assertEqual(sum(r['projected_native_rows'] for r in diagnostics),4)
+            self.assertEqual([(r['epoch'],r['first_available_base']) for r in sorted(diagnostics,key=lambda r:r['used_order_rank'])],[('A',START+100),('B',START+200),('C',START+350)])
+            db.close()
 
 
 class ProductionPolicyTests(unittest.TestCase):
