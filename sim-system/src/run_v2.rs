@@ -6992,6 +6992,7 @@ fn business_resource_snapshot_v2(state: &BusinessReducerStateV2) -> ResourceQuan
 #[cfg(test)]
 mod tests {
     include!("limit_cost_submission_tests.rs");
+    include!("gpu_order_execution_tests.rs");
     use std::cell::RefCell;
     use std::fs;
     use std::io::Write;

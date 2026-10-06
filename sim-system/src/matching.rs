@@ -891,6 +891,7 @@ pub(crate) struct BuyOrderActionV2 {
 
 #[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(test, derive(serde::Serialize))]
 enum OrderQuantityStateV2 {
     Base {
         accepted_base_units: u128,
@@ -2631,6 +2632,22 @@ impl ExecutionStateV2 {
             self.account.available_pusd(),
             self.account.principal_encumbrance_pusd(),
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn gpu_order_checkpoint_for_tests(&self, order_id: &str) -> serde_json::Value {
+        let (cash, available, maker, taker, maker_locked, taker_locked, outcomes) =
+            self.account.economic_balances_for_tests();
+        serde_json::json!({
+            "quantities": self.orders.get(order_id).map(|order| &order.quantities),
+            "cash": cash.to_string(), "available": available.to_string(),
+            "principal": self.account.principal_encumbrance_pusd().to_string(),
+            "fee": self.account.immediate_taker_fee_encumbrance_pusd().to_string(),
+            "rebates": [maker.to_string(), taker.to_string(), maker_locked.to_string(), taker_locked.to_string()],
+            "outcomes": outcomes.into_iter().map(|(token, value)| (token, value.to_string())).collect::<Vec<_>>(),
+            "next_sequence": self.account.next_account_transition_seq(),
+            "fill_shape": self.fill_shape_for_tests(),
+        })
     }
 
     #[cfg(test)]
