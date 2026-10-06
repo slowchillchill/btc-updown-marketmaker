@@ -2722,6 +2722,7 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
     for family in ["single", "paired", "market"] {
         let mut gpu_reference=Vec::new();
         let mut gpu_cancel_sources=Vec::new();
+        let mut gpu_buy_sources=Vec::new();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("dpt");
         let (core, times) = recorded_trading_window(&root, "100", None, 60_000, true);
@@ -2769,13 +2770,13 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
             .unwrap();
         gpu_cancel_sources.push(gpu_registry_receipt("empty-market","market",&empty_receipt));
         let pending = shared.action_before(&mut driver).unwrap().unwrap();
-        gpu_reference.push(gpu_registry_frozen_reference("empty_cancel_pending",&pending,shared.registry(),&gpu_cancel_sources));
+        gpu_reference.push(gpu_registry_frozen_reference("empty_cancel_pending",&pending,shared.registry(),&gpu_cancel_sources,&gpu_buy_sources));
         assert_eq!(pending.cancellation_requests(None).pending_count, Known(1));
         for _ in 2..5 {
             driver.next_group().unwrap().unwrap();
         }
         let empty = shared.action_before(&mut driver).unwrap().unwrap();
-        gpu_reference.push(gpu_registry_frozen_reference("empty_cancel_completed",&empty,shared.registry(),&gpu_cancel_sources));
+        gpu_reference.push(gpu_registry_frozen_reference("empty_cancel_completed",&empty,shared.registry(),&gpu_cancel_sources,&gpu_buy_sources));
         let response = empty.cancellation_requests(None);
         assert_eq!(response.pending_count, Known(0));
         assert_eq!(response.response_counts, [Known(0), Known(0), Known(0)]);
@@ -2783,23 +2784,33 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
         let Known(Some(empty_completion)) = response.latest_response else {
             unreachable!()
         };
-        shared
+        let pair_intent=Arc::new(ModelIntentV1::SubmitPairedBuy {
+            condition_id: ConditionId(CONDITION_ID.into()),orders:[leg(UP_TOKEN_ID,5),leg(DOWN_TOKEN_ID,5)]});
+        let pair_receipt=shared
             .execute(
                 &mut driver.decision().unwrap(),
                 context("pair-after-empty"),
-                Some(Arc::new(ModelIntentV1::SubmitPairedBuy {
-                    condition_id: ConditionId(CONDITION_ID.into()),
-                    orders: [leg(UP_TOKEN_ID, 5), leg(DOWN_TOKEN_ID, 5)],
-                })),
+                Some(pair_intent.clone()),
             )
             .await
             .unwrap()
             .unwrap();
+        let ModelIntentV1::SubmitPairedBuy { orders:original_legs,.. }=pair_intent.as_ref() else { unreachable!() };
+        let original_terms=original_legs.iter().enumerate().map(|(item,leg)| {
+            let BuyOrderIntentV1::GtcLimit { size_shares,.. }=&leg.order else { panic!("工程原GTC意图") };
+            serde_json::json!({"item":item,"token":leg.token_id,"target":size_shares})
+        }).collect::<Vec<_>>();
+        gpu_buy_sources.push(serde_json::json!({"request":"pair-after-empty",
+            "input_sequence":pair_receipt.input_sequence(),"platform_arrived_at":pair_receipt.platform_arrived_at_utc_ms(),
+            "scheduled_actions":pair_receipt.scheduled_action_count(),
+            "terms":original_terms}));
+        let unbound=shared.action_before(&mut driver).unwrap().unwrap();
+        gpu_reference.push(gpu_registry_frozen_reference("submitted_pair_unbound",&unbound,shared.registry(),&gpu_cancel_sources,&gpu_buy_sources));
         for _ in 5..=6 {
             driver.next_group().unwrap().unwrap();
         }
         let before = shared.action_before(&mut driver).unwrap().unwrap();
-        gpu_reference.push(gpu_registry_frozen_reference("before_cancel",&before,shared.registry(),&gpu_cancel_sources));
+        gpu_reference.push(gpu_registry_frozen_reference("before_cancel",&before,shared.registry(),&gpu_cancel_sources,&gpu_buy_sources));
         let orders: Vec<_> = before.orders().collect();
         assert_eq!(orders.len(), 2);
         assert_eq!(platform_id(orders[0].order_identity), "sim-1");
@@ -2838,7 +2849,7 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
         assert_eq!(receipt, duplicate);
         gpu_cancel_sources.push(gpu_registry_receipt("finite-failure",family,&receipt));
         let pending = shared.action_before(&mut driver).unwrap().unwrap();
-        gpu_reference.push(gpu_registry_frozen_reference("cancel_pending",&pending,shared.registry(),&gpu_cancel_sources));
+        gpu_reference.push(gpu_registry_frozen_reference("cancel_pending",&pending,shared.registry(),&gpu_cancel_sources,&gpu_buy_sources));
         assert_eq!(pending.cancellation_requests(None).pending_count, Known(1));
         let mut checked = false;
         while driver.next_group().unwrap().is_some() {
@@ -2847,7 +2858,7 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
             if requests.response_counts[1] != Known(1) {
                 continue;
             }
-            gpu_reference.push(gpu_registry_frozen_reference("partial_cancel_result",&view,shared.registry(),&gpu_cancel_sources));
+            gpu_reference.push(gpu_registry_frozen_reference("partial_cancel_result",&view,shared.registry(),&gpu_cancel_sources,&gpu_buy_sources));
             assert_eq!(requests.pending_count, Known(0));
             assert_eq!(
                 requests.response_counts,
@@ -2916,7 +2927,7 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
                 Known(0),
                 "同市场不同ID不相交"
             );
-            gpu_reference.push(gpu_registry_frozen_reference("overlapping_cancel_pending",&overlapping,shared.registry(),&gpu_cancel_sources));
+            gpu_reference.push(gpu_registry_frozen_reference("overlapping_cancel_pending",&overlapping,shared.registry(),&gpu_cancel_sources,&gpu_buy_sources));
             checked = true;
             break;
         }
@@ -3380,7 +3391,7 @@ fn gpu_registry_receipt(request:&str,family:&str,receipt:&sim_system::execution:
         "platform_arrived_at":receipt.platform_arrived_at_utc_ms(),"scheduled_actions":receipt.scheduled_action_count()})
 }
 
-fn gpu_registry_frozen_reference(stage:&str,view:&ActionBeforeReadV2,registry:&SharedExecutionRegistryV2,cancel_sources:&[serde_json::Value])->serde_json::Value {
+fn gpu_registry_frozen_reference(stage:&str,view:&ActionBeforeReadV2,registry:&SharedExecutionRegistryV2,cancel_sources:&[serde_json::Value],buy_sources:&[serde_json::Value])->serde_json::Value {
     fn record(value:&::execution_normalization::NoeConsumedRecordRef<contracts::execution_normalization::CancellationRequestCompletedV1>)->serde_json::Value {
         serde_json::json!({"record":value.record(),"position":value.position(),"visibility":value.visibility()})
     }
@@ -3432,6 +3443,6 @@ fn gpu_registry_frozen_reference(stage:&str,view:&ActionBeforeReadV2,registry:&S
     serde_json::json!({"stage":stage,"logical_at":view.cutoff().decision_time().logical_time_utc_ms(),
         "orders":orders,"raw_orders":raw_orders,"commitments":commitments,"request_funds":funds,
         "pending_noe_records":view.pending_noe_record_count(),"ledger":view.ledger(),"economics":view.economics(),
-        "cancel_source_requests":cancel_sources,"cancel_pending":requests.pending_count,"cancel_response_counts":requests.response_counts,"cancel_latest":latest,
+        "buy_source_receipts":buy_sources,"cancel_source_requests":cancel_sources,"cancel_pending":requests.pending_count,"cancel_response_counts":requests.response_counts,"cancel_latest":latest,
         "source":"original_SharedExecutionV2_ActionBeforeReadV2","post_only_fixture_not_B_Actor_domain":true})
 }

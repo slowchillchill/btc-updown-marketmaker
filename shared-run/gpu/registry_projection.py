@@ -19,14 +19,17 @@ def concatenate_integer(values,roots):
         torch.cat([value.fault.reshape(roots,-1) for value in prepared],1).flatten())
 
 
-def order_events_from_closed(bank,batches,closed,receive_rank):
+def public_rows_from_closed(bank,batches,closed,receive_rank):
+    from commitments import SubmissionBindings
     roots,width=closed.record_refs.shape
     device=closed.record_refs.device
     if receive_rank.shape!=(roots,width) or receive_rank.dtype!=torch.int64 or receive_rank.device!=device:
         raise TypeError('Registry物理领取顺序需同设备int64[roots,records]')
     if width == 0:
         from dataclasses import replace
-        return replace(PublicRegistryEvents.empty(roots,device),fault=closed.fault)
+        events=replace(PublicRegistryEvents.empty(roots,device),fault=closed.fault)
+        return events,SubmissionBindings(events.received,events.request_slots,events.item_ordinals,
+            events.private_sequences,events.receive_rank,events.orders,events.received,events.fault)
     original_rows=torch.cat([batch.rows for batch in batches],1)
     original_active=torch.cat([batch.emitted for batch in batches],1)
     matching=(original_rows[:,:,None]==closed.record_refs[:,None,:]) & original_active[:,:,None]
@@ -66,10 +69,23 @@ def order_events_from_closed(bank,batches,closed,receive_rank):
     ordinals=concatenate_integer([batch.record_ordinals for batch in batches],roots)
     batch_sequences=concatenate_integer([batch.batch_sequences for batch in batches],roots)
     contexts=torch.cat([batch.context_slots for batch in batches],1).gather(1,at)
+    requests=torch.cat([batch.request_slots for batch in batches],1).gather(1,at)
+    items=torch.cat([batch.item_ordinals for batch in batches],1).gather(1,at)
     runs=torch.cat([batch.run_slots for batch in batches],1).gather(1,at)
-    return PublicRegistryEvents(received,kinds,order,fill,_take(private,coordinates),closed.delivered_sequences,
-        _take(ordinals,coordinates),_take(batch_sequences,coordinates),contexts,runs,closed.record_refs,closed.available_at,receive_rank,
+    events=PublicRegistryEvents(received,kinds,order,fill,_take(private,coordinates),closed.delivered_sequences,
+        _take(ordinals,coordinates),_take(batch_sequences,coordinates),contexts,runs,requests,items,closed.record_refs,closed.available_at,receive_rank,
         units(decoded[3][6]),units(decoded[3][7]),units(decoded[8][10]),
         decoded[8][8].reshape(roots,width),decoded[8][6].reshape(roots,width),
         (formed & (decoded[7][5]==1)).reshape(roots,width),formed.reshape(roots,width),
         torch.zeros_like(received),torch.zeros_like(received),fault)
+
+    submission=active & (schemas==3)
+    fault=fault | (submission & ((decoded[3][1]<0)|(decoded[3][1]>2))).reshape(roots,width).any(1).to(torch.int32)
+    bindings=SubmissionBindings(submission.reshape(roots,width),requests,items,_take(private,coordinates),receive_rank,
+        decoded[3][4],accepted.reshape(roots,width),fault)
+    from dataclasses import replace
+    return replace(events,fault=fault),bindings
+
+
+def order_events_from_closed(bank,batches,closed,receive_rank):
+    return public_rows_from_closed(bank,batches,closed,receive_rank)[0]

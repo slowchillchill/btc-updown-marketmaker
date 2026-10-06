@@ -17,6 +17,7 @@ from registry import (PublicRegistryEvents, FrozenIntentOrders, PublicRegistrySt
     BASE_ACCEPTED, QUOTE_ACCEPTED, ORDER_LIFECYCLE, TRADE, CANCEL_TARGET,
     PublicCancellationState, CancellationCompletions)
 from validate_base_execution import integers, rational, values
+from commitments import SubmittedLegs,SubmissionBindings,freeze_leg_commitments
 from queues import Numbers
 
 
@@ -30,7 +31,7 @@ def position_key(reference):
     return (position['context_reference'], watermark['run_id'], watermark['projection_batch_sequence'], position['record_ordinal'])
 
 
-def event_columns(references, identities, rank_start):
+def event_columns(references, identities, rank_start, requests):
     # 这是验证器冷边界的原强类型JSON解码，不是生产逐事件CPU业务循环。
     rows = []
     for reference in references:
@@ -38,13 +39,15 @@ def event_columns(references, identities, rank_start):
         source = evidence['source_order']
         row = dict(kind=ORDER_LIFECYCLE, order=0, trade=0, private=source['sequence']['PrivateFeedback']['private_feedback_sequence'],
             delivery=reference['visibility']['Feedback']['delivery_sequence'], batch=reference['position']['source_watermark']['projection_batch_sequence'], available=reference['visibility']['Feedback']['available_at_utc_ms'], ordinal=reference['position']['record_ordinal'],
-            matched='0', opened='0', quantity='0', role=0, disposition=0, formed_matched=False, formation=False, canceled=False, closed=False)
+            request=-1,item=-1,matched='0', opened='0', quantity='0', role=0, disposition=0, formed_matched=False, formation=False, canceled=False, closed=False)
         payload = evidence['evidence']
         if 'Control' in payload:
             control = payload['Control']['result']
             if 'Submission' in control:
                 accepted = control['Submission']['outcome']['Accepted']
                 row['order'] = identities[accepted['order']['order_identity']]
+                association=evidence['source_reference']['record']['DirectResponse']['association']['SubmissionItem']
+                row.update(request=requests[association['global_request_id']],item=association['batch_item_ordinal'])
                 measurement = accepted['measurement']
                 if 'Base' in measurement:
                     row.update(kind=BASE_ACCEPTED, matched=measurement['Base']['matched_base_quantity_shares'],
@@ -72,14 +75,14 @@ def event_columns(references, identities, rank_start):
         rows.append(row)
     active = [True]*len(rows)
     if not rows:
-        rows=[dict(kind=0,order=0,trade=0,private=0,delivery=0,batch=0,available=0,ordinal=0,matched='0',opened='0',quantity='0',role=0,disposition=0,formed_matched=False,formation=False,canceled=False,closed=False)]
+        rows=[dict(kind=0,order=0,trade=0,private=0,delivery=0,batch=0,available=0,ordinal=0,request=-1,item=-1,matched='0',opened='0',quantity='0',role=0,disposition=0,formed_matched=False,formation=False,canceled=False,closed=False)]
         active=[False]
     tensor = lambda name,dtype=torch.int64:torch.tensor([[row[name] for row in rows]],dtype=dtype,device='cuda')
     integer = lambda name:integers([row[name] for row in rows])
     ratio = lambda name:rational([row[name] for row in rows])
     return PublicRegistryEvents(torch.tensor([active],dtype=torch.bool,device='cuda'), tensor('kind'),
         integer('order'),integer('trade'),integer('private'),integer('delivery'),integer('ordinal'),integer('batch'),
-        torch.zeros((1,len(rows)),dtype=torch.int64,device='cuda'),torch.zeros((1,len(rows)),dtype=torch.int64,device='cuda'),
+        torch.zeros((1,len(rows)),dtype=torch.int64,device='cuda'),torch.zeros((1,len(rows)),dtype=torch.int64,device='cuda'),tensor('request'),tensor('item'),
         torch.arange(rank_start,rank_start+len(rows),device='cuda')[None,:],tensor('available'),
         torch.arange(rank_start,rank_start+len(rows),device='cuda')[None,:],ratio('matched'),ratio('opened'),ratio('quantity'),
         tensor('role'),tensor('disposition'),tensor('formed_matched',torch.bool),tensor('formation',torch.bool),tensor('canceled',torch.bool),
@@ -126,6 +129,9 @@ def check_family(source):
         present=torch.tensor([[key in public for key in catalog]],dtype=torch.bool,device='cuda')
         return FrozenIntentOrders(present,integers([identities[key] for key in catalog]),present.clone(),
             rational([targets[key] for key in catalog]),torch.zeros_like(present),present.clone())
+    buy_ids={value['request']:index for index,value in enumerate(source[-1]['buy_source_receipts'])}
+    leg_keys=[(receipt['request'],term['item'],term['target']) for receipt in source[-1]['buy_source_receipts'] for term in receipt['terms']]
+    leg_saved=[]
     request_ids={value['request']:index+1 for index,value in enumerate(source[-1]['cancel_source_requests'])}
     cancel=Numbers.run_exact_batch(lambda:PublicCancellationState(integers(list(request_ids.values())),
         torch.zeros((1,len(request_ids)),dtype=torch.bool,device='cuda'),completion_columns(None,request_ids)))
@@ -148,7 +154,7 @@ def check_family(source):
                     seen.add(position_key(reference));incoming.append(reference)
         incoming.sort(key=lambda r:(r['visibility']['Feedback']['delivery_sequence'],r['position']['record_ordinal']))
         def compute():
-            events=event_columns(incoming,identities,rank)
+            events=event_columns(incoming,identities,rank,buy_ids)
             candidate=PublicRegistryState(events) if state is None else state.receive(events)
             return candidate,candidate.freeze_orders(directory(frame),torch.tensor([frame['logical_at']],device='cuda'))
         state,view=Numbers.run_exact_batch(compute)
@@ -168,13 +174,39 @@ def check_family(source):
             assert view.cancellable_known.cpu().tolist()[0][index]==('Known' in order['cancellable'])
             if 'Known' in order['cancellable']:assert view.cancellable.cpu().tolist()[0][index]==order['cancellable']['Known']
         commit_population=view.commitment_present.cpu().tolist()[0]
-        assert {key for key,index in indexes.items() if commit_population[index]}=={item['order'] for item in frame['commitments']},(frame['stage'],'完整承诺人口')
+        assert {key for key,index in indexes.items() if commit_population[index]}=={item['order'] for item in frame['commitments'] if item['order'] is not None},(frame['stage'],'完整承诺人口')
         for commitment in frame['commitments']:
             if commitment['order'] is None:continue
             index=indexes[commitment['order']]
             known=view.commitment_known.cpu().tolist()[0][index]
             assert known==('Known' in commitment['remaining'])
             if known:assert amounts(view.commitment)[index]==Fraction(commitment['remaining']['Known'])
+        receipts={receipt['request'] for receipt in frame['buy_source_receipts']}
+        def leg_freeze():
+            registered=torch.tensor([[request in receipts for request,_,_ in leg_keys]],dtype=torch.bool,device='cuda')
+            legs=SubmittedLegs(torch.ones_like(registered),registered,
+                torch.tensor([[buy_ids[request] for request,_,_ in leg_keys]],device='cuda'),
+                torch.tensor([[item for _,item,_ in leg_keys]],device='cuda'),
+                rational([target for _,_,target in leg_keys]),torch.ones_like(registered))
+            events=state.events
+            bindings=SubmissionBindings(events.received & ((events.kinds==BASE_ACCEPTED)|(events.kinds==QUOTE_ACCEPTED)),
+                events.request_slots,events.item_ordinals,events.private_sequences,events.receive_rank,events.orders,
+                torch.ones_like(events.received),events.fault)
+            return freeze_leg_commitments(legs,bindings,directory(frame),view)
+        legs_view=Numbers.run_exact_batch(leg_freeze)
+        assert legs_view.fault.cpu().tolist()==[0]
+        included=legs_view.present.cpu().tolist()[0]
+        assert {(request,item) for (request,item,_),active_leg in zip(leg_keys,included) if active_leg}=={
+            (item['request'],item['item']) for item in frame['commitments']},(frame['stage'],'完整逐腿承诺人口')
+        remaining=amounts(legs_view.remaining)
+        has_order=legs_view.has_order.cpu().tolist()[0]
+        known=legs_view.known.cpu().tolist()[0]
+        for oracle in frame['commitments']:
+            index=next(index for index,(request,item,_) in enumerate(leg_keys) if (request,item)==(oracle['request'],oracle['item']))
+            assert has_order[index]==(oracle['order'] is not None)
+            assert known[index]==('Known' in oracle['remaining'])
+            if known[index]:assert remaining[index]==Fraction(oracle['remaining']['Known'])
+        leg_saved.append((legs_view,remaining))
         saved.append((view,amounts(view.active),view.unfinished.clone()))
         registered={value['request'] for value in frame['cancel_source_requests']}
         receipt_mask=torch.tensor([[name in registered for name in request_ids]],dtype=torch.bool,device='cuda')
@@ -196,6 +228,8 @@ def check_family(source):
         cancel_saved.append((cancel_view,values(cancel_view.pending_count),values(cancel_view.response_counts)))
     for view,active,unfinished in saved:
         assert amounts(view.active)==active and torch.equal(view.unfinished,unfinished),'旧冻结读取不可倒灌'
+    for view,remaining in leg_saved:
+        assert amounts(view.remaining)==remaining,'旧逐腿冻结不可倒灌'
     for view,pending,counts in cancel_saved:
         assert values(view.pending_count)==pending and values(view.response_counts)==counts,'旧撤单冻结不可倒灌'
     return len(source),len(seen),maximum_retained
@@ -206,7 +240,7 @@ def main():
     counts=[check_family(json.loads(Path(path).read_text())) for path in sys.argv[1:]]
     torch.cuda.synchronize()
     print(json.dumps({'frozen_prefixes':sum(n for n,_,_ in counts),'distinct_original_order_records':sum(n for _,n,_ in counts),
-        'continuous_received_state':True,'maximum_retained_order_records_per_family':[width for _,_,width in counts],'derived_oracle_initialization':False,'old_freeze_unchanged':True,
+        'receipt_without_order_keeps_original_leg_target':True,'continuous_received_state':True,'maximum_retained_order_records_per_family':[width for _,_,width in counts],'derived_oracle_initialization':False,'old_freeze_unchanged':True,
         'complete_first_delivery_stream':False,'global_cancel_request_completed_state':True,'scoped_cancel_objects':False,
         'full_registry_or_root':False,'seconds':time.perf_counter()-started,'device_peak_allocated_bytes':torch.cuda.max_memory_allocated()}))
 

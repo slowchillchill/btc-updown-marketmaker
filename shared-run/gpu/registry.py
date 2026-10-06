@@ -26,6 +26,8 @@ class PublicRegistryEvents:
     batch_sequences: object
     context_slots: torch.Tensor
     run_slots: torch.Tensor
+    request_slots: torch.Tensor
+    item_ordinals: torch.Tensor
     record_refs: torch.Tensor  # NOE共享不可变bank引用；不是新的业务位置。
     available_at: torch.Tensor  # [roots,events]，原首次公开领取的available_at。
     receive_rank: torch.Tensor  # 物理领取顺序，不能替代业务u64序号。
@@ -47,7 +49,7 @@ class PublicRegistryEvents:
         blank=columns.bool()
         zero=ExactInt.from_i64_tensor(columns.flatten())
         ratio=ExactRational(zero,zero.constant(1))
-        return cls(blank,columns,zero,zero,zero,zero,zero,zero,columns,columns,columns,columns,columns,
+        return cls(blank,columns,zero,zero,zero,zero,zero,zero,columns,columns,columns,columns,columns,columns,columns,
             ratio,ratio,ratio,columns,columns,blank,blank,blank,blank,torch.zeros(roots,dtype=torch.int32,device=device))
 
 
