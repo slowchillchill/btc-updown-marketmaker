@@ -37,6 +37,7 @@ class PublicBookFrame:
     anchor_ids: torch.Tensor
     anchor_present: torch.Tensor
     quality: torch.Tensor
+    prefix_fault: torch.Tensor
     fault: torch.Tensor
 
 
@@ -119,9 +120,10 @@ class PublicPmState:
         fault = fault | self.decimal_fault[self.slots[:, 2]][None]
         fault = fault | self.decimal_fault[tick][:, asset]
         fault = fault | (quantity.numerator.sign.reshape(qid.shape) < 0).to(torch.int32)
-        fault = fault | ((prefixes < -1) | (prefixes >= self.group_count))[:, None].to(torch.int32)
+        prefix_fault = ((prefixes < -1) | (prefixes >= self.group_count)).to(torch.int32)
+        fault = fault | prefix_fault[:, None]
         return PublicBookFrame(quantity, present,
             ifound & initialized.bool(),
             rfound & ready.bool() & (rseq >= reset), tick, tfound,
             anchor, afound & (aseq >= reset[:, asset]),
-            torch.where(quality_found, quality, 3), fault)
+            torch.where(quality_found, quality, 3), prefix_fault, fault)

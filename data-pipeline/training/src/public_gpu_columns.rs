@@ -91,6 +91,13 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
         }
         for group in &packet.groups {
             builder.columns.groups.push([i64::try_from(group.group_position)?,i64::try_from(group.closed_at_input_position)?,group.visible_at_utc_ms]);
+            for fact in &group.records {
+                if let crate::compact_public::CompactFactPayloadV1::Inline(
+                    PublicBusinessPayloadV1::MarketFact {payload:CanonicalMarketFactPayloadV1::FixedIdentity {assets}, ..}
+                ) = &fact.payload {
+                    for asset in assets { builder.asset(asset); }
+                }
+            }
         }
         for pm in &packet.pm {
             let group = i64::try_from(packet.groups.iter()

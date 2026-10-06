@@ -34,7 +34,8 @@ def main():
                       'assets':len(columns['assets']),'decimals':len(columns['decimals']),
                       'cold_seconds':parsed-started}),flush=True)
     state = PublicPmState(columns)
-    prefixes = torch.tensor([-1,0,len(columns['groups'])-1],device='cuda',dtype=torch.int64)
+    prefix_values = [-1,0,len(columns['groups'])-1] if columns['groups'] else [-1,-1,-1]
+    prefixes = torch.tensor(prefix_values,device='cuda',dtype=torch.int64)
     frame = state.frame(prefixes)
     # 短组件参考：只检查3个事实前缀的末项，不重放候选、账户或原全窗CPU诊断。
     def latest(name,prefix):
@@ -43,7 +44,7 @@ def main():
             if group <= prefix: result[target] = (sequence,value)
         return result
     expected_values, expected_masks, expected_initialized, expected_ready = [],[],[],[]
-    for prefix in [-1,0,len(columns['groups'])-1]:
+    for prefix in prefix_values:
         quantity,selection,reset = (latest(name,prefix) for name in ('quantities','selections','resets'))
         initialized,ready = (latest(name,prefix) for name in ('initialized','ready'))
         for slot,(asset,_,_) in enumerate(columns['slots']):
@@ -67,13 +68,16 @@ def main():
     assert not frame.present[0].any().cpu().item()
     # 必须先按当前正量压紧再进入原BookEncoder；不让future槽位改变配对树。
     assets = torch.tensor([[0,1]]*3, dtype=torch.int64, device='cuda')
-    now = torch.tensor([columns['groups'][max(0,int(prefix))][2] for prefix in [-1,0,len(columns['groups'])-1]],
+    now = torch.tensor([columns['groups'][max(0,int(prefix))][2] if columns['groups'] else 0 for prefix in prefix_values],
                        dtype=torch.int64,device='cuda')
     if args.original_reference is not None:
         now[-1] = json.loads(args.original_reference.read_text())['observation_ms']
     packer = PmBookInputs(state, initial_capacity=1)
     packed = packer.pack(frame, assets, now)
-    assert not packed.fault.any().cpu().item()
+    if len(columns['assets']) >= 2:
+        assert not packed.fault.any().cpu().item()
+    else:
+        assert packed.fault.ne(0).all().cpu().item()  # 未知资产坐标返回fault，不补假身份。
     assert torch.all(packed.mask[:, :, 1:].to(torch.int32) <= packed.mask[:, :, :-1].to(torch.int32))
     assert torch.count_nonzero(packed.levels[~packed.mask]) == 0
     torch.manual_seed(181102)  # 当前有限盘口组件验证，不登记正式训练seed。
@@ -149,6 +153,7 @@ def main():
                        for column in columns_for_query]
     invalid = state.frame(prefixes.new_tensor([len(columns['groups'])]))
     assert invalid.fault.ne(0).all().cpu().item()
+    assert invalid.prefix_fault.ne(0).all().cpu().item()
     torch.cuda.synchronize()
     report = {'source_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
               'identity':'engineering_real_public_pm_book_inputs_only','device':torch.cuda.get_device_name(),

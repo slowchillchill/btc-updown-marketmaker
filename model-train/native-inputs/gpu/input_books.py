@@ -59,6 +59,14 @@ class PmBookInputs:
             raise ValueError('设备坐标不在同一GPU')
         ids_valid = (asset_indices >= 0) & (asset_indices < len(state.assets))
         safe_assets = asset_indices.clamp(0, max(0, len(state.assets)-1))
+        fault = numbers.combine_fault_rows(frame.fault.bitwise_or(self.sort_fault[None]))
+        fault = fault | frame.prefix_fault | (~ids_valid.all(dim=1)).to(torch.int32)
+        quality = (torch.nn.functional.one_hot(frame.quality.gather(1, safe_assets), 6).float()
+            if state.assets else torch.nn.functional.one_hot(torch.full_like(asset_indices, 3), 6).float())
+        if not state.assets or slots == 0:
+            levels = torch.zeros((roots, 4, self.capacity, 9), dtype=torch.float32, device=state.slots.device)
+            return PackedPmBooks(levels, torch.zeros(levels.shape[:3],dtype=torch.bool,device=levels.device),
+                                 quality, fault)
         visible = frame.ready & ((frame.quality == 0) | (frame.quality == 1))
         quantity_positive = frame.quantity.numerator.sign.reshape(roots, slots) > 0
         candidates = []
@@ -78,8 +86,6 @@ class PmBookInputs:
         capacity = self.capacity
         levels = torch.zeros((roots, 4, capacity, 9), dtype=torch.float32, device=state.slots.device)
         mask = torch.zeros((roots, 4, capacity), dtype=torch.bool, device=state.slots.device)
-        fault = numbers.combine_fault_rows(frame.fault.bitwise_or(self.sort_fault[None]))
-        fault = fault | (~ids_valid.all(dim=1)).to(torch.int32)
         for side, (ordered, counts) in enumerate(candidates):
             count = min(capacity, slots)
             ordered = ordered[:, :count]
@@ -121,5 +127,4 @@ class PmBookInputs:
             levels[:, side, :count] = torch.where(valid[:, :, None], rows, 0.0)
             mask[:, side, :count] = valid
             fault = fault | numbers.combine_fault_rows(errors)
-        quality = torch.nn.functional.one_hot(frame.quality.gather(1, safe_assets), 6).float()
         return PackedPmBooks(levels, mask, quality, fault)

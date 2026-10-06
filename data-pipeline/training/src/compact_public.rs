@@ -689,6 +689,49 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "只在已同步准确提交的AutoDL CUDA环境显式运行"]
+    fn gpu_public_missing_book_keeps_metadata_identity_and_empty_coordinate_fault() {
+        for metadata in [true, false] {
+            let temp = tempfile::tempdir().unwrap();
+            let target = temp.path().join("compact");
+            let header = PublicInputStreamHeaderV1 {
+                input_stream_id:"gpu-no-pm-real-construction".into(),canonical_rule_version:"rule-v1".into(),
+                observation_version:"public-observation-v1".into(),ordering_version:"original-input-v1".into(),
+                input_scope:"constructed-no-pm-boundary".into(),max_pending_ws_terminals:2,
+                initial_state:PublicInitialStateV1::Empty,
+            };
+            let mut core = PublicObservationCoreV1::new(header.clone()).unwrap();
+            let mut writer = PublicCompactWriterV1::create(&target,header.clone()).unwrap();
+            let sources = if metadata {
+                vec![TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(metadata_snapshot_row())))]
+            } else { vec![] };
+            for (position, source) in sources.into_iter().map(Some).chain(std::iter::once(None)).enumerate() {
+                let ingress = source.map_or(DptIngressV1::EndOfInput,|row|DptIngressV1::Message {
+                    source_evidence:source_evidence_v3_from_typed_raw_v2(&row).unwrap(),row,
+                });
+                let input = RecordedIngressV1 {input_stream_id:header.input_stream_id.clone(),input_position:position as u64,
+                    ingress,dependency_record_refs:vec![]};
+                let ids = BTreeMap::new();
+                let prepared = prepare_public_ingress_v1(&core,&input,&ids,&[]).unwrap();
+                let applied = core.push_facts(&prepared).unwrap();
+                writer.push(&input,&applied).unwrap();
+            }
+            writer.publish().unwrap();
+            let mut reader = PublicCompactReaderV1::open(&target,1024*1024).unwrap();
+            let columns = crate::public_gpu_columns::public_pm_device_columns_v1(&mut reader, |_|{}).unwrap();
+            assert_eq!(columns.assets.len(),if metadata {2} else {0});
+            assert_eq!(columns.original_pm_steps,0);
+            assert!(columns.slots.is_empty());
+            let status = std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
+                .arg(std::env::var("B_GPU_STATE_VALIDATOR").unwrap())
+                .args(["--binary",&std::env::var("B_GPU_COLUMNS_BINARY").unwrap()])
+                .arg("--material").arg(&target).arg("--output").arg(temp.path().join("report.json"))
+                .status().unwrap();
+            assert!(status.success());
+        }
+    }
+
+    #[test]
     fn compact_atomic_publication_roundtrips_source_and_rejects_changed_payload() {
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("compact");
