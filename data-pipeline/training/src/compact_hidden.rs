@@ -259,7 +259,7 @@ mod tests {
         let recording_root = temp.path().join("recording");
         let compact_root = temp.path().join("compact");
         let mut writer = PublicRecordingWriterV1::create(&recording_root, old_core.header(), config()).unwrap();
-        let mut compact = PublicCompactWriterV1::create(&compact_root, compact_core.header()).unwrap();
+        let mut compact = PublicCompactWriterV1::create(&compact_root, compact_core.header().clone()).unwrap();
         let mut anomaly = twap_input(60);
         anomaly.common.freshness_status = RtdsFreshnessStatus::InvalidTimestamp;
         for input in [
@@ -277,9 +277,11 @@ mod tests {
         }
         compact.publish().unwrap();
         writer.stabilize().unwrap();
+        let mut output_config = config();
+        output_config.sort.merge_workers = 8;
         let old = prepare_hidden_v1(old_core,
             PublicRecordingReaderV1::recover(&recording_root, 1, 1<<20).unwrap(),
-            &temp.path().join("old-hidden"), &config(), "same-hidden-consumer".into()).unwrap();
+            &temp.path().join("old-hidden"), &output_config, "same-hidden-consumer".into()).unwrap();
         let mut expected = Vec::new();
         let mut steps = HiddenStepReaderV1::open(&old, 1, 1<<20).unwrap();
         while let Some(row) = steps.next_row().unwrap() { expected.push(serde_json::to_value(row).unwrap()); }
@@ -293,8 +295,7 @@ mod tests {
         let order = Arc::new(GpuInitialRunOrderV1::start(
             Path::new(&std::env::var("B_GPU_PYTHON").unwrap()),
             Path::new(&std::env::var("B_GPU_SORT_WORKER").unwrap())).unwrap());
-        let mut sort = config().sort;
-        sort.merge_workers = 8;
+        let sort = output_config.sort;
         let mut collected = Collected::default();
         let mut reader = PublicCompactReaderV1::open(&compact_root, 1<<20).unwrap();
         let summary = reduce_compact_hidden_v1(&mut reader, &temp.path().join("compact-hidden"), &sort,
