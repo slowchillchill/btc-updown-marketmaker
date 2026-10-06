@@ -10,6 +10,7 @@ from asset_buy import take_ratio
 from admission_lifecycle import LifecycleColumns,LifecycleDirectory
 from reservation import ReservationBook,run_reserve_action,sequence_fault
 from memory import EconomicColumns
+from core import OUT_EVIDENCE,OUT_FACT,OUT_DUPLICATE,OUT_ALIAS,OUT_LOGICAL_CONFLICT,OUT_ECONOMIC_CONFLICT,OUT_PENDING
 
 
 def coordinate(value,original,valid):
@@ -93,9 +94,13 @@ class AdmissionLifecycle:
         root=torch.arange(roots,device=local.device)
         index=root*width+local
         tag=self.lifecycle.schemas[root,local]
+        outcome_kind=self.lifecycle.normalization_outcomes[root,local]
         requested=enabled & ~self.applied[root,local]
+        not_applicable=requested & ((outcome_kind==OUT_DUPLICATE)|(outcome_kind==OUT_ALIAS)|
+            (outcome_kind==OUT_LOGICAL_CONFLICT)|(outcome_kind==OUT_ECONOMIC_CONFLICT))
+        requested=requested & ~not_applicable
         fault=self.fault | torch.where(requested,self.lifecycle.fault[root,local],0)
-        economic=requested&(tag==11)
+        economic=requested&(outcome_kind==OUT_FACT)&(tag==11)
         sequence=_take(self.columns.sequences,index)
         balances=take_ratio(self.columns.balances,(index[:,None]*8+torch.arange(8,device=index.device)).flatten())
         selected=take_ratio(self.columns.outcomes,index)
@@ -109,7 +114,8 @@ class AdmissionLifecycle:
         fault=fault | torch.where(requested,sequence_fault(next_entry),0)
         platform,result=self.platform.apply_transition(sequence,balances,outcome,economic&(fault==0),
             torch.zeros_like(economic),association_available)
-        applicable=(tag==3)|(tag==7)|(tag==8)|(tag==9)
+        applicable=((outcome_kind==OUT_EVIDENCE)&((tag==3)|(tag==7)|(tag==8)|(tag==9)))|
+            (outcome_kind==OUT_PENDING)
         use=(requested&applicable)|result.applied
         fault=fault | result.fault
         use=use&(fault==0)
@@ -123,8 +129,8 @@ class AdmissionLifecycle:
         old_request=self.orders.requests[root,order_at]
         direct_request=self.lifecycle.request_slots[root,local]
         item=self.lifecycle.item_ordinals[root,local]
-        association=(self.global_requests==direct_request[:,None])&(self.item_ordinals==item[:,None])&(
-            self.reservations.request_slots>=0)
+        association=(direct_request[:,None]>=0)&(item[:,None]>=0)&(self.global_requests>=0)&(self.item_ordinals>=0)&(
+            self.global_requests==direct_request[:,None])&(self.item_ordinals==item[:,None])&(self.reservations.request_slots>=0)
         bound=association.any(dim=1)
         reservation_at=association.to(torch.int32).argmax(dim=1)
         binding=self.reservations.request_slots[root,reservation_at]
@@ -132,19 +138,20 @@ class AdmissionLifecycle:
         is_order_economic=economic&(self.lifecycle.economic_tags[root,local]==0)&result.applied
         # Economic来源可能没有DirectResponse关联；只用原显式绑定或已有订单绑定。
         request=torch.where((tag==3)&bound,binding,torch.where(bound,binding,old_request))
-        has_request=request>=0
-        confirm=use&(tag==3)&bound
+        has_request=bound | (found & (old_request>=0))
+        lifecycle_use=use&(outcome_kind==OUT_EVIDENCE)
+        confirm=lifecycle_use&(tag==3)&bound
         convert=use&is_order_economic&has_request
         book=self.reservations.definitive(request,accepted | is_order_economic,old_applied | is_order_economic,
             next_entry,confirm|convert)
         fault=fault | book.fault
-        order_event=use&((tag==7)|accepted|is_order_economic)
+        order_event=(lifecycle_use&((tag==7)|accepted))|(use&is_order_economic)
         open_flag=torch.where((tag==7)|accepted,self.lifecycle.open_orders[root,local],old_open)
         request=torch.where(accepted&bound,binding,old_request)
         orders,error=self.orders.set(order,self.lifecycle.conditions[root,local],open_flag,next_entry,order_event,
             request=request,economic=old_applied | is_order_economic)
         fault=fault | torch.where(order_event,error,0)
-        trade_event=use&(tag==8)
+        trade_event=lifecycle_use&(tag==8)
         trades,error=self.trades.set(fill,self.lifecycle.conditions[root,local],self.lifecycle.pending_trades[root,local],
             next_entry,trade_event,terminal_sticky=True)
         fault=fault | torch.where(trade_event,error,0)
@@ -166,7 +173,7 @@ class AdmissionLifecycle:
             applied_sequences=_take(next_entry,root.repeat_interleave(width)).select((same&success[:,None]).flatten(),self.applied_sequences),
             available_through=torch.where(success,torch.where(self.has_available,torch.maximum(self.available_through,available_at),available_at),self.available_through),
             has_available=self.has_available | success,
-            available_at=torch.where(same&success[:,None],available_at[:,None],self.available_at),fault=fault),success
+            available_at=torch.where(same&success[:,None],available_at[:,None],self.available_at),fault=fault),success | (not_applicable & (fault==0))
 
     def apply_closed(self,closed,association_available,*,maximum_retry_rounds=None):
         roots,width=self.applied.shape

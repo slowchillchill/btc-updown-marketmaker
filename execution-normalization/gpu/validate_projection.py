@@ -214,6 +214,40 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert values(again.current_entry_sequence)==values(admission.current_entry_sequence)
     assert not remaining.any().cpu().item()
     assert admission.has_available.cpu().tolist()==[True] and admission.available_through.cpu().tolist()==[10000]
+    # 同一真实SIM证据再次Core准备产生Duplicate；Ledger领取后NotApplicable不写位置/seq。
+    from dataclasses import replace
+    duplicate_batches=[]
+    for batch in batches:
+        _,duplicate=Numbers.run_exact_batch(lambda:state.normalizer.prepare(batch.rows,batch.emitted))
+        assert duplicate.outcomes[duplicate.emitted].cpu().tolist()==[3]*int(duplicate.emitted.sum().cpu())
+        duplicate_batches.append(replace(batch,normalized=duplicate,economic_enabled=torch.zeros_like(batch.economic_enabled)))
+    duplicate_columns=Numbers.run_exact_batch(lambda:EconomicColumns.from_projection_batches(duplicate_batches))
+    duplicate_ledger=Numbers.run_exact_batch(lambda:AdmissionLifecycle.open(platform,state.normalizer.bank,duplicate_columns,
+        integers([26]),integers([2])))
+    duplicate_ledger,remaining=Numbers.run_exact_batch(lambda:duplicate_ledger.apply_closed(delivered,
+        torch.ones_like(columns.enabled),maximum_retry_rounds=1))
+    assert not remaining.any().cpu().item() and not duplicate_ledger.applied.any().cpu().item()
+    assert values(duplicate_ledger.current_entry_sequence)==[26] and duplicate_ledger.fault.cpu().tolist()==[0]
+    # 真实原Ledger同一经济先到，没有Submission绑定不能Convert另一笔未发送预留。
+    early=Numbers.run_exact_batch(lambda:AdmissionLifecycle.open(platform,state.normalizer.bank,columns,integers([3]),integers([0])))
+    early,_=Numbers.run_exact_batch(lambda:early.reserve_action(zero[:,None],zero[:,None],rational(['1.5']),rational(['0']),
+        torch.ones((1,1),dtype=torch.bool,device='cuda'),rational([initial])))
+    early=Numbers.run_exact_batch(lambda:early.submission_started(zero,zero,zero,zero,torch.tensor([True],device='cuda')))
+    early,_=Numbers.run_exact_batch(lambda:early.reserve_action(torch.ones_like(zero[:,None]),zero[:,None],rational(['0.25']),rational(['0']),
+        torch.ones((1,1),dtype=torch.bool,device='cuda'),rational([initial])))
+    sequence=values(columns.sequences)
+    first_economic=next(i for i in range(columns.row_refs.size(1)) if columns.enabled[0,i].cpu().item() and sequence[i]==1)
+    submission=next(i for i in range(columns.row_refs.size(1)) if early.lifecycle.emitted[0,i].cpu().item() and early.lifecycle.schemas[0,i].cpu().item()==3)
+    enabled=torch.tensor([True],device='cuda')
+    early,used=Numbers.run_exact_batch(lambda:early.apply_record(torch.tensor([first_economic],device='cuda'),enabled,torch.tensor([10000],device='cuda'),enabled))
+    reference=source['economic_first_reference']
+    assert used.cpu().tolist()==[True] and early.reservations.statuses[0,:2].cpu().tolist()==[1,0]
+    assert values(early.current_entry_sequence)==[reference['before']['projection']['ledger_entry_seq']]
+    assert values(early.reservations.last_sequences)[:2]==[reference['before']['request']['last_ledger_entry_seq'],reference['unsent']['last_ledger_entry_seq']]
+    early,used=Numbers.run_exact_batch(lambda:early.apply_record(torch.tensor([submission],device='cuda'),enabled,torch.tensor([10000],device='cuda'),enabled))
+    assert used.cpu().tolist()==[True] and early.reservations.statuses[0,:2].cpu().tolist()==[3,0]
+    assert values(early.current_entry_sequence)==[reference['after']['projection']['ledger_entry_seq']]
+    assert values(early.reservations.last_sequences)[:2]==[reference['after']['request']['last_ledger_entry_seq'],reference['unsent']['last_ledger_entry_seq']]
     before=ledger.platform
     again=Numbers.run_exact_batch(lambda:ledger.receive(delivered).apply_pending(torch.ones_like(columns.enabled)))
     assert values(again.platform.platform_source_prefix)==[7]
@@ -222,4 +256,5 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     return {'device_generated_NOE_records':checked,'device_batches':len(batches),'original_positions_and_receive_order_checked':True,
         'bank_physical_rows':state.normalizer.bank.kinds.numel(),'masked_or_unemitted_rows':state.normalizer.bank.kinds.numel()-checked,
         'actual_device_Ledger_economic_position_predecessor_checked':True,
-        'Ledger_admission_device_generated_entry_local_and_binding_checked':True,'full_clock_Ledger_reservation_delivered':False}
+        'Ledger_admission_device_generated_entry_local_and_binding_checked':True,
+        'duplicate_NOE_NotApplicable_without_Ledger_commit_checked':True,'unbound_economic_before_Submission_unsent_reservation_checked':True,'full_clock_Ledger_reservation_delivered':False}

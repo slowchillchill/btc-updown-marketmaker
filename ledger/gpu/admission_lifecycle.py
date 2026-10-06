@@ -7,12 +7,14 @@ from dataclasses import dataclass,replace
 import torch
 from queues import ExactInt,Numbers,_take
 from fields import decode_fields
+from core import OUT_EVIDENCE,OUT_FACT,OUT_PENDING
 from reservation import grow_integer
 
 
 @dataclass(frozen=True)
 class LifecycleColumns:
     schemas: torch.Tensor
+    normalization_outcomes: torch.Tensor
     orders: object
     fills: object
     conditions: torch.Tensor
@@ -32,7 +34,9 @@ class LifecycleColumns:
         keys=bank.logical_keys[rows]
         schemas=keys[:,4]
         active=torch.cat([batch.emitted for batch in columns.projection_batches],dim=1).flatten()
-        enabled={tag:active&(schemas==tag) for tag in [3,7,8,9,11]}
+        outcomes=torch.cat([batch.normalized.outcomes for batch in columns.projection_batches],dim=1).flatten()
+        material=active & ((outcomes==OUT_EVIDENCE)|(outcomes==OUT_FACT))
+        enabled={tag:material&(schemas==tag) for tag in [3,7,8,9,11]}
         layouts={
             3:['scalar']*4+['integer','scalar','integer','integer','scalar'],
             7:['scalar']*3+['integer','scalar','scalar'],
@@ -41,14 +45,14 @@ class LifecycleColumns:
             11:['scalar']*4+['integer','scalar']+['rational']*8+['scalar','scalar']+['rational']*3,
         }
         decoded={}
-        fault=bank.fault[rows].clone()
+        fault=torch.where(material,bank.fault[rows],0)
         known=torch.zeros_like(active)
         for tag,layout in layouts.items():
             values,error=decode_fields(bank.semantic[rows],layout,enabled[tag])
             decoded[tag]=values
             fault=fault | error
             known=known | (schemas==tag)
-        fault=fault | (active & ~known).to(torch.int32)
+        fault=fault | (material & ~known).to(torch.int32)
         zero=ExactInt.from_i64_tensor(torch.zeros_like(schemas))
         orders=decoded[3][4].select(enabled[3],zero)
         orders=decoded[7][3].select(enabled[7],orders)
@@ -69,7 +73,7 @@ class LifecycleColumns:
         accepted=enabled[3]&(decoded[3][1]==0)
         request=torch.cat([batch.request_slots for batch in columns.projection_batches],dim=1)
         item=torch.cat([batch.item_ordinals for batch in columns.projection_batches],dim=1)
-        return cls(schemas.reshape(roots,width),orders,fills,conditions.reshape(roots,width),
+        return cls(schemas.reshape(roots,width),outcomes.reshape(roots,width),orders,fills,conditions.reshape(roots,width),
             open_orders.reshape(roots,width),pending.reshape(roots,width),accepted.reshape(roots,width),
             torch.where(economic,decoded[11][3],-1).reshape(roots,width),request,item,active.reshape(roots,width),
             torch.where(active,fault,0).reshape(roots,width))

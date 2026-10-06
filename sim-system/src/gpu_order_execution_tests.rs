@@ -320,6 +320,50 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
     let ledger_projection=serde_json::Value::Null;
     #[cfg(not(feature="shared-execution"))]
     let reservation_checkpoints=Vec::<serde_json::Value>::new();
+    #[cfg(feature="shared-execution")]
+    let economic_first_reference={
+        let mut ledger=ledger::LedgerWriterV1::new_with_admission_v2(ledger::AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        ledger.apply_noe_memory_v2(&observation.opening_record().unwrap()).unwrap();
+        for record in &initial_records { ledger.apply_noe_memory_v2(record).unwrap(); }
+        let intent=|id:&str,principal:&str|ledger::ReserveIntentV1 {
+            request_identity:ledger::LedgerRequestIdentityV1(id.into()),condition_id:condition.clone(),
+            requested_principal_pusd:ExactDecimal(principal.into()),immediate_fee_reserve_pusd:ExactDecimal("0".into()),
+        };
+        ledger.try_reserve_action_v2(&[intent("gpu-reservation","1.5")]).unwrap();
+        ledger.record_submission_started(&ledger::LedgerLocalEventIdentityV1("gpu-send-started".into()),
+            &ledger::LedgerRequestIdentityV1("gpu-reservation".into()),&ledger::LedgerSubmissionItemIdentityV1 {
+                global_request_id:"gpu-multiask-post".into(),batch_item_ordinal:0,
+            }).unwrap();
+        ledger.try_reserve_action_v2(&[intent("gpu-unsent-reservation","0.25")]).unwrap();
+        let economic=noe.iter().find(|record|match record.record() {
+            execution_normalization::NormalizationRecord::EconomicFactV2 {fact,..}=>matches!(fact.economic_identity,
+                contracts::execution_normalization::SourceNeutralEconomicIdentityV1::AccountTransition {account_transition_seq:1,..}),
+            execution_normalization::NormalizationRecord::EconomicFact {fact,..}=>matches!(fact.economic_identity,
+                contracts::execution_normalization::SourceNeutralEconomicIdentityV1::AccountTransition {account_transition_seq:1,..}),
+            _=>false,
+        }).unwrap();
+        ledger.apply_noe_memory_v2(economic).unwrap();
+        let unsent=|ledger:&ledger::LedgerWriterV1| {
+            let value=ledger.funds_read_v1().request(&ledger::LedgerRequestIdentityV1("gpu-unsent-reservation".into())).unwrap();
+            serde_json::json!({"status":value.reservation_state,"last_ledger_entry_seq":value.last_ledger_entry_seq})
+        };
+        let before=gpu_ledger_reservation_checkpoint(&ledger,"economic_before_submission");
+        let unsent_before=unsent(&ledger);
+        assert_eq!(before["request"]["status"],"SubmittedUnknown");
+        assert_eq!(unsent_before["status"],"ReservedBeforeSend");
+        let submission=noe.iter().find(|record|match record.record() {
+            execution_normalization::NormalizationRecord::Evidence {evidence,..}=>matches!(evidence,
+                execution_normalization::SourceNeutralEvidenceKind::Control {result:contracts::execution_normalization::SourceNeutralControlResult::Submission {..}}),
+            _=>false,
+        }).unwrap();
+        ledger.apply_noe_memory_v2(submission).unwrap();
+        let after=gpu_ledger_reservation_checkpoint(&ledger,"submission_after_economic");
+        assert_eq!(after["request"]["status"],"Converted");
+        assert_eq!(unsent(&ledger),unsent_before);
+        serde_json::json!({"before":before,"after":after,"unsent":unsent_before})
+    };
+    #[cfg(not(feature="shared-execution"))]
+    let economic_first_reference=serde_json::Value::Null;
     let records=noe.iter().map(|record|serde_json::json!({"record":record.record(),
         "position":record.position(),"visibility":record.visibility()})).collect::<Vec<_>>();
     let rules = &actor._rule_snapshot.snapshot().synchronized_platform_rules;
@@ -327,7 +371,7 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
         "finality_path":actor._finality_policy.normal_path(),"fee_rate":rules.fee_schedule.rate.value().to_string(),
         "fee_exponent":rules.fee_schedule.exponent,"taker_rebate_rate":actor._rule_snapshot.snapshot().project_account_rules.rebate_settlement.value.fixed_taker_rebate_rate.value().to_string(),
         "feedback_batches":feedback_batches,"noe_records":records,"initial_noe_records":initial_records.len(),
-        "normalization_reference":normalization_reference.borrow().clone(),
+        "economic_first_reference":economic_first_reference,"normalization_reference":normalization_reference.borrow().clone(),
         "ledger_projection":ledger_projection,"reservation_checkpoints":reservation_checkpoints,
         "opening_available_pusd":state.session.as_ref().unwrap().opening_fact.initial_account_state.available_pusd,
         "session_seed":state.session.as_ref().unwrap().session_seed.0});
