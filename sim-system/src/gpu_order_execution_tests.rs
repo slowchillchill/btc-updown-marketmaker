@@ -176,6 +176,11 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
     let token = TokenId("1".into());
     let (state,_) = reduce_market_event_slice_v2(actor.state.take().unwrap(),MarketEventPathV1::HiddenPlatform,1_100,
         &initial,actor._rule_snapshot.snapshot(),actor._finality_policy.as_ref()).unwrap_or_else(|_|panic!("原双腿初始化"));
+    // 同价正增量必须追加另一个E段，不能与原B/Q合并。
+    let addition = decoded_maker_level_event(BookSide::Ask,"0.2","1.000001","2.000001",1_150,1_151,10);
+    let (state,_) = reduce_market_event_slice_v2(state,MarketEventPathV1::HiddenPlatform,1_150,
+        std::slice::from_ref(&addition),actor._rule_snapshot.snapshot(),actor._finality_policy.as_ref())
+        .unwrap_or_else(|_|panic!("原同价正增量"));
     let request = BusinessRequestV2::PostOrders(PostOrdersRequestV2 {
         context:RequestContextV2 {global_request_id:"gpu-multiask-post".into(),caller_correlation_id:None},
         items:vec![PostOrderBatchItemV2 {batch_item_ordinal:0,item:post_item("gpu-multiask-item",&condition,&token,
@@ -188,7 +193,7 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
     let MutationActionBusinessEffectV3::Post(post) = accepted.unwrap().business else {panic!("原提交结果");};
     assert!(matches!(&post.outcome,PostOrderItemOutcomeV2::Accepted(_)));
     let mut execution = state.session.unwrap().execution_state;
-    assert_eq!(execution.fill_shape_for_tests(),(2,3));
+    assert_eq!(execution.fill_shape_for_tests(),(3,4));
     let mut checkpoints = vec![serde_json::json!({"at":receipt.platform_arrived_at_utc_ms,
         "state":execution.gpu_order_checkpoint_for_tests("sim-1")})];
     while let Some(at) = execution.next_scheduled_finality_at_utc_ms() {
@@ -198,9 +203,9 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
         checkpoints.push(serde_json::json!({"at":at,"fill_sequence":transition.trade_finality.fill_sequence,
             "state":execution.gpu_order_checkpoint_for_tests("sim-1")}));
     }
-    assert_eq!(checkpoints.len(),5);
+    assert_eq!(checkpoints.len(),7);
     let rules = &actor._rule_snapshot.snapshot().synchronized_platform_rules;
-    let input = serde_json::json!({"initial":initial,"checkpoints":checkpoints,"processing_at":receipt.platform_arrived_at_utc_ms,
+    let input = serde_json::json!({"initial":initial,"addition":addition,"checkpoints":checkpoints,"processing_at":receipt.platform_arrived_at_utc_ms,
         "finality_path":actor._finality_policy.normal_path(),"fee_rate":rules.fee_schedule.rate.value().to_string(),
         "fee_exponent":rules.fee_schedule.exponent,"taker_rebate_rate":actor._rule_snapshot.snapshot().project_account_rules.rebate_settlement.value.fixed_taker_rebate_rate.value().to_string()});
     let mut child = std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
