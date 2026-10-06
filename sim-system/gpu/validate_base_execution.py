@@ -13,6 +13,7 @@ from queues import Numbers, ExactInt, ExactRational, PriceQueueBatch, run_queue_
 from account_state import PlatformAccountState
 from base_execution import prepare_base_order, reduce_order_maker, cancel_base_order, append_base_remainder
 from fill_finality import NormalFillRecord
+from fill_pool import FillPool,run_fill_pool_batch
 
 
 def integers(values):
@@ -74,16 +75,20 @@ def main():
         taker_record = NormalFillRecord.create(prepared.asset_plan.matched_base,prepared.asset_plan.used_quote,prepared.fee.total_micro,
             torch.tensor([0],device='cuda'),torch.tensor([reference['processing_at']],device='cuda'),delta.emitted,reference['finality_path'])
         rebate_rate = Numbers.run_exact_batch(lambda:rational([reference['taker_rebate_rate']]))
-        taker_record,account,_ = Numbers.run_exact_batch(lambda:taker_record.advance_one(account,taker_record.matched_at,rebate_rate))
+        pool = FillPool.empty(taker_record,capacity=1)
+        pool,allocated = run_fill_pool_batch(pool,lambda value:value.enqueue(taker_record))
+        assert allocated.emitted.cpu().tolist() == [True] and values(allocated.sequence) == [1]
+        pool,account,_ = Numbers.run_exact_batch(lambda:pool.advance_one(account,taker_record.matched_at,rebate_rate))
         maker_record = None
         for checkpoint in reference['checkpoints']:
             stage = checkpoint['stage']
             if stage == 'taker_finality':
                 at = torch.tensor([checkpoint['at']],device='cuda')
-                taker_record,account,transition = Numbers.run_exact_batch(lambda:taker_record.advance_one(account,at,rebate_rate))
+                pool,account,transition = Numbers.run_exact_batch(lambda:pool.advance_one(account,at,rebate_rate))
+                assert values(transition.fill_sequence) == [1]
                 # 同实际原义务时点的重投不重复经济应用或应计。
-                taker_record,account,repeated = Numbers.run_exact_batch(lambda:taker_record.advance_one(account,at,rebate_rate))
-                assert not repeated.emitted.any().cpu().item()
+                pool,account,repeated = Numbers.run_exact_batch(lambda:pool.advance_one(account,at,rebate_rate))
+                assert not repeated.event.emitted.any().cpu().item()
             elif stage == 'hidden_step':
                 event = reference['events'][checkpoint['ordinal']]['payload']['event']
                 side = event['side']
@@ -105,10 +110,14 @@ def main():
             elif stage == 'maker_finality':
                 assert maker is not None
                 if maker_record is None:
-                    maker_record = NormalFillRecord.create(maker.base,maker.quote,maker.quote.constant(0),torch.tensor([0],device='cuda'),
-                        torch.tensor([reference['maker_at']],device='cuda'),maker.emitted,reference['finality_path'])
-                    maker_record,account,_ = Numbers.run_exact_batch(lambda:maker_record.advance_one(account,maker_record.matched_at,rebate_rate))
-                maker_record,account,_ = Numbers.run_exact_batch(lambda:maker_record.advance_one(account,torch.tensor([checkpoint['at']],device='cuda'),rebate_rate))
+                    maker_record = pool.new_record(maker.base,maker.quote,maker.quote.constant(0),torch.tensor([0],device='cuda'),
+                        torch.tensor([reference['maker_at']],device='cuda'),maker.emitted,torch.tensor([0],device='cuda'))
+                    pool,allocated = run_fill_pool_batch(pool,lambda value:value.enqueue(maker_record))
+                    assert allocated.emitted.cpu().tolist() == [True] and values(allocated.sequence) == [2]
+                    assert pool.capacity == 2  # 完成的taker记录仍保留，增长后按原seq追加maker。
+                    pool,account,_ = Numbers.run_exact_batch(lambda:pool.advance_one(account,maker_record.matched_at,rebate_rate))
+                pool,account,transition = Numbers.run_exact_batch(lambda:pool.advance_one(account,torch.tensor([checkpoint['at']],device='cuda'),rebate_rate))
+                assert values(transition.fill_sequence) == [2]
             elif stage == 'canceled':
                 queue,quantity,account,_,_,found,_ = Numbers.run_exact_batch(lambda:cancel_base_order(queue,quantity,account,
                     torch.tensor([-1,7],device='cuda'),torch.tensor([0,0],device='cuda'),torch.tensor([False],device='cuda'),torch.tensor([True],device='cuda')))
@@ -117,6 +126,13 @@ def main():
                 assert_checkpoint(checkpoint['state'],quantity,account)
             except AssertionError as error:
                 raise AssertionError((stage,checkpoint.get('at'),checkpoint.get('ordinal'),error)) from error
+        assert pool.occupied.cpu().tolist() == [[True,True]] and values(pool.next_sequence) == [3]
+        scheduled,slot,pending = pool.next_obligation()
+        assert pending.cpu().tolist() == [False]
+        for original in reference['checkpoints'][-1]['state']['fill_records']:
+            index = torch.tensor([original['sequence']-1],device='cuda')
+            assert pool.records.ordinal[index].cpu().tolist() == [original['ordinal']]
+            assert values(_take(pool.records.economic_application_sequence,index)) == [original['economic_application_sequence'] or 0]
         # 同一次最终性候选的经济扣款成功、第二笔应计序号溢出须共同回退。
         near_limit = replace(accepted_account,next_sequence=integers([(1<<64)-2]))
         atomic_record = NormalFillRecord.create(prepared.asset_plan.matched_base,prepared.asset_plan.used_quote,prepared.fee.total_micro,
@@ -170,7 +186,7 @@ def main():
         'cuda_memcpy_events':sum(event.name.startswith('Memcpy') for event in cuda),
         'public_integer_kernel_launches':sum(event.name.startswith('integer_kernel') for event in kernels),
         'public_floor_sum_kernel_launches':sum(event.name.startswith('floor_sum_kernel') for event in kernels),
-        'queue_rows':queue.rows,'segment_capacity':queue.capacity,
+        'queue_rows':queue.rows,'segment_capacity':queue.capacity,'fill_pool_capacity':pool.capacity,'retained_fill_records':2,
         'maximum_exact_words':max(getattr(quantity,field.name).words.shape[1] for field in fields(quantity) if field.name!='fault'),
         'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
         'public_clock_NOE_Ledger_actor_delivered':False}))
