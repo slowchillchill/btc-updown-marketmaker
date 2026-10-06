@@ -146,9 +146,12 @@ fn gpu_fifo_preserves_segment_order_taker_debt_and_resync() {
         let expected=floor_sum_biguint_v1(n.clone(),m.clone(),a.clone(),b.clone()).unwrap();
         floor_sums.push(json!({"n":n.to_string(),"m":m.to_string(),"a":a.to_string(),"b":b.to_string(),"expected":expected.to_string()}));
     }
+    let empty=AssetQueueV2::from_initial_levels(&[],&[]).unwrap();
+    let empty_quote=empty.calculate_taker_buy(cross_prices[2],TakerTargetV1::Quote(7)).unwrap();
+    assert!(empty_quote.fills.is_empty());
     let input=json!({"checkpoints":checkpoints,"maker_depletion":"1000000","taker_quote":"2000000",
         "multi_plan":{"initial":multi_initial,"slices":slices,"applied":multi_applied,"echo":multi_echo},
-        "quote_plans":quote_plans,"cross_quote_plans":cross_plans,"floor_sums":floor_sums});
+        "quote_plans":quote_plans,"cross_quote_plans":cross_plans,"floor_sums":floor_sums,"empty_quote_plan":{"matched":empty_quote.matched_base_units.to_string(),"used":empty_quote.used_quote_units.to_string()}});
     let python=std::env::var("B_GPU_PYTHON").unwrap();
     let script=std::env::var("B_GPU_FIFO_VALIDATOR").unwrap();
     let mut child=std::process::Command::new(python).arg(script).stdin(std::process::Stdio::piped())

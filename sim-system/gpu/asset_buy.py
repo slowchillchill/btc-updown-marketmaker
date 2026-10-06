@@ -29,8 +29,21 @@ def plan_asset_quote(queue, ask_rows, budget, maximum_price):
         raise TypeError('ask坐标须为同设备int64矩阵')
     if budget.sign.shape != (assets,) or maximum_price.numerator.sign.shape != (assets,):
         raise ValueError('资产预算及最高价形状不一致')
-    if queue.rows < 1 or assets < 1:
-        raise ValueError('资产/价位物理人口须非空；无ask用尾部-1表示')
+    if assets < 1:
+        raise ValueError('资产物理人口须非空')
+    if queue.rows == 0:
+        # 原已初始化空簿是合法状态；零价位不补假盘口或强制NoTrade。
+        zero = budget.constant(0)
+        fault = budget.fault | maximum_price.fault | (budget.sign < 0).to(torch.int32)
+        fault = fault | (ask_rows != -1).any(1).to(torch.int32)
+        relation = zero.compare(budget)
+        fault = fault | relation.fault
+        flat_zero = queue.total_base.constant(0)
+        queue_zero = queue.debt.constant(0)
+        combined = QuoteTakerPlan(queue,flat_zero,flat_zero,queue.consumed_base,
+            queue_zero,queue_zero,torch.zeros(0,dtype=torch.bool,device=ask_rows.device),queue.fault)
+        return AssetQuotePlan(combined,zero,zero,(relation.order == 0) & (fault == 0),fault,
+                              torch.empty(0,dtype=torch.int64,device=ask_rows.device))
     present = ask_rows >= 0
     valid = present & (ask_rows < queue.rows)
     safe = ask_rows.clamp(0, queue.rows-1)

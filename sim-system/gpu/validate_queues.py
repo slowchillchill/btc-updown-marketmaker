@@ -143,6 +143,16 @@ def main():
         result=Numbers.run_exact_batch(lambda:apply_asset_quote(cross,plan,torch.ones(1,dtype=torch.bool,device='cuda')))
         assert describe(result)==original['applied']
         assert describe(cross)==original['initial']
+    empty_price=Numbers.run_exact_batch(lambda:ExactRational.ratio(integers([]),integers([])))
+    empty_queue=PriceQueueBatch.empty(empty_price,capacity=1)
+    empty_layout=torch.empty((1,0),dtype=torch.int64,device='cuda')
+    empty_plan=Numbers.run_exact_batch(lambda:plan_asset_quote(empty_queue,empty_layout,integers([7]),maximum))
+    assert not empty_plan.fault.any().cpu().item()
+    assert values(empty_plan.matched_base)==[int(reference['empty_quote_plan']['matched'])]
+    assert values(empty_plan.used_quote)==[int(reference['empty_quote_plan']['used'])]
+    assert empty_plan.complete.cpu().tolist()==[False]
+    empty_applied=Numbers.run_exact_batch(lambda:apply_asset_quote(empty_queue,empty_plan,torch.ones(1,dtype=torch.bool,device='cuda')))
+    assert describe(empty_applied)==[] and empty_applied.rows==0
     originals=reference['floor_sums']
     n=integers([int(item['n']) for item in originals])
     m=integers([int(item['m']) for item in originals])
@@ -160,7 +170,7 @@ def main():
         'original_quote_budget_planning','incomplete_FOK_queue_unchanged','partial_segment_stops',
         'stale_plan_not_applied','original_cross_price_quote_plan','partial_price_stops_later_prices',
         'whole_budget_FOK_gate_before_any_queue_apply','original_Euclid_floor_sum',
-        'floor_sum_grows_for_large_exact_result','floor_sum_invalid_not_normal_value'],
+        'floor_sum_grows_for_large_exact_result','floor_sum_invalid_not_normal_value','original_empty_asset_quote_no_liquidity'],
         'capacity':queue.capacity,'elapsed_seconds':time.perf_counter()-started,
         'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
         'noe_ledger_execution_delivered':False}))
