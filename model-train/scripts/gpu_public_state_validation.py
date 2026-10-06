@@ -6,6 +6,9 @@ import subprocess
 import sys
 import time
 import math
+import os
+import bisect
+import hashlib
 from pathlib import Path
 from fractions import Fraction
 import torch
@@ -37,6 +40,7 @@ def main():
     from model_train.book import BookEncoder
     from prepare import _numbers
     history_reference = None
+    native_freeze_reference = None
     started = time.perf_counter()
     print(json.dumps({'stage':'strict_compact_to_pm_device_columns'}),flush=True)
     wire = subprocess.check_output([str(args.binary),'--pm-device-columns',str(args.material),'268435456'])
@@ -433,6 +437,73 @@ def main():
             'retained_samples':frozen.memory.counts.cpu().tolist()[0],
             'group_batch_rows':7,'path_reset_keeps_history':True,'t_minus_30_ineligible_remains_empty':True}
 
+        rule_binary = os.environ.get('B_GPU_RULE_CONTEXT_BINARY')
+        if rule_binary:
+            sys.path.insert(0,str(root/'sim-system/gpu'))
+            from rules import PublicRuleGpu
+            from input_rules import RuleInputs
+            from input_100ms import MarketInputs100ms,MarketFreezeMemory
+            snapshot = root/'sim-system/tests/fixtures/platform-rule-snapshot-v3-gate-b.json'
+            request = args.output.parent/'historical-rule-request.json'
+            request.write_text(json.dumps({'snapshot_path':str(snapshot),'expected_file_sha256':hashlib.sha256(snapshot.read_bytes()).hexdigest(),
+                'replay_causal_start_utc_ms':2**63-1,'market':columns['markets'][target_market]}))
+            context = json.loads(subprocess.check_output([rule_binary,str(request)]))
+            process_rules = PublicRuleGpu(context)
+            direct_rule = RuleInputs(state,process_rules).encode(observation,assets,now)
+            expected_rule = [0.0]*30
+            for outcome,asset in enumerate(sorted(reference['public_assets'],key=lambda a:a['asset']['outcome']['index'])):
+                field = asset['tick'];visible = field['value'] is not None and field['quality'] in ('fresh','stale')
+                start = 7*outcome
+                if visible: expected_rule[start:start+2] = [signed_log(Fraction(field['value'])),1.0]
+                anchors = [a for a in field['direct_anchors'] if a['field_path']=='tick']
+                expected_rule[start+2:start+7] = original_t5(anchors[0] if len(anchors)==1 else None)
+            for slot,value in ((14,Fraction(context['limit_min_quantity_shares'])),(16,Fraction(context['market_buy_min_spend_pusd'])),
+                               (20,Fraction(context['taker_delay_ms'],1000)),(24,Fraction(context['fee_rate'])),(26,context['fee_exponent'])):
+                expected_rule[slot:slot+2] = [signed_log(value),1.0]
+            for slot,key in ((18,'taker_delay_enabled'),(22,'fees_enabled'),(28,'fee_taker_only')):
+                expected_rule[slot:slot+2] = [float(context[key]),1.0]
+            assert torch.equal(direct_rule.values[2],torch.tensor(expected_rule,device='cuda',dtype=torch.float32)), (direct_rule.values[2],expected_rule)
+            encoder = MarketInputs100ms(state,market_state,reference_state,binance_state,source_history,process_rules,columns,state.causal_visible_at)
+            # 仅重建有界Native字段起始边界；不是模型热身或活动账户恢复。
+            clocks = [];frontier = -(2**63)
+            for value in reference['public_visible_times']:
+                frontier = max(frontier,value);clocks.append(frontier)
+            before = 19800;through = bisect.bisect_right(clocks,before)
+            continuous = source_history.empty(1,start_at)
+            if through:
+                batch = torch.arange(through,device='cuda',dtype=torch.int64)
+                continuous,error = source_history.consume(batch,state.causal_visible_at[batch],market_indices[-1:],start_at,continuous)
+                assert not error.any().cpu().item()
+            continuous = source_history.freeze(continuous).memory
+            endpoints = MarketFreezeMemory(prefixes.new_tensor([through-1]),prefixes.new_tensor([before]),None,None)
+            saved = None;roles = set();native_freezes = 0
+            for grid in range(19900,26300,100):
+                end = bisect.bisect_right(clocks,grid)
+                if end>through:
+                    batch = torch.arange(through,end,device='cuda',dtype=torch.int64)
+                    continuous,error = source_history.consume(batch,state.causal_visible_at[batch],market_indices[-1:],start_at,continuous)
+                    assert not error.any().cpu().item()
+                frozen_market = encoder.freeze(prefixes.new_tensor([grid]),market_indices[-1:],start_at,continuous,endpoints)
+                assert not frozen_market.fault.any().cpu().item()
+                assert frozen_market.fast.shape==(1,626) and frozen_market.book_levels.shape[1]==6
+                assert torch.equal(frozen_market.fast[:,566:596],frozen_market.rule)
+                roles.add(int(frozen_market.role.cpu()[0]))
+                if saved is not None: assert torch.equal(saved[0].fast,saved[1])
+                if grid==24000:
+                    # 原两次完整快照12→13；冻结端点差及存在位。
+                    assert torch.equal(frozen_market.fast[0,37+6+3],torch.tensor(signed_log(1),device='cuda',dtype=torch.float32))
+                    assert frozen_market.fast[0,37+6+4].cpu().item()==1.0
+                    saved = (frozen_market,frozen_market.fast.clone())
+                if grid==26100:
+                    assert torch.equal(frozen_market.fast[0,596],torch.tensor(signed_log(20),device='cuda',dtype=torch.float32))
+                    assert frozen_market.fast[0,542].cpu().item()==1.0
+                continuous,endpoints = frozen_market.history_memory,frozen_market.endpoint_memory
+                through=end;native_freezes+=1
+                if native_freezes%8==0: print(json.dumps({'stage':'native_100ms_freeze','ticks':native_freezes,'observation_ms':grid}),flush=True)
+            assert roles=={0,1}
+            native_freeze_reference = {'ticks':native_freezes,'first_observation_ms':19900,'last_observation_ms':26200,
+                'context_only_and_decision_required':True,'frozen_fast626_immutable':True,
+                'rule_snapshot':'historical_test_fixture_not_formal_training','account_policy_execution':False}
         depth_rows = reference['binance_observations']
         saw_gap = saw_missing = False
         for row in depth_rows:
@@ -713,6 +784,7 @@ def main():
               'passed':passed,
               'original_core_reference_checked':args.original_reference is not None,
               'history_original_reference':history_reference,
+              'native_100ms_freeze_reference':native_freeze_reference,
               'not_delivered':(['reference_preparation_for_this_material'] if not columns['reference_preparation_complete'] else [])+['hidden','sim_noe_ledger',
                                '100ms_window','full_actor','ppo','active_root_restore']}
     args.output.parent.mkdir(parents=True,exist_ok=True)
