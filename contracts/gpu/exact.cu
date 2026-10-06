@@ -137,3 +137,29 @@ extern "C" void public_gpu_index_probe(const int64_t* widths, const uint32_t* to
     int64_t* out, int64_t rows, cudaStream_t stream) {
   index_probe_kernel<<<(rows + 255) / 256, 256, 0, stream>>>(widths, tops, out, rows);
 }
+
+__global__ void gcd_kernel(const uint32_t* a, int64_t wa, const uint32_t* b,
+    int64_t wb, uint32_t* out, uint32_t* work, int64_t cap, int64_t rows) {
+  int64_t row = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (row >= rows) return;
+  uint32_t* x = work + row * 4 * cap;
+  uint32_t* y = x + cap;
+  uint32_t* q = y + cap;
+  uint32_t* r = q + cap;
+  copy(x, cap, a + row * wa, wa);
+  copy(y, cap, b + row * wb, wb);
+  while (length(y, cap)) {
+    divide(q, cap, r, cap, x, cap, y, cap);
+    // 旋转独占临时区；不用CPU条件判断或回传余数。
+    uint32_t* old_x = x;
+    x = y;
+    y = r;
+    r = old_x;
+  }
+  copy(out + row * cap, cap, x, cap);
+}
+extern "C" void public_gpu_gcd(const uint32_t* a, int64_t wa, const uint32_t* b,
+    int64_t wb, uint32_t* out, uint32_t* work, int64_t cap, int64_t rows,
+    cudaStream_t stream) {
+  gcd_kernel<<<(rows + 255) / 256, 256, 0, stream>>>(a, wa, b, wb, out, work, cap, rows);
+}

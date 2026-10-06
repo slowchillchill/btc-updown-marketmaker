@@ -80,8 +80,24 @@ torch::Tensor index_probe(torch::Tensor widths, torch::Tensor tops) {
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
 }
+torch::Tensor gcd(torch::Tensor a, torch::Tensor b) {
+  words_check(a); words_check(b);
+  TORCH_CHECK(a.device() == b.device() && a.size(0) == b.size(0), "GCD批次/设备不一致");
+  const c10::cuda::CUDAGuard guard(a.device());
+  int64_t rows = a.size(0), cap = std::max(a.size(1), b.size(1)) + 1;
+  capacity_check(rows, 4 * cap);
+  auto out = torch::empty({rows, cap}, a.options());
+  auto work = torch::empty({rows, 4 * cap}, a.options());
+  if (rows) public_gpu_gcd((uint32_t*)a.data_ptr<int32_t>(), a.size(1),
+      (uint32_t*)b.data_ptr<int32_t>(), b.size(1), (uint32_t*)out.data_ptr<int32_t>(),
+      (uint32_t*)work.data_ptr<int32_t>(), cap, rows,
+      c10::cuda::getCurrentCUDAStream().stream());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return out;
+}
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("integer_op", &integer_op);
   m.def("project", &project);
   m.def("index_probe", &index_probe);
+  m.def("gcd", &gcd);
 }

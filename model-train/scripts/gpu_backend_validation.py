@@ -8,9 +8,10 @@ import struct
 import subprocess
 import time
 from decimal import Decimal, localcontext
+from fractions import Fraction
 from pathlib import Path
 import torch
-from model_train.gpu_exact import ExactInt, public_extension
+from model_train.gpu_exact import ExactInt, ExactRational, public_extension
 
 
 def nearest_bits(n,d):
@@ -84,6 +85,26 @@ def main():
     expected_bits = [(w-1)*32+(top & 0xffffffff).bit_length() for w,top in zip(widths,tops)]
     assert probe.cpu().tolist() == [[v,(v-1)//32,(v-1)%32] for v in expected_bits], '64-bit device bit indexes'
     records.extend(['compare_fault', 'index64'])
+    log(f'阶段=公共精确有理数 工作量={len(a)} 耗时={time.monotonic()-started:.3f}s')
+    ra = ExactRational.from_values(a, b)
+    rc = ExactRational.from_values(b, [3] * len(b))
+    fa = [Fraction(n, d) for n, d in zip(a, b)]
+    fc = [Fraction(n, 3) for n in b]
+    for name, actual, reference in [
+        ('rational_add', ra+rc, [x+y for x,y in zip(fa,fc)]),
+        ('rational_sub', ra-rc, [x-y for x,y in zip(fa,fc)]),
+        ('rational_mul', ra*rc, [x*y for x,y in zip(fa,fc)]),
+        ('rational_div', ra.divided_by(rc), [x/y for x,y in zip(fa,fc)]),
+    ]:
+        assert actual.numerator.report_values() == [x.numerator for x in reference], name
+        assert actual.denominator.report_values() == [x.denominator for x in reference], name
+        assert not bool(actual.fault.any()), name
+        records.append(name)
+        log(f'完成={name} 耗时={time.monotonic()-started:.3f}s')
+    assert ra.floor().report_values() == [x.numerator//x.denominator for x in fa], 'rational_floor'
+    bad_r = ExactRational.from_values([1], [0])
+    assert not bool(bad_r.compare(ExactRational.from_values([1], [1])).valid_mask()[0]), 'rational zero denominator fault'
+    records.extend(['rational_floor', 'rational_fault'])
     torch.cuda.synchronize();elapsed=time.monotonic()-started
     report={'scope':'实际公共GPU整数/末端投影；不是完整环境/PPO/训练容量','source_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'cases':len(a),'passed':records,'projection_errors':errors,'compile_seconds':compile_seconds,'elapsed_seconds':elapsed,'device':torch.cuda.get_device_name(),'peak_allocated_bytes':torch.cuda.max_memory_allocated()}
     args.output.parent.mkdir(parents=True,exist_ok=True);args.output.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n');log(f'完成 精确检查={records} 投影有限误差={errors} 耗时={elapsed:.3f}s')
