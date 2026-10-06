@@ -114,8 +114,7 @@ class AdmissionLifecycle:
         fault=fault | torch.where(requested,sequence_fault(next_entry),0)
         platform,result=self.platform.apply_transition(sequence,balances,outcome,economic&(fault==0),
             torch.zeros_like(economic),association_available)
-        applicable=((outcome_kind==OUT_EVIDENCE)&((tag==3)|(tag==7)|(tag==8)|(tag==9)))|
-            (outcome_kind==OUT_PENDING)
+        applicable=((outcome_kind==OUT_EVIDENCE)&((tag==3)|(tag==7)|(tag==8)|(tag==9))) | (outcome_kind==OUT_PENDING)
         use=(requested&applicable)|result.applied
         fault=fault | result.fault
         use=use&(fault==0)
