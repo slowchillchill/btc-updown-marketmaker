@@ -12,6 +12,7 @@ from fill_pool import FillPool
 from validate_base_execution import integers,rational,units,values,assert_checkpoint
 from latency import EmpiricalDelaySampler, byte_column
 from pathlib import Path
+from feedback import FeedbackEmitter
 
 
 def main():
@@ -71,11 +72,29 @@ def main():
         [source['session_seed'].encode('ascii')])
     lifecycle=[]
     direct=[]
+    emitter=FeedbackEmitter.open(1)
     for batch in source['feedback_batches']:
+        drafts=[]
         for category in ['orders','trades','settlements']:
             for row in batch[category]:
-                lifecycle.append(row.get('feedback',row)['metadata'])
+                metadata=row.get('feedback',row)['metadata']
+                lifecycle.append(metadata)
+                drafts.append((False,metadata))
         direct.extend(row['metadata'] for row in batch['direct'])
+        drafts.extend((True,row['metadata']) for row in batch['direct'])
+        drafts.sort(key=lambda row:row[1]['private_feedback_sequence'])
+        active=torch.ones((1,len(drafts)),dtype=torch.bool,device='cuda')
+        is_direct=torch.tensor([[row[0] for row in drafts]],device='cuda')
+        platform=torch.tensor([[row[1]['platform_responded_at_utc_ms'] if row[0] else row[1]['platform_event_at_utc_ms']
+                                for row in drafts]],device='cuda')
+        received=torch.tensor([[row[1]['response_received_at_utc_ms'] if row[0] else 0 for row in drafts]],device='cuda')
+        emitter,emission=Numbers.run_exact_batch(lambda:emitter.emit(sampler,active,is_direct,platform,platform,
+            received,torch.zeros_like(platform,dtype=torch.int32)))
+        assert emission.emitted.cpu().tolist()==[[True]*len(drafts)]
+        assert values(emission.private_sequences)==[row[1]['private_feedback_sequence'] for row in drafts]
+        assert values(emission.batch_sequences)==[batch['batch_sequence']]*len(drafts)
+        assert emission.received_at.cpu().tolist()==[[row[1]['response_received_at_utc_ms'] if row[0] else
+            row[1]['feedback_received_at_utc_ms'] for row in drafts]]
     sequence=integers([row['private_feedback_sequence'] for row in lifecycle])
     roots=torch.zeros(len(lifecycle),dtype=torch.int64,device='cuda')
     sampled=sampler.sample_feedback(roots,sequence)
@@ -89,6 +108,15 @@ def main():
     assert not fault.any().cpu().item()
     assert arrived.cpu().tolist()==[row['response_received_at_utc_ms'] for row in direct]
     assert source['initial_noe_records']>0 and source['noe_records']
+    # 同一发射候选u64溢出不能耗序号或发出半批，已成功旧批不回滚。
+    boundary=FeedbackEmitter(integers([(1<<64)-2]),integers([2]),torch.zeros(1,dtype=torch.int32,device='cuda'))
+    active=torch.ones((1,2),dtype=torch.bool,device='cuda')
+    direct_mask=torch.zeros_like(active)
+    at=torch.full((1,2),1200,dtype=torch.int64,device='cuda')
+    candidate,event=Numbers.run_exact_batch(lambda:boundary.emit(sampler,active,direct_mask,at,at,at,
+        torch.zeros_like(at,dtype=torch.int32)))
+    assert not event.emitted.any().cpu().item() and event.root_fault.cpu().tolist()==[1]
+    assert values(candidate.next_private_sequence)==[(1<<64)-2] and values(candidate.next_batch_sequence)==[2]
     import os
     artifact=os.environ.get('B_GPU_ORDER_ARTIFACT_DIR')
     if artifact:
@@ -99,6 +127,7 @@ def main():
         'elapsed_seconds_with_reference_reads':time.perf_counter()-started,
         'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
         'original_NOE_records':len(source['noe_records']),'actual_lifecycle_device_delay_checks':len(lifecycle),
+        'actual_device_private_batch_numbering_checked':True,
         'original_feedback_dual_visibility_gate_checked':True,
         'global_clock_NOE_Ledger_delivered':False}))
 
