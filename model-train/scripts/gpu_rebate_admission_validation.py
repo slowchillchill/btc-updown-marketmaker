@@ -148,3 +148,54 @@ def validate(source):
     return {'actual_V4_rebate_consumer_attempts':checked,'actual_deferred_rebate_attempts':deferred,
         'actual_position_and_ledger_prefix_checked':True,'cold_original_prefix_initialization':True,
         'full_activity_restore_or_day_producer_delivered':False}
+
+
+def validate_account_transfers(source):
+    """源实际V4经济前缀冷装箱，核SIM日结/付款金额及独立经济序号。"""
+    from account_state import PlatformAccountState
+    from validate_base_execution import units
+    from fractions import Fraction
+    names=['cash_pusd','available_pusd','principal_encumbrance_pusd','immediate_taker_fee_encumbrance_pusd',
+        'maker_rebate_receivable_pusd','taker_rebate_receivable_pusd','maker_rebate_locked_remainder_pusd','taker_rebate_locked_remainder_pusd']
+    delta_names=['cash_pusd_delta','available_pusd_delta','principal_encumbrance_pusd_delta','immediate_taker_fee_encumbrance_pusd_delta',
+        'maker_rebate_receivable_pusd_delta','taker_rebate_receivable_pusd_delta','maker_rebate_locked_remainder_pusd_delta','taker_rebate_locked_remainder_pusd_delta']
+    checked=0
+    for original in source['records']:
+        fact=original['record'].get('EconomicFact')
+        if fact is None or original.get('deferred',False):
+            continue
+        transition=fact['fact']['disposition']['AccountTransition']
+        body=transition['transition']
+        body=body.get('Existing',body)
+        name=next(iter(body))
+        if name not in ['MakerRebateDayFinalized','TakerRebateDayFinalized','MakerRebatePaid','TakerRebatePaid']:
+            continue
+        before=original['before']['base']['platform_confirmed_projection']
+        account=Numbers.run_exact_batch(lambda:PlatformAccountState.open(integers([units(before['cash_pusd'])]),
+            torch.tensor([0],device='cuda')))
+        account=replace(account,available=integers([units(before['available_pusd'])]),
+            principal=integers([units(before['principal_encumbrance_pusd'])]),fee=integers([units(before['immediate_taker_fee_encumbrance_pusd'])]),
+            rebates=rational([before[field] for field in names[4:]]),
+            next_sequence=integers([original['before']['base']['platform_source_prefix']+1]))
+        delta=transition['balance_delta']
+        delta=delta.get('existing',delta)
+        maker=torch.tensor([name.startswith('Maker')],device='cuda')
+        enabled=torch.tensor([True],device='cuda')
+        if name.endswith('DayFinalized'):
+            amount=delta['maker_rebate_locked_remainder_pusd_delta' if bool(maker.cpu()[0]) else 'taker_rebate_locked_remainder_pusd_delta']
+            account,result=Numbers.run_exact_batch(lambda:account.finalize_rebate_day(rational([amount]),maker,enabled))
+        else:
+            account,result=Numbers.run_exact_batch(lambda:account.pay_rebate_day(rational([delta['cash_pusd_delta']]),maker,enabled))
+        assert result.fault.cpu().tolist()==[0] and result.emitted.cpu().tolist()==[True]
+        assert values(result.sequence)==[transition['account_transition_seq']]
+        observed=[Fraction(values(getattr(result.movement,field))[0],1_000_000) for field in ['cash','available','principal','fee']]
+        observed+=[Fraction(n,d) for n,d in zip(values(result.movement.rebates.numerator),values(result.movement.rebates.denominator))]
+        assert observed==[Fraction(delta[field]) for field in delta_names]
+        assert delta['outcome_balance_deltas']==[] and values(result.movement.outcomes)==[0]
+        after=original['after']['base']['platform_confirmed_projection']
+        observed=[Fraction(values(getattr(account,field))[0],1_000_000) for field in ['cash','available','principal','fee']]
+        observed+=[Fraction(n,d) for n,d in zip(values(account.rebates.numerator),values(account.rebates.denominator))]
+        assert observed==[Fraction(after[field]) for field in names]
+        checked+=1
+    assert checked==2
+    return {'actual_SIM_day_account_transfers_checked':checked}

@@ -205,3 +205,38 @@ class PlatformAccountState:
         rebates = rational_select(expanded,selected,zeros(self.rebates))
         movement = replace(self.no_movement(),rebates=rebates)
         return candidate.apply_movement(movement,requested & (candidate.fault == 0))
+
+    def finalize_rebate_day(self,locked,maker,requested):
+        """原日结只把业务locked从应收转锁定；零locked不分配经济序号。"""
+        roots=self.cash.sign.numel()
+        if maker.shape!=(roots,) or maker.dtype!=torch.bool or maker.device!=self.cash.words.device:
+            raise TypeError('返佣种类须为同设备bool[roots]')
+        error=locked.fault | (locked.numerator.sign<0).to(torch.int32)
+        candidate=replace(self,fault=self.fault | torch.where(requested,error,0))
+        columns=torch.arange(roots*4,device=maker.device)
+        owner=columns//4
+        receivable=(~maker[owner]).to(torch.int64)
+        amount=ExactRational(_take(locked.numerator,owner),_take(locked.denominator,owner))
+        negative=ExactRational(amount.numerator.negated(),amount.denominator)
+        delta=rational_select(negative,columns%4==receivable,zeros(self.rebates))
+        delta=rational_select(amount,columns%4==receivable+2,delta)
+        return candidate.apply_movement(replace(self.no_movement(),rebates=delta),
+            requested & (locked.numerator.sign>0) & (candidate.fault==0))
+
+    def pay_rebate_day(self,paid,maker,requested):
+        """原正全额付款：精确应收转cash/available，源金额最多四位小数。"""
+        roots=self.cash.sign.numel()
+        if maker.shape!=(roots,) or maker.dtype!=torch.bool or maker.device!=self.cash.words.device:
+            raise TypeError('返佣种类须为同设备bool[roots]')
+        scaled=paid.numerator*paid.numerator.constant(10000)
+        units,remainder=scaled.divrem(paid.denominator)
+        error=paid.fault | units.fault | remainder.fault | ((paid.numerator.sign<=0)|(remainder.sign!=0)).to(torch.int32)
+        candidate=replace(self,fault=self.fault | torch.where(requested,error,0))
+        micro=units*units.constant(100)
+        columns=torch.arange(roots*4,device=maker.device)
+        owner=columns//4
+        amount=ExactRational(_take(paid.numerator,owner),_take(paid.denominator,owner))
+        negative=ExactRational(amount.numerator.negated(),amount.denominator)
+        delta=rational_select(negative,columns%4==(~maker[owner]).to(torch.int64),zeros(self.rebates))
+        return candidate.apply_movement(replace(self.no_movement(),cash=micro,available=micro,rebates=delta),
+            requested & (candidate.fault==0))

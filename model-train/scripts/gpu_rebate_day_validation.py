@@ -178,8 +178,8 @@ def main():
     assert restored.payment_observed.cpu().tolist()==[[True,False]]
     consumer={}
     if source.get('source_contract')=='execution_normalization_v4':
-        from gpu_rebate_admission_validation import validate
-        consumer=validate(source)
+        from gpu_rebate_admission_validation import validate,validate_account_transfers
+        consumer={**validate(source),**validate_account_transfers(source)}
     print(json.dumps({'actual_maker_vectors':len(vectors),'actual_contributions':len(source['contributions']),
         'actual_DayFinalized_and_Payment':True,'missing_predecessors_no_commit':True,
         'condition_finite_payable_locked_checked':True,'source_totals_conserved':True,'payment_repeat_no_second_allocation':True,
