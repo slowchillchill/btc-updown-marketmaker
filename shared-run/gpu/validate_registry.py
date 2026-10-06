@@ -18,6 +18,8 @@ from registry import (PublicRegistryEvents, FrozenIntentOrders, PublicRegistrySt
     PublicCancellationState, CancellationCompletions)
 from validate_base_execution import integers, rational, values
 from commitments import SubmittedLegs,SubmissionBindings,freeze_leg_commitments
+from cancel_objects import OrderFormation,CancelObjectDirectory,freeze_cancel_objects
+from registry import identity_matches
 from queues import Numbers
 
 
@@ -109,6 +111,73 @@ def completion_columns(reference,requests):
         integers([ordinal]),integers(values),tensor(available),tensor(responded),tensor(received),torch.zeros(1,dtype=torch.int32,device='cuda'))
 
 
+def cancel_object_columns(frame,catalog,identities,events):
+    # 原输入source、receipt和formed NOE是冷解码依据；cancel_objects只作后验对照。
+    raw={row['identity']:row for row in frame['raw_orders']}
+    markets=frame['public_market_sources']
+    market_ids={market['condition_id']:index for index,market in enumerate(markets)}
+    identity_rank={identity:index for index,identity in enumerate(sorted(catalog))}
+    receipts={receipt['request']:receipt for receipt in frame['buy_source_receipts']}
+    processed=[];times=[];sequences=[];items=[];formed=[];source_sequence=[];locations=[]
+    for identity in catalog:
+        order=raw.get(identity)
+        origin=None if order is None else order['origin']
+        accepted=None if order is None else order['accepted']
+        has_processing=accepted is not None and origin is not None and origin['request'] in receipts
+        processed.append(has_processing)
+        times.append(accepted['record']['Evidence']['evidence']['Control']['result']['Submission']['outcome']['Accepted']['effective_processing_at_utc_ms'] if has_processing else 0)
+        sequences.append(receipts[origin['request']]['input_sequence'] if has_processing else 0)
+        items.append(origin['item'] if has_processing else 0)
+        source=None if order is None else order['formed']
+        formed.append(source is not None)
+        source_sequence.append(source['record']['Evidence']['source_order']['sequence']['PrivateFeedback']['private_feedback_sequence'] if source is not None else 0)
+        locations.append(market_ids.get(None if order is None else order['condition'],-1))
+    tensor=lambda values,dtype=torch.int64:torch.tensor([values],dtype=dtype,device='cuda')
+    same,error=identity_matches(integers([identities[key] for key in catalog]),events.orders,1,len(catalog),events.received.size(1))
+    evidence=(same&events.received[:,None,:]).any(2)
+    formation=OrderFormation(evidence,tensor([identity_rank[key] for key in catalog]),tensor(locations),
+        tensor(processed,torch.bool),tensor(times),integers(sequences),tensor(items),tensor(formed,torch.bool),integers(source_sequence),events.fault)
+    pairs=[]
+    for request in sorted(receipts):
+        receipt=receipts[request]
+        if len(receipt['terms'])!=2:continue
+        members=[]
+        for ordinal in range(2):
+            member=next((identity for identity,order in raw.items() if order['origin'] is not None and
+                order['origin']['request']==request and order['origin']['item']==ordinal and order['accepted'] is not None),None)
+            members.append(catalog.index(member) if member is not None else -1)
+        pairs.append(members)
+    pair_members=torch.tensor([pairs],dtype=torch.int64,device='cuda').reshape(1,len(pairs),2)
+    directory=CancelObjectDirectory(tensor([True]*len(markets),torch.bool),tensor([market['window']['start_at_utc_ms'] for market in markets]),
+        tensor([sorted(market_ids).index(market['condition_id']) for market in markets]),tensor([True]*len(markets),torch.bool),
+        (pair_members>=0).all(2),pair_members,tensor(list(range(len(pairs)))))
+    return formation,directory
+
+
+def compare_objects(frame,result,directory,catalog):
+    assert result.fault.cpu().tolist()==[0],frame['stage']
+    ranks=result.formation_ranks.cpu().tolist()[0]
+    population=result.present.cpu().tolist()[0]
+    members=result.members.cpu().tolist()[0]
+    kinds=result.kinds.cpu().tolist()[0]
+    pair_slots=result.origin_pairs.cpu().tolist()[0]
+    market_slots=result.markets.cpu().tolist()[0]
+    pair_members=directory.paired_members.cpu().tolist()[0]
+    actual=[]
+    for index,active in enumerate(population):
+        if not active:continue
+        kind=kinds[index]
+        if kind==1:
+            selected=[catalog[item] for item in pair_members[pair_slots[index]]]
+        else:
+            selected=[catalog[item] for item in sorted(range(len(catalog)),key=lambda item:ranks[item]) if members[index][item]]
+        row={'kind':kind,'members':selected}
+        if kind==2:row['condition']=frame['public_market_sources'][market_slots[index]]['condition_id']
+        actual.append(row)
+    oracle=[{key:value for key,value in row.items() if key!='origin'} for row in frame['cancel_objects']]
+    assert actual==oracle,(frame['stage'],'完整撤单对象/形成顺序',actual,oracle)
+
+
 def check_family(source):
     identities = {}
     targets = {}
@@ -142,6 +211,7 @@ def check_family(source):
     state=None
     rank=0
     saved=[]
+    objects_saved=[]
     for frame in source:
         incoming=[]
         for order in frame['raw_orders']:
@@ -206,6 +276,12 @@ def check_family(source):
             assert has_order[index]==(oracle['order'] is not None)
             assert known[index]==('Known' in oracle['remaining'])
             if known[index]:assert remaining[index]==Fraction(oracle['remaining']['Known'])
+        def objects_freeze():
+            formation,objects_directory=cancel_object_columns(frame,catalog,identities,state.events)
+            return freeze_cancel_objects(view,formation,objects_directory),objects_directory
+        objects,objects_directory=Numbers.run_exact_batch(objects_freeze)
+        compare_objects(frame,objects,objects_directory,catalog)
+        objects_saved.append((objects,objects.members.clone(),objects.present.clone()))
         leg_saved.append((legs_view,remaining))
         saved.append((view,amounts(view.active),view.unfinished.clone()))
         registered={value['request'] for value in frame['cancel_source_requests']}
@@ -226,6 +302,8 @@ def check_family(source):
         else:
             assert frame['cancel_response_counts']==['NotApplicable']*3
         cancel_saved.append((cancel_view,values(cancel_view.pending_count),values(cancel_view.response_counts)))
+    for objects,members,present in objects_saved:
+        assert torch.equal(objects.members,members) and torch.equal(objects.present,present),'旧撤单对象不倒灌'
     for view,active,unfinished in saved:
         assert amounts(view.active)==active and torch.equal(view.unfinished,unfinished),'旧冻结读取不可倒灌'
     for view,remaining in leg_saved:
@@ -241,7 +319,7 @@ def main():
     torch.cuda.synchronize()
     print(json.dumps({'frozen_prefixes':sum(n for n,_,_ in counts),'distinct_original_order_records':sum(n for _,n,_ in counts),
         'receipt_without_order_keeps_original_leg_target':True,'continuous_received_state':True,'maximum_retained_order_records_per_family':[width for _,_,width in counts],'derived_oracle_initialization':False,'old_freeze_unchanged':True,
-        'complete_first_delivery_stream':False,'global_cancel_request_completed_state':True,'scoped_cancel_objects':False,
+        'complete_first_delivery_stream':False,'global_cancel_request_completed_state':True,'single_paired_market_cancel_objects':True,'scoped_cancel_request_results':False,'dynamic_identity_ties':False,
         'full_registry_or_root':False,'seconds':time.perf_counter()-started,'device_peak_allocated_bytes':torch.cuda.max_memory_allocated()}))
 
 

@@ -2726,6 +2726,7 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("dpt");
         let (core, times) = recorded_trading_window(&root, "100", None, 60_000, true);
+        let gpu_market_sources=core.fixed_markets().collect::<Vec<_>>();
         let path = temp.path().join("sim.jsonl");
         let (mut execution, observation, _) =
             execution_with_rules_v4(&path, &core, SUCCESS_POLICY, None, "e".repeat(64), "100");
@@ -2770,13 +2771,13 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
             .unwrap();
         gpu_cancel_sources.push(gpu_registry_receipt("empty-market","market",&empty_receipt));
         let pending = shared.action_before(&mut driver).unwrap().unwrap();
-        gpu_reference.push(gpu_registry_frozen_reference("empty_cancel_pending",&pending,shared.registry(),&gpu_cancel_sources,&gpu_buy_sources));
+        gpu_reference.push(gpu_registry_frozen_reference("empty_cancel_pending",&pending,shared.registry(),&gpu_cancel_sources,&gpu_buy_sources,&gpu_market_sources));
         assert_eq!(pending.cancellation_requests(None).pending_count, Known(1));
         for _ in 2..5 {
             driver.next_group().unwrap().unwrap();
         }
         let empty = shared.action_before(&mut driver).unwrap().unwrap();
-        gpu_reference.push(gpu_registry_frozen_reference("empty_cancel_completed",&empty,shared.registry(),&gpu_cancel_sources,&gpu_buy_sources));
+        gpu_reference.push(gpu_registry_frozen_reference("empty_cancel_completed",&empty,shared.registry(),&gpu_cancel_sources,&gpu_buy_sources,&gpu_market_sources));
         let response = empty.cancellation_requests(None);
         assert_eq!(response.pending_count, Known(0));
         assert_eq!(response.response_counts, [Known(0), Known(0), Known(0)]);
@@ -2805,12 +2806,12 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
             "scheduled_actions":pair_receipt.scheduled_action_count(),
             "terms":original_terms}));
         let unbound=shared.action_before(&mut driver).unwrap().unwrap();
-        gpu_reference.push(gpu_registry_frozen_reference("submitted_pair_unbound",&unbound,shared.registry(),&gpu_cancel_sources,&gpu_buy_sources));
+        gpu_reference.push(gpu_registry_frozen_reference("submitted_pair_unbound",&unbound,shared.registry(),&gpu_cancel_sources,&gpu_buy_sources,&gpu_market_sources));
         for _ in 5..=6 {
             driver.next_group().unwrap().unwrap();
         }
         let before = shared.action_before(&mut driver).unwrap().unwrap();
-        gpu_reference.push(gpu_registry_frozen_reference("before_cancel",&before,shared.registry(),&gpu_cancel_sources,&gpu_buy_sources));
+        gpu_reference.push(gpu_registry_frozen_reference("before_cancel",&before,shared.registry(),&gpu_cancel_sources,&gpu_buy_sources,&gpu_market_sources));
         let orders: Vec<_> = before.orders().collect();
         assert_eq!(orders.len(), 2);
         assert_eq!(platform_id(orders[0].order_identity), "sim-1");
@@ -2849,7 +2850,7 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
         assert_eq!(receipt, duplicate);
         gpu_cancel_sources.push(gpu_registry_receipt("finite-failure",family,&receipt));
         let pending = shared.action_before(&mut driver).unwrap().unwrap();
-        gpu_reference.push(gpu_registry_frozen_reference("cancel_pending",&pending,shared.registry(),&gpu_cancel_sources,&gpu_buy_sources));
+        gpu_reference.push(gpu_registry_frozen_reference("cancel_pending",&pending,shared.registry(),&gpu_cancel_sources,&gpu_buy_sources,&gpu_market_sources));
         assert_eq!(pending.cancellation_requests(None).pending_count, Known(1));
         let mut checked = false;
         while driver.next_group().unwrap().is_some() {
@@ -2858,7 +2859,7 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
             if requests.response_counts[1] != Known(1) {
                 continue;
             }
-            gpu_reference.push(gpu_registry_frozen_reference("partial_cancel_result",&view,shared.registry(),&gpu_cancel_sources,&gpu_buy_sources));
+            gpu_reference.push(gpu_registry_frozen_reference("partial_cancel_result",&view,shared.registry(),&gpu_cancel_sources,&gpu_buy_sources,&gpu_market_sources));
             assert_eq!(requests.pending_count, Known(0));
             assert_eq!(
                 requests.response_counts,
@@ -2927,7 +2928,7 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
                 Known(0),
                 "同市场不同ID不相交"
             );
-            gpu_reference.push(gpu_registry_frozen_reference("overlapping_cancel_pending",&overlapping,shared.registry(),&gpu_cancel_sources,&gpu_buy_sources));
+            gpu_reference.push(gpu_registry_frozen_reference("overlapping_cancel_pending",&overlapping,shared.registry(),&gpu_cancel_sources,&gpu_buy_sources,&gpu_market_sources));
             checked = true;
             break;
         }
@@ -3391,7 +3392,7 @@ fn gpu_registry_receipt(request:&str,family:&str,receipt:&sim_system::execution:
         "platform_arrived_at":receipt.platform_arrived_at_utc_ms(),"scheduled_actions":receipt.scheduled_action_count()})
 }
 
-fn gpu_registry_frozen_reference(stage:&str,view:&ActionBeforeReadV2,registry:&SharedExecutionRegistryV2,cancel_sources:&[serde_json::Value],buy_sources:&[serde_json::Value])->serde_json::Value {
+fn gpu_registry_frozen_reference(stage:&str,view:&ActionBeforeReadV2,registry:&SharedExecutionRegistryV2,cancel_sources:&[serde_json::Value],buy_sources:&[serde_json::Value],market_sources:&[MarketIdentityV2])->serde_json::Value {
     fn record(value:&::execution_normalization::NoeConsumedRecordRef<contracts::execution_normalization::CancellationRequestCompletedV1>)->serde_json::Value {
         serde_json::json!({"record":value.record(),"position":value.position(),"visibility":value.visibility()})
     }
@@ -3421,7 +3422,7 @@ fn gpu_registry_frozen_reference(stage:&str,view:&ActionBeforeReadV2,registry:&S
             });
             serde_json::json!({"request":origin.intent.global_request_id(),"item":origin.batch_item_ordinal,"terms":terms})
         });
-        serde_json::json!({"identity":order.order_identity,"origin":origin,
+        serde_json::json!({"identity":order.order_identity,"origin":origin,"condition":order.condition_id,
             "accepted":order.accepted.map(record),"formed":order.formed.map(record),
             "latest_lifecycle":order.latest_lifecycle.map(record),
             "latest_cancel":order.latest_cancel_feedback.map(record),
@@ -3434,6 +3435,12 @@ fn gpu_registry_frozen_reference(stage:&str,view:&ActionBeforeReadV2,registry:&S
     let funds=view.request_funds().map(|funds|serde_json::json!({"request":funds.request_identity,
         "condition":funds.condition_id,"state":funds.reservation_state,"principal":funds.principal_pusd,
         "fee":funds.immediate_fee_pusd,"last_sequence":funds.last_ledger_entry_seq})).collect::<Vec<_>>();
+    let ExecutionReadValueV1::Known(objects)=view.cancel_objects() else { panic!("原撤单对象人口始终Known") };
+    let objects=objects.into_iter().map(|object|match object {
+        CancelObjectReadV2::Single { order }=>serde_json::json!({"kind":0,"members":[order.order_identity]}),
+        CancelObjectReadV2::Paired { origin,orders }=>serde_json::json!({"kind":1,"origin":origin.global_request_id(),"members":[orders[0].order_identity,orders[1].order_identity]}),
+        CancelObjectReadV2::Market { condition_id,orders }=>serde_json::json!({"kind":2,"condition":condition_id,"members":orders.iter().map(|order|order.order_identity).collect::<Vec<_>>()}),
+    }).collect::<Vec<_>>();
     let requests=view.cancellation_requests(None);
     let latest=match requests.latest_response {
         ExecutionReadValueV1::Known(value)=>serde_json::json!({"Known":value.map(record)}),
@@ -3441,7 +3448,7 @@ fn gpu_registry_frozen_reference(stage:&str,view:&ActionBeforeReadV2,registry:&S
         ExecutionReadValueV1::NotApplicable=>serde_json::json!("NotApplicable"),
     };
     serde_json::json!({"stage":stage,"logical_at":view.cutoff().decision_time().logical_time_utc_ms(),
-        "orders":orders,"raw_orders":raw_orders,"commitments":commitments,"request_funds":funds,
+        "orders":orders,"raw_orders":raw_orders,"commitments":commitments,"cancel_objects":objects,"public_market_sources":market_sources,"request_funds":funds,
         "pending_noe_records":view.pending_noe_record_count(),"ledger":view.ledger(),"economics":view.economics(),
         "buy_source_receipts":buy_sources,"cancel_source_requests":cancel_sources,"cancel_pending":requests.pending_count,"cancel_response_counts":requests.response_counts,"cancel_latest":latest,
         "source":"original_SharedExecutionV2_ActionBeforeReadV2","post_only_fixture_not_B_Actor_domain":true})
