@@ -522,15 +522,25 @@ backtest，PPO仍归model-train；offline-evaluation按冻结模型和原权限�
 
 `data-pipeline-training` 的 `dpt-public-compact` 接受原
 `CompactPublicPreparationConfigV1` JSON（只含实际输入/排序/流头与可选元数据初始化，不再要求旧 recording 配置）、锁定 Python 路径和同提交的
-`data-pipeline/gpu/sort_worker.py` 路径。它复用原有限 Parquet 类型化解码、两遍
-代际排名及来源键生成。初始 run 的稳定排序在常驻 CUDA worker 执行；只有原
+`data-pipeline/gpu/sort_worker.py` 路径。它复用原有限 Parquet 类型化解码、原代际排名及来源键生成。GPU准备
+路径在第一遍类型化解码和原接收范围筛选后，将选中行和初始化来源绑定写入数据盘
+匿名临时缓存；第二遍只供给缓存行。代际排名仍在全部选中行扫描完成后确定，
+来源键、原初始化选择和全部错误传播保持。CPU旧有限入口继续原两遍读取。初始 run 的稳定排序在常驻 CUDA worker 执行；只有原
 字节键与返回 permutation 跨 CPU/GPU，原载荷按同一 permutation 搬运。
 CPU 继续执行原跨 run 多核归并、来源头选择、公共事实归约和原子持久写入。
 这部分保留 CPU 的原因是现有嵌套 Parquet/强类型来源证据和因果归约尚未迁入公共
 GPU 后端。此入口是一次冷材料准备的实际接线，不表示 GPU 连续环境已完成。
 
 该入口直接使用 `push_facts` 和紧凑 writer，不要求先写旧 public recording。
-紧凑材料 v2 只保存源盘口快照/增量；PM 事实和初始步骤引用源输入，Binance
+紧凑材料 v3 在 v2 语义上对每个 packet 的强类型 JSON 独立执行 Zstd level3
+压缩。复用锁内 `zstd=0.13.3`，无需新平台依赖；CPU保留成熟流式编解码，原因是
+当前嵌套强类型JSON codec在CPU，避免为一次冷持久阶段复制专用GPU codec。
+reader 兼容 v2，并对压缩字节和解压字节分别检查调用者的资源容量；容量不足可
+提高资源参数重试，不截断、不丢弃业务。偏移列描述实际压缩字节，自身完成凭据
+和SHA覆盖该编码。`--repack <旧材料> <新目标> <packet容量>` 严格读取已完成
+材料后重编码，无需原源重扫或业务重归约。
+
+两版本均只保存源盘口快照/增量；PM 事实和初始步骤引用源输入，Binance
 盘口状态引用完整合法公共前缀。完整盘口可按原归约配方重建。reader 检查自身
 完成凭据、连续位置、固定列、PM/普通 Produced 实际引用及末端覆盖。它不签发
 正式数据验收，也不代替独立 hidden 顺序的准备。

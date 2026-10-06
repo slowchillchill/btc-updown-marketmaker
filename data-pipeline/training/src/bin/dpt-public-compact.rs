@@ -70,6 +70,7 @@ fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     let started = Instant::now();
     let mut preparation_stage = "starting".to_owned();
     let mut decoded_rows = 0_u64;
+    let mut cached_rows = 0_u64;
     let mut preparation_notice_at = Instant::now();
     let mut notice = |event| {
         let mut stage_changed = false;
@@ -79,6 +80,7 @@ fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
                 stage_changed = true;
             }
             Notice::RawBatch { rows, .. } => decoded_rows += rows,
+            Notice::SelectedRow { pass: data_pipeline_training::historical_preparation_progress::HistoricalRawPassV1::SecondSupply, .. } => cached_rows += 1,
             Notice::SourceMergeProgress { index, progress } => {
                 if preparation_notice_at.elapsed().as_secs() >= 10 {
                     eprintln!("{}",serde_json::json!({"stage":"cpu_source_merge", "source_index":index,
@@ -92,7 +94,7 @@ fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
             _ => {}
         }
         if stage_changed || preparation_notice_at.elapsed().as_secs() >= 10 {
-            eprintln!("{}",serde_json::json!({"stage":preparation_stage,"decoded_rows_across_passes":decoded_rows,
+            eprintln!("{}",serde_json::json!({"stage":preparation_stage,"decoded_rows_across_passes":decoded_rows,"selected_rows_second_supply":cached_rows,
                 "elapsed_seconds":started.elapsed().as_secs_f64(),"total_inputs":null}));
             preparation_notice_at = Instant::now();
         }

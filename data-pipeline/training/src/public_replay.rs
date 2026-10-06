@@ -14,6 +14,9 @@ use std::{
     sync::Arc,
     collections::BTreeMap,
     fs,
+    io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write},
+    cell::RefCell,
+    rc::Rc,
     path::{Path, PathBuf},
 };
 
@@ -1174,11 +1177,30 @@ pub fn prepare_historical_finite_files_with_initial_order_v1(
     progress: Option<&HistoricalPreparationNotifierV1<'_>>,
     initial_order: Option<Arc<dyn crate::InitialRunOrder>>,
 ) -> RecordingResult<HistoricalMergeV1> {
+    // GPU准备路径：原强类型/准入解码只执行一次。匿名临时文件只保留原筛选行及
+    // 初始化来源绑定；第二遍仍使用原epoch排名和来源键，不重开整小时Parquet。
+    let cache = if initial_order.is_some() {
+        let parent = root.parent().ok_or_else(|| std::io::Error::other("准备根缺少父目录"))?;
+        fs::create_dir_all(parent)?;
+        Some(Rc::new(RefCell::new(BufWriter::new(tempfile::tempfile_in(parent)?))))
+    } else { None };
     prepare_historical_tagged_rows_with_initial_order_v1(
         root,
         config,
         stream,
-        |pass| {
+        |pass| -> RecordingResult<Box<dyn Iterator<Item = RecordingResult<(TypedRawRowV2, Option<SourceArtifactBindingV1>)>> + '_>> {
+            if matches!(pass, Pass::SecondSupply) {
+                if let Some(cache) = &cache {
+                    let mut cache = cache.borrow_mut();
+                    cache.flush()?;
+                    let mut file = cache.get_ref().try_clone()?;
+                    file.seek(SeekFrom::Start(0))?;
+                    return Ok(Box::new(CachedTypedRowsV1 {
+                        file: BufReader::new(file), max_row_bytes: config.max_temporary_row_bytes,
+                        failed: false, progress,
+                    }));
+                }
+            }
             let initial = initialization.into_iter().flat_map(move |selection| {
                 selection.read_with_progress(
                     config.decode_batch_rows,
@@ -1187,7 +1209,7 @@ pub fn prepare_historical_finite_files_with_initial_order_v1(
                     pass,
                 )
             });
-            Ok(initial.chain(
+            let selected = initial.chain(
                 TypedFileRowsV1 {
                     files: FileRowsSelectionV1::Finite(files.iter()),
                     stream: None,
@@ -1216,12 +1238,61 @@ pub fn prepare_historical_finite_files_with_initial_order_v1(
                         (row, None)
                     })
                 }),
-            ))
+            );
+            let cache = cache.clone();
+            Ok(Box::new(selected.map(move |row| {
+                let row = row?;
+                if let Some(cache) = &cache {
+                    let bytes = serde_json::to_vec(&row)?;
+                    let mut cache = cache.borrow_mut();
+                    cache.write_all(&(bytes.len() as u64).to_le_bytes())?;
+                    cache.write_all(&bytes)?;
+                }
+                Ok(row)
+            })))
         },
         progress,
         initial_order,
     )
 }
+/// 请求私有的临时行缓存；任一截断/容量错误传播，不跳过、不重新解码来源。
+struct CachedTypedRowsV1<'a, 'b> {
+    file: BufReader<fs::File>,
+    max_row_bytes: usize,
+    failed: bool,
+    progress: Option<&'a HistoricalPreparationNotifierV1<'b>>,
+}
+impl Iterator for CachedTypedRowsV1<'_, '_> {
+    type Item = RecordingResult<(TypedRawRowV2, Option<SourceArtifactBindingV1>)>;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.failed { return None; }
+        let mut length = [0_u8; 8];
+        match self.file.read(&mut length[..1]) {
+            Ok(0) => return None,
+            Err(error) => { self.failed = true; return Some(Err(error.into())); }
+            Ok(_) => {}
+        }
+        let decoded = (|| -> Self::Item {
+            self.file.read_exact(&mut length[1..])?;
+            let length = usize::try_from(u64::from_le_bytes(length))?;
+            if length > self.max_row_bytes {
+                return Err(std::io::Error::other("缓存行超过本次临时行容量，请增加max_temporary_row_bytes").into());
+            }
+            let mut bytes = vec![0; length];
+            self.file.read_exact(&mut bytes)?;
+            let row: (TypedRawRowV2, Option<SourceArtifactBindingV1>) = serde_json::from_slice(&bytes)?;
+            notify(self.progress, Notice::SelectedRow {
+                pass: Pass::SecondSupply, initialization: row.1.is_some(),
+            });
+            Ok(row)
+        })();
+        match decoded {
+            Ok(row) => Some(Ok(row)),
+            Err(error) => { self.failed = true; Some(Err(error)) }
+        }
+    }
+}
+
 struct TypedFileRowsV1<'a, 'b, 'c> {
     files: FileRowsSelectionV1<'a>,
     stream: Option<crate::typed_raw::TypedRawParquetStream<TypedRawRowV2>>,
