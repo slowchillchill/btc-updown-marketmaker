@@ -254,6 +254,19 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert used.cpu().tolist()==[True] and early.reservations.statuses[0,:2].cpu().tolist()==[3,0]
     assert values(early.current_entry_sequence)==[reference['after']['projection']['ledger_entry_seq']]
     assert values(early.reservations.last_sequences)[:2]==[reference['after']['request']['last_ledger_entry_seq'],reference['unsent']['last_ledger_entry_seq']]
+    fill_economic=next(i for i in range(columns.row_refs.size(1)) if columns.enabled[0,i].cpu().item() and sequence[i]==2)
+    fill_sequence=values(early.lifecycle.fills)
+    pending_trade=next(i for i in range(columns.row_refs.size(1)) if early.lifecycle.emitted[0,i].cpu().item() and
+        early.lifecycle.schemas[0,i].cpu().item()==8 and fill_sequence[i]==1 and early.lifecycle.pending_trades[0,i].cpu().item())
+    early,used=Numbers.run_exact_batch(lambda:early.apply_record(torch.tensor([fill_economic],device='cuda'),enabled,torch.tensor([10000],device='cuda'),enabled))
+    assert used.cpu().tolist()==[True]
+    assert int(early.trades.flags.sum().cpu())==reference['economic_before_trade']['projection']['platform_confirmed_projection']['pending_fill_count']
+    assert not early.trade_success.has_fact.any().cpu().item()
+    early,used=Numbers.run_exact_batch(lambda:early.apply_record(torch.tensor([pending_trade],device='cuda'),enabled,torch.tensor([10000],device='cuda'),enabled))
+    assert used.cpu().tolist()==[True] and early.fault.cpu().tolist()==[0]
+    assert int(early.trades.flags.sum().cpu())==reference['pending_after_economic']['projection']['platform_confirmed_projection']['pending_fill_count']==1
+    assert values(early.current_entry_sequence)==[reference['pending_after_economic']['projection']['ledger_entry_seq']]
+    assert not early.trade_success.success_applied.any().cpu().item()
     funds=Numbers.run_exact_batch(lambda:admission.funds())
     expected_cash=source['reservation_checkpoints'][-1]['cash']
     for actual,name in [(funds.actual_available,'actual_available_pusd'),(funds.maker_available,'maker_available_pusd'),
@@ -297,4 +310,4 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         'bank_physical_rows':state.normalizer.bank.kinds.numel(),'masked_or_unemitted_rows':state.normalizer.bank.kinds.numel()-checked,
         'actual_device_Ledger_economic_position_predecessor_checked':True,
         'Ledger_admission_device_generated_entry_local_and_binding_checked':True,
-        'duplicate_NOE_NotApplicable_without_Ledger_commit_checked':True,'unbound_economic_before_Submission_unsent_reservation_checked':True,'actual_existing_economic_MakerCash_and_four_funds_checked':True,'two_root_one_item_funds_fault_isolation_checked':True,'actual_trade_economic_success_pool_checked':True,'full_clock_Ledger_reservation_delivered':False}
+        'duplicate_NOE_NotApplicable_without_Ledger_commit_checked':True,'unbound_economic_before_Submission_unsent_reservation_checked':True,'actual_existing_economic_MakerCash_and_four_funds_checked':True,'two_root_one_item_funds_fault_isolation_checked':True,'actual_trade_economic_success_pool_checked':True,'fill_economic_before_pending_lifecycle_checked':True,'full_clock_Ledger_reservation_delivered':False}

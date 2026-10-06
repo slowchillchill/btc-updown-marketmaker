@@ -183,10 +183,12 @@ class AdmissionLifecycle:
         economic_trade=use & economic & ((self.lifecycle.economic_tags[root,local]>=6)&(self.lifecycle.economic_tags[root,local]<=8))
         trade_at,trade_found,trade_error=self.trades.lookup(fill)
         fault=fault | torch.where(trade_event|economic_trade,Numbers.combine_fault_rows(trade_error),0)
+        known_fact=self.trade_success.has_fact[root,trade_at]
+        pending=self.lifecycle.pending_trades[root,local] & (~known_fact | self.trades.flags[root,trade_at])
         trades,error=self.trades.set(fill,self.lifecycle.conditions[root,local],
-            torch.where(trade_event,self.lifecycle.pending_trades[root,local],self.trades.flags[root,trade_at]),
-            next_entry,trade_event|economic_trade,terminal_sticky=True)
-        fault=fault | torch.where(trade_event,error,0)
+            torch.where(trade_event,pending,self.trades.flags[root,trade_at]),
+            next_entry,trade_event|economic_trade)
+        fault=fault | torch.where(trade_event|economic_trade,error,0)
         # 真实份额/本金保持精确；D-0295只发生在成功池的派生成本分配端。
         base=_take(self.lifecycle.trade_base_units,index)
         quote=_take(self.lifecycle.trade_quote_units,index)

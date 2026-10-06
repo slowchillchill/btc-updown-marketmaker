@@ -361,7 +361,25 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
         let after=gpu_ledger_reservation_checkpoint(&ledger,"submission_after_economic");
         assert_eq!(after["request"]["status"],"Converted");
         assert_eq!(unsent(&ledger),unsent_before);
-        serde_json::json!({"before":before,"after":after,"unsent":unsent_before})
+        let fill_economic=noe.iter().find(|record|match record.record() {
+            execution_normalization::NormalizationRecord::EconomicFactV2 {fact,..}=>matches!(fact.economic_identity,
+                contracts::execution_normalization::SourceNeutralEconomicIdentityV1::AccountTransition {account_transition_seq:2,..}),
+            execution_normalization::NormalizationRecord::EconomicFact {fact,..}=>matches!(fact.economic_identity,
+                contracts::execution_normalization::SourceNeutralEconomicIdentityV1::AccountTransition {account_transition_seq:2,..}),
+            _=>false,
+        }).unwrap();
+        ledger.apply_noe_memory_v2(fill_economic).unwrap();
+        let economic_before_trade=gpu_ledger_reservation_checkpoint(&ledger,"fill_economic_before_trade");
+        let pending_trade=noe.iter().find(|record|match record.record() {
+            execution_normalization::NormalizationRecord::Evidence {evidence:execution_normalization::SourceNeutralEvidenceKind::TradeLifecycleV3 {result},..}
+                => result.result.fill_sequence==1 && result.result.state==contracts::execution_normalization::SourceNeutralTradeStateV1::Matched,
+            _=>false,
+        }).unwrap();
+        ledger.apply_noe_memory_v2(pending_trade).unwrap();
+        let pending_after_economic=gpu_ledger_reservation_checkpoint(&ledger,"pending_trade_after_economic");
+        assert_eq!(pending_after_economic["projection"]["platform_confirmed_projection"]["pending_fill_count"],1);
+        serde_json::json!({"before":before,"after":after,"unsent":unsent_before,
+            "economic_before_trade":economic_before_trade,"pending_after_economic":pending_after_economic})
     };
     #[cfg(not(feature="shared-execution"))]
     let economic_first_reference=serde_json::Value::Null;
