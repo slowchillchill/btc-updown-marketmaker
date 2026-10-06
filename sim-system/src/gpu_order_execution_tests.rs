@@ -284,6 +284,7 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
         "fee_exponent":rules.fee_schedule.exponent,"taker_rebate_rate":actor._rule_snapshot.snapshot().project_account_rules.rebate_settlement.value.fixed_taker_rebate_rate.value().to_string(),
         "feedback_batches":feedback_batches,"noe_records":records,"initial_noe_records":initial_records.len(),
         "ledger_projection":ledger_projection,
+        "opening_available_pusd":state.session.as_ref().unwrap().opening_fact.initial_account_state.available_pusd,
         "session_seed":state.session.as_ref().unwrap().session_seed.0});
     let mut child = std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
         .arg(std::env::var("B_GPU_MULTIASK_VALIDATOR").unwrap()).stdin(std::process::Stdio::piped())

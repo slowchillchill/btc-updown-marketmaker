@@ -154,6 +154,52 @@ def main():
         torch.zeros_like(at,dtype=torch.int32)))
     assert not event.emitted.any().cpu().item() and event.root_fault.cpu().tolist()==[1]
     assert values(candidate.next_private_sequence)==[(1<<64)-2] and values(candidate.next_batch_sequence)==[2]
+    platform_checked=False
+    if source['ledger_projection'] is not None:
+        path=Path(__file__).resolve().parents[2]/'ledger/gpu/platform.py'
+        spec=importlib.util.spec_from_file_location('gpu_ledger_platform',path)
+        platform=importlib.util.module_from_spec(spec)
+        modules.modules[spec.name]=platform
+        spec.loader.exec_module(platform)
+        initial=source['opening_available_pusd']
+        state=Numbers.run_exact_batch(lambda:platform.PlatformBalances.open(
+            rational([initial,initial,'0','0','0','0','0','0']),rational(['0','0']),
+            torch.tensor([0,0],device='cuda'),integers([0])))
+        economic=[]
+        field_names=['cash_pusd_delta','available_pusd_delta','principal_encumbrance_pusd_delta',
+            'immediate_taker_fee_encumbrance_pusd_delta','maker_rebate_receivable_pusd_delta',
+            'taker_rebate_receivable_pusd_delta','maker_rebate_locked_remainder_pusd_delta',
+            'taker_rebate_locked_remainder_pusd_delta']
+        for record in source['noe_records']:
+            body=next(iter(record['record'].values()))
+            if 'fact' not in body or 'AccountTransition' not in body['fact']['economic_identity']:
+                continue
+            fact=body['fact']
+            delta=fact['disposition']['AccountTransition']['balance_delta']
+            outcomes={row['token_id']:row['balance_shares_delta'] for row in delta['outcome_balance_deltas']}
+            economic.append(Numbers.run_exact_batch(lambda:(
+                integers([fact['economic_identity']['AccountTransition']['account_transition_seq']]),
+                rational([delta[field] for field in field_names]),
+                rational([outcomes.get('1','0'),outcomes.get('2','0')]))))
+        # 保留实际领取史1,3,4,2,7,5,6；设备缺前驱候选等待而非重排史。
+        assert [values(row[0])[0] for row in economic]==[1,3,4,2,7,5,6]
+        platform_applied=torch.zeros(len(economic),dtype=torch.bool,device='cuda')
+        for _ in range(len(economic)):
+            for index,(sequence,balance_delta,outcome_delta) in enumerate(economic):
+                state,event=Numbers.run_exact_batch(lambda:state.apply_transition(sequence,balance_delta,outcome_delta,
+                    torch.tensor([True],device='cuda'),platform_applied[index:index+1],torch.tensor([True],device='cuda')))
+                platform_applied[index]=platform_applied[index] | event.applied[0]
+        assert platform_applied.cpu().tolist()==[True]*len(economic) and values(state.platform_source_prefix)==[7]
+        expected=source['ledger_projection']['platform_confirmed_projection']
+        names=['cash_pusd','available_pusd','principal_encumbrance_pusd','immediate_taker_fee_encumbrance_pusd',
+            'maker_rebate_receivable_pusd','taker_rebate_receivable_pusd','maker_rebate_locked_remainder_pusd','taker_rebate_locked_remainder_pusd']
+        from fractions import Fraction
+        actual=[Fraction(n,d) for n,d in zip(values(state.balances.numerator),values(state.balances.denominator))]
+        assert actual==[Fraction(expected[name]) for name in names]
+        expected_outcomes={row['token_id']:row['balance_shares'] for row in expected['outcome_balances']}
+        actual=[Fraction(n,d) for n,d in zip(values(state.outcomes.numerator),values(state.outcomes.denominator))]
+        assert actual==[Fraction(expected_outcomes.get(token,'0')) for token in ['1','2']]
+        platform_checked=True
     import os
     artifact=os.environ.get('B_GPU_ORDER_ARTIFACT_DIR')
     if artifact:
@@ -168,6 +214,7 @@ def main():
         'actual_device_private_batch_numbering_checked':True,
         'actual_NOE_device_delivery_order_checked':True,
         'original_Ledger_reference_checked':source['ledger_projection'] is not None,
+        'Ledger_platform_balance_and_predecessor_candidate_checked':platform_checked,
         'original_feedback_dual_visibility_gate_checked':True,
         'global_clock_NOE_Ledger_delivered':False}))
 
