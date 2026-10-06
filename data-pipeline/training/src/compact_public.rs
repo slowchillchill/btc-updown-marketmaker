@@ -621,7 +621,22 @@ mod tests {
         if let PolymarketOrderbookEvent::Book {bids,..} = &mut next_book {
             bids.push(PolymarketPriceLevel {price:"0.4".into(),size:"0".into()});
         }
+        let reference_source = |at:i64| {
+            let row: data_pipeline_core::typed_raw::PolymarketRtdsChainlinkBtcUsdRow = serde_json::from_value(serde_json::json!({
+                "timestamp_received":at,"message_timestamp":at-1,"payload_timestamp":at-3,"age_ms":3,
+                "symbol":"btc/usd","value":"64000","topic":"crypto_prices_chainlink","message_type":"update",
+                "freshness_status":"fresh","subscription_filter":"{\"symbol\":\"btc/usd\"}",
+                "source_native_payload_json":serde_json::json!({"topic":"crypto_prices_chainlink","type":"update",
+                    "timestamp":at-1,"payload":{"symbol":"btc/usd","timestamp":at-3,"value":"64000"}}).to_string(),
+                "collector_host_id":"collector-1","collector_region":"eu-west-1",
+                "source_endpoint":"wss://ws-live-data.polymarket.com",
+                "schema_version":data_pipeline_core::typed_raw::POLYMARKET_RTDS_CHAINLINK_BTC_USD_SCHEMA,
+            })).unwrap();
+            row.validate().unwrap();
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketRtdsChainlinkBtcUsd(row))
+        };
         let sources = vec![
+            reference_source(200),reference_source(100),
             TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(metadata_snapshot_row()))),
             TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",1,21000,22000,book("10")))),
             TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",2,23000,24000,next_book))),
@@ -652,6 +667,7 @@ mod tests {
         let mut observation_core = PublicObservationCoreV1::new(header.clone()).unwrap();
         let mut public_assets = Vec::new();
         let mut public_events = Vec::new();
+        let mut public_visible_times = Vec::new();
         let mut original = None;
         let mut zero_evidence_without_change = false;
         let mut token = String::new();
@@ -669,6 +685,8 @@ mod tests {
             let observed = observation_core.push(&observed_prepared).unwrap();
             for group in &observed.applied.closed_groups {
                 public_events.extend(group.records.iter().cloned());
+                public_visible_times.push(data_pipeline_core::public_observation_core::public_group_visible_at_utc_ms(
+                    &input.ingress,&group.records));
                 for observation in &group.observations {
                     public_assets = observation.assets.clone();
                 }
@@ -699,7 +717,7 @@ mod tests {
         let reference = serde_json::json!({"token":token,"price":"0.4",
             "quantity":original.quantity(&token,BookSide::Bid,price).normalize().to_string(),
             "present":true,"initialized":asset.has_initial_snapshot,"ready":asset.book_ready,
-            "public_assets":public_assets,"public_events":public_events,"observation_ms":38000});
+            "public_assets":public_assets,"public_events":public_events,"public_visible_times":public_visible_times,"observation_ms":38000});
         let reference_path = temp.path().join("original-reference.json");
         serde_json::to_writer(File::create(&reference_path).unwrap(),&reference).unwrap();
         eprintln!("original_core_zero_reference={reference}");

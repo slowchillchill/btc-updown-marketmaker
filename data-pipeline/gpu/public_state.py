@@ -77,6 +77,8 @@ class PublicPmState:
                 raise ValueError('公共设备价位身份或精确值引用越界')
         self.slots = torch.tensor(columns['slots'], dtype=torch.int64, device=device).reshape(-1, 3)
         self.groups = torch.tensor(columns['groups'], dtype=torch.int64, device=device).reshape(-1, 3)
+        # 原组时间可回退；宿主按原组顺序累计可见时间，不改变原事实或重排。
+        self.causal_visible_at = torch.cummax(self.groups[:,2],dim=0).values.contiguous()
         raw, offsets = bytearray(), [0]
         for text in columns['decimals']:
             raw.extend(text.encode('ascii')); offsets.append(len(raw))
@@ -145,6 +147,12 @@ class PublicPmState:
                 previous[target] = (sequence,group)
             setattr(self,name,PrefixColumn(columns[name],assets,device))
             setattr(self,table_name,torch.tensor(table,dtype=torch.int64,device=device).reshape(-1,width))
+
+    def prefix_at(self, observation_ms):
+        """UTC观察选择完整合法前缀；后组必须同时等到全部前组可见。"""
+        if observation_ms.dtype != torch.int64 or observation_ms.ndim != 1 or observation_ms.device != self.groups.device:
+            raise ValueError('需同设备int64观察UTC批次')
+        return torch.searchsorted(self.causal_visible_at,observation_ms,right=True)-1
 
     def frame(self, prefixes):
         qseq, qid, qfound, qfault = self.quantities.query(prefixes)

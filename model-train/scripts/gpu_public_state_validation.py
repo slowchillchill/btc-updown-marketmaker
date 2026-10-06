@@ -116,8 +116,8 @@ def main():
     if columns['groups']:
         last_grid = (columns['groups'][-1][2]//100)*100
         grid = torch.arange(last_grid-900,last_grid+1,100,dtype=torch.int64,device='cuda')
-        end_prefix = torch.searchsorted(state.groups[:,2].contiguous(),grid,right=True)-1
-        begin_prefix = torch.searchsorted(state.groups[:,2].contiguous(),grid-100,right=True)-1
+        end_prefix = state.prefix_at(grid)
+        begin_prefix = state.prefix_at(grid-100)
         grid_events = events.encode(begin_prefix,end_prefix,grid)
         assert not grid_events.fault.any().cpu().item()
     torch.cuda.synchronize()
@@ -163,12 +163,20 @@ def main():
         assert frame.present[2,slot].cpu().item() == reference['present']
         assert frame.initialized[2,asset].cpu().item() == reference['initialized']
         assert frame.ready[2,asset].cpu().item() == reference['ready']
+        # 两个合法原RTDS入口产生200→100可见时间；t150不能越过依赖t200的前组。
+        assert reference['public_visible_times'][:2] == [200,100]
+        assert [row[2] for row in columns['groups']] == reference['public_visible_times']
+        queries = torch.tensor([99,100,150,199,200],device='cuda',dtype=torch.int64)
+        assert state.prefix_at(queries).cpu().tolist() == [-1,-1,-1,-1,1]
         # 仅这个有效公共短链读回原公开事实；不是全窗CPU历史诊断。
         def original_class(payload):
             if 'PolymarketMessage' in payload:
                 p = payload['PolymarketMessage']['payload']
                 if p['kind'] == 'book': return (0 if p['fact']['kind']=='full_book' else 1),0
                 return {'best_bid_ask':2,'tick_size_change':3,'public_trade':4,'new_market':5}[p['kind']],0
+            if 'ReferenceFact' in payload:
+                assert payload['ReferenceFact']['reference_type'] == 'chainlink_btc_usd'
+                return 12,2
             p = payload['MarketFact']['payload']
             key = next(iter(p))
             return {'FixedIdentity':6,'InitialTick':7,'LifecycleTransition':8,'MarketLifecycleSnapshot':8,
@@ -378,7 +386,7 @@ def main():
               'cold_seconds':parsed-started,'total_seconds':time.perf_counter()-started,
               'peak_allocated_bytes':torch.cuda.max_memory_allocated(),
               'normal_window_peak_allocated_bytes':normal_window_peak,
-              'window_peak_scope':'驻留共享公共列、已打包盘口和直接字段、三前缀窗口与末10个100ms窗口；非法窗不扩池',
+              'window_peak_scope':'驻留共享公共列及累计可见时间、已打包盘口和直接字段、三前缀窗口与末10个100ms窗口；非法窗不扩池',
               'passed':passed,
               'original_core_reference_checked':args.original_reference is not None,
               'not_delivered':['market_and_reference_state','binance_state','hidden','sim_noe_ledger',
