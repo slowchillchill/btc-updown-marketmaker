@@ -47,6 +47,7 @@ def main():
     from queues import _take
     from asset_buy import take_ratio
     gpu_trade_frames=[]
+    accepted_pool=pool
     gpu_economic_frames=[(accepted.submission_delta,0,integers([1]),torch.zeros(1,dtype=torch.int64,device='cuda'),at)]
     # 同价多段对应同来源价，各实际fill保留原plan人口。
     source_prices=[]
@@ -167,6 +168,8 @@ def main():
     normalization_report=normalization.validate(source['normalization_reference'])
     trade_report=normalization.validate_trades(source['noe_records'],gpu_trade_frames)
     economic_report=normalization.validate_economic(source['noe_records'],gpu_economic_frames)
+    from validate_projection import validate as validate_projection
+    projection_report=validate_projection(source,sampler,prepared,accepted,accepted_pool,gpu_trade_frames,rebate)
     path=Path(__file__).resolve().parents[2]/'execution-normalization/gpu/consumption.py'
     spec=importlib.util.spec_from_file_location('gpu_noe_consumption',path)
     consumption=importlib.util.module_from_spec(spec)
@@ -276,6 +279,7 @@ def main():
         'normalization_core_candidate':normalization_report,
         'actual_SIM_device_trade_mapping':trade_report,
         'actual_SIM_device_economic_mapping':economic_report,
+        'actual_SIM_device_projection_batch':projection_report,
         'original_feedback_dual_visibility_gate_checked':True,
         'global_clock_NOE_Ledger_delivered':False}))
 
