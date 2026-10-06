@@ -299,6 +299,38 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert [Fraction(n,d) for n,d in zip(values(admission.success_pools.success_quantity.numerator),values(admission.success_pools.success_quantity.denominator))]==[Fraction(value) for value in market['success_shares']]
     assert [Fraction(n,d) for n,d in zip(values(admission.success_pools.success_cost.numerator),values(admission.success_pools.success_cost.denominator))]==[Fraction(int(value['numerator']),int(value['denominator'])) for value in market['success_principal_cost_pusd']]
     assert int(admission.trade_success.success_applied.sum().cpu())==3
+    original_days=source['reservation_checkpoints'][-1]['rebate_days']
+    expected_rebates={entity_sequence(value['trade_identity'],'Trade'):(0 if day['kind']=='Maker' else 1,
+        day['attribution_day_start_utc_ms'],Fraction(value['contribution_pusd']))
+        for day in original_days for value in day['contributions']}
+    stored=admission.rebate_contributions
+    original_keys=values(stored.trades)
+    original_amounts=[Fraction(n,d) for n,d in zip(values(stored.amounts.numerator),values(stored.amounts.denominator))]
+    actual_rebates={key:(kind,day,amount) for key,kind,day,amount,present in zip(original_keys,
+        stored.kinds.flatten().cpu().tolist(),stored.days.flatten().cpu().tolist(),original_amounts,
+        stored.occupied.flatten().cpu().tolist()) if present}
+    assert actual_rebates==expected_rebates and len(actual_rebates)==3
+    # 原贡献身份再次出现在新Ledger位置时也不重复应计；本索引不改现金/应收。
+    first=next(i for i,present in enumerate(stored.occupied.flatten().cpu().tolist()) if present)
+    duplicate_rebate,required,changed=Numbers.run_exact_batch(lambda:stored.add(integers([original_keys[first]]),
+        stored.kinds[:,first],stored.days[:,first],stored.conditions[:,first],
+        type(stored.amounts).from_values([original_amounts[first].numerator],[original_amounts[first].denominator]),
+        torch.tensor([True],device='cuda')))
+    assert changed.cpu().tolist()==[False] and int(duplicate_rebate.occupied.sum().cpu())==3
+    first_reference=source['contribution_first_reference']
+    first_fact=first_reference['record']['Evidence']['evidence']['SettlementLifecycleV2']['result']['Contribution']
+    first_trade=entity_sequence(first_fact['trade_identity'],'Trade')
+    early_contribution=Numbers.run_exact_batch(lambda:AdmissionLifecycle.open(platform,state.normalizer.bank,columns,
+        integers([3]),integers([0]),pools))
+    fill_columns=values(early_contribution.lifecycle.fills)
+    contribution_at=next(i for i in range(columns.row_refs.size(1)) if early_contribution.lifecycle.emitted[0,i].cpu().item()
+        and early_contribution.lifecycle.schemas[0,i].cpu().item()==9 and fill_columns[i]==first_trade)
+    early_contribution,used=Numbers.run_exact_batch(lambda:early_contribution.apply_record(torch.tensor([contribution_at],device='cuda'),
+        torch.tensor([True],device='cuda'),torch.tensor([10000],device='cuda'),torch.tensor([True],device='cuda')))
+    assert used.cpu().tolist()==[True] and not early_contribution.trade_success.has_fact.any().cpu().item()
+    assert values(early_contribution.current_entry_sequence)==[first_reference['checkpoint']['projection']['ledger_entry_seq']]
+    assert int(early_contribution.rebate_contributions.occupied.sum().cpu())==1
+    assert values(early_contribution.platform.platform_source_prefix)==[0]
     exact_contributions=[Fraction(n,d) for n,d in zip(values(admission.trade_success.unpaired_contribution.numerator),values(admission.trade_success.unpaired_contribution.denominator))]
     expected_contributions={int(row['fact']['fill_sequence']):Fraction(int(row['unpaired_contribution_shares']['Known']['numerator']),
         int(row['unpaired_contribution_shares']['Known']['denominator'])) for row in source['reservation_checkpoints'][-1]['trades'] if row['success_applied']}
@@ -316,4 +348,4 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         'bank_physical_rows':state.normalizer.bank.kinds.numel(),'masked_or_unemitted_rows':state.normalizer.bank.kinds.numel()-checked,
         'actual_device_Ledger_economic_position_predecessor_checked':True,
         'Ledger_admission_device_generated_entry_local_and_binding_checked':True,
-        'duplicate_NOE_NotApplicable_without_Ledger_commit_checked':True,'unbound_economic_before_Submission_unsent_reservation_checked':True,'actual_existing_economic_MakerCash_and_four_funds_checked':True,'two_root_one_item_funds_fault_isolation_checked':True,'actual_trade_economic_success_pool_checked':True,'fill_economic_before_pending_lifecycle_checked':True,'actual_unpaired_trade_contribution_checked':True,'full_clock_Ledger_reservation_delivered':False}
+        'duplicate_NOE_NotApplicable_without_Ledger_commit_checked':True,'unbound_economic_before_Submission_unsent_reservation_checked':True,'actual_existing_economic_MakerCash_and_four_funds_checked':True,'two_root_one_item_funds_fault_isolation_checked':True,'actual_trade_economic_success_pool_checked':True,'fill_economic_before_pending_lifecycle_checked':True,'actual_unpaired_trade_contribution_checked':True,'actual_taker_contribution_index_checked':True,'full_clock_Ledger_reservation_delivered':False}

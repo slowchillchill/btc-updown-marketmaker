@@ -12,6 +12,7 @@ from admission_lifecycle import LifecycleColumns,LifecycleDirectory
 from reservation import ReservationBook,run_reserve_action,sequence_fault
 from memory import EconomicColumns
 from trade_success import TradeSuccess
+from rebate_contribution import RebateContributions
 from core import OUT_EVIDENCE,OUT_FACT,OUT_DUPLICATE,OUT_ALIAS,OUT_LOGICAL_CONFLICT,OUT_ECONOMIC_CONFLICT,OUT_PENDING
 
 
@@ -49,6 +50,7 @@ class AdmissionLifecycle:
     platform: object
     success_pools: object
     trade_success: object
+    rebate_contributions: object
     maker_cash: object  # 原Existing经济现金归Maker；结算新kind须按原归属另接。
     reservations: object
     orders: object
@@ -73,7 +75,8 @@ class AdmissionLifecycle:
         book=ReservationBook.empty(roots,capacity=max(1,width),device=columns.row_refs.device)
         empty=torch.full_like(book.request_slots,-1)
         opening_cash=take_ratio(platform.balances,torch.arange(roots,device=empty.device)*8)
-        return cls(platform,success_pools,TradeSuccess.open(roots,max(1,width),empty.device),opening_cash,book,LifecycleDirectory.empty(roots,max(1,width),device=empty.device),
+        return cls(platform,success_pools,TradeSuccess.open(roots,max(1,width),empty.device),
+            RebateContributions.empty(roots,max(1,width),empty.device),opening_cash,book,LifecycleDirectory.empty(roots,max(1,width),device=empty.device),
             LifecycleDirectory.empty(roots,max(1,width),device=empty.device),columns,life,
             current_entry_sequence,current_local_prefix,empty,empty.clone(),torch.zeros_like(columns.enabled),
             ExactInt.from_i64_tensor(torch.zeros(roots*width,dtype=torch.int64,device=empty.device)),
@@ -200,6 +203,14 @@ class AdmissionLifecycle:
             self.lifecycle.economic_tags[root,local]==6)
         trade_success,success_pools=trade_success.apply_success(self.success_pools,trades,trade_at,(trade_event|economic_trade)&(fault==0))
         fault=fault | success_pools.fault
+        contribution_event=lifecycle_use & (tag==9)
+        contributions,required,_=self.rebate_contributions.add(fill,self.lifecycle.contribution_kinds[root,local],
+            self.lifecycle.contribution_days[root,local],self.lifecycle.conditions[root,local],
+            take_ratio(self.lifecycle.contribution_amounts,index),contribution_event & (fault==0))
+        fault=fault | contributions.fault
+        # 此候选目录容量等于本已接入NOE块人口，完整跨块宿主须先扩池再消费。
+        # 不提交条目/position，容量不足仍保留原待消费记录。
+        use=use & (~contribution_event | (required<=contributions.occupied.size(1)))
         success=use&(fault==0)
         valid=fault==0
         # 各NOE记录候选共同成功，先前已消费位置/账本条目不回滚。
@@ -213,7 +224,8 @@ class AdmissionLifecycle:
         same=(self.columns.positions.reshape(roots,width,-1)==key[:,None,:]).all(dim=2)&self.lifecycle.emitted
         applied=self.applied | (same&success[:,None])
         return replace(self,platform=platform,success_pools=success_pools.coordinated(self.success_pools,valid),
-            trade_success=coordinate(trade_success,self.trade_success,valid),maker_cash=ExactRational(
+            trade_success=coordinate(trade_success,self.trade_success,valid),
+            rebate_contributions=coordinate(contributions,self.rebate_contributions,valid),maker_cash=ExactRational(
             maker_cash.numerator.select(success & economic,self.maker_cash.numerator),
             maker_cash.denominator.select(success & economic,self.maker_cash.denominator)),reservations=coordinate(book,self.reservations,valid),
             orders=coordinate(orders,self.orders,valid),trades=coordinate(trades,self.trades,valid),

@@ -383,6 +383,24 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
     };
     #[cfg(not(feature="shared-execution"))]
     let economic_first_reference=serde_json::Value::Null;
+    #[cfg(feature="shared-execution")]
+    let contribution_first_reference={
+        let mut ledger=ledger::LedgerWriterV1::new_with_admission_v2(ledger::AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        ledger.apply_noe_memory_v2(&observation.opening_record().unwrap()).unwrap();
+        for record in &initial_records { ledger.apply_noe_memory_v2(record).unwrap(); }
+        let contribution=noe.iter().find(|record|matches!(record.record(),
+            execution_normalization::NormalizationRecord::Evidence {
+                evidence:execution_normalization::SourceNeutralEvidenceKind::SettlementLifecycleV2 {
+                    result:contracts::economics::SourceNeutralSettlementLifecycleResultV2::Contribution(_),
+                },..
+            })).unwrap();
+        ledger.apply_noe_memory_v2(contribution).unwrap();
+        assert_eq!(ledger.economic_read().unwrap().trades().count(),0,"Taker贡献不等待成交详情");
+        let checkpoint=gpu_ledger_reservation_checkpoint(&ledger,"contribution_before_trade");
+        serde_json::json!({"record":contribution.record(),"checkpoint":checkpoint})
+    };
+    #[cfg(not(feature="shared-execution"))]
+    let contribution_first_reference=serde_json::Value::Null;
     let records=noe.iter().map(|record|serde_json::json!({"record":record.record(),
         "position":record.position(),"visibility":record.visibility()})).collect::<Vec<_>>();
     let rules = &actor._rule_snapshot.snapshot().synchronized_platform_rules;
@@ -390,7 +408,8 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
         "finality_path":actor._finality_policy.normal_path(),"fee_rate":rules.fee_schedule.rate.value().to_string(),
         "fee_exponent":rules.fee_schedule.exponent,"taker_rebate_rate":actor._rule_snapshot.snapshot().project_account_rules.rebate_settlement.value.fixed_taker_rebate_rate.value().to_string(),
         "feedback_batches":feedback_batches,"noe_records":records,"initial_noe_records":initial_records.len(),
-        "economic_first_reference":economic_first_reference,"normalization_reference":normalization_reference.borrow().clone(),
+        "economic_first_reference":economic_first_reference,"contribution_first_reference":contribution_first_reference,
+        "normalization_reference":normalization_reference.borrow().clone(),
         "ledger_projection":ledger_projection,"reservation_checkpoints":reservation_checkpoints,
         "opening_available_pusd":state.session.as_ref().unwrap().opening_fact.initial_account_state.available_pusd,
         "session_seed":state.session.as_ref().unwrap().session_seed.0});
@@ -456,8 +475,11 @@ fn gpu_ledger_reservation_checkpoint(ledger:&ledger::LedgerWriterV1,stage:&str) 
     let trades=read.trades().map(|trade|serde_json::json!({"identity":trade.trade_identity,"fact":trade.fact,
         "economic_applied":trade.economic_applied,"success_applied":trade.success_applied,
         "net_fee":trade.actual_net_fee_pusd,"unpaired_contribution_shares":trade.unpaired_contribution_shares})).collect::<Vec<_>>();
+    let rebate_days=read.rebate_days().map(|day|serde_json::json!({"kind":day.kind,
+        "attribution_day_start_utc_ms":day.attribution_day_start_utc_ms,
+        "contributions":day.contributions,"amounts":day.amounts})).collect::<Vec<_>>();
     serde_json::json!({"stage":stage,"projection":ledger.projection_v2().unwrap(),
-        "cash":read.cash(),"request":request,"markets":read.market_totals().collect::<Vec<_>>(),"trades":trades})
+        "cash":read.cash(),"request":request,"markets":read.market_totals().collect::<Vec<_>>(),"trades":trades,"rebate_days":rebate_days})
 }
 
 #[test]
