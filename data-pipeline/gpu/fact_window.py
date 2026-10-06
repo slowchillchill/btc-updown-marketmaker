@@ -57,7 +57,7 @@ class PublicFactWindow:
         for groups in (self.fact_groups,self.source_groups):
             start = torch.searchsorted(groups,safe_previous,right=True)
             end = torch.searchsorted(groups,safe_current,right=True)
-            spans.append((start,(end-start).clamp_min(0)))
+            spans.append((start,torch.where(valid,(end-start).clamp_min(0),0)))
         # 唯一回传为本批两种资源总需求，不回传事实值或模型业务分支。
         required = torch.stack([count.max() for _,count in spans]).cpu().tolist()
         while self.fact_capacity < required[0]: self.fact_capacity *= 2
@@ -106,7 +106,7 @@ class PublicTradeWindow:
         current = current_prefix.clamp(-1,max(-1,self.group_count-1))
         start = torch.searchsorted(self.groups,previous,right=True)
         end = torch.searchsorted(self.groups,current,right=True)
-        count = (end-start).clamp_min(0)
+        count = torch.where(valid,(end-start).clamp_min(0),0)
         required = int(count.max().cpu())  # 仅一次资源需求，不回传成交值或方向。
         while self.capacity < required: self.capacity *= 2
         offset = torch.arange(self.capacity,device=current.device)[None]

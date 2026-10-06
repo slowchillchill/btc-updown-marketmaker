@@ -88,6 +88,7 @@ def main():
     packer = PmBookInputs(state, initial_capacity=1)
     packed = packer.pack(frame, assets, now)
     native_fields = pm_fields(state,observation,assets,now)
+    torch.cuda.reset_peak_memory_stats()  # 正常窗口阶段，含已驻留公共列/盘口/直接字段。
     fact_windows = PublicFactWindow(columns,initial_capacity=1)
     events = EventInputs(fact_windows)
     previous = prefixes.new_tensor([-1,-1,max(-1,prefix_values[-1]-1)])
@@ -101,9 +102,16 @@ def main():
     assert not native_events.fault.any().cpu().item()
     empty_window = events.encode(prefixes,prefixes,now)
     assert torch.count_nonzero(empty_window.values) == 0
+    capacities_before_invalid = (fact_windows.fact_capacity,fact_windows.source_capacity)
     invalid_window = events.encode(prefixes.new_tensor([-1]),prefixes.new_tensor([len(columns['groups'])]),now[:1])
     assert invalid_window.fault.ne(0).all().cpu().item()
     assert torch.count_nonzero(invalid_window.values) == 0
+    assert capacities_before_invalid == (fact_windows.fact_capacity,fact_windows.source_capacity)
+    trade_capacity_before_invalid = trades.window.capacity
+    invalid_trade_window = trades.encode(prefixes.new_tensor([-1]),prefixes.new_tensor([len(columns['groups'])]),assets[:1],now[:1])
+    assert invalid_trade_window.fault.ne(0).all().cpu().item()
+    assert torch.count_nonzero(invalid_trade_window.values) == 0
+    assert trades.window.capacity == trade_capacity_before_invalid
     # 真正UTC 100ms网格的末10个窗口，GPU选择合法闭组前缀，区间不按source time筛选。
     if columns['groups']:
         last_grid = (columns['groups'][-1][2]//100)*100
@@ -112,6 +120,8 @@ def main():
         begin_prefix = torch.searchsorted(state.groups[:,2].contiguous(),grid-100,right=True)-1
         grid_events = events.encode(begin_prefix,end_prefix,grid)
         assert not grid_events.fault.any().cpu().item()
+    torch.cuda.synchronize()
+    normal_window_peak = torch.cuda.max_memory_allocated()
 
     positive_rows = int(packed.mask.sum().cpu())
     if columns['slots']:
@@ -367,6 +377,8 @@ def main():
               'direct_sources':len(columns['fact_sources']),
               'cold_seconds':parsed-started,'total_seconds':time.perf_counter()-started,
               'peak_allocated_bytes':torch.cuda.max_memory_allocated(),
+              'normal_window_peak_allocated_bytes':normal_window_peak,
+              'window_peak_scope':'驻留共享公共列、已打包盘口和直接字段、三前缀窗口与末10个100ms窗口；非法窗不扩池',
               'passed':passed,
               'original_core_reference_checked':args.original_reference is not None,
               'not_delivered':['market_and_reference_state','binance_state','hidden','sim_noe_ledger',
