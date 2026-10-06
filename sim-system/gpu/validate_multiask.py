@@ -43,6 +43,25 @@ def main():
     queue,account,pool,accepted = run_base_acceptance_batch(prepared,queue,account,pool,at,
         torch.zeros((1,prepared.maximum_fills),dtype=torch.int64,device='cuda'),rebate,
         torch.zeros(queue.rows,dtype=torch.int64,device='cuda'))
+    from fill_pool import _take_record
+    from queues import _take
+    from asset_buy import take_ratio
+    gpu_trade_frames=[]
+    # 同价多段对应同来源价，各实际fill保留原plan人口。
+    source_prices=[]
+    for column,frame in enumerate(accepted.fills):
+        record=_take_record(pool.records,frame.slot)
+        price=take_ratio(prepared.taker_prices,torch.tensor([column],device='cuda'))
+        if frame.event.emitted.cpu().item():
+            source_prices.append(price)
+            gpu_trade_frames.append((record,frame,price))
+    price_by_slot=type(source_prices[0])(type(source_prices[0].numerator)(
+        torch.cat([price.numerator.words for price in source_prices]),
+        torch.cat([price.numerator.sign for price in source_prices]),
+        torch.cat([price.numerator.fault for price in source_prices])),type(source_prices[0].denominator)(
+        torch.cat([price.denominator.words for price in source_prices]),
+        torch.cat([price.denominator.sign for price in source_prices]),
+        torch.cat([price.denominator.fault for price in source_prices])))
     assert accepted.submission_delta.emitted.cpu().tolist() == [True]
     assert pool.capacity == 4 and values(pool.next_sequence) == [4]
     actual = [values(frame.fill_sequence)[0] for frame in accepted.fills if frame.event.emitted.cpu().item()]
@@ -61,6 +80,7 @@ def main():
             assert frame.event.emitted.cpu().tolist() == [True]
             assert values(frame.fill_sequence) == [checkpoint['fill_sequence']]
             order.append(checkpoint['fill_sequence'])
+            gpu_trade_frames.append((_take_record(pool.records,frame.slot),frame,take_ratio(price_by_slot,frame.slot)))
         assert_checkpoint(checkpoint['state'],original_quantity,account)
         for record in checkpoint['state']['fill_records']:
             coordinate = record['sequence']-1
@@ -116,6 +136,7 @@ def main():
     normalization=importlib.util.module_from_spec(spec)
     spec.loader.exec_module(normalization)
     normalization_report=normalization.validate(source['normalization_reference'])
+    trade_report=normalization.validate_trades(source['noe_records'],gpu_trade_frames)
     path=Path(__file__).resolve().parents[2]/'execution-normalization/gpu/consumption.py'
     spec=importlib.util.spec_from_file_location('gpu_noe_consumption',path)
     consumption=importlib.util.module_from_spec(spec)
@@ -222,6 +243,7 @@ def main():
         'original_Ledger_reference_checked':source['ledger_projection'] is not None,
         'Ledger_platform_balance_and_predecessor_candidate_checked':platform_checked,
         'normalization_core_candidate':normalization_report,
+        'actual_SIM_device_trade_mapping':trade_report,
         'original_feedback_dual_visibility_gate_checked':True,
         'global_clock_NOE_Ledger_delivered':False}))
 

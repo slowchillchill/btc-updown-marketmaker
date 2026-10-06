@@ -22,6 +22,7 @@ class PreparedBaseOrder:
     requested: torch.Tensor
     taker_bases: object  # [roots*maximum_fills]，原ask价序与段序，零槽不产生fill。
     taker_quotes: object
+    taker_prices: object  # 同逐fill人口的真实来源价，不用quote/base倒推
     maximum_fills: int
     fault: torch.Tensor
 
@@ -72,7 +73,7 @@ def prepare_base_order(queue, account, ask_rows, accepted_base, accepted_quote, 
     fault = plan.fault | fee.fault | quantity.fault
     if asset_indices.shape != (roots,) or requested.shape != (roots,) or requested.dtype != torch.bool:
         raise ValueError('订单资产/请求布局不一致')
-    return PreparedBaseOrder(account,plan,quantity,fee,asset_indices,requested,base,quote,maximum_fills,fault)
+    return PreparedBaseOrder(account,plan,quantity,fee,asset_indices,requested,base,quote,price,maximum_fills,fault)
 
 
 def reduce_order_maker(quantity, queue_effects, order_ids):

@@ -118,3 +118,73 @@ def validate(cases):
         assert actual==expected_order,case['name']
     assert counts.get('Duplicate',0)>0 and counts.get('EconomicAlias',0)>0 and counts.get('Conflict',0)>0 and counts.get('Pending',0)>0
     return {'cases':len(cases),'outcomes':counts,'whole_GPU_NOE_source_mapping_delivered':False}
+
+
+def validate_trades(records,frames):
+    import json
+    from types import SimpleNamespace
+    from queues import Numbers
+    from validate_base_execution import integers,rational,values,units
+    sys.path.insert(0,str(Path(__file__).parent))
+    from trade import map_trade
+    from core import EvidenceBank,Normalizer,EVIDENCE,OUT_EVIDENCE,OUT_DUPLICATE
+    from fields import append_rows,encode_fields
+    source={}
+    status={'MatchedNotBroadcasted':0,'Matched':1,'Retrying':2,'Mined':3,'Confirmed':4,'Failed':5}
+    for row in records:
+        body=row['record'].get('Evidence')
+        if body is None or 'TradeLifecycleV3' not in body['evidence']:
+            continue
+        fact=body['evidence']['TradeLifecycleV3']['result']['result']
+        source[(fact['fill_sequence'],status[fact['state']])]=(body,fact)
+    state=None
+    count=0
+    for record,frame,price in frames:
+        body,fact=source[(values(frame.fill_sequence)[0],int(frame.event.state.cpu()[0]))]
+        reference=body['source_reference']['record']['TradeLifecycle']
+        private=integers([reference['private_feedback_sequence']])
+        ordinal=torch.tensor([body['source_order']['ordinal']],device='cuda')
+        zero=torch.zeros(1,dtype=torch.int64,device='cuda')
+        read_kind=torch.full_like(zero,2)
+        mapped=Numbers.run_exact_batch(lambda:map_trade(record,frame,integers([1]),price,zero,zero,zero,
+            private,ordinal,liquidity_role=zero,maker_fee_equivalent=rational(['0']),maker_fee_read_kind=read_kind))
+        # 原类型参考保留完整实际payload；只在冷对照中解析原sim-N订单身份。
+        entity=json.loads(fact['order_identity'].split(':',1)[1])[-1]['Order']['source_order_id']
+        order=int(entity.removeprefix('sim-'))
+        applied=fact['economic_application_account_transition_seq'] is not None
+        expected=Numbers.run_exact_batch(lambda:encode_fields([zero,zero,zero,integers([fact['fill_sequence']]),
+            integers([order]),torch.tensor([status[fact['state']]],device='cuda'),
+            torch.tensor([{'PendingUnapplied':0,'PendingApplied':1,'FinalSuccess':2,
+                'FinalFailureUnapplied':3,'FinalFailureCompensated':4}[fact['economic_disposition']]],device='cuda'),
+            torch.tensor([fact['matched_at_utc_ms']],device='cuda'),zero,rational([fact['source_price_pusd_per_share']]),
+            integers([units(fact['base_quantity_shares'])]),integers([units(fact['quote_amount_pusd'])]),
+            integers([units(fact['immediate_taker_fee_pusd'])]),torch.tensor([applied],device='cuda'),
+            integers([fact['economic_application_account_transition_seq'] or 0]),read_kind,rational(['0'])]))
+        width=max(expected.size(1),mapped.semantic.size(1))
+        assert torch.equal(torch.nn.functional.pad(expected,(0,width-expected.size(1))),
+            torch.nn.functional.pad(mapped.semantic,(0,width-mapped.semantic.size(1))))
+        assert mapped.emitted.cpu().tolist()==[True]
+        bank=EvidenceBank(mapped.logical_keys,torch.zeros((1,1),dtype=torch.int64,device='cuda'),mapped.semantic,
+            torch.zeros((1,1),dtype=torch.int64,device='cuda'),torch.full_like(zero,EVIDENCE),mapped.source_order,
+            zero,mapped.fault)
+        if state is None:
+            state=Normalizer.empty(bank,1)
+        else:
+            state=state.append_bank(bank)
+        row=torch.tensor([[count]],device='cuda')
+        state,result=state.prepare(row,torch.ones_like(row,dtype=torch.bool))
+        assert result.outcomes.cpu().tolist()==[[OUT_EVIDENCE]] and result.emitted.cpu().tolist()==[[True]]
+        before=state.logical_rows.size(1)
+        state,repeat=state.prepare(row,torch.ones_like(row,dtype=torch.bool))
+        assert repeat.outcomes.cpu().tolist()==[[OUT_DUPLICATE]] and state.logical_rows.size(1)==before
+        count+=1
+    assert count==9
+    # 同值不同物理容量的整数必须得到同一字段编码，不能引入伪冲突。
+    one=integers([1])
+    first=encode_fields([one])
+    second=encode_fields([one.with_capacity(32)])
+    width=max(first.size(1),second.size(1))
+    assert torch.equal(torch.nn.functional.pad(first,(0,width-first.size(1))),
+        torch.nn.functional.pad(second,(0,width-second.size(1))))
+    return {'actual_trade_lifecycles':count,'same_values_different_word_capacity_equal':True,
+        'SIM_feedback_full_batch_mapping_delivered':False}

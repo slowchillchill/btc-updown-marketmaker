@@ -46,6 +46,14 @@ class EvidenceBank:
             result = result.gather(1, key[result].argsort(dim=1, stable=True))
         return result
 
+    def append(self, incoming):
+        """追加已按同schema编码的不可变行，旧身份/值引用不改号。"""
+        from fields import append_rows
+        from dataclasses import fields
+        return EvidenceBank(**{field.name:append_rows(getattr(self,field.name),getattr(incoming,field.name))
+            if getattr(self,field.name).ndim==2 else torch.cat([getattr(self,field.name),getattr(incoming,field.name)])
+            for field in fields(self)})
+
 
 @dataclass(frozen=True)
 class NormalizedBatch:
@@ -67,6 +75,13 @@ class Normalizer:
     def empty(cls, bank, roots):
         rows = torch.full((roots, bank.kinds.numel()), -1, dtype=torch.int64, device=bank.kinds.device)
         return cls(bank, rows, rows.clone(), torch.zeros(roots, dtype=torch.int32, device=rows.device))
+
+    def append_bank(self, incoming):
+        """字段已设备生成；按新输入人口增长目录，重复prepare仍复用原容量。"""
+        bank=self.bank.append(incoming)
+        addition=incoming.kinds.numel()
+        return Normalizer(bank,torch.nn.functional.pad(self.logical_rows,(0,addition),value=-1),
+            torch.nn.functional.pad(self.economic_rows,(0,addition),value=-1),self.fault)
 
     def prepare(self, rows, enabled):
         """纯候选；按原输入重试不会接纳半批，旧成功前缀不回滚。
