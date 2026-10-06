@@ -14,7 +14,8 @@ import torch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path[:0] = [str(ROOT/'sim-system/gpu'), str(ROOT/'ledger/gpu'), str(Path(__file__).resolve().parent)]
 from registry import (PublicRegistryEvents, FrozenIntentOrders, PublicRegistryState,
-    BASE_ACCEPTED, QUOTE_ACCEPTED, ORDER_LIFECYCLE, TRADE, CANCEL_TARGET)
+    BASE_ACCEPTED, QUOTE_ACCEPTED, ORDER_LIFECYCLE, TRADE, CANCEL_TARGET,
+    PublicCancellationState, CancellationCompletions)
 from validate_base_execution import integers, rational, values
 from queues import Numbers
 
@@ -36,7 +37,7 @@ def event_columns(references, identities, rank_start):
         evidence = reference['record']['Evidence']
         source = evidence['source_order']
         row = dict(kind=ORDER_LIFECYCLE, order=0, trade=0, private=source['sequence']['PrivateFeedback']['private_feedback_sequence'],
-            delivery=reference['visibility']['Feedback']['delivery_sequence'], ordinal=reference['position']['record_ordinal'],
+            delivery=reference['visibility']['Feedback']['delivery_sequence'], available=reference['visibility']['Feedback']['available_at_utc_ms'], ordinal=reference['position']['record_ordinal'],
             matched='0', opened='0', quantity='0', role=0, disposition=0, formed_matched=False, canceled=False, closed=False)
         payload = evidence['evidence']
         if 'Control' in payload:
@@ -71,16 +72,36 @@ def event_columns(references, identities, rank_start):
         rows.append(row)
     active = [True]*len(rows)
     if not rows:
-        rows=[dict(kind=0,order=0,trade=0,private=0,delivery=0,ordinal=0,matched='0',opened='0',quantity='0',role=0,disposition=0,formed_matched=False,canceled=False,closed=False)]
+        rows=[dict(kind=0,order=0,trade=0,private=0,delivery=0,available=0,ordinal=0,matched='0',opened='0',quantity='0',role=0,disposition=0,formed_matched=False,canceled=False,closed=False)]
         active=[False]
     tensor = lambda name,dtype=torch.int64:torch.tensor([[row[name] for row in rows]],dtype=dtype,device='cuda')
     integer = lambda name:integers([row[name] for row in rows])
     ratio = lambda name:rational([row[name] for row in rows])
     return PublicRegistryEvents(torch.tensor([active],dtype=torch.bool,device='cuda'), tensor('kind'),
-        integer('order'),integer('trade'),integer('private'),integer('delivery'),integer('ordinal'),
+        integer('order'),integer('trade'),integer('private'),integer('delivery'),integer('ordinal'),tensor('available'),
         torch.arange(rank_start,rank_start+len(rows),device='cuda')[None,:],ratio('matched'),ratio('opened'),ratio('quantity'),
         tensor('role'),tensor('disposition'),tensor('formed_matched',torch.bool),tensor('canceled',torch.bool),
         tensor('closed',torch.bool),torch.zeros(1,dtype=torch.int32,device='cuda'))
+
+
+def completion_columns(reference,requests):
+    active=reference is not None
+    if active:
+        evidence=reference['record']['Evidence']
+        completed=evidence['evidence']['Control']['result']['CancellationRequestCompleted']['result']
+        source=evidence['source_reference']['record']['DirectResponse']
+        request=source['association']['CancellationRequestCompleted']['global_request_id']
+        values=[completed[name] for name in ['canceled_count','not_canceled_no_effect_count','evidence_unknown_no_effect_count']]
+        delivery=reference['visibility']['Feedback']['delivery_sequence']
+        ordinal=reference['position']['record_ordinal']
+        available=reference['visibility']['Feedback']['available_at_utc_ms']
+        responded=source['platform_responded_at_utc_ms']
+        received=source['response_received_at_utc_ms']
+    else:
+        request=None;values=[0,0,0];delivery=ordinal=available=responded=received=0
+    tensor=lambda value,dtype=torch.int64:torch.tensor([[value]],dtype=dtype,device='cuda')
+    return CancellationCompletions(tensor(active,torch.bool),integers([requests.get(request,0)]),integers([delivery]),
+        integers([ordinal]),integers(values),tensor(available),tensor(responded),tensor(received),torch.zeros(1,dtype=torch.int32,device='cuda'))
 
 
 def check_family(source):
@@ -103,6 +124,11 @@ def check_family(source):
         present=torch.tensor([[key in public for key in catalog]],dtype=torch.bool,device='cuda')
         return FrozenIntentOrders(present,integers([identities[key] for key in catalog]),present.clone(),
             rational([targets[key] for key in catalog]),torch.zeros_like(present),present.clone())
+    request_ids={value['request']:index+1 for index,value in enumerate(source[-1]['cancel_source_requests'])}
+    cancel=Numbers.run_exact_batch(lambda:PublicCancellationState(integers(list(request_ids.values())),
+        torch.zeros((1,len(request_ids)),dtype=torch.bool,device='cuda'),completion_columns(None,request_ids)))
+    cancel_seen=set()
+    cancel_saved=[]
     seen=set()
     state=None
     rank=0
@@ -121,7 +147,7 @@ def check_family(source):
         def compute():
             events=event_columns(incoming,identities,rank)
             candidate=PublicRegistryState(events) if state is None else state.receive(events)
-            return candidate,candidate.freeze_orders(directory(frame))
+            return candidate,candidate.freeze_orders(directory(frame),torch.tensor([frame['logical_at']],device='cuda'))
         state,view=Numbers.run_exact_batch(compute)
         rank+=max(1,len(incoming))
         assert view.fault.cpu().tolist()==[0]
@@ -144,8 +170,28 @@ def check_family(source):
             assert known==('Known' in commitment['remaining'])
             if known:assert amounts(view.commitment)[index]==Fraction(commitment['remaining']['Known'])
         saved.append((view,amounts(view.active),view.unfinished.clone()))
+        registered={value['request'] for value in frame['cancel_source_requests']}
+        receipt_mask=torch.tensor([[name in registered for name in request_ids]],dtype=torch.bool,device='cuda')
+        latest=frame['cancel_latest']['Known']
+        reference=latest if latest is not None and position_key(latest) not in cancel_seen else None
+        if reference is not None:cancel_seen.add(position_key(reference))
+        def cancel_step():
+            candidate=cancel.register(receipt_mask).receive(completion_columns(reference,request_ids))
+            return candidate,candidate.freeze_global(torch.tensor([frame['logical_at']],device='cuda'))
+        cancel,cancel_view=Numbers.run_exact_batch(cancel_step)
+        assert cancel_view.fault.cpu().tolist()==[0]
+        assert values(cancel_view.pending_count)==[frame['cancel_pending']['Known']],frame['stage']
+        assert cancel_view.has_latest.cpu().tolist()==[latest is not None]
+        assert cancel_view.counts_applicable.cpu().tolist()==[latest is not None]
+        if latest is not None:
+            assert values(cancel_view.response_counts)==[count['Known'] for count in frame['cancel_response_counts']]
+        else:
+            assert frame['cancel_response_counts']==['NotApplicable']*3
+        cancel_saved.append((cancel_view,values(cancel_view.pending_count),values(cancel_view.response_counts)))
     for view,active,unfinished in saved:
         assert amounts(view.active)==active and torch.equal(view.unfinished,unfinished),'旧冻结读取不可倒灌'
+    for view,pending,counts in cancel_saved:
+        assert values(view.pending_count)==pending and values(view.response_counts)==counts,'旧撤单冻结不可倒灌'
     return len(source),len(seen)
 
 
@@ -155,7 +201,7 @@ def main():
     torch.cuda.synchronize()
     print(json.dumps({'frozen_prefixes':sum(n for n,_ in counts),'distinct_original_order_records':sum(n for _,n in counts),
         'continuous_received_state':True,'derived_oracle_initialization':False,'old_freeze_unchanged':True,
-        'complete_first_delivery_stream':False,'cancel_request_completed_state':False,
+        'complete_first_delivery_stream':False,'global_cancel_request_completed_state':True,'scoped_cancel_objects':False,
         'full_registry_or_root':False,'seconds':time.perf_counter()-started,'device_peak_allocated_bytes':torch.cuda.max_memory_allocated()}))
 
 

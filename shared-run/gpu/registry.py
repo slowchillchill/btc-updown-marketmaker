@@ -23,6 +23,7 @@ class PublicRegistryEvents:
     private_sequences: object
     delivery_sequences: object
     record_ordinals: object
+    available_at: torch.Tensor  # [roots,events]，原首次公开领取的available_at。
     receive_rank: torch.Tensor  # 物理领取顺序，不能替代业务u64序号。
     matched: object
     open_quantity: object
@@ -210,5 +211,111 @@ class PublicRegistryState:
                 payload[field.name] = join_integer(old,new)
         return PublicRegistryState(PublicRegistryEvents(**payload))
 
-    def freeze_orders(self, intents):
-        return frozen_order_read(self.events,intents)
+    def freeze_orders(self, intents, cutoff):
+        from dataclasses import replace
+        roots = self.events.received.size(0)
+        if cutoff.shape != (roots,) or cutoff.dtype != torch.int64 or cutoff.device != self.events.received.device:
+            raise TypeError('冻结cutoff需要同设备int64[roots]可信公开逻辑时刻')
+        visible = self.events.received & (self.events.available_at <= cutoff[:,None])
+        return frozen_order_read(replace(self.events,received=visible),intents)
+
+
+@dataclass(frozen=True)
+class CancellationCompletions:
+    received: torch.Tensor  # [roots,events]，完整请求完成，不是逐目标回应。
+    requests: object  # 原全局请求身份的无损字典坐标。
+    delivery_sequences: object
+    record_ordinals: object
+    counts: object  # ExactInt[roots*events*3]，原完成人口三类，不重算目标数。
+    available_at: torch.Tensor
+    responded_at: torch.Tensor
+    received_at: torch.Tensor
+    fault: torch.Tensor
+
+
+@dataclass(frozen=True)
+class GlobalCancellationRead:
+    pending_count: object
+    has_latest: torch.Tensor
+    response_counts: object
+    counts_applicable: torch.Tensor
+    responded_at: torch.Tensor
+    received_at: torch.Tensor
+    fault: torch.Tensor
+
+
+@dataclass(frozen=True)
+class PublicCancellationState:
+    requests: object
+    registered: torch.Tensor  # [roots,requests]，发送登记的原receipt证明；完成不抹原身份。
+    completions: CancellationCompletions
+
+    def register(self, receipt_registered):
+        from dataclasses import replace
+        if receipt_registered.shape != self.registered.shape or receipt_registered.dtype != torch.bool or receipt_registered.device != self.registered.device:
+            raise TypeError('原receipt登记需要同设备bool请求人口')
+        return replace(self,registered=self.registered | receipt_registered)
+
+    def receive(self, incoming):
+        # 共享设备列追加沿用同一资源事务；保留全部原完成引用的领取顺序。
+        from dataclasses import fields
+        roots, old_width = self.completions.received.shape
+        new_width = incoming.received.size(1)
+        payload = {}
+        for field in fields(self.completions):
+            old,new = getattr(self.completions,field.name),getattr(incoming,field.name)
+            if field.name == 'fault':
+                payload[field.name] = old | new
+            elif isinstance(old,torch.Tensor):
+                payload[field.name] = torch.cat([old,new],1)
+            else:
+                components = 3 if field.name == 'counts' else 1
+                capacity = max(old.words.size(1),new.words.size(1))
+                old,new = old.with_capacity(capacity),new.with_capacity(capacity)
+                payload[field.name] = ExactInt(
+                    torch.cat([old.words.reshape(roots,old_width*components,capacity),new.words.reshape(roots,new_width*components,capacity)],1).flatten(0,1),
+                    torch.cat([old.sign.reshape(roots,old_width*components),new.sign.reshape(roots,new_width*components)],1).flatten(),
+                    torch.cat([old.fault.reshape(roots,old_width*components),new.fault.reshape(roots,new_width*components)],1).flatten())
+        return PublicCancellationState(self.requests,self.registered,CancellationCompletions(**payload))
+
+    def freeze_global(self, cutoff):
+        roots,width = self.completions.received.shape
+        count = self.registered.size(1)
+        device = self.registered.device
+        if cutoff.shape != (roots,) or cutoff.dtype != torch.int64 or cutoff.device != device:
+            raise TypeError('冻结cutoff需要同设备int64[roots]可信公开逻辑时刻')
+        if width == 0:
+            pending=ExactInt.from_i64_tensor(self.registered.to(torch.int64).sum(1))
+            absent=torch.zeros(roots,dtype=torch.bool,device=device)
+            counts=ExactInt.from_i64_tensor(torch.zeros(roots*3,dtype=torch.int64,device=device))
+            time=torch.zeros(roots,dtype=torch.int64,device=device)
+            return GlobalCancellationRead(pending,absent,counts,absent,time,time,self.completions.fault | pending.fault)
+        visible = self.completions.received & (self.completions.available_at <= cutoff[:,None])
+        matches,comparison_fault = identity_matches(self.requests,self.completions.requests,roots,count,width)
+        member = matches & self.registered[:,:,None] & visible[:,None,:]
+        pending = self.registered & ~member.any(2)
+        pending_count = ExactInt.from_i64_tensor(pending.to(torch.int64).sum(1))
+        candidate = member.any(1)
+        order = torch.arange(width,device=device)[None,:].expand(roots,width)
+        # 原latest_complete按(delivery_sequence,record_ordinal)，两个完整u64均不截成i64。
+        for sequence in [self.completions.record_ordinals,self.completions.delivery_sequences]:
+            words = sequence.words.to(torch.int64)&0xffffffff
+            for limb in [0,1]:
+                key=words[:,limb].reshape(roots,width)
+                order=order.gather(1,key.gather(1,order).argsort(dim=1,descending=True,stable=True))
+        at,has_latest = choose_latest(candidate[:,None,:],order)
+        at,has_latest = at[:,0],has_latest[:,0]
+        global_at=torch.arange(roots,device=device)*width+at
+        population=global_at[:,None]*3+torch.arange(3,device=device)[None,:]
+        counts=_take(self.completions.counts,population.flatten())
+        fault=self.completions.fault | Numbers.combine_fault_rows(torch.where(member,comparison_fault,0).reshape(roots,-1))
+        for sequence,components in [(self.completions.requests,1),(self.completions.delivery_sequences,1),
+                (self.completions.record_ordinals,1),(self.completions.counts,3)]:
+            limit=sequence.compare(sequence.constant((1<<64)-1))
+            invalid=sequence.fault | limit.fault | ((sequence.sign<0)|(limit.order>0)).to(torch.int32)
+            enabled=visible[:,:,None].expand(roots,width,components).reshape(roots,-1)
+            fault=fault | Numbers.combine_fault_rows(torch.where(enabled,invalid.reshape(roots,-1),0))
+        fault=fault | pending_count.fault
+        return GlobalCancellationRead(pending_count,has_latest,counts,has_latest,
+            self.completions.responded_at.gather(1,at[:,None])[:,0],
+            self.completions.received_at.gather(1,at[:,None])[:,0],fault)
