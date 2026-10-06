@@ -21,6 +21,19 @@ def _bucket(required):
     return 1 << (max(4, required) - 1).bit_length()
 
 
+def device_word_capacity():
+    """公共候选算子共享本批物理容量；没有协调批时返回最小初始容量。"""
+    state = _batch.get()
+    return state['capacity'] if state else 4
+
+
+def record_resource_request(required):
+    """独立登记设备容量请求，不能让业务select丢失扩池请求。"""
+    state = _batch.get()
+    if state is not None and required.numel():
+        state['requests'].append(required)
+
+
 def run_exact_batch(compute, *, initial_word_capacity=4):
     """协调资源事务：compute只生成待提交结果，不能推进外部账户或随机数。
 

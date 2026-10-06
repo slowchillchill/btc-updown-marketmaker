@@ -124,6 +124,38 @@ std::vector<torch::Tensor> floor_sum(torch::Tensor n, torch::Tensor m,
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {out,fault,required};
 }
+extern "C" void sim_gpu_limit_segment(const uint32_t*, const int8_t*, int64_t,
+    uint32_t*, uint32_t*, bool*, int32_t*, int64_t*, uint32_t*, int64_t, int64_t, cudaStream_t);
+std::vector<torch::Tensor> limit_segment(torch::Tensor inputs, torch::Tensor signs) {
+  TORCH_CHECK(inputs.is_cuda() && inputs.scalar_type() == torch::kInt32 &&
+      inputs.is_contiguous() && inputs.dim() == 3 && inputs.size(1) == 8,
+      "需CUDA连续int32[batch,8,words]原段和订单精确量");
+  int64_t rows = inputs.size(0), width = inputs.size(2);
+  TORCH_CHECK(rows <= int64_t(INT32_MAX) * 128 && width > 0 &&
+      width <= (INT64_MAX / 138 - 8) / 6 && width <= INT64_MAX / 32 - 6,
+      "SIM搜索临时字索引或grid容量溢出");
+  TORCH_CHECK(signs.is_cuda() && signs.device() == inputs.device() &&
+      signs.scalar_type() == torch::kInt8 && signs.is_contiguous() &&
+      signs.dim() == 2 && signs.size(0) == rows && signs.size(1) == 8,
+      "需同设备int8[batch,8]原符号");
+  const c10::cuda::CUDAGuard guard(inputs.device());
+  int64_t cap = 6 * width + 8;
+  capacity_check(rows, 138 * cap);
+  auto base = torch::empty({rows, width}, inputs.options());
+  auto quote = torch::empty_like(base);
+  auto present = torch::empty({rows}, inputs.options().dtype(torch::kBool));
+  auto fault = torch::empty({rows}, inputs.options());
+  auto required = torch::empty({rows}, inputs.options().dtype(torch::kInt64));
+  auto work = torch::empty({rows, 138 * cap}, inputs.options());
+  if (rows) sim_gpu_limit_segment((uint32_t*)inputs.data_ptr<int32_t>(),
+      signs.data_ptr<int8_t>(), width, (uint32_t*)base.data_ptr<int32_t>(),
+      (uint32_t*)quote.data_ptr<int32_t>(), present.data_ptr<bool>(),
+      fault.data_ptr<int32_t>(), required.data_ptr<int64_t>(),
+      (uint32_t*)work.data_ptr<int32_t>(), cap, rows,
+      c10::cuda::getCurrentCUDAStream().stream());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {base, quote, present, fault, required};
+}
 std::vector<torch::Tensor> decimal(torch::Tensor bytes, torch::Tensor offsets,
                                   torch::Tensor present) {
   TORCH_CHECK(bytes.is_cuda() && bytes.scalar_type() == torch::kUInt8
@@ -179,6 +211,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("index_probe", &index_probe);
   m.def("gcd", &gcd);
   m.def("floor_sum", &floor_sum);
+  m.def("limit_segment", &limit_segment);
   m.def("decimal", &decimal);
   m.def("prefix_lookup", &prefix_lookup);
 }
