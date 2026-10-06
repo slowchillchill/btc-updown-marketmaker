@@ -29,6 +29,7 @@ fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         let mut last = Instant::now();
         while let Some(bucket) = reader.next_bucket()? {
             for reference in &bucket.steps { reader.restore_step(reference)?; }
+            for position in &bucket.reference_positions { reader.reference_fact(*position)?; }
             buckets += 1; steps += bucket.steps.len() as u64; references += bucket.reference_positions.len() as u64;
             if !interval.is_zero() && last.elapsed()>=interval {
                 eprintln!("{}",serde_json::json!({"stage":"hidden_read","buckets":buckets,"steps":steps,
@@ -53,6 +54,7 @@ fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     let order = Arc::new(GpuInitialRunOrderV1::start(Path::new(&args[4]),Path::new(&args[5]))?);
     let mut scanned = 0_u64; let mut supplied = 0_u64; let mut reduced = 0_u64;
     let mut last = Instant::now();
+    let mut phase = None;
     let mut callback = |notice| {
         if interval.is_zero() { return; }
         let stage = match notice {
@@ -66,8 +68,9 @@ fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
             },
             _=>None,
         };
+        if stage.is_some() { phase = stage; }
         if stage.is_some() || last.elapsed()>=interval {
-            eprintln!("{}",serde_json::json!({"stage":stage,"scanned_inputs":scanned,
+            eprintln!("{}",serde_json::json!({"stage":phase,"scanned_inputs":scanned,
                 "supplied_messages":supplied,"reduced_messages":reduced,"elapsed_seconds":started.elapsed().as_secs_f64()}));
             last = Instant::now();
         }

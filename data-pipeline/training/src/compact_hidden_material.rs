@@ -236,6 +236,7 @@ pub struct CompactHiddenMaterialReaderV1 {
     expected_indexed_steps: u64,
     expected_references: BTreeMap<u64,(i64,u64)>,
     reference_facts: BTreeMap<u64,u64>,
+    reference_locations: BTreeMap<u64,u64>,
     failed: bool,
     last_key: Option<(i64,u64)>,
     max_packet_bytes: usize,
@@ -350,7 +351,7 @@ impl CompactHiddenMaterialReaderV1 {
             progress("hidden_receipt_sha256", "manifest.json", done, Some(total));
         })?;
         Ok(Self {manifest, material_manifest_sha256, payload:File::open(root.join(MEMBERS[0]))?, offsets, messages,
-            source, cached_message:None, read_reports:0, expected_indexed_steps:0, expected_references, reference_facts:BTreeMap::new(), failed:false,
+            source, cached_message:None, read_reports:0, expected_indexed_steps:0, expected_references, reference_facts:BTreeMap::new(), reference_locations:BTreeMap::new(), failed:false,
             index:RunCursor::open(&root.join(MEMBERS[3]), rows, bytes)?, next:None, position:0,
             read_steps:0, read_references:0, last_key:None, max_packet_bytes})
     }
@@ -429,6 +430,17 @@ impl CompactHiddenMaterialReaderV1 {
         }
         self.cached_message = Some(packet);
         Ok(())
+    }
+
+    /// 只恢复已验证hidden索引的真实参考，不生成公开可见性或旧稳定前缀。
+    pub fn reference_fact(&mut self, index_position: u64) -> RecordingResult<crate::compact_public::CompactFactV1> {
+        if self.failed { return Err(io::Error::other("失败的hidden材料读取不能继续").into()); }
+        self.failed = true;
+        let canonical = self.reference_locations.get(&index_position).copied()
+            .ok_or_else(|| io::Error::other("参考不属于已验证的hidden索引位置"))?;
+        let fact = self.source.canonical_fact(canonical)?;
+        self.failed = false;
+        Ok(fact)
     }
 
     /// 冷块消费者复原原强类型步骤；快照仅从自身来源原消息取回，不归约public步骤。
@@ -550,6 +562,9 @@ impl CompactHiddenMaterialReaderV1 {
                 if self.expected_references.get(canonical_position) != Some(&(*source_at_utc_ms,*derivation_position)) {
                     return Err(io::Error::other("hidden参考不指向原真实来源时间的非PM事实").into());
                 }
+                let index_position = self.read_steps.checked_add(self.read_references)
+                    .ok_or_else(|| io::Error::other("hidden索引位置溢出"))?;
+                self.reference_locations.insert(index_position,*canonical_position);
                 self.read_references += 1;
             }
         }
@@ -607,6 +622,11 @@ mod tests {
         let mut snapshots = Vec::new();
         let mut transitions = Vec::new();
         while let Some(bucket) = reader.next_bucket().unwrap() {
+            for position in &bucket.reference_positions {
+                let fact = reader.reference_fact(*position).unwrap();
+                assert_eq!(fact.dependency_time.source_event_at_utc_ms,Some(bucket.bucket_time_utc_ms));
+                assert!(!matches!(fact.payload,crate::compact_public::CompactFactPayloadV1::PmFromInput(_)));
+            }
             for reference in &bucket.steps {
                 let step = reader.restore_step(reference).unwrap();
                 match step.change {
