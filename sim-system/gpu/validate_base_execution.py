@@ -2,6 +2,7 @@
 from dataclasses import fields, replace
 from fractions import Fraction
 import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -10,7 +11,8 @@ import torch
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from queues import Numbers, ExactInt, ExactRational, PriceQueueBatch, run_queue_batch, _take
 from account_state import PlatformAccountState
-from base_execution import prepare_base_order, reduce_order_maker
+from base_execution import prepare_base_order, reduce_order_maker, cancel_base_order, append_base_remainder
+from fill_finality import NormalFillRecord
 
 
 def integers(values):
@@ -64,22 +66,23 @@ def main():
         assert delta.emitted.cpu().tolist() == [True] and rejected.cpu().tolist() == [False]
         quantity = prepared.quantity
         # 已接单剩余量进入原bid队尾；队列rows0=ask0.2，rows1=bid0.3。
-        queue,_ = run_queue_batch(queue,lambda state:state.append_account(
-            torch.tensor([-1,7],dtype=torch.int64,device='cuda'),
-            _take(quantity.open_base_units,torch.tensor([0,0],device='cuda')).select(
-                torch.tensor([False,True],device='cuda'),queue.debt.constant(0))))
+        queue,remainder = run_queue_batch(queue,lambda state:append_base_remainder(state,quantity,
+            torch.tensor([1],device='cuda'),torch.tensor([7],device='cuda'),delta.emitted))
+        assert not remainder.root_fault.any().cpu().item()
         maker = None
-        economic_ordinal = reference['finality_path']['economic_application_ordinal']
-        offset = reference['finality_path']['steps'][economic_ordinal]['offset_ms']
-        success_offset = reference['finality_path']['steps'][-1]['offset_ms']
+        taker_record = NormalFillRecord.create(prepared.asset_plan.matched_base,prepared.asset_plan.used_quote,prepared.fee.total_micro,
+            torch.tensor([0],device='cuda'),torch.tensor([reference['processing_at']],device='cuda'),delta.emitted,reference['finality_path'])
+        rebate_rate = Numbers.run_exact_batch(lambda:rational([reference['taker_rebate_rate']]))
+        taker_record,account,_ = Numbers.run_exact_batch(lambda:taker_record.advance_one(account,taker_record.matched_at,rebate_rate))
+        maker_record = None
         for checkpoint in reference['checkpoints']:
             stage = checkpoint['stage']
-            if stage == 'taker_finality' and checkpoint['at'] == reference['processing_at']+offset:
-                account,_ = Numbers.run_exact_batch(lambda:account.fill_economic(prepared.asset_plan.matched_base,
-                    prepared.asset_plan.used_quote,prepared.fee.total_micro,torch.tensor([0],device='cuda'),torch.tensor([True],device='cuda')))
-            if stage == 'taker_finality' and checkpoint['at'] == reference['processing_at']+success_offset:
-                amount = Numbers.run_exact_batch(lambda:ExactRational.ratio(prepared.fee.total_micro,prepared.fee.total_micro.constant(1_000_000))*rational([reference['taker_rebate_rate']]))
-                account,_ = Numbers.run_exact_batch(lambda:account.accrue_rebate(amount,torch.tensor([False],device='cuda'),prepared.fee.total_micro.sign > 0))
+            if stage == 'taker_finality':
+                at = torch.tensor([checkpoint['at']],device='cuda')
+                taker_record,account,transition = Numbers.run_exact_batch(lambda:taker_record.advance_one(account,at,rebate_rate))
+                # 同实际原义务时点的重投不重复经济应用或应计。
+                taker_record,account,repeated = Numbers.run_exact_batch(lambda:taker_record.advance_one(account,at,rebate_rate))
+                assert not repeated.emitted.any().cpu().item()
             elif stage == 'hidden_step':
                 event = reference['events'][checkpoint['ordinal']]['payload']['event']
                 side = event['side']
@@ -98,15 +101,17 @@ def main():
                     maker = replace(current,base=current.base.select(current.emitted,maker.base),
                         quote=current.quote.select(current.emitted,maker.quote),emitted=current.emitted | maker.emitted,
                         fault=current.fault | maker.fault)
-            elif stage == 'maker_finality' and checkpoint['at'] == reference['maker_at']+offset:
+            elif stage == 'maker_finality':
                 assert maker is not None
-                account,_ = Numbers.run_exact_batch(lambda:account.fill_economic(maker.base,maker.quote,maker.quote.constant(0),
-                    torch.tensor([0],device='cuda'),maker.emitted))
+                if maker_record is None:
+                    maker_record = NormalFillRecord.create(maker.base,maker.quote,maker.quote.constant(0),torch.tensor([0],device='cuda'),
+                        torch.tensor([reference['maker_at']],device='cuda'),maker.emitted,reference['finality_path'])
+                    maker_record,account,_ = Numbers.run_exact_batch(lambda:maker_record.advance_one(account,maker_record.matched_at,rebate_rate))
+                maker_record,account,_ = Numbers.run_exact_batch(lambda:maker_record.advance_one(account,torch.tensor([checkpoint['at']],device='cuda'),rebate_rate))
             elif stage == 'canceled':
-                queue,_,found = Numbers.run_exact_batch(lambda:queue.cancel(torch.tensor([-1,7],device='cuda')))
+                queue,quantity,account,_,_,found,_ = Numbers.run_exact_batch(lambda:cancel_base_order(queue,quantity,account,
+                    torch.tensor([-1,7],device='cuda'),torch.tensor([0,0],device='cuda'),torch.tensor([True],device='cuda')))
                 assert found.cpu().tolist() == [False,True]
-                quantity,canceled,released,valid = Numbers.run_exact_batch(lambda:quantity.cancel(torch.tensor([True],device='cuda')))
-                account,_ = Numbers.run_exact_batch(lambda:account.release_principal(released,valid))
             try:
                 assert_checkpoint(checkpoint['state'],quantity,account)
             except AssertionError as error:
@@ -115,11 +120,18 @@ def main():
     elapsed = time.perf_counter()-started
     events = profile.events()
     cuda = [event for event in events if event.device_type == torch.autograd.DeviceType.CUDA]
+    kernels = [event for event in cuda if not event.name.startswith(('Memcpy','Memset'))]
     for event in cuda:
         operators[event.name] = operators.get(event.name,0)+1
+    artifact = Path(os.environ['B_GPU_ORDER_ARTIFACT_DIR'])
+    artifact.mkdir(parents=True,exist_ok=True)
+    (artifact/'cuda-device-events.json').write_text(json.dumps(operators,indent=2)+'\n')
     print(json.dumps({'checkpoints':len(reference['checkpoints']),'original_external_5share_request':True,
-        'elapsed_seconds_with_profile_and_reference_reads':elapsed,'cuda_kernel_launches':len(cuda),
-        'cuda_kernel_counts':operators,'queue_rows':queue.rows,'segment_capacity':queue.capacity,
+        'elapsed_seconds_with_profile_and_reference_reads':elapsed,'cuda_device_events':len(cuda),'cuda_kernel_launches':len(kernels),
+        'cuda_memcpy_events':sum(event.name.startswith('Memcpy') for event in cuda),
+        'public_integer_kernel_launches':sum(event.name.startswith('integer_kernel') for event in kernels),
+        'public_floor_sum_kernel_launches':sum(event.name.startswith('floor_sum_kernel') for event in kernels),
+        'queue_rows':queue.rows,'segment_capacity':queue.capacity,
         'maximum_exact_words':max(getattr(quantity,field.name).words.shape[1] for field in fields(quantity) if field.name!='fault'),
         'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
         'public_clock_NOE_Ledger_actor_delivered':False}))
