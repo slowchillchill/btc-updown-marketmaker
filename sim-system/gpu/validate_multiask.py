@@ -129,16 +129,21 @@ def main():
     pending=Numbers.run_exact_batch(lambda:consumption.PendingRecords.from_columns(active,
         torch.tensor([[row[0] for row in columns]],device='cuda'),integers([row[1] for row in columns]),
         integers([row[2] for row in columns]),torch.arange(len(records)-1,-1,-1,device='cuda')[None,:],integers([0])))
-    pending,closed=Numbers.run_exact_batch(lambda:pending.take_closed(torch.tensor([10_000],device='cuda'),
-        torch.tensor([1_200],device='cuda')))
+    gates=consumption.ReceiveGates.unset(1)
+    pending,closed=Numbers.run_exact_batch(lambda:pending.take_closed(gates))
     assert not closed.emitted.any().cpu().item()
-    pending,closed=Numbers.run_exact_batch(lambda:pending.take_closed(torch.tensor([10_000],device='cuda'),
-        torch.tensor([10_000],device='cuda')))
+    gates=gates.set_receive(torch.tensor([10_000],device='cuda'),torch.tensor([True],device='cuda'))
+    pending,closed=Numbers.run_exact_batch(lambda:pending.take_closed(gates))
+    assert not closed.emitted.any().cpu().item()
+    gates=gates.set_public(torch.tensor([1_200],device='cuda'),torch.tensor([True],device='cuda'))
+    pending,closed=Numbers.run_exact_batch(lambda:pending.take_closed(gates))
+    assert not closed.emitted.any().cpu().item()
+    gates=gates.set_public(torch.tensor([10_000],device='cuda'),torch.tensor([True],device='cuda'))
+    pending,closed=Numbers.run_exact_batch(lambda:pending.take_closed(gates))
     assert closed.emitted.cpu().tolist()==[[True]*len(records)]
     assert closed.record_refs.cpu().tolist()==[list(range(len(records)))]
     assert values(closed.delivered_sequences)==[row['visibility']['Feedback']['delivery_sequence'] for row in source['noe_records']]
-    pending,repeated=Numbers.run_exact_batch(lambda:pending.take_closed(torch.tensor([10_000],device='cuda'),
-        torch.tensor([10_000],device='cuda')))
+    pending,repeated=Numbers.run_exact_batch(lambda:pending.take_closed(gates))
     assert not repeated.emitted.any().cpu().item()
     # 同一发射候选u64溢出不能耗序号或发出半批，已成功旧批不回滚。
     boundary=FeedbackEmitter(integers([(1<<64)-2]),integers([2]),torch.zeros(1,dtype=torch.int32,device='cuda'))

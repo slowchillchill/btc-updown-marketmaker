@@ -27,6 +27,28 @@ class ClosedRecords:
 
 
 @dataclass(frozen=True)
+class ReceiveGates:
+    closed_receive_at: torch.Tensor
+    public_visible_at: torch.Tensor
+    has_closed_receive: torch.Tensor
+    has_public_visible: torch.Tensor
+
+    @classmethod
+    def unset(cls,roots,*,device='cuda'):
+        times=torch.zeros(roots,dtype=torch.int64,device=device)
+        missing=torch.zeros(roots,dtype=torch.bool,device=device)
+        return cls(times,times.clone(),missing,missing.clone())
+
+    def set_receive(self,at,enabled):
+        return replace(self,closed_receive_at=torch.where(enabled,at,self.closed_receive_at),
+            has_closed_receive=self.has_closed_receive | enabled)
+
+    def set_public(self,at,enabled):
+        return replace(self,public_visible_at=torch.where(enabled,at,self.public_visible_at),
+            has_public_visible=self.has_public_visible | enabled)
+
+
+@dataclass(frozen=True)
 class PendingRecords:
     active: torch.Tensor  # [roots,slots]
     received_at: torch.Tensor
@@ -56,13 +78,18 @@ class PendingRecords:
             (delivered_through.sign<0)|(upper.order>0)).to(torch.int32)
         return cls(active,received_at,private_sequences,source_ordinals,record_refs,delivered_through,fault)
 
-    def take_closed(self,closed_receive_at,public_visible_at):
+    def take_closed(self,gates):
         roots,width=self.active.shape
+        closed_receive_at,public_visible_at=gates.closed_receive_at,gates.public_visible_at
         for value in [closed_receive_at,public_visible_at]:
             if value.shape!=(roots,) or value.dtype!=torch.int64 or value.device!=self.active.device:
                 raise TypeError('NOE时间门需同设备int64[roots]')
+        for value in [gates.has_closed_receive,gates.has_public_visible]:
+            if value.shape!=(roots,) or value.dtype!=torch.bool or value.device!=self.active.device:
+                raise TypeError('NOE未设时间门须显式同设备bool[roots]')
         ready=self.active & (self.received_at<=closed_receive_at[:,None]) & (
             self.received_at<=public_visible_at[:,None])
+        ready=ready & (gates.has_closed_receive & gates.has_public_visible)[:,None]
         order=torch.arange(width,device=self.active.device).expand(roots,width)
         def sort(key):
             nonlocal order
