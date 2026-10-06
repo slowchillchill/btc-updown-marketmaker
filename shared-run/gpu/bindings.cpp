@@ -4,6 +4,8 @@
 #include <c10/cuda/CUDAException.h>
 #include <limits>
 #include "../../contracts/gpu/exact.cuh"
+extern "C" void public_gpu_decimal(const uint8_t*, int64_t, const int64_t*,
+    const bool*, uint32_t*, uint32_t*, int8_t*, int32_t*, int32_t*, int64_t, cudaStream_t);
 
 void words_check(const torch::Tensor& x) {
   TORCH_CHECK(x.is_cuda() && x.scalar_type() == torch::kInt32 &&
@@ -99,9 +101,35 @@ torch::Tensor gcd(torch::Tensor a, torch::Tensor b) {
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
 }
+std::vector<torch::Tensor> decimal(torch::Tensor bytes, torch::Tensor offsets,
+                                  torch::Tensor present) {
+  TORCH_CHECK(bytes.is_cuda() && bytes.scalar_type() == torch::kUInt8
+      && bytes.is_contiguous() && bytes.dim() == 1, "需设备连续字节字典");
+  TORCH_CHECK(offsets.is_cuda() && offsets.scalar_type() == torch::kInt64
+      && offsets.is_contiguous() && offsets.dim() == 1 && offsets.numel() >= 1
+      && offsets.device() == bytes.device(), "需同设备int64[N+1]偏移");
+  int64_t rows = offsets.numel() - 1;
+  TORCH_CHECK(rows <= int64_t(INT32_MAX) * 256, "批次超grid容量");
+  TORCH_CHECK(present.is_cuda() && present.scalar_type() == torch::kBool
+      && present.is_contiguous() && present.dim() == 1 && present.numel() == rows
+      && present.device() == bytes.device(), "需同设备bool[N]缺失mask");
+  const c10::cuda::CUDAGuard guard(bytes.device());
+  auto options = bytes.options().dtype(torch::kInt32);
+  auto c = torch::empty({rows, 3}, options), d = torch::empty({rows, 3}, options);
+  auto signs = torch::empty({rows}, options.dtype(torch::kInt8));
+  auto scale = torch::empty({rows}, options), fault = torch::empty({rows}, options);
+  if (rows) public_gpu_decimal(bytes.data_ptr<uint8_t>(), bytes.numel(),
+      offsets.data_ptr<int64_t>(), present.data_ptr<bool>(),
+      (uint32_t*)c.data_ptr<int32_t>(), (uint32_t*)d.data_ptr<int32_t>(),
+      signs.data_ptr<int8_t>(), scale.data_ptr<int32_t>(), fault.data_ptr<int32_t>(),
+      rows, c10::cuda::getCurrentCUDAStream().stream());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {c, d, signs, scale, fault};
+}
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("integer_op", &integer_op);
   m.def("project", &project);
   m.def("index_probe", &index_probe);
   m.def("gcd", &gcd);
+  m.def("decimal", &decimal);
 }

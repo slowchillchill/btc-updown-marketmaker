@@ -7,6 +7,7 @@ use std::{
 };
 use contracts::*;
 use data_pipeline_core::{
+    public_input::{DptIngressV1, RecordedIngressV1},
     pm_reduction::{PmReductionReportV2, PmReductionStepV1},
     public_observation_core::{PublicFactAppliedIngressV1, PublicFactGroupV1, PublicObservationCoreV1},
     public_reduction::PublicReductionReportV1,
@@ -237,7 +238,7 @@ impl PublicCompactReaderV1 {
         if manifest.files.len() != expected.len() { return Err(io::Error::other("材料文件集合不完整").into()); }
         for (item, name) in manifest.files.iter().zip(expected) {
             if item.name != name { return Err(io::Error::other("材料文件名或顺序错误").into()); }
-            let mut file = File::open(root.join(name))?;
+            let file = File::open(root.join(name))?;
             if file.metadata()?.len() != item.bytes { return Err(io::Error::other("材料大小错误").into()); }
             if file_sha256(&root.join(name))? != item.sha256 { return Err(io::Error::other("材料SHA错误").into()); }
         }

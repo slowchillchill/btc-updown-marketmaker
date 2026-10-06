@@ -171,6 +171,31 @@ def main():
     assert grown.report_values() == [1<<252] and not bool(grown.fault.any()), 'real growth must expand capacity and retry'
     assert grown.words.shape[1] == 8, 'resource growth uses actual required width'
     records.extend(['continuous_capacity', 'true_growth_retry'])
+    log(f'阶段=DPT批量转换/原键稳定排序/独立归约 耗时={time.monotonic()-started:.3f}s')
+    path = Path(__file__).resolve().parents[2] / 'data-pipeline/gpu/prepare.py'
+    spec = importlib.util.spec_from_file_location('dpt_gpu_prepare', path)
+    dpt = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = dpt
+    spec.loader.exec_module(dpt)
+    tokens = ['0', '-1.25', '79228162514264337593543950335',
+              '0.0000000000000000000000000001', '12.000000000000000000000000001', '', '1..2']
+    payload = ''.join(tokens).encode('ascii')
+    offsets = [0]
+    for token in tokens:
+        offsets.append(offsets[-1] + len(token))
+    columns = dpt.decimal_columns(torch.tensor(list(payload), dtype=torch.uint8, device='cuda'),
+        torch.tensor(offsets, dtype=torch.int64, device='cuda'),
+        torch.tensor([True]*5+[False,True], dtype=torch.bool, device='cuda'))
+    assert columns.coefficient.report_values()[:5] == [0,-125,(1<<96)-1,1,12000000000000000000000000001], 'GPU decimal coefficients'
+    assert columns.scale.cpu().tolist()[:6] == [0,2,0,28,27,0], 'GPU decimal scales and missing'
+    assert columns.coefficient.fault.cpu().tolist() == [0,0,0,0,0,0,1], 'GPU malformed decimal fault'
+    keys = [b'',b'\x00',b'\x00\x00',b'\x00\xff',b'\xff',b'\x00\x00']
+    key_bytes = torch.tensor([list(k)+[0]*(2-len(k)) for k in keys], dtype=torch.uint8, device='cuda')
+    order, key_fault = dpt.stable_source_order(key_bytes, torch.tensor([len(k) for k in keys], dtype=torch.int64, device='cuda'))
+    assert order.cpu().tolist() == sorted(range(len(keys)), key=lambda i:keys[i]), 'GPU original byte-key stable order'
+    assert not bool(key_fault.any())
+    assert dpt.independent_tag_counts(torch.tensor([0,2,2,1], device='cuda'), 4).cpu().tolist() == [1,1,2,0]
+    records.extend(['dpt_decimal', 'dpt_stable_keys', 'dpt_tag_counts'])
     torch.cuda.synchronize();elapsed=time.monotonic()-started
     report={'scope':'实际公共GPU整数/有理数/SIM费用/连续容量；不是完整环境/PPO/训练容量','source_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'cases':len(a),'passed':records,'projection_errors':errors,'compile_seconds':compile_seconds,'elapsed_seconds':elapsed,'device':torch.cuda.get_device_name(),'constant_chain_peak_growth_bytes':constant_peak_growth,'constant_chain_words':capacities[-1],'peak_after_constant_stage_reset_bytes':torch.cuda.max_memory_allocated()}
     args.output.parent.mkdir(parents=True,exist_ok=True);args.output.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n');log(f'完成 精确检查={records} 投影有限误差={errors} 耗时={elapsed:.3f}s')
