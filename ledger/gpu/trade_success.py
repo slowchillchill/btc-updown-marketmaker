@@ -139,8 +139,8 @@ class TradeSuccess:
             if day.dtype!=torch.int64 or day.shape!=(roots,) or day.device!=member.device:
                 raise TypeError('估计day须同设备int64[roots]')
             # 比较日编号，避免极端i64时刻乘回午夜溢出；不增加成交时刻业务门。
-            member=member&(torch.div(self.matched_at,86_400_000,rounding_mode='floor')==
-                torch.div(day,86_400_000,rounding_mode='floor')[:,None])
+            member=member&(~self.details_known | (torch.div(self.matched_at,86_400_000,rounding_mode='floor')==
+                torch.div(day,86_400_000,rounding_mode='floor')[:,None]))
         capacity=contributions.occupied.size(1)
         root=torch.arange(roots,device=member.device)[:,None,None]
         trade_index=(root*width+torch.arange(width,device=member.device)[None,:,None]).expand(roots,width,capacity)

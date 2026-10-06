@@ -31,6 +31,14 @@ def main():
     directory, error = Numbers.run_exact_batch(lambda: directory.set(integers([1]), zero, no, integers([0]), yes))
     assert error.cpu().tolist() == [0]
     contributions = Numbers.run_exact_batch(lambda: RebateContributions.empty(1, 1, 'cuda'))
+    cold_fact = next(checkpoint['record']['Evidence']['evidence']['TradeLifecycleV3']['result']['result']
+        for checkpoint in source['checkpoints'] if 'TradeLifecycleV3' in checkpoint['record'].get('Evidence', {}).get('evidence', {}))
+    cold = Numbers.run_exact_batch(lambda: TradeSuccess.open(1, 1, 'cuda').update(zero, zero, zero,
+        rational([cold_fact['base_quantity_shares']]), rational([cold_fact['quote_amount_pusd']]),
+        zero, yes, no, no))
+    unknown_day = Numbers.run_exact_batch(lambda: cold.estimated_rebate(directory, contributions,
+        zero[:, None], yes[:, None], day=torch.full_like(zero, 86_400_000)))
+    assert unknown_day.known.cpu().tolist() == [[False, False]] and unknown_day.fault.cpu().tolist() == [0]
     unknown = Numbers.run_exact_batch(lambda: PositionCosts.empty(1, 1, 'cuda', known=False).asset_cost(zero))
     assert unknown.known.cpu().tolist() == [False] and unknown.fault.cpu().tolist() == [0]
     prefix = 0
@@ -99,6 +107,7 @@ def main():
         'actual_applied_cost_fee_token_basis_and_executed_net_fee_checked': True,
         'actual_pending_and_failed_rebate_estimate_checked': True,
         'unknown_cold_prefix_asset_cost_not_known_zero_checked': True,
+        'unknown_cold_trade_day_does_not_become_known_zero_checked': True,
         'reference_attempt_order_drives_validation': True,
         'full_device_NOE_failure_clock_or_activity_restore_delivered': False}))
 
