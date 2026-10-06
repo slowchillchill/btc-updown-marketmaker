@@ -166,6 +166,8 @@ def validate_account_transfers(source):
             continue
         transition=fact['fact']['disposition']['AccountTransition']
         body=transition['transition']
+        if not isinstance(body,dict):
+            continue
         body=body.get('Existing',body)
         name=next(iter(body))
         if name not in ['MakerRebateDayFinalized','TakerRebateDayFinalized','MakerRebatePaid','TakerRebatePaid']:
