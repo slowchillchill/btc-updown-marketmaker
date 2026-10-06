@@ -517,3 +517,36 @@ A继续CPU公共宿主/部署和独立账户；新经济版本只按准确消费
 账户，也不改写旧研究。原逐帧 #5 保持自己的算法、27配置、预算和无活动根恢复范围。
 本设计不读第三留出、不启动A/C/#5、不部署或操作真实资金。公共开发/开发比较复用
 backtest，PPO仍归model-train；offline-evaluation按冻结模型和原权限独立处理。
+
+### 当前可执行的紧凑公共材料准备入口
+
+`data-pipeline-training` 的 `dpt-public-compact` 接受原
+`FinitePublicRecordingConfigV1` JSON、锁定 Python 路径和同提交的
+`data-pipeline/gpu/sort_worker.py` 路径。它复用原有限 Parquet 类型化解码、两遍
+代际排名及来源键生成。初始 run 的稳定排序在常驻 CUDA worker 执行；只有原
+字节键与返回 permutation 跨 CPU/GPU，原载荷按同一 permutation 搬运。
+CPU 继续执行原跨 run 多核归并、来源头选择、公共事实归约和原子持久写入。
+这部分保留 CPU 的原因是现有嵌套 Parquet/强类型来源证据和因果归约尚未迁入公共
+GPU 后端。此入口是一次冷材料准备的实际接线，不表示 GPU 连续环境已完成。
+
+该入口直接使用 `push_facts` 和紧凑 writer，不要求先写旧 public recording。
+紧凑材料 v2 只保存源盘口快照/增量；PM 事实和初始步骤引用源输入，Binance
+盘口状态引用完整合法公共前缀。完整盘口可按原归约配方重建。reader 检查自身
+完成凭据、连续位置、固定列、PM/普通 Produced 实际引用及末端覆盖。它不签发
+正式数据验收，也不代替独立 hidden 顺序的准备。
+
+实际采用了 CPU 外归并，所以配置必须显式提供 `canonical.sort.merge_workers`。
+在当前 25 vCPU / 90 GiB 配额上，工程切片用 8 个归并 worker，实际活跃数受
+独立合并组和原共享句柄额度约束。正式材料的初始 run/归并批次按完整工作集设置；
+六个来源 pending 缓冲、并发归并读取/写入缓冲、GPU 字节键矩阵与长度、主机 pinned
+副本、permutation 和 CUDA 排序临时区均计入准备阶段预算。GPU worker 按批报告
+行数、键宽、耗时及设备分配峰值，入口报告解码阶段、累计工作和归并进度。
+
+```bash
+cargo run -p data-pipeline-training --bin dpt-public-compact --locked --offline -- \
+  <finite-config.json> <locked-python> <same-commit>/data-pipeline/gpu/sort_worker.py
+```
+
+运行仍遵守准确提交 bundle 同步及数据盘环境规则。这里的有限工程范围不能当作
+完整 15 天/3 天根的数据准备或学习验收。设备十进制转换与独立归约已具公共 API；
+把其实际接到共享列块、hidden 材料和连续公共 GPU 状态仍是后续实现责任。

@@ -9,6 +9,7 @@ mod dpt_gate_a_cli;
 pub mod finite_recording;
 pub mod finite_source_progress;
 pub mod gate_a;
+pub mod gpu_initial_sort;
 mod gate_a_publication;
 mod gate_a_sim_adapter;
 pub mod hidden_preparation;
@@ -1243,6 +1244,11 @@ where
     sorter.finish_with_digest()
 }
 
+/// 冷准备的初始run排序器；业务键仍由来源模块生成。
+pub trait InitialRunOrder: Send + Sync {
+    fn permutation(&self, rows: &[SortRow]) -> Result<Vec<usize>, SortError>;
+}
+
 pub(crate) struct ExternalSorter {
     work_directory: PathBuf,
     config: SortConfig,
@@ -1253,10 +1259,17 @@ pub(crate) struct ExternalSorter {
     resources: Arc<SortResources>,
     next_file_id: usize,
     retain_work_directory: bool,
+    initial_order: Option<Arc<dyn InitialRunOrder>>,
 }
 
 impl ExternalSorter {
     pub(crate) fn new(temp_root: &Path, config: &SortConfig) -> Result<Self, SortError> {
+        Self::with_initial_order(temp_root, config, None)
+    }
+
+    pub(crate) fn with_initial_order(
+        temp_root: &Path, config: &SortConfig, initial_order: Option<Arc<dyn InitialRunOrder>>,
+    ) -> Result<Self, SortError> {
         validate_config(config)?;
 
         let work_directory = temp_root.join(WORK_DIRECTORY);
@@ -1278,6 +1291,7 @@ impl ExternalSorter {
             resources: SortResources::new(config, 0, 0),
             next_file_id: 0,
             retain_work_directory: false,
+            initial_order,
         };
         let pending_base_bytes =
             sort_row_buffer_bytes(&sorter.pending_rows, sorter.pending_inner_bytes).ok_or(
@@ -1348,6 +1362,7 @@ impl ExternalSorter {
             &mut self.metrics,
             digest,
             split,
+            self.initial_order.as_deref(),
         )?;
         self.next_file_id += 1;
         self.runs.push(run);
@@ -1602,8 +1617,15 @@ fn flush_initial_run(
     metrics: &mut SortMetrics,
     mut digest: Option<&mut Sha256>,
     split: bool,
+    initial_order: Option<&dyn InitialRunOrder>,
 ) -> Result<RunInfo, SortError> {
-    let sorted = sort_rows_with_arrow(rows)?;
+    let sorted = match initial_order {
+        Some(order) => {
+            let indices = order.permutation(&rows)?;
+            apply_run_permutation(rows, &indices)?
+        }
+        None => sort_rows_with_arrow(rows)?,
+    };
     ensure_unique_keys(&sorted)?;
     let path = run_path(
         destination.work_directory,
@@ -1738,6 +1760,35 @@ fn sort_rows_with_arrow(mut rows: Vec<SortRow>) -> Result<Vec<SortRow>, SortErro
             rows.swap(current, source);
             current = source;
         }
+    }
+    Ok(rows)
+}
+
+fn apply_run_permutation(mut rows: Vec<SortRow>, indices: &[usize]) -> Result<Vec<SortRow>, SortError> {
+    if indices.len() != rows.len() {
+        return Err(SortError::InvalidRun("初始排序响应长度不符"));
+    }
+    let mut visited = vec![false; rows.len()];
+    for &index in indices {
+        if index >= rows.len() || visited[index] {
+            return Err(SortError::InvalidRun("初始排序响应不是完整permutation"));
+        }
+        visited[index] = true;
+    }
+    visited.fill(false);
+    for target in 0..rows.len() {
+        if visited[target] { continue; }
+        let mut current = target;
+        loop {
+            visited[current] = true;
+            let source = indices[current];
+            if visited[source] { break; }
+            rows.swap(current, source);
+            current = source;
+        }
+    }
+    if rows.windows(2).any(|pair| pair[0].sort_key > pair[1].sort_key) {
+        return Err(SortError::InvalidRun("初始排序响应未按原键递增"));
     }
     Ok(rows)
 }

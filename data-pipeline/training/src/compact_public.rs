@@ -637,4 +637,54 @@ mod tests {
         }
         assert!(rejected);
     }
+    #[test]
+    #[ignore = "只在已同步准确提交的AutoDL CUDA环境显式运行"]
+    fn gpu_original_source_keys_reach_compact_fact_sink() {
+        use crate::{canonical_run::CanonicalRunConfig, gpu_initial_sort::GpuInitialRunOrderV1,
+            public_replay::{prepare_historical_rows_with_initial_order_v1,HISTORICAL_SOURCE_HEAD_ORDERING_VERSION}, SortConfig};
+        use std::sync::Arc;
+        let python = std::env::var("B_GPU_PYTHON").unwrap();
+        let script = std::env::var("B_GPU_SORT_WORKER").unwrap();
+        let order = Arc::new(GpuInitialRunOrderV1::start(Path::new(&python),Path::new(&script)).unwrap());
+        let temp = tempfile::tempdir().unwrap();
+        let sources = vec![
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",1,21_000,22_000,book("12.000000000000000000000000001")))),
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthUpdate(update("depth-a",101,101,2,Some(100),None,
+                BinanceDepthStitchVerdict::Applied,vec![DepthLevel {price:"63900".into(),quantity:"1.234567890123456789".into()}]))),
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(metadata_snapshot_row()))),
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(snapshot("depth-a",100,1))),
+        ];
+        let config = CanonicalRunConfig {
+            decode_batch_rows:4096,max_decode_batch_bytes:64*1024*1024,max_temporary_row_bytes:64*1024*1024,
+            max_epoch_count_per_source:1024,max_pending_ws_terminals:1024,max_retained_reducer_entries:65536,
+            canonical_rule_version:"rule-v1".into(),
+            sort:SortConfig {max_run_rows:1024,max_run_bytes:64*1024*1024,max_temp_run_files:64,
+                merge_fan_in:2,merge_workers:8,max_open_files:24,batch_rows:1024,max_temp_bytes:256*1024*1024},
+        };
+        let header = PublicInputStreamHeaderV1 {
+            input_stream_id:"gpu-compact".into(),canonical_rule_version:"rule-v1".into(),
+            observation_version:"public-observation-v1".into(),ordering_version:HISTORICAL_SOURCE_HEAD_ORDERING_VERSION.into(),
+            input_scope:"engineering-constructed-short".into(),max_pending_ws_terminals:1024,initial_state:PublicInitialStateV1::Empty,
+        };
+        let mut merge = prepare_historical_rows_with_initial_order_v1(&temp.path().join("merge"),&config,
+            header.input_stream_id.clone(),||Ok(sources.clone().into_iter().map(Ok)),order).unwrap();
+        let target = temp.path().join("compact");
+        let mut writer = PublicCompactWriterV1::create(&target,header).unwrap();
+        let core = consume_historical_merge_facts_v1(&mut merge,writer.manifest.header.clone(),&mut writer,|_|Ok(())).unwrap();
+        assert_eq!(core.applied_prefix().next_input_position,5);
+        let receipt = writer.publish().unwrap();
+        assert!(receipt.normal_end && receipt.facts>0);
+        let mut reader = PublicCompactReaderV1::open(&target,64*1024*1024).unwrap();
+        let mut source_positions = vec![];
+        let mut depth_refs = 0;
+        while let Some(packet) = reader.next_packet().unwrap() {
+            source_positions.push(packet.input.input_position);
+            depth_refs += packet.groups.iter().flat_map(|g|&g.records)
+                .filter(|f|matches!(f.payload,CompactFactPayloadV1::BinanceDepthFromPrefix{..})).count();
+        }
+        assert_eq!(source_positions,vec![0,1,2,3,4]);
+        assert_eq!(depth_refs,2);
+        eprintln!("gpu_compact_receipt={}",serde_json::to_string(&receipt).unwrap());
+    }
+
 }

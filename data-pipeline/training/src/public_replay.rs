@@ -11,6 +11,7 @@ use data_pipeline_core::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    sync::Arc,
     collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
@@ -75,12 +76,20 @@ impl HistoricalMergeV1 {
         input: impl IntoIterator<Item = RecordingResult<HistoricalIngressV1>>,
         progress: Option<&HistoricalPreparationNotifierV1<'_>>,
     ) -> RecordingResult<Self> {
+        Self::prepare_with_initial_order(root, config, stream, input, progress, None)
+    }
+    fn prepare_with_initial_order(
+        root: &Path, config: &SortConfig, stream: String,
+        input: impl IntoIterator<Item = RecordingResult<HistoricalIngressV1>>,
+        progress: Option<&HistoricalPreparationNotifierV1<'_>>,
+        initial_order: Option<Arc<dyn crate::InitialRunOrder>>,
+    ) -> RecordingResult<Self> {
         fs::create_dir(root)?;
         let mut sorters = Vec::new();
         for i in 0..6 {
             let path = root.join(i.to_string());
             fs::create_dir(&path)?;
-            sorters.push(ExternalSorter::new(&path, config)?);
+            sorters.push(ExternalSorter::with_initial_order(&path, config, initial_order.clone())?);
         }
         for entry in input {
             let entry = entry?;
@@ -864,15 +873,39 @@ where
         None,
     )
 }
+/// 原两遍epoch与来源键算法，兼容批量排序接入GPU初始run；跨run归并仍由CPU承担。
+pub fn prepare_historical_rows_with_initial_order_v1<I>(
+    root: &Path, config: &crate::canonical_run::CanonicalRunConfig, stream: String,
+    mut read: impl FnMut() -> RecordingResult<I>,
+    initial_order: Arc<dyn crate::InitialRunOrder>,
+) -> RecordingResult<HistoricalMergeV1>
+where I: Iterator<Item = RecordingResult<TypedRawRowV2>>,
+{
+    prepare_historical_tagged_rows_with_initial_order_v1(
+        root, config, stream, |_| Ok(read()?.map(|row| row.map(|row| (row, None)))),
+        None, Some(initial_order),
+    )
+}
+
 fn prepare_historical_tagged_rows_v1<I>(
     root: &Path,
     config: &crate::canonical_run::CanonicalRunConfig,
     stream: String,
-    mut read: impl FnMut(Pass) -> RecordingResult<I>,
+    read: impl FnMut(Pass) -> RecordingResult<I>,
     progress: Option<&HistoricalPreparationNotifierV1<'_>>,
 ) -> RecordingResult<HistoricalMergeV1>
 where
     I: Iterator<Item = RecordingResult<(TypedRawRowV2, Option<SourceArtifactBindingV1>)>>,
+{
+    prepare_historical_tagged_rows_with_initial_order_v1(root, config, stream, read, progress, None)
+}
+fn prepare_historical_tagged_rows_with_initial_order_v1<I>(
+    root: &Path, config: &crate::canonical_run::CanonicalRunConfig, stream: String,
+    mut read: impl FnMut(Pass) -> RecordingResult<I>,
+    progress: Option<&HistoricalPreparationNotifierV1<'_>>,
+    initial_order: Option<Arc<dyn crate::InitialRunOrder>>,
+) -> RecordingResult<HistoricalMergeV1>
+where I: Iterator<Item = RecordingResult<(TypedRawRowV2, Option<SourceArtifactBindingV1>)>>,
 {
     use crate::canonical_run::{CaptureCoordinate, rank_epochs, update_epoch_start};
     let mut pm = BTreeMap::new();
@@ -990,7 +1023,10 @@ where
             },
         })
     });
-    HistoricalMergeV1::prepare(root, &config.sort, stream, entries, progress)
+    match initial_order {
+        Some(order) => HistoricalMergeV1::prepare_with_initial_order(root, &config.sort, stream, entries, progress, Some(order)),
+        None => HistoricalMergeV1::prepare(root, &config.sort, stream, entries, progress),
+    }
 }
 /// 文件仅作为供料位置；其顺序/路径不进入新历史排序键。
 pub fn prepare_historical_files_v1(
@@ -1125,7 +1161,20 @@ pub fn prepare_historical_finite_files_with_initialization_v1(
     initialization: Option<&crate::historical_initialization::MetadataInitializationSelectionV1>,
     progress: Option<&HistoricalPreparationNotifierV1<'_>>,
 ) -> RecordingResult<HistoricalMergeV1> {
-    prepare_historical_tagged_rows_v1(
+    prepare_historical_finite_files_with_initial_order_v1(
+        root, files, config, stream, received_range, initialization, progress, None,
+    )
+}
+/// 文件解码保持原强类型入口；GPU初始排序只替换run内顺序实现。
+pub fn prepare_historical_finite_files_with_initial_order_v1(
+    root: &Path, files: &[crate::public_input::PublicFiniteFileV1],
+    config: &crate::canonical_run::CanonicalRunConfig, stream: String,
+    received_range: std::ops::Range<i64>,
+    initialization: Option<&crate::historical_initialization::MetadataInitializationSelectionV1>,
+    progress: Option<&HistoricalPreparationNotifierV1<'_>>,
+    initial_order: Option<Arc<dyn crate::InitialRunOrder>>,
+) -> RecordingResult<HistoricalMergeV1> {
+    prepare_historical_tagged_rows_with_initial_order_v1(
         root,
         config,
         stream,
@@ -1170,6 +1219,7 @@ pub fn prepare_historical_finite_files_with_initialization_v1(
             ))
         },
         progress,
+        initial_order,
     )
 }
 struct TypedFileRowsV1<'a, 'b, 'c> {
