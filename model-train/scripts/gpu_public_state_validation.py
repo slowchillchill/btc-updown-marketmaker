@@ -491,7 +491,10 @@ def main():
                 if saved is not None: assert torch.equal(saved[0].fast,saved[1])
                 if grid==24000:
                     # 原两次完整快照12→13；冻结端点差及存在位。
-                    assert torch.equal(frozen_market.fast[0,37+6+3],torch.tensor(signed_log(1),device='cuda',dtype=torch.float32))
+                    assert torch.equal(frozen_market.fast[0,37+6+3],torch.tensor(signed_log(1),device='cuda',dtype=torch.float32)), {
+                        'prefix':frozen_market.prefixes.cpu().tolist(),'up_bid16':frozen_market.fast[0,43:59].cpu().tolist(),
+                        'before_total':endpoints.pm_sides.total.report_values(),'after_total':frozen_market.endpoint_memory.pm_sides.total.report_values(),
+                        'clock_prefix':clocks[:end],'asset_pairs':market_state.asset_pairs[target_market].cpu().tolist()}
                     assert frozen_market.fast[0,37+6+4].cpu().item()==1.0
                     saved = (frozen_market,frozen_market.fast.clone())
                 if grid==26100:
