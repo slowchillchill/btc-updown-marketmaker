@@ -194,6 +194,7 @@ async fn gpu_real_failed_fill_reverses_original_applied_cost_and_fee_once() {
         let capture = Rc::clone(&saved);
         let normalization = Rc::new(RefCell::new(Vec::new()));
         let normalization_capture = Rc::clone(&normalization);
+        let create_request_id = format!("create-{run_id}");
         let (_directory, mut actor) = active_market_actor_with_projection(
             SimCallerRoleV1::ModelTrain, &run_id, policy.clone(), move |log_path, opened| {
                 opened.projection_version = crate::runtime_v2::BusinessProjectionVersionV1::V4;
@@ -204,12 +205,12 @@ async fn gpu_real_failed_fill_reverses_original_applied_cost_and_fee_once() {
                 };
                 let memory = noe_projection::MemoryNoeProjectionPortV4::new(
                     log_path.parent().unwrap().join("noe-memory"), opened.clone(),
-                    reference.clone(), reference.clone(), format!("create-{run_id}"), "failure-source".into(),
+                    reference.clone(), reference.clone(), create_request_id.clone(), "failure-source".into(),
                 );
                 *capture.borrow_mut() = Some(memory.observation());
                 let durable = noe_projection::SimV2NoeProjectionPortV4::new(
                     log_path.parent().unwrap().join("noe-durable"), opened.clone(),
-                    reference.clone(), reference, format!("create-{run_id}"), "failure-source".into(),
+                    reference.clone(), reference, create_request_id.clone(), "failure-source".into(),
                 );
                 Box::new(GpuNoeReferencePort {
                     memory, durable, normalization_reference: normalization_capture, normalization_core: None,
