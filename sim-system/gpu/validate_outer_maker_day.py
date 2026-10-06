@@ -165,7 +165,8 @@ def main():
     order=[by_row[row] for row,active in zip(delivered.record_refs.cpu().tolist()[0],delivered.emitted.cpu().tolist()[0]) if active]
     assert [r['position'] for r in order]==[r['position'] for r in source['records']]
     # Registry在首次公开领取后、Ledger消费前接纳实际设备NOE。
-    sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'shared-run/gpu'))
+    sys.path[:0]=[str(Path(__file__).resolve().parents[2]/'shared-run/gpu'),
+        str(Path(__file__).resolve().parents[2]/'ledger/gpu')]
     from registry_projection import order_events_from_closed
     from registry import PublicRegistryState,FrozenIntentOrders,TRADE,compact_order_events
     receive_rank=torch.arange(delivered.record_refs.size(1),device='cuda')[None,:]
