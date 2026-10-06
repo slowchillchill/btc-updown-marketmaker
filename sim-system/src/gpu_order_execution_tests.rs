@@ -82,6 +82,7 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
         "processing_at":processing_at, "maker_at":maker_at,
         "finality_path":actor._finality_policy.normal_path(),
         "fee_rate":rules.fee_schedule.rate.value().to_string(), "fee_exponent":rules.fee_schedule.exponent,
+        "taker_rebate_rate":actor._rule_snapshot.snapshot().project_account_rules.rebate_settlement.value.fixed_taker_rebate_rate.value().to_string(),
         "post":post, "cancel_arrived_at":cancel_receipt.platform_arrived_at_utc_ms});
     let mut child = std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
         .arg(std::env::var("B_GPU_ORDER_VALIDATOR").unwrap()).stdin(std::process::Stdio::piped())

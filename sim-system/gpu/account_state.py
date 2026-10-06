@@ -145,3 +145,18 @@ class PlatformAccountState:
         candidate = replace(self,fault=self.fault | error*requested.to(torch.int32))
         movement = replace(self.no_movement(),available=amount,principal=amount.negated())
         return candidate.apply_movement(movement,requested & (amount.sign > 0) & (candidate.fault == 0))
+
+    def accrue_rebate(self, amount, maker, requested):
+        """原返佣应计独立经济转移；现金与资金占款保持原值。"""
+        roots = self.cash.sign.numel()
+        if maker.shape != (roots,) or maker.dtype != torch.bool or maker.device != self.cash.words.device:
+            raise TypeError('返佣种类须为同设备bool[roots]')
+        error = amount.fault | (amount.numerator.sign <= 0).to(torch.int32)
+        candidate = replace(self,fault=self.fault | error*requested.to(torch.int32))
+        columns = torch.arange(roots*4,device=maker.device)
+        owners = columns//4
+        selected = columns%4 == (~maker[owners]).to(torch.int64)
+        expanded = ExactRational(_take(amount.numerator,owners),_take(amount.denominator,owners))
+        rebates = rational_select(expanded,selected,zeros(self.rebates))
+        movement = replace(self.no_movement(),rebates=rebates)
+        return candidate.apply_movement(movement,requested & (candidate.fault == 0))

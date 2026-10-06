@@ -45,7 +45,8 @@ def assert_checkpoint(reference, quantity, account):
     assert values(account.next_sequence) == [reference['next_sequence']],('next_sequence',values(account.next_sequence),reference)
     expected_outcomes = dict(reference['outcomes'])
     assert values(account.outcomes) == [units(expected_outcomes.get('1','0')),units(expected_outcomes.get('2','0'))]
-    assert values(account.rebates.numerator) == [0,0,0,0]
+    numerators,denominators = values(account.rebates.numerator),values(account.rebates.denominator)
+    assert [Fraction(n,d) for n,d in zip(numerators,denominators)] == [Fraction(value) for value in reference['rebates']]
 
 
 def main():
@@ -70,11 +71,15 @@ def main():
         maker = None
         economic_ordinal = reference['finality_path']['economic_application_ordinal']
         offset = reference['finality_path']['steps'][economic_ordinal]['offset_ms']
+        success_offset = reference['finality_path']['steps'][-1]['offset_ms']
         for checkpoint in reference['checkpoints']:
             stage = checkpoint['stage']
             if stage == 'taker_finality' and checkpoint['at'] == reference['processing_at']+offset:
                 account,_ = Numbers.run_exact_batch(lambda:account.fill_economic(prepared.asset_plan.matched_base,
                     prepared.asset_plan.used_quote,prepared.fee.total_micro,torch.tensor([0],device='cuda'),torch.tensor([True],device='cuda')))
+            if stage == 'taker_finality' and checkpoint['at'] == reference['processing_at']+success_offset:
+                amount = Numbers.run_exact_batch(lambda:ExactRational.ratio(prepared.fee.total_micro,prepared.fee.total_micro.constant(1_000_000))*rational([reference['taker_rebate_rate']]))
+                account,_ = Numbers.run_exact_batch(lambda:account.accrue_rebate(amount,torch.tensor([False],device='cuda'),prepared.fee.total_micro.sign > 0))
             elif stage == 'hidden_step':
                 event = reference['events'][checkpoint['ordinal']]['payload']['event']
                 side = event['side']
