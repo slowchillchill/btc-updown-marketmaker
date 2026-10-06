@@ -260,6 +260,25 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     before_cash=Numbers.run_exact_batch(lambda:admission.maker_cash)
     repeated,_=Numbers.run_exact_batch(lambda:admission.apply_closed(delivered,torch.ones_like(columns.enabled),maximum_retry_rounds=1))
     assert torch.equal(repeated.maker_cash.numerator.words,before_cash.numerator.words)
+    # 有界双根资金张量工程验证，仅验证root轴隔离；不创建正式训练根。
+    # 该候选不消费NOE，复用只读列与其余冻结字段，仅装配资金/预留所属状态。
+    from reservation import ReservationBook
+    dual_platform=Numbers.run_exact_batch(lambda:platform_module.PlatformBalances.open(
+        rational([initial,initial,'0','0','0','0','0','0']*2),rational(['0']*4),
+        torch.tensor([0,0,1,1],device='cuda'),integers([0,0])))
+    def funds_candidate(fault):
+        return replace(admission,platform=dual_platform,maker_cash=rational([initial,initial]),
+            reservations=ReservationBook.empty(2,capacity=1),current_entry_sequence=integers([3,3]),
+            current_local_prefix=integers([0,0]),fault=fault)
+    requests=torch.tensor([[0],[0]],device='cuda')
+    pair_enabled=torch.ones((2,1),dtype=torch.bool,device='cuda')
+    dual=Numbers.run_exact_batch(lambda:funds_candidate(torch.zeros(2,dtype=torch.int32,device='cuda')))
+    dual,event=Numbers.run_exact_batch(lambda:dual.reserve_action(requests,requests,rational(['1','1']),rational(['0','0']),pair_enabled))
+    assert event.outcomes.cpu().tolist()==[[1],[1]] and values(dual.current_entry_sequence)==[4,4]
+    broken=Numbers.run_exact_batch(lambda:funds_candidate(torch.tensor([1,0],dtype=torch.int32,device='cuda')))
+    broken,event=Numbers.run_exact_batch(lambda:broken.reserve_action(requests,requests,rational(['1','1']),rational(['0','0']),pair_enabled))
+    assert values(broken.current_entry_sequence)==[3,4]
+    assert broken.reservations.request_slots.cpu().tolist()==[[-1],[0]] and broken.fault.cpu().tolist()==[1,0]
     before=ledger.platform
     again=Numbers.run_exact_batch(lambda:ledger.receive(delivered).apply_pending(torch.ones_like(columns.enabled)))
     assert values(again.platform.platform_source_prefix)==[7]
@@ -269,4 +288,4 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         'bank_physical_rows':state.normalizer.bank.kinds.numel(),'masked_or_unemitted_rows':state.normalizer.bank.kinds.numel()-checked,
         'actual_device_Ledger_economic_position_predecessor_checked':True,
         'Ledger_admission_device_generated_entry_local_and_binding_checked':True,
-        'duplicate_NOE_NotApplicable_without_Ledger_commit_checked':True,'unbound_economic_before_Submission_unsent_reservation_checked':True,'actual_existing_economic_MakerCash_and_four_funds_checked':True,'full_clock_Ledger_reservation_delivered':False}
+        'duplicate_NOE_NotApplicable_without_Ledger_commit_checked':True,'unbound_economic_before_Submission_unsent_reservation_checked':True,'actual_existing_economic_MakerCash_and_four_funds_checked':True,'two_root_one_item_funds_fault_isolation_checked':True,'full_clock_Ledger_reservation_delivered':False}

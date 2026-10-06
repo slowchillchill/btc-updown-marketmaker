@@ -91,7 +91,7 @@ class AdmissionLifecycle:
     def reserve_action(self,requests,conditions,principal,fee,enabled):
         funds=self.funds()
         actual,maker=funds.actual_available,funds.maker_available
-        book,event=self.reservations.reserve_action(requests,conditions,principal,fee,enabled&(funds.fault==0),actual,maker,
+        book,event=self.reservations.reserve_action(requests,conditions,principal,fee,enabled&(funds.fault==0)[:,None],actual,maker,
             self.current_entry_sequence,self.current_local_prefix)
         return replace(self,reservations=book,current_entry_sequence=event.current_ledger_sequence,
             current_local_prefix=event.current_local_prefix,fault=self.fault | funds.fault | event.fault),event
