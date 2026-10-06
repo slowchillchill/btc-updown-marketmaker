@@ -344,7 +344,8 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
         }).unwrap();
         ledger.apply_noe_memory_v2(economic).unwrap();
         let unsent=|ledger:&ledger::LedgerWriterV1| {
-            let value=ledger.funds_read_v1().request(&ledger::LedgerRequestIdentityV1("gpu-unsent-reservation".into())).unwrap();
+            let funds=ledger.funds_read_v1();
+            let value=funds.request(&ledger::LedgerRequestIdentityV1("gpu-unsent-reservation".into())).unwrap();
             serde_json::json!({"status":value.reservation_state,"last_ledger_entry_seq":value.last_ledger_entry_seq})
         };
         let before=gpu_ledger_reservation_checkpoint(&ledger,"economic_before_submission");
