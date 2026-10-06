@@ -11,6 +11,7 @@ from validate_base_execution import rational,values
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'ledger/gpu'))
 from success_pool import SuccessPools
 from trade_success import TradeSuccess
+sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'execution-normalization/gpu'))
 from device_identity import sim_trade_order_key
 from types import SimpleNamespace
 from validate_base_execution import integers
