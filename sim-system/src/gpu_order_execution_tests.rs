@@ -734,6 +734,7 @@ async fn gpu_actual_fok_mature_day_preserves_noe_batch_and_continuous_ledger() {
 #[tokio::test(flavor="current_thread")]
 #[ignore="AutoDL真实外层Maker成熟日NOE与连续Ledger消费对照"]
 async fn gpu_actual_maker_mature_day_preserves_noe_batch_and_continuous_ledger() {
+    let reference_started=std::time::Instant::now();
     let run_id="run-gpu-maker-mature-day";
     let policy=Arc::new(TradeFinalityPolicyV2::decode_and_seal(
         br#"{"schema_version":"trade_finality_policy_v2","normal_path":{"steps":[{"state":"MATCHED","offset_ms":0},{"state":"MINED","offset_ms":10},{"state":"CONFIRMED","offset_ms":20}],"economic_application_ordinal":2},"failure_overrides":[]}"#
@@ -854,6 +855,8 @@ async fn gpu_actual_maker_mature_day_preserves_noe_batch_and_continuous_ledger()
     actor.projection_port.observe_public_time(&public_time(closed_at));
     let received=observation.take_closed_records();
     assert_eq!(received.len(),9,"真实3Trade、Maker市场/日结/付款与3经济事实");
+    let original_producer_seconds=reference_started.elapsed().as_secs_f64();
+    let original_ledger_started=std::time::Instant::now();
     let mut pending=received.clone();
     let mut attempts=Vec::new();
     while !pending.is_empty() {
@@ -871,6 +874,7 @@ async fn gpu_actual_maker_mature_day_preserves_noe_batch_and_continuous_ledger()
         assert!(waiting.len()<count,"日业务前驱等待能按原位置重试闭合");
         pending=waiting;
     }
+    let original_ledger_seconds=original_ledger_started.elapsed().as_secs_f64();
     let records=received.iter().map(|record|serde_json::json!({"record":record.record(),"position":record.position(),
         "visibility":record.visibility()})).collect::<Vec<_>>();
     let source=serde_json::json!({"source_contract":"original_outer_GTC_hidden_Maker_SIM_NOE_V4_Ledger",
@@ -881,12 +885,17 @@ async fn gpu_actual_maker_mature_day_preserves_noe_batch_and_continuous_ledger()
         "maker_rate":actor._rule_snapshot.snapshot().project_account_rules.rebate_settlement.value.fixed_maker_rebate_rate.value().to_string(),
         "fee_rate":actor._rule_snapshot.snapshot().synchronized_platform_rules.fee_schedule.rate.value().to_string(),
         "fee_exponent":actor._rule_snapshot.snapshot().synchronized_platform_rules.fee_schedule.exponent});
+    eprintln!("maker_original_reference_stages={}",serde_json::json!({
+        "SIM_NOE_opening_and_prefix_reference_seconds":original_producer_seconds,
+        "Ledger_apply_and_checkpoint_reference_seconds":original_ledger_seconds,
+        "original_attempts":attempts.len(),"original_records":received.len(),
+    }));
     let artifact=std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap());
     std::fs::create_dir_all(&artifact).unwrap();
     std::fs::write(artifact.join("original-outer-maker-mature-day.json"),serde_json::to_vec_pretty(&source).unwrap()).unwrap();
     let mut child=std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
         .arg(std::env::var("B_GPU_OUTER_MAKER_VALIDATOR").unwrap()).stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::inherit()).spawn().unwrap();
     serde_json::to_writer(child.stdin.take().unwrap(),&source).unwrap();
     let output=child.wait_with_output().unwrap();
     std::fs::write(artifact.join("outer-maker-day-report.json"),&output.stdout).unwrap();
