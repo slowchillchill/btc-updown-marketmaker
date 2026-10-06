@@ -2,6 +2,7 @@
 import torch
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from queues import Numbers,ExactInt,_take
 from fill_pool import _take_record
@@ -218,9 +219,25 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         torch.ones((1,1),dtype=torch.bool,device='cuda')))
     admission=Numbers.run_exact_batch(lambda:admission.submission_started(zero,zero,zero,zero,torch.tensor([True],device='cuda')))
     assert values(admission.current_entry_sequence)==[5] and values(admission.current_local_prefix)==[2]
-    admission,remaining=Numbers.run_exact_batch(lambda:admission.apply_closed(delivered,
-        torch.ones_like(columns.enabled),maximum_retry_rounds=3))
-    assert not remaining.any().cpu().item() and admission.fault.cpu().tolist()==[0]
+    from closed import ClosedAdmission
+    cache=ClosedAdmission.empty(columns)
+    prefix=torch.arange(delivered.record_refs.size(1),device='cuda')[None,:] < 7
+    first=replace(delivered,emitted=delivered.emitted & prefix)
+    later=replace(delivered,emitted=delivered.emitted & ~prefix)
+    cache=Numbers.run_exact_batch(lambda:cache.accept(columns,first))
+    admission,cache=Numbers.run_exact_batch(lambda:cache.drain(admission,torch.ones_like(columns.enabled),passes=3))
+    first_pending=(cache.received & ~cache.consumed).clone()
+    assert first_pending.any().cpu().item()
+    first_rank=cache.receive_rank.clone()
+    first_available=cache.available_at.clone()
+    first_delivery=values(cache.delivered_sequences)
+    cache=Numbers.run_exact_batch(lambda:cache.accept(columns,later))
+    assert torch.equal(cache.receive_rank[first_pending],first_rank[first_pending])
+    assert torch.equal(cache.available_at[first_pending],first_available[first_pending])
+    assert [v for v,keep in zip(values(cache.delivered_sequences),first_pending.flatten().cpu().tolist()) if keep]==[
+        v for v,keep in zip(first_delivery,first_pending.flatten().cpu().tolist()) if keep]
+    admission,cache=Numbers.run_exact_batch(lambda:cache.drain(admission,torch.ones_like(columns.enabled),passes=3))
+    assert not (cache.received & ~cache.consumed).any().cpu().item() and admission.fault.cpu().tolist()==[0]
     assert values(admission.current_entry_sequence)==[source['ledger_projection']['ledger_entry_seq']]
     assert values(admission.current_local_prefix)==[source['ledger_projection']['ledger_local_prefix']]
     assert values(admission.platform.platform_source_prefix)==[7]
@@ -235,7 +252,6 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert not remaining.any().cpu().item()
     assert admission.has_available.cpu().tolist()==[True] and admission.available_through.cpu().tolist()==[10000]
     # 同一真实SIM证据再次Core准备产生Duplicate；Ledger领取后NotApplicable不写位置/seq。
-    from dataclasses import replace
     duplicate_batches=[]
     for batch in batches:
         _,duplicate=Numbers.run_exact_batch(lambda:state.normalizer.prepare(batch.rows,batch.emitted))
@@ -392,4 +408,5 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         'bank_physical_rows':state.normalizer.bank.kinds.numel(),'masked_or_unemitted_rows':state.normalizer.bank.kinds.numel()-checked,
         'actual_device_Ledger_economic_position_predecessor_checked':True,
         'Ledger_admission_device_generated_entry_local_and_binding_checked':True,
+        'device_closed_cache_waiting_then_new_records_retry_checked':True,
         'duplicate_NOE_NotApplicable_without_Ledger_commit_checked':True,'unbound_economic_before_Submission_unsent_reservation_checked':True,'actual_existing_economic_MakerCash_and_four_funds_checked':True,'two_root_one_item_funds_fault_isolation_checked':True,'actual_trade_economic_success_pool_checked':True,'fill_economic_before_pending_lifecycle_checked':True,'actual_unpaired_trade_contribution_checked':True,'actual_taker_contribution_index_checked':True,'full_clock_Ledger_reservation_delivered':False}

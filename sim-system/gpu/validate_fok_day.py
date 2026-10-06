@@ -96,7 +96,7 @@ def main():
         by_row[row]=original
     assert len(by_row)==7
     pending=PendingRecords.from_columns(batch.emitted,batch.received_at,batch.private_sequences,
-        integers(noe.normalizer.bank.source_order[batch.rows.flatten(),3].cpu().tolist()),batch.rows,integers([0]))
+        Numbers.ExactInt.from_i64_tensor(noe.normalizer.bank.source_order[batch.rows.flatten(),3]),batch.rows,integers([0]))
     closed=torch.tensor([source['closed_at']],device='cuda')
     gates=ReceiveGates.unset(1).set_receive(closed,enabled)
     pending,blocked=Numbers.run_exact_batch(lambda:pending.take_closed(gates))
@@ -108,6 +108,7 @@ def main():
     sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'ledger/gpu'))
     from memory import EconomicColumns
     from admission import AdmissionLifecycle
+    from closed import ClosedAdmission
     from success_pool import SuccessPools
     from rebate_day import RebateDays
     spec=importlib.util.spec_from_file_location('gpu_platform_fok_day',Path(__file__).resolve().parents[2]/'ledger/gpu/platform.py')
@@ -130,22 +131,38 @@ def main():
             rational([fact['quote_amount_pusd']]),torch.ones_like(zero),enabled,enabled,enabled)
         return replace(admission,trades=trades,trade_success=success)
     admission=Numbers.run_exact_batch(prepare_ledger)
-    lookup={int(batch.rows[0,column].cpu()):(column,by_row[int(batch.rows[0,column].cpu())]) for column,active in enumerate(batch.emitted.cpu().tolist()[0]) if active}
-    position_to_column={json.dumps(original['position'],sort_keys=True):column for column,original in lookup.values()}
-    for attempt in source['attempts']:
-        column=position_to_column[json.dumps(attempt['position'],sort_keys=True)]
-        admission,consumed=Numbers.run_exact_batch(lambda:admission.apply_record(torch.tensor([column],device='cuda'),enabled,closed,enabled))
-        assert admission.fault.cpu().tolist()==[0] and consumed.cpu().tolist()==[not attempt['deferred']]
-        actual=attempt['after']['projection']
-        assert values(admission.current_entry_sequence)==[actual['ledger_entry_seq']]
-        assert values(admission.platform.platform_source_prefix)==[actual['platform_source_prefix']]
-        assert amounts(admission.platform.balances)==[Fraction(actual['platform_confirmed_projection'][name]) for name in names]
+    cache=ClosedAdmission.empty(admission.columns)
+    cache=Numbers.run_exact_batch(lambda:cache.accept(admission.columns,delivered))
+    admission,cache=Numbers.run_exact_batch(lambda:cache.drain(admission,torch.ones_like(cache.received)))
+    assert cache.fault.cpu().tolist()==[0]
+    assert not (cache.received & ~cache.consumed).any().cpu().item()
+    # 参考仅核对已发生的结果；它不提供设备应用次序或重试控制。
+    actual=source['attempts'][-1]['after']['projection']
+    assert values(admission.current_entry_sequence)==[actual['ledger_entry_seq']]
+    assert values(admission.platform.platform_source_prefix)==[actual['platform_source_prefix']]
+    assert amounts(admission.platform.balances)==[Fraction(actual['platform_confirmed_projection'][name]) for name in names]
+    original_sequences={json.dumps(a['position'],sort_keys=True):a['after']['projection']['ledger_entry_seq']
+        for a in source['attempts'] if not a['deferred']}
+    applied_sequences=values(admission.applied_sequences)
+    for column,active in enumerate(batch.emitted.cpu().tolist()[0]):
+        if active:
+            original=by_row[int(batch.rows[0,column].cpu())]
+            assert applied_sequences[column]==original_sequences[json.dumps(original['position'],sort_keys=True)]
+    first_rank=cache.receive_rank.clone()
+    first_available=cache.available_at.clone()
+    first_delivery=values(cache.delivered_sequences)
+    repeated=Numbers.run_exact_batch(lambda:cache.accept(admission.columns,replace(delivered,available_at=delivered.available_at+1)))
+    repeated_admission,repeated=Numbers.run_exact_batch(lambda:repeated.drain(admission,torch.ones_like(cache.received),passes=1))
+    assert torch.equal(repeated.receive_rank,first_rank) and torch.equal(repeated.available_at,first_available)
+    assert values(repeated.delivered_sequences)==first_delivery
+    assert values(repeated_admission.current_entry_sequence)==values(admission.current_entry_sequence)
     assert admission.rebate_days.payment_observed.cpu().tolist()==[[True]]
     assert amounts(admission.rebate_days.condition_payable)==[Fraction('1.4')]
     assert amounts(admission.rebate_days.condition_locked)==[Fraction('0.0000016')]
     assert amounts(admission.success_pools.success_quantity)==[Fraction('1000.001'),0]
     print(json.dumps({'original_outer_FOK_source':True,'same_actual_V4_batch_and_payloads_checked':7,
-        'original_received_order_and_dual_gates_checked':True,'continuous_ledger_attempts':len(source['attempts']),
+        'original_received_order_and_dual_gates_checked':True,'device_closed_record_consumer_checked':True,
+        'reference_attempt_order_drives_device':False,'repeat_keeps_first_visibility_and_delivery':True,
         'cold_prefix_initializations':1,'day_and_payment_money_seq_and_positions_checked':True,
         'elapsed_seconds_with_reference_reads':time.perf_counter()-start,'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
         'full_root_recovery_or_Maker_day_pipeline_delivered':False}))
