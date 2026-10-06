@@ -1,6 +1,8 @@
 """实际SIM设备来源批→Core→领取的原NOE位置与正文冷对照。"""
 import torch
 import json
+import sys
+from pathlib import Path
 from queues import Numbers,ExactInt,_take
 from fill_pool import _take_record
 from feedback import FeedbackEmitter
@@ -148,6 +150,46 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         for batch in batches for column,active in enumerate(batch.emitted.cpu().tolist()[0]) if active}
     actual=[lookup[row]['position'] for row,valid in zip(delivered.record_refs.cpu().tolist()[0],delivered.emitted.cpu().tolist()[0]) if valid]
     assert actual==[record['position'] for record in source['noe_records']]
+    # Ledger经济子路径消费上面真正生成的设备delta，无原NOE JSON→delta反造。
+    # 全部其它Lifecycle/预留/归属仍由后续完整Ledger协调，不能假装已应用Evidence。
+    sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'ledger/gpu'))
+    from memory import EconomicColumns,EconomicMemory
+    import importlib.util
+    spec=importlib.util.spec_from_file_location('gpu_ledger_platform_projection',
+        Path(__file__).resolve().parents[2]/'ledger/gpu/platform.py')
+    platform_module=importlib.util.module_from_spec(spec)
+    sys.modules[spec.name]=platform_module
+    spec.loader.exec_module(platform_module)
+    initial=source['opening_available_pusd']
+    platform=Numbers.run_exact_batch(lambda:platform_module.PlatformBalances.open(
+        rational([initial,initial,'0','0','0','0','0','0']),rational(['0','0']),
+        torch.tensor([0,0],device='cuda'),integers([0])))
+    columns=Numbers.run_exact_batch(lambda:EconomicColumns.from_projection_batches(batches))
+    ledger=EconomicMemory.open(platform,columns)
+    ledger=Numbers.run_exact_batch(lambda:ledger.receive(delivered))
+    assert int(ledger.received.sum().cpu())==7
+    # 工程夹具已绑定单订单/两token；遮住真实seq2关联必须只停受影响前驱。
+    association=(columns.sequences.compare(columns.sequences.constant(2)).order!=0).reshape_as(columns.enabled)
+    ledger=Numbers.run_exact_batch(lambda:ledger.apply_pending(association))
+    assert values(ledger.platform.platform_source_prefix)==[1]
+    assert int(ledger.applied.sum().cpu())==1
+    ledger=Numbers.run_exact_batch(lambda:ledger.apply_pending(torch.ones_like(columns.enabled)))
+    assert values(ledger.platform.platform_source_prefix)==[7]
+    assert int((ledger.applied & columns.enabled).sum().cpu())==7 and not ledger.fault.any().cpu().item()
+    expected_platform=source['ledger_projection']['platform_confirmed_projection']
+    names=['cash_pusd','available_pusd','principal_encumbrance_pusd','immediate_taker_fee_encumbrance_pusd',
+        'maker_rebate_receivable_pusd','taker_rebate_receivable_pusd','maker_rebate_locked_remainder_pusd','taker_rebate_locked_remainder_pusd']
+    from fractions import Fraction
+    assert [Fraction(n,d) for n,d in zip(values(ledger.platform.balances.numerator),values(ledger.platform.balances.denominator))]==[
+        Fraction(expected_platform[name]) for name in names]
+    expected_assets={row['token_id']:row['balance_shares'] for row in expected_platform['outcome_balances']}
+    assert [Fraction(n,d) for n,d in zip(values(ledger.platform.outcomes.numerator),values(ledger.platform.outcomes.denominator))]==[
+        Fraction(expected_assets.get(token,'0')) for token in ['1','2']]
+    before=ledger.platform
+    again=Numbers.run_exact_batch(lambda:ledger.receive(delivered).apply_pending(torch.ones_like(columns.enabled)))
+    assert values(again.platform.platform_source_prefix)==[7]
+    assert torch.equal(again.platform.balances.numerator.words,before.balances.numerator.words)
+    assert ledger.available_at[ledger.received].cpu().tolist()==[10000]*7
     return {'device_generated_NOE_records':checked,'device_batches':len(batches),'original_positions_and_receive_order_checked':True,
         'bank_physical_rows':state.normalizer.bank.kinds.numel(),'masked_or_unemitted_rows':state.normalizer.bank.kinds.numel()-checked,
-        'full_clock_Ledger_reservation_delivered':False}
+        'actual_device_Ledger_economic_position_predecessor_checked':True,'full_clock_Ledger_reservation_delivered':False}

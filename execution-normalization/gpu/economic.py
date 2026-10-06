@@ -15,6 +15,7 @@ class EconomicEvidence:
     has_outcome: torch.Tensor
     emitted: torch.Tensor
     fault: torch.Tensor
+    sequence: object
 
 
 def map_economic(delta,account_slots,condition_slots,token_slots,asset_indices,asset_roots,private_sequence,
@@ -83,4 +84,4 @@ def map_economic(delta,account_slots,condition_slots,token_slots,asset_indices,a
     high=words[:,1] if words.size(1)>1 else torch.zeros(count,dtype=torch.int64,device=device)
     source=torch.stack([torch.full_like(high,2),words[:,0],high,source_ordinal],dim=1)
     return EconomicEvidence(logical,economic,semantic,source,balances,outcome,has_outcome,
-        delta.emitted & (fault==0),fault)
+        delta.emitted & (fault==0),fault,delta.sequence)

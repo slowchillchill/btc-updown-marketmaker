@@ -5,7 +5,7 @@ SIM仍拥有撮合、账户和发射器；这里只组合原证据与独立经�
 """
 from dataclasses import dataclass,replace
 import torch
-from core import EvidenceBank,Normalizer,EVIDENCE,ECONOMIC
+from core import EvidenceBank,Normalizer,EVIDENCE,ECONOMIC,OUT_FACT
 from trade import map_trade
 from economic import map_economic
 from lifecycle import map_base_accepted,map_order_accepted,map_taker_contribution
@@ -45,6 +45,11 @@ class ProjectionBatch:
     item_ordinals: torch.Tensor
     context_slots: torch.Tensor
     run_slots: torch.Tensor
+    economic_sequences: object
+    economic_balances: object
+    economic_outcomes: object
+    economic_assets: torch.Tensor
+    economic_enabled: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -83,13 +88,16 @@ class Projection:
         return replace(self,emitter=emitter,normalizer=normalizer),rows,mapped.emitted[:,None],private,batch,received
 
     def _finish(self,emitter,records,source_fault):
-        from queues import ExactInt
+        from queues import ExactInt,ExactRational
         def cat_integer(values):
             width=max(value.words.size(1) for value in values)
             words=torch.stack([value.with_capacity(width).words for value in values],dim=1).flatten(0,1)
             signs=torch.stack([value.sign for value in values],dim=1).flatten()
             faults=torch.stack([value.fault for value in values],dim=1).flatten()
             return ExactInt(words,signs,faults)
+        def cat_ratio(values):
+            return ExactRational(cat_integer([value.numerator for value in values]),
+                cat_integer([value.denominator for value in values]))
         original=self
         working=self
         coordinates=[]
@@ -124,6 +132,34 @@ class Projection:
         batch_values=_take(batch_values,locations)
         times=torch.stack(received,dim=1).gather(1,order)
         ordinals=ExactInt.from_i64_tensor((normalized.emitted.to(torch.int64).cumsum(dim=1)-1).clamp_min(0).flatten())
+        # 共享原经济列随规范序移动，Ledger不从semantic token反解或读回CPU。
+        economic_sequences=[]
+        economic_balances=[]
+        economic_outcomes=[]
+        economic_masks=[]
+        for mapped,kind,private_sequence,_,_,_,_,_ in records:
+            zero=ExactRational.ratio(private_sequence.constant(0),private_sequence.constant(1))
+            economic_sequences.append(mapped.sequence if kind==ECONOMIC else private_sequence.constant(0))
+            economic_balances.append(mapped.balances if kind==ECONOMIC else (zero,)*8)
+            economic_outcomes.append(mapped.outcome if kind==ECONOMIC else zero)
+            economic_masks.append(torch.full_like(self.account_slots,kind==ECONOMIC,dtype=torch.bool))
+        balance_fields=[cat_ratio([record[field] for record in economic_balances]) for field in range(8)]
+        # 先[root,record]后字段8；规范row位置可直接gather共享精确列。
+        balance_width=max(value.numerator.words.size(1) for value in balance_fields)
+        denominator_width=max(value.denominator.words.size(1) for value in balance_fields)
+        def fields_integer(values,width):
+            return ExactInt(torch.stack([value.with_capacity(width).words for value in values],dim=1).flatten(0,1),
+                torch.stack([value.sign for value in values],dim=1).flatten(),
+                torch.stack([value.fault for value in values],dim=1).flatten())
+        packed_balance=ExactRational(fields_integer([value.numerator for value in balance_fields],balance_width),
+            fields_integer([value.denominator for value in balance_fields],denominator_width))
+        def take_ratio(value,index):
+            return ExactRational(_take(value.numerator,index),_take(value.denominator,index))
+        economic_sequence=_take(cat_integer(economic_sequences),locations)
+        economic_balance=take_ratio(packed_balance,(locations[:,None]*8+torch.arange(8,device=rows.device)).flatten())
+        economic_outcome=take_ratio(cat_ratio(economic_outcomes),locations)
+        economic_mask=torch.stack(economic_masks,dim=1).gather(1,order)
+        economic_mask=economic_mask & normalized.emitted & (normalized.outcomes==OUT_FACT)
         fault=normalized.fault
         committed=fault==0
         # 各来源批原子准备；发射器和目录都只提交同一成功根，旧成功批保留。
@@ -136,7 +172,8 @@ class Projection:
         items=torch.where(categories==0,self.item_ordinals[:,None],-1)
         return replace(working,emitter=coordinated,normalizer=candidate),ProjectionBatch(normalized,
             private_values,batch_values,ordinals,times,normalized.rows,normalized.emitted,fault,
-            categories,platforms,requests,items,self.context_slots[:,None].expand_as(rows),self.run_slots[:,None].expand_as(rows))
+            categories,platforms,requests,items,self.context_slots[:,None].expand_as(rows),self.run_slots[:,None].expand_as(rows),
+            economic_sequence,economic_balance,economic_outcome,self.asset_indices[:,None].expand_as(rows),economic_mask)
 
     def acceptance(self,sampler,prepared,effects,pool,at,direct_received):
         """已真实接纳Base产生Order/逐fill/直接响应；其它结果须对应producer。"""
