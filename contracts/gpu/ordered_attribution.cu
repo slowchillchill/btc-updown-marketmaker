@@ -11,7 +11,7 @@ struct Arithmetic {
   int32_t fault = 0;
   int64_t required = 0;
 
-  void product(uint32_t* out, const uint32_t* a, const uint32_t* b) {
+  __device__ void product(uint32_t* out, const uint32_t* a, const uint32_t* b) {
     int64_t na = length(a, cap), nb = length(b, cap);
     if (na + nb >= cap) {
       fault |= 2;
@@ -22,12 +22,12 @@ struct Arithmetic {
     multiply(out, cap, a, na, b, nb);
   }
 
-  void assign(Ratio out, Ratio in) {
+  __device__ void assign(Ratio out, Ratio in) {
     copy(out.n, cap, in.n, cap);
     copy(out.d, cap, in.d, cap);
   }
 
-  void normalize(Ratio value) {
+  __device__ void normalize(Ratio value) {
     auto* a = work + 4 * cap;
     auto* b = work + 5 * cap;
     auto* q = work + 6 * cap;
@@ -50,13 +50,13 @@ struct Arithmetic {
     copy(value.d, cap, q, cap);
   }
 
-  int order(Ratio a, Ratio b) {
+  __device__ int order(Ratio a, Ratio b) {
     product(work, a.n, b.d);
     product(work + cap, b.n, a.d);
     return compare(work, cap, work + cap, cap);
   }
 
-  void combine(Ratio out, Ratio a, Ratio b, bool minus = false) {
+  __device__ void combine(Ratio out, Ratio a, Ratio b, bool minus = false) {
     product(work, a.n, b.d);
     product(work + cap, b.n, a.d);
     product(work + 2 * cap, a.d, b.d);
@@ -75,7 +75,7 @@ struct Arithmetic {
     normalize(out);
   }
 
-  void multiply_ratio(Ratio out, Ratio a, Ratio b, bool inverse = false) {
+  __device__ void multiply_ratio(Ratio out, Ratio a, Ratio b, bool inverse = false) {
     product(work, a.n, inverse ? b.d : b.n);
     product(work + cap, a.d, inverse ? b.n : b.d);
     copy(out.n, cap, work, cap);
@@ -83,7 +83,7 @@ struct Arithmetic {
     normalize(out);
   }
 
-  void round_scale12(Ratio out, Ratio value) {
+  __device__ void round_scale12(Ratio out, Ratio value) {
     auto* scale = work + 2 * cap;
     auto* q = work + 3 * cap;
     auto* r = work + 4 * cap;

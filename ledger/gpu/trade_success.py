@@ -82,16 +82,10 @@ class TradeSuccess:
             sorted_member=member.gather(1,order)
             positions=(root[:,None]*width+order).flatten()
             sorted_contribution=take_ratio(contributions,positions)
-            capacities=[]
-            for column in range(width):
-                at=root*width+column
-                value=take_ratio(sorted_contribution,at)
-                zero=ExactRational.ratio(value.numerator.constant(0),value.denominator.constant(1))
-                capacities.append(select(value,sorted_member[:,column],zero))
-            allocated,fault=attribution().allocate_ordered_device(take_ratio(pools.quantity,asset),tuple(capacities),enabled)
+            zero=ExactRational.ratio(sorted_contribution.numerator.constant(0),sorted_contribution.denominator.constant(1))
+            capacities=select(sorted_contribution,sorted_member.flatten(),zero)
+            packed,fault=attribution().allocate_ordered_packed(take_ratio(pools.quantity,asset),capacities,width,enabled)
             error=error | torch.where(enabled,fault,0)
-            from queues import _columns
-            packed=ExactRational(_columns([value.numerator for value in allocated]),_columns([value.denominator for value in allocated]))
             original_positions=(root[:,None]*width+inverse).flatten()
             unsorted=take_ratio(packed,original_positions)
             contributions=select(unsorted,(member & enabled[:,None]).flatten(),contributions)
