@@ -135,9 +135,18 @@ pub fn prepare_compact_hidden_material_v1(
     source_root: &Path, target: &Path, max_packet_bytes: usize, config: &SortConfig,
     initial_order: Arc<dyn InitialRunOrder>, consumer_stream_id: String,
     progress: Option<&HistoricalPreparationNotifierV1<'_>>,
+    publication_progress: impl FnMut(&str, &str, u64, Option<u64>),
+) -> RecordingResult<CompactHiddenManifestV1> {
+    prepare_compact_hidden_material_with_interval_v1(source_root,target,max_packet_bytes,config,
+        initial_order,consumer_stream_id,progress,Duration::from_secs(10),publication_progress)
+}
+
+pub fn prepare_compact_hidden_material_with_interval_v1(
+    source_root: &Path, target: &Path, max_packet_bytes: usize, config: &SortConfig,
+    initial_order: Arc<dyn InitialRunOrder>, consumer_stream_id: String,
+    progress: Option<&HistoricalPreparationNotifierV1<'_>>, interval: Duration,
     mut publication_progress: impl FnMut(&str, &str, u64, Option<u64>),
 ) -> RecordingResult<CompactHiddenManifestV1> {
-    let interval = Duration::from_secs(10);
     let mut reader = PublicCompactReaderV1::open_with_progress(source_root, max_packet_bytes, interval, |notice| {
         publication_progress(notice.stage, notice.member, notice.completed_bytes, notice.total_bytes);
     })?;
@@ -240,8 +249,13 @@ fn entry_key(entry: &HiddenIndexEntryV1) -> RecordingResult<(i64,u64)> {
 }
 impl CompactHiddenMaterialReaderV1 {
     pub fn open(root: &Path, source_root: &Path, rows: usize, bytes: usize, max_packet_bytes: usize,
+        progress: impl FnMut(&str, &str, u64, Option<u64>)) -> RecordingResult<Self> {
+        Self::open_with_progress_interval(root,source_root,rows,bytes,max_packet_bytes,Duration::from_secs(10),progress)
+    }
+
+    pub fn open_with_progress_interval(root: &Path, source_root: &Path, rows: usize, bytes: usize,
+        max_packet_bytes: usize, interval: Duration,
         mut progress: impl FnMut(&str, &str, u64, Option<u64>)) -> RecordingResult<Self> {
-        let interval = Duration::from_secs(10);
         let manifest: CompactHiddenManifestV1 = serde_json::from_reader(File::open(root.join("manifest.json"))?)?;
         if manifest.version != VERSION || !manifest.normal_end || manifest.files.len() != MEMBERS.len() {
             return Err(io::Error::other("hidden材料完成凭据不合法").into());
@@ -275,7 +289,7 @@ impl CompactHiddenMaterialReaderV1 {
                 }
                 canonical = canonical.checked_add(1).ok_or_else(|| io::Error::other("hidden来源事实位置溢出"))?;
             }
-            if last_notice.elapsed()>=interval {
+            if !interval.is_zero() && last_notice.elapsed()>=interval {
                 progress("hidden_source_census","inputs",packet.input.input_position+1,Some(source.manifest.inputs));
                 last_notice = std::time::Instant::now();
             }

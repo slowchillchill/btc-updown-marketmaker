@@ -591,6 +591,7 @@ cargo run -p data-pipeline-training --bin dpt-public-compact --locked --offline 
 读取器通过下一全局时间或完整 EOF 关闭真实时间桶，Parquet 页末不关闭桶。它携带
 自身材料摘要及来源 `AppliedIngressPrefixV1`，不伪造旧 public recording 的稳定前缀。
 `--inspect <hidden目录> <公共compact目录> <页行数> <页字节数> <包容量>` 是冷材料
-完整验证入口；冷扫描、排序、SHA 和读取有可控进度。材料完整性不提高运行时公开
+完整验证入口；前置可选 `--progress-interval-seconds N` 控制冷扫描、归并、SHA 和
+读取进度（缺省10秒，0关闭CLI进度）。GPU排序worker仍报告真实批次计量。材料完整性不提高运行时公开
 可见前沿，不代表 hidden GPU 撮合、NOE/Ledger、完整根调度或活动账户恢复已完成。
 EOF 只表示这一份显式工程来源完整，不替代所属15天/3天根的数据验收。
