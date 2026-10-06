@@ -184,8 +184,15 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
         }).await;
     let observation=saved_observation.borrow_mut().take().unwrap();
     assert!(observation.opening_record().is_some(),"开户必须先进入实际NOE上下文");
-    let initial_records=observation.take_closed_records();
     let mut feedback_batches=Vec::new();
+    // 原合法训练目录登记是非空投影，但没有private反馈草稿。
+    let mut state=actor.state.take().unwrap();
+    let enrollment=state.session.as_mut().unwrap().enroll_market(&MarketEnrollmentRequestV1 {
+        enrollment_request_id:"gpu-before-business-enrollment".into(),market:market('2',"456","3","4"),
+    }).unwrap();
+    actor.state=Some(gpu_accept_projection_reference(&mut actor,state,
+        BusinessReducerOutputV2::MarketEnrollment(enrollment),&mut feedback_batches));
+    let initial_records=observation.take_closed_records();
     let mut initial = decoded_maker_initial_events();
     let ExecutionMarketEventPayloadV3::InitialL2Snapshot(book) = &mut initial[0].payload else {unreachable!()};
     book.asks.push(contracts::PriceLevelV1 {price_pusd_per_share:ExactDecimal("0.25".into()),quantity_shares:ExactDecimal("1".into())});
@@ -269,6 +276,7 @@ fn gpu_accept_projection_reference(actor:&mut SimRunActorV2,state:BusinessReduce
         _=>panic!("当前真实短链仅PostOrders直接响应"),
     }).collect::<Vec<_>>();
     batches.push(serde_json::json!({"batch_sequence":batch.projection_batch_sequence,
+        "has_control_admission":batch.account_opening.is_some() || batch.market_enrollment.is_some(),
         "orders":batch.order_lifecycle,"trades":batch.trade_lifecycle,
         "settlements":batch.settlement_lifecycle,"direct":direct}));
     assert!(actor.projection_port.try_accept_payload(Arc::new(BusinessProjectionBatchPayloadV1::V4(Arc::new(batch)))),

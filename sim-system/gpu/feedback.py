@@ -30,13 +30,17 @@ class FeedbackEmitter:
                    torch.zeros(roots,dtype=torch.int32,device=device))
 
     def emit(self, sampler, active, direct, platform_at, effective_event_at,
-             direct_received_at, source_fault):
+             direct_received_at, source_fault, *, control_admission=None):
         """[root,draft]：life以原private序采样；直接响应沿请求已抽收到时刻。
 
         effective_event_at由原协调器提供实际补处理时刻与platform时刻较大者。
         保留platform_at不改，不能让隐藏预取时间充当有效处理时刻。
         """
         roots, width = active.shape
+        if control_admission is None:
+            control_admission=torch.zeros(roots,dtype=torch.bool,device=active.device)
+        if control_admission.shape!=(roots,) or control_admission.dtype!=torch.bool or control_admission.device!=active.device:
+            raise TypeError('SIM开户/市场登记标记需同设备bool[roots]')
         if roots != self.fault.numel():
             raise ValueError('SIM反馈根人口不符')
         for value in [active,direct,platform_at,effective_event_at,direct_received_at,source_fault]:
@@ -50,7 +54,7 @@ class FeedbackEmitter:
         coordinates=torch.arange(roots,device=active.device).repeat_interleave(width)
         private=_take(self.next_private_sequence,coordinates)+ExactInt.from_i64_tensor(prefixes.reshape(-1))
         next_private=self.next_private_sequence+ExactInt.from_i64_tensor(counts)
-        nonempty=counts>0
+        nonempty=(counts>0)|control_admission
         next_batch=self.next_batch_sequence+ExactInt.from_i64_tensor(nonempty.to(torch.int64))
         maximum=self.next_private_sequence.constant((1<<64)-1)
         minimum=self.next_private_sequence.constant(1)

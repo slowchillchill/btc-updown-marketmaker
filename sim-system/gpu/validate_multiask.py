@@ -86,12 +86,13 @@ def main():
         drafts.extend((True,row['metadata']) for row in batch['direct'])
         drafts.sort(key=lambda row:row[1]['private_feedback_sequence'])
         active=torch.ones((1,len(drafts)),dtype=torch.bool,device='cuda')
-        is_direct=torch.tensor([[row[0] for row in drafts]],device='cuda')
+        is_direct=torch.tensor([[row[0] for row in drafts]],dtype=torch.bool,device='cuda')
         platform=torch.tensor([[row[1]['platform_responded_at_utc_ms'] if row[0] else row[1]['platform_event_at_utc_ms']
-                                for row in drafts]],device='cuda')
-        received=torch.tensor([[row[1]['response_received_at_utc_ms'] if row[0] else 0 for row in drafts]],device='cuda')
+                                for row in drafts]],dtype=torch.int64,device='cuda')
+        received=torch.tensor([[row[1]['response_received_at_utc_ms'] if row[0] else 0 for row in drafts]],dtype=torch.int64,device='cuda')
         emitter,emission=Numbers.run_exact_batch(lambda:emitter.emit(sampler,active,is_direct,platform,platform,
-            received,torch.zeros_like(platform,dtype=torch.int32)))
+            received,torch.zeros_like(platform,dtype=torch.int32),
+            control_admission=torch.tensor([batch['has_control_admission']],device='cuda')))
         assert emission.emitted.cpu().tolist()==[[True]*len(drafts)]
         assert values(emission.private_sequences)==[row[1]['private_feedback_sequence'] for row in drafts]
         assert values(emission.batch_sequences)==[batch['batch_sequence']]*len(drafts)
