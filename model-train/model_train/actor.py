@@ -1,4 +1,8 @@
-"""Rust 支持及精确前缀上的概率消费；不推导可行动作或重建金额。"""
+"""现有逐帧Rust支持与精确前缀上的概率消费。
+
+逐条件CPU回调保留原消费者用途；#181设备阶段循环设计见docs/100ms-gpu-training.md。
+本模块当前不实现100ms GPU环境、PPO或活动根恢复。
+"""
 from dataclasses import dataclass
 
 import torch

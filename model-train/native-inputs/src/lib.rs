@@ -1,4 +1,6 @@
-//! model-train 所属原生输入组合；不实现公共归约、账本或动作支持集。
+//! model-train 所属现有逐帧原生输入组合；消费公共归约与账本，支持集沿原精确合同。
+//! #181 的100ms设备接口与公共GPU后端分工见 docs/100ms-window-inputs.md 及训练设计。
+//! 当前模块仍为v7 CPU消费者；不以其存在宣称连续GPU环境或完整活动根恢复已交付。
 mod account;
 mod support;
 pub use support::{NativeActor, encoding_limit, quantity_segment};

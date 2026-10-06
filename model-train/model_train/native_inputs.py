@@ -1,4 +1,8 @@
-"""原生596/433与六侧全量盘口状态输入与30/36/184参数组件消费；不推导动作支持集。"""
+"""现有逐帧v7的596/433与六侧全量盘口、30/36/184参数组件消费。
+
+CPU列表装箱及Rust支持读取仍是当前行为；#181的626维GPU接口见docs/100ms-window-inputs.md。
+旧消费者不代表100ms窗口或连续GPU训练已经实现。
+"""
 from dataclasses import dataclass, field
 
 import torch
