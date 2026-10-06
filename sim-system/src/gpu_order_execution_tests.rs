@@ -109,7 +109,8 @@ async fn gpu_sealed_failure_paths_preserve_original_economic_sequence_and_compen
         let original_spec = spec(&run_id, "gpu-failure-create");
         let account_key = contracts::AccountInstanceKeyV1 {
             run_id: original_spec.run_id.clone(), caller_instance_id: original_spec.caller_instance_id.clone(),
-            account_id: original_spec.account_id.clone(),
+            account_id: original_spec.account_id.clone(),caller_role:SimCallerRoleV1::ModelTrain,
+            platform_source:contracts::PlatformSourceV1::Simulated,
         };
         let path = serde_json::json!({"steps":[
             {"state":"MATCHED","offset_ms":0},
