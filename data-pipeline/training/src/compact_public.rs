@@ -306,7 +306,13 @@ pub fn consume_historical_merge_facts_v1(
         if let Some(binding) = merge.initialization_binding() { writer.source_binding(binding)?; }
         let prepared = merge.prepare_input(&core, &mut input)?;
         let applied = core.push_facts(&prepared)?;
-        writer.push(prepared.recorded, &applied)?;
+        let recorded = RecordedIngressV1 {
+            input_stream_id: prepared.recorded.input_stream_id.clone(),
+            input_position: prepared.recorded.input_position,
+            ingress: prepared.recorded.ingress.clone(),
+            dependency_record_refs: prepared.recorded.dependency_record_refs.clone(),
+        };
+        writer.push(&recorded, &applied)?;
         progress(input.input_position + 1)?;
     }
     let mut end = RecordedIngressV1 {
@@ -316,7 +322,13 @@ pub fn consume_historical_merge_facts_v1(
     };
     let prepared = merge.prepare_input(&core, &mut end)?;
     let applied = core.push_facts(&prepared)?;
-    writer.push(prepared.recorded, &applied)?;
+    let recorded = RecordedIngressV1 {
+        input_stream_id: prepared.recorded.input_stream_id.clone(),
+        input_position: prepared.recorded.input_position,
+        ingress: prepared.recorded.ingress.clone(),
+        dependency_record_refs: prepared.recorded.dependency_record_refs.clone(),
+    };
+    writer.push(&recorded, &applied)?;
     progress(end.input_position + 1)?;
     Ok(core)
 }
