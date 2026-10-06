@@ -8,7 +8,7 @@ use data_pipeline_training::{
 };
 use std::{error::Error, fs::File, path::Path, sync::Arc, time::Instant};
 
-fn run() -> Result<(), Box<dyn Error>> {
+fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     let args: Vec<_> = std::env::args().collect();
     if args.len() != 4 {
         return Err("用法: dpt-public-compact <finite-config.json> <locked-python> <same-commit-sort_worker.py>".into());
