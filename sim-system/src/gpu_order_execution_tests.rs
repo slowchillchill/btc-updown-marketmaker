@@ -437,3 +437,44 @@ fn gpu_ledger_reservation_checkpoint(ledger:&ledger::LedgerWriterV1,stage:&str) 
     serde_json::json!({"stage":stage,"projection":ledger.projection_v2().unwrap(),
         "cash":ledger.economic_read().unwrap().cash(),"request":request})
 }
+
+#[test]
+#[ignore = "AutoDL D-0295 GPU精确源尾差与任意精度归属对照"]
+fn gpu_finite_attribution_matches_original_exact_source_contract() {
+    use contracts::economics::EconomicRational as R;
+    use contracts::finite_attribution::*;
+    let ratio=|n:i64,d:i64|R::ratio(n.into(),d.into());
+    let mut splits=Vec::new();
+    let huge=R::ratio((num_bigint::BigInt::from(1u8)<<180)+num_bigint::BigInt::from(3u8),num_bigint::BigInt::from(1_000_000_000_000_000u64));
+    for (total,part,whole) in [
+        (ratio(1,1),ratio(1,1),ratio(3,1)),
+        (ratio(5,1_000_000_000_000),ratio(1,1),ratio(2,1)),
+        (ratio(7,1_000_000_000_000),ratio(1,1),ratio(2,1)),
+        (ratio(6,10_000_000_000_000),ratio(9,1),ratio(10,1)),
+        (ratio(7,1_000_000_000_000_000),ratio(0,1),ratio(1,1)),
+        (ratio(7,1_000_000_000_000_000),ratio(1,1),ratio(1,1)),
+        (huge,ratio(77,1),ratio(211,1)),
+    ] {
+        let result=split_scale12_rne_v1(&total,&part,&whole).unwrap();
+        splits.push(serde_json::json!({"total":total.public(),"part":part.public(),"whole":whole.public(),
+            "allocated":result.allocated.public(),"remaining":result.remaining.public()}));
+    }
+    let mut allocations=Vec::new();
+    for (total,capacities) in [
+        (ratio(16,10_000_000_000_000),vec![ratio(10,10_000_000_000_000);3]),
+        (ratio(9,10_000_000_000_000),vec![ratio(6,10_000_000_000_000);2]),
+        (ratio(1,1),vec![ratio(0,1),ratio(2,1),ratio(0,1)]),
+        (ratio(0,1),vec![ratio(0,1);2]),
+    ] {
+        let result=allocate_capacity_scale12_candidate_v1(&total,&capacities).unwrap();
+        allocations.push(serde_json::json!({"total":total.public(),"capacities":capacities.iter().map(R::public).collect::<Vec<_>>(),
+            "allocated":result.iter().map(R::public).collect::<Vec<_>>()}));
+    }
+    let mut child=std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
+        .arg(std::env::var("B_GPU_FINITE_VALIDATOR").unwrap()).stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    serde_json::to_writer(child.stdin.take().unwrap(),&serde_json::json!({"splits":splits,"allocations":allocations})).unwrap();
+    let output=child.wait_with_output().unwrap();
+    assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+    eprintln!("gpu_finite_attribution={}",String::from_utf8(output.stdout).unwrap());
+}
