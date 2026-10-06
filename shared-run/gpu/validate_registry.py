@@ -90,7 +90,7 @@ def completion_columns(reference,requests):
         evidence=reference['record']['Evidence']
         completed=evidence['evidence']['Control']['result']['CancellationRequestCompleted']['result']
         source=evidence['source_reference']['record']['DirectResponse']
-        request=source['association']['CancellationRequestCompleted']['global_request_id']
+        request=source['association']['Request']['global_request_id']
         values=[completed[name] for name in ['canceled_count','not_canceled_no_effect_count','evidence_unknown_no_effect_count']]
         delivery=reference['visibility']['Feedback']['delivery_sequence']
         ordinal=reference['position']['record_ordinal']
