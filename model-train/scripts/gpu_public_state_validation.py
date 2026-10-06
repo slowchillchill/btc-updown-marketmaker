@@ -26,6 +26,8 @@ def main():
     from input_pm_fields import pm_fields
     from fact_window import PublicFactWindow, PublicTradeWindow
     from input_trades import TradeInputs
+    from market_state import PublicMarketState
+    from input_lifecycle import LifecycleInputs
     from input_events import EventInputs, time_envelope
     from model_train.book import BookEncoder
     from prepare import _numbers
@@ -42,6 +44,8 @@ def main():
     prefixes = torch.tensor(prefix_values,device='cuda',dtype=torch.int64)
     frame = state.frame(prefixes)
     observation = state.observation(prefixes)
+    market_state = PublicMarketState(state,columns)
+    market_frame = market_state.frame(prefixes)
     assert not observation.bba.fault.any().cpu().item()
     assert not observation.trade.fault.any().cpu().item()
     assert not observation.tick.fault.any().cpu().item()
@@ -88,6 +92,13 @@ def main():
     packer = PmBookInputs(state, initial_capacity=1)
     packed = packer.pack(frame, assets, now)
     native_fields = pm_fields(state,observation,assets,now)
+    market_indices = torch.full((3,),target_market,dtype=torch.int64,device='cuda')
+    native_lifecycle = LifecycleInputs(market_state).encode(market_frame,market_indices,assets,now)
+    assert not native_lifecycle.identity_present[0].cpu().item()
+    if columns['markets']:
+        assert not native_lifecycle.fault.any().cpu().item()
+    else:
+        assert native_lifecycle.fault.ne(0).all().cpu().item()
     torch.cuda.reset_peak_memory_stats()  # 正常窗口阶段，含已驻留公共列/盘口/直接字段。
     fact_windows = PublicFactWindow(columns,initial_capacity=1)
     events = EventInputs(fact_windows)
@@ -253,6 +264,55 @@ def main():
         def signed_log(value):
             value = float(value)
             return math.copysign(math.log1p(abs(value)),value) if value else 0.0
+        lifecycle_expected = [0.0]*103
+        market = reference['public_market']
+        now_reference = reference['observation_ms']
+        lifecycle_expected[0] = signed_log(Fraction(now_reference-market['market']['window']['start_at_utc_ms'],1000))
+        lifecycle_expected[1] = signed_log(Fraction(market['market']['window']['end_at_utc_ms']-now_reference,1000))
+        def original_envelope(field):
+            rows = field['direct_anchors']
+            result = [0.0]*9
+            if not rows: return result
+            ages = [[],[],[]]
+            for source in rows:
+                s,r = source['source_event_at_utc_ms'],source['received_at_utc_ms']
+                ages[1].append(now_reference-r)
+                if s is not None: ages[0].append(now_reference-s); ages[2].append(r-s)
+            for k,age in enumerate(ages):
+                if age:
+                    result[2*k] = signed_log(Fraction(min(age),1000))
+                    result[2*k+1] = signed_log(Fraction(max(age),1000))
+                result[6+k] = len(age)/len(rows)
+            return result
+        f = market['lifecycle']
+        lifecycle_expected[2+quality_names.index(f['quality'])] = 1.0
+        if f['value'] is not None and f['quality'] in ('fresh','stale'):
+            lifecycle_expected[8] = 1.0
+            state_index = {'candidate':0,'prefetched':1,'active':2,'retired':3}.get(f['value'].get('value'),4)
+            lifecycle_expected[9+state_index] = 1.0
+        lifecycle_expected[14:23] = original_envelope(f)
+        whole = next((market[name] for name in ['active','closed','accepting_orders'] if market[name]['value'] is not None),None)
+        lifecycle_expected[23+quality_names.index(whole['quality'] if whole else 'unknown_not_observed')] = 1.0
+        lifecycle_expected[29] = float(whole is not None)
+        for name,start in [('active',30),('closed',41),('accepting_orders',52)]:
+            f = market[name]
+            if f['value'] is not None and f['quality'] in ('fresh','stale'):
+                lifecycle_expected[start] = float(f['value']); lifecycle_expected[start+1] = 1.0
+            lifecycle_expected[start+2:start+11] = original_envelope(f)
+        f = market['terminal']
+        lifecycle_expected[63+quality_names.index(f['quality'])] = 1.0
+        for start in (72,83,94): lifecycle_expected[start:start+9] = original_envelope(f)
+        if f['value'] is not None and f['quality'] in ('fresh','stale'):
+            terminal = f['value']; lifecycle_expected[69] = 1.0
+            for side,asset_id in enumerate(original_pair):
+                token = columns['assets'][asset_id]['token_id']
+                lifecycle_expected[70+side] = float(token==terminal['winning_asset_id'])
+                payout = next((row for row in terminal['payout_vector'] if row['asset']['token_id']==token),None)
+                if payout is not None:
+                    lifecycle_expected[81+11*side] = float(2*Fraction(payout['payout_pusd_per_share'])-1)
+                    lifecycle_expected[82+11*side] = 1.0
+        assert native_lifecycle.identity_present[2].cpu().item()
+        assert torch.equal(native_lifecycle.values[2],torch.tensor(lifecycle_expected,device='cuda',dtype=torch.float32)), (native_lifecycle.values[2],lifecycle_expected)
         for outcome, asset_id in enumerate(original_pair):
             original = next(a for a in reference['public_assets']
                             if a['asset']['token_id'] == columns['assets'][asset_id]['token_id'])
@@ -369,7 +429,7 @@ def main():
               'continuous_device_query','out_of_material_prefix_fault',
               'i64_time_coordinate_exact_difference','fault_bit_union','pm_direct_observation_fields',
               'native_events104_legal_prefix_window','empty_and_invalid_window','utc_100ms_window_prefix',
-              'native_window_trades77_exact_aggregation']
+              'native_window_trades77_exact_aggregation','public_market_identity_prefix','native_lifecycle103']
     if columns['slots']:
         passed += ['exact_price_sort_current_positive_compaction','native_pm_nine_fields',
                    'real_book_encoder_forward_backward','tail_padding_pairwise_tree','native_pm_bba28_trade18']
@@ -389,7 +449,7 @@ def main():
               'window_peak_scope':'驻留共享公共列及累计可见时间、已打包盘口和直接字段、三前缀窗口与末10个100ms窗口；非法窗不扩池',
               'passed':passed,
               'original_core_reference_checked':args.original_reference is not None,
-              'not_delivered':['market_and_reference_state','binance_state','hidden','sim_noe_ledger',
+              'not_delivered':['reference_state','binance_state','hidden','sim_noe_ledger',
                                '100ms_window','full_actor','ppo','active_root_restore']}
     args.output.parent.mkdir(parents=True,exist_ok=True)
     args.output.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n')

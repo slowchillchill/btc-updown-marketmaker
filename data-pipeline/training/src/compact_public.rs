@@ -661,6 +661,10 @@ mod tests {
             TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",9,37000,38000,
                 PolymarketOrderbookEvent::LastTradePrice {asset_id:"20".into(),price:"0.53".into(),size:Some("1.25".into()),
                     side:Some(data_pipeline_core::typed_raw::PolymarketSide::Unknown),fee_rate_bps:None}))),
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",10,39000,40000,
+                PolymarketOrderbookEvent::MarketResolved {clob_market_id:"3195576".into(),question:None,
+                    description:None,asset_ids:vec!["20".into(),"3".into()],outcomes:vec!["UP".into(),"DOWN".into()],
+                    event_message:None,winning_asset_id:"20".into(),winning_outcome:"UP".into()}))),
         ];
         let mut core = PublicObservationCoreV1::new(header.clone()).unwrap();
         let mut writer = PublicCompactWriterV1::create(&target,header.clone()).unwrap();
@@ -668,6 +672,7 @@ mod tests {
         let mut public_assets = Vec::new();
         let mut public_events = Vec::new();
         let mut public_visible_times = Vec::new();
+        let mut public_market = serde_json::Value::Null;
         let mut original = None;
         let mut zero_evidence_without_change = false;
         let mut token = String::new();
@@ -689,6 +694,9 @@ mod tests {
                     &input.ingress,&group.records));
                 for observation in &group.observations {
                     public_assets = observation.assets.clone();
+                    public_market = serde_json::json!({"market":observation.market,"lifecycle":observation.lifecycle,
+                        "active":observation.active,"closed":observation.closed,"accepting_orders":observation.accepting_orders,
+                        "terminal":observation.terminal});
                 }
             }
             for (_, reduction) in &applied.pm_reductions {
@@ -717,7 +725,7 @@ mod tests {
         let reference = serde_json::json!({"token":token,"price":"0.4",
             "quantity":original.quantity(&token,BookSide::Bid,price).normalize().to_string(),
             "present":true,"initialized":asset.has_initial_snapshot,"ready":asset.book_ready,
-            "public_assets":public_assets,"public_events":public_events,"public_visible_times":public_visible_times,"observation_ms":38000});
+            "public_assets":public_assets,"public_events":public_events,"public_visible_times":public_visible_times,"public_market":public_market,"observation_ms":40000});
         let reference_path = temp.path().join("original-reference.json");
         serde_json::to_writer(File::create(&reference_path).unwrap(),&reference).unwrap();
         eprintln!("original_core_zero_reference={reference}");

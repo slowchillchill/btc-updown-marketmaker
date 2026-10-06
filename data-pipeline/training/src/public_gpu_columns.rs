@@ -53,6 +53,17 @@ pub struct PublicPmDeviceColumnsV1 {
     pub raw_trades: Vec<[i64;11]>,
     pub field_updates: i64,
     pub original_pm_steps: i64,
+    pub lifecycle_states: Vec<MappedMarketLifecycleStateV1>,
+    /// lifecycle [present,stateId,anchorSet,quality]；三开关 [p,v,p,v,p,v,anchorSet,quality]。
+    pub lifecycle_values: Vec<[i64;4]>,
+    pub trading_values: Vec<[i64;8]>,
+    /// terminal [present,winnerAsset,payoutSet,anchorSet,quality]，完整原payout向量另存。
+    pub terminal_values: Vec<[i64;5]>,
+    pub terminal_payouts: Vec<Vec<[i64;2]>>,
+    pub market_admitted: Vec<[i64;4]>,
+    pub market_lifecycle: Vec<[i64;4]>,
+    pub market_trading: Vec<[i64;4]>,
+    pub market_terminal: Vec<[i64;4]>,
 }
 #[derive(Serialize)]
 pub struct PublicLevelAnchorV1 {
@@ -112,8 +123,12 @@ struct Builder {
     assets: BTreeMap<String,i64>, markets: BTreeMap<String,i64>,
     decimals: BTreeMap<String,i64>, slots: BTreeMap<(i64,i64,i64),i64>,
     last_bba: BTreeMap<i64,i64>, last_tick: BTreeMap<i64,i64>,
+    last_terminal: BTreeMap<i64,i64>,
 }
 impl Builder {
+    fn market_field(&mut self, market: i64, group: i64, value: i64) -> RecordingResult<[i64;4]> {
+        self.field_row(market,group,value)
+    }
     fn anchor_set(&mut self, sources: &[SourceEvidenceRefV3], position: &PublicFactPositionV1,
         group_id: &Sha256Hex) -> RecordingResult<i64> {
         let mut ids = Vec::with_capacity(sources.len());
@@ -202,9 +217,11 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
     let mut builder = Builder { columns: PublicPmDeviceColumnsV1 {
         version:"public_pm_device_columns_v1",input_stream_id:reader.manifest.header.input_stream_id.clone(),
         bba_values:vec![[0,0,0,0,0,0,0,3]],trade_values:vec![[0,0,0,0,0,0,3]],
-        observed_tick_values:vec![[0,0,0,3]],anchor_sets:vec![vec![]],..Default::default()
+        observed_tick_values:vec![[0,0,0,3]],anchor_sets:vec![vec![]],
+        lifecycle_values:vec![[0,0,0,3]],trading_values:vec![[0,0,0,0,0,0,0,3]],
+        terminal_values:vec![[0,0,0,0,3]],terminal_payouts:vec![vec![]],..Default::default()
     }, assets:BTreeMap::new(), markets:BTreeMap::new(), decimals:BTreeMap::new(), slots:BTreeMap::new(),
-        last_bba:BTreeMap::new(),last_tick:BTreeMap::new() };
+        last_bba:BTreeMap::new(),last_tick:BTreeMap::new(),last_terminal:BTreeMap::new() };
     // 零值占位不是已知零；设备查询另带initialized/selected/present。
     builder.decimal(&ExactDecimal("0".into()))?;
     let mut snapshots = BTreeMap::new();
@@ -283,12 +300,84 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
                     let market_id = *builder.markets.entry(market.condition_id.0.clone()).or_insert_with(|| {
                         builder.columns.markets.push(market.clone()); next
                     });
+                    let admitted = builder.market_field(market_id,group_position,1)?;
+                    builder.columns.market_admitted.push(admitted);
                     for asset in assets {
                         let asset_id = builder.asset(asset);
                         let identity = [market_id, asset_id, i64::from(asset.outcome.index)];
                         if !builder.columns.market_assets.contains(&identity) {
                             builder.columns.market_assets.push(identity);
                         }
+                    }
+                }
+                if let crate::compact_public::CompactFactPayloadV1::Inline(
+                    PublicBusinessPayloadV1::MarketFact {market,payload}
+                ) = &fact.payload {
+                    let id = *builder.markets.get(&market.condition_id.0).ok_or("公共市场字段缺FixedIdentity")?;
+                    let q = quality_code(fact.quality.availability);
+                    match payload {
+                        CanonicalMarketFactPayloadV1::LifecycleTransition(value) => {
+                            let state_id = i64::try_from(builder.columns.lifecycle_states.len())?;
+                            builder.columns.lifecycle_states.push(value.current_state.clone());
+                            let anchors = builder.anchor_set(&fact.direct_sources,&fact.position,&group.group_id)?;
+                            let value = i64::try_from(builder.columns.lifecycle_values.len())?;
+                            builder.columns.lifecycle_values.push([1,state_id,anchors,q]);
+                            let row = builder.market_field(id,group_position,value)?;
+                            builder.columns.market_lifecycle.push(row);
+                        }
+                        CanonicalMarketFactPayloadV1::MarketLifecycleSnapshot {current_state,..} => {
+                            let state_id = i64::try_from(builder.columns.lifecycle_states.len())?;
+                            builder.columns.lifecycle_states.push(current_state.clone());
+                            let anchors = builder.anchor_set(&fact.direct_sources,&fact.position,&group.group_id)?;
+                            let value = i64::try_from(builder.columns.lifecycle_values.len())?;
+                            builder.columns.lifecycle_values.push([1,state_id,anchors,q]);
+                            let row = builder.market_field(id,group_position,value)?;
+                            builder.columns.market_lifecycle.push(row);
+                        }
+                        CanonicalMarketFactPayloadV1::TradingState(value) => {
+                            let anchors = builder.anchor_set(&fact.direct_sources,&fact.position,&group.group_id)?;
+                            let id_value = i64::try_from(builder.columns.trading_values.len())?;
+                            let pairs = [value.active,value.closed,value.accepting_orders]
+                                .map(|v|[i64::from(v.is_some()),i64::from(v.unwrap_or(false))]);
+                            builder.columns.trading_values.push([pairs[0][0],pairs[0][1],pairs[1][0],pairs[1][1],
+                                pairs[2][0],pairs[2][1],anchors,q]);
+                            let row = builder.market_field(id,group_position,id_value)?;
+                            builder.columns.market_trading.push(row);
+                        }
+                        CanonicalMarketFactPayloadV1::Terminal(MarketResolutionTerminalV3::Resolved {
+                            winning_asset_id,payout_vector,..}) => {
+                            let winner = builder.columns.market_assets.iter().find_map(|entry| {
+                                (entry[0]==id && builder.columns.assets[entry[1] as usize].token_id.0==*winning_asset_id)
+                                    .then_some(entry[1])
+                            }).ok_or("公共终态赢家缺所属市场原资产")?;
+                            let mut payouts = Vec::new();
+                            for payout in payout_vector {
+                                let a = builder.asset(&payout.asset);
+                                if !builder.columns.market_assets.iter().any(|entry|entry[0]==id && entry[1]==a) {
+                                    return Err("公共终态payout引用其它市场资产".into());
+                                }
+                                payouts.push([a,builder.decimal(&payout.payout_pusd_per_share)?]);
+                            }
+                            let payout_id = i64::try_from(builder.columns.terminal_payouts.len())?;
+                            builder.columns.terminal_payouts.push(payouts);
+                            let anchors = builder.anchor_set(&fact.direct_sources,&fact.position,&group.group_id)?;
+                            let v = i64::try_from(builder.columns.terminal_values.len())?;
+                            builder.columns.terminal_values.push([1,winner,payout_id,anchors,q]);
+                            let row = builder.market_field(id,group_position,v)?;
+                            builder.columns.market_terminal.push(row);builder.last_terminal.insert(id,v);
+                        }
+                        CanonicalMarketFactPayloadV1::QualityBoundary(boundary) => {
+                            // 原公共apply_fact只改变terminal质量，并在非Fresh/Stale时清除值；锚点保留。
+                            let previous = builder.last_terminal.get(&id).copied().unwrap_or(0) as usize;
+                            let mut value = builder.columns.terminal_values[previous];
+                            value[4] = quality_code(boundary.current_quality);
+                            if value[4]>1 { value[0]=0; }
+                            let v = i64::try_from(builder.columns.terminal_values.len())?;
+                            builder.columns.terminal_values.push(value);
+                            let row = builder.market_field(id,group_position,v)?;
+                            builder.columns.market_terminal.push(row);builder.last_terminal.insert(id,v);
+                        }
+                        _=>{}
                     }
                 }
                 if let crate::compact_public::CompactFactPayloadV1::Inline(
