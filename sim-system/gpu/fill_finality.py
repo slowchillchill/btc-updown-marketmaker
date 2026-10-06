@@ -65,6 +65,7 @@ class NormalFillRecord:
         """只推进到下一原时点；重复调用不重复经济应用，跳过未消费义务保留fault。"""
         if at.shape != self.matched_at.shape or at.dtype != torch.int64 or at.device != self.matched_at.device:
             raise TypeError('最终性时刻须同设备int64[roots]')
+        original_account = account
         next_ordinal = self.ordinal+1
         pending = self.active & (next_ordinal < self.offsets.numel())
         safe = next_ordinal.clamp(0,self.offsets.numel()-1)
@@ -79,6 +80,9 @@ class NormalFillRecord:
         account, rebate_delta = account.accrue_rebate(accrual,torch.zeros_like(ready),success)
         fault = fault | economic_delta.fault | rebate_delta.fault
         committed = ready & (fault == 0)
+        account = account.coordinate_result(original_account,fault)
+        economic_delta = account.coordinate_delta(economic_delta,committed,fault)
+        rebate_delta = account.coordinate_delta(rebate_delta,committed,fault)
         record = replace(self,ordinal=torch.where(committed,next_ordinal,self.ordinal),
             economic_applied=self.economic_applied | economic_delta.emitted,fault=fault)
         transition = NormalFillTransition(committed,next_ordinal,state,economic_delta,rebate_delta,fault)

@@ -47,6 +47,24 @@ class PlatformAccountState:
     next_sequence: object
     fault: torch.Tensor
 
+    def coordinate_result(self, original, fault):
+        """同一次公共候选的全部经济转移共同提交；保留此前已成功状态。"""
+        valid = fault == 0
+        return replace(self,
+            cash=self.cash.select(valid,original.cash),available=self.available.select(valid,original.available),
+            principal=self.principal.select(valid,original.principal),fee=self.fee.select(valid,original.fee),
+            outcomes=self.outcomes.select(valid[self.asset_roots],original.outcomes),
+            rebates=rational_select(self.rebates,valid.repeat_interleave(4),original.rebates),
+            next_sequence=self.next_sequence.select(valid,original.next_sequence),fault=fault)
+
+    def coordinate_delta(self, delta, committed, fault):
+        movement = delta.movement
+        integer_fields = ('cash','available','principal','fee')
+        result = AccountMovement(*(getattr(movement,name).select(committed,self.cash.constant(0)) for name in integer_fields),
+            movement.outcomes.select(committed[self.asset_roots],self.outcomes.constant(0)),
+            rational_select(movement.rebates,committed.repeat_interleave(4),zeros(self.rebates)))
+        return replace(delta,emitted=delta.emitted & committed,movement=result,fault=fault)
+
     @classmethod
     def open(cls, cash, asset_roots):
         roots = cash.sign.numel()

@@ -78,9 +78,15 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
     assert!(matches!(canceled.unwrap().business, MutationActionBusinessEffectV3::Cancel(_)));
     checkpoints.push(serde_json::json!({"stage":"canceled", "state":snapshot(&state)}));
     let rules = &actor._rule_snapshot.snapshot().synchronized_platform_rules;
+    let mut confirmed_path = serde_json::to_value(actor._finality_policy.normal_path()).unwrap();
+    confirmed_path["economic_application_ordinal"] = serde_json::json!(2);
+    let confirmed_policy = TradeFinalityPolicyV2::decode_and_seal(&serde_json::to_vec(&serde_json::json!({
+        "schema_version":"trade_finality_policy_v2", "normal_path":confirmed_path,"failure_overrides":[],
+    })).unwrap()).expect("确认时应用经济的原密封路径");
     let input = serde_json::json!({"checkpoints":checkpoints, "initial":initial, "events":events,
         "processing_at":processing_at, "maker_at":maker_at,
         "finality_path":actor._finality_policy.normal_path(),
+        "confirmed_economic_path":confirmed_policy.normal_path(),
         "fee_rate":rules.fee_schedule.rate.value().to_string(), "fee_exponent":rules.fee_schedule.exponent,
         "taker_rebate_rate":actor._rule_snapshot.snapshot().project_account_rules.rebate_settlement.value.fixed_taker_rebate_rate.value().to_string(),
         "post":post, "cancel_arrived_at":cancel_receipt.platform_arrived_at_utc_ms});

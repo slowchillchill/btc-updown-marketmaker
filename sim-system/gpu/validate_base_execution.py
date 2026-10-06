@@ -67,8 +67,9 @@ def main():
         quantity = prepared.quantity
         # 已接单剩余量进入原bid队尾；队列rows0=ask0.2，rows1=bid0.3。
         queue,remainder = run_queue_batch(queue,lambda state:append_base_remainder(state,quantity,
-            torch.tensor([1],device='cuda'),torch.tensor([7],device='cuda'),delta.emitted))
+            torch.tensor([1],device='cuda'),torch.tensor([7],device='cuda'),torch.tensor([0,0],device='cuda'),delta.emitted))
         assert not remainder.root_fault.any().cpu().item()
+        accepted_queue,accepted_account,accepted_quantity = queue,account,quantity
         maker = None
         taker_record = NormalFillRecord.create(prepared.asset_plan.matched_base,prepared.asset_plan.used_quote,prepared.fee.total_micro,
             torch.tensor([0],device='cuda'),torch.tensor([reference['processing_at']],device='cuda'),delta.emitted,reference['finality_path'])
@@ -110,12 +111,49 @@ def main():
                 maker_record,account,_ = Numbers.run_exact_batch(lambda:maker_record.advance_one(account,torch.tensor([checkpoint['at']],device='cuda'),rebate_rate))
             elif stage == 'canceled':
                 queue,quantity,account,_,_,found,_ = Numbers.run_exact_batch(lambda:cancel_base_order(queue,quantity,account,
-                    torch.tensor([-1,7],device='cuda'),torch.tensor([0,0],device='cuda'),torch.tensor([True],device='cuda')))
+                    torch.tensor([-1,7],device='cuda'),torch.tensor([0,0],device='cuda'),torch.tensor([False],device='cuda'),torch.tensor([True],device='cuda')))
                 assert found.cpu().tolist() == [False,True]
             try:
                 assert_checkpoint(checkpoint['state'],quantity,account)
             except AssertionError as error:
                 raise AssertionError((stage,checkpoint.get('at'),checkpoint.get('ordinal'),error)) from error
+        # 同一次最终性候选的经济扣款成功、第二笔应计序号溢出须共同回退。
+        near_limit = replace(accepted_account,next_sequence=integers([(1<<64)-2]))
+        atomic_record = NormalFillRecord.create(prepared.asset_plan.matched_base,prepared.asset_plan.used_quote,prepared.fee.total_micro,
+            torch.tensor([0],device='cuda'),torch.tensor([reference['processing_at']],device='cuda'),
+            torch.tensor([True],device='cuda'),reference['confirmed_economic_path'])
+        for offset in (0,10):
+            atomic_record,near_limit,_ = Numbers.run_exact_batch(lambda:atomic_record.advance_one(
+                near_limit,atomic_record.matched_at+offset,rebate_rate))
+        original_account = near_limit
+        original_ordinal = atomic_record.ordinal.clone()
+        atomic_record,near_limit,failed = Numbers.run_exact_batch(lambda:atomic_record.advance_one(
+            near_limit,atomic_record.matched_at+20,rebate_rate))
+        assert failed.fault.cpu().tolist() == [1]
+        assert not failed.emitted.any().cpu().item() and not failed.economic_delta.emitted.any().cpu().item()
+        assert not failed.rebate_delta.emitted.any().cpu().item()
+        assert torch.equal(atomic_record.ordinal,original_ordinal)
+        for name in ('cash','available','principal','fee','outcomes','next_sequence'):
+            assert values(getattr(near_limit,name)) == values(getattr(original_account,name)),name
+        assert values(near_limit.rebates.numerator) == values(original_account.rebates.numerator)
+        # 合法end清队列与缺失账户段的错误必须分开；错误不放款/关数量。
+        empty_queue = Numbers.run_exact_batch(lambda:accepted_queue.clear_matching(torch.ones(accepted_queue.rows,dtype=torch.bool,device='cuda')))
+        bad_queue,bad_quantity,bad_account,_,_,_,bad_delta = Numbers.run_exact_batch(lambda:cancel_base_order(
+            empty_queue,accepted_quantity,accepted_account,torch.tensor([-1,7],device='cuda'),torch.tensor([0,0],device='cuda'),
+            torch.tensor([False],device='cuda'),torch.tensor([True],device='cuda')))
+        assert bad_quantity.fault.cpu().tolist() == [1] and not bad_delta.emitted.any().cpu().item()
+        assert values(bad_quantity.open_base_units) == values(accepted_quantity.open_base_units)
+        assert values(bad_account.available) == values(accepted_account.available)
+        assert values(bad_account.next_sequence) == values(accepted_account.next_sequence)
+        _,end_quantity,end_account,_,_,_,end_delta = Numbers.run_exact_batch(lambda:cancel_base_order(
+            empty_queue,accepted_quantity,accepted_account,torch.tensor([-1,7],device='cuda'),torch.tensor([0,0],device='cuda'),
+            torch.tensor([True],device='cuda'),torch.tensor([True],device='cuda')))
+        assert not end_quantity.fault.any().cpu().item() and end_delta.emitted.cpu().tolist() == [True]
+        assert values(end_quantity.open_base_units) == [0]
+        # 重复账户段错误沿row→root保留，不能只返回容量需求。
+        _,duplicate = run_queue_batch(accepted_queue,lambda state:append_base_remainder(state,accepted_quantity,
+            torch.tensor([1],device='cuda'),torch.tensor([7],device='cuda'),torch.tensor([0,0],device='cuda'),torch.tensor([True],device='cuda')))
+        assert duplicate.root_fault.cpu().tolist() == [1]
     torch.cuda.synchronize()
     elapsed = time.perf_counter()-started
     events = profile.events()
@@ -127,6 +165,7 @@ def main():
     artifact.mkdir(parents=True,exist_ok=True)
     (artifact/'cuda-device-events.json').write_text(json.dumps(operators,indent=2)+'\n')
     print(json.dumps({'checkpoints':len(reference['checkpoints']),'original_external_5share_request':True,
+        'error_boundaries':['confirmed_two_transfers_atomic','missing_A_cancel_no_release','closed_matching_cancel_allowed','append_row_fault_reaches_root'],
         'elapsed_seconds_with_profile_and_reference_reads':elapsed,'cuda_device_events':len(cuda),'cuda_kernel_launches':len(kernels),
         'cuda_memcpy_events':sum(event.name.startswith('Memcpy') for event in cuda),
         'public_integer_kernel_launches':sum(event.name.startswith('integer_kernel') for event in kernels),
