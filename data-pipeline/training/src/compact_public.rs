@@ -8,7 +8,7 @@ use std::{
 };
 use contracts::*;
 use data_pipeline_core::{
-    public_input::{DptIngressV1, RecordedIngressV1},
+    public_input::{DptIngressV1, RecordedIngressV1, PreparedIngressV1, TypedRawRowV2},
     pm_reduction::{PmEvidencePairV1, PmReductionDispositionV2, PmReductionReportV2, PmReductionStepV1, PmStepChangeV1},
     public_observation_core::{PublicFactAppliedIngressV1, PublicFactGroupV1, PublicObservationCoreV1},
     public_reduction::PublicReductionReportV1,
@@ -31,7 +31,8 @@ pub struct CompactPublicPreparationConfigV1 {
     pub initialization: Option<crate::historical_initialization::MetadataInitializationConfigV1>,
 }
 
-const SCHEMA: &str = "public_compact_facts_v3_zstd";
+const SCHEMA: &str = "public_compact_facts_v4_reference_selection_zstd";
+const ZSTD_V3_SCHEMA: &str = "public_compact_facts_v3_zstd";
 const LEGACY_SCHEMA: &str = "public_compact_facts_v2";
 
 #[derive(Serialize, Deserialize)]
@@ -148,11 +149,20 @@ pub struct CompactPmPacketV1 {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct CompactReferencePreparationV1 {
+    pub market: Option<MarketIdentityV2>,
+    pub selection: Option<PreparedReferenceSelectionV1>,
+}
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PublicCompactPacketV1 {
     pub input: RecordedIngressV1,
     pub groups: Vec<CompactGroupV1>,
     pub pm: Vec<CompactPmPacketV1>,
     pub reports: Vec<PublicReductionReportV1>,
+    /// None是旧材料或未使用原准备器，不能解释成已选择“无参考”。
+    /// Some(None,None)表示原准备器已执行，本输入没有市场选择操作。
+    pub reference_preparation: Option<CompactReferencePreparationV1>,
 }
 impl PublicCompactPacketV1 {
     fn build(input: &RecordedIngressV1, applied: &PublicFactAppliedIngressV1<'_>) -> RecordingResult<Self> {
@@ -183,7 +193,7 @@ impl PublicCompactPacketV1 {
             pm.push(CompactPmPacketV1 { position: position.clone(), steps,
                 reports: serde_json::from_value(serde_json::to_value(&reduction.reports)?)? });
         }
-        Ok(Self { input: input.clone(), groups, pm,
+        Ok(Self { input: input.clone(), groups, pm, reference_preparation:None,
             reports: applied.reductions.iter().flat_map(|r| r.reports.iter().cloned()).collect() })
     }
 }
@@ -271,6 +281,23 @@ impl PublicCompactWriterV1 {
     }
     pub fn push(&mut self, input: &RecordedIngressV1,
                 applied: &PublicFactAppliedIngressV1<'_>) -> RecordingResult<()> {
+        self.push_reference(input,applied,None)
+    }
+    pub fn push_prepared(&mut self, input: &RecordedIngressV1, prepared: &PreparedIngressV1<'_>,
+                         applied: &PublicFactAppliedIngressV1<'_>) -> RecordingResult<()> {
+        if input.input_position!=prepared.recorded.input_position
+            || input.input_stream_id!=prepared.recorded.input_stream_id
+            || &input.ingress!=prepared.recorded.ingress
+            || input.dependency_record_refs!=prepared.recorded.dependency_record_refs {
+            return Err(io::Error::other("参考准备与实际入流记录不一致").into());
+        }
+        self.push_reference(input,applied,Some(CompactReferencePreparationV1 {
+            market:prepared.reference_selection_market.clone(),selection:prepared.reference_selection.clone(),
+        }))
+    }
+    fn push_reference(&mut self, input: &RecordedIngressV1,
+                      applied: &PublicFactAppliedIngressV1<'_>,
+                      preparation: Option<CompactReferencePreparationV1>) -> RecordingResult<()> {
         if self.failed || self.manifest.normal_end { return Err(io::Error::other("失败或结束材料不能续写").into()); }
         self.failed = true;
         if input.input_stream_id != self.manifest.header.input_stream_id
@@ -279,7 +306,8 @@ impl PublicCompactWriterV1 {
             || applied.applied_prefix.next_input_position != input.input_position + 1 {
             return Err(io::Error::other("材料输入与应用前缀不连续").into());
         }
-        let packet = PublicCompactPacketV1::build(input, applied)?;
+        let mut packet = PublicCompactPacketV1::build(input, applied)?;
+        packet.reference_preparation = preparation;
         self.write_packet(packet)
     }
     fn write_packet(&mut self, packet: PublicCompactPacketV1) -> RecordingResult<()> {
@@ -370,7 +398,7 @@ pub fn consume_historical_merge_facts_v1(
             ingress: prepared.recorded.ingress.clone(),
             dependency_record_refs: prepared.recorded.dependency_record_refs.clone(),
         };
-        writer.push(&recorded, &applied)?;
+        writer.push_prepared(&recorded,&prepared, &applied)?;
         progress(input.input_position + 1)?;
     }
     let mut end = RecordedIngressV1 {
@@ -386,7 +414,7 @@ pub fn consume_historical_merge_facts_v1(
         ingress: prepared.recorded.ingress.clone(),
         dependency_record_refs: prepared.recorded.dependency_record_refs.clone(),
     };
-    writer.push(&recorded, &applied)?;
+    writer.push_prepared(&recorded,&prepared, &applied)?;
     progress(end.input_position + 1)?;
     Ok(core)
 }
@@ -405,6 +433,8 @@ pub struct PublicCompactReaderV1 {
     next_step: u64,
     next_report: u64,
     max_packet_bytes: usize,
+    reference_sources: std::collections::BTreeMap<u64,(ChainlinkBtcUsdTwapReferenceV1,SourceEvidenceRefV3)>,
+    reference_markets: std::collections::BTreeMap<String,MarketIdentityV2>,
 }
 impl PublicCompactReaderV1 {
     /// SHA核对完整文件；上限只限制本次读取分配，不改变业务或签发数据验收。
@@ -417,7 +447,7 @@ impl PublicCompactReaderV1 {
     ) -> RecordingResult<Self> {
         progress(CompactPublicationProgressV1 {stage:"read_manifest",member:"manifest.json",completed_bytes:0,total_bytes:None});
         let manifest: PublicCompactManifestV1 = serde_json::from_reader(File::open(root.join("manifest.json"))?)?;
-        if !matches!(manifest.schema_version.as_str(), SCHEMA | LEGACY_SCHEMA) || !manifest.normal_end || manifest.inputs == 0
+        if !matches!(manifest.schema_version.as_str(), SCHEMA | ZSTD_V3_SCHEMA | LEGACY_SCHEMA) || !manifest.normal_end || manifest.inputs == 0
             || manifest.applied_prefix.next_input_position != manifest.inputs
             || manifest.applied_prefix.input_stream_id != manifest.header.input_stream_id {
             return Err(io::Error::other("紧凑材料完成凭据不合法").into());
@@ -441,7 +471,8 @@ impl PublicCompactReaderV1 {
         Ok(Self { payload: File::open(root.join(expected[0]))?, offsets: File::open(root.join(expected[1]))?,
                   columns: File::open(root.join(expected[2]))?, sources: File::open(root.join(expected[3]))?,
                   manifest, next: 0, next_group: 0, next_fact: 0, next_offset: 0,
-                  next_pm: 0, next_step: 0, next_report: 0, max_packet_bytes })
+                  next_pm: 0, next_step: 0, next_report: 0, max_packet_bytes,
+                  reference_sources:Default::default(),reference_markets:Default::default() })
     }
     pub fn next_packet(&mut self) -> RecordingResult<Option<PublicCompactPacketV1>> {
         if self.next == self.manifest.inputs { return Ok(None); }
@@ -457,7 +488,7 @@ impl PublicCompactReaderV1 {
         let mut bytes = vec![0; (end - start) as usize];
         self.payload.seek(SeekFrom::Start(start))?;
         self.payload.read_exact(&mut bytes)?;
-        let decoded = if self.manifest.schema_version == SCHEMA {
+        let decoded = if self.manifest.schema_version != LEGACY_SCHEMA {
             let frame_bytes = zstd::zstd_safe::get_frame_content_size(&bytes)
                 .map_err(|error| io::Error::other(format!("材料压缩帧头错误: {error:?}")))?
                 .map(usize::try_from).transpose()?.unwrap_or(self.max_packet_bytes);
@@ -469,6 +500,53 @@ impl PublicCompactReaderV1 {
         let packet: PublicCompactPacketV1 = serde_json::from_slice(&decoded)?;
         if packet.input.input_stream_id != self.manifest.header.input_stream_id || packet.input.input_position != self.next {
             return Err(io::Error::other("材料packet输入位置错误").into());
+        }
+        if self.manifest.schema_version != SCHEMA && packet.reference_preparation.is_some() {
+            return Err(io::Error::other("旧schema不能声明新参考选择能力").into());
+        }
+        if let DptIngressV1::Message {row:TypedRawRowV2::PolymarketRtdsChainlinkTwap(row),source_evidence} = &packet.input.ingress {
+            let event = data_pipeline_core::public_reference::canonicalize_chainlink_twap_v1(
+                row,source_evidence,&self.manifest.header.canonical_rule_version)?;
+            if let CanonicalReferenceEventPayloadV2::ChainlinkBtcUsdTwap(value) = event.payload {
+                self.reference_sources.insert(self.next,(value,source_evidence.clone()));
+            }
+        }
+        for fact in packet.groups.iter().flat_map(|g|&g.records) {
+            if let CompactFactPayloadV1::Inline(PublicBusinessPayloadV1::MarketFact {
+                market,payload:CanonicalMarketFactPayloadV1::FixedIdentity {..},
+            }) = &fact.payload {
+                self.reference_markets.insert(market.condition_id.0.clone(),market.clone());
+            }
+        }
+        if let Some(preparation) = &packet.reference_preparation {
+            match (&preparation.market,&preparation.selection) {
+                (None,None)=>{},
+                (Some(market),Some(selection))=>{
+                    if self.reference_markets.get(&market.condition_id.0)!=Some(market)
+                        || selection.dependency_input_position!=self.next {
+                        return Err(io::Error::other("参考选择市场/依赖位置错误").into());
+                    }
+                    match (&selection.selected_record_ref,&selection.selected_value,&selection.direct_anchor) {
+                        (None,None,None)=>{},
+                        (Some(record),Some(value),Some(anchor))=>{
+                            let expected = self.reference_sources.get(&record.input_position)
+                                .ok_or_else(||io::Error::other("参考选择没有实际TWAP源记录"))?;
+                            if record.input_stream_id!=packet.input.input_stream_id || record.input_position>self.next
+                                || (record.input_position<self.next && !packet.input.dependency_record_refs.contains(record))
+                                || value!=&expected.0 || anchor.position.input_stream_id!=record.input_stream_id
+                                || anchor.position.closed_at_input_position!=record.input_position || anchor.position.fact_ordinal!=0
+                                || anchor.group_id!=expected.1.source_message_id || anchor.source_message_id!=expected.1.source_message_id
+                                || anchor.source_event_at_utc_ms!=expected.1.source_event_at_utc_ms
+                                || anchor.received_at_utc_ms!=expected.1.received_at_utc_ms
+                                || anchor.field_path!=if value.window_s==30 {"chainlink_twap_thirty"} else {"chainlink_twap_sixty"} {
+                                return Err(io::Error::other("参考选择精确值/源引用/直接锚点不闭合").into());
+                            }
+                        },
+                        _=>return Err(io::Error::other("参考选择字段不完整").into()),
+                    }
+                },
+                _=>return Err(io::Error::other("参考准备市场与选择不配对").into()),
+            }
         }
         let final_packet = self.next + 1 == self.manifest.inputs;
         if final_packet != matches!(packet.input.ingress, DptIngressV1::EndOfInput)
@@ -605,6 +683,20 @@ mod tests {
     };
     use crate::public_recording::tests::{metadata_snapshot_row, row, book, snapshot, update};
 
+    fn prepare_reference<'a>(core:&PublicObservationCoreV1,input:&'a mut RecordedIngressV1,
+        candidates:&[data_pipeline_core::public_reference::TemporaryReferenceCandidateV1])
+        -> data_pipeline_core::public_input::PreparedIngressV1<'a> {
+        if let Some(context) = core.fixed_markets().next() {
+            data_pipeline_core::public_input::prepare_public_ingress_with_reference_v1(
+                core,input,&BTreeMap::new(),&[],&context,|cursor| {
+                    Ok((candidates.iter().filter(|c|c.record_ref.input_position>=cursor.next_input_position)
+                        .cloned().collect(),cursor,true))
+                }).unwrap()
+        } else {
+            prepare_public_ingress_v1(core,input,&BTreeMap::new(),&[]).unwrap()
+        }
+    }
+
     #[test]
     #[ignore = "明确在AutoDL同提交GPU环境运行；包含独立原core语义对照"]
     fn gpu_public_zero_selection_matches_original_core() {
@@ -719,14 +811,25 @@ mod tests {
             TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",9,37000,38000,
                 PolymarketOrderbookEvent::LastTradePrice {asset_id:"20".into(),price:"0.53".into(),size:Some("1.25".into()),
                     side:Some(data_pipeline_core::typed_raw::PolymarketSide::Unknown),fee_rate_bps:None}))),
+            match crate::public_recording::tests::twap_record(12,30,23002,"65000000000000000000000").ingress {
+                DptIngressV1::Message {row,..}=>row,_=>unreachable!(),
+            },
+            match crate::public_recording::tests::twap_record(13,30,24002,"66000000000000000000000").ingress {
+                DptIngressV1::Message {row,..}=>row,_=>unreachable!(),
+            },
+            match crate::public_recording::tests::rule_record(14,30,None).ingress {
+                DptIngressV1::Message {row,..}=>row,_=>unreachable!(),
+            },
             aggregate_trade(1,"64000","1",false),aggregate_trade(2,"64001","2",true),
-            terminal_metadata(10,39000,40000),
-            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",10,39000,40000,
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",10,38500,38600,
+                PolymarketOrderbookEvent::Book {asset_id:"3".into(),bids:vec![],asks:vec![],last_trade_price:None}))),
+            terminal_metadata(11,39000,40000),
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",11,39000,40000,
                 PolymarketOrderbookEvent::MarketResolved {clob_market_id:"3195576".into(),question:None,
                     description:None,asset_ids:vec!["20".into(),"3".into()],outcomes:vec!["UP".into(),"DOWN".into()],
                     event_message:None,winning_asset_id:"20".into(),winning_outcome:"UP".into()}))),
-            terminal_metadata(11,41000,42000),
-            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",11,41000,42000,
+            terminal_metadata(12,41000,42000),
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",12,41000,42000,
                 PolymarketOrderbookEvent::MarketResolved {clob_market_id:"3195576".into(),question:None,
                     description:None,asset_ids:vec!["20".into(),"3".into()],outcomes:vec!["UP".into(),"DOWN".into()],
                     event_message:None,winning_asset_id:"3".into(),winning_outcome:"DOWN".into()}))),
@@ -741,6 +844,7 @@ mod tests {
         let mut terminal_observations = Vec::new();
         let mut first_sides = serde_json::Value::Null;
         let mut observed_groups = 0_u64;
+        let mut reference_candidates = Vec::new();
         let mut original = None;
         let mut zero_evidence_without_change = false;
         let mut token = String::new();
@@ -748,13 +852,24 @@ mod tests {
             let ingress = source.map_or(DptIngressV1::EndOfInput,|row|DptIngressV1::Message {
                 source_evidence:source_evidence_v3_from_typed_raw_v2(&row).unwrap(),row,
             });
-            let input = RecordedIngressV1 {input_stream_id:header.input_stream_id.clone(),input_position:position as u64,
+            let mut input = RecordedIngressV1 {input_stream_id:header.input_stream_id.clone(),input_position:position as u64,
                 ingress,dependency_record_refs:vec![]};
-            let ids = BTreeMap::new();
-            let prepared = prepare_public_ingress_v1(&core,&input,&ids,&[]).unwrap();
+            if let DptIngressV1::Message {row:TypedRawRowV2::PolymarketRtdsChainlinkTwap(row),source_evidence} = &input.ingress {
+                let canonical_fact = data_pipeline_core::public_reference::canonicalize_chainlink_twap_v1(
+                    row,source_evidence,&header.canonical_rule_version).unwrap();
+                reference_candidates.push(data_pipeline_core::public_reference::TemporaryReferenceCandidateV1 {
+                    canonical_fact,record_ref:CanonicalInputRecordRefV1 {input_stream_id:header.input_stream_id.clone(),input_position:position as u64},
+                    anchor:DirectObservationAnchorV1 {field_path:"chainlink_twap_thirty".into(),
+                        position:PublicFactPositionV1 {input_stream_id:header.input_stream_id.clone(),closed_at_input_position:position as u64,fact_ordinal:0},
+                        group_id:source_evidence.source_message_id.clone(),source_message_id:source_evidence.source_message_id.clone(),
+                        source_event_at_utc_ms:source_evidence.source_event_at_utc_ms,received_at_utc_ms:source_evidence.received_at_utc_ms},
+                });
+            }
+            let mut observed_input = input.clone();
+            let prepared = prepare_reference(&core,&mut input,&reference_candidates);
             let applied = core.push_facts(&prepared).unwrap();
             // 有界真实构造链的独立旧公共观察入口；不回放历史全窗。
-            let observed_prepared = prepare_public_ingress_v1(&observation_core,&input,&ids,&[]).unwrap();
+            let observed_prepared = prepare_reference(&observation_core,&mut observed_input,&reference_candidates);
             let observed = observation_core.push(&observed_prepared).unwrap();
             for group in &observed.applied.closed_groups {
                 public_events.extend(group.records.iter().cloned());
@@ -767,7 +882,10 @@ mod tests {
                     public_assets = observation.assets.clone();
                     public_market = serde_json::json!({"market":observation.market,"lifecycle":observation.lifecycle,
                         "active":observation.active,"closed":observation.closed,"accepting_orders":observation.accepting_orders,
-                        "terminal":observation.terminal});
+                        "terminal":observation.terminal,"settlement_reference":observation.settlement_reference,
+                        "temporary_reference":observation.temporary_reference,"effective_reference":observation.effective_reference,
+                        "chainlink_spot":observation.chainlink_spot,"chainlink_twap_thirty":observation.chainlink_twap_thirty,
+                        "chainlink_twap_sixty":observation.chainlink_twap_sixty});
                     if observation.terminal.value.is_some()
                         || observation.terminal.quality == MarketDataQuality::Invalid {
                         terminal_observations.push(serde_json::json!({"prefix":observed_groups,
@@ -791,7 +909,10 @@ mod tests {
                     PmStepChangeV1::LevelChange{transition,..} if zero(&transition.price_pusd_per_share)));
                 zero_evidence_without_change |= has_evidence && !has_change;
             }
-            writer.push(&input,&applied).unwrap();
+            let recorded = RecordedIngressV1 {input_stream_id:prepared.recorded.input_stream_id.clone(),
+                input_position:prepared.recorded.input_position,ingress:prepared.recorded.ingress.clone(),
+                dependency_record_refs:prepared.recorded.dependency_record_refs.clone()};
+            writer.push_prepared(&recorded,&prepared,&applied).unwrap();
         }
         writer.publish().unwrap();
         assert!(zero_evidence_without_change);
@@ -800,6 +921,8 @@ mod tests {
         assert_eq!(resolved["terminal"]["value"]["payout_vector"].as_array().unwrap().len(),2);
         assert_eq!(public_market["terminal"]["quality"],"invalid");
         assert!(public_market["terminal"]["value"].is_null());
+        assert_eq!(public_market["temporary_reference"]["value"]["price_usd_per_btc"],"65000");
+        assert_eq!(public_market["chainlink_twap_thirty"]["value"]["price_usd_per_btc"],"66000");
         let original = original.unwrap();
         let price = data_pipeline_core::parse_canonical_decimal(&ExactDecimal("0.4".into()),"zero_price").unwrap();
         assert!(original.selected_level(&token,BookSide::Bid,price).unwrap().present);
@@ -819,6 +942,29 @@ mod tests {
             .arg("--material").arg(&target).arg("--original-reference").arg(reference_path)
             .arg("--output").arg(temp.path().join("report.json")).status().unwrap();
         assert!(status.success());
+        // 新选择引用属于持久结构边界；重算文件hash也不能把第一条引用改成第二条。
+        let mut reader = PublicCompactReaderV1::open(&target,1<<20).unwrap();
+        let changed = temp.path().join("bad-reference");
+        let mut writer = PublicCompactWriterV1::create(&changed,header).unwrap();
+        let mut damaged = false;
+        while let Some(mut packet) = reader.next_packet().unwrap() {
+            if !damaged {
+                if let Some(selection) = packet.reference_preparation.as_mut().and_then(|p|p.selection.as_mut()) {
+                    if let Some(record) = selection.selected_record_ref.as_mut() {
+                        record.input_position += 1; damaged = true;
+                    }
+                }
+            }
+            writer.write_packet(packet).unwrap();
+        }
+        assert!(damaged);
+        writer.publish().unwrap();
+        let mut reader = PublicCompactReaderV1::open(&changed,1<<20).unwrap();
+        let mut rejected = false;
+        loop {
+            match reader.next_packet() {Ok(Some(_))=>{},Ok(None)=>break,Err(_)=>{rejected=true;break;}}
+        }
+        assert!(rejected);
     }
 
     #[test]

@@ -29,6 +29,8 @@ def main():
     from market_state import PublicMarketState
     from input_lifecycle import LifecycleInputs
     from input_sides import SideInputs
+    from reference_state import PublicReferenceState
+    from input_reference import ReferenceInputs
     from input_events import EventInputs, time_envelope
     from model_train.book import BookEncoder
     from prepare import _numbers
@@ -97,6 +99,12 @@ def main():
     native_lifecycle = LifecycleInputs(market_state).encode(market_frame,market_indices,assets,now)
     side_inputs = SideInputs(state)
     native_sides = side_inputs.encode(frame,assets,now)
+    reference_state = PublicReferenceState(market_state,columns)
+    native_reference = ReferenceInputs(reference_state).encode(reference_state.frame(prefixes),market_frame,market_indices,now)
+    if columns['reference_preparation_complete'] and columns['markets']:
+        assert not native_reference.fault.any().cpu().item()
+    else:
+        assert native_reference.fault.ne(0).all().cpu().item()
     assert not native_lifecycle.identity_present[0].cpu().item()
     if columns['markets']:
         assert not native_lifecycle.fault.any().cpu().item()
@@ -189,7 +197,10 @@ def main():
                 if p['kind'] == 'book': return (0 if p['fact']['kind']=='full_book' else 1),0
                 return {'best_bid_ask':2,'tick_size_change':3,'public_trade':4,'new_market':5}[p['kind']],0
             if 'ReferenceFact' in payload:
-                return {'chainlink_btc_usd':(12,2),'binance_aggregate_trade':(18,7)}[payload['ReferenceFact']['reference_type']]
+                key = payload['ReferenceFact']['reference_type']
+                if key=='chainlink_btc_usd_twap':
+                    return (13,3) if payload['ReferenceFact']['reference']['window_s']==30 else (14,4)
+                return {'chainlink_btc_usd':(12,2),'binance_aggregate_trade':(18,7),'market_settlement_reference_update':(16,5),'market_price_anchor_update':(15,5)}[key]
             p = payload['MarketFact']['payload']
             key = next(iter(p))
             return {'FixedIdentity':6,'InitialTick':7,'LifecycleTransition':8,'MarketLifecycleSnapshot':8,
@@ -311,6 +322,32 @@ def main():
         def signed_log(value):
             value = float(value)
             return math.copysign(math.log1p(abs(value)),value) if value else 0.0
+        # 临时参考是原准备器选中的第一条，不能以全局最新TWAP替代。
+        selected_reference = reference['public_market']
+        temporary = selected_reference['temporary_reference']
+        assert Fraction(temporary['value']['price_usd_per_btc']) == 65000
+        assert Fraction(selected_reference['chainlink_twap_thirty']['value']['price_usd_per_btc']) == 66000
+        expected_reference = [0.0]*37
+        expected_reference[1] = expected_reference[4] = expected_reference[6] = 1.0
+        expected_reference[7] = signed_log(65000)
+        def original_t5(anchor):
+            if anchor is None: return [0.0]*5
+            s,r = anchor['source_event_at_utc_ms'],anchor['received_at_utc_ms']
+            return [signed_log(Fraction(reference['observation_ms']-s,1000)) if s is not None else 0.0,
+                    signed_log(Fraction(reference['observation_ms']-r,1000)),
+                    signed_log(Fraction(r-s,1000)) if s is not None else 0.0,float(s is not None),1.0]
+        expected_reference[8:13] = original_t5(temporary['direct_anchor'])
+        expected_reference[13] = signed_log(30)
+        for index,name in enumerate(('chainlink_spot','chainlink_twap_thirty','chainlink_twap_sixty')):
+            field = selected_reference[name]
+            visible = field['value'] is not None and field['quality'] in ('fresh','stale')
+            start = 14+7*index
+            if visible:
+                expected_reference[start:start+2] = [signed_log(Fraction(field['value']['price_usd_per_btc'])),1.0]
+            # 原unique直接锚点规则；不以时间相同合并不同证据。
+            expected_reference[start+2:start+7] = original_t5(field['direct_anchors'][0] if len(field['direct_anchors'])==1 else None)
+        expected_reference[35:37] = [signed_log(1000),1.0]
+        assert torch.equal(native_reference.values[2],torch.tensor(expected_reference,device='cuda',dtype=torch.float32)), (native_reference.values[2],expected_reference)
         lifecycle_expected = [0.0]*103
         market = reference['public_market']
         now_reference = reference['observation_ms']
@@ -345,7 +382,7 @@ def main():
             for side,name in enumerate(('bids','asks')):
                 field,old = current[name],before[name]
                 out = [0.0]*16
-                out[5:14] = original_envelope(field)
+                out[5:14] = original_envelope({**field,'direct_anchors':[a for a in field['direct_anchors'] if a['field_path'].startswith(f'assets[{token}].{name}[')]})
                 if field['value'] is not None and field['quality'] in ('fresh','stale'):
                     levels = [row for row in field['value'] if Fraction(row['quantity_shares'])>0]
                     total = sum(Fraction(row['quantity_shares']) for row in levels)

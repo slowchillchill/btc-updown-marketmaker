@@ -36,6 +36,8 @@ class PublicBookFrame:
     tick_present: torch.Tensor
     anchor_ids: torch.Tensor
     anchor_present: torch.Tensor
+    book_anchor_ids: torch.Tensor
+    book_anchor_present: torch.Tensor
     quality: torch.Tensor
     prefix_fault: torch.Tensor
     fault: torch.Tensor
@@ -94,7 +96,7 @@ class PublicPmState:
              a['direct']['source_event_at_utc_ms'] or 0, a['direct']['received_at_utc_ms']]
             for a in self.anchors], dtype=torch.int64, device=device)
         for name in ('quantities', 'selections', 'resets', 'initialized', 'ready', 'ticks',
-                     'level_anchors', 'book_quality'):
+                     'level_anchors', 'book_quality', 'book_anchors'):
             target_count = slots if name in ('quantities', 'selections', 'level_anchors') else assets
             previous = {}
             for target, sequence, group, value in columns[name]:
@@ -109,7 +111,7 @@ class PublicPmState:
                     raise ValueError('公共设备精确值引用越界')
                 if name in ('selections', 'initialized', 'ready') and value not in (0, 1):
                     raise ValueError('公共设备存在标志错误')
-                if name == 'level_anchors' and not 0 <= value < len(self.anchors):
+                if name in ('level_anchors','book_anchors') and not 0 <= value < len(self.anchors):
                     raise ValueError('公共档位直接锚点引用越界')
                 if name == 'book_quality' and not 0 <= value < 6:
                     raise ValueError('公共盘口质量错误')
@@ -162,6 +164,7 @@ class PublicPmState:
         rseq, ready, rfound, rfault = self.ready.query(prefixes)
         tseq, tick, tfound, tfault = self.ticks.query(prefixes)
         aseq, anchor, afound, afault = self.level_anchors.query(prefixes)
+        bseq, book_anchor, bfound, bfault = self.book_anchors.query(prefixes)
         _, quality, quality_found, quality_fault = self.book_quality.query(prefixes)
         asset = self.slots[:, 0]
         reset = torch.where(reset_found, reset, -1)
@@ -172,7 +175,7 @@ class PublicPmState:
         numbers = _numbers()
         quantity = numbers.ExactRational(_take(self.decimals.numerator, qid.reshape(-1)),
                                           _take(self.decimals.denominator, qid.reshape(-1)))
-        asset_fault = reset_fault | ifault | rfault | tfault | quality_fault
+        asset_fault = reset_fault | ifault | rfault | tfault | quality_fault | bfault
         fault = qfault | sfault | afault | asset_fault[:, asset]
         fault = fault | quantity.fault.reshape(qid.shape)
         fault = fault | self.decimal_fault[self.slots[:, 2]][None]
@@ -184,6 +187,7 @@ class PublicPmState:
             ifound & initialized.bool(),
             rfound & ready.bool() & (rseq >= reset), tick, tfound,
             anchor, afound & (aseq >= reset[:, asset]),
+            book_anchor,bfound & (bseq >= reset),
             torch.where(quality_found, quality, 3), prefix_fault, fault)
 
     def observation(self, prefixes):

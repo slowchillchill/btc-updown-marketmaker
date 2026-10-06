@@ -269,7 +269,7 @@ pub struct DirectObservationAnchorV1 {
 }
 
 /// 来源准备阶段由核心纯函数产生的唯一选择结果。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PreparedReferenceSelectionV1 {
     pub selected_record_ref: Option<crate::CanonicalInputRecordRefV1>,
     pub selected_value: Option<ChainlinkBtcUsdTwapReferenceV1>,

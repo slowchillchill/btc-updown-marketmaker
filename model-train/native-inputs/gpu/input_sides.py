@@ -81,7 +81,7 @@ class SideInputs:
                         best,bp,error = _extreme(prices,mask,maximum=side==0)
                         best = best.select(bp,best.constant(0))
                         fault = fault | error | numbers.combine_fault_rows(frame.fault)
-                        anchor_mask = coordinate & valid[:,outcome,None] & frame.anchor_present
+                        anchor_mask = coordinate & valid[:,outcome,None] & ready[:,None] & frame.anchor_present
                         times = state.anchor_times[frame.anchor_ids+1]
                         time,error = time_envelope(times[:,:,1],times[:,:,2],anchor_mask & times[:,:,0].bool(),anchor_mask,observation_ms)
                         side_out[:,5:14] = time; fault = fault | error

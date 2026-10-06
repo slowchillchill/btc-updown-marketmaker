@@ -32,6 +32,8 @@ pub struct PublicPmDeviceColumnsV1 {
     pub level_anchors: Vec<[i64;4]>,
     /// 与原Native Q6一致：Fresh/Stale/Missing/Unknown/Gap/Invalid。
     pub book_quality: Vec<[i64;4]>,
+    /// 原InitialSnapshot/已选择AbsenceBaseline的整簿直接锚点，空侧回退用。
+    pub book_anchors: Vec<[i64;4]>,
     /// [bidPresent,bidId,askPresent,askId,spreadPresent,spreadId,anchorSet,quality]。
     pub bba_values: Vec<[i64;8]>,
     pub bba: Vec<[i64;4]>,
@@ -64,6 +66,18 @@ pub struct PublicPmDeviceColumnsV1 {
     pub market_lifecycle: Vec<[i64;4]>,
     pub market_trading: Vec<[i64;4]>,
     pub market_terminal: Vec<[i64;4]>,
+    /// 所有输入是否携带原准备器结果；旧材料不可据latest重建临时选择。
+    pub reference_preparation_complete: bool,
+    /// 全局参考：[priceId,anchorSet,quality,windowS]；规则：[referenceType,anchorSet,quality]。
+    pub reference_values: Vec<[i64;4]>,
+    pub global_references: Vec<[i64;4]>,
+    pub reference_rule_values: Vec<[i64;3]>,
+    pub reference_rules: Vec<[i64;4]>,
+    /// 官方：[present,priceId,anchorSet,quality]；临时：[present,priceId,anchorSet,windowS]。
+    pub reference_official_values: Vec<[i64;4]>,
+    pub reference_official: Vec<[i64;4]>,
+    pub reference_temporary_values: Vec<[i64;4]>,
+    pub reference_temporary: Vec<[i64;4]>,
 }
 #[derive(Serialize)]
 pub struct PublicLevelAnchorV1 {
@@ -224,10 +238,20 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
         last_bba:BTreeMap::new(),last_tick:BTreeMap::new(),last_terminal:BTreeMap::new() };
     // 零值占位不是已知零；设备查询另带initialized/selected/present。
     builder.decimal(&ExactDecimal("0".into()))?;
+    builder.columns.reference_preparation_complete = true;
+    builder.columns.reference_values.push([0,0,3,0]);
+    builder.columns.reference_rule_values.push([3,0,3]);
+    builder.columns.reference_official_values.push([0,0,0,3]);
+    builder.columns.reference_temporary_values.push([0,0,0,0]);
     let mut snapshots = BTreeMap::new();
     let mut raw_pm: BTreeMap<u64,PolymarketOrderbookRow> = BTreeMap::new();
     let mut pm_types: BTreeMap<u64,&'static str> = BTreeMap::new();
+    let mut temporary_sources = BTreeMap::new();
     while let Some(packet) = reader.next_packet()? {
+        builder.columns.reference_preparation_complete &= packet.reference_preparation.is_some();
+        if let DptIngressV1::Message {row:TypedRawRowV2::PolymarketRtdsChainlinkTwap(_),source_evidence} = &packet.input.ingress {
+            temporary_sources.insert(packet.input.input_position,source_evidence.clone());
+        }
         if let DptIngressV1::Message { row:TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row)), .. } = &packet.input.ingress {
             // 只保存原枚举坐标；实际事实是否存在由闭组决定，不能计入被抑制重试。
             if !matches!(&row.event,PolymarketOrderbookEvent::MarketResolved {..}) {
@@ -257,6 +281,47 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
                     builder.columns.fact_types.push(kind.into()); id
                 };
                 let group_position = i64::try_from(group.group_position)?;
+                if let crate::compact_public::CompactFactPayloadV1::Inline(PublicBusinessPayloadV1::ReferenceFact(payload)) = &fact.payload {
+                    let q = quality_code(fact.quality.availability);
+                    match payload {
+                        CanonicalReferenceEventPayloadV2::ChainlinkBtcUsd(value) => {
+                            let price = builder.decimal(&value.price_usd_per_btc)?;
+                            let anchor = builder.anchor_set(&fact.direct_sources,&fact.position,&group.group_id)?;
+                            let id = i64::try_from(builder.columns.reference_values.len())?;
+                            builder.columns.reference_values.push([price,anchor,q,0]);
+                            let row = builder.field_row(0,group_position,id)?;
+                            builder.columns.global_references.push(row);
+                        },
+                        CanonicalReferenceEventPayloadV2::ChainlinkBtcUsdTwap(value) => {
+                            let price = builder.decimal(&value.price_usd_per_btc)?;
+                            let anchor = builder.anchor_set(&fact.direct_sources,&fact.position,&group.group_id)?;
+                            let id = i64::try_from(builder.columns.reference_values.len())?;
+                            builder.columns.reference_values.push([price,anchor,q,i64::try_from(value.window_s)?]);
+                            let row = builder.field_row(if value.window_s==30 {1} else {2},group_position,id)?;
+                            builder.columns.global_references.push(row);
+                        },
+                        CanonicalReferenceEventPayloadV2::MarketSettlementReferenceUpdate(value) => {
+                            let market = *builder.markets.get(&value.market.condition_id.0).ok_or("参考规则缺原市场身份")?;
+                            let reference = match value.reference {BtcSettlementReferenceV1::ChainlinkSpot=>0,
+                                BtcSettlementReferenceV1::ChainlinkTwapThirtySeconds=>1,BtcSettlementReferenceV1::ChainlinkTwapSixtySeconds=>2};
+                            let anchor = builder.anchor_set(&fact.direct_sources,&fact.position,&group.group_id)?;
+                            let id = i64::try_from(builder.columns.reference_rule_values.len())?;
+                            builder.columns.reference_rule_values.push([reference,anchor,q]);
+                            let row = builder.field_row(market,group_position,id)?;
+                            builder.columns.reference_rules.push(row);
+                        },
+                        CanonicalReferenceEventPayloadV2::MarketPriceAnchorUpdate(value) => {
+                            let market = *builder.markets.get(&value.market.condition_id.0).ok_or("官方参考缺原市场身份")?;
+                            let price = builder.decimal(&value.anchor.price_usd_per_btc)?;
+                            let anchor = builder.anchor_set(&fact.direct_sources,&fact.position,&group.group_id)?;
+                            let id = i64::try_from(builder.columns.reference_official_values.len())?;
+                            builder.columns.reference_official_values.push([1,price,anchor,q]);
+                            let row = builder.field_row(market,group_position,id)?;
+                            builder.columns.reference_official.push(row);
+                        },
+                        _=>{},
+                    }
+                }
                 let start = i64::try_from(builder.columns.fact_sources.len())?;
                 for source in &fact.direct_sources {
                     builder.columns.fact_sources.push([group_position,type_id,
@@ -434,6 +499,7 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
                         builder.columns.initialized.push([a,sequence,group,1]);
                         builder.columns.ready.push([a,sequence,group,1]);
                         builder.columns.book_quality.push([a,sequence,group,quality_code(step.quality.availability)]);
+                        builder.columns.book_anchors.push([a,sequence,group,anchor]);
                         let tick = builder.decimal(initial_tick_size_pusd_per_share)?;
                         builder.columns.ticks.push([a,sequence,group,tick]);
                         for (side,levels) in [(BookSide::Bid,bids),(BookSide::Ask,asks)] {
@@ -464,6 +530,10 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
                         PmStepChangeV1::BookReady {asset} => {
                             let a = builder.asset(asset); builder.columns.ready.push([a,sequence,group,1]);
                             builder.columns.book_quality.push([a,sequence,group,0]);
+                        }
+                        PmStepChangeV1::AbsenceBaseline {asset,selected,..} if selected.is_some() => {
+                            let a = builder.asset(asset);
+                            builder.columns.book_anchors.push([a,sequence,group,anchor]);
                         }
                         PmStepChangeV1::Tick {tick,..} => {
                             let a = builder.asset(&tick.asset); let value = builder.decimal(&tick.new_tick_size_pusd_per_share)?;
@@ -538,6 +608,22 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
                         }
                         _ => {} // 该列消费者只负责数量/选择/初始/ready/tick，其它原事实保留在compact。
                     }
+                }
+            }
+        }
+        if let Some(preparation) = &packet.reference_preparation {
+            if let (Some(market),Some(selection)) = (&preparation.market,&preparation.selection) {
+                if let (Some(record),Some(value),Some(anchor)) =
+                    (&selection.selected_record_ref,&selection.selected_value,&selection.direct_anchor) {
+                    let group = packet.groups.last().ok_or("实际参考提交没有闭组可见位置")?;
+                    let market = *builder.markets.get(&market.condition_id.0).ok_or("临时参考缺原市场身份")?;
+                    let source = temporary_sources.get(&record.input_position).ok_or("临时参考缺原TWAP输入")?;
+                    let price = builder.decimal(&value.price_usd_per_btc)?;
+                    let anchors = builder.anchor_set(std::slice::from_ref(source),&anchor.position,&anchor.group_id)?;
+                    let id = i64::try_from(builder.columns.reference_temporary_values.len())?;
+                    builder.columns.reference_temporary_values.push([1,price,anchors,i64::try_from(value.window_s)?]);
+                    let row = builder.field_row(market,i64::try_from(group.group_position)?,id)?;
+                    builder.columns.reference_temporary.push(row);
                 }
             }
         }
