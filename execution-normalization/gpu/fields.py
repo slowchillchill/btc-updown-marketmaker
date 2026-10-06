@@ -18,6 +18,30 @@ class IntegerList:
         return Numbers.combine_fault_rows(torch.where(self.present,self.values.fault.reshape_as(self.present),0))
 
 
+@dataclass(frozen=True)
+class RecordList:
+    fields: tuple  # 每列[row*capacity]，成员字段保留原强类型顺序。
+    present: torch.Tensor
+
+    @property
+    def fault(self):
+        from queues import Numbers
+        result=torch.zeros_like(self.present,dtype=torch.int32)
+        for value in self.fields:
+            if not isinstance(value,torch.Tensor):
+                result=result | torch.where(self.present,value.fault.reshape_as(self.present),0)
+        return Numbers.combine_fault_rows(result)
+
+
+def take_field(value,index):
+    from queues import _take,ExactRational
+    if isinstance(value,torch.Tensor):
+        return value[index]
+    if hasattr(value,'numerator'):
+        return ExactRational(_take(value.numerator,index),_take(value.denominator,index))
+    return _take(value,index)
+
+
 def encode_fields(fields):
     if not fields:
         raise ValueError('设备字段schema不能为空')
@@ -46,7 +70,23 @@ def encode_fields(fields):
         append(words,valid if present is None else valid & present[:,None])
 
     for value in fields:
-        if isinstance(value,IntegerList):
+        if isinstance(value,RecordList):
+            rows,capacity=value.present.shape
+            if value.present.dtype!=torch.bool:
+                raise TypeError('记录列表需要bool[row,capacity]实际人口')
+            for member in value.fields:
+                count=member.numel() if isinstance(member,torch.Tensor) else member.fault.numel()
+                member_device=member.device if isinstance(member,torch.Tensor) else member.fault.device
+                if count!=rows*capacity or member_device!=value.present.device:
+                    raise ValueError('记录列表字段人口/设备不符')
+            population=value.present.to(torch.int64).sum(dim=1)
+            append(torch.stack([torch.full_like(population,5),population],dim=1))
+            for column in range(capacity):
+                index=torch.arange(rows,device=value.present.device)*capacity+column
+                encoded=encode_fields([take_field(member,index) for member in value.fields])
+                tokens=torch.arange(encoded.size(1),device=encoded.device)[None,:]
+                append(encoded,value.present[:,column,None] & (tokens<=encoded[:,0,None]))
+        elif isinstance(value,IntegerList):
             from queues import _take
             rows,capacity=value.present.shape
             if value.present.dtype!=torch.bool or value.present.device!=value.values.words.device or value.values.sign.numel()!=rows*capacity:
@@ -146,6 +186,41 @@ def decode_fields(encoded,schema,enabled):
             fault=fault | (denominator.sign<=0).to(torch.int32)
             neutral=denominator.constant(1)
             values.append(ExactRational(numerator,denominator.select(enabled,neutral)))
+        elif isinstance(kind,tuple) and kind[0]=='record_list':
+            from queues import _columns
+            tag=read(cursor)
+            population=read(cursor+1)
+            # 成员至少需要其长度token及非空schema，不设业务人口上限。
+            minima={'scalar':2,'integer':3,'rational':7,'integer_list':2}
+            minimum=1+sum(2 if isinstance(field,tuple) else minima[field] for field in kind[1])
+            capacity=max(1,width//minimum)
+            fault=fault | ((tag!=5)|(population<0)|(population>capacity)).to(torch.int32)
+            cursor=cursor+2
+            members=[]
+            masks=[]
+            for column in range(capacity):
+                live=(column<population) & enabled
+                previous_fault=fault
+                size=read(cursor)
+                coordinates=cursor[:,None]+torch.arange(width,device=encoded.device)[None,:]
+                member=encoded.gather(1,coordinates.clamp(0,width-1))
+                decoded,error=decode_fields(member,kind[1],live)
+                invalid=(size<0)|(size>=width)|(cursor+size>length)
+                fault=torch.where(live,fault | error | invalid.to(torch.int32),previous_fault)
+                members.append(decoded)
+                masks.append(live)
+                cursor=cursor+torch.where(live,size.clamp(0,width)+1,0)
+            packed=[]
+            for field in range(len(kind[1])):
+                entries=[member[field] for member in members]
+                if isinstance(entries[0],torch.Tensor):
+                    packed.append(torch.stack(entries,dim=1).flatten())
+                elif hasattr(entries[0],'numerator'):
+                    packed.append(ExactRational(_columns([entry.numerator for entry in entries]),
+                        _columns([entry.denominator for entry in entries])))
+                else:
+                    packed.append(_columns(entries))
+            values.append(RecordList(tuple(packed),torch.stack(masks,dim=1)))
         elif kind=='integer_list':
             from queues import _columns
             tag=read(cursor)

@@ -12,8 +12,8 @@ sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'ledger/gpu'))
 from rebate_contribution import RebateContributions
 from rebate_day import RebateDays
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'execution-normalization/gpu'))
-from fields import IntegerList,encode_fields,decode_fields
-from lifecycle import map_day_finalized,map_rebate_payment
+from fields import IntegerList,RecordList,encode_fields,decode_fields
+from lifecycle import map_day_finalized,map_rebate_payment,map_maker_finalized
 from core import EvidenceBank,Normalizer,EVIDENCE,OUT_EVIDENCE,OUT_DUPLICATE,OUT_LOGICAL_CONFLICT
 
 
@@ -66,6 +66,7 @@ def main():
     assert [value for value,present in zip(ref_values,decoded[2].present.flatten().cpu().tolist()) if present]==padded_ids[:-2]
     zero=torch.zeros_like(day)
     evidence=[]
+    maker_vectors_checked=0
     for original in source['records']:
         body=original['record'].get('Evidence')
         if body is None:
@@ -74,6 +75,34 @@ def main():
         if settlement is None:
             continue
         result=settlement['result']
+        if 'MakerAccrualFinalized' in result:
+            vector=result['MakerAccrualFinalized']
+            children=vector['contributions']
+            trade=integers([identity(child['trade_identity']) for child in children])
+            conditions=torch.tensor([condition[child['condition_id']] for child in children],device='cuda')
+            kinds=torch.tensor([{'Maker':0,'Taker':1}[child['kind']] for child in children],device='cuda')
+            days=torch.tensor([child['attribution_day_start_utc_ms'] for child in children],device='cuda')
+            contributions=RecordList((trade,conditions,kinds,days,rational([child['contribution_pusd'] for child in children])),
+                torch.ones((1,len(children)),dtype=torch.bool,device='cuda'))
+            reference=body['source_reference']['record']['SettlementLifecycle']
+            private=integers([reference['private_feedback_sequence']])
+            ordinal=torch.tensor([body['source_order']['ordinal']],device='cuda')
+            outer=torch.tensor([condition[vector['condition_id']]],device='cuda')
+            status=torch.tensor([{'Calculated':0,'ZeroNoEligibleMakerFill':1,'UnknownIncomplete':2}[vector['status']]],device='cuda')
+            mapped=Numbers.run_exact_batch(lambda:map_maker_finalized(outer,status,contributions,private,ordinal,zero,enabled))
+            assert mapped.emitted.cpu().tolist()==[True] and mapped.fault.cpu().tolist()==[0]
+            assert json.loads(body['logical_identity'].split(':',1)[1])[-1]=={'SettlementLifecycle':{'private_feedback_sequence':values(private)[0]}}
+            assert torch.equal(mapped.logical_keys,encode_fields([zero,torch.full_like(zero,9),private]))
+            decoded,error=Numbers.run_exact_batch(lambda:decode_fields(mapped.semantic,
+                ['scalar','scalar','scalar',('record_list',('integer','scalar','scalar','scalar','rational'))],enabled))
+            assert error.cpu().tolist()==[0] and decoded[0].cpu().tolist()==[0] and torch.equal(decoded[1],outer) and torch.equal(decoded[2],status)
+            actual=decoded[3]
+            mask=actual.present.flatten().cpu().tolist()
+            assert [value for value,live in zip(values(actual.fields[0]),mask) if live]==values(trade)
+            for member,expected_member in zip(actual.fields[1:4],[conditions,kinds,days]):
+                assert [value for value,live in zip(member.cpu().tolist(),mask) if live]==expected_member.cpu().tolist()
+            assert [value for value,live in zip(amounts(actual.fields[4]),mask) if live]==[Fraction(child['contribution_pusd']) for child in children]
+            maker_vectors_checked+=1
         if not ('DayFinalized' in result or 'Payment' in result):
             continue
         reference=body['source_reference']['record']['SettlementLifecycle']
@@ -103,6 +132,7 @@ def main():
             mapped.source_order,zero,mapped.fault,torch.full_like(zero,mapped.payload_schema))
         evidence.append(incoming)
     assert len(evidence)==2
+    assert maker_vectors_checked==2
     normalizer=Normalizer.empty(evidence[0],1).append_bank(evidence[1])
     rows=torch.tensor([[0,1]],device='cuda')
     normalizer,result=normalizer.prepare(rows,torch.ones_like(rows,dtype=torch.bool))
@@ -149,6 +179,7 @@ def main():
         'condition_finite_payable_locked_checked':True,'source_totals_conserved':True,'payment_repeat_no_second_allocation':True,
         'actual_day_reference_integer_list_and_padding_checked':True,
         'actual_day_payment_identity_body_source_order_and_repeat_checked':True,
+        'actual_maker_full_vector_body_decode_checked':maker_vectors_checked,
         'elapsed_seconds':time.perf_counter()-started,'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
         'full_NOE_Ledger_day_coordinator_delivered':False}))
 

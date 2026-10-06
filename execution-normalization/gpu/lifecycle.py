@@ -100,3 +100,28 @@ def map_rebate_payment(kind,day,paid,private,ordinal,account,active):
     # 固定原引用类型、账户、kind/day全部保留，不以该引用代替付款逻辑身份。
     semantic=encode_fields([account,kind,day,account,torch.full_like(account,12),kind,day,paid])
     return LifecycleEvidence(logical,semantic,source_order(private,ordinal),active & (fault==0),fault,13)
+
+
+def map_maker_finalized(condition,status,contributions,private,ordinal,account,active):
+    """一条原Maker证据保存完整贡献向量；不按元素拆反馈或重排人口。"""
+    from fields import RecordList
+    from queues import Numbers
+    if not isinstance(contributions,RecordList) or len(contributions.fields)!=5:
+        raise TypeError('Maker需要原trade/condition/kind/day/amount贡献向量')
+    roots,capacity=contributions.present.shape
+    if roots!=account.numel():
+        raise ValueError('Maker贡献向量根人口不符')
+    trade,conditions,kinds,days,amounts=contributions.fields
+    for column in [conditions,kinds,days]:
+        if column.shape!=(roots*capacity,) or column.dtype!=torch.int64 or column.device!=account.device:
+            raise TypeError('Maker贡献标量需同设备int64[root*capacity]')
+    comparison=trade.compare(trade.constant((1<<64)-1))
+    error=trade.fault | comparison.fault | amounts.fault | ((trade.sign<0)|(comparison.order>0)).to(torch.int32)
+    error=error.reshape(roots,capacity) | ((conditions.reshape(roots,capacity)!=condition[:,None]) |
+        (kinds.reshape(roots,capacity)!=0)).to(torch.int32)
+    fault=input_fault([private],[account,condition,status],ordinal) | contributions.fault
+    fault=fault | Numbers.combine_fault_rows(torch.where(contributions.present,error,0))
+    fault=fault | ((account<0)|(condition<0)|(status<0)|(status>2)).to(torch.int32)
+    logical=encode_fields([account,torch.full_like(account,9),private])
+    semantic=encode_fields([account,condition,status,contributions])
+    return LifecycleEvidence(logical,semantic,source_order(private,ordinal),active & (fault==0),fault,14)

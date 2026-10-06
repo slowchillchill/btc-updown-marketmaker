@@ -152,7 +152,8 @@ class Normalizer:
             late = kind == LATE_COVERAGE
             result = torch.where(incoming_economic,
                 torch.where(found_economic,
-                    torch.where((bank.semantic[fact] == bank.semantic[row]).all(dim=1), OUT_ALIAS, OUT_ECONOMIC_CONFLICT),
+                    torch.where((bank.semantic[fact] == bank.semantic[row]).all(dim=1) &
+                        (bank.payload_schemas[fact] == bank.payload_schemas[row]), OUT_ALIAS, OUT_ECONOMIC_CONFLICT),
                     OUT_FACT), torch.where(late,
                     torch.where(found_economic, OUT_ALIAS, OUT_PENDING),
                     torch.where(kind == PENDING, OUT_PENDING, OUT_EVIDENCE)))
