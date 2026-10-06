@@ -32,6 +32,7 @@ def sum_population(values,rows,width):
 @dataclass(frozen=True)
 class RebateDays:
     condition_slots: torch.Tensor  # [roots,conditions]，原condition身份序，非物理添加序。
+    maker_accrual_finalized: torch.Tensor  # 原市场状态，独立于日人口/付款。
     occupied: torch.Tensor
     kinds: torch.Tensor
     days: torch.Tensor
@@ -58,9 +59,17 @@ class RebateDays:
         by_condition=ratio(roots*capacity*count)
         duplicate=(conditions[:,:,None]==conditions[:,None,:]) & ~torch.eye(count,dtype=torch.bool,device=conditions.device)[None,:,:]
         fault=((conditions<0).any(dim=1)|duplicate.any(dim=2).any(dim=1)).to(torch.int32)
-        return cls(conditions,empty,torch.full_like(empty,-1,dtype=torch.int64),torch.zeros_like(empty,dtype=torch.int64),empty.clone(),
+        return cls(conditions,torch.zeros_like(conditions,dtype=torch.bool),empty,torch.full_like(empty,-1,dtype=torch.int64),torch.zeros_like(empty,dtype=torch.int64),empty.clone(),
             value,value,value,by_condition,by_condition,by_condition,fault,
             torch.full((roots,),capacity,dtype=torch.int64,device=conditions.device))
+
+    def observe_maker(self,condition,status,enabled):
+        match=self.condition_slots==condition[:,None]
+        fault=self.fault | torch.where(enabled,((match.to(torch.int32).sum(dim=1)!=1) |
+            (status<0)|(status>2)).to(torch.int32),0)
+        mask=match & enabled[:,None] & (fault==0)[:,None]
+        # 原Calculated/Zero为true，UnknownIncomplete为false；不是sticky终态。
+        return replace(self,maker_accrual_finalized=torch.where(mask,(status!=2)[:,None],self.maker_accrual_finalized),fault=fault)
 
     def resized(self,capacity):
         roots,old=self.occupied.shape

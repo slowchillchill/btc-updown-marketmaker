@@ -251,8 +251,10 @@ class AdmissionLifecycle:
         payment_event=lifecycle_use & (tag==13)
         if days is None:
             # 配置缺口不能静默消费原日记录；现Base路径尚无日记录时保留兼容。
-            fault=fault | (day_event | payment_event).to(torch.int32)
+            fault=fault | (maker_event | day_event | payment_event).to(torch.int32)
         else:
+            days=days.observe_maker(self.lifecycle.conditions[root,local],self.lifecycle.maker_statuses[root,local],
+                maker_event & maker_ready & maker_capacity & (fault==0))
             refs=self.lifecycle.rebate_refs
             ref_width=refs.present.size(1)
             ref_index=index[:,None]*ref_width+torch.arange(ref_width,device=index.device)[None,:]
@@ -272,7 +274,7 @@ class AdmissionLifecycle:
         contributions=replace(coordinate(contributions,self.rebate_contributions,contribution_commit),
             capacity_required=contributions.capacity_required)
         if days is not None:
-            days=replace(coordinate(days,self.rebate_days,valid & (~(day_event | payment_event) | success)),
+            days=replace(coordinate(days,self.rebate_days,valid & (~(maker_event | day_event | payment_event) | success)),
                 capacity_required=days.capacity_required)
         # 各NOE记录候选共同成功，先前已消费位置/账本条目不回滚。
         platform=replace(platform,balances=ExactRational(

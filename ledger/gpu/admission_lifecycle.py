@@ -39,6 +39,7 @@ class LifecycleColumns:
     rebate_paid: object
     rebate_refs: object
     maker_contributions: object
+    maker_statuses: torch.Tensor
     emitted: torch.Tensor
     fault: torch.Tensor
 
@@ -117,7 +118,7 @@ class LifecycleColumns:
             decoded[9][3].reshape(roots,width),decoded[9][4].reshape(roots,width),decoded[9][5],
             torch.where(payment,decoded[13][1],decoded[12][1]).reshape(roots,width),
             torch.where(payment,decoded[13][2],decoded[12][2]).reshape(roots,width),
-            decoded[12][3],decoded[12][4],decoded[12][5],decoded[13][7],decoded[12][6],decoded[14][3],
+            decoded[12][3],decoded[12][4],decoded[12][5],decoded[13][7],decoded[12][6],decoded[14][3],decoded[14][2].reshape(roots,width),
             active.reshape(roots,width),
             torch.where(active,fault,0).reshape(roots,width))
 

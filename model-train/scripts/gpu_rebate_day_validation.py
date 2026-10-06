@@ -176,12 +176,17 @@ def main():
     restored=Numbers.run_exact_batch(lambda:state.resized(2),initial_word_capacity=8)
     assert amounts(restored.condition_payable)[:len(condition)]==amounts(state.condition_payable)
     assert restored.payment_observed.cpu().tolist()==[[True,False]]
+    consumer={}
+    if source.get('source_contract')=='execution_normalization_v4':
+        from gpu_rebate_admission_validation import validate
+        consumer=validate(source)
     print(json.dumps({'actual_maker_vectors':len(vectors),'actual_contributions':len(source['contributions']),
         'actual_DayFinalized_and_Payment':True,'missing_predecessors_no_commit':True,
         'condition_finite_payable_locked_checked':True,'source_totals_conserved':True,'payment_repeat_no_second_allocation':True,
         'actual_day_reference_integer_list_and_padding_checked':True,
         'actual_day_payment_identity_body_source_order_and_repeat_checked':True,
         'actual_maker_full_vector_body_decode_checked':maker_vectors_checked,
+        **consumer,
         'elapsed_seconds':time.perf_counter()-started,'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
         'full_NOE_Ledger_day_coordinator_delivered':False}))
 
