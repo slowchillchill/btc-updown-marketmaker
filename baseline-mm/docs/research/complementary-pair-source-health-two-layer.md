@@ -1,6 +1,6 @@
 # 直接 Parquet 查询与两层来源健康研究
 
-来源健康研究直接查询 Parquet 的必要列，用于形成连续时间分布和候选阈值。当前任务见[#185](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)，流程依据[D-0302](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6013334211)。v6实际准备已失败，本次身份修复尚未重跑；仍无完整研究结果，不正式采用normal/max。
+来源健康研究直接查询 Parquet 的必要列，用于形成连续时间分布和候选阈值。当前任务见[#185](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)，流程依据[D-0302](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6013334211)。v6失败后，身份修复源码76f854e0已完成十八日prepare和五折结果生成；prepare/study均退出0，全程2:12:52.154384。结果见[十八日正式研究结果](complementary-pair-source-health-18d-20260909-20260926.md)，不正式采用normal/max。
 
 ## 当前入口与职责
 
@@ -16,7 +16,7 @@
 
 随后工程头 `fd5581c8ec88a783d35a23e63f98177df5a5eb11` 的列式尝试仍累计全期raw表。该次运行被systemd-oomd终止，最后进程RSS约108.93GiB，study未启动。原80GiB配置不是RSS上界，旧APPROVED不覆盖当前修正。事故和新方向见[#185记录](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185#issuecomment-6015835991)。
 
-v6源码 `6a31a28d1bc9e250acf1474cd1271201f547a57a` 已在获批独立研究保护下实际执行prepare，墙钟20分27.42秒、退出码1。进程峰值RSS22487860KiB（约21.45GiB），研究cgroup峰值31949815808字节（约29.76GiB），swap为0；该次失败不是OOM。身份投影仅接受metadata_snapshot，遗漏了合法market_state_transition所携带的固定身份，未发布完整材料，study未启动。本次最小修复使用metadata通用固定身份字段，保持冲突检查和原行接收/准入可见时间；修复头尚未重跑。实际失败与修复分流见[#185记录](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185#issuecomment-6019444363)。
+v6源码 `6a31a28d1bc9e250acf1474cd1271201f547a57a` 已在获批独立研究保护下实际执行prepare，墙钟20分27.42秒、退出码1。进程峰值RSS22487860KiB（约21.45GiB），研究cgroup峰值31949815808字节（约29.76GiB），swap为0；该次失败不是OOM。身份投影仅接受metadata_snapshot，遗漏了合法market_state_transition所携带的固定身份，未发布完整材料，study未启动。随后v7使用metadata通用固定身份字段，保持冲突检查和原行接收/准入可见时间。源码76f854e0已完成十八日prepare，形成有效S/A充分统计和五折结果；prepare/study均退出0，全程2:12:52.154384。实际失败与修复分流见[#185记录](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185#issuecomment-6019444363)。
 
 十八日主要来源的原始到达延迟描述统计已由直接SQL查询完成。PM按book/price_change原始消息计数，未做业务去重、资产展开和市场窗口过滤。该结果不能冒充有效消息分布，也不能直接进入normal/max拟合。当前S/A查询按原有效消息和窗口口径另行形成必要充分统计，不重复原始描述查询。
 
@@ -72,7 +72,7 @@ study保留五折各一份冻结和验证JSON。每个候选的 `*.exceeded/*.pa
 
 SQL以自然文件为单元；原生范围重叠时合并必要文件。单次查询最坏可触及该文件组全部物理行，不能以谓词筛选后的行数声称读取上界。行组裁剪是引擎能力，当前没有把它写成已实测保证。最大PM文件有3,267,444行、10,211个行组，footer约54.32MiB；不按每个小序号段反复重开该文件。索引只保留非空范围摘要，不枚举稀疏序号空洞。
 
-主要顺序键是来源epoch、原生序号、稳定file/row；状态按source/condition/asset和visible_at分组。PM源内前沿在分condition前形成，市场同步仍在该condition实际遇到代际变化时更新。窗口、排序和连接可能缓冲或spill；输出、临时文件和引擎外分配另计。完整峰值与耗时仍未知。官方说明见[Parquet投影](https://duckdb.org/docs/current/data/parquet/overview.html)和[缓冲算子及spill](https://duckdb.org/docs/current/guides/performance/how_to_tune_workloads.html)。
+主要顺序键是来源epoch、原生序号、稳定file/row；状态按source/condition/asset和visible_at分组。PM源内前沿在分condition前形成，市场同步仍在该condition实际遇到代际变化时更新。窗口、排序和连接可能缓冲或spill；输出、临时文件和引擎外分配另计。本次prepare墙钟1:03:21、进程峰值RSS39,758,648KiB；study结果已生成，study退出0，全程2:12:52.154384、研究cgroup峰值51,543,330,816B、swap峰值0。本次实际量值不构成其他输入的上界。官方说明见[Parquet投影](https://duckdb.org/docs/current/data/parquet/overview.html)和[缓冲算子及spill](https://duckdb.org/docs/current/guides/performance/how_to_tune_workloads.html)。
 
 依赖锁为 `research/requirements-source-health.lock`，固定CPython3.14/Linux x86_64的官方DuckDB1.5.6和PyArrow23.0.1 wheel及SHA-256。实际环境/制品与源码在私有交接绑定。公开命令使用逻辑路径变量：
 
@@ -96,7 +96,7 @@ SQL以自然文件为单元；原生范围重叠时合并必要文件。单次�
 
 代表测试覆盖原构造/解析入口、跨文件重复与冲突、资产和代际、缺口/快照恢复、持续旧事件、Chainlink异常保留、同毫秒样本和最终状态、真实断选、未知分母、首尾/午夜/删失、normal=max=0、未来折不泄漏和一个Parquet截断边界。原metadata初始化小文件的精确选择仍得到原3条前序；没有重扫十二分钟或十八日完整core。此前投影原型17项Python测试通过；固定workspace退出0，累计1379 passed/0 failed/23 ignored，具名UTC测试明确跳过。fmt和相关all-targets clippy退出0，既有警告保持。当前返工只改Python、测试与说明，Rust输入未变；上述Rust结果仍适用，不能证明当前SQL入口。17条真实构造原始记录验证prepare命令；另存的19条有限标量确认验证五折10份冻结/验证文件，不能称为18日历史运行。返工代表例验证：未来epoch旧received不改已可见前缀；B首条重复过滤后，A→B→C仍保持10@100、20@400、30@400；实际5ms断选的两段共15ms，右删失2、左截断1；重新选择时才可见新事实的左截断0。监督SIGTERM代表记录真实阶段−15并回收，无study。结果见[工程机器摘要](complementary-pair-columnar-health-engineering.json)和PR，不把旧通过记录替代新入口验证。
 
-用户已取消新增小样本试验。当前身份修复没有新增试验、RSS对照、构建或重跑；v6已实际执行并失败，不能写成从未尝试完整输入。既有23项小测试属于较早中间源码，后续metadata、文件范围、TWAP过滤顺序和内存连接修改未用新试验验证。旧工程机器摘要保持原版本，不能冒充当前入口结果。准确实现与实际查询结果仍须分别核对。
+用户已取消新增小样本试验。身份修复没有新增试验、RSS对照或构建。v6已实际执行并失败，随后v7在用户批准的保护下完整生成十八日材料和五折结果；不覆盖旧失败事实。既有23项小测试属于较早中间源码，后续metadata、文件范围、TWAP过滤顺序和内存连接修改未用新试验验证。旧工程机器摘要保持原版本，不能冒充当前入口结果。准确实现与实际查询结果仍须分别核对。
 
 ## 历史紧凑工程证据
 

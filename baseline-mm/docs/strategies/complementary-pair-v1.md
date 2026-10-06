@@ -6,7 +6,7 @@
 
 依据为 #185 两份详细合同与 [D-0268](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5932157187)、[D-0269](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5933131977)、[D-0270](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5933292905)。公共策略调用基线为 #186 任务 1 / PR #188（`90e21137de51611a63c40e9c91502721a2fb6d4e`）。后续依据为 [D-0272](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5942867176)、[D-0273](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5943106626) 和 [D-0274](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5958205955)。职责与源代码入口见第 10 节，不从当前模型表达推导人工策略交易限制。
 
-[D-0284](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5981603350) 的来源健康、静默重评和发送前失效设计已实施。三态与16个显式阈值由 #185/PR #248 交付，公共调度与历史接线沿 #241。当前 A 使用直接Parquet SQL完成来源健康研究。十八日原始到达描述统计已完成，但尚未形成正式有效消息S/A校准结果；全期列式导入的OOM失败保留历史，当前修正不沿用其容量或审查结论。已获批的独立研究保护实际生效，v6准备因合法metadata身份遗漏退出1，非OOM，study未启；当前身份修复尚未重跑。正式 normal/max 未采用，完整经营及 PAPER/LIVE 装配仍按所属任务交付。
+[D-0284](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5981603350) 的来源健康、静默重评和发送前失效设计已实施。三态与16个显式阈值由 #185/PR #248 交付，公共调度与历史接线沿 #241。当前 A 使用直接Parquet SQL完成来源健康研究。十八日原始到达描述统计和有效消息S/A、四折冻结验证及最后开发比较均已生成；全期列式导入的OOM失败保留历史，当前修正不沿用其容量或审查结论。已获批的独立研究保护实际生效，v6准备因合法metadata身份遗漏退出1，非OOM，study未启；随后v7身份修复已形成完整来源健康材料与五折结果，prepare/study均退出0，全程2:12:52.154384；见[十八日正式研究结果](../research/complementary-pair-source-health-18d-20260909-20260926.md)。正式 normal/max 未采用，完整经营及 PAPER/LIVE 装配仍按所属任务交付。
 
 已定边界为 BUY-only、等量新配对、Maker 为主、`GTC + post_only`、每侧一个目标价位、主动修复优先 FAK；允许有限小亏、部分修复、超成本留孤腿及受约束执行性过补。普通换价允许新旧单重叠，主动 FAK 前必须先处理补入侧可能重复成交的旧买单。初始资金 2000 pUSD、逐市场 1000 pUSD 含费投入、账户 30% 高水位回撤、未到账两类返佣排除及实际退出立即结束均按原合同执行。
 
@@ -200,7 +200,7 @@ Binance 特征候选为因果收益、滚动波动、聚合成交方向、深度
 
 研究校准限 UTC `[2026-09-09,2026-09-24)`，开发比较限 UTC `[2026-09-24,2026-09-27)`。先由公共准备核对覆盖、缺失、可见时间、规则、市场成员及数据用途；日期已过去不证明数据合格。任务3已完成18天原文件准入、真实规则加载与最终性来源核对；逐日事实、资源与边界见[输入资格报告](../research/complementary-pair-input-readiness.md)，分折、27参数形成、时序与连续账户方法见[研究计划](../research/complementary-pair-research-plan.md)。实际统计、经营实验随后在准确合同下执行。
 
-公共增量及健康策略历史组合已交付。当前按 D-0302 完成必要列投影、SQL连续统计和冻结候选研究，再接续剩余研究；已完成的输入资格、材料、因果统计和 PR #240 来源候选保留，不重复执行。研究方法仍按概率与跨源基线 → 报价及数量候选 → 修复／风险候选和费用归属核对 → 同账户连续历史经营 → 固定候选后开发区间比较推进，并补必要健康统计／分层，与其他参数共同形成候选。后一步有依赖时使用已交付公共回测，不在研究脚本自造撮合或账本。每次实验用独立账户／策略实例，记录代码、规则、参数和时序。开发比较参与选择，其成绩不是独立留出证据；范围外数据与模型第三集合不因共享入口开放。
+公共增量及健康策略历史组合已交付。当前已按 D-0302 形成必要列SQL连续统计和五折来源健康结果，再接续剩余研究；已完成的输入资格、材料、因果统计和 PR #240 来源候选保留，不重复执行。研究方法仍按概率与跨源基线 → 报价及数量候选 → 修复／风险候选和费用归属核对 → 同账户连续历史经营 → 固定候选后开发区间比较推进，并补必要健康统计／分层，与其他参数共同形成候选。后一步有依赖时使用已交付公共回测，不在研究脚本自造撮合或账本。每次实验用独立账户／策略实例，记录代码、规则、参数和时序。开发比较参与选择，其成绩不是独立留出证据；范围外数据与模型第三集合不因共享入口开放。
 
 | 研究对象 | 输入／方法候选与输出 | 推翻候选的证据 |
 | --- | --- | --- |
