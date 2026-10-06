@@ -104,11 +104,13 @@ class ExactRational:
 
     @classmethod
     def ratio(cls, numerator, denominator):
+        invalid = numerator.fault | denominator.fault | (denominator.sign == 0).to(torch.int32)
         common = numerator.gcd(denominator)
         n, _ = numerator.divrem(common)
         d, _ = denominator.divrem(common)
-        n = ExactInt(n.words, n.sign * d.sign, n.fault | d.fault)
-        return cls(n, d.abs())
+        invalid = invalid | n.fault | d.fault
+        n = ExactInt(n.words, n.sign * d.sign, invalid)
+        return cls(n, ExactInt(d.words, d.sign.abs(), invalid))
 
     @classmethod
     def from_values(cls, numerators, denominators, *, device='cuda'):

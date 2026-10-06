@@ -104,6 +104,10 @@ def main():
     assert ra.floor().report_values() == [x.numerator//x.denominator for x in fa], 'rational_floor'
     bad_r = ExactRational.from_values([1], [0])
     assert not bool(bad_r.compare(ExactRational.from_values([1], [1])).valid_mask()[0]), 'rational zero denominator fault'
+    canonical = ExactRational.from_values([0, -6, 6], [-7, -8, -8])
+    assert canonical.numerator.report_values() == [0, 3, -3], 'normalized numerator sign'
+    assert canonical.denominator.report_values() == [1, 4, 4], 'normalized denominator and zero'
+    assert not bool(canonical.fault.any()), 'valid normalized rationals'
     records.extend(['rational_floor', 'rational_fault'])
     torch.cuda.synchronize();elapsed=time.monotonic()-started
     report={'scope':'实际公共GPU整数/末端投影；不是完整环境/PPO/训练容量','source_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'cases':len(a),'passed':records,'projection_errors':errors,'compile_seconds':compile_seconds,'elapsed_seconds':elapsed,'device':torch.cuda.get_device_name(),'peak_allocated_bytes':torch.cuda.max_memory_allocated()}
