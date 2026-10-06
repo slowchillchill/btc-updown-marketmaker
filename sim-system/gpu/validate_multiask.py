@@ -259,13 +259,15 @@ def main():
         actual=[Fraction(n,d) for n,d in zip(values(state.outcomes.numerator),values(state.outcomes.denominator))]
         assert actual==[Fraction(expected_outcomes.get(token,'0')) for token in ['1','2']]
         platform_checked=True
+    from validate_reservation import validate as validate_reservation
+    reservation_report=validate_reservation(source)
     import os
     artifact=os.environ.get('B_GPU_ORDER_ARTIFACT_DIR')
     if artifact:
         Path(artifact,'original-noe-reference.json').write_text(json.dumps({
             'feedback_batches':source['feedback_batches'],'noe_records':source['noe_records'],
             'normalization_reference':source['normalization_reference'],
-            'original_ledger_projection':source['ledger_projection']},ensure_ascii=False))
+            'original_ledger_projection':source['ledger_projection'],'reservation_checkpoints':source['reservation_checkpoints']},ensure_ascii=False))
     print(json.dumps({'original_external_5share_request':True,'taker_fills':3,'checkpoints':len(source['checkpoints']),
         'same_time_consumption_fill_sequences':order,'fill_pool_capacity':pool.capacity,
         'elapsed_seconds_with_reference_reads':time.perf_counter()-started,
@@ -280,6 +282,7 @@ def main():
         'actual_SIM_device_trade_mapping':trade_report,
         'actual_SIM_device_economic_mapping':economic_report,
         'actual_SIM_device_projection_batch':projection_report,
+        'actual_Ledger_reservation_candidate':reservation_report,
         'original_feedback_dual_visibility_gate_checked':True,
         'global_clock_NOE_Ledger_delivered':False}))
 

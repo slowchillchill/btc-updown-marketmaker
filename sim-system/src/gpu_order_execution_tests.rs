@@ -215,6 +215,35 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
         items:vec![PostOrderBatchItemV2 {batch_item_ordinal:0,item:post_item("gpu-multiask-item",&condition,&token,
             SimBuyOrderKindV1::GtcLimit {limit_price_pusd_per_share:"0.3".parse().unwrap(),size_shares:"5".parse().unwrap(),post_only:false})}],
     });
+    #[cfg(feature="shared-execution")]
+    let mut reservation_checkpoints=Vec::new();
+    #[cfg(feature="shared-execution")]
+    let mut source_ledger={
+        let mut ledger=ledger::LedgerWriterV1::new_with_admission_v2(ledger::AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+        ledger.apply_noe_memory_v2(&observation.opening_record().unwrap()).unwrap();
+        for record in &initial_records { ledger.apply_noe_memory_v2(record).unwrap(); }
+        reservation_checkpoints.push(gpu_ledger_reservation_checkpoint(&ledger,"opening"));
+        let cost=actor._rule_snapshot.limit_buy_cost_v1(&num_bigint::BigUint::from(500u32),30,
+            &ExactDecimal("0.01".into()),false).unwrap();
+        let principal:rust_decimal::Decimal=cost.principal_micro.to_string().parse().unwrap();
+        let fee:rust_decimal::Decimal=cost.fee_1e5_units.to_string().parse().unwrap();
+        let intent=ledger::ReserveIntentV1 {
+            request_identity:ledger::LedgerRequestIdentityV1("gpu-reservation".into()),condition_id:condition.clone(),
+            requested_principal_pusd:ExactDecimal((principal/rust_decimal::Decimal::from(1_000_000)).normalize().to_string()),
+            immediate_fee_reserve_pusd:ExactDecimal((fee/rust_decimal::Decimal::from(100_000)).normalize().to_string()),
+        };
+        let decision=ledger.try_reserve_action_v2(std::slice::from_ref(&intent)).unwrap();
+        assert!(matches!(decision[0],ledger::LedgerReservationOutcomeV1::Reserved {..}));
+        reservation_checkpoints.push(gpu_ledger_reservation_checkpoint(&ledger,"reserved"));
+        let repeated=ledger.try_reserve_action_v2(std::slice::from_ref(&intent)).unwrap();
+        assert_eq!(repeated,decision,"同请求预留结果粘滞，不二次占用");
+        ledger.record_submission_started(&ledger::LedgerLocalEventIdentityV1("gpu-send-started".into()),
+            &intent.request_identity,&ledger::LedgerSubmissionItemIdentityV1 {
+                global_request_id:"gpu-multiask-post".into(),batch_item_ordinal:0,
+            }).unwrap();
+        reservation_checkpoints.push(gpu_ledger_reservation_checkpoint(&ledger,"submitted"));
+        ledger
+    };
     let (state,receipt) = register_request_candidate(&actor.opened,actor.scenario.initial_market_directory(),state,
         &request_cutoff(1_200),&request,11,actor._latency_profile.as_ref(),actor._rule_snapshot.snapshot());
     let (state,accepted) = advance_mutation_candidate_with_outputs(&actor.opened,actor.scenario.initial_market_directory(),state,
@@ -254,15 +283,15 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
     assert!(observation.take_closed_records().is_empty(),"实际领取位置不重复消费");
     #[cfg(feature="shared-execution")]
     let ledger_projection={
-    let mut ledger=ledger::LedgerWriterV1::new_with_admission_v2(ledger::AccountAdmissionPolicyV2::DualCashNoMarketLimit);
-    ledger.apply_noe_memory_v2(&observation.opening_record().unwrap()).unwrap();
-    for record in &initial_records { ledger.apply_noe_memory_v2(record).unwrap(); }
+    let mut ledger=source_ledger;
     let mut pending=noe.clone();
     while !pending.is_empty() {
         let previous=pending.len();
         let mut remaining=Vec::new();
         for record in pending {
-            match ledger.apply_noe_memory_v2(&record).unwrap() {
+            let outcome=ledger.apply_noe_memory_v2(&record).unwrap();
+            reservation_checkpoints.push(gpu_ledger_reservation_checkpoint(&ledger,"noe"));
+            match outcome {
                 ledger::LedgerMemoryApplyOutcomeV1::MissingEconomicAssociation |
                 ledger::LedgerMemoryApplyOutcomeV1::Applied(ledger::LedgerApplyOutcomeV1::MissingPlatformPredecessor {..})
                     => remaining.push(record),
@@ -279,6 +308,8 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
     };
     #[cfg(not(feature="shared-execution"))]
     let ledger_projection=serde_json::Value::Null;
+    #[cfg(not(feature="shared-execution"))]
+    let reservation_checkpoints=Vec::<serde_json::Value>::new();
     let records=noe.iter().map(|record|serde_json::json!({"record":record.record(),
         "position":record.position(),"visibility":record.visibility()})).collect::<Vec<_>>();
     let rules = &actor._rule_snapshot.snapshot().synchronized_platform_rules;
@@ -287,7 +318,7 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
         "fee_exponent":rules.fee_schedule.exponent,"taker_rebate_rate":actor._rule_snapshot.snapshot().project_account_rules.rebate_settlement.value.fixed_taker_rebate_rate.value().to_string(),
         "feedback_batches":feedback_batches,"noe_records":records,"initial_noe_records":initial_records.len(),
         "normalization_reference":normalization_reference.borrow().clone(),
-        "ledger_projection":ledger_projection,
+        "ledger_projection":ledger_projection,"reservation_checkpoints":reservation_checkpoints,
         "opening_available_pusd":state.session.as_ref().unwrap().opening_fact.initial_account_state.available_pusd,
         "session_seed":state.session.as_ref().unwrap().session_seed.0});
     let mut child = std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
@@ -341,4 +372,13 @@ impl BusinessProjectionPortV2 for GpuNoeReferencePort {
     fn observe_public_time(&mut self,time:&crate::public_consumption::TrustedActorExecutionTimeV1) {
         self.memory.observe_public_time(time);
     }
+}
+
+#[cfg(feature="shared-execution")]
+fn gpu_ledger_reservation_checkpoint(ledger:&ledger::LedgerWriterV1,stage:&str) -> serde_json::Value {
+    let request=ledger.funds_read_v1().request(&ledger::LedgerRequestIdentityV1("gpu-reservation".into()))
+        .map(|value|serde_json::json!({"status":value.reservation_state,"principal":value.principal_pusd,
+            "fee":value.immediate_fee_pusd,"last_ledger_entry_seq":value.last_ledger_entry_seq}));
+    serde_json::json!({"stage":stage,"projection":ledger.projection_v2().unwrap(),
+        "cash":ledger.economic_read().unwrap().cash(),"request":request})
 }
