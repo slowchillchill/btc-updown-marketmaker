@@ -437,6 +437,21 @@ pub struct PublicCompactReaderV1 {
     reference_markets: std::collections::BTreeMap<String,MarketIdentityV2>,
 }
 impl PublicCompactReaderV1 {
+    /// 已验收前缀内的原输入引用；读取不会推进组/事实光标。
+    /// 供独立hidden准备恢复原CanonicalPmMessage，不复制输入全集到内存。
+    pub fn input_record(&mut self, reference: &CanonicalInputRecordRefV1) -> RecordingResult<RecordedIngressV1> {
+        if reference.input_stream_id != self.manifest.header.input_stream_id
+            || reference.input_position >= self.next {
+            return Err(io::Error::other("原输入引用未属于已读取的合法前缀").into());
+        }
+        let (packet, _, _) = self.decode_packet_at(reference.input_position)?;
+        if packet.input.input_stream_id != reference.input_stream_id
+            || packet.input.input_position != reference.input_position {
+            return Err(io::Error::other("原输入引用与实际packet不一致").into());
+        }
+        Ok(packet.input)
+    }
+
     /// SHA核对完整文件；上限只限制本次读取分配，不改变业务或签发数据验收。
     pub fn open(root: &Path, max_packet_bytes: usize) -> RecordingResult<Self> {
         Self::open_with_progress(root, max_packet_bytes, Duration::from_secs(10), |_| {})
@@ -474,18 +489,19 @@ impl PublicCompactReaderV1 {
                   next_pm: 0, next_step: 0, next_report: 0, max_packet_bytes,
                   reference_sources:Default::default(),reference_markets:Default::default() })
     }
-    pub fn next_packet(&mut self) -> RecordingResult<Option<PublicCompactPacketV1>> {
-        if self.next == self.manifest.inputs { return Ok(None); }
+    fn decode_packet_at(&mut self, position: u64) -> RecordingResult<(PublicCompactPacketV1, u64, u64)> {
+        let offset = position.checked_mul(8)
+            .ok_or_else(|| io::Error::other("材料输入索引溢出"))?;
         let mut value = [0_u8; 8];
-        self.offsets.seek(SeekFrom::Start(self.next * 8))?;
+        self.offsets.seek(SeekFrom::Start(offset))?;
         self.offsets.read_exact(&mut value)?;
         let start = u64::from_le_bytes(value);
         self.offsets.read_exact(&mut value)?;
         let end = u64::from_le_bytes(value);
-        if start != self.next_offset || start >= end || end > self.manifest.files[0].bytes || end - start > self.max_packet_bytes as u64 {
+        if start >= end || end > self.manifest.files[0].bytes || end - start > self.max_packet_bytes as u64 {
             return Err(io::Error::other("材料payload偏移或本次资源容量错误").into());
         }
-        let mut bytes = vec![0; (end - start) as usize];
+        let mut bytes = vec![0; usize::try_from(end - start)?];
         self.payload.seek(SeekFrom::Start(start))?;
         self.payload.read_exact(&mut bytes)?;
         let decoded = if self.manifest.schema_version != LEGACY_SCHEMA {
@@ -497,7 +513,16 @@ impl PublicCompactReaderV1 {
             }
             zstd::bulk::decompress(&bytes, frame_bytes)?
         } else { bytes };
-        let packet: PublicCompactPacketV1 = serde_json::from_slice(&decoded)?;
+        Ok((serde_json::from_slice(&decoded)?, start, end))
+    }
+
+    pub fn next_packet(&mut self) -> RecordingResult<Option<PublicCompactPacketV1>> {
+        if self.next == self.manifest.inputs { return Ok(None); }
+        let (packet, start, end) = self.decode_packet_at(self.next)?;
+        if start != self.next_offset {
+            return Err(io::Error::other("材料payload没有连续完整覆盖").into());
+        }
+        let mut value = [0_u8; 8];
         if packet.input.input_stream_id != self.manifest.header.input_stream_id || packet.input.input_position != self.next {
             return Err(io::Error::other("材料packet输入位置错误").into());
         }

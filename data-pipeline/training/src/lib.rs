@@ -13,6 +13,7 @@ pub mod gpu_initial_sort;
 mod gate_a_publication;
 mod gate_a_sim_adapter;
 pub mod hidden_preparation;
+pub mod compact_hidden;
 pub mod historical_initialization;
 pub mod historical_preparation_progress;
 pub mod observation;
