@@ -10,7 +10,9 @@ sys.path[:0] = [str(ROOT/'model-train'), str(ROOT/'sim-system/gpu'), str(ROOT/'l
 from queues import Numbers
 from position_cost import PositionCosts
 from trade_success import TradeSuccess
-from validate_base_execution import rational, values, units, integers
+from validate_base_execution import rational, values, integers
+from admission_lifecycle import LifecycleDirectory
+from rebate_contribution import RebateContributions
 
 
 def amounts(value):
@@ -24,6 +26,10 @@ def main():
     no = ~yes
     costs, trades = Numbers.run_exact_batch(lambda: (
         PositionCosts.empty(1, 1, 'cuda'), TradeSuccess.open(1, 1, 'cuda')))
+    directory = Numbers.run_exact_batch(lambda: LifecycleDirectory.empty(1, 1, device='cuda'))
+    directory, error = Numbers.run_exact_batch(lambda: directory.set(integers([1]), zero, no, integers([0]), yes))
+    assert error.cpu().tolist() == [0]
+    contributions = Numbers.run_exact_batch(lambda: RebateContributions.empty(1, 1, 'cuda'))
     prefix = 0
     checked = 0
     for checkpoint in source['checkpoints']:
@@ -78,11 +84,16 @@ def main():
         original = checkpoint['after']['markets'][0]['executed']
         for field, key in [('quantity', 'shares'), ('principal', 'principal_pusd'), ('actual_fee', 'actual_fee_pusd')]:
             assert amounts(getattr(executed, field)) == [Fraction(row[key]) for row in original]
+        estimate = Numbers.run_exact_batch(lambda: trades.estimated_rebate(directory, contributions, zero[:, None], yes[:, None]))
+        expected_estimate = [row['estimated_pusd']['Known'] for row in checkpoint['after']['markets'][0]['rebates']]
+        assert estimate.known.cpu().tolist() == [[True, True]] and estimate.fault.cpu().tolist() == [0]
+        assert amounts(estimate.amount) == [Fraction(int(row['numerator']), int(row['denominator'])) for row in expected_estimate]
         checked += 1
     assert not costs.active.any().cpu().item()
     print(json.dumps({'actual_failed_V4_attempts': checked,
         'unapplied_release_and_applied_compensation_checked': True,
         'actual_applied_cost_fee_token_basis_and_executed_net_fee_checked': True,
+        'actual_pending_and_failed_rebate_estimate_checked': True,
         'reference_attempt_order_drives_validation': True,
         'full_device_NOE_failure_clock_or_activity_restore_delivered': False}))
 

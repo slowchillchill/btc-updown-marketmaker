@@ -31,6 +31,13 @@ class ExecutedTradeRead:
 
 
 @dataclass(frozen=True)
+class EstimatedRebateRead:
+    amount: object  # [roots*2]；原Maker、Taker顺序，不是实际应收delta。
+    known: torch.Tensor
+    fault: torch.Tensor
+
+
+@dataclass(frozen=True)
 class TradeSuccess:
     has_fact: torch.Tensor
     economic_applied: torch.Tensor
@@ -114,6 +121,56 @@ class TradeSuccess:
         for value in fields:
             fault=fault|Numbers.combine_fault_rows(value.fault.reshape(roots,2))
         return ExecutedTradeRead(*fields,(~unknown[:,None]).expand(roots,2),fault)
+
+    def estimated_rebate(self,directory,contributions,scope_conditions,scope_present,*,day=None):
+        """原economic_read估计：失败/已贡献人口剔除，未经济应用的公开Trade仍参与。
+
+        Maker只用公开费用等价Known；任一所需未知值令该scope Unavailable。
+        原读面固定Maker .2/Taker .08，不引入模型或正式训练参数。
+        """
+        roots,width=self.has_fact.shape
+        if scope_conditions.ndim!=2 or scope_conditions.size(0)!=roots or scope_present.shape!=scope_conditions.shape:
+            raise ValueError('估计scope须原根/condition人口')
+        if scope_conditions.dtype!=torch.int64 or scope_present.dtype!=torch.bool or scope_conditions.device!=self.has_fact.device or scope_present.device!=self.has_fact.device:
+            raise TypeError('估计scope须同设备int64身份和bool存在位')
+        member=((self.conditions[:,:,None]==scope_conditions[:,None,:])&scope_present[:,None,:]).any(2)
+        member=member&self.has_fact&(self.dispositions<3)
+        if day is not None:
+            if day.dtype!=torch.int64 or day.shape!=(roots,) or day.device!=member.device:
+                raise TypeError('估计day须同设备int64[roots]')
+            # 比较日编号，避免极端i64时刻乘回午夜溢出；不增加成交时刻业务门。
+            member=member&(torch.div(self.matched_at,86_400_000,rounding_mode='floor')==
+                torch.div(day,86_400_000,rounding_mode='floor')[:,None])
+        capacity=contributions.occupied.size(1)
+        root=torch.arange(roots,device=member.device)[:,None,None]
+        trade_index=(root*width+torch.arange(width,device=member.device)[None,:,None]).expand(roots,width,capacity)
+        contribution_index=(root*capacity+torch.arange(capacity,device=member.device)[None,None,:]).expand(roots,width,capacity)
+        relation=_take(directory.keys,trade_index.flatten()).compare(_take(contributions.trades,contribution_index.flatten()))
+        pair=directory.occupied[:,:,None]&contributions.occupied[:,None,:]
+        same=(relation.order.reshape(roots,width,capacity)==0)&pair
+        # 跨所有日的同kind原trade贡献均剔除，不按condition/token猜关联。
+        kinds=torch.arange(2,device=member.device)
+        contributed=(same[:,None,:,:] & (contributions.kinds[:,None,None,:]==kinds[None,:,None,None])).any(3)
+        roles=torch.tensor([1,0],device=member.device,dtype=torch.int64)
+        eligible=member[:,None,:]&~contributed
+        unknown=(eligible&~self.details_known[:,None,:]).any(2)
+        selected=eligible&self.details_known[:,None,:]&(self.roles[:,None,:]==roles[None,:,None])
+        unknown=unknown|torch.stack([(selected[:,0,:]&(self.maker_fee_read_kind!=0)).any(1),
+            torch.zeros(roots,dtype=torch.bool,device=member.device)],dim=1)
+        index=(torch.arange(roots,device=member.device)[:,None,None]*width+
+            torch.arange(width,device=member.device)[None,None,:]).expand(roots,2,width).flatten()
+        equivalent=take_ratio(self.maker_fee_equivalent,index)
+        taker=take_ratio(self.immediate_fee,index)
+        maker_mask=(kinds[None,:,None]==0).expand(roots,2,width).flatten()
+        fee=select(equivalent,maker_mask,taker)
+        rate=ExactRational.ratio(Numbers.ExactInt.from_i64_tensor(
+            torch.tensor([20,8],device=member.device,dtype=torch.int64)[None,:,None].expand(roots,2,width).flatten()),fee.denominator.constant(100))
+        value=fee*rate
+        zero=ExactRational(value.numerator.constant(0),value.denominator.constant(1))
+        amount=sum_rows(select(value,selected.flatten(),zero),roots*2,width)
+        fault=Numbers.combine_fault_rows(torch.where(pair&member[:,:,None],relation.fault.reshape(roots,width,capacity),0).reshape(roots,-1))
+        fault=fault|Numbers.combine_fault_rows(amount.fault.reshape(roots,2))|contributions.fault
+        return EstimatedRebateRead(amount,~unknown,fault)
 
     def apply_success(self,pools,directory,slots,enabled):
         roots,width=self.has_fact.shape
