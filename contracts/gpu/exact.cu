@@ -191,52 +191,11 @@ __global__ void floor_sum_kernel(const uint32_t* counts, int64_t wn,
     int32_t* fault, uint32_t* work, int64_t cap, int64_t* required, int64_t rows) {
   int64_t row = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
   if (row >= rows) return;
-  uint32_t* n = work + row * 10 * cap;
-  uint32_t* m = n + cap;
-  uint32_t* a = m + cap;
-  uint32_t* b = a + cap;
-  uint32_t* q = b + cap;
-  uint32_t* r = q + cap;
-  uint32_t* product = r + cap;
-  uint32_t* term = product + cap;
-  uint32_t* saved = term + cap;
-  uint32_t* result = saved + cap;
-  copy(n, cap, counts + row * wn, wn);
-  copy(m, cap, moduli + row * wm, wm);
-  copy(a, cap, slopes + row * wa, wa);
-  copy(b, cap, offsets + row * wb, wb);
-  zero(result, cap);
-  fault[row] = length(m, cap) ? 0 : 1;
-  while (!fault[row] && length(n, cap)) {
-    if (compare(a, cap, m, cap) >= 0) {
-      divide(q, cap, r, cap, a, cap, m, cap);
-      copy(saved, cap, q, cap);
-      copy(a, cap, r, cap);
-      zero(term, cap); term[0] = 1;
-      subtract(term, cap, n, cap, term, cap);
-      multiply(product, cap, n, length(n, cap), term, length(term, cap));
-      zero(term, cap); term[0] = 2;
-      divide(q, cap, r, cap, product, cap, term, 1);
-      multiply(term, cap, q, length(q, cap), saved, length(saved, cap));
-      add(result, cap, result, cap, term, cap);
-    }
-    if (compare(b, cap, m, cap) >= 0) {
-      divide(q, cap, r, cap, b, cap, m, cap);
-      copy(b, cap, r, cap);
-      multiply(term, cap, n, length(n, cap), q, length(q, cap));
-      add(result, cap, result, cap, term, cap);
-    }
-    multiply(product, cap, a, length(a, cap), n, length(n, cap));
-    add(product, cap, product, cap, b, cap);
-    if (compare(product, cap, m, cap) < 0) break;
-    divide(q, cap, r, cap, product, cap, m, cap);
-    copy(n, cap, q, cap);
-    copy(b, cap, r, cap);
-    uint32_t* old_m = m; m = a; a = old_m;
-  }
-  required[row] = length(result, cap);
+  bool valid = floor_sum_value(counts + row * wn, wn, moduli + row * wm, wm,
+      slopes + row * wa, wa, offsets + row * wb, wb, out + row * wo, wo,
+      work + row * 10 * cap, cap, required[row]);
+  fault[row] = valid ? 0 : 1;
   if (required[row] > wo) fault[row] |= 2;
-  copy(out + row * wo, wo, result, cap);
 }
 extern "C" void public_gpu_floor_sum(const uint32_t* n, int64_t wn,
     const uint32_t* m, int64_t wm, const uint32_t* a, int64_t wa,

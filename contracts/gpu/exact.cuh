@@ -98,6 +98,59 @@ __device__ inline bool divide(uint32_t* q, int64_t nq, uint32_t* r,
   }
   return true;
 }
+
+// 共享Euclid归约。调用者提供10*cap独占临时字；输入/结果容量证明归调用模块。
+__device__ inline bool floor_sum_value(const uint32_t* counts, int64_t wn,
+    const uint32_t* moduli, int64_t wm, const uint32_t* slopes, int64_t wa,
+    const uint32_t* offsets, int64_t wb, uint32_t* out, int64_t wo,
+    uint32_t* work, int64_t cap, int64_t& required) {
+  uint32_t* n = work;
+  uint32_t* m = n + cap;
+  uint32_t* a = m + cap;
+  uint32_t* b = a + cap;
+  uint32_t* q = b + cap;
+  uint32_t* r = q + cap;
+  uint32_t* product = r + cap;
+  uint32_t* term = product + cap;
+  uint32_t* saved = term + cap;
+  uint32_t* result = saved + cap;
+  copy(n, cap, counts, wn);
+  copy(m, cap, moduli, wm);
+  copy(a, cap, slopes, wa);
+  copy(b, cap, offsets, wb);
+  zero(result, cap);
+  bool valid = length(m, cap) != 0;
+  while (valid && length(n, cap)) {
+    if (compare(a, cap, m, cap) >= 0) {
+      divide(q, cap, r, cap, a, cap, m, cap);
+      copy(saved, cap, q, cap);
+      copy(a, cap, r, cap);
+      zero(term, cap); term[0] = 1;
+      subtract(term, cap, n, cap, term, cap);
+      multiply(product, cap, n, length(n, cap), term, length(term, cap));
+      zero(term, cap); term[0] = 2;
+      divide(q, cap, r, cap, product, cap, term, 1);
+      multiply(term, cap, q, length(q, cap), saved, length(saved, cap));
+      add(result, cap, result, cap, term, cap);
+    }
+    if (compare(b, cap, m, cap) >= 0) {
+      divide(q, cap, r, cap, b, cap, m, cap);
+      copy(b, cap, r, cap);
+      multiply(term, cap, n, length(n, cap), q, length(q, cap));
+      add(result, cap, result, cap, term, cap);
+    }
+    multiply(product, cap, a, length(a, cap), n, length(n, cap));
+    add(product, cap, product, cap, b, cap);
+    if (compare(product, cap, m, cap) < 0) break;
+    divide(q, cap, r, cap, product, cap, m, cap);
+    copy(n, cap, q, cap);
+    copy(b, cap, r, cap);
+    uint32_t* old_m = m; m = a; a = old_m;
+  }
+  required = length(result, cap);
+  copy(out, wo, result, cap);
+  return valid;
+}
 }
 #endif
 extern "C" void public_gpu_integer(int, const uint32_t*, int64_t, const int8_t*,
