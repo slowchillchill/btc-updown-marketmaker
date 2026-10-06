@@ -34,7 +34,7 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
     state = next;
     let accepted = accepted.expect("到达时刻必须实际处理合法GTC");
     let MutationActionBusinessEffectV3::Post(posts) = &accepted.business else { panic!("应返回提交结果"); };
-    let PostOrderItemOutcomeV2::Accepted(post) = &posts[0].outcome else { panic!("真实5份订单未接受: {:?}", posts[0].outcome); };
+    let PostOrderItemOutcomeV2::Accepted(post) = &posts.outcome else { panic!("真实5份订单未接受: {:?}", posts.outcome); };
     assert_eq!(post.platform_order_id, "sim-1");
     let snapshot = |state: &BusinessReducerStateV2| state.session.as_ref().unwrap()
         .execution_state.gpu_order_checkpoint_for_tests("sim-1");
@@ -82,7 +82,7 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
         "processing_at":processing_at, "maker_at":maker_at,
         "finality_path":actor._finality_policy.normal_path(),
         "fee_rate":rules.fee_schedule.rate.value().to_string(), "fee_exponent":rules.fee_schedule.exponent,
-        "post":post, "receipt":receipt, "cancel_receipt":cancel_receipt});
+        "post":post, "cancel_arrived_at":cancel_receipt.platform_arrived_at_utc_ms});
     let mut child = std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
         .arg(std::env::var("B_GPU_ORDER_VALIDATOR").unwrap()).stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
