@@ -623,8 +623,12 @@ async fn gpu_actual_maker_mature_day_preserves_noe_batch_and_continuous_ledger()
     let public_time=|at|crate::public_consumption::TrustedActorExecutionTimeV1(crate::public_consumption::ActorTimeRecordV1 {
         run_id:run_id.into(),drive_position:1,logical_time_utc_ms:at,
     });
-    actor.projection_port.close_receive_prefix(processing+10_000);
-    actor.projection_port.observe_public_time(&public_time(processing+10_000));
+    let prefix_at=batches[0]["orders"].as_array().unwrap().iter()
+        .map(|value|value["metadata"]["feedback_received_at_utc_ms"].as_i64().unwrap())
+        .chain(batches[0]["direct"].as_array().unwrap().iter().map(|value|
+            value["metadata"]["response_received_at_utc_ms"].as_i64().unwrap())).max().unwrap();
+    actor.projection_port.close_receive_prefix(prefix_at);
+    actor.projection_port.observe_public_time(&public_time(prefix_at));
     let mut previous=observation.take_closed_records();
     while !previous.is_empty() {
         let count=previous.len();
@@ -643,7 +647,7 @@ async fn gpu_actual_maker_mature_day_preserves_noe_batch_and_continuous_ledger()
     let next_private=state.session.as_ref().unwrap().next_private_feedback_sequence;
     let next_batch=state.session.as_ref().unwrap().next_projection_batch_sequence;
     let account_before=state.session.as_ref().unwrap().execution_state.gpu_order_checkpoint_for_tests("sim-1");
-    let maker_at=processing+10_100;
+    let maker_at=prefix_at+100;
     assert!(maker_at+30<market_end,"工程原请求必须在市场结束前处理");
     let mut state=state;
     let mut events=Vec::new();
