@@ -490,11 +490,16 @@ def main():
                 roles.add(int(frozen_market.role.cpu()[0]))
                 if saved is not None: assert torch.equal(saved[0].fast,saved[1])
                 if grid==24000:
-                    # 原两次完整快照12→13；冻结端点差及存在位。
+                    # received=24000不能提前接纳；原完整组关闭依赖为24001。
+                    assert clocks[4]==24001 and frozen_market.prefixes.cpu().tolist()==[3]
+                    assert frozen_market.fast[0,37+6+3].cpu().item()==0.0
+                    assert frozen_market.fast[0,37+6+4].cpu().item()==1.0
+                if grid==24100:
+                    # 下一合法UTC网格才从原完整快照12接纳为13。
+                    assert frozen_market.prefixes.cpu().tolist()==[4]
                     assert torch.equal(frozen_market.fast[0,37+6+3],torch.tensor(signed_log(1),device='cuda',dtype=torch.float32)), {
                         'prefix':frozen_market.prefixes.cpu().tolist(),'up_bid16':frozen_market.fast[0,43:59].cpu().tolist(),
-                        'before_total':endpoints.pm_sides.total.report_values(),'after_total':frozen_market.endpoint_memory.pm_sides.total.report_values(),
-                        'clock_prefix':clocks[:end],'asset_pairs':market_state.asset_pairs[target_market].cpu().tolist()}
+                        'before_total':endpoints.pm_sides.total.report_values(),'after_total':frozen_market.endpoint_memory.pm_sides.total.report_values()}
                     assert frozen_market.fast[0,37+6+4].cpu().item()==1.0
                     saved = (frozen_market,frozen_market.fast.clone())
                 if grid==26100:
@@ -506,6 +511,7 @@ def main():
             assert roles=={0,1}
             native_freeze_reference = {'ticks':native_freezes,'first_observation_ms':19900,'last_observation_ms':26200,
                 'context_only_and_decision_required':True,'frozen_fast626_immutable':True,
+                'received_24000_closed_24001_frozen_at_24100':True,
                 'rule_snapshot':'historical_test_fixture_not_formal_training','account_policy_execution':False}
         depth_rows = reference['binance_observations']
         saw_gap = saw_missing = False
