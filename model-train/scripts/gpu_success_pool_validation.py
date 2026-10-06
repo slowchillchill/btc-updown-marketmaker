@@ -8,6 +8,7 @@ import torch
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'sim-system/gpu'))
 from queues import Numbers
 from validate_base_execution import rational,values
+sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'ledger/gpu'))
 from success_pool import SuccessPools
 
 
