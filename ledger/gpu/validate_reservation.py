@@ -44,6 +44,10 @@ def validate(source):
     again,_,changed=Numbers.run_exact_batch(lambda:book.submission_started(roots,roots,
         integers([sent['projection']['ledger_entry_seq']+1]),enabled))
     assert not changed.any().cpu().item() and values(again.last_sequences)==values(book.last_sequences)
+    repeated,decision_after_send=run_reserve_action(book,roots[:,None],roots[:,None],principal,fee,enabled[:,None],actual,maker,
+        integers([sent['projection']['ledger_entry_seq']]),integers([sent['projection']['ledger_local_prefix']]))
+    assert values(decision_after_send.ledger_sequences)==[reserved['request']['last_ledger_entry_seq']]
+    assert values(repeated.last_sequences)==[sent['request']['last_ledger_entry_seq']]
     # 真实领取中平台接受先到、经济占款随后；序号这里只由原Ledger对照提供。
     invalid=Numbers.run_exact_batch(lambda:book.definitive(roots,enabled,enabled,integers([1<<64]),enabled))
     assert invalid.fault.cpu().tolist()==[1] and invalid.statuses.cpu().tolist()==book.statuses.cpu().tolist()
@@ -60,6 +64,10 @@ def validate(source):
     assert book.statuses.cpu().tolist()==[[CONVERTED]]
     local_pending,platform_pending=Numbers.run_exact_batch(book.pending)
     assert local_pending.numerator.sign.cpu().tolist()==[0] and platform_pending.numerator.sign.cpu().tolist()==[0]
+    repeated,decision_after_convert=run_reserve_action(book,roots[:,None],roots[:,None],principal,fee,enabled[:,None],actual,maker,
+        integers([converted['projection']['ledger_entry_seq']]),integers([converted['projection']['ledger_local_prefix']]))
+    assert values(decision_after_convert.ledger_sequences)==[reserved['request']['last_ledger_entry_seq']]
+    assert values(repeated.last_sequences)==[converted['request']['last_ledger_entry_seq']]
     # 同一已转换预留重复结果不释放/占用第二次，last成功序保留。
     repeated=Numbers.run_exact_batch(lambda:book.definitive(roots,enabled,enabled,
         integers([converted['request']['last_ledger_entry_seq']+1]),enabled))

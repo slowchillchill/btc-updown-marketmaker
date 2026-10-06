@@ -54,6 +54,7 @@ class ReservationBook:
     fee: object
     outcomes: torch.Tensor
     statuses: torch.Tensor
+    decision_sequences: object  # 原CachedReservationRequest.outcome的初始Reserved序，不随状态迁移。
     last_sequences: object
     event_slots: torch.Tensor
     event_sequences: object
@@ -67,7 +68,7 @@ class ReservationBook:
         zero=ExactInt.from_i64_tensor(torch.zeros(roots*capacity,dtype=torch.int64,device=device))
         ratio=ExactRational.ratio(zero,zero.constant(1))
         return cls(coordinates,coordinates.clone(),ratio,ratio,
-            torch.zeros_like(coordinates),coordinates.clone(),zero,coordinates.clone(),zero,
+            torch.zeros_like(coordinates),coordinates.clone(),zero,zero,coordinates.clone(),zero,
             torch.zeros(roots,dtype=torch.int32,device=device))
 
     @property
@@ -85,7 +86,7 @@ class ReservationBook:
                 grow_integer(value.denominator,roots,old,capacity,1))
         return replace(self,request_slots=matrix(self.request_slots,-1),conditions=matrix(self.conditions,-1),
             principal=ratio(self.principal),fee=ratio(self.fee),outcomes=matrix(self.outcomes,EMPTY),
-            statuses=matrix(self.statuses,-1),last_sequences=grow_integer(self.last_sequences,roots,old,capacity),
+            statuses=matrix(self.statuses,-1),decision_sequences=grow_integer(self.decision_sequences,roots,old,capacity),last_sequences=grow_integer(self.last_sequences,roots,old,capacity),
             event_slots=matrix(self.event_slots,-1),event_sequences=grow_integer(self.event_sequences,roots,old,capacity))
 
     def pending(self):
@@ -177,9 +178,10 @@ class ReservationBook:
                 principal=choose(p,root_seqmask.flatten(),book.principal),fee=choose(f,root_seqmask.flatten(),book.fee),
                 outcomes=torch.where(mask,refusal[:,None],book.outcomes),
                 statuses=torch.where(root_seqmask,BEFORE_SEND,book.statuses),
+                decision_sequences=full_sequence.select(root_seqmask.flatten(),book.decision_sequences),
                 last_sequences=full_sequence.select(root_seqmask.flatten(),book.last_sequences))
             decisions.append(torch.where(enabled[:,column],book.outcomes[root_index,place],EMPTY))
-            sequences.append(take_root(book.last_sequences,place,self.capacity))
+            sequences.append(take_root(book.decision_sequences,place,self.capacity))
             ledger_seq=candidate_sequence.select(reserved,ledger_seq)
             local_prefix=candidate_prefix.select(reserved,local_prefix)
         # 工程fault不提交当前动作目录；资金拒绝是已缓存的正常决定。
@@ -189,6 +191,7 @@ class ReservationBook:
             conditions=torch.where(slots_valid,book.conditions,self.conditions),outcomes=torch.where(slots_valid,book.outcomes,self.outcomes),
             statuses=torch.where(slots_valid,book.statuses,self.statuses),principal=choose(book.principal,slots_valid.expand_as(self.request_slots).flatten(),self.principal),
             fee=choose(book.fee,slots_valid.expand_as(self.request_slots).flatten(),self.fee),
+            decision_sequences=book.decision_sequences.select(slots_valid.expand_as(self.request_slots).flatten(),self.decision_sequences),
             last_sequences=book.last_sequences.select(slots_valid.expand_as(self.request_slots).flatten(),self.last_sequences),fault=fault)
         width_words=max(value.words.size(1) for value in sequences)
         seq=ExactInt(torch.stack([value.with_capacity(width_words).words for value in sequences],dim=1).flatten(0,1),

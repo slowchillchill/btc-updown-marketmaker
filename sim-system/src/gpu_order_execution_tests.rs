@@ -242,6 +242,8 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
                 global_request_id:"gpu-multiask-post".into(),batch_item_ordinal:0,
             }).unwrap();
         reservation_checkpoints.push(gpu_ledger_reservation_checkpoint(&ledger,"submitted"));
+        assert_eq!(ledger.try_reserve_action_v2(std::slice::from_ref(&intent)).unwrap(),decision,
+            "发送后原预留决定仍保留最初Reserved序");
         ledger
     };
     let (state,receipt) = register_request_candidate(&actor.opened,actor.scenario.initial_market_directory(),state,
@@ -302,6 +304,14 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
         pending=remaining;
     }
     let ledger_projection=ledger.projection_v2().unwrap();
+    let original=&reservation_checkpoints[1];
+    let repeated=ledger.try_reserve_action_v2(&[ledger::ReserveIntentV1 {
+        request_identity:ledger::LedgerRequestIdentityV1("gpu-reservation".into()),condition_id:condition.clone(),
+        requested_principal_pusd:ExactDecimal("1.5".into()),immediate_fee_reserve_pusd:ExactDecimal("0".into()),
+    }]).unwrap();
+    assert_eq!(repeated,vec![ledger::LedgerReservationOutcomeV1::Reserved {
+        ledger_entry_seq:original["request"]["last_ledger_entry_seq"].as_u64().unwrap(),
+    }],"转换后即使新参数不同，仍返回原预留决定");
     for record in &noe { ledger.apply_noe_memory_v2(record).unwrap(); }
     assert_eq!(ledger.projection_v2().unwrap(),ledger_projection,"原NOE位置重读不重复写账本");
     serde_json::to_value(ledger_projection).unwrap()
