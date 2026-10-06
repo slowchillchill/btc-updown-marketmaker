@@ -174,10 +174,12 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
             let reference=contracts::execution_normalization::DurableSourceReferenceV1 {
                 source:contracts::execution_normalization::ImmutableSourceReferenceV1::Location(path.display().to_string()),
             };
-            let port=noe_projection::MemoryNoeProjectionPortV4::new(path.parent().unwrap().join("noe"),
+            let memory=noe_projection::MemoryNoeProjectionPortV4::new(path.parent().unwrap().join("noe-memory"),
+                opened.clone(),reference.clone(),reference.clone(),"create-run-gpu-multiask".into(),"gpu-source-reference".into());
+            *capture.borrow_mut()=Some(memory.observation());
+            let durable=noe_projection::SimV2NoeProjectionPortV4::new(path.parent().unwrap().join("noe-durable"),
                 opened.clone(),reference.clone(),reference,"create-run-gpu-multiask".into(),"gpu-source-reference".into());
-            *capture.borrow_mut()=Some(port.observation());
-            Box::new(port)
+            Box::new(GpuNoeReferencePort { memory,durable })
         }).await;
     let observation=saved_observation.borrow_mut().take().unwrap();
     assert!(observation.opening_record().is_some(),"开户必须先进入实际NOE上下文");
@@ -268,7 +270,26 @@ fn gpu_accept_projection_reference(actor:&mut SimRunActorV2,state:BusinessReduce
     batches.push(serde_json::json!({"batch_sequence":batch.projection_batch_sequence,
         "orders":batch.order_lifecycle,"trades":batch.trade_lifecycle,
         "settlements":batch.settlement_lifecycle,"direct":direct}));
-    actor.projection_port.accept_for_background(Arc::new(BusinessProjectionBatchPayloadV1::V4(Arc::new(batch))))
-        .expect("原NOE实际接纳完整反馈");
+    assert!(actor.projection_port.try_accept_payload(Arc::new(BusinessProjectionBatchPayloadV1::V4(Arc::new(batch)))),
+        "原NOE实际接纳完整反馈");
     state
+}
+
+// 原Actor同步持久发布与原Memory领取同时观察相同来源批；不新增生产端口。
+struct GpuNoeReferencePort {
+    memory:noe_projection::MemoryNoeProjectionPortV4,
+    durable:noe_projection::SimV2NoeProjectionPortV4,
+}
+impl BusinessProjectionPortV2 for GpuNoeReferencePort {
+    fn try_accept(&mut self,_:Arc<BusinessProjectionBatchV2>) -> bool { false }
+    fn try_accept_payload(&mut self,payload:Arc<BusinessProjectionBatchPayloadV1>) -> bool {
+        if !self.durable.try_accept_payload(Arc::clone(&payload)) { return false; }
+        self.memory.accept_for_background(payload).expect("原MemoryNOE接纳同一实际批");
+        true
+    }
+    fn durable_through(&self,run_id:&str) -> u64 { self.durable.durable_through(run_id) }
+    fn close_receive_prefix(&mut self,at:i64) { self.memory.close_receive_prefix(at); }
+    fn observe_public_time(&mut self,time:&crate::public_consumption::TrustedActorExecutionTimeV1) {
+        self.memory.observe_public_time(time);
+    }
 }

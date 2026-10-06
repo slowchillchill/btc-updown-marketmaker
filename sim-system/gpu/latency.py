@@ -34,6 +34,9 @@ class DelaySample:
 
     def arrival_at(self, sent_at):
         """沿原u64→i64 delay及checked_add；结果故障不能提交到延迟队列。"""
+        if sent_at.dtype != torch.int64 or sent_at.device != self.milliseconds.words.device or (
+                sent_at.ndim != 1 or sent_at.numel() != self.milliseconds.words.size(0)):
+            raise TypeError('SIM时钟需同设备int64[batch]')
         words = self.milliseconds.words.to(torch.int64) & 0xffffffff
         delay = words[:, 0] | (words[:, 1] << 32)
         invalid = (words[:, 1] > 0x7fffffff) | (sent_at > 0x7fffffffffffffff-delay)
