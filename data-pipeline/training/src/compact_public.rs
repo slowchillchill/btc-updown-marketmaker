@@ -1,5 +1,5 @@
 //! 公共完整事实的紧凑冷材料。输入/组/PM步骤各保存一次，不写模型观察或逐事件全盘口。
-//! 当前wire侧车复用原强类型JSON编码；固定列供批量GPU转换，hidden由独立排序归约产生。
+//! wire侧车复用原强类型JSON并逐packet独立Zstd压缩；固定列供批量GPU转换，hidden独立排序归约。
 use std::{
     fs::{self, File},
     io::{self, BufWriter, Read, Seek, SeekFrom, Write},
@@ -31,7 +31,8 @@ pub struct CompactPublicPreparationConfigV1 {
     pub initialization: Option<crate::historical_initialization::MetadataInitializationConfigV1>,
 }
 
-const SCHEMA: &str = "public_compact_facts_v2";
+const SCHEMA: &str = "public_compact_facts_v3_zstd";
+const LEGACY_SCHEMA: &str = "public_compact_facts_v2";
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -278,16 +279,20 @@ impl PublicCompactWriterV1 {
             return Err(io::Error::other("材料输入与应用前缀不连续").into());
         }
         let packet = PublicCompactPacketV1::build(input, applied)?;
+        self.write_packet(packet)
+    }
+    fn write_packet(&mut self, packet: PublicCompactPacketV1) -> RecordingResult<()> {
+        self.failed = true;
         self.manifest.pm_packets += packet.pm.len() as u64;
         self.manifest.pm_steps += packet.pm.iter().map(|p| p.steps.len() as u64).sum::<u64>();
         self.manifest.reports += packet.reports.len() as u64 + packet.pm.iter().map(|p| p.reports.len() as u64).sum::<u64>();
-        let bytes = serde_json::to_vec(&packet)?;
+        let bytes = zstd::bulk::compress(&serde_json::to_vec(&packet)?, 3)?;
         self.payload.write_all(&bytes)?;
         self.payload_bytes = self.payload_bytes.checked_add(bytes.len() as u64)
             .ok_or_else(|| io::Error::other("材料字节位置溢出"))?;
         self.offsets.write_all(&self.payload_bytes.to_le_bytes())?;
-        for group in &applied.groups {
-            if group.group_position != self.manifest.groups || group.closed_at_input_position != input.input_position {
+        for group in &packet.groups {
+            if group.group_position != self.manifest.groups || group.closed_at_input_position != packet.input.input_position {
                 return Err(io::Error::other("材料组与关闭位置不连续").into());
             }
             // 每行5列：组序号/关闭输入/合法可见时刻/事实起点/事实末端。
@@ -301,8 +306,10 @@ impl PublicCompactWriterV1 {
             self.manifest.facts = end;
         }
         self.manifest.inputs += 1;
-        self.manifest.applied_prefix = applied.applied_prefix.clone();
-        self.manifest.normal_end = matches!(input.ingress, DptIngressV1::EndOfInput);
+        self.manifest.applied_prefix = AppliedIngressPrefixV1 {
+            input_stream_id: packet.input.input_stream_id.clone(), next_input_position: packet.input.input_position + 1,
+        };
+        self.manifest.normal_end = matches!(packet.input.ingress, DptIngressV1::EndOfInput);
         self.failed = false;
         Ok(())
     }
@@ -388,6 +395,7 @@ pub struct PublicCompactReaderV1 {
     payload: File,
     offsets: File,
     columns: File,
+    sources: File,
     next: u64,
     next_group: u64,
     next_fact: u64,
@@ -401,7 +409,7 @@ impl PublicCompactReaderV1 {
     /// SHA核对完整文件；上限只限制本次读取分配，不改变业务或签发数据验收。
     pub fn open(root: &Path, max_packet_bytes: usize) -> RecordingResult<Self> {
         let manifest: PublicCompactManifestV1 = serde_json::from_reader(File::open(root.join("manifest.json"))?)?;
-        if manifest.schema_version != SCHEMA || !manifest.normal_end || manifest.inputs == 0
+        if !matches!(manifest.schema_version.as_str(), SCHEMA | LEGACY_SCHEMA) || !manifest.normal_end || manifest.inputs == 0
             || manifest.applied_prefix.next_input_position != manifest.inputs
             || manifest.applied_prefix.input_stream_id != manifest.header.input_stream_id {
             return Err(io::Error::other("紧凑材料完成凭据不合法").into());
@@ -419,7 +427,7 @@ impl PublicCompactReaderV1 {
             return Err(io::Error::other("材料固定列长度错误").into());
         }
         Ok(Self { payload: File::open(root.join(expected[0]))?, offsets: File::open(root.join(expected[1]))?,
-                  columns: File::open(root.join(expected[2]))?,
+                  columns: File::open(root.join(expected[2]))?, sources: File::open(root.join(expected[3]))?,
                   manifest, next: 0, next_group: 0, next_fact: 0, next_offset: 0,
                   next_pm: 0, next_step: 0, next_report: 0, max_packet_bytes })
     }
@@ -437,7 +445,10 @@ impl PublicCompactReaderV1 {
         let mut bytes = vec![0; (end - start) as usize];
         self.payload.seek(SeekFrom::Start(start))?;
         self.payload.read_exact(&mut bytes)?;
-        let packet: PublicCompactPacketV1 = serde_json::from_slice(&bytes)?;
+        let decoded = if self.manifest.schema_version == SCHEMA {
+            zstd::bulk::decompress(&bytes, self.max_packet_bytes)?
+        } else { bytes };
+        let packet: PublicCompactPacketV1 = serde_json::from_slice(&decoded)?;
         if packet.input.input_stream_id != self.manifest.header.input_stream_id || packet.input.input_position != self.next {
             return Err(io::Error::other("材料packet输入位置错误").into());
         }
@@ -544,6 +555,27 @@ impl PublicCompactReaderV1 {
     }
 }
 
+/// 重用已完成/结构合法的旧冷材料，只转换物理编码，不重跑业务归约或原源解码。
+pub fn repack_public_compact_v1(
+    reader: &mut PublicCompactReaderV1, writer: &mut PublicCompactWriterV1,
+    mut progress: impl FnMut(u64),
+) -> RecordingResult<()> {
+    if reader.next != 0 || writer.manifest.inputs != 0 || writer.failed
+        || serde_json::to_value(&reader.manifest.header)? != serde_json::to_value(&writer.manifest.header)? {
+        return Err(io::Error::other("重编码须从同一材料头的完整起点开始").into());
+    }
+    for source in serde_json::Deserializer::from_reader(reader.sources.try_clone()?)
+        .into_iter::<SourceArtifactBindingV1>() {
+        writer.source_binding(&source?)?;
+    }
+    while let Some(packet) = reader.next_packet()? {
+        let processed = packet.input.input_position + 1;
+        writer.write_packet(packet)?;
+        progress(processed);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -643,28 +675,35 @@ mod tests {
         let payload_path = target.join("packet_payload.bin");
         let original_payload = fs::read(&payload_path).unwrap();
         let offsets = fs::read(target.join("packet_offsets.u64le")).unwrap();
-        let mut damaged_payload = original_payload.clone();
+        let mut damaged_payload = Vec::new();
+        let mut damaged_offsets = 0_u64.to_le_bytes().to_vec();
         let mut changed = false;
         for pair in offsets.chunks_exact(8).collect::<Vec<_>>().windows(2) {
             let start = u64::from_le_bytes(pair[0].try_into().unwrap()) as usize;
             let end = u64::from_le_bytes(pair[1].try_into().unwrap()) as usize;
-            let mut value: serde_json::Value = serde_json::from_slice(&original_payload[start..end]).unwrap();
-            if let Some(step) = value["pm"].as_array_mut().unwrap().iter_mut()
-                .find_map(|pm| pm["steps"].as_array_mut().unwrap().first_mut()) {
-                step["derived_id"]["consumer_stream_id"] = "compact-boundarx".into();
-                let bytes = serde_json::to_vec(&value).unwrap();
-                assert_eq!(bytes.len(), end-start);
-                damaged_payload[start..end].copy_from_slice(&bytes);
-                changed = true;
-                break;
+            let decoded = zstd::bulk::decompress(&original_payload[start..end],1024*1024).unwrap();
+            let mut value: serde_json::Value = serde_json::from_slice(&decoded).unwrap();
+            let mut replacement = None;
+            if !changed {
+                if let Some(step) = value["pm"].as_array_mut().unwrap().iter_mut()
+                    .find_map(|pm| pm["steps"].as_array_mut().unwrap().first_mut()) {
+                    step["derived_id"]["consumer_stream_id"] = "compact-boundarx".into();
+                    replacement = Some(zstd::bulk::compress(&serde_json::to_vec(&value).unwrap(),3).unwrap());
+                    changed = true;
+                }
             }
+            damaged_payload.extend(replacement.as_deref().unwrap_or(&original_payload[start..end]));
+            damaged_offsets.extend((damaged_payload.len() as u64).to_le_bytes());
         }
         assert!(changed);
         fs::write(&payload_path, &damaged_payload).unwrap();
+        fs::write(target.join("packet_offsets.u64le"), &damaged_offsets).unwrap();
         let manifest_path = target.join("manifest.json");
         let original_manifest = fs::read(&manifest_path).unwrap();
         let mut manifest: PublicCompactManifestV1 = serde_json::from_slice(&original_manifest).unwrap();
+        manifest.files[0].bytes = damaged_payload.len() as u64;
         manifest.files[0].sha256 = file_sha256(&payload_path).unwrap();
+        manifest.files[1].sha256 = file_sha256(&target.join("packet_offsets.u64le")).unwrap();
         serde_json::to_writer(File::create(&manifest_path).unwrap(), &manifest).unwrap();
         let mut damaged = PublicCompactReaderV1::open(&target,1024*1024).unwrap();
         let mut rejected = false;
@@ -672,6 +711,7 @@ mod tests {
             match damaged.next_packet() { Ok(Some(_))=>{}, Ok(None)=>break, Err(_)=>{rejected=true;break;} }
         }
         assert!(rejected);
+        fs::write(target.join("packet_offsets.u64le"), offsets).unwrap();
         fs::write(&payload_path, original_payload).unwrap();
         fs::write(&manifest_path, original_manifest).unwrap();
         // 实际审查反例：成员SHA均不变，仅末端facts计数篡改也必须拒绝。

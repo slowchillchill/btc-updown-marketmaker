@@ -7,7 +7,7 @@ import subprocess
 import time
 
 import torch
-from model_train.gpu_policy import ModelShape100ms, Policy100ms, deterministic_condition, score_condition
+from model_train.gpu_policy import ModelShape100ms, Policy100ms, deterministic_condition, global_price_condition, score_condition
 
 
 def main():
@@ -59,6 +59,15 @@ def main():
         indices = torch.tensor([0,4,998],dtype=torch.int64,device=device)
         price = stages['action_price'](one_z[-1],context,prefix,indices,torch.zeros(4,3,device=device))
         assert price.shape == (4,3)
+        support = torch.zeros(4,999,dtype=torch.bool,device=device)
+        support[:,indices] = True
+        faults = torch.zeros(4,dtype=torch.int32,device=device)
+        active_price = torch.ones(4,dtype=torch.bool,device=device)
+        selected_price = global_price_condition(price,indices,support,active_price,faults)
+        expected_price = indices[price.argmax(dim=-1)]
+        assert torch.equal(selected_price.choice,expected_price)
+        replay_price = global_price_condition(price,indices,support,active_price,faults,replay=expected_price)
+        assert torch.equal(selected_price.log_prob,replay_price.log_prob)
     logits = torch.tensor([[2.,2.,-4.],[1.,3.,4.],[2.,-3.,8.],[0.,1.,2.]],device=device,requires_grad=True)
     support = torch.tensor([[True,True,False],[False,True,False],[True,False,True],[False,False,False]],device=device)
     active = torch.tensor([True,True,True,True],device=device)
@@ -83,7 +92,7 @@ def main():
               'identity':'engineering_short_model_and_probability_only', 'device':torch.cuda.get_device_name(),
               'seconds':time.perf_counter()-started,'peak_allocated_bytes':torch.cuda.max_memory_allocated(),
               'passed':['all_layer_100ms_state','burn_in_no_grad_all_layer_detach','context_only_learning_gradient',
-                        'split_time_axis_carry','bootstrap_does_not_commit_hidden','original_actor_parameter_heads',
+                        'split_time_axis_carry','bootstrap_does_not_commit_hidden','original_actor_parameter_heads','local_price_to_global_path',
                         'gpu_global_choice_and_replay','mature_categorical_probability','unique_zero_gradient','fault_not_choice'],
               'not_delivered':['public_gpu_support_generation','stochastic_path_rng','full_gpu_environment','ppo','active_root_restore']}
     args.output.parent.mkdir(parents=True,exist_ok=True)

@@ -1723,6 +1723,7 @@ dependencies = [
  "sha2",
  "time",
  "tokio",
+ "zstd",
 ]
 
 [[package]]

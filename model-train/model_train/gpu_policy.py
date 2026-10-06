@@ -117,3 +117,13 @@ def deterministic_condition(logits, support, active, support_fault):
     """同分沿原全局顺序取首项，不读取设备choice回CPU。"""
     choice = logits.masked_fill(~support, -torch.inf).argmax(dim=-1)
     return score_condition(logits, support, choice, active, support_fault)
+
+
+def global_price_condition(local_logits, price_indices, global_support, active, support_fault, *, replay=None):
+    """P个实际价格分数沿原k-1映射999全局坐标，再选择/重算同一全局路径。"""
+    logits = local_logits.new_zeros((local_logits.shape[0], 999)).index_copy(1, price_indices, local_logits)
+    scored = torch.zeros_like(global_support).index_fill(1, price_indices, True)
+    support_fault = support_fault | ((global_support & ~scored).any(dim=-1) & active).to(torch.int32) * 8
+    if replay is None:
+        return deterministic_condition(logits, global_support, active, support_fault)
+    return score_condition(logits, global_support, replay, active, support_fault)

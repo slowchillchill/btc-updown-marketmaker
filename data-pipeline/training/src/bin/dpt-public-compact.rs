@@ -1,6 +1,6 @@
 //! B紧凑公共材料入口；既有typed/parquet准入和来源键→GPU run排序→CPU归并→完整factsink。
 use data_pipeline_training::{
-    compact_public::{CompactPublicPreparationConfigV1, PublicCompactReaderV1, PublicCompactWriterV1, consume_historical_merge_facts_v1},
+    compact_public::{CompactPublicPreparationConfigV1, PublicCompactReaderV1, PublicCompactWriterV1, consume_historical_merge_facts_v1, repack_public_compact_v1},
     gpu_initial_sort::GpuInitialRunOrderV1,
     historical_initialization::{MetadataInitializationSelectionV1, select_prefix_initialization_config_v1},
     historical_preparation_progress::{HistoricalPreparationNoticeV1 as Notice, HistoricalPreparationNotifierV1},
@@ -10,6 +10,24 @@ use std::{error::Error, fs::File, path::Path, sync::Arc, time::Instant};
 
 fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     let args: Vec<_> = std::env::args().collect();
+    if args.len() == 5 && args[1] == "--repack" {
+        let started = Instant::now();
+        let mut reader = PublicCompactReaderV1::open(Path::new(&args[2]),args[4].parse()?)?;
+        let mut writer = PublicCompactWriterV1::create(Path::new(&args[3]),reader.manifest.header.clone())?;
+        let mut last_notice = Instant::now();
+        repack_public_compact_v1(&mut reader,&mut writer,|processed| {
+            if last_notice.elapsed().as_secs() >= 10 {
+                eprintln!("{}",serde_json::json!({"stage":"compact_repack","inputs":processed,
+                    "elapsed_seconds":started.elapsed().as_secs_f64()}));
+                last_notice = Instant::now();
+            }
+        })?;
+        let receipt = writer.publish_with_progress(std::time::Duration::from_secs(10), |notice| {
+            eprintln!("{}",serde_json::json!({"publication":notice,"elapsed_seconds":started.elapsed().as_secs_f64()}));
+        })?;
+        serde_json::to_writer(std::io::stdout(),&receipt)?;
+        return Ok(());
+    }
     if args.len() == 5 && args[1] == "--initialize" {
         let mut config: CompactPublicPreparationConfigV1 = serde_json::from_reader(File::open(&args[2])?)?;
         let started = Instant::now();
