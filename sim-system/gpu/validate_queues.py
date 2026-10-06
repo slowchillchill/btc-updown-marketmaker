@@ -163,6 +163,17 @@ def main():
     assert sums.words.shape[1]>=15, '真实450位结果须增长，不截到输入位宽'
     invalid=Numbers.run_exact_batch(lambda:integers([5,-1]).floor_sum(integers([0,7]),integers([9,9]),integers([17,17])))
     assert invalid.fault.cpu().tolist()==[1,1]
+    from limit_segment import maximum_limit_segment
+    limit_originals=reference['limit_segments']
+    args=[integers([int(item['arguments'][index]) for item in limit_originals]) for index in range(8)]
+    limit_started=time.perf_counter()
+    limit=Numbers.run_exact_batch(lambda:maximum_limit_segment(*args))
+    limit_base,limit_quote=values(limit.base),values(limit.quote)
+    assert not limit.fault.any().cpu().item(),limit.fault.cpu().tolist()
+    for index,item in enumerate(limit_originals):
+        actual=[str(limit_base[index]),str(limit_quote[index])] if bool(limit.present[index].cpu()) else None
+        assert actual==item['result'],(item['arguments'],actual,item['result'])
+    limit_seconds=time.perf_counter()-limit_started
     torch.cuda.synchronize()
     print(json.dumps({'checks':['original_fifo_all_fields','taker_original_quote_difference','debt_echo_no_second_depletion',
         'resync_retains_account_order','cancel_only_target','segment_growth_retains_original_B_Q',
@@ -170,8 +181,9 @@ def main():
         'original_quote_budget_planning','incomplete_FOK_queue_unchanged','partial_segment_stops',
         'stale_plan_not_applied','original_cross_price_quote_plan','partial_price_stops_later_prices',
         'whole_budget_FOK_gate_before_any_queue_apply','original_Euclid_floor_sum',
-        'floor_sum_grows_for_large_exact_result','floor_sum_invalid_not_normal_value','original_empty_asset_quote_no_liquidity'],
-        'capacity':queue.capacity,'elapsed_seconds':time.perf_counter()-started,
+        'floor_sum_grows_for_large_exact_result','floor_sum_invalid_not_normal_value','original_empty_asset_quote_no_liquidity','original_nonmonotone_limit_segment',
+        'limit_segment_exact_96bit_quantity'],
+        'limit_segment_seconds':limit_seconds,'capacity':queue.capacity,'elapsed_seconds':time.perf_counter()-started,
         'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
         'noe_ledger_execution_delivered':False}))
 

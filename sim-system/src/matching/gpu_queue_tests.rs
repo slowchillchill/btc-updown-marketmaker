@@ -149,9 +149,23 @@ fn gpu_fifo_preserves_segment_order_taker_debt_and_resync() {
     let empty=AssetQueueV2::from_initial_levels(&[],&[]).unwrap();
     let empty_quote=empty.calculate_taker_buy(cross_prices[2],TakerTargetV1::Quote(7)).unwrap();
     assert!(empty_quote.fills.is_empty());
+    let mut limit_segments=Vec::new();
+    for arguments in [
+        [11_u128,7,3,6,13,8,4,2],
+        [10,5,0,10,10,6,0,0],
+        [10,5,0,5,10,5,0,0],
+        [10,5,0,3,10,3,0,0],
+        [10,5,4,6,10,5,4,2],
+        [1_u128<<96,1_u128<<95,0,1_u128<<95,1_u128<<96,1_u128<<95,0,0],
+    ] {
+        let [eb,eq,c,x,ob,oq,m,u]=arguments;
+        let expected=maximum_base_for_limit_order_segment_v1(eb,eq,c,x,ob,oq,m,u).unwrap();
+        limit_segments.push(json!({"arguments":arguments.iter().map(|value|value.to_string()).collect::<Vec<_>>(),
+            "result":expected.map(|(base,quote)|[base.to_string(),quote.to_string()])}));
+    }
     let input=json!({"checkpoints":checkpoints,"maker_depletion":"1000000","taker_quote":"2000000",
         "multi_plan":{"initial":multi_initial,"slices":slices,"applied":multi_applied,"echo":multi_echo},
-        "quote_plans":quote_plans,"cross_quote_plans":cross_plans,"floor_sums":floor_sums,"empty_quote_plan":{"matched":empty_quote.matched_base_units.to_string(),"used":empty_quote.used_quote_units.to_string()}});
+        "quote_plans":quote_plans,"cross_quote_plans":cross_plans,"floor_sums":floor_sums,"limit_segments":limit_segments,"empty_quote_plan":{"matched":empty_quote.matched_base_units.to_string(),"used":empty_quote.used_quote_units.to_string()}});
     let python=std::env::var("B_GPU_PYTHON").unwrap();
     let script=std::env::var("B_GPU_FIFO_VALIDATOR").unwrap();
     let mut child=std::process::Command::new(python).arg(script).stdin(std::process::Stdio::piped())
