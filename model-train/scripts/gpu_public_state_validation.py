@@ -67,8 +67,11 @@ def main():
     assert not frame.fault.any().cpu().item()
     assert not frame.present[0].any().cpu().item()
     # 必须先按当前正量压紧再进入原BookEncoder；不让future槽位改变配对树。
+    # 工程组件选择首次有真实档位事实的原市场；不签发交易资格或创建账户根。
+    target_market = (next(entry[0] for entry in columns['market_assets']
+                         if entry[1] == columns['slots'][0][0]) if columns['slots'] else 0)
     original_pair = [asset for _,asset,_ in sorted(
-        [entry for entry in columns['market_assets'] if entry[0] == 0],key=lambda entry:entry[2])]
+        [entry for entry in columns['market_assets'] if entry[0] == target_market],key=lambda entry:entry[2])]
     assets = torch.tensor([original_pair if original_pair else [0,1]]*3, dtype=torch.int64, device='cuda')
     now = torch.tensor([columns['groups'][max(0,int(prefix))][2] if columns['groups'] else 0 for prefix in prefix_values],
                        dtype=torch.int64,device='cuda')
@@ -76,6 +79,9 @@ def main():
         now[-1] = json.loads(args.original_reference.read_text())['observation_ms']
     packer = PmBookInputs(state, initial_capacity=1)
     packed = packer.pack(frame, assets, now)
+    positive_rows = int(packed.mask.sum().cpu())
+    if columns['slots']:
+        assert positive_rows > 0, '真实来源盘口检查必须实际编码正数量档位，不能以空侧冒充'
     if len(columns['assets']) >= 2:
         assert not packed.fault.any().cpu().item()
     else:
@@ -172,6 +178,7 @@ def main():
               'groups':len(columns['groups']),'original_pm_steps':columns['original_pm_steps'],
               'assets':len(columns['assets']),'slots':len(columns['slots']),
               'decimal_dictionary':len(columns['decimals']),'derived_column_wire_bytes':len(wire),
+              'encoded_positive_rows':positive_rows,
               'cold_seconds':parsed-started,'total_seconds':time.perf_counter()-started,
               'peak_allocated_bytes':torch.cuda.max_memory_allocated(),
               'passed':passed,
