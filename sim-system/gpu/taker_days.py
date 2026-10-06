@@ -57,8 +57,75 @@ class TakerDayResult:
     fault: torch.Tensor
 
 
+class RebateCalendarOperations:
+    """两类返佣共用的日成熟、源金额日结与全额付款；前驱由各生产者登记。"""
+    maturity_ms = MATURITY
+    maker = False
+
+    def next_clock(self):
+        valid=self.occupied & ~self.mature
+        times=self.days+self.maturity_ms
+        sentinel=torch.full_like(times,(1<<63)-1)
+        at=torch.where(valid,times,sentinel).min(1).values
+        return at,valid.any(1)
+
+    def advance_clock(self,at,enabled):
+        if at.shape!=self.fault.shape or at.dtype!=torch.int64 or at.device!=self.days.device:
+            raise TypeError('日钟须同设备int64[roots]')
+        next_at,exists=self.next_clock()
+        fault=self.fault | ((at>next_at) & exists & enabled).to(torch.int32)
+        use=enabled & exists & (at==next_at) & (fault==0)
+        mask=self.occupied & ~self.mature & (self.days+self.maturity_ms==at[:,None]) & use[:,None]
+        return replace(self,mature=self.mature | mask,fault=fault),use
+
+    def finalize_one(self,account,enabled):
+        roots,capacity=self.occupied.shape
+        root=torch.arange(roots,device=self.days.device)
+        ready=self.occupied & self.mature & (self.pending==0) & ~self.finalized
+        values=torch.where(ready,self.days,torch.full_like(self.days,(1<<63)-1))
+        di=values.argmin(1)
+        requested=enabled & ready.any(1) & (self.fault==0)
+        index=root*capacity+di
+        accrued=take_ratio(self.accrued,index)
+        one=accrued.numerator.constant(1)
+        enough=accrued.compare(_ratio(one))
+        scaled=accrued.numerator*one.constant(10000)
+        units,_=scaled.divrem(accrued.denominator)
+        payable=ExactRational.ratio(units,one.constant(10000))
+        payable=rational_select(payable,enough.order>=0,zeros(payable))
+        locked=rational_select(accrued-payable,payable.numerator.sign>0,zeros(payable))
+        fault=self.fault | torch.where(requested,accrued.fault | enough.fault | payable.fault | locked.fault,0)
+        account,delta=account.finalize_rebate_day(locked,torch.full_like(enabled,self.maker),requested & (fault==0))
+        fault=fault | account.fault
+        use=requested & (fault==0)
+        mask=torch.zeros_like(self.occupied).scatter(1,di[:,None],use[:,None])
+        refs,ref_mask=self._references(self.days[root,di])
+        return (replace(self,finalized=self.finalized | mask,
+            payable=_store_ratio(self.payable,payable,index,use),locked=_store_ratio(self.locked,locked,index,use),fault=fault),account,
+            TakerDayResult(self.days[root,di],accrued,payable,locked,refs,ref_mask,delta,use,fault))
+
+    def pay_one(self,account,enabled):
+        roots,capacity=self.occupied.shape
+        root=torch.arange(roots,device=self.days.device)
+        ready_to_finalize=self.occupied & self.mature & (self.pending==0) & ~self.finalized
+        ready=self.occupied & self.finalized & ~self.paid & (self.payable.numerator.sign.reshape(roots,capacity)>0)
+        values=torch.where(ready,self.days,torch.full_like(self.days,(1<<63)-1))
+        di=values.argmin(1)
+        use=enabled & ready.any(1) & ~ready_to_finalize.any(1) & (self.fault==0)
+        index=root*capacity+di
+        paid=take_ratio(self.payable,index)
+        account,delta=account.pay_rebate_day(paid,torch.full_like(enabled,self.maker),use)
+        fault=self.fault | account.fault
+        use=use & delta.emitted & (fault==0)
+        mask=torch.zeros_like(self.occupied).scatter(1,di[:,None],use[:,None])
+        refs,ref_mask=self._references(self.days[root,di])
+        return (replace(self,paid=self.paid | mask,fault=fault),account,
+            TakerDayResult(self.days[root,di],take_ratio(self.accrued,index),paid,take_ratio(self.locked,index),
+                refs,ref_mask,delta,use,fault))
+
+
 @dataclass(frozen=True)
-class TakerDays:
+class TakerDays(RebateCalendarOperations):
     fill_occupied: torch.Tensor
     fill_sequences: object
     fill_days: torch.Tensor
@@ -185,22 +252,6 @@ class TakerDays:
             accrued=_store_ratio(self.accrued,added,root*self.occupied.size(1)+di,use),fault=fault)
         return result,terminal & (~requested | found) & (fault==0)
 
-    def next_clock(self):
-        valid=self.occupied & ~self.mature
-        times=self.days+MATURITY
-        sentinel=torch.full_like(times,(1<<63)-1)
-        at=torch.where(valid,times,sentinel).min(1).values
-        return at,valid.any(1)
-
-    def advance_clock(self,at,enabled):
-        if at.shape!=self.fault.shape or at.dtype!=torch.int64 or at.device!=self.days.device:
-            raise TypeError('日钟须同设备int64[roots]')
-        next_at,exists=self.next_clock()
-        fault=self.fault | ((at>next_at) & exists & enabled).to(torch.int32)
-        use=enabled & exists & (at==next_at) & (fault==0)
-        mask=self.occupied & ~self.mature & (self.days+MATURITY==at[:,None]) & use[:,None]
-        return replace(self,mature=self.mature | mask,fault=fault),use
-
     def _references(self,day):
         valid=self.fill_occupied & self.terminal_consumed & self.successful & (self.fill_days==day[:,None])
         key=torch.where(valid,self.terminal_order,torch.full_like(self.terminal_order,(1<<63)-1))
@@ -208,48 +259,3 @@ class TakerDays:
         roots,capacity=valid.shape
         index=(torch.arange(roots,device=day.device)[:,None]*capacity+order).flatten()
         return _take(self.fill_sequences,index),valid.gather(1,order)
-
-    def finalize_one(self,account,enabled):
-        roots,capacity=self.occupied.shape
-        root=torch.arange(roots,device=self.days.device)
-        ready=self.occupied & self.mature & (self.pending==0) & ~self.finalized
-        values=torch.where(ready,self.days,torch.full_like(self.days,(1<<63)-1))
-        di=values.argmin(1)
-        requested=enabled & ready.any(1) & (self.fault==0)
-        index=root*capacity+di
-        accrued=take_ratio(self.accrued,index)
-        one=accrued.numerator.constant(1)
-        enough=accrued.compare(_ratio(one))
-        scaled=accrued.numerator*one.constant(10000)
-        units,_=scaled.divrem(accrued.denominator)
-        payable=ExactRational.ratio(units,one.constant(10000))
-        payable=rational_select(payable,enough.order>=0,zeros(payable))
-        locked=rational_select(accrued-payable,payable.numerator.sign>0,zeros(payable))
-        fault=self.fault | torch.where(requested,accrued.fault | enough.fault | payable.fault | locked.fault,0)
-        account,delta=account.finalize_rebate_day(locked,torch.zeros_like(enabled),requested & (fault==0))
-        fault=fault | account.fault
-        use=requested & (fault==0)
-        mask=torch.zeros_like(self.occupied).scatter(1,di[:,None],use[:,None])
-        refs,ref_mask=self._references(self.days[root,di])
-        return (replace(self,finalized=self.finalized | mask,
-            payable=_store_ratio(self.payable,payable,index,use),locked=_store_ratio(self.locked,locked,index,use),fault=fault),account,
-            TakerDayResult(self.days[root,di],accrued,payable,locked,refs,ref_mask,delta,use,fault))
-
-    def pay_one(self,account,enabled):
-        roots,capacity=self.occupied.shape
-        root=torch.arange(roots,device=self.days.device)
-        ready_to_finalize=self.occupied & self.mature & (self.pending==0) & ~self.finalized
-        ready=self.occupied & self.finalized & ~self.paid & (self.payable.numerator.sign.reshape(roots,capacity)>0)
-        values=torch.where(ready,self.days,torch.full_like(self.days,(1<<63)-1))
-        di=values.argmin(1)
-        use=enabled & ready.any(1) & ~ready_to_finalize.any(1) & (self.fault==0)
-        index=root*capacity+di
-        paid=take_ratio(self.payable,index)
-        account,delta=account.pay_rebate_day(paid,torch.zeros_like(enabled),use)
-        fault=self.fault | account.fault
-        use=use & delta.emitted & (fault==0)
-        mask=torch.zeros_like(self.occupied).scatter(1,di[:,None],use[:,None])
-        refs,ref_mask=self._references(self.days[root,di])
-        return (replace(self,paid=self.paid | mask,fault=fault),account,
-            TakerDayResult(self.days[root,di],take_ratio(self.accrued,index),paid,take_ratio(self.locked,index),
-                refs,ref_mask,delta,use,fault))

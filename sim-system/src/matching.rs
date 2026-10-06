@@ -9239,6 +9239,78 @@ mod tests {
         assert_eq!(allocations, vec![0, 10]);
         assert_eq!(allocations.iter().sum::<u128>(), total);
     }
+
+    #[tokio::test(flavor = "current_thread")]
+    #[ignore = "AutoDL真实Maker队列→市场结束→日结/付款设备验证"]
+    async fn gpu_maker_market_and_day_follow_original_positive_fill() {
+        let rules = crate::platform_rules::tests::successful_snapshot_v3_for_sim_tests().await;
+        let policy = TradeFinalityPolicyV2::decode_and_seal(
+            br#"{"schema_version":"trade_finality_policy_v2","normal_path":{"steps":[{"state":"MATCHED","offset_ms":0},{"state":"MINED","offset_ms":5000},{"state":"CONFIRMED","offset_ms":6000}],"economic_application_ordinal":2},"failure_overrides":[]}"#,
+        ).unwrap();
+        let (state, condition, token) = execution_state_v2_for_resting_limit_tests("639.50052");
+        let (mut state, disposition) = state.apply_buy_order(BuyOrderActionV2 {
+            global_request_id:"gpu-positive-maker".into(),batch_item_ordinal:0,item_id:"gpu-positive-maker-item".into(),
+            condition_id:condition.clone(),token_id:token,effective_processing_at_utc_ms:1200,
+            terms:BuyOrderTermsV2::Gtc {limit_price_pusd_per_share:decimal("0.4"),accepted_base_units:305_000_000,
+                accepted_quote_units:122_000_000,post_only:false},
+        },rules.snapshot(),&policy).unwrap();
+        assert!(matches!(disposition,BuyOrderDispositionV2::Accepted(_)));
+        let before = state.gpu_order_checkpoint_for_tests("sim-1");
+        let mut checkpoints = Vec::new();
+        for event in [
+            decoded_level_event_at_v2_for_tests(BookSide::Bid,"0.4","0","300",1300,1301,100),
+            decoded_level_event_at_v2_for_tests(BookSide::Bid,"0.4","300","0",1310,1311,101),
+        ] {
+            let normalized=crate::market::normalize_market_event_v2(&event).unwrap();
+            state.apply_market_event(&condition.0,&normalized,event.time.source_event_at_utc_ms.unwrap(),2000,
+                rules.snapshot(),&policy).unwrap();
+        }
+        assert_eq!(state.fills[&1].base_units,300_000_000);
+        assert_eq!(state.fills[&1].quote_units,120_000_000);
+        assert_eq!(state.fills[&1].liquidity_role,SimLiquidityRoleV1::Maker);
+        checkpoints.push(serde_json::json!({"stage":"matched","at":1310,"state":state.gpu_order_checkpoint_for_tests("sim-1")}));
+        let (next,end)=state.advance_next_rebate_clock_at(2000).unwrap();
+        state=next;
+        assert!(end.settlement.is_empty());
+        checkpoints.push(serde_json::json!({"stage":"end_pending","at":2000,"state":state.gpu_order_checkpoint_for_tests("sim-1")}));
+        let mut settlements=Vec::new();
+        let mut maker_fee_equivalent=None;
+        for at in [6310,7310] {
+            let (next,effect)=state.advance_next_scheduled_finality_at(at,&policy,rules.snapshot()).unwrap();
+            state=next;
+            maker_fee_equivalent=effect.transition.as_ref().and_then(|value|value.maker_fee_equivalent_pusd.as_ref()).map(|value|value.0.clone());
+            for effect in effect.into_lifecycle_feedback().unwrap() {
+                if let LifecycleFeedbackEffectV2::Settlement(effect)=effect {
+                    settlements.push(serde_json::json!({"at":effect.platform_event_at_utc_ms,"event":effect.event}));
+                }
+            }
+            checkpoints.push(serde_json::json!({"stage":"finality","at":at,"state":state.gpu_order_checkpoint_for_tests("sim-1")}));
+        }
+        let (next,effect)=state.advance_next_rebate_clock_at(89_100_000).unwrap();
+        state=next;
+        for effect in effect.into_lifecycle_feedback().unwrap() {
+            if let LifecycleFeedbackEffectV2::Settlement(effect)=effect {
+                settlements.push(serde_json::json!({"at":effect.platform_event_at_utc_ms,"event":effect.event}));
+            }
+        }
+        let source=serde_json::json!({"source_contract":"original_matching_positive_Maker_queue_market_day",
+            "before":before,"checkpoints":checkpoints,"after":state.gpu_order_checkpoint_for_tests("sim-1"),
+            "settlements":settlements,"finality_path":policy.normal_path(),"maker_fee_equivalent":maker_fee_equivalent.unwrap(),
+            "fee_rate":rules.snapshot().synchronized_platform_rules.fee_schedule.rate.value().to_string(),
+            "fee_exponent":rules.snapshot().synchronized_platform_rules.fee_schedule.exponent,
+            "maker_rate":rules.snapshot().project_account_rules.rebate_settlement.value.fixed_maker_rebate_rate.value().to_string()});
+        let directory=std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap());
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("original-positive-maker-day.json"),serde_json::to_vec_pretty(&source).unwrap()).unwrap();
+        let mut child=std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
+            .arg(std::env::var("B_GPU_MAKER_DAY_VALIDATOR").unwrap()).stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+        serde_json::to_writer(child.stdin.take().unwrap(),&source).unwrap();
+        let result=child.wait_with_output().unwrap();
+        assert!(result.status.success(),"{}",String::from_utf8_lossy(&result.stderr));
+        std::fs::write(directory.join("maker-day-report.json"),&result.stdout).unwrap();
+        eprintln!("gpu_positive_maker_day={}",String::from_utf8(result.stdout).unwrap());
+    }
 }
 
 fn maker_fee_equivalent(

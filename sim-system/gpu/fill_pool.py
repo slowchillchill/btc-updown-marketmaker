@@ -189,6 +189,39 @@ class FillPool:
         candidate=candidate.coordinate_result(self,committed,fault)
         return candidate,days,replace(effect,emitted=committed,fault=fault),demand
 
+    def enqueue_with_maker(self,record,days,condition,source_price):
+        """实际Maker fill同成交池/市场日前驱共同登记；即时费保持原零值。"""
+        candidate,effect=self.enqueue(record)
+        maker,demand=days.register(effect.sequence,condition,record.matched_at,record.base,source_price,effect.emitted)
+        fault=effect.fault | demand.fault | ((record.fee.sign!=0)&record.active).to(torch.int32)
+        committed=effect.emitted & demand.committed & (fault==0)
+        candidate=candidate.coordinate_result(self,committed,fault)
+        maker=maker.coordinate_result(days,committed,fault)
+        return candidate,maker,replace(effect,emitted=committed,fault=fault),demand
+
+    def advance_with_maker(self,account,days,at,fee_rate,fee_exponent,maker_rate):
+        """消费Maker密封义务；终态→市场前驱→可完成市场单汇总应计同候选提交。"""
+        original_account=account
+        candidate,account,transition=self.advance_one(account,at,maker_rate)
+        event=transition.event
+        maker,consumed=days.complete(transition.fill_sequence,event.terminal,event.state==4,fee_rate,fee_exponent,maker_rate)
+        fi,found,lookup_fault=maker._lookup(transition.fill_sequence)
+        root=torch.arange(self.roots,device=at.device)
+        market_slot=maker.fill_markets[root,fi]
+        maker,account,result=maker.finalize_market(account,market_slot,event.terminal & found)
+        fault=event.fault | maker.fault | lookup_fault | (event.emitted & ~found).to(torch.int32)
+        committed=event.emitted & (~event.terminal | consumed) & (fault==0)
+        candidate=candidate.coordinate_result(self,committed,fault)
+        maker=maker.coordinate_result(days,committed,fault)
+        account=account.coordinate_result(original_account,fault)
+        event=replace(event,emitted=committed,terminal=event.terminal & committed,fault=fault,
+            economic_delta=account.coordinate_delta(event.economic_delta,committed,fault),
+            failure_delta=account.coordinate_delta(event.failure_delta,committed,fault),
+            rebate_delta=account.coordinate_delta(event.rebate_delta,committed,fault))
+        result=replace(result,emitted=result.emitted & committed,fault=fault,
+            account_delta=account.coordinate_delta(result.account_delta,committed,fault))
+        return candidate,account,maker,replace(transition,event=event),result
+
     def advance_with_days(self,account,days,at,taker_rebate_rate):
         """原最终性终态通知同一Taker日桶，实际应计只由原经济delta产生一次。"""
         original_account=account
