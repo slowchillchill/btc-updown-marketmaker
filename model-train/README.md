@@ -6,7 +6,16 @@
 [窗口语义/物理布局](docs/100ms-window-inputs.md)。采用紧凑外生块一次构建共享复用，
 CPU/GPU协作准备，公共GPU环境与模型/PPO闭环；完整活动根恢复在完整PPO更新协调边界
 保存。设计接口为626/433市场与账户输入、完整六侧盘口及原30/36/184动作特征。
-这些是待实现版本，现有v7的596维schema、权重、轨迹和历史结果保持原身份。
+完整接口仍待闭合，现有v7的596维schema、权重、轨迹和历史结果保持原身份。
+
+新生产材料入口已接通原Parquet准入、GPU初始排序、原多核归并与完整事实输出，
+紧凑材料保存原快照/增量及可重建引用，不逐事件持久化全盘口。`data-pipeline/gpu/public_state.py`
+冷加载共享精确字典、原固定市场/资产身份、PM档位、质量和直接时间锚点；设备按合法组前缀查询。
+`native-inputs/gpu/input_books.py`沿原Native配方计算四个PM侧的9字段，按精确价格排序并稳定压紧
+当前正数量档位，只在尾部补齐后进入原BookEncoder。空盘口保留Unknown质量；不存在的资产坐标
+返回错误而不补假身份。资源容量增长只改变墙钟，不丢档位或缩小合法域。
+这些能力已有真实首日工程前缀及原公共观察短链的服务器证据；尚缺完整公共字段、Binance、
+100ms窗口、hidden/SIM/NOE/Ledger/预留与合法Actor纵向闭环，以及PPO/MLflow和活动根恢复。
 
 现有 `NativeInputRoot`、`NativeComponentConsumer` 和 `consume_actor` 仍是逐帧CPU/Rust
 消费者：Python列表装箱及逐条件标量回传不能用于声称已交付100ms GPU闭环。新后端按

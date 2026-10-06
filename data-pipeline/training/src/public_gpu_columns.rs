@@ -13,6 +13,9 @@ pub struct PublicPmDeviceColumnsV1 {
     pub version: &'static str,
     pub input_stream_id: String,
     pub assets: Vec<AssetIdentityV1>,
+    pub markets: Vec<MarketIdentityV2>,
+    /// 原固定身份：[market,asset,outcome.index]；不是由出现盘口的顺序推导市场。
+    pub market_assets: Vec<[i64;3]>,
     pub decimals: Vec<String>,
     /// [asset,bid=0/ask=1,price_decimal_id]；保留全部实际价位和显式零量。
     pub slots: Vec<[i64;3]>,
@@ -46,7 +49,8 @@ fn quality_code(quality: MarketDataQuality) -> i64 {
 }
 struct Builder {
     columns: PublicPmDeviceColumnsV1,
-    assets: BTreeMap<String,i64>, decimals: BTreeMap<String,i64>, slots: BTreeMap<(i64,i64,i64),i64>,
+    assets: BTreeMap<String,i64>, markets: BTreeMap<String,i64>,
+    decimals: BTreeMap<String,i64>, slots: BTreeMap<(i64,i64,i64),i64>,
 }
 impl Builder {
     fn asset(&mut self, asset: &AssetIdentityV1) -> i64 {
@@ -79,7 +83,7 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
     let mut builder = Builder { columns: PublicPmDeviceColumnsV1 {
         version:"public_pm_device_columns_v1",input_stream_id:reader.manifest.header.input_stream_id.clone(),
         ..Default::default()
-    }, assets:BTreeMap::new(), decimals:BTreeMap::new(), slots:BTreeMap::new() };
+    }, assets:BTreeMap::new(), markets:BTreeMap::new(), decimals:BTreeMap::new(), slots:BTreeMap::new() };
     // 零值占位不是已知零；设备查询另带initialized/selected/present。
     builder.decimal(&ExactDecimal("0".into()))?;
     let mut snapshots = BTreeMap::new();
@@ -93,9 +97,19 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
             builder.columns.groups.push([i64::try_from(group.group_position)?,i64::try_from(group.closed_at_input_position)?,group.visible_at_utc_ms]);
             for fact in &group.records {
                 if let crate::compact_public::CompactFactPayloadV1::Inline(
-                    PublicBusinessPayloadV1::MarketFact {payload:CanonicalMarketFactPayloadV1::FixedIdentity {assets}, ..}
+                    PublicBusinessPayloadV1::MarketFact {market,payload:CanonicalMarketFactPayloadV1::FixedIdentity {assets}}
                 ) = &fact.payload {
-                    for asset in assets { builder.asset(asset); }
+                    let next = i64::try_from(builder.columns.markets.len())?;
+                    let market_id = *builder.markets.entry(market.condition_id.0.clone()).or_insert_with(|| {
+                        builder.columns.markets.push(market.clone()); next
+                    });
+                    for asset in assets {
+                        let asset_id = builder.asset(asset);
+                        let identity = [market_id, asset_id, i64::from(asset.outcome.index)];
+                        if !builder.columns.market_assets.contains(&identity) {
+                            builder.columns.market_assets.push(identity);
+                        }
+                    }
                 }
             }
         }

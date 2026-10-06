@@ -67,7 +67,9 @@ def main():
     assert not frame.fault.any().cpu().item()
     assert not frame.present[0].any().cpu().item()
     # 必须先按当前正量压紧再进入原BookEncoder；不让future槽位改变配对树。
-    assets = torch.tensor([[0,1]]*3, dtype=torch.int64, device='cuda')
+    original_pair = [asset for _,asset,_ in sorted(
+        [entry for entry in columns['market_assets'] if entry[0] == 0],key=lambda entry:entry[2])]
+    assets = torch.tensor([original_pair if original_pair else [0,1]]*3, dtype=torch.int64, device='cuda')
     now = torch.tensor([columns['groups'][max(0,int(prefix))][2] if columns['groups'] else 0 for prefix in prefix_values],
                        dtype=torch.int64,device='cuda')
     if args.original_reference is not None:
@@ -113,7 +115,7 @@ def main():
         def signed_log(value):
             value = float(value)
             return math.copysign(math.log1p(abs(value)),value) if value else 0.0
-        for outcome, asset_id in enumerate([0,1]):
+        for outcome, asset_id in enumerate(original_pair):
             original = next(a for a in reference['public_assets']
                             if a['asset']['token_id'] == columns['assets'][asset_id]['token_id'])
             for side, name in enumerate(['bids','asks']):
@@ -155,19 +157,24 @@ def main():
     assert invalid.fault.ne(0).all().cpu().item()
     assert invalid.prefix_fault.ne(0).all().cpu().item()
     torch.cuda.synchronize()
+    passed = ['real_source_shared_exact_decimal_columns','gpu_prefix_quantity_and_selection',
+              'initialization_and_ready_prefix','future_slots_masked',
+              'continuous_device_query','out_of_material_prefix_fault',
+              'i64_time_coordinate_exact_difference','fault_bit_union']
+    if columns['slots']:
+        passed += ['exact_price_sort_current_positive_compaction','native_pm_nine_fields',
+                   'real_book_encoder_forward_backward','tail_padding_pairwise_tree']
+    else:
+        passed += ['legal_missing_book','metadata_identity_preserved_or_unknown_coordinate_fault']
     report = {'source_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
-              'identity':'engineering_real_public_pm_book_inputs_only','device':torch.cuda.get_device_name(),
+              'identity':('engineering_real_public_pm_book_inputs_only' if columns['slots']
+                          else 'engineering_missing_book_boundary'),'device':torch.cuda.get_device_name(),
               'groups':len(columns['groups']),'original_pm_steps':columns['original_pm_steps'],
               'assets':len(columns['assets']),'slots':len(columns['slots']),
               'decimal_dictionary':len(columns['decimals']),'derived_column_wire_bytes':len(wire),
               'cold_seconds':parsed-started,'total_seconds':time.perf_counter()-started,
               'peak_allocated_bytes':torch.cuda.max_memory_allocated(),
-              'passed':['real_source_shared_exact_decimal_columns','gpu_prefix_quantity_and_selection',
-                        'initialization_and_ready_prefix','future_slots_masked',
-                        'continuous_device_query','out_of_material_prefix_fault',
-                        'exact_price_sort_current_positive_compaction','native_pm_nine_fields',
-                        'real_book_encoder_forward_backward','tail_padding_pairwise_tree',
-                        'i64_time_coordinate_exact_difference','fault_bit_union'],
+              'passed':passed,
               'original_core_reference_checked':args.original_reference is not None,
               'not_delivered':['bba_trade_market_state','binance_state','hidden','sim_noe_ledger',
                                '100ms_window','full_actor','ppo','active_root_restore']}

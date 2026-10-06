@@ -53,6 +53,8 @@ class PublicPmState:
             raise ValueError('设备列版本错误')
         self.input_stream_id = columns['input_stream_id']
         self.assets = columns['assets']  # 只在冷身份边界使用。
+        self.markets = columns['markets']
+        self.market_assets = columns['market_assets']
         assets, slots, groups = len(self.assets), len(columns['slots']), len(columns['groups'])
         self.group_count = groups
         for asset, side, price in columns['slots']:
