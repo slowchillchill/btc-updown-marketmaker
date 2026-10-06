@@ -874,7 +874,7 @@ mod tests {
             for group in &observed.applied.closed_groups {
                 public_events.extend(group.records.iter().cloned());
                 public_visible_times.push(data_pipeline_core::public_observation_core::public_group_visible_at_utc_ms(
-                    &input.ingress,&group.records));
+                    prepared.recorded.ingress,&group.records));
                 for observation in &group.observations {
                     if position == 3 {
                         first_sides = serde_json::json!({"prefix":observed_groups,"assets":observation.assets});
