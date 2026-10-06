@@ -164,6 +164,36 @@ def main():
     pending,delivered=run(lambda:pending.take_closed(gates))
     order=[by_row[row] for row,active in zip(delivered.record_refs.cpu().tolist()[0],delivered.emitted.cpu().tolist()[0]) if active]
     assert [r['position'] for r in order]==[r['position'] for r in source['records']]
+    # Registry在首次公开领取后、Ledger消费前接纳实际设备NOE。
+    sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'shared-run/gpu'))
+    from registry_projection import order_events_from_closed
+    from registry import PublicRegistryState,FrozenIntentOrders,TRADE,compact_order_events
+    receive_rank=torch.arange(delivered.record_refs.size(1),device='cuda')[None,:]
+    registry_events=run(lambda:order_events_from_closed(noe.normalizer.bank,batches,delivered,receive_rank))
+    registry_state=run(lambda:PublicRegistryState(compact_order_events(registry_events)))
+    trade_population=registry_state.events.received & (registry_state.events.kinds==TRADE)
+    assert int(trade_population.sum().cpu())==1
+    trade_values=amounts(registry_state.events.trade_quantity)
+    for slot,active_trade in enumerate(trade_population.cpu().tolist()[0]):
+        if active_trade:assert trade_values[slot]==Fraction('300')
+    # 本MINED冷前缀没有提交接受引用/原意图绑定：读面保持Unknown，不猜回历史。
+    public_orders=FrozenIntentOrders(enabled[:,None],noe.order_sequence,torch.zeros_like(enabled[:,None]),
+        run(lambda:rational(['0'])),torch.zeros_like(enabled[:,None]),torch.zeros_like(enabled[:,None]))
+    registry_view=run(lambda:registry_state.freeze_orders(public_orders,closed))
+    assert registry_view.fault.cpu().tolist()==[0]
+    assert registry_view.matched_known.cpu().tolist()==[[False]]
+    assert registry_view.commitment_known.cpu().tolist()==[[False]]
+    saved_registry=amounts(registry_view.matched)
+    # 一个实际Trade载荷被改坏，随后被更高private正常来源替换：故障不得丢失。
+    corrupted=replace(registry_events,roles=torch.where(registry_events.kinds==TRADE,
+        torch.full_like(registry_events.roles,9),registry_events.roles))
+    corrupted_state=run(lambda:PublicRegistryState(compact_order_events(corrupted)))
+    newer=replace(registry_events,private_sequences=registry_events.private_sequences+registry_events.private_sequences.constant(100),
+        receive_rank=registry_events.receive_rank+registry_events.received.size(1))
+    corrupted_state=run(lambda:corrupted_state.receive(newer))
+    assert corrupted_state.events.fault.cpu().tolist()==[1]
+    registry_state=run(lambda:registry_state.receive(newer))
+    assert amounts(registry_view.matched)==saved_registry
     finish_phase('device_receive_and_original_order_comparison')
     sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'ledger/gpu'))
     from memory import EconomicColumns
@@ -256,7 +286,8 @@ def main():
         'first_drain_pure_compute_attempts':drain_attempts,
         'timings_are_validation_stage_synchronizations_not_training_throughput':True,
         'original_outer_non_post_only_GTC_hidden_Maker_source':True,'same_actual_V4_batch_and_payloads_checked':9,
-        'original_received_order_and_dual_gates_checked':True,'device_closed_record_consumer_checked':True,
+        'original_received_order_and_dual_gates_checked':True,'device_closed_record_consumer_checked':True,'actual_device_NOE_Registry_Maker_trade_checked':True,
+        'Registry_missing_cold_submission_remains_Unknown':True,'replaced_malformed_Trade_keeps_fault':True,
         'reference_attempt_order_drives_device':False,'repeat_keeps_first_visibility_and_delivery':True,
         'cold_prefix_initializations':1,'actual_trade_role_and_net_fee_executed_read_checked':True,'actual_applied_position_cost_and_fee_read_checked':True,'actual_estimated_rebate_read_checked':True,'day_and_payment_money_seq_and_positions_checked':True,
         'elapsed_seconds_with_reference_reads':time.perf_counter()-start,'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),

@@ -66,7 +66,7 @@ def event_columns(references, identities, rank_start):
             result = result.get('result',result)
             row.update(kind=TRADE,order=identities[result['order_identity']],trade=identities[result['trade_identity']],
                 quantity=result['base_quantity_shares'],role=0 if result['liquidity_role']=='Taker' else 1,
-                disposition=['Pending','Retrying','FinalSuccess','FinalFailureNoEconomicEffect','FinalFailureReverted'].index(result['disposition']))
+                disposition=['PendingUnapplied','PendingApplied','FinalSuccess','FinalFailureUnapplied','FinalFailureCompensated'].index(result['economic_disposition']))
         else:
             raise ValueError('该订单组件冷适配器未包含此证据')
         rows.append(row)

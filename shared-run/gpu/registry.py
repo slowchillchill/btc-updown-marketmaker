@@ -119,19 +119,13 @@ def frozen_order_read(events, intents):
     formed_matched = formed_known & events.accepted_matched.gather(1,formed_at)
     closed = (life_known & events.lifecycle_closed.gather(1,life_at)) | (
         member & ((events.kinds==CANCEL_TARGET)&events.canceled)[:,None,:]).any(2)
-    # Trade按完整身份保留最高private来源；同来源只取首次领取，不按经济应用过滤。
-    trade_same, trade_fault = identity_matches(events.trades,events.trades,roots,width,width)
-    trade_member = trade_same & (events.received & (events.kinds==TRADE))[:,None,:]
-    latest, has_trade = choose_latest(trade_member,priority)
+    # Trade按完整身份的最高private保留一份；排序相邻键去重，不建历史平方矩阵。
     candidate = events.received & (events.kinds==TRADE)
-    earlier = events.receive_rank[:,:,None] > events.receive_rank[:,None,:]
-    representative = candidate & ~(trade_same & candidate[:,None,:] & earlier).any(2)
-    latest_coordinates = (torch.arange(roots,device=device)[:,None]*width+latest).flatten()
-    quantity = take_ratio(events.trade_quantity,latest_coordinates)
-    roles = events.roles.gather(1,latest)
-    disposition = events.dispositions.gather(1,latest)
-    trade_to_order = same.gather(2,latest[:,None,:].expand(roots,count,width))
-    trade_to_order = trade_to_order & representative[:,None,:] & has_trade[:,None,:]
+    representative = first_identity_population(events.trades,torch.zeros_like(events.kinds),candidate,priority)
+    quantity = events.trade_quantity
+    roles = events.roles
+    disposition = events.dispositions
+    trade_to_order = same & representative[:,None,:]
     indices = (torch.arange(roots,device=device)[:,None,None]*width+
         torch.arange(width,device=device)[None,None,:]).expand(roots,count,width).flatten()
     values = take_ratio(quantity,indices)
@@ -172,7 +166,6 @@ def frozen_order_read(events, intents):
     invalid=invalid | ((events.kinds==TRADE)&((events.roles<0)|(events.roles>1)|(events.dispositions<0)|(events.dispositions>4)))
     fault=fault | Numbers.combine_fault_rows(torch.where(events.received,invalid.to(torch.int32),0))
     fault = fault | Numbers.combine_fault_rows(torch.where(member,comparison_fault,0).reshape(roots,-1))
-    fault = fault | Numbers.combine_fault_rows(torch.where(trade_member,trade_fault,0).reshape(roots,-1))
     for value in [matched,active,commitment]:
         fault = fault | Numbers.combine_fault_rows(torch.where(intents.present,value.fault.reshape(roots,count),0))
     fault = fault | Numbers.combine_fault_rows(torch.where(accepted,coverage.fault.reshape(roots,count),0))
@@ -181,6 +174,26 @@ def frozen_order_read(events, intents):
         commitment_present,cancellable,cancellable_known,
         commitment,commitment_known,unfinished,fault)
 
+
+def first_identity_population(key,category,population,priority):
+    roots,width=population.shape
+    device=population.device
+    order=priority
+    # namespace + 完整u64字典坐标；同private继续保留首次领取。
+    words=key.words.to(torch.int64)&0xffffffff
+    for limb in [0,1]:
+        column=words[:,limb].reshape(roots,width)
+        order=order.gather(1,column.gather(1,order).argsort(dim=1,stable=True))
+    order=order.gather(1,category.gather(1,order).argsort(dim=1,stable=True))
+    # 将不属于这次权威来源人口的padding放尾；不让它遮蔽真实来源。
+    order=order.gather(1,(~population).gather(1,order).to(torch.int64).argsort(dim=1,stable=True))
+    sorted_category=category.gather(1,order)
+    sorted_words=words.reshape(roots,width,-1).gather(1,order[:,:,None].expand(roots,width,words.size(1)))
+    same=torch.zeros((roots,width),dtype=torch.bool,device=device)
+    if width>1:
+        same[:,1:]=(sorted_category[:,1:]==sorted_category[:,:-1]) & (sorted_words[:,1:,:2]==sorted_words[:,:-1,:2]).all(2)
+    selected=population.gather(1,order)&~same
+    return torch.zeros_like(selected).scatter(1,order,selected)
 
 def compact_order_events(events):
     """保留原Registry各身份的必要来源人口，不累计每次版本的整段历史。
@@ -198,26 +211,9 @@ def compact_order_events(events):
     trade=events.kinds==TRADE
     key=events.trades.select(trade.flatten(),key)
     category=torch.where(events.kinds<=QUOTE_ACCEPTED,0,events.kinds-1)
-    def first_per_identity(population):
-        order=priority
-        # namespace + 完整u64字典坐标；同private继续保留首次领取。
-        words=key.words.to(torch.int64)&0xffffffff
-        for limb in [0,1]:
-            column=words[:,limb].reshape(roots,width)
-            order=order.gather(1,column.gather(1,order).argsort(dim=1,stable=True))
-        order=order.gather(1,category.gather(1,order).argsort(dim=1,stable=True))
-        # 将不属于这次权威来源人口的padding放尾；不让它遮蔽真实来源。
-        order=order.gather(1,(~population).gather(1,order).to(torch.int64).argsort(dim=1,stable=True))
-        sorted_category=category.gather(1,order)
-        sorted_words=words.reshape(roots,width,-1).gather(1,order[:,:,None].expand(roots,width,words.size(1)))
-        same=torch.zeros((roots,width),dtype=torch.bool,device=device)
-        if width>1:
-            same[:,1:]=(sorted_category[:,1:]==sorted_category[:,:-1]) & (sorted_words[:,1:,:2]==sorted_words[:,:-1,:2]).all(2)
-        selected=population.gather(1,order)&~same
-        return torch.zeros_like(selected).scatter(1,order,selected)
     ordinary=events.received & ((events.kinds!=CANCEL_TARGET)|events.canceled)
-    keep=first_per_identity(ordinary)
-    keep=keep | first_per_identity(events.received & (events.kinds==ORDER_LIFECYCLE) & events.formation)
+    keep=first_identity_population(key,category,ordinary,priority)
+    keep=keep | first_identity_population(key,category,events.received & (events.kinds==ORDER_LIFECYCLE) & events.formation,priority)
     # root fault保存全部输入的故障，不因来源替换或压紧洗掉失败。
     fault=events.fault.clone()
     for value in [events.orders,events.trades,events.private_sequences,events.delivery_sequences,events.record_ordinals]:
@@ -227,6 +223,7 @@ def compact_order_events(events):
     for value in [events.matched,events.open_quantity,events.trade_quantity]:
         fault=fault | Numbers.combine_fault_rows(torch.where(events.received,value.fault.reshape(roots,width),0))
     kind_fault=(events.kinds<BASE_ACCEPTED)|(events.kinds>CANCEL_TARGET)
+    kind_fault=kind_fault | ((events.kinds==TRADE)&((events.roles<0)|(events.roles>1)|(events.dispositions<0)|(events.dispositions>4)))
     fault=fault | Numbers.combine_fault_rows(torch.where(events.received,kind_fault.to(torch.int32),0))
     # 唯一CPU读数是该物理块的最大保留人口，用于分配；不读业务条件逐项推进。
     capacity=max(1,int(keep.to(torch.int64).sum(1).max().cpu()))
