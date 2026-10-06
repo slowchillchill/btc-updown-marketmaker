@@ -279,6 +279,7 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
     let mut raw_pm: BTreeMap<u64,PolymarketOrderbookRow> = BTreeMap::new();
     let mut pm_types: BTreeMap<u64,&'static str> = BTreeMap::new();
     let mut temporary_sources = BTreeMap::new();
+    let mut retained_depth_ids = BTreeMap::new();
     while let Some(packet) = reader.next_packet()? {
         builder.columns.reference_preparation_complete &= packet.reference_preparation.is_some();
         if let DptIngressV1::Message {row:TypedRawRowV2::PolymarketRtdsChainlinkTwap(_),source_evidence} = &packet.input.ingress {
@@ -314,27 +315,50 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
                 };
                 let group_position = i64::try_from(group.group_position)?;
                 if let crate::compact_public::CompactFactPayloadV1::BinanceDepthFromPrefix {symbol,last_update_id,through_input_position} = &fact.payload {
-                    // 原core只为实际应用的深度输入产该事实；直接用原快照/绝对增量，不另归约全簿。
-                    if *through_input_position!=packet.input.input_position {return Err("深度事实缺当前原输入关联".into());}
-                    let symbol_id = builder.binance_symbol(symbol)?;
-                    let (snapshot,bids,asks) = match &packet.input.ingress {
-                        DptIngressV1::Message {row:TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(row)),..}
-                            if row.symbol==*symbol && row.last_update_id==*last_update_id => (true,&row.bids,&row.asks),
-                        DptIngressV1::Message {row:TypedRawRowV2::Existing(TypedRawRow::BinanceDepthUpdate(row)),..}
-                            if row.symbol==*symbol && row.final_update_id==*last_update_id
-                                && row.stitch_verdict==data_pipeline_core::typed_raw::BinanceDepthStitchVerdict::Applied => (false,&row.bids,&row.asks),
-                        _=>return Err("深度事实与已应用源快照/增量不一致".into()),
-                    };
-                    if snapshot {
-                        let row = builder.field_row(symbol_id,group_position,0)?;
-                        builder.columns.binance_resets.push(row);
+                    // 拒绝增量仍可产生Missing/ConfirmedGap事实；保留旧载荷，不应用raw更新。
+                    if *through_input_position != packet.input.input_position {
+                        return Err("深度事实缺当前原输入关联".into());
                     }
-                    for (side,levels) in [(0,bids),(1,asks)] {
-                        for level in levels {builder.binance_level(symbol_id,side,&level.price,&level.quantity,group_position)?;}
+                    let symbol_id = builder.binance_symbol(symbol)?;
+                    let levels = match &packet.input.ingress {
+                        DptIngressV1::Message {row:TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(row)),..}
+                            if row.symbol == *symbol && row.last_update_id == *last_update_id => {
+                                let reset = builder.field_row(symbol_id,group_position,0)?;
+                                builder.columns.binance_resets.push(reset);
+                                Some((&row.bids,&row.asks))
+                            },
+                        DptIngressV1::Message {row:TypedRawRowV2::Existing(TypedRawRow::BinanceDepthUpdate(row)),..}
+                            if row.symbol == *symbol => {
+                                use data_pipeline_core::typed_raw::BinanceDepthStitchVerdict as Verdict;
+                                match row.stitch_verdict {
+                                    Verdict::Applied if row.final_update_id == *last_update_id => Some((&row.bids,&row.asks)),
+                                    Verdict::NotAppliedSnapshotUnavailable | Verdict::NotAppliedConfirmedHole => {
+                                        let expected = if row.stitch_verdict == Verdict::NotAppliedSnapshotUnavailable {
+                                            MarketDataQuality::Missing
+                                        } else { MarketDataQuality::ConfirmedGap };
+                                        if fact.quality.availability != expected
+                                            || retained_depth_ids.get(symbol) != Some(last_update_id) {
+                                            return Err("拒绝深度事实缺原质量或保留更新ID".into());
+                                        }
+                                        None
+                                    },
+                                    _ => return Err("深度事实与源增量裁定不一致".into()),
+                                }
+                            },
+                        _ => return Err("深度事实与源快照/增量不一致".into()),
+                    };
+                    if let Some((bids,asks)) = levels {
+                        for (side,levels) in [(0,bids),(1,asks)] {
+                            for level in levels {
+                                builder.binance_level(symbol_id,side,&level.price,&level.quantity,group_position)?;
+                            }
+                        }
+                        retained_depth_ids.insert(symbol.clone(),*last_update_id);
                     }
                     let anchors = builder.anchor_set(&fact.direct_sources,&fact.position,&group.group_id)?;
                     let id = i64::try_from(builder.columns.binance_depth_values.len())?;
-                    builder.columns.binance_depth_values.push([1,anchors,quality_code(fact.quality.availability)]);
+                    let q = quality_code(fact.quality.availability);
+                    builder.columns.binance_depth_values.push([i64::from(q <= 1),anchors,q]);
                     let row = builder.field_row(symbol_id,group_position,id)?;
                     builder.columns.binance_depth.push(row);
                 }

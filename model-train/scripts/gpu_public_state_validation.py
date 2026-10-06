@@ -359,6 +359,39 @@ def main():
             expected_reference[start+2:start+7] = original_t5(field['direct_anchors'][0] if len(field['direct_anchors'])==1 else None)
         expected_reference[35:37] = [signed_log(1000),1.0]
         assert torch.equal(native_reference.values[2],torch.tensor(expected_reference,device='cuda',dtype=torch.float32)), (native_reference.values[2],expected_reference)
+        depth_rows = reference['binance_observations']
+        saw_gap = saw_missing = False
+        for row in depth_rows:
+            prefix = prefixes.new_tensor([row['prefix']])
+            current = binance_state.frame(prefix)
+            native = binance_inputs.encode(current,binance_state.observation(prefix),symbols[:1],now[:1])
+            original = row['depth']
+            q = quality_names.index(original['quality'])
+            assert native.side.values[0,0,q].cpu().item() == 1
+            visible = original['value'] is not None and original['quality'] in ('fresh','stale')
+            assert current.ready[0,0].cpu().item() == visible
+            assert not native.fault.any().cpu().item()
+            if not visible:
+                assert not native.packed.mask.any().cpu().item()
+                assert not native.side.values[0,0,6:].any().cpu().item()
+                saw_gap |= original['quality'] == 'confirmed_gap'
+                saw_missing |= original['quality'] == 'missing'
+            else:
+                for side,name in enumerate(('bids','asks')):
+                    levels = original['value'][name]
+                    expected = [[signed_log(Fraction(level['price_usdt_per_btc'])),
+                        signed_log(Fraction(level['quantity_btc'])),1.0,*([0.0]*5),
+                        signed_log(Fraction(levels[0]['price_usdt_per_btc'])-Fraction(level['price_usdt_per_btc'])
+                            if side==0 else Fraction(level['price_usdt_per_btc'])-Fraction(levels[0]['price_usdt_per_btc']))]
+                        for level in levels]
+                    actual = native.packed.levels[0,side][native.packed.mask[0,side]]
+                    assert torch.equal(actual,torch.tensor(expected,device='cuda',dtype=torch.float32)), (actual,expected)
+        assert saw_gap and saw_missing
+        # 同一旧载荷跨拒绝边界保持精确；不是只把错误更新遮在mask后。
+        for before,after in ((1,2),(3,4)):
+            a = binance_state.frame(prefixes.new_tensor([depth_rows[before]['prefix']])).quantity.project()[0]
+            b = binance_state.frame(prefixes.new_tensor([depth_rows[after]['prefix']])).quantity.project()[0]
+            assert torch.equal(a,b)
         original_binance = selected_reference['binance_depth']
         original_first = reference['first_binance']
         first_binance = binance_inputs.encode(binance_state.frame(prefixes.new_tensor([original_first['prefix']])),
@@ -601,7 +634,8 @@ def main():
               'cold_seconds':parsed-started,'total_seconds':time.perf_counter()-started,
               'peak_allocated_bytes':torch.cuda.max_memory_allocated(),
               'normal_window_peak_allocated_bytes':normal_window_peak,
-              'window_peak_scope':'驻留共享公共列及累计可见时间、已打包盘口和直接字段、三前缀窗口与末10个100ms窗口；非法窗不扩池',
+              'window_peak_scope':'驻留共享公共列、累计可见时间、PM及Binance盘口打包和直接字段、三前缀与末10个100ms窗口；在BookEncoder创建前采样，非法窗不扩池',
+              'peak_scope':'本组件全部检查峰，含六侧BookEncoder前向反向及尾补齐双前向对照；不是完整编码或学习工作集',
               'passed':passed,
               'original_core_reference_checked':args.original_reference is not None,
               'not_delivered':(['reference_preparation_for_this_material'] if not columns['reference_preparation_complete'] else [])+['hidden','sim_noe_ledger',

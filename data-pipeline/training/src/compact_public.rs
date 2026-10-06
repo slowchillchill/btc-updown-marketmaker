@@ -815,6 +815,15 @@ mod tests {
             TypedRawRowV2::Existing(TypedRawRow::BinanceDepthUpdate(update("depth-a",101,101,2,Some(100),None,
                 BinanceDepthStitchVerdict::Applied,vec![DepthLevel {price:"64000".into(),quantity:"0".into()},
                     DepthLevel {price:"63900".into(),quantity:"1.234".into()}]))),
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthUpdate(update("depth-a",104,104,3,Some(100),Some(101),
+                BinanceDepthStitchVerdict::NotAppliedConfirmedHole,vec![DepthLevel {price:"64100".into(),quantity:"0.9".into()}]))),
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(snapshot("depth-b",200,1))),
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthUpdate(update("depth-c",201,201,1,None,None,
+                BinanceDepthStitchVerdict::NotAppliedSnapshotUnavailable,vec![DepthLevel {price:"64100".into(),quantity:"0.99".into()}]))),
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(snapshot("depth-c",300,2))),
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthUpdate(update("depth-c",301,301,3,Some(300),None,
+                BinanceDepthStitchVerdict::Applied,vec![DepthLevel {price:"64000".into(),quantity:"0".into()},
+                    DepthLevel {price:"63900".into(),quantity:"1.234".into()}]))),
             match crate::public_recording::tests::twap_record(12,30,23002,"65000000000000000000000").ingress {
                 DptIngressV1::Message {row,..}=>row,_=>unreachable!(),
             },
@@ -848,6 +857,7 @@ mod tests {
         let mut terminal_observations = Vec::new();
         let mut first_sides = serde_json::Value::Null;
         let mut first_binance = serde_json::Value::Null;
+        let mut binance_observations = Vec::new();
         let mut observed_groups = 0_u64;
         let mut reference_candidates = Vec::new();
         let mut original = None;
@@ -886,6 +896,10 @@ mod tests {
                     }
                     if first_binance.is_null() && observation.binance_depth.value.is_some() {
                         first_binance = serde_json::json!({"prefix":observed_groups,"depth":observation.binance_depth});
+                    }
+                    if matches!(prepared.recorded.ingress,DptIngressV1::Message {row:TypedRawRowV2::Existing(
+                        TypedRawRow::BinanceDepthSnapshot(_) | TypedRawRow::BinanceDepthUpdate(_)),..}) {
+                        binance_observations.push(serde_json::json!({"prefix":observed_groups,"depth":observation.binance_depth}));
                     }
                     public_assets = observation.assets.clone();
                     public_market = serde_json::json!({"market":observation.market,"lifecycle":observation.lifecycle,
@@ -941,7 +955,7 @@ mod tests {
             "present":true,"initialized":asset.has_initial_snapshot,"ready":asset.book_ready,
             "public_assets":public_assets,"public_events":public_events,"public_visible_times":public_visible_times,
             "public_market":public_market,"terminal_observations":terminal_observations,
-            "first_sides":first_sides,"first_binance":first_binance,"observation_ms":44000});
+            "first_sides":first_sides,"first_binance":first_binance,"binance_observations":binance_observations,"observation_ms":44000});
         let reference_path = temp.path().join("original-reference.json");
         serde_json::to_writer(File::create(&reference_path).unwrap(),&reference).unwrap();
         eprintln!("original_core_zero_reference={reference}");
