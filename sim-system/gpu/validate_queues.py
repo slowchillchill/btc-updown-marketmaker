@@ -122,12 +122,34 @@ def main():
             pass
         else:
             raise AssertionError('旧计划不得重复应用到新队列')
+    from asset_buy import plan_asset_quote, apply_asset_quote
+    cross_price=Numbers.run_exact_batch(lambda:ExactRational.ratio(integers([4,5,6]),integers([10,10,10])))
+    cross=PriceQueueBatch.empty(cross_price,capacity=1)
+    cross,_=run_queue_batch(cross,lambda value:value.append_external(integers([10,10,10])))
+    layout=torch.tensor([[0,1,2]],dtype=torch.int64,device='cuda')
+    maximum=Numbers.run_exact_batch(lambda:ExactRational.ratio(integers([6]),integers([10])))
+    for original in reference['cross_quote_plans']:
+        budget=integers([int(original['budget'])])
+        assert describe(cross)==original['initial']
+        plan=Numbers.run_exact_batch(lambda:plan_asset_quote(cross,layout,budget,maximum))
+        assert not plan.fault.any().cpu().item()
+        assert values(plan.matched_base)==[int(original['matched'])]
+        assert values(plan.used_quote)==[int(original['used'])]
+        actual=[]
+        for row,(base,quote) in enumerate(zip(values(plan.queue_plan.delta_base),values(plan.queue_plan.delta_quote))):
+            if base>0:
+                actual.append({'price':str([0.4,0.5,0.6][row]),'column':0,'base':str(base),'quote':str(quote)})
+        assert actual==original['slices']
+        result=Numbers.run_exact_batch(lambda:apply_asset_quote(cross,plan,torch.ones(1,dtype=torch.bool,device='cuda')))
+        assert describe(result)==original['applied']
+        assert describe(cross)==original['initial']
     torch.cuda.synchronize()
     print(json.dumps({'checks':['original_fifo_all_fields','taker_original_quote_difference','debt_echo_no_second_depletion',
         'resync_retains_account_order','cancel_only_target','segment_growth_retains_original_B_Q',
         'original_multi_segment_plan_coordinates','plan_finish_preserves_unfinished_rows',
         'original_quote_budget_planning','incomplete_FOK_queue_unchanged','partial_segment_stops',
-        'stale_plan_not_applied'],
+        'stale_plan_not_applied','original_cross_price_quote_plan','partial_price_stops_later_prices',
+        'whole_budget_FOK_gate_before_any_queue_apply'],
         'capacity':queue.capacity,'elapsed_seconds':time.perf_counter()-started,
         'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
         'noe_ledger_execution_delivered':False}))

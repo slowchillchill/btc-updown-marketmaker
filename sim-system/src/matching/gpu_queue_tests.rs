@@ -121,9 +121,23 @@ fn gpu_fifo_preserves_segment_order_taker_debt_and_resync() {
             "budget":budget.to_string(),"matched":matched.to_string(),"used":used.to_string(),
             "accepted":accepted,"slices":slices,"applied":describe(&queue,BookSide::Ask,ask)}));
     }
+    let cross_prices:Vec<Decimal>=["0.4","0.5","0.6"].iter().map(|value|value.parse().unwrap()).collect();
+    let mut cross_plans=Vec::new();
+    for budget in [7_u128,15,16] {
+        let levels:Vec<_>=cross_prices.iter().map(|price|(*price,10)).collect();
+        let mut source=AssetQueueV2::from_initial_levels(&[],&levels).unwrap();
+        let initial:Vec<_>=cross_prices.iter().map(|price|describe(&source,BookSide::Ask,*price)).collect();
+        let plan=source.calculate_taker_buy(cross_prices[2],TakerTargetV1::Quote(budget)).unwrap();
+        let slices:Vec<_>=plan.fills.iter().map(|part|json!({"price":part.fill.price_pusd_per_share.to_string(),
+            "column":part.segment_index,"base":part.fill.base_units.to_string(),"quote":part.fill.quote_units.to_string()})).collect();
+        let matched=plan.matched_base_units;let used=plan.used_quote_units;
+        if used==budget {source.apply_taker_consumption(plan);}
+        cross_plans.push(json!({"budget":budget.to_string(),"matched":matched.to_string(),"used":used.to_string(),
+            "initial":initial,"slices":slices,"applied":cross_prices.iter().map(|price|describe(&source,BookSide::Ask,*price)).collect::<Vec<_>>() }));
+    }
     let input=json!({"checkpoints":checkpoints,"maker_depletion":"1000000","taker_quote":"2000000",
         "multi_plan":{"initial":multi_initial,"slices":slices,"applied":multi_applied,"echo":multi_echo},
-        "quote_plans":quote_plans});
+        "quote_plans":quote_plans,"cross_quote_plans":cross_plans});
     let python=std::env::var("B_GPU_PYTHON").unwrap();
     let script=std::env::var("B_GPU_FIFO_VALIDATOR").unwrap();
     let mut child=std::process::Command::new(python).arg(script).stdin(std::process::Stdio::piped())
