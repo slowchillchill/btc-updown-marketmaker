@@ -288,6 +288,50 @@ class PriceQueueBatch:
         return QuoteTakerPlan(self, _columns(base_columns), _columns(quote_columns), _columns(consumed_columns),
                               matched, used, stopped, roots_fault)
 
+    def plan_limit_base(self, total_base, total_quote, matched_before, used_before):
+        """原GTC LimitBase目标：每片以订单累计成交/付款承接精确价格改善余额。"""
+        from limit_segment import maximum_limit_segment
+        zero = total_base.constant(0)
+        matched, used = matched_before, used_before
+        stopped = torch.zeros(self.rows,dtype=torch.bool,device=self.kind.device)
+        fault = self.fault | total_base.fault | total_quote.fault | matched.fault | used.fault
+        fault = fault | ((total_base.sign <= 0) | (total_quote.sign < 0) | (matched.sign < 0) | (used.sign < 0)).to(torch.int32)
+        relation = matched.compare(total_base)
+        fault = fault | relation.fault | (relation.order > 0).to(torch.int32)
+        safe_total = total_base.select(total_base.sign > 0,total_base.constant(1))
+        allocation = (matched*total_quote).divrem(safe_total)[0]
+        relation = used.compare(allocation)
+        fault = fault | relation.fault | allocation.fault | (relation.order > 0).to(torch.int32)
+        base_columns,quote_columns,consumed_columns = [],[],[]
+        for column in range(self.capacity):
+            base = self._at(self.total_base,column)
+            quote = self._at(self.total_quote,column)
+            consumed = self._at(self.consumed_base,column)
+            remaining = base-consumed
+            target_remaining = total_base-matched
+            candidate = (self.kind[:,column] == 1) & (quote.sign > 0) & (remaining.sign > 0)
+            candidate = candidate & (target_remaining.sign > 0) & ~stopped & (fault == 0)
+            maximum = _minimum(remaining,target_remaining).select(candidate,zero)
+            # 空槽用合法物理占位，仍携带原完整source fault，不产生假流动性。
+            safe_base = base.select(base.sign > 0,total_base.constant(1))
+            result = maximum_limit_segment(safe_base,quote,consumed.select(candidate,zero),maximum,
+                                          total_base,total_quote,matched,used)
+            fault = fault | result.fault * candidate.to(torch.int32)
+            selected = candidate & result.present & (fault == 0)
+            delta_base = result.base.select(selected,zero)
+            delta_quote = result.quote.select(selected,zero)
+            matched = matched+delta_base
+            used = used+delta_quote
+            fault = fault | matched.fault | used.fault
+            partial = delta_base.compare(remaining)
+            fault = fault | partial.fault
+            stopped = stopped | (candidate & (~result.present | (partial.order < 0)))
+            base_columns.append(delta_base)
+            quote_columns.append(delta_quote)
+            consumed_columns.append(consumed+delta_base)
+        return QuoteTakerPlan(self,_columns(base_columns),_columns(quote_columns),_columns(consumed_columns),
+            matched-matched_before,used-used_before,stopped,fault)
+
     def apply_quote_plan(self, plan, accepted):
         """接单协调器证明全计划可接纳后应用同一冻结队列的计划；拒绝根无队列变化。"""
         if plan.source is not self:

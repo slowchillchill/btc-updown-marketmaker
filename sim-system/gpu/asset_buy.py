@@ -18,7 +18,7 @@ class AssetQuotePlan:
     row_owners: torch.Tensor  # int64[queue rows]，冷资产/ask索引；-1不是本次ask。
 
 
-def plan_asset_quote(queue, ask_rows, budget, maximum_price):
+def _plan_asset_buy(queue, ask_rows, budget, maximum_price, total_base=None):
     """ask_rows为原精确价位升序的冷共享索引[assets,maximum_levels]，尾部-1。
 
     所有业务分支与预算衔接留在设备。None/部分段停止整个资产计划；FOK宿主仅在
@@ -27,6 +27,8 @@ def plan_asset_quote(queue, ask_rows, budget, maximum_price):
     assets, width = ask_rows.shape
     if ask_rows.dtype != torch.int64 or ask_rows.device != queue.kind.device:
         raise TypeError('ask坐标须为同设备int64矩阵')
+    if total_base is not None and total_base.sign.shape != (assets,):
+        raise ValueError('LimitBase总量形状不一致')
     if budget.sign.shape != (assets,) or maximum_price.numerator.sign.shape != (assets,):
         raise ValueError('资产预算及最高价形状不一致')
     if assets < 1:
@@ -36,7 +38,9 @@ def plan_asset_quote(queue, ask_rows, budget, maximum_price):
         zero = budget.constant(0)
         fault = budget.fault | maximum_price.fault | (budget.sign < 0).to(torch.int32)
         fault = fault | (ask_rows != -1).any(1).to(torch.int32)
-        relation = zero.compare(budget)
+        if total_base is not None:
+            fault = fault | total_base.fault | (total_base.sign <= 0).to(torch.int32)
+        relation = zero.compare(budget if total_base is None else total_base)
         fault = fault | relation.fault
         flat_zero = queue.total_base.constant(0)
         queue_zero = queue.debt.constant(0)
@@ -65,6 +69,8 @@ def plan_asset_quote(queue, ask_rows, budget, maximum_price):
         bad_tail = ~present[:, :-1] & present[:, 1:]
         fault = fault | (bad_order.any(1) | bad_tail.any(1)).to(torch.int32)
         fault = fault | Numbers.combine_fault_rows(relation.fault.reshape(assets, -1)*adjacent.to(torch.int32))
+    if total_base is not None:
+        fault = fault | total_base.fault | (total_base.sign <= 0).to(torch.int32)
     root_zero = budget.constant(0)
     matched = used = root_zero
     stopped = torch.zeros(assets, dtype=torch.bool, device=ask_rows.device)
@@ -78,13 +84,23 @@ def plan_asset_quote(queue, ask_rows, budget, maximum_price):
         price = take_ratio(queue.price, row)
         permitted = price.compare(maximum_price)
         fault = fault | permitted.fault * valid[:, column].to(torch.int32)
-        selected = valid[:, column] & ~stopped & (permitted.order <= 0) & (fault == 0)
+        target_remaining = budget-used if total_base is None else total_base-matched
+        selected = valid[:, column] & ~stopped & (target_remaining.sign > 0) & (permitted.order <= 0) & (fault == 0)
         remaining = budget-used
         root_budget = remaining.select(selected, root_zero)
         row_budget = _take(root_budget, safe_owner)
         row_selected = torch.zeros(queue.rows, dtype=torch.int64, device=row.device).scatter_add(0,row,selected.to(torch.int64)) > 0
         row_budget = row_budget.select(row_selected, row_budget.constant(0))
-        candidate = queue.plan_quote_budget(row_budget)
+        if total_base is None:
+            candidate = queue.plan_quote_budget(row_budget)
+        else:
+            source_base = _take(total_base,safe_owner)
+            source_quote = _take(budget,safe_owner)
+            source_base = source_base.select(row_selected,source_base.constant(1))
+            source_quote = source_quote.select(row_selected,source_quote.constant(0))
+            prior_matched = _take(matched,safe_owner).select(row_selected,row_budget.constant(0))
+            prior_used = _take(used,safe_owner).select(row_selected,row_budget.constant(0))
+            candidate = queue.plan_limit_base(source_base,source_quote,prior_matched,prior_used)
         fault = fault | candidate.fault[row] * selected.to(torch.int32)
         addition_base = _take(candidate.matched_base, row).select(selected, root_zero)
         addition_quote = _take(candidate.used_quote, row).select(selected, root_zero)
@@ -97,7 +113,7 @@ def plan_asset_quote(queue, ask_rows, budget, maximum_price):
         quote = candidate.delta_quote.select(flat_selected, quote)
         consumed = candidate.consumed_after.select(flat_selected, consumed)
         row_fault = row_fault | candidate.fault * row_selected.to(torch.int32)
-    complete = used.compare(budget)
+    complete = used.compare(budget) if total_base is None else matched.compare(total_base)
     fault = fault | complete.fault
     row_matched = queue.debt.constant(0)
     row_used = queue.debt.constant(0)
@@ -109,9 +125,30 @@ def plan_asset_quote(queue, ask_rows, budget, maximum_price):
     return AssetQuotePlan(combined, matched, used, (complete.order == 0) & (fault == 0), fault, owner)
 
 
+def plan_asset_quote(queue, ask_rows, budget, maximum_price):
+    """原Quote目标跨升序ask计划；完整预算条件由complete表达。"""
+    return _plan_asset_buy(queue,ask_rows,budget,maximum_price)
+
+
+def plan_asset_limit(queue, ask_rows, total_base, total_quote, maximum_price):
+    """原LimitBase目标跨升序ask计划；未成交的base留给原GTC余量接单。"""
+    return _plan_asset_buy(queue,ask_rows,total_quote,maximum_price,total_base)
+
+
+def apply_asset_limit(queue, plan, accepted):
+    """GTC可部分成交；仍须由原接单条件授权，不把complete当接单条件。"""
+    return _apply_asset_plan(queue,plan,accepted,require_complete=False)
+
+
 def apply_asset_quote(queue, plan, accepted):
+    return _apply_asset_plan(queue,plan,accepted,require_complete=True)
+
+
+def _apply_asset_plan(queue,plan,accepted,*,require_complete):
     if accepted.dtype != torch.bool or accepted.shape != plan.complete.shape or accepted.device != queue.kind.device:
         raise TypeError('资产接纳掩码须为同设备bool[assets]')
     safe_owner = plan.row_owners.clamp(0, accepted.numel()-1)
-    enabled = (plan.row_owners >= 0) & accepted[safe_owner] & plan.complete[safe_owner] & (plan.fault[safe_owner] == 0)
+    enabled = (plan.row_owners >= 0) & accepted[safe_owner] & (plan.fault[safe_owner] == 0)
+    if require_complete:
+        enabled = enabled & plan.complete[safe_owner]
     return queue.apply_quote_plan(plan.queue_plan, enabled)

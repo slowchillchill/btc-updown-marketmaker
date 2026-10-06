@@ -174,6 +174,26 @@ def main():
         actual=[str(limit_base[index]),str(limit_quote[index])] if bool(limit.present[index].cpu()) else None
         assert actual==item['result'],(item['arguments'],actual,item['result'])
     limit_seconds=time.perf_counter()-limit_started
+    from asset_buy import plan_asset_limit,apply_asset_limit
+    limit_cross_started=time.perf_counter()
+    for original in reference['cross_limits']:
+        total_base,total_quote=integers([int(original['base'])]),integers([int(original['quote'])])
+        from fractions import Fraction
+        price=Fraction(original['maximum'])
+        maximum_limit=Numbers.run_exact_batch(lambda:ExactRational.ratio(integers([price.numerator]),integers([price.denominator])))
+        plan=Numbers.run_exact_batch(lambda:plan_asset_limit(cross,layout,total_base,total_quote,maximum_limit))
+        assert not plan.fault.any().cpu().item(),plan.fault.cpu().tolist()
+        assert values(plan.matched_base)==[int(original['matched'])]
+        assert values(plan.used_quote)==[int(original['used'])]
+        assert plan.complete.cpu().tolist()==[original['matched']==original['base']]
+        actual=[]
+        for row,(base,quote) in enumerate(zip(values(plan.queue_plan.delta_base),values(plan.queue_plan.delta_quote))):
+            if base>0:
+                actual.append({'price':str([0.4,0.5,0.6][row]),'column':0,'base':str(base),'quote':str(quote)})
+        assert actual==original['slices']
+        result=Numbers.run_exact_batch(lambda:apply_asset_limit(cross,plan,torch.ones(1,dtype=torch.bool,device='cuda')))
+        assert describe(result)==original['applied']
+    limit_cross_seconds=time.perf_counter()-limit_cross_started
     torch.cuda.synchronize()
     print(json.dumps({'checks':['original_fifo_all_fields','taker_original_quote_difference','debt_echo_no_second_depletion',
         'resync_retains_account_order','cancel_only_target','segment_growth_retains_original_B_Q',
@@ -182,8 +202,9 @@ def main():
         'stale_plan_not_applied','original_cross_price_quote_plan','partial_price_stops_later_prices',
         'whole_budget_FOK_gate_before_any_queue_apply','original_Euclid_floor_sum',
         'floor_sum_grows_for_large_exact_result','floor_sum_invalid_not_normal_value','original_empty_asset_quote_no_liquidity','original_nonmonotone_limit_segment',
-        'limit_segment_exact_96bit_quantity'],
-        'limit_segment_seconds':limit_seconds,'capacity':queue.capacity,'elapsed_seconds':time.perf_counter()-started,
+        'limit_segment_exact_96bit_quantity','original_GTC_cross_price_cumulative_credit',
+        'GTC_partial_target_applies_without_FOK_gate','maximum_price_stops_before_later_ask'],
+        'limit_cross_seconds':limit_cross_seconds,'limit_segment_seconds':limit_seconds,'capacity':queue.capacity,'elapsed_seconds':time.perf_counter()-started,
         'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
         'noe_ledger_execution_delivered':False}))
 

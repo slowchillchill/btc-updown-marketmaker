@@ -163,9 +163,22 @@ fn gpu_fifo_preserves_segment_order_taker_debt_and_resync() {
         limit_segments.push(json!({"arguments":arguments.iter().map(|value|value.to_string()).collect::<Vec<_>>(),
             "result":expected.map(|(base,quote)|[base.to_string(),quote.to_string()])}));
     }
+    let mut cross_limits=Vec::new();
+    for (target,quote,maximum) in [(25_u128,15_u128,cross_prices[2]),(40,24,cross_prices[2]),(25,15,cross_prices[1])] {
+        let levels:Vec<_>=cross_prices.iter().map(|price|(*price,10)).collect();
+        let mut source=AssetQueueV2::from_initial_levels(&[],&levels).unwrap();
+        let plan=source.calculate_taker_buy(maximum,TakerTargetV1::LimitBase {total_base_units:target,total_quote_units:quote}).unwrap();
+        let slices:Vec<_>=plan.fills.iter().map(|part|json!({"price":part.fill.price_pusd_per_share.to_string(),
+            "column":part.segment_index,"base":part.fill.base_units.to_string(),"quote":part.fill.quote_units.to_string()})).collect();
+        let matched=plan.matched_base_units;let used=plan.used_quote_units;
+        source.apply_taker_consumption(plan);
+        cross_limits.push(json!({"base":target.to_string(),"quote":quote.to_string(),"maximum":maximum.to_string(),
+            "matched":matched.to_string(),"used":used.to_string(),"slices":slices,
+            "applied":cross_prices.iter().map(|price|describe(&source,BookSide::Ask,*price)).collect::<Vec<_>>() }));
+    }
     let input=json!({"checkpoints":checkpoints,"maker_depletion":"1000000","taker_quote":"2000000",
         "multi_plan":{"initial":multi_initial,"slices":slices,"applied":multi_applied,"echo":multi_echo},
-        "quote_plans":quote_plans,"cross_quote_plans":cross_plans,"floor_sums":floor_sums,"limit_segments":limit_segments,"empty_quote_plan":{"matched":empty_quote.matched_base_units.to_string(),"used":empty_quote.used_quote_units.to_string()}});
+        "quote_plans":quote_plans,"cross_quote_plans":cross_plans,"floor_sums":floor_sums,"cross_limits":cross_limits,"limit_segments":limit_segments,"empty_quote_plan":{"matched":empty_quote.matched_base_units.to_string(),"used":empty_quote.used_quote_units.to_string()}});
     let python=std::env::var("B_GPU_PYTHON").unwrap();
     let script=std::env::var("B_GPU_FIFO_VALIDATOR").unwrap();
     let mut child=std::process::Command::new(python).arg(script).stdin(std::process::Stdio::piped())
