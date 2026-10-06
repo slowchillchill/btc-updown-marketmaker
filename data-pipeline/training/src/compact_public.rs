@@ -785,7 +785,7 @@ mod tests {
             trade.validate().unwrap();
             TypedRawRowV2::Existing(TypedRawRow::BinanceAggTrade(trade))
         };
-        let sources = vec![
+        let mut sources = vec![
             reference_source(200),reference_source(100),
             TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(metadata_snapshot_row()))),
             TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",1,21000,22000,book("12")))),
@@ -847,6 +847,24 @@ mod tests {
                     description:None,asset_ids:vec!["20".into(),"3".into()],outcomes:vec!["UP".into(),"DOWN".into()],
                     event_message:None,winning_asset_id:"3".into(),winning_outcome:"DOWN".into()}))),
         ];
+        // 同值新身份及超过16条的窗内路径，均从原合法BBA输入产生。
+        for source in &mut sources {
+            match source {
+                TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row)) if row.collector_admission_sequence>=4 => {
+                    row.collector_admission_sequence += 20;
+                },
+                TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(row)) => {
+                    if let Some(sequence) = row.ws_claimant_collector_admission_sequence.as_mut() { *sequence += 20; }
+                },
+                _ => {},
+            }
+        }
+        sources.splice(6..6,(0..20).map(|index| {
+            let bid = if index%2==0 {"0.45"} else {"0.50"};
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",4+index,26010+index as i64,
+                26011+index as i64,PolymarketOrderbookEvent::BestBidAsk {asset_id:"20".into(),
+                    best_bid:Some(bid.into()),best_ask:Some("0.65".into()),spread:None})))
+        }));
         let mut core = PublicObservationCoreV1::new(header.clone()).unwrap();
         let mut writer = PublicCompactWriterV1::create(&target,header.clone()).unwrap();
         let mut observation_core = PublicObservationCoreV1::new(header.clone()).unwrap();
@@ -858,6 +876,7 @@ mod tests {
         let mut first_sides = serde_json::Value::Null;
         let mut first_binance = serde_json::Value::Null;
         let mut binance_observations = Vec::new();
+        let mut source_observations = Vec::new();
         let mut observed_groups = 0_u64;
         let mut reference_candidates = Vec::new();
         let mut original = None;
@@ -891,6 +910,7 @@ mod tests {
                 public_visible_times.push(data_pipeline_core::public_observation_core::public_group_visible_at_utc_ms(
                     prepared.recorded.ingress,&group.records));
                 for observation in &group.observations {
+                    source_observations.push(serde_json::json!({"prefix":observed_groups,"observation":observation}));
                     if position == 3 {
                         first_sides = serde_json::json!({"prefix":observed_groups,"assets":observation.assets});
                     }
@@ -955,7 +975,7 @@ mod tests {
             "present":true,"initialized":asset.has_initial_snapshot,"ready":asset.book_ready,
             "public_assets":public_assets,"public_events":public_events,"public_visible_times":public_visible_times,
             "public_market":public_market,"terminal_observations":terminal_observations,
-            "first_sides":first_sides,"first_binance":first_binance,"binance_observations":binance_observations,"observation_ms":44000});
+            "first_sides":first_sides,"first_binance":first_binance,"binance_observations":binance_observations,"source_observations":source_observations,"observation_ms":44000});
         let reference_path = temp.path().join("original-reference.json");
         serde_json::to_writer(File::create(&reference_path).unwrap(),&reference).unwrap();
         eprintln!("original_core_zero_reference={reference}");

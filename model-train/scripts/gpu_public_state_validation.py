@@ -359,6 +359,70 @@ def main():
             expected_reference[start+2:start+7] = original_t5(field['direct_anchors'][0] if len(field['direct_anchors'])==1 else None)
         expected_reference[35:37] = [signed_log(1000),1.0]
         assert torch.equal(native_reference.values[2],torch.tensor(expected_reference,device='cuda',dtype=torch.float32)), (native_reference.values[2],expected_reference)
+        from input_history import SourceHistoryInputs
+        source_history = SourceHistoryInputs(state,market_state,reference_state,columns)
+        start_at = prefixes.new_tensor([columns['markets'][target_market]['window']['start_at_utc_ms']-30000])
+        memory = source_history.empty(1,start_at)
+        # 原完整组交付时钟，零额外delay短工程配置；不以100ms格点替代。
+        count = len(columns['groups'])
+        for start in range(0,count,7):
+            batch = torch.arange(start,min(count,start+7),device='cuda',dtype=torch.int64)
+            memory,error = source_history.consume(batch,state.causal_visible_at[batch],market_indices[-1:],start_at,memory)
+            assert not error.any().cpu().item()
+        frozen = source_history.freeze(memory)
+        assert not frozen.fault.any().cpu().item()
+        series = [[] for _ in range(6)]
+        for row in reference['source_observations']:
+            original = row['observation']
+            at = max(reference['public_visible_times'][:row['prefix']+1])
+            window = original['market']['window']
+            if not (window['start_at_utc_ms']-30000 <= at < window['end_at_utc_ms']): continue
+            fields = [None]*6
+            for asset in original['assets']:
+                outcome = asset['asset']['outcome']['index']
+                if outcome < 2: fields[outcome] = asset['best_bid_ask']
+            fields[3:] = [original[name] for name in ('chainlink_spot','chainlink_twap_thirty','chainlink_twap_sixty')]
+            for route,field in enumerate(fields):
+                if field is None or field['value'] is None or field['quality'] not in ('fresh','stale'): continue
+                path = 'best_bid_ask' if route<2 else ('chainlink_spot','chainlink_twap_thirty','chainlink_twap_sixty')[route-3]
+                identity = [anchor for anchor in field['direct_anchors'] if anchor['field_path']==path]
+                if not identity or (series[route] and series[route][-1][1]==identity): continue
+                if route<2:
+                    bid,ask = field['value']['best_bid_pusd_per_share'],field['value']['best_ask_pusd_per_share']
+                    if bid is None or ask is None: continue
+                    value = (Fraction(bid)+Fraction(ask))/2
+                else: value = Fraction(field['value']['price_usd_per_btc'])
+                series[route].append((value,identity,at))
+        expected_history,expected_path = [],[]
+        for route,samples in enumerate(series):
+            tail = samples[-16:]
+            history = [len(tail)/16,0.0,0.0,0.0]
+            if len(tail)>1:
+                squared = sum((b[0]-a[0])**2 for a,b in zip(tail,tail[1:]))/ (len(tail)-1)
+                history[1:] = [signed_log(tail[-1][0]-tail[-2][0]),math.log1p(math.sqrt(float(squared))),
+                               signed_log(Fraction(tail[-1][2]-tail[0][2],1000))]
+            expected_history.extend(history)
+            if route==2: continue
+            path = [signed_log(len(samples)),0.0,0.0,0.0,0.0,0.0]
+            if samples:
+                values = [row[0] for row in samples]
+                transform = (lambda v:float(2*v-1)) if route<2 else signed_log
+                path[1:5] = [transform(v) for v in (values[0],values[-1],min(values),max(values))]
+                if len(values)>1:
+                    squared = sum((b-a)**2 for a,b in zip(values,values[1:]))/(len(values)-1)
+                    path[5] = math.log1p(math.sqrt(float(squared)))
+            expected_path.extend(path)
+        assert len(series[0])>16  # 路径不可错误地只遍历最后16条。
+        assert torch.equal(frozen.history[0],torch.tensor(expected_history,device='cuda',dtype=torch.float32)), (frozen.history,expected_history)
+        assert torch.equal(frozen.path[0],torch.tensor(expected_path,device='cuda',dtype=torch.float32)), (frozen.path,expected_path)
+        again = source_history.freeze(frozen.memory)
+        assert torch.equal(again.history,frozen.history) and not again.path.any().cpu().item()
+        # 同一已同步来源按不同批次划分接纳，数值与身份/时间必须相同。
+        whole,error = source_history.consume(torch.arange(count,device='cuda',dtype=torch.int64),state.causal_visible_at,
+            market_indices[-1:],start_at,source_history.empty(1,start_at))
+        whole = source_history.freeze(whole)
+        assert torch.equal(whole.history,frozen.history) and torch.equal(whole.path,frozen.path)
+        assert torch.equal(whole.memory.identities,frozen.memory.identities)
         depth_rows = reference['binance_observations']
         saw_gap = saw_missing = False
         for row in depth_rows:
