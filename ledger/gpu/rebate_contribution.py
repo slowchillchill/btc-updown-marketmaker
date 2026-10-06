@@ -20,6 +20,7 @@ class RebateContributions:
     conditions: torch.Tensor
     amounts: object
     fault: torch.Tensor
+    capacity_required: torch.Tensor
 
     @classmethod
     def empty(cls,roots,capacity,device):
@@ -28,7 +29,7 @@ class RebateContributions:
         amount=ExactRational.ratio(zero,zero.constant(1))
         unknown=torch.full_like(population,-1,dtype=torch.int64)
         return cls(zero,population,unknown,torch.zeros_like(unknown),unknown.clone(),amount,
-            torch.zeros(roots,dtype=torch.int32,device=device))
+            torch.zeros(roots,dtype=torch.int32,device=device),torch.full((roots,),capacity,dtype=torch.int64,device=device))
 
     def resized(self,capacity):
         roots,old=self.occupied.shape
@@ -42,7 +43,8 @@ class RebateContributions:
             kinds=torch.nn.functional.pad(self.kinds,(0,capacity-old),value=-1),
             days=torch.nn.functional.pad(self.days,(0,capacity-old),value=0),
             conditions=torch.nn.functional.pad(self.conditions,(0,capacity-old),value=-1),
-            amounts=ExactRational(grow_integer(self.amounts.numerator,roots,old,capacity),denominator))
+            amounts=ExactRational(grow_integer(self.amounts.numerator,roots,old,capacity),denominator),
+            capacity_required=torch.full_like(self.capacity_required,capacity))
 
     def add(self,trade,kind,day,condition,amount,enabled):
         roots,width=self.occupied.shape
@@ -65,4 +67,5 @@ class RebateContributions:
         return replace(self,trades=expanded.select(mask.flatten(),self.trades),occupied=self.occupied | mask,
             kinds=torch.where(mask,kind[:,None],self.kinds),days=torch.where(mask,day[:,None],self.days),
             conditions=torch.where(mask,condition[:,None],self.conditions),
-            amounts=select(next_amount,mask.flatten(),self.amounts),fault=fault),required,use
+            amounts=select(next_amount,mask.flatten(),self.amounts),fault=fault,
+            capacity_required=torch.maximum(self.capacity_required,required)),required,use

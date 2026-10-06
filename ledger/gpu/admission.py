@@ -95,6 +95,10 @@ class AdmissionLifecycle:
         fault=self.fault | actual.fault | maker.fault | reserved.fault
         return CashFunds(actual,maker,reserved,reserved,local,platform_pending,fault)
 
+    def resized_contributions(self,capacity):
+        """宿主只核人口容量请求后扩目录；原未消费NOE再试，不推进业务或随机数。"""
+        return replace(self,rebate_contributions=self.rebate_contributions.resized(capacity))
+
     def reserve_action(self,requests,conditions,principal,fee,enabled):
         funds=self.funds()
         actual,maker=funds.actual_available,funds.maker_available

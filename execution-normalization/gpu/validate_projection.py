@@ -331,6 +331,26 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert values(early_contribution.current_entry_sequence)==[first_reference['checkpoint']['projection']['ledger_entry_seq']]
     assert int(early_contribution.rebate_contributions.occupied.sum().cpu())==1
     assert values(early_contribution.platform.platform_source_prefix)==[0]
+    # 同一真实已领取块跨人口扩池：第二条贡献容量不足时不提交位置/条目，扩池后重试。
+    capacity_candidate=Numbers.run_exact_batch(lambda:AdmissionLifecycle.open(platform,state.normalizer.bank,columns,
+        integers([3]),integers([0]),pools))
+    from rebate_contribution import RebateContributions
+    capacity_candidate=replace(capacity_candidate,rebate_contributions=Numbers.run_exact_batch(
+        lambda:RebateContributions.empty(1,1,zero.device)))
+    contribution_rows=[i for i in range(columns.row_refs.size(1)) if capacity_candidate.lifecycle.emitted[0,i].cpu().item()
+        and capacity_candidate.lifecycle.schemas[0,i].cpu().item()==9]
+    for ordinal,local in enumerate(contribution_rows[:2]):
+        capacity_candidate,used=Numbers.run_exact_batch(lambda:capacity_candidate.apply_record(torch.tensor([local],device='cuda'),
+            torch.tensor([True],device='cuda'),torch.tensor([10000],device='cuda'),torch.tensor([True],device='cuda')))
+        assert used.cpu().tolist()==[ordinal==0]
+    assert values(capacity_candidate.current_entry_sequence)==[4] and int(capacity_candidate.applied.sum().cpu())==1
+    assert capacity_candidate.rebate_contributions.capacity_required.cpu().tolist()==[2]
+    assert capacity_candidate.fault.cpu().tolist()==[0]
+    capacity_candidate=Numbers.run_exact_batch(lambda:capacity_candidate.resized_contributions(2))
+    capacity_candidate,used=Numbers.run_exact_batch(lambda:capacity_candidate.apply_record(torch.tensor([contribution_rows[1]],device='cuda'),
+        torch.tensor([True],device='cuda'),torch.tensor([10000],device='cuda'),torch.tensor([True],device='cuda')))
+    assert used.cpu().tolist()==[True] and int(capacity_candidate.rebate_contributions.occupied.sum().cpu())==2
+    assert values(capacity_candidate.current_entry_sequence)==[5] and int(capacity_candidate.applied.sum().cpu())==2
     exact_contributions=[Fraction(n,d) for n,d in zip(values(admission.trade_success.unpaired_contribution.numerator),values(admission.trade_success.unpaired_contribution.denominator))]
     expected_contributions={int(row['fact']['fill_sequence']):Fraction(int(row['unpaired_contribution_shares']['Known']['numerator']),
         int(row['unpaired_contribution_shares']['Known']['denominator'])) for row in source['reservation_checkpoints'][-1]['trades'] if row['success_applied']}
