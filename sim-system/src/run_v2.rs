@@ -7383,7 +7383,7 @@ mod tests {
         role: SimCallerRoleV1,
         run_id: &str,
         finality_policy: Arc<TradeFinalityPolicyV2>,
-        make_port: impl FnOnce(&std::path::Path,&RunOpenedV2) -> Box<dyn BusinessProjectionPortV2>,
+        make_port: impl FnOnce(&std::path::Path,&mut RunOpenedV2) -> Box<dyn BusinessProjectionPortV2>,
     ) -> (tempfile::TempDir, SimRunActorV2) {
         let directory = tempfile::tempdir().expect("创建市场事件测试目录");
         let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
@@ -7400,7 +7400,7 @@ mod tests {
         if role == SimCallerRoleV1::Paper {
             run_opened.durability_role = RunDurabilityRoleV2::RecoverablePaper;
         }
-        let projection_port=make_port(&path,&run_opened);
+        let projection_port=make_port(&path,&mut run_opened);
         let mut actor = SimRunActorV2::create_new(
             &path,
             run_opened,
