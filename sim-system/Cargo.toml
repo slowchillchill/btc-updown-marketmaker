@@ -34,8 +34,6 @@ tokio = { version = "=1.52.3", default-features = false, features = ["time"] }
 toml = { version = "=1.1.4", default-features = false, features = ["parse", "serde", "std"] }
 
 [dev-dependencies]
-# 原公开Registry仅用于跨模块对照，SIM生产模块不反向依赖宿主。
-shared-run = { path = "../shared-run" }
 data-pipeline-training = { path = "../data-pipeline/training" }
 tempfile = "=3.27.0"
 tokio = { version = "=1.52.3", default-features = false, features = ["io-util", "macros", "net", "rt", "test-util", "time"] }
