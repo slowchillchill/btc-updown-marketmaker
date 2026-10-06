@@ -44,9 +44,19 @@ def main():
     result=public.run_exact_batch(compute)
     assert result.report_values()==[1<<240] and result.fault.cpu().tolist()==[0]
     assert capacities==[4,8],capacities
+    # 丢弃业务值也必须保留已发生的独立扩池请求。
+    capacities.clear()
+    def masked_compute():
+        capacities.append(queues.Numbers.device_word_capacity())
+        discarded=value*gpu_exact.ExactInt.from_values([1<<120])
+        one=value.constant(1)
+        return discarded.select(torch.tensor([False],device='cuda'),one)
+    masked=public.run_exact_batch(masked_compute)
+    assert masked.report_values()==[1] and masked.fault.cpu().tolist()==[0]
+    assert capacities==[4,8]
     assert public._batch.get() is None
     print(json.dumps({'import_order':args.order,'Native_NOE_distinct_projection_modules':True,
-        'DPT_SIM_model_shared_exact_module_and_resource_batch':True,'resource_retry_capacities':capacities,
+        'DPT_SIM_model_shared_exact_module_and_resource_batch':True,'resource_retry_capacities':capacities,'masked_result_preserves_resource_requests':True,
         'device_peak_allocated_bytes':torch.cuda.max_memory_allocated()}))
 
 

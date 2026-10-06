@@ -27,11 +27,25 @@ def device_word_capacity():
     return state['capacity'] if state else 4
 
 
+def _flush_resource_requests(state):
+    requests = state['requests']
+    if not requests:
+        return
+    # 小批标准张量归约；只保留累计最大值，不累计整个候选的逐微算子临时列。
+    values = ([state['required'].reshape(-1)] if state['required'] is not None else [])
+    values.extend(value.reshape(-1) for value in requests)
+    state['required'] = torch.cat(values).max()
+    requests.clear()
+
+
 def record_resource_request(required):
     """独立登记设备容量请求，不能让业务select丢失扩池请求。"""
     state = _batch.get()
     if state is not None and required.numel():
         state['requests'].append(required)
+        # 32仅是物理归约批量；任何后续请求均继续合并，没有算术/业务人口上限。
+        if len(state['requests']) == 32:
+            _flush_resource_requests(state)
 
 
 def run_exact_batch(compute, *, initial_word_capacity=4):
@@ -43,17 +57,19 @@ def run_exact_batch(compute, *, initial_word_capacity=4):
     """
     capacity = _bucket(initial_word_capacity)
     while True:
-        state = {'capacity': capacity, 'requests': []}
+        state = {'capacity': capacity, 'required': None, 'requests': []}
         token = _batch.set(state)
         try:
             result = compute()
         finally:
             _batch.reset(token)
-        requests = state['requests']
-        if not requests:
+        _flush_resource_requests(state)
+        requested = state['required']
+        if requested is None:
             return result
-        # 这里只读取资源容量，不读取价格、余额、分支或选择路径。
-        required = int(torch.stack([x.max() for x in requests]).max().cpu())
+        # 每个物理批在独立设备标量中合并请求，业务select不能删除已发生的扩池需求。
+        # 只读取资源容量；不保存整个长候选的逐微算子请求张量。
+        required = int(requested.cpu())
         if required <= capacity:
             return result
         capacity = _bucket(required)
@@ -115,8 +131,7 @@ class ExactInt:
         left = self.with_capacity(state['capacity']) if state else self
         right = other.with_capacity(state['capacity']) if state else other
         w,s,r,rs,f,required=public_extension().integer_op(op,left.words,left.sign,right.words,right.sign)
-        if state is not None and required.numel():
-            state['requests'].append(required)
+        record_resource_request(required)
         f=f|self.fault|other.fault
         return ExactInt(w,s,f),ExactInt(r,rs,f)
 
@@ -148,8 +163,7 @@ class ExactInt:
         original = (self, modulus, slope, offset)
         inputs = tuple(value.with_capacity(state['capacity']) if state else value for value in original)
         words, fault, required = public_extension().floor_sum(*(value.words for value in inputs))
-        if state is not None and required.numel():
-            state['requests'].append(required)
+        record_resource_request(required)
         for value in original:
             fault = fault | value.fault | (value.sign < 0).to(torch.int32)
         return ExactInt(words, words.any(dim=1).to(torch.int8), fault)
