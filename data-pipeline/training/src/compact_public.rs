@@ -606,6 +606,78 @@ mod tests {
     use crate::public_recording::tests::{metadata_snapshot_row, row, book, snapshot, update};
 
     #[test]
+    #[ignore = "明确在AutoDL同提交GPU环境运行；包含独立原core语义对照"]
+    fn gpu_public_zero_selection_matches_original_core() {
+        use data_pipeline_core::{public_observation_core::PmOwnedStateV1,
+            pm_reduction::{PmStateReadV1, PmStepChangeV1}, typed_raw::{PolymarketOrderbookEvent, PolymarketPriceLevel}};
+        let temp = tempfile::tempdir().unwrap();
+        let target = temp.path().join("compact");
+        let header = PublicInputStreamHeaderV1 {
+            input_stream_id:"gpu-zero-real-construction".into(),canonical_rule_version:"rule-v1".into(),
+            observation_version:"public-observation-v1".into(),ordering_version:"original-input-v1".into(),
+            input_scope:"constructed-short-zero-boundary".into(),max_pending_ws_terminals:2,initial_state:PublicInitialStateV1::Empty,
+        };
+        let mut next_book = book("10");
+        if let PolymarketOrderbookEvent::Book {bids,..} = &mut next_book {
+            bids.push(PolymarketPriceLevel {price:"0.4".into(),size:"0".into()});
+        }
+        let sources = vec![
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(metadata_snapshot_row()))),
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",1,21000,22000,book("10")))),
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",2,23000,24000,next_book))),
+        ];
+        let mut core = PublicObservationCoreV1::new(header.clone()).unwrap();
+        let mut writer = PublicCompactWriterV1::create(&target,header.clone()).unwrap();
+        let mut original = None;
+        let mut zero_evidence_without_change = false;
+        let mut token = String::new();
+        for (position, source) in sources.into_iter().map(Some).chain(std::iter::once(None)).enumerate() {
+            let ingress = source.map_or(DptIngressV1::EndOfInput,|row|DptIngressV1::Message {
+                source_evidence:source_evidence_v3_from_typed_raw_v2(&row).unwrap(),row,
+            });
+            let input = RecordedIngressV1 {input_stream_id:header.input_stream_id.clone(),input_position:position as u64,
+                ingress,dependency_record_refs:vec![]};
+            let ids = BTreeMap::new();
+            let prepared = prepare_public_ingress_v1(&core,&input,&ids,&[]).unwrap();
+            let applied = core.push_facts(&prepared).unwrap();
+            for (_, reduction) in &applied.pm_reductions {
+                if original.is_none() {
+                    let context = core.fixed_markets().next().unwrap();
+                    original = Some(PmOwnedStateV1::new(core.prepared_pm_context(&context.condition_id.0).unwrap()));
+                }
+                original.as_mut().unwrap().apply(reduction);
+                let zero = |price:&ExactDecimal| price.0 == "0.4";
+                let has_evidence = reduction.steps.iter().any(|step|matches!(&step.change,
+                    PmStepChangeV1::LevelEvidenceOnly{asset,price,..} if zero(price) && {
+                        token = asset.token_id.0.clone(); true
+                    }));
+                let has_change = reduction.steps.iter().any(|step|matches!(&step.change,
+                    PmStepChangeV1::LevelChange{transition,..} if zero(&transition.price_pusd_per_share)));
+                zero_evidence_without_change |= has_evidence && !has_change;
+            }
+            writer.push(&input,&applied).unwrap();
+        }
+        writer.publish().unwrap();
+        assert!(zero_evidence_without_change);
+        let original = original.unwrap();
+        let price = data_pipeline_core::parse_canonical_decimal(&ExactDecimal("0.4".into()),"zero_price").unwrap();
+        assert!(original.selected_level(&token,BookSide::Bid,price).unwrap().present);
+        let asset = original.asset_state(&token).unwrap();
+        let reference = serde_json::json!({"token":token,"price":"0.4",
+            "quantity":original.quantity(&token,BookSide::Bid,price).normalize().to_string(),
+            "present":true,"initialized":asset.has_initial_snapshot,"ready":asset.book_ready});
+        let reference_path = temp.path().join("original-reference.json");
+        serde_json::to_writer(File::create(&reference_path).unwrap(),&reference).unwrap();
+        eprintln!("original_core_zero_reference={reference}");
+        let status = std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
+            .arg(std::env::var("B_GPU_STATE_VALIDATOR").unwrap())
+            .args(["--binary",&std::env::var("B_GPU_COLUMNS_BINARY").unwrap()])
+            .arg("--material").arg(&target).arg("--original-reference").arg(reference_path)
+            .arg("--output").arg(temp.path().join("report.json")).status().unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
     fn compact_atomic_publication_roundtrips_source_and_rejects_changed_payload() {
         let temp = tempfile::tempdir().unwrap();
         let target = temp.path().join("compact");

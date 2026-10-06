@@ -12,7 +12,9 @@ def _take(value, indices):
 class PrefixColumn:
     def __init__(self, rows, targets, device):
         rows = torch.tensor(rows, dtype=torch.int64).reshape(-1, 4).pin_memory().to(device, non_blocking=True)
-        self.rows = rows[torch.argsort(rows[:, 0], stable=True)].contiguous()
+        ordered = rows[torch.argsort(rows[:, 0], stable=True)].contiguous()
+        self.padded = torch.cat((ordered.new_zeros((1, 4)), ordered))
+        self.rows = self.padded[1:]  # 与sentinel共享存储；热查询不复制整段历史。
         counts = torch.bincount(self.rows[:, 0], minlength=targets)
         self.offsets = torch.cat((counts.new_zeros(1), counts.cumsum(0))).contiguous()
 
@@ -20,8 +22,7 @@ class PrefixColumn:
         selected, fault = _numbers().public_extension().prefix_lookup(self.rows, self.offsets, prefixes)
         found = selected >= 0
         # 冷列为空也有同设备占位，不能使缺值伪装成已知零。
-        padded = torch.cat((self.rows.new_zeros((1, 4)), self.rows))
-        rows = padded[selected + 1]
+        rows = self.padded[selected + 1]
         return rows[:, :, 1], rows[:, :, 3], found, fault
 
 
@@ -49,6 +50,9 @@ class PublicPmState:
         self.assets = columns['assets']  # 只在冷身份边界使用。
         assets, slots, groups = len(self.assets), len(columns['slots']), len(columns['groups'])
         self.group_count = groups
+        for asset, side, price in columns['slots']:
+            if not (0 <= asset < assets and side in (0, 1) and 0 <= price < len(columns['decimals'])):
+                raise ValueError('公共设备价位身份或精确值引用越界')
         self.slots = torch.tensor(columns['slots'], dtype=torch.int64, device=device).reshape(-1, 3)
         self.groups = torch.tensor(columns['groups'], dtype=torch.int64, device=device).reshape(-1, 3)
         raw, offsets = bytearray(), [0]
@@ -94,7 +98,10 @@ class PublicPmState:
         asset_fault = reset_fault | ifault | rfault | tfault
         fault = qfault | sfault | asset_fault[:, asset]
         fault = fault | quantity.fault.reshape(qid.shape)
+        fault = fault | self.decimals.fault[self.slots[:, 2]][None]
+        fault = fault | self.decimals.fault[tick][:, asset]
+        fault = fault | (quantity.numerator.sign.reshape(qid.shape) < 0).to(torch.int32)
         fault = fault | ((prefixes < -1) | (prefixes >= self.group_count))[:, None].to(torch.int32)
-        return PublicBookFrame(quantity, present & recent_quantity,
+        return PublicBookFrame(quantity, present,
             ifound & initialized.bool(),
             rfound & ready.bool() & (rseq >= reset), tick, tfound, fault)
