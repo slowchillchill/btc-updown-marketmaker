@@ -158,7 +158,7 @@ class EconomicMemory:
             use=event.applied & (fault==0)
             # position等值目录而不是账户seq去重；同位置另一物理引用不应二次应用。
             key=self.columns.positions[index]
-            matches=(self.columns.positions.reshape(roots,width,-1)==key[:,None,:]).all(dim=2)
+            matches=(self.columns.positions.reshape(roots,width,-1)==key[:,None,:]).all(dim=2)&self.columns.enabled
             accepted=matches & use[:,None]
             candidate=replace(candidate,platform=platform,applied=candidate.applied | accepted,fault=fault)
             pending=pending & ~accepted

@@ -185,6 +185,35 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     expected_assets={row['token_id']:row['balance_shares'] for row in expected_platform['outcome_balances']}
     assert [Fraction(n,d) for n,d in zip(values(ledger.platform.outcomes.numerator),values(ledger.platform.outcomes.denominator))]==[
         Fraction(expected_assets.get(token,'0')) for token in ['1','2']]
+    # 真实共享NOE→Ledger顺序/绑定候选自行生成entry/local seq，原对照只检查结果。
+    from admission import AdmissionLifecycle
+    from buy_cost import limit_buy_cost
+    admission=Numbers.run_exact_batch(lambda:AdmissionLifecycle.open(platform,state.normalizer.bank,columns,
+        integers([source['reservation_checkpoints'][0]['projection']['ledger_entry_seq']]),integers([0])))
+    cost=Numbers.run_exact_batch(lambda:limit_buy_cost(integers([500]),rational(['0.3']),rational([source['fee_rate']]),
+        source['fee_exponent'],post_only=torch.tensor([False],device='cuda'),minimum_principal_micro=integers([1_000_000])))
+    principal=Numbers.run_exact_batch(lambda:type(rational(['0'])).ratio(cost.principal_micro,cost.principal_micro.constant(1_000_000)))
+    fee=Numbers.run_exact_batch(lambda:type(principal).ratio(cost.fee_1e5_units,cost.fee_1e5_units.constant(100_000)))
+    admission,reserve_event=Numbers.run_exact_batch(lambda:admission.reserve_action(zero[:,None],zero[:,None],principal,fee,
+        torch.ones((1,1),dtype=torch.bool,device='cuda'),rational([initial])))
+    admission=Numbers.run_exact_batch(lambda:admission.submission_started(zero,zero,zero,zero,torch.tensor([True],device='cuda')))
+    assert values(admission.current_entry_sequence)==[5] and values(admission.current_local_prefix)==[2]
+    admission,remaining=Numbers.run_exact_batch(lambda:admission.apply_closed(delivered,
+        torch.ones_like(columns.enabled),maximum_retry_rounds=3))
+    assert not remaining.any().cpu().item() and admission.fault.cpu().tolist()==[0]
+    assert values(admission.current_entry_sequence)==[source['ledger_projection']['ledger_entry_seq']]
+    assert values(admission.current_local_prefix)==[source['ledger_projection']['ledger_local_prefix']]
+    assert values(admission.platform.platform_source_prefix)==[7]
+    assert int(admission.applied.sum().cpu())==21
+    converted=next(row for row in source['reservation_checkpoints'] if row['request'] and row['request']['status']=='Converted')
+    assert admission.reservations.statuses.cpu().tolist()[0][0]==3
+    assert values(admission.reservations.last_sequences)[0]==converted['request']['last_ledger_entry_seq']
+    assert int(admission.orders.flags.sum().cpu())==1 and int(admission.trades.flags.sum().cpu())==0
+    again,remaining=Numbers.run_exact_batch(lambda:admission.apply_closed(delivered,
+        torch.ones_like(columns.enabled),maximum_retry_rounds=1))
+    assert values(again.current_entry_sequence)==values(admission.current_entry_sequence)
+    assert not remaining.any().cpu().item()
+    assert admission.has_available.cpu().tolist()==[True] and admission.available_through.cpu().tolist()==[10000]
     before=ledger.platform
     again=Numbers.run_exact_batch(lambda:ledger.receive(delivered).apply_pending(torch.ones_like(columns.enabled)))
     assert values(again.platform.platform_source_prefix)==[7]
@@ -192,4 +221,5 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert ledger.available_at[ledger.received].cpu().tolist()==[10000]*7
     return {'device_generated_NOE_records':checked,'device_batches':len(batches),'original_positions_and_receive_order_checked':True,
         'bank_physical_rows':state.normalizer.bank.kinds.numel(),'masked_or_unemitted_rows':state.normalizer.bank.kinds.numel()-checked,
-        'actual_device_Ledger_economic_position_predecessor_checked':True,'full_clock_Ledger_reservation_delivered':False}
+        'actual_device_Ledger_economic_position_predecessor_checked':True,
+        'Ledger_admission_device_generated_entry_local_and_binding_checked':True,'full_clock_Ledger_reservation_delivered':False}
