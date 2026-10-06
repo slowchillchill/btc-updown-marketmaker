@@ -127,8 +127,11 @@ def projected_markets(db, initialization, rules):
                epoch_ms(market_start_utc) AS window_start,epoch_ms(market_end_utc) AS window_end,
                greatest(epoch_ms(timestamp_received),epoch_ms(collector_admission_time_utc_ms)) AS visible_at,
                epoch_ms(timestamp_received) AS dependency_received
-        FROM raw_polymarket_market_metadata WHERE metadata_row_kind='metadata_snapshot'
+        FROM raw_polymarket_market_metadata
         UNION ALL SELECT condition_id,list_sort(assets),window_start,window_end,greatest(received,admitted),received FROM initial_metadata""")
+    # Every admitted metadata kind carries the verified fixed identity. A timer
+    # transition or anchor may be its first in-range record. Observe that row at
+    # its receive/admission time; never backfill to its earlier verification time.
     conflicts = db.execute("SELECT count(*) FROM (SELECT condition_id FROM identities GROUP BY condition_id HAVING count(DISTINCT (assets,window_start,window_end))>1)").fetchone()[0]
     if conflicts:
         raise ValueError("conflicting admitted fixed market identity")

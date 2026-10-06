@@ -214,11 +214,14 @@ class SourceQuery:
                 CASE WHEN event_type='price_change' THEN changed_assets
                      WHEN event_type IN ('book','best_bid_ask','tick_size_change','last_trade_price') THEN [asset_id]
                      ELSE []::VARCHAR[] END AS assets FROM {raw}""")
-            invalid = db.execute("""SELECT count(*) FROM pm_native p LEFT JOIN markets m USING(condition_id)
-                WHERE m.condition_id IS NULL OR p.visible_at<m.known_at
-                   OR EXISTS(SELECT 1 FROM unnest(p.assets) x(asset) WHERE NOT list_contains(m.assets,x.asset))""").fetchone()[0]
-            if invalid:
-                raise ValueError('PM input before identity or with unregistered asset')
+            invalid = db.execute("""SELECT
+                count(*) FILTER(WHERE m.condition_id IS NULL),
+                count(*) FILTER(WHERE p.visible_at<m.known_at),
+                count(*) FILTER(WHERE EXISTS(SELECT 1 FROM unnest(p.assets) x(asset)
+                    WHERE NOT list_contains(m.assets,x.asset)))
+                FROM pm_native p LEFT JOIN markets m USING(condition_id)""").fetchone()
+            if any(invalid):
+                raise ValueError('PM identity/asset check failed: missing_identity=%d, before_identity=%d, unregistered_asset=%d' % invalid)
             db.execute("""CREATE TEMP TABLE unit_events AS
                 SELECT 'polymarket' AS source,p.condition_id,unnest(p.assets) AS asset,
                     greatest(p.visible_at,m.known_at,m.dependency_received) AS visible_at,
