@@ -3372,7 +3372,7 @@ fn v4_real_opening_stable_ledger_reopen() {
 // 原公共冻结读面；只在实际shared.apply_closed/action_before之后导出。
 // 非模型热输入producer，不把fixture的post_only=true授权给B Actor。
 fn gpu_registry_frozen_reference(stage:&str,view:&ActionBeforeReadV2,registry:&SharedExecutionRegistryV2)->serde_json::Value {
-    fn record(value:&execution_normalization::NoeConsumedRecordRef<contracts::execution_normalization::CancellationRequestCompletedV1>)->serde_json::Value {
+    fn record(value:&::execution_normalization::NoeConsumedRecordRef<contracts::execution_normalization::CancellationRequestCompletedV1>)->serde_json::Value {
         serde_json::json!({"record":value.record(),"position":value.position(),"visibility":value.visibility()})
     }
     let orders=view.orders().map(|order|serde_json::json!({
