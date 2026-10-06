@@ -786,6 +786,8 @@ def main():
         passed.append('native_reference37_original_preparation')
     else:
         passed.append('missing_reference_preparation_retains_fault')
+    if native_freeze_reference is not None:
+        passed.append('native_fast626_rule30_freeze_original_closed_group_clock')
     report = {'source_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),
               'identity':('engineering_real_public_pm_book_inputs_only' if columns['slots']
                           else 'engineering_missing_book_boundary'),'device':torch.cuda.get_device_name(),
@@ -800,13 +802,13 @@ def main():
               'peak_allocated_bytes':torch.cuda.max_memory_allocated(),
               'normal_window_peak_allocated_bytes':normal_window_peak,
               'window_peak_scope':'驻留共享公共列、累计可见时间、PM及Binance盘口打包和直接字段、三前缀与末10个100ms窗口；在BookEncoder创建前采样，非法窗不扩池',
-              'peak_scope':'本组件全部检查峰，含六侧BookEncoder前向反向及尾补齐双前向对照；不是完整编码或学习工作集',
+              'peak_scope':'本组件全部检查峰，含六侧BookEncoder前向反向、尾补齐双前向及本次原短链Native冻结；不是完整模型账户或学习工作集',
               'passed':passed,
               'original_core_reference_checked':args.original_reference is not None,
               'history_original_reference':history_reference,
               'native_100ms_freeze_reference':native_freeze_reference,
               'not_delivered':(['reference_preparation_for_this_material'] if not columns['reference_preparation_complete'] else [])+['hidden','sim_noe_ledger',
-                               '100ms_window','full_actor','ppo','active_root_restore']}
+                               'whole_root_100ms_scheduler_cross_block','full_actor','ppo','active_root_restore']}
     args.output.parent.mkdir(parents=True,exist_ok=True)
     args.output.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n')
     print(json.dumps(report,ensure_ascii=False),flush=True)
