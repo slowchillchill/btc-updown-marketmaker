@@ -128,11 +128,11 @@ class FillPool:
     def enqueue(self,record):
         """容量不足仅请求增长，不提交fill seq或选定路径；纯候选retry读原输入。"""
         count = self.occupied.to(torch.int64).sum(1)
-        demand = count+record.active.to(torch.int64)
         slot = count.clamp_max(self.capacity-1)
         next_sequence = self.next_sequence+self.next_sequence.constant(1)
         upper = next_sequence.compare(next_sequence.constant((1<<64)-1))
         fault = self.fault | (record.fault | upper.fault | (upper.order > 0).to(torch.int32))*record.active.to(torch.int32)
+        demand = count+(record.active & (fault == 0)).to(torch.int64)
         enabled = record.active & (count < self.capacity) & (fault == 0)
         coordinates = torch.arange(self.roots,device=slot.device)*self.capacity+slot
         records = _put_record(self.records,record,coordinates,enabled)

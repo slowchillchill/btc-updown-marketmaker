@@ -20,6 +20,9 @@ class PreparedBaseOrder:
     fee: object
     asset_indices: torch.Tensor
     requested: torch.Tensor
+    taker_bases: object  # [roots*maximum_fills]，原ask价序与段序，零槽不产生fill。
+    taker_quotes: object
+    maximum_fills: int
     fault: torch.Tensor
 
     def accept(self, queue, account):
@@ -48,15 +51,20 @@ def prepare_base_order(queue, account, ask_rows, accepted_base, accepted_quote, 
     roots, width = ask_rows.shape
     # 各原ask行的段顺序与规划fill顺序一致；未成交槽仅为物理尾补齐。
     safe = ask_rows.clamp(0,max(queue.rows-1,0))
-    if queue.rows == 0:
+    if queue.rows == 0 or width == 0:
         base = accepted_base.constant(0)
+        quote = accepted_quote.constant(0)
+        maximum_fills = 1
         price = maximum_price
-        fee = allocate_taker_fee(base,price,fee_rate,fee_exponent,roots,1)
+        fee = allocate_taker_fee(base,price,fee_rate,fee_exponent,roots,maximum_fills)
     else:
         indices = (safe[:,:,None]*queue.capacity+torch.arange(queue.capacity,device=ask_rows.device)).flatten()
         base = _take(plan.queue_plan.delta_base,indices)
+        quote = _take(plan.queue_plan.delta_quote,indices)
+        maximum_fills = width*queue.capacity
         present = (ask_rows >= 0).repeat_interleave(queue.capacity,1).flatten()
         base = base.select(present,base.constant(0))
+        quote = quote.select(present,quote.constant(0))
         row_indices = safe.repeat_interleave(queue.capacity,1).flatten()
         price = take_ratio(queue.price,row_indices)
         fee = allocate_taker_fee(base,price,fee_rate,fee_exponent,roots,width*queue.capacity)
@@ -64,7 +72,7 @@ def prepare_base_order(queue, account, ask_rows, accepted_base, accepted_quote, 
     fault = plan.fault | fee.fault | quantity.fault
     if asset_indices.shape != (roots,) or requested.shape != (roots,) or requested.dtype != torch.bool:
         raise ValueError('订单资产/请求布局不一致')
-    return PreparedBaseOrder(account,plan,quantity,fee,asset_indices,requested,fault)
+    return PreparedBaseOrder(account,plan,quantity,fee,asset_indices,requested,base,quote,maximum_fills,fault)
 
 
 def reduce_order_maker(quantity, queue_effects, order_ids):

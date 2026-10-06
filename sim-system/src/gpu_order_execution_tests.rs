@@ -162,3 +162,52 @@ async fn gpu_sealed_failure_paths_preserve_original_economic_sequence_and_compen
     assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
     eprintln!("gpu_failure_finality={}",String::from_utf8(output.stdout).unwrap());
 }
+
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "AutoDL原合法多ask逐fill及同时间最终性顺序"]
+async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
+    let (_directory,mut actor) = active_market_actor(SimCallerRoleV1::ModelTrain,"run-gpu-multiask").await;
+    let mut initial = decoded_maker_initial_events();
+    let ExecutionMarketEventPayloadV3::InitialL2Snapshot(book) = &mut initial[0].payload else {unreachable!()};
+    book.asks.push(contracts::PriceLevelV1 {price_pusd_per_share:ExactDecimal("0.25".into()),quantity_shares:ExactDecimal("1".into())});
+    initial[0].event_id = data_pipeline_core::derive_execution_market_event_v3_id(&initial[0]).unwrap();
+    initial[0] = data_pipeline_core::decode_execution_market_event_v3(&data_pipeline_core::encode_execution_market_event_v3(&initial[0]).unwrap()).unwrap();
+    let condition = initial[0].market.condition_id.clone();
+    let token = TokenId("1".into());
+    let (state,_) = reduce_market_event_slice_v2(actor.state.take().unwrap(),MarketEventPathV1::HiddenPlatform,1_100,
+        &initial,actor._rule_snapshot.snapshot(),actor._finality_policy.as_ref()).unwrap_or_else(|_|panic!("原双腿初始化"));
+    let request = BusinessRequestV2::PostOrders(PostOrdersRequestV2 {
+        context:RequestContextV2 {global_request_id:"gpu-multiask-post".into(),caller_correlation_id:None},
+        items:vec![PostOrderBatchItemV2 {batch_item_ordinal:0,item:post_item("gpu-multiask-item",&condition,&token,
+            SimBuyOrderKindV1::GtcLimit {limit_price_pusd_per_share:"0.3".parse().unwrap(),size_shares:"5".parse().unwrap(),post_only:false})}],
+    });
+    let (state,receipt) = register_request_candidate(&actor.opened,actor.scenario.initial_market_directory(),state,
+        &request_cutoff(1_200),&request,11,actor._latency_profile.as_ref(),actor._rule_snapshot.snapshot());
+    let (state,accepted) = advance_mutation_candidate_with_outputs(&actor.opened,actor.scenario.initial_market_directory(),state,
+        receipt.platform_arrived_at_utc_ms,actor._rule_snapshot.snapshot(),actor._finality_policy.as_ref());
+    let MutationActionBusinessEffectV3::Post(post) = accepted.unwrap().business else {panic!("原提交结果");};
+    assert!(matches!(&post.outcome,PostOrderItemOutcomeV2::Accepted(_)));
+    let mut execution = state.session.unwrap().execution_state;
+    assert_eq!(execution.fill_shape_for_tests(),(2,3));
+    let mut checkpoints = vec![serde_json::json!({"at":receipt.platform_arrived_at_utc_ms,
+        "state":execution.gpu_order_checkpoint_for_tests("sim-1")})];
+    while let Some(at) = execution.next_scheduled_finality_at_utc_ms() {
+        let (next,effect) = execution.advance_next_scheduled_finality_at(at,actor._finality_policy.as_ref(),actor._rule_snapshot.snapshot()).unwrap();
+        execution=next;
+        let transition = effect.transition.expect("逐原义务消费");
+        checkpoints.push(serde_json::json!({"at":at,"fill_sequence":transition.trade_finality.fill_sequence,
+            "state":execution.gpu_order_checkpoint_for_tests("sim-1")}));
+    }
+    assert_eq!(checkpoints.len(),5);
+    let rules = &actor._rule_snapshot.snapshot().synchronized_platform_rules;
+    let input = serde_json::json!({"initial":initial,"checkpoints":checkpoints,"processing_at":receipt.platform_arrived_at_utc_ms,
+        "finality_path":actor._finality_policy.normal_path(),"fee_rate":rules.fee_schedule.rate.value().to_string(),
+        "fee_exponent":rules.fee_schedule.exponent,"taker_rebate_rate":actor._rule_snapshot.snapshot().project_account_rules.rebate_settlement.value.fixed_taker_rebate_rate.value().to_string()});
+    let mut child = std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
+        .arg(std::env::var("B_GPU_MULTIASK_VALIDATOR").unwrap()).stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    serde_json::to_writer(child.stdin.take().unwrap(),&input).unwrap();
+    let output=child.wait_with_output().unwrap();
+    assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+    eprintln!("gpu_multiask={}",String::from_utf8(output.stdout).unwrap());
+}
