@@ -2,3 +2,7 @@
 wallets/
 /target/
 /.local-artifacts/
+
+# Generated Python bytecode in the columnar research modules.
+__pycache__/
+*.py[cod]

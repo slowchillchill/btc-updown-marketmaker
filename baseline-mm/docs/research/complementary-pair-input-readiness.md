@@ -2,6 +2,8 @@
 
 本报告交付 [#185 当前任务3](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)的原准入只读核对，承接 [D-0270](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5933292905)。18天全部通过原 DPT 准入：2864个文件、45,652,568,053字节、762,240,960行。没有剔除有 gaps 的日期，没有执行参数搜索、策略回测或收益比较。后续具体方法见[研究计划](complementary-pair-research-plan.md)。
 
+当前来源健康流程按 [D-0302](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6013334211) 复用本报告的18份清单身份。`configure` 只读小型清单并核对摘要，`prepare` 向量化读取必要列。旧准入不是健康事实完整或业务时间正确的证明。新流程保留原初始化、来源判定、资产与窗口，并单列未知、同步和时间异常。它不重复全量准入，也不把采集排序声明当作跨来源全局顺序证明。实际采集提交为 `8e6e9d8a744ec3ec10b4c0b8d57a251a16159d59`。当前入口和语义差异见[列式研究说明](complementary-pair-source-health-two-layer.md)。
+
 ## 1. 原调用与可复核证据
 
 在实现基线 `5503fcf507aebe60c93f49a8565aca60c26411d3` 上新增[资格审计示例](../../examples/research_input_audit.rs)。单个本地进程按日期串行调用 `data_pipeline_training::validate_public_source_daily_manifest_admission_v1`，保留每一天成功结果或原始错误，不改准入规则。清单路径逻辑形状为 `<INPUT_ROOT>/<UTC日期>/typed_raw/utc_day=<UTC日期>/manifest.json`。只读上述显式18天；不复制输入、不外排全量、不读取范围外或独立留出、不连接远端。

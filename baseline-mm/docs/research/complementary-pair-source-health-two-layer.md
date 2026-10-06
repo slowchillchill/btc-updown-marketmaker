@@ -1,77 +1,99 @@
-# 两层来源健康研究与十八日待执行配置
+# 必要列与列式两层来源健康研究
 
-本轮交付 [#185任务3与§3.5](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)的工程入口、验证和具体待执行配置。原公共前置见[紧凑来源事实测量](../../../data-pipeline/training/docs/finite-source-progress-12m.md)。正式 normal/max 未采用，完整十八日真实消费、拟合与开发比较没有执行；后续实质投入由主会话依据本交付处理。
+列式来源健康研究只读取判断消息进展所需的列，用于形成健康分布和候选阈值。当前任务见[#185](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)，流程依据[D-0302](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6013334211)。用户已批准新流程的完整十八日研究；准确工程头先独审，再执行。本文不宣称该新十八日运行已完成，也不正式采用normal/max。
 
-## 来源、格式与实际选源
+## 当前入口与职责
 
-`research_source_health_two_layer prepare` 直接调用 `prepare_finite_source_progress_v1`，复用原有限文件解码、两遍代际、外排、merge/prepare_input与一条连续公共 core。跨 UTC 日不重置，不复制市场观察或完整来源集合。PM 原去重只在真实代际变化清理；历史市场保留，Binance旧代际沿原归约移除；没有 TTL、市场淘汰、截断去重或按日清空。
+`baseline-mm/research/research_source_health_columnar.py` 提供 `configure / prepare / study`。
 
-研究材料含一次 `material.json` scope字典、带帧校验的 Zstandard `scalars.zst`、低频计量 `telemetry.jsonl` 和制备汇总。每条标量34字节（压缩前）：合法单调可见前沿、scope编号、最后有效接收/事件时间、质量/同步/未知连接标记、新有效消息样本数及共同来源选择位。保留接收与事件时间，省去逐消息SHA身份、证据正文和盘口。scope身份仅字典写一次；字典解析、引用/顺序/记录数及Zstandard帧完整性通过真实读取边界验证。此私有研究格式不扩展公共record、writer、replay、位置或持久前缀合同。
+- `configure` 复用原18份准入清单摘要和同序文件列表。只读小型清单，输出含私有路径的配置。
+- `prepare` 调用公共 `data-pipeline/training/python/dpt_health`。DuckDB向量化读取必要列、展开资产、维护最小状态并输出Zstandard压缩Parquet。
+- `study` 由baseline计算连续区间、分布、三态、超限与切换。只把每日充分统计交给原Rust `Histogram::body_normal` 和 `candidates`，不把原始PM行传给Python或Rust逐条core。该辅助工具的输入量按日、四组、两个指标和实际有权重的桶计算，不按原始消息行计算。初始化辅助入口本轮读取原792行metadata文件，选出3条；重复辅助入口只读命中候选的子集。
 
-PM按准确condition/token及固定窗口 `[start,end)` 计时，包括窗口首尾未知或静默；共同来源按自身时钟只统计一次，不按活跃市场重复加权。报告 `source_distributions` 是各来源自身分母，`groups`/`daily` 是实际动作依赖选源的分母；PM组为资产·毫秒，Chainlink组为实际所选来源·毫秒，不能当市场数或消息数。实际选择复用生产现价可用性，先现价、否则实际TWAP60；缺规则的原现价回退仍统计未知。TWAP30保留为原策略可用选源，属于本轮校准目标之外，不被当TWAP60或额外参数组。Binance启用依赖由配置显式指定，拟执行配置对应两个修正均启用；不改变生产系数或策略许可。
+原录制、完整归约和持久格式保持。旧 `research_source_health_two_layer prepare/study` 为历史入口，不再作为本次来源健康默认流程。两次旧完整prepare均未产生完整可消费材料，未执行study。旧排序文件和未封口标量已清理；最小失败日志和身份缺失限制另有私有清单。旧结果不重标为新流程验证。
 
-共同源选择只有变化及窗口边界才写入。研究选择器只维护当前/已登记未来窗口与当前来源事实，已结束窗口退出选择器；公共 core 仍保留原历史市场。统计每个scope只保留当前事实、区间起点与候选必要累计量。来源事实同毫秒变化的区间时长为零，最终状态延续下一正时间区间；有效消息到达样本仍各自保留计数。选择变化只扫描固定共同来源，低频计量才读取同次只读 core 的 `object_counts()`，不逐消息扫描全部历史市场。
+## 必要列与最小状态
 
-## 报告维度与连续段口径
+| 来源 | 必要列和处理 | 状态 |
+| --- | --- | --- |
+| PM | received、event timestamp、condition、资产或price_changes资产、event_type、epoch、admission sequence/time | 每condition/asset最后有效直接时间、同步状态；真实epoch改变只重置已出现资产的同步要求，Book恢复对应资产 |
+| Binance depth | received/event、snapshot/update ID、local_u_before、stitch_verdict、epoch/generation、admission坐标 | 复用采集器判定；Applied刷新，缺快照/缺口要求同步，Snapshot恢复。旧事件时间持续到达仍更新received |
+| Binance trade | received/trade_time(T)、record_kind、native trade ID、epoch/generation、admission坐标 | 非法输入不刷新；原生ID跨采集epoch连续；重复抑制，倒退ID维持原失败，冲突比较T及原公共规范载荷 |
+| Chainlink spot/TWAP60 | received/payload time、合法freshness分类；TWAP窗口与admission；spot必要原生身份 | Fresh与Stale都刷新；四类异常保留旧有效消息和质量，不因异常或年龄自动切换TWAP |
+| metadata | condition/assets、市场窗口、身份Snapshot时间、实际规则字段 | 原初始化仍由 `MetadataInitializationSelectionV1` 精确选择原文件和两Snapshot；已观察规则映射复用公共纯原语 |
 
-当前报告标识为 `source-health-two-layer-report-v2`。`scopes[编号]` 保留准确来源/condition/asset/window身份、来源自身与实际选源的分布、全窗候选状态及逐日同类累计；PM不把资产身份藏在合并分布中。`markets[condition]` 引用组成scope编号，汇总该市场PM资产累计及逐日结果，不复制共同来源。`daily_candidate_states[UTC日][候选][四组]` 与原 `daily` 分布并列，保留日三态/独立异常时长、超限次数/时长及切换。无消息scope也沿窗口计未知首尾；窗与评估范围无交集的scope保留零分母，不补造数据。
+`price_changes`只把资产列表写入窄表，不写价格、数量、盘口或完整谱系。输入端的嵌套列物理读取由引擎决定，不能把输出投影误说成所有嵌套列均已物理裁剪。重复键先由必要列定位。只有重复候选所在的行组才读取完整行，用原Rust类型解析、来源身份或规范成交载荷核对。PM新坐标上的有效同值消息保留，重复坐标不刷新。候选核对不为每条唯一PM消息构造JSON身份。
 
-全窗 `candidate_states` 及各scope/market的全窗状态按正时长连续段累计。同一毫秒SELECT先取消再恢复、或事实先健康再超限，不产生正时长中断，不能拆分连续段；真正的未选区间才封口并在恢复选择后开启新观测段。到达样本保持每次有效确认，来源自身计数不因零时长暂态丢失；实际选源的消息样本沿该确认当时的选择，后续同毫秒选择不倒改已到达样本。
+窄状态和区间存于引擎磁盘表，不在Python保存全量行或区间Vec。未知连接代次和同步上下文单列，可与有效年龄分布重叠。它们不构成另一个交易拒绝门。没有TTL、历史市场淘汰、去重截断或按日重置core；新入口根本不构建完整core。
 
-PM逐scope单位是资产·毫秒；市场、PM组是组成资产的和，超限次数/切换亦是资产段的和，最长时长取组成资产最长段，不是市场墙钟健康状态的并集。共同源单位是来源·毫秒，仍只计自身一次。`transitions_per_source_hour` 使用当前维度全部已观察状态时长（含独立未知/异常）作为分母，即 `transitions × 3,600,000 / Σduration_ms`；PM市场对应资产小时。无分母时频率为null。选择开始/结束及UTC边界不伪装成健康状态切换。
+## 时间、选源与区间
 
-全窗连续段跨午夜不重置，日内报告则把连续段与UTC日相交成片段。例：跨午夜连续超限30ms，全窗一次/最长30ms；前后日分别超限10ms、20ms，各一日内片段/最长10ms、20ms，不能将两日次数相加当两次完整故障。`unfinished_exceeded_at_end` 表示在日边界、窗口/评估结束或真正选择结束仍超限的右删失片段，`left_censored_exceeded_at_start` 表示片段开始前已超限的左截断；日界截断不增加切换。超限时长和状态时长可逐日相加，全窗次数、最长及持续段直方图直接看全窗结果，不能以日内片段相加替代。窗口裁剪遵守同一口径，不将删失当已恢复。 恰在UTC午夜发生的真实阈值到达或新可见事实切换归入新日半开区间，不能随日内段封口丢掉。日内段读取全窗此前实际已观察标签；窗口/评估裁剪的前态在新行赋值前沿旧可见事实取得。新事实携带旧接收/事件时间不代表它此前已可见，不能用它回推左截断；已有合法此前可见事实的真实超限延续仍计左删失。
+健康received/event来自最后有效消息的直接来源。合法可知时间使用 `max(received, admitted)` 和必要身份/源内前沿。窄排序只处理epoch内admission坐标及来源时序。多个来源各自维护时间，不恢复旧六首项回放的全局 `now=max(previous_now,group.visible)`。因此新 `visible_at` 不是逐条旧core的at，不能声称两者逐条等价。这项区别不改变 S=t−last_received、A=t−last_event、未知/同步/时间异常或无消息时长的定义。
 
-统计流式维护每scope当前全窗段和当前日内段，以及各维度有限直方图/累计量，不留原始区间Vec。报告体积与scope数量、有效日及直方图桶数有关；增加这些批准维度会增加累计内存和输出，完整十八日实际占用仍待测量，不增加拒绝门或资源保证。
+PM按准确condition/asset及半开市场窗口统计。共同源各自只有一份来源分布。策略依赖分布使用实际启用的Binance和参考选择。有效spot存在时继续选spot；spot缺失时按已观察规则选择TWAP60或spot，TWAP30不参与本轮校准。共同需求由覆盖边界合并，不按活跃市场数量重复计权。
 
-## 分布、近似与候选方法
+区间使用同毫秒最终事实和选择。零时长暂态不切断连续段；每次真实有效确认仍保留到达样本。正时长未选区间切断段。首端、尾端、无消息和跨午夜时长全部保留。边界探针只读取此前已可见的状态，不用起点新事实回推历史。
 
-以下方法在读取十八日结果前固定，仍是研究方法及候选，不是正式风险采用：
+逐scope报告标出source/condition/asset。PM市场和组的单位是资产·毫秒，次数是资产段之和；逐scope另报单资产最长段；不能称为市场墙钟健康时长。共同源单位是来源·毫秒。UTC日片段是完整连续段与该日的交集，日片段次数不能相加冒充全窗次数。真实午夜切换归新半开日；同状态跨午夜不伪造切换。左/右删失表示段在评价、市场或日边界被截断。切换每小时以全部已观察时长为分母，PM对应资产小时。
 
-1. 连续接收静默 `S=t-received` 和事件年龄 `A=t-event` 使用合法可见前沿，精确累积毫秒权重；到达延迟 `received-event` 按新有效消息计样本。首尾、无消息、跨午夜均处理。同步要求、不可用、未知业务/事件时间、时间不一致分层排除，不把未知当零。未知连接代际/同步背景单列时长，不据此宣称网络断线。没有独立故障真值，三态时长不代表故障识别准确率。
-2. 直方图0—60秒使用100ms桶、60秒—一天使用1000ms桶，更长采用二进制宽桶。持续时长在桶间精确积分，不按固定100ms采样时钟；量化只影响分位及候选阈值。分位返回桶右边界，前两段上偏差分别不超过100/1000ms，长尾桶相对宽度最高100%。原时长、最长超限时长与切换计数不量化。
-3. 各UTC日、各原四组、S/A各自用Q1/Q3及 `Q3+1.5×IQR` 划出描述性主体，主体内p90作为该日正常候选。这个缩减规则不是已确认故障分类，不能把被排除长尾称为事故。跨日取可得日候选的下中位数，保留各日全直方图、未知分母与日间差异；缺某组全部有效日则显式失败，不补正式数值。原全量p99/历史最大值不定义normal。
-4. 形成三套完整配置：同一正常主体候选，max分别为normal的2、4、8倍，四组S/A共同组成各套十六项参数。三个倍率是显式接受范围假设，供未来覆盖/超限取舍比较；实际尾部分布、跨日稳定性和取舍证据不能由倍率替代，不是经验估得的故障边界，也不是参数笛卡尔积。零及normal==max保持合法，不添加正数门。候选输出分组正常/中间/超限/独立异常时长、切换次数、超限次数、时长直方图及最长时长；窗口、选源或评估结束仍超限的段单列为右删失，不能当已恢复。
+## 分布、三态与候选
 
-## 因果折与冻结
+S/A按连续时间毫秒加权，到达延迟按每次有效消息计数。独立未知、同步、不可用和时间异常分别记录；不把它们混入年龄分位或超限。原桶保持：0—60秒宽100ms，60秒—1日宽1000ms，此后桶下界与宽度均为DAY的二倍幂。SQL用首尾桶及中间范围差分精确累计毫秒，避免每区间展开所有桶。桶上界分位有100/1000ms或长桶宽度的近似误差，累计时长没有桶舍入误差。
 
-研究UTC `[2026-09-09,2026-09-24)`，开发UTC `[2026-09-24,2026-09-27)`。原四折保持：9—11日拟合/12—14日验证；9—14日拟合/15—17日验证；9—17日拟合/18—20日验证；9—20日拟合/21—23日验证。最终仅9—23日拟合，先冻结三套完整健康候选，再读24—26日开发窗口。
+原Rust方法计算每日Q1/Q3，fence=Q3+floor(1.5IQR)，保留桶下界≤fence后取主体p90。只有S/A均有分布的日进入，跨日取下中位数。三个完整候选的max为normal×2/4/8。倍率仍是待验证假设，不能替代真实尾部分布和取舍。缺少必需分组分布时传播原方法错误，不发明零默认。
 
-`study` 先独立核对整个材料的编码完整性；该步骤不参与候选形成。每折拟合消费者在右边界前停止读取业务事实，较早折不读取未来消息形成分布。先写 `fold-N-frozen.json`，然后才开始该折验证消费。候选复用已归约标量，不重复解码原始行；后折可以使用已过去前折数据。所有候选直接使用生产 `source_health_state_v1`，当前工程不运行账户或收益，不反向用开发结果改拟合候选。
+研究保持原四折：9—11日拟合/12—14日验证；9—14日/15—17日；9—17日/18—20日；9—20日/21—23日。最后只9—23日拟合，先写 `fold-4.frozen.json`，再比较24—26日开发。准备可以读全部材料，拟合SQL必须先过滤自己的右边界，未来数据不能改变早折候选。
 
-## 资源提案与限制
+四组仍为PM、Chainlink、Binance trade、depth，共16个显式normal/max字段。正常要求S/A均严格小于normal；中间态仍严格小于max；达到max即超限。normal≤max，允许零或相等。SQL按同一生产三态定义向量化计算，有限跨语言测试调用真实 `source_health_state_v1` 对照。新入口不改策略阻断集合、撤单、补腿或发送前缀义务。三态不是故障准确率。
 
-[原十八日审计](complementary-pair-input-audit-20260909-20260926.json)已核762,240,960行，其中PM728,429,320行；清单声明5186市场/10372资产。这些不是实际归约后对象数。原日清单、原metadata文件及两Snapshot复用既有初始化选择，初始化原区间与原源身份保持，不增前史；实际文件路径通过命令显式绑定，原输入只读。
+## 输出与监督
 
-[待执行计划](../../configs/source-health-two-layer-18d.plan.json)保留1024行/64MiB解码，32768行/64MiB初始run，fan-in8/max-open16。原128文件额度会在第129个初始run失败；仅按行数，PM至少需要22,230个run。原十二分钟PM真实195,597行、7个初始run，内存限制先于32768行，在峰值run28,931行/67,108,512B触发；按该行数规模参考需25,179run。计划用65,536临时文件，覆盖这个参考值及合并额外输出，不保证新日期载荷大小不变。
+prepare输出 `changes.parquet / arrivals.parquet / markets.parquet / rules.parquet / initialization.jsonl / material.json`。material.json只在全部成功后写出。study保留两类每日直方图、逐source/asset/day分母、到达样本，以及五折各一份冻结和验证JSON。每个候选另有 `*.exceeded.parquet`，记录真实进入超限的时刻、最后直接received/event、当时S/A、前态、最后事实可见时间及删失；明确标出无新消息期间的阈值跨越，不把延迟阈值当事故真值。
 
-原十二分钟PM排序实测峰值临时76,200,339B，约389.58B/行；按PM行数作同编码规模参考约264.3GiB。逐来源提案384GiB，保留原字节额度失败语义，未据此保证完整研究可完成。该参考混合run输入/输出重叠、压缩及合并时刻，不能当逐行确定上界；其他来源应分别沿真实 `SourceSortFinished` 指标监督。总盘占用还需包含同时存在的各来源run、标量输出、日志及独立归档副本，不能只检查PM参考量。六源额度的联合理论上限大于现场空闲盘，不能把逐源许可之和当实际容量保证。标量每条压缩前34B；按消息数机械放大亦不能保证变化条数、压缩率或总输出，因为一条输入可能更新多scope及选择状态。
+进度默认30秒，阶段变化即时输出。日志含阶段、已读原始行/文件、已耗时、引擎查询进度、当前VmRSS、getrusage峰值RSS、CPU、I/O、工作数据库/ spill占用和实际剩余空间。无可靠总量的算子不编造完成比例或ETA。模型监督按用户要求每10分钟一次。成功后只删除本次已无用途的工作数据库；失败现场保留，不自动重跑、扩额、缩窗或跳源。
 
-每次外排完成只打开最多8个读取器及1个writer。现场FD软硬限制524288，不改系统设置。公共PM去重与历史市场仍保留，十八日RSS不能用十二分钟RSS线性外推：代际清理、市场累积、锚点/盘口和Binance留存均影响对象数。制备阶段可控30秒打印、UTC日边界及结束保存同次 core 对象计数/RSS/阶段/处理量，计数不是容量字节；总应用输入未知时明确标注。没有新增硬RSS/墙钟自动拒绝或自动缩窗/丢行/重试。完整投入、实际CPU/RSS/产物占用与最终可行性仍待本段独审收尾后处理。
+## 全局资源与命令
 
-投入规模的条件算例：原紧凑应用阶段21.973秒处理208,684条主输入，若机械以762,240,960条物理行为一对一代理，则约80,259秒/22.3小时，已是一日量级。物理行不等于实际归约输入，此算例不是ETA、上限或已验证十八日耗时；未包含跨日市场/core累积变化、解码/外排、多次候选读取、输出与归档，且新压缩写入路径也不同。真实投入仍须现场监督和实际证据。
+原输入2864文件、762,240,960行、45,652,568,053字节，其中PM728,429,320行；清单5186市场/10372资产不是实际状态数。计划依据本机32核/128GB，整进程共用DuckDB 24线程、80GiB引擎内存和700GiB临时盘额度。它们不是每来源预算，也不是进程RSS或总磁盘上界。输出、数据库、归档副本及引擎外开销另计。窗口算子会缓冲，必要窄列可排序或spill；完整峰值与耗时未知。
 
-## 命令与产物
+PM窄原表仍含重复condition/epoch和资产列表；按8字节时间/坐标及可变标识估算每行约80—200字节未压缩量级，7.28亿行约58—146GB，仅为一张表的条件估算。派生events/states等可能同时存在，嵌套列表、引擎页、排序和压缩改变实量。主要键是condition/epoch首次顺序/admission sequence、source局部顺序，以及source/condition/asset/visible_at。不能用原46GB压缩输入推定总盘峰值。官方说明见[Parquet投影](https://duckdb.org/docs/current/data/parquet/overview.html)和[缓冲算子及spill](https://duckdb.org/docs/current/guides/performance/how_to_tune_workloads.html)。
 
-先编译 `cargo build -p baseline-mm --example research_source_health_two_layer --release -j8 --locked --offline`。`configure`只绑定18份既有清单与原初始化，不解码原始行或启动十八日研究；输出配置含调用者私有绝对路径，不发布该文件。
-
-```bash
-BIN=target/release/examples/research_source_health_two_layer
-"$BIN" configure baseline-mm/configs/source-health-two-layer-18d.plan.json "$INPUT_ROOT" "$WORK_ROOT" "$CONFIG_OUT"
-```
-
-后续完整投入确认后，在新的输出位置运行：
+依赖锁为 `research/requirements-source-health.lock`，固定CPython3.14/Linux x86_64的官方DuckDB1.5.6和PyArrow23.0.1 wheel及SHA-256。实际环境/制品与源码在私有交接绑定。公开命令使用逻辑路径变量：
 
 ```bash
-"$BIN" prepare "$CONFIG_OUT" "$MATERIAL_OUT"
-"$BIN" study "$MATERIAL_OUT" "$RESEARCH_OUT" 30
+python3 -m venv "$ENV"
+"$ENV/bin/pip" install --require-hashes -r baseline-mm/research/requirements-source-health.lock
+cargo build -p baseline-mm -p data-pipeline-training \
+  --example research_source_health_two_layer --example source_health_boundary \
+  --release -j8 --locked --offline
+"$ENV/bin/python" baseline-mm/research/research_source_health_columnar.py configure \
+  baseline-mm/configs/source-health-two-layer-18d.plan.json \
+  "$INPUT_ROOT" "$NEW_RUN_ROOT" "$BOUNDARY_HELPER" "$STATISTICS_HELPER" "$CONFIG"
+/usr/bin/time -v -o "$PREPARE_TIME" "$ENV/bin/python" \
+  baseline-mm/research/research_source_health_columnar.py prepare "$CONFIG"
+# 仅prepare成功且material.json完整后，沿同一次授权执行：
+/usr/bin/time -v -o "$STUDY_TIME" "$ENV/bin/python" \
+  baseline-mm/research/research_source_health_columnar.py study "$CONFIG"
 ```
 
-本轮验证只读已归档#246十二分钟紧凑journal：`import-246 INPUT OUT` 转换为新标量材料，`analyze OUT HEALTH_TOML REPORT` 使用显式工程配置校核新消费者。导入模式是全部共同来源的格式/消费者验证，报告明确 `legacy-consumer-validation`，不冒充生产实际选源、十八日研究或旧单层研究重算。既有材料及原十二分钟健康结果不改写。独立归档保留实际命令、源码/二进制版本、原始日志、转换材料、测量与核对；不依赖待清理target保存唯一证据。
+正式运行用前台包装器保留一次prepare成功才一次study和挂载失败停止：
 
-## 本轮验证记录
+```bash
+"$ENV/bin/python" -u baseline-mm/research/run_source_health_columnar_once.py \
+  "$CONFIG" "$ARCHIVE_ROOT" "$MOUNT_POINT" "$NEW_LOGS"
+```
 
-真实历史组合已验证正常边界仍交易/保留风险单、max边界撤单，等值与全零配置完成有限运行且不忙循环；原独立修复、计算/待发失效、已发前缀义务与恢复回归保持。新研究反例涵盖未知首尾、午夜、同毫秒最终状态、未来数据不改早折候选、主体排除长尾、共同源一次计权、实际有限prepare输出与压缩截断。低频只读计量有无对照保持公共前缀及对象计数。
+使用前核对准确源提交、两个优化工具、依赖、配置、输入身份和实际归档挂载。stdout/stderr/exit和信号单独保留。脚本必须保持前台可追踪，归档不可用时沿绑定规则停止；配置不得作为新的合同或批准账本。
+
+## 有界验证与适用限制
+
+同一合法collector构造的262144行PM样本，1文件/1个row group，1线程墙钟1.286s、CPU1.216s、峰值RSS278.6MB；24线程1.006s、CPU2.618s、峰值RSS732.8MB。四份窄输出EXCEPT ALL差异0。真实CPU累计表明确有多核参与；没有采到每个算子的活动线程数。小样本行组少，不能外推十八日加速、总耗时或峰值。随后只调整来源时钟/去重、规则连接和必要行数计量；该小型性能对照没有重测，不能称为最终所有路径的耗时。磁盘记录是测量结束占用，不称全程峰值。
+
+代表测试覆盖原构造/解析入口、跨文件重复与冲突、资产和代际、缺口/快照恢复、持续旧事件、Chainlink异常保留、同毫秒样本和最终状态、真实断选、未知分母、首尾/午夜/删失、normal=max=0、未来折不泄漏和一个Parquet截断边界。原metadata初始化小文件的精确选择仍得到原3条前序；没有重扫十二分钟或十八日完整core。本次14项Python测试通过；固定workspace退出0，累计1379 passed/0 failed/23 ignored，具名UTC测试明确跳过。fmt和相关all-targets clippy退出0，既有警告保持。17条真实构造原始记录验证prepare命令；另存的19条有限标量确认验证五折10份冻结/验证文件，不能称为18日历史运行。结果见[工程机器摘要](complementary-pair-columnar-health-engineering.json)和PR，不把旧通过记录替代新入口验证。
+
+## 历史紧凑工程证据
+
+以下为此前PR #248的历史格式、有限验证和审查返工记录。它们证明旧标量消费者，不证明新列式入口或十八日运行已经完成。原公开机器结果保持原身份。
 
 首次交付旧v1格式测量源码为 `3779fce58cd1300cddc85c1b5c0adc9be9a873ef`，release二进制SHA-256为 `cfb367904c697364c65cc5169c22d035201f0716aa3e4fb4297a25b03c2e7f87`，19,633,200B。完整固定workspace回归退出0（日志累计1370 passed/0 failed/23 ignored），具名UTC夹具明确跳过；原健康回调测量保持ignored。fmt与相关clippy通过，原仓库警告保持；额外 `-D warnings` 尝试被未改动contracts既有警告阻断，新例自身警告已修正。首次交付新研究7项、有限计量3项、真实CLI2项和来源健康组合9项分别通过。
 

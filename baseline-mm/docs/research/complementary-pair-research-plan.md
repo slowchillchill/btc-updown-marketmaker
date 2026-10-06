@@ -1,8 +1,10 @@
 # 互补配对策略可执行研究计划
 
+当前 A 已恢复。来源健康、无消息重评和发送前失效已由 #241、#185/PR #248 交付。[D-0302](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6013334211) 将当前来源健康研究改为必要列、最小状态投影和列式统计。准确任务见 [#185](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)。用户已批准新流程的完整十八日投入；先审查准确工程头，再按该头执行。此前两次完整准备均未得到可消费完整材料，未执行 study。保留最小失败证据，已清理无用途排序文件。正式阈值及经营研究仍未执行。
+
 本计划交付 [#185 当前任务3](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)的方法与执行前置，遵守 [D-0270](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5933292905)。原准入审计已完成，事实见[输入资格报告](complementary-pair-input-readiness.md)。首五分钟原失败[历史结果](complementary-pair-material-trial-20260909-0000-0005.md)保持；D-0276批准的#196由PR #197完成公共初始化修复及收尾后，同一首五分钟原prepare和公共统计已成功，见[初始化修复后结果](complementary-pair-material-trial-initialized-20260909-0000-0005.md)。本范围正常公共／隐藏材料已就绪；D-0277下的[首五分钟因果历史与结算窗诊断](complementary-pair-causal-input-20260909-0000-0005.md)已实际执行，281个spot来源及8个冻结截止、60秒接收轴持价近似可复核。该旧五分钟范围目标terminal未观察；后续[两市场公共材料、冻结特征与事后标签连接](complementary-pair-causal-labels-20260909-0000-0012.md)已完成UTC9月9日00:00—00:12新原prepare及一次共享公共读取器诊断，两目标各8冻结与右边界不倒灌，事后各自Up/Fresh已连接。生产概率、正式参数与盈利仍未验证，完整研究资源安排尚未闭合。本轮没有参数搜索、策略回测或收益比较。本文列明后续任务可执行的顺序、输入、输出与可推翻证据，不把方法候选写成已测结果或正式风险默认值。
 
-既有[窗口统计段](complementary-pair-window-statistics-20260909-0000-0010.md)已由PR #212完成审查、合并与收尾，首次比较器表示差异及后续保存结果的80窗有限投影核对分别保留。[PR #213](https://github.com/slowchillchill/btc-updown-marketmaker/pull/213)已交付并收尾的[16GiB第一小时失败报告](complementary-pair-first-fit-hour-20260909-0000-0100.md)保持原prepare_failed、统计未执行及研究0次事实。本次[显式40GiB配置重试](complementary-pair-first-fit-hour-budget-20260909-0000-0100.md)在同一UTC9月9日[00:00,01:00)完成一次原prepare、原通用统计及唯一首小时研究读取：正常公共前缀／hidden、12个完整目标／96冻结／480描述窗和11个同condition事后Fresh标签已实测，末目标终局未观察。首两市场共同数值与合法全局前史差异分别保存，不称80窗完全一致。完整拟合折、sigma／概率／风险采用、账户与收益仍未完成。所属[#214](https://github.com/slowchillchill/btc-updown-marketmaker/issues/214)十三段公共工程已完成独立组合审查和收尾；[当前首小时消费者复核](complementary-pair-hour-consumer-recheck-20260909-0000-0100.md)沿既有小时材料唯一读取，analyze3,506.577672868秒，与旧完整小时结果在仅两顶层运行字段排除后业务差异0，峰值RSS增加约9.24%。该小时复核没有重制材料或扩大其范围；随后[首折三日Chainlink来源统计](complementary-pair-initial-sigma-source-20260909-20260912.md)已完成显式选源的一次准备和重放，形成全局来源候选，保留缺口并区分每市场记忆。完整六源拟合和正式采用仍未完成，任务3继续进行。
+既有[窗口统计段](complementary-pair-window-statistics-20260909-0000-0010.md)已由PR #212完成审查、合并与收尾，首次比较器表示差异及后续保存结果的80窗有限投影核对分别保留。[PR #213](https://github.com/slowchillchill/btc-updown-marketmaker/pull/213)已交付并收尾的[16GiB第一小时失败报告](complementary-pair-first-fit-hour-20260909-0000-0100.md)保持原prepare_failed、统计未执行及研究0次事实。本次[显式40GiB配置重试](complementary-pair-first-fit-hour-budget-20260909-0000-0100.md)在同一UTC9月9日[00:00,01:00)完成一次原prepare、原通用统计及唯一首小时研究读取：正常公共前缀／hidden、12个完整目标／96冻结／480描述窗和11个同condition事后Fresh标签已实测，末目标终局未观察。首两市场共同数值与合法全局前史差异分别保存，不称80窗完全一致。完整拟合折、sigma／概率／风险采用、账户与收益仍未完成。所属[#214](https://github.com/slowchillchill/btc-updown-marketmaker/issues/214)十三段公共工程已完成独立组合审查和收尾；[当前首小时消费者复核](complementary-pair-hour-consumer-recheck-20260909-0000-0100.md)沿既有小时材料唯一读取，analyze3,506.577672868秒，与旧完整小时结果在仅两顶层运行字段排除后业务差异0，峰值RSS增加约9.24%。该小时复核没有重制材料或扩大其范围；随后[首折三日Chainlink来源统计](complementary-pair-initial-sigma-source-20260909-20260912.md)已完成显式选源的一次准备和重放，形成全局来源候选，保留缺口并区分每市场记忆。完整六源拟合和正式采用仍未完成；任务3保持开放，执行状态与恢复顺序以上述当前合同为准。
 
 公共[内部成本诊断](../../../data-pipeline/training/docs/public-replay-internal-cost-12m.md)、[组内深度共享](../../../data-pipeline/training/docs/binance-depth-shared-owner-12m.md)、[4096布局试验](../../../data-pipeline/training/docs/public-recording-layout-12m.md)及[payload页/压缩候选](../../../data-pipeline/training/docs/public-payload-page-compression-12m.md)已分别由PR #203／#207／#209／#211完成审查、合并和收尾。候选压缩未自动采用为生产默认，长期预算仍未闭合；这些资源历史及边界在原报告/本计划§7保留，上述小时试制沿原生产默认完成材料，不将候选试验当长期预算闭合。
 
@@ -25,7 +27,17 @@
 | 耗时／规则／finality 敏感性（待执行） | 同候选、同材料、显式不同调度或预封定政策 | 机制假设影响与运行能力，和基准经济结果分别报告 |
 | 连续开发比较（待执行） | 每候选一个独立账户，2000 pUSD贯穿三天，新增市场原登记 | 完整配置、同口径结果、未闭合尾部、风险数值建议与取舍；不按日重置账户 |
 
-先完成原材料试制和因果统计，再形成完整策略配置；不拿工程合成参数直接跑真实收益搜索。公共库已有生产历史入口和上层 CLI（PR #190，合并基线 `5503fcf…`），研究工具仅做统计及分析。反向依赖具体策略、第二套撮合／账本和三环境策略私有宿主均不属于该计划。
+上表保留既有研究阶段及证据；已完成部分不重做。当前先以新列式入口完成来源健康分布、四折冻结和开发比较，再结合后续概率、成本及风险研究形成完整策略配置；不拿工程合成参数直接跑真实收益搜索。公共库已有生产历史入口和上层 CLI（PR #190，合并基线 `5503fcf…`），研究工具仅做统计及分析。反向依赖具体策略、第二套撮合／账本和三环境策略私有宿主均不属于该计划。
+
+### 当前来源健康步骤
+
+1. 使用 `research_source_health_columnar.py configure` 绑定原18份准入清单和原metadata初始化。不重新扫描全部原始行作准入。
+2. `prepare` 只读必要列。公共DPT维护有效消息、代际同步、身份和合法时间，输出窄 Parquet。PM资产展开和状态窗口由 DuckDB 向量化执行。
+3. `study` 计算连续时间 S/A、有效消息到达延迟、未知与异常分母、每日和逐资产三态、超限持续段及实际停滞触发记录。共同来源不按市场重复加权。
+4. 原四折先拟合、写冻结候选，再评价随后三天。最后仅9—23日拟合，冻结后比较24—26日开发段。2/4/8倍率仍是待验证假设。
+5. 中文结果与机器摘要分别报告统计、尾部取舍、资源和未闭合问题。来源健康研究不产生经营账户或收益。
+
+原公共录制入口继续服务需要完整行情和账本的研究。健康统计不再默认执行宽JSON重写、完整盘口/core或两遍宽外排。旧宿主全局时钟不成为业务时间定义。详细列、时间差异、配置和命令见[列式两层说明](complementary-pair-source-health-two-layer.md)。
 
 ## 3. 概率与跨源候选的形成
 
@@ -39,9 +51,13 @@ Binance 因果基差／创新在双方已接收且可见后计算，Chainlink �
 
 输出为因果概率基线、跨源系数候选、来源资格与缺失分层、校准和反转证据。若短窗误差与假确定性系统增大、效果只存在于源时间、或者扣执行成本后无增益，应推翻或缩小对应候选，不擅自加 TTL、冷却或新的禁止条件。
 
-## 4. 全部27个策略参数的形成与审定边界
+D-0284 已批准的来源健康范围按 #185 §3.5 执行，不由上述研究现象另推交易限制。健康阈值与概率、成本和风险参数共同形成候选并按证据审定；保留原统计分母和候选身份，只补必要健康分层与动作影响。历史缺少连接事实时保留未知；故障注入及合成工程值不作真实事故、正式阈值或盈利证据。
+
+## 4. 既有27个策略参数与新增健康参数的审定边界
 
 当前 `ComplementaryPairConfigV1` 全部数值显式输入，没有正式数值默认。以下均为生成方法，实际值必须由后续结果填入；工程示例不提供正式数值。分组相邻字段共用说明但仍逐字段保存有效值及来源。
+
+下表对应已交付候选实现的27个字段，另有已实现的16项来源健康字段，见下文和策略配置；这些字段没有正式默认值。正式健康数值与既有参数共同审定，采集恢复超时或某日最大消息间隔不能直接作为默认。
 
 | 配置字段 | 候选形成方法／实际取舍 |
 | --- | --- |
@@ -97,9 +113,9 @@ Binance 因果基差／创新在双方已接收且可见后计算，Chainlink �
 
 ## 7. 下一步配置与资源执行表
 
-首折Chainlink来源统计已按[#185当前五步分配](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)完成一次三日选源准备及原重放，见[报告](complementary-pair-initial-sigma-source-20260909-20260912.md)与[机器结果](complementary-pair-initial-sigma-source-20260909-20260912.json)。接收区间为UTC `[2026-09-09,2026-09-12)`，78文件/239591来源事实，保留原gaps 0/17/15、239571接纳点及239570正时间pair，来源候选3.970033377357779 (USD/BTC)/√s未采用为正式参数。最大接纳间隔367.399秒，Fresh事实不证明三日连续完整行情；全局来源前史与每condition记忆及六源单调可见前沿仍区分。此段没有元数据初始化、隐藏材料或市场观察，不是完整账户拟合或收益研究，任务3仍沿既定范围推进。
+首折Chainlink来源统计已按[#185当前五步分配](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)完成一次三日选源准备及原重放，见[报告](complementary-pair-initial-sigma-source-20260909-20260912.md)与[机器结果](complementary-pair-initial-sigma-source-20260909-20260912.json)。接收区间为UTC `[2026-09-09,2026-09-12)`，78文件/239591来源事实，保留原gaps 0/17/15、239571接纳点及239570正时间pair，来源候选3.970033377357779 (USD/BTC)/√s未采用为正式参数。最大接纳间隔367.399秒，Fresh事实不证明三日连续完整行情；全局来源前史与每condition记忆及六源单调可见前沿仍区分。此段没有元数据初始化、隐藏材料或市场观察，不是完整账户拟合或收益研究；任务3仍未完成，接续以顶部当前合同为准。
 
-下一次执行需要真实完整配置，不可直接使用 `synthetic-command.json` 中的占位身份或合成风险。下表对应现有CLI结构，足以逐项填充，不以待研究数字的伪造JSON声称当前可跑正式经营。
+后续研究经营执行需要真实完整配置，不可直接使用 `synthetic-command.json` 中的占位身份或合成风险。下表对应现有CLI结构；健康16字段已同步到 CLI 和策略配置，normal≤max，允许零或相等。研究入口见两层说明；占位身份和工程合成数值不能用于正式经营。
 
 | 实际配置位置 | 来源与填充要求 |
 | --- | --- |

@@ -1,0 +1,134 @@
+{
+  "format": "columnar-health-engineering-v1",
+  "delivery_issue": 185,
+  "collector_commit": "8e6e9d8a744ec3ec10b4c0b8d57a251a16159d59",
+  "historical_eighteen_day_run": false,
+  "formal_threshold_adoption": false,
+  "implementation": {
+    "public_projection": "data-pipeline/training/python/dpt_health/projection.py",
+    "policy": "baseline-mm/research/source_health",
+    "engine": {
+      "threads": 24,
+      "memory_limit": "80GiB",
+      "max_temp_directory_size": "700GiB"
+    },
+    "resource_limits_are_process_rss_or_total_disk_bounds": false,
+    "full_duration_and_peaks": "unknown",
+    "legacy_global_replay_clock_preserved": false
+  },
+  "validation": {
+    "python_tests": 14,
+    "python_exit": 0,
+    "syntax": "AST parsed",
+    "dependency_check": "passed",
+    "workspace": {
+      "passed": 1379,
+      "failed": 0,
+      "ignored": 23,
+      "exit": 0,
+      "wall_s": 152.45,
+      "skipped": "four_source_production_path_sustains_two_to_five_thousand_native_messages_per_second",
+      "skip_reason": "fixture depends on actual UTC clock"
+    },
+    "fmt_exit": 0,
+    "clippy": {
+      "exit": 0,
+      "existing_warnings_preserved": true
+    },
+    "bounded_command_fixture": {
+      "prepare_raw_rows": 17,
+      "constructed_study_confirmations": 19,
+      "frozen_and_validation_files": 10,
+      "historical_run": false
+    },
+    "original_initialization": {
+      "selected_rows": 3,
+      "raw_file_bytes": 97043,
+      "raw_file_rows": 792,
+      "scope": "original single metadata file and exact original selections"
+    }
+  },
+  "bounded_pm_comparison": {
+    "input": {
+      "rows": 262144,
+      "files": 1,
+      "row_groups": 1
+    },
+    "runs": [
+      {
+        "threads": 1,
+        "rows": 262144,
+        "wall_s": 1.2863561470003333,
+        "cpu_s": 1.2159361979999999,
+        "peak_rss_bytes": 278556672,
+        "disk_allocated_bytes": 5451776,
+        "duckdb_version": "1.5.6"
+      },
+      {
+        "threads": 24,
+        "rows": 262144,
+        "wall_s": 1.0057342530053575,
+        "cpu_s": 2.61761376,
+        "peak_rss_bytes": 732844032,
+        "disk_allocated_bytes": 7192576,
+        "duckdb_version": "1.5.6"
+      }
+    ],
+    "equivalence": {
+      "changes": {
+        "difference_rows": 0,
+        "rows": 262144
+      },
+      "arrivals": {
+        "difference_rows": 0,
+        "rows": 262144
+      },
+      "markets": {
+        "difference_rows": 0,
+        "rows": 1
+      },
+      "rules": {
+        "difference_rows": 0,
+        "rows": 0
+      },
+      "input": {
+        "rows": 262144,
+        "row_groups": 1,
+        "files": 1
+      }
+    },
+    "limitations": [
+      "Only one run for each thread setting; no repeated benchmark.",
+      "Operator active worker counts were not sampled.",
+      "Disk allocated bytes are end occupancy, not the whole-run peak.",
+      "Measured before final source/rule/counter corrections; not all final paths were timed.",
+      "No inference of eighteen-day speedup, RSS or disk capacity."
+    ]
+  },
+  "semantic_checks": [
+    "trade_time T differs from event_time E and is the effective trade clock",
+    "native trade ID deduplication spans collector epochs; canonical payload and T conflict retained",
+    "depth gap then awaiting snapshot uses captured snapshot_unavailable",
+    "RTDS invalid classifications preserve earlier valid value and source selection",
+    "same-ms final state retains every effective arrival sample",
+    "midnight transition and late-visible fact use actual causal previous state",
+    "unknown asset and source durations remain in their proper denominators",
+    "positive-time deselection splits episodes; same-ms temporary selection does not",
+    "zero/equal normal and max; finite SQL labels match production policy",
+    "future fit contributions cannot alter earlier frozen candidates",
+    "one truncated Parquet boundary"
+  ],
+  "input_proposal": {
+    "files": 2864,
+    "rows": 762240960,
+    "bytes": 45652568053,
+    "manifest_identities": "existing eighteen-day admission audit",
+    "configuration_sha256": "1d6b90cb746216d0d5855e7d43922ae54971c7d9c76a99ccc48cf35986aa6060",
+    "created_run_root": false
+  },
+  "research_remaining": [
+    "Exact-head independent review before starting the already-authorized new eighteen-day study.",
+    "Actual full-run resource evidence, tail distributions and candidate tradeoffs are still unavailable.",
+    "Candidates are hypotheses; no formal thresholds or economic validation."
+  ]
+}
