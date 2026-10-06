@@ -163,6 +163,158 @@ async fn gpu_sealed_failure_paths_preserve_original_economic_sequence_and_compen
     eprintln!("gpu_failure_finality={}",String::from_utf8(output.stdout).unwrap());
 }
 
+#[cfg(feature = "shared-execution")]
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "AutoDL真实失败最终性V4反馈与Ledger成本补偿关联"]
+async fn gpu_real_failed_fill_reverses_original_applied_cost_and_fee_once() {
+    for (index, economic_ordinal) in [None, Some(0_u32), Some(1_u32)].into_iter().enumerate() {
+        let run_id = format!("run-gpu-ledger-failure-{index}");
+        let original_spec = spec(&run_id, "gpu-ledger-failure-create");
+        let account_key = contracts::AccountInstanceKeyV1 {
+            run_id: original_spec.run_id,
+            caller_instance_id: original_spec.caller_instance_id,
+            account_id: original_spec.account_id,
+            caller_role: SimCallerRoleV1::ModelTrain,
+            platform_source: contracts::PlatformSourceV1::Simulated,
+        };
+        let path = serde_json::json!({"steps":[
+            {"state":"MATCHED","offset_ms":0},
+            {"state":"MINED","offset_ms":10},
+            {"state":"FAILED","offset_ms":20}],"economic_application_ordinal":economic_ordinal});
+        let policy = Arc::new(TradeFinalityPolicyV2::decode_and_seal(
+            &serde_json::to_vec(&serde_json::json!({
+                "schema_version":"trade_finality_policy_v2",
+                "normal_path":successful_policy_v2_for_tests().normal_path(),
+                "failure_overrides":[{"selector":{"selector_domain":"REQUEST",
+                    "account_instance_key":account_key,"global_request_id":"gpu-ledger-failure-post"},
+                    "path":path}],
+            })).unwrap(),
+        ).unwrap());
+        let saved = Rc::new(RefCell::new(None));
+        let capture = Rc::clone(&saved);
+        let normalization = Rc::new(RefCell::new(Vec::new()));
+        let normalization_capture = Rc::clone(&normalization);
+        let (_directory, mut actor) = active_market_actor_with_projection(
+            SimCallerRoleV1::ModelTrain, &run_id, policy.clone(), move |log_path, opened| {
+                opened.projection_version = crate::runtime_v2::BusinessProjectionVersionV1::V4;
+                let reference = contracts::execution_normalization::DurableSourceReferenceV1 {
+                    source: contracts::execution_normalization::ImmutableSourceReferenceV1::Location(
+                        log_path.display().to_string(),
+                    ),
+                };
+                let memory = noe_projection::MemoryNoeProjectionPortV4::new(
+                    log_path.parent().unwrap().join("noe-memory"), opened.clone(),
+                    reference.clone(), reference.clone(), format!("create-{run_id}"), "failure-source".into(),
+                );
+                *capture.borrow_mut() = Some(memory.observation());
+                let durable = noe_projection::SimV2NoeProjectionPortV4::new(
+                    log_path.parent().unwrap().join("noe-durable"), opened.clone(),
+                    reference.clone(), reference, format!("create-{run_id}"), "failure-source".into(),
+                );
+                Box::new(GpuNoeReferencePort {
+                    memory, durable, normalization_reference: normalization_capture, normalization_core: None,
+                })
+            },
+        ).await;
+        let observation = saved.borrow_mut().take().unwrap();
+        let mut ledger = ledger::LedgerWriterV1::new_with_admission_v2(
+            ledger::AccountAdmissionPolicyV2::DualCashNoMarketLimit,
+        );
+        ledger.apply_noe_memory_v2(&observation.opening_record().unwrap()).unwrap();
+        for record in observation.take_closed_records() {
+            ledger.apply_noe_memory_v2(&record).unwrap();
+        }
+        let initial = decoded_maker_initial_events();
+        let condition = initial[0].market.condition_id.clone();
+        let (state, _) = reduce_market_event_slice_v2(
+            actor.state.take().unwrap(), MarketEventPathV1::HiddenPlatform, 1_100, &initial,
+            actor._rule_snapshot.snapshot(), policy.as_ref(),
+        ).unwrap_or_else(|_| panic!("原双腿初始化失败"));
+        let request = BusinessRequestV2::PostOrders(PostOrdersRequestV2 {
+            context: RequestContextV2 { global_request_id: "gpu-ledger-failure-post".into(), caller_correlation_id: None },
+            items: vec![PostOrderBatchItemV2 { batch_item_ordinal: 0, item: post_item(
+                "gpu-ledger-failure-item", &condition, &TokenId("1".into()),
+                SimBuyOrderKindV1::GtcLimit {
+                    limit_price_pusd_per_share: "0.3".parse().unwrap(),
+                    size_shares: "5".parse().unwrap(), post_only: false,
+                },
+            ) }],
+        });
+        let (state, receipt) = register_request_candidate(
+            &actor.opened, actor.scenario.initial_market_directory(), state, &request_cutoff(1_200),
+            &request, 11, actor._latency_profile.as_ref(), actor._rule_snapshot.snapshot(),
+        );
+        let (state, accepted) = advance_mutation_candidate_with_outputs(
+            &actor.opened, actor.scenario.initial_market_directory(), state,
+            receipt.platform_arrived_at_utc_ms, actor._rule_snapshot.snapshot(), policy.as_ref(),
+        );
+        let accepted = accepted.unwrap();
+        let MutationActionBusinessEffectV3::Post(post) = &accepted.business else { panic!("原提交结果"); };
+        assert!(matches!(post.outcome, PostOrderItemOutcomeV2::Accepted(_)));
+        let mut batches = Vec::new();
+        let mut state = gpu_accept_projection_reference(
+            &mut actor, state, BusinessReducerOutputV2::MutationAction(Some(accepted)), &mut batches,
+        );
+        while let Some(at) = state.session.as_ref().unwrap().execution_state.next_scheduled_finality_at_utc_ms() {
+            let (next, effects) = advance_finality_to_candidate(
+                state, at, actor._rule_snapshot.snapshot(), policy.as_ref(),
+            );
+            state = gpu_accept_projection_reference(
+                &mut actor, next, BusinessReducerOutputV2::LogicalDrive(LogicalDriveOutputV2 {
+                    lifecycle: effects.into_lifecycle_feedback().unwrap(), ..Default::default()
+                }), &mut batches,
+            );
+        }
+        // 只关闭原已生成反馈的工程观察边界；不重新编号或伪造经济记录。
+        actor.projection_port.close_receive_prefix(1_000_000);
+        actor.projection_port.observe_public_time(&crate::public_consumption::TrustedActorExecutionTimeV1(
+            crate::public_consumption::ActorTimeRecordV1 {
+                run_id: actor.opened.run_id.clone(), drive_position: 1, logical_time_utc_ms: 1_000_000,
+            },
+        ));
+        let records = observation.take_closed_records();
+        assert!(!records.is_empty());
+        let mut pending = records.clone();
+        let mut checkpoints = Vec::new();
+        while !pending.is_empty() {
+            let previous = pending.len();
+            let mut waiting = Vec::new();
+            for record in pending {
+                let outcome = ledger.apply_noe_memory_v2(&record).unwrap();
+                checkpoints.push(serde_json::json!({
+                    "record":record.record(),"position":record.position(),"visibility":record.visibility(),
+                    "after":gpu_ledger_reservation_checkpoint(&ledger,"failure-noe"),
+                }));
+                if matches!(outcome, ledger::LedgerMemoryApplyOutcomeV1::MissingEconomicAssociation
+                    | ledger::LedgerMemoryApplyOutcomeV1::Applied(ledger::LedgerApplyOutcomeV1::MissingPlatformPredecessor {..})) {
+                    waiting.push(record);
+                }
+            }
+            assert!(waiting.len() < previous, "真实失败反馈前驱无法闭合");
+            pending = waiting;
+        }
+        let before_repeat = ledger.projection_v2().unwrap();
+        for record in &records { ledger.apply_noe_memory_v2(record).unwrap(); }
+        assert_eq!(ledger.projection_v2().unwrap(), before_repeat, "重复原位置不能二次补偿");
+        let artifact = std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap());
+        std::fs::create_dir_all(&artifact).unwrap();
+        std::fs::write(artifact.join(format!("original-failed-fill-{index}.json")),
+            serde_json::to_vec_pretty(&serde_json::json!({"path":path,"batches":batches,
+                "checkpoints":checkpoints,"final":before_repeat})).unwrap()).unwrap();
+        let platform = &before_repeat.platform_confirmed_projection;
+        eprintln!("failure_cost_case={index} application_ordinal={economic_ordinal:?} cost={} fee={}",
+            platform.position_cost_basis_pusd.0, platform.fees_pusd.0);
+        assert_eq!(platform.position_cost_basis_pusd, ExactDecimal("0".into()), "失败应撤回此前实际应用成本");
+        assert_eq!(platform.fees_pusd, ExactDecimal("0".into()), "失败应撤回此前实际应用费用");
+        assert!(platform.outcome_balances.iter().all(|outcome|
+            outcome.balance_shares == ExactDecimal("0".into())
+                && outcome.position_cost_basis_pusd == ExactDecimal("0".into())));
+        assert!(before_repeat.market_projections.iter().all(|market|
+            market.position_cost_basis_pusd == ExactDecimal("0".into())
+                && market.fees_pusd == ExactDecimal("0".into())));
+    }
+}
+
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "AutoDL原合法多ask逐fill及同时间最终性顺序"]
 async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
