@@ -47,6 +47,7 @@ def main():
     from queues import _take
     from asset_buy import take_ratio
     gpu_trade_frames=[]
+    gpu_economic_frames=[(accepted.submission_delta,0,integers([1]),torch.zeros(1,dtype=torch.int64,device='cuda'),at)]
     # 同价多段对应同来源价，各实际fill保留原plan人口。
     source_prices=[]
     for column,frame in enumerate(accepted.fills):
@@ -87,6 +88,12 @@ def main():
             assert pool.records.ordinal[coordinate].cpu().item() == record['ordinal']
             assert values(pool.records.economic_application_sequence)[coordinate] == (record['economic_application_sequence'] or 0)
     assert order == [1,2,3,1,2,3] and not pool.next_obligation()[-1].any().cpu().item()
+    for record,frame,_ in gpu_trade_frames:
+        event=frame.event
+        event_at=record.matched_at+record.offsets[record.selected_path,event.ordinal]
+        for delta,tag in [(event.economic_delta,6),(event.failure_delta,7),(event.rebate_delta,10)]:
+            if delta.emitted.cpu().item():
+                gpu_economic_frames.append((delta,tag,frame.fill_sequence,event.ordinal,event_at))
     # 原完整BusinessProjectionBatch→MemoryNOE是冷来源参考，运行热链不调用CPU端口。
     profile_sha='98fd40f843275db8994a29cec1de6a72f95bbaa4309df9779c7ed1285cdff596'
     profile_path=Path(__file__).resolve().parents[1]/'config/latency-profiles'/profile_sha/'profile.json'
@@ -159,6 +166,7 @@ def main():
     spec.loader.exec_module(normalization)
     normalization_report=normalization.validate(source['normalization_reference'])
     trade_report=normalization.validate_trades(source['noe_records'],gpu_trade_frames)
+    economic_report=normalization.validate_economic(source['noe_records'],gpu_economic_frames)
     path=Path(__file__).resolve().parents[2]/'execution-normalization/gpu/consumption.py'
     spec=importlib.util.spec_from_file_location('gpu_noe_consumption',path)
     consumption=importlib.util.module_from_spec(spec)
@@ -267,6 +275,7 @@ def main():
         'Ledger_platform_balance_and_predecessor_candidate_checked':platform_checked,
         'normalization_core_candidate':normalization_report,
         'actual_SIM_device_trade_mapping':trade_report,
+        'actual_SIM_device_economic_mapping':economic_report,
         'original_feedback_dual_visibility_gate_checked':True,
         'global_clock_NOE_Ledger_delivered':False}))
 

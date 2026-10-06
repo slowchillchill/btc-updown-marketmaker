@@ -195,3 +195,70 @@ def validate_trades(records,frames):
         torch.nn.functional.pad(second,(0,width-second.size(1))))
     return {'actual_trade_lifecycles':count,'same_values_different_word_capacity_equal':True,
         'SIM_feedback_full_batch_mapping_delivered':False}
+
+
+def validate_economic(records,frames):
+    import json
+    from queues import Numbers
+    from validate_base_execution import integers,rational,values
+    from economic import map_economic
+    from fields import encode_fields
+    from core import EvidenceBank,Normalizer,ECONOMIC,OUT_FACT,OUT_DUPLICATE
+    source={}
+    for row in records:
+        body=next(iter(row['record'].values()))
+        if 'fact' in body and 'AccountTransition' in body['fact']['economic_identity']:
+            source[body['fact']['economic_identity']['AccountTransition']['account_transition_seq']]=body
+    state=None
+    field_names=['cash_pusd_delta','available_pusd_delta','principal_encumbrance_pusd_delta',
+        'immediate_taker_fee_encumbrance_pusd_delta','maker_rebate_receivable_pusd_delta',
+        'taker_rebate_receivable_pusd_delta','maker_rebate_locked_remainder_pusd_delta','taker_rebate_locked_remainder_pusd_delta']
+    counts=0
+    for delta,tag,entity,path,at in frames:
+        body=source[values(delta.sequence)[0]]
+        fact=body['fact']
+        source_ref=next(iter(fact['source_reference']['record'].values()))
+        zero=torch.zeros(1,dtype=torch.int64,device='cuda')
+        private=integers([source_ref['private_feedback_sequence']])
+        ordinal=torch.tensor([body['source_order']['ordinal']],device='cuda')
+        transition_tag=torch.full_like(zero,tag)
+        mapped=Numbers.run_exact_batch(lambda:map_economic(delta,zero,zero,zero,zero,
+            torch.tensor([0,0],device='cuda'),private,ordinal,at,transition_tag,entity,path))
+        disposition=fact['disposition']['AccountTransition']
+        transition=disposition['transition']
+        if 'Existing' in transition:
+            transition=transition['Existing']
+        original_tag,original_fields=next(iter(transition.items()))
+        expected_tag={'OrderAcceptedEncumbranceApplied':0,'FillFinalityEconomicApplied':6,
+            'TakerRebateAccrualApplied':10}[original_tag]
+        original_identity=original_fields['order_identity' if expected_tag==0 else 'trade_identity']
+        identity=json.loads(original_identity.split(':',1)[1])[-1]
+        original_entity=next(iter(next(iter(identity.values())).values()))
+        original_sequence=int(original_entity.removeprefix('sim-'))
+        expected_path=original_fields.get('path_ordinal',0)
+        fields=disposition['balance_delta']
+        if 'existing' in fields:
+            assert fields['settlement_fee_liability_pusd_delta']=='0' and fields['actual_taker_fee_liability_pusd_delta']=='0'
+            fields=fields['existing']
+        outcome=fields['outcome_balance_deltas']
+        assert len(outcome)<=1 and (not outcome or outcome[0]['token_id']=='1')
+        expected=Numbers.run_exact_batch(lambda:encode_fields([zero,zero,
+            torch.tensor([disposition['economic_effective_at_utc_ms']],device='cuda'),torch.full_like(zero,expected_tag),
+            integers([original_sequence]),torch.full_like(zero,expected_path),*[rational([fields[name]]) for name in field_names],
+            torch.tensor([bool(outcome)],device='cuda'),zero,
+            rational([outcome[0]['balance_shares_delta'] if outcome else '0']),rational(['0']),rational(['0'])]))
+        width=max(expected.size(1),mapped.semantic.size(1))
+        assert torch.equal(torch.nn.functional.pad(expected,(0,width-expected.size(1))),
+            torch.nn.functional.pad(mapped.semantic,(0,width-mapped.semantic.size(1))))
+        assert mapped.emitted.cpu().tolist()==[True]
+        bank=EvidenceBank(mapped.logical_keys,mapped.economic_keys,mapped.semantic,torch.zeros((1,1),dtype=torch.int64,device='cuda'),
+            torch.full_like(zero,ECONOMIC),mapped.source_order,zero,mapped.fault)
+        state=Normalizer.empty(bank,1) if state is None else state.append_bank(bank)
+        row=torch.tensor([[counts]],device='cuda')
+        state,event=state.prepare(row,torch.ones_like(row,dtype=torch.bool))
+        assert event.outcomes.cpu().tolist()==[[OUT_FACT]] and event.emitted.cpu().tolist()==[[True]]
+        state,repeat=state.prepare(row,torch.ones_like(row,dtype=torch.bool))
+        assert repeat.outcomes.cpu().tolist()==[[OUT_DUPLICATE]]
+        counts+=1
+    assert counts==7
+    return {'actual_economic_deltas':counts,'full_Ledger_lifecycle_and_reservation_delivered':False}
