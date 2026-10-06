@@ -88,7 +88,7 @@ class TradeSuccess:
                 value=take_ratio(sorted_contribution,at)
                 zero=ExactRational.ratio(value.numerator.constant(0),value.denominator.constant(1))
                 capacities.append(select(value,sorted_member[:,column],zero))
-            allocated,fault=attribution().allocate_ordered(take_ratio(pools.quantity,asset),tuple(capacities))
+            allocated,fault=attribution().allocate_ordered_device(take_ratio(pools.quantity,asset),tuple(capacities),enabled)
             error=error | torch.where(enabled,fault,0)
             from queues import _columns
             packed=ExactRational(_columns([value.numerator for value in allocated]),_columns([value.denominator for value in allocated]))

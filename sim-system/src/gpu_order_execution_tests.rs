@@ -475,7 +475,7 @@ fn gpu_finite_attribution_matches_original_exact_source_contract() {
         (ratio(6,10_000_000_000_000),ratio(9,1),ratio(10,1)),
         (ratio(7,1_000_000_000_000_000),ratio(0,1),ratio(1,1)),
         (ratio(7,1_000_000_000_000_000),ratio(1,1),ratio(1,1)),
-        (huge,ratio(77,1),ratio(211,1)),
+        (huge.clone(),ratio(77,1),ratio(211,1)),
     ] {
         let result=split_scale12_rne_v1(&total,&part,&whole).unwrap();
         splits.push(serde_json::json!({"total":total.public(),"part":part.public(),"whole":whole.public(),
@@ -487,6 +487,7 @@ fn gpu_finite_attribution_matches_original_exact_source_contract() {
         (ratio(9,10_000_000_000_000),vec![ratio(6,10_000_000_000_000);2]),
         (ratio(1,1),vec![ratio(0,1),ratio(2,1),ratio(0,1)]),
         (ratio(0,1),vec![ratio(0,1);2]),
+        (huge.clone(),vec![huge.clone(),huge]),
     ] {
         let result=allocate_capacity_scale12_candidate_v1(&total,&capacities).unwrap();
         allocations.push(serde_json::json!({"total":total.public(),"capacities":capacities.iter().map(R::public).collect::<Vec<_>>(),

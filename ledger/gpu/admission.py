@@ -1,7 +1,8 @@
 """原已编码Base短链NOE→平台/预留/生命周期的设备协调候选。
 
 Ledger entry/local/platform三个序独立；原位置成功后才登记，缺前驱/关联保留待消费。
-当前不含成功成本、贡献归属、结算或完整账户读面，不能代替全Ledger/活动根恢复。
+成功成本池和未配对成交贡献按首次经济成功接纳；返佣日归属、结算及完整账户读面
+仍须接入，不能代替全Ledger或活动根恢复。
 """
 from dataclasses import dataclass,replace,fields
 import torch

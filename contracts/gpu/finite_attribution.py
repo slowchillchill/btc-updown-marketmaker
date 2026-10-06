@@ -94,3 +94,46 @@ def allocate_ordered(total,capacities):
         capacity=future
     fault=fault | remaining.fault | (remaining.numerator.sign!=0).to(torch.int32)
     return tuple(with_fault(value,fault) for value in result),fault
+
+
+def allocate_ordered_device(total,capacities,enabled):
+    """同一顺序容量公式的设备循环；无新增成功根直接保留源贡献。
+
+    只回传独立物理容量请求，由原纯计算批统一重试，不逐项读取业务值。
+    """
+    from queues import Numbers
+    roots=total.numerator.sign.numel()
+    columns=len(capacities)
+    integer=type(total.numerator)
+    width=max([Numbers.device_word_capacity(),total.numerator.words.shape[1],total.denominator.words.shape[1]]+
+        [part.words.shape[1] for value in capacities for part in [value.numerator,value.denominator]])
+    def padded(value):
+        return value.with_capacity(width).words
+    if columns:
+        numerator=torch.stack([padded(value.numerator) for value in capacities],dim=1).reshape(roots*columns,width)
+        denominator=torch.stack([padded(value.denominator) for value in capacities],dim=1).reshape(roots*columns,width)
+        signs=torch.stack([value.numerator.sign for value in capacities],dim=1).reshape(-1)
+        input_fault=total.fault.clone()
+        for value in capacities:
+            input_fault=input_fault | value.fault
+    else:
+        numerator=torch.empty((0,width),dtype=torch.int32,device=total.numerator.words.device)
+        denominator=numerator.clone()
+        signs=torch.empty(0,dtype=torch.int8,device=numerator.device)
+        input_fault=total.fault
+    input_fault=input_fault | (total.denominator.sign<=0).to(torch.int32)
+    for value in capacities:
+        input_fault=input_fault | (value.denominator.sign<=0).to(torch.int32)
+    n,d,fault,required=Numbers.public_extension().ordered_attribution(padded(total.numerator),padded(total.denominator),
+        total.numerator.sign,numerator,denominator,signs,enabled,columns)
+    Numbers.record_resource_request(required)
+    fault=fault | torch.where(enabled,input_fault,0)
+    output=type(total)(integer(n,n.any(dim=1).to(torch.int8),fault.repeat_interleave(columns)),
+        integer(d,d.any(dim=1).to(torch.int8),fault.repeat_interleave(columns)))
+    result=[]
+    for column in range(columns):
+        at=torch.arange(roots,device=enabled.device)*columns+column
+        original_fault=capacities[column].fault
+        result.append(type(total)(integer(output.numerator.words[at].contiguous(),output.numerator.sign[at],output.numerator.fault[at] | original_fault),
+            integer(output.denominator.words[at].contiguous(),output.denominator.sign[at],output.denominator.fault[at] | original_fault)))
+    return tuple(result),fault

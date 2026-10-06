@@ -42,8 +42,21 @@ def main():
             tuple(ratio([value]) for value in row['capacities'])))
         assert fault.cpu().tolist()==[0]
         assert [fractions(value)[0] for value in result]==[expected(value) for value in row['allocated']]
+        fused,fault=Numbers.run_exact_batch(lambda:finite.allocate_ordered_device(ratio([row['total']]),
+            tuple(ratio([value]) for value in row['capacities']),torch.tensor([True],device='cuda')))
+        assert fault.cpu().tolist()==[0]
+        assert [fractions(value)[0] for value in fused]==[expected(value) for value in row['allocated']]
+        retained,fault=Numbers.run_exact_batch(lambda:finite.allocate_ordered_device(ratio([row['total']]),
+            tuple(ratio([value]) for value in row['capacities']),torch.tensor([False],device='cuda')))
+        assert fault.cpu().tolist()==[0]
+        assert [fractions(value)[0] for value in retained]==[expected(value) for value in row['capacities']]
+        mixed,fault=Numbers.run_exact_batch(lambda:finite.allocate_ordered_device(ratio([row['total']]*2),
+            tuple(ratio([value]*2) for value in row['capacities']),torch.tensor([True,False],device='cuda')))
+        assert fault.cpu().tolist()==[0,0]
+        assert [fractions(value)[0] for value in mixed]==[expected(value) for value in row['allocated']]
+        assert [fractions(value)[1] for value in mixed]==[expected(value) for value in row['capacities']]
     print(json.dumps({'split_rows':len(splits),'ordered_capacity_cases':len(source['allocations']),
-        'source_endpoints_exact':True,'over_u128_input_checked':True,'elapsed_seconds':time.perf_counter()-start,
+        'source_endpoints_exact':True,'over_u128_input_checked':True,'fused_ordered_capacity_checked':True,'disabled_source_retained':True,'elapsed_seconds':time.perf_counter()-start,
         'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),'Ledger_policy_consumer_delivered':False}))
 
 

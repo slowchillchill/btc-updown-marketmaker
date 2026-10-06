@@ -264,7 +264,46 @@ std::vector<torch::Tensor> sim_trade_key(torch::Tensor words,torch::Tensor signs
   return {keys,fault};
 }
 
+extern "C" void public_gpu_ordered_attribution(const uint32_t*,const uint32_t*,const int8_t*,
+    const uint32_t*,const uint32_t*,const int8_t*,int64_t,int64_t,const bool*,uint32_t*,
+    uint32_t*,int32_t*,int64_t*,uint32_t*,int64_t,int64_t,cudaStream_t);
+
+std::vector<torch::Tensor> ordered_attribution(torch::Tensor tn,torch::Tensor td,torch::Tensor ts,
+    torch::Tensor cn,torch::Tensor cd,torch::Tensor cs,torch::Tensor enabled,int64_t columns) {
+  words_check(tn); words_check(td); words_check(cn); words_check(cd);
+  sign_check(ts,tn); sign_check(cs,cn);
+  int64_t roots=tn.size(0),width=tn.size(1);
+  TORCH_CHECK(roots<=int64_t(INT32_MAX)*128,"归属批次超过设备grid.x容量");
+  TORCH_CHECK(columns>=0 && (!roots || columns<=INT64_MAX/roots),"归属人口坐标溢出");
+  for(auto value:{td,cn,cd}) {
+    TORCH_CHECK(value.device()==tn.device() && value.size(1)==width,"归属值字容量/设备不一致");
+  }
+  TORCH_CHECK(td.size(0)==roots && cn.size(0)==roots*columns && cd.size(0)==roots*columns,
+      "归属根/人口形状不一致");
+  TORCH_CHECK(enabled.device()==tn.device() && enabled.scalar_type()==torch::kBool &&
+      enabled.is_contiguous() && enabled.dim()==1 && enabled.size(0)==roots,"归属门须同设备bool[roots]");
+  // 规范化后的累计分母至多源分母乘积；为跨乘、scale12及除法保留额外字。
+  // 此界只分配工作区，不限制数值或人口。核中仍检查每次乘法/输出有效字数。
+  TORCH_CHECK(columns<=(INT64_MAX-32)/8,"归属工作区人口溢出");
+  int64_t factor=8*columns+32;
+  TORCH_CHECK(width<=(INT64_MAX/30-16)/factor,"归属工作区字索引溢出");
+  int64_t cap=factor*width+16;
+  capacity_check(roots,30*cap);
+  const c10::cuda::CUDAGuard guard(tn.device());
+  auto on=torch::zeros_like(cn),od=torch::zeros_like(cd);
+  auto fault=torch::zeros({roots},tn.options());
+  auto required=torch::zeros({roots},tn.options().dtype(torch::kInt64));
+  auto scratch=torch::empty({roots,30*cap},tn.options());
+  if(roots) public_gpu_ordered_attribution((uint32_t*)tn.data_ptr<int32_t>(),(uint32_t*)td.data_ptr<int32_t>(),ts.data_ptr<int8_t>(),
+      (uint32_t*)cn.data_ptr<int32_t>(),(uint32_t*)cd.data_ptr<int32_t>(),cs.data_ptr<int8_t>(),width,columns,
+      enabled.data_ptr<bool>(),(uint32_t*)on.data_ptr<int32_t>(),(uint32_t*)od.data_ptr<int32_t>(),fault.data_ptr<int32_t>(),
+      required.data_ptr<int64_t>(),(uint32_t*)scratch.data_ptr<int32_t>(),cap,roots,c10::cuda::getCurrentCUDAStream().stream());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {on,od,fault,required};
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("ordered_attribution", &ordered_attribution);
   m.def("sim_trade_key", &sim_trade_key);
   m.def("integer_op", &integer_op);
   m.def("project", &project);
