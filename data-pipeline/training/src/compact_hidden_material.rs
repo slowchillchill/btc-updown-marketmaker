@@ -713,6 +713,14 @@ mod tests {
         }
         assert_eq!(snapshot_refs,1);
         assert_eq!(read_all(&target,&source_root,1),read_all(&target,&source_root,64));
+        if let Ok(binary) = std::env::var("B_GPU_HIDDEN_CLI") {
+            let output = std::process::Command::new(binary).args(["--progress-interval-seconds","0","--inspect"])
+                .arg(&target).arg(&source_root).args(["1","1048576","1048576"]).output().unwrap();
+            assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+            assert!(output.stderr.is_empty());
+            let report:serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report["steps"],15);assert_eq!(report["references"],1);
+        }
         // 合法精确tick替换、重新压缩并更新成员hash，仍必须绑定原物化身份。
         let original_payload = fs::read(target.join(MEMBERS[0])).unwrap();
         let original_offsets = fs::read(target.join(MEMBERS[1])).unwrap();
