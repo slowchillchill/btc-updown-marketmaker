@@ -346,7 +346,14 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert values(capacity_candidate.current_entry_sequence)==[4] and int(capacity_candidate.applied.sum().cpu())==1
     assert capacity_candidate.rebate_contributions.capacity_required.cpu().tolist()==[2]
     assert capacity_candidate.fault.cpu().tolist()==[0]
-    capacity_candidate=Numbers.run_exact_batch(lambda:capacity_candidate.resized_contributions(2))
+    original_key=values(capacity_candidate.rebate_contributions.trades)[0]
+    original_amount=Fraction(values(capacity_candidate.rebate_contributions.amounts.numerator)[0],
+        values(capacity_candidate.rebate_contributions.amounts.denominator)[0])
+    capacity_candidate=Numbers.run_exact_batch(lambda:capacity_candidate.resized_contributions(2),initial_word_capacity=8)
+    assert capacity_candidate.rebate_contributions.trades.words.size(1)==8
+    assert values(capacity_candidate.rebate_contributions.trades)==[original_key,0]
+    assert [Fraction(n,d) for n,d in zip(values(capacity_candidate.rebate_contributions.amounts.numerator),
+        values(capacity_candidate.rebate_contributions.amounts.denominator))]==[original_amount,Fraction(0)]
     capacity_candidate,used=Numbers.run_exact_batch(lambda:capacity_candidate.apply_record(torch.tensor([contribution_rows[1]],device='cuda'),
         torch.tensor([True],device='cuda'),torch.tensor([10000],device='cuda'),torch.tensor([True],device='cuda')))
     assert used.cpu().tolist()==[True] and int(capacity_candidate.rebate_contributions.occupied.sum().cpu())==2

@@ -17,11 +17,14 @@ def choose(value,mask,other):
 
 
 def grow_integer(value,roots,old,new,fill=0):
-    words=value.words.reshape(roots,old,-1)
+    append=ExactInt.from_i64_tensor(torch.full((roots*(new-old),),fill,dtype=torch.int64,device=value.words.device))
+    width=max(value.words.size(1),append.words.size(1))
+    value=value.with_capacity(width)
+    append=append.with_capacity(width)
+    words=value.words.reshape(roots,old,width)
     signs=value.sign.reshape(roots,old)
     fault=value.fault.reshape(roots,old)
-    append=ExactInt.from_i64_tensor(torch.full((roots*(new-old),),fill,dtype=torch.int64,device=words.device)).with_capacity(words.size(2))
-    return ExactInt(torch.cat([words,append.words.reshape(roots,new-old,-1)],dim=1).flatten(0,1),
+    return ExactInt(torch.cat([words,append.words.reshape(roots,new-old,width)],dim=1).flatten(0,1),
         torch.cat([signs,append.sign.reshape(roots,new-old)],dim=1).flatten(),
         torch.cat([fault,append.fault.reshape(roots,new-old)],dim=1).flatten())
 
