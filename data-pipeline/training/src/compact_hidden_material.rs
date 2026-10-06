@@ -13,7 +13,7 @@ use data_pipeline_core::pm_reduction::{MaterializedPmReductionV1, PmReductionSte
     PmReductionReportV2, PmStepChangeV1, PreparedPmMessageV1};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs::{self, File},
-    io::{self, BufWriter, Read, Seek, SeekFrom, Write}, path::{Path, PathBuf},
+    io::{self, BufWriter, Read, Seek, SeekFrom, Write}, path::Path,
     sync::Arc, time::Duration};
 
 #[derive(Deserialize)]
@@ -545,17 +545,26 @@ mod tests {
         let mut reader = CompactHiddenMaterialReaderV1::open(root, source, rows, 1<<20, 1<<20, |_,_,_,_| {}).unwrap();
         let mut result = Vec::new();
         let mut snapshots = Vec::new();
+        let mut transitions = Vec::new();
         while let Some(bucket) = reader.next_bucket().unwrap() {
             for reference in &bucket.steps {
                 let step = reader.restore_step(reference).unwrap();
-                if let PmStepChangeV1::InitialSnapshot {bids, ..} = step.change {
-                    assert_eq!(bids.len(),1);
-                    snapshots.push(bids[0].quantity_shares.0.clone());
+                match step.change {
+                    PmStepChangeV1::InitialSnapshot {bids, ..} => {
+                        assert_eq!(bids.len(),1);
+                        snapshots.push(bids[0].quantity_shares.0.clone());
+                    }
+                    PmStepChangeV1::LevelChange {transition, ..} if transition.side==BookSide::Bid => {
+                        transitions.push((transition.quantity_before_shares.0,transition.quantity_after_shares.0));
+                    }
+                    _=>{}
                 }
             }
             result.push(bucket);
         }
-        assert_eq!(snapshots, vec!["10", "15"]);
+        assert_eq!(snapshots, vec!["10"]);
+        // 已初始化资产的epoch恢复沿原Reset+重校准转移，不伪造第二次InitialSnapshot。
+        assert_eq!(transitions,vec![("10".into(),"20".into()),("0".into(),"15".into())]);
         assert_eq!(result.iter().map(|bucket| bucket.steps.len()).sum::<usize>(),15);
         assert_eq!(result.iter().map(|bucket| bucket.reference_positions.len()).sum::<usize>(),1);
         assert!(matches!(result.last().unwrap().closure,ReplayIndexClosureV1::EndOfInput));
@@ -604,7 +613,7 @@ mod tests {
                 if matches!(step.change,CompactPmChangeV1::InitialSnapshotFromInput {..}) { snapshot_refs += 1; }
             }
         }
-        assert_eq!(snapshot_refs,2);
+        assert_eq!(snapshot_refs,1);
         assert_eq!(read_all(&target,&source_root,1),read_all(&target,&source_root,64));
         // 成员SHA不变仍不能通过被修改的自身计数；不重新归约业务。
         let mut bad:serde_json::Value = serde_json::from_reader(File::open(target.join("manifest.json")).unwrap()).unwrap();
