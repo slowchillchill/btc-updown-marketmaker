@@ -6,7 +6,8 @@ import sys
 import torch
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path[:0] = [str(ROOT/'model-train'), str(ROOT/'sim-system/gpu'), str(ROOT/'ledger/gpu')]
+sys.path[:0] = [str(ROOT/'model-train'), str(ROOT/'sim-system/gpu'), str(ROOT/'ledger/gpu'),
+    str(ROOT/'execution-normalization/gpu')]
 from queues import Numbers
 from position_cost import PositionCosts
 from trade_success import TradeSuccess
