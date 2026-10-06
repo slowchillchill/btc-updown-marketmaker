@@ -4,6 +4,7 @@
 //! 和不透明载荷。本 crate 不是通用存储层或查询层，也不解释排序键的业务语义。
 
 pub mod canonical_run;
+pub mod compact_public;
 mod dpt_gate_a_cli;
 pub mod finite_recording;
 pub mod finite_source_progress;
