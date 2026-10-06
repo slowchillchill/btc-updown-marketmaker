@@ -6,6 +6,8 @@
 from pathlib import Path
 from dataclasses import replace
 import sys
+import json
+import subprocess
 import torch
 from hidden_market import HiddenAssetState, rational_take, rational_select, zeros
 from queues import Numbers, ExactInt, ExactRational
@@ -17,7 +19,16 @@ QUALITY = {'fresh': 0, 'stale': 1, 'missing': 2, 'unknown_not_observed': 3, 'con
 
 
 class HiddenPmBlock:
-    def __init__(self, buckets, assets, slots, *, device='cuda'):
+    def __init__(self, buckets, assets, slots, *, source_binding, device='cuda'):
+        # JSON是新的可达输入边界。绑定原材料reader再次恢复内容，不能只信自有hash或ID。
+        command = [source_binding['binary'], '--progress-interval-seconds', '0', '--verify-gpu-pm-buckets',
+                   source_binding['hidden'], source_binding['public'], str(source_binding['rows']),
+                   str(source_binding['bytes']), str(source_binding['max_batch_bytes'])]
+        verified = subprocess.run(command, input=json.dumps(buckets).encode(), stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, check=False)
+        if verified.returncode:
+            raise ValueError('hidden冷批次与实际原材料不一致: ' + verified.stderr.decode())
+        self.source_verification = json.loads(verified.stdout)
         self.buckets = buckets  # 原完整身份、闭桶证明、参考和步骤均保留。
         self.assets = assets
         self.slots = slots
@@ -87,40 +98,32 @@ class HiddenPmBlock:
         self.decimals = Numbers.run_exact_batch(columns.rational)
         self.decimal_fault = self.decimals.fault | (~columns.present).to(torch.int32)
         self.prices = self._values(price_ids)
-        self.operations = []
-        assets_axis = torch.arange(len(assets), device=device)
+        self.operations = pending
+        self.asset_axis = torch.arange(len(assets), device=device)
+        self.price_fault = torch.zeros(len(slots), dtype=torch.int32, device=device)
+        events = []
+        snapshot_levels = []
         for entry in pending:
-            enabled = assets_axis == entry.get('asset', -1)
-            entry['enabled'] = enabled
-            # 冷归一化/身份关联，只构建共享设备源列；此阶段不推进业务状态。
-            if entry['tag'] == 'InitialSnapshot':
-                quantities = zeros(self.prices)
-                count = torch.zeros(len(slots), dtype=torch.int64, device=device)
-                missing = torch.zeros((), dtype=torch.int32, device=device)
-                for side, price, quantity in entry['levels']:
-                    target = self._level_mask(entry['asset'], side, price)
-                    missing = missing | (target.sum() != 1).to(torch.int32)
-                    count = count + target.to(torch.int64)
-                    quantities = rational_select(self._broadcast(quantity, len(slots)), target, quantities)
-                entry['shares'] = quantities
-                entry['source_fault'] = (count > 1).to(torch.int32)
-                entry['asset_source_fault'] = missing * enabled.to(torch.int32)
-                entry['tick_value'] = self._broadcast(entry['tick'], len(assets))
-            elif entry['tag'] == 'LevelChange':
-                entry['level_enabled'] = self._level_mask(entry['asset'], entry['side'], entry['price'])
-                entry['asset_source_fault'] = (entry['level_enabled'].sum() != 1).to(torch.int32) * enabled.to(torch.int32)
-                entry['before_value'] = self._broadcast(entry['before'], len(slots))
-                entry['after_value'] = self._broadcast(entry['after'], len(slots))
-            elif entry['tag'] == 'Tick':
-                entry['previous_value'] = self._broadcast(entry['previous'], len(assets))
-                entry['current_value'] = self._broadcast(entry['current'], len(assets))
-            self.operations.append(entry)
+            # 常驻只保存共享字典索引及源ragged盘口；不保存N×L mask或精确广播字张量。
+            entry['snapshot_start'] = len(snapshot_levels)
+            snapshot_levels.extend(entry.get('levels', []))
+            entry['snapshot_end'] = len(snapshot_levels)
+            events.append([entry.get('asset', -1), entry.get('side', -1), entry.get('price', 0),
+                entry.get('before', 0), entry.get('after', 0), entry.get('tick', 0),
+                entry.get('previous', 0), entry.get('current', 0), int(entry.get('previous_present', False)),
+                int(entry.get('resync', False)), entry['quality'], entry.get('previous_quality', 3),
+                entry.get('current_quality', 3), int(entry['required'])])
+        self.event_indices = torch.tensor(events, dtype=torch.int64, device=device).reshape(-1, 14)
+        self.snapshot_levels = torch.tensor(snapshot_levels, dtype=torch.int64, device=device).reshape(-1, 3)
 
     def _values(self, ids):
-        return rational_take(self.decimals, torch.tensor(ids, dtype=torch.int64, device=self.level_assets.device))
+        indices = ids if isinstance(ids, torch.Tensor) else torch.tensor(ids, dtype=torch.int64, device=self.level_assets.device)
+        return rational_take(self.decimals, indices.reshape(-1))
 
     def _broadcast(self, index, count):
-        return self._values([index] * count)
+        if isinstance(index, torch.Tensor):
+            return self._values(index.expand(count))
+        return self._values(torch.full((count,), index, dtype=torch.int64, device=self.level_assets.device))
 
     def _level_mask(self, asset, side, price):
         relation = Numbers.run_exact_batch(lambda: self.prices.compare(self._broadcast(price, len(self.slots))))
@@ -145,24 +148,41 @@ class HiddenPmBlock:
         from hidden_market import run_hidden_asset_batch
         entry = self.operations[index]
         tag = entry['tag']
+        row = self.event_indices[index]
+        enabled = self.asset_axis == row[0]
         if tag == 'InitialSnapshot':
-            quality = torch.full_like(state.quality, entry['quality'])
+            quantities = zeros(self.prices)
+            count = torch.zeros(len(self.slots), dtype=torch.int64, device=self.level_assets.device)
+            missing = torch.zeros((), dtype=torch.int32, device=self.level_assets.device)
+            for level_index in range(entry['snapshot_start'], entry['snapshot_end']):
+                side, price, quantity = self.snapshot_levels[level_index].unbind()
+                target = self._level_mask(row[0], side, price)
+                missing = missing | (target.sum() != 1).to(torch.int32)
+                count = count + target.to(torch.int64)
+                quantities = rational_select(self._broadcast(quantity, len(self.slots)), target, quantities)
+            quality = row[10].expand_as(state.quality)
             state, _ = run_hidden_asset_batch(state, lambda value: value.initial_snapshot(
-                entry['enabled'], entry['shares'], entry['tick_value'], quality))
-            source_fault = state._asset_fault(entry['source_fault'])
-            return replace(state, fault=state.fault | source_fault | entry['asset_source_fault'])
+                enabled, quantities, self._broadcast(row[5], len(self.assets)), quality))
+            source_fault = state._asset_fault((count > 1).to(torch.int32) | self.price_fault)
+            active = enabled & ~state.matching_closed
+            return replace(state, fault=state.fault | source_fault | missing * active.to(torch.int32)), None
         if tag == 'LevelChange':
-            state, _ = run_hidden_asset_batch(state, lambda value: value.level_transition(
-                entry['level_enabled'], entry['before_value'], entry['after_value'],
-                torch.full_like(entry['level_enabled'], entry['resync'])))
-            return replace(state, fault=state.fault | entry['asset_source_fault'])
+            level_enabled = self._level_mask(row[0], row[1], row[2])
+            state, effects = run_hidden_asset_batch(state, lambda value: value.level_transition(
+                level_enabled, self._broadcast(row[3], len(self.slots)), self._broadcast(row[4], len(self.slots)),
+                (row[9] != 0).expand_as(level_enabled)))
+            active = enabled & ~state.matching_closed
+            source_fault = state._asset_fault(self.price_fault) | (level_enabled.sum() != 1).to(torch.int32) * active.to(torch.int32)
+            state = replace(state, fault=state.fault | source_fault)
+            effects = replace(effects, fault=effects.fault | state.fault[state.level_assets])
+            return state, effects
         if tag == 'Tick':
-            return Numbers.run_exact_batch(lambda: state.tick_change(entry['enabled'], entry['previous_value'],
-                torch.full_like(entry['enabled'], entry['previous_present']), entry['current_value']))
+            return Numbers.run_exact_batch(lambda: state.tick_change(enabled, self._broadcast(row[6], len(self.assets)),
+                (row[8] != 0).expand_as(enabled), self._broadcast(row[7], len(self.assets)))), None
         if tag == 'Quality':
-            return Numbers.run_exact_batch(lambda: state.quality_boundary(entry['enabled'],
-                torch.full_like(state.quality, entry['previous_quality']), torch.full_like(state.quality, entry['current_quality']),
-                torch.full_like(entry['enabled'], entry['required'])))
+            return Numbers.run_exact_batch(lambda: state.quality_boundary(enabled,
+                row[11].expand_as(state.quality), row[12].expand_as(state.quality),
+                (row[13] != 0).expand_as(enabled))), None
         # 与原normalize_pm_step_v1及ExecutionStateV2::apply_market_event一致：
         # 选择/证据/公开成交/BBA不驱动隐藏FIFO，也不抬高公开可见性。
-        return state
+        return state, None

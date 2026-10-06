@@ -20,9 +20,31 @@ fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         eprintln!("{}",serde_json::json!({"stage":stage,"member":member,
             "completed":completed,"total":total,"unit":if member=="inputs" {"inputs"} else {"bytes"},"elapsed_seconds":started.elapsed().as_secs_f64()}));
     };
-    if args.len()==7 && (args[1]=="--inspect" || args[1]=="--gpu-pm-buckets") {
+    if args.len()==7 && (args[1]=="--inspect" || args[1]=="--gpu-pm-buckets" || args[1]=="--verify-gpu-pm-buckets") {
         let mut reader = CompactHiddenMaterialReaderV1::open_with_progress_interval(Path::new(&args[2]),Path::new(&args[3]),
             args[4].parse()?,args[5].parse()?,args[6].parse()?,interval,publication)?;
+        if args[1]=="--verify-gpu-pm-buckets" {
+            use std::io::Read;
+            let limit:u64 = args[6].parse()?;
+            let mut bytes = Vec::new();
+            std::io::stdin().lock().take(limit.checked_add(1).ok_or("批次字节容量溢出")?).read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > limit {return Err("冷批次超过显式字节容量；须调整资源或源块接口".into());}
+            let supplied:Vec<serde_json::Value> = serde_json::from_slice(&bytes)?;
+            let mut count = 0_u64;
+            for value in supplied {
+                let actual = data_pipeline_training::compact_hidden_gpu::next_compact_hidden_gpu_bucket_v1(&mut reader)?
+                    .ok_or("冷批次包含原材料以外的桶")?;
+                if serde_json::to_value(actual)? != value {return Err("冷批次内容/身份/市场/时间/闭桶与实际原材料不一致".into());}
+                count += 1;
+            }
+            if data_pipeline_training::compact_hidden_gpu::next_compact_hidden_gpu_bucket_v1(&mut reader)?.is_some() {
+                return Err("冷批次遗漏原材料完整桶".into());
+            }
+            println!("{}",serde_json::json!({"stage":"hidden_gpu_source_verified","buckets":count,
+                "material_manifest_sha256":reader.material_manifest_sha256,
+                "source_manifest_sha256":reader.manifest.source_manifest_sha256}));
+            return Ok(());
+        }
         if args[1]=="--gpu-pm-buckets" {
             use std::io::Write;
             let stdout = std::io::stdout();
@@ -63,7 +85,7 @@ fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         return Ok(());
     }
     if args.len()!=6 {
-        return Err("用法: dpt-compact-hidden [--progress-interval-seconds N (0关闭)] <source-compact> <target> <config.json> <locked-python> <same-commit-sort_worker.py>; --inspect 或 --gpu-pm-buckets <hidden> <source> <rows> <bytes> <max-packet-bytes>".into());
+        return Err("用法: dpt-compact-hidden [--progress-interval-seconds N (0关闭)] <source-compact> <target> <config.json> <locked-python> <same-commit-sort_worker.py>; --inspect、--gpu-pm-buckets 或 --verify-gpu-pm-buckets <hidden> <source> <rows> <bytes> <max-packet/batch-bytes>".into());
     }
     let value: serde_json::Value = serde_json::from_reader(File::open(&args[3])?)?;
     if value["sort"]["merge_workers"].as_u64().is_none() {

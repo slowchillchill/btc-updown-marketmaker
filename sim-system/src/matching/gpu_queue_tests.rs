@@ -22,7 +22,11 @@ pub(crate) struct HiddenQueueReference {
 }
 impl HiddenQueueReference {
     pub(crate) fn new() -> Self { Self {assets:Default::default()} }
-    pub(crate) fn apply(&mut self, event:&NormalizedMarketEventV2<'_>) {
+    pub(crate) fn insert_account(&mut self, token:&str, price:Decimal) {
+        self.assets.get_mut(token).unwrap().insert_account_buy_remainder(price,"account-order".into(),3_000_000);
+    }
+    pub(crate) fn apply(&mut self, event:&NormalizedMarketEventV2<'_>) -> Vec<Value> {
+        let mut maker = Vec::new();
         match event {
             NormalizedMarketEventV2::InitialL2Snapshot {asset,bids,asks,..}=>{
                 let bids:Vec<_>=bids.iter().map(|v|(v.price_pusd_per_share,micro_units_v1(v.quantity_shares).unwrap())).collect();
@@ -30,8 +34,10 @@ impl HiddenQueueReference {
                 assert!(self.assets.insert(asset.token_id.0.clone(),AssetQueueV2::from_initial_levels(&bids,&asks).unwrap()).is_none());
             },
             NormalizedMarketEventV2::LevelExecutionTransition {transition,price_pusd_per_share,quantity_before_shares,quantity_after_shares}=>{
-                self.assets.get_mut(&transition.asset.token_id.0).unwrap().apply_level_transition(transition.side,
+                let effects = self.assets.get_mut(&transition.asset.token_id.0).unwrap().apply_level_transition(transition.side,
                     *price_pusd_per_share,micro_units_v1(*quantity_before_shares).unwrap(),micro_units_v1(*quantity_after_shares).unwrap()).unwrap();
+                maker = effects.maker_depletions.into_iter().map(|effect| json!({"order":effect.platform_order_id,
+                    "base":effect.base_units.to_string()})).collect();
             },
             NormalizedMarketEventV2::QualityBoundary {boundary,resync} if *resync==ResyncQuality::Required=>{
                 if let QualityScopeV1::Asset(asset)=&boundary.scope {
@@ -40,6 +46,7 @@ impl HiddenQueueReference {
             },
             _=>{},
         }
+        maker
     }
     pub(crate) fn describe(&self,slots:&[(String,BookSide,Decimal)]) -> Vec<Value> {
         slots.iter().map(|(token,side,price)|self.assets.get(token)

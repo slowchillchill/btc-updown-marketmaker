@@ -18,14 +18,18 @@ fn gpu_compact_hidden_drives_exact_asset_state_and_queues() {
     let recovery = record(5, TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(
         row("epoch-b", 1, 21005, 22000, book("15")),
     )));
-    let at_end = record(6, TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(
-        row("epoch-b", 2, MARKET_END_AT, MARKET_END_AT + 1000,
+    let depletion = record(6, TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(
+        row("epoch-b", 2, 21006, 22000,
+            PolymarketOrderbookEvent::PriceChange {price_changes:vec![change(Some("13"))]}),
+    )));
+    let at_end = record(7, TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(
+        row("epoch-b", 3, MARKET_END_AT, MARKET_END_AT + 1000,
             PolymarketOrderbookEvent::PriceChange {price_changes:vec![change(Some("77"))]}),
     )));
     for input in [meta(0),pm(1,1,21000,book("10.0000007")),pm(2,2,21001,down),
         pm(3,3,21002,PolymarketOrderbookEvent::PriceChange {price_changes:vec![change(Some("20.0000007"))]}),
         pm(4,4,21003,PolymarketOrderbookEvent::PriceChange {price_changes:vec![change(Some("20.0000008"))]}),
-        recovery,at_end,end(7)] {
+        recovery,depletion,at_end,end(8)] {
         let prepared=prepare_public_ingress_v1(&public,&input,&BTreeMap::new(),&[]).unwrap();
         let applied=public.push_facts(&prepared).unwrap();
         writer.push_prepared(&input,&prepared,&applied).unwrap();
@@ -44,27 +48,35 @@ fn gpu_compact_hidden_drives_exact_asset_state_and_queues() {
     let mut reader=CompactHiddenMaterialReaderV1::open(&hidden,&source,1,1<<20,1<<20,|_,_,_,_| {}).unwrap();
     let slots:Vec<_>=assets.iter().flat_map(|a|[(a.token_id.0.clone(),BookSide::Bid,"0.5".parse().unwrap()),
         (a.token_id.0.clone(),BookSide::Ask,"0.6".parse().unwrap())]).collect();
-    let mut buckets=Vec::new();let mut expected=Vec::new();
+    let mut buckets=Vec::new();let mut expected=Vec::new();let mut insertion_index=None;
     while let Some(bucket)=next_compact_hidden_gpu_bucket_v1(&mut reader).unwrap() {
         for (market,step) in &bucket.steps {
+            let mut maker = Vec::new();
             if let Some(normalized)=crate::market::normalize_pm_step_v1(step).unwrap() {
                 let header=MarketEventHeaderV1 {identity:&step.derived_id.0,market,time:&step.dependency_time,quality:&step.quality};
                 original.apply_admitted_header(&header,&normalized,bucket.bucket.bucket_time_utc_ms,MARKET_END_AT).unwrap();
                 // 原ExecutionStateV2在at>=end先关matching，保持已存在队列。
-                if bucket.bucket.bucket_time_utc_ms < MARKET_END_AT {queues.apply(&normalized);}
+                if bucket.bucket.bucket_time_utc_ms < MARKET_END_AT {maker = queues.apply(&normalized);}
+            }
+            if matches!(&step.change,PmStepChangeV1::InitialSnapshot {asset,..} if asset.token_id.0==UP_TOKEN_ID) {
+                // 原有效GTC余量的生产插入点；当前测试不冒充整订单接纳或经济反馈。
+                queues.insert_account(UP_TOKEN_ID,"0.5".parse().unwrap());
+                insertion_index = Some(expected.len());
             }
             let states:Vec<_>=assets.iter().map(|asset|{
                 let (initialized,tick,quality)=original.asset_state_for_gpu_tests(CONDITION_ID,&asset.token_id.0);
                 serde_json::json!({"initialized":initialized,"tick":tick.map(|v|v.to_string()),"quality":quality})
             }).collect();
             let shares:Vec<_>=slots.iter().map(|(token,side,price)|original.external_quantity_for_tests(CONDITION_ID,token,*side,*price).unwrap().to_string()).collect();
-            expected.push(serde_json::json!({"assets":states,"shares":shares,"queues":queues.describe(&slots)}));
+            expected.push(serde_json::json!({"assets":states,"shares":shares,"queues":queues.describe(&slots),"maker":maker}));
         }
         buckets.push(bucket);
     }
     assert!(buckets.iter().flat_map(|b|&b.steps).any(|(_,s)|matches!(s.change,PmStepChangeV1::InitialSnapshot {ref bids,ref asks,..} if bids.is_empty()&&asks.is_empty())));
     let input=serde_json::json!({"assets":assets,"slots":slots.iter().map(|(token,side,p)|serde_json::json!([token,side,p.to_string()])).collect::<Vec<_>>(),
-        "buckets":buckets,"expected":expected});
+        "buckets":buckets,"expected":expected,"insertion_index":insertion_index,
+        "source_binding":{"binary":std::env::var("B_GPU_HIDDEN_CLI").unwrap(),"hidden":hidden,"public":source,
+            "rows":1,"bytes":1048576,"max_batch_bytes":1048576}});
     let mut child=std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
         .arg(std::env::var("B_GPU_HIDDEN_ASSET_VALIDATOR").unwrap()).stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
