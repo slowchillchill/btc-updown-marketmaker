@@ -35,17 +35,21 @@ def expected_semantic(record):
         if 'Existing' in transition:
             transition=transition['Existing']
         name,fields=next(iter(transition.items()))
-        tag={'OrderAcceptedEncumbranceApplied':0,'FillFinalityEconomicApplied':6,'TakerRebateAccrualApplied':10}[name]
-        identity=fields['order_identity' if tag==0 else 'trade_identity']
-        entity=json.loads(identity.split(':',1)[1])[-1]
-        sequence=int(next(iter(next(iter(entity.values())).values())).removeprefix('sim-'))
+        tag={'OrderAcceptedEncumbranceApplied':0,'FillFinalityEconomicApplied':6,'TakerRebateAccrualApplied':10,
+            'MakerRebateDayFinalized':11,'TakerRebateDayFinalized':12,'MakerRebatePaid':13,'TakerRebatePaid':14}[name]
+        if tag>=11:
+            sequence=fields['attribution_day_utc_ms']
+        else:
+            identity=fields['order_identity' if tag==0 else 'trade_identity']
+            entity=json.loads(identity.split(':',1)[1])[-1]
+            sequence=int(next(iter(next(iter(entity.values())).values())).removeprefix('sim-'))
         balance=value['balance_delta']
         if 'existing' in balance:
             balance=balance['existing']
         names=['cash_pusd_delta','available_pusd_delta','principal_encumbrance_pusd_delta','immediate_taker_fee_encumbrance_pusd_delta',
             'maker_rebate_receivable_pusd_delta','taker_rebate_receivable_pusd_delta','maker_rebate_locked_remainder_pusd_delta','taker_rebate_locked_remainder_pusd_delta']
         outcomes=balance['outcome_balance_deltas']
-        return encode_fields([zero,zero,torch.tensor([value['economic_effective_at_utc_ms']],device='cuda'),
+        return encode_fields([zero,torch.full_like(zero,-1) if value['condition_id'] is None else zero,torch.tensor([value['economic_effective_at_utc_ms']],device='cuda'),
             torch.full_like(zero,tag),integers([sequence]),torch.full_like(zero,fields.get('path_ordinal',0)),
             *[rational([balance[name]]) for name in names],torch.tensor([bool(outcomes)],device='cuda'),zero,
             rational([outcomes[0]['balance_shares_delta'] if outcomes else '0']),rational(['0']),rational(['0'])])
@@ -72,6 +76,19 @@ def expected_semantic(record):
             integers([units(value['measurement']['Base']['open_base_quantity_shares'])]),
             torch.tensor([value['effective_processing_at_utc_ms']],device='cuda')])
     if kind=='SettlementLifecycleV2':
+        if 'DayFinalized' in value:
+            from fields import IntegerList
+            value=value['DayFinalized']
+            refs=value['contribution_refs']
+            return encode_fields([zero,torch.full_like(zero,{'Maker':0,'Taker':1}[value['kind']]),
+                torch.tensor([value['attribution_day_start_utc_ms']],device='cuda'),rational([value['accrued_pusd']]),
+                rational([value['payable_pusd']]),rational([value['locked_remainder_pusd']]),
+                IntegerList(integers([entity_sequence(ref,'Trade') for ref in refs]),torch.ones((1,len(refs)),dtype=torch.bool,device='cuda'))])
+        if 'Payment' in value:
+            value=value['Payment']
+            kind=torch.full_like(zero,{'Maker':0,'Taker':1}[value['kind']])
+            day=torch.tensor([value['attribution_day_start_utc_ms']],device='cuda')
+            return encode_fields([zero,kind,day,zero,torch.full_like(zero,12),kind,day,rational([value['paid_pusd']])])
         value=value['Contribution']
         identity=json.loads(value['trade_identity'].split(':',1)[1])[-1]
         sequence=int(identity['Trade']['source_trade_id'].removeprefix('sim-'))

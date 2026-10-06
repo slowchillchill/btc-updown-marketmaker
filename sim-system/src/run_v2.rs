@@ -7385,6 +7385,16 @@ mod tests {
         finality_policy: Arc<TradeFinalityPolicyV2>,
         make_port: impl FnOnce(&std::path::Path,&mut RunOpenedV2) -> Box<dyn BusinessProjectionPortV2>,
     ) -> (tempfile::TempDir, SimRunActorV2) {
+        active_market_actor_with_projection_and_cash(role,run_id,finality_policy,make_port,"10").await
+    }
+
+    async fn active_market_actor_with_projection_and_cash(
+        role: SimCallerRoleV1,
+        run_id: &str,
+        finality_policy: Arc<TradeFinalityPolicyV2>,
+        make_port: impl FnOnce(&std::path::Path,&mut RunOpenedV2) -> Box<dyn BusinessProjectionPortV2>,
+        opening_cash: &str,
+    ) -> (tempfile::TempDir, SimRunActorV2) {
         let directory = tempfile::tempdir().expect("创建市场事件测试目录");
         let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
         let rule_snapshot = successful_snapshot_v3_for_sim_tests().await;
@@ -7414,6 +7424,7 @@ mod tests {
         .expect("创建市场事件测试运行根");
         let mut session_spec = spec(run_id, &format!("create-{run_id}"));
         session_spec.caller_role = role;
+        session_spec.initial_account_state.available_pusd=ExactDecimal(opening_cash.to_owned());
         actor
             .create_session(session_spec)
             .expect("创建市场事件测试会话");
