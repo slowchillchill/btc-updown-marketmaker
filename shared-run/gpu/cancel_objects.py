@@ -45,7 +45,7 @@ class CancelObjectsRead:
 
 
 def _sort(order, key):
-    return order.gather(1,key.gather(1,order).argsort(1,stable=True))
+    return order.gather(1,key.gather(1,order).argsort(dim=1,stable=True))
 
 
 def _sort_u64(order, value, roots, width):
