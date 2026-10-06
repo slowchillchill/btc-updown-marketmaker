@@ -95,15 +95,22 @@ def main():
     lifecycle=[]
     direct=[]
     emitter=FeedbackEmitter.open(1)
+    sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'execution-normalization/gpu'))
+    from source_order import map_source_ordinals
+    source_ordinal_checks=0
+    actual_inputs={case['input']['source_watermark']['projection_batch_sequence']:case['input']
+        for case in source['normalization_reference'] if case['name']=='actual_source'}
     for batch in source['feedback_batches']:
         drafts=[]
-        for category in ['orders','trades','settlements']:
+        for category_number,category in enumerate(['orders','trades','settlements'],start=1):
             for row in batch[category]:
-                metadata=row.get('feedback',row)['metadata']
+                feedback=row.get('feedback',row)
+                metadata=feedback['metadata']
                 lifecycle.append(metadata)
-                drafts.append((False,metadata))
+                delta=feedback.get('account_delta') if category=='trades' else next(iter(feedback['event'].values())).get('account_delta')
+                drafts.append((False,metadata,category_number,1+int(delta is not None)))
         direct.extend(row['metadata'] for row in batch['direct'])
-        drafts.extend((True,row['metadata']) for row in batch['direct'])
+        drafts.extend((True,row['metadata'],0,1) for row in batch['direct'])
         drafts.sort(key=lambda row:row[1]['private_feedback_sequence'])
         active=torch.ones((1,len(drafts)),dtype=torch.bool,device='cuda')
         is_direct=torch.tensor([[row[0] for row in drafts]],dtype=torch.bool,device='cuda')
@@ -118,6 +125,21 @@ def main():
         assert values(emission.batch_sequences)==[batch['batch_sequence']]*len(drafts)
         assert emission.received_at.cpu().tolist()==[[row[1]['response_received_at_utc_ms'] if row[0] else
             row[1]['feedback_received_at_utc_ms'] for row in drafts]]
+        mapped=map_source_ordinals(active,
+            torch.tensor([[row[2] for row in drafts]],dtype=torch.int64,device='cuda'),
+            torch.tensor([[row[3] for row in drafts]],dtype=torch.int64,device='cuda'),
+            torch.zeros_like(platform,dtype=torch.int32))
+        by_private={}
+        for evidence in actual_inputs[batch['batch_sequence']]['evidence']:
+            record=evidence['source_record']
+            if isinstance(record,dict):
+                record=next(iter(record.values()))
+                if 'private_feedback_sequence' in record:
+                    by_private.setdefault(record['private_feedback_sequence'],[]).append(evidence['source_ordinal'])
+        assert mapped.first_ordinals.cpu().tolist()==[[min(by_private[row[1]['private_feedback_sequence']]) for row in drafts]]
+        assert mapped.record_counts.cpu().tolist()==[[len(by_private[row[1]['private_feedback_sequence']]) for row in drafts]]
+        assert not mapped.fault.any().cpu().item()
+        source_ordinal_checks+=len(drafts)
     sequence=integers([row['private_feedback_sequence'] for row in lifecycle])
     roots=torch.zeros(len(lifecycle),dtype=torch.int64,device='cuda')
     sampled=sampler.sample_feedback(roots,sequence)
@@ -239,6 +261,7 @@ def main():
         'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
         'original_NOE_records':len(source['noe_records']),'actual_lifecycle_device_delay_checks':len(lifecycle),
         'actual_device_private_batch_numbering_checked':True,
+        'actual_device_source_ordinal_checks':source_ordinal_checks,
         'actual_NOE_device_delivery_order_checked':True,
         'original_Ledger_reference_checked':source['ledger_projection'] is not None,
         'Ledger_platform_balance_and_predecessor_candidate_checked':platform_checked,
