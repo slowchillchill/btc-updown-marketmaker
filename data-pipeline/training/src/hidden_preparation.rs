@@ -77,6 +77,58 @@ pub struct HiddenPreparationV1 {
     pub derived_path: PathBuf,
     pub index_path: PathBuf,
 }
+/// 独立hidden状态，共享原归约与物化算法；不依赖旧recording的耐久前缀。
+/// 调用方先按原epoch rank/source time/admission/canonical总序供给消息。
+pub struct HiddenOrderedReducerV1 {
+    states: BTreeMap<String, PmOwnedStateV1<PreparedPmEvidenceV1<SourceEvidenceRefV3>>>,
+    consumer_stream_id: String,
+    failed: bool,
+}
+impl HiddenOrderedReducerV1 {
+    pub fn new(contexts: Vec<PmMarketContextV1>, consumer_stream_id: String) -> RecordingResult<Self> {
+        let mut states = BTreeMap::new();
+        for context in contexts {
+            let condition = context.market.condition_id.0.clone();
+            states.insert(
+                condition,
+                PmOwnedStateV1::new(PmMarketContextV1 {
+                    market: context.market,
+                    assets: context.assets,
+                    identity_source_evidence: context
+                        .identity_source_evidence
+                        .into_iter()
+                        .map(|e| PreparedPmEvidenceV1::prepare(e, None))
+                        .collect::<Result<_, _>>()?,
+                    canonical_rule_version: context.canonical_rule_version,
+                }),
+            );
+        }
+        Ok(Self { states, consumer_stream_id, failed: false })
+    }
+
+    /// 失败可能发生在状态应用后的物化阶段；不得从部分归约继续消费。
+    pub fn reduce<'m>(
+        &mut self,
+        prepared: &'m PreparedPmMessageV1,
+        canonical_position: u64,
+    ) -> RecordingResult<MaterializedPmReductionV1<'m>> {
+        if self.failed {
+            return Err(io::Error::other("失败的hidden归约器不能继续消费").into());
+        }
+        self.failed = true;
+        let state = self.states
+            .get_mut(&prepared.message().market.condition_id.0)
+            .ok_or_else(|| io::Error::other("hidden消息缺原固定身份及初始tick上下文"))?;
+        let result = compute_pm_message_steps_v1(
+            state.context(), state, prepared, &self.consumer_stream_id, canonical_position, false,
+        )?;
+        state.apply(&result);
+        let material = materialize_pm_step_identity_v1(result)?;
+        self.failed = false;
+        Ok(material)
+    }
+}
+
 /// 参数消费公开核心，不与隐藏数量状态并存；上下文仅保留原固定身份及初始 tick。
 pub fn prepare_hidden_v1(
     public: PublicObservationCoreV1,
@@ -182,23 +234,7 @@ pub fn prepare_hidden_with_progress_v1(
         config.sort.batch_rows,
         config.sort.max_run_bytes,
     )?;
-    let mut states = BTreeMap::new();
-    for context in contexts {
-        let condition = context.market.condition_id.0.clone();
-        states.insert(
-            condition,
-            PmOwnedStateV1::new(PmMarketContextV1 {
-                market: context.market,
-                assets: context.assets,
-                identity_source_evidence: context
-                    .identity_source_evidence
-                    .into_iter()
-                    .map(|e| PreparedPmEvidenceV1::prepare(e, None))
-                    .collect::<Result<_, _>>()?,
-                canonical_rule_version: context.canonical_rule_version,
-            }),
-        );
-    }
+    let mut reducer = HiddenOrderedReducerV1::new(contexts, consumer_stream_id.clone())?;
     let mut derived = SequentialCaptureWriter::create(
         "hidden_derived_v1",
         &root.join("derived"),
@@ -213,19 +249,7 @@ pub fn prepare_hidden_with_progress_v1(
         let (canonical_position, message): (u64, CanonicalPmMessageV1) =
             serde_json::from_slice(row.payload())?;
         let prepared = PreparedPmMessageV1::prepare(message)?;
-        let state = states
-            .get_mut(&prepared.message().market.condition_id.0)
-            .unwrap();
-        let result = compute_pm_message_steps_v1(
-            state.context(),
-            state,
-            &prepared,
-            &consumer_stream_id,
-            canonical_position,
-            false,
-        )?;
-        state.apply(&result);
-        let material = materialize_pm_step_identity_v1(result)?;
+        let material = reducer.reduce(&prepared, canonical_position)?;
         notify(progress, Notice::HiddenMessageReduced);
         for (step, binding) in material.reduction.steps.into_iter().zip(material.bindings) {
             let reference = HiddenDerivedStepRefV1 {
@@ -278,7 +302,7 @@ pub fn prepare_hidden_with_progress_v1(
             }
         }
     }
-    drop(states);
+    drop(reducer);
     notify(progress, Notice::Stage(Stage::HiddenFinalize));
     let derived_path = derived.close_segment()?;
     let (index_path, index_metrics) = index.finish_single_file(None)?;
