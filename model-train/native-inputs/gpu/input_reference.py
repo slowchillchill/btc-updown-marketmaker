@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 import torch
 from prepare import _numbers
-from projection import decimal_value, t5
+from input_projection import decimal_value, t5
 
 
 @dataclass(frozen=True)

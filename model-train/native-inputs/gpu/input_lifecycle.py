@@ -2,7 +2,7 @@
 from dataclasses import dataclass
 import torch
 from prepare import _numbers
-from projection import decimal_value, price_value
+from input_projection import decimal_value, price_value
 from input_events import time_envelope
 
 

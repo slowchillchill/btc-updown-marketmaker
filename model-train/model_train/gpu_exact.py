@@ -9,11 +9,12 @@ import sys
 def _numbers():
     path = Path(__file__).resolve().parents[2] / 'contracts/gpu/numbers.py'
     name = 'public_gpu_numbers'
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
 
 
 ExactInt = _numbers().ExactInt
