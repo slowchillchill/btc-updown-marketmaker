@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # B路线已授权的有限纵向工程验证；只在AutoDL数据盘运行。
 set -euo pipefail
-case_name=${1:?传入 trade-read、maker-read 或 failed-fill}
+case_name=${1:?传入 trade-read、maker-read、registry-reference 或 failed-fill}
 artifact_dir=${2:?传入数据盘上的新证据目录}
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 case "$repo_root" in /root/autodl-tmp/*) ;; *) echo 'B计算必须在AutoDL数据盘' >&2; exit 2 ;; esac
@@ -32,6 +32,16 @@ case "$case_name" in
     trade-read)
         run_test gpu_legal_multiask tests.log
         run_test gpu_actual_maker_mature_day_preserves_noe_batch_and_continuous_ledger maker-day.log
+        ;;
+    registry-reference)
+        export B_GPU_REGISTRY_REFERENCE_DIR="$artifact_dir"
+        command=(cargo test -p shared-run --test continuous --locked --offline
+            v4_real_partial_cancel_and_zero_target_completion_preserve_economics -- --nocapture)
+        printf '%q ' "${command[@]}" > "$artifact_dir/commands.txt"
+        printf '\n' >> "$artifact_dir/commands.txt"
+        echo "stage=original_SharedExecutionV2_ActionBeforeReadV2 commit=$(git rev-parse HEAD)"
+        "${command[@]}" > "$artifact_dir/registry-reference.log" 2>&1
+        tail -4 "$artifact_dir/registry-reference.log"
         ;;
     maker-read)
         run_test gpu_actual_maker_mature_day_preserves_noe_batch_and_continuous_ledger maker-day.log
