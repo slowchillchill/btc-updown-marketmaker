@@ -2720,6 +2720,7 @@ async fn actual_partial_fak_final_success_before_economics_drives_gap_without_su
 async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() {
     use contracts::ExecutionReadValueV1::Known;
     for family in ["single", "paired", "market"] {
+        let mut gpu_reference=Vec::new();
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("dpt");
         let (core, times) = recorded_trading_window(&root, "100", None, 60_000, true);
@@ -2766,11 +2767,13 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
             .unwrap()
             .unwrap();
         let pending = shared.action_before(&mut driver).unwrap().unwrap();
+        gpu_reference.push(gpu_registry_frozen_reference("empty_cancel_pending",&pending,shared.registry()));
         assert_eq!(pending.cancellation_requests(None).pending_count, Known(1));
         for _ in 2..5 {
             driver.next_group().unwrap().unwrap();
         }
         let empty = shared.action_before(&mut driver).unwrap().unwrap();
+        gpu_reference.push(gpu_registry_frozen_reference("empty_cancel_completed",&empty,shared.registry()));
         let response = empty.cancellation_requests(None);
         assert_eq!(response.pending_count, Known(0));
         assert_eq!(response.response_counts, [Known(0), Known(0), Known(0)]);
@@ -2794,6 +2797,7 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
             driver.next_group().unwrap().unwrap();
         }
         let before = shared.action_before(&mut driver).unwrap().unwrap();
+        gpu_reference.push(gpu_registry_frozen_reference("before_cancel",&before,shared.registry()));
         let orders: Vec<_> = before.orders().collect();
         assert_eq!(orders.len(), 2);
         assert_eq!(platform_id(orders[0].order_identity), "sim-1");
@@ -2831,6 +2835,7 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
             .unwrap();
         assert_eq!(receipt, duplicate);
         let pending = shared.action_before(&mut driver).unwrap().unwrap();
+        gpu_reference.push(gpu_registry_frozen_reference("cancel_pending",&pending,shared.registry()));
         assert_eq!(pending.cancellation_requests(None).pending_count, Known(1));
         let mut checked = false;
         while driver.next_group().unwrap().is_some() {
@@ -2839,6 +2844,7 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
             if requests.response_counts[1] != Known(1) {
                 continue;
             }
+            gpu_reference.push(gpu_registry_frozen_reference("partial_cancel_result",&view,shared.registry()));
             assert_eq!(requests.pending_count, Known(0));
             assert_eq!(
                 requests.response_counts,
@@ -2906,6 +2912,7 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
                 Known(0),
                 "同市场不同ID不相交"
             );
+            gpu_reference.push(gpu_registry_frozen_reference("overlapping_cancel_pending",&overlapping,shared.registry()));
             checked = true;
             break;
         }
@@ -2945,6 +2952,12 @@ async fn v4_real_partial_cancel_and_zero_target_completion_preserve_economics() 
             }
         }
         assert!(closed && completed);
+        if let Ok(artifact)=std::env::var("B_GPU_REGISTRY_REFERENCE_DIR") {
+            let root=std::path::PathBuf::from(artifact);
+            assert!(root.starts_with("/root/autodl-tmp/"),"B材料位于数据盘");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::write(root.join(format!("original-registry-{family}.json")),serde_json::to_vec_pretty(&gpu_reference).unwrap()).unwrap();
+        }
 
         let before_reopen = shared.ledger().projection_v2();
         let cash_before_reopen = shared.ledger().economic_read().unwrap().cash().clone();
@@ -3354,4 +3367,40 @@ fn v4_real_opening_stable_ledger_reopen() {
         LedgerMemoryApplyOutcomeV1::Applied(LedgerApplyOutcomeV1::AlreadyApplied { .. })
     ));
     assert_eq!(restored.projection_v2(), before);
+}
+
+// 原公共冻结读面；只在实际shared.apply_closed/action_before之后导出。
+// 非模型热输入producer，不把fixture的post_only=true授权给B Actor。
+fn gpu_registry_frozen_reference(stage:&str,view:&ActionBeforeReadV2,registry:&SharedExecutionRegistryV2)->serde_json::Value {
+    fn record(value:&execution_normalization::NoeConsumedRecordRefV2)->serde_json::Value {
+        serde_json::json!({"record":value.record(),"position":value.position(),"visibility":value.visibility()})
+    }
+    let orders=view.orders().map(|order|serde_json::json!({
+        "identity":order.order_identity,"condition":order.condition_id,"token":order.token_id,
+        "base_applicable":order.base_quantity_applicability,"matched":order.matched_shares,
+        "active":order.active_unfilled_shares,"cancellable":order.cancellable,
+        "origin":order.origin.map(|origin|serde_json::json!({"request":origin.intent.global_request_id(),"item":origin.batch_item_ordinal})),
+        "accepted":order.accepted.map(record),"formed":order.formed.map(record),
+        "latest_lifecycle":order.latest_lifecycle.map(record),"latest_direct":order.latest_direct_feedback.map(record),
+        "latest_cancel":order.latest_cancel_feedback.map(record),
+        "trades":registry.order_trades(order.order_identity).map(record).collect::<Vec<_>>(),
+    })).collect::<Vec<_>>();
+    let commitments=view.commitments().map(|commitment|serde_json::json!({
+        "request":commitment.origin.intent.global_request_id(),"item":commitment.origin.batch_item_ordinal,
+        "order":commitment.order_identity,"remaining":commitment.remaining_target_shares,
+    })).collect::<Vec<_>>();
+    let funds=view.request_funds().map(|funds|serde_json::json!({"request":funds.request_identity,
+        "condition":funds.condition_id,"state":funds.reservation_state,"principal":funds.principal_pusd,
+        "fee":funds.immediate_fee_pusd,"last_sequence":funds.last_ledger_entry_seq})).collect::<Vec<_>>();
+    let requests=view.cancellation_requests(None);
+    let latest=match requests.latest_response {
+        ExecutionReadValueV1::Known(value)=>serde_json::json!({"Known":value.map(record)}),
+        ExecutionReadValueV1::Unavailable=>serde_json::json!("Unavailable"),
+        ExecutionReadValueV1::NotApplicable=>serde_json::json!("NotApplicable"),
+    };
+    serde_json::json!({"stage":stage,"logical_at":view.cutoff().decision_time().logical_time_utc_ms(),
+        "orders":orders,"commitments":commitments,"request_funds":funds,
+        "pending_noe_records":view.pending_noe_record_count(),"ledger":view.ledger(),"economics":view.economics(),
+        "cancel_pending":requests.pending_count,"cancel_response_counts":requests.response_counts,"cancel_latest":latest,
+        "source":"original_SharedExecutionV2_ActionBeforeReadV2","post_only_fixture_not_B_Actor_domain":true})
 }
