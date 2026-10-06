@@ -135,9 +135,20 @@ fn gpu_fifo_preserves_segment_order_taker_debt_and_resync() {
         cross_plans.push(json!({"budget":budget.to_string(),"matched":matched.to_string(),"used":used.to_string(),
             "initial":initial,"slices":slices,"applied":cross_prices.iter().map(|price|describe(&source,BookSide::Ask,*price)).collect::<Vec<_>>() }));
     }
+    let mut floor_sums=Vec::new();
+    for (n,m,a,b) in [
+        (BigUint::zero(),BigUint::from(7_u8),BigUint::from(9_u8),BigUint::from(17_u8)),
+        (BigUint::from(10_u8),BigUint::from(7_u8),BigUint::from(9_u8),BigUint::from(17_u8)),
+        ((BigUint::one()<<160_usize)+BigUint::one(),BigUint::from(3_u8),
+            (BigUint::one()<<130_usize)+BigUint::from(7_u8),BigUint::from(17_u8)),
+        (BigUint::from(101_u8),(BigUint::one()<<160_usize)+BigUint::one(),BigUint::from(23_u8),BigUint::from(41_u8)),
+    ] {
+        let expected=floor_sum_biguint_v1(n.clone(),m.clone(),a.clone(),b.clone()).unwrap();
+        floor_sums.push(json!({"n":n.to_string(),"m":m.to_string(),"a":a.to_string(),"b":b.to_string(),"expected":expected.to_string()}));
+    }
     let input=json!({"checkpoints":checkpoints,"maker_depletion":"1000000","taker_quote":"2000000",
         "multi_plan":{"initial":multi_initial,"slices":slices,"applied":multi_applied,"echo":multi_echo},
-        "quote_plans":quote_plans,"cross_quote_plans":cross_plans});
+        "quote_plans":quote_plans,"cross_quote_plans":cross_plans,"floor_sums":floor_sums});
     let python=std::env::var("B_GPU_PYTHON").unwrap();
     let script=std::env::var("B_GPU_FIFO_VALIDATOR").unwrap();
     let mut child=std::process::Command::new(python).arg(script).stdin(std::process::Stdio::piped())

@@ -101,6 +101,29 @@ torch::Tensor gcd(torch::Tensor a, torch::Tensor b) {
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
 }
+std::vector<torch::Tensor> floor_sum(torch::Tensor n, torch::Tensor m,
+                                     torch::Tensor a, torch::Tensor b) {
+  for (const auto& value : {n,m,a,b}) {
+    words_check(value);
+    TORCH_CHECK(value.device() == n.device() && value.size(0) == n.size(0), "floor_sum批次/设备不一致");
+  }
+  const c10::cuda::CUDAGuard guard(n.device());
+  int64_t width = std::max({n.size(1),m.size(1),a.size(1),b.size(1)});
+  TORCH_CHECK(width <= (INT64_MAX/10-4)/3, "floor_sum临时字索引溢出");
+  int64_t rows = n.size(0), cap = 3*width+4;
+  capacity_check(rows,10*cap);
+  auto out = torch::empty({rows,width},n.options());
+  auto fault = torch::empty({rows},n.options());
+  auto required = torch::empty({rows},n.options().dtype(torch::kInt64));
+  auto work = torch::empty({rows,10*cap},n.options());
+  if (rows) public_gpu_floor_sum((uint32_t*)n.data_ptr<int32_t>(),n.size(1),
+      (uint32_t*)m.data_ptr<int32_t>(),m.size(1),(uint32_t*)a.data_ptr<int32_t>(),a.size(1),
+      (uint32_t*)b.data_ptr<int32_t>(),b.size(1),(uint32_t*)out.data_ptr<int32_t>(),width,
+      fault.data_ptr<int32_t>(),(uint32_t*)work.data_ptr<int32_t>(),cap,
+      required.data_ptr<int64_t>(),rows,c10::cuda::getCurrentCUDAStream().stream());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {out,fault,required};
+}
 std::vector<torch::Tensor> decimal(torch::Tensor bytes, torch::Tensor offsets,
                                   torch::Tensor present) {
   TORCH_CHECK(bytes.is_cuda() && bytes.scalar_type() == torch::kUInt8
@@ -155,6 +178,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("project", &project);
   m.def("index_probe", &index_probe);
   m.def("gcd", &gcd);
+  m.def("floor_sum", &floor_sum);
   m.def("decimal", &decimal);
   m.def("prefix_lookup", &prefix_lookup);
 }

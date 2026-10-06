@@ -126,6 +126,21 @@ class ExactInt:
         sign = words.any(dim=1).to(torch.int8)
         return ExactInt(words, sign, self.fault | other.fault)
 
+    def floor_sum(self, modulus, slope, offset):
+        """Σ floor((slope*i+offset)/modulus), 0<=i<self；非负，零模数为fault。
+
+        原Euclid循环在设备运行。输出字容量与其它精确运算同一纯候选协调重试。
+        """
+        state = _batch.get()
+        original = (self, modulus, slope, offset)
+        inputs = tuple(value.with_capacity(state['capacity']) if state else value for value in original)
+        words, fault, required = public_extension().floor_sum(*(value.words for value in inputs))
+        if state is not None and required.numel():
+            state['requests'].append(required)
+        for value in original:
+            fault = fault | value.fault | (value.sign < 0).to(torch.int32)
+        return ExactInt(words, words.any(dim=1).to(torch.int8), fault)
+
     def abs(self):
         return ExactInt(self.words, self.sign.abs(), self.fault)
 

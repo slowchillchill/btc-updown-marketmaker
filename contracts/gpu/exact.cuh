@@ -110,3 +110,6 @@ extern "C" void public_gpu_index_probe(const int64_t*, const uint32_t*, int64_t*
     int64_t, cudaStream_t);
 extern "C" void public_gpu_gcd(const uint32_t*, int64_t, const uint32_t*,
     int64_t, uint32_t*, uint32_t*, int64_t, int64_t, cudaStream_t);
+extern "C" void public_gpu_floor_sum(const uint32_t*, int64_t, const uint32_t*, int64_t,
+    const uint32_t*, int64_t, const uint32_t*, int64_t, uint32_t*, int64_t,
+    int32_t*, uint32_t*, int64_t, int64_t*, int64_t, cudaStream_t);

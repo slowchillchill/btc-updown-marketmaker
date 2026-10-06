@@ -143,13 +143,24 @@ def main():
         result=Numbers.run_exact_batch(lambda:apply_asset_quote(cross,plan,torch.ones(1,dtype=torch.bool,device='cuda')))
         assert describe(result)==original['applied']
         assert describe(cross)==original['initial']
+    originals=reference['floor_sums']
+    n=integers([int(item['n']) for item in originals])
+    m=integers([int(item['m']) for item in originals])
+    a=integers([int(item['a']) for item in originals])
+    b=integers([int(item['b']) for item in originals])
+    sums=Numbers.run_exact_batch(lambda:n.floor_sum(m,a,b))
+    assert values(sums)==[int(item['expected']) for item in originals]
+    assert sums.words.shape[1]>=15, '真实450位结果须增长，不截到输入位宽'
+    invalid=Numbers.run_exact_batch(lambda:integers([5,-1]).floor_sum(integers([0,7]),integers([9,9]),integers([17,17])))
+    assert invalid.fault.cpu().tolist()==[1,1]
     torch.cuda.synchronize()
     print(json.dumps({'checks':['original_fifo_all_fields','taker_original_quote_difference','debt_echo_no_second_depletion',
         'resync_retains_account_order','cancel_only_target','segment_growth_retains_original_B_Q',
         'original_multi_segment_plan_coordinates','plan_finish_preserves_unfinished_rows',
         'original_quote_budget_planning','incomplete_FOK_queue_unchanged','partial_segment_stops',
         'stale_plan_not_applied','original_cross_price_quote_plan','partial_price_stops_later_prices',
-        'whole_budget_FOK_gate_before_any_queue_apply'],
+        'whole_budget_FOK_gate_before_any_queue_apply','original_Euclid_floor_sum',
+        'floor_sum_grows_for_large_exact_result','floor_sum_invalid_not_normal_value'],
         'capacity':queue.capacity,'elapsed_seconds':time.perf_counter()-started,
         'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
         'noe_ledger_execution_delivered':False}))
