@@ -110,11 +110,25 @@ def main():
     days,request=Numbers.run_exact_batch(lambda:days.register(integers([2]),future,fee,enabled))
     assert request.committed.cpu().tolist()==[True] and values(days.fill_sequences)==[1,2]
     assert days.pending.cpu().tolist()==[[0,1]] and ratios(days.accrued)==ratios(old_days.accrued)+[0]
+    # 零fee只受自身密封最终性时点约束，不为不存在的返佣日要求可表示成熟时刻。
+    def zero_fee_boundary():
+        short={'steps':[{'state':'MATCHED','offset_ms':0},{'state':'MINED','offset_ms':10},
+            {'state':'CONFIRMED','offset_ms':20}],'economic_application_ordinal':1}
+        late=torch.tensor([(1<<63)-1-20],device='cuda')
+        record=FillRecord.create(integers([1]),integers([1]),integers([0]),zero,late,enabled,short)
+        pool=FillPool.empty(record,capacity=1)
+        days=TakerDays.empty(1,'cuda',fills=1,days=1)
+        return pool.enqueue_with_days(record,days)
+    boundary,empty_day,event,demand=Numbers.run_exact_batch(zero_fee_boundary)
+    assert event.emitted.cpu().tolist()==[True] and event.fault.cpu().tolist()==[0]
+    assert not empty_day.occupied.any().cpu().item() and not empty_day.fill_occupied.any().cpu().item()
+    assert values(boundary.next_sequence)==[2]
     print(json.dumps({'original_SIM_mature_Taker_source':True,'maturity_before_terminal_checked':True,
         'actual_accrual_day_payment_sequences':[3,4,5],'repeat_no_second_payment':True,
         'fill_pool_terminal_predecessor_checked':True,'capacity_retry_preserves_source':True,
         'same_finality_batch_trade_accrual_day_payment_checked':True,
         'delay_profile_identity':'engineering_only_not_formal_training',
+        'zero_fee_no_rebate_maturity_requirement_checked':True,
         'elapsed_seconds_with_reference_reads':time.perf_counter()-start,
         'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
         'global_Maker_clock_NOE_ledger_day_pipeline_delivered':False}))

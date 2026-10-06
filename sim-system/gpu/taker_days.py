@@ -135,11 +135,12 @@ class TakerDays:
         fi=torch.where(found,fi,vacancy)
         old_fee=_take(self.fill_fees,root*fill_capacity+fi).compare(fee)
         upper=sequence.compare(sequence.constant((1<<64)-1))
-        error=sequence.fault | fee.fault | lookup_fault | upper.fault | ((sequence.sign<=0)|(upper.order>0)|(fee.sign<0)|
-            (matched_at<MIN_DAY)|(matched_at>MAX_MATCHED)).to(torch.int32)
-        error=error | torch.where(found,old_fee.fault | ((old_fee.order!=0)|
-            (self.fill_days[root,fi]!=day)).to(torch.int32),0)
         positive=enabled & (fee.sign>0)
+        error=sequence.fault | fee.fault | upper.fault | ((sequence.sign<=0)|(upper.order>0)|(fee.sign<0)).to(torch.int32)
+        # 原SIM只为正fee成交创建返佣日；零费不要求不存在的成熟时刻可表示。
+        error=error | torch.where(positive,lookup_fault | ((matched_at<MIN_DAY)|(matched_at>MAX_MATCHED)).to(torch.int32),0)
+        error=error | torch.where(positive & found,old_fee.fault | ((old_fee.order!=0)|
+            (self.fill_days[root,fi]!=day)).to(torch.int32),0)
         fresh=positive & ~found
         error=error | (fresh & known_day & self.finalized[root,di]).to(torch.int32)
         need_f=torch.where(fresh & self.fill_occupied.all(1),fill_capacity+1,fill_capacity)
