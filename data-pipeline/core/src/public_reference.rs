@@ -194,6 +194,27 @@ pub(crate) fn materialize_reference_v2(
     })
 }
 
+/// 合法已观察响应中的结算参考规则；未观察或未发布的参数不替换旧规则。
+/// 列式消费者可生成这张有限映射表，不复制另一套规则判断。
+pub fn observed_settlement_reference_v1(
+    origin: MarketAnchorOriginV1,
+    result: MarketAnchorQueryResultV1,
+    twap_enabled: Option<bool>,
+    lookback_seconds: Option<u32>,
+) -> Option<BtcSettlementReferenceV1> {
+    if result != MarketAnchorQueryResultV1::Observed
+        || origin != MarketAnchorOriginV1::GammaEventBySlug
+    {
+        return None;
+    }
+    match (twap_enabled, lookback_seconds) {
+        (Some(false), _) => Some(BtcSettlementReferenceV1::ChainlinkSpot),
+        (Some(true), Some(30)) => Some(BtcSettlementReferenceV1::ChainlinkTwapThirtySeconds),
+        (Some(true), Some(60)) => Some(BtcSettlementReferenceV1::ChainlinkTwapSixtySeconds),
+        _ => None,
+    }
+}
+
 /// 一份实际响应可以产生锚点及规则两个成员；封组仍由唯一共享核心负责。
 pub fn canonicalize_market_reference_response_v1(
     row: &MarketAnchorRuleUpdateInput,
@@ -230,16 +251,12 @@ pub fn canonicalize_market_reference_response_v1(
         )?);
     }
     // 官网参数只是请求依据，不能成为官网发布的规则。
-    let reference = if row.metadata_origin == MarketAnchorOriginV1::GammaEventBySlug {
-        match (row.twap_enabled, row.twap_lookback_seconds) {
-            (Some(false), _) => Some(BtcSettlementReferenceV1::ChainlinkSpot),
-            (Some(true), Some(30)) => Some(BtcSettlementReferenceV1::ChainlinkTwapThirtySeconds),
-            (Some(true), Some(60)) => Some(BtcSettlementReferenceV1::ChainlinkTwapSixtySeconds),
-            _ => None,
-        }
-    } else {
-        None
-    };
+    let reference = observed_settlement_reference_v1(
+        row.metadata_origin,
+        row.anchor_query_result,
+        row.twap_enabled,
+        row.twap_lookback_seconds,
+    );
     if let Some(reference) = reference {
         events.push(finalize_reference(
             source,

@@ -31,7 +31,7 @@ let dispatch = shared.dispatch_strategy_qualified(&mut decision, &mut strategy, 
 
 `health` 区段的十六个必填字段均为非负整数毫秒，没有正式默认值。原八项 `*_silence_ms` / `*_event_delay_ms` 保持最大期限；对应新增 `*_silence_normal_ms` / `*_event_delay_normal_ms` 为正常上界。normal 不超过对应 max，允许零与相等。接收静默 S 与事件年龄 A 都严格小于 normal 时为正常；都严格小于 max、至少一项达到 normal 时为延迟升高但可接受；任一项达到 max 即超限。中间态继续按原条件交易，不单独暂停、撤单或限制补腿。缺少有效业务消息或事件时间、时间不一致、来源不可用或明确要求重新同步独立表达，不填成正常。
 
-生产与研究复用 `source_health_state_v1`。冻结诊断的 `source_health_states` 表达三态及独立异常，原 `source_health` 只保存阻断项，原 `is_empty()` 动作许可不被中间态改变。正常与最大边界均可无消息重评，预约只返回严格未来时刻，零/等边界不反复预约当前时间。无效帧、PONG、重复接收或其他资产消息不能覆盖对应流事实。
+生产与既有紧凑消费者复用 `source_health_state_v1`。新列式研究按同一三态定义向量化计算，并用小型跨语言对照核对该生产函数。冻结诊断的 `source_health_states` 表达三态及独立异常，原 `source_health` 只保存阻断项，原 `is_empty()` 动作许可不被中间态改变。正常与最大边界均可无消息重评，预约只返回严格未来时刻，零/等边界不反复预约当前时间。无效帧、PONG、重复接收或其他资产消息不能覆盖对应流事实。
 | 流 | 接收静默阈值 | 原事件滞后阈值 | 范围 |
 |---|---|---|---|
 | Polymarket 盘口 | `polymarket_silence_ms` | `polymarket_event_delay_ms` | 每个 condition/token |
@@ -77,6 +77,8 @@ Chainlink 与两个资产盘口是新增配对的依赖。Binance 只按实际�
 
 既有十二分钟材料的两目标市场、四PM资产及五个辅助scope结果见[中文市场来源健康报告](docs/research/complementary-pair-market-source-health-20260909-0000-0012.md)和[完整分源JSON](docs/research/complementary-pair-market-source-health-20260909-0000-0012.json)。该报告独立列各scope窗口/未知证据、116对描述性候选及一次运行的版本与资源；TWAP30无样本保持未知，候选未采纳为正式健康参数。
 
-### 两层健康紧凑研究
+### 当前列式来源健康研究
 
-`research_source_health_two_layer` 沿 `prepare_finite_source_progress_v1` 一次连续归约，输出带校验的 Zstandard 标量流；候选与各时间折复用材料。四组十六项仍全部显式指定，spot/TWAP60 按实际选源统计，TWAP30 不作为本轮校准目标。十八日工程配置是待执行提案，完整投入与正式阈值尚未采用。格式、主体/跨日方法、冻结顺序、资源推导与复现命令见[两层研究说明](docs/research/complementary-pair-source-health-two-layer.md)。
+`research/research_source_health_columnar.py` 直接查询Parquet必要列。DuckDB按文件或必要重叠文件组形成连续区间，立即汇总每日S/A bins、有效到达样本与分母，不累计全期raw或逐消息材料。公共最小状态归 `data-pipeline/training/python/dpt_health`，候选归本库。冻结后重读验证窗，保留窗前状态和连续段。Python不逐行处理全部PM消息；原Rust初始化选择器和 Histogram/body_normal/candidates 继续复用。
+
+当前任务与授权见[#185](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)。十八日原始到达描述统计已完成，但不是有效消息校准结果。`fd5581c8` 的全期导入因OOM终止，study未启动；旧APPROVED不覆盖当前修正。用户批准的独立研究内存保护已实际生效。v6准备因snapshot身份筛选遗漏合法metadata而退出1，不是OOM；未发布完整材料，study未启。随后v7源码76f854e0已生成十八日有效S/A、四折冻结验证和最后开发比较；prepare/study均退出0，全程2:12:52.154384。用户取消新增小样本试验。见[十八日正式研究报告](docs/research/complementary-pair-source-health-18d-20260909-20260926.md)及[机器摘要](docs/research/complementary-pair-source-health-18d-20260909-20260926.json)。完整4倍配置仅建议作为后续经营比较起点，正式阈值尚未采用。原 `research_source_health_two_layer prepare/study` 保留为历史入口；新健康研究以列式入口为准。依赖锁、时间语义、16字段、四折冻结、全局资源预算、复现命令和限制见[两层研究说明](docs/research/complementary-pair-source-health-two-layer.md)。

@@ -1,64 +1,9 @@
 {
-  "purpose": "待执行配置；未批准完整十八日真实投入，不是正式 normal/max 或容量保证。",
-  "configuration": {
-    "preparation": {
-      "header": {
-        "canonical_rule_version": "canonical-reduction-v1",
-        "initial_state": "Empty",
-        "input_scope": "eighteen-original-daily-manifests/20260909-20260927",
-        "input_stream_id": "complementary-pair-health-two-layer-20260909-20260927",
-        "max_pending_ws_terminals": 1024,
-        "observation_version": "market_business_observation_v1",
-        "ordering_version": "historical-source-head-v2"
-      },
-      "canonical": {
-        "canonical_rule_version": "canonical-reduction-v1",
-        "decode_batch_rows": 1024,
-        "max_decode_batch_bytes": 67108864,
-        "max_epoch_count_per_source": 1024,
-        "max_pending_ws_terminals": 1024,
-        "max_retained_reducer_entries": 1000000,
-        "max_temporary_row_bytes": 16777216,
-        "sort": {
-          "batch_rows": 1024,
-          "max_open_files": 16,
-          "max_run_bytes": 67108864,
-          "max_run_rows": 32768,
-          "max_temp_bytes": 412316860416,
-          "max_temp_run_files": 65536,
-          "merge_fan_in": 8
-        }
-      },
-      "metadata_initialization": {
-        "files": [
-          {
-            "manifest_path": "2026-09-08/typed_raw/utc_day=2026-09-08/manifest.json",
-            "relative_paths": [
-              "source_kind=polymarket_market_metadata/polymarket_market_metadata_23.parquet"
-            ]
-          }
-        ],
-        "markets": [
-          {
-            "condition_id": "0x1fc54206bf570dbdf843a88d608aee9df9eac980a9ab47e400d787d732f7b748",
-            "snapshot_source_message_id": "d3842b75d06c65d26d38c87e9520c14a0c11d0bf5d210c70dc62ae883b9097e5"
-          },
-          {
-            "condition_id": "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20",
-            "snapshot_source_message_id": "c11b6b3d60cb590a314f6de3a748de5923b4376d3fee8f4a7583fe7bd36ede42"
-          }
-        ],
-        "purpose": "D-0276原选定来源/市场及00:00起点，仅建立市场状态；D-0277后#185当前分段材料右端延至00:12",
-        "received_end_utc_ms": 1788912720000,
-        "received_start_utc_ms": 1788912000000
-      },
-      "received_start_utc_ms": 1788912000000,
-      "received_end_utc_ms": 1790467200000
-    },
-    "progress_interval_seconds": 30,
-    "binance_trade_enabled": true,
-    "binance_depth_enabled": true
-  },
+  "purpose": "D-0302直接Parquet健康SQL：按物理文件/重叠文件组累计每日时长bins，冻结后重读验证窗；原80GiB累计导入已OOM。8GiB为共享引擎预算、24线程，不是RSS硬上限；本入口尚未完整运行，候选不正式采用。",
+  "format": "direct-parquet-health-plan-v2",
+  "collector_commit": "8e6e9d8a744ec3ec10b4c0b8d57a251a16159d59",
+  "start": 1788912000000,
+  "end": 1790467200000,
   "manifests": [
     {
       "path": "2026-09-09/typed_raw/utc_day=2026-09-09/manifest.json",
@@ -168,5 +113,37 @@
       "rows": 29328226,
       "bytes": 1714553053
     }
-  ]
+  ],
+  "metadata_initialization": {
+    "files": [
+      {
+        "manifest_path": "2026-09-08/typed_raw/utc_day=2026-09-08/manifest.json",
+        "relative_paths": [
+          "source_kind=polymarket_market_metadata/polymarket_market_metadata_23.parquet"
+        ]
+      }
+    ],
+    "markets": [
+      {
+        "condition_id": "0x1fc54206bf570dbdf843a88d608aee9df9eac980a9ab47e400d787d732f7b748",
+        "snapshot_source_message_id": "d3842b75d06c65d26d38c87e9520c14a0c11d0bf5d210c70dc62ae883b9097e5"
+      },
+      {
+        "condition_id": "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20",
+        "snapshot_source_message_id": "c11b6b3d60cb590a314f6de3a748de5923b4376d3fee8f4a7583fe7bd36ede42"
+      }
+    ],
+    "purpose": "D-0276原选定来源/市场及00:00起点，仅建立市场状态；D-0277后#185当前分段材料右端延至00:12",
+    "received_end_utc_ms": 1788912720000,
+    "received_start_utc_ms": 1788912000000
+  },
+  "binance_trade_enabled": true,
+  "binance_depth_enabled": true,
+  "progress_interval_seconds": 30,
+  "engine": {
+    "threads": 24,
+    "memory_limit": "8GiB",
+    "max_temp_directory_size": "700GiB"
+  },
+  "native_unit_span": 1048576
 }
