@@ -2013,6 +2013,20 @@ impl SparseLedgerStateKeysV1 {
     }
 }
 
+// 原密封最终性每个trade只产生一次经济应用；FAILED的ordinal是失败步骤，
+// 不是applied_fills中保留的经济应用步骤。沿原trade身份找尚未撤回的应用项，
+// 同时供稀疏候选和实际补偿使用，保持原持久键及两种ordinal各自的含义。
+fn active_applied_fill_key(
+    lifecycle: &LifecycleStateV1,
+    trade_identity: &LedgerIdentityKeyV1,
+) -> Option<(LedgerIdentityKeyV1, u32)> {
+    lifecycle
+        .applied_fills
+        .range((trade_identity.clone(), 0)..=(trade_identity.clone(), u32::MAX))
+        .find(|(_, fill)| fill.active)
+        .map(|(key, _)| key.clone())
+}
+
 fn reservation_state_slice(
     source: &ReservationStateV1,
     keys: &SparseLedgerStateKeysV1,
@@ -2603,11 +2617,17 @@ fn economic_transition_keys<I: LedgerIdentity>(
         SourceNeutralAccountTransitionKindV1::FillFinalityEconomicApplied {
             trade_identity,
             path_ordinal,
-        }
-        | SourceNeutralAccountTransitionKindV1::FillFinalityCompensationApplied {
-            trade_identity,
-            path_ordinal,
         } => keys.add_fill(lifecycle, &trade_identity.ledger_key(), *path_ordinal),
+        SourceNeutralAccountTransitionKindV1::FillFinalityCompensationApplied {
+            trade_identity,
+            ..
+        } => {
+            if let Some((identity, application_ordinal)) =
+                active_applied_fill_key(lifecycle, &trade_identity.ledger_key())
+            {
+                keys.add_fill(lifecycle, &identity, application_ordinal);
+            }
+        }
         SourceNeutralAccountTransitionKindV1::FillFinalityUnappliedFailureReleased { .. }
         | SourceNeutralAccountTransitionKindV1::MakerRebateAccrualFinalized
         | SourceNeutralAccountTransitionKindV1::TakerRebateAccrualApplied { .. }
@@ -3032,11 +3052,10 @@ fn apply_economic_lifecycle<I: LedgerIdentity>(
         SourceNeutralAccountTransitionKindV1::FillFinalityUnappliedFailureReleased { .. } => {}
         SourceNeutralAccountTransitionKindV1::FillFinalityCompensationApplied {
             trade_identity,
-            path_ordinal,
+            ..
         } => {
-            let fill_key = (trade_identity.ledger_key().clone(), *path_ordinal);
-            if let Some(fill) = lifecycle.applied_fills.get(&fill_key).cloned()
-                && fill.active
+            if let Some(fill_key) = active_applied_fill_key(lifecycle, &trade_identity.ledger_key())
+                && let Some(fill) = lifecycle.applied_fills.get(&fill_key).cloned()
             {
                 let reversed_cost = checked_sub(
                     Decimal::ZERO,
