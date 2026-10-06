@@ -655,7 +655,7 @@ async fn gpu_actual_maker_mature_day_preserves_noe_batch_and_continuous_ledger()
         let (next,effect)=reduce_market_event_slice_v2(state,MarketEventPathV1::HiddenPlatform,at,
             std::slice::from_ref(&event),actor._rule_snapshot.snapshot(),policy.as_ref()).unwrap_or_else(|_|panic!("实际hidden Maker行情"));
         state=next;
-        let lifecycle=effect.execution.into_lifecycle_feedback().unwrap();
+        let lifecycle=effect.execution.into_iter().flat_map(|value|value.into_lifecycle_feedback().unwrap()).collect::<Vec<_>>();
         if !lifecycle.is_empty() {
             state=gpu_accept_projection_reference(&mut actor,state,BusinessReducerOutputV2::LogicalDrive(
                 LogicalDriveOutputV2 {lifecycle,..Default::default()}),&mut batches);
