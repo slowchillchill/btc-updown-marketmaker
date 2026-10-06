@@ -18,10 +18,14 @@ fn gpu_compact_hidden_drives_exact_asset_state_and_queues() {
     let recovery = record(5, TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(
         row("epoch-b", 1, 21005, 22000, book("15")),
     )));
+    let at_end = record(6, TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(
+        row("epoch-b", 2, MARKET_END_AT, MARKET_END_AT + 1000,
+            PolymarketOrderbookEvent::PriceChange {price_changes:vec![change(Some("77"))]}),
+    )));
     for input in [meta(0),pm(1,1,21000,book("10.0000007")),pm(2,2,21001,down),
         pm(3,3,21002,PolymarketOrderbookEvent::PriceChange {price_changes:vec![change(Some("20.0000007"))]}),
         pm(4,4,21003,PolymarketOrderbookEvent::PriceChange {price_changes:vec![change(Some("20.0000008"))]}),
-        recovery,pm(6,2,MARKET_END_AT,PolymarketOrderbookEvent::PriceChange {price_changes:vec![change(Some("77"))]}),end(7)] {
+        recovery,at_end,end(7)] {
         let prepared=prepare_public_ingress_v1(&public,&input,&BTreeMap::new(),&[]).unwrap();
         let applied=public.push_facts(&prepared).unwrap();
         writer.push_prepared(&input,&prepared,&applied).unwrap();
