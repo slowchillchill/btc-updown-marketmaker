@@ -13,6 +13,8 @@ from validate_base_execution import integers,rational,units,values,assert_checkp
 from latency import EmpiricalDelaySampler, byte_column
 from pathlib import Path
 from feedback import FeedbackEmitter
+import importlib.util
+import sys as modules
 
 
 def main():
@@ -108,6 +110,35 @@ def main():
     assert not fault.any().cpu().item()
     assert arrived.cpu().tolist()==[row['response_received_at_utc_ms'] for row in direct]
     assert source['initial_noe_records']>0 and source['noe_records']
+    path=Path(__file__).resolve().parents[2]/'execution-normalization/gpu/consumption.py'
+    spec=importlib.util.spec_from_file_location('gpu_noe_consumption',path)
+    consumption=importlib.util.module_from_spec(spec)
+    modules.modules[spec.name]=consumption
+    spec.loader.exec_module(consumption)
+    # 冷对照输入是原NOE已接纳记录，device消费不重新编号record position。
+    records=list(reversed(source['noe_records']))
+    def source_coordinate(row):
+        body=next(iter(row['record'].values()))
+        reference=body.get('source_reference') or body['fact']['source_reference']
+        metadata=next(iter(reference['record'].values()))
+        return (metadata.get('feedback_received_at_utc_ms',metadata.get('response_received_at_utc_ms')),
+                metadata['private_feedback_sequence'],body['source_order']['ordinal'])
+    columns=[source_coordinate(row) for row in records]
+    active=torch.ones((1,len(records)),dtype=torch.bool,device='cuda')
+    pending=Numbers.run_exact_batch(lambda:consumption.PendingRecords.from_columns(active,
+        torch.tensor([[row[0] for row in columns]],device='cuda'),integers([row[1] for row in columns]),
+        integers([row[2] for row in columns]),torch.arange(len(records)-1,-1,-1,device='cuda')[None,:],integers([0])))
+    pending,closed=Numbers.run_exact_batch(lambda:pending.take_closed(torch.tensor([10_000],device='cuda'),
+        torch.tensor([1_200],device='cuda')))
+    assert not closed.emitted.any().cpu().item()
+    pending,closed=Numbers.run_exact_batch(lambda:pending.take_closed(torch.tensor([10_000],device='cuda'),
+        torch.tensor([10_000],device='cuda')))
+    assert closed.emitted.cpu().tolist()==[[True]*len(records)]
+    assert closed.record_refs.cpu().tolist()==[list(range(len(records)))]
+    assert values(closed.delivered_sequences)==[row['visibility']['Feedback']['delivery_sequence'] for row in source['noe_records']]
+    pending,repeated=Numbers.run_exact_batch(lambda:pending.take_closed(torch.tensor([10_000],device='cuda'),
+        torch.tensor([10_000],device='cuda')))
+    assert not repeated.emitted.any().cpu().item()
     # 同一发射候选u64溢出不能耗序号或发出半批，已成功旧批不回滚。
     boundary=FeedbackEmitter(integers([(1<<64)-2]),integers([2]),torch.zeros(1,dtype=torch.int32,device='cuda'))
     active=torch.ones((1,2),dtype=torch.bool,device='cuda')
@@ -128,6 +159,7 @@ def main():
         'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
         'original_NOE_records':len(source['noe_records']),'actual_lifecycle_device_delay_checks':len(lifecycle),
         'actual_device_private_batch_numbering_checked':True,
+        'actual_NOE_device_delivery_order_checked':True,
         'original_feedback_dual_visibility_gate_checked':True,
         'global_clock_NOE_Ledger_delivered':False}))
 
