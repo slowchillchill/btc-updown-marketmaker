@@ -189,7 +189,7 @@ def validate_account_transfers(source):
         else:
             account,result=Numbers.run_exact_batch(lambda:account.pay_rebate_day(rational([delta['cash_pusd_delta']]),maker,enabled))
         assert result.fault.cpu().tolist()==[0] and result.emitted.cpu().tolist()==[True]
-        assert values(result.sequence)==[transition['account_transition_seq']]
+        assert values(result.sequence)==[fact['fact']['economic_identity']['AccountTransition']['account_transition_seq']]
         observed=[Fraction(values(getattr(result.movement,field))[0],1_000_000) for field in ['cash','available','principal','fee']]
         observed+=[Fraction(n,d) for n,d in zip(values(result.movement.rebates.numerator),values(result.movement.rebates.denominator))]
         assert observed==[Fraction(delta[field]) for field in delta_names]
