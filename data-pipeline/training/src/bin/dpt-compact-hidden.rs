@@ -12,7 +12,7 @@ fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     let started = Instant::now();
     let publication = |stage: &str, member: &str, completed: u64, total: Option<u64>| {
         eprintln!("{}",serde_json::json!({"stage":stage,"member":member,
-            "completed_bytes":completed,"total_bytes":total,"elapsed_seconds":started.elapsed().as_secs_f64()}));
+            "completed":completed,"total":total,"unit":if member=="inputs" {"inputs"} else {"bytes"},"elapsed_seconds":started.elapsed().as_secs_f64()}));
     };
     if args.len()==7 && args[1]=="--inspect" {
         let mut reader = CompactHiddenMaterialReaderV1::open(Path::new(&args[2]),Path::new(&args[3]),

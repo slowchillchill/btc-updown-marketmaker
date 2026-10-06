@@ -12,7 +12,7 @@ use contracts::*;
 use data_pipeline_core::pm_reduction::{MaterializedPmReductionV1, PmReductionStepV1,
     PmReductionReportV2, PmStepChangeV1, PreparedPmMessageV1};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, fs::{self, File},
+use std::{collections::{BTreeMap, BTreeSet}, fs::{self, File},
     io::{self, BufWriter, Read, Seek, SeekFrom, Write}, path::Path,
     sync::Arc, time::Duration};
 
@@ -224,6 +224,8 @@ pub struct CompactHiddenMaterialReaderV1 {
     read_steps: u64,
     read_references: u64,
     read_reports: u64,
+    expected_indexed_steps: u64,
+    expected_references: BTreeMap<u64,(i64,u64)>,
     reference_facts: BTreeMap<u64,u64>,
     failed: bool,
     last_key: Option<(i64,u64)>,
@@ -247,7 +249,7 @@ impl CompactHiddenMaterialReaderV1 {
         if manifest.indexed_steps > manifest.summary.steps {
             return Err(io::Error::other("hidden索引步骤超出实际步骤数量").into());
         }
-        let source = PublicCompactReaderV1::open_with_progress(source_root, max_packet_bytes, interval, |notice| {
+        let mut source = PublicCompactReaderV1::open_with_progress(source_root, max_packet_bytes, interval, |notice| {
             progress(notice.stage, notice.member, notice.completed_bytes, notice.total_bytes);
         })?;
         let source_sha = file_sha256_with_progress(&source_root.join("manifest.json"), interval, |done,total| {
@@ -257,6 +259,31 @@ impl CompactHiddenMaterialReaderV1 {
             || source.manifest.applied_prefix != manifest.summary.source_prefix
             || source.manifest.facts != manifest.summary.canonical_facts {
             return Err(io::Error::other("hidden来源完成凭据不匹配").into());
+        }
+        // 自身计数不能替代来源人口。只读原事实，不重跑任何业务归约。
+        let mut expected_messages = BTreeSet::new();
+        let mut expected_references = BTreeMap::new();
+        let mut canonical = 0_u64;
+        let mut last_notice = std::time::Instant::now();
+        while let Some(packet) = source.next_packet()? {
+            for fact in packet.groups.iter().flat_map(|group| &group.records) {
+                match &fact.payload {
+                    crate::compact_public::CompactFactPayloadV1::PmFromInput(_) => {expected_messages.insert(canonical);}
+                    _=>{if let Some(at) = fact.dependency_time.source_event_at_utc_ms {
+                        expected_references.insert(canonical,(at,u64::try_from(expected_references.len())?));
+                    }}
+                }
+                canonical = canonical.checked_add(1).ok_or_else(|| io::Error::other("hidden来源事实位置溢出"))?;
+            }
+            if last_notice.elapsed()>=interval {
+                progress("hidden_source_census","inputs",packet.input.input_position+1,Some(source.manifest.inputs));
+                last_notice = std::time::Instant::now();
+            }
+        }
+        progress("hidden_source_census_complete","inputs",source.manifest.inputs,Some(source.manifest.inputs));
+        if canonical != manifest.summary.canonical_facts || expected_messages.len() as u64 != manifest.summary.messages
+            || expected_references.len() as u64 != manifest.summary.references {
+            return Err(io::Error::other("hidden消息/参考人口与原完整来源不闭合").into());
         }
         for (file,name) in manifest.files.iter().zip(MEMBERS) {
             if file.name != name || fs::metadata(root.join(name))?.len() != file.bytes {
@@ -299,6 +326,9 @@ impl CompactHiddenMaterialReaderV1 {
             }
             next_derivation = next_derivation.checked_add(count).ok_or_else(|| io::Error::other("hidden派生位置溢出"))?;
         }
+        if !messages.keys().copied().eq(expected_messages.into_iter()) {
+            return Err(io::Error::other("hidden实际消息位置未覆盖原PM事实人口").into());
+        }
         if next_derivation.checked_sub(manifest.summary.references) != Some(manifest.summary.steps) {
             return Err(io::Error::other("hidden步骤末端计数不闭合").into());
         }
@@ -306,7 +336,7 @@ impl CompactHiddenMaterialReaderV1 {
             progress("hidden_receipt_sha256", "manifest.json", done, Some(total));
         })?;
         Ok(Self {manifest, material_manifest_sha256, payload:File::open(root.join(MEMBERS[0]))?, offsets, messages,
-            source, cached_message:None, read_reports:0, reference_facts:BTreeMap::new(), failed:false,
+            source, cached_message:None, read_reports:0, expected_indexed_steps:0, expected_references, reference_facts:BTreeMap::new(), failed:false,
             index:RunCursor::open(&root.join(MEMBERS[3]), rows, bytes)?, next:None, position:0,
             read_steps:0, read_references:0, last_key:None, max_packet_bytes})
     }
@@ -363,6 +393,7 @@ impl CompactHiddenMaterialReaderV1 {
             if matches!(step.change, CompactPmChangeV1::Inline(PmStepChangeV1::InitialSnapshot {..})) {
                 return Err(io::Error::other("compact hidden快照必须引用原输入").into());
             }
+            self.restore_materialized_step(&packet.message, step.clone())?;
         }
         for report in &packet.reports {
             if report.canonical_fact_id != packet.message.event_id {
@@ -375,6 +406,9 @@ impl CompactHiddenMaterialReaderV1 {
             }
         }
         if !validated {
+            self.expected_indexed_steps = self.expected_indexed_steps.checked_add(u64::try_from(packet.steps.iter()
+                .filter(|(reference,_)| reference.dependency_time.source_event_at_utc_ms.is_some()).count())?)
+                .ok_or_else(|| io::Error::other("hidden可索引步骤人口溢出"))?;
             self.read_reports = self.read_reports.checked_add(u64::try_from(packet.reports.len())?)
                 .ok_or_else(|| io::Error::other("hidden报告计数溢出"))?;
             self.messages.get_mut(&canonical_position).unwrap().3 = true;
@@ -399,6 +433,11 @@ impl CompactHiddenMaterialReaderV1 {
             .ok_or_else(|| io::Error::other("恢复步骤不是本材料实际引用"))?;
         let step = step.clone();
         let header = packet.message.clone();
+        self.restore_materialized_step(&header, step)
+    }
+
+    fn restore_materialized_step(&mut self, header: &CompactPmMessageHeaderV1,
+        step: CompactPmStepV1<CanonicalEventId>) -> RecordingResult<PmReductionStepV1<'static, SourceEvidenceRefV3>> {
         let change = match step.change {
             CompactPmChangeV1::Inline(change) => change,
             CompactPmChangeV1::InitialSnapshotFromInput {input_record, asset, initial_tick_size_pusd_per_share,
@@ -445,9 +484,14 @@ impl CompactHiddenMaterialReaderV1 {
                     book_digest_sha256,bids:std::borrow::Cow::Owned(bids.clone()),asks:std::borrow::Cow::Owned(asks.clone()),evidence}
             }
         };
-        Ok(PmReductionStepV1 {canonical_fact_id:step.canonical_fact_id,member_index:step.member_index,step_index:step.step_index,
+        let restored = PmReductionStepV1 {canonical_fact_id:step.canonical_fact_id,member_index:step.member_index,step_index:step.step_index,
             derived_id:step.derived_id,change,direct:step.direct,prestate:step.prestate,absence:step.absence,dependencies:step.dependencies,
-            direct_time:step.direct_time,dependency_time:step.dependency_time,quality:step.quality})
+            direct_time:step.direct_time,dependency_time:step.dependency_time,quality:step.quality};
+        if data_pipeline_core::pm_reduction::materialized_pm_step_id_v1(&restored,&header.market,
+            &header.lineage.canonical_rule_version)? != restored.derived_id {
+            return Err(io::Error::other("hidden步骤恢复内容与原物化身份不一致").into());
+        }
+        Ok(restored)
     }
 
     fn read_index(&mut self) -> RecordingResult<Option<HiddenIndexEntryV1>> {
@@ -455,7 +499,8 @@ impl CompactHiddenMaterialReaderV1 {
             // 仅报告/无索引的消息也必须完整校验；不让漏报告绕过完成凭据。
             let unseen: Vec<_> = self.messages.iter().filter_map(|(position, value)| (!value.3).then_some(*position)).collect();
             for position in unseen { self.load_message(position)?; }
-            if self.read_steps != self.manifest.indexed_steps || self.read_references != self.manifest.summary.references {
+            if self.read_steps != self.manifest.indexed_steps || self.read_steps != self.expected_indexed_steps
+                || self.read_references != self.manifest.summary.references {
                 return Err(io::Error::other("hidden时间索引末端计数不闭合").into());
             }
             if self.read_reports != self.manifest.summary.reports {
@@ -488,9 +533,7 @@ impl CompactHiddenMaterialReaderV1 {
                     || self.reference_facts.insert(*canonical_position,*derivation_position).is_some() {
                     return Err(io::Error::other("hidden参考位置越过自身来源范围").into());
                 }
-                let original = self.source.canonical_fact(*canonical_position)?;
-                if matches!(original.payload, crate::compact_public::CompactFactPayloadV1::PmFromInput(_))
-                    || original.dependency_time.source_event_at_utc_ms != Some(*source_at_utc_ms) {
+                if self.expected_references.get(canonical_position) != Some(&(*source_at_utc_ms,*derivation_position)) {
                     return Err(io::Error::other("hidden参考不指向原真实来源时间的非PM事实").into());
                 }
                 self.read_references += 1;
@@ -621,11 +664,72 @@ mod tests {
         }
         assert_eq!(snapshot_refs,1);
         assert_eq!(read_all(&target,&source_root,1),read_all(&target,&source_root,64));
+        // 合法精确tick替换、重新压缩并更新成员hash，仍必须绑定原物化身份。
+        let original_payload = fs::read(target.join(MEMBERS[0])).unwrap();
+        let original_offsets = fs::read(target.join(MEMBERS[1])).unwrap();
+        let offsets:Vec<_> = original_offsets.chunks_exact(8).map(|word| u64::from_le_bytes(word.try_into().unwrap()) as usize).collect();
+        let mut bad_payload = Vec::new(); let mut bad_offsets = 0_u64.to_le_bytes().to_vec();
+        let mut modified = false; let mut modified_position = 0;
+        for pair in offsets.windows(2) {
+            let mut packet:CompactHiddenMessageV1 = serde_json::from_slice(&zstd::bulk::decompress(
+                &original_payload[pair[0]..pair[1]],1<<20).unwrap()).unwrap();
+            for (_,step) in &mut packet.steps {
+                if let CompactPmChangeV1::InitialSnapshotFromInput {initial_tick_size_pusd_per_share,..} = &mut step.change {
+                    *initial_tick_size_pusd_per_share = ExactDecimal("0.001".into());
+                    modified = true;modified_position = packet.canonical_position;
+                }
+            }
+            bad_payload.extend(zstd::bulk::compress(&serde_json::to_vec(&packet).unwrap(),3).unwrap());
+            bad_offsets.extend((bad_payload.len() as u64).to_le_bytes());
+        }
+        assert!(modified);
+        fs::write(target.join(MEMBERS[0]),&bad_payload).unwrap();
+        fs::write(target.join(MEMBERS[1]),&bad_offsets).unwrap();
+        let mut bad_tick = serde_json::to_value(&manifest).unwrap();
+        for index in 0..2 {
+            let path = target.join(MEMBERS[index]);
+            bad_tick["files"][index]["bytes"] = serde_json::json!(fs::metadata(&path).unwrap().len());
+            bad_tick["files"][index]["sha256"] = serde_json::json!(file_sha256_with_progress(&path,Duration::from_secs(10),|_,_| {}).unwrap());
+        }
+        serde_json::to_writer(File::create(target.join("manifest.json")).unwrap(),&bad_tick).unwrap();
+        let mut broken_tick = CompactHiddenMaterialReaderV1::open(&target,&source_root,1,1<<20,1<<20,|_,_,_,_| {}).unwrap();
+        assert!(broken_tick.message(modified_position).is_err());
+        assert!(broken_tick.next_bucket().is_err());
+        fs::write(target.join(MEMBERS[0]),original_payload).unwrap();
+        fs::write(target.join(MEMBERS[1]),original_offsets).unwrap();
+        serde_json::to_writer(File::create(target.join("manifest.json")).unwrap(),&manifest).unwrap();
         // 成员SHA不变仍不能通过被修改的自身计数；不重新归约业务。
         let mut bad:serde_json::Value = serde_json::from_reader(File::open(target.join("manifest.json")).unwrap()).unwrap();
         bad["summary"]["steps"] = serde_json::json!(16);
         serde_json::to_writer(File::create(target.join("manifest.json")).unwrap(),&bad).unwrap();
         assert!(CompactHiddenMaterialReaderV1::open(&target,&source_root,1,1<<20,1<<20,|_,_,_,_| {}).is_err());
+        serde_json::to_writer(File::create(target.join("manifest.json")).unwrap(),&manifest).unwrap();
+        let mut original = RunCursor::open(&target.join(MEMBERS[3]),1,1<<20).unwrap();
+        let mut replacement = ExternalSorter::new(&temp.path().join("tamper-index"),&sort).unwrap();
+        let mut removed = false;
+        while let Some(row) = original.next_row().unwrap() {
+            let entry:HiddenIndexEntryV1 = serde_json::from_slice(row.payload()).unwrap();
+            if !removed && matches!(entry,HiddenIndexEntryV1::Step(_)) {removed = true;continue;}
+            replacement.push(row).unwrap();
+        }
+        assert!(removed);
+        let (index,_) = replacement.finish_single_file(None).unwrap();
+        fs::rename(index,target.join(MEMBERS[3])).unwrap();
+        let mut tampered:serde_json::Value = serde_json::to_value(&manifest).unwrap();
+        tampered["indexed_steps"] = serde_json::json!(manifest.indexed_steps-1);
+        tampered["files"][3]["bytes"] = serde_json::json!(fs::metadata(target.join(MEMBERS[3])).unwrap().len());
+        tampered["files"][3]["sha256"] = serde_json::json!(file_sha256_with_progress(&target.join(MEMBERS[3]),
+            Duration::from_secs(10),|_,_| {}).unwrap());
+        serde_json::to_writer(File::create(target.join("manifest.json")).unwrap(),&tampered).unwrap();
+        let mut broken = CompactHiddenMaterialReaderV1::open(&target,&source_root,1,1<<20,1<<20,|_,_,_,_| {}).unwrap();
+        loop {
+            match broken.next_bucket() {
+                Ok(Some(_))=>{},
+                Ok(None)=>panic!("删掉有真实时间的原步骤不能通过完整EOF"),
+                Err(_)=>break,
+            }
+        }
+        assert!(broken.next_bucket().is_err());
         eprintln!("compact_hidden_material_roundtrip={}",serde_json::to_string(&manifest).unwrap());
     }
 }

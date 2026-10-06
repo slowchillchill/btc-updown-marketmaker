@@ -1781,6 +1781,20 @@ fn book_digest(
     ))
 }
 
+/// 原物化身份的纯编码入口；可校验持久步骤，不读取或重算业务状态。
+pub fn materialized_pm_step_id_v1<'m, E: PmEvidenceV1, I>(
+    step: &PmReductionStepV1<'m, E, I>,
+    market: &MarketIdentityV2,
+    canonical_rule_version: &str,
+) -> Result<CanonicalEventId, ContractError> {
+    Ok(CanonicalEventId(hash_domain_bytes(
+        b"data-pipeline/pm-derived-step/v1\0",
+        &stable_json(&(canonical_rule_version, market, &step.canonical_fact_id,
+            step.member_index, step.step_index, &step.change, &step.prestate,
+            &step.absence, &step.dependencies, &step.quality))?,
+    ).0))
+}
+
 /// 只编码已经计算完成的不可变步骤；不读取或推进调用方状态。
 pub fn materialize_pm_reduction<'m, E: PmEvidenceV1, I: PmStepIndexV1>(
     reduction: PmMessageReductionV1<'m, E, I>,
@@ -1788,24 +1802,8 @@ pub fn materialize_pm_reduction<'m, E: PmEvidenceV1, I: PmStepIndexV1>(
     let mut ids = Vec::with_capacity(reduction.steps.len());
     let mut steps = Vec::with_capacity(reduction.steps.len());
     for step in reduction.steps {
-        let derived_id = CanonicalEventId(
-            hash_domain_bytes(
-                b"data-pipeline/pm-derived-step/v1\0",
-                &stable_json(&(
-                    &reduction.materialization_rule_version,
-                    &reduction.materialization_market,
-                    &step.canonical_fact_id,
-                    step.member_index,
-                    step.step_index,
-                    &step.change,
-                    &step.prestate,
-                    &step.absence,
-                    &step.dependencies,
-                    &step.quality,
-                ))?,
-            )
-            .0,
-        );
+        let derived_id = materialized_pm_step_id_v1(&step, &reduction.materialization_market,
+            &reduction.materialization_rule_version)?;
         ids.push(derived_id.clone());
         steps.push(PmReductionStepV1 {
             canonical_fact_id: step.canonical_fact_id,
