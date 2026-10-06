@@ -24,6 +24,8 @@ def main():
     sys.path.insert(0,str(root/'model-train/native-inputs/gpu'))
     from input_books import PmBookInputs
     from input_pm_fields import pm_fields
+    from fact_window import PublicFactWindow
+    from input_events import EventInputs, time_envelope
     from model_train.book import BookEncoder
     from prepare import _numbers
     started = time.perf_counter()
@@ -85,6 +87,25 @@ def main():
     packer = PmBookInputs(state, initial_capacity=1)
     packed = packer.pack(frame, assets, now)
     native_fields = pm_fields(state,observation,assets,now)
+    fact_windows = PublicFactWindow(columns,initial_capacity=1)
+    events = EventInputs(fact_windows)
+    previous = prefixes.new_tensor([-1,-1,max(-1,prefix_values[-1]-1)])
+    native_events = events.encode(previous,prefixes,now)
+    assert not native_events.fault.any().cpu().item()
+    empty_window = events.encode(prefixes,prefixes,now)
+    assert torch.count_nonzero(empty_window.values) == 0
+    invalid_window = events.encode(prefixes.new_tensor([-1]),prefixes.new_tensor([len(columns['groups'])]),now[:1])
+    assert invalid_window.fault.ne(0).all().cpu().item()
+    assert torch.count_nonzero(invalid_window.values) == 0
+    # 真正UTC 100ms网格的末10个窗口，GPU选择合法闭组前缀，区间不按source time筛选。
+    if columns['groups']:
+        last_grid = (columns['groups'][-1][2]//100)*100
+        grid = torch.arange(last_grid-900,last_grid+1,100,dtype=torch.int64,device='cuda')
+        end_prefix = torch.searchsorted(state.groups[:,2].contiguous(),grid,right=True)-1
+        begin_prefix = torch.searchsorted(state.groups[:,2].contiguous(),grid-100,right=True)-1
+        grid_events = events.encode(begin_prefix,end_prefix,grid)
+        assert not grid_events.fault.any().cpu().item()
+
     positive_rows = int(packed.mask.sum().cpu())
     if columns['slots']:
         assert positive_rows > 0, '真实来源盘口检查必须实际编码正数量档位，不能以空侧冒充'
@@ -125,6 +146,44 @@ def main():
         assert frame.present[2,slot].cpu().item() == reference['present']
         assert frame.initialized[2,asset].cpu().item() == reference['initialized']
         assert frame.ready[2,asset].cpu().item() == reference['ready']
+        # 仅这个有效公共短链读回原公开事实；不是全窗CPU历史诊断。
+        def original_class(payload):
+            if 'PolymarketMessage' in payload:
+                p = payload['PolymarketMessage']['payload']
+                if p['kind'] == 'book': return (0 if p['fact']['kind']=='full_book' else 1),0
+                return {'best_bid_ask':2,'tick_size_change':3,'public_trade':4,'new_market':5}[p['kind']],0
+            p = payload['MarketFact']['payload']
+            key = next(iter(p))
+            return {'FixedIdentity':6,'InitialTick':7,'LifecycleTransition':8,'MarketLifecycleSnapshot':8,
+                    'TradingState':9,'Terminal':10,'QualityBoundary':11}[key],1
+        expected = [0.0]*104
+        counts, source_times = [0]*23,[[] for _ in range(9)]
+        for event in reference['public_events']:
+            kind,time_group = original_class(event['payload'])
+            counts[kind] += 1
+            for source in event['direct_sources']:
+                source_times[time_group].append((source['source_event_at_utc_ms'],source['received_at_utc_ms']))
+        def original_log(value):
+            value = float(value)
+            return math.copysign(math.log1p(abs(value)),value) if value else 0.0
+        expected[:23] = [original_log(value) for value in counts]
+        for group, rows in enumerate(source_times):
+            if not rows: continue
+            age = [[],[],[]]
+            for source,received in rows:
+                age[1].append(reference['observation_ms']-received)
+                if source is not None:
+                    age[0].append(reference['observation_ms']-source)
+                    age[2].append(received-source)
+            start = 23+9*group
+            for k, values in enumerate(age):
+                if values:
+                    expected[start+2*k] = original_log(Fraction(min(values),1000))
+                    expected[start+2*k+1] = original_log(Fraction(max(values),1000))
+                expected[start+6+k] = len(values)/len(rows)
+        full_window = events.encode(prefixes.new_tensor([-1]),prefixes[-1:],now[-1:])
+        assert torch.equal(full_window.values[0],torch.tensor(expected,device='cuda',dtype=torch.float32)), (full_window.values,expected)
+        assert not full_window.fault.any().cpu().item()
         quality_names = ['fresh','stale','missing','unknown_not_observed','confirmed_gap','invalid']
         def signed_log(value):
             value = float(value)
@@ -243,7 +302,8 @@ def main():
     passed = ['real_source_shared_exact_decimal_columns','gpu_prefix_quantity_and_selection',
               'initialization_and_ready_prefix','future_slots_masked',
               'continuous_device_query','out_of_material_prefix_fault',
-              'i64_time_coordinate_exact_difference','fault_bit_union','pm_direct_observation_fields']
+              'i64_time_coordinate_exact_difference','fault_bit_union','pm_direct_observation_fields',
+              'native_events104_legal_prefix_window','empty_and_invalid_window','utc_100ms_window_prefix']
     if columns['slots']:
         passed += ['exact_price_sort_current_positive_compaction','native_pm_nine_fields',
                    'real_book_encoder_forward_backward','tail_padding_pairwise_tree','native_pm_bba28_trade18']
@@ -255,7 +315,8 @@ def main():
               'groups':len(columns['groups']),'original_pm_steps':columns['original_pm_steps'],
               'assets':len(columns['assets']),'slots':len(columns['slots']),
               'decimal_dictionary':len(columns['decimals']),'derived_column_wire_bytes':len(wire),
-              'encoded_positive_rows':positive_rows,
+              'encoded_positive_rows':positive_rows,'public_facts':len(columns['facts']),
+              'direct_sources':len(columns['fact_sources']),
               'cold_seconds':parsed-started,'total_seconds':time.perf_counter()-started,
               'peak_allocated_bytes':torch.cuda.max_memory_allocated(),
               'passed':passed,

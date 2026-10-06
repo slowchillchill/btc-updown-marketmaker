@@ -42,6 +42,12 @@ pub struct PublicPmDeviceColumnsV1 {
     pub observed_tick_values: Vec<[i64;4]>,
     pub observed_ticks: Vec<[i64;4]>,
     pub anchor_sets: Vec<Vec<i64>>,
+    /// 原公共payload枚举名；不含模型特征分类或时间聚合。
+    pub fact_types: Vec<String>,
+    /// [group,typeId,directSourceStart,directSourceEnd]，一行对应一个实际规范事实。
+    pub facts: Vec<[i64;4]>,
+    /// 全部直接来源的原双时间：[group,typeId,sourcePresent,sourceMs,receivedMs]。
+    pub fact_sources: Vec<[i64;5]>,
     pub field_updates: i64,
     pub original_pm_steps: i64,
 }
@@ -57,6 +63,46 @@ fn quality_code(quality: MarketDataQuality) -> i64 {
         MarketDataQuality::Missing => 2, MarketDataQuality::UnknownNotObserved => 3,
         MarketDataQuality::ConfirmedGap => 4, MarketDataQuality::Invalid => 5,
     }
+}
+fn pm_payload_type(event: &PolymarketOrderbookEvent) -> RecordingResult<&'static str> {
+    Ok(match event {
+        PolymarketOrderbookEvent::Book {..} => "pm.full_book",
+        PolymarketOrderbookEvent::PriceChange {..} => "pm.absolute_level_changes",
+        PolymarketOrderbookEvent::BestBidAsk {..} => "pm.best_bid_ask",
+        PolymarketOrderbookEvent::TickSizeChange {..} => "pm.tick_size_change",
+        PolymarketOrderbookEvent::LastTradePrice {..} => "pm.public_trade",
+        PolymarketOrderbookEvent::NewMarket {..} => "pm.new_market",
+        PolymarketOrderbookEvent::MarketResolved {..} => return Err("终态原输入不能充当规范PM消息".into()),
+    })
+}
+fn inline_payload_type(payload: &PublicBusinessPayloadV1) -> RecordingResult<&'static str> {
+    Ok(match payload {
+        PublicBusinessPayloadV1::MarketFact {payload,..} => match payload {
+            CanonicalMarketFactPayloadV1::FixedIdentity {..} => "market.fixed_identity",
+            CanonicalMarketFactPayloadV1::InitialTick {..} => "market.initial_tick",
+            CanonicalMarketFactPayloadV1::LifecycleTransition(_) => "market.lifecycle_transition",
+            CanonicalMarketFactPayloadV1::MarketLifecycleSnapshot {..} => "market.lifecycle_snapshot",
+            CanonicalMarketFactPayloadV1::TradingState(_) => "market.trading_state",
+            CanonicalMarketFactPayloadV1::Terminal(_) => "market.terminal",
+            CanonicalMarketFactPayloadV1::QualityBoundary(_) => "market.quality_boundary",
+        },
+        PublicBusinessPayloadV1::ReferenceFact(payload) => match payload {
+            CanonicalReferenceEventPayloadV2::ChainlinkBtcUsd(_) => "reference.chainlink_spot",
+            CanonicalReferenceEventPayloadV2::ChainlinkBtcUsdTwap(t) if t.window_s==30 => "reference.chainlink_twap30",
+            CanonicalReferenceEventPayloadV2::ChainlinkBtcUsdTwap(_) => "reference.chainlink_twap60",
+            CanonicalReferenceEventPayloadV2::MarketPriceAnchorUpdate(_) => "reference.market_price_anchor",
+            CanonicalReferenceEventPayloadV2::MarketSettlementReferenceUpdate(_) => "reference.market_settlement",
+            CanonicalReferenceEventPayloadV2::BinanceDepthState(_) => "reference.binance_depth",
+            CanonicalReferenceEventPayloadV2::BinanceAggregateTrade(_) => "reference.binance_trade",
+            CanonicalReferenceEventPayloadV2::RtdsObservedAnomaly(a) => match a.classification {
+                RtdsObservedAnomalyClassificationV1::InvalidType => "reference.anomaly_type",
+                RtdsObservedAnomalyClassificationV1::InvalidTopic => "reference.anomaly_topic",
+                RtdsObservedAnomalyClassificationV1::InvalidSymbol => "reference.anomaly_symbol",
+                RtdsObservedAnomalyClassificationV1::InvalidTimestamp => "reference.anomaly_timestamp",
+            },
+        },
+        PublicBusinessPayloadV1::PolymarketMessage(_) => return Err("紧凑PM事实应引用原输入".into()),
+    })
 }
 struct Builder {
     columns: PublicPmDeviceColumnsV1,
@@ -148,8 +194,13 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
     builder.decimal(&ExactDecimal("0".into()))?;
     let mut snapshots = BTreeMap::new();
     let mut raw_pm: BTreeMap<u64,PolymarketOrderbookRow> = BTreeMap::new();
+    let mut pm_types: BTreeMap<u64,&'static str> = BTreeMap::new();
     while let Some(packet) = reader.next_packet()? {
         if let DptIngressV1::Message { row:TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row)), .. } = &packet.input.ingress {
+            // 只保存原枚举坐标；实际事实是否存在由闭组决定，不能计入被抑制重试。
+            if !matches!(&row.event,PolymarketOrderbookEvent::MarketResolved {..}) {
+                pm_types.insert(packet.input.input_position,pm_payload_type(&row.event)?);
+            }
             if matches!(&row.event,PolymarketOrderbookEvent::BestBidAsk {..} | PolymarketOrderbookEvent::PriceChange {..}) {
                 raw_pm.insert(packet.input.input_position,row.clone());
             }
@@ -160,6 +211,27 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
         for group in &packet.groups {
             builder.columns.groups.push([i64::try_from(group.group_position)?,i64::try_from(group.closed_at_input_position)?,group.visible_at_utc_ms]);
             for fact in &group.records {
+                let kind = match &fact.payload {
+                    crate::compact_public::CompactFactPayloadV1::PmFromInput(m) => *pm_types
+                        .get(&m.input_record.input_position).ok_or("规范PM事实缺原类型引用")?,
+                    crate::compact_public::CompactFactPayloadV1::BinanceDepthFromPrefix {..} => "reference.binance_depth",
+                    crate::compact_public::CompactFactPayloadV1::Inline(p) => inline_payload_type(p)?,
+                };
+                let type_id = if let Some(id) = builder.columns.fact_types.iter().position(|s|s==kind) {
+                    i64::try_from(id)?
+                } else {
+                    let id = i64::try_from(builder.columns.fact_types.len())?;
+                    builder.columns.fact_types.push(kind.into()); id
+                };
+                let group_position = i64::try_from(group.group_position)?;
+                let start = i64::try_from(builder.columns.fact_sources.len())?;
+                for source in &fact.direct_sources {
+                    builder.columns.fact_sources.push([group_position,type_id,
+                        i64::from(source.source_event_at_utc_ms.is_some()),
+                        source.source_event_at_utc_ms.unwrap_or(0),source.received_at_utc_ms]);
+                }
+                let end = i64::try_from(builder.columns.fact_sources.len())?;
+                builder.columns.facts.push([group_position,type_id,start,end]);
                 if let crate::compact_public::CompactFactPayloadV1::Inline(
                     PublicBusinessPayloadV1::MarketFact {market,payload:CanonicalMarketFactPayloadV1::FixedIdentity {assets}}
                 ) = &fact.payload {
@@ -338,7 +410,7 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
         }
         for group in &packet.groups {
             for member in &group.member_input_positions { snapshots.remove(member); }
-            for member in &group.member_input_positions { raw_pm.remove(member); }
+            for member in &group.member_input_positions { raw_pm.remove(member); pm_types.remove(member); }
         }
         progress(packet.input.input_position+1);
     }

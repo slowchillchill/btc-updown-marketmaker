@@ -645,6 +645,7 @@ mod tests {
         let mut writer = PublicCompactWriterV1::create(&target,header.clone()).unwrap();
         let mut observation_core = PublicObservationCoreV1::new(header.clone()).unwrap();
         let mut public_assets = Vec::new();
+        let mut public_events = Vec::new();
         let mut original = None;
         let mut zero_evidence_without_change = false;
         let mut token = String::new();
@@ -661,6 +662,7 @@ mod tests {
             let observed_prepared = prepare_public_ingress_v1(&observation_core,&input,&ids,&[]).unwrap();
             let observed = observation_core.push(&observed_prepared).unwrap();
             for group in &observed.applied.closed_groups {
+                public_events.extend(group.records.iter().cloned());
                 for observation in &group.observations {
                     public_assets = observation.assets.clone();
                 }
@@ -691,7 +693,7 @@ mod tests {
         let reference = serde_json::json!({"token":token,"price":"0.4",
             "quantity":original.quantity(&token,BookSide::Bid,price).normalize().to_string(),
             "present":true,"initialized":asset.has_initial_snapshot,"ready":asset.book_ready,
-            "public_assets":public_assets,"observation_ms":34000});
+            "public_assets":public_assets,"public_events":public_events,"observation_ms":34000});
         let reference_path = temp.path().join("original-reference.json");
         serde_json::to_writer(File::create(&reference_path).unwrap(),&reference).unwrap();
         eprintln!("original_core_zero_reference={reference}");
