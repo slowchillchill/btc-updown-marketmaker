@@ -4,7 +4,7 @@
 注册来自已接纳成交，终态来自已消费密封路径，金额来自实际返佣经济delta。
 日钟与hidden/其它义务的先后顺序仍由SIM宿主协调，读取下一时刻不推进状态。
 """
-from dataclasses import dataclass,replace
+from dataclasses import dataclass,replace,fields
 import torch
 from queues import Numbers,ExactInt,ExactRational,_take
 from asset_buy import take_ratio
@@ -55,6 +55,23 @@ class TakerDayResult:
     account_delta: object
     emitted: torch.Tensor
     fault: torch.Tensor
+
+
+def coordinate_calendar(candidate, original, committed, fault):
+    roots = committed.numel()
+    updates = {}
+    for field in fields(candidate):
+        new, old = getattr(candidate, field.name), getattr(original, field.name)
+        if isinstance(new, ExactInt):
+            updates[field.name] = new.select(committed.repeat_interleave(new.sign.numel() // roots), old)
+        elif isinstance(new, ExactRational):
+            mask = committed.repeat_interleave(new.numerator.sign.numel() // roots)
+            updates[field.name] = ExactRational(new.numerator.select(mask, old.numerator), new.denominator.select(mask, old.denominator))
+        else:
+            mask = committed.reshape((roots,) + (1,) * (new.ndim - 1))
+            updates[field.name] = torch.where(mask, new, old)
+    updates['fault'] = fault
+    return replace(candidate, **updates)
 
 
 class RebateCalendarOperations:

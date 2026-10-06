@@ -23,7 +23,7 @@ def map_economic(delta,account_slots,condition_slots,token_slots,asset_indices,a
     """覆盖当前SIM接纳、逐fill应用/失败/返佣及单订单释放的原Existing转移。
 
     0=OrderAccepted，2=CallerCanceled，6=EconomicApplied，7=UnappliedFailure，
-    8=Compensation，10=TakerRebate。其它转移必须由对应producer接齐其字段，
+    8=Compensation，9=Maker市场汇总应计，10=TakerRebate。其它转移必须由对应producer接齐其字段，
     不能把这里的单资产表示当作多资产结算或V2新增经济种类。
     """
     from queues import ExactRational,_take
@@ -39,7 +39,7 @@ def map_economic(delta,account_slots,condition_slots,token_slots,asset_indices,a
         relation=value.compare(maximum)
         fault=fault | relation.fault | ((value.sign<0)|(relation.order>0)).to(torch.int32)
     transition_known=torch.zeros(count,dtype=torch.bool,device=device)
-    for tag in [0,2,6,7,8,10]:
+    for tag in [0,2,6,7,8,9,10]:
         transition_known=transition_known | (transition_tag==tag)
     path_used=(transition_tag>=6)&(transition_tag<=8)
     fault=fault | ((account_slots<0)|(condition_slots<0)|(token_slots<0)|

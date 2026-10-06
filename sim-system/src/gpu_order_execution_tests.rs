@@ -563,6 +563,166 @@ async fn gpu_actual_fok_mature_day_preserves_noe_batch_and_continuous_ledger() {
     eprintln!("gpu_outer_fok_day={}",String::from_utf8_lossy(&output.stdout));
 }
 
+#[cfg(feature="shared-execution")]
+#[tokio::test(flavor="current_thread")]
+#[ignore="AutoDL真实外层Maker成熟日NOE与连续Ledger消费对照"]
+async fn gpu_actual_maker_mature_day_preserves_noe_batch_and_continuous_ledger() {
+    let run_id="run-gpu-maker-mature-day";
+    let policy=Arc::new(TradeFinalityPolicyV2::decode_and_seal(
+        br#"{"schema_version":"trade_finality_policy_v2","normal_path":{"steps":[{"state":"MATCHED","offset_ms":0},{"state":"MINED","offset_ms":10},{"state":"CONFIRMED","offset_ms":20}],"economic_application_ordinal":2},"failure_overrides":[]}"#
+    ).unwrap());
+    let saved=Rc::new(RefCell::new(None));
+    let capture=Rc::clone(&saved);
+    let normalization=Rc::new(RefCell::new(Vec::new()));
+    let normalization_capture=Rc::clone(&normalization);
+    let (_directory,mut actor)=active_market_actor_with_projection_and_cash(
+        SimCallerRoleV1::ModelTrain,run_id,policy.clone(),move |path,opened| {
+            opened.projection_version=crate::runtime_v2::BusinessProjectionVersionV1::V4;
+            let reference=contracts::execution_normalization::DurableSourceReferenceV1 {
+                source:contracts::execution_normalization::ImmutableSourceReferenceV1::Location(path.display().to_string()),
+            };
+            let memory=noe_projection::MemoryNoeProjectionPortV4::new(path.parent().unwrap().join("noe-memory"),
+                opened.clone(),reference.clone(),reference.clone(),"create-run-gpu-maker-mature-day".into(),"gpu-day-source".into());
+            *capture.borrow_mut()=Some(memory.observation());
+            let durable=noe_projection::SimV2NoeProjectionPortV4::new(path.parent().unwrap().join("noe-durable"),
+                opened.clone(),reference.clone(),reference,"create-run-gpu-maker-mature-day".into(),"gpu-day-source".into());
+            Box::new(GpuNoeReferencePort {memory,durable,normalization_reference:normalization_capture,normalization_core:None})
+        },"639.50052").await;
+    let observation=saved.borrow_mut().take().unwrap();
+    let mut ledger=ledger::LedgerWriterV1::new_with_admission_v2(ledger::AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+    ledger.apply_noe_memory_v2(&observation.opening_record().unwrap()).unwrap();
+    for record in observation.take_closed_records() { ledger.apply_noe_memory_v2(&record).unwrap(); }
+    let mut initial=decoded_maker_initial_events();
+    // 通过原编码/解码边界建立已初始化空盘口，不能用tick代替L2初始化。
+    for event in &mut initial {
+        let ExecutionMarketEventPayloadV3::InitialL2Snapshot(book)=&mut event.payload else {unreachable!()};
+        book.bids.clear();
+        book.asks.clear();
+        event.event_id=data_pipeline_core::derive_execution_market_event_v3_id(event).unwrap();
+        *event=data_pipeline_core::decode_execution_market_event_v3(&data_pipeline_core::encode_execution_market_event_v3(event).unwrap()).unwrap();
+    }
+    let market_end=initial[0].market.window.end_at_utc_ms;
+    let condition=initial[0].market.condition_id.clone();
+    let (state,_)=reduce_market_event_slice_v2(actor.state.take().unwrap(),MarketEventPathV1::HiddenPlatform,1100,
+        &initial,actor._rule_snapshot.snapshot(),policy.as_ref()).unwrap_or_else(|_|panic!("真实双腿初始化"));
+    let request=BusinessRequestV2::PostOrders(PostOrdersRequestV2 {
+        context:RequestContextV2 {global_request_id:"gpu-maker-mature-post".into(),caller_correlation_id:None},
+        items:vec![PostOrderBatchItemV2 {batch_item_ordinal:0,item:post_item("gpu-maker-mature-item",&condition,&TokenId("1".into()),
+            SimBuyOrderKindV1::GtcLimit {limit_price_pusd_per_share:"0.4".parse().unwrap(),size_shares:"305".parse().unwrap(),post_only:false})}],
+    });
+    let (state,receipt)=register_request_candidate(&actor.opened,actor.scenario.initial_market_directory(),state,
+        &request_cutoff(1200),&request,11,actor._latency_profile.as_ref(),actor._rule_snapshot.snapshot());
+    let processing=receipt.platform_arrived_at_utc_ms;
+    let (state,accepted)=advance_mutation_candidate_with_outputs(&actor.opened,actor.scenario.initial_market_directory(),state,
+        processing,actor._rule_snapshot.snapshot(),policy.as_ref());
+    let accepted=accepted.expect("合法Maker GTC实际处理");
+    let MutationActionBusinessEffectV3::Post(post)=&accepted.business else {panic!("真实Maker GTC响应");};
+    assert!(matches!(post.outcome,PostOrderItemOutcomeV2::Accepted(_)),"{:?}",post.outcome);
+    let mut batches=Vec::new();
+    let state=gpu_accept_projection_reference(&mut actor,state,BusinessReducerOutputV2::MutationAction(Some(accepted)),&mut batches);
+    let public_time=|at|crate::public_consumption::TrustedActorExecutionTimeV1(crate::public_consumption::ActorTimeRecordV1 {
+        run_id:run_id.into(),drive_position:1,logical_time_utc_ms:at,
+    });
+    actor.projection_port.close_receive_prefix(processing+10_000);
+    actor.projection_port.observe_public_time(&public_time(processing+10_000));
+    let mut previous=observation.take_closed_records();
+    while !previous.is_empty() {
+        let count=previous.len();
+        let mut waiting=Vec::new();
+        for record in previous {
+            match ledger.apply_noe_memory_v2(&record).unwrap() {
+                ledger::LedgerMemoryApplyOutcomeV1::MissingEconomicAssociation |
+                ledger::LedgerMemoryApplyOutcomeV1::Applied(ledger::LedgerApplyOutcomeV1::MissingPlatformPredecessor {..})=>waiting.push(record),
+                _=>(),
+            }
+        }
+        assert!(waiting.len()<count,"真实初始前缀可闭合");
+        previous=waiting;
+    }
+    let before=gpu_ledger_reservation_checkpoint(&ledger,"accepted_prefix");
+    let next_private=state.session.as_ref().unwrap().next_private_feedback_sequence;
+    let next_batch=state.session.as_ref().unwrap().next_projection_batch_sequence;
+    let account_before=state.session.as_ref().unwrap().execution_state.gpu_order_checkpoint_for_tests("sim-1");
+    let maker_at=processing+10_100;
+    assert!(maker_at+30<market_end,"工程原请求必须在市场结束前处理");
+    let mut state=state;
+    let mut events=Vec::new();
+    for event in [
+        decoded_maker_level_event(BookSide::Bid,"0.4","0","300",maker_at,maker_at+1,10),
+        decoded_maker_level_event(BookSide::Bid,"0.4","300","0",maker_at+10,maker_at+11,11),
+    ] {
+        let at=event.time.source_event_at_utc_ms.unwrap();
+        let (next,effect)=reduce_market_event_slice_v2(state,MarketEventPathV1::HiddenPlatform,at,
+            std::slice::from_ref(&event),actor._rule_snapshot.snapshot(),policy.as_ref()).unwrap_or_else(|_|panic!("实际hidden Maker行情"));
+        state=next;
+        let lifecycle=effect.execution.into_lifecycle_feedback().unwrap();
+        if !lifecycle.is_empty() {
+            state=gpu_accept_projection_reference(&mut actor,state,BusinessReducerOutputV2::LogicalDrive(
+                LogicalDriveOutputV2 {lifecycle,..Default::default()}),&mut batches);
+        }
+        events.push(event);
+    }
+    while let Some(at)=state.session.as_ref().unwrap().execution_state.next_scheduled_finality_at_utc_ms() {
+        let (next,effect)=advance_finality_to_candidate(state,at,actor._rule_snapshot.snapshot(),policy.as_ref());
+        state=gpu_accept_projection_reference(&mut actor,next,BusinessReducerOutputV2::LogicalDrive(
+            LogicalDriveOutputV2 {lifecycle:effect.into_lifecycle_feedback().unwrap(),..Default::default()}),&mut batches);
+    }
+    while let Some(at)=state.session.as_ref().unwrap().execution_state.next_rebate_clock_at_utc_ms() {
+        if at>89_100_000 {break;}
+        let (next,effect)=advance_rebate_clock_to_candidate(state,at);
+        state=next;
+        let lifecycle=effect.into_lifecycle_feedback().unwrap();
+        if !lifecycle.is_empty() {
+            state=gpu_accept_projection_reference(&mut actor,state,BusinessReducerOutputV2::LogicalDrive(
+                LogicalDriveOutputV2 {lifecycle,..Default::default()}),&mut batches);
+        }
+    }
+    let final_at=89_100_000;
+    let closed_at=final_at+10_000;
+    actor.projection_port.close_receive_prefix(closed_at);
+    actor.projection_port.observe_public_time(&public_time(closed_at));
+    let received=observation.take_closed_records();
+    assert_eq!(received.len(),9,"真实3Trade、Maker市场/日结/付款与3经济事实");
+    let mut pending=received.clone();
+    let mut attempts=Vec::new();
+    while !pending.is_empty() {
+        let count=pending.len();
+        let mut waiting=Vec::new();
+        for record in pending {
+            let prior=gpu_ledger_reservation_checkpoint(&ledger,"before");
+            let outcome=ledger.apply_noe_memory_v2(&record).unwrap();
+            let deferred=matches!(outcome,ledger::LedgerMemoryApplyOutcomeV1::MissingEconomicAssociation |
+                ledger::LedgerMemoryApplyOutcomeV1::Applied(ledger::LedgerApplyOutcomeV1::MissingPlatformPredecessor {..}));
+            attempts.push(serde_json::json!({"record":record.record(),"position":record.position(),"visibility":record.visibility(),
+                "deferred":deferred,"before":prior,"after":gpu_ledger_reservation_checkpoint(&ledger,"after")}));
+            if deferred {waiting.push(record);}
+        }
+        assert!(waiting.len()<count,"日业务前驱等待能按原位置重试闭合");
+        pending=waiting;
+    }
+    let records=received.iter().map(|record|serde_json::json!({"record":record.record(),"position":record.position(),
+        "visibility":record.visibility()})).collect::<Vec<_>>();
+    let source=serde_json::json!({"source_contract":"original_outer_GTC_hidden_Maker_SIM_NOE_V4_Ledger",
+        "before":before,"account_before":account_before,"after":gpu_ledger_reservation_checkpoint(&ledger,"after_all"),
+        "records":records,"attempts":attempts,"next_private":next_private,"next_batch":next_batch,
+        "processing_at":processing,"maker_at":maker_at+10,"market_end":market_end,"day_at":final_at,"events":events,"batches":batches,"closed_at":closed_at,
+        "finality_path":policy.normal_path(),"session_seed":state.session.as_ref().unwrap().session_seed.0,
+        "maker_rate":actor._rule_snapshot.snapshot().project_account_rules.rebate_settlement.value.fixed_maker_rebate_rate.value().to_string(),
+        "fee_rate":actor._rule_snapshot.snapshot().synchronized_platform_rules.fee_schedule.rate.value().to_string(),
+        "fee_exponent":actor._rule_snapshot.snapshot().synchronized_platform_rules.fee_schedule.exponent});
+    let artifact=std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap());
+    std::fs::create_dir_all(&artifact).unwrap();
+    std::fs::write(artifact.join("original-outer-maker-mature-day.json"),serde_json::to_vec_pretty(&source).unwrap()).unwrap();
+    let mut child=std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
+        .arg(std::env::var("B_GPU_OUTER_MAKER_VALIDATOR").unwrap()).stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    serde_json::to_writer(child.stdin.take().unwrap(),&source).unwrap();
+    let output=child.wait_with_output().unwrap();
+    std::fs::write(artifact.join("outer-maker-day-report.json"),&output.stdout).unwrap();
+    assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+    eprintln!("gpu_outer_maker_day={}",String::from_utf8_lossy(&output.stdout));
+}
+
 fn gpu_accept_projection_reference(actor:&mut SimRunActorV2,state:BusinessReducerStateV2,
     output:BusinessReducerOutputV2,batches:&mut Vec<serde_json::Value>) -> BusinessReducerStateV2 {
     let (state,_,batch)=finalize_projection_batch_v2(&actor.opened.run_id,state,output,

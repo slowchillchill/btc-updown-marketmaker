@@ -35,10 +35,13 @@ def expected_semantic(record):
         transition=value['transition']
         if 'Existing' in transition:
             transition=transition['Existing']
-        name,fields=next(iter(transition.items()))
+        name,fields=(transition,{}) if isinstance(transition,str) else next(iter(transition.items()))
         tag={'OrderAcceptedEncumbranceApplied':0,'FillFinalityEconomicApplied':6,'TakerRebateAccrualApplied':10,
+            'MakerRebateAccrualFinalized':9,
             'MakerRebateDayFinalized':11,'TakerRebateDayFinalized':12,'MakerRebatePaid':13,'TakerRebatePaid':14}[name]
-        if tag>=11:
+        if tag==9:
+            sequence=0
+        elif tag>=11:
             sequence=fields['attribution_day_utc_ms']
         else:
             identity=fields['order_identity' if tag==0 else 'trade_identity']
@@ -57,15 +60,18 @@ def expected_semantic(record):
     kind,value=next(iter(body['evidence'].items()))
     value=value['result']
     if kind=='TradeLifecycleV3':
+        maker_read=value['maker_fee_equivalent_pusd']
+        maker_kind=0 if isinstance(maker_read,dict) and 'Known' in maker_read else 1 if maker_read=='Unavailable' else 2
+        maker_value=maker_read['Known'] if maker_kind==0 else '0'
         value=value['result']
         state={'MatchedNotBroadcasted':0,'Matched':1,'Retrying':2,'Mined':3,'Confirmed':4,'Failed':5}[value['state']]
         disposition={'PendingUnapplied':0,'PendingApplied':1,'FinalSuccess':2,'FinalFailureUnapplied':3,'FinalFailureCompensated':4}[value['economic_disposition']]
         return encode_fields([zero,zero,zero,integers([value['fill_sequence']]),integers([entity_sequence(value['order_identity'],'Order')]),
             torch.full_like(zero,state),torch.full_like(zero,disposition),torch.tensor([value['matched_at_utc_ms']],device='cuda'),
-            torch.full_like(zero,{'Taker':0,'Maker':1}[value['liquidity_role']]),rational([value['source_price_pusd_per_share']]),integers([units(value['base_quantity_shares'])]),
+            torch.full_like(zero,{'Taker':0,'MakerInferred':1}[value['liquidity_role']]),rational([value['source_price_pusd_per_share']]),integers([units(value['base_quantity_shares'])]),
             integers([units(value['quote_amount_pusd'])]),integers([units(value['immediate_taker_fee_pusd'])]),
             torch.tensor([value['economic_application_account_transition_seq'] is not None],device='cuda'),
-            integers([value['economic_application_account_transition_seq'] or 0]),torch.full_like(zero,2),rational(['0'])])
+            integers([value['economic_application_account_transition_seq'] or 0]),torch.full_like(zero,maker_kind),rational([maker_value])])
     if kind=='OrderLifecycle':
         return encode_fields([zero,zero,zero,integers([entity_sequence(value['order_identity'],'Order')]),zero,
             torch.full_like(zero,{'Open':0,'Matched':1}[value['event']['Accepted']['state']])])
@@ -77,6 +83,15 @@ def expected_semantic(record):
             integers([units(value['measurement']['Base']['open_base_quantity_shares'])]),
             torch.tensor([value['effective_processing_at_utc_ms']],device='cuda')])
     if kind=='SettlementLifecycleV2':
+        if 'MakerAccrualFinalized' in value:
+            from fields import RecordList
+            value=value['MakerAccrualFinalized']
+            items=value['contributions']
+            vector=RecordList((integers([entity_sequence(item['trade_identity'],'Trade') for item in items]),
+                torch.zeros(len(items),dtype=torch.int64,device='cuda'),torch.zeros(len(items),dtype=torch.int64,device='cuda'),
+                torch.tensor([item['attribution_day_start_utc_ms'] for item in items],dtype=torch.int64,device='cuda'),
+                rational([item['contribution_pusd'] for item in items])),torch.ones((1,len(items)),dtype=torch.bool,device='cuda'))
+            return encode_fields([zero,zero,torch.full_like(zero,{'Calculated':0,'ZeroNoEligibleMakerFill':1,'UnknownIncomplete':2}[value['status']]),vector])
         if 'DayFinalized' in value:
             from fields import IntegerList
             value=value['DayFinalized']

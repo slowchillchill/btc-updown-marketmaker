@@ -3,12 +3,12 @@
 一个市场首次触及一天才登记一个日级前驱。市场结束与所有成交终态共同关闭它。
 源金额保持精确；贡献按原数值fill sequence排序，日引用按市场结果发射序追加。
 """
-from dataclasses import dataclass, replace, fields
+from dataclasses import dataclass, replace
 import torch
 from queues import Numbers, ExactInt, ExactRational, _take
 from asset_buy import take_ratio
 from taker_fee import allocate_taker_fee
-from taker_days import RebateCalendarOperations, DAY, MIN_DAY, _ratio, _store_ratio, _grow
+from taker_days import RebateCalendarOperations, DAY, MIN_DAY, _ratio, _store_ratio, _grow, coordinate_calendar
 from fill_pool import _put_integer
 
 
@@ -74,20 +74,7 @@ class MakerDays(RebateCalendarOperations):
     fault: torch.Tensor
 
     def coordinate_result(self, original, committed, fault):
-        roots = committed.numel()
-        updates = {}
-        for field in fields(self):
-            new, old = getattr(self, field.name), getattr(original, field.name)
-            if isinstance(new, ExactInt):
-                updates[field.name] = new.select(committed.repeat_interleave(new.sign.numel() // roots), old)
-            elif isinstance(new, ExactRational):
-                mask = committed.repeat_interleave(new.numerator.sign.numel() // roots)
-                updates[field.name] = ExactRational(new.numerator.select(mask, old.numerator), new.denominator.select(mask, old.denominator))
-            else:
-                mask = committed.reshape((roots,) + (1,) * (new.ndim - 1))
-                updates[field.name] = torch.where(mask, new, old)
-        updates['fault'] = fault
-        return replace(self, **updates)
+        return coordinate_calendar(self, original, committed, fault)
 
     @classmethod
     def empty(cls, market_ids, market_ends, market_admitted, *, fills=4, days=2):
