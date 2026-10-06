@@ -9207,3 +9207,7 @@ fn maker_fee_equivalent(
     )?;
     Ok(Some(exact_decimal_v2(contribution.fee_equivalent_pusd)))
 }
+
+#[cfg(test)]
+#[path = "matching/gpu_queue_tests.rs"]
+mod gpu_queue_tests;
