@@ -32,30 +32,39 @@ def micro_units(value):
 @dataclass(frozen=True)
 class HiddenAssetState:
     level_assets: torch.Tensor  # int64[levels]，含根的稳定资产坐标。
+    asset_markets: torch.Tensor  # int64[assets]，原SIM目录市场归属。
+    market_populations: torch.Tensor
     initialized: torch.Tensor  # bool[assets]；初始空盘也是已初始化。
     quality: torch.Tensor  # int64[assets]，固定顺序 Fresh/Stale/Missing/Unknown/Gap/Invalid。
     tick: object  # ExactRational[assets]
     tick_present: torch.Tensor
     matching_closed: torch.Tensor  # bool[assets]；end后不再应用初始盘/档位到撮合状态。
+    book_closed: torch.Tensor  # 原Active→PostEnd时清行情簿；Preloading与matching关闭不同。
     external_shares: object  # ExactRational[levels]；原档位前驱保持全部源精度。
     queues: PriceQueueBatch
     fault: torch.Tensor  # int32[assets]，错误候选不可提交到活动状态。
 
     @classmethod
-    def empty(cls, level_assets, prices, assets, *, segment_capacity=4):
+    def empty(cls, level_assets, prices, asset_markets, markets, *, segment_capacity=4):
+        assets = asset_markets.numel()
         if level_assets.dtype != torch.int64 or not level_assets.is_cuda:
             raise TypeError('价位所属资产须为设备int64列')
         if level_assets.shape != prices.numerator.sign.shape or assets < 1:
             raise ValueError('价位及资产坐标形状不一致')
         device = level_assets.device
+        if asset_markets.dtype != torch.int64 or asset_markets.device != device or asset_markets.shape != (assets,):
+            raise TypeError('资产所属市场须为同设备int64[assets]')
         valid = (level_assets >= 0) & (level_assets < assets)
         safe_assets = level_assets.clamp(0, assets - 1)
         fault = torch.zeros(assets, dtype=torch.int32, device=device)
         fault.scatter_reduce_(0, safe_assets, (~valid).to(torch.int32), reduce='amax')
         tick_zero = ExactInt.from_i64_tensor(torch.zeros(assets, dtype=torch.int64, device=device))
-        return cls(safe_assets, torch.zeros(assets, dtype=torch.bool, device=device),
+        populations = torch.zeros(markets, dtype=torch.int64, device=device).scatter_add(
+            0, asset_markets, torch.ones_like(asset_markets))
+        return cls(safe_assets, asset_markets, populations, torch.zeros(assets, dtype=torch.bool, device=device),
                    torch.full((assets,), 3, dtype=torch.int64, device=device),
                    ExactRational.ratio(tick_zero, tick_zero.constant(1)),
+                   torch.zeros(assets, dtype=torch.bool, device=device),
                    torch.zeros(assets, dtype=torch.bool, device=device),
                    torch.zeros(assets, dtype=torch.bool, device=device), zeros(prices),
                    PriceQueueBatch.empty(prices, segment_capacity), fault)
@@ -78,7 +87,18 @@ class HiddenAssetState:
         for column in (now, end):
             if column.shape != self.initialized.shape or column.dtype != torch.int64 or column.device != self.quality.device:
                 raise TypeError('处理时刻与市场end须为同设备int64[assets]')
-        return replace(self, matching_closed=self.matching_closed | (now >= end))
+        reached = now >= end
+        newly_closed = reached & ~self.matching_closed
+        queues = self.queues.clear_matching(newly_closed[self.level_assets])
+        return replace(self, matching_closed=self.matching_closed | reached, queues=queues)._close_active_book()
+
+    def _close_active_book(self):
+        initialized = torch.zeros_like(self.market_populations).scatter_add(
+            0, self.asset_markets, self.initialized.to(torch.int64))
+        active = (initialized == self.market_populations) & (self.market_populations > 0)
+        closed = self.book_closed | (active[self.asset_markets] & self.matching_closed)
+        return replace(self, book_closed=closed,
+                       external_shares=rational_select(zeros(self.external_shares), closed[self.level_assets], self.external_shares))
 
     def initial_tick(self, enabled, tick):
         enabled = self._mask(enabled)
@@ -90,7 +110,7 @@ class HiddenAssetState:
     def initial_snapshot(self, enabled, shares, tick, quality):
         """原InitialL2Snapshot只接纳一次；所有原档位的数量同次供给，空资产仍初始化。"""
         enabled = self._mask(enabled)
-        enabled = enabled & ~self.matching_closed
+        enabled = enabled & ~self.book_closed
         fault = self.fault | (enabled & self.initialized).to(torch.int32)
         invalid_tick = tick.fault | (tick.numerator.sign <= 0).to(torch.int32)
         fault = fault | (invalid_tick * enabled.to(torch.int32))
@@ -99,7 +119,7 @@ class HiddenAssetState:
         fault = fault | self._asset_fault(amounts.fault * level_mask.to(torch.int32))
         valid = enabled & (fault == 0)
         level_valid = valid[self.level_assets]
-        quantities = amounts.select(level_valid, amounts.constant(0))
+        quantities = amounts.select(level_valid & ~self.matching_closed[self.level_assets], amounts.constant(0))
         queues, required = self.queues.append_external(quantities)
         queue_fault = self._asset_fault(queues.fault)
         fault = fault | queue_fault
@@ -109,7 +129,7 @@ class HiddenAssetState:
                        tick=rational_select(tick, valid, self.tick),
                        tick_present=self.tick_present | valid,
                        external_shares=rational_select(shares, valid[self.level_assets], self.external_shares),
-                       queues=queues, fault=fault), required
+                       queues=queues, fault=fault)._close_active_book(), required
 
     def tick_change(self, enabled, previous, previous_present, current):
         enabled = self._mask(enabled)
@@ -136,7 +156,7 @@ class HiddenAssetState:
         """原精确档位前驱检查后驱动队列；PublicTrade/BBA没有本调用。"""
         if enabled.dtype != torch.bool or enabled.shape != self.level_assets.shape or enabled.device != self.level_assets.device:
             raise TypeError('档位事件掩码须为同设备bool[levels]')
-        enabled = enabled & ~self.matching_closed[self.level_assets]
+        enabled = enabled & ~self.book_closed[self.level_assets]
         relation = self.external_shares.compare(before)
         ready = self.initialized[self.level_assets]
         allowed = (self.quality[self.level_assets] == 0) | resync_inference
@@ -149,7 +169,8 @@ class HiddenAssetState:
         old_units = micro_units(before)
         new_units = micro_units(after)
         queues, effects = self.queues.apply_level_transition(
-            old_units.select(valid, old_units.constant(0)), new_units.select(valid, new_units.constant(0)))
+            old_units.select(valid & ~self.matching_closed[self.level_assets], old_units.constant(0)),
+            new_units.select(valid & ~self.matching_closed[self.level_assets], new_units.constant(0)))
         fault = fault | self._asset_fault(effects.fault)
         return replace(self, external_shares=rational_select(after, valid, self.external_shares),
                        queues=queues, fault=fault), effects

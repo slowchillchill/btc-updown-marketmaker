@@ -179,6 +179,13 @@ class PriceQueueBatch:
                         debt=self.debt.constant(0).select(enabled,self.debt))
         return state._compact()
 
+    def clear_matching(self, enabled):
+        """原end_matching清整个撮合队列；订单及经济义务仍由各自状态保留。"""
+        clear = enabled[:, None]
+        return replace(self, kind=torch.where(clear, 0, self.kind),
+                       order_ids=torch.where(clear, -1, self.order_ids),
+                       debt=self.debt.constant(0).select(enabled, self.debt))
+
     def cancel(self, order_ids):
         selected = (self.kind==2)&(self.order_ids==order_ids[:,None])
         zero = self.debt.constant(0)

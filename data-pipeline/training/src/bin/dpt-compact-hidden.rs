@@ -42,7 +42,7 @@ fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
             }
             println!("{}",serde_json::json!({"stage":"hidden_gpu_source_verified","buckets":count,
                 "material_manifest_sha256":reader.material_manifest_sha256,
-                "source_manifest_sha256":reader.manifest.source_manifest_sha256}));
+                "source_manifest_sha256":reader.manifest.source_manifest_sha256,"source_scene":reader.source_scene}));
             return Ok(());
         }
         if args[1]=="--gpu-pm-buckets" {

@@ -40,7 +40,7 @@ fn gpu_compact_hidden_drives_exact_asset_state_and_queues() {
     let scenario=sealed_scenario_for_markets(vec![crate::scenario::PlatformMarketV1::try_new(
         context.market.clone(),assets.clone().try_into().unwrap()).unwrap()]);
     let mut original=MarketStateStoreV2::new(scenario.initial_market_directory());
-    let mut queues=HiddenQueueReference::new();
+    let mut queues=HiddenQueueReference::new(scenario.initial_market_directory(),CONDITION_ID);
     let mut sort=config().sort;sort.merge_workers=8;
     let order=Arc::new(GpuInitialRunOrderV1::start(Path::new(&std::env::var("B_GPU_PYTHON").unwrap()),
         Path::new(&std::env::var("B_GPU_SORT_WORKER").unwrap())).unwrap());
@@ -55,8 +55,8 @@ fn gpu_compact_hidden_drives_exact_asset_state_and_queues() {
             if let Some(normalized)=crate::market::normalize_pm_step_v1(step).unwrap() {
                 let header=MarketEventHeaderV1 {identity:&step.derived_id.0,market,time:&step.dependency_time,quality:&step.quality};
                 original.apply_admitted_header(&header,&normalized,bucket.bucket.bucket_time_utc_ms,MARKET_END_AT).unwrap();
-                // 原ExecutionStateV2在at>=end先关matching，保持已存在队列。
-                if bucket.bucket.bucket_time_utc_ms < MARKET_END_AT {maker = queues.apply(&normalized);}
+                // 原ExecutionQueueStateV2::end_matching清除全部E/A，不复制结束逻辑。
+                maker = queues.apply(&normalized,bucket.bucket.bucket_time_utc_ms,MARKET_END_AT);
             }
             if matches!(&step.change,PmStepChangeV1::InitialSnapshot {asset,..} if asset.token_id.0==UP_TOKEN_ID) {
                 // 原有效GTC余量的生产插入点；当前测试不冒充整订单接纳或经济反馈。

@@ -29,6 +29,29 @@ class HiddenPmBlock:
         if verified.returncode:
             raise ValueError('hidden冷批次与实际原材料不一致: ' + verified.stderr.decode())
         self.source_verification = json.loads(verified.stdout)
+        # 原首次FixedIdentity的完整市场成员来自reader；不从当前PM步骤人口推断Active。
+        scene = self.source_verification['source_scene']
+        registry = {}
+        scene_members = {}
+        for market_index, (_, members) in enumerate(scene.values()):
+            scene_members[market_index] = {asset['token_id'] for asset in members}
+            for asset in members:
+                if asset['token_id'] in registry:
+                    raise ValueError('SIM冷目录资产身份冲突')
+                registry[asset['token_id']] = (asset, market_index)
+        selected = set()
+        coordinates = []
+        for asset in assets:
+            token = asset['token_id']
+            if token in selected or token not in registry or registry[token][0] != asset:
+                raise ValueError('资产不属于原SIM冷目录身份')
+            selected.add(token)
+            coordinates.append(registry[token][1])
+        for market_index in set(coordinates):
+            if not scene_members[market_index] <= selected:
+                raise ValueError('SIM市场须包含原完整资产人口，不能提前判定Active')
+        self.asset_markets = torch.tensor(coordinates, dtype=torch.int64, device=device)
+        self.market_count = len(scene)
         self.buckets = buckets  # 原完整身份、闭桶证明、参考和步骤均保留。
         self.assets = assets
         self.slots = slots
@@ -134,7 +157,7 @@ class HiddenPmBlock:
         return (self.level_assets == asset) & (self.level_sides == side) & (relation.order == 0) & (relation.fault == 0)
 
     def empty_state(self, *, segment_capacity=4):
-        state = HiddenAssetState.empty(self.level_assets, self.prices, len(self.assets), segment_capacity=segment_capacity)
+        state = HiddenAssetState.empty(self.level_assets, self.prices, self.asset_markets, self.market_count, segment_capacity=segment_capacity)
         cold_fault = state._asset_fault(getattr(self, 'price_fault', torch.zeros_like(self.level_assets, dtype=torch.int32)))
         decimal_fault = Numbers.combine_fault_rows(self.decimal_fault.reshape(1, -1))[0]
         return replace(state, fault=state.fault | cold_fault | decimal_fault)
@@ -151,6 +174,7 @@ class HiddenPmBlock:
         row = self.event_indices[index]
         enabled = self.asset_axis == row[0]
         if tag == 'InitialSnapshot':
+            active = enabled & ~state.book_closed
             quantities = zeros(self.prices)
             count = torch.zeros(len(self.slots), dtype=torch.int64, device=self.level_assets.device)
             missing = torch.zeros((), dtype=torch.int32, device=self.level_assets.device)
@@ -164,14 +188,13 @@ class HiddenPmBlock:
             state, _ = run_hidden_asset_batch(state, lambda value: value.initial_snapshot(
                 enabled, quantities, self._broadcast(row[5], len(self.assets)), quality))
             source_fault = state._asset_fault((count > 1).to(torch.int32) | self.price_fault)
-            active = enabled & ~state.matching_closed
             return replace(state, fault=state.fault | source_fault | missing * active.to(torch.int32)), None
         if tag == 'LevelChange':
+            active = enabled & ~state.book_closed
             level_enabled = self._level_mask(row[0], row[1], row[2])
             state, effects = run_hidden_asset_batch(state, lambda value: value.level_transition(
                 level_enabled, self._broadcast(row[3], len(self.slots)), self._broadcast(row[4], len(self.slots)),
                 (row[9] != 0).expand_as(level_enabled)))
-            active = enabled & ~state.matching_closed
             source_fault = state._asset_fault(self.price_fault) | (level_enabled.sum() != 1).to(torch.int32) * active.to(torch.int32)
             state = replace(state, fault=state.fault | source_fault)
             effects = replace(effects, fault=effects.fault | state.fault[state.level_assets])

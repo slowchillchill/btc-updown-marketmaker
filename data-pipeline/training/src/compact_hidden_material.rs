@@ -224,6 +224,8 @@ pub struct ClosedCompactHiddenBucketV1 {
 pub struct CompactHiddenMaterialReaderV1 {
     pub manifest: CompactHiddenManifestV1,
     pub material_manifest_sha256: String,
+    /// 原首次FixedIdentity，只作SIM冷目录身份；不代表公开运行前缀已接纳。
+    pub source_scene: BTreeMap<String, (MarketIdentityV2, Vec<AssetIdentityV1>)>,
     payload: File,
     offsets: Vec<u64>,
     /// canonical_position -> (packet_index,first_derivation,steps)。只读块内小固定列。
@@ -281,10 +283,16 @@ impl CompactHiddenMaterialReaderV1 {
         // 自身计数不能替代来源人口。只读原事实，不重跑任何业务归约。
         let mut expected_messages = BTreeSet::new();
         let mut expected_references = BTreeMap::new();
+        let mut source_scene = BTreeMap::new();
         let mut canonical = 0_u64;
         let mut last_notice = std::time::Instant::now();
         while let Some(packet) = source.next_packet()? {
             for fact in packet.groups.iter().flat_map(|group| &group.records) {
+                if let crate::compact_public::CompactFactPayloadV1::Inline(PublicBusinessPayloadV1::MarketFact {
+                    market, payload:CanonicalMarketFactPayloadV1::FixedIdentity {assets},
+                }) = &fact.payload {
+                    source_scene.entry(market.condition_id.0.clone()).or_insert_with(||(market.clone(),assets.clone()));
+                }
                 match &fact.payload {
                     crate::compact_public::CompactFactPayloadV1::PmFromInput(_) => {expected_messages.insert(canonical);}
                     _=>{if let Some(at) = fact.dependency_time.source_event_at_utc_ms {
@@ -353,7 +361,7 @@ impl CompactHiddenMaterialReaderV1 {
         let material_manifest_sha256 = file_sha256_with_progress(&root.join("manifest.json"), interval, |done,total| {
             progress("hidden_receipt_sha256", "manifest.json", done, Some(total));
         })?;
-        Ok(Self {manifest, material_manifest_sha256, payload:File::open(root.join(MEMBERS[0]))?, offsets, messages,
+        Ok(Self {manifest, material_manifest_sha256, source_scene, payload:File::open(root.join(MEMBERS[0]))?, offsets, messages,
             source, cached_message:None, read_reports:0, expected_indexed_steps:0, expected_references, reference_facts:BTreeMap::new(), reference_locations:BTreeMap::new(), failed:false,
             index:RunCursor::open(&root.join(MEMBERS[3]), rows, bytes)?, next:None, position:0,
             read_steps:0, read_references:0, last_key:None, max_packet_bytes})

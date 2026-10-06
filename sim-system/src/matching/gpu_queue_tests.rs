@@ -18,30 +18,35 @@ fn describe(asset:&AssetQueueV2,side:BookSide,price:Decimal)->Value {
 
 /// 原合法步骤直接经过原normalizer/FIFO的只读测试基线，不生成经济反馈。
 pub(crate) struct HiddenQueueReference {
-    assets: std::collections::BTreeMap<String,AssetQueueV2>,
+    queues: ExecutionQueueStateV2,
+    condition: String,
 }
 impl HiddenQueueReference {
-    pub(crate) fn new() -> Self { Self {assets:Default::default()} }
-    pub(crate) fn insert_account(&mut self, token:&str, price:Decimal) {
-        self.assets.get_mut(token).unwrap().insert_account_buy_remainder(price,"account-order".into(),3_000_000);
+    pub(crate) fn new(directory: &SessionMarketDirectoryV1, condition: &str) -> Self {
+        Self {queues: ExecutionQueueStateV2::new(directory), condition:condition.to_owned()}
     }
-    pub(crate) fn apply(&mut self, event:&NormalizedMarketEventV2<'_>) -> Vec<Value> {
+    pub(crate) fn insert_account(&mut self, token:&str, price:Decimal) {
+        self.queues.asset_mut(&self.condition,token).unwrap().insert_account_buy_remainder(price,"account-order".into(),3_000_000);
+    }
+    pub(crate) fn apply(&mut self, event:&NormalizedMarketEventV2<'_>, at:i64, end:i64) -> Vec<Value> {
+        if at >= end { self.queues.end_matching(&self.condition).unwrap(); }
+        if self.queues.matching_closed(&self.condition).unwrap() { return Vec::new(); }
         let mut maker = Vec::new();
         match event {
             NormalizedMarketEventV2::InitialL2Snapshot {asset,bids,asks,..}=>{
                 let bids:Vec<_>=bids.iter().map(|v|(v.price_pusd_per_share,micro_units_v1(v.quantity_shares).unwrap())).collect();
                 let asks:Vec<_>=asks.iter().map(|v|(v.price_pusd_per_share,micro_units_v1(v.quantity_shares).unwrap())).collect();
-                assert!(self.assets.insert(asset.token_id.0.clone(),AssetQueueV2::from_initial_levels(&bids,&asks).unwrap()).is_none());
+                self.queues.apply_initial_levels(&self.condition,&asset.token_id.0,&bids,&asks).unwrap();
             },
             NormalizedMarketEventV2::LevelExecutionTransition {transition,price_pusd_per_share,quantity_before_shares,quantity_after_shares}=>{
-                let effects = self.assets.get_mut(&transition.asset.token_id.0).unwrap().apply_level_transition(transition.side,
+                let effects = self.queues.asset_mut(&self.condition,&transition.asset.token_id.0).unwrap().apply_level_transition(transition.side,
                     *price_pusd_per_share,micro_units_v1(*quantity_before_shares).unwrap(),micro_units_v1(*quantity_after_shares).unwrap()).unwrap();
                 maker = effects.maker_depletions.into_iter().map(|effect| json!({"order":effect.platform_order_id,
                     "base":effect.base_units.to_string()})).collect();
             },
             NormalizedMarketEventV2::QualityBoundary {boundary,resync} if *resync==ResyncQuality::Required=>{
                 if let QualityScopeV1::Asset(asset)=&boundary.scope {
-                    if let Some(queue)=self.assets.get_mut(&asset.token_id.0) {queue.clear_external_segments();}
+                    self.queues.asset_mut(&self.condition,&asset.token_id.0).unwrap().clear_external_segments();
                 }
             },
             _=>{},
@@ -49,8 +54,8 @@ impl HiddenQueueReference {
         maker
     }
     pub(crate) fn describe(&self,slots:&[(String,BookSide,Decimal)]) -> Vec<Value> {
-        slots.iter().map(|(token,side,price)|self.assets.get(token)
-            .map(|asset|describe(asset,*side,*price)).unwrap_or_else(||json!({"debt":"0","segments":[]}))).collect()
+        slots.iter().map(|(token,side,price)|self.queues.asset(&self.condition,token)
+            .map(|asset|describe(asset,*side,*price)).unwrap()).collect()
     }
 }
 
