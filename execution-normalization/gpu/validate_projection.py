@@ -195,7 +195,7 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     principal=Numbers.run_exact_batch(lambda:type(rational(['0'])).ratio(cost.principal_micro,cost.principal_micro.constant(1_000_000)))
     fee=Numbers.run_exact_batch(lambda:type(principal).ratio(cost.fee_1e5_units,cost.fee_1e5_units.constant(100_000)))
     admission,reserve_event=Numbers.run_exact_batch(lambda:admission.reserve_action(zero[:,None],zero[:,None],principal,fee,
-        torch.ones((1,1),dtype=torch.bool,device='cuda'),rational([initial])))
+        torch.ones((1,1),dtype=torch.bool,device='cuda')))
     admission=Numbers.run_exact_batch(lambda:admission.submission_started(zero,zero,zero,zero,torch.tensor([True],device='cuda')))
     assert values(admission.current_entry_sequence)==[5] and values(admission.current_local_prefix)==[2]
     admission,remaining=Numbers.run_exact_batch(lambda:admission.apply_closed(delivered,
@@ -231,10 +231,10 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     # 真实原Ledger同一经济先到，没有Submission绑定不能Convert另一笔未发送预留。
     early=Numbers.run_exact_batch(lambda:AdmissionLifecycle.open(platform,state.normalizer.bank,columns,integers([3]),integers([0])))
     early,_=Numbers.run_exact_batch(lambda:early.reserve_action(zero[:,None],zero[:,None],rational(['1.5']),rational(['0']),
-        torch.ones((1,1),dtype=torch.bool,device='cuda'),rational([initial])))
+        torch.ones((1,1),dtype=torch.bool,device='cuda')))
     early=Numbers.run_exact_batch(lambda:early.submission_started(zero,zero,zero,zero,torch.tensor([True],device='cuda')))
     early,_=Numbers.run_exact_batch(lambda:early.reserve_action(torch.ones_like(zero[:,None]),zero[:,None],rational(['0.25']),rational(['0']),
-        torch.ones((1,1),dtype=torch.bool,device='cuda'),rational([initial])))
+        torch.ones((1,1),dtype=torch.bool,device='cuda')))
     sequence=values(columns.sequences)
     first_economic=next(i for i in range(columns.row_refs.size(1)) if columns.enabled[0,i].cpu().item() and sequence[i]==1)
     submission=next(i for i in range(columns.row_refs.size(1)) if early.lifecycle.emitted[0,i].cpu().item() and early.lifecycle.schemas[0,i].cpu().item()==3)
@@ -244,10 +244,22 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert used.cpu().tolist()==[True] and early.reservations.statuses[0,:2].cpu().tolist()==[1,0]
     assert values(early.current_entry_sequence)==[reference['before']['projection']['ledger_entry_seq']]
     assert values(early.reservations.last_sequences)[:2]==[reference['before']['request']['last_ledger_entry_seq'],reference['unsent']['last_ledger_entry_seq']]
+    early_funds=Numbers.run_exact_batch(lambda:early.funds())
+    assert [Fraction(n,d) for n,d in zip(values(early_funds.actual_available.numerator),values(early_funds.actual_available.denominator))]==[Fraction(reference['before']['cash']['actual_available_pusd'])]
+    assert [Fraction(n,d) for n,d in zip(values(early_funds.maker_available.numerator),values(early_funds.maker_available.denominator))]==[Fraction(reference['before']['cash']['maker_available_pusd'])]
     early,used=Numbers.run_exact_batch(lambda:early.apply_record(torch.tensor([submission],device='cuda'),enabled,torch.tensor([10000],device='cuda'),enabled))
     assert used.cpu().tolist()==[True] and early.reservations.statuses[0,:2].cpu().tolist()==[3,0]
     assert values(early.current_entry_sequence)==[reference['after']['projection']['ledger_entry_seq']]
     assert values(early.reservations.last_sequences)[:2]==[reference['after']['request']['last_ledger_entry_seq'],reference['unsent']['last_ledger_entry_seq']]
+    funds=Numbers.run_exact_batch(lambda:admission.funds())
+    expected_cash=source['reservation_checkpoints'][-1]['cash']
+    for actual,name in [(funds.actual_available,'actual_available_pusd'),(funds.maker_available,'maker_available_pusd'),
+                        (funds.actual_reserved,'actual_reserved_pusd'),(funds.maker_reserved,'maker_reserved_pusd')]:
+        assert [Fraction(n,d) for n,d in zip(values(actual.numerator),values(actual.denominator))]==[Fraction(expected_cash[name])]
+    assert funds.fault.cpu().tolist()==[0]
+    before_cash=Numbers.run_exact_batch(lambda:admission.maker_cash)
+    repeated,_=Numbers.run_exact_batch(lambda:admission.apply_closed(delivered,torch.ones_like(columns.enabled),maximum_retry_rounds=1))
+    assert torch.equal(repeated.maker_cash.numerator.words,before_cash.numerator.words)
     before=ledger.platform
     again=Numbers.run_exact_batch(lambda:ledger.receive(delivered).apply_pending(torch.ones_like(columns.enabled)))
     assert values(again.platform.platform_source_prefix)==[7]
@@ -257,4 +269,4 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         'bank_physical_rows':state.normalizer.bank.kinds.numel(),'masked_or_unemitted_rows':state.normalizer.bank.kinds.numel()-checked,
         'actual_device_Ledger_economic_position_predecessor_checked':True,
         'Ledger_admission_device_generated_entry_local_and_binding_checked':True,
-        'duplicate_NOE_NotApplicable_without_Ledger_commit_checked':True,'unbound_economic_before_Submission_unsent_reservation_checked':True,'full_clock_Ledger_reservation_delivered':False}
+        'duplicate_NOE_NotApplicable_without_Ledger_commit_checked':True,'unbound_economic_before_Submission_unsent_reservation_checked':True,'actual_existing_economic_MakerCash_and_four_funds_checked':True,'full_clock_Ledger_reservation_delivered':False}

@@ -32,8 +32,20 @@ def coordinate(value,original,valid):
 
 
 @dataclass(frozen=True)
+class CashFunds:
+    actual_available: object
+    maker_available: object
+    actual_reserved: object
+    maker_reserved: object
+    local_pending: object
+    platform_pending: object
+    fault: torch.Tensor
+
+
+@dataclass(frozen=True)
 class AdmissionLifecycle:
     platform: object
+    maker_cash: object  # 原Existing经济现金归Maker；结算新kind须按原归属另接。
     reservations: object
     orders: object
     trades: object
@@ -56,22 +68,33 @@ class AdmissionLifecycle:
         life=LifecycleColumns.from_projection(bank,columns)
         book=ReservationBook.empty(roots,capacity=max(1,width),device=columns.row_refs.device)
         empty=torch.full_like(book.request_slots,-1)
-        return cls(platform,book,LifecycleDirectory.empty(roots,max(1,width),device=empty.device),
+        opening_cash=take_ratio(platform.balances,torch.arange(roots,device=empty.device)*8)
+        return cls(platform,opening_cash,book,LifecycleDirectory.empty(roots,max(1,width),device=empty.device),
             LifecycleDirectory.empty(roots,max(1,width),device=empty.device),columns,life,
             current_entry_sequence,current_local_prefix,empty,empty.clone(),torch.zeros_like(columns.enabled),
             ExactInt.from_i64_tensor(torch.zeros(roots*width,dtype=torch.int64,device=empty.device)),
             torch.zeros(roots,dtype=torch.int64,device=empty.device),torch.zeros(roots,dtype=torch.bool,device=empty.device),
             torch.zeros_like(columns.row_refs),platform.fault)
 
-    def reserve_action(self,requests,conditions,principal,fee,enabled,maker_cash):
+    def funds(self):
         roots=self.fault.numel()
         at=torch.arange(roots,device=self.fault.device)*8
         available,principal_balance,fee_balance=[take_ratio(self.platform.balances,at+offset) for offset in [1,2,3]]
-        actual,maker=self.reservations.available(available,maker_cash,principal_balance,fee_balance)
-        book,event=self.reservations.reserve_action(requests,conditions,principal,fee,enabled,actual,maker,
+        local,platform_pending=self.reservations.pending()
+        pending=local+platform_pending
+        reserved=principal_balance+fee_balance+pending
+        actual=available-pending
+        maker=self.maker_cash-reserved
+        fault=self.fault | actual.fault | maker.fault | reserved.fault
+        return CashFunds(actual,maker,reserved,reserved,local,platform_pending,fault)
+
+    def reserve_action(self,requests,conditions,principal,fee,enabled):
+        funds=self.funds()
+        actual,maker=funds.actual_available,funds.maker_available
+        book,event=self.reservations.reserve_action(requests,conditions,principal,fee,enabled&(funds.fault==0),actual,maker,
             self.current_entry_sequence,self.current_local_prefix)
         return replace(self,reservations=book,current_entry_sequence=event.current_ledger_sequence,
-            current_local_prefix=event.current_local_prefix,fault=self.fault | event.fault),event
+            current_local_prefix=event.current_local_prefix,fault=self.fault | funds.fault | event.fault),event
 
     def submission_started(self,request,event,global_request,item,enabled):
         sequence=self.current_entry_sequence+self.current_entry_sequence.constant(1)
@@ -114,6 +137,9 @@ class AdmissionLifecycle:
         fault=fault | torch.where(requested,sequence_fault(next_entry),0)
         platform,result=self.platform.apply_transition(sequence,balances,outcome,economic&(fault==0),
             torch.zeros_like(economic),association_available)
+        cash_delta=take_ratio(balances,root*8)
+        maker_cash=self.maker_cash+cash_delta
+        fault=fault | torch.where(result.applied,maker_cash.fault,0)
         applicable=((outcome_kind==OUT_EVIDENCE)&((tag==3)|(tag==7)|(tag==8)|(tag==9))) | (outcome_kind==OUT_PENDING)
         use=(requested&applicable)|result.applied
         fault=fault | result.fault
@@ -166,7 +192,9 @@ class AdmissionLifecycle:
         key=self.columns.positions[index]
         same=(self.columns.positions.reshape(roots,width,-1)==key[:,None,:]).all(dim=2)&self.lifecycle.emitted
         applied=self.applied | (same&success[:,None])
-        return replace(self,platform=platform,reservations=coordinate(book,self.reservations,valid),
+        return replace(self,platform=platform,maker_cash=ExactRational(
+            maker_cash.numerator.select(success & economic,self.maker_cash.numerator),
+            maker_cash.denominator.select(success & economic,self.maker_cash.denominator)),reservations=coordinate(book,self.reservations,valid),
             orders=coordinate(orders,self.orders,valid),trades=coordinate(trades,self.trades,valid),
             current_entry_sequence=next_entry.select(success,self.current_entry_sequence),applied=applied,
             applied_sequences=_take(next_entry,root.repeat_interleave(width)).select((same&success[:,None]).flatten(),self.applied_sequences),
