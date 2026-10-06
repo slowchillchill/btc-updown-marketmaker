@@ -227,7 +227,8 @@ class AdmissionLifecycle:
         applied_fill=economic_trade & (self.lifecycle.economic_tags[root,local]==6)
         compensated=economic_trade & (self.lifecycle.economic_tags[root,local]==8)
         fault=fault | torch.where(applied_fill,applied_cost.fault | applied_fee.fault,0)
-        position_costs=self.position_costs.transition(trade_at,self.lifecycle.conditions[root,local],assets,
+        cost_asset=torch.where(self.lifecycle.economic_has_outcome[root,local],assets,-1)
+        position_costs=self.position_costs.transition(trade_at,self.lifecycle.conditions[root,local],cost_asset,
             self.lifecycle.economic_path_ordinals[root,local],applied_cost,applied_fee,applied_fill,compensated)
         trade_success,success_pools=trade_success.apply_success(self.success_pools,trades,trade_at,(trade_event|economic_trade)&(fault==0))
         fault=fault | success_pools.fault
