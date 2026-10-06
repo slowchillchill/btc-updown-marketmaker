@@ -705,7 +705,9 @@ mod tests {
         assert!(CompactHiddenMaterialReaderV1::open(&target,&source_root,1,1<<20,1<<20,|_,_,_,_| {}).is_err());
         serde_json::to_writer(File::create(target.join("manifest.json")).unwrap(),&manifest).unwrap();
         let mut original = RunCursor::open(&target.join(MEMBERS[3]),1,1<<20).unwrap();
-        let mut replacement = ExternalSorter::new(&temp.path().join("tamper-index"),&sort).unwrap();
+        let replacement_root = temp.path().join("tamper-index");
+        fs::create_dir(&replacement_root).unwrap();
+        let mut replacement = ExternalSorter::new(&replacement_root,&sort).unwrap();
         let mut removed = false;
         while let Some(row) = original.next_row().unwrap() {
             let entry:HiddenIndexEntryV1 = serde_json::from_slice(row.payload()).unwrap();
