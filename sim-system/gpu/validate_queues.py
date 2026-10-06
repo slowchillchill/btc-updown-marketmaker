@@ -206,6 +206,11 @@ def main():
         assert not fee.fault.any().cpu().item(),fee.fault.cpu().tolist()
         assert values(fee.total_micro)==[int(original['total'])]
         assert values(fee.per_fill_micro)==[int(value) for value in original['allocations']]
+    failed_price=Numbers.run_exact_batch(lambda:ExactRational.ratio(integers([1]),integers([0])))
+    rate=Numbers.run_exact_batch(lambda:ExactRational.ratio(integers([1]),integers([4])))
+    failed_fee=Numbers.run_exact_batch(lambda:allocate_taker_fee(integers([1]),failed_price,rate,4_000_000_000,1,1))
+    assert failed_fee.fault.cpu().tolist()==[1]
+    assert failed_fee.total_micro.fault.cpu().tolist()==[1] and failed_fee.per_fill_micro.fault.cpu().tolist()==[1]
     from account_state import PlatformAccountState
     account_reference=reference['account']
     enabled=torch.ones(1,dtype=torch.bool,device='cuda')
@@ -260,7 +265,7 @@ def main():
         'GTC_partial_target_applies_without_FOK_gate','maximum_price_stops_before_later_ask','original_order_total_taker_fee_H5',
         'exact_remainder_allocation_original_fill_order','taker_fee_large_exponent_strict_zero','original_SIM_account_encumbrance_and_economic_delta',
         'cancellation_principal_only_zero_is_no_delta','insufficient_available_is_rejection_without_mutation',
-        'account_underflow_no_partial_commit'],
+        'account_underflow_no_partial_commit','large_exponent_preserves_failed_price_fault'],
         'limit_cross_seconds':limit_cross_seconds,'limit_segment_seconds':limit_seconds,'capacity':queue.capacity,'elapsed_seconds':time.perf_counter()-started,
         'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
         'noe_ledger_execution_delivered':False}))

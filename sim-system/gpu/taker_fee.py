@@ -35,10 +35,6 @@ def allocate_taker_fee(base, price, rate, exponent, roots, maximum_fills):
         total_base = total_base+value
         fault = fault | value.fault | (value.sign < 0).to(torch.int32)
     fault = fault | total_base.fault
-    # 与原严格early-zero等价的物理容量充分条件；不限制量域或放宽半单位边界。
-    bits = 32*(total_base.words.shape[1]+rate.numerator.words.shape[1])
-    if 2*exponent >= bits:
-        return TakerFeeAllocation(ExactInt(zero.words,zero.sign,fault),base.constant(0),fault)
     rows = roots*maximum_fills
     root_indices = torch.arange(rows,device=base.words.device)//maximum_fills
     one = ExactRational.ratio(base.constant(1),base.constant(1))
@@ -47,6 +43,12 @@ def allocate_taker_fee(base, price, rate, exponent, roots, maximum_fills):
     input_fault = base.fault | price.fault | upper.fault
     input_fault = input_fault | ((price.numerator.sign <= 0) | (upper.order >= 0)).to(torch.int32)*filled.to(torch.int32)
     fault = fault | Numbers.combine_fault_rows(input_fault.reshape(roots,maximum_fills))
+    # 与原严格early-zero等价的物理容量充分条件；不限制量域或放宽半单位边界。
+    bits = 32*(total_base.words.shape[1]+rate.numerator.words.shape[1])
+    if 2*exponent >= bits:
+        flat_zero = base.constant(0)
+        return TakerFeeAllocation(ExactInt(zero.words,zero.sign,fault),
+            ExactInt(flat_zero.words,flat_zero.sign,fault[root_indices]),fault)
     curve = price*(one-price)
     power = one
     remaining = exponent
