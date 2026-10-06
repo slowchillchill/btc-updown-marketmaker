@@ -12,7 +12,7 @@ CPU/GPU协作准备，公共GPU环境与模型/PPO闭环；完整活动根恢复
 紧凑材料保存原快照/增量及可重建引用，不逐事件持久化全盘口。`data-pipeline/gpu/public_state.py`
 冷加载共享精确字典、原固定市场/资产身份、PM档位、质量和直接时间锚点；设备按合法组前缀查询。
 `native-inputs/gpu/input_books.py`沿原Native配方计算四个PM侧的9字段，按精确价格排序并稳定压紧
-当前正数量档位，只在尾部补齐后进入原BookEncoder。空盘口保留Unknown质量；不存在的资产坐标
+当前正数量档位，只在尾部补齐后进入原BookEncoder。尚未观察到盘口时保留Unknown质量；不存在的资产坐标
 返回错误而不补假身份。资源容量增长只改变墙钟，不丢档位或缩小合法域。
 这些能力已有真实首日工程前缀及原公共观察短链的服务器证据；尚缺完整公共字段、Binance、
 100ms窗口、hidden/SIM/NOE/Ledger/预留与合法Actor纵向闭环，以及PPO/MLflow和活动根恢复。

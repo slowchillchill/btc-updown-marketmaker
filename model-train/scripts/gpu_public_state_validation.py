@@ -23,6 +23,7 @@ def main():
     from public_state import PublicPmState
     sys.path.insert(0,str(root/'model-train/native-inputs/gpu'))
     from input_books import PmBookInputs
+    from input_pm_fields import pm_fields
     from model_train.book import BookEncoder
     from prepare import _numbers
     started = time.perf_counter()
@@ -83,13 +84,16 @@ def main():
         now[-1] = json.loads(args.original_reference.read_text())['observation_ms']
     packer = PmBookInputs(state, initial_capacity=1)
     packed = packer.pack(frame, assets, now)
+    native_fields = pm_fields(state,observation,assets,now)
     positive_rows = int(packed.mask.sum().cpu())
     if columns['slots']:
         assert positive_rows > 0, '真实来源盘口检查必须实际编码正数量档位，不能以空侧冒充'
     if len(columns['assets']) >= 2:
         assert not packed.fault.any().cpu().item()
+        assert not native_fields.fault.any().cpu().item()
     else:
         assert packed.fault.ne(0).all().cpu().item()  # 未知资产坐标返回fault，不补假身份。
+        assert native_fields.fault.ne(0).all().cpu().item()
     assert torch.all(packed.mask[:, :, 1:].to(torch.int32) <= packed.mask[:, :, :-1].to(torch.int32))
     assert torch.count_nonzero(packed.levels[~packed.mask]) == 0
     torch.manual_seed(181102)  # 当前有限盘口组件验证，不登记正式训练seed。
@@ -158,6 +162,45 @@ def main():
                 if trade['fee_rate_bps'] is not None: assert exact_value(observation.trade,4) == Fraction(trade['fee_rate_bps'])
             tick = original['tick']['value']
             if tick is not None: assert exact_value(observation.tick,1) == Fraction(tick)
+            def reference_time(field):
+                result = [0.0]*5
+                if len(field['direct_anchors']) == 1:
+                    a = field['direct_anchors'][0]
+                    r, s = a['received_at_utc_ms'],a['source_event_at_utc_ms']
+                    result[1] = signed_log(Fraction(reference['observation_ms']-r,1000))
+                    result[4] = 1.0
+                    if s is not None:
+                        result[0] = signed_log(Fraction(reference['observation_ms']-s,1000))
+                        result[2] = signed_log(Fraction(r-s,1000))
+                        result[3] = 1.0
+                return result
+            for name,width in (('best_bid_ask',28),('public_trade',18)):
+                f = original[name]
+                expected = [0.0]*width
+                expected[quality_names.index(f['quality'])] = 1.0
+                value = f['value'] if f['quality'] in ('fresh','stale') else None
+                expected[6] = float(value is not None)
+                time_fields = reference_time(f)
+                if width == 28:
+                    for member,key in enumerate(['best_bid_pusd_per_share','best_ask_pusd_per_share','spread_pusd_per_share']):
+                        start = 7+7*member
+                        if value is not None and value[key] is not None:
+                            exact = Fraction(value[key])
+                            expected[start] = float(2*exact-1) if member < 2 else signed_log(exact)
+                            expected[start+1] = 1.0
+                        expected[start+2:start+7] = time_fields
+                    actual = native_fields.bba[2,outcome]
+                else:
+                    if value is not None:
+                        expected[7] = float(2*Fraction(value['price_pusd_per_share'])-1)
+                        expected[8] = signed_log(Fraction(value['quantity_shares']))
+                        expected[9 if value['aggressor_side'] == 'BUY' else 10] = 1.0
+                        if value['fee_rate_bps'] is not None:
+                            expected[11] = signed_log(Fraction(value['fee_rate_bps']))
+                            expected[12] = 1.0
+                    expected[13:] = time_fields
+                    actual = native_fields.trade[2,outcome]
+                assert torch.equal(actual,torch.tensor(expected,dtype=torch.float32,device='cuda'))
             for side, name in enumerate(['bids','asks']):
                 book = original[name]
                 assert frame.quality[2,asset_id].cpu().item() == quality_names.index(book['quality'])
@@ -203,7 +246,7 @@ def main():
               'i64_time_coordinate_exact_difference','fault_bit_union','pm_direct_observation_fields']
     if columns['slots']:
         passed += ['exact_price_sort_current_positive_compaction','native_pm_nine_fields',
-                   'real_book_encoder_forward_backward','tail_padding_pairwise_tree']
+                   'real_book_encoder_forward_backward','tail_padding_pairwise_tree','native_pm_bba28_trade18']
     else:
         passed += ['legal_missing_book','metadata_identity_preserved_or_unknown_coordinate_fault']
     report = {'source_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),

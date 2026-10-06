@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import torch
 from prepare import _numbers
 from public_state import _take
+from projection import price_value, t5
 
 
 @dataclass(frozen=True)
@@ -97,32 +98,20 @@ class PmBookInputs:
                                               _take(frame.quantity.denominator, flat))
             valid = torch.arange(count, device=ordered.device)[None] < counts[:, None]
             def project():
-                phi = price.numerator.constant(2)*price.numerator-price.denominator
-                p, pf = phi.project(price.denominator)
+                p, pf = price_value(price,pm=True)
                 q, qf = quantity.project(operation=1)
                 best_ids = state.slots[ordered[:, :1], 2].expand(-1, count).reshape(-1)
                 best = numbers.ExactRational(_take(state.decimals.numerator, best_ids),
                                               _take(state.decimals.denominator, best_ids))
                 distance = best-price if side % 2 == 0 else price-best
                 distance_value, df = distance.project(operation=1)
-                anchor_id = frame.anchor_ids.gather(1, ordered)+1
-                times = state.anchor_times[anchor_id]
+                anchor_ids = frame.anchor_ids.gather(1, ordered)
                 has_anchor = frame.anchor_present.gather(1, ordered)
-                has_source = has_anchor & times[:, :, 0].bool()
                 now = observation_ms[:, None].expand(-1, count)
-                source = times[:, :, 1]
-                received = times[:, :, 2]
-                time_features, time_fault = [], torch.zeros_like(pf)
-                for left, right, present in ((now, source, has_source),
-                        (now, received, has_anchor), (received, source, has_source)):
-                    delta = numbers.ExactInt.from_i64_tensor(left)-numbers.ExactInt.from_i64_tensor(right)
-                    value, error = delta.project(delta.constant(1000), operation=1)
-                    time_features.append(torch.where(present, value.reshape(roots, count), 0.0))
-                    time_fault = time_fault | error
-                rows = torch.stack((p.reshape(roots, count), q.reshape(roots, count), valid.float(),
-                    *time_features, has_source.float(), has_anchor.float(),
-                    distance_value.reshape(roots, count)), dim=-1)
-                return rows, (pf | qf | df | time_fault).reshape(roots, count)
+                time_features, time_fault = t5(state,anchor_ids,has_anchor,now)
+                rows = torch.stack((p.reshape(roots,count),q.reshape(roots,count),valid.float(),
+                    *time_features.unbind(dim=-1),distance_value.reshape(roots,count)),dim=-1)
+                return rows,(pf | qf | df | time_fault.reshape(-1)).reshape(roots,count)
             rows, errors = numbers.run_exact_batch(project)
             levels[:, side, :count] = torch.where(valid[:, :, None], rows, 0.0)
             mask[:, side, :count] = valid

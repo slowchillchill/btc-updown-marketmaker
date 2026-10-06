@@ -53,6 +53,7 @@ class PublicPmObservation:
     bba: ObservedPmField
     trade: ObservedPmField
     tick: ObservedPmField
+    prefix_fault: torch.Tensor
 
 
 class PublicPmState:
@@ -191,4 +192,4 @@ class PublicPmState:
                 fault = fault | self.decimal_fault[values[:,:,index]]
             present = found & values[:,:,0].bool() if name == 'observed_ticks' else found
             fields.append(ObservedPmField(values,present,fault))
-        return PublicPmObservation(*fields)
+        return PublicPmObservation(*fields,invalid_prefix)
