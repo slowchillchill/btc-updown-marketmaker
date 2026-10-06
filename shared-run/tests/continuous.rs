@@ -3385,6 +3385,28 @@ fn gpu_registry_frozen_reference(stage:&str,view:&ActionBeforeReadV2,registry:&S
         "latest_cancel":order.latest_cancel_feedback.map(record),
         "trades":registry.order_trades(order.order_identity).map(record).collect::<Vec<_>>(),
     })).collect::<Vec<_>>();
+    // 原全部订单的来源引用用于设备连续接纳；unfinished派生读面仅作oracle。
+    let raw_orders=registry.orders().map(|order| {
+        let origin=order.origin.as_ref().map(|origin| {
+            let intent=origin.intent.intent();
+            let leg=match intent {
+                ModelIntentV1::SubmitSingleBuy { order,.. }=>Some(order),
+                ModelIntentV1::SubmitPairedBuy { orders,.. }=>orders.get(origin.batch_item_ordinal as usize),
+                _=>None,
+            };
+            let terms=leg.map(|leg|match &leg.order {
+                BuyOrderIntentV1::GtcLimit { size_shares,limit_price_pusd_per_share,post_only }=>
+                    serde_json::json!({"GtcLimit":{"size_shares":size_shares,"price":limit_price_pusd_per_share,"post_only":post_only}}),
+                other=>serde_json::json!({"unsupported_engineering_terms":format!("{other:?}")}),
+            });
+            serde_json::json!({"request":origin.intent.global_request_id(),"item":origin.batch_item_ordinal,"terms":terms})
+        });
+        serde_json::json!({"identity":order.order_identity,"origin":origin,
+            "accepted":order.accepted.map(record),"formed":order.formed.map(record),
+            "latest_lifecycle":order.latest_lifecycle.map(record),
+            "latest_cancel":order.latest_cancel_feedback.map(record),
+            "trades":registry.order_trades(order.order_identity).map(record).collect::<Vec<_>>()})
+    }).collect::<Vec<_>>();
     let commitments=view.commitments().map(|commitment|serde_json::json!({
         "request":commitment.origin.intent.global_request_id(),"item":commitment.origin.batch_item_ordinal,
         "order":commitment.order_identity,"remaining":commitment.remaining_target_shares,
@@ -3399,7 +3421,7 @@ fn gpu_registry_frozen_reference(stage:&str,view:&ActionBeforeReadV2,registry:&S
         ExecutionReadValueV1::NotApplicable=>serde_json::json!("NotApplicable"),
     };
     serde_json::json!({"stage":stage,"logical_at":view.cutoff().decision_time().logical_time_utc_ms(),
-        "orders":orders,"commitments":commitments,"request_funds":funds,
+        "orders":orders,"raw_orders":raw_orders,"commitments":commitments,"request_funds":funds,
         "pending_noe_records":view.pending_noe_record_count(),"ledger":view.ledger(),"economics":view.economics(),
         "cancel_pending":requests.pending_count,"cancel_response_counts":requests.response_counts,"cancel_latest":latest,
         "source":"original_SharedExecutionV2_ActionBeforeReadV2","post_only_fixture_not_B_Actor_domain":true})

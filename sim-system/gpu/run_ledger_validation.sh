@@ -42,6 +42,13 @@ case "$case_name" in
         echo "stage=original_SharedExecutionV2_ActionBeforeReadV2 commit=$(git rev-parse HEAD)"
         "${command[@]}" > "$artifact_dir/registry-reference.log" 2>&1
         tail -4 "$artifact_dir/registry-reference.log"
+        command=("$B_GPU_PYTHON" "$repo_root/shared-run/gpu/validate_registry.py"
+            "$artifact_dir/original-registry-single.json" "$artifact_dir/original-registry-paired.json"
+            "$artifact_dir/original-registry-market.json")
+        printf '%q ' "${command[@]}" >> "$artifact_dir/commands.txt"
+        printf '\n' >> "$artifact_dir/commands.txt"
+        "${command[@]}" > "$artifact_dir/registry-device.log" 2>&1
+        tail -1 "$artifact_dir/registry-device.log"
         ;;
     maker-read)
         run_test gpu_actual_maker_mature_day_preserves_noe_batch_and_continuous_ledger maker-day.log
