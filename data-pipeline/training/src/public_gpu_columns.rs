@@ -96,21 +96,29 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
             let group = i64::try_from(packet.groups.iter()
                 .find(|group| group.records.iter().any(|fact| fact.position == pm.position))
                 .ok_or("设备PM步骤缺公共事实组关联")?.group_position)?;
+            // 同事实内各价位Selection共享完全相同的直接源，不逐档复制其身份文本。
+            let mut shared_anchors: Vec<(SourceEvidenceRefV3, i64)> = Vec::new();
             for step in &pm.steps {
                 let sequence = builder.columns.original_pm_steps;
                 builder.columns.original_pm_steps = sequence.checked_add(1).ok_or("设备步骤位置溢出")?;
                 // 只有模型直接选择步骤产生档位锚点；每步共享一次原证据。
-                let anchor = i64::try_from(builder.columns.anchors.len())?;
                 let has_anchor = matches!(&step.change,
                     CompactPmChangeV1::InitialSnapshotFromInput {..} |
                     CompactPmChangeV1::Inline(PmStepChangeV1::Selection {..}));
-                if has_anchor {
-                    let group_id = packet.groups.iter().find(|g| g.group_position as i64 == group)
-                        .ok_or("设备锚点缺原闭组")?.group_id.clone();
-                    builder.columns.anchors.push(PublicLevelAnchorV1 {
-                        direct:step.direct.clone(),position:pm.position.clone(),group_id,
-                    });
-                }
+                let anchor = if has_anchor {
+                    if let Some((_, id)) = shared_anchors.iter().find(|(direct, _)| direct == &step.direct) {
+                        *id
+                    } else {
+                        let id = i64::try_from(builder.columns.anchors.len())?;
+                        let group_id = packet.groups.iter().find(|g| g.group_position as i64 == group)
+                            .ok_or("设备锚点缺原闭组")?.group_id.clone();
+                        builder.columns.anchors.push(PublicLevelAnchorV1 {
+                            direct:step.direct.clone(),position:pm.position.clone(),group_id,
+                        });
+                        shared_anchors.push((step.direct.clone(), id));
+                        id
+                    }
+                } else { 0 };
                 match &step.change {
                     CompactPmChangeV1::InitialSnapshotFromInput {input_record,asset,initial_tick_size_pusd_per_share,..} => {
                         let (token,bids,asks) = snapshots.get(&input_record.input_position).ok_or("设备初始盘口缺原输入快照")?;

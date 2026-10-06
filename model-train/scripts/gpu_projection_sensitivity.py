@@ -275,83 +275,6 @@ def compare_stream_runs(reference: dict, candidate: dict) -> dict:
             "scope": "固定真实源范围连续状态；前32决定组局部梯度；不设统一误差阈值，不代表TBPTT/PPO或收益验收"}
 
 
-def prepared_config(args) -> dict:
-    """只组合调用者已核验的材料与已有运行参数，不创建或执行回放。"""
-    if args.run_template is not None:
-        template = json.loads(args.run_template.read_text())
-        run = dict(template.get("run", template))
-        run.pop("preparation", None)
-        parameter_source = {"kind": "supplied_run_template", "path": str(args.run_template.resolve()),
-                            "sha256": sha(args.run_template)}
-    else:
-        # 只由显式flag选择本次NoOp机制对照；不声称这些是生产宿主时延。
-        run = {
-            "timing": {name: {"Fixed": 0} for name in ("public_delivery_delay_ms", "calculation_start_delay_ms",
-                                                        "calculation_duration_ms", "dispatch_delay_ms")},
-            "session": {"session_seed": hashlib.sha256(b"projection-real-20260915-0415").hexdigest()},
-            "admission_policy": "DualCashNoMarketLimit", "max_group_bytes": 67108864,
-            "finite_in_flight_groups": 128, "activation_id": "projection-activate",
-            "consumption_sequence_ref": "projection-noop-history-v1",
-            "noe_implementation_identity": "projection-noop-diagnostic-v1",
-        }
-        parameter_source = {
-            "kind": "explicit_noop_zero_delay_mechanism_diagnostic",
-            "host_timing": "显式零额外交付/计算/发送延迟；NoOp机制对照，不是生产默认或时延验收",
-            "capacity_source": "model-train/validation/issue-172/evidence/provenance.json:configuration_without_local_paths",
-            "seed_and_admission_source": "model-train/native-inputs/examples/replay_projection.rs:trace",
-            "seed_rule": "SHA256(run_id UTF-8)",
-        }
-    material = json.loads(args.prepared.read_text())
-    if material["schema_version"] != "prepared_historical_material_v1":
-        raise ValueError("需要公共prepare实际发布的材料描述")
-    scope = material["preparation"]["scope"]
-    if not 1788912000000 <= scope["received_start_utc_ms"] <= 1789445670000 or scope["received_end_utc_ms"] != 1789446000000:
-        raise ValueError("材料范围须在批准训练内部覆盖T−30并结束于2026-09-15 04:20 UTC")
-    if sha(args.rules) != args.rules_sha256:
-        raise ValueError("规则文件与已核摘要不符")
-    # 不使用synthetic-command或默认训练参数补缺。
-    for name in ("timing", "session", "admission_policy", "max_group_bytes", "finite_in_flight_groups",
-                 "activation_id", "consumption_sequence_ref", "noe_implementation_identity"):
-        if name not in run:
-            raise ValueError(f"已有运行参数缺少 {name}，须由root交接来源")
-    run["implementation_identity"] = json.loads(args.implementation_identity.read_text())
-    run["session"] = dict(run["session"])
-    for field, value in (("run_id", "projection-real-20260915-0415"), ("session_id", "projection-session"),
-                         ("account_id", "projection-sim-account"), ("caller_instance_id", "projection-diagnostic"),
-                         ("creation_request_id", "projection-opening"), ("response_bridge_binding_id", "projection-bridge")):
-        run["session"][field] = value
-    run["session"]["initial_account_state"] = {"available_pusd": "2000"}
-    run["strategy"] = {"strategy_id": "projection-noop-diagnostic", "strategy_rule_version": "diagnostic-noop-v1",
-                       "effective_parameters": {"submit_intents": False}}
-    run["finality_policy_path"] = str(args.finality.resolve(strict=True))
-    directory = args.run_output_dir.resolve()
-    for name, tail in (("sim_log", "sim.jsonl"), ("noe_root", "noe"), ("ledger_root", "ledger"),
-                       ("metadata_path", "run-metadata.json"), ("result_path", "historical-result.json")):
-        run[name] = str(directory / tail)
-    run["replay_progress_interval_seconds"] = 30
-    result = {"prepared": str(args.prepared.resolve()), "prepared_sha256": sha(args.prepared), "run": run,
-              "rules": {"snapshot_path": str(args.rules.resolve()), "expected_file_sha256": args.rules_sha256,
-                        "replay_causal_start_utc_ms": scope["received_start_utc_ms"]}}
-    provenance = {name: {"path": str(path.resolve()), "sha256": sha(path)} for name, path in
-                  (("prepared", args.prepared), ("rules", args.rules),
-                   ("finality", args.finality), ("implementation_identity", args.implementation_identity))}
-    sidecar = args.output.with_suffix(args.output.suffix + ".sources.json")
-    if args.output.exists() or sidecar.exists():
-        raise ValueError("配置或来源记录已存在，保留原材料")
-    semantic = {key: value for key, value in run.items() if key not in
-                ("sim_log", "noe_root", "ledger_root", "metadata_path", "result_path", "finality_policy_path")}
-    semantic.update(finality_policy_sha256=sha(args.finality), rule_snapshot_sha256=args.rules_sha256,
-                    rules_replay_causal_start_utc_ms=scope["received_start_utc_ms"])
-    semantic_sha = hashlib.sha256(json.dumps(semantic, sort_keys=True, ensure_ascii=False,
-                                            separators=(",", ":")).encode()).hexdigest()
-    dump(args.output, result)
-    dump(sidecar, {"sources": provenance, "parameter_source": parameter_source,
-                   "runtime_semantics_sha256": semantic_sha,
-                   "scope": "仅生成可审查私有配置；不加载规则、不创建运行或读取行情"})
-    return {"output": str(args.output), "sources": str(sidecar), "sha256": sha(args.output),
-            "run_output_dir_to_create_before_execution": str(directory)}
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     modes = parser.add_subparsers(dest="mode", required=True)
@@ -361,19 +284,10 @@ def main():
     compare.add_argument("--reference", required=True, type=Path)
     compare.add_argument("--candidate", required=True, type=Path)
     compare.add_argument("--output", required=True, type=Path)
-    config = modes.add_parser("config", help="由显式已交接参数生成私有prepared诊断配置，不执行")
-    parameters = config.add_mutually_exclusive_group(required=True)
-    parameters.add_argument("--run-template", type=Path)
-    parameters.add_argument("--noop-zero-delay", action="store_true", help="显式本次NoOp机制对照，不是生产时延默认")
-    for name in ("prepared", "rules", "finality", "implementation-identity", "run-output-dir", "output"):
-        config.add_argument(f"--{name}", required=True, type=Path)
-    config.add_argument("--rules-sha256", required=True)
     args = parser.parse_args()
     if args.mode == "tables":
         result = export_tables(args.gpu_output_dir.resolve())
         print(json.dumps(result, ensure_ascii=False, indent=2))
-    elif args.mode == "config":
-        print(json.dumps(prepared_config(args), ensure_ascii=False, indent=2))
     else:
         if args.output.exists():
             parser.error("比较输出已存在；保留原证据")
