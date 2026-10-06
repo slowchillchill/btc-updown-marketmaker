@@ -9267,7 +9267,7 @@ mod tests {
         }
         assert_eq!(state.fills[&1].base_units,300_000_000);
         assert_eq!(state.fills[&1].quote_units,120_000_000);
-        assert_eq!(state.fills[&1].liquidity_role,SimLiquidityRoleV1::Maker);
+        assert_eq!(state.fills[&1].liquidity_role,SimLiquidityRoleV1::EligibleMaker);
         checkpoints.push(serde_json::json!({"stage":"matched","at":1310,"state":state.gpu_order_checkpoint_for_tests("sim-1")}));
         let (next,end)=state.advance_next_rebate_clock_at(2000).unwrap();
         state=next;
@@ -9278,7 +9278,7 @@ mod tests {
         for at in [6310,7310] {
             let (next,effect)=state.advance_next_scheduled_finality_at(at,&policy,rules.snapshot()).unwrap();
             state=next;
-            maker_fee_equivalent=effect.transition.as_ref().and_then(|value|value.maker_fee_equivalent_pusd.as_ref()).map(|value|value.0.clone());
+            maker_fee_equivalent=effect.transition.as_ref().and_then(|value|value.trade_finality.maker_fee_equivalent_pusd.as_ref()).map(|value|value.0.clone());
             for effect in effect.into_lifecycle_feedback().unwrap() {
                 if let LifecycleFeedbackEffectV2::Settlement(effect)=effect {
                     settlements.push(serde_json::json!({"at":effect.platform_event_at_utc_ms,"event":effect.event}));
