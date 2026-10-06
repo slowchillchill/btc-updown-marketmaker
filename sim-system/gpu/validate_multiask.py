@@ -153,7 +153,8 @@ def main():
     artifact=os.environ.get('B_GPU_ORDER_ARTIFACT_DIR')
     if artifact:
         Path(artifact,'original-noe-reference.json').write_text(json.dumps({
-            'feedback_batches':source['feedback_batches'],'noe_records':source['noe_records']},ensure_ascii=False))
+            'feedback_batches':source['feedback_batches'],'noe_records':source['noe_records'],
+            'original_ledger_projection':source['ledger_projection']},ensure_ascii=False))
     print(json.dumps({'original_external_5share_request':True,'taker_fills':3,'checkpoints':len(source['checkpoints']),
         'same_time_consumption_fill_sequences':order,'fill_pool_capacity':pool.capacity,
         'elapsed_seconds_with_reference_reads':time.perf_counter()-started,

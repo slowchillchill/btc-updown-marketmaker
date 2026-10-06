@@ -249,6 +249,27 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
     let noe=observation.take_closed_records();
     assert!(!noe.is_empty());
     assert!(observation.take_closed_records().is_empty(),"实际领取位置不重复消费");
+    let mut ledger=ledger::LedgerWriterV1::new_with_admission_v2(ledger::AccountAdmissionPolicyV2::DualCashNoMarketLimit);
+    ledger.apply_noe_memory_v2(&observation.opening_record().unwrap()).unwrap();
+    for record in &initial_records { ledger.apply_noe_memory_v2(record).unwrap(); }
+    let mut pending=noe.clone();
+    while !pending.is_empty() {
+        let previous=pending.len();
+        let mut remaining=Vec::new();
+        for record in pending {
+            match ledger.apply_noe_memory_v2(&record).unwrap() {
+                ledger::LedgerMemoryApplyOutcomeV1::MissingEconomicAssociation |
+                ledger::LedgerMemoryApplyOutcomeV1::Applied(ledger::LedgerApplyOutcomeV1::MissingPlatformPredecessor {..})
+                    => remaining.push(record),
+                _ => (),
+            }
+        }
+        assert!(remaining.len()<previous,"真实反馈原前驱未能闭合");
+        pending=remaining;
+    }
+    let ledger_projection=ledger.projection_v2().unwrap();
+    for record in &noe { ledger.apply_noe_memory_v2(record).unwrap(); }
+    assert_eq!(ledger.projection_v2().unwrap(),ledger_projection,"原NOE位置重读不重复写账本");
     let records=noe.iter().map(|record|serde_json::json!({"record":record.record(),
         "position":record.position(),"visibility":record.visibility()})).collect::<Vec<_>>();
     let rules = &actor._rule_snapshot.snapshot().synchronized_platform_rules;
@@ -256,6 +277,7 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
         "finality_path":actor._finality_policy.normal_path(),"fee_rate":rules.fee_schedule.rate.value().to_string(),
         "fee_exponent":rules.fee_schedule.exponent,"taker_rebate_rate":actor._rule_snapshot.snapshot().project_account_rules.rebate_settlement.value.fixed_taker_rebate_rate.value().to_string(),
         "feedback_batches":feedback_batches,"noe_records":records,"initial_noe_records":initial_records.len(),
+        "ledger_projection":ledger_projection,
         "session_seed":state.session.as_ref().unwrap().session_seed.0});
     let mut child = std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
         .arg(std::env::var("B_GPU_MULTIASK_VALIDATOR").unwrap()).stdin(std::process::Stdio::piped())
