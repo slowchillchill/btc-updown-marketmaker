@@ -8355,6 +8355,45 @@ mod tests {
         };
         assert_eq!(account_delta.account_transition_seq, 5);
 
+        if let Ok(validator) = std::env::var("B_GPU_TAKER_DAY_VALIDATOR") {
+            use std::io::Write;
+            use std::process::{Command, Stdio};
+            let artifact = std::path::PathBuf::from(
+                std::env::var("B_GPU_ORDER_ARTIFACT_DIR").expect("GPU返佣验证产物目录"),
+            );
+            std::fs::create_dir_all(&artifact).unwrap();
+            let fill = &state.fills[&1];
+            let settlements = [accrual_lifecycle, day_lifecycle, paid_lifecycle]
+                .into_iter()
+                .map(|effect| serde_json::json!({
+                    "platform_event_at_utc_ms":effect.platform_event_at_utc_ms,
+                    "repeated_at_utc_ms":effect.repeated_at_utc_ms,"event":effect.event,
+                }))
+                .collect::<Vec<_>>();
+            let source = serde_json::json!({
+                "source_contract":"original_SIM_matching_Taker_rebate_v2",
+                "opening_cash":"517.50052","fill_sequence":1,
+                "matched_at":fill.matched_at_utc_ms,"base_units":fill.base_units.to_string(),
+                "quote_units":fill.quote_units.to_string(),"fee_units":fill.immediate_taker_fee_units.to_string(),
+                "finality_path":finality_policy.normal_path(),
+                "taker_rebate_rate":rules.snapshot().project_account_rules.rebate_settlement.value.fixed_taker_rebate_rate.value().to_string(),
+                "submission_deltas":accepted.account_deltas,"settlements":settlements,
+                "maturity_at":maturity_at_utc_ms,"confirmed_at":confirmed_at_utc_ms,
+                "final_available":state.account.available_pusd().to_string(),
+                "next_account_sequence":state.account.next_account_transition_seq(),
+            });
+            let wire = serde_json::to_vec_pretty(&source).unwrap();
+            std::fs::write(artifact.join("original-taker-mature-day.json"), &wire).unwrap();
+            let mut child = Command::new(std::env::var("B_GPU_PYTHON").expect("锁定GPU Python"))
+                .arg(validator).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+                .spawn().expect("启动GPU真实Taker日验证");
+            child.stdin.take().unwrap().write_all(&wire).unwrap();
+            let output = child.wait_with_output().unwrap();
+            std::fs::write(artifact.join("taker-day-report.json"), &output.stdout).unwrap();
+            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            println!("{}", String::from_utf8_lossy(&output.stdout));
+        }
+
         let (state, repeated_clock) = state
             .advance_next_rebate_clock_at(maturity_at_utc_ms)
             .expect("已消费的成熟时钟不得重复日结或付款");

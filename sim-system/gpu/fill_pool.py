@@ -170,6 +170,46 @@ class FillPool:
         result = FillPoolTransition(_take(self.sequences,coordinates),slot,transition)
         return replace(self,records=records,fault=self.fault | transition.fault),account,result
 
+    def coordinate_result(self,original,committed,fault):
+        """本次成交与日桶候选共同提交；不回滚此前已消费的义务。"""
+        population=self.roots*self.capacity
+        index=torch.arange(population,device=self.occupied.device)
+        valid=committed.repeat_interleave(self.capacity)
+        return replace(self,records=_put_record(original.records,self.records,index,valid),
+            sequences=self.sequences.select(valid,original.sequences),
+            occupied=torch.where(committed[:,None],self.occupied,original.occupied),
+            next_sequence=self.next_sequence.select(committed,original.next_sequence),fault=fault)
+
+    def enqueue_with_days(self,record,days):
+        """实际fill登记只在成交池与日桶人口均可提交时生效。"""
+        candidate,effect=self.enqueue(record)
+        days,demand=days.register(effect.sequence,record.matched_at,record.fee,effect.emitted)
+        fault=effect.fault | demand.fault
+        committed=effect.emitted & demand.committed & (fault==0)
+        candidate=candidate.coordinate_result(self,committed,fault)
+        return candidate,days,replace(effect,emitted=committed,fault=fault),demand
+
+    def advance_with_days(self,account,days,at,taker_rebate_rate):
+        """原最终性终态通知同一Taker日桶，实际应计只由原经济delta产生一次。"""
+        original_account=account
+        candidate,account,transition=self.advance_one(account,at,taker_rebate_rate)
+        event=transition.event
+        coordinates=torch.arange(self.roots,device=at.device)*self.capacity+transition.slot
+        fee=_take(self.records.fee,coordinates)
+        root=torch.arange(self.roots,device=at.device)
+        from asset_buy import take_ratio
+        contribution=take_ratio(event.rebate_delta.movement.rebates,root*4+1)
+        days,consumed=days.complete(transition.fill_sequence,fee,event.terminal,event.state==4,contribution)
+        fault=event.fault | days.fault
+        committed=event.emitted & (~event.terminal | consumed) & (fault==0)
+        candidate=candidate.coordinate_result(self,committed,fault)
+        account=account.coordinate_result(original_account,fault)
+        event=replace(event,emitted=committed,terminal=event.terminal & committed,fault=fault,
+            economic_delta=account.coordinate_delta(event.economic_delta,committed,fault),
+            failure_delta=account.coordinate_delta(event.failure_delta,committed,fault),
+            rebate_delta=account.coordinate_delta(event.rebate_delta,committed,fault))
+        return candidate,account,days,replace(transition,event=event)
+
 
 def run_fill_pool_batch(pool,compute):
     """同queue/精确字协调；compute返回末项FillPoolEffects，不推进外部状态或RNG。"""
