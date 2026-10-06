@@ -593,11 +593,18 @@ async fn real_partial_makers_fix_average_cost_and_nonterminating_fraction() {
             Decimal::new(1, 1),
         )
         .await;
+        let mut gpu_success_trace=Vec::new();
+        let mut gpu_success_seen=std::collections::BTreeSet::new();
         let mut second = false;
         let mut opposite = false;
         while driver.next_group().unwrap().is_some() {
             if !shared.apply_closed().unwrap() {
                 continue;
+            }
+            for trade in shared.ledger().economic_read().unwrap().trades().filter(|trade|trade.success_applied) {
+                if gpu_success_seen.insert(trade.trade_identity.clone()) {
+                    gpu_success_trace.push(serde_json::json!({"identity":trade.trade_identity,"fact":trade.fact}));
+                }
             }
             let at = driver
                 .decision()
@@ -663,6 +670,11 @@ async fn real_partial_makers_fix_average_cost_and_nonterminating_fraction() {
             }
         }
         assert!(shared.apply_closed().unwrap());
+        for trade in shared.ledger().economic_read().unwrap().trades().filter(|trade|trade.success_applied) {
+            if gpu_success_seen.insert(trade.trade_identity.clone()) {
+                gpu_success_trace.push(serde_json::json!({"identity":trade.trade_identity,"fact":trade.fact}));
+            }
+        }
         let read = shared.ledger().economic_read().unwrap();
         let m = read.market_totals().next().unwrap();
         let up = m
@@ -701,6 +713,21 @@ async fn real_partial_makers_fix_average_cost_and_nonterminating_fraction() {
             }
         );
         assert_eq!(m.orphan_shares[up].0, if fractional { "2" } else { "1" });
+        if let Ok(validator)=std::env::var("B_GPU_SUCCESS_POOL_VALIDATOR") {
+            assert_eq!(gpu_success_trace.len(),3,"实际三次成功人口保持原闭组顺序");
+            let cost=EconomicRational::try_from(&m.success_principal_cost_pusd[up]).unwrap();
+            let quantity=EconomicRational::from_decimal(m.success_shares[up].0.parse().unwrap());
+            let paired=EconomicRational::from_decimal(m.paired_shares.0.parse().unwrap());
+            let split=contracts::finite_attribution::split_scale12_rne_v1(&cost,&paired,&quantity).unwrap();
+            let mut child=std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap()).arg(validator)
+                .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+            serde_json::to_writer(child.stdin.take().unwrap(),&serde_json::json!({"trace":gpu_success_trace,"market":m,
+                "up_token":UP_TOKEN_ID,"down_token":DOWN_TOKEN_ID,"allocated_up_cost":split.allocated.public(),
+                "remaining_up_cost":split.remaining.public(),"fractional":fractional})).unwrap();
+            let output=child.wait_with_output().unwrap();
+            assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+            eprintln!("gpu_two_leg_success_pool={}",String::from_utf8(output.stdout).unwrap());
+        }
         driver.stop_and_drain().unwrap();
     }
 }
