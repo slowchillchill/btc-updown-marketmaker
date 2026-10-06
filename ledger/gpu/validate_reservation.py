@@ -13,7 +13,6 @@ def validate(source):
     begin,reserved,sent=stages[:3]
     roots=torch.tensor([0],device='cuda')
     enabled=torch.tensor([True],device='cuda')
-    zero=integers([0])
     cost=Numbers.run_exact_batch(lambda:limit_buy_cost(integers([500]),rational(['0.3']),rational([source['fee_rate']]),
         source['fee_exponent'],post_only=torch.tensor([False],device='cuda'),minimum_principal_micro=integers([1_000_000])))
     principal=Numbers.run_exact_batch(lambda:type(rational(['0'])).ratio(cost.principal_micro,cost.principal_micro.constant(1_000_000)))
@@ -46,6 +45,9 @@ def validate(source):
         integers([sent['projection']['ledger_entry_seq']+1]),enabled))
     assert not changed.any().cpu().item() and values(again.last_sequences)==values(book.last_sequences)
     # 真实领取中平台接受先到、经济占款随后；序号这里只由原Ledger对照提供。
+    invalid=Numbers.run_exact_batch(lambda:book.definitive(roots,enabled,enabled,integers([1<<64]),enabled))
+    assert invalid.fault.cpu().tolist()==[1] and invalid.statuses.cpu().tolist()==book.statuses.cpu().tolist()
+    assert values(invalid.last_sequences)==values(book.last_sequences)
     pending=next(row for row in stages[3:] if row['request']['status']=='PlatformConfirmedPendingEconomicFact')
     converted=next(row for row in stages[3:] if row['request']['status']=='Converted')
     book=Numbers.run_exact_batch(lambda:book.definitive(roots,enabled,torch.tensor([False],device='cuda'),

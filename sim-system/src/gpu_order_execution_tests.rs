@@ -218,7 +218,7 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
     #[cfg(feature="shared-execution")]
     let mut reservation_checkpoints=Vec::new();
     #[cfg(feature="shared-execution")]
-    let mut source_ledger={
+    let source_ledger={
         let mut ledger=ledger::LedgerWriterV1::new_with_admission_v2(ledger::AccountAdmissionPolicyV2::DualCashNoMarketLimit);
         ledger.apply_noe_memory_v2(&observation.opening_record().unwrap()).unwrap();
         for record in &initial_records { ledger.apply_noe_memory_v2(record).unwrap(); }

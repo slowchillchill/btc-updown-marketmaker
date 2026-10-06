@@ -26,6 +26,12 @@ def grow_integer(value,roots,old,new,fill=0):
         torch.cat([fault,append.fault.reshape(roots,new-old)],dim=1).flatten())
 
 
+def sequence_fault(value,*,positive=False):
+    upper=value.compare(value.constant((1<<64)-1))
+    return value.fault | upper.fault | ((upper.order>0)|(value.sign<0)|
+        ((value.sign==0) if positive else torch.zeros_like(value.sign,dtype=torch.bool))).to(torch.int32)
+
+
 def take_root(value,index,width):
     return _take(value,torch.arange(index.numel(),device=index.device)*width+index)
 
@@ -119,7 +125,7 @@ class ReservationBook:
         zero=ExactRational.ratio(current_ledger_sequence.constant(0),current_ledger_sequence.constant(1))
         total=zero
         new=[]
-        fault=self.fault.clone()
+        fault=self.fault | sequence_fault(current_ledger_sequence) | sequence_fault(current_local_prefix)
         for column in range(width):
             cached=(self.request_slots==requests[:,column,None]).any(dim=1)
             prior=((requests[:,:column]==requests[:,column,None])&enabled[:,:column]).any(dim=1)
@@ -158,7 +164,6 @@ class ReservationBook:
             reserved=reserved&(fault==0)
             fresh=fresh&(fault==0)
             place=torch.where(found,old,vacant)
-            location=root_index*self.capacity+place
             mask=torch.zeros_like(book.request_slots,dtype=torch.bool).scatter(1,place[:,None],fresh[:,None])
             full_sequence=_take(candidate_sequence,root_index.repeat_interleave(self.capacity))
             root_seqmask=torch.zeros_like(mask).scatter(1,place[:,None],reserved[:,None])
@@ -193,11 +198,18 @@ class ReservationBook:
 
     def submission_started(self,request,event,ledger_sequence,enabled):
         roots,width=self.request_slots.shape
+        for column in [request,event]:
+            if column.shape!=(roots,) or column.dtype!=torch.int64 or column.device!=self.fault.device:
+                raise TypeError('预留发送目录须同设备int64[roots]')
+        if enabled.shape!=(roots,) or enabled.dtype!=torch.bool or enabled.device!=self.fault.device:
+            raise TypeError('预留发送mask须同设备bool[roots]')
         found=(self.request_slots==request[:,None])&(self.outcomes==RESERVED)
         old_event=(self.event_slots==event[:,None]).any(dim=1)
         at=found.to(torch.int32).argmax(dim=1)
         eligible=enabled&~old_event&(self.statuses.gather(1,at[:,None]).flatten()==BEFORE_SEND)
         fault=self.fault | (enabled&~old_event&~found.any(dim=1)).to(torch.int32)
+        fault=fault | torch.where(enabled,sequence_fault(ledger_sequence,positive=True)|
+            ((request<0)|(event<0)).to(torch.int32),0)
         vacant=self.event_slots<0
         enough=vacant.any(dim=1)
         required=torch.maximum((self.request_slots>=0).sum(1),(self.event_slots>=0).sum(1)+eligible.to(torch.int64))
@@ -212,11 +224,18 @@ class ReservationBook:
             event_sequences=expanded.select(event_mask.flatten(),self.event_sequences),fault=fault),required,use
 
     def definitive(self,request,accepted,economic_applied,ledger_sequence,enabled):
+        roots=self.fault.numel()
+        if request.shape!=(roots,) or request.dtype!=torch.int64 or request.device!=self.fault.device:
+            raise TypeError('预留确定结果请求目录须同设备int64[roots]')
+        for mask in [accepted,economic_applied,enabled]:
+            if mask.shape!=(roots,) or mask.dtype!=torch.bool or mask.device!=self.fault.device:
+                raise TypeError('预留确定结果mask须同设备bool[roots]')
         found=(self.request_slots==request[:,None])&(self.outcomes==RESERVED)
         at=found.to(torch.int32).argmax(dim=1)
         status=self.statuses.gather(1,at[:,None]).flatten()
         mutable=(status==BEFORE_SEND)|(status==SUBMITTED)|(status==PLATFORM_PENDING)
         fault=self.fault | (enabled&~found.any(dim=1)).to(torch.int32)
+        fault=fault | torch.where(enabled,sequence_fault(ledger_sequence,positive=True)|(request<0).to(torch.int32),0)
         next_status=torch.where(accepted,torch.where(economic_applied,CONVERTED,PLATFORM_PENDING),RELEASED)
         change=enabled&mutable&(status!=next_status)&(fault==0)
         mask=torch.zeros_like(found).scatter(1,at[:,None],change[:,None])
