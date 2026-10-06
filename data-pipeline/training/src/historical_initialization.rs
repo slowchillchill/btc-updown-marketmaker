@@ -339,3 +339,64 @@ impl MetadataInitializationSelectionV1 {
         Ok(Sha256Hex(format!("{:x}", hash.finalize())))
     }
 }
+
+/// 工程短前缀从原元数据文件选择必要真实前序；只给出可审查配置，不签发数据验收。
+/// 每个condition的首个目标接纳若不是Snapshot，就需要所选前序清单内的真实Snapshot。
+pub fn select_prefix_initialization_config_v1(
+    target_files: &[PublicFiniteFileV1], preceding_manifest: &std::path::Path,
+    received_start: i64, received_end: i64, rows: usize, bytes: usize,
+) -> RecordingResult<MetadataInitializationConfigV1> {
+    let mut first: BTreeMap<String, (MetadataOrder, PolymarketMetadataRowKind)> = BTreeMap::new();
+    for file in target_files.iter().filter(|f| f.source_kind == "polymarket_market_metadata") {
+        for batch in open_finite_public_input_v1(file, rows, bytes)? {
+            for row in batch? {
+                let Some(metadata) = existing(&row) else { continue; };
+                if metadata.timestamp_received < received_start || metadata.timestamp_received >= received_end { continue; }
+                let source = source_evidence_v3_from_typed_raw_v2(&row)?;
+                let coordinate = order(metadata, &source.source_message_id);
+                let current = first.entry(metadata.condition_id.clone())
+                    .or_insert_with(||(coordinate.clone(),metadata.metadata_row_kind));
+                if coordinate < current.0 { *current = (coordinate,metadata.metadata_row_kind); }
+            }
+        }
+    }
+    let required: BTreeSet<_> = first.into_iter()
+        .filter(|(_,(_,kind))| *kind != PolymarketMetadataRowKind::MetadataSnapshot)
+        .map(|(condition,_)|condition).collect();
+    let manifest_path = std::fs::canonicalize(preceding_manifest)?;
+    let raw = crate::read_daily_manifest(&manifest_path)?;
+    let manifest: Manifest = serde_json::from_slice(&raw)?;
+    let mut snapshots: BTreeMap<String,(MetadataOrder,Sha256Hex)> = BTreeMap::new();
+    let mut relative_paths = Vec::new();
+    for file in manifest.files.iter().filter(|f| f.source_kind == "polymarket_market_metadata") {
+        let facts = PublicFiniteFileV1 {
+            path:manifest_path.parent().unwrap().join(&file.path), source_kind:file.source_kind.clone(),
+            schema_version:file.schema_version.clone(), bytes:file.bytes, rows:file.rows, sha256:file.sha256.clone(),
+        };
+        for batch in open_finite_public_input_v1(&facts, rows, bytes)? {
+            for row in batch? {
+                let Some(metadata) = existing(&row) else { continue; };
+                if metadata.metadata_row_kind != PolymarketMetadataRowKind::MetadataSnapshot
+                    || !required.contains(&metadata.condition_id) || metadata.timestamp_received >= received_start { continue; }
+                let source = source_evidence_v3_from_typed_raw_v2(&row)?;
+                let coordinate = order(metadata,&source.source_message_id);
+                snapshots.entry(metadata.condition_id.clone())
+                    .and_modify(|old| { if coordinate < old.0 { *old = (coordinate.clone(),source.source_message_id.clone()); } })
+                    .or_insert((coordinate,source.source_message_id));
+            }
+        }
+        relative_paths.push(file.path.clone());
+    }
+    let missing:Vec<_> = required.iter().filter(|condition| !snapshots.contains_key(*condition)).collect();
+    if !missing.is_empty() {
+        return Err(format!("原前序清单缺少目标首行之前的真实身份Snapshot: {missing:?}").into());
+    }
+    Ok(MetadataInitializationConfigV1 {
+        files:vec![MetadataInitializationFileSelectionV1 {manifest_path,relative_paths}],
+        markets:snapshots.into_iter().map(|(condition,(_,snapshot_source_message_id))|MetadataInitializationMarketV1 {
+            condition_id:ConditionId(condition),snapshot_source_message_id,
+        }).collect(),
+        received_start_utc_ms:received_start,received_end_utc_ms:received_end,
+        purpose:"issue-181-engineering-prefix-real-metadata-initialization".into(),
+    })
+}

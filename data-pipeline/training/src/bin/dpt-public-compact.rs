@@ -2,7 +2,7 @@
 use data_pipeline_training::{
     compact_public::{CompactPublicPreparationConfigV1, PublicCompactReaderV1, PublicCompactWriterV1, consume_historical_merge_facts_v1},
     gpu_initial_sort::GpuInitialRunOrderV1,
-    historical_initialization::MetadataInitializationSelectionV1,
+    historical_initialization::{MetadataInitializationSelectionV1, select_prefix_initialization_config_v1},
     historical_preparation_progress::{HistoricalPreparationNoticeV1 as Notice, HistoricalPreparationNotifierV1},
     public_replay::{HISTORICAL_SOURCE_HEAD_ORDERING_VERSION, prepare_historical_finite_files_with_initial_order_v1},
 };
@@ -10,6 +10,18 @@ use std::{error::Error, fs::File, path::Path, sync::Arc, time::Instant};
 
 fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     let args: Vec<_> = std::env::args().collect();
+    if args.len() == 5 && args[1] == "--initialize" {
+        let mut config: CompactPublicPreparationConfigV1 = serde_json::from_reader(File::open(&args[2])?)?;
+        let started = Instant::now();
+        eprintln!("{}",serde_json::json!({"stage":"select_real_metadata_initialization","preceding_manifest":args[3]}));
+        config.initialization = Some(select_prefix_initialization_config_v1(&config.files,Path::new(&args[3]),
+            config.received_start_utc_ms,config.received_end_utc_ms,config.canonical.decode_batch_rows,
+            config.canonical.max_decode_batch_bytes)?);
+        serde_json::to_writer(std::fs::File::create_new(&args[4])?, &config)?;
+        eprintln!("{}",serde_json::json!({"stage":"selected_real_metadata_initialization",
+            "markets":config.initialization.as_ref().unwrap().markets.len(),"elapsed_seconds":started.elapsed().as_secs_f64()}));
+        return Ok(());
+    }
     if args.len() == 4 && args[1] == "--inspect" {
         let mut reader = PublicCompactReaderV1::open(Path::new(&args[2]), args[3].parse()?)?;
         let mut inputs = 0_u64;

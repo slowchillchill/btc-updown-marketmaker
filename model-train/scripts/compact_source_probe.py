@@ -27,7 +27,7 @@ def main():
             'max_temp_bytes':64*1024**3}
     config = {'files':files,'received_start_utc_ms':beginning,'received_end_utc_ms':args.end_ms,
               'work_root':str(args.work_root),'initialization':None,
-              'header':{'input_stream_id':'issue-181-real-source-short-v1',
+              'header':{'input_stream_id':'issue-181-real-source-short-'+args.hour,
                         'canonical_rule_version':'issue-181-public-core-engineering-v1',
                         'observation_version':'public-observation-v1',
                         'ordering_version':'historical-source-head-v2',
