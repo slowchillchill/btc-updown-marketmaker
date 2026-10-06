@@ -534,6 +534,13 @@ impl MarketStateStoreV2 {
     }
 
     #[cfg(test)]
+    pub(crate) fn asset_state_for_gpu_tests(&self, condition: &str, token: &str)
+        -> (bool, Option<Decimal>, MarketDataQuality) {
+        let asset = &self.markets[condition].assets[token];
+        (asset.initialized, asset.current_tick_size_pusd_per_share, asset.quality)
+    }
+
+    #[cfg(test)]
     pub(crate) fn external_quantity_for_tests(
         &self,
         condition_id: &str,

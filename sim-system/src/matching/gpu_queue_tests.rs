@@ -1,6 +1,7 @@
 //! 原生产FIFO状态对照GPU候选。只测试队列，不伪造NOE或账户经济事实。
 use super::*;
 use serde_json::{Value,json};
+use contracts::ResyncQuality;
 
 fn describe(asset:&AssetQueueV2,side:BookSide,price:Decimal)->Value {
     let levels = match side {BookSide::Bid=>&asset.bids,BookSide::Ask=>&asset.asks};
@@ -13,6 +14,37 @@ fn describe(asset:&AssetQueueV2,side:BookSide,price:Decimal)->Value {
             "kind":"account","order":platform_order_id,"remaining":remaining_base_units.to_string()}),
     }).collect();
     json!({"debt":queue.account_taker_depletion_debt_units.to_string(),"segments":segments})
+}
+
+/// 原合法步骤直接经过原normalizer/FIFO的只读测试基线，不生成经济反馈。
+pub(crate) struct HiddenQueueReference {
+    assets: std::collections::BTreeMap<String,AssetQueueV2>,
+}
+impl HiddenQueueReference {
+    pub(crate) fn new() -> Self { Self {assets:Default::default()} }
+    pub(crate) fn apply(&mut self, event:&NormalizedMarketEventV2<'_>) {
+        match event {
+            NormalizedMarketEventV2::InitialL2Snapshot {asset,bids,asks,..}=>{
+                let bids:Vec<_>=bids.iter().map(|v|(v.price_pusd_per_share,micro_units_v1(v.quantity_shares).unwrap())).collect();
+                let asks:Vec<_>=asks.iter().map(|v|(v.price_pusd_per_share,micro_units_v1(v.quantity_shares).unwrap())).collect();
+                assert!(self.assets.insert(asset.token_id.0.clone(),AssetQueueV2::from_initial_levels(&bids,&asks).unwrap()).is_none());
+            },
+            NormalizedMarketEventV2::LevelExecutionTransition {transition,price_pusd_per_share,quantity_before_shares,quantity_after_shares}=>{
+                self.assets.get_mut(&transition.asset.token_id.0).unwrap().apply_level_transition(transition.side,
+                    *price_pusd_per_share,micro_units_v1(*quantity_before_shares).unwrap(),micro_units_v1(*quantity_after_shares).unwrap()).unwrap();
+            },
+            NormalizedMarketEventV2::QualityBoundary {boundary,resync} if *resync==ResyncQuality::Required=>{
+                if let QualityScopeV1::Asset(asset)=&boundary.scope {
+                    if let Some(queue)=self.assets.get_mut(&asset.token_id.0) {queue.clear_external_segments();}
+                }
+            },
+            _=>{},
+        }
+    }
+    pub(crate) fn describe(&self,slots:&[(String,BookSide,Decimal)]) -> Vec<Value> {
+        slots.iter().map(|(token,side,price)|self.assets.get(token)
+            .map(|asset|describe(asset,*side,*price)).unwrap_or_else(||json!({"debt":"0","segments":[]}))).collect()
+    }
 }
 
 #[test]

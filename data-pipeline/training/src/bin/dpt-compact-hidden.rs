@@ -20,9 +20,28 @@ fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         eprintln!("{}",serde_json::json!({"stage":stage,"member":member,
             "completed":completed,"total":total,"unit":if member=="inputs" {"inputs"} else {"bytes"},"elapsed_seconds":started.elapsed().as_secs_f64()}));
     };
-    if args.len()==7 && args[1]=="--inspect" {
+    if args.len()==7 && (args[1]=="--inspect" || args[1]=="--gpu-pm-buckets") {
         let mut reader = CompactHiddenMaterialReaderV1::open_with_progress_interval(Path::new(&args[2]),Path::new(&args[3]),
             args[4].parse()?,args[5].parse()?,args[6].parse()?,interval,publication)?;
+        if args[1]=="--gpu-pm-buckets" {
+            use std::io::Write;
+            let stdout = std::io::stdout();
+            let mut output = std::io::BufWriter::new(stdout.lock());
+            let mut count = 0_u64;
+            let mut last = Instant::now();
+            while let Some(bucket) = data_pipeline_training::compact_hidden_gpu::next_compact_hidden_gpu_bucket_v1(&mut reader)? {
+                serde_json::to_writer(&mut output,&bucket)?;
+                output.write_all(b"\n")?;
+                count += 1;
+                if !interval.is_zero() && last.elapsed()>=interval {
+                    eprintln!("{}",serde_json::json!({"stage":"hidden_gpu_source","buckets":count,
+                        "elapsed_seconds":started.elapsed().as_secs_f64()}));
+                    last=Instant::now();
+                }
+            }
+            output.flush()?;
+            return Ok(());
+        }
         let mut buckets = 0_u64;
         let mut steps = 0_u64;
         let mut references = 0_u64;
@@ -44,7 +63,7 @@ fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         return Ok(());
     }
     if args.len()!=6 {
-        return Err("用法: dpt-compact-hidden [--progress-interval-seconds N (0关闭)] <source-compact> <target> <config.json> <locked-python> <same-commit-sort_worker.py>; --inspect <hidden> <source> <rows> <bytes> <max-packet-bytes>".into());
+        return Err("用法: dpt-compact-hidden [--progress-interval-seconds N (0关闭)] <source-compact> <target> <config.json> <locked-python> <same-commit-sort_worker.py>; --inspect 或 --gpu-pm-buckets <hidden> <source> <rows> <bytes> <max-packet-bytes>".into());
     }
     let value: serde_json::Value = serde_json::from_reader(File::open(&args[3])?)?;
     if value["sort"]["merge_workers"].as_u64().is_none() {

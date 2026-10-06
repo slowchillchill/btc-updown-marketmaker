@@ -9210,4 +9210,4 @@ fn maker_fee_equivalent(
 
 #[cfg(test)]
 #[path = "matching/gpu_queue_tests.rs"]
-mod gpu_queue_tests;
+pub(crate) mod gpu_queue_tests;

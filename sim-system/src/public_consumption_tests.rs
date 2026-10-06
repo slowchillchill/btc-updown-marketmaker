@@ -295,6 +295,11 @@ fn recorded_books(root: &Path) -> PublicObservationCoreV1 {
     writer.stabilize().unwrap();
     core
 }
+
+mod gpu_hidden_tests {
+    use super::*;
+    include!("gpu_hidden_tests.rs");
+}
 async fn public_execution(
     path: &Path,
     core: &PublicObservationCoreV1,

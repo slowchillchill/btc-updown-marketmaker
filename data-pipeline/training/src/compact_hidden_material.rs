@@ -455,6 +455,15 @@ impl CompactHiddenMaterialReaderV1 {
         result
     }
 
+    /// 同一已验证原消息的市场身份与步骤；供所属SIM批次转换，不复制整消息载荷。
+    /// 读取/恢复只提供材料，不推进hidden运行前沿或公开反馈可见性。
+    pub fn restore_step_with_market(&mut self, reference: &HiddenDerivedStepRefV1)
+        -> RecordingResult<(MarketIdentityV2, PmReductionStepV1<'static, SourceEvidenceRefV3>)> {
+        let step = self.restore_step(reference)?;
+        let market = self.cached_message.as_ref().unwrap().message.market.clone();
+        Ok((market, step))
+    }
+
     fn restore_step_inner(&mut self, reference: &HiddenDerivedStepRefV1) -> RecordingResult<PmReductionStepV1<'static, SourceEvidenceRefV3>> {
         self.load_message(reference.canonical_record_position)?;
         let packet = self.cached_message.as_ref().unwrap();
