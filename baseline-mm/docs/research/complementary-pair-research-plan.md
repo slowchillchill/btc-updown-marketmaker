@@ -1,6 +1,8 @@
 # 互补配对策略可执行研究计划
 
-当前 A 已恢复。来源健康、无消息重评和发送前失效已由 #241、#185/PR #248 交付。当前来源健康研究直接查询Parquet，按文件或必要重叠文件组即时汇总，不先累计十八日raw表。准确任务见[#185](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)。此前两次完整core准备均未形成完整材料；随后 `fd5581c8` 的全期列式导入又被systemd-oomd终止，study未启动。必要失败证据保持原身份。十八日主要来源原始到达延迟描述统计已完成，但尚不是有效消息健康分布或正式阈值。用户取消新增小样本试验；当前修正的完整S/A、冻结验证和经营研究结果仍未完成。
+当前 A 已恢复。来源健康、无消息重评和发送前失效已由 #241、#185/PR #248 交付。当前来源健康研究直接查询Parquet，按文件或必要重叠文件组即时汇总，不先累计十八日raw表。准确任务见[#185](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)。此前两次完整core准备均未形成完整材料；随后 `fd5581c8` 的全期列式导入又被systemd-oomd终止，study未启动。必要失败证据保持原身份。十八日主要来源原始到达延迟描述统计已完成，但尚不是有效消息健康分布或正式阈值。用户取消新增小样本试验；完整S/A、冻结验证和经营研究结果仍未完成。
+
+v6源码 `6a31a28d1bc9e250acf1474cd1271201f547a57a` 已在获批独立研究保护下实际执行prepare，墙钟20分27.42秒、退出码1。进程峰值RSS22487860KiB（约21.45GiB），研究cgroup峰值31949815808字节（约29.76GiB），swap为0；该次失败不是OOM。身份投影仅接受metadata_snapshot，遗漏了合法market_state_transition所携带的固定身份，未发布完整材料，study未启动。本次最小修复使用metadata通用固定身份字段，保持冲突检查和原行接收/准入可见时间；修复头尚未重跑。实际失败与修复分流见[#185记录](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185#issuecomment-6019444363)。
 
 本计划交付 [#185 当前任务3](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)的方法与执行前置，遵守 [D-0270](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5933292905)。原准入审计已完成，事实见[输入资格报告](complementary-pair-input-readiness.md)。首五分钟原失败[历史结果](complementary-pair-material-trial-20260909-0000-0005.md)保持；D-0276批准的#196由PR #197完成公共初始化修复及收尾后，同一首五分钟原prepare和公共统计已成功，见[初始化修复后结果](complementary-pair-material-trial-initialized-20260909-0000-0005.md)。本范围正常公共／隐藏材料已就绪；D-0277下的[首五分钟因果历史与结算窗诊断](complementary-pair-causal-input-20260909-0000-0005.md)已实际执行，281个spot来源及8个冻结截止、60秒接收轴持价近似可复核。该旧五分钟范围目标terminal未观察；后续[两市场公共材料、冻结特征与事后标签连接](complementary-pair-causal-labels-20260909-0000-0012.md)已完成UTC9月9日00:00—00:12新原prepare及一次共享公共读取器诊断，两目标各8冻结与右边界不倒灌，事后各自Up/Fresh已连接。生产概率、正式参数与盈利仍未验证，完整研究资源安排尚未闭合。本轮没有参数搜索、策略回测或收益比较。本文列明后续任务可执行的顺序、输入、输出与可推翻证据，不把方法候选写成已测结果或正式风险默认值。
 
@@ -37,7 +39,7 @@
 4. 原四折先拟合每日bins并写冻结候选，再直接读取对应验证窗。保留窗前已可见种子和连续episode，输出逐日及逐资产三态、超限、切换和删失。最后只9—23日拟合，冻结后比较24—26日开发段。2/4/8倍率仍是待验证假设。
 5. 中文结果与机器摘要按实际源码和执行证据报告。当前未新增小样本试验，不以旧小样本证明容量。正式normal/max未采用，来源健康研究不产生经营账户或收益。
 
-当前连接为内存DuckDB，必要时使用显式临时目录spill，不创建持久工作数据库。整进程共用24线程和8GiB引擎预算；该预算不是RSS上界。准确配置、输出与限制见[直接Parquet研究说明](complementary-pair-source-health-two-layer.md)。原公共录制入口继续服务需要完整行情和账本的研究；健康统计不默认执行宽JSON重写、完整盘口/core或两遍宽外排。
+当前连接为内存DuckDB，必要时使用显式临时目录spill，不创建持久工作数据库。整进程共用24线程和8GiB引擎预算；该预算不是RSS上界。用户已批准独立研究保护并启动，实际读回MemoryHigh48GiB、MemoryMax64GiB、MemorySwapMax0、OOMPolicy=stop；研究与Codex位于不同cgroup。8GiB仍是DuckDB共享引擎预算，不是RSS上界；64GiB限制独立研究cgroup，也不是完成保证。该保护依据[D-0304](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6018959504)，不改变来源统计和候选方法。准确配置、输出与限制见[直接Parquet研究说明](complementary-pair-source-health-two-layer.md)。原公共录制入口继续服务需要完整行情和账本的研究；健康统计不默认执行宽JSON重写、完整盘口/core或两遍宽外排。
 
 ## 3. 概率与跨源候选的形成
 

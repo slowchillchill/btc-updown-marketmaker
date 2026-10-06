@@ -1,6 +1,6 @@
 # 直接 Parquet 查询与两层来源健康研究
 
-来源健康研究直接查询 Parquet 的必要列，用于形成连续时间分布和候选阈值。当前任务见[#185](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)，流程依据[D-0302](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6013334211)。当前修正尚无完整研究结果，不正式采用normal/max。
+来源健康研究直接查询 Parquet 的必要列，用于形成连续时间分布和候选阈值。当前任务见[#185](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)，流程依据[D-0302](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6013334211)。v6实际准备已失败，本次身份修复尚未重跑；仍无完整研究结果，不正式采用normal/max。
 
 ## 当前入口与职责
 
@@ -16,6 +16,8 @@
 
 随后工程头 `fd5581c8ec88a783d35a23e63f98177df5a5eb11` 的列式尝试仍累计全期raw表。该次运行被systemd-oomd终止，最后进程RSS约108.93GiB，study未启动。原80GiB配置不是RSS上界，旧APPROVED不覆盖当前修正。事故和新方向见[#185记录](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185#issuecomment-6015835991)。
 
+v6源码 `6a31a28d1bc9e250acf1474cd1271201f547a57a` 已在获批独立研究保护下实际执行prepare，墙钟20分27.42秒、退出码1。进程峰值RSS22487860KiB（约21.45GiB），研究cgroup峰值31949815808字节（约29.76GiB），swap为0；该次失败不是OOM。身份投影仅接受metadata_snapshot，遗漏了合法market_state_transition所携带的固定身份，未发布完整材料，study未启动。本次最小修复使用metadata通用固定身份字段，保持冲突检查和原行接收/准入可见时间；修复头尚未重跑。实际失败与修复分流见[#185记录](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185#issuecomment-6019444363)。
+
 十八日主要来源的原始到达延迟描述统计已由直接SQL查询完成。PM按book/price_change原始消息计数，未做业务去重、资产展开和市场窗口过滤。该结果不能冒充有效消息分布，也不能直接进入normal/max拟合。当前S/A查询按原有效消息和窗口口径另行形成必要充分统计，不重复原始描述查询。
 
 ## 必要列与最小状态
@@ -26,9 +28,11 @@
 | Binance depth | received/event、snapshot/update ID、local_u_before、stitch_verdict、epoch/generation、admission坐标 | 复用采集器判定；Applied刷新，缺快照/缺口要求同步，Snapshot恢复。旧事件时间持续到达仍更新received |
 | Binance trade | received/trade_time(T)、record_kind、native trade ID、epoch/generation、admission坐标 | 非法输入不刷新；原生ID跨采集epoch连续；重复抑制，倒退ID维持原失败，冲突比较T及原公共规范载荷 |
 | Chainlink spot/TWAP60 | received/payload time、合法freshness分类；TWAP窗口与admission；spot必要原生身份 | Fresh与Stale都刷新；四类异常保留旧有效消息和质量，不因异常或年龄自动切换TWAP |
-| metadata | condition/assets、市场窗口、身份Snapshot时间、实际规则字段 | 原初始化仍由 `MetadataInitializationSelectionV1` 精确选择原文件和两Snapshot；已观察规则映射复用公共纯原语 |
+| metadata | condition/assets、市场窗口、身份记录时间、实际规则字段 | 原初始化仍由 `MetadataInitializationSelectionV1` 精确选择原文件和两Snapshot；已观察规则映射复用公共纯原语 |
 
 `price_changes`在当前查询单元内只投影资产列表，不保留价格、数量、盘口或完整谱系。输入端的嵌套列物理读取由引擎决定，不能把输出投影误说成所有嵌套列均已物理裁剪。重复键先由必要列定位。只有重复候选所在的行组才读取完整行，用原Rust类型解析、来源身份或规范成交载荷核对。PM新坐标上的有效同值消息保留，重复坐标不刷新。候选核对不为每条唯一PM消息构造JSON身份。
+
+各类metadata均携带通用固定身份；已有状态转换和终态/轮询记录不因缺少metadata_snapshot标签而失去身份。V6锚点请求失败只表示查询未取得锚点，其采集生产链仍保留已发现市场的固定身份。本研究复用这些字段，不将其他metadata种类改称完整core身份快照，不从slug猜测。known_at仍取实际身份记录的接收/准入时间，不回填更早verification时间。真实缺身份、早于身份和非注册资产分别报告，原拒绝条件未扩大。
 
 连接使用 `duckdb.connect(':memory:')`。段内临时关系在汇总后释放，不累计全期raw、events、states、changes或arrivals。引擎可按既有 `temp_directory` 溢写临时数据；最终只持久化小型汇总、必要身份与种子。段间保留最后有效直接时间、同步状态、必要去重连续性和未闭合段，不在Python保存全量行或区间Vec。未知连接代次和同步上下文单列，可与有效年龄分布重叠。它们不构成另一个交易拒绝门。没有TTL、历史市场淘汰、去重截断或按日重置core；新入口根本不构建完整core。
 
@@ -84,7 +88,7 @@ SQL以自然文件为单元；原生范围重叠时合并必要文件。单次�
   >"$STUDY_STDOUT" 2>"$STUDY_STDERR"
 ```
 
-准确参数、源码副本、辅助工具与日志路径在私有交接中绑定。启动和真实退出证据由实际执行记录保存。本次没有新增cgroup、MemoryMax、swap设置或其他系统保护。参数文件不是批准账本。
+准确参数、源码副本、辅助工具与日志路径在私有交接中绑定。启动和真实退出证据由实际执行记录保存。用户已批准独立研究保护并启动，实际读回MemoryHigh48GiB、MemoryMax64GiB、MemorySwapMax0、OOMPolicy=stop；研究与Codex位于不同cgroup。8GiB仍是DuckDB共享引擎预算，不是RSS上界；64GiB限制独立研究cgroup，也不是完成保证。该保护依据[D-0304](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6018959504)，不改变来源统计和候选方法。参数文件不是批准账本。
 
 ## 历史验证与当前限制
 
@@ -92,7 +96,7 @@ SQL以自然文件为单元；原生范围重叠时合并必要文件。单次�
 
 代表测试覆盖原构造/解析入口、跨文件重复与冲突、资产和代际、缺口/快照恢复、持续旧事件、Chainlink异常保留、同毫秒样本和最终状态、真实断选、未知分母、首尾/午夜/删失、normal=max=0、未来折不泄漏和一个Parquet截断边界。原metadata初始化小文件的精确选择仍得到原3条前序；没有重扫十二分钟或十八日完整core。此前投影原型17项Python测试通过；固定workspace退出0，累计1379 passed/0 failed/23 ignored，具名UTC测试明确跳过。fmt和相关all-targets clippy退出0，既有警告保持。当前返工只改Python、测试与说明，Rust输入未变；上述Rust结果仍适用，不能证明当前SQL入口。17条真实构造原始记录验证prepare命令；另存的19条有限标量确认验证五折10份冻结/验证文件，不能称为18日历史运行。返工代表例验证：未来epoch旧received不改已可见前缀；B首条重复过滤后，A→B→C仍保持10@100、20@400、30@400；实际5ms断选的两段共15ms，右删失2、左截断1；重新选择时才可见新事实的左截断0。监督SIGTERM代表记录真实阶段−15并回收，无study。结果见[工程机器摘要](complementary-pair-columnar-health-engineering.json)和PR，不把旧通过记录替代新入口验证。
 
-用户已取消新增小样本试验。当前直接查询修正没有新增试验、RSS对照、构建或完整运行；既有23项小测试属于较早中间源码，后续metadata、文件范围、TWAP过滤顺序和内存连接修改未用新试验验证。旧工程机器摘要保持原版本，不能冒充当前入口结果。准确实现与实际查询结果仍须分别核对。
+用户已取消新增小样本试验。当前身份修复没有新增试验、RSS对照、构建或重跑；v6已实际执行并失败，不能写成从未尝试完整输入。既有23项小测试属于较早中间源码，后续metadata、文件范围、TWAP过滤顺序和内存连接修改未用新试验验证。旧工程机器摘要保持原版本，不能冒充当前入口结果。准确实现与实际查询结果仍须分别核对。
 
 ## 历史紧凑工程证据
 

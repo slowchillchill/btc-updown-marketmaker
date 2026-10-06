@@ -6,7 +6,7 @@
 
 依据为 #185 两份详细合同与 [D-0268](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5932157187)、[D-0269](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5933131977)、[D-0270](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5933292905)。公共策略调用基线为 #186 任务 1 / PR #188（`90e21137de51611a63c40e9c91502721a2fb6d4e`）。后续依据为 [D-0272](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5942867176)、[D-0273](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5943106626) 和 [D-0274](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5958205955)。职责与源代码入口见第 10 节，不从当前模型表达推导人工策略交易限制。
 
-[D-0284](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5981603350) 的来源健康、静默重评和发送前失效设计已实施。三态与16个显式阈值由 #185/PR #248 交付，公共调度与历史接线沿 #241。当前 A 使用直接Parquet SQL完成来源健康研究。十八日原始到达描述统计已完成，但尚未形成正式有效消息S/A校准结果；全期列式导入的OOM失败保留历史，当前修正不沿用其容量或审查结论。正式 normal/max 未采用，完整经营及 PAPER/LIVE 装配仍按所属任务交付。
+[D-0284](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5981603350) 的来源健康、静默重评和发送前失效设计已实施。三态与16个显式阈值由 #185/PR #248 交付，公共调度与历史接线沿 #241。当前 A 使用直接Parquet SQL完成来源健康研究。十八日原始到达描述统计已完成，但尚未形成正式有效消息S/A校准结果；全期列式导入的OOM失败保留历史，当前修正不沿用其容量或审查结论。已获批的独立研究保护实际生效，v6准备因合法metadata身份遗漏退出1，非OOM，study未启；当前身份修复尚未重跑。正式 normal/max 未采用，完整经营及 PAPER/LIVE 装配仍按所属任务交付。
 
 已定边界为 BUY-only、等量新配对、Maker 为主、`GTC + post_only`、每侧一个目标价位、主动修复优先 FAK；允许有限小亏、部分修复、超成本留孤腿及受约束执行性过补。普通换价允许新旧单重叠，主动 FAK 前必须先处理补入侧可能重复成交的旧买单。初始资金 2000 pUSD、逐市场 1000 pUSD 含费投入、账户 30% 高水位回撤、未到账两类返佣排除及实际退出立即结束均按原合同执行。
 
