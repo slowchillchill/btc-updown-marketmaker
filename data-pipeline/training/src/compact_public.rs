@@ -131,9 +131,9 @@ pub enum CompactPmChangeV1 {
     },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CompactPmStepV1 {
+pub struct CompactPmStepV1<I = PmDerivedStepPositionV1> {
     pub canonical_fact_id: CanonicalEventId,
-    pub member_index: Option<u32>, pub step_index: u32, pub derived_id: PmDerivedStepPositionV1,
+    pub member_index: Option<u32>, pub step_index: u32, pub derived_id: I,
     pub change: CompactPmChangeV1, pub direct: SourceEvidenceRefV3,
     pub prestate: Option<PmEvidencePairV1<SourceEvidenceRefV3>>,
     pub absence: Option<PmEvidencePairV1<SourceEvidenceRefV3>>, pub dependencies: Vec<SourceEvidenceRefV3>,
@@ -223,7 +223,7 @@ pub struct CompactPublicationProgressV1<'a> {
 fn file_sha256(path: &Path) -> io::Result<String> {
     file_sha256_with_progress(path, Duration::from_secs(10), |_, _| {})
 }
-fn file_sha256_with_progress(
+pub(crate) fn file_sha256_with_progress(
     path: &Path, interval: Duration, mut progress: impl FnMut(u64, u64),
 ) -> io::Result<String> {
     let mut file = File::open(path)?;
@@ -437,12 +437,53 @@ pub struct PublicCompactReaderV1 {
     reference_markets: std::collections::BTreeMap<String,MarketIdentityV2>,
 }
 impl PublicCompactReaderV1 {
+    /// 冷派生材料校验原规范位置；只读完整文件，不推进或签发运行时可见前缀。
+    pub(crate) fn canonical_fact(&mut self, position: u64) -> RecordingResult<CompactFactV1> {
+        let cursor = self.columns.stream_position()?;
+        let result = self.cold_canonical_fact(position);
+        self.columns.seek(SeekFrom::Start(cursor))?;
+        result
+    }
+
+    fn cold_canonical_fact(&mut self, position: u64) -> RecordingResult<CompactFactV1> {
+        if position >= self.manifest.facts { return Err(io::Error::other("原规范事实位置越界").into()); }
+        let mut low = 0_u64; let mut high = self.manifest.groups;
+        while low < high {
+            let mid = low + (high-low)/2;
+            self.columns.seek(SeekFrom::Start(mid.checked_mul(40).ok_or_else(|| io::Error::other("组列索引溢出"))?))?;
+            let mut words = [0_u8;40]; self.columns.read_exact(&mut words)?;
+            let end = u64::from_le_bytes(words[32..40].try_into()?);
+            if end <= position { low = mid+1; } else { high = mid; }
+        }
+        self.columns.seek(SeekFrom::Start(low.checked_mul(40).ok_or_else(|| io::Error::other("组列索引溢出"))?))?;
+        let mut words = [0_u8;40]; self.columns.read_exact(&mut words)?;
+        let group_position = u64::from_le_bytes(words[..8].try_into()?);
+        let input_position = u64::from_le_bytes(words[8..16].try_into()?);
+        let first = u64::from_le_bytes(words[24..32].try_into()?);
+        let end = u64::from_le_bytes(words[32..40].try_into()?);
+        if !(first<=position && position<end) { return Err(io::Error::other("原事实位置与组列不闭合").into()); }
+        let (packet, _, _) = self.decode_packet_at(input_position)?;
+        let group = packet.groups.iter().find(|group| group.group_position==group_position)
+            .ok_or_else(|| io::Error::other("原事实组不存在"))?;
+        if group.records.len() as u64 != end-first { return Err(io::Error::other("原事实组载荷/列不闭合").into()); }
+        Ok(group.records[usize::try_from(position-first)?].clone())
+    }
+
     /// 已验收前缀内的原输入引用；读取不会推进组/事实光标。
     /// 供独立hidden准备恢复原CanonicalPmMessage，不复制输入全集到内存。
     pub fn input_record(&mut self, reference: &CanonicalInputRecordRefV1) -> RecordingResult<RecordedIngressV1> {
         if reference.input_stream_id != self.manifest.header.input_stream_id
             || reference.input_position >= self.next {
             return Err(io::Error::other("原输入引用未属于已读取的合法前缀").into());
+        }
+        self.cold_input_record(reference)
+    }
+
+    /// 派生材料冷解码只读原完整文件；不得用此位置推进模型/公开运行时前沿。
+    pub(crate) fn cold_input_record(&mut self, reference: &CanonicalInputRecordRefV1) -> RecordingResult<RecordedIngressV1> {
+        if reference.input_stream_id != self.manifest.header.input_stream_id
+            || reference.input_position >= self.manifest.inputs {
+            return Err(io::Error::other("冷原输入引用越过完整来源范围").into());
         }
         let (packet, _, _) = self.decode_packet_at(reference.input_position)?;
         if packet.input.input_stream_id != reference.input_stream_id

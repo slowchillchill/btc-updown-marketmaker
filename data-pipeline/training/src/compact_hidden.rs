@@ -15,7 +15,7 @@ use data_pipeline_core::{
     public_input::{PreparedCanonicalInputV1, prepare_ingress_v1},
     reduction::PolymarketAssetContextV1,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, fs, io, path::Path, sync::Arc};
 
 /// 冷准备sink写材料/设备列，不推进账户或执行。失败时不能发布部分产物。
@@ -27,7 +27,7 @@ pub trait CompactHiddenSinkV1 {
         prepared: &PreparedPmMessageV1, material: MaterializedPmReductionV1<'_>) -> RecordingResult<()>;
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 pub struct CompactHiddenSummaryV1 {
     /// 自身来源是compact完整验收前缀，不冒充旧recording的CommittedPrefix。
     pub source_prefix: AppliedIngressPrefixV1,
