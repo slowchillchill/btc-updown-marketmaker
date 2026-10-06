@@ -104,10 +104,9 @@ def score_condition(logits, support, choice, active, support_fault):
     numerical_support = torch.where(valid_row[:, None], support, fallback)
     numerical_logits = torch.where(valid_row[:, None], logits, 0.0)
     masked = numerical_logits.masked_fill(~numerical_support, -torch.inf)
-    log_distribution = torch.log_softmax(masked, dim=-1)
-    probability = torch.softmax(masked, dim=-1)
-    ell = log_distribution.gather(1, safe_choice[:, None]).squeeze(1)
-    entropy = -(probability * torch.where(numerical_support, log_distribution, 0.0)).sum(dim=-1)
+    distribution = torch.distributions.Categorical(logits=masked, validate_args=False)
+    ell = distribution.log_prob(safe_choice)
+    entropy = distribution.entropy()
     ell = torch.where(count == 1, ell * 0.0, ell)
     entropy = torch.where(count == 1, entropy * 0.0, entropy)
     return ConditionalScore(torch.where(valid_row, choice, -1),
