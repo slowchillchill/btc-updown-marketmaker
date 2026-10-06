@@ -17,8 +17,8 @@ class PublicRuleGpu:
         self.values = decimal_columns(torch.tensor(list(raw),dtype=torch.uint8,device=device),
             torch.tensor(offsets,dtype=torch.int64,device=device),torch.ones(3,dtype=torch.bool,device=device)).rational()
         numbers = _numbers()
-        self.delay_ms = numbers.ExactInt.from_ints([context['taker_delay_ms']],device=device)
-        self.exponent = numbers.ExactInt.from_ints([context['fee_exponent']],device=device)
+        self.delay_ms = numbers.ExactInt.from_values([context['taker_delay_ms']],device=device)
+        self.exponent = numbers.ExactInt.from_values([context['fee_exponent']],device=device)
         def project():
             tail = torch.zeros(16,device=device)
             fault = torch.zeros(1,dtype=torch.int32,device=device)
