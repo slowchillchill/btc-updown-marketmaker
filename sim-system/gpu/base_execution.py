@@ -136,7 +136,7 @@ def cancel_base_order(queue, quantity, account, row_order_ids, row_roots, matchi
         indices = torch.full(requested.shape,row,dtype=torch.int64,device=requested.device)
         amount = _take(removed,indices)
         root_removed = root_removed+amount.select(torch.arange(requested.numel(),device=requested.device) == row_roots[row],amount.constant(0))
-    root_found = torch.zeros_like(requested).scatter_reduce(0,safe_roots,found,reduce='amax')
+    root_found = torch.zeros_like(requested,dtype=torch.int32).scatter_reduce(0,safe_roots,found.to(torch.int32),reduce='amax') > 0
     relation = root_removed.compare(quantity.open_base_units)
     need_segment = requested & ~matching_closed & (quantity.open_base_units.sign > 0)
     error = error | (root_removed.fault | relation.fault)*need_segment.to(torch.int32)
