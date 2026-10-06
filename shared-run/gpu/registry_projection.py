@@ -60,9 +60,12 @@ def order_events_from_closed(bank,batches,closed,receive_rank):
     kinds=torch.where(trades,TRADE,torch.where(formed,ORDER_LIFECYCLE,BASE_ACCEPTED)).reshape(roots,width)
     units=lambda value:ExactRational.ratio(value,value.constant(1_000_000))
     private=concatenate_integer([batch.private_sequences for batch in batches],roots)
-    ordinals=torch.cat([batch.record_ordinals for batch in batches],1).gather(1,at)
+    ordinals=concatenate_integer([batch.record_ordinals for batch in batches],roots)
+    batch_sequences=concatenate_integer([batch.batch_sequences for batch in batches],roots)
+    contexts=torch.cat([batch.context_slots for batch in batches],1).gather(1,at)
+    runs=torch.cat([batch.run_slots for batch in batches],1).gather(1,at)
     return PublicRegistryEvents(received,kinds,order,fill,_take(private,coordinates),closed.delivered_sequences,
-        ExactInt.from_i64_tensor(ordinals.flatten()),closed.available_at,receive_rank,
+        _take(ordinals,coordinates),_take(batch_sequences,coordinates),contexts,runs,closed.record_refs,closed.available_at,receive_rank,
         units(decoded[3][6]),units(decoded[3][7]),units(decoded[8][10]),
         decoded[8][8].reshape(roots,width),decoded[8][6].reshape(roots,width),
         (formed & (decoded[7][5]==1)).reshape(roots,width),formed.reshape(roots,width),

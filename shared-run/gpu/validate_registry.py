@@ -37,7 +37,7 @@ def event_columns(references, identities, rank_start):
         evidence = reference['record']['Evidence']
         source = evidence['source_order']
         row = dict(kind=ORDER_LIFECYCLE, order=0, trade=0, private=source['sequence']['PrivateFeedback']['private_feedback_sequence'],
-            delivery=reference['visibility']['Feedback']['delivery_sequence'], available=reference['visibility']['Feedback']['available_at_utc_ms'], ordinal=reference['position']['record_ordinal'],
+            delivery=reference['visibility']['Feedback']['delivery_sequence'], batch=reference['position']['source_watermark']['projection_batch_sequence'], available=reference['visibility']['Feedback']['available_at_utc_ms'], ordinal=reference['position']['record_ordinal'],
             matched='0', opened='0', quantity='0', role=0, disposition=0, formed_matched=False, formation=False, canceled=False, closed=False)
         payload = evidence['evidence']
         if 'Control' in payload:
@@ -72,13 +72,15 @@ def event_columns(references, identities, rank_start):
         rows.append(row)
     active = [True]*len(rows)
     if not rows:
-        rows=[dict(kind=0,order=0,trade=0,private=0,delivery=0,available=0,ordinal=0,matched='0',opened='0',quantity='0',role=0,disposition=0,formed_matched=False,formation=False,canceled=False,closed=False)]
+        rows=[dict(kind=0,order=0,trade=0,private=0,delivery=0,batch=0,available=0,ordinal=0,matched='0',opened='0',quantity='0',role=0,disposition=0,formed_matched=False,formation=False,canceled=False,closed=False)]
         active=[False]
     tensor = lambda name,dtype=torch.int64:torch.tensor([[row[name] for row in rows]],dtype=dtype,device='cuda')
     integer = lambda name:integers([row[name] for row in rows])
     ratio = lambda name:rational([row[name] for row in rows])
     return PublicRegistryEvents(torch.tensor([active],dtype=torch.bool,device='cuda'), tensor('kind'),
-        integer('order'),integer('trade'),integer('private'),integer('delivery'),integer('ordinal'),tensor('available'),
+        integer('order'),integer('trade'),integer('private'),integer('delivery'),integer('ordinal'),integer('batch'),
+        torch.zeros((1,len(rows)),dtype=torch.int64,device='cuda'),torch.zeros((1,len(rows)),dtype=torch.int64,device='cuda'),
+        torch.arange(rank_start,rank_start+len(rows),device='cuda')[None,:],tensor('available'),
         torch.arange(rank_start,rank_start+len(rows),device='cuda')[None,:],ratio('matched'),ratio('opened'),ratio('quantity'),
         tensor('role'),tensor('disposition'),tensor('formed_matched',torch.bool),tensor('formation',torch.bool),tensor('canceled',torch.bool),
         tensor('closed',torch.bool),torch.zeros(1,dtype=torch.int32,device='cuda'))

@@ -23,6 +23,10 @@ class PublicRegistryEvents:
     private_sequences: object
     delivery_sequences: object
     record_ordinals: object
+    batch_sequences: object
+    context_slots: torch.Tensor
+    run_slots: torch.Tensor
+    record_refs: torch.Tensor  # NOE共享不可变bank引用；不是新的业务位置。
     available_at: torch.Tensor  # [roots,events]，原首次公开领取的available_at。
     receive_rank: torch.Tensor  # 物理领取顺序，不能替代业务u64序号。
     matched: object
@@ -158,7 +162,7 @@ def frozen_order_read(events, intents):
     unfinished = intents.present & (~(cancellable_known & ~cancellable)|pending_any|
         ~(commitment_known & (commitment.numerator.sign==0).reshape(roots,count)))
     fault = events.fault.clone()
-    for sequence in [events.orders,events.trades,events.private_sequences,events.delivery_sequences,events.record_ordinals]:
+    for sequence in [events.orders,events.trades,events.private_sequences,events.delivery_sequences,events.record_ordinals,events.batch_sequences]:
         limit=sequence.compare(sequence.constant((1<<64)-1))
         invalid=sequence.fault | limit.fault | ((sequence.sign<0)|(limit.order>0)).to(torch.int32)
         fault=fault | Numbers.combine_fault_rows(torch.where(events.received,invalid.reshape(roots,width),0))
@@ -216,7 +220,7 @@ def compact_order_events(events):
     keep=keep | first_identity_population(key,category,events.received & (events.kinds==ORDER_LIFECYCLE) & events.formation,priority)
     # root fault保存全部输入的故障，不因来源替换或压紧洗掉失败。
     fault=events.fault.clone()
-    for value in [events.orders,events.trades,events.private_sequences,events.delivery_sequences,events.record_ordinals]:
+    for value in [events.orders,events.trades,events.private_sequences,events.delivery_sequences,events.record_ordinals,events.batch_sequences]:
         limit=value.compare(value.constant((1<<64)-1))
         invalid=value.fault | limit.fault | ((value.sign<0)|(limit.order>0)).to(torch.int32)
         fault=fault | Numbers.combine_fault_rows(torch.where(events.received,invalid.reshape(roots,width),0))
