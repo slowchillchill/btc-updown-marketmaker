@@ -98,10 +98,36 @@ def main():
     assert describe(multi)==[plan['applied']]
     multi,_=run_queue_batch(multi,lambda state:state.apply_level_transition(integers([5]),integers([0])))
     assert describe(multi)==[plan['echo']]
+    for original in reference['quote_plans']:
+        source=PriceQueueBatch.empty(multi_price,capacity=2)
+        source,_=run_queue_batch(source,lambda state:state.append_external(integers([int(original['base'])])))
+        source,_=run_queue_batch(source,lambda state:state.apply_level_transition(
+            integers([int(original['base'])]),integers([int(original['after'])])))
+        assert describe(source)==[original['initial']]
+        budget=integers([int(original['budget'])])
+        candidate=Numbers.run_exact_batch(lambda:source.plan_quote_budget(budget))
+        assert values(candidate.matched_base)==[int(original['matched'])]
+        assert values(candidate.used_quote)==[int(original['used'])]
+        actual_slices=[{'column':index,'base':str(base),'quote':str(quote)}
+                      for index,(base,quote) in enumerate(zip(values(candidate.delta_base),values(candidate.delta_quote))) if base>0]
+        assert actual_slices==original['slices']
+        acceptance=candidate.used_quote.compare(budget)
+        accepted=(acceptance.order==0)&(acceptance.fault==0)&(candidate.fault==0)
+        applied=Numbers.run_exact_batch(lambda:source.apply_quote_plan(candidate,accepted))
+        assert describe(applied)==[original['applied']]
+        assert describe(source)==[original['initial']]
+        try:
+            applied.apply_quote_plan(candidate,accepted)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('旧计划不得重复应用到新队列')
     torch.cuda.synchronize()
     print(json.dumps({'checks':['original_fifo_all_fields','taker_original_quote_difference','debt_echo_no_second_depletion',
         'resync_retains_account_order','cancel_only_target','segment_growth_retains_original_B_Q',
-        'original_multi_segment_plan_coordinates','plan_finish_preserves_unfinished_rows'],
+        'original_multi_segment_plan_coordinates','plan_finish_preserves_unfinished_rows',
+        'original_quote_budget_planning','incomplete_FOK_queue_unchanged','partial_segment_stops',
+        'stale_plan_not_applied'],
         'capacity':queue.capacity,'elapsed_seconds':time.perf_counter()-started,
         'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
         'noe_ledger_execution_delivered':False}))

@@ -50,6 +50,19 @@ class QueueEffects:
 
 
 @dataclass(frozen=True)
+class QuoteTakerPlan:
+    """同一精确价位的原Quote目标规划；后续价位仍须按原ask升序衔接剩余预算。"""
+    source: object  # 冻结PriceQueueBatch；禁止把旧计划应用到已变更或已经消费的队列。
+    delta_base: object  # [rows*capacity]，保持规划时段坐标。
+    delta_quote: object
+    consumed_after: object
+    matched_base: object  # [rows]
+    used_quote: object
+    stopped: torch.Tensor  # 原None/部分段停止，不能跳到后价继续吃。
+    fault: torch.Tensor
+
+
+@dataclass(frozen=True)
 class PriceQueueBatch:
     price: object  # ExactRational[rows]，原精确价位；不反解模型投影。
     kind: torch.Tensor  # [rows,capacity] 0空/1External/2Account，有效段先于尾部空槽。
@@ -212,6 +225,76 @@ class PriceQueueBatch:
         if enabled.shape != (self.rows,) or enabled.dtype != torch.bool or enabled.device != self.kind.device:
             raise TypeError('完成价位掩码须为同设备bool[rows]')
         return self._compact(enabled & (self.fault == 0))
+
+    def plan_quote_budget(self, budget):
+        """沿原maximum_base_for_quote_budget_v1规划全部External段，尚不改变队列。
+
+        只消费quote目标。FOK宿主须在所有合法价位规划完且整预算满足后才一次应用；
+        不能将本方法当成GTC的LimitBase目标或完整接单能力。
+        """
+        zero = budget.constant(0)
+        one = budget.constant(1)
+        remaining = budget
+        matched = used = zero
+        stopped = torch.zeros(self.rows, dtype=torch.bool, device=self.kind.device)
+        roots_fault = self.fault | budget.fault | (budget.sign < 0).to(torch.int32)
+        base_columns = []
+        quote_columns = []
+        consumed_columns = []
+        for column in range(self.capacity):
+            base = self._at(self.total_base, column)
+            quote = self._at(self.total_quote, column)
+            consumed = self._at(self.consumed_base, column)
+            relation = consumed.compare(base)
+            external = self.kind[:, column] == 1
+            invalid = (base.sign <= 0) | (quote.sign < 0) | (consumed.sign < 0) | (relation.order > 0)
+            roots_fault = roots_fault | relation.fault | base.fault | quote.fault | consumed.fault
+            roots_fault = roots_fault | (external & invalid).to(torch.int32)
+            candidate = external & (quote.sign > 0) & (relation.order < 0)
+            candidate = candidate & (remaining.sign > 0) & ~stopped & (roots_fault == 0)
+            # 未选中的空槽只用非零除数占位；不会将未知源字段解释为业务零。
+            safe_base = base.select(base.sign > 0, one)
+            safe_quote = quote.select(quote.sign > 0, one)
+            consumed_quote, _ = (consumed * quote).divrem(safe_base)
+            remaining_quote = quote - consumed_quote
+            covers = remaining.compare(remaining_quote)
+            partial_end, _ = (((consumed_quote + remaining + one) * base) - one).divrem(safe_quote)
+            end = base.select(covers.order >= 0, partial_end)
+            delta_base = end - consumed
+            end_quote, _ = (end * quote).divrem(safe_base)
+            delta_quote = end_quote - consumed_quote
+            affordable = delta_quote.compare(remaining)
+            usable = (delta_base.sign > 0) & (delta_quote.sign > 0) & (affordable.order <= 0)
+            roots_fault = roots_fault | covers.fault | affordable.fault | delta_base.fault | delta_quote.fault
+            selected = candidate & usable & (roots_fault == 0)
+            taken_base = delta_base.select(selected, zero)
+            taken_quote = delta_quote.select(selected, zero)
+            matched = matched + taken_base
+            used = used + taken_quote
+            remaining = remaining - taken_quote
+            partial = delta_base.compare(base - consumed)
+            roots_fault = roots_fault | partial.fault | matched.fault | used.fault | remaining.fault
+            stopped = stopped | (candidate & (~usable | (partial.order < 0)))
+            base_columns.append(taken_base)
+            quote_columns.append(taken_quote)
+            consumed_columns.append((consumed + taken_base).select(selected, consumed))
+        return QuoteTakerPlan(self, _columns(base_columns), _columns(quote_columns), _columns(consumed_columns),
+                              matched, used, stopped, roots_fault)
+
+    def apply_quote_plan(self, plan, accepted):
+        """接单协调器证明全计划可接纳后应用同一冻结队列的计划；拒绝根无队列变化。"""
+        if plan.source is not self:
+            raise ValueError('taker计划只能应用到其原冻结队列，不能重复消费或跨状态应用')
+        if accepted.shape != (self.rows,) or accepted.dtype != torch.bool or accepted.device != self.kind.device:
+            raise TypeError('接单掩码须为同设备bool[rows]')
+        roots_fault = self.fault | plan.fault
+        next_debt = self.debt + plan.matched_base
+        roots_fault = roots_fault | next_debt.fault
+        enabled = accepted & (roots_fault == 0)
+        candidate = replace(self,
+            consumed_base=plan.consumed_after.select(enabled.repeat_interleave(self.capacity), self.consumed_base),
+            debt=next_debt.select(enabled, self.debt), fault=roots_fault)
+        return candidate.finish_taker_plan(enabled)
 
     def apply_level_transition(self, before, after):
         """原减少先抵taker debt，再逐段耗尽；增加永远追加尾段，绝不合并原B/Q。"""

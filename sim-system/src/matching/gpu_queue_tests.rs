@@ -61,8 +61,25 @@ fn gpu_fifo_preserves_segment_order_taker_debt_and_resync() {
     let multi_applied=describe(&multi,BookSide::Ask,ask);
     multi.apply_level_transition(BookSide::Ask,ask,5,0).unwrap();
     let multi_echo=describe(&multi,BookSide::Ask,ask);
+    let mut quote_plans=Vec::new();
+    for (base,after,budget) in [(2,5,2),(2,5,3),(10,10,1)] {
+        let mut queue=AssetQueueV2::from_initial_levels(&[],&[(ask,base)]).unwrap();
+        queue.apply_level_transition(BookSide::Ask,ask,base,after).unwrap();
+        let initial=describe(&queue,BookSide::Ask,ask);
+        let plan=queue.calculate_taker_buy(ask,TakerTargetV1::Quote(budget)).unwrap();
+        let slices:Vec<_>=plan.fills.iter().map(|part|json!({"column":part.segment_index,
+            "base":part.fill.base_units.to_string(),"quote":part.fill.quote_units.to_string()})).collect();
+        let matched=plan.matched_base_units;let used=plan.used_quote_units;
+        // FOK整预算不满足时根本不apply；此处只对照生产队列，不生成接受反馈。
+        let accepted=used==budget;
+        if accepted {queue.apply_taker_consumption(plan);}
+        quote_plans.push(json!({"initial":initial,"base":base.to_string(),"after":after.to_string(),
+            "budget":budget.to_string(),"matched":matched.to_string(),"used":used.to_string(),
+            "accepted":accepted,"slices":slices,"applied":describe(&queue,BookSide::Ask,ask)}));
+    }
     let input=json!({"checkpoints":checkpoints,"maker_depletion":"1000000","taker_quote":"2000000",
-        "multi_plan":{"initial":multi_initial,"slices":slices,"applied":multi_applied,"echo":multi_echo}});
+        "multi_plan":{"initial":multi_initial,"slices":slices,"applied":multi_applied,"echo":multi_echo},
+        "quote_plans":quote_plans});
     let python=std::env::var("B_GPU_PYTHON").unwrap();
     let script=std::env::var("B_GPU_FIFO_VALIDATOR").unwrap();
     let mut child=std::process::Command::new(python).arg(script).stdin(std::process::Stdio::piped())
