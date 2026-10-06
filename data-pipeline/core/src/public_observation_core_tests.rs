@@ -2868,3 +2868,36 @@ fn compact_progress_matches_complete_groups_through_isolation_retry_and_resync()
     assert_eq!(full.object_counts(), compact.object_counts());
     assert!(total_deltas < rows.len() * reconstructed.len());
 }
+
+#[test]
+fn facts_sink_preserves_complete_causal_groups_without_observation_expansion() {
+    let mut observed = core();
+    observed.enable_source_progress();
+    let mut facts = core();
+    let inputs = [
+        meta(0),
+        pm(1, 1, 21_000, book("12.000000000000000000000000001")),
+        pm(2, 2, 21_001, PolymarketOrderbookEvent::PriceChange {
+            price_changes: vec![change(Some("13"))],
+        }),
+    ];
+    for input in &inputs {
+        let ids = BTreeMap::new();
+        let old_prepared = prepare_public_ingress_v1(&observed, input, &ids, &[]).unwrap();
+        let old = observed.push(&old_prepared).unwrap();
+        let prepared = prepare_public_ingress_v1(&facts, input, &ids, &[]).unwrap();
+        let compact = facts.push_facts(&prepared).unwrap();
+        assert_eq!(compact.applied_prefix, old.applied.applied_prefix);
+        assert_eq!(compact.groups.len(), old.applied.closed_groups.len());
+        for (a, b) in compact.groups.iter().zip(&old.applied.closed_groups) {
+            assert_eq!(a.group_id, b.group_id);
+            assert_eq!(a.group_position, b.group_position);
+            assert_eq!(a.member_input_positions, b.member_input_positions);
+            assert_eq!(a.closed_at_input_position, b.closed_at_input_position);
+            assert_eq!(a.records, b.records);
+        }
+        assert_eq!(serde_json::to_value(&compact.pm_reductions).unwrap(),
+                   serde_json::to_value(&old.pm_reductions).unwrap());
+    }
+    assert_eq!(facts.applied_prefix(), observed.applied_prefix());
+}

@@ -294,6 +294,29 @@ pub struct PublicAppliedIngressV1<'a> {
     pub pm_reductions: Vec<(PublicFactPositionV1, PublicPmReductionV1<'a>)>,
     pub reductions: Vec<PublicReductionBatchV1>,
 }
+/// 完整事实消费；保留原归约、撮合步骤和合法前缀，不展开模型观察或全部盘口。
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PublicFactGroupV1 {
+    pub group_id: Sha256Hex,
+    pub group_position: u64,
+    pub member_input_positions: Vec<u64>,
+    pub closed_at_input_position: u64,
+    pub visible_at_utc_ms: i64,
+    pub records: Arc<[PublicBusinessFactV1]>,
+    pub source_progress_changes: Vec<SourceStreamProgressV1>,
+}
+pub struct PublicFactAppliedIngressV1<'a> {
+    pub applied_prefix: AppliedIngressPrefixV1,
+    pub groups: Vec<PublicFactGroupV1>,
+    pub pm_reductions: Vec<(PublicFactPositionV1, PublicPmReductionV1<'a>)>,
+    pub reductions: Vec<PublicReductionBatchV1>,
+}
+#[derive(Clone, Copy)]
+enum PublicOutputModeV1 {
+    Observations,
+    SourceProgress,
+    Facts,
+}
 /// 研究专用事实增量；没有完整观察、撮合材料或持久前缀承诺。
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct PublicSourceProgressGroupV1 {
@@ -322,6 +345,7 @@ struct CoreApplicationV1<'a> {
     pm_reductions: Vec<(PublicFactPositionV1, PublicPmReductionV1<'a>)>,
     reductions: Vec<PublicReductionBatchV1>,
     compact_groups: Option<Vec<PublicSourceProgressGroupV1>>,
+    fact_groups: Option<Vec<PublicFactGroupV1>>,
     changed_scopes: BTreeSet<SourceStreamScopeV1>,
     closed_fact_count: u32,
 }
@@ -681,9 +705,23 @@ impl PublicObservationCoreV1 {
         &mut self,
         input: &'a PreparedIngressV1<'_>,
     ) -> Result<PublicAppliedIngressV1<'a>, DptCoreErrorV1> {
-        let result = self.push_application(input, false)?;
+        let result = self.push_application(input, PublicOutputModeV1::Observations)?;
         Ok(PublicAppliedIngressV1 {
             applied: result.applied,
+            pm_reductions: result.pm_reductions,
+            reductions: result.reductions,
+        })
+    }
+    /// 新材料调用完整公共归约的事实输出；不调用研究型来源进展入口。
+    pub fn push_facts<'a>(
+        &mut self,
+        input: &'a PreparedIngressV1<'_>,
+    ) -> Result<PublicFactAppliedIngressV1<'a>, DptCoreErrorV1> {
+        self.enable_source_progress();
+        let result = self.push_application(input, PublicOutputModeV1::Facts)?;
+        Ok(PublicFactAppliedIngressV1 {
+            applied_prefix: result.applied.applied_prefix,
+            groups: result.fact_groups.unwrap(),
             pm_reductions: result.pm_reductions,
             reductions: result.reductions,
         })
@@ -695,7 +733,7 @@ impl PublicObservationCoreV1 {
         input: &PreparedIngressV1<'_>,
     ) -> Result<PublicSourceProgressAppliedV1, DptCoreErrorV1> {
         self.enable_source_progress();
-        let result = self.push_application(input, true)?;
+        let result = self.push_application(input, PublicOutputModeV1::SourceProgress)?;
         Ok(PublicSourceProgressAppliedV1 {
             applied_prefix: result.applied.applied_prefix,
             closed_groups: result.compact_groups.unwrap(),
@@ -704,7 +742,7 @@ impl PublicObservationCoreV1 {
     fn push_application<'a>(
         &mut self,
         input: &'a PreparedIngressV1<'_>,
-        compact: bool,
+        mode: PublicOutputModeV1,
     ) -> Result<CoreApplicationV1<'a>, DptCoreErrorV1> {
         if input.recorded.input_stream_id != self.header.input_stream_id
             || input.recorded.input_position != self.next_input_position
@@ -722,7 +760,8 @@ impl PublicObservationCoreV1 {
             },
             pm_reductions: vec![],
             reductions: vec![],
-            compact_groups: compact.then(Vec::new),
+            compact_groups: matches!(mode, PublicOutputModeV1::SourceProgress).then(Vec::new),
+            fact_groups: matches!(mode, PublicOutputModeV1::Facts).then(Vec::new),
             changed_scopes: BTreeSet::new(),
             closed_fact_count: 0,
         };
@@ -1438,6 +1477,22 @@ impl PublicObservationCoreV1 {
     ) {
         self.next_canonical_position += records.len() as u64;
         output.closed_fact_count += records.len() as u32;
+        if let Some(groups) = &mut output.fact_groups {
+            groups.push(PublicFactGroupV1 {
+                visible_at_utc_ms: public_group_visible_at_utc_ms(ingress, &records),
+                group_id,
+                group_position: self.next_group_position,
+                member_input_positions: members,
+                closed_at_input_position: self.next_input_position,
+                records,
+                source_progress_changes: std::mem::take(&mut output.changed_scopes)
+                    .into_iter()
+                    .map(|scope| self.source_progress[&scope].clone())
+                    .collect(),
+            });
+            self.next_group_position += 1;
+            return;
+        }
         if let Some(groups) = &mut output.compact_groups {
             groups.push(PublicSourceProgressGroupV1 {
                 group_id,
