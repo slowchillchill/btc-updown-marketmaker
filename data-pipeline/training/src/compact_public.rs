@@ -811,6 +811,10 @@ mod tests {
             TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",9,37000,38000,
                 PolymarketOrderbookEvent::LastTradePrice {asset_id:"20".into(),price:"0.53".into(),size:Some("1.25".into()),
                     side:Some(data_pipeline_core::typed_raw::PolymarketSide::Unknown),fee_rate_bps:None}))),
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(snapshot("depth-a",100,1))),
+            TypedRawRowV2::Existing(TypedRawRow::BinanceDepthUpdate(update("depth-a",101,101,2,Some(100),None,
+                BinanceDepthStitchVerdict::Applied,vec![DepthLevel {price:"64000".into(),quantity:"0".into()},
+                    DepthLevel {price:"63900".into(),quantity:"1.234".into()}]))),
             match crate::public_recording::tests::twap_record(12,30,23002,"65000000000000000000000").ingress {
                 DptIngressV1::Message {row,..}=>row,_=>unreachable!(),
             },
@@ -843,6 +847,7 @@ mod tests {
         let mut public_market = serde_json::Value::Null;
         let mut terminal_observations = Vec::new();
         let mut first_sides = serde_json::Value::Null;
+        let mut first_binance = serde_json::Value::Null;
         let mut observed_groups = 0_u64;
         let mut reference_candidates = Vec::new();
         let mut original = None;
@@ -879,13 +884,17 @@ mod tests {
                     if position == 3 {
                         first_sides = serde_json::json!({"prefix":observed_groups,"assets":observation.assets});
                     }
+                    if first_binance.is_null() && observation.binance_depth.value.is_some() {
+                        first_binance = serde_json::json!({"prefix":observed_groups,"depth":observation.binance_depth});
+                    }
                     public_assets = observation.assets.clone();
                     public_market = serde_json::json!({"market":observation.market,"lifecycle":observation.lifecycle,
                         "active":observation.active,"closed":observation.closed,"accepting_orders":observation.accepting_orders,
                         "terminal":observation.terminal,"settlement_reference":observation.settlement_reference,
                         "temporary_reference":observation.temporary_reference,"effective_reference":observation.effective_reference,
                         "chainlink_spot":observation.chainlink_spot,"chainlink_twap_thirty":observation.chainlink_twap_thirty,
-                        "chainlink_twap_sixty":observation.chainlink_twap_sixty});
+                        "chainlink_twap_sixty":observation.chainlink_twap_sixty,"binance_depth":observation.binance_depth,
+                        "binance_trade":observation.binance_trade});
                     if observation.terminal.value.is_some()
                         || observation.terminal.quality == MarketDataQuality::Invalid {
                         terminal_observations.push(serde_json::json!({"prefix":observed_groups,
@@ -932,7 +941,7 @@ mod tests {
             "present":true,"initialized":asset.has_initial_snapshot,"ready":asset.book_ready,
             "public_assets":public_assets,"public_events":public_events,"public_visible_times":public_visible_times,
             "public_market":public_market,"terminal_observations":terminal_observations,
-            "first_sides":first_sides,"observation_ms":44000});
+            "first_sides":first_sides,"first_binance":first_binance,"observation_ms":44000});
         let reference_path = temp.path().join("original-reference.json");
         serde_json::to_writer(File::create(&reference_path).unwrap(),&reference).unwrap();
         eprintln!("original_core_zero_reference={reference}");

@@ -31,6 +31,8 @@ def main():
     from input_sides import SideInputs
     from reference_state import PublicReferenceState
     from input_reference import ReferenceInputs
+    from binance_state import PublicBinanceState
+    from input_binance import BinanceInputs
     from input_events import EventInputs, time_envelope
     from model_train.book import BookEncoder
     from prepare import _numbers
@@ -99,6 +101,12 @@ def main():
     native_lifecycle = LifecycleInputs(market_state).encode(market_frame,market_indices,assets,now)
     side_inputs = SideInputs(state)
     native_sides = side_inputs.encode(frame,assets,now)
+    binance_state = PublicBinanceState(state,columns)
+    binance_inputs = BinanceInputs(binance_state,initial_capacity=1)
+    binance_frame = binance_state.frame(prefixes)
+    symbols = torch.zeros_like(prefixes)
+    native_binance = binance_inputs.encode(binance_frame,binance_state.observation(prefixes),symbols,now)
+    assert not native_binance.fault.any().cpu().item()
     reference_state = PublicReferenceState(market_state,columns)
     native_reference = ReferenceInputs(reference_state).encode(reference_state.frame(prefixes),market_frame,market_indices,now)
     if columns['reference_preparation_complete'] and columns['markets']:
@@ -158,8 +166,11 @@ def main():
     assert torch.count_nonzero(packed.levels[~packed.mask]) == 0
     torch.manual_seed(181102)  # 当前有限盘口组件验证，不登记正式训练seed。
     encoder = BookEncoder().cuda()
-    levels = torch.nn.functional.pad(packed.levels,(0,0,0,0,0,2)).detach().requires_grad_(True)
-    mask = torch.nn.functional.pad(packed.mask,(0,0,0,2))
+    combined_capacity = max(packed.levels.shape[2],native_binance.packed.levels.shape[2])
+    levels = torch.cat((torch.nn.functional.pad(packed.levels,(0,0,0,combined_capacity-packed.levels.shape[2])),
+        torch.nn.functional.pad(native_binance.packed.levels,(0,0,0,combined_capacity-native_binance.packed.levels.shape[2]))),dim=1).detach().requires_grad_(True)
+    mask = torch.cat((torch.nn.functional.pad(packed.mask,(0,combined_capacity-packed.mask.shape[2])),
+                     torch.nn.functional.pad(native_binance.packed.mask,(0,combined_capacity-native_binance.packed.mask.shape[2]))),dim=1)
     encoded = encoder(levels,mask)
     # 尾部资源补齐不能改变固定相邻配对树的模型输出。
     padded = torch.nn.functional.pad(levels,(0,0,0,17))
@@ -200,7 +211,7 @@ def main():
                 key = payload['ReferenceFact']['reference_type']
                 if key=='chainlink_btc_usd_twap':
                     return (13,3) if payload['ReferenceFact']['reference']['window_s']==30 else (14,4)
-                return {'chainlink_btc_usd':(12,2),'binance_aggregate_trade':(18,7),'market_settlement_reference_update':(16,5),'market_price_anchor_update':(15,5)}[key]
+                return {'chainlink_btc_usd':(12,2),'binance_aggregate_trade':(18,7),'binance_depth_state':(17,6),'market_settlement_reference_update':(16,5),'market_price_anchor_update':(15,5)}[key]
             p = payload['MarketFact']['payload']
             key = next(iter(p))
             return {'FixedIdentity':6,'InitialTick':7,'LifecycleTransition':8,'MarketLifecycleSnapshot':8,
@@ -348,6 +359,34 @@ def main():
             expected_reference[start+2:start+7] = original_t5(field['direct_anchors'][0] if len(field['direct_anchors'])==1 else None)
         expected_reference[35:37] = [signed_log(1000),1.0]
         assert torch.equal(native_reference.values[2],torch.tensor(expected_reference,device='cuda',dtype=torch.float32)), (native_reference.values[2],expected_reference)
+        original_binance = selected_reference['binance_depth']
+        original_first = reference['first_binance']
+        first_binance = binance_inputs.encode(binance_state.frame(prefixes.new_tensor([original_first['prefix']])),
+            binance_state.observation(prefixes.new_tensor([original_first['prefix']])),symbols[:1],now[:1])
+        continued_binance = binance_inputs.encode(binance_state.frame(prefixes[-1:]),binance_state.observation(prefixes[-1:]),
+            symbols[-1:],now[-1:],first_binance.side.memory)
+        expected_depth = [0.0]*38;expected_depth[0]=1.0
+        for side,name in enumerate(('bids','asks')):
+            rows = original_binance['value'][name]
+            old = original_first['depth']['value'][name]
+            total = sum(Fraction(row['quantity_btc']) for row in rows)
+            before = sum(Fraction(row['quantity_btc']) for row in old)
+            out = [1.0,signed_log(len(rows)),signed_log(total),signed_log(total-before),1.0]+[0.0]*9
+            out += [signed_log(Fraction(rows[0]['price_usdt_per_btc'])-Fraction(old[0]['price_usdt_per_btc'])),1.0]
+            expected_depth[6+16*side:22+16*side] = out
+            expected_book = [[signed_log(Fraction(row['price_usdt_per_btc'])),signed_log(Fraction(row['quantity_btc'])),1.0,
+                              *([0.0]*5),signed_log((Fraction(rows[0]['price_usdt_per_btc'])-Fraction(row['price_usdt_per_btc']))
+                              if side==0 else Fraction(row['price_usdt_per_btc'])-Fraction(rows[0]['price_usdt_per_btc']))] for row in rows]
+            actual_book = continued_binance.packed.levels[0,side][continued_binance.packed.mask[0,side]]
+            assert torch.equal(actual_book,torch.tensor(expected_book,dtype=torch.float32,device='cuda')), (actual_book,expected_book)
+        assert torch.equal(continued_binance.side.values[0,0],torch.tensor(expected_depth,dtype=torch.float32,device='cuda'))
+        original_trade = selected_reference['binance_trade']
+        expected_trade = [0.0]*15;expected_trade[0]=expected_trade[6]=1.0
+        expected_trade[7:10] = [signed_log(Fraction(original_trade['value']['price_usdt_per_btc'])),
+                              signed_log(Fraction(original_trade['value']['quantity_btc'])),float(original_trade['value']['buyer_is_maker'])]
+        expected_trade[10:15] = original_t5(original_trade['direct_anchors'][0])
+        assert torch.equal(continued_binance.trade[0],torch.tensor(expected_trade,dtype=torch.float32,device='cuda'))
+        assert not continued_binance.fault.any().cpu().item()
         lifecycle_expected = [0.0]*103
         market = reference['public_market']
         now_reference = reference['observation_ms']
@@ -539,7 +578,7 @@ def main():
               'continuous_device_query','out_of_material_prefix_fault',
               'i64_time_coordinate_exact_difference','fault_bit_union','pm_direct_observation_fields',
               'native_events104_legal_prefix_window','empty_and_invalid_window','utc_100ms_window_prefix',
-              'native_window_trades77_exact_aggregation','public_market_identity_prefix','native_lifecycle103','native_pm_side38_endpoint_memory']
+              'native_window_trades77_exact_aggregation','public_market_identity_prefix','native_lifecycle103','native_pm_side38_endpoint_memory','binance_source_prefix_state','native_binance38_book9_trade15']
     if columns['slots']:
         passed += ['exact_price_sort_current_positive_compaction','native_pm_nine_fields',
                    'real_book_encoder_forward_backward','tail_padding_pairwise_tree','native_pm_bba28_trade18']
@@ -556,6 +595,7 @@ def main():
               'assets':len(columns['assets']),'slots':len(columns['slots']),
               'decimal_dictionary':len(columns['decimals']),'derived_column_wire_bytes':len(wire),
               'encoded_positive_rows':positive_rows,'raw_trade_facts':len(columns['raw_trades']),'public_facts':len(columns['facts']),
+              'binance_positive_rows':int(native_binance.packed.mask.sum().cpu()),
               'direct_sources':len(columns['fact_sources']),
               'reference_preparation_complete':columns['reference_preparation_complete'],
               'cold_seconds':parsed-started,'total_seconds':time.perf_counter()-started,
@@ -564,7 +604,7 @@ def main():
               'window_peak_scope':'驻留共享公共列及累计可见时间、已打包盘口和直接字段、三前缀窗口与末10个100ms窗口；非法窗不扩池',
               'passed':passed,
               'original_core_reference_checked':args.original_reference is not None,
-              'not_delivered':(['reference_preparation_for_this_material'] if not columns['reference_preparation_complete'] else [])+['binance_state','hidden','sim_noe_ledger',
+              'not_delivered':(['reference_preparation_for_this_material'] if not columns['reference_preparation_complete'] else [])+['hidden','sim_noe_ledger',
                                '100ms_window','full_actor','ppo','active_root_restore']}
     args.output.parent.mkdir(parents=True,exist_ok=True)
     args.output.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n')

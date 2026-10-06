@@ -24,8 +24,9 @@ class NativePmSides:
 
 
 class SideInputs:
-    def __init__(self, state):
-        self.state = state
+    def __init__(self, state, *, outcomes=2):
+        if outcomes not in (1,2): raise ValueError('原PM两资产或Binance一个symbol')
+        self.state,self.outcomes = state,outcomes
         numbers = _numbers()
         def price_units():
             source = state.decimal_columns
@@ -43,7 +44,7 @@ class SideInputs:
         """
         state, numbers = self.state,_numbers()
         roots,slots = frame.present.shape
-        if (asset_indices.shape != (roots,2) or observation_ms.shape != (roots,)
+        if (asset_indices.shape != (roots,self.outcomes) or observation_ms.shape != (roots,)
                 or asset_indices.dtype != torch.int64 or observation_ms.dtype != torch.int64
                 or asset_indices.device != state.slots.device or observation_ms.device != state.slots.device):
             raise ValueError('需同设备int64市场资产/观察时间')
@@ -51,17 +52,17 @@ class SideInputs:
         base_fault = frame.prefix_fault | (~valid.all(dim=1)).to(torch.int32)
         safe = asset_indices.clamp(0,max(0,len(state.assets)-1))
         if previous is not None:
-            if previous.known.shape != (roots,4) or previous.asset_indices.shape != asset_indices.shape:
+            if previous.known.shape != (roots,2*self.outcomes) or previous.asset_indices.shape != asset_indices.shape:
                 raise ValueError('上次冻结端点形状错误')
         def compute():
-            output = torch.zeros((roots,2,38),device=asset_indices.device)
+            output = torch.zeros((roots,self.outcomes,38),device=asset_indices.device)
             totals,bests,knowns,best_present = [],[],[],[]
             fault = base_fault
             quantity = frame.quantity.numerator
             factor,remainder = quantity.constant(10**28).divrem(frame.quantity.denominator)
             units = quantity*factor
             units = numbers.ExactInt(units.words,units.sign,units.fault | remainder.fault | (remainder.sign != 0).to(torch.int32))
-            for outcome in range(2):
+            for outcome in range(self.outcomes):
                 if state.assets:
                     q = frame.quality.gather(1,safe[:,outcome,None]).reshape(-1)
                     ready = frame.ready.gather(1,safe[:,outcome,None]).reshape(-1)
@@ -99,7 +100,7 @@ class SideInputs:
                     if previous is not None:
                         # 资产坐标必须已按原身份迁移；不能把另一市场的端点并入本市场。
                         same = previous.asset_indices[:,outcome]==asset_indices[:,outcome]
-                        before = torch.arange(roots,device=asset_indices.device)*4+index
+                        before = torch.arange(roots,device=asset_indices.device)*(2*self.outcomes)+index
                         delta = total-_take(previous.total,before)
                         value,error = delta.project(delta.constant(10**28),operation=1)
                         present = known & previous.known[:,index] & same

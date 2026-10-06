@@ -78,6 +78,16 @@ pub struct PublicPmDeviceColumnsV1 {
     pub reference_official: Vec<[i64;4]>,
     pub reference_temporary_values: Vec<[i64;4]>,
     pub reference_temporary: Vec<[i64;4]>,
+    pub binance_symbols: Vec<String>,
+    /// [symbol,side,priceId]及原实际深度快照/增量；不持久化逐事件全簿。
+    pub binance_slots: Vec<[i64;3]>,
+    pub binance_quantities: Vec<[i64;4]>,
+    pub binance_resets: Vec<[i64;4]>,
+    /// [known,anchorSet,quality]与最新成交[priceId,quantityId,maker,anchorSet,quality]。
+    pub binance_depth_values: Vec<[i64;3]>,
+    pub binance_depth: Vec<[i64;4]>,
+    pub binance_trade_values: Vec<[i64;5]>,
+    pub binance_trades: Vec<[i64;4]>,
 }
 #[derive(Serialize)]
 pub struct PublicLevelAnchorV1 {
@@ -138,8 +148,25 @@ struct Builder {
     decimals: BTreeMap<String,i64>, slots: BTreeMap<(i64,i64,i64),i64>,
     last_bba: BTreeMap<i64,i64>, last_tick: BTreeMap<i64,i64>,
     last_terminal: BTreeMap<i64,i64>,
+    binance_symbols: BTreeMap<String,i64>, binance_slots: BTreeMap<(i64,i64,i64),i64>,
 }
 impl Builder {
+    fn binance_symbol(&mut self, symbol:&str) -> RecordingResult<i64> {
+        if let Some(id) = self.binance_symbols.get(symbol) {return Ok(*id);}
+        let id = i64::try_from(self.columns.binance_symbols.len())?;
+        self.columns.binance_symbols.push(symbol.into());self.binance_symbols.insert(symbol.into(),id);
+        Ok(id)
+    }
+    fn binance_level(&mut self,symbol:i64,side:i64,price:&str,quantity:&str,group:i64) -> RecordingResult<()> {
+        let price = self.decimal(&normalize_decimal_text(price,"depth.price")?)?;
+        let quantity = self.decimal(&normalize_decimal_text(quantity,"depth.quantity")?)?;
+        let next = i64::try_from(self.columns.binance_slots.len())?;
+        let slot = *self.binance_slots.entry((symbol,side,price)).or_insert_with(|| {
+            self.columns.binance_slots.push([symbol,side,price]);next
+        });
+        let row = self.field_row(slot,group,quantity)?;
+        self.columns.binance_quantities.push(row);Ok(())
+    }
     fn market_field(&mut self, market: i64, group: i64, value: i64) -> RecordingResult<[i64;4]> {
         self.field_row(market,group,value)
     }
@@ -235,14 +262,19 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
         lifecycle_values:vec![[0,0,0,3]],trading_values:vec![[0,0,0,0,0,0,0,3]],
         terminal_values:vec![[0,0,0,0,3]],terminal_payouts:vec![vec![]],..Default::default()
     }, assets:BTreeMap::new(), markets:BTreeMap::new(), decimals:BTreeMap::new(), slots:BTreeMap::new(),
-        last_bba:BTreeMap::new(),last_tick:BTreeMap::new(),last_terminal:BTreeMap::new() };
+        last_bba:BTreeMap::new(),last_tick:BTreeMap::new(),last_terminal:BTreeMap::new(),
+        binance_symbols:BTreeMap::new(),binance_slots:BTreeMap::new() };
     // 零值占位不是已知零；设备查询另带initialized/selected/present。
     builder.decimal(&ExactDecimal("0".into()))?;
+    // 原typed/canonical来源合同固定BTCUSDT；已知symbol不代表已观察盘口或价格。
+    builder.binance_symbol("BTCUSDT")?;
     builder.columns.reference_preparation_complete = true;
     builder.columns.reference_values.push([0,0,3,0]);
     builder.columns.reference_rule_values.push([3,0,3]);
     builder.columns.reference_official_values.push([0,0,0,3]);
     builder.columns.reference_temporary_values.push([0,0,0,0]);
+    builder.columns.binance_depth_values.push([0,0,3]);
+    builder.columns.binance_trade_values.push([0,0,0,0,3]);
     let mut snapshots = BTreeMap::new();
     let mut raw_pm: BTreeMap<u64,PolymarketOrderbookRow> = BTreeMap::new();
     let mut pm_types: BTreeMap<u64,&'static str> = BTreeMap::new();
@@ -281,6 +313,31 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
                     builder.columns.fact_types.push(kind.into()); id
                 };
                 let group_position = i64::try_from(group.group_position)?;
+                if let crate::compact_public::CompactFactPayloadV1::BinanceDepthFromPrefix {symbol,last_update_id,through_input_position} = &fact.payload {
+                    // 原core只为实际应用的深度输入产该事实；直接用原快照/绝对增量，不另归约全簿。
+                    if *through_input_position!=packet.input.input_position {return Err("深度事实缺当前原输入关联".into());}
+                    let symbol_id = builder.binance_symbol(symbol)?;
+                    let (snapshot,bids,asks) = match &packet.input.ingress {
+                        DptIngressV1::Message {row:TypedRawRowV2::Existing(TypedRawRow::BinanceDepthSnapshot(row)),..}
+                            if row.symbol==*symbol && row.last_update_id==*last_update_id => (true,&row.bids,&row.asks),
+                        DptIngressV1::Message {row:TypedRawRowV2::Existing(TypedRawRow::BinanceDepthUpdate(row)),..}
+                            if row.symbol==*symbol && row.final_update_id==*last_update_id
+                                && row.stitch_verdict==data_pipeline_core::typed_raw::BinanceDepthStitchVerdict::Applied => (false,&row.bids,&row.asks),
+                        _=>return Err("深度事实与已应用源快照/增量不一致".into()),
+                    };
+                    if snapshot {
+                        let row = builder.field_row(symbol_id,group_position,0)?;
+                        builder.columns.binance_resets.push(row);
+                    }
+                    for (side,levels) in [(0,bids),(1,asks)] {
+                        for level in levels {builder.binance_level(symbol_id,side,&level.price,&level.quantity,group_position)?;}
+                    }
+                    let anchors = builder.anchor_set(&fact.direct_sources,&fact.position,&group.group_id)?;
+                    let id = i64::try_from(builder.columns.binance_depth_values.len())?;
+                    builder.columns.binance_depth_values.push([1,anchors,quality_code(fact.quality.availability)]);
+                    let row = builder.field_row(symbol_id,group_position,id)?;
+                    builder.columns.binance_depth.push(row);
+                }
                 if let crate::compact_public::CompactFactPayloadV1::Inline(PublicBusinessPayloadV1::ReferenceFact(payload)) = &fact.payload {
                     let q = quality_code(fact.quality.availability);
                     match payload {
@@ -355,6 +412,14 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
                         builder.raw_trade(group_position,-1,&t.price_usdt_per_btc,&Some(t.quantity_btc.clone()),
                             Some(if t.buyer_is_maker {CanonicalPmSideV1::Sell} else {CanonicalPmSideV1::Buy}),
                             &None,&fact.direct_time)?;
+                        let symbol = builder.binance_symbol(&t.symbol)?;
+                        let price = builder.decimal(&t.price_usdt_per_btc)?;
+                        let quantity = builder.decimal(&t.quantity_btc)?;
+                        let anchors = builder.anchor_set(&fact.direct_sources,&fact.position,&group.group_id)?;
+                        let id = i64::try_from(builder.columns.binance_trade_values.len())?;
+                        builder.columns.binance_trade_values.push([price,quantity,i64::from(t.buyer_is_maker),anchors,quality_code(fact.quality.availability)]);
+                        let row = builder.field_row(symbol,group_position,id)?;
+                        builder.columns.binance_trades.push(row);
                     }
                     _=>{}
                 }

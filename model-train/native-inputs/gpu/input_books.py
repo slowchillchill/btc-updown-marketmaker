@@ -15,10 +15,11 @@ class PackedPmBooks:
 
 
 class PmBookInputs:
-    def __init__(self, state, *, initial_capacity=128):
+    def __init__(self, state, *, initial_capacity=128, pm=True, outcomes=2):
         if initial_capacity < 1:
             raise ValueError('初始资源容量须为正')
-        self.state = state
+        if outcomes not in (1,2): raise ValueError('原PM两资产或Binance一个symbol')
+        self.state, self.pm, self.outcomes = state, pm, outcomes
         self.capacity = initial_capacity
         numbers = _numbers()
         # SourceDecimal最多96位、scale<=28；统一10^28整数排序保持全部源精度。
@@ -52,7 +53,7 @@ class PmBookInputs:
         numbers = _numbers()
         state = self.state
         roots, slots = frame.present.shape
-        if asset_indices.shape != (roots, 2) or observation_ms.shape != (roots,):
+        if asset_indices.shape != (roots, self.outcomes) or observation_ms.shape != (roots,):
             raise ValueError('市场资产/观察时间批次错误')
         if asset_indices.dtype != torch.int64 or observation_ms.dtype != torch.int64:
             raise TypeError('需设备int64资产和UTC观察时间')
@@ -65,13 +66,13 @@ class PmBookInputs:
         quality = (torch.nn.functional.one_hot(frame.quality.gather(1, safe_assets), 6).float()
             if state.assets else torch.nn.functional.one_hot(torch.full_like(asset_indices, 3), 6).float())
         if not state.assets or slots == 0:
-            levels = torch.zeros((roots, 4, self.capacity, 9), dtype=torch.float32, device=state.slots.device)
+            levels = torch.zeros((roots, 2*self.outcomes, self.capacity, 9), dtype=torch.float32, device=state.slots.device)
             return PackedPmBooks(levels, torch.zeros(levels.shape[:3],dtype=torch.bool,device=levels.device),
                                  quality, fault)
         visible = frame.ready & ((frame.quality == 0) | (frame.quality == 1))
         quantity_positive = frame.quantity.numerator.sign.reshape(roots, slots) > 0
         candidates = []
-        for outcome in range(2):
+        for outcome in range(self.outcomes):
             for side in range(2):
                 order = self.bid_order if side == 0 else self.ask_order
                 selected = (frame.present & quantity_positive &
@@ -85,8 +86,8 @@ class PmBookInputs:
         while self.capacity < required:
             self.capacity *= 2
         capacity = self.capacity
-        levels = torch.zeros((roots, 4, capacity, 9), dtype=torch.float32, device=state.slots.device)
-        mask = torch.zeros((roots, 4, capacity), dtype=torch.bool, device=state.slots.device)
+        levels = torch.zeros((roots, 2*self.outcomes, capacity, 9), dtype=torch.float32, device=state.slots.device)
+        mask = torch.zeros((roots, 2*self.outcomes, capacity), dtype=torch.bool, device=state.slots.device)
         for side, (ordered, counts) in enumerate(candidates):
             count = min(capacity, slots)
             ordered = ordered[:, :count]
@@ -98,7 +99,7 @@ class PmBookInputs:
                                               _take(frame.quantity.denominator, flat))
             valid = torch.arange(count, device=ordered.device)[None] < counts[:, None]
             def project():
-                p, pf = price_value(price,pm=True)
+                p, pf = price_value(price,pm=self.pm)
                 q, qf = quantity.project(operation=1)
                 best_ids = state.slots[ordered[:, :1], 2].expand(-1, count).reshape(-1)
                 best = numbers.ExactRational(_take(state.decimals.numerator, best_ids),
