@@ -7376,6 +7376,15 @@ mod tests {
         run_id: &str,
         finality_policy: Arc<TradeFinalityPolicyV2>,
     ) -> (tempfile::TempDir, SimRunActorV2) {
+        active_market_actor_with_projection(role,run_id,finality_policy,|_,_| accepting_projection_port()).await
+    }
+
+    async fn active_market_actor_with_projection(
+        role: SimCallerRoleV1,
+        run_id: &str,
+        finality_policy: Arc<TradeFinalityPolicyV2>,
+        make_port: impl FnOnce(&std::path::Path,&RunOpenedV2) -> Box<dyn BusinessProjectionPortV2>,
+    ) -> (tempfile::TempDir, SimRunActorV2) {
         let directory = tempfile::tempdir().expect("创建市场事件测试目录");
         let path = directory.path().join(SIM_EVENT_LOG_FILE_NAME_V2);
         let rule_snapshot = successful_snapshot_v3_for_sim_tests().await;
@@ -7391,6 +7400,7 @@ mod tests {
         if role == SimCallerRoleV1::Paper {
             run_opened.durability_role = RunDurabilityRoleV2::RecoverablePaper;
         }
+        let projection_port=make_port(&path,&run_opened);
         let mut actor = SimRunActorV2::create_new(
             &path,
             run_opened,
@@ -7398,7 +7408,7 @@ mod tests {
             finality_policy,
             scenario,
             latency_profile,
-            accepting_projection_port(),
+            projection_port,
             MAX_GROUP_BYTES,
         )
         .expect("创建市场事件测试运行根");

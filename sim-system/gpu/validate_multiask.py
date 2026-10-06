@@ -10,6 +10,8 @@ from base_acceptance import run_base_acceptance_batch
 from fill_finality import FillRecord
 from fill_pool import FillPool
 from validate_base_execution import integers,rational,units,values,assert_checkpoint
+from latency import EmpiricalDelaySampler, byte_column
+from pathlib import Path
 
 
 def main():
@@ -62,10 +64,42 @@ def main():
             assert pool.records.ordinal[coordinate].cpu().item() == record['ordinal']
             assert values(pool.records.economic_application_sequence)[coordinate] == (record['economic_application_sequence'] or 0)
     assert order == [1,2,3,1,2,3] and not pool.next_obligation()[-1].any().cpu().item()
+    # 原完整BusinessProjectionBatch→MemoryNOE是冷来源参考，运行热链不调用CPU端口。
+    profile_sha='98fd40f843275db8994a29cec1de6a72f95bbaa4309df9779c7ed1285cdff596'
+    profile_path=Path(__file__).resolve().parents[1]/'config/latency-profiles'/profile_sha/'profile.json'
+    sampler=EmpiricalDelaySampler.build(profile_path.read_bytes(),profile_sha,
+        [source['session_seed'].encode('ascii')])
+    lifecycle=[]
+    direct=[]
+    for batch in source['feedback_batches']:
+        for category in ['orders','trades','settlements']:
+            for row in batch[category]:
+                lifecycle.append(row.get('feedback',row)['metadata'])
+        direct.extend(row['metadata'] for row in batch['direct'])
+    sequence=integers([row['private_feedback_sequence'] for row in lifecycle])
+    roots=torch.zeros(len(lifecycle),dtype=torch.int64,device='cuda')
+    sampled=sampler.sample_feedback(roots,sequence)
+    arrived,fault=sampled.arrival_at(torch.tensor([row['platform_event_at_utc_ms'] for row in lifecycle],device='cuda'))
+    assert not fault.any().cpu().item()
+    assert arrived.cpu().tolist()==[row['feedback_received_at_utc_ms'] for row in lifecycle]
+    identities,offsets=byte_column([row['global_request_id'].encode('utf-8') for row in direct])
+    roots=torch.zeros(len(direct),dtype=torch.int64,device='cuda')
+    sampled=sampler.sample_requests(roots,identities,offsets,torch.ones_like(roots))
+    arrived,fault=sampled.arrival_at(torch.tensor([row['platform_responded_at_utc_ms'] for row in direct],device='cuda'))
+    assert not fault.any().cpu().item()
+    assert arrived.cpu().tolist()==[row['response_received_at_utc_ms'] for row in direct]
+    assert source['initial_noe_records']>0 and source['noe_records']
+    import os
+    artifact=os.environ.get('B_GPU_ORDER_ARTIFACT_DIR')
+    if artifact:
+        Path(artifact,'original-noe-reference.json').write_text(json.dumps({
+            'feedback_batches':source['feedback_batches'],'noe_records':source['noe_records']},ensure_ascii=False))
     print(json.dumps({'original_external_5share_request':True,'taker_fills':3,'checkpoints':len(source['checkpoints']),
         'same_time_consumption_fill_sequences':order,'fill_pool_capacity':pool.capacity,
         'elapsed_seconds_with_reference_reads':time.perf_counter()-started,
         'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
+        'original_NOE_records':len(source['noe_records']),'actual_lifecycle_device_delay_checks':len(lifecycle),
+        'original_feedback_dual_visibility_gate_checked':True,
         'global_clock_NOE_Ledger_delivered':False}))
 
 

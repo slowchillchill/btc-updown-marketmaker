@@ -166,7 +166,23 @@ async fn gpu_sealed_failure_paths_preserve_original_economic_sequence_and_compen
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "AutoDL原合法多ask逐fill及同时间最终性顺序"]
 async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
-    let (_directory,mut actor) = active_market_actor(SimCallerRoleV1::ModelTrain,"run-gpu-multiask").await;
+    let saved_observation=Rc::new(RefCell::new(None));
+    let capture=Rc::clone(&saved_observation);
+    let (_directory,mut actor) = active_market_actor_with_projection(
+        SimCallerRoleV1::ModelTrain,"run-gpu-multiask",successful_policy_v2_for_tests(),
+        move |path,opened| {
+            let reference=contracts::execution_normalization::DurableSourceReferenceV1 {
+                source:contracts::execution_normalization::ImmutableSourceReferenceV1::Location(path.display().to_string()),
+            };
+            let port=noe_projection::MemoryNoeProjectionPortV4::new(path.parent().unwrap().join("noe"),
+                opened.clone(),reference.clone(),reference,"create-run-gpu-multiask".into(),"gpu-source-reference".into());
+            *capture.borrow_mut()=Some(port.observation());
+            Box::new(port)
+        }).await;
+    let observation=saved_observation.borrow_mut().take().unwrap();
+    assert!(observation.opening_record().is_some(),"开户必须先进入实际NOE上下文");
+    let initial_records=observation.take_closed_records();
+    let mut feedback_batches=Vec::new();
     let mut initial = decoded_maker_initial_events();
     let ExecutionMarketEventPayloadV3::InitialL2Snapshot(book) = &mut initial[0].payload else {unreachable!()};
     book.asks.push(contracts::PriceLevelV1 {price_pusd_per_share:ExactDecimal("0.25".into()),quantity_shares:ExactDecimal("1".into())});
@@ -190,24 +206,47 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
         &request_cutoff(1_200),&request,11,actor._latency_profile.as_ref(),actor._rule_snapshot.snapshot());
     let (state,accepted) = advance_mutation_candidate_with_outputs(&actor.opened,actor.scenario.initial_market_directory(),state,
         receipt.platform_arrived_at_utc_ms,actor._rule_snapshot.snapshot(),actor._finality_policy.as_ref());
-    let MutationActionBusinessEffectV3::Post(post) = accepted.unwrap().business else {panic!("原提交结果");};
+    let accepted=accepted.unwrap();
+    let MutationActionBusinessEffectV3::Post(post) = &accepted.business else {panic!("原提交结果");};
     assert!(matches!(&post.outcome,PostOrderItemOutcomeV2::Accepted(_)));
-    let mut execution = state.session.unwrap().execution_state;
-    assert_eq!(execution.fill_shape_for_tests(),(3,4));
+    let mut state=gpu_accept_projection_reference(&mut actor,state,
+        BusinessReducerOutputV2::MutationAction(Some(accepted)),&mut feedback_batches);
+    assert_eq!(state.session.as_ref().unwrap().execution_state.fill_shape_for_tests(),(3,4));
     let mut checkpoints = vec![serde_json::json!({"at":receipt.platform_arrived_at_utc_ms,
-        "state":execution.gpu_order_checkpoint_for_tests("sim-1")})];
-    while let Some(at) = execution.next_scheduled_finality_at_utc_ms() {
-        let (next,effect) = execution.advance_next_scheduled_finality_at(at,actor._finality_policy.as_ref(),actor._rule_snapshot.snapshot()).unwrap();
-        execution=next;
-        let transition = effect.transition.expect("逐原义务消费");
-        checkpoints.push(serde_json::json!({"at":at,"fill_sequence":transition.trade_finality.fill_sequence,
-            "state":execution.gpu_order_checkpoint_for_tests("sim-1")}));
+        "state":state.session.as_ref().unwrap().execution_state.gpu_order_checkpoint_for_tests("sim-1")})];
+    while let Some(at) = state.session.as_ref().unwrap().execution_state.next_scheduled_finality_at_utc_ms() {
+        let mut session=state.session.take().unwrap();
+        let (next,effect) = session.execution_state.advance_next_scheduled_finality_at(at,
+            actor._finality_policy.as_ref(),actor._rule_snapshot.snapshot()).unwrap();
+        session.execution_state=next;
+        let fill_sequence=effect.transition.as_ref().expect("逐原义务消费").trade_finality.fill_sequence;
+        state.session=Some(session);
+        state=gpu_accept_projection_reference(&mut actor,state,BusinessReducerOutputV2::LogicalDrive(LogicalDriveOutputV2 {
+            lifecycle:effect.into_lifecycle_feedback().unwrap(),..Default::default()
+        }),&mut feedback_batches);
+        checkpoints.push(serde_json::json!({"at":at,"fill_sequence":fill_sequence,
+            "state":state.session.as_ref().unwrap().execution_state.gpu_order_checkpoint_for_tests("sim-1")}));
     }
     assert_eq!(checkpoints.len(),7);
+    assert!(observation.take_closed_records().is_empty(),"没有双时间闭合时不能交付动态反馈");
+    actor.projection_port.close_receive_prefix(10_000);
+    let time=|at| crate::public_consumption::TrustedActorExecutionTimeV1(crate::public_consumption::ActorTimeRecordV1 {
+        run_id:actor.opened.run_id.clone(),drive_position:1,logical_time_utc_ms:at,
+    });
+    actor.projection_port.observe_public_time(&time(1_200));
+    assert!(observation.take_closed_records().is_empty(),"hidden领先不得抬高public可见时间");
+    actor.projection_port.observe_public_time(&time(10_000));
+    let noe=observation.take_closed_records();
+    assert!(!noe.is_empty());
+    assert!(observation.take_closed_records().is_empty(),"实际领取位置不重复消费");
+    let records=noe.iter().map(|record|serde_json::json!({"record":record.record(),
+        "position":record.position(),"visibility":record.visibility()})).collect::<Vec<_>>();
     let rules = &actor._rule_snapshot.snapshot().synchronized_platform_rules;
     let input = serde_json::json!({"initial":initial,"addition":addition,"checkpoints":checkpoints,"processing_at":receipt.platform_arrived_at_utc_ms,
         "finality_path":actor._finality_policy.normal_path(),"fee_rate":rules.fee_schedule.rate.value().to_string(),
-        "fee_exponent":rules.fee_schedule.exponent,"taker_rebate_rate":actor._rule_snapshot.snapshot().project_account_rules.rebate_settlement.value.fixed_taker_rebate_rate.value().to_string()});
+        "fee_exponent":rules.fee_schedule.exponent,"taker_rebate_rate":actor._rule_snapshot.snapshot().project_account_rules.rebate_settlement.value.fixed_taker_rebate_rate.value().to_string(),
+        "feedback_batches":feedback_batches,"noe_records":records,"initial_noe_records":initial_records.len(),
+        "session_seed":state.session.as_ref().unwrap().session_seed.0});
     let mut child = std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
         .arg(std::env::var("B_GPU_MULTIASK_VALIDATOR").unwrap()).stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
@@ -215,4 +254,21 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
     let output=child.wait_with_output().unwrap();
     assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
     eprintln!("gpu_multiask={}",String::from_utf8(output.stdout).unwrap());
+}
+
+fn gpu_accept_projection_reference(actor:&mut SimRunActorV2,state:BusinessReducerStateV2,
+    output:BusinessReducerOutputV2,batches:&mut Vec<serde_json::Value>) -> BusinessReducerStateV2 {
+    let (state,_,batch)=finalize_projection_batch_v2(&actor.opened.run_id,state,output,
+        actor._latency_profile.as_ref()).unwrap();
+    let batch=batch.expect("真实接单/最终性应产生非空原投影");
+    let direct=batch.direct_responses().map(|response| match response {
+        BusinessDirectResponse::PostOrders(result)=>serde_json::json!({"metadata":result.metadata}),
+        _=>panic!("当前真实短链仅PostOrders直接响应"),
+    }).collect::<Vec<_>>();
+    batches.push(serde_json::json!({"batch_sequence":batch.projection_batch_sequence,
+        "orders":batch.order_lifecycle,"trades":batch.trade_lifecycle,
+        "settlements":batch.settlement_lifecycle,"direct":direct}));
+    actor.projection_port.accept_for_background(Arc::new(BusinessProjectionBatchPayloadV1::V4(Arc::new(batch))))
+        .expect("原NOE实际接纳完整反馈");
+    state
 }
