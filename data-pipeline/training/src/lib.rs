@@ -17,6 +17,7 @@ pub mod historical_initialization;
 pub mod historical_preparation_progress;
 pub mod observation;
 pub mod public_input;
+pub mod public_gpu_columns;
 pub mod public_online;
 pub mod public_recording;
 pub mod public_replay;

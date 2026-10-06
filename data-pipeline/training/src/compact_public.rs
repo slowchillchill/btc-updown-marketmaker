@@ -209,6 +209,7 @@ pub struct CompactPublicationProgressV1<'a> {
     pub completed_bytes: u64,
     pub total_bytes: Option<u64>,
 }
+#[cfg(test)]
 fn file_sha256(path: &Path) -> io::Result<String> {
     file_sha256_with_progress(path, Duration::from_secs(10), |_, _| {})
 }

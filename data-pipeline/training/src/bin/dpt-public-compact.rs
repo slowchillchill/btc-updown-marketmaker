@@ -10,6 +10,23 @@ use std::{error::Error, fs::File, path::Path, sync::Arc, time::Instant};
 
 fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     let args: Vec<_> = std::env::args().collect();
+    if args.len() == 4 && args[1] == "--pm-device-columns" {
+        let started = Instant::now();
+        let mut reader = PublicCompactReaderV1::open_with_progress(Path::new(&args[2]),args[3].parse()?,
+            std::time::Duration::from_secs(10),|notice| {
+                eprintln!("{}",serde_json::json!({"reader":notice,"elapsed_seconds":started.elapsed().as_secs_f64()}));
+            })?;
+        let mut last_notice = Instant::now();
+        let columns = data_pipeline_training::public_gpu_columns::public_pm_device_columns_v1(&mut reader,|inputs| {
+            if last_notice.elapsed().as_secs() >= 10 {
+                eprintln!("{}",serde_json::json!({"stage":"public_pm_device_columns","inputs":inputs,
+                    "elapsed_seconds":started.elapsed().as_secs_f64()}));
+                last_notice = Instant::now();
+            }
+        })?;
+        serde_json::to_writer(std::io::stdout(),&columns)?;
+        return Ok(());
+    }
     if args.len() == 5 && args[1] == "--repack" {
         let started = Instant::now();
         let mut reader = PublicCompactReaderV1::open_with_progress(Path::new(&args[2]),args[4].parse()?,

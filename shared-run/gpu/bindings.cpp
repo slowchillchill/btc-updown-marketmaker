@@ -126,10 +126,35 @@ std::vector<torch::Tensor> decimal(torch::Tensor bytes, torch::Tensor offsets,
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {c, d, signs, scale, fault};
 }
+extern "C" void public_gpu_prefix_lookup(const int64_t*, int64_t, const int64_t*,
+    int64_t, const int64_t*, int64_t, int64_t*, int32_t*, cudaStream_t);
+std::vector<torch::Tensor> prefix_lookup(torch::Tensor rows, torch::Tensor offsets,
+                                        torch::Tensor prefixes) {
+  TORCH_CHECK(rows.is_cuda() && rows.scalar_type() == torch::kInt64 &&
+      rows.is_contiguous() && rows.dim() == 2 && rows.size(1) == 4,
+      "需CUDA连续int64[N,4]公共事实更新列");
+  for (const auto& tensor : {offsets, prefixes}) {
+    TORCH_CHECK(tensor.device() == rows.device() && tensor.scalar_type() == torch::kInt64 &&
+        tensor.is_contiguous() && tensor.dim() == 1, "需同设备连续int64索引列");
+  }
+  TORCH_CHECK(offsets.numel() >= 1, "目标偏移必须包含末端");
+  int64_t roots = prefixes.numel(), targets = offsets.numel() - 1;
+  TORCH_CHECK(!roots || targets <= (int64_t(INT32_MAX) * 256) / roots,
+      "公共查询批次超grid容量，需按资源分块");
+  const c10::cuda::CUDAGuard guard(rows.device());
+  auto output = torch::empty({roots, targets}, prefixes.options());
+  auto fault = torch::empty({roots, targets}, prefixes.options().dtype(torch::kInt32));
+  public_gpu_prefix_lookup(rows.data_ptr<int64_t>(), rows.size(0), offsets.data_ptr<int64_t>(),
+      targets, prefixes.data_ptr<int64_t>(), roots, output.data_ptr<int64_t>(),
+      fault.data_ptr<int32_t>(), c10::cuda::getCurrentCUDAStream().stream());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {output, fault};
+}
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("integer_op", &integer_op);
   m.def("project", &project);
   m.def("index_probe", &index_probe);
   m.def("gcd", &gcd);
   m.def("decimal", &decimal);
+  m.def("prefix_lookup", &prefix_lookup);
 }
