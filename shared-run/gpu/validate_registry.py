@@ -38,7 +38,7 @@ def event_columns(references, identities, rank_start):
         source = evidence['source_order']
         row = dict(kind=ORDER_LIFECYCLE, order=0, trade=0, private=source['sequence']['PrivateFeedback']['private_feedback_sequence'],
             delivery=reference['visibility']['Feedback']['delivery_sequence'], available=reference['visibility']['Feedback']['available_at_utc_ms'], ordinal=reference['position']['record_ordinal'],
-            matched='0', opened='0', quantity='0', role=0, disposition=0, formed_matched=False, canceled=False, closed=False)
+            matched='0', opened='0', quantity='0', role=0, disposition=0, formed_matched=False, formation=False, canceled=False, closed=False)
         payload = evidence['evidence']
         if 'Control' in payload:
             control = payload['Control']['result']
@@ -59,7 +59,7 @@ def event_columns(references, identities, rank_start):
         elif 'OrderLifecycle' in payload:
             result = payload['OrderLifecycle']['result']
             event = result['event']
-            row.update(order=identities[result['order_identity']], formed_matched=isinstance(event,dict) and event.get('Accepted',{}).get('state')=='Matched',
+            row.update(order=identities[result['order_identity']], formation=isinstance(event,dict) and 'Accepted' in event, formed_matched=isinstance(event,dict) and event.get('Accepted',{}).get('state')=='Matched',
                 closed=event in ['CallerCanceled','GtdExpired','VenueDustTerminal'] if isinstance(event,str) else 'MarketResolvedCanceled' in event)
         elif 'TradeLifecycleV3' in payload or 'TradeLifecycle' in payload:
             result = payload.get('TradeLifecycleV3',payload.get('TradeLifecycle'))['result']
@@ -72,7 +72,7 @@ def event_columns(references, identities, rank_start):
         rows.append(row)
     active = [True]*len(rows)
     if not rows:
-        rows=[dict(kind=0,order=0,trade=0,private=0,delivery=0,available=0,ordinal=0,matched='0',opened='0',quantity='0',role=0,disposition=0,formed_matched=False,canceled=False,closed=False)]
+        rows=[dict(kind=0,order=0,trade=0,private=0,delivery=0,available=0,ordinal=0,matched='0',opened='0',quantity='0',role=0,disposition=0,formed_matched=False,formation=False,canceled=False,closed=False)]
         active=[False]
     tensor = lambda name,dtype=torch.int64:torch.tensor([[row[name] for row in rows]],dtype=dtype,device='cuda')
     integer = lambda name:integers([row[name] for row in rows])
@@ -80,7 +80,7 @@ def event_columns(references, identities, rank_start):
     return PublicRegistryEvents(torch.tensor([active],dtype=torch.bool,device='cuda'), tensor('kind'),
         integer('order'),integer('trade'),integer('private'),integer('delivery'),integer('ordinal'),tensor('available'),
         torch.arange(rank_start,rank_start+len(rows),device='cuda')[None,:],ratio('matched'),ratio('opened'),ratio('quantity'),
-        tensor('role'),tensor('disposition'),tensor('formed_matched',torch.bool),tensor('canceled',torch.bool),
+        tensor('role'),tensor('disposition'),tensor('formed_matched',torch.bool),tensor('formation',torch.bool),tensor('canceled',torch.bool),
         tensor('closed',torch.bool),torch.zeros(1,dtype=torch.int32,device='cuda'))
 
 
@@ -128,6 +128,7 @@ def check_family(source):
     cancel=Numbers.run_exact_batch(lambda:PublicCancellationState(integers(list(request_ids.values())),
         torch.zeros((1,len(request_ids)),dtype=torch.bool,device='cuda'),completion_columns(None,request_ids)))
     cancel_seen=set()
+    maximum_retained=0
     cancel_saved=[]
     seen=set()
     state=None
@@ -150,6 +151,7 @@ def check_family(source):
             return candidate,candidate.freeze_orders(directory(frame),torch.tensor([frame['logical_at']],device='cuda'))
         state,view=Numbers.run_exact_batch(compute)
         rank+=max(1,len(incoming))
+        maximum_retained=max(maximum_retained,state.events.received.size(1))
         assert view.fault.cpu().tolist()==[0]
         indexes={key:index for index,key in enumerate(catalog)}
         unfinished=view.unfinished.cpu().tolist()[0]
@@ -163,6 +165,8 @@ def check_family(source):
                 if known:assert amounts(getattr(view,name))[index]==Fraction(oracle['Known']),(frame['stage'],name)
             assert view.cancellable_known.cpu().tolist()[0][index]==('Known' in order['cancellable'])
             if 'Known' in order['cancellable']:assert view.cancellable.cpu().tolist()[0][index]==order['cancellable']['Known']
+        commit_population=view.commitment_present.cpu().tolist()[0]
+        assert {key for key,index in indexes.items() if commit_population[index]}=={item['order'] for item in frame['commitments']},(frame['stage'],'完整承诺人口')
         for commitment in frame['commitments']:
             if commitment['order'] is None:continue
             index=indexes[commitment['order']]
@@ -192,15 +196,15 @@ def check_family(source):
         assert amounts(view.active)==active and torch.equal(view.unfinished,unfinished),'旧冻结读取不可倒灌'
     for view,pending,counts in cancel_saved:
         assert values(view.pending_count)==pending and values(view.response_counts)==counts,'旧撤单冻结不可倒灌'
-    return len(source),len(seen)
+    return len(source),len(seen),maximum_retained
 
 
 def main():
     started=time.perf_counter()
     counts=[check_family(json.loads(Path(path).read_text())) for path in sys.argv[1:]]
     torch.cuda.synchronize()
-    print(json.dumps({'frozen_prefixes':sum(n for n,_ in counts),'distinct_original_order_records':sum(n for _,n in counts),
-        'continuous_received_state':True,'derived_oracle_initialization':False,'old_freeze_unchanged':True,
+    print(json.dumps({'frozen_prefixes':sum(n for n,_,_ in counts),'distinct_original_order_records':sum(n for _,n,_ in counts),
+        'continuous_received_state':True,'maximum_retained_order_records_per_family':[width for _,_,width in counts],'derived_oracle_initialization':False,'old_freeze_unchanged':True,
         'complete_first_delivery_stream':False,'global_cancel_request_completed_state':True,'scoped_cancel_objects':False,
         'full_registry_or_root':False,'seconds':time.perf_counter()-started,'device_peak_allocated_bytes':torch.cuda.max_memory_allocated()}))
 

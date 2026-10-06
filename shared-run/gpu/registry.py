@@ -31,6 +31,7 @@ class PublicRegistryEvents:
     roles: torch.Tensor  # 原Taker=0/MakerInferred=1。
     dispositions: torch.Tensor
     accepted_matched: torch.Tensor
+    formation: torch.Tensor
     canceled: torch.Tensor
     lifecycle_closed: torch.Tensor
     fault: torch.Tensor
@@ -103,7 +104,7 @@ def frozen_order_read(events, intents):
     if width==0:
         blank=torch.zeros_like(intents.present)
         return PublicOrdersRead(intents.present,intents.original_target,blank,intents.original_target,blank,
-            ~intents.quoted,intents.origin_known,intents.receipt_known & intents.origin_known,
+            ~intents.quoted,intents.origin_known,intents.present & intents.receipt_known & intents.origin_known & (intents.original_target.numerator.sign!=0).reshape(roots,count),
             blank,blank,intents.original_target,intents.origin_known,intents.present,events.fault)
     same, comparison_fault = identity_matches(intents.identities,events.orders,roots,count,width)
     member = same & events.received[:,None,:] & intents.present[:,:,None]
@@ -114,7 +115,8 @@ def frozen_order_read(events, intents):
     initial_open = take_ratio(events.open_quantity,coordinates)
     quote = accepted & (events.kinds.gather(1,at)==QUOTE_ACCEPTED)
     life_at, life_known = choose_latest(member & (events.kinds==ORDER_LIFECYCLE)[:,None,:], priority)
-    formed_matched = (member & ((events.kinds==ORDER_LIFECYCLE)&events.accepted_matched)[:,None,:]).any(2)
+    formed_at, formed_known = choose_latest(member & ((events.kinds==ORDER_LIFECYCLE)&events.formation)[:,None,:], priority)
+    formed_matched = formed_known & events.accepted_matched.gather(1,formed_at)
     closed = (life_known & events.lifecycle_closed.gather(1,life_at)) | (
         member & ((events.kinds==CANCEL_TARGET)&events.canceled)[:,None,:]).any(2)
     # Trade按完整身份保留最高private来源；同来源只取首次领取，不按经济应用过滤。
@@ -156,6 +158,8 @@ def frozen_order_read(events, intents):
     commitment = select(commitment,accepted.flatten(),intents.original_target)
     commitment_known = (~accepted)|quote|(~quote & covered & active_known)
     commitment_known = commitment_known & intents.origin_known
+    commitment_present = intents.present & intents.receipt_known & intents.origin_known & ~(
+        commitment_known & (commitment.numerator.sign==0).reshape(roots,count))
     pending_any = (trade_to_order & (disposition<2)[:,None,:]).any(2)
     unfinished = intents.present & (~(cancellable_known & ~cancellable)|pending_any|
         ~(commitment_known & (commitment.numerator.sign==0).reshape(roots,count)))
@@ -174,8 +178,69 @@ def frozen_order_read(events, intents):
     fault = fault | Numbers.combine_fault_rows(torch.where(accepted,coverage.fault.reshape(roots,count),0))
     return PublicOrdersRead(intents.present,matched,accepted,active,active_known,
         ~(quote | (intents.origin_known & intents.quoted)),accepted|intents.origin_known,
-        intents.receipt_known & intents.origin_known,cancellable,cancellable_known,
+        commitment_present,cancellable,cancellable_known,
         commitment,commitment_known,unfinished,fault)
+
+
+def compact_order_events(events):
+    """保留原Registry各身份的必要来源人口，不累计每次版本的整段历史。
+
+    accepted、formed、latest lifecycle、明确撤成和每Trade最高private分别保留。
+    一个事件同时是formed/latest时只存一份；旧冻结结果持其不可变张量。
+    """
+    from dataclasses import fields,replace
+    roots,width=events.received.shape
+    if width == 0:
+        return events
+    device=events.received.device
+    priority=source_priority(events.private_sequences,events.receive_rank)
+    key=ExactInt(events.orders.words,events.orders.sign,events.orders.fault)
+    trade=events.kinds==TRADE
+    key=events.trades.select(trade.flatten(),key)
+    category=torch.where(events.kinds<=QUOTE_ACCEPTED,0,events.kinds-1)
+    def first_per_identity(population):
+        order=priority
+        # namespace + 完整u64字典坐标；同private继续保留首次领取。
+        words=key.words.to(torch.int64)&0xffffffff
+        for limb in [0,1]:
+            column=words[:,limb].reshape(roots,width)
+            order=order.gather(1,column.gather(1,order).argsort(dim=1,stable=True))
+        order=order.gather(1,category.gather(1,order).argsort(dim=1,stable=True))
+        # 将不属于这次权威来源人口的padding放尾；不让它遮蔽真实来源。
+        order=order.gather(1,(~population).gather(1,order).to(torch.int64).argsort(dim=1,stable=True))
+        sorted_category=category.gather(1,order)
+        sorted_words=words.reshape(roots,width,-1).gather(1,order[:,:,None].expand(roots,width,words.size(1)))
+        same=torch.zeros((roots,width),dtype=torch.bool,device=device)
+        if width>1:
+            same[:,1:]=(sorted_category[:,1:]==sorted_category[:,:-1]) & (sorted_words[:,1:,:2]==sorted_words[:,:-1,:2]).all(2)
+        selected=population.gather(1,order)&~same
+        return torch.zeros_like(selected).scatter(1,order,selected)
+    ordinary=events.received & ((events.kinds!=CANCEL_TARGET)|events.canceled)
+    keep=first_per_identity(ordinary)
+    keep=keep | first_per_identity(events.received & (events.kinds==ORDER_LIFECYCLE) & events.formation)
+    # root fault保存全部输入的故障，不因来源替换或压紧洗掉失败。
+    fault=events.fault.clone()
+    for value in [events.orders,events.trades,events.private_sequences,events.delivery_sequences,events.record_ordinals]:
+        limit=value.compare(value.constant((1<<64)-1))
+        invalid=value.fault | limit.fault | ((value.sign<0)|(limit.order>0)).to(torch.int32)
+        fault=fault | Numbers.combine_fault_rows(torch.where(events.received,invalid.reshape(roots,width),0))
+    for value in [events.matched,events.open_quantity,events.trade_quantity]:
+        fault=fault | Numbers.combine_fault_rows(torch.where(events.received,value.fault.reshape(roots,width),0))
+    kind_fault=(events.kinds<BASE_ACCEPTED)|(events.kinds>CANCEL_TARGET)
+    fault=fault | Numbers.combine_fault_rows(torch.where(events.received,kind_fault.to(torch.int32),0))
+    # 唯一CPU读数是该物理块的最大保留人口，用于分配；不读业务条件逐项推进。
+    capacity=max(1,int(keep.to(torch.int64).sum(1).max().cpu()))
+    order=(~keep).to(torch.int64).argsort(dim=1,stable=True)[:,:capacity]
+    coordinates=(torch.arange(roots,device=device)[:,None]*width+order).flatten()
+    payload={}
+    for field in fields(events):
+        value=getattr(events,field.name)
+        if field.name=='fault':payload[field.name]=fault
+        elif field.name=='received':payload[field.name]=keep.gather(1,order)
+        elif isinstance(value,torch.Tensor):payload[field.name]=value.gather(1,order)
+        elif isinstance(value,ExactRational):payload[field.name]=take_ratio(value,coordinates)
+        else:payload[field.name]=_take(value,coordinates)
+    return PublicRegistryEvents(**payload)
 
 
 @dataclass(frozen=True)
@@ -209,7 +274,7 @@ class PublicRegistryState:
                 payload[field.name] = ExactRational(join_integer(old.numerator,new.numerator),join_integer(old.denominator,new.denominator))
             else:
                 payload[field.name] = join_integer(old,new)
-        return PublicRegistryState(PublicRegistryEvents(**payload))
+        return PublicRegistryState(compact_order_events(PublicRegistryEvents(**payload)))
 
     def freeze_orders(self, intents, cutoff):
         from dataclasses import replace
