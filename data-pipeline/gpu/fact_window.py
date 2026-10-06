@@ -70,3 +70,46 @@ class PublicFactWindow:
             indices = torch.where(present,start[:,None]+offsets+1,0)
             results.extend((padded[indices],present))
         return FactWindow(*results,(~valid).to(torch.int32))
+
+
+class PublicTradeWindow:
+    """原成交事实的区间，不以逻辑public最新成交替换缺量/未知方向事实。"""
+    def __init__(self, columns, *, device='cuda', initial_capacity=128):
+        if initial_capacity < 1:
+            raise ValueError('原成交区间容量须为正')
+        self.capacity = initial_capacity
+        self.group_count = len(columns['groups'])
+        self.asset_count = len(columns['assets'])
+        previous = -1
+        for group,asset,price,qp,q,side,fp,fee,sp,_,_ in columns['raw_trades']:
+            if not (previous <= group < self.group_count and group >= 0
+                    and -1 <= asset < self.asset_count and side in (0,1,2,3)
+                    and qp in (0,1) and fp in (0,1) and sp in (0,1)
+                    and all(0 <= value < len(columns['decimals']) for value in (price,q,fee))):
+                raise ValueError('原成交列坐标/精确值引用错误')
+            if asset == -1 and (qp != 1 or side not in (0,1) or fp != 0):
+                raise ValueError('Binance原成交事实字段不一致')
+            previous = group
+        rows = torch.tensor(columns['raw_trades'],dtype=torch.int64).reshape(-1,11).pin_memory().to(device,non_blocking=True)
+        self.padded = torch.cat((rows.new_zeros((1,11)),rows))
+        self.rows = self.padded[1:]
+        self.groups = self.rows[:,0].contiguous()
+
+    def query(self, previous_prefix, current_prefix):
+        if (previous_prefix.ndim != 1 or current_prefix.shape != previous_prefix.shape
+                or previous_prefix.dtype != torch.int64 or current_prefix.dtype != torch.int64
+                or previous_prefix.device != self.rows.device or current_prefix.device != self.rows.device):
+            raise ValueError('需同设备int64成交区间前缀')
+        valid = ((previous_prefix >= -1) & (current_prefix >= previous_prefix)
+                 & (current_prefix < self.group_count))
+        previous = previous_prefix.clamp(-1,max(-1,self.group_count-1))
+        current = current_prefix.clamp(-1,max(-1,self.group_count-1))
+        start = torch.searchsorted(self.groups,previous,right=True)
+        end = torch.searchsorted(self.groups,current,right=True)
+        count = (end-start).clamp_min(0)
+        required = int(count.max().cpu())  # 仅一次资源需求，不回传成交值或方向。
+        while self.capacity < required: self.capacity *= 2
+        offset = torch.arange(self.capacity,device=current.device)[None]
+        present = (offset < count[:,None]) & valid[:,None]
+        indices = torch.where(present,start[:,None]+offset+1,0)
+        return self.padded[indices],present,(~valid).to(torch.int32)

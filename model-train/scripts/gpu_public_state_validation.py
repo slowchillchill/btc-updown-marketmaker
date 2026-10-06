@@ -24,7 +24,8 @@ def main():
     sys.path.insert(0,str(root/'model-train/native-inputs/gpu'))
     from input_books import PmBookInputs
     from input_pm_fields import pm_fields
-    from fact_window import PublicFactWindow
+    from fact_window import PublicFactWindow, PublicTradeWindow
+    from input_trades import TradeInputs
     from input_events import EventInputs, time_envelope
     from model_train.book import BookEncoder
     from prepare import _numbers
@@ -91,6 +92,12 @@ def main():
     events = EventInputs(fact_windows)
     previous = prefixes.new_tensor([-1,-1,max(-1,prefix_values[-1]-1)])
     native_events = events.encode(previous,prefixes,now)
+    trades = TradeInputs(state,PublicTradeWindow(columns,initial_capacity=1))
+    native_window_trades = trades.encode(previous,prefixes,assets,now)
+    if len(columns['assets']) >= 2:
+        assert not native_window_trades.fault.any().cpu().item()
+    empty_trades = trades.encode(prefixes,prefixes,assets,now)
+    assert torch.count_nonzero(empty_trades.values) == 0
     assert not native_events.fault.any().cpu().item()
     empty_window = events.encode(prefixes,prefixes,now)
     assert torch.count_nonzero(empty_window.values) == 0
@@ -184,6 +191,46 @@ def main():
         full_window = events.encode(prefixes.new_tensor([-1]),prefixes[-1:],now[-1:])
         assert torch.equal(full_window.values[0],torch.tensor(expected,device='cuda',dtype=torch.float32)), (full_window.values,expected)
         assert not full_window.fault.any().cpu().item()
+        # 原canonical PublicTrade缺量/未知方向仍计入整窗，不被public latest trade抑制。
+        full_trades = trades.encode(prefixes.new_tensor([-1]),prefixes[-1:],assets[-1:],now[-1:])
+        expected_trades = [0.0]*77
+        for leg,asset_id in enumerate(original_pair):
+            rows = [event for event in reference['public_events']
+                    if 'PolymarketMessage' in event['payload']
+                    and event['payload']['PolymarketMessage']['payload']['kind'] == 'public_trade'
+                    and event['payload']['PolymarketMessage']['payload']['asset']['token_id'] == columns['assets'][asset_id]['token_id']]
+            if not rows: continue
+            values = [row['payload']['PolymarketMessage']['payload'] for row in rows]
+            out = [0.0]*28
+            ps = [Fraction(row['price_pusd_per_share']) for row in values]
+            qty = [None if row['quantity_shares'] is None else Fraction(row['quantity_shares']) for row in values]
+            sides = [row['side'] for row in values]
+            fees = [Fraction(row['fee_rate_bps']) for row in values if row['fee_rate_bps'] is not None]
+            out[0] = original_log(len(rows))
+            out[1:6] = [float(2*p-1) for p in (ps[0],ps[-1],min(ps),max(ps),sum(ps)/len(rows))]
+            out[6] = original_log(sum(q for q in qty if q is not None))
+            out[7] = sum(q is not None for q in qty)/len(rows)
+            out[8] = original_log(sum(p*q for p,q in zip(ps,qty) if q is not None))
+            for k,side in enumerate(['BUY','SELL','UNKNOWN',None]): out[9+k] = original_log(sides.count(side))
+            for k,side in enumerate(['BUY','SELL']):
+                out[13+k] = original_log(sum(q for q,s in zip(qty,sides) if q is not None and s==side))
+                out[15+k] = (sum(q is not None and s==side for q,s in zip(qty,sides))/sides.count(side)) if sides.count(side) else 0.0
+            out[17] = original_log(sum(fees)/len(fees)) if fees else 0.0
+            out[18] = len(fees)/len(rows)
+            age = [[],[],[]]
+            for event in rows:
+                source,received = event['direct_time']['source_event_at_utc_ms'],event['direct_time']['received_at_utc_ms']
+                age[1].append(reference['observation_ms']-received)
+                if source is not None:
+                    age[0].append(reference['observation_ms']-source); age[2].append(received-source)
+            for k,values in enumerate(age):
+                if values:
+                    out[19+2*k] = original_log(Fraction(min(values),1000))
+                    out[20+2*k] = original_log(Fraction(max(values),1000))
+                out[25+k] = len(values)/len(rows)
+            expected_trades[28*leg:28*(leg+1)] = out
+        assert torch.equal(full_trades.values[0],torch.tensor(expected_trades,device='cuda',dtype=torch.float32)), (full_trades.values,expected_trades)
+        assert not full_trades.fault.any().cpu().item()
         quality_names = ['fresh','stale','missing','unknown_not_observed','confirmed_gap','invalid']
         def signed_log(value):
             value = float(value)
@@ -303,7 +350,8 @@ def main():
               'initialization_and_ready_prefix','future_slots_masked',
               'continuous_device_query','out_of_material_prefix_fault',
               'i64_time_coordinate_exact_difference','fault_bit_union','pm_direct_observation_fields',
-              'native_events104_legal_prefix_window','empty_and_invalid_window','utc_100ms_window_prefix']
+              'native_events104_legal_prefix_window','empty_and_invalid_window','utc_100ms_window_prefix',
+              'native_window_trades77_exact_aggregation']
     if columns['slots']:
         passed += ['exact_price_sort_current_positive_compaction','native_pm_nine_fields',
                    'real_book_encoder_forward_backward','tail_padding_pairwise_tree','native_pm_bba28_trade18']
@@ -315,7 +363,7 @@ def main():
               'groups':len(columns['groups']),'original_pm_steps':columns['original_pm_steps'],
               'assets':len(columns['assets']),'slots':len(columns['slots']),
               'decimal_dictionary':len(columns['decimals']),'derived_column_wire_bytes':len(wire),
-              'encoded_positive_rows':positive_rows,'public_facts':len(columns['facts']),
+              'encoded_positive_rows':positive_rows,'raw_trade_facts':len(columns['raw_trades']),'public_facts':len(columns['facts']),
               'direct_sources':len(columns['fact_sources']),
               'cold_seconds':parsed-started,'total_seconds':time.perf_counter()-started,
               'peak_allocated_bytes':torch.cuda.max_memory_allocated(),

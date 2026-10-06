@@ -48,6 +48,9 @@ pub struct PublicPmDeviceColumnsV1 {
     pub facts: Vec<[i64;4]>,
     /// 全部直接来源的原双时间：[group,typeId,sourcePresent,sourceMs,receivedMs]。
     pub fact_sources: Vec<[i64;5]>,
+    /// 原事实成交：[group,asset(-1=Binance),priceId,qPresent,qId,side(B/S/U/None),
+    /// feePresent,feeId,sourcePresent,sourceMs,receivedMs]；不等同public最新成交步骤。
+    pub raw_trades: Vec<[i64;11]>,
     pub field_updates: i64,
     pub original_pm_steps: i64,
 }
@@ -157,6 +160,18 @@ impl Builder {
         self.last_bba.insert(asset,id);
         Ok(())
     }
+    fn raw_trade(&mut self, group: i64, asset: i64, price: &ExactDecimal,
+        quantity: &Option<ExactDecimal>, side: Option<CanonicalPmSideV1>, fee: &Option<ExactDecimal>,
+        time: &EventTimeV2) -> RecordingResult<()> {
+        let price = self.decimal(price)?;
+        let [qp,q] = self.optional_decimal(quantity)?;
+        let [fp,f] = self.optional_decimal(fee)?;
+        let side = match side {Some(CanonicalPmSideV1::Buy)=>0,Some(CanonicalPmSideV1::Sell)=>1,
+            Some(CanonicalPmSideV1::Unknown)=>2,None=>3};
+        self.columns.raw_trades.push([group,asset,price,qp,q,side,fp,f,
+            i64::from(time.source_event_at_utc_ms.is_some()),time.source_event_at_utc_ms.unwrap_or(0),time.received_at_utc_ms]);
+        Ok(())
+    }
     fn asset(&mut self, asset: &AssetIdentityV1) -> i64 {
         let next = self.columns.assets.len() as i64;
         *self.assets.entry(asset.token_id.0.clone()).or_insert_with(|| { self.columns.assets.push(asset.clone()); next })
@@ -201,7 +216,8 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
             if !matches!(&row.event,PolymarketOrderbookEvent::MarketResolved {..}) {
                 pm_types.insert(packet.input.input_position,pm_payload_type(&row.event)?);
             }
-            if matches!(&row.event,PolymarketOrderbookEvent::BestBidAsk {..} | PolymarketOrderbookEvent::PriceChange {..}) {
+            if matches!(&row.event,PolymarketOrderbookEvent::BestBidAsk {..} | PolymarketOrderbookEvent::PriceChange {..} |
+                PolymarketOrderbookEvent::LastTradePrice {..}) {
                 raw_pm.insert(packet.input.input_position,row.clone());
             }
             if let PolymarketOrderbookEvent::Book {asset_id,bids,asks,..} = &row.event {
@@ -232,6 +248,34 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
                 }
                 let end = i64::try_from(builder.columns.fact_sources.len())?;
                 builder.columns.facts.push([group_position,type_id,start,end]);
+                match &fact.payload {
+                    crate::compact_public::CompactFactPayloadV1::PmFromInput(m) if kind=="pm.public_trade" => {
+                        let row = raw_pm.get(&m.input_record.input_position).ok_or("原成交事实缺输入")?;
+                        let PolymarketOrderbookEvent::LastTradePrice {asset_id,..} = &row.event else {
+                            return Err("规范成交引用了非成交输入".into());
+                        };
+                        let asset = builder.columns.market_assets.iter().find_map(|entry| {
+                            let identity = &builder.columns.assets[entry[1] as usize];
+                            (builder.columns.markets[entry[0] as usize].condition_id==m.market.condition_id &&
+                                identity.token_id.0==*asset_id).then(||identity.clone())
+                        }).ok_or("原成交事实缺所属市场注册资产")?;
+                        let Some(CanonicalPmPayloadV1::PublicTrade {asset,price_pusd_per_share,
+                            quantity_shares,side,fee_rate_bps}) =
+                            data_pipeline_core::pm_message::direct_trade_from_typed_raw_v1(row,&asset)? else {
+                                return Err("原成交载荷重建失败".into());
+                            };
+                        let a = builder.asset(&asset);
+                        builder.raw_trade(group_position,a,&price_pusd_per_share,&quantity_shares,side,
+                            &fee_rate_bps,&fact.direct_time)?;
+                    }
+                    crate::compact_public::CompactFactPayloadV1::Inline(PublicBusinessPayloadV1::ReferenceFact(
+                        CanonicalReferenceEventPayloadV2::BinanceAggregateTrade(t))) => {
+                        builder.raw_trade(group_position,-1,&t.price_usdt_per_btc,&Some(t.quantity_btc.clone()),
+                            Some(if t.buyer_is_maker {CanonicalPmSideV1::Sell} else {CanonicalPmSideV1::Buy}),
+                            &None,&fact.direct_time)?;
+                    }
+                    _=>{}
+                }
                 if let crate::compact_public::CompactFactPayloadV1::Inline(
                     PublicBusinessPayloadV1::MarketFact {market,payload:CanonicalMarketFactPayloadV1::FixedIdentity {assets}}
                 ) = &fact.payload {

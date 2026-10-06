@@ -169,6 +169,29 @@ pub fn direct_bba_from_typed_raw_v1(
     }
 }
 
+/// 沿原规范化配方恢复成交载荷。调用方必须给出规范事实引用的原注册资产。
+/// 数量、方向与费用缺失保持缺失，不使用public逻辑归约的最新成交代替。
+pub fn direct_trade_from_typed_raw_v1(
+    row: &PolymarketOrderbookRow, asset: &AssetIdentityV1,
+) -> Result<Option<CanonicalPmPayloadV1>, ContractError> {
+    let Raw::LastTradePrice {asset_id,price,size,side:direction,fee_rate_bps} = &row.event else {
+        return Ok(None);
+    };
+    if asset_id != &asset.token_id.0 {
+        return Err(invalid("asset_id", "trade asset differs from its registered identity"));
+    }
+    Ok(Some(trade_payload(asset.clone(),price,size,*direction,fee_rate_bps)?))
+}
+fn trade_payload(
+    asset: AssetIdentityV1, price: &str, size: &Option<String>,
+    direction: Option<PolymarketSide>, fee_rate_bps: &Option<String>,
+) -> Result<CanonicalPmPayloadV1, ContractError> {
+    Ok(CanonicalPmPayloadV1::PublicTrade {
+        asset, price_pusd_per_share:decimal(price,"last_trade_price.price")?,
+        quantity_shares:optional(size,"last_trade_price.size")?,side:direction.map(side),
+        fee_rate_bps:optional(fee_rate_bps,"fee_rate_bps")?,
+    })
+}
 pub(crate) fn payload_from_typed_raw(
     row: &PolymarketOrderbookRow,
     assets: &[crate::reduction::PolymarketAssetContextV1],
@@ -254,13 +277,7 @@ pub(crate) fn payload_from_typed_raw(
             size,
             side: direction,
             fee_rate_bps,
-        } => CanonicalPmPayloadV1::PublicTrade {
-            asset: asset(asset_id)?,
-            price_pusd_per_share: decimal(price, "last_trade_price.price")?,
-            quantity_shares: optional(size, "last_trade_price.size")?,
-            side: direction.map(side),
-            fee_rate_bps: optional(fee_rate_bps, "fee_rate_bps")?,
-        },
+        } => trade_payload(asset(asset_id)?,price,size,*direction,fee_rate_bps)?,
         Raw::NewMarket {
             clob_market_id,
             question,

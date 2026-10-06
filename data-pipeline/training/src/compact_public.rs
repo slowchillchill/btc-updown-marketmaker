@@ -640,6 +640,12 @@ mod tests {
             TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",7,33000,34000,
                 PolymarketOrderbookEvent::LastTradePrice {asset_id:"20".into(),price:"0.55".into(),size:Some("2.5".into()),
                     side:Some(data_pipeline_core::typed_raw::PolymarketSide::Buy),fee_rate_bps:Some("100".into())}))),
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",8,35000,36000,
+                PolymarketOrderbookEvent::LastTradePrice {asset_id:"20".into(),price:"0.57".into(),size:None,
+                    side:None,fee_rate_bps:None}))),
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",9,37000,38000,
+                PolymarketOrderbookEvent::LastTradePrice {asset_id:"20".into(),price:"0.53".into(),size:Some("1.25".into()),
+                    side:Some(data_pipeline_core::typed_raw::PolymarketSide::Unknown),fee_rate_bps:None}))),
         ];
         let mut core = PublicObservationCoreV1::new(header.clone()).unwrap();
         let mut writer = PublicCompactWriterV1::create(&target,header.clone()).unwrap();
@@ -693,7 +699,7 @@ mod tests {
         let reference = serde_json::json!({"token":token,"price":"0.4",
             "quantity":original.quantity(&token,BookSide::Bid,price).normalize().to_string(),
             "present":true,"initialized":asset.has_initial_snapshot,"ready":asset.book_ready,
-            "public_assets":public_assets,"public_events":public_events,"observation_ms":34000});
+            "public_assets":public_assets,"public_events":public_events,"observation_ms":38000});
         let reference_path = temp.path().join("original-reference.json");
         serde_json::to_writer(File::create(&reference_path).unwrap(),&reference).unwrap();
         eprintln!("original_core_zero_reference={reference}");
