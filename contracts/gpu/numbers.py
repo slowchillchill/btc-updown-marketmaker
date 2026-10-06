@@ -10,6 +10,13 @@ import torch
 _batch = ContextVar('public_exact_resource_batch', default=None)
 
 
+def combine_fault_rows(fault):
+    """合并[batch,rows]的全部int32错误位，不以最大整数丢失其它位。"""
+    bits = torch.arange(32, dtype=torch.int64, device=fault.device)
+    flags = ((fault.to(torch.int64)[:, :, None] >> bits) & 1).bool().any(dim=1)
+    return (flags.to(torch.int64) << bits).sum(dim=1).to(torch.int32)
+
+
 def _bucket(required):
     return 1 << (max(4, required) - 1).bit_length()
 
@@ -59,6 +66,20 @@ class ExactInt:
     words: torch.Tensor
     sign: torch.Tensor
     fault: torch.Tensor
+
+    @classmethod
+    def from_i64_tensor(cls, values):
+        """设备坐标转换；INT64_MIN的绝对值位模式也精确保留为2^63。"""
+        if values.dtype != torch.int64 or not values.is_cuda:
+            raise TypeError('需设备int64坐标')
+        values = values.reshape(-1)
+        magnitude = torch.where(values < 0, -values, values)
+        width = max(4, _batch.get()['capacity'] if _batch.get() else 4)
+        words = torch.zeros((values.numel(), width), dtype=torch.int32, device=values.device)
+        words[:, 0] = (magnitude & 0xffffffff).to(torch.int32)
+        words[:, 1] = ((magnitude >> 32) & 0xffffffff).to(torch.int32)
+        return cls(words, ((values > 0).to(torch.int8) - (values < 0).to(torch.int8)),
+                   torch.zeros_like(values, dtype=torch.int32))
 
     @classmethod
     def from_values(cls, values, *, device="cuda"):

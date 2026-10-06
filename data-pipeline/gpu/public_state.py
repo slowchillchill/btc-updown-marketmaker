@@ -34,14 +34,18 @@ class PublicBookFrame:
     ready: torch.Tensor
     tick_ids: torch.Tensor
     tick_present: torch.Tensor
+    anchor_ids: torch.Tensor
+    anchor_present: torch.Tensor
+    quality: torch.Tensor
     fault: torch.Tensor
 
 
 class PublicPmState:
     """一次冷加载共享外生列；查询只消费设备公共组前缀，不读设备选择回CPU。
 
-    slots包含整块全部精确价位。未来槽位必须present=false，模型使用其mask；
-    不把这个数量切片冒充包含quality/BBA/trade/生命周期的完整公共GPU状态。
+    slots包含整块全部精确价位。未来槽位必须present=false；Native须先压紧
+    当前正量档位才能进入模型，不能把这些共享槽位直接当模型padding。
+    本入口尚未包含BBA/trade/生命周期的完整公共GPU状态。
     """
     def __init__(self, columns, *, device='cuda'):
         if columns['version'] != 'public_pm_device_columns_v1':
@@ -60,10 +64,18 @@ class PublicPmState:
             raw.extend(text.encode('ascii')); offsets.append(len(raw))
         byte_column = torch.tensor(list(raw), dtype=torch.uint8).pin_memory().to(device, non_blocking=True)
         offset_column = torch.tensor(offsets, dtype=torch.int64).pin_memory().to(device, non_blocking=True)
-        self.decimals = decimal_columns(byte_column, offset_column,
-            torch.ones(len(offsets)-1, dtype=torch.bool, device=device)).rational()
-        for name in ('quantities', 'selections', 'resets', 'initialized', 'ready', 'ticks'):
-            target_count = slots if name in ('quantities', 'selections') else assets
+        self.decimal_columns = decimal_columns(byte_column, offset_column,
+            torch.ones(len(offsets)-1, dtype=torch.bool, device=device))
+        self.decimals = self.decimal_columns.rational()
+        self.decimal_fault = self.decimals.fault  # 不可变字典的合并错误只冷计算一次。
+        self.anchors = columns['anchors']
+        self.anchor_times = torch.tensor([[0, 0, 0]] + [
+            [int(a['direct']['source_event_at_utc_ms'] is not None),
+             a['direct']['source_event_at_utc_ms'] or 0, a['direct']['received_at_utc_ms']]
+            for a in self.anchors], dtype=torch.int64, device=device)
+        for name in ('quantities', 'selections', 'resets', 'initialized', 'ready', 'ticks',
+                     'level_anchors', 'book_quality'):
+            target_count = slots if name in ('quantities', 'selections', 'level_anchors') else assets
             previous = {}
             for target, sequence, group, value in columns[name]:
                 if not (0 <= target < target_count and 0 <= sequence < columns['original_pm_steps']
@@ -77,6 +89,10 @@ class PublicPmState:
                     raise ValueError('公共设备精确值引用越界')
                 if name in ('selections', 'initialized', 'ready') and value not in (0, 1):
                     raise ValueError('公共设备存在标志错误')
+                if name == 'level_anchors' and not 0 <= value < len(self.anchors):
+                    raise ValueError('公共档位直接锚点引用越界')
+                if name == 'book_quality' and not 0 <= value < 6:
+                    raise ValueError('公共盘口质量错误')
             setattr(self, name, PrefixColumn(columns[name], target_count, device))
 
     def frame(self, prefixes):
@@ -86,6 +102,8 @@ class PublicPmState:
         iseq, initialized, ifound, ifault = self.initialized.query(prefixes)
         rseq, ready, rfound, rfault = self.ready.query(prefixes)
         tseq, tick, tfound, tfault = self.ticks.query(prefixes)
+        aseq, anchor, afound, afault = self.level_anchors.query(prefixes)
+        _, quality, quality_found, quality_fault = self.book_quality.query(prefixes)
         asset = self.slots[:, 0]
         reset = torch.where(reset_found, reset, -1)
         recent_quantity = qfound & (qseq >= reset[:, asset])
@@ -95,13 +113,15 @@ class PublicPmState:
         numbers = _numbers()
         quantity = numbers.ExactRational(_take(self.decimals.numerator, qid.reshape(-1)),
                                           _take(self.decimals.denominator, qid.reshape(-1)))
-        asset_fault = reset_fault | ifault | rfault | tfault
-        fault = qfault | sfault | asset_fault[:, asset]
+        asset_fault = reset_fault | ifault | rfault | tfault | quality_fault
+        fault = qfault | sfault | afault | asset_fault[:, asset]
         fault = fault | quantity.fault.reshape(qid.shape)
-        fault = fault | self.decimals.fault[self.slots[:, 2]][None]
-        fault = fault | self.decimals.fault[tick][:, asset]
+        fault = fault | self.decimal_fault[self.slots[:, 2]][None]
+        fault = fault | self.decimal_fault[tick][:, asset]
         fault = fault | (quantity.numerator.sign.reshape(qid.shape) < 0).to(torch.int32)
         fault = fault | ((prefixes < -1) | (prefixes >= self.group_count))[:, None].to(torch.int32)
         return PublicBookFrame(quantity, present,
             ifound & initialized.bool(),
-            rfound & ready.bool() & (rseq >= reset), tick, tfound, fault)
+            rfound & ready.bool() & (rseq >= reset), tick, tfound,
+            anchor, afound & (aseq >= reset[:, asset]),
+            torch.where(quality_found, quality, 3), fault)

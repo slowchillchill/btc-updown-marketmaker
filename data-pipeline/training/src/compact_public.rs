@@ -628,6 +628,8 @@ mod tests {
         ];
         let mut core = PublicObservationCoreV1::new(header.clone()).unwrap();
         let mut writer = PublicCompactWriterV1::create(&target,header.clone()).unwrap();
+        let mut observation_core = PublicObservationCoreV1::new(header.clone()).unwrap();
+        let mut public_assets = Vec::new();
         let mut original = None;
         let mut zero_evidence_without_change = false;
         let mut token = String::new();
@@ -640,6 +642,14 @@ mod tests {
             let ids = BTreeMap::new();
             let prepared = prepare_public_ingress_v1(&core,&input,&ids,&[]).unwrap();
             let applied = core.push_facts(&prepared).unwrap();
+            // 有界真实构造链的独立旧公共观察入口；不回放历史全窗。
+            let observed_prepared = prepare_public_ingress_v1(&observation_core,&input,&ids,&[]).unwrap();
+            let observed = observation_core.push(&observed_prepared).unwrap();
+            for group in &observed.applied.closed_groups {
+                for observation in &group.observations {
+                    public_assets = observation.assets.clone();
+                }
+            }
             for (_, reduction) in &applied.pm_reductions {
                 if original.is_none() {
                     let context = core.fixed_markets().next().unwrap();
@@ -665,7 +675,8 @@ mod tests {
         let asset = original.asset_state(&token).unwrap();
         let reference = serde_json::json!({"token":token,"price":"0.4",
             "quantity":original.quantity(&token,BookSide::Bid,price).normalize().to_string(),
-            "present":true,"initialized":asset.has_initial_snapshot,"ready":asset.book_ready});
+            "present":true,"initialized":asset.has_initial_snapshot,"ready":asset.book_ready,
+            "public_assets":public_assets,"observation_ms":24000});
         let reference_path = temp.path().join("original-reference.json");
         serde_json::to_writer(File::create(&reference_path).unwrap(),&reference).unwrap();
         eprintln!("original_core_zero_reference={reference}");

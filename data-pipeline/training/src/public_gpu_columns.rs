@@ -24,7 +24,25 @@ pub struct PublicPmDeviceColumnsV1 {
     pub initialized: Vec<[i64;4]>,
     pub ready: Vec<[i64;4]>,
     pub ticks: Vec<[i64;4]>,
+    /// 直接锚点的原证据；槽位列决定原level字段路径，不改成依赖时间。
+    pub anchors: Vec<PublicLevelAnchorV1>,
+    pub level_anchors: Vec<[i64;4]>,
+    /// 与原Native Q6一致：Fresh/Stale/Missing/Unknown/Gap/Invalid。
+    pub book_quality: Vec<[i64;4]>,
     pub original_pm_steps: i64,
+}
+#[derive(Serialize)]
+pub struct PublicLevelAnchorV1 {
+    pub direct: SourceEvidenceRefV3,
+    pub position: PublicFactPositionV1,
+    pub group_id: Sha256Hex,
+}
+fn quality_code(quality: MarketDataQuality) -> i64 {
+    match quality {
+        MarketDataQuality::Fresh => 0, MarketDataQuality::Stale => 1,
+        MarketDataQuality::Missing => 2, MarketDataQuality::UnknownNotObserved => 3,
+        MarketDataQuality::ConfirmedGap => 4, MarketDataQuality::Invalid => 5,
+    }
 }
 struct Builder {
     columns: PublicPmDeviceColumnsV1,
@@ -81,6 +99,18 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
             for step in &pm.steps {
                 let sequence = builder.columns.original_pm_steps;
                 builder.columns.original_pm_steps = sequence.checked_add(1).ok_or("设备步骤位置溢出")?;
+                // 只有模型直接选择步骤产生档位锚点；每步共享一次原证据。
+                let anchor = i64::try_from(builder.columns.anchors.len())?;
+                let has_anchor = matches!(&step.change,
+                    CompactPmChangeV1::InitialSnapshotFromInput {..} |
+                    CompactPmChangeV1::Inline(PmStepChangeV1::Selection {..}));
+                if has_anchor {
+                    let group_id = packet.groups.iter().find(|g| g.group_position as i64 == group)
+                        .ok_or("设备锚点缺原闭组")?.group_id.clone();
+                    builder.columns.anchors.push(PublicLevelAnchorV1 {
+                        direct:step.direct.clone(),position:pm.position.clone(),group_id,
+                    });
+                }
                 match &step.change {
                     CompactPmChangeV1::InitialSnapshotFromInput {input_record,asset,initial_tick_size_pusd_per_share,..} => {
                         let (token,bids,asks) = snapshots.get(&input_record.input_position).ok_or("设备初始盘口缺原输入快照")?;
@@ -89,6 +119,7 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
                         builder.columns.resets.push([a,sequence,group,0]);
                         builder.columns.initialized.push([a,sequence,group,1]);
                         builder.columns.ready.push([a,sequence,group,1]);
+                        builder.columns.book_quality.push([a,sequence,group,quality_code(step.quality.availability)]);
                         let tick = builder.decimal(initial_tick_size_pusd_per_share)?;
                         builder.columns.ticks.push([a,sequence,group,tick]);
                         for (side,levels) in [(BookSide::Bid,bids),(BookSide::Ask,asks)] {
@@ -97,6 +128,7 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
                                 let quantity = normalize_decimal_text(&level.size,"book.size")?;
                                 let slot = builder.level(asset,side, &price,&quantity,sequence,group)?;
                                 builder.columns.selections.push([slot,sequence,group,1]);
+                                builder.columns.level_anchors.push([slot,sequence,group,anchor]);
                             }
                         }
                     }
@@ -113,13 +145,21 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
                         PmStepChangeV1::Selection {asset,side,price,selected,..} => {
                             let slot = builder.slot(asset,*side,price)?;
                             builder.columns.selections.push([slot,sequence,group,i64::from(selected.present)]);
+                            builder.columns.level_anchors.push([slot,sequence,group,anchor]);
                         }
                         PmStepChangeV1::BookReady {asset} => {
                             let a = builder.asset(asset); builder.columns.ready.push([a,sequence,group,1]);
+                            builder.columns.book_quality.push([a,sequence,group,0]);
                         }
                         PmStepChangeV1::Tick {tick,..} => {
                             let a = builder.asset(&tick.asset); let value = builder.decimal(&tick.new_tick_size_pusd_per_share)?;
                             builder.columns.ticks.push([a,sequence,group,value]);
+                        }
+                        PmStepChangeV1::Quality {boundary} => {
+                            if let QualityScopeV1::Asset(asset) = &boundary.scope {
+                                let a = builder.asset(asset);
+                                builder.columns.book_quality.push([a,sequence,group,quality_code(boundary.current_quality)]);
+                            }
                         }
                         _ => {} // 该列消费者只负责数量/选择/初始/ready/tick，其它原事实保留在compact。
                     }
