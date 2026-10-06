@@ -35,6 +35,9 @@ pub struct PublicCompactManifestV1 {
     pub inputs: u64,
     pub groups: u64,
     pub facts: u64,
+    pub pm_packets: u64,
+    pub pm_steps: u64,
+    pub reports: u64,
     pub normal_end: bool,
     pub files: Vec<CompactFileV1>,
 }
@@ -214,7 +217,8 @@ impl PublicCompactWriterV1 {
                 schema_version: SCHEMA.into(),
                 applied_prefix: AppliedIngressPrefixV1 {
                     input_stream_id: header.input_stream_id.clone(), next_input_position: 0,
-                }, header, inputs: 0, groups: 0, facts: 0, normal_end: false, files: vec![],
+            }, header, inputs: 0, groups: 0, facts: 0, pm_packets: 0, pm_steps: 0,
+            reports: 0, normal_end: false, files: vec![],
             }, failed: false,
         })
     }
@@ -238,6 +242,9 @@ impl PublicCompactWriterV1 {
             return Err(io::Error::other("材料输入与应用前缀不连续").into());
         }
         let packet = PublicCompactPacketV1::build(input, applied)?;
+        self.manifest.pm_packets += packet.pm.len() as u64;
+        self.manifest.pm_steps += packet.pm.iter().map(|p| p.steps.len() as u64).sum::<u64>();
+        self.manifest.reports += packet.reports.len() as u64 + packet.pm.iter().map(|p| p.reports.len() as u64).sum::<u64>();
         let bytes = serde_json::to_vec(&packet)?;
         self.payload.write_all(&bytes)?;
         self.payload_bytes = self.payload_bytes.checked_add(bytes.len() as u64)
@@ -323,6 +330,9 @@ pub struct PublicCompactReaderV1 {
     next_group: u64,
     next_fact: u64,
     next_offset: u64,
+    next_pm: u64,
+    next_step: u64,
+    next_report: u64,
     max_packet_bytes: usize,
 }
 impl PublicCompactReaderV1 {
@@ -348,7 +358,8 @@ impl PublicCompactReaderV1 {
         }
         Ok(Self { payload: File::open(root.join(expected[0]))?, offsets: File::open(root.join(expected[1]))?,
                   columns: File::open(root.join(expected[2]))?,
-                  manifest, next: 0, next_group: 0, next_fact: 0, next_offset: 0, max_packet_bytes })
+                  manifest, next: 0, next_group: 0, next_fact: 0, next_offset: 0,
+                  next_pm: 0, next_step: 0, next_report: 0, max_packet_bytes })
     }
     pub fn next_packet(&mut self) -> RecordingResult<Option<PublicCompactPacketV1>> {
         if self.next == self.manifest.inputs { return Ok(None); }
@@ -404,11 +415,17 @@ impl PublicCompactReaderV1 {
                 if let CompactFactPayloadV1::BinanceDepthFromPrefix { through_input_position, .. } = &fact.payload {
                     if *through_input_position != self.next { return Err(io::Error::other("深度状态前缀不一致").into()); }
                 }
+                if matches!(&fact.payload, CompactFactPayloadV1::Inline(PublicBusinessPayloadV1::PolymarketMessage(_)
+                    | PublicBusinessPayloadV1::ReferenceFact(CanonicalReferenceEventPayloadV2::BinanceDepthState(_)))) {
+                    return Err(io::Error::other("紧凑事实不得内联重复盘口载荷").into());
+                }
             }
             self.next_group += 1;
             self.next_fact = fact_end;
         }
+        let mut seen_pm = std::collections::BTreeSet::new();
         for pm in &packet.pm {
+            if !seen_pm.insert(&pm.position) { return Err(io::Error::other("PM材料重复事实关联").into()); }
             let (message, canonical_position) = associations.get(&pm.position)
                 .ok_or_else(|| io::Error::other("PM步骤没有对应事实"))?;
             for (index, step) in pm.steps.iter().enumerate() {
@@ -420,10 +437,21 @@ impl PublicCompactReaderV1 {
                 if let CompactPmChangeV1::InitialSnapshotFromInput { input_record, .. } = &step.change {
                     if input_record != &message.input_record { return Err(io::Error::other("PM快照输入关联不一致").into()); }
                 }
+                if matches!(&step.change, CompactPmChangeV1::Inline(PmStepChangeV1::InitialSnapshot { .. })) {
+                    return Err(io::Error::other("紧凑步骤不得内联重复快照").into());
+                }
+            }
+            if pm.reports.iter().any(|r|r.canonical_fact_id != message.event_id) {
+                return Err(io::Error::other("PM报告与事实关联错误").into());
             }
         }
+        if associations.len() != seen_pm.len() { return Err(io::Error::other("PM事实缺少完整材料关联").into()); }
+        self.next_pm += packet.pm.len() as u64;
+        self.next_step += packet.pm.iter().map(|p|p.steps.len() as u64).sum::<u64>();
+        self.next_report += packet.reports.len() as u64 + packet.pm.iter().map(|p|p.reports.len() as u64).sum::<u64>();
         if final_packet && (self.next_group != self.manifest.groups || self.next_fact != self.manifest.facts
-                            || end != self.manifest.files[0].bytes) {
+                            || end != self.manifest.files[0].bytes || self.next_pm != self.manifest.pm_packets
+                            || self.next_step != self.manifest.pm_steps || self.next_report != self.manifest.reports) {
             return Err(io::Error::other("材料末端计数或offset覆盖不闭合").into());
         }
         self.next_offset = end;
@@ -526,7 +554,7 @@ mod tests {
         assert_eq!(depths.len(),2);
         assert_eq!(depths[0].bids.len(),2);
         assert_eq!(depths[1].bids.len(),3);
-        assert!(depths[1].bids.iter().any(|v|v.quantity.0=="1.234567890123456789"));
+        assert!(depths[1].bids.iter().any(|v|v.quantity_btc.0=="1.234567890123456789"));
         // 实际审查反例：成员SHA均不变，仅末端facts计数篡改也必须拒绝。
         let manifest_path = target.join("manifest.json");
         let mut manifest:PublicCompactManifestV1=serde_json::from_reader(File::open(&manifest_path).unwrap()).unwrap();
