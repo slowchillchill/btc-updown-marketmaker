@@ -9267,7 +9267,7 @@ mod tests {
         }
         assert_eq!(state.fills[&1].base_units,300_000_000);
         assert_eq!(state.fills[&1].quote_units,120_000_000);
-        assert_eq!(state.fills[&1].liquidity_role,SimLiquidityRoleV1::EligibleMaker);
+        assert_eq!(state.fills[&1].liquidity_role,SimLiquidityRoleV1::MakerInferred);
         checkpoints.push(serde_json::json!({"stage":"matched","at":1310,"state":state.gpu_order_checkpoint_for_tests("sim-1")}));
         let (next,end)=state.advance_next_rebate_clock_at(2000).unwrap();
         state=next;

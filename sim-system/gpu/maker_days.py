@@ -149,7 +149,7 @@ class MakerDays(RebateCalendarOperations):
         fault = Numbers.combine_fault_rows(torch.where(self.fill_occupied, relation.fault.reshape(roots, capacity), 0))
         return matches.to(torch.int64).argmax(1), matches.any(1), fault
 
-    def register(self, sequence, condition, matched_at, base, price, enabled):
+    def register(self, sequence, condition, matched_at, base, price, enabled, fee_rate, fee_exponent):
         roots, capacity = self.fill_occupied.shape
         root = torch.arange(roots, device=self.days.device)
         for value in [condition, matched_at]:
@@ -169,15 +169,19 @@ class MakerDays(RebateCalendarOperations):
         old_price = take_ratio(self.fill_prices, root * capacity + fi).compare(price)
         upper = sequence.compare(sequence.constant((1 << 64) - 1))
         p_upper = price.compare(_ratio(base.constant(1)))
+        # 原Maker TradeLifecycle各阶段都提供真实逐fill H5费用等价。
+        fee = allocate_taker_fee(base, price, fee_rate, fee_exponent, roots, 1)
+        equivalent = ExactRational.ratio(fee.total_micro, base.constant(1_000_000))
         error = sequence.fault | base.fault | price.fault | upper.fault | p_upper.fault
         error = error | ((sequence.sign <= 0) | (upper.order > 0) | (base.sign <= 0) |
             (price.numerator.sign <= 0) | (p_upper.order >= 0) | ~known_market |
             (matched_at < MIN_DAY) | (matched_at > MAX_MATCHED)).to(torch.int32)
         mismatch = found & ((self.fill_markets[root, fi] != mi) | (self.fill_days[root, fi] != day) |
             (old_base.order != 0) | (old_price.order != 0))
-        error = error | old_base.fault | old_price.fault | lookup_fault | mismatch.to(torch.int32)
+        error = error | old_base.fault | old_price.fault | lookup_fault | mismatch.to(torch.int32) | fee.fault | equivalent.fault
         fresh = enabled & ~found
-        error = error | (fresh & ((self.market_result[root, mi] >= 0) | self.end_reached[root, mi] | self.finalized[root, di])).to(torch.int32)
+        error = error | (fresh & ((self.market_result[root, mi] >= 0) | self.end_reached[root, mi] |
+            (known_day & self.finalized[root, di]))).to(torch.int32)
         fault = self.fault | torch.where(enabled, error, 0)
         fill_demand = self.fill_occupied.to(torch.int64).sum(1) + fresh.to(torch.int64)
         day_demand = self.occupied.to(torch.int64).sum(1) + (fresh & ~known_day).to(torch.int64)
@@ -193,33 +197,30 @@ class MakerDays(RebateCalendarOperations):
             fill_markets=torch.where(fm, mi[:, None], self.fill_markets), fill_days=torch.where(fm, day[:, None], self.fill_days),
             fill_bases=_put_integer(self.fill_bases, base, root * capacity + fi, use),
             fill_prices=_store_ratio(self.fill_prices, price, root * capacity + fi, use),
+            fee_equivalent=_store_ratio(self.fee_equivalent, equivalent, root * capacity + fi, use),
             market_pending=self.market_pending + added, market_days=market_days,
             occupied=self.occupied | dm, days=torch.where(dm, day[:, None], self.days),
             pending=self.pending + (dm & ~touched[:, None]).to(torch.int64), fault=fault)
         return result, MakerDemand((~enabled | found | use) & (fault == 0), fill_demand, day_demand, fault)
 
-    def complete(self, sequence, terminal, success, fee_rate, fee_exponent, maker_rate):
+    def complete(self, sequence, terminal, success, maker_rate):
         roots, capacity = self.fill_occupied.shape
         root = torch.arange(roots, device=self.days.device)
         fi, found, lookup_fault = self._lookup(sequence)
         mi = self.fill_markets[root, fi].clamp_min(0)
         requested = terminal & ~self.terminal_consumed[root, fi]
-        base = _take(self.fill_bases, root * capacity + fi)
-        price = take_ratio(self.fill_prices, root * capacity + fi)
-        fee = allocate_taker_fee(base, price, fee_rate, fee_exponent, roots, 1)
-        equivalent = ExactRational.ratio(fee.total_micro, base.constant(1_000_000))
+        equivalent = take_ratio(self.fee_equivalent, root * capacity + fi)
         contribution = equivalent * maker_rate
         fault = self.fault | torch.where(terminal, lookup_fault | (~found).to(torch.int32), 0)
         fault = fault | torch.where(requested, 
             (self.market_pending[root, mi] <= 0).to(torch.int32), 0)
-        fault = fault | torch.where(requested & success, fee.fault | contribution.fault | (maker_rate.numerator.sign < 0).to(torch.int32), 0)
+        fault = fault | torch.where(requested & success, contribution.fault | (maker_rate.numerator.sign < 0).to(torch.int32), 0)
         use = requested & found & (fault == 0)
         fm = torch.zeros_like(self.fill_occupied).scatter(1, fi[:, None], use[:, None])
         subtract = torch.zeros_like(self.market_pending).scatter(1, mi[:, None], use.to(torch.int64)[:, None])
         result = replace(self, terminal_consumed=self.terminal_consumed | fm,
             successful=torch.where(fm, success[:, None], self.successful),
             market_pending=self.market_pending - subtract,
-            fee_equivalent=_store_ratio(self.fee_equivalent, equivalent, root * capacity + fi, use & success),
             contributions=_store_ratio(self.contributions, contribution, root * capacity + fi, use & success), fault=fault)
         return result, terminal & (~requested | found) & (fault == 0)
 

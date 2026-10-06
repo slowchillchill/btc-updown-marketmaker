@@ -3,6 +3,7 @@
 原matching生产路径供给源结果；不冒称外层Actor、NOE或全局宿主已经闭合。
 """
 from fractions import Fraction
+from dataclasses import replace
 import json
 import sys
 import time
@@ -36,6 +37,7 @@ def main():
     started = time.perf_counter()
     zero = torch.zeros(1, dtype=torch.int64, device='cuda')
     enabled = torch.ones(1, dtype=torch.bool, device='cuda')
+    rate = Numbers.run_exact_batch(lambda: rational([source['fee_rate']]))
     def prepare():
         account = PlatformAccountState.open(integers([639_500_520]), torch.tensor([0, 0], device='cuda'))
         account, delta, _ = account.accept_order(integers([122_000_000]), integers([0]), integers([122_000_000]), enabled)
@@ -53,12 +55,13 @@ def main():
         record = FillRecord.create(maker_fill.base, maker_fill.quote, integers([0]), zero,
             torch.tensor([1310], device='cuda'), maker_fill.emitted, source['finality_path'])
         pool = FillPool.empty(record, capacity=1)
-        days = MakerDays.empty(zero[:, None], torch.tensor([[2000]], device='cuda'), enabled[:, None], fills=1, days=1)
-        pool, days, effect, demand = pool.enqueue_with_maker(record, days, zero, rational(['0.4']))
+        # 第二冷市场只用于日目录增长边界，不是正式模型根或新增数据读取。
+        days = MakerDays.empty(torch.tensor([[0,1]],device='cuda'),torch.tensor([[2000,86_402_000]],device='cuda'),
+            torch.tensor([[True,True]],device='cuda'),fills=1,days=1)
+        pool, days, effect, demand = pool.enqueue_with_maker(record, days, zero, rational(['0.4']),rate,source['fee_exponent'])
         assert effect.emitted.cpu().tolist() == [True] and demand.committed.cpu().tolist() == [True]
         return pool, days
     pool, days = Numbers.run_exact_batch(register)
-    rate = Numbers.run_exact_batch(lambda: rational([source['fee_rate']]))
     maker_rate = Numbers.run_exact_batch(lambda: rational([source['maker_rate']]))
     results = []
     for checkpoint in source['checkpoints']:
@@ -70,7 +73,7 @@ def main():
             assert days.pending.cpu().tolist() == [[1]]
         else:
             pool, account, days, frame, result = Numbers.run_exact_batch(lambda: pool.advance_with_maker(
-                account, days, at, rate, source['fee_exponent'], maker_rate))
+                account, days, at, maker_rate))
             assert frame.event.emitted.cpu().tolist() == [True]
             if result.emitted.any().cpu().item():
                 results.append(result)
@@ -79,7 +82,7 @@ def main():
     assert values(results[0].fill_sequences) == [1] and results[0].member_mask.cpu().tolist() == [[True]]
     assert amounts(results[0].contributions) == [Fraction('1.008')]
     assert amounts(days.fee_equivalent) == [Fraction(source['maker_fee_equivalent'])]
-    assert days.pending.cpu().tolist() == [[0]] and days.market_pending.cpu().tolist() == [[0]]
+    assert days.pending.cpu().tolist() == [[0]] and days.market_pending.cpu().tolist() == [[0,0]]
     days, advanced = days.advance_clock(torch.tensor([89_100_000], device='cuda'), enabled)
     assert advanced.cpu().tolist() == [True]
     days, account, final = Numbers.run_exact_batch(lambda: days.finalize_one(account, enabled))
@@ -97,10 +100,22 @@ def main():
     assert values(grown.fill_sequences) == [1, 0]
     assert amounts(grown.fill_prices) == [Fraction('0.4'), 0]
     assert amounts(grown.contributions) == [Fraction('1.008'), 0]
+    def new_day(state):
+        return state.register(integers([2]),torch.ones_like(zero),torch.tensor([86_401_310],device='cuda'),
+            integers([1_000_000]),rational(['0.4']),enabled,rate,source['fee_exponent'])
+    retry, demand = Numbers.run_exact_batch(lambda:new_day(days))
+    assert demand.fault.cpu().tolist()==[0] and demand.committed.cpu().tolist()==[False]
+    assert demand.day_capacity.cpu().tolist()==[2] and demand.fill_capacity.cpu().tolist()==[2]
+    assert torch.equal(retry.occupied,days.occupied) and values(retry.fill_sequences)==[1]
+    retried, demand = Numbers.run_exact_batch(lambda:new_day(grown))
+    assert demand.committed.cpu().tolist()==[True] and retried.fault.cpu().tolist()==[0]
+    assert values(retried.fill_sequences)==[1,2] and retried.finalized.cpu().tolist()==[[True,False]]
+    assert amounts(retried.payable)==[Fraction('1.008'),0] and retried.pending.cpu().tolist()==[[0,1]]
     print(json.dumps({'original_non_post_only_GTC_hidden_Maker_source': True,
         'queue_depletion_base_quote_checked': True, 'market_end_waits_for_terminal': True,
         'positive_fill_H5_and_market_vector_checked': True, 'Maker_day_payment_exact_money_checked': True,
         'capacity_growth_preserves_identity_price_contribution': True,
+        'full_finalized_old_day_then_new_market_day_capacity_retry_checked':True,
         'elapsed_seconds_with_reference_reads': time.perf_counter() - started,
         'device_peak_allocated_bytes': torch.cuda.max_memory_allocated(),
         'global_clock_NOE_Ledger_Maker_pipeline_delivered': False}))
