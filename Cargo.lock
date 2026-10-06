@@ -4495,6 +4495,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "shared-run",
  "tempfile",
  "tokio",
  "toml",

@@ -757,6 +757,7 @@ async fn gpu_actual_maker_mature_day_preserves_noe_batch_and_continuous_ledger()
             Box::new(GpuNoeReferencePort {memory,durable,normalization_reference:normalization_capture,normalization_core:None})
         },"639.50052").await;
     let observation=saved.borrow_mut().take().unwrap();
+    let mut registry=shared_run::SharedExecutionRegistryV2::new(Arc::new(observation.opening_record().unwrap().context().clone()));
     let mut ledger=ledger::LedgerWriterV1::new_with_admission_v2(ledger::AccountAdmissionPolicyV2::DualCashNoMarketLimit);
     ledger.apply_noe_memory_v2(&observation.opening_record().unwrap()).unwrap();
     for record in observation.take_closed_records() { ledger.apply_noe_memory_v2(&record).unwrap(); }
@@ -773,6 +774,14 @@ async fn gpu_actual_maker_mature_day_preserves_noe_batch_and_continuous_ledger()
     let condition=initial[0].market.condition_id.clone();
     let (state,_)=reduce_market_event_slice_v2(actor.state.take().unwrap(),MarketEventPathV1::HiddenPlatform,1100,
         &initial,actor._rule_snapshot.snapshot(),policy.as_ref()).unwrap_or_else(|_|panic!("真实双腿初始化"));
+    let intent=Arc::new(contracts::ModelIntentV1::SubmitSingleBuy {
+        condition_id:condition.clone(),order:contracts::BuyLegIntentV1 {
+            token_id:TokenId("1".into()),order:contracts::BuyOrderIntentV1::GtcLimit {
+                limit_price_pusd_per_share:"0.4".parse().unwrap(),size_shares:"305".parse().unwrap(),post_only:false,
+            },
+        },
+    });
+    let origin=registry.freeze("gpu-maker-mature-post".into(),intent.clone());
     let request=BusinessRequestV2::PostOrders(PostOrdersRequestV2 {
         context:RequestContextV2 {global_request_id:"gpu-maker-mature-post".into(),caller_correlation_id:None},
         items:vec![PostOrderBatchItemV2 {batch_item_ordinal:0,item:post_item("gpu-maker-mature-item",&condition,&TokenId("1".into()),
@@ -780,6 +789,7 @@ async fn gpu_actual_maker_mature_day_preserves_noe_batch_and_continuous_ledger()
     });
     let (state,receipt)=register_request_candidate(&actor.opened,actor.scenario.initial_market_directory(),state,
         &request_cutoff(1200),&request,11,actor._latency_profile.as_ref(),actor._rule_snapshot.snapshot());
+    registry.record_sim_receipt(&origin,&receipt);
     let processing=receipt.platform_arrived_at_utc_ms;
     let (state,accepted)=advance_mutation_candidate_with_outputs(&actor.opened,actor.scenario.initial_market_directory(),state,
         processing,actor._rule_snapshot.snapshot(),policy.as_ref());
@@ -798,6 +808,7 @@ async fn gpu_actual_maker_mature_day_preserves_noe_batch_and_continuous_ledger()
     actor.projection_port.close_receive_prefix(prefix_at);
     actor.projection_port.observe_public_time(&public_time(prefix_at));
     let mut previous=observation.take_closed_records();
+    for record in &previous {registry.observe(record);}
     while !previous.is_empty() {
         let count=previous.len();
         let mut waiting=Vec::new();
@@ -811,6 +822,7 @@ async fn gpu_actual_maker_mature_day_preserves_noe_batch_and_continuous_ledger()
         assert!(waiting.len()<count,"真实初始前缀可闭合");
         previous=waiting;
     }
+    let registry_before=gpu_registry_checkpoint(&registry);
     let before=gpu_ledger_reservation_checkpoint(&ledger,"accepted_prefix");
     let next_private=state.session.as_ref().unwrap().next_private_feedback_sequence;
     let next_batch=state.session.as_ref().unwrap().next_projection_batch_sequence;
@@ -854,6 +866,8 @@ async fn gpu_actual_maker_mature_day_preserves_noe_batch_and_continuous_ledger()
     actor.projection_port.close_receive_prefix(closed_at);
     actor.projection_port.observe_public_time(&public_time(closed_at));
     let received=observation.take_closed_records();
+    for record in &received {registry.observe(record);}
+    let registry_after=gpu_registry_checkpoint(&registry);
     assert_eq!(received.len(),9,"真实3Trade、Maker市场/日结/付款与3经济事实");
     let original_producer_seconds=reference_started.elapsed().as_secs_f64();
     let original_ledger_started=std::time::Instant::now();
@@ -878,6 +892,9 @@ async fn gpu_actual_maker_mature_day_preserves_noe_batch_and_continuous_ledger()
     let records=received.iter().map(|record|serde_json::json!({"record":record.record(),"position":record.position(),
         "visibility":record.visibility()})).collect::<Vec<_>>();
     let source=serde_json::json!({"source_contract":"original_outer_GTC_hidden_Maker_SIM_NOE_V4_Ledger",
+        "registry_before":registry_before,"registry_after":registry_after,
+        "frozen_intent":{"request":origin.global_request_id(),"condition":condition,"token":"1","quantity":"305","price":"0.4","kind":"GTC","post_only":false},
+        "receipt":{"input_sequence":receipt.input_sequence(),"platform_arrived_at_utc_ms":receipt.platform_arrived_at_utc_ms(),"scheduled_action_count":receipt.scheduled_action_count()},
         "before":before,"account_before":account_before,"after":gpu_ledger_reservation_checkpoint(&ledger,"after_all"),
         "records":records,"attempts":attempts,"next_private":next_private,"next_batch":next_batch,
         "processing_at":processing,"maker_at":maker_at+10,"market_end":market_end,"day_at":final_at,"events":events,"batches":batches,"closed_at":closed_at,
@@ -901,6 +918,28 @@ async fn gpu_actual_maker_mature_day_preserves_noe_batch_and_continuous_ledger()
     std::fs::write(artifact.join("outer-maker-day-report.json"),&output.stdout).unwrap();
     assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
     eprintln!("gpu_outer_maker_day={}",String::from_utf8_lossy(&output.stdout));
+}
+
+#[cfg(feature="shared-execution")]
+fn gpu_registry_checkpoint(registry:&shared_run::SharedExecutionRegistryV2)->serde_json::Value {
+    let orders=registry.orders().map(|order|serde_json::json!({
+        "identity":order.order_identity,"condition":order.condition_id,"token":order.token_id,
+        "base_quantity_applicability":order.base_quantity_applicability,
+        "matched":order.matched_shares,"active":order.active_unfilled_shares,"cancellable":order.cancellable,
+        "origin":order.origin.map(|origin|serde_json::json!({"request":origin.intent.global_request_id(),"item":origin.batch_item_ordinal})),
+    })).collect::<Vec<_>>();
+    let commitments=registry.all_commitments().map(|commitment|serde_json::json!({
+        "request":commitment.origin.intent.global_request_id(),"item":commitment.origin.batch_item_ordinal,
+        "order":commitment.order_identity,"remaining":commitment.remaining_target_shares,
+    })).collect::<Vec<_>>();
+    let cancellation=registry.cancellation_requests(None);
+    serde_json::json!({"orders":orders,"commitments":commitments,
+        "cancel_pending":cancellation.pending_count,"cancel_counts":cancellation.response_counts,
+        "cancel_latest":match cancellation.latest_response {
+            contracts::ExecutionReadValueV1::Known(value)=>serde_json::json!({"Known":value.map(|record|record.position())}),
+            contracts::ExecutionReadValueV1::Unavailable=>serde_json::json!("Unavailable"),
+            contracts::ExecutionReadValueV1::NotApplicable=>serde_json::json!("NotApplicable"),
+        },"includes_historical_orders_not_frozen_unfinished_population":true})
 }
 
 fn gpu_accept_projection_reference(actor:&mut SimRunActorV2,state:BusinessReducerStateV2,
