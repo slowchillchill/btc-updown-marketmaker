@@ -40,7 +40,9 @@ def settlement_results(value):
 def main():
     source=json.load(sys.stdin)
     started=time.perf_counter()
-    results=list(settlement_results(source['records']))
+    # V4来源保留原缺前驱尝试；Mapper等值对照只取原最终成功应用的那次引用。
+    mapping_records=[record for record in source['records'] if not record.get('deferred',False)]
+    results=list(settlement_results(mapping_records))
     vectors=[value['MakerAccrualFinalized'] for value in results if 'MakerAccrualFinalized' in value]
     finalized=next(value['DayFinalized'] for value in results if 'DayFinalized' in value)
     payment=next(value['Payment'] for value in results if 'Payment' in value)
@@ -67,7 +69,7 @@ def main():
     zero=torch.zeros_like(day)
     evidence=[]
     maker_vectors_checked=0
-    for original in source['records']:
+    for original in mapping_records:
         body=original['record'].get('Evidence')
         if body is None:
             continue
