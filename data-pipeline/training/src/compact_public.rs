@@ -8,9 +8,10 @@ use std::{
 use contracts::*;
 use data_pipeline_core::{
     public_input::{DptIngressV1, RecordedIngressV1},
-    pm_reduction::{PmEvidencePairV1, PmReductionReportV2, PmReductionStepV1, PmStepChangeV1},
+    pm_reduction::{PmEvidencePairV1, PmReductionDispositionV2, PmReductionReportV2, PmReductionStepV1, PmStepChangeV1},
     public_observation_core::{PublicFactAppliedIngressV1, PublicFactGroupV1, PublicObservationCoreV1},
     public_reduction::PublicReductionReportV1,
+    reduction::ReductionDispositionV1,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -398,6 +399,7 @@ impl PublicCompactReaderV1 {
         }
         let mut associations = std::collections::BTreeMap::new();
         let mut ordinal = 0_u32;
+        let mut fact_positions = std::collections::BTreeSet::new();
         for group in &packet.groups {
             if group.group_position != self.next_group || group.closed_at_input_position != self.next
                 || group.member_input_positions.iter().any(|p| *p > self.next) {
@@ -416,6 +418,7 @@ impl PublicCompactReaderV1 {
                     || fact.source_refs.iter().any(|r| r.input_stream_id != self.manifest.header.input_stream_id || r.input_position > self.next) {
                     return Err(io::Error::other("材料事实位置或输入关联错误").into());
                 }
+                fact_positions.insert(&fact.position);
                 ordinal = ordinal.checked_add(1).ok_or_else(|| io::Error::other("事实序位溢出"))?;
                 if let CompactFactPayloadV1::PmFromInput(message) = &fact.payload {
                     if message.input_record.input_stream_id != self.manifest.header.input_stream_id
@@ -442,6 +445,7 @@ impl PublicCompactReaderV1 {
                 .ok_or_else(|| io::Error::other("PM步骤没有对应事实"))?;
             for (index, step) in pm.steps.iter().enumerate() {
                 if step.canonical_fact_id != message.event_id || step.step_index != index as u32
+                    || step.derived_id.consumer_stream_id != self.manifest.header.input_stream_id
                     || step.derived_id.canonical_record_position != *canonical_position
                     || step.derived_id.step_index != step.step_index || step.derived_id.member_index != step.member_index {
                     return Err(io::Error::other("PM步骤身份或序位错误").into());
@@ -453,8 +457,27 @@ impl PublicCompactReaderV1 {
                     return Err(io::Error::other("紧凑步骤不得内联重复快照").into());
                 }
             }
-            if pm.reports.iter().any(|r|r.canonical_fact_id != message.event_id) {
-                return Err(io::Error::other("PM报告与事实关联错误").into());
+            for report in &pm.reports {
+                if report.canonical_fact_id != message.event_id {
+                    return Err(io::Error::other("PM报告与事实关联错误").into());
+                }
+                if let PmReductionDispositionV2::Produced { derived_id } = &report.disposition {
+                    if !pm.steps.iter().any(|step| &step.derived_id == derived_id) {
+                        return Err(io::Error::other("PM Produced报告没有同流实际步骤").into());
+                    }
+                }
+            }
+        }
+        for (index, report) in packet.reports.iter().enumerate() {
+            if report.position.input_stream_id != self.manifest.header.input_stream_id
+                || report.position.closed_at_input_position != self.next
+                || report.position.report_ordinal as usize != index {
+                return Err(io::Error::other("公共报告流或关闭位置序位错误").into());
+            }
+            if let ReductionDispositionV1::Produced { result_event_id } = &report.report.disposition {
+                if !fact_positions.contains(result_event_id) {
+                    return Err(io::Error::other("公共Produced报告没有实际同批事实").into());
+                }
             }
         }
         if associations.len() != seen_pm.len() { return Err(io::Error::other("PM事实缺少完整材料关联").into()); }
@@ -567,6 +590,41 @@ mod tests {
         assert_eq!(depths[0].bids.len(),2);
         assert_eq!(depths[1].bids.len(),3);
         assert!(depths[1].bids.iter().any(|v|v.quantity_btc.0=="1.234567890123456789"));
+        // 身份引用损坏与成员摘要一致仍须被结构层拒绝，不重跑业务归约。
+        let payload_path = target.join("packet_payload.bin");
+        let original_payload = fs::read(&payload_path).unwrap();
+        let offsets = fs::read(target.join("packet_offsets.u64le")).unwrap();
+        let mut damaged_payload = original_payload.clone();
+        let mut changed = false;
+        for pair in offsets.chunks_exact(8).collect::<Vec<_>>().windows(2) {
+            let start = u64::from_le_bytes(pair[0].try_into().unwrap()) as usize;
+            let end = u64::from_le_bytes(pair[1].try_into().unwrap()) as usize;
+            let mut value: serde_json::Value = serde_json::from_slice(&original_payload[start..end]).unwrap();
+            if let Some(step) = value["pm"].as_array_mut().unwrap().iter_mut()
+                .find_map(|pm| pm["steps"].as_array_mut().unwrap().first_mut()) {
+                step["derived_id"]["consumer_stream_id"] = "compact-boundarx".into();
+                let bytes = serde_json::to_vec(&value).unwrap();
+                assert_eq!(bytes.len(), end-start);
+                damaged_payload[start..end].copy_from_slice(&bytes);
+                changed = true;
+                break;
+            }
+        }
+        assert!(changed);
+        fs::write(&payload_path, &damaged_payload).unwrap();
+        let manifest_path = target.join("manifest.json");
+        let original_manifest = fs::read(&manifest_path).unwrap();
+        let mut manifest: PublicCompactManifestV1 = serde_json::from_slice(&original_manifest).unwrap();
+        manifest.files[0].sha256 = file_sha256(&payload_path).unwrap();
+        serde_json::to_writer(File::create(&manifest_path).unwrap(), &manifest).unwrap();
+        let mut damaged = PublicCompactReaderV1::open(&target,1024*1024).unwrap();
+        let mut rejected = false;
+        loop {
+            match damaged.next_packet() { Ok(Some(_))=>{}, Ok(None)=>break, Err(_)=>{rejected=true;break;} }
+        }
+        assert!(rejected);
+        fs::write(&payload_path, original_payload).unwrap();
+        fs::write(&manifest_path, original_manifest).unwrap();
         // 实际审查反例：成员SHA均不变，仅末端facts计数篡改也必须拒绝。
         let manifest_path = target.join("manifest.json");
         let mut manifest:PublicCompactManifestV1=serde_json::from_reader(File::open(&manifest_path).unwrap()).unwrap();
