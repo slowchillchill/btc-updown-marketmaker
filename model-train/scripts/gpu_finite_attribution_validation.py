@@ -7,7 +7,12 @@ from fractions import Fraction
 import torch
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'sim-system/gpu'))
 from queues import Numbers,ExactRational
-from finite_attribution import split_scale12,allocate_ordered
+import importlib.util
+spec=importlib.util.spec_from_file_location('public_gpu_finite_attribution',Path(__file__).resolve().parents[2]/'contracts/gpu/finite_attribution.py')
+finite=importlib.util.module_from_spec(spec)
+sys.modules[spec.name]=finite
+spec.loader.exec_module(finite)
+split_scale12,allocate_ordered=finite.split_scale12,finite.allocate_ordered
 
 
 def ratio(values):
