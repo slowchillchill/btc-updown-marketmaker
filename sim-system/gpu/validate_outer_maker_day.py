@@ -189,6 +189,12 @@ def main():
         value=getattr(executed,name)
         actual=[Fraction(n,d) for n,d in zip(values(value.numerator),values(value.denominator))]
         assert actual==[Fraction(row[key]) for row in expected_executed],(name,actual,expected_executed)
+    estimate=Numbers.run_exact_batch(lambda:admission.trade_success.estimated_rebate(admission.trades,
+        admission.rebate_contributions,zero[:,None],torch.ones_like(zero[:,None],dtype=torch.bool)))
+    assert estimate.known.cpu().tolist()==[[True,True]] and estimate.fault.cpu().tolist()==[0]
+    original_estimate=[row['estimated_pusd']['Known'] for row in source['after']['markets'][0]['rebates']]
+    assert [Fraction(n,d) for n,d in zip(values(estimate.amount.numerator),values(estimate.amount.denominator))]==[
+        Fraction(int(row['numerator']),int(row['denominator'])) for row in original_estimate]
     assert admission.rebate_days.payment_observed.cpu().tolist()==[[True]]
     assert amounts(admission.rebate_days.condition_payable)==[Fraction('1.008')]
     assert amounts(admission.rebate_days.condition_locked)==[Fraction('0')]
@@ -196,7 +202,7 @@ def main():
     print(json.dumps({'original_outer_non_post_only_GTC_hidden_Maker_source':True,'same_actual_V4_batch_and_payloads_checked':9,
         'original_received_order_and_dual_gates_checked':True,'device_closed_record_consumer_checked':True,
         'reference_attempt_order_drives_device':False,'repeat_keeps_first_visibility_and_delivery':True,
-        'cold_prefix_initializations':1,'actual_trade_role_and_net_fee_executed_read_checked':True,'actual_applied_position_cost_and_fee_read_checked':True,'day_and_payment_money_seq_and_positions_checked':True,
+        'cold_prefix_initializations':1,'actual_trade_role_and_net_fee_executed_read_checked':True,'actual_applied_position_cost_and_fee_read_checked':True,'actual_estimated_rebate_read_checked':True,'day_and_payment_money_seq_and_positions_checked':True,
         'elapsed_seconds_with_reference_reads':time.perf_counter()-start,'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
         'complete_global_SIM_clock_or_activity_recovery_delivered':False}))
 
