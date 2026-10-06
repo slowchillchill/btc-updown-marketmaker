@@ -247,7 +247,25 @@ std::vector<torch::Tensor> sample_latency(torch::Tensor prefix,torch::Tensor see
   return {words,fault,digest};
 }
 
+extern "C" void noe_gpu_sim_trade_key(const uint32_t*,const int8_t*,int64_t,uint8_t*,int32_t*,int64_t,cudaStream_t);
+
+std::vector<torch::Tensor> sim_trade_key(torch::Tensor words,torch::Tensor signs) {
+  words_check(words);
+  sign_check(signs,words);
+  int64_t rows=words.size(0),width=words.size(1);
+  capacity_check(rows,width);
+  TORCH_CHECK(rows<=INT64_MAX/20,"NOE原实体字节坐标溢出");
+  const c10::cuda::CUDAGuard guard(words.device());
+  auto keys=torch::empty({rows,20},words.options().dtype(torch::kUInt8));
+  auto fault=torch::empty({rows},words.options());
+  if(rows) noe_gpu_sim_trade_key((uint32_t*)words.data_ptr<int32_t>(),signs.data_ptr<int8_t>(),width,
+      keys.data_ptr<uint8_t>(),fault.data_ptr<int32_t>(),rows,c10::cuda::getCurrentCUDAStream().stream());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {keys,fault};
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("sim_trade_key", &sim_trade_key);
   m.def("integer_op", &integer_op);
   m.def("project", &project);
   m.def("index_probe", &index_probe);

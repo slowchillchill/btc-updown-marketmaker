@@ -16,6 +16,7 @@ class TradeSuccess:
     tokens: torch.Tensor
     quantity: object
     cost: object
+    unpaired_contribution: object
 
     @classmethod
     def open(cls,roots,capacity,device):
@@ -23,7 +24,7 @@ class TradeSuccess:
         columns=torch.full((roots,capacity),-1,dtype=torch.int64,device=device)
         zero=Numbers.ExactInt.from_i64_tensor(torch.zeros(roots*capacity,dtype=torch.int64,device=device))
         ratio=ExactRational.ratio(zero,zero.constant(1))
-        return cls(blank,blank.clone(),blank.clone(),columns,columns.clone(),columns.clone(),ratio,ratio)
+        return cls(blank,blank.clone(),blank.clone(),columns,columns.clone(),columns.clone(),ratio,ratio,ratio)
 
     def update(self,slots,condition,token,quantity,cost,disposition,trade_enabled,economic_enabled,economic_applied):
         roots,width=self.has_fact.shape
@@ -43,7 +44,7 @@ class TradeSuccess:
             conditions=torch.where(mask,condition[:,None],self.conditions),tokens=torch.where(mask,token[:,None],self.tokens),
             quantity=quantity,cost=cost)
 
-    def apply_success(self,pools,slots,enabled):
+    def apply_success(self,pools,directory,slots,enabled):
         roots,width=self.has_fact.shape
         root=torch.arange(roots,device=slots.device)
         index=root*width+slots
@@ -52,4 +53,46 @@ class TradeSuccess:
         pools,committed=pools.add(self.conditions[root,slots],self.tokens[root,slots],
             take_ratio(self.quantity,index),take_ratio(self.cost,index),use)
         mask=torch.zeros_like(self.success_applied).scatter(1,slots[:,None],committed[:,None])
-        return replace(self,success_applied=self.success_applied|mask),pools
+        empty=ExactRational.ratio(self.quantity.numerator.constant(0),self.quantity.denominator.constant(1))
+        contributions=self.unpaired_contribution+select(self.quantity,mask.flatten(),empty)
+        candidate=replace(self,success_applied=self.success_applied|mask,unpaired_contribution=contributions)
+        return candidate.allocate_contributions(pools,directory,slots,committed)
+
+    def allocate_contributions(self,pools,directory,slots,enabled):
+        from device_identity import sim_trade_order_key
+        from success_pool import attribution
+        roots,width=self.has_fact.shape
+        root=torch.arange(roots,device=slots.device)
+        keys=sim_trade_order_key(directory.keys)
+        error=Numbers.combine_fault_rows(torch.where(directory.occupied,keys.fault.reshape(roots,width),0))
+        order=torch.arange(width,device=slots.device).expand(roots,width)
+        # 固定同账户Trade命名空间，按原sim-N字符串字节序；10必须排在2前。
+        for byte in range(19,-1,-1):
+            column=keys.bytes.reshape(roots,width,20)[:,:,byte]
+            order=order.gather(1,column.gather(1,order).argsort(dim=1,stable=True))
+        inverse=order.argsort(dim=1)
+        condition=self.conditions[root,slots]
+        token=self.tokens[root,slots]
+        matches=(pools.asset_roots[:,None]==root[None,:]) & (pools.condition_slots[:,None]==condition[None,:]) & (
+            pools.token_slots[:,None]==token[None,:])
+        first=matches.to(torch.int32).argmax(dim=0)
+        contributions=self.unpaired_contribution
+        for asset in [first,pools.counterpart[first]]:
+            member=self.success_applied & (self.conditions==condition[:,None]) & (self.tokens==pools.token_slots[asset][:,None])
+            sorted_member=member.gather(1,order)
+            positions=(root[:,None]*width+order).flatten()
+            sorted_contribution=take_ratio(contributions,positions)
+            capacities=[]
+            for column in range(width):
+                at=root*width+column
+                value=take_ratio(sorted_contribution,at)
+                zero=ExactRational.ratio(value.numerator.constant(0),value.denominator.constant(1))
+                capacities.append(select(value,sorted_member[:,column],zero))
+            allocated,fault=attribution().allocate_ordered(take_ratio(pools.quantity,asset),tuple(capacities))
+            error=error | torch.where(enabled,fault,0)
+            from queues import _columns
+            packed=ExactRational(_columns([value.numerator for value in allocated]),_columns([value.denominator for value in allocated]))
+            original_positions=(root[:,None]*width+inverse).flatten()
+            unsorted=take_ratio(packed,original_positions)
+            contributions=select(unsorted,(member & enabled[:,None]).flatten(),contributions)
+        return replace(self,unpaired_contribution=contributions),replace(pools,fault=pools.fault | torch.where(enabled,error,0))

@@ -197,7 +197,7 @@ class AdmissionLifecycle:
         trade_success=self.trade_success.update(trade_at,self.lifecycle.conditions[root,local],self.lifecycle.tokens[root,local],
             quantity,cost,self.lifecycle.trade_dispositions[root,local],trade_event,economic_trade,
             self.lifecycle.economic_tags[root,local]==6)
-        trade_success,success_pools=trade_success.apply_success(self.success_pools,trade_at,(trade_event|economic_trade)&(fault==0))
+        trade_success,success_pools=trade_success.apply_success(self.success_pools,trades,trade_at,(trade_event|economic_trade)&(fault==0))
         fault=fault | success_pools.fault
         success=use&(fault==0)
         valid=fault==0

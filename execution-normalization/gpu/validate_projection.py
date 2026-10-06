@@ -299,6 +299,12 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert [Fraction(n,d) for n,d in zip(values(admission.success_pools.success_quantity.numerator),values(admission.success_pools.success_quantity.denominator))]==[Fraction(value) for value in market['success_shares']]
     assert [Fraction(n,d) for n,d in zip(values(admission.success_pools.success_cost.numerator),values(admission.success_pools.success_cost.denominator))]==[Fraction(int(value['numerator']),int(value['denominator'])) for value in market['success_principal_cost_pusd']]
     assert int(admission.trade_success.success_applied.sum().cpu())==3
+    exact_contributions=[Fraction(n,d) for n,d in zip(values(admission.trade_success.unpaired_contribution.numerator),values(admission.trade_success.unpaired_contribution.denominator))]
+    expected_contributions={int(row['fact']['fill_sequence']):Fraction(int(row['unpaired_contribution_shares']['Known']['numerator']),
+        int(row['unpaired_contribution_shares']['Known']['denominator'])) for row in source['reservation_checkpoints'][-1]['trades'] if row['success_applied']}
+    for slot,(sequence,present) in enumerate(zip(values(admission.trades.keys),admission.trades.occupied.flatten().cpu().tolist())):
+        if present:
+            assert exact_contributions[slot]==expected_contributions[sequence]
     assert [Fraction(n,d) for n,d in zip(values(admission.success_pools.quantity.numerator),values(admission.success_pools.quantity.denominator))]==[Fraction(value) for value in market['orphan_shares']]
     assert [Fraction(n,d) for n,d in zip(values(admission.success_pools.paired_quantity.numerator),values(admission.success_pools.paired_quantity.denominator))]==[Fraction(market['paired_shares'])]*2
     before=ledger.platform
@@ -310,4 +316,4 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         'bank_physical_rows':state.normalizer.bank.kinds.numel(),'masked_or_unemitted_rows':state.normalizer.bank.kinds.numel()-checked,
         'actual_device_Ledger_economic_position_predecessor_checked':True,
         'Ledger_admission_device_generated_entry_local_and_binding_checked':True,
-        'duplicate_NOE_NotApplicable_without_Ledger_commit_checked':True,'unbound_economic_before_Submission_unsent_reservation_checked':True,'actual_existing_economic_MakerCash_and_four_funds_checked':True,'two_root_one_item_funds_fault_isolation_checked':True,'actual_trade_economic_success_pool_checked':True,'fill_economic_before_pending_lifecycle_checked':True,'full_clock_Ledger_reservation_delivered':False}
+        'duplicate_NOE_NotApplicable_without_Ledger_commit_checked':True,'unbound_economic_before_Submission_unsent_reservation_checked':True,'actual_existing_economic_MakerCash_and_four_funds_checked':True,'two_root_one_item_funds_fault_isolation_checked':True,'actual_trade_economic_success_pool_checked':True,'fill_economic_before_pending_lifecycle_checked':True,'actual_unpaired_trade_contribution_checked':True,'full_clock_Ledger_reservation_delivered':False}

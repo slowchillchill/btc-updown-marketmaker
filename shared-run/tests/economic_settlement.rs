@@ -719,11 +719,17 @@ async fn real_partial_makers_fix_average_cost_and_nonterminating_fraction() {
             let quantity=EconomicRational::from_decimal(m.success_shares[up].0.parse().unwrap());
             let paired=EconomicRational::from_decimal(m.paired_shares.0.parse().unwrap());
             let split=contracts::finite_attribution::split_scale12_rne_v1(&cost,&paired,&quantity).unwrap();
+            let ordered_trades=read.trades().filter(|trade|trade.success_applied && trade.fact.token_id.0==UP_TOKEN_ID).collect::<Vec<_>>();
+            let capacities=ordered_trades.iter().map(|trade|EconomicRational::from_decimal(trade.fact.base_quantity_shares.0.parse().unwrap())).collect::<Vec<_>>();
+            let remaining=EconomicRational::from_decimal(m.orphan_shares[up].0.parse().unwrap());
+            let allocations=contracts::finite_attribution::allocate_capacity_scale12_candidate_v1(&remaining,&capacities).unwrap();
+            let contribution_expected=ordered_trades.iter().zip(allocations).map(|(trade,value)|serde_json::json!({
+                "fill_sequence":trade.fact.fill_sequence,"remaining":value.public()})).collect::<Vec<_>>();
             let mut child=std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap()).arg(validator)
                 .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
             serde_json::to_writer(child.stdin.take().unwrap(),&serde_json::json!({"trace":gpu_success_trace,"market":m,
                 "up_token":UP_TOKEN_ID,"down_token":DOWN_TOKEN_ID,"allocated_up_cost":split.allocated.public(),
-                "remaining_up_cost":split.remaining.public(),"fractional":fractional})).unwrap();
+                "remaining_up_cost":split.remaining.public(),"fractional":fractional,"contribution_expected":contribution_expected})).unwrap();
             let output=child.wait_with_output().unwrap();
             assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
             eprintln!("gpu_two_leg_success_pool={}",String::from_utf8(output.stdout).unwrap());
