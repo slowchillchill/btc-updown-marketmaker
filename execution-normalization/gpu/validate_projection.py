@@ -221,7 +221,8 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert values(admission.current_entry_sequence)==[5] and values(admission.current_local_prefix)==[2]
     from closed import ClosedAdmission
     cache=ClosedAdmission.empty(columns)
-    prefix=torch.arange(delivered.record_refs.size(1),device='cuda')[None,:] < 7
+    # 原领取第8条是经济seq3；其前驱seq2真实位于后续第12条。
+    prefix=torch.arange(delivered.record_refs.size(1),device='cuda')[None,:] < 8
     first=replace(delivered,emitted=delivered.emitted & prefix)
     later=replace(delivered,emitted=delivered.emitted & ~prefix)
     cache=Numbers.run_exact_batch(lambda:cache.accept(columns,first))
