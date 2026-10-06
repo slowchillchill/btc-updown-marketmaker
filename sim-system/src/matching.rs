@@ -2647,6 +2647,10 @@ impl ExecutionStateV2 {
             "outcomes": outcomes.into_iter().map(|(token, value)| (token, value.to_string())).collect::<Vec<_>>(),
             "next_sequence": self.account.next_account_transition_seq(),
             "fill_shape": self.fill_shape_for_tests(),
+            "fill_records": self.fills.iter().map(|(sequence,fill)| serde_json::json!({
+                "sequence":sequence,"ordinal":fill.finality_path_ordinal,
+                "economic_application_sequence":fill.economic_application_account_transition_seq,
+            })).collect::<Vec<_>>(),
         })
     }
 

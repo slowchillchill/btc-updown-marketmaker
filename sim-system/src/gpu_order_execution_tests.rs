@@ -98,3 +98,66 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     eprintln!("gpu_order_execution={}", String::from_utf8(result.stdout).unwrap());
 }
+
+// 经实际会话策略密封及外层5份请求建立失败分支，不绕过接单约束。
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "AutoDL原密封失败路径/首次经济seq/设备补偿验证"]
+async fn gpu_sealed_failure_paths_preserve_original_economic_sequence_and_compensate_once() {
+    let mut cases = Vec::new();
+    for (index, economic_ordinal) in [None, Some(0_u32), Some(1_u32)].into_iter().enumerate() {
+        let run_id = format!("run-gpu-failure-{index}");
+        let original_spec = spec(&run_id, "gpu-failure-create");
+        let account_key = contracts::AccountInstanceKeyV1 {
+            run_id: original_spec.run_id.clone(), caller_instance_id: original_spec.caller_instance_id.clone(),
+            account_id: original_spec.account_id.clone(),
+        };
+        let path = serde_json::json!({"steps":[
+            {"state":"MATCHED","offset_ms":0},
+            {"state":"MINED","offset_ms":10},
+            {"state":"FAILED","offset_ms":20}],"economic_application_ordinal":economic_ordinal});
+        let policy = Arc::new(TradeFinalityPolicyV2::decode_and_seal(&serde_json::to_vec(&serde_json::json!({
+            "schema_version":"trade_finality_policy_v2", "normal_path":successful_policy_v2_for_tests().normal_path(),
+            "failure_overrides":[{"selector":{"selector_domain":"REQUEST","account_instance_key":account_key,
+                "global_request_id":"gpu-failure-post"},"path":path}],
+        })).unwrap()).expect("原失败策略密封"));
+        let (_directory, mut actor) = active_market_actor_with_policy(SimCallerRoleV1::ModelTrain,&run_id,policy.clone()).await;
+        let initial = decoded_maker_initial_events();
+        let condition = initial[0].market.condition_id.clone();
+        let token = TokenId("1".into());
+        let (state, _) = reduce_market_event_slice_v2(actor.state.take().unwrap(),MarketEventPathV1::HiddenPlatform,
+            1_100,&initial,actor._rule_snapshot.snapshot(),policy.as_ref()).unwrap_or_else(|_| panic!("原初始化"));
+        assert_eq!(state.session.as_ref().unwrap().execution_state.account_instance_key(), &account_key);
+        let request = BusinessRequestV2::PostOrders(PostOrdersRequestV2 {
+            context:RequestContextV2 {global_request_id:"gpu-failure-post".into(),caller_correlation_id:None},
+            items:vec![PostOrderBatchItemV2 {batch_item_ordinal:0,item:post_item("gpu-failure-item",&condition,&token,
+                SimBuyOrderKindV1::GtcLimit {limit_price_pusd_per_share:"0.3".parse().unwrap(),
+                    size_shares:"5".parse().unwrap(),post_only:false})}],
+        });
+        let (state,receipt) = register_request_candidate(&actor.opened,actor.scenario.initial_market_directory(),state,
+            &request_cutoff(1_200),&request,11,actor._latency_profile.as_ref(),actor._rule_snapshot.snapshot());
+        let (mut state,accepted) = advance_mutation_candidate_with_outputs(&actor.opened,
+            actor.scenario.initial_market_directory(),state,receipt.platform_arrived_at_utc_ms,
+            actor._rule_snapshot.snapshot(),policy.as_ref());
+        let MutationActionBusinessEffectV3::Post(post) = accepted.unwrap().business else {panic!("原提交结果");};
+        assert!(matches!(&post.outcome,PostOrderItemOutcomeV2::Accepted(_)));
+        let checkpoint = |state:&BusinessReducerStateV2| state.session.as_ref().unwrap().execution_state.gpu_order_checkpoint_for_tests("sim-1");
+        let mut checkpoints = vec![serde_json::json!({"at":receipt.platform_arrived_at_utc_ms,"state":checkpoint(&state)})];
+        while let Some(at) = state.session.as_ref().unwrap().execution_state.next_scheduled_finality_at_utc_ms() {
+            let (next,_) = advance_finality_to_candidate(state,at,actor._rule_snapshot.snapshot(),policy.as_ref());
+            state=next;
+            checkpoints.push(serde_json::json!({"at":at,"state":checkpoint(&state)}));
+        }
+        assert_eq!(checkpoints.len(),3);
+        let rules = &actor._rule_snapshot.snapshot().synchronized_platform_rules;
+        cases.push(serde_json::json!({"path":path,"initial":initial,"processing_at":receipt.platform_arrived_at_utc_ms,
+            "checkpoints":checkpoints,"fee_rate":rules.fee_schedule.rate.value().to_string(),"fee_exponent":rules.fee_schedule.exponent,
+            "taker_rebate_rate":actor._rule_snapshot.snapshot().project_account_rules.rebate_settlement.value.fixed_taker_rebate_rate.value().to_string()}));
+    }
+    let mut child = std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
+        .arg(std::env::var("B_GPU_FINALITY_VALIDATOR").unwrap()).stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    serde_json::to_writer(child.stdin.take().unwrap(),&cases).unwrap();
+    let output=child.wait_with_output().unwrap();
+    assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+    eprintln!("gpu_failure_finality={}",String::from_utf8(output.stdout).unwrap());
+}

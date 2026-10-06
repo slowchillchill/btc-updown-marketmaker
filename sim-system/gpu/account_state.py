@@ -157,6 +157,33 @@ class PlatformAccountState:
         movement = replace(self.no_movement(),cash=(quote+fee).negated(),principal=quote.negated(),fee=fee.negated(),outcomes=outcome)
         return candidate.apply_movement(movement,requested & (candidate.fault == 0))
 
+    def fill_failure(self, base, quote, fee, asset_indices, previously_applied, requested):
+        """原FAILED补偿或未应用释放；保留原应用seq由成交记录负责。"""
+        roots = self.cash.sign.numel()
+        if asset_indices.shape != (roots,) or asset_indices.dtype != torch.int64 or asset_indices.device != self.cash.words.device:
+            raise TypeError('失败成交资产须为同设备int64[roots]')
+        if previously_applied.shape != (roots,) or previously_applied.dtype != torch.bool or previously_applied.device != self.cash.words.device:
+            raise TypeError('失败经济应用状态须为同设备bool[roots]')
+        if self.asset_roots.numel() == 0:
+            candidate = replace(self,fault=self.fault | requested.to(torch.int32))
+            return candidate.apply_movement(self.no_movement(),torch.zeros_like(requested))
+        safe = asset_indices.clamp(0,self.asset_roots.numel()-1)
+        valid = (asset_indices >= 0) & (asset_indices < self.asset_roots.numel())
+        valid = valid & (self.asset_roots[safe] == torch.arange(roots,device=safe.device))
+        error = base.fault | quote.fault | fee.fault
+        error = error | ((base.sign <= 0) | (quote.sign <= 0) | (fee.sign < 0) | ~valid).to(torch.int32)
+        candidate = replace(self,fault=self.fault | error*requested.to(torch.int32))
+        zero = quote.constant(0)
+        total = quote+fee
+        selected = torch.arange(self.asset_roots.numel(),device=safe.device) == safe[self.asset_roots]
+        compensate = previously_applied[self.asset_roots] & selected
+        outcomes = _take(base,self.asset_roots).negated().select(compensate,self.outcomes.constant(0))
+        movement = replace(self.no_movement(),available=total,
+            cash=total.select(previously_applied,zero),
+            principal=quote.negated().select(~previously_applied,zero),
+            fee=fee.negated().select(~previously_applied,zero),outcomes=outcomes)
+        return candidate.apply_movement(movement,requested & (candidate.fault == 0))
+
     def release_principal(self, amount, requested):
         """原取消/GTD/dust释放经济量；零量不发delta，不释放即时fee占款。"""
         error = amount.fault | (amount.sign < 0).to(torch.int32)
