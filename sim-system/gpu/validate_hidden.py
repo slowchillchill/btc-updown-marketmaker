@@ -24,6 +24,11 @@ def main():
     state = Numbers.run_exact_batch(lambda: block.empty_state(segment_capacity=1))
     from fractions import Fraction
     for index, expected in enumerate(original['expected']):
+        event = block.operations[index]
+        # 本工程单市场短链按实际已接纳桶时刻推进；生产宿主必须给出其实际处理时刻。
+        # 冷构造HiddenPmBlock本身没有调用该时钟，也不能把预取当作apply。
+        state = state.advance_matching_time(torch.full_like(state.quality, event['source_time']),
+                                            torch.full_like(state.quality, event['market']['window']['end_at_utc_ms']))
         state = block.apply(state, index)
         assert not state.fault.any().cpu().item(), (index, block.operations[index]['tag'], state.fault.cpu().tolist())
         assert state.initialized.cpu().tolist() == [asset['initialized'] for asset in expected['assets']]
@@ -45,10 +50,11 @@ def main():
     assert any(point['assets'][empty_asset]['initialized'] and all(Fraction(point['shares'][slot]) == 0 for slot in empty_slots)
                for point in original['expected'])
     assert all(not bucket['references'] for bucket in original['buckets']), '本短链不替代市场参考/终态处理器'
+    assert state.matching_closed.cpu().tolist() == [True] * len(original['assets'])
     torch.cuda.synchronize()
     print(json.dumps({'checks': ['compact_independent_hidden_source', 'original_sim_exact_asset_predecessor',
         'uninitialized_distinct_from_initialized_empty', 'fine_source_quantity_preserved',
-        'original_fifo_all_segments', 'epoch_required_resync_and_recovery'],
+        'original_fifo_all_segments', 'epoch_required_resync_and_recovery', 'end_closes_matching_before_level'],
         'buckets': len(block.buckets), 'steps': len(block.operations), 'elapsed_seconds': time.perf_counter()-started,
         'device_peak_allocated_bytes': torch.cuda.max_memory_allocated(),
         'full_request_noe_ledger_clock_delivered': False}))

@@ -36,6 +36,7 @@ class HiddenAssetState:
     quality: torch.Tensor  # int64[assets]，固定顺序 Fresh/Stale/Missing/Unknown/Gap/Invalid。
     tick: object  # ExactRational[assets]
     tick_present: torch.Tensor
+    matching_closed: torch.Tensor  # bool[assets]；end后不再应用初始盘/档位到撮合状态。
     external_shares: object  # ExactRational[levels]；原档位前驱保持全部源精度。
     queues: PriceQueueBatch
     fault: torch.Tensor  # int32[assets]，错误候选不可提交到活动状态。
@@ -55,6 +56,7 @@ class HiddenAssetState:
         return cls(safe_assets, torch.zeros(assets, dtype=torch.bool, device=device),
                    torch.full((assets,), 3, dtype=torch.int64, device=device),
                    ExactRational.ratio(tick_zero, tick_zero.constant(1)),
+                   torch.zeros(assets, dtype=torch.bool, device=device),
                    torch.zeros(assets, dtype=torch.bool, device=device), zeros(prices),
                    PriceQueueBatch.empty(prices, segment_capacity), fault)
 
@@ -65,12 +67,18 @@ class HiddenAssetState:
 
     def _asset_fault(self, level_fault):
         # 按位OR，不使用整数max丢失同资产多价位的不同错误位。
-        result = torch.zeros_like(self.fault)
-        for bit in range(32):
-            values = ((level_fault.to(torch.int64) >> bit) & 1).to(torch.int32)
-            reduced = torch.zeros_like(result).scatter_reduce(0, self.level_assets, values, reduce='amax')
-            result = result | (reduced << bit)
-        return result
+        bits = torch.arange(32, dtype=torch.int64, device=self.fault.device)
+        values = ((level_fault.to(torch.int64)[:, None] >> bits) & 1).to(torch.int32)
+        reduced = torch.zeros((self.fault.numel(), 32), dtype=torch.int32, device=self.fault.device)
+        reduced = reduced.scatter_reduce(0, self.level_assets[:, None].expand_as(values), values, reduce='amax')
+        return (reduced.to(torch.int64) << bits).sum(1).to(torch.int32)
+
+    def advance_matching_time(self, now, end):
+        """使用SIM实际处理时钟；冷预取时间或公开观察时钟不能替代此调用。"""
+        for column in (now, end):
+            if column.shape != self.initialized.shape or column.dtype != torch.int64 or column.device != self.quality.device:
+                raise TypeError('处理时刻与市场end须为同设备int64[assets]')
+        return replace(self, matching_closed=self.matching_closed | (now >= end))
 
     def initial_tick(self, enabled, tick):
         enabled = self._mask(enabled)
@@ -82,6 +90,7 @@ class HiddenAssetState:
     def initial_snapshot(self, enabled, shares, tick, quality):
         """原InitialL2Snapshot只接纳一次；所有原档位的数量同次供给，空资产仍初始化。"""
         enabled = self._mask(enabled)
+        enabled = enabled & ~self.matching_closed
         fault = self.fault | (enabled & self.initialized).to(torch.int32)
         invalid_tick = tick.fault | (tick.numerator.sign <= 0).to(torch.int32)
         fault = fault | (invalid_tick * enabled.to(torch.int32))
@@ -127,6 +136,7 @@ class HiddenAssetState:
         """原精确档位前驱检查后驱动队列；PublicTrade/BBA没有本调用。"""
         if enabled.dtype != torch.bool or enabled.shape != self.level_assets.shape or enabled.device != self.level_assets.device:
             raise TypeError('档位事件掩码须为同设备bool[levels]')
+        enabled = enabled & ~self.matching_closed[self.level_assets]
         relation = self.external_shares.compare(before)
         ready = self.initialized[self.level_assets]
         allowed = (self.quality[self.level_assets] == 0) | resync_inference

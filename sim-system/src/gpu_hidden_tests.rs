@@ -21,7 +21,7 @@ fn gpu_compact_hidden_drives_exact_asset_state_and_queues() {
     for input in [meta(0),pm(1,1,21000,book("10.0000007")),pm(2,2,21001,down),
         pm(3,3,21002,PolymarketOrderbookEvent::PriceChange {price_changes:vec![change(Some("20.0000007"))]}),
         pm(4,4,21003,PolymarketOrderbookEvent::PriceChange {price_changes:vec![change(Some("20.0000008"))]}),
-        recovery,end(6)] {
+        recovery,pm(6,2,MARKET_END_AT,PolymarketOrderbookEvent::PriceChange {price_changes:vec![change(Some("77"))]}),end(7)] {
         let prepared=prepare_public_ingress_v1(&public,&input,&BTreeMap::new(),&[]).unwrap();
         let applied=public.push_facts(&prepared).unwrap();
         writer.push_prepared(&input,&prepared,&applied).unwrap();
@@ -46,7 +46,8 @@ fn gpu_compact_hidden_drives_exact_asset_state_and_queues() {
             if let Some(normalized)=crate::market::normalize_pm_step_v1(step).unwrap() {
                 let header=MarketEventHeaderV1 {identity:&step.derived_id.0,market,time:&step.dependency_time,quality:&step.quality};
                 original.apply_admitted_header(&header,&normalized,bucket.bucket.bucket_time_utc_ms,MARKET_END_AT).unwrap();
-                queues.apply(&normalized);
+                // 原ExecutionStateV2在at>=end先关matching，保持已存在队列。
+                if bucket.bucket.bucket_time_utc_ms < MARKET_END_AT {queues.apply(&normalized);}
             }
             let states:Vec<_>=assets.iter().map(|asset|{
                 let (initialized,tick,quality)=original.asset_state_for_gpu_tests(CONDITION_ID,&asset.token_id.0);

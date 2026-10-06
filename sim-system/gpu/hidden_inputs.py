@@ -40,12 +40,13 @@ class HiddenPmBlock:
                 raise ValueError('不是已恢复的compact独立hidden桶')
             if len(bucket['steps']) != len(bucket['bucket']['steps']):
                 raise ValueError('步骤人口与完整桶引用不闭合')
-            for (_, step), reference in zip(bucket['steps'], bucket['bucket']['steps']):
+            for (market, step), reference in zip(bucket['steps'], bucket['bucket']['steps']):
                 if step['derived_id'] != reference['derived_id']:
                     raise ValueError('步骤不属于完整桶原派生身份')
                 tag, fields = next(iter(step['change'].items()))
                 entry = {'tag': tag, 'fields': fields, 'quality': QUALITY[step['quality']['availability']],
-                         'required': step['quality']['resync'] == 'REQUIRED', 'step': step}
+                         'required': step['quality']['resync'] == 'REQUIRED', 'step': step,
+                         'source_time': bucket['bucket']['bucket_time_utc_ms'], 'market': market}
                 if tag == 'InitialSnapshot':
                     entry['asset'] = asset_ids[fields['asset']['token_id']]
                     entry['tick'] = intern(fields['initial_tick_size_pusd_per_share'])
