@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 import duckdb
 from dpt_health import projection
-from . import intervals, statistics
+from . import intervals, statistics, direct_study
 
 
 def save(path, value):
@@ -50,8 +50,6 @@ class Progress:
         # DuckDB's API is an engine progress observation, not another SQL query.
         row["engine_query_progress"]=self.db.query_progress()
         row["filesystem_available_bytes"]=os.statvfs(self.work).f_bavail*os.statvfs(self.work).f_frsize
-        database=self.work/"working.duckdb"
-        row["working_database_allocated_bytes"]=database.stat().st_blocks*512 if database.exists() else 0
         spill=self.work/"spill";allocated=0
         if spill.exists():
             for entry in os.scandir(spill):
@@ -74,9 +72,12 @@ class Progress:
 
 def connection(root, engine):
     root.mkdir(exist_ok=False)
-    db=duckdb.connect(str(root/"working.duckdb"))
+    db=duckdb.connect(':memory:')
     db.execute("SET threads=?",[engine["threads"]])
     db.execute("SET memory_limit=?",[engine["memory_limit"]])
+    # Identity and causal order use explicit native/file-row coordinates. Keeping
+    # physical insertion order adds import buffering without a business consumer.
+    db.execute("SET preserve_insertion_order=false")
     db.execute("SET temp_directory=?",[str(root/"spill")])
     db.execute("SET max_temp_directory_size=?",[engine["max_temp_directory_size"]])
     db.execute("SET enable_progress_bar=true")
@@ -115,75 +116,53 @@ def prepare(config_path):
     work=root/"projection"
     db=connection(work,config["engine"])
     progress=Progress(db,config["progress_interval_seconds"],work)
-    completed=False
     try:
         helper=Path(config["boundary_helper"])
         init_config=work/"initialization.private.json";save(init_config,config["metadata_initialization"])
         initialization=material/"initialization.jsonl"
         subprocess.run([str(helper),"initialization",str(init_config),str(initialization)],check=True)
         rules=json.loads(subprocess.check_output([str(helper),"rules"],text=True))
-        progress("necessary-columns-start",total_raw_rows=sum(f["rows"] for f in config["files"]))
-        kinds=projection.read_columns(db,config["files"],progress)
-        progress("market-identity-and-rules")
-        projection.projected_markets(db,initialization,rules)
-        pm=projection.deduplicate(db,"raw_polymarket_market",["market","source_sequence_epoch_id","collector_admission_sequence"],helper,config["files"],work/"duplicates-pm")
-        progress("pm-minimal-state")
-        projection.make_pm_events(db,pm)
-        projection.make_common_events(db,kinds,helper,config["files"],work,progress)
-        progress("persist-narrow-facts")
-        projection.state_changes(db,material)
-        summary=dict(engine_versions=dict(duckdb=duckdb.__version__),format="columnar-source-facts-v1",start=config["start"],end=config["end"],
+        progress("direct-file-index",total_raw_rows=sum(f["rows"] for f in config["files"]))
+        direct_study.metadata(db,config,initialization,rules)
+        direct_study.setup(db,config,material)
+        ranges,units=direct_study.query_plan(db,config,progress)
+        from dataclasses import asdict
+        save(material/"query-units.json",[asdict(u) for u in units])
+        save(material/"file-ranges.json",[asdict(r) for r in ranges])
+        save(material/"epoch-ordering.json",direct_study.ordering_summary(ranges,units))
+        from dpt_health.projection import literal
+        for table in ("markets","rules","selections"):
+            db.execute(f"COPY {table} TO {literal(material/(table+'.parquet'))} (FORMAT PARQUET,COMPRESSION ZSTD)")
+        direct_study.distributions(db,config,material,work,units,progress,ranges)
+        summary=dict(engine_versions=dict(duckdb=duckdb.__version__),format="direct-parquet-health-bins-v2",start=config["start"],end=config["end"],
                      binance_trade_enabled=config["binance_trade_enabled"],binance_depth_enabled=config["binance_depth_enabled"],
                      config_sha256=hashlib.sha256(config_path.read_bytes()).hexdigest(),
-                     raw_rows=sum(f["rows"] for f in config["files"]),files=len(config["files"]),
-                     clocks="direct last-valid received/event; admitted and source-local/dependency receive frontier; no legacy global replay clock",
+                     raw_rows=sum(f["rows"] for f in config["files"]),files=len(config["files"]),units=len(units),
+                     maximum_candidate_file_rows=max((u.candidate_file_rows for u in units),default=0),
+                     clocks="direct received/event; whole-PM/source-native frontier; condition-local sync; no legacy global replay clock",
                      outputs=[dict(path=p.name,bytes=p.stat().st_size) for p in sorted(material.iterdir())])
         save(material/"material.json",summary)
         progress("prepare-complete")
-        completed=True
     finally:
         progress.close();db.close()
-        if completed:
-            (work/"working.duckdb").unlink()
 
 
 def study(config_path):
     config=json.loads(config_path.read_text());root=Path(config["run_root"])
     material=root/"material";summary=json.loads((material/"material.json").read_text())
-    if summary["format"]!="columnar-source-facts-v1" or summary["config_sha256"]!=hashlib.sha256(config_path.read_bytes()).hexdigest():
+    if summary["format"]!="direct-parquet-health-bins-v2" or summary["config_sha256"]!=hashlib.sha256(config_path.read_bytes()).hexdigest():
         raise ValueError("incompatible material")
     output=root/"study";output.mkdir(exist_ok=False)
     work=root/"statistics"
     db=connection(work,config["engine"])
     progress=Progress(db,config["progress_interval_seconds"],work)
-    completed=False
     try:
-        progress("continuous-intervals")
-        intervals.load_intervals(db,material,config["start"],config["end"],config["binance_trade_enabled"],config["binance_depth_enabled"])
-        statistics.histogram_macros(db)
-        intervals.daily_intervals(db,"selected_intervals","selected_daily")
-        intervals.daily_intervals(db,"intervals","source_daily")
-        progress("selected-duration-histograms")
-        statistics.histogram(db,"selected_daily","selected_histogram")
-        progress("source-duration-histograms")
-        statistics.histogram(db,"source_daily","source_histogram",grouping="source")
+        progress("direct-bin-load")
+        direct_study.setup(db,config,material)
+        from dpt_health.direct import QueryUnit
+        units=[QueryUnit(**dict(u,file_ids=tuple(u["file_ids"]))) for u in json.loads((material/"query-units.json").read_text())]
         from dpt_health.projection import literal
-        for table in ("selected_histogram","source_histogram"):
-            db.execute(f"COPY {table} TO {literal(output/(table+'.parquet'))} (FORMAT PARQUET,COMPRESSION ZSTD)")
-        # Independent exclusions and unknown sync/generation do not disappear
-        # into age quantiles. Exact source/asset/day denominators remain visible.
-        db.execute(f"""COPY (SELECT source,condition_id,asset,day_start,exclusion,
-            sum(db-da)::HUGEINT AS duration_ms,sum(CASE WHEN sync_unknown THEN db-da ELSE 0 END)::HUGEINT AS sync_unknown_ms,
-            sum(CASE WHEN generation_unknown THEN db-da ELSE 0 END)::HUGEINT AS generation_unknown_ms
-            FROM source_daily GROUP BY source,condition_id,asset,day_start,exclusion)
-            TO {literal(output/'source-denominators.parquet')} (FORMAT PARQUET,COMPRESSION ZSTD)""")
-        db.execute(f"""COPY (SELECT a.source,a.condition_id,a.asset,(a.visible_at//{intervals.DAY})*{intervals.DAY} AS day_start,
-            CASE WHEN a.sync_required THEN 'synchronization_required' WHEN NOT a.available THEN 'unavailable' WHEN a.event IS NULL THEN 'unknown_event_time' WHEN a.event>a.received THEN 'time_inconsistent' ELSE 'valid' END AS status,
-            CASE WHEN NOT a.sync_required AND a.available AND a.event<=a.received THEN age_bin(a.received-a.event) END AS arrival_bin,count(*) AS samples,
-            sum((a.source='polymarket' OR EXISTS(SELECT 1 FROM selections z WHERE z.source=a.source AND a.visible_at>=z.a AND a.visible_at<z.b))::INTEGER) AS selected_samples
-            FROM arrivals a JOIN scopes s USING(source,condition_id,asset) WHERE a.visible_at>=s.a AND a.visible_at<s.b
-            GROUP BY a.source,a.condition_id,a.asset,day_start,status,arrival_bin)
-            TO {literal(output/'arrival-samples.parquet')} (FORMAT PARQUET,COMPRESSION ZSTD)""")
+        db.execute(f"CREATE VIEW selected_histogram AS SELECT * FROM read_parquet({literal(material/'selected_histogram.parquet')})")
         start=config["start"];day=intervals.DAY
         for fold,fit_days in enumerate([3,6,9,12,15]):
             cutoff=start+fit_days*day
@@ -191,22 +170,16 @@ def study(config_path):
             candidates=statistics.fit_candidates(db,cutoff,Path(config["statistics_helper"]),work)
             save(output/f"fold-{fold}.frozen.json",dict(fold=fold,fit=[start,cutoff],candidates=candidates))
             progress("frozen-validation",fold=fold)
-            validation=[]
-            for candidate in candidates:
-                name=f"fold-{fold}.{candidate['identifier']}"
-                validation.append(statistics.evaluate(db,candidate,cutoff,cutoff+3*day,name,output))
+            validation=direct_study.validate_candidates(db,config,material,output,work,units,candidates,cutoff,cutoff+3*day,fold,progress)
             save(output/f"fold-{fold}.validation.json",dict(fold=fold,window=[cutoff,cutoff+3*day],development=fold==4,results=validation))
         save(output/"summary.json",dict(material=summary,engine=config["engine"],method="daily body p90 after Q3+1.5IQR; lower median across fit days; 2/4/8 hypotheses",formal_adoption=False))
         progress("study-complete")
-        completed=True
     finally:
         progress.close();db.close()
-        if completed:
-            (root/"statistics/working.duckdb").unlink()
 
 
 def main():
-    parser=argparse.ArgumentParser(description="Necessary-column source facts and frozen source-health research. No trading parameter adoption.")
+    parser=argparse.ArgumentParser(description="Direct Parquet SQL for daily source-health bins and frozen validation. No trading parameter adoption.")
     sub=parser.add_subparsers(dest="command",required=True)
     configure_parser=sub.add_parser("configure",help="bind original manifest identities without reading raw rows")
     for name in ("plan","input_root","run_root","boundary_helper","statistics_helper","output"):

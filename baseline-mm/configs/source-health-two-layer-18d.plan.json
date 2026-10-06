@@ -1,6 +1,6 @@
 {
-  "purpose": "D-0302列式健康研究；完整投入已授权，准确实现头先独审。候选不正式采用。",
-  "format": "columnar-source-health-plan-v1",
+  "purpose": "D-0302直接Parquet健康SQL：按物理文件/重叠文件组累计每日时长bins，冻结后重读验证窗；原80GiB累计导入已OOM。8GiB为共享引擎预算、24线程，不是RSS硬上限；本入口尚未完整运行，候选不正式采用。",
+  "format": "direct-parquet-health-plan-v2",
   "collector_commit": "8e6e9d8a744ec3ec10b4c0b8d57a251a16159d59",
   "start": 1788912000000,
   "end": 1790467200000,
@@ -142,7 +142,8 @@
   "progress_interval_seconds": 30,
   "engine": {
     "threads": 24,
-    "memory_limit": "80GiB",
+    "memory_limit": "8GiB",
     "max_temp_directory_size": "700GiB"
-  }
+  },
+  "native_unit_span": 1048576
 }

@@ -79,6 +79,6 @@ Chainlink 与两个资产盘口是新增配对的依赖。Binance 只按实际�
 
 ### 当前列式来源健康研究
 
-`research/research_source_health_columnar.py` 使用必要列和最小状态。公共投影在 `data-pipeline/training/python/dpt_health`，健康阈值与候选在本库。DuckDB执行资产展开、窄列排序、状态窗口及连续区间归约。Python不逐行处理PM消息，不构造完整盘口或公共core。原Rust初始化选择器和原 Histogram/body_normal/candidates 继续复用。
+`research/research_source_health_columnar.py` 直接查询Parquet必要列。DuckDB按文件或必要重叠文件组形成连续区间，立即汇总每日S/A bins、有效到达样本与分母，不累计全期raw或逐消息材料。公共最小状态归 `data-pipeline/training/python/dpt_health`，候选归本库。冻结后重读验证窗，保留窗前状态和连续段。Python不逐行处理全部PM消息；原Rust初始化选择器和 Histogram/body_normal/candidates 继续复用。
 
-当前任务与授权见[#185](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)。正式阈值尚未采用。原 `research_source_health_two_layer prepare/study` 保留为历史入口；新健康研究以列式入口为准。依赖锁、时间语义、16字段、四折冻结、全局资源预算、复现命令和限制见[两层研究说明](docs/research/complementary-pair-source-health-two-layer.md)。
+当前任务与授权见[#185](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)。十八日原始到达描述统计已完成，但不是有效消息校准结果。`fd5581c8` 的全期导入因OOM终止，study未启动；旧APPROVED不覆盖当前修正。用户取消新增小样本试验，当前完整S/A及冻结验证结果尚未完成。正式阈值尚未采用。原 `research_source_health_two_layer prepare/study` 保留为历史入口；新健康研究以列式入口为准。依赖锁、时间语义、16字段、四折冻结、全局资源预算、复现命令和限制见[两层研究说明](docs/research/complementary-pair-source-health-two-layer.md)。

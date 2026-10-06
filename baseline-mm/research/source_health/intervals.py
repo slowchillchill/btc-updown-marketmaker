@@ -86,7 +86,7 @@ def make_selection(db, start, end, trade_enabled, depth_enabled):
 
 
 def daily_intervals(db, table, target):
-    db.execute(f"""CREATE TABLE {target} AS SELECT i.*,d.day_start,
+    db.execute(f"""CREATE TEMP TABLE {target} AS SELECT i.*,d.day_start,
         greatest(a,d.day_start) AS da,least(b,d.day_start+{DAY}) AS db
         FROM {table} i, LATERAL range((a//{DAY})*{DAY},b,{DAY}) d(day_start) WHERE b>a""")
 
@@ -101,7 +101,7 @@ def candidate_intervals(db, candidate, table, target):
         p=candidate[group]
         limits.append((source,p["normal_s"],p["normal_a"],p["max_s"],p["max_a"]))
     db.executemany("INSERT INTO limits VALUES (?,?,?,?,?)",limits)
-    db.execute(f"""CREATE TABLE {target} AS WITH joined AS (
+    db.execute(f"""CREATE TEMP TABLE {target} AS WITH joined AS (
         SELECT i.*,l.* EXCLUDE(source) FROM {table} i JOIN limits l USING(source)
     ), split AS (
         SELECT j.*,u.visible_at AS x FROM joined j,
@@ -123,7 +123,7 @@ def episodes(db, table, target, selection_scopes=False):
     # A one-ms causal probe must not bridge a real one-ms deselection gap.
     partition=',evaluation_start' if selection_scopes else ''
     # Positive-time continuity: same-ms temporary selections never split runs.
-    db.execute(f"""CREATE TABLE {target} AS WITH prior AS (
+    db.execute(f"""CREATE TEMP TABLE {target} AS WITH prior AS (
         SELECT *,lag(state) OVER w AS previous_state,lag(b) OVER w AS previous_end
         FROM {table} WINDOW w AS (PARTITION BY source,condition_id,asset{partition} ORDER BY a)
     ), numbered AS (

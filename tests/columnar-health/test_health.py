@@ -111,26 +111,39 @@ class ProjectionTests(unittest.TestCase):
 
     def test_real_pm_cross_file_duplicates_epoch_and_assets(self):
         import subprocess
+        from source_health import cli
         with tempfile.TemporaryDirectory() as tmp:
             root=Path(tmp);fixture=root/'pm.parquet'
             subprocess.run([str(self.generator),str(fixture),'16'],check=True)
             files=[dict(path=str(fixture),source_kind='polymarket_market',schema_version='polymarket_orderbook_v3',bytes=fixture.stat().st_size,rows=16)]*2
-            db=duckdb.connect();projection.read_columns(db,files,lambda *a,**k:None)
-            unique=projection.deduplicate(db,'raw_polymarket_market',['market','source_sequence_epoch_id','collector_admission_sequence'],self.helper,files,root/'duplicates')
-            self.assertEqual(db.execute(f'SELECT count(*) FROM {unique}').fetchone()[0],16)
-            db.execute('CREATE TABLE markets(condition_id VARCHAR,assets VARCHAR[],window_start BIGINT,window_end BIGINT,known_at BIGINT,dependency_received BIGINT)')
-            db.execute('INSERT INTO markets VALUES (?,?,?,?,?,?)',[CONDITION,['1','2'],START,START+30,START-1,START-1])
-            projection.make_pm_events(db,unique)
-            self.assertEqual(db.execute('SELECT count(*) FROM pm_events WHERE forced_sync').fetchone()[0],2)
-            db.execute('CREATE TABLE common_events AS SELECT * FROM pm_events WHERE false')
-            db.execute('CREATE TABLE rules(condition_id VARCHAR,visible_at BIGINT,sequence BIGINT,reference INTEGER)')
-            output=root/'material';output.mkdir();projection.state_changes(db,output)
-            states=db.execute(f"SELECT asset,visible_at,received,event,sync_required FROM read_parquet('{output}/changes.parquet') ORDER BY asset,visible_at").fetchall()
-            self.assertTrue(all(r[3]==START for r in states))
-            self.assertTrue(all(not r[4] for r in states))
-            self.assertEqual(db.execute(f"SELECT count(*) FROM read_parquet('{output}/arrivals.parquet')").fetchone()[0],16)
-            self.assertEqual(db.execute(f"SELECT sum(projected_native_rows),count(*) FROM read_parquet('{output}/epoch-ordering.parquet')").fetchone(),(16,2))
-            db.close()
+            results=[]
+            for preserve in (True,False):
+                work=root/str(preserve);work.mkdir()
+                db=cli.connection(work/'database',dict(threads=24,memory_limit='32GiB',max_temp_directory_size='1GiB'))
+                self.assertFalse(db.execute("SELECT current_setting('preserve_insertion_order')").fetchone()[0])
+                if preserve:
+                    db.execute('SET preserve_insertion_order=true')
+                projection.read_columns(db,files,lambda *a,**k:None)
+                coordinates=db.execute('SELECT file_id,row_id,collector_admission_sequence,source_sequence_epoch_id FROM raw_polymarket_market ORDER BY file_id,row_id').fetchall()
+                self.assertEqual([(r[0],r[1]) for r in coordinates],[(file,row) for file in range(2) for row in range(16)])
+                unique=projection.deduplicate(db,'raw_polymarket_market',['market','source_sequence_epoch_id','collector_admission_sequence'],self.helper,files,work/'duplicates')
+                self.assertEqual(db.execute(f'SELECT count(*) FROM {unique}').fetchone()[0],16)
+                db.execute('CREATE TABLE markets(condition_id VARCHAR,assets VARCHAR[],window_start BIGINT,window_end BIGINT,known_at BIGINT,dependency_received BIGINT)')
+                db.execute('INSERT INTO markets VALUES (?,?,?,?,?,?)',[CONDITION,['1','2'],START,START+30,START-1,START-1])
+                projection.make_pm_events(db,unique)
+                self.assertEqual(db.execute('SELECT count(*) FROM pm_events WHERE forced_sync').fetchone()[0],2)
+                db.execute('CREATE TABLE common_events AS SELECT * FROM pm_events WHERE false')
+                db.execute('CREATE TABLE rules(condition_id VARCHAR,visible_at BIGINT,sequence BIGINT,reference INTEGER)')
+                output=work/'material';output.mkdir();projection.state_changes(db,output)
+                states=db.execute(f"SELECT asset,visible_at,received,event,sync_required FROM read_parquet('{output}/changes.parquet') ORDER BY asset,visible_at").fetchall()
+                self.assertTrue(all(r[3]==START for r in states))
+                self.assertTrue(all(not r[4] for r in states))
+                arrivals=db.execute(f"SELECT * FROM read_parquet('{output}/arrivals.parquet') ORDER BY asset,visible_at,received,event").fetchall()
+                self.assertEqual(len(arrivals),16)
+                self.assertEqual(db.execute(f"SELECT sum(projected_native_rows),count(*) FROM read_parquet('{output}/epoch-ordering.parquet')").fetchone(),(16,2))
+                results.append((coordinates,states,arrivals))
+                db.close()
+            self.assertEqual(results[0],results[1])
 
     def test_future_epoch_and_older_later_receive_preserve_visible_prefix(self):
         import hashlib

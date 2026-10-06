@@ -2,7 +2,7 @@
 
 本报告交付 [#185 当前任务3](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)的原准入只读核对，承接 [D-0270](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-5933292905)。18天全部通过原 DPT 准入：2864个文件、45,652,568,053字节、762,240,960行。没有剔除有 gaps 的日期，没有执行参数搜索、策略回测或收益比较。后续具体方法见[研究计划](complementary-pair-research-plan.md)。
 
-当前来源健康流程按 [D-0302](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6013334211) 复用本报告的18份清单身份。`configure` 只读小型清单并核对摘要，`prepare` 向量化读取必要列。旧准入不是健康事实完整或业务时间正确的证明。新流程保留原初始化、来源判定、资产与窗口，并单列未知、同步和时间异常。它不重复全量准入，也不把采集排序声明当作跨来源全局顺序证明。实际采集提交为 `8e6e9d8a744ec3ec10b4c0b8d57a251a16159d59`。当前入口和语义差异见[列式研究说明](complementary-pair-source-health-two-layer.md)。
+当前来源健康流程按 [D-0302](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6013334211) 复用本报告的18份清单身份。已有准确配置保持原同序文件列表。当前SQL直接读取Parquet必要列，按文件或必要重叠文件组即时汇总，不先累计全期raw表；不重复全量准入。旧准入不是健康事实完整或业务时间正确的证明。新流程保留原初始化、来源判定、资产与窗口，并单列未知、同步和时间异常。采集排序声明也不作为跨来源全局顺序证明。实际采集提交为 `8e6e9d8a744ec3ec10b4c0b8d57a251a16159d59`。十八日原始到达延迟描述统计已完成，但未做正式有效消息和窗口处理，不能代替健康校准。此前全期列式导入OOM失败也不推翻本报告的文件准入事实；它证明旧资源实现不足。当前入口和语义差异见[直接Parquet研究说明](complementary-pair-source-health-two-layer.md)。
 
 ## 1. 原调用与可复核证据
 

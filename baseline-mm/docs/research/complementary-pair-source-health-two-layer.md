@@ -1,16 +1,22 @@
-# 必要列与列式两层来源健康研究
+# 直接 Parquet 查询与两层来源健康研究
 
-列式来源健康研究只读取判断消息进展所需的列，用于形成健康分布和候选阈值。当前任务见[#185](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)，流程依据[D-0302](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6013334211)。用户已批准新流程的完整十八日研究；准确工程头先独审，再执行。本文不宣称该新十八日运行已完成，也不正式采用normal/max。
+来源健康研究直接查询 Parquet 的必要列，用于形成连续时间分布和候选阈值。当前任务见[#185](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)，流程依据[D-0302](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6013334211)。当前修正尚无完整研究结果，不正式采用normal/max。
 
 ## 当前入口与职责
 
-`baseline-mm/research/research_source_health_columnar.py` 提供 `configure / prepare / study`。
+`baseline-mm/research/research_source_health_columnar.py` 提供 `configure / prepare / study`。名称保留已有入口；prepare不再先累计十八日raw表。
 
-- `configure` 复用原18份准入清单摘要和同序文件列表。只读小型清单，输出含私有路径的配置。
-- `prepare` 调用公共 `data-pipeline/training/python/dpt_health`。DuckDB向量化读取必要列、展开资产、维护最小状态并输出Zstandard压缩Parquet。
-- `study` 由baseline计算连续区间、分布、三态、超限与切换。只把每日充分统计交给原Rust `Histogram::body_normal` 和 `candidates`，不把原始PM行传给Python或Rust逐条core。该辅助工具的输入量按日、四组、两个指标和实际有权重的桶计算，不按原始消息行计算。初始化辅助入口本轮读取原792行metadata文件，选出3条；重复辅助入口只读命中候选的子集。
+- `configure` 复用原18份准入清单摘要和同序文件列表。只读小型清单，输出含私有路径的配置。已有准确配置无需重新配置或全量准入。
+- `prepare` 直接查询必要列。公共 `data-pipeline/training/python/dpt_health` 按文件或原生范围重叠的文件组组织SQL单元。段内形成有效状态和连续区间后，立即汇总每日S/A桶、有效到达样本桶、来源与资产分母及异常。Python不逐条遍历全部PM消息。
+- `study` 只把每日充分统计交给原Rust `Histogram::body_normal` 和 `candidates`。先写冻结候选，再直接读取对应验证窗，计算三态、持续段、切换、删失和实际超限明细。三个候选共享该窗的必要投影。窗前种子保留此前已可见事实，不补造历史。
 
-原录制、完整归约和持久格式保持。旧 `research_source_health_two_layer prepare/study` 为历史入口，不再作为本次来源健康默认流程。两次旧完整prepare均未产生完整可消费材料，未执行study。旧排序文件和未封口标量已清理；最小失败日志和身份缺失限制另有私有清单。旧结果不重标为新流程验证。
+初始化辅助入口读取原792行metadata文件并选择原3条前序。重复辅助入口只解析真实重复候选子集；拟合辅助入口只读取每日有权重的桶。当前沿用已归档工具，不为执行SQL重新构建Rust。
+
+原录制、完整归约和持久格式保持。旧 `research_source_health_two_layer prepare/study` 为历史入口。此前两次完整core准备未形成完整可消费材料，未执行study；无用途排序文件已清理，必要失败证据保持原身份。
+
+随后工程头 `fd5581c8ec88a783d35a23e63f98177df5a5eb11` 的列式尝试仍累计全期raw表。该次运行被systemd-oomd终止，最后进程RSS约108.93GiB，study未启动。原80GiB配置不是RSS上界，旧APPROVED不覆盖当前修正。事故和新方向见[#185记录](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185#issuecomment-6015835991)。
+
+十八日主要来源的原始到达延迟描述统计已由直接SQL查询完成。PM按book/price_change原始消息计数，未做业务去重、资产展开和市场窗口过滤。该结果不能冒充有效消息分布，也不能直接进入normal/max拟合。当前S/A查询按原有效消息和窗口口径另行形成必要充分统计，不重复原始描述查询。
 
 ## 必要列与最小状态
 
@@ -22,9 +28,9 @@
 | Chainlink spot/TWAP60 | received/payload time、合法freshness分类；TWAP窗口与admission；spot必要原生身份 | Fresh与Stale都刷新；四类异常保留旧有效消息和质量，不因异常或年龄自动切换TWAP |
 | metadata | condition/assets、市场窗口、身份Snapshot时间、实际规则字段 | 原初始化仍由 `MetadataInitializationSelectionV1` 精确选择原文件和两Snapshot；已观察规则映射复用公共纯原语 |
 
-`price_changes`只把资产列表写入窄表，不写价格、数量、盘口或完整谱系。输入端的嵌套列物理读取由引擎决定，不能把输出投影误说成所有嵌套列均已物理裁剪。重复键先由必要列定位。只有重复候选所在的行组才读取完整行，用原Rust类型解析、来源身份或规范成交载荷核对。PM新坐标上的有效同值消息保留，重复坐标不刷新。候选核对不为每条唯一PM消息构造JSON身份。
+`price_changes`在当前查询单元内只投影资产列表，不保留价格、数量、盘口或完整谱系。输入端的嵌套列物理读取由引擎决定，不能把输出投影误说成所有嵌套列均已物理裁剪。重复键先由必要列定位。只有重复候选所在的行组才读取完整行，用原Rust类型解析、来源身份或规范成交载荷核对。PM新坐标上的有效同值消息保留，重复坐标不刷新。候选核对不为每条唯一PM消息构造JSON身份。
 
-窄状态和区间存于引擎磁盘表，不在Python保存全量行或区间Vec。未知连接代次和同步上下文单列，可与有效年龄分布重叠。它们不构成另一个交易拒绝门。没有TTL、历史市场淘汰、去重截断或按日重置core；新入口根本不构建完整core。
+连接使用 `duckdb.connect(':memory:')`。段内临时关系在汇总后释放，不累计全期raw、events、states、changes或arrivals。引擎可按既有 `temp_directory` 溢写临时数据；最终只持久化小型汇总、必要身份与种子。段间保留最后有效直接时间、同步状态、必要去重连续性和未闭合段，不在Python保存全量行或区间Vec。未知连接代次和同步上下文单列，可与有效年龄分布重叠。它们不构成另一个交易拒绝门。没有TTL、历史市场淘汰、去重截断或按日重置core；新入口根本不构建完整core。
 
 ## 时间、选源与区间
 
@@ -50,48 +56,43 @@ S/A按连续时间毫秒加权，到达延迟按每次有效消息计数。独�
 
 ## 输出与监督
 
-prepare输出 `changes.parquet / arrivals.parquet / markets.parquet / rules.parquet / epoch-ordering.parquet / initialization.jsonl / material.json`。`epoch-ordering.parquet`保留小型代际首项、末项、原生序号、received/available时间、前沿和实际所用顺序。共同来源诊断包含业务过滤前的必要列记录；PM诊断以原生消息计数，不按展开资产重复计数，已压掉相同坐标的重复。它不证明完整采集会话，也不增加拒绝或丢弃规则。material.json只在全部成功后写出。study保留两类每日直方图、逐source/asset/day分母、到达样本，以及五折各一份冻结和验证JSON。每个候选另有 `*.exceeded.parquet`，记录真实进入超限的时刻、最后直接received/event、当时S/A、前态、最后事实可见时间及删失；明确标出无新消息期间的阈值跨越，不把延迟阈值当事故真值。
+prepare输出 `selected_histogram.parquet / source_histogram.parquet / denominators.parquet / arrival_bins.parquet`，以及小型 `markets.parquet / rules.parquet / selections.parquet / epoch-ordering.json / file-ranges.json / query-units.json / initialization.jsonl` 和各折窗前种子。`epoch-ordering.json`记录代际首项、原生坐标、接收/可用时间范围和所用顺序。它不证明实际会话的物理先后，也不新增拒绝或丢弃规则。`material.json`只在全部成功后写出。
 
-进度默认30秒，阶段变化即时输出。日志含阶段、已读原始行/文件、已耗时、引擎查询进度、当前VmRSS、getrusage峰值RSS、CPU、I/O、工作数据库/ spill占用和实际剩余空间。无可靠总量的算子不编造完成比例或ETA。模型监督按用户要求每10分钟一次。成功后只删除本次已无用途的工作数据库；失败现场保留，不自动重跑、扩额、缩窗或跳源。
+study保留五折各一份冻结和验证JSON。每个候选的 `*.exceeded/*.parquet` 按已闭合超限段输出真实进入时刻、最后直接received/event、当时S/A、前态、最后事实可见时间和删失。无新消息期间的阈值跨越单列，不当作事故真值。逐日片段与全窗连续段的次数分别报告。
+
+进度默认30秒，阶段变化即时输出。日志含阶段、已处理原始文件/行计数、已耗时、引擎查询进度、当前VmRSS、getrusage峰值RSS、CPU、I/O、spill占用和实际剩余空间。计数必须结合阶段解释，不能当作全流程百分比。无可靠总量的算子不编造ETA。模型监督按用户要求每10分钟一次。失败现场保留，不自动重跑、扩额、缩窗或跳源。
 
 ## 全局资源与命令
 
-原输入2864文件、762,240,960行、45,652,568,053字节，其中PM728,429,320行；清单5186市场/10372资产不是实际状态数。计划依据本机32核/128GB，整进程共用DuckDB 24线程、80GiB引擎内存和700GiB临时盘额度。它们不是每来源预算，也不是进程RSS或总磁盘上界。输出、数据库、归档副本及引擎外开销另计。窗口算子会缓冲，必要窄列可排序或spill；完整峰值与耗时未知。
+原输入2864文件、762,240,960行、45,652,568,053字节，其中PM728,429,320行；清单5186市场/10372资产不是实际状态数。当前执行参数整进程共用DuckDB 24线程、8GiB引擎预算和700GiB临时盘额度。它们不是每来源预算，也不是进程RSS或总磁盘上界。原80GiB配置只保留历史身份。
 
-PM窄原表仍含重复condition/epoch和资产列表；按8字节时间/坐标及可变标识估算每行约80—200字节未压缩量级，7.28亿行约58—146GB，仅为一张表的条件估算。派生events/states等可能同时存在，嵌套列表、引擎页、排序和压缩改变实量。主要键是condition/epoch首次顺序/admission sequence、source局部顺序，以及source/condition/asset/visible_at。不能用原46GB压缩输入推定总盘峰值。官方说明见[Parquet投影](https://duckdb.org/docs/current/data/parquet/overview.html)和[缓冲算子及spill](https://duckdb.org/docs/current/guides/performance/how_to_tune_workloads.html)。
+SQL以自然文件为单元；原生范围重叠时合并必要文件。单次查询最坏可触及该文件组全部物理行，不能以谓词筛选后的行数声称读取上界。行组裁剪是引擎能力，当前没有把它写成已实测保证。最大PM文件有3,267,444行、10,211个行组，footer约54.32MiB；不按每个小序号段反复重开该文件。索引只保留非空范围摘要，不枚举稀疏序号空洞。
+
+主要顺序键是来源epoch、原生序号、稳定file/row；状态按source/condition/asset和visible_at分组。PM源内前沿在分condition前形成，市场同步仍在该condition实际遇到代际变化时更新。窗口、排序和连接可能缓冲或spill；输出、临时文件和引擎外分配另计。完整峰值与耗时仍未知。官方说明见[Parquet投影](https://duckdb.org/docs/current/data/parquet/overview.html)和[缓冲算子及spill](https://duckdb.org/docs/current/guides/performance/how_to_tune_workloads.html)。
 
 依赖锁为 `research/requirements-source-health.lock`，固定CPython3.14/Linux x86_64的官方DuckDB1.5.6和PyArrow23.0.1 wheel及SHA-256。实际环境/制品与源码在私有交接绑定。公开命令使用逻辑路径变量：
 
-```bash
-python3 -m venv "$ENV"
-"$ENV/bin/pip" install --require-hashes -r baseline-mm/research/requirements-source-health.lock
-cargo build -p baseline-mm -p data-pipeline-training \
-  --example research_source_health_two_layer --example source_health_boundary \
-  --release -j8 --locked --offline
-"$ENV/bin/python" baseline-mm/research/research_source_health_columnar.py configure \
-  baseline-mm/configs/source-health-two-layer-18d.plan.json \
-  "$INPUT_ROOT" "$NEW_RUN_ROOT" "$BOUNDARY_HELPER" "$STATISTICS_HELPER" "$CONFIG"
-/usr/bin/time -v -o "$PREPARE_TIME" "$ENV/bin/python" \
-  baseline-mm/research/research_source_health_columnar.py prepare "$CONFIG"
-# 仅prepare成功且material.json完整后，沿同一次授权执行：
-/usr/bin/time -v -o "$STUDY_TIME" "$ENV/bin/python" \
-  baseline-mm/research/research_source_health_columnar.py study "$CONFIG"
-```
-
-正式运行用前台包装器保留一次prepare成功才一次study和挂载失败停止：
+已有执行环境、锁定依赖、输入配置和两个辅助工具保持可复用。当前启动命令不安装依赖、不重建工具，也不再次读取清单生成配置：
 
 ```bash
-"$ENV/bin/python" -u baseline-mm/research/run_source_health_columnar_once.py \
-  "$CONFIG" "$ARCHIVE_ROOT" "$MOUNT_POINT" "$NEW_LOGS"
+/usr/bin/time -v -o "$PREPARE_TIME" "$ENV/bin/python" -u \
+  baseline-mm/research/research_source_health_columnar.py prepare "$CONFIG" \
+  >"$PREPARE_STDOUT" 2>"$PREPARE_STDERR"
+# 仅prepare成功且material.json完整后：
+/usr/bin/time -v -o "$STUDY_TIME" "$ENV/bin/python" -u \
+  baseline-mm/research/research_source_health_columnar.py study "$CONFIG" \
+  >"$STUDY_STDOUT" 2>"$STUDY_STDERR"
 ```
 
-使用前核对准确源提交、两个优化工具、依赖、配置、输入身份和实际归档挂载。stdout/stderr/exit和信号单独保留。包装器收到SIGTERM/SIGHUP/SIGINT或监督错误时，结束并回收自己创建的活动阶段进程组，记录真实阶段退出码和信号，再退出；不进入study。脚本必须保持前台可追踪，归档不可用时沿绑定规则停止；配置不得作为新的合同或批准账本。
+准确参数、源码副本、辅助工具与日志路径在私有交接中绑定。启动和真实退出证据由实际执行记录保存。本次没有新增cgroup、MemoryMax、swap设置或其他系统保护。参数文件不是批准账本。
 
-## 有界验证与适用限制
+## 历史验证与当前限制
 
-同一合法collector构造的262144行PM样本，1文件/1个row group，1线程墙钟1.286s、CPU1.216s、峰值RSS278.6MB；24线程1.006s、CPU2.618s、峰值RSS732.8MB。四份窄输出EXCEPT ALL差异0。真实CPU累计表明确有多核参与；没有采到每个算子的活动线程数。小样本行组少，不能外推十八日加速、总耗时或峰值。随后调整来源时钟/去重、规则连接、必要行数计量、代际前沿及诊断；该小型性能对照没有重测，不能称为最终所有路径的耗时。磁盘记录是测量结束占用，不称全程峰值。
+此前全期投影原型使用同一合法collector构造的262144行PM样本，1文件/1个row group，1线程墙钟1.286s、CPU1.216s、峰值RSS278.6MB；24线程1.006s、CPU2.618s、峰值RSS732.8MB。四份窄输出EXCEPT ALL差异0。真实CPU累计表明确有多核参与；没有采到每个算子的活动线程数。小样本行组少，不能外推十八日加速、总耗时或峰值。随后调整来源时钟/去重、规则连接、必要行数计量、代际前沿及诊断；该小型性能对照没有重测，不能称为最终所有路径的耗时。磁盘记录是测量结束占用，不称全程峰值。
 
-代表测试覆盖原构造/解析入口、跨文件重复与冲突、资产和代际、缺口/快照恢复、持续旧事件、Chainlink异常保留、同毫秒样本和最终状态、真实断选、未知分母、首尾/午夜/删失、normal=max=0、未来折不泄漏和一个Parquet截断边界。原metadata初始化小文件的精确选择仍得到原3条前序；没有重扫十二分钟或十八日完整core。本次17项Python测试通过；固定workspace退出0，累计1379 passed/0 failed/23 ignored，具名UTC测试明确跳过。fmt和相关all-targets clippy退出0，既有警告保持。后续返工仅改Python、测试与说明，Rust输入未变，上述Rust结果继续适用。17条真实构造原始记录验证prepare命令；另存的19条有限标量确认验证五折10份冻结/验证文件，不能称为18日历史运行。返工代表例验证：未来epoch旧received不改已可见前缀；B首条重复过滤后，A→B→C仍保持10@100、20@400、30@400；实际5ms断选的两段共15ms，右删失2、左截断1；重新选择时才可见新事实的左截断0。监督SIGTERM代表记录真实阶段−15并回收，无study。结果见[工程机器摘要](complementary-pair-columnar-health-engineering.json)和PR，不把旧通过记录替代新入口验证。
+代表测试覆盖原构造/解析入口、跨文件重复与冲突、资产和代际、缺口/快照恢复、持续旧事件、Chainlink异常保留、同毫秒样本和最终状态、真实断选、未知分母、首尾/午夜/删失、normal=max=0、未来折不泄漏和一个Parquet截断边界。原metadata初始化小文件的精确选择仍得到原3条前序；没有重扫十二分钟或十八日完整core。此前投影原型17项Python测试通过；固定workspace退出0，累计1379 passed/0 failed/23 ignored，具名UTC测试明确跳过。fmt和相关all-targets clippy退出0，既有警告保持。当前返工只改Python、测试与说明，Rust输入未变；上述Rust结果仍适用，不能证明当前SQL入口。17条真实构造原始记录验证prepare命令；另存的19条有限标量确认验证五折10份冻结/验证文件，不能称为18日历史运行。返工代表例验证：未来epoch旧received不改已可见前缀；B首条重复过滤后，A→B→C仍保持10@100、20@400、30@400；实际5ms断选的两段共15ms，右删失2、左截断1；重新选择时才可见新事实的左截断0。监督SIGTERM代表记录真实阶段−15并回收，无study。结果见[工程机器摘要](complementary-pair-columnar-health-engineering.json)和PR，不把旧通过记录替代新入口验证。
+
+用户已取消新增小样本试验。当前直接查询修正没有新增试验、RSS对照、构建或完整运行；既有23项小测试属于较早中间源码，后续metadata、文件范围、TWAP过滤顺序和内存连接修改未用新试验验证。旧工程机器摘要保持原版本，不能冒充当前入口结果。准确实现与实际查询结果仍须分别核对。
 
 ## 历史紧凑工程证据
 
