@@ -103,15 +103,19 @@ class PriceQueueBatch:
                        total_base=enlarged(self.total_base),total_quote=enlarged(self.total_quote),
                        consumed_base=enlarged(self.consumed_base),account_remaining=enlarged(self.account_remaining))
 
-    def _compact(self):
+    def _compact(self, enabled=None):
+        if enabled is None:
+            enabled = torch.ones(self.rows, dtype=torch.bool, device=self.kind.device)
         external = (self.total_base-self.consumed_base).sign.reshape(self.rows,self.capacity)>0
         account = self.account_remaining.sign.reshape(self.rows,self.capacity)>0
         present = ((self.kind==1)&external)|((self.kind==2)&account)
         permutation = torch.argsort((~present).to(torch.int8),dim=1,stable=True)
+        original = torch.arange(self.capacity, device=self.kind.device)[None, :].expand_as(permutation)
+        permutation = torch.where(enabled[:, None], permutation, original)
         indices = (torch.arange(self.rows,device=self.kind.device)[:,None]*self.capacity+permutation).flatten()
         kinds = self.kind.gather(1,permutation)
         orders = self.order_ids.gather(1,permutation)
-        retained = present.gather(1,permutation)
+        retained = present.gather(1,permutation) | ~enabled[:, None]
         return replace(self,kind=torch.where(retained,kinds,0),order_ids=torch.where(retained,orders,-1),
                        total_base=_take(self.total_base,indices),total_quote=_take(self.total_quote,indices),
                        consumed_base=_take(self.consumed_base,indices),account_remaining=_take(self.account_remaining,indices))
@@ -173,7 +177,10 @@ class PriceQueueBatch:
         return state,total,selected.any(1)
 
     def apply_taker_slice(self, columns, delta_base):
-        """只应用原planner已选择的External段；返回原累计quote差及候选，未接单不调用。"""
+        """应用原planner的External段，不改变同价位计划中其他片的原段坐标。
+
+        接单后按原计划顺序调用；该价位最后片后调用finish_taker_plan，期间不穿插队列变更。
+        """
         if columns.shape!=(self.rows,) or columns.dtype!=torch.int64 or columns.device!=self.kind.device:
             raise TypeError('段坐标须为同设备int64[rows]')
         index = torch.arange(self.rows,device=self.kind.device)*self.capacity+columns.clamp(0,self.capacity-1)
@@ -197,8 +204,14 @@ class PriceQueueBatch:
         target = torch.arange(self.capacity,device=self.kind.device)[None,:]==columns[:,None]
         target = target & (fault==0)[:,None]
         candidate = replace(self,consumed_base=_repeat(next_consumed,self.capacity).select(target.flatten(),self.consumed_base),
-                            debt=next_debt.select(fault==0,self.debt),fault=fault)._compact()
+                            debt=next_debt.select(fault==0,self.debt),fault=fault)
         return candidate,used_quote
+
+    def finish_taker_plan(self, enabled):
+        """仅在对应价位的原计划最后片应用后压紧；其他价位仍保持规划时坐标。"""
+        if enabled.shape != (self.rows,) or enabled.dtype != torch.bool or enabled.device != self.kind.device:
+            raise TypeError('完成价位掩码须为同设备bool[rows]')
+        return self._compact(enabled & (self.fault == 0))
 
     def apply_level_transition(self, before, after):
         """原减少先抵taker debt，再逐段耗尽；增加永远追加尾段，绝不合并原B/Q。"""

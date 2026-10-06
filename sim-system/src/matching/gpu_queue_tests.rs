@@ -45,7 +45,24 @@ fn gpu_fifo_preserves_segment_order_taker_debt_and_resync() {
     checkpoint("cancel_removes_target_only",&fifo,&debt);
     debt.clear_external_segments();
     checkpoint("clear",&fifo,&debt);
-    let input=json!({"checkpoints":checkpoints,"maker_depletion":"1000000","taker_quote":"2000000"});
+    // 原planner在同价位两片中保留最初的段索引；第一片耗尽后不能压紧。
+    let mut multi=AssetQueueV2::from_initial_levels(&[],&[(ask,2)]).unwrap();
+    multi.apply_level_transition(BookSide::Ask,ask,2,5).unwrap();
+    let multi_initial=describe(&multi,BookSide::Ask,ask);
+    let plan=multi.calculate_taker_buy(ask,TakerTargetV1::Quote(2)).unwrap();
+    assert_eq!(plan.fills.len(),2);
+    assert_eq!(plan.matched_base_units,5);
+    assert_eq!(plan.used_quote_units,2);
+    let slices:Vec<_>=plan.fills.iter().map(|part|json!({
+        "column":part.segment_index,"base":part.fill.base_units.to_string(),
+        "quote":part.fill.quote_units.to_string(),
+    })).collect();
+    multi.apply_taker_consumption(plan);
+    let multi_applied=describe(&multi,BookSide::Ask,ask);
+    multi.apply_level_transition(BookSide::Ask,ask,5,0).unwrap();
+    let multi_echo=describe(&multi,BookSide::Ask,ask);
+    let input=json!({"checkpoints":checkpoints,"maker_depletion":"1000000","taker_quote":"2000000",
+        "multi_plan":{"initial":multi_initial,"slices":slices,"applied":multi_applied,"echo":multi_echo}});
     let python=std::env::var("B_GPU_PYTHON").unwrap();
     let script=std::env::var("B_GPU_FIFO_VALIDATOR").unwrap();
     let mut child=std::process::Command::new(python).arg(script).stdin(std::process::Stdio::piped())

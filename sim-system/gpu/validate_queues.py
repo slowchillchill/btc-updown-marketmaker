@@ -54,6 +54,7 @@ def main():
     checkpoint('external_tail')
     queue,quote=Numbers.run_exact_batch(lambda:queue.apply_taker_slice(torch.zeros(2,dtype=torch.int64,device='cuda'),integers([0,4_000_000])))
     assert values(quote)==[0,int(reference['taker_quote'])]
+    queue=Numbers.run_exact_batch(lambda:queue.finish_taker_plan(torch.ones(2,dtype=torch.bool,device='cuda')))
     checkpoint('taker_applied')
     queue,effects=run_queue_batch(queue,lambda state:state.apply_level_transition(integers([7_000_000,10_000_000]),integers([4_000_000,6_000_000])))
     depletion=values(effects.maker_base_units)
@@ -76,9 +77,31 @@ def main():
     assert len(grown[1]['segments'])==10 and queue.capacity==16
     # 新增价位外部段原B/Q被保留，已消耗的段不改成新本金。
     assert all(segment['base']=='2' and segment['quote']=='1' for segment in grown[1]['segments'])
+    # 同价位原planner的两片必须保留规划坐标；第一片耗尽也不能移动第二片。
+    plan=reference['multi_plan']
+    multi_price=Numbers.run_exact_batch(lambda:ExactRational.ratio(integers([5]),integers([10])))
+    multi=PriceQueueBatch.empty(multi_price,capacity=2)
+    multi,_=run_queue_batch(multi,lambda state:state.append_external(integers([2])))
+    multi,_=run_queue_batch(multi,lambda state:state.apply_level_transition(integers([2]),integers([5])))
+    assert describe(multi)==[plan['initial']]
+    for ordinal,part in enumerate(plan['slices']):
+        multi,used=Numbers.run_exact_batch(lambda:multi.apply_taker_slice(
+            torch.tensor([part['column']],dtype=torch.int64,device='cuda'),integers([int(part['base'])])))
+        assert values(used)==[int(part['quote'])]
+        if ordinal==0:
+            assert multi.kind.cpu().tolist()==[[1,1]]
+            assert values(multi.consumed_base)==[2,0]
+            # 未完成行即使经过完成屏障，也不改变原坐标。
+            multi=Numbers.run_exact_batch(lambda:multi.finish_taker_plan(torch.tensor([False],device='cuda')))
+            assert values(multi.total_base)==[2,3]
+    multi=Numbers.run_exact_batch(lambda:multi.finish_taker_plan(torch.tensor([True],device='cuda')))
+    assert describe(multi)==[plan['applied']]
+    multi,_=run_queue_batch(multi,lambda state:state.apply_level_transition(integers([5]),integers([0])))
+    assert describe(multi)==[plan['echo']]
     torch.cuda.synchronize()
     print(json.dumps({'checks':['original_fifo_all_fields','taker_original_quote_difference','debt_echo_no_second_depletion',
-        'resync_retains_account_order','cancel_only_target','segment_growth_retains_original_B_Q'],
+        'resync_retains_account_order','cancel_only_target','segment_growth_retains_original_B_Q',
+        'original_multi_segment_plan_coordinates','plan_finish_preserves_unfinished_rows'],
         'capacity':queue.capacity,'elapsed_seconds':time.perf_counter()-started,
         'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
         'noe_ledger_execution_delivered':False}))
