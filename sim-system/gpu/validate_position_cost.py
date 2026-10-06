@@ -31,6 +31,8 @@ def main():
     directory, error = Numbers.run_exact_batch(lambda: directory.set(integers([1]), zero, no, integers([0]), yes))
     assert error.cpu().tolist() == [0]
     contributions = Numbers.run_exact_batch(lambda: RebateContributions.empty(1, 1, 'cuda'))
+    unknown = Numbers.run_exact_batch(lambda: PositionCosts.empty(1, 1, 'cuda', known=False).asset_cost(zero))
+    assert unknown.known.cpu().tolist() == [False] and unknown.fault.cpu().tolist() == [0]
     prefix = 0
     checked = 0
     for checkpoint in source['checkpoints']:
@@ -80,7 +82,8 @@ def main():
         assert amounts(read.fee) == [Fraction(expected['fees_pusd'])]
         asset = Numbers.run_exact_batch(lambda: costs.asset_cost(zero))
         expected_token = next((row for row in expected['outcome_balances'] if row['token_id'] == '1'), None)
-        assert amounts(asset) == [Fraction(expected_token['position_cost_basis_pusd']) if expected_token else 0]
+        assert asset.known.cpu().tolist() == [True] and asset.fault.cpu().tolist() == [0]
+        assert amounts(asset.cost) == [Fraction(expected_token['position_cost_basis_pusd']) if expected_token else 0]
         executed = Numbers.run_exact_batch(lambda: trades.executed(zero[:, None], yes[:, None]))
         original = checkpoint['after']['markets'][0]['executed']
         for field, key in [('quantity', 'shares'), ('principal', 'principal_pusd'), ('actual_fee', 'actual_fee_pusd')]:
@@ -95,6 +98,7 @@ def main():
         'unapplied_release_and_applied_compensation_checked': True,
         'actual_applied_cost_fee_token_basis_and_executed_net_fee_checked': True,
         'actual_pending_and_failed_rebate_estimate_checked': True,
+        'unknown_cold_prefix_asset_cost_not_known_zero_checked': True,
         'reference_attempt_order_drives_validation': True,
         'full_device_NOE_failure_clock_or_activity_restore_delivered': False}))
 

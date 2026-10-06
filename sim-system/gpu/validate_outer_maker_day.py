@@ -162,8 +162,9 @@ def main():
     assert amounts(cost_read.cost)==[Fraction(actual['platform_confirmed_projection']['position_cost_basis_pusd'])]
     assert amounts(cost_read.fee)==[Fraction(actual['platform_confirmed_projection']['fees_pusd'])]
     cost_assets=Numbers.run_exact_batch(lambda:admission.position_costs.asset_cost(admission.platform.asset_roots))
+    assert cost_assets.known.cpu().tolist()==[True,True] and cost_assets.fault.cpu().tolist()==[0,0]
     expected_costs={row['token_id']:row['position_cost_basis_pusd'] for row in actual['platform_confirmed_projection']['outcome_balances']}
-    assert amounts(cost_assets)==[Fraction(expected_costs.get(token,'0')) for token in ['1','2']]
+    assert amounts(cost_assets.cost)==[Fraction(expected_costs.get(token,'0')) for token in ['1','2']]
     original_sequences={json.dumps(a['position'],sort_keys=True):a['after']['projection']['ledger_entry_seq']
         for a in source['attempts'] if not a['deferred']}
     applied_sequences=values(admission.applied_sequences)

@@ -20,6 +20,13 @@ class PositionCostRead:
 
 
 @dataclass(frozen=True)
+class AssetPositionCostRead:
+    cost: object
+    known: torch.Tensor
+    fault: torch.Tensor
+
+
+@dataclass(frozen=True)
 class PositionCosts:
     active: torch.Tensor
     conditions: torch.Tensor
@@ -73,4 +80,5 @@ class PositionCosts:
         member = self.active[asset_roots] & (self.assets[asset_roots] == torch.arange(assets, device=asset_roots.device)[:, None])
         value = take_ratio(self.cost, positions.flatten())
         zero = ExactRational(value.numerator.constant(0), value.denominator.constant(1))
-        return sum_rows(select(value, member.flatten(), zero), assets, width)
+        cost = sum_rows(select(value, member.flatten(), zero), assets, width)
+        return AssetPositionCostRead(cost, self.known[asset_roots], cost.fault)

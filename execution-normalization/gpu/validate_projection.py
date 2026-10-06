@@ -422,8 +422,9 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         value=getattr(cost_read,name)
         assert [Fraction(n,d) for n,d in zip(values(value.numerator),values(value.denominator))]==[Fraction(expected_platform[key])]
     asset_cost=Numbers.run_exact_batch(lambda:admission.position_costs.asset_cost(admission.platform.asset_roots))
+    assert asset_cost.known.cpu().tolist()==[True,True] and asset_cost.fault.cpu().tolist()==[0,0]
     expected_costs={row['token_id']:row['position_cost_basis_pusd'] for row in expected_platform['outcome_balances']}
-    assert [Fraction(n,d) for n,d in zip(values(asset_cost.numerator),values(asset_cost.denominator))]==[
+    assert [Fraction(n,d) for n,d in zip(values(asset_cost.cost.numerator),values(asset_cost.cost.denominator))]==[
         Fraction(expected_costs.get(token,'0')) for token in ['1','2']]
     estimate=Numbers.run_exact_batch(lambda:admission.trade_success.estimated_rebate(admission.trades,
         admission.rebate_contributions,zero[:,None],torch.ones_like(zero[:,None],dtype=torch.bool)))
