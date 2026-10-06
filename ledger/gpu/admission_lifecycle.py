@@ -24,6 +24,10 @@ class LifecycleColumns:
     economic_tags: torch.Tensor
     request_slots: torch.Tensor
     item_ordinals: torch.Tensor
+    tokens: torch.Tensor
+    trade_base_units: object
+    trade_quote_units: object
+    trade_dispositions: torch.Tensor
     emitted: torch.Tensor
     fault: torch.Tensor
 
@@ -75,7 +79,8 @@ class LifecycleColumns:
         item=torch.cat([batch.item_ordinals for batch in columns.projection_batches],dim=1)
         return cls(schemas.reshape(roots,width),outcomes.reshape(roots,width),orders,fills,conditions.reshape(roots,width),
             open_orders.reshape(roots,width),pending.reshape(roots,width),accepted.reshape(roots,width),
-            torch.where(economic,decoded[11][3],-1).reshape(roots,width),request,item,active.reshape(roots,width),
+            torch.where(economic,decoded[11][3],-1).reshape(roots,width),request,item,
+            decoded[8][2].reshape(roots,width),decoded[8][10],decoded[8][11],decoded[8][6].reshape(roots,width),active.reshape(roots,width),
             torch.where(active,fault,0).reshape(roots,width))
 
 

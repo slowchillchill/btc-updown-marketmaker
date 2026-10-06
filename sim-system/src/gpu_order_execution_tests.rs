@@ -434,8 +434,12 @@ fn gpu_ledger_reservation_checkpoint(ledger:&ledger::LedgerWriterV1,stage:&str) 
     let request=ledger.funds_read_v1().request(&ledger::LedgerRequestIdentityV1("gpu-reservation".into()))
         .map(|value|serde_json::json!({"status":value.reservation_state,"principal":value.principal_pusd,
             "fee":value.immediate_fee_pusd,"last_ledger_entry_seq":value.last_ledger_entry_seq}));
+    let read=ledger.economic_read().unwrap();
+    let trades=read.trades().map(|trade|serde_json::json!({"identity":trade.trade_identity,"fact":trade.fact,
+        "economic_applied":trade.economic_applied,"success_applied":trade.success_applied,
+        "net_fee":trade.actual_net_fee_pusd,"unpaired_contribution_shares":trade.unpaired_contribution_shares})).collect::<Vec<_>>();
     serde_json::json!({"stage":stage,"projection":ledger.projection_v2().unwrap(),
-        "cash":ledger.economic_read().unwrap().cash(),"request":request})
+        "cash":read.cash(),"request":request,"markets":read.market_totals().collect::<Vec<_>>(),"trades":trades})
 }
 
 #[test]

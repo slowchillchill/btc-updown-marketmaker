@@ -10,6 +10,7 @@ from asset_buy import take_ratio
 from admission_lifecycle import LifecycleColumns,LifecycleDirectory
 from reservation import ReservationBook,run_reserve_action,sequence_fault
 from memory import EconomicColumns
+from trade_success import TradeSuccess
 from core import OUT_EVIDENCE,OUT_FACT,OUT_DUPLICATE,OUT_ALIAS,OUT_LOGICAL_CONFLICT,OUT_ECONOMIC_CONFLICT,OUT_PENDING
 
 
@@ -45,6 +46,8 @@ class CashFunds:
 @dataclass(frozen=True)
 class AdmissionLifecycle:
     platform: object
+    success_pools: object
+    trade_success: object
     maker_cash: object  # 原Existing经济现金归Maker；结算新kind须按原归属另接。
     reservations: object
     orders: object
@@ -63,13 +66,13 @@ class AdmissionLifecycle:
     fault: torch.Tensor
 
     @classmethod
-    def open(cls,platform,bank,columns,current_entry_sequence,current_local_prefix):
+    def open(cls,platform,bank,columns,current_entry_sequence,current_local_prefix,success_pools):
         roots,width=columns.row_refs.shape
         life=LifecycleColumns.from_projection(bank,columns)
         book=ReservationBook.empty(roots,capacity=max(1,width),device=columns.row_refs.device)
         empty=torch.full_like(book.request_slots,-1)
         opening_cash=take_ratio(platform.balances,torch.arange(roots,device=empty.device)*8)
-        return cls(platform,opening_cash,book,LifecycleDirectory.empty(roots,max(1,width),device=empty.device),
+        return cls(platform,success_pools,TradeSuccess.open(roots,max(1,width),empty.device),opening_cash,book,LifecycleDirectory.empty(roots,max(1,width),device=empty.device),
             LifecycleDirectory.empty(roots,max(1,width),device=empty.device),columns,life,
             current_entry_sequence,current_local_prefix,empty,empty.clone(),torch.zeros_like(columns.enabled),
             ExactInt.from_i64_tensor(torch.zeros(roots*width,dtype=torch.int64,device=empty.device)),
@@ -177,9 +180,23 @@ class AdmissionLifecycle:
             request=request,economic=old_applied | is_order_economic)
         fault=fault | torch.where(order_event,error,0)
         trade_event=lifecycle_use&(tag==8)
-        trades,error=self.trades.set(fill,self.lifecycle.conditions[root,local],self.lifecycle.pending_trades[root,local],
-            next_entry,trade_event,terminal_sticky=True)
+        economic_trade=use & economic & ((self.lifecycle.economic_tags[root,local]>=6)&(self.lifecycle.economic_tags[root,local]<=8))
+        trade_at,trade_found,trade_error=self.trades.lookup(fill)
+        fault=fault | torch.where(trade_event|economic_trade,Numbers.combine_fault_rows(trade_error),0)
+        trades,error=self.trades.set(fill,self.lifecycle.conditions[root,local],
+            torch.where(trade_event,self.lifecycle.pending_trades[root,local],self.trades.flags[root,trade_at]),
+            next_entry,trade_event|economic_trade,terminal_sticky=True)
         fault=fault | torch.where(trade_event,error,0)
+        # 真实份额/本金保持精确；D-0295只发生在成功池的派生成本分配端。
+        base=_take(self.lifecycle.trade_base_units,index)
+        quote=_take(self.lifecycle.trade_quote_units,index)
+        quantity=ExactRational.ratio(base,base.constant(1_000_000))
+        cost=ExactRational.ratio(quote,quote.constant(1_000_000))
+        trade_success=self.trade_success.update(trade_at,self.lifecycle.conditions[root,local],self.lifecycle.tokens[root,local],
+            quantity,cost,self.lifecycle.trade_dispositions[root,local],trade_event,economic_trade,
+            self.lifecycle.economic_tags[root,local]==6)
+        trade_success,success_pools=trade_success.apply_success(self.success_pools,trade_at,(trade_event|economic_trade)&(fault==0))
+        fault=fault | success_pools.fault
         success=use&(fault==0)
         valid=fault==0
         # 各NOE记录候选共同成功，先前已消费位置/账本条目不回滚。
@@ -192,7 +209,8 @@ class AdmissionLifecycle:
         key=self.columns.positions[index]
         same=(self.columns.positions.reshape(roots,width,-1)==key[:,None,:]).all(dim=2)&self.lifecycle.emitted
         applied=self.applied | (same&success[:,None])
-        return replace(self,platform=platform,maker_cash=ExactRational(
+        return replace(self,platform=platform,success_pools=success_pools.coordinated(self.success_pools,valid),
+            trade_success=coordinate(trade_success,self.trade_success,valid),maker_cash=ExactRational(
             maker_cash.numerator.select(success & economic,self.maker_cash.numerator),
             maker_cash.denominator.select(success & economic,self.maker_cash.denominator)),reservations=coordinate(book,self.reservations,valid),
             orders=coordinate(orders,self.orders,valid),trades=coordinate(trades,self.trades,valid),

@@ -187,9 +187,12 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         Fraction(expected_assets.get(token,'0')) for token in ['1','2']]
     # 真实共享NOE→Ledger顺序/绑定候选自行生成entry/local seq，原对照只检查结果。
     from admission import AdmissionLifecycle
+    from success_pool import SuccessPools
+    pools=Numbers.run_exact_batch(lambda:SuccessPools.open(torch.tensor([0,0],device='cuda'),
+        torch.tensor([0,0],device='cuda'),torch.tensor([0,1],device='cuda'),torch.tensor([1,0],device='cuda'),1))
     from buy_cost import limit_buy_cost
     admission=Numbers.run_exact_batch(lambda:AdmissionLifecycle.open(platform,state.normalizer.bank,columns,
-        integers([source['reservation_checkpoints'][0]['projection']['ledger_entry_seq']]),integers([0])))
+        integers([source['reservation_checkpoints'][0]['projection']['ledger_entry_seq']]),integers([0]),pools))
     cost=Numbers.run_exact_batch(lambda:limit_buy_cost(integers([500]),rational(['0.3']),rational([source['fee_rate']]),
         source['fee_exponent'],post_only=torch.tensor([False],device='cuda'),minimum_principal_micro=integers([1_000_000])))
     principal=Numbers.run_exact_batch(lambda:type(rational(['0'])).ratio(cost.principal_micro,cost.principal_micro.constant(1_000_000)))
@@ -223,13 +226,13 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         duplicate_batches.append(replace(batch,normalized=duplicate,economic_enabled=torch.zeros_like(batch.economic_enabled)))
     duplicate_columns=Numbers.run_exact_batch(lambda:EconomicColumns.from_projection_batches(duplicate_batches))
     duplicate_ledger=Numbers.run_exact_batch(lambda:AdmissionLifecycle.open(platform,state.normalizer.bank,duplicate_columns,
-        integers([26]),integers([2])))
+        integers([26]),integers([2]),pools))
     duplicate_ledger,remaining=Numbers.run_exact_batch(lambda:duplicate_ledger.apply_closed(delivered,
         torch.ones_like(columns.enabled),maximum_retry_rounds=1))
     assert not remaining.any().cpu().item() and not duplicate_ledger.applied.any().cpu().item()
     assert values(duplicate_ledger.current_entry_sequence)==[26] and duplicate_ledger.fault.cpu().tolist()==[0]
     # 真实原Ledger同一经济先到，没有Submission绑定不能Convert另一笔未发送预留。
-    early=Numbers.run_exact_batch(lambda:AdmissionLifecycle.open(platform,state.normalizer.bank,columns,integers([3]),integers([0])))
+    early=Numbers.run_exact_batch(lambda:AdmissionLifecycle.open(platform,state.normalizer.bank,columns,integers([3]),integers([0]),pools))
     early,_=Numbers.run_exact_batch(lambda:early.reserve_action(zero[:,None],zero[:,None],rational(['1.5']),rational(['0']),
         torch.ones((1,1),dtype=torch.bool,device='cuda')))
     early=Numbers.run_exact_batch(lambda:early.submission_started(zero,zero,zero,zero,torch.tensor([True],device='cuda')))
@@ -279,6 +282,12 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     broken,event=Numbers.run_exact_batch(lambda:broken.reserve_action(requests,requests,rational(['1','1']),rational(['0','0']),pair_enabled))
     assert values(broken.current_entry_sequence)==[3,4]
     assert broken.reservations.request_slots.cpu().tolist()==[[-1],[0]] and broken.fault.cpu().tolist()==[1,0]
+    market=next(row for row in source['reservation_checkpoints'][-1]['markets'] if row['condition_id']==source['initial'][0]['market']['condition_id'])
+    assert [Fraction(n,d) for n,d in zip(values(admission.success_pools.success_quantity.numerator),values(admission.success_pools.success_quantity.denominator))]==[Fraction(value) for value in market['success_shares']]
+    assert [Fraction(n,d) for n,d in zip(values(admission.success_pools.success_cost.numerator),values(admission.success_pools.success_cost.denominator))]==[Fraction(int(value['numerator']),int(value['denominator'])) for value in market['success_principal_cost_pusd']]
+    assert int(admission.trade_success.success_applied.sum().cpu())==3
+    assert [Fraction(n,d) for n,d in zip(values(admission.success_pools.quantity.numerator),values(admission.success_pools.quantity.denominator))]==[Fraction(value) for value in market['orphan_shares']]
+    assert [Fraction(n,d) for n,d in zip(values(admission.success_pools.paired_quantity.numerator),values(admission.success_pools.paired_quantity.denominator))]==[Fraction(market['paired_shares'])]*2
     before=ledger.platform
     again=Numbers.run_exact_batch(lambda:ledger.receive(delivered).apply_pending(torch.ones_like(columns.enabled)))
     assert values(again.platform.platform_source_prefix)==[7]
@@ -288,4 +297,4 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         'bank_physical_rows':state.normalizer.bank.kinds.numel(),'masked_or_unemitted_rows':state.normalizer.bank.kinds.numel()-checked,
         'actual_device_Ledger_economic_position_predecessor_checked':True,
         'Ledger_admission_device_generated_entry_local_and_binding_checked':True,
-        'duplicate_NOE_NotApplicable_without_Ledger_commit_checked':True,'unbound_economic_before_Submission_unsent_reservation_checked':True,'actual_existing_economic_MakerCash_and_four_funds_checked':True,'two_root_one_item_funds_fault_isolation_checked':True,'full_clock_Ledger_reservation_delivered':False}
+        'duplicate_NOE_NotApplicable_without_Ledger_commit_checked':True,'unbound_economic_before_Submission_unsent_reservation_checked':True,'actual_existing_economic_MakerCash_and_four_funds_checked':True,'two_root_one_item_funds_fault_isolation_checked':True,'actual_trade_economic_success_pool_checked':True,'full_clock_Ledger_reservation_delivered':False}
