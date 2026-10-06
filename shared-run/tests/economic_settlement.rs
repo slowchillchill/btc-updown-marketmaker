@@ -818,6 +818,7 @@ async fn actual_two_market_maker_day_allocates_exact_contribution_ratios() {
         "e".repeat(64),
         "2000",
     );
+    let gpu_day_observation=observation.clone();
     let mut ledger =
         LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
     execution
@@ -917,6 +918,32 @@ async fn actual_two_market_maker_day_allocates_exact_contribution_ratios() {
         &temp.path().join("ledger"),
         &temp.path().join("legacy-ledger"),
     );
+    if let Ok(validator)=std::env::var("B_GPU_REBATE_DAY_VALIDATOR") {
+        use contracts::economics::EconomicRational as R;
+        let records=gpu_day_observation.result_references().iter().map(|reference| {
+            let record=execution_normalization::read_durable_noe_record_v1(reference).unwrap();
+            serde_json::json!({"position":record.position(),"context":record.context(),"record":record.record()})
+        }).collect::<Vec<_>>();
+        let mut conditions=day.contributions.iter().map(|value|value.condition_id.0.clone()).collect::<Vec<_>>();
+        conditions.sort(); conditions.dedup();
+        let weights=conditions.iter().map(|condition|day.contributions.iter().filter(|value|&value.condition_id.0==condition)
+            .fold(R::zero(),|sum,value|sum.add(&R::from_decimal(Decimal::from_str_exact(&value.contribution_pusd.0).unwrap())))).collect::<Vec<_>>();
+        let expected_pay=contracts::finite_attribution::allocate_capacity_scale12_candidate_v1(&R::from_decimal(Decimal::ONE),&weights).unwrap();
+        let expected_lock=contracts::finite_attribution::allocate_capacity_scale12_candidate_v1(&R::from_decimal(Decimal::new(6,5)),&weights).unwrap();
+        let source=serde_json::json!({"records":records,"conditions":conditions,"contributions":day.contributions,
+            "amounts":day.amounts,"expected_pay":expected_pay.iter().map(R::public).collect::<Vec<_>>(),
+            "expected_lock":expected_lock.iter().map(R::public).collect::<Vec<_>>(),"cash":read.cash(),"base":read.base()});
+        if let Ok(directory)=std::env::var("B_GPU_ORDER_ARTIFACT_DIR") {
+            std::fs::write(std::path::Path::new(&directory).join("original-rebate-day-reference.json"),
+                serde_json::to_vec_pretty(&source).unwrap()).unwrap();
+        }
+        let mut child=std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap()).arg(validator)
+            .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+        serde_json::to_writer(child.stdin.take().unwrap(),&source).unwrap();
+        let output=child.wait_with_output().unwrap();
+        assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
+        eprintln!("gpu_rebate_day={}",String::from_utf8(output.stdout).unwrap());
+    }
 }
 
 // 从本场景真实落盘的交易生成旧 days 完整快照布局，保留实际来源与经济字段。
