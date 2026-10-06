@@ -15,7 +15,9 @@ fn gpu_compact_hidden_drives_exact_asset_state_and_queues() {
     if let PolymarketOrderbookEvent::Book {asset_id,bids,asks,..}=&mut down {
         *asset_id=DOWN_TOKEN_ID.into();bids.clear();asks.clear();
     }
-    let recovery=record(5,TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-b",1,21005,22000,book("15"))))));
+    let recovery = record(5, TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(
+        row("epoch-b", 1, 21005, 22000, book("15")),
+    )));
     for input in [meta(0),pm(1,1,21000,book("10.0000007")),pm(2,2,21001,down),
         pm(3,3,21002,PolymarketOrderbookEvent::PriceChange {price_changes:vec![change(Some("20.0000007"))]}),
         pm(4,4,21003,PolymarketOrderbookEvent::PriceChange {price_changes:vec![change(Some("20.0000008"))]}),
