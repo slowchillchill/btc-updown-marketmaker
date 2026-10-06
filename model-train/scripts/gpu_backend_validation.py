@@ -50,7 +50,9 @@ def main():
         records.append(name);log(f'完成={name} 耗时={time.monotonic()-started:.3f}s')
     q,r=ga.divrem(gb);expected_q=[(abs(x)//y)*(-1 if x<0 else 1) for x,y in zip(a,b)]
     assert q.report_values()==expected_q,'division';assert r.report_values()==[x-y*z for x,y,z in zip(a,b,expected_q)],'remainder'
-    assert ga.compare(gb).cpu().tolist()==[(x>y)-(x<y) for x,y in zip(a,b)],'compare'
+    comparison = ga.compare(gb)
+    assert comparison.order.cpu().tolist()==[(x>y)-(x<y) for x,y in zip(a,b)],'compare'
+    assert bool(comparison.valid_mask().all()), 'compare valid mask'
     assert not bool(q.fault.any());records.extend(['divrem','compare'])
     log(f'阶段=精确f32及标准末端投影 耗时={time.monotonic()-started:.3f}s')
     pn=[0,1,3,5,2**24+1,2**24+3,2**25-1,2**128-2**103,2**128-2**104]
@@ -73,6 +75,15 @@ def main():
     assert not bool(lf.any()|rf.any())
     _,zero_fault=ga.project(ExactInt.from_values([0]*len(a)));assert bool((zero_fault==1).all()),'zero denominator'
     _,_,_,_,df=extension.integer_op(3,ga.words,ga.sign,ExactInt.from_values([0]*len(a)).words,gb.sign);assert bool((df==1).all()),'division zero'
+    bad, _ = ExactInt.from_values([1]).divrem(ExactInt.from_values([0]))
+    compared_bad = bad.compare(ExactInt.from_values([1]))
+    assert int(compared_bad.fault[0]) == 1 and not bool(compared_bad.valid_mask()[0]), 'compare fault propagation'
+    widths = [1, (1 << 26), (1 << 26) + 1, (1 << 30) + 1]
+    tops = [1, -1, 1, -2147483648]
+    probe = extension.index_probe(torch.tensor(widths, dtype=torch.int64, device='cuda'), torch.tensor(tops, dtype=torch.int32, device='cuda'))
+    expected_bits = [(w-1)*32+(top & 0xffffffff).bit_length() for w,top in zip(widths,tops)]
+    assert probe.cpu().tolist() == [[v,(v-1)//32,(v-1)%32] for v in expected_bits], '64-bit device bit indexes'
+    records.extend(['compare_fault', 'index64'])
     torch.cuda.synchronize();elapsed=time.monotonic()-started
     report={'scope':'实际公共GPU整数/末端投影；不是完整环境/PPO/训练容量','source_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'cases':len(a),'passed':records,'projection_errors':errors,'compile_seconds':compile_seconds,'elapsed_seconds':elapsed,'device':torch.cuda.get_device_name(),'peak_allocated_bytes':torch.cuda.max_memory_allocated()}
     args.output.parent.mkdir(parents=True,exist_ok=True);args.output.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n');log(f'完成 精确检查={records} 投影有限误差={errors} 耗时={elapsed:.3f}s')

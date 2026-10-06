@@ -13,6 +13,15 @@ def public_extension():
     return module.load_extension()
 
 @dataclass(frozen=True)
+class ExactComparison:
+    order: torch.Tensor
+    fault: torch.Tensor
+
+    def valid_mask(self):
+        """业务条件必须同时检查此mask，不能把故障数解释为正常关系。"""
+        return self.fault == 0
+
+@dataclass(frozen=True)
 class ExactInt:
     words: torch.Tensor
     sign: torch.Tensor
@@ -41,7 +50,9 @@ class ExactInt:
     def __sub__(self, other):return self._operate(other,1)[0]
     def __mul__(self, other):return self._operate(other,2)[0]
     def divrem(self, other):return self._operate(other,3)
-    def compare(self, other):return self._operate(other,4)[0].sign
+    def compare(self, other):
+        result = self._operate(other, 4)[0]
+        return ExactComparison(result.sign, result.fault)
 
     def project(self, denominator, *, operation=0):
         output,fault=public_extension().project(operation,self.words,self.sign*denominator.sign,denominator.words)

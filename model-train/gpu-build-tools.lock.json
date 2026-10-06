@@ -1,0 +1,13 @@
+{
+  "format": 1,
+  "platform": "linux-x86_64",
+  "artifacts": [
+    {
+      "name": "ninja",
+      "version": "1.13.2",
+      "url": "https://files.pythonhosted.org/packages/6e/53/ebfed7b689c338dd8ebeec9c0730c8d56821292f14e2536e5f3ef1a05744/ninja-1.13.2-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+      "sha256": "65a24341b5ac09fcadcc37082660be40a94174e51a937fabf6e2cae26225fa2c",
+      "size": 183365
+    }
+  ]
+}
