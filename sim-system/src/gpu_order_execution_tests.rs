@@ -249,6 +249,8 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
     let noe=observation.take_closed_records();
     assert!(!noe.is_empty());
     assert!(observation.take_closed_records().is_empty(),"实际领取位置不重复消费");
+    #[cfg(feature="shared-execution")]
+    let ledger_projection={
     let mut ledger=ledger::LedgerWriterV1::new_with_admission_v2(ledger::AccountAdmissionPolicyV2::DualCashNoMarketLimit);
     ledger.apply_noe_memory_v2(&observation.opening_record().unwrap()).unwrap();
     for record in &initial_records { ledger.apply_noe_memory_v2(record).unwrap(); }
@@ -270,6 +272,10 @@ async fn gpu_legal_multiask_preserves_each_fill_and_same_time_finality_order() {
     let ledger_projection=ledger.projection_v2().unwrap();
     for record in &noe { ledger.apply_noe_memory_v2(record).unwrap(); }
     assert_eq!(ledger.projection_v2().unwrap(),ledger_projection,"原NOE位置重读不重复写账本");
+    serde_json::to_value(ledger_projection).unwrap()
+    };
+    #[cfg(not(feature="shared-execution"))]
+    let ledger_projection=serde_json::Value::Null;
     let records=noe.iter().map(|record|serde_json::json!({"record":record.record(),
         "position":record.position(),"visibility":record.visibility()})).collect::<Vec<_>>();
     let rules = &actor._rule_snapshot.snapshot().synchronized_platform_rules;

@@ -162,6 +162,7 @@ def main():
         'original_NOE_records':len(source['noe_records']),'actual_lifecycle_device_delay_checks':len(lifecycle),
         'actual_device_private_batch_numbering_checked':True,
         'actual_NOE_device_delivery_order_checked':True,
+        'original_Ledger_reference_checked':source['ledger_projection'] is not None,
         'original_feedback_dual_visibility_gate_checked':True,
         'global_clock_NOE_Ledger_delivered':False}))
 
