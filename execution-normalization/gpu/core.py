@@ -22,17 +22,20 @@ class EvidenceBank:
     source_order: torch.Tensor  # sequence tag, u64 low/high, source ordinal
     legacy_order: torch.Tensor  # 同SourceOrder时原完整身份字符串的无损排序rank
     fault: torch.Tensor
+    payload_schemas: torch.Tensor | None = None  # 正文类型，不是逻辑身份命名空间。
 
     def __post_init__(self):
         count = self.kinds.numel()
         device = self.kinds.device
+        if self.payload_schemas is None:
+            object.__setattr__(self, 'payload_schemas', torch.zeros_like(self.kinds))
         for value in [self.logical_keys, self.economic_keys, self.semantic,
                       self.cancellation, self.source_order]:
             if value.ndim != 2 or value.size(0) != count or value.dtype != torch.int64 or value.device != device:
                 raise TypeError('NOE共享字段需同设备int64[row,field]')
         if self.source_order.size(1) != 4:
             raise ValueError('NOE源序需要原sequence tag、完整u64及ordinal')
-        for value in [self.kinds, self.legacy_order]:
+        for value in [self.kinds, self.legacy_order, self.payload_schemas]:
             if value.shape != (count,) or value.dtype != torch.int64 or value.device != device:
                 raise TypeError('NOE类型与排序需同设备int64[row]')
         if self.fault.shape != (count,) or self.fault.dtype != torch.int32 or self.fault.device != device:
@@ -139,6 +142,7 @@ class Normalizer:
             found_logical, previous = lookup(logical, bank.logical_keys[row], bank.logical_keys)
             found_economic, fact = lookup(economic, bank.economic_keys[row], bank.economic_keys)
             equal_body = (bank.semantic[previous] == bank.semantic[row]).all(dim=1)
+            equal_body = equal_body & (bank.payload_schemas[previous] == bank.payload_schemas[row])
             equal_cancel = (bank.cancellation[previous] == bank.cancellation[row]).all(dim=1)
             equal_economic = (bank.economic_keys[previous] == bank.economic_keys[row]).all(dim=1)
             incoming_economic = kind == ECONOMIC

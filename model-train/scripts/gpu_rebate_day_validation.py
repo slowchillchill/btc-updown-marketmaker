@@ -13,6 +13,8 @@ from rebate_contribution import RebateContributions
 from rebate_day import RebateDays
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'execution-normalization/gpu'))
 from fields import IntegerList,encode_fields,decode_fields
+from lifecycle import map_day_finalized,map_rebate_payment
+from core import EvidenceBank,Normalizer,EVIDENCE,OUT_EVIDENCE,OUT_DUPLICATE,OUT_LOGICAL_CONFLICT
 
 
 def amounts(value):
@@ -62,6 +64,56 @@ def main():
     assert error.cpu().tolist()==[0] and decoded[0].cpu().tolist()==[0] and torch.equal(decoded[1],day)
     ref_values=values(decoded[2].values)
     assert [value for value,present in zip(ref_values,decoded[2].present.flatten().cpu().tolist()) if present]==padded_ids[:-2]
+    zero=torch.zeros_like(day)
+    evidence=[]
+    for original in source['records']:
+        body=original['record'].get('Evidence')
+        if body is None:
+            continue
+        settlement=body['evidence'].get('SettlementLifecycleV2')
+        if settlement is None:
+            continue
+        result=settlement['result']
+        if not ('DayFinalized' in result or 'Payment' in result):
+            continue
+        reference=body['source_reference']['record']['SettlementLifecycle']
+        private=integers([reference['private_feedback_sequence']])
+        ordinal=torch.tensor([body['source_order']['ordinal']],device='cuda')
+        actual_key=json.loads(body['logical_identity'].split(':',1)[1])[-1]
+        if 'DayFinalized' in result:
+            assert actual_key=={'RebateDay':{'kind':'Maker','attribution_day_start_utc_ms':int(day.cpu()[0])}}
+            mapped=Numbers.run_exact_batch(lambda:map_day_finalized(kind,day,rational([finalized['accrued_pusd']]),
+                rational([finalized['payable_pusd']]),rational([finalized['locked_remainder_pusd']]),
+                IntegerList(refs,ref_mask),private,ordinal,zero,enabled))
+            expected=Numbers.run_exact_batch(lambda:encode_fields([zero,kind,day,rational([finalized['accrued_pusd']]),
+                rational([finalized['payable_pusd']]),rational([finalized['locked_remainder_pusd']]),IntegerList(refs,ref_mask)]))
+            expected_key=encode_fields([zero,torch.full_like(zero,12),kind,day])
+        else:
+            assert actual_key=={'SettlementLifecycle':{'private_feedback_sequence':values(private)[0]}}
+            day_reference=json.loads(payment['day_result_identity'].split(':',1)[1])
+            own_identity=json.loads(body['logical_identity'].split(':',1)[1])
+            assert day_reference[1]==own_identity[1] and day_reference[-1]=={'RebateDay':{'kind':'Maker','attribution_day_start_utc_ms':int(day.cpu()[0])}}
+            mapped=Numbers.run_exact_batch(lambda:map_rebate_payment(kind,day,rational([payment['paid_pusd']]),private,ordinal,zero,enabled))
+            expected=Numbers.run_exact_batch(lambda:encode_fields([zero,kind,day,zero,torch.full_like(zero,12),kind,day,rational([payment['paid_pusd']])]))
+            expected_key=encode_fields([zero,torch.full_like(zero,9),private])
+        assert torch.equal(mapped.semantic,expected) and torch.equal(mapped.logical_keys,expected_key)
+        assert mapped.emitted.cpu().tolist()==[True] and mapped.fault.cpu().tolist()==[0]
+        assert mapped.source_order.cpu().tolist()==[[2,values(private)[0]&0xffffffff,values(private)[0]>>32,body['source_order']['ordinal']]]
+        incoming=EvidenceBank(mapped.logical_keys,zero[:,None],mapped.semantic,zero[:,None],zero,
+            mapped.source_order,zero,mapped.fault,torch.full_like(zero,mapped.payload_schema))
+        evidence.append(incoming)
+    assert len(evidence)==2
+    normalizer=Normalizer.empty(evidence[0],1).append_bank(evidence[1])
+    rows=torch.tensor([[0,1]],device='cuda')
+    normalizer,result=normalizer.prepare(rows,torch.ones_like(rows,dtype=torch.bool))
+    assert result.outcomes.cpu().tolist()==[[OUT_EVIDENCE,OUT_EVIDENCE]]
+    normalizer,repeat=normalizer.prepare(rows,torch.ones_like(rows,dtype=torch.bool))
+    assert repeat.outcomes.cpu().tolist()==[[OUT_DUPLICATE,OUT_DUPLICATE]]
+    # 同逻辑身份、相同数值token但另一正文类型仍是Conflict；类型不另造逻辑身份。
+    from dataclasses import replace
+    normalizer=normalizer.append_bank(replace(evidence[1],payload_schemas=torch.full_like(zero,9)))
+    normalizer,conflict=normalizer.prepare(torch.tensor([[2]],device='cuda'),enabled[:,None])
+    assert conflict.outcomes.cpu().tolist()==[[OUT_LOGICAL_CONFLICT]]
     index=Numbers.run_exact_batch(lambda:RebateContributions.empty(1,len(source['contributions']),day.device))
     state=Numbers.run_exact_batch(lambda:RebateDays.empty(torch.tensor([list(range(len(condition)))],device='cuda'),1))
     def finalize(current):
@@ -96,6 +148,7 @@ def main():
         'actual_DayFinalized_and_Payment':True,'missing_predecessors_no_commit':True,
         'condition_finite_payable_locked_checked':True,'source_totals_conserved':True,'payment_repeat_no_second_allocation':True,
         'actual_day_reference_integer_list_and_padding_checked':True,
+        'actual_day_payment_identity_body_source_order_and_repeat_checked':True,
         'elapsed_seconds':time.perf_counter()-started,'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
         'full_NOE_Ledger_day_coordinator_delivered':False}))
 

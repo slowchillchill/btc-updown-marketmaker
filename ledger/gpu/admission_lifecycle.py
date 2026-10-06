@@ -38,8 +38,7 @@ class LifecycleColumns:
     def from_projection(cls,bank,columns):
         roots,width=columns.row_refs.shape
         rows=columns.row_refs.flatten()
-        keys=bank.logical_keys[rows]
-        schemas=keys[:,4]
+        schemas=bank.payload_schemas[rows]
         active=torch.cat([batch.emitted for batch in columns.projection_batches],dim=1).flatten()
         outcomes=torch.cat([batch.normalized.outcomes for batch in columns.projection_batches],dim=1).flatten()
         material=active & ((outcomes==OUT_EVIDENCE)|(outcomes==OUT_FACT))

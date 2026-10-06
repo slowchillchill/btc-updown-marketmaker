@@ -11,6 +11,7 @@ class LifecycleEvidence:
     source_order: torch.Tensor
     emitted: torch.Tensor
     fault: torch.Tensor
+    payload_schema: int = 0
 
 
 def source_order(private,ordinal):
@@ -46,7 +47,7 @@ def map_base_accepted(quantity,order_sequence,private,ordinal,account,condition,
         torch.where(accepted,token,0),order_sequence.select(accepted,zero),torch.where(accepted,state,0),
         quantity.matched_base_units.select(accepted,zero),quantity.open_base_units.select(accepted,zero),
         torch.where(accepted,at,0)])
-    return LifecycleEvidence(logical,semantic,source_order(private,ordinal),active & (fault==0),fault)
+    return LifecycleEvidence(logical,semantic,source_order(private,ordinal),active & (fault==0),fault,3)
 
 
 def map_order_accepted(quantity,order_sequence,private,ordinal,account,condition,token,active):
@@ -55,7 +56,7 @@ def map_order_accepted(quantity,order_sequence,private,ordinal,account,condition
     state=torch.where(quantity.open_base_units.sign>0,0,1)
     logical=encode_fields([account,torch.full_like(account,7),order_sequence,private])
     semantic=encode_fields([account,condition,token,order_sequence,torch.zeros_like(account),state])
-    return LifecycleEvidence(logical,semantic,source_order(private,ordinal),active & (fault==0),fault)
+    return LifecycleEvidence(logical,semantic,source_order(private,ordinal),active & (fault==0),fault,7)
 
 
 def map_taker_contribution(record,frame,rebate_rate,private,ordinal,account,condition):
@@ -71,4 +72,31 @@ def map_taker_contribution(record,frame,rebate_rate,private,ordinal,account,cond
     logical=encode_fields([account,torch.full_like(account,9),private])
     semantic=encode_fields([account,condition,frame.fill_sequence,torch.ones_like(account),day,contribution])
     emitted=frame.event.rebate_delta.emitted & (fault==0)
-    return LifecycleEvidence(logical,semantic,source_order(private,ordinal),emitted,fault)
+    return LifecycleEvidence(logical,semantic,source_order(private,ordinal),emitted,fault,9)
+
+
+def map_day_finalized(kind,day,accrued,payable,locked,refs,private,ordinal,account,active):
+    """原RebateDay逻辑身份；贡献引用保留原向量顺序和完整Trade身份。"""
+    from fields import IntegerList
+    if not isinstance(refs,IntegerList) or refs.present.size(0)!=account.numel():
+        raise TypeError('日结果需要原贡献引用列表及对应根人口')
+    fault=input_fault([private],[account,kind,day],ordinal)
+    fault=fault | accrued.fault | payable.fault | locked.fault | refs.fault
+    from queues import Numbers
+    reference_limit=refs.values.compare(refs.values.constant((1<<64)-1))
+    reference_error=reference_limit.fault | ((refs.values.sign<0)|(reference_limit.order>0)).to(torch.int32)
+    fault=fault | Numbers.combine_fault_rows(torch.where(refs.present,reference_error.reshape_as(refs.present),0))
+    fault=fault | ((account<0)|(kind<0)|(kind>1)).to(torch.int32)
+    logical=encode_fields([account,torch.full_like(account,12),kind,day])
+    semantic=encode_fields([account,kind,day,accrued,payable,locked,refs])
+    return LifecycleEvidence(logical,semantic,source_order(private,ordinal),active & (fault==0),fault,12)
+
+
+def map_rebate_payment(kind,day,paid,private,ordinal,account,active):
+    """付款自身按SettlementLifecycle身份；day_result指向同账户RebateDay。"""
+    fault=input_fault([private],[account,kind,day],ordinal) | paid.fault
+    fault=fault | ((account<0)|(kind<0)|(kind>1)).to(torch.int32)
+    logical=encode_fields([account,torch.full_like(account,9),private])
+    # 固定原引用类型、账户、kind/day全部保留，不以该引用代替付款逻辑身份。
+    semantic=encode_fields([account,kind,day,account,torch.full_like(account,12),kind,day,paid])
+    return LifecycleEvidence(logical,semantic,source_order(private,ordinal),active & (fault==0),fault,13)
