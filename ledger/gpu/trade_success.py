@@ -6,6 +6,30 @@ from asset_buy import take_ratio
 from success_pool import select
 
 
+def sum_rows(value, rows, width):
+    """共享精确有理数的固定相邻配对归约；人口来自物理布局，无业务值读回。"""
+    while width>1:
+        positions=torch.arange(rows,device=value.numerator.words.device)[:,None]*width
+        left=torch.arange(0,width,2,device=positions.device)
+        right=left+1
+        a=take_ratio(value,(positions+left).flatten())
+        b=take_ratio(value,(positions+right.clamp_max(width-1)).flatten())
+        zero=ExactRational(b.numerator.constant(0),b.denominator.constant(1))
+        b=select(b,(right<width).expand(rows,-1).flatten(),zero)
+        value=a+b
+        width=left.numel()
+    return value
+
+
+@dataclass(frozen=True)
+class ExecutedTradeRead:
+    quantity: object  # [roots*2]；原公开读面Maker在前、Taker在后。
+    principal: object
+    actual_fee: object
+    known: torch.Tensor
+    fault: torch.Tensor
+
+
 @dataclass(frozen=True)
 class TradeSuccess:
     has_fact: torch.Tensor
@@ -17,6 +41,12 @@ class TradeSuccess:
     quantity: object
     cost: object
     unpaired_contribution: object
+    details_known: torch.Tensor
+    roles: torch.Tensor  # 原Trade枚举Taker=0/MakerInferred=1；不是读面数组序。
+    matched_at: torch.Tensor
+    immediate_fee: object
+    maker_fee_read_kind: torch.Tensor
+    maker_fee_equivalent: object
 
     @classmethod
     def open(cls,roots,capacity,device):
@@ -24,9 +54,11 @@ class TradeSuccess:
         columns=torch.full((roots,capacity),-1,dtype=torch.int64,device=device)
         zero=Numbers.ExactInt.from_i64_tensor(torch.zeros(roots*capacity,dtype=torch.int64,device=device))
         ratio=ExactRational.ratio(zero,zero.constant(1))
-        return cls(blank,blank.clone(),blank.clone(),columns,columns.clone(),columns.clone(),ratio,ratio,ratio)
+        return cls(blank,blank.clone(),blank.clone(),columns,columns.clone(),columns.clone(),ratio,ratio,ratio,
+            blank.clone(),columns.clone(),torch.zeros_like(columns),ratio,torch.ones_like(columns),ratio)
 
-    def update(self,slots,condition,token,quantity,cost,disposition,trade_enabled,economic_enabled,economic_applied):
+    def update(self,slots,condition,token,quantity,cost,disposition,trade_enabled,economic_enabled,economic_applied,
+               *,role=None,matched_at=None,immediate_fee=None,maker_fee_read_kind=None,maker_fee_equivalent=None):
         roots,width=self.has_fact.shape
         root=torch.arange(roots,device=slots.device)
         index=root*width+slots
@@ -38,11 +70,50 @@ class TradeSuccess:
         repeated=root.repeat_interleave(width)
         quantity=select(take_ratio(quantity,repeated),mask.flatten(),self.quantity)
         cost=select(take_ratio(cost,repeated),mask.flatten(),self.cost)
-        return replace(self,has_fact=self.has_fact|mask,
+        details={}
+        if role is not None:
+            # 来源详情只在真实TradeLifecycle到达时安装。旧冷初始化不伪造未知fee/role。
+            detail_take=trade_enabled & (~self.details_known[root,slots] | take_fact)
+            detail_mask=torch.zeros_like(self.details_known).scatter(1,slots[:,None],detail_take[:,None])
+            equivalent_use=trade_enabled & (maker_fee_read_kind!=1)
+            equivalent_mask=torch.zeros_like(self.details_known).scatter(1,slots[:,None],equivalent_use[:,None])
+            details=dict(details_known=self.details_known|detail_mask,
+                roles=torch.where(detail_mask,role[:,None],self.roles),matched_at=torch.where(detail_mask,matched_at[:,None],self.matched_at),
+                immediate_fee=select(take_ratio(immediate_fee,repeated),detail_mask.flatten(),self.immediate_fee),
+                maker_fee_read_kind=torch.where(equivalent_mask,maker_fee_read_kind[:,None],self.maker_fee_read_kind),
+                maker_fee_equivalent=select(take_ratio(maker_fee_equivalent,repeated),equivalent_mask.flatten(),self.maker_fee_equivalent))
+        return replace(self,**details,has_fact=self.has_fact|mask,
             economic_applied=torch.where(economic,economic_applied[:,None],self.economic_applied),
             dispositions=torch.where(mask,disposition[:,None],self.dispositions),
             conditions=torch.where(mask,condition[:,None],self.conditions),tokens=torch.where(mask,token[:,None],self.tokens),
             quantity=quantity,cost=cost)
+
+    def executed(self,scope_conditions,scope_present):
+        """原首次Trade详情统计及当前净费，不能用成功池替代执行量/费用。"""
+        roots,width=self.has_fact.shape
+        if scope_conditions.ndim!=2 or scope_conditions.size(0)!=roots or scope_present.shape!=scope_conditions.shape:
+            raise ValueError('执行读scope须原根/condition人口')
+        if scope_conditions.dtype!=torch.int64 or scope_present.dtype!=torch.bool or scope_conditions.device!=self.has_fact.device or scope_present.device!=self.has_fact.device:
+            raise TypeError('读scope须同设备int64身份和bool存在位')
+        member=(self.conditions[:,:,None]==scope_conditions[:,None,:]) & scope_present[:,None,:]
+        member=member.any(2)&self.has_fact
+        unknown=(member & ~self.details_known).any(1)
+        # 原公开Market.executed数组[Maker,Taker]；真实Trade enum次序相反。
+        roles=torch.tensor([1,0],device=self.has_fact.device,dtype=torch.int64)
+        masks=member[:,None,:] & self.details_known[:,None,:] & (self.roles[:,None,:]==roles[None,:,None])
+        positions=(torch.arange(roots,device=masks.device)[:,None,None]*width+
+            torch.arange(width,device=masks.device)[None,None,:]).expand(roots,2,width).flatten()
+        fields=[]
+        zero=ExactRational(self.quantity.numerator.constant(0),self.quantity.denominator.constant(1))
+        net_fee=select(self.immediate_fee,self.economic_applied.flatten(),zero)
+        for value in [self.quantity,self.cost,net_fee]:
+            values=take_ratio(value,positions)
+            empty=ExactRational(values.numerator.constant(0),values.denominator.constant(1))
+            fields.append(sum_rows(select(values,masks.flatten(),empty),roots*2,width))
+        fault=torch.zeros(roots,dtype=torch.int32,device=masks.device)
+        for value in fields:
+            fault=fault|Numbers.combine_fault_rows(value.fault.reshape(roots,2))
+        return ExecutedTradeRead(*fields,(~unknown[:,None]).expand(roots,2),fault)
 
     def apply_success(self,pools,directory,slots,enabled):
         roots,width=self.has_fact.shape

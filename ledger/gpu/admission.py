@@ -211,7 +211,11 @@ class AdmissionLifecycle:
         cost=ExactRational.ratio(quote,quote.constant(1_000_000))
         trade_success=self.trade_success.update(trade_at,self.lifecycle.conditions[root,local],self.lifecycle.tokens[root,local],
             quantity,cost,self.lifecycle.trade_dispositions[root,local],trade_event,economic_trade,
-            self.lifecycle.economic_tags[root,local]==6)
+            self.lifecycle.economic_tags[root,local]==6,role=self.lifecycle.trade_roles[root,local],
+            matched_at=self.lifecycle.trade_matched_at[root,local],
+            immediate_fee=ExactRational.ratio(_take(self.lifecycle.trade_fee_units,index),base.constant(1_000_000)),
+            maker_fee_read_kind=self.lifecycle.maker_fee_read_kind[root,local],
+            maker_fee_equivalent=take_ratio(self.lifecycle.maker_fee_equivalent,index))
         trade_success,success_pools=trade_success.apply_success(self.success_pools,trades,trade_at,(trade_event|economic_trade)&(fault==0))
         fault=fault | success_pools.fault
         contribution_event=lifecycle_use & (tag==9)

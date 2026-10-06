@@ -28,6 +28,11 @@ class LifecycleColumns:
     trade_base_units: object
     trade_quote_units: object
     trade_dispositions: torch.Tensor
+    trade_roles: torch.Tensor
+    trade_matched_at: torch.Tensor
+    trade_fee_units: object
+    maker_fee_read_kind: torch.Tensor
+    maker_fee_equivalent: object
     contribution_kinds: torch.Tensor
     contribution_days: torch.Tensor
     contribution_amounts: object
@@ -115,6 +120,8 @@ class LifecycleColumns:
             open_orders.reshape(roots,width),pending.reshape(roots,width),accepted.reshape(roots,width),
             torch.where(economic,decoded[11][3],-1).reshape(roots,width),request,item,
             decoded[8][2].reshape(roots,width),decoded[8][10],decoded[8][11],decoded[8][6].reshape(roots,width),
+            decoded[8][8].reshape(roots,width),decoded[8][7].reshape(roots,width),decoded[8][12],
+            decoded[8][15].reshape(roots,width),decoded[8][16],
             decoded[9][3].reshape(roots,width),decoded[9][4].reshape(roots,width),decoded[9][5],
             torch.where(payment,decoded[13][1],decoded[12][1]).reshape(roots,width),
             torch.where(payment,decoded[13][2],decoded[12][2]).reshape(roots,width),

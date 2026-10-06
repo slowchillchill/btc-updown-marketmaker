@@ -407,6 +407,13 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         torch.tensor([True],device='cuda'),torch.tensor([10000],device='cuda'),torch.tensor([True],device='cuda')))
     assert used.cpu().tolist()==[True] and int(capacity_candidate.rebate_contributions.occupied.sum().cpu())==2
     assert values(capacity_candidate.current_entry_sequence)==[5] and int(capacity_candidate.applied.sum().cpu())==2
+    executed=Numbers.run_exact_batch(lambda:admission.trade_success.executed(zero[:,None],torch.ones_like(zero[:,None],dtype=torch.bool)))
+    assert executed.known.cpu().tolist()==[[True,True]] and executed.fault.cpu().tolist()==[0]
+    expected_executed=source['reservation_checkpoints'][-1]['markets'][0]['executed']
+    for name,key in [('quantity','shares'),('principal','principal_pusd'),('actual_fee','actual_fee_pusd')]:
+        value=getattr(executed,name)
+        actual=[Fraction(n,d) for n,d in zip(values(value.numerator),values(value.denominator))]
+        assert actual==[Fraction(row[key]) for row in expected_executed],(name,actual,expected_executed)
     exact_contributions=[Fraction(n,d) for n,d in zip(values(admission.trade_success.unpaired_contribution.numerator),values(admission.trade_success.unpaired_contribution.denominator))]
     expected_contributions={int(row['fact']['fill_sequence']):Fraction(int(row['unpaired_contribution_shares']['Known']['numerator']),
         int(row['unpaired_contribution_shares']['Known']['denominator'])) for row in source['reservation_checkpoints'][-1]['trades'] if row['success_applied']}
@@ -425,4 +432,4 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         'actual_device_Ledger_economic_position_predecessor_checked':True,
         'Ledger_admission_device_generated_entry_local_and_binding_checked':True,
         'device_closed_cache_waiting_then_new_records_retry_checked':True,
-        'duplicate_NOE_NotApplicable_without_Ledger_commit_checked':True,'unbound_economic_before_Submission_unsent_reservation_checked':True,'actual_existing_economic_MakerCash_and_four_funds_checked':True,'two_root_one_item_funds_fault_isolation_checked':True,'actual_trade_economic_success_pool_checked':True,'fill_economic_before_pending_lifecycle_checked':True,'actual_unpaired_trade_contribution_checked':True,'actual_taker_contribution_index_checked':True,'full_clock_Ledger_reservation_delivered':False}
+        'duplicate_NOE_NotApplicable_without_Ledger_commit_checked':True,'unbound_economic_before_Submission_unsent_reservation_checked':True,'actual_existing_economic_MakerCash_and_four_funds_checked':True,'two_root_one_item_funds_fault_isolation_checked':True,'actual_trade_economic_success_pool_checked':True,'fill_economic_before_pending_lifecycle_checked':True,'actual_unpaired_trade_contribution_checked':True,'actual_taker_contribution_index_checked':True,'actual_trade_role_and_net_fee_executed_read_checked':True,'full_clock_Ledger_reservation_delivered':False}
