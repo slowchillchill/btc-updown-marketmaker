@@ -1441,7 +1441,8 @@ pub fn build_binance_aggregate_trade_reference_event_v1(
     )
 }
 
-pub(crate) fn prepare_binance_aggregate_trade_payload(
+/// Normalize the effective native trade payload for reduction and narrow duplicate checks.
+pub fn prepare_binance_aggregate_trade_payload(
     row: &typed_raw::BinanceAggTradeRow,
 ) -> Result<BinanceAggregateTradeReferenceV1, ContractError> {
     let typed_raw::BinanceAggTradeRecord::Trade {

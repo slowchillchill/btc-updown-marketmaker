@@ -507,15 +507,67 @@ fn study(dir: &Path, out: &Path, progress: u64) -> Result<()> {
     }
     Ok(())
 }
+/// Columnar consumers pass only daily sufficient statistics, never raw messages.
+fn fit_columnar_histograms(input: &Path, output: &Path) -> Result<()> {
+    #[derive(Deserialize)]
+    struct Bin {
+        day_start: i64,
+        group_name: String,
+        metric: String,
+        lower: u64,
+        weight: u64,
+    }
+    let mut report = stats::Report::default();
+    for line in BufReader::new(File::open(input)?).lines() {
+        let row: Bin = serde_json::from_str(&line?)?;
+        let distribution = report
+            .daily
+            .entry(row.day_start)
+            .or_default()
+            .entry(row.group_name)
+            .or_default();
+        let histogram = match row.metric.as_str() {
+            "silence" => &mut distribution.silence_time_ms,
+            "event_age" => &mut distribution.event_age_time_ms,
+            _ => return Err("unexpected columnar histogram metric".into()),
+        };
+        *histogram.bins.entry(row.lower).or_default() += row.weight;
+        histogram.weight += row.weight;
+    }
+    save(output, &stats::candidates(&report)?)
+}
+/// Small cross-language checks call the exact production health policy.
+fn classify_columnar_facts(input: &Path, output: &Path) -> Result<()> {
+    #[derive(Deserialize)]
+    struct Case {
+        facts: Option<SourceHealthFactsV1>,
+        limits: SourceHealthLimitsV1,
+        at: i64,
+    }
+    let mut writer = BufWriter::new(File::create(output)?);
+    for line in BufReader::new(File::open(input)?).lines() {
+        let row: Case = serde_json::from_str(&line?)?;
+        serde_json::to_writer(
+            &mut writer,
+            &source_health_state_v1(row.facts.as_ref(), row.limits, row.at),
+        )?;
+        writeln!(writer)?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    let command=args.first().and_then(|x|x.to_str()).ok_or("usage: configure PLAN INPUT_ROOT WORK_ROOT CONFIG_OUT | prepare CONFIG OUT | import-246 INPUT OUT | analyze MATERIAL HEALTH_TOML OUT | study MATERIAL OUT [PROGRESS_SECONDS]")?;
+    let command=args.first().and_then(|x|x.to_str()).ok_or("usage: fit-columnar-histograms INPUT OUTPUT | classify-columnar-facts INPUT OUTPUT | configure PLAN INPUT_ROOT WORK_ROOT CONFIG_OUT | prepare CONFIG OUT | import-246 INPUT OUT | analyze MATERIAL HEALTH_TOML OUT | study MATERIAL OUT [PROGRESS_SECONDS]")?;
     let path = |i: usize| -> Result<PathBuf> {
         args.get(i)
             .map(PathBuf::from)
             .ok_or("missing path argument".into())
     };
     match command {
+        "fit-columnar-histograms" => fit_columnar_histograms(&path(1)?, &path(2)?),
+        "classify-columnar-facts" => classify_columnar_facts(&path(1)?, &path(2)?),
         "configure" => configure(&path(1)?, &path(2)?, &path(3)?, &path(4)?),
         "prepare" => prepare(&path(1)?, &path(2)?),
         "import-246" => import_legacy(&path(1)?, &path(2)?),
