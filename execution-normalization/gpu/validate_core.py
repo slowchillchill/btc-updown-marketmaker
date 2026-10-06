@@ -55,6 +55,13 @@ def validate(cases):
                 identity='opening_evidence_identity' if tag=='AccountOpening' else 'account_transition_seq'
                 key={tag:{identity:fields[identity]}}
                 payload={tag:{key:value for key,value in fields.items() if key!=identity}}
+                if tag=='AccountTransition':
+                    # 原disposition().into()统一至V2，不能按载荷版本区分同一事实。
+                    payload[tag]['transition']={'Existing':payload[tag]['transition']}
+                    payload[tag]['balance_delta']={
+                        'existing':payload[tag]['balance_delta'],
+                        'settlement_fee_liability_pusd_delta':'0',
+                        'actual_taker_fee_liability_pusd_delta':'0'}
             elif name=='LateEconomicCoverage':
                 kind=core.LATE_COVERAGE
                 key=body['economic_key']

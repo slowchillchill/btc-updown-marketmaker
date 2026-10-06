@@ -1699,6 +1699,34 @@ pub(super) fn gpu_normalization_reference_v4(
             record("same_logical_changed_processing_time",candidate);
         }
     }
+    if let Some(original)=input.evidence.iter().find(|row|matches!(row.kind,SourceNeutralEvidenceKind::Economic {
+        evidence:SourceNeutralEconomicEvidenceV1::AccountTransition {..}
+    })) {
+        let mut converted=original.clone();
+        if let SourceNeutralEvidenceKind::Economic {evidence:SourceNeutralEconomicEvidenceV1::AccountTransition {
+            account_transition_seq,economic_effective_at_utc_ms,condition_id,transition,balance_delta,
+        }}=&original.kind {
+            converted.kind=SourceNeutralEvidenceKind::EconomicV2 {
+                evidence:execution_normalization::SourceNeutralEconomicEvidenceV2 {
+                    economic_key:execution_normalization::SourceNeutralEconomicKeyV1::AccountTransition {
+                        account_transition_seq:*account_transition_seq,
+                    },
+                    disposition:contracts::execution_normalization::SourceNeutralEconomicDispositionV1::AccountTransition {
+                        economic_effective_at_utc_ms:*economic_effective_at_utc_ms,
+                        condition_id:condition_id.clone(),transition:transition.clone(),balance_delta:balance_delta.clone(),
+                    }.into(),
+                },
+            };
+        }
+        let mut candidate=input.clone();
+        candidate.evidence=vec![converted.clone()];
+        record("same_fact_v1_v2_duplicate",candidate.clone());
+        converted.logical_key=SourceNeutralLogicalKeyV1::AuditEvidence {
+            evidence_identity:format!("gpu-v2-alias-{}",input.source_watermark.projection_batch_sequence),
+        };
+        candidate.evidence=vec![converted];
+        record("same_fact_v1_v2_alias",candidate);
+    }
     if let Some(original)=input.evidence.iter().find(|row|matches!(row.source_record,SimV2SourceRecordReferenceV1::TradeLifecycle {..})) {
         let mut late=original.clone();
         late.logical_key=SourceNeutralLogicalKeyV1::AuditEvidence {evidence_identity:format!("gpu-missing-coverage-{}",input.source_watermark.projection_batch_sequence)};
