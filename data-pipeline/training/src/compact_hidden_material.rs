@@ -268,8 +268,11 @@ impl CompactHiddenMaterialReaderV1 {
             if hash != file.sha256 { return Err(io::Error::other("hidden成员SHA不匹配").into()); }
         }
         let message_count = manifest.summary.messages;
-        if manifest.files[1].bytes != message_count.checked_add(1).and_then(|n| n.checked_mul(8)).unwrap_or(0)
-            || manifest.files[2].bytes != message_count.checked_mul(24).unwrap_or(0) {
+        let offset_bytes = message_count.checked_add(1).and_then(|n| n.checked_mul(8))
+            .ok_or_else(|| io::Error::other("hidden消息偏移列长度溢出"))?;
+        let position_bytes = message_count.checked_mul(24)
+            .ok_or_else(|| io::Error::other("hidden消息位置列长度溢出"))?;
+        if manifest.files[1].bytes != offset_bytes || manifest.files[2].bytes != position_bytes {
             return Err(io::Error::other("hidden消息固定列长度不闭合").into());
         }
         let mut offsets_file = File::open(root.join(MEMBERS[1]))?;
@@ -564,9 +567,12 @@ mod tests {
         }
         assert_eq!(snapshots, vec!["10"]);
         // 已初始化资产的epoch恢复沿原Reset+重校准转移，不伪造第二次InitialSnapshot。
-        assert_eq!(transitions,vec![("10".into(),"20".into()),("0".into(),"15".into())]);
+        // 消息归约按epoch；发布索引按原真实时间，此反例的第二代20100先于前代20200。
+        assert_eq!(transitions,vec![("0".into(),"15".into()),("10".into(),"20".into())]);
         assert_eq!(result.iter().map(|bucket| bucket.steps.len()).sum::<usize>(),15);
         assert_eq!(result.iter().map(|bucket| bucket.reference_positions.len()).sum::<usize>(),1);
+        assert!(result.iter().any(|bucket| bucket.steps.len()>1)); // rows=1仍不可提前关闭同毫秒桶。
+        assert!(result.iter().any(|bucket| bucket.steps.is_empty() && !bucket.reference_positions.is_empty()));
         assert!(matches!(result.last().unwrap().closure,ReplayIndexClosureV1::EndOfInput));
         for adjacent in result.windows(2) {
             assert_eq!(adjacent[0].closure,ReplayIndexClosureV1::NextGlobalEventAt(adjacent[1].bucket_time_utc_ms));
