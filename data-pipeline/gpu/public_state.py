@@ -41,12 +41,26 @@ class PublicBookFrame:
     fault: torch.Tensor
 
 
+@dataclass(frozen=True)
+class ObservedPmField:
+    values: torch.Tensor
+    present: torch.Tensor
+    fault: torch.Tensor
+
+
+@dataclass(frozen=True)
+class PublicPmObservation:
+    bba: ObservedPmField
+    trade: ObservedPmField
+    tick: ObservedPmField
+
+
 class PublicPmState:
     """一次冷加载共享外生列；查询只消费设备公共组前缀，不读设备选择回CPU。
 
     slots包含整块全部精确价位。未来槽位必须present=false；Native须先压紧
     当前正量档位才能进入模型，不能把这些共享槽位直接当模型padding。
-    本入口尚未包含BBA/trade/生命周期的完整公共GPU状态。
+    本入口包含PM盘口、直接BBA/trade/tick；生命周期/参考/Binance仍由后续公共后端衔接。
     """
     def __init__(self, columns, *, device='cuda'):
         if columns['version'] != 'public_pm_device_columns_v1':
@@ -97,6 +111,39 @@ class PublicPmState:
                 if name == 'book_quality' and not 0 <= value < 6:
                     raise ValueError('公共盘口质量错误')
             setattr(self, name, PrefixColumn(columns[name], target_count, device))
+        self.anchor_sets = columns['anchor_sets']
+        for members in self.anchor_sets:
+            if any(not 0 <= member < len(self.anchors) for member in members):
+                raise ValueError('观察字段直接来源集合引用越界')
+        self.unique_anchor_ids = torch.tensor([members[0] if len(members) == 1 else -1
+            for members in self.anchor_sets],dtype=torch.int64,device=device)
+        for name, table_name, width, decimal_indices, presence_indices, anchor_index in (
+                ('bba','bba_values',8,(1,3,5),(0,2,4),6),
+                ('trades','trade_values',7,(0,1,4),(3,),5),
+                ('observed_ticks','observed_tick_values',4,(1,),(0,),2)):
+            table = columns[table_name]
+            for values in table:
+                if len(values) != width or not 0 <= values[-1] < 6:
+                    raise ValueError('公共观察字段布局或质量错误')
+                if any(not 0 <= values[i] < len(columns['decimals']) for i in decimal_indices):
+                    raise ValueError('公共观察字段精确值引用越界')
+                if any(values[i] not in (0,1) for i in presence_indices):
+                    raise ValueError('公共观察字段缺失位错误')
+                if not 0 <= values[anchor_index] < len(self.anchor_sets):
+                    raise ValueError('公共观察字段来源集合引用越界')
+                if name == 'trades' and values[2] not in (0,1):
+                    raise ValueError('公共成交方向错误')
+            previous = {}
+            for target, sequence, group, value in columns[name]:
+                if not (0 <= target < assets and 0 <= sequence < columns['field_updates']
+                        and 0 <= group < groups and 0 <= value < len(table)):
+                    raise ValueError('公共观察字段原位置或载荷引用越界')
+                prior = previous.get(target,(-1,-1))
+                if sequence < prior[0] or group < prior[1]:
+                    raise ValueError('公共观察字段原顺序倒退')
+                previous[target] = (sequence,group)
+            setattr(self,name,PrefixColumn(columns[name],assets,device))
+            setattr(self,table_name,torch.tensor(table,dtype=torch.int64,device=device).reshape(-1,width))
 
     def frame(self, prefixes):
         qseq, qid, qfound, qfault = self.quantities.query(prefixes)
@@ -129,3 +176,19 @@ class PublicPmState:
             rfound & ready.bool() & (rseq >= reset), tick, tfound,
             anchor, afound & (aseq >= reset[:, asset]),
             torch.where(quality_found, quality, 3), prefix_fault, fault)
+
+    def observation(self, prefixes):
+        """原末端公共所选字段；未过滤质量或用L2生成BBA，不产生模型窗口。"""
+        invalid_prefix = ((prefixes < -1) | (prefixes >= self.group_count)).to(torch.int32)
+        fields = []
+        for name, table_name, decimal_indices in (
+                ('bba','bba_values',(1,3,5)), ('trades','trade_values',(0,1,4)),
+                ('observed_ticks','observed_tick_values',(1,))):
+            _, ids, found, fault = getattr(self,name).query(prefixes)
+            values = getattr(self,table_name)[ids]
+            fault = fault | invalid_prefix[:,None]
+            for index in decimal_indices:
+                fault = fault | self.decimal_fault[values[:,:,index]]
+            present = found & values[:,:,0].bool() if name == 'observed_ticks' else found
+            fields.append(ObservedPmField(values,present,fault))
+        return PublicPmObservation(*fields)

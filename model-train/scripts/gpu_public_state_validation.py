@@ -37,6 +37,10 @@ def main():
     prefix_values = [-1,0,len(columns['groups'])-1] if columns['groups'] else [-1,-1,-1]
     prefixes = torch.tensor(prefix_values,device='cuda',dtype=torch.int64)
     frame = state.frame(prefixes)
+    observation = state.observation(prefixes)
+    assert not observation.bba.fault.any().cpu().item()
+    assert not observation.trade.fault.any().cpu().item()
+    assert not observation.tick.fault.any().cpu().item()
     # 短组件参考：只检查3个事实前缀的末项，不重放候选、账户或原全窗CPU诊断。
     def latest(name,prefix):
         result = {}
@@ -124,6 +128,36 @@ def main():
         for outcome, asset_id in enumerate(original_pair):
             original = next(a for a in reference['public_assets']
                             if a['asset']['token_id'] == columns['assets'][asset_id]['token_id'])
+            def exact_value(field,index):
+                return Fraction(columns['decimals'][int(field.values[2,asset_id,index].cpu())])
+            def selected_anchors(field,index):
+                anchor_set = int(field.values[2,asset_id,index].cpu())
+                return [columns['anchors'][a]['direct'] for a in columns['anchor_sets'][anchor_set]]
+            for selected, original_name, anchor_index in (
+                    (observation.bba,'best_bid_ask',6),(observation.trade,'public_trade',5),
+                    (observation.tick,'tick',2)):
+                reference_field = original[original_name]
+                assert selected.present[2,asset_id].cpu().item() == (reference_field['value'] is not None)
+                assert selected.values[2,asset_id,-1].cpu().item() == quality_names.index(reference_field['quality'])
+                actual_anchors = selected_anchors(selected,anchor_index)
+                expected_anchors = reference_field['direct_anchors']
+                assert [(a['source_message_id'],a['source_event_at_utc_ms'],a['received_at_utc_ms']) for a in actual_anchors] == [
+                    (a['source_message_id'],a['source_event_at_utc_ms'],a['received_at_utc_ms']) for a in expected_anchors]
+            bba = original['best_bid_ask']['value']
+            if bba is not None:
+                for present_index,value_index,name in ((0,1,'best_bid_pusd_per_share'),
+                        (2,3,'best_ask_pusd_per_share'),(4,5,'spread_pusd_per_share')):
+                    assert observation.bba.values[2,asset_id,present_index].cpu().item() == (bba[name] is not None)
+                    if bba[name] is not None: assert exact_value(observation.bba,value_index) == Fraction(bba[name])
+            trade = original['public_trade']['value']
+            if trade is not None:
+                assert exact_value(observation.trade,0) == Fraction(trade['price_pusd_per_share'])
+                assert exact_value(observation.trade,1) == Fraction(trade['quantity_shares'])
+                assert observation.trade.values[2,asset_id,2].cpu().item() == (trade['aggressor_side'] == 'SELL')
+                assert observation.trade.values[2,asset_id,3].cpu().item() == (trade['fee_rate_bps'] is not None)
+                if trade['fee_rate_bps'] is not None: assert exact_value(observation.trade,4) == Fraction(trade['fee_rate_bps'])
+            tick = original['tick']['value']
+            if tick is not None: assert exact_value(observation.tick,1) == Fraction(tick)
             for side, name in enumerate(['bids','asks']):
                 book = original[name]
                 assert frame.quality[2,asset_id].cpu().item() == quality_names.index(book['quality'])
@@ -166,7 +200,7 @@ def main():
     passed = ['real_source_shared_exact_decimal_columns','gpu_prefix_quantity_and_selection',
               'initialization_and_ready_prefix','future_slots_masked',
               'continuous_device_query','out_of_material_prefix_fault',
-              'i64_time_coordinate_exact_difference','fault_bit_union']
+              'i64_time_coordinate_exact_difference','fault_bit_union','pm_direct_observation_fields']
     if columns['slots']:
         passed += ['exact_price_sort_current_positive_compaction','native_pm_nine_fields',
                    'real_book_encoder_forward_backward','tail_padding_pairwise_tree']
@@ -183,7 +217,7 @@ def main():
               'peak_allocated_bytes':torch.cuda.max_memory_allocated(),
               'passed':passed,
               'original_core_reference_checked':args.original_reference is not None,
-              'not_delivered':['bba_trade_market_state','binance_state','hidden','sim_noe_ledger',
+              'not_delivered':['market_and_reference_state','binance_state','hidden','sim_noe_ledger',
                                '100ms_window','full_actor','ppo','active_root_restore']}
     args.output.parent.mkdir(parents=True,exist_ok=True)
     args.output.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n')

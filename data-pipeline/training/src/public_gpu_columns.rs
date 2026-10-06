@@ -2,7 +2,7 @@
 use crate::{compact_public::{CompactPmChangeV1, PublicCompactReaderV1}, public_recording::RecordingResult};
 use contracts::*;
 use data_pipeline_core::{pm_reduction::PmStepChangeV1, public_input::{DptIngressV1, TypedRawRowV2},
-    typed_raw::{TypedRawRow, PolymarketOrderbookEvent, normalize_decimal_text}};
+    typed_raw::{TypedRawRow, PolymarketOrderbookEvent, PolymarketOrderbookRow, normalize_decimal_text}};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -32,6 +32,17 @@ pub struct PublicPmDeviceColumnsV1 {
     pub level_anchors: Vec<[i64;4]>,
     /// 与原Native Q6一致：Fresh/Stale/Missing/Unknown/Gap/Invalid。
     pub book_quality: Vec<[i64;4]>,
+    /// [bidPresent,bidId,askPresent,askId,spreadPresent,spreadId,anchorSet,quality]。
+    pub bba_values: Vec<[i64;8]>,
+    pub bba: Vec<[i64;4]>,
+    /// [priceId,quantityId,buy=0/sell=1,feePresent,feeId,anchorSet,quality]。
+    pub trade_values: Vec<[i64;7]>,
+    pub trades: Vec<[i64;4]>,
+    /// [valuePresent,decimalId,anchorSet,quality]，与原观察tick区分经济tick状态。
+    pub observed_tick_values: Vec<[i64;4]>,
+    pub observed_ticks: Vec<[i64;4]>,
+    pub anchor_sets: Vec<Vec<i64>>,
+    pub field_updates: i64,
     pub original_pm_steps: i64,
 }
 #[derive(Serialize)]
@@ -51,8 +62,55 @@ struct Builder {
     columns: PublicPmDeviceColumnsV1,
     assets: BTreeMap<String,i64>, markets: BTreeMap<String,i64>,
     decimals: BTreeMap<String,i64>, slots: BTreeMap<(i64,i64,i64),i64>,
+    last_bba: BTreeMap<i64,i64>, last_tick: BTreeMap<i64,i64>,
 }
 impl Builder {
+    fn anchor_set(&mut self, sources: &[SourceEvidenceRefV3], position: &PublicFactPositionV1,
+        group_id: &Sha256Hex) -> RecordingResult<i64> {
+        let mut ids = Vec::with_capacity(sources.len());
+        for direct in sources {
+            let id = i64::try_from(self.columns.anchors.len())?;
+            self.columns.anchors.push(PublicLevelAnchorV1 {
+                direct:direct.clone(),position:position.clone(),group_id:group_id.clone(),
+            });
+            ids.push(id);
+        }
+        let id = i64::try_from(self.columns.anchor_sets.len())?;
+        self.columns.anchor_sets.push(ids);
+        Ok(id)
+    }
+    fn field_row(&mut self, asset: i64, group: i64, value: i64) -> RecordingResult<[i64;4]> {
+        let sequence = self.columns.field_updates;
+        self.columns.field_updates = sequence.checked_add(1).ok_or("设备观察字段位置溢出")?;
+        Ok([asset,sequence,group,value])
+    }
+    fn optional_decimal(&mut self, value: &Option<ExactDecimal>) -> RecordingResult<[i64;2]> {
+        Ok(match value {Some(value)=>[1,self.decimal(value)?],None=>[0,0]})
+    }
+    fn observed_tick(&mut self, asset: &AssetIdentityV1, value: &ExactDecimal,
+        present: bool, anchors: i64, quality: i64, group: i64) -> RecordingResult<()> {
+        let asset = self.asset(asset);
+        let value = [i64::from(present),self.decimal(value)?,anchors,quality];
+        let id = i64::try_from(self.columns.observed_tick_values.len())?;
+        self.columns.observed_tick_values.push(value);
+        let row = self.field_row(asset,group,id)?;
+        self.columns.observed_ticks.push(row);
+        self.last_tick.insert(asset,id);
+        Ok(())
+    }
+    fn observed_bba(&mut self, asset: &AssetIdentityV1, quote: &CanonicalBbaFactV1,
+        anchors: i64, quality: i64, group: i64) -> RecordingResult<()> {
+        let asset = self.asset(asset);
+        let [bp,b] = self.optional_decimal(&quote.best_bid_pusd_per_share)?;
+        let [ap,a] = self.optional_decimal(&quote.best_ask_pusd_per_share)?;
+        let [sp,s] = self.optional_decimal(&quote.spread_pusd_per_share)?;
+        let id = i64::try_from(self.columns.bba_values.len())?;
+        self.columns.bba_values.push([bp,b,ap,a,sp,s,anchors,quality]);
+        let row = self.field_row(asset,group,id)?;
+        self.columns.bba.push(row);
+        self.last_bba.insert(asset,id);
+        Ok(())
+    }
     fn asset(&mut self, asset: &AssetIdentityV1) -> i64 {
         let next = self.columns.assets.len() as i64;
         *self.assets.entry(asset.token_id.0.clone()).or_insert_with(|| { self.columns.assets.push(asset.clone()); next })
@@ -82,13 +140,19 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
     mut progress: impl FnMut(u64)) -> RecordingResult<PublicPmDeviceColumnsV1> {
     let mut builder = Builder { columns: PublicPmDeviceColumnsV1 {
         version:"public_pm_device_columns_v1",input_stream_id:reader.manifest.header.input_stream_id.clone(),
-        ..Default::default()
-    }, assets:BTreeMap::new(), markets:BTreeMap::new(), decimals:BTreeMap::new(), slots:BTreeMap::new() };
+        bba_values:vec![[0,0,0,0,0,0,0,3]],trade_values:vec![[0,0,0,0,0,0,3]],
+        observed_tick_values:vec![[0,0,0,3]],anchor_sets:vec![vec![]],..Default::default()
+    }, assets:BTreeMap::new(), markets:BTreeMap::new(), decimals:BTreeMap::new(), slots:BTreeMap::new(),
+        last_bba:BTreeMap::new(),last_tick:BTreeMap::new() };
     // 零值占位不是已知零；设备查询另带initialized/selected/present。
     builder.decimal(&ExactDecimal("0".into()))?;
     let mut snapshots = BTreeMap::new();
+    let mut raw_pm: BTreeMap<u64,PolymarketOrderbookRow> = BTreeMap::new();
     while let Some(packet) = reader.next_packet()? {
         if let DptIngressV1::Message { row:TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row)), .. } = &packet.input.ingress {
+            if matches!(&row.event,PolymarketOrderbookEvent::BestBidAsk {..} | PolymarketOrderbookEvent::PriceChange {..}) {
+                raw_pm.insert(packet.input.input_position,row.clone());
+            }
             if let PolymarketOrderbookEvent::Book {asset_id,bids,asks,..} = &row.event {
                 snapshots.insert(packet.input.input_position,(asset_id.clone(),bids.clone(),asks.clone()));
             }
@@ -111,6 +175,15 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
                         }
                     }
                 }
+                if let crate::compact_public::CompactFactPayloadV1::Inline(
+                    PublicBusinessPayloadV1::MarketFact {payload:CanonicalMarketFactPayloadV1::InitialTick {
+                        asset,tick_size_pusd_per_share},..}
+                ) = &fact.payload {
+                    let anchors = builder.anchor_set(&fact.direct_sources,&fact.position,&group.group_id)?;
+                    let q = quality_code(fact.quality.availability);
+                    builder.observed_tick(asset,tick_size_pusd_per_share,q<=1,anchors,q,
+                        i64::try_from(group.group_position)?)?;
+                }
             }
         }
         for pm in &packet.pm {
@@ -119,6 +192,13 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
                 .ok_or("设备PM步骤缺公共事实组关联")?.group_position)?;
             // 同事实内各价位Selection共享完全相同的直接源，不逐档复制其身份文本。
             let mut shared_anchors: Vec<(SourceEvidenceRefV3, i64)> = Vec::new();
+            let group_id = packet.groups.iter().find(|g| g.group_position as i64 == group)
+                .ok_or("设备PM观察字段缺原闭组")?.group_id.clone();
+            let input_position = packet.groups.iter().flat_map(|g|&g.records).find(|fact|fact.position==pm.position)
+                .and_then(|fact|match &fact.payload {
+                    crate::compact_public::CompactFactPayloadV1::PmFromInput(header)=>Some(header.input_record.input_position),
+                    _=>None,
+                }).ok_or("设备PM字段缺原规范消息输入引用")?;
             for step in &pm.steps {
                 let sequence = builder.columns.original_pm_steps;
                 builder.columns.original_pm_steps = sequence.checked_add(1).ok_or("设备步骤位置溢出")?;
@@ -183,6 +263,67 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
                         PmStepChangeV1::Tick {tick,..} => {
                             let a = builder.asset(&tick.asset); let value = builder.decimal(&tick.new_tick_size_pusd_per_share)?;
                             builder.columns.ticks.push([a,sequence,group,value]);
+                            let anchors = builder.anchor_set(std::slice::from_ref(&step.direct),&pm.position,&group_id)?;
+                            builder.observed_tick(&tick.asset,&tick.new_tick_size_pusd_per_share,true,
+                                anchors,quality_code(step.quality.availability),group)?;
+                        }
+                        PmStepChangeV1::BestBidAsk {quote,..} => {
+                            let direct = raw_pm.get(&input_position).map(|row|
+                                data_pipeline_core::pm_message::direct_bba_from_typed_raw_v1(row,step.member_index)).transpose()?.flatten();
+                            let value = direct.unwrap_or_else(||CanonicalBbaFactV1 {
+                                best_bid_pusd_per_share:quote.best_bid_pusd_per_share.clone(),
+                                best_ask_pusd_per_share:quote.best_ask_pusd_per_share.clone(),spread_pusd_per_share:None,
+                            });
+                            let anchors = builder.anchor_set(std::slice::from_ref(&step.direct),&pm.position,&group_id)?;
+                            builder.observed_bba(&quote.asset,&value,anchors,quality_code(step.quality.availability),group)?;
+                        }
+                        PmStepChangeV1::PublicConfirmation {asset,kind} => {
+                            let a = builder.asset(asset);
+                            match kind {
+                                data_pipeline_core::pm_reduction::PmConfirmationComponentV1::Tick => {
+                                    if let Some(&old) = builder.last_tick.get(&a) {
+                                        let mut value = builder.columns.observed_tick_values[old as usize];
+                                        if value[0] != 0 {
+                                            value[2] = builder.anchor_set(std::slice::from_ref(&step.direct),&pm.position,&group_id)?;
+                                            value[3] = quality_code(step.quality.availability);
+                                            let id = i64::try_from(builder.columns.observed_tick_values.len())?;
+                                            builder.columns.observed_tick_values.push(value);
+                                            let row = builder.field_row(a,group,id)?;
+                                            builder.columns.observed_ticks.push(row);
+                                            builder.last_tick.insert(a,id);
+                                        }
+                                    }
+                                }
+                                data_pipeline_core::pm_reduction::PmConfirmationComponentV1::BestBidAsk => {
+                                    let direct = raw_pm.get(&input_position).map(|row|
+                                        data_pipeline_core::pm_message::direct_bba_from_typed_raw_v1(row,step.member_index)).transpose()?.flatten();
+                                    let old = builder.last_bba.get(&a).map(|&old|builder.columns.bba_values[old as usize]);
+                                    if let Some(value) = direct {
+                                        let anchors = builder.anchor_set(std::slice::from_ref(&step.direct),&pm.position,&group_id)?;
+                                        builder.observed_bba(asset,&value,anchors,quality_code(step.quality.availability),group)?;
+                                    } else if let Some(mut value) = old {
+                                        value[6] = builder.anchor_set(std::slice::from_ref(&step.direct),&pm.position,&group_id)?;
+                                        value[7] = quality_code(step.quality.availability);
+                                        let id = i64::try_from(builder.columns.bba_values.len())?;
+                                        builder.columns.bba_values.push(value);
+                                        let row = builder.field_row(a,group,id)?;
+                                        builder.columns.bba.push(row);
+                                        builder.last_bba.insert(a,id);
+                                    }
+                                }
+                            }
+                        }
+                        PmStepChangeV1::PublicTrade {trade} => {
+                            let a = builder.asset(&trade.asset);
+                            let price = builder.decimal(&trade.price_pusd_per_share)?;
+                            let quantity = builder.decimal(&trade.quantity_shares)?;
+                            let [fee_present,fee] = builder.optional_decimal(&trade.fee_rate_bps)?;
+                            let anchors = builder.anchor_set(std::slice::from_ref(&step.direct),&pm.position,&group_id)?;
+                            let id = i64::try_from(builder.columns.trade_values.len())?;
+                            builder.columns.trade_values.push([price,quantity,i64::from(trade.aggressor_side==TradeSide::Sell),
+                                fee_present,fee,anchors,quality_code(step.quality.availability)]);
+                            let row = builder.field_row(a,group,id)?;
+                            builder.columns.trades.push(row);
                         }
                         PmStepChangeV1::Quality {boundary} => {
                             if let QualityScopeV1::Asset(asset) = &boundary.scope {
@@ -197,6 +338,7 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
         }
         for group in &packet.groups {
             for member in &group.member_input_positions { snapshots.remove(member); }
+            for member in &group.member_input_positions { raw_pm.remove(member); }
         }
         progress(packet.input.input_position+1);
     }

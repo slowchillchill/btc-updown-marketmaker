@@ -149,6 +149,26 @@ fn quote(
     })
 }
 
+/// 紧凑消费者沿原source payload重建直接BBA；复用原空报价/精确规范化语义。
+/// 成员下标仍取原price_changes位置，不用归约后推断报价代替直接来源值。
+pub fn direct_bba_from_typed_raw_v1(
+    row: &PolymarketOrderbookRow,
+    member: Option<u32>,
+) -> Result<Option<CanonicalBbaFactV1>, ContractError> {
+    match &row.event {
+        Raw::BestBidAsk {best_bid,best_ask,spread,..} => quote(best_bid,best_ask,spread).map(Some),
+        Raw::PriceChange {price_changes} => {
+            let value = member.and_then(|index| price_changes.get(index as usize));
+            match value {
+                Some(value) if value.best_bid.is_some() || value.best_ask.is_some() =>
+                    quote(&value.best_bid,&value.best_ask,&None).map(Some),
+                _ => Ok(None),
+            }
+        }
+        _ => Ok(None),
+    }
+}
+
 pub(crate) fn payload_from_typed_raw(
     row: &PolymarketOrderbookRow,
     assets: &[crate::reduction::PolymarketAssetContextV1],
