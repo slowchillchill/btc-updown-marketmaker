@@ -1,8 +1,8 @@
 //! 紧凑公共PM步骤到共享设备列。只转已有事实，不重新计算public/hidden归约。
 use crate::{compact_public::{CompactPmChangeV1, PublicCompactReaderV1}, public_recording::RecordingResult};
 use contracts::*;
-use data_pipeline_core::{pm_reduction::PmStepChangeV1, public_input::DptIngressV1,
-    typed_raw::{TypedRawRow, TypedRawRowV2, PolymarketOrderbookEvent, normalize_decimal_text}};
+use data_pipeline_core::{pm_reduction::PmStepChangeV1, public_input::{DptIngressV1, TypedRawRowV2},
+    typed_raw::{TypedRawRow, PolymarketOrderbookEvent, normalize_decimal_text}};
 use serde::Serialize;
 use std::collections::BTreeMap;
 
@@ -75,7 +75,9 @@ pub fn public_pm_device_columns_v1(reader: &mut PublicCompactReaderV1,
             builder.columns.groups.push([i64::try_from(group.group_position)?,i64::try_from(group.closed_at_input_position)?,group.visible_at_utc_ms]);
         }
         for pm in &packet.pm {
-            let group = i64::try_from(pm.position.group_position)?;
+            let group = i64::try_from(packet.groups.iter()
+                .find(|group| group.records.iter().any(|fact| fact.position == pm.position))
+                .ok_or("设备PM步骤缺公共事实组关联")?.group_position)?;
             for step in &pm.steps {
                 let sequence = builder.columns.original_pm_steps;
                 builder.columns.original_pm_steps = sequence.checked_add(1).ok_or("设备步骤位置溢出")?;
