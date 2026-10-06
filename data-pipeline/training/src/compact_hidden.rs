@@ -170,7 +170,9 @@ pub fn reduce_compact_hidden_v1(
         return Err(io::Error::other("hidden准备必须消费完整compact起点和末端").into());
     }
     notify(progress, Notice::Stage(Stage::HiddenMessagesFinish));
-    let (sorted_path, message_sort) = messages.finish(None)?;
+    let (sorted_path, message_sort) = messages.finish_with_progress(&mut |value| {
+        notify(progress,Notice::SourceMergeProgress {index:0,progress:value});
+    })?;
     notify(progress, Notice::HiddenMessagesSorted(message_sort.clone()));
     let contexts = contexts.into_values().map(|context| context.prepared_context(&version))
         .collect::<RecordingResult<Vec<_>>>()?;

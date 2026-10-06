@@ -55,10 +55,16 @@ fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut scanned = 0_u64; let mut supplied = 0_u64; let mut reduced = 0_u64;
     let mut last = Instant::now();
     let mut phase = None;
+    let mut merge = None;
+    let mut merge_started = None;
     let mut callback = |notice| {
         if interval.is_zero() { return; }
         let stage = match notice {
-            Notice::Stage(stage)=>Some(stage),
+            Notice::Stage(stage)=>{merge=None;merge_started=None;Some(stage)},
+            Notice::SourceMergeProgress {index,progress}=>{
+                merge_started.get_or_insert_with(Instant::now);
+                merge = Some((index,progress));None
+            },
             Notice::HiddenScanRow=>{scanned += 1;None},
             Notice::HiddenMessageSupplied=>{supplied += 1;None},
             Notice::HiddenMessageReduced=>{reduced += 1;None},
@@ -71,7 +77,9 @@ fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         if stage.is_some() { phase = stage; }
         if stage.is_some() || last.elapsed()>=interval {
             eprintln!("{}",serde_json::json!({"stage":phase,"scanned_inputs":scanned,
-                "supplied_messages":supplied,"reduced_messages":reduced,"elapsed_seconds":started.elapsed().as_secs_f64()}));
+                "supplied_messages":supplied,"reduced_messages":reduced,"merge":merge,
+                "merge_elapsed_seconds":merge_started.map(|at| at.elapsed().as_secs_f64()),
+                "elapsed_seconds":started.elapsed().as_secs_f64()}));
             last = Instant::now();
         }
     };

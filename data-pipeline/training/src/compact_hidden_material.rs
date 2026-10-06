@@ -173,6 +173,9 @@ pub fn prepare_compact_hidden_material_with_interval_v1(
     fs::remove_dir_all(pending.join("supply"))?;
     let MaterialSink {mut payload, mut offsets, mut positions, index, indexed_steps, ..} = sink;
     for file in [&mut payload, &mut offsets, &mut positions] { file.flush()?; file.get_ref().sync_all()?; }
+    crate::historical_preparation_progress::notify(progress,
+        crate::historical_preparation_progress::HistoricalPreparationNoticeV1::Stage(
+            crate::historical_preparation_progress::HistoricalPreparationStageV1::HiddenFinalize));
     let (index_path, index_metrics) = index.finish_single_file_with_progress(&mut |notice| {
         crate::historical_preparation_progress::notify(progress,
             crate::historical_preparation_progress::HistoricalPreparationNoticeV1::SourceMergeProgress {index: 0, progress: notice});
@@ -679,9 +682,21 @@ mod tests {
         writer.publish().unwrap();
         let order = Arc::new(GpuInitialRunOrderV1::start(Path::new(&std::env::var("B_GPU_PYTHON").unwrap()),
             Path::new(&std::env::var("B_GPU_SORT_WORKER").unwrap())).unwrap());
-        let mut sort = config().sort; sort.merge_workers = 8;
+        let mut sort = config().sort; sort.merge_workers = 8;sort.max_run_rows = 1;
+        let mut message_merge_seen = false;let mut index_merge_seen = false;let mut finalizing = false;
+        let mut progress = |notice| {
+            use crate::historical_preparation_progress::{HistoricalPreparationNoticeV1 as Notice,HistoricalPreparationStageV1 as Stage};
+            match notice {
+                Notice::Stage(Stage::HiddenFinalize)=>finalizing=true,
+                Notice::SourceMergeProgress {..} if finalizing=>index_merge_seen=true,
+                Notice::SourceMergeProgress {..}=>message_merge_seen=true,
+                _=>{},
+            }
+        };
+        let notifier = HistoricalPreparationNotifierV1::new(&mut progress);
         let manifest = prepare_compact_hidden_material_v1(&source_root,&target,1<<20,&sort,order,
-            "original-hidden-consumer".into(),None,|_,_,_,_| {}).unwrap();
+            "original-hidden-consumer".into(),Some(&notifier),|_,_,_,_| {}).unwrap();
+        assert!(message_merge_seen && index_merge_seen);
         assert_eq!(manifest.summary.messages,3);
         assert_eq!(manifest.summary.steps,15);
         assert_eq!(manifest.summary.reports,6);
