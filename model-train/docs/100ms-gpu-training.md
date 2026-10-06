@@ -521,7 +521,7 @@ backtest，PPO仍归model-train；offline-evaluation按冻结模型和原权限�
 ### 当前可执行的紧凑公共材料准备入口
 
 `data-pipeline-training` 的 `dpt-public-compact` 接受原
-`FinitePublicRecordingConfigV1` JSON、锁定 Python 路径和同提交的
+`CompactPublicPreparationConfigV1` JSON（只含实际输入/排序/流头与可选元数据初始化，不再要求旧 recording 配置）、锁定 Python 路径和同提交的
 `data-pipeline/gpu/sort_worker.py` 路径。它复用原有限 Parquet 类型化解码、两遍
 代际排名及来源键生成。初始 run 的稳定排序在常驻 CUDA worker 执行；只有原
 字节键与返回 permutation 跨 CPU/GPU，原载荷按同一 permutation 搬运。

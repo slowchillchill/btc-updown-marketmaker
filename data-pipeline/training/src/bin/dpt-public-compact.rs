@@ -1,8 +1,8 @@
 //! B紧凑公共材料入口；既有typed/parquet准入和来源键→GPU run排序→CPU归并→完整factsink。
 use data_pipeline_training::{
-    compact_public::{PublicCompactWriterV1, consume_historical_merge_facts_v1},
-    finite_recording::FinitePublicRecordingConfigV1,
+    compact_public::{CompactPublicPreparationConfigV1, PublicCompactReaderV1, PublicCompactWriterV1, consume_historical_merge_facts_v1},
     gpu_initial_sort::GpuInitialRunOrderV1,
+    historical_initialization::MetadataInitializationSelectionV1,
     historical_preparation_progress::{HistoricalPreparationNoticeV1 as Notice, HistoricalPreparationNotifierV1},
     public_replay::{HISTORICAL_SOURCE_HEAD_ORDERING_VERSION, prepare_historical_finite_files_with_initial_order_v1},
 };
@@ -10,6 +10,23 @@ use std::{error::Error, fs::File, path::Path, sync::Arc, time::Instant};
 
 fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     let args: Vec<_> = std::env::args().collect();
+    if args.len() == 4 && args[1] == "--inspect" {
+        let mut reader = PublicCompactReaderV1::open(Path::new(&args[2]), args[3].parse()?)?;
+        let mut inputs = 0_u64;
+        let started = Instant::now();
+        let mut last_notice = Instant::now();
+        while reader.next_packet()?.is_some() {
+            inputs += 1;
+            if last_notice.elapsed().as_secs() >= 10 {
+                eprintln!("{}",serde_json::json!({"stage":"compact_read","inputs":inputs,
+                    "total_inputs":reader.manifest.inputs,"elapsed_seconds":started.elapsed().as_secs_f64()}));
+                last_notice = Instant::now();
+            }
+        }
+        println!("{}",serde_json::json!({"stage":"compact_read_complete","inputs":inputs,
+            "groups":reader.manifest.groups,"facts":reader.manifest.facts,"elapsed_seconds":started.elapsed().as_secs_f64()}));
+        return Ok(());
+    }
     if args.len() != 4 {
         return Err("用法: dpt-public-compact <finite-config.json> <locked-python> <same-commit-sort_worker.py>".into());
     }
@@ -17,7 +34,7 @@ fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
     if value["canonical"]["sort"]["merge_workers"].as_u64().is_none() {
         return Err("实际采用CPU外归并，必须按当前共享配额显式配置canonical.sort.merge_workers".into());
     }
-    let config: FinitePublicRecordingConfigV1 = serde_json::from_value(value)?;
+    let config: CompactPublicPreparationConfigV1 = serde_json::from_value(value)?;
     std::fs::create_dir(&config.work_root)?;
     let order = Arc::new(GpuInitialRunOrderV1::start(Path::new(&args[2]), Path::new(&args[3]))?);
     let started = Instant::now();
@@ -51,11 +68,15 @@ fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
     };
     let notifier = HistoricalPreparationNotifierV1::new(&mut notice);
+    let initialization = config.initialization.as_ref().map(|config_initialization| {
+        MetadataInitializationSelectionV1::open_with_progress(config_initialization,
+            config.canonical.decode_batch_rows, config.canonical.max_decode_batch_bytes, Some(&notifier))
+    }).transpose()?;
     let mut merge = prepare_historical_finite_files_with_initial_order_v1(
         &config.work_root.join("merge"), &config.files, &config.canonical,
         config.header.input_stream_id.clone(),
         config.received_start_utc_ms..config.received_end_utc_ms,
-        None, Some(&notifier), Some(order),
+        initialization.as_ref(), Some(&notifier), Some(order),
     )?;
     let mut header = config.header.clone();
     header.ordering_version = HISTORICAL_SOURCE_HEAD_ORDERING_VERSION.into();
@@ -69,7 +90,9 @@ fn run() -> Result<(), Box<dyn Error + Send + Sync>> {
         }
         Ok(())
     })?;
-    let receipt = writer.publish()?;
+    let receipt = writer.publish_with_progress(std::time::Duration::from_secs(10), |notice| {
+        eprintln!("{}",serde_json::json!({"publication":notice,"elapsed_seconds":started.elapsed().as_secs_f64()}));
+    })?;
     eprintln!("{}", serde_json::json!({"stage":"public_compact_published",
         "elapsed_seconds":started.elapsed().as_secs_f64(), "inputs":receipt.inputs,
         "groups":receipt.groups,"facts":receipt.facts}));

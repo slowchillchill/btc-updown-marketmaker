@@ -4,6 +4,7 @@ use std::{
     fs::{self, File},
     io::{self, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 use contracts::*;
 use data_pipeline_core::{
@@ -17,6 +18,18 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use crate::public_recording::RecordingResult;
 use crate::public_replay::HistoricalMergeV1;
+
+/// 紧凑准备只保留实际使用的冷入口参数，不要求旧Gate-A recording配置。
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CompactPublicPreparationConfigV1 {
+    pub files: Vec<crate::public_input::PublicFiniteFileV1>,
+    pub received_start_utc_ms: i64,
+    pub received_end_utc_ms: i64,
+    pub work_root: PathBuf,
+    pub header: PublicInputStreamHeaderV1,
+    pub canonical: crate::canonical_run::CanonicalRunConfig,
+    pub initialization: Option<crate::historical_initialization::MetadataInitializationConfigV1>,
+}
 
 const SCHEMA: &str = "public_compact_facts_v2";
 
@@ -188,15 +201,37 @@ pub struct PublicCompactWriterV1 {
 fn new_file(root: &Path, name: &str) -> io::Result<BufWriter<File>> {
     Ok(BufWriter::new(File::create_new(root.join(name))?))
 }
+#[derive(Serialize)]
+pub struct CompactPublicationProgressV1<'a> {
+    pub stage: &'static str,
+    pub member: &'a str,
+    pub completed_bytes: u64,
+    pub total_bytes: Option<u64>,
+}
 fn file_sha256(path: &Path) -> io::Result<String> {
+    file_sha256_with_progress(path, Duration::from_secs(10), |_, _| {})
+}
+fn file_sha256_with_progress(
+    path: &Path, interval: Duration, mut progress: impl FnMut(u64, u64),
+) -> io::Result<String> {
     let mut file = File::open(path)?;
+    let total = file.metadata()?.len();
+    let mut completed = 0_u64;
+    let mut last_notice = Instant::now();
+    progress(completed, total);
     let mut digest = Sha256::new();
     let mut buffer = vec![0; 1024 * 1024];
     loop {
         let count = file.read(&mut buffer)?;
         if count == 0 { break; }
         digest.update(&buffer[..count]);
+        completed += count as u64;
+        if last_notice.elapsed() >= interval {
+            progress(completed, total);
+            last_notice = Instant::now();
+        }
     }
+    progress(completed, total);
     Ok(format!("{:x}", digest.finalize()))
 }
 impl PublicCompactWriterV1 {
@@ -271,18 +306,31 @@ impl PublicCompactWriterV1 {
         self.failed = false;
         Ok(())
     }
-    pub fn publish(mut self) -> RecordingResult<PublicCompactManifestV1> {
+    pub fn publish(self) -> RecordingResult<PublicCompactManifestV1> {
+        self.publish_with_progress(Duration::from_secs(10), |_| {})
+    }
+    pub fn publish_with_progress(
+        mut self, interval: Duration, mut progress: impl FnMut(CompactPublicationProgressV1<'_>),
+    ) -> RecordingResult<PublicCompactManifestV1> {
         if self.failed || !self.manifest.normal_end { return Err(io::Error::other("仅完整正常结束材料可发布").into()); }
-        for file in [&mut self.payload, &mut self.offsets, &mut self.columns, &mut self.sources] {
+        for (name, file) in [("packet_payload.bin", &mut self.payload), ("packet_offsets.u64le", &mut self.offsets),
+                             ("group_columns.i64le", &mut self.columns), ("source_bindings.jsonl", &mut self.sources)] {
+            progress(CompactPublicationProgressV1 { stage:"flush_and_sync", member:name, completed_bytes:0,total_bytes:None });
             file.flush()?;
             file.get_ref().sync_all()?;
+            let bytes = file.get_ref().metadata()?.len();
+            progress(CompactPublicationProgressV1 { stage:"flush_and_sync_done", member:name, completed_bytes:bytes,total_bytes:Some(bytes) });
         }
         for name in ["packet_payload.bin", "packet_offsets.u64le", "group_columns.i64le", "source_bindings.jsonl"] {
             let path = self.pending.join(name);
             self.manifest.files.push(CompactFileV1 {
-                name: name.into(), bytes: fs::metadata(&path)?.len(), sha256: file_sha256(&path)?,
+                name: name.into(), bytes: fs::metadata(&path)?.len(),
+                sha256: file_sha256_with_progress(&path, interval, |completed,total| {
+                    progress(CompactPublicationProgressV1 { stage:"member_sha256",member:name,completed_bytes:completed,total_bytes:Some(total) });
+                })?,
             });
         }
+        progress(CompactPublicationProgressV1 { stage:"atomic_manifest_publish",member:"manifest.json",completed_bytes:0,total_bytes:None });
         let mut manifest = File::create_new(self.pending.join("manifest.json"))?;
         serde_json::to_writer(&mut manifest, &self.manifest)?;
         manifest.sync_all()?;
@@ -291,6 +339,7 @@ impl PublicCompactWriterV1 {
         rustix::fs::renameat_with(rustix::fs::CWD, &self.pending,
             rustix::fs::CWD, &self.target, rustix::fs::RenameFlags::NOREPLACE)?;
         File::open(self.target.parent().unwrap())?.sync_all()?;
+        progress(CompactPublicationProgressV1 { stage:"published",member:"manifest.json",completed_bytes:0,total_bytes:None });
         Ok(self.manifest)
     }
 }
