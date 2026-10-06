@@ -11,6 +11,8 @@ from validate_base_execution import integers,rational,values
 sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'ledger/gpu'))
 from rebate_contribution import RebateContributions
 from rebate_day import RebateDays
+sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'execution-normalization/gpu'))
+from fields import IntegerList,encode_fields,decode_fields
 
 
 def amounts(value):
@@ -47,6 +49,19 @@ def main():
     day=torch.tensor([finalized['attribution_day_start_utc_ms']],device='cuda')
     refs=integers([identity(value) for value in finalized['contribution_refs']])
     ref_mask=torch.ones((1,len(finalized['contribution_refs'])),dtype=torch.bool,device='cuda')
+    # 原Day贡献引用列表保留实际人口/原顺序；物理字宽或人口尾补齐不得改变正文。
+    encoded=Numbers.run_exact_batch(lambda:encode_fields([kind,day,IntegerList(refs,ref_mask)]))
+    padded_ids=[identity(value) for value in finalized['contribution_refs']]+[0,0]
+    padded_refs=Numbers.run_exact_batch(lambda:integers(padded_ids),initial_word_capacity=8)
+    padded_mask=torch.nn.functional.pad(ref_mask,(0,2),value=False)
+    padded=Numbers.run_exact_batch(lambda:encode_fields([kind,day,IntegerList(padded_refs,padded_mask)]))
+    common=max(encoded.size(1),padded.size(1))
+    assert torch.equal(torch.nn.functional.pad(encoded,(0,common-encoded.size(1))),
+        torch.nn.functional.pad(padded,(0,common-padded.size(1))))
+    decoded,error=Numbers.run_exact_batch(lambda:decode_fields(padded,['scalar','scalar','integer_list'],enabled))
+    assert error.cpu().tolist()==[0] and decoded[0].cpu().tolist()==[0] and torch.equal(decoded[1],day)
+    ref_values=values(decoded[2].values)
+    assert [value for value,present in zip(ref_values,decoded[2].present.flatten().cpu().tolist()) if present]==padded_ids[:-2]
     index=Numbers.run_exact_batch(lambda:RebateContributions.empty(1,len(source['contributions']),day.device))
     state=Numbers.run_exact_batch(lambda:RebateDays.empty(torch.tensor([list(range(len(condition)))],device='cuda'),1))
     def finalize(current):
@@ -80,6 +95,7 @@ def main():
     print(json.dumps({'actual_maker_vectors':len(vectors),'actual_contributions':len(source['contributions']),
         'actual_DayFinalized_and_Payment':True,'missing_predecessors_no_commit':True,
         'condition_finite_payable_locked_checked':True,'source_totals_conserved':True,'payment_repeat_no_second_allocation':True,
+        'actual_day_reference_integer_list_and_padding_checked':True,
         'elapsed_seconds':time.perf_counter()-started,'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
         'full_NOE_Ledger_day_coordinator_delivered':False}))
 

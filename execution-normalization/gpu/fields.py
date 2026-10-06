@@ -4,6 +4,18 @@
 不会改变同值字段编码；字段类型与顺序是所属载荷schema的组成部分。
 """
 import torch
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class IntegerList:
+    values: object  # ExactInt[rows*capacity]，原列表顺序；尾补齐不属于正文。
+    present: torch.Tensor
+
+    @property
+    def fault(self):
+        from queues import Numbers
+        return Numbers.combine_fault_rows(torch.where(self.present,self.values.fault.reshape_as(self.present),0))
 
 
 def encode_fields(fields):
@@ -24,15 +36,26 @@ def encode_fields(fields):
         values.append(value)
         masks.append(torch.ones_like(value,dtype=torch.bool) if mask is None else mask)
 
-    def integer(value):
+    def integer(value,present=None):
         words=value.words.to(torch.int64)&0xffffffff
         positions=torch.arange(words.size(1),device=words.device)
         length=torch.where(words!=0,positions+1,0).max(dim=1).values
-        append(torch.stack([torch.full_like(length,2),value.sign.to(torch.int64),length],dim=1))
-        append(words,positions[None,:]<length[:,None])
+        header=torch.stack([torch.full_like(length,2),value.sign.to(torch.int64),length],dim=1)
+        append(header,None if present is None else present[:,None].expand_as(header))
+        valid=positions[None,:]<length[:,None]
+        append(words,valid if present is None else valid & present[:,None])
 
     for value in fields:
-        if isinstance(value,torch.Tensor):
+        if isinstance(value,IntegerList):
+            from queues import _take
+            rows,capacity=value.present.shape
+            if value.present.dtype!=torch.bool or value.present.device!=value.values.words.device or value.values.sign.numel()!=rows*capacity:
+                raise TypeError('整数列表须同设备bool[row,capacity]人口及原顺序精确值')
+            population=value.present.to(torch.int64).sum(dim=1)
+            append(torch.stack([torch.full_like(population,4),population],dim=1))
+            for column in range(capacity):
+                integer(_take(value.values,torch.arange(rows,device=value.present.device)*capacity+column),value.present[:,column])
+        elif isinstance(value,torch.Tensor):
             flat=value.reshape(-1)
             if flat.dtype not in (torch.int64,torch.bool,torch.int8,torch.int32):
                 raise TypeError('标量字段必须是精确整数或bool')
@@ -80,7 +103,7 @@ def decode_fields(encoded,schema,enabled):
         outside=(index<1)|(index>=width)|(index>length)
         fault=fault | outside.to(torch.int32)
         return encoded.gather(1,index.clamp(0,width-1)[:,None]).flatten()
-    def integer():
+    def integer(row_enabled=None):
         nonlocal cursor,fault
         tag=read(cursor)
         sign=read(cursor+1)
@@ -90,7 +113,8 @@ def decode_fields(encoded,schema,enabled):
         fault=fault | invalid.to(torch.int32)
         capacity=Numbers.device_word_capacity()
         # 只有合法字段长度才提出真实资源需求；别让非本schema/损坏tokens扩池。
-        valid=enabled & (fault==0)
+        active=enabled if row_enabled is None else enabled & row_enabled
+        valid=active & (fault==0)
         Numbers.record_resource_request(torch.where(valid,words,0))
         positions=torch.arange(capacity,device=encoded.device)
         coordinates=cursor[:,None]+3+positions[None,:]
@@ -99,9 +123,9 @@ def decode_fields(encoded,schema,enabled):
         fault=fault | ((present & ((raw<0)|(raw>0xffffffff))).any(dim=1)).to(torch.int32)
         tail=read((cursor+2+safe).clamp(1,width-1))
         fault=fault | (((safe==0)&(sign!=0))|((safe>0)&((sign==0)|(tail==0)))).to(torch.int32)
-        capacity_fault=torch.where(enabled & (words>capacity),2,0).to(torch.int32)
-        value=ExactInt(torch.where(present & enabled[:,None],raw,0).to(torch.int32),
-            torch.where(enabled,sign,0).to(torch.int8),torch.where(enabled,fault,0)|capacity_fault)
+        capacity_fault=torch.where(active & (words>capacity),2,0).to(torch.int32)
+        value=ExactInt(torch.where(present & active[:,None],raw,0).to(torch.int32),
+            torch.where(active,sign,0).to(torch.int8),torch.where(active,fault,0)|capacity_fault)
         cursor=cursor+3+safe
         return value
     values=[]
@@ -122,6 +146,24 @@ def decode_fields(encoded,schema,enabled):
             fault=fault | (denominator.sign<=0).to(torch.int32)
             neutral=denominator.constant(1)
             values.append(ExactRational(numerator,denominator.select(enabled,neutral)))
+        elif kind=='integer_list':
+            from queues import _columns
+            tag=read(cursor)
+            population=read(cursor+1)
+            # 每个合法整数至少占三个token；这个界来自本编码成员容量而非业务域。
+            capacity=max(1,width//3)
+            fault=fault | ((tag!=4)|(population<0)|(population>capacity)).to(torch.int32)
+            cursor=cursor+2
+            entries=[]
+            present=[]
+            for column in range(capacity):
+                live=(column<population) & enabled
+                previous_fault,previous_cursor=fault,cursor
+                entries.append(integer(live))
+                fault=torch.where(live,fault,previous_fault)
+                cursor=torch.where(live,cursor,previous_cursor)
+                present.append(live)
+            values.append(IntegerList(_columns(entries),torch.stack(present,dim=1)))
         else:
             raise ValueError('未知NOE固定字段schema')
     fault=fault | (cursor!=length+1).to(torch.int32)
