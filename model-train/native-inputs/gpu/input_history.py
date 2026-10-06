@@ -22,6 +22,12 @@ class SourceIdentityRegistry:
     """跨材料块复用的冷身份表；完整原DirectObservationAnchor向量决定等价性。"""
     def __init__(self):
         self.identities = {}
+        self.markets = {}
+
+    def market_id(self, market):
+        key = json.dumps(market,sort_keys=True,separators=(',',':'))
+        if key not in self.markets: self.markets[key] = len(self.markets)+1
+        return self.markets[key]
 
     def register(self, anchors, members, path):
         identity = [(path,a['position'],a['group_id'],a['direct']['source_message_id'],
@@ -47,6 +53,8 @@ class SourceHistoryMemory:
     path_squares: object
     last_prefix: torch.Tensor
     last_cutoff: torch.Tensor
+    market_ids: torch.Tensor
+    root_started_at: torch.Tensor
 
 
 @dataclass(frozen=True)
@@ -62,6 +70,8 @@ class SourceHistoryInputs:
         self.shared,self.market,self.references = shared,market,references
         self.registry = identity_registry if identity_registry is not None else SourceIdentityRegistry()
         device = shared.slots.device
+        self.market_ids = torch.tensor([self.registry.market_id(market) for market in columns['markets']],
+                                       dtype=torch.int64,device=device)
         self.bba_identity = torch.tensor([self.registry.register(shared.anchors,columns['anchor_sets'][row[6]],
             'best_bid_ask') for row in columns['bba_values']],dtype=torch.int64,device=device)
         self.reference_identity = torch.tensor([self.registry.register(shared.anchors,columns['anchor_sets'][row[1]],
@@ -85,7 +95,8 @@ class SourceHistoryInputs:
         ring = _numbers().ExactInt.from_i64_tensor(torch.zeros((roots,6,16),dtype=torch.int64,device=device))
         return SourceHistoryMemory(ring,zeros[:,:,None].expand(-1,-1,16).clone(),
             zeros[:,:,None].expand(-1,-1,16).clone(),zeros,zeros,
-            value,value,value,value,value,torch.full_like(started_at,-1),started_at.clone())
+            value,value,value,value,value,torch.full_like(started_at,-1),started_at.clone(),
+            torch.zeros_like(started_at),started_at.clone())
 
     def consume(self, prefixes, delivered_cutoffs, market_indices, started_at, memory):
         """一次批量接纳连续完整组；不得省略无字段变化的组。
@@ -127,6 +138,8 @@ class SourceHistoryInputs:
         monotonic = (delivered_cutoffs[1:]>=delivered_cutoffs[:-1]).all()
         valid_root = valid_market & consecutive & monotonic & (prefixes[0]==memory.last_prefix+1)
         valid_root &= delivered_cutoffs[0]>=memory.last_cutoff
+        valid_root &= (memory.market_ids==0) | (memory.market_ids==self.market_ids[safe])
+        valid_root &= started_at==memory.root_started_at
         fault = (~valid_root).to(torch.int32) | eligible_root.fault
         fault |= _numbers().combine_fault_rows((after_start.fault|before_end.fault).reshape(groups,roots).T)
         eligible = (valid_root[None] & (eligible_root.order<=0)[None]
@@ -211,7 +224,8 @@ class SourceHistoryInputs:
             result = SourceHistoryMemory(ring_values,ring_ids,ring_times,keep,memory.path_count+count,
                 path_first,path_last,path_min,path_max,memory.path_squares+squares+cross,
                 torch.where(valid_root,prefixes[-1],memory.last_prefix),
-                torch.where(valid_root,delivered_cutoffs[-1],memory.last_cutoff))
+                torch.where(valid_root,delivered_cutoffs[-1],memory.last_cutoff),
+                torch.where(valid_root,self.market_ids[safe],memory.market_ids),memory.root_started_at)
             error = fault | numbers.combine_fault_rows(torch.stack(errors,dim=1).reshape(roots,-1))
             error |= numbers.combine_fault_rows((ef|eg|low.fault|high.fault).reshape(roots,6))
             return result,error
@@ -253,7 +267,7 @@ class SourceHistoryInputs:
             path[:,5] = torch.where(memory.path_count.reshape(-1)>1,path[:,5],0.0)
             zero = path_n.constant(0)
             cleared = SourceHistoryMemory(memory.values,memory.identities,memory.times,memory.counts,
-                torch.zeros_like(memory.path_count),zero,zero,zero,zero,zero,memory.last_prefix,memory.last_cutoff)
+                torch.zeros_like(memory.path_count),zero,zero,zero,zero,zero,memory.last_prefix,memory.last_cutoff,memory.market_ids,memory.root_started_at)
             return NativeSourceHistory(history.reshape(roots,24),path.reshape(roots,6,6)[:,[0,1,3,4,5]].reshape(roots,30),
                 cleared,numbers.combine_fault_rows(error.reshape(roots,6)))
         return numbers.run_exact_batch(compute,initial_word_capacity=memory.values.words.shape[1])

@@ -36,6 +36,7 @@ def main():
     from input_events import EventInputs, time_envelope
     from model_train.book import BookEncoder
     from prepare import _numbers
+    history_reference = None
     started = time.perf_counter()
     print(json.dumps({'stage':'strict_compact_to_pm_device_columns'}),flush=True)
     wire = subprocess.check_output([str(args.binary),'--pm-device-columns',str(args.material),'268435456'])
@@ -423,6 +424,15 @@ def main():
         whole = source_history.freeze(whole)
         assert torch.equal(whole.history,frozen.history) and torch.equal(whole.path,frozen.path)
         assert torch.equal(whole.memory.identities,frozen.memory.identities)
+        ineligible,error = source_history.consume(torch.arange(count,device='cuda',dtype=torch.int64),state.causal_visible_at,
+            market_indices[-1:],start_at+1,source_history.empty(1,start_at+1))
+        assert not error.any().cpu().item()
+        ineligible = source_history.freeze(ineligible)
+        assert not ineligible.history.any().cpu().item() and not ineligible.path.any().cpu().item()
+        history_reference = {'accepted_samples':[len(samples) for samples in series],
+            'retained_samples':frozen.memory.counts.cpu().tolist()[0],
+            'group_batch_rows':7,'path_reset_keeps_history':True,'t_minus_30_ineligible_remains_empty':True}
+
         depth_rows = reference['binance_observations']
         saw_gap = saw_missing = False
         for row in depth_rows:
@@ -702,6 +712,7 @@ def main():
               'peak_scope':'本组件全部检查峰，含六侧BookEncoder前向反向及尾补齐双前向对照；不是完整编码或学习工作集',
               'passed':passed,
               'original_core_reference_checked':args.original_reference is not None,
+              'history_original_reference':history_reference,
               'not_delivered':(['reference_preparation_for_this_material'] if not columns['reference_preparation_complete'] else [])+['hidden','sim_noe_ledger',
                                '100ms_window','full_actor','ppo','active_root_restore']}
     args.output.parent.mkdir(parents=True,exist_ok=True)
