@@ -1,6 +1,15 @@
 # GPU 标准数学末端特征有限诊断
 
-本入口比较两种末端特征计算：标准 CUDA FP64 `log1p/sqrt` 后转 FP32，以及单列的
+本页仅保留已有样板的范围、格式和测量边界，供复用历史证据；不再作为当前执行手册或开发前置。
+旧运行命令见[固定历史版本](https://github.com/slowchillchill/btc-updown-marketmaker/blob/344fd08e459cd9ff8befc5872e82967483d1093d/model-train/scripts/gpu-standard-projection-sample.md)。
+当前实施按 [#181](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181) 和
+[D-0300](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6008518300)：
+直接建设真实 GPU 路径，复用仍适用的结果；必要的新 CPU／GPU 核对也在训练服务器完成，
+当前按 #181 选择单张 RTX 5090（32GB 显存），充分使用实际 CPU、内存、GPU 及显存；
+条件升级为单张 RTX PRO 6000 Blackwell（96GB）沿当前合同执行，不恢复独立低配置参考路线。
+以下旧样板的固定案例、位宽和顺序只说明当时实现，不约束当前工作集或调度。
+
+此历史样板比较两种末端特征计算：标准 CUDA FP64 `log1p/sqrt` 后转 FP32，以及单列的
 标准 CUDA FP32 `log1pf/sqrtf` 对照。它没有接入生产特征、账户或训练入口。
 原有精确 CPU 参考与已有 GPU 有理归约、有限归属样板继续保留各自范围。
 
@@ -22,9 +31,10 @@
 报告保存两次高精度结果及位模式。这是有限技术参考，不能当作公共精确 CPU 合同或全域正确舍入证明。
 上述22项默认样本不是实际训练分布，也不能证明生产位宽足够，不读取训练数据或独立第三留出集。
 显式传入 `projection_sensitivity_stream_run_v1` 时，只批量计算已批准真实训练内部工程窗捕获的
-末端有理输入；真实行情恢复与模型消费归[流式组件诊断](gpu-projection-sensitivity.md)，不在此重做。
+末端有理输入；它曾由[现已停用的流式组件诊断](gpu-projection-sensitivity.md)捕获，
+当前不恢复该捕获与重放路线。
 
-后续[真实组件敏感性诊断](gpu-projection-sensitivity.md)也复用此入口，传入
+旧[真实组件敏感性诊断](gpu-projection-sensitivity.md)曾复用此入口，传入
 `projection_sensitivity_run_v1` 或 `projection_capture_v1` 报告，批量计算其实际捕获的末端输入。
 此模式不添加三项技术探针，全部参考位模式来自捕获时的公共精确 CPU 实现；样本数量按输入记录。
 
@@ -57,15 +67,7 @@ FP64 候选对这批有限参考产生非有限、错误符号或丢失非零值
 先从本地已审查提交制作 Git bundle，经本机同步到目标机并核对准确提交。
 显式指定现有 nvcc。全部材料、缓存、临时目录和结果位于 AutoDL 数据盘：
 
-```bash
-python model-train/scripts/gpu_standard_projection_sample.py \
-  --nvcc /usr/local/cuda/bin/nvcc \
-  --cpu-reference /root/autodl-tmp/artifacts/issue-181/environment/gpu-exact-numeric-reference-v1.json \
-  --devices 0 1 --warmups 2 --iterations 20 --progress-seconds 10 \
-  --output-dir /root/autodl-tmp/artifacts/issue-181/gpu-standard-projection-sample-001
-```
-
-输出必须是新目录，两张卡依次执行。沿用既有 runner 的定期进度和失败日志保留方式。
+旧入口使用独立输出目录并逐卡测量；此顺序不作为当前资源安排。沿用既有 runner 的定期进度和失败日志保留方式。
 `input-layout.json` 保存完整整数、参考来源与各类位模式；`cpu-reference.json` 保留原参考。
 `report.json` 保存源码提交、执行文件的 Git 状态与 SHA-256、参考材料哈希、nvcc 版本、
 实际编译命令和二进制哈希。逐卡原始结果与差值保存在 `device-*.json`。

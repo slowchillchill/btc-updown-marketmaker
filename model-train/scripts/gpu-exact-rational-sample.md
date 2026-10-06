@@ -1,11 +1,20 @@
 # GPU 有理归约与 f32 投影有限样板
 
-本入口继续 #181 的精确数值验证。公共有理数算法的 GPU 诊断位于
+本页仅保留已有样板的范围、格式和测量边界，供复用历史证据；不再作为当前执行手册或开发前置。
+旧运行命令见[固定历史版本](https://github.com/slowchillchill/btc-updown-marketmaker/blob/344fd08e459cd9ff8befc5872e82967483d1093d/model-train/scripts/gpu-exact-rational-sample.md)。
+当前实施按 [#181](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181) 和
+[D-0300](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6008518300)：
+直接建设真实 GPU 路径，复用仍适用的结果；必要的新 CPU／GPU 核对也在训练服务器完成，
+当前按 #181 选择单张 RTX 5090（32GB 显存），充分使用实际 CPU、内存、GPU 及显存；
+条件升级为单张 RTX PRO 6000 Blackwell（96GB）沿当前合同执行，不恢复独立低配置参考路线。
+以下旧样板的固定案例、位宽和顺序只说明当时实现，不约束当前工作集或调度。
+
+此历史样板记录 #181 早期精确数值核对。公共有理数算法的 GPU 诊断位于
 [exact_rational.cuh](../../contracts/gpu-diagnostics/exact_rational.cuh)，固定案例入口位于
 [exact_rational_sample.cu](../native-inputs/gpu-diagnostics/exact_rational_sample.cu)。
 它们未接入生产行情、账户、预留或训练热循环，也未解决生产动态整数宽度。
 
-## 本次执行范围
+## 历史样板范围
 
 | 项目 | CPU 权威来源与 GPU 比较内容 |
 | --- | --- |
@@ -27,18 +36,9 @@ JSON 中的 `deferred_gpu_scope` 保留公共 CPU 的 log/sqrt 参考，本次 G
 
 默认忽略的导出测试仅位于测试模块，不扩大公共生产接口：
 
-```bash
-cargo test --manifest-path model-train/native-inputs/Cargo.toml --lib --locked --offline \
-  exact::projection_tests::export_gpu_exact_numeric_reference_v1 -- --exact --ignored --nocapture
-```
-
 提取唯一 `BTC_GPU_EXACT_NUMERIC_REFERENCE_V1=` 行的 JSON，保存为
 `gpu-exact-numeric-reference-v1.json`。保留源码版本、日志及文件 SHA-256；已有准确 JSON
-可以复用，不必每次 GPU 运行重做导出。对应原有回归为：
-
-```bash
-cargo test --manifest-path model-train/native-inputs/Cargo.toml --locked --offline --test rounding
-```
+可以复用，不因当前开发重新执行旧参考路线。历史导出与回归命令见页首固定版本。
 
 CPU 测试直接调用 `EconomicRational`、`round_f32`、`signed_log_f32` 和 `sqrt_log_f32`。
 原高精度参考常量仅用于断言，不替代实际函数输出；log/sqrt 的 CPU 成功不代表 GPU 已实现。
@@ -50,20 +50,9 @@ CPU 测试直接调用 `EconomicRational`、`round_f32`、`signed_log_f32` 和 `
 Git bundle 同步到目标数据盘，再确认执行源码版本一致。所有材料与运行产物位于
 `/root/autodl-tmp/`；nvcc 使用已核验的系统工具绝对路径。
 
-```bash
-python model-train/scripts/gpu_exact_rational_sample.py \
-  --nvcc /usr/local/cuda/bin/nvcc \
-  --cgbn-root /root/autodl-tmp/dependencies/CGBN-114601b07ae8c3e4d46b250208ea8d9def7a12f0 \
-  --cgbn-record /root/autodl-tmp/offline/cgbn/material-record.json \
-  --gmp-prefix /root/autodl-tmp/tools/gmp-6.2.1 \
-  --cpu-reference /root/autodl-tmp/artifacts/issue-181/environment/gpu-exact-numeric-reference-v1.json \
-  --devices 0 1 --warmups 2 --iterations 20 --progress-seconds 10 \
-  --output-dir /root/autodl-tmp/artifacts/issue-181/gpu-exact-rational-sample-001
-```
-
 输出必须使用新目录。构建显式传入 CGBN 与 GMP 头文件、库目录和 rpath，使用 C++17、
 `sm_120` 和指定 nvcc。只在子进程环境设置输出目录下的 TMPDIR／CUDA 缓存及 GMP 库路径，
-保留已有 `LD_LIBRARY_PATH`。每张卡独立、顺序运行；中文进度间隔可控，不估计未知剩余时间。
+保留已有 `LD_LIBRARY_PATH`。旧入口逐卡顺序测量，不作为当前资源安排；中文进度间隔可控，不估计未知剩余时间。
 
 ## 结果与计时口径
 

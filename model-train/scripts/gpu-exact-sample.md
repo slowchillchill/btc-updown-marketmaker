@@ -1,6 +1,15 @@
 # GPU 精确算术有限样板
 
-此入口用于 #181 的精确经济先行验证。它不是正式 100ms 训练入口，也没有接入公共账本、
+本页仅保留已有样板的范围、格式和测量边界，供复用历史证据；不再作为当前执行手册或开发前置。
+旧运行命令见[固定历史版本](https://github.com/slowchillchill/btc-updown-marketmaker/blob/344fd08e459cd9ff8befc5872e82967483d1093d/model-train/scripts/gpu-exact-sample.md)。
+当前实施按 [#181](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181) 和
+[D-0300](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6008518300)：
+直接建设真实 GPU 路径，复用仍适用的结果；必要的新 CPU／GPU 核对也在训练服务器完成，
+当前按 #181 选择单张 RTX 5090（32GB 显存），充分使用实际 CPU、内存、GPU 及显存；
+条件升级为单张 RTX PRO 6000 Blackwell（96GB）沿当前合同执行，不恢复独立低配置参考路线。
+以下旧样板的固定案例、位宽和顺序只说明当时实现，不约束当前工作集或调度。
+
+此入口记录 #181 早期精确经济样板。它不是正式 100ms 训练入口，也没有接入公共账本、
 订单预留、NOE、撮合或完整 Actor。源码在本地任务工作树编写；审查并提交后，经 Git bundle
 同步同一提交，才在 AutoDL 执行。全部材料和运行输出放在 `/root/autodl-tmp/`。
 
@@ -24,17 +33,10 @@ family、数量、两腿类型和两个待选价格坐标是已指定样本输�
 费用反例均不能证明全部合法 Decimal／BigUint 域可由 256 位覆盖。整数探针与费用反例
 分别报告，不将技术构造称为实际平台费率。
 
-## CPU 参考准备
+## 历史 CPU 参考
 
-在本地已锁定 Rust 环境下显式运行两个默认忽略的导出测试。原普通样本已在本地及目标
-对照过；已有准确 JSON 可以直接复用，不必为每次 GPU 运行重新导出。
-
-```bash
-cargo test --manifest-path model-train/native-inputs/Cargo.toml --lib --locked --offline \
-  action_tests::buy_tests::export_gpu_exact_buy_reference_v1 -- --exact --ignored --nocapture
-cargo test -p sim-system --lib --locked --offline \
-  buy_cost::tests::export_gpu_wide_buy_reference_v1 -- --exact --ignored --nocapture
-```
+历史参考来自两个默认忽略的导出测试。原普通样本已在本地及目标机对照过；
+该历史事实不授权本机重新执行。已有同版本 JSON 直接复用，当前必要核对只在训练服务器进行。
 
 分别提取唯一 `BTC_GPU_EXACT_REFERENCE_V1=` 和 `BTC_GPU_WIDE_REFERENCE_V1=` 行的 JSON。
 大整数为十进制字符串；宽费用测试沿既有本地脚本化 HTTP 夹具的规则解析与密封过程，
@@ -65,23 +67,11 @@ Ubuntu 下载页给出官方来源、版本与 SHA；本次 `.deb` 文件来自
 CGBN 保留原归档中的 `LICENSE`，不修改第三方源码。材料来源记录用于运行报告，
 不包含账号、SSH 或代理绑定。
 
-在项目 Python 环境中，按实际材料路径执行，例如：
-
-```bash
-python model-train/scripts/gpu_exact_sample.py \
-  --nvcc /usr/local/cuda/bin/nvcc \
-  --cgbn-root /root/autodl-tmp/dependencies/CGBN-114601b07ae8c3e4d46b250208ea8d9def7a12f0 \
-  --cgbn-record /root/autodl-tmp/offline/cgbn/material-record.json \
-  --gmp-prefix /root/autodl-tmp/tools/gmp-6.2.1 \
-  --cpu-reference /root/autodl-tmp/artifacts/issue-181/environment/gpu-exact-buy-reference-v1.json \
-  --wide-reference /root/autodl-tmp/artifacts/issue-181/environment/gpu-wide-buy-reference-v1.json \
-  --devices 0 1 --warmups 2 --iterations 20 --progress-seconds 10 \
-  --output-dir /root/autodl-tmp/artifacts/issue-181/gpu-exact-sample-001
-```
+旧构建与运行命令保存在页首固定历史版本，本页不再提供执行指令。
 
 输出目录须为新目录。入口只在本次子进程环境中设置 TMPDIR、CUDA 缓存目录和 GMP 库目录；
 已有 `LD_LIBRARY_PATH`（含项目 Python 动态库）继续保留。编译使用 C++17、`sm_120` 和
-指定 nvcc；不自动换版本、下载依赖或更改第三方源码。每张卡独立、顺序运行。
+指定 nvcc；不自动换版本、下载依赖或更改第三方源码。旧入口逐卡顺序测量，不作为当前资源安排。
 
 ## 证据与计时
 

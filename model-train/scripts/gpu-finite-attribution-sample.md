@@ -1,6 +1,15 @@
 # GPU 有限定点归属样板
 
-本入口验证 #181 已批准试验的 12 位最近偶数分配及精确补差候选。它调用独立的
+本页仅保留已有样板的范围、格式和测量边界，供复用历史证据；不再作为当前执行手册或开发前置。
+旧运行命令见[固定历史版本](https://github.com/slowchillchill/btc-updown-marketmaker/blob/344fd08e459cd9ff8befc5872e82967483d1093d/model-train/scripts/gpu-finite-attribution-sample.md)。
+当前实施按 [#181](https://github.com/slowchillchill/btc-updown-marketmaker/issues/181) 和
+[D-0300](https://github.com/slowchillchill/btc-updown-marketmaker/issues/62#issuecomment-6008518300)：
+直接建设真实 GPU 路径，复用仍适用的结果；必要的新 CPU／GPU 核对也在训练服务器完成，
+当前按 #181 选择单张 RTX 5090（32GB 显存），充分使用实际 CPU、内存、GPU 及显存；
+条件升级为单张 RTX PRO 6000 Blackwell（96GB）沿当前合同执行，不恢复独立低配置参考路线。
+以下旧样板的固定案例、位宽和顺序只说明当时实现，不约束当前工作集或调度。
+
+此历史样板核对了 #181 的 12 位最近偶数分配及精确补差候选。它调用独立的
 [GPU 诊断头](../../contracts/gpu-diagnostics/finite_attribution.cuh)，由
 [CUDA 入口](../native-inputs/gpu-diagnostics/finite_attribution_sample.cu) 在设备内执行有限案例，
 再与公共 [CPU helper](../../contracts/src/finite_attribution.rs) 的实际结果比较。
@@ -33,14 +42,10 @@
 使用公共 helper 的 `finite_attribution_reference_v1` JSON，保留其导出源码、运行日志和 SHA-256。
 输入与全部期望结果分开存放；GPU 不接收期望结果。已有同版本参考可直接复用。
 
-CPU 导出直接调用公共 helper：
+历史 CPU 导出直接调用公共 helper，当前优先复用已有结果。
 
-```bash
-cargo run -p contracts --example finite_attribution_reference --locked --offline \
-  > /tmp/finite-attribution-reference-v1.json
-```
-
-此命令示例在本机执行；目标机的参考文件按下方数据盘路径交接。
+不再提供旧本机导出命令。确需新增参考时，在训练服务器真实实现的必要核对中完成；
+全部输入、缓存、临时文件及输出位于 `/root/autodl-tmp/`。
 导出源码为 [finite_attribution_reference.rs](../../contracts/examples/finite_attribution_reference.rs)，
 标准输出只含 JSON，进度写标准错误。原 helper 的定向测试由其责任方维护。
 
@@ -72,18 +77,7 @@ cargo run -p contracts --example finite_attribution_reference --locked --offline
 先由本地已审查提交生成 Git bundle，同步并核对目标执行版本。全部材料、临时文件、缓存和产物
 放在 `/root/autodl-tmp/`，使用显式 nvcc、GMP 头文件／库目录及 rpath：
 
-```bash
-python model-train/scripts/gpu_finite_attribution_sample.py \
-  --nvcc /usr/local/cuda/bin/nvcc \
-  --cgbn-root /root/autodl-tmp/dependencies/CGBN-114601b07ae8c3e4d46b250208ea8d9def7a12f0 \
-  --cgbn-record /root/autodl-tmp/offline/cgbn/material-record.json \
-  --gmp-prefix /root/autodl-tmp/tools/gmp-6.2.1 \
-  --cpu-reference /root/autodl-tmp/artifacts/issue-181/environment/finite-attribution-reference-v1.json \
-  --devices 0 1 --warmups 2 --iterations 20 --progress-seconds 10 \
-  --output-dir /root/autodl-tmp/artifacts/issue-181/gpu-finite-attribution-sample-001
-```
-
-两张卡分别顺序运行。输出须是新目录；失败保留报告和日志。
+旧入口逐卡顺序测量，不作为当前资源安排。输出须是新目录；失败保留报告和日志。
 `input-layout.json` 记录来源字段、尺度与准确整数材料；`report.json` 记录源码提交和文件哈希、
 CPU 参考哈希、CGBN 实际头文件哈希、GMP 哈希、nvcc 版本、编译命令及二进制哈希。
 逐卡原始输出和逐值比较结论保存在 `device-*.json`。

@@ -1,6 +1,9 @@
 # AutoDL 的 Python / cu128 离线环境
 
-本入口服务 #181 的首次目标环境准备，不启动训练。代码通过既定 Git bundle 流程同步。用户已批准本次
+本入口记录 #181 的目标环境准备方法，不授予环境重建或恢复 B 路线的权限。先复用已完成的
+环境及其证据；没有依赖变化或实际缺口时不重装、不重跑环境样板。执行范围按用户当前授权，
+仅授权代码审查时不运行计算。
+代码通过既定 Git bundle 流程同步。用户已批准
 材料准备在目标机直接下载；失败或停滞时按获批的有限重试、同制品换源、本机中转顺序恢复，方式耗尽后汇报。
 下载完成后的安装仍完全离线。Rust 材料见 [Rust 离线准备](autodl-rust.md)。
 
@@ -16,31 +19,35 @@ GPU 所需 CUDA / cuDNN / Triton 依赖由 uv 解析，不用镜像预装版本�
 源文件哈希仅用于记录。执行时核对实际版本约束；注释变化或脚本修正不使已经校验的安装材料失效。
 同一制品切换已批准的下载来源时，保留版本和 SHA。脚本不更新依赖；只有显式启用下述恢复选项才按批准顺序换源。
 
-## 本机解析与准备
+## 目标机解析与准备
 
-本机需要 Python 3.11+、curl 和已经核实 SHA 的 uv 0.12.9 可执行文件。下载缓存放在仓库外。
+恢复执行且确有依赖缺口时，在目标机使用已核实的 Python、curl 和 uv 0.12.9。
+调用者通过 `AUTODL_BOOTSTRAP_PYTHON` 提供已核实目标机引导解释器的绝对路径，再执行以下命令。
+正常准备直接复用已提交的锁，不重新解析。确需生成获批依赖锁时，缓存、材料与临时文件
+均放在 `/root/autodl-tmp/`；`AUTODL_UV` 指向目标机已经核实 SHA 的 uv 可执行文件。
 代理由调用者通过环境变量提供；curl 支持既有 `ALL_PROXY` / SOCKS5 配置。本仓库不记录代理地址，
 脚本不读取或修改 VPN 全局配置。uv 的索引解析和 curl 的下载分别使用其标准网络机制。
 
 ```bash
-AUTODL_LOCAL_CACHE="${XDG_CACHE_HOME:-$HOME/.cache}/btc-updown-marketmaker/issue-181-autodl"
-python3 model-train/scripts/autodl_environment.py lock \
-  --uv "$AUTODL_LOCAL_CACHE/tools/uv-0.12.9" \
-  --cache "$AUTODL_LOCAL_CACHE/resolution"
-python3 model-train/scripts/autodl_environment.py plan
+AUTODL_MATERIAL_CACHE=/root/autodl-tmp/offline/issue-181-autodl
+"$AUTODL_BOOTSTRAP_PYTHON" model-train/scripts/autodl_environment.py lock \
+  --uv "$AUTODL_UV" \
+  --cache "$AUTODL_MATERIAL_CACHE/resolution"
+"$AUTODL_BOOTSTRAP_PYTHON" model-train/scripts/autodl_environment.py plan
 ```
 
 `lock --head-sizes` 可用 curl 查询索引未提供的大小；HEAD 失败时保留未知，不阻止写锁，也不会触发大包下载。
 `plan` 区分已知合计与未知材料，不把部分大小当作总量。首次锁应审查后再下载；正常准备直接复用已提交的锁。
 
 ```bash
-python3 model-train/scripts/autodl_environment.py prepare \
-  --bundle "$AUTODL_LOCAL_CACHE/python-cu128-bundle" \
+"$AUTODL_BOOTSTRAP_PYTHON" model-train/scripts/autodl_environment.py prepare \
+  --bundle "$AUTODL_MATERIAL_CACHE/python-cu128-bundle" \
   --jobs 4 \
   --progress-seconds 5
 ```
 
-`prepare --jobs` 默认 1，本次目标运行用 4。Python、uv 优先排队，其余独立材料并发下载。
+`prepare --jobs` 默认 1；示例的 4 沿用已批准下载恢复配置，只限定材料下载并发，不限制
+编译、数据处理、测试或训练的 CPU／GPU 并行。Python、uv 优先排队，其余独立材料并发下载。
 curl 继承调用者代理，`.part` 文件支持续传。连接超时为 30 秒，持续 60 秒低于 1 字节/秒会终止该次请求。
 每个完成文件检查 SHA-256；已知大小同时检查。
 已有正确文件直接复用，损坏文件拒绝覆盖。
@@ -61,7 +68,8 @@ curl 继承调用者代理，`.part` 文件支持续传。连接超时为 30 秒
   包含首个失败材料、尝试地址、curl/HTTP 错误和部分文件路径。成功材料记录实际完成来源。
 
 用户另已批准：目标机的获批来源仍失败时，由本机经香港网络下载该失败制品后上传，再按同一 SHA 核对。
-此跨机回退由本机编排执行，脚本只保留失败信息；不包含 SSH、账号或代理绑定，也不自动启动跨机操作。
+此跨机回退只中转同版本、同 SHA 的依赖材料，不能在本机安装后转为执行 B 路线计算任务。
+回退由本机编排执行，脚本只保留失败信息；不包含 SSH、账号或代理绑定，也不自动启动跨机操作。
 
 ## 目标机离线安装
 
@@ -99,5 +107,7 @@ Rust 工具前缀为 `/root/autodl-tmp/tools/rust-1.95.0`。后续编译和运�
 已有搜索路径保留；`PYO3_PYTHON` 仍指向项目虚拟环境，不修改解释器版本、sysconfig 或系统库目录。
 执行 Rust `python` feature 测试时，勿再用上述原始 `LIBDIR` 覆盖这些变量。
 
-此入口只完成依赖安装和依赖一致性检查。原生扩展编译、实际模型的 GPU 前向/反向/更新/保存加载、
-显存与端到端耗时仍由后续短验证完成，不能据此声称训练环境或业务验收已经通过。
+此入口只完成依赖安装和依赖一致性检查，不能据此声称训练环境或业务验收已经通过。
+原生扩展编译及 CPU／GPU 验证都在训练服务器进行。已有有效环境证据直接复用；
+实际模型的前向、反向、更新、保存／加载、显存及端到端耗时随真实 100ms GPU 路径验证，
+不再建立独立低配置参考任务或将重复环境样板设为开发前置。
