@@ -18,6 +18,14 @@ def validate(source):
     principal=Numbers.run_exact_batch(lambda:type(rational(['0'])).ratio(cost.principal_micro,cost.principal_micro.constant(1_000_000)))
     fee=Numbers.run_exact_batch(lambda:type(principal).ratio(cost.fee_1e5_units,cost.fee_1e5_units.constant(100_000)))
     book=ReservationBook.empty(1)
+    invalid_request=torch.tensor([[-1]],device='cuda')
+    invalid_book,result=run_reserve_action(book,invalid_request,roots[:,None],principal,fee,enabled[:,None],
+        rational(['10']),rational(['10']),integers([1]),integers([0]))
+    assert result.fault.cpu().tolist()==[1] and invalid_book.request_slots.cpu().tolist()==[[-1]]
+    padding_book,result=run_reserve_action(book,invalid_request,roots[:,None],principal,fee,torch.zeros_like(enabled[:,None]),
+        rational(['10']),rational(['10']),integers([1]),integers([0]))
+    assert result.fault.cpu().tolist()==[0] and result.outcomes.cpu().tolist()==[[0]]
+    assert padding_book.request_slots.cpu().tolist()==[[-1]]
     current=integers([begin['projection']['ledger_entry_seq']])
     local=integers([begin['projection']['ledger_local_prefix']])
     actual=rational([begin['cash']['actual_available_pusd']])

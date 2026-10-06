@@ -127,8 +127,9 @@ class ReservationBook:
         total=zero
         new=[]
         fault=self.fault | sequence_fault(current_ledger_sequence) | sequence_fault(current_local_prefix)
+        fault=fault | (enabled & (requests<0)).any(dim=1).to(torch.int32)
         for column in range(width):
-            cached=(self.request_slots==requests[:,column,None]).any(dim=1)
+            cached=((self.request_slots==requests[:,column,None])&(self.request_slots>=0)).any(dim=1)
             prior=((requests[:,:column]==requests[:,column,None])&enabled[:,:column]).any(dim=1)
             fresh=enabled[:,column]&~cached&~prior
             new.append(fresh)
