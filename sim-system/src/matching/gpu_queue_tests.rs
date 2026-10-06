@@ -188,9 +188,46 @@ fn gpu_fifo_preserves_segment_order_taker_debt_and_resync() {
             "rate":rate,"exponent":exponent,"total":total.to_string(),
             "allocations":allocations.iter().map(|value|value.to_string()).collect::<Vec<_>>() }));
     }
+    let opening = contracts::AccountOpeningFactV2 {
+        creation_request_id:"gpu-account-opening".into(),
+        account_instance_key:contracts::AccountInstanceKeyV1 {run_id:"gpu-account-run".into(),
+            caller_role:contracts::SimCallerRoleV1::ModelTrain,caller_instance_id:"gpu-account-caller".into(),
+            account_id:"gpu-account".into(),platform_source:contracts::PlatformSourceV1::Simulated},
+        session_id:"gpu-account-session".into(),initial_platform_scenario_file_sha256:contracts::Sha256Hex("a".repeat(64)),
+        initial_account_state:contracts::InitialAccountStateV2 {available_pusd:contracts::ExactDecimal("2000".into())},
+    };
+    let mut account=PlatformAccountStateV2::try_from_opening_fact(&opening).unwrap();
+    let account_condition=ConditionId("gpu-account-condition".into());
+    let account_token=TokenId("1".into());
+    let describe_account=|account:&PlatformAccountStateV2| {
+        let (cash,available,mr,tr,ml,tl,outcomes)=account.economic_balances_for_tests();
+        json!({"cash":cash.to_string(),"available":available.to_string(),
+            "principal":account.principal_encumbrance_pusd().to_string(),
+            "fee":account.immediate_taker_fee_encumbrance_pusd().to_string(),
+            "rebates":[mr.to_string(),tr.to_string(),ml.to_string(),tl.to_string()],
+            "outcomes":outcomes.iter().map(|(token,amount)|json!([token,amount.to_string()])).collect::<Vec<_>>(),
+            "next_sequence":account.next_account_transition_seq().to_string()})
+    };
+    let account_opened=describe_account(&account);
+    let accepted_delta=account.apply_order_accepted_with_required_available("sim-1",&account_condition,1_000,
+        5_010_000,"4".parse().unwrap(),"0.01".parse().unwrap()).unwrap();
+    let account_accepted=describe_account(&account);
+    let fill_delta=account.apply_fill_finality_economic("trade-1",0,&account_condition,&account_token,1_001,
+        crate::account::FillEconomicAmountsV1 {base_units:2_000_000,quote_units:1_000_000,immediate_taker_fee_units:10_000}).unwrap();
+    let account_filled=describe_account(&account);
+    let cancel_delta=account.apply_caller_cancel_release("sim-1",&account_condition,1_002,"3".parse().unwrap()).unwrap().unwrap();
+    let account_cancelled=describe_account(&account);
+    assert!(account.apply_caller_cancel_release("sim-1",&account_condition,1_003,Decimal::ZERO).unwrap().is_none());
+    assert!(matches!(account.apply_order_accepted_with_required_available("sim-2",&account_condition,1_004,
+        3_000_000_000,"3000".parse().unwrap(),Decimal::ZERO),Err(crate::account::PlatformAccountError::BalanceUnderflow("available_pusd"))));
+    assert_eq!(describe_account(&account),account_cancelled);
+    assert!(account.apply_caller_cancel_release("sim-1",&account_condition,1_005,"1".parse().unwrap()).is_err());
+    assert_eq!(describe_account(&account),account_cancelled);
+    let account_reference=json!({"opened":account_opened,"accepted":account_accepted,"filled":account_filled,
+        "cancelled":account_cancelled,"deltas":[accepted_delta,fill_delta,cancel_delta]});
     let input=json!({"checkpoints":checkpoints,"maker_depletion":"1000000","taker_quote":"2000000",
         "multi_plan":{"initial":multi_initial,"slices":slices,"applied":multi_applied,"echo":multi_echo},
-        "quote_plans":quote_plans,"cross_quote_plans":cross_plans,"floor_sums":floor_sums,"taker_fees":taker_fees,"cross_limits":cross_limits,"limit_segments":limit_segments,"empty_quote_plan":{"matched":empty_quote.matched_base_units.to_string(),"used":empty_quote.used_quote_units.to_string()}});
+        "quote_plans":quote_plans,"cross_quote_plans":cross_plans,"floor_sums":floor_sums,"account":account_reference,"taker_fees":taker_fees,"cross_limits":cross_limits,"limit_segments":limit_segments,"empty_quote_plan":{"matched":empty_quote.matched_base_units.to_string(),"used":empty_quote.used_quote_units.to_string()}});
     let python=std::env::var("B_GPU_PYTHON").unwrap();
     let script=std::env::var("B_GPU_FIFO_VALIDATOR").unwrap();
     let mut child=std::process::Command::new(python).arg(script).stdin(std::process::Stdio::piped())

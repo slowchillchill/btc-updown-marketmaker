@@ -206,6 +206,48 @@ def main():
         assert not fee.fault.any().cpu().item(),fee.fault.cpu().tolist()
         assert values(fee.total_micro)==[int(original['total'])]
         assert values(fee.per_fill_micro)==[int(value) for value in original['allocations']]
+    from account_state import PlatformAccountState
+    account_reference=reference['account']
+    enabled=torch.ones(1,dtype=torch.bool,device='cuda')
+    account=Numbers.run_exact_batch(lambda:PlatformAccountState.open(integers([2_000_000_000]),torch.zeros(1,dtype=torch.int64,device='cuda')))
+    def describe_account(state):
+        rebate_n,rebate_d=values(state.rebates.numerator),values(state.rebates.denominator)
+        fields={name:str(Fraction(values(getattr(state,name))[0],1_000_000)) for name in ('cash','available','principal','fee')}
+        # Compare exact quantities, not decimal formatting.
+        return fields,[Fraction(n,d) for n,d in zip(rebate_n,rebate_d)],values(state.outcomes),values(state.next_sequence)
+    def check_account(state,expected):
+        fields,rebates,outcomes,sequence=describe_account(state)
+        for name,value in fields.items():
+            assert Fraction(value)==Fraction(expected[name]),(name,value,expected[name])
+        assert rebates==[Fraction(value) for value in expected['rebates']]
+        original_outcomes={token:Fraction(value)*1_000_000 for token,value in expected['outcomes']}
+        assert outcomes==[int(original_outcomes.get('1',0))]
+        assert sequence==[int(expected['next_sequence'])]
+    def check_delta(delta,expected):
+        assert delta.emitted.cpu().tolist()==[True]
+        assert values(delta.sequence)==[expected['account_transition_seq']]
+        source=expected['balance_delta']
+        for name,field in [('cash','cash_pusd_delta'),('available','available_pusd_delta'),
+                           ('principal','principal_encumbrance_pusd_delta'),('fee','immediate_taker_fee_encumbrance_pusd_delta')]:
+            assert values(getattr(delta.movement,name))==[int(Fraction(source[field])*1_000_000)]
+        original_outcomes={item['token_id']:Fraction(item['balance_shares_delta'])*1_000_000 for item in source['outcome_balance_deltas']}
+        assert values(delta.movement.outcomes)==[int(original_outcomes.get('1',0))]
+    check_account(account,account_reference['opened'])
+    account,delta,rejected=Numbers.run_exact_batch(lambda:account.accept_order(integers([4_000_000]),integers([10_000]),integers([5_010_000]),enabled))
+    assert rejected.cpu().tolist()==[False]
+    check_account(account,account_reference['accepted']);check_delta(delta,account_reference['deltas'][0])
+    account,delta=Numbers.run_exact_batch(lambda:account.fill_economic(integers([2_000_000]),integers([1_000_000]),integers([10_000]),torch.zeros(1,dtype=torch.int64,device='cuda'),enabled))
+    check_account(account,account_reference['filled']);check_delta(delta,account_reference['deltas'][1])
+    account,delta=Numbers.run_exact_batch(lambda:account.release_principal(integers([3_000_000]),enabled))
+    check_account(account,account_reference['cancelled']);check_delta(delta,account_reference['deltas'][2])
+    same,delta=Numbers.run_exact_batch(lambda:account.release_principal(integers([0]),enabled))
+    check_account(same,account_reference['cancelled']);assert delta.emitted.cpu().tolist()==[False]
+    rejected_state,delta,rejected=Numbers.run_exact_batch(lambda:account.accept_order(integers([3_000_000_000]),integers([0]),integers([3_000_000_000]),enabled))
+    check_account(rejected_state,account_reference['cancelled']);assert rejected.cpu().tolist()==[True]
+    assert delta.emitted.cpu().tolist()==[False] and not rejected_state.fault.any().cpu().item()
+    failed,delta=Numbers.run_exact_batch(lambda:account.release_principal(integers([1_000_000]),enabled))
+    check_account(failed,account_reference['cancelled']);assert delta.emitted.cpu().tolist()==[False]
+    assert failed.fault.cpu().tolist()==[1]
     torch.cuda.synchronize()
     print(json.dumps({'checks':['original_fifo_all_fields','taker_original_quote_difference','debt_echo_no_second_depletion',
         'resync_retains_account_order','cancel_only_target','segment_growth_retains_original_B_Q',
@@ -216,7 +258,9 @@ def main():
         'floor_sum_grows_for_large_exact_result','floor_sum_invalid_not_normal_value','original_empty_asset_quote_no_liquidity','original_nonmonotone_limit_segment',
         'limit_segment_exact_96bit_quantity','original_GTC_cross_price_cumulative_credit',
         'GTC_partial_target_applies_without_FOK_gate','maximum_price_stops_before_later_ask','original_order_total_taker_fee_H5',
-        'exact_remainder_allocation_original_fill_order','taker_fee_large_exponent_strict_zero'],
+        'exact_remainder_allocation_original_fill_order','taker_fee_large_exponent_strict_zero','original_SIM_account_encumbrance_and_economic_delta',
+        'cancellation_principal_only_zero_is_no_delta','insufficient_available_is_rejection_without_mutation',
+        'account_underflow_no_partial_commit'],
         'limit_cross_seconds':limit_cross_seconds,'limit_segment_seconds':limit_seconds,'capacity':queue.capacity,'elapsed_seconds':time.perf_counter()-started,
         'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
         'noe_ledger_execution_delivered':False}))
