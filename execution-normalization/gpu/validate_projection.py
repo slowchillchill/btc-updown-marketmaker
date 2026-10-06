@@ -220,12 +220,14 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         Fraction(expected_assets.get(token,'0')) for token in ['1','2']]
     # 真实共享NOE→Ledger顺序/绑定候选自行生成entry/local seq，原对照只检查结果。
     from admission import AdmissionLifecycle
+    from position_cost import PositionCosts
     from success_pool import SuccessPools
     pools=Numbers.run_exact_batch(lambda:SuccessPools.open(torch.tensor([0,0],device='cuda'),
         torch.tensor([0,0],device='cuda'),torch.tensor([0,1],device='cuda'),torch.tensor([1,0],device='cuda'),1))
     from buy_cost import limit_buy_cost
     admission=Numbers.run_exact_batch(lambda:AdmissionLifecycle.open(platform,state.normalizer.bank,columns,
-        integers([source['reservation_checkpoints'][0]['projection']['ledger_entry_seq']]),integers([0]),pools))
+        integers([source['reservation_checkpoints'][0]['projection']['ledger_entry_seq']]),integers([0]),pools,
+        position_costs=PositionCosts.empty(1,columns.row_refs.size(1),'cuda')))
     cost=Numbers.run_exact_batch(lambda:limit_buy_cost(integers([500]),rational(['0.3']),rational([source['fee_rate']]),
         source['fee_exponent'],post_only=torch.tensor([False],device='cuda'),minimum_principal_micro=integers([1_000_000])))
     principal=Numbers.run_exact_batch(lambda:type(rational(['0'])).ratio(cost.principal_micro,cost.principal_micro.constant(1_000_000)))
@@ -414,6 +416,15 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         value=getattr(executed,name)
         actual=[Fraction(n,d) for n,d in zip(values(value.numerator),values(value.denominator))]
         assert actual==[Fraction(row[key]) for row in expected_executed],(name,actual,expected_executed)
+    cost_read=Numbers.run_exact_batch(admission.position_costs.read)
+    assert cost_read.known.cpu().tolist()==[True] and cost_read.fault.cpu().tolist()==[0]
+    for name,key in [('cost','position_cost_basis_pusd'),('fee','fees_pusd')]:
+        value=getattr(cost_read,name)
+        assert [Fraction(n,d) for n,d in zip(values(value.numerator),values(value.denominator))]==[Fraction(expected_platform[key])]
+    asset_cost=Numbers.run_exact_batch(lambda:admission.position_costs.asset_cost(admission.platform.asset_roots))
+    expected_costs={row['token_id']:row['position_cost_basis_pusd'] for row in expected_platform['outcome_balances']}
+    assert [Fraction(n,d) for n,d in zip(values(asset_cost.numerator),values(asset_cost.denominator))]==[
+        Fraction(expected_costs.get(token,'0')) for token in ['1','2']]
     exact_contributions=[Fraction(n,d) for n,d in zip(values(admission.trade_success.unpaired_contribution.numerator),values(admission.trade_success.unpaired_contribution.denominator))]
     expected_contributions={int(row['fact']['fill_sequence']):Fraction(int(row['unpaired_contribution_shares']['Known']['numerator']),
         int(row['unpaired_contribution_shares']['Known']['denominator'])) for row in source['reservation_checkpoints'][-1]['trades'] if row['success_applied']}
@@ -432,4 +443,4 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         'actual_device_Ledger_economic_position_predecessor_checked':True,
         'Ledger_admission_device_generated_entry_local_and_binding_checked':True,
         'device_closed_cache_waiting_then_new_records_retry_checked':True,
-        'duplicate_NOE_NotApplicable_without_Ledger_commit_checked':True,'unbound_economic_before_Submission_unsent_reservation_checked':True,'actual_existing_economic_MakerCash_and_four_funds_checked':True,'two_root_one_item_funds_fault_isolation_checked':True,'actual_trade_economic_success_pool_checked':True,'fill_economic_before_pending_lifecycle_checked':True,'actual_unpaired_trade_contribution_checked':True,'actual_taker_contribution_index_checked':True,'actual_trade_role_and_net_fee_executed_read_checked':True,'full_clock_Ledger_reservation_delivered':False}
+        'duplicate_NOE_NotApplicable_without_Ledger_commit_checked':True,'unbound_economic_before_Submission_unsent_reservation_checked':True,'actual_existing_economic_MakerCash_and_four_funds_checked':True,'two_root_one_item_funds_fault_isolation_checked':True,'actual_trade_economic_success_pool_checked':True,'fill_economic_before_pending_lifecycle_checked':True,'actual_unpaired_trade_contribution_checked':True,'actual_taker_contribution_index_checked':True,'actual_trade_role_and_net_fee_executed_read_checked':True,'actual_applied_position_cost_and_fee_read_checked':True,'full_clock_Ledger_reservation_delivered':False}

@@ -12,6 +12,7 @@ from admission_lifecycle import LifecycleColumns,LifecycleDirectory
 from reservation import ReservationBook,run_reserve_action,sequence_fault
 from memory import EconomicColumns
 from trade_success import TradeSuccess
+from position_cost import PositionCosts
 from rebate_contribution import RebateContributions
 from core import OUT_EVIDENCE,OUT_FACT,OUT_DUPLICATE,OUT_ALIAS,OUT_LOGICAL_CONFLICT,OUT_ECONOMIC_CONFLICT,OUT_PENDING
 
@@ -50,6 +51,7 @@ class AdmissionLifecycle:
     platform: object
     success_pools: object
     trade_success: object
+    position_costs: object
     rebate_contributions: object
     rebate_days: object
     maker_cash: object  # 原Existing经济现金归Maker；结算新kind须按原归属另接。
@@ -70,13 +72,16 @@ class AdmissionLifecycle:
     fault: torch.Tensor
 
     @classmethod
-    def open(cls,platform,bank,columns,current_entry_sequence,current_local_prefix,success_pools,*,rebate_days=None):
+    def open(cls,platform,bank,columns,current_entry_sequence,current_local_prefix,success_pools,*,rebate_days=None,position_costs=None):
         roots,width=columns.row_refs.shape
         life=LifecycleColumns.from_projection(bank,columns)
         book=ReservationBook.empty(roots,capacity=max(1,width),device=columns.row_refs.device)
         empty=torch.full_like(book.request_slots,-1)
         opening_cash=take_ratio(platform.balances,torch.arange(roots,device=empty.device)*8)
-        return cls(platform,success_pools,TradeSuccess.open(roots,max(1,width),empty.device),
+        # 中途冷前缀不能将未提供的既有成本冒充已知零；新根显式传入empty。
+        if position_costs is None:
+            position_costs=PositionCosts.empty(roots,max(1,width),empty.device,known=False)
+        return cls(platform,success_pools,TradeSuccess.open(roots,max(1,width),empty.device),position_costs,
             RebateContributions.empty(roots,max(1,width),empty.device),rebate_days,opening_cash,book,LifecycleDirectory.empty(roots,max(1,width),device=empty.device),
             LifecycleDirectory.empty(roots,max(1,width),device=empty.device),columns,life,
             current_entry_sequence,current_local_prefix,empty,empty.clone(),torch.zeros_like(columns.enabled),
@@ -216,6 +221,14 @@ class AdmissionLifecycle:
             immediate_fee=ExactRational.ratio(_take(self.lifecycle.trade_fee_units,index),base.constant(1_000_000)),
             maker_fee_read_kind=self.lifecycle.maker_fee_read_kind[root,local],
             maker_fee_equivalent=take_ratio(self.lifecycle.maker_fee_equivalent,index))
+        zero_cost=ExactRational(base.constant(0),base.constant(1))
+        applied_cost=zero_cost-take_ratio(balances,root*8+2)
+        applied_fee=zero_cost-take_ratio(balances,root*8+3)
+        applied_fill=economic_trade & (self.lifecycle.economic_tags[root,local]==6)
+        compensated=economic_trade & (self.lifecycle.economic_tags[root,local]==8)
+        fault=fault | torch.where(applied_fill,applied_cost.fault | applied_fee.fault,0)
+        position_costs=self.position_costs.transition(trade_at,self.lifecycle.conditions[root,local],assets,
+            self.lifecycle.economic_path_ordinals[root,local],applied_cost,applied_fee,applied_fill,compensated)
         trade_success,success_pools=trade_success.apply_success(self.success_pools,trades,trade_at,(trade_event|economic_trade)&(fault==0))
         fault=fault | success_pools.fault
         contribution_event=lifecycle_use & (tag==9)
@@ -292,6 +305,7 @@ class AdmissionLifecycle:
         applied=self.applied | (same&success[:,None])
         return replace(self,platform=platform,success_pools=success_pools.coordinated(self.success_pools,valid),
             trade_success=coordinate(trade_success,self.trade_success,valid),
+            position_costs=coordinate(position_costs,self.position_costs,valid),
             rebate_contributions=contributions,rebate_days=days,maker_cash=ExactRational(
             maker_cash.numerator.select(success & economic,self.maker_cash.numerator),
             maker_cash.denominator.select(success & economic,self.maker_cash.denominator)),reservations=coordinate(book,self.reservations,valid),

@@ -15,6 +15,7 @@ git status --porcelain > "$artifact_dir/status.txt"
 export B_GPU_PYTHON="$repo_root/model-train/.venv/bin/python"
 export B_GPU_MULTIASK_VALIDATOR="$repo_root/sim-system/gpu/validate_multiask.py"
 export B_GPU_OUTER_MAKER_VALIDATOR="$repo_root/sim-system/gpu/validate_outer_maker_day.py"
+export B_GPU_POSITION_VALIDATOR="$repo_root/sim-system/gpu/validate_position_cost.py"
 export B_GPU_ORDER_ARTIFACT_DIR="$artifact_dir"
 export PYTHONPATH="$repo_root/model-train/src:$repo_root/sim-system/gpu"
 run_test() {

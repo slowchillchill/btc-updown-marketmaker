@@ -320,6 +320,13 @@ async fn gpu_real_failed_fill_reverses_original_applied_cost_and_fee_once() {
             zero(&outcome.balance_shares) && zero(&outcome.position_cost_basis_pusd)));
         assert!(before_repeat.market_projections.iter().all(|market|
             zero(&market.position_cost_basis_pusd) && zero(&market.fees_pusd)));
+        let output = std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
+            .arg(std::env::var("B_GPU_POSITION_VALIDATOR").unwrap())
+            .arg(artifact.join(format!("original-failed-fill-{index}.json")))
+            .output().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        std::fs::write(artifact.join(format!("failed-position-report-{index}.json")), &output.stdout).unwrap();
+        eprintln!("gpu_failed_position={}", String::from_utf8_lossy(&output.stdout));
     }
 }
 

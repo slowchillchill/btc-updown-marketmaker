@@ -126,6 +126,7 @@ def main():
     sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'ledger/gpu'))
     from memory import EconomicColumns
     from admission import AdmissionLifecycle
+    from position_cost import PositionCosts
     from closed import ClosedAdmission
     from success_pool import SuccessPools
     from rebate_day import RebateDays
@@ -141,7 +142,8 @@ def main():
             torch.tensor([0,1],device='cuda'),torch.tensor([1,0],device='cuda'),1)
         rebatedays=RebateDays.empty(torch.tensor([[0]],device='cuda'),1)
         admission=AdmissionLifecycle.open(balances,noe.normalizer.bank,columns,
-            integers([projection['ledger_entry_seq']]),integers([projection['ledger_local_prefix']]),pools,rebate_days=rebatedays)
+            integers([projection['ledger_entry_seq']]),integers([projection['ledger_local_prefix']]),pools,rebate_days=rebatedays,
+            position_costs=PositionCosts.empty(1,columns.row_refs.size(1),'cuda'))
         admission=replace(admission,maker_cash=rational([str(Fraction(before['cash']['maker_available_pusd'])+Fraction(before['cash']['maker_reserved_pusd']))]))
         return admission
     admission=Numbers.run_exact_batch(prepare_ledger)
@@ -155,6 +157,13 @@ def main():
     assert values(admission.current_entry_sequence)==[actual['ledger_entry_seq']]
     assert values(admission.platform.platform_source_prefix)==[actual['platform_source_prefix']]
     assert amounts(admission.platform.balances)==[Fraction(actual['platform_confirmed_projection'][name]) for name in names]
+    cost_read=Numbers.run_exact_batch(admission.position_costs.read)
+    assert cost_read.known.cpu().tolist()==[True] and cost_read.fault.cpu().tolist()==[0]
+    assert amounts(cost_read.cost)==[Fraction(actual['platform_confirmed_projection']['position_cost_basis_pusd'])]
+    assert amounts(cost_read.fee)==[Fraction(actual['platform_confirmed_projection']['fees_pusd'])]
+    cost_assets=Numbers.run_exact_batch(lambda:admission.position_costs.asset_cost(admission.platform.asset_roots))
+    expected_costs={row['token_id']:row['position_cost_basis_pusd'] for row in actual['platform_confirmed_projection']['outcome_balances']}
+    assert amounts(cost_assets)==[Fraction(expected_costs.get(token,'0')) for token in ['1','2']]
     original_sequences={json.dumps(a['position'],sort_keys=True):a['after']['projection']['ledger_entry_seq']
         for a in source['attempts'] if not a['deferred']}
     applied_sequences=values(admission.applied_sequences)
@@ -187,7 +196,7 @@ def main():
     print(json.dumps({'original_outer_non_post_only_GTC_hidden_Maker_source':True,'same_actual_V4_batch_and_payloads_checked':9,
         'original_received_order_and_dual_gates_checked':True,'device_closed_record_consumer_checked':True,
         'reference_attempt_order_drives_device':False,'repeat_keeps_first_visibility_and_delivery':True,
-        'cold_prefix_initializations':1,'actual_trade_role_and_net_fee_executed_read_checked':True,'day_and_payment_money_seq_and_positions_checked':True,
+        'cold_prefix_initializations':1,'actual_trade_role_and_net_fee_executed_read_checked':True,'actual_applied_position_cost_and_fee_read_checked':True,'day_and_payment_money_seq_and_positions_checked':True,
         'elapsed_seconds_with_reference_reads':time.perf_counter()-start,'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
         'complete_global_SIM_clock_or_activity_recovery_delivered':False}))
 
