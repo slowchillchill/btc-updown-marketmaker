@@ -13,7 +13,7 @@ from decimal import Decimal, localcontext
 from fractions import Fraction
 from pathlib import Path
 import torch
-from model_train.gpu_exact import ExactInt, ExactRational, public_extension
+from model_train.gpu_exact import ExactInt, ExactRational, public_extension, run_exact_batch
 
 
 def nearest_bits(n,d):
@@ -77,7 +77,7 @@ def main():
         reference=torch.tensor(expected,dtype=torch.float32,device='cuda');difference=(actual-reference).abs();errors[name]={'max_absolute':float(difference.max()),'different':int((actual!=reference).sum())}
     assert not bool(lf.any()|rf.any())
     _,zero_fault=ga.project(ExactInt.from_values([0]*len(a)));assert bool((zero_fault==1).all()),'zero denominator'
-    _,_,_,_,df=extension.integer_op(3,ga.words,ga.sign,ExactInt.from_values([0]*len(a)).words,gb.sign);assert bool((df==1).all()),'division zero'
+    _,_,_,_,df,_=extension.integer_op(3,ga.words,ga.sign,ExactInt.from_values([0]*len(a)).words,gb.sign);assert bool((df==1).all()),'division zero'
     bad, _ = ExactInt.from_values([1]).divrem(ExactInt.from_values([0]))
     compared_bad = bad.compare(ExactInt.from_values([1]))
     assert int(compared_bad.fault[0]) == 1 and not bool(compared_bad.valid_mask()[0]), 'compare fault propagation'
@@ -124,8 +124,8 @@ def main():
     nums = ExactInt.from_values(quantities)
     price_r = ExactRational.from_values([p.numerator for p in prices], [p.denominator for p in prices])
     rate_r = ExactRational.from_values([r.numerator for r in rates], [r.denominator for r in rates])
-    cost = buy_cost.limit_buy_cost(nums, price_r, rate_r, 1,
-        post_only=torch.tensor(post, dtype=torch.bool, device='cuda'), minimum_principal_micro=nums.constant(1_000_000))
+    cost = run_exact_batch(lambda: buy_cost.limit_buy_cost(nums, price_r, rate_r, 1,
+        post_only=torch.tensor(post, dtype=torch.bool, device='cuda'), minimum_principal_micro=nums.constant(1_000_000)))
     principal_expected = [n * int(p*1_000_000)//100 for n,p in zip(quantities,prices)]
     def half_up(f):
         q,r = divmod(f.numerator, f.denominator)
@@ -140,15 +140,39 @@ def main():
     threshold_rate = ExactRational.from_values([4,39999], [1_000_000,10_000_000_000])
     threshold_n = ExactInt.from_values([500,500])
     threshold_p = ExactRational.from_values([1,1], [2,2])
-    threshold_fee = buy_cost.market_fee_estimate(threshold_n, threshold_p, threshold_rate, 1)
+    threshold_fee = run_exact_batch(lambda: buy_cost.market_fee_estimate(threshold_n, threshold_p, threshold_rate, 1))
     assert threshold_fee.report_values() == [1,0], 'strict fee half unit'
     for exponent in [95, 0xffffffff]:
-        tiny_fee = buy_cost.market_fee_estimate(nums, price_r, rate_r, exponent)
+        tiny_fee = run_exact_batch(lambda: buy_cost.market_fee_estimate(nums, price_r, rate_r, exponent), initial_word_capacity=128)
         assert tiny_fee.report_values() == [0]*len(quantities), 'large exponent exact zero'
         assert not bool(tiny_fee.fault.any())
     records.extend(['sim_limit_cost', 'sim_fee_half', 'sim_fee_large_exponent'])
+    log(f'阶段=连续容量复用 耗时={time.monotonic()-started:.3f}s')
+    def constant_chain():
+        value = ExactRational.from_values([1], [1])
+        capacities = []
+        for _ in range(64):
+            value = value * value
+            capacities.append((value.numerator.words.shape[1], value.denominator.words.shape[1]))
+        return value, capacities
+    torch.cuda.synchronize()
+    resident_before = torch.cuda.memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
+    stable, capacities = run_exact_batch(constant_chain)
+    torch.cuda.synchronize()
+    constant_peak_growth = torch.cuda.max_memory_allocated() - resident_before
+    assert stable.numerator.report_values() == [1] and stable.denominator.report_values() == [1]
+    assert set(capacities) == {(4,4)}, 'constant rational storage must remain stable'
+    assert constant_peak_growth < 16*1024*1024, 'bounded continuous temporary storage'
+    def growth_chain():
+        value = ExactInt.from_values([1<<126])
+        return value * value
+    grown = run_exact_batch(growth_chain)
+    assert grown.report_values() == [1<<252] and not bool(grown.fault.any()), 'real growth must expand capacity and retry'
+    assert grown.words.shape[1] == 8, 'resource growth uses actual required width'
+    records.extend(['continuous_capacity', 'true_growth_retry'])
     torch.cuda.synchronize();elapsed=time.monotonic()-started
-    report={'scope':'实际公共GPU整数/末端投影；不是完整环境/PPO/训练容量','source_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'cases':len(a),'passed':records,'projection_errors':errors,'compile_seconds':compile_seconds,'elapsed_seconds':elapsed,'device':torch.cuda.get_device_name(),'peak_allocated_bytes':torch.cuda.max_memory_allocated()}
+    report={'scope':'实际公共GPU整数/有理数/SIM费用/连续容量；不是完整环境/PPO/训练容量','source_commit':subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip(),'cases':len(a),'passed':records,'projection_errors':errors,'compile_seconds':compile_seconds,'elapsed_seconds':elapsed,'device':torch.cuda.get_device_name(),'constant_chain_peak_growth_bytes':constant_peak_growth,'constant_chain_words':capacities[-1],'peak_after_constant_stage_reset_bytes':torch.cuda.max_memory_allocated()}
     args.output.parent.mkdir(parents=True,exist_ok=True);args.output.write_text(json.dumps(report,ensure_ascii=False,indent=2)+'\n');log(f'完成 精确检查={records} 投影有限误差={errors} 耗时={elapsed:.3f}s')
 
 if __name__=='__main__':main()

@@ -5,42 +5,59 @@ using namespace public_gpu;
 __global__ void integer_kernel(int op, const uint32_t* aw, int64_t wa,
     const int8_t* as, const uint32_t* bw, int64_t wb, const int8_t* bs,
     uint32_t* ow, int64_t wo, int8_t* os, uint32_t* rw, int64_t wr,
-    int8_t* rs, int32_t* fault, int64_t rows) {
+    int8_t* rs, int32_t* fault, uint32_t* work, int64_t cap,
+    int64_t* required, int64_t rows) {
   int64_t row = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
   if (row >= rows) return;
   const auto* a = aw + row * wa;
   const auto* b = bw + row * wb;
-  auto* o = ow + row * wo;
-  auto* r = rw + row * wr;
+  auto* output = ow + row * wo;
+  auto* remainder = rw + row * wr;
+  auto* o = work + row * 2 * cap;
+  auto* r = o + cap;
   int64_t na = length(a, wa), nb = length(b, wb);
   int sa = na ? as[row] : 0, sb = nb ? bs[row] : 0;
-  zero(o, wo);
-  zero(r, wr);
+  zero(o, cap);
+  zero(r, cap);
   fault[row] = 0;
+  required[row] = 0;
   rs[row] = 0;
   if (op == 0 || op == 1) {
     if (op == 1) sb = -sb;
     if (sa == sb) {
-      add(o, wo, a, na, b, nb);
+      add(o, cap, a, na, b, nb);
       os[row] = sa;
     } else if (compare(a, na, b, nb) >= 0) {
-      subtract(o, wo, a, na, b, nb);
+      subtract(o, cap, a, na, b, nb);
       os[row] = sa;
     } else {
-      subtract(o, wo, b, nb, a, na);
+      subtract(o, cap, b, nb, a, na);
       os[row] = sb;
     }
   } else if (op == 2) {
-    multiply(o, wo, a, na, b, nb);
+    multiply(o, cap, a, na, b, nb);
     os[row] = sa * sb;
   } else if (op == 3) {
-    fault[row] = !divide(o, wo, r, wr, a, na, b, nb);
+    fault[row] = !divide(o, cap, r, cap, a, na, b, nb);
     os[row] = sa * sb;
-    rs[row] = length(r, wr) ? sa : 0;
+    rs[row] = length(r, cap) ? sa : 0;
   } else {
     os[row] = sa == sb ? sa * compare(a, na, b, nb) : (sa < sb ? -1 : 1);
   }
-  if (op != 4 && !length(o, wo)) os[row] = 0;
+  int64_t used = length(o, cap);
+  int64_t used_rem = length(r, cap);
+  if (used > wo || used_rem > wr) {
+    // 独立资源信号，整批扩容重试；不是业务拒绝、截断数值或NoTrade。
+    fault[row] |= 2;
+    required[row] = used > used_rem ? used : used_rem;
+    zero(output, wo);
+    zero(remainder, wr);
+    os[row] = rs[row] = 0;
+    return;
+  }
+  copy(output, wo, o, used);
+  copy(remainder, wr, r, used_rem);
+  if (op != 4 && !used) os[row] = 0;
 }
 
 // 高位尾数和指数避免任意长整数转double时溢出。
@@ -123,9 +140,10 @@ __global__ void index_probe_kernel(const int64_t* widths, const uint32_t* tops,
 extern "C" void public_gpu_integer(int op, const uint32_t* a, int64_t wa,
     const int8_t* sa, const uint32_t* b, int64_t wb, const int8_t* sb,
     uint32_t* o, int64_t wo, int8_t* so, uint32_t* r, int64_t wr,
-    int8_t* sr, int32_t* f, int64_t rows, cudaStream_t stream) {
+    int8_t* sr, int32_t* f, uint32_t* work, int64_t cap,
+    int64_t* required, int64_t rows, cudaStream_t stream) {
   integer_kernel<<<(rows + 255) / 256, 256, 0, stream>>>(
-      op, a, wa, sa, b, wb, sb, o, wo, so, r, wr, sr, f, rows);
+      op, a, wa, sa, b, wb, sb, o, wo, so, r, wr, sr, f, work, cap, required, rows);
 }
 extern "C" void public_gpu_project(int op, const uint32_t* n, int64_t wn,
     const int8_t* sn, const uint32_t* d, int64_t wd, float* o, int32_t* f,
@@ -142,14 +160,15 @@ __global__ void gcd_kernel(const uint32_t* a, int64_t wa, const uint32_t* b,
     int64_t wb, uint32_t* out, uint32_t* work, int64_t cap, int64_t rows) {
   int64_t row = int64_t(blockIdx.x) * blockDim.x + threadIdx.x;
   if (row >= rows) return;
-  uint32_t* x = work + row * 4 * cap;
-  uint32_t* y = x + cap;
-  uint32_t* q = y + cap;
-  uint32_t* r = q + cap;
-  copy(x, cap, a + row * wa, wa);
-  copy(y, cap, b + row * wb, wb);
-  while (length(y, cap)) {
-    divide(q, cap, r, cap, x, cap, y, cap);
+  int64_t scratch_cap = cap + 1;
+  uint32_t* x = work + row * 4 * scratch_cap;
+  uint32_t* y = x + scratch_cap;
+  uint32_t* q = y + scratch_cap;
+  uint32_t* r = q + scratch_cap;
+  copy(x, scratch_cap, a + row * wa, wa);
+  copy(y, scratch_cap, b + row * wb, wb);
+  while (length(y, scratch_cap)) {
+    divide(q, scratch_cap, r, scratch_cap, x, scratch_cap, y, scratch_cap);
     // 旋转独占临时区；不用CPU条件判断或回传余数。
     uint32_t* old_x = x;
     x = y;

@@ -20,3 +20,4 @@ ExactInt = _numbers().ExactInt
 ExactComparison = _numbers().ExactComparison
 ExactRational = _numbers().ExactRational
 public_extension = _numbers().public_extension
+run_exact_batch = _numbers().run_exact_batch

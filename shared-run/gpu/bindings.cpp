@@ -28,22 +28,26 @@ std::vector<torch::Tensor> integer_op(int op, torch::Tensor a, torch::Tensor sa,
   TORCH_CHECK(op >= 0 && op <= 4, "未知整数操作");
   const c10::cuda::CUDAGuard guard(a.device());
   int64_t wa = a.size(1), wb = b.size(1), rows = a.size(0);
-  int64_t wo = op == 2 ? wa + wb : (op == 3 ? wa : std::max(wa, wb) + 1);
-  int64_t wr = wb + 1;
+  int64_t wo = std::max(wa, wb), wr = wo;
+  int64_t cap = wa + wb + 1;
   capacity_check(rows, wo); capacity_check(rows, wr);
+  capacity_check(rows, 2 * cap);
   auto out = torch::empty({rows, wo}, a.options());
   auto sign = torch::empty({rows}, sa.options());
   auto rem = torch::empty({rows, wr}, a.options());
   auto rs = torch::empty({rows}, sa.options());
   auto fault = torch::empty({rows}, a.options());
+  auto required = torch::empty({rows}, a.options().dtype(torch::kInt64));
+  auto work = torch::empty({rows, 2 * cap}, a.options());
   if (rows) public_gpu_integer(op, (uint32_t*)a.data_ptr<int32_t>(), wa,
       sa.data_ptr<int8_t>(), (uint32_t*)b.data_ptr<int32_t>(), wb,
       sb.data_ptr<int8_t>(), (uint32_t*)out.data_ptr<int32_t>(), wo,
       sign.data_ptr<int8_t>(), (uint32_t*)rem.data_ptr<int32_t>(), wr,
-      rs.data_ptr<int8_t>(), fault.data_ptr<int32_t>(), rows,
+      rs.data_ptr<int8_t>(), fault.data_ptr<int32_t>(),
+      (uint32_t*)work.data_ptr<int32_t>(), cap, required.data_ptr<int64_t>(), rows,
       c10::cuda::getCurrentCUDAStream().stream());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  return {out, sign, rem, rs, fault};
+  return {out, sign, rem, rs, fault, required};
 }
 std::vector<torch::Tensor> project(int op, torch::Tensor n,
                                  torch::Tensor sign, torch::Tensor d) {
@@ -84,10 +88,10 @@ torch::Tensor gcd(torch::Tensor a, torch::Tensor b) {
   words_check(a); words_check(b);
   TORCH_CHECK(a.device() == b.device() && a.size(0) == b.size(0), "GCD批次/设备不一致");
   const c10::cuda::CUDAGuard guard(a.device());
-  int64_t rows = a.size(0), cap = std::max(a.size(1), b.size(1)) + 1;
-  capacity_check(rows, 4 * cap);
+  int64_t rows = a.size(0), cap = std::max(a.size(1), b.size(1));
+  capacity_check(rows, 4 * (cap + 1));
   auto out = torch::empty({rows, cap}, a.options());
-  auto work = torch::empty({rows, 4 * cap}, a.options());
+  auto work = torch::empty({rows, 4 * (cap + 1)}, a.options());
   if (rows) public_gpu_gcd((uint32_t*)a.data_ptr<int32_t>(), a.size(1),
       (uint32_t*)b.data_ptr<int32_t>(), b.size(1), (uint32_t*)out.data_ptr<int32_t>(),
       (uint32_t*)work.data_ptr<int32_t>(), cap, rows,

@@ -102,7 +102,8 @@ __device__ inline bool divide(uint32_t* q, int64_t nq, uint32_t* r,
 #endif
 extern "C" void public_gpu_integer(int, const uint32_t*, int64_t, const int8_t*,
     const uint32_t*, int64_t, const int8_t*, uint32_t*, int64_t, int8_t*,
-    uint32_t*, int64_t, int8_t*, int32_t*, int64_t, cudaStream_t);
+    uint32_t*, int64_t, int8_t*, int32_t*, uint32_t*, int64_t, int64_t*,
+    int64_t, cudaStream_t);
 extern "C" void public_gpu_project(int, const uint32_t*, int64_t, const int8_t*,
     const uint32_t*, int64_t, float*, int32_t*, uint32_t*, int64_t, int64_t, cudaStream_t);
 extern "C" void public_gpu_index_probe(const int64_t*, const uint32_t*, int64_t*,

@@ -3,7 +3,40 @@ from dataclasses import dataclass
 from pathlib import Path
 from functools import lru_cache
 import importlib.util
+from contextvars import ContextVar
 import torch
+
+
+_batch = ContextVar('public_exact_resource_batch', default=None)
+
+
+def _bucket(required):
+    return 1 << (max(4, required) - 1).bit_length()
+
+
+def run_exact_batch(compute, *, initial_word_capacity=4):
+    """协调资源事务：compute只生成待提交结果，不能推进外部账户或随机数。
+
+    全批只读取一次资源请求。容量不足时丢弃本批临时结果、扩池并原输入重算。
+    本入口不读取业务数值、不把资源失败转换成合法域拒绝。真实环境协调器须在
+    此入口成功后才提交状态；含随机采样时由协调器保存/恢复其原RNG快照。
+    """
+    capacity = _bucket(initial_word_capacity)
+    while True:
+        state = {'capacity': capacity, 'requests': []}
+        token = _batch.set(state)
+        try:
+            result = compute()
+        finally:
+            _batch.reset(token)
+        requests = state['requests']
+        if not requests:
+            return result
+        # 这里只读取资源容量，不读取价格、余额、分支或选择路径。
+        required = int(torch.stack([x.max() for x in requests]).max().cpu())
+        if required <= capacity:
+            return result
+        capacity = _bucket(required)
 
 @lru_cache(maxsize=1)
 def public_extension():
@@ -31,6 +64,8 @@ class ExactInt:
     def from_values(cls, values, *, device="cuda"):
         """显式批次输入边界；不能用于训练逐条件往返。"""
         values=list(values);width=max(1,max((abs(v).bit_length()+31)//32 for v in values)) if values else 1
+        state = _batch.get()
+        width = _bucket(max(width, state['capacity'] if state else 4))
         words=[]
         for value in values:
             row=[]
@@ -42,9 +77,20 @@ class ExactInt:
                    torch.zeros(len(values),dtype=torch.int32,device=device))
 
     def _operate(self, other, op):
-        w,s,r,rs,f=public_extension().integer_op(op,self.words,self.sign,other.words,other.sign)
+        state = _batch.get()
+        left = self.with_capacity(state['capacity']) if state else self
+        right = other.with_capacity(state['capacity']) if state else other
+        w,s,r,rs,f,required=public_extension().integer_op(op,left.words,left.sign,right.words,right.sign)
+        if state is not None and required.numel():
+            state['requests'].append(required)
         f=f|self.fault|other.fault
         return ExactInt(w,s,f),ExactInt(r,rs,f)
+
+    def with_capacity(self, capacity):
+        if self.words.shape[1] >= capacity:
+            return self
+        words = torch.nn.functional.pad(self.words, (0, capacity - self.words.shape[1]))
+        return ExactInt(words, self.sign, self.fault)
 
     def __add__(self, other):return self._operate(other,0)[0]
     def __sub__(self, other):return self._operate(other,1)[0]
@@ -77,7 +123,9 @@ class ExactInt:
 
     def constant(self, value):
         """标量配置常量在设备广播，不读取活动数值。"""
-        width = max(1, (abs(value).bit_length() + 31) // 32)
+        state = _batch.get()
+        width = _bucket(max(self.words.shape[1], (abs(value).bit_length() + 31) // 32,
+                            state['capacity'] if state else 4))
         words = torch.empty((self.words.shape[0], width), dtype=torch.int32,
                             device=self.words.device)
         for i in range(width):
