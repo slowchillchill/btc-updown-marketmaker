@@ -198,6 +198,26 @@ def validate_account_transfers(source):
         observed=[Fraction(values(getattr(account,field))[0],1_000_000) for field in ['cash','available','principal','fee']]
         observed+=[Fraction(n,d) for n,d in zip(values(account.rebates.numerator),values(account.rebates.denominator))]
         assert observed==[Fraction(after[field]) for field in names]
+        # 原V4完整经济身份/正文冷对照，设备金额来自上面的实际账户候选。
+        from economic import map_rebate_economic
+        from fields import encode_fields
+        private=integers([fact['fact']['source_reference']['record']['SettlementLifecycle']['private_feedback_sequence']])
+        zero=torch.zeros(1,dtype=torch.int64,device='cuda')
+        ordinal=torch.tensor([fact['source_order']['ordinal']],device='cuda')
+        effective=torch.tensor([transition['economic_effective_at_utc_ms']],device='cuda')
+        day=torch.tensor([body[name]['attribution_day_utc_ms']],device='cuda')
+        kind=torch.full_like(zero,0 if name.startswith('Maker') else 1)
+        paid=torch.tensor([name.endswith('Paid')],device='cuda')
+        mapped=Numbers.run_exact_batch(lambda:map_rebate_economic(result,zero,torch.tensor([0],device='cuda'),
+            private,ordinal,effective,kind,day,paid))
+        tag={'MakerRebateDayFinalized':11,'TakerRebateDayFinalized':12,'MakerRebatePaid':13,'TakerRebatePaid':14}[name]
+        expected=Numbers.run_exact_batch(lambda:encode_fields([zero,torch.full_like(zero,-1),effective,torch.full_like(zero,tag),
+            integers([body[name]['attribution_day_utc_ms']]),zero,*[rational([delta[field]]) for field in delta_names],
+            torch.tensor([False],device='cuda'),zero,rational(['0']),rational(['0']),rational(['0'])]))
+        width=max(expected.size(1),mapped.semantic.size(1))
+        assert torch.equal(torch.nn.functional.pad(expected,(0,width-expected.size(1))),
+            torch.nn.functional.pad(mapped.semantic,(0,width-mapped.semantic.size(1))))
+        assert mapped.emitted.cpu().tolist()==[True] and mapped.fault.cpu().tolist()==[0]
         checked+=1
     assert checked==2
-    return {'actual_SIM_day_account_transfers_checked':checked}
+    return {'actual_SIM_day_account_transfers_checked':checked,'actual_V4_day_economic_body_checked':True}

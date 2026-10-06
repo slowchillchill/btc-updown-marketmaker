@@ -233,20 +233,24 @@ class Projection:
         records.append((mapped,EVIDENCE,private,batch,time,torch.zeros_like(at),at,emission.emitted[:,-1]))
         return self._finish(emitter,records,emission.root_fault | ordinals.fault)
 
-    def finality(self,sampler,record,frame,price,rebate_rate,at):
+    def finality(self,sampler,record,frame,price,rebate_rate,at,*,finalized=(),payments=(),kind=None):
         from queues import _take,ExactRational
         roots=self.account_slots.numel()
-        active=torch.stack([frame.event.emitted,frame.event.rebate_delta.emitted],dim=1)
-        platform=at[:,None].expand(roots,2)
+        population=tuple((result,False) for result in finalized)+tuple((result,True) for result in payments)
+        width=2+len(population)
+        active=torch.stack([frame.event.emitted,frame.event.rebate_delta.emitted,
+            *[result.emitted for result,_ in population]],dim=1)
+        source_fault=torch.stack([frame.event.fault,frame.event.fault,*[result.fault for result,_ in population]],dim=1)
+        platform=at[:,None].expand(roots,width)
         direct=torch.zeros_like(active)
-        emitter,emission=self.emitter.emit(sampler,active,direct,platform,platform,platform,
-            frame.event.fault[:,None].expand(roots,2))
+        emitter,emission=self.emitter.emit(sampler,active,direct,platform,platform,platform,source_fault)
         counts=torch.stack([1+(frame.event.economic_delta.emitted | frame.event.failure_delta.emitted).to(torch.int64),
-            1+frame.event.rebate_delta.emitted.to(torch.int64)],dim=1)
-        categories=torch.tensor([2,3],device=at.device).expand(roots,2)
-        ordinals=map_source_ordinals(emission.emitted,categories,counts,frame.event.fault[:,None].expand(roots,2))
+            1+frame.event.rebate_delta.emitted.to(torch.int64),
+            *[1+result.account_delta.emitted.to(torch.int64) for result,_ in population]],dim=1)
+        categories=torch.tensor([2,3]+[3]*len(population),device=at.device).expand(roots,width)
+        ordinals=map_source_ordinals(emission.emitted,categories,counts,source_fault)
         def sequence(column):
-            positions=torch.arange(roots,device=at.device)*2+column
+            positions=torch.arange(roots,device=at.device)*width+column
             return _take(emission.private_sequences,positions),_take(emission.batch_sequences,positions),emission.received_at[:,column]
         private,batch,time=sequence(0)
         zero=ExactRational.ratio(record.base.constant(0),record.base.constant(1))
@@ -267,4 +271,50 @@ class Projection:
             self.asset_indices,self.asset_roots,private,ordinals.first_ordinals[:,1]+1,at,
             torch.full_like(at,10),frame.fill_sequence,torch.zeros_like(at))
         records.append((mapped,ECONOMIC,private,batch,time,torch.full_like(at,3),at,frame.event.rebate_delta.emitted))
+        for column,(result,is_payment) in enumerate(population,start=2):
+            private,batch,time=sequence(column)
+            records.extend(self._rebate_records(result,is_payment,kind,at,private,batch,time,ordinals.first_ordinals[:,column]))
+        return self._finish(emitter,records,emission.root_fault | ordinals.fault)
+
+    def _rebate_records(self,result,is_payment,kind,at,private,batch,received,ordinal):
+        from fields import IntegerList
+        from lifecycle import map_day_finalized,map_rebate_payment
+        from economic import map_rebate_economic
+        if kind is None:
+            raise TypeError('实际日结果必须绑定原Maker/Taker种类')
+        if is_payment:
+            mapped=map_rebate_payment(kind,result.day,result.payable,private,ordinal,self.account_slots,result.emitted)
+        else:
+            refs=IntegerList(result.contribution_refs,result.reference_mask)
+            mapped=map_day_finalized(kind,result.day,result.accrued,result.payable,result.locked,
+                refs,private,ordinal,self.account_slots,result.emitted)
+        records=[(mapped,EVIDENCE,private,batch,received,torch.full_like(at,3),at,result.emitted)]
+        mapped=map_rebate_economic(result.account_delta,self.account_slots,self.asset_roots,private,ordinal+1,
+            at,kind,result.day,torch.full_like(result.emitted,is_payment))
+        records.append((mapped,ECONOMIC,private,batch,received,torch.full_like(at,3),at,result.account_delta.emitted))
+        return records
+
+    def rebate_days(self,sampler,finalized,payments,kind,at):
+        """已真实消费的日结果先发完再付款；每反馈独立Evidence+可选Economic。"""
+        from queues import _take
+        roots=self.account_slots.numel()
+        population=tuple((result,False) for result in finalized)+tuple((result,True) for result in payments)
+        if not population:
+            raise ValueError('日批需要物理候选人口；未发出行用emitted表示')
+        width=len(population)
+        active=torch.stack([result.emitted for result,_ in population],dim=1)
+        fault=torch.stack([result.fault for result,_ in population],dim=1)
+        times=at[:,None].expand(roots,width)
+        emitter,emission=self.emitter.emit(sampler,active,torch.zeros_like(active),times,times,times,fault)
+        counts=torch.stack([1+result.account_delta.emitted.to(torch.int64) for result,_ in population],dim=1)
+        categories=torch.full_like(times,3)
+        ordinals=map_source_ordinals(emission.emitted,categories,counts,fault)
+        records=[]
+        for column,(result,is_payment) in enumerate(population):
+            index=torch.arange(roots,device=at.device)*width+column
+            private=_take(emission.private_sequences,index)
+            batch=_take(emission.batch_sequences,index)
+            received=emission.received_at[:,column]
+            ordinal=ordinals.first_ordinals[:,column]
+            records.extend(self._rebate_records(result,is_payment,kind,at,private,batch,received,ordinal))
         return self._finish(emitter,records,emission.root_fault | ordinals.fault)

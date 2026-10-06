@@ -8374,6 +8374,7 @@ mod tests {
                 "source_contract":"original_SIM_matching_Taker_rebate_v2",
                 "opening_cash":"517.50052","fill_sequence":1,
                 "matched_at":fill.matched_at_utc_ms,"base_units":fill.base_units.to_string(),
+                "source_price":fill.price_pusd_per_share.to_string(),
                 "quote_units":fill.quote_units.to_string(),"fee_units":fill.immediate_taker_fee_units.to_string(),
                 "finality_path":finality_policy.normal_path(),
                 "taker_rebate_rate":rules.snapshot().project_account_rules.rebate_settlement.value.fixed_taker_rebate_rate.value().to_string(),

@@ -85,3 +85,36 @@ def map_economic(delta,account_slots,condition_slots,token_slots,asset_indices,a
     source=torch.stack([torch.full_like(high,2),words[:,0],high,source_ordinal],dim=1)
     return EconomicEvidence(logical,economic,semantic,source,balances,outcome,has_outcome,
         delta.emitted & (fault==0),fault,delta.sequence)
+
+
+def map_rebate_economic(delta,account,asset_roots,private,ordinal,at,kind,day,paid):
+    """原Existing日结/付款：无condition、无持仓项，day仍是有符号时间。"""
+    from queues import ExactInt,ExactRational
+    from asset_buy import take_ratio
+    from lifecycle import input_fault,source_order
+    from account_state import grouped_fault
+    count=account.numel()
+    device=account.device
+    fault=input_fault([delta.sequence,private],[account,at,kind,day],ordinal) | delta.fault
+    if paid.shape!=(count,) or paid.dtype!=torch.bool or paid.device!=device:
+        raise TypeError('日经济变体须同设备bool[row]')
+    if asset_roots.shape!=delta.movement.outcomes.sign.shape or asset_roots.dtype!=torch.int64 or asset_roots.device!=device:
+        raise TypeError('日经济持仓所属目录须同设备int64[assets]')
+    fault=fault | ((account<0)|(kind<0)|(kind>1)).to(torch.int32)
+    outcome_error=delta.movement.outcomes.fault | (delta.movement.outcomes.sign!=0).to(torch.int32)
+    outcome_error=outcome_error | ((asset_roots<0)|(asset_roots>=count)).to(torch.int32)
+    fault=fault | grouped_fault(outcome_error,asset_roots.clamp(0,count-1),count)
+    balances=tuple(ExactRational.ratio(value,value.constant(1_000_000)) for value in
+        [delta.movement.cash,delta.movement.available,delta.movement.principal,delta.movement.fee]) + tuple(
+            take_ratio(delta.movement.rebates,torch.arange(count,device=device)*4+field) for field in range(4))
+    for value in balances:
+        fault=fault | value.fault
+    zero=ExactRational.ratio(delta.sequence.constant(0),delta.sequence.constant(1))
+    logical=encode_fields([account,torch.full_like(account,11),delta.sequence])
+    economic=encode_fields([account,torch.ones_like(account),delta.sequence])
+    tag=torch.where(paid,13,11)+kind
+    # 保持统一schema11，与原V1/V2 Existing归一相同；day不是u64实体序号。
+    semantic=encode_fields([account,torch.full_like(account,-1),at,tag,ExactInt.from_i64_tensor(day),
+        torch.zeros_like(account),*balances,torch.zeros_like(paid),torch.zeros_like(account),zero,zero,zero])
+    return EconomicEvidence(logical,economic,semantic,source_order(private,ordinal),balances,zero,
+        torch.zeros_like(paid),delta.emitted & (fault==0),fault,delta.sequence)
