@@ -621,6 +621,44 @@ mod tests {
         if let PolymarketOrderbookEvent::Book {bids,..} = &mut next_book {
             bids.push(PolymarketPriceLevel {price:"0.4".into(),size:"0".into()});
         }
+        // 终态必须经原metadata+WS配对入口；单边WS只能保持pending。
+        let terminal_metadata = |sequence:u64,source:i64,received:i64| {
+            use data_pipeline_core::typed_raw::*;
+            let mut m = metadata_snapshot_row();
+            m.metadata_row_kind = PolymarketMetadataRowKind::ResolutionTerminalWs;
+            m.metadata_origin = PolymarketMetadataOrigin::MarketResolvedWs;
+            m.timestamp_received = received;
+            m.collector_admission_sequence = sequence;
+            m.collector_admission_time_utc_ms = received+1;
+            m.market_lifecycle_state = MetadataMarketLifecycleState::Retired;
+            m.market_runtime_role = MetadataMarketRuntimeRole::None;
+            m.source_endpoint = Some("wss://ws-subscriptions-clob.polymarket.com/ws/market".into());
+            m.source_evidence_origin = Some(MetadataSourceEvidenceOrigin::MarketResolvedWs);
+            m.source_evidence_event_type = Some(MetadataSourceEvidenceEventType::MarketResolved);
+            m.source_evidence_channel = Some(MetadataSourceEvidenceChannel::Market);
+            m.source_evidence_received_at_utc = Some(received);
+            m.row_evidence_validation_completed_at_utc = Some(received+1);
+            m.source_evidence_payload_json = None;
+            m.source_evidence_raw_sha256 = Some("a".repeat(64));
+            m.market_lifecycle_transition = Some(MetadataMarketLifecycleTransition::ActiveToRetired);
+            m.lifecycle_applied_at_utc = Some(received+2);
+            m.market_runtime_role_transition = Some(MetadataMarketRuntimeRoleTransition::ResolutionPendingToNone);
+            m.runtime_role_applied_at_utc = Some(received+2);
+            m.metadata_fetch_start_utc = None;
+            m.closed = None; m.active = None; m.accepting_orders = None;
+            m.active_unavailable_reason = Some(MetadataActiveUnavailableReason::NotApplicableForRowKind);
+            m.outcomes_raw = None; m.outcome_prices_raw = None;
+            m.ws_platform_timestamp_raw = Some(source.to_string());
+            m.ws_platform_timestamp_utc = Some(source);
+            m.winning_asset_id = Some("20".into()); m.winning_outcome = Some("UP".into());
+            m.resolution_evidence_source = Some(MetadataResolutionEvidenceSource::MarketResolvedWs);
+            m.terminal_claim_owner = Some(MetadataTerminalClaimOwner::MarketResolvedWs);
+            m.resolution_budget_horizon_utc = Some(m.market_end_utc+8*60_000);
+            m.resolution_followup_status = Some(MetadataResolutionFollowupStatus::TerminalWs);
+            m.ws_claimant_source_sequence_epoch_id = Some("epoch-a".into());
+            m.ws_claimant_collector_admission_sequence = Some(sequence);
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(m)))
+        };
         let reference_source = |at:i64| {
             let row: data_pipeline_core::typed_raw::PolymarketRtdsChainlinkBtcUsdRow = serde_json::from_value(serde_json::json!({
                 "timestamp_received":at,"message_timestamp":at-1,"payload_timestamp":at-3,"age_ms":3,
@@ -661,10 +699,16 @@ mod tests {
             TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",9,37000,38000,
                 PolymarketOrderbookEvent::LastTradePrice {asset_id:"20".into(),price:"0.53".into(),size:Some("1.25".into()),
                     side:Some(data_pipeline_core::typed_raw::PolymarketSide::Unknown),fee_rate_bps:None}))),
+            terminal_metadata(10,39000,40000),
             TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",10,39000,40000,
                 PolymarketOrderbookEvent::MarketResolved {clob_market_id:"3195576".into(),question:None,
                     description:None,asset_ids:vec!["20".into(),"3".into()],outcomes:vec!["UP".into(),"DOWN".into()],
                     event_message:None,winning_asset_id:"20".into(),winning_outcome:"UP".into()}))),
+            terminal_metadata(11,41000,42000),
+            TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(row("epoch-a",11,41000,42000,
+                PolymarketOrderbookEvent::MarketResolved {clob_market_id:"3195576".into(),question:None,
+                    description:None,asset_ids:vec!["20".into(),"3".into()],outcomes:vec!["UP".into(),"DOWN".into()],
+                    event_message:None,winning_asset_id:"3".into(),winning_outcome:"DOWN".into()}))),
         ];
         let mut core = PublicObservationCoreV1::new(header.clone()).unwrap();
         let mut writer = PublicCompactWriterV1::create(&target,header.clone()).unwrap();
@@ -673,6 +717,8 @@ mod tests {
         let mut public_events = Vec::new();
         let mut public_visible_times = Vec::new();
         let mut public_market = serde_json::Value::Null;
+        let mut terminal_observations = Vec::new();
+        let mut observed_groups = 0_u64;
         let mut original = None;
         let mut zero_evidence_without_change = false;
         let mut token = String::new();
@@ -697,7 +743,13 @@ mod tests {
                     public_market = serde_json::json!({"market":observation.market,"lifecycle":observation.lifecycle,
                         "active":observation.active,"closed":observation.closed,"accepting_orders":observation.accepting_orders,
                         "terminal":observation.terminal});
+                    if observation.terminal.value.is_some()
+                        || observation.terminal.quality == MarketDataQuality::Invalid {
+                        terminal_observations.push(serde_json::json!({"prefix":observed_groups,
+                            "terminal":observation.terminal}));
+                    }
                 }
+                observed_groups += 1;
             }
             for (_, reduction) in &applied.pm_reductions {
                 if original.is_none() {
@@ -718,6 +770,11 @@ mod tests {
         }
         writer.publish().unwrap();
         assert!(zero_evidence_without_change);
+        let resolved = terminal_observations.iter().find(|v|!v["terminal"]["value"].is_null()).unwrap();
+        assert_eq!(resolved["terminal"]["value"]["winning_asset_id"],"20");
+        assert_eq!(resolved["terminal"]["value"]["payout_vector"].as_array().unwrap().len(),2);
+        assert_eq!(public_market["terminal"]["quality"],"invalid");
+        assert!(public_market["terminal"]["value"].is_null());
         let original = original.unwrap();
         let price = data_pipeline_core::parse_canonical_decimal(&ExactDecimal("0.4".into()),"zero_price").unwrap();
         assert!(original.selected_level(&token,BookSide::Bid,price).unwrap().present);
@@ -725,7 +782,8 @@ mod tests {
         let reference = serde_json::json!({"token":token,"price":"0.4",
             "quantity":original.quantity(&token,BookSide::Bid,price).normalize().to_string(),
             "present":true,"initialized":asset.has_initial_snapshot,"ready":asset.book_ready,
-            "public_assets":public_assets,"public_events":public_events,"public_visible_times":public_visible_times,"public_market":public_market,"observation_ms":40000});
+            "public_assets":public_assets,"public_events":public_events,"public_visible_times":public_visible_times,
+            "public_market":public_market,"terminal_observations":terminal_observations,"observation_ms":44000});
         let reference_path = temp.path().join("original-reference.json");
         serde_json::to_writer(File::create(&reference_path).unwrap(),&reference).unwrap();
         eprintln!("original_core_zero_reference={reference}");

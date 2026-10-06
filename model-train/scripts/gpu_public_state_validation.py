@@ -261,6 +261,27 @@ def main():
         assert torch.equal(full_trades.values[0],torch.tensor(expected_trades,device='cuda',dtype=torch.float32)), (full_trades.values,expected_trades)
         assert not full_trades.fault.any().cpu().item()
         quality_names = ['fresh','stale','missing','unknown_not_observed','confirmed_gap','invalid']
+        # 原合法终态配对的非空赢家/payout，以及随后原冲突入口的清值。
+        terminal_rows = reference['terminal_observations']
+        terminal_prefixes = prefixes.new_tensor([row['prefix'] for row in terminal_rows])
+        terminal_native = LifecycleInputs(market_state).encode(market_state.frame(terminal_prefixes),
+            torch.full_like(terminal_prefixes,target_market),assets[:1].expand(len(terminal_rows),-1),
+            torch.full_like(terminal_prefixes,reference['observation_ms']))
+        assert not terminal_native.fault.any().cpu().item()
+        saw_resolved = saw_invalid = False
+        for index,row in enumerate(terminal_rows):
+            field = row['terminal']
+            assert terminal_native.values[index,63+quality_names.index(field['quality'])].cpu().item() == 1
+            if field['value'] is not None:
+                saw_resolved = True
+                assert terminal_native.values[index,69:72].cpu().tolist() == [1.0,1.0,0.0]
+                assert terminal_native.values[index,[81,82,92,93]].cpu().tolist() == [1.0,1.0,-1.0,1.0]
+            elif field['quality'] == 'invalid':
+                saw_invalid = True
+                assert torch.count_nonzero(terminal_native.values[index,69:72]) == 0
+                assert torch.count_nonzero(terminal_native.values[index,[81,82,92,93]]) == 0
+                assert terminal_native.values[index,78].cpu().item() == 1  # 原terminal锚点仍保留。
+        assert saw_resolved and saw_invalid
         def signed_log(value):
             value = float(value)
             return math.copysign(math.log1p(abs(value)),value) if value else 0.0
