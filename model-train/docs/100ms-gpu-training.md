@@ -572,3 +572,25 @@ cargo run -p data-pipeline-training --bin dpt-public-compact --locked --offline 
 只选择两个缺初始化市场从#196真实Snapshot至9月9日零点前的完整Existing片段。
 原文件和清单经原选择器核验；不读取前史盘口/价格/TWAP/AnchorRule，不供模型热身、
 策略计算或经营统计。训练根15天、模型T−30及冷启动范围保持。
+
+### 当前独立 hidden 材料入口
+
+`dpt-compact-hidden <公共compact目录> <新hidden目录> <config.json> <locked-python>
+<same-commit>/data-pipeline/gpu/sort_worker.py` 从完整原规范事实选择实际 PM 消息，
+按原 epoch 首现排名、真实来源时间、接纳序位与规范位置排序。它调用原独立 hidden
+归约器，不使用公共 PM 派生步骤替代 hidden。配置显式给出 `max_packet_bytes`、
+`consumer_stream_id` 和 `SortConfig`，包括实际 CPU 跨 run 归并的 `merge_workers`。
+
+产物 `compact_hidden_source_steps_v1` 保存压缩消息步骤、固定偏移/位置列和真实时间
+索引。首次盘口步骤引用公共原输入；恢复时核对原消息、代际、游标、盘口摘要和原
+物化身份。已初始化资产换代后的恢复沿原 Reset/重校准转移，不生成第二次首次快照。
+消息/参考人口与完整原来源闭合，可索引步骤人口与完整步骤载荷闭合；成员哈希不能
+代替这些关系检查。所有文件刷新、同步和摘要完成后，凭据随目录原子发布且不覆盖
+现有目标。失败保留本构建的 pending 目录，不发布部分结果。
+
+读取器通过下一全局时间或完整 EOF 关闭真实时间桶，Parquet 页末不关闭桶。它携带
+自身材料摘要及来源 `AppliedIngressPrefixV1`，不伪造旧 public recording 的稳定前缀。
+`--inspect <hidden目录> <公共compact目录> <页行数> <页字节数> <包容量>` 是冷材料
+完整验证入口；冷扫描、排序、SHA 和读取有可控进度。材料完整性不提高运行时公开
+可见前沿，不代表 hidden GPU 撮合、NOE/Ledger、完整根调度或活动账户恢复已完成。
+EOF 只表示这一份显式工程来源完整，不替代所属15天/3天根的数据验收。
