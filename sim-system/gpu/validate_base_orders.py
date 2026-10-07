@@ -131,7 +131,7 @@ def main():
     assert not calendars.taker.pending.any().cpu().item()
     # 已完成请求无pending：调度padding零terms/故障不得污染既存状态。
     padding = FrozenBaseTerms(tensor([-1]), integers([0]), integers([0]), rational(['0']),
-                              tensor([-1]), tensor([-1]), tensor([1], torch.int32))
+                              tensor([-1]), tensor([-1]), tensor([1], torch.int32),tensor([-1]))
     old_requests, old_orders, old_queue, old_account, old_fills = requests, orders, queue, account, fills
     requests, orders, queue, account, fills, idle = run_pending_base_acceptance(requests, orders, queue,
         account, fills, padding, tensor([[-1]]), fee_rate, source['fee_exponent'],
