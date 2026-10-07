@@ -14,6 +14,10 @@ from trade_success import TradeSuccess
 from validate_base_execution import rational, values, integers
 from admission_lifecycle import LifecycleDirectory
 from rebate_contribution import RebateContributions
+from success_pool import SuccessPools
+from market_economics import UnresolvedMarkets
+from validate_market_economics import check as check_markets
+from types import SimpleNamespace
 
 
 def amounts(value):
@@ -41,7 +45,11 @@ def main():
     assert unknown_day.known.cpu().tolist() == [[False, False]] and unknown_day.fault.cpu().tolist() == [0]
     unknown = Numbers.run_exact_batch(lambda: PositionCosts.empty(1, 1, 'cuda', known=False).asset_cost(zero))
     assert unknown.known.cpu().tolist() == [False] and unknown.fault.cpu().tolist() == [0]
+    pools=Numbers.run_exact_batch(lambda:SuccessPools.open(torch.tensor([0,0],device='cuda'),
+        torch.tensor([0,0],device='cuda'),torch.tensor([0,1],device='cuda'),torch.tensor([1,0],device='cuda'),1))
+    markets=Numbers.run_exact_batch(lambda:UnresolvedMarkets.open(pools,zero))
     prefix = 0
+    ledger_prefix = 3
     checked = 0
     for checkpoint in source['checkpoints']:
         body = next(iter(checkpoint['record'].values()))
@@ -83,6 +91,13 @@ def main():
             # 仅验证器按真实参考尝试安排输入；生产门由Admission的result.applied给出。
             trades = Numbers.run_exact_batch(lambda: trades.update(zero, zero, zero,
                 rational(['0']), rational(['0']), zero, no, economic, applied))
+        # 失败来源无成功池人口。按每条原实际Ledger提交核Pi/peak；本参考驱动不冒充设备宿主。
+        entry=after['ledger_entry_seq']
+        committed_entry=yes if entry!=ledger_prefix else no
+        ledger_prefix=entry
+        markets=Numbers.run_exact_batch(lambda:markets.refresh(pools,trades,None,committed_entry))
+        assert check_markets(SimpleNamespace(unresolved_markets=markets,success_pools=pools,
+            trade_success=trades,rebate_days=None),checkpoint['after'],checkpoint['after']['markets'][0]['condition_id'])
         read = Numbers.run_exact_batch(costs.read)
         expected = after['platform_confirmed_projection']
         assert read.known.cpu().tolist() == [True] and read.fault.cpu().tolist() == [0]
@@ -106,6 +121,7 @@ def main():
         'unapplied_release_and_applied_compensation_checked': True,
         'actual_applied_cost_fee_token_basis_and_executed_net_fee_checked': True,
         'actual_pending_and_failed_rebate_estimate_checked': True,
+        'actual_failure_per_Ledger_Pi_and_persistent_maximum_loss_checked': True,
         'unknown_cold_prefix_asset_cost_not_known_zero_checked': True,
         'unknown_cold_trade_day_does_not_become_known_zero_checked': True,
         'reference_attempt_order_drives_validation': True,
