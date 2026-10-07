@@ -246,11 +246,16 @@ class BaseSimRuntime:
             fault |= self.source_resolutions.fault | self.resolution_obligations.fault
         if self.hidden_frontier is not None:
             hidden_source,hidden_eof=self.hidden_frontier.scheduled()
+        next_at=None
+        if self.hidden_frontier is not None:
+            bound=self.hidden_frontier.columns.next_bucket_at
+            if bound is not None:
+                next_at=bound.expand_as(advance_until)
         source=replace(hidden_source,fault=hidden_source.fault | fault)
         if settlement is None and self.settlement_registrations is not None:
             settlement=self.settlement_registrations.next_clock()
         choice=next_sim_drive(self.requests,self.fills,self.calendars,source,hidden_eof,
-            advance_until,enabled,settlement=settlement,gtd=gtd)
+            advance_until,enabled,settlement=settlement,gtd=gtd,hidden_next_at=next_at)
         return replace(choice,hidden_frontier=self.hidden_frontier,settlement_registrations=self.settlement_registrations)
 
     def begin_hidden_bucket(self, choice):

@@ -18,6 +18,7 @@ class HiddenBucketColumns:
     index_ends: object  # 原u64索引位置，不能用有符号设备坐标替代业务位置。
     end_of_input: bool  # 原最后桶closure；不是本设备页末。
     bucket_base: int = 0  # 同一不可变材料的稳定完整桶坐标。
+    next_bucket_at: object = None  # 原页末NextGlobalEventAt证明；只许可严格更早义务。
 
     @classmethod
     def from_block(cls, block):

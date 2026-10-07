@@ -182,6 +182,14 @@ def main():
                 HiddenBucketColumns.from_block(empty_block),1)))
         check_initial_gather(empty_start,source,tensor,fee_rate,rebate,'empty_snapshot',False)
         queue=runtime.hidden.queues
+    if prepared_hidden is not None:
+        # 原NextGlobalEventAt许可本请求的严格更早处理，不许可未安装下一桶。
+        same_time=replace(runtime,requests=replace(runtime.requests,
+            effective_at=torch.full_like(runtime.requests.effective_at,source['maker_at'])))
+        waiting_choice=same_time.choose(None,None,tensor([source['maker_at']]),active)
+        assert not waiting_choice.present.cpu().item()
+        assert not same_time.begin_hidden_bucket(waiting_choice).hidden_frontier.applying.cpu().item()
+        hidden_page_report["uninstalled_next_bucket_equal_time_waits_and_strictly_earlier_request_runs"]=True
     choice=choose()
     assert choice.enabled(5).cpu().tolist()==[True] and torch.equal(choice.at,requests.next_pending().effective_at)
     # 源边界未知时不把公开grid当关闭证明；同ms完整hidden仍先于真实pending。

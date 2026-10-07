@@ -36,7 +36,7 @@ class SimDriveChoice:
 
 
 def next_sim_drive(requests, fills, calendars, hidden, hidden_eof, advance_until, enabled,
-                   *, settlement=None, gtd=None):
+                   *, settlement=None, gtd=None, hidden_next_at=None):
     """选择每根唯一原阶段；同阶段人口仍由其原(time,seq,ordinal)入口选择。
 
     settlement/GTD由所属实际义务模块供给，None仅表示本装配无此类义务。
@@ -69,5 +69,12 @@ def next_sim_drive(requests, fills, calendars, hidden, hidden_eof, advance_until
     fault=requests.fault | fills.fault | calendars.maker.fault | calendars.taker.fault
     fault=fault | settlement.fault | gtd.fault | hidden.fault
     source_known=hidden.present | hidden_eof
-    present=population.any(1) & source_known & enabled & (at<=advance_until) & (fault==0)
+    before_next=torch.ones_like(enabled)
+    if hidden_next_at is not None:
+        column(hidden_next_at,torch.int64)
+        # 原页末真实下一源时间只证明严格更早空档；不签发该桶可用或EOF。
+        waiting=~hidden.present & ~hidden_eof
+        source_known=source_known | waiting
+        before_next=~waiting | (at<hidden_next_at)
+    present=population.any(1) & source_known & before_next & enabled & (at<=advance_until) & (fault==0)
     return SimDriveChoice(at,phase,present,fault,requests,fills,calendars)

@@ -270,4 +270,5 @@ class PreparedHiddenPage:
         return HiddenBucketColumns(block,c.upload(c.arrays['bucket_times'][self.begin:self.end]),
             c.upload(c.arrays['step_offsets'][self.begin:self.end+1]-self.step_begin),
             c.upload(c.arrays['reference_offsets'][self.begin:self.end+1]-self.ref_begin),
-            _take(c.index_ends,index),bool(c.arrays['closure'][self.end-1,0]),self.begin)
+            _take(c.index_ends,index),bool(c.arrays['closure'][self.end-1,0]),self.begin,
+            None if c.arrays['closure'][self.end-1,0] else c.upload(c.arrays['closure'][self.end-1,1:2]))
