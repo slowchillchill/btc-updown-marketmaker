@@ -533,6 +533,8 @@ def check_captured_hidden_step(runtime,index,tensor,fee_rate,fee_exponent,rebate
     idle_loop.replay()
     torch.cuda.synchronize()
     compare(idle_storage.runtime,frozen,"first_launch_zero_iteration")
+    assert idle_loop.candidate.required_words.cpu().item()==0
+    assert idle_loop.candidate.fits.cpu().item() and idle_loop.resources_fit.cpu().item()
     assert idle_loop.output.fault.cpu().tolist()==[0]
     assert idle_loop.output.required_records.cpu().tolist()==[0]
     assert not any(frame.event.emitted.cpu().item() for frame in idle_loop.output.fills)

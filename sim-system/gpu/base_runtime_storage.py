@@ -159,6 +159,8 @@ class CapturedHiddenBaseStep:
         with torch.cuda.graph(self.entry):
             # 零次迭代时不暴露旧输出或首次捕获的未初始化字段；不重新领取反馈。
             _clear_output(self.output)
+            self.candidate.required_words.zero_()
+            self.candidate.fits.fill_(True)
             self.resources_fit.fill_(True)
             self.ready.copy_(ready())
         # 图句柄是冷资源元数据；所有业务条件仍在上述设备列中。
