@@ -64,12 +64,10 @@ class BookEncoder(nn.Module):
 
     @staticmethod
     def encode_valid(encoder: nn.Module, levels: Tensor, mask: Tensor) -> Tensor:
-        """仅编码有效行；原位恢复后归约，保持六侧顺序及固定配对加法树。"""
-        flat = levels.flatten(0, 2)
-        indices = mask.flatten().nonzero().squeeze(1)
-        encoded = encoder(flat.index_select(0, indices))
-        restored = encoded.new_zeros((flat.shape[0], BOOK_EMBEDDING)).index_copy(0, indices, encoded)
-        return restored.reshape(*levels.shape[:3], BOOK_EMBEDDING)
+        """固定形状编码，前后遮蔽补齐行；六侧坐标与原配对加法树保持不变。"""
+        valid = mask.unsqueeze(-1)
+        encoded = encoder(torch.where(valid, levels, 0.0))
+        return torch.where(valid, encoded, 0.0)
 
 
 def pad_books(rows, *, like: Tensor) -> tuple[Tensor, Tensor]:
