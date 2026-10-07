@@ -309,6 +309,44 @@ class CancellationCompletions:
     responded_at: torch.Tensor
     received_at: torch.Tensor
     fault: torch.Tensor
+    record_refs: torch.Tensor
+    context_slots: torch.Tensor
+    run_slots: torch.Tensor
+    batch_sequences: object
+    private_sequences: object
+
+
+@dataclass(frozen=True)
+class CancellationResponseRef:
+    present: torch.Tensor
+    record_refs: torch.Tensor
+    context_slots: torch.Tensor
+    run_slots: torch.Tensor
+    batch_sequences: object
+    record_ordinals: object
+    private_sequences: object
+    delivery_sequences: object
+    available_at: torch.Tensor
+    responded_at: torch.Tensor
+    received_at: torch.Tensor
+    requests: object
+
+
+def completion_reference(completions,at,present):
+    roots,width=completions.received.shape
+    count=at.size(1)
+    if width==0:
+        blank=torch.zeros_like(at)
+        exact=ExactInt.from_i64_tensor(blank.flatten())
+        return CancellationResponseRef(present,torch.full_like(blank,-1),blank,blank,
+            exact,exact,exact,exact,blank,blank,blank,exact)
+    coordinates=(torch.arange(roots,device=at.device)[:,None]*width+at).flatten()
+    return CancellationResponseRef(present,completions.record_refs.gather(1,at),
+        completions.context_slots.gather(1,at),completions.run_slots.gather(1,at),
+        _take(completions.batch_sequences,coordinates),_take(completions.record_ordinals,coordinates),
+        _take(completions.private_sequences,coordinates),_take(completions.delivery_sequences,coordinates),
+        completions.available_at.gather(1,at),completions.responded_at.gather(1,at),completions.received_at.gather(1,at),
+        _take(completions.requests,coordinates))
 
 
 @dataclass(frozen=True)
@@ -320,6 +358,7 @@ class GlobalCancellationRead:
     responded_at: torch.Tensor
     received_at: torch.Tensor
     fault: torch.Tensor
+    latest_response: CancellationResponseRef
 
 
 @dataclass(frozen=True)
@@ -367,7 +406,8 @@ class PublicCancellationState:
             absent=torch.zeros(roots,dtype=torch.bool,device=device)
             counts=ExactInt.from_i64_tensor(torch.zeros(roots*3,dtype=torch.int64,device=device))
             time=torch.zeros(roots,dtype=torch.int64,device=device)
-            return GlobalCancellationRead(pending,absent,counts,absent,time,time,self.completions.fault | pending.fault)
+            return GlobalCancellationRead(pending,absent,counts,absent,time,time,self.completions.fault | pending.fault,
+                completion_reference(self.completions,torch.zeros((roots,1),dtype=torch.int64,device=device),absent[:,None]))
         visible = self.completions.received & (self.completions.available_at <= cutoff[:,None])
         matches,comparison_fault = identity_matches(self.requests,self.completions.requests,roots,count,width)
         member = matches & self.registered[:,:,None] & visible[:,None,:]
@@ -388,7 +428,8 @@ class PublicCancellationState:
         counts=_take(self.completions.counts,population.flatten())
         fault=self.completions.fault | Numbers.combine_fault_rows(torch.where(member,comparison_fault,0).reshape(roots,-1))
         for sequence,components in [(self.completions.requests,1),(self.completions.delivery_sequences,1),
-                (self.completions.record_ordinals,1),(self.completions.counts,3)]:
+                (self.completions.record_ordinals,1),(self.completions.batch_sequences,1),
+                (self.completions.private_sequences,1),(self.completions.counts,3)]:
             limit=sequence.compare(sequence.constant((1<<64)-1))
             invalid=sequence.fault | limit.fault | ((sequence.sign<0)|(limit.order>0)).to(torch.int32)
             enabled=visible[:,:,None].expand(roots,width,components).reshape(roots,-1)
@@ -396,4 +437,4 @@ class PublicCancellationState:
         fault=fault | pending_count.fault
         return GlobalCancellationRead(pending_count,has_latest,counts,has_latest,
             self.completions.responded_at.gather(1,at[:,None])[:,0],
-            self.completions.received_at.gather(1,at[:,None])[:,0],fault)
+            self.completions.received_at.gather(1,at[:,None])[:,0],fault,completion_reference(self.completions,at[:,None],has_latest[:,None]))

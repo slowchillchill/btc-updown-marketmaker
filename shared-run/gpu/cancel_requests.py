@@ -6,7 +6,7 @@
 from dataclasses import dataclass
 import torch
 from queues import ExactInt,Numbers
-from registry import identity_matches,choose_latest
+from registry import identity_matches,choose_latest,completion_reference
 
 
 @dataclass(frozen=True)
@@ -38,6 +38,7 @@ class ScopedCancellationRead:
     responded_at: torch.Tensor
     received_at: torch.Tensor
     fault: torch.Tensor
+    latest_response: object
 
 
 def scope_relation(left,right,order_markets,location_known):
@@ -72,7 +73,8 @@ def freeze_scoped_cancel_requests(state,request_scopes,scopes,order_markets,loca
     relation,known=scope_relation(scopes,request_scopes,order_markets,location_known)
     fault=state.completions.fault|targets.fault
     from cancel_objects import _sequence_fault
-    for value in [state.completions.requests,state.completions.delivery_sequences,state.completions.record_ordinals]:
+    for value in [state.completions.requests,state.completions.delivery_sequences,state.completions.record_ordinals,
+            state.completions.batch_sequences,state.completions.private_sequences]:
         fault=fault|_sequence_fault(value,state.completions.received)
     fault=fault|_sequence_fault(targets.requests,targets.received)
     fault=fault|((targets.received&((targets.outcomes<0)|(targets.outcomes>2))).any(1)).to(torch.int32)
@@ -92,6 +94,7 @@ def freeze_scoped_cancel_requests(state,request_scopes,scopes,order_markets,loca
     counts=torch.zeros((roots,scope_count,3),dtype=torch.int64,device=device)
     counts_known=torch.ones_like(counts,dtype=torch.bool)
     responded=received=torch.zeros((roots,scope_count),dtype=torch.int64,device=device)
+    at=torch.zeros((roots,scope_count),dtype=torch.int64,device=device)
     if width:
         possible=(relation|~known)[:,:,:,None]&member[:,None,:,:]
         candidate=possible.any(2)
@@ -123,7 +126,8 @@ def freeze_scoped_cancel_requests(state,request_scopes,scopes,order_markets,loca
     counts_known=counts_known&latest_known[:,:,None]
     counts_applicable=has_latest
     return ScopedCancellationRead(pending_count,pending_known,has_latest,latest_known,
-        ExactInt.from_i64_tensor(counts.flatten()),counts_known,counts_applicable,responded,received,fault)
+        ExactInt.from_i64_tensor(counts.flatten()),counts_known,counts_applicable,responded,received,fault,
+        completion_reference(state.completions,at,has_latest&latest_known))
 
 
 @dataclass(frozen=True)
