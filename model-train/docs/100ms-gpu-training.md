@@ -700,7 +700,7 @@ Maker 市场应计是一个汇总经济事实，贡献向量不拆成多条 NOE�
 原 intent/receipt 决定提交关联，不从 SIM 真实余量或账户余额推断。原 GTC 承诺
 Known(0) 不输出，Unknown 保留。原接受、形成、最新生命周期、明确撤成及每个 Trade
 最高 private 来源按所属身份保留；压紧前合并所有输入故障。排序相邻键去重替代
-Trade×Trade 历史关系。对象/作用域候选见下文；完整取消首次领取、FOK/查询及 slow433 仍在接入。
+Trade×Trade 历史关系。对象/作用域候选见下文；单资产取消批的真实首次领取已接入，完整请求时钟、FOK/查询及 slow433 仍在接入。
 
 该表示只服务向前推进的合法 cutoff。预取不是接纳，旧观察使用已冻结结果，不能用
 压紧后的当前状态重新声称任意较早 cutoff 可重建。原 NOE batch/context/run/record
@@ -714,6 +714,27 @@ ordinal、来源序和共享引用分别保留；全根跨块、历史退役与�
 物理成本变化，不是完整100ms热路径、15天容量或训练吞吐结论。固定物理重试循环
 仍有调度成本，完整共享二进制加载/身份退役尚未交付。
 
-公开Registry现在以原21前缀验证receipt已存在而order尚未绑定的逐腿承诺，及Single/Paired/Market撤单对象。`shared-run/gpu/cancel_objects.py` 仅相邻图保持每节点两条后继；输出对象成员仍是稠密object×order掩码，不能据小夹具外推15天容量。对象内撤单请求读取归`shared-run/gpu/cancel_requests.py`，分别消费实际逐目标结果与请求完成，未知归属保留Unknown。动态SIM订单身份排序复用同根固定命名空间的设备十进制原语；公共外部字符串身份仍由原字典绑定。完整首次领取取消/查询映射、所有形成证据到该接口的生产装配、完整账户冻结、100ms宿主与恢复仍待交付。
+公开Registry现在以原21前缀验证receipt已存在而order尚未绑定的逐腿承诺，及Single/Paired/Market撤单对象。`shared-run/gpu/cancel_objects.py` 仅相邻图保持每节点两条后继；输出对象成员仍是稠密object×order掩码，不能据小夹具外推15天容量。对象内撤单请求读取归`shared-run/gpu/cancel_requests.py`，分别消费实际逐目标结果与请求完成，未知归属保留Unknown。动态SIM订单身份排序复用同根固定命名空间的设备十进制原语；公共外部字符串身份仍由原字典绑定。所有形成证据到该接口的完整生产装配、查询、完整账户冻结、100ms宿主与恢复仍待交付。
 
-原账户action_snapshot还按global/现有对象latest与在途等needed集合冻结撤单请求和位置依据。设备候选已按原needed规则保留在途、global latest和现有对象latest，并保留needed提交与未闭合订单涉及的定位证据；验证分别核对完整Registry与裁剪后账户快照。最新响应携带共享引用坐标、原context/run字典坐标、完整批/record/private/delivery序号及available/responded/received时点，原正文由共享只读引用目录保存。旧冻结对象保持该完整引用，不随新领取倒灌。任意额外作用域的完整历史结果与裁剪快照结果仍是不同接口；完整首次领取装配与活动根恢复尚未交付。
+原账户action_snapshot还按global/现有对象latest与在途等needed集合冻结撤单请求和位置依据。设备候选已按原needed规则保留在途、global latest和现有对象latest，并保留needed提交与未闭合订单涉及的定位证据；验证分别核对完整Registry与裁剪后账户快照。最新响应携带共享引用坐标、原context/run字典坐标、完整批/record/private/delivery序号及available/responded/received时点，原正文由共享只读引用目录保存。旧冻结对象保持该完整引用，不随新领取倒灌。任意额外作用域的完整历史结果与裁剪快照结果仍是不同接口；完整根的首次领取装配与活动根恢复尚未交付。
+
+
+### 当前真实取消反馈接缝
+
+`execution-normalization/gpu/projection.py::cancellation` 消费同一单资产完整取消请求的
+实际SIM效果。CallerCanceled生命周期先分配private序，完整直接响应另分配一次private序；
+映射正文时保持原全部Target、Completed、生命周期及独立经济记录的source ordinal顺序。
+Target保留原target ordinal和原序input item refs，Completed不与逐目标响应合并。
+请求入站时延已在发送登记时确定，不以反馈private序重抽直接响应的收到时刻。
+
+`shared-run/gpu/cancel_projection.py` 只从实际已领取共享NOE记录读取这些字段。
+Control Canceled本身关闭公开订单，不能等待CallerCanceled；两个来源均不直接释放资金。
+真实释放仍归独立AccountTransition，由Ledger连续经济前驱门接纳。完整Target和Completed
+分别生成原Ledger空条目并登记原position；CallerCanceled关闭订单，不能把其占位state字段
+解释成Accepted/Open。Target没有condition，沿原Ledger规则保留已有订单关联，不猜市场。
+
+有限验证由原外层合法GTC请求、真实hidden Maker变化及原取消请求产生四条V4记录。
+取消前账户前缀来自原V4端口和唯一公开领取后的Ledger。设备只在开头安装这个前缀；
+随后自己按双门领取及设备待消费缓存推进四条记录，并核原余额、平台/本地/条目序和
+逐position去重。原SIM内部余额不替代公开Ledger初态。该边界不代表整个账户从开户至
+15天连续运行、跨资产取消、全局调度、请求式结算或活动根恢复已经交付。

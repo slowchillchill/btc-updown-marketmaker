@@ -170,8 +170,9 @@ class AdmissionLifecycle:
         order=_take(self.lifecycle.orders,index)
         fill=_take(self.lifecycle.fills,index)
         canceled=(tag==15)&self.lifecycle.canceled_orders[root,local]
+        is_order_release=economic&(self.lifecycle.economic_tags[root,local]==2)&result.applied
         order_at,found,lookup_fault=self.orders.lookup(order)
-        fault=fault | torch.where(use&((tag==3)|(tag==7)|canceled|(economic&(self.lifecycle.economic_tags[root,local]==0))),
+        fault=fault | torch.where(use&((tag==3)|(tag==7)|canceled|is_order_release|(economic&(self.lifecycle.economic_tags[root,local]==0))),
             Numbers.combine_fault_rows(lookup_fault),0)
         old_open=self.orders.flags[root,order_at]
         old_applied=self.orders.economic_applied[root,order_at]
@@ -194,9 +195,9 @@ class AdmissionLifecycle:
         book=self.reservations.definitive(request,accepted | is_order_economic,old_applied | is_order_economic,
             next_entry,confirm|convert)
         fault=fault | book.fault
-        order_event=(lifecycle_use&((tag==7)|accepted|canceled))|(use&is_order_economic)
+        order_event=(lifecycle_use&((tag==7)|accepted|canceled))|(use&(is_order_economic|is_order_release))
         open_flag=torch.where((tag==7)|accepted,self.lifecycle.open_orders[root,local],old_open)
-        open_flag=open_flag & ~canceled
+        open_flag=open_flag & ~(canceled|is_order_release)
         request=torch.where(accepted&bound,binding,old_request)
         # Target控制没有condition字段；沿原set_order_open保留已有关联，未知不猜。
         condition=torch.where(canceled,torch.where(found,self.orders.conditions[root,order_at],-1),

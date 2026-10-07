@@ -22,7 +22,7 @@ pub use reservation::{
 pub use core::memory::*;
 pub use projection::LedgerProjectionV2;
 
-pub use core::funds::{LedgerFundsReadV1, OrderFundsReadV1, RequestFundsReadV1};
+pub use core::funds::{LedgerFundsReadV1, OrderFundsReadV1, OrderLifecycleReadV1, RequestFundsReadV1};
 pub use reservation::ReservationStatusV1;
 
 pub use core::economics::{

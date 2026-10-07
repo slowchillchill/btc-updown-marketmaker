@@ -172,6 +172,13 @@ pub struct OrderFundsReadV1<'a> {
     pub immediate_fee_encumbrance_pusd: ExecutionReadValueV1<ExactDecimal>,
     pub last_ledger_entry_seq: Option<u64>,
 }
+/// 原订单生命周期读面；序号是最近生命周期/经济关闭条目，不是资金效果序。
+#[derive(Clone, Copy, Debug)]
+pub struct OrderLifecycleReadV1<'a> {
+    pub condition_id: Option<&'a ConditionId>,
+    pub open: bool,
+    pub last_ledger_entry_seq: u64,
+}
 pub struct LedgerFundsReadV1<'a> {
     writer: &'a LedgerWriterV1,
 }
@@ -227,6 +234,14 @@ impl LedgerFundsReadV1<'_> {
         item: &LedgerSubmissionItemIdentityV1,
     ) -> Option<&LedgerRequestIdentityV1> {
         self.writer.lifecycle.submission_requests.get(item)
+    }
+    pub fn order_lifecycle(&self, id: &Identity) -> Option<OrderLifecycleReadV1<'_>> {
+        let state = self.writer.lifecycle.orders.get(&id.ledger_key())?;
+        Some(OrderLifecycleReadV1 {
+            condition_id: state.condition_id.as_ref(),
+            open: state.open,
+            last_ledger_entry_seq: state.last_ledger_entry_seq,
+        })
     }
     pub fn order(&self, id: &Identity) -> Option<OrderFundsReadV1<'_>> {
         let (id, state) = self.writer.funds.orders.get_key_value(id)?;

@@ -116,13 +116,26 @@ def validate_actual_cancel(source,delta):
         ledger=replace(ledger,maker_cash=rational([str(Fraction(before['cash']['maker_available_pusd'])+
             Fraction(before['cash']['maker_reserved_pusd']))]))
         # 原目录当前只有这一真实已接纳订单；保存原公开open/经济接纳标志。
-        assert platform['open_order_count']==1
+        initial_order=before['order_lifecycle'][0]
+        assert platform['open_order_count']==1 and initial_order['open']
         orders,error=ledger.orders.set(integers([1]),zero,active,
-            integers([original_projection['ledger_entry_seq']]),active,economic=active)
+            integers([initial_order['last_ledger_entry_seq']]),active,economic=active)
         return replace(ledger,orders=orders,fault=ledger.fault|error)
     ledger=Numbers.run_exact_batch(prepare_ledger)
-    cache=Numbers.run_exact_batch(lambda:ClosedAdmission.empty(ledger.columns).accept(ledger.columns,closed))
-    ledger,cache=Numbers.run_exact_batch(lambda:cache.drain(ledger,torch.ones_like(cache.received)))
+    cache=ClosedAdmission.empty(ledger.columns)
+    # 设备实际take_closed输出定义次序；原CPU逐条after只用于比较，不提供应用控制。
+    for prefix in range(1,closed.emitted.size(1)+1):
+        first=replace(closed,emitted=closed.emitted & (rank<prefix))
+        cache=Numbers.run_exact_batch(lambda:cache.accept(ledger.columns,first))
+        ledger,cache=Numbers.run_exact_batch(lambda:cache.drain(ledger,torch.ones_like(cache.received),passes=1))
+        expected=source['cancel_ledger_attempts'][prefix-1]['after']
+        original_order=expected['order_lifecycle'][0]
+        assert ledger.orders.flags.cpu().tolist()[0][0]==original_order['open']
+        assert ledger.orders.conditions.cpu().tolist()[0][0]==0 and original_order['condition']==before['order_lifecycle'][0]['condition']
+        assert values(ledger.orders.last_sequences)[0]==original_order['last_ledger_entry_seq']
+        assert amounts(ledger.platform.balances)==[Fraction(expected['projection']['platform_confirmed_projection'][name]) for name in names]
+        assert values(ledger.current_entry_sequence)==[expected['projection']['ledger_entry_seq']]
+        assert values(ledger.platform.platform_source_prefix)==[expected['projection']['platform_source_prefix']]
     assert ledger.fault.cpu().tolist()==[0] and cache.fault.cpu().tolist()==[0]
     assert not (cache.received & ~cache.consumed).any().cpu().item()
     after=source['cancel_ledger_after']['projection']
@@ -148,5 +161,6 @@ def validate_actual_cancel(source,delta):
     return {'actual_GPU_cancel_effects_to_NOE_records':4,'Control_Canceled_before_CallerCanceled_closed':True,
         'real_CallerCanceled_device_decoder_checked':True,'NOE_unset_gates_no_delivery':True,'first_delivery_not_repeated':True,
         'source_private_batch_and_actual_release_checked':True,'Ledger_four_original_positions_and_sequences_checked':True,
+        'each_actual_receive_prefix_order_condition_open_and_last_sequence_checked':True,
         'Ledger_control_closes_without_cash_and_economic_releases_once':True,
         'cold_original_cancel_prefix_initialized_once':True,'full_root':False}
