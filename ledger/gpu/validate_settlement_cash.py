@@ -84,6 +84,9 @@ def main(source):
     intents=FrozenIntentOrders(empty,empty_int,empty,empty_ratio,empty,empty)
     for block_index,block in enumerate(source['blocks']):
         before,after=block['before'],block['after'];consumed_rows=block['records']
+        assert after['projection']['ledger_entry_seq']-before['projection']['ledger_entry_seq']==len(consumed_rows), (
+            source['label'],block_index,'非费用材料跨过了切片边界',before['projection']['ledger_entry_seq'],
+            after['projection']['ledger_entry_seq'],[row['ledger_entry_seq'] for row in consumed_rows])
         feedback=feedback_key(consumed_rows[0])
         assert all(feedback_key(row)==feedback for row in consumed_rows)
         # 原同反馈完整来源与实际Ledger提交切片分别保留，不能以切片行数猜Option。
@@ -274,7 +277,10 @@ def main(source):
             association_retry=True
         state,scan=_device_scan(state,current_mask,'cost_cash_'+str(block_index))
         scans.append(scan);resource_exits+=scan['resource_retries'];ledger=state.ledger
-        assert ledger.fault.cpu().tolist()==[0] and not (state.waiting.received&~state.waiting.consumed).any().cpu().item()
+        assert ledger.fault.cpu().tolist()==[0], (source['label'],block_index,'ledger fault',ledger.fault.cpu().tolist())
+        assert not (state.waiting.received&~state.waiting.consumed).any().cpu().item(), (
+            source['label'],block_index,'waiting',values(ledger.platform.platform_source_prefix),sequence,
+            state.waiting.received.cpu().tolist(),state.waiting.consumed.cpu().tolist())
         assert values(ledger.current_entry_sequence)==[after['projection']['ledger_entry_seq']]
         assert values(ledger.platform.platform_source_prefix)==[after['projection']['platform_source_prefix']]
         assert exact(ledger.platform.balances)==[Fraction(after['projection']['platform_confirmed_projection'][n]) for n in BALANCES]
@@ -338,6 +344,7 @@ def main(source):
             'total':len(source['blocks']),'elapsed_seconds':time.perf_counter()-started}),file=sys.stderr,flush=True)
     assert source['label']=='external-cash' or liability_only
     if source['label']=='settlement-case-8':assert negative and resource_exits>0
+    if source['label']=='settlement-case-0':assert split_economic
     if source['label']=='external-cash':
         assert resource_exits>0 and zero_cash_sequence is not None and zero_cash_continued and association_retry and split_economic
     print(json.dumps({'status':'PASS','label':source['label'],'actual_fee_blocks':len(source['blocks']),

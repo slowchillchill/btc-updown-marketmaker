@@ -71,7 +71,9 @@ pub fn finish(materials: Option<Materials>,root: &Path,label: &str,seed: &str) {
             source_records.push(row.clone());
             let batch=serde_json::to_value(&record.position().source_watermark).unwrap();
             let feedback=serde_json::to_value(&record.record().source_order().sequence).unwrap();
-            if let Some(block)=blocks.last_mut().filter(|b|b["batch"]==batch && b["feedback"]==feedback) {
+            // 非费用材料也推进真实Ledger/经济前缀，不能跨过它们拼接冷切片。
+            if let Some(block)=blocks.last_mut().filter(|b|b["batch"]==batch && b["feedback"]==feedback
+                && b["after"]["projection"]["ledger_entry_seq"]==before.as_ref().unwrap()["projection"]["ledger_entry_seq"]) {
                 block["records"].as_array_mut().unwrap().push(row);block["after"]=after;
             } else {
                 blocks.push(serde_json::json!({"batch":batch,"feedback":feedback,"before":before.unwrap(),"after":after,"records":[row]}));
