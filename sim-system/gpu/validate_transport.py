@@ -3,6 +3,7 @@ from dataclasses import fields, is_dataclass, replace
 import torch
 from queues import ExactInt, ExactRational
 from transport import compact_committed_batches
+from fields import RecordList
 
 
 def check_transport_layout(batches):
@@ -11,6 +12,8 @@ def check_transport_layout(batches):
             return None
         if isinstance(value, torch.Tensor):
             return value.repeat((2,)+(1,)*(value.ndim-1))
+        if isinstance(value,tuple):
+            return tuple(duplicate(member) for member in value)
         if is_dataclass(value):
             return replace(value, **{field.name: duplicate(getattr(value, field.name)) for field in fields(value)})
         raise TypeError('原批布局包含未覆盖字段')
@@ -58,6 +61,27 @@ def check_transport_layout(batches):
                     for batch,value in zip(doubled,expected)],got)
         elif name == 'fault':
             assert torch.equal(got, torch.zeros_like(got))  # 原源批本身已提交无错误。
+        elif isinstance(got,RecordList):
+            from fractions import Fraction
+            from validate_base_execution import values
+            def member(value,index):
+                if isinstance(value,torch.Tensor):return int(value[index].cpu())
+                if isinstance(value,ExactRational):return (Fraction(values(value.numerator)[index],values(value.denominator)[index]),int(value.fault[index].cpu()))
+                return (values(value)[index],int(value.fault[index].cpu()))
+            for root in range(2):
+                originals=[]
+                for batch,value in zip(doubled,expected):
+                    for col in range(batch.rows.size(1)):
+                        row=root*batch.rows.size(1)+col
+                        population=value.present[row].cpu().tolist()
+                        originals.append([tuple(member(field,row*len(population)+i) for field in value.fields)
+                            for i,present in enumerate(population) if present])
+                for col,source in enumerate(order[root].cpu().tolist()):
+                    row=root*work.allocated_width+col
+                    population=got.present[row].cpu().tolist()
+                    actual_members=[tuple(member(field,row*len(population)+i) for field in got.fields)
+                        for i,present in enumerate(population) if present]
+                    assert actual_members==originals[source]
         elif isinstance(got, torch.Tensor):
             tensor(expected, got)
         elif isinstance(got, ExactInt):

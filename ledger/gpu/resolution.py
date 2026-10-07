@@ -168,6 +168,13 @@ class MarketResolutions:
         member=self.present & (self.conditions==condition[self.roots]) & (self.identities==identity[self.roots])
         return torch.zeros_like(condition,dtype=torch.int32).scatter_reduce(0,self.roots,member.to(torch.int32),reduce='amax').bool()
 
+    def accrue_realized(self,condition,amount,enabled):
+        """原返佣应计即计已实现盈亏；是否已公开判定不改变这项归属。"""
+        selected=(self.conditions==condition[self.roots]) & enabled[self.roots]
+        incoming=take_ratio(amount,self.roots)
+        zero=ExactRational(incoming.numerator.constant(0),incoming.denominator.constant(1))
+        return replace(self,realized_pnl=self.realized_pnl+select(incoming,selected,zero))
+
     def redeem(self,condition,identity,cash,removed_cost,pools,enabled):
         """原经济到账按未兑付pair与其余现金归属；Request本身不清应收。"""
         selected=self.present & (self.conditions==condition[self.roots]) & (self.identities==identity[self.roots]) & enabled[self.roots]

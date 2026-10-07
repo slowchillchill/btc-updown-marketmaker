@@ -1047,6 +1047,8 @@ NOE `schema21` 将完整判定／政策身份、八列余额及原多资产成�
 共享传输和 Ledger 按成员人口消费，不拆平台经济序号。Ledger 先等待公开 Resolution
 关联和平台直接前驱，再同事务销实际 token 成本、记录已兑付配对与孤腿量。
 未兑付配对到账归 Maker，其余到账归 Directional；费用不因清偿撤回。
+市场已实现盈亏持续接原返佣应计，再在清偿经济成功时加到账减被销成本，
+不把仅本次清偿增量当作完整累计盈亏。
 Request 证据仍独立占一个账本条目，本身不改变余额或应收。
 
 当前自然短例沿原 TypedRaw、GTC、Maker、Terminal、MINED／CONFIRMED 与首次

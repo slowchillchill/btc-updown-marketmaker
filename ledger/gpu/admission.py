@@ -382,6 +382,9 @@ class AdmissionLifecycle:
             # 缺完整Terminal/资产绑定仍显式故障，不能消费后冒充零应收。
             fault |= (resolved_event|request_event).to(torch.int32)
         else:
+            accrued=take_ratio(balances,root*8+4)+take_ratio(balances,root*8+5)+take_ratio(balances,root*8+6)+take_ratio(balances,root*8+7)
+            resolutions=resolutions.accrue_realized(self.lifecycle.conditions[root,local],accrued,
+                economic & ((self.lifecycle.economic_tags[root,local]==9)|(self.lifecycle.economic_tags[root,local]==10)) & result.applied & use & (fault==0))
             resolutions=resolutions.observe(self.lifecycle.conditions[root,local],
                 self.lifecycle.resolution_identities[root,local],self.lifecycle.resolution_terminals[root,local],
                 success_pools,resolved_event & use & (fault==0))

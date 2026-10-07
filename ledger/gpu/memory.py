@@ -5,7 +5,7 @@
 """
 from dataclasses import dataclass,replace
 import torch
-from queues import ExactInt,ExactRational,_take
+from queues import ExactInt,ExactRational,Numbers,_take
 
 
 def take_ratio(value,index):
@@ -109,7 +109,7 @@ class EconomicColumns:
         if owners.numel():
             error |= owners[ids.clamp(0,owners.numel()-1)]!=torch.arange(roots,device=ids.device)[:,None]
         amount_fault=vectors.fields[1].fault.reshape(roots,width)
-        return __import__('queues').Numbers.combine_fault_rows(torch.where(vectors.present,amount_fault|error.to(torch.int32),0))
+        return Numbers.combine_fault_rows(torch.where(vectors.present,amount_fault|error.to(torch.int32),0))
 
     def outcome_delta(self,index,owners):
         from transport import take_record_list

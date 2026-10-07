@@ -384,6 +384,23 @@ def main():
         runtime,projection,success_batch=Numbers.run_exact_batch(lambda:runtime.settlement_success(choice,projection,sampler,zero,redemption_sources))
         assert success_batch.fault.cpu().tolist()==[0] and success_batch.emitted.sum().cpu().item()==2
         assert values(runtime.account.outcomes)==[0,0]
+        # 原两个NOE正文/位置作为oracle，保持原private与源ordinal，不据其控制消费。
+        for column,original in enumerate(success_reference['records']):
+            body=next(iter(original['record'].values()))
+            row=success_batch.rows[0,column]
+            expected=Numbers.run_exact_batch(lambda:expected_semantic(original,token_slots={a['token_id']:i for i,a in enumerate(block.assets)}))
+            semantic=projection.normalizer.bank.semantic[row]
+            assert torch.equal(semantic[:expected.size(1)],expected[0]) and not semantic[expected.size(1):].any().cpu().item()
+            assert values(success_batch.batch_sequences)[column]==original['position']['source_watermark']['projection_batch_sequence']
+            assert values(success_batch.record_ordinals)[column]==original['position']['record_ordinal']
+            assert values(success_batch.private_sequences)[column]==body['source_order']['sequence']['PrivateFeedback']['private_feedback_sequence']
+            assert projection.normalizer.bank.source_order[row,3].cpu().item()==body['source_order']['ordinal']
+            source_record=body.get('source_reference',body.get('fact',{}).get('source_reference'))['record']['SettlementLifecycle']
+            assert success_batch.received_at[0,column].cpu().item()==source_record['feedback_received_at_utc_ms']
+            assert success_batch.platform_at[0,column].cpu().item()==source_record['platform_event_at_utc_ms']
+            if 'fact' in body:
+                assert values(success_batch.economic_sequences)[column]==body['fact']['economic_identity']['AccountTransition']['account_transition_seq']
+        assert values(success_batch.private_sequences)[0]==values(success_batch.private_sequences)[1]
         original_success=success_reference['ledger']['projection']
         assert values(runtime.account.cash)==[units(original_success['platform_confirmed_projection']['cash_pusd'])]
         public=Numbers.run_exact_batch(lambda:public.append_batch(projection.normalizer.bank,success_batch))
@@ -423,6 +440,7 @@ def main():
         'public_Ledger_economic_predecessors_and_Maker_gate_checked':with_pending,
         'first_public_Request_backend_Registered_same_NOE_Ledger_checked':with_pending,
         'actual_success_redemption_one_economic_fact_cost_and_cash_attribution_checked':with_pending,
+        'actual_success_Request_Economic_body_position_and_original_member_order_checked':with_pending,
         'Registered_feedback_fault_keeps_same_runtime_scenario_prefix_checked':with_pending,
         'first_registration_invalidates_previous_drive_choice_checked':with_pending,
         'growth_new_slot_does_not_alias_old_pending_identity_checked':with_pending,'full_root_and_requested_settlement':False,

@@ -26,7 +26,7 @@ def entity_sequence(identity,kind):
     return int(value[kind]['source_'+kind.lower()+'_id'].removeprefix('sim-'))
 
 
-def expected_semantic(record, resolution_index=0, terminal_index=0, token_index=0):
+def expected_semantic(record, resolution_index=0, terminal_index=0, token_index=0, token_slots=None):
     zero=torch.zeros(1,dtype=torch.int64,device='cuda')
     body=next(iter(record['record'].values()))
     if 'fact' in body:
@@ -36,7 +36,22 @@ def expected_semantic(record, resolution_index=0, terminal_index=0, token_index=
         if 'Existing' in transition:
             transition=transition['Existing']
         name,fields=(transition,{}) if isinstance(transition,str) else next(iter(transition.items()))
-        tag={'OrderAcceptedEncumbranceApplied':0,'CallerCancellationEncumbranceReleased':2,'MarketResolutionEncumbranceReleased':5,'FillFinalityEconomicApplied':6,'TakerRebateAccrualApplied':10,
+        if name=='ResolutionRedeemApplied':
+            from fields import RecordList
+            balance=value['balance_delta']
+            existing=balance['existing']
+            request=fields['settlement_request_id']
+            assert request['policy_version']=='RESOLUTION_REDEEM_ONLY'
+            assert request['resolution_identity']==fields['resolution_identity']
+            vector=existing['outcome_balance_deltas']
+            vector_fields=RecordList((torch.tensor([token_slots[e['token_id']] for e in vector],dtype=torch.int64,device='cuda'),
+                rational([e['balance_shares_delta'] for e in vector])),torch.ones((1,len(vector)),dtype=torch.bool,device='cuda'))
+            names=['cash_pusd_delta','available_pusd_delta','principal_encumbrance_pusd_delta','immediate_taker_fee_encumbrance_pusd_delta',
+                'maker_rebate_receivable_pusd_delta','taker_rebate_receivable_pusd_delta','maker_rebate_locked_remainder_pusd_delta','taker_rebate_locked_remainder_pusd_delta']
+            return encode_fields([zero,zero,torch.tensor([value['economic_effective_at_utc_ms']],device='cuda'),
+                torch.full_like(zero,resolution_index),zero,*[rational([existing[n]]) for n in names],vector_fields,
+                rational([balance['settlement_fee_liability_pusd_delta']]),rational([balance['actual_taker_fee_liability_pusd_delta']])])
+        tag={'OrderAcceptedEncumbranceApplied' :0,'CallerCancellationEncumbranceReleased':2,'MarketResolutionEncumbranceReleased':5,'FillFinalityEconomicApplied':6,'TakerRebateAccrualApplied':10,
             'MakerRebateAccrualFinalized':9,
             'MakerRebateDayFinalized':11,'TakerRebateDayFinalized':12,'MakerRebatePaid':13,'TakerRebatePaid':14}[name]
         if tag==9:
@@ -97,6 +112,14 @@ def expected_semantic(record, resolution_index=0, terminal_index=0, token_index=
             integers([units(value['measurement']['Base']['open_base_quantity_shares'])]),
             torch.tensor([value['effective_processing_at_utc_ms']],device='cuda')])
     if kind=='SettlementLifecycleV2':
+        if 'Request' in value:
+            request=value['Request']
+            assert request['index_sets']==['0x1','0x2'] and request['settlement_request_id']['policy_version']=='RESOLUTION_REDEEM_ONLY'
+            outcomes={'Registered':0,'Pending':1,'FinalSuccess':2,'FinalFailureNoEffect':3}
+            observations=['Registered','SubmissionAccepted','SubmissionUnknown','SubmissionTimeout','QueryAcceptedPending','QueryFinalSuccess',
+                'QueryUnknown','ObservationTimeout','RetryAuthorized','TerminalSuccess','TerminalFailureNoEffect']
+            return encode_fields([zero,zero,torch.full_like(zero,resolution_index),zero,torch.ones_like(zero),torch.full_like(zero,2),
+                torch.full_like(zero,outcomes[request['outcome']]),torch.full_like(zero,observations.index(request['observation']))])
         if 'Resolved' in value:
             return encode_fields([zero,zero,torch.full_like(zero,resolution_index),torch.full_like(zero,terminal_index)])
         if 'MakerAccrualFinalized' in value:
