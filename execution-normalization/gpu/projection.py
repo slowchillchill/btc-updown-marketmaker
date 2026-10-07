@@ -246,18 +246,14 @@ class Projection:
             (economic,ECONOMIC,private,batch,received,torch.full_like(conditions,3),at,delta.emitted)]
         return self._finish(emitter,records,fault | frame.root_fault | ordinals.fault)
 
-    def _record(self,emitter,mapped,kind,private,batch,received):
+    def _record_bank(self,mapped,kind):
         roots=self.account_slots.numel()
-        size=roots
         zero=torch.zeros(roots,dtype=torch.int64,device=self.account_slots.device)
         schema=getattr(mapped,'payload_schema',11 if kind==ECONOMIC else 8)
         incoming=EvidenceBank(mapped.logical_keys,mapped.economic_keys if kind==ECONOMIC else zero[:,None],
             mapped.semantic,getattr(mapped,'cancellation_fields',None) if getattr(mapped,'cancellation_fields',None) is not None else zero[:,None],torch.full_like(zero,kind),mapped.source_order,zero,mapped.fault,
             torch.full_like(zero,schema),frozenset([schema]))
-        normalizer=Normalizer.empty(incoming,roots) if self.normalizer is None else self.normalizer.append_bank(incoming)
-        offset=normalizer.bank.kinds.numel()-size
-        rows=(torch.arange(size,device=zero.device)+offset)[:,None]
-        return replace(self,emitter=emitter,normalizer=normalizer),rows,mapped.emitted[:,None],private,batch,received
+        return incoming
 
     def _finish(self,emitter,records,source_fault):
         from queues import ExactInt,ExactRational
@@ -271,21 +267,24 @@ class Projection:
             return ExactRational(cat_integer([value.numerator for value in values]),
                 cat_integer([value.denominator for value in values]))
         original=self
-        working=self
-        coordinates=[]
+        banks=[]
         active=[]
         private=[]
         batch=[]
         received=[]
         for mapped,kind,sequence,batch_sequence,received_at,category,platform_at,wanted in records:
-            working,rows,enabled,_,_,_=working._record(emitter,mapped,kind,sequence,batch_sequence,received_at)
-            coordinates.append(rows)
-            active.append(enabled)
+            banks.append(self._record_bank(mapped,kind))
+            active.append(mapped.emitted)
             private.append(sequence)
             batch.append(batch_sequence)
             received.append(received_at)
-        rows=torch.cat(coordinates,dim=1)
-        enabled=torch.cat(active,dim=1)
+        incoming=EvidenceBank.concatenate(banks)
+        roots=self.account_slots.numel()
+        normalizer=Normalizer.empty(incoming,roots) if self.normalizer is None else self.normalizer.append_bank(incoming)
+        offset=normalizer.bank.kinds.numel()-incoming.kinds.numel()
+        rows=offset+torch.arange(roots,device=self.account_slots.device)[:,None]+roots*torch.arange(len(records),device=self.account_slots.device)[None,:]
+        enabled=torch.stack(active,dim=1)
+        working=replace(self,emitter=emitter,normalizer=normalizer)
         # emitter错误或任何已实际生成证据错误不能静默少一条记录。
         error=source_fault.clone()
         for mapped,_,_,_,_,_,_,wanted in records:

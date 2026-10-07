@@ -61,6 +61,22 @@ class EvidenceBank:
             result = result.gather(1, key[result].argsort(dim=1, stable=True))
         return result
 
+    @classmethod
+    def concatenate(cls, banks):
+        """同一自然批的记录主序字段一次装箱，旧bank尚未参与复制。"""
+        from dataclasses import fields
+        columns={}
+        for field in fields(cls):
+            if field.name=='declared_schemas': continue
+            values=[getattr(bank,field.name) for bank in banks]
+            if values[0].ndim==2:
+                width=max(value.size(1) for value in values)
+                values=[torch.nn.functional.pad(value,(0,width-value.size(1))) for value in values]
+            columns[field.name]=torch.cat(values)
+        declaration=None if any(bank.declared_schemas is None for bank in banks) else frozenset().union(
+            *(bank.declared_schemas for bank in banks))
+        return cls(**columns,declared_schemas=declaration)
+
     def append(self, incoming):
         """追加已按同schema编码的不可变行，旧身份/值引用不改号。"""
         from fields import append_rows

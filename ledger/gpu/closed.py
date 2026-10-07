@@ -50,7 +50,7 @@ class ClosedAdmission:
             torch.zeros(roots, dtype=torch.int32, device=columns.row_refs.device),
         )
 
-    def accept(self, columns, closed):
+    def accept(self, columns, closed, *, source_rows=None):
         roots, width = self.received.shape
         if columns.row_refs.shape != self.received.shape:
             raise ValueError('缓存须绑定原共享NOE列块')
@@ -62,11 +62,16 @@ class ClosedAdmission:
         if width == 0:
             error = closed.emitted.any(1).to(torch.int32)
             return replace(self, fault=self.fault | closed.fault | error)
-        members = torch.cat([batch.emitted for batch in columns.projection_batches], dim=1)
-        matches = (columns.row_refs[:, :, None] == closed.record_refs[:, None, :]) & members[:, :, None]
-        counts = matches.to(torch.int64).sum(1)
-        error = ((counts != 1) & closed.emitted).any(1).to(torch.int32)
-        fault = self.fault | closed.fault | error
+        if source_rows is None:
+            members = torch.cat([batch.emitted for batch in columns.projection_batches], dim=1)
+            matches = (columns.row_refs[:, :, None] == closed.record_refs[:, None, :]) & members[:, :, None]
+            counts = matches.to(torch.int64).sum(1)
+            error = ((counts != 1) & closed.emitted).any(1).to(torch.int32)
+            fault = self.fault | closed.fault | error
+        else:
+            # 与Registry/cancel共享实际源坐标；等待只接纳原匹配故障，不提前用Ledger业务结果。
+            matches = source_rows.matches
+            fault = self.fault | source_rows.match_fault
         actual = matches & closed.emitted[:, None, :]
         index = actual.to(torch.int64).argmax(2)
         # 同一物理引用再次传入不追加人口，也不刷新首次可见性。

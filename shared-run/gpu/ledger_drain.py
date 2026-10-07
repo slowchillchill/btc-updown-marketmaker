@@ -38,6 +38,7 @@ def _owned(value, layout, word_capacity=0):
 
 
 def _pairs(target,candidate):
+    if target is candidate: return
     if isinstance(target,torch.Tensor):
         if target.shape != candidate.shape or target.dtype != candidate.dtype or target.device != candidate.device:
             raise ValueError('Ledger候选布局改变须退出图增长资源')

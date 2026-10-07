@@ -63,6 +63,7 @@ def _owned(value, layout):
 
 
 def _tensor_pairs(target, candidate):
+    if target is candidate: return
     if isinstance(target, torch.Tensor):
         if (target.shape != candidate.shape or target.dtype != candidate.dtype or
                 target.device != candidate.device):

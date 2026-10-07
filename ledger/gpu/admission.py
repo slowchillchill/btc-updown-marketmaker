@@ -19,11 +19,14 @@ from core import OUT_EVIDENCE,OUT_FACT,OUT_DUPLICATE,OUT_ALIAS,OUT_LOGICAL_CONFL
 
 
 def coordinate(value,original,valid):
+    if value is original: return value
     roots=valid.numel()
     updates={}
     for field in fields(value):
         new,old=getattr(value,field.name),getattr(original,field.name)
-        if isinstance(new,ExactInt):
+        if new is old:
+            updates[field.name]=new
+        elif isinstance(new,ExactInt):
             updates[field.name]=new.select(valid.repeat_interleave(new.sign.numel()//roots),old)
         elif isinstance(new,ExactRational):
             mask=valid.repeat_interleave(new.numerator.sign.numel()//roots)
@@ -323,7 +326,7 @@ class AdmissionLifecycle:
         fault=fault | torch.where(applied_fill,applied_cost.fault | applied_fee.fault,0)
         cost_asset=torch.where(self.lifecycle.economic_has_outcome[root,local],assets,-1)
         position_costs=self.position_costs.transition(trade_at,self.lifecycle.conditions[root,local],cost_asset,
-            self.lifecycle.economic_path_ordinals[root,local],applied_cost,applied_fee,applied_fill,compensated)
+            applied_cost,applied_fee,applied_fill,compensated)
         trade_success,success_pools=trade_success.apply_success(self.success_pools,trades,trade_at,(trade_event|economic_trade)&(fault==0))
         fault=fault | success_pools.fault
         contribution_event=lifecycle_use & (tag==9)

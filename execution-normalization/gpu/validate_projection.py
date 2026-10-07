@@ -570,7 +570,9 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert values(again.platform.platform_source_prefix)==[7]
     assert torch.equal(again.platform.balances.numerator.words,before.balances.numerator.words)
     assert ledger.available_at[ledger.received].cpu().tolist()==[10000]*7
-    return {'device_generated_NOE_records':checked,'device_batches':len(batches),'original_positions_and_receive_order_checked':True,
+    from validate_two_root_projection import validate_two_root_projection
+    two_root_report=validate_two_root_projection(source)
+    return {'two_root_projection':two_root_report,'device_generated_NOE_records':checked,'device_batches':len(batches),'original_positions_and_receive_order_checked':True,
         'bank_physical_rows':state.normalizer.bank.kinds.numel(),'masked_or_unemitted_rows':state.normalizer.bank.kinds.numel()-checked,
         'actual_device_Ledger_economic_position_predecessor_checked':True,
         'Ledger_admission_device_generated_entry_local_and_binding_checked':True,

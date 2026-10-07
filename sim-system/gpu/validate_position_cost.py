@@ -56,14 +56,13 @@ def main():
         after = checkpoint['after']['projection']
         committed = after['platform_source_prefix'] != prefix
         prefix = after['platform_source_prefix']
-        name, ordinal, principal, fee = None, 0, '0', '0'
+        name, principal, fee = None, '0', '0'
         if 'fact' in body:
             value = body['fact']['disposition']['AccountTransition']
             transition = value['transition']
             if 'Existing' in transition:
                 transition = transition['Existing']
-            name, fields = (transition, {}) if isinstance(transition, str) else next(iter(transition.items()))
-            ordinal = fields.get('path_ordinal', 0)
+            name = transition if isinstance(transition, str) else next(iter(transition))
             delta = value['balance_delta']
             if 'existing' in delta:
                 delta = delta['existing']
@@ -73,7 +72,7 @@ def main():
         compensated = yes if committed and name == 'FillFinalityCompensationApplied' else no
         # 原金额来自真实NOE delta；FAILED ordinal不决定之前存储的应用项。
         costs = Numbers.run_exact_batch(lambda: costs.transition(zero, zero, zero,
-            torch.full_like(zero, ordinal), rational([principal]), rational([fee]), applied, compensated))
+            rational([principal]), rational([fee]), applied, compensated))
         economic = yes if committed and name in ['FillFinalityEconomicApplied',
             'FillFinalityUnappliedFailureReleased', 'FillFinalityCompensationApplied'] else no
         evidence = body.get('evidence', {}).get('TradeLifecycleV3')

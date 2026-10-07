@@ -6,7 +6,7 @@
 """
 from dataclasses import dataclass, replace
 import torch
-from registry_projection import public_rows_from_closed
+from registry_projection import public_rows_from_closed,resolve_closed_public_rows
 from cancel_projection import cancellation_rows_from_closed, cancellation_order_events
 
 
@@ -62,8 +62,9 @@ class PublicLedgerState:
         batches = self.ledger.columns.projection_batches
         # 物理领取rank按真实emitted人口递增；不是private/delivery业务序号。
         rank = self.waiting.next_rank[:, None] + closed.emitted.to(torch.int64).cumsum(1)-1
-        events, bindings = public_rows_from_closed(bank, batches, closed, rank)
-        targets, completions = cancellation_rows_from_closed(bank, batches, closed)
+        source_rows=resolve_closed_public_rows(bank,batches,closed) if closed.record_refs.size(1) else None
+        events, bindings = public_rows_from_closed(bank, batches, closed, rank,source_rows=source_rows)
+        targets, completions = cancellation_rows_from_closed(bank, batches, closed,source_rows=source_rows)
         from commitments import SubmissionBindings
         old_bindings = self.submission_bindings
         if old_bindings is None:
@@ -74,7 +75,7 @@ class PublicLedgerState:
         cancellations = None if self.cancellations is None else self.cancellations.receive(completions)
         cancellation_fault = completions.fault if cancellations is None else cancellations.completions.fault
         # Registry只在首次领取路径更新。Ledger再试始终引用原waiting和首次visibility。
-        waiting = self.waiting.accept(self.ledger.columns, closed)
+        waiting = self.waiting.accept(self.ledger.columns, closed,source_rows=source_rows)
         # 原Registry接纳失败时不得继续提交同根Ledger；其它独立根仍能推进。
         ledger_input=replace(self.ledger,fault=self.ledger.fault | registry.events.fault | targets.fault | cancellation_fault | submission_bindings.fault)
         fault = closed.fault | registry.events.fault | targets.fault | cancellation_fault | waiting.fault | ledger_input.fault | submission_bindings.fault

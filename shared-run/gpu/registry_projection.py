@@ -4,6 +4,7 @@
 输入是NOE双门已领取引用；不读取Ledger应用结果，不经CPU逐条业务回调。
 更宽查询/取消/登记schema由各自来源接入，不把未知类型解释为已支持。
 """
+from dataclasses import dataclass
 import torch
 from queues import ExactInt,ExactRational,Numbers,_take
 from fields import decode_fields
@@ -19,6 +20,17 @@ def concatenate_integer(values,roots):
         torch.cat([value.fault.reshape(roots,-1) for value in prepared],1).flatten())
 
 
+@dataclass(frozen=True)
+class ClosedRowLookup:
+    rows: torch.Tensor
+    at: torch.Tensor
+    coordinates: torch.Tensor
+    active: torch.Tensor
+    fault: torch.Tensor
+    matches: torch.Tensor
+    match_fault: torch.Tensor
+
+
 def resolve_closed_public_rows(bank,batches,closed):
     """原共享位置到来源批坐标；公开Registry与取消读取复用同一设备绑定。"""
     roots,width=closed.record_refs.shape
@@ -27,7 +39,8 @@ def resolve_closed_public_rows(bank,batches,closed):
     original_active=torch.cat([batch.emitted for batch in batches],1)
     matching=(original_rows[:,:,None]==closed.record_refs[:,None,:])&original_active[:,:,None]
     count=matching.to(torch.int64).sum(1)
-    fault=closed.fault|((count!=1)&closed.emitted).any(1).to(torch.int32)
+    match_fault=closed.fault|((count!=1)&closed.emitted).any(1).to(torch.int32)
+    fault=match_fault
     at=matching.to(torch.int32).argmax(1)
     coordinates=(torch.arange(roots,device=device)[:,None]*original_rows.size(1)+at).flatten()
     rows=closed.record_refs.clamp(0,bank.kinds.numel()-1).flatten()
@@ -36,10 +49,10 @@ def resolve_closed_public_rows(bank,batches,closed):
     fault=fault|Numbers.combine_fault_rows(torch.where(closed.emitted,bank.fault[rows].reshape(roots,width),0))
     outcomes=torch.cat([batch.normalized.outcomes for batch in batches],1).gather(1,at).flatten()
     active=closed.emitted.flatten()&(outcomes==OUT_EVIDENCE)&(fault==0).repeat_interleave(width)
-    return rows,at,coordinates,active,fault
+    return ClosedRowLookup(rows,at,coordinates,active,fault,matching,match_fault)
 
 
-def public_rows_from_closed(bank,batches,closed,receive_rank):
+def public_rows_from_closed(bank,batches,closed,receive_rank,*,source_rows=None):
     from commitments import SubmissionBindings
     roots,width=closed.record_refs.shape
     device=closed.record_refs.device
@@ -50,7 +63,8 @@ def public_rows_from_closed(bank,batches,closed,receive_rank):
         events=replace(PublicRegistryEvents.empty(roots,device),fault=closed.fault)
         return events,SubmissionBindings(events.received,events.request_slots,events.item_ordinals,
             events.private_sequences,events.receive_rank,events.orders,events.received,events.fault)
-    rows,at,coordinates,active,fault=resolve_closed_public_rows(bank,batches,closed)
+    source_rows=resolve_closed_public_rows(bank,batches,closed) if source_rows is None else source_rows
+    rows,at,coordinates,active,fault=(source_rows.rows,source_rows.at,source_rows.coordinates,source_rows.active,source_rows.fault)
     schemas=bank.payload_schemas[rows]
     layouts={3:['scalar']*4+['integer','scalar','integer','integer','scalar'],
         7:['scalar']*3+['integer','scalar','scalar'],

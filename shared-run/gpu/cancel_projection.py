@@ -34,10 +34,11 @@ class PublicCancellationRows:
     fault: torch.Tensor
 
 
-def cancellation_rows_from_closed(bank,batches,closed):
+def cancellation_rows_from_closed(bank,batches,closed,*,source_rows=None):
     roots,width=closed.record_refs.shape
     device=closed.record_refs.device
-    rows,at,coordinates,active,fault=resolve_closed_public_rows(bank,batches,closed)
+    source_rows=resolve_closed_public_rows(bank,batches,closed) if source_rows is None else source_rows
+    rows,at,coordinates,active,fault=(source_rows.rows,source_rows.at,source_rows.coordinates,source_rows.active,source_rows.fault)
     schema=bank.payload_schemas[rows]
     target=active&(schema==15)
     complete=active&(schema==16)

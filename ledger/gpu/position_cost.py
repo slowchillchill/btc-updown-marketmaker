@@ -31,7 +31,6 @@ class PositionCosts:
     active: torch.Tensor
     conditions: torch.Tensor
     assets: torch.Tensor
-    application_ordinals: torch.Tensor
     cost: object
     fee: object
     known: torch.Tensor
@@ -43,10 +42,10 @@ class PositionCosts:
         identity = torch.full(shape, -1, dtype=torch.int64, device=device)
         zero = Numbers.ExactInt.from_i64_tensor(torch.zeros(roots*capacity, dtype=torch.int64, device=device))
         ratio = ExactRational(zero, zero.constant(1))
-        return cls(active, identity, identity.clone(), identity.clone(), ratio, ratio,
+        return cls(active, identity, identity.clone(), ratio, ratio,
             torch.full((roots,), known, dtype=torch.bool, device=device))
 
-    def transition(self, slots, conditions, assets, application_ordinals, cost, fee, applied, compensated):
+    def transition(self, slots, conditions, assets, cost, fee, applied, compensated):
         roots, width = self.active.shape
         repeated = torch.arange(roots, device=slots.device).repeat_interleave(width)
         install = torch.zeros_like(self.active).scatter(1, slots[:, None], applied[:, None])
@@ -54,7 +53,6 @@ class PositionCosts:
         return replace(self, active=(self.active | install) & ~remove,
             conditions=torch.where(install, conditions[:, None], self.conditions),
             assets=torch.where(install, assets[:, None], self.assets),
-            application_ordinals=torch.where(install, application_ordinals[:, None], self.application_ordinals),
             cost=select(take_ratio(cost, repeated), install.flatten(), self.cost),
             fee=select(take_ratio(fee, repeated), install.flatten(), self.fee))
 
@@ -79,7 +77,7 @@ class PositionCosts:
             raise ValueError('未退役成本目录不能缩小')
         blank=type(self).empty(roots,capacity-old,self.active.device)
         updates={name:torch.cat([getattr(self,name),getattr(blank,name)],1)
-            for name in ['active','conditions','assets','application_ordinals']}
+            for name in ['active','conditions','assets']}
         for name in ['cost','fee']:
             updates[name]=append_root_fields(getattr(self,name),getattr(blank,name),roots,old,capacity-old)
         return replace(self,**updates)
