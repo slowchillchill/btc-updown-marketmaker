@@ -58,10 +58,23 @@ def success_inputs(pools, conditions, present, applicable, asset_outcomes, *, pr
     quantity = encode(pools.success_quantity,sides)
     cost = encode(pools.success_cost,sides)
     orphan = encode(pools.quantity,sides)
-    # 双腿各存相同配对量；原outcome0代表该市场一项，不将双腿加倍。
-    paired_sides = encode(pools.paired_quantity,sides)
-    paired_known = known.all(2)
-    paired = torch.stack((torch.where(paired_known,paired_sides[:,:,0,0],0.0),
+    # 原paired_shares是市场量，不依赖outcome绑定。池按资产重复存同一市场值；
+    # 仅按(root,condition)稳定取一次，不能借逐腿known决定市场级适用性。
+    order = pools.condition_slots.argsort(stable=True)
+    order = order[owner[order].argsort(stable=True)]
+    first = torch.ones(assets,dtype=torch.bool,device=device)
+    if assets>1:
+        first[1:] = ((owner[order][1:]!=owner[order][:-1])
+            | (pools.condition_slots[order][1:]!=pools.condition_slots[order][:-1]))
+    representative = torch.zeros_like(first).scatter(0,order,first)
+    pair_index = torch.arange(assets,device=device)[None,None,:].expand(roots,2,assets).flatten()
+    value = take_ratio(pools.paired_quantity,pair_index)
+    empty = numbers.ExactRational(value.numerator.constant(0),value.denominator.constant(1))
+    total = sum_rows(select(value,(member & representative[None,None,:]).flatten(),empty),roots*2,assets)
+    projected,error = total.project(operation=1)
+    paired_known = (prefix_known[:,None] | ~present.any(2)) & applicable
+    fault |= numbers.combine_fault_rows(torch.where(applicable,error.reshape(roots,2),0))
+    paired = torch.stack((torch.where(paired_known,projected.reshape(roots,2),0.0),
         paired_known.float(),applicable.float()),-1)
     return SuccessInputs(quantity,cost,paired,orphan,fault)
 

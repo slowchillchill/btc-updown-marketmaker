@@ -80,6 +80,13 @@ def main():
     torch.testing.assert_close(slow[0,146:149].cpu(),torch.tensor(project(Fraction(market['paired_shares']))),rtol=1e-6,atol=1e-7)
     for first,last in [(128,134),(140,146),(155,164)]:
         assert slow[0,first:last].cpu().tolist()==[0.,1.,1.]*((last-first)//3)
+    missing_side=Numbers.run_exact_batch(lambda:success_inputs(pool,torch.tensor([[[0],[-1]]],device='cuda'),
+        torch.tensor([[[True],[False]]],device='cuda'),torch.ones((1,2),dtype=torch.bool,device='cuda'),
+        torch.tensor([0,-1],device='cuda'),prefix_known=torch.ones(1,dtype=torch.bool,device='cuda')))
+    assert missing_side.fault.cpu().tolist()==[0]
+    torch.testing.assert_close(missing_side.paired[0,0].cpu(),torch.tensor(project(Fraction(market['paired_shares']))),
+        rtol=1e-6,atol=1e-7)
+    assert missing_side.quantity[0,0,1].cpu().tolist()==[0.,0.,1.], '缺outcome只使原逐腿字段Unknown'
     identifiers=[1,10,2,(1<<64)-1]
     keys=Numbers.run_exact_batch(lambda:sim_trade_order_key(integers(identifiers)))
     assert keys.fault.cpu().tolist()==[0]*len(identifiers)
@@ -87,7 +94,7 @@ def main():
     assert encoded==[str(value) for value in identifiers]
     assert sorted(range(len(encoded)),key=lambda i:encoded[i])==[0,1,3,2]
     print(json.dumps({'actual_success_population':len(source['trace']),'fractional':source['fractional'],
-        'paired_cost_and_source_tail_checked':True,'Native_actual_success_pair_orphan_fields_122_to_163_checked':True,'elapsed_seconds':time.perf_counter()-started,
+        'market_paired_known_independent_of_missing_outcome_checked':True,'paired_cost_and_source_tail_checked':True,'Native_actual_success_pair_orphan_fields_122_to_163_checked':True,'elapsed_seconds':time.perf_counter()-started,
         'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),'actual_finite_contribution_checked':True,'full_u64_legacy_string_order_checked':True,'rebate_day_policy_delivered':False}))
 
 
