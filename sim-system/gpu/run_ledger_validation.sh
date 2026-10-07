@@ -55,7 +55,7 @@ case "$case_name" in
             tail -4 "$artifact_dir/$target.log"
         done
         ;;
-    hidden-terminal-pending|hidden-terminal-orders|hidden-reference)
+    hidden-terminal-query|hidden-terminal-pending|hidden-terminal-orders|hidden-reference)
         export B_GPU_SORT_WORKER="$repo_root/data-pipeline/gpu/sort_worker.py"
         export B_GPU_HIDDEN_REFERENCE_VALIDATOR="$repo_root/sim-system/gpu/validate_hidden_references.py"
         export B_GPU_HIDDEN_CLI="$CARGO_TARGET_DIR/debug/dpt-compact-hidden"
@@ -63,7 +63,12 @@ case "$case_name" in
         printf '%q ' "${command[@]}" >> "$artifact_dir/commands.txt"
         printf '\n' >> "$artifact_dir/commands.txt"
         "${command[@]}" > "$artifact_dir/build.log" 2>&1
-        if [ "$case_name" = hidden-terminal-pending ]; then
+        if [ "$case_name" = hidden-terminal-query ]; then
+            export B_GPU_SETTLEMENT_QUERY=1
+            printf '%s\n' 'B_GPU_SETTLEMENT_QUERY=1' >> "$artifact_dir/commands.txt"
+            export B_GPU_HIDDEN_REFERENCE_VALIDATOR="$repo_root/sim-system/gpu/validate_terminal_orders.py"
+            run_test gpu_compact_hidden_terminal_keeps_actual_maker_pending_until_terminal tests.log
+        elif [ "$case_name" = hidden-terminal-pending ]; then
             export B_GPU_HIDDEN_REFERENCE_VALIDATOR="$repo_root/sim-system/gpu/validate_terminal_orders.py"
             run_test gpu_compact_hidden_terminal_keeps_actual_maker_pending_until_terminal tests.log
         elif [ "$case_name" = hidden-terminal-orders ]; then

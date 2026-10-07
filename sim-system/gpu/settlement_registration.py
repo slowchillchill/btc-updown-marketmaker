@@ -1,6 +1,6 @@
 """请求式SIM首登记/Registered回执的纯候选，有限scenario不设训练默认。
 
-当前接显式Registered与可选TerminalSuccess步骤。费用、查询及受控重试尚未接入；
+当前接显式Registered、有限Timeout/QueryReply与TerminalSuccess步骤。费用及受控重试尚未接入；
 Registered不当经济到账。根已绑定原account，resolution为原ID引用。
 """
 from dataclasses import dataclass, replace
@@ -30,6 +30,25 @@ class SettlementRegistrations:
     fault: torch.Tensor
     succeeded: torch.Tensor
     success_offsets: torch.Tensor | None = None
+    query_state: object | None = None
+    terminal_consumed: torch.Tensor | None = None
+
+    def install_queries(self,timeout_offsets,reply_offsets,replies):
+        from settlement_query import SettlementQueries
+        if self.query_state is not None:
+            raise ValueError('查询scenario只能冷安装一次')
+        queries=SettlementQueries.empty(self.conditions,timeout_offsets,reply_offsets,replies)
+        if self.success_offsets is None:
+            raise ValueError('当前有限查询场景需同一已安装的后续成功步骤')
+        invalid=(timeout_offsets<self.receipt_offsets)|(reply_offsets>self.success_offsets)
+        fault=self.fault | queries.fault | Numbers.combine_fault_rows(invalid.to(torch.int32))
+        return replace(self,query_state=queries,terminal_consumed=torch.zeros_like(self.present),fault=fault)
+
+    def submit_queries(self,actions):
+        if self.query_state is None:
+            raise ValueError('查询需实际安装场景与首请求')
+        queries=self.query_state.submit(self,actions)
+        return replace(self,query_state=queries,fault=self.fault | queries.fault)
 
     @classmethod
     def empty(cls, conditions, receipt_offsets,success_offsets=None):
@@ -79,7 +98,18 @@ class SettlementRegistrations:
         times=self.first_arrival+self.receipt_offsets
         pending=self.present & ~self.received
         if self.success_offsets is not None:
-            success_pending=self.present & self.received & ~self.succeeded
+            terminal_done=self.succeeded if self.terminal_consumed is None else self.terminal_consumed
+            success_pending=self.present & self.received & ~terminal_done
+            if self.query_state is not None:
+                query=self.query_state
+                success_pending &= query.reply_consumed
+                timeout_pending=self.present & self.received & ~query.timeout_consumed
+                reply_pending=self.present & query.timeout_consumed & ~query.reply_consumed
+                for mask,offset in ((timeout_pending,query.timeout_offsets),(reply_pending,query.reply_offsets)):
+                    fault |= Numbers.combine_fault_rows((mask & (self.first_arrival>(1<<63)-1-offset)).to(torch.int32))
+                    times=torch.minimum(torch.where(pending,times,(1<<63)-1),torch.where(mask,self.first_arrival+offset,(1<<63)-1))
+                    pending |= mask
+                fault |= query.fault
             success_overflow=success_pending & (self.first_arrival>(1<<63)-1-self.success_offsets)
             fault |= Numbers.combine_fault_rows(success_overflow.to(torch.int32))
             success_at=self.first_arrival+self.success_offsets
@@ -93,7 +123,49 @@ class SettlementRegistrations:
         use=valid_roots[:,None]
         return replace(self,**{name:torch.where(use,getattr(self,name),getattr(original,name))
             for name in ('present','resolutions','first_arrival','received','succeeded')},
-            sends=self.sends.select(use.expand_as(self.present).flatten(),original.sends))
+            sends=self.sends.select(use.expand_as(self.present).flatten(),original.sends),
+            query_state=None if self.query_state is None else self.query_state.coordinated(original.query_state,valid_roots),
+            terminal_consumed=None if self.terminal_consumed is None else torch.where(use,self.terminal_consumed,original.terminal_consumed))
+
+    def advance_timeout(self,at,enabled):
+        if self.query_state is None:
+            raise ValueError('Timeout需实际查询scenario')
+        query=self.query_state
+        clock=self.next_clock()
+        due=self.present & self.received & ~query.timeout_consumed & (self.first_arrival+query.timeout_offsets==at[:,None])
+        emitted=due & enabled[:,None] & clock.present[:,None] & (clock.at==at)[:,None]
+        emitted &= clock.fault[:,None]==0
+        return replace(self,query_state=replace(query,timeout_consumed=query.timeout_consumed|emitted),fault=clock.fault),RegisteredSettlementFeedback(
+            self.conditions,self.resolutions,at[:,None].expand_as(self.conditions),emitted,clock.fault)
+
+    def advance_query_reply(self,at,enabled,account,sources,obligations):
+        if self.query_state is None:
+            raise ValueError('QueryReply需实际查询scenario')
+        query=self.query_state
+        due=self.present & query.timeout_consumed & ~query.reply_consumed & (self.first_arrival+query.reply_offsets==at[:,None])
+        market=due.to(torch.int32).argmax(1)
+        root=torch.arange(due.size(0),device=at.device)
+        clock=self.next_clock()
+        use=enabled & due.any(1) & clock.present & (clock.at==at)
+        index=root*due.size(1)+market
+        from queues import _take
+        remaining=_take(query.queries,index).compare(_take(query.consumed_queries,index))
+        reference=obligations.reference_indices[root,market]
+        assets,tokens,payouts,error=sources.gather(reference)
+        fault=self.fault | clock.fault | torch.where(use,error | remaining.fault | (remaining.order<=0).to(torch.int32),0)
+        success=query.replies[root,market]==2
+        original=account
+        account,delta=account.redeem_outcomes(assets,payouts,use & success & ~self.succeeded[root,market] & (fault==0))
+        fault |= account.fault
+        account=account.coordinate_result(original,fault)
+        delta=account.coordinate_delta(delta,fault==0,fault)
+        consumed=use & (fault==0)
+        selected=(torch.arange(due.size(1),device=at.device)[None,:]==market[:,None]) & consumed[:,None]
+        counts=query.consumed_queries+ExactInt.from_i64_tensor(selected.flatten().to(torch.int64))
+        queries=replace(query,reply_consumed=query.reply_consumed|selected,consumed_queries=counts)
+        backend=replace(self,query_state=queries,succeeded=self.succeeded|(selected & success[:,None]),fault=fault)
+        observations=torch.tensor([3,4,5,6],dtype=torch.int64,device=at.device)[query.replies[root,market].clamp(0,3)]
+        return backend,account,(self.conditions[root,market],self.resolutions[root,market],assets,tokens,delta,consumed,fault,observations)
 
     def advance_registered(self,at,enabled):
         scheduled=self.next_clock()
@@ -111,7 +183,10 @@ class SettlementRegistrations:
         """有限Registered→TerminalSuccess；每根本轮一项，成功守卫不重复兑付。"""
         if self.success_offsets is None:
             raise ValueError('未安装实际成功scenario步骤')
-        due=self.present & self.received & ~self.succeeded & (self.first_arrival+self.success_offsets==at[:,None])
+        done=self.succeeded if self.terminal_consumed is None else self.terminal_consumed
+        due=self.present & self.received & ~done & (self.first_arrival+self.success_offsets==at[:,None])
+        if self.query_state is not None:
+            due &= self.query_state.reply_consumed
         market=due.to(torch.int32).argmax(1)
         root=torch.arange(due.size(0),device=at.device)
         scheduled=self.next_clock()
@@ -120,12 +195,13 @@ class SettlementRegistrations:
         assets,tokens,payouts,error=sources.gather(reference)
         fault=self.fault | torch.where(use,error,0) | scheduled.fault
         original=account
-        account,delta=account.redeem_outcomes(assets,payouts,use & (fault==0))
+        account,delta=account.redeem_outcomes(assets,payouts,use & ~self.succeeded[root,market] & (fault==0))
         fault |= account.fault
         valid=fault==0
         account=account.coordinate_result(original,fault)
         delta=account.coordinate_delta(delta,valid,fault)
         consumed=use & valid
         selected=torch.arange(due.size(1),device=at.device)[None,:]==market[:,None]
-        backend=replace(self,succeeded=self.succeeded | (selected & consumed[:,None]),fault=fault)
+        backend=replace(self,succeeded=self.succeeded | (selected & consumed[:,None]),fault=fault,
+            terminal_consumed=None if self.terminal_consumed is None else self.terminal_consumed | (selected & consumed[:,None]))
         return backend,account,(self.conditions[root,market],self.resolutions[root,market],assets,tokens,delta,consumed,fault)

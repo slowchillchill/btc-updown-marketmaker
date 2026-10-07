@@ -1028,7 +1028,7 @@ Pi/历史亏损仍在每条实际提交时更新。此处原Resolved切片只证
 
 下一首请求增量在 shared-run 所属 `SettlementCoordinator` 消费同一次 `FrozenPublicAccount`。首次发送须公开Ledger waiting为空、同condition完整receipt逐腿承诺为空、经济前驱Known(true)且应收正；未知腿关联不能证明本condition无承诺。已有Request的查询和显式RetryAuthorized不重查首次资格，按最后已处理公开observation抑制重复；普通Unknown/Timeout不增加赎回次数，Timeout分支只查询。请求身份保原account、condition、canonical resolution及固定RESOLUTION_REDEEM_ONLY，SDK indexSets固定[1,2]。设备目录坐标借完整原字符串字典，不是新业务身份。
 
-SIM `SettlementRegistrations` 支持显式Registered及可选TerminalSuccess的有限scenario：首次到达按原canonical resolution ID的出站SHA时延采样，保存first_arrival/完整u64 sends，后台独立核原resolution pending集合为空及Maker市场结果存在。重复登记保首次到达与scenario进度。真实Registered观察由原SettlementLifecycle映射为schema20，经同Emitter/private时延、Normalizer、NOE双门及持续公开Ledger接纳；Ledger只增加条目并保存非终局Request，平台经济/本地序和现金不变。此类型不是完整scenario解释器；成功经济接线见下文，费用、查询和受控重试后台尚未交付。完整Request证据仍由bank/原position保存，终局Request状态沿原Ledger保持sticky。
+SIM `SettlementRegistrations` 支持显式Registered及可选TerminalSuccess的有限scenario：首次到达按原canonical resolution ID的出站SHA时延采样，保存first_arrival/完整u64 sends，后台独立核原resolution pending集合为空及Maker市场结果存在。重复登记保首次到达与scenario进度。真实Registered观察由原SettlementLifecycle映射为schema20，经同Emitter/private时延、Normalizer、NOE双门及持续公开Ledger接纳；Ledger只增加条目并保存非终局Request，平台经济/本地序和现金不变。此类型不是完整scenario解释器；成功经济及有限查询接线见下文，费用和受控重试后台尚未交付。完整Request证据仍由bank/原position保存，终局Request状态沿原Ledger保持sticky。
 
 该有限验证继续原26000/27000 Maker→31000 Terminal→32000 MINED→33000 CONFIRMED来源；在实际50000公开cutoff第一次符合发送门后，请求出站到达加scenario offset1产生Registered。原参考调用实际reduce_actor_input_v2与scheduled obligation消费、finalizer、唯一Memory及Ledger；设备侧从公开冻结选择请求并由后台登记/阶段0时钟生成反馈，原结果只检查金额/位置/时间/状态。源profile和单Registered步骤是工程输入，不冻结正式训练延迟/费用/失败查询重试参数，完整宿主和清偿继续接线。
 
@@ -1065,3 +1065,20 @@ Request 证据仍独立占一个账本条目，本身不改变余额或应收。
 同一 private 及一个平台经济序号，公开 Ledger 将到账 6 归为 Maker 5、Directional 1，
 移除两腿成本且保留费用。此处一次经济消费、旧冻结及重复位置对照已运行；
 原完整双腿场景的 GPU 接单、失败补偿与结算费用连续推进尚未验收。
+
+### 已有请求的有限查询接线
+
+`SettlementQueries` 保存原根／condition请求的完整u64查询数和已消费查询数。
+公开`ObservationTimeout`进入同一次冻结账户后，原`SettlementCoordinator`只给
+该观察一次Query；查询登记不再检查首次发送的应收／承诺门，也不立即公开结果。
+后台在原QueryReply时钟核已登记未消费查询，成功回复才消费真实账户余额，
+经同一Emitter、schema20／21、双时间门和持续公开Ledger提交。
+查询成功后的TerminalSuccess仍发Request证据，成功守卫不再生成经济delta；
+Ledger保留首次FinalSuccess Request，不用较晚回执覆盖其观察。
+查询计数更新替换实际注册对象，因此此前SimDriveChoice也失效。
+
+当前验证候选复用同一自然typedraw／Maker待最终性链，显式安装Registered+1、
+Timeout+30001、QueryFinalSuccess+40001、TerminalSuccess+50001和空费用表。
+原入口使用实际Query BusinessInput，真实V4首次领取及原Ledger只作结果对照。
+这些偏移和可信公开截点只服务有限工程验证，不是正式profile。
+当前后端还不是完整scenario解释器；费用、受控Retry、重复原回执和统一宿主未交付。

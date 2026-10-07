@@ -25,7 +25,7 @@ class BaseSimRuntime:
     market_controls: object = None  # MarketFact映射/交易/质量；不冒充Terminal经济状态。
     source_resolutions: object = None
     resolution_obligations: object = None
-    settlement_registrations: object = None  # 仅显式单Registered工程scenario；不代表完整结算后端。
+    settlement_registrations: object = None  # 显式Registered/成功与有限查询场景；不代表完整结算后端。
 
     def install_settlement_registration(self,conditions,receipt_offsets,success_offsets=None):
         from settlement_registration import SettlementRegistrations
@@ -70,6 +70,44 @@ class BaseSimRuntime:
         account=account.coordinate_result(self.account,fault)
         batch=replace(batch,emitted=batch.emitted & valid[:,None],economic_enabled=batch.economic_enabled & valid[:,None],fault=fault)
         return replace(self,settlement_registrations=backend,account=account),projected,batch
+
+    def install_settlement_queries(self,timeout_offsets,reply_offsets,replies):
+        if self.settlement_registrations is None:
+            raise ValueError('查询场景需同一实际首登记目录')
+        return replace(self,settlement_registrations=self.settlement_registrations.install_queries(timeout_offsets,reply_offsets,replies))
+
+    def submit_resolution_queries(self,actions):
+        if self.settlement_registrations is None:
+            raise ValueError('查询需要既有请求')
+        return replace(self,settlement_registrations=self.settlement_registrations.submit_queries(actions))
+
+    def settlement_timeout(self,choice,projection,sampler,policy):
+        self._source(choice)
+        original=self.settlement_registrations
+        backend,feedback=original.advance_timeout(choice.at,choice.enabled(0))
+        projected,batch=projection.settlement_requests(sampler,feedback.conditions,feedback.resolutions,policy,
+            torch.ones_like(feedback.conditions),torch.full_like(feedback.conditions,2),feedback.at,feedback.emitted,
+            feedback.fault | choice.fault)
+        fault=backend.fault | batch.fault | choice.fault
+        backend=replace(backend.coordinated(original,fault==0),fault=fault)
+        return replace(self,settlement_registrations=backend),projected,replace(batch,
+            emitted=batch.emitted & (fault==0)[:,None],economic_enabled=batch.economic_enabled & (fault==0)[:,None],fault=fault)
+
+    def settlement_query_reply(self,choice,projection,sampler,policy,sources):
+        self._source(choice)
+        if sources.columns is not self.hidden_frontier.columns.source.terminal_columns:
+            raise ValueError('查询到账须实际原Terminal字典')
+        backend,account,feedback=self.settlement_registrations.advance_query_reply(choice.at,choice.enabled(0),
+            self.account,sources,self.resolution_obligations)
+        condition,identity,assets,tokens,delta,emitted,fault,observation=feedback
+        projected,batch=projection.settlement_success(sampler,condition,identity,policy,assets,tokens,delta,choice.at,emitted,
+            fault | choice.fault,observation=observation)
+        fault |= batch.fault | choice.fault
+        valid=fault==0
+        backend=replace(backend.coordinated(self.settlement_registrations,valid),fault=fault)
+        account=account.coordinate_result(self.account,fault)
+        return replace(self,settlement_registrations=backend,account=account),projected,replace(batch,
+            emitted=batch.emitted & valid[:,None],economic_enabled=batch.economic_enabled & valid[:,None],fault=fault)
 
     def install_hidden_resolutions(self):
         """冷安装判定存储；不把未来Terminal、订单或成交当已应用事实。"""

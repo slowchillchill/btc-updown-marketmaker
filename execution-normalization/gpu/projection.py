@@ -222,7 +222,7 @@ class Projection:
         return bound.finality(sampler,_take_record(pool.records,index),frame,origin.prices,rebate_rate,at,
             maker_results=maker_results,liquidity_role=origin.roles,maker_fee_equivalent=equivalent)
 
-    def settlement_success(self,sampler,conditions,resolutions,policy,assets,tokens,delta,at,emitted,fault):
+    def settlement_success(self,sampler,conditions,resolutions,policy,assets,tokens,delta,at,emitted,fault,*,observation=None):
         """一条实际成功Request及可选多资产经济，原同private/source顺序。"""
         from lifecycle import map_settlement_request
         from economic import map_resolution_redemption
@@ -237,8 +237,9 @@ class Projection:
         batch=frame.batch_sequences
         received=frame.received_at[:,0]
         first=ordinals.first_ordinals[:,0]
+        observation=torch.full_like(conditions,9) if observation is None else observation
         request=map_settlement_request(self.account_slots,conditions,resolutions,policy,
-            torch.full_like(conditions,2),torch.full_like(conditions,9),private,first,frame.emitted[:,0])
+            torch.where(observation==5,2,torch.where(observation==9,2,1)),observation,private,first,frame.emitted[:,0])
         economic=map_resolution_redemption(delta,self.account_slots,conditions,resolutions,policy,assets,tokens,
             self.asset_roots,private,first+1,at)
         records=[(request,EVIDENCE,private,batch,received,torch.full_like(conditions,3),at,emitted),

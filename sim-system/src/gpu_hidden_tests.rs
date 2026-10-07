@@ -219,8 +219,14 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool) {
             Box::new(GpuNoeReferencePort {memory,durable,normalization_reference:normalization_capture,normalization_core:None})
         })),finality).await;
     // 有pending成交例显式Registered→TerminalSuccess，有限工程scenario非训练默认。
+    let with_query=with_pending && std::env::var_os("B_GPU_SETTLEMENT_QUERY").is_some();
     let settlement_scenario=crate::ResolutionRedeemScenarioV1 {
-        steps:if with_pending {vec![crate::ResolutionRedeemScenarioStepV1 {offset_ms:1,
+        steps:if with_query {vec![crate::ResolutionRedeemScenarioStepV1 {offset_ms:1,
+            event:crate::ResolutionRedeemScenarioEventV1::SubmissionReceipt(crate::SettlementSubmissionReceiptV1::Registered)},
+            crate::ResolutionRedeemScenarioStepV1 {offset_ms:30001,event:crate::ResolutionRedeemScenarioEventV1::ObservationTimeout},
+            crate::ResolutionRedeemScenarioStepV1 {offset_ms:40001,event:crate::ResolutionRedeemScenarioEventV1::QueryReply(crate::SettlementQueryReplyV1::FinalSuccess)},
+            crate::ResolutionRedeemScenarioStepV1 {offset_ms:50001,event:crate::ResolutionRedeemScenarioEventV1::Terminal(crate::SettlementTerminalV1::Success)}]}
+        else if with_pending {vec![crate::ResolutionRedeemScenarioStepV1 {offset_ms:1,
             event:crate::ResolutionRedeemScenarioEventV1::SubmissionReceipt(crate::SettlementSubmissionReceiptV1::Registered)},
             crate::ResolutionRedeemScenarioStepV1 {offset_ms:20001,event:crate::ResolutionRedeemScenarioEventV1::Terminal(crate::SettlementTerminalV1::Success)}]} else {Vec::new()},costs:Vec::new()};
     execution.configure_resolution_redeem_v1(settlement_scenario.clone()).unwrap();
@@ -398,6 +404,7 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool) {
         }
     }
     let mut settlement_reference=None;
+    let mut settlement_query_reference=Vec::new();
     let mut settlement_success_reference=None;
     if with_pending {
         use contracts::economics::{SettlementRequestV1,SettlementRequestIdV1};
@@ -430,6 +437,33 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool) {
         settlement_reference=Some(serde_json::json!({"request":request,"sent_at":sent_at,"at":at,"scenario":settlement_scenario,
             "records":rows,"ledger":gpu_ledger_reservation_checkpoint(&ledger,"Registered_request"),
             "public_request":ledger.economic_read().unwrap().resolutions().next().unwrap().request}));
+        if with_query {
+            for (stage,close) in [("Timeout",81000),("QueryReply",91000)] {
+                let at=state.session.as_ref().unwrap().execution_state.next_settlement_clock_at_utc_ms().unwrap();
+                let mut output=LogicalDriveOutputV2::default();
+                state=drain_scheduled_obligations_at_v2(state,at,execution.actor._rule_snapshot.snapshot(),
+                    execution.actor._finality_policy.as_ref(),&mut output).unwrap();
+                state=gpu_accept_projection_reference(&mut execution.actor,state,BusinessReducerOutputV2::LogicalDrive(output),&mut batches);
+                execution.actor.projection_port.close_receive_prefix(close);
+                execution.actor.projection_port.observe_public_time(&crate::public_consumption::TrustedActorExecutionTimeV1(
+                    crate::public_consumption::ActorTimeRecordV1 {run_id:execution.actor.opened.run_id.clone(),drive_position:2,logical_time_utc_ms:close}));
+                let received=observation.take_closed_records();
+                assert_eq!(received.len(),if stage=="Timeout" {1} else {2});
+                let rows=received.iter().map(|r|serde_json::json!({"record":r.record(),"position":r.position(),"visibility":r.visibility()})).collect::<Vec<_>>();
+                for record in &received {ledger.apply_noe_memory_v2(record).unwrap();}
+                settlement_query_reference.push(serde_json::json!({"stage":stage,"at":at,"public_at":close,"records":rows,
+                    "ledger":gpu_ledger_reservation_checkpoint(&ledger,stage),"public_request":ledger.economic_read().unwrap().resolutions().next().unwrap().request}));
+                if stage=="Timeout" {
+                    let query=BusinessInputV2::Settlement(SettlementOperationV1::Query {identity:request.identity.clone(),requested_at_utc_ms:close});
+                    let (next,output)=reduce_actor_input_v2(&execution.actor.opened,scenario.initial_market_directory(),state,&query,13,
+                        execution.actor._latency_profile.as_ref(),execution.actor._rule_snapshot.snapshot(),execution.actor._finality_policy.as_ref()).unwrap();
+                    let (next,_,batch)=finalize_projection_batch_v2(&execution.actor.opened.run_id,next,output,execution.actor._latency_profile.as_ref()).unwrap();
+                    assert!(batch.is_none(),"查询登记不直接产生公开结果");
+                    state=next;
+                }
+            }
+            assert_eq!(state.session.as_ref().unwrap().execution_state.settlement_simulation_read(&ConditionId(CONDITION_ID.into())).unwrap().queries,1);
+        }
         let success_at=state.session.as_ref().unwrap().execution_state.next_settlement_clock_at_utc_ms().unwrap();
         assert!(success_at>60000,"真实成功时钟保持前一公开领取截点之后");
         let mut output=LogicalDriveOutputV2::default();
@@ -437,11 +471,12 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool) {
             execution.actor._finality_policy.as_ref(),&mut output).unwrap();
         assert_eq!(output.lifecycle.len(),1);
         state=gpu_accept_projection_reference(&mut execution.actor,state,BusinessReducerOutputV2::LogicalDrive(output),&mut batches);
-        execution.actor.projection_port.close_receive_prefix(80000);
+        let success_visible=if with_query {120000} else {80000};
+        execution.actor.projection_port.close_receive_prefix(success_visible);
         execution.actor.projection_port.observe_public_time(&crate::public_consumption::TrustedActorExecutionTimeV1(
-            crate::public_consumption::ActorTimeRecordV1 {run_id:execution.actor.opened.run_id.clone(),drive_position:2,logical_time_utc_ms:80000}));
+            crate::public_consumption::ActorTimeRecordV1 {run_id:execution.actor.opened.run_id.clone(),drive_position:2,logical_time_utc_ms:success_visible}));
         let received=observation.take_closed_records();
-        assert_eq!(received.len(),2,"成功Request与账户经济是两条NOE，共享一反馈private序");
+        assert_eq!(received.len(),if with_query {1} else {2},"已查询成功的后续成功回执不再生成经济");
         let rows=received.iter().map(|r|serde_json::json!({"record":r.record(),"position":r.position(),"visibility":r.visibility()})).collect::<Vec<_>>();
         for record in &received {ledger.apply_noe_memory_v2(record).unwrap();}
         let read=ledger.economic_read().unwrap();
@@ -456,6 +491,7 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool) {
     }
     let input = serde_json::json!({"assets":assets,"buckets":buckets,"market_end":MARKET_END_AT,"with_pending":with_pending,
         "settlement_reference":settlement_reference,"settlement_success_reference":settlement_success_reference,
+        "with_query":with_query,"settlement_query_reference":settlement_query_reference,
         "engineering_finality_path":finality_path,"maker_checkpoints":maker_checkpoints,"finality_reference":finality_reference,
         "original_controls":controls,"qualified_sources":qualified_sources,"resolved_records":records,
         "ledger_before":ledger_before,"ledger_after":ledger_after,"ledger_resolutions":resolutions,

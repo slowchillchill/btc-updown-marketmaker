@@ -40,6 +40,7 @@ def main():
     tensor=lambda x,dtype=torch.int64:torch.tensor(x,dtype=dtype,device='cuda')
     enabled,zero=tensor([True],torch.bool),tensor([0])
     with_pending=source.get('with_pending',False)
+    with_query=source.get('with_query',False)
     post=source['post_reference']
     request=post['request']['request']
     item=request['items'][0]
@@ -313,8 +314,17 @@ def main():
         assert actions.request.cpu().tolist()==[True] and actions.query.cpu().tolist()==[False]
         assert not frozen.commitments.present.any().cpu().item()
         reference=source['settlement_reference']
-        assert reference['scenario']=={'steps':[{'offset_ms':1,'event':{'SubmissionReceipt':'Registered'}},{'offset_ms':20001,'event':{'Terminal':'Success'}}],'costs':[]}
-        runtime=runtime.install_settlement_registration(tensor([[0]]),tensor([[1]]),tensor([[20001]]))
+        steps=[{'offset_ms':1,'event':{'SubmissionReceipt':'Registered'}}]
+        if with_query:
+            steps.extend([{'offset_ms':30001,'event':'ObservationTimeout'},
+                {'offset_ms':40001,'event':{'QueryReply':'FinalSuccess'}},
+                {'offset_ms':50001,'event':{'Terminal':'Success'}}])
+        else:
+            steps.append({'offset_ms':20001,'event':{'Terminal':'Success'}})
+        assert reference['scenario']=={'steps':steps,'costs':[]}
+        runtime=runtime.install_settlement_registration(tensor([[0]]),tensor([[1]]),tensor([[50001 if with_query else 20001]]))
+        if with_query:
+            runtime=runtime.install_settlement_queries(tensor([[30001]]),tensor([[40001]]),tensor([[2]]))
         identity_bytes,identity_offsets=byte_column([value.encode('utf-8') for value in block.terminal_columns.canonical_ids])
         old_choice=runtime.choose(None,None,tensor([60000]),enabled)
         runtime=Numbers.run_exact_batch(lambda:runtime.register_resolution_request(actions,sampler,identity_bytes,identity_offsets))
@@ -372,43 +382,99 @@ def main():
         assert not no_action.request.any().cpu().item() and not no_action.query.any().cpu().item()
         coordinator,no_action=Numbers.run_exact_batch(lambda:coordinator.advance(next_frozen,enabled))
         assert not no_action.request.any().cpu().item() and not no_action.query.any().cpu().item()
-        success_reference=source['settlement_success_reference']
-        assert backend.next_clock().at.cpu().tolist()==[success_reference['at']]
         old_registered=public
         from settlement_redemption import RedemptionSources
         redemption_sources=RedemptionSources.bind(block.terminal_columns,[a['token_id'] for a in block.assets],
             [0,0],[0,1],1)
-        horizon.fill_(80000)
+        def check_settlement_batch(incoming,original_records):
+            assert incoming.emitted.sum().cpu().item()==len(original_records)
+            for column,original in enumerate(original_records):
+                body=next(iter(original['record'].values()))
+                row=incoming.rows[0,column]
+                expected=Numbers.run_exact_batch(lambda:expected_semantic(original,token_slots={a['token_id']:i for i,a in enumerate(block.assets)}))
+                semantic=projection.normalizer.bank.semantic[row]
+                assert torch.equal(semantic[:expected.size(1)],expected[0]) and not semantic[expected.size(1):].any().cpu().item()
+                assert values(incoming.batch_sequences)[column]==original['position']['source_watermark']['projection_batch_sequence']
+                assert values(incoming.record_ordinals)[column]==original['position']['record_ordinal']
+                assert values(incoming.private_sequences)[column]==body['source_order']['sequence']['PrivateFeedback']['private_feedback_sequence']
+                assert projection.normalizer.bank.source_order[row,3].cpu().item()==body['source_order']['ordinal']
+                source_record=body.get('source_reference',body.get('fact',{}).get('source_reference'))['record']['SettlementLifecycle']
+                assert incoming.received_at[0,column].cpu().item()==source_record['feedback_received_at_utc_ms']
+                assert incoming.platform_at[0,column].cpu().item()==source_record['platform_event_at_utc_ms']
+                if 'fact' in body:
+                    assert values(incoming.economic_sequences)[column]==body['fact']['economic_identity']['AccountTransition']['account_transition_seq']
+
+        if with_query:
+            for original_query in source['settlement_query_reference']:
+                clock=runtime.settlement_registrations.next_clock()
+                assert clock.at.cpu().tolist()==[original_query['at']]
+                horizon.copy_(clock.at)
+                choice=runtime.choose(None,None,horizon,enabled)
+                assert choice.enabled(0).cpu().tolist()==[True]
+                held_account=runtime.account
+                if original_query['stage']=='Timeout':
+                    runtime,projection,incoming=Numbers.run_exact_batch(lambda:runtime.settlement_timeout(choice,projection,sampler,tensor([[0]])))
+                    compare(runtime.account,held_account,'Timeout_does_not_redeem')
+                else:
+                    runtime,projection,incoming=Numbers.run_exact_batch(lambda:runtime.settlement_query_reply(choice,projection,sampler,zero,redemption_sources))
+                    assert values(runtime.settlement_registrations.query_state.consumed_queries)==[1]
+                assert incoming.fault.cpu().tolist()==[0]
+                check_settlement_batch(incoming,original_query['records'])
+                public=Numbers.run_exact_batch(lambda:public.append_batch(projection.normalizer.bank,incoming))
+                visible=tensor([original_query['public_at']])
+                gates=gates.set_receive(visible,enabled).set_public(visible,enabled)
+                progress('actual_query_public_receive_begin',stage=original_query['stage'],physical_columns=public.waiting.received.size(1))
+                public,query_received=Numbers.run_exact_batch(lambda:public.receive(projection.normalizer.bank,gates,torch.ones_like(public.waiting.received)))
+                progress('actual_query_public_receive_end',stage=original_query['stage'])
+                assert query_received.fault.cpu().tolist()==[0] and query_received.closed.emitted.sum().cpu().item()==len(original_query['records'])
+                expected=original_query['ledger']['projection']
+                assert values(public.ledger.current_entry_sequence)==[expected['ledger_entry_seq']]
+                assert values(public.ledger.platform.platform_source_prefix)==[expected['platform_source_prefix']]
+                assert values(public.ledger.current_local_prefix)==[expected['ledger_local_prefix']]
+                assert [Fraction(n,d) for n,d in zip(values(public.ledger.platform.balances.numerator),values(public.ledger.platform.balances.denominator))]==[Fraction(expected['platform_confirmed_projection'][key]) for key in names]
+                public_request=original_query['public_request']
+                expected_observation=2 if original_query['stage']=='Timeout' else 5
+                assert public.ledger.resolutions.requests.observations.cpu().tolist()==[expected_observation]
+                assert public_request['observation']==('ObservationTimeout' if expected_observation==2 else 'QueryFinalSuccess')
+                query_frozen=Numbers.run_exact_batch(lambda:public.freeze_account(intents,visible,submitted_legs=submitted))
+                coordinator,query_actions=Numbers.run_exact_batch(lambda:coordinator.advance(query_frozen,enabled))
+                assert query_actions.query.cpu().tolist()==[original_query['stage']=='Timeout']
+                assert not query_actions.request.any().cpu().item()
+                if original_query['stage']=='Timeout':
+                    old_choice=runtime.choose(None,None,tensor([120000]),enabled)
+                    runtime=Numbers.run_exact_batch(lambda:runtime.submit_resolution_queries(query_actions))
+                    assert values(runtime.settlement_registrations.query_state.queries)==[1]
+                    try:
+                        runtime.advance_role_time(old_choice,end)
+                    except ValueError as error:
+                        assert '选择时的同一活动状态' in str(error)
+                    else:
+                        raise AssertionError('查询计数更新后旧choice必须拒绝')
+                coordinator,repeated_actions=Numbers.run_exact_batch(lambda:coordinator.advance(query_frozen,enabled))
+                assert not repeated_actions.query.any().cpu().item() and not repeated_actions.request.any().cpu().item()
+            assert values(runtime.account.outcomes)==[0,0]
+            queried_success=public
+        success_reference=source['settlement_success_reference']
+        assert runtime.settlement_registrations.next_clock().at.cpu().tolist()==[success_reference['at']]
+        success_visible=120000 if with_query else 80000
+        horizon.fill_(success_visible)
         choice=runtime.choose(None,None,horizon,enabled)
         assert choice.enabled(0).cpu().tolist()==[True] and choice.at.cpu().tolist()==[success_reference['at']]
         runtime,projection,success_batch=Numbers.run_exact_batch(lambda:runtime.settlement_success(choice,projection,sampler,zero,redemption_sources))
-        assert success_batch.fault.cpu().tolist()==[0] and success_batch.emitted.sum().cpu().item()==2
+        expected_count=1 if with_query else 2
+        assert success_batch.fault.cpu().tolist()==[0] and success_batch.emitted.sum().cpu().item()==expected_count
         assert values(runtime.account.outcomes)==[0,0]
-        # 原两个NOE正文/位置作为oracle，保持原private与源ordinal，不据其控制消费。
-        for column,original in enumerate(success_reference['records']):
-            body=next(iter(original['record'].values()))
-            row=success_batch.rows[0,column]
-            expected=Numbers.run_exact_batch(lambda:expected_semantic(original,token_slots={a['token_id']:i for i,a in enumerate(block.assets)}))
-            semantic=projection.normalizer.bank.semantic[row]
-            assert torch.equal(semantic[:expected.size(1)],expected[0]) and not semantic[expected.size(1):].any().cpu().item()
-            assert values(success_batch.batch_sequences)[column]==original['position']['source_watermark']['projection_batch_sequence']
-            assert values(success_batch.record_ordinals)[column]==original['position']['record_ordinal']
-            assert values(success_batch.private_sequences)[column]==body['source_order']['sequence']['PrivateFeedback']['private_feedback_sequence']
-            assert projection.normalizer.bank.source_order[row,3].cpu().item()==body['source_order']['ordinal']
-            source_record=body.get('source_reference',body.get('fact',{}).get('source_reference'))['record']['SettlementLifecycle']
-            assert success_batch.received_at[0,column].cpu().item()==source_record['feedback_received_at_utc_ms']
-            assert success_batch.platform_at[0,column].cpu().item()==source_record['platform_event_at_utc_ms']
-            if 'fact' in body:
-                assert values(success_batch.economic_sequences)[column]==body['fact']['economic_identity']['AccountTransition']['account_transition_seq']
-        assert values(success_batch.private_sequences)[0]==values(success_batch.private_sequences)[1]
+        check_settlement_batch(success_batch,success_reference['records'])
+        if not with_query:
+            assert values(success_batch.private_sequences)[0]==values(success_batch.private_sequences)[1]
         original_success=success_reference['ledger']['projection']
         assert values(runtime.account.cash)==[units(original_success['platform_confirmed_projection']['cash_pusd'])]
         public=Numbers.run_exact_batch(lambda:public.append_batch(projection.normalizer.bank,success_batch))
-        gates=gates.set_receive(tensor([80000]),enabled).set_public(tensor([80000]),enabled)
+        gates=gates.set_receive(tensor([success_visible]),enabled).set_public(tensor([success_visible]),enabled)
         progress('actual_success_redemption_public_receive_begin',physical_columns=public.waiting.received.size(1))
         public,success_received=Numbers.run_exact_batch(lambda:public.receive(projection.normalizer.bank,gates,torch.ones_like(public.waiting.received)))
         progress('actual_success_redemption_public_receive_end')
-        assert success_received.fault.cpu().tolist()==[0] and success_received.closed.emitted.sum().cpu().item()==2
+        assert success_received.fault.cpu().tolist()==[0] and success_received.closed.emitted.sum().cpu().item()==expected_count
         assert not (public.waiting.received & ~public.waiting.consumed).any().cpu().item()
         assert values(public.ledger.current_entry_sequence)==[original_success['ledger_entry_seq']]
         assert values(public.ledger.platform.platform_source_prefix)==[original_success['platform_source_prefix']]
@@ -423,6 +489,12 @@ def main():
         result=Numbers.run_exact_batch(lambda:public.ledger.resolutions.read(public.ledger.success_pools))
         assert values(result.paired_receivable.numerator)==[0] and values(result.winner_orphan_receivable.numerator)==[0]
         assert public.ledger.resolutions.requests.outcomes.cpu().tolist()==[2]
+        assert public.ledger.resolutions.requests.observations.cpu().tolist()==[5 if with_query else 9]
+        if with_query:
+            compare(public.ledger.platform,queried_success.ledger.platform,'Terminal_after_QueryFinalSuccess_has_no_second_economic')
+            assert values(public.ledger.platform.platform_source_prefix)==values(queried_success.ledger.platform.platform_source_prefix)
+            assert values(runtime.settlement_registrations.sends)==[1]
+            assert values(runtime.settlement_registrations.query_state.queries)==[1]
         assert not runtime.settlement_registrations.next_clock().present.any().cpu().item()
         assert values(old_registered.ledger.platform.outcomes.numerator)!=[0,0]
         assert old_registered.ledger.resolutions.requests.outcomes.cpu().tolist()==[0]
@@ -434,7 +506,7 @@ def main():
         'original_end_clears_FIFO_without_releasing_GTC_then_Terminal_releases_once_checked':True,
         'new_schema18_19_complete_resolution_identity_and_original_NOE_positions_checked':True,
         'old_public_prefix_and_resource_denied_Terminal_preserved_checked':True,
-        'actual_records':6+int(with_pending)+sum(len(r['records']) for r in source['finality_reference'])+(3 if with_pending else 0),
+        'actual_records':6+int(with_pending)+sum(len(r['records']) for r in source['finality_reference'])+(5 if with_query else 3 if with_pending else 0),
         'actual_records_before_post_resolution_finality':6+int(with_pending),'pending_actual_fill_population':int(with_pending),
         'actual_Maker_pending_Terminal_then_MINED_CONFIRMED_and_market_result_checked':with_pending,
         'public_Ledger_economic_predecessors_and_Maker_gate_checked':with_pending,
@@ -442,6 +514,10 @@ def main():
         'actual_success_redemption_one_economic_fact_cost_and_cash_attribution_checked':with_pending,
         'actual_success_Request_Economic_body_position_and_original_member_order_checked':with_pending,
         'Registered_feedback_fault_keeps_same_runtime_scenario_prefix_checked':with_pending,
+        'same_public_Timeout_coordinator_query_once_and_original_QueryFinalSuccess_redeems_checked':with_query,
+        'later_TerminalSuccess_preserves_first_success_Request_and_no_second_economic_checked':with_query,
+        'query_submission_invalidates_previous_drive_choice_checked':with_query,
+        'full_settlement_cost_controlled_retry_and_full_host_checked':False,
         'first_registration_invalidates_previous_drive_choice_checked':with_pending,
         'growth_new_slot_does_not_alias_old_pending_identity_checked':with_pending,'full_root_and_requested_settlement':False,
         'elapsed_seconds_with_reference_reads':time.perf_counter()-started,'device_peak_allocated_bytes':torch.cuda.max_memory_allocated()}))
