@@ -73,7 +73,7 @@ class MarketResolutions:
         return cls(sources, markets.roots, markets.conditions, assets,
             torch.zeros(count, dtype=torch.bool, device=assets.device), torch.full_like(markets.conditions, -1),
             torch.full_like(markets.conditions, -1), torch.zeros(count, dtype=torch.bool, device=assets.device),
-            ExactRational(zero, zero.constant(1)), torch.full((count,), known, dtype=torch.bool, device=assets.device),
+            ExactRational(zero, zero.constant(1)), markets.known & torch.full((count,), known, dtype=torch.bool, device=assets.device),
             markets.fault.clone(), pools.fault.clone())
 
     def observe(self, condition, identity, terminal, pools, enabled):
@@ -108,7 +108,7 @@ class MarketResolutions:
             terminals=torch.where(fresh, terminal[self.roots], self.terminals),
             maker_category=torch.where(fresh, paired.numerator.sign > 0, self.maker_category),
             payouts=select(incoming, fresh.repeat_interleave(2), self.payouts),
-            known=self.known | fresh, fault=fault, root_fault=root_fault)
+            known=self.known, fault=fault, root_fault=root_fault)
 
     def coordinated(self, original, valid_roots):
         use = valid_roots[self.roots]

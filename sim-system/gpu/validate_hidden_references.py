@@ -201,11 +201,11 @@ def main():
         'maker_rebate_receivable_pusd','taker_rebate_receivable_pusd',
         'maker_rebate_locked_remainder_pusd','taker_rebate_locked_remainder_pusd']
     original_balances=before_ledger['platform_confirmed_projection']
-    def assemble():
+    def assemble(*,known=True):
         balances=module.PlatformBalances.open(rational([original_balances[key] for key in names]),
             rational(['0','0']),tensor([0,0]),integers([before_ledger['platform_source_prefix']]))
         pools=SuccessPools.open(tensor([0,0]),tensor([0,0]),tensor([0,1]),tensor([1,0]),1)
-        markets=UnresolvedMarkets.open(pools,tensor([0]))
+        markets=UnresolvedMarkets.open(pools,tensor([0]),known=known)
         sources=ResolutionSources.bind(block.terminal_columns,[asset['token_id'] for asset in block.assets])
         resolutions=MarketResolutions.open(pools,markets,sources)
         columns=EconomicColumns.from_projection_batches([batch])
@@ -273,6 +273,18 @@ def main():
         tensor([source['resolved_close_at']]),enabled))
     assert rejected.fault.cpu().tolist()==[1] and not rejected.applied.any().cpu().item()
     assert values(rejected.current_entry_sequence)==[before_ledger['ledger_entry_seq']]
+    # 实际可达冷前缀未安装经济历史：原Resolved身份/payout不能补出成本/份额完整性。
+    unknown=Numbers.run_exact_batch(lambda:assemble(known=False))
+    assert unknown.ledger.resolutions.known.cpu().tolist()==[False]
+    unknown,unknown_delivery=Numbers.run_exact_batch(lambda:unknown.receive(projection.normalizer.bank,gates,
+        torch.ones_like(unknown.waiting.received)))
+    assert unknown_delivery.fault.cpu().tolist()==[0] and unknown.ledger.resolutions.present.cpu().tolist()==[True]
+    unknown_read=Numbers.run_exact_batch(lambda:unknown.ledger.resolutions.read(unknown.ledger.success_pools))
+    unknown_market=Numbers.run_exact_batch(lambda:unknown.ledger.unresolved_markets.read(unknown.ledger.success_pools,
+        unknown.ledger.trade_success,unknown.ledger.rebate_days,resolutions=unknown.ledger.resolutions))
+    assert unknown_read.known.cpu().tolist()==[False] and unknown_market.known.cpu().tolist()==[False]
+    assert unknown.ledger.unresolved_markets.known.cpu().tolist()==[False]
+    assert values(unknown.ledger.current_entry_sequence)==[after_ledger['ledger_entry_seq']]
     # 传输vector顺序改变不能改变token归属；仅此冷绑定组件代表，非新源事件。
     reversed_columns=replace(block.terminal_columns,terminals=tuple(
         dict(terminal,payout_vector=list(reversed(terminal['payout_vector'])))
@@ -313,6 +325,7 @@ def main():
         'device_PublicLedgerState_receives_Resolved_once_and_preserves_first_visibility_and_position_checked':True,
         'Resolved_payout_token_binding_and_missing_source_binding_explicit_fault_checked':True,
         'zero_balance_Resolved_read_is_not_nonzero_receivable_or_settlement_barrier_coverage':True,
+        'actual_Resolved_does_not_repair_unknown_cold_economic_history_checked':True,
         'no_orders_or_pending_fills_in_original_Terminal_population':True,
         'cold_projection_prefix_initialization':True,
         'Resolved_Ledger_consumer_and_request_settlement_complete':False,

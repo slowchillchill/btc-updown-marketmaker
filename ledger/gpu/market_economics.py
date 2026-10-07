@@ -85,7 +85,10 @@ class UnresolvedMarkets:
             profit = profit + select(orphan-orphan_cost, resolutions.present, zero)
             fault |= resolutions.fault | orphan.fault
         fault |= profit.fault
-        return guarantee, paired_cost, orphan_cost, profit, ~detail_missing, fault
+        complete = ~detail_missing
+        if resolutions is not None:
+            complete &= resolutions.known
+        return guarantee, paired_cost, orphan_cost, profit, complete, fault
 
     def refresh(self, pools, trades, days, committed_roots, *, resolutions=None):
         """候选先计算完整精确值，随后随同一Ledger事务提交，不能冻结时才补最大值。"""
