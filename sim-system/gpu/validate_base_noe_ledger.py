@@ -50,7 +50,7 @@ def check(source,noe,batches,order,receipt,target):
     width=columns.row_refs.size(1)
     pools=run(lambda:SuccessPools.open(tensor([0,0]),tensor([0,0]),tensor([0,1]),tensor([1,0]),1))
     admission=run(lambda:AdmissionLifecycle.open(platform,noe.normalizer.bank,columns,
-        integers([initial['ledger_entry_seq']]),integers([initial['local_event_prefix']]),pools,
+        integers([initial['ledger_entry_seq']]),integers([initial['ledger_local_prefix']]),pools,
         position_costs=PositionCosts.empty(1,max(1,width),'cuda'),
         order_funds=OrderFunds.empty(1,max(1,width),max(1,width),width,'cuda'),
         unresolved_markets=UnresolvedMarkets.open(pools,zero)))
@@ -69,7 +69,7 @@ def check(source,noe,batches,order,receipt,target):
     assert delivery.closed.emitted.sum().cpu().item()==len(source['prior_records'])
     expected=source['cancel_ledger_before']['projection']
     for actual,key in [(state.ledger.current_entry_sequence,'ledger_entry_seq'),
-        (state.ledger.current_local_prefix,'local_event_prefix'),
+        (state.ledger.current_local_prefix,'ledger_local_prefix'),
         (state.ledger.platform.platform_source_prefix,'platform_source_prefix')]:
         assert values(actual)==[expected[key]],key
     def amounts(ratio):
