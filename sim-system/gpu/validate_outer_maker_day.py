@@ -210,6 +210,7 @@ def main():
     from closed import ClosedAdmission
     from success_pool import SuccessPools
     from rebate_day import RebateDays
+    from validate_market_economics import open_prefix as open_markets,check as check_markets
     spec=importlib.util.spec_from_file_location('gpu_platform_fok_day',Path(__file__).resolve().parents[2]/'ledger/gpu/platform.py')
     module=importlib.util.module_from_spec(spec)
     sys.modules[spec.name]=module
@@ -223,7 +224,8 @@ def main():
         rebatedays=RebateDays.empty(torch.tensor([[0]],device='cuda'),1)
         admission=AdmissionLifecycle.open(balances,noe.normalizer.bank,columns,
             integers([projection['ledger_entry_seq']]),integers([projection['ledger_local_prefix']]),pools,rebate_days=rebatedays,
-            position_costs=PositionCosts.empty(1,columns.row_refs.size(1),'cuda'))
+            position_costs=PositionCosts.empty(1,columns.row_refs.size(1),'cuda'),
+            unresolved_markets=open_markets(pools,before,before['markets'][0]['condition_id']))
         admission=replace(admission,maker_cash=rational([str(Fraction(before['cash']['maker_available_pusd'])+Fraction(before['cash']['maker_reserved_pusd']))]))
         return admission
     admission=run(prepare_ledger)
@@ -238,6 +240,7 @@ def main():
     assert not (cache.received & ~cache.consumed).any().cpu().item()
     # 参考仅核对已发生的结果；它不提供设备应用次序或重试控制。
     actual=source['attempts'][-1]['after']['projection']
+    assert check_markets(admission,source['attempts'][-1]['after'],before['markets'][0]['condition_id'])
     assert values(admission.current_entry_sequence)==[actual['ledger_entry_seq']]
     assert values(admission.platform.platform_source_prefix)==[actual['platform_source_prefix']]
     assert amounts(admission.platform.balances)==[Fraction(actual['platform_confirmed_projection'][name]) for name in names]
@@ -297,7 +300,7 @@ def main():
         'original_received_order_and_dual_gates_checked':True,'device_closed_record_consumer_checked':True,'actual_device_NOE_Registry_Maker_trade_checked':True,
         'Registry_missing_cold_submission_remains_Unknown':True,'replaced_malformed_Trade_keeps_fault':True,
         'reference_attempt_order_drives_device':False,'repeat_keeps_first_visibility_and_delivery':True,
-        'cold_prefix_initializations':1,'actual_trade_role_and_net_fee_executed_read_checked':True,'actual_applied_position_cost_and_fee_read_checked':True,'actual_estimated_rebate_read_checked':True,'day_and_payment_money_seq_and_positions_checked':True,
+        'cold_prefix_initializations':1,'actual_trade_role_and_net_fee_executed_read_checked':True,'actual_applied_position_cost_and_fee_read_checked':True,'actual_estimated_rebate_read_checked':True,'day_and_payment_money_seq_and_positions_checked':True,'actual_Maker_day_unresolved_Pi_and_maximum_loss_checked':True,
         'elapsed_seconds_with_reference_reads':time.perf_counter()-start,'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),
         'complete_global_SIM_clock_or_activity_recovery_delivered':False}))
 

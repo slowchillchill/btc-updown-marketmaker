@@ -231,6 +231,7 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     from admission import AdmissionLifecycle
     from position_cost import PositionCosts
     from validate_order_funds import open_prefix,check as check_order_funds
+    from validate_market_economics import open_prefix as open_markets,check as check_markets
     from success_pool import SuccessPools
     pools=Numbers.run_exact_batch(lambda:SuccessPools.open(torch.tensor([0,0],device='cuda'),
         torch.tensor([0,0],device='cuda'),torch.tensor([0,1],device='cuda'),torch.tensor([1,0],device='cuda'),1))
@@ -238,7 +239,8 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     admission=Numbers.run_exact_batch(lambda:AdmissionLifecycle.open(platform,state.normalizer.bank,columns,
         integers([source['reservation_checkpoints'][0]['projection']['ledger_entry_seq']]),integers([0]),pools,
         position_costs=PositionCosts.empty(1,columns.row_refs.size(1),'cuda'),
-        order_funds=open_prefix(1,columns.row_refs.size(1),columns.row_refs.size(1),columns.row_refs.size(1),source['reservation_checkpoints'][0])))
+        order_funds=open_prefix(1,columns.row_refs.size(1),columns.row_refs.size(1),columns.row_refs.size(1),source['reservation_checkpoints'][0]),
+        unresolved_markets=open_markets(pools,source['reservation_checkpoints'][0],source['initial'][0]['market']['condition_id'])))
     cost=Numbers.run_exact_batch(lambda:limit_buy_cost(integers([500]),rational(['0.3']),rational([source['fee_rate']]),
         source['fee_exponent'],post_only=torch.tensor([False],device='cuda'),minimum_principal_micro=integers([1_000_000])))
     principal=Numbers.run_exact_batch(lambda:type(rational(['0'])).ratio(cost.principal_micro,cost.principal_micro.constant(1_000_000)))
@@ -276,6 +278,7 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert values(admission.reservations.last_sequences)[0]==converted['request']['last_ledger_entry_seq']
     assert int(admission.orders.flags.sum().cpu())==1 and int(admission.trades.flags.sum().cpu())==0
     assert check_order_funds(admission,source['reservation_checkpoints'][-1])
+    assert check_markets(admission,source['reservation_checkpoints'][-1],source['initial'][0]['market']['condition_id'])
     again,remaining=Numbers.run_exact_batch(lambda:admission.apply_closed(delivered,
         torch.ones_like(columns.enabled),maximum_retry_rounds=1))
     assert values(again.current_entry_sequence)==values(admission.current_entry_sequence)
@@ -296,7 +299,8 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert values(duplicate_ledger.current_entry_sequence)==[26] and duplicate_ledger.fault.cpu().tolist()==[0]
     # 真实原Ledger同一经济先到，没有Submission绑定不能Convert另一笔未发送预留。
     early=Numbers.run_exact_batch(lambda:AdmissionLifecycle.open(platform,state.normalizer.bank,columns,integers([3]),integers([0]),pools,
-        order_funds=open_prefix(1,columns.row_refs.size(1),columns.row_refs.size(1),columns.row_refs.size(1),source['reservation_checkpoints'][0])))
+        order_funds=open_prefix(1,columns.row_refs.size(1),columns.row_refs.size(1),columns.row_refs.size(1),source['reservation_checkpoints'][0]),
+        unresolved_markets=open_markets(pools,source['reservation_checkpoints'][0],source['initial'][0]['market']['condition_id'])))
     early,_=Numbers.run_exact_batch(lambda:early.reserve_action(zero[:,None],zero[:,None],rational(['1.5']),rational(['0']),
         torch.ones((1,1),dtype=torch.bool,device='cuda')))
     early=Numbers.run_exact_batch(lambda:early.submission_started(zero,zero,zero,zero,torch.tensor([True],device='cuda')))
@@ -309,6 +313,7 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     early,used=Numbers.run_exact_batch(lambda:early.apply_record(torch.tensor([first_economic],device='cuda'),enabled,torch.tensor([10000],device='cuda'),enabled))
     reference=source['economic_first_reference']
     assert check_order_funds(early,reference['before'])
+    assert check_markets(early,reference['before'],source['initial'][0]['market']['condition_id'])
     assert used.cpu().tolist()==[True] and early.reservations.statuses[0,:2].cpu().tolist()==[1,0]
     assert values(early.current_entry_sequence)==[reference['before']['projection']['ledger_entry_seq']]
     assert values(early.reservations.last_sequences)[:2]==[reference['before']['request']['last_ledger_entry_seq'],reference['unsent']['last_ledger_entry_seq']]
@@ -319,6 +324,7 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert used.cpu().tolist()==[True] and early.reservations.statuses[0,:2].cpu().tolist()==[3,0]
     assert values(early.current_entry_sequence)==[reference['after']['projection']['ledger_entry_seq']]
     assert check_order_funds(early,reference['after'])
+    assert check_markets(early,reference['after'],source['initial'][0]['market']['condition_id'])
     assert values(early.reservations.last_sequences)[:2]==[reference['after']['request']['last_ledger_entry_seq'],reference['unsent']['last_ledger_entry_seq']]
     fill_economic=next(i for i in range(columns.row_refs.size(1)) if columns.enabled[0,i].cpu().item() and sequence[i]==2)
     fill_sequence=values(early.lifecycle.fills)
@@ -329,12 +335,14 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert int(early.trades.flags.sum().cpu())==reference['economic_before_trade']['projection']['platform_confirmed_projection']['pending_fill_count']
     assert not early.trade_success.has_fact.any().cpu().item()
     assert check_order_funds(early,reference['economic_before_trade'])
+    assert check_markets(early,reference['economic_before_trade'],source['initial'][0]['market']['condition_id'])
     early,used=Numbers.run_exact_batch(lambda:early.apply_record(torch.tensor([pending_trade],device='cuda'),enabled,torch.tensor([10000],device='cuda'),enabled))
     assert used.cpu().tolist()==[True] and early.fault.cpu().tolist()==[0]
     assert int(early.trades.flags.sum().cpu())==reference['pending_after_economic']['projection']['platform_confirmed_projection']['pending_fill_count']==1
     assert values(early.current_entry_sequence)==[reference['pending_after_economic']['projection']['ledger_entry_seq']]
     assert not early.trade_success.success_applied.any().cpu().item()
     assert check_order_funds(early,reference['pending_after_economic'])
+    assert check_markets(early,reference['pending_after_economic'],source['initial'][0]['market']['condition_id'])
     funds=Numbers.run_exact_batch(lambda:admission.funds())
     expected_cash=source['reservation_checkpoints'][-1]['cash']
     for actual,name in [(funds.actual_available,'actual_available_pusd'),(funds.maker_available,'maker_available_pusd'),
@@ -467,4 +475,4 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         'actual_device_Ledger_economic_position_predecessor_checked':True,
         'Ledger_admission_device_generated_entry_local_and_binding_checked':True,
         'device_closed_cache_waiting_then_new_records_retry_checked':True,
-        'duplicate_NOE_NotApplicable_without_Ledger_commit_checked':True,'unbound_economic_before_Submission_unsent_reservation_checked':True,'actual_existing_economic_MakerCash_and_four_funds_checked':True,'two_root_one_item_funds_fault_isolation_checked':True,'actual_trade_economic_success_pool_checked':True,'fill_economic_before_pending_lifecycle_checked':True,'actual_economic_before_Trade_OrderFunds_Unknown_and_binding_checked':True,'actual_unpaired_trade_contribution_checked':True,'actual_taker_contribution_index_checked':True,'actual_trade_role_and_net_fee_executed_read_checked':True,'actual_applied_position_cost_and_fee_read_checked':True,'actual_estimated_rebate_read_checked':True,'full_clock_Ledger_reservation_delivered':False}
+        'duplicate_NOE_NotApplicable_without_Ledger_commit_checked':True,'unbound_economic_before_Submission_unsent_reservation_checked':True,'actual_existing_economic_MakerCash_and_four_funds_checked':True,'two_root_one_item_funds_fault_isolation_checked':True,'actual_trade_economic_success_pool_checked':True,'fill_economic_before_pending_lifecycle_checked':True,'actual_per_Ledger_record_unresolved_Pi_and_maximum_loss_checked':True,'actual_economic_before_Trade_OrderFunds_Unknown_and_binding_checked':True,'actual_unpaired_trade_contribution_checked':True,'actual_taker_contribution_index_checked':True,'actual_trade_role_and_net_fee_executed_read_checked':True,'actual_applied_position_cost_and_fee_read_checked':True,'actual_estimated_rebate_read_checked':True,'full_clock_Ledger_reservation_delivered':False}

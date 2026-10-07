@@ -53,6 +53,7 @@ class AdmissionLifecycle:
     success_pools: object
     trade_success: object
     position_costs: object
+    unresolved_markets: object
     rebate_contributions: object
     rebate_days: object
     maker_cash: object  # 原Existing经济现金归Maker；结算新kind须按原归属另接。
@@ -74,7 +75,7 @@ class AdmissionLifecycle:
     fault: torch.Tensor
 
     @classmethod
-    def open(cls,platform,bank,columns,current_entry_sequence,current_local_prefix,success_pools,*,rebate_days=None,position_costs=None,order_funds=None):
+    def open(cls,platform,bank,columns,current_entry_sequence,current_local_prefix,success_pools,*,rebate_days=None,position_costs=None,order_funds=None,unresolved_markets=None):
         roots,width=columns.row_refs.shape
         life=LifecycleColumns.from_projection(bank,columns)
         book=ReservationBook.empty(roots,capacity=max(1,width),device=columns.row_refs.device)
@@ -85,7 +86,7 @@ class AdmissionLifecycle:
             position_costs=PositionCosts.empty(roots,max(1,width),empty.device,known=False)
         if order_funds is None:
             order_funds=OrderFunds.empty(roots,max(1,width),max(1,width),width,empty.device,known=False)
-        return cls(platform,success_pools,TradeSuccess.open(roots,max(1,width),empty.device),position_costs,
+        return cls(platform,success_pools,TradeSuccess.open(roots,max(1,width),empty.device),position_costs,unresolved_markets,
             RebateContributions.empty(roots,max(1,width),empty.device),rebate_days,opening_cash,book,LifecycleDirectory.empty(roots,max(1,width),device=empty.device),order_funds,
             LifecycleDirectory.empty(roots,max(1,width),device=empty.device),columns,life,
             current_entry_sequence,current_local_prefix,empty,empty.clone(),torch.zeros_like(columns.enabled),
@@ -302,6 +303,12 @@ class AdmissionLifecycle:
             next_entry,self.applied_sequences,lifecycle_use & use,economic & result.applied & use)
         fault=fault | order_funds.fault
         use=use & funds_ready
+        markets=self.unresolved_markets
+        if markets is not None:
+            markets=markets.refresh(success_pools,trade_success,days,use & (fault==0))
+            root_fault=Numbers.combine_fault_rows(torch.where(
+                markets.roots[None,:]==root[:,None],markets.fault[None,:],0))
+            fault=fault | root_fault
         success=use&(fault==0)
         valid=(fault==0)&funds_ready
         # 多成员向量容量不足时保留请求，整个证据不提交任何部分贡献。
@@ -324,6 +331,7 @@ class AdmissionLifecycle:
         return replace(self,platform=platform,success_pools=success_pools.coordinated(self.success_pools,valid),
             trade_success=coordinate(trade_success,self.trade_success,valid),
             position_costs=coordinate(position_costs,self.position_costs,valid),
+            unresolved_markets=None if markets is None else markets.coordinated(self.unresolved_markets,valid),
             rebate_contributions=contributions,rebate_days=days,maker_cash=ExactRational(
             maker_cash.numerator.select(success & economic,self.maker_cash.numerator),
             maker_cash.denominator.select(success & economic,self.maker_cash.denominator)),reservations=coordinate(book,self.reservations,valid),
