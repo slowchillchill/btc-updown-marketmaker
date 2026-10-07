@@ -903,7 +903,9 @@ def main():
               'peak_allocated_bytes':torch.cuda.max_memory_allocated(),
               'normal_window_peak_allocated_bytes':normal_window_peak,
               'window_peak_scope':'驻留共享公共列、累计可见时间、PM及Binance盘口打包和直接字段、三前缀与末10个100ms窗口；在BookEncoder创建前采样，非法窗不扩池',
-              'peak_scope':'本组件全部检查峰，含六侧BookEncoder前向反向、尾补齐双前向及本次原短链Native冻结；不是完整模型账户或学习工作集',
+              'peak_scope':('本组件全部检查峰，含六侧BookEncoder前向反向、尾补齐双前向'
+                    + ('及本次原短链Native冻结' if native_freeze_reference is not None else '；原短链Native冻结参考未运行')
+                    + '；不是完整模型账户或学习工作集'),
               'passed':passed,
               'original_core_reference_checked':args.original_reference is not None,
               'history_original_reference':history_reference,
