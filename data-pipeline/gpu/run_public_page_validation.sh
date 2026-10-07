@@ -14,7 +14,7 @@ test -z "$(git status --porcelain)"
 mkdir "$artifact_dir"
 git rev-parse HEAD > "$artifact_dir/source-commit.txt"
 git status --porcelain > "$artifact_dir/status.txt"
-export PYTHONPATH="$repo_root/model-train/src:$repo_root/data-pipeline/gpu"
+export PYTHONPATH="$repo_root/model-train:$repo_root/data-pipeline/gpu"
 command=(cargo build -p data-pipeline-training --bin dpt-public-compact --locked --offline)
 printf '%q ' "${command[@]}" >> "$artifact_dir/commands.txt"
 printf '\n' >> "$artifact_dir/commands.txt"
