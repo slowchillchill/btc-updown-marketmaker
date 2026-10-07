@@ -21,6 +21,7 @@ def main():
     source=json.load(sys.stdin)
     started=time.perf_counter()
     root=Path(__file__).resolve().parents[2]
+    sys.path.insert(0,str(root/'data-pipeline/gpu'))
     tensor=lambda v,dtype=torch.int64:torch.tensor(v,dtype=dtype,device='cuda')
     zero=tensor([0]);enabled=tensor([True],torch.bool)
     names=['cash_pusd','available_pusd','principal_encumbrance_pusd','immediate_taker_fee_encumbrance_pusd',
