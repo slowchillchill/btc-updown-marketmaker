@@ -75,8 +75,8 @@ class SubmissionBindings:
             fault |= Numbers.combine_fault_rows(torch.where(combined.received,invalid.reshape(roots,width),0))
         order = source_priority(combined.private_sequences,combined.receive_rank)
         for key in [combined.item_ordinals,combined.request_slots]:
-            order = order.gather(1,key.gather(1,order).argsort(1,stable=True))
-        order = order.gather(1,(~combined.received).gather(1,order).to(torch.int32).argsort(1,stable=True))
+            order = order.gather(1,key.gather(1,order).argsort(dim=1,stable=True))
+        order = order.gather(1,(~combined.received).gather(1,order).to(torch.int32).argsort(dim=1,stable=True))
         same = torch.zeros_like(combined.received)
         if width>1:
             same[:,1:] = ((combined.request_slots.gather(1,order)[:,1:]==combined.request_slots.gather(1,order)[:,:-1])
@@ -84,7 +84,7 @@ class SubmissionBindings:
         keep = combined.received.gather(1,order) & ~same
         # 主机仅读取物理最大保留人口以分配，不读取逐腿业务outcome。
         capacity = int(keep.to(torch.int64).sum(1).max().cpu())
-        retained_at = (~keep).to(torch.int32).argsort(1,stable=True)[:,:capacity]
+        retained_at = (~keep).to(torch.int32).argsort(dim=1,stable=True)[:,:capacity]
         selected = order.gather(1,retained_at)
         coordinates = (torch.arange(roots,device=device)[:,None]*width+selected).flatten()
         retained = {}
