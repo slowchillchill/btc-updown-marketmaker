@@ -48,6 +48,42 @@ def record_resource_request(required):
             _flush_resource_requests(state)
 
 
+@dataclass(frozen=True)
+class DeviceExactCandidate:
+    value: object
+    required_words: torch.Tensor
+    fits: torch.Tensor
+
+
+def device_batch_active():
+    """固定容量候选的冷Python模式；不读取任何设备业务条件。"""
+    state = _batch.get()
+    return state is not None and state.get('device_only', False)
+
+
+def device_exact_batch(compute, *, word_capacity, device):
+    """固定物理容量纯候选；请求与fit留在设备，调用者成功后才提交。
+
+    可以捕获入CUDA graph。这里不扩池或消费RNG，嵌套run共享同一个需求归约。
+    容量不足时外层保留全部原输入，仅在资源退出边界扩容并重算；fit不能作业务拒绝。
+    """
+    if _batch.get() is not None:
+        raise ValueError('固定设备候选须拥有最外层资源批')
+    if word_capacity < 4:
+        raise ValueError('初始物理字容量须至少4，可按需求增长')
+    state = {'capacity': word_capacity, 'required': None, 'requests': [], 'device_only': True}
+    token = _batch.set(state)
+    try:
+        result = compute()
+    finally:
+        _batch.reset(token)
+    _flush_resource_requests(state)
+    required = state['required']
+    if required is None:
+        required = torch.zeros((), dtype=torch.int64, device=device)
+    return DeviceExactCandidate(result, required, required <= word_capacity)
+
+
 def run_exact_batch(compute, *, initial_word_capacity=4):
     """协调资源事务：compute只生成待提交结果，不能推进外部账户或随机数。
 
@@ -55,6 +91,8 @@ def run_exact_batch(compute, *, initial_word_capacity=4):
     本入口不读取业务数值、不把资源失败转换成合法域拒绝。真实环境协调器须在
     此入口成功后才提交状态；含随机采样时由协调器保存/恢复其原RNG快照。
     """
+    if device_batch_active():
+        return compute()
     capacity = _bucket(initial_word_capacity)
     while True:
         state = {'capacity': capacity, 'required': None, 'requests': []}

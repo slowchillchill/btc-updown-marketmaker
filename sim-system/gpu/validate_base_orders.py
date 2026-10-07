@@ -164,6 +164,7 @@ def main():
     cancel_batch=None
     observed_pending_zero_quote = False
     checked_bad_hidden_predecessor=False
+    checked_captured_maker=False
     for checkpoint in source['checkpoints'][1:]:
         stage = checkpoint['stage']
         if stage in ('taker_finality', 'maker_finality'):
@@ -215,8 +216,13 @@ def main():
                 assert transition['quantity_before_shares']==event['quantity_before_shares']
                 assert transition['quantity_after_shares']==event['quantity_after_shares']
                 assert transition['price_pusd_per_share']==event['price_pusd_per_share']
-                runtime,hidden=runtime.apply_hidden_step(choose(),compact_index,tensor([0,0]),
-                    tensor([[0]*runtime.hidden.queues.capacity]),fee_rate,source['fee_exponent'],rebate)
+                if checkpoint['ordinal']==len(source['events'])-1:
+                    runtime,hidden=check_captured_hidden_step(runtime,compact_index,tensor,
+                        fee_rate,source['fee_exponent'],rebate)
+                    checked_captured_maker=True
+                else:
+                    runtime,hidden=runtime.apply_hidden_step(choose(),compact_index,tensor([0,0]),
+                        tensor([[0]*runtime.hidden.queues.capacity]),fee_rate,source['fee_exponent'],rebate)
                 compact_index+=1
                 assert values(runtime.hidden_frontier.index_position)==[block.buckets[0]['bucket']['index_end']]
                 if checkpoint['ordinal']!=len(source['events'])-1:
@@ -401,12 +407,72 @@ def main():
         'verified_typedraw_initial_and_complete_seven_message_maker_bucket_checked':block is not None,
         'complete_maker_bucket_frontier_keeps_original_index_until_all_steps_commit_checked':block is not None,
         'compact_hidden_source_identities_are_new_DPT_identities_not_old_constructed_V3':block is not None,
+        'actual_positive_maker_joint_candidate_CUDA_graph_replay_to_same_NOE_checked':checked_captured_maker,
         'runtime_hidden_reference_handler_covered':False,
         'public_ledger':account_report,
         'original_SIM_checkpoints': len(source['checkpoints']),
         'elapsed_seconds_with_reference_reads': time.perf_counter()-started,
         'device_peak_allocated_bytes': torch.cuda.max_memory_allocated(),
         'global_clock_SDK_admission_and_full_response_body_delivered': False}))
+
+
+def check_captured_hidden_step(runtime,index,tensor,fee_rate,fee_exponent,rebate):
+    """同一真实正Maker源步：物理预热/扩容在冷边界，候选和需求留设备。
+
+    只证明当前固定shape源类型的capture/replay。不据此声明WHILE、页追加、
+    跨步持久地址提交或GPU业务分派已完成；后续NOE实际消费这次graph候选。
+    """
+    from dataclasses import fields,is_dataclass
+    # 原容量重试生成参考候选，但不安装它；只取其物理容量增长原状态。
+    horizon=tensor([runtime.hidden_frontier.columns.source.operations[index]['market']['window']['end_at_utc_ms']])
+    enabled=tensor([True],torch.bool)
+    conditions=tensor([0,0])
+    def compute(value):
+        choice=value.choose(None,None,horizon,enabled)
+        paths=torch.zeros((value.orders.roots,value.hidden.queues.capacity),dtype=torch.int64,device=horizon.device)
+        return value.apply_hidden_step(choice,index,conditions,paths,fee_rate,fee_exponent,rebate)
+    expected,_=compute(runtime)
+    runtime=replace(runtime,
+        hidden=replace(runtime.hidden,queues=runtime.hidden.queues.resized(expected.hidden.queues.capacity)),
+        fills=runtime.fills.resized(expected.fills.capacity),
+        calendars=replace(runtime.calendars,maker=runtime.calendars.maker.resized(
+            fills=expected.calendars.maker.fill_occupied.size(1),days=expected.calendars.maker.occupied.size(1))))
+    expected,effect=compute(runtime)
+    compute_candidate=lambda:Numbers.device_exact_batch(lambda:compute(runtime),word_capacity=4,
+        device=runtime.account.cash.words.device)
+    warm=compute_candidate()
+    assert warm.fits.cpu().item() and warm.value[1].fault.cpu().tolist()==[0]
+    torch.cuda.synchronize()
+    graph=torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured=compute_candidate()
+    graph.replay()
+    torch.cuda.synchronize()
+    assert captured.fits.cpu().item(), '仅资源退出边界可读此需求，不提交不足容量候选'
+    actual,actual_effect=captured.value
+    def compare(a,b):
+        if isinstance(a,torch.Tensor):
+            assert torch.equal(a,b)
+        elif isinstance(a,ExactInt):
+            assert values(a)==values(b) and torch.equal(a.fault,b.fault)
+        elif is_dataclass(a):
+            for field in fields(a):
+                # 真实源引用为同一个冻结对象；不把Python对象绑定当设备业务状态。
+                if field.name not in ('source','columns'):
+                    compare(getattr(a,field.name),getattr(b,field.name))
+        elif isinstance(a,(tuple,list)):
+            assert len(a)==len(b)
+            for left,right in zip(a,b):compare(left,right)
+        elif a is None or isinstance(a,(str,int,bool)):
+            assert a==b
+    compare(actual,expected)
+    compare(actual_effect,effect)
+    assert any(frame.event.emitted.cpu().item() for frame in actual_effect.fills)
+    # 再次replay同一未提交原输入，纯候选应一致，不消耗订单/fill号或RNG。
+    graph.replay()
+    torch.cuda.synchronize()
+    compare(actual,expected)
+    return actual,actual_effect
 
 
 if __name__ == '__main__':

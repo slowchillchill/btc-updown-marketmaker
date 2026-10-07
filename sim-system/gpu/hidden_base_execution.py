@@ -192,6 +192,10 @@ def run_hidden_base_transition(state, orders, account, fills, calendars, rows, b
         source_price, condition, at, enabled, resync_inference, selected_paths, row_roots,
         fee_rate, fee_exponent, taker_rate):
     """重试同一原step；容量需求仅在纯候选边界回读，不推进源/RNG/运行前沿。"""
+    if Numbers.device_batch_active():
+        return apply_hidden_base_transition(state,orders,account,fills,calendars,rows,before,after,
+            source_price,condition,at,enabled,resync_inference,selected_paths,row_roots,
+            fee_rate,fee_exponent,taker_rate)
     while True:
         result=Numbers.run_exact_batch(lambda:apply_hidden_base_transition(state,orders,account,fills,calendars,
             rows,before,after,source_price,condition,at,enabled,resync_inference,selected_paths,row_roots,
