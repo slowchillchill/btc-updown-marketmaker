@@ -939,8 +939,8 @@ NOE消费者读取这些实际效果，不能用最后一轮活动成交详情�
 源资产坐标与运行根资产坐标分别绑定；每根的初始化、市场人口与队列继续独立。
 图节点数量不随源operation人口展开。当前页和布局仍固定地址持有，跨容量类换页尚未交付。
 
-原步骤仍逐条共同提交，只有reference和steps都完成后才推进闭桶前沿；待处理reference
-保留等待，不签发reference完成。真实正quote输出保存进入时的step句柄和时点，后续
+原步骤仍逐条共同提交，只有reference和steps都完成后才推进闭桶前沿；尚无真实处理器的reference
+保留等待，不签发完成。真实正quote输出保存进入时的step句柄和时点，后续
 重放不覆盖已有输出。字/段/fill/Maker池和反馈页共同门控本次步骤，资源不足保留此前
 成功步骤与当前未消费游标。四类池需求包含未发射反馈的退出轮，冷协调不从
 `emitted=false`猜测哪个池不足；零迭代入口清空需求，旧反馈页保持不变。
@@ -950,7 +950,7 @@ NOE消费者读取这些实际效果，不能用最后一轮活动成交详情�
 `B_GPU_PROGRESS_INTERVAL_SECONDS`控制，默认10秒，0关闭。冷物理源人口不冒充已应用业务人口。
 本例实际源人口为9条PM、2桶、14条操作，23是排序索引项。旧逐来源展开图的371工程对照
 包含正常、实际fill不足、增长后续跑三个图，总285.54秒；它是过渡实现证据，不是吞吐或容量结论。
-固定类型/gather消费者继续沿同原来源验证，reference、其它阶段和完整设备宿主仍在实施。
+固定类型/gather消费者继续沿同原来源验证，Terminal、其它阶段和完整设备宿主仍在实施。
 
 源事件/类型的补零哨兵在冷安装时一次建立，每步仅gather当前根的索引，不拼接整页。
 `sim-system/gpu/hidden_gather.cu`只对本轮Snapshot掩码扫描其offset范围，逐源档位关联该根运行档位；
@@ -964,9 +964,9 @@ hidden纯引用消费沿原`reduce_hidden_step_bucket_v1`：七类`ReferenceFact
 `BinanceDepthFromPrefix`不更新SIM盘口、账户或公开行情。冷列仅从已由原reader逐值绑定的
 完整事实分类，图内按每根`next_reference`推进一个引用；实际引用正文/位置由同一源页保留。
 同轮已选择引用的根不额外消费step。全部引用完成后才进入PM步骤，纯引用桶也必须沿
-原到期义务、role时间和完整桶闭合。MarketFact保留游标等待其所属市场处理器，不能统一作noop。
+原到期义务、role时间和完整桶闭合。MarketFact须由其所属市场处理器消费，不能统一作noop。
 引用游标推进是device loop的实际进展；无处理进展时退出并保持原前沿。预读/分类不更新NOE公开门。
-当前市场生命周期、交易状态和Terminal消费者及完整多阶段宿主仍未交付。
+当前Terminal经济消费者及完整多阶段宿主仍未交付，控制字段接线如下。
 
 `BaseSimRuntime.install_hidden_market_controls`在冷边界安装SIM原默认None/未知控制状态，
 不读未来参考或公开市场状态来初始化。`hidden_reference.py`保留完整mapped生命周期值字典，
