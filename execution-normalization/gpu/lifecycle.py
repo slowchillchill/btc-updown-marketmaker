@@ -125,3 +125,52 @@ def map_maker_finalized(condition,status,contributions,private,ordinal,account,a
     logical=encode_fields([account,torch.full_like(account,9),private])
     semantic=encode_fields([account,condition,status,contributions])
     return LifecycleEvidence(logical,semantic,source_order(private,ordinal),active & (fault==0),fault,14)
+
+
+@dataclass(frozen=True)
+class CancellationEvidence(LifecycleEvidence):
+    cancellation_fields: object = None  # 原input_item_refs，独立于Control正文等值。
+
+
+def map_cancellation(order_sequence,target_ordinal,input_item_refs,outcome,private,ordinal,account,request,active):
+    """原单目标Cancellation；target序u64与input item人口分别保持。
+
+    input_item_refs保存原(item_id字典坐标,u16 ordinal)和原顺序；不能由目标数重建。
+    """
+    from fields import RecordList
+    from queues import Numbers
+    if not isinstance(input_item_refs,RecordList) or len(input_item_refs.fields)!=2:
+        raise TypeError('撤单目标需原item_id/ordinal有序引用列表')
+    item_ids,item_ordinals=input_item_refs.fields
+    rows,capacity=input_item_refs.present.shape
+    if rows!=account.numel():
+        raise ValueError('撤单引用人口与反馈人口不符')
+    for value in [item_ids,item_ordinals]:
+        if value.shape!=(rows*capacity,) or value.dtype!=torch.int64 or value.device!=account.device:
+            raise TypeError('撤单input item需同设备int64[row*capacity]字段')
+    invalid=(item_ids<0)|(item_ordinals<0)|(item_ordinals>65535)
+    fault=input_fault([order_sequence,target_ordinal,private],[account,request,outcome],ordinal)
+    fault=fault|input_item_refs.fault|Numbers.combine_fault_rows(torch.where(input_item_refs.present,invalid.reshape(rows,capacity).to(torch.int32),0))
+    fault=fault|((account<0)|(request<0)|(outcome<0)|(outcome>2)).to(torch.int32)
+    logical=encode_fields([account,torch.full_like(account,4),request,target_ordinal])
+    semantic=encode_fields([account,order_sequence,outcome])
+    return CancellationEvidence(logical,semantic,source_order(private,ordinal),active&(fault==0),fault,15,
+        encode_fields([input_item_refs]))
+
+
+def map_cancellation_completed(canceled,no_effect,unknown,private,ordinal,account,request,active):
+    """原DirectResponseRequest身份；完整三个u64计数，零目标仍有一条证据。"""
+    fault=input_fault([canceled,no_effect,unknown,private],[account,request],ordinal)
+    fault=fault|((account<0)|(request<0)).to(torch.int32)
+    logical=encode_fields([account,torch.full_like(account,5),request])
+    semantic=encode_fields([account,canceled,no_effect,unknown])
+    return LifecycleEvidence(logical,semantic,source_order(private,ordinal),active&(fault==0),fault,16)
+
+
+def map_order_canceled(order_sequence,private,ordinal,account,condition,token,active):
+    """真实CallerCanceled生命周期；控制Canceled不代替该独立private事实。"""
+    fault=input_fault([order_sequence,private],[account,condition,token],ordinal)
+    fault=fault|((account<0)|(condition<0)|(token<0)).to(torch.int32)
+    logical=encode_fields([account,torch.full_like(account,7),order_sequence,private])
+    semantic=encode_fields([account,condition,token,order_sequence,torch.full_like(account,4),torch.zeros_like(account)])
+    return LifecycleEvidence(logical,semantic,source_order(private,ordinal),active&(fault==0),fault,7)

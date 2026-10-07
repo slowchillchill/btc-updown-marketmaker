@@ -197,7 +197,7 @@ def scope_columns(scopes,universe,markets):
         torch.tensor([[[order in scope.get('orders',[]) for order in universe] for scope in scopes]],dtype=torch.bool,device='cuda').reshape(1,len(scopes),len(universe)))
 
 
-def scoped_freeze(frame,cancel,request_ids,target_rows,universe,objects,catalog,view,legs_view,leg_keys):
+def scoped_freeze(frame,cancel,request_ids,target_rows,universe,objects,catalog,view,legs_view,leg_keys,device_targets=None):
     markets={market['condition_id']:index for index,market in enumerate(frame['public_market_sources'])}
     source_requests={source['request']:source['scope'] for source in frame['cancel_source_requests']}
     requests=scope_columns([source_requests.get(name,{'orders':[]}) for name in request_ids],universe,markets)
@@ -217,6 +217,7 @@ def scoped_freeze(frame,cancel,request_ids,target_rows,universe,objects,catalog,
         available.append(reference['visibility']['Feedback']['available_at_utc_ms'])
     targets=CancellationTargets(tensor([True]*len(target_rows),torch.bool),integers(request_keys),
         scope_columns(target_scopes,universe,markets),tensor(outcomes),tensor(available),torch.zeros(1,dtype=torch.int32,device='cuda'))
+    if device_targets is not None:targets=device_targets
     cutoff=torch.tensor([frame['logical_at']],device='cuda')
     full=freeze_scoped_cancel_requests(cancel,requests,queries,order_markets,known,targets,cutoff)
     # 原action_snapshot先保留unfinished/承诺所需BUY请求的全部outcomes，再补needed撤单位置。
@@ -281,7 +282,7 @@ def check_family(source):
     # 冷共享引用目录保存原完整正文；设备slot仅定位，不替代原context/run/业务position。
     catalog_refs={"references":{},"contexts":{},"runs":{}}
     for frame in source:
-        references=[frame['cancel_latest']['Known']]
+        references=[frame['cancel_latest']['Known']]+[order['latest_cancel'] for order in frame['raw_orders']]
         for key in ['scoped_cancellation_requests','snapshot_scoped_cancellation_requests']:
             references.extend(query['latest'].get('Known') if isinstance(query['latest'],dict) else None for query in frame[key])
         for reference in references:
@@ -321,6 +322,14 @@ def check_family(source):
     cancel_seen=set()
     target_rows=[]
     universe=sorted({platform_order_id(key) for key in catalog}|{order for frame in source for query in frame['scoped_cancellation_requests'] for order in query['scope'].get('orders',[])})
+    from validate_cancel_source import prepare_cancel_source,receive_cancel_source
+    source_columns=prepare_cancel_source([value[1] for value in catalog_refs['references'].values()],request_ids,universe,catalog_refs)
+    directory_sequences=integers([int(name.removeprefix('sim-')) if name.startswith('sim-') else 0 for name in universe])
+    directory_present=torch.tensor([[name.startswith('sim-') for name in universe]],dtype=torch.bool,device='cuda')
+    target_received=torch.zeros((1,0),dtype=torch.bool,device='cuda')
+    device_targets=CancellationTargets(target_received,integers([]),CancellationScopes(target_received,
+        torch.empty((1,0),dtype=torch.int64,device='cuda'),torch.zeros((1,0,len(universe)),dtype=torch.bool,device='cuda')),
+        torch.empty((1,0),dtype=torch.int64,device='cuda'),torch.empty((1,0),dtype=torch.int64,device='cuda'),torch.zeros(1,dtype=torch.int32,device='cuda'))
     scoped_saved=[]
     maximum_retained=0
     cancel_saved=[]
@@ -409,10 +418,11 @@ def check_family(source):
         latest=frame['cancel_latest']['Known']
         reference=latest if latest is not None and position_key(latest) not in cancel_seen else None
         if reference is not None:cancel_seen.add(position_key(reference))
-        def cancel_step():
-            candidate=cancel.register(receipt_mask).receive(completion_columns(reference,request_ids,catalog_refs))
-            return candidate,candidate.freeze_global(torch.tensor([frame['logical_at']],device='cuda'))
-        cancel,cancel_view=Numbers.run_exact_batch(cancel_step)
+        cancellation_incoming=[row for row in incoming if 'Cancellation' in row['record']['Evidence']['evidence'].get('Control',{}).get('result',{})]
+        if reference is not None:cancellation_incoming.append(reference)
+        cancel=cancel.register(receipt_mask)
+        cancel,device_targets=receive_cancel_source(source_columns,cancellation_incoming,cancel,device_targets,directory_sequences,directory_present)
+        cancel_view=Numbers.run_exact_batch(lambda:cancel.freeze_global(torch.tensor([frame['logical_at']],device='cuda')))
         assert cancel_view.fault.cpu().tolist()==[0]
         assert values(cancel_view.pending_count)==[frame['cancel_pending']['Known']],frame['stage']
         assert cancel_view.has_latest.cpu().tolist()==[latest is not None]
@@ -423,7 +433,7 @@ def check_family(source):
         else:
             assert frame['cancel_response_counts']==['NotApplicable']*3
         cancel_saved.append((cancel_view,values(cancel_view.pending_count),values(cancel_view.response_counts)))
-        scoped,frozen_scoped=Numbers.run_exact_batch(lambda:scoped_freeze(frame,cancel,request_ids,target_rows,universe,objects,catalog,view,legs_view,leg_keys))
+        scoped,frozen_scoped=Numbers.run_exact_batch(lambda:scoped_freeze(frame,cancel,request_ids,target_rows,universe,objects,catalog,view,legs_view,leg_keys,device_targets))
         compare_scoped(frame,scoped,catalog_refs)
         compare_scoped(frame,frozen_scoped,catalog_refs,'snapshot_scoped_cancellation_requests')
         for snapshot in [scoped,frozen_scoped]:
@@ -453,7 +463,7 @@ def main():
     torch.cuda.synchronize()
     print(json.dumps({'frozen_prefixes':sum(n for n,_,_ in counts),'distinct_original_order_records':sum(n for _,n,_ in counts),
         'receipt_without_order_keeps_original_leg_target':True,'continuous_received_state':True,'maximum_retained_order_records_per_family':[width for _,_,width in counts],'derived_oracle_initialization':False,'old_freeze_unchanged':True,
-        'complete_first_delivery_stream':False,'global_cancel_request_completed_state':True,'single_paired_market_cancel_objects':True,'scoped_cancel_request_results':True,'original_action_snapshot_needed_cancel_projection':True,'latest_response_full_source_position_checked':True,'scoped_unknown_order_location_preserved':True,'device_sim_identity_tie_order':True,
+        'complete_first_delivery_stream':False,'global_cancel_request_completed_state':True,'single_paired_market_cancel_objects':True,'scoped_cancel_request_results':True,'original_action_snapshot_needed_cancel_projection':True,'latest_response_full_source_position_checked':True,'cancel_noe_mapper_core_and_closed_decoder':True,'cancel_first_delivery_filtered_original_references':True,'scoped_unknown_order_location_preserved':True,'device_sim_identity_tie_order':True,
         'full_registry_or_root':False,'seconds':time.perf_counter()-started,'device_peak_allocated_bytes':torch.cuda.max_memory_allocated()}))
 
 

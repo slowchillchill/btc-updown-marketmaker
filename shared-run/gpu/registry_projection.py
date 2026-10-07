@@ -19,6 +19,26 @@ def concatenate_integer(values,roots):
         torch.cat([value.fault.reshape(roots,-1) for value in prepared],1).flatten())
 
 
+def resolve_closed_public_rows(bank,batches,closed):
+    """原共享位置到来源批坐标；公开Registry与取消读取复用同一设备绑定。"""
+    roots,width=closed.record_refs.shape
+    device=closed.record_refs.device
+    original_rows=torch.cat([batch.rows for batch in batches],1)
+    original_active=torch.cat([batch.emitted for batch in batches],1)
+    matching=(original_rows[:,:,None]==closed.record_refs[:,None,:])&original_active[:,:,None]
+    count=matching.to(torch.int64).sum(1)
+    fault=closed.fault|((count!=1)&closed.emitted).any(1).to(torch.int32)
+    at=matching.to(torch.int32).argmax(1)
+    coordinates=(torch.arange(roots,device=device)[:,None]*original_rows.size(1)+at).flatten()
+    rows=closed.record_refs.clamp(0,bank.kinds.numel()-1).flatten()
+    invalid=(closed.record_refs<0)|(closed.record_refs>=bank.kinds.numel())
+    fault=fault|(invalid&closed.emitted).any(1).to(torch.int32)
+    fault=fault|Numbers.combine_fault_rows(torch.where(closed.emitted,bank.fault[rows].reshape(roots,width),0))
+    outcomes=torch.cat([batch.normalized.outcomes for batch in batches],1).gather(1,at).flatten()
+    active=closed.emitted.flatten()&(outcomes==OUT_EVIDENCE)&(fault==0).repeat_interleave(width)
+    return rows,at,coordinates,active,fault
+
+
 def public_rows_from_closed(bank,batches,closed,receive_rank):
     from commitments import SubmissionBindings
     roots,width=closed.record_refs.shape
@@ -30,19 +50,7 @@ def public_rows_from_closed(bank,batches,closed,receive_rank):
         events=replace(PublicRegistryEvents.empty(roots,device),fault=closed.fault)
         return events,SubmissionBindings(events.received,events.request_slots,events.item_ordinals,
             events.private_sequences,events.receive_rank,events.orders,events.received,events.fault)
-    original_rows=torch.cat([batch.rows for batch in batches],1)
-    original_active=torch.cat([batch.emitted for batch in batches],1)
-    matching=(original_rows[:,:,None]==closed.record_refs[:,None,:]) & original_active[:,:,None]
-    count=matching.to(torch.int64).sum(1)
-    fault=closed.fault | ((count!=1)&closed.emitted).any(1).to(torch.int32)
-    at=matching.to(torch.int32).argmax(1)
-    coordinates=(torch.arange(roots,device=device)[:,None]*original_rows.size(1)+at).flatten()
-    rows=closed.record_refs.clamp(0,bank.kinds.numel()-1).flatten()
-    row_fault=(closed.record_refs<0)|(closed.record_refs>=bank.kinds.numel())
-    fault=fault | (row_fault&closed.emitted).any(1).to(torch.int32)
-    outcomes=torch.cat([batch.normalized.outcomes for batch in batches],1).gather(1,at).flatten()
-    fault=fault | Numbers.combine_fault_rows(torch.where(closed.emitted,bank.fault[rows].reshape(roots,width),0))
-    active=closed.emitted.flatten() & (outcomes==OUT_EVIDENCE) & (fault==0).repeat_interleave(width)
+    rows,at,coordinates,active,fault=resolve_closed_public_rows(bank,batches,closed)
     schemas=bank.payload_schemas[rows]
     layouts={3:['scalar']*4+['integer','scalar','integer','integer','scalar'],
         7:['scalar']*3+['integer','scalar','scalar'],
@@ -54,16 +62,19 @@ def public_rows_from_closed(bank,batches,closed,receive_rank):
         fault=fault | Numbers.combine_fault_rows(torch.where(enabled,error,0).reshape(roots,width))
     accepted=active & (schemas==3) & (decoded[3][1]==0)
     formed=active & (schemas==7)
-    # 当前生产来源仅发Accepted；未实现的Order事件不得冒充该事件。
-    fault=fault | (formed & (decoded[7][4]!=0)).reshape(roots,width).any(1).to(torch.int32)
+    # Accepted与真实CallerCanceled分开；其它未接Order事件仍显式报告缺口。
+    order_life=formed
+    fault=fault | (order_life & (decoded[7][4]!=0)&(decoded[7][4]!=4)).reshape(roots,width).any(1).to(torch.int32)
+    closed_order=order_life&(decoded[7][4]==4)
+    formed=order_life&(decoded[7][4]==0)
     trades=active & (schemas==8)
-    received=(accepted|formed|trades).reshape(roots,width)
+    received=(accepted|order_life|trades).reshape(roots,width)
     zero=ExactInt.from_i64_tensor(torch.zeros(roots*width,dtype=torch.int64,device=device))
     order=decoded[3][4].select(accepted,zero)
-    order=decoded[7][3].select(formed,order)
+    order=decoded[7][3].select(order_life,order)
     order=decoded[8][4].select(trades,order)
     fill=decoded[8][3].select(trades,zero)
-    kinds=torch.where(trades,TRADE,torch.where(formed,ORDER_LIFECYCLE,BASE_ACCEPTED)).reshape(roots,width)
+    kinds=torch.where(trades,TRADE,torch.where(order_life,ORDER_LIFECYCLE,BASE_ACCEPTED)).reshape(roots,width)
     units=lambda value:ExactRational.ratio(value,value.constant(1_000_000))
     private=concatenate_integer([batch.private_sequences for batch in batches],roots)
     ordinals=concatenate_integer([batch.record_ordinals for batch in batches],roots)
@@ -77,7 +88,7 @@ def public_rows_from_closed(bank,batches,closed,receive_rank):
         units(decoded[3][6]),units(decoded[3][7]),units(decoded[8][10]),
         decoded[8][8].reshape(roots,width),decoded[8][6].reshape(roots,width),
         (formed & (decoded[7][5]==1)).reshape(roots,width),formed.reshape(roots,width),
-        torch.zeros_like(received),torch.zeros_like(received),fault)
+        torch.zeros_like(received),closed_order.reshape(roots,width),fault)
 
     submission=active & (schemas==3)
     fault=fault | (submission & ((decoded[3][1]<0)|(decoded[3][1]>2))).reshape(roots,width).any(1).to(torch.int32)
