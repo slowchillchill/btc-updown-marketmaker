@@ -11,7 +11,7 @@ import torch
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path[:0] = [str(ROOT/'sim-system/gpu'), str(ROOT/'ledger/gpu'),
-               str(ROOT/'data-pipeline/gpu'), str(Path(__file__).resolve().parent)]
+               str(ROOT/'data-pipeline/gpu'), str(ROOT/'shared-run/gpu'), str(Path(__file__).resolve().parent)]
 from queues import Numbers
 from validate_base_execution import integers, rational
 from position_cost import PositionCosts
