@@ -263,6 +263,7 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     from validate_order_funds import open_prefix,check as check_order_funds
     from validate_market_economics import open_prefix as open_markets,check as check_markets
     from validate_rebate_read import check as check_rebates
+    from validate_accepted_principal import open_prefix as open_principal,check as check_principal,check_growth as check_principal_growth
     from success_pool import SuccessPools
     pools=Numbers.run_exact_batch(lambda:SuccessPools.open(torch.tensor([0,0],device='cuda'),
         torch.tensor([0,0],device='cuda'),torch.tensor([0,1],device='cuda'),torch.tensor([1,0],device='cuda'),1))
@@ -278,7 +279,8 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         position_costs=PositionCosts.empty(1,capacity,'cuda'),
         order_funds=open_prefix(1,capacity,capacity,columns.row_refs.size(1),source['reservation_checkpoints'][0]),
         unresolved_markets=open_markets(pools,source['reservation_checkpoints'][0],source['initial'][0]['market']['condition_id']),
-        projected_markets=initial_population,lifecycle_capacity=capacity))
+        projected_markets=initial_population,lifecycle_capacity=capacity,
+        accepted_principal=open_principal(pools,source['reservation_checkpoints'][0])))
     admission=open_initial()
     cost=Numbers.run_exact_batch(lambda:limit_buy_cost(integers([500]),rational(['0.3']),rational([source['fee_rate']]),
         source['fee_exponent'],post_only=torch.tensor([False],device='cuda'),minimum_principal_micro=integers([1_000_000])))
@@ -297,6 +299,20 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     admission=Numbers.run_exact_batch(lambda:admission.submission_started(zero,zero,zero,zero,torch.tensor([True],device='cuda')))
     assert values(admission.current_entry_sequence)==[5] and values(admission.current_local_prefix)==[2]
     append_start=admission
+    # 消费实际Submission Accepted，尚未消费任何economic；不能把接纳计数拖到经济到达。
+    submitted_reference=next(row for row in source['reservation_checkpoints']
+        if row['request'] and row['request']['status']=='PlatformConfirmedPendingEconomicFact')
+    submission_column=next(i for i in range(columns.row_refs.size(1))
+        if admission.lifecycle.emitted[0,i].cpu().item()
+        and admission.lifecycle.schemas[0,i].cpu().item()==3 and admission.lifecycle.accepted[0,i].cpu().item())
+    submission_only,used=Numbers.run_exact_batch(lambda:append_start.apply_record(
+        torch.tensor([submission_column],device='cuda'),torch.tensor([True],device='cuda'),
+        torch.tensor([10000],device='cuda'),torch.tensor([True],device='cuda')))
+    assert used.cpu().tolist()==[True] and submission_only.reservations.statuses[0,0].cpu().item()==2
+    assert values(submission_only.platform.platform_source_prefix)==[0]
+    assert not (submission_only.applied&columns.enabled).any().cpu().item()
+    assert check_principal(submission_only,submitted_reference)>0
+    assert submission_only.orders.accepted_principal_counted.sum().cpu().item()==1
     from closed import ClosedAdmission
     cache=ClosedAdmission.empty(columns)
     # 原领取第8条是经济seq3；其前驱seq2真实位于后续第12条。
@@ -352,8 +368,12 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     # 同一真实设备NOE人口分成两页接入。第一页末是完整feedback边界；
     # 只在来源接齐后关receive门，不把分页末尾当新的业务闭时点。
     from validate_append import check_incremental_receive
+    from accepted_principal import AcceptedPrincipal
+    # 同一真实来源故意缺本金condition物理槽；扫描须退出而不提交counted/金额半状态。
+    principal_limited_start=replace(limited_start,accepted_principal=AcceptedPrincipal.open(1,
+        torch.empty(0,dtype=torch.int64,device='cuda'),known=True))
     incremental_checked=check_incremental_receive(state.normalizer.bank,batches,delivered,
-        append_start,admission,gates,capacity_start=limited_start)
+        append_start,admission,gates,capacity_start=principal_limited_start)
     assert values(admission.current_entry_sequence)==[source['ledger_projection']['ledger_entry_seq']]
     assert values(admission.current_local_prefix)==[source['ledger_projection']['ledger_local_prefix']]
     assert values(admission.platform.platform_source_prefix)==[7]
@@ -365,6 +385,8 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert check_order_funds(admission,source['reservation_checkpoints'][-1])
     assert check_markets(admission,source['reservation_checkpoints'][-1],source['initial'][0]['market']['condition_id'])
     assert check_rebates(admission,source['reservation_checkpoints'][-1],source['initial'][0]['market']['condition_id'])
+    check_principal(admission,source['reservation_checkpoints'][-1])
+    check_principal_growth(admission,source,delivered)
     again,remaining=Numbers.run_exact_batch(lambda:admission.apply_closed(delivered,
         torch.ones_like(columns.enabled),maximum_retry_rounds=1))
     assert values(again.current_entry_sequence)==values(admission.current_entry_sequence)
@@ -386,7 +408,8 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     # 真实原Ledger同一经济先到，没有Submission绑定不能Convert另一笔未发送预留。
     early=Numbers.run_exact_batch(lambda:AdmissionLifecycle.open(platform,state.normalizer.bank,columns,integers([3]),integers([0]),pools,
         order_funds=open_prefix(1,columns.row_refs.size(1),columns.row_refs.size(1),columns.row_refs.size(1),source['reservation_checkpoints'][0]),
-        unresolved_markets=open_markets(pools,source['reservation_checkpoints'][0],source['initial'][0]['market']['condition_id'])))
+        unresolved_markets=open_markets(pools,source['reservation_checkpoints'][0],source['initial'][0]['market']['condition_id']),
+        accepted_principal=open_principal(pools,source['reservation_checkpoints'][0])))
     early,_=Numbers.run_exact_batch(lambda:early.reserve_action(zero[:,None],zero[:,None],rational(['1.5']),rational(['0']),
         torch.ones((1,1),dtype=torch.bool,device='cuda')))
     early=Numbers.run_exact_batch(lambda:early.submission_started(zero,zero,zero,zero,torch.tensor([True],device='cuda')))
@@ -400,6 +423,7 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     reference=source['economic_first_reference']
     assert check_order_funds(early,reference['before'])
     assert check_markets(early,reference['before'],source['initial'][0]['market']['condition_id'])
+    early_cumulative=check_principal(early,reference['before'])
     assert used.cpu().tolist()==[True] and early.reservations.statuses[0,:2].cpu().tolist()==[1,0]
     assert values(early.current_entry_sequence)==[reference['before']['projection']['ledger_entry_seq']]
     assert values(early.reservations.last_sequences)[:2]==[reference['before']['request']['last_ledger_entry_seq'],reference['unsent']['last_ledger_entry_seq']]
@@ -411,6 +435,7 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert values(early.current_entry_sequence)==[reference['after']['projection']['ledger_entry_seq']]
     assert check_order_funds(early,reference['after'])
     assert check_markets(early,reference['after'],source['initial'][0]['market']['condition_id'])
+    assert check_principal(early,reference['after'])==early_cumulative
     assert values(early.reservations.last_sequences)[:2]==[reference['after']['request']['last_ledger_entry_seq'],reference['unsent']['last_ledger_entry_seq']]
     fill_economic=next(i for i in range(columns.row_refs.size(1)) if columns.enabled[0,i].cpu().item() and sequence[i]==2)
     fill_sequence=values(early.lifecycle.fills)

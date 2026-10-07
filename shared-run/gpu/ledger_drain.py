@@ -116,6 +116,7 @@ class CapturedLedgerDrain:
                 'order_funds':ledger.order_funds.capacity_required,
                 'days':torch.zeros_like(self.required['days']) if ledger.rebate_days is None else ledger.rebate_days.capacity_required,
                 'conditions':torch.full_like(self.required['conditions'],-1) if ledger.projected_markets is None else ledger.projected_markets.required_conditions}
+            needs['conditions']=torch.where(needs['conditions']>=0,needs['conditions'],ledger.accepted_principal.required_conditions)
             fit=self.candidate.fits
             for name,directory in (('orders',ledger.orders),('trades',ledger.trades),
                     ('contributions',ledger.rebate_contributions),('order_funds',ledger.order_funds)):

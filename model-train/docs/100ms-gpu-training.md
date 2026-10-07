@@ -947,6 +947,23 @@ Trade 详情到达后绑定原订单身份，消费这些原分录；不新增�
 当前未关联目录绑定一个共享 NOE 块，跨块宿主必须迁移仍需保留的引用、身份和金额后才能退役输入。
 完整账户冻结、100ms 宿主及活动根恢复仍由后续协调器接齐。
 
+### 累计接纳本金
+
+`ledger/gpu/accepted_principal.py` 保存每根、原 condition 的精确累计接纳本金，
+与订单 `accepted_principal_counted` 在同一 Ledger 候选提交。它独立于当前净 `OrderFunds`，
+取消、释放和兑付不减少累计值，也不替代 Native slow95 的当前 all-in commitment。
+接纳 Evidence 只有实际预留确定转态才计原预留本金；经济先到时按原显式请求关联转态，
+没有该转态则沿公开经济 delta 本金及 condition 计数。迟到接纳只完成预留转换，不能重复计数。
+完整冷历史须显式安装，完整历史中未接纳的市场为 Known0；中途缺历史的非空 scope 保持 Unknown。
+
+未安装 condition 物理槽时沿原 `CapturedLedgerDrain` 资源出口保留未提交位置，
+冷增长保留全部旧累计后重试；金额、订单去重位、waiting 和 cursor 共同提交。
+已有 ownership snapshot 同时保存精确分子、分母及去重位，不能用该快照宣称持久活动恢复。
+定向验证复用真实三成交的正常接纳和 CPU Ledger 合法 economic→迟到 Submission 归约，
+核原累计金额、另一未发送预留、分页续跑、资源增长及旧冻结。
+后者是合法 NOE 乱序归约证据，不代表自然 public 调度经济先公开；本批未新增 OrderQuery 生产路径。
+完整账户输入与当前 all-in 读面仍继续接线。
+
 ### 未判定市场利润与最大历史亏损
 
 `ledger/gpu/market_economics.py` 在每条成功 Ledger 提交时刷新已绑定未判定市场，

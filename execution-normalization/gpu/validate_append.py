@@ -40,10 +40,16 @@ def _device_scan(state,association,label,*,zero_first=False):
             zero_first=False
         progress('launch')
         old=storage.snapshot()
+        old_principal={(part,name):getattr(getattr(old.ledger.accepted_principal.amounts,part),name).clone()
+            for part in ('numerator','denominator') for name in ('words','sign','fault')}
+        old_counted=old.ledger.orders.accepted_principal_counted.clone()
         state=state.drain_captured(captured)
         scans.append(captured.iterations.cpu().tolist())
         # 旧冻结独立，不借活动张量；当前提交不能回写原state。
         assert values(old.ledger.current_entry_sequence)==values(storage.source_ledger.current_entry_sequence)
+        for (part,name),value in old_principal.items():
+            assert torch.equal(getattr(getattr(old.ledger.accepted_principal.amounts,part),name),value)
+        assert torch.equal(old.ledger.orders.accepted_principal_counted,old_counted)
         if captured.resources_fit.cpu().item():
             break
         retries+=1
@@ -51,8 +57,13 @@ def _device_scan(state,association,label,*,zero_first=False):
         required_words=int(captured.candidate.required_words.cpu())
         progress('resource_exit')
         assert state.ledger.fault.cpu().tolist()==[0]
-        assert all(v<0 for v in need['conditions']), '目录绑定需求须在原来源冷安装边界处理'
         ledger=state.ledger
+        if any(value>=0 for value in need['conditions']):
+            # 本入口只增长实际已绑定来源的累计本金目录，公共新块目录仍归原冷安装。
+            assert ledger.projected_markets is None or (ledger.projected_markets.required_conditions<0).all().cpu().item()
+            conditions=torch.tensor([value for value in need['conditions'] if value>=0],device=association.device)
+            assert (conditions[:,None]==ledger.success_pools.condition_slots[None,:]).any(1).all().cpu().item()
+            ledger=ledger.extended_principal_conditions(torch.unique(torch.cat((ledger.accepted_principal.conditions,conditions))))
         orders=max(ledger.orders.occupied.size(1),max(need['orders']))
         trades=max(ledger.trades.occupied.size(1),max(need['trades']))
         # 来源物理列已安装，容量可按本页人口增长；不改变合法成交人口。
@@ -139,6 +150,9 @@ def check_incremental_receive(bank,batches,delivered,start,expected,gates,*,capa
     assert state.ledger.fault.cpu().tolist()==[0]
     for name in ['current_entry_sequence','current_local_prefix']:
         assert values(getattr(state.ledger,name))==values(getattr(expected,name))
+    assert values(state.ledger.accepted_principal.amounts.numerator)==values(expected.accepted_principal.amounts.numerator)
+    assert values(state.ledger.accepted_principal.amounts.denominator)==values(expected.accepted_principal.amounts.denominator)
+    assert int(state.ledger.orders.accepted_principal_counted.sum().cpu())==int(expected.orders.accepted_principal_counted.sum().cpu())==1
     assert values(state.ledger.platform.platform_source_prefix)==values(expected.platform.platform_source_prefix)
     for name in ['words','sign','fault']:
         actual=getattr(state.ledger.platform.balances.numerator,name)

@@ -9,11 +9,13 @@ import torch
 from queues import ExactInt,ExactRational,Numbers,_take
 from asset_buy import take_ratio
 from admission_lifecycle import LifecycleColumns,LifecycleDirectory
-from reservation import ReservationBook,run_reserve_action,sequence_fault
+from reservation import ReservationBook,run_reserve_action,sequence_fault,RESERVED,BEFORE_SEND,SUBMITTED,PLATFORM_PENDING
+from success_pool import select
 from memory import EconomicColumns
 from trade_success import TradeSuccess
 from position_cost import PositionCosts
 from order_funds import OrderFunds
+from accepted_principal import AcceptedPrincipal
 from rebate_contribution import RebateContributions
 from core import OUT_EVIDENCE,OUT_FACT,OUT_DUPLICATE,OUT_ALIAS,OUT_LOGICAL_CONFLICT,OUT_ECONOMIC_CONFLICT,OUT_PENDING
 
@@ -78,9 +80,10 @@ class AdmissionLifecycle:
     fault: torch.Tensor
     projected_markets: object | None = None
     resolutions: object | None = None
+    accepted_principal: object | None = None
 
     @classmethod
-    def open(cls,platform,bank,columns,current_entry_sequence,current_local_prefix,success_pools,*,rebate_days=None,position_costs=None,order_funds=None,unresolved_markets=None,projected_markets=None,resolutions=None,lifecycle_capacity=None):
+    def open(cls,platform,bank,columns,current_entry_sequence,current_local_prefix,success_pools,*,rebate_days=None,position_costs=None,order_funds=None,unresolved_markets=None,projected_markets=None,resolutions=None,lifecycle_capacity=None,accepted_principal=None):
         roots,width=columns.row_refs.shape
         capacity=max(1,width) if lifecycle_capacity is None else lifecycle_capacity
         if type(capacity) is not int or capacity<1:
@@ -96,13 +99,15 @@ class AdmissionLifecycle:
             position_costs=PositionCosts.empty(roots,capacity,empty.device,known=False)
         if order_funds is None:
             order_funds=OrderFunds.empty(roots,capacity,capacity,width,empty.device,known=False)
+        if accepted_principal is None:
+            accepted_principal=AcceptedPrincipal.open(roots,torch.unique(success_pools.condition_slots),known=False)
         return cls(platform,success_pools,TradeSuccess.open(roots,capacity,empty.device),position_costs,unresolved_markets,
             RebateContributions.empty(roots,max(1,width),empty.device),rebate_days,opening_cash,book,LifecycleDirectory.empty(roots,capacity,device=empty.device),order_funds,
             LifecycleDirectory.empty(roots,capacity,device=empty.device),columns,life,
             current_entry_sequence,current_local_prefix,empty,empty.clone(),torch.zeros_like(columns.enabled),
             ExactInt.from_i64_tensor(torch.zeros(roots*width,dtype=torch.int64,device=empty.device)),
             torch.zeros(roots,dtype=torch.int64,device=empty.device),torch.zeros(roots,dtype=torch.bool,device=empty.device),
-            torch.zeros_like(columns.row_refs),platform.fault | (0 if projected_markets is None else projected_markets.fault),projected_markets,resolutions)
+            torch.zeros_like(columns.row_refs),platform.fault | accepted_principal.fault | (0 if projected_markets is None else projected_markets.fault),projected_markets,resolutions,accepted_principal)
 
     def funds(self):
         roots=self.fault.numel()
@@ -164,6 +169,10 @@ class AdmissionLifecycle:
 
     def resized_order_funds(self,capacity):
         return replace(self,order_funds=self.order_funds.resized(capacity))
+
+    def extended_principal_conditions(self,conditions):
+        """缺condition物理目录时增长；保留旧累计，原未提交NOE位置续跑。"""
+        return replace(self,accepted_principal=self.accepted_principal.extended(conditions))
 
     def reserve_action(self,requests,conditions,principal,fee,enabled):
         funds=self.funds()
@@ -264,6 +273,7 @@ class AdmissionLifecycle:
         old_open=self.orders.flags[root,order_at]
         old_applied=self.orders.economic_applied[root,order_at]
         old_request=self.orders.requests[root,order_at]
+        old_counted=self.orders.accepted_principal_counted[root,order_at]&found
         direct_request=self.lifecycle.request_slots[root,local]
         item=self.lifecycle.item_ordinals[root,local]
         association=(direct_request[:,None]>=0)&(item[:,None]>=0)&(self.global_requests>=0)&(self.item_ordinals>=0)&(
@@ -279,18 +289,30 @@ class AdmissionLifecycle:
         lifecycle_use=use&(outcome_kind==OUT_EVIDENCE)
         confirm=lifecycle_use&(tag==3)&bound
         convert=use&is_order_economic&has_request
+        # CPU definitive只在实际预留转态时返回本金；终态/重复pending不重新计数。
+        reservation_match=(self.reservations.request_slots==request[:,None])&(self.reservations.outcomes==RESERVED)
+        accepted_at=reservation_match.to(torch.int64).argmax(1)
+        reservation_status=self.reservations.statuses[root,accepted_at]
         book=self.reservations.definitive(request,accepted | is_order_economic,old_applied | is_order_economic,
             next_entry,confirm|convert)
+        transitioned=(confirm|convert)&reservation_match.any(1)&(
+            (reservation_status==BEFORE_SEND)|(reservation_status==SUBMITTED)|((reservation_status==PLATFORM_PENDING)&(old_applied|is_order_economic)))
+        accepted_condition=torch.where(transitioned,self.reservations.conditions[root,accepted_at],self.lifecycle.conditions[root,local])
+        reserved_principal=take_ratio(self.reservations.principal,root*self.reservations.capacity+accepted_at)
+        principal=select(reserved_principal,transitioned,take_ratio(balances,root*8+2))
+        count_principal=~old_counted&((accepted&transitioned)|(use&is_order_economic&(accepted_condition>=0)))
+        accepted_principal,principal_ready=self.accepted_principal.add(accepted_condition,principal,count_principal)
+        fault|=accepted_principal.fault
         fault=fault | book.fault
         order_event=(lifecycle_use&((tag==7)|(tag==19)|accepted|canceled))|(use&(is_order_economic|is_order_release))
         open_flag=torch.where((tag==7)|(tag==19)|accepted,self.lifecycle.open_orders[root,local],old_open)
         open_flag=open_flag & ~(canceled|is_order_release)
-        request=torch.where(accepted&bound,binding,old_request)
+        request=torch.where((accepted&bound)|(is_order_economic&has_request),request,old_request)
         # Target控制没有condition字段；沿原set_order_open保留已有关联，未知不猜。
         condition=torch.where(canceled,torch.where(found,self.orders.conditions[root,order_at],-1),
             self.lifecycle.conditions[root,local])
         orders,error=self.orders.set(order,condition,open_flag,next_entry,order_event,
-            request=request,economic=old_applied | is_order_economic)
+            request=request,economic=old_applied | is_order_economic,counted=old_counted|count_principal)
         fault=fault | torch.where(order_event,error,0)
         trade_event=lifecycle_use&(tag==8)
         economic_trade=use & economic & ((self.lifecycle.economic_tags[root,local]>=6)&(self.lifecycle.economic_tags[root,local]<=8))
@@ -302,7 +324,7 @@ class AdmissionLifecycle:
             torch.where(trade_event,pending,self.trades.flags[root,trade_at]),
             next_entry,trade_event|economic_trade)
         fault=fault | torch.where(trade_event|economic_trade,error,0)
-        lifecycle_ready=(orders.capacity_required<=orders.occupied.size(1)) & (trades.capacity_required<=trades.occupied.size(1))
+        lifecycle_ready=(orders.capacity_required<=orders.occupied.size(1)) & (trades.capacity_required<=trades.occupied.size(1)) & principal_ready
         use &= lifecycle_ready
         trade_event &= lifecycle_ready
         economic_trade &= lifecycle_ready
@@ -448,6 +470,7 @@ class AdmissionLifecycle:
         same=(self.columns.positions.reshape(roots,width,-1)==key[:,None,:]).all(dim=2)&self.lifecycle.emitted
         applied=self.applied | (same&success[:,None])
         return replace(self,platform=platform,
+            accepted_principal=accepted_principal.coordinated(self.accepted_principal,valid),
             projected_markets=None if population is None else population.coordinated(self.projected_markets,valid),
             success_pools=success_pools.coordinated(self.success_pools,valid),
             trade_success=coordinate(trade_success,self.trade_success,valid),
