@@ -316,7 +316,14 @@ def main():
         assert reference['scenario']=={'steps':[{'offset_ms':1,'event':{'SubmissionReceipt':'Registered'}}],'costs':[]}
         runtime=runtime.install_settlement_registration(tensor([[0]]),tensor([[1]]))
         identity_bytes,identity_offsets=byte_column([value.encode('utf-8') for value in block.terminal_columns.canonical_ids])
+        old_choice=runtime.choose(None,None,tensor([60000]),enabled)
         runtime=Numbers.run_exact_batch(lambda:runtime.register_resolution_request(actions,sampler,identity_bytes,identity_offsets))
+        try:
+            runtime.advance_role_time(old_choice,end)
+        except ValueError as error:
+            assert '选择时的同一活动状态' in str(error)
+        else:
+            raise AssertionError('新结算时钟登记后不得应用登记前的旧choice')
         backend=runtime.settlement_registrations
         assert backend.fault.cpu().tolist()==[0] and values(backend.sends)==[1]
         first_backend=backend
@@ -324,6 +331,7 @@ def main():
         compare(repeated.settlement_registrations,first_backend,'same_request_preserves_first_registration_and_scenario')
         clock=backend.next_clock()
         assert clock.at.cpu().tolist()==[reference['at']] and clock.present.cpu().tolist()==[True]
+        assert (old_choice.at>clock.at).cpu().tolist()==[True]
         horizon.copy_(clock.at)
         choice=runtime.choose(None,None,horizon,enabled)
         assert choice.enabled(0).cpu().tolist()==[True]
@@ -376,6 +384,7 @@ def main():
         'public_Ledger_economic_predecessors_and_Maker_gate_checked':with_pending,
         'first_public_Request_backend_Registered_same_NOE_Ledger_checked':with_pending,
         'Registered_feedback_fault_keeps_same_runtime_scenario_prefix_checked':with_pending,
+        'first_registration_invalidates_previous_drive_choice_checked':with_pending,
         'growth_new_slot_does_not_alias_old_pending_identity_checked':with_pending,'full_root_and_requested_settlement':False,
         'elapsed_seconds_with_reference_reads':time.perf_counter()-started,'device_peak_allocated_bytes':torch.cuda.max_memory_allocated()}))
 

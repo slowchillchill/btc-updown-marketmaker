@@ -197,7 +197,7 @@ class BaseSimRuntime:
             settlement=self.settlement_registrations.next_clock()
         choice=next_sim_drive(self.requests,self.fills,self.calendars,source,hidden_eof,
             advance_until,enabled,settlement=settlement,gtd=gtd)
-        return replace(choice,hidden_frontier=self.hidden_frontier)
+        return replace(choice,hidden_frontier=self.hidden_frontier,settlement_registrations=self.settlement_registrations)
 
     def begin_hidden_bucket(self, choice):
         self._source(choice)
@@ -365,7 +365,8 @@ class BaseSimRuntime:
     def _source(self, choice):
         # 对象绑定只确认纯候选来源；不读设备phase或业务值回CPU选择执行分支。
         if (choice.requests is not self.requests or choice.fills is not self.fills or
-            choice.calendars is not self.calendars or choice.hidden_frontier is not self.hidden_frontier):
+            choice.calendars is not self.calendars or choice.hidden_frontier is not self.hidden_frontier or
+            choice.settlement_registrations is not self.settlement_registrations):
             raise ValueError('SIM阶段候选只能应用于选择时的同一活动状态')
 
     def accept_base(self, choice, terms, ask_rows, fee_rate, fee_exponent, selected_paths,
