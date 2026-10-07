@@ -7,6 +7,8 @@ progress_seconds=${2:-10}
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 case "$repo_root:$artifact_dir" in /root/autodl-tmp/*:/root/autodl-tmp/*) ;; *) echo '依赖求解必须在AutoDL数据盘' >&2; exit 2 ;; esac
 source /root/autodl-tmp/environments/issue-181-cu128.sh
+# 现有工程验证环境默认离线；这次获准的依赖元数据求解需要网络。
+export UV_OFFLINE=false
 cd "$repo_root"
 test -z "$(git status --porcelain)"
 mkdir "$artifact_dir"
