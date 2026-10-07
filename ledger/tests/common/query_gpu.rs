@@ -23,7 +23,12 @@ impl Export {
     pub(super) fn record(export:&mut Option<Self>,writer:&LedgerWriterV1,reference:&NoeResultReferenceV1) {
         if let Some(export)=export {
             let source=execution_normalization::read_noe_result_v1(reference).unwrap();
-            let position=execution_normalization::read_durable_noe_record_position(reference).unwrap();
+            // 原V1读取已返回真实提交边界；恢复位置接口不支持这个V1 context。
+            let position=execution_normalization::NoeRecordPositionV1 {
+                context_reference:source.boundary.context_reference.clone(),
+                source_watermark:source.boundary.source_watermark.clone(),
+                record_ordinal:reference.record_ordinal,
+            };
             export.steps.push(serde_json::json!({"action":{"Noe":{
                 "position":position,"context":source.context,"record":source.record,
                 "durable_available_at":source.boundary.durable_available_at_utc_ms}},
