@@ -1150,7 +1150,7 @@ async fn old_pairing_is_market_local_before_sum() {
 
 // 只读同次唯一消费后的公开来源；不读取派生matched/active/commitment初始化GPU。
 fn account_registry_sources_for_tests(registry:&SharedExecutionRegistryV2)->serde_json::Value {
-    fn record(value:&execution_normalization::NoeConsumedRecordRefV2)->serde_json::Value {
+    fn record(value:&::execution_normalization::NoeConsumedRecordRefV2)->serde_json::Value {
         serde_json::json!({"record":value.record(),"position":value.position(),"visibility":value.visibility()})
     }
     serde_json::json!(registry.orders().map(|order| serde_json::json!({
