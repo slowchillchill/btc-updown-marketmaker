@@ -64,10 +64,11 @@ def main():
     batch.set('state_value',old.reshape(6,1))
     batch.set('advantage',trajectory['advantage'].reshape(6,1))
     batch.set('value_target',trajectory['value_target'].reshape(6,1))
-    loss_module=ClipPPOLoss(actor,critic,clip_epsilon=0.2,entropy_coeff=0.01,critic_coeff=0.5,
+    loss_module=ClipPPOLoss(actor,critic,clip_epsilon=0.2,entropy_bonus=False,critic_coeff=0.5,
         functional=False,device=device)
     optimizer=torch.optim.AdamW(policy.parameters(),lr=0.0001)
     losses=loss_module(batch)
+    assert 'loss_entropy' not in losses.keys()
     loss=sum(value for key,value in losses.items() if key.startswith('loss_'))
     assert loss.is_cuda and torch.isfinite(loss)
     before=next(policy.critic.parameters()).detach().clone()
@@ -93,7 +94,8 @@ def main():
         'full_action_path_and_business_rollout':False,'active_root_restore':False,
         'versions':{name:metadata.version(name) for name in ['torch','numpy','torchrl','tensordict','mlflow','protobuf']},
         'losses':{key:float(value.detach().cpu()) for key,value in losses.items() if key.startswith('loss_')},
-        'seconds':time.perf_counter()-started,'device_peak_allocated_bytes':torch.cuda.max_memory_allocated()}
+        'default_PPO_entropy_disabled':True,
+        'model_critic_seconds':time.perf_counter()-started,'device_peak_allocated_bytes':torch.cuda.max_memory_allocated()}
     mlflow.set_tracking_uri('sqlite:///'+str(artifact/'mlflow.db'))
     experiment=mlflow.create_experiment('issue-181-engineering-dependency-wiring',artifact_location=(artifact/'mlflow-artifacts').as_uri())
     with mlflow.start_run(experiment_id=experiment) as run:
@@ -106,6 +108,7 @@ def main():
     assert stored.info.status=='FINISHED' and stored.data.params['formal_training']=='False'
     assert all(key in stored.data.metrics for key in report['losses'])
     report['mlflow_record_readback_checked']=True
+    report['seconds']=time.perf_counter()-started
     (artifact/'report.json').write_text(json.dumps(report,indent=2)+'\n')
     print(json.dumps(report),flush=True)
 
