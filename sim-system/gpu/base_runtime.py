@@ -26,6 +26,17 @@ class BaseSimRuntime:
     source_resolutions: object = None
     resolution_obligations: object = None
     settlement_registrations: object = None  # 显式Registered/成功与有限查询场景；不代表完整结算后端。
+    order_query_history: object = None  # 显式原订单保留水位；不代表列表查询RootSnapshot退役。
+
+    def install_order_query_history(self,history):
+        if self.order_query_history is not None:
+            raise ValueError('当前订单查询水位须沿原显式输入推进，不能冷覆盖')
+        return replace(self,order_query_history=history)
+
+    def advance_order_retention(self,retained_from,has_retained,enabled):
+        if self.order_query_history is None:
+            raise ValueError('须先安装同根实际订单查询历史')
+        return replace(self,order_query_history=self.order_query_history.advance(retained_from,has_retained,enabled))
 
     def install_settlement_registration(self,conditions,receipt_offsets,success_offsets=None):
         from settlement_registration import SettlementRegistrations
@@ -172,7 +183,7 @@ class BaseSimRuntime:
         matching_open = torch.zeros(roots,dtype=torch.int32,device=owner.device).scatter_reduce(
             0,owner,(members & ~self.hidden.matching_closed).to(torch.int32),reduce='amax') != 0
         orders, queue, account, effects = resolve_market_base_orders(self.orders,self.hidden.queues,
-            self.account,condition,owner[self.hidden.level_assets],~matching_open,resolved)
+            self.account,condition,owner[self.hidden.level_assets],~matching_open,resolved,choice.at)
         fault |= obligations.fault | effects.fault
         committed = enabled & (fault == 0)
         selected = (torch.arange(markets,device=owner.device)[None,:] == market[:,None]) & committed[:,None]
@@ -244,6 +255,8 @@ class BaseSimRuntime:
             fault = fault | self.market_controls.fault
         if self.source_resolutions is not None:
             fault |= self.source_resolutions.fault | self.resolution_obligations.fault
+        if self.order_query_history is not None:
+            fault|=self.order_query_history.fault
         if self.hidden_frontier is not None:
             hidden_source,hidden_eof=self.hidden_frontier.scheduled()
         next_at=None
@@ -256,7 +269,8 @@ class BaseSimRuntime:
             settlement=self.settlement_registrations.next_clock()
         choice=next_sim_drive(self.requests,self.fills,self.calendars,source,hidden_eof,
             advance_until,enabled,settlement=settlement,gtd=gtd,hidden_next_at=next_at)
-        return replace(choice,hidden_frontier=self.hidden_frontier,settlement_registrations=self.settlement_registrations)
+        return replace(choice,hidden_frontier=self.hidden_frontier,settlement_registrations=self.settlement_registrations,
+            order_query_history=self.order_query_history)
 
     def begin_hidden_bucket(self, choice):
         self._source(choice)
@@ -425,7 +439,8 @@ class BaseSimRuntime:
         # 对象绑定只确认纯候选来源；不读设备phase或业务值回CPU选择执行分支。
         if (choice.requests is not self.requests or choice.fills is not self.fills or
             choice.calendars is not self.calendars or choice.hidden_frontier is not self.hidden_frontier or
-            choice.settlement_registrations is not self.settlement_registrations):
+            choice.settlement_registrations is not self.settlement_registrations or
+            choice.order_query_history is not self.order_query_history):
             raise ValueError('SIM阶段候选只能应用于选择时的同一活动状态')
 
     def accept_base(self, choice, terms, ask_rows, fee_rate, fee_exponent, selected_paths,
@@ -446,6 +461,24 @@ class BaseSimRuntime:
             self.hidden.queues,self.account,target,row_roots,closed,result_refs,choice.enabled(5))
         return replace(self,requests=requests,orders=orders,hidden=replace(self.hidden,queues=queue),account=account),effects
 
+    def query_base(self,choice,target,result_refs,projection,sampler,asset_tokens):
+        """实际阶段5的Query完成与NOE发射共同提交；未完成不消耗请求。"""
+        from pending_order_query import run_pending_base_query
+        self._source(choice)
+        if self.order_query_history is None:
+            raise ValueError('普通Query须绑定同根实际保留历史')
+        history=self.order_query_history
+        requests,effects=run_pending_base_query(self.requests,self.orders,target,history.retained_from,
+            history.has_retained,result_refs,choice.enabled(5))
+        projected,batch=projection.order_query(sampler,effects,asset_tokens)
+        fault=effects.fault|batch.fault|choice.fault
+        valid=fault==0
+        requests=requests.coordinate_result(self.requests,valid,fault)
+        response=replace(effects.response,emitted=effects.response.emitted&valid,fault=fault)
+        effects=replace(effects,processed=effects.processed&valid,response=response,fault=fault)
+        return replace(self,requests=requests),projected,replace(batch,
+            emitted=batch.emitted&valid[:,None],economic_enabled=batch.economic_enabled&valid[:,None],fault=fault),effects
+
     def hidden_base(self, choice, rows, before, after, source_price, condition, resync_inference,
                     selected_paths, row_roots, fee_rate, fee_exponent, taker_rate):
         self._source(choice)
@@ -459,6 +492,32 @@ class BaseSimRuntime:
         fills,account,maker,taker,effect,market=Numbers.run_exact_batch(lambda:self.fills.advance_mixed(
             self.account,self.calendars.maker,self.calendars.taker,choice.at,maker_rate,taker_rate,
             enabled=choice.enabled(2)))
+        from pending_base_execution import _coordinate_orders
+        from taker_days import coordinate_calendar
+        roots=torch.arange(self.orders.roots,device=choice.at.device)
+        slot=effect.slot.clamp(0,self.fills.capacity-1)
+        before_applied=self.fills.records.economic_applied[roots*self.fills.capacity+slot]
+        # 原fee释放点即使fee为0仍更新；economic后的FAILED补偿不刷新订单时钟。
+        changed=effect.event.emitted&(effect.event.economic_delta.emitted|
+            ((effect.event.state==5)&~before_applied))
+        read=self.orders.read(effect.origin.order_slots)
+        same=read.sequence.compare(effect.origin.order_sequences)
+        fault=effect.event.fault|torch.where(changed,read.fault|same.fault|
+            (~read.present|(same.order!=0)).to(torch.int32),0)
+        orders=self.orders.update(read,read.quantity,changed&(fault==0),choice.at)
+        fault|=orders.fault
+        committed=effect.event.emitted&(fault==0)
+        fills=fills.coordinate_result(self.fills,committed,fault)
+        account=account.coordinate_result(self.account,fault)
+        maker=coordinate_calendar(maker,self.calendars.maker,committed,fault)
+        taker=coordinate_calendar(taker,self.calendars.taker,committed,fault)
+        event=replace(effect.event,emitted=committed,terminal=effect.event.terminal&committed,fault=fault,
+            economic_delta=account.coordinate_delta(effect.event.economic_delta,committed,fault),
+            failure_delta=account.coordinate_delta(effect.event.failure_delta,committed,fault),
+            rebate_delta=account.coordinate_delta(effect.event.rebate_delta,committed,fault))
+        effect=replace(effect,event=event)
+        market=replace(market,emitted=market.emitted&committed,fault=fault,
+            account_delta=account.coordinate_delta(market.account_delta,committed,fault))
         obligations = self.resolution_obligations
         if obligations is not None:
             from taker_days import coordinate_calendar
@@ -477,7 +536,8 @@ class BaseSimRuntime:
             effect=replace(effect,event=event)
             market=replace(market,emitted=market.emitted & committed,fault=fault,
                 account_delta=account.coordinate_delta(market.account_delta,committed,fault))
-        candidate=replace(self,fills=fills,account=account,calendars=RebateCoordinator(maker,taker),
+        orders=_coordinate_orders(orders,self.orders,effect.event.fault)
+        candidate=replace(self,fills=fills,account=account,orders=orders,calendars=RebateCoordinator(maker,taker),
             resolution_obligations=obligations)
         return candidate._finish_obligation_time(choice.at,effect.event.emitted,market_end),effect,market
 

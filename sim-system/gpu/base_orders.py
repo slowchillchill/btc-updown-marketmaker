@@ -74,6 +74,7 @@ class BaseOrderRead:
     present: torch.Tensor
     fault: torch.Tensor
     conditions: object = None
+    last_updated_at: object = None
 
 
 @dataclass(frozen=True)
@@ -110,6 +111,7 @@ class BaseOrders:
     accepted_at: torch.Tensor
     fault: torch.Tensor
     conditions: object = None
+    last_updated_at: object = None  # 原实际订单变化时钟；不由查询、公开时间或保留水位刷新。
 
     @property
     def roots(self):
@@ -132,7 +134,8 @@ class BaseOrders:
         absent = torch.full(shape, -1, dtype=torch.int64, device=device)
         return cls(quantities, flat, zero.constant(1), ExactRational(flat, flat.constant(1)),
             torch.zeros(shape, dtype=torch.bool, device=device), absent, absent, absent, absent, absent,
-            torch.zeros(shape, dtype=torch.int64, device=device), torch.zeros_like(zero.fault), absent)
+            torch.zeros(shape, dtype=torch.int64, device=device), torch.zeros_like(zero.fault), absent,
+            torch.zeros(shape, dtype=torch.int64, device=device))
 
     def resized(self, capacity):
         if capacity <= self.capacity:
@@ -147,8 +150,8 @@ class BaseOrders:
         price = ExactRational(_put_integer(result.prices.numerator, self.prices.numerator, new_index, enabled),
                               _put_integer(result.prices.denominator, self.prices.denominator, new_index, enabled))
         updates = {name: torch.nn.functional.pad(getattr(self, name), (0, capacity-self.capacity),
-                   value=0 if name in ('occupied', 'accepted_at') else -1)
-                   for name in ('occupied', 'request_keys', 'item_ordinals', 'item_refs', 'assets', 'bid_rows', 'accepted_at','conditions')}
+                   value=0 if name in ('occupied', 'accepted_at','last_updated_at') else -1)
+                   for name in ('occupied', 'request_keys', 'item_ordinals', 'item_refs', 'assets', 'bid_rows', 'accepted_at','conditions','last_updated_at')}
         return replace(result, **updates, quantities=quantities, sequences=sequence, prices=price,
                        next_sequence=self.next_sequence, fault=self.fault)
 
@@ -178,7 +181,8 @@ class BaseOrders:
         emitted = enabled & (count < self.capacity) & (fault == 0)
         updates = {}
         for name, value in (('request_keys', request_keys), ('item_ordinals', item_ordinals),
-            ('item_refs', item_refs), ('assets', assets), ('bid_rows', bid_rows), ('accepted_at', accepted_at)):
+            ('item_refs', item_refs), ('assets', assets), ('bid_rows', bid_rows), ('accepted_at', accepted_at),
+            ('last_updated_at', accepted_at)):
             old = getattr(self, name)
             updates[name] = old.flatten().index_copy(0, index, torch.where(emitted, value, old[roots, slot])).reshape_as(old)
         if conditions is not None:
@@ -207,7 +211,7 @@ class BaseOrders:
         return BaseOrderRead(self, slots, _take(self.sequences, index), take_quantity(self.quantities, index), price,
             self.request_keys[root, safe], self.item_ordinals[root, safe], self.item_refs[root, safe],
             self.assets[root, safe], self.bid_rows[root, safe], self.accepted_at[root, safe], present, self.fault,
-            self.conditions[root,safe])
+            self.conditions[root,safe],self.last_updated_at[root,safe])
 
     def find(self,sequence):
         """按完整原u64身份找当前Base订单；slot只在本目录内返回。"""
@@ -221,23 +225,30 @@ class BaseOrders:
         error=Numbers.combine_fault_rows(torch.where(self.occupied,comparison.fault.reshape_as(self.occupied),0))
         return replace(read,fault=read.fault | error)
 
-    def update(self, read, quantity, enabled):
+    def update(self, read, quantity, enabled, at):
         if read.source is not self:
             raise ValueError('订单更新须绑定读取时同一目录状态')
+        if at.shape!=(self.roots,) or at.dtype!=torch.int64 or at.device!=self.occupied.device:
+            raise TypeError('订单实际变化时钟须同设备int64[roots]')
         error = self.fault | quantity.fault*enabled.to(torch.int32)
         error = error | (enabled & ~read.present).to(torch.int32)
         valid = enabled & read.present & (error == 0)
         index = torch.arange(self.roots, device=read.slots.device)*self.capacity+read.slots.clamp(0, self.capacity-1)
-        return replace(self, quantities=put_quantity(self.quantities, quantity, index, valid), fault=error)
+        updated=self.last_updated_at.flatten().index_copy(0,index,
+            torch.where(valid,at,self.last_updated_at.flatten()[index])).reshape_as(self.last_updated_at)
+        return replace(self, quantities=put_quantity(self.quantities, quantity, index, valid),
+            last_updated_at=updated,fault=error)
 
-    def reduce_maker(self, effects, row_roots):
+    def reduce_maker(self, effects, row_roots, at):
         """全部真实Account段depletion按根内slot路由，不按price/余额猜订单。
 
-        返回逐订单人口供原FillPool创建maker fill；零quote只保存pending计量。
+        返回逐订单人口供原FillPool创建maker fill；零quote仍消费base并更新pending和变化时钟。
         """
         rows, segment_capacity = effects.order_ids.shape
         if row_roots.shape != (rows,) or row_roots.dtype != torch.int64:
             raise ValueError('maker队列行根映射错误')
+        if at.shape!=(self.roots,) or at.dtype!=torch.int64 or at.device!=self.occupied.device:
+            raise TypeError('maker实际变化时钟须同设备int64[roots]')
         mapping = (row_roots >= 0) & (row_roots < self.roots)
         safe_roots = row_roots.clamp(0, self.roots-1)
         fault = self.fault | (~mapping).any().to(torch.int32) | grouped_fault(effects.fault, safe_roots, self.roots)
@@ -255,7 +266,10 @@ class BaseOrders:
         fault = fault | Numbers.combine_fault_rows(event.fault.reshape(self.roots, self.capacity))
         enabled = (fault == 0).repeat_interleave(self.capacity)
         index = torch.arange(self.roots*self.capacity, device=self.occupied.device)
-        candidate = replace(self, quantities=put_quantity(self.quantities, quantities, index, enabled), fault=fault)
+        changed=enabled & self.occupied.flatten() & (amount.sign>0)
+        updated=torch.where(changed.reshape_as(self.occupied),at[:,None],self.last_updated_at)
+        candidate = replace(self, quantities=put_quantity(self.quantities, quantities, index, enabled),
+            last_updated_at=updated,fault=fault)
         emitted = event.emitted & enabled
         return candidate, OrderMakerEffects(slots, self.sequences,
             event.base.select(emitted, event.base.constant(0)), event.quote.select(emitted, event.quote.constant(0)),

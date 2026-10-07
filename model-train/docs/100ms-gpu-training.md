@@ -1518,7 +1518,7 @@ Submission 的已收到 Accepted 也须有原 SubmissionItem 关联才应用 Led
 后置验证入口是 `model-train/scripts/run_order_query_validation.sh`，完整成功池路径复用
 原 `trade-records` 定向回归。`cf03345` 两个原 Ledger 场景均在 AutoDL 通过，
 `c510f64` 完整成功池非空 trade 回归适用；原导出和验证读面失败保留于 #181 实施记录。
-Registry 的 V2 Found 消费者见下一节；实际 SIM Query 生产者和发送端登记仍开放。Found 快照
+Registry 的 V2 Found 消费者见下一节；本批单笔 Base SIM Query 和显式发送登记见后续小节。Found 快照
 不能替代原 Submission 数量测量。此处不增加自动查询或重试政策，也不声称完整 Query 宿主、
 连续训练、PPO 或活动账户恢复已经交付。
 
@@ -1546,4 +1546,33 @@ open 减后续 Maker 的公式，Query 只提供终态覆盖，不改变账本�
 核实际双时间门，非 Query 来源复用原冷引用适配；这不是完整首次领取流或 GPU SIM 生产者。
 `dc412cf` 已在 AutoDL 通过原 Registry 六帧、两个 Ledger Query 场景以及非空交易和取消
 回归。原 CPU 终态引用独立验证 `known_query` 的完整位置、时间和保持性；附加重排不冒称
-实际收到顺序。完整取消对象人口、Quote Query 的 SIM 后端和发送/关联共同提交仍开放。
+实际收到顺序。完整取消对象人口、Quote Query 的 SIM 后端和完整连续宿主仍开放。
+
+### 普通单笔 Base Query 的 SIM 与显式发送
+
+`BaseSimRuntime.query_base` 复用原阶段 5 的请求选择和完成时钟。实际 `Order` 请求
+只有 ordinal 0，不增加 taker 延迟。响应沿该 Query 的原 request 身份和
+DirectResponse Request 关联进入 `Projection.order_query`；Found 正文另取实际订单身份，
+NotFound/OutOfRetention 不依赖不存在的订单、token 或 condition。完成与发射共享故障门，
+精确字需求继续由公共 `Numbers.device_exact_batch` 返回，外层只安装 fits 的完整候选。
+
+Base 的活动数量是 pending maker 消耗加 open 余量；matched 独立保留。原零 quote、正 base
+消耗也更新订单和 `last_updated_at`。最终性仅在原经济应用或首次失败释放时更新该时钟，
+金额为零不取消这次更新时间；已应用经济后的失败补偿不改它。显式订单历史水位来自
+原 `RetentionAdvance` 输入，活动订单始终 Found，终态按实际 last_updated 与水位比较，
+不存在的身份在有水位时为 OutOfRetention，否则 NotFound。这里不支持列表 root/trade 水位
+或以页退役、观察时间代替保留事件。水位与原目录沿候选、增长和拥有所有权的快照保留。
+
+`shared-run/gpu/query_submission.py` 只协调已经形成的显式 Order 请求与原 Ledger 本地关联。
+SIM 请求目录或 Ledger 关联目录不足时，两边均保持原状态和前缀；同输入冷增长后重试。
+重复同一请求和本地事件复用各自原幂等域，不引入自动查询或重试政策。查询本身不写资金，
+关联后的公开接纳仍沿原公共 Ledger/Registry 消费者。
+
+后置入口 `model-train/scripts/run_sim_order_query_validation.sh` 复用同一原 GTC 工程账户。
+在原 Maker 最终性后、取消前实际发送活动 Found，核其非零 matched 和 active 原响应数量；
+随后沿原取消，再显式发送终态 Found、NotFound 和实际保留事件后的 OutOfRetention。
+原 NOE 坐标、来源顺序、响应时钟、完整正文及 CPU Ledger 前后读面作为独立预期，GPU 从
+原经营链继续进入实际公开门、Registry 和 Ledger。有限新预留仅服务这三个显式查询关联。
+验证核实际目录不足后的同源续跑、候选捕获、旧快照和真实字需求；未触发字不足时不声明
+本场景验证了字增长。运行材料、逐阶段进度与失败保存在独立数据盘目录，本批后置尚未运行。
+Quote、Orders 列表、GTD/dust 完整推进器以及自主连续宿主仍开放；本组件不代表训练闭环。

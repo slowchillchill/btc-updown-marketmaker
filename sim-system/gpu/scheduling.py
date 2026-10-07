@@ -30,6 +30,7 @@ class SimDriveChoice:
     calendars: object
     hidden_frontier: object = None
     settlement_registrations: object = None
+    order_query_history: object = None
 
     def enabled(self, phase):
         return self.present & (self.phase==phase) & (self.fault==0)

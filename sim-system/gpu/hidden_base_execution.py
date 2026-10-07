@@ -83,7 +83,7 @@ def apply_base_level_transition(queue, orders, account, fills, calendars, rows, 
         fault = fault | read.fault | torch.where(live,amount.fault | association.to(torch.int32),0)
         quantity, depletion = read.quantity.maker_depletion(amount,live & (fault == 0))
         fault = fault | depletion.fault*live.to(torch.int32)
-        orders = orders.update(read,quantity,live & (fault == 0))
+        orders = orders.update(read,quantity,live & (fault == 0),at)
         fills, account, maker, transition, allocation, demand = start_maker_fill(fills,account,maker,read,
             depletion.base,depletion.quote,condition,source_price,at,selected_paths[:,column],
             depletion.emitted & (fault == 0),fee_rate,fee_exponent,taker_rate)

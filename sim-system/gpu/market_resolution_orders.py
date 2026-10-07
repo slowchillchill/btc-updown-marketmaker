@@ -24,7 +24,7 @@ class MarketResolutionOrders:
     fault: torch.Tensor
 
 
-def resolve_market_base_orders(orders, queue, account, condition, row_roots, matching_closed, enabled):
+def resolve_market_base_orders(orders, queue, account, condition, row_roots, matching_closed, enabled, at):
     """所有原订单作为同一候选；任一后继失败撤回本次前缀，保更早已提交事实。"""
     from device_identity import sim_trade_order_key
     roots, width = orders.roots, orders.capacity
@@ -52,7 +52,7 @@ def resolve_market_base_orders(orders, queue, account, condition, row_roots, mat
         queue, quantity, account, effect = resolve_base_order(queue, read.quantity, account,
             ids, row_roots, matching_closed, requested)
         # 关闭mask独立于delta.emitted，pending-only的合法零释放也更新真实计量。
-        orders = orders.update(read, quantity, effect.closed)
+        orders = orders.update(read, quantity, effect.closed,at)
         fault |= orders.fault | account.fault | effect.fault
         events.append(MarketResolvedOrder(read, effect))
     fault |= grouped_fault(queue.fault, row_roots.clamp(0,roots-1), roots)

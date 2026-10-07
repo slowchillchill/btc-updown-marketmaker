@@ -164,6 +164,29 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
             LogicalDriveOutputV2 { lifecycle: effect.into_lifecycle_feedback().unwrap(), ..Default::default() }), &mut prior_batches);
         checkpoints.push(serde_json::json!({"stage":"maker_finality", "at":at, "state":snapshot(&state)}));
     }
+    let mut live_query=None;
+    let mut cancel_sent_at=maker_at+30;
+    let mut cancel_input_sequence=12;
+    if std::env::var_os("B_GPU_SIM_ORDER_QUERY").is_some() {
+        let sent=maker_at+31;
+        let request=BusinessRequestV2::Order(crate::runtime_v2::OrderRequestV2 {
+            context:RequestContextV2 {global_request_id:"gpu-actual-live-query".into(),caller_correlation_id:None},
+            platform_order_id:"sim-1".into(),
+        });
+        let (next,receipt)=register_request_candidate(&actor.opened,actor.scenario.initial_market_directory(),state,
+            &request_cutoff(sent),&request,12,actor._latency_profile.as_ref(),actor._rule_snapshot.snapshot());
+        let (next,effect)=advance_mutation_candidate_with_outputs(&actor.opened,actor.scenario.initial_market_directory(),next,
+            receipt.platform_arrived_at_utc_ms,actor._rule_snapshot.snapshot(),actor._finality_policy.as_ref());
+        let effect=effect.expect("原活动订单Query完整响应");
+        let MutationActionBusinessEffectV3::Query(query)=&effect.business else {panic!("原活动Order Query");};
+        let QueryActionResultV2::Order(OrderQueryResultV2::Found(order))=&query.result else {panic!("原活动订单Found");};
+        let result=serde_json::to_value(order).unwrap();
+        state=gpu_accept_projection_reference(&mut actor,next,BusinessReducerOutputV2::MutationAction(Some(effect)),&mut prior_batches);
+        cancel_sent_at=prior_batches.last().unwrap()["direct"][0]["metadata"]["response_received_at_utc_ms"].as_i64().unwrap()+1;
+        cancel_input_sequence=13;
+        live_query=Some(serde_json::json!({"request":"gpu-actual-live-query","sent_at":sent,
+            "input_sequence":receipt.input_sequence(),"arrived_at":receipt.platform_arrived_at_utc_ms,"result":result}));
+    }
     let cancel = BusinessRequestV2::CancelOrders(CancelOrdersRequestV2 {
         context: RequestContextV2 { global_request_id: "gpu-legal-gtc-cancel".into(), caller_correlation_id: None },
         items: vec![CancelOrderBatchItemV2 { batch_item_ordinal: 0, item: CancelOrderItemV1 {
@@ -171,7 +194,7 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
         } }],
     });
     let (next, cancel_receipt) = register_request_candidate(&actor.opened, actor.scenario.initial_market_directory(),
-        state, &request_cutoff(maker_at+30), &cancel, 12, actor._latency_profile.as_ref(), actor._rule_snapshot.snapshot());
+        state, &request_cutoff(cancel_sent_at), &cancel, cancel_input_sequence, actor._latency_profile.as_ref(), actor._rule_snapshot.snapshot());
     state = next;
     // 取消前公开账本来自真实V4唯一领取；不以SIM内部余额补写Ledger前缀。
     let prefix_at = prior_batches.iter().flat_map(|batch| {
@@ -249,6 +272,10 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
     let empty_compact_source = std::env::var_os("B_GPU_COMPACT_BASE_SOURCE").map(|_| {
         public_consumption_tests::gpu_compact_hidden_for_order_fixture(&initial, &[], true)
     });
+    let session_seed=state.session.as_ref().unwrap().session_seed.0.clone();
+    let order_queries=std::env::var_os("B_GPU_SIM_ORDER_QUERY").map(|_| {
+        gpu_actual_order_query_reference(&mut actor,state,&observation,&mut ledger,closed_at,&condition)
+    });
     let input = serde_json::json!({"hidden_material":compact_source.as_ref().map(|(_, value)| value),
         "empty_hidden_material":empty_compact_source.as_ref().map(|(_,value)| value),
         "checkpoints":checkpoints, "initial":initial, "events":events,
@@ -268,17 +295,39 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
         },"proxy_latency_sha256":actor._latency_profile.file_sha256(),
         "cancel_arrived_at":cancel_receipt.platform_arrived_at_utc_ms,
         "cancel_request_key":"gpu-legal-gtc-cancel","cancel_input_sequence":cancel_receipt.input_sequence(),
-        "cancel_sent_at":maker_at+30,
+        "cancel_sent_at":cancel_sent_at,"live_query":live_query,
         "cancel_records":cancel_records,"cancel_batches":cancel_batches,"cancel_closed_at":closed_at,
         "prior_records":prior_records,"prior_batches":prior_batches,"prior_closed_at":prefix_at,
         "opening_ledger":opening_ledger,
         "cancel_ledger_before":cancel_ledger_before,"cancel_ledger_after":cancel_ledger_after,"cancel_ledger_attempts":cancel_ledger_attempts,
-        "next_private":next_private,"next_batch":next_batch,"session_seed":state.session.as_ref().unwrap().session_seed.0});
-    let mut child = std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
-        .arg(std::env::var("B_GPU_ORDER_VALIDATOR").unwrap()).stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+        "next_private":next_private,"next_batch":next_batch,"session_seed":session_seed,
+        "order_queries":order_queries});
+    let mut command=std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap());
+    command.arg(std::env::var("B_GPU_ORDER_VALIDATOR").unwrap()).stdin(std::process::Stdio::piped());
+    if std::env::var_os("B_GPU_SIM_ORDER_QUERY").is_some() {
+        let artifact=std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap());
+        serde_json::to_writer(std::fs::File::create(artifact.join("original-source.json")).unwrap(),&input).unwrap();
+        fn copy_source(from:&std::path::Path,to:&std::path::Path) {
+            std::fs::create_dir(to).unwrap();
+            for entry in std::fs::read_dir(from).unwrap() {
+                let entry=entry.unwrap();let destination=to.join(entry.file_name());
+                if entry.file_type().unwrap().is_dir() {copy_source(&entry.path(),&destination);}
+                else {std::fs::copy(entry.path(),destination).unwrap();}
+            }
+        }
+        copy_source(_directory.path(),&artifact.join("original-producer"));
+        command.stdout(std::fs::File::create(artifact.join("GPU.stdout")).unwrap());
+        command.stderr(std::fs::File::create(artifact.join("GPU.stderr")).unwrap());
+    } else {
+        command.stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+    }
+    let mut child=command.spawn().unwrap();
     serde_json::to_writer(child.stdin.take().unwrap(), &input).unwrap();
     let result = child.wait_with_output().unwrap();
+    if std::env::var_os("B_GPU_SIM_ORDER_QUERY").is_some() {
+        let artifact=std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap());
+        std::fs::write(artifact.join("GPU.exit"),format!("{}\n",result.status.code().unwrap_or(-1))).unwrap();
+    }
     assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
     eprintln!("gpu_order_execution={}", String::from_utf8(result.stdout).unwrap());
 }
@@ -1152,6 +1201,7 @@ fn gpu_accept_projection_reference(actor:&mut SimRunActorV2,state:BusinessReduce
         BusinessDirectResponse::CancelOrder(result)=>serde_json::json!({"metadata":result.metadata}),
         BusinessDirectResponse::CancelOrders(result)=>serde_json::json!({"metadata":result.metadata}),
         BusinessDirectResponse::CancelMarketOrders(result)=>serde_json::json!({"metadata":result.metadata}),
+        BusinessDirectResponse::Order(result)=>serde_json::json!({"metadata":result.metadata,"result":result.result}),
         _=>panic!("此有限工程入口尚未映射该直接响应"),
     }).collect::<Vec<_>>();
     batches.push(serde_json::json!({"batch_sequence":batch.projection_batch_sequence,
@@ -1161,6 +1211,74 @@ fn gpu_accept_projection_reference(actor:&mut SimRunActorV2,state:BusinessReduce
     assert!(actor.projection_port.try_accept_payload(Arc::new(BusinessProjectionBatchPayloadV1::V4(Arc::new(batch)))),
         "原NOE实际接纳完整反馈");
     state
+}
+
+#[cfg(feature="shared-execution")]
+fn gpu_actual_order_query_reference(actor:&mut SimRunActorV2,mut state:BusinessReducerStateV2,
+    observation:&noe_projection::MemoryNoeObservationV4,ledger:&mut ledger::LedgerWriterV1,
+    mut cutoff:i64,condition:&ConditionId) -> serde_json::Value {
+    // 同账户取消后新建真实本地预留；三个显式Query不改变终态订单或释放该预留。
+    let reservation=ledger::LedgerRequestIdentityV1("gpu-query-reservation".into());
+    ledger.try_reserve_action_v2(&[ledger::ReserveIntentV1 {
+        request_identity:reservation.clone(),condition_id:condition.clone(),
+        requested_principal_pusd:ExactDecimal("0.25".into()),immediate_fee_reserve_pusd:ExactDecimal("0".into()),
+    }]).unwrap();
+    let reserved=gpu_ledger_reservation_checkpoint(ledger,"query_reserved");
+    let mut frames=Vec::new();
+    let mut next_input_sequence=14;
+    for (index,(target,retained)) in [("sim-1",false),("sim-999",false),("sim-1",true)].into_iter().enumerate() {
+        let retention=retained.then_some(crate::runtime_v2::RetentionAdvanceV2 {
+            earliest_retained_root_sequence:0,order_history_retained_from_utc_ms:Some(cutoff+1),
+            trade_history_retained_from_utc_ms:None,
+        });
+        let retention_input_sequence=retention.map(|_|next_input_sequence);
+        if let Some(advance)=retention {
+            let (next,output)=reduce_actor_input_v2(&actor.opened,actor.scenario.initial_market_directory(),state,
+                &crate::runtime_v2::BusinessInputV2::RetentionAdvance(advance),next_input_sequence,
+                actor._latency_profile.as_ref(),actor._rule_snapshot.snapshot(),actor._finality_policy.as_ref())
+                .unwrap_or_else(|_|panic!("原显式RetentionAdvance入口"));
+            assert!(matches!(output,BusinessReducerOutputV2::RetentionAdvanced));
+            state=next;
+            next_input_sequence+=1;
+        }
+        let key=format!("gpu-actual-order-query-{index}");
+        let event=ledger::LedgerLocalEventIdentityV1(format!("gpu-actual-query-send-{index}"));
+        let before=gpu_ledger_reservation_checkpoint(ledger,"query_before_send");
+        ledger.record_order_query_association(&event,&key,&reservation).unwrap();
+        let after_send=gpu_ledger_reservation_checkpoint(ledger,"query_after_send");
+        let sent=cutoff+2;
+        let request=BusinessRequestV2::Order(crate::runtime_v2::OrderRequestV2 {
+            context:RequestContextV2 {global_request_id:key.clone(),caller_correlation_id:None},
+            platform_order_id:target.into(),
+        });
+        let (next,receipt)=register_request_candidate(&actor.opened,actor.scenario.initial_market_directory(),state,
+            &request_cutoff(sent),&request,next_input_sequence,actor._latency_profile.as_ref(),actor._rule_snapshot.snapshot());
+        next_input_sequence+=1;
+        let (next,effect)=advance_mutation_candidate_with_outputs(&actor.opened,actor.scenario.initial_market_directory(),next,
+            receipt.platform_arrived_at_utc_ms,actor._rule_snapshot.snapshot(),actor._finality_policy.as_ref());
+        let effect=effect.expect("原单Query完成响应");
+        let MutationActionBusinessEffectV3::Query(query)=&effect.business else {panic!("原单Query业务结果");};
+        let QueryActionResultV2::Order(result)=&query.result else {panic!("本批仅单笔Order");};
+        let result=serde_json::to_value(result).unwrap();
+        let mut batches=Vec::new();
+        state=gpu_accept_projection_reference(actor,next,BusinessReducerOutputV2::MutationAction(Some(effect)),&mut batches);
+        cutoff=batches[0]["direct"][0]["metadata"]["response_received_at_utc_ms"].as_i64().unwrap();
+        actor.projection_port.close_receive_prefix(cutoff);
+        actor.projection_port.observe_public_time(&crate::public_consumption::TrustedActorExecutionTimeV1(
+            crate::public_consumption::ActorTimeRecordV1 {run_id:actor.opened.run_id.clone(),drive_position:2+index as u64,
+                logical_time_utc_ms:cutoff}));
+        let records=observation.take_closed_records();
+        assert_eq!(records.len(),1,"Query无Economic，只产生一条实际Direct来源");
+        let material=records.iter().map(|record|serde_json::json!({"record":record.record(),"position":record.position(),
+            "visibility":record.visibility(),"context":record.context()})).collect::<Vec<_>>();
+        for record in &records {ledger.apply_noe_memory_v2(record).unwrap();}
+        let after=gpu_ledger_reservation_checkpoint(ledger,"query_after_receive");
+        frames.push(serde_json::json!({"request":key,"event":event.0,"target":target,"input_sequence":receipt.input_sequence(),
+            "sent_at":sent,"arrived_at":receipt.platform_arrived_at_utc_ms,"cutoff":cutoff,"retention":retention,
+            "retention_input_sequence":retention_input_sequence,
+            "result":result,"batches":batches,"records":material,"before":before,"after_send":after_send,"after":after}));
+    }
+    serde_json::json!({"reservation":"gpu-query-reservation","principal":"0.25","reserved":reserved,"frames":frames})
 }
 
 // 原Actor同步持久发布与原Memory领取同时观察相同来源批；不新增生产端口。

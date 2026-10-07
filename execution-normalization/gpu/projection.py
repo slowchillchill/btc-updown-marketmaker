@@ -185,6 +185,40 @@ class Projection:
                 categories[:,column],at[:,column],emission.emitted[:,column]))
         return self._finish(emitter,records,emission.root_fault | ordinals.fault)
 
+    def order_query(self,sampler,effects,asset_tokens):
+        """原单订单Query DirectRequest；请求身份与被查询订单的下单身份分开。"""
+        from lifecycle import OrderQueryResult,map_order_query
+        response=effects.response
+        order=effects.order
+        active=response.emitted
+        found=effects.outcome==0
+        if asset_tokens.shape!=self.asset_roots.shape or asset_tokens.dtype!=torch.int64 or asset_tokens.device!=active.device:
+            raise TypeError('原token目录需同设备完整资产int64列')
+        if asset_tokens.numel():
+            safe=order.assets.clamp(0,asset_tokens.numel()-1)
+            tokens=asset_tokens[safe]
+            invalid=(order.assets<0)|(order.assets>=asset_tokens.numel())|(tokens<0)|(
+                self.asset_roots[safe]!=torch.arange(active.numel(),device=active.device))
+        else:
+            tokens=torch.full_like(order.assets,-1)
+            invalid=torch.ones_like(active)
+        fault=effects.fault|torch.where(active&found,
+            (invalid|~order.present|(order.conditions<0)).to(torch.int32),0)
+        # NF/OOR没有订单正文；不能使用bind_base_order的Found来源校验，也不能借原下单request。
+        working=replace(self,request_slots=response.request_key,item_ordinals=torch.full_like(response.request_key,-1))
+        zeros=torch.zeros_like(response.request_key)
+        sequence=order.sequence.constant(0)
+        result=OrderQueryResult(effects.outcome,order.sequence,order.conditions,tokens,effects.state,
+            torch.full_like(zeros,-1),zeros,effects.matched,effects.active_quantity,zeros,
+            effects.retained_from,sequence,sequence)
+        emitter,emission=working.emitter.emit(sampler,active[:,None],torch.ones_like(active[:,None]),
+            response.responded_at[:,None],response.responded_at[:,None],response.received_at[:,None],fault[:,None])
+        mapped=map_order_query(result,emission.private_sequences,zeros,working.account_slots,
+            response.request_key,emission.emitted[:,0])
+        return working._finish(emitter,[(mapped,EVIDENCE,emission.private_sequences,
+            emission.batch_sequences,emission.received_at[:,0],zeros,response.responded_at,active)],
+            fault|emission.root_fault)
+
     def pending_base_acceptance(self,sampler,orders,pool,effects,asset_tokens):
         """已完成的单项Base接单来源；完整Pair响应仍须原请求封口协调。
 

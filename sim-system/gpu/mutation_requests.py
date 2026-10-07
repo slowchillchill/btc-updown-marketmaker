@@ -275,3 +275,19 @@ class MutationRequests:
             if required <= state.capacity:
                 return candidate, receipt
             state = state.resized(1 << (required-1).bit_length())
+
+    def coordinate_result(self,original,committed,fault):
+        """与发送方Ledger登记或Direct发射共同提交，不消费失败/资源不足的请求。"""
+        if self.keys.shape!=original.keys.shape or self.item_refs.shape!=original.item_refs.shape:
+            raise ValueError('共同提交须使用同次冷容量的请求前驱')
+        from dataclasses import fields
+        updates={}
+        for field in fields(self):
+            new,old=getattr(self,field.name),getattr(original,field.name)
+            if new is old:updates[field.name]=new
+            elif isinstance(new,ExactInt):
+                updates[field.name]=new.select(committed.repeat_interleave(self.capacity),old)
+            elif field.name=='fault':updates[field.name]=fault
+            else:
+                updates[field.name]=torch.where(committed.reshape((self.roots,)+(1,)*(new.ndim-1)),new,old)
+        return replace(self,**updates,fault=fault)

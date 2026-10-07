@@ -46,7 +46,7 @@ def cancel_pending_base_target(requests,pending,orders,queue,account,target,row_
     queue,quantity,account,_,_,_,delta=cancel_base_order(queue,read.quantity,account,
         torch.where(row_roots==torch.arange(orders.roots,device=row_roots.device)[:,None],
             read.slots[:,None],-1).max(0).values,row_roots,matching_closed,requested)
-    orders=orders.update(read,quantity,delta.emitted)
+    orders=orders.update(read,quantity,delta.emitted,pending.effective_at)
     fault=source_fault | orders.fault | account.fault | delta.fault
     processed=active & (fault==0)
     requests,response=requests.complete(pending,result_refs,processed,fault)

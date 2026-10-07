@@ -2640,6 +2640,7 @@ impl ExecutionStateV2 {
             self.account.economic_balances_for_tests();
         serde_json::json!({
             "quantities": self.orders.get(order_id).map(|order| &order.quantities),
+            "last_updated_at": self.orders.get(order_id).map(|order| order.last_updated_at_utc_ms),
             "cash": cash.to_string(), "available": available.to_string(),
             "principal": self.account.principal_encumbrance_pusd().to_string(),
             "fee": self.account.immediate_taker_fee_encumbrance_pusd().to_string(),

@@ -43,8 +43,8 @@ def progress(stage, **population):
                                      **population})+'\n')
 
 
-def main():
-    source = json.load(sys.stdin)
+def main(source=None):
+    source = json.load(sys.stdin) if source is None else source
     started = time.perf_counter()
     tensor = lambda values, dtype=torch.int64: torch.tensor(values, dtype=dtype, device='cuda')
     active, zero_fault = tensor([True], torch.bool), tensor([0], torch.int32)
@@ -261,7 +261,7 @@ def main():
     finality_page=None
     if block is not None:
         runtime,finality_page=check_captured_finalities(runtime,source,tensor,maker_rate,rebate,slot)
-        fills,account,calendars=runtime.fills,runtime.account,runtime.calendars
+        orders,fills,account,calendars=runtime.orders,runtime.fills,runtime.account,runtime.calendars
     taker_index=0
     hidden_page=None
     for checkpoint in source['checkpoints'][1:]:
@@ -284,7 +284,7 @@ def main():
             at=choice.at
             assert choice.enabled(2).cpu().tolist()==[True] and at.cpu().tolist()==[checkpoint['at']]
             runtime,transition,market=runtime.finality(choice,maker_rate,rebate,tensor([source['market_end']]*2))
-            fills,account,calendars=runtime.fills,runtime.account,runtime.calendars
+            orders,fills,account,calendars=runtime.orders,runtime.fills,runtime.account,runtime.calendars
             noe,batch=Numbers.run_exact_batch(lambda:noe.fill_from_origin(sampler,orders,fills,transition,
                 asset_tokens,calendars,rebate,at,maker_results=(market,)))
             batches.append(batch)
@@ -355,6 +355,11 @@ def main():
                     assert values(maker_transition.fill_sequence) == [2]
                     assert maker_transition.origin.roles.cpu().tolist() == [1]
         elif stage == 'canceled':
+            if source.get('live_query') is not None:
+                from validate_sim_order_query import advance_live
+                runtime,noe,query_batch,live_query_resources=advance_live(source,runtime,noe,sampler,asset_tokens)
+                batches.append(query_batch)
+                requests=runtime.requests
             read = orders.read(slot)
             ids,offsets=byte_column([source['post_request_key'].encode(),source['cancel_request_key'].encode()])
             requests,cancel_receipt=requests.run_registration(sampler,ids,offsets,tensor([1]),tensor([1]),
@@ -381,6 +386,7 @@ def main():
             noe,cancel_batch=Numbers.run_exact_batch(lambda:bound.cancellation(sampler,(feedback,),
                 canceled.pending.effective_at,canceled.response.received_at,canceled.response.method,canceled.response.emitted))
         assert_checkpoint(checkpoint['state'], orders.read(slot).quantity, account)
+        assert orders.read(slot).last_updated_at.cpu().tolist()==[checkpoint['state']['last_updated_at']],stage
     assert observed_pending_zero_quote and maker_record is not None
     assert values(fills.next_sequence) == [3] and values(orders.next_sequence) == [2]
     assert fills.origins.roles.cpu().tolist() == [[0,1]]
@@ -407,7 +413,11 @@ def main():
             received_name='response_received_at_utc_ms' if category=='DirectResponse' else 'feedback_received_at_utc_ms'
             assert int(batch.received_at[0,column].cpu())==metadata[received_name]
             row=int(batch.rows[0,column].cpu())
-            semantic=Numbers.run_exact_batch(lambda:expected_semantic(original))
+            if body.get('evidence',{}).get('Control',{}).get('result',{}).get('OrderQuery') is not None:
+                from validate_sim_order_query import semantic_from_reference
+                semantic=Numbers.run_exact_batch(lambda:semantic_from_reference(original))
+            else:
+                semantic=Numbers.run_exact_batch(lambda:expected_semantic(original))
             actual=noe.normalizer.bank.semantic[row:row+1]
             width=max(actual.size(1),semantic.size(1))
             assert torch.equal(torch.nn.functional.pad(actual,(0,width-actual.size(1))),
@@ -430,7 +440,13 @@ def main():
     assert not repeat.emitted.any().cpu().item()
     from validate_base_noe_ledger import check as check_public_account
     account_report=check_public_account(source,noe,batches,orders.read(slot),receipt,
-        Numbers.run_exact_batch(lambda:rational([original_kind['size_shares']])),cancel_batch)
+        Numbers.run_exact_batch(lambda:rational([original_kind['size_shares']])),cancel_batch,
+        return_state=source.get('order_queries') is not None)
+    if source.get('order_queries') is not None:
+        from validate_sim_order_query import check
+        query_report=check(source,runtime,noe,sampler,asset_tokens,account_report,live_query_resources)
+        print(json.dumps(query_report),flush=True)
+        return
     # 已完成请求无pending：调度padding零terms/故障不得污染既存状态。
     padding = FrozenBaseTerms(tensor([-1]), integers([0]), integers([0]), rational(['0']),
                               tensor([-1]), tensor([-1]), tensor([1], torch.int32),tensor([-1]))
@@ -562,6 +578,7 @@ def check_captured_finalities(runtime,source,tensor,maker_rate,taker_rate,slot):
         choice=reference.choose(None,None,horizon,enabled)
         assert choice.enabled(2).cpu().tolist()==[True] and choice.at.cpu().tolist()==[checkpoint['at']]
         reference,transition,market=reference.finality(choice,maker_rate,taker_rate,end)
+        assert reference.orders.read(slot).last_updated_at.cpu().tolist()==[checkpoint['state']['last_updated_at']]
         index=transition.slot.clamp(0,reference.fills.capacity-1)
         frames.append(FinalityFeedback(choice.at,transition,market,_take_record(reference.fills.records,index)))
         prefixes.append(reference)

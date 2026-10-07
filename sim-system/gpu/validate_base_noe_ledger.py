@@ -11,7 +11,7 @@ from queues import Numbers
 from validate_base_execution import integers,rational,values
 
 
-def check(source,noe,batches,order,receipt,target,cancel_batch):
+def check(source,noe,batches,order,receipt,target,cancel_batch,*,return_state=False):
     root=Path(__file__).resolve().parents[2]
     sys.path[:0]=[str(root/'ledger/gpu'),str(root/'shared-run/gpu')]
     from memory import EconomicColumns
@@ -140,6 +140,7 @@ def check(source,noe,batches,order,receipt,target,cancel_batch):
     assert canceled.fault.cpu().tolist()==[0] and canceled.orders.cancellable.cpu().tolist()==[[False]]
     assert amounts(canceled.funds.actual_available)==[Fraction(source['cancel_ledger_after']['cash']['actual_available_pusd'])]
     assert amounts(frozen.funds.actual_available)==[Fraction(source['cancel_ledger_before']['cash']['actual_available_pusd'])]
+    if return_state:return state
     return {'natural_dynamic_base_batches_to_single_public_ledger_checked':True,
         'initialization_only_at_original_opening_checked':True,
         'actual_NOE_population':len(source['prior_records']),
