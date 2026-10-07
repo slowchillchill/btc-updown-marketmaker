@@ -58,8 +58,8 @@ class BaseSimRuntime:
                                   owner[self.hidden.level_assets],self.orders.roots)
         enabled=enabled & (source_fault == 0)
         if block.operations[index]['tag'] == 'LevelChange':
-            target=block._level_mask(row[0],row[1],row[2])
-            source_fault=source_fault | grouped_fault(self.hidden._asset_fault(block.price_fault),owner,self.orders.roots)
+            target,price_fault=block._level_lookup(row[0],row[1],row[2])
+            source_fault=source_fault | grouped_fault(self.hidden._asset_fault(price_fault),owner,self.orders.roots)
             level_roots=owner[self.hidden.level_assets]
             counts=torch.zeros_like(enabled,dtype=torch.int64).scatter_add(0,level_roots,target.to(torch.int64))
             rows=torch.full_like(counts,-1).scatter_reduce(0,level_roots,

@@ -123,7 +123,7 @@ class HiddenPmBlock:
         self.prices = self._values(price_ids)
         self.operations = pending
         self.asset_axis = torch.arange(len(assets), device=device)
-        self.price_fault = torch.zeros(len(slots), dtype=torch.int32, device=device)
+        self.price_fault = self.prices.fault  # 冷不可变价格列的源故障
         events = []
         snapshot_levels = []
         for entry in pending:
@@ -148,13 +148,13 @@ class HiddenPmBlock:
             return self._values(index.expand(count))
         return self._values(torch.full((count,), index, dtype=torch.int64, device=self.level_assets.device))
 
-    def _level_mask(self, asset, side, price):
+    def _level_lookup(self, asset, side, price):
         relation = Numbers.run_exact_batch(lambda: self.prices.compare(self._broadcast(price, len(self.slots))))
         if relation.fault.shape != self.level_assets.shape:
             raise ValueError('设备精确价位形状错误')
-        # 关联结果保留fault；不得把解析失败误判成“该价位不存在”。
-        self.price_fault = getattr(self, 'price_fault', torch.zeros_like(relation.fault)) | relation.fault
-        return (self.level_assets == asset) & (self.level_sides == side) & (relation.order == 0) & (relation.fault == 0)
+        # 关联故障随本次候选返回，不覆盖共享源列，也不让资源失败污染原输入。
+        fault = self.price_fault | relation.fault
+        return (self.level_assets == asset) & (self.level_sides == side) & (relation.order == 0) & (fault == 0), fault
 
     def empty_state(self, *, segment_capacity=4):
         state = HiddenAssetState.empty(self.level_assets, self.prices, self.asset_markets, self.market_count, segment_capacity=segment_capacity)
@@ -180,26 +180,28 @@ class HiddenPmBlock:
             quantities = zeros(self.prices)
             count = torch.zeros(len(self.slots), dtype=torch.int64, device=self.level_assets.device)
             missing = torch.zeros((), dtype=torch.int32, device=self.level_assets.device)
+            price_fault = self.price_fault
             for level_index in range(entry['snapshot_start'], entry['snapshot_end']):
                 side, price, quantity = self.snapshot_levels[level_index].unbind()
-                target = self._level_mask(row[0], side, price)
+                target, fault = self._level_lookup(row[0], side, price)
+                price_fault = price_fault | fault
                 missing = missing | (target.sum() != 1).to(torch.int32)
                 count = count + target.to(torch.int64)
                 quantities = rational_select(self._broadcast(quantity, len(self.slots)), target, quantities)
             quality = row[10].expand_as(state.quality)
             state, _ = run_hidden_asset_batch(state, lambda value: value.initial_snapshot(
                 enabled, quantities, self._broadcast(row[5], len(self.assets)), quality))
-            source_fault = state._asset_fault((count > 1).to(torch.int32) | self.price_fault)
+            source_fault = state._asset_fault((count > 1).to(torch.int32) | price_fault)
             return replace(state, fault=state.fault | source_fault | missing * active.to(torch.int32)), None
         if tag == 'LevelChange':
             active = enabled & ~state.book_closed
-            level_enabled = self._level_mask(row[0], row[1], row[2])
+            level_enabled, price_fault = self._level_lookup(row[0], row[1], row[2])
             if enabled_assets is not None:
                 level_enabled = level_enabled & enabled_assets[state.level_assets]
             state, effects = run_hidden_asset_batch(state, lambda value: value.level_transition(
                 level_enabled, self._broadcast(row[3], len(self.slots)), self._broadcast(row[4], len(self.slots)),
                 (row[9] != 0).expand_as(level_enabled)))
-            source_fault = state._asset_fault(self.price_fault) | (level_enabled.sum() != 1).to(torch.int32) * active.to(torch.int32)
+            source_fault = state._asset_fault(price_fault) | (level_enabled.sum() != 1).to(torch.int32) * active.to(torch.int32)
             state = replace(state, fault=state.fault | source_fault)
             effects = replace(effects, fault=effects.fault | state.fault[state.level_assets])
             return state, effects
