@@ -257,35 +257,48 @@ class Projection:
         return incoming
 
     def settlement_cost(self,sampler,condition,resolution,policy,identity,recognized,paid,has_correction,correction,
-            economic_kind,sequence,balances,outcomes,transported_outcomes,settlement_liability,taker_liability,at,active,fault,*,economic_present):
+            economic_kind,sequence,balances,outcomes,transported_outcomes,settlement_liability,taker_liability,at,active,fault,*,economic_present,source_ordinal,record_ordinal):
         """实际Cost反馈及完整V2 delta，同private/time，原ordinal递增。"""
         from settlement_cash import map_cost
         return self._settlement_cash(sampler,condition,resolution,policy,identity,economic_kind,sequence,
-            balances,outcomes,transported_outcomes,settlement_liability,taker_liability,economic_present,at,active,fault,
+            balances,outcomes,transported_outcomes,settlement_liability,taker_liability,economic_present,source_ordinal,record_ordinal,at,active,fault,
             lambda private,ordinal,emitted:map_cost(self.account_slots,condition,resolution,policy,identity,
                 recognized,paid,has_correction,correction,private,ordinal,emitted))
 
     def external_cash_feedback(self,sampler,identity,amount,attribution,has_correction,correction,
-            sequence,balances,outcomes,transported_outcomes,settlement_liability,taker_liability,at,active,fault,*,economic_present):
+            sequence,balances,outcomes,transported_outcomes,settlement_liability,taker_liability,at,active,fault,*,economic_present,source_ordinal,record_ordinal):
         from settlement_cash import map_external_cash
         absent=torch.full_like(identity,-1)
         return self._settlement_cash(sampler,absent,absent,absent,identity,torch.full_like(identity,2),sequence,
-            balances,outcomes,transported_outcomes,settlement_liability,taker_liability,economic_present,at,active,fault,
+            balances,outcomes,transported_outcomes,settlement_liability,taker_liability,economic_present,source_ordinal,record_ordinal,at,active,fault,
             lambda private,ordinal,emitted:map_external_cash(self.account_slots,identity,amount,attribution,
                 has_correction,correction,private,ordinal,emitted))
 
     def _settlement_cash(self,sampler,condition,resolution,policy,identity,kind,sequence,
-            balances,outcomes,transported_outcomes,settlement_liability,taker_liability,economic_present,at,active,fault,make_lifecycle):
+            balances,outcomes,transported_outcomes,settlement_liability,taker_liability,economic_present,source_ordinal,record_ordinal,at,active,fault,make_lifecycle):
         from settlement_cash import map_settlement_cash_economic
         if (economic_present.shape!=active.shape or economic_present.dtype!=torch.bool
                 or economic_present.device!=active.device):
             raise TypeError('Economic存在位须来自原Option(delta)，为同设备bool[root]')
+        if (source_ordinal.shape!=active.shape or source_ordinal.dtype!=torch.int64
+                or source_ordinal.device!=active.device or not isinstance(record_ordinal,ExactInt)
+                or record_ordinal.sign.shape!=active.shape or record_ordinal.words.device!=active.device):
+            raise TypeError('反馈片段需原自然批source ordinal及精确u64 record ordinal起点')
+        # 原自然批可能先有Request或其它反馈；两种坐标分别沿其实际来源传入。
+        upper=record_ordinal.compare(record_ordinal.constant((1<<64)-1))
+        last=record_ordinal+ExactInt.from_i64_tensor(economic_present.to(torch.int64))
+        last_upper=last.compare(last.constant((1<<64)-1))
+        coordinate_fault=upper.fault|last_upper.fault|record_ordinal.fault|last.fault
+        coordinate_fault|=((record_ordinal.sign<0)|(upper.order>0)|(last_upper.order>0)|
+            (source_ordinal<0)|(source_ordinal>0xffffffff)|
+            (source_ordinal+economic_present.to(torch.int64)>0xffffffff)).to(torch.int32)
+        fault=fault|torch.where(active,coordinate_fault,0)
         categories=torch.full_like(active[:,None],3,dtype=torch.int64)
         emitter,frame=self.emitter.emit(sampler,active[:,None],torch.zeros_like(active[:,None]),
             at[:,None],at[:,None],torch.zeros_like(at[:,None]),fault[:,None])
         ordinals=map_source_ordinals(frame.emitted,categories,(1+economic_present.to(torch.int64))[:,None],fault[:,None])
         private,batch=frame.private_sequences,frame.batch_sequences
-        first=ordinals.first_ordinals[:,0]
+        first=source_ordinal+ordinals.first_ordinals[:,0]
         life=make_lifecycle(private,first,frame.emitted[:,0])
         economic=map_settlement_cash_economic(self.account_slots,condition,at,kind,resolution,policy,identity,
             sequence,balances,outcomes,transported_outcomes,settlement_liability,taker_liability,
@@ -293,9 +306,9 @@ class Projection:
         common=(private,batch,frame.received_at[:,0],categories[:,0],at)
         return self._finish(emitter,[(life,EVIDENCE,*common,active),
             (economic,ECONOMIC,*common,active&economic_present)],fault | frame.root_fault | ordinals.fault |
-                torch.where(active&economic_present,economic.fault,0))
+                torch.where(active&economic_present,economic.fault,0),record_ordinal_base=record_ordinal)
 
-    def _finish(self,emitter,records,source_fault):
+    def _finish(self,emitter,records,source_fault,*,record_ordinal_base=None):
         from queues import ExactInt,ExactRational
         def cat_integer(values):
             width=max(value.words.size(1) for value in values)
@@ -343,6 +356,8 @@ class Projection:
         batch_values=_take(batch_values,locations)
         times=torch.stack(received,dim=1).gather(1,order)
         ordinals=ExactInt.from_i64_tensor((normalized.emitted.to(torch.int64).cumsum(dim=1)-1).clamp_min(0).flatten())
+        if record_ordinal_base is not None:
+            ordinals=ordinals+_take(record_ordinal_base,torch.arange(roots,device=rows.device).repeat_interleave(width))
         # 共享原经济列随规范序移动，Ledger不从semantic token反解或读回CPU。
         economic_sequences=[]
         economic_balances=[]

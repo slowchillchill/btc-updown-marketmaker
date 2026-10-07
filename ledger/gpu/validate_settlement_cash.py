@@ -55,12 +55,22 @@ def exact(value):
 def body(row):return next(iter(row['record'].values()))
 
 
+def position_key(row):
+    position=row['position'];watermark=position['source_watermark']
+    return (position['context_reference'],watermark['run_id'],watermark['projection_batch_sequence'],position['record_ordinal'])
+
+
+def feedback_key(row):
+    return (*position_key(row)[:3],body(row)['source_order']['sequence']['PrivateFeedback']['private_feedback_sequence'])
+
+
 def main(source):
     started=time.perf_counter();run=Numbers.run_exact_batch
     tensor=lambda value,dtype=torch.int64:torch.tensor(value,dtype=dtype,device='cuda')
     zero=tensor([0]);yes=tensor([True],torch.bool);no=~yes
     costs=cash_ids=None;previous=None;scans=[];liability_only=False;negative=False;resource_exits=0
-    zero_cash_sequence=None;zero_cash_continued=False;association_retry=False
+    zero_cash_sequence=None;zero_cash_continued=False;association_retry=False;split_economic=False
+    committed_positions={}
     identities=sorted({identity for block in source['blocks'] for row in block['records']
         if 'evidence' in body(row) for kind,fact in body(row)['evidence']['SettlementLifecycleV2']['result'].items()
         for identity in [fact['cost_identity' if kind=='Cost' else 'identity'],fact.get('correction_of')]
@@ -73,9 +83,20 @@ def main(source):
     empty=tensor([[]],torch.bool);empty_int=run(lambda:integers([]));empty_ratio=run(lambda:rational([]))
     intents=FrozenIntentOrders(empty,empty_int,empty,empty_ratio,empty,empty)
     for block_index,block in enumerate(source['blocks']):
-        before,after=block['before'],block['after'];rows=block['records']
+        before,after=block['before'],block['after'];consumed_rows=block['records']
+        feedback=feedback_key(consumed_rows[0])
+        assert all(feedback_key(row)==feedback for row in consumed_rows)
+        # 原同反馈完整来源与实际Ledger提交切片分别保留，不能以切片行数猜Option。
+        rows=sorted((row for row in source['source_records'] if feedback_key(row)==feedback),
+            key=lambda row:row['position']['record_ordinal'])
         life=body(rows[0]);kind,fact=next(iter(life['evidence']['SettlementLifecycleV2']['result'].items()))
         assert kind in ('Cost','ExternalCash') and len(rows) in (1,2)
+        assert len({position_key(row) for row in rows})==len(rows)
+        keys=[position_key(row) for row in rows]+[None]*(2-len(rows))
+        current_keys={position_key(row) for row in consumed_rows}
+        assert current_keys.issubset({key for key in keys if key is not None})
+        current_mask=tensor([[key in current_keys for key in keys]],torch.bool)
+        split_economic|=len(rows)==2 and keys[1] in current_keys and keys[0] not in current_keys and keys[0] in committed_positions
         condition=fact['settlement_request_id']['condition_id'] if kind=='Cost' else source['initials'][0]['market']['condition_id']
         initial=next(v for v in source['initials'] if v['market']['condition_id']==condition)
         assets=initial['assets'];tokens=[asset['token_id'] for asset in assets]
@@ -91,6 +112,8 @@ def main(source):
         has_correction=tensor([fact['correction_of'] is not None],torch.bool)
         # 两条原NOE表示真实Some(delta)，即使八余额/份额/负债全部为零。
         economic_present=tensor([len(rows)==2],torch.bool)
+        source_ordinal=tensor([life['source_order']['ordinal']])
+        record_ordinal=run(lambda:integers([rows[0]['position']['record_ordinal']]))
         correction=tensor([slots.get(fact['correction_of'],0)])
         identity=tensor([slots[fact['cost_identity' if kind=='Cost' else 'identity']]])
         balance={'existing':{name+'_delta':'0' for name in BALANCES},
@@ -121,14 +144,16 @@ def main(source):
             projection,batch=run(lambda:projection.settlement_cost(sampler,zero,zero,zero,identity,
                 rational([fact['recognized_pusd']]),rational([fact['paid_pusd']]),has_correction,correction,
                 tensor([economic_kind]),integers([sequence]),balances,original_vector,original_vector,*liabilities,at,yes,
-                tensor([0],torch.int32),economic_present=economic_present))
+                tensor([0],torch.int32),economic_present=economic_present,
+                source_ordinal=source_ordinal,record_ordinal=record_ordinal))
             expected_life=run(lambda:encode_fields([zero,zero,zero,zero,identity,rational([fact['recognized_pusd']]),
                 rational([fact['paid_pusd']]),has_correction,correction]))
         else:
             attribution=['Deposit','ManualAdjustment','UnknownActivity'].index(fact['attribution'])
             projection,batch=run(lambda:projection.external_cash_feedback(sampler,identity,rational([fact['signed_delta_pusd']]),
                 tensor([attribution]),has_correction,correction,integers([sequence]),balances,original_vector,original_vector,
-                *liabilities,at,yes,tensor([0],torch.int32),economic_present=economic_present))
+                *liabilities,at,yes,tensor([0],torch.int32),economic_present=economic_present,
+                source_ordinal=source_ordinal,record_ordinal=record_ordinal))
             expected_life=run(lambda:encode_fields([zero,identity,rational([fact['signed_delta_pusd']]),
                 tensor([attribution]),has_correction,correction]))
         assert batch.fault.cpu().tolist()==[0] and batch.emitted.cpu().tolist()==[[True,len(rows)==2]]
@@ -140,7 +165,7 @@ def main(source):
             liability_only|=all(Fraction(existing[n+'_delta'])==0 for n in BALANCES) and not members and (
                 Fraction(balance['settlement_fee_liability_pusd_delta'])!=0 or Fraction(balance['actual_taker_fee_liability_pusd_delta'])!=0)
         if kind=='ExternalCash':
-            if Fraction(fact['signed_delta_pusd'])==0:
+            if len(rows)==2 and keys[1] in current_keys and Fraction(fact['signed_delta_pusd'])==0:
                 assert len(rows)==2 and not members
                 assert all(Fraction(existing[n+'_delta'])==0 for n in BALANCES)
                 assert Fraction(balance['settlement_fee_liability_pusd_delta'])==0
@@ -148,7 +173,7 @@ def main(source):
                 assert sequence==before['projection']['platform_source_prefix']+1
                 assert after['projection']['platform_source_prefix']==sequence
                 zero_cash_sequence=sequence
-            elif zero_cash_sequence is not None and not zero_cash_continued:
+            elif len(rows)==2 and keys[1] in current_keys and zero_cash_sequence is not None and not zero_cash_continued:
                 assert len(rows)==2 and sequence==zero_cash_sequence+1
                 zero_cash_continued=True
         for column,row in enumerate(rows):
@@ -204,7 +229,9 @@ def main(source):
                 economic_applied=tensor([[t['economic_applied'] for t in actual]+[False]*pad],torch.bool),
                 success_applied=tensor([[t['success_applied'] for t in actual]+[False]*pad],torch.bool),
                 immediate_fee=rational([t['actual_net_fee'] for t in actual]+['0']*pad))
-            return replace(ledger,trade_success=trades,maker_cash=rational([
+            return replace(ledger,trade_success=trades,
+                applied=tensor([[key in committed_positions for key in keys]],torch.bool),
+                applied_sequences=integers([committed_positions.get(key,0) for key in keys]),maker_cash=rational([
                 Fraction(before['cash']['maker_available_pusd'])+Fraction(before['cash']['maker_reserved_pusd'])]))
         if costs is None:
             # 绑定在原开户前，所有Cost/Cash材料都参与此序列；不从净余额推身份历史。
@@ -215,8 +242,9 @@ def main(source):
         old=run(lambda:_owned(ledger,ledger))
         visible=rows[0]['visibility']['Feedback']['available_at_utc_ms']
         delivery=rows[0]['visibility']['Feedback']['delivery_sequence']
-        pending=run(lambda:PendingRecords.from_columns(batch.emitted,batch.received_at,batch.private_sequences,
-            integers([0,1]),batch.rows,integers([delivery-1])))
+        pending=run(lambda:PendingRecords.from_columns(batch.emitted&current_mask,batch.received_at,batch.private_sequences,
+            Numbers.ExactInt.from_i64_tensor(projection.normalizer.bank.source_order[batch.rows.flatten(),3]),
+            batch.rows,integers([delivery-1])))
         state=PublicLedgerState(pending,PublicRegistryState(PublicRegistryEvents.empty(1,'cuda')),
             ClosedAdmission.empty(columns),ledger)
         gates=ReceiveGates.unset(1).set_receive(tensor([visible]),yes).set_public(tensor([visible]),yes)
@@ -244,7 +272,7 @@ def main(source):
             assert values(resumed.current_entry_sequence)==[after['projection']['ledger_entry_seq']]
             assert exact(resumed.platform.balances)==[Fraction(after['projection']['platform_confirmed_projection'][n]) for n in BALANCES]
             association_retry=True
-        state,scan=_device_scan(state,torch.ones_like(columns.enabled),'cost_cash_'+str(block_index))
+        state,scan=_device_scan(state,current_mask,'cost_cash_'+str(block_index))
         scans.append(scan);resource_exits+=scan['resource_retries'];ledger=state.ledger
         assert ledger.fault.cpu().tolist()==[0] and not (state.waiting.received&~state.waiting.consumed).any().cpu().item()
         assert values(ledger.current_entry_sequence)==[after['projection']['ledger_entry_seq']]
@@ -304,15 +332,18 @@ def main(source):
             assert torch.equal(getattr(grown.external_cash,name)[:,:old_width],getattr(ledger.external_cash,name))
         previous=(frozen,exact(ledger.settlement_costs.recognized),exact(ledger.maker_cash))
         costs,cash_ids=ledger.settlement_costs,ledger.external_cash
+        for row in consumed_rows:
+            committed_positions[position_key(row)]=row['ledger_entry_seq']
         print(json.dumps({'stage':'cost_cash_block','label':source['label'],'completed':block_index+1,
             'total':len(source['blocks']),'elapsed_seconds':time.perf_counter()-started}),file=sys.stderr,flush=True)
     assert source['label']=='external-cash' or liability_only
     if source['label']=='settlement-case-8':assert negative and resource_exits>0
     if source['label']=='external-cash':
-        assert resource_exits>0 and zero_cash_sequence is not None and zero_cash_continued and association_retry
+        assert resource_exits>0 and zero_cash_sequence is not None and zero_cash_continued and association_retry and split_economic
     print(json.dumps({'status':'PASS','label':source['label'],'actual_fee_blocks':len(source['blocks']),
         'liability_only_economic':liability_only,'negative_correction':negative,'resource_exits':resource_exits,
         'zero_cash_economic_continued':zero_cash_continued,'same_permission_association_retry':association_retry,
+        'actual_split_Evidence_then_Economic_slices':split_economic,
         'scans':scans,'seconds':time.perf_counter()-started}))
 
 

@@ -1004,6 +1004,8 @@ NOE `schema22/23`分别保留真实Cost／ExternalCash证据，`schema24`保留�
 Lifecycle，再按原 `Option(delta)` 的存在位决定是否发Economic，不按金额非零判断。
 只有settlement liability变化以及实际存在的全零delta，都须保留第二条记录和账户序。
 两条记录共用原private/time，source ordinal递增，SourceOrder按完整u64 private sequence比较。
+反馈片段显式接入原自然批的source ordinal起点与精确u64 record ordinal起点；
+同批已有Request等记录时，不把片段重编号成0。两个起点不能用delivery或Ledger提交序代替。
 
 Ledger的Cost目录保存原身份、完整request关联、最新SourceOrder、累计recognized／paid与归属。
 新累计只替换更晚来源。修正先等待原Cost身份，继承原归属；无修正时使用首次Resolution归属。
@@ -1019,6 +1021,9 @@ old人口不完整时保Unknown，不能把已有子集之和当完整old。
 
 有限验证复用原case0／8、late false／true和ExternalCash修正场景，导出原NOE位置及CPU提交before／after。
 每个费用块从真实before安装非费用冷状态，Cost／Cash目录沿全部费用块承接，after只作独立预期。
+同反馈的原来源记录与实际提交块分开导出；Evidence和Economic分开提交时仍保留原顺序。
+已提交位置从更早原材料冷安装，当前只消费本块实际位置。该切片证明目录承接和共同提交；
+独立缺身份重试核实际waiting，但CPU选定的提交块不能充当连续GPU宿主的热调度器。
 这是费用切片，不证明GPU已从开户连续推进所有非费用事件，不交付完整SIM费用场景调度、NAV或活动恢复。
 
 ### 累计接纳本金

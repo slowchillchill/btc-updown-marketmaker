@@ -48,6 +48,7 @@ pub fn finish(materials: Option<Materials>,root: &Path,label: &str,seed: &str) {
     let Some(materials)=materials else {return};
     let mut writer=LedgerBackgroundWriterV2::new(root);
     let mut blocks=Vec::<serde_json::Value>::new();
+    let mut source_records=Vec::new();
     let mut initials=Vec::new();
     for material in materials.lock().unwrap().iter() {
         if let Some(record)=material.consumed_record_v1() {
@@ -66,19 +67,21 @@ pub fn finish(materials: Option<Materials>,root: &Path,label: &str,seed: &str) {
             writer.finish().unwrap();
             let after=snapshot(&LedgerWriterV1::open_durable(root).unwrap());
             let row=serde_json::json!({"position":record.position(),"context":record.context(),
-                "visibility":record.visibility(),"record":record.record()});
+                "visibility":record.visibility(),"record":record.record(),"ledger_entry_seq":material.ledger_entry_seq().unwrap()});
+            source_records.push(row.clone());
             let batch=serde_json::to_value(&record.position().source_watermark).unwrap();
-            if let Some(block)=blocks.last_mut().filter(|b|b["batch"]==batch) {
+            let feedback=serde_json::to_value(&record.record().source_order().sequence).unwrap();
+            if let Some(block)=blocks.last_mut().filter(|b|b["batch"]==batch && b["feedback"]==feedback) {
                 block["records"].as_array_mut().unwrap().push(row);block["after"]=after;
             } else {
-                blocks.push(serde_json::json!({"batch":batch,"before":before.unwrap(),"after":after,"records":[row]}));
+                blocks.push(serde_json::json!({"batch":batch,"feedback":feedback,"before":before.unwrap(),"after":after,"records":[row]}));
             }
         }
     }
     writer.finish().unwrap();
     assert!(!blocks.is_empty());
     let source=serde_json::json!({"source_contract":"actual_NOE_Cost_Cash_slices_at_committed_CPU_prefixes",
-        "label":label,"seed":seed,"initials":initials,"blocks":blocks});
+        "label":label,"seed":seed,"initials":initials,"source_records":source_records,"blocks":blocks});
     let directory=std::path::PathBuf::from(std::env::var("B_GPU_ORDER_ARTIFACT_DIR").unwrap());
     std::fs::write(directory.join(format!("{label}.source.json")),serde_json::to_vec_pretty(&source).unwrap()).unwrap();
     let mut child=std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
