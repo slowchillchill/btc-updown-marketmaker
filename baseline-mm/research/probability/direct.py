@@ -64,7 +64,7 @@ def typed_subset(files, coordinates, work, number):
             n=parquet.metadata.row_group(group).num_rows;indices=[]
             while cursor<len(wanted) and wanted[cursor]<consumed+n:
                 row=wanted[cursor]; indices.append(row-consumed); clocks.append(selected[row]);cursor+=1
-            if indices: batches.append(parquet.read_row_group(group).take(pa.array(indices,pa.int64())))
+            if indices: batches.append(parquet.read_row_group(group,use_threads=False).take(pa.array(indices,pa.int64())))
             consumed+=n
         path=work/f'boundary-{number}-{file_id}.parquet'
         pq.write_table(pa.concat_tables(batches),path,compression='zstd',use_compliant_nested_type=False)
