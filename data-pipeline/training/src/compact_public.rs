@@ -479,7 +479,7 @@ impl PublicCompactReaderV1 {
         let CompactFactPayloadV1::Inline(payload @ PublicBusinessPayloadV1::MarketFact {..}) = &fact.payload
             else {return Ok((fact, None));};
         let direct_ids = fact.direct_sources.iter().map(|source|source.source_message_id.clone()).collect::<Vec<_>>();
-        let original = PublicBusinessFactV1 {position:fact.position, payload:payload.clone(),
+        let original = PublicBusinessFactV1 {position:fact.position.clone(), payload:payload.clone(),
             source_refs:fact.source_refs.clone(), lineage:fact.lineage.clone(), direct_time:fact.direct_time.clone(),
             dependency_time:fact.dependency_time.clone(), quality:fact.quality.clone(), direct_sources:fact.direct_sources.clone()};
         let market = data_pipeline_core::public_reduction::materialize_market_fact_v1(
