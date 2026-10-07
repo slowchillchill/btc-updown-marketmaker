@@ -1,6 +1,6 @@
 # 直接概率与跨来源校准：方法及配置
 
-本实现承接 [#185 当前任务3分配](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)。代码和合成边界验证已交付候选计算能力，真实十八日准备、拟合和评价尚未执行。正式参数仍未采用。本方法不完成经营参数、任务4连续账户、PAPER 或 LIVE 验收。
+本实现承接 [#185 当前任务3分配](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)。代码和合成边界验证已交付候选计算能力，一次真实十八日prepare已因缺身份前态失败，study未启动；[失败及最小修复报告](complementary-pair-probability-run-20261007.md)保留准确事实。正式参数仍未采用。本方法不完成经营参数、任务4连续账户、PAPER 或 LIVE 验收。
 
 ## 输入与准确查询
 
@@ -20,7 +20,7 @@ PM 的全来源前沿在筛终局前形成。仅读元数据非空结果不能�
 
 元数据没有连接epoch，排序键直接复用 `metadata_admission_order_v1(admitted,sequence,source_message_id)`，与原初始化唯一排序一致。种子和普通元数据共同排序及归约，后到种子不会先污染更早普通行；不以清单文件顺序替代元数据原生顺序。PM、Binance及TWAP继续使用各自epoch/admission顺序。来源可见时刻为原生序列上 `max(received, admitted, prior_frontier)`；spot 没有 admission，使用旧文件/行顺序及接收前沿。跨文件、午夜、折不重置。原生重叠文件组成一个查询单元，不用 TTL 截断重复身份。临时重复候选只沿既有类型身份边界核对，不建立全期身份 JSON 库。
 
-目标为全部合法市场 × 剩余300/240/180/120/60/30/10/1秒。先形成分母，再按可见时刻左连接；市场身份尚不可见、缺规则、缺锚点、缺价格或标签都留在分母。正式锚点仅在真实可见后使用。初始 TWAP 规则沿公共 OpeningWindow，可以选择市场窗内、规则后到前已接收的首个合法 TWAP；真实规则变化从变化可见时开始适用。首个已固定临时锚点保持，后续规则变化不重置；正式锚点可见后优先。候选半开窗口和有效性复用公共 `temporary_twap_candidate_matches_v1`，SQL 聚合首条，不遍历每市场全期消息。
+目标为原始目录中唯一可定位的窗口与合法公共窗口的并集 × 剩余300/240/180/120/60/30/10/1秒。原始事后目录不是FixedIdentity；缺公共身份的普通Metadata仅记缺前态摘要，不缓存重放、不伪造Snapshot。AnchorRule、WS暂存及成功Snapshot继续原公共路径。原始字段冲突保存两侧来源，多值窗口的原始目标数为null。先形成分母，再按可见时刻左连接；市场身份尚不可见、缺规则、缺锚点、缺价格或标签都留在分母。正式锚点仅在真实可见后使用。初始 TWAP 规则沿公共 OpeningWindow，可以选择市场窗内、规则后到前已接收的首个合法 TWAP；真实规则变化从变化可见时开始适用。首个已固定临时锚点保持，后续规则变化不重置；正式锚点可见后优先。候选半开窗口和有效性复用公共 `temporary_twap_candidate_matches_v1`，SQL 聚合首条，不遍历每市场全期消息。
 
 此时间轴是来源级因果直接查询。它不具有完整多来源组身份，也不是生产策略逐次调用的冻结回放。终局保存必要状态变化；拟合取严格截止前最后公共状态，后到冲突不能回写早期状态。评价取原十八日范围内最后状态；不读范围外尾部，末日未观察终局按右删失处理。
 
@@ -70,11 +70,11 @@ WHERE visible_at <= sample_at
 
 ## 输出、资源和执行边界
 
-只保留 `material/samples.json`、五个价对充分统计、查询单元与材料身份；评价保留全候选评分、冻结参数、必要预测、覆盖、Brier及共同交集差值。临时语义子集、规范化映射及深度传输文件在消费后删除；失败保留原边界以便诊断。
+只保留原始/公共两层市场分母及缺身份区间的 `material/market-coverage.json`、`material/samples.json`、五个价对充分统计、查询单元与材料身份；评价保留全候选评分、冻结参数、必要预测、覆盖、Brier及共同交集差值。临时语义子集、规范化映射及深度传输文件在消费后删除；失败保留原边界以便诊断。
 
 校准固定十桶 `[0,.1)…[.9,1]`，空桶的均值/真实率/Brier为 null。生成独立 SVG 和中文 report.md。分层包含剩余时间、标准化距离、参考类别、接收/事件年龄、来源缺失、日与市场；日/市场分别报告等块均值、标准差、最小/最大值，不把八次采样当成独立样本。创新报告正/负/零/缺失、相邻可算对及反号对。未套用健康最终阈值筛早期数据。
 
-配置提案为一个独立作业，共享24 DuckDB查询线程、8GiB引擎内存预算、64GiB spill额度。每次只消费一个物理文件或原生重叠文件组，原生索引桶为1,048,576，类型读取批次1024行/64MiB，公共待归并终局上限65536。24为共享查询并行度，不是总OS线程数。前台Python、监督器、30秒日志线程及串行Rust helper也同属该作业；查询与helper归约分阶段执行，元数据/终局的小语义子集显式以 PyArrow `use_threads=False` 串行读取，不启用默认列线程池；BLAS/OpenMP另限1线程。不并发启动多个各64GiB服务。prepare临时目录为 `RUN_ROOT/projection/spill`，study为 `RUN_ROOT/statistics/spill`，其余临时文件亦在本轮专用根下。8GiB不是RSS上限；整个进程组沿批准保护 `MemoryHigh=48G / MemoryMax=64G / MemorySwapMax=0 / OOMPolicy=stop`，Codex在组外。墙钟、峰值和完整磁盘实际消耗尚未测量，不从旧健康统计外推。
+配置提案为一个独立作业，共享24 DuckDB查询线程、8GiB引擎内存预算、64GiB spill额度。每次只消费一个物理文件或原生重叠文件组，原生索引桶为1,048,576，类型读取批次1024行/64MiB，公共待归并终局上限65536。24为共享查询并行度，不是总OS线程数。前台Python、监督器、30秒日志线程及串行Rust helper也同属该作业；查询与helper归约分阶段执行，元数据/终局的小语义子集显式以 PyArrow `use_threads=False` 串行读取，不启用默认列线程池；BLAS/OpenMP另限1线程。不并发启动多个各64GiB服务。prepare临时目录为 `RUN_ROOT/projection/spill`，study为 `RUN_ROOT/statistics/spill`，其余临时文件亦在本轮专用根下。8GiB不是RSS上限；整个进程组沿批准保护 `MemoryHigh=48G / MemoryMax=64G / MemorySwapMax=0 / OOMPolicy=stop`，Codex在组外。一次失败墙钟及峰值见失败报告；完整成功成本仍未知，不从旧健康统计外推。
 
 `RUN_ROOT`、`INPUT_ROOT`、辅助产物和归档根仅由私有绑定提供；公开命令不含本机绑定。新 helper 必须绑定本轮准确提交及SHA-256。旧 `source_health_boundary` 只复用已验证产物，核对原源码适用性；不重编未修改辅助。DuckDB/PyArrow沿 `requirements-source-health.lock`，绘图复用已有matplotlib（本机已核对3.10.7+dfsg1），运行证据记录实际版本。
 
@@ -97,10 +97,14 @@ systemd-run --user --wait --pipe --unit=issue185-probability-run \
 
 DuckDB语义依据：[ASOF连接](https://duckdb.org/docs/stable/sql/query_syntax/from)、[窗口函数](https://www.duckdb.org/docs/current/sql/functions/window_functions)、[COPY](https://www.duckdb.org/docs/current/sql/statements/copy)。实际SQL通过合成合法跨文件、跨午夜、左端反例、临时参考及深度边界验证，不用新增真实小样本研究替代。
 
-## 本轮工程验证
+## 原工程交付验证（PR #257）
 
-本轮只执行合成合法边界和受影响源码验证，没有读取真实行情做概率准备或评分。`data-pipeline-core` 的 lib/tests 共192项通过；新 `probability_boundary` 示例的元数据种子时序测试1项通过；概率 Python 测试11项通过；原健康直接查询默认入口兼容测试2项通过。`cargo fmt --all --check` 通过。受影响两个包的普通 Clippy 通过，保留既有警告；`-D warnings` 被未修改的 contracts 大枚举警告阻断，没有据此扩大修改范围。
+原工程交付只执行合成合法边界和受影响源码验证，没有读取真实行情做概率准备或评分。`data-pipeline-core` 的 lib/tests 共192项通过；新 `probability_boundary` 示例的元数据种子时序测试1项通过；概率 Python 测试11项通过；原健康直接查询默认入口兼容测试2项通过。`cargo fmt --all --check` 通过。受影响两个包的普通 Clippy 通过，保留既有警告；`-D warnings` 被未修改的 contracts 大枚举警告阻断，没有据此扩大修改范围。
 
 新 release helper 的 SHA-256 为 `099ea3e22854321be1a2f62ed3caac248bf40e0be242f515e6997ce785c9bce1`。旧初始化 helper 从原独立归档恢复，SHA-256 为 `45bab72dca21884eb4ee418f6952b629720b78b00b8d593cfe3c9dcfbf48f4b0`，原构建源码为 `6b96f7101476aaf54782e353b5bf4f0a5616c3f0`；本轮没有重编它。元数据排序只提取原公共比较键供当前研究复用，原初始化的比较及选择行为保持。准确源码头、命令、日志和二进制身份随本轮交付证据保存。
 
 审查发现薄 applied 更新仍执行随后丢弃的 Decimal 数量报告与旧证据聚合。本轮修正在同一价位更新循环按实际报告消费者收集这些材料，薄入口跳过聚合；完整入口继续原报告规则。合法 applied 更新将两 bid 数量各覆写为 `79228162514264337593543950335` 后，公共薄入口及实际 helper 均精确采样为 `158456325028528675187087900670/1`。扩展原边界后 core192项、示例1项、概率Python11项再次通过；完整输出固定摘要及原报告溢出错误测试保持通过。
+
+## 本次失败修复验证
+
+真实执行、诊断、修复及新提案见[失败报告](complementary-pair-probability-run-20261007.md)。本轮Rust示例2项与Python12项通过，夹具由真实公共Rust输出生成并逐字核对。ReferenceFact、Terminal及市场QualityBoundary按实际serde读取。原始目录与合法身份分开；成功公共归并时才生效的pending终局不回填。未获身份的事后采样不更新创新记忆。新helper SHA-256为 `d77d6d2dbf5a252cd66ce171dc68a0c597733b0fc24014387b8188af773539ee`；原工程helper摘要和192项证据保持原身份，不重标为本次构建。
