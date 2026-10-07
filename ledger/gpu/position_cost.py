@@ -1,7 +1,7 @@
 """原已应用fill成本/费用，补偿关联实际应用项，不沿失败ordinal另造金额。
 
-本读面只覆盖已接入的Existing成交经济路径；市场兑付成本清理须由原结算
-消费者另接。目录槽位沿LifecycleDirectory原trade身份，真实金额不量化。
+本读面覆盖已接入的Existing成交及实际销token的兑付成本。
+目录槽位沿LifecycleDirectory原trade身份，真实金额不量化。
 """
 from dataclasses import dataclass, replace
 import torch
@@ -57,6 +57,20 @@ class PositionCosts:
             application_ordinals=torch.where(install, application_ordinals[:, None], self.application_ordinals),
             cost=select(take_ratio(cost, repeated), install.flatten(), self.cost),
             fee=select(take_ratio(fee, repeated), install.flatten(), self.fee))
+
+    def redeem(self,outcome_delta,asset_roots,enabled):
+        """实际被销token的成本全部移除；已付费用不随赎回撤回。"""
+        roots,width=self.active.shape
+        if asset_roots.numel()==0:
+            zero=ExactRational(self.cost.numerator.constant(0),self.cost.denominator.constant(1))
+            return self,sum_rows(zero,roots,width)
+        assets=self.assets.clamp(0,asset_roots.numel()-1)
+        selected=self.active & (self.assets>=0) & (self.assets<asset_roots.numel())
+        selected &= outcome_delta.numerator.sign[assets]<0
+        selected &= enabled[:,None]
+        zero=ExactRational(self.cost.numerator.constant(0),self.cost.denominator.constant(1))
+        removed=sum_rows(select(self.cost,selected.flatten(),zero),roots,width)
+        return replace(self,cost=select(zero,selected.flatten(),self.cost)),removed
 
     def resized(self,capacity):
         from transport import append_root_fields

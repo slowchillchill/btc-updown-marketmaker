@@ -1,7 +1,7 @@
 """请求式SIM首登记/Registered回执的纯候选，有限scenario不设训练默认。
 
-完整成功、费用、查询及受控重试仍由其真实后端分支接入；本对象只安装显式
-单Registered步骤，不把回执当经济到账。根已绑定原account，resolution为原ID引用。
+当前接显式Registered与可选TerminalSuccess步骤。费用、查询及受控重试尚未接入；
+Registered不当经济到账。根已绑定原account，resolution为原ID引用。
 """
 from dataclasses import dataclass, replace
 import torch
@@ -28,15 +28,19 @@ class SettlementRegistrations:
     received: torch.Tensor
     sends: object  # 完整原u64[roots*markets]。
     fault: torch.Tensor
+    succeeded: torch.Tensor
+    success_offsets: torch.Tensor | None = None
 
     @classmethod
-    def empty(cls, conditions, receipt_offsets):
+    def empty(cls, conditions, receipt_offsets,success_offsets=None):
         if conditions.ndim!=2 or conditions.dtype!=torch.int64 or receipt_offsets.shape!=conditions.shape or receipt_offsets.dtype!=torch.int64 or receipt_offsets.device!=conditions.device:
             raise TypeError('单Registered scenario需同设备根/市场目录及int64 offset')
+        if success_offsets is not None and (success_offsets.shape!=conditions.shape or success_offsets.dtype!=torch.int64 or success_offsets.device!=conditions.device):
+            raise TypeError('成功scenario offset需同设备原目录')
         zero=ExactInt.from_i64_tensor(torch.zeros(conditions.numel(),dtype=torch.int64,device=conditions.device))
         blank=torch.zeros_like(conditions,dtype=torch.bool)
         return cls(conditions,receipt_offsets,blank,torch.full_like(conditions,-1),torch.zeros_like(conditions),
-            blank.clone(),zero,Numbers.combine_fault_rows((receipt_offsets<0).to(torch.int32)))
+            blank.clone(),zero,Numbers.combine_fault_rows((receipt_offsets<0).to(torch.int32)),blank.clone(),success_offsets)
 
     def register(self,actions,sampler,identity_bytes,identity_offsets,obligations,maker,columns):
         """首请求独立核后台屏障，重复保首次到达/scenario位置/计数。"""
@@ -74,6 +78,13 @@ class SettlementRegistrations:
         fault=self.fault | Numbers.combine_fault_rows(overflow.to(torch.int32))
         times=self.first_arrival+self.receipt_offsets
         pending=self.present & ~self.received
+        if self.success_offsets is not None:
+            success_pending=self.present & self.received & ~self.succeeded
+            success_overflow=success_pending & (self.first_arrival>(1<<63)-1-self.success_offsets)
+            fault |= Numbers.combine_fault_rows(success_overflow.to(torch.int32))
+            success_at=self.first_arrival+self.success_offsets
+            times=torch.minimum(torch.where(pending,times,(1<<63)-1),torch.where(success_pending,success_at,(1<<63)-1))
+            pending |= success_pending
         masked=torch.where(pending,times,(1<<63)-1)
         at=masked.min(1).values
         return ScheduledTime(at,pending.any(1)&(fault==0),fault)
@@ -81,7 +92,7 @@ class SettlementRegistrations:
     def coordinated(self,original,valid_roots):
         use=valid_roots[:,None]
         return replace(self,**{name:torch.where(use,getattr(self,name),getattr(original,name))
-            for name in ('present','resolutions','first_arrival','received')},
+            for name in ('present','resolutions','first_arrival','received','succeeded')},
             sends=self.sends.select(use.expand_as(self.present).flatten(),original.sends))
 
     def advance_registered(self,at,enabled):
@@ -94,3 +105,27 @@ class SettlementRegistrations:
         emitted &= fault[:,None]==0
         return replace(self,received=self.received|emitted,fault=fault), RegisteredSettlementFeedback(
             self.conditions,self.resolutions,at[:,None].expand_as(self.conditions),emitted,fault)
+
+
+    def advance_success(self,at,enabled,account,sources,obligations):
+        """有限Registered→TerminalSuccess；每根本轮一项，成功守卫不重复兑付。"""
+        if self.success_offsets is None:
+            raise ValueError('未安装实际成功scenario步骤')
+        due=self.present & self.received & ~self.succeeded & (self.first_arrival+self.success_offsets==at[:,None])
+        market=due.to(torch.int32).argmax(1)
+        root=torch.arange(due.size(0),device=at.device)
+        scheduled=self.next_clock()
+        use=enabled & due.any(1) & scheduled.present & (scheduled.at==at)
+        reference=obligations.reference_indices[root,market]
+        assets,tokens,payouts,error=sources.gather(reference)
+        fault=self.fault | torch.where(use,error,0) | scheduled.fault
+        original=account
+        account,delta=account.redeem_outcomes(assets,payouts,use & (fault==0))
+        fault |= account.fault
+        valid=fault==0
+        account=account.coordinate_result(original,fault)
+        delta=account.coordinate_delta(delta,valid,fault)
+        consumed=use & valid
+        selected=torch.arange(due.size(1),device=at.device)[None,:]==market[:,None]
+        backend=replace(self,succeeded=self.succeeded | (selected & consumed[:,None]),fault=fault)
+        return backend,account,(self.conditions[root,market],self.resolutions[root,market],assets,tokens,delta,consumed,fault)

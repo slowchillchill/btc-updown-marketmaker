@@ -32,11 +32,12 @@ class EconomicColumns:
     outcomes: object
     asset_indices: torch.Tensor
     enabled: torch.Tensor
+    outcome_list: object
     projection_batches: tuple  # 同一不可变共享列，保留source参考和实际收到时刻。
 
     def append(self, incoming):
         """追加新批共享列；旧字段不重新解码，完整原位置保持不变。"""
-        from transport import append_root_fields
+        from transport import append_root_fields,append_record_lists
         roots,width=self.row_refs.shape
         extra=incoming.row_refs.size(1)
         if incoming.row_refs.size(0)!=roots or incoming.row_refs.device!=self.row_refs.device:
@@ -51,6 +52,7 @@ class EconomicColumns:
             outcomes=append_root_fields(self.outcomes,incoming.outcomes,roots,width,extra),
             asset_indices=torch.cat([self.asset_indices,incoming.asset_indices],1),
             enabled=torch.cat([self.enabled,incoming.enabled],1),
+            outcome_list=append_record_lists(self.outcome_list,incoming.outcome_list,roots,width,extra),
             projection_batches=self.projection_batches+incoming.projection_batches)
 
     @classmethod
@@ -87,9 +89,40 @@ class EconomicColumns:
         indices=torch.cat(order,dim=1).flatten()
         balances=take_ratio(balances,(indices[:,None]*8+torch.arange(8,device=refs.device)).flatten())
         outcomes=take_ratio(outcomes,indices)
+        from transport import batch_outcome_list,append_record_lists
+        vectors=batch_outcome_list(batches[0])
+        joined_width=widths[0]
+        for batch in batches[1:]:
+            vectors=append_record_lists(vectors,batch_outcome_list(batch),roots,joined_width,batch.rows.size(1))
+            joined_width+=batch.rows.size(1)
         return cls(refs,positions,cat_integer('economic_sequences'),balances,outcomes,
             torch.cat([batch.economic_assets for batch in batches],dim=1),
-            torch.cat([batch.economic_enabled for batch in batches],dim=1),tuple(batches))
+            torch.cat([batch.economic_enabled for batch in batches],dim=1),vectors,tuple(batches))
+
+
+    def outcome_fault(self,index,owners):
+        from transport import take_record_list
+        vectors=take_record_list(self.outcome_list,index)
+        roots,width=vectors.present.shape
+        ids=vectors.fields[0].reshape(roots,width)
+        error=(ids<0)|(ids>=owners.numel())
+        if owners.numel():
+            error |= owners[ids.clamp(0,owners.numel()-1)]!=torch.arange(roots,device=ids.device)[:,None]
+        amount_fault=vectors.fields[1].fault.reshape(roots,width)
+        return __import__('queues').Numbers.combine_fault_rows(torch.where(vectors.present,amount_fault|error.to(torch.int32),0))
+
+    def outcome_delta(self,index,owners):
+        from transport import take_record_list
+        from success_pool import select
+        from trade_success import sum_rows
+        vectors=take_record_list(self.outcome_list,index)
+        width=vectors.present.size(1)
+        rows=owners[:,None]*width+torch.arange(width,device=owners.device)
+        values=take_ratio(vectors.fields[1],rows.flatten())
+        ids=vectors.fields[0].reshape(-1,width)[owners]
+        selected=vectors.present[owners] & (ids==torch.arange(owners.numel(),device=owners.device)[:,None])
+        zero=ExactRational(values.numerator.constant(0),values.denominator.constant(1))
+        return sum_rows(select(values,selected.flatten(),zero),owners.numel(),width)
 
 
 @dataclass(frozen=True)
@@ -157,19 +190,9 @@ class EconomicMemory:
             index=torch.arange(roots,device=local.device)*width+local
             sequence=_take(self.columns.sequences,index)
             balances=take_ratio(self.columns.balances,(index[:,None]*8+torch.arange(8,device=index.device)).flatten())
-            assets=self.columns.asset_indices.gather(1,local[:,None]).flatten()
-            outcome=take_ratio(self.columns.outcomes,index)
-            # 当前原producer为每Fact最多单token delta；其它资产补精确0，不广播一腿到双腿。
             owners=candidate.platform.asset_roots
-            valid=(assets>=0)&(assets<candidate.platform.outcomes.numerator.sign.numel())
-            error=(enabled & ~valid).to(torch.int32)
-            if owners.numel():
-                error=error | (enabled & (owners[assets.clamp(0,owners.numel()-1)]!=torch.arange(roots,device=local.device))).to(torch.int32)
-            fault=candidate.fault | torch.where(enabled,relation.fault.reshape(roots,width).gather(1,local[:,None]).flatten(),0) | error
-            selected=take_ratio(outcome,owners)
-            actual=torch.arange(owners.numel(),device=owners.device)==assets[owners]
-            zero=ExactRational.ratio(selected.numerator.constant(0),selected.denominator.constant(1))
-            outcome_delta=ExactRational(selected.numerator.select(actual,zero.numerator),selected.denominator.select(actual,zero.denominator))
+            outcome_delta=self.columns.outcome_delta(index,owners)
+            fault=candidate.fault | torch.where(enabled,relation.fault.reshape(roots,width).gather(1,local[:,None]).flatten() | self.columns.outcome_fault(index,owners),0)
             # 无效目录/旧fault不调用可提交的经济候选。
             platform,event=candidate.platform.apply_transition(sequence,balances,outcome_delta,
                 enabled & (fault==0),torch.zeros_like(enabled),torch.ones_like(enabled))

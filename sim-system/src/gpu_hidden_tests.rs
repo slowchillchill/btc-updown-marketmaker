@@ -218,10 +218,11 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool) {
                 opened.clone(),reference.clone(),reference,"create-public".into(),"gpu-hidden-terminal".into());
             Box::new(GpuNoeReferencePort {memory,durable,normalization_reference:normalization_capture,normalization_core:None})
         })),finality).await;
-    // 有pending成交例只安装一个显式Registered步骤，非正式训练scenario。
+    // 有pending成交例显式Registered→TerminalSuccess，有限工程scenario非训练默认。
     let settlement_scenario=crate::ResolutionRedeemScenarioV1 {
         steps:if with_pending {vec![crate::ResolutionRedeemScenarioStepV1 {offset_ms:1,
-            event:crate::ResolutionRedeemScenarioEventV1::SubmissionReceipt(crate::SettlementSubmissionReceiptV1::Registered)}]} else {Vec::new()},costs:Vec::new()};
+            event:crate::ResolutionRedeemScenarioEventV1::SubmissionReceipt(crate::SettlementSubmissionReceiptV1::Registered)},
+            crate::ResolutionRedeemScenarioStepV1 {offset_ms:20001,event:crate::ResolutionRedeemScenarioEventV1::Terminal(crate::SettlementTerminalV1::Success)}]} else {Vec::new()},costs:Vec::new()};
     execution.configure_resolution_redeem_v1(settlement_scenario.clone()).unwrap();
     let observation=saved.borrow_mut().take().unwrap();
     // 开户/初始市场已由同一原端口接纳；唯一消费者先领取初始化人口。
@@ -397,6 +398,7 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool) {
         }
     }
     let mut settlement_reference=None;
+    let mut settlement_success_reference=None;
     if with_pending {
         use contracts::economics::{SettlementRequestV1,SettlementRequestIdV1};
         use crate::matching::settlement::SettlementOperationV1;
@@ -428,9 +430,32 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool) {
         settlement_reference=Some(serde_json::json!({"request":request,"sent_at":sent_at,"at":at,"scenario":settlement_scenario,
             "records":rows,"ledger":gpu_ledger_reservation_checkpoint(&ledger,"Registered_request"),
             "public_request":ledger.economic_read().unwrap().resolutions().next().unwrap().request}));
+        let success_at=state.session.as_ref().unwrap().execution_state.next_settlement_clock_at_utc_ms().unwrap();
+        assert!(success_at>60000,"真实成功时钟保持前一公开领取截点之后");
+        let mut output=LogicalDriveOutputV2::default();
+        state=drain_scheduled_obligations_at_v2(state,success_at,execution.actor._rule_snapshot.snapshot(),
+            execution.actor._finality_policy.as_ref(),&mut output).unwrap();
+        assert_eq!(output.lifecycle.len(),1);
+        state=gpu_accept_projection_reference(&mut execution.actor,state,BusinessReducerOutputV2::LogicalDrive(output),&mut batches);
+        execution.actor.projection_port.close_receive_prefix(80000);
+        execution.actor.projection_port.observe_public_time(&crate::public_consumption::TrustedActorExecutionTimeV1(
+            crate::public_consumption::ActorTimeRecordV1 {run_id:execution.actor.opened.run_id.clone(),drive_position:2,logical_time_utc_ms:80000}));
+        let received=observation.take_closed_records();
+        assert_eq!(received.len(),2,"成功Request与账户经济是两条NOE，共享一反馈private序");
+        let rows=received.iter().map(|r|serde_json::json!({"record":r.record(),"position":r.position(),"visibility":r.visibility()})).collect::<Vec<_>>();
+        for record in &received {ledger.apply_noe_memory_v2(record).unwrap();}
+        let read=ledger.economic_read().unwrap();
+        settlement_success_reference=Some(serde_json::json!({"at":success_at,"records":rows,
+            "ledger":gpu_ledger_reservation_checkpoint(&ledger,"TerminalSuccess_redemption"),
+            "public_request":read.resolutions().next().unwrap().request,"cash":read.cash(),
+            "directional_cash":read.residual_cash().directional_cash_pusd,
+            "resolutions":read.resolutions().map(|r|serde_json::json!({"resolved":r.resolved,"request":r.request,
+                "category":r.settlement_cost_attribution,"economic_predecessors_closed":r.economic_predecessors_closed,
+                "paired_receivable":r.paired_receivable_pusd,"orphan_receivable":r.winner_orphan_receivable_pusd})).collect::<Vec<_>>()}));
+
     }
     let input = serde_json::json!({"assets":assets,"buckets":buckets,"market_end":MARKET_END_AT,"with_pending":with_pending,
-        "settlement_reference":settlement_reference,
+        "settlement_reference":settlement_reference,"settlement_success_reference":settlement_success_reference,
         "engineering_finality_path":finality_path,"maker_checkpoints":maker_checkpoints,"finality_reference":finality_reference,
         "original_controls":controls,"qualified_sources":qualified_sources,"resolved_records":records,
         "ledger_before":ledger_before,"ledger_after":ledger_after,"ledger_resolutions":resolutions,

@@ -1033,3 +1033,24 @@ SIM `SettlementRegistrations` 当前只消费显式单Registered步骤的有限s
 该有限验证继续原26000/27000 Maker→31000 Terminal→32000 MINED→33000 CONFIRMED来源；在实际50000公开cutoff第一次符合发送门后，请求出站到达加scenario offset1产生Registered。原参考调用实际reduce_actor_input_v2与scheduled obligation消费、finalizer、唯一Memory及Ledger；设备侧从公开冻结选择请求并由后台登记/阶段0时钟生成反馈，原结果只检查金额/位置/时间/状态。源profile和单Registered步骤是工程输入，不冻结正式训练延迟/费用/失败查询重试参数，完整宿主和清偿继续接线。
 
 SIM阶段选择同时绑定实际SettlementRegistrations对象。首次请求登记改变下一阶段0时钟后，登记前的选择失效，须沿同一设备时钟重新选择；此来源绑定不读取设备业务值回CPU。Registered步骤与同Emitter/NOE反馈共同提交，发射序号故障保留首次登记及未消费scenario。
+
+
+### 请求式清偿的成功经济接线
+
+`SettlementRegistrations` 的显式有限场景可在 `Registered` 后调度
+`TerminalSuccess`。成功步骤读取同一根实际资产余额，按原 token 的长度及字串序
+输出两个成员，零变化成员不进入人口。BTC 二元来源合格 payout 为赢家 1、输家 0；
+销份额与到账保持原微单位，正输家余额即使现金变化为零仍产生原经济转移。
+成功守卫阻止重复销份额；这不授权首次发送零应收请求。
+
+NOE `schema21` 将完整判定／政策身份、八列余额及原多资产成员写成一条经济事实。
+共享传输和 Ledger 按成员人口消费，不拆平台经济序号。Ledger 先等待公开 Resolution
+关联和平台直接前驱，再同事务销实际 token 成本、记录已兑付配对与孤腿量。
+未兑付配对到账归 Maker，其余到账归 Directional；费用不因清偿撤回。
+Request 证据仍独立占一个账本条目，本身不改变余额或应收。
+
+当前自然短例沿原 TypedRaw、GTC、Maker、Terminal、MINED／CONFIRMED 与首次
+请求后追加成功步骤。`Registered` 偏移 1、成功偏移 20001、公开领取截点
+60000／80000 均为有限工程输入，不是正式训练场景。该例只有一腿正余额；
+双腿同时非零、原 Query／Retry、费用及完整宿主仍需后续实际来源接线与验证。
+当前不据两成员物理容量签发完整根或长期容量结论。

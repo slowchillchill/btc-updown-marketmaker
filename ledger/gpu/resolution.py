@@ -1,7 +1,7 @@
 """公开Resolved事实的首次安装和未兑付应收，归Ledger经济层。
 
 完整Terminal与canonical身份借同一不可变来源字典。冷绑定按原token匹配
-payout，不按vector位置猜资产。请求、费用和兑付仍须各自真实事实接入。
+payout，不按vector位置猜资产。Request与清偿由独立真实事实提交，费用尚未接入。
 """
 from dataclasses import dataclass, replace
 import torch
@@ -85,17 +85,24 @@ class MarketResolutions:
     fault: torch.Tensor
     root_fault: torch.Tensor
     requests: PublicSettlementRequests
+    redeemed_pair: object
+    redeemed_orphan: object
+    realized_pnl: object
+    directional_cash: object
 
     @classmethod
     def open(cls, pools, markets, sources, *, known=True):
         assets = torch.stack([markets.asset_indices, pools.counterpart[markets.asset_indices]], 1)
         count = assets.size(0)
         zero = ExactInt.from_i64_tensor(torch.zeros(count*2, dtype=torch.int64, device=assets.device))
+        market_zero=ExactInt.from_i64_tensor(torch.zeros(count,dtype=torch.int64,device=assets.device))
+        amount=ExactRational(market_zero,market_zero.constant(1))
         return cls(sources, markets.roots, markets.conditions, assets,
             torch.zeros(count, dtype=torch.bool, device=assets.device), torch.full_like(markets.conditions, -1),
             torch.full_like(markets.conditions, -1), torch.zeros(count, dtype=torch.bool, device=assets.device),
             ExactRational(zero, zero.constant(1)), markets.known & torch.full((count,), known, dtype=torch.bool, device=assets.device),
-            markets.fault.clone(), pools.fault.clone(), PublicSettlementRequests.empty(markets.conditions))
+            markets.fault.clone(), pools.fault.clone(), PublicSettlementRequests.empty(markets.conditions),
+            amount,ExactRational(zero,zero.constant(1)),amount,amount)
 
     def observe(self, condition, identity, terminal, pools, enabled):
         roots = pools.fault.numel()
@@ -136,6 +143,10 @@ class MarketResolutions:
         return replace(self, **{name:torch.where(use, getattr(self, name), getattr(original, name))
             for name in ('present', 'identities', 'terminals', 'maker_category', 'known')},
             payouts=select(self.payouts, use.repeat_interleave(2), original.payouts),
+            redeemed_pair=select(self.redeemed_pair,use,original.redeemed_pair),
+            redeemed_orphan=select(self.redeemed_orphan,use.repeat_interleave(2),original.redeemed_orphan),
+            realized_pnl=select(self.realized_pnl,use,original.realized_pnl),
+            directional_cash=select(self.directional_cash,use,original.directional_cash),
             requests=PublicSettlementRequests(**{name:torch.where(use,getattr(self.requests,name),getattr(original.requests,name))
                 for name in ('present','policies','outcomes','observations')}))
 
@@ -153,15 +164,45 @@ class MarketResolutions:
             torch.where(use,observation[self.roots],self.requests.observations))
         return replace(self,requests=requests,root_fault=root_fault),ready
 
-    def orphan_value(self, pools):
+    def associated(self,condition,identity):
+        member=self.present & (self.conditions==condition[self.roots]) & (self.identities==identity[self.roots])
+        return torch.zeros_like(condition,dtype=torch.int32).scatter_reduce(0,self.roots,member.to(torch.int32),reduce='amax').bool()
+
+    def redeem(self,condition,identity,cash,removed_cost,pools,enabled):
+        """原经济到账按未兑付pair与其余现金归属；Request本身不清应收。"""
+        selected=self.present & (self.conditions==condition[self.roots]) & (self.identities==identity[self.roots]) & enabled[self.roots]
+        paired=take_ratio(pools.paired_quantity,self.assets[:,0])
+        pair_cash=paired-self.redeemed_pair
+        incoming=take_ratio(cash,self.roots)
+        direction=incoming-pair_cash
+        pnl=take_ratio(cash-removed_cost,self.roots)
+        fault=self.root_fault.clone()
+        fault |= Numbers.combine_fault_rows(torch.where(self.roots[None,:]==torch.arange(enabled.numel(),device=enabled.device)[:,None],
+            torch.where(selected,pair_cash.fault|direction.fault|pnl.fault,0)[None,:],0))
+        selected &= fault[self.roots]==0
+        from trade_success import sum_rows
+        zero=ExactRational(pair_cash.numerator.constant(0),pair_cash.denominator.constant(1))
+        root_count=enabled.numel()
+        positions=torch.arange(self.roots.numel(),device=enabled.device).expand(root_count,-1)
+        amounts=take_ratio(pair_cash,positions.flatten())
+        absent=ExactRational(amounts.numerator.constant(0),amounts.denominator.constant(1))
+        maker=sum_rows(select(amounts,((self.roots[None,:]==torch.arange(root_count,device=enabled.device)[:,None]) & selected[None,:]).flatten(),absent),root_count,self.roots.numel())
+        return replace(self,redeemed_pair=select(paired,selected,self.redeemed_pair),
+            redeemed_orphan=select(take_ratio(pools.quantity,self.assets.flatten()),selected.repeat_interleave(2),self.redeemed_orphan),
+            realized_pnl=self.realized_pnl+select(pnl,selected,zero),
+            directional_cash=self.directional_cash+select(direction,selected,zero),root_fault=fault),maker
+
+    def orphan_value(self, pools, *, unredeemed=False):
         quantities = take_ratio(pools.quantity, self.assets.flatten())
+        if unredeemed:
+            quantities=quantities-self.redeemed_orphan
         amounts = quantities*self.payouts
         axes = torch.arange(self.roots.numel(), device=self.roots.device)*2
         return take_ratio(amounts, axes) + take_ratio(amounts, axes+1)
 
     def read(self, pools):
-        pair = take_ratio(pools.paired_quantity, self.assets[:, 0])
-        orphan = self.orphan_value(pools)
+        pair = take_ratio(pools.paired_quantity, self.assets[:, 0])-self.redeemed_pair
+        orphan = self.orphan_value(pools,unredeemed=True)
         zero = ExactRational(pair.numerator.constant(0), pair.denominator.constant(1))
         return ResolutionRead(self.present, self.identities, self.terminals, self.maker_category,
             select(pair, self.present, zero), select(orphan, self.present, zero), self.known,

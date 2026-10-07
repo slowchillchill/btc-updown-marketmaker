@@ -313,8 +313,8 @@ def main():
         assert actions.request.cpu().tolist()==[True] and actions.query.cpu().tolist()==[False]
         assert not frozen.commitments.present.any().cpu().item()
         reference=source['settlement_reference']
-        assert reference['scenario']=={'steps':[{'offset_ms':1,'event':{'SubmissionReceipt':'Registered'}}],'costs':[]}
-        runtime=runtime.install_settlement_registration(tensor([[0]]),tensor([[1]]))
+        assert reference['scenario']=={'steps':[{'offset_ms':1,'event':{'SubmissionReceipt':'Registered'}},{'offset_ms':20001,'event':{'Terminal':'Success'}}],'costs':[]}
+        runtime=runtime.install_settlement_registration(tensor([[0]]),tensor([[1]]),tensor([[20001]]))
         identity_bytes,identity_offsets=byte_column([value.encode('utf-8') for value in block.terminal_columns.canonical_ids])
         old_choice=runtime.choose(None,None,tensor([60000]),enabled)
         runtime=Numbers.run_exact_batch(lambda:runtime.register_resolution_request(actions,sampler,identity_bytes,identity_offsets))
@@ -372,17 +372,57 @@ def main():
         assert not no_action.request.any().cpu().item() and not no_action.query.any().cpu().item()
         coordinator,no_action=Numbers.run_exact_batch(lambda:coordinator.advance(next_frozen,enabled))
         assert not no_action.request.any().cpu().item() and not no_action.query.any().cpu().item()
-        assert not backend.next_clock().present.any().cpu().item()
+        success_reference=source['settlement_success_reference']
+        assert backend.next_clock().at.cpu().tolist()==[success_reference['at']]
+        old_registered=public
+        from settlement_redemption import RedemptionSources
+        redemption_sources=RedemptionSources.bind(block.terminal_columns,[a['token_id'] for a in block.assets],
+            [0,0],[0,1],1)
+        horizon.fill_(80000)
+        choice=runtime.choose(None,None,horizon,enabled)
+        assert choice.enabled(0).cpu().tolist()==[True] and choice.at.cpu().tolist()==[success_reference['at']]
+        runtime,projection,success_batch=Numbers.run_exact_batch(lambda:runtime.settlement_success(choice,projection,sampler,zero,redemption_sources))
+        assert success_batch.fault.cpu().tolist()==[0] and success_batch.emitted.sum().cpu().item()==2
+        assert values(runtime.account.outcomes)==[0,0]
+        original_success=success_reference['ledger']['projection']
+        assert values(runtime.account.cash)==[units(original_success['platform_confirmed_projection']['cash_pusd'])]
+        public=Numbers.run_exact_batch(lambda:public.append_batch(projection.normalizer.bank,success_batch))
+        gates=gates.set_receive(tensor([80000]),enabled).set_public(tensor([80000]),enabled)
+        progress('actual_success_redemption_public_receive_begin',physical_columns=public.waiting.received.size(1))
+        public,success_received=Numbers.run_exact_batch(lambda:public.receive(projection.normalizer.bank,gates,torch.ones_like(public.waiting.received)))
+        progress('actual_success_redemption_public_receive_end')
+        assert success_received.fault.cpu().tolist()==[0] and success_received.closed.emitted.sum().cpu().item()==2
+        assert not (public.waiting.received & ~public.waiting.consumed).any().cpu().item()
+        assert values(public.ledger.current_entry_sequence)==[original_success['ledger_entry_seq']]
+        assert values(public.ledger.platform.platform_source_prefix)==[original_success['platform_source_prefix']]
+        assert [Fraction(n,d) for n,d in zip(values(public.ledger.platform.balances.numerator),values(public.ledger.platform.balances.denominator))]==[Fraction(original_success['platform_confirmed_projection'][key]) for key in names]
+        assert values(public.ledger.platform.outcomes.numerator)==[0,0]
+        cost=Numbers.run_exact_batch(lambda:public.ledger.position_costs.read())
+        assert cost.known.cpu().tolist()==[True] and values(cost.cost.numerator)==[0]
+        assert [Fraction(n,d) for n,d in zip(values(public.ledger.resolutions.realized_pnl.numerator),values(public.ledger.resolutions.realized_pnl.denominator))]==[Fraction(original_success['platform_confirmed_projection']['realized_pnl_pusd'])]
+        cash=success_reference['cash']
+        assert [Fraction(n,d) for n,d in zip(values(public.ledger.maker_cash.numerator),values(public.ledger.maker_cash.denominator))]==[Fraction(cash['maker_available_pusd'])+Fraction(cash['maker_reserved_pusd'])]
+        assert [Fraction(n,d) for n,d in zip(values(public.ledger.resolutions.directional_cash.numerator),values(public.ledger.resolutions.directional_cash.denominator))]==[Fraction(success_reference['directional_cash'])]
+        result=Numbers.run_exact_batch(lambda:public.ledger.resolutions.read(public.ledger.success_pools))
+        assert values(result.paired_receivable.numerator)==[0] and values(result.winner_orphan_receivable.numerator)==[0]
+        assert public.ledger.resolutions.requests.outcomes.cpu().tolist()==[2]
+        assert not runtime.settlement_registrations.next_clock().present.any().cpu().item()
+        assert values(old_registered.ledger.platform.outcomes.numerator)!=[0,0]
+        assert old_registered.ledger.resolutions.requests.outcomes.cpu().tolist()==[0]
+        repeated,repeat_closed=Numbers.run_exact_batch(lambda:public.receive(projection.normalizer.bank,gates,torch.ones_like(public.waiting.received)))
+        compare(repeated.ledger.platform,public.ledger.platform,'success_receive_repeat_cash_and_outcomes')
+        assert not repeat_closed.closed.emitted.any().cpu().item()
     print(json.dumps({'actual_empty_source_Books_to_outer_GTC_new_runtime_bid_checked':True,
         'actual_Terminal_order_close_tag5_release_and_Resolved_same_public_Ledger_checked':True,
         'original_end_clears_FIFO_without_releasing_GTC_then_Terminal_releases_once_checked':True,
         'new_schema18_19_complete_resolution_identity_and_original_NOE_positions_checked':True,
         'old_public_prefix_and_resource_denied_Terminal_preserved_checked':True,
-        'actual_records':6+int(with_pending)+sum(len(r['records']) for r in source['finality_reference'])+(1 if with_pending else 0),
+        'actual_records':6+int(with_pending)+sum(len(r['records']) for r in source['finality_reference'])+(3 if with_pending else 0),
         'actual_records_before_post_resolution_finality':6+int(with_pending),'pending_actual_fill_population':int(with_pending),
         'actual_Maker_pending_Terminal_then_MINED_CONFIRMED_and_market_result_checked':with_pending,
         'public_Ledger_economic_predecessors_and_Maker_gate_checked':with_pending,
         'first_public_Request_backend_Registered_same_NOE_Ledger_checked':with_pending,
+        'actual_success_redemption_one_economic_fact_cost_and_cash_attribution_checked':with_pending,
         'Registered_feedback_fault_keeps_same_runtime_scenario_prefix_checked':with_pending,
         'first_registration_invalidates_previous_drive_choice_checked':with_pending,
         'growth_new_slot_does_not_alias_old_pending_identity_checked':with_pending,'full_root_and_requested_settlement':False,

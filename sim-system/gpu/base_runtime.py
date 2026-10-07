@@ -27,11 +27,11 @@ class BaseSimRuntime:
     resolution_obligations: object = None
     settlement_registrations: object = None  # 仅显式单Registered工程scenario；不代表完整结算后端。
 
-    def install_settlement_registration(self,conditions,receipt_offsets):
+    def install_settlement_registration(self,conditions,receipt_offsets,success_offsets=None):
         from settlement_registration import SettlementRegistrations
         if self.settlement_registrations is not None:
             return self
-        return replace(self,settlement_registrations=SettlementRegistrations.empty(conditions,receipt_offsets))
+        return replace(self,settlement_registrations=SettlementRegistrations.empty(conditions,receipt_offsets,success_offsets))
 
     def register_resolution_request(self,actions,sampler,identity_bytes,identity_offsets):
         if self.settlement_registrations is None or self.resolution_obligations is None:
@@ -55,6 +55,21 @@ class BaseSimRuntime:
         batch=replace(batch,emitted=batch.emitted & (fault==0)[:,None],
             economic_enabled=batch.economic_enabled & (fault==0)[:,None],fault=fault)
         return replace(self,settlement_registrations=backend),projected,batch
+
+    def settlement_success(self,choice,projection,sampler,policy,sources):
+        self._source(choice)
+        if sources.columns is not self.hidden_frontier.columns.source.terminal_columns:
+            raise ValueError('兑付须绑定同一实际原Terminal字典')
+        backend,account,feedback=self.settlement_registrations.advance_success(choice.at,choice.enabled(0),
+            self.account,sources,self.resolution_obligations)
+        condition,identity,assets,tokens,delta,emitted,fault=feedback
+        projected,batch=projection.settlement_success(sampler,condition,identity,policy,assets,tokens,delta,choice.at,emitted,fault | choice.fault)
+        fault |= batch.fault | choice.fault
+        valid=fault==0
+        backend=replace(backend.coordinated(self.settlement_registrations,valid),fault=fault)
+        account=account.coordinate_result(self.account,fault)
+        batch=replace(batch,emitted=batch.emitted & valid[:,None],economic_enabled=batch.economic_enabled & valid[:,None],fault=fault)
+        return replace(self,settlement_registrations=backend,account=account),projected,batch
 
     def install_hidden_resolutions(self):
         """冷安装判定存储；不把未来Terminal、订单或成交当已应用事实。"""

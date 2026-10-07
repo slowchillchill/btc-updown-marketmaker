@@ -51,6 +51,7 @@ class ProjectionBatch:
     economic_outcomes: object
     economic_assets: torch.Tensor
     economic_enabled: torch.Tensor
+    economic_outcome_list: object = None  # 多资产经济原成员；旧单资产列保无损兼容视图。
     cancellation_method: torch.Tensor | None = None  # 原直接响应method冷字典坐标，非反馈为-1。
 
 
@@ -221,6 +222,29 @@ class Projection:
         return bound.finality(sampler,_take_record(pool.records,index),frame,origin.prices,rebate_rate,at,
             maker_results=maker_results,liquidity_role=origin.roles,maker_fee_equivalent=equivalent)
 
+    def settlement_success(self,sampler,conditions,resolutions,policy,assets,tokens,delta,at,emitted,fault):
+        """一条实际成功Request及可选多资产经济，原同private/source顺序。"""
+        from lifecycle import map_settlement_request
+        from economic import map_resolution_redemption
+        roots=emitted.numel()
+        active=emitted[:,None]
+        counts=1+delta.emitted.to(torch.int64)
+        categories=torch.full_like(active,3,dtype=torch.int64)
+        ordinals=map_source_ordinals(active,categories,counts[:,None],fault[:,None])
+        emitter,frame=self.emitter.emit(sampler,active,torch.zeros_like(active),at[:,None],at[:,None],
+            torch.zeros_like(at[:,None]),fault[:,None])
+        private=frame.private_sequences
+        batch=frame.batch_sequences
+        received=frame.received_at[:,0]
+        first=ordinals.first_ordinals[:,0]
+        request=map_settlement_request(self.account_slots,conditions,resolutions,policy,
+            torch.full_like(conditions,2),torch.full_like(conditions,9),private,first,frame.emitted[:,0])
+        economic=map_resolution_redemption(delta,self.account_slots,conditions,resolutions,policy,assets,tokens,
+            self.asset_roots,private,first+1,at)
+        records=[(request,EVIDENCE,private,batch,received,torch.full_like(conditions,3),at,emitted),
+            (economic,ECONOMIC,private,batch,received,torch.full_like(conditions,3),at,delta.emitted)]
+        return self._finish(emitter,records,fault | frame.root_fault | ordinals.fault)
+
     def _record(self,emitter,mapped,kind,private,batch,received):
         roots=self.account_slots.numel()
         size=roots
@@ -305,6 +329,16 @@ class Projection:
             fields_integer([value.denominator for value in balance_fields],denominator_width))
         def take_ratio(value,index):
             return ExactRational(_take(value.numerator,index),_take(value.denominator,index))
+        from fields import RecordList
+        from transport import append_record_lists,take_record_list
+        vectors=None
+        for col,(mapped,kind,*_) in enumerate(records):
+            value=getattr(mapped,'outcome_list',None) if kind==ECONOMIC else None
+            if value is None:
+                value=RecordList((economic_assets[col],economic_outcomes[col]),
+                    (economic_masks[col] & (economic_outcomes[col].numerator.sign!=0))[:,None])
+            vectors=value if vectors is None else append_record_lists(vectors,value,roots,col,1)
+        vectors=take_record_list(vectors,locations)
         economic_sequence=_take(cat_integer(economic_sequences),locations)
         economic_balance=take_ratio(packed_balance,(locations[:,None]*8+torch.arange(8,device=rows.device)).flatten())
         economic_outcome=take_ratio(cat_ratio(economic_outcomes),locations)
@@ -323,7 +357,7 @@ class Projection:
         return replace(working,emitter=coordinated,normalizer=candidate),ProjectionBatch(normalized,
             private_values,batch_values,ordinals,times,normalized.rows,normalized.emitted,fault,
             categories,platforms,requests,items,self.context_slots[:,None].expand_as(rows),self.run_slots[:,None].expand_as(rows),
-            economic_sequence,economic_balance,economic_outcome,torch.stack(economic_assets,1).gather(1,order),economic_mask)
+            economic_sequence,economic_balance,economic_outcome,torch.stack(economic_assets,1).gather(1,order),economic_mask,vectors)
 
     def cancellation(self,sampler,targets,at,direct_received,method,completed):
         """已处理完整单资产请求的真实取消效果，保原双重顺序。

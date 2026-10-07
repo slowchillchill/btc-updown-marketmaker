@@ -210,18 +210,22 @@ class AdmissionLifecycle:
             (outcome_kind==OUT_LOGICAL_CONFLICT)|(outcome_kind==OUT_ECONOMIC_CONFLICT))
         requested=requested & ~not_applicable
         fault=self.fault | torch.where(requested,self.lifecycle.fault[root,local],0)
-        economic=requested&(outcome_kind==OUT_FACT)&((tag==11)|(tag==18))
+        economic=requested&(outcome_kind==OUT_FACT)&((tag==11)|(tag==18)|(tag==21))
         sequence=_take(self.columns.sequences,index)
         balances=take_ratio(self.columns.balances,(index[:,None]*8+torch.arange(8,device=index.device)).flatten())
-        selected=take_ratio(self.columns.outcomes,index)
         owners=self.platform.asset_roots
         assets=self.columns.asset_indices[root,local]
-        outcome=take_ratio(selected,owners)
-        changed=torch.arange(owners.numel(),device=owners.device)==assets[owners]
-        zero=ExactRational.ratio(outcome.numerator.constant(0),outcome.denominator.constant(1))
-        outcome=ExactRational(outcome.numerator.select(changed,zero.numerator),outcome.denominator.select(changed,zero.denominator))
+        outcome=self.columns.outcome_delta(index,owners)
+        fault |= torch.where(economic,self.columns.outcome_fault(index,owners),0)
         next_entry=self.current_entry_sequence+self.current_entry_sequence.constant(1)
         fault=fault | torch.where(requested,sequence_fault(next_entry),0)
+        redemption=economic & (tag==21)
+        if self.resolutions is None:
+            fault |= redemption.to(torch.int32)
+        else:
+            resolved_ready=self.resolutions.associated(self.lifecycle.conditions[root,local],
+                self.lifecycle.resolution_identities[root,local])
+            association_available=association_available & (~redemption | resolved_ready)
         platform,result=self.platform.apply_transition(sequence,balances,outcome,economic&(fault==0),
             torch.zeros_like(economic),association_available)
         cash_delta=take_ratio(balances,root*8)
@@ -370,6 +374,7 @@ class AdmissionLifecycle:
             fault |= population.fault
             funds_ready &= population_ready
         use=use & funds_ready
+        position_costs,removed_cost=position_costs.redeem(outcome,owners,redemption & result.applied & use)
         resolutions=self.resolutions
         resolved_event=lifecycle_use & (tag==17)
         request_event=lifecycle_use & (tag==20)
@@ -385,7 +390,13 @@ class AdmissionLifecycle:
                 self.lifecycle.settlement_outcomes[root,local],self.lifecycle.settlement_observations[root,local],
                 request_event & use & (fault==0))
             use &= ~request_event | request_ready
-            fault |= resolutions.root_fault
+            resolutions,maker_delta=resolutions.redeem(self.lifecycle.conditions[root,local],
+                self.lifecycle.resolution_identities[root,local],cash_delta,removed_cost,success_pools,
+                redemption & result.applied & use & (fault==0))
+            maker_cash=self.maker_cash+ExactRational(
+                maker_delta.numerator.select(redemption,cash_delta.numerator),
+                maker_delta.denominator.select(redemption,cash_delta.denominator))
+            fault |= resolutions.root_fault | torch.where(result.applied,maker_cash.fault,0)
         markets=self.unresolved_markets
         if markets is not None:
             markets=markets.refresh(success_pools,trade_success,days,use & (fault==0),resolutions=resolutions)

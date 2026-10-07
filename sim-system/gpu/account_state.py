@@ -191,6 +191,33 @@ class PlatformAccountState:
         movement = replace(self.no_movement(),available=amount,principal=amount.negated())
         return candidate.apply_movement(movement,requested & (amount.sign > 0) & (candidate.fault == 0))
 
+    def redeem_outcomes(self,assets,payouts,requested):
+        """原二元BTC请求兑付：两腿正余额销份额，0/1 payout保精确微单位。"""
+        from asset_buy import take_ratio
+        roots=self.fault.numel()
+        if assets.shape!=(roots,2) or assets.dtype!=torch.int64 or assets.device!=self.asset_roots.device:
+            raise TypeError('兑付须同设备原两腿资产[root,2]')
+        safe=assets.clamp(0,max(self.asset_roots.numel()-1,0))
+        valid=(assets>=0)&(assets<self.asset_roots.numel())
+        if self.asset_roots.numel()==0:
+            candidate=replace(self,fault=self.fault | requested.to(torch.int32))
+            return candidate.apply_movement(self.no_movement(),torch.zeros_like(requested))
+        valid &= self.asset_roots[safe]==torch.arange(roots,device=assets.device)[:,None]
+        quantity=_take(self.outcomes,safe.flatten())
+        amount=ExactRational(quantity,quantity.constant(1))*payouts
+        left=torch.arange(roots,device=assets.device)*2
+        total=take_ratio(amount,left)+take_ratio(amount,left+1)
+        units,remainder=total.numerator.divrem(total.denominator)
+        # 原auto_redeem_calculation到账转换为微pUSD；源BTC合格Terminal payout为0/1。
+        error=Numbers.combine_fault_rows((~valid).to(torch.int32)) | (assets[:,0]==assets[:,1]).to(torch.int32)
+        error |= total.fault | units.fault | remainder.fault | (remainder.sign!=0).to(torch.int32)
+        member=(torch.arange(self.asset_roots.numel(),device=assets.device)[:,None]==assets[self.asset_roots]).any(1)
+        outcomes=self.outcomes.negated().select(member,self.outcomes.constant(0))
+        has_balance=quantity.sign.reshape(roots,2).gt(0).any(1)
+        candidate=replace(self,fault=self.fault | torch.where(requested,error,0))
+        return candidate.apply_movement(replace(self.no_movement(),cash=units,available=units,outcomes=outcomes),
+            requested & has_balance & (candidate.fault==0))
+
     def accrue_rebate(self, amount, maker, requested):
         """原返佣应计独立经济转移；现金与资金占款保持原值。"""
         roots = self.cash.sign.numel()

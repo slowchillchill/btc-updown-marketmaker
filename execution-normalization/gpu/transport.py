@@ -28,9 +28,49 @@ def append_root_fields(left, right, roots, left_width, right_width, *, fields=1)
     raise TypeError('共享记录字段须为原精确数值或张量')
 
 
+def take_record_list(value, rows):
+    from fields import RecordList,take_field
+    width=value.present.size(1)
+    positions=(rows[:,None]*width+torch.arange(width,device=rows.device)).flatten()
+    return RecordList(tuple(take_field(member,positions) for member in value.fields),value.present[rows])
+
+
+def append_record_lists(left,right,roots,left_width,right_width):
+    """原变长成员人口按根/记录追加，padding不进入内容等值或经济量。"""
+    from fields import RecordList
+    width=max(left.present.size(1),right.present.size(1))
+    def pad(value,rows,old,*,denominator=False):
+        if isinstance(value,ExactRational):
+            return ExactRational(pad(value.numerator,rows,old),pad(value.denominator,rows,old,denominator=True))
+        if isinstance(value,torch.Tensor):
+            return torch.nn.functional.pad(value.reshape(rows,old),(0,width-old)).flatten()
+        if old==0:
+            return ExactInt.from_i64_tensor(torch.full((rows*width,),int(denominator),dtype=torch.int64,device=left.present.device))
+        column=torch.arange(width,device=left.present.device)
+        positions=(torch.arange(rows,device=column.device)[:,None]*old+column.clamp_max(old-1)).flatten()
+        result=_take(value,positions)
+        return result.select((column<old).expand(rows,width).flatten(),result.constant(int(denominator)))
+    members=tuple(append_root_fields(pad(a,roots*left_width,left.present.size(1)),
+        pad(b,roots*right_width,right.present.size(1)),roots,left_width,right_width,fields=width)
+        for a,b in zip(left.fields,right.fields,strict=True))
+    present=append_root_fields(torch.nn.functional.pad(left.present,(0,width-left.present.size(1))),
+        torch.nn.functional.pad(right.present,(0,width-right.present.size(1))),roots,left_width,right_width,fields=width)
+    return RecordList(members,present.reshape(-1,width))
+
+
+def batch_outcome_list(batch):
+    """旧单资产经济列的无损视图，新增多资产批沿同一成员格式传输。"""
+    from fields import RecordList
+    if batch.economic_outcome_list is not None:
+        return batch.economic_outcome_list
+    present=batch.economic_enabled.flatten() & (batch.economic_outcomes.numerator.sign!=0)
+    return RecordList((batch.economic_assets.flatten(),batch.economic_outcomes),present[:,None])
+
+
 def select_batch_columns(batch, order):
     """原批的不可变列视图；保留原record/private/batch身份及来源人口。"""
     from dataclasses import fields as members
+    from fields import RecordList
     roots,width=batch.rows.shape
     root=torch.arange(roots,device=order.device)[:,None]
     coordinates=(root*width+order).flatten()
@@ -41,6 +81,8 @@ def select_batch_columns(batch, order):
         value=getattr(batch,member.name)
         if value is None or member.name=='fault':
             updates[member.name]=value
+        elif isinstance(value,RecordList):
+            updates[member.name]=take_record_list(value,coordinates)
         elif member.name=='normalized':
             updates[member.name]=replace(value,**{name:getattr(value,name).gather(1,order)
                 for name in ['rows','outcomes','primary_fact_rows','emitted']})
@@ -125,5 +167,11 @@ def compact_committed_batches(batches):
         for batch,value in zip(batches,methods)])
     updates['economic_balances'] = ratio([batch.economic_balances for batch in batches], 8)
     updates['economic_outcomes'] = ratio([batch.economic_outcomes for batch in batches])
+    vectors=batch_outcome_list(first)
+    joined_width=widths[0]
+    for batch in batches[1:]:
+        vectors=append_record_lists(vectors,batch_outcome_list(batch),roots,joined_width,batch.rows.size(1))
+        joined_width+=batch.rows.size(1)
+    updates['economic_outcome_list']=take_record_list(vectors,index)
     merged = replace(first, normalized=normalized, fault=fault([batch.fault for batch in batches]), **updates)
     return (merged,), TransportPopulation(original_width, allocated, population)
