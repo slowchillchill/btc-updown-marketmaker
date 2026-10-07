@@ -880,6 +880,7 @@ quality/resync和精确shares前驱。`apply_hidden_base_transition`在同一候
 `BaseSimRuntime`在SIM所属模块保存这一持续装配：hidden是FIFO唯一持有者，请求、订单、账户、
 成交池和两类日历复用原状态；阶段候选绑定选择时的同一状态对象。
 GTC接纳和取消只替换其中的同一queue，最终性不重开账户，hidden候选继续核对完整源shares。
-role时间只对所选hidden/请求根推进，未选中根即使物理候选时点到end也不关闭盘口。
+role时间在所选hidden/请求之前推进；纯到期义务只有实际消费且该毫秒的fill/返佣钟已耗尽，
+才对对应根收尾，不能提前跳过同刻其它义务。未选中根即使物理候选时点到end也不关闭盘口。
 end清撮合段与订单释放仍分开。这个装配没有复制SIM业务或Ledger状态，但仍依赖调用者提供
 已准入terms、原selector、完整源桶及实际推进上界；外层设备循环与100ms公开冻结尚待闭合。

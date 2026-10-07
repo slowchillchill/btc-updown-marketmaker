@@ -144,7 +144,7 @@ def main():
             choice=choose()
             at=choice.at
             assert choice.enabled(2).cpu().tolist()==[True] and at.cpu().tolist()==[checkpoint['at']]
-            runtime,transition,market=runtime.finality(choice,maker_rate,rebate)
+            runtime,transition,market=runtime.finality(choice,maker_rate,rebate,tensor([source['market_end']]*2))
             fills,account,calendars=runtime.fills,runtime.account,runtime.calendars
             noe,batch=Numbers.run_exact_batch(lambda:noe.fill_from_origin(sampler,orders,fills,transition,
                 asset_tokens,calendars,rebate,at,maker_results=(market,)))
@@ -309,6 +309,19 @@ def main():
     orders = orders.resized(4)
     assert values(orders.read(slot).sequence) == [1]
     assert queue.order_ids[1][queue.kind[1] == 2].cpu().tolist() == [1]
+    # 前述真实新增工程GTC仍开放；纯Maker end义务必须清段而不释放订单/占款。
+    ending=BaseSimRuntime(replace(runtime.hidden,queues=queue),requests,orders,account,fills,calendars)
+    end_choice=ending.choose(hidden_source,hidden_eof,horizon,active)
+    assert end_choice.enabled(3).cpu().tolist()==[True] and end_choice.at.cpu().tolist()==[source['market_end']]
+    open_before=orders.read(next_effect.order.slots).quantity.open_base_units
+    principal_before=account.principal
+    ending,end_frame=ending.rebate_clock(end_choice,tensor([source['market_end']]*2))
+    assert end_frame.consumed.cpu().tolist()==[True]
+    assert ending.hidden.matching_closed.cpu().tolist()==[True,True]
+    assert ending.hidden.book_closed.cpu().tolist()==[True,True]
+    assert not ending.hidden.queues.kind.any().cpu().item()
+    assert values(ending.orders.read(next_effect.order.slots).quantity.open_base_units)==values(open_before)
+    assert values(ending.account.principal)==values(principal_before)
     torch.cuda.synchronize()
     print(json.dumps({'device_request_registration_to_real_GTC_acceptance_checked': True,
         'directory_routes_actual_hidden_maker_depletion_and_cancel_checked': True,
@@ -327,6 +340,7 @@ def main():
         'next_SIM_drive_from_actual_obligation_sources_controls_phase_masks_checked':True,
         'controlled_same_time_hidden_before_pending_and_unknown_source_pause_checked':True,
         'single_SIM_runtime_owns_hidden_queue_account_requests_orders_and_obligations_checked':True,
+        'pure_market_end_obligation_closes_matching_but_preserves_open_order_encumbrance_checked':True,
         'public_ledger':account_report,
         'original_SIM_checkpoints': len(source['checkpoints']),
         'elapsed_seconds_with_reference_reads': time.perf_counter()-started,

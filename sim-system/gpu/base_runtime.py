@@ -61,18 +61,33 @@ class BaseSimRuntime:
             choice.enabled(4),resync_inference,selected_paths,row_roots,fee_rate,fee_exponent,taker_rate)
         return replace(self,hidden=hidden,orders=orders,account=account,fills=fills,calendars=calendars),effects
 
-    def finality(self, choice, maker_rate, taker_rate):
+    def finality(self, choice, maker_rate, taker_rate, market_end):
         self._source(choice)
         fills,account,maker,taker,effect,market=Numbers.run_exact_batch(lambda:self.fills.advance_mixed(
             self.account,self.calendars.maker,self.calendars.taker,choice.at,maker_rate,taker_rate,
             enabled=choice.enabled(2)))
-        return replace(self,fills=fills,account=account,calendars=RebateCoordinator(maker,taker)),effect,market
+        candidate=replace(self,fills=fills,account=account,calendars=RebateCoordinator(maker,taker))
+        return candidate._finish_obligation_time(choice.at,effect.event.emitted,market_end),effect,market
 
-    def rebate_clock(self, choice):
+    def rebate_clock(self, choice, market_end):
         self._source(choice)
         calendars,account,effect=Numbers.run_exact_batch(lambda:self.calendars.advance_clock(
             self.account,choice.at,choice.enabled(3)))
-        return replace(self,calendars=calendars,account=account),effect
+        candidate=replace(self,calendars=calendars,account=account)
+        return candidate._finish_obligation_time(choice.at,effect.consumed,market_end),effect
+
+    def _finish_obligation_time(self, at, consumed, market_end):
+        """本Base装配实际义务已消费且本毫秒义务耗尽后，才推进role时间。
+
+        同刻还有其它fill或返佣钟时不提前收尾。Settlement/GTD未来装配仍须
+        在原更早阶段耗尽其义务，本方法不代替未交后端或原hidden桶关闭证明。
+        """
+        fill_at,_,has_fill=self.fills.next_obligation()
+        clock_at,_,has_clock=self.calendars.next_clock()
+        finished=consumed & ~(has_fill & (fill_at<=at)) & ~(has_clock & (clock_at<=at))
+        hidden=Numbers.run_exact_batch(lambda:self.hidden.advance_matching_time(at[self.account.asset_roots],
+            market_end,enabled=finished[self.account.asset_roots]))
+        return replace(self,hidden=hidden)
 
     def advance_role_time(self, choice, market_end):
         self._source(choice)
