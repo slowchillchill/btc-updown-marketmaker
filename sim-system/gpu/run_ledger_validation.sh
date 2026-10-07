@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # B路线已授权的有限纵向工程验证；只在AutoDL数据盘运行。
 set -euo pipefail
-case_name=${1:?传入 trade-read、maker-read、registry-reference、base-cancel 或 failed-fill}
+case_name=${1:?传入 trade-read、trade-records、maker-read、registry-reference、base-cancel 或 failed-fill}
 artifact_dir=${2:?传入数据盘上的新证据目录}
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
 case "$repo_root" in /root/autodl-tmp/*) ;; *) echo 'B计算必须在AutoDL数据盘' >&2; exit 2 ;; esac
@@ -30,6 +30,9 @@ run_test() {
     tail -4 "$artifact_dir/$log"
 }
 case "$case_name" in
+    trade-records)
+        run_test gpu_legal_multiask tests.log
+        ;;
     trade-read)
         run_test gpu_legal_multiask tests.log
         run_test gpu_actual_maker_mature_day_preserves_noe_batch_and_continuous_ledger maker-day.log

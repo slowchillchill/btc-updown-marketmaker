@@ -11,6 +11,27 @@ def validate(source):
     if not stages:
         return {'original_reservation_reference_available':False}
     begin,reserved,sent=stages[:3]
+    import sys
+    from pathlib import Path
+    sys.path[:0] = [str(Path(__file__).resolve().parents[2]/'model-train/native-inputs/gpu'),
+                   str(Path(__file__).resolve().parents[2]/'data-pipeline/gpu')]
+    from input_reservations import reservation_inputs
+    def check_native(book, reference):
+        inputs = Numbers.run_exact_batch(lambda:reservation_inputs(book,
+            torch.tensor([[[0],[-1]]], device='cuda'),
+            torch.tensor([[[True],[False]]], device='cuda'),
+            torch.ones((1,2), dtype=torch.bool, device='cuda')))
+        assert inputs.fault.cpu().tolist()==[0]
+        market = next(item for item in reference['projection']['market_projections'])
+        names = ['local_before_send_principal_pusd','local_before_send_immediate_fee_pusd','local_before_send_count',
+                 'local_after_send_unknown_principal_pusd','local_after_send_unknown_immediate_fee_pusd','local_after_send_unknown_count',
+                 'platform_confirmation_pending_economic_principal_pusd','platform_confirmation_pending_economic_immediate_fee_pusd',
+                 'platform_confirmation_pending_economic_count']
+        import math
+        expected = [math.log1p(float(market[name])) for name in names]
+        torch.testing.assert_close(inputs.values[0,0,:,0].cpu(),torch.tensor(expected),rtol=1e-6,atol=1e-7)
+        assert inputs.values[0,0,:,1:].cpu().tolist()==[[1.,1.]]*9
+        assert inputs.values[0,1].cpu().tolist()==[[0.,1.,1.]]*9
     roots=torch.tensor([0],device='cuda')
     enabled=torch.tensor([True],device='cuda')
     cost=Numbers.run_exact_batch(lambda:limit_buy_cost(integers([500]),rational(['0.3']),rational([source['fee_rate']]),
@@ -35,6 +56,7 @@ def validate(source):
     assert values(decision.current_ledger_sequence)==[reserved['projection']['ledger_entry_seq']]
     assert values(decision.current_local_prefix)==[reserved['projection']['ledger_local_prefix']]
     assert values(book.last_sequences)==[reserved['request']['last_ledger_entry_seq']]
+    check_native(book,reserved)
     amount=principal+fee
     for reference,state in [(reserved,book)]:
         local_pending,platform_pending=Numbers.run_exact_batch(state.pending)
@@ -48,6 +70,7 @@ def validate(source):
     book,required,changed=Numbers.run_exact_batch(lambda:book.submission_started(roots,roots,
         integers([sent['projection']['ledger_entry_seq']]),enabled))
     assert changed.cpu().tolist()==[True] and required.cpu().tolist()==[1]
+    check_native(book,sent)
     assert book.statuses.cpu().tolist()==[[1]] and values(book.last_sequences)==[sent['request']['last_ledger_entry_seq']]
     again,_,changed=Numbers.run_exact_batch(lambda:book.submission_started(roots,roots,
         integers([sent['projection']['ledger_entry_seq']+1]),enabled))
@@ -64,11 +87,13 @@ def validate(source):
     converted=next(row for row in stages[3:] if row['request']['status']=='Converted')
     book=Numbers.run_exact_batch(lambda:book.definitive(roots,enabled,torch.tensor([False],device='cuda'),
         integers([pending['request']['last_ledger_entry_seq']]),enabled))
+    check_native(book,pending)
     assert book.statuses.cpu().tolist()==[[PLATFORM_PENDING]]
     local_pending,platform_pending=Numbers.run_exact_batch(book.pending)
     assert local_pending.numerator.sign.cpu().tolist()==[0] and platform_pending.compare(amount).order.cpu().tolist()==[0]
     book=Numbers.run_exact_batch(lambda:book.definitive(roots,enabled,enabled,
         integers([converted['request']['last_ledger_entry_seq']]),enabled))
+    check_native(book,converted)
     assert book.statuses.cpu().tolist()==[[CONVERTED]]
     local_pending,platform_pending=Numbers.run_exact_batch(book.pending)
     assert local_pending.numerator.sign.cpu().tolist()==[0] and platform_pending.numerator.sign.cpu().tolist()==[0]
@@ -91,4 +116,5 @@ def validate(source):
     assert decision.outcomes.cpu().tolist()==[[2,2]]
     return {'original_reservation_reference_available':True,'original_reserve_send_pending_convert_checked':True,
         'request_and_send_repeat_checked':True,'whole_action_refusal_sticky_checked':True,
+        'Native_three_reservation_state_groups_match_original_Ledger_projections':True,
         'full_NOE_Ledger_sequence_and_binding_coordinator_delivered':False}
