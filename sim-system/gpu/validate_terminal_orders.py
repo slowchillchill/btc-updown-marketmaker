@@ -53,7 +53,7 @@ def main():
         fill=FillRecord.create(integers([1]),integers([1]),blank,zero,zero,tensor([False],torch.bool),
             {'steps':[{'state':'MATCHED','offset_ms':0},{'state':'MINED','offset_ms':10},{'state':'CONFIRMED','offset_ms':20}],
              'economic_application_ordinal':1})
-        return BaseSimRuntime(block.empty_state(segment_capacity=1),MutationRequests.empty(blank),BaseOrders.empty(quantity),
+        return BaseSimRuntime(block.empty_state(segment_capacity=1),MutationRequests.empty(blank,capacity=1,action_capacity=1),BaseOrders.empty(quantity),
             PlatformAccountState.open(integers([units(opening['cash_pusd'])]),tensor([0,0])),FillPool.empty(fill),
             RebateCoordinator(MakerDays.empty(tensor([[0]]),tensor([[source['market_end']]]),enabled[:,None]),
                 TakerDays.empty(1,'cuda')),HiddenBucketFrontier.open(HiddenBucketColumns.from_block(block),1))
