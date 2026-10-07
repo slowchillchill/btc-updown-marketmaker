@@ -821,3 +821,12 @@ latestDirect按原delivery序及record ordinal选，三类取消结果均保留�
 本入口接收已完成原SDK准入的动作列，原身份UTF8目录只读共享并由设备索引采样。
 它不替代SDK准入、CancelMarket动态目标展开、订单/成交目录或全根时钟。
 目录增长保留此前回执与完成状态；历史请求退役与完整活动根恢复仍由后续宿主衔接。
+
+`sim-system/gpu/base_orders.py`保存原Base完整订单计量、精确限价、请求/item关联及u64订单序号。
+FIFO段保存根内稳定slot；目录增长后由该slot无损取得原订单序号，不能将slot作为业务身份导出。
+真实hidden的Account段depletion按设备坐标归约到对应订单，零quote只累计pending量。
+`pending_base_execution.py`将已准入GTC的pending引用与原terms绑定，再组合已有撮合、
+逐fill费用/最终性候选、占款、挂余单、订单目录和请求完成状态。
+三种物理池不足时扩容并从原状态重算，错误不当业务拒绝，先前成功前缀继续保留。
+原Post结果正文仍须由调用者按返回效果物化；这里的完成引用不代替完整原响应正文。
+完整FOK接纳、动态selector、全根时钟及全部订单退役/恢复继续接入，不以此GTC切片替代。

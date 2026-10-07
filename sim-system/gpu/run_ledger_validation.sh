@@ -30,6 +30,10 @@ run_test() {
     tail -4 "$artifact_dir/$log"
 }
 case "$case_name" in
+    base-directory)
+        export B_GPU_ORDER_VALIDATOR="$repo_root/sim-system/gpu/validate_base_orders.py"
+        run_test gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution tests.log
+        ;;
     mutation-requests)
         export B_GPU_MUTATION_VALIDATOR="$repo_root/sim-system/gpu/validate_mutation_requests.py"
         run_test gpu_mutation_registration_preserves_original_pending_and_first_receipt tests.log

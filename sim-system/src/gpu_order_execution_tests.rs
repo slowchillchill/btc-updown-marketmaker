@@ -243,7 +243,14 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
         "confirmed_economic_path":confirmed_policy.normal_path(),
         "fee_rate":rules.fee_schedule.rate.value().to_string(), "fee_exponent":rules.fee_schedule.exponent,
         "taker_rebate_rate":actor._rule_snapshot.snapshot().project_account_rules.rebate_settlement.value.fixed_taker_rebate_rate.value().to_string(),
-        "post":post, "cancel_arrived_at":cancel_receipt.platform_arrived_at_utc_ms,
+        "post":post,"post_request_key":"gpu-legal-gtc-post","post_input_sequence":receipt.input_sequence(),
+        "post_sent_at":1200,"post_terms":match &request {
+            BusinessRequestV2::PostOrders(request) => serde_json::json!({
+                "ordinal":request.items[0].batch_item_ordinal,
+                "item_id":request.items[0].item.item_id,"order":request.items[0].item.order}),
+            _ => unreachable!(),
+        },"proxy_latency_sha256":actor._latency_profile.file_sha256(),
+        "cancel_arrived_at":cancel_receipt.platform_arrived_at_utc_ms,
         "cancel_records":cancel_records,"cancel_batches":cancel_batches,"cancel_closed_at":closed_at,
         "cancel_ledger_before":cancel_ledger_before,"cancel_ledger_after":cancel_ledger_after,"cancel_ledger_attempts":cancel_ledger_attempts,
         "next_private":next_private,"next_batch":next_batch,"session_seed":state.session.as_ref().unwrap().session_seed.0});
