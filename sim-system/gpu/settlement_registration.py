@@ -58,7 +58,10 @@ class SettlementRegistrations:
         valid=(references>=0) & ~obligations.pending.any(2) & (maker.market_result>=0) & (
             original==actions.resolutions[at])
         incoming=actions.fault[at] | error[at] | (counts[at]!=1).to(torch.int32)
-        fault=self.fault | obligations.fault | maker.fault | Numbers.combine_fault_rows(torch.where(
+        action_error=torch.where(actions.request,actions.fault | (counts!=1).to(torch.int32),0)
+        root_error=Numbers.combine_fault_rows(torch.where(
+            torch.arange(roots,device=self.conditions.device)[:,None]==actions.roots[None,:],action_error[None,:],0))
+        fault=self.fault | root_error | obligations.fault | maker.fault | Numbers.combine_fault_rows(torch.where(
             fresh,incoming | (~valid).to(torch.int32),0))
         use=fresh & (fault[:,None]==0)
         repeated=use.flatten()

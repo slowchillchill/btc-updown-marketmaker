@@ -30,7 +30,7 @@ class SettlementCoordinator:
         ledger=frozen.ledger
         resolutions=ledger.resolutions
         commitments=frozen.commitments
-        if resolutions is None or commitments is None or commitments.condition_slots is None or commitments.association_known is None:
+        if resolutions is None or commitments is None or commitments.condition_slots is None:
             raise ValueError('结算协调须同次公开判定及完整receipt逐腿承诺绑定')
         if enabled.shape!=frozen.cutoff.shape or enabled.dtype!=torch.bool or enabled.device!=frozen.cutoff.device:
             raise TypeError('结算推进人口须同设备bool[roots]')
@@ -40,9 +40,9 @@ class SettlementCoordinator:
         read=resolutions.read(ledger.success_pools)
         predecessors=resolutions.economic_predecessors(ledger.trade_success,ledger.rebate_days)
         legs=commitments.present[roots]
-        leg_known=commitments.association_known[roots]
-        # 无法关联的实际承诺不能证明本condition承诺为空。
-        blocked=(legs & (~leg_known | (commitments.condition_slots[roots]==resolutions.conditions[:,None]))).any(1)
+        conditions=commitments.condition_slots[roots]
+        # condition关联独立于token/outcome；缺token不阻塞已知另一个市场。
+        blocked=(legs & ((conditions<0) | (conditions==resolutions.conditions[:,None]))).any(1)
         positive=(read.paired_receivable.numerator.sign>0)|(read.winner_orphan_receivable.numerator.sign>0)
         state=resolutions.requests
         existing=state.present

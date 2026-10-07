@@ -408,7 +408,10 @@ async fn gpu_hidden_terminal_source(with_order: bool, with_pending: bool) {
         let operation=BusinessInputV2::Settlement(SettlementOperationV1::Request {request:request.clone(),requested_at_utc_ms:sent_at});
         let (next,output)=reduce_actor_input_v2(&execution.actor.opened,scenario.initial_market_directory(),state,&operation,12,
             execution.actor._latency_profile.as_ref(),execution.actor._rule_snapshot.snapshot(),execution.actor._finality_policy.as_ref()).unwrap();
-        state=gpu_accept_projection_reference(&mut execution.actor,next,output,&mut batches);
+        let (next,_,batch)=finalize_projection_batch_v2(&execution.actor.opened.run_id,next,output,
+            execution.actor._latency_profile.as_ref()).unwrap();
+        assert!(batch.is_none(),"Request首登记本身不发反馈，Registered由真实scenario时钟生成");
+        state=next;
         let at=state.session.as_ref().unwrap().execution_state.next_settlement_clock_at_utc_ms().unwrap();
         let mut output=LogicalDriveOutputV2::default();
         state=drain_scheduled_obligations_at_v2(state,at,execution.actor._rule_snapshot.snapshot(),
