@@ -5,6 +5,7 @@ SIM仍拥有撮合、账户和发射器；这里只组合原证据与独立经�
 """
 from dataclasses import dataclass,replace
 import torch
+from queues import ExactInt
 from core import EvidenceBank,Normalizer,EVIDENCE,ECONOMIC,OUT_FACT
 from trade import map_trade
 from economic import map_economic
@@ -35,7 +36,7 @@ class ProjectionBatch:
     normalized: object
     private_sequences: object
     batch_sequences: object
-    record_ordinals: torch.Tensor
+    record_ordinals: ExactInt
     received_at: torch.Tensor
     rows: torch.Tensor
     emitted: torch.Tensor

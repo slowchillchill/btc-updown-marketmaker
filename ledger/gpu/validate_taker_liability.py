@@ -82,7 +82,7 @@ def validate(source):
             torch.zeros_like(zero,dtype=torch.int32)))
         assert batch.fault.cpu().tolist()==[0] and batch.normalized.outcomes.cpu().tolist()==[[OUT_FACT]]
         assert values(batch.batch_sequences)==[batch_sequence]
-        assert batch.record_ordinals.cpu().tolist()==[[row['position']['record_ordinal']]]
+        assert values(batch.record_ordinals)==[row['position']['record_ordinal']]
         batches.append(batch)
     bank=projection.normalizer.bank
     columns=run(lambda:EconomicColumns.from_projection_batches([batches[0]]))
