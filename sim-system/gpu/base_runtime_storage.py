@@ -1,0 +1,83 @@
+"""固定物理布局的SIM活动存储，供真实候选图提交后继续使用同一地址。
+
+冷边界安装容量与独立存储；共享源块/密封路径bank保持只读。业务候选仍由
+BaseSimRuntime生成。本层只提交已经共同协调的候选，不选择阶段或扩容量。
+冻结观察必须取snapshot，不能借可原位提交的活动张量。
+"""
+from dataclasses import fields, is_dataclass, replace
+import torch
+from queues import ExactInt
+from fill_finality import FillRecord
+
+
+def _shared(value, name):
+    return name == 'columns' or isinstance(value, FillRecord) and name in (
+        'offsets', 'states', 'lengths', 'economic_ordinals')
+
+
+def _owned(value, layout):
+    if isinstance(value, ExactInt):
+        # 布局只来自冷资源准备；不能截断原精确值或人口。
+        width = max(value.words.size(1), layout.words.size(1))
+        value = value.with_capacity(width)
+        return ExactInt(value.words.clone(), value.sign.clone(), value.fault.clone())
+    if isinstance(value, torch.Tensor):
+        if value.shape != layout.shape or value.dtype != layout.dtype or value.device != layout.device:
+            raise ValueError('活动SIM容量须先在冷边界与候选布局对齐')
+        # 分别拥有各字段，不能让初始同值的cash/available等共享可写存储。
+        return value.clone()
+    if is_dataclass(value):
+        return replace(value, **{field.name: getattr(value, field.name) if _shared(value, field.name)
+            else _owned(getattr(value, field.name), getattr(layout, field.name)) for field in fields(value)})
+    if isinstance(value, tuple):
+        if len(value) != len(layout):
+            raise ValueError('固定SIM输出人口不一致')
+        return tuple(_owned(item, target) for item, target in zip(value, layout))
+    if value is None or isinstance(value, (str, int, bool)):
+        if value != layout:
+            raise ValueError('活动SIM物理布局元数据不一致')
+        return value
+    raise TypeError('活动SIM存储只接受原状态类型与已安装共享列')
+
+
+def _tensor_pairs(target, candidate):
+    if isinstance(target, torch.Tensor):
+        if (target.shape != candidate.shape or target.dtype != candidate.dtype or
+                target.device != candidate.device):
+            raise ValueError('候选物理布局变化须退出图并从未提交输入准备资源')
+        yield target, candidate
+    elif is_dataclass(target):
+        for field in fields(target):
+            if not _shared(target, field.name):
+                yield from _tensor_pairs(getattr(target, field.name), getattr(candidate, field.name))
+    elif target != candidate:
+        raise ValueError('候选不能更换活动SIM冷元数据')
+
+
+class BaseRuntimeStorage:
+    """单一固定布局的活动运行状态；图与冻结副本的生命周期由宿主持有。"""
+    def __init__(self, original, layout):
+        self.runtime = _owned(original, layout)
+
+    def snapshot(self):
+        return _owned(self.runtime, self.runtime)
+
+    @staticmethod
+    def snapshot_output(output):
+        """保留本次已提交SIM输出，后续图重放不能覆盖待消费反馈。"""
+        return _owned(output, output)
+
+    def commit(self, candidate, resources_fit):
+        """资源不足保留全部活动字段；原各根fault/回退由业务协调器负责。
+
+        resources_fit须同时包含字容量与本次各池容量需求，不能仅取Exact fit。
+        此标量只是本物理批的提交门，不替代业务根掩码或运行关闭证据。
+        """
+        device = self.runtime.account.cash.words.device
+        if resources_fit.shape != () or resources_fit.dtype != torch.bool or resources_fit.device != device:
+            raise TypeError('物理批提交门须为同设备bool标量')
+        # 先构建完整固定布局映射，再发射原位写入；图内不读任何业务值。
+        pairs = tuple(_tensor_pairs(self.runtime, candidate))
+        with torch.no_grad():
+            for target, incoming in pairs:
+                target.copy_(torch.where(resources_fit, incoming, target))

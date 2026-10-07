@@ -408,6 +408,7 @@ def main():
         'complete_maker_bucket_frontier_keeps_original_index_until_all_steps_commit_checked':block is not None,
         'compact_hidden_source_identities_are_new_DPT_identities_not_old_constructed_V3':block is not None,
         'actual_positive_maker_joint_candidate_CUDA_graph_replay_to_same_NOE_checked':checked_captured_maker,
+        'actual_positive_maker_fixed_address_commit_then_consumed_step_replay_checked':checked_captured_maker,
         'runtime_hidden_reference_handler_covered':False,
         'public_ledger':account_report,
         'original_SIM_checkpoints': len(source['checkpoints']),
@@ -419,8 +420,8 @@ def main():
 def check_captured_hidden_step(runtime,index,tensor,fee_rate,fee_exponent,rebate):
     """同一真实正Maker源步：物理预热/扩容在冷边界，候选和需求留设备。
 
-    只证明当前固定shape源类型的capture/replay。不据此声明WHILE、页追加、
-    跨步持久地址提交或GPU业务分派已完成；后续NOE实际消费这次graph候选。
+    只证明当前固定shape源类型的capture/replay及活动地址提交。不据此声明
+    WHILE、页追加或GPU业务分派已完成；后续NOE实际消费这次graph候选。
     """
     from dataclasses import fields,is_dataclass
     # 原容量重试生成参考候选，但不安装它；只取其物理容量增长原状态。
@@ -473,7 +474,39 @@ def check_captured_hidden_step(runtime,index,tensor,fee_rate,fee_exponent,rebate
     graph.replay()
     torch.cuda.synchronize()
     compare(actual,expected)
-    return actual,actual_effect
+    from base_runtime_storage import BaseRuntimeStorage
+    storage=BaseRuntimeStorage(runtime,expected)
+    old=storage.snapshot()
+    def committed_step():
+        candidate=Numbers.device_exact_batch(lambda:compute(storage.runtime),word_capacity=4,
+            device=runtime.account.cash.words.device)
+        state,output=candidate.value
+        # 本次真正参与的所有物理池与字容量统一决定提交；不足不安装fault=2。
+        fit=candidate.fits & (output.required_segments <= storage.runtime.hidden.queues.capacity).all()
+        fit=fit & (output.required_records <= storage.runtime.fills.capacity).all()
+        fit=fit & (output.required_maker_fills <= storage.runtime.calendars.maker.fill_occupied.size(1)).all()
+        fit=fit & (output.required_maker_days <= storage.runtime.calendars.maker.occupied.size(1)).all()
+        storage.commit(state,fit)
+        return candidate,fit
+    committed_graph=torch.cuda.CUDAGraph()
+    with torch.cuda.graph(committed_graph):
+        committed,fit=committed_step()
+    committed_graph.replay()
+    torch.cuda.synchronize()
+    assert fit.cpu().item()
+    compare(storage.runtime,expected,"committed")
+    compare(committed.value[1],effect,"committed_effects")
+    frozen=storage.snapshot()
+    frozen_effects=storage.snapshot_output(committed.value[1])
+    # 已提交游标继续作为同一图的输入；同原step已消费，不再生成fill/消耗序号。
+    committed_graph.replay()
+    torch.cuda.synchronize()
+    compare(storage.runtime,frozen,"consumed_step")
+    assert not any(frame.event.emitted.cpu().item() for frame in committed.value[1].fills)
+    compare(old,runtime,"old_snapshot")
+    compare(frozen,expected,"frozen_after_commit")
+    compare(frozen_effects,effect,"frozen_committed_effects")
+    return frozen,frozen_effects
 
 
 if __name__ == '__main__':
