@@ -48,6 +48,8 @@ class DeviceNativeActor:
         self.context=context;self.rows=context.cutoff.numel();self.device=context.cutoff.device
         self.encoding_limit=((1<<96)-1)//10000  # 原SDK编码域，不裁剪现金root。
         self.exponent=context.rules.context['fee_exponent']  # 共享封存配置，非设备业务值。
+        from cancel_objects import global_cancel_slots
+        self.cancel_slots=global_cancel_slots(context.cancels)
 
     def initial(self):
         c=self.context;zero=c.cash_micro.constant(0);unset=torch.full_like(c.cutoff,-1)
@@ -190,7 +192,8 @@ class DeviceNativeActor:
             words=value.words.to(torch.int64)&0xffffffff
             prices.append(words[:,0]+(words[:,1]<<32))
         price=(coordinates>=prices[0][:,None])&(coordinates<=prices[1][:,None])&present[:,None]
-        cancel=c.cancels.present&(c.cancels.kinds==(state.family-3)[:,None])&c.decision_required[:,None]
+        cancel=(c.cancels.present&(c.cancels.kinds==(state.family-3)[:,None])).gather(1,self.cancel_slots)
+        cancel&=c.decision_required[:,None]
         return ActorSupport(family,quantity,torch.stack(variants,1),price,cancel,fault)
 
     def choose(self,state,choice):

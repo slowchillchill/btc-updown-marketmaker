@@ -28,6 +28,14 @@ def check(actor,reference,label,model):
             # 原CPU精确末端投影是独立预期，不由GPU首次结果建立。
             assert torch.equal(features,expected),(label,step['stage'],features.cpu().tolist(),expected.cpu().tolist())
             name=step['stage']
+            if name=='CancelObject':
+                support=Numbers.run_exact_batch(lambda:actor.support(state))
+                expected_mask=torch.tensor([step['mask']],dtype=torch.bool,device='cuda')
+                count=expected_mask.shape[1]
+                assert support.fault.cpu().tolist()==[0]
+                assert support.cancel.shape[1]>=count
+                assert torch.equal(support.cancel[:,:count],expected_mask)
+                assert not support.cancel[:,count:].any().cpu().item()
             if name!='Family':
                 graph=stages['action_quantity' if name=='QuantityBranch' else
                     'action_variant' if name.startswith('Variant') else
@@ -38,12 +46,16 @@ def check(actor,reference,label,model):
                 assert torch.equal(actual,original),(label,name,'model scores')
             coordinate=torch.tensor([step['choice']],dtype=torch.int64,device='cuda')
             state=Numbers.run_exact_batch(lambda:actor.choose(state,coordinate))
-            assert state.fault.cpu().tolist()==[0]
+            assert state.fault.cpu().tolist()==[0],(label,trace['family'],name,step['choice'],
+                actor.context.cancels.present.cpu().tolist(),actor.cancel_slots.cpu().tolist(),state.fault.cpu().tolist())
             checked+=1
         assert state.stage.cpu().tolist()==[7]
     print(json.dumps({'stage':'prefix36','source':label,'prefixes':checked,
         'elapsed_seconds':time.perf_counter()-started}),flush=True)
-    return {'source':label,'prefixes':checked,'original_population':actor.context.cancels.present.shape[1]}
+    report={'source':label,'prefixes':checked,'physical_object_width':actor.context.cancels.present.shape[1],
+        'global_object_count':actor.context.cancels.present.sum(1).cpu().tolist()}
+    if label=='actual-Accepted-only-publisher':report['global_to_physical']=actor.cancel_slots.cpu().tolist()
+    return report
 
 
 def capture_and_gradients(source,model):

@@ -213,7 +213,16 @@ class JointFreezeValidation:
         assert support.fault.cpu().tolist()==[0] and support.family[:,3:].cpu().tolist()==[[False,False,True]]
         cancel_state=self.run(lambda:actor.choose(initial,torch.full_like(self.zero,5)))
         cancel_support=self.run(lambda:actor.support(cancel_state))
-        assert torch.equal(cancel_support.cancel,objects.present)
+        expected_global=torch.arange(objects.present.shape[1],device='cuda')[None,:]==0
+        assert torch.equal(cancel_support.cancel,expected_global)
+        physical=actor.cancel_slots[:,0]
+        assert objects.present.gather(1,physical[:,None]).cpu().tolist()==[[True]]
+        assert objects.kinds.gather(1,physical[:,None]).cpu().tolist()==[[2]]
+        assert objects.markets.gather(1,physical[:,None]).cpu().tolist()==[[0]]
+        assert not objects.members[0,physical[0]].any().cpu().item()
+        selected_cancel=self.run(lambda:actor.choose(cancel_state,self.zero))
+        assert selected_cancel.fault.cpu().tolist()==[0] and selected_cancel.stage.cpu().tolist()==[7]
+        assert selected_cancel.cancel_index.cpu().tolist()==[0]
         from actor_context import _owned
         if self.actor_saved is None:
             self.actor_saved=(context,_owned(context.cash_micro),_owned(context.cap_centishares),
@@ -240,7 +249,13 @@ class JointFreezeValidation:
             assert again.fault.cpu().tolist()==[0] and again.family[:,3:].cpu().tolist()==[[False,False,True]]
             old_actor=DeviceNativeActor(old)
             old_cancel=self.run(lambda:old_actor.choose(old_actor.initial(),torch.full_like(self.zero,5)))
-            assert torch.equal(self.run(lambda:old_actor.support(old_cancel)).cancel,population.present)
+            assert torch.equal(self.run(lambda:old_actor.support(old_cancel)).cancel,expected_global)
+            old_physical=old_actor.cancel_slots[:,0]
+            assert old.cancels.kinds.gather(1,old_physical[:,None]).cpu().tolist()==[[2]]
+            assert old.cancels.markets.gather(1,old_physical[:,None]).cpu().tolist()==[[0]]
+            assert not old.cancels.members[0,old_physical[0]].any().cpu().item()
+            old_selected=self.run(lambda:old_actor.choose(old_cancel,self.zero))
+            assert old_selected.fault.cpu().tolist()==[0] and old_selected.cancel_index.cpu().tolist()==[0]
         self.actor_reports.append({'actor_exact_context_cutoff':int(context.cutoff.cpu()[0]),
             'cash_micro':values(context.cash_micro),'cap_centishares':values(context.cap_centishares),
             'empty_member_market_object':True})

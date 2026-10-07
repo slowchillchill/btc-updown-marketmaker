@@ -44,6 +44,15 @@ class CancelObjectsRead:
     fault: torch.Tensor
 
 
+def global_cancel_slots(objects):
+    """原完整对象顺序的全局ordinal→物理槽；尾部padding没有业务ordinal。
+
+    Single/Pair/Market共同压紧，不能按family重新编号。成员与Pair来源
+    仍从原物理槽读取，不改变其腿序或形成顺序。
+    """
+    return (~objects.present).to(torch.int32).argsort(dim=1,stable=True)
+
+
 def _sort(order, key):
     return order.gather(1,key.gather(1,order).argsort(dim=1,stable=True))
 
