@@ -677,3 +677,10 @@ Converted/Released或余额归零不清除。共享condition物理目录未包�
 成本未安装的中途前缀保持Unknown，不用成功池成本替代；缺少真实资产绑定也保持Unknown。
 空旧作用域保持Known零，当前作用域的适用位仍由原选择器提供。
 当前有限验证对照原Ledger份额读数，尚未升级为完整原Native433编码对照。
+
+`account_inputs_at_prefix` 将原公开前缀、根起点、condition字典序和实际Ledger市场人口
+接到同一次冻结账户的current/old选择及已交付字段装配。验证器复用原Native真实
+consume/encode的五个冷冻结前缀核对0—77；尚未证明连续GPU账户或完整slow433。
+`input_executed.py` 复用原公开Trade执行量、本金和净费读面写176—211；它需要显式
+完整Trade前缀known。未传该能力时不标provided，中途未知人口不以空目录冒充零。
+这些可选装配入口保留各自能力边界，完整根仍须统一提供真实时钟、公开前沿和全部账户状态。
