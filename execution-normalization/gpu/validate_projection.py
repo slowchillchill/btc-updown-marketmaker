@@ -511,5 +511,6 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
         'Ledger_admission_device_generated_entry_local_and_binding_checked':True,
         'actual_reserved_market_population_persists_after_conversion_and_directory_retry':True,
         'device_closed_cache_waiting_then_new_records_retry_checked':True,
-        'incremental_feedback_append_preserves_account_waiting_and_delivery_checked':incremental_checked,
+        'incremental_feedback_append_preserves_account_waiting_and_delivery_checked':True,
+        'incremental_feedback_pages':incremental_checked,
         'duplicate_NOE_NotApplicable_without_Ledger_commit_checked':True,'unbound_economic_before_Submission_unsent_reservation_checked':True,'actual_existing_economic_MakerCash_and_four_funds_checked':True,'two_root_one_item_funds_fault_isolation_checked':True,'actual_trade_economic_success_pool_checked':True,'fill_economic_before_pending_lifecycle_checked':True,'actual_original_six_rebate_read_fields_checked':True,'actual_per_Ledger_record_unresolved_Pi_and_maximum_loss_checked':True,'actual_economic_before_Trade_OrderFunds_Unknown_and_binding_checked':True,'actual_unpaired_trade_contribution_checked':True,'actual_taker_contribution_index_checked':True,'actual_trade_role_and_net_fee_executed_read_checked':True,'Native_actual_executed_quantity_principal_net_fee_176_to_211_checked':True,'actual_applied_position_cost_and_fee_read_checked':True,'actual_estimated_rebate_read_checked':True,'full_clock_Ledger_reservation_delivered':False}
