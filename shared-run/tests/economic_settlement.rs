@@ -1909,9 +1909,9 @@ async fn gpu_actual_pair_and_winner_orphan_redemption_preserves_one_economic_fac
             if matches!(&fact.disposition,SourceNeutralEconomicDispositionV2::AccountTransition {
                 transition:SourceNeutralAccountTransitionKindV2::ResolutionRedeemApplied {..},..})));
         if redeem {
-            writer.flush_accepted_batch().unwrap();
+            writer.finish().unwrap();
             let before=snapshot(&LedgerWriterV1::open_durable(&restored_root).unwrap());
-            assert!(writer.write(material).unwrap());writer.flush_accepted_batch().unwrap();
+            assert!(writer.write(material).unwrap());writer.finish().unwrap();
             let after=snapshot(&LedgerWriterV1::open_durable(&restored_root).unwrap());
             let record=material.consumed_record_v2().unwrap();
             let request=material_guard.iter().filter_map(LedgerRecordMaterialV2::consumed_record_v2)
