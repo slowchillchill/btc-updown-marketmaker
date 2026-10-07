@@ -146,7 +146,7 @@ class OrderFunds:
         maximum_lo = torch.where(pending_nonzero & (hi == maximum_hi[:, None]), lo, 0).max(1).values
         max_words = torch.stack((maximum_lo, maximum_hi), 1).to(torch.int32)
         max_words = torch.nn.functional.pad(max_words, (0, max(0, applied_sequences.words.size(1)-2)))
-        maximum = ExactInt(max_words, (pending_nonzero.any(1)).to(torch.int32),
+        maximum = ExactInt(max_words, (pending_nonzero.any(1)).to(torch.int8),
             Numbers.combine_fault_rows(torch.where(pending_nonzero, applied_sequences.fault.reshape(roots, width), 0)))
         previous = _take(self.last_sequence, directory_index)
         comparison = maximum.compare(previous)
