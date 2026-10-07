@@ -1,4 +1,6 @@
 mod common;
+#[path = "common/gpu_settlement_cash.rs"]
+mod gpu_settlement_cash;
 use common::*;
 use contracts::{economics::*, *};
 use ledger::*;
@@ -344,6 +346,7 @@ fn assert_all_settlement_cuts(case: usize, seen: &std::collections::BTreeSet<u64
 #[tokio::test(flavor = "current_thread")]
 async fn actual_chain_requested_settlement_s0_to_s4_and_stable_ledger() {
     for case in 0..=8 {
+        if std::env::var_os("B_GPU_SETTLEMENT_CASH_VALIDATOR").is_some() && ![0,8].contains(&case) {continue;}
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().join("dpt");
         let (core, times) = recorded_settlement(&root);
@@ -355,9 +358,7 @@ async fn actual_chain_requested_settlement_s0_to_s4_and_stable_ledger() {
         let mut ledger =
             LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
         let ledger_root = temp.path().join("ledger");
-        execution
-            .bind_ledger_recording_v2(&mut ledger, &ledger_root)
-            .unwrap();
+        let gpu_materials=gpu_settlement_cash::bind(&mut execution,&mut ledger,&ledger_root);
         let mut shared = SharedExecutionV1::from_opening(ledger, observation)
             .unwrap()
             .unwrap();
@@ -522,6 +523,7 @@ async fn actual_chain_requested_settlement_s0_to_s4_and_stable_ledger() {
         } else {
             driver.complete().unwrap();
         }
+        gpu_settlement_cash::finish(gpu_materials,&ledger_root,&format!("settlement-case-{case}"),&"e".repeat(64));
         let recovered = LedgerWriterV1::open_durable(&ledger_root).unwrap();
         let recovered = recovered.economic_read().unwrap();
         assert_eq!(recovered.cash(), &expected_cash);
@@ -1172,9 +1174,7 @@ async fn original_external_cash_identity_correction_and_no_frame_nav() {
     let mut ledger =
         LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
     let ledger_root = temp.path().join("ledger");
-    execution
-        .bind_ledger_recording_v2(&mut ledger, &ledger_root)
-        .unwrap();
+    let gpu_materials=gpu_settlement_cash::bind(&mut execution,&mut ledger,&ledger_root);
     let mut shared = SharedExecutionV1::from_opening(ledger, observation)
         .unwrap()
         .unwrap();
@@ -1184,6 +1184,7 @@ async fn original_external_cash_identity_correction_and_no_frame_nav() {
         driver.next_group().unwrap().unwrap();
     }
     let facts = [
+        ("zero-credit", "0", ExternalCashAttributionV1::UnknownActivity, None),
         (
             "unknown-credit",
             "7",
@@ -1231,6 +1232,7 @@ async fn original_external_cash_identity_correction_and_no_frame_nav() {
     assert_eq!(nav.worst_case_maker_nav_pusd, r("97", "1"));
     assert_eq!(nav.other_account_residual_pusd, r("2", "1"));
     driver.complete().unwrap();
+    gpu_settlement_cash::finish(gpu_materials,&ledger_root,"external-cash",&"e".repeat(64));
     let restored = LedgerWriterV1::open_durable(&ledger_root).unwrap();
     assert_eq!(
         AccountEconomicsReadV1::from_ledger(&restored.economic_read().unwrap()),
@@ -1256,9 +1258,7 @@ async fn resolution_before_late_success_fixes_fee_bucket_and_updates_pi_without_
         let mut ledger =
             LedgerWriterV1::new_with_admission_v2(AccountAdmissionPolicyV2::DualCashNoMarketLimit);
         let ledger_root = temp.path().join("ledger");
-        execution
-            .bind_ledger_recording_v2(&mut ledger, &ledger_root)
-            .unwrap();
+        let gpu_materials=gpu_settlement_cash::bind(&mut execution,&mut ledger,&ledger_root);
         let mut shared = SharedExecutionV1::from_opening(ledger, observation)
             .unwrap()
             .unwrap();
@@ -1459,6 +1459,8 @@ async fn resolution_before_late_success_fixes_fee_bucket_and_updates_pi_without_
         assert_eq!(market.confirmed_net_pnl_pusd, r("-317", "250"));
         assert_eq!(market.maximum_confirmed_net_loss_pusd, r("317", "250"));
         driver.complete().unwrap();
+        gpu_settlement_cash::finish(gpu_materials,&ledger_root,&format!("settlement-late-{late}"),
+            "00000000000000000000000000000000000000000000000000000000000023c8");
         let restored = LedgerWriterV1::open_durable(&ledger_root).unwrap();
         assert_eq!(
             AccountEconomicsReadV1::from_ledger(&restored.economic_read().unwrap()),

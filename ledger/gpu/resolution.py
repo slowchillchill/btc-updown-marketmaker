@@ -1,7 +1,8 @@
 """公开Resolved事实的首次安装和未兑付应收，归Ledger经济层。
 
 完整Terminal与canonical身份借同一不可变来源字典。冷绑定按原token匹配
-payout，不按vector位置猜资产。Request与清偿由独立真实事实提交，费用尚未接入。
+payout，不按vector位置猜资产。Request与清偿由独立真实事实提交；费用现金
+消费首次Resolution冻结的归属，不能随迟到成功重新分类。
 """
 from dataclasses import dataclass, replace
 import torch
@@ -167,6 +168,18 @@ class MarketResolutions:
     def associated(self,condition,identity):
         member=self.present & (self.conditions==condition[self.roots]) & (self.identities==identity[self.roots])
         return torch.zeros_like(condition,dtype=torch.int32).scatter_reduce(0,self.roots,member.to(torch.int32),reduce='amax').bool()
+
+    def maker_attribution(self,condition,identity):
+        """首次实际Resolution决定费用现金归属，不随迟到成功重分。"""
+        member=self.present & (self.conditions==condition[self.roots]) & (self.identities==identity[self.roots])
+        return torch.zeros_like(condition,dtype=torch.int32).scatter_reduce(0,self.roots,
+            (member & self.maker_category).to(torch.int32),reduce='amax').bool()
+
+    def accrue_directional_cash(self,condition,amount,enabled):
+        selected=self.present & (self.conditions==condition[self.roots]) & enabled[self.roots]
+        incoming=take_ratio(amount,self.roots)
+        zero=ExactRational(incoming.numerator.constant(0),incoming.denominator.constant(1))
+        return replace(self,directional_cash=self.directional_cash+select(incoming,selected,zero))
 
     def accrue_realized(self,condition,amount,enabled):
         """原返佣应计即计已实现盈亏；是否已公开判定不改变这项归属。"""

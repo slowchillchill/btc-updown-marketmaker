@@ -61,7 +61,7 @@ class AdmissionLifecycle:
     unresolved_markets: object
     rebate_contributions: object
     rebate_days: object
-    maker_cash: object  # 原Existing经济现金归Maker；结算新kind须按原归属另接。
+    maker_cash: object  # Existing归Maker；CostPaid按首次Resolution，Cash按原身份分类。
     reservations: object
     orders: object
     order_funds: object
@@ -82,9 +82,12 @@ class AdmissionLifecycle:
     resolutions: object | None = None
     accepted_principal: object | None = None
     market_balance_origin: object | None = None  # 原冷起点市场余额及经济prefix，None是Unknown。
+    settlement_costs: object | None = None  # 实际Cost累计/SourceOrder；未安装冷历史为None。
+    external_cash: object | None = None
+    other_cash: object | None = None  # 原ExternalCash非Maker余额，不混入Maker可用资金。
 
     @classmethod
-    def open(cls,platform,bank,columns,current_entry_sequence,current_local_prefix,success_pools,*,rebate_days=None,position_costs=None,order_funds=None,unresolved_markets=None,projected_markets=None,resolutions=None,lifecycle_capacity=None,accepted_principal=None,market_balance_origin=None):
+    def open(cls,platform,bank,columns,current_entry_sequence,current_local_prefix,success_pools,*,rebate_days=None,position_costs=None,order_funds=None,unresolved_markets=None,projected_markets=None,resolutions=None,lifecycle_capacity=None,accepted_principal=None,market_balance_origin=None,settlement_costs=None,external_cash=None,other_cash=None):
         roots,width=columns.row_refs.shape
         if market_balance_origin is not None and (market_balance_origin.known.shape!=(roots,)
                 or market_balance_origin.conditions.device!=columns.row_refs.device):
@@ -111,7 +114,8 @@ class AdmissionLifecycle:
             current_entry_sequence,current_local_prefix,empty,empty.clone(),torch.zeros_like(columns.enabled),
             ExactInt.from_i64_tensor(torch.zeros(roots*width,dtype=torch.int64,device=empty.device)),
             torch.zeros(roots,dtype=torch.int64,device=empty.device),torch.zeros(roots,dtype=torch.bool,device=empty.device),
-            torch.zeros_like(columns.row_refs),platform.fault | accepted_principal.fault | (0 if projected_markets is None else projected_markets.fault),projected_markets,resolutions,accepted_principal,market_balance_origin)
+            torch.zeros_like(columns.row_refs),platform.fault | accepted_principal.fault | (0 if projected_markets is None else projected_markets.fault),projected_markets,resolutions,accepted_principal,market_balance_origin,
+            settlement_costs,external_cash,other_cash)
 
     def funds(self):
         roots=self.fault.numel()
@@ -150,7 +154,16 @@ class AdmissionLifecycle:
             trade_success=self.trade_success.resized(trade_capacity),
             position_costs=self.position_costs.resized(trade_capacity),
             order_funds=self.order_funds.resized(self.order_funds.occupied.size(1)+extra).append_records(extra,trade_capacity),
-            rebate_contributions=self.rebate_contributions.resized(self.rebate_contributions.occupied.size(1)+extra))
+            rebate_contributions=self.rebate_contributions.resized(self.rebate_contributions.occupied.size(1)+extra),
+            settlement_costs=None if self.settlement_costs is None else self.settlement_costs.resized(self.settlement_costs.occupied.size(1)+extra),
+            external_cash=None if self.external_cash is None else self.external_cash.resized(self.external_cash.occupied.size(1)+extra))
+
+    def resized_settlement_identities(self,*,costs=None,cash=None):
+        if (costs is not None and self.settlement_costs is None) or (cash is not None and self.external_cash is None):
+            raise ValueError('增长资源不能替代缺失的真实费用/现金历史')
+        return replace(self,
+            settlement_costs=self.settlement_costs if costs is None else self.settlement_costs.resized(costs),
+            external_cash=self.external_cash if cash is None else self.external_cash.resized(cash))
 
     def resized_lifecycle(self, *, orders=None, trades=None):
         """冷资源边界增长真实身份目录及逐槽关联；不重登旧身份/已应用位置。"""
@@ -241,7 +254,7 @@ class AdmissionLifecycle:
             (outcome_kind==OUT_LOGICAL_CONFLICT)|(outcome_kind==OUT_ECONOMIC_CONFLICT))
         requested=requested & ~not_applicable
         fault=self.fault | torch.where(requested,self.lifecycle.fault[root,local],0)
-        economic=requested&(outcome_kind==OUT_FACT)&((tag==11)|(tag==18)|(tag==21))
+        economic=requested&(outcome_kind==OUT_FACT)&((tag==11)|(tag==18)|(tag==21)|(tag==24))
         sequence=_take(self.columns.sequences,index)
         balances=take_ratio(self.columns.balances,(index[:,None]*8+torch.arange(8,device=index.device)).flatten())
         owners=self.platform.asset_roots
@@ -251,22 +264,63 @@ class AdmissionLifecycle:
         next_entry=self.current_entry_sequence+self.current_entry_sequence.constant(1)
         fault=fault | torch.where(requested,sequence_fault(next_entry),0)
         redemption=economic & (tag==21)
+        fee_economic=economic & (tag==24)
+        paid_economic=fee_economic & (self.lifecycle.economic_tags[root,local]==16)
+        cash_economic=fee_economic & (self.lifecycle.economic_tags[root,local]==17)
+        cost_event=requested & (outcome_kind==OUT_EVIDENCE) & (tag==22)
+        cash_event=requested & (outcome_kind==OUT_EVIDENCE) & (tag==23)
+        condition=self.lifecycle.conditions[root,local]
+        resolution=self.lifecycle.resolution_identities[root,local]
+        identity=self.lifecycle.settlement_identities[root,local]
+        resolution_maker=torch.zeros_like(economic)
         if self.resolutions is None:
-            fault |= redemption.to(torch.int32)
+            fault |= (redemption|cost_event|(fee_economic&~cash_economic)).to(torch.int32)
         else:
-            resolved_ready=self.resolutions.associated(self.lifecycle.conditions[root,local],
-                self.lifecycle.resolution_identities[root,local])
-            association_available=association_available & (~redemption | resolved_ready)
+            resolved_ready=self.resolutions.associated(condition,resolution)
+            resolution_maker=self.resolutions.maker_attribution(condition,resolution)
+            association_available=association_available & (~(redemption|cost_event|(fee_economic&~cash_economic)) | resolved_ready)
+        costs=self.settlement_costs
+        cash_identities=self.external_cash
+        settlement_ready=torch.ones_like(economic)
+        if costs is None:
+            fault |= cost_event.to(torch.int32)
+        else:
+            source_order=self.lifecycle.source_bank.source_order[self.columns.row_refs[root,local]]
+            costs,cost_ready,_,_=costs.observe(identity,condition,resolution,self.lifecycle.settlement_policies[root,local],
+                take_ratio(self.lifecycle.cost_recognized,index),take_ratio(self.lifecycle.cost_paid,index),
+                self.lifecycle.has_settlement_correction[root,local],self.lifecycle.settlement_corrections[root,local],
+                source_order,resolution_maker,cost_event & association_available & (fault==0))
+            fault |= costs.fault
+            settlement_ready &= ~cost_event | (association_available & cost_ready)
+        cash_maker=torch.zeros_like(economic)
+        if cash_identities is None:
+            fault |= (cash_event|cash_economic).to(torch.int32)
+        else:
+            cash_found,cash_maker=cash_identities.lookup(identity)
+            association_available=association_available & (~cash_economic | cash_found)
+            cash_identities,cash_ready=cash_identities.observe(identity,take_ratio(self.lifecycle.external_cash_amount,index),
+                self.lifecycle.has_settlement_correction[root,local],self.lifecycle.settlement_corrections[root,local],cash_event & (fault==0))
+            fault |= cash_identities.fault
+            settlement_ready &= ~cash_event | cash_ready
+        association_available=association_available & settlement_ready
         platform,result=self.platform.apply_transition(sequence,balances,outcome,economic&(fault==0),
             torch.zeros_like(economic),association_available)
         cash_delta=take_ratio(balances,root*8)
-        maker_cash=self.maker_cash+cash_delta
+        zero_cash=ExactRational(cash_delta.numerator.constant(0),cash_delta.denominator.constant(1))
+        cash_for_maker=select(cash_delta,~fee_economic | (paid_economic & resolution_maker) | (cash_economic & cash_maker),zero_cash)
+        maker_cash=self.maker_cash+cash_for_maker
+        other_cash=self.other_cash
+        if other_cash is None:
+            fault |= cash_economic.to(torch.int32)
+        else:
+            other_cash=other_cash+select(cash_delta,cash_economic & ~cash_maker & result.applied,zero_cash)
+            fault |= torch.where(cash_economic & result.applied,other_cash.fault,0)
         fault=fault | torch.where(result.applied,maker_cash.fault,0)
         applicable=((outcome_kind==OUT_EVIDENCE)&((tag==3)|(tag==7)|(tag==8)|(tag==9)|
-            (tag==12)|(tag==13)|(tag==14)|(tag==15)|(tag==16)|(tag==17)|(tag==19)|(tag==20))) | (outcome_kind==OUT_PENDING)
+            (tag==12)|(tag==13)|(tag==14)|(tag==15)|(tag==16)|(tag==17)|(tag==19)|(tag==20)|(tag==22)|(tag==23))) | (outcome_kind==OUT_PENDING)
         use=(requested&applicable)|result.applied
         fault=fault | result.fault
-        use=use&(fault==0)
+        use=use&(fault==0)&settlement_ready
         order=_take(self.lifecycle.orders,index)
         fill=_take(self.lifecycle.fills,index)
         canceled=(tag==15)&self.lifecycle.canceled_orders[root,local]
@@ -444,18 +498,18 @@ class AdmissionLifecycle:
             resolutions,maker_delta=resolutions.redeem(self.lifecycle.conditions[root,local],
                 self.lifecycle.resolution_identities[root,local],cash_delta,removed_cost,success_pools,
                 redemption & result.applied & use & (fault==0))
-            maker_cash=self.maker_cash+ExactRational(
-                maker_delta.numerator.select(redemption,cash_delta.numerator),
-                maker_delta.denominator.select(redemption,cash_delta.denominator))
+            maker_cash=self.maker_cash+select(maker_delta,redemption,cash_for_maker)
+            resolutions=resolutions.accrue_directional_cash(condition,cash_delta,
+                paid_economic & ~resolution_maker & result.applied & use & (fault==0))
             fault |= resolutions.root_fault | torch.where(result.applied,maker_cash.fault,0)
         markets=self.unresolved_markets
         if markets is not None:
-            markets=markets.refresh(success_pools,trade_success,days,use & (fault==0),resolutions=resolutions)
+            markets=markets.refresh(success_pools,trade_success,days,use & (fault==0),resolutions=resolutions,settlement_costs=costs)
             root_fault=Numbers.combine_fault_rows(torch.where(
                 markets.roots[None,:]==root[:,None],markets.fault[None,:],0))
             fault=fault | root_fault
         success=use&(fault==0)
-        valid=(fault==0)&funds_ready&lifecycle_ready
+        valid=(fault==0)&funds_ready&lifecycle_ready&settlement_ready
         # 多成员向量容量不足时保留请求，整个证据不提交任何部分贡献。
         contribution_commit=valid & (~maker_event | success)
         contributions=replace(coordinate(contributions,self.rebate_contributions,contribution_commit),
@@ -474,6 +528,9 @@ class AdmissionLifecycle:
         same=(self.columns.positions.reshape(roots,width,-1)==key[:,None,:]).all(dim=2)&self.lifecycle.emitted
         applied=self.applied | (same&success[:,None])
         return replace(self,platform=platform,
+            settlement_costs=None if costs is None else replace(coordinate(costs,self.settlement_costs,valid & (~cost_event | success)),capacity_required=costs.capacity_required),
+            external_cash=None if cash_identities is None else replace(coordinate(cash_identities,self.external_cash,valid & (~cash_event | success)),capacity_required=cash_identities.capacity_required),
+            other_cash=None if other_cash is None else select(other_cash,success & economic,self.other_cash),
             accepted_principal=accepted_principal.coordinated(self.accepted_principal,valid),
             projected_markets=None if population is None else population.coordinated(self.projected_markets,valid),
             success_pools=success_pools.coordinated(self.success_pools,valid),

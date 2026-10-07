@@ -256,6 +256,45 @@ class Projection:
             torch.full_like(zero,schema),frozenset([schema]))
         return incoming
 
+    def settlement_cost(self,sampler,condition,resolution,policy,identity,recognized,paid,has_correction,correction,
+            economic_kind,sequence,balances,outcomes,transported_outcomes,settlement_liability,taker_liability,at,active,fault,*,economic_present):
+        """实际Cost反馈及完整V2 delta，同private/time，原ordinal递增。"""
+        from settlement_cash import map_cost
+        return self._settlement_cash(sampler,condition,resolution,policy,identity,economic_kind,sequence,
+            balances,outcomes,transported_outcomes,settlement_liability,taker_liability,economic_present,at,active,fault,
+            lambda private,ordinal,emitted:map_cost(self.account_slots,condition,resolution,policy,identity,
+                recognized,paid,has_correction,correction,private,ordinal,emitted))
+
+    def external_cash_feedback(self,sampler,identity,amount,attribution,has_correction,correction,
+            sequence,balances,outcomes,transported_outcomes,settlement_liability,taker_liability,at,active,fault,*,economic_present):
+        from settlement_cash import map_external_cash
+        absent=torch.full_like(identity,-1)
+        return self._settlement_cash(sampler,absent,absent,absent,identity,torch.full_like(identity,2),sequence,
+            balances,outcomes,transported_outcomes,settlement_liability,taker_liability,economic_present,at,active,fault,
+            lambda private,ordinal,emitted:map_external_cash(self.account_slots,identity,amount,attribution,
+                has_correction,correction,private,ordinal,emitted))
+
+    def _settlement_cash(self,sampler,condition,resolution,policy,identity,kind,sequence,
+            balances,outcomes,transported_outcomes,settlement_liability,taker_liability,economic_present,at,active,fault,make_lifecycle):
+        from settlement_cash import map_settlement_cash_economic
+        if (economic_present.shape!=active.shape or economic_present.dtype!=torch.bool
+                or economic_present.device!=active.device):
+            raise TypeError('Economic存在位须来自原Option(delta)，为同设备bool[root]')
+        categories=torch.full_like(active[:,None],3,dtype=torch.int64)
+        emitter,frame=self.emitter.emit(sampler,active[:,None],torch.zeros_like(active[:,None]),
+            at[:,None],at[:,None],torch.zeros_like(at[:,None]),fault[:,None])
+        ordinals=map_source_ordinals(frame.emitted,categories,(1+economic_present.to(torch.int64))[:,None],fault[:,None])
+        private,batch=frame.private_sequences,frame.batch_sequences
+        first=ordinals.first_ordinals[:,0]
+        life=make_lifecycle(private,first,frame.emitted[:,0])
+        economic=map_settlement_cash_economic(self.account_slots,condition,at,kind,resolution,policy,identity,
+            sequence,balances,outcomes,transported_outcomes,settlement_liability,taker_liability,
+            private,first+1,frame.emitted[:,0]&economic_present)
+        common=(private,batch,frame.received_at[:,0],categories[:,0],at)
+        return self._finish(emitter,[(life,EVIDENCE,*common,active),
+            (economic,ECONOMIC,*common,active&economic_present)],fault | frame.root_fault | ordinals.fault |
+                torch.where(active&economic_present,economic.fault,0))
+
     def _finish(self,emitter,records,source_fault):
         from queues import ExactInt,ExactRational
         def cat_integer(values):

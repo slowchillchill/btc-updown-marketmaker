@@ -69,6 +69,9 @@ def _device_scan(state,association,label,*,zero_first=False):
         # 来源物理列已安装，容量可按本页人口增长；不改变合法成交人口。
         if trades>ledger.trades.occupied.size(1): trades=max(trades,ledger.columns.row_refs.size(1))
         ledger=ledger.resized_lifecycle(orders=orders,trades=trades)
+        ledger=ledger.resized_settlement_identities(
+            costs=None if ledger.settlement_costs is None else max(need['costs']),
+            cash=None if ledger.external_cash is None else max(need['cash']))
         if max(need['contributions'])>ledger.rebate_contributions.occupied.size(1):
             ledger=ledger.resized_contributions(max(need['contributions']))
         if ledger.rebate_days is not None and max(need['days'])>ledger.rebate_days.occupied.size(1):

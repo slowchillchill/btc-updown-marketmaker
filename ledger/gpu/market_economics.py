@@ -2,7 +2,8 @@
 
 配对和派生成本来自D-0295成功池；费用来自公开Trade净费，返佣只取
 已冻结日payable归属。孤腿本金独立读出，不提前计入未判定利润。
-Resolution/请求式结算的payout、费用、兑付和负债尚须原消费者接齐。
+Cost目录安装后按完整recognized累计扣盈亏；付款不再扣一次盈亏。
+未安装Cost目录仍只提供既有部分读面，完整经济输入不得据此宣称费用已知零。
 """
 from dataclasses import dataclass, replace
 import torch
@@ -51,7 +52,7 @@ class UnresolvedMarkets:
         return cls(safe, roots, conditions, ratio, ratio,
             torch.full_like(safe, known, dtype=torch.bool), fault)
 
-    def values(self, pools, trades, days, resolutions=None):
+    def values(self, pools, trades, days, resolutions=None,settlement_costs=None):
         count = self.roots.numel()
         first, second = self.asset_indices, pools.counterpart[self.asset_indices]
         guarantee = take_ratio(pools.paired_quantity, first)
@@ -84,15 +85,20 @@ class UnresolvedMarkets:
             zero = ExactRational(orphan.numerator.constant(0), orphan.denominator.constant(1))
             profit = profit + select(orphan-orphan_cost, resolutions.present, zero)
             fault |= resolutions.fault | orphan.fault
+        costs_known=torch.ones_like(self.known)
+        if settlement_costs is not None:
+            recognized,_,costs_known,cost_fault=settlement_costs.read_markets(self.roots,self.conditions)
+            profit=profit-recognized
+            fault |= cost_fault
         fault |= profit.fault
-        complete = ~detail_missing
+        complete = ~detail_missing & costs_known
         if resolutions is not None:
             complete &= resolutions.known
         return guarantee, paired_cost, orphan_cost, profit, complete, fault
 
-    def refresh(self, pools, trades, days, committed_roots, *, resolutions=None):
+    def refresh(self, pools, trades, days, committed_roots, *, resolutions=None,settlement_costs=None):
         """候选先计算完整精确值，随后随同一Ledger事务提交，不能冻结时才补最大值。"""
-        _, _, _, profit, complete, fault = self.values(pools, trades, days, resolutions)
+        _, _, _, profit, complete, fault = self.values(pools, trades, days, resolutions,settlement_costs)
         zero = ExactRational(profit.numerator.constant(0), profit.denominator.constant(1))
         loss = zero - profit
         comparison = loss.compare(self.maximum_loss)
@@ -109,8 +115,8 @@ class UnresolvedMarkets:
             maximum_loss=select(self.maximum_loss, use, original.maximum_loss),
             known=torch.where(use, self.known, original.known))
 
-    def read(self, pools, trades, days, *, resolutions=None):
-        guarantee, paired_cost, orphan_cost, _, complete, fault = self.values(pools, trades, days, resolutions)
+    def read(self, pools, trades, days, *, resolutions=None,settlement_costs=None):
+        guarantee, paired_cost, orphan_cost, _, complete, fault = self.values(pools, trades, days, resolutions,settlement_costs)
         if resolutions is not None:
             zero = ExactRational(guarantee.numerator.constant(0), guarantee.denominator.constant(1))
             guarantee = select(zero, resolutions.present, guarantee)

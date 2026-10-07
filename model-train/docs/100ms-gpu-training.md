@@ -995,7 +995,31 @@ Native同冻结账户消费current293:296、old308:311，精确求和后才投�
 未接经济历史来源时provided=False，缺历史时提供适用Unknown，old人口不完整也保持Unknown。
 有限公共V2场景经原NOE构造、接纳和CPU Ledger归约核增额、减额、重复、失败事务及旧冻结，
 它不是自然SIM非零费用producer。现有自然SIM和V1升V2的额外负债仍是零。
-经济settlement liability不是市场Cost Evidence的recognized−paid；该读面、费用归属和完整NAV仍继续开发。
+经济settlement liability不是市场Cost Evidence的recognized−paid；市场费用读面与归属见下一节，完整NAV仍继续开发。
+
+### 公共Cost／ExternalCash接线与费用切片
+
+NOE `schema22/23`分别保留真实Cost／ExternalCash证据，`schema24`保留原V2新增经济kind。
+金额始终使用ExactRational，真实空outcome列表保持空人口。一个Settlement反馈的自然批先发
+Lifecycle，再按原 `Option(delta)` 的存在位决定是否发Economic，不按金额非零判断。
+只有settlement liability变化以及实际存在的全零delta，都须保留第二条记录和账户序。
+两条记录共用原private/time，source ordinal递增，SourceOrder按完整u64 private sequence比较。
+
+Ledger的Cost目录保存原身份、完整request关联、最新SourceOrder、累计recognized／paid与归属。
+新累计只替换更晚来源。修正先等待原Cost身份，继承原归属；无修正时使用首次Resolution归属。
+Cost经济事实只等待Resolution，不增加等待Cost证据的门。付款按Resolution归属更新Maker／Directional现金，
+确认费用不扣现金；市场盈亏扣完整recognized累计，付款不再次扣盈亏，最大历史亏损随同一条提交更新。
+ExternalCash证据修正等待原现金身份。首次负额归Maker，非负额归Other；修正继承原分类，不按本次符号或标签重分。
+对应经济事实等待现金身份。缺前驱仍待消费；目录和精确字容量不足退出后保原成功前缀、位置及冻结，冷增长后续跑。
+
+Cost／Cash目录必须来自真实冷历史或实际开户后的完整来源。`None`和不完整历史不能升级成已知空目录。
+Native通过同一公共账户冻结消费current `slow[296:299]`／old `slow[311:314]`的市场未付结算费。
+按scope精确求recognized−paid后投影；不完整非空scope为Unknown，空scope为Known0，current不适用为NA。
+old人口不完整时保Unknown，不能把已有子集之和当完整old。
+
+有限验证复用原case0／8、late false／true和ExternalCash修正场景，导出原NOE位置及CPU提交before／after。
+每个费用块从真实before安装非费用冷状态，Cost／Cash目录沿全部费用块承接，after只作独立预期。
+这是费用切片，不证明GPU已从开户连续推进所有非费用事件，不交付完整SIM费用场景调度、NAV或活动恢复。
 
 ### 累计接纳本金
 

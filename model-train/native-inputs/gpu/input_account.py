@@ -35,6 +35,14 @@ def frozen_account_inputs(account, scope_members, scope_known, scope_applicable,
         slow = write_reservation_fields(slow, reservations)
         provided[:, :54] = True
         fault |= reservations.fault
+        if account.ledger.settlement_costs is not None:
+            from input_settlement_fee import settlement_fee_inputs
+            fees,fee_fault=settlement_fee_inputs(account.ledger,scope_conditions,scope_present,scope_applicable)
+            slow[:,296:299]=fees[:,0]
+            slow[:,311:314]=fees[:,1]
+            provided[:,296:299]=True
+            provided[:,311:314]=True
+            fault |= fee_fault
         if economic_liability_prefix_known is not None:
             from input_taker_fee import taker_fee_inputs,write_taker_fee_fields
             fees=taker_fee_inputs(account.ledger,scope_conditions,scope_present,scope_applicable,
@@ -189,5 +197,8 @@ def account_inputs_at_prefix(account, market, condition_slots, prefixes, root_st
     if economic_liability_prefix_known is not None:
         unknown_old=scopes.applicable[:,1]&~population_known[:,1]
         slow[:,308:311]=torch.where(unknown_old[:,None],torch.tensor([0.,0.,1.],device=device),slow[:,308:311])
+    if account.ledger.settlement_costs is not None:
+        unknown_old=scopes.applicable[:,1]&~population_known[:,1]
+        slow[:,311:314]=torch.where(unknown_old[:,None],torch.tensor([0.,0.,1.],device=device),slow[:,311:314])
     return NativeAccountAtPrefix(FrozenAccountInputs(slow,inputs.provided,inputs.order_fields,
         inputs.cutoff,inputs.fault | scopes.fault),scopes)

@@ -98,7 +98,7 @@ class CapturedLedgerDrain:
         self.resources_fit=torch.ones((),dtype=torch.bool,device=device)
         self.iterations=torch.zeros_like(storage.state.cursor.position)
         self.required={name:torch.zeros_like(storage.state.cursor.position)
-            for name in ('orders','trades','contributions','days','order_funds','conditions')}
+            for name in ('orders','trades','contributions','days','order_funds','conditions','costs','cash')}
         def compute():
             state=storage.state
             ledger,waiting,cursor=state.waiting.drain_one(state.ledger,association_available,state.cursor)
@@ -115,6 +115,8 @@ class CapturedLedgerDrain:
                 'contributions':ledger.rebate_contributions.capacity_required,
                 'order_funds':ledger.order_funds.capacity_required,
                 'days':torch.zeros_like(self.required['days']) if ledger.rebate_days is None else ledger.rebate_days.capacity_required,
+                'costs':torch.zeros_like(self.required['costs']) if ledger.settlement_costs is None else ledger.settlement_costs.capacity_required,
+                'cash':torch.zeros_like(self.required['cash']) if ledger.external_cash is None else ledger.external_cash.capacity_required,
                 'conditions':torch.full_like(self.required['conditions'],-1) if ledger.projected_markets is None else ledger.projected_markets.required_conditions}
             needs['conditions']=torch.where(needs['conditions']>=0,needs['conditions'],ledger.accepted_principal.required_conditions)
             fit=self.candidate.fits
@@ -123,6 +125,8 @@ class CapturedLedgerDrain:
                 fit=fit & (needs[name]<=directory.occupied.size(1)).all()
             if ledger.rebate_days is not None:
                 fit=fit & (needs['days']<=ledger.rebate_days.occupied.size(1)).all()
+            for name,directory in (('costs',ledger.settlement_costs),('cash',ledger.external_cash)):
+                if directory is not None:fit=fit & (needs[name]<=directory.occupied.size(1)).all()
             fit=fit & (needs['conditions']<0).all()
             self.resources_fit.copy_(fit)
             for name,need in needs.items(): self.required[name].copy_(need)
