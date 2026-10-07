@@ -4,6 +4,7 @@ import argparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from importlib import metadata
 import json
+import os
 from pathlib import Path
 import subprocess
 import time
@@ -15,6 +16,7 @@ def main():
     parser.add_argument('--artifact',type=Path,required=True)
     parser.add_argument('--jobs',type=int,default=8)
     parser.add_argument('--progress-seconds',type=float,default=10)
+    parser.add_argument('--reuse-wheels',type=Path)
     args=parser.parse_args()
     if args.jobs<1 or args.progress_seconds<=0:
         parser.error('并发数和进度间隔必须为正')
@@ -23,6 +25,14 @@ def main():
     if artifact.exists():
         raise ValueError('差异安装证据目录必须是新目录')
     artifact.mkdir(parents=True)
+    # 校验真实路径位于数据盘，但保留venv符号链接路径作为uv目标。
+    # resolve(sys.executable)会穿过venv的链接，变成基准CPython安装目录。
+    import sys
+    python=Path(sys.executable).absolute()
+    environment.on_data_disk(python)
+    expected_prefix=environment.MODEL_ROOT/'.venv'
+    if Path(sys.prefix).resolve()!=expected_prefix.resolve():
+        raise ValueError('差异安装必须由现有model-train/.venv解释器启动')
     commit=subprocess.check_output(['git','rev-parse','HEAD'],cwd=environment.MODEL_ROOT.parent,text=True).strip()
     status=subprocess.check_output(['git','status','--porcelain'],cwd=environment.MODEL_ROOT.parent,text=True)
     if status:
@@ -40,6 +50,14 @@ def main():
     items=[item for item in environment.artifacts({'packages':changed}) if item['directory']=='wheels']
     for item in items:
         item['download_urls']=environment.download_candidates(item['url'],None,True)
+        if args.reuse_wheels is not None:
+            source=environment.on_data_disk(args.reuse_wheels/item['filename'])
+            if source.exists():
+                if not environment.verified(source,item):
+                    raise ValueError('复用wheel哈希不符，保留现场：'+str(source))
+                destination=environment.on_data_disk(artifact/'wheels'/item['filename'])
+                destination.parent.mkdir(parents=True,exist_ok=True)
+                os.link(source,destination)
     batch=environment.DownloadBatch()
     started=time.monotonic()
     def download(item):
@@ -57,7 +75,6 @@ def main():
     requirements=artifact/'requirements.hashed.txt'
     requirements.write_text('\n'.join(f"{package['name']}=={package['version']} "+' '.join(
         f"--hash=sha256:{wheel['hashes']['sha256']}" for wheel in package['wheels']) for package in changed)+'\n')
-    python=environment.on_data_disk(Path(__import__('sys').executable))
     uv=environment.on_data_disk(Path('/root/autodl-tmp/tools/uv-0.12.9/uv'))
     commands=[
         [str(uv),'pip','install','--python',str(python),'--offline','--no-index','--find-links',str(artifact/'wheels'),
