@@ -161,7 +161,7 @@ def main():
     assert batch.received_at.cpu().tolist()==[[metadata['feedback_received_at_utc_ms']]]
     assert batch.source_categories.cpu().tolist()==[[3]]
     ordinal=integers([int(projection.normalizer.bank.source_order[actual_row,3].cpu().item())])
-    assert values(ordinal)==[evidence['source_order']['source_ordinal']]
+    assert values(ordinal)==[evidence['source_order']['ordinal']]
     pending=PendingRecords.from_columns(batch.emitted,batch.received_at,batch.private_sequences,ordinal,batch.rows,integers([0]))
     gates=ReceiveGates.unset(1).set_receive(tensor([source['resolved_close_at']]),enabled)
     pending,blocked=Numbers.run_exact_batch(lambda:pending.take_closed(gates))
