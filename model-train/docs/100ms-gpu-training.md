@@ -954,8 +954,16 @@ NOE消费者读取这些实际效果，不能用最后一轮活动成交详情�
 
 源事件/类型的补零哨兵在冷安装时一次建立，每步仅gather当前根的索引，不拼接整页。
 `sim-system/gpu/hidden_gather.cu`只对本轮Snapshot掩码扫描其offset范围，逐源档位关联该根运行档位；
-Level/Tick/noop不扫描快照。临时量为运行档位输出和每根两份交叉乘积字scratch，
+每根一个CUDA线程。Level/Tick/noop不扫描快照。临时量为运行档位输出和每根两份交叉乘积字scratch，
 没有运行档位×全页快照矩阵。精确比较复用公共multiply/compare，scratch按完整输入字宽和分母
 交叉乘积上界分配，数量仍取原精确字典值。选中快照与运行档位关联的成本仍随两者人口增加，
 这里不据小页对照宣称全工作集吞吐。零运行档位的合法空Book保留初始化与完整桶闭合，
 空fill tuple取设备false人口，不要求空Snapshot生成撮合反馈。
+
+hidden纯引用消费沿原`reduce_hidden_step_bucket_v1`：七类`ReferenceFact`与紧凑
+`BinanceDepthFromPrefix`不更新SIM盘口、账户或公开行情。冷列仅从已由原reader逐值绑定的
+完整事实分类，图内按每根`next_reference`推进一个引用；实际引用正文/位置由同一源页保留。
+同轮已选择引用的根不额外消费step。全部引用完成后才进入PM步骤，纯引用桶也必须沿
+原到期义务、role时间和完整桶闭合。MarketFact保留游标等待其所属市场处理器，不能统一作noop。
+引用游标推进是device loop的实际进展；无处理进展时退出并保持原前沿。预读/分类不更新NOE公开门。
+当前市场生命周期、交易状态和Terminal消费者及完整多阶段宿主仍未交付。

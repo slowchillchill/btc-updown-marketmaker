@@ -17,6 +17,9 @@ from prepare import decimal_columns
 
 QUALITY = {'fresh': 0, 'stale': 1, 'missing': 2, 'unknown_not_observed': 3, 'confirmed_gap': 4, 'invalid': 5}
 STEP_TAG = {'InitialSnapshot': 1, 'LevelChange': 2, 'Tick': 3, 'Quality': 4}
+REFERENCE_TYPES = frozenset(('chainlink_btc_usd', 'binance_depth_state', 'binance_aggregate_trade',
+    'market_price_anchor_update', 'market_settlement_reference_update', 'chainlink_btc_usd_twap',
+    'rtds_observed_anomaly'))
 
 
 class HiddenPmBlock:
@@ -54,6 +57,23 @@ class HiddenPmBlock:
         self.asset_markets = torch.tensor(coordinates, dtype=torch.int64, device=device)
         self.market_count = len(scene)
         self.buckets = buckets  # 原完整身份、闭桶证明、参考和步骤均保留。
+        reference_tags = []
+        for bucket in buckets:
+            for reference in bucket['references']:
+                payload = reference['payload']
+                if 'BinanceDepthFromPrefix' in payload:
+                    reference_tags.append(1)
+                elif 'Inline' in payload and 'ReferenceFact' in payload['Inline']:
+                    kind = payload['Inline']['ReferenceFact']['reference_type']
+                    if kind not in REFERENCE_TYPES:
+                        raise ValueError('未知hidden纯引用类型不得作为noop消费')
+                    reference_tags.append(1)
+                elif 'Inline' in payload and 'MarketFact' in payload['Inline']:
+                    reference_tags.append(2)  # 保留原市场事实，等待真实市场处理器。
+                else:
+                    raise ValueError('hidden参考人口必须是原ReferenceFact或MarketFact')
+        # 原reader已经逐值绑定完整正文；类型列仅供SIM游标分派，不签发公开可见性。
+        self.reference_tags = torch.tensor(reference_tags + [0], dtype=torch.int64, device=device)
         self.assets = assets
         self.slots = slots
         asset_ids = {asset['token_id']: index for index, asset in enumerate(assets)}

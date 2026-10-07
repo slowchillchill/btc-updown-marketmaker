@@ -230,9 +230,12 @@ class CapturedHiddenBuckets:
         self.required_maker_days = torch.zeros_like(enabled,dtype=torch.int64)
         self.closed = torch.zeros_like(enabled)
         self.iterations = torch.zeros_like(horizon)
-        def candidate(indices):
+        self.reference_iterations = torch.zeros_like(horizon)
+        def candidate(indices, step_allowed=None):
             runtime = storage.runtime
             choice = runtime.choose(None, None, horizon, enabled & self.resources_fit)
+            if step_allowed is not None:
+                choice = replace(choice, present=choice.present & step_allowed)
             return runtime.apply_hidden_selected(choice, indices, conditions, selected_paths,
                 fee_rate, fee_exponent, taker_rate, source_assets, level_sides)
         if stage_progress is not None:
@@ -250,6 +253,7 @@ class CapturedHiddenBuckets:
             runtime = storage.runtime
             before_bucket = runtime.hidden_frontier.next_bucket.clone()
             before_step = runtime.hidden_frontier.next_step.clone()
+            before_reference = runtime.hidden_frontier.next_reference.clone()
             before_applying = runtime.hidden_frontier.applying.clone()
             def begin():
                 runtime = storage.runtime
@@ -259,8 +263,14 @@ class CapturedHiddenBuckets:
             self.required_words.copy_(torch.maximum(self.required_words,opening.required_words))
             self.resources_fit.logical_and_(opening.fits)
             storage.commit(opening.value,self.resources_fit)
+            reference_indices = storage.runtime.hidden_frontier.next_reference.clone()
+            reference_round = storage.runtime.hidden_frontier.reference_enabled(reference_indices)
+            runtime = storage.runtime
+            choice = runtime.choose(None, None, horizon, enabled & self.resources_fit)
+            storage.commit(runtime.apply_hidden_reference(choice, reference_indices), self.resources_fit)
+            self.reference_iterations.add_((storage.runtime.hidden_frontier.next_reference > reference_indices).to(torch.int64))
             indices = storage.runtime.hidden_frontier.next_step.clone()
-            value = Numbers.device_exact_batch(lambda:candidate(indices),
+            value = Numbers.device_exact_batch(lambda:candidate(indices, ~reference_round),
                 word_capacity=word_capacity, device=horizon.device)
             state, effect = value.value
             self.required_words.copy_(torch.maximum(self.required_words,value.required_words))
@@ -291,6 +301,7 @@ class CapturedHiddenBuckets:
             self.closed.logical_or_(finishing.value[1] & self.resources_fit)
             frontier = storage.runtime.hidden_frontier
             progress = (frontier.next_bucket != before_bucket) | (frontier.next_step != before_step)
+            progress = progress | (frontier.next_reference != before_reference)
             progress = progress | (frontier.applying != before_applying)
             self.ready.copy_(ready() & self.resources_fit & progress.any())
         if stage_progress is not None:
@@ -306,6 +317,7 @@ class CapturedHiddenBuckets:
             self.resources_fit.fill_(True)
             self.closed.zero_()
             self.iterations.zero_()
+            self.reference_iterations.zero_()
             self.ready.copy_(ready())
         if stage_progress is not None:
             stage_progress('native_instantiate_begin')

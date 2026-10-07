@@ -85,3 +85,68 @@ fn gpu_compact_hidden_drives_exact_asset_state_and_queues() {
     assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
     eprintln!("gpu_hidden_asset_reference={}",String::from_utf8(output.stdout).unwrap());
 }
+#[test]
+#[ignore="AutoDL真实紧凑TWAP引用→设备循环；市场事实保持等待"]
+fn gpu_compact_hidden_reference_population_closes_without_fabricating_market_effects() {
+    use data_pipeline_training::{compact_public::{PublicCompactWriterV1, CompactFactPayloadV1},
+        compact_hidden_material::{prepare_compact_hidden_material_v1, CompactHiddenMaterialReaderV1},
+        compact_hidden_gpu::next_compact_hidden_gpu_bucket_v1, gpu_initial_sort::GpuInitialRunOrderV1};
+    let temp = tempfile::tempdir().unwrap();
+    let source = temp.path().join("public");
+    let hidden = temp.path().join("hidden");
+    let mut public = core();
+    let mut writer = PublicCompactWriterV1::create(&source, public.header().clone()).unwrap();
+    let reference = |window, sequence| {
+        let mut input = twap_input(window);
+        input.common.timestamp_received = 21001 + sequence as i64;
+        input.common.message_timestamp = 21000;
+        input.common.payload_timestamp = 21000;
+        input.common.age_ms = Some(1 + sequence as i64);
+        input.collector_admission_sequence = sequence;
+        input.collector_admission_time_utc_ms = 21002 + sequence as i64;
+        input
+    };
+    let mut missing = reference(60, 3);
+    missing.common.freshness_status = RtdsFreshnessStatus::InvalidTimestamp;
+    let empty = |token: &str| PolymarketOrderbookEvent::Book {
+        asset_id: token.into(), last_trade_price: None, bids: Vec::new(), asks: Vec::new(),
+    };
+    for input in [meta(0), record(1, TypedRawRowV2::PolymarketRtdsChainlinkTwap(reference(30, 1))),
+        record(2, TypedRawRowV2::PolymarketRtdsChainlinkTwap(reference(60, 2))),
+        record(3, TypedRawRowV2::PolymarketRtdsChainlinkTwap(missing)),
+        pm(4, 1, 22000, empty(UP_TOKEN_ID)), pm(5, 2, 22000, empty(DOWN_TOKEN_ID)),
+        record(6, TypedRawRowV2::Existing(TypedRawRow::PolymarketMarketMetadata(Box::new(terminal_metadata_row(&market()))))),
+        record(7, TypedRawRowV2::Existing(TypedRawRow::PolymarketOrderbook(terminal_orderbook_row(&market())))), end(8)] {
+        let prepared = prepare_public_ingress_v1(&public, &input, &BTreeMap::new(), &[]).unwrap();
+        let applied = public.push_facts(&prepared).unwrap();
+        writer.push_prepared(&input, &prepared, &applied).unwrap();
+    }
+    writer.publish().unwrap();
+    let assets = public.pm_context(CONDITION_ID).unwrap().assets.into_iter().map(|a| a.asset).collect::<Vec<_>>();
+    let mut sort = config().sort;
+    sort.merge_workers = 8;
+    let order = Arc::new(GpuInitialRunOrderV1::start(Path::new(&std::env::var("B_GPU_PYTHON").unwrap()),
+        Path::new(&std::env::var("B_GPU_SORT_WORKER").unwrap())).unwrap());
+    prepare_compact_hidden_material_v1(&source, &hidden, 1<<20, &sort, order,
+        "gpu-hidden-reference-test".into(), None, |_,_,_,_| {}).unwrap();
+    let mut reader = CompactHiddenMaterialReaderV1::open(&hidden, &source, 1, 1<<20, 1<<20, |_,_,_,_| {}).unwrap();
+    let mut buckets = Vec::new();
+    while let Some(bucket) = next_compact_hidden_gpu_bucket_v1(&mut reader).unwrap() { buckets.push(bucket); }
+    assert_eq!(buckets.iter().map(|b| b.bucket.bucket_time_utc_ms).collect::<Vec<_>>(), vec![21000,22000,31000]);
+    assert_eq!(buckets[0].references.len(), 2);
+    assert!(buckets[0].steps.is_empty());
+    assert!(buckets[0].references.iter().all(|r| matches!(r.payload,
+        CompactFactPayloadV1::Inline(PublicBusinessPayloadV1::ReferenceFact(CanonicalReferenceEventPayloadV2::ChainlinkBtcUsdTwap(_))))));
+    assert!(buckets[2].references.iter().any(|r| matches!(r.payload,
+        CompactFactPayloadV1::Inline(PublicBusinessPayloadV1::MarketFact { .. }))));
+    let input = serde_json::json!({"assets":assets,"buckets":buckets,"market_end":MARKET_END_AT,
+        "source_binding":{"binary":std::env::var("B_GPU_HIDDEN_CLI").unwrap(),"hidden":hidden,"public":source,
+            "rows":1,"bytes":1048576,"max_batch_bytes":1048576}});
+    let mut child = std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
+        .arg(std::env::var("B_GPU_HIDDEN_REFERENCE_VALIDATOR").unwrap()).stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+    serde_json::to_writer(child.stdin.take().unwrap(), &input).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    eprintln!("gpu_hidden_reference={}", String::from_utf8(output.stdout).unwrap());
+}

@@ -30,6 +30,22 @@ run_test() {
     tail -4 "$artifact_dir/$log"
 }
 case "$case_name" in
+    hidden-reference)
+        export B_GPU_SORT_WORKER="$repo_root/data-pipeline/gpu/sort_worker.py"
+        export B_GPU_HIDDEN_REFERENCE_VALIDATOR="$repo_root/sim-system/gpu/validate_hidden_references.py"
+        export B_GPU_HIDDEN_CLI="$CARGO_TARGET_DIR/debug/dpt-compact-hidden"
+        command=(cargo build -p data-pipeline-training --bin dpt-compact-hidden --locked --offline)
+        printf '%q ' "${command[@]}" >> "$artifact_dir/commands.txt"
+        printf '\n' >> "$artifact_dir/commands.txt"
+        "${command[@]}" > "$artifact_dir/build.log" 2>&1
+        run_test gpu_compact_hidden_reference_population tests.log
+        command=(cargo test -p sim-system --features shared-execution --lib --locked --offline
+            pure_reference_bucket_closes_without_market_effect_and_missing_time_is_not_fabricated -- --nocapture)
+        printf '%q ' "${command[@]}" >> "$artifact_dir/commands.txt"
+        printf '\n' >> "$artifact_dir/commands.txt"
+        "${command[@]}" > "$artifact_dir/original-reference.log" 2>&1
+        tail -4 "$artifact_dir/original-reference.log"
+        ;;
     hidden-asset)
         export B_GPU_SORT_WORKER="$repo_root/data-pipeline/gpu/sort_worker.py"
         export B_GPU_HIDDEN_ASSET_VALIDATOR="$repo_root/sim-system/gpu/validate_hidden.py"

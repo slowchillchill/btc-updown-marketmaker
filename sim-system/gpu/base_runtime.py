@@ -143,6 +143,15 @@ class BaseSimRuntime:
     def hidden_reference_applied(self, index, committed, fault):
         return replace(self,hidden_frontier=self.hidden_frontier.reference_applied(index,committed,fault))
 
+    def apply_hidden_reference(self, choice, indices):
+        """原ReferenceEvent无SIM业务效果；MarketFact保留游标等待其真实处理器。"""
+        self._source(choice)
+        tags = self.hidden_frontier.columns.source.reference_tags
+        selected = tags.index_select(0, indices.clamp(0, tags.numel()-1))
+        enabled = choice.enabled(4) & self.hidden_frontier.reference_enabled(indices)
+        return self.hidden_reference_applied(indices, enabled & (selected == 1),
+            torch.zeros_like(self.hidden_frontier.fault))
+
     def finish_hidden_bucket(self):
         from account_state import grouped_fault
         fault=self.account.fault | self.orders.fault | self.fills.fault | self.requests.fault
