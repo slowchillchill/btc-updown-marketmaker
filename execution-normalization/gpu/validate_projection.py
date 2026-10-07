@@ -453,6 +453,8 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     executed=Numbers.run_exact_batch(lambda:admission.trade_success.executed(zero[:,None],torch.ones_like(zero[:,None],dtype=torch.bool)))
     assert executed.known.cpu().tolist()==[[True,True]] and executed.fault.cpu().tolist()==[0]
     expected_executed=source['reservation_checkpoints'][-1]['markets'][0]['executed']
+    sys.path[:0] = [str(Path(__file__).resolve().parents[2]/'model-train/native-inputs/gpu'),
+                   str(Path(__file__).resolve().parents[2]/'data-pipeline/gpu')]
     from input_executed import executed_inputs,write_executed_fields
     native_executed = Numbers.run_exact_batch(lambda:executed_inputs(admission.trade_success,
         torch.tensor([[[0],[-1]]],device='cuda'),torch.tensor([[[True],[False]]],device='cuda'),
