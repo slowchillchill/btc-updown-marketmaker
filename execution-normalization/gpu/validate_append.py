@@ -77,8 +77,8 @@ def check_incremental_receive(bank,batches,delivered,start,expected,gates):
     order=matches.to(torch.int64).argmax(1)
     assert values(state.ledger.applied_sequences)==values(_take(expected.applied_sequences,order))
     assert torch.equal(state.waiting.available_at[:,:8],first_visible)
-    delivered_values=values(first_delivery.delivered_sequences)+values(last_delivery.delivered_sequences)
-    delivered_active=first_delivery.emitted.flatten().cpu().tolist()+last_delivery.emitted.flatten().cpu().tolist()
+    delivered_values=values(first_delivery.closed.delivered_sequences)+values(last_delivery.closed.delivered_sequences)
+    delivered_active=first_delivery.closed.emitted.flatten().cpu().tolist()+last_delivery.closed.emitted.flatten().cpu().tolist()
     assert [v for v,on in zip(delivered_values,delivered_active) if on]==values(delivered.delivered_sequences)[:21]
     saved_width=state.ledger.columns.row_refs.size(1)
     empty=replace(later,emitted=torch.zeros_like(later.emitted))
@@ -91,4 +91,59 @@ def check_incremental_receive(bank,batches,delivered,start,expected,gates):
     damaged=replace(empty,fault=torch.ones_like(empty.fault))
     damaged=run(lambda:state.append_batch(bank,damaged))
     assert damaged.ledger.columns.row_refs.size(1)==saved_width and damaged.ledger.fault.cpu().tolist()==[1]
+    return True
+
+
+def check_incremental_rebate_batches(bank,batches,start,expected,gates):
+    """原Maker完整来源批逐批追加，最后统一合法双门领取。
+
+    此处检查新批解码/向量人口，不声称宿主已随真实义务自动推进时间。
+    """
+    sys.path.insert(0,str(Path(__file__).resolve().parents[2]/'shared-run/gpu'))
+    from memory import EconomicColumns
+    from admission_lifecycle import LifecycleColumns
+    from closed import ClosedAdmission
+    from consumption import PendingRecords
+    from registry import PublicRegistryState,PublicRegistryEvents
+    from public_ledger import PublicLedgerState
+    run=Numbers.run_exact_batch
+    (first,),_=run(lambda:compact_committed_batches([batches[0]]))
+    columns=run(lambda:EconomicColumns.from_projection_batches([first]))
+    roots,width=columns.row_refs.shape
+    device=columns.row_refs.device
+    initial=replace(start,columns=columns,lifecycle=run(lambda:LifecycleColumns.from_projection(bank,columns)),
+        applied=torch.zeros_like(columns.enabled),available_at=torch.zeros_like(columns.row_refs),
+        applied_sequences=ExactInt.from_i64_tensor(torch.zeros(roots*width,dtype=torch.int64,device=device)),
+        order_funds=replace(start.order_funds,unassigned_records=torch.zeros_like(columns.enabled)))
+    pending=run(lambda:PendingRecords.from_columns(first.emitted,first.received_at,first.private_sequences,
+        ExactInt.from_i64_tensor(bank.source_order[first.rows.flatten(),3]),first.rows,
+        ExactInt.from_i64_tensor(torch.zeros(roots,dtype=torch.int64,device=device))))
+    state=PublicLedgerState(pending,PublicRegistryState(PublicRegistryEvents.empty(roots,device)),
+        ClosedAdmission.empty(columns),initial)
+    old_entry=values(state.ledger.current_entry_sequence)
+    for batch in batches[1:]:
+        state=run(lambda:state.append_batch(bank,batch))
+        assert values(state.ledger.current_entry_sequence)==old_entry
+        assert not state.waiting.received.any().cpu().item()
+    assert state.ledger.lifecycle.maker_contributions.present.any().cpu().item()
+    assert state.ledger.lifecycle.rebate_refs.present.any().cpu().item()
+    state,delivery=run(lambda:state.receive(bank,gates,torch.ones_like(state.ledger.columns.enabled)))
+    assert not (state.waiting.received & ~state.waiting.consumed).any().cpu().item()
+    assert state.ledger.fault.cpu().tolist()==[0]
+    assert int(delivery.closed.emitted.sum().cpu())==9
+    for name in ['current_entry_sequence','current_local_prefix']:
+        assert values(getattr(state.ledger,name))==values(getattr(expected,name))
+    assert values(state.ledger.platform.platform_source_prefix)==values(expected.platform.platform_source_prefix)
+    for name in ['balances','outcomes']:
+        for part in ['numerator','denominator']:
+            a=getattr(getattr(state.ledger.platform,name),part)
+            b=getattr(getattr(expected.platform,name),part)
+            capacity=max(a.words.size(1),b.words.size(1))
+            assert torch.equal(a.with_capacity(capacity).words,b.with_capacity(capacity).words)
+            assert torch.equal(a.sign,b.sign)
+    for name in ['condition_payable','condition_locked']:
+        a=getattr(state.ledger.rebate_days,name)
+        b=getattr(expected.rebate_days,name)
+        assert values(a.numerator)==values(b.numerator) and values(a.denominator)==values(b.denominator)
+    assert torch.equal(state.ledger.rebate_days.payment_observed,expected.rebate_days.payment_observed)
     return True

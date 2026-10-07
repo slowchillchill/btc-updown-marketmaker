@@ -148,6 +148,7 @@ def main():
     from transport import compact_committed_batches
     from validate_transport import check_transport_layout
     layout_checked=run(lambda:check_transport_layout(batches))
+    incremental_batches=tuple(batches)
     batches,transport_population=run(lambda:compact_committed_batches(batches))
     active=torch.cat([batch.emitted for batch in batches],dim=1)
     received=torch.cat([batch.received_at for batch in batches],dim=1)
@@ -230,6 +231,7 @@ def main():
         admission=replace(admission,maker_cash=rational([str(Fraction(before['cash']['maker_available_pusd'])+Fraction(before['cash']['maker_reserved_pusd']))]))
         return admission
     admission=run(prepare_ledger)
+    incremental_initial=admission
     cache=ClosedAdmission.empty(admission.columns)
     cache=run(lambda:cache.accept(admission.columns,delivered))
     finish_phase('cold_Ledger_assembly_and_accept')
@@ -244,6 +246,9 @@ def main():
     assert check_markets(admission,source['attempts'][-1]['after'],before['markets'][0]['condition_id'])
     assert check_rebates(admission,source['attempts'][-1]['after'],before['markets'][0]['condition_id'])
     assert values(admission.current_entry_sequence)==[actual['ledger_entry_seq']]
+    from validate_append import check_incremental_rebate_batches
+    incremental_rebate_checked=check_incremental_rebate_batches(noe.normalizer.bank,incremental_batches,
+        incremental_initial,admission,gates)
     assert values(admission.platform.platform_source_prefix)==[actual['platform_source_prefix']]
     assert amounts(admission.platform.balances)==[Fraction(actual['platform_confirmed_projection'][name]) for name in names]
     cost_read=run(admission.position_costs.read)
@@ -293,6 +298,7 @@ def main():
     assert amounts(admission.success_pools.success_quantity)==[Fraction('300'),0]
     finish_phase('account_public_reads_and_original_comparison')
     print(json.dumps({'stages':phases,'transport_two_root_layout_and_empty_padding_checked':layout_checked,
+        'incremental_actual_Maker_vector_and_Day_reference_batches_checked':incremental_rebate_checked,
         'original_transport_width':transport_population.original_width,'compacted_transport_width':transport_population.allocated_width,
         'physical_record_width':cache.received.size(1),'received_record_population':int(cache.received.sum().cpu()),
         'first_drain_apply_record_calls':drain_attempts*cache.received.size(1)**2,
