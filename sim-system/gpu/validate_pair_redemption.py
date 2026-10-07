@@ -160,6 +160,7 @@ def main():
     from validate_native_market_economics import check as check_economics
     from input_success import success_inputs,write_success_fields
     from success_read import net_success
+    from exposure import read_portfolio_exposure
     import math
     empty=tensor([[]],torch.bool);integer=integers([])
     ratio_empty=type(rational(['0']))(integer,integer.constant(1))
@@ -207,6 +208,13 @@ def main():
     differences=[]
     for current,reference,native in [(old,before,before_native),(ledger,after,after_native)]:
         expected=reference['markets'][0]
+        # 原真实qualified Resolved在实际兑付之前就移出训练暴露E；成功回执
+        # 只改变请求状态，不能把仍未兑付的确认孤腿继续作为Unresolved计时。
+        assert current.resolutions.present.cpu().tolist()==[True]
+        exposure=Numbers.run_exact_batch(lambda:read_portfolio_exposure(current,
+            success_prefix_known=enabled,settlement_prefix_known=enabled))
+        assert exposure.known.cpu().tolist()==[True] and exposure.fault.cpu().tolist()==[0]
+        assert ratio(exposure.amount)==[Fraction(0)]
         check_economics(native,expected,profit_known=False)
         # 实际FinalSuccess Request与已兑付量独立于成功池历史完整性。
         incomplete=Numbers.run_exact_batch(lambda:frozen_account_inputs(
@@ -286,6 +294,7 @@ def main():
         'actual_Request_Economic_semantic_positions_private_source_times_checked':True,
         'same_NOE_closed_first_visibility_direct_platform_prefix_and_no_double_apply_checked':True,
         'actual_pair_five_maker_and_orphan_one_directional_attribution_checked':True,
+        'qualified_Resolved_excluded_from_reward_exposure_before_and_after_redemption_checked':True,
         'actual_already_consumed_FinalSuccess_Request_and_sticky_state_cold_prefix_preserved_checked':True,
         'same_public_freeze_Native_net_success_122_to_163_and_missing_settlement_Unknown_checked':True,
         'same_device_typed_resolution_net_success_graph_replay_and_old_frozen_checked':True,

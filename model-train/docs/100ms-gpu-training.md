@@ -373,9 +373,33 @@ GAE使用TorchRL `generalized_advantage_estimate` 基础函数，输入各根有
 为假；未知/补齐可用计算占位，但不能取得学习资格。合法零间隔折扣为1。真正终止
 不要求未使用的bootstrap已知；非经济终止的截断仍需bootstrap。优势与价值目标不带
 采集图，标准化使用整批真实决定的总体方差，minibatch仅索引这份结果。
-本组件尚未提供奖励known的生产者、完整轨迹绑定或optimizer门。后继更新入口必须
+本组件消费奖励区间的known，但尚未提供完整轨迹绑定或optimizer门。后继更新入口必须
 在协调边界阻止not-ready批次的 `optimizer.step()`；零loss不是该门，优化器仍可能
 改变momentum、权重衰减与step计数。有限GPU数学样本不代表联合PPO或活动恢复。
+`shared-run/gpu/exposure.py` 在同一已提交账本读确认份额暴露 `E`：每个尚未因果可见
+合格判定的市场先取净确认两腿份额差的绝对值，再跨全账户市场相加，按1pUSD/份
+计量。公共 `net_success` 提供确认份额和实际兑付后的净读面；`Unresolved` 筛选仍由
+同前缀的真实判定目录决定，不能用市场日期、模型scope或净占款代替。缺完整成功/
+判定历史保留Unknown，报价未知不影响这项不依赖价格的暴露。
+
+`model_train/interval_reward.py` 提供参数化区间状态：保存起点WCM、上一 `E`、实际
+模拟UTC毫秒前沿和精确面积。每次实际公开变化先将旧 `E` 积分到实际可见/应用时间，
+再安装新 `E`；迟到来源不回填。区间闭合补齐静默尾段，并精确计算
+`10000/2000 * (ΔWCM - a_pusd * area_pusd_ms / 6000000)`，只在末端投影成张量。
+`a_pusd` 是显式正有理数，无正式默认；工程算例0.2不作为正式系数。训练时间成本
+不改账本、NAV或费用。正时长Unknown使当前区间持续Unknown，后续Known不能抹除；
+零时长Unknown没有面积，不污染区间。未知区间保持真实决定人口，交给优势包装的
+整体可用门处理，不能丢样本、裁剪奖励或分别标准化两项。
+
+日期、采集批次和学习切片不得重新调用 `open` 清零累计。闭合后继续保留末端 `E`，
+下一真实奖励区间从该时刻接续。图外 `snapshot` 仅拥有这些少量跨调用状态，不复制
+账本；下一capture不得覆盖已发布起点、上一暴露或累计面积。所有精确运算复用
+`Numbers.device_exact_batch` 的 `fits/required_words`；调用者共同接纳状态与奖励，
+容量不足保留原状态并按同一输入增长重试，不将其作业务拒绝或丢弃历史面积。
+本切片提供公共暴露读取和区间数学，尚未接上每条连续Ledger提交的奖励积分器、
+完整决定归属/轨迹消费或学习器屏障；两个原账户冷来源与有限数学输入序列不代表
+自然采集轨迹、联合PPO或完整根恢复。
+
 组件用法依据[TorchRL PPO说明](https://docs.pytorch.org/rl/0.13/reference/generated/torchrl.objectives.PPOLoss.html)
 及[GAE说明](https://docs.pytorch.org/rl/0.13/reference/generated/torchrl.objectives.value.GAE.html)，
 本项目需核对循环和全域条件分布的适配，不由普通连续动作教程证明已兼容。
