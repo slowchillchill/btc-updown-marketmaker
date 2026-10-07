@@ -197,8 +197,10 @@ class LifecycleColumns:
         canceled_orders=enabled[15]&(decoded[15][2]==0)
         pending=enabled[8]&((decoded[8][6]==0)|(decoded[8][6]==1))
         accepted=enabled[3]&(decoded[3][1]==0)
-        request=torch.cat([batch.request_slots for batch in columns.projection_batches],dim=1)
-        item=torch.cat([batch.item_ordinals for batch in columns.projection_batches],dim=1)
+        request=(torch.cat([batch.request_slots for batch in columns.projection_batches],dim=1)
+            if columns.projection_batches else torch.full_like(columns.row_refs,-1))
+        item=(torch.cat([batch.item_ordinals for batch in columns.projection_batches],dim=1)
+            if columns.projection_batches else torch.full_like(columns.row_refs,-1))
         return cls(schemas.reshape(roots,width),outcomes.reshape(roots,width),orders,fills,conditions.reshape(roots,width),
             open_orders.reshape(roots,width),canceled_orders.reshape(roots,width),pending.reshape(roots,width),accepted.reshape(roots,width),
             torch.where(economic,decoded[11][3],-1).reshape(roots,width),decoded[11][5].reshape(roots,width),
