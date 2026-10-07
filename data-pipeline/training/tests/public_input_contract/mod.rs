@@ -947,7 +947,8 @@ fn real_metadata_admission_order_survives_file_and_batch_permutations() {
             let prepared = merge.prepare_input(&core, &mut actual[0]).unwrap();
             assert!(matches!(
                 core.push(&prepared),
-                Err(DptCoreErrorV1::MetadataBeforeIdentitySnapshot)
+                Err(DptCoreErrorV1::Contract(data_pipeline_core::ContractError::InvalidField { field, reason }))
+                    if field == "metadata" && reason.contains("requires a complete Gamma")
             ));
         }
     }

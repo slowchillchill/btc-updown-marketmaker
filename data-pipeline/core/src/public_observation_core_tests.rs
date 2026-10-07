@@ -2799,7 +2799,7 @@ fn compact_progress_matches_complete_groups_through_isolation_retry_and_resync()
             assert_eq!(f.group_position, c.group_position);
             assert_eq!(f.member_input_positions, c.member_input_positions);
             assert_eq!(f.closed_at_input_position, c.closed_at_input_position);
-            // Independent old formula, including collector admission later than receive.
+            // 本轨迹首个Snapshot的准入明确为10001，不得提前到接收10000。
             let available = match &input.ingress {
                 DptIngressV1::Message {
                     source_evidence, ..
@@ -2810,6 +2810,11 @@ fn compact_progress_matches_complete_groups_through_isolation_retry_and_resync()
                         a.admitted_at_utc_ms.max(source_evidence.received_at_utc_ms)
                     }),
                 _ => i64::MIN,
+            };
+            let available = if input.input_position == 0 {
+                SNAPSHOT_RECEIVED_AT + 1
+            } else {
+                available
             };
             assert_eq!(
                 c.visible_at_utc_ms,

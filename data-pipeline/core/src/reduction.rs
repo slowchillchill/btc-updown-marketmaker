@@ -1413,7 +1413,7 @@ impl<E: ReductionEvidenceV1> PolymarketMetadataReducer<E> {
         if canonical_rule_version.trim().is_empty() {
             return Err(invalid("canonical_rule_version", "must not be empty"));
         }
-        validate_identity_snapshot(&input)?;
+        validate_initial_identity_metadata(&input)?;
 
         let initial_tick = initial_tick.ok_or_else(|| {
             invalid(
@@ -1488,7 +1488,14 @@ impl<E: ReductionEvidenceV1> PolymarketMetadataReducer<E> {
             current_lifecycle,
             &input.evidence,
             ReductionOperationKindV1::Merge,
-            "POLYMARKET_METADATA_INITIAL_LIFECYCLE",
+            // 首行转换没有已观察前态；公共绑定复用当前生命周期快照。
+            if input.row.metadata_row_kind
+                == typed_raw::PolymarketMetadataRowKind::MarketStateTransition
+            {
+                "POLYMARKET_METADATA_LIFECYCLE_SNAPSHOT"
+            } else {
+                "POLYMARKET_METADATA_INITIAL_LIFECYCLE"
+            },
             &mut batch,
         )?;
         if let Some(trading_state) = current_trading_state {
@@ -2890,7 +2897,7 @@ fn validate_polymarket_metadata_input(
     Ok(())
 }
 
-fn validate_identity_snapshot<E: crate::pm_reduction::PmEvidenceV1>(
+fn validate_initial_identity_metadata<E: crate::pm_reduction::PmEvidenceV1>(
     input: &PolymarketMetadataInputV1<E>,
 ) -> Result<(), ContractError> {
     use typed_raw::{
@@ -2914,15 +2921,33 @@ fn validate_identity_snapshot<E: crate::pm_reduction::PmEvidenceV1>(
             Some(MetadataSourceEvidenceEventType::GammaMarketBySlugResponse),
         )
     );
-    if input.row.metadata_row_kind != PolymarketMetadataRowKind::MetadataSnapshot
-        || !source_pair_matches
+    // 首个本地计时器行可以保留先前收到的真实Gamma载荷；产生方不等于证据来源。
+    let gamma_transition = input.row.metadata_row_kind
+        == PolymarketMetadataRowKind::MarketStateTransition
+        && input.row.metadata_origin == PolymarketMetadataOrigin::LocalMarketStateTimer
+        && matches!(
+            (
+                input.row.source_evidence_origin,
+                input.row.source_evidence_event_type
+            ),
+            (
+                Some(MetadataSourceEvidenceOrigin::GammaMarketsDiscovery),
+                Some(MetadataSourceEvidenceEventType::GammaMarketsDiscoveryResponse)
+            ) | (
+                Some(MetadataSourceEvidenceOrigin::GammaBySlug),
+                Some(MetadataSourceEvidenceEventType::GammaMarketBySlugResponse)
+            )
+        );
+    if !(input.row.metadata_row_kind == PolymarketMetadataRowKind::MetadataSnapshot
+        && source_pair_matches
+        || gamma_transition)
         || input.row.source_evidence_payload_json.is_none()
         || input.row.outcomes_raw.is_none()
         || input.evidence.source_time().is_some()
     {
         return Err(invalid(
             "metadata",
-            "market context requires a complete Gamma identity snapshot without fabricated source time",
+            "market context requires a complete Gamma identity snapshot or initial local state transition without fabricated source time",
         ));
     }
     Ok(())
@@ -3681,7 +3706,7 @@ impl PolymarketMetadataReducer<SourceEvidenceRefV2> {
         if canonical_rule_version.trim().is_empty() {
             return Err(invalid("canonical_rule_version", "must not be empty"));
         }
-        validate_identity_snapshot(&input)?;
+        validate_initial_identity_metadata(&input)?;
         let outcomes = input
             .row
             .outcome_evidence()
