@@ -1,0 +1,149 @@
+{
+  "purpose": "任务3直接概率/跨来源因果查询、预声明75次顺序拟合与冻结评价配置提案；真实十八日运行尚未执行且不构成正式参数采用。",
+  "format": "direct-probability-plan-v1",
+  "collector_commit": "8e6e9d8a744ec3ec10b4c0b8d57a251a16159d59",
+  "start": 1788912000000,
+  "end": 1790467200000,
+  "manifests": [
+    {
+      "path": "2026-09-09/typed_raw/utc_day=2026-09-09/manifest.json",
+      "sha256": "93a70f4775bdb3d52bf7de73d58caaa5ccbf2f2d7f6a8e2f00e09c092e1f1918",
+      "rows": 34766440,
+      "bytes": 2169975828
+    },
+    {
+      "path": "2026-09-10/typed_raw/utc_day=2026-09-10/manifest.json",
+      "sha256": "a940cc15d039efd2a2555f8da30958ea6b381cc24574477dbd8c93d33a240a60",
+      "rows": 33880107,
+      "bytes": 2102161414
+    },
+    {
+      "path": "2026-09-11/typed_raw/utc_day=2026-09-11/manifest.json",
+      "sha256": "4cb535f1baa9a15d4bb1115020309c5c09edec119e49ef35a0b0400a28c2c975",
+      "rows": 35628921,
+      "bytes": 2205427289
+    },
+    {
+      "path": "2026-09-12/typed_raw/utc_day=2026-09-12/manifest.json",
+      "sha256": "e204a795061341ffae961795307892bfdc785d186a99d56de75cfafad64385af",
+      "rows": 25744186,
+      "bytes": 1544553889
+    },
+    {
+      "path": "2026-09-13/typed_raw/utc_day=2026-09-13/manifest.json",
+      "sha256": "c9b6a352a7856419b73fbb1c53be9762ef88d9994779fe4e81b544637472a131",
+      "rows": 26519877,
+      "bytes": 1609521911
+    },
+    {
+      "path": "2026-09-14/typed_raw/utc_day=2026-09-14/manifest.json",
+      "sha256": "8a516eb39bcd37d2ff993265b1513b0b2b530e1f098628c63b9fe3591c306dd9",
+      "rows": 40021910,
+      "bytes": 2439106910
+    },
+    {
+      "path": "2026-09-15/typed_raw/utc_day=2026-09-15/manifest.json",
+      "sha256": "dbb7f677ec17f8c58643a79b6027ea1a88ab145fbe617f83e3fd974d78819bcd",
+      "rows": 43933902,
+      "bytes": 2673707368
+    },
+    {
+      "path": "2026-09-16/typed_raw/utc_day=2026-09-16/manifest.json",
+      "sha256": "0e3234a16b227d8479aa2fbc714d1f2cd508366f082e7f5a9ff14c99ab6fe12f",
+      "rows": 48108530,
+      "bytes": 2901537812
+    },
+    {
+      "path": "2026-09-17/typed_raw/utc_day=2026-09-17/manifest.json",
+      "sha256": "d217c4d56a6900678374306e406ac93f53e394d48cb84d9b0624c4a3c421ab82",
+      "rows": 45251483,
+      "bytes": 2690346664
+    },
+    {
+      "path": "2026-09-18/typed_raw/utc_day=2026-09-18/manifest.json",
+      "sha256": "a710cf0ab237bf708e3690ad6b95fbe4a006dbad53d784906d8588ff78c375c2",
+      "rows": 50107256,
+      "bytes": 2987044116
+    },
+    {
+      "path": "2026-09-19/typed_raw/utc_day=2026-09-19/manifest.json",
+      "sha256": "b4b8920adedef134a7030acd3a6dfc370bc5b6449bc9e8af763c0bbfc6787ab7",
+      "rows": 36465224,
+      "bytes": 2142483114
+    },
+    {
+      "path": "2026-09-20/typed_raw/utc_day=2026-09-20/manifest.json",
+      "sha256": "b7e20320a29c46f6c9a819cb4d06dab44783aba519036fce4c8e120b39a1ff5b",
+      "rows": 46293004,
+      "bytes": 2709403192
+    },
+    {
+      "path": "2026-09-21/typed_raw/utc_day=2026-09-21/manifest.json",
+      "sha256": "1aaaf115459e91ed4a5c60bb63c4e0af370cb0eabc4c42bf47a2169528f01d61",
+      "rows": 59948134,
+      "bytes": 3549168715
+    },
+    {
+      "path": "2026-09-22/typed_raw/utc_day=2026-09-22/manifest.json",
+      "sha256": "573ba690a17d9b35874ed97b48434ef53868230ad6f1760c87cd1f908eb0d3dc",
+      "rows": 54176454,
+      "bytes": 3224120881
+    },
+    {
+      "path": "2026-09-23/typed_raw/utc_day=2026-09-23/manifest.json",
+      "sha256": "fd2958a10e8a36947d3377c5fbd9ff9d5d26d11c221853179cb25aec0e247465",
+      "rows": 53959264,
+      "bytes": 3183086744
+    },
+    {
+      "path": "2026-09-24/typed_raw/utc_day=2026-09-24/manifest.json",
+      "sha256": "4a7bf6e3fc0255ca583719f197ade087819a0f0718d84e0b7655217befca7caf",
+      "rows": 50907435,
+      "bytes": 3025521344
+    },
+    {
+      "path": "2026-09-25/typed_raw/utc_day=2026-09-25/manifest.json",
+      "sha256": "6676470736c0b2e0616ff4f69722740fb2f1c7a04f0bd47b5cbff44a12500bd9",
+      "rows": 47200607,
+      "bytes": 2780847809
+    },
+    {
+      "path": "2026-09-26/typed_raw/utc_day=2026-09-26/manifest.json",
+      "sha256": "408e18a4288eeffaf8137094d70ca489c604542b9e7f36e8eadfdac37dbb69b8",
+      "rows": 29328226,
+      "bytes": 1714553053
+    }
+  ],
+  "metadata_initialization": {
+    "files": [
+      {
+        "manifest_path": "2026-09-08/typed_raw/utc_day=2026-09-08/manifest.json",
+        "relative_paths": [
+          "source_kind=polymarket_market_metadata/polymarket_market_metadata_23.parquet"
+        ]
+      }
+    ],
+    "markets": [
+      {
+        "condition_id": "0x1fc54206bf570dbdf843a88d608aee9df9eac980a9ab47e400d787d732f7b748",
+        "snapshot_source_message_id": "d3842b75d06c65d26d38c87e9520c14a0c11d0bf5d210c70dc62ae883b9097e5"
+      },
+      {
+        "condition_id": "0xa653ad0b30faf75c56f20b40bd5b4c1194fe2153c0b2ca77ed3ceb8798a52c20",
+        "snapshot_source_message_id": "c11b6b3d60cb590a314f6de3a748de5923b4376d3fee8f4a7583fe7bd36ede42"
+      }
+    ],
+    "purpose": "复用D-0276原两市场起点前Snapshot及后续已可见变更，仅作为UTC9月9日00:00种子；保留原00:12描述边界，不筛选或截断本次十八日正常元数据/市场状态。",
+    "received_end_utc_ms": 1788912720000,
+    "received_start_utc_ms": 1788912000000
+  },
+  "progress_interval_seconds": 30,
+  "engine": {
+    "threads": 24,
+    "memory_limit": "8GiB",
+    "max_temp_directory_size": "64GiB"
+  },
+  "native_unit_span": 1048576,
+  "max_pending_ws_terminals": 65536,
+  "study_method": "每折先60个全覆盖基线，再三类各5个共同交集权重，最多75次预声明順序评分；冻结后评价，不采用正式参数。"
+}

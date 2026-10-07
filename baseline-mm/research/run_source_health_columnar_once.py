@@ -27,7 +27,7 @@ def interruption(signum, _frame):
     raise error
 
 
-def main():
+def main(entry=None):
     for signum in (signal.SIGTERM,signal.SIGHUP,signal.SIGINT):
         signal.signal(signum,interruption)
     parser=argparse.ArgumentParser(description=__doc__)
@@ -40,7 +40,7 @@ def main():
     if run_root.exists():
         raise RuntimeError('run root already exists; this wrapper never retries')
     args.logs.mkdir(exist_ok=False)
-    entry=Path(__file__).with_name('research_source_health_columnar.py')
+    entry=entry or Path(__file__).with_name('research_source_health_columnar.py')
     for stage in ('prepare','study'):
         command=['/usr/bin/time','-v','-o',str(args.logs/(stage+'.time')),sys.executable,'-u',str(entry),stage,str(args.config)]
         (args.logs/(stage+'.command.json')).write_text(json.dumps(command,ensure_ascii=False,indent=2)+'\n')

@@ -1,6 +1,7 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 
+use contracts::economics::EconomicRational;
 use contracts::*;
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
@@ -536,11 +537,71 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
         )
     }
 
+    /// 完整公共归约与薄路径共用数量状态和接纳步骤。
     pub fn compute_snapshot(
         &mut self,
         row: &BinanceDepthSnapshotRow,
         evidence: E,
     ) -> Result<ReferenceReductionOutcomeV1<E, E::Identity>, ContractError> {
+        self.compute_snapshot_projection(row, evidence, false)
+            .map(|outcome| outcome.expect("完整路径提供公共归约结果"))
+    }
+    pub fn compute_update(
+        &mut self,
+        row: &BinanceDepthUpdateRow,
+        evidence: E,
+    ) -> Result<ReferenceReductionOutcomeV1<E, E::Identity>, ContractError> {
+        self.compute_update_projection(row, evidence, false)
+            .map(|outcome| outcome.expect("完整路径提供公共归约结果"))
+    }
+    /// 研究薄入口复用已验证行和接纳边界，不投影完整事件或盘口谱系。
+    pub fn apply_quantity_snapshot(
+        &mut self,
+        row: &BinanceDepthSnapshotRow,
+        evidence: E,
+    ) -> Result<(), ContractError> {
+        self.compute_snapshot_projection(row, evidence, true)
+            .map(|_| ())
+    }
+    pub fn apply_quantity_update(
+        &mut self,
+        row: &BinanceDepthUpdateRow,
+        evidence: E,
+    ) -> Result<(), ContractError> {
+        self.compute_update_projection(row, evidence, true)
+            .map(|_| ())
+    }
+    /// 仅在实际采样时精确求和；缺口或新代际尚无快照时返回 None。
+    pub fn current_quantity_totals(
+        &self,
+    ) -> Result<Option<(ExactRationalV1, ExactRationalV1)>, ContractError> {
+        let Some(book) = self
+            .current_epoch
+            .as_ref()
+            .and_then(|e| self.epochs.get(e))
+            .and_then(|s| s.book.as_ref())
+        else {
+            return Ok(None);
+        };
+        let total = |levels: &BTreeMap<Decimal, ReferenceLevelState<E>>| {
+            levels
+                .values()
+                .try_fold(EconomicRational::zero(), |sum, level| {
+                    Ok::<_, ContractError>(sum.add(&EconomicRational::from_decimal(
+                        parse_canonical_decimal(&level.quantity, "quantity")?,
+                    )))
+                })
+                .map(|sum| sum.public())
+        };
+        Ok(Some((total(&book.bids)?, total(&book.asks)?)))
+    }
+
+    fn compute_snapshot_projection(
+        &mut self,
+        row: &BinanceDepthSnapshotRow,
+        evidence: E,
+        quantity_only: bool,
+    ) -> Result<Option<ReferenceReductionOutcomeV1<E, E::Identity>>, ContractError> {
         self.begin_epoch(&row.source_sequence_epoch_id)?;
         let state = self
             .epochs
@@ -558,6 +619,7 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
         let prior_evidence = state
             .book
             .as_ref()
+            .filter(|_| !quantity_only)
             .map(binance_depth_evidence)
             .transpose()?
             .unwrap_or_default();
@@ -574,11 +636,18 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
                 ResyncQuality::NotRequired
             };
 
-        let scope = format!("binance_depth:{}", row.source_sequence_epoch_id);
+        let scope = if quantity_only {
+            String::new()
+        } else {
+            format!("binance_depth:{}", row.source_sequence_epoch_id)
+        };
         if same_state {
+            if quantity_only {
+                return Ok(None);
+            }
             let mut confirmation_evidence = prior_evidence;
             confirmation_evidence.push(evidence);
-            return Ok(ReferenceReductionOutcomeV1 {
+            return Ok(Some(ReferenceReductionOutcomeV1 {
                 event: None,
                 report: non_event_report(
                     &self.canonical_rule_version,
@@ -588,7 +657,7 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
                     confirmation_evidence,
                     true,
                 )?,
-            });
+            }));
         }
         let book = BinanceDepthBookState {
             snapshot_last_update_id: row.last_update_id,
@@ -601,6 +670,10 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
             anchor_evidence: evidence.clone(),
             visibility_frontier_evidence: evidence,
         };
+        if quantity_only {
+            state.install_book(book);
+            return Ok(None);
+        }
         let event = finalize_binance_depth_event(
             &self.canonical_rule_version,
             &book,
@@ -616,21 +689,19 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
             None,
             event.event_id.clone(),
         )?;
-        state.book = Some(book);
-        state.awaiting_after_confirmed_gap = false;
-        state.epoch_switch_prior_book = None;
-        state.epoch_switch_missing_emitted = false;
-        Ok(ReferenceReductionOutcomeV1 {
+        state.install_book(book);
+        Ok(Some(ReferenceReductionOutcomeV1 {
             event: Some(event),
             report,
-        })
+        }))
     }
 
-    pub fn compute_update(
+    fn compute_update_projection(
         &mut self,
         row: &BinanceDepthUpdateRow,
         evidence: E,
-    ) -> Result<ReferenceReductionOutcomeV1<E, E::Identity>, ContractError> {
+        quantity_only: bool,
+    ) -> Result<Option<ReferenceReductionOutcomeV1<E, E::Identity>>, ContractError> {
         self.begin_epoch(&row.source_sequence_epoch_id)?;
         let state = self
             .epochs
@@ -649,10 +720,17 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
             ));
         }
         state.last_admission_sequence = Some(row.collector_admission_sequence);
-        let scope = format!("binance_depth:{}", row.source_sequence_epoch_id);
+        let scope = if quantity_only {
+            String::new()
+        } else {
+            format!("binance_depth:{}", row.source_sequence_epoch_id)
+        };
 
         match row.stitch_verdict {
             BinanceDepthStitchVerdict::NotAppliedSnapshotUnavailable => {
+                if quantity_only {
+                    return Ok(None);
+                }
                 if !state.epoch_switch_missing_emitted
                     && let Some(previous_book) = state.epoch_switch_prior_book.as_ref()
                 {
@@ -672,12 +750,12 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
                         event.event_id.clone(),
                     )?;
                     state.epoch_switch_missing_emitted = true;
-                    return Ok(ReferenceReductionOutcomeV1 {
+                    return Ok(Some(ReferenceReductionOutcomeV1 {
                         event: Some(event),
                         report,
-                    });
+                    }));
                 }
-                Ok(ReferenceReductionOutcomeV1 {
+                Ok(Some(ReferenceReductionOutcomeV1 {
                     event: None,
                     report: non_event_report(
                         &self.canonical_rule_version,
@@ -687,13 +765,16 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
                         vec![evidence],
                         false,
                     )?,
-                })
+                }))
             }
             BinanceDepthStitchVerdict::NotAppliedStaleDuplicate => {
+                if quantity_only {
+                    return Ok(None);
+                }
                 let matched_evidence = binance_depth_evidence(
                     state.book.as_ref().expect("stale verdict requires a book"),
                 )?;
-                Ok(ReferenceReductionOutcomeV1 {
+                Ok(Some(ReferenceReductionOutcomeV1 {
                     event: None,
                     report: duplicate_suppressed_report(
                         &self.canonical_rule_version,
@@ -703,9 +784,13 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
                         matched_evidence,
                         vec![evidence],
                     )?,
-                })
+                }))
             }
             BinanceDepthStitchVerdict::NotAppliedConfirmedHole => {
+                if quantity_only {
+                    state.confirm_gap();
+                    return Ok(None);
+                }
                 let book = state.book.as_ref().expect("hole verdict requires a book");
                 let event = finalize_binance_depth_event(
                     &self.canonical_rule_version,
@@ -722,12 +807,11 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
                     None,
                     event.event_id.clone(),
                 )?;
-                state.book = None;
-                state.awaiting_after_confirmed_gap = true;
-                Ok(ReferenceReductionOutcomeV1 {
+                state.confirm_gap();
+                Ok(Some(ReferenceReductionOutcomeV1 {
                     event: Some(event),
                     report,
-                })
+                }))
             }
             BinanceDepthStitchVerdict::Applied => {
                 let book = state
@@ -755,6 +839,9 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
                 book.anchor_evidence = evidence.clone();
                 book.visibility_frontier_evidence =
                     visibility_frontier_evidence(vec![previous_frontier, evidence])?;
+                if quantity_only {
+                    return Ok(None);
+                }
                 let event = finalize_binance_depth_event(
                     &self.canonical_rule_version,
                     book,
@@ -770,10 +857,10 @@ impl<E: ReductionEvidenceV1> BinanceDepthReducer<E> {
                     Some(summary.into_report()),
                     event.event_id.clone(),
                 )?;
-                Ok(ReferenceReductionOutcomeV1 {
+                Ok(Some(ReferenceReductionOutcomeV1 {
                     event: Some(event),
                     report,
-                })
+                }))
             }
         }
     }
@@ -3314,6 +3401,19 @@ fn event_time_from_prepared_evidence<E: crate::pm_reduction::PmEvidenceV1>(
             .map(|e| e.received_time())
             .max()
             .expect("canonical evidence is non-empty"),
+    }
+}
+
+impl<E: ReductionEvidenceV1> BinanceDepthEpochState<E> {
+    fn install_book(&mut self, book: BinanceDepthBookState<E>) {
+        self.book = Some(book);
+        self.awaiting_after_confirmed_gap = false;
+        self.epoch_switch_prior_book = None;
+        self.epoch_switch_missing_emitted = false;
+    }
+    fn confirm_gap(&mut self) {
+        self.book = None;
+        self.awaiting_after_confirmed_gap = true;
     }
 }
 

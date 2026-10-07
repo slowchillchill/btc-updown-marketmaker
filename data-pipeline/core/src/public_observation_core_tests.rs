@@ -2868,3 +2868,26 @@ fn compact_progress_matches_complete_groups_through_isolation_retry_and_resync()
     assert_eq!(full.object_counts(), compact.object_counts());
     assert!(total_deltas < rows.len() * reconstructed.len());
 }
+
+#[test]
+fn thin_reference_facts_match_full_actual_reductions() {
+    let mut full = core();
+    let mut thin = core();
+    for input in [meta(0), twap_record(1, 60, 22001, "100000000000000000000")] {
+        let ids = BTreeMap::new();
+        let prepared = prepare_public_ingress_v1(&full, &input, &ids, &[]).unwrap();
+        let expected = full.push(&prepared).unwrap().reductions;
+        let prepared = prepare_public_ingress_v1(&thin, &input, &ids, &[]).unwrap();
+        let actual = thin.push_reference_facts(&prepared).unwrap();
+        let facts = |batches: Vec<PublicReductionBatchV1>| {
+            batches
+                .into_iter()
+                .flat_map(|b| b.facts.iter().cloned().collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            serde_json::to_value(facts(expected)).unwrap(),
+            serde_json::to_value(facts(actual)).unwrap()
+        );
+    }
+}
