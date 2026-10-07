@@ -25,7 +25,7 @@ class LifecycleInputs:
         capacity = max(1,max(map(len,anchors),default=0))
         self.anchor_ids = torch.full((len(anchors),capacity),-1,dtype=torch.int64,device=public_state.times.device)
         for index,ids in enumerate(anchors):
-            if ids: self.anchor_ids[index,:len(ids)] = torch.tensor(ids,dtype=torch.int64,device=self.anchor_ids.device)
+            if len(ids): self.anchor_ids[index,:len(ids)] = torch.tensor(ids,dtype=torch.int64,device=self.anchor_ids.device)
 
     def encode(self, frame, market_indices, asset_indices, observation_ms):
         roots = observation_ms.numel()

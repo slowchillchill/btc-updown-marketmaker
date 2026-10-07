@@ -62,7 +62,10 @@ def main():
         build_started=time.perf_counter()
         built=build_public_device_page(args.binary,args.material,args.device_page,progress=page_progress)
         build_seconds=time.perf_counter()-build_started
-        original_columns=built[-1]
+        original_columns,binding=built[4:]
+        from dataclasses import asdict
+        args.output.parent.mkdir(parents=True,exist_ok=True)
+        (args.output.parent/'public-page-binding.json').write_text(json.dumps(asdict(binding),ensure_ascii=False,indent=2)+'\n')
         # 第二次及后续冷安装禁止GPU数字解析/GCD入口与前缀排序/counts。
         saved=(public_module.decimal_columns,torch.argsort,torch.bincount,public_module.PrefixColumn.__init__)
         saved_ratio=vars(_numbers().ExactRational)['ratio']
@@ -73,9 +76,10 @@ def main():
             _numbers().ExactRational.ratio=classmethod(forbidden)
             for attempt in range(2):
                 load_started=time.perf_counter()
-                page=PreparedPublicPage(args.device_page,args.material)
+                page=PreparedPublicPage(args.device_page,args.material,binding=binding)
                 installed=page.install()
                 assert page.columns['fact_records'].decoded_records==0
+                assert all(page.columns[name].decoded_records==0 for name in ('assets','markets','anchors','lifecycle_states'))
                 assert set(page.columns)==set(original_columns)
                 for name in TABLES: assert np.array_equal(page.columns[name],np.asarray(original_columns[name]).reshape(page.columns[name].shape))
                 for name in ('anchor_sets','terminal_payouts'):
@@ -114,17 +118,35 @@ def main():
             # 其余成员硬链接原只读页；仅独立复制的身份成员发生损坏。
             for entry in manifest['members'].values():
                 if entry['file']!=identity_name: os.link(args.device_page/entry['file'],broken/entry['file'])
-            try: PreparedPublicPage(broken,args.material)
+            try: PreparedPublicPage(broken,args.material,binding=binding)
             except ValueError as error:
                 assert '摘要' in str(error) and identity_name in str(error)
             else: raise AssertionError('损坏原身份成员必须拒绝')
+        # 同一冗余消费列边界：篡改预排值并更新其自身SHA仍不能替换已接纳页。
+        with tempfile.TemporaryDirectory(prefix='page-rehashed-',dir=args.output.parent) as temporary:
+            broken=Path(temporary)
+            manifest=json.loads((args.device_page/'manifest.json').read_text())
+            entry=manifest['members']['quantities.padded']; target=broken/entry['file']
+            shutil.copyfile(args.device_page/entry['file'],target)
+            rows=np.memmap(target,dtype='<i8',mode='r+',shape=tuple(entry['shape']))
+            assert len(rows)>1
+            rows[1,3]=len(original_columns['decimals']); rows.flush(); del rows
+            entry['sha256']=hashlib.sha256(target.read_bytes()).hexdigest()
+            (broken/'manifest.json').write_text(json.dumps(manifest,ensure_ascii=False,separators=(',',':')))
+            try: PreparedPublicPage(broken,args.material,binding=binding)
+            except ValueError as error: assert 'publisher绑定' in str(error)
+            else: raise AssertionError('重写成员自身摘要不得替换已接纳预排事实')
         wire=b''
+        member_sizes=sorted(((p.name,p.stat().st_size) for p in args.device_page.iterdir()),key=lambda entry:entry[1],reverse=True)
         page_report={'build_seconds':build_seconds,'load_seconds':loads,
             'bytes':sum(p.stat().st_size for p in args.device_page.iterdir()),
+            'largest_members':member_sizes[:8],
             'complete_original_columns_and_full_identity_equal':True,
             'fact_json_decodes_during_two_loads':prepared.columns['fact_records'].decoded_records,
+            'identity_json_decodes_during_two_loads':0,
             'two_loads_without_decimal_gcd_or_prefix_sort_checked':True,
             'corrupted_original_identity_member_rejected':True,
+            'rehashed_prepared_member_rejected_by_independent_publisher_binding':True,
             'whole_material_ended_page_only':True,'continuous_page_handoff_checked':False}
         del built
     parsed = time.perf_counter()

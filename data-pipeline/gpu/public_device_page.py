@@ -6,6 +6,7 @@
 import hashlib
 import json
 import math
+from dataclasses import dataclass
 from pathlib import Path
 import subprocess
 import numpy as np
@@ -37,6 +38,15 @@ DTYPES = {'i8':np.dtype('<i8'),'i4':np.dtype('<i4'),'i1':np.dtype('i1'),'u1':np.
 BANKS = ('assets','markets','anchors','lifecycle_states','fact_records','group_ids',
     'group_members','fact_types','binance_symbols')
 TEXT_BANKS = ('group_ids','fact_types','binance_symbols')
+
+
+@dataclass(frozen=True)
+class PublicPageBinding:
+    """原reader核验后由publisher交接；调用方保留，不从待加载页推导expected。"""
+    source_manifest_sha256: str
+    page_manifest_sha256: str
+    input_stream_id: str
+    next_input_position: int
 
 
 class IdentityBank:
@@ -155,18 +165,27 @@ def build_public_device_page(binary, material, destination, *, device='cuda', pr
         'source_manifest_sha256':hashlib.sha256(source_manifest).hexdigest(),
         'source_applied_prefix':source['applied_prefix'],'source_members':source['files']}
     with (destination/'manifest.json').open('xb') as stream: stream.write(_json_bytes(manifest))
+    binding=PublicPageBinding(manifest['source_manifest_sha256'],_sha(destination/'manifest.json'),
+        source['applied_prefix']['input_stream_id'],source['applied_prefix']['next_input_position'])
     if progress: progress('public_device_page_written',bytes=sum(p.stat().st_size for p in destination.iterdir()))
-    return pm,market,reference,binance,columns
+    return pm,market,reference,binance,columns,binding
 
 
 class PreparedPublicPage:
     """验收页后复用预排数组与精确bank；所有根共享此不可变对象。"""
-    def __init__(self,directory,material,*,device='cuda'):
+    def __init__(self,directory,material,*,binding,device='cuda'):
         self.directory=Path(directory); self.device=torch.device(device); self._tensors={}; self._prefixes={}
-        manifest=json.loads((self.directory/'manifest.json').read_bytes())
+        manifest_bytes=(self.directory/'manifest.json').read_bytes()
+        if (not isinstance(binding,PublicPageBinding)
+                or hashlib.sha256(manifest_bytes).hexdigest()!=binding.page_manifest_sha256):
+            raise ValueError('公共设备页与调用方已接纳publisher绑定不一致')
+        manifest=json.loads(manifest_bytes)
         if manifest['version']!=VERSION: raise ValueError('公共设备页版本错误')
         original=(Path(material)/'manifest.json').read_bytes(); source=json.loads(original)
-        if (hashlib.sha256(original).hexdigest()!=manifest['source_manifest_sha256']
+        if (hashlib.sha256(original).hexdigest()!=binding.source_manifest_sha256
+                or binding.source_manifest_sha256!=manifest['source_manifest_sha256']
+                or source['applied_prefix']['input_stream_id']!=binding.input_stream_id
+                or source['applied_prefix']['next_input_position']!=binding.next_input_position
                 or source['applied_prefix']!=manifest['source_applied_prefix']
                 or source['files']!=manifest['source_members'] or not source['normal_end']):
             raise ValueError('公共设备页原材料绑定错误')
@@ -223,6 +242,17 @@ class PreparedPublicPage:
                 or self.arrays['market_times'].shape!=(len(markets),2)
                 or self.arrays['condition_order'].shape!=(len(markets),)):
             raise ValueError('公共设备页市场派生人口错误')
+        pairs=np.full((len(markets),2),-1,dtype='<i8')
+        for market,asset,outcome in self.arrays['market_assets']:
+            if not (0<=market<len(markets) and 0<=asset<len(self.columns['assets']) and outcome>=0):
+                raise ValueError('公共设备页市场资产绑定错误')
+            if outcome<2 and pairs[market,outcome]==-1: pairs[market,outcome]=asset
+        order=self.arrays['condition_order']
+        if (len(set(order.tolist()))!=len(markets) or np.any((order<0)|(order>=len(markets)))
+                or not np.array_equal(self.arrays['asset_pairs'],pairs)):
+            raise ValueError('公共设备页市场派生绑定错误')
+        # 原身份派生时间、condition字典序和双精确表示由独立publisher绑定覆盖；
+        # 不为二次加载重复解包整个人口的身份JSON或重跑decimal/GCD。
         text=self._array('decimal_text','u1',1); offsets=self._offsets('decimal_offsets',len(text))
         self.columns['decimals']=IdentityBank(text,offsets,text=True)
         for name,width in (('anchor_sets',1),('terminal_payouts',2)):
@@ -230,6 +260,16 @@ class PreparedPublicPage:
             if values.shape[1]!=width: raise ValueError('公共设备页ragged列宽错误')
             offsets=self._offsets(name+'.offsets',len(values))
             self.columns[name]=RaggedRows(values,offsets,width)
+        unique=np.asarray([members[0] if len(members)==1 else -1 for members in self.columns['anchor_sets']],dtype='<i8')
+        if not np.array_equal(self.arrays['unique_anchor_ids'],unique):
+            raise ValueError('公共设备页直接锚点绑定错误')
+        payouts=self.columns['terminal_payouts']; maximum=max(1,max(map(len,payouts),default=0))
+        dense=self.arrays['market_payouts']
+        if dense.shape!=(len(payouts),maximum,2): raise ValueError('公共设备页payout布局错误')
+        for index,values in enumerate(payouts):
+            if (not np.array_equal(dense[index,:len(values)],values)
+                    or np.any(dense[index,len(values):,0]!=-1) or np.any(dense[index,len(values):,1]!=0)):
+                raise ValueError('公共设备页payout成员绑定错误')
         for name in PREFIXES:
             padded=self._array(name+'.padded','i8',2)
             if padded.shape[1]!=4 or len(padded)<1 or np.any(padded[0]):
@@ -242,6 +282,16 @@ class PreparedPublicPage:
                 if (np.any(part[:,0]!=target) or np.any(np.diff(part[:,1])<0)
                         or np.any(np.diff(part[:,2])<0)):
                     raise ValueError('公共设备页prefix分段或原顺序错误')
+            # 校验原行→已给offset段的稳定映射，O(N)，不重排或重算offset。
+            next_row=np.array(offsets[:-1],copy=True)
+            for row in self.arrays[name]:
+                target=row[0]
+                if (not 0<=target<targets or next_row[target]>=offsets[target+1]
+                        or not np.array_equal(rows[next_row[target]],row)):
+                    raise ValueError('公共设备页预排列与原事实行不一致: '+name)
+                next_row[target]+=1
+            if not np.array_equal(next_row,offsets[1:]):
+                raise ValueError('公共设备页预排列原人口不一致: '+name)
         n=len(self.columns['decimals']); exact={}
         for name in EXACTS:
             words=self._array(name+'.words','i4',2); sign=self._array(name+'.sign','i1',1)

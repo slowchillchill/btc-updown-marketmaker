@@ -590,6 +590,12 @@ bytes/offset bank，不合并不同来源或位置，不保存每事件全盘口
 `AppliedIngressPrefixV1`。成员布局、offset、字典边界及原缺失/质量条件由加载接口
 和现公共消费者核验；不使用 pickle 或任意 Python class 恢复。
 
+publisher 在原 reader 核验及页写入完成后交付独立 `PublicPageBinding`，包含
+原 manifest SHA、设备页 manifest SHA 与完整输入前缀。加载必须传入调用方已经
+接纳的该绑定；不允许从待加载页自身推导 expected SHA。它同时覆盖预排/派生列
+和两种精确表示的来源一致性，重写成员自身摘要仍不能替换已接纳页。catalog/
+检查点后续须保存此绑定与共享页引用；当前尚未交付完整 catalog 或恢复。
+
 `PreparedPublicPage.install` 直接安装 `PublicPmState`、市场、参考和 Binance
 预排列及精确 bank，不再解包原事件 JSON、解析十进制、GCD 或重排前缀。
 数字和 ragged 列保留只读数组视图，首次上传使用 pinned staging，同页设备列共享。
