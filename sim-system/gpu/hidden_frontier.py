@@ -17,9 +17,12 @@ class HiddenBucketColumns:
     reference_offsets: torch.Tensor
     index_ends: object  # 原u64索引位置，不能用有符号设备坐标替代业务位置。
     end_of_input: bool  # 原最后桶closure；不是本设备页末。
+    bucket_base: int = 0  # 同一不可变材料的稳定完整桶坐标。
 
     @classmethod
     def from_block(cls, block):
+        if getattr(block,'prepared_page',None) is not None:
+            return block.prepared_page.bucket_columns(block)
         steps, references = [0], [0]
         for value in block.buckets:
             steps.append(steps[-1]+len(value['steps']))
@@ -42,7 +45,7 @@ class HiddenBucketFrontier:
     applying: torch.Tensor
     closed_at: torch.Tensor
     has_closed: torch.Tensor
-    closed_bucket: torch.Tensor  # 完整原桶引用的稳定页内句柄。
+    closed_bucket: torch.Tensor  # 同源完整桶的稳定坐标；换页不重解释旧坐标。
     index_position: object
     fault: torch.Tensor
 
@@ -60,6 +63,28 @@ class HiddenBucketFrontier:
         at = self.columns.at[self.next_bucket.clamp(0,count-1)] if count else torch.zeros_like(self.closed_at)
         eof = ~present & self.columns.end_of_input
         return ScheduledTime(at,present,self.fault),eof
+
+    def handoff(self, columns):
+        """退出图后的物理页边界验收；不处理业务或给未完成桶签发关闭。
+
+        仅在所有根已完整消费本页后安装同源相邻完整桶页。此冷检查读取
+        页耗尽/位置凭据，不代替设备调度；其它SIM、NOE和公开状态由宿主保留。
+        """
+        from queues import Numbers
+        old=self.columns
+        source=getattr(old.source,'catalog',None)
+        if (source is None or source is not getattr(columns.source,'catalog',None)
+                or old.end_of_input or columns.bucket_base!=old.bucket_base+old.at.numel()):
+            raise ValueError('hidden换页须保持原共享bank和相邻完整桶范围')
+        page=columns.source.prepared_page
+        first=_take(source.index_starts,torch.full_like(self.next_bucket,page.begin))
+        match=Numbers.run_exact_batch(lambda:self.index_position.compare(first))
+        ready=(self.next_bucket==old.at.numel()) & ~self.applying & (self.fault==0)
+        ready &= (match.order==0) & (match.fault==0)
+        if not ready.all().cpu().item():
+            raise ValueError('hidden当前页仍有未提交桶/错误根，不能换页')
+        zero=torch.zeros_like(self.next_bucket)
+        return replace(self,columns=columns,next_bucket=zero,next_step=zero.clone(),next_reference=zero.clone())
 
     def begin(self, choice):
         source,_ = self.scheduled()
@@ -101,5 +126,5 @@ class HiddenBucketFrontier:
         position = _take(self.columns.index_ends,slot).select(complete,self.index_position)
         return replace(self,next_bucket=self.next_bucket+complete.to(torch.int64),
                        applying=self.applying & ~complete,closed_at=torch.where(complete,self.columns.at[slot],self.closed_at),
-                       has_closed=self.has_closed | complete,closed_bucket=torch.where(complete,slot,self.closed_bucket),
+                       has_closed=self.has_closed | complete,closed_bucket=torch.where(complete,slot+self.columns.bucket_base,self.closed_bucket),
                        index_position=position,fault=fault),complete

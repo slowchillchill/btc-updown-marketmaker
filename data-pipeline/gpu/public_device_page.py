@@ -101,6 +101,33 @@ def _json_bytes(value):
     return json.dumps(value,ensure_ascii=False,separators=(',',':')).encode('utf8')
 
 
+def store_array_member(directory, members, name, array, kind):
+    """public/hidden共用的固定类型成员；调用方负责来源绑定和业务列布局。"""
+    array=np.asarray(array,dtype=DTYPES[kind],order='C')
+    path=Path(directory)/(name+'.bin')
+    with path.open('xb') as stream: stream.write(array.tobytes(order='C'))
+    members[name]={'file':path.name,'dtype':kind,'shape':list(array.shape),
+        'bytes':path.stat().st_size,'sha256':_sha(path)}
+
+
+def load_array_members(directory, members):
+    """只读typed成员；调用方必须先核验独立publisher绑定。"""
+    arrays={}
+    for name,entry in members.items():
+        filename=entry['file']; shape=entry['shape']; kind=entry['dtype']
+        if (not isinstance(filename,str) or Path(filename).name!=filename
+                or filename in ('','.', '..') or kind not in DTYPES
+                or not isinstance(shape,list) or any(type(n)!=int or n<0 for n in shape)):
+            raise ValueError('设备页成员布局或路径错误')
+        path=Path(directory)/filename; dtype=DTYPES[kind]
+        if (path.is_symlink() or math.prod(shape)*dtype.itemsize!=entry['bytes']
+                or path.stat().st_size!=entry['bytes'] or _sha(path)!=entry['sha256']):
+            raise ValueError('设备页成员长度或摘要错误: '+filename)
+        arrays[name]=(np.memmap(path,dtype=dtype,mode='r',shape=tuple(shape))
+            if entry['bytes'] else np.empty(shape,dtype=dtype))
+    return arrays
+
+
 def build_public_device_page(binary, material, destination, *, device='cuda', progress=None):
     """原reader完成来源核验后仅一次解析精确数字/排序，保存最终typed列。"""
     material,destination=Path(material),Path(destination)
@@ -121,11 +148,7 @@ def build_public_device_page(binary, material, destination, *, device='cuda', pr
     destination.mkdir(parents=True,exist_ok=False)
     members={}
     def store(name,array,kind):
-        array=np.asarray(array,dtype=DTYPES[kind],order='C')
-        path=destination/(name+'.bin')
-        with path.open('xb') as stream: stream.write(array.tobytes(order='C'))
-        members[name]={'file':path.name,'dtype':kind,'shape':list(array.shape),
-            'bytes':path.stat().st_size,'sha256':_sha(path)}
+        store_array_member(destination,members,name,array,kind)
     def tensor(name,value,kind='i8'): store(name,value.detach().cpu().numpy(),kind)
     for name,width in TABLES.items(): store(name,np.asarray(columns[name],dtype='<i8').reshape(-1,width),'i8')
     for names,state in ((PM_PREFIXES,pm),(MARKET_PREFIXES,market),
@@ -189,14 +212,6 @@ class PreparedPublicPage:
                 or source['applied_prefix']!=manifest['source_applied_prefix']
                 or source['files']!=manifest['source_members'] or not source['normal_end']):
             raise ValueError('公共设备页原材料绑定错误')
-        def member(entry):
-            name=entry['file']
-            if not isinstance(name,str) or Path(name).name!=name or name in ('','.', '..'):
-                raise ValueError('公共设备页成员路径错误')
-            path=self.directory/name
-            if path.is_symlink() or path.stat().st_size!=entry['bytes'] or _sha(path)!=entry['sha256']:
-                raise ValueError('公共设备页成员长度或摘要错误: '+name)
-            return path
         self.columns=manifest['metadata']
         if self.columns['input_stream_id']!=source['header']['input_stream_id']:
             raise ValueError('公共设备页输入身份错误')
@@ -206,16 +221,7 @@ class PreparedPublicPage:
         expected|={name+'.'+field for name in ('anchor_sets','terminal_payouts') for field in ('values','offsets')}
         expected|={name+'.'+field for name in BANKS for field in ('utf8','offsets')}
         if set(manifest['members'])!=expected: raise ValueError('公共设备页列人口错误')
-        self.arrays={}
-        for name,entry in manifest['members'].items():
-            shape=entry['shape']; kind=entry['dtype']
-            if kind not in DTYPES or not isinstance(shape,list) or any(type(n)!=int or n<0 for n in shape):
-                raise ValueError('公共设备页数组布局错误')
-            dtype=DTYPES[kind]
-            if math.prod(shape)*dtype.itemsize!=entry['bytes']: raise ValueError('公共设备页数组长度错误')
-            path=member(entry)
-            self.arrays[name]=(np.memmap(path,dtype=dtype,mode='r',shape=tuple(shape))
-                if entry['bytes'] else np.empty(shape,dtype=dtype))
+        self.arrays=load_array_members(self.directory,manifest['members'])
         for name,width in TABLES.items():
             value=self._array(name,'i8',2)
             if value.shape[1]!=width: raise ValueError('公共设备页表列宽错误')

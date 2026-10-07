@@ -35,6 +35,18 @@ class EconomicColumns:
     outcome_list: object
     projection_batches: tuple  # 同一不可变共享列，保留source参考和实际收到时刻。
 
+    @classmethod
+    def empty(cls, roots, device):
+        """公开账户可在首个真实NOE批之前安装；没有未来记录或已应用人口。"""
+        from fields import RecordList,encode_fields
+        rows=torch.empty((roots,0),dtype=torch.int64,device=device)
+        scalars=rows.flatten()
+        integer=ExactInt.from_i64_tensor(scalars)
+        ratio=ExactRational(integer,integer.constant(1))
+        positions=encode_fields([scalars,scalars,integer,integer])
+        return cls(rows,positions,integer,ratio,ratio,rows.clone(),rows.bool(),
+            RecordList((scalars,ratio),torch.empty((0,0),dtype=torch.bool,device=device)),())
+
     def append(self, incoming):
         """追加新批共享列；旧字段不重新解码，完整原位置保持不变。"""
         from transport import append_root_fields,append_record_lists

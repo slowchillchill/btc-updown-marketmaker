@@ -2,6 +2,7 @@
 from dataclasses import replace
 from pathlib import Path
 import json
+import os
 import sys
 import time
 import torch
@@ -28,6 +29,59 @@ def main():
     started = time.perf_counter()
     tensor = lambda x, dtype=torch.int64: torch.tensor(x, dtype=dtype, device='cuda')
     block = HiddenPmBlock(source['buckets'], source['assets'], [], source_binding=source['source_binding'])
+    page_mode=os.environ.get('B_GPU_HIDDEN_DEVICE_PAGES')=='1'
+    prepared=None; page_report={}
+    if page_mode:
+        import subprocess
+        import numpy as np
+        import hidden_inputs
+        from hidden_device_page import build_hidden_device_columns,PreparedHiddenMaterial,_json_bytes
+        destination=Path(os.environ['B_GPU_ORDER_ARTIFACT_DIR'])/'hidden-device-columns'
+        before_build=time.perf_counter()
+        binding=build_hidden_device_columns(block,destination,source['source_binding'],progress=progress)
+        build_seconds=time.perf_counter()-before_build
+        (destination.parent/'hidden-columns-binding.json').write_bytes(_json_bytes(binding.__dict__))
+        original=block; timings=[]
+        saved=(subprocess.run,hidden_inputs.decimal_columns,Numbers.ExactRational.ratio,torch.argsort,torch.bincount)
+        def forbidden(*args,**kwargs): raise AssertionError('hidden页加载不得再解析事件/decimal/GCD/排序或调用verify CLI')
+        try:
+            subprocess.run=hidden_inputs.decimal_columns=forbidden
+            Numbers.ExactRational.ratio=staticmethod(forbidden)
+            torch.argsort=torch.bincount=forbidden
+            for _ in range(2):
+                before_load=time.perf_counter()
+                prepared=PreparedHiddenMaterial(destination,source['source_binding'],binding=binding)
+                first=HiddenPmBlock.from_prepared(prepared.page(0,2))
+                second=HiddenPmBlock.from_prepared(prepared.page(2,3))
+                assert prepared.banks['buckets'].decoded_records==0
+                assert first.terminal_columns is second.terminal_columns
+                assert first.decimals is second.decimals
+                timings.append(time.perf_counter()-before_load)
+        finally:
+            subprocess.run,hidden_inputs.decimal_columns=saved[:2]
+            Numbers.ExactRational.ratio=staticmethod(saved[2])
+            torch.argsort,torch.bincount=saved[3:]
+        for name in ('event_indices','step_tags','snapshot_levels','snapshot_offsets','reference_rows'):
+            assert np.array_equal(prepared.arrays[name],getattr(original,name).cpu().numpy()),name
+        compare(prepared.decimals,original.decimals,'loaded_exact_hidden_dictionary')
+        assert prepared.banks['buckets']==source['buckets']
+        assert prepared.banks['assets']==source['assets']
+        # 调用方已保存绑定不会跟随待加载页自述SHA变化。
+        manifest_path=destination/'manifest.json'; manifest_bytes=manifest_path.read_bytes()
+        changed=json.loads(manifest_bytes); changed['market_count']+=1
+        manifest_path.write_bytes(_json_bytes(changed))
+        try:
+            try: PreparedHiddenMaterial(destination,source['source_binding'],binding=binding)
+            except ValueError: pass
+            else: raise AssertionError('改自述manifest不能替换独立publisher绑定')
+        finally: manifest_path.write_bytes(manifest_bytes)
+        block=first
+        page_report={'hidden_columns_build_seconds':build_seconds,'hidden_columns_load_seconds':timings,
+            'hidden_columns_bytes':sum(p.stat().st_size for p in destination.iterdir()),
+            'hidden_second_load_no_event_JSON_decimal_GCD_sort_or_verify':True,
+            'hidden_caller_independent_binding_rejects_changed_manifest':True,
+            'hidden_full_original_bucket_and_exact_columns_checked':True,
+            'hidden_real_complete_bucket_pages':[[0,2],[2,3]]}
     ends = tensor([source['market_end']]*len(block.assets))
     columns = HiddenBucketColumns.from_block(block)
     def open_runtime():
@@ -43,13 +97,77 @@ def main():
                 tensor([[True]], torch.bool)), TakerDays.empty(1, 'cuda')),
             HiddenBucketFrontier.open(columns, 1))
     initial = Numbers.run_exact_batch(open_runtime).install_hidden_market_controls().install_hidden_resolutions()
+    # 原同会话反馈计数只在此工程入口冷安装一次；实际Resolved正文来自GPU源/执行候选。
+    root=Path(__file__).resolve().parents[2]
+    sys.path.insert(0,str(root/'execution-normalization/gpu'))
+    from projection import Projection
+    from latency import EmpiricalDelaySampler
+    from feedback import FeedbackEmitter
+    from fields import decode_fields
+    from consumption import PendingRecords,ReceiveGates
+    from core import OUT_EVIDENCE
+    sha='98fd40f843275db8994a29cec1de6a72f95bbaa4309df9779c7ed1285cdff596'
+    sampler=EmpiricalDelaySampler.build((root/'sim-system/config/latency-profiles'/sha/'profile.json').read_bytes(),
+        sha,[source['session_seed'].encode('ascii')])
+    emitter=replace(FeedbackEmitter.open(1),next_private_sequence=integers([source['next_private']]),
+        next_batch_sequence=integers([source['next_batch']]))
+    zero=tensor([0])
+    projection=Projection.open(emitter,zero,zero,zero,zero,initial.account.asset_roots,integers([0]),
+        zero,zero,zero,zero)
+    condition,end=tensor([[0]]),tensor([[source['market_end']]])
+    from core import EvidenceBank,Normalizer
+    projection=replace(projection,normalizer=Normalizer.empty(EvidenceBank.empty('cuda'),1))
+    original_projection=projection
+    sys.path.insert(0,str(root/'ledger/gpu'))
+    sys.path.insert(0,str(root/'shared-run/gpu'))
+    from memory import EconomicColumns
+    from admission_lifecycle import LifecycleColumns
+    # 一次开户/初始市场前缀冷安装；之后由同一公开领取器和Ledger设备事务消费。
+    import importlib.util
+    from admission import AdmissionLifecycle
+    from closed import ClosedAdmission
+    from success_pool import SuccessPools
+    from position_cost import PositionCosts
+    from market_economics import UnresolvedMarkets
+    from resolution import ResolutionSources,MarketResolutions
+    from registry import PublicRegistryEvents,PublicRegistryState
+    from public_ledger import PublicLedgerState
+    spec=importlib.util.spec_from_file_location('gpu_terminal_platform',root/'ledger/gpu/platform.py')
+    module=importlib.util.module_from_spec(spec)
+    sys.modules[spec.name]=module
+    spec.loader.exec_module(module)
+    before_ledger=source['ledger_before']['projection']
+    names=['cash_pusd','available_pusd','principal_encumbrance_pusd','immediate_taker_fee_encumbrance_pusd',
+        'maker_rebate_receivable_pusd','taker_rebate_receivable_pusd',
+        'maker_rebate_locked_remainder_pusd','taker_rebate_locked_remainder_pusd']
+    original_balances=before_ledger['platform_confirmed_projection']
+    def assemble(*,known=True,columns=None):
+        balances=module.PlatformBalances.open(rational([original_balances[key] for key in names]),
+            rational(['0','0']),tensor([0,0]),integers([before_ledger['platform_source_prefix']]))
+        pools=SuccessPools.open(tensor([0,0]),tensor([0,0]),tensor([0,1]),tensor([1,0]),1)
+        markets=UnresolvedMarkets.open(pools,tensor([0]),known=known)
+        sources=ResolutionSources.bind(block.terminal_columns,[asset['token_id'] for asset in block.assets])
+        resolutions=MarketResolutions.open(pools,markets,sources)
+        if columns is None:
+            columns=EconomicColumns.empty(1,'cuda')
+        admission=AdmissionLifecycle.open(balances,projection.normalizer.bank,columns,
+            integers([before_ledger['ledger_entry_seq']]),integers([before_ledger['ledger_local_prefix']]),pools,
+            position_costs=PositionCosts.empty(1,1,'cuda'),unresolved_markets=markets,resolutions=resolutions)
+        empty=columns.row_refs
+        pending=PendingRecords.from_columns(torch.zeros_like(empty,dtype=torch.bool),empty.clone(),
+            integers([]),integers([]),empty,integers([0]))
+        return PublicLedgerState(pending,PublicRegistryState(PublicRegistryEvents.empty(1,'cuda')),
+            ClosedAdmission.empty(columns),admission)
+    public=Numbers.run_exact_batch(assemble)
     storage = BaseRuntimeStorage(initial, initial)
     frozen = storage.snapshot()
     horizon, enabled = tensor([21000]), tensor([False], torch.bool)
     fee, rebate = Numbers.run_exact_batch(lambda:(rational(['0.07']), rational(['0.08'])))
-    loop = CapturedHiddenBuckets(storage, horizon, enabled, tensor([0]*len(block.assets)), tensor([[0]]),
-        fee, 1, rebate, ends, word_capacity=4, feedback_capacity=1,
-        stage_progress=lambda stage:progress('reference_'+stage))
+    def capture(current):
+        return CapturedHiddenBuckets(current, horizon, enabled, tensor([0]*len(block.assets)), tensor([[0]]),
+            fee, 1, rebate, ends, word_capacity=4, feedback_capacity=1,
+            stage_progress=lambda stage:progress('reference_'+stage))
+    loop=capture(storage)
     loop.replay()
     torch.cuda.synchronize()
     compare(storage.runtime, frozen, 'first_disabled_reference_entry')
@@ -77,6 +195,26 @@ def main():
     assert storage.runtime.hidden_frontier.closed_at.cpu().tolist() == [22000]
     assert loop.reference_iterations.cpu().tolist() == [0] and loop.page.count.cpu().item() == 0
     compare(pure_reference_freeze.hidden, frozen.hidden, 'old_reference_freeze_not_backfilled')
+    if page_mode:
+        old_storage=storage; old_loop=loop; old_columns=columns
+        old_public_at_page_end=public
+        assert not columns.end_of_input
+        assert storage.runtime.hidden_frontier.scheduled()[1].cpu().tolist()==[False]
+        block=second; columns=HiddenBucketColumns.from_block(block)
+        frontier=storage.runtime.hidden_frontier.handoff(columns)
+        assert values(frontier.index_position)==values(storage.runtime.hidden_frontier.index_position)
+        assert frontier.closed_at.cpu().tolist()==[22000] and frontier.closed_bucket.cpu().tolist()==[1]
+        continued=replace(storage.runtime,hidden_frontier=frontier)
+        storage=BaseRuntimeStorage(continued,continued)
+        loop=capture(storage)
+        assert public is old_public_at_page_end
+        for name in ('hidden','requests','orders','account','fills','calendars','market_controls','source_resolutions'):
+            compare(getattr(storage.runtime,name),getattr(old_storage.runtime,name),'page_handoff_keeps_'+name)
+        assert old_storage.runtime.hidden_frontier.columns is old_columns
+        compare(pure_reference_freeze.hidden,frozen.hidden,'old_page_freeze_stays_immutable')
+        page_report.update(hidden_same_runtime_and_public_ledger_across_pages=True,
+            hidden_page_end_is_not_EOF=True,hidden_complete_u64_frontier_and_old_source_handle_preserved=True,
+            hidden_stable_Terminal_bank_preserved_across_pages=True)
     # 原已登记end义务实际消费后，再进入真实terminal来源桶；不伪造MarketFact已应用。
     horizon.fill_(31000)
     choice = storage.runtime.choose(None, None, horizon, enabled)
@@ -89,31 +227,12 @@ def main():
     torch.cuda.synchronize()
     frontier = storage.runtime.hidden_frontier
     assert block.reference_tags[frontier.next_reference].cpu().tolist() == [9]
-    assert frontier.next_reference.cpu().tolist() == [source['terminal_reference_index']]
+    assert frontier.next_reference.cpu().tolist() == [0 if page_mode else source['terminal_reference_index']]
     assert frontier.closed_at.cpu().tolist() == [22000] and frontier.applying.cpu().tolist() == [True]
     assert loop.closed.cpu().tolist() == [False]
-    assert loop.reference_iterations.cpu().tolist() == [source['terminal_reference_index']-before.hidden_frontier.next_reference.cpu().item()]
+    assert loop.reference_iterations.cpu().tolist() == [(0 if page_mode else source['terminal_reference_index'])-before.hidden_frontier.next_reference.cpu().item()]
     assert frontier.fault.cpu().tolist() == [0] and loop.page.count.cpu().item() == 0
     terminal_before=storage.snapshot()
-    # 原同会话反馈计数只在此工程入口冷安装一次；实际Resolved正文来自GPU源/执行候选。
-    root=Path(__file__).resolve().parents[2]
-    sys.path.insert(0,str(root/'execution-normalization/gpu'))
-    from projection import Projection
-    from latency import EmpiricalDelaySampler
-    from feedback import FeedbackEmitter
-    from fields import decode_fields
-    from consumption import PendingRecords,ReceiveGates
-    from core import OUT_EVIDENCE
-    sha='98fd40f843275db8994a29cec1de6a72f95bbaa4309df9779c7ed1285cdff596'
-    sampler=EmpiricalDelaySampler.build((root/'sim-system/config/latency-profiles'/sha/'profile.json').read_bytes(),
-        sha,[source['session_seed'].encode('ascii')])
-    emitter=replace(FeedbackEmitter.open(1),next_private_sequence=integers([source['next_private']]),
-        next_batch_sequence=integers([source['next_batch']]))
-    zero=tensor([0])
-    projection=Projection.open(emitter,zero,zero,zero,zero,initial.account.asset_roots,integers([0]),
-        zero,zero,zero,zero)
-    condition,end=tensor([[0]]),tensor([[source['market_end']]])
-    original_projection=projection
     choice=storage.runtime.choose(None,None,horizon,enabled)
     exhausted=replace(projection,emitter=replace(projection.emitter,
         next_private_sequence=integers([(1<<64)-1])))
@@ -146,7 +265,7 @@ def main():
     assert runtime.source_resolutions.present.cpu().tolist()==[[True]]
     assert runtime.resolution_obligations.reference_indices.cpu().tolist()==[[source['terminal_reference_index']]]
     assert not runtime.resolution_obligations.pending.any().cpu().item()
-    assert runtime.hidden_frontier.next_reference.cpu().tolist()==[source['terminal_reference_index']+1]
+    assert runtime.hidden_frontier.next_reference.cpu().tolist()==[(0 if page_mode else source['terminal_reference_index'])+1]
     compare(runtime.account,before.account,'Resolved_is_not_cash_or_automatic_redeem')
     reference=source['qualified_sources'][0]
     ref_index=runtime.source_resolutions.reference_indices.cpu().item()
@@ -187,42 +306,8 @@ def main():
     assert batch.source_categories.cpu().tolist()==[[3]]
     ordinal=integers([int(projection.normalizer.bank.source_order[actual_row,3].cpu().item())])
     assert values(ordinal)==[evidence['source_order']['ordinal']]
-    # 一次开户/初始市场前缀冷安装；之后由同一公开领取器和Ledger设备事务消费。
-    import importlib.util
-    from admission import AdmissionLifecycle
-    from closed import ClosedAdmission
-    from success_pool import SuccessPools
-    from position_cost import PositionCosts
-    from market_economics import UnresolvedMarkets
-    from resolution import ResolutionSources,MarketResolutions
-    from registry import PublicRegistryEvents,PublicRegistryState
-    from public_ledger import PublicLedgerState
-    spec=importlib.util.spec_from_file_location('gpu_terminal_platform',root/'ledger/gpu/platform.py')
-    module=importlib.util.module_from_spec(spec)
-    sys.modules[spec.name]=module
-    spec.loader.exec_module(module)
-    before_ledger=source['ledger_before']['projection']
-    names=['cash_pusd','available_pusd','principal_encumbrance_pusd','immediate_taker_fee_encumbrance_pusd',
-        'maker_rebate_receivable_pusd','taker_rebate_receivable_pusd',
-        'maker_rebate_locked_remainder_pusd','taker_rebate_locked_remainder_pusd']
-    original_balances=before_ledger['platform_confirmed_projection']
-    def assemble(*,known=True):
-        balances=module.PlatformBalances.open(rational([original_balances[key] for key in names]),
-            rational(['0','0']),tensor([0,0]),integers([before_ledger['platform_source_prefix']]))
-        pools=SuccessPools.open(tensor([0,0]),tensor([0,0]),tensor([0,1]),tensor([1,0]),1)
-        markets=UnresolvedMarkets.open(pools,tensor([0]),known=known)
-        sources=ResolutionSources.bind(block.terminal_columns,[asset['token_id'] for asset in block.assets])
-        resolutions=MarketResolutions.open(pools,markets,sources)
-        columns=EconomicColumns.from_projection_batches([batch])
-        admission=AdmissionLifecycle.open(balances,projection.normalizer.bank,columns,
-            integers([before_ledger['ledger_entry_seq']]),integers([before_ledger['ledger_local_prefix']]),pools,
-            position_costs=PositionCosts.empty(1,1,'cuda'),unresolved_markets=markets,resolutions=resolutions)
-        pending=PendingRecords.from_columns(batch.emitted,batch.received_at,batch.private_sequences,ordinal,
-            batch.rows,integers([0]))
-        return PublicLedgerState(pending,PublicRegistryState(PublicRegistryEvents.empty(1,'cuda')),
-            ClosedAdmission.empty(columns),admission)
-    public=Numbers.run_exact_batch(assemble)
     old_public=public
+    public=Numbers.run_exact_batch(lambda:public.append_batch(projection.normalizer.bank,batch))
     gates=ReceiveGates.unset(1).set_receive(tensor([source['resolved_close_at']]),enabled)
     public,blocked=Numbers.run_exact_batch(lambda:public.receive(projection.normalizer.bank,gates,
         torch.ones_like(public.waiting.received)))
@@ -280,6 +365,7 @@ def main():
     assert values(rejected.current_entry_sequence)==[before_ledger['ledger_entry_seq']]
     # 实际可达冷前缀未安装经济历史：原Resolved身份/payout不能补出成本/份额完整性。
     unknown=Numbers.run_exact_batch(lambda:assemble(known=False))
+    unknown=Numbers.run_exact_batch(lambda:unknown.append_batch(projection.normalizer.bank,batch))
     assert unknown.ledger.resolutions.known.cpu().tolist()==[False]
     unknown,unknown_delivery=Numbers.run_exact_batch(lambda:unknown.receive(projection.normalizer.bank,gates,
         torch.ones_like(unknown.waiting.received)))
@@ -313,7 +399,7 @@ def main():
     compare(storage.runtime,held,'closed_Terminal_bucket_replay_no_duplicate')
     compare(pure_reference_freeze.source_resolutions,frozen.source_resolutions,'old_freeze_has_no_future_resolution')
     progress('actual_Terminal_Resolved_then_Lifecycle_closed',actual_resolved=1,actual_controls=len(source['original_controls']))
-    print(json.dumps({'actual_typedraw_TWAP_references':2, 'actual_bucket_times':[21000,22000,31000],
+    report={'actual_typedraw_TWAP_references':2, 'actual_bucket_times':[21000,22000,31000],
         'pure_reference_bucket_closed_without_SIM_business_effects':True,
         'missing_source_time_did_not_fabricate_bucket':True,
         'same_graph_reference_then_actual_empty_Books_checked':True,
@@ -337,7 +423,12 @@ def main():
         'first_disabled_reference_entry_and_old_freeze_checked':True,
         'market_fact_handler_complete':False, 'full_unified_host_clock_complete':False,
         'elapsed_seconds':time.perf_counter()-started,
-        'device_peak_allocated_bytes':torch.cuda.max_memory_allocated()}))
+        'device_peak_allocated_bytes':torch.cuda.max_memory_allocated(),**page_report}
+    if page_mode:
+        report['hidden_ended_material_once_build_only']=True
+        report['hidden_streaming_publication_catalog_and_nonempty_order_handoff_complete']=False
+        (Path(os.environ['B_GPU_ORDER_ARTIFACT_DIR'])/'hidden-pages-report.json').write_text(json.dumps(report,indent=2))
+    print(json.dumps(report))
 
 
 if __name__ == '__main__':

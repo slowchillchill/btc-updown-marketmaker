@@ -25,6 +25,15 @@ class EvidenceBank:
     payload_schemas: torch.Tensor | None = None  # 正文类型，不是逻辑身份命名空间。
     declared_schemas: frozenset | None = None  # 冷映射声明的布局集合；未知来源不省略解码。
 
+    @classmethod
+    def empty(cls,device):
+        """首条真实反馈前的空共享bank；append仍使用完整原身份与正文。"""
+        scalar=torch.empty(0,dtype=torch.int64,device=device)
+        fields=torch.empty((0,0),dtype=torch.int64,device=device)
+        return cls(fields,fields.clone(),fields.clone(),fields.clone(),scalar,
+            torch.empty((0,4),dtype=torch.int64,device=device),scalar.clone(),
+            torch.empty(0,dtype=torch.int32,device=device),scalar.clone(),frozenset())
+
     def __post_init__(self):
         count = self.kinds.numel()
         device = self.kinds.device

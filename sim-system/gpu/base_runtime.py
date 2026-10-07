@@ -163,7 +163,8 @@ class BaseSimRuntime:
         original_fault = grouped_fault(self.hidden.fault,owner,roots) | self.orders.fault | self.account.fault
         fault = original_fault | self.market_controls.fault | self.resolution_obligations.fault
         fault |= torch.where(enabled,grouped_fault(source_invalid.to(torch.int32),owner,roots),0)
-        source, transition = self.source_resolutions.observe(indices,market,end,initialized,
+        stable_reference = block.stable_reference(indices)
+        source, transition = self.source_resolutions.observe(stable_reference,market,end,initialized,
             enabled & (fault == 0),torch.zeros_like(enabled))
         fault |= transition.fault
         obligations, resolved = self.resolution_obligations.register(transition,self.fills,condition,
@@ -175,7 +176,7 @@ class BaseSimRuntime:
         fault |= obligations.fault | effects.fault
         committed = enabled & (fault == 0)
         selected = (torch.arange(markets,device=owner.device)[None,:] == market[:,None]) & committed[:,None]
-        quality = block.terminal_columns.fields[indices.clamp(0,block.terminal_columns.fields.size(0)-1),4]
+        quality = block.terminal_columns.fields[stable_reference.clamp(0,block.terminal_columns.fields.size(0)-1),4]
         controls = replace(self.market_controls,quality=torch.where(selected,quality[:,None],self.market_controls.quality))
         from pending_base_execution import _coordinate_orders
         from base_acceptance import _coordinate_queue

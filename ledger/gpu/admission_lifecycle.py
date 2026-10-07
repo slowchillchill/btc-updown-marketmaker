@@ -105,8 +105,10 @@ class LifecycleColumns:
         roots,width=columns.row_refs.shape
         rows=columns.row_refs.flatten()
         schemas=bank.payload_schemas[rows]
-        active=torch.cat([batch.emitted for batch in columns.projection_batches],dim=1).flatten()
-        outcomes=torch.cat([batch.normalized.outcomes for batch in columns.projection_batches],dim=1).flatten()
+        active=(torch.cat([batch.emitted for batch in columns.projection_batches],dim=1).flatten()
+            if columns.projection_batches else torch.zeros_like(rows,dtype=torch.bool))
+        outcomes=(torch.cat([batch.normalized.outcomes for batch in columns.projection_batches],dim=1).flatten()
+            if columns.projection_batches else torch.zeros_like(rows))
         material=active & ((outcomes==OUT_EVIDENCE)|(outcomes==OUT_FACT))
         enabled={tag:material&(schemas==tag) for tag in [3,7,8,9,11,12,13,14,15,16,17,18,19,20,21]}
         layouts={

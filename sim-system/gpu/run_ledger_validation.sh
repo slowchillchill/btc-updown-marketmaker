@@ -55,7 +55,7 @@ case "$case_name" in
             tail -4 "$artifact_dir/$target.log"
         done
         ;;
-    hidden-terminal-query|hidden-terminal-pending|hidden-terminal-orders|hidden-reference)
+    hidden-terminal-query|hidden-terminal-pending|hidden-terminal-orders|hidden-reference|hidden-device-pages)
         export B_GPU_SORT_WORKER="$repo_root/data-pipeline/gpu/sort_worker.py"
         export B_GPU_HIDDEN_REFERENCE_VALIDATOR="$repo_root/sim-system/gpu/validate_hidden_references.py"
         export B_GPU_HIDDEN_CLI="$CARGO_TARGET_DIR/debug/dpt-compact-hidden"
@@ -63,6 +63,10 @@ case "$case_name" in
         printf '%q ' "${command[@]}" >> "$artifact_dir/commands.txt"
         printf '\n' >> "$artifact_dir/commands.txt"
         "${command[@]}" > "$artifact_dir/build.log" 2>&1
+        if [ "$case_name" = hidden-device-pages ]; then
+            export B_GPU_HIDDEN_DEVICE_PAGES=1
+            printf '%s\n' 'B_GPU_HIDDEN_DEVICE_PAGES=1' >> "$artifact_dir/commands.txt"
+        fi
         if [ "$case_name" = hidden-terminal-query ]; then
             export B_GPU_SETTLEMENT_QUERY=1
             printf '%s\n' 'B_GPU_SETTLEMENT_QUERY=1' >> "$artifact_dir/commands.txt"

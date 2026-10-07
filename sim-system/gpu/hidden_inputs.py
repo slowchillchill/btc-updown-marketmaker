@@ -126,6 +126,7 @@ class HiddenPmBlock:
         offsets_gpu = torch.tensor(offsets, dtype=torch.int64).pin_memory().to(device, non_blocking=True)
         columns = decimal_columns(raw_gpu, offsets_gpu, torch.ones(len(texts), dtype=torch.bool, device=device))
         self.decimals = Numbers.run_exact_batch(columns.rational)
+        self.decimal_texts = tuple(texts)  # 一次构建列页保留源词法；二次加载不重新解析。
         self.decimal_fault = self.decimals.fault | (~columns.present).to(torch.int32)
         self.prices = self._values(price_ids)
         self.operations = pending
@@ -152,6 +153,18 @@ class HiddenPmBlock:
         # 补零哨兵在冷安装时建立一次；每步仅index_select，不复制整页源列。
         self.event_lookup = torch.cat((self.event_indices, torch.zeros((1, 14), dtype=torch.int64, device=device)), 0)
         self.tag_lookup = torch.cat((self.step_tags, torch.zeros(1, dtype=torch.int64, device=device)), 0)
+
+    @classmethod
+    def from_prepared(cls, page):
+        """DPT已验收typed页直接安装；不重读原事件JSON或再次执行verify CLI。"""
+        block=cls.__new__(cls)
+        page.install_block(block)
+        return block
+
+    def stable_reference(self, indices):
+        """完整Terminal bank用稳定来源坐标；运行参考游标仍是本页坐标。"""
+        mapping=getattr(self,'reference_ids',None)
+        return indices if mapping is None else mapping[indices.clamp(0,mapping.numel()-1)]
 
     def selected_rows(self, indices):
         """设备游标选原源步；补零行只供无步根的掩码候选，不算来源人口。"""

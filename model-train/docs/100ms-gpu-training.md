@@ -579,7 +579,7 @@ cargo run -p data-pipeline-training --bin dpt-public-compact --locked --offline 
 原文件和清单经原选择器核验；不读取前史盘口/价格/TWAP/AnchorRule，不供模型热身、
 策略计算或经营统计。训练根15天、模型T−30及冷启动范围保持。
 
-### 当前独立 hidden 材料入口
+### 当前公共及独立 hidden 材料入口
 
 公共设备列的二次加载接口是 `data-pipeline/gpu/public_device_page.py`。
 `build_public_device_page` 只读已完成的原 compact，经原 reader 核验来源一次，
@@ -602,7 +602,7 @@ publisher 在原 reader 核验及页写入完成后交付独立 `PublicPageBindi
 人口级事实 bank 在加载和模型消费中保持不解码。市场、资产和锚点的完整身份由
 现 `SourceHistoryInputs` 等冷身份消费者按需解码并按页缓存；此冷绑定成本仍需计入。
 当前接口只发布一个已结束材料的完整组页，尚无连续 Builder flush、跨页前沿、
-hidden 列安装或十五天工作集结论。加载页本身不签发实际交付/public prefix。
+hidden 流式发布或十五天工作集结论。加载页本身不签发实际交付/public prefix。
 
 现 `gpu_public_state_validation.py --device-page <新目录>` 沿原首分钟入口一次构建，
 两次加载时禁止精确解析、GCD 与前缀排序调用，逐值核对固定列和原身份 bank 字节，
@@ -624,6 +624,31 @@ hidden 列安装或十五天工作集结论。加载页本身不签发实际交�
 本次 GPU 检查峰 99,640,832 字节包含验证和组件模型，不是完整根容量。
 `1df` 导入、`937` ragged bool、`72` ndarray 来源比较的实际失败原件保持，
 独审和准确执行组合见 #181 当前阶段证据。
+
+hidden 同 codec 的接口为 `data-pipeline/gpu/hidden_device_page.py`。一次构建
+复用原 `HiddenPmBlock` 对原 compact reader 的完整逐值验收，再保存步骤/tag、
+快照 ragged、参考分派、完整桶时间/offset/closure 与完整 u64 index 列。
+资产/价位目录、精确 bank、完整 Terminal/canonical ID 及原完整桶身份字节 bank
+共享；不持久化逐事件全盘口。调用方独立保存 `HiddenPageBinding`，加载先核
+两份原 manifest 与列 manifest 绑定，再验成员、布局、offset 和字典域。
+
+`PreparedHiddenMaterial.page(begin,end)` 只接受原连续完整桶范围。页内只上传
+本范围的步骤、快照和参考；共享数值/目录/Terminal 对象复用。第二次加载不调用
+事件 JSON 解包、decimal/GCD/排序或从头到 EOF 的 verify CLI。原完整桶身份
+按需冷读，固定类型设备图直接读原 typed 列。运行参考游标保持页内坐标；
+Terminal 候选、执行义务、NOE 和 Ledger 使用同源稳定参考 ID。
+
+`HiddenBucketFrontier.handoff` 是退出图后的物理页边界操作。它检查所有根已经
+完整提交本页、完整 u64 index 等于相邻原桶起点，再重绑定新页游标；closed 时间、
+旧完整桶坐标及故障保持。物理页末不是 EOF，只有原最后 closure 才签发 EOF。
+此冷验收读取设备页完成凭据，不是统一热循环自动换页。新图绑定新页地址，
+SIM 业务状态、源判定、旧图/冻结/反馈引用及公开消费者由宿主继续保留。
+
+本增量准备沿原 TWAP→双空 Book→Terminal 三桶在第二桶后分两页，使用同一
+公开账户，核旧冻结、稳定来源 ID、一次 Resolved 和首次可见性。此人口无订单
+或 pending fill，不作为非空订单跨页/完整根恢复证据。首版 writer 仍一次构建
+已结束材料的完整列文件，reader 使用只读 mmap 范围；尚无持续 writer flush、
+catalog 发布协议、全目录退役或十五天工作集预算。
 
 `dpt-compact-hidden <公共compact目录> <新hidden目录> <config.json> <locked-python>
 <same-commit>/data-pipeline/gpu/sort_worker.py` 从完整原规范事实选择实际 PM 消息，
