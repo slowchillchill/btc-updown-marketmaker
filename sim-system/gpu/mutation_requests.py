@@ -283,11 +283,11 @@ class MutationRequests:
         from dataclasses import fields
         updates={}
         for field in fields(self):
+            if field.name=='fault':continue
             new,old=getattr(self,field.name),getattr(original,field.name)
             if new is old:updates[field.name]=new
             elif isinstance(new,ExactInt):
                 updates[field.name]=new.select(committed.repeat_interleave(self.capacity),old)
-            elif field.name=='fault':updates[field.name]=fault
             else:
                 updates[field.name]=torch.where(committed.reshape((self.roots,)+(1,)*(new.ndim-1)),new,old)
         return replace(self,**updates,fault=fault)
