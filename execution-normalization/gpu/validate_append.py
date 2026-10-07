@@ -72,7 +72,7 @@ def check_incremental_receive(bank,batches,delivered,start,expected,gates):
         assert torch.equal(actual,oracle)
     positions=state.ledger.columns.positions
     before_positions=expected.columns.positions
-    matches=(positions[:,None,:]==before_positions[None,:,:]).all(2)
+    matches=(positions[:,None,:]==before_positions[None,:,:]).all(2) & expected.lifecycle.emitted.flatten()[None,:]
     assert matches.to(torch.int64).sum(1).cpu().tolist()==[1]*21
     order=matches.to(torch.int64).argmax(1)
     assert values(state.ledger.applied_sequences)==values(_take(expected.applied_sequences,order))
