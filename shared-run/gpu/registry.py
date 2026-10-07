@@ -236,6 +236,9 @@ def compact_order_events(events):
     direct=(events.kinds<=QUOTE_ACCEPTED)|(events.kinds==CANCEL_TARGET)
     direct_priority=delivery_priority(events.delivery_sequences,events.record_ordinals,events.receive_rank)
     keep=keep | first_identity_population(events.orders,torch.zeros_like(events.kinds),events.received & direct,direct_priority)
+    # latest_cancel是独立来源；较新的非撤单Direct不能抹掉此前NoEffect/Unknown响应。
+    keep=keep | first_identity_population(events.orders,torch.zeros_like(events.kinds),
+        events.received & (events.kinds==CANCEL_TARGET),direct_priority)
     # root fault保存全部输入的故障，不因来源替换或压紧洗掉失败。
     fault=events.fault.clone()
     for value in [events.orders,events.trades,events.private_sequences,events.delivery_sequences,events.record_ordinals,events.batch_sequences]:
@@ -516,6 +519,7 @@ class FrozenOrderSources:
     formed: OrderFeedbackSource
     latest_direct: OrderFeedbackSource
     fault: torch.Tensor
+    latest_cancel: OrderFeedbackSource | None = None
 
 
 def delivery_priority(delivery, ordinal, receive_rank):
@@ -539,7 +543,7 @@ def frozen_order_sources(events,intents):
         columns=torch.zeros((roots,count),dtype=torch.int64,device=device)
         zero=ExactInt.from_i64_tensor(columns.flatten())
         source=OrderFeedbackSource(blank,torch.full_like(columns,-1),columns,columns,columns,columns,columns,zero,zero,zero,zero)
-        return FrozenOrderSources(source,source,events.fault)
+        return FrozenOrderSources(source,source,events.fault,source)
     same,error=identity_matches(intents.identities,events.orders,roots,count,width)
     member=same&events.received[:,None,:]&intents.present[:,:,None]
     fault=events.fault|Numbers.combine_fault_rows(torch.where(member,error,0).reshape(roots,-1))
@@ -556,4 +560,6 @@ def frozen_order_sources(events,intents):
     formed=select_source((events.kinds==ORDER_LIFECYCLE)&events.formation,source_priority(events.private_sequences,events.receive_rank))
     direct=select_source((events.kinds<=QUOTE_ACCEPTED)|(events.kinds==CANCEL_TARGET),
         delivery_priority(events.delivery_sequences,events.record_ordinals,events.receive_rank))
-    return FrozenOrderSources(formed,direct,fault)
+    cancellation=select_source(events.kinds==CANCEL_TARGET,
+        delivery_priority(events.delivery_sequences,events.record_ordinals,events.receive_rank))
+    return FrozenOrderSources(formed,direct,fault,cancellation)

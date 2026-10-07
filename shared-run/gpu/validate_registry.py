@@ -293,7 +293,8 @@ def compare_scoped(frame,read,catalog,oracle_key='scoped_cancellation_requests')
 def compare_order_sources(frame,sources,orders,catalog):
     assert sources.fault.cpu().tolist()==[0]
     raw={order['identity']:order for order in frame['raw_orders']}
-    for column,name,source_kind in [(sources.formed,'formed','OrderLifecycle'),(sources.latest_direct,'latest_direct','DirectResponse')]:
+    for column,name,source_kind in [(sources.formed,'formed','OrderLifecycle'),(sources.latest_direct,'latest_direct','DirectResponse'),
+        (sources.latest_cancel,'latest_cancel','DirectResponse')]:
         present=column.present.cpu().tolist()[0]
         slots=column.record_refs.cpu().tolist()[0]
         platform=column.platform_at.cpu().tolist()[0]
@@ -611,7 +612,7 @@ def main():
     torch.cuda.synchronize()
     print(json.dumps({'frozen_prefixes':sum(n for n,_,_ in counts),'distinct_original_order_records':sum(n for _,n,_ in counts),
         'receipt_without_order_keeps_original_leg_target':True,'continuous_received_state':True,'maximum_retained_order_records_per_family':[width for _,_,width in counts],'derived_oracle_initialization':False,'old_freeze_unchanged':True,
-        'complete_first_delivery_stream':False,'global_cancel_request_completed_state':True,'single_paired_market_cancel_objects':True,'scoped_cancel_request_results':True,'original_action_snapshot_needed_cancel_projection':True,'latest_response_full_source_position_checked':True,'Order_formed_and_latest_direct_original_times_and_full_reference_checked':True,'cancel_noe_mapper_core_and_closed_decoder':True,'cancel_first_delivery_filtered_original_references':True,'scoped_unknown_order_location_preserved':True,'device_sim_identity_tie_order':True,
+        'complete_first_delivery_stream':False,'global_cancel_request_completed_state':True,'single_paired_market_cancel_objects':True,'scoped_cancel_request_results':True,'original_action_snapshot_needed_cancel_projection':True,'independent_order_latest_cancel_full_source_position_checked':True,'latest_response_full_source_position_checked':True,'Order_formed_and_latest_direct_original_times_and_full_reference_checked':True,'cancel_noe_mapper_core_and_closed_decoder':True,'cancel_first_delivery_filtered_original_references':True,'scoped_unknown_order_location_preserved':True,'device_sim_identity_tie_order':True,
         'native_order_age_and_cancel_time_fields_from_frozen_original_sources':True,
         'native_unfinished_order_active_cancelable_and_count_scope_fields':True,
         'original_native_encoder_invoked':False,
