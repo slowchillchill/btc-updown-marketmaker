@@ -3468,6 +3468,15 @@ fn gpu_registry_frozen_reference(stage:&str,view:&ActionBeforeReadV2,registry:&S
         };
         serde_json::json!({"scope":encoded_scope,"pending":request.pending_count,"counts":request.response_counts,"latest":latest})
     }).collect::<Vec<_>>();
+    let snapshot_scoped=scope_queries.iter().map(|scope| {
+        let request=view.cancellation_requests(Some(scope));
+        let latest=match request.latest_response {
+            ExecutionReadValueV1::Known(value)=>serde_json::json!({"Known":value.map(record)}),
+            ExecutionReadValueV1::Unavailable=>serde_json::json!("Unavailable"),
+            ExecutionReadValueV1::NotApplicable=>serde_json::json!("NotApplicable"),
+        };
+        serde_json::json!({"pending":request.pending_count,"counts":request.response_counts,"latest":latest})
+    }).collect::<Vec<_>>();
     let requests=view.cancellation_requests(None);
     let latest=match requests.latest_response {
         ExecutionReadValueV1::Known(value)=>serde_json::json!({"Known":value.map(record)}),
@@ -3477,6 +3486,6 @@ fn gpu_registry_frozen_reference(stage:&str,view:&ActionBeforeReadV2,registry:&S
     serde_json::json!({"stage":stage,"logical_at":view.cutoff().decision_time().logical_time_utc_ms(),
         "orders":orders,"raw_orders":raw_orders,"commitments":commitments,"cancel_objects":objects,"public_market_sources":market_sources,"request_funds":funds,
         "pending_noe_records":view.pending_noe_record_count(),"ledger":view.ledger(),"economics":view.economics(),
-        "buy_source_receipts":buy_sources,"cancel_source_requests":cancel_sources,"scoped_cancellation_requests":scoped,"cancel_pending":requests.pending_count,"cancel_response_counts":requests.response_counts,"cancel_latest":latest,
+        "buy_source_receipts":buy_sources,"cancel_source_requests":cancel_sources,"scoped_cancellation_requests":scoped,"snapshot_scoped_cancellation_requests":snapshot_scoped,"cancel_pending":requests.pending_count,"cancel_response_counts":requests.response_counts,"cancel_latest":latest,
         "source":"original_SharedExecutionV2_ActionBeforeReadV2","post_only_fixture_not_B_Actor_domain":true})
 }

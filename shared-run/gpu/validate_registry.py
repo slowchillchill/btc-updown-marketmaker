@@ -19,7 +19,7 @@ from registry import (PublicRegistryEvents, FrozenIntentOrders, PublicRegistrySt
 from validate_base_execution import integers, rational, values
 from commitments import SubmittedLegs,SubmissionBindings,freeze_leg_commitments
 from cancel_objects import OrderFormation,CancelObjectDirectory,freeze_cancel_objects,sim_identity_order
-from cancel_requests import CancellationScopes,CancellationTargets,freeze_scoped_cancel_requests
+from cancel_requests import CancellationScopes,CancellationTargets,freeze_scoped_cancel_requests,freeze_cancel_snapshot
 from registry import identity_matches
 from queues import Numbers
 
@@ -191,7 +191,7 @@ def scope_columns(scopes,universe,markets):
         torch.tensor([[[order in scope.get('orders',[]) for order in universe] for scope in scopes]],dtype=torch.bool,device='cuda').reshape(1,len(scopes),len(universe)))
 
 
-def scoped_freeze(frame,cancel,request_ids,target_rows,universe):
+def scoped_freeze(frame,cancel,request_ids,target_rows,universe,objects,catalog,view,legs_view,leg_keys):
     markets={market['condition_id']:index for index,market in enumerate(frame['public_market_sources'])}
     source_requests={source['request']:source['scope'] for source in frame['cancel_source_requests']}
     requests=scope_columns([source_requests.get(name,{'orders':[]}) for name in request_ids],universe,markets)
@@ -211,11 +211,28 @@ def scoped_freeze(frame,cancel,request_ids,target_rows,universe):
         available.append(reference['visibility']['Feedback']['available_at_utc_ms'])
     targets=CancellationTargets(tensor([True]*len(target_rows),torch.bool),integers(request_keys),
         scope_columns(target_scopes,universe,markets),tensor(outcomes),tensor(available),torch.zeros(1,dtype=torch.int32,device='cuda'))
-    return freeze_scoped_cancel_requests(cancel,requests,queries,order_markets,known,targets,
-        torch.tensor([frame['logical_at']],device='cuda'))
+    cutoff=torch.tensor([frame['logical_at']],device='cuda')
+    full=freeze_scoped_cancel_requests(cancel,requests,queries,order_markets,known,targets,cutoff)
+    # 原action_snapshot先保留unfinished/承诺所需BUY请求的全部outcomes，再补needed撤单位置。
+    raw={row['identity']:row for row in frame['raw_orders']}
+    origin=[raw[key]['origin']['request'] if key in raw and raw[key]['origin'] is not None else None for key in catalog]
+    same=torch.tensor([[[request==order_request for request,_,_ in leg_keys] for order_request in origin]],dtype=torch.bool,device='cuda')
+    needed_buy=legs_view.present|(same&view.unfinished[:,:,None]).any(1)
+    retained=view.unfinished|(same&needed_buy[:,None,:]).any(2)
+    membership=torch.zeros((1,objects.members.size(1),len(universe)),dtype=torch.bool,device='cuda')
+    locations=torch.zeros((1,len(universe)),dtype=torch.bool,device='cuda')
+    for index,key in enumerate(catalog):
+        column=universe.index(platform_order_id(key))
+        membership[:,:,column]=objects.members[:,:,index]
+        locations[:,column]=retained[:,index]
+    scope_markets=objects.markets.clone()
+    object_scopes=CancellationScopes(objects.kinds==2,scope_markets,membership)
+    snapshot=freeze_cancel_snapshot(cancel,requests,object_scopes,objects.present,order_markets,known,locations,targets,cutoff)
+    frozen=freeze_scoped_cancel_requests(snapshot.state,requests,queries,order_markets,snapshot.location_known,snapshot.targets,cutoff)
+    return full,frozen
 
 
-def compare_scoped(frame,read):
+def compare_scoped(frame,read,oracle_key='scoped_cancellation_requests'):
     assert read.fault.cpu().tolist()==[0]
     pending=values(read.pending_count)
     counts=values(read.response_counts)
@@ -223,10 +240,10 @@ def compare_scoped(frame,read):
     latest_known=read.latest_known.cpu().tolist()[0]
     latest=read.has_latest.cpu().tolist()[0]
     counts_known=read.counts_known.cpu().tolist()[0]
-    for index,query in enumerate(frame['scoped_cancellation_requests']):
+    for index,query in enumerate(frame[oracle_key]):
         assert pending_known[index]==('Known' in query['pending']),(frame['stage'],'作用域pending Known')
         if pending_known[index]:assert pending[index]==query['pending']['Known']
-        assert latest_known[index]==('Known' in query['latest']),(frame['stage'],'作用域latest Known',index,query['scope'],query['latest'],latest_known,latest)
+        assert latest_known[index]==('Known' in query['latest']),(frame['stage'],'作用域latest Known',index,query.get('scope'),query['latest'],latest_known,latest)
         if latest_known[index]:assert latest[index]==(query['latest']['Known'] is not None)
         for outcome,oracle in enumerate(query['counts']):
             if oracle=='NotApplicable':assert not latest[index]
@@ -365,8 +382,9 @@ def check_family(source):
         else:
             assert frame['cancel_response_counts']==['NotApplicable']*3
         cancel_saved.append((cancel_view,values(cancel_view.pending_count),values(cancel_view.response_counts)))
-        scoped=Numbers.run_exact_batch(lambda:scoped_freeze(frame,cancel,request_ids,target_rows,universe))
+        scoped,frozen_scoped=Numbers.run_exact_batch(lambda:scoped_freeze(frame,cancel,request_ids,target_rows,universe,objects,catalog,view,legs_view,leg_keys))
         compare_scoped(frame,scoped)
+        compare_scoped(frame,frozen_scoped,'snapshot_scoped_cancellation_requests')
         scoped_saved.append((scoped,values(scoped.response_counts),scoped.pending_known.clone()))
     for scoped,counts,pending_known in scoped_saved:
         assert values(scoped.response_counts)==counts and torch.equal(scoped.pending_known,pending_known),'旧作用域读取不倒灌'
@@ -387,7 +405,7 @@ def main():
     torch.cuda.synchronize()
     print(json.dumps({'frozen_prefixes':sum(n for n,_,_ in counts),'distinct_original_order_records':sum(n for _,n,_ in counts),
         'receipt_without_order_keeps_original_leg_target':True,'continuous_received_state':True,'maximum_retained_order_records_per_family':[width for _,_,width in counts],'derived_oracle_initialization':False,'old_freeze_unchanged':True,
-        'complete_first_delivery_stream':False,'global_cancel_request_completed_state':True,'single_paired_market_cancel_objects':True,'scoped_cancel_request_results':True,'scoped_unknown_order_location_preserved':True,'device_sim_identity_tie_order':True,
+        'complete_first_delivery_stream':False,'global_cancel_request_completed_state':True,'single_paired_market_cancel_objects':True,'scoped_cancel_request_results':True,'original_action_snapshot_needed_cancel_projection':True,'scoped_unknown_order_location_preserved':True,'device_sim_identity_tie_order':True,
         'full_registry_or_root':False,'seconds':time.perf_counter()-started,'device_peak_allocated_bytes':torch.cuda.max_memory_allocated()}))
 
 

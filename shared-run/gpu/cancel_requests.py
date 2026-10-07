@@ -124,3 +124,68 @@ def freeze_scoped_cancel_requests(state,request_scopes,scopes,order_markets,loca
     counts_applicable=has_latest
     return ScopedCancellationRead(pending_count,pending_known,has_latest,latest_known,
         ExactInt.from_i64_tensor(counts.flatten()),counts_known,counts_applicable,responded,received,fault)
+
+
+@dataclass(frozen=True)
+class CancellationSnapshot:
+    state: object
+    targets: CancellationTargets
+    location_known: torch.Tensor
+    needed_requests: torch.Tensor
+
+
+def freeze_cancel_snapshot(state,request_scopes,objects,object_present,order_markets,location_known,
+        retained_orders,targets,cutoff):
+    """原action_snapshot的撤单needed投影；不改接纳中的完整Registry。
+
+    retained_orders是原unfinished及needed提交outcomes的订单集合，由公开
+    订单/逐腿目录设备装配。只保留在途、global latest、当前对象latest请求。
+    """
+    from dataclasses import replace
+    roots,request_count=state.registered.shape
+    width=state.completions.received.size(1)
+    device=state.registered.device
+    if request_count==0:
+        return CancellationSnapshot(replace(state,completions=replace(state.completions,received=torch.zeros_like(state.completions.received))),
+            replace(targets,received=torch.zeros_like(targets.received)),location_known&retained_orders,state.registered)
+    relation,known=scope_relation(objects,request_scopes,order_markets,location_known)
+    needed=state.registered.clone()
+    completed=torch.zeros_like(needed)
+    error=state.completions.fault
+    if width:
+        same,fault=identity_matches(state.requests,state.completions.requests,roots,request_count,width)
+        visible=state.completions.received&(state.completions.available_at<=cutoff[:,None])
+        member=same&visible[:,None,:]
+        completed=member.any(2)
+        needed=state.registered&~completed
+        order=torch.arange(width,device=device)[None,:].expand(roots,width)
+        for sequence in [state.completions.record_ordinals,state.completions.delivery_sequences]:
+            words=sequence.words.to(torch.int64)&0xffffffff
+            for limb in [0,1]:
+                order=order.gather(1,words[:,limb].reshape(roots,width).gather(1,order).argsort(dim=1,descending=True,stable=True))
+        # global与每个原对象独立选择原latest可能相关记录，Unknown也必须保留。
+        global_candidate=member.any(1)[:,None,:]
+        object_candidate=((relation|~known)[:,:,:,None]&member[:,None,:,:]).any(2)&object_present[:,:,None]
+        candidate=torch.cat([global_candidate,object_candidate],1)
+        at,present=choose_latest(candidate,order)
+        request_at=member.to(torch.int32).argmax(1).gather(1,at)
+        kept=torch.zeros_like(needed,dtype=torch.int64).scatter_add(1,request_at,present.to(torch.int64))>0
+        needed=needed|kept
+        completion_needed=(same&needed[:,:,None]).any(1)
+        projected=replace(state.completions,received=visible&completion_needed)
+        error=error|Numbers.combine_fault_rows(torch.where(member,fault,0).reshape(roots,-1))
+    else:
+        projected=state.completions
+    target_count=targets.received.size(1)
+    target_kept=torch.zeros_like(targets.received)
+    referenced=torch.zeros_like(location_known)
+    if target_count:
+        same,fault=identity_matches(state.requests,targets.requests,roots,request_count,target_count)
+        target_kept=(same&needed[:,:,None]).any(1)&targets.received&(targets.available_at<=cutoff[:,None])
+        referenced=(targets.scopes.order_members&target_kept[:,:,None]).any(1)
+        error=error|Numbers.combine_fault_rows(torch.where(same&needed[:,:,None],fault,0).reshape(roots,-1))
+    explicit=(request_scopes.order_members&needed[:,:,None]).any(1)
+    locations=location_known&(retained_orders|explicit|referenced)
+    projected=replace(projected,fault=projected.fault|error)
+    return CancellationSnapshot(replace(state,registered=state.registered&needed,completions=projected),
+        replace(targets,received=target_kept),locations,needed)
