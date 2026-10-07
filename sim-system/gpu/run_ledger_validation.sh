@@ -30,6 +30,14 @@ run_test() {
     tail -4 "$artifact_dir/$log"
 }
 case "$case_name" in
+    mutation-requests)
+        export B_GPU_MUTATION_VALIDATOR="$repo_root/sim-system/gpu/validate_mutation_requests.py"
+        run_test gpu_mutation_registration_preserves_original_pending_and_first_receipt tests.log
+        ;;
+    latency)
+        export B_GPU_LATENCY_VALIDATOR="$repo_root/sim-system/gpu/validate_latency.py"
+        run_test gpu_latency_matches_original_sampler_and_full_u64_feedback_identity tests.log
+        ;;
     native-success-pool)
         export B_GPU_SUCCESS_POOL_VALIDATOR="$repo_root/model-train/scripts/gpu_success_pool_validation.py"
         command=(cargo test -p shared-run --test economic_settlement --locked --offline

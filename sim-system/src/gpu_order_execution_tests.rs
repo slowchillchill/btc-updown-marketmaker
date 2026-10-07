@@ -1,4 +1,70 @@
 // 原外层请求登记与合法接单生成只读基线；设备自行生成撮合/计量/账户候选。
+#[tokio::test(flavor = "current_thread")]
+#[ignore = "AutoDL原请求登记、完整u64 pending顺序及首次回执设备对照"]
+async fn gpu_mutation_registration_preserves_original_pending_and_first_receipt() {
+    let (_directory, mut actor) = active_market_actor(SimCallerRoleV1::ModelTrain, "run-gpu-mutation-register").await;
+    let initial = decoded_initial_market_events("10");
+    let condition = initial[0].market.condition_id.clone();
+    let token = TokenId("1".into());
+    let (state, _) = reduce_market_event_slice_v2(actor.state.take().unwrap(),
+        MarketEventPathV1::HiddenPlatform, 1_100, &initial, actor._rule_snapshot.snapshot(),
+        actor._finality_policy.as_ref()).unwrap_or_else(|_| panic!("原请求初始化失败"));
+    let seed = state.session.as_ref().unwrap().session_seed.0.as_bytes().to_vec();
+    let request_id = "gpu-mutation-pair";
+    let request = BusinessRequestV2::PostOrders(PostOrdersRequestV2 {
+        context: RequestContextV2 { global_request_id: request_id.into(), caller_correlation_id: None },
+        items: vec![
+            PostOrderBatchItemV2 { batch_item_ordinal: 7, item: post_item("gtc", &condition, &token,
+                SimBuyOrderKindV1::GtcLimit { limit_price_pusd_per_share: "0.3".parse().unwrap(),
+                    size_shares: "5".parse().unwrap(), post_only: false }) },
+            PostOrderBatchItemV2 { batch_item_ordinal: 1, item: post_item("fok", &condition, &token,
+                SimBuyOrderKindV1::FokMarket { spend_pusd: "3.6".parse().unwrap(),
+                    worst_price_pusd_per_share: "0.6".parse().unwrap() }) },
+        ],
+    });
+    let (mut state, receipt) = register_request_candidate(&actor.opened,
+        actor.scenario.initial_market_directory(), state, &request_cutoff(1_200), &request, 11,
+        actor._latency_profile.as_ref(), actor._rule_snapshot.snapshot());
+    let keys = state.session.as_ref().unwrap().mutation_requests.pending_actions.keys()
+        .map(|key| serde_json::json!({"effective_at":key.effective_processing_at_utc_ms,
+            "input_sequence":key.input_sequence,"ordinal":key.batch_item_ordinal})).collect::<Vec<_>>();
+    assert_eq!(keys.len(), 2);
+    assert_eq!(keys[0]["ordinal"], 7);
+    let mut response_times = None;
+    for key in &keys {
+        let (next, effects) = advance_mutation_candidate_with_outputs(&actor.opened,
+            actor.scenario.initial_market_directory(), state, key["effective_at"].as_i64().unwrap(),
+            actor._rule_snapshot.snapshot(), actor._finality_policy.as_ref());
+        state = next;
+        if let Some(response) = effects.unwrap().completed_response {
+            let StoredDirectResponseV3::Draft(response) = response.as_ref() else { panic!("原候选响应尚未编号"); };
+            response_times = Some(serde_json::json!({"responded_at":response.platform_responded_at_utc_ms,
+                "received_at":response.response_received_at_utc_ms}));
+        }
+    }
+    let altered = BusinessRequestV2::PostOrders(PostOrdersRequestV2 {
+        context: RequestContextV2 { global_request_id: request_id.into(), caller_correlation_id: Some("different".into()) },
+        items: vec![],
+    });
+    assert_eq!(existing_mutation_request_receipt_v2(&state, &altered.context().global_request_id), Some(receipt));
+    let rules = actor._rule_snapshot.snapshot();
+    let source = serde_json::json!({"profile_sha256":actor._latency_profile.file_sha256(),
+        "seed":seed,"identity":request_id,"sent_at":1200,"input_sequence":11,
+        "taker_delay_ms":if rules.synchronized_platform_rules.taker_order_delay_enabled {
+            rules.documented_platform_rules.taker_delay.value.delay_ms } else { 0 },
+        "receipt":{"input_sequence":receipt.input_sequence(),
+            "arrived_at":receipt.platform_arrived_at_utc_ms(),"scheduled_count":receipt.scheduled_action_count()},
+        "pending":keys,"response":response_times.unwrap(),"original_changed_body_retry_keeps_receipt":true});
+    let mut child = std::process::Command::new(std::env::var("B_GPU_PYTHON").unwrap())
+        .arg(std::env::var("B_GPU_MUTATION_VALIDATOR").unwrap())
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped()).spawn().unwrap();
+    serde_json::to_writer(child.stdin.take().unwrap(), &source).unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    println!("gpu_mutation_registration={}", String::from_utf8(output.stdout).unwrap());
+}
+
 #[cfg(feature = "shared-execution")]
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "AutoDL同提交合法接单→真实行情maker→撤单设备纵向验证"]

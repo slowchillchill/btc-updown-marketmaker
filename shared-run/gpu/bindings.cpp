@@ -207,14 +207,14 @@ std::vector<torch::Tensor> prefix_lookup(torch::Tensor rows, torch::Tensor offse
 }
 extern "C" void sim_gpu_latency(const uint8_t*,int64_t,const uint8_t*,int64_t,
     const int64_t*,int64_t,const int64_t*,const uint8_t*,int64_t,const int64_t*,
-    const uint32_t*,const int8_t*,int64_t,const int64_t*,bool,const uint64_t*,
+    int64_t,const int64_t*,const uint32_t*,const int8_t*,int64_t,const int64_t*,bool,const uint64_t*,
     const uint64_t*,int64_t,uint64_t,uint32_t*,int32_t*,uint8_t*,int64_t,cudaStream_t);
 
 std::vector<torch::Tensor> sample_latency(torch::Tensor prefix,torch::Tensor seeds,
     torch::Tensor seed_offsets,torch::Tensor roots,torch::Tensor identities,
     torch::Tensor identity_offsets,torch::Tensor sequences,torch::Tensor signs,
     torch::Tensor domains,torch::Tensor cumulative,torch::Tensor delays,
-    uint64_t count,bool decimal_identity) {
+    uint64_t count,bool decimal_identity,torch::Tensor identity_indices) {
   const auto device=prefix.device();
   auto check=[&](const torch::Tensor& value,torch::ScalarType type,int dimensions) {
     TORCH_CHECK(value.is_cuda() && value.device()==device && value.scalar_type()==type
@@ -223,11 +223,13 @@ std::vector<torch::Tensor> sample_latency(torch::Tensor prefix,torch::Tensor see
   check(prefix,torch::kUInt8,1);check(seeds,torch::kUInt8,1);
   check(seed_offsets,torch::kInt64,1);check(roots,torch::kInt64,1);
   check(identities,torch::kUInt8,1);check(identity_offsets,torch::kInt64,1);
+  check(identity_indices,torch::kInt64,1);
   check(sequences,torch::kInt32,2);check(signs,torch::kInt8,1);
   check(domains,torch::kInt64,1);check(cumulative,torch::kInt64,1);check(delays,torch::kInt64,1);
   int64_t rows=roots.numel();
   TORCH_CHECK(seed_offsets.numel()>=1 && domains.numel()==rows && signs.numel()==rows
-      && sequences.size(0)==rows && sequences.size(1)>0 && identity_offsets.numel()==rows+1
+      && sequences.size(0)==rows && sequences.size(1)>0 && identity_offsets.numel()>=1
+      && identity_indices.numel()==rows
       && cumulative.numel()>0 && delays.numel()==cumulative.numel() && count>0
       && rows<=int64_t(INT32_MAX)*128 && rows<=INT64_MAX/32,"SIM时延列容量/人口不符");
   const c10::cuda::CUDAGuard guard(device);
@@ -237,7 +239,8 @@ std::vector<torch::Tensor> sample_latency(torch::Tensor prefix,torch::Tensor see
   if(rows) sim_gpu_latency(prefix.data_ptr<uint8_t>(),prefix.numel(),seeds.data_ptr<uint8_t>(),
       seeds.numel(),seed_offsets.data_ptr<int64_t>(),seed_offsets.numel()-1,
       roots.data_ptr<int64_t>(),identities.data_ptr<uint8_t>(),identities.numel(),
-      identity_offsets.data_ptr<int64_t>(),(uint32_t*)sequences.data_ptr<int32_t>(),
+      identity_offsets.data_ptr<int64_t>(),identity_offsets.numel()-1,
+      identity_indices.data_ptr<int64_t>(),(uint32_t*)sequences.data_ptr<int32_t>(),
       signs.data_ptr<int8_t>(),sequences.size(1),domains.data_ptr<int64_t>(),
       decimal_identity,(uint64_t*)cumulative.data_ptr<int64_t>(),
       (uint64_t*)delays.data_ptr<int64_t>(),cumulative.numel(),count,

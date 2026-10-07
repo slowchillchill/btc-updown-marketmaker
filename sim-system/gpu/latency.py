@@ -82,11 +82,14 @@ class EmpiricalDelaySampler:
                    offsets, torch.tensor(cumulative, dtype=torch.int64, device=device),
                    torch.tensor(delays, dtype=torch.int64, device=device), count, actual)
 
-    def _sample(self, roots, identities, offsets, sequences, domains, *, decimal):
+    def _sample(self, roots, identities, offsets, sequences, domains, *, decimal, identity_indices=None):
+        if identity_indices is None:
+            identity_indices = torch.arange(roots.numel(), dtype=torch.int64, device=roots.device)
         words, fault, digest = Numbers.public_extension().sample_latency(
             self.prefix, self.seeds, self.seed_offsets, roots.contiguous(), identities,
             offsets, sequences.words.contiguous(), sequences.sign.contiguous(),
-            domains.contiguous(), self.cumulative, self.delays, self.sample_count, decimal)
+            domains.contiguous(), self.cumulative, self.delays, self.sample_count, decimal,
+            identity_indices.contiguous())
         fault = fault | sequences.fault
         sign = words.ne(0).any(dim=1).to(torch.int8)
         return DelaySample(ExactInt(words, sign, fault), digest)
@@ -108,3 +111,14 @@ class EmpiricalDelaySampler:
         return self._sample(roots, torch.empty(0, dtype=torch.uint8, device=roots.device),
                             torch.zeros(rows+1, dtype=torch.int64, device=roots.device),
                             private_sequences, torch.full_like(roots, 2), decimal=True)
+
+    def sample_requests_indexed(self, roots, identities, offsets, identity_indices, domains):
+        """原UTF8字节目录的设备索引；不复制正文或回CPU拼接动态requestID。"""
+        empty = ExactInt(torch.zeros((roots.numel(), 1), dtype=torch.int32, device=roots.device),
+                         torch.zeros_like(roots, dtype=torch.int8),
+                         torch.zeros_like(roots, dtype=torch.int32))
+        result = self._sample(roots, identities, offsets, empty, domains, decimal=False,
+                              identity_indices=identity_indices)
+        invalid = (domains != 0) & (domains != 1)
+        value = result.milliseconds
+        return DelaySample(ExactInt(value.words, value.sign, value.fault | invalid.to(torch.int32)), result.digest)

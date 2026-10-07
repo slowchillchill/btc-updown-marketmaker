@@ -76,7 +76,8 @@ __device__ bool range(const int64_t* offsets, int64_t row, int64_t count,
 __global__ void sample(const uint8_t* prefix, int64_t prefix_size,
     const uint8_t* seeds, int64_t seed_size, const int64_t* seed_offsets, int64_t seed_count,
     const int64_t* roots, const uint8_t* identities, int64_t identity_size,
-    const int64_t* identity_offsets, const uint32_t* sequences, const int8_t* signs,
+    const int64_t* identity_offsets, int64_t identity_count, const int64_t* identity_indices,
+    const uint32_t* sequences, const int8_t* signs,
     int64_t sequence_width, const int64_t* domains, bool decimal_identity,
     const uint64_t* cumulative, const uint64_t* delays, int64_t bins, uint64_t count,
     uint32_t* output, int32_t* fault, uint8_t* digests, int64_t rows) {
@@ -98,7 +99,7 @@ __global__ void sample(const uint8_t* prefix, int64_t prefix_size,
     uint64_t value=uint64_t(words[0]) | (sequence_width>1 ? uint64_t(words[1])<<32 : 0);
     if (value && !signs[row]) {fault[row]=1;return;}
     do { decimal[decimal_size++]=uint8_t('0'+value%10);value/=10; } while(value);
-  } else if (!range(identity_offsets,row,rows,identity_size,id_begin,id_end)) {
+  } else if (!range(identity_offsets,identity_indices[row],identity_count,identity_size,id_begin,id_end)) {
     fault[row]=1; return;
   }
   // 可分配张量的字节索引为int64；SHA长度是u64位数，先防止总长度溢出。
@@ -140,11 +141,13 @@ __global__ void sample(const uint8_t* prefix, int64_t prefix_size,
 extern "C" void sim_gpu_latency(const uint8_t* prefix,int64_t prefix_size,
     const uint8_t* seeds,int64_t seed_size,const int64_t* seed_offsets,int64_t seed_count,
     const int64_t* roots,const uint8_t* identities,int64_t identity_size,
-    const int64_t* identity_offsets,const uint32_t* sequences,const int8_t* signs,
+    const int64_t* identity_offsets,int64_t identity_count,const int64_t* identity_indices,
+    const uint32_t* sequences,const int8_t* signs,
     int64_t sequence_width,const int64_t* domains,bool decimal_identity,
     const uint64_t* cumulative,const uint64_t* delays,int64_t bins,uint64_t count,
     uint32_t* output,int32_t* fault,uint8_t* digests,int64_t rows,cudaStream_t stream) {
   sample<<<(rows+127)/128,128,0,stream>>>(prefix,prefix_size,seeds,seed_size,seed_offsets,
-      seed_count,roots,identities,identity_size,identity_offsets,sequences,signs,sequence_width,
+      seed_count,roots,identities,identity_size,identity_offsets,identity_count,identity_indices,
+      sequences,signs,sequence_width,
       domains,decimal_identity,cumulative,delays,bins,count,output,fault,digests,rows);
 }
