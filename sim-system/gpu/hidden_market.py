@@ -82,12 +82,14 @@ class HiddenAssetState:
         reduced = reduced.scatter_reduce(0, self.level_assets[:, None].expand_as(values), values, reduce='amax')
         return (reduced.to(torch.int64) << bits).sum(1).to(torch.int32)
 
-    def advance_matching_time(self, now, end):
+    def advance_matching_time(self, now, end, *, enabled=None):
         """使用SIM实际处理时钟；冷预取时间或公开观察时钟不能替代此调用。"""
         for column in (now, end):
             if column.shape != self.initialized.shape or column.dtype != torch.int64 or column.device != self.quality.device:
                 raise TypeError('处理时刻与市场end须为同设备int64[assets]')
         reached = now >= end
+        if enabled is not None:
+            reached = reached & self._mask(enabled)
         newly_closed = reached & ~self.matching_closed
         queues = self.queues.clear_matching(newly_closed[self.level_assets])
         return replace(self, matching_closed=self.matching_closed | reached, queues=queues)._close_active_book()
