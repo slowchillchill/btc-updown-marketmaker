@@ -283,7 +283,7 @@ def check_family(source):
     for frame in source:
         references=[frame['cancel_latest']['Known']]
         for key in ['scoped_cancellation_requests','snapshot_scoped_cancellation_requests']:
-            references.extend(query['latest'].get('Known') for query in frame[key])
+            references.extend(query['latest'].get('Known') if isinstance(query['latest'],dict) else None for query in frame[key])
         for reference in references:
             if reference is None:continue
             position=reference['position']
