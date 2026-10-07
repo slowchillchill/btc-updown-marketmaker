@@ -66,6 +66,7 @@ def validate_actual_cancel(source,delta):
         assert torch.equal(actual[:count+1],expected[0,:count+1]),(ordinal,'原强类型取消/释放正文')
     pending=PendingRecords.from_columns(batch.emitted,batch.received_at,batch.private_sequences,
         integers([int(state.normalizer.bank.source_order[row,3].cpu()) for row in batch.rows[0]]),batch.rows,integers([0]))
+    pending_initial=pending
     gates=ReceiveGates.unset(1)
     pending,empty=Numbers.run_exact_batch(lambda:pending.take_closed(gates))
     assert not empty.emitted.any().cpu().item()
@@ -130,6 +131,26 @@ def validate_actual_cancel(source,delta):
         return replace(ledger,orders=orders,fault=ledger.fault|error)
     ledger=Numbers.run_exact_batch(prepare_ledger)
     cache=ClosedAdmission.empty(ledger.columns)
+    from public_ledger import PublicLedgerState
+    from registry import PublicRegistryEvents
+    # 同真实来源另算纯候选，作为统一生产入口的对照，不重复接纳手工分支。
+    coordinated=PublicLedgerState(pending_initial,PublicRegistryState(PublicRegistryEvents.empty(1,'cuda')),cache,ledger)
+    # 缺经济关联只暂停Ledger释放；公开Control已领取，Registry仍先关闭。
+    blocked_association=torch.zeros_like(ledger.columns.enabled)
+    coordinated,delivery=Numbers.run_exact_batch(lambda:coordinated.receive(state.normalizer.bank,gates,blocked_association,passes=1))
+    assert delivery.fault.cpu().tolist()==[0] and int(delivery.closed.emitted.sum().cpu())==4
+    assert (coordinated.waiting.received & ~coordinated.waiting.consumed).any().cpu().item()
+    frozen_blocked=Numbers.run_exact_batch(lambda:coordinated.registry.freeze_orders(directory,closed_at))
+    assert frozen_blocked.cancellable_known.cpu().tolist()==[[True]] and frozen_blocked.cancellable.cpu().tolist()==[[False]]
+    coordinated,again=Numbers.run_exact_batch(lambda:coordinated.receive(state.normalizer.bank,gates,torch.ones_like(ledger.columns.enabled),passes=1))
+    assert not again.closed.emitted.any().cpu().item()
+    assert not (coordinated.waiting.received & ~coordinated.waiting.consumed).any().cpu().item()
+    assert torch.equal(coordinated.waiting.available_at,delivery.closed.available_at)
+    assert check_order_funds(coordinated.ledger,source['cancel_ledger_after'])
+    assert values(coordinated.ledger.current_entry_sequence)==[source['cancel_ledger_after']['projection']['ledger_entry_seq']]
+    assert amounts(coordinated.ledger.platform.balances)==[Fraction(source['cancel_ledger_after']['projection']['platform_confirmed_projection'][name]) for name in names]
+    # 较晚Ledger提交不能修改已冻结的公开读取。
+    assert frozen_blocked.cancellable.cpu().tolist()==[[False]]
     # 设备实际take_closed输出定义次序；原CPU逐条after只用于比较，不提供应用控制。
     for prefix in range(1,closed.emitted.size(1)+1):
         first=replace(closed,emitted=closed.emitted & (rank<prefix))
@@ -167,7 +188,7 @@ def validate_actual_cancel(source,delta):
     assert amounts(repeated.platform.balances)==amounts(ledger.platform.balances)
     assert torch.equal(repeat_cache.available_at,cache.available_at)
     return {'actual_GPU_cancel_effects_to_NOE_records':4,'Control_Canceled_before_CallerCanceled_closed':True,
-        'real_CallerCanceled_device_decoder_checked':True,'NOE_unset_gates_no_delivery':True,'first_delivery_not_repeated':True,
+        'actual_shared_NOE_first_receive_Registry_then_Ledger_checked':True,'Ledger_waiting_does_not_delay_public_cancel_close_checked':True,'real_CallerCanceled_device_decoder_checked':True,'NOE_unset_gates_no_delivery':True,'first_delivery_not_repeated':True,
         'source_private_batch_and_actual_release_checked':True,'Ledger_four_original_positions_and_sequences_checked':True,
         'each_actual_receive_prefix_order_condition_open_and_last_sequence_checked':True,
         'Ledger_control_closes_without_cash_and_economic_releases_once':True,

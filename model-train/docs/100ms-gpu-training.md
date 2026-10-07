@@ -779,3 +779,16 @@ Trade 详情到达后绑定原订单身份，消费这些原分录；不新增�
 原正全额 Payment 在 payable 已有归属上选择互补端点，不再次改变应计或利润。
 读取要求显式完整冷前缀可用位，缺失前缀不以已知零表示；估计仍保留真实 Trade 详情 Unknown。
 当前同源验证为三成交未成熟应计及 Maker 正全额付款，尚不等同完整 slow433 冻结或跨块账户恢复。
+
+### 首次公开领取与 Ledger 等待协调
+
+`shared-run/gpu/public_ledger.py::PublicLedgerState.receive` 组合真实双门领取、
+公开订单/成交与取消控制接纳、Ledger 已领取缓存和原次序重试。
+它先更新 Registry，再应用 Ledger；缺经济关联不会延迟已公开的 Canceled 关闭。
+再次调用只领取新人口，旧 waiting 不改 delivery 或首次 available_at，也不重新进入 Registry。
+返回的 Submission 绑定、逐目标结果和 Completed 保留原引用，交给请求目录的所属协调状态接纳。
+
+该入口不推进 SIM/public 时钟、不伪造初始化或请求登记。
+当前仍绑定共享 NOE 块和已有订单/意图目录；跨块退役、动态接单与完整冻结账户/100ms 宿主继续接入。
+有界取消验证复用四条真实来源，以设备经济关联门暂留释放记录，
+核 Registry 先关闭、随后等待记录消费且不重复领取，与原最终 Ledger 相等。
