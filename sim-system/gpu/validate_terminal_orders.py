@@ -87,7 +87,7 @@ def main():
     horizon.fill_(post['processing_at'])
     choice=runtime.choose(None,None,horizon,enabled)
     assert choice.enabled(5).cpu().tolist()==[True]
-    runtime,effect=Numbers.run_exact_batch(lambda:runtime.accept_base(choice,terms,tensor([[-1]]),fee,1,tensor([[0]]),rebate,zero,zero))
+    runtime,effect=Numbers.run_exact_batch(lambda:runtime.accept_base(choice,terms,tensor([[-1]]),fee,1,tensor([[0]*runtime.hidden.queues.capacity]),rebate,zero,zero))
     assert effect.order.emitted.cpu().tolist()==[True] and effect.fault.cpu().tolist()==[0]
     assert values(runtime.orders.read(effect.order.slots).quantity.open_base_units)==[5_000_000]
     assert (runtime.hidden.queues.kind==2).sum().cpu().item()==1 and not runtime.fills.occupied.any().cpu().item()
