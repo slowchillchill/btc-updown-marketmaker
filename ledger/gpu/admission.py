@@ -126,8 +126,10 @@ class AdmissionLifecycle:
         life=self.lifecycle.append(LifecycleColumns.from_projection(bank,incoming))
         blank=torch.zeros_like(incoming.enabled)
         zero=ExactInt.from_i64_tensor(torch.zeros(roots*extra,dtype=torch.int64,device=blank.device))
-        order_capacity=self.orders.occupied.size(1)+extra
-        trade_capacity=self.trades.occupied.size(1)+extra
+        order_capacity=max(self.orders.occupied.size(1),self.order_funds.occupied.size(1))+extra
+        # 原冷前缀可安装更宽逐槽缓存；追加保留全部已绑定人口，不反向缩它们。
+        trade_capacity=max(self.trades.occupied.size(1),self.trade_success.has_fact.size(1),
+            self.position_costs.active.size(1),self.order_funds.trade_bound.size(1))+extra
         return replace(self,columns=columns,lifecycle=life,
             applied=torch.cat([self.applied,blank],1),
             applied_sequences=append_root_fields(self.applied_sequences,zero,roots,width,extra),

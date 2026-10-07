@@ -107,7 +107,7 @@ def check_incremental_receive(bank,batches,delivered,start,expected,gates,*,capa
         applied=torch.zeros_like(first_columns.enabled),
         applied_sequences=ExactInt.from_i64_tensor(torch.zeros(first_width,dtype=torch.int64,device=positions.device)),
         available_at=torch.zeros_like(first_columns.row_refs),
-        order_funds=replace(start.order_funds,unassigned_records=root_start.order_funds.unassigned_records[:,:first_width]))
+        order_funds=replace(root_start.order_funds,unassigned_records=root_start.order_funds.unassigned_records[:,:first_width]))
     pending=run(lambda:PendingRecords.from_columns(first.emitted,first.received_at,first.private_sequences,
         ExactInt.from_i64_tensor(bank.source_order[first.rows.flatten(),3]),first.rows,
         ExactInt.from_i64_tensor(torch.zeros(1,dtype=torch.int64,device=positions.device))))
