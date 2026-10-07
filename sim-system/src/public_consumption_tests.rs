@@ -421,7 +421,7 @@ async fn public_execution_with_scenario_capacity_and_projection(
     role: SimCallerRoleV1,
     capacity: usize,
     rules: Option<Arc<SealedProcessRuleSnapshotV3>>,
-    make_projection: Option<Box<dyn FnOnce(&Path,&mut PublicRunOpenedV1)->Box<dyn BusinessProjectionPortV2>>>,
+    make_projection: Option<Box<dyn FnOnce(&Path,&mut RunOpenedV2)->Box<dyn PublicProjectionPortV1>>>,
 ) -> (PublicSimExecutionV1, Rc<DeliveredFeedbackState>) {
     let rules = match rules {
         Some(rules) => rules,
@@ -429,14 +429,19 @@ async fn public_execution_with_scenario_capacity_and_projection(
     };
     let finality = successful_policy_v2_for_tests();
     let latency = load_embedded_proxy_latency_profile().unwrap();
-    let opened = opened(
+    let mut opened = opened(
         "public-consumption-test",
         &rules,
         &finality,
         &scenario,
         &latency,
     );
-    let mut spec_opened = PublicRunOpenedV1 {
+    let delivered = Rc::new(DeliveredFeedbackState::default());
+    let projection = match make_projection {
+        Some(make) => make(path,&mut opened),
+        None => Box::new(DeliveredProjection {accepted:0,delivered:delivered.clone()}) as Box<dyn PublicProjectionPortV1>,
+    };
+    let spec_opened = PublicRunOpenedV1 {
         projection_version: opened.projection_version,
         run_id: opened.run_id,
         platform_rule_snapshot_file_sha256: opened.platform_rule_snapshot_file_sha256,
@@ -445,11 +450,6 @@ async fn public_execution_with_scenario_capacity_and_projection(
         proxy_latency_profile_file_sha256: opened.proxy_latency_profile_file_sha256,
         implementation_identity: opened.implementation_identity,
         market_event_source_identity_sha256: opened.market_event_source_identity_sha256,
-    };
-    let delivered = Rc::new(DeliveredFeedbackState::default());
-    let projection = match make_projection {
-        Some(make) => make(path,&mut spec_opened),
-        None => Box::new(DeliveredProjection {accepted:0,delivered:delivered.clone()}) as Box<dyn BusinessProjectionPortV2>,
     };
     let mut execution = PublicSimExecutionV1::create_new(
         path,

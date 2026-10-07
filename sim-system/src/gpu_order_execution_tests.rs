@@ -1115,6 +1115,11 @@ struct GpuNoeReferencePort {
     normalization_reference:Rc<RefCell<Vec<serde_json::Value>>>,
     normalization_core:Option<execution_normalization::NormalizationCoreV4>,
 }
+impl crate::public_consumption::PublicProjectionPortV1 for GpuNoeReferencePort {
+    fn delivered_private_feedback(&self, run_id: &str) -> u64 {
+        crate::public_consumption::PublicProjectionPortV1::delivered_private_feedback(&self.memory, run_id)
+    }
+}
 impl BusinessProjectionPortV2 for GpuNoeReferencePort {
     fn try_accept(&mut self,_:Arc<BusinessProjectionBatchV2>) -> bool { false }
     fn try_accept_payload(&mut self,payload:Arc<BusinessProjectionBatchPayloadV1>) -> bool {
