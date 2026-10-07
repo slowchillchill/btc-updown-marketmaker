@@ -6,6 +6,9 @@
 from dataclasses import dataclass
 import torch
 from prepare import _numbers
+from asset_buy import take_ratio
+from success_pool import select
+from trade_success import sum_rows
 
 
 @dataclass(frozen=True)
@@ -13,6 +16,9 @@ class FrozenOrderInputs:
     formed_time: torch.Tensor       # [roots,orders,6]，cancel每腿base+35。
     latest_direct_time: torch.Tensor  # [roots,orders,6]，cancel每腿base+41。
     ages: torch.Tensor              # [roots,scopes,2,3]，最大/最小age。
+    active: torch.Tensor            # [roots,scopes,3]，原未闭合订单剩余量和。
+    cancellable_count: torch.Tensor
+    order_count: torch.Tensor
     fault: torch.Tensor
 
 
@@ -83,4 +89,55 @@ def order_inputs(orders, sources, cutoff, scope_members, scope_known):
         ages.append(torch.stack((torch.where(known, value.reshape(start.shape), 0.0),
                                  known.float(), applicable.float()), -1))
         fault |= numbers.combine_fault_rows(torch.where(known, error.reshape(start.shape), 0))
-    return FrozenOrderInputs(formed, direct, torch.stack(ages, 2), fault)
+    def scalar(value, known):
+        projected, error = value.project(operation=1)
+        fault_rows = numbers.combine_fault_rows(torch.where(known, error.reshape(known.shape), 0))
+        triple = torch.stack((torch.where(known, projected.reshape(known.shape), 0.0),
+                              known.float(), torch.ones_like(known, dtype=torch.float32)), -1)
+        return triple, fault_rows
+    scopes = scope_known.size(1)
+    if count:
+        index = (torch.arange(roots, device=device)[:, None, None]*count +
+                 torch.arange(count, device=device)[None, None, :]).expand(roots, scopes, count).flatten()
+        active_values = take_ratio(orders.active, index)
+        zero = numbers.ExactRational(active_values.numerator.constant(0), active_values.denominator.constant(1))
+        active_population = selected & orders.active_applicable[:, None, :] & orders.active_known[:, None, :]
+        active_total = sum_rows(select(active_values, active_population.flatten(), zero), roots*scopes, count)
+    else:
+        zero = numbers.ExactInt.from_i64_tensor(torch.zeros(roots*scopes, dtype=torch.int64, device=device))
+        active_total = numbers.ExactRational(zero, zero.constant(1))
+    active_known = scope_known & ~(selected & (~orders.active_applicability_known[:, None, :] |
+        (orders.active_applicable[:, None, :] & ~orders.active_known[:, None, :]))).any(2)
+    active, error = scalar(active_total, active_known)
+    fault |= error
+    cancel_known = scope_known & ~(selected & ~orders.cancellable_known[:, None, :]).any(2)
+    cancel_population = (selected & orders.cancellable[:, None, :] & orders.cancellable_known[:, None, :]).to(torch.int64).sum(2)
+    cancel_integer = numbers.ExactInt.from_i64_tensor(cancel_population.flatten())
+    cancellable, error = scalar(numbers.ExactRational(cancel_integer, cancel_integer.constant(1)), cancel_known)
+    fault |= error
+    count_integer = numbers.ExactInt.from_i64_tensor(selected.to(torch.int64).sum(2).flatten())
+    order_count, error = scalar(numbers.ExactRational(count_integer, count_integer.constant(1)), scope_known)
+    fault |= error
+    return FrozenOrderInputs(formed, direct, torch.stack(ages, 2), active, cancellable, order_count, fault)
+
+
+def write_order_scope_fields(slow, inputs, scope_applicable):
+    """写原current/old订单块；其它账户字段须由实际读面装配，不能以零补全。
+
+    第0/1个scope必须由Native根的当前/旧市场选择器提供。当前市场不存在时
+    scope_applicable[:,0]=False；旧市场空集合仍适用。不从订单猜当前市场。
+    """
+    roots = slow.size(0)
+    if (slow.shape != (roots, 433) or slow.dtype != torch.float32
+            or inputs.ages.shape != (roots, 2, 2, 3)
+            or scope_applicable.shape != (roots, 2) or scope_applicable.dtype != torch.bool
+            or scope_applicable.device != slow.device or inputs.ages.device != slow.device):
+        raise TypeError('原slow433订单块需要同设备current/old双scope及float32输入')
+    result = slow.clone()
+    for group in range(2):
+        use = scope_applicable[:, group, None]
+        for base, value in ((382, inputs.ages[:, group, 0]), (385, inputs.ages[:, group, 1]),
+                            (388, inputs.active[:, group]), (391, inputs.cancellable_count[:, group])):
+            result[:, base+group*12:base+group*12+3] = torch.where(use, value, 0.0)
+        result[:, 406+group*3:409+group*3] = torch.where(use, inputs.order_count[:, group], 0.0)
+    return result

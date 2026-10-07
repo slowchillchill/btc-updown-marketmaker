@@ -351,8 +351,23 @@ def compare_native_order_times(frame, view, sources, catalog):
             expected.append(row)
         torch.testing.assert_close(features.cpu(), torch.tensor([expected], dtype=torch.float32), rtol=1e-6, atol=1e-7)
     expected = []
+    expected_active, expected_cancel, expected_count = [], [], []
     for scope in scopes:
         selected = [order for order in frame['orders'] if order['condition'] in scope]
+        def quantity_triple(value):
+            number = float(value)
+            return [math.copysign(math.log1p(abs(number)),number), 1., 1.]
+        if unknown and scope:
+            expected_active.append([0.,0.,1.])
+            expected_cancel.append([0.,0.,1.])
+            expected_count.append([0.,0.,1.])
+        else:
+            unavailable = any(order['active']!='NotApplicable' and 'Known' not in order['active'] for order in selected)
+            total = sum((Fraction(order['active']['Known']) for order in selected if isinstance(order['active'],dict) and 'Known' in order['active']), Fraction(0))
+            expected_active.append([0.,0.,1.] if unavailable else quantity_triple(total))
+            unavailable = any('Known' not in order['cancellable'] for order in selected)
+            expected_cancel.append([0.,0.,1.] if unavailable else quantity_triple(sum(order['cancellable']['Known'] for order in selected)))
+            expected_count.append(quantity_triple(len(selected)))
         if unknown and scope:
             expected.append([[0.,0.,1.]]*2)
         elif not selected:
@@ -364,6 +379,8 @@ def compare_native_order_times(frame, view, sources, catalog):
                     for order in selected]
             expected.append([[projected(max(ages)),1.,1.], [projected(min(ages)),1.,1.]])
     torch.testing.assert_close(result.ages.cpu(), torch.tensor([expected], dtype=torch.float32), rtol=1e-6, atol=1e-7)
+    for actual, expected in [(result.active,expected_active),(result.cancellable_count,expected_cancel),(result.order_count,expected_count)]:
+        torch.testing.assert_close(actual.cpu(), torch.tensor([expected], dtype=torch.float32), rtol=1e-6, atol=1e-7)
     return result
 
 
@@ -577,6 +594,7 @@ def main():
         'receipt_without_order_keeps_original_leg_target':True,'continuous_received_state':True,'maximum_retained_order_records_per_family':[width for _,_,width in counts],'derived_oracle_initialization':False,'old_freeze_unchanged':True,
         'complete_first_delivery_stream':False,'global_cancel_request_completed_state':True,'single_paired_market_cancel_objects':True,'scoped_cancel_request_results':True,'original_action_snapshot_needed_cancel_projection':True,'latest_response_full_source_position_checked':True,'Order_formed_and_latest_direct_original_times_and_full_reference_checked':True,'cancel_noe_mapper_core_and_closed_decoder':True,'cancel_first_delivery_filtered_original_references':True,'scoped_unknown_order_location_preserved':True,'device_sim_identity_tie_order':True,
         'native_order_age_and_cancel_time_fields_from_frozen_original_sources':True,
+        'native_unfinished_order_active_cancelable_and_count_scope_fields':True,
         'original_native_encoder_invoked':False,
         'full_registry_or_root':False,'seconds':time.perf_counter()-started,'device_peak_allocated_bytes':torch.cuda.max_memory_allocated()}))
 
