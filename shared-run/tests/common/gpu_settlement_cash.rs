@@ -31,7 +31,7 @@ fn snapshot(ledger: &LedgerWriterV1) -> serde_json::Value {
             "remaining_shares":t.remaining_success_shares,"remaining_principal":t.remaining_principal_cost_pusd})).collect::<Vec<_>>()})
 }
 
-fn selected(record: &::execution_normalization::NoeMemoryRecordV4) -> bool {
+fn selected(record: &::execution_normalization::NoeMemoryRecordV3) -> bool {
     use ::execution_normalization::{NormalizationRecord as N,SourceNeutralEvidenceKind as E};
     match record {
         N::Evidence { evidence:E::SettlementLifecycleV2 {result},.. } => matches!(result,
@@ -50,13 +50,13 @@ pub fn finish(materials: Option<Materials>,root: &Path,label: &str,seed: &str) {
     let mut blocks=Vec::<serde_json::Value>::new();
     let mut initials=Vec::new();
     for material in materials.lock().unwrap().iter() {
-        if let Some(record)=material.consumed_record_v2() {
+        if let Some(record)=material.consumed_record_v1() {
             if let ::execution_normalization::NormalizationRecord::Evidence {
                 evidence: ::execution_normalization::SourceNeutralEvidenceKind::InitialMarket {result},..}=record.record() {
                 initials.push(result.clone());
             }
         }
-        let record=material.consumed_record_v2().filter(|r|selected(r.record()));
+        let record=material.consumed_record_v1().filter(|r|selected(r.record()));
         let before=record.map(|_| {
             writer.finish().unwrap();
             snapshot(&LedgerWriterV1::open_durable(root).unwrap())
