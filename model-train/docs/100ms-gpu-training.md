@@ -665,6 +665,15 @@ writer，不含前面的原严格材料验收及 GPU 数字构建；两次加载
 `4d77008` 初次分页因页末无源误停更早请求而失败，原记录不改写。
 原 NOE 公开账户仍沿现入口在后续消费，尚非页边界自动公开/冻结的宿主。
 
+Ledger 待消费的单记录接口为 `ClosedAdmission.start_drain/drain_one`。
+`ClosedDrainCursor` 保存本轮原领取序、物理位置、scanning 与 round progress。
+每个候选沿原 `AdmissionLifecycle.apply_record` 返回共同 Ledger/waiting/cursor；
+Missing 保留原引用并继续本轮后面的记录，整轮无退出才关闭该根业务扫描。
+已应用重复与 NotApplicable 仍退出但不伪造经济应用。旧 `drain` 包装复用这条
+候选，仍发射固定 passes×width；原生条件循环、全部池/字资源共同门及首次
+Registry 接纳的固定容量候选尚待接入，不能据此声称当前物理 K²成本已消除。
+
+
 首版 writer 仍一次构建已结束材料的完整列文件，reader 使用只读 mmap 范围；
 尚无持续 writer flush、catalog 发布协议、全目录退役或十五天工作集预算。
 

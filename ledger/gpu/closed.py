@@ -9,6 +9,14 @@ from queues import ExactInt, _take
 
 
 @dataclass(frozen=True)
+class ClosedDrainCursor:
+    order: torch.Tensor  # 仅本轮固定布局的原领取序；不是NOE身份。
+    position: torch.Tensor
+    scanning: torch.Tensor
+    progress: torch.Tensor  # 完整一轮是否有记录退出；单记录等待不停止该轮。
+
+
+@dataclass(frozen=True)
 class ClosedAdmission:
     received: torch.Tensor
     consumed: torch.Tensor
@@ -77,35 +85,59 @@ class ClosedAdmission:
             available_at=torch.where(fresh, incoming_available, self.available_at), fault=fault,
         )
 
-    def drain(self, admission, association_available, *, passes=None):
-        """按原领取序重试；整轮无退出时设备关闭该根后续扫描。
+    def start_drain(self):
+        """首次领取候选提交后启动扫描；不重新领取waiting或改first visibility。"""
+        order = self.receive_rank.argsort(dim=1, stable=True)
+        scanning = (self.fault == 0) & (self.received & ~self.consumed).any(1)
+        return ClosedDrainCursor(order, torch.zeros_like(self.next_rank), scanning,
+                                 torch.zeros_like(scanning))
 
-        K个人口至多K轮可消解本批无环前驱。passes仅切分物理调度；未解引用仍保留。
-        资源需求由Admission目录返回，不能把未消费统一解释为业务缺前驱。
+    def drain_one(self, admission, association_available, cursor):
+        """一个原领取位置的完整候选；调用方共同提交Ledger/waiting/cursor。
+
+        只在整轮末判无进展。容量/字资源不足时，捕获消费者须保本位置及此前
+        已提交前缀，从未提交输入续跑；此函数不扩池、不签发消费或公开前沿。
         """
         roots, width = self.received.shape
+        if association_available.shape != self.received.shape or association_available.dtype != torch.bool or association_available.device != self.received.device:
+            raise TypeError('经济关联须同设备bool[roots,records]')
+        if cursor.order.shape != self.received.shape or cursor.position.shape != (roots,):
+            raise ValueError('扫描游标须保持本轮原领取人口布局')
+        if width == 0:
+            return admission, self, replace(cursor, scanning=torch.zeros_like(cursor.scanning))
+        root = torch.arange(roots, device=self.received.device)
+        column = cursor.order.gather(1, cursor.position.clamp(0, width-1)[:, None])[:, 0]
+        enabled = self.received[root, column] & ~self.consumed[root, column] & cursor.scanning
+        admission, consumed = admission.apply_record(
+            column, enabled, self.available_at[root, column], association_available[root, column])
+        already = admission.applied[root, column]
+        exited = enabled & (consumed | already) & (admission.fault == 0)
+        mask = torch.zeros_like(self.consumed).scatter(1, column[:, None], exited[:, None])
+        result = replace(self, consumed=self.consumed | mask, fault=self.fault | admission.fault)
+        progress = cursor.progress | exited
+        end = cursor.position + 1 == width
+        remaining = (result.received & ~result.consumed).any(1)
+        scanning = cursor.scanning & (result.fault == 0) & (~end | (progress & remaining))
+        position = torch.where(cursor.scanning, torch.where(end, 0, cursor.position+1), cursor.position)
+        cursor = replace(cursor, position=position, scanning=scanning,
+                         progress=torch.where(end, False, progress))
+        return admission, result, cursor
+
+    def drain(self, admission, association_available, *, passes=None):
+        """兼容现冷发射入口，单记录语义与后续设备条件消费者共用。
+
+        passes仅切分物理调度；未解引用仍保留。无进展根设备关闭业务消费，
+        本包装仍发射固定passes×width候选，不宣称物理工作已提前结束。
+        """
+        _, width = self.received.shape
         if association_available.shape != self.received.shape or association_available.dtype != torch.bool or association_available.device != self.received.device:
             raise TypeError('经济关联须同设备bool[roots,records]')
         if passes is None:
             passes = width
         if type(passes) is not int or passes < 0:
             raise ValueError('重试物理轮数须非负整数')
-        root = torch.arange(roots, device=self.received.device)
-        order = self.receive_rank.argsort(dim=1, stable=True)
+        cursor = self.start_drain()
         result = self
-        scanning = result.fault == 0
-        for _ in range(passes):
-            progress = torch.zeros_like(scanning)
-            for position in range(width):
-                column = order[:, position]
-                enabled = result.received[root, column] & ~result.consumed[root, column] & scanning
-                admission, consumed = admission.apply_record(
-                    column, enabled, result.available_at[root, column], association_available[root, column],
-                )
-                already = admission.applied[root, column]
-                exited = enabled & (consumed | already) & (admission.fault == 0)
-                mask = torch.zeros_like(result.consumed).scatter(1, column[:, None], exited[:, None])
-                result = replace(result, consumed=result.consumed | mask, fault=result.fault | admission.fault)
-                progress = progress | exited
-            scanning = scanning & progress & (result.fault == 0)
+        for _ in range(passes * width):
+            admission, result, cursor = result.drain_one(admission, association_available, cursor)
         return admission, result
