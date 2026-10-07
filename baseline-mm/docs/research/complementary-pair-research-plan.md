@@ -25,7 +25,7 @@ v6源码 `6a31a28d1bc9e250acf1474cd1271201f547a57a` 已在获批独立研究保�
 | 输入资格（已完成） | 原逐日 `validate_public_source_daily_manifest_admission_v1`、规则 loader、finality seal | 18天原结果、摘要、资源与适用边界；不等于策略依赖完整 |
 | 公共材料与资源试制（历史：首五分钟及后续12分钟成功） | 公共 `prepare_historical_run_v1`：freeze、范围内真实文件准备、显式必要元数据初始化、公开归约／正常有限封口、公开重放、隐藏准备 | 原失败保留；新试制prepare393.22秒＋统计59.37秒、正常前缀／隐藏就绪，3初始化组与76,244研究组分别统计；旧五分钟只有4352318完整窗口inside；新12分钟prepare922.28秒＋统计368.36秒、材料终值1,458,053,463字节，两个完整目标另列，完整研究安排待闭合 |
 | 因果统计连接（历史：两市场冻结及事后标签已连接） | 原RecordedPublicGroupSource读完整组，保存spot真实来源/三时间、冻结持价近似、跨源和盘口缺失；未运行概率或拟合；不能另建回测执行器 | 旧首五分钟8截止及右边界保持；新两个市场各8截止、合法窗前支持及同condition事后Up/Fresh连接见最新诊断；未拟合或计算Brier，后续各折拟合参数/验证曲线/缺失分母/逐字段来源仍待准确任务实施 |
-| 概率与跨来源候选（剩余统计待执行） | 直接查询已审计Parquet必要列，复用公共有效性、合法可见时间和市场参考，保留计算所需最小跨段状态；不先累计全期raw表或生成完整core／宽录制材料 | 准确查询与计算方法、覆盖／缺失分母、有限波动／跨源候选；较早折拟合并冻结后评价后折，最终冻结后比较既定开发窗；准确公式、75次顺序评分和资源提案见[直接概率说明](complementary-pair-probability-direct.md)；一次真实十八日prepare失败，study未启动；[失败与最小修复](complementary-pair-probability-run-20261007.md)不产生概率结果 |
+| 概率与跨来源候选（本次统计已完成） | 直接查询已审计Parquet必要列，复用公共参考/终局和合法可见时间，保留计算所需跨段状态及完整来源阶段；不生成完整core／宽录制材料 | 已完成四折和最终冻结开发窗评价、每轮60+3×5候选、Brier、十桶及覆盖/缺失分母，见[十八日概率结果](complementary-pair-probability-results-20261007.md)；正式参数未采用，任务3经营候选与公共回测仍待执行 |
 | 经营候选与消融（待执行） | `run_historical_v1<StrategyV1>` + 真实 `ComplementaryPairV1`；所属 SIM/NOE/Ledger | 冻结候选、实际自身成交／费用／预留／孤腿、完整账户结果及可推翻证据；不得用 public_trade 或触价造自身成交 |
 | 耗时／规则／finality 敏感性（待执行） | 同候选、同材料、显式不同调度或预封定政策 | 机制假设影响与运行能力，和基准经济结果分别报告 |
 | 连续开发比较（待执行） | 每候选一个独立账户，2000 pUSD贯穿三天，新增市场原登记 | 完整配置、同口径结果、未闭合尾部、风险数值建议与取舍；不按日重置账户 |
@@ -44,7 +44,7 @@ v6源码 `6a31a28d1bc9e250acf1474cd1271201f547a57a` 已在获批独立研究保�
 
 ## 3. 概率与跨源候选的形成
 
-本节形成剩余概率统计，用于比较预测可靠性和跨来源增量。当前[#185实现分配](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)已明确有限研究公式、75次顺序评分及必要公共薄投影；准确字段、SQL、时间语义、冻结和资源提案见[直接概率说明](complementary-pair-probability-direct.md)。三次真实十八日概率prepare均失败，拟合、评价及经营运行未启动。缺公共身份保留原始/合法两层分母的修复见[首次失败报告](complementary-pair-probability-run-20261007.md)；修复后的TWAP跨单元保留SQL解析错误、必要修复及目录中间分母见[第二次失败报告](complementary-pair-probability-run-20261007-repair1.md)。第三次公共深度拼接状态失败、已批准窄修复及剩余reset表达缺口见[第三次失败报告](complementary-pair-probability-run-20261007-repair2.md)。正式参数未采用。
+本节形成剩余概率统计，用于比较预测可靠性和跨来源增量。当前[#185实现分配](https://github.com/slowchillchill/btc-updown-marketmaker/issues/185)已明确有限研究公式、75次顺序评分及必要公共薄投影；准确字段、SQL、时间语义、冻结和资源提案见[直接概率说明](complementary-pair-probability-direct.md)。前三次真实十八日概率prepare均失败，其时拟合和评价未启动，以下历史失败保持。本次简化查询并修复固定目标重复插入后，复用完整来源阶段完成一次prepare及study，四折与最终冻结开发窗结果见[十八日概率结果](complementary-pair-probability-results-20261007.md)；经营运行仍未启动。缺公共身份保留原始/合法两层分母的修复见[首次失败报告](complementary-pair-probability-run-20261007.md)；修复后的TWAP跨单元保留SQL解析错误、必要修复及目录中间分母见[第二次失败报告](complementary-pair-probability-run-20261007-repair1.md)。第三次公共深度拼接状态失败、已批准窄修复及剩余reset表达缺口见[第三次失败报告](complementary-pair-probability-run-20261007-repair2.md)。正式参数未采用。
 
 ### 3.1 直接读取与连续状态
 
