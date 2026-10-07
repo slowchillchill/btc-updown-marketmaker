@@ -147,4 +147,4 @@ DPT 的 `valuation_best_bid` 在原来源选择投影内组合直接 BBA 与完�
 
 `gpu/commitments.py` 将原发送receipt与Submission逐腿关联分开；在接受反馈前，原双腿各自的完整目标继续进入承诺人口，不能由订单目录空推断零责任。`gpu/cancel_objects.py` 继承原完整形成证据：按市场组选择覆盖全部证据的处理链或来源链，否则合并两链相邻边；设备Kahn按原Identity字典序取就绪项。无就绪项时保持原Known对象结果，不新增业务错误。Single、原双腿Paired与请求的已公开Market按原顺序输出，空Market仍存在，未知可撤性仍保留。相邻图每节点至多两后继；当前对象成员输出仍是object×order稠密掩码，完整根容量尚未验收。固定根Order命名空间的动态`sim-u64`排序复用公共设备十进制字节原语，不回CPU拼业务字符串。
 
-`gpu/cancel_requests.py` 以原冻结请求作用域、逐目标NOE及整请求完成分别读取在途人口、最新可能相关响应和对象内三类结果；未知订单归属保留Unknown。当前原21前缀对照覆盖单订单、同市场另一订单、市场与未观察订单作用域。输入适配器仍是有限原JSON冷边界，尚未把完整生产取消/查询schema和前沿装配到首次领取器；不称整个Registry、slow433或全根完成。
+`gpu/cancel_requests.py` 以原冻结请求作用域、逐目标NOE及整请求完成分别读取在途人口、最新可能相关响应和对象内三类结果；未知订单归属保留Unknown。当前原21前缀的完整Registry对照覆盖单订单、同市场另一订单、市场与未观察订单作用域。完整Registry保留的旧请求可能仍让未知订单作用域Unknown；原ActionBeforeRead的action_snapshot仅保留global/现有对象最新和在途等needed请求，其任意额外作用域可因此不同。整账户冻结时还须按该原范围投影接线，不把本候选当成已完成的action_snapshot。输入适配器仍是有限原JSON冷边界，尚未把完整生产取消/查询schema和前沿装配到首次领取器；不称整个Registry、slow433或全根完成。

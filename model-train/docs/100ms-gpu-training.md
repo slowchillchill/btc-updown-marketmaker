@@ -715,3 +715,5 @@ ordinal、来源序和共享引用分别保留；全根跨块、历史退役与�
 仍有调度成本，完整共享二进制加载/身份退役尚未交付。
 
 公开Registry现在以原21前缀验证receipt已存在而order尚未绑定的逐腿承诺，及Single/Paired/Market撤单对象。`shared-run/gpu/cancel_objects.py` 仅相邻图保持每节点两条后继；输出对象成员仍是稠密object×order掩码，不能据小夹具外推15天容量。对象内撤单请求读取归`shared-run/gpu/cancel_requests.py`，分别消费实际逐目标结果与请求完成，未知归属保留Unknown。动态SIM订单身份排序复用同根固定命名空间的设备十进制原语；公共外部字符串身份仍由原字典绑定。完整首次领取取消/查询映射、所有形成证据到该接口的生产装配、完整账户冻结、100ms宿主与恢复仍待交付。
+
+原账户action_snapshot还按global/现有对象latest与在途等needed集合冻结撤单请求和位置依据。当前作用域候选核对完整Registry，尚未交付该账户冻结范围投影；不能将任意额外作用域的完整历史结果与裁剪快照结果混为同一接口。

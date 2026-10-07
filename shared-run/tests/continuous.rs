@@ -3456,7 +3456,7 @@ fn gpu_registry_frozen_reference(stage:&str,view:&ActionBeforeReadV2,registry:&S
     let scope_queries=[CancellationScopeV1::Orders(vec!["sim-1"]),CancellationScopeV1::Orders(vec!["sim-2"]),
         CancellationScopeV1::Market(&condition),CancellationScopeV1::Orders(vec!["not-observed-order"])];
     let scoped=scope_queries.iter().map(|scope| {
-        let request=view.cancellation_requests(Some(scope));
+        let request=registry.cancellation_requests(Some(scope));
         let encoded_scope=match scope {
             CancellationScopeV1::Orders(orders)=>serde_json::json!({"orders":orders}),
             CancellationScopeV1::Market(condition)=>serde_json::json!({"market":condition}),
