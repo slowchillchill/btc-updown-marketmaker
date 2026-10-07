@@ -77,8 +77,11 @@ class AdmissionLifecycle:
     resolutions: object | None = None
 
     @classmethod
-    def open(cls,platform,bank,columns,current_entry_sequence,current_local_prefix,success_pools,*,rebate_days=None,position_costs=None,order_funds=None,unresolved_markets=None,projected_markets=None,resolutions=None):
+    def open(cls,platform,bank,columns,current_entry_sequence,current_local_prefix,success_pools,*,rebate_days=None,position_costs=None,order_funds=None,unresolved_markets=None,projected_markets=None,resolutions=None,lifecycle_capacity=None):
         roots,width=columns.row_refs.shape
+        capacity=max(1,width) if lifecycle_capacity is None else lifecycle_capacity
+        if type(capacity) is not int or capacity<1:
+            raise ValueError('身份目录物理容量须为正整数，可从资源退出边界增长')
         if projected_markets is not None and (projected_markets.present.size(0) != roots or projected_markets.present.device != columns.row_refs.device):
             raise ValueError('市场投影人口须同根同设备')
         life=LifecycleColumns.from_projection(bank,columns)
@@ -87,12 +90,12 @@ class AdmissionLifecycle:
         opening_cash=take_ratio(platform.balances,torch.arange(roots,device=empty.device)*8)
         # 中途冷前缀不能将未提供的既有成本冒充已知零；新根显式传入empty。
         if position_costs is None:
-            position_costs=PositionCosts.empty(roots,max(1,width),empty.device,known=False)
+            position_costs=PositionCosts.empty(roots,capacity,empty.device,known=False)
         if order_funds is None:
-            order_funds=OrderFunds.empty(roots,max(1,width),max(1,width),width,empty.device,known=False)
-        return cls(platform,success_pools,TradeSuccess.open(roots,max(1,width),empty.device),position_costs,unresolved_markets,
-            RebateContributions.empty(roots,max(1,width),empty.device),rebate_days,opening_cash,book,LifecycleDirectory.empty(roots,max(1,width),device=empty.device),order_funds,
-            LifecycleDirectory.empty(roots,max(1,width),device=empty.device),columns,life,
+            order_funds=OrderFunds.empty(roots,capacity,capacity,width,empty.device,known=False)
+        return cls(platform,success_pools,TradeSuccess.open(roots,capacity,empty.device),position_costs,unresolved_markets,
+            RebateContributions.empty(roots,max(1,width),empty.device),rebate_days,opening_cash,book,LifecycleDirectory.empty(roots,capacity,device=empty.device),order_funds,
+            LifecycleDirectory.empty(roots,capacity,device=empty.device),columns,life,
             current_entry_sequence,current_local_prefix,empty,empty.clone(),torch.zeros_like(columns.enabled),
             ExactInt.from_i64_tensor(torch.zeros(roots*width,dtype=torch.int64,device=empty.device)),
             torch.zeros(roots,dtype=torch.int64,device=empty.device),torch.zeros(roots,dtype=torch.bool,device=empty.device),

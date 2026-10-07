@@ -271,12 +271,15 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     assert not source['reservation_checkpoints'][0]['projection']['market_projections']
     initial_population=ProjectedMarkets.open(torch.empty(0,dtype=torch.int64,device='cuda'),
         torch.empty((1,0),dtype=torch.bool,device='cuda'),torch.ones(1,dtype=torch.bool,device='cuda'))
-    admission=Numbers.run_exact_batch(lambda:AdmissionLifecycle.open(platform,state.normalizer.bank,columns,
+    def open_initial(capacity=None):
+        capacity=columns.row_refs.size(1) if capacity is None else capacity
+        return Numbers.run_exact_batch(lambda:AdmissionLifecycle.open(platform,state.normalizer.bank,columns,
         integers([source['reservation_checkpoints'][0]['projection']['ledger_entry_seq']]),integers([0]),pools,
-        position_costs=PositionCosts.empty(1,columns.row_refs.size(1),'cuda'),
-        order_funds=open_prefix(1,columns.row_refs.size(1),columns.row_refs.size(1),columns.row_refs.size(1),source['reservation_checkpoints'][0]),
+        position_costs=PositionCosts.empty(1,capacity,'cuda'),
+        order_funds=open_prefix(1,capacity,capacity,columns.row_refs.size(1),source['reservation_checkpoints'][0]),
         unresolved_markets=open_markets(pools,source['reservation_checkpoints'][0],source['initial'][0]['market']['condition_id']),
-        projected_markets=initial_population))
+        projected_markets=initial_population,lifecycle_capacity=capacity))
+    admission=open_initial()
     cost=Numbers.run_exact_batch(lambda:limit_buy_cost(integers([500]),rational(['0.3']),rational([source['fee_rate']]),
         source['fee_exponent'],post_only=torch.tensor([False],device='cuda'),minimum_principal_micro=integers([1_000_000])))
     principal=Numbers.run_exact_batch(lambda:type(rational(['0'])).ratio(cost.principal_micro,cost.principal_micro.constant(1_000_000)))
@@ -315,10 +318,13 @@ def validate(source,sampler,prepared,accepted,accepted_pool,frames,rebate_rate):
     admission,cache=Numbers.run_exact_batch(lambda:cache.drain(admission,torch.ones_like(columns.enabled),passes=3))
     assert not (cache.received & ~cache.consumed).any().cpu().item() and admission.fault.cpu().tolist()==[0]
     # 同一原21条NOE，同订单三成交，成交物理目录仅一槽：满池不变成业务错误或提交半个记录。
-    from admission_lifecycle import LifecycleDirectory
-    from trade_success import TradeSuccess
-    limited=replace(append_start,trades=LifecycleDirectory.empty(1,1,device=columns.row_refs.device),
-        trade_success=TradeSuccess.open(1,1,columns.row_refs.device))
+    limited=open_initial(1)
+    limited=replace(limited,projected_markets=limited.projected_markets.extended(zero))
+    limited,_=Numbers.run_exact_batch(lambda:limited.reserve_action(zero[:,None],zero[:,None],principal,fee,
+        torch.ones((1,1),dtype=torch.bool,device='cuda')))
+    limited=Numbers.run_exact_batch(lambda:limited.submission_started(zero,zero,zero,zero,
+        torch.tensor([True],device='cuda')))
+    assert values(limited.current_entry_sequence)==values(append_start.current_entry_sequence)
     small_waiting=Numbers.run_exact_batch(lambda:ClosedAdmission.empty(columns).accept(columns,delivered))
     initial_rank=small_waiting.receive_rank.clone()
     initial_available=small_waiting.available_at.clone()
