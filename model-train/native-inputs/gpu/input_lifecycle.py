@@ -67,7 +67,7 @@ class LifecycleInputs:
             result[:,9:14] = torch.nn.functional.one_hot(self.codes[life[:,1]],5).float()*lp[:,None]
             value,error = envelope(life[:,2],frame.lifecycle.present[batch,safe] & admitted)
             result[:,14:23] = value; fault = fault | error
-            tp = frame.trading.present[batch,safe] & trading[:,[0,2,4]].bool().any(dim=1) & (trading[:,7]<=1) & admitted
+            tp = frame.trading.present[batch,safe] & trading[:,:5:2].bool().any(dim=1) & (trading[:,7]<=1) & admitted
             result[:,23:29] = torch.nn.functional.one_hot(torch.where(tp,trading[:,7],3),6).float()
             result[:,29] = tp.float()
             for field,start in enumerate((30,41,52)):

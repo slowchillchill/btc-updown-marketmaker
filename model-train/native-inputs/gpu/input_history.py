@@ -268,6 +268,7 @@ class SourceHistoryInputs:
             zero = path_n.constant(0)
             cleared = SourceHistoryMemory(memory.values,memory.identities,memory.times,memory.counts,
                 torch.zeros_like(memory.path_count),zero,zero,zero,zero,zero,memory.last_prefix,memory.last_cutoff,memory.market_ids,memory.root_started_at)
-            return NativeSourceHistory(history.reshape(roots,24),path.reshape(roots,6,6)[:,[0,1,3,4,5]].reshape(roots,30),
+            paths = path.reshape(roots,6,6)
+            return NativeSourceHistory(history.reshape(roots,24),torch.cat((paths[:,:2],paths[:,3:]),dim=1).reshape(roots,30),
                 cleared,numbers.combine_fault_rows(error.reshape(roots,6)))
         return numbers.run_exact_batch(compute,initial_word_capacity=memory.values.words.shape[1])
