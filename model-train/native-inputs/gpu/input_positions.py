@@ -26,10 +26,7 @@ def position_inputs(ledger, conditions, present, applicable, asset_outcomes):
         raise TypeError('持仓字段需同设备原scope、适用位和固定资产outcome索引')
     numbers = _numbers()
     slots = ledger.success_pools.condition_slots
-    scope = ((slots[None,None,:,None] == conditions[:,:,None,:]) & present[:,:,None,:]).any(3)
-    scope &= owners[None,None,:] == torch.arange(roots,device=device)[:,None,None]
     sides = torch.arange(2,device=device)
-    member = scope[:,:,None,:] & (asset_outcomes[None,None,None,:] == sides[None,None,:,None])
     # 原lsum只对真实Ledger市场记录查固定资产binding；不存在的市场是Known零。
     # 未安装人口时不能凭空目录证明不存在。缺少某侧真实binding保留Unknown。
     bound = ((slots[None,None,None,None,:] == conditions[:,:,None,:,None])
@@ -43,6 +40,12 @@ def position_inputs(ledger, conditions, present, applicable, asset_outcomes):
             & projected.present[:,None,None,:]).any(3)
         absent = ~exists & projected.known[:,None,None]
     binding_known = (~present[:,:,None,:] | absent[:,:,None,:] | bound).all(3)
+    # 已知不存在的Ledger市场不参与余额、成本、known或字段fault归约。
+    # 固定冷资产目录中的身份不能覆盖原lsum的空市场Known零。
+    amount_present = present & ~absent
+    scope = ((slots[None,None,:,None] == conditions[:,:,None,:]) & amount_present[:,:,None,:]).any(3)
+    scope &= owners[None,None,:] == torch.arange(roots,device=device)[:,None,None]
+    member = scope[:,:,None,:] & (asset_outcomes[None,None,None,:] == sides[None,None,:,None])
     coordinates = torch.arange(assets,device=device)[None,None,None,:].expand(roots,2,2,assets).flatten()
     costs = ledger.position_costs.asset_cost(owners)
     fields = []

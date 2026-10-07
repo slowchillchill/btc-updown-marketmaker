@@ -39,6 +39,12 @@ case "$case_name" in
         echo "stage=original_NativeInputRoot_consume_and_encode commit=$(git rev-parse HEAD)"
         "${command[@]}" > "$artifact_dir/native-reference.log" 2>&1
         tail -4 "$artifact_dir/native-reference.log"
+        command=("$B_GPU_PYTHON" "$repo_root/model-train/native-inputs/gpu/validate_original_account.py"
+            "$artifact_dir/original-native-account.json")
+        printf '%q ' "${command[@]}" >> "$artifact_dir/commands.txt"
+        printf '\n' >> "$artifact_dir/commands.txt"
+        "${command[@]}" > "$artifact_dir/native-device.log" 2>&1
+        tail -1 "$artifact_dir/native-device.log"
         ;;
     trade-records)
         run_test gpu_legal_multiask tests.log
