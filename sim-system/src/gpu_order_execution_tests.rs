@@ -8,7 +8,7 @@ async fn gpu_legal_gtc_request_taker_maker_cancel_matches_original_execution() {
     let normalization = Rc::new(RefCell::new(Vec::new()));
     let normalization_capture = Rc::clone(&normalization);
     let (_directory, mut actor) = active_market_actor_with_projection(
-        SimCallerRoleV1::ModelTrain, "run-gpu-legal-gtc", Arc::new(successful_policy_v2_for_tests()),
+        SimCallerRoleV1::ModelTrain, "run-gpu-legal-gtc", successful_policy_v2_for_tests(),
         move |path, opened| {
             opened.projection_version = crate::runtime_v2::BusinessProjectionVersionV1::V4;
             let reference = contracts::execution_normalization::DurableSourceReferenceV1 {
