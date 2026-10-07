@@ -81,7 +81,7 @@ def accept_pending_base(requests, pending, orders, queue, account, fills, terms,
         pending.effective_at, selected_paths, taker_rebate_rate, row_roots)
     orders, insertion = orders.insert(prepared.quantity, terms.limit_price, pending.request_key,
         pending.ordinal, pending.item_ref, terms.assets, terms.bid_rows, pending.effective_at,
-        accepted.submission_delta.emitted)
+        accepted.submission_delta.emitted,conditions=terms.conditions)
     if terms.conditions is not None:
         from asset_buy import take_ratio
         for column, frame in enumerate(accepted.fills):

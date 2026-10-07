@@ -14,8 +14,8 @@ def start_maker_fill(pool, account, maker, order, base, quote, condition, source
     """订单目录真实read、原depletion价和选定路径进入原fill/账户/日桶。"""
     original_pool, original_account, original_maker = pool, account, maker
     requested = enabled & (quote.sign > 0)
-    fault = pool.fault | account.fault | maker.fault | (order.fault |
-        (~order.present).to(torch.int32))*requested.to(torch.int32)
+    fault = (pool.fault | account.fault | maker.fault | order.fault |
+        (~order.present).to(torch.int32)*requested.to(torch.int32))
     fault = fault | (base.fault | quote.fault | source_price.fault)*enabled.to(torch.int32)
     record = pool.new_record(base, quote, base.constant(0), order.assets, matched_at,
                              requested & (fault == 0), selected_path)

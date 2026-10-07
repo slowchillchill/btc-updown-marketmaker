@@ -16,7 +16,7 @@ from pending_base_execution import FrozenBaseTerms, run_pending_base_acceptance
 from base_execution import cancel_base_order
 from fill_finality import FillRecord
 from fill_pool import FillPool, run_fill_pool_batch
-from maker_execution import run_start_maker_fill
+from hidden_base_execution import run_base_level_transition
 from maker_days import MakerDays
 from taker_days import TakerDays
 from rebate_coordinator import RebateCoordinator
@@ -90,29 +90,23 @@ def main():
         elif stage == 'hidden_step':
             event = source['events'][checkpoint['ordinal']]['payload']['event']
             bid = event['side'] == 'BID'
-            before = integers([0, units(event['quantity_before_shares'])] if bid else [units(event['quantity_before_shares']), 0])
-            after = integers([0, units(event['quantity_after_shares'])] if bid else [units(event['quantity_after_shares']), 0])
-            queue, effect = run_queue_batch(queue, lambda state: state.apply_level_transition(before, after))
-            orders, makers = Numbers.run_exact_batch(lambda: orders.reduce_maker(effect, tensor([0, 0])))
-            assert makers.fault.cpu().tolist() == [0]
-            read = orders.read(slot)
-            index = slot  # 单根；运行协调器保留root×slot无损映射。
-            from queues import _take
-            emitted = makers.emitted[:, slot[0]].reshape(1)
-            maker_emitted = emitted.cpu().item()
-            if maker_emitted:
-                assert maker_record is None
-            elif values(read.quantity.pending_maker_depletion_base_units)[0] > 0:
-                observed_pending_zero_quote = True
+            before = integers([units(event['quantity_before_shares'])])
+            after = integers([units(event['quantity_after_shares'])])
             source_price = Numbers.run_exact_batch(lambda:rational([event['price_pusd_per_share']]))
-            fills, account, maker, maker_transition, _, _ = run_start_maker_fill(fills,account,calendars.maker,
-                read,_take(makers.base,index),_take(makers.quote,index),tensor([0]),source_price,
-                tensor([source['maker_at']]),tensor([0]),emitted,fee_rate,source['fee_exponent'],rebate)
-            calendars = replace(calendars,maker=maker)
-            if maker_emitted:
-                maker_record = maker_transition
-                assert values(maker_transition.fill_sequence) == [2]
-                assert maker_transition.origin.roles.cpu().tolist() == [1]
+            queue,orders,account,fills,calendars,hidden = run_base_level_transition(queue,orders,account,fills,
+                calendars,tensor([1 if bid else 0]),before,after,source_price,tensor([0]),
+                tensor([source['maker_at']]),active,tensor([[0]*queue.capacity]),tensor([0,0]),tensor([0,0]),
+                fee_rate,source['fee_exponent'],rebate)
+            assert hidden.fault.cpu().tolist() == [0]
+            read = orders.read(slot)
+            if values(read.quantity.pending_maker_depletion_base_units)[0] > 0:
+                observed_pending_zero_quote = True
+            for maker_transition in hidden.fills:
+                if maker_transition.event.emitted.cpu().item():
+                    assert maker_record is None
+                    maker_record = maker_transition
+                    assert values(maker_transition.fill_sequence) == [2]
+                    assert maker_transition.origin.roles.cpu().tolist() == [1]
         elif stage == 'canceled':
             read = orders.read(slot)
             queue, quantity, account, _, _, _, delta = Numbers.run_exact_batch(lambda: cancel_base_order(queue,
@@ -177,6 +171,7 @@ def main():
         'controlled_order_only_growth_keeps_eight_queue_segments_checked': True,
         'actual_order_role_and_source_price_bound_to_each_fill_checked':True,
         'same_fill_pool_finality_uses_actual_role_and_calendar_predecessors_checked':True,
+        'single_original_hidden_transition_queue_order_fill_calendar_common_commit_checked':True,
         'original_SIM_checkpoints': len(source['checkpoints']),
         'elapsed_seconds_with_reference_reads': time.perf_counter()-started,
         'device_peak_allocated_bytes': torch.cuda.max_memory_allocated(),

@@ -839,3 +839,10 @@ GTC接纳按原ask与FIFO段的逐fill人口绑定来源并登记正费Taker日�
 `FillPool.advance_mixed`先按原`(time,fill_sequence,path_ordinal)`选唯一义务，再由设备真实角色
 关闭对应返佣前驱；零费用不构成Maker证据。当前真实短链先完成Taker再生成Maker，
 尚未以该短链证明同时活跃的混合角色排序、完整hidden事务、动态selector或全根时钟。
+
+`hidden_base_execution.py`在原已绑定价位上一次接纳每根一条真实level transition，
+先执行FIFO队列变化，再按effects的Account encounter顺序逐条更新对应订单计量和启动正quote成交。
+队列、订单、成交池、首最终性账户效果及Maker市场/日桶在同一纯候选内提交；
+任何业务故障或物理池不足回退本条transition，保留之前已成功的源前缀。
+扩容从同一原输入重算，不按订单排序，不将同毫秒不同step拼成一次数量归约。
+这仍是单条已绑定价位入口；新价位目录、整消息/完整桶事务及外层hidden关闭前沿继续由后续宿主衔接。

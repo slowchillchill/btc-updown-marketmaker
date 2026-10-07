@@ -73,6 +73,7 @@ class BaseOrderRead:
     accepted_at: torch.Tensor
     present: torch.Tensor
     fault: torch.Tensor
+    conditions: object = None
 
 
 @dataclass(frozen=True)
@@ -108,6 +109,7 @@ class BaseOrders:
     bid_rows: torch.Tensor
     accepted_at: torch.Tensor
     fault: torch.Tensor
+    conditions: object = None
 
     @property
     def roots(self):
@@ -130,7 +132,7 @@ class BaseOrders:
         absent = torch.full(shape, -1, dtype=torch.int64, device=device)
         return cls(quantities, flat, zero.constant(1), ExactRational(flat, flat.constant(1)),
             torch.zeros(shape, dtype=torch.bool, device=device), absent, absent, absent, absent, absent,
-            torch.zeros(shape, dtype=torch.int64, device=device), torch.zeros_like(zero.fault))
+            torch.zeros(shape, dtype=torch.int64, device=device), torch.zeros_like(zero.fault), absent)
 
     def resized(self, capacity):
         if capacity <= self.capacity:
@@ -146,12 +148,12 @@ class BaseOrders:
                               _put_integer(result.prices.denominator, self.prices.denominator, new_index, enabled))
         updates = {name: torch.nn.functional.pad(getattr(self, name), (0, capacity-self.capacity),
                    value=0 if name in ('occupied', 'accepted_at') else -1)
-                   for name in ('occupied', 'request_keys', 'item_ordinals', 'item_refs', 'assets', 'bid_rows', 'accepted_at')}
+                   for name in ('occupied', 'request_keys', 'item_ordinals', 'item_refs', 'assets', 'bid_rows', 'accepted_at','conditions')}
         return replace(result, **updates, quantities=quantities, sequences=sequence, prices=price,
                        next_sequence=self.next_sequence, fault=self.fault)
 
     def insert(self, quantity, price, request_keys, item_ordinals, item_refs, assets, bid_rows,
-               accepted_at, enabled):
+               accepted_at, enabled, *, conditions=None):
         """仅成功接纳人口安装订单；与账户/填单/队列在外层共同提交。
 
         slot增长请求不耗order序号。原接纳失败或SDK拒绝不调用enabled。
@@ -169,12 +171,19 @@ class BaseOrders:
             (request_keys < 0) | (item_ordinals < 0) | (item_ordinals > 65535) | (item_refs < 0) |
             (assets < 0) | ((quantity.open_base_units.sign > 0) & (bid_rows < 0))).to(torch.int32)
         fault = self.fault | error*enabled.to(torch.int32)
+        if conditions is not None:
+            if conditions.shape != (self.roots,) or conditions.dtype != torch.int64 or conditions.device != self.occupied.device:
+                raise TypeError('原订单市场须同设备int64[roots]')
+            fault = fault | (enabled & (conditions < 0)).to(torch.int32)
         emitted = enabled & (count < self.capacity) & (fault == 0)
         updates = {}
         for name, value in (('request_keys', request_keys), ('item_ordinals', item_ordinals),
             ('item_refs', item_refs), ('assets', assets), ('bid_rows', bid_rows), ('accepted_at', accepted_at)):
             old = getattr(self, name)
             updates[name] = old.flatten().index_copy(0, index, torch.where(emitted, value, old[roots, slot])).reshape_as(old)
+        if conditions is not None:
+            updates['conditions'] = self.conditions.flatten().index_copy(0,index,
+                torch.where(emitted,conditions,self.conditions[roots,slot])).reshape_as(self.conditions)
         updates['occupied'] = self.occupied.flatten().index_copy(0, index,
             self.occupied[roots, slot] | emitted).reshape_as(self.occupied)
         candidate = replace(self, **updates,
@@ -197,7 +206,8 @@ class BaseOrders:
         price = ExactRational(_take(self.prices.numerator, index), _take(self.prices.denominator, index))
         return BaseOrderRead(self, slots, _take(self.sequences, index), take_quantity(self.quantities, index), price,
             self.request_keys[root, safe], self.item_ordinals[root, safe], self.item_refs[root, safe],
-            self.assets[root, safe], self.bid_rows[root, safe], self.accepted_at[root, safe], present, self.fault)
+            self.assets[root, safe], self.bid_rows[root, safe], self.accepted_at[root, safe], present, self.fault,
+            self.conditions[root,safe])
 
     def update(self, read, quantity, enabled):
         if read.source is not self:
